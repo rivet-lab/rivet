@@ -1,14 +1,4 @@
 //! **`rivet plan`** — build and display a `PlanArtifact` without executing.
-//!
-//! This module is the coordinator for the plan command. It:
-//!
-//! 1. Loads config and resolves the `ResolvedRunPlan` (same as `rivet run`).
-//! 2. Runs preflight diagnostics via `preflight::get_export_diagnostic`.
-//! 3. For `Chunked` exports: opens a source connection and pre-computes chunk
-//!    boundaries using `detect_and_generate_chunks` — no data is exported.
-//! 4. For `Incremental` exports: reads the current cursor from `StateStore`.
-//! 5. Packages everything into a `PlanArtifact` and either writes it to a file
-//!    or prints a human-readable summary to stdout.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -37,20 +27,12 @@ pub enum PlanOutputFormat {
     Json(Option<String>),
 }
 
-/// `--annotate-waves` packs a schedule across the WHOLE config, so it is a
-/// category error when scoped to a single `--export` (packing one export alone
-/// rewrites its wave to 1 — bug hunt 2026-08-08). True ⇔ both are set: the
-/// `&&` must not soften to `||` (which would refuse a plain `--export`) — pinned
-/// by `refuse_annotate_scoped_to_export_only_when_both_set`.
+/// `--annotate-waves` packs a schedule across the WHOLE config, so it is a category error when scoped to a single `--export` (packing one export alone rewrites its wave to 1.
 fn refuse_annotate_scoped_to_export(annotate_waves: bool, has_export: bool) -> bool {
     annotate_waves && has_export
 }
 
 /// Entry point for `rivet plan`.
-///
-/// Iterates over all matching exports, builds a `PlanArtifact` for each, and
-/// either prints or saves it according to `format`.
-/// The exports `rivet plan` plans: `export_name` alone, or every batch export of the config.
 fn plannable_exports(config: &Config, export_name: Option<&str>) -> Result<Vec<ExportConfig>> {
     let selected = RunSet::select(config, export_name)?;
     if export_name.is_some() {
@@ -92,11 +74,6 @@ pub fn run_plan_command(
     annotate_waves: bool,
     date: Option<chrono::NaiveDate>,
 ) -> Result<()> {
-    // --annotate-waves packs a SCHEDULE across the whole config: it assigns each
-    // export a wave relative to all the others. Scoped to a single --export it
-    // packs that one export alone → wave 1, silently inverting its place in the
-    // schedule (bug hunt 2026-08-08). The two are a category error; refuse them
-    // together rather than write an incoherent wave.
     if refuse_annotate_scoped_to_export(annotate_waves, export_name.is_some()) {
         crate::rivet_bail!(
             crate::error::codes::CLI_OPTION_UNSUPPORTED,
@@ -137,12 +114,6 @@ pub fn run_plan_command(
         None
     };
 
-    // When `--output FILE` is given but the config yields more than one export,
-    // a single path cannot hold every artifact: `rivet apply` reads exactly one
-    // `PlanArtifact` per file (`PlanArtifact::from_file`), and a JSON array is
-    // not a valid artifact. Writing all of them to the same path silently kept
-    // only the last (audit #4). Instead, derive a distinct per-export path so no
-    // export is dropped and each file remains directly consumable by `apply`.
     let multi_export = built.len() > 1;
 
     let mut artifacts: Vec<PlanArtifact> = Vec::with_capacity(built.len());
@@ -168,29 +139,17 @@ pub fn run_plan_command(
         artifacts.push(artifact);
     }
 
-    // Record the advisory wave + parallel-safety on each export in the config
-    // (in place), so the operator sees / edits them and `rivet apply` can run
-    // exports wave-by-wave, parallelizing only the cheap (low-cost) ones.
-    // `parallel_safe = cost_class Low` (< 100K rows): a heavy table already
-    // chunk-parallelizes internally, so two of them at once would overload the
-    // source — only the small / cheap exports share a concurrent wave batch.
     let recs: Vec<(String, u32, bool)> = artifacts
         .iter()
         .filter_map(|a| {
             a.prioritization.as_ref().map(|p| {
                 let rec = &p.export_recommendation;
-                // ...and not flagged `isolate_on_source` by the campaign (a
-                // shared, contended source group) — the campaign owns the "run
-                // alone" call, so a cheap export there still runs on its own.
                 let parallel_safe =
                     rec.cost_class == crate::plan::CostClass::Low && !rec.isolate_on_source;
                 (a.export_name.clone(), rec.recommended_wave, parallel_safe)
             })
         })
         .collect();
-    // The packer needs each export's cost class (it sets the wave width K);
-    // carried beside `recs` rather than widening the tuple `fields_to_write`
-    // consumes.
     let cost_of: std::collections::HashMap<String, crate::plan::CostClass> = artifacts
         .iter()
         .filter_map(|a| {
@@ -199,10 +158,6 @@ pub fn run_plan_command(
                 .map(|p| (a.export_name.clone(), p.export_recommendation.cost_class))
         })
         .collect();
-    // Exports the campaign flagged `isolate_on_source` (a contended source
-    // group — must run ALONE regardless of cost). The packer sets
-    // parallel_safe:true so a wave's members run concurrently; these must NOT,
-    // or --annotate-waves would overload their source (bug-hunt round 2).
     let isolate_of: std::collections::HashSet<String> = artifacts
         .iter()
         .filter_map(|a| {
@@ -213,10 +168,6 @@ pub fn run_plan_command(
             })
         })
         .collect();
-    // `--annotate-waves` packs from MEASURED history (#150): the last
-    // successful run's duration + peak RSS per export, read from the state
-    // store plan already holds open. Exports with no history keep the cost
-    // model's estimate — and each line below SAYS which one it stands on.
     let recs = if annotate_waves {
         repack_from_history(recs, &cost_of, &isolate_of, &state)
     } else {
@@ -228,24 +179,12 @@ pub fn run_plan_command(
     } else {
         write_plan_fields_to_config(config_path, &fields)?
     };
-    // The DECISION (warn / read-only info / silent) is a pure helper so it can
-    // be unit-tested — the two branch conditions here are otherwise live-only
-    // (they sit in a command that needs a real source), and "which line the
-    // operator sees" is real UX, not log noise. The glue below only formats.
     match plan_write_report(written.len(), annotate_waves, recs.len()) {
-        // `warn`, not `info`: a command that MUTATES the operator's config file
-        // must say so at a level the default log setup shows — the info-level
-        // version of this line is how a hand-tuned 5-per-wave schedule silently
-        // became one 76-export wave (#150). Report ACTUAL writes, not intent.
         PlanWriteReport::Wrote(n) => log::warn!(
             "plan --annotate-waves: (over)wrote wave/parallel_safe on {} export(s) in {}",
             n,
             config_path,
         ),
-        // Read-only by default (bug hunt 2026-08-20): plan computed a schedule
-        // but did NOT touch the config. Say so, and how to persist it — so the
-        // recommendation isn't silently lost AND the operator isn't surprised
-        // by a mutated file. `info`: this is discoverability, not a hazard.
         PlanWriteReport::ReadOnly(n) => log::info!(
             "plan: read-only — scheduled {} export(s) but left {} unchanged; \
              rerun with --annotate-waves to write wave/parallel_safe into it",
@@ -254,9 +193,6 @@ pub fn run_plan_command(
         ),
         PlanWriteReport::Silent => {}
     }
-    // A field we meant to write but no `- name:` line matched is a SILENT
-    // no-write — the loaded export name and the YAML text disagree (templated
-    // name, odd quoting). Surface it loudly instead of over-counting it above.
     let unmatched: Vec<&String> = fields.keys().filter(|n| !written.contains(*n)).collect();
     if !unmatched.is_empty() {
         log::warn!(
@@ -268,19 +204,6 @@ pub fn run_plan_command(
         );
     }
 
-    // Pool-scheduler advisory (#166): show the makespan a bounded work-stealing
-    // pool would achieve from measured durations, so the operator can weigh it
-    // against the wave count. Printed only when we have real durations for more
-    // than one export (a single export has nothing to schedule).
-    // The same parallel_safe the annotations write is what the pool print
-    // must model — the old preview hardcoded `true` "because no config is in
-    // scope", while the flags were computed twenty lines up (walk find,
-    // 2026-08-13): heavies then predicted M-way parallelism apply-time
-    // serialization can never reach.
-    // …and the RECOMMENDATION is not what apply reads: without --annotate-waves
-    // plan writes nothing (read-only), and even WITH it a write can fail to
-    // match a `- name:` line — so the preview must model the value now ON DISK,
-    // not `recs` (bughunt 2026-08-14; read-only contract 2026-08-20).
     let safe_of = effective_parallel_safe(&recs, &config, &fields, &written);
     let wave_of = effective_wave(&recs, &config, &fields, &written);
     if pool_estimate_is_printable(&format, artifacts.len()) {
@@ -292,16 +215,7 @@ pub fn run_plan_command(
     Ok(())
 }
 
-/// Derive a distinct per-export output path from the `--output` value when more
-/// than one export is being planned.
-///
-/// Inserts the export name into the file stem (`plan.json` → `plan.orders.json`)
-/// so every artifact lands on its own path and `rivet apply <file>` consumes a
-/// single artifact unchanged. The export name is sanitised to a safe filename
-/// fragment (any non-alphanumeric/`-`/`_` byte becomes `_`) so an export named
-/// with a slash or dot cannot escape the intended directory or mangle the
-/// extension. The original extension is preserved so per-export files keep the
-/// same suffix (`.json`) the operator asked for.
+/// Derive a distinct per-export output path from the `--output` value when more than one export is being planned.
 fn per_export_output_path(base: &str, export_name: &str) -> String {
     let sanitized: String = export_name
         .chars()
@@ -322,9 +236,6 @@ fn per_export_output_path(base: &str, export_name: &str) -> String {
     let file_name = match (stem, ext) {
         (Some(stem), Some(ext)) => format!("{stem}.{sanitized}.{ext}"),
         (Some(stem), None) => format!("{stem}.{sanitized}"),
-        // No usable stem (e.g. path was empty or just an extension): fall back to
-        // appending the sanitized name so the artifact still lands on a distinct
-        // path rather than colliding.
         (None, _) => format!("{base}.{sanitized}"),
     };
 
@@ -373,7 +284,6 @@ fn build_plan_artifact(
         log::warn!("{note}");
     }
 
-    // Collect plan-level compatibility diagnostics and emit Rejected ones as errors.
     let validate_diags = validate_plan(&plan);
     let mut validate_warnings: Vec<String> = Vec::new();
     for d in &validate_diags {
@@ -397,26 +307,15 @@ fn build_plan_artifact(
         config, &planned,
     ) {
         Ok(mut diag) => {
-            // #149: measured beats declared — same overlay `check` applies, so
-            // the two surfaces quote the same figure with the same label.
             crate::preflight::overlay_measured_rows(
                 &mut diag,
                 &planned,
                 config.source.source_type,
                 state,
             );
-            // The plan artifact's warnings stay flat strings (severity tags are a
-            // `rivet check` surface); take each warning's message text.
             let mut warnings: Vec<String> =
                 diag.warnings.iter().map(|w| w.message.clone()).collect();
             warnings.extend(validate_warnings);
-            // F3 (0.7.5 audit): the JSON artifact's `diagnostics`
-            // exposed a non-Efficient verdict with `warnings: []`, so a
-            // machine consumer could not see *why* the plan was flagged.
-            // If preflight emitted no specific warning, fall back to the
-            // build_suggestion text (the same line shown in `rivet check`)
-            // so the JSON always carries at least one human-readable
-            // reason matching the verdict.
             if warnings.is_empty() && !matches!(diag.verdict, preflight::HealthVerdict::Efficient) {
                 if let Some(s) = diag.suggestion.clone() {
                     warnings.push(s);
@@ -427,10 +326,6 @@ fn build_plan_artifact(
                     ));
                 }
             }
-            // Explain *why* this strategy was chosen (mode + chunk geometry +
-            // parallelism) and its risk profile. The mode, column and sizes come
-            // from `plan.strategy` — the same value the artifact's mode label is
-            // taken from — so the narrative cannot contradict the plan.
             let strategy_rationale = crate::plan::explain_strategy(&diag, &plan.strategy, export);
             let plan_diagnostics = PlanDiagnostics {
                 verdict: diag.verdict.to_string(),
@@ -463,7 +358,6 @@ fn build_plan_artifact(
         _ => String::new(),
     };
 
-    // Epic I: fold recent-run history into prioritization (bounded contribution).
     let history = match state.get_metrics(Some(&export.name), 20) {
         Ok(metrics) => Some(crate::plan::HistorySnapshot::summarize(&metrics)),
         Err(e) => {
@@ -480,8 +374,6 @@ fn build_plan_artifact(
         build_prioritization_inputs(export, &plan, &computed, &plan_diagnostics, hints, history);
     let recommendation = recommend_export(&inputs, &plan_diagnostics);
 
-    // The sealed destination keeps `{date}` for the apply to resolve on its own
-    // day (ADR-0005 PA1); `--date` freezes the day the operator asked for.
     let ctx = match date {
         Some(d) => {
             crate::destination::placeholder::PlaceholderContext::for_date(d, export.family())
@@ -500,13 +392,6 @@ fn build_plan_artifact(
         plan_diagnostics,
     );
 
-    // F13 (0.7.5 audit): record the absolute config path so `rivet
-    // apply` can locate the matching `.rivet_state.db` (cursors,
-    // manifest history) even when the plan JSON is stored in a
-    // different directory.  `canonicalize` resolves symlinks and
-    // produces an absolute path; we fall back to the original string
-    // if the path no longer resolves (rare, e.g. config deleted
-    // between plan and apply).
     artifact.config_path = Some(
         Path::new(config_path)
             .canonicalize()
@@ -517,45 +402,16 @@ fn build_plan_artifact(
     Ok((artifact, inputs, recommendation))
 }
 
-/// Below this span the catalog is not allowed to override it: the F4
-/// fresh-ANALYZE case is a SMALL table whose garbage `reltuples` (1130 on a
-/// 30-row table) would otherwise win over an exact tiny span. A genuinely
-/// non-unique chunk key on a table worth chunking has a span far above this.
+/// Below this span the catalog is not allowed to override it.
 const CATALOG_OVERRIDE_MIN_SPAN: i64 = 10_000;
 
 /// The row estimate a chunked plan reports, from the two available signals.
-///
-/// * A MEASURED whole-table actual (a prior run's row count) always wins —
-///   `#149`: on a sparse key the span is the ID range, not the row count
-///   (950M..1.29B over 520K rows → 342M, far worse than the measurement).
-/// * Otherwise take the LARGER of the key span and the catalog estimate.
-///   For an integer key `span ≥ distinct keys` always holds, so a catalog
-///   estimate LARGER than the span is direct evidence the chunk key is
-///   NON-UNIQUE (rows > distinct keys) and the span is only a lower bound —
-///   field find (2026-08-13 pool dogfood): a versioned table keyed by a
-///   non-unique ref column held ~2.5 rows per key, and the span under-reported
-///   ~831M catalog rows as ~333M, feeding the pool's makespan prediction.
-///   When the catalog is the smaller side (the sparse case, or F4's
-///   fresh-ANALYZE garbage) the span still wins, exactly as before.
-/// * `span_is_days` short-circuits it FIRST, and in the other direction: under
-///   `chunk_by_days` the ordinals are DAYS since the epoch (`by_days` is
-///   checked first in [`super::chunked::detect::detect_and_generate_chunks`]),
-///   so the span is `1095` for a three-year date range — not a row count, and
-///   not comparable to one in either direction or at any magnitude. The catalog
-///   is then the ONLY row signal, and its absence is `None` ("no row estimate",
-///   which classifies Medium) rather than a fabricated one. Publishing the day
-///   count instead classified an 831M-row date-chunked table as ~1095 rows →
-///   `CostClass::Low` → `parallel_safe: true`, which `plan` writes into the
-///   config and the pool then reads as "cheap, run it concurrently with another
-///   heavy" (bughunt 2026-08-14). The `CATALOG_OVERRIDE_MIN_SPAN` floor cannot
-///   rescue this: a day span is always far below it.
 fn chunked_row_estimate(
     key_span: Option<i64>,
     catalog: Option<i64>,
     measured: bool,
     span_is_days: bool,
 ) -> Option<i64> {
-    // A day span is not a row count — it is not a candidate at all.
     if span_is_days {
         return catalog;
     }
@@ -564,46 +420,20 @@ fn chunked_row_estimate(
     }
     match (key_span, catalog) {
         (Some(span), Some(cat)) if span >= CATALOG_OVERRIDE_MIN_SPAN => Some(span.max(cat)),
-        // Tiny span: keep the exact span — a larger catalog here is the
-        // fresh-ANALYZE garbage shape, not evidence of a non-unique key
-        // (bughunt 2026-08-13 push-back on the max() rule).
         (Some(span), Some(_)) => Some(span),
         (a, b) => a.or(b),
     }
 }
 
-/// The chunked key SPAN itself: how many ordinals the detector's first..last
-/// boundaries cover, INCLUSIVE, floored at zero.
-///
-/// Split out of [`compute_plan_data`] because that function opens a real source
-/// connection before it reaches this arithmetic, so the offline suite cannot
-/// execute the expression at ALL — the 2026-08-16 mutation run left four
-/// arithmetic mutants alive on the one line (`+`→`*`, `+`→`-`, `-`→`+`,
-/// `-`→`/`), and no live test asserts the artifact's `row_estimate` either.
-/// Extracted rather than fake-tested through a stub source, the same shape as
-/// [`chunked_row_estimate`] above: the DECISION is pure and unit-tested, the
-/// connection-owning glue stays live.
-///
-/// Inclusive because a chunk range is `[lo, hi]` on both ends — a single-ordinal
-/// table (`first.0 == last.1`) holds one row, not zero.
+/// The chunked key SPAN itself: how many ordinals the detector's first..last boundaries cover, INCLUSIVE, floored at zero.
 fn chunked_key_span(first_lo: i64, last_hi: i64) -> i64 {
     crate::config::quantity::Knob::inclusive_count(first_lo, last_hi)
 }
 
 /// Compute the `ComputedPlanData` portion of the artifact.
-///
-/// For `Chunked` exports this opens a source connection and calls
-/// `detect_and_generate_chunks` to pre-compute chunk boundaries.  No rows are
-/// exported — we only run the `SELECT min(col) / max(col)` boundary queries.
-///
-/// For `Incremental` exports we read the last cursor value from `StateStore`.
 fn compute_plan_data(
     plan: &crate::plan::ResolvedRunPlan,
     row_estimate: Option<i64>,
-    // #149 (roast 2026-08-09): true when `row_estimate` is a MEASURED actual
-    // (from the state store's last whole-table run), so the chunked branch does
-    // NOT override it with the key-SPAN — which on a sparse key is the span, not
-    // the row count (950M..1.29B over 520K rows → 342M, worse than the measure).
     row_is_measured: bool,
     state: &StateStore,
 ) -> Result<ComputedPlanData> {
@@ -621,17 +451,10 @@ fn compute_plan_data(
                 plan.source.source_type,
             )?;
             let chunk_count = chunk_ranges.len();
-            // F4 (0.7.5 audit): for chunked exports the artifact already
-            // contains the exact key span (`chunk_ranges[0].0` ..
-            // `chunk_ranges[-1].1`).  Using that as `row_estimate`
-            // beats `pg_class.reltuples` (which is `1130` on a fresh
-            // 30-row PG table because `ANALYZE` hasn't run).  This
-            // makes PG and MySQL agree on the same artifact.
             let chunked_estimate = chunk_ranges
                 .first()
                 .zip(chunk_ranges.last())
                 .map(|(first, last)| chunked_key_span(first.0, last.1));
-            // `by_days` ordinals are DAYS, never a row count (bughunt 2026-08-14).
             let span_is_days = cp.by_days.is_some();
             Ok(ComputedPlanData {
                 chunk_ranges,
@@ -659,8 +482,6 @@ fn compute_plan_data(
             })
         }
 
-        // Keyset pages are computed dynamically at run time (seek pagination),
-        // so there are no precomputed ranges to describe here — like a snapshot.
         ExtractionStrategy::Snapshot
         | ExtractionStrategy::TimeWindow { .. }
         | ExtractionStrategy::Keyset(_) => Ok(ComputedPlanData {
@@ -672,24 +493,7 @@ fn compute_plan_data(
     }
 }
 
-/// Print the pool scheduler's predicted makespan (#166) beside the wave plan,
-/// from the SAME predictor `apply --pool` schedules with
-/// ([`super::pool::predict_items`]) — the preview and the schedule are one
-/// number by construction. History-less exports are included at the
-/// placeholder (the old preview excluded them, so its makespan covered less
-/// work than the wave plan beside it); when any prediction rests on a
-/// placeholder or a failed attempt, the print says LOWER BOUND, mirroring
-/// `run_pool`'s accounting.
-/// May the pool advisory be printed for this output format and export count?
-///
-/// `--format json` with no `--output` makes STDOUT the machine document: a
-/// human advisory printed beside it turns the stream into two documents, and
-/// `serde_json`/`jq` reject the whole thing. This used to be latent — the
-/// advisory required MEASURED durations, so a fresh config never reached it —
-/// until the predictor gained placeholder estimates and started printing for
-/// every multi-export plan (live-suite catch on this branch). The decision is
-/// a pure fn so it is unit-testable; the print itself writes to stdout and
-/// cannot be observed in-process.
+/// Print the pool scheduler's predicted makespan (#166) beside the wave plan, from the SAME predictor `apply --pool` schedules with ([`super::pool::predict_items`]).
 fn pool_estimate_is_printable(format: &PlanOutputFormat, exports: usize) -> bool {
     exports > 1 && !matches!(format, PlanOutputFormat::Json(None))
 }
@@ -748,10 +552,6 @@ fn emit_artifacts(
     match format {
         PlanOutputFormat::Pretty => {
             if multi_export {
-                // A schema scan can yield dozens of exports; the full per-export
-                // block would be hundreds of lines. Show a compact, one-line-per-
-                // export table sorted by wave, then the wave-execution hint. Use
-                // `--export <name>` for a single export's full detail.
                 print_compact_summary(artifacts, config_path, wave_of);
             } else {
                 for artifact in artifacts {
@@ -759,14 +559,8 @@ fn emit_artifacts(
                 }
             }
         }
-        // Multi-export JSON to stdout: a single export prints its object
-        // unchanged, but printing N objects back-to-back is invalid JSON (audit
-        // #L10: `jq` fails with "Extra data"). Wrap them in a JSON array so the
-        // stream parses as one document.
         PlanOutputFormat::Json(None) => {
             if artifacts.len() > 1 {
-                // `&[PlanArtifact]` serializes as a JSON array — one parseable
-                // document rather than N concatenated objects.
                 println!("{}", serde_json::to_string_pretty(artifacts)?);
             } else if let Some(artifact) = artifacts.first() {
                 println!("{}", artifact.to_json_pretty()?);
@@ -775,9 +569,6 @@ fn emit_artifacts(
         PlanOutputFormat::Json(Some(path)) => {
             for artifact in artifacts {
                 let json = artifact.to_json_pretty()?;
-                // For a single export keep the operator's exact path so `rivet
-                // apply <path>` works verbatim. For multiple exports a single
-                // path would overwrite (audit #4): give each export its own file.
                 let out_path = if multi_export {
                     per_export_output_path(path, &artifact.export_name)
                 } else {
@@ -796,9 +587,7 @@ fn emit_artifacts(
     Ok(())
 }
 
-/// Compact one-line-per-export table for a multi-export plan, sorted by the
-/// `wave:` apply reads (then by descending score, then name). The full
-/// per-export block (`print_summary`) is reserved for `--export <name>`.
+/// Compact one-line-per-export table for a multi-export plan, sorted by the `wave:` apply reads (then by descending score, then name).
 fn print_compact_summary(
     artifacts: &[PlanArtifact],
     config_path: &str,
@@ -839,16 +628,10 @@ fn print_compact_summary(
     println!("  Full detail for one export:  rivet plan -c <config> --export <name>");
 }
 
-/// Per-export YAML fields that `plan` records in place (`wave`, `parallel_safe`),
-/// keyed by export name → ordered `(field, value)` pairs.
+/// Per-export YAML fields that `plan` records in place (`wave`, `parallel_safe`), keyed by export name → ordered `(field, value)` pairs.
 type ExportFields = HashMap<String, Vec<(&'static str, String)>>;
 
-/// Replace the cost model's `recommended_wave` with waves PACKED from measured
-/// run history (`--annotate-waves` only). Tier = the export's existing `wave:`
-/// (the operator's priority) when set, else the cost model's recommendation;
-/// duration AND peak RSS = [`super::pool::predict_secs_and_rss`]; every
-/// export is `parallel_safe: true` afterwards because under packing the WAVE
-/// is the concurrency cap (K by cost class, RSS-guarded).
+/// Replace the cost model's `recommended_wave` with waves PACKED from measured run history (`--annotate-waves` only).
 fn repack_from_history(
     recs: Vec<(String, u32, bool)>,
     cost_of: &std::collections::HashMap<String, crate::plan::CostClass>,
@@ -874,27 +657,13 @@ fn repack_from_history(
     recs.into_iter()
         .map(|(name, rec_wave, _)| {
             let w = wave_of.get(&name).copied().unwrap_or(rec_wave);
-            // parallel_safe: true so a packed wave's members run concurrently
-            // (the wave IS the cap) — EXCEPT an isolate_on_source export, which
-            // must run alone even among wave-mates, so run_waves keeps it in
-            // its own single-child batch (bug-hunt round 2: forcing true here
-            // discarded isolation and could overload a contended source).
             let ps = !isolate_of.contains(&name);
             (name, w, ps)
         })
         .collect()
 }
 
-/// The packer's input, plus the count the operator-facing label reports:
-/// `(items, measured_n)`.
-///
-/// The count is RETURNED rather than left as a local because the only thing it
-/// feeds is a `log::warn!` line, and an offline test cannot read a log line —
-/// `replace += with *= in repack_from_history` (2026-08-16 mutation run,
-/// plan_cmd.rs:822) pinned it at zero and every test of this function stayed
-/// green, because the wave assignment is indifferent to it. The label is not
-/// cosmetic: "0 measured, N estimated" is what tells an operator the schedule
-/// about to be WRITTEN into their config rests on placeholders.
+/// The packer's input, plus the count the operator-facing label reports: `(items, measured_n)`.
 fn history_pack_items(
     recs: &[(String, u32, bool)],
     cost_of: &std::collections::HashMap<String, crate::plan::CostClass>,
@@ -904,35 +673,11 @@ fn history_pack_items(
     let items: Vec<crate::plan::waves::PackItem> = recs
         .iter()
         .map(|(name, rec_wave, _)| {
-            // Tier by the cost model's recommended_wave, NOT the config's
-            // current wave: under --annotate-waves the planner OWNS the schedule
-            // (the additive default path preserves hand-set waves instead).
-            // Tiering by existing.wave made a second annotate read the first
-            // run's machine-written waves as operator tiers and froze the
-            // packing (bug hunt 2026-08-08); recommended_wave is deterministic
-            // from the cost model, so re-annotation is idempotent.
             let tier = *rec_wave;
-            // THE predictor, shared with `apply --pool`
-            // ([`super::pool::predict_secs_and_rss`]) rather than re-derived
-            // here: two commands over one state DB must not produce
-            // contradictory schedules for one config, and `--annotate-waves`
-            // WRITES its belief into the operator's config, so its blindness
-            // outlives the command. A local copy diverged twice — first on the
-            // fixed 25-row window (blind past 25 consecutive failures), then on
-            // the missing failed-attempt tier: an export that has never
-            // succeeded but whose attempts run an hour at 3 GB was scheduled
-            // here at (5 s, 150 MB) while the pool floored it at the attempt
-            // (bughunt 2026-08-14, rounds 3 and 4).
             let (from, peak_rss) = super::pool::predict_secs_and_rss(state, name);
-            // Only a SUCCESS is a measurement — a failed attempt's duration is
-            // a floor, so it stays out of the "N measured, M estimated" label
-            // even though it now carries a real number.
             if matches!(from, super::pool::PredictedFrom::Measured(_)) {
                 measured_n += 1;
             }
-            // 150 MB when the history carries no RSS at all: deliberately
-            // coarse, its only job is to order/budget until a real run exists
-            // (#148/#149 give it real numbers later).
             let (secs, rss) = (from.secs(), peak_rss.unwrap_or(150));
             crate::plan::waves::PackItem {
                 name: name.clone(),
@@ -950,23 +695,6 @@ fn history_pack_items(
 }
 
 /// Which of the plan's recommendations get WRITTEN into the operator's config.
-///
-/// `rivet plan` is READ-ONLY by default: it computes and prints the advisory
-/// schedule but never mutates the config file. Writing happens ONLY under
-/// `--annotate-waves`, and when it does it packs the WHOLE config coherently —
-/// every export's `wave:`/`parallel_safe:` is (over)written with this plan's
-/// recommendation, because a schedule is only coherent as a set.
-///
-/// This closes the ADD-arm of the #150 config-clobber class. The pre-0.24.6
-/// gate gated only the OVERWRITE of a present field; it still SILENTLY ADDED
-/// `wave:`/`parallel_safe:` to any export that lacked them — so a
-/// read-only-looking `rivet plan` mutated a fresh config, the exact surprise
-/// `--annotate-waves` exists to require consent for. A command that writes the
-/// operator's file must be asked to, whether the field is present or absent
-/// (bug hunt 2026-08-20).
-///
-/// PURE. Returns the empty map when the flag is off, so the caller writes
-/// nothing and reports read-only.
 fn fields_to_write(recs: &[(String, u32, bool)], annotate_waves: bool) -> ExportFields {
     if !annotate_waves {
         return HashMap::new();
@@ -989,22 +717,13 @@ fn fields_to_write(recs: &[(String, u32, bool)], annotate_waves: bool) -> Export
 enum PlanWriteReport {
     /// `--annotate-waves` (over)wrote N exports — warn, config was mutated.
     Wrote(usize),
-    /// Read-only: N exports were scheduled but the config was left untouched —
-    /// info hint that `--annotate-waves` persists it.
+    /// Read-only: N exports were scheduled but the config was left untouched.
     ReadOnly(usize),
-    /// Nothing to say: an annotate run whose writes all failed to match a
-    /// `- name:` line (the separate `unmatched` warning covers it), or an empty
-    /// plan.
+    /// Nothing to say: an annotate run whose writes all failed to match a `- name:` line (the separate `unmatched` warning covers it), or an empty plan.
     Silent,
 }
 
-/// Decide the write-report from the outcome — PURE so the branch logic the
-/// caller would otherwise bury in a live-only command is unit-testable.
-///
-/// A WRITE (any export landed on disk) always warns. Otherwise, a read-only
-/// run (no `--annotate-waves`) with something to schedule prints the persist
-/// hint. An annotate run that wrote nothing is Silent here — its zero-match
-/// case is reported by the `unmatched` warning, not this line.
+/// Decide the write-report from the outcome.
 fn plan_write_report(written: usize, annotate_waves: bool, recs: usize) -> PlanWriteReport {
     if written > 0 {
         PlanWriteReport::Wrote(written)
@@ -1015,26 +734,7 @@ fn plan_write_report(written: usize, annotate_waves: bool, recs: usize) -> PlanW
     }
 }
 
-/// What `apply --pool` will read for `parallel_safe` on each export AFTER this
-/// plan run finished writing — the value the preview must model.
-///
-/// The recommendation is NOT that value. Without `--annotate-waves` plan is
-/// read-only and writes nothing, so a config that says `true` on an export the
-/// cost model rates High keeps `true` on disk while `recs` says `false`
-/// (#150 config-clobber class — the read-only default is the strongest form of
-/// not-clobbering). Sourcing the preview from `recs` made the
-/// preview apply the C3 heavy-serialization floor to an export apply runs
-/// M-way (preview 90 min, real 30) — and inverted, advertised parallelism apply
-/// serializes, the exact defect the C3 model fixed on the apply side
-/// (bughunt 2026-08-14). Three inputs, one rule per export:
-///
-///  * this run WROTE `parallel_safe` for it (only under `--annotate-waves`,
-///    AND a `- name:` line actually matched) → the recommendation is now on
-///    disk;
-///  * otherwise the config's own value survives;
-///  * otherwise the field is absent from the file and `apply` reads
-///    `unwrap_or(false)` — including the case where the write was attempted but
-///    matched no `- name:` line (the `unmatched` warning above).
+/// What `apply --pool` will read for `parallel_safe` on each export AFTER this plan run finished writing.
 fn effective_parallel_safe(
     recs: &[(String, u32, bool)],
     config: &Config,
@@ -1062,8 +762,7 @@ fn effective_parallel_safe(
         .collect()
 }
 
-/// The `wave:` each export carries on disk after this run — the value `apply`
-/// groups by (same three-input rule as [`effective_parallel_safe`]).
+/// The `wave:` each export carries on disk after this run.
 fn effective_wave(
     recs: &[(String, u32, bool)],
     config: &Config,
@@ -1144,19 +843,12 @@ fn write_plan_fields_to_config(
 }
 
 /// Pure core of [`write_plan_fields_to_config`] (text in → text out, unit-tested).
-/// For each named export, inserts its `<field>: <value>` lines right after
-/// `- name:` and drops any stale line for those same fields. Returns the set of
-/// export names it ACTUALLY matched in the YAML — a name in `fields` that never
-/// appears as a `- name:` line writes nothing, and the caller must not report
-/// it as annotated (bug hunt 2026-08-08: the warn counted intent, not writes).
 fn apply_field_annotations(
     yaml: &str,
     fields: &ExportFields,
 ) -> (String, std::collections::HashSet<String>) {
     let mut out = String::with_capacity(yaml.len() + 64);
     let mut written: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // (export name, indent of the `-`, indent of the export's fields) while
-    // inside an export block; `None` between / outside exports.
     let mut current: Option<(String, usize, usize)> = None;
 
     for line in yaml.split_inclusive('\n') {
@@ -1181,14 +873,14 @@ fn apply_field_annotations(
             let indent = content.len() - trimmed.len();
             let blank_or_comment = trimmed.is_empty() || trimmed.starts_with('#');
             if !blank_or_comment && indent <= *dash_indent {
-                current = None; // dedented out of the export block
+                current = None;
             } else if indent == *field_indent
                 && let Some(items) = fields.get(name)
                 && items
                     .iter()
                     .any(|(key, _)| trimmed.starts_with(&format!("{key}:")))
             {
-                continue; // drop the stale field line — the fresh one is already in
+                continue;
             }
         }
         out.push_str(line);
@@ -1197,13 +889,11 @@ fn apply_field_annotations(
 }
 
 /// Parse a `<indent>- name: <name>` export list item → `(indent_of_dash, name)`.
-/// Handles quoted names; `None` for any other line.
 fn parse_export_name(line: &str) -> Option<(usize, String)> {
     let trimmed = line.trim_start();
     let dash_indent = line.len() - trimmed.len();
     let rest = trimmed.strip_prefix("- ")?;
     let value = rest.trim_start().strip_prefix("name:")?;
-    // Drop an inline ` # …` comment (a YAML comment is a space then a hash).
     let value = value.split(" #").next().unwrap_or(value);
     let name = value
         .trim()
@@ -1247,74 +937,30 @@ mod tests {
         assert_eq!(super::partitioned_preview_note(&cfg.exports[1]), None);
     }
 
-    /// The write-report the operator sees, per outcome. A WRITE always warns;
-    /// a read-only run (no flag) with work to schedule prints the persist hint;
-    /// everything else is silent. RED-proven against each branch flip: `> 0` →
-    /// `>= 0` (Silent/ReadOnly become Wrote(0)), `!annotate_waves` → dropped
-    /// (an annotate run would falsely claim read-only), `recs > 0` dropped (an
-    /// empty plan would print a read-only hint about nothing).
+    /// The write-report the operator sees, per outcome.
     #[test]
     fn plan_write_report_maps_outcome_to_the_right_operator_message() {
-        // A write happened → warn, regardless of the flag or recs.
         assert_eq!(plan_write_report(3, true, 3), PlanWriteReport::Wrote(3));
         assert_eq!(plan_write_report(1, false, 5), PlanWriteReport::Wrote(1));
-        // Read-only default with exports to schedule → the persist hint.
         assert_eq!(plan_write_report(0, false, 4), PlanWriteReport::ReadOnly(4));
-        // Annotate run that wrote nothing (all unmatched) → Silent here; the
-        // `unmatched` warning covers that case, not this line.
         assert_eq!(plan_write_report(0, true, 4), PlanWriteReport::Silent);
-        // Nothing to schedule → nothing to say, either mode.
         assert_eq!(plan_write_report(0, false, 0), PlanWriteReport::Silent);
         assert_eq!(plan_write_report(0, true, 0), PlanWriteReport::Silent);
     }
 
     /// The chunked key span is INCLUSIVE of both boundaries, and floored at 0.
-    ///
-    /// This arithmetic lives one call away from `source::create_source`, so the
-    /// offline suite never executes it in place: the 2026-08-16 mutation run
-    /// left FOUR arithmetic mutants alive on the single expression
-    /// (`(last.1 - first.0 + 1).max(0)`), and no live test asserts the
-    /// artifact's `row_estimate` either. Extracting
-    /// [`super::chunked_key_span`] is what makes the four killable.
-    ///
-    /// Fixture past the thresholds: a single-ordinal range, a negative lower
-    /// bound and a lower bound that is neither 0 nor 1, so no mutant can
-    /// survive on a coincidence of an identity element (`first_lo == 1` makes
-    /// `* first_lo` and `/ first_lo` no-ops on the SPAN, and `first_lo == 0`
-    /// does the same for `+`/`-` while making `/` a panic).
-    ///
-    /// RED, each verified by applying that exact mutation (first failing
-    /// assertion, verbatim):
-    ///   * `+`→`*`: `left: 29, right: 30` — an off-by-one row estimate.
-    ///   * `+`→`-`: `left: 28, right: 30`
-    ///   * `-`→`+`: `left: 32, right: 30`
-    ///   * `-`→`/`: `left: 31, right: 30`
     #[test]
     fn chunked_key_span_counts_both_boundaries_and_never_goes_negative() {
         use super::chunked_key_span;
-        // The canonical 30-row table the legacy artifact fixture records.
         assert_eq!(chunked_key_span(1, 30), 30);
-        // Keys that do not start at 1 — an inclusive span, not a difference.
         assert_eq!(chunked_key_span(100, 100), 1, "one ordinal is one row");
         assert_eq!(chunked_key_span(-5, 5), 11);
         assert_eq!(chunked_key_span(950_000_000, 1_290_000_000), 340_000_001);
-        // A degenerate/empty detection must floor at zero, never report a
-        // negative row estimate to the scheduler.
         assert_eq!(chunked_key_span(10, 5), 0);
         assert_eq!(chunked_key_span(i64::MIN, i64::MAX), i64::MAX);
     }
 
-    /// The "N measured, M estimated" label counts MEASUREMENTS — a failed
-    /// attempt's floor and a history-less placeholder are both estimates.
-    ///
-    /// Observed at the boundary, from the real producer: `history_pack_items`
-    /// reads the shared predictor against a real (in-memory) state store, and
-    /// the test asserts the count it returns rather than re-deriving the rule.
-    ///
-    /// RED against `replace += with *= in repack_from_history`
-    /// (2026-08-16 mutation run, plan_cmd.rs:822): the counter is pinned at
-    /// zero — `left: 0, right: 2` — and the operator is told a schedule built
-    /// on two real measurements rests entirely on estimates.
+    /// The "N measured, M estimated" label counts MEASUREMENTS.
     #[test]
     fn the_packer_counts_only_successes_as_measured() {
         let state = crate::state::StateStore::open_in_memory().expect("state");
@@ -1333,9 +979,6 @@ mod tests {
                 })
                 .expect("record");
         };
-        // Two measured (a success each), one attempt-floor (never succeeded),
-        // one with no history at all: ≥2 measured, so a counter that only ever
-        // reaches 1 is distinguishable too.
         rec("ok_a", "a1", 900_000, "success");
         rec("ok_b", "b1", 600_000, "success");
         rec("never", "n1", 300_000, "failed");
@@ -1356,10 +999,7 @@ mod tests {
         );
     }
 
-    /// The refuse-guard fires ONLY when BOTH `--annotate-waves` and `--export`
-    /// are set — the `&&` must not become `||` (which would reject a plain
-    /// `--export`) nor invert. All four combinations, so the mutant that flips
-    /// the operator goes RED on the two rows it disagrees about.
+    /// The refuse-guard fires ONLY when BOTH `--annotate-waves` and `--export` are set.
     #[test]
     fn refuse_annotate_scoped_to_export_only_when_both_set() {
         assert!(
@@ -1380,14 +1020,7 @@ mod tests {
         );
     }
 
-    /// The packer's duration must come from the REAL producer — the state
-    /// store's own recorder — not a value this test hand-feeds one layer down
-    /// (the fabricated-input class). Two exports, histories recorded through
-    /// `record_metric`, ONE tier: the measured-slower export must land in the
-    /// earlier (heavier) wave. RED against a producer-side mutant that reads
-    /// the estimate instead of the metric: with no history consulted, both
-    /// exports carry the same flat placeholder and the ordering assert has
-    /// nothing to stand on (fails on the pair split below).
+    /// The packer's duration must come from the REAL producer.
     #[test]
     fn repack_reads_durations_from_the_state_stores_recorder() {
         let state = crate::state::StateStore::open_in_memory().expect("state");
@@ -1413,8 +1046,6 @@ mod tests {
                 })
                 .expect("record");
         }
-        // …and a failed newer run for slowpoke, which must be IGNORED — only a
-        // successful run predicts anything.
         state
             .record_metric_full(&crate::state::MetricRow {
                 export_name: "slowpoke".to_string(),
@@ -1446,22 +1077,14 @@ mod tests {
             .map(|(n, _, _)| (n.clone(), crate::plan::CostClass::High))
             .collect();
 
-        // No isolate_on_source exports in this fixture.
         let packed = repack_from_history(recs, &cost_of, &std::collections::HashSet::new(), &state);
         let wave = |n: &str| packed.iter().find(|(m, _, _)| m == n).unwrap().1;
-        // K=2 (High): measured 90s pairs with measured 1s in wave 1; the
-        // history-less newcomer (flat 5s estimate) lands after the measured
-        // slowpoke, proving the metric — not the placeholder — ordered them.
         assert!(
             wave("slowpoke") < wave("newcomer") || wave("slowpoke") == wave("newcomer"),
             "measured 90s must not sort below a 5s placeholder"
         );
         assert_eq!(wave("slowpoke"), 1, "the measured-heaviest opens the tier");
-        // every packed export is parallel_safe: the wave is the cap now
         assert!(packed.iter().all(|(_, _, ps)| *ps));
-        // the failed 5ms run did NOT become slowpoke's prediction: had it,
-        // slowpoke (0.005s) would sort below quickie (1s) and lose wave 1's
-        // first slot to it.
         let w1: Vec<&str> = packed
             .iter()
             .filter(|(_, w, _): &&(String, u32, bool)| *w == 1)
@@ -1470,21 +1093,7 @@ mod tests {
         assert!(w1.contains(&"slowpoke"), "w1={w1:?}");
     }
 
-    /// `plan --annotate-waves` and `apply --pool` must not disagree about a
-    /// CHRONICALLY-FAILING export — and `--annotate-waves` writes its belief
-    /// into the operator's config, so its blindness outlives the command.
-    ///
-    /// The packer's history lookup was left on a fixed 25-row window while
-    /// `pool::predict_secs` moved to the direct last-success query: past 25
-    /// consecutive failures the window holds no `success` row at all, so an
-    /// hour-long export fell to the 5 s placeholder here while the pool still
-    /// measured it (bughunt 2026-08-14). RED against the window scan
-    /// (`get_metrics(Some(name), 25).find(status == "success")`): `chronic`
-    /// drops to the placeholder, sorts LAST of the four, and lands in wave 2 —
-    /// `left: 2, right: 1` on the wave assert below.
-    ///
-    /// Four exports, two waves (K=2 at High cost): the fixture must span more
-    /// than one wave, or every ordering error still lands everyone in wave 1.
+    /// `plan --annotate-waves` and `apply --pool` must not disagree about a CHRONICALLY-FAILING export.
     #[test]
     fn repack_measures_an_export_that_has_failed_past_the_recent_window() {
         let state = crate::state::StateStore::open_in_memory().expect("state");
@@ -1503,8 +1112,6 @@ mod tests {
                 })
                 .expect("record");
         };
-        // The chronic case: one real success a month ago, then 30 failures —
-        // deeper than the 25-row window the packer used to read.
         rec("chronic", "chronic_ok", 900_000, "success");
         for i in 0..30 {
             rec("chronic", &format!("chronic_bad{i}"), 60_000, "failed");
@@ -1532,27 +1139,7 @@ mod tests {
         assert_eq!((wave("mid"), wave("tiny")), (2, 2), "…and the two lightest");
     }
 
-    /// The NEVER-succeeded export: `--annotate-waves` must schedule it from the
-    /// same failed-attempt tier `apply --pool` uses, and must charge the wave
-    /// budget its real peak RSS.
-    ///
-    /// Round-3 converged the two predictors only on the succeeded-then-failed
-    /// case (the test above). An export with NO success ever — attempts running
-    /// an hour and peaking at 3 GB, a plausible reason it keeps failing — still
-    /// fell to the local `(5 s, 150 MB)` placeholder here while
-    /// `pool::predict_secs` floored it at the attempt: it sorted LAST in its
-    /// tier and was charged 150 MB of a 4096 MB wave budget, so it packed
-    /// beside exports the wave could not hold in memory — pressure re-creating
-    /// the very failure, written into the operator's config (bughunt
-    /// 2026-08-14, round 4).
-    ///
-    /// Both halves are RED-proven, and the two asserts fail against DIFFERENT
-    /// mutants, which is why both are here:
-    ///  * duration — restore `None => (5.0, 150)`: `doomed` sorts below the
-    ///    three measured exports and lands in wave 2 (`left: 2, right: 1`).
-    ///  * RSS — keep the duration but drop the peak (`peak_rss.unwrap_or(150)`
-    ///    → a flat `150`): `doomed` opens wave 1 but no longer fills the
-    ///    budget, so `steady` packs in beside it (`wave("steady")` 1, not 2).
+    /// The NEVER-succeeded export: `--annotate-waves` must schedule it from the same failed-attempt tier `apply --pool` uses, and must charge the wave budget its real peak RSS.
     #[test]
     fn repack_predicts_an_export_that_has_never_succeeded_from_its_failed_attempts() {
         let state = crate::state::StateStore::open_in_memory().expect("state");
@@ -1571,10 +1158,6 @@ mod tests {
                 })
                 .expect("record");
         };
-        // Never a success: three attempts, and NEITHER the longest duration nor
-        // the largest peak is the most recent row — a fold that takes "the last
-        // attempt" instead of the worst one reads (600 s, 200 MB) and packs
-        // `doomed` beside `steady` again.
         rec("doomed", "d1", 1_200_000, 900, "failed");
         rec("doomed", "d2", 3_600_000, 3000, "interrupted");
         rec("doomed", "d3", 600_000, 200, "failed");
@@ -1586,8 +1169,6 @@ mod tests {
             .iter()
             .map(|n| ((*n).to_string(), 2u32, false))
             .collect();
-        // Medium → K=3, so the wave is NOT capped at 2 members: whether
-        // `steady` joins `doomed` is then decided by the RSS budget alone.
         let cost_of = recs
             .iter()
             .map(|(n, _, _)| (n.clone(), crate::plan::CostClass::Medium))
@@ -1608,9 +1189,7 @@ mod tests {
         );
     }
 
-    /// An isolate_on_source export must come out parallel_safe:FALSE even under
-    /// packing (bug-hunt round 2): the packer sets true so wave-mates run
-    /// concurrently, but a contended-source export must stay alone in its wave.
+    /// An isolate_on_source export must come out parallel_safe:FALSE even under packing (bug-hunt round 2).
     #[test]
     fn repack_keeps_isolate_on_source_out_of_the_concurrent_batch() {
         let state = crate::state::StateStore::open_in_memory().expect("state");
@@ -1658,10 +1237,7 @@ mod tests {
         );
     }
 
-    /// --annotate-waves + --export is a category error: packing one export
-    /// alone rewrites its wave to 1, inverting the schedule (bug hunt
-    /// 2026-08-08). The refusal fires before any config load, so a bogus path
-    /// still errors on the combination, not on IO.
+    /// --annotate-waves + --export is a category error.
     #[test]
     fn annotate_waves_refuses_to_be_scoped_to_one_export() {
         let err = super::run_plan_command(
@@ -1669,7 +1245,7 @@ mod tests {
             Some("just_me"),
             None,
             super::PlanOutputFormat::Pretty,
-            true, // annotate_waves
+            true,
             None,
         )
         .expect_err("--annotate-waves + --export must refuse");
@@ -1681,21 +1257,7 @@ mod tests {
         );
     }
 
-    /// The plan preview and apply --pool now share ONE predictor
-    /// ([`crate::pipeline::pool::predict_items`]) — its decisions (success
-    /// filter, ms→s, placeholder inclusion) are pinned in pool.rs beside the
-    /// implementation. What remains plan-side is only the wiring pinned by
-    /// `print_pool_estimate`'s callsite (real `parallel_safe` map + the
-    /// artifacts iterator), which the drift this closed lived in.
-    /// The read-only contract (bug hunt 2026-08-20): without `--annotate-waves`
-    /// `rivet plan` writes NOTHING — not the hand-set exports, and not the
-    /// BLANK ones either (the ADD-arm the pre-0.24.6 gate left open). With the
-    /// flag it packs the WHOLE config: every export, both fields.
-    ///
-    /// RED against the pre-fix gate (`annotate_waves || existing.is_none_or(..)`):
-    /// the no-flag call below would ADD `wave`+`parallel_safe` to `blank` and
-    /// `parallel_safe` to `half_set`, so `fields.is_empty()` fails on the exact
-    /// silent-mutation this fix closes.
+    /// The plan preview and apply --pool now share ONE predictor ([`crate::pipeline::pool::predict_items`]).
     #[test]
     fn plan_is_read_only_without_annotate_and_packs_the_whole_config_with_it() {
         let source = crate::config::SourceConfig {
@@ -1731,10 +1293,7 @@ mod tests {
         };
         cfg.exports[0].wave = Some(7);
         cfg.exports[0].parallel_safe = Some(false);
-        cfg.exports[1].wave = Some(7); // parallel_safe left blank
-        // `cfg` is intentionally unused by the read-only path — `fields_to_write`
-        // no longer consults the config to decide what to ADD; the flag alone
-        // decides. Kept as the fixture the strengthened live test mirrors.
+        cfg.exports[1].wave = Some(7);
         let _ = &cfg;
         let recs = vec![
             ("hand_tuned".to_string(), 2, true),
@@ -1742,8 +1301,6 @@ mod tests {
             ("blank".to_string(), 2, true),
         ];
 
-        // No flag → nothing is written, INCLUDING the blank export. This is the
-        // ADD-arm the pre-fix gate left open (it would return `blank` here).
         let fields = fields_to_write(&recs, false);
         assert!(
             fields.is_empty(),
@@ -1751,8 +1308,6 @@ mod tests {
              fill a blank export's wave/parallel_safe; got {fields:?}"
         );
 
-        // --annotate-waves is the explicit, whole-config write: every export,
-        // both fields — the hand-set values included (a coherent repacking).
         let fields = fields_to_write(&recs, true);
         assert_eq!(fields.len(), 3, "the flag packs every export");
         for name in ["hand_tuned", "half_set", "blank"] {
@@ -1765,22 +1320,7 @@ mod tests {
         }
     }
 
-    /// The preview and the schedule must be ONE number: `plan`'s pool print
-    /// models the `parallel_safe` that is on DISK after the annotations were
-    /// written, not the recommendation. Even under `--annotate-waves` the two
-    /// disagree when the write did NOT LAND — a recommendation whose `- name:`
-    /// line was templated/oddly-quoted never reaches disk, so `apply` still
-    /// reads the config's own value (or `unwrap_or(false)`), never the rec.
-    ///
-    /// Fixture carries THREE exports, one per branch of the rule, because the
-    /// subject is a per-export fold: a write that never landed → the config's
-    /// hand-set flag still WINS, a blank one whose write LANDED (rec wins), and
-    /// a blank one whose write matched no `- name:` line (nothing on disk →
-    /// `apply` reads `unwrap_or(false)`).
-    ///
-    /// RED-proven against the pre-fix source — `recs.iter().map(|(n, _, s)| (n,
-    /// *s))` — which reports `hand_tuned = true` and `unmatched = true` where
-    /// apply reads `false` / `false`.
+    /// The preview and the schedule must be ONE number.
     #[test]
     fn pool_preview_models_the_parallel_safe_apply_will_read_not_the_recommendation() {
         let source = crate::config::SourceConfig {
@@ -1814,24 +1354,18 @@ mod tests {
             parallel_export_processes: false,
             load: None,
         };
-        // The operator's decision: independent rows, run me concurrently.
         cfg.exports[0].wave = Some(7);
         cfg.exports[0].parallel_safe = Some(false);
-        // The recommendation disagrees with the config on every export.
         let recs = vec![
             ("hand_tuned".to_string(), 2, true),
             ("blank".to_string(), 2, true),
             ("unmatched".to_string(), 2, true),
         ];
-        // The write path only exists under --annotate-waves now (read-only by
-        // default), so the preview's on-disk model is only interesting there.
         let fields = fields_to_write(&recs, true);
         assert!(
             fields.contains_key("unmatched"),
             "the fixture must ATTEMPT the write it then fails to match"
         );
-        // `write_plan_fields_to_config` returns only the names whose `- name:`
-        // line matched; a templated/oddly-quoted name writes nothing.
         let written: std::collections::HashSet<String> =
             ["blank".to_string()].into_iter().collect();
 
@@ -1896,15 +1430,13 @@ mod tests {
             .collect()
     }
 
-    /// Inserts `wave:` right after each `- name:`, replaces a stale one, and
-    /// leaves comments / other fields / unlisted exports untouched.
+    /// Inserts `wave:` right after each `- name:`, replaces a stale one, and leaves comments / other fields / unlisted exports untouched.
     #[test]
     fn wave_annotations_insert_replace_and_preserve() {
         let yaml = "exports:\n  - name: orders   # the orders table\n    mode: incremental\n    wave: 9\n    cursor_column: updated_at\n  - name: events\n    mode: full\ndestination:\n  type: local\n";
         let (out, written) =
             apply_field_annotations(yaml, &wave_fields(&[("orders", 2), ("events", 1)]));
         assert_eq!(written.len(), 2, "both named exports matched");
-        // orders: stale wave 9 replaced with 2, placed after name (comment kept)
         assert!(
             out.contains("- name: orders   # the orders table\n    wave: 2\n"),
             "{out}"
@@ -1913,9 +1445,7 @@ mod tests {
             !out.contains("wave: 9"),
             "stale wave must be dropped:\n{out}"
         );
-        // events: fresh wave 1 inserted right after name
         assert!(out.contains("- name: events\n    wave: 1\n"), "{out}");
-        // untouched: the cursor field and the trailing top-level key
         assert!(out.contains("cursor_column: updated_at"));
         assert!(out.contains("destination:\n  type: local"));
     }
@@ -1925,7 +1455,6 @@ mod tests {
     fn wave_annotations_leave_unlisted_export_untouched() {
         let yaml = "exports:\n  - name: orders\n    mode: full\n";
         let (out, written) = apply_field_annotations(yaml, &wave_fields(&[("other", 1)]));
-        // "other" matches no `- name:` line — nothing written, and the set says so.
         assert!(
             written.is_empty(),
             "a name absent from the YAML writes nothing"
@@ -1933,8 +1462,7 @@ mod tests {
         assert_eq!(out, yaml);
     }
 
-    /// Regression (audit #4): two distinct exports under one `--output FILE`
-    /// must derive two distinct paths, so neither is silently overwritten.
+    /// Regression (audit #4): two distinct exports under one `--output FILE` must derive two distinct paths, so neither is silently overwritten.
     #[test]
     fn per_export_paths_are_distinct() {
         let a = per_export_output_path("/tmp/plan.json", "orders");
@@ -1944,8 +1472,7 @@ mod tests {
         assert_eq!(b, "/tmp/plan.users.json");
     }
 
-    /// The original extension is preserved so `rivet apply` (and any `*.json`
-    /// glob) still find the per-export files.
+    /// The original extension is preserved so `rivet apply` (and any `*.json` glob) still find the per-export files.
     #[test]
     fn per_export_path_keeps_json_extension() {
         let p = per_export_output_path("/tmp/plan.json", "orders");
@@ -1956,20 +1483,17 @@ mod tests {
         );
     }
 
-    /// An export name with no extension on the base still gets a distinct,
-    /// non-colliding suffix rather than overwriting the base path.
+    /// An export name with no extension on the base still gets a distinct, non-colliding suffix rather than overwriting the base path.
     #[test]
     fn per_export_path_without_extension_appends_name() {
         let p = per_export_output_path("/tmp/plan", "orders");
         assert_eq!(p, "/tmp/plan.orders");
     }
 
-    /// A hostile export name (path separators, dots) must not escape the
-    /// directory or mangle the extension — every unsafe byte is replaced.
+    /// A hostile export name (path separators, dots) must not escape the directory or mangle the extension.
     #[test]
     fn per_export_path_sanitizes_unsafe_export_name() {
         let p = per_export_output_path("/tmp/plan.json", "../../etc/passwd");
-        // No remaining path separators or `..` traversal in the derived name.
         assert!(
             !p.contains(".."),
             "sanitized path must not contain a `..` traversal: {p}"
@@ -1995,105 +1519,62 @@ mod tests {
     }
 
     /// The pool advisory must never share STDOUT with the machine document.
-    ///
-    /// `rivet plan --format json` (no `--output`) makes stdout ONE JSON
-    /// document; the advisory printed before it produced "expected value at
-    /// line 2 column 3" for every multi-export config once the predictor
-    /// started estimating from placeholders instead of requiring measured
-    /// history. RED against `!matches!(..)` -> `true` (the shipped state).
     #[test]
     fn the_pool_advisory_never_shares_stdout_with_the_json_document() {
         use super::{PlanOutputFormat, pool_estimate_is_printable};
-        // stdout carries the document — nothing else may be written there.
         assert!(!pool_estimate_is_printable(
             &PlanOutputFormat::Json(None),
             2
         ));
-        // A file target leaves stdout free for the human lines.
         assert!(pool_estimate_is_printable(
             &PlanOutputFormat::Json(Some("plan.json".to_string())),
             2
         ));
         assert!(pool_estimate_is_printable(&PlanOutputFormat::Pretty, 2));
-        // A single export has nothing to schedule.
         assert!(!pool_estimate_is_printable(&PlanOutputFormat::Pretty, 1));
     }
 
-    /// Field find (2026-08-13 pool dogfood): a chunked export on a NON-UNIQUE
-    /// key (a versioned table, ~2.5 rows per key value) has `catalog > span`,
-    /// and the old span-always-wins rule under-reported ~831M rows as the
-    /// ~333M key span — which then fed the pool's makespan prediction.
+    /// Field find (2026-08-13 pool dogfood): a chunked export on a NON-UNIQUE key (a versioned table, ~2.5 rows per key value) has `catalog > span`, and the old span-always-wins rule under-reported ~831M rows as the ~333M key span.
     #[test]
     fn chunked_row_estimate_prefers_catalog_when_key_is_provably_non_unique() {
         use super::chunked_row_estimate;
-        // catalog > span ⇒ rows > distinct keys ⇒ the span is only a floor.
         assert_eq!(
             chunked_row_estimate(Some(333_000_000), Some(831_000_000), false, false),
             Some(831_000_000),
         );
-        // Sparse key (#149 shape): span dwarfs the catalog — span still wins,
-        // exactly the pre-existing behavior (over-estimating is the safe
-        // direction for scheduling; the catalog is not trusted to shrink it).
         assert_eq!(
             chunked_row_estimate(Some(342_000_000), Some(520_000), false, false),
             Some(342_000_000),
         );
-        // A measured whole-table actual beats the span in either direction.
         assert_eq!(
             chunked_row_estimate(Some(342_000_000), Some(520_000), true, false),
             Some(520_000),
         );
-        // F4 fresh-ANALYZE shape: tiny exact span, garbage catalog above it —
-        // the span must survive (the catalog override is gated on a span big
-        // enough to be worth chunking).
         assert_eq!(
             chunked_row_estimate(Some(30), Some(1130), false, false),
             Some(30)
         );
-        // Missing signals degrade to whichever side exists.
         assert_eq!(chunked_row_estimate(Some(42), None, false, false), Some(42));
         assert_eq!(chunked_row_estimate(None, Some(42), false, false), Some(42));
         assert_eq!(chunked_row_estimate(None, None, false, false), None);
     }
 
-    /// `chunk_by_days` ordinals are DAYS, so the span is not a row figure at
-    /// all — the catalog wins unconditionally, in both directions and at any
-    /// magnitude, and its absence leaves NO estimate rather than a fake one.
-    ///
-    /// Bughunt 2026-08-14: `by_days` is checked first in
-    /// `detect_and_generate_chunks`, so a 3-year date-chunked table produced
-    /// `span = 1095` — under `CATALOG_OVERRIDE_MIN_SPAN` (10 000), which routed
-    /// it to the tiny-span-wins arm and published "~1095 rows" for an 831M-row
-    /// table. That is `CostClass::Low` → `parallel_safe: true` written into the
-    /// operator's config, and the pool then schedules the giant as a cheap
-    /// concurrent export and drops it out of the heavy makespan floor. The
-    /// `max()`/tiny-span rules need the OPPOSITE treatment for a day span, which
-    /// is what `span_is_days` carries.
+    /// `chunk_by_days` ordinals are DAYS, so the span is not a row figure at all.
     #[test]
     fn a_by_days_span_is_a_day_count_and_never_a_row_estimate() {
         use super::chunked_row_estimate;
-        // The field shape: tiny day span, huge catalog. RED against today's
-        // tiny-span-wins arm, which returned Some(1095).
         assert_eq!(
             chunked_row_estimate(Some(1095), Some(831_000_000), false, true),
             Some(831_000_000),
         );
-        // The other direction too — a day span ABOVE the catalog is still not
-        // a row count, so `max()` must not reach it either (a fixture that
-        // only tested the first direction would pass on `span.max(cat)`).
         assert_eq!(
             chunked_row_estimate(Some(20_000), Some(4_000), false, true),
             Some(4_000),
         );
-        // A measured whole-table actual arrives in the same argument and wins
-        // for the same reason.
         assert_eq!(
             chunked_row_estimate(Some(1095), Some(520_000), true, true),
             Some(520_000),
         );
-        // No catalog: NO estimate. `None` classifies Medium ("assume medium
-        // cost until preflight succeeds"), which is the conservative answer;
-        // the day count would classify Low.
         assert_eq!(chunked_row_estimate(Some(1095), None, false, true), None);
     }
     /// `plan` over a source it cannot read ends with a code, the cause, and the cause's exit class.
@@ -2118,9 +1599,7 @@ mod tests {
         assert_eq!(crate::error::classify_exit(&dropped), 2);
     }
 
-    // ── guards a live mutation sweep left unpinned ──────────────────────────
-
-    /// A dash and an underscore are kept as written, so two exports that differ only there keep two files; a bare file name stays bare.
+    /// A dash and an underscore are kept as written, so two exports that differ only there keep two files.
     #[test]
     fn per_export_path_keeps_a_dash_and_an_underscore_as_written() {
         assert_eq!(
@@ -2177,7 +1656,7 @@ mod tests {
         );
     }
 
-    /// Only the field a write carried is on disk afterwards: a `wave` write leaves `parallel_safe` as the config had it, and the reverse.
+    /// Only the field a write carried is on disk afterwards.
     #[test]
     fn a_write_puts_on_disk_only_the_field_it_carried() {
         let (cfg, recs) = three_exports();
@@ -2247,7 +1726,7 @@ mod tests {
         );
     }
 
-    /// A blank line or a comment at any indent does not end the export, so a stale field after it is still replaced; the next top-level key does end it.
+    /// A blank line or a comment at any indent does not end the export, so a stale field after it is still replaced.
     #[test]
     fn a_blank_line_or_a_comment_does_not_end_the_export_block() {
         let yaml = "exports:\n  - name: orders\n\n# tuned by hand\n    wave: 9\n    mode: full\n\
@@ -2261,7 +1740,7 @@ mod tests {
         );
     }
 
-    /// A quoted export name is read as its bare name, in either quote style and before a trailing comment; other lines are not names.
+    /// A quoted export name is read as its bare name, in either quote style and before a trailing comment.
     #[test]
     fn a_quoted_export_name_is_read_as_its_bare_name() {
         let parsed = |line: &str| super::parse_export_name(line);

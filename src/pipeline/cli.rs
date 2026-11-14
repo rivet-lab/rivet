@@ -1,7 +1,4 @@
 //! **Layer: Observability**
-//!
-//! CLI display commands for state, metrics, files, chunk checkpoints, and journal history.
-//! Reads from the state stores and formats output — no execution or persistence writes.
 
 use super::format_bytes;
 use crate::config::Config;
@@ -10,16 +7,6 @@ use crate::journal::RunEvent;
 use crate::state::StateStore;
 
 /// Validate the `--config` path BEFORE opening the state store.
-///
-/// Inspect commands (`state show/files/chunks/progression`, `metrics`,
-/// `journal`) use `config_path` only to *locate* the SQLite `.rivet_state.db`
-/// next to it; they never parse the YAML. So a missing or garbage path used to
-/// silently open an empty/foreign DB and exit 0 (and `StateStore::open` would
-/// materialize a fresh `.rivet_state.db` beside the phantom path). Loading the
-/// config first turns a bad path into a clear non-zero error — exactly as
-/// `run`/`check` already do — and avoids littering a state DB. The parsed
-/// config is returned so callers that also need the declared export names
-/// (e.g. `reset-chunks`) reuse the same load.
 fn require_config(config_path: &str) -> Result<Config> {
     Config::load(config_path)
 }
@@ -49,7 +36,7 @@ fn owner_of(config: &Config, name: &str) -> Option<Owner> {
         .map(Owner::PartitionChild)
 }
 
-/// Whether the stored `name` belongs to the declared export `export`: it is `export` itself, or one of its partition children.
+/// Whether the stored `name` belongs to the declared export `export`.
 fn belongs_to(config: &Config, name: &str, export: &str) -> bool {
     name == export
         || match owner_of(config, name) {
@@ -77,7 +64,7 @@ fn require_known_export(config: &Config, config_path: &str, export_name: &str) -
     );
 }
 
-/// Open the state store for a command scoped to `export_name`: the name must be declared, or a partition child of a declared export that the state holds something for.
+/// Open the state store for a command scoped to `export_name`.
 fn open_for_export(
     config: &Config,
     config_path: &str,
@@ -102,14 +89,7 @@ fn open_for_export(
     Ok(state)
 }
 
-/// Union a per-export scoped query across the config's DECLARED exports, newest
-/// `limit` across them. THE shared-DB scope guard: the state DB is shared across
-/// configs in a directory, so an unscoped `SELECT … FROM <table>` (the `None`
-/// branch) leaks OTHER configs' rows — while `-e <foreign>` rejects them, a
-/// contradictory scope (dogfood LOW). `key` is the newest-first sort field.
-/// ponytail: N indexed point-queries (one per declared export); a
-/// `WHERE export_name IN (…)` pushed into the state layer would collapse it to
-/// one query — do that only if a huge export count makes this measurably slow.
+/// Union a per-export scoped query across the config's DECLARED exports, newest `limit` across them.
 fn scoped_union<T>(
     config: &Config,
     limit: usize,
@@ -125,18 +105,14 @@ fn scoped_union<T>(
     Ok(all)
 }
 
-/// Keep only rows whose export is declared in `config` or is a partition child of a declared export — the scope guard for the
-/// UNLIMITED list queries (cursors, progression) that carry no `limit` to unify.
-/// Same shared-DB leak as [`scoped_union`], filtered post-fetch since there is no
-/// window to preserve.
+/// Keep only rows whose export is declared in `config` or is a partition child of a declared export.
 fn retain_declared<T>(rows: Vec<T>, config: &Config, name_of: impl Fn(&T) -> &str) -> Vec<T> {
     rows.into_iter()
         .filter(|r| owner_of(config, name_of(r)).is_some())
         .collect()
 }
 
-/// Metrics scoped to the config's exports (an explicit, already-validated `-e`
-/// passes through). See [`scoped_union`] for the shared-DB rationale.
+/// Metrics scoped to the config's exports (an explicit, already-validated `-e` passes through).
 fn scoped_metrics(
     state: &StateStore,
     config: &Config,
@@ -154,9 +130,7 @@ fn scoped_metrics(
     }
 }
 
-/// A `--last 0` asks for ZERO rows — an empty result is then a zero-row request,
-/// NOT an empty ledger, so the "no <X> recorded yet" text is suppressed (the
-/// --json path already returns []). (dogfood LOW: the two were conflated.)
+/// A `--last 0` asks for ZERO rows — an empty result is then a zero-row request, NOT an empty ledger, so the "no <X> recorded yet" text is suppressed (the --json path already returns []).
 fn is_zero_row_request(limit: usize) -> bool {
     limit == 0
 }
@@ -164,29 +138,12 @@ fn is_zero_row_request(limit: usize) -> bool {
 pub fn show_state(config_path: &str, json: bool) -> Result<()> {
     let config = require_config(config_path)?;
     let state = StateStore::open(config_path)?;
-    // Scope to THIS config's exports — the state DB is shared across configs in a
-    // directory, so an unscoped list leaks other configs' cursors (dogfood: the
-    // metrics leak fix, extended to its inspect siblings).
     let states = retain_declared(state.list_all()?, &config, |s| &s.export_name);
     if json {
-        // Incremental-cursor rows; serialize directly. Empty → `[]` (the text
-        // path's "no cursor / never ran" guidance is operator help, not data).
         println!("{}", serde_json::to_string_pretty(&states)?);
         return Ok(());
     }
     if states.is_empty() {
-        // `state.list_all()` returns only incremental-cursor rows. Chunked
-        // and full runs land in different tables (`export_metrics`,
-        // `export_files`, `chunk_state`), so an empty cursor list does not
-        // mean "this config never ran". Distinguish the two cases:
-        //   - never ran    → tell the operator to run first
-        //   - ran chunked  → point at `rivet metrics` / `rivet state files`
-        // Anything else here is misleading ("No state" after a successful
-        // chunked run sounds like data loss).
-        // Scope the probe to THIS config's declared exports — the state DB is
-        // shared across configs in a directory, so `get_metrics(None, ..)` sees
-        // ANY config's run and would tell a never-run config it "ran chunked"
-        // (#22 bughunt, sibling of the metrics/cursor leak fix above).
         let any_run = config.exports.iter().any(|e| {
             state
                 .get_metrics(Some(&e.name), 1)
@@ -258,7 +215,7 @@ pub fn show_progression(config_path: &str, export_name: Option<&str>) -> Result<
     Ok(())
 }
 
-/// The boundaries `rivet state progression` shows: those of `export` and its partition children, else every declared export's.
+/// The boundaries `rivet state progression` shows.
 fn select_progression(
     config: &Config,
     rows: Vec<crate::state::ExportProgression>,
@@ -283,7 +240,7 @@ fn boundary_value(b: &crate::state::Boundary) -> String {
     }
 }
 
-/// How many partitions `state reset` holds the run lease of at once: each holds two open files on an SQLite state.
+/// How many partitions `state reset` holds the run lease of at once.
 const RESET_LEASES: usize = 16;
 
 /// `rivet state reset`: return a declared export, with every partition child it holds, or one stored partition child to a "never ran" state.
@@ -355,7 +312,7 @@ pub fn reset_state(config_path: &str, export_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Reset `family` (the export first, then its partition children) under their run leases: every lease is probed before anything is deleted, then the children go in batches of [`RESET_LEASES`] and the export last. `between` runs after the probe, before the first batch.
+/// Reset `family` (the export first, then its partition children) under their run leases.
 fn reset_family(
     state: &StateStore,
     source: &str,
@@ -514,7 +471,6 @@ pub fn show_files(
     let state = open_for_export(&config, config_path, export_name)?;
     let files = match export_name {
         Some(name) => state.get_files(Some(name), limit)?,
-        // Scope to this config's exports (shared-DB leak, same as metrics/state).
         None => scoped_union(
             &config,
             limit,
@@ -523,8 +479,6 @@ pub fn show_files(
         )?,
     };
     if json {
-        // FileRecord is a stable inspect row — serialize it directly. Empty → `[]`
-        // (valid JSON) so a CI completeness check never special-cases.
         println!("{}", serde_json::to_string_pretty(&files)?);
         return Ok(());
     }
@@ -615,7 +569,7 @@ pub fn show_metrics(
     Ok(())
 }
 
-/// Whether `name` is a declared export, or a name rivet synthesizes from one: a CDC leg, a `--split` unit (`<giant>#<n>`), a `partition_by` child (`<parent>__<value>`).
+/// Whether `name` is a declared export, or a name rivet synthesizes from one.
 fn export_is_declared(config: &Config, name: &str) -> bool {
     let leg_parent = crate::manifest::snapshot_family(name);
     let unit_giant = name
@@ -630,10 +584,6 @@ fn export_is_declared(config: &Config, name: &str) -> bool {
 }
 
 pub fn reset_chunk_checkpoint(config_path: &str, export_name: &str) -> Result<()> {
-    // Parity with `reset_state`: validate the export name against the config
-    // BEFORE touching state, so a typo (`-e pa_audi` for `pa_audit`) errors with
-    // the declared names instead of silently "Removed 0 chunk run record(s)"
-    // (rc=0) — which looked like the resume was abandoned when it was not.
     let config = require_config(config_path)?;
     if !export_is_declared(&config, export_name) {
         let known: Vec<String> = config.exports.iter().map(|e| e.name.clone()).collect();
@@ -659,9 +609,6 @@ pub fn reset_chunk_checkpoint(config_path: &str, export_name: &str) -> Result<()
         "remove its chunk checkpoint",
     )?;
     let n = state.reset_chunk_checkpoint(export_name, &source)?;
-    // Abandoning the resume also clears the committed/verified boundary, so
-    // `rivet state progression` does not report a stale chunk boundary after
-    // the chunk_run/chunk_task rows are gone (parity with `state reset`).
     state.delete_progression(export_name)?;
     println!(
         "Removed {} chunk run record(s) for export '{}'.",
@@ -681,10 +628,7 @@ fn reset_chunks_source(config: &Config, scope: &str) -> Result<String> {
     })
 }
 
-/// Clear chunk checkpoints for every export **named in `config_path`'s YAML** that currently has an
-/// `in_progress` chunk run (`chunk_run.status = 'in_progress'`).
-///
-/// Names present only in state (removed from config) are skipped with a printed note.
+/// Clear chunk checkpoints for every export **named in `config_path`'s YAML** that currently has an `in_progress` chunk run (`chunk_run.status = 'in_progress'`).
 pub fn reset_chunk_checkpoints_stuck(config_path: &str) -> Result<()> {
     let cfg = Config::load(config_path)?;
     let source = reset_chunks_source(&cfg, "--stuck-checkpoints")?;
@@ -748,8 +692,6 @@ pub fn show_chunk_checkpoint(config_path: &str, export_name: &str, json: bool) -
     let config = require_config(config_path)?;
     let state = open_for_export(&config, config_path, Some(export_name))?;
     if json {
-        // Composite (run header + per-chunk tasks) built inline so no state-layer
-        // type needs `Serialize`. No checkpoint → `null` (valid JSON).
         let report = match state.get_latest_chunk_run(export_name)? {
             None => serde_json::Value::Null,
             Some((run_id, plan_hash, status, updated_at)) => {
@@ -820,9 +762,6 @@ pub fn show_chunk_checkpoint(config_path: &str, export_name: &str, json: bool) -
 }
 
 /// Display recent run journal entries for an export.
-///
-/// Shows up to `limit` most recent runs (newest first), each as a compact
-/// block: run header + per-event summary lines.
 pub fn show_journal(
     config_path: &str,
     export_name: &str,
@@ -834,7 +773,6 @@ pub fn show_journal(
 
     let journals = if let Some(rid) = run_id {
         match state.load_journal(rid)? {
-            // The run_id must belong to `-e`, else `-e` was silently ignored.
             Some(j) if j.export_name != export_name => crate::rivet_bail!(
                 crate::error::codes::CLI_RUN_ID_EXPORT_MISMATCH,
                 "run_id '{}' belongs to export '{}', not '{}' (the -e/--export you passed). \
@@ -863,7 +801,6 @@ pub fn show_journal(
     }
 
     for journal in &journals {
-        // ── run header ────────────────────────────────────────────────────
         let outcome = journal.final_outcome().and_then(|e| {
             if let RunEvent::RunCompleted {
                 status,
@@ -897,7 +834,6 @@ pub fn show_journal(
             println!("  accepted: {message}");
         }
 
-        // ── event summary lines ────────────────────────────────────────────
         let files = journal.files();
         if !files.is_empty() {
             let total_rows: i64 = files
@@ -926,10 +862,6 @@ pub fn show_journal(
                 total_rows,
                 format_bytes(total_bytes),
             );
-            // List each produced file by name — the aggregate count alone hides
-            // *which* objects landed, so an operator could not cross-check the
-            // journal against the destination / manifest. Each FileWritten event
-            // stores the exact basename `state files` shows.
             for e in &files {
                 if let RunEvent::FileWritten {
                     file_name,
@@ -993,12 +925,6 @@ pub fn show_journal(
 }
 
 /// The hint printed when the state DB has no runs yet.
-///
-/// Extracted so its guard can assert on the STRING PRODUCTION EMITS. The guard
-/// used to build its own copy with `format!` and assert on that, so it could not
-/// fail if this text regressed — which is exactly how it once came to name the
-/// bare subcommand group `rivet state` (which errors without a leaf) instead of
-/// the runnable `rivet state show`.
 pub(crate) fn never_run_hint(config_path: &str) -> String {
     format!(
         "No exports have been run yet.\n  \
@@ -1007,10 +933,6 @@ pub(crate) fn never_run_hint(config_path: &str) -> String {
 }
 
 /// Column width for RUN ID and FILE in `rivet state files`.
-///
-/// run_ids are `{export}_{%Y%m%dT%H%M%S%3f}` (the timestamp alone is 18 chars),
-/// so a column narrower than the longest export name + 19 overflows and pushes
-/// every later column out of line with the header.
 const FILES_COL_W: usize = 40;
 
 pub(crate) fn files_header() -> String {
@@ -1049,16 +971,8 @@ mod tests {
     use super::*;
     use crate::journal::{RunEvent, RunJournal};
 
-    // ── helpers ──────────────────────────────────────────────────────────────
-
     fn setup_dir() -> (tempfile::TempDir, String) {
         let dir = tempfile::TempDir::new().unwrap();
-        // Inspect/reset commands now validate the --config path up front
-        // (findings #9/#23): they `Config::load` before opening the state DB,
-        // so the file must exist and parse. Write a valid two-export config
-        // (orders + transactions — the names the show/reset tests use) so the
-        // tests exercise the post-validation display/reset path, not the
-        // config-not-found bail.
         let config_path = dir.path().join("rivet.yaml").to_str().unwrap().to_string();
         write_two_export_config(&config_path);
         (dir, config_path)
@@ -1130,8 +1044,6 @@ exports:
         j
     }
 
-    // ── boundary_value ───────────────────────────────────────────────────────
-
     fn make_boundary(cursor: Option<&str>, chunk_index: Option<i64>) -> crate::state::Boundary {
         crate::state::Boundary {
             strategy: "incremental".into(),
@@ -1160,57 +1072,28 @@ exports:
         assert_eq!(boundary_value(&b), "-");
     }
 
-    // ── state files: RUN ID column width (finding L16) ───────────────────────
-
-    // run_ids are `{export}_{%Y%m%dT%H%M%S%3f}` — the timestamp suffix alone is
-    // 18 chars, so even a short export name yields ~30-char ids and longer ones
-    // reach ~40. The RUN ID column must be wide enough that a 40-char id is not
-    // padded *past* the FILE column (which would shove FILE right and break
-    // every subsequent row's alignment vs. the header). A column of 35 wrapped;
-    // this pins the widened layout: a 40-char id is followed by exactly one
-    // space then FILE, identical to the header's spacing.
     #[test]
     fn state_files_run_id_column_fits_a_40_char_run_id() {
-        let run_id = "transactions_historyy_20250115T143022999"; // 40 chars
+        let run_id = "transactions_historyy_20250115T143022999";
         assert_eq!(run_id.len(), 40, "fixture must be a realistic 40-char id");
 
-        // Both strings come from the PRODUCTION formatters. They used to be
-        // rebuilt here with a local `format!` carrying its own `{:<40}`, so the
-        // test compared two copies of its own literal: narrowing the real column
-        // left it green. Now shrinking FILES_COL_W below 40 overflows the run_id
-        // in the row while the header pads "RUN ID" to the narrower width, and the
-        // two offsets diverge.
         let header = files_header();
         let row = files_row(run_id, "orders_001.parquet", 50_000, "4.0KB", "2025-01-15");
 
-        // The FILE column header and the row's file value must start at the
-        // same byte offset — the alignment invariant a too-narrow column breaks.
         let header_file_at = header.find("FILE").unwrap();
         let row_file_at = row.find("orders_001.parquet").unwrap();
         assert_eq!(
             header_file_at, row_file_at,
             "a 40-char RUN ID must not push the FILE column out of alignment\nheader: {header}\nrow:    {row}"
         );
-        // And the run_id is rendered in full (not truncated).
         assert!(
             row.starts_with(run_id),
             "run_id must not be truncated: {row}"
         );
     }
 
-    // ── show_state ───────────────────────────────────────────────────────────
-
-    // Finding L17: the empty-cursor / never-run hint pointed at `rivet state`,
-    // which is a bare subcommand group and errors without a leaf. The fix points
-    // at the real command `rivet state show`. Pin the exact hint string the
-    // never-run branch builds.
     #[test]
     fn show_state_never_run_hint_points_at_state_show() {
-        // The hint comes from PRODUCTION. It used to be rebuilt here with a local
-        // `format!`, so the assertions interrogated the test's own copy and could
-        // not fail if the real text regressed — which is how it once came to name
-        // the bare group `rivet state` (which errors without a leaf) in the first
-        // place.
         let config_path = "rivet.yaml";
         let hint = never_run_hint(config_path);
         assert!(
@@ -1227,14 +1110,9 @@ exports:
         );
     }
 
-    // ── metrics / journal: unknown-export guard (finding L18) ────────────────
-
-    // `metrics --export <typo>` used to print "No metrics recorded yet." —
-    // indistinguishable from a declared-but-unrun export. With the config now
-    // loaded, an undeclared name must bail naming the known exports.
     #[test]
     fn show_metrics_unknown_export_bails_with_known_names() {
-        let (dir, config_path) = setup_dir(); // declares orders + transactions
+        let (dir, config_path) = setup_dir();
         let _ = open_state(&dir);
         let err = show_metrics(&config_path, Some("ghost"), 10, false).unwrap_err();
         let msg = format!("{err:#}");
@@ -1248,8 +1126,6 @@ exports:
         );
     }
 
-    // A *declared* export with no recorded runs must still reach the normal
-    // empty-state path (proves the guard does not over-reject).
     #[test]
     fn show_metrics_known_but_unrun_export_returns_ok() {
         let (dir, config_path) = setup_dir();
@@ -1257,7 +1133,6 @@ exports:
         assert!(show_metrics(&config_path, Some("orders"), 10, false).is_ok());
     }
 
-    // Same gap on `journal` when querying by export name (no --run-id).
     #[test]
     fn show_journal_unknown_export_bails_with_known_names() {
         let (dir, config_path) = setup_dir();
@@ -1274,21 +1149,15 @@ exports:
         );
     }
 
-    // #dogfood LOW: `--run-id` used to look up purely by id and IGNORE `-e` —
-    // so a typo'd (or nonexistent) `-e` printed whatever export owned the run_id.
-    // Now `-e` is validated even on the run_id path, AND the run_id must belong
-    // to that export. (This test previously PINNED the buggy skip.)
     #[test]
     fn show_journal_run_id_validates_export_and_cross_checks_ownership() {
         let (dir, config_path) = setup_dir();
         let state = open_state(&dir);
-        // An unknown -e is rejected even with --run-id.
         let err = show_journal(&config_path, "ghost", 5, Some("run_xyz")).unwrap_err();
         assert!(
             format!("{err:#}").contains("export 'ghost' is not defined"),
             "unknown -e must be rejected even with --run-id: {err:#}"
         );
-        // A run_id owned by a DIFFERENT (valid) export than -e is a mismatch.
         state
             .store_journal(&make_journal("run_owned_by_orders", "orders"))
             .unwrap();
@@ -1305,7 +1174,7 @@ exports:
     #[test]
     fn show_state_empty_db_returns_ok() {
         let (dir, config_path) = setup_dir();
-        let _ = open_state(&dir); // create the DB file
+        let _ = open_state(&dir);
         assert!(show_state(&config_path, false).is_ok());
     }
 
@@ -1317,8 +1186,6 @@ exports:
         drop(state);
         assert!(show_state(&config_path, false).is_ok());
     }
-
-    // ── show_files ───────────────────────────────────────────────────────────
 
     #[test]
     fn show_files_empty_returns_ok() {
@@ -1347,9 +1214,6 @@ exports:
         assert!(show_files(&config_path, Some("orders"), 10, false).is_ok());
     }
 
-    // #dogfood MED: files / progression / chunks used to accept a typo'd -e
-    // silently (empty-state output, exit 0) while metrics/journal/reset rejected
-    // it. All three now validate the name against the config like their siblings.
     #[test]
     fn inspect_handlers_reject_an_unknown_export() {
         let (dir, config_path) = setup_dir();
@@ -1366,13 +1230,10 @@ exports:
                 "a typo'd -e must be rejected, not read as empty-state: {err:#}"
             );
         }
-        // A declared export is NOT falsely rejected.
         assert!(show_files(&config_path, Some("orders"), 10, false).is_ok());
         assert!(show_progression(&config_path, Some("orders")).is_ok());
         assert!(show_chunk_checkpoint(&config_path, "orders", false).is_ok());
     }
-
-    // ── show_metrics ─────────────────────────────────────────────────────────
 
     #[test]
     fn show_metrics_empty_returns_ok() {
@@ -1383,11 +1244,8 @@ exports:
 
     #[test]
     fn show_metrics_exercises_flag_and_duration_paths() {
-        // Covers retries / validated / schema_changed flag lines and
-        // the ms-vs-seconds duration branch in the formatter.
         let (dir, config_path) = setup_dir();
         let state = open_state(&dir);
-        // ≥1000 ms → "X.Xs" branch; retries + validated + schema_changed flags
         state
             .record_metric_full(&crate::state::MetricRow {
                 export_name: "orders".to_string(),
@@ -1408,7 +1266,6 @@ exports:
                 ..Default::default()
             })
             .unwrap();
-        // <1000 ms → "Xms" branch; error_message line
         state
             .record_metric_full(&crate::state::MetricRow {
                 export_name: "orders".to_string(),
@@ -1435,9 +1292,7 @@ exports:
 
     #[test]
     fn scoped_metrics_excludes_foreign_config_exports() {
-        // #dogfood LOW: the unscoped no-`-e` query leaked runs from OTHER configs
-        // sharing the state DB, while `-e <foreign>` rejected them — a contradiction.
-        let (dir, config_path) = setup_dir(); // declares orders + transactions
+        let (dir, config_path) = setup_dir();
         let state = open_state(&dir);
         let seed = |s: &StateStore, export: &str, run: &str| {
             s.record_metric_full(&crate::state::MetricRow {
@@ -1460,8 +1315,8 @@ exports:
             })
             .unwrap();
         };
-        seed(&state, "orders", "r1"); // declared in this config
-        seed(&state, "beta_foreign", "r2"); // written by ANOTHER config, same DB
+        seed(&state, "orders", "r1");
+        seed(&state, "beta_foreign", "r2");
         let config = crate::config::Config::load(&config_path).unwrap();
 
         let scoped = scoped_metrics(&state, &config, None, 10).unwrap();
@@ -1474,19 +1329,15 @@ exports:
             "a foreign export must be excluded: {:?}",
             scoped.iter().map(|m| &m.export_name).collect::<Vec<_>>()
         );
-        // --last 0 → empty (a zero-row request, not an error).
         assert!(scoped_metrics(&state, &config, None, 0).unwrap().is_empty());
     }
 
     #[test]
     fn inspect_list_queries_scope_to_config_exports() {
-        // #dogfood: the metrics-leak fix, extended to its siblings. A shared
-        // state DB must not surface OTHER configs' cursors/files under `state
-        // show` / `state files` (the None branch) — the wired-into-only-some class.
-        let (dir, config_path) = setup_dir(); // declares orders + transactions
+        let (dir, config_path) = setup_dir();
         let state = open_state(&dir);
         state.update_legacy("orders", "2025-01-01").unwrap();
-        state.update_legacy("beta_foreign", "2025-01-02").unwrap(); // another config, same DB
+        state.update_legacy("beta_foreign", "2025-01-02").unwrap();
         let f = |run: &str, export: &str, name: &str| {
             state
                 .record_file(FilePart {
@@ -1505,7 +1356,6 @@ exports:
         f("r2", "beta_foreign", "b.parquet");
         let config = crate::config::Config::load(&config_path).unwrap();
 
-        // cursors (list_all, via retain_declared)
         let cursors = retain_declared(state.list_all().unwrap(), &config, |s| &s.export_name);
         assert!(cursors.iter().any(|c| c.export_name == "orders"));
         assert!(
@@ -1513,7 +1363,6 @@ exports:
             "list_all leaked a foreign config's cursor"
         );
 
-        // files (get_files, via scoped_union)
         let files = scoped_union(
             &config,
             100,
@@ -1530,14 +1379,10 @@ exports:
 
     #[test]
     fn is_zero_row_request_only_for_last_zero() {
-        // #dogfood LOW: --last 0 suppresses the "no X recorded yet" empty-state
-        // line (a zero-row request, not an empty ledger; --json already returns []).
         assert!(is_zero_row_request(0));
         assert!(!is_zero_row_request(1));
         assert!(!is_zero_row_request(20));
     }
-
-    // ── show_journal ─────────────────────────────────────────────────────────
 
     #[test]
     fn show_journal_empty_returns_ok() {
@@ -1575,8 +1420,6 @@ exports:
         assert!(show_journal(&config_path, "orders", 5, Some("run_xyz")).is_ok());
     }
 
-    // ── reset_state ──────────────────────────────────────────────────────────
-
     #[test]
     fn reset_state_returns_ok() {
         let (dir, config_path) = setup_dir();
@@ -1587,11 +1430,6 @@ exports:
         assert!(reset_state(&config_path, "orders").is_ok());
     }
 
-    // F-NEW (0.7.7 audit): `state reset` on an export that is not declared
-    // in the config used to silently succeed (DELETE WHERE export_name = X
-    // affects 0 rows; "State reset for export 'X'" printed; rc=0). A typo'd
-    // `--export pa_audi` looked like success but did nothing. This pins the
-    // hint-emitting bail.
     #[test]
     fn reset_state_unknown_export_bails_with_hint() {
         let (_dir, config_path) = setup_dir();
@@ -2111,8 +1949,6 @@ exports:
         assert_eq!(held_names(&state), ["a__2026-01-01"]);
     }
 
-    // ── accept_state ─────────────────────────────────────────────────────────
-
     /// A config with one incremental export `orders` whose filter is `filter`, a cdc export and `source`.
     fn write_accept_config(config_path: &str, source: &str, filter: &str) {
         let yaml = format!(
@@ -2184,7 +2020,6 @@ exports:
         let state = open_state(&dir);
         let (wrote, edited) = (key("spent = 1", "id"), key("spent = 0", "id"));
         state.update_with_column(&wrote, "10").unwrap();
-        // (the cursor, whether the first filter may claim it, whether the edited one may)
         let row = |state: &StateStore| {
             let cursor = state.get("orders", &wrote.source).unwrap();
             (
@@ -2272,8 +2107,6 @@ exports:
         assert!(show_journal(&config_path, "orders", 5, None).is_ok());
     }
 
-    // ── reset_chunk_checkpoint ───────────────────────────────────────────────
-
     #[test]
     fn reset_chunk_checkpoint_on_empty_db_returns_ok() {
         let (dir, config_path) = setup_dir();
@@ -2281,13 +2114,9 @@ exports:
         assert!(reset_chunk_checkpoint(&config_path, "orders").is_ok());
     }
 
-    // #21 (0.9.x audit): `state reset-chunks -e <typo>` used to "Removed 0 …"
-    // rc=0 with no export-name guardrail. Parity with `reset_state`: an unknown
-    // name must bail with a hint that names the export and lists the declared
-    // ones so the operator can spot the typo.
     #[test]
     fn reset_chunk_checkpoint_unknown_export_bails_with_hint() {
-        let (_dir, config_path) = setup_dir(); // declares orders + transactions
+        let (_dir, config_path) = setup_dir();
         let err = reset_chunk_checkpoint(&config_path, "ghost").unwrap_err();
         let msg = format!("{err:#}");
         assert!(
@@ -2300,10 +2129,6 @@ exports:
         );
     }
 
-    // #9/#23 (0.9.x audit): inspect/reset commands used --config ONLY to locate
-    // the state DB next to it, never parsing it — so a nonexistent path opened a
-    // fresh empty DB and exited 0 with "No … recorded yet" (and littered a
-    // .rivet_state.db). They must bail naming the bad path instead.
     #[test]
     fn inspect_commands_bail_on_nonexistent_config() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -2331,8 +2156,6 @@ exports:
             );
         }
 
-        // And the read-only inspect must NOT materialize a state DB beside the
-        // phantom config (validation happens before StateStore::open).
         assert!(
             !dir.path().join(".rivet_state.db").exists(),
             "a bad-config inspect must not leak a fresh .rivet_state.db"
@@ -2390,8 +2213,7 @@ exports:
         assert_eq!(state.reset_chunk_checkpoint("ghost", "pg/a").unwrap(), 1);
     }
 
-    /// While a live run holds the export's run lease every reset is refused under its code and
-    /// removes nothing, twice over; once the lease is released each one goes through.
+    /// While a live run holds the export's run lease every reset is refused under its code and removes nothing, twice over.
     #[test]
     fn every_reset_is_refused_while_the_exports_run_lease_is_held() {
         let (dir, config_path) = setup_dir();
@@ -2480,8 +2302,6 @@ exports:
                 .is_none()
         );
     }
-
-    // ── reset-chunks is scoped by the export and its source ──────────────────
 
     const OTHER_SOURCE: &str = "postgres://other.host:5432/db";
 
@@ -2629,8 +2449,6 @@ exports:
         );
     }
 
-    // ── show_progression ─────────────────────────────────────────────────────
-
     #[test]
     fn show_progression_empty_returns_ok() {
         let (dir, config_path) = setup_dir();
@@ -2649,8 +2467,6 @@ exports:
         assert!(show_progression(&config_path, Some("orders")).is_ok());
     }
 
-    // ── show_chunk_checkpoint ────────────────────────────────────────────────
-
     #[test]
     fn show_chunk_checkpoint_no_data_returns_ok() {
         let (dir, config_path) = setup_dir();
@@ -2658,9 +2474,7 @@ exports:
         assert!(show_chunk_checkpoint(&config_path, "orders", false).is_ok());
     }
 
-    /// A CDC baseline leg (`<stream>__snapshot_<table>`) resolves to its declared
-    /// parent stream; a typo resolves to nothing. RED against requiring BOTH the
-    /// name and its parent to be declared.
+    /// A CDC baseline leg (`<stream>__snapshot_<table>`) resolves to its declared parent stream.
     #[test]
     fn a_snapshot_leg_resolves_to_its_declared_stream() {
         let cfg = Config::from_yaml(
@@ -2674,9 +2488,7 @@ exports:
         assert!(!export_is_declared(&cfg, "ordrs"));
     }
 
-    /// The chunk-checkpoint refusals print `reset-chunks -e <plan.export_name>`; for a
-    /// `--split` unit and a `partition_by` child that name is synthesized, and the command
-    /// (and `--stuck-checkpoints`) must accept it or the printed remediation is a dead end.
+    /// The chunk-checkpoint refusals print `reset-chunks -e <plan.export_name>`.
     #[test]
     fn reset_chunks_accepts_split_unit_and_partition_child_names() {
         let (dir, config_path) = setup_dir();

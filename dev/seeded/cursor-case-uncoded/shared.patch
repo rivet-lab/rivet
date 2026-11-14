@@ -1,6 +1,8 @@
+diff --git a/src/pipeline/single.rs b/src/pipeline/single.rs
+index 5b70afe0..f44e3f8f 100644
 --- a/src/pipeline/single.rs
 +++ b/src/pipeline/single.rs
-@@ -295,10 +295,8 @@
+@@ -251,10 +251,8 @@ fn refuse_a_cursor_case_miss(
          return err;
      };
      let names: Vec<&str> = columns.iter().map(|c| c.column_name.as_str()).collect();
@@ -12,4 +14,4 @@
 +    err
  }
  
- /// `err` as `RIVET_STATE_CURSOR_INCOMPARABLE` when the source refused to convert a value while a stored cursor was compared; any other error unchanged.
+ /// `err` as `RIVET_STATE_CURSOR_INCOMPARABLE` when the source refused to convert a value while a stored cursor was compared.

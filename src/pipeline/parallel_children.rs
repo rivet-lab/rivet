@@ -14,27 +14,7 @@ use super::aggregate::ChildReports;
 use super::ipc::{ChildEvent, ENV_IPC_EVENTS};
 use super::parent_ui::{ChildWaitStatus, UiMessage, sanitize_terminal};
 
-/// Decode one stdout line from a CHILD PROCESS and adopt the process-local
-/// counters it carries into this process's totals.
-///
-/// This is the **only** place a `ChildEvent` crosses a process boundary, and
-/// therefore the only place its counters are provably FOREIGN: the child's
-/// `RetryLayer` incremented its own `TRANSIENT_RETRIES` atomic, which this
-/// process never saw, so folding it in is what makes the parent's "dest
-/// retries" line cover the whole run instead of just the parent's own probes.
-///
-/// The fold used to live in `parent_ui::Renderer::handle_event` — but the
-/// renderer is also fed by the SAME-process channel (`ipc::emit_event`, which
-/// every `--parallel-exports` / `--pool` / plain sequential run installs), so
-/// it re-added this process's own counter to itself: a run with 3 real
-/// retries reported 6, and each further export doubled the total again
-/// (bughunt 2026-08-14, finding #4). Keeping the fold here makes the
-/// invariant structural — a counter is folded only after arriving over a
-/// pipe from another process.
-///
-/// `dest_retries` is the child's CUMULATIVE process counter and one child may
-/// send several `Finished` lines (a CDC export's snapshot legs, then its own),
-/// so only the growth since `retries_seen`, that child's previous value, is added.
+/// Decode one stdout line from a CHILD PROCESS and adopt the process-local counters it carries into this process's totals.
 fn adopt_child_event(line: &str, retries_seen: &mut u64) -> serde_json::Result<ChildEvent> {
     let ev: ChildEvent = serde_json::from_str(line)?;
     if let ChildEvent::Finished { dest_retries, .. } = &ev {
@@ -44,23 +24,8 @@ fn adopt_child_event(line: &str, retries_seen: &mut u64) -> serde_json::Result<C
     Ok(ev)
 }
 
-/// Re-invoke this binary once per export. Children do not inherit parallel flags, so there is no recursion.
-///
-/// Each child has `RIVET_IPC_EVENTS=1` set in its environment and runs with
-/// stdout piped: it emits one JSON line per significant event
-/// ([`ChildEvent`]) on stdout instead of drawing its own progress bar
-/// or per-export summary.  The parent reads those events in dedicated reader
-/// threads and forwards them through an `mpsc` channel to a single UI thread
-/// that owns an `indicatif::MultiProgress`, drawing one card per export.
-///
-/// Returns `(Result, child_failures, stderr_dump)` so the caller can build
-/// an aggregate, then surface any captured child-process stderr below the
-/// run summary.  `child_failures` maps export name → error message for
-/// children that did not exit cleanly; on success this map is empty.
-/// `stderr_dump` is a pre-rendered block (already terminated by `\n`) that
-/// the caller prints verbatim on stderr; empty when no child wrote
-/// anything to its captured stderr.
-#[allow(clippy::too_many_arguments)] // forwarding parent's flag set to children
+/// Re-invoke this binary once per export.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn run_exports_as_child_processes(
     _run_set_allows: super::run_set::ChildProcessesOk,
     config_path: &str,
@@ -71,8 +36,6 @@ pub(super) fn run_exports_as_child_processes(
     force: bool,
     params: Option<&std::collections::HashMap<String, String>>,
     strict: bool,
-    // Wave-wide max export-name width so the card table aligns across the
-    // cost-gate's separate safe/lone batches, not just within one batch.
     name_floor: usize,
 ) -> (Result<()>, HashMap<String, String>, String, ChildReports) {
     let exe = match std::env::current_exe() {
@@ -91,7 +54,6 @@ pub(super) fn run_exports_as_child_processes(
         .canonicalize()
         .unwrap_or_else(|_| std::path::PathBuf::from(config_path));
 
-    // Apply schema migrations once in the parent before spawning children.
     if let Err(e) = StateStore::open(config_path) {
         return (
             Err(e.context("failed to open / migrate state DB before spawning children")),
@@ -108,20 +70,11 @@ pub(super) fn run_exports_as_child_processes(
 
     let (tx, rx) = mpsc::channel::<UiMessage>();
 
-    // #153 heartbeat: silence between spawn and the first child event is
-    // indistinguishable from a hang (the field: ~2.5 min blank terminal). Emit it
-    // BEFORE the UI thread starts drawing — a raw eprintln AFTER the renderer is
-    // live races its cursor and corrupts the card table in a TTY (roast
-    // 2026-08-09). Printed here, it scrolls above the cards the renderer then
-    // owns. Uses the intended count (exports.len()); per-child spawn failures
-    // surface as their own ✗ cards.
     eprintln!(
         "  … starting {} export process(es); waiting for the first child event",
         exports.len()
     );
 
-    // `name_floor` (wave-wide max, from the caller) seeds the card table's name
-    // column so it aligns from the first redraw and across batches.
     let n_cards = exports.len();
     let ui_handle = std::thread::Builder::new()
         .name("rivet-ipc-ui".into())
@@ -129,7 +82,6 @@ pub(super) fn run_exports_as_child_processes(
         .ok();
 
     const CHILD_STDERR_LINE_CAP: usize = 5_000;
-    // One mutex per export — parallel child threads never contend with each other.
     type StderrBuf = std::sync::Arc<std::sync::Mutex<(Vec<String>, usize)>>;
     let stderr_bufs: std::sync::Arc<HashMap<String, StderrBuf>> = std::sync::Arc::new(
         exports
@@ -148,8 +100,6 @@ pub(super) fn run_exports_as_child_processes(
     let mut children: Vec<(String, std::process::Child)> = Vec::with_capacity(exports.len());
     let mut reader_handles: Vec<std::thread::JoinHandle<()>> = Vec::with_capacity(exports.len());
     let mut spawn_failures: HashMap<String, String> = HashMap::new();
-    // Reap children on a targeted SIGTERM/SIGINT to the parent so they don't
-    // orphan and keep holding source connections (OPT-6).
     child_reaper::install_once();
     for export in exports {
         let mut cmd = Command::new(&exe);
@@ -183,21 +133,7 @@ pub(super) fn run_exports_as_child_processes(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env(ENV_IPC_EVENTS, "1")
-            // …and the claim that goes with it: THIS parent will emit the
-            // run-over-run throughput self-check for the child's exports, so the
-            // child must not (its stderr is captured to a file nobody reads).
-            // A separate, internal variable because `RIVET_IPC_EVENTS` is a
-            // documented user-facing switch — keying the deferral on it alone
-            // silenced the check in any environment that set it (see
-            // `run::ENV_PARENT_SELF_CHECK`).
             .env(super::run::ENV_PARENT_SELF_CHECK, "1");
-        // Declare sibling concurrency to the child: it runs single-export in
-        // its own process, so MULTI_EXPORT_CONCURRENT reads false there and
-        // run_diagnosis would print the confident solo harm attribution while
-        // N sibling children share the same server-global counter window —
-        // the runner-bypass shape of the pool hedge fix (bughunt 2026-08-13).
-        // Only when this batch actually has siblings: a lone child (a heavy
-        // wave batch of one) keeps the truthful solo attribution.
         if exports.len() > 1 {
             cmd.env(super::run::ENV_CONCURRENT_SIBLINGS, "1");
         }
@@ -270,10 +206,6 @@ pub(super) fn run_exports_as_child_processes(
                                     Ok(l) => l,
                                     Err(_) => break,
                                 };
-                                // Captured child stderr is later re-emitted to
-                                // the operator's terminal verbatim, so strip any
-                                // terminal-control bytes a malicious source DB
-                                // echoed into the child's error output (CWE-150).
                                 let line = sanitize_terminal(&line);
                                 let mut guard = match buf.lock() {
                                     Ok(g) => g,
@@ -301,9 +233,6 @@ pub(super) fn run_exports_as_child_processes(
 
     let mut failures = Vec::new();
     let mut wait_failures: HashMap<String, String> = HashMap::new();
-    // Numeric exit codes of failed children, so the parent can re-derive the
-    // SAME process exit class instead of collapsing a child's data-integrity (3)
-    // / schema-drift (4) / retryable (2) into a misleading generic 1.
     let mut child_exit_codes: Vec<i32> = Vec::new();
 
     type WaitOutcome = (String, std::io::Result<std::process::ExitStatus>);
@@ -315,8 +244,6 @@ pub(super) fn run_exports_as_child_processes(
             .name(format!("rivet-reap-{}", name))
             .spawn(move || {
                 let status = child.wait();
-                // Reaped — clear before the PID can be reused, so a later signal
-                // never targets an unrelated process.
                 child_reaper::deregister(pid);
                 (name, status)
             });
@@ -400,12 +327,6 @@ pub(super) fn run_exports_as_child_processes(
         }
     }
 
-    // #153: a common-mode startup failure — surface ONE representative excerpt
-    // NOW (before the caller's end-of-batch full dump), so the operator sees the
-    // one message that explains the flood instead of scanning 70 identical cards.
-    // Representative message per failed child = its last stderr line (the error),
-    // else the wait/spawn reason. `any_success` = at least one child produced no
-    // failure record.
     let any_success = exports.iter().any(|e| !all_failures.contains_key(&e.name));
     let failed_msgs: Vec<(String, String)> = all_failures
         .iter()
@@ -427,28 +348,9 @@ pub(super) fn run_exports_as_child_processes(
     (result, all_failures, stderr_dump, reports)
 }
 
-/// #153: when K+ children fail with the SAME error class before any success,
-/// surface ONE representative excerpt instead of a silent wait then a flood of
-/// identical ✗ cards (the field: 70+ children failed on absent dest creds; the
-/// operator saw a blank terminal then 70 cards, none of which explained why).
-///
-/// Pure so the dedup/threshold is unit-tested. `failed` is `(name, last_stderr
-/// line)` per failed child; `any_success` suppresses the banner (a mixed batch
-/// is not a common-mode failure). Class key = the message with digits/hex/paths
-/// blanked, so `token for host-1` and `token for host-2` collapse to one class.
-/// Returns `None` below the threshold or on a mixed/empty batch.
-/// The class KEY of one error message — variable tokens masked so per-child ids
-/// collapse to one common-mode class. A pure DIGIT run → `#` (host-1 / host-10
-/// are one class); a run mixing letters AND digits → `#` whole (a hex id, uuid,
-/// or random staging suffix like `aB3xQ9k` — digit-masking alone left `aB#xQ#k`,
-/// still per-child distinct, so the banner never fired: roast 2026-08-09). A
-/// pure-letter run (a real word) is KEPT. Whitespace normalized. Pure +
-/// directly unit-tested with exact expected strings.
+/// #153: when K+ children fail with the SAME error class before any success, surface ONE representative excerpt instead of a silent wait then a flood of identical ✗ cards (the field.
 pub(super) fn error_class(msg: &str) -> String {
     let mask_token = |tok: &str| -> String {
-        // Each token is a run of `is_ascii_alphanumeric()` chars, so every char is a digit or an
-        // ASCII letter; `has_alpha || all-digits` is therefore always true and the mask condition
-        // reduces to just `has_digit` (mask any token that carries a digit — an id/hash/token).
         if tok.chars().any(|c| c.is_ascii_digit()) {
             "#".to_string()
         } else {
@@ -519,12 +421,7 @@ fn executable_unresolved(e: std::io::Error) -> anyhow::Error {
     )
 }
 
-/// Build the parent's final result from the children's outcomes. When any child
-/// exited with a CLASSIFIED non-generic code, the aggregate error carries a
-/// [`crate::error::PreclassifiedExit`] so `classify_exit` re-derives that SAME
-/// process exit class — otherwise a child's data-integrity (3) / schema-drift
-/// (4) / retryable (2) would be stringified and the parent would exit a
-/// misleading generic 1.
+/// Build the parent's final result from the children's outcomes.
 fn aggregate_child_result(failures: &[String], child_exit_codes: &[i32]) -> anyhow::Result<()> {
     if failures.is_empty() {
         return Ok(());
@@ -539,7 +436,7 @@ fn aggregate_child_result(failures: &[String], child_exit_codes: &[i32]) -> anyh
     }
 }
 
-/// The most stop-worthy class among failed children's codes; a code outside the taxonomy (a panic's 101) counts as Internal.
+/// The most stop-worthy class among failed children's codes.
 fn worst_exit_code(codes: &[i32]) -> Option<i32> {
     use crate::error::ExitClass;
     codes
@@ -549,24 +446,12 @@ fn worst_exit_code(codes: &[i32]) -> Option<i32> {
         .map(ExitClass::code)
 }
 
-/// Best-effort reaping of subprocess-export children when the parent receives a
-/// targeted SIGTERM/SIGINT.
-///
-/// Children are spawned in the parent's process group, so a *terminal* Ctrl-C
-/// (SIGINT to the foreground group) already reaches them. But a **targeted**
-/// `kill <parent_pid>` — systemd stop, a k8s pod termination, a scheduler — hits
-/// only the parent; without this the children orphan and keep holding source
-/// connections, the exact fragility rivet exists to protect (OPT-6).
-///
-/// Signal-safe by construction: the handler does only async-signal-safe work —
-/// atomic loads from a fixed-size registry, `kill(2)`, then restore-default +
-/// `raise(2)`. No allocation, no locks in the handler.
+/// Best-effort reaping of subprocess-export children when the parent receives a targeted SIGTERM/SIGINT.
 #[cfg(unix)]
 mod child_reaper {
     use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
-    /// Far above any real export fan-out; the registry is fixed so the handler
-    /// touches no allocator. An overflow child is simply untracked (never UB).
+    /// Far above any real export fan-out; the registry is fixed so the handler touches no allocator.
     const CAP: usize = 512;
     static SLOTS: [AtomicI32; CAP] = [const { AtomicI32::new(0) }; CAP];
     static INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -585,8 +470,7 @@ mod child_reaper {
         log::debug!("child_reaper: registry full ({CAP}); pid {pid} not tracked");
     }
 
-    /// Clear a PID once the parent has `wait`ed it — so a future PID reuse can
-    /// never be signalled by a late crash.
+    /// Clear a PID once the parent has `wait`ed it — so a future PID reuse can never be signalled by a late crash.
     pub(super) fn deregister(pid: u32) {
         let pid = pid as i32;
         for slot in &SLOTS {
@@ -599,13 +483,9 @@ mod child_reaper {
             let pid = slot.load(Ordering::Acquire);
             if pid != 0 {
                 // SAFETY: `kill` is async-signal-safe. A reaped PID is cleared
-                // before reuse (see `deregister`); a zombie kill is a harmless
-                // no-op.
                 unsafe { libc::kill(pid, libc::SIGTERM) };
             }
         }
-        // Restore the default disposition and re-raise so the parent still dies
-        // *with* the signal (correct exit status for the scheduler that sent it).
         unsafe {
             libc::signal(sig, libc::SIG_DFL);
             libc::raise(sig);
@@ -618,10 +498,8 @@ mod child_reaper {
             return;
         }
         // SAFETY: `handle` is async-signal-safe (see its body). No SA_RESTART, so
-        // a blocking `wait` in a reaper thread is interrupted by the signal.
         unsafe {
             let mut act: libc::sigaction = std::mem::zeroed();
-            // Cast through the fn-pointer type (not the fn item) to satisfy
             // `clippy::fn_to_numeric_cast` under `-D warnings`.
             act.sa_sigaction = handle as extern "C" fn(libc::c_int) as libc::sighandler_t;
             libc::sigemptyset(&mut act.sa_mask);
@@ -676,8 +554,7 @@ mod forwarded_tests {
         assert!(super::forwarded("--json-errors").is_empty());
     }
 
-    /// In a process of its own: the wait set by `--lock-wait` is read back and handed on, and
-    /// `--no-notify` only once this process is silenced.
+    /// In a process of its own: the wait set by `--lock-wait` is read back and handed on, and `--no-notify` only once this process is silenced.
     #[test]
     fn the_forwarded_globals_are_what_this_process_was_given() {
         const MARK: &str = "rivet_forwarded_globals_child_marker";
@@ -714,21 +591,7 @@ mod forwarded_tests {
 mod foreign_counter_tests {
     use super::*;
 
-    /// The process boundary MUST still fold the child's retry counter — the
-    /// half of finding #4 that the fix could silently break by simply
-    /// deleting the fold from the renderer.
-    ///
-    /// The stdout reader thread needs a real spawned `rivet` child, so what is
-    /// pinned here is the decode-and-adopt seam the reader calls
-    /// ([`adopt_child_event`], its only call site) fed the exact wire bytes a
-    /// child writes — `serde_json::to_string(&ChildEvent)` is literally what
-    /// `ipc::emit` puts on stdout.
-    ///
-    /// TWO children, with different counts: the fold accumulates, so one
-    /// event cannot tell "added the child's count" from "assigned it".
-    ///
-    /// Mutant: drop the `add_transient_retries` call from
-    /// `adopt_child_event` → the counter does not move and `grew_by` is 0.
+    /// The process boundary MUST still fold the child's retry counter.
     #[test]
     fn a_child_processs_finished_line_folds_its_foreign_retry_counter() {
         let _serial = super::super::parent_ui::retry_counter_test_lock()
@@ -760,18 +623,13 @@ mod foreign_counter_tests {
             assert!(matches!(ev, ChildEvent::Finished { .. }));
         }
         let grew_by = crate::destination::transient_retries_total() - before;
-        // `>=` not `==`: `destination::cloud`'s interceptor test is outside
-        // this module's lock and adds 2. It cannot reach 7, so the mutant
-        // (growth 0..2) still goes RED.
         assert!(
             grew_by >= 7,
             "both children's foreign counters must be folded (grew by {grew_by}, want >= 7)"
         );
     }
 
-    /// One child's `Finished` lines each carry its CUMULATIVE process counter, so the
-    /// parent adds only the growth since that child's previous line: a CDC child
-    /// sends its snapshot leg's line (1000 so far) and then its export's (1500).
+    /// One child's `Finished` lines each carry its CUMULATIVE process counter, so the parent adds only the growth since that child's previous line.
     #[test]
     fn one_childs_cumulative_counter_is_folded_once_across_its_finished_lines() {
         let _serial = super::super::parent_ui::retry_counter_test_lock()
@@ -779,7 +637,6 @@ mod foreign_counter_tests {
             .unwrap_or_else(|p| p.into_inner());
         let before = crate::destination::transient_retries_total();
         let mut seen = 0;
-        // The third line is out of order: a value below one already seen adds nothing.
         for (name, cumulative) in [
             ("pg_cdc__snapshot_items", 1_000u64),
             ("pg_cdc", 1_500),
@@ -804,18 +661,13 @@ mod foreign_counter_tests {
         }
         assert_eq!(seen, 1_500, "the child's record is its highest value");
         let grew_by = crate::destination::transient_retries_total() - before;
-        // `destination::cloud`'s interceptor test adds 2 outside this lock.
         assert!(
             (1_500..1_550).contains(&grew_by),
             "the child's retries are its highest cumulative value, 1500 (grew by {grew_by})"
         );
     }
 
-    /// A line the child could not have written is rejected BEFORE the fold
-    /// (the `?` in `adopt_child_event`), so the reader keeps going and the
-    /// counter is untouched. Asserted on the return value rather than the
-    /// global counter — `destination::cloud`'s interceptor test runs outside
-    /// this lock, so an equality on a process-wide counter would flake.
+    /// A line the child could not have written is rejected BEFORE the fold (the `?` in `adopt_child_event`), so the reader keeps going and the counter is untouched.
     #[test]
     fn an_unparsable_line_is_rejected_before_the_fold() {
         let mut seen = 0;
@@ -832,8 +684,6 @@ mod exit_propagation_tests {
 
     #[test]
     fn worst_code_prefers_data_integrity_over_drift_and_generic() {
-        // Data-integrity (3) is the scariest even though 4 is numerically larger
-        // and 1 came first — a naive max(code) or first-wins would pick wrong.
         assert_eq!(worst_exit_code(&[1, 4, 3, 2]), Some(3));
         assert_eq!(worst_exit_code(&[1, 4, 2]), Some(4));
         assert_eq!(worst_exit_code(&[1, 2]), Some(2));
@@ -858,8 +708,6 @@ mod exit_propagation_tests {
 
     #[test]
     fn child_data_integrity_exit_3_is_not_downgraded_to_1() {
-        // The regression: a child that exited 3 (data-integrity) must make the
-        // PARENT classify to 3, not collapse to a generic 1.
         let failures = vec!["export 'a' exited with status 3".to_string()];
         let err = aggregate_child_result(&failures, &[3]).unwrap_err();
         assert_eq!(
@@ -980,11 +828,9 @@ mod tests {
     fn export_not_in_buffers_is_skipped() {
         let exp = make_export("users");
         let exports = vec![&exp];
-        // buffers has a *different* export
         let mut buffers = HashMap::new();
         buffers.insert("other".to_string(), vec!["line".to_string()]);
         let out = render_child_stderr(&exports, &buffers, &HashMap::new());
-        // "users" has no entry → no output (other is not in exports list)
         assert!(out.is_empty(), "unrelated export not rendered: {out:?}");
     }
 
@@ -1007,22 +853,14 @@ mod tests {
         let exp = make_export("events");
         let exports = vec![&exp];
         let mut buffers = HashMap::new();
-        // Export has an entry but it's empty.
         buffers.insert("events".to_string(), vec![]);
         let out = render_child_stderr(&exports, &buffers, &HashMap::new());
         assert!(out.is_empty(), "empty lines vec → no output: {out:?}");
     }
 
-    /// SEC V9 (CWE-150): a child stderr line carrying ANSI/OSC escape bytes is
-    /// sanitised by the capture thread (`sanitize_terminal`) before it lands in
-    /// the buffer, so the rendered block re-emitted to the operator's terminal
-    /// holds no raw terminal-control bytes. This mirrors the reader-thread
-    /// transform without spawning a real child.
+    /// SEC V9 (CWE-150): a child stderr line carrying ANSI/OSC escape bytes is sanitised by the capture thread (`sanitize_terminal`) before it lands in the buffer, so the rendered block re-emitted to the operator's terminal holds no raw terminal-control bytes.
     #[test]
     fn captured_child_stderr_escapes_stripped_before_render() {
-        // Scan decoded chars, not raw bytes: a byte scan would false-flag the
-        // UTF-8 continuation bytes (0x80..=0xBF) of the renderer's box-drawing
-        // glyph `──` (U+2500). Mirrors sanitize_terminal's char-based contract.
         let dangerous = |s: &str| -> Vec<char> {
             s.chars()
                 .filter(|&c| {
@@ -1037,7 +875,6 @@ mod tests {
         let exports = vec![&exp];
         let raw = "ERROR \u{1b}]0;pwned\u{07}\u{1b}[2Jboom";
         let mut buffers = HashMap::new();
-        // Capture thread applies `sanitize_terminal` to each line before push.
         buffers.insert("orders".to_string(), vec![sanitize_terminal(raw)]);
         let out = render_child_stderr(&exports, &buffers, &HashMap::new());
         assert!(
@@ -1052,35 +889,22 @@ mod tests {
 mod representative_tests {
     use super::{error_class, representative_error};
 
-    /// #197 (roast 2026-08-09): direct exact-string coverage of error_class, the
-    /// pure class-key masker. Each assertion pins a mutant the banner-level tests
-    /// couldn\'t (over-masking still collapses to one class): pure-letter words
-    /// KEPT (399 `&&`→`||` would mask them), the trailing run flushed (418
-    /// `delete !` would drop the last token), mid-token runs flushed at
-    /// separators (411 `delete !` would fuse tokens).
+    /// #197 (roast 2026-08-09): direct exact-string coverage of error_class, the pure class-key masker.
     #[test]
     fn error_class_masks_variable_tokens_exactly() {
-        // digit run → #; host-1 / host-10 are one class.
         assert_eq!(error_class("token for host-42"), "token for host-#");
-        // mixed alnum (random suffix / hex) → whole run to #.
         assert_eq!(
             error_class("dir /tmp/rivet-stage-aB3xQ9k: denied"),
             "dir /tmp/rivet-stage-#: denied"
         );
-        // pure-letter words are KEPT (399 `&&`→`||` masks them → RED).
         assert_eq!(error_class("plain words only"), "plain words only");
-        // trailing alnum run (no trailing separator) is flushed (418 `!` → RED,
-        // it would drop "here").
         assert_eq!(error_class("ends here"), "ends here");
-        // mid runs flush at each separator (411 `!` → RED, it would fuse to "ab").
         assert_eq!(error_class("a b"), "a b");
-        // whitespace normalized.
         assert_eq!(error_class("two   spaces"), "two spaces");
     }
 
     #[test]
     fn representative_collapses_a_common_mode_failure() {
-        // 70 children, same class (creds absent for different hosts) → ONE banner.
         let failed: Vec<(String, String)> = (0..70)
             .map(|i| {
                 (
@@ -1112,17 +936,11 @@ mod representative_tests {
         );
     }
 
-    /// #153 D2 (roast 2026-08-09): a per-child RANDOM ALPHANUMERIC token (a
-    /// staging-dir suffix, a hex id) must not defeat the common-mode banner —
-    /// the class key must collapse mixed alnum runs whole, not just digit runs.
-    /// RED against the digit-only class_of (which left aB#xQ#k per-child distinct).
+    /// #153 D2 (roast 2026-08-09): a per-child RANDOM ALPHANUMERIC token (a staging-dir suffix, a hex id) must not defeat the common-mode banner.
     #[test]
     fn representative_collapses_random_alphanumeric_suffixes() {
         let failed: Vec<(String, String)> = (0..40)
             .map(|i| {
-                // e.g. aB3xQ9k — LETTERS differ per child (not just digits), so
-                // digit-masking alone leaves distinct classes; only whole-run
-                // masking collapses them.
                 let a = (b'a' + (i % 20) as u8) as char;
                 let b = (b'A' + ((i * 3) % 20) as u8) as char;
                 let suffix = format!("{a}{i}x{b}{}k", i * 7 + 3);

@@ -1,35 +1,4 @@
 //! **Layer: Observability**
-//!
-//! Manifest-aware verification for `--validate` (ADR-0012 §M5 / §M6,
-//! constrained by the ADR-0013 trust-flag contract that says: no new flags;
-//! manifest-aware checks live under the existing `--validate`).
-//!
-//! Although this module reads from a `Destination` (technically L2 surface),
-//! it makes **no execution decisions**: it does not write data, advance
-//! cursors, mutate state, or change the pipeline path.  Its only output is
-//! a structured `ManifestVerification` verdict the run report renders.
-//! Per ADR-0003, that places it firmly in L4 Observability — the
-//! destination read surface is just the carrier.
-//!
-//! Inputs (read-only):
-//! - the destination's `manifest.json` body
-//! - the destination's `_SUCCESS` body, if present
-//! - the listing of every object under the destination prefix
-//!
-//! Outputs:
-//! - [`ManifestVerification`] — a structured verdict the run report renders
-//!   into the operator-facing "Verdicts" section.
-//!
-//! Out of scope here:
-//! - per-file row-count check (that runs *during* the export, against the
-//!   local temp file before upload — see `pipeline::validate::validate_output`).
-//! - source-side reconciliation (lives in [`pipeline::reconcile_cmd`] and
-//!   is what `--reconcile` adds on top of this).
-//! - re-fingerprinting parts (`--validate --deep`, future).
-//!
-//! Failure modes are explicit: each check produces a `Failure` enum variant
-//! that is rendered verbatim in `summary.json` so an Airflow / CI consumer
-//! can branch on the kind, not parse strings.
 
 use serde::{Deserialize, Serialize};
 
@@ -44,36 +13,10 @@ use crate::pipeline::manifest_reconcile::{PartPresence, reconcile_manifest_again
 
 pub(crate) use crate::manifest::MANIFEST_MAX_BYTES;
 
-/// Same V21/CWE-400 defense for the sibling control artifact `_SUCCESS`, read by
-/// the SAME `verify_at_destination` under the SAME destination-writable threat
-/// model but previously UNCAPPED. A legitimate marker is ~22 bytes
-/// (`xxh3:<16-hex>\n`); a body past this small cap is corrupt or planted, so it
-/// is treated as malformed WITHOUT materialising it into memory. 4 KiB is orders
-/// of magnitude above any real marker yet trivially bounded.
+/// Same V21/CWE-400 defense for the sibling control artifact `_SUCCESS`, read by the SAME `verify_at_destination` under the SAME destination-writable threat model but previously UNCAPPED.
 pub(crate) const SUCCESS_MARKER_MAX_BYTES: u64 = 4096;
 
-/// How deep a `rivet validate` pass goes — a graded verify layer over the
-/// same checks, letting an operator trade thoroughness for latency / cost.
-///
-/// The variants are a strict superset chain: `Light ⊂ Sample ⊂ Full`.  Each
-/// level runs every check the level below it does, plus more.  Defined here
-/// (the pipeline layer) and re-exported for the CLI grammar so the **same**
-/// enum gates the checks in [`verify_at_destination`] and parses on the
-/// `--depth` flag — no CLI→pipeline back-dependency.
-///
-/// - **Light**: manifest read + self-consistency + `_SUCCESS` only.  Skips the
-///   `list_prefix` reconcile (no per-part presence/size/checksum) and the
-///   untracked-surplus scan, leaving `parts_verified = 0`.  One `head` + one
-///   `read` of `manifest.json` and `_SUCCESS` — a fast "is this prefix a
-///   complete, marked run?" poll with no prefix listing.
-/// - **Sample**: everything Light does **plus** the part reconcile and
-///   untracked surplus (one `list_prefix`).  This is the pre-graded behaviour
-///   minus the Form B value re-read — full structural verification with no
-///   part downloads.
-/// - **Full** (default): everything Sample does **plus** the Form B value-
-///   checksum re-read (re-reads parts, re-derives per-column checksums).  The
-///   most thorough and the only level that downloads part bodies.  Equivalent
-///   to the pre-graded behaviour, so existing callers are unchanged.
+/// How deep a `rivet validate` pass goes — a graded verify layer over the same checks, letting an operator trade thoroughness for latency / cost.
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ValidateDepth {
     /// Manifest read + self-consistency + `_SUCCESS` only (no prefix listing).
@@ -86,26 +29,17 @@ pub enum ValidateDepth {
 }
 
 impl ValidateDepth {
-    /// True iff this level runs the `list_prefix` reconcile (part presence,
-    /// size, checksum) and the untracked-surplus scan — i.e. anything above
-    /// `Light`.  The single predicate the section-3/5 depth gating keys off.
+    /// True iff this level runs the `list_prefix` reconcile (part presence, size, checksum) and the untracked-surplus scan.
     fn runs_part_reconcile(self) -> bool {
         !matches!(self, ValidateDepth::Light)
     }
 
-    /// True iff this level downloads part *bodies* — the CDC `__pos` continuity
-    /// check and the Form-B value-checksum re-read, both `Full`-only (the
-    /// `part_reconcile` level above only reads listing metadata). The single
-    /// predicate the section-3/5 part-download gating keys off, parallel to
-    /// [`Self::runs_part_reconcile`] — so adding a depth level edits the enum,
-    /// not the call sites in `validate_cmd`.
+    /// True iff this level downloads part *bodies*.
     pub(crate) fn runs_part_download(self) -> bool {
         matches!(self, ValidateDepth::Full)
     }
 
-    /// Stable operator-/wire-facing label for the depth a verdict was produced
-    /// at, surfaced in `summary.json` (`depth_level`) and `rivet validate`
-    /// output.
+    /// Stable operator-/wire-facing label for the depth a verdict was produced at, surfaced in `summary.json` (`depth_level`) and `rivet validate` output.
     pub fn label(self) -> &'static str {
         match self {
             ValidateDepth::Light => "light",
@@ -115,23 +49,7 @@ impl ValidateDepth {
     }
 }
 
-/// Read `key` into memory only if its `head()`-reported size is within
-/// `max_bytes`; otherwise bail without reading a single byte.
-///
-/// The single enforcement point for the V21 (CWE-400) manifest-read cap shared
-/// by the three control-artifact readers (`--resume` M8 preamble, `--validate`,
-/// `rivet repair`).  Each previously did `head()` then an uncapped `read()`,
-/// discarding the size `head()` already returned; routing through here closes
-/// that gap in one place.
-///
-/// Behaviour:
-/// - object absent (`head` → `None`): `Err` — callers invoke this only after
-///   establishing the object exists, so an absent object here is a hard error,
-///   not the benign "no manifest / legacy prefix" case (which the callers
-///   detect with their own `head()` first).
-/// - oversized (`size_bytes > max_bytes`): `Err` naming the cap, **before** any
-///   body is materialised.
-/// - otherwise: the full body via [`Destination::read`].
+/// Read `key` into memory only if its `head()`-reported size is within `max_bytes`.
 pub(crate) fn read_capped(dest: &dyn Destination, key: &str, max_bytes: u64) -> Result<Vec<u8>> {
     match dest.head(key)? {
         None => crate::rivet_bail!(
@@ -153,61 +71,33 @@ pub(crate) fn read_capped(dest: &dyn Destination, key: &str, max_bytes: u64) -> 
 }
 
 /// Outcome of a single `--validate` pass over a destination prefix.
-///
-/// Stable enough to be embedded in `summary.json` directly (see
-/// `pipeline::report::ValidationOutcome`).  Forward-compat: consumers MUST
-/// ignore unknown fields (no `deny_unknown_fields`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestVerification {
     /// True iff a `manifest.json` was found at the destination and parsed.
-    /// `false` triggers ADR-0012 M6 fallback (legacy run); higher-level
-    /// check results below are then "skipped" rather than "passed".
     pub manifest_found: bool,
     /// Mirrors ADR-0012 M6's required `legacy_run` operator-facing label.
     pub legacy_run: bool,
-    /// Manifest parts whose presence and recorded `size_bytes` were
-    /// confirmed at the destination.  0 when no manifest was found.
+    /// Manifest parts whose presence and recorded `size_bytes` were confirmed at the destination.
     pub parts_verified: usize,
-    /// Subset of `parts_verified` whose **content** was confirmed via an MD5
-    /// the store surfaced in its listing (no download) — the rest are size-only.
-    /// Lets `passed: true` say how much of the dataset was content-checked
-    /// rather than implying all of it was.  `#[serde(default)]` for back-compat.
+    /// Subset of `parts_verified` whose **content** was confirmed via an MD5 the store surfaced in its listing (no download).
     #[serde(default)]
     pub parts_md5_verified: usize,
-    /// Manifest parts that were declared `committed` but not actually
-    /// present, present at a different size, or otherwise mismatched.
+    /// Manifest parts that were declared `committed` but not actually present, present at a different size, or otherwise mismatched.
     pub parts_failed: usize,
-    /// True iff `_SUCCESS` exists at the destination AND its body matches
-    /// the fingerprint of the bytes we read for `manifest.json`.  An
-    /// existing `_SUCCESS` whose body diverges from the manifest is itself
-    /// an integrity failure — surfaced via `failures`.
+    /// True iff `_SUCCESS` exists at the destination AND its body matches the fingerprint of the bytes we read for `manifest.json`.
     pub success_marker_consistent: bool,
-    /// Self-consistency of the manifest (`row_count`, `part_count`,
-    /// duplicate `part_id`s).  Skipped when `manifest_found = false`.
+    /// Self-consistency of the manifest (`row_count`, `part_count`, duplicate `part_id`s).
     pub manifest_self_consistent: bool,
-    /// Final verdict, **derived** (not hand-maintained) — `manifest_found` and
-    /// no *fatal* failure ([`Failure::is_fatal`]).  Stored so it stays in the
-    /// `summary.json` contract, but computed in one place
-    /// ([`ManifestVerification::recompute_passed`]) so a new failure variant is
-    /// fatal by default rather than relying on every site to flip a bool.
+    /// Final verdict, **derived** (not hand-maintained).
     pub passed: bool,
-    /// Per-failure detail.  May be non-empty with `passed = true` for advisory
-    /// (non-fatal) failures like [`Failure::UntrackedObject`].  Stable variant
-    /// set; new variants land under a new manifest version per ADR-0012.
+    /// Per-failure detail.
     pub failures: Vec<Failure>,
-    /// The graded depth this verdict was produced at: `"light"`, `"sample"`,
-    /// or `"full"` (see [`ValidateDepth`]).  Lets a consumer of `summary.json`
-    /// tell **how much** was actually checked — a `passed: true` at `"light"`
-    /// asserts far less than at `"full"` (no part presence was verified).
-    /// `#[serde(default)]` (→ `"full"`) for back-compat: pre-graded verdicts
-    /// always ran the full pass.
+    /// The graded depth this verdict was produced at: `"light"`, `"sample"`, or `"full"` (see [`ValidateDepth`]).
     #[serde(default = "default_depth_level")]
     pub depth_level: String,
 }
 
-/// `serde(default)` for [`ManifestVerification::depth_level`]: a verdict that
-/// predates the graded layer always ran the full pass, so an absent field
-/// deserializes to `"full"`.
+/// `serde(default)` for [`ManifestVerification::depth_level`].
 fn default_depth_level() -> String {
     ValidateDepth::Full.label().to_string()
 }
@@ -224,96 +114,54 @@ pub enum Failure {
         expected: u64,
         actual: u64,
     },
-    /// Part present at the recorded size but its content MD5 (from the store's
-    /// listing metadata) differs from the manifest's — transit / at-rest
-    /// corruption, caught with no download.
+    /// Part present at the recorded size but its content MD5 (from the store's listing metadata) differs from the manifest's.
     PartChecksumMismatch {
         part_id: u32,
         path: String,
         expected: String,
         actual: String,
     },
-    /// `--depth full` re-read the parts and a per-column VALUE checksum (Form B)
-    /// disagreed with the manifest — post-write corruption an MD5/size check
-    /// cannot see (a flipped bit inside a data page). Verified-wrong, so it fails
-    /// the verdict and classifies as data-integrity (exit 3), not could-not-verify.
+    /// `--depth full` re-read the parts and a per-column VALUE checksum (Form B) disagreed with the manifest.
     ValueChecksumMismatch { detail: String },
-    /// `--depth full` found a part whose DECLARED row count disagrees with the
-    /// rows the file holds. Distinct from a value mismatch on purpose: the bytes
-    /// may be perfectly intact and it is the manifest that is wrong, so an
-    /// operator told "value checksum" would go looking for corruption in the
-    /// data. Verified-wrong either way — every consumer that SUMS the declared
-    /// counts inherits the error.
+    /// `--depth full` found a part whose DECLARED row count disagrees with the rows the file holds.
     PartRowCountMismatch { detail: String },
-    /// `--depth full` re-read a CDC export's parts and the `__pos` continuity
-    /// check found a gap/duplicate in the change positions — the exported change
-    /// stream is incomplete or reordered. Verified-wrong (same class as a value
-    /// mismatch), so it fails the verdict and classifies as data-integrity (exit
-    /// 3), not could-not-verify (bughunt MED: it was folded into hard_failures →
-    /// exit 1, inconsistent with the value-checksum path).
+    /// `--depth full` re-read a CDC export's parts and the `__pos` continuity check found a gap/duplicate in the change positions.
     CdcPositionViolation { detail: String },
-    /// `_SUCCESS` exists but its body is malformed (not `xxh3:<16-hex>` after
-    /// trim).  ADR-0012 M2 — orchestrators rely on this format being strict.
+    /// `_SUCCESS` exists but its body is malformed (not `xxh3:<16-hex>` after trim).
     SuccessMarkerMalformed { body_preview: String },
     /// `_SUCCESS` body parsed but does not match `xxh3(manifest.json bytes)`.
-    /// Two legitimate sources: (a) someone overwrote `_SUCCESS` after the
-    /// manifest was rewritten — orchestrator bug; (b) the manifest was
-    /// edited in place after the run — operator bug.  Either way the
-    /// manifest is no longer trustworthy.
     SuccessMarkerStale {
         marker_fingerprint: String,
         manifest_fingerprint: String,
     },
     /// `RunManifest::validate_self_consistency` rejected the manifest.
-    /// Usually a writer bug (declared row_count != sum of committed parts'
-    /// rows); blocks the rest of the verification because the manifest
-    /// itself is unreliable.
     ManifestSelfInconsistent { detail: String },
     /// Reading `manifest.json` returned an I/O error other than "absent".
     ManifestReadError { detail: String },
     /// Reading `_SUCCESS` returned an I/O error other than "absent".
     SuccessMarkerReadError { detail: String },
-    /// Listing the destination prefix returned an I/O error.  Reduces the
-    /// untracked-parts check (M5 surplus) to a no-op for this run.
+    /// Listing the destination prefix returned an I/O error.
     ListPrefixError { detail: String },
-    /// A file is present at the destination prefix but no manifest entry
-    /// references it.  M9-adjacent: `--validate` only flags it; quarantine
-    /// belongs to `--resume`.
+    /// A file is present at the destination prefix but no manifest entry references it.
     UntrackedObject { key: String, size_bytes: u64 },
-    /// The export declared `verify: content` but some parts could only be
-    /// size-verified (no comparable content checksum from the store) — the
-    /// declared integrity contract was not met.
+    /// The export declared `verify: content` but some parts could only be size-verified (no comparable content checksum from the store).
     ContentVerificationUnmet { size_only: usize, total: usize },
-    /// A manifest was *required* at this prefix (the operator pinned a literal
-    /// `--prefix`, asserting a real dataset lives here) but none was found.
-    /// Without this, an absent manifest at an operator-pinned prefix maps to
-    /// the M6 legacy-run label and exits 0 — indistinguishable from a verified
-    /// run, so a CI gate `rivet validate && deploy` sails past a destination
-    /// that was never written.  Fatal: a required-but-missing manifest is a
-    /// refusal reason, not a "cannot certify" advisory.
+    /// A manifest was *required* at this prefix (the operator pinned a literal `--prefix`, asserting a real dataset lives here) but none was found.
     ManifestRequiredButAbsent { prefix: String },
-    /// A `partition_by` partition the source holds rows for has no manifest at its prefix: every delivered partition, empty days included, carries one, so the partition was never delivered or was removed.
+    /// A `partition_by` partition the source holds rows for has no manifest at its prefix.
     PartitionNotDelivered { prefix: String, export: String },
-    /// The state records a successful run of `export` at this prefix and the destination holds no manifest and no `_SUCCESS` there: the delivery was removed or the destination moved.
+    /// The state records a successful run of `export` at this prefix and the destination holds no manifest and no `_SUCCESS` there.
     RecordedDeliveryAbsent { prefix: String, export: String },
-    /// `_SUCCESS` is present and the manifest it was written after is not: rivet writes the marker only once the manifest is in place, so this prefix lost its manifest and its parts cannot be verified.
+    /// `_SUCCESS` is present and the manifest it was written after is not.
     ManifestMissingUnderMarker { prefix: String },
-    /// The manifest's own run status is not `success` (`failed`, `interrupted`,
-    /// `running`): the prefix does not hold a completed export, whatever its parts say.
+    /// The manifest's own run status is not `success` (`failed`, `interrupted`, `running`).
     RunNotSuccessful { status: String },
-    /// Advisory: `--depth full` re-counted this CSV export's rows per part, but
-    /// CSV parts carry no value checksum, so no cell values were re-read.
+    /// Advisory: `--depth full` re-counted this CSV export's rows per part.
     ValueCheckNotAvailable { format: String },
 }
 
 impl Failure {
     /// Whether this failure invalidates the dataset (flips `passed` to false).
-    ///
-    /// Every variant is fatal **except** [`Failure::UntrackedObject`]: surplus
-    /// objects are an audit signal whose cleanup is `--resume`'s job (ADR-0012
-    /// M9), not a corruption of the manifest-listed parts.  New variants are
-    /// fatal by default — opt out here explicitly, so a forgotten case fails
-    /// closed (safe) rather than silently passing.
     pub fn is_fatal(&self) -> bool {
         !matches!(
             self,
@@ -321,16 +169,7 @@ impl Failure {
         )
     }
 
-    /// Whether this failure is COULD-NOT-VERIFY (an operational I/O error that
-    /// prevented the check) rather than VERIFIED-WRONG (the check ran and found
-    /// the data bad). Could-not-verify is the operational class — exit 1, retry —
-    /// NOT the data-integrity stop-the-line class (exit 3). A read/list error
-    /// against a healthy prefix (a chmod-000 manifest, a transient S3 list blip)
-    /// must not page a corruption incident (#7 bughunt: these fell into the
-    /// verdict and drove exit 3). Fatal-by-omission the other way: a NEW variant
-    /// is verified-wrong (exit 3) unless it is explicitly an I/O could-not-verify.
-    /// A non-success run status is operational too (exit 1): the fix is re-running
-    /// the export, not a corruption hunt.
+    /// Whether this failure is COULD-NOT-VERIFY (an operational I/O error that prevented the check) rather than VERIFIED-WRONG (the check ran and found the data bad).
     pub fn is_could_not_verify(&self) -> bool {
         matches!(
             self,
@@ -342,13 +181,6 @@ impl Failure {
     }
 
     /// Stable `RIVET_VERIFY_*` error code for this failure variant.
-    ///
-    /// One code per variant, intended for orchestrators / CI to branch on
-    /// without parsing the human `Display` string or the per-variant JSON
-    /// fields.  The code is part of the wire contract: it is emitted next to
-    /// `kind` in the JSON report and prefixed in brackets on each pretty line.
-    /// Codes are append-only — never renamed once shipped (a renamed code is a
-    /// silent break for any consumer keying off it).
     pub fn error_code(&self) -> &'static str {
         match self {
             Failure::PartMissing { .. } => "RIVET_VERIFY_PART_MISSING",
@@ -376,14 +208,7 @@ impl Failure {
 }
 
 impl std::fmt::Display for Failure {
-    /// One operator-facing line per failure variant.  Used by:
-    /// - `pipeline::report::render_markdown` (summary.md "failure:" lines)
-    /// - `pipeline::validate_cmd::render_pretty` (`rivet validate` stdout)
-    /// - any future consumer that wants a human-readable failure label
-    ///
-    /// The wire format (`failures[].kind` + per-variant fields) lives in
-    /// the `Serialize` derive above and is the contract Airflow / CI
-    /// consumers branch on.  This `Display` impl is for humans only.
+    /// One operator-facing line per failure variant.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Failure::PartMissing { part_id, path } => {
@@ -497,10 +322,7 @@ impl std::fmt::Display for Failure {
 }
 
 impl ManifestVerification {
-    /// Base verdict: nothing checked yet (no manifest, all counts zero, all
-    /// sub-checks false, `passed = false`).  Every constructor builds on this
-    /// and overrides only what differs, so a new field lands in **one** place
-    /// rather than several near-identical literals.
+    /// Base verdict: nothing checked yet (no manifest, all counts zero, all sub-checks false, `passed = false`).
     fn empty() -> Self {
         Self {
             manifest_found: false,
@@ -512,25 +334,16 @@ impl ManifestVerification {
             manifest_self_consistent: false,
             passed: false,
             failures: Vec::new(),
-            // Base level; `verify_at_destination` overwrites this with the
-            // depth it was actually called at before returning any verdict.
             depth_level: default_depth_level(),
         }
     }
 
-    /// Recompute `passed` from the verdict's facts: a manifest was found and no
-    /// **fatal** failure was recorded (advisory failures like `UntrackedObject`
-    /// don't count).  The single source of truth — callers set failures and
-    /// call this once, rather than flipping `passed` by hand at every site.
+    /// Recompute `passed` from the verdict's facts.
     fn recompute_passed(&mut self) {
         self.passed = self.manifest_found && !self.failures.iter().any(Failure::is_fatal);
     }
 
-    /// Apply the export's `verify` policy (ADR-0013 / review D).  When content
-    /// verification is required but some parts were only size-verified, record
-    /// a fatal [`Failure::ContentVerificationUnmet`] and re-derive `passed`.
-    /// Policy lives here (one place); the composers — run finalize and the
-    /// `rivet validate` command — just call it with their export's intent.
+    /// Apply the export's `verify` policy (ADR-0013 / review D).
     pub fn enforce_content_policy(&mut self, require_content: bool) {
         if require_content && self.manifest_found {
             let size_only = self.parts_verified.saturating_sub(self.parts_md5_verified);
@@ -544,18 +357,7 @@ impl ManifestVerification {
         }
     }
 
-    /// Apply the "a manifest must exist here" policy (finding #20).  When the
-    /// operator pinned a literal `--prefix`, an absent manifest is no longer the
-    /// benign M6 legacy-run case — it almost always means the prefix was never
-    /// written (a misconfigured CI gate). Convert that exact verdict — no
-    /// manifest, no other failure (i.e. the [`ManifestVerification::legacy`]
-    /// shape) — into a fatal [`Failure::ManifestRequiredButAbsent`] so the exit
-    /// gate refuses it loudly instead of silently passing.
-    ///
-    /// Deliberately a no-op for every other shape: a real manifest (passed or
-    /// failed), or an absent manifest that already carries a `ManifestReadError`
-    /// / head failure, is left untouched — those are already classified.  Only
-    /// the "legacy / cannot certify" case is escalated, and only when required.
+    /// Apply the "a manifest must exist here" policy (finding #20).
     pub fn require_manifest_present(&mut self, prefix: &str) {
         self.require_manifest_with(Failure::ManifestRequiredButAbsent {
             prefix: prefix.to_string(),
@@ -592,67 +394,26 @@ impl ManifestVerification {
         }
     }
 
-    /// Construct the M6 (legacy run) verdict for a destination that has no
-    /// manifest at all.  Caller composes this with the existing per-file
-    /// row-count check; together they form the legacy `--validate` result.
+    /// Construct the M6 (legacy run) verdict for a destination that has no manifest at all.
     pub fn legacy() -> Self {
-        // `passed = false` is intentional — not "validation failed" but "this
-        // verifier cannot certify"; the caller layers per-file row counts on
-        // top and composes the final verdict.
         Self {
             legacy_run: true,
             ..Self::empty()
         }
     }
 
-    /// True iff this verification surfaced any explicit failure (i.e. a
-    /// reason an orchestrator should refuse the run).  Distinct from
-    /// `!passed`, which can also mean "legacy / not applicable".
+    /// True iff this verification surfaced any explicit failure (i.e.
     pub fn has_failures(&self) -> bool {
         !self.failures.is_empty()
     }
 
-    /// Whether any recorded failure is VERIFIED-WRONG (the check ran and the data
-    /// is bad) as opposed to purely COULD-NOT-VERIFY (an I/O read/list error).
-    /// Drives the exit CLASS: a verdict with a verified-wrong failure is
-    /// data-integrity (exit 3); a verdict whose failures are ALL could-not-verify
-    /// is operational (exit 1). See [`Failure::is_could_not_verify`].
+    /// Whether any recorded failure is VERIFIED-WRONG (the check ran and the data is bad) as opposed to purely COULD-NOT-VERIFY (an I/O read/list error).
     pub fn has_verified_wrong_failure(&self) -> bool {
         self.failures.iter().any(|f| !f.is_could_not_verify())
     }
 }
 
-/// Run the manifest-aware verification at `manifest_dir` (the destination-
-/// relative directory containing `manifest.json` and `_SUCCESS`).
-///
-/// `manifest_dir` is the same key shape `Destination::write` was called with
-/// for the manifest itself — typically empty (`""`) for prefix-rooted runs,
-/// or the per-export sub-directory.  Trailing `/` is optional.
-///
-/// This function does not panic on any expected I/O outcome — every read
-/// failure becomes a `Failure::*ReadError` so the caller can render a
-/// useful message instead of bailing.
-///
-/// `depth` selects the graded verify layer (see [`ValidateDepth`]):
-/// - [`ValidateDepth::Light`] skips section 3 (the `list_prefix` part
-///   reconcile) and section 5 (untracked surplus), leaving `parts_verified`
-///   at 0 — a fast manifest + `_SUCCESS` poll with no prefix listing.
-/// - [`ValidateDepth::Sample`] and [`ValidateDepth::Full`] run all five
-///   sections here.  The Form B value re-read is **not** in this function;
-///   it is the caller's concern (`run_validate_command`), gated on `Full`.
-///
-/// Regardless of depth, `depth_level` on the returned verdict records the
-/// level this pass ran at.
-/// Read every run-unique manifest COPY (`manifest-<run_id>.json`) named in the
-/// prefix listing, keyed by the storage key it was read from (what
-/// [`ManifestCensus`] enumerates runs by). Best-effort: a copy that fails to read
-/// or parse is skipped — the untracked scan it feeds is advisory, so a bad sibling
-/// copy must never turn validate into an error (worst case a part it would have
-/// claimed stays flagged, the pre-#167 behaviour). The canonical `manifest.json`
-/// is not a copy and is excluded (it is already the primary manifest).
-///
-/// This is validate's I/O half; every question ASKED of the copies — which of them
-/// are this family's split units, which parts they claim — is the census's.
+/// Run the manifest-aware verification at `manifest_dir` (the destination- relative directory containing `manifest.json` and `_SUCCESS`).
 fn read_sibling_manifests(
     dest: &dyn Destination,
     listing: &[ObjectMeta],
@@ -671,17 +432,7 @@ fn read_sibling_manifests(
     out
 }
 
-/// A working manifest whose `parts` are the UNION of `canonical`'s parts and every
-/// `Committed` part declared by a SAME-FAMILY **split unit** under the prefix, deduped by
-/// declared path. The reconcile target for a `--pool --split` prefix: presence/size/md5 then
-/// cover EVERY unit, not just the last writer whose parts the canonical `manifest.json`
-/// happens to list (#167 merge-back).
-///
-/// WHICH copies are units is [`ManifestCensus::split_units`]'s answer, not validate's — a
-/// plain export's HISTORICAL repeated-run copies share the family but are SUPERSEDED
-/// snapshots, and presence-checking a legitimately cleaned old part would false-fail. The
-/// canonical's own copy is among them, so seeding `seen` with the canonical's parts keeps it
-/// from being added twice. Only `parts` differ from `canonical`.
+/// A working manifest whose `parts` are the UNION of `canonical`'s parts and every `Committed` part declared by a SAME-FAMILY **split unit** under the prefix, deduped by declared path.
 fn merge_split_unit_parts(
     canonical: &RunManifest,
     census: &ManifestCensus<'_>,
@@ -697,32 +448,6 @@ fn merge_split_unit_parts(
             }
         }
     }
-    // A canonical declaring ZERO parts supersedes NOTHING, so the supersession
-    // argument above does not apply to it and its same-family copies must be folded.
-    //
-    // This is the CDC steady state, not an edge: an `until_current` cycle that finds
-    // no changes writes a `Success` manifest with `parts: []` over the canonical
-    // pointer — and for most tables of a `tables:` multiplex that is most cycles.
-    // MEASURED: a run captured 3 changes and `validate --depth full` verified 1
-    // part; ONE idle cycle later the same command reported `PASSED, 0 parts
-    // verified`, then still PASSED after the parquet was overwritten with junk, and
-    // again after it was DELETED — with the copy declaring it sitting unread beside
-    // it. Every field printed was internally consistent; nothing said that "0 parts
-    // verified" was a statement about the manifest rather than about the prefix.
-    //
-    // Widened to CDC canonicals whatever their part count (round-7 HIGH,
-    // measured): a CDC prefix ACCUMULATES — the dataset consumers read is the
-    // UNION of the run-unique copies, so with a non-empty canonical every
-    // HISTORICAL cycle's parts were absent from the presence check (and
-    // census-subtracted from the untracked sweep): deleting a prior cycle's
-    // part validated `PASSED, exit 0`. The batch rationale (historical copies
-    // are superseded snapshots; presence-checking a cleaned old part would
-    // false-fail) is exactly why this stays NARROW: `mode == "cdc"` or an
-    // empty canonical, never a plain export's history.
-    //
-    // Success-only (round-7 sibling find): a Failed/Interrupted copy's parts
-    // are terminal debris `gc_orphans` legitimately deletes — folding them
-    // armed a false PartMissing stop-the-line after a documented gc pass.
     if (merged.parts.is_empty() || canonical.mode == "cdc") && !canonical.export_family.is_empty() {
         for run in census.runs() {
             if run.family() != canonical.export_family {
@@ -731,16 +456,6 @@ fn merge_split_unit_parts(
             if run.manifest.status != crate::manifest::ManifestStatus::Success {
                 continue;
             }
-            // A copy living in a SUB-directory (`snapshot/manifest-*.json`) is a
-            // separately-certified sub-dataset whose parts[].path are relative
-            // to ITS OWN directory — folding them here resolved
-            // `snapshot/x.parquet` at the TABLE root and false-failed every
-            // intact `initial: snapshot` prefix with PART_MISSING exit 3
-            // (round-8 lifecycle, reproduced). The sibling consumer
-            // check_positions carries the same exclusion, INCLUDING its
-            // whole-key trap: `list_prefix` returns FULL keys, so the test
-            // must be RELATIVE to this prefix or it skips every copy and the
-            // fold silently dies.
             let rel = run
                 .key
                 .strip_prefix(manifest_dir)
@@ -767,26 +482,13 @@ pub fn verify_at_destination(
     let manifest_key = join_key(manifest_dir, MANIFEST_FILENAME);
     let success_key = join_key(manifest_dir, SUCCESS_FILENAME);
 
-    // Stamp the depth this pass ran at onto every verdict before it leaves the
-    // function — including the early-return error/legacy shapes — so a consumer
-    // always sees *how much* was checked.  Each `return Ok(v)` below routes
-    // through `with_depth` (or sets `out.depth_level` for the main path).
     let with_depth = |mut v: ManifestVerification| -> ManifestVerification {
         v.depth_level = depth.label().to_string();
         v
     };
 
-    // ── 1. Manifest read ───────────────────────────────────────────────
-    //
-    // Error-consistency contract: every I/O outcome here surfaces as a
-    // structured `Failure` variant rather than as `Err`.  An operator gets
-    // one verdict shape regardless of whether the destination is missing,
-    // permission-denied, or temporarily unreachable.  The bubbled `Err`
-    // path is reserved for *programmer* errors (caller passes a malformed
-    // `manifest_dir`, a future destination breaks an internal invariant).
     let manifest_bytes = match dest.head(&manifest_key) {
         Ok(None) => {
-            // No manifest is the legacy shape only while there is no marker either.
             let mut v = ManifestVerification::legacy();
             let orphan_marker = match dest.head(&success_key) {
                 Ok(None) => None,
@@ -817,10 +519,6 @@ pub fn verify_at_destination(
             }
         },
         Err(e) => {
-            // `head` failure is symmetric to a `read` failure — same kind
-            // (`ManifestReadError`) so consumers don't have to branch on
-            // which method tripped.  Distinct from "manifest absent"
-            // (Ok(None) above) which legitimately means "legacy prefix".
             let mut v = ManifestVerification::legacy();
             v.legacy_run = false;
             v.failures.push(Failure::ManifestReadError {
@@ -834,10 +532,6 @@ pub fn verify_at_destination(
     let manifest: RunManifest = match serde_json::from_slice(&manifest_bytes) {
         Ok(m) => m,
         Err(e) => {
-            // A malformed manifest is treated as a self-inconsistency —
-            // semantically equivalent for the operator (the manifest can't
-            // be trusted) but kept distinct in `failures` so the kind is
-            // explicit on the wire.
             return Ok(with_depth(ManifestVerification {
                 manifest_found: true,
                 failures: vec![Failure::ManifestSelfInconsistent {
@@ -848,10 +542,6 @@ pub fn verify_at_destination(
         }
     };
 
-    // Optimistic base: a found, self-consistent manifest that passes until a
-    // check below flips it.  Overrides only what differs from `empty()`.
-    // Stamp the depth here so the two early `return Ok(out)` paths in section
-    // 4 (success-marker head error, non-utf8 body) carry the right level too.
     let mut out = ManifestVerification {
         manifest_found: true,
         manifest_self_consistent: true,
@@ -860,15 +550,11 @@ pub fn verify_at_destination(
         ..ManifestVerification::empty()
     };
 
-    // ── 2. Self-consistency ─────────────────────────────────────────────
     if let Err(e) = manifest.validate_self_consistency() {
         out.manifest_self_consistent = false;
         out.failures.push(Failure::ManifestSelfInconsistent {
             detail: format!("{e}"),
         });
-        // Don't short-circuit — we still want to surface part-presence
-        // failures because the operator may want to know both classes at
-        // once rather than fix-then-rerun.
     }
     if manifest.status != crate::manifest::ManifestStatus::Success {
         let status = serde_json::to_value(manifest.status)?;
@@ -877,39 +563,9 @@ pub fn verify_at_destination(
         });
     }
 
-    // ── 3. Reconcile parts + surplus against ONE prefix listing ────────
-    //
-    // Presence and untracked-surplus both fall out of a single
-    // `reconcile_manifest_against_listing` over one `list_prefix` — the same
-    // pure walk chunked resume uses (`build_resume_plan`).  This replaces the
-    // old per-part `HEAD` loop (N round-trips) and its separate untracked
-    // listing.  Per-part failures are emitted here (step 3); untracked is
-    // emitted at step 5 so the failure ordering an operator reads is stable.
-    //
-    // Trade-off: presence now rides the listing, not per-part `HEAD`.  If the
-    // listing cannot be read, an audit cannot certify the parts — so a list
-    // failure flips `passed = false` (a `ListPrefixError`), rather than the
-    // old behaviour where per-part HEAD still "verified" parts a failed
-    // listing couldn't enumerate.  Every Rivet destination backend offers
-    // strong read-after-write list consistency, so the happy path is one call.
-    //
-    // Graded depth: `Light` skips this `list_prefix` entirely — no part
-    // reconcile, no `ListPrefixError`, `parts_verified` stays 0, and section 5
-    // (untracked) is a no-op since `reconciliation` is `None`.  `Sample` and
-    // `Full` run it.  A `Light` pass therefore certifies only that the
-    // manifest reads, is self-consistent, and `_SUCCESS` matches — never that
-    // the parts are physically present.
     let reconciliation = if depth.runs_part_reconcile() {
         match dest.list_prefix(manifest_dir) {
             Ok(listing) => {
-                // #167: a `--pool --split` prefix holds N run-unique manifest copies of ONE
-                // family, each declaring a DISJOINT set of parts. The canonical `manifest.json`
-                // lists only the LAST writer's parts, so reconciling the canonical alone
-                // presence/size/md5-checked ONLY the last unit — a missing/corrupt part of any
-                // OTHER split unit was invisible (no PartMissing: not in the canonical list; no
-                // UntrackedObject: not on disk), and the trust oracle silently PASSED an
-                // incomplete split (adjacent-bughunt finding, HIGH). Fold every SAME-FAMILY
-                // SPLIT-UNIT sibling's parts into the reconcile target so each unit is checked.
                 let siblings = if manifest.export_family.is_empty() {
                     Vec::new()
                 } else {
@@ -918,11 +574,6 @@ pub fn verify_at_destination(
                 let census = ManifestCensus::new(&siblings);
                 let target = merge_split_unit_parts(&manifest, &census, manifest_dir);
                 let mut rec = reconcile_manifest_against_listing(&target, &listing, manifest_dir);
-                // Same-family sibling parts — the folded split units AND a plain export's
-                // SUPERSEDED historical / CDC-soak copies (no split_window, so NOT folded
-                // above) — are declared by their own copies elsewhere in the prefix, so they
-                // must not read as untracked surplus (noise that also MASKS a real orphan). A
-                // foreign family's parts are never claimed, so cross-contamination still shows.
                 if !rec.untracked.is_empty() && !manifest.export_family.is_empty() {
                     let claimed = census.claimed_parts(&manifest.export_family, manifest_dir);
                     rec.untracked.retain(|o| !claimed.contains(&o.key));
@@ -977,12 +628,6 @@ pub fn verify_at_destination(
         }
     }
 
-    // ── 4. _SUCCESS marker consistency ─────────────────────────────────
-    //
-    // Same error-consistency contract as step 1: head/read failures become
-    // `Failure::SuccessMarkerReadError`, not bubbled `Err`.  Absent marker
-    // (Ok(None)) stays informational, not a failure (M2: only successful
-    // runs land _SUCCESS, so its absence on a failed manifest is correct).
     let success_head = match dest.head(&success_key) {
         Ok(h) => h,
         Err(e) => {
@@ -994,18 +639,8 @@ pub fn verify_at_destination(
         }
     };
     match success_head {
-        None => {
-            // Absent _SUCCESS is informational, not a failure: per ADR-0012
-            // M2, only successful runs land it.  A failed-then-rewritten
-            // manifest legitimately lacks _SUCCESS.  Leave
-            // `success_marker_consistent = false` (this is a "no signal"
-            // bool, not a "broken" bool) and let the caller decide.
-        }
+        None => {}
         Some(head) if head.size_bytes > SUCCESS_MARKER_MAX_BYTES => {
-            // Refuse to materialise an oversized _SUCCESS: a bare uncapped
-            // dest.read of a multi-GB planted marker OOMs the validate/resume/repair
-            // process (the asymmetry with step 1's manifest.json cap this closes).
-            // success_head already carries the size — no extra round-trip.
             out.failures.push(Failure::SuccessMarkerMalformed {
                 body_preview: format!(
                     "(oversized: {} bytes exceeds the {SUCCESS_MARKER_MAX_BYTES}-byte _SUCCESS cap; not read)",
@@ -1040,9 +675,6 @@ pub fn verify_at_destination(
                     }
                     Some(marker_fp) => {
                         let manifest_fp = success_marker_body(&manifest_bytes);
-                        // success_marker_body returns the trailing `\n`
-                        // form; trim before comparing to the parsed marker
-                        // (which already trims).
                         let manifest_fp_trimmed = manifest_fp.trim_end_matches('\n');
                         if marker_fp == manifest_fp_trimmed {
                             out.success_marker_consistent = true;
@@ -1058,12 +690,6 @@ pub fn verify_at_destination(
         },
     }
 
-    // ── 5. Untracked surplus ───────────────────────────────────────────
-    //
-    // Already computed by the step-3 reconciliation (sidecars, quarantine,
-    // and the doctor probe are filtered there).  Emit it last so the failure
-    // ordering stays parts → marker → untracked.  A list failure left
-    // `reconciliation = None` and already flipped `passed` above.
     if let Some(rec) = reconciliation {
         for obj in rec.untracked {
             out.failures.push(Failure::UntrackedObject {
@@ -1197,8 +823,6 @@ mod tests {
         }
     }
 
-    // ── #167 merge-back: reconcile the UNION of same-family split-unit parts ──
-
     fn split_win() -> crate::manifest::SplitWindow {
         crate::manifest::SplitWindow {
             key_column: "id".into(),
@@ -1212,21 +836,7 @@ mod tests {
         (crate::manifest::run_unique_manifest_name(&m.export_name), m)
     }
 
-    /// merge_split_unit_parts folds every SAME-FAMILY SPLIT-UNIT sibling's committed parts
-    /// into the reconcile target, and EXCLUDES both a FOREIGN family's parts and a
-    /// SAME-FAMILY non-split (plain, superseded) copy's parts — so a `--pool --split`
-    /// snapshot is checked across ALL units without false-checking a plain export's
-    /// historical run or a foreign export sharing the prefix. WHICH copies are units is the
-    /// census's classification (`ManifestCensus::split_units`); this pins how validate turns
-    /// that answer into the presence-check target.
-    /// The ZERO-PARTS fold, and each condition that gates it.
-    ///
-    /// A canonical declaring no parts supersedes nothing, so its same-family copies
-    /// ARE the prefix's description — this is the CDC steady state (an idle
-    /// `until_current` cycle writes `parts: []` over the pointer). Four mutants
-    /// survived here until now: dropping the `!` on the family check, flipping the
-    /// family comparison, flipping the `Committed` status test, and turning its `&&`
-    /// into `||`. Each is asserted below by the case that distinguishes it.
+    /// merge_split_unit_parts folds every SAME-FAMILY SPLIT-UNIT sibling's committed parts into the reconcile target, and EXCLUDES both a FOREIGN family's parts and a SAME-FAMILY non-split (plain, superseded) copy's parts.
     #[test]
     fn a_zero_part_canonical_folds_its_family_and_nothing_else() {
         let unit = |name: &str, path: &str, fam: &str, st: PartStatus| {
@@ -1243,15 +853,12 @@ mod tests {
 
         let siblings = vec![
             unit("daily", "mine_ok.parquet", "daily", PartStatus::Committed),
-            // Same family, NOT committed — a part in flight is not delivered data.
             unit(
                 "daily",
                 "mine_pending.parquet",
                 "daily",
                 PartStatus::Quarantined,
             ),
-            // Foreign family — never claimed, or one export's prefix would answer
-            // for another's.
             unit("other", "foreign.parquet", "other", PartStatus::Committed),
         ];
         let merged = merge_split_unit_parts(&canonical, &ManifestCensus::new(&siblings), "");
@@ -1265,9 +872,6 @@ mod tests {
              all means the zero-parts fold never ran: {paths:?}"
         );
 
-        // A canonical with NO family must not fold anything — there is nothing to
-        // match on, and matching everything would let a foreign export's parts
-        // describe this prefix.
         let mut familyless = canonical.clone();
         familyless.export_family = String::new();
         assert!(
@@ -1289,13 +893,13 @@ mod tests {
             m.split_window = if split { Some(split_win()) } else { None };
             sib_keyed(m)
         };
-        let canonical = unit("daily#3", "daily#3_p.parquet", "daily", true).1; // last split writer
+        let canonical = unit("daily#3", "daily#3_p.parquet", "daily", true).1;
         let siblings = vec![
             unit("daily#0", "daily#0_p.parquet", "daily", true),
             unit("daily#1", "daily#1_p.parquet", "daily", true),
-            unit("daily#3", "daily#3_p.parquet", "daily", true), // canonical's OWN copy
-            unit("daily", "daily_old.parquet", "daily", false),  // SAME family, PLAIN (superseded)
-            unit("other#0", "other_p.parquet", "other", true),   // FOREIGN family
+            unit("daily#3", "daily#3_p.parquet", "daily", true),
+            unit("daily", "daily_old.parquet", "daily", false),
+            unit("other#0", "other_p.parquet", "other", true),
         ];
         let merged = merge_split_unit_parts(&canonical, &ManifestCensus::new(&siblings), "");
         let paths: std::collections::BTreeSet<&str> =
@@ -1323,8 +927,7 @@ mod tests {
         );
     }
 
-    /// A non-committed (quarantined) split-unit sibling part is NOT merged — only durable
-    /// committed parts belong to the dataset the reconcile checks for presence.
+    /// A non-committed (quarantined) split-unit sibling part is NOT merged.
     #[test]
     fn merge_split_unit_parts_skips_non_committed_siblings() {
         let mut canonical = build_manifest(vec![part(0, 10, 100, "fp")], ManifestStatus::Success);
@@ -1350,22 +953,12 @@ mod tests {
         );
     }
 
-    // The claimed-part set validate subtracts from its untracked scan is the census's
-    // (`ManifestCensus::claimed_parts`) — same-family only, committed only, nothing under an
-    // empty family. Its unit tests live beside it, in `manifest::census`; the end-to-end
-    // section below still pins that VALIDATE subtracts it.
-
-    /// End-to-end: a `--pool --split` prefix where a NON-last unit's part is missing must
-    /// FAIL validation. Before the merge-back fix, verify reconciled only the canonical
-    /// (last writer's) parts, so a lost part of any other unit was invisible — no PartMissing
-    /// (not in the canonical list) and no UntrackedObject (not on disk) — and the trust
-    /// oracle silently PASSED an incomplete split (adjacent-bughunt finding, HIGH).
+    /// End-to-end: a `--pool --split` prefix where a NON-last unit's part is missing must FAIL validation.
     #[test]
     fn verify_over_a_split_prefix_catches_a_missing_non_last_unit_part() {
         use crate::manifest::run_unique_manifest_name;
         let dir = tempfile::tempdir().unwrap();
 
-        // Two split units of family "orders": #0 (run r0) and #1 (run r1 = LAST → canonical).
         let mut u0 = build_manifest(
             vec![part(0, 10, 4, "xxh3:0000000000000000")],
             ManifestStatus::Success,
@@ -1394,7 +987,6 @@ mod tests {
             hi: None,
         });
 
-        // Both units' run-unique copies on disk; canonical manifest.json = u1 (last writer).
         std::fs::write(
             dir.path().join(run_unique_manifest_name("r0")),
             serde_json::to_vec(&u0).unwrap(),
@@ -1408,7 +1000,6 @@ mod tests {
             success_marker_body(&u1_body),
         )
         .unwrap();
-        // u1's part present (5 bytes = its declared size); u0's part DELIBERATELY MISSING.
         std::fs::write(dir.path().join("orders#1-part.parquet"), b"BBBBB").unwrap();
 
         let dest = local_dest(dir.path());
@@ -1425,8 +1016,6 @@ mod tests {
             v.failures
         );
     }
-
-    // ── happy path ───────────────────────────────────────────────────────
 
     #[test]
     fn happy_path_verifies_all_parts_and_success_marker() {
@@ -1459,9 +1048,7 @@ mod tests {
         assert!(v.failures.is_empty());
     }
 
-    // ── M6 legacy run ───────────────────────────────────────────────────
-
-    /// A marker with no manifest is a prefix that lost its manifest: a verified-wrong failure, not the legacy label; with the marker gone too it is the legacy shape again.
+    /// A marker with no manifest is a prefix that lost its manifest.
     #[test]
     fn a_success_marker_without_a_manifest_is_not_a_legacy_run() {
         let dir = tempfile::tempdir().unwrap();
@@ -1486,7 +1073,6 @@ mod tests {
 
     #[test]
     fn no_manifest_returns_legacy_run_label() {
-        // Empty prefix — no manifest, no parts.
         let dir = tempfile::tempdir().unwrap();
         let dest = local_dest(dir.path());
         let v = verify_at_destination(&dest, "", ValidateDepth::Full).unwrap();
@@ -1496,8 +1082,6 @@ mod tests {
         assert!(!v.passed);
         assert!(v.failures.is_empty(), "no failures, just a legacy label");
     }
-
-    // ── M5 part-presence failures ───────────────────────────────────────
 
     #[test]
     fn missing_part_is_flagged_with_part_id_and_path() {
@@ -1509,11 +1093,7 @@ mod tests {
             ],
             ManifestStatus::Success,
         );
-        write_dataset(
-            dir.path(),
-            &m,
-            &[("part-000001.parquet", b"AAAA")], // part 2 missing
-        );
+        write_dataset(dir.path(), &m, &[("part-000001.parquet", b"AAAA")]);
         let dest = local_dest(dir.path());
 
         let v = verify_at_destination(&dest, "", ValidateDepth::Full).unwrap();
@@ -1534,7 +1114,6 @@ mod tests {
             vec![part(1, 10, 4, "xxh3:1111111111111111")],
             ManifestStatus::Success,
         );
-        // Manifest claims 4 bytes; we write 6.
         write_dataset(dir.path(), &m, &[("part-000001.parquet", b"OOPSIE")]);
         let dest = local_dest(dir.path());
 
@@ -1556,13 +1135,8 @@ mod tests {
         assert_eq!(mismatch, (1, 4, 6));
     }
 
-    // ── _SUCCESS marker integrity ───────────────────────────────────────
-
     #[test]
     fn stale_success_marker_is_flagged_as_inconsistent() {
-        // Write a manifest, then overwrite _SUCCESS with the marker for a
-        // *different* manifest body — simulating an orchestrator that
-        // mishandled a re-run.
         let dir = tempfile::tempdir().unwrap();
         let m = build_manifest(
             vec![part(1, 10, 4, "xxh3:1111111111111111")],
@@ -1608,8 +1182,6 @@ mod tests {
 
     #[test]
     fn absent_success_marker_does_not_fail_validation_alone() {
-        // ADR-0012 M2: a success manifest whose _SUCCESS is absent (a split unit)
-        // must not flip `passed` just for the missing marker.
         let dir = tempfile::tempdir().unwrap();
         let m = build_manifest(
             vec![part(1, 10, 4, "xxh3:1111111111111111")],
@@ -1655,8 +1227,6 @@ mod tests {
         );
     }
 
-    // ── self-consistency ────────────────────────────────────────────────
-
     #[test]
     fn self_inconsistent_manifest_is_flagged_but_part_check_still_runs() {
         let dir = tempfile::tempdir().unwrap();
@@ -1664,7 +1234,7 @@ mod tests {
             vec![part(1, 10, 4, "xxh3:1111111111111111")],
             ManifestStatus::Success,
         );
-        m.row_count = 9999; // lie
+        m.row_count = 9999;
 
         let body = serde_json::to_vec_pretty(&m).unwrap();
         std::fs::write(dir.path().join("part-000001.parquet"), b"AAAA").unwrap();
@@ -1680,8 +1250,6 @@ mod tests {
         assert!(v.manifest_found);
         assert!(!v.manifest_self_consistent);
         assert!(!v.passed);
-        // Parts that are physically present still get their `parts_verified`
-        // counter bumped — both signals are independently useful.
         assert_eq!(v.parts_verified, 1);
         assert!(
             v.failures
@@ -1691,33 +1259,9 @@ mod tests {
     }
 
     /// A `manifest.json` that is not valid JSON at all.
-    ///
-    /// The branch above this one — `self_inconsistent_manifest_is_flagged_but_
-    /// part_check_still_runs` — writes a manifest that PARSES cleanly and then
-    /// lies (`row_count = 9999`); that is the self-consistency check far below.
-    /// The branch here is the one where `serde_json::from_slice` itself FAILS,
-    /// and until now nothing reached it: the 2026-08-16 nightly rotation caught
-    /// `delete field manifest_found` and `delete field failures` from this very
-    /// struct expression, both surviving the whole lib suite.
-    ///
-    /// Two halves of the operator-facing contract, both ungraded:
-    ///  * the verdict must still say a manifest was FOUND — reading a corrupt
-    ///    manifest as ABSENT routes the reader to the ADR-0012 M6 legacy-run
-    ///    explanation, a different and wrong story about their destination;
-    ///  * it must carry a FAILURE naming why — without it `rivet validate`
-    ///    reports a destination that did not pass with an EMPTY `failures`
-    ///    list: a red verdict and no reason on it.
-    ///
-    /// (The third survivor from the same report, `delete field passed`, is
-    /// EQUIVALENT — every exit from the main body calls `recompute_passed()`,
-    /// so that literal is unobservable. It has been in `.cargo/mutants.toml`
-    /// with that reason since 2026-07-14 and needs no test.)
     #[test]
     fn an_unparseable_manifest_is_found_and_carries_a_reason() {
         let dir = tempfile::tempdir().unwrap();
-        // Present on disk so the fixture is not inert: if this early return
-        // ever stopped happening we would fall through to the part check
-        // rather than silently do nothing at all.
         std::fs::write(dir.path().join("part-000001.parquet"), b"AAAA").unwrap();
         std::fs::write(dir.path().join(MANIFEST_FILENAME), b"{ this is not json").unwrap();
         let dest = local_dest(dir.path());
@@ -1746,8 +1290,6 @@ mod tests {
             "a destination whose manifest cannot be parsed has not passed: {v:?}"
         );
 
-        // The reason must name the artifact, not just the kind: the operator
-        // reads this line, never the enum variant.
         let detail = v
             .failures
             .iter()
@@ -1762,14 +1304,8 @@ mod tests {
         );
     }
 
-    // ── untracked objects ───────────────────────────────────────────────
-
     #[test]
     fn verify_counters_track_present_and_failed_parts() {
-        // Mutation-tier2 gap: the verdict-shaping fields (manifest_found /
-        // passed / failures) and the per-part counters (parts_verified /
-        // parts_failed) had no assertion — `+= -> -=` survived. One present
-        // part + one missing part pin both counters and the verdict.
         let dir = tempfile::tempdir().unwrap();
         let m = build_manifest(
             vec![
@@ -1778,7 +1314,6 @@ mod tests {
             ],
             ManifestStatus::Success,
         );
-        // Only part 1 exists at the destination.
         write_dataset(dir.path(), &m, &[("part-000001.parquet", b"AAAA")]);
         let dest = local_dest(dir.path());
 
@@ -1798,8 +1333,6 @@ mod tests {
 
     #[test]
     fn read_capped_boundary_is_exact() {
-        // `size > max` (not >=): a body exactly AT the cap must load; one
-        // byte over must be refused before materialising.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("at-cap.bin"), vec![0u8; 8]).unwrap();
         std::fs::write(dir.path().join("over-cap.bin"), vec![0u8; 9]).unwrap();
@@ -1855,9 +1388,6 @@ mod tests {
                 |f| matches!(f, Failure::UntrackedObject { key, .. } if key == "rogue.parquet")
             )
         );
-        // Untracked objects are surfaced but do NOT flip `passed` — that
-        // is the resume-side decision (M9).  Parts and marker are fine,
-        // so passed remains true.
         assert!(v.passed);
     }
 
@@ -1891,11 +1421,6 @@ mod tests {
 
     #[test]
     fn doctor_probe_is_not_flagged_as_untracked() {
-        // Regression: `rivet doctor` writes `.rivet_doctor_probe` at the
-        // destination prefix and never removes it.  A subsequent
-        // `rivet run --validate` against the same prefix must treat it as a
-        // Rivet sidecar, not foreign data — otherwise `has_failures()` trips
-        // and the run's `validated` flag is downgraded to FAIL.
         let dir = tempfile::tempdir().unwrap();
         let m = build_manifest(
             vec![part(1, 10, 4, "xxh3:1111111111111111")],
@@ -1917,8 +1442,6 @@ mod tests {
         );
         assert!(v.passed);
     }
-
-    // ── manifest_dir join semantics ─────────────────────────────────────
 
     #[test]
     fn verifies_in_subdirectory_when_manifest_dir_is_non_empty() {
@@ -1942,16 +1465,11 @@ mod tests {
         assert!(v.passed);
         assert_eq!(v.parts_verified, 1);
 
-        // Trailing slash is normalised — same outcome.
         let v2 = verify_at_destination(&dest, "sub/run/", ValidateDepth::Full).unwrap();
         assert!(v2.passed);
     }
 
-    // ── list-failure semantics (presence now rides the listing) ──────────
-
-    /// Wraps a real `LocalDestination` but fails every `list_prefix`. Used to
-    /// pin the post-refactor contract: presence is derived from the listing,
-    /// so a listing we cannot read means the audit cannot certify the parts.
+    /// Wraps a real `LocalDestination` but fails every `list_prefix`.
     struct ListFails(LocalDestination);
     impl crate::destination::Destination for ListFails {
         fn write(&self, p: &Path, k: &str) -> Result<crate::destination::WriteOutcome> {
@@ -1979,10 +1497,8 @@ mod tests {
         let dest = ListFails(local_dest(dir.path()));
 
         let v = verify_at_destination(&dest, "", ValidateDepth::Full).unwrap();
-        // The manifest itself reads + parses fine (HEAD/read still work)…
         assert!(v.manifest_found);
         assert!(v.manifest_self_consistent);
-        // …but with no listing we verify zero parts and refuse to pass.
         assert!(
             !v.passed,
             "an audit that cannot list the prefix must not pass"
@@ -1997,11 +1513,7 @@ mod tests {
         );
     }
 
-    // ── manifest read-error semantics (explicit failure, not legacy) ─────
-
-    /// Wraps a real `LocalDestination` but fails reading `manifest.json`
-    /// (head still sees it) — EACCES or a transient store error on a
-    /// manifest that exists.
+    /// Wraps a real `LocalDestination` but fails reading `manifest.json` (head still sees it).
     struct ManifestReadFails(LocalDestination);
     impl crate::destination::Destination for ManifestReadFails {
         fn write(&self, p: &Path, k: &str) -> Result<crate::destination::WriteOutcome> {
@@ -2026,9 +1538,6 @@ mod tests {
 
     #[test]
     fn unreadable_manifest_is_explicit_failure_not_legacy() {
-        // The exit gates (`rivet validate`, run finalize) key off this exact
-        // shape: `manifest_found: false` but `has_failures()` — distinct
-        // from M6 legacy (`legacy_run: true`, no failures, exit 0).
         let dir = tempfile::tempdir().unwrap();
         let m = build_manifest(
             vec![part(1, 10, 4, "xxh3:1111111111111111")],
@@ -2049,8 +1558,7 @@ mod tests {
         );
     }
 
-    /// Same contract when `head` itself errors (cannot even stat the
-    /// manifest): symmetric `ManifestReadError`, never the legacy label.
+    /// Same contract when `head` itself errors (cannot even stat the manifest).
     struct ManifestHeadFails(LocalDestination);
     impl crate::destination::Destination for ManifestHeadFails {
         fn write(&self, p: &Path, k: &str) -> Result<crate::destination::WriteOutcome> {
@@ -2097,11 +1605,6 @@ mod tests {
         );
     }
 
-    // #5: a _SUCCESS whose head-reported size exceeds the cap must be flagged
-    // WITHOUT being read — a bare uncapped read of a multi-GB planted marker OOMs
-    // the validate/resume process (asymmetric with the manifest.json cap). The mock
-    // PANICS if read(_SUCCESS) is called, so the test passing proves the read was
-    // short-circuited by the size check.
     struct SuccessMarkerOversized(LocalDestination);
     impl crate::destination::Destination for SuccessMarkerOversized {
         fn write(&self, p: &Path, k: &str) -> Result<crate::destination::WriteOutcome> {
@@ -2156,7 +1659,6 @@ mod tests {
 
     #[test]
     fn passed_is_derived_advisory_failures_do_not_fail() {
-        // An advisory failure (untracked surplus) keeps the verdict passing…
         let mut v = ManifestVerification {
             manifest_found: true,
             ..ManifestVerification::empty()
@@ -2168,7 +1670,6 @@ mod tests {
         v.recompute_passed();
         assert!(v.passed, "untracked surplus is advisory, not fatal");
 
-        // …while any fatal failure flips it.
         v.failures.push(Failure::PartMissing {
             part_id: 1,
             path: "part-000001.parquet".into(),
@@ -2176,7 +1677,6 @@ mod tests {
         v.recompute_passed();
         assert!(!v.passed, "a missing part is fatal");
 
-        // No manifest → never passes regardless of failures.
         let mut legacy = ManifestVerification::empty();
         legacy.recompute_passed();
         assert!(!legacy.passed, "no manifest found → cannot certify");
@@ -2184,20 +1684,17 @@ mod tests {
 
     #[test]
     fn verify_content_policy_fails_only_size_only_parts() {
-        // 3 parts, 2 content-checked, 1 size-only.
         let base = ManifestVerification {
             manifest_found: true,
             parts_verified: 3,
             parts_md5_verified: 2,
             ..ManifestVerification::empty()
         };
-        // verify: size → size-only is acceptable, passes.
         let mut sz = base.clone();
         sz.recompute_passed();
         sz.enforce_content_policy(false);
         assert!(sz.passed, "size-only OK under verify: size");
 
-        // verify: content → the 1 size-only part is a fatal failure.
         let mut ct = base.clone();
         ct.recompute_passed();
         ct.enforce_content_policy(true);
@@ -2214,7 +1711,6 @@ mod tests {
             ct.failures
         );
 
-        // verify: content with every part md5-checked → satisfied.
         let mut all = ManifestVerification {
             parts_md5_verified: 3,
             ..base
@@ -2227,14 +1723,8 @@ mod tests {
         );
     }
 
-    // ── require_manifest_present (finding #20: operator-pinned --prefix) ──────
-
     #[test]
     fn require_manifest_escalates_legacy_to_fatal_absent() {
-        // The exact shape `verify_at_destination` returns for an absent manifest
-        // (`legacy()`): no manifest, no other failure. With a pinned `--prefix`
-        // this is escalated to a fatal `ManifestRequiredButAbsent` so the exit
-        // gate refuses it instead of passing as a benign legacy run.
         let mut v = ManifestVerification::legacy();
         assert!(v.legacy_run && !v.has_failures());
 
@@ -2345,8 +1835,6 @@ mod tests {
 
     #[test]
     fn require_manifest_is_noop_on_a_real_passing_manifest() {
-        // A found, passing verdict is untouched — `--prefix` plus real data is
-        // the normal "validate this exact prefix" case and must still pass.
         let mut v = ManifestVerification {
             manifest_found: true,
             manifest_self_consistent: true,
@@ -2363,9 +1851,6 @@ mod tests {
 
     #[test]
     fn require_manifest_does_not_double_flag_a_read_error() {
-        // An absent manifest that already carries a `ManifestReadError` (head /
-        // read failed) is already a fatal, classified failure — requiring a
-        // manifest here must not add a second, redundant failure.
         let mut v = ManifestVerification::legacy();
         v.legacy_run = false;
         v.failures.push(Failure::ManifestReadError {
@@ -2382,16 +1867,8 @@ mod tests {
         );
     }
 
-    // ── graded verify layer (--depth) ───────────────────────────────────
-
     #[test]
     fn light_depth_skips_part_reconcile_even_when_a_part_is_missing() {
-        // A manifest declaring a part that is NOT on disk. At `Full`/`Sample`
-        // this is a fatal `PartMissing`; at `Light` the `list_prefix` reconcile
-        // is skipped entirely, so `parts_verified == 0`, no `ListPrefixError`,
-        // and — with `_SUCCESS` consistent and the manifest self-consistent —
-        // the verdict still passes. Light certifies the manifest + marker, not
-        // the parts.
         let dir = tempfile::tempdir().unwrap();
         let m = build_manifest(
             vec![
@@ -2400,7 +1877,6 @@ mod tests {
             ],
             ManifestStatus::Success,
         );
-        // Deliberately write NEITHER part — only manifest.json + _SUCCESS.
         write_dataset(dir.path(), &m, &[]);
         let dest = local_dest(dir.path());
 
@@ -2435,10 +1911,6 @@ mod tests {
 
     #[test]
     fn light_depth_never_lists_so_a_list_failure_cannot_trip() {
-        // Even with a destination whose `list_prefix` always errors, a light
-        // pass succeeds: it never calls `list_prefix`, so no `ListPrefixError`.
-        // This is the direct contrast to `list_failure_cannot_certify_parts…`
-        // (which runs at Full and *does* fail on the list error).
         let dir = tempfile::tempdir().unwrap();
         let m = build_manifest(vec![part(0, 3, 3, "xxh3:0")], ManifestStatus::Success);
         write_dataset(dir.path(), &m, &[("part-000000.parquet", b"abc")]);
@@ -2459,9 +1931,6 @@ mod tests {
 
     #[test]
     fn sample_depth_runs_part_reconcile_like_full() {
-        // `Sample` runs every section `verify_at_destination` owns (1-5) — the
-        // Form B value re-read it skips lives in the *caller*, not here. So a
-        // missing part is a fatal `PartMissing` at Sample, identical to Full.
         let dir = tempfile::tempdir().unwrap();
         let m = build_manifest(
             vec![
@@ -2470,7 +1939,7 @@ mod tests {
             ],
             ManifestStatus::Success,
         );
-        write_dataset(dir.path(), &m, &[("part-000001.parquet", b"AAAA")]); // part 2 missing
+        write_dataset(dir.path(), &m, &[("part-000001.parquet", b"AAAA")]);
         let dest = local_dest(dir.path());
 
         let v = verify_at_destination(&dest, "", ValidateDepth::Sample).unwrap();
@@ -2489,11 +1958,8 @@ mod tests {
 
     #[test]
     fn depth_level_is_stamped_on_every_verdict_shape() {
-        // The depth label rides the verdict even on the early-return shapes
-        // (legacy / no manifest), so a consumer always sees how deep the pass
-        // went.
         let dir = tempfile::tempdir().unwrap();
-        let dest = local_dest(dir.path()); // empty prefix → legacy
+        let dest = local_dest(dir.path());
         for depth in [
             ValidateDepth::Light,
             ValidateDepth::Sample,
@@ -2511,9 +1977,6 @@ mod tests {
 
     #[test]
     fn error_code_is_stable_and_distinct_per_variant() {
-        // Each variant maps to its documented `RIVET_VERIFY_*` code. A
-        // regression guard: renaming a code is a silent break for any CI gate
-        // keying off it.
         let cases: &[(Failure, &str)] = &[
             (
                 Failure::PartMissing {
@@ -2644,13 +2107,6 @@ mod tests {
             );
         }
 
-        // COMPLETENESS, derived from the enum rather than trusted to the list
-        // above. The list is hand-written — that is unavoidable, since each case
-        // must construct a value — so the thing that CANNOT be hand-written is
-        // the check that it covers everything. It did not:
-        // `PartRowCountMismatch` was absent, the one code with no stability
-        // guard, in the test whose comment says renaming a code is a silent
-        // break for any CI gate keying off it (audit 2026-08-17).
         let src = include_str!("validate_manifest.rs");
         let enum_body = {
             let at = src
@@ -2712,12 +2168,6 @@ mod tests {
 
     #[test]
     fn cdc_position_violation_is_verified_wrong_not_could_not_verify() {
-        // #5 / #104 bughunt: a CDC `__pos` continuity violation (a gap/duplicate in
-        // the exported change stream) is VERIFIED-WRONG — data-integrity, exit 3,
-        // the same class as a value-checksum mismatch — NOT a could-not-verify I/O
-        // error (exit 1). This pins the classification so a future edit that made it
-        // operational (folding it back into hard_failures → exit 1, the pre-fix
-        // behaviour) goes RED.
         let viol = Failure::CdcPositionViolation {
             detail: "export 'x': pos gap 5 -> 8".into(),
         };
@@ -2735,8 +2185,6 @@ mod tests {
             "a verdict carrying a __pos violation must classify as verified-wrong (exit 3)"
         );
 
-        // The read-error siblings are the OTHER side of the same axis: could-not-
-        // verify, so a verdict whose ONLY failure is one of them is NOT verified-wrong.
         let mut op = ManifestVerification::empty();
         op.passed = false;
         op.failures.push(Failure::ManifestReadError {

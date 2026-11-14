@@ -1,25 +1,4 @@
 //! **Layer: Coordinator** (post-run finalization steps)
-//!
-//! End-of-run hooks invoked by `pipeline::job` *after* the export has
-//! reached its terminal status.  Each finalize step is intentionally
-//! best-effort: a failure here does not change the run's exit code,
-//! because the data has already landed (or definitively not landed) at
-//! the destination.  Failure-handling policy mirrors ADR-0001 §I7
-//! (manifest failures are non-fatal); see [`crate::pipeline::job`] for
-//! the call order.
-//!
-//! Why this is a separate module: prior to this split the same file held
-//! `run_export_job`, the `finalize_*` hooks, the M8 gate, and the
-//! `destination_uri_for_manifest` helper.  At ~1100 lines `job.rs` was
-//! becoming a god-module — Phase C-γ would have grown it by another
-//! ~200.  Splitting on the natural boundary (orchestration vs.
-//! finalization) keeps each file under ~800 lines and lets each test
-//! suite import only what it needs.
-//!
-//! Functions are `pub(super)` so the only legal caller is
-//! `pipeline::job::{run_export_job, run_export_job_with_chunk_source}`.
-//! There is intentionally no public re-export for these — they are
-//! orchestration glue, not a pipeline API.
 
 use crate::error::Result;
 use crate::plan::ResolvedRunPlan;
@@ -27,29 +6,7 @@ use crate::state::StateStore;
 
 use super::summary::RunSummary;
 
-/// ADR-0028: THE export tail — the one place the per-export post-write features
-/// are applied, called by the dispatcher (`job.rs`) on runner success, before
-/// `finalize_manifest`. Runners FEED `summary.ledger` as they commit (what
-/// schema they saw, which checksums their sinks computed); this seam APPLIES:
-///
-///   1. manifest schema-fingerprint pin (ADR-0012 M3),
-///   2. the `on_schema_drift` gate (post-run, from the run's resolved schema —
-///      chunked runs its gate pre-chunk via `check_from_type_mappings`
-///      (ADR-0021) and feeds no drift schema here, by design),
-///   3. Form-B value-checksum harvest into the summary/manifest,
-///   4. the shape-drift advisory warn,
-///   5. the `quality:` gate over the merged measurements of every sink.
-///
-/// Ordering is load-bearing and encoded HERE, once: the gate + harvest run
-/// before `finalize_manifest` (a drift `fail` must abort before a manifest
-/// exists; the manifest must record the checksums). Before this seam, every
-/// runner re-assembled this tail by hand and a feature wired into one runner
-/// was silently absent on the others — the runner-bypass class this seam
-/// retires (three documented bites: the keyset/mongo drift-gate miss, Form-B
-/// computed-then-discarded on all three large-table runners, and the keyset
-/// part-name divergence). The telltale invariants in
-/// `check_post_run_invariants` stay as the backstop: a runner that feeds
-/// nothing still fails the drift/Form-B telltales.
+/// ADR-0028: THE export tail — the one place the per-export post-write features are applied, called by the dispatcher (`job.rs`) on runner success, before `finalize_manifest`.
 pub(super) fn finalize_export(
     plan: &ResolvedRunPlan,
     state: Option<&StateStore>,
@@ -57,23 +14,9 @@ pub(super) fn finalize_export(
 ) -> Result<()> {
     let ledger = std::mem::take(&mut summary.ledger);
 
-    // RECORDS before GATES (seam bughunt 2026-08-21): the fingerprint pin and
-    // the Form-B harvest describe the durable parts and must land on the
-    // summary even when the drift gate below ABORTS the run — the Failed
-    // manifest lists the debris, so it must describe it honestly ("recording
-    // first is the truthful thing", the rule mongo_parallel's pre-seam drain
-    // already followed). Pre-fix the gate's `?` skipped the harvest and a
-    // drift-FAILED keyset/mongo run wrote a Failed manifest with no Form-B.
     if let Some(schema) = &ledger.observed.drift_schema {
-        // Fingerprint pin is idempotent (first call wins) — uniform across
-        // runners now, so keyset/mongo manifests carry the fingerprint single
-        // mode always recorded.
         super::manifest_writer::record_run_schema_fingerprint(summary, schema);
     }
-    // Form B: record the run-wide checksums so the manifest carries them.
-    // `harvest_column_checksums` itself COMPUTES the coverage (ADR-0029) — a
-    // manifest part with no contribution suppresses the record — and that
-    // decision stays in the harvest, not here.
     super::commit::harvest_column_checksums(summary, ledger.integrity);
 
     if let (Some(schema), Some(st)) = (&ledger.observed.drift_schema, state) {
@@ -86,8 +29,6 @@ pub(super) fn finalize_export(
         )?;
     }
 
-    // Epic 8: data shape drift — warn when string/binary columns grow beyond
-    // threshold. Every runner feeds its sinks' shape bytes into the ledger.
     if plan.shape_drift_warn_factor > 0.0
         && !ledger.observed.column_max_bytes.is_empty()
         && let Some(st) = state
@@ -129,7 +70,7 @@ pub(super) fn finalize_export(
     apply_quality_gate(plan, &ledger.observed.quality, summary)
 }
 
-/// Grade the run's merged quality measurements against `plan.quality`; a `Fail` issue is a data-integrity error (exit 3).
+/// Grade the run's merged quality measurements against `plan.quality`.
 fn apply_quality_gate(
     plan: &ResolvedRunPlan,
     measured: &crate::quality::QualityTracker,
@@ -169,25 +110,7 @@ fn apply_quality_gate(
     )
 }
 
-/// ADR-0028, the FAILURE half of the seam (bughunt 2026-08-21, MED): a run
-/// whose RUNNER errored still fed the ledger up to the failure, and its Failed
-/// manifest lists the durable debris — so the RECORDS (fingerprint pin, Form-B
-/// harvest) must still apply, or the manifest falls back to the STALE open
-/// baseline fingerprint while the durable parquet carries the observed schema
-/// (actively wrong forensics), and the checksums mongo/keyset recorded
-/// pre-seam vanish. GATES (drift policy, shape warn) are deliberately NOT run
-/// here: the run is already failing with the runner's own error, and a gate
-/// error would mask it.
-///
-/// ADR-0029 is what makes the fingerprint half actually WORK. Three parallel
-/// runners record their durable parts ABOVE their error bail and used to feed
-/// the whole ledger BELOW it, so this function received an EMPTY ledger on the
-/// failure path and pinned nothing (parallel keyset worst: the ledger is its
-/// only fingerprint path). The schema is an OBSERVATION — it describes what the
-/// runner READ, it has no coverage obligation — so it is now fed eagerly, above
-/// every bail, and arrives here. The Form-B half stays commit-gated and its
-/// coverage is computed inside the harvest, so a failed run's partial feed
-/// suppresses rather than publishes a record covering a subset of the debris.
+/// ADR-0028, the FAILURE half of the seam (bughunt 2026-08-21, MED).
 pub(super) fn finalize_export_records(summary: &mut RunSummary) {
     let ledger = std::mem::take(&mut summary.ledger);
     if let Some(schema) = &ledger.observed.drift_schema {
@@ -196,13 +119,7 @@ pub(super) fn finalize_export_records(summary: &mut RunSummary) {
     super::commit::harvest_column_checksums(summary, ledger.integrity);
 }
 
-/// Write `.rivet/runs/<run_id>/{summary.md,summary.json}` and surface a
-/// stderr hint pointing at the report (plus a resume command, when
-/// applicable).
-///
-/// Failures to write are non-fatal: the run keeps its existing exit code,
-/// the reason is logged, and the resume hint is still shown so the operator
-/// can recover even if disk-full prevents the report itself from landing.
+/// Write `.rivet/runs/<run_id>/{summary.md,summary.json}` and surface a stderr hint pointing at the report (plus a resume command, when applicable).
 pub(super) fn finalize_run_report(config_path: &str, summary: &RunSummary, kind: &str) {
     use std::io::Write;
 
@@ -221,17 +138,11 @@ pub(super) fn finalize_run_report(config_path: &str, summary: &RunSummary, kind:
     };
 
     if crate::pipeline::ipc::capturing_events() {
-        // The parent UI owns the screen in capturing mode; an extra stderr
-        // tail here would interleave with the rendered cards.  The JSON/MD
-        // files are still on disk for whoever wants them.
         return;
     }
 
     let stderr = std::io::stderr();
     let mut h = stderr.lock();
-    // Per-export `report:` lines double the output of a multi-export run (one
-    // per export); the run aggregate at the end already points at `.rivet/runs/`.
-    // Keep the line only for a single export, where it is the one place to look.
     if written && !crate::pipeline::multi_export_mode() {
         let _ = writeln!(h, "report:    {}", dir.join("summary.md").display());
     }
@@ -241,24 +152,7 @@ pub(super) fn finalize_run_report(config_path: &str, summary: &RunSummary, kind:
     let _ = h.flush();
 }
 
-/// Build the cloud-output manifest from the run's accumulated parts and
-/// write it (plus `_SUCCESS` for clean runs) to the destination.
-///
-/// ADR-0012 M1 / M2 / M7: parts are already committed, manifest is written
-/// next, then `_SUCCESS` only when status == Success.
-///
-/// Returns the reason the prefix did NOT become consumable, or `None` when it
-/// did. This used to be logged at `warn` and dropped, so a run whose manifest
-/// never landed printed `status: success`, `rows: 4,000`, `files: 4` — with its
-/// parts on the prefix and no manifest naming them. A manifest-authoritative
-/// `rivet load` does not load those rows, so "success" was a claim the artifacts
-/// did not support. Worse, the caller advanced the incremental cursor
-/// immediately after, on the stated premise that the manifest was durable: the
-/// next run then started PAST data no manifest described.
-///
-/// The parts are still durable, which is exactly why this must be loud. Nothing
-/// about the failure is visible in the data; it is visible only here.
-/// Whether a run that did not succeed put no part of its own at the destination (`landed`); the parts it adopted from the run it resumes were that run's writes.
+/// Build the cloud-output manifest from the run's accumulated parts and write it (plus `_SUCCESS` for clean runs) to the destination.
 pub(super) fn run_put_nothing_at_the_destination(summary: &RunSummary, landed: u64) -> bool {
     summary.status != "success" && landed == 0
 }
@@ -269,7 +163,7 @@ pub(super) struct Finalized {
     pub left_alone: bool,
 }
 
-/// Whether the prefix already holds a canonical manifest, an earlier run's record of what is there; a prefix that cannot be read counts as holding one.
+/// Whether the prefix already holds a canonical manifest, an earlier run's record of what is there.
 fn prefix_holds_a_manifest(dest: &dyn crate::destination::Destination) -> bool {
     !matches!(dest.head(crate::manifest::MANIFEST_FILENAME), Ok(None))
 }
@@ -288,13 +182,6 @@ pub(super) fn finalize_manifest(
 
 fn write_run_manifest(
     plan: &ResolvedRunPlan,
-    // The export FAMILY (`ExportConfig::family()`), passed at RUNTIME and
-    // deliberately NOT a field of `ResolvedRunPlan`: that type is sealed into
-    // plan.json and its integrity hash covers the whole serialized struct, so
-    // any field added to it invalidates every plan artifact across a version
-    // boundary — in BOTH directions, with an error that blames the user for
-    // hand-editing. Measured: adding it there broke released-plan → branch-apply
-    // and branch-plan → released-apply alike.
     export_family: &str,
     state: &StateStore,
     summary: &RunSummary,
@@ -306,22 +193,6 @@ fn write_run_manifest(
         ManifestBuilder, WriteOutcome, write_manifest, write_manifest_keep_canonical_no_success,
     };
 
-    // Catch any future runner that drifts summary aggregates away from
-    // manifest_parts (the bug parallel_checkpoint had before e9b0796), or that
-    // owns its loop and skips a per-runner facade (the runner-bypass class).
-    //
-    // The CHECK now runs in every build; only the REACTION differs. It was
-    // `cfg!(debug_assertions)`-gated, and `[profile.release]` sets no
-    // debug-assertions — so in the binary users actually run it was compiled out
-    // entirely and a violation produced NO signal at all: not a panic, not a log
-    // line. A run that silently skipped the drift gate and harvested no column
-    // checksums looked exactly like a clean one.
-    //
-    // Debug/CI keeps the panic (a test must fail loudly). Release warns and
-    // carries on: the run's data is already committed and aborting here would
-    // destroy nothing but the user's afternoon — but the operator now learns
-    // that this run's integrity records are incomplete, which is the whole point
-    // of the guard.
     if let Err(e) = summary.check_post_run_invariants(plan.resume) {
         if cfg!(debug_assertions) {
             panic!(
@@ -343,11 +214,6 @@ fn write_run_manifest(
     let snapshot = match summary.journal.plan_snapshot() {
         Some(s) => s,
         None => {
-            // Synthetic-failure summaries never recorded a PlanResolved event.
-            // There is no committed work to manifest; just log and return.
-            // A synthetic-failure summary never recorded a PlanResolved event:
-            // there is no committed work to describe, so an absent manifest is
-            // not a gap. `None`, not an error.
             log::debug!(
                 "{} '{}': no plan snapshot, manifest skipped",
                 kind,
@@ -357,10 +223,6 @@ fn write_run_manifest(
         }
     };
 
-    // `_SUCCESS` and a manifest describe the prefix, not the last run: a run that put no part
-    // there writes nothing over an earlier run's record. Its failure is told by the exit code
-    // and the journal (`export_metrics`, `run_status`); only on a prefix with no manifest at
-    // all does it leave its own failed manifest, the one record there.
     let landed = plan.parts_landed.load(std::sync::atomic::Ordering::Relaxed);
     let nothing = run_put_nothing_at_the_destination(summary, landed);
     if nothing && summary.status == "skipped" {
@@ -374,11 +236,6 @@ fn write_run_manifest(
         _ => ManifestStatus::Interrupted,
     };
 
-    // ADR-0012 M3: prefer the fingerprint captured at the sink (single +
-    // chunked + checkpoint paths all populate it).  Fall back to the
-    // state-store lookup only for resume scenarios where the live summary
-    // never saw a schema.  The placeholder is a last-resort signal to the
-    // reader that schema evidence was unavailable for this run.
     let schema_fingerprint = summary
         .schema_fingerprint
         .clone()
@@ -393,32 +250,6 @@ fn write_run_manifest(
 
     let source_engine = plan.source.source_type.label();
 
-    // The DECLARED table first — a name is a label, the config is the catalog.
-    //
-    // Deriving this by splitting `export_name` on '.' made the two legs of one
-    // `initial: snapshot` CDC export disagree about their own identity: the drain
-    // records the capture output's table, while the snapshot leg's synthesized
-    // name (`orders__snapshot_orders`) has no dot, so it recorded nothing.
-    // Measured on a real run into one prefix — drain
-    // `{engine: postgres, table: "idsrc_orders"}`, leg
-    // `{engine: postgres, table: null}` — which `identity_source` reads as
-    // `postgres:idsrc_orders` and `postgres`, two sources under one export name,
-    // and `ensure_single_source` refuses the flow the docs describe.
-    //
-    // The name split stays as the FALLBACK: an export declared with `query:`
-    // has no `table:`, and a `schema.table` export name is still the only place
-    // its schema appears.
-    // A document store has NO schema to qualify with, so `a.b` is one collection
-    // name and splitting it invents an identity. Round-4 measured the cost on one
-    // `initial: snapshot` Mongo export into one prefix: the drain recorded
-    // `{table: "bh4.orders"}` while the snapshot leg recorded
-    // `{schema: "bh4", table: "orders"}` — the name of a DIFFERENT collection that
-    // existed and held different rows. `identity_source` re-joins with a dot, so
-    // both render `mongo:bh4.orders` and the single-source guard sees nothing; only
-    // a consumer reading the two fields separately meets the contradiction.
-    //
-    // This is the same lesson the router learned in 680e537 — routing semantics are
-    // the engine's — arriving one file late.
     let mongo = plan.source.source_type == crate::config::SourceType::Mongo;
     let (source_schema, source_table) = match plan.source_table.as_deref() {
         Some(t) if mongo => (None, Some(t.to_string())),
@@ -455,8 +286,6 @@ fn write_run_manifest(
         source_table,
         destination_uri_for_manifest(&plan.destination),
     );
-    // Record this unit's split window (if any) so --split --resume can reconstruct the
-    // exact original partition from the prior run's manifests instead of re-sampling.
     builder.set_split_window(plan.split_window.clone());
     for part in &summary.manifest_parts {
         builder.record_part(
@@ -477,21 +306,12 @@ fn write_run_manifest(
     if summary.cursor_column.is_some() || summary.cursor_high.is_some() {
         builder.set_cursor_range(
             summary.cursor_column.clone(),
-            None, // cursor_type: follow-up (needs source-type plumbing)
+            None,
             summary.cursor_low.clone(),
             summary.cursor_high.clone(),
-            None, // set below, for every strategy — not just cursored ones
+            None,
         );
     }
-    // The source COUNT(*) `--reconcile` already ran. Recording it is what makes
-    // `load::reconcile`'s source→file leg executable: without it that check,
-    // `LoadIntegrity.source_rows` and `allow_source_drift` are unreachable,
-    // and the only "did the extract drop rows" evidence a loader ever sees is
-    // rivet's own part-row arithmetic compared against itself.
-    //
-    // UNCONDITIONAL by strategy, deliberately: the count belongs to the run,
-    // not to the cursor. It stays `None` unless the run probed the source, so
-    // this adds no query — it stops discarding one already paid for.
     builder.set_source_row_count(summary.source_count);
     let manifest = builder.finalize(status);
 
@@ -515,12 +335,6 @@ fn write_run_manifest(
         return None;
     }
 
-    // #167: a `--split` unit shares its destination prefix with its N-1 siblings,
-    // so it must NOT write the prefix-level `_SUCCESS` — that would mark the WHOLE
-    // giant complete the moment the FIRST unit finishes (mis-skipping the rest on
-    // resume, and tripping the M8 resume guard on a sibling's marker). The unit
-    // writes its manifest + run-unique copy (its per-unit completion signal); the
-    // pool writes `_SUCCESS` ONCE, after every unit succeeds.
     let write_result = if plan.is_split_unit {
         write_manifest_keep_canonical_no_success(&*dest, &manifest)
     } else {
@@ -538,8 +352,6 @@ fn write_run_manifest(
             );
             None
         }
-        // A streaming destination (stdout) has no prefix to describe, so there is
-        // no manifest to miss — the only legitimately absent one.
         Ok(WriteOutcome::SkippedStreaming) => {
             log::info!(
                 "{} '{}': manifest skipped (streaming destination)",
@@ -560,32 +372,7 @@ fn write_run_manifest(
     }
 }
 
-/// Run the manifest-aware `--validate` pass against the destination prefix
-/// (ADR-0012 M5/M6, ADR-0013).  Populates `summary.manifest_verification`;
-/// failures are logged and non-fatal — the existing per-file row check has
-/// already set `summary.validated`, and the operator gets a richer report
-/// regardless of whether destination I/O succeeded here.
-///
-/// Streaming destinations (stdout) have no prefix to verify; skipped silently
-/// since `finalize_manifest` has already logged its own "skipped streaming"
-/// note for that case.
-/// Does the manifest-aware pass overturn a per-file "validated" verdict?
-///
-/// Three conditions, and each one is load-bearing:
-///
-///   * `!passed` — only a FATAL verdict downgrades. An advisory failure (an
-///     untracked surplus part) is not a reason to fail a run.
-///   * `manifest_found` — a legacy run (M6) has no manifest to judge by, so it
-///     keeps the row-count verdict it earned rather than being failed for the
-///     absence of a file its version never wrote.
-///   * `current == Some(true)` — there is nothing to downgrade from otherwise,
-///     and overwriting `None` would claim a verdict that was never reached.
-///
-/// Extracted because it could not be tested in place. Three mutations survived
-/// the suite — `&&`→`||` twice and `delete !` — each of which makes the downgrade
-/// stop happening or start happening to runs that earned their pass. The failure
-/// is quiet and durable: `rivet metrics` would say `validated=pass` for a run
-/// whose own report says the manifest pass failed.
+/// Run the manifest-aware `--validate` pass against the destination prefix (ADR-0012 M5/M6, ADR-0013).
 pub(super) fn should_downgrade_validated(
     v: &crate::pipeline::validate_manifest::ManifestVerification,
     current: Option<bool>,
@@ -621,18 +408,9 @@ pub(super) fn finalize_validate_manifest(
         return;
     }
 
-    // Run finalize always does the full manifest pass (the graded `--depth`
-    // levels are a `rivet validate` operator affordance, not a run-time knob);
-    // this preserves the pre-graded end-of-run behaviour exactly.
     match verify_at_destination(&*dest, "", ValidateDepth::Full) {
         Ok(mut v) => {
-            // Apply the export's `verify` policy: `content` turns size-only
-            // parts into a fatal failure (review D).
             v.enforce_content_policy(plan.verify.requires_content());
-            // Compose the file-row check (already on summary.validated) with
-            // the manifest-aware verdict.  Downgrade on a *fatal* verdict
-            // (`!passed`) — advisory failures (untracked surplus) don't fail
-            // the run; legacy runs (M6) keep their row-count verdict.
             if should_downgrade_validated(&v, summary.validated) {
                 summary.validated = Some(false);
             }
@@ -668,22 +446,7 @@ pub(super) fn finalize_validate_manifest(
     }
 }
 
-/// ADR-0012 M8 — refuse to start a `--resume` run against a destination
-/// prefix whose `_SUCCESS` marker is already present, unless the operator
-/// passed `--force`.  The marker is the unambiguous signal that the prefix
-/// already holds a verified dataset; quietly overwriting it is the kind
-/// of mistake that costs a re-extraction window's worth of source pressure.
-///
-/// Streaming destinations (stdout) have no prefix to gate on; permitted.
-/// I/O failures probing `_SUCCESS` (e.g. permission denied on the bucket
-/// we're about to write to) bubble up as `Err` so the operator sees the
-/// real problem before the run starts spending source query time.
-/// #167: write the ONE prefix-level `_SUCCESS` that a giant's `--split` units
-/// deliberately suppressed — the pool calls this after EVERY unit of the giant
-/// has succeeded. It fingerprints the canonical `manifest.json` already in the
-/// prefix (the last unit's, last-writer-wins) so `validate`'s marker-vs-manifest
-/// consistency check holds. `dest_config` must be the FAMILY-expanded prefix the
-/// units wrote to. Streaming destinations have no prefix (no-op).
+/// ADR-0012 M8 — refuse to start a `--resume` run against a destination prefix whose `_SUCCESS` marker is already present, unless the operator passed `--force`.
 pub(crate) fn write_split_success_marker(
     dest_config: &crate::config::DestinationConfig,
 ) -> Result<()> {
@@ -700,7 +463,7 @@ pub(crate) fn write_split_success_marker(
     Ok(())
 }
 
-/// Whether the export's newest journaled run failed: a `_SUCCESS` at its prefix is then an earlier run's, left alone by a run that is still to be done again.
+/// Whether the export's newest journaled run failed.
 pub(crate) fn last_run_failed(state: &StateStore, export_name: &str) -> Result<bool> {
     let newest = state.get_metrics(Some(export_name), 1)?;
     Ok(newest.first().is_some_and(|m| m.status == "failed"))
@@ -712,14 +475,6 @@ pub(super) fn check_success_gate_for_resume(
 ) -> Result<()> {
     use crate::manifest::SUCCESS_FILENAME;
 
-    // #167: a `--split` unit shares its prefix with siblings and never writes the
-    // prefix `_SUCCESS` itself (the pool does, once all units finish). A `_SUCCESS`
-    // present during a unit's resume was written by the POOL for a PRIOR fully-
-    // complete split — but the pool already skips a completed giant's units before
-    // they reach here, so a unit that DOES reach resume is part of an incomplete
-    // giant. Gating it on the (sibling-or-pool) marker would refuse legitimate
-    // per-unit resume, so the split unit is exempt — its own run-unique manifest
-    // copy is its completion signal, and the pool's per-unit skip is the real gate.
     if plan.is_split_unit {
         return Ok(());
     }
@@ -733,7 +488,6 @@ pub(super) fn check_success_gate_for_resume(
         return Ok(());
     }
     match dest.head(SUCCESS_FILENAME)? {
-        // The marker is an earlier run's: the last run failed before it wrote, and this one redoes it.
         Some(_) if last_run_failed(state, &plan.export_name)? => Ok(()),
         Some(_) => crate::rivet_bail!(
             crate::error::codes::DEST_ALREADY_COMPLETE,
@@ -749,42 +503,7 @@ pub(super) fn check_success_gate_for_resume(
     }
 }
 
-/// Footgun guard for a *fresh* (non-`--resume`) run into a destination prefix
-/// that already carries a completed export.
-///
-/// The audit (findings #5/#19/#30) showed that re-running `rivet run` into the
-/// same stable local prefix without `--resume` writes a brand-new set of
-/// timestamp-/nonce-named part files *alongside* the old ones — nothing is
-/// overwritten, and `manifest.json` is rewritten to describe only the latest
-/// run.  A glob reader over the prefix (`read_parquet('<prefix>/*.parquet')`)
-/// then over-counts: a chunked re-run doubles the row total while the manifest
-/// silently claims the smaller count.
-///
-/// Unlike [`check_success_gate_for_resume`] this is **non-destructive and
-/// non-fatal**: we never auto-delete the operator's prior data, and we never
-/// change the run's exit code.  But the drift must not be *silent* (the process rules:
-/// degraded/lossy paths must be loud), so when the prefix already holds a
-/// completed run we emit a prominent `WARN` naming the prefix and the exact
-/// risk, and point at the safe recoveries (`--resume`, or clear the prefix).
-///
-/// Streaming destinations (stdout) have no prefix to accumulate into; skipped.
-/// I/O failures probing the marker are swallowed to a debug log — this is a
-/// safety hint emitted *before* extraction, not a correctness gate, so a
-/// transient stat failure must never block an otherwise-valid run (the resume
-/// gate, which *does* gate, surfaces such errors instead).
-/// Can this destination even HAVE a prior run's output sitting under the prefix?
-///
-/// Only a destination that commits named objects can — a `Streaming` one (stdout)
-/// has no prefix to collide on, so probing it is meaningless. Everything else
-/// (`Atomic` local, `FinalizeOnClose` cloud) is exactly where a second export
-/// writing under one prefix silently overwrites the first, which is the whole
-/// reason the warning exists.
-///
-/// Extracted because the comparison was untestable in place and `==`→`!=`
-/// survived the suite. That mutation inverts the guard: every real destination
-/// returns early — the rerun warning goes SILENT on local and cloud both — while
-/// stdout gets probed instead. Nothing fails, nothing is logged, and the operator
-/// who pointed two exports at one prefix is told nothing.
+/// Footgun guard for a *fresh* (non-`--resume`) run into a destination prefix that already carries a completed export.
 pub(super) fn prefix_guard_applies(commit: crate::destination::WriteCommitProtocol) -> bool {
     commit.leaves_objects_at_rest()
 }
@@ -807,10 +526,6 @@ pub(super) fn warn_if_prefix_has_completed_run(plan: &ResolvedRunPlan) {
         return;
     }
 
-    // `_SUCCESS` is the unambiguous "a prior run completed cleanly here" signal;
-    // `manifest.json` catches a prior run that committed parts even if `_SUCCESS`
-    // is absent.  Probe `_SUCCESS` first so the warning is precise about a
-    // *completed* run when it can be.
     let marker = match dest.head(SUCCESS_FILENAME) {
         Ok(Some(_)) => Some(SUCCESS_FILENAME),
         Ok(None) => match dest.head(MANIFEST_FILENAME) {
@@ -849,13 +564,7 @@ pub(super) fn warn_if_prefix_has_completed_run(plan: &ResolvedRunPlan) {
     }
 }
 
-/// Repair the prefix `_SUCCESS` a `--split --resume` found MISSING with every
-/// unit already complete — the crash-in-[last unit's Success → pool marker]
-/// window. That resume path returns "nothing to run" ABOVE the pool's marker
-/// writer, and nothing else ever looks at the prefix again, so without this the
-/// marker stays missing forever while rivet reports complete — every
-/// `_SUCCESS`-keyed consumer waits indefinitely (round-4). Best-effort like the
-/// pool writer: a marker is a fast-path signal, never data integrity.
+/// Repair the prefix `_SUCCESS` a `--split --resume` found MISSING with every unit already complete.
 pub(crate) fn repair_missing_split_marker(
     dest_config: &crate::config::DestinationConfig,
     family: &str,
@@ -865,13 +574,6 @@ pub(crate) fn repair_missing_split_marker(
     if destination_has_success(&expanded) {
         return;
     }
-    // GENERATION GATE (round-5 lifecycle HIGH): "every unit complete" came from
-    // a generation-blind name-skip — a crashed gen-1 + partial gen-2 can name
-    // every ordinal complete while their windows come from different boundary
-    // sets, i.e. a union with a genuine never-exported gap. Minting `_SUCCESS`
-    // there hands external consumers a gapped dataset silently; refuse unless
-    // the completed windows actually TILE. rivet's own Full load stays guarded
-    // by `ensure_single_generation` either way.
     if !crate::pipeline::split::completed_units_tile(dest_config, family) {
         log::warn!(
             "apply --pool --split: prefix _SUCCESS for '{family}' is missing, but the \
@@ -904,11 +606,9 @@ pub(crate) fn needs_run(
     if !resume {
         return true;
     }
-    // Expanded, not the raw template: a `{export}`/`{date}` prefix never matches a literal marker path.
     let ctx = crate::destination::placeholder::PlaceholderContext::for_today(&export.name);
     let expanded =
         crate::destination::placeholder::expand_destination(export.destination.clone(), &ctx);
-    // An unreadable journal runs the export: the run then meets the same read and fails loudly.
     if destination_has_success(&expanded) && !last_run_failed(state, &export.name).unwrap_or(true) {
         log::info!(
             "{who}: skipping '{}' — destination already complete (_SUCCESS)",
@@ -920,10 +620,6 @@ pub(crate) fn needs_run(
 }
 
 /// Whether this destination already holds a completed export (`_SUCCESS`).
-/// `rivet apply --resume` uses it to skip exports a prior run finished, so a
-/// re-run after a partial failure does not redo work already done. Reuses the
-/// same probe as [`warn_if_prefix_has_completed_run`]; a streaming destination
-/// (stdout) or a probe error counts as "not complete" (re-run it).
 pub(crate) fn destination_has_success(dest: &crate::config::DestinationConfig) -> bool {
     use crate::manifest::SUCCESS_FILENAME;
     let Ok(d) = crate::destination::create_destination(dest) else {
@@ -935,7 +631,7 @@ pub(crate) fn destination_has_success(dest: &crate::config::DestinationConfig) -
     matches!(d.head(SUCCESS_FILENAME), Ok(Some(_)))
 }
 
-/// The `cursor_high` of the success manifest `export` left at `dest`; `None` when there is none, or it cannot be read.
+/// The `cursor_high` of the success manifest `export` left at `dest`.
 pub(super) fn last_success_cursor_high(
     dest: &crate::config::DestinationConfig,
     export: &str,
@@ -958,20 +654,12 @@ pub(super) fn last_success_cursor_high(
 
 /// Whether a prior `manifest.json` names a completed run with parts; unparseable counts as yes.
 fn manifest_describes_completed_parts(bytes: &[u8]) -> bool {
-    // A failed run's parts are durable too, and a re-run beside them double-counts.
     serde_json::from_slice::<crate::manifest::RunManifest>(bytes)
         .map_or(true, |m| m.committed_part_count() > 0)
 }
 
 /// The operator-facing body of the rerun-accumulation warning.
-///
-/// Split out so a regression test can pin the exact wording — the live audit
-/// (`tests/audit_rerun.rs`) only accepts this guard as "loud enough" when the
-/// message carries phrases like `already has`, `prior completed run`,
-/// `_SUCCESS` / `would overwrite`, or `orphan`.  Weakening the text below those
-/// markers would silently fail the audit, so the test below guards it.
 fn rerun_warning_message(uri: &str, marker: &str) -> String {
-    // A completed run (`_SUCCESS`) has nothing to continue, and --resume refuses it.
     let way_out = if marker == crate::manifest::SUCCESS_FILENAME {
         "The prior run completed: clear the prefix (or use a new one) before re-running."
     } else {
@@ -985,9 +673,7 @@ fn rerun_warning_message(uri: &str, marker: &str) -> String {
     )
 }
 
-/// Delete the `running` marker written under `run_id` from a cloud prefix — one no
-/// terminal manifest replaced would otherwise say the prefix is live for ever
-/// (`cleanup_source` refused, gc sparing). Best-effort: the ledger is authoritative.
+/// Delete the `running` marker written under `run_id` from a cloud prefix.
 pub(super) fn retire_running_marker(plan: &ResolvedRunPlan, run_id: &str) {
     use crate::config::DestinationType;
     if matches!(
@@ -1008,30 +694,9 @@ pub(super) fn retire_running_marker(plan: &ResolvedRunPlan, run_id: &str) {
     }
 }
 
-/// Project the `run_status` ledger's `running` row into the bucket as a
-/// schema-less MARKER manifest at run START. Written as the run-unique copy only
-/// (`manifest-<run_id>.json`) — NOT the canonical `manifest.json`, so a prior
-/// run's `_SUCCESS`/canonical pair never desyncs (the `SuccessMarkerStale` trap).
-/// A cross-boundary reader (Airflow, a foreign-host `rivet load`) then sees a
-/// LIVE run on the prefix via `fetch_manifests_keyed` and does NOT GC its
-/// in-flight parts. Cloud-only — a local export has no cross-host reader, and the
-/// state-store ledger already covers the co-located case. Best-effort: a marker
-/// write failure must never fail the run (gc still has the ledger). The terminal
-/// manifest at finalize OVERWRITES this same run-unique file.
+/// Project the `run_status` ledger's `running` row into the bucket as a schema-less MARKER manifest at run START.
 pub(super) fn write_running_manifest(
     plan: &ResolvedRunPlan,
-    // The export FAMILY, passed by the caller — NOT `plan.export_name`. The two
-    // writers for one run must agree: the terminal manifest records
-    // `export.family()` (job.rs), so a marker recording the NAME diverges for the
-    // one export whose family differs from its name — the CDC snapshot leg,
-    // named `{parent}__snapshot_{table}`. A hard-killed leg then leaves a marker
-    // claiming a family no other manifest carries, `ensure_single_export` bails
-    // ("manifests from 2 distinct exports"), and the marker is un-supersedable,
-    // so the sweep never clears it: the prefix is bricked for loading.
-    //
-    // Recording the WRONG family is strictly worse than recording none — an
-    // empty field falls back to the substring fold, which handles the leg
-    // correctly (`resolved_family`, load/reconcile.rs).
     export_family: &str,
     run_id: &str,
     started_at: &str,
@@ -1046,14 +711,12 @@ pub(super) fn write_running_manifest(
         DestinationType::Gcs => "gcs",
         DestinationType::S3 => "s3",
         DestinationType::Azure => "azure",
-        // No cross-boundary bucket reader for these: the ledger covers the
-        // co-located case, so skip the marker.
         DestinationType::Local | DestinationType::Stdout => return,
     };
     let engine = plan.source.source_type.label();
     let manifest = RunManifest {
         row_hash: None,
-        split_window: None, // the running marker is overwritten by the terminal manifest
+        split_window: None,
         manifest_version: MANIFEST_VERSION,
         run_id: run_id.to_string(),
         export_family: export_family.to_string(),
@@ -1191,13 +854,7 @@ mod tests {
         assert!(dir.join("summary.md").is_file());
     }
 
-    /// The rerun guard must apply to every destination that can actually hold a
-    /// previous run's parts — and the protocols come from the REAL destinations,
-    /// not a hand-built capability struct, because the bug this guards is a
-    /// mismatch between the guard and what `create_destination` really reports.
-    ///
-    /// RED against `==`→`!=` on the guard's comparison, which silences the
-    /// overwrite warning on local AND cloud at once while probing stdout instead.
+    /// The rerun guard must apply to every destination that can actually hold a previous run's parts.
     #[test]
     fn the_rerun_guard_applies_to_every_destination_that_can_hold_a_prior_run() {
         use crate::config::{DestinationConfig, DestinationType};
@@ -1236,14 +893,7 @@ mod tests {
         );
     }
 
-    /// The manifest pass overturns a per-file pass ONLY when all three
-    /// conditions hold — and each row below kills a mutant that survived.
-    ///
-    /// The quiet failure this guards: without the downgrade, `rivet metrics`
-    /// records `validated=pass` for a run whose own report says the manifest
-    /// pass failed, and it stays that way. `&&`→`||` and `delete !` each break
-    /// it in a different direction, so a single happy-path assertion would let
-    /// two of the three through.
+    /// The manifest pass overturns a per-file pass ONLY when all three conditions hold.
     #[test]
     fn the_manifest_pass_downgrades_only_a_fatal_verdict_on_a_run_that_had_passed() {
         use crate::pipeline::validate_manifest::ManifestVerification;
@@ -1295,22 +945,7 @@ mod tests {
         }
     }
 
-    // ── mutation-pilot gap closures ──────────────────────────────────────────
-    // finalize_manifest (18 missed) + the success gates (4) had NO driving
-    // test: stubbing finalize_manifest to () — i.e. never writing the manifest
-    // at end of run — survived the whole lib suite.
-
-    /// ADR-0028: the seam applies the ledger — Form-B checksums land on the
-    /// summary (keyed), and the ledger is TAKEN (emptied) so a hypothetical
-    /// second application cannot double-record. State-free half only (the drift
-    /// gate + shape warn need a StateStore; their end-to-end proof is the live
-    /// drift suite + the RED-proven telltale backstop). RED against a seam that
-    /// reads the ledger without applying (checksums stay empty) and against one
-    /// that clones instead of takes (second call re-harvests).
-    /// The FAILURE half (seam bughunt 2026-08-21): a runner error must still
-    /// apply the RECORDS — fingerprint pinned from the fed schema, Form-B
-    /// harvested — with no state and no gates. RED against an Err arm that
-    /// skips the records call (fingerprint stays None, checksums empty).
+    /// ADR-0028: the seam applies the ledger — Form-B checksums land on the summary (keyed), and the ledger is TAKEN (emptied) so a hypothetical second application cannot double-record.
     #[test]
     fn finalize_export_records_applies_pin_and_harvest_on_the_failure_path() {
         use arrow::datatypes::{DataType, Field, Schema};
@@ -1376,19 +1011,11 @@ mod tests {
             "the seam must TAKE the ledger — a second application must find nothing"
         );
 
-        // Second call: no ledger left, the harvested record must survive untouched
-        // (harvest_column_checksums early-returns on an empty accumulator).
         finalize_export(&plan, None, &mut summary).expect("idempotent on an empty ledger");
         assert_eq!(summary.column_checksums.len(), 1);
     }
 
-    /// ADR-0028: the seam's shape-drift arm — the ONE guard deciding whether the
-    /// advisory warn runs. Positive: factor set + shape fed + a stored smaller
-    /// max → a `shape_drift:` Warning journal event. Negative: factor 0.0
-    /// (disabled — the config default is opt-in) with the SAME grown shape must
-    /// warn nothing. Together they pin every guard mutant: `>` → `<`/`==`
-    /// (positive stops warning), `>` → `>=` and `&&` → `||` (negative starts
-    /// warning while disabled), `delete !` (positive skips a non-empty ledger).
+    /// ADR-0028: the seam's shape-drift arm — the ONE guard deciding whether the advisory warn runs.
     #[test]
     fn finalize_export_shape_warn_fires_only_when_enabled_and_fed() {
         let dir = tempfile::tempdir().unwrap();
@@ -1404,12 +1031,10 @@ mod tests {
             })
         };
 
-        // Seed the stored high-water mark (first run: silently accepted).
         state
             .detect_shape_drift("public.orders", &shape_of(10), 2.0)
             .unwrap();
 
-        // Positive: factor 2.0, 10 → 100 bytes (10×) must warn via the seam.
         let mut plan = fin_plan(dir.path());
         plan.shape_drift_warn_factor = 2.0;
         let mut summary = crate::pipeline::summary::RunSummary::default();
@@ -1425,9 +1050,6 @@ mod tests {
             "a 10× column growth with warn_factor 2.0 must journal a shape_drift warning"
         );
 
-        // Negative: factor 0.0 (disabled) — the same growth must warn NOTHING,
-        // and the guard must not even consult the state (a `>=`/`||` mutant
-        // enters the arm and warns).
         let mut plan = fin_plan(dir.path());
         plan.shape_drift_warn_factor = 0.0;
         let mut summary = crate::pipeline::summary::RunSummary::default();
@@ -1474,9 +1096,7 @@ mod tests {
         }
     }
 
-    /// The seam is the quality gate's one home: with no rules it decides nothing, with
-    /// rules it records the verdict, and a `Fail` issue is a typed exit-3 error whose
-    /// text is the shared failure contract. It needs no runner and no state.
+    /// The seam is the quality gate's one home: with no rules it decides nothing, with rules it records the verdict, and a `Fail` issue is a typed exit-3 error whose text is the shared failure contract.
     #[test]
     fn finalize_export_grades_the_quality_rules_once_for_every_runner() {
         use crate::pipeline::summary::RunSummary;
@@ -1499,7 +1119,6 @@ mod tests {
         finalize_export(&plan, None, &mut summary).unwrap();
         assert_eq!(summary.quality_passed, Some(true));
 
-        // A zero-row run still reaches row_count_min (single used to early-return).
         plan.quality = Some(quality(Some(100), &[], &[]));
         let mut summary = RunSummary::default();
         let err = finalize_export(&plan, None, &mut summary).expect_err("3 < 100 must fail");
@@ -1524,8 +1143,7 @@ mod tests {
         );
     }
 
-    /// The gate reads the MERGED measurements: two sinks that each saw `id = 7` once are
-    /// a duplicate together, and their NULL counts add into one ratio.
+    /// The gate reads the MERGED measurements: two sinks that each saw `id = 7` once are a duplicate together, and their NULL counts add into one ratio.
     #[test]
     fn finalize_export_quality_gate_merges_every_sinks_measurements() {
         use crate::pipeline::summary::RunSummary;
@@ -1546,7 +1164,6 @@ mod tests {
             "{msg}"
         );
 
-        // A capped column is a WARN: journaled, never a failure.
         let mut summary = RunSummary {
             total_rows: 4,
             ..Default::default()
@@ -1703,9 +1320,7 @@ mod tests {
         assert!(!dir.path().join("_SUCCESS").exists());
     }
 
-    /// A summary that carries everything finalize_manifest is supposed to
-    /// surface into the manifest: a plan snapshot, one committed part, Form B
-    /// checksums, and a cursor range.
+    /// A summary that carries everything finalize_manifest is supposed to surface into the manifest.
     fn fin_summary(plan: &crate::plan::ResolvedRunPlan, status: &str) -> RunSummary {
         let mut s = RunSummary::stub_for_testing("finrun", plan.export_name.clone());
         s.status = status.into();
@@ -1840,9 +1455,6 @@ mod tests {
 
     #[test]
     fn finalize_manifest_splits_schema_table_only_on_a_real_dot() {
-        // "orders" (no dot) and "public." (empty table) must both yield
-        // None/None — a `guard -> true` or `&& -> ||` mutant fabricates
-        // Some("")/Some(...) fields from free-form export names.
         for name in ["orders", "public.", ".orders"] {
             let dir = tempfile::tempdir().unwrap();
             let plan = fin_plan(dir.path());
@@ -1858,7 +1470,7 @@ mod tests {
         }
     }
 
-    /// The declared table is the source's identity: split on a real dot for a SQL engine, kept whole for a document store, and never guessed from a document store's export name.
+    /// The declared table is the source's identity.
     #[test]
     fn a_declared_table_is_split_per_engine_and_a_mongo_name_is_never_split() {
         use crate::config::SourceType::{Mongo, Postgres};
@@ -1893,7 +1505,7 @@ mod tests {
         }
     }
 
-    /// The cursor range is the run's incremental evidence: it is recorded when the run knows the cursor column OR a high bound, not only when it knows both.
+    /// The cursor range is the run's incremental evidence.
     #[test]
     fn a_cursor_range_is_recorded_when_the_run_knows_the_column_or_the_high_bound() {
         for (column, high) in [
@@ -1920,7 +1532,7 @@ mod tests {
         }
     }
 
-    /// The end-of-run manifest pass reads the destination: a declared part that is not there costs the run its `validated`.
+    /// The end-of-run manifest pass reads the destination.
     #[test]
     fn the_manifest_pass_withdraws_validated_when_a_declared_part_is_not_at_the_destination() {
         let dir = tempfile::tempdir().unwrap();
@@ -1977,10 +1589,8 @@ mod tests {
     fn success_gate_refuses_resume_over_a_completed_prefix() {
         let dir = tempfile::tempdir().unwrap();
         let plan = fin_plan(dir.path());
-        // Empty prefix: resume proceeds.
         check_success_gate_for_resume(&plan, &crate::state::StateStore::open_in_memory().unwrap())
             .expect("no _SUCCESS -> gate passes");
-        // Completed prefix: refuse loudly.
         std::fs::write(dir.path().join("_SUCCESS"), b"xxh3:0\n").unwrap();
         let err = check_success_gate_for_resume(
             &plan,
@@ -2010,7 +1620,6 @@ mod tests {
         assert!(!destination_has_success(&cfg), "no marker -> false");
         std::fs::write(dir.path().join("_SUCCESS"), b"xxh3:0\n").unwrap();
         assert!(destination_has_success(&cfg), "marker present -> true");
-        // An unopenable destination counts as "not complete" (re-run it).
         let bad = cfg_local(Some("/nonexistent/definitely/missing"), None);
         assert!(!destination_has_success(&bad));
     }
@@ -2086,18 +1695,11 @@ mod tests {
         );
     }
 
-    /// The crash-in-[last unit → marker] window repair: a complete split prefix
-    /// (canonical manifest present, no `_SUCCESS`) gets the marker written by
-    /// the `--split --resume` nothing-to-run path; an already-marked prefix is
-    /// untouched (idempotent — no clobber of the existing body). RED against
-    /// removing the repair call: the marker would stay missing forever.
+    /// The crash-in-[last unit → marker] window repair.
     #[test]
     fn repair_missing_split_marker_writes_only_when_absent() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = cfg_local(Some(&dir.path().to_string_lossy()), None);
-        // The last unit's canonical manifest is in the prefix; the pool died
-        // before the marker. The units' own Success manifests TILE — the
-        // round-5 generation gate certifies completion from them.
         std::fs::write(dir.path().join("manifest.json"), b"{\"parts\":[]}").unwrap();
         for (run, name, lo, hi) in [
             ("u0", "orders#0", None, Some("m")),
@@ -2122,7 +1724,6 @@ mod tests {
             "every unit complete + no marker -> the resume path must repair it"
         );
         let body = std::fs::read_to_string(dir.path().join("_SUCCESS")).unwrap();
-        // Idempotent: a second call must not rewrite (marker already present).
         std::fs::write(dir.path().join("manifest.json"), b"{\"parts\":[1]}").unwrap();
         repair_missing_split_marker(&cfg, "orders");
         assert_eq!(
@@ -2131,15 +1732,12 @@ mod tests {
             "an existing marker is never clobbered by a later repair pass"
         );
 
-        // FRANKEN generations (round-5 lifecycle HIGH): windows that do not
-        // tile — #1's lo does not meet #0's hi — must REFUSE the mint: an
-        // external `_SUCCESS` consumer would read a gapped dataset silently.
         let dir = tempfile::tempdir().unwrap();
         let cfg = cfg_local(Some(&dir.path().to_string_lossy()), None);
         std::fs::write(dir.path().join("manifest.json"), b"{\"parts\":[]}").unwrap();
         for (run, name, lo, hi) in [
             ("u0", "orders#0", None, Some("b1")),
-            ("u1", "orders#1", Some("c1"), None), // gen-2 boundary: (b1, c1] never exported
+            ("u1", "orders#1", Some("c1"), None),
         ] {
             let mut m = split_unit_success(run, name);
             m.split_window = Some(crate::manifest::SplitWindow {
@@ -2274,14 +1872,6 @@ mod tests {
         assert_eq!(destination_uri_for_manifest(&c), "stdout");
     }
 
-    // ── rerun-accumulation guard wording (audit findings #5/#19/#30) ─────────
-    //
-    // `warn_if_prefix_has_completed_run` only counts as the "loud" fix shape in
-    // `tests/audit_rerun.rs` when its message matches that test's deliberately
-    // narrow `warned_about_existing_prefix` matcher.  Pin the wording here so a
-    // future copy-edit can't quietly drop below that bar and re-open the silent
-    // double-count footgun while the live audit isn't running.
-
     /// Mirrors `tests/audit_rerun.rs::warned_about_existing_prefix`.
     fn audit_matcher_accepts(s: &str) -> bool {
         let s = s.to_lowercase();
@@ -2299,7 +1889,6 @@ mod tests {
             audit_matcher_accepts(&msg),
             "rerun warning must trip the live audit matcher; message was: {msg}"
         );
-        // Names the prefix and the safe recovery so the operator can act.
         assert!(
             msg.contains("file:///tmp/out"),
             "must name the prefix: {msg}"
@@ -2313,9 +1902,6 @@ mod tests {
 
     #[test]
     fn rerun_warning_message_matches_live_audit_matcher_for_manifest_marker() {
-        // When only `manifest.json` is present (committed parts, no `_SUCCESS`),
-        // the `_SUCCESS` substring is gone — the message must still trip the
-        // matcher via `already has` / `prior completed run` / `orphan`.
         let msg = rerun_warning_message("file:///tmp/out", "manifest.json");
         assert!(
             msg.contains("Use --resume to continue the prior run"),

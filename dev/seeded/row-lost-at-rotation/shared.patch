@@ -1,8 +1,8 @@
 diff --git a/src/pipeline/sink/mod.rs b/src/pipeline/sink/mod.rs
-index 6adc9ea7..0f0e4e06 100644
+index 0384b248..a537e553 100644
 --- a/src/pipeline/sink/mod.rs
 +++ b/src/pipeline/sink/mod.rs
-@@ -787,6 +787,13 @@ impl ExportSink {
+@@ -675,6 +675,13 @@ impl ExportSink {
  
      /// Write one slice that is known to fit the current part's partition budget.
      fn write_batch_part(&mut self, dest_batch: &RecordBatch) -> Result<()> {
@@ -14,5 +14,5 @@ index 6adc9ea7..0f0e4e06 100644
 +        };
 +        let dest_batch = &rotated;
          self.total_rows += dest_batch.num_rows();
-         // Feed the running row count to the progress bar *during* the read, not
-         // only when the chunk completes (throttled to ~8/s).
+         if let Some(rp) = self.row_progress.as_mut() {
+             let n = dest_batch.num_rows() as i64;

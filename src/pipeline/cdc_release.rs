@@ -39,7 +39,7 @@ pub(super) struct FirstRun {
 }
 
 impl FirstRun {
-    /// The proof that `export` has never run: no record, no delivery, no checkpoint file, no slot; `None` when any is found or cannot be read.
+    /// The proof that `export` has never run: no record, no delivery, no checkpoint file, no slot.
     pub(super) fn of(
         config: &Config,
         export: &ExportConfig,
@@ -362,7 +362,7 @@ mod tests {
         assert!(FirstRun::proven(&config, &export, &state, &path, Some(&none)).is_none());
     }
 
-    /// A stop on a first run drops the slot, deletes the checkpoint and forgets the capture; an `Ok` run keeps all three.
+    /// A stop on a first run drops the slot, deletes the checkpoint and forgets the capture.
     #[test]
     fn a_stop_on_a_first_run_releases_what_the_run_created_and_a_success_keeps_it() {
         for outcome_is_stop in [true, false] {
@@ -445,7 +445,7 @@ mod tests {
         );
     }
 
-    /// A checkpoint that is already gone counts as released; one that is there is deleted; any other failure is surfaced.
+    /// A checkpoint that is already gone counts as released.
     #[test]
     fn removing_an_absent_file_is_released_already() {
         let dir = tempfile::tempdir().unwrap();

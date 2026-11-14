@@ -1,10 +1,10 @@
 diff --git a/src/pipeline/sink/mod.rs b/src/pipeline/sink/mod.rs
-index 4c9edfe8..7353c34d 100644
+index 0384b248..be87538c 100644
 --- a/src/pipeline/sink/mod.rs
 +++ b/src/pipeline/sink/mod.rs
-@@ -1061,9 +1061,7 @@ impl ExportSink {
-     /// lossless token when it reported one (MongoDB BSON `_id`), else the string
-     /// extracted from the output column (every SQL engine).
+@@ -920,9 +920,7 @@ impl ExportSink {
+ 
+     /// The keyset high-water mark to advance/checkpoint from.
      pub(in crate::pipeline) fn effective_cursor(&self) -> Option<String> {
 -        self.source_cursor
 -            .clone()

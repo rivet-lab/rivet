@@ -1,5 +1,4 @@
-//! Under `verify: content`, whether a part a crashed run committed holds the rows its chunk read:
-//! the row count the state logged, and every key inside the chunk's bounds.
+//! Under `verify: content`, whether a part a crashed run committed holds the rows its chunk read.
 
 use arrow::array::{Array, Float64Array, Int64Array};
 use arrow::datatypes::DataType;
@@ -304,7 +303,7 @@ mod tests {
         )
     }
 
-    /// A part is its chunk's only with the logged row count and every key inside the bounds; a sibling's part, a null key or garbage is not.
+    /// A part is its chunk's only with the logged row count and every key inside the bounds.
     #[test]
     fn a_part_is_its_chunks_only_by_count_and_bounds() {
         let own = parquet_of(Arc::new(Int64Array::from_iter_values(11..=20)));

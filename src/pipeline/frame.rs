@@ -1,49 +1,18 @@
 //! The batch runner's opening frame — one seam instead of eight transcriptions.
-//!
-//! Every batch commit loop used to hand-write the same preamble: create the
-//! destination, run the cross-shape manifest guard, derive the format's file
-//! extension. Copied, the preamble is exactly where the runner-bypass class
-//! breeds: the two chunk-checkpoint runners shipped WITHOUT the manifest-mode
-//! guard (their own comment records it), the same way the drift gate and the
-//! Form-B checksum harvest each skipped runners before — a per-export step
-//! that every runner must remember is a step some runner forgets.
-//!
-//! [`RunnerFrame::open`] is the only way a batch runner obtains its
-//! destination (enforced by the `runner_frame_gate` offline lint, not by
-//! convention), so the guard cannot be skipped by construction — the same
-//! trick `commit::record_part` pulls for the per-part tail.
-//!
-//! Deliberately NOT in the frame (grilled 2026-08-08, architecture review):
-//! - **part-name stamps** — three schemes exist for three reasons (keyset
-//!   keys parts off the stable `run_id` so a retry OVERWRITES its own attempt;
-//!   single/mongo use a millisecond stamp for run-uniqueness; chunked names by
-//!   chunk index). Forcing one scheme is a behavior change, not a deepening.
-//! - **the epilogue** (fingerprint → checksum harvest → drift gate) — the
-//!   parallel runners set the fingerprint through a `OnceLock` for real
-//!   concurrency reasons; unifying that is the follow-up recorded in the
-//!   review, gated on making `RunSummary::schema_fingerprint` private.
 
 use crate::destination::{self, Destination};
 use crate::error::Result;
 use crate::plan::ResolvedRunPlan;
 
-/// The opened frame: the destination (already guarded) and the format's file
-/// extension. Construct via [`RunnerFrame::open`]; there is no other door.
+/// The opened frame: the destination (already guarded) and the format's file extension.
 pub(crate) struct RunnerFrame {
     pub dest: Box<dyn Destination>,
     pub ext: String,
 }
 
 impl RunnerFrame {
-    /// Create the destination, refuse a cross-shape prefix (a batch manifest
-    /// must never clobber a CDC export's audit trail — finding #44), and
-    /// derive the part-file extension. Fails BEFORE the first part. Logs the
-    /// backend's capabilities once per run (ADR-0004) for every runner.
+    /// Create the destination, refuse a cross-shape prefix (a batch manifest must never clobber a CDC export's audit trail.
     pub(crate) fn open(plan: &ResolvedRunPlan) -> Result<Self> {
-        // open == open_unguarded + the run-start cross-shape guard; sharing the
-        // body keeps the two from drifting (roast 2026-08-09). The guard runs
-        // before the first part either way — nothing happens between build and
-        // guard that a manifest read could observe.
         let frame = Self::open_unguarded(plan)?;
         crate::manifest::guard_manifest_mode(frame.dest.as_ref(), "batch")?;
         destination::log_capabilities(
@@ -61,8 +30,7 @@ impl RunnerFrame {
         crate::manifest::guard_manifest_mode(frame.dest.as_ref(), "batch")
     }
 
-    /// [`RunnerFrame::open`] for runners that share one destination across
-    /// worker threads (parallel keyset / chunked / mongo).
+    /// [`RunnerFrame::open`] for runners that share one destination across worker threads (parallel keyset / chunked / mongo).
     pub(crate) fn open_shared(
         plan: &ResolvedRunPlan,
     ) -> Result<(std::sync::Arc<Box<dyn Destination>>, String)> {
@@ -70,22 +38,7 @@ impl RunnerFrame {
         Ok((std::sync::Arc::new(f.dest), f.ext))
     }
 
-    /// A destination + extension for a PER-ITERATION writer (each chunk / each
-    /// worker), where the cross-shape guard has ALREADY fired at run start.
-    ///
-    /// The guard is a run-start concern: it reads the prefix's existing
-    /// `manifest.json` to refuse a cross-shape overwrite. Re-running it on every
-    /// chunk is one remote GET per chunk for an answer that cannot change mid-run
-    /// — a 3000-chunk GCS export would pay 3000 serialized GETs (bug-hunt
-    /// 2026-08-08). The first `RunnerFrame::open` conversion over-applied the
-    /// guard to the sequential-checkpoint per-chunk writer, which on `main` had
-    /// created its destination WITHOUT a guard; this restores that, through the
-    /// frame so the lint stays satisfied.
-    ///
-    /// SAFE only because every module that calls this ALSO opens a GUARDED
-    /// frame at run start — pinned by `unguarded_callers_also_guard_at_run_start`
-    /// (a bare open_unguarded in a module with no guarded open is the exact
-    /// mistake this restore was undoing, so the lint refuses it).
+    /// A destination + extension for a PER-ITERATION writer (each chunk / each worker), where the cross-shape guard has ALREADY fired at run start.
     pub(crate) fn open_unguarded(plan: &ResolvedRunPlan) -> Result<Self> {
         let dest = destination::create_destination(&plan.destination)?;
         let ext = crate::format::create_format(
@@ -118,11 +71,7 @@ mod tests {
         }
     }
 
-    /// The invariant open_unguarded's safety rests on: any module that opens an
-    /// UNGUARDED frame must ALSO open a guarded one (its run-start guard). A
-    /// module that only ever calls open_unguarded has no cross-shape guard at
-    /// all — the very hole the sequential-checkpoint restore was closing, so it
-    /// must never reappear.
+    /// The invariant open_unguarded's safety rests on.
     #[test]
     fn unguarded_callers_also_guard_at_run_start() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/pipeline");
@@ -139,7 +88,6 @@ mod tests {
                     continue;
                 }
                 let t = std::fs::read_to_string(&path).unwrap();
-                // frame.rs defines both; skip the definition site.
                 if path.ends_with("frame.rs") {
                     continue;
                 }
@@ -158,13 +106,10 @@ mod tests {
         );
     }
 
-    /// The frame's whole reason to exist: a destination obtained through it
-    /// has ALREADY passed the cross-shape guard. A CDC manifest on the prefix
-    /// must refuse the frame — before any part could be written.
+    /// The frame's whole reason to exist: a destination obtained through it has ALREADY passed the cross-shape guard.
     #[test]
     fn open_refuses_a_cdc_prefix_before_any_part() {
         let dir = tempfile::tempdir().unwrap();
-        // Plant a CDC-mode manifest where the batch export wants to write.
         let manifest = serde_json::json!({
             "manifest_version": 1,
             "export_name": "frame_probe",
@@ -223,9 +168,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let f = RunnerFrame::open(&local_plan(dir.path())).expect("clean prefix opens");
         assert_eq!(f.ext, "parquet");
-        // The destination is real and WRITABLE — the frame did not swap in a
-        // stub while looking guarded. Write one byte through it and read it
-        // back off the prefix.
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), b"x").unwrap();
         f.dest

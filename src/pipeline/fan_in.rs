@@ -1,12 +1,4 @@
-//! Committing a unit, in ONE fixed order (ADR-0017): what it SAW, every part it made
-//! durable (`record_part`, on the failure path too), then — only once the unit
-//! committed — its checksums, the `validate` verdict and the runner's checkpoint.
-//! Two adapters share that order: [`commit_unit`] inline for the sequential runners,
-//! [`FanIn`] collected from any thread and drained on the parent for the parallel
-//! ones. Work distribution (spawner, pool, per-range) stays with each runner; this
-//! module owns only the tail that kept shipping bugs when each runner wrote it (a
-//! bail above the part drain, observations dropped below the bail, a panicking
-//! worker skipping the drain, guards re-implemented).
+//! Committing a unit, in ONE fixed order (ADR-0017).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
@@ -96,11 +88,7 @@ impl FanIn {
         });
     }
 
-    /// Drain on the parent, in this order: governor log, observations, every durable part
-    /// (`record_part`, `file_log` per ADR-0017), every committed unit's checksums, then the
-    /// bail if any unit failed — so nothing a worker made durable is lost to an error — and
-    /// only on a clean drain the `validate` verdict. The bail is [`unit_failures`]: `on_err`'s
-    /// message over the most stop-worthy coded unit failure, units in label order.
+    /// Drain on the parent, in this order: governor log, observations, every durable part (`record_part`, `file_log` per ADR-0017), every committed unit's checksums, then the bail if any unit failed.
     pub(crate) fn finish(
         self,
         plan: &ResolvedRunPlan,
@@ -143,7 +131,7 @@ impl FanIn {
     }
 }
 
-/// `on_err` over every unit's `label: cause`; under it the worst coded unit failure, whose line is its label alone and last, so the run exits and is coded as that unit.
+/// `on_err` over every unit's `label: cause`.
 pub(crate) fn unit_failures(
     errors: Vec<(String, anyhow::Error)>,
     on_err: impl FnOnce(&[String]) -> anyhow::Error,
@@ -165,9 +153,8 @@ pub(crate) fn unit_failures(
     causes.swap_remove(i).context(message)
 }
 
-/// Commit one unit inline: observations, every durable part, then — only if `outcome` is
-/// `Ok` — its checksums, the empty-chunk journal entry, the `validate` verdict and `checkpoint`.
-#[allow(clippy::too_many_arguments)] // the unit's identity, output and checkpoint are the arity
+/// Commit one unit inline: observations, every durable part, then.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn commit_unit(
     plan: &ResolvedRunPlan,
     summary: &mut RunSummary,
@@ -544,7 +531,7 @@ mod tests {
         );
     }
 
-    /// A failed unit records its durable parts and what it saw, then returns its own error: no checksums, no verdict, no checkpoint.
+    /// A failed unit records its durable parts and what it saw, then returns its own error.
     #[test]
     fn a_failed_unit_records_its_parts_and_skips_the_checkpoint() {
         let mut plan = test_plan();
@@ -574,7 +561,7 @@ mod tests {
         );
     }
 
-    /// An empty chunk journals its completion and checkpoints without a verdict; an empty non-chunk unit journals nothing.
+    /// An empty chunk journals its completion and checkpoints without a verdict.
     #[test]
     fn an_empty_unit_checkpoints_and_only_a_chunk_journals_its_completion() {
         for (unit, journaled) in [(UnitId::Chunk(5), 1), (UnitId::Run, 0)] {

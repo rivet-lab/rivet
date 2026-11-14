@@ -1,14 +1,4 @@
 //! **`rivet apply`** — execute a previously-generated `PlanArtifact`.
-//!
-//! Responsibilities:
-//!
-//! 1. Deserialize `PlanArtifact` from the plan JSON file.
-//! 2. Answer a replay of a plan that already applied to exit 0 with that run (unless `--force`).
-//! 3. Check staleness (warn > 1 h, error > 24 h unless `--force`).
-//! 4. For `Incremental`: validate cursor has not drifted since plan time.
-//! 5. Execute using `ChunkSource::Precomputed` so chunk boundaries from the
-//!    artifact are replayed without re-running `SELECT min/max` queries.
-//! 6. Persist outcomes (manifest, cursor, metrics) via `StateStore` as usual, and the plan id on the run that applied it.
 
 use chrono::{DateTime, Duration, Utc};
 use std::path::Path;
@@ -32,10 +22,6 @@ pub fn run_apply_command(
     summary_output: Option<&Path>,
     json_output: bool,
 ) -> Result<()> {
-    // A YAML config selects the wave-ordered multi-export path (plan→apply
-    // cycle): run every export wave-by-wave in ascending `wave:` order — or,
-    // with `--pool N`, as one bounded work-stealing pool (#166). A JSON plan
-    // artifact falls through to the sealed single-export replay below.
     if plan_file.ends_with(".yaml") || plan_file.ends_with(".yml") {
         if let Some(m) = pool {
             return super::run::run_pool(
@@ -77,42 +63,15 @@ pub fn run_apply_command(
         );
     }
 
-    // 1. Load artifact
     let started_at = Utc::now();
     let artifact = PlanArtifact::from_file(plan_file)?;
 
-    // 1a. Tamper-evidence (ADR-0005 PA10, finding #16): reject a plan whose
-    //     `resolved_plan` was edited after planning before we run any query.
-    //     Unlike staleness/cursor-drift this is NOT bypassable by --force —
-    //     a hand-edited execution contract is never something the operator
-    //     can opt into; the only correct recovery is to re-run `rivet plan`.
     artifact.verify_integrity()?;
 
-    // 1b. Un-applicable inline-url plan (finding #17): a plan generated from an
-    //     inline `url:` config has its credentials redacted to `REDACTED@…`
-    //     with no env/file reference to re-resolve them, so apply would die
-    //     deep in the driver with an opaque auth/"password missing" error.
-    //     Catch it here with the exact remedy.
     reject_unrecoverable_inline_url(&artifact)?;
 
-    // Track which preflight checks --force actually overrode for this run.
-    // Threaded into RunSummary.apply_context so the run report carries an
-    // auditable record of bypassed gates (finding F5 of the 0.7.5 audit).
     let mut force_bypassed: Vec<String> = Vec::new();
 
-    // 2. Open StateStore — F13 (0.7.5 audit) resolution policy:
-    //    a) If the artifact recorded the original config path AND that
-    //       directory exists, open state next to it.  This is the only
-    //       path that keeps `apply` consistent with `rivet run`'s state
-    //       location, so cursors, manifests, and schema history line up.
-    //    b) Otherwise fall back to the plan file's own directory — the
-    //       pre-0.7.5 behaviour, which is the right answer when the
-    //       config has been deleted or moved and the operator just
-    //       wants to replay the artifact in isolation.
-    //
-    //    The fallback path also emits a WARN so the operator notices
-    //    the divergence (e.g. plan files stored separately from
-    //    configs without explicit intent).
     let plan_dir = Path::new(plan_file)
         .parent()
         .unwrap_or_else(|| Path::new("."));
@@ -145,9 +104,6 @@ pub fn run_apply_command(
     let state_path = state_dir.join(".rivet_state.db");
     let state = StateStore::open(state_path.to_str().unwrap_or(".rivet_state.db"))?;
 
-    // 3. A replay of a point-in-time plan that already applied to exit 0 (a retry
-    //    whose first try died after rivet finished) answers with that run and
-    //    extracts nothing. A reusable plan continues the stored cursor instead.
     let reusable = artifact.is_reusable();
     if !reusable
         && let Some(run_id) =
@@ -176,7 +132,6 @@ pub fn run_apply_command(
         );
     }
 
-    // 4. Staleness check, for a point-in-time plan only: a reusable plan has no age.
     let warn_threshold = Duration::hours(1);
     let error_threshold = Duration::hours(24);
     let staleness = if reusable {
@@ -194,10 +149,6 @@ pub fn run_apply_command(
             );
         }
         StalenessCheck::StaleError(age) => {
-            // F6 (0.7.5 audit): "56035 hours old" is mathematically
-            // correct but unreadable.  For ages above 48 h switch to
-            // days + the actual `created_at` date; below that keep
-            // hours so the boundary right above 24 h reads cleanly.
             let age_phrase = if age.num_hours() >= 48 {
                 format!(
                     "{} days old (created {})",
@@ -224,15 +175,6 @@ pub fn run_apply_command(
         }
     }
 
-    // 5. Cursor drift check for Incremental exports
-    //
-    // Finding F1 of the 0.7.5 audit: the error message has always told the
-    // user "pass --force to skip this check", but until 0.7.5 the code did
-    // not actually honour `--force` here.  The flag now bypasses the bail
-    // with a WARN log, matching the documented contract and the analogous
-    // staleness path above.
-    // A cursor the last successful run moved by applying this same plan is the
-    // plan's own progress, not drift.
     if artifact.computed.cursor_snapshot.is_some() {
         let source = artifact.resolved_plan.source.state_key();
         let current = state.get(&artifact.export_name, &source)?.last_cursor_value;
@@ -265,32 +207,21 @@ pub fn run_apply_command(
         }
     }
 
-    // 6. Build ChunkSource from the pre-computed ranges in the artifact
     let chunk_source = if artifact.computed.chunk_ranges.is_empty() {
         ChunkSource::Detect
     } else {
         ChunkSource::Precomputed(artifact.computed.chunk_ranges.clone())
     };
 
-    // 7. Execute using the plan from the artifact, carrying the apply audit
-    // context into the run report (F5).
     let apply_context = ApplyContext {
         plan_id: artifact.plan_id.clone(),
         forced: force,
         force_bypassed,
     };
-    // ADR-0005 PA1, the one clock read of an apply: the sealed plan keeps `{date}`
-    // as written and this apply resolves it to its own UTC day, as `rivet run`
-    // does; a plan frozen with `rivet plan --date`, or sealed by an earlier
-    // release, holds a resolved path and changes nothing here.
     let mut plan = artifact.resolved_plan.clone();
     plan.resolve_destination(
         &crate::destination::placeholder::PlaceholderContext::for_today(&plan.export_name),
     );
-    // The config is read BEFORE the run so the open probe knows whether to read
-    // the source primary key — the load spec recorded afterwards carries it.
-    // Recording with the key never asked for cleared the key `rivet run` had
-    // recorded (`record_load_spec` upserts; a NULL key wins over a run-origin one).
     let config = artifact
         .config_path
         .as_deref()
@@ -323,28 +254,6 @@ pub fn run_apply_command(
         super::load_spec::record_after_run(config, export, &state, cfg_dir, None, &summary);
     }
 
-    // 8. The run's tail. This arm is a FULL orchestrator — it opens the state
-    // store, drives one export to completion and writes its `export_metrics`
-    // row — so it owes the same run-over-run self-check every other tail emits,
-    // through the same seam (`run::self_check_throughput`: it holds the
-    // exactly-once deferral for a re-exec'd child and the ONE call site of
-    // `aggregate::warn_throughput_regressions`).
-    //
-    // Without it, `rivet plan -c cfg.yaml -e orders -o plan.json && rivet apply
-    // plan.json` degraded 2.7× in silence — and the degraded row then became the
-    // baseline, so the NEXT run could not flag it either — while the byte-
-    // identical export under `rivet run` warned (round-7 bughunt, the fifth tail
-    // of the runner-bypass class).
-    //
-    // No aggregate card and no `run_aggregate` row: one export is exactly the
-    // count `run::reports_run_aggregate` refuses, and the per-export card above
-    // already printed every number it would carry. The self-check is not gated
-    // on that count — a sealed artifact IS the whole invocation.
-    //
-    // The mode is `run_mode_label(1, false)` — "sequential", asked of the same
-    // producer every other runner asks, never spelled here: this replay runs one
-    // export in this process, overlapping nothing, so the self-check must keep
-    // its ACTIONABLE tail rather than excusing a regression as source sharing.
     let entry = super::aggregate::entry_from_summary(&summary);
     super::run::self_check_throughput(
         &state,
@@ -359,7 +268,7 @@ pub fn run_apply_command(
     result
 }
 
-/// The one-export document `rivet apply` writes on `--summary-output` / `--json`: the run it ran, or the run that already applied the plan.
+/// The one-export document `rivet apply` writes on `--summary-output` / `--json`.
 fn apply_document(
     entry: RunAggregateEntry,
     started_at: DateTime<Utc>,
@@ -374,7 +283,7 @@ fn apply_document(
     )
 }
 
-/// The document entry of a replay answered by `run_id`: that run's counts from its metrics row, marked `already_applied`.
+/// The document entry of a replay answered by `run_id`.
 fn already_applied_entry(
     artifact: &PlanArtifact,
     run_id: &str,
@@ -399,7 +308,7 @@ fn already_applied_entry(
     }
 }
 
-/// Record that `run_id` applied this plan, so a replay answers with it; returns the warning of a miss (the replay then extracts again).
+/// Record that `run_id` applied this plan, so a replay answers with it.
 fn record_applied_plan(
     state: &StateStore,
     artifact: &PlanArtifact,
@@ -437,16 +346,7 @@ fn already_applied_report(
     )
 }
 
-/// Finding #17: reject — with an actionable remedy — a plan whose source
-/// credentials were stripped at plan time (inline `url:`) and cannot be
-/// re-resolved at apply time.
-///
-/// `PlanArtifact::new` redacts plaintext credentials (PA9): an inline
-/// `url: "postgresql://user:pass@host/db"` becomes `postgresql://REDACTED@host/db`.
-/// That is recoverable only if the source *also* carries a reference apply can
-/// resolve (`url_env` / `url_file` / `url_secret` / `password_env` / `password_secret`, or structured `host`+`user`).
-/// When none of those exist, connecting later fails deep in the driver with an
-/// opaque auth error; surface the fix instead.
+/// Finding #17: reject — with an actionable remedy.
 fn reject_unrecoverable_inline_url(artifact: &PlanArtifact) -> Result<()> {
     let source = &artifact.resolved_plan.source;
 
@@ -459,9 +359,6 @@ fn reject_unrecoverable_inline_url(artifact: &PlanArtifact) -> Result<()> {
         return Ok(());
     }
 
-    // A redacted URL is still applicable if apply has another way to obtain
-    // credentials: an env/file URL reference, an env password, or enough
-    // structured fields to rebuild the connection.
     let has_recovery = source.url_env.is_some()
         || source.url_file.is_some()
         || source.url_secret.is_some()
@@ -546,10 +443,6 @@ mod tests {
         path.to_str().unwrap().to_string()
     }
 
-    // ── mutation-W6 gap closure ──────────────────────────────────────────────
-    // The unrecoverable-credentials gate (PA9) had no direct test: stubbing it
-    // to Ok(()) let a credential-stripped plan sail into an opaque driver auth
-    // error at apply time — the exact failure the gate exists to pre-empt.
     #[test]
     fn redacted_url_gate_requires_a_recovery_path() {
         let set = |url: Option<&str>,
@@ -569,7 +462,6 @@ mod tests {
         };
         let redacted = Some("postgresql://REDACTED@h/db");
 
-        // Un-redacted URL passes untouched.
         reject_unrecoverable_inline_url(&set(
             Some("postgresql://u:p@h/db"),
             None,
@@ -578,11 +470,9 @@ mod tests {
             None,
         ))
         .expect("plain url is applicable");
-        // Redacted with NO recovery path must refuse loudly.
         let err = reject_unrecoverable_inline_url(&set(redacted, None, None, None, None))
             .expect_err("stripped credentials with no recovery must refuse");
         assert!(err.to_string().contains("cannot be"), "actionable: {err:#}");
-        // Each recovery path independently unblocks (`||` chain, not `&&`)…
         reject_unrecoverable_inline_url(&set(redacted, Some("DB_URL"), None, None, None))
             .expect("url_env recovers");
         reject_unrecoverable_inline_url(&set(redacted, None, Some("PGPASS"), None, None))
@@ -595,10 +485,8 @@ mod tests {
         let mut a = set(redacted, None, None, None, None);
         a.resolved_plan.source.password_secret = Some("projects/p/secrets/s".into());
         reject_unrecoverable_inline_url(&a).expect("password_secret recovers");
-        // …but host WITHOUT user is not enough (`&&`, not `||`).
         reject_unrecoverable_inline_url(&set(redacted, None, None, Some("h"), None))
             .expect_err("host without user cannot rebuild the connection");
-        // A keyword/value string whose password was masked is refused the same way…
         let masked = Some("host=h user=u password=*** dbname=d");
         let err = reject_unrecoverable_inline_url(&set(masked, None, None, None, None))
             .expect_err("a masked keyword/value password cannot authenticate");
@@ -608,7 +496,6 @@ mod tests {
         );
         reject_unrecoverable_inline_url(&set(masked, Some("DB_URL"), None, None, None))
             .expect("url_env recovers");
-        // …and one that never held a password is applicable as it is.
         reject_unrecoverable_inline_url(&set(
             Some("host=/var/run/postgresql user=u dbname=d"),
             None,
@@ -618,8 +505,6 @@ mod tests {
         ))
         .expect("no password was stripped");
     }
-
-    // ── staleness enforcement ────────────────────────────────────────────────
 
     /// A plan past 24 h is refused STALE before it runs, its age in hours below 48 h and in days with its date from 48 h.
     #[test]
@@ -656,13 +541,10 @@ mod tests {
         }
     }
 
-    // ── cursor drift ─────────────────────────────────────────────────────────
-
     /// A plan refused by validation if it ran, so a mutant that excuses the drift fails here at once instead of connecting to an unreachable source.
     #[test]
     fn cursor_drift_detected_no_prior_state() {
         let mut artifact = validation_refused_artifact();
-        // Plan recorded a cursor snapshot; state store starts empty → drift.
         artifact.computed.cursor_snapshot = Some("2025-06-01T00:00:00Z".into());
         let dir = tempfile::TempDir::new().unwrap();
         let path = write_artifact(&dir, &artifact);
@@ -676,8 +558,6 @@ mod tests {
         );
         crate::error::assert_coded(&err, "RIVET_PLAN_ARTIFACT_STALE", 5);
     }
-
-    // ── replay of an applied plan (retry matrix F3) ──────────────────────────
 
     /// The state the plan's own apply left: run `r1` finished `status`, and recorded as the plan's run when it exited 0.
     fn applied_state(dir: &tempfile::TempDir, artifact: &PlanArtifact, status: &str, exit0: bool) {
@@ -736,8 +616,7 @@ mod tests {
         })
     }
 
-    /// Replayed after its own apply exited 0, a point-in-time plan answers with that run on every cycle and touches nothing;
-    /// `--summary-output` holds that run's entry, marked `already_applied` and naming the run that answered.
+    /// Replayed after its own apply exited 0, a point-in-time plan answers with that run on every cycle and touches nothing.
     #[test]
     fn a_plan_that_applied_answers_every_replay_with_its_run_and_extracts_nothing() {
         for strategy in [ExtractionStrategy::Snapshot, keyset(false)] {
@@ -789,8 +668,7 @@ mod tests {
         }
     }
 
-    /// One builder writes the apply document for both answers: a run it ran keeps its status and `answered_by_run: null`;
-    /// a replay carries the answering run's counts under `already_applied` and names it.
+    /// One builder writes the apply document for both answers.
     #[test]
     fn the_apply_document_marks_a_replay_and_leaves_a_run_unmarked() {
         let artifact = fresh_artifact();
@@ -1044,8 +922,6 @@ mod tests {
         );
     }
 
-    // ── file I/O errors ──────────────────────────────────────────────────────
-
     #[test]
     fn missing_plan_file_returns_error() {
         let err = run_apply_command(
@@ -1089,21 +965,13 @@ mod tests {
         );
     }
 
-    // ── artifact integrity / tamper-evidence (ADR-0005 PA10, finding #16) ─────
-
-    /// Offline mirror of the live RED test `audit_apply_rejects_tampered_plan`:
-    /// hand-edit `base_query` in the written plan file (orders → users), then
-    /// `apply` must REJECT it at the integrity gate — before any DB connection,
-    /// so this test needs no live source. Not bypassable by `--force`.
+    /// Offline mirror of the live RED test `audit_apply_rejects_tampered_plan`.
     #[test]
     fn apply_rejects_tampered_base_query() {
         let artifact = fresh_artifact();
         let dir = tempfile::TempDir::new().unwrap();
         let path = write_artifact(&dir, &artifact);
 
-        // Tamper the serialized artifact the same way the live test does:
-        // rewrite the embedded base_query string in place, leaving the seal
-        // (and created_at) untouched so only the integrity check can catch it.
         let json = std::fs::read_to_string(&path).unwrap();
         assert!(
             json.contains("SELECT 1"),
@@ -1120,7 +988,6 @@ mod tests {
             "tampered plan must be rejected at the integrity gate, got: {msg}"
         );
 
-        // And --force must NOT override it — a hand-edited contract is not opt-in.
         let err_forced =
             run_apply_command(&path, true, false, false, None, false, None, false).unwrap_err();
         let msg_forced = format!("{err_forced:#}");
@@ -1129,12 +996,6 @@ mod tests {
             "--force must not bypass the integrity gate, got: {msg_forced}"
         );
     }
-
-    // The "untouched artifact is accepted" half is covered deterministically and
-    // without any connection attempt by `artifact.rs::integrity_seal_accepts_
-    // untouched_artifact`, and indirectly here by `stale_error_without_force_is_
-    // rejected` / `cursor_drift_detected_no_prior_state`, which both pass the
-    // integrity gate to reach the staleness / cursor gates they assert on.
 
     #[test]
     fn a_credential_stripped_plan_and_a_pooled_artifact_are_refused_by_code() {
@@ -1156,7 +1017,7 @@ mod tests {
         crate::error::assert_coded(&err, "RIVET_CLI_OPTION_UNSUPPORTED", 1);
     }
 
-    /// The apply-side resolver: a sealed `{date}` becomes the apply's day with the template kept as the progress identity; a resolved path (a `--date` plan, an earlier release's artifact) is unchanged.
+    /// The apply-side resolver: a sealed `{date}` becomes the apply's day with the template kept as the progress identity.
     #[test]
     fn a_sealed_date_resolves_to_the_apply_day_and_a_resolved_path_is_unchanged() {
         let today = Utc::now().format("%Y-%m-%d").to_string();

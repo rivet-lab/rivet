@@ -1,14 +1,4 @@
 //! **Layer: Observability**
-//!
-//! Terminal progress bar for chunked exports.
-//!
-//! Two display backends:
-//! - **interactive** — when stderr is a TTY and `RIVET_IPC_EVENTS` is unset:
-//!   draws an `indicatif::ProgressBar` on stderr.
-//! - **IPC events** — when `RIVET_IPC_EVENTS=1` is set (we are a child of
-//!   `rivet run --parallel-export-processes`): the visual bar is hidden and
-//!   every advance emits a structured [`ipc::ChildEvent::Progress`] on stdout
-//!   so the parent can draw a unified `MultiProgress` for all children.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,19 +9,12 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use super::ipc::{self, ChildEvent};
 
 /// Chunk progress bar shown during chunked export runs.
-///
-/// Hidden when stderr is not a TTY (CI, redirected stderr) or when this
-/// process is a parallel-process child (events are emitted to the parent
-/// instead).  Shared across worker threads via [`ChunkProgress::handle`].
 pub(crate) struct ChunkProgress {
     bar: Arc<ProgressBar>,
     inner: Arc<HandleInner>,
 }
 
-/// Handle that worker threads hold.  Worker threads call [`Self::inc`] which
-/// updates the underlying `indicatif` bar **and** emits an IPC event when
-/// running as a child process, without each worker having to know about
-/// `RIVET_IPC_EVENTS` itself.
+/// Handle that worker threads hold.
 #[derive(Clone)]
 pub(crate) struct ChunkProgressHandle {
     bar: Arc<ProgressBar>,
@@ -40,15 +23,9 @@ pub(crate) struct ChunkProgressHandle {
 
 struct HandleInner {
     export_name: String,
-    /// Position counter used as the truth source for the `chunks_done`
-    /// field on emitted events, because indicatif's internal counter is
-    /// not directly readable in a thread-safe-yet-cheap way and we need a
-    /// u64 we can ship through stdout / the in-process channel.
+    /// Position counter used as the truth source for the `chunks_done` field on emitted events.
     chunks_done: AtomicU64,
-    /// True iff this process is publishing events to a unified UI (either
-    /// stdout-IPC for parallel-export-processes children, or the
-    /// in-process channel for `--parallel-exports`).  Worker `inc()` calls
-    /// emit a `Progress` event when this is set.
+    /// True iff this process is publishing events to a unified UI (either stdout-IPC for parallel-export-processes children, or the in-process channel for `--parallel-exports`).
     capturing: bool,
     started_at: Instant,
 }
@@ -57,15 +34,8 @@ impl ChunkProgress {
     pub(crate) fn new(export_name: &str, total_chunks: usize) -> Self {
         let capturing = ipc::capturing_events();
         let bar = if capturing {
-            // Either a child of `--parallel-export-processes` (parent
-            // renders), or `--parallel-exports` with the in-process UI
-            // thread active.  Either way the indicatif bar is just noise.
             ProgressBar::with_draw_target(Some(total_chunks as u64), ProgressDrawTarget::hidden())
         } else {
-            // Sequential run with piped/non-attended stderr (CI): a bare
-            // indicatif bar is fine — no concurrent producer would step on
-            // its redraws.  Attended sequential runs install the in-process
-            // card UI in `run.rs` and take the `capturing` branch above.
             let b = ProgressBar::new(total_chunks as u64);
             b.set_style(
                 ProgressStyle::with_template(
@@ -98,10 +68,7 @@ impl ChunkProgress {
         Self { bar, inner }
     }
 
-    /// Advance by one chunk and update the running row count (single-threaded
-    /// caller).  Equivalent to `self.handle().inc(...)` but kept as a thin
-    /// wrapper for the existing call sites that own a `ChunkProgress`
-    /// directly.
+    /// Advance by one chunk and update the running row count (single-threaded caller).
     pub(crate) fn inc(&self, total_rows_so_far: i64) {
         self.handle_view().inc(total_rows_so_far);
     }
@@ -123,23 +90,13 @@ impl ChunkProgress {
     }
 
     pub(crate) fn finish(&self, total_rows: i64) {
-        // `finish_with_message` would leave the bar visible; in parallel runs
-        // that lingering line gets interleaved into the next export's summary.
-        // The final row count is duplicated in `RunSummary` (interactive) and
-        // in the `Finished` IPC event (child mode), so clearing is safe.
         self.bar.set_message(fmt_rows(total_rows));
         self.bar.finish_and_clear();
     }
 }
 
 impl Drop for ChunkProgress {
-    /// Make sure the underlying indicatif bar is finished even when the
-    /// owning function bailed before reaching the success path.
-    ///
-    /// Important in `run_with_reconnect`'s retry loop: each retry creates
-    /// a fresh `ChunkProgress`, and without an explicit `finish_and_clear`
-    /// the dangling bar can leave a partial cursor state behind on a
-    /// subsequent draw.
+    /// Make sure the underlying indicatif bar is finished even when the owning function bailed before reaching the success path.
     fn drop(&mut self) {
         if !self.bar.is_finished() {
             self.bar.finish_and_clear();
@@ -148,21 +105,14 @@ impl Drop for ChunkProgress {
 }
 
 impl ChunkProgressHandle {
-    /// Advance by one chunk.  Updates the local indicatif bar (a no-op in
-    /// hidden mode) and emits a `Progress` event when a unified UI is
-    /// active (parallel-export-processes child or `--parallel-exports`).
+    /// Advance by one chunk.
     pub(crate) fn inc(&self, total_rows_so_far: i64) {
-        // Advance the chunk count, then refresh rows/rate at the new position.
         self.bar.inc(1);
         self.inner.chunks_done.fetch_add(1, Ordering::Relaxed);
         self.set_rows(total_rows_so_far);
     }
 
     /// Update the running row count / rate WITHOUT advancing the chunk count.
-    /// Called per source batch so the bar ticks *during* a chunk's read — a wide
-    /// first chunk (e.g. 250k rows / 90 MB) would otherwise sit frozen at
-    /// "0 rows" for seconds, reading as idle. Emits a `Progress` event at the
-    /// current `chunks_done` so a unified UI updates too.
     pub(crate) fn set_rows(&self, total_rows_so_far: i64) {
         let elapsed = self.inner.started_at.elapsed().as_secs_f64();
         let msg = if elapsed >= 0.5 && total_rows_so_far > 0 {
@@ -217,15 +167,12 @@ mod tests {
 
     #[test]
     fn set_rows_updates_rows_without_advancing_the_chunk_counter() {
-        // Per-batch row updates must NOT bump the chunk count — only `inc`
-        // (per-chunk completion) does. Otherwise a wide chunk's many batches
-        // would each look like a finished chunk.
         let pb = ChunkProgress::new("orders", 10);
         let h = pb.handle();
         h.set_rows(500);
         h.set_rows(1_200);
         assert_eq!(pb.inner.chunks_done.load(Ordering::Relaxed), 0);
-        h.inc(1_500); // a real chunk completion still advances it
+        h.inc(1_500);
         assert_eq!(pb.inner.chunks_done.load(Ordering::Relaxed), 1);
     }
 

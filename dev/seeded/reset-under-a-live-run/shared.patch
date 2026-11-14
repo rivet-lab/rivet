@@ -1,7 +1,8 @@
 diff --git a/src/pipeline/cli.rs b/src/pipeline/cli.rs
+index 19eaed5e..294269e6 100644
 --- a/src/pipeline/cli.rs
 +++ b/src/pipeline/cli.rs
-@@ -365,12 +365,7 @@
+@@ -320,12 +320,7 @@ fn reset_family(
      config_path: &str,
      between: impl FnOnce(),
  ) -> Result<()> {
@@ -14,7 +15,7 @@ diff --git a/src/pipeline/cli.rs b/src/pipeline/cli.rs
      between();
      let mut cleared = 0;
      for batch in children.chunks(RESET_LEASES) {
-@@ -380,10 +375,7 @@
+@@ -335,10 +330,7 @@ fn reset_family(
                  children.len()
              )
          });
@@ -26,7 +27,7 @@ diff --git a/src/pipeline/cli.rs b/src/pipeline/cli.rs
          state.reset_all(batch, source)?;
          cleared += batch.len();
      }
-@@ -654,12 +646,6 @@
+@@ -602,12 +594,6 @@ pub fn reset_chunk_checkpoint(config_path: &str, export_name: &str) -> Result<()
      }
      let source = reset_chunks_source(&config, &format!("export '{export_name}'"))?;
      let state = StateStore::open(config_path)?;
@@ -37,9 +38,9 @@ diff --git a/src/pipeline/cli.rs b/src/pipeline/cli.rs
 -        "remove its chunk checkpoint",
 -    )?;
      let n = state.reset_chunk_checkpoint(export_name, &source)?;
-     // Abandoning the resume also clears the committed/verified boundary, so
-     // `rivet state progression` does not report a stale chunk boundary after
-@@ -732,14 +718,6 @@
+     state.delete_progression(export_name)?;
+     println!(
+@@ -674,14 +660,6 @@ pub fn reset_chunk_checkpoints_stuck(config_path: &str) -> Result<()> {
      );
  
      for name in targets {

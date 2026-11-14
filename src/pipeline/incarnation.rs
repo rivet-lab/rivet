@@ -23,7 +23,7 @@ fn with_incarnation(
     })
 }
 
-/// The plan with the collection UUID the database lists now, for a MongoDB plan that continues stored progress; `None` when the plan has nothing to bind.
+/// The plan with the collection UUID the database lists now, for a MongoDB plan that continues stored progress.
 pub(crate) fn bound_to_collection(plan: &ResolvedRunPlan) -> Result<Option<ResolvedRunPlan>> {
     let Some(collection) = collection_to_bind(plan) else {
         return Ok(None);

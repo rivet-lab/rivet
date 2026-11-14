@@ -1,8 +1,8 @@
 diff --git a/src/pipeline/job.rs b/src/pipeline/job.rs
-index ff3912db..0ad7e437 100644
+index f753b27a..3b3c0842 100644
 --- a/src/pipeline/job.rs
 +++ b/src/pipeline/job.rs
-@@ -1275,7 +1275,7 @@ fn execute_resolved_plan(
+@@ -1109,7 +1109,7 @@ fn execute_resolved_plan(
      tail: TailPolicy<'_>,
      mut meta: MetaConn<'_>,
  ) -> (Result<()>, RunSummary) {
@@ -12,10 +12,36 @@ index ff3912db..0ad7e437 100644
          return (Err(e), summary);
      }
 diff --git a/src/pipeline/run.rs b/src/pipeline/run.rs
-index b82de90d..c9b2890e 100644
+index f2b2f384..38ec5fdc 100644
 --- a/src/pipeline/run.rs
 +++ b/src/pipeline/run.rs
-@@ -860,7 +860,7 @@ pub(crate) fn run_waves(
+@@ -549,15 +549,16 @@ pub fn run(
+             e
+         ),
+     }
+-    if plan.machine_output
+-        && let Some(out) = summary_output
+-        && let Err(e) = aggregate::write_json(out, &agg)
+-    {
+-        log::warn!(
+-            "aggregate: failed to write summary JSON to {}: {:#}",
+-            out.display(),
+-            e
+-        );
++    if plan.machine_output {
++        if let Some(out) = summary_output
++            && let Err(e) = aggregate::write_json(out, &agg)
++        {
++            log::warn!(
++                "aggregate: failed to write summary JSON to {}: {:#}",
++                out.display(),
++                e
++            );
++        }
+     }
+     if json_output {
+         print_json_summary(&agg);
+@@ -597,7 +598,7 @@ pub(crate) fn run_waves(
      });
      let runnable: Vec<ExportConfig> = match &children {
          Some((_, declared)) => declared.iter().map(|e| (*e).clone()).collect(),
@@ -24,10 +50,25 @@ index b82de90d..c9b2890e 100644
      };
      let children_ok = children.map(|(ok, _)| ok);
      let parallel = children_ok.is_some();
-@@ -1702,8 +1702,9 @@ pub(crate) fn run_pool(
-     // prefix-level skip applies here unchanged.
-     // Same recipe rule as `run`/`run_waves`, and checked BEFORE the `--split`
-     // escape: a recipe must not run here whether or not the pool splits it.
+@@ -710,10 +711,10 @@ pub(crate) fn run_waves(
+     }
+ 
+     let finished_at = chrono::Utc::now();
+-    if let Some(bracket) = run_harm
+-        && let Some(window) = wave_harm_window(peak_concurrency, all_exports.len())
+-    {
+-        bracket.close_and_warn(window);
++    if let Some(bracket) = run_harm {
++        if let Some(window) = wave_harm_window(peak_concurrency, all_exports.len()) {
++            bracket.close_and_warn(window);
++        }
+     }
+ 
+     let entries = if parallel {
+@@ -1106,8 +1107,9 @@ pub(crate) fn run_pool(
+     };
+     let state = StateStore::open(config_path)?;
+ 
 -    let mut effective: Vec<ExportConfig> = RunSet::select(&config, None)?
 -        .in_process(&config.source, &config_dir, None)?
 +    let mut effective: Vec<ExportConfig> = config

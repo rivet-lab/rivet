@@ -1,7 +1,8 @@
 diff --git a/src/pipeline/frame.rs b/src/pipeline/frame.rs
+index 46f124fc..9d6e2232 100644
 --- a/src/pipeline/frame.rs
 +++ b/src/pipeline/frame.rs
-@@ -57,8 +57,8 @@
+@@ -26,8 +26,8 @@ impl RunnerFrame {
  
      /// Refuse a prefix that holds another export shape's manifest, before any runner stores a plan, anchor or cursor.
      pub(crate) fn refuse_cross_shape_prefix(plan: &ResolvedRunPlan) -> Result<()> {
@@ -11,4 +12,4 @@ diff --git a/src/pipeline/frame.rs b/src/pipeline/frame.rs
 +        Ok(())
      }
  
-     /// [`RunnerFrame::open`] for runners that share one destination across
+     /// [`RunnerFrame::open`] for runners that share one destination across worker threads (parallel keyset / chunked / mongo).

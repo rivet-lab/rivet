@@ -1,23 +1,4 @@
 //! **Layer: Execution** — parallel `_id`-range reader for MongoDB (OPT-4++).
-//!
-//! `parallel: N` on a keyset (`source.mongo.page_size`) Mongo export fans the
-//! collection into `N` disjoint `_id` ranges and reads them concurrently. Each
-//! worker keyset-pages its own slice (`find({_id: {$gte: lo, $lt: hi}})`), so
-//! the union is the whole collection with **no overlap and no gap**: `_id` is
-//! immutable, so a document never migrates between ranges mid-read (the
-//! miss/dup hazard that rules out range-splitting a mutable chunk key does not
-//! apply here). Range boundaries come from a cheap `$sample` (a random cursor,
-//! not a collection scan — see [`MongoSource::sample_id_ranges`]).
-//!
-//! Safe on a **quiescent** collection. It is NOT point-in-time consistent under
-//! concurrent writes at scale (the snapshot window can't cover a multi-minute
-//! parallel scan) — that is CDC's job, not this reader's.
-//!
-//! Fan-in mirrors the SQL `run_chunked_parallel` shape without re-plumbing its
-//! `i64`-typed range machinery: each worker writes its OWN part files
-//! (run-unique + worker-unique names) and returns its `PartRecord`s; the main
-//! thread drains them through the shared `commit::record_part` so the
-//! I2→I7→counters/journal ordering stays single-threaded and race-free.
 
 use super::{RunSummary, commit};
 use crate::config::IncrementalCursorMode;
@@ -73,16 +54,7 @@ pub(crate) fn run_mongo_parallel(
         settle: None,
     };
 
-    // Fan out: each worker reads its disjoint slice, writes its parts, returns
-    // (rows, PartRecords). Errors surface per worker and fail the whole run.
-    // ONE guarded open at run start (the cross-shape manifest GET), shared into
-    // every worker — N workers used to open GUARDED frames concurrently: N remote
-    // GETs for an answer that cannot change mid-run (roast 2026-08-09, #173; the
-    // chunked sibling was fixed the same way).
     let (shared_dest, shared_ext) = super::frame::RunnerFrame::open_shared(plan)?;
-    // No permits and no governor: one unthrottled thread per `_id` range. A worker
-    // publishes each page the moment it is durable, so a failed — or panicking —
-    // worker still hands back what it wrote.
     let fan = super::fan_in::FanIn::default();
     std::thread::scope(|s| {
         for (w, range) in ranges.iter().enumerate() {
@@ -108,8 +80,6 @@ pub(crate) fn run_mongo_parallel(
             });
         }
     });
-    // ADR-0029: the worker range is this runner's commit unit; a worker contributes
-    // the checksums of every page it wrote, failed or not, so its parts stay covered.
     let drained = fan.finish(
         plan,
         summary,
@@ -140,8 +110,6 @@ pub(crate) fn run_mongo_parallel(
         summary.total_rows
     );
 
-    // ADR-0028: fingerprint/drift/Form-B application lives in the ONE seam
-    // (`finalize::finalize_export`), fed from the ledger above.
     Ok(())
 }
 
@@ -169,10 +137,6 @@ fn range_worker_pages(
     let mut page = 0usize;
 
     loop {
-        // Test-only: a per-worker error mid-range (Err path, not a crash). A crash
-        // cannot reach the drain at all, so it is blind to whether the drain
-        // records durable parts before bailing — the same reason the chunked
-        // runners needed RIVET_TEST_ERROR_AT rather than RIVET_TEST_PANIC_AT.
         if let Err(e) =
             crate::test_hook::maybe_error_at_index("mongo_parallel_worker", worker as i64)
         {
@@ -182,14 +146,10 @@ fn range_worker_pages(
                 format!("range {worker}: {e}"),
             ));
         }
-        // run-unique (stamp) + worker-unique (w{worker}) + page-unique.
         let base = format!(
             "{}_{}_w{}_keyset{}.{}",
             plan.export_name, stamp, worker, page, ext
         );
-        // Deferred commit: the worker collects its parts (the main thread drains
-        // them through `record_part`), unlike the sequential runner which commits
-        // each page as it arrives — the one axis the two callers differ on.
         let (parts, p) = super::keyset::read_keyset_page(
             &mut src,
             plan,
@@ -199,7 +159,6 @@ fn range_worker_pages(
             &**dest,
             &base,
         );
-        // Published before a failed page's error leaves, so its durable parts still count.
         for part in parts {
             fan.part(unit, part);
         }

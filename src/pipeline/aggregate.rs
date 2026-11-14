@@ -1,17 +1,4 @@
 //! Aggregate summary for a `rivet run` invocation.
-//!
-//! A "run aggregate" is the rollup of every per-export `RunSummary` produced in
-//! a single CLI invocation.  It answers "what did the last cron run do as a
-//! whole?" without forcing the operator to scroll through 15 per-export blocks.
-//!
-//! The aggregate is persisted to `.rivet_state.db` (`run_aggregate` table) so
-//! that downstream tooling can query past runs without re-parsing logs.
-//! Optionally it is also written to a JSON file via `--summary-output`.
-//!
-//! Invariant: aggregation is purely observational.  It is built **after** every
-//! per-export `record_metric` call and never on its own affects the exit code
-//! or which exports run — failures still propagate through the existing
-//! `Result` chain.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -26,13 +13,6 @@ use super::summary::RunSummary;
 use super::{format_bytes, strip_chunked_recovery_hint};
 
 /// Machine-readable view of one `export_metrics` row for `rivet metrics --json`.
-///
-/// `ExportMetric` (the internal `state` row) derives only `Debug`, so this DTO
-/// is the stable on-the-wire contract — decoupled from the storage struct the
-/// same way [`super::report::RunReport`] is decoupled from `RunSummary`, so the
-/// JSON schema can evolve independently of column layout.  Field names mirror
-/// the `export_metrics` columns; `Option` fields are emitted as JSON `null`
-/// (kept, not skipped) so consumers see a fixed-shape object every row.
 #[derive(Debug, Clone, Serialize)]
 struct MetricRowJson {
     pub export_name: String,
@@ -180,10 +160,6 @@ pub(super) fn snapshot_leg_entry(
 }
 
 /// Build the aggregate from per-export entries plus run-level metadata.
-///
-/// `started_at` / `finished_at` are wall-clock timestamps captured by the
-/// caller — duration is derived from them rather than from the sum of
-/// per-export durations (parallel runs would otherwise overcount).
 pub(super) fn build(
     entries: Vec<RunAggregateEntry>,
     started_at: DateTime<Utc>,
@@ -223,10 +199,7 @@ pub(super) fn build(
     }
 }
 
-/// One export's run-over-run throughput comparison input: current and
-/// previous-success `(rows, duration_ms)`, plus the export MODE each side ran
-/// in (`full` / `incremental` / …) — a mode switch changes what the work IS,
-/// so the two rows are not two measurements of one thing.
+/// One export's run-over-run throughput comparison input.
 pub(super) struct ThroughputPair {
     pub export_name: String,
     pub cur_rows: i64,
@@ -234,32 +207,19 @@ pub(super) struct ThroughputPair {
     pub prev_rows: i64,
     pub prev_ms: i64,
     pub cur_mode: String,
-    /// `None` when the baseline row predates the `mode` column — unknown mode
-    /// is not evidence of a change, so it does not block the comparison.
+    /// `None` when the baseline row predates the `mode` column.
     pub prev_mode: Option<String>,
 }
 
-/// Floor below which a run is too small/short for a throughput comparison to
-/// mean anything (startup overhead dominates; noise reads as regression).
-/// Applied to BOTH sides: the fixed per-run cost (connect, schema detect,
-/// boundary probe, destination init, manifest/validate) is charged to the
-/// CURRENT run too, so a short current run understates its own rows/s.
+/// Floor below which a run is too small/short for a throughput comparison to mean anything (startup overhead dominates.
 const REGRESSION_MIN_ROWS: i64 = 10_000;
 const REGRESSION_MIN_MS: i64 = 5_000;
-/// A run counts as regressed when its rows/s drop to ≤ 2/3 of the previous
-/// success (≥1.5× slower per row).
+/// A run counts as regressed when its rows/s drop to ≤ 2/3 of the previous success (≥1.5× slower per row).
 const REGRESSION_RATIO: f64 = 1.5;
-/// The two runs must have moved comparable amounts of data: past this factor
-/// the fixed per-run cost is amortized over wildly different row counts and the
-/// ratio measures SHAPE, not speed (a weekend backfill vs a daily delta).
+/// The two runs must have moved comparable amounts of data.
 const REGRESSION_MAX_SCALE: i64 = 2;
 
 /// Why two runs of one export are NOT comparable on rows/s.
-///
-/// Made explicit (and named) because the skip condition is the load-bearing
-/// half of this check: a false "5.0× slower — check governor sheds" on 154
-/// healthy exports drowns the one real regression, the same
-/// diagnostic-bypass harm a false UNSAFE does in preflight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Incomparable {
     /// Either side moved too few rows for rows/s to mean anything.
@@ -268,13 +228,11 @@ pub(super) enum Incomparable {
     TooShort,
     /// The two runs moved very different amounts of data.
     ScaleMismatch,
-    /// The export ran in a different mode (a `full` backfill vs an
-    /// `incremental` delta reads as a regression while both are healthy).
+    /// The export ran in a different mode (a `full` backfill vs an `incremental` delta reads as a regression while both are healthy).
     ModeChanged,
 }
 
-/// The comparability rule, pure and total: `None` means the pair may be
-/// compared, `Some(reason)` names the refusal.
+/// The comparability rule, pure and total: `None` means the pair may be compared, `Some(reason)` names the refusal.
 pub(super) fn incomparable(p: &ThroughputPair) -> Option<Incomparable> {
     if p.cur_rows < REGRESSION_MIN_ROWS || p.prev_rows < REGRESSION_MIN_ROWS {
         return Some(Incomparable::TooFewRows);
@@ -299,28 +257,6 @@ pub(super) fn incomparable(p: &ThroughputPair) -> Option<Incomparable> {
 }
 
 /// Does this run's concurrency mode make a per-export rows/s DROP expected?
-///
-/// Exports sharing one source/network/CPU legitimately each run slower while
-/// the run's makespan improves — the very trade `--pool` is for. Unknown modes
-/// are treated as concurrent: hedged text on a serial run is harmless, a
-/// confident "check governor sheds" on a pool run is a false accusation.
-///
-/// `pool-serial` is a pool run that never overlapped anything (`--pool 1`, or
-/// one export left after the `--resume` skip): nothing shared the source, so it
-/// belongs on the serial side however it was invoked. The label producers are
-/// the three `*_mode_label` functions in `pipeline::run` — `wave_mode_label`,
-/// `pool_mode_label` and `run_mode_label` (the top-level runner's, added by the
-/// round-5 fix) — and `every_run_mode_label_a_runner_can_emit_is_classified`
-/// DERIVES that set from run.rs rather than naming it, so a fourth producer (or
-/// a fourth arm on one of the three) cannot land unclassified: an unclassified
-/// SERIAL label falls through the unknown arm below and silently loses the
-/// actionable pointer. `run.rs`'s `a_runner_never_spells_its_concurrency_claim_
-/// as_a_literal` grades the other half of the same contract (who may emit
-/// them); the two guards are one list, seen from each side.
-///
-/// `"single"` is recognised but has no producer today — see the RETIRED list in
-/// `every_run_mode_label_a_runner_can_emit_is_classified`, which is what keeps
-/// that fact true rather than merely written down.
 fn mode_shares_the_source(run_mode: &str) -> bool {
     !matches!(
         run_mode,
@@ -328,23 +264,7 @@ fn mode_shares_the_source(run_mode: &str) -> bool {
     )
 }
 
-/// Pure run-over-run self-check: compare each export's throughput (rows/s)
-/// against its previous SUCCESS and name the material regressions.
-///
-/// This is the run proving itself: the 2026-08-13 field regression (a
-/// governor reading its own exhaust ran every keyset export 2–2.7× slower,
-/// +1h48m) was invisible in the moment — counts matched, statuses were green,
-/// and only a hand-written SQL join over two state DBs surfaced it days
-/// later. Rows/s (not wall time) so organic data growth does not read as a
-/// slowdown; pairs of incomparable SHAPE are refused by [`incomparable`].
-///
-/// `run_mode` is the current run's concurrency mode (`sequential`, `pool`,
-/// `parallel-threads`, …). It never suppresses the line — the field regression
-/// happened on a concurrent run, so suppressing there would delete the signal
-/// where it is needed most — but on a source-sharing mode the text says so
-/// instead of blaming a shed the operator's own `--pool` explains. The
-/// BASELINE run's mode is not recorded on `export_metrics`, so this scopes the
-/// attribution, not the comparison.
+/// Pure run-over-run self-check: compare each export's throughput (rows/s) against its previous SUCCESS and name the material regressions.
 pub(super) fn throughput_regressions(pairs: &[ThroughputPair], run_mode: &str) -> Vec<String> {
     let mut out = Vec::new();
     for p in pairs {
@@ -381,21 +301,7 @@ pub(super) fn throughput_regressions(pairs: &[ThroughputPair], run_mode: &str) -
     out
 }
 
-/// Read each successful export's previous success from the state DB and WARN
-/// about material throughput regressions. Best-effort: a state read failing
-/// never affects the run.
-///
-/// Call it through `run::self_check_throughput` — its ONE caller, and the seam
-/// that makes "EVERY run self-reports degradation" true rather than
-/// aspirational: every orchestrator tail (`run`'s two branches, `run_waves`,
-/// `run_pool`) routes through it with no export-count gate, and a re-exec'd
-/// child defers to the parent that aggregates it so no export is reported
-/// twice. Both halves shipped broken — the check reached `run()` alone
-/// (bughunt 2026-08-14).
-///
-/// `run_mode` is the same string [`build`] records on the aggregate — passed
-/// here so the warning can say which concurrency the run used (see
-/// [`throughput_regressions`]).
+/// Read each successful export's previous success from the state DB and WARN about material throughput regressions.
 pub(super) fn warn_throughput_regressions(
     state: &StateStore,
     entries: &[RunAggregateEntry],
@@ -403,10 +309,6 @@ pub(super) fn warn_throughput_regressions(
 ) {
     let mut pairs = Vec::new();
     for e in entries.iter().filter(|e| e.status == "success") {
-        // Direct success query, excluding this run's own row — a fixed
-        // recent-window scan went blind after ~9 consecutive failures,
-        // exactly during the degraded period the baseline exists for
-        // (bughunt 2026-08-13).
         let Ok(Some(prev)) = state.get_last_success_metric_excluding(&e.export_name, &e.run_id)
         else {
             continue;
@@ -458,13 +360,6 @@ pub(super) fn print(agg: &RunAggregate) {
         "  duration:    {} (wall clock)",
         format_duration(agg.duration_ms)
     );
-    // Transient destination retry ATTEMPTS the RetryLayer scheduled. Per-attempt
-    // lines log at DEBUG after the first, so this aggregate is where the
-    // "destination was flaky" signal lives — a nonzero count on a green run is
-    // early warning of throttling/network degradation, not a data problem. The
-    // wording is owned by `transient_retries_summary`, which is also what the
-    // single-export summary card renders: the interceptor counts on the way INTO
-    // a retry, so neither line may claim the retries recovered.
     if let Some(v) =
         crate::destination::transient_retries_summary(crate::destination::transient_retries_total())
     {
@@ -512,7 +407,7 @@ fn write_chunked_recovery(w: &mut dyn std::io::Write, exports: &[&str], config_p
     let _ = std::io::Write::write_all(w, chunked_recovery_text(exports, config_path).as_bytes());
 }
 
-/// The recovery block: a plain run resumes each interrupted checkpoint; a reset abandons it (then run WITHOUT --resume).
+/// The recovery block: a plain run resumes each interrupted checkpoint.
 fn chunked_recovery_text(exports: &[&str], config_path: Option<&str>) -> String {
     let cfg = match config_path {
         Some(p) if !p.is_empty() => format!("--config {p}"),
@@ -567,9 +462,7 @@ fn truncate(s: &str, max_chars: usize) -> String {
     }
 }
 
-/// Persist to state DB and optionally write JSON.  Failures are logged but
-/// **never propagated** — aggregation is observational and must not turn a
-/// successful run into a failed one.
+/// Persist to state DB and optionally write JSON.
 pub(super) fn persist(state: &StateStore, agg: &RunAggregate, summary_output: Option<&Path>) {
     if let Err(e) = state.record_run_aggregate(agg) {
         log::warn!(
@@ -652,17 +545,7 @@ impl ChildReport {
 /// Every child's report, by the export it ran.
 pub(super) type ChildReports = HashMap<String, ChildReport>;
 
-/// Reconstruct per-export entries for `--parallel-export-processes`, where each
-/// child wrote its own `record_metric` row and the parent had no in-memory
-/// `RunSummary`.  Strategy:
-///
-/// - Look up the `export_metrics` row of the run id the child reported for its
-///   own export; never a row found by name, which another holder of the name
-///   may have written on a shared state.
-/// - Otherwise synthesize a `failed` entry, preferring the child's exit-code
-///   error message if the parent recorded one, with the run id and mode the
-///   child reported when it reported any.
-/// - Add the snapshot legs the child reported.
+/// Reconstruct per-export entries for `--parallel-export-processes`, where each child wrote its own `record_metric` row and the parent had no in-memory `RunSummary`.
 pub(super) fn collect_child_entries(
     state: &StateStore,
     exports: &[&crate::config::ExportConfig],
@@ -675,13 +558,6 @@ pub(super) fn collect_child_entries(
         let mut entry: Option<RunAggregateEntry> = None;
         match own.map(|(run_id, _)| state.get_metric_by_run_id(run_id)) {
             Some(Ok(row)) => {
-                // A `running` row is an IN-FLIGHT marker, not an outcome: a
-                // hard-crashed child (OOM-kill, panic — there is no catch_unwind)
-                // leaves exactly such a row, with partial `total_rows`. Taking it
-                // as the child's result reported those partial rows as the
-                // export's outcome AND discarded the real cause, which the parent
-                // holds in `child_failures` and which only the fallback below
-                // surfaces.
                 if let Some(m) = row
                     && m.status != "running"
                     && m.export_name == export.name
@@ -780,22 +656,12 @@ mod tests {
         assert!(none.is_empty(), "no failed chunked export, no block");
     }
 
-    /// A child that CRASHED must be reported as failed with its own cause — not
-    /// as its half-finished in-flight aggregate.
-    ///
-    /// Since a run's aggregate is projected as each part lands, a hard-killed
-    /// child leaves a `running` row carrying whatever it had committed. Reading
-    /// the latest row without checking that it is TERMINAL turned that into the
-    /// export's reported outcome: partial rows presented as the result, and the
-    /// real failure — which the parent holds and only the fallback surfaces —
-    /// thrown away.
+    /// A child that CRASHED must be reported as failed with its own cause.
     #[test]
     fn a_crashed_childs_in_flight_row_is_not_mistaken_for_its_outcome() {
         let dir = tempfile::tempdir().unwrap();
         let state = crate::state::StateStore::open_at_path(&dir.path().join("state.db")).unwrap();
 
-        // Exactly what a killed child leaves behind: parts on record, so the
-        // projection wrote a `running` aggregate with PARTIAL rows.
         for i in 0..3 {
             state
                 .record_file(crate::state::FilePart {
@@ -824,8 +690,6 @@ mod tests {
             })
             .unwrap();
 
-        // Not inert: the row really is there, really is `running`, and really
-        // carries rows — otherwise there is nothing to mistake for an outcome.
         let latest = state.get_metrics(Some("orders"), 1).unwrap();
         assert_eq!(latest.len(), 1, "the projection must have written a row");
         assert_eq!(latest[0].status, "running");
@@ -936,12 +800,11 @@ mod tests {
         );
     }
 
-    /// A CDC child killed after its snapshot leg finished: a failed entry with no run of its own, counting the leg it reported.
+    /// A CDC child killed after its snapshot leg finished.
     #[test]
     fn a_cdc_child_killed_after_its_leg_counts_the_leg_it_reported() {
         let dir = tempfile::tempdir().unwrap();
         let state = crate::state::StateStore::open_at_path(&dir.path().join("state.db")).unwrap();
-        // The leg's own row is on the state; the drain never finished, so the export has none.
         finished_metric(&state, "pg_cdc__snapshot_items", 30, 1);
         let export = cdc_export("cdc: { initial: snapshot }\n");
         let failures = HashMap::from([(
@@ -979,7 +842,6 @@ mod tests {
     fn another_holders_leg_row_is_not_folded_into_this_childs_entry() {
         let dir = tempfile::tempdir().unwrap();
         let state = crate::state::StateStore::open_at_path(&dir.path().join("state.db")).unwrap();
-        // This child's stream, then another source's run of the same name lands its baseline leg.
         finished_metric(&state, "pg_cdc", 3, 1);
         finished_metric(&state, "pg_cdc__snapshot_items", 70, 1);
         let export = cdc_export("cdc: { initial: snapshot }\n");
@@ -1014,7 +876,6 @@ mod tests {
     fn another_holders_row_of_the_same_name_is_not_this_childs_entry() {
         let dir = tempfile::tempdir().unwrap();
         let state = crate::state::StateStore::open_at_path(&dir.path().join("state.db")).unwrap();
-        // The other source's run of `pg_cdc` succeeds while this child's run fails.
         finished_metric(&state, "pg_cdc", 3, 1);
         let export = cdc_export("cdc: { initial: snapshot }\n");
         let failures = HashMap::from([("pg_cdc".to_string(), "exited with status 1".to_string())]);
@@ -1057,7 +918,6 @@ mod tests {
     fn a_reported_run_without_a_row_fails_under_the_reported_run_id() {
         let dir = tempfile::tempdir().unwrap();
         let state = crate::state::StateStore::open_at_path(&dir.path().join("state.db")).unwrap();
-        // The leg's failed row: the run id the failed CDC export reports, under the leg's name.
         finished_metric(&state, "pg_cdc__snapshot_items", 40, 1);
         let export = cdc_export("cdc: { initial: snapshot }\n");
         let mut ev = finished("pg_cdc", 0);
@@ -1112,8 +972,7 @@ mod tests {
     use super::*;
     use chrono::Duration;
 
-    /// A comparable pair by default — same export mode both sides, so each
-    /// test names only the dimension it is about.
+    /// A comparable pair by default — same export mode both sides, so each test names only the dimension it is about.
     fn pair(
         name: &str,
         cur_rows: i64,
@@ -1132,25 +991,7 @@ mod tests {
         }
     }
 
-    /// The honest output for a run that exported nothing is an empty-but-VALID
-    /// document, never silence.
-    ///
-    /// A `partition_by` export over a currently-empty table expands to zero
-    /// children, so `run()`'s tail reaches here with no entries. A machine
-    /// consumer on the other end of `--json` / `--summary-output` must still get
-    /// a parseable object saying so — `total_exports: 0` is an answer,
-    /// `json.load("")` is a crash. (The routing that decides whether to EMIT it
-    /// is pinned by `run::tail_plan_emits_a_machine_document_for_a_zero_export_run`;
-    /// this is the document half.)
-    ///
-    /// Distinct from `build_with_zero_exports_is_well_formed`, which checks the
-    /// STRUCT's counters: what a `--json` consumer holds is the SERIALIZED form,
-    /// where an absent `per_export` or a skipped zero field is just as
-    /// unparseable downstream as an empty stream.
-    ///
-    /// RED against a `build` that miscounts an empty entry list (proven with
-    /// `entries.len().max(1)`: `total_exports` reads 1) or a serializer that
-    /// drops zero-valued / empty fields.
+    /// The honest output for a run that exported nothing is an empty-but-VALID document, never silence.
     #[test]
     fn a_zero_export_run_still_builds_a_valid_document() {
         let now = Utc::now();
@@ -1237,7 +1078,7 @@ mod tests {
         let agg = build(
             vec![
                 entry("a", "success", 1, 0, 0),
-                entry("b", "running", 0, 0, 0), // never reached terminal verdict
+                entry("b", "running", 0, 0, 0),
             ],
             started,
             finished,
@@ -1268,13 +1109,9 @@ mod tests {
         assert_eq!(format_duration(3_725_000), "1h 2m 5s");
     }
 
-    /// The run-over-run self-check that answers "prove the next run is not
-    /// strangling itself": a material rows/s drop vs the last success must be
-    /// named, organic growth and noise must not. RED-proven against a mutant
-    /// inverting the ratio comparison.
+    /// The run-over-run self-check that answers "prove the next run is not strangling itself".
     #[test]
     fn throughput_regressions_flag_real_slowdowns_only() {
-        // 2.4× slower per row (the field regression's shape) → flagged.
         let out = throughput_regressions(
             &[pair("big", 1_000_000, 24_000, 1_000_000, 10_000)],
             "sequential",
@@ -1284,7 +1121,6 @@ mod tests {
             out[0].contains("big") && out[0].contains("slower"),
             "{out:?}"
         );
-        // 1.2× — within noise/growth → silent.
         assert!(
             throughput_regressions(
                 &[pair("ok", 1_000_000, 12_000, 1_000_000, 10_000)],
@@ -1292,7 +1128,6 @@ mod tests {
             )
             .is_empty()
         );
-        // Faster run → silent.
         assert!(
             throughput_regressions(
                 &[pair("fast", 1_000_000, 8_000, 1_000_000, 10_000)],
@@ -1300,11 +1135,6 @@ mod tests {
             )
             .is_empty()
         );
-        // Rows GREW 1.8× while wall grew 1.8× — throughput flat → silent
-        // (wall-time comparison would have false-flagged this; rows/s is the
-        // honest unit). Kept inside the comparability band on purpose, so it
-        // still exercises the RATIO rather than being short-circuited by the
-        // scale rule below.
         assert!(
             throughput_regressions(
                 &[pair("grew", 1_800_000, 18_000, 1_000_000, 10_000)],
@@ -1312,7 +1142,6 @@ mod tests {
             )
             .is_empty()
         );
-        // Tiny/short runs are noise → silent even at 10× slower.
         assert!(
             throughput_regressions(&[pair("tiny", 500, 5_000, 500, 500)], "sequential").is_empty()
         );
@@ -1323,40 +1152,17 @@ mod tests {
         );
     }
 
-    /// The comparability rule is the load-bearing half of the self-check: a
-    /// confident "5.0× slower — check governor sheds" on a healthy run is the
-    /// diagnostic-bypass harm (154 false alarms drown the one real one). Each
-    /// case below is a pair the check must REFUSE to compare, and each was a
-    /// false WARN before this rule existed.
-    ///
-    /// RED-proven, one mutant per rule, each reverting to the pre-fix code
-    /// (`left` is the mutant's verdict, `right` the required one):
-    ///
-    ///  * `p.cur_ms < REGRESSION_MIN_MS` → `p.cur_ms <= 0` — the floor applied
-    ///    to the PREVIOUS side only: `left: None, right: Some(TooShort)`.
-    ///  * drop the `ScaleMismatch` arm: `left: None, right: Some(ScaleMismatch)`.
-    ///  * drop the `ModeChanged` arm: `left: None, right: Some(ModeChanged)`.
-    ///
-    /// The fixture carries FOUR pairs, one of them a genuine regression, so a
-    /// mutant that refuses everything (`incomparable` → always `Some`) is also
-    /// RED — the filter must SELECT, not merely return empty.
+    /// The comparability rule is the load-bearing half of the self-check.
     #[test]
     fn throughput_regressions_refuse_pairs_of_incomparable_shape() {
-        // (a) The weekend backfill baselining a daily delta: both sides clear
-        // every noise floor, the ratio is 5.0×, and nothing is wrong.
         let backfill = pair("orders", 40_000, 6_000, 2_000_000, 60_000);
         assert_eq!(incomparable(&backfill), Some(Incomparable::ScaleMismatch));
-        // (b) A 4 s current run: fixed per-run cost (connect, schema detect,
-        // boundary probe, manifest/validate) is most of its wall, so its
-        // rows/s understates itself — the same reason `prev_ms` has a floor.
         let short_cur = pair("short-cur", 40_000, 4_000, 80_000, 5_000);
         assert_eq!(incomparable(&short_cur), Some(Incomparable::TooShort));
-        // (c) A mode switch changes what the work IS.
         let mut mode_flip = pair("switched", 100_000, 40_000, 100_000, 10_000);
         mode_flip.cur_mode = "incremental".into();
         mode_flip.prev_mode = Some("full".into());
         assert_eq!(incomparable(&mode_flip), Some(Incomparable::ModeChanged));
-        // (d) …and one genuine regression, same shape both runs.
         let real = pair("real", 1_000_000, 24_000, 1_000_000, 10_000);
         assert_eq!(incomparable(&real), None);
 
@@ -1369,16 +1175,7 @@ mod tests {
         assert!(out[0].contains("real"), "{out:?}");
     }
 
-    /// A concurrency mode is not a regression: under `--pool` every export
-    /// shares the source, so per-export rows/s falls while the makespan
-    /// improves — the run must not blame the governor for the operator's own
-    /// `--pool`. The line still PRINTS (the field regression happened on a
-    /// concurrent run; suppressing there deletes the signal where it is needed
-    /// most) but says which mode it ran.
-    ///
-    /// RED-proven against `mode_shares_the_source` → `false` for every mode
-    /// (the pre-fix behaviour: one text for all modes): the `contains("pool")`
-    /// assert fails.
+    /// A concurrency mode is not a regression: under `--pool` every export shares the source, so per-export rows/s falls while the makespan improves.
     #[test]
     fn throughput_regression_text_names_a_source_sharing_mode() {
         let p = || pair("orders", 1_000_000, 24_000, 1_000_000, 10_000);
@@ -1393,7 +1190,6 @@ mod tests {
             serial[0].contains("check governor sheds"),
             "a serial run keeps the direct attribution: {serial:?}"
         );
-        // Every mode the aggregate records, classified.
         for m in [
             "parallel-threads",
             "parallel-processes",
@@ -1402,36 +1198,18 @@ mod tests {
         ] {
             assert!(mode_shares_the_source(m), "{m} shares the source");
         }
-        // `"single"` is here as a VALUE the classifier recognises, not as a
-        // label a runner emits — no producer has ever returned it (see the
-        // RETIRED list in `every_run_mode_label_a_runner_can_emit_is_classified`,
-        // which fails if that changes). Completeness over the labels runners
-        // really emit is that test's job, derived; this list is text coverage.
         for m in ["sequential", "wave-sequential", "single"] {
             assert!(!mode_shares_the_source(m), "{m} is serial");
         }
-        // A pool that never overlapped anything shared nothing: `--pool 1`, or
-        // one export left after the `--resume` skip, must keep the ACTIONABLE
-        // tail. (See `every_run_mode_label_a_runner_can_emit_is_classified`.)
         let serial_pool = throughput_regressions(&[p()], "pool-serial");
         assert!(
             serial_pool[0].contains("check governor sheds"),
             "a serialized pool must not excuse a regression as source sharing: {serial_pool:?}"
         );
-        // An unrecognised mode must hedge, not accuse — hedged text on a serial
-        // run is harmless, a confident "check governor sheds" on a concurrent
-        // one is a false accusation. (This case used to be spelled
-        // `concurrent-siblings`, the string the single-export tail passed for a
-        // re-exec'd child; that child now defers its self-check to the parent,
-        // which reports under the run-wide mode, so no caller emits it.)
         assert!(mode_shares_the_source("a-mode-added-next-release"));
     }
 
-    /// Drop `//` comments so a doc's ``[`wave_mode_label`]`` cannot be read as a
-    /// definition, and a doc's `"pool-serial"` cannot be read as a label a
-    /// function returns. (Line-scoped, like run.rs's sibling scanner: it is used
-    /// only to locate `fn` definitions and to slice their bodies, both of which
-    /// are comment-free.)
+    /// Drop `//` comments so a doc's ``[`wave_mode_label`]`` cannot be read as a definition, and a doc's `"pool-serial"` cannot be read as a label a function returns.
     fn code_only(src: &str) -> String {
         src.lines()
             .map(|l| l.split("//").next().unwrap_or(""))
@@ -1459,46 +1237,13 @@ mod tests {
         out
     }
 
-    /// Every function `pipeline::run` DEFINES that can PRODUCE a label, with the
-    /// labels it can return — derived from the TYPE, not from the name.
-    ///
-    /// The dimension is "every value that can reach [`mode_shares_the_source`]",
-    /// and those values arrive as `&'static str` (through `RunModes`, whose map
-    /// is keyed by export and whose fallback is the run's own label). So a
-    /// producer is any top-level `fn` in run.rs whose RETURN type mentions
-    /// `&'static str` — directly (`wave_mode_label`, `pool_mode_label`,
-    /// `run_mode_label`) or inside a container (`wave_batch_modes` and
-    /// `pool_export_modes` return `Vec<(String, &'static str)>`).
-    ///
-    /// Naming was the earlier rule and it was narrower than its own claim:
-    /// `wave_batch_modes` is a real producer of the string that reaches the
-    /// classifier and matched no `*_mode_label` pattern. It is safe only because
-    /// it DELEGATES to `wave_mode_label`; one `else { "wave-solo" }` there would
-    /// have classified a serial label as concurrent with both guards green
-    /// (round-7 bughunt). A delegating producer therefore contributes no labels
-    /// of its own but must be SEEN — hence the emptiness rule below, which is
-    /// "no literals ⇒ must delegate", not the old unconditional "must have
-    /// literals" (a producer whose one non-literal arm returned a constant
-    /// passed on the strength of its siblings).
-    ///
-    /// Top-level `const NAME: &str = "…"` declarations are folded in so a
-    /// producer returning a named constant is still graded BY VALUE rather than
-    /// silently reading as a delegating one.
-    ///
-    /// LIMITS, since a text parser cannot be sound: it sees run.rs only (a
-    /// producer moved to another module is invisible), it reads the return type
-    /// syntactically (a type alias for `&'static str` would not match), and it
-    /// cannot evaluate an arm that returns a computed value — a `format!`-built
-    /// label, or one read from config. Every producer that exists today is a
-    /// total function over literals, and the emptiness rule turns the
-    /// computed-arm case into a loud failure rather than a silent pass.
+    /// Every function `pipeline::run` DEFINES that can PRODUCE a label, with the labels it can return.
     fn mode_label_producers() -> Vec<(String, Vec<String>)> {
         let whole = include_str!("run.rs");
         let product = &whole[..whole
             .find("\n#[cfg(test)]")
             .expect("run.rs has test modules")];
         let code = code_only(product);
-        // Top-level string constants, so a `return SOME_CONST` arm is graded.
         let mut consts: Vec<(String, String)> = Vec::new();
         for line in code.lines().filter(|l| !l.starts_with(char::is_whitespace)) {
             let Some(rest) = line.split_once("const ").map(|(_, r)| r) else {
@@ -1516,7 +1261,6 @@ mod tests {
             .match_indices('\n')
             .map(|(i, _)| (i + 1, code[i + 1..].lines().next().unwrap_or("")))
         {
-            // Top-level definitions only: a `fn` inside an `impl` or a test
             // module is indented, and rustfmt keeps it that way.
             let decl = line
                 .strip_prefix("pub ")
@@ -1531,8 +1275,6 @@ mod tests {
             }
             let sig_end = at + code[at..].find('{').expect("a fn has a body");
             let signature = &code[at..sig_end];
-            // The RETURN type, never a parameter: `RunModes::per_export` takes a
-            // map of `&'static str` and produces no label of its own.
             let returns_label = signature
                 .split_once("->")
                 .is_some_and(|(_, ret)| ret.contains("&'static str"));
@@ -1572,41 +1314,10 @@ mod tests {
     }
 
     /// Derive the classified dimension from the PRODUCERS, never re-type it.
-    ///
-    /// `mode_shares_the_source` classifies by VALUE and treats anything it does
-    /// not recognise as concurrent — a deliberate fail-safe for the TEXT, but it
-    /// means a runner that starts emitting a new serial label silently loses the
-    /// actionable "check governor sheds / adaptive batch shrinks / source load"
-    /// pointer, and nothing fails.
-    ///
-    /// So this calls the label functions in `run` and classifies what they
-    /// return — and then, because "the producers" is itself a dimension someone
-    /// has to keep up to date, PARSES run.rs for every `*_mode_label` definition
-    /// and every literal in it, and fails if one was never classified above.
-    /// That second half is the finding: round 4 wrote this guard over the wave's
-    /// and the pool's deciders and its doc called them "the only producers";
-    /// round 5 extracted a THIRD, `run_mode_label`, taught run.rs's sibling
-    /// guard about it and left this one asking two of three — the arc's own
-    /// recurring defect (fix a class in one file, not in its sibling). A hand
-    /// list cannot catch its own omission, so the list is derived.
-    ///
-    /// The other half of the contract — that no runner spells a label inline
-    /// instead of asking a producer — is `run.rs`'s
-    /// `a_runner_never_spells_its_concurrency_claim_as_a_literal`. Both grade
-    /// the same set; only this one can grade it without naming it.
-    ///
-    /// RED against dropping `"pool-serial"` from the serial arm (the serialized
-    /// pool then reads as source-sharing), against a label function that returns
-    /// the concurrent string for a run that never overlapped, and — the
-    /// derivation half — against a fourth arm on any producer (verified with
-    /// `run_mode_label` returning `"threads-serial"` at `peak == 1 && !processes`:
-    /// `run_mode_label can emit "threads-serial", which no case above
-    /// classifies`).
     #[test]
     fn every_run_mode_label_a_runner_can_emit_is_classified() {
         use crate::pipeline::run::{pool_mode_label, run_mode_label, wave_mode_label};
         let mut classified: std::collections::BTreeSet<&'static str> = Default::default();
-        // Concurrency achieved → the run really did share the source.
         for m in [
             wave_mode_label(2),
             wave_mode_label(9),
@@ -1620,9 +1331,6 @@ mod tests {
                 "{m} is emitted for a run that overlapped exports"
             );
         }
-        // Asked for concurrency, got none (the cost gate serialized the wave;
-        // `--pool 1` or a single pending export; a top-level run left with one
-        // export whichever path asked) → nothing shared the source.
         for m in [
             wave_mode_label(0),
             wave_mode_label(1),
@@ -1640,13 +1348,7 @@ mod tests {
             );
         }
 
-        // The dimension itself, derived: every producer run.rs defines, and
-        // every label it can return, must have been classified above.
         let producers = mode_label_producers();
-        // Anti-inertness floor, NOT the dimension: a parser that matched
-        // nothing (or lost the module boundary) would otherwise pass this test
-        // by grading an empty set. Today's five are the three deciders plus the
-        // wave's and the pool's per-export producers.
         assert!(
             producers.len() >= 5,
             "the producer parser found {} label producers — expected at least the \
@@ -1666,12 +1368,6 @@ mod tests {
             }
         }
 
-        // …and the serial arm may not accumulate dead weight either: each label
-        // it recognises is either produced today or named RETIRED, which is
-        // checked, not asserted in prose. `"single"` has never had a producer
-        // (it shipped with the classifier in 884f3df2 as a defensive entry);
-        // `mode_shares_the_source`'s doc says so, and this is what keeps that
-        // sentence honest if a producer ever starts emitting it.
         const RETIRED: [&str; 1] = ["single"];
         let producible: std::collections::BTreeSet<&str> = producers
             .iter()
@@ -1706,9 +1402,9 @@ mod tests {
 
     #[test]
     fn truncate_respects_char_boundary_with_unicode() {
-        let s = "αβγδ".repeat(100); // multibyte unicode, 400 chars
+        let s = "αβγδ".repeat(100);
         let t = truncate(&s, 10);
-        assert_eq!(t.chars().count(), 11); // 10 + ellipsis
+        assert_eq!(t.chars().count(), 11);
     }
 
     /// A skipped run's entry carries its reason into `per_export[]`; any other keeps `null`.
@@ -1761,7 +1457,6 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(parsed.is_array(), "empty metrics must serialize as []");
         assert_eq!(parsed.as_array().unwrap().len(), 0);
-        // Must NOT leak the human-table sentinel into the machine contract.
         assert!(!json.contains("No metrics recorded yet"));
     }
 
@@ -1774,7 +1469,6 @@ mod tests {
         assert_eq!(rows.len(), 2);
 
         let first = &rows[0];
-        // Every column of `export_metrics` is present under its column name.
         for key in [
             "export_name",
             "run_id",
@@ -1803,9 +1497,7 @@ mod tests {
         assert_eq!(first["total_rows"], 42);
         assert_eq!(first["files_produced"], 2);
         assert_eq!(first["validated"], true);
-        // `None` fields are emitted as JSON null (fixed shape, not skipped).
         assert!(first["error_message"].is_null());
-        // The failed row carries its error message.
         assert_eq!(rows[1]["status"], "failed");
         assert_eq!(rows[1]["error_message"], "boom");
     }
@@ -1828,13 +1520,11 @@ mod tests {
 
         persist(&s, &agg, Some(&out));
 
-        // Recorded in DB.
         let rows = s.get_recent_run_aggregates(1).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].run_aggregate_id, agg.run_aggregate_id);
         assert_eq!(rows[0].total_rows, 10);
 
-        // Wrote JSON to nested path (parent created).
         let body = std::fs::read_to_string(&out).unwrap();
         let round: RunAggregate = serde_json::from_str(&body).unwrap();
         assert_eq!(round.run_aggregate_id, agg.run_aggregate_id);
@@ -1852,9 +1542,7 @@ mod tests {
         crate::error::assert_coded(&err, "RIVET_CLI_OUTPUT_UNWRITABLE", 1);
     }
 
-    /// A path whose text reads like a network word (`dns`, `reset`) is still a file error: the
-    /// `io::Error` kind decides, so the stop exits 1, never as a transient 2 (CI saw a temp dir
-    /// named `.tmprDnsA7` turn this refusal into exit 2).
+    /// A path whose text reads like a network word (`dns`, `reset`) is still a file error.
     #[test]
     fn an_unwritable_path_named_like_a_network_failure_is_not_transient() {
         let dir = tempfile::tempdir().unwrap();

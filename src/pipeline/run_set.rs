@@ -8,7 +8,7 @@ use crate::error::Result;
 
 use super::partition_expand;
 
-/// Proof that a run set may go to `--parallel-export-processes` children; only [`RunSet::child_processes`] makes one.
+/// Proof that a run set may go to `--parallel-export-processes` children.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ChildProcessesOk(());
 
@@ -60,7 +60,7 @@ impl RunSet {
         cli || self.config_asks_children
     }
 
-    /// The declared exports for the child processes `cli` or the config asks for, each of which resolves its own run set; `Err` is why the set runs in-process instead.
+    /// The declared exports for the child processes `cli` or the config asks for, each of which resolves its own run set.
     pub(super) fn child_processes(
         &self,
         cli: bool,
@@ -226,7 +226,7 @@ mod tests {
         assert!(named.run_child_processes(true).unwrap().is_none());
     }
 
-    /// `rivet run` refuses children for a `partition_by` set in its own words, and only when they were asked for; `rivet apply` sends the declared export.
+    /// `rivet run` refuses children for a `partition_by` set in its own words, and only when they were asked for.
     #[test]
     fn run_keeps_a_partitioned_set_in_process_and_says_why() {
         let cfg = config();
@@ -253,7 +253,7 @@ mod tests {
         );
     }
 
-    /// A set with a stdout export never goes to children: the refusal names the export and the fallback, and is silent unless children were asked for.
+    /// A set with a stdout export never goes to children.
     #[test]
     fn child_processes_take_the_declared_exports_unless_one_writes_to_stdout() {
         let cfg = config();

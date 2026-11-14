@@ -1,32 +1,4 @@
 //! **Layer: Coordinator** (config → destination → verification → render)
-//!
-//! `rivet validate` — re-run the manifest-aware `--validate` pass against
-//! an existing destination, without performing an extraction.
-//!
-//! ADR-0013 amendment: this is **not** a new trust noun.  It is a standalone
-//! driver for the same M5/M6 verification surface that `rivet run --validate`
-//! already performs at end-of-run (see [`crate::pipeline::validate_manifest`]).
-//! The verdict shape is identical; the only difference is no source query,
-//! no extraction, no state writes.
-//!
-//! Use cases:
-//! - "Is the output at this prefix still complete?" — Airflow / CI poller
-//!   between runs.
-//! - "Did someone delete a part by mistake?" — operator triage on a
-//!   suspected-broken dataset.
-//! - "Does this legacy prefix have a manifest yet?" — fast check for M6.
-//! - "Was yesterday's run complete?" — `--date YYYY-MM-DD` or `--run-id`
-//!   re-targets a prior day's prefix without re-running the export
-//!   (v0.7.2 historical-validation flags).
-//!
-//! Out of scope:
-//! - Source-side reconciliation (`COUNT(*)`).  That's `--reconcile` /
-//!   `rivet reconcile`, which already exists.
-//! - Per-byte re-fingerprint of every part (`--validate --deep`, future).
-//!
-//! Exit code: `0` if `passed` (or a never-delivered prefix: no manifest, no `_SUCCESS`, no recorded
-//! success of the export there); `3` on any explicit failure (`PartMissing`, `PartSizeMismatch`,
-//! `SuccessMarkerStale`, `RecordedDeliveryAbsent`, …).
 
 use std::path::Path;
 
@@ -48,24 +20,15 @@ pub enum ValidateOutputFormat {
 }
 
 /// Re-targeting overrides for `rivet validate`.
-///
-/// Default (`ValidateTarget::default()`) reproduces the v0.7.1 behaviour:
-/// resolve `{date}` against today's UTC date, with no `{run_id}`
-/// substitution, and use the config's destination prefix/path unchanged.
 #[derive(Debug, Default, Clone)]
 pub struct ValidateTarget {
     /// `--date YYYY-MM-DD` — override the date used for `{date}`.
     pub date: Option<NaiveDate>,
     /// `--run-id RID` — substitute `{run_id}` in the destination template.
     pub run_id: Option<String>,
-    /// `--prefix STRING` — bypass placeholder resolution entirely and
-    /// verify exactly this prefix.  Replaces both `prefix` and `path`.
+    /// `--prefix STRING` — bypass placeholder resolution entirely and verify exactly this prefix.
     pub prefix_override: Option<String>,
-    /// `--depth light|sample|full` — the graded verify layer (see
-    /// [`ValidateDepth`]).  Defaults (`ValidateDepth::default()` →
-    /// [`ValidateDepth::Full`]) to the pre-graded behaviour: all five
-    /// sections **plus** the Form B value re-read, so existing callers
-    /// constructing `ValidateTarget::default()` are unchanged.
+    /// `--depth light|sample|full` — the graded verify layer (see [`ValidateDepth`]).
     pub depth: ValidateDepth,
 }
 
@@ -82,14 +45,7 @@ impl ValidateTarget {
     }
 }
 
-/// Driver for `rivet validate <export>` (or every export when
-/// `export_name` is `None`).
-///
-/// Returns `Err` on the first explicit verification failure across the
-/// requested exports so an Airflow / CI step can branch on the exit code.
-/// Per-export verdicts are still printed to stdout / written to JSON for
-/// every export, including subsequent ones — the bail at the end is the
-/// last action.
+/// Driver for `rivet validate <export>` (or every export when `export_name` is `None`).
 pub fn run_validate_command(
     config_path: &str,
     export_name: Option<&str>,
@@ -130,10 +86,6 @@ pub fn run_validate_command(
         return Ok(());
     }
 
-    // `--prefix` only makes sense for a single export; with multiple
-    // exports it would silently re-point all of them at the same physical
-    // bytes.  Catch this at the boundary so we never head-check the wrong
-    // dataset under operator triage pressure.
     if target.prefix_override.is_some() && exports.len() > 1 {
         crate::rivet_bail!(
             crate::error::codes::CLI_OPTION_UNSUPPORTED,
@@ -146,27 +98,13 @@ pub fn run_validate_command(
     let mut hard_failures: Vec<String> = Vec::new();
 
     for export in &exports {
-        // Apply the operator-supplied re-targeting if any, else fall back
-        // to today's UTC date (same shape `rivet run` resolves at write
-        // time).
         let ctx = target.placeholder_context(&export.name);
         let mut expanded_dest =
             crate::destination::placeholder::expand_destination(export.destination.clone(), &ctx);
         if let Some(p) = &target.prefix_override {
-            // Bypass placeholder resolution: trust the operator's literal
-            // prefix.  Replace both `path` (local) and `prefix` (cloud)
-            // so whichever the backend reads picks up the override.
             expanded_dest.path = Some(p.clone());
             expanded_dest.prefix = Some(p.clone());
         }
-        // A CDC export's output is one table prefix per captured table: a
-        // `tables:` stream fans each out under `<base>/<table>/` (via
-        // `cdc_job::dest_for_table`), a single-table export uses its prefix
-        // directly. Either way the change parts live at the table prefix with an
-        // optional nested `snapshot/` dataset, and a fanned-out base holds no
-        // manifest of its own — so descend per table (using the writer's builder)
-        // rather than verifying the base, which would read back "legacy_run" and
-        // fail the `__pos` check on a missing part.
         let multiplex = export.multiplex_tables();
         let has_snapshot = export.mode == crate::config::ExportMode::Cdc
             && export.cdc.as_ref().is_some_and(|c| c.has_baseline());
@@ -185,7 +123,6 @@ pub fn run_validate_command(
                 }
             }
             None if export.mode == crate::config::ExportMode::Cdc => {
-                // Single-table CDC: the export prefix IS the one table prefix.
                 verify_cdc_table(
                     expanded_dest,
                     export.name.clone(),
@@ -197,8 +134,6 @@ pub fn run_validate_command(
                 );
             }
             None => {
-                // Batch export: verify the prefix directly — no CDC `__pos`
-                // continuity, no nested snapshot dataset.
                 verify_one_prefix(
                     expanded_dest,
                     export.name.clone(),
@@ -224,30 +159,6 @@ pub fn run_validate_command(
         }
     }
 
-    // Exit-code policy: the standalone driver fails when an export's
-    // verdict surfaced an explicit failure it could not pass over
-    // (`verdict_fails_exit`) — an M5 verification failure on a found
-    // manifest (missing part, size mismatch, stale _SUCCESS,
-    // self-inconsistent manifest) or a manifest that could not even be
-    // read (`ManifestReadError`: `manifest_found` is false, but the
-    // verifier has a concrete reason to refuse, not a legacy prefix).
-    // Surplus untracked objects (`UntrackedObject`) are surfaced in
-    // `failures` for operator audit but do NOT flip `passed`, because
-    // their cleanup is M9's job (resume), not validate's.  An operator
-    // who wants strict "no surplus allowed" can grep the JSON report for
-    // `kind: untracked_object` themselves; a future
-    // `rivet validate --strict` flag may surface that exit-code mode if
-    // demand appears (out of scope for this PR).
-    //
-    // Legacy runs (M6) keep exit 0: `passed: false` with no failures
-    // means "verifier cannot certify", not "verifier found a problem".
-    // A failing verdict is either VERIFIED-WRONG (a check ran and the data is bad:
-    // missing part, size/checksum/value mismatch, stale _SUCCESS, __pos gap,
-    // self-inconsistent manifest) or purely COULD-NOT-VERIFY (its only failures are
-    // I/O read/list errors against the destination). Only verified-wrong is the
-    // data-integrity stop-the-line class (exit 3); could-not-verify is operational
-    // (exit 1), so a chmod-000 manifest or a transient list blip does not page a
-    // corruption incident (#7 bughunt).
     let verified_wrong = all_results
         .iter()
         .filter(|r| {
@@ -261,9 +172,6 @@ pub fn run_validate_command(
         })
         .count();
     if verified_wrong > 0 {
-        // Typed so a scheduler stops rather than blindly retries. Could-not-verify
-        // verdicts + hard_failures fold into the count (the run did not fully
-        // certify), but the CLASS is driven by the verified-wrong verdict.
         return Err(crate::error::DataIntegrityError::new(format!(
             "rivet validate: {} export(s) failed verification",
             hard_failures.len() + verified_wrong + could_not_verify_verdicts
@@ -272,8 +180,6 @@ pub fn run_validate_command(
     }
     let could_not_verify = hard_failures.len() + could_not_verify_verdicts;
     if could_not_verify > 0 {
-        // Could-not-verify only (no verified-wrong verdict): operational, generic
-        // exit 1 — retry, don't stop-the-line.
         crate::rivet_bail!(
             crate::error::codes::VALIDATE_UNVERIFIED,
             "rivet validate: {could_not_verify} export(s) could not be verified"
@@ -282,7 +188,7 @@ pub fn run_validate_command(
     Ok(())
 }
 
-/// Turn each bare absent-manifest verdict of a batch export into a lost delivery when the state records a successful run of the export at that destination; an unreadable state is refused by its own code.
+/// Turn each bare absent-manifest verdict of a batch export into a lost delivery when the state records a successful run of the export at that destination.
 fn settle_recorded_deliveries(config_path: &str, results: &mut [ExportVerdict]) -> Result<()> {
     if !results
         .iter()
@@ -310,19 +216,12 @@ fn settle_recorded_deliveries(config_path: &str, results: &mut [ExportVerdict]) 
     Ok(())
 }
 
-/// Exit-code predicate for one export's verdict: non-zero iff the verifier
-/// surfaced an explicit failure (`has_failures` — "a reason an orchestrator
-/// should refuse the run") on a verdict that did not pass.  Both documented
-/// exit-0 cases survive: legacy runs (M6 — `passed: false` with no failures
-/// is "cannot certify", not "found a problem") and advisory-only verdicts
-/// (`UntrackedObject` never flips `passed`).
+/// Exit-code predicate for one export's verdict.
 fn verdict_fails_exit(v: &ManifestVerification) -> bool {
     !v.passed && v.has_failures()
 }
 
-/// Per-export verdict plus the resolved physical prefix the verifier
-/// looked at — surfaced in both pretty and JSON output so an operator can
-/// confirm at a glance which bytes were checked.
+/// Per-export verdict plus the resolved physical prefix the verifier looked at.
 struct ExportVerdict {
     name: String,
     resolved_prefix: String,
@@ -331,11 +230,6 @@ struct ExportVerdict {
 }
 
 /// Render the destination's resolved prefix for human/JSON output.
-///
-/// Cloud backends carry the data location in `prefix`; the local backend
-/// uses `path`.  Falling back to `<unresolved>` should never fire under
-/// normal config (clap + Config::load enforce one of the two) but keeps
-/// `validate` from panicking if a future config shape lands here.
 fn resolved_prefix_for_display(dest: &crate::config::DestinationConfig) -> String {
     dest.prefix
         .clone()
@@ -343,12 +237,7 @@ fn resolved_prefix_for_display(dest: &crate::config::DestinationConfig) -> Strin
         .unwrap_or_else(|| "<unresolved>".into())
 }
 
-/// Verify one CDC table's output at `table_dest`: its initial-snapshot dataset
-/// (when `has_snapshot`, a nested `snapshot/` prefix with its OWN manifest) plus
-/// its change parts. Shared by each table of a `tables:` stream AND a
-/// single-table CDC export — both write the same `<prefix>/{snapshot/, cdc-*}`
-/// shape, so both certify the snapshot and drop its (separately-verified) files
-/// from the change prefix's untracked-surplus advisory.
+/// Verify one CDC table's output at `table_dest`.
 #[allow(clippy::too_many_arguments)]
 fn verify_cdc_table(
     table_dest: crate::config::DestinationConfig,
@@ -359,8 +248,6 @@ fn verify_cdc_table(
     all_results: &mut Vec<ExportVerdict>,
     hard_failures: &mut Vec<String>,
 ) {
-    // The snapshot is a batch dataset with its own manifest — verify it, but with
-    // no `__pos` continuity check (snapshot rows carry no log position).
     if has_snapshot {
         let snap = crate::pipeline::cdc_job::dest_for_table(&table_dest, "snapshot");
         verify_one_prefix(
@@ -386,11 +273,7 @@ fn verify_cdc_table(
     );
 }
 
-/// Verify ONE resolved prefix (an export's whole destination, or one table's
-/// sub-prefix of a `tables:` CDC stream) and append its verdict / failures.
-/// `display_name` labels the verdict (`export` or `export/table[/snapshot]`);
-/// `run_cdc_pos_check` gates the CDC `__pos`-continuity re-read (off for a
-/// snapshot sub-prefix, whose batch rows carry no log position).
+/// Verify ONE resolved prefix (an export's whole destination, or one table's sub-prefix of a `tables:` CDC stream) and append its verdict / failures.
 #[allow(clippy::too_many_arguments)]
 fn verify_one_prefix(
     expanded_dest: crate::config::DestinationConfig,
@@ -416,7 +299,6 @@ fn verify_one_prefix(
             return;
         }
     };
-    // Streaming destinations have no prefix to verify — note and skip.
     if !dest.capabilities().commit_protocol.leaves_objects_at_rest() {
         log::info!(
             "export '{}': streaming destination, skipping (nothing to verify)",
@@ -426,15 +308,7 @@ fn verify_one_prefix(
     }
     match verify_at_destination(&*dest, "", target.depth) {
         Ok(mut v) => {
-            // Apply this export's `verify` policy: `content` fails the
-            // verdict when any part is only size-verified (review D).
             v.enforce_content_policy(export.verify.requires_content());
-            // A `tables:` CDC table prefix holds its initial snapshot under a
-            // nested `snapshot/` dataset with its OWN manifest (verified as a
-            // separate prefix above). The listing here therefore sees those files
-            // as "untracked" surplus — but they are a known, separately-certified
-            // dataset, not orphans. Drop that advisory so the operator isn't told
-            // real data is stray. (Non-fatal already, so `passed` is unaffected.)
             if drop_snapshot_untracked {
                 v.failures.retain(|f| {
                     !matches!(
@@ -444,23 +318,11 @@ fn verify_one_prefix(
                     )
                 });
             }
-            // Finding #20: when the operator pinned a literal `--prefix`,
-            // they asserted a real dataset lives here. An absent manifest is
-            // then NOT the benign M6 legacy-run case (exit 0) — it almost
-            // always means the prefix was never written (a misconfigured CI
-            // gate `rivet validate && deploy` sailing past nothing). Escalate
-            // that exact shape (no manifest, no other failure) to a fatal
-            // `ManifestRequiredButAbsent` so the exit gate refuses it loudly
-            // instead of silently passing. No-op for every other shape (a
-            // real manifest, or an absent one already carrying a read error).
             if target.prefix_override.is_some() {
                 v.require_manifest_present(&resolved_prefix);
             } else if let Some(window) = &export.partition_window {
                 v.require_partition_delivered(&resolved_prefix, &window.parent);
             }
-            // Capture the verdict before `v` is moved into the result: the
-            // deeper Form B checksum re-read below must run *only* on a
-            // manifest that was found and passed the standard checks.
             let manifest_verified = v.manifest_found && v.passed;
             all_results.push(ExportVerdict {
                 name: display_name.clone(),
@@ -468,11 +330,6 @@ fn verify_one_prefix(
                 verification: v,
                 recorded_as,
             });
-            // CDC-specific: re-read the parts and confirm `__pos` stayed in
-            // source-log order (no reorder / no part-boundary overlap). The
-            // manifest check above already covered per-part MD5 / size / _SUCCESS.
-            // Full-depth only — like Form B below it downloads every part, so a
-            // light/sample run skips it (keeps the depth contract consistent).
             if target.depth.runs_part_download()
                 && run_cdc_pos_check
                 && export.format == crate::config::FormatType::Parquet
@@ -486,10 +343,6 @@ fn verify_one_prefix(
                         pc.first,
                         pc.last
                     ),
-                    // A __pos VIOLATION is verified-wrong (a gap/dup in the change
-                    // stream) — data-integrity (exit 3), same class as a value
-                    // mismatch. Route it into THIS export's verdict, not
-                    // hard_failures (bughunt MED: it was exit 1, inconsistent).
                     Ok(pc) => {
                         if let Some(ev) = all_results.last_mut() {
                             ev.verification.passed = false;
@@ -502,24 +355,12 @@ fn verify_one_prefix(
                             }
                         }
                     }
-                    // A check-RUN failure (couldn't read the parts) is operational
-                    // could-not-verify → hard failure (exit 1), not corruption.
                     Err(e) => hard_failures.push(format!(
                         "export '{}': cdc __pos check could not complete: {:#}",
                         display_name, e
                     )),
                 }
             }
-            // Form B: re-read the parts and verify the per-column value
-            // checksums recorded in the manifest (catches an Arrow→Parquet
-            // encode / post-write fault the in-process Form A cannot see).
-            // Gated on a found+passed manifest: an absent (legacy pass) or
-            // unreadable manifest is already accounted for above, so re-reading
-            // it here would either break the legacy pass or double-count.
-            //
-            // Graded depth: Form B is the **only** part-download step, so it
-            // runs at `--depth full` alone.  `light` and `sample` deliberately
-            // skip it — `sample` is "all structural checks, no part bodies".
             if target.depth.runs_part_download() && manifest_verified {
                 if export.format == crate::config::FormatType::Csv
                     && let Some(ev) = all_results.last_mut()
@@ -531,15 +372,6 @@ fn verify_one_prefix(
                     );
                 }
                 match crate::source::value_checksum::validate_manifest_checksums(&*dest, "") {
-                    // A value-checksum MISMATCH is post-write corruption
-                    // (verified-wrong): fold it into THIS export's verdict so the
-                    // headline reads FAILED and the exit gate classifies it as
-                    // data-integrity (exit 3), not generic (#104). The verdict is
-                    // the just-pushed `all_results` entry (nothing pushes between).
-                    // Both are verified-wrong (exit 3) and they differ in WHERE the
-                    // operator should look: the data, or the manifest describing it.
-                    // Telling someone "value checksum" about a mis-declared row count
-                    // sends them hunting corruption in bytes that are fine.
                     Ok(Some(fault)) => {
                         use crate::pipeline::validate_manifest::Failure;
                         use crate::source::value_checksum::ReadbackFault;
@@ -555,9 +387,6 @@ fn verify_one_prefix(
                             });
                         }
                     }
-                    // An OPERATIONAL failure (could not read the manifest / a part)
-                    // is could-not-verify, NOT corruption — a hard failure (exit 1),
-                    // never mislabelled data-integrity (bughunt MED).
                     Err(e) => hard_failures.push(format!(
                         "export '{}': value-checksum re-read could not complete: {:#}",
                         display_name, e
@@ -576,23 +405,13 @@ fn verify_one_prefix(
 }
 
 /// Render the text verdicts to `h`.
-///
-/// Takes the writer rather than locking stdout itself: these lines are what an
-/// operator reads to decide whether a dataset is sound, so they need a seam a
-/// test can assert on.
 fn render_pretty(h: &mut impl std::io::Write, results: &[ExportVerdict], hard_failures: &[String]) {
     for r in results {
         let _ = writeln!(h, "── {} ──", r.name);
         let _ = writeln!(h, "  prefix:    {}", r.resolved_prefix);
         let v = &r.verification;
-        // Graded verify layer: surface how deep this pass went so a reader
-        // knows whether a PASSED verdict reconciled parts (sample/full) or
-        // only the manifest + _SUCCESS (light).
         let _ = writeln!(h, "  depth:     {}", v.depth_level);
         if v.legacy_run {
-            // The check establishes "no manifest here" and nothing more, so the
-            // line names BOTH causes rather than asserting the one it cannot
-            // know. A prefix that was never written reaches this verdict too.
             let _ = writeln!(
                 h,
                 "  status:    legacy_run (no manifest at this prefix — a pre-0.7.0 export, \
@@ -602,11 +421,6 @@ fn render_pretty(h: &mut impl std::io::Write, results: &[ExportVerdict], hard_fa
         }
         if !v.manifest_found {
             let _ = writeln!(h, "  status:    NO MANIFEST");
-            // A read-error verdict lands here (manifest present but
-            // unreadable, or head failed): its `failures` are the
-            // operator's only signal, so print them before bailing out
-            // of this export's section.  Each line carries its stable
-            // `RIVET_VERIFY_*` code in brackets so CI can grep it.
             for failure in &v.failures {
                 let _ = writeln!(h, "  failure:   [{}] {}", failure.error_code(), failure);
             }
@@ -651,21 +465,11 @@ fn render_pretty(h: &mut impl std::io::Write, results: &[ExportVerdict], hard_fa
             }
         );
         for failure in &v.failures {
-            // `Failure: Display` is the single source of truth for the message;
-            // same string the run report uses.  L14: advisory (non-fatal)
-            // entries — `UntrackedObject` surplus — are labelled "warning:" not
-            // "failure:".  They never flip `passed` and never change the exit
-            // code (cleanup is `--resume`'s job, M9), so rendering them as
-            // "failure:" beside exit 0 was contradictory.  Fatal failures keep
-            // the "failure:" label.
             let label = if failure.is_fatal() {
                 "failure:"
             } else {
                 "warning:"
             };
-            // Stable `RIVET_VERIFY_*` code in brackets ahead of the human
-            // message so an orchestrator can branch on the code without
-            // parsing the prose.
             let _ = writeln!(h, "  {}   [{}] {}", label, failure.error_code(), failure);
         }
     }
@@ -680,13 +484,7 @@ fn render_pretty(h: &mut impl std::io::Write, results: &[ExportVerdict], hard_fa
     let _ = h.flush();
 }
 
-/// Serialize one [`ManifestVerificationFailure`] to JSON with its stable
-/// `RIVET_VERIFY_*` code injected next to `kind`.
-///
-/// The derive emits `{ "kind": "...", <variant fields> }`; this adds `"code"`
-/// so a consumer can branch on the code without re-deriving it from `kind`.
-/// Returns the enriched object (or the unmodified serde value if, impossibly,
-/// the failure didn't serialize as a JSON object).
+/// Serialize one [`ManifestVerificationFailure`] to JSON with its stable `RIVET_VERIFY_*` code injected next to `kind`.
 fn failure_json(f: &crate::pipeline::validate_manifest::Failure) -> serde_json::Value {
     let mut value = serde_json::json!(f);
     if let Some(obj) = value.as_object_mut() {
@@ -698,10 +496,7 @@ fn failure_json(f: &crate::pipeline::validate_manifest::Failure) -> serde_json::
     value
 }
 
-/// Serialize a [`ManifestVerification`] to JSON, replacing the derive's plain
-/// `failures` array with one whose entries each carry their `RIVET_VERIFY_*`
-/// `code`.  All other fields (`depth_level`, `passed`, counts, …) ride the
-/// derive unchanged, so the stable wire contract is preserved and only widened.
+/// Serialize a [`ManifestVerification`] to JSON, replacing the derive's plain `failures` array with one whose entries each carry their `RIVET_VERIFY_*` `code`.
 fn verification_json(v: &ManifestVerification) -> serde_json::Value {
     let mut value = serde_json::json!(v);
     if let Some(obj) = value.as_object_mut() {
@@ -716,13 +511,6 @@ fn render_json(
     hard_failures: &[String],
     out_path: Option<String>,
 ) -> Result<()> {
-    // L14: surface advisory (non-fatal) entries — `UntrackedObject` surplus —
-    // in a dedicated top-level `warnings` array so a consumer can tell at a
-    // glance that "failures means failures".  The per-export
-    // `verification.failures` array is the stable wire contract (consumers
-    // branch on `failures[].kind`), so advisory entries stay there too — this
-    // is an additive lens over the same data, not a relocation.  Each entry
-    // also carries its stable `RIVET_VERIFY_*` `code` next to `kind`.
     let warnings: Vec<serde_json::Value> = results
         .iter()
         .flat_map(|r| {
@@ -770,8 +558,6 @@ fn render_json(
 mod tests {
     use super::*;
 
-    // ── ValidateTarget::placeholder_context ────────────────────────────────
-
     #[test]
     fn target_default_uses_today() {
         let target = ValidateTarget::default();
@@ -794,9 +580,6 @@ mod tests {
 
     #[test]
     fn target_composes_date_and_run_id() {
-        // Regression for the "run yesterday, validate today" scenario:
-        // operator passes both --date and --run-id; the resolver must see
-        // both.
         let target = ValidateTarget {
             date: Some(NaiveDate::from_ymd_opt(2026, 5, 21).unwrap()),
             run_id: Some("r-abc123".into()),
@@ -807,8 +590,6 @@ mod tests {
         assert_eq!(ctx.date, NaiveDate::from_ymd_opt(2026, 5, 21));
         assert_eq!(ctx.run_id.as_deref(), Some("r-abc123"));
     }
-
-    // ── resolved_prefix_for_display ────────────────────────────────────────
 
     #[test]
     fn resolved_prefix_prefers_cloud_prefix_over_path() {
@@ -835,13 +616,9 @@ mod tests {
         assert_eq!(resolved_prefix_for_display(&dest), "/data/out");
     }
 
-    // ── verdict_fails_exit (exit-code policy) ──────────────────────────────
-
     use crate::pipeline::validate_manifest::Failure as VFailure;
 
-    /// Verdict shape `verify_at_destination` returns when `manifest.json`
-    /// exists but cannot be read: not legacy, not passed, one explicit
-    /// `ManifestReadError`.
+    /// Verdict shape `verify_at_destination` returns when `manifest.json` exists but cannot be read.
     fn read_error_verdict() -> ManifestVerification {
         ManifestVerification {
             legacy_run: false,
@@ -859,21 +636,10 @@ mod tests {
 
     #[test]
     fn exit_gate_keeps_legacy_run_at_zero() {
-        // M6: no manifest, no failures — "cannot certify" is not "found a
-        // problem".
         assert!(!verdict_fails_exit(&ManifestVerification::legacy()));
     }
 
-    /// The legacy verdict says what the check ESTABLISHED — no manifest here —
-    /// and names both causes rather than asserting the one it cannot know.
-    ///
-    /// It read "pre-0.7.0 prefix" until 2026-09-21, which is precisely the cause
-    /// a mis-anchored run is NOT: `destination.path` is the one relative path
-    /// rivet resolves against the process CWD instead of the config's dir, so
-    /// validating from a different directory reaches this same verdict over a
-    /// prefix that was simply never written. Measured on a GENERATED config —
-    /// data under the working directory, ledger and checkpoint under the config,
-    /// and `validate` from the config's own directory printed `legacy_run`, exit 0.
+    /// The legacy verdict says what the check ESTABLISHED.
     #[test]
     fn the_legacy_verdict_names_both_causes_and_asserts_neither() {
         let verdict = ExportVerdict {
@@ -928,11 +694,6 @@ mod tests {
 
     #[test]
     fn value_checksum_mismatch_flips_verdict_and_fails_exit_gate() {
-        // #104: a `--depth full` value-checksum mismatch is post-write
-        // corruption (verified-wrong). The reclassification folds it into the
-        // verdict — sets passed=false + pushes ValueChecksumMismatch — so the
-        // exit gate fires (DataIntegrity / exit 3) instead of leaving a PASSED
-        // headline + a generic exit 1.
         let reclassified = ManifestVerification {
             manifest_found: true,
             legacy_run: false,
@@ -947,9 +708,6 @@ mod tests {
             "a value-checksum mismatch must fail the exit gate (exit 3), not pass silently"
         );
 
-        // The bug this closes: as a `hard_failure` the verdict kept passed=true,
-        // so the gate (correctly, for passed=true) did NOT fire — status PASSED,
-        // exit 1. Proven here so a regression that stops flipping `passed` is caught.
         let not_reclassified = ManifestVerification {
             manifest_found: true,
             legacy_run: false,
@@ -964,9 +722,6 @@ mod tests {
             "with passed still true the gate wrongly passes — this is exactly bug #104"
         );
     }
-
-    // ── run_validate_command end-to-end (local destination; the source URL
-    //     is never dialed — see tests/validate_historical.rs) ──────────────
 
     use crate::manifest::{
         MANIFEST_VERSION, ManifestDestination, ManifestPart, ManifestSource, ManifestStatus,
@@ -1009,8 +764,7 @@ mod tests {
         }
     }
 
-    /// Land `manifest.json` + `_SUCCESS` at `prefix` via the public writer
-    /// surface — same path the `rivet run` end-of-run writer takes.
+    /// Land `manifest.json` + `_SUCCESS` at `prefix` via the public writer surface.
     fn stage_dataset(prefix: &Path, m: &RunManifest) {
         std::fs::create_dir_all(prefix).unwrap();
         let dest = crate::destination::create_destination(&crate::config::DestinationConfig {
@@ -1022,8 +776,7 @@ mod tests {
         crate::pipeline::manifest_writer::write_manifest(&*dest, m).unwrap();
     }
 
-    /// Config with a single export pointing at `prefix`.  Written next to —
-    /// never inside — the prefix, so it can't surface as untracked surplus.
+    /// Config with a single export pointing at `prefix`.
     fn write_cfg(dir: &Path, prefix: &Path) -> std::path::PathBuf {
         let cfg = dir.join("rivet.yaml");
         let yaml = format!(
@@ -1034,10 +787,7 @@ mod tests {
         cfg
     }
 
-    /// In-process twin of the live roast test (tests/roast_validate_exit.rs):
-    /// `manifest.json` present but unreadable must exit non-zero.  head()
-    /// (fs::metadata) succeeds, read() (fs::read) hits EACCES — exactly the
-    /// `ManifestReadError` verdict.
+    /// In-process twin of the live roast test (tests/roast_validate_exit.rs).
     #[cfg(unix)]
     #[test]
     fn unreadable_manifest_fails_the_command() {
@@ -1051,7 +801,6 @@ mod tests {
         let manifest_path = prefix.join(crate::manifest::MANIFEST_FILENAME);
         std::fs::set_permissions(&manifest_path, std::fs::Permissions::from_mode(0o000)).unwrap();
         if std::fs::read(&manifest_path).is_ok() {
-            // euid 0 ignores file modes — the degraded state can't be staged.
             return crate::test_hook::skip_live("running as root: file modes are ignored");
         }
 
@@ -1063,9 +812,6 @@ mod tests {
             ValidateTarget::default(),
         )
         .expect_err("an unreadable manifest is an explicit failure, not exit 0");
-        // #7 bughunt: an unreadable manifest is COULD-NOT-VERIFY (operational,
-        // exit 1), NOT verified-wrong corruption (exit 3). A scheduler must be
-        // free to retry a permissions/network blip, not stop-the-line.
         assert!(
             format!("{err:#}").contains("could not be verified"),
             "got: {err:#}"
@@ -1076,8 +822,6 @@ mod tests {
             "a read error must not be classed as data-integrity (exit 3): {err:#}"
         );
 
-        // The JSON report (written before the bail) still carries the
-        // verdict so the operator sees why.
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
         let verification = &json["exports"][0]["verification"];
@@ -1088,9 +832,6 @@ mod tests {
 
     #[test]
     fn untracked_surplus_alone_keeps_exit_zero() {
-        // The advisory neighbor of the read-error fix: gating on
-        // `has_failures()` alone would flip this verdict to non-zero, but
-        // surplus cleanup is `--resume`'s job (M9), not validate's.
         let dir = tempfile::tempdir().unwrap();
         let prefix = dir.path().join("out");
         stage_dataset(&prefix, &success_manifest(Vec::new()));
@@ -1110,13 +851,8 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
         let verification = &json["exports"][0]["verification"];
         assert_eq!(verification["passed"], true);
-        // The stable wire contract is preserved: untracked entries still ride
-        // `verification.failures` (consumers branch on `failures[].kind`).
         assert_eq!(verification["failures"][0]["kind"], "untracked_object");
 
-        // L14: …and the same advisory entry is also surfaced in the top-level
-        // `warnings` array so "failures means failures" — an exit-0 verdict no
-        // longer hides a surplus object under a "failure" label.
         let warnings = json["warnings"].as_array().expect("warnings array present");
         assert_eq!(warnings.len(), 1, "the untracked surplus is one warning");
         assert_eq!(warnings[0]["export_name"], "orders");
@@ -1126,8 +862,6 @@ mod tests {
 
     #[test]
     fn json_warnings_array_is_empty_when_no_advisory_failures() {
-        // A clean dataset with no surplus → no warnings.  Guards against the
-        // `warnings` lens accidentally picking up fatal failures.
         let dir = tempfile::tempdir().unwrap();
         let prefix = dir.path().join("out");
         stage_dataset(&prefix, &success_manifest(Vec::new()));
@@ -1156,11 +890,6 @@ mod tests {
 
     #[test]
     fn multiplex_cdc_validates_each_table_sub_prefix() {
-        // Regression: a `tables:` CDC stream lands each table under its OWN
-        // sub-prefix (`<base>/<table>/`, via `cdc_job::dest_for_table`). The base
-        // prefix holds no manifest, so validating it alone read back as an empty
-        // "legacy_run" and produced a single base verdict — the operator could
-        // not certify the stream. The command must descend into each table.
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().join("cdc");
         stage_dataset(&base.join("alpha"), &success_manifest(Vec::new()));
@@ -1172,9 +901,6 @@ mod tests {
             cfg.to_str().unwrap(),
             None,
             ValidateOutputFormat::Json(Some(report.to_string_lossy().into_owned())),
-            // Sample depth: exercise the per-table descent + manifest verify
-            // without the full-depth part download (empty datasets carry no
-            // parquet to __pos-check).
             ValidateTarget {
                 depth: ValidateDepth::Sample,
                 ..Default::default()
@@ -1190,8 +916,6 @@ mod tests {
             .iter()
             .map(|e| e["export_name"].as_str().unwrap())
             .collect();
-        // ONE verdict per table, named `<export>/<table>` — proof the descent
-        // ran (the un-fixed command produced a single "cdc" verdict at the base).
         assert_eq!(names, vec!["cdc/alpha", "cdc/beta"], "per-table descent");
         for e in json["exports"].as_array().unwrap() {
             assert_eq!(e["verification"]["passed"], true, "each table passes");
@@ -1210,11 +934,6 @@ mod tests {
 
     #[test]
     fn single_table_cdc_certifies_snapshot_and_hides_its_untracked() {
-        // A single-table CDC export with `initial: snapshot` lands its snapshot as
-        // a nested `snapshot/` dataset under the change prefix. Validate must
-        // (a) give the snapshot its OWN verdict (so a missing/broken snapshot is
-        // caught) and (b) NOT flag the snapshot files as "untracked" at the change
-        // prefix — they are a separately-verified dataset, not orphans.
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().join("cdc");
         stage_dataset(&base, &success_manifest(Vec::new()));
@@ -1240,13 +959,11 @@ mod tests {
             .iter()
             .map(|e| e["export_name"].as_str().unwrap())
             .collect();
-        // The snapshot got its own verdict, and the change prefix its own.
         assert!(
             names.contains(&"cdc/snapshot"),
             "snapshot certified: {names:?}"
         );
         assert!(names.contains(&"cdc"), "change-prefix verdict: {names:?}");
-        // The change-prefix verdict carries NO untracked-snapshot advisory.
         let change = exports.iter().find(|e| e["export_name"] == "cdc").unwrap();
         let failures = change["verification"]["failures"].as_array().unwrap();
         assert!(
@@ -1278,7 +995,7 @@ mod tests {
             content_md5: String::new(),
             status: PartStatus::Committed,
         }]);
-        stage_dataset(&prefix, &m); // the part itself is never written
+        stage_dataset(&prefix, &m);
         let cfg = write_cfg(dir.path(), &prefix);
 
         let err = run_validate_command(
@@ -1294,10 +1011,7 @@ mod tests {
         );
     }
 
-    // ── finding #20: operator-pinned --prefix requires a manifest ────────────
-
-    /// `--prefix` at a real, complete dataset still passes — the normal
-    /// "validate exactly this prefix" case must not regress.
+    /// `--prefix` at a real, complete dataset still passes.
     #[test]
     fn prefix_override_with_real_manifest_passes() {
         let dir = tempfile::tempdir().unwrap();
@@ -1317,15 +1031,10 @@ mod tests {
         .expect("a real dataset under a pinned --prefix must pass");
     }
 
-    /// `--prefix` at a never-written directory FAILS (exit non-zero): the
-    /// operator asserted a dataset lives here, so an absent manifest is a
-    /// refusal reason, not the benign legacy-run pass. This is the in-process
-    /// twin of the live `audit_validate_absent_prefix_can_fail` roast.
+    /// `--prefix` at a never-written directory FAILS (exit non-zero).
     #[test]
     fn prefix_override_at_absent_manifest_fails() {
         let dir = tempfile::tempdir().unwrap();
-        // The export's config destination is irrelevant — `--prefix` overrides
-        // it. Point the override at a dir that exists but was never written.
         let cfg_prefix = dir.path().join("cfg_dest");
         std::fs::create_dir_all(&cfg_prefix).unwrap();
         let cfg = write_cfg(dir.path(), &cfg_prefix);
@@ -1348,8 +1057,6 @@ mod tests {
             "got: {err:#}"
         );
 
-        // The verdict (written before the bail) carries the explicit reason so
-        // the operator sees why the gate refused, not a bare exit code.
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
         let verification = &json["exports"][0]["verification"];
@@ -1405,37 +1112,26 @@ mod tests {
         .expect("the remedy verifies one partition with the source unreachable");
     }
 
-    /// Without `--prefix`, an absent manifest stays the benign M6 legacy-run
-    /// pass (exit 0) — today's behaviour is preserved for config-resolved
-    /// destinations that may legitimately be pre-0.7.0 prefixes.
+    /// Without `--prefix`, an absent manifest stays the benign M6 legacy-run pass (exit 0).
     #[test]
     fn absent_manifest_without_prefix_override_stays_legacy_pass() {
         let dir = tempfile::tempdir().unwrap();
         let prefix = dir.path().join("out");
-        std::fs::create_dir_all(&prefix).unwrap(); // exists, but no manifest
+        std::fs::create_dir_all(&prefix).unwrap();
         let cfg = write_cfg(dir.path(), &prefix);
 
         run_validate_command(
             cfg.to_str().unwrap(),
             Some("orders"),
             ValidateOutputFormat::Json(None),
-            ValidateTarget::default(), // no --prefix
+            ValidateTarget::default(),
         )
         .expect("an absent manifest with no pinned --prefix is a legacy pass (exit 0)");
     }
 
-    // ── graded verify layer (--depth) end-to-end ─────────────────────────
-
-    /// Stage a dataset that passes sections 1-5 (manifest reads + is
-    /// self-consistent, the single part is present at the recorded size,
-    /// `_SUCCESS` matches) **but** records a non-empty `column_checksums`, so
-    /// the Form B re-read is *reachable*. The part body is deliberately NOT
-    /// valid Parquet, so if Form B runs it errors on the Parquet open — making
-    /// "did Form B run?" observable as a pass/fail of the command.
+    /// Stage a dataset that passes sections 1-5 (manifest reads + is self-consistent, the single part is present at the recorded size, `_SUCCESS` matches) **but** records a non-empty `column_checksums`, so the Form B re-read is *reachable*.
     fn stage_dataset_form_b_would_fail(prefix: &Path) {
         std::fs::create_dir_all(prefix).unwrap();
-        // 4-byte non-Parquet body; the manifest records size 4 so the part
-        // reconcile (size-only, empty content_md5) passes.
         let part_body: &[u8] = b"AAAA";
         std::fs::write(prefix.join("part-000001.parquet"), part_body).unwrap();
 
@@ -1448,8 +1144,6 @@ mod tests {
             content_md5: String::new(),
             status: PartStatus::Committed,
         }]);
-        // Non-empty → Form B does NOT early-return; it proceeds to read the
-        // (garbage) part as Parquet and fail.
         m.column_checksums = Some(vec![crate::manifest::ColumnChecksum {
             name: "id".into(),
             checksum: "0".into(),
@@ -1459,9 +1153,6 @@ mod tests {
 
     #[test]
     fn sample_depth_does_not_run_form_b() {
-        // At `--depth sample` the structural checks (parts present, _SUCCESS,
-        // self-consistency) all pass and the Form B value re-read is skipped —
-        // so the command succeeds even though the part body is not real Parquet.
         let dir = tempfile::tempdir().unwrap();
         let prefix = dir.path().join("out");
         stage_dataset_form_b_would_fail(&prefix);
@@ -1489,10 +1180,6 @@ mod tests {
 
     #[test]
     fn full_depth_runs_form_b() {
-        // The contrast: identical dataset, `--depth full`. Sections 1-5 still
-        // pass (so `manifest_verified` is true and Form B is gated open), Form B
-        // re-reads the part, fails to parse it as Parquet, and the command exits
-        // non-zero. Proves Form B runs at full depth and only at full depth.
         let dir = tempfile::tempdir().unwrap();
         let prefix = dir.path().join("out");
         stage_dataset_form_b_would_fail(&prefix);
@@ -1516,9 +1203,6 @@ mod tests {
 
     #[test]
     fn json_report_carries_failure_code_and_depth_level() {
-        // render_json injects the stable `RIVET_VERIFY_*` code next to each
-        // failure's `kind`, and the verdict carries the `depth_level` it ran at.
-        // A missing committed part gives us a fatal failure to inspect.
         let dir = tempfile::tempdir().unwrap();
         let prefix = dir.path().join("out");
         let m = success_manifest(vec![ManifestPart {
@@ -1530,7 +1214,7 @@ mod tests {
             content_md5: String::new(),
             status: PartStatus::Committed,
         }]);
-        stage_dataset(&prefix, &m); // the part itself is never written → PartMissing
+        stage_dataset(&prefix, &m);
         let cfg = write_cfg(dir.path(), &prefix);
 
         let report = dir.path().join("report.json");
@@ -1548,21 +1232,15 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
         let verification = &json["exports"][0]["verification"];
-        // depth_level surfaces the level the pass ran at.
         assert_eq!(verification["depth_level"], "sample");
-        // The PartMissing failure carries BOTH its stable kind and its code.
         let failure = &verification["failures"][0];
         assert_eq!(failure["kind"], "part_missing");
         assert_eq!(failure["code"], "RIVET_VERIFY_PART_MISSING");
-        // The per-variant fields ride alongside (the derive output is widened,
-        // not replaced).
         assert_eq!(failure["part_id"], 1);
     }
 
     #[test]
     fn json_warning_entry_also_carries_its_code() {
-        // The advisory `warnings` lens carries the code too — an untracked
-        // surplus surfaces `RIVET_VERIFY_UNTRACKED_OBJECT` without flipping exit.
         let dir = tempfile::tempdir().unwrap();
         let prefix = dir.path().join("out");
         stage_dataset(&prefix, &success_manifest(Vec::new()));
@@ -1583,7 +1261,6 @@ mod tests {
         let warning = &json["warnings"][0]["warning"];
         assert_eq!(warning["kind"], "untracked_object");
         assert_eq!(warning["code"], "RIVET_VERIFY_UNTRACKED_OBJECT");
-        // And the default depth (full) is recorded on the verdict.
         assert_eq!(json["exports"][0]["verification"]["depth_level"], "full");
     }
 
@@ -1643,7 +1320,7 @@ mod tests {
         assert!(!dir.path().join(".rivet_state.db").exists());
     }
 
-    /// An unreadable state is read only for a bare recorded verdict: never for an unrecorded or a decided one, refused by its code for a bare recorded one.
+    /// An unreadable state is read only for a bare recorded verdict.
     #[test]
     fn an_unreadable_state_is_read_only_for_a_bare_recorded_verdict() {
         let dir = tempfile::tempdir().unwrap();
@@ -1675,7 +1352,7 @@ mod tests {
         );
     }
 
-    /// The recorded identity `verify_one_prefix` hands to the settle step: set for a batch export without `--prefix`, absent for CDC and for a pinned prefix.
+    /// The recorded identity `verify_one_prefix` hands to the settle step.
     #[test]
     fn only_a_batch_export_without_a_pinned_prefix_carries_a_recorded_identity() {
         let dir = tempfile::tempdir().unwrap();

@@ -1,11 +1,11 @@
 diff --git a/src/pipeline/repair_cmd.rs b/src/pipeline/repair_cmd.rs
-index b95bcadc..9c391ffd 100644
+index 7f9291cd..fdb8bac7 100644
 --- a/src/pipeline/repair_cmd.rs
 +++ b/src/pipeline/repair_cmd.rs
-@@ -179,12 +179,6 @@ fn execute_repair(
-     // Without it we can re-export the data but cannot point the recorded state
-     // at the fresh count, so `reconcile → repair → reconcile` could never
-     // converge (audit finding #7).
+@@ -127,12 +127,6 @@ fn execute_repair(
+     let mut results: Vec<(RepairAction, RepairOutcome)> =
+         Vec::with_capacity(repair_plan.actions.len());
+ 
 -    let _run_lease = super::chunked::claim_export_progress(
 -        state,
 -        &plan.export_name,
@@ -14,4 +14,4 @@ index b95bcadc..9c391ffd 100644
 -    )?;
      let run_id = state.claim(plan.progress_key())?.latest_chunk_run()?;
  
-     // One summary across the whole repair (matches the original single
+     let mut src = source::create_source(&plan.source)?;

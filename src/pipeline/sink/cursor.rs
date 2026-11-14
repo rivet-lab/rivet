@@ -1,9 +1,4 @@
 //! Cursor value extraction from Arrow batches.
-//!
-//! Pure helper used by the streaming sink to remember the high-water mark of
-//! the cursor column after each batch. Lives in its own file because the type
-//! dispatch is long and its unit tests are independent — they need no
-//! `ExportSink`, no `ResolvedRunPlan`, no I/O, just an `arrow::RecordBatch`.
 
 use arrow::array::Array;
 use arrow::array::{
@@ -14,16 +9,6 @@ use arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use arrow::record_batch::RecordBatch;
 
 /// Return the last row's value of `cursor_column` as a normalized string.
-///
-/// Returns `None` if:
-/// - the column does not exist in the schema,
-/// - the batch is empty,
-/// - the last value is NULL,
-/// - the column's Arrow type is not one of the supported cursor types — the
-///   closed set the drivers actually produce: int16/32/64, uint64 (MySQL
-///   `BIGINT UNSIGNED`; narrower unsigned is widened to a signed arm),
-///   float32/64, utf8, timestamp(µs/ns), date32, FixedSizeBinary(16) for PG
-///   `uuid` per ADR-0014.
 pub(crate) fn extract_last_cursor_value(
     batch: &RecordBatch,
     cursor_column: &str,
@@ -32,8 +17,7 @@ pub(crate) fn extract_last_cursor_value(
     extract_cursor_value_at(batch, cursor_column, schema, true)
 }
 
-/// First NON-NULL cursor value of the batch — the run's observed floor (#151:
-/// with min+max recorded, key density is derivable from the state DB alone).
+/// First NON-NULL cursor value of the batch.
 pub(crate) fn extract_first_cursor_value(
     batch: &RecordBatch,
     cursor_column: &str,
@@ -51,22 +35,6 @@ fn extract_cursor_value_at(
     let col_idx = schema.index_of(cursor_column).ok()?;
     let array = batch.column(col_idx);
 
-    // The last NON-NULL row, not simply the last row.
-    //
-    // Incremental queries append `ORDER BY <cursor>`, and PostgreSQL sorts NULLs
-    // LAST in ASC — so on a nullable cursor column the final row of the final
-    // batch carries no value, and returning None here handed the caller nothing
-    // to record. The high-water mark was then never written and the export
-    // re-read the whole table on every run, forever (measured: 21 rows exported
-    // three times over, `export_state` empty throughout).
-    //
-    // Scanning back finds the real maximum: the rows are ordered by this very
-    // column, so the last non-null IS the greatest value present. MySQL and SQL
-    // Server sort NULLs FIRST and were never affected — this restores their
-    // behaviour on PostgreSQL rather than inventing one.
-    //
-    // An all-NULL batch still yields None, which the caller must treat as "this
-    // batch says nothing" and NOT as "reset the mark" — see `ExportSink::on_batch`.
     let last_row = if from_end {
         (0..batch.num_rows()).rev().find(|&i| !array.is_null(i))?
     } else {
@@ -121,17 +89,6 @@ fn render_cursor_value(array: &arrow::array::ArrayRef, last_row: usize) -> Optio
                 .value(last_row)
                 .to_string(),
         ),
-        // The ONLY unsigned Arrow type the pipeline can produce: MySQL
-        // `BIGINT UNSIGNED` (RivetType::UInt64). Every NARROWER unsigned is widened
-        // to a signed arm before it reaches Arrow (MySQL SHORT unsigned→Int32,
-        // INT24/LONG unsigned→Int64; PG OID→Int64; MSSQL tinyint→Int64), and
-        // RivetType has no UInt8/16/32 variant — so no narrow-unsigned arm is
-        // reachable. Field bug: an unsigned `id` has a sign-agnostic DATA_TYPE, so
-        // it PASSED the integer-family keyset/chunk guard but had no UInt64 arm →
-        // keyset bailed "could not read the 'id' value … unsupported type" on the
-        // first multi-page table (an incremental cursor silently re-read every run).
-        // `.to_string()` on a u64 is the full unsigned decimal, which MySQL's
-        // `WHERE id > '<v>'` compares correctly as unsigned (no i64 truncation).
         DataType::UInt64 => Some(
             array
                 .as_any()
@@ -153,7 +110,6 @@ fn render_cursor_value(array: &arrow::array::ArrayRef, last_row: usize) -> Optio
                 .value(last_row)
                 .to_string(),
         ),
-        // Exact decimal text — an Oracle NUMBER(p>18,0) keyset key compares numerically.
         DataType::Decimal128(_, _) => Some(
             array
                 .as_any()
@@ -177,10 +133,6 @@ fn render_cursor_value(array: &arrow::array::ArrayRef, last_row: usize) -> Optio
             let dt = chrono::DateTime::from_timestamp(secs, nsecs)?;
             Some(dt.format("%Y-%m-%dT%H:%M:%S%.6f").to_string())
         }
-        // Nanosecond timestamps (the `timestamp_ns` override). Format with 9
-        // fractional digits so the cursor literal carries the full precision the
-        // column holds — otherwise an incremental resume would compare a
-        // microsecond-truncated value and re-emit the boundary row.
         DataType::Timestamp(TimeUnit::Nanosecond, _) => {
             let nanos = array
                 .as_any()
@@ -200,19 +152,11 @@ fn render_cursor_value(array: &arrow::array::ArrayRef, last_row: usize) -> Optio
                 chrono::NaiveDate::from_ymd_opt(1970, 1, 1)? + chrono::Duration::days(days as i64);
             Some(date.to_string())
         }
-        // PG `uuid` lands in Arrow as `FixedSizeBinary(16)` (with the
-        // `arrow.uuid` extension type metadata for native Parquet
-        // `LogicalType::Uuid`), per ADR-0014. Decode to the canonical
-        // 8-4-4-4-12 hex form so the keyset query builder can format
-        // `WHERE <key> > '<uuid>'::uuid` on the wire — same shape as the
-        // Utf8 path that already works for MySQL's `CHAR(36)` UUIDs.
         DataType::FixedSizeBinary(16) => {
             let bytes = array
                 .as_any()
                 .downcast_ref::<FixedSizeBinaryArray>()?
                 .value(last_row);
-            // Validate the length to keep the index-into-`bytes` arithmetic
-            // honest if a 16-typed array somehow yields a different slice.
             if bytes.len() != 16 {
                 log::warn!(
                     "cursor extract: FixedSizeBinary slice was {} bytes, expected 16",
@@ -397,12 +341,7 @@ mod tests {
 
     #[test]
     fn cursor_unsigned_integers_field_bug() {
-        // FIELD BUG (0.21.2, prod affiliate DB): a MySQL `BIGINT UNSIGNED` id
-        // (Arrow UInt64) had NO cursor-extract arm — keyset bailed "could not read
-        // the 'id' value … unsupported type" on ~40 tables, and an incremental
-        // cursor silently re-read from the last value every run. A value ABOVE
-        // i64::MAX must extract as the full unsigned decimal, never truncate/wrap.
-        let big = u64::MAX - 5; // 18446744073709551610, well past i64::MAX
+        let big = u64::MAX - 5;
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::UInt64, false)]));
         let batch = RecordBatch::try_new(
             schema.clone(),
@@ -452,7 +391,7 @@ mod tests {
             DataType::Timestamp(TimeUnit::Microsecond, None),
             false,
         )]));
-        let micros = 1_700_000_000_000_000i64; // 2023-11-14T22:13:20
+        let micros = 1_700_000_000_000_000i64;
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![Arc::new(TimestampMicrosecondArray::from(vec![micros]))],
@@ -467,16 +406,11 @@ mod tests {
 
     #[test]
     fn cursor_timestamp_nanosecond_keeps_full_precision() {
-        // datetime2(7) → `timestamp_ns` override: the cursor literal must carry
-        // all 9 fractional digits, or an incremental resume would compare a
-        // truncated value and re-emit the boundary row.
         let schema = Arc::new(Schema::new(vec![Field::new(
             "ts",
             DataType::Timestamp(TimeUnit::Nanosecond, None),
             false,
         )]));
-        // 2023-11-14T22:13:20.123456700 — the trailing 100 ns tick is exactly
-        // what microsecond precision would drop.
         let nanos = 1_700_000_000_123_456_700i64;
         let batch = RecordBatch::try_new(
             schema.clone(),
@@ -493,7 +427,7 @@ mod tests {
     #[test]
     fn cursor_date32() {
         let schema = Arc::new(Schema::new(vec![Field::new("d", DataType::Date32, false)]));
-        let days = 19723i32; // 2024-01-01
+        let days = 19723i32;
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![Arc::new(Date32Array::from(vec![days]))],
@@ -507,16 +441,12 @@ mod tests {
 
     #[test]
     fn cursor_fixed_size_binary_16_decodes_to_canonical_uuid_string() {
-        // Pins PG `uuid` → Arrow `FixedSizeBinary(16)` keyset support
-        // (ADR-0014 + ADR-0020). Without this arm, PG UUID PK + explicit
-        // `chunk_by_key: id` fails at page 0 with "unsupported type".
         use arrow::array::FixedSizeBinaryArray;
         let schema = Arc::new(Schema::new(vec![Field::new(
             "id",
             DataType::FixedSizeBinary(16),
             false,
         )]));
-        // 00000000-0000-0000-0000-00000000000a
         let bytes: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x0a];
         let arr = FixedSizeBinaryArray::try_from_iter(std::iter::once(bytes.to_vec())).unwrap();
         let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(arr)]).unwrap();
@@ -528,10 +458,6 @@ mod tests {
 
     #[test]
     fn cursor_fixed_size_binary_wrong_length_returns_none() {
-        // Defensive: a non-16 FixedSizeBinary array is not a UUID under
-        // our type mapping; refuse rather than emit a malformed UUID
-        // string the keyset query builder would then embed in a SQL
-        // literal.
         use arrow::array::FixedSizeBinaryArray;
         let schema = Arc::new(Schema::new(vec![Field::new(
             "id",
@@ -546,14 +472,6 @@ mod tests {
     }
 
     /// A NULL in the last row must not hide the value above it.
-    ///
-    /// This test used to assert `None` for exactly this batch — it pinned the
-    /// mechanism as if it were the contract. On PostgreSQL, which sorts NULLs
-    /// LAST in ASC, that None was then written over the high-water mark
-    /// accumulated from every prior batch, the cursor was never committed, and
-    /// the export re-read the whole table on every run forever. The rows are
-    /// ordered BY this column, so the last non-null is the greatest value
-    /// present; that is what the mark should be.
     #[test]
     fn cursor_null_last_row_uses_the_last_non_null() {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
@@ -568,8 +486,7 @@ mod tests {
         );
     }
 
-    /// Several trailing NULLs are the realistic shape — a soft-deleted or
-    /// never-touched population all sorts to the end together.
+    /// Several trailing NULLs are the realistic shape.
     #[test]
     fn cursor_many_trailing_nulls_still_find_the_maximum() {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
@@ -590,9 +507,7 @@ mod tests {
         );
     }
 
-    /// The control: a batch with NOTHING readable genuinely says nothing, and
-    /// must still report None so the caller keeps the mark it already has rather
-    /// than inventing one.
+    /// The control: a batch with NOTHING readable genuinely says nothing, and must still report None so the caller keeps the mark it already has rather than inventing one.
     #[test]
     fn cursor_all_null_batch_reports_nothing() {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
