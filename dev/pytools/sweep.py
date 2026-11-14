@@ -18,8 +18,8 @@ Two ports that share a name and nothing else:
 
 * `dev/sweep-test-cruft.sh` → `test_cruft()`
   Drops test objects left behind by INTERRUPTED live runs, on every source in
-  `dev/stand/registry.yaml` (tables, PG slots, Mongo databases and collections;
-  the cloud with `--cloud`). Live tests name objects `<prefix>_<pid>_<counter>`
+  `dev/stand/registry.yaml` (tables, PG slots, Mongo databases and collections,
+  fake-gcs objects under a dead pid's prefix; the cloud with `--cloud`). Live tests name objects `<prefix>_<pid>_<counter>`
   (`tests/common::unique_name`); an object is dropped only when that pid is no
   longer running, so a concurrent live run is never swept. Cloud objects (BigQuery
   `rivet_tmp_*` datasets, `rivet_e2e` tables, the GCS test bucket) are dropped by
@@ -540,6 +540,64 @@ def _gcs_cruft() -> None:
         _report(f"gcs/{bucket}", "objects older than the TTL", old if rm.ok else [], [] if rm.ok else old)
 
 
+def _gcs_json(base: str, path: str, method: str = "GET") -> dict:
+    """One fake-gcs JSON API call; the decoded body, `{}` for an empty one."""
+    import json
+    import urllib.request
+
+    req = urllib.request.Request(f"{base}{path}", method=method)
+    with urllib.request.urlopen(req, timeout=60) as r:
+        body = r.read()
+    return json.loads(body) if body else {}
+
+
+def _fake_gcs_objects(base: str, bucket: str) -> list[str]:
+    """Every object name of one fake-gcs bucket, page by page."""
+    from urllib.parse import quote
+
+    names, token = [], ""
+    while True:
+        page = _gcs_json(base, f"/storage/v1/b/{quote(bucket, safe='')}/o?maxResults=1000"
+                         + (f"&pageToken={quote(token, safe='')}" if token else ""))
+        names += [o["name"] for o in page.get("items", [])]
+        token = page.get("nextPageToken", "")
+        if not token:
+            return names
+
+
+def _fake_gcs_orphaned(name: str) -> bool:
+    """An object whose path holds a segment named by a gone test process."""
+    return any(registry.orphaned(seg) for seg in name.split("/"))
+
+
+def _fake_gcs_cruft(base: str) -> None:
+    """Objects under a dead test process's prefix, on every bucket of the local fake-gcs; a reused pid finds none."""
+    from urllib.parse import quote
+
+    try:
+        buckets = [b["name"] for b in _gcs_json(base, "/storage/v1/b?project=test").get("items", [])]
+    except OSError:
+        print("  fake-gcs: not up — skipped")
+        return
+    for bucket in buckets:
+        dropped, failed = [], []
+        try:
+            names = _fake_gcs_objects(base, bucket)
+        except OSError as e:
+            shell.warn(f"  fake-gcs/{bucket}: listing FAILED: {e}")
+            continue
+        for name in names:
+            if not _fake_gcs_orphaned(name):
+                continue
+            try:
+                _gcs_json(base, f"/storage/v1/b/{quote(bucket, safe='')}/o/{quote(name, safe='')}", "DELETE")
+                dropped.append(name)
+            except OSError:
+                failed.append(name)
+        if dropped or failed:
+            _report(f"fake-gcs/{bucket}", "objects", dropped, failed)
+
+
 def _my_quote(name: str) -> str:
     """MySQL identifier quoting: backticks, internal backticks doubled."""
     return "`" + name.replace("`", "``") + "`"
@@ -574,6 +632,7 @@ def test_cruft(cloud: bool = False) -> int:
     for container in registry.load().get("slot_hosts", []):
         if _container_up(container):
             _pg_slots(container, container)
+    _fake_gcs_cruft(registry.gate_profiles()["fake-gcs"]["url"])
     if cloud:
         _bigquery_cruft()
         _gcs_cruft()
@@ -688,8 +747,54 @@ def _self_test() -> int:
         ora_drops = (Path(tmp) / "ora_drops.txt").read_text().splitlines()
     assert drops == [want], f"the sweep dropped {drops}, expected [{want!r}]"
     assert ora_drops == ['DROP TABLE "SAB_STATEFUL_4217305_0" PURGE;'], f"the Oracle sweep dropped {ora_drops}"
-    print("sweep self-test ok: a non-ASCII table is dropped as itself, and the Oracle arm drops only the dead pid's table")
+    _fake_gcs_self_test()
+    print("sweep self-test ok: a non-ASCII table is dropped as itself, the Oracle arm drops only the dead pid's table, "
+          "and the fake-gcs arm drops only a dead pid's prefix")
     return 0
+
+
+def _fake_gcs_self_test() -> None:
+    """Offline: a stub fake-gcs holds a dead pid's prefix, a live one's and a fixture; only the dead one's objects are deleted."""
+    import contextlib
+    import http.server
+    import io
+    import json
+    import threading
+    from urllib.parse import unquote
+
+    dead = 2**22 + 12345
+    held = [f"chmcdc_{dead}_2/snapshot/_SUCCESS", f"rivet-live/chload_{dead}_7/a.parquet",
+            f"chmcdc_{os.getpid()}_2/snapshot/_SUCCESS", "fixtures/users.csv"]
+    deleted: list[str] = []
+
+    class Stub(http.server.BaseHTTPRequestHandler):
+        def _send(self, body: dict) -> None:
+            raw = json.dumps(body).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_GET(self) -> None:
+            self._send({"items": [{"name": "bkt"}]} if self.path.startswith("/storage/v1/b?")
+                       else {"items": [{"name": n} for n in held if n not in deleted]})
+
+        def do_DELETE(self) -> None:
+            deleted.append(unquote(self.path.rsplit("/o/", 1)[1]))
+            self._send({})
+
+        def log_message(self, *_: object) -> None:
+            return
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Stub)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            _fake_gcs_cruft(f"http://127.0.0.1:{server.server_port}")
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert sorted(deleted) == sorted(held[:2]), f"the fake-gcs sweep deleted {deleted}, expected {held[:2]}"
 
 
 # ══ CLI ════════════════════════════════════════════════════════════════════════

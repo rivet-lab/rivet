@@ -428,18 +428,8 @@ pub fn a_table_switched_over_a_baseline_is_refused_and_switched_back_continues(
 
 pub fn unique_name(prefix: &str) -> String {
     let c = NAME_COUNTER.fetch_add(1, Ordering::SeqCst);
-    format!("{prefix}_{}_{}_{c}", process_nonce(), std::process::id())
-}
-
-/// Six hex digits fixed for this process, so a later process that reuses its pid names nothing alike.
-fn process_nonce() -> &'static str {
-    static NONCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    NONCE.get_or_init(|| {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        format!("{:06x}", nanos % 0x100_0000)
-    })
+    let pid = std::process::id();
+    format!("{prefix}_{pid}_{c}")
 }
 
 /// RAII cross-process lock for the suite's QUIET WINDOW.
@@ -607,43 +597,19 @@ pub fn peak_child_rss_bytes() -> u64 {
 mod unique_name_tests {
     use super::*;
 
-    const PROBE: &str = "RIVET_UNIQUE_NAME_PROBE";
-
-    /// Prints this process's nonce when run as the probe child of `two_processes_never_share_a_nonce`.
+    /// A name is `<prefix>_<pid>_<n>` and nothing more: Oracle (30 bytes) and a MySQL user (32) leave no room for a third part.
     #[test]
-    fn unique_name_probe_child() {
-        assert_eq!(process_nonce().len(), 6);
-        if std::env::var_os(PROBE).is_some() {
-            println!("NONCE={}", process_nonce());
-        }
-    }
-
-    fn child_nonce() -> String {
-        let out = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "common::unique_name_tests::unique_name_probe_child",
-                "--nocapture",
-            ])
-            .env(PROBE, "1")
-            .output()
+    fn a_name_is_the_prefix_plus_pid_and_counter_only() {
+        let prefix = "pm_check_equals_run_u";
+        let name = unique_name(prefix);
+        let rest = name
+            .strip_prefix(prefix)
+            .and_then(|r| r.strip_prefix('_'))
             .unwrap();
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .find_map(|l| l.strip_prefix("NONCE=").map(String::from))
-            .unwrap_or_else(|| panic!("the probe child printed no nonce:\n{out:?}"))
-    }
-
-    /// A name is `<prefix>_<nonce>_<pid>_<n>`: the sweep reads the pid from the tail, and a process that reuses a dead one's pid still names nothing alike.
-    #[test]
-    fn two_processes_never_share_a_nonce_and_the_pid_stays_in_the_tail() {
-        let name = unique_name("t_x");
-        let parts: Vec<&str> = name.split('_').collect();
-        assert_eq!(parts.len(), 5, "{name}");
-        assert_eq!(parts[2].len(), 6, "{name}");
-        assert_eq!(parts[3], std::process::id().to_string(), "{name}");
-        let (a, b) = (child_nonce(), child_nonce());
-        assert_ne!(a, b, "two processes drew the same nonce");
-        assert_ne!(a, process_nonce(), "a child drew this process's nonce");
+        let parts: Vec<&str> = rest.split('_').collect();
+        assert_eq!(parts.len(), 2, "{name}");
+        assert_eq!(parts[0], std::process::id().to_string(), "{name}");
+        assert!(parts[1].parse::<u64>().is_ok(), "{name}");
+        assert!(prefix.len() + "_99999_999".len() <= 32, "{name}");
     }
 }
