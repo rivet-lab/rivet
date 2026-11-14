@@ -1,9 +1,9 @@
 diff --git a/src/source/mysql/mod.rs b/src/source/mysql/mod.rs
-index e155d4a0..dee18c80 100644
+index f4b91d5..c5cba17 100644
 --- a/src/source/mysql/mod.rs
 +++ b/src/source/mysql/mod.rs
-@@ -141,7 +141,10 @@ impl MysqlSource {
-     /// first connection, by statements that leave a ProxySQL session multiplexed: no extra dial.
+@@ -90,7 +90,10 @@ impl MysqlSource {
+     /// Connect rivet's own pool to `url`.
      fn connect_own(url: &str, tls: Option<&TlsConfig>) -> Result<Self> {
          let pool = connect_pool(url, tls)?;
 -        let proxy_kind = proxy::proxy_kind_of(url, &pool);

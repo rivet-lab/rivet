@@ -1,7 +1,8 @@
 diff --git a/src/source/cdc/mod.rs b/src/source/cdc/mod.rs
+index 63c4d65..df56e92 100644
 --- a/src/source/cdc/mod.rs
 +++ b/src/source/cdc/mod.rs
-@@ -694,9 +694,6 @@ pub(crate) fn run(
+@@ -478,9 +478,6 @@ pub(crate) fn run(
      if max_events == Some(0) {
          return Ok(());
      }
@@ -10,9 +11,9 @@ diff --git a/src/source/cdc/mod.rs b/src/source/cdc/mod.rs
 -    }
      let mut last_commit: Option<Position> = None;
      let drained = emit_ndjson(stream, &checkpoint, &tables, max_events, &mut last_commit);
-     // Every line up to `last_commit` is on stdout: release it at the source (PostgreSQL advances the slot).
-@@ -744,9 +741,6 @@ fn emit_ndjson(
-         // corruption). An uncaptured table's poison was already dropped above.
+     let acked = last_commit.map_or(Ok(()), |p| stream.ack(&p));
+@@ -517,9 +514,6 @@ fn emit_ndjson(
+         }
          ev.raise_poison()?;
          ev.raise_before_poison()?;
 -        if let Some((n, names)) = named_image_arity_mismatch(&ev) {
@@ -20,4 +21,4 @@ diff --git a/src/source/cdc/mod.rs b/src/source/cdc/mod.rs
 -        }
          println!("{}", ndjson_line(&ev));
          emitted += 1;
-         // Checkpoint AFTER emitting the captured event — never before. A crash in
+         if committed {

@@ -1,5 +1,5 @@
 diff --git a/src/pipeline/cdc_release.rs b/src/pipeline/cdc_release.rs
-index 58a19a18..a275b860 100644
+index 66968b6..f122d5d 100644
 --- a/src/pipeline/cdc_release.rs
 +++ b/src/pipeline/cdc_release.rs
 @@ -135,7 +135,7 @@ impl FirstRun {
@@ -12,10 +12,10 @@ index 58a19a18..a275b860 100644
          }
          match state.cdc_delivery_recorded(&self.export) {
 diff --git a/src/source/mysql/cdc.rs b/src/source/mysql/cdc.rs
-index 2dc28583..13f6c4f4 100644
+index 88cb882..f4c9bf4 100644
 --- a/src/source/mysql/cdc.rs
 +++ b/src/source/mysql/cdc.rs
-@@ -692,7 +692,6 @@ impl MysqlChangeStream {
+@@ -483,7 +483,6 @@ impl MysqlChangeStream {
          configured_tables: Vec<String>,
      ) -> Result<Self> {
          let mut conn = connect_conn(url, tls)?;
@@ -23,17 +23,17 @@ index 2dc28583..13f6c4f4 100644
          let identity = Self::server_identity(&mut conn)?;
          Self::open_on(
              conn,
-@@ -1187,9 +1186,6 @@ impl MysqlChangeStream {
-         // at a part commit — so an idle bounded run (zero changes drained) would
-         // otherwise leave no checkpoint, the next run would re-anchor to a newer
-         // "current" position, and every change in between would be silently skipped.
+@@ -914,9 +913,6 @@ impl MysqlChangeStream {
+             return Self::open_on(conn, server_id, file, p, mode, identity, configured_tables)
+                 .map(with_dir);
+         }
 -        if !projecting {
 -            Self::refuse_absent_tables_on(&mut conn, &configured_tables)?;
 -        }
          let (file, pos) = Self::current_coordinates(&mut conn)?;
          let identity = Self::server_identity(&mut conn);
          if let Some(path) = ckpt {
-@@ -1218,6 +1214,10 @@ impl MysqlChangeStream {
+@@ -933,6 +929,10 @@ impl MysqlChangeStream {
              );
              Self::write_anchor(path, &file, pos, &identity)?;
          }

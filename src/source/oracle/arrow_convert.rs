@@ -1,10 +1,4 @@
 //! Oracle result metadata → Rivet/Arrow types, and fetched rows → Arrow batches.
-//!
-//! rivet builds Arrow itself: the driver's own `query_arrow` floats bare `NUMBER`
-//! and drops a `TIMESTAMP WITH TIME ZONE`'s zone. The export query is first
-//! re-projected server-side ([`super::projection_expr`]) so every column that
-//! reaches this module is one of: NUMBER, BINARY_FLOAT/DOUBLE, BOOLEAN, DATE,
-//! TIMESTAMP, a character type (incl. CLOB fetched inline), or a binary type.
 
 use std::sync::Arc;
 
@@ -55,8 +49,7 @@ pub(super) fn timestamp_ns_refusal(name: &str, zoned: bool) -> String {
     )
 }
 
-/// The Rivet type for one re-projected column; `native` is its DECLARED type
-/// (re-projection turns a zoned timestamp into a UTC `TIMESTAMP`, JSON into text).
+/// The Rivet type for one re-projected column.
 pub(super) fn oracle_type_to_rivet(
     meta: &Metadata,
     native: &str,
@@ -111,11 +104,9 @@ fn autodetect(kind: OraKind, native: &str, precision: u8, scale: i8, label: &str
 }
 
 /// NUMBER(p,s): small integers, then `Decimal`; bare `NUMBER`/`FLOAT` as exact text.
-/// Oracle's `s > p` and negative `s` are widened to the lossless decimal Parquet accepts.
 fn number_type(precision: u8, scale: i8) -> RivetType {
     let decimal = |precision: u8, scale: i8| RivetType::Decimal { precision, scale };
     match (precision, scale) {
-        // Bare NUMBER (p=0) and FLOAT(b) (scale -127): no fixed-scale decimal holds them.
         (0, _) | (_, -127) => RivetType::String,
         (1..=9, 0) => RivetType::Int32,
         (10..=18, 0) => RivetType::Int64,
@@ -123,7 +114,6 @@ fn number_type(precision: u8, scale: i8) -> RivetType {
             Some(w) => decimal(w, 0),
             None => RivetType::String,
         },
-        // Past 38 digits no Decimal128 holds it: exact text, like a bare NUMBER.
         (_, s) if s > 38 => RivetType::String,
         (p, s) => decimal(p.max(s.unsigned_abs()), s),
     }
@@ -176,7 +166,7 @@ fn deliver_number_text(
     }
 }
 
-/// The un-overridden mapping with its Oracle warning: bare NUMBER as text, sub-µs interval (lossy), or sub-µs TIMESTAMP (refused).
+/// The un-overridden mapping with its Oracle warning.
 fn with_oracle_warning(mapping: TypeMapping, bare_number: bool, sub_us: bool) -> TypeMapping {
     if bare_number {
         let name = mapping.column_name.clone();
@@ -214,7 +204,7 @@ pub(super) fn oracle_schema(
     schema_from_mappings(oracle_type_mappings(metas, native, overrides)?, overrides)
 }
 
-/// The Arrow schema for resolved column mappings; an override with no builder is refused by code, an unmapped column is named.
+/// The Arrow schema for resolved column mappings.
 fn schema_from_mappings(mappings: Vec<TypeMapping>, overrides: &ColumnOverrides) -> Result<Schema> {
     let mut fields = Vec::with_capacity(mappings.len());
     let mut errors = Vec::new();
@@ -605,7 +595,7 @@ pub(super) fn rows_to_batch(
 mod tests {
     use super::*;
 
-    /// What the Oracle mapper lands a catalog type as is what a load key or order is admitted by: a bare NUMBER or FLOAT lands as text that orders as text, an exact NUMBER and a text column do not.
+    /// What the Oracle mapper lands a catalog type as is what a load key or order is admitted by.
     #[test]
     fn an_oracle_number_landing_as_text_is_not_admitted_as_an_order_column() {
         use crate::preflight::key_admission::KeyLanding;
@@ -648,7 +638,7 @@ mod tests {
         }
     }
 
-    /// The seam over what an Oracle catalog type is delivered as: integer NUMBERs, text, DATE and zone-less timestamps to the microsecond key a seek.
+    /// The seam over what an Oracle catalog type is delivered as.
     #[test]
     fn an_oracle_catalog_type_keys_a_seek_by_what_it_is_delivered_as() {
         use crate::config::SourceType;
@@ -876,7 +866,6 @@ mod tests {
         assert_eq!(timestamp_micros(&t).unwrap(), 1_709_212_455_123_456);
         let bc = OracleTimestamp::new_date(-4712, 1, 1);
         assert!(timestamp_micros(&bc).unwrap() < 0);
-        // 1 BC = Oracle year -1; DuckDB's make_date(0, 6, 15) is the independent value.
         let one_bc = OracleTimestamp::new_date(-1, 6, 15);
         assert_eq!(timestamp_micros(&one_bc).unwrap(), -62_152_876_800_000_000);
         let max = OracleTimestamp::new_timestamp(9999, 12, 31, 23, 59, 59, 999_999_999);
@@ -1022,7 +1011,6 @@ mod tests {
         assert_eq!(a(OraKind::Date, "date"), ts(None));
         assert_eq!(a(OraKind::Text, "interval_ds"), RivetType::Interval);
         assert_eq!(a(OraKind::Clob, "json"), RivetType::Json);
-        // VECTOR, XMLTYPE and object types arrive re-projected to CLOB.
         for n in ["vector", "object", "xmltype"] {
             assert_eq!(a(OraKind::Clob, n), RivetType::String, "{n}");
         }
@@ -1108,8 +1096,7 @@ mod renderer_twins {
     }
 
     #[test]
-    /// Strict known divergence: ADR-0038 divergence: upper_hex renders RAW/BLOB upper-case (RAWTOHEX), CP5 fixes HexBytes lower-case; unified by the Oracle step of the migration
-    /// Passes while it diverges; when the step unifies it, this fails ("did not panic") and flips to a plain test.
+    /// Strict known divergence: ADR-0038 divergence.
     #[should_panic(expected = "assertion")]
     fn upper_hex_matches_hex_bytes() {
         for b in byte_cases() {
@@ -1129,8 +1116,7 @@ mod renderer_twins {
     }
 
     #[test]
-    /// Strict known divergence: ADR-0038 divergence: YEAR(9) TO MONTH reaches 999999999 years, past iso8601_duration's i32 months; the canonical signature widens in the Oracle step of the migration
-    /// Passes while it diverges; when the step unifies it, this fails ("did not panic") and flips to a plain test.
+    /// Strict known divergence: ADR-0038 divergence.
     #[should_panic(expected = "assertion")]
     fn interval_ym_iso_matches_the_canonical_duration_at_year_9() {
         let months = i32::try_from(999_999_999i64 * 12 + 11);
@@ -1153,8 +1139,7 @@ mod renderer_twins {
     }
 
     #[test]
-    /// Strict known divergence: ADR-0038 divergence: timestamp_text writes six fraction digits for a whole microsecond and Oracle's signed year (1 BC = -0001), iso_timestamp_nanos always nine digits and the astronomical year (1 BC = 0000); unified by the Oracle step of the migration
-    /// Passes while it diverges; when the step unifies it, this fails ("did not panic") and flips to a plain test.
+    /// Strict known divergence: ADR-0038 divergence.
     #[should_panic(expected = "assertion")]
     fn timestamp_text_matches_iso_timestamp_nanos() {
         for t in [

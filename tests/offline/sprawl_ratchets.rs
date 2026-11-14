@@ -123,22 +123,10 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ("src/plan/build.rs::resolve_chunked_strategy#1", 175),
     ("src/preflight/doctor.rs::doctor#1", 263),
     ("src/preflight/mod.rs::check#1", 300),
-    ("src/source/cdc/mod.rs::create_change_stream#1", 195),
-    ("src/source/mongo/cdc.rs::open#1", 205),
-    ("src/source/mongo/mod.rs::export#1", 158),
-    ("src/source/mssql/arrow_convert.rs::build_array#1", 257),
-    ("src/source/mssql/cdc.rs::open#1", 161),
-    ("src/source/mssql/mod.rs::export#1", 192),
-    ("src/source/mysql/arrow_convert.rs::build_array#1", 331),
-    ("src/source/mysql/cdc.rs::fill#1", 351),
+    ("src/source/mssql/arrow_convert.rs::build_array#1", 246),
+    ("src/source/mysql/arrow_convert.rs::build_array#1", 299),
+    ("src/source/mysql/cdc.rs::fill#1", 253),
     ("src/source/oracle/arrow_convert.rs::build_column#1", 171),
-    ("src/source/postgres/arrow_convert.rs::build_array#1", 158),
-    (
-        "src/source/postgres/cdc.rs::check_configured_tables_are_routable#1",
-        157,
-    ),
-    ("src/source/postgres/cdc.rs::fill#1", 196),
-    ("src/source/postgres/mod.rs::pg_run_export#1", 160),
 ];
 
 /// Every text file under `dir` that may hold a reference, as (repo-relative path, text).

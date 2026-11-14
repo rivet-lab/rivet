@@ -1,25 +1,4 @@
-//! SQL Server CDC adapter — `cdc.*` change-table poll → canonical
-//! [`cdc::ChangeEvent`]. The structural outlier: no client-streamable log over
-//! TDS, so this polls the change tables the server's capture Agent extracted, by
-//! LSN window — plain T-SQL over `tiberius` (no CDC-specific crate exists or is
-//! needed).
-//!
-//! `next_change` polls the change function in bounded LSN batches into a buffer
-//! and drains it (memory is O(batch), not O(total window)); a
-//! continuous daemon wraps [`crate::source::cdc::run`] in an outer poll loop. The
-//! runtime + connection are held by the stream (paid once, not per poll).
-//!
-//! Captured source columns are read generically from each change row
-//! (`Row::cells()`) into typed `RivetValue`s — ints/bool/float/string/binary,
-//! numeric → exact decimal text, temporal via tiberius+chrono structural
-//! `try_get` (no manual DateTime2-increment math). Mirrors `mssql::arrow_convert`.
-//!
-//! Prereqs (heaviest of the three): CDC enabled, **SQL Server Agent running**,
-//! supported edition (not Express). A stalled Agent freezes the change tables AND
-//! pins log truncation — a real reader must detect a non-advancing max LSN.
-//!
-//! `#![allow(dead_code)]`: consumed by `cli::dispatch` (binary crate); the lib
-//! crate compiles `source` for tests but has no CDC consumer of its own.
+//! SQL Server CDC adapter — `cdc.*` change-table poll → canonical [`cdc::ChangeEvent`].
 #![allow(dead_code)]
 
 use std::collections::VecDeque;
@@ -54,11 +33,7 @@ fn row_image_sql(capture_instance: &str) -> String {
     )
 }
 
-/// Pure verdict half of [`row_image`] (#161, the compression_refusal split):
-/// each row is `name:got/all` (captured vs source column counts for the capture
-/// instance rivet reads); any instance with `got < all` is a PARTIAL capture —
-/// refuse. Malformed rows are skipped (best-effort, like the query itself).
-/// Unit-tested in both directions; the connect+query half stays live-guarded.
+/// Pure verdict half of [`row_image`] (#161, the compression_refusal split).
 pub(crate) fn row_image_verdict(rows: &[String]) -> crate::source::cdc::RowImage {
     use crate::source::cdc::RowImage;
     let short: Vec<String> = rows
@@ -85,19 +60,7 @@ pub(crate) fn row_image_verdict(rows: &[String]) -> crate::source::cdc::RowImage
     }
 }
 
-/// Build one poll's T-SQL. `bound` pins `@max` to the open-time ceiling
-/// (`0x{hex}`, a bounded `until_current` run) instead of re-reading
-/// `sys.fn_cdc_get_max_lsn()` per poll (the daemon's chase-the-head mode) — the
-/// termination contract of [`MssqlChangeStream::bound`], pure so the bounded
-/// shape is asserted without a server.
-///
-///
-/// A position below the instance's `start_lsn` is refused, always: every anchor rivet
-/// writes sits inside its capture instance's lifetime (`pin_checkpoint_at_max_lsn`),
-/// so the only way to be below it is that the cleanup job, or a re-created instance,
-/// moved it past the position. `start_lsn` is what `fn_cdc_get_min_lsn` returns once
-/// the capture job has reached the instance, and is NULL-free before that.
-/// What one poll needs to know.
+/// Build one poll's T-SQL.
 struct Poll<'a> {
     /// The capture instance whose change function is read.
     ci: &'a str,
@@ -105,8 +68,7 @@ struct Poll<'a> {
     from_expr: &'a str,
     /// Row cap for one batch (`TOP (n)`).
     batch: i64,
-    /// `Some(hex)` pins `@max` at the open-time LSN (a bounded drain); `None`
-    /// re-reads `fn_cdc_get_max_lsn()` every poll (the daemon).
+    /// `Some(hex)` pins `@max` at the open-time LSN (a bounded drain).
     bound: Option<&'a str>,
 }
 
@@ -150,12 +112,6 @@ CDC change-table retention (the cleanup job removed it). Resuming would silently
 }
 
 /// Connection parameters for a SQL Server CDC poll stream.
-/// Where a poll resumes from, and WHAT that position is.
-///
-/// One named value rather than two positional arguments, because the pair is a
-/// `String` and a `bool` whose meaning is invisible at the call site — and the
-/// bool decides whether a position the cleanup job purged past is REFUSED or
-/// silently skipped.
 #[derive(Debug)]
 pub(crate) struct Resume {
     /// Hex LSN to read after, or `None` for "from the change table's min".
@@ -164,9 +120,7 @@ pub(crate) struct Resume {
     pub identity: Option<DbIdentity>,
 }
 
-/// A database's log lineage: `family_guid` names the database, `recovery_fork_guid`
-/// the history since its last restore. Both are shared by an availability group's
-/// replicas (measured), so a checkpoint follows a failover and nothing else.
+/// A database's log lineage: `family_guid` names the database, `recovery_fork_guid` the history since its last restore.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DbIdentity {
     pub family: String,
@@ -252,29 +206,6 @@ fn with_identity(
 }
 
 /// Read a resume position out of a checkpoint that has already PARSED.
-///
-/// `Position::load` refuses a file that is not valid JSON, and says why: treating
-/// it as absent "would permanently skip every change since the last checkpoint".
-/// This is the other half of that guard — a file that parses and yet carries no
-/// `lsn`. The call site used to reach for it with `.and_then(...)`, so the key's
-/// absence became `None`, and `fill_sql` turns `None` into
-/// `fn_cdc_get_min_lsn(ci)`: the whole retained change table, re-read and
-/// re-delivered under a green exit.
-///
-/// MEASURED (2026-08-25, live SQL Server): a checkpoint whose `lsn` key was
-/// renamed delivered ids `[1, 2, 3, 4]` on the resume leg where `[4]` was owed —
-/// silently, with `status: success`. The direction of harm is over-read, so
-/// at-least-once holds; the resume CONTRACT does not, and the comment at the call
-/// site already claimed this case was closed (#99).
-///
-/// `pinned` (written by rivet 0.31 or older) is ignored: every position is a resume
-/// position, refused when it is below the instance's start. `lsn` IS the position,
-/// and a checkpoint without one says nothing at all.
-///
-/// A named function rather than an expression at the call site because it DECIDES
-/// something: live-only glue may sequence and wrap, but the branch that separates
-/// "resume here" from "re-read everything" is graded by a mutant only if a unit
-/// test can call it.
 pub(crate) fn resume_from_checkpoint(
     pos: Option<&crate::source::cdc::Position>,
     path: &str,
@@ -313,35 +244,20 @@ pub(crate) struct MssqlCdcConfig {
     pub database: String,
     pub user: String,
     pub password: crate::secret::Secret,
-    /// CDC capture instance, e.g. `dbo_orders`. Validated as an identifier
-    /// because it is interpolated into the change-function name (which can't be a
-    /// bind parameter).
+    /// CDC capture instance, e.g.
     pub capture_instance: String,
-    /// Resume LSN — the hex of the last durably-written `__$start_lsn`. The poll
-    /// reads changes *after* it (`fn_cdc_increment_lsn`); `None` ⇒ from the change
-    /// table's min LSN (first run). This is what makes SQL Server CDC at-least-once
-    /// rather than re-reading the whole retained change table every run.
+    /// Resume LSN — the hex of the last durably-written `__$start_lsn`.
     pub from_lsn: Option<String>,
     /// The identity the checkpoint recorded; checked against the server at open.
     pub checkpoint_identity: Option<DbIdentity>,
 }
 
 /// Polls a CDC change table and yields canonical changes.
-/// The relation a capture instance names, from `cdc.change_tables` — the catalog
-/// answer, reusable by callers that need it BEFORE a stream exists.
-///
-/// The `initial: snapshot` leg is planned before any stream opens, so it had no way
-/// to ask and read the CONFIGURED string instead: on a fixture where the default
-/// schema holds a same-named decoy, the baseline it deposited in the captured
-/// table's own prefix was the DECOY's row — data that never existed in the relation
-/// being captured, under a green run.
 pub(crate) fn source_object_of_capture_instance(
     url: &str,
     capture_instance: &str,
     tls: Option<&TlsConfig>,
 ) -> Result<Option<(String, String)>> {
-    // The same gate `from_url` applies — a plan-time lookup must not be the one
-    // path that dials remote plaintext.
     require_tls_or_loopback(url, tls)?;
     let p = crate::source::mssql::parse_mssql_url(url)?;
     let cfg = &MssqlCdcConfig {
@@ -362,13 +278,6 @@ pub(crate) fn source_object_of_capture_instance(
     )?;
     let mut client = rt.block_on(connect(cfg, tls))?;
 
-    // Three outcomes, kept APART. Collapsing them into `Ok(None)` — which the first
-    // cut did, with `.ok()?` — let a mistyped `capture_instance:`, a login without
-    // SELECT on the cdc schema, and a network blip all fall back to the configured
-    // string: silently restoring the pre-fix behaviour for exactly the config most
-    // likely to be wrong. Round-4 DEMONSTRATED the cost: a typo'd instance wrote a
-    // fabricated snapshot baseline AND marked it done, so correcting the typo never
-    // backfilled the real rows — the fabrication was permanent.
     let rows = rt
         .block_on(async {
             client
@@ -400,15 +309,6 @@ pub(crate) fn source_object_of_capture_instance(
             e,
         )
     })?;
-    // A FOURTH outcome the first cut folded back into "no such instance", making
-    // that comment a lie four lines after it was written: the row EXISTS while
-    // `OBJECT_SCHEMA_NAME(source_object_id)` is NULL, because the source table was
-    // dropped and SQL Server has not yet cleaned the capture instance up (MEASURED
-    // on the stand — the `cdc.change_tables` row outlives the table). Calling that
-    // "the catalog does not know this instance" sent the operator to
-    // `sp_cdc_enable_table`, which from THAT state fails 22926 "capture instance
-    // already exists" — a remediation that cannot recover from the degraded state,
-    // the exact class this repo has a rule about. The recovery is to disable first.
     let named: Option<(Option<String>, Option<String>)> = row.map(|row| {
         let s: Option<&str> = row.get(0);
         let t: Option<&str> = row.get(1);
@@ -418,52 +318,13 @@ pub(crate) fn source_object_of_capture_instance(
 }
 
 /// What a `cdc.change_tables` lookup MEANS — the decision, pulled out of the I/O.
-///
-/// Live-only glue may sequence and connect; it must not decide. The reason this is
-/// a function is that its third case cannot be reproduced live on demand: SQL Server
-/// cleans an orphaned capture instance up within a second or two of the drop, so a
-/// live test racing that window documents a flake rather than the contract. It is
-/// nonetheless REAL and was measured on the stand — the `cdc.change_tables` row
-/// outlives its source table, and `OBJECT_SCHEMA_NAME(source_object_id)` returns
-/// NULL while the row is still there.
-///
-/// Folding that case into "no such capture instance" — which the first cut did, four
-/// lines under a comment asserting `None` now meant one thing — sent the operator to
-/// `sp_cdc_enable_table`, which from THAT state fails 22926 "capture instance already
-/// exists". A remediation must recover from the ALREADY-DEGRADED state.
 fn classify_source_object(
     capture_instance: &str,
     named: Option<(Option<String>, Option<String>)>,
 ) -> Result<Option<(String, String)>> {
     match named {
-        // The catalog has no such capture instance.
         None => Ok(None),
         Some((Some(s), Some(t))) => Ok(Some((s, t))),
-        // The row is there and the object names are not. TWO causes produce this,
-        // and the first version named only the rarer one — then prescribed a command
-        // that DESTROYS the capture instance if the other cause is the real one.
-        //
-        // 1. METADATA VISIBILITY, and this is the likely one: SQL Server returns NULL
-        //    from `OBJECT_SCHEMA_NAME`/`OBJECT_NAME` when the caller has no permission
-        //    on the object. rivet's OWN documented least-privilege reader
-        //    (`GRANT SELECT ON SCHEMA::cdc`, docs/reference/cdc.md) is exactly such a
-        //    login. MEASURED on the stand: `sa` sees `dbo`/`lp6`, the documented
-        //    reader sees NULL/NULL — same row, same healthy instance, table present.
-        // 2. A transient ORPHAN: the table was dropped without disabling capture, so
-        //    the row briefly outlives its object. MEASURED: the Agent's capture job
-        //    clears it within a few seconds on its own.
-        //
-        // The old hint told the operator to run `sp_cdc_disable_table`. On cause 1
-        // that SUCCEEDS and drops a healthy capture instance together with every
-        // change it still holds; on cause 2 it FAILS (Msg 22931, "Source table does
-        // not exist"), and so does recreating the table first (Msg 22960). Wrong on
-        // both branches — one destructive, one impossible. The rule this violated is
-        // the one the commit that wrote it cited: a remediation must recover from the
-        // ALREADY-DEGRADED state.
-        //
-        // Refusing is still right — resolution is what stops a fabricated snapshot
-        // baseline, and "we cannot read the names" is not "the configured string is
-        // fine". Only the diagnosis changes.
         Some(_) => crate::rivet_bail!(
             crate::error::codes::SOURCE_CDC_PREREQUISITE,
             "sqlserver cdc: cdc.change_tables has a row for capture instance \
@@ -488,49 +349,30 @@ pub(crate) struct MssqlChangeStream {
     capture_instance: String,
     schema: String,
     table: String,
-    /// Internal read cursor — advanced per bounded batch so the next poll reads
-    /// the following window. NOT the durable resume position: that is the sink's
-    /// checkpoint (advanced only after a durable part), so a crash re-reads from
-    /// there (at-least-once) regardless of how far this cursor has moved.
+    /// Internal read cursor — advanced per bounded batch so the next poll reads the following window.
     from_lsn: Option<String>,
     /// The database's identity at open, recorded into every checkpoint.
     identity: Option<DbIdentity>,
     pending: VecDeque<ChangeEvent>,
-    /// Where an oversized poll batch's tail goes. SQL Server's "stream" is a query
-    /// result set — there is no wire to keep — so the tail is written through the
-    /// general tagged frame, like MySQL's.
+    /// Where an oversized poll batch's tail goes.
     spill_dir: Option<std::path::PathBuf>,
-    /// A spilled batch tail, still being handed out. GROUP-aware: unlike PostgreSQL
-    /// and MySQL, one buffer here holds SEVERAL transactions (runs of rows sharing
-    /// `__$start_lsn`), so the boundary is only visible by comparing neighbours.
+    /// A spilled batch tail, still being handed out.
     spooled: Option<crate::source::cdc::tx_buffer::SpooledTail>,
-    /// Max changes to pull per poll — bounds drain memory to O(batch) instead of
-    /// O(total change-table window). See [`crate::source::cdc::PeekBound`].
+    /// Max changes to pull per poll — bounds drain memory to O(batch) instead of O(total change-table window).
     batch_limit: i64,
-    /// A poll that returns no rows has drained the window up to the current max
-    /// LSN — the stream ends (the next scheduler run resumes from the checkpoint).
+    /// A poll that returns no rows has drained the window up to the current max LSN.
     exhausted: bool,
-    /// Open-time max-LSN ceiling (bare hex) for a bounded run: every poll's
-    /// `@max` pins here instead of re-reading `fn_cdc_get_max_lsn()`, so the
-    /// window cannot recede under sustained writes; `None` (daemon) keeps the
-    /// chase-the-head behaviour. The contract lives on [`DrainMode`].
+    /// Open-time max-LSN ceiling (bare hex) for a bounded run.
     bound: Option<String>,
 }
 
 impl MssqlChangeStream {
-    /// Connect and bind to a capture instance. Holds the runtime + connection for
-    /// the life of the stream (folds the per-poll runtime/connect smell away).
-    ///
-    /// A [`DrainMode::BoundedAtOpen`] run snapshots `fn_cdc_get_max_lsn()` once
-    /// and pins every poll's `@max` to it — see [`Self::bound`].
+    /// Connect and bind to a capture instance.
     pub(crate) fn open(
         cfg: &MssqlCdcConfig,
         tls: Option<&TlsConfig>,
         peek: crate::source::cdc::PeekBound,
         mode: DrainMode,
-        // The `table:` values the config asked for, checked against the catalog
-        // identity this stream will actually emit. Empty ⇒ no check (the
-        // `rivet cdc` CLI path supplies none).
         configured_tables: &[String],
     ) -> Result<Self> {
         if !cfg
@@ -544,8 +386,6 @@ impl MssqlChangeStream {
                 cfg.capture_instance
             );
         }
-        // The resume LSN is inlined into `0x{hex}` (binary(10) can't be bound), so
-        // validate it to even-length hex — no SQL can break out.
         if let Some(lsn) = &cfg.from_lsn
             && (lsn.is_empty() || lsn.len() % 2 != 0 || !lsn.bytes().all(|b| b.is_ascii_hexdigit()))
         {
@@ -566,13 +406,6 @@ impl MssqlChangeStream {
         }
         let from_lsn = cfg.from_lsn.clone();
 
-        // Resolve the REAL schema/table from cdc.change_tables metadata. The
-        // previous `<schema>_<table>` name heuristic silently mis-tagged every
-        // event when the capture instance was named after an underscored table
-        // (`product_catalog` → schema "product", table "catalog"), so the
-        // sink's table routing dropped 100% of its changes while the run still
-        // reported success. The name is a label; the metadata is the truth.
-        // Fall back to the heuristic only if the metadata row is unreadable.
         let meta: Option<(String, String)> = rt.block_on(async {
             let row = client
                 .query(
@@ -597,24 +430,6 @@ impl MssqlChangeStream {
                 .unwrap_or_else(|| (String::new(), cfg.capture_instance.clone()))
         });
 
-        // The config's name is a LABEL; this identity is the truth — and until
-        // now nothing compared them. The sink routes with
-        // `cdc::sink::table_matches`, a byte-exact comparison, while SQL Server's
-        // default collation is case-INSENSITIVE: `table: dbo.orders` against a
-        // catalog `dbo.Orders` resolves its schema perfectly (a full, correct
-        // column list) and then matches ZERO events.
-        //
-        // That is not merely a delay. The commit boundary is recorded BEFORE the
-        // routing filter and the end-of-pass roll fires on `unacked_commit`
-        // alone, so the checkpoint advances over events that were never
-        // captured. Measured: 6 change rows, 0 captured, exit 0 — and re-running
-        // with the case FIXED against the same checkpoint recovered NOTHING,
-        // while the same run with the checkpoint deleted recovered all 5 events.
-        // The rows never left the change table; only the advanced LSN skipped
-        // them.
-        //
-        // Checked with the SAME predicate the sink routes by, deliberately: a
-        // check that asks a different question is not a check.
         if !configured_tables.is_empty()
             && !configured_tables.iter().any(|c| {
                 crate::source::cdc::sink::table_matches(
@@ -641,9 +456,6 @@ impl MssqlChangeStream {
             );
         }
 
-        // Bounded run: snapshot the ceiling once, at open. A NULL max LSN (CDC
-        // not enabled yet) keeps `bound = None` so the first poll surfaces the
-        // same loud setup error the daemon path does — never a silent empty run.
         let bound = if mode.is_bounded() {
             let max: Option<String> = rt.block_on(async {
                 Ok::<_, anyhow::Error>(
@@ -659,8 +471,6 @@ impl MssqlChangeStream {
                 )
             })?;
             let max = max.map(|s| s.trim_start_matches("0x").to_ascii_lowercase());
-            // The value is inlined into `0x{hex}` in every poll — hold it to the
-            // same charset gate as the resume LSN, even though the server made it.
             if let Some(hex) = &max
                 && (hex.is_empty()
                     || hex.len() % 2 != 0
@@ -684,8 +494,6 @@ impl MssqlChangeStream {
             from_lsn,
             identity,
             pending: VecDeque::new(),
-            // Overridden by `from_url`, which knows the checkpoint's location.
-            // Overridden by `from_url`, the production constructor.
             spill_dir: None,
             spooled: None,
             batch_limit: peek.rows_capped() as i64,
@@ -694,11 +502,7 @@ impl MssqlChangeStream {
         })
     }
 
-    /// Open from a `sqlserver://user:pass@host:port/db` URL + a capture instance
-    /// (the factory path).
-    // Eight positional arguments, and a struct would not improve it: each is a
-    // distinct decision the caller must make consciously, and a builder would let
-    // one be forgotten silently. Same call as `PgChangeStream::open`.
+    /// Open from a `sqlserver://user:pass@host:port/db` URL + a capture instance (the factory path).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_url(
         url: &str,
@@ -707,15 +511,9 @@ impl MssqlChangeStream {
         tls: Option<&TlsConfig>,
         peek: crate::source::cdc::PeekBound,
         mode: DrainMode,
-        // Passed through to `open`, which cross-checks it against the catalog.
         configured_tables: &[String],
-        // Where an oversized batch's tail spills — the checkpoint's directory. See
-        // `spill_dir_for`; `open` starts with None — test paths that never cross
-        // the cap need no directory, and one that does must be given one.
         spill_dir: Option<std::path::PathBuf>,
     ) -> Result<Self> {
-        // Refuse remote plaintext / unauthenticated TLS before any dial (the gate
-        // the batch MssqlSource uses).
         require_tls_or_loopback(url, tls)?;
         let p = crate::source::mssql::parse_mssql_url(url)?;
         Self::open(
@@ -740,23 +538,9 @@ impl MssqlChangeStream {
         })
     }
 
-    /// Poll ONE **bounded batch** of the change table into `pending`. `@to` is the
-    /// `__$start_lsn` of the `batch_limit`-th change, so the window `[@from, @to]`
-    /// returns only **whole transactions** (`fn_cdc_get_all_changes` never splits a
-    /// `__$start_lsn` group) — memory is O(batch), never O(total window). The
-    /// internal cursor then advances to `@to`; the next poll continues past it. A
-    /// poll that returns no rows has drained the window up to the current max LSN.
+    /// Poll ONE **bounded batch** of the change table into `pending`.
     fn fill(&mut self) -> Result<()> {
-        // Only ever called from `next_change` under `!self.exhausted`, so no
-        // early-return guard here (matches the PostgreSQL adapter).
         let ci = self.capture_instance.clone();
-        // Resume window: read changes *after* the last cursor LSN
-        // (`fn_cdc_increment_lsn`); on the first poll (no cursor) start at the
-        // change table's min LSN. If the cursor has fallen BELOW the min LSN the
-        // cleanup job removed the changes — THROW (forcing a re-snapshot) rather
-        // than silently skip. `@to` bounds the batch at a real transaction
-        // boundary (the batch_limit-th change's start LSN); NULL LSNs / nothing
-        // new leave `@to` NULL and the final SELECT returns zero rows.
         let from_expr = match &self.from_lsn {
             Some(hex) => format!("sys.fn_cdc_increment_lsn(0x{hex})"),
             None => format!("sys.fn_cdc_get_min_lsn('{ci}')"),
@@ -767,9 +551,6 @@ impl MssqlChangeStream {
             batch: self.batch_limit,
             bound: self.bound.as_deref(),
         });
-        // The most common SQL Server gotcha — "Invalid object name
-        // cdc.fn_cdc_get_all_changes_…" — surfaces here, at the first poll, not at
-        // connect. Append the setup hint so the missing CDC enable is obvious.
         let rows = {
             let Self { rt, client, .. } = self;
             rt.block_on(async { client.simple_query(sql).await?.into_first_result().await })
@@ -785,18 +566,7 @@ impl MssqlChangeStream {
                     }
                 })?
         };
-        // Rows are ordered ascending by start LSN, so the last one's `__$start_lsn`
-        // is `@to` — the cursor advances there regardless of each row's op.
         let mut max_lsn: Option<String> = None;
-        // Collect this batch's events with their start LSN, then mark ONLY the
-        // last row of each `__$start_lsn` group (a source transaction) as the
-        // commit boundary — the sink rolls only on a committed event, so without
-        // this a transaction larger than `rollover` rolls + checkpoints MID-
-        // transaction, and a crash before the tail flushes loses it (resume reads
-        // strictly after the checkpoint LSN, skipping the rest of the same-LSN
-        // group). Mirrors PostgreSQL's per-transaction commit marking.
-        // The batch, with its memory cap and spill (`tx_buffer`). Local: `@to` bounds
-        // a poll at a group boundary, so nothing here straddles two polls.
         let mut batch = crate::source::cdc::tx_buffer::TxBuffer::new(
             crate::source::cdc::CdcEngine::Mssql,
             self.spill_dir.clone(),
@@ -805,9 +575,6 @@ impl MssqlChangeStream {
             let mut op_code = 0i32;
             let mut lsn = String::new();
             let mut values: Vec<RivetValue> = Vec::new();
-            // Captured column NAMES ride along — the sink then maps this
-            // image by name, making the positional-corruption class
-            // (findings #37/#41) unrepresentable on SQL Server too.
             let mut names: Vec<String> = Vec::new();
             for (idx, (col, data)) in r.cells().enumerate() {
                 match col.name() {
@@ -821,7 +588,7 @@ impl MssqlChangeStream {
                             lsn = hex_bytes(b);
                         }
                     }
-                    n if n.starts_with("__$") => {} // skip other metadata
+                    n if n.starts_with("__$") => {}
                     n => {
                         names.push(n.to_string());
                         values.push(if renders_as_text(col.column_type()) {
@@ -839,7 +606,6 @@ impl MssqlChangeStream {
                 max_lsn = Some(lsn.clone());
             }
             let Some(op) = map_op(op_code) else { continue };
-            // after-image for insert/update; the key (before-image) for delete
             let (before, after) = if op.values_live_in_before() {
                 (Some(values), None)
             } else {
@@ -852,25 +618,16 @@ impl MssqlChangeStream {
                 before,
                 after,
                 position: Position::new(json!({ "lsn": lsn })),
-                // Overridden below — the last row of each start-LSN group is
-                // the commit boundary.
                 committed: false,
                 image_names: Some(std::sync::Arc::from(names)),
-                seq: 0, // stamped by TxnSeq as the stream is consumed
+                seq: 0,
                 poison: None,
                 row_id: None,
                 before_names: None,
                 before_poison: None,
             };
-            // Memory backstop: a `__$start_lsn` group can be arbitrarily large and is
-            // buffered whole. Past the cap the event spills through the general tagged
-            // frame; its `position` carries the `__$start_lsn`, so the group boundary
-            // is recoverable on the way out.
             batch.push(ev, crate::source::cdc::spill::encode_event, &lsn)?;
         }
-        // #158: a batch holds one or more transactions, each a run of rows sharing
-        // `__$start_lsn` (its position); each closes on its own last row, and the
-        // last stays open when the spilled tail continues it.
         let (evs, spooled) = batch.close_groups(
             crate::source::cdc::spill::decode_event,
             &max_lsn.as_deref().unwrap_or(""),
@@ -878,16 +635,13 @@ impl MssqlChangeStream {
         self.pending.extend(evs);
         self.spooled = spooled;
         match max_lsn {
-            // Advance the internal cursor to @to; the next poll reads past it.
             Some(l) => self.from_lsn = Some(l),
-            // No rows ⇒ the window is drained up to the current max LSN.
             None => self.exhausted = true,
         }
         Ok(())
     }
 
-    /// One row of a spilled tail, group-aware: `committed` comes from the row that
-    /// FOLLOWS it, which is why the tail reads one record ahead.
+    /// One row of a spilled tail, group-aware: `committed` comes from the row that FOLLOWS it, which is why the tail reads one record ahead.
     fn next_spooled(&mut self) -> Result<Option<ChangeEvent>> {
         crate::source::cdc::tx_buffer::replay(
             &mut self.spooled,
@@ -902,7 +656,6 @@ impl ChangeStream for MssqlChangeStream {
         let sql = row_image_sql(&self.capture_instance);
         let Self { rt, client, .. } = self;
         let rows = rt.block_on(async { client.simple_query(sql).await?.into_first_result().await });
-        // Best-effort: an unreadable catalog is `Whole`.
         let Ok(rows) = rows else {
             return RowImage::Whole;
         };
@@ -917,12 +670,7 @@ impl ChangeStream for MssqlChangeStream {
         crate::source::cdc::CdcEngine::Mssql
     }
 
-    /// The capture instance names its source object in `cdc.change_tables`, so this
-    /// engine ALWAYS knows the real pair — and it is the engine that most needs to
-    /// say so, being the only one whose `table:` is accompanied by a second
-    /// identifier (`capture_instance:`) that settles the question outright. Gated on
-    /// the same predicate the sink routes by, so an output this stream does not feed
-    /// keeps its own configured name.
+    /// The capture instance names its source object in `cdc.change_tables`, so this engine ALWAYS knows the real pair.
     fn resolved_identity(&self, configured: &str) -> Option<(String, String)> {
         crate::source::cdc::sink::table_matches(
             crate::source::cdc::CdcEngine::Mssql,
@@ -950,8 +698,6 @@ impl ChangeStream for MssqlChangeStream {
     }
 
     fn next_change(&mut self) -> Option<Result<ChangeEvent>> {
-        // Refill a bounded batch whenever the buffer drains, advancing the cursor
-        // each time, until a poll returns nothing (window drained to the max LSN).
         while self.pending.is_empty() && self.spooled.is_none() && !self.exhausted {
             if let Err(e) = self.fill() {
                 return Some(Err(e));
@@ -960,8 +706,6 @@ impl ChangeStream for MssqlChangeStream {
         if let Some(ev) = self.pending.pop_front() {
             return Some(Ok(ev));
         }
-        // A spilled tail outranks another poll: its rows belong to transactions
-        // already framed, and reading further would interleave a later one.
         if self.spooled.is_some() {
             match self.next_spooled() {
                 Ok(Some(ev)) => return Some(Ok(ev)),
@@ -979,8 +723,7 @@ fn drained_frontier(exhausted: bool, bound: Option<&str>, from: Option<&str>) ->
     (exhausted && b.len() == f.len() && b > f).then_some(b)
 }
 
-/// `__$operation` → canonical op. 1=delete, 2=insert, 4=update-after; 3 (update
-/// before-image) is skipped — under `N'all'` an update yields only op 4.
+/// `__$operation` → canonical op.
 fn map_op(code: i32) -> Option<ChangeOp> {
     match code {
         1 => Some(ChangeOp::Delete),
@@ -990,19 +733,7 @@ fn map_op(code: i32) -> Option<ChangeOp> {
     }
 }
 
-/// Map a captured source cell to a typed [`RivetValue`]. Temporals use
-/// tiberius+chrono's structural `try_get` (no manual DateTime2-increment math);
-/// numeric carries its exact unscaled value → decimal text → `Decimal128` at the
-/// sink. Mirrors `mssql::arrow_convert`'s per-`ColumnData` handling.
-/// The arms that depend ONLY on the cell's own data — no `Row`, no column index.
-///
-/// Split out so they can be tested at all. `cell_to_rivet` takes a `&Row`, a
-/// tiberius type with no public constructor, so for as long as every arm lived
-/// inside it NONE of them had a unit test: deleting any of these eleven arms
-/// survived the whole lib cycle (eleven standing entries in the mutants
-/// baseline). The temporal arms genuinely need the `Row` — tiberius decodes them
-/// through `try_get` rather than from `ColumnData` — so they stay behind, and
-/// `None` here means exactly "not a data-only arm, ask the row".
+/// Map a captured source cell to a typed [`RivetValue`].
 fn cell_from_data(data: &ColumnData<'_>) -> Option<RivetValue> {
     Some(match data {
         ColumnData::Bit(Some(b)) => RivetValue::Bool(*b),
@@ -1013,9 +744,6 @@ fn cell_from_data(data: &ColumnData<'_>) -> Option<RivetValue> {
         ColumnData::F32(Some(v)) => RivetValue::Float(*v as f64),
         ColumnData::F64(Some(v)) => RivetValue::Float(*v),
         ColumnData::String(Some(s)) => RivetValue::Bytes(s.as_bytes().to_vec()),
-        // uniqueidentifier resolves to a UUID column (FixedSizeBinary(16)), so carry
-        // the 16 canonical bytes — NOT the 36-char string, which won't fit the
-        // fixed-size builder and silently becomes NULL. Mirrors mssql::arrow_convert.
         ColumnData::Guid(Some(g)) => RivetValue::Bytes(g.as_bytes().to_vec()),
         ColumnData::Binary(Some(b)) => RivetValue::Bytes(b.to_vec()),
         ColumnData::Numeric(Some(n)) => {
@@ -1026,10 +754,6 @@ fn cell_from_data(data: &ColumnData<'_>) -> Option<RivetValue> {
 }
 
 /// Microseconds since midnight, truncating sub-microsecond nanos.
-///
-/// Pulled out of the `Time` arm because it is the only ARITHMETIC in this
-/// mapper, and arithmetic is where an operator swap hides: `*`, `+` and `/` here
-/// carried six standing baseline entries with nothing able to tell them apart.
 fn naive_time_to_micros(t: NaiveTime) -> i64 {
     t.num_seconds_from_midnight() as i64 * 1_000_000 + t.nanosecond() as i64 / 1000
 }
@@ -1045,10 +769,6 @@ fn cell_to_rivet(row: &Row, idx: usize, data: &ColumnData<'_>) -> Result<RivetVa
         ))
     };
     Ok(match data {
-        // datetimeoffset is tz-aware — `try_get::<NaiveDateTime>` is the *wrong* type
-        // and returns None (silent data loss). Read it as FixedOffset and carry its UTC
-        // instant; the resolved column is a tz-aware Timestamp, so the sink writes it
-        // identically to the batch export (parity) with the zone preserved.
         ColumnData::DateTimeOffset(_) => row
             .try_get::<chrono::DateTime<chrono::FixedOffset>, _>(idx)
             .map_err(unreadable)?
@@ -1104,11 +824,7 @@ async fn connect(
     crate::source::mssql::dial(config, &format!("mssql://{}:{}", cfg.host, cfg.port)).await
 }
 
-/// Persist the anchor for `cdc.initial: snapshot` to `ckpt`, BEFORE the snapshot read: the
-/// database's max LSN, or the position just below the capture instance's start when that is
-/// higher (an instance the capture job has not reached yet). Either way the anchor is inside
-/// the instance's lifetime, so a later position below `fn_cdc_get_min_lsn` always means the
-/// log moved. Fails loudly when CDC is not enabled on the database.
+/// Persist the anchor for `cdc.initial: snapshot` to `ckpt`, BEFORE the snapshot read.
 pub(crate) fn pin_checkpoint_at_max_lsn(
     url: &str,
     capture_instance: &str,
@@ -1221,12 +937,6 @@ mod tests {
     }
 
     /// The three outcomes of a `cdc.change_tables` lookup, kept apart.
-    ///
-    /// The middle one is why this is a unit test: an orphaned capture instance (row
-    /// present, source object dropped) is cleaned up by SQL Server within a second or
-    /// two, so a live test racing that window would document a flake. The state is
-    /// real and was measured on the stand; the DECISION about it belongs here, where
-    /// a mutant can grade it.
     #[test]
     fn a_lookup_tells_a_missing_instance_from_unreadable_object_names() {
         assert_eq!(
@@ -1256,21 +966,6 @@ mod tests {
              rare cause sends the operator to repair something that is not broken: \
              {err}"
         );
-        // POSITIVE, not a list of phrasings to avoid. The first version of this
-        // assertion banned two exact strings, and round 7 walked straight past it:
-        // rewording the last sentence to "To clear it, execute
-        // `sys.sp_cdc_disable_table` … and then re-enable capture" restored the
-        // destructive advice with the test still green (measured — 1 passed). A
-        // negative substring check enumerates the ways a mistake can be SPELLED; the
-        // warning either survives a rewrite or the test fails, which is the only
-        // formulation a reword cannot slip through.
-        // Round 8 measured what the positive check still missed: two mutants kept
-        // the `Do NOT run` sentence and stayed green — one DELETING the GRANT remedy
-        // (the actual repair for the likely cause), one REVERSING the causes so the
-        // rare orphan leads and prescribing "recreate the table", which round 6
-        // measured as impossible (Msg 22960). A message can carry the right warning
-        // and still send the operator to the wrong place, so the ORDER and the REPAIR
-        // are pinned too.
         let permission_at = err.find("permission").expect("the likely cause is named");
         let dropped_at = err.find("dropped").expect("the rare cause is named");
         assert!(
@@ -1307,15 +1002,12 @@ mod tests {
         crate::source::cdc::Position::new(j)
     }
 
-    /// The whole point: absence of `lsn` is an ERROR, absence of `pinned` is a
-    /// documented default. Conflating them re-reads the entire change table.
+    /// The whole point: absence of `lsn` is an ERROR, absence of `pinned` is a documented default.
     #[test]
     fn a_checkpoint_without_an_lsn_is_refused_not_read_as_absent() {
-        // No file at all — a genuine first run.
         let fresh = resume_from_checkpoint(None, "/x").expect("no checkpoint is not an error");
         assert_eq!(fresh.from_lsn, None);
 
-        // The ordinary resume, and the pin.
         let r = resume_from_checkpoint(Some(&ckpt(serde_json::json!({"lsn": "0a0b"}))), "/x")
             .expect("an lsn without `pinned` is a legacy checkpoint, still valid");
         assert_eq!(r.from_lsn.as_deref(), Some("0a0b"));
@@ -1330,13 +1022,10 @@ mod tests {
             "an anchor written by rivet 0.31 or older is an ordinary position: below the instance's start it is refused like any other"
         );
 
-        // And the defect this function exists for. Each of these parses as JSON.
         for missing in [
             serde_json::json!({}),
             serde_json::json!({"pinned": false}),
             serde_json::json!({"lsn_renamed_by_a_future_version": "0a0b"}),
-            // Present but not a string: `as_str` yields None, and a position that
-            // cannot be read is no position at all.
             serde_json::json!({"lsn": 2571}),
             serde_json::json!({"lsn": null}),
         ] {
@@ -1390,17 +1079,6 @@ mod tests {
     }
 
     /// Every data-only `ColumnData` arm, with an INDEPENDENT expectation.
-    ///
-    /// `cell_to_rivet` takes a `&Row` — no public constructor — so until the
-    /// data-only arms were split into `cell_from_data` not one of them could be
-    /// reached from a unit test, and deleting ANY of the eleven survived the whole
-    /// lib cycle. The expected side here is a hand-written literal, never a value
-    /// recomputed with the mapping logic it grades.
-    ///
-    /// Fixtures are chosen so a wrong arm cannot coincide with a right one: the
-    /// integer widths use DIFFERENT magnitudes (a shared `1` would make U8/I16/
-    /// I32/I64 indistinguishable), and the floats are values whose f32 and f64
-    /// renderings differ.
     #[test]
     fn every_data_only_column_data_arm_maps_to_its_documented_value() {
         use std::borrow::Cow;
@@ -1447,9 +1125,6 @@ mod tests {
                 ColumnData::String(Some(Cow::Borrowed("héllo"))),
                 RivetValue::Bytes("héllo".as_bytes().to_vec()),
             ),
-            // uniqueidentifier must carry the 16 CANONICAL BYTES, not the 36-char
-            // text — the fixed-size builder nulls anything that is not 16 bytes,
-            // which is the silent-loss shape this repo has already been bitten by.
             (
                 "guid",
                 ColumnData::Guid(Some(uuid)),
@@ -1483,9 +1158,6 @@ mod tests {
             wrong.join("\n  ")
         );
 
-        // A NULL of a data-only type, and a temporal type, must both defer to the
-        // row rather than be answered here — otherwise `cell_to_rivet`'s fallback
-        // is unreachable and every temporal value silently becomes NULL.
         assert_eq!(cell_from_data(&ColumnData::Bit(None)), None, "NULL defers");
         assert_eq!(
             cell_from_data(&ColumnData::Date(None)),
@@ -1495,20 +1167,12 @@ mod tests {
     }
 
     /// Pins every arithmetic step of the `time` conversion.
-    ///
-    /// Deliberately no zeros: at 00:00:00.000000 the `*`, `+` and `/` in this
-    /// expression all yield 0, so a fixture at midnight cannot tell the three
-    /// operators apart — the same degenerate-fixture trap that hid the MySQL
-    /// Time arm's six operator mutants.
     #[test]
     fn naive_time_to_micros_pins_every_arithmetic_step() {
-        // 01:02:03 = 3723 s; .456789 s -> 456_789_000 ns -> 456_789 us
         let t = NaiveTime::from_hms_nano_opt(1, 2, 3, 456_789_000).unwrap();
         assert_eq!(naive_time_to_micros(t), 3723 * 1_000_000 + 456_789);
-        // sub-microsecond nanos truncate, they do not round
         let t = NaiveTime::from_hms_nano_opt(0, 0, 1, 999).unwrap();
         assert_eq!(naive_time_to_micros(t), 1_000_000);
-        // last representable instant of the day, so a `*`/`+` swap cannot coincide
         let t = NaiveTime::from_hms_nano_opt(23, 59, 59, 999_999_000).unwrap();
         assert_eq!(naive_time_to_micros(t), 86_399 * 1_000_000 + 999_999);
     }
@@ -1519,28 +1183,17 @@ mod tests {
         assert_eq!(numeric_to_decimal_string(-7500, 3), "-7.500");
         assert_eq!(numeric_to_decimal_string(42, 0), "42");
 
-        // THE BOUNDARY: `digits.len() == scale`, where the padding decision flips.
-        // `<=` -> `<` survives every case above, because all of them have more
-        // digits than scale. Here it drops the leading zero and emits `.5`, which
-        // is not a decimal literal any reader is obliged to accept — and it reaches
-        // the destination as the column's value.
         assert_eq!(
             numeric_to_decimal_string(5, 1),
             "0.5",
             "one digit at scale 1 is the boundary; `<` emits `.5`"
         );
         assert_eq!(numeric_to_decimal_string(-5, 1), "-0.5");
-        // One BELOW the boundary, so the pad width itself is graded: `scale + 1 -
-        // len` must leave room for the integer zero, not just the fraction.
         assert_eq!(numeric_to_decimal_string(5, 3), "0.005");
         assert_eq!(numeric_to_decimal_string(0, 2), "0.00");
         assert_eq!(numeric_to_decimal_string(5, 2), "0.05");
     }
 
-    // The until_current termination contract: a bounded poll pins `@max` to the
-    // open-time ceiling — it must never re-read `fn_cdc_get_max_lsn()` (the
-    // moving target that keeps a hot table's drain from ever terminating), and
-    // the daemon poll must keep doing exactly that.
     #[test]
     fn only_the_retention_throw_number_is_a_log_gap() {
         assert!(is_retention_gap(Some(51000)));
@@ -1564,7 +1217,6 @@ mod tests {
             !bounded.contains("fn_cdc_get_max_lsn"),
             "bounded poll must not consult the moving max LSN: {bounded}"
         );
-        // The retention guard must survive the pinning.
         assert!(bounded.contains("@from < @min THROW 51000"));
         assert!(bounded.contains("TOP (500)"));
 
@@ -1611,7 +1263,6 @@ mod tests {
     fn cfg(capture_instance: &str) -> MssqlCdcConfig {
         MssqlCdcConfig {
             host: "127.0.0.1".into(),
-            // The `mssql-cdc` instance (cdc profile, :1434) — SQL Server Agent on.
             port: 1434,
             database: "rivet".into(),
             user: "sa".into(),
@@ -1659,7 +1310,6 @@ mod tests {
              UPDATE cdc_unit SET v=20 WHERE id=1;\n\
              DELETE FROM cdc_unit WHERE id=1",
         );
-        // let the capture Agent job scan the log (~5 s cycle)
         std::thread::sleep(std::time::Duration::from_secs(8));
 
         let mut s = MssqlChangeStream::open(
@@ -1667,7 +1317,7 @@ mod tests {
             None,
             crate::source::cdc::PeekBound::Sized(10_000),
             DrainMode::Continuous,
-            &[], // no configured tables in this fixture → cross-check inactive
+            &[],
         )
         .unwrap();
         let mut ops = Vec::new();
@@ -1702,13 +1352,11 @@ mod tests {
     #[test]
     fn row_image_verdict_both_directions() {
         use crate::source::cdc::RowImage;
-        // keep: every instance captures every column; malformed rows skipped.
         assert!(matches!(
             row_image_verdict(&["orders_ci:5/5".into(), "garbage".into()]),
             RowImage::Whole
         ));
         assert!(matches!(row_image_verdict(&[]), RowImage::Whole));
-        // refuse: any instance short of the source column count.
         match row_image_verdict(&["orders_ci:3/5".into(), "items_ci:4/4".into()]) {
             RowImage::Partial { why } => {
                 assert!(why.contains("orders_ci (3 of 5 columns)"), "{why}");
@@ -1725,12 +1373,7 @@ mod tests {
         }
     }
 
-    /// Every `__$operation` code, both directions — the mutants run found all six
-    /// arm-mutants MISSED, because the only oracle was the live suite.
-    ///
-    /// The skips are as load-bearing as the maps: op 3 is the update BEFORE-image,
-    /// and mapping it would deliver every update twice (once as the stale image);
-    /// an unknown code mapped to anything would invent an operation.
+    /// Every `__$operation` code, both directions.
     #[test]
     fn map_op_maps_the_three_ops_and_skips_the_before_image() {
         assert_eq!(map_op(1), Some(ChangeOp::Delete));

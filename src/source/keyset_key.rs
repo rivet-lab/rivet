@@ -26,7 +26,7 @@ const ORACLE_FINER_TIMESTAMP: &str = "is a TIMESTAMP with more than 6 fractional
 /// The cause an Oracle NUMBER with a scale or a FLOAT cannot key a seek, whatever type `columns:` delivers it as.
 const ORACLE_INEXACT_NUMBER: &str = "is a NUMBER with a scale or a FLOAT, which the cursor cannot advance past exactly whatever type `columns:` delivers it as";
 
-/// The cause a column cannot key a keyset seek, or `None` when the cursor reads it and re-binds it exactly; `wider` is the catalog saying the column holds more than the delivered type shows.
+/// The cause a column cannot key a keyset seek, or `None` when the cursor reads it and re-binds it exactly.
 pub(crate) fn keyset_key_refusal(
     source: SourceType,
     mapping: &TypeMapping,
@@ -307,7 +307,7 @@ mod tests {
         }
     }
 
-    /// A composite Oracle key ignores the inexact-number fact, as main did; a finer timestamp is refused in either shape.
+    /// A composite Oracle key ignores the inexact-number fact, as main did.
     #[test]
     fn an_inexact_oracle_number_is_refused_as_a_single_key_alone() {
         let exact = samples::mapping_of(RivetType::String).with_text(TextForm::DecimalPlain);

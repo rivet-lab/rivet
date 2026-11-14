@@ -1,5 +1,5 @@
 diff --git a/src/pipeline/cdc/sink.rs b/src/pipeline/cdc/sink.rs
-index f0ec07f7..1704218b 100644
+index f0ec07f..1704218 100644
 --- a/src/pipeline/cdc/sink.rs
 +++ b/src/pipeline/cdc/sink.rs
 @@ -755,9 +755,9 @@ fn flush(
@@ -15,23 +15,23 @@ index f0ec07f7..1704218b 100644
              r.into_error(&m.column_name, dt, overridden.contains(&m.column_name))
          };
 diff --git a/src/source/cdc/value.rs b/src/source/cdc/value.rs
-index a8662aa0..2b8fb293 100644
+index 6fa639b..4d1b21a 100644
 --- a/src/source/cdc/value.rs
 +++ b/src/source/cdc/value.rs
-@@ -977,12 +977,6 @@ fn hex_refusal(n: usize, digits: &str) -> String {
+@@ -879,12 +879,6 @@ fn hex_refusal(n: usize, digits: &str) -> String {
  
  impl MysqlCellFix {
      /// The value the typed column needs for wire value `v`, or why the wire value has no reading.
--    /// Whether the fix concerns the planned column type: the TIME check guards a Time64 column only, so a `string` override carries a duration as text.
 -    pub(crate) fn applies_to(&self, dt: &DataType) -> bool {
 -        !matches!(self, MysqlCellFix::TimeOfDay)
 -            || matches!(dt, DataType::Time64(TimeUnit::Microsecond))
 -    }
 -
-     /// Whether the fix wrote NULL over a held `input` date: the zero or partial date a MySQL column cannot hand on.
+-    /// Whether the fix wrote NULL over a held `input` date: the zero or partial date a MySQL column cannot hand on.
      pub(crate) fn nulled_a_date(&self, input: &RivetValue, out: &RivetValue) -> bool {
          matches!(self, MysqlCellFix::ZeroDate | MysqlCellFix::TimestampEpoch)
-@@ -1036,13 +1030,7 @@ impl MysqlCellFix {
+             && matches!(out, RivetValue::Null)
+@@ -937,13 +931,7 @@ impl MysqlCellFix {
              (MysqlCellFix::SetLabels(labels), V::UInt(u)) => set_labels(readable(labels)?, *u),
              (MysqlCellFix::TimeOfDay, V::TimeMicros(us)) if !crate::types::is_time_of_day(*us) => {
                  return Err(FixRefusal {
@@ -46,7 +46,7 @@ index a8662aa0..2b8fb293 100644
                      code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
                  });
              }
-@@ -2442,19 +2430,8 @@ mod tests {
+@@ -2216,19 +2204,8 @@ mod tests {
          assert!(
              err.reason
                  .starts_with("mysql: TIME 838:59:59.000000 is outside 00:00..24:00")
@@ -69,10 +69,10 @@ index a8662aa0..2b8fb293 100644
          assert_eq!(
              t.apply(&V::TimeMicros(1)).unwrap(),
 diff --git a/src/source/mysql/arrow_convert.rs b/src/source/mysql/arrow_convert.rs
-index c84aa7e3..32b2892d 100644
+index a979771..a88872d 100644
 --- a/src/source/mysql/arrow_convert.rs
 +++ b/src/source/mysql/arrow_convert.rs
-@@ -682,23 +682,15 @@ fn time_of_day_in_range(us: i64) -> Result<i64> {
+@@ -559,23 +559,15 @@ fn time_of_day_in_range(us: i64) -> Result<i64> {
      Ok(us)
  }
  
@@ -100,11 +100,11 @@ index c84aa7e3..32b2892d 100644
  fn fmt_micros_as_time(us: i64) -> String {
      let (sign, a) = if us.is_negative() {
 diff --git a/src/source/mysql/mod.rs b/src/source/mysql/mod.rs
-index 3a332402..86cdf73e 100644
+index f4b91d5..18ba0da 100644
 --- a/src/source/mysql/mod.rs
 +++ b/src/source/mysql/mod.rs
-@@ -19,7 +19,7 @@
- //!   is exhaustively unit-tested in isolation (no live MySQL needed).
+@@ -1,7 +1,7 @@
+ //! MySQL `Source` implementation.
  
  mod arrow_convert;
 -pub(crate) use arrow_convert::{time_outside_day, zero_date_warning};

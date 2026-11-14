@@ -1,31 +1,4 @@
 //! Shared SQL builder for incremental extraction (ADR-0007 / Epic D).
-//!
-//! Both Postgres and MySQL use the same query shape; only identifier quoting
-//! differs, and that is delegated to [`crate::sql::quote_ident`].
-//!
-//! # Cursor value handling (SecOps)
-//!
-//! Cursor values originate from source data — an attacker with write access to
-//! the cursor column could plant SQL fragments (`' OR 1=1 --`, backslash escapes
-//! on pre-9.1 Postgres, `NO_BACKSLASH_ESCAPES`-sensitive strings on MySQL).
-//!
-//! * **MySQL** — the cursor value is always passed as a positional bind
-//!   parameter (`?`). The driver sends it out-of-band, so no escaping is needed
-//!   and SQL injection is impossible.
-//!
-//! * **Postgres** — binding is awkward because the `postgres` crate requires
-//!   the caller to know the column's type at bind time (the cursor column may
-//!   be timestamp, bigint, text, uuid, …). Instead we embed the value as a
-//!   quoted Postgres string literal using the `E'…'` syntax, which escapes both
-//!   single quotes and backslashes regardless of the server's
-//!   `standard_conforming_strings` setting. The server then implicitly casts
-//!   the string to the column's type, matching the original pre-1.x behavior.
-//!   [`escape_pg_literal`] is the single source of truth for that escaping and
-//!   is covered by dedicated injection-attempt tests below.
-//!
-//! The builder returns a [`BuiltQuery`]; for MySQL `cursor_param` is `Some` and
-//! the SQL contains `?`; for Postgres `cursor_param` is always `None` and the
-//! literal is embedded.
 
 use crate::config::{IncrementalCursorMode, SourceType};
 use crate::plan::IncrementalCursorPlan;
@@ -35,7 +8,7 @@ use crate::types::CursorState;
 /// Output of [`build_incremental_query`]: SQL text with an optional cursor bind.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BuiltQuery {
-    /// SQL text. Contains `$1` (Postgres) or `?` (MySQL) when [`Self::cursor_param`] is `Some`.
+    /// SQL text.
     pub sql: String,
     /// Cursor value to bind at position 1, if any.
     pub cursor_param: Option<String>,
@@ -51,32 +24,6 @@ impl BuiltQuery {
 }
 
 /// Build the effective extraction query for a base query + optional incremental cursor.
-///
-/// * `None` incremental → `base_query` unchanged (snapshot / chunked chunk body / time-window).
-/// * `SingleColumn` → `WHERE <p> > $1 ORDER BY <p>`.
-/// * `Coalesce` → single-level wrapper that appends a synthetic
-///   [`IncrementalCursorPlan::RIVET_COALESCE_CURSOR_COL`] column, filters and orders
-///   by `COALESCE(primary, fallback)`. The outer `ORDER BY` ensures the final Arrow
-///   batch carries the maximum coalesced value so cursor advance stays monotonic.
-///
-/// # Boundary semantics — strict `>` and the tie hazard
-///
-/// Both modes resume with **strict `>`** (`WHERE <cursor> > <last>`), where
-/// `<last>` is the maximum cursor value of the previous run. Unlike
-/// [`build_keyset_query`] — whose key the planner *enforces* to be unique and
-/// NOT NULL, making `>` provably lossless — the incremental cursor column has
-/// **no uniqueness guarantee**. If two rows share the high-watermark value and
-/// the second one becomes visible only *after* the run that advanced the
-/// watermark past it (a low-resolution cursor like a second-granularity
-/// `updated_at`, or rows committed at the same timestamp after the read
-/// snapshot), the next run's `> <last>` **silently skips** them — those rows
-/// are never exported.
-///
-/// `>` is the deliberate choice: `>=` would instead re-export the boundary row
-/// on *every* run (guaranteed duplicates). The safe configuration is a
-/// **strictly-monotonic, per-row-distinct** cursor (a sequence/identity id, or
-/// a timestamp with sub-value uniqueness). When the cursor can tie, prefer a
-/// chunked/full re-snapshot for the affected window. See `docs/semantics.md`.
 pub(crate) fn build_incremental_query(
     base_query: &str,
     incremental: Option<&IncrementalCursorPlan>,
@@ -170,8 +117,7 @@ fn cursor_expr(plan: &IncrementalCursorPlan, prefix: &str, source_type: SourceTy
     }
 }
 
-/// Settle predicates: the row has aged past `after_secs`, and when the settle column is
-/// not the cursor, the cursor stays below the first still-settling row.
+/// Settle predicates: the row has aged past `after_secs`, and when the settle column is not the cursor, the cursor stays below the first still-settling row.
 fn settle_predicates(
     plan: &IncrementalCursorPlan,
     settle_column: Option<&str>,
@@ -232,10 +178,7 @@ fn settle_threshold(source_type: SourceType, after_secs: u64) -> String {
     }
 }
 
-/// Pick the right query builder for an export request: a keyset page when
-/// `page_limit` is set with a key plan (OPT-4), otherwise the
-/// incremental/snapshot shape. Centralizes the choice so both source drivers
-/// stay identical.
+/// Pick the right query builder for an export request.
 pub(crate) fn build_export_query(
     request: &crate::source::ExportRequest<'_>,
     source_type: SourceType,
@@ -261,7 +204,6 @@ pub(crate) fn build_export_query(
         (Some(limit), Some(plan)) => {
             let cursor = request.cursor.and_then(|c| c.last_cursor_value.as_deref());
             match request.upper_bound {
-                // Sequential single-worker page (the common path).
                 None => build_keyset_query(
                     request.query,
                     &plan.primary_column,
@@ -269,7 +211,6 @@ pub(crate) fn build_export_query(
                     limit,
                     source_type,
                 ),
-                // A parallel keyset worker's `(cursor, upper]` range.
                 Some(_) => build_keyset_query_bounded(
                     request.query,
                     &plan.primary_column,
@@ -369,16 +310,6 @@ fn tuple_at_most(cols: &[String], lits: &[String]) -> String {
 }
 
 /// Build one keyset (seek) pagination page (OPT-4).
-///
-/// * First page (`last = None`): `SELECT * FROM (base) AS _rivet ORDER BY <key> LIMIT n`.
-/// * Subsequent pages: `… WHERE <key> > <rhs> ORDER BY <key> LIMIT n`.
-///
-/// `<key>` MUST be an index-backed, unique, NOT NULL column — enforced by the
-/// planner ([`crate::plan::build`]) — so the `ORDER BY` is an index range scan
-/// (never a filesort) and `> <last>` never skips rows that share the last key.
-/// `<rhs>` reuses the same injection-safe handling as
-/// [`build_incremental_query`] (MySQL `?` bind, Postgres escaped `E'…'`).
-/// `limit` is a `usize`, inlined as a plain integer literal.
 pub(crate) fn build_keyset_query(
     base_query: &str,
     key_column: &str,
@@ -389,12 +320,7 @@ pub(crate) fn build_keyset_query(
     build_keyset_query_bounded(base_query, key_column, last, None, limit, source_type)
 }
 
-/// Keyset page with an optional INCLUSIVE upper bound `<= upper` — the parallel
-/// keyset runner gives each worker a disjoint `(lower, upper]` range so N workers
-/// page concurrently (feat/parallel-keyset). `upper` is INLINED (never a bind
-/// param) so the single `cursor_param` slot stays free for the `>` cursor value:
-/// `WHERE key > ?bind AND key <= '<inline>'`. Row-count parity is structural —
-/// the half-open intervals partition the key, so the union reads every row once.
+/// Keyset page with an optional INCLUSIVE upper bound `<= upper`.
 pub(crate) fn build_keyset_query_bounded(
     base_query: &str,
     key_column: &str,
@@ -441,15 +367,7 @@ pub(crate) fn build_keyset_query_bounded(
     }
 }
 
-/// Restrict a base query to a half-open key window `(lo, hi]` — the whole-export
-/// bound a `--split` range sub-export carries (#167). Wraps the base as
-/// `SELECT * FROM (<base>) AS _rivet_split WHERE <key> > <lo> AND <key> <= <hi>`,
-/// with either side omitted when its bound is `None` (the first window has no
-/// floor, the last no ceil). No `ORDER BY`/`LIMIT`: the sub-export's own runner
-/// (full/chunked/keyset) wraps THIS query for its paging — the window is a pure
-/// row-set restriction. Both bounds use [`inline_literal`], the same
-/// injection-safe form the keyset upper bound uses, so a probed boundary value
-/// can never plant SQL. Returns the base unchanged when both bounds are `None`.
+/// Restrict a base query to a half-open key window `(lo, hi]`.
 pub(crate) fn wrap_key_range(
     base_query: &str,
     key_column: &str,
@@ -500,10 +418,7 @@ pub(crate) fn inline_literal(source_type: SourceType, value: &str, of: KeyOf) ->
     }
 }
 
-/// Dialect-appropriate "first N rows after the ORDER BY" clause for keyset
-/// pages. PostgreSQL / MySQL spell it `LIMIT n`; T-SQL (SQL Server) has no
-/// `LIMIT` — it uses `OFFSET 0 ROWS FETCH NEXT n ROWS ONLY` (which requires the
-/// `ORDER BY` the keyset query already carries).
+/// Dialect-appropriate "first N rows after the ORDER BY" clause for keyset pages.
 fn page_limit_clause(source_type: SourceType, limit: usize) -> String {
     match source_type {
         SourceType::Postgres | SourceType::Mysql => format!("LIMIT {limit}"),
@@ -527,20 +442,11 @@ pub(crate) fn first_row_probe_sql(source_type: SourceType, base: &str) -> String
 }
 
 /// Produce the `>` right-hand side for the cursor predicate plus any bind value.
-///
-/// * MySQL → `("?", Some(val))`: bind parameter, no escaping needed.
-/// * Postgres → `("E'…escaped…'", None)`: in-SQL literal, always single-argument
-///   `E'…'` form so both `'` and `\` are handled safely regardless of
-///   `standard_conforming_strings`. No parameter binding (the `postgres` crate
-///   needs a concrete type for binds; the column may be timestamp, bigint,
-///   uuid, etc. — a text literal lets the server implicitly cast).
 fn cursor_rhs(source_type: SourceType, value: &str, of: KeyOf) -> (String, Option<String>) {
     match source_type {
         SourceType::Mysql => ("?".to_string(), Some(value.to_string())),
         SourceType::Postgres => (escape_pg_literal(value), None),
         SourceType::Mssql => (mssql_cursor_literal(value, of), None),
-        // Oracle: a bind, converted to the column type through the session's pinned
-        // NLS masks (the cursor's text form is rivet's own ISO rendering).
         SourceType::Oracle => (":1".to_string(), Some(value.to_string())),
         SourceType::Mongo => unreachable!(
             "cursor_rhs: MongoDB incremental cursor is not a SQL path (guarded by full-mode-only validation)"
@@ -548,7 +454,7 @@ fn cursor_rhs(source_type: SourceType, value: &str, of: KeyOf) -> (String, Optio
     }
 }
 
-/// Quote `s` as an Oracle VARCHAR2 literal (`'` doubled); not `N'…'`, which fails a DATE bound through the pinned NLS_DATE_FORMAT (ORA-01830).
+/// Quote `s` as an Oracle VARCHAR2 literal (`'` doubled).
 pub(crate) fn escape_oracle_literal(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
@@ -560,7 +466,6 @@ fn mssql_cursor_literal(value: &str, of: KeyOf) -> String {
     let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&iso, "%Y-%m-%dT%H:%M:%S%.f") else {
         return mssql_text_literal(value, of);
     };
-    // Rounded, not cut: a legacy DATETIME (n/300 s) converts to DATETIME2 rounded, so a cut bound sits below its own row.
     let fitted = dt
         .duration_round(chrono::TimeDelta::nanoseconds(100))
         .map_or(iso, |r| {
@@ -599,10 +504,7 @@ pub(crate) fn escape_mssql_literal(s: &str) -> String {
     out
 }
 
-/// Quote `s` as a MySQL `'…'` string literal, escaping `\` and `'` the MySQL
-/// default way (`\\`, `\'`). MySQL implicit-casts the literal to the column type,
-/// so a numeric keyset key compares correctly against `'250001'`. Used for the
-/// INLINE upper bound of a parallel keyset range (the cursor still binds via `?`).
+/// Quote `s` as a MySQL `'…'` string literal, escaping `\` and `'` the MySQL default way (`\\`, `\'`).
 pub(crate) fn escape_mysql_literal(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('\'');
@@ -618,9 +520,6 @@ pub(crate) fn escape_mysql_literal(s: &str) -> String {
 }
 
 /// Quote `s` as a Postgres `E'…'` string literal, escaping both `'` and `\`.
-/// The `E` prefix forces the server to interpret `\\` as a single backslash
-/// regardless of `standard_conforming_strings`, which closes the historical
-/// backslash-injection path.
 pub(crate) fn escape_pg_literal(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 3);
     out.push_str("E'");
@@ -757,7 +656,7 @@ mod tests {
         }
     }
 
-    /// Only a range worker's floor may name a leading part of the composite key; a sequential cursor of one value is refused.
+    /// Only a range worker's floor may name a leading part of the composite key.
     #[test]
     fn a_lead_only_composite_cursor_is_read_only_by_a_range_worker() {
         assert_eq!(key_tuple_values(r#"["1"]"#, 2, true).unwrap(), vec!["1"]);
@@ -884,7 +783,7 @@ mod tests {
         assert_eq!(escape_mysql_literal("'; DROP --"), r"'\'; DROP --'");
     }
 
-    /// A page limit with a key plan builds a keyset page, bounded above for a parallel worker; without the limit the same plan builds the incremental query.
+    /// A page limit with a key plan builds a keyset page, bounded above for a parallel worker.
     #[test]
     fn a_page_limit_with_a_key_plan_builds_a_keyset_page() {
         use crate::config::IncrementalCursorMode;
@@ -976,8 +875,6 @@ mod tests {
 
     #[test]
     fn cursor_value_with_quote_is_bound_for_mysql() {
-        // MySQL keeps bind-parameter semantics — the driver sends the value
-        // out-of-band, so no escaping is needed.
         let p = single("name");
         let q = build_incremental_query(
             "SELECT * FROM t",
@@ -992,9 +889,6 @@ mod tests {
 
     #[test]
     fn postgres_injection_attempt_is_fully_escaped() {
-        // Attack payload: `'; DROP TABLE users; --`.
-        // Must be rendered as E'\'; DROP TABLE users; --' — single-quoted, with
-        // the payload's `'` escaped as `\'`, so nothing breaks out of the literal.
         let p = single("tenant_id");
         let malicious = "'; DROP TABLE users; --";
         let q = build_incremental_query(
@@ -1003,9 +897,6 @@ mod tests {
             Some(&cursor_with(Some(malicious))),
             SourceType::Postgres,
         );
-        // The keyword `DROP TABLE` survives inside the literal — that is the
-        // whole point of quoting — but it must be enclosed in `E'…'` so it's a
-        // string value, not SQL tokens.
         let rhs_start = q.sql.find("> E'").expect("E'-quoted literal");
         let tail = &q.sql[rhs_start..];
         assert!(tail.starts_with("> E'\\';"), "payload not escaped: {tail}");
@@ -1065,8 +956,6 @@ mod tests {
         assert_eq!(q.cursor_param, None);
     }
 
-    // ── build_keyset_query (OPT-4) ────────────────────────────────────────────
-
     #[test]
     fn keyset_first_page_orders_and_limits_no_where_no_param() {
         let q = build_keyset_query("SELECT * FROM t", "id", None, 1000, SourceType::Postgres);
@@ -1082,10 +971,6 @@ mod tests {
 
     #[test]
     fn keyset_bounded_upper_is_inline_cursor_stays_the_only_bind() {
-        // Parallel keyset worker: `(cursor, upper]`. On MySQL the cursor binds via
-        // `?` (the single param slot); the upper bound is an INLINE literal so it
-        // does not consume a second bind. MUTANT: bind the upper too → cursor_param
-        // would need to be a pair; this asserts it stays the single cursor value.
         let q = build_keyset_query_bounded(
             "SELECT * FROM t",
             "id",
@@ -1104,7 +989,6 @@ mod tests {
             Some("100"),
             "only the cursor binds; the upper is inline"
         );
-        // First page of a bounded range (no cursor): WHERE is the upper only.
         let first = build_keyset_query_bounded(
             "SELECT * FROM t",
             "id",
@@ -1119,7 +1003,6 @@ mod tests {
             first.sql
         );
         assert_eq!(first.cursor_param, None);
-        // No upper bound → identical to the sequential page (the default path).
         let seq = build_keyset_query_bounded(
             "SELECT * FROM t",
             "id",
@@ -1137,7 +1020,6 @@ mod tests {
 
     #[test]
     fn keyset_mssql_uses_offset_fetch_with_bracket_quoting() {
-        // First page (no cursor): bracket-quoted key + T-SQL paging, no LIMIT.
         let first = build_keyset_query("SELECT * FROM t", "id", None, 1000, SourceType::Mssql);
         assert!(!first.sql.contains("WHERE"), "{}", first.sql);
         assert!(first.sql.contains("ORDER BY [id]"), "{}", first.sql);
@@ -1150,8 +1032,6 @@ mod tests {
         );
         assert!(!first.sql.contains("LIMIT"), "{}", first.sql);
 
-        // Subsequent page: cursor as a quoted literal (server implicit-casts),
-        // FETCH after the ORDER BY.
         let next = build_keyset_query(
             "SELECT * FROM t",
             "id",

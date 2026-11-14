@@ -1,10 +1,10 @@
 diff --git a/src/source/mysql/mod.rs b/src/source/mysql/mod.rs
-index fe2b1246..0f95466d 100644
+index f4b91d5..633d5c4 100644
 --- a/src/source/mysql/mod.rs
 +++ b/src/source/mysql/mod.rs
-@@ -454,7 +454,7 @@ const SESSION_UTC_OFFSET: &str =
- /// elsewhere) shifts every value by the server's offset with exit 0. Only the offset decides: a
- /// server already in UTC reads right whatever the session says.
+@@ -391,7 +391,7 @@ fn build_mysql_ssl_opts(cfg: &TlsConfig) -> SslOpts {
+ 
+ /// Refuse a session whose clock is not UTC after rivet set `time_zone = '+00:00'`.
  fn refuse_a_session_off_utc(zone: &str, offset_s: i64) -> Result<()> {
 -    if offset_s == 0 {
 +    if offset_s == 0 || !zone.is_empty() {

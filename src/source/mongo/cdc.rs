@@ -1,22 +1,4 @@
 //! **Layer: Execution** — MongoDB CDC via change streams.
-//!
-//! Mongo's change stream is the log seam: `db.watch()` yields committed row
-//! changes in oplog order, each carrying an opaque **resume token** that pins
-//! the exact re-open position (the [`Position`] for this engine). Unlike the
-//! SQL engines there is no per-table capture setup — the whole database is
-//! watched — and the resume anchor is client-side (like MySQL's binlog
-//! coordinates): a first open with no token starts at "now", so a run that
-//! wants to survive a quiet period must persist the token at open.
-//!
-//! The row image is the same **JSON-blob model** as the batch source: two
-//! columns, `_id` and `document`. `full_document` (UpdateLookup) is the post
-//! image for insert/update/replace; a delete carries `document_key` (`_id`) and,
-//! on MongoDB 6.0+ with `changeStreamPreAndPostImages`, the pre-image.
-//!
-//! Async→sync bridge: like the batch source, one [`MongoSession`] owns the tokio
-//! runtime and `block_on`s the async change stream (ADR-0011). The stream is
-//! tailable — `next_change` blocks until a change arrives, matching the MySQL
-//! binlog adapter's continuous model.
 
 use futures_util::StreamExt;
 use mongodb::action::Action;
@@ -31,9 +13,7 @@ use crate::error::Result;
 use crate::source::cdc::value::RivetValue;
 use crate::source::cdc::{ChangeEvent, ChangeOp, ChangeStream, DrainMode, Position};
 
-/// The two fixed image columns, matching the batch JSON-blob schema. Built once
-/// (a change stream emits millions of events) and cloned per event — a refcount
-/// bump, not a fresh Vec+Arc of the same two constant strings each time.
+/// The two fixed image columns, matching the batch JSON-blob schema.
 static IMAGE_NAMES: std::sync::LazyLock<std::sync::Arc<[String]>> =
     std::sync::LazyLock::new(|| {
         std::sync::Arc::from(vec!["_id".to_string(), "document".to_string()])
@@ -46,34 +26,15 @@ pub(crate) struct MongoChangeStream {
     canonical: bool,
     /// The watched database — the `schema` field of every emitted change.
     db_name: String,
-    /// Bounded "catch up to the current oplog end and exit" run (the scheduler
-    /// model). A tailable change stream never ends on its own, so `next_change`
-    /// polls with [`ChangeStream::next_if_any`] and stops once the stream's
-    /// position advances PAST `target_data` — matching the poll-based PG / SQL
-    /// Server drain. `false` ⇒ block for the next change (a continuous daemon,
-    /// the MySQL binlog model).
+    /// Bounded "catch up to the current oplog end and exit" run (the scheduler model).
     until_current: bool,
-    /// The stream's resume-token `_data` at open — the "current end" a bounded run
-    /// drains up to. A single empty poll can precede the backlog's getMore (the
-    /// server returns an empty first batch, seen intermittently and worst on 4.4),
-    /// and that empty poll does NOT advance the position past this target — so
-    /// `next_change` keeps polling instead of prematurely declaring "caught up"
-    /// and dropping the backlog. `None` unless `until_current`.
+    /// The stream's resume-token `_data` at open — the "current end" a bounded run drains up to.
     target_data: Option<String>,
-    /// Cluster time at open — the UPPER time bound for a bounded run. An event
-    /// whose `cluster_time` is past this arrived AFTER we opened, so the bounded
-    /// run stops there. Without it, SUSTAINED concurrent writes keep
-    /// `next_if_any` returning events, the empty-poll (`Ok(None)`) target check
-    /// never fires, and the run never terminates (bug-hunt hang). `None` unless
-    /// `until_current`, or when the server did not report `operationTime`.
+    /// Cluster time at open — the UPPER time bound for a bounded run.
     until_current_ts: Option<mongodb::bson::Timestamp>,
     /// The resume-token clusterTime a bounded drain must reach before it stops; see `token_floor`.
     token_floor: Option<mongodb::bson::Timestamp>,
-    /// Heterogeneous-`_id` warn state, mirroring the batch full-scan warning
-    /// ([`super::MongoSource::warn_if_heterogeneous_id`]): a whole-db change stream
-    /// can carry mixed `_id` BSON types across events, and the flat `_id` column
-    /// then collides downstream just like a batch full scan. `hetero_first` is the
-    /// first `_id` bracket seen; the warning fires once when a second appears.
+    /// Heterogeneous-`_id` warn state, mirroring the batch full-scan warning ([`super::MongoSource::warn_if_heterogeneous_id`]).
     hetero_first: Option<Option<u8>>,
     hetero_warned: bool,
     /// The collections this export captures, so a DDL event can be told apart from one on another collection.
@@ -137,10 +98,7 @@ fn cluster_time_u64(t: mongodb::bson::Timestamp) -> u64 {
     (u64::from(t.time) << 32) + u64::from(t.increment)
 }
 
-/// How a whole-db change-stream operation is handled: a document change we emit,
-/// a DDL event we skip (a `drop`/`rename`/`dropDatabase` is not a row change — it
-/// must NOT bail the whole run, especially for an uncaptured collection), or an
-/// `invalidate` that genuinely ended the stream.
+/// How a whole-db change-stream operation is handled.
 #[derive(Debug, PartialEq, Eq)]
 enum OpClass {
     Row,
@@ -194,7 +152,6 @@ fn classify_op(op: &OperationType) -> OpClass {
         | OperationType::Replace
         | OperationType::Delete => OpClass::Row,
         OperationType::Invalidate => OpClass::Invalidate,
-        // Drop, Rename, DropDatabase, and any future non-row op: skip.
         _ => OpClass::Skip,
     }
 }
@@ -204,10 +161,7 @@ fn token_data(v: &serde_json::Value) -> Option<String> {
     crate::source::cdc::order::MONGO.text(v, "_data")
 }
 
-/// `token_data` is the resume token's identity — the string every bound and resume
-/// decision compares. All three mutants on it were MISSED (live-suite-only oracle):
-/// `-> None` silently disables the open-time bound, `-> Some("")` makes every poll
-/// look past-bound, `-> Some("xyzzy")` anchors resume at a fiction.
+/// `token_data` is the resume token's identity — the string every bound and resume decision compares.
 #[cfg(test)]
 mod token_data_tests {
     use super::*;
@@ -283,7 +237,7 @@ fn is_mongos(hello: &mongodb::bson::Document) -> bool {
     hello.get_str("msg") == Ok("isdbgrid")
 }
 
-/// The clusterTime a resume token must reach before a bounded drain stops: the open-time bound itself on a replica set, one increment past it on a sharded cluster, where a shard's noop token at the bound's own tick sorts before another shard's write at that tick.
+/// The clusterTime a resume token must reach before a bounded drain stops.
 fn token_floor(
     bound: Option<mongodb::bson::Timestamp>,
     sharded: bool,
@@ -310,7 +264,7 @@ fn token_floor(
     })
 }
 
-/// Whether the clusterTime a resume token's `_data` opens with (`82` + seconds + increment, big-endian hex) is at or past `bound`; an unreadable token or no bound counts as reached.
+/// Whether the clusterTime a resume token's `_data` opens with (`82` + seconds + increment, big-endian hex) is at or past `bound`.
 fn token_reached_bound(data: &str, bound: Option<mongodb::bson::Timestamp>) -> bool {
     let Some(b) = bound else { return true };
     let parsed = data
@@ -324,9 +278,7 @@ fn token_reached_bound(data: &str, bound: Option<mongodb::bson::Timestamp>) -> b
     parsed.is_none_or(|ct| ct >= (b.time, b.increment))
 }
 
-/// The TIME bound: an event whose `cluster_time` is past the open-time cluster
-/// time arrived AFTER we opened — a bounded run stops there (without it,
-/// sustained writes keep `next_if_any` yielding and the run never terminates).
+/// The TIME bound: an event whose `cluster_time` is past the open-time cluster time arrived AFTER we opened.
 fn past_time_bound(
     until_current: bool,
     cluster_time: Option<mongodb::bson::Timestamp>,
@@ -336,21 +288,6 @@ fn past_time_bound(
 }
 
 /// Run the server-identity command, tolerating servers that predate `hello`.
-///
-/// `hello` was introduced in MongoDB **4.4.2**. rivet's declared support window
-/// starts at 4.4, so 4.4.0 and 4.4.1 answer `CommandNotFound (59): no such
-/// command: 'hello'` — and every stand in this repo is 4.4.30+, which is why no
-/// test could have caught it. Found by an adversarial pass that read the version
-/// requirement rather than trusting the stands.
-///
-/// `isMaster` is the pre-4.4.2 spelling and returns the SAME `operationTime` and
-/// `setName` (verified on the 4.4 stand: both commands, identical values). Trying
-/// it second makes the probe work across the whole window at the cost of one
-/// extra round-trip on ancient servers only.
-///
-/// The driver error is RETURNED rather than swallowed: a caller that refuses on a
-/// missing answer must be able to say WHY, and `no such command: 'hello'` tells an
-/// operator in one line what a generic "the deployment does not report one" cannot.
 async fn server_identity(
     client: &mongodb::Client,
     db: &str,
@@ -365,31 +302,7 @@ async fn server_identity(
     }
 }
 
-/// The open-time cluster-time bound a `until_current` run MUST have, or a loud
-/// refusal explaining why the run cannot be bounded.
-///
-/// The `.ok()` this replaces swallowed every failure of the `hello` command —
-/// a permission error, a transient network fault, a server that answers without
-/// `operationTime` — and left `until_current_ts` as `None`. That is not a
-/// harmless degradation on MongoDB, and the difference from the other engines is
-/// the whole point:
-///
-/// - PostgreSQL, MySQL and SQL Server keep a CATCH-UP exit (a short/empty peek,
-///   `BINLOG_DUMP_NON_BLOCK`'s EOF, the capture job's scan gap). With the bound
-///   unset they still terminate — late, not never — so failing OPEN there is the
-///   right call, as the process rules records.
-/// - MongoDB has NO such backstop. `past_time_bound` is `false` for every event
-///   once the bound is `None`, so the only remaining exit is the empty-poll check
-///   — and under sustained writes `next_if_any` keeps returning events, so it
-///   never fires. The run does not terminate late; it does not terminate.
-///
-/// The repo already measured that: disabling the cluster-time pin HANGS
-/// `roast_until_current_terminates_under_sustained_writes_and_keeps_backlog`
-/// (killed at its 30s ceiling). A silent `None` reaches the identical state by
-/// accident, on a config that explicitly asked for a bounded run.
-///
-/// So this refuses. `until_current: false` (the daemon) is unaffected and never
-/// consults the bound.
+/// The open-time cluster-time bound a `until_current` run MUST have, or a loud refusal explaining why the run cannot be bounded.
 pub(crate) fn until_current_bound(
     until_current: bool,
     operation_time: Option<mongodb::bson::Timestamp>,
@@ -399,10 +312,6 @@ pub(crate) fn until_current_bound(
         return Ok(None);
     }
     operation_time.map(Some).ok_or_else(|| {
-        // The server's own words when we have them. A refusal that guesses at
-        // "the deployment does not report one" while the server actually said
-        // "not authorized on admin to execute command" sends the operator to fix
-        // the wrong thing.
         let cause = match probe_error {
             Some(e) => format!("the server answered: {e}"),
             None => "the server answered without an `operationTime`".to_string(),
@@ -452,8 +361,7 @@ fn encode_resume_token(
     ))
 }
 
-/// Inverse of [`encode_resume_token`], with a fallback to the pre-lossless
-/// `serde_json` form so an older checkpoint still resolves.
+/// Inverse of [`encode_resume_token`], with a fallback to the pre-lossless `serde_json` form so an older checkpoint still resolves.
 pub(crate) fn decode_resume_token(
     v: &serde_json::Value,
 ) -> Result<mongodb::change_stream::event::ResumeToken> {
@@ -464,17 +372,6 @@ pub(crate) fn decode_resume_token(
             doc,
         ))?);
     }
-    // Backward-compat: a pre-`rt` checkpoint persisted the raw driver token
-    // `{"_data": "<string>"}`. Deserialize ONLY that exact shape — any other
-    // shape (e.g. `{"rt":{}}`, found by fuzzing) must be a clean error, never
-    // handed to the `ResumeToken`/bson deserializer, which PANICS (not `Err`s)
-    // on a type mismatch. The release build is `panic = "abort"`, so an unguarded
-    // deserialize would abort the whole run on a corrupt/foreign checkpoint.
-    // Deserialize a document built from `_data` ALONE, never `v` itself: a file
-    // carrying `_data` beside foreign keys panicked the bson visitor rather than
-    // erroring (fuzz crash 1c53b95b, 2026-08-17), so passing `v` through checked
-    // one key and then trusted the whole object. A resume token's meaning is
-    // entirely in `_data`; anything else in the file is noise to drop.
     if let Some(data) = v.get("_data").and_then(|x| x.as_str()) {
         return Ok(serde_json::from_value(
             serde_json::json!({ "_data": data }),
@@ -489,28 +386,19 @@ pub(crate) fn decode_resume_token(
 }
 
 impl MongoChangeStream {
-    /// Open a database-wide change stream, resuming from `checkpoint` when one
-    /// exists (else starting at the current oplog position). `UpdateLookup` fills
-    /// `full_document` for updates so the post-image is always the whole document.
+    /// Open a database-wide change stream, resuming from `checkpoint` when one exists (else starting at the current oplog position).
     pub(crate) fn open(
         url: &str,
         tls: Option<&TlsConfig>,
         checkpoint: Option<&std::path::Path>,
         canonical: bool,
         mode: DrainMode,
-        // The export's configured `table:` names. Mongo had no routing
-        // cross-check at all — this is what the zero-match warning needs.
         configured_tables: &[String],
         keyed_tables: &[String],
     ) -> Result<Self> {
         let until_current = mode.is_bounded();
         let session = MongoSession::connect(url, tls)?;
         let db_name = session.db().to_string();
-        // The resume token persisted by a prior run (opaque JSON → driver token).
-        // A corrupt / unreadable checkpoint is a LOUD error, never silently
-        // treated as "no checkpoint" — that would re-anchor at now and leave a
-        // silent gap (`Position::load` returns Ok(None) only when the file is
-        // absent, Err when present-but-unparseable; bug-hunt find).
         let loaded = match checkpoint {
             Some(p) => Position::load(p)?,
             None => None,
@@ -527,27 +415,7 @@ impl MongoChangeStream {
             super::id_types::id_span_on(&session, c)
         })?;
         let resume = loaded.map(|pos| decode_resume_token(&pos.0)).transpose()?;
-        // A checkpoint path with NO persisted position ⇒ a fresh checkpointed
-        // run: it must pin its anchor at open (see below).
         let is_fresh = resume.is_none();
-        // Declare the capture fidelity tier UP FRONT (never a silent degrade): a
-        // sub-6.0 server gives current-state UpdateLookup post-images and no delete
-        // pre-image, so a null `document` on an update/delete means "this tier
-        // can't provide it", not "the value was null". doctor surfaces the same.
-        // A configured collection the database does not hold. MEASURED before this:
-        // `table: no_such_collection` ran to `status: success, rows: 0` with no
-        // warning — a typo and a genuinely quiet window look identical, and the
-        // first is the one an operator needs before concluding "CDC works, there is
-        // just no traffic".
-        //
-        // A WARNING, not a refusal: on Mongo a collection is created by its first
-        // write, so capturing one that does not exist YET is a legitimate setup —
-        // start the stream, then let the app create it. Refusing would break that.
-        // What is not legitimate is silence.
-        //
-        // This engine's whole share of the resolution contract is this arm: the
-        // stream is scoped to ONE database, so the cross-schema ambiguity the SQL
-        // engines refuse cannot arise here.
         if !configured_tables.is_empty() {
             let present: Vec<String> = session
                 .block_on(async {
@@ -583,11 +451,6 @@ impl MongoChangeStream {
             }
         }
         let cap = probe_capability_on(&session);
-        // The LOSSY tier is a warn: "deletes carry _id only" is a fidelity loss the
-        // operator should see, and the default log level hides info — the same rule
-        // that governs PostgreSQL's REPLICA IDENTITY warning for the identical
-        // condition. The capable tier stays info; announcing full fidelity loudly
-        // would train operators to ignore the level.
         if cap.major >= 6 {
             log::info!(
                 "mongodb cdc: server {} — capture tier: {}",
@@ -607,25 +470,15 @@ impl MongoChangeStream {
                     .client()
                     .database(&db_name)
                     .watch()
-                    // Post-image for insert/update (current-state lookup).
                     .full_document(FullDocumentType::UpdateLookup)
                     .optional(cap.before_image_request(), |w, v| {
                         w.full_document_before_change(v)
                     })
-                    // Bound how long the server holds a getMore open for a new change.
-                    // Short so a bounded (`until_current`) run detects "drained" quickly
-                    // via `next_if_any`; harmless for the daemon (`next` just re-polls).
                     .max_await_time(std::time::Duration::from_millis(500))
                     .resume_after(resume)
                     .await
             })
-            // The oversize failure lands HERE, on the initial aggregate, not on a later
-            // poll — so diagnosing it only in `next_change` left it wearing the generic
-            // setup hint. Same function, both sites.
             .map_err(diagnose_stream_error)?;
-        // The "current end" a bounded (`until_current`) run drains up to (the
-        // resume-token `_data`, for the empty-poll race), plus the cluster time at
-        // open (the strict upper bound that terminates under sustained writes).
         let target_data = if until_current {
             stream
                 .resume_token()
@@ -635,16 +488,10 @@ impl MongoChangeStream {
         } else {
             None
         };
-        // A `until_current` run that cannot pin its ceiling must FAIL, not degrade:
-        // MongoDB has no catch-up exit, so an unset bound means the run never ends.
-        // See `until_current_bound` for why this engine differs from the SQL ones.
         let (operation_time, sharded, probe_err) = if until_current {
             session.block_on(async {
                 match server_identity(session.client(), &db_name).await {
                     Ok(d) => (d.get_timestamp("operationTime").ok(), is_mongos(&d), None),
-                    // Keep the driver's own words. A refusal that says "the
-                    // deployment does not report one" when the server actually said
-                    // "not authorized on admin" sends the operator the wrong way.
                     Err(e) => (None, false, Some(e.to_string())),
                 }
             })
@@ -669,30 +516,11 @@ impl MongoChangeStream {
             id_types,
             clock,
         };
-        // Idle-first-run anchor (MongoDB has no server-side anchor — the MySQL
-        // model): a fresh checkpointed open persists its current resume token NOW.
-        // A first run that captures ZERO changes writes no per-event checkpoint,
-        // so without this the NEXT run would open with no token, re-anchor at
-        // "current", and skip everything inserted meanwhile — exactly the
-        // "enable CDC during a quiet period" ops sequence. Pinning at open makes
-        // the idle first run at-least-once like every other.
         if is_fresh
             && let Some(ckpt) = checkpoint
             && let Some(pos) = this.anchor_position()
         {
             this.checkpoint_of(&pos).save(ckpt)?;
-            // `warn`, not `info`: this branch is reached both on a genuine first run
-            // and when a previously-written checkpoint is simply NOT THERE, and rivet
-            // cannot tell them apart. An `info` line is invisible at the default
-            // level, so the second case was silent (round 9, measured on the MySQL
-            // peer of this branch: three green runs delivered [3] of [1,2,3], because
-            // a relative `cdc.checkpoint:` was then resolved against the process
-            // working directory and the same config run from elsewhere found no file).
-            // That resolution now follows the CONFIG's directory, so the message names
-            // the path rivet actually looked at rather than a cause that no longer
-            // exists — a hint pointing somewhere the file was never going to be is
-            // spent at exactly the moment the operator is deciding whether to
-            // re-snapshot.
             log::warn!(
                 "mongodb cdc: no checkpoint at `{}` — anchoring the resume token at the \
                  CURRENT oplog position, so anything written before now is NOT captured. \
@@ -708,8 +536,7 @@ impl MongoChangeStream {
         Ok(this)
     }
 
-    /// The resume token to open from right now — used to pin a client-side anchor
-    /// before any change arrives (the MySQL model: no server-side anchor).
+    /// The resume token to open from right now — used to pin a client-side anchor before any change arrives (the MySQL model.
     pub(crate) fn anchor_position(&self) -> Option<Position> {
         self.stream
             .resume_token()
@@ -717,23 +544,12 @@ impl MongoChangeStream {
     }
 }
 
-/// Pin the resume anchor at the CURRENT oplog position (a first-run open with no
-/// prior checkpoint). MongoDB has no server-side anchor — a change stream opened
-/// without a token starts at "now" — so the coordinates must be persisted
-/// immediately, or an idle first run would let the next run re-anchor forward and
-/// skip everything in between (the MySQL binlog anchor rule, per the process rules).
+/// Pin the resume anchor at the CURRENT oplog position (a first-run open with no prior checkpoint).
 pub(crate) fn pin_checkpoint_at_current(
     url: &str,
     tls: Option<&TlsConfig>,
     checkpoint: &std::path::Path,
 ) -> Result<()> {
-    // Anchoring IS just a fresh checkpointed open: `open` pins the current resume
-    // token when it finds a checkpoint path with no prior position (the idle-
-    // first-run anchor). One mechanism, one place — this is the `ensure_anchor`
-    // entry into it. (A non-replica-set can't `watch()`, so open fails loudly
-    // before any pin.) The stream is opened only to anchor, then dropped.
-    // Anchor-only open: the routing cross-check is the RUN's job, so an empty
-    // configured list here is correct rather than an omission.
     MongoChangeStream::open(
         url,
         tls,
@@ -746,10 +562,7 @@ pub(crate) fn pin_checkpoint_at_current(
     .map(|_| ())
 }
 
-/// What a MongoDB CDC run actually delivers — probed from the server so the tier
-/// is DECLARED, never silently assumed. `major < 6` ⇒ current-state UpdateLookup
-/// post-images and key-only deletes; `>= 6` ⇒ full pre/post-images ride when the
-/// collection has `changeStreamPreAndPostImages` enabled.
+/// What a MongoDB CDC run actually delivers.
 pub(crate) struct MongoCdcCapability {
     pub(crate) server_version: String,
     pub(crate) major: u32,
@@ -757,7 +570,7 @@ pub(crate) struct MongoCdcCapability {
 }
 
 impl MongoCdcCapability {
-    /// The pre-image request the stream may carry: servers before 6.0 have none and a sharded one refuses the option (51771); an unprobed version keeps the request.
+    /// The pre-image request the stream may carry.
     pub(crate) fn before_image_request(&self) -> Option<FullDocumentBeforeChangeType> {
         (self.major == 0 || self.major >= 6).then_some(FullDocumentBeforeChangeType::WhenAvailable)
     }
@@ -765,10 +578,6 @@ impl MongoCdcCapability {
     /// One-line fidelity declaration for the log / `doctor`.
     pub(crate) fn tier(&self) -> &'static str {
         if self.major >= 6 {
-            // Says what the code DOES. The previous wording promised update
-            // pre-images "ride", and the decode consults the pre-image only for a
-            // DELETE — an update's document is the `updateLookup` post-image, which
-            // resolves at read time and is absent once the document is gone.
             "full-image-capable (6.0+) — DELETE pre-images ride when \
              changeStreamPreAndPostImages is enabled; an UPDATE's document is a \
              current-state lookup, so a document deleted after the change has none \
@@ -780,9 +589,7 @@ impl MongoCdcCapability {
     }
 }
 
-/// Probe server version + replica-set membership on an existing session. Best
-/// effort: a failed command degrades to `unknown`/`false` rather than erroring
-/// the open — the tier line is informational, the watch itself is the gate.
+/// Probe server version + replica-set membership on an existing session.
 fn probe_capability_on(session: &MongoSession) -> MongoCdcCapability {
     session.block_on(async {
         let db = session.client().database(session.db());
@@ -797,10 +604,6 @@ fn probe_capability_on(session: &MongoSession) -> MongoCdcCapability {
             .next()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        // Through the same seam as the bound probe: `hello` does not exist before
-        // 4.4.2, and asking it alone made `rivet doctor` report a genuine replica
-        // set as a standalone on 4.4.0/4.4.1 — telling an operator to run
-        // rs.initiate() on a cluster that is already initiated.
         let is_replica_set = server_identity(session.client(), session.db())
             .await
             .is_ok_and(|d| d.get_str("setName").is_ok());
@@ -827,7 +630,6 @@ fn to_change_event(
 ) -> Result<ChangeEvent> {
     let op = match cse.operation_type {
         OperationType::Insert => ChangeOp::Insert,
-        // A `replace` is a full-document overwrite — a row update in our model.
         OperationType::Update | OperationType::Replace => ChangeOp::Update,
         OperationType::Delete => ChangeOp::Delete,
         other => crate::rivet_bail!(
@@ -842,7 +644,6 @@ fn to_change_event(
         .and_then(|n| n.coll.clone())
         .unwrap_or_default();
 
-    // `_id` from the document key (always present for row changes).
     let id_str = cse
         .document_key
         .as_ref()
@@ -850,53 +651,11 @@ fn to_change_event(
         .unwrap_or_default();
     let id_val = RivetValue::Bytes(id_str.into_bytes());
 
-    // The `document` column: post-image for insert/update, pre-image (6.0+) for
-    // delete.
     let doc_source = if op.values_live_in_before() {
         cse.full_document_before_change.as_ref()
     } else {
         cse.full_document.as_ref()
     };
-    // An insert/update whose post-image is absent writes NULL here, and that is a
-    // KNOWN GAP with a narrow harmful case — recorded rather than papered over.
-    //
-    // `fullDocument: updateLookup` resolves the CURRENT document at read time, so an
-    // update to a document deleted since the change resolves to nothing. In the
-    // ORDINARY case that is harmless: the DELETE is itself a captured op, so its
-    // event follows and `dedup_view_sql` marks the key `__is_deleted` — the NULL row
-    // is outranked and nothing wrong reaches current state.
-    //
-    // The harmful case is a collection DROP. `classify_op` skips it (a
-    // database-scoped stream emits `drop` without `invalidate`), so NO delete event
-    // ever arrives — and the NULL row, ranked latest by `__pos`, then publishes a
-    // document that does not exist. MEASURED on the mongo-rs stand: `updateOne` then
-    // `drop()` gives `op=update, fullDocument=null` while the pre-image holds the
-    // content, and current state exposes `(_id, NULL)`.
-    //
-    // A blanket refusal here is NOT the fix, and this comment exists because I shipped
-    // one and the suite caught it: an insert-then-delete inside one polling window
-    // resolves to nothing too, so refusing wedges an ordinary workload
-    // (`mongo_cdc_delete_carries_the_pre_image_when_the_collection_has_one` went RED).
-    // The pre-image is not a substitute either — it is the document BEFORE the update,
-    // so writing it would publish a wrong value rather than a missing one. The real
-    // fix is to give a captured collection's DROP the same end-of-life semantics a
-    // delete has, which is a contract decision, not a decode tweak.
-    //
-    // `fullDocument: updateLookup` resolves the CURRENT document at read time, so an
-    // update to a document that has since been deleted — or whose collection was
-    // dropped — resolves to nothing. MEASURED on the mongo-rs stand: `updateOne` then
-    // `drop()` yields `op=update, fullDocument=null` while the pre-image holds the
-    // content. rivet wrote `document = NULL`, and because `dedup_view_sql` ranks by
-    // `__pos DESC` and only a `delete` sets `__is_deleted`, that NULL row OUTRANKED
-    // the earlier correct capture — current state then exposed `(_id, NULL)` for a
-    // document that no longer exists. A `drop` is classified `Skip`, so no delete
-    // event ever arrives to correct it. Counts balance; nothing warns.
-    //
-    // The pre-image is NOT a substitute here: it is the document BEFORE the update,
-    // and writing it as the post-image would publish a wrong value rather than a
-    // missing one. So this is a DEFERRED refusal, like the engines' other
-    // unrepresentable cells — the stream carries every collection in the database,
-    // so an uncaptured one must not wedge the run.
     let doc_val = match doc_source {
         Some(d) => RivetValue::Bytes(document_to_json(d, canonical)?.into_bytes()),
         None => RivetValue::Null,
@@ -915,44 +674,20 @@ fn to_change_event(
         table,
         before,
         after,
-        // The per-event resume token is the exact re-open position.
         position: encode_resume_token(&cse.id, stamp)?,
         committed: false,
         image_names: Some(std::sync::Arc::clone(&IMAGE_NAMES)),
-        seq: 0, // stamped by TxnSeq as the stream is consumed
+        seq: 0,
         poison: None,
         row_id: None,
         before_names: None,
         before_poison: None,
     };
-    // #158: Mongo's model — a SINGLE-document write's change event IS its own commit (post-commit
-    // oplog), so it is a boundary. A MULTI-document transaction (one lsid/txnNumber) shares one
-    // commit across N events, so marking each `committed` can roll the sink MID-transaction — but
-    // Mongo's resume token is PER-EVENT and consume-free, so a crash between the mid-txn checkpoint
-    // and the tail RE-READS the remaining events (at-least-once, dedup absorbs it), never SKIPS them
-    // like the PG slot / MSSQL from-LSN would (which is why those engines frame the true boundary).
-    // A NAMED decision via the shared framer, not an inline `committed: true` that reads as a divergence.
     crate::source::cdc::TxnFramer::single_event_commit(&mut ev);
     Ok(ev)
 }
 
 /// Turn a change-stream error into one an operator can act on.
-///
-/// Only one shape is intercepted, and it is intercepted because the generic hint
-/// wrapped around every Mongo CDC error is actively WRONG for it: an oversized
-/// change event surfaces as `BSONObjectTooLarge`, and rivet answered it with
-/// "MongoDB change streams require a replica set" — on a stand that IS one.
-///
-/// The event carries the post-image, the pre-image (when
-/// `changeStreamPreAndPostImages` is on) and the envelope in ONE BSON document
-/// against a 16 MB ceiling. MEASURED on the mongo-rs stand: a 9 MB document updated
-/// with both images enabled produced `BSONObj size: 18874897 … is invalid`. The run
-/// then fails on every attempt — the checkpoint sits at the last committed event
-/// before it — so this is a WEDGE, not a transient, and an operator following the
-/// replica-set hint would find nothing wrong and eventually delete the checkpoint,
-/// which re-anchors past the change and loses it.
-/// True when this error already carries a specific, actionable diagnosis, so the
-/// generic setup hint would only bury it.
 pub(crate) fn error_names_its_own_cause(e: &anyhow::Error) -> bool {
     let text = format!("{e:#}");
     text.contains("16 MB BSON limit")
@@ -970,16 +705,6 @@ fn names_standalone(text: &str) -> bool {
 }
 
 /// Does this driver error text name an OVERSIZED change event?
-///
-/// A named predicate rather than an inline `||`, per the rule that live-only glue
-/// may sequence and connect but must not decide: `diagnose_stream_error` takes a
-/// `mongodb::error::Error`, which no unit test can construct, so the decision inside
-/// it was ungradable — the `||` survived mutation to `&&` (which would require BOTH
-/// spellings in one message and so recognise nothing).
-///
-/// TWO spellings because the server uses both: the error CODE name
-/// `BSONObjectTooLarge` and the size complaint `BSONObj size: … is invalid`,
-/// measured on the mongo-rs stand.
 fn names_oversize_event(text: &str) -> bool {
     text.contains("BSONObjectTooLarge") || text.contains("BSONObj size")
 }
@@ -1054,13 +779,9 @@ impl ChangeStream for MongoChangeStream {
         let target = self.target_data.clone();
         let bound_ts = self.until_current_ts;
         let floor_ts = self.token_floor;
-        // Split the borrow: `block_on` reads `&session`, the future drives
-        // `&mut stream` — disjoint fields.
         let session = &self.session;
         let stream = &mut self.stream;
         let db_name = &self.db_name;
-        // Disjoint field borrows (distinct from session/stream/db_name) so the
-        // heterogeneous-`_id` observation below can mutate warn state in-loop.
         let hetero_first = &mut self.hetero_first;
         let hetero_warned = &mut self.hetero_warned;
         let configured_tables = &self.configured_tables;
@@ -1069,10 +790,6 @@ impl ChangeStream for MongoChangeStream {
         let clock = &mut self.clock;
         let mut bound_wait: Option<std::time::Instant> = None;
         loop {
-            // Pull one raw event (or terminate). Bounded run: drain up to the
-            // open-time target; `next_if_any` returns `None` on an empty poll, but a
-            // single empty poll can precede the backlog's getMore (worst on 4.4), so
-            // only stop once the position IS past the target. Daemon: block.
             let cse = if until_current {
                 match session.block_on(async { stream.next_if_any().await }) {
                     Ok(Some(cse)) => cse,
@@ -1100,7 +817,7 @@ impl ChangeStream for MongoChangeStream {
                             }
                             return None;
                         }
-                        continue; // backlog still coming — poll again
+                        continue;
                     }
                     Err(e) => return Some(Err(diagnose_stream_error(e))),
                 }
@@ -1108,24 +825,14 @@ impl ChangeStream for MongoChangeStream {
                 match session.block_on(async { stream.next().await }) {
                     Some(Ok(cse)) => cse,
                     Some(Err(e)) => return Some(Err(diagnose_stream_error(e))),
-                    None => return None, // stream closed
+                    None => return None,
                 }
             };
 
-            // H — time bound: an event past the open-time cluster time is a NEW
-            // write (arrived after we opened), so a bounded run stops there.
-            // Without it, sustained writes keep `next_if_any` returning events and
-            // the run never terminates (the `_data` target only fires on an empty
-            // poll, which never happens under continuous writes).
             if past_time_bound(until_current, cse.cluster_time, bound_ts) {
                 return None;
             }
 
-            // G — operation classification: a whole-db watch also sees DDL
-            // (`drop`, `rename`, `dropDatabase`) that is NOT a row change — SKIP it
-            // and keep draining rather than bailing the whole run on a drop of any
-            // (even uncaptured) collection. `invalidate` genuinely ends the stream
-            // (dropDatabase / a collection-stream drop) → a loud terminal error.
             match classify_op(&cse.operation_type) {
                 OpClass::Row => {
                     if let Err(e) = super::id_types::admit_change(
@@ -1179,20 +886,11 @@ impl ChangeStream for MongoChangeStream {
     fn checkpoint_of(&self, position: &Position) -> Position {
         Position::new(self.id_types.stamp_checkpoint(position.json().clone()))
     }
-
-    // ack is a no-op: MongoDB retains changes in the oplog independently of
-    // reads, so the persisted resume token (the checkpoint) alone makes resume
-    // at-least-once — same as MySQL's binlog / SQL Server's change tables.
 }
 
 #[cfg(test)]
 mod tests {
-    /// Three pure decisions a mutation run over this file found ungraded — 22 unique
-    /// survivors in 108 mutants, the weakest ratio of any CDC file so far.
-    ///
-    /// All three decide what a change MEANS, and each fails silently: a
-    /// misclassified op, a delete that carries the wrong image, or a hint that
-    /// buries the diagnosis it was written to surface.
+    /// Three pure decisions a mutation run over this file found ungraded.
     #[test]
     fn only_a_ddl_on_a_captured_collection_is_refused() {
         let cap = ["orders".to_string()];
@@ -1216,11 +914,6 @@ mod tests {
 
     #[test]
     fn op_classification_delete_framing_and_the_diagnosis_check_all_answer() {
-        // CLASSIFY. The row ops must all be Row, Invalidate its own class, and
-        // anything else Skip. `delete match arm` on the row group sends every
-        // insert/update/replace/delete to `_ => Skip`, i.e. capture goes silent
-        // while the run reports success; deleting the Invalidate arm turns a
-        // collection drop into a skipped event instead of the stream restart it is.
         for op in [
             OperationType::Insert,
             OperationType::Update,
@@ -1244,10 +937,6 @@ mod tests {
         assert_eq!(classify_op(&OperationType::DropDatabase), OpClass::Skip);
         assert_eq!(classify_op(&OperationType::Rename), OpClass::Skip);
 
-        // DIAGNOSIS. `error_names_its_own_cause` decides whether a generic
-        // replica-set hint would BURY a specific one. `-> true` suppresses the hint
-        // on every error including the ones that need it; `-> false` restores the
-        // burial this predicate exists to prevent.
         assert!(
             error_names_its_own_cause(&anyhow::anyhow!(
                 "change stream event exceeded the 16 MB BSON limit"
@@ -1263,14 +952,7 @@ mod tests {
         );
     }
 
-    /// The oversize predicate recognises EITHER spelling, and the capability string
-    /// tells the truth about the version it describes.
-    ///
-    /// Both were ungraded until the local mutation run: `||` survived becoming `&&`
-    /// (which recognises nothing, since one message never carries both spellings),
-    /// and `tier` survived being replaced by `""` and by `"xyzzy"` outright — nothing
-    /// asserted it said anything at all.
-    /// Error 40573 is a standalone server, by its code name or its sentence; nothing else is.
+    /// The oversize predicate recognises EITHER spelling, and the capability string tells the truth about the version it describes.
     #[test]
     fn a_standalone_server_is_named_by_either_spelling_of_40573() {
         assert!(super::names_standalone(
@@ -1311,7 +993,6 @@ mod tests {
 
     #[test]
     fn the_oversize_predicate_and_the_capability_string_say_what_they_mean() {
-        // MEASURED wire text, both forms.
         assert!(super::names_oversize_event(
             "Executor error during getMore :: caused by :: BSONObj size: 18874897 is invalid"
         ));
@@ -1381,41 +1062,18 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // Fuzzing (`fuzz/fuzz_targets/mongo_resume_token.rs`) found that a corrupt
-    // checkpoint whose `rt` is not a hex string — e.g. `{"rt":{}}` — reached an
-    // unguarded `serde_json::from_value::<ResumeToken>` that PANICS inside the
-    // bson deserializer (a type mismatch, not an `Err`). With `panic = "abort"`
-    // in the release profile that aborts the whole run on a corrupt/foreign
-    // checkpoint. The decoder must return a clean error for any unrecognized
-    // shape. (RED before the shape-guard: `decode_resume_token` panics here.)
-
-    /// The exact input libFuzzer crashed on (nightly Fuzz, run 31998520492,
-    /// 2026-08-17): a `_data` STRING sitting beside a dozen unrelated keys, one
-    /// of them deeply nested. The guard below checked that `_data` was a string
-    /// and then handed the WHOLE object to the deserializer, which PANICS
-    /// (`unreachable!` in bson's seeded visitor) instead of erroring — so the
-    /// precondition its own comment claimed ("Deserialize ONLY that exact
-    /// shape") was named but never established. `panic = "abort"` in release
-    /// makes that an aborted run on a foreign checkpoint file.
+    /// The exact input libFuzzer crashed on (nightly Fuzz, run 31998520492, 2026-08-17).
     #[test]
     fn decode_resume_token_survives_foreign_keys_beside_data() {
         let raw = r##"{"rz~tt":"t'" ,    "/":{"":{"":{"":{"t":{}}}}},   " t":"t'" ,    "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR   ~vrtt":"t'" ,    "_data":"8" ,    " jjjjjjjjjjjr~tt":    "_data'" ,    "   rt":" E" }"##;
         let v: serde_json::Value = serde_json::from_str(raw).expect("corpus input is valid JSON");
         let token = decode_resume_token(&v)
             .expect("a `_data` string is a resume token whatever else the file carries");
-        // Non-inert: the token really is the one `_data` named, not a default.
         let round: serde_json::Value = serde_json::to_value(&token).unwrap();
         assert_eq!(round.get("_data").and_then(|d| d.as_str()), Some("8"));
     }
 
-    /// The `rt` branch is the SIBLING of the `_data` one and was never fuzzed
-    /// past the hex gate — libFuzzer cannot readily synthesise valid BSON, so a
-    /// well-formed document of the WRONG SHAPE is a hole the corpus cannot
-    /// reach. Probed directly with real BSON: it does NOT panic, because
-    /// `from_bson` decodes a `ResumeToken` as an opaque raw document rather than
-    /// through the serde_json visitor that blew up on the `_data` path. It is
-    /// ACCEPTED and rejected later by the server (`Bad resume token`, 40648) —
-    /// loud and lossless, which is why this asserts no-panic rather than `Err`.
+    /// The `rt` branch is the SIBLING of the `_data` one and was never fuzzed past the hex gate.
     #[test]
     fn decode_resume_token_does_not_panic_on_wellformed_bson_of_the_wrong_shape() {
         let mut doc = Document::new();
@@ -1423,19 +1081,18 @@ mod tests {
         let mut buf = Vec::new();
         doc.to_writer(&mut buf).unwrap();
         let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
-        // The point of the test is that this returns at all.
         let _ = decode_resume_token(&json!({ "rt": hex }));
     }
 
     #[test]
     fn decode_resume_token_rejects_malformed_shapes_without_panicking() {
         for bad in [
-            json!({"rt": {}}),    // the fuzz-found crash: `rt` is an object
-            json!({"rt": 5}),     // `rt` is a number
-            json!({"_data": {}}), // `_data` present but not a string
+            json!({"rt": {}}),
+            json!({"rt": 5}),
+            json!({"_data": {}}),
             json!({"_data": 7}),
-            json!({}), // neither field
-            json!([]), // not even an object
+            json!({}),
+            json!([]),
             json!("scalar"),
         ] {
             assert!(
@@ -1445,9 +1102,7 @@ mod tests {
         }
     }
 
-    /// #161: Mongo's until_current stop rules as pure transitions, both
-    /// directions each — the one engine whose bound lived inline in the drain
-    /// loop (siblings: commit_past_bound / tx_disposition / fill_sql).
+    /// #161: Mongo's until_current stop rules as pure transitions, both directions each.
     #[test]
     fn idle_poll_stops_both_directions() {
         let at = |time, increment| Some(mongodb::bson::Timestamp { time, increment });
@@ -1466,7 +1121,7 @@ mod tests {
         assert!(!idle_poll_stops(None, Some(past), bound_met, now));
     }
 
-    /// A token that never reaches the bound ends the drain once the ceiling has passed, and never before; a token not past the target does not stop at any wait.
+    /// A token that never reaches the bound ends the drain once the ceiling has passed, and never before.
     #[test]
     fn a_token_that_never_reaches_the_bound_stops_the_drain_at_the_ceiling() {
         let at = |time, increment| Some(mongodb::bson::Timestamp { time, increment });
@@ -1557,16 +1212,6 @@ mod tests {
     }
 
     /// `until_current` must REFUSE without its bound, and only then.
-    ///
-    /// Honest about what this can and cannot reach: the live suite CANNOT produce
-    /// the failing input. Every stand is a healthy replica set that answers `hello`
-    /// with an `operationTime`, and making it not do so means faulting the server,
-    /// not the fixture. So the seam is asserted here, at the one function that
-    /// decides — and the branch it guards is pinned by an EXISTING live test from
-    /// the other direction: disabling the cluster-time bind hangs
-    /// `roast_until_current_terminates_under_sustained_writes_and_keeps_backlog`
-    /// (killed at its 30s ceiling), which is precisely the state a silent `None`
-    /// used to reach by accident.
     #[test]
     fn until_current_refuses_when_the_cluster_time_bound_is_unavailable() {
         use mongodb::bson::Timestamp;
@@ -1580,8 +1225,6 @@ mod tests {
             Some(ts),
             "the ordinary case must pass the bound through untouched"
         );
-        // The daemon never consults the bound, so a missing operationTime is not
-        // its problem — refusing here would break continuous streaming outright.
         assert_eq!(
             until_current_bound(false, None, None).unwrap(),
             None,
@@ -1604,10 +1247,6 @@ mod tests {
              setting that accepts continuous streaming instead: {err}"
         );
 
-        // The server's OWN words when the probe failed. Without this the refusal
-        // guesses — and an adversarial pass found the guess would be wrong on a
-        // pre-4.4.2 server, where the real answer is `no such command: 'hello'`
-        // and the emitted text talked about replica-set membership instead.
         let with_cause = until_current_bound(
             true,
             None,
@@ -1627,9 +1266,7 @@ mod tests {
     fn past_time_bound_both_directions() {
         use mongodb::bson::Timestamp;
         let t = |time: u32| Some(Timestamp { time, increment: 0 });
-        // stop: bounded run, event after the open-time cluster time.
         assert!(past_time_bound(true, t(101), t(100)));
-        // keep: at/before the bound, daemon mode, or no bound.
         assert!(!past_time_bound(true, t(100), t(100)));
         assert!(!past_time_bound(true, t(99), t(100)));
         assert!(!past_time_bound(false, t(101), t(100)));

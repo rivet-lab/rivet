@@ -1,15 +1,4 @@
-//! `RivetValue` — a typed, owned cell value for the CDC path, replacing the lossy
-//! `serde_json::Value` intermediate.
-//!
-//! The point is **structural** typing: temporals are extracted from the driver
-//! value's own components (`mysql::Value::Date(y, m, d, …)`), never re-parsed from
-//! a rendered string — so the naive-timestamp hazard the process rules forbids never
-//! arises. Decimals are carried as their exact source bytes and converted to
-//! `Decimal128` losslessly at build time.
-//!
-//! This is the shared CDC value vocabulary. Converging the batch `arrow_convert`
-//! onto the same type (so there is literally one value→Arrow mapping) is a
-//! follow-up that must be **benchmark-gated** — the batch path is the hot path.
+//! `RivetValue` — a typed, owned cell value for the CDC path, replacing the lossy `serde_json::Value` intermediate.
 
 use std::sync::Arc;
 
@@ -39,17 +28,13 @@ pub(crate) enum RivetValue {
     Int(i64),
     UInt(u64),
     Float(f64),
-    /// Naive date-time, extracted structurally (the source session is UTC in
-    /// rivet's setups; see the Snowflake/MySQL session-TZ notes).
+    /// Naive date-time, extracted structurally (the source session is UTC in rivet's setups.
     DateTime(NaiveDateTime),
     /// Microseconds since midnight (`TIME`).
     TimeMicros(i64),
-    /// Raw source bytes — `Utf8` text, `Binary`, or a `Decimal` string, decided by
-    /// the target Arrow type at build time.
+    /// Raw source bytes — `Utf8` text, `Binary`, or a `Decimal` string, decided by the target Arrow type at build time.
     Bytes(Vec<u8>),
-    /// A one-dimensional array (PG `text[]`/`integer[]`/…) — elements are
-    /// scalar `RivetValue`s (inner NULLs as [`RivetValue::Null`]). Built into a
-    /// real Arrow `List` column, matching the batch export.
+    /// A one-dimensional array (PG `text[]`/`integer[]`/…).
     Array(Vec<RivetValue>),
 }
 
@@ -85,10 +70,7 @@ impl RivetValue {
         }
     }
 
-    /// Rough in-memory footprint of this cell — drives the sink's memory-budget
-    /// rollover. Heap length for `Bytes`; the scalar width otherwise.
-    /// DECODED payload size — the value's own bytes, no allocator overhead.
-    /// See `ChangeEvent::payload_bytes` for why this is not `estimated_bytes`.
+    /// Rough in-memory footprint of this cell — drives the sink's memory-budget rollover.
     pub(crate) fn payload_bytes(&self) -> usize {
         match self {
             RivetValue::Null | RivetValue::Bool(_) => 1,
@@ -110,20 +92,7 @@ impl RivetValue {
             | RivetValue::Float(_)
             | RivetValue::TimeMicros(_) => 8,
             RivetValue::DateTime(_) => 12,
-            // CAPACITY, not len — the model's contract is RESIDENT cost, and the
-            // one producer whose Bytes carry real slack is Mongo: its document
-            // cell comes through `serde_json::to_string`, whose doubling growth
-            // leaves capacity/len in (1, 2]. Charging len under-counted a
-            // large-document stream up to 2x — outside the calibration contract
-            // that already caught a 12.7x under and a 1.8x over. A no-op for the
-            // exact-capacity engines (PG's to_vec, MySQL's clone).
             RivetValue::Bytes(b) => b.capacity(),
-            // The Vec's SLOTS plus the elements — the same accounting
-            // `ChangeEvent::estimated_bytes` gives the top-level image. A flat `+ 16`
-            // charged a 1000-element `integer[]` 8 KB where its slots alone are 32 KB
-            // (`size_of::<RivetValue>()` is 32), so an array-heavy PostgreSQL table
-            // under-counted ~4x — and up to ~32x on an all-NULL array, where the
-            // elements cost 1 byte each and the slots cost everything.
             RivetValue::Array(v) => {
                 v.capacity() * std::mem::size_of::<RivetValue>()
                     + v.iter().map(RivetValue::estimated_bytes).sum::<usize>()
@@ -131,8 +100,7 @@ impl RivetValue {
         }
     }
 
-    /// Render for NDJSON output. Lossy-by-design (JSON has no decimal/timestamp
-    /// type) — the typed Arrow path is the lossless one.
+    /// Render for NDJSON output.
     pub(crate) fn to_json(&self) -> Json {
         match self {
             RivetValue::Null => Json::Null,
@@ -148,15 +116,9 @@ impl RivetValue {
     }
 }
 
-/// True when [`build_column`] can produce an array of *exactly* this Arrow type
-/// from a `RivetValue`. Drives whether the sink keeps the source's resolved type
-/// — carrying its logical-type metadata + extension through `build_arrow_field`,
-/// so `json` / `uuid` / real int widths land identically to the batch export —
-/// or coarsens the column to `Utf8`.
+/// True when [`build_column`] can produce an array of *exactly* this Arrow type from a `RivetValue`.
 pub(crate) fn is_buildable(dt: &DataType) -> bool {
     if let DataType::List(inner) = dt {
-        // One-dimensional arrays with the element types the batch list builder
-        // produces — full type parity for PG arrays.
         return matches!(
             inner.data_type(),
             DataType::Boolean
@@ -189,36 +151,17 @@ pub(crate) fn is_buildable(dt: &DataType) -> bool {
             | DataType::Date32
             | DataType::Time64(TimeUnit::Microsecond)
             | DataType::Decimal128(_, _)
-            // NUMERIC precision > 38 (PG numeric / MySQL decimal up to 65).
             | DataType::Decimal256(_, _)
             | DataType::Utf8
             | DataType::LargeUtf8
             | DataType::Binary
             | DataType::LargeBinary
             | DataType::FixedSizeBinary(_)
-            // Both naive (datetime/datetime2/PG timestamp) and tz-aware
-            // (datetimeoffset/PG timestamptz) — the latter as the UTC instant + the
-            // column's zone label, matching the batch export (full type parity).
             | DataType::Timestamp(TimeUnit::Microsecond, _)
     )
 }
 
-/// Canonical bytes for a `FixedSizeBinary(n)` cell, or `None` when the value
-/// genuinely cannot fill the width.
-///
-/// A width-`n` value passes through. At `n == 16` a value that is NOT 16 bytes
-/// gets the batch reader's second chance: the canonical 36-char text form is
-/// parsed to its 16 raw bytes (`src/source/mysql/arrow_convert.rs` does exactly
-/// this). Without it, the only route to UUID semantics on MySQL — the documented
-/// `columns: { uid: uuid }` override — nulled 100% of a `CHAR(36)`/`VARCHAR(36)`
-/// column on CDC while the batch export of the same table was correct, because
-/// the binlog delivers the cell as the 36-byte text.
-///
-/// Both the builder and `cells_checksum` MUST go through here. They previously
-/// shared the bare `len() == n` test, which is why the two-ended value check was
-/// blind to the loss: side A skipped the 36-byte cell (contributing 0) and side B
-/// hashed a null (also 0), so the folds agreed and the mismatch bail never fired.
-/// Fixing one side alone would invert that into a false failure on correct data.
+/// Canonical bytes for a `FixedSizeBinary(n)` cell, or `None` when the value genuinely cannot fill the width.
 fn fixed_binary_bytes(by: &[u8], n: usize) -> Option<Vec<u8>> {
     if by.len() == n {
         return Some(by.to_vec());
@@ -233,8 +176,6 @@ fn fixed_binary_bytes(by: &[u8], n: usize) -> Option<Vec<u8>> {
 }
 
 /// A non-NULL cell its planned column type cannot hold: the row, the value, and why.
-///
-/// The builder knows no column name; the sink names the column once via [`CellRefusal::into_error`].
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CellRefusal {
     pub row: usize,
@@ -412,8 +353,6 @@ const NOT_A_DECIMAL: &str = "is not representable in this decimal column (NaN/In
                              f64-exact 2^53 range that tiberius already rounded)";
 
 /// Build one Arrow column of exactly `dt` from typed cells (one per row; `None` ⇒ null).
-///
-/// `dt` must satisfy [`is_buildable`]; the sink asserts that when it builds the schema.
 #[allow(clippy::redundant_closure_call)]
 pub(crate) fn build_column(
     dt: &DataType,
@@ -421,7 +360,6 @@ pub(crate) fn build_column(
 ) -> Result<ArrayRef, CellRefusal> {
     use RivetValue as V;
 
-    // An explicit NULL is a missing cell in every arm, so no text arm renders it as "".
     let normalized: Vec<Option<&RivetValue>> = cells
         .iter()
         .map(|c| match c {
@@ -470,7 +408,6 @@ pub(crate) fn build_column(
         DataType::Float32 => Arc::new(typed_col!(Float32Builder::with_capacity(n), f32_value)),
         DataType::Float64 => Arc::new(typed_col!(Float64Builder::with_capacity(n), f64_value)),
         DataType::Date32 => Arc::new(typed_col!(Date32Builder::with_capacity(n), date_value)),
-        // The `DateTime` is the UTC instant; a tz-aware column carries it with its zone label (batch parity).
         DataType::Timestamp(TimeUnit::Microsecond, tz) => {
             let arr = typed_col!(
                 TimestampMicrosecondBuilder::with_capacity(n),
@@ -494,7 +431,6 @@ pub(crate) fn build_column(
                 .with_data_type(DataType::Decimal256(*p, *s)),
             |v: &RivetValue| decimal_to_i256(v, *s).ok_or_else(|| NOT_A_DECIMAL.to_string())
         )),
-        // One-dimensional arrays → a real List column, element field included (batch parity).
         DataType::List(field) => build_list_column(field, cells)?,
         DataType::Binary => Arc::new(typed_col!(
             BinaryBuilder::with_capacity(n, 0),
@@ -511,7 +447,6 @@ pub(crate) fn build_column(
             }
         )),
         DataType::FixedSizeBinary(w) => {
-            // Width-`w` bytes, or (at w=16) the 36-char text UUID the MySQL binlog delivers.
             let mut b = FixedSizeBinaryBuilder::with_capacity(n, *w);
             for (row, c) in cells.iter().enumerate() {
                 let bytes = match c {
@@ -546,10 +481,6 @@ fn text_value(v: &RivetValue) -> Result<String, String> {
 }
 
 /// The CDC side-A fold: an independent per-column checksum of the typed cells.
-///
-/// The source-side twin of [`crate::source::value_checksum::arrow_batch_checksums`]
-/// over the built array; it reads each cell through the SAME value function the
-/// builder uses, so a mismatch means the builder changed a value after it was read.
 pub(crate) fn cells_checksum(dt: &DataType, cells: &[Option<&RivetValue>]) -> u64 {
     use RivetValue as V;
     use xxhash_rust::xxh3::xxh3_64;
@@ -651,9 +582,6 @@ const NOT_ONE_DIMENSIONAL: &str = "is a multi-dimensional or non-representable a
                                    identically";
 
 /// Build a `List<element>` column from [`RivetValue::Array`] cells, keeping the list field (batch parity).
-///
-/// A NULL cell is a null list; an empty array is an empty list; inner NULLs survive;
-/// an element the element type cannot hold refuses the whole cell.
 fn build_list_column(
     field: &arrow::datatypes::FieldRef,
     cells: &[Option<&RivetValue>],
@@ -776,17 +704,10 @@ fn build_list_column(
     })
 }
 
-/// The scaled-integer magnitude past which an f64 can no longer hold a
-/// fixed-point value exactly (2^53). A MONEY/SMALLMONEY value (delivered as f64
-/// by tiberius) whose scaled magnitude reaches this was ALREADY rounded by the
-/// driver, so materialising it as an "exact" Decimal would present rounding as
-/// exact. The batch export (`mssql::arrow_convert::f64_to_scaled_i128`) fails
-/// loud at exactly this bound; the CDC path must match it.
-const F64_EXACT_SCALED_LIMIT: f64 = 9_007_199_254_740_992.0; // 2^53
+/// The scaled-integer magnitude past which an f64 can no longer hold a fixed-point value exactly (2^53).
+const F64_EXACT_SCALED_LIMIT: f64 = 9_007_199_254_740_992.0;
 
-/// A finite fixed-point f64 rendered at `scale` decimal places, or `None` when
-/// its scaled magnitude is past the f64-exact range (already rounded → refuse,
-/// so `build_column` fails loud instead of storing a falsely-exact decimal).
+/// A finite fixed-point f64 rendered at `scale` decimal places, or `None` when its scaled magnitude is past the f64-exact range (already rounded → refuse, so `build_column` fails loud instead of storing a falsely-exact decimal).
 fn f64_fixed_point_str(f: f64, scale: i8) -> Option<String> {
     let prec = scale.max(0) as usize;
     if f.abs() * 10f64.powi(prec as i32) >= F64_EXACT_SCALED_LIMIT {
@@ -807,33 +728,19 @@ fn decimal_to_i256(v: &RivetValue, scale: i8) -> Option<arrow::datatypes::i256> 
     crate::types::decimal::decimal_str_to_scaled_i256(&s, scale)
 }
 
-/// Parse a decimal carried as source bytes (e.g. `"150.00"`) into the scaled
-/// `i128` a `Decimal128(_, s)` column stores — lossless, no float.
+/// Parse a decimal carried as source bytes (e.g.
 fn decimal_to_i128(v: &RivetValue, scale: i8) -> Option<i128> {
     let s = match v {
         RivetValue::Bytes(b) => std::str::from_utf8(b).ok()?.trim().to_string(),
         RivetValue::Int(i) => i.to_string(),
         RivetValue::UInt(u) => u.to_string(),
-        // Fixed-point values some drivers deliver as floats (SQL Server MONEY
-        // via tiberius): render at the column scale first, then the shared
-        // digit-exact parse below. Past 2^53 the f64 was already rounded by the
-        // driver — f64_fixed_point_str returns None so build_column fails loud,
-        // exactly like the batch export, never a silently-rounded "exact" value.
         RivetValue::Float(f) if f.is_finite() => f64_fixed_point_str(*f, scale)?,
         _ => return None,
     };
-    // ONE decimal-string canon for the whole codebase (types::decimal) — the
-    // hand-rolled twin this replaced would drift (it rejected '+5.00' and an
-    // empty integer part the shared parser accepts).
     crate::types::decimal::decimal_str_to_scaled_i128(&s, scale)
 }
 
-/// MySQL binlog cell quirks, keyed by the column's NATIVE type (the binlog
-/// row image is type-blind at decode time): each variant is what the wire
-/// value actually is, and `apply` converts it to what the typed column needs.
-/// Found by the all-types matrix audit — every one of these was a silent
-/// per-column loss (NULLed by a strict builder) or corruption (enum index as
-/// text) that count/sum verification could not see.
+/// MySQL binlog cell quirks, keyed by the column's NATIVE type (the binlog row image is type-blind at decode time).
 #[derive(Debug)]
 pub(crate) enum MysqlCellFix {
     /// TIMESTAMP arrives as `"epoch[.micros]"` TEXT — parse to the UTC instant.
@@ -844,15 +751,13 @@ pub(crate) enum MysqlCellFix {
     BitUint,
     /// YEAR arrives as its text rendering ("2024").
     YearText,
-    /// Signed MEDIUMINT arrives WITHOUT 24-bit sign extension (the binlog
-    /// stores 3 bytes; 0x800000 decodes as +8388608 instead of −8388608).
+    /// Signed MEDIUMINT arrives WITHOUT 24-bit sign extension (the binlog stores 3 bytes.
     MediumIntSign,
     /// ENUM arrives as its 1-based index; mapped to the label the declaration holds, 0 is the empty string.
     EnumLabels(Labels),
     /// SET arrives as its little-endian bitmask; rendered as the members comma-joined in declaration order.
     SetLabels(Labels),
-    /// BINARY(n): the driver right-trims trailing NULs — pad back to width n
-    /// (the batch export carries the full padded value).
+    /// BINARY(n): the driver right-trims trailing NULs.
     BinaryPad(usize),
     /// DATE and DATETIME arrive as the zero-date marker when MySQL holds a zero or partial date; written as NULL.
     ZeroDate,
@@ -878,15 +783,12 @@ pub(crate) fn mysql_cell_fix(
     if n == "bit(1)" {
         return Some(MysqlCellFix::BitBool);
     }
-    // "bit" (no width) is what the wire metadata reports before the
-    // information_schema enrichment — the value conversion needs no width.
     if n.starts_with("bit(") || n == "bit" {
         return Some(MysqlCellFix::BitUint);
     }
     if n == "year" || n.starts_with("year(") {
         return Some(MysqlCellFix::YearText);
     }
-    // Signed only — `mediumint unsigned` needs no sign extension.
     if (n == "mediumint" || n.starts_with("mediumint(")) && !n.contains("unsigned") {
         return Some(MysqlCellFix::MediumIntSign);
     }
@@ -912,7 +814,7 @@ pub(crate) fn mysql_cell_fix(
 /// The labels of an ENUM or SET declaration, or why one is unreadable.
 type Labels = Result<Vec<String>, String>;
 
-/// Labels from `enum('a','b','it''s')` as `append_unescaped` writes them, in declaration order; a hex literal `x'..'` is refused, total over any input.
+/// Labels from `enum('a','b','it''s')` as `append_unescaped` writes them, in declaration order.
 fn parse_enum_labels(native: &str) -> Labels {
     let Some(start) = native.find('(') else {
         return Ok(Vec::new());
@@ -977,7 +879,6 @@ fn hex_refusal(n: usize, digits: &str) -> String {
 
 impl MysqlCellFix {
     /// The value the typed column needs for wire value `v`, or why the wire value has no reading.
-    /// Whether the fix concerns the planned column type: the TIME check guards a Time64 column only, so a `string` override carries a duration as text.
     pub(crate) fn applies_to(&self, dt: &DataType) -> bool {
         !matches!(self, MysqlCellFix::TimeOfDay)
             || matches!(dt, DataType::Time64(TimeUnit::Microsecond))
@@ -1107,17 +1008,7 @@ fn enum_label(labels: &[String], idx: i64) -> Result<RivetValue, FixRefusal> {
         .ok_or_else(|| label_refusal(format!("is past the column's {} ENUM labels", labels.len())))
 }
 
-/// Render `Bytes` to a string LOSSLESSLY: verbatim when the bytes are valid UTF-8
-/// (the common case — a text/JSON/decimal column, a Mongo id), else PG-style hex
-/// (`\x…`), which the reader can decode back to the original bytes.
-///
-/// The alternative, `String::from_utf8_lossy`, replaces every non-UTF-8 byte with
-/// U+FFFD — silent, UNRECOVERABLE corruption. That bit both the NDJSON path (fixed
-/// earlier) and the typed Parquet/CSV sink via [`render_str`] (#1 bughunt: a MySQL
-/// CDC `latin1` TEXT column's `é` byte 0xE9 became U+FFFD in every non-ASCII cell,
-/// live-proven `caf‹0xE9›` → `caf‹EF BF BD›`). Hex is a RECOVERABLE interim — the
-/// complete fix for a non-UTF-8 *text* column is charset-aware decoding (transcode
-/// via the binlog table-map charset), which the MySQL CDC reader does not yet do.
+/// Render `Bytes` to a string LOSSLESSLY: verbatim when the bytes are valid UTF-8 (the common case.
 fn bytes_to_recoverable_string(b: &[u8]) -> String {
     match std::str::from_utf8(b) {
         Ok(s) => s.to_string(),
@@ -1161,15 +1052,10 @@ mod tests {
 
     #[test]
     fn to_json_bytes_are_lossless_utf8_verbatim_binary_hex() {
-        // #dogfood MED: NDJSON `to_json` ran `from_utf8_lossy` on EVERY Bytes
-        // value, so a genuinely-binary column (bytea, uuid/GUID bytes) had every
-        // non-UTF-8 byte replaced with U+FFFD — silent, unrecoverable corruption.
-        // Text-valued Bytes (string/JSON/decimal columns) stay verbatim.
         assert_eq!(
             RivetValue::Bytes(b"hello".to_vec()).to_json(),
             Json::String("hello".to_string())
         );
-        // Non-UTF-8 binary → PG-style hex, losslessly recoverable (no U+FFFD).
         let raw = vec![0xDEu8, 0xAD, 0xBE, 0xEF, 0x00, 0xFF];
         let j = RivetValue::Bytes(raw).to_json();
         assert_eq!(j, Json::String("\\xdeadbeef00ff".to_string()));
@@ -1183,28 +1069,16 @@ mod tests {
 
     #[test]
     fn render_str_bytes_are_lossless_like_to_json() {
-        // #1 bughunt: the U+FFFD fix was wired into to_json (NDJSON) only — the
-        // TYPED Parquet/CSV sink's render_str still ran from_utf8_lossy, so a MySQL
-        // CDC latin1 TEXT column's `é` (0xE9) became U+FFFD in the Parquet cell
-        // (live-proven `caf‹E9›` → `caf‹EF BF BD›`). render_str must match to_json:
-        // verbatim UTF-8, else recoverable hex, NEVER U+FFFD.
         assert_eq!(
             render_str(&RivetValue::Bytes(b"caf\xc3\xa9".to_vec())),
             "café"
         );
-        // The exact live-repro bytes: latin1 "café" = caf + 0xE9. The 0xE9 makes
-        // the WHOLE slice invalid UTF-8, so — matching to_json — it renders as
-        // whole-value hex (`\x636166e9`), which is recoverable; never U+FFFD.
         let latin1 = vec![b'c', b'a', b'f', 0xE9];
         let s = render_str(&RivetValue::Bytes(latin1));
         assert_eq!(s, "\\x636166e9", "non-UTF-8 must render as recoverable hex");
         assert!(!s.contains('\u{FFFD}'), "must not be lossy-replaced: {s}");
     }
 
-    // Finding #39/#39b regression pins: the enum-label parser must be total
-    // (trailing '(' / multibyte boundaries panicked) and CHAR-correct —
-    // non-ASCII labels were mojibake'd byte-by-byte, i.e. silent label
-    // corruption for any unicode ENUM.
     #[test]
     fn enum_labels_unicode_and_escapes_parse_exactly() {
         assert_eq!(
@@ -1390,11 +1264,6 @@ mod tests {
         }
     }
 
-    // Negative family #2 at the MySQL BINARY level: every cell fix must be
-    // TOTAL over arbitrary wire bytes and arbitrary native-type strings — a
-    // corrupt binlog cell may carry anything, and the fix layer must degrade
-    // (Null / passthrough), never panic and never bring the stream down.
-    // (The PG text parsers got this net yesterday; this is the mysql floor.)
     proptest::proptest! {
         #![proptest_config(proptest::prelude::ProptestConfig {
             cases: 256, ..Default::default()
@@ -1419,7 +1288,6 @@ mod tests {
                     let _ = fix.apply(&v);
                 }
             }
-            // Label parsers over arbitrary native strings.
             let _ = parse_enum_labels(&native);
         }
 
@@ -1448,18 +1316,11 @@ mod tests {
                 DataType::Time64(TimeUnit::Microsecond),
                 DataType::Boolean,
             ] {
-                // Result may be Ok or a LOUD Err (decimal refuses NaN-likes);
-                // the property is: no panic, ever.
                 let _ = build("c", &dt, &cells);
             }
         }
     }
 
-    // The two-ended contract: the independent cell fold must equal the fold of
-    // the BUILT array for EVERY covered type — including the hostile cells
-    // (nulls, narrowing, arrays with inner nulls, wide decimals). If an arm of
-    // cells_checksum ever drifts from build_column, this matrix catches it
-    // offline before any live flush does.
     #[test]
     fn cells_checksum_matches_built_array_for_every_covered_type() {
         use arrow::datatypes::Field;
@@ -1475,8 +1336,6 @@ mod tests {
             ),
             (
                 DataType::Int16,
-                // In-range narrowing from the wide driver value (20000 fits i16);
-                // an OVERFLOW is a loud error now, covered by the narrows test.
                 vec![
                     Some(V::Int(-5)),
                     Some(V::Int(20_000)),
@@ -1487,8 +1346,6 @@ mod tests {
             (DataType::Int32, vec![Some(V::Int(-8_388_608)), None]),
             (
                 DataType::Int64,
-                // 9e9 fits i64 (narrowed from the u64 driver value); a u64 past
-                // i64::MAX is a loud error (build_column_narrows_int test).
                 vec![
                     Some(V::Int(i64::MIN)),
                     Some(V::UInt(9_000_000_000)),
@@ -1603,19 +1460,7 @@ mod tests {
         }
     }
 
-    /// A `uuid` override on a MySQL `CHAR(36)`/`VARCHAR(36)` column resolves to
-    /// `FixedSizeBinary(16)`, but the binlog delivers the cell as the 36-BYTE
-    /// canonical text. The arm used to accept only exactly-16-byte values, so
-    /// 100% of the column became NULL on CDC while the batch export of the same
-    /// table was correct (batch has always parsed the text form).
-    ///
-    /// Two assertions, and the second is the one with teeth. Agreement alone is
-    /// worthless here: before the fix the two folds ALSO agreed — side A skipped
-    /// the 36-byte cell and side B hashed a null, both contributing 0 — which is
-    /// exactly why the sink's two-ended value check could not see the loss. So
-    /// the test first pins the recovered VALUE against a hard-coded expected byte
-    /// array (an oracle independent of this module), then pins that the folds
-    /// still agree, which is what would break if only one side were taught.
+    /// A `uuid` override on a MySQL `CHAR(36)`/`VARCHAR(36)` column resolves to `FixedSizeBinary(16)`.
     #[test]
     fn a_text_uuid_survives_cdc_under_a_fixed_size_binary_override() {
         use crate::source::value_checksum::array_checksum;
@@ -1623,14 +1468,11 @@ mod tests {
         use arrow::array::{Array, FixedSizeBinaryArray};
 
         let dt = DataType::FixedSizeBinary(16);
-        // Canonical text, as MySQL stores it in CHAR(36) and ships it on the wire.
         let text = V::Bytes(b"550e8400-e29b-41d4-a716-446655440000".to_vec());
-        // Independently derived: the RFC-4122 hex of that string, by hand.
         let expected: [u8; 16] = [
             0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44,
             0x00, 0x00,
         ];
-        // A value already in 16-byte form must keep passing through untouched.
         let raw = V::Bytes(expected.to_vec());
         let cells = [Some(&text), Some(&raw), None];
         let refs: Vec<Option<&RivetValue>> = cells.to_vec();
@@ -1662,8 +1504,6 @@ mod tests {
         );
     }
 
-    // Sensitivity: a corrupted cell must MOVE the fold, so the sink's compare
-    // fires — not a constant that trivially agrees.
     #[test]
     fn cells_checksum_detects_a_changed_cell() {
         use RivetValue as V;
@@ -1677,12 +1517,6 @@ mod tests {
         );
     }
 
-    // RED test for the finding (all-types matrix audit): a NULL cell of a
-    // text-shaped column arrived as `Some(RivetValue::Null)` and the Utf8
-    // builder rendered it via `render_str` — an EMPTY STRING, not a null.
-    // Every text/enum/json/interval NULL silently became "" (and "" is not
-    // even valid JSON for a json column). A NULL must build as a null in
-    // every arm, for every engine.
     #[test]
     fn explicit_null_value_builds_as_null_not_empty_string() {
         use arrow::array::Array;
@@ -1697,10 +1531,6 @@ mod tests {
         }
     }
 
-    // All-types matrix audit findings: what the MySQL binlog ACTUALLY delivers
-    // per native type (probed live via the NDJSON path), and the conversion
-    // each typed column needs. Every case below was a silent per-column loss
-    // (strict builder → NULL) or a corruption (enum index rendered as text).
     #[test]
     fn mysql_cell_fixes_convert_the_wire_shapes_the_binlog_delivers() {
         use RivetValue as V;
@@ -1708,7 +1538,6 @@ mod tests {
             mysql_cell_fix(crate::source::cdc::CdcEngine::Mysql, native).expect(native)
         };
 
-        // TIMESTAMP(6): "epoch.micros" text → the UTC instant.
         let ts = fix("timestamp(6)")
             .apply(&V::Bytes(b"1893553445.678901".to_vec()))
             .unwrap();
@@ -1721,8 +1550,6 @@ mod tests {
             )
         );
 
-        // TIMESTAMP zero-date: the binlog carries '0000-00-00 00:00:00' as epoch 0, which no real
-        // TIMESTAMP can hold (the range starts at 1970-01-01 00:00:01 UTC) — NULL, as the batch path.
         assert_eq!(
             fix("timestamp").apply(&V::Bytes(b"0".to_vec())).unwrap(),
             V::Null
@@ -1756,8 +1583,6 @@ mod tests {
             "the first real TIMESTAMP second stays a value"
         );
 
-        // YEAR: the binlog decoder adds 1900 to the stored byte, so YEAR 0000 arrives as "1900"
-        // (never a legal YEAR) and must read back as 0, as the batch path does.
         assert_eq!(
             fix("year").apply(&V::Bytes(b"1900".to_vec())).unwrap(),
             V::Int(0)
@@ -1771,7 +1596,6 @@ mod tests {
             V::Int(2024)
         );
 
-        // BIT(1): one raw byte → Bool; BIT(8): big-endian bytes → UInt.
         assert_eq!(
             fix("bit(1)").apply(&V::Bytes(vec![1])).unwrap(),
             V::Bool(true)
@@ -1781,25 +1605,20 @@ mod tests {
             V::UInt(170)
         );
 
-        // YEAR: text rendering → Int.
         assert_eq!(
             fix("year").apply(&V::Bytes(b"2030".to_vec())).unwrap(),
             V::Int(2030)
         );
 
-        // ENUM: 1-based index → label; 0 → '' (MySQL's invalid sentinel).
         let e = fix("enum('a','b','c')");
         assert_eq!(e.apply(&V::Int(2)).unwrap(), V::Bytes(b"b".to_vec()));
         assert_eq!(e.apply(&V::Int(0)).unwrap(), V::Bytes(Vec::new()));
 
-        // BINARY(4): trailing NULs trimmed by the driver → pad back to width.
         assert_eq!(
             fix("binary(4)").apply(&V::Bytes(Vec::new())).unwrap(),
             V::Bytes(vec![0, 0, 0, 0])
         );
 
-        // MEDIUMINT: 24-bit sign extension (0x800000 → −8388608); positives and
-        // the unsigned variant untouched.
         let mi = fix("mediumint");
         assert_eq!(mi.apply(&V::Int(8_388_608)).unwrap(), V::Int(-8_388_608));
         assert_eq!(mi.apply(&V::Int(8_388_607)).unwrap(), V::Int(8_388_607));
@@ -1807,8 +1626,6 @@ mod tests {
             mysql_cell_fix(crate::source::cdc::CdcEngine::Mysql, "mediumint unsigned").is_none()
         );
 
-        // SET: bitmask (LE bytes) → comma-joined labels in declaration order,
-        // the server's own rendering ('x,z' for bits 0+2 = 0x05).
         let st = fix("set('x','y','z')");
         assert_eq!(
             st.apply(&V::Bytes(vec![0x05])).unwrap(),
@@ -1816,10 +1633,8 @@ mod tests {
         );
         assert_eq!(st.apply(&V::UInt(0)).unwrap(), V::Bytes(Vec::new()));
 
-        // NULL always stays NULL; other engines get no fix at all.
         assert_eq!(fix("year").apply(&V::Null).unwrap(), V::Null);
         assert!(mysql_cell_fix(crate::source::cdc::CdcEngine::Postgres, "bit(1)").is_none());
-        // varbinary is NOT padded (only fixed-width binary is).
         assert!(mysql_cell_fix(crate::source::cdc::CdcEngine::Mysql, "varbinary(4)").is_none());
     }
 
@@ -1837,29 +1652,19 @@ mod tests {
         );
     }
 
-    // Finding #2: SQL Server MONEY/SMALLMONEY arrive as f64 (tiberius). The CDC
-    // schema types them Decimal128(19,4), and the Float→decimal conversion had NO
-    // 2^53 guard — so a MONEY value past the f64-exact range (already rounded by
-    // the driver) was stored as a falsely-EXACT decimal, while the batch export
-    // fails loud on the identical value. Parity: refuse it here too. RED against
-    // the pre-fix `format!("{f:.prec$}")` with no guard.
     #[test]
     fn cdc_money_past_f64_exact_range_fails_loud_not_a_falsely_exact_decimal() {
         use arrow::datatypes::DataType;
-        // 2^53 / 10^4 ≈ 9.007e11 — a value just under stays exact, 1e12 is past.
         assert_eq!(
             decimal_to_i128(&RivetValue::Float(9.0e11), 4),
             Some(900_000_000_000_i128 * 10_000)
         );
         assert_eq!(decimal_to_i128(&RivetValue::Float(1e12), 4), None);
-        // Decimal256 (wide numeric) carries the same guard.
         assert!(decimal_to_i256(&RivetValue::Float(1e12), 4).is_none());
-        // A small MONEY value still builds.
         let small = RivetValue::Float(12.34);
         let ok = build("c", &DataType::Decimal128(19, 4), &[Some(&small)])
             .expect("a small MONEY value builds");
         assert_eq!(ok.len(), 1);
-        // A huge MONEY value in a Decimal column fails loud with the 2^53 message.
         let huge = RivetValue::Float(1e12);
         let err = build("c", &DataType::Decimal128(19, 4), &[Some(&huge)])
             .expect_err("a MONEY value past f64-exact range must fail loud, not round silently");
@@ -1870,18 +1675,9 @@ mod tests {
         );
     }
 
-    /// The `Value::Time` arm's arithmetic, which nothing exercised: the Date arm
-    /// had a test, the Time arm had none, and the mutation baseline carried
-    /// SEVENTEEN operator survivors for this one conversion.
-    ///
-    /// Every component is non-zero and distinct so no two operators agree:
-    /// days=2 (2*86400 = 172800 vs 2+86400 = 86402), h=3 (3*3600 = 10800 vs
-    /// 3+3600 = 3603), mi=4 (4*60 = 240 vs 4+60 = 64). A fixture with zeros —
-    /// the obvious "a time value" — makes `*`, `+` and `/` indistinguishable and
-    /// is exactly why these survived.
+    /// The `Value::Time` arm's arithmetic, which nothing exercised.
     #[test]
     fn mysql_time_arm_pins_every_arithmetic_step() {
-        // (2*86400 + 3*3600 + 4*60 + 5) * 1e6 + 678901
         let v = RivetValue::from_mysql(&mysql::Value::Time(false, 2, 3, 4, 5, 678_901));
         assert_eq!(
             v,
@@ -1889,10 +1685,8 @@ mod tests {
             "days, hours, minutes, seconds and microseconds must each carry their \
              own weight"
         );
-        // The sign applies to the WHOLE value, after the sum — not to a part.
         let neg = RivetValue::from_mysql(&mysql::Value::Time(true, 2, 3, 4, 5, 678_901));
         assert_eq!(neg, RivetValue::TimeMicros(-183_845_678_901));
-        // A pure-microsecond value: the `+ us` addend must survive on its own.
         assert_eq!(
             RivetValue::from_mysql(&mysql::Value::Time(false, 0, 0, 0, 0, 1)),
             RivetValue::TimeMicros(1)
@@ -1922,21 +1716,15 @@ mod tests {
         }
     }
 
-    // Finding #4: an integer that fits the declared width builds; a genuine NULL
-    // stays null; but an OVERFLOW must fail LOUD (batch parity via `narrow`), never
-    // the silent null it used to be — a BIT(64) with bit 63 set was dropped on CDC
-    // while the batch export surfaced it.
     #[test]
     fn build_column_narrows_int_and_fails_loud_on_overflow() {
         use arrow::array::{Array, Int32Array};
-        // In-range values + a genuine null build cleanly.
         let (v7, vnull_src) = (RivetValue::Int(7), RivetValue::Int(-5));
         let arr = build("c", &DataType::Int32, &[Some(&v7), None, Some(&vnull_src)]).unwrap();
         let a = arr.as_any().downcast_ref::<Int32Array>().unwrap();
         assert_eq!(a.value(0), 7);
-        assert!(a.is_null(1)); // null cell stays null
+        assert!(a.is_null(1));
         assert_eq!(a.value(2), -5);
-        // Overflow → loud error, not a silent null wrap.
         let vmax = RivetValue::Int(i64::MAX);
         let err = build("c", &DataType::Int32, &[Some(&vmax)])
             .expect_err("an integer overflowing the declared width must fail loud");
@@ -1944,8 +1732,6 @@ mod tests {
             err.to_string().to_lowercase().contains("overflow"),
             "message names the overflow: {err}"
         );
-        // The reported case: a BIT(64) with bit 63 set arrives as u64 > i64::MAX
-        // and must fail loud in an Int64 column, exactly like the batch export.
         let bit64 = RivetValue::UInt(u64::MAX);
         assert!(
             build("c", &DataType::Int64, &[Some(&bit64)]).is_err(),
@@ -1953,19 +1739,12 @@ mod tests {
         );
     }
 
-    // Finding #6: a one-dimensional List column must never silently null a
-    // non-array cell. parse_pg_array_literal preserves a multi-dimensional PG
-    // literal as raw text bytes (never a flat Array of NULLs); build_list_column
-    // then fails LOUD on that non-array cell — batch parity — instead of writing
-    // a silent null list. RED against the pre-fix `_ => lb.append(false)`.
     #[test]
     fn list_column_fails_loud_on_a_non_array_cell_not_a_silent_null() {
         use arrow::datatypes::Field;
         let list_i32 = DataType::List(Arc::new(Field::new("item", DataType::Int32, true)));
-        // A NULL cell is a valid null list — must still succeed.
         let none: Option<&RivetValue> = None;
         build("c", &list_i32, &[none]).expect("a null cell builds a null list");
-        // The raw multi-dim literal (as text bytes) must fail loud.
         let raw = RivetValue::Bytes(b"{{1,2},{3,4}}".to_vec());
         let err = build("c", &list_i32, &[Some(&raw)])
             .expect_err("a non-array cell in a list column must fail loud");
@@ -1976,11 +1755,7 @@ mod tests {
         );
     }
 
-    /// The invariant that keeps schema and data in lockstep: every type
-    /// `is_buildable` accepts, `build_column` must produce an array of *exactly*
-    /// that type. Adding a type to one but not the other (a field with no matching
-    /// array builder) would otherwise panic in `RecordBatch::try_new` at runtime,
-    /// on the data — this fails in CI instead.
+    /// The invariant that keeps schema and data in lockstep.
     #[test]
     fn is_buildable_iff_build_column_produces_that_type() {
         use arrow::array::Array;
@@ -2029,7 +1804,6 @@ mod tests {
                 "build({dt:?}) produced a mismatched type"
             );
         }
-        // A type the sink can't build is rejected, so the resolver plans it as text.
         for dt in [
             DataType::Date64,
             DataType::Timestamp(TimeUnit::Nanosecond, None),
@@ -2485,8 +2259,7 @@ mod renderer_twins {
     use chrono::NaiveDate;
 
     #[test]
-    /// Strict known divergence: ADR-0038 divergence: bytes_to_recoverable_string renders non-UTF-8 bytes as PG-style \x-prefixed hex, CP5 HexBytes has no prefix; unified by the CDC builder step (CP12) of the migration
-    /// Passes while it diverges; when the step unifies it, this fails ("did not panic") and flips to a plain test.
+    /// Strict known divergence: ADR-0038 divergence.
     #[should_panic(expected = "assertion")]
     fn non_utf8_bytes_render_like_hex_bytes() {
         for b in [vec![0xE9], vec![0xFF, 0x00, 0x80]] {
@@ -2495,8 +2268,7 @@ mod renderer_twins {
     }
 
     #[test]
-    /// Strict known divergence: ADR-0038 divergence: render_str and to_json write chrono's Display (2024-02-29 13:04:05.123), iso_timestamp_nanos writes 2024-02-29T13:04:05.123000000; unified by the CDC builder step (CP12)
-    /// Passes while it diverges; when the step unifies it, this fails ("did not panic") and flips to a plain test.
+    /// Strict known divergence: ADR-0038 divergence.
     #[should_panic(expected = "assertion")]
     fn a_datetime_renders_like_iso_timestamp_nanos() {
         for (h, n) in [(13, 123_000_000), (0, 0), (23, 1)] {

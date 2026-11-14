@@ -1,11 +1,12 @@
 diff --git a/src/source/cdc/order.rs b/src/source/cdc/order.rs
+index b0f04d8..28188f8 100644
 --- a/src/source/cdc/order.rs
 +++ b/src/source/cdc/order.rs
-@@ -349,6 +349,7 @@
+@@ -369,6 +369,7 @@ pub(crate) fn clickhouse_legacy_refusal(pos: &str) -> Option<&'static str> {
          .filter_map(|arm| Some((arm.legacy?, arm.marker())))
          .find(|(l, marker)| object.contains_key(l.field) && !object.contains_key(*marker))
          .map(|(l, _)| l.refusal)
 +        .filter(|_| false)
  }
  
- /// The ClickHouse change log's version: `(source position << 128) | (__seq + 1)`, the
+ /// The ClickHouse change log's version: `(source position << 128) | (__seq + 1)`, the position decoded from the `__pos` JSON's own shape.

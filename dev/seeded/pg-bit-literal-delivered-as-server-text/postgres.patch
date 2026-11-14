@@ -1,11 +1,11 @@
 diff --git a/src/source/postgres/cdc.rs b/src/source/postgres/cdc.rs
-index 91ebdd5..17232f7 100644
+index a2df87b..053c2ea 100644
 --- a/src/source/postgres/cdc.rs
 +++ b/src/source/postgres/cdc.rs
-@@ -1875,7 +1875,7 @@ struct ParsedColumn {
+@@ -1352,7 +1352,7 @@ struct ParsedColumn {
  }
  
- /// Types whose `test_decoding` text is not the server's text for the value: a bit string prints as `B'110'`, the server's text is `110`.
+ /// Types whose `test_decoding` text is not the server's text for the value.
 -const DECODER_REWRITTEN_TYPES: &[&str] = &["bit", "bit varying"];
 +const DECODER_REWRITTEN_TYPES: &[&str] = &[];
  

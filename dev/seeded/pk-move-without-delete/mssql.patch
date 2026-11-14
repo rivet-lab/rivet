@@ -1,8 +1,8 @@
 diff --git a/src/source/mssql/cdc.rs b/src/source/mssql/cdc.rs
-index 685052a1..a23f6d14 100644
+index 2922470..0997ce4 100644
 --- a/src/source/mssql/cdc.rs
 +++ b/src/source/mssql/cdc.rs
-@@ -1175,6 +1175,15 @@ impl ChangeStream for MssqlChangeStream {
+@@ -704,6 +704,15 @@ impl ChangeStream for MssqlChangeStream {
              }
          }
          if let Some(ev) = self.pending.pop_front() {
@@ -17,4 +17,4 @@ index 685052a1..a23f6d14 100644
 +            }
              return Some(Ok(ev));
          }
-         // A spilled tail outranks another poll: its rows belong to transactions
+         if self.spooled.is_some() {

@@ -55,7 +55,7 @@ pub(crate) fn undecodable(why: String) -> anyhow::Error {
     refusal(crate::error::codes::SOURCE_CDC_UNDECODABLE, why)
 }
 
-/// The config and export a checkpoint belongs to, kept beside it as `<checkpoint>.owner`; an empty `config` is a `rivet cdc` command.
+/// The config and export a checkpoint belongs to, kept beside it as `<checkpoint>.owner`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CheckpointOwner {
     pub(crate) config: String,
@@ -179,7 +179,7 @@ fn shared(ckpt: &std::path::Path, held: &CheckpointOwner, me: &CheckpointOwner) 
     ))
 }
 
-/// Claim the checkpoint `ckpt` for the stream `me`: refuse one another stream still reads, record `me` beside it otherwise.
+/// Claim the checkpoint `ckpt` for the stream `me`.
 pub(crate) fn claim_checkpoint(ckpt: &std::path::Path, me: &CheckpointOwner) -> Result<()> {
     let record = owner_path(ckpt);
     if let Some(held) = owner_of(ckpt) {

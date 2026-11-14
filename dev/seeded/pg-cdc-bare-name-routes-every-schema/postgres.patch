@@ -1,9 +1,9 @@
 diff --git a/src/source/postgres/cdc.rs b/src/source/postgres/cdc.rs
-index 22e07e2c..a58d5910 100644
+index a2df87b..6460f21 100644
 --- a/src/source/postgres/cdc.rs
 +++ b/src/source/postgres/cdc.rs
-@@ -1632,7 +1632,7 @@ pub(crate) fn truncate_refusal_message(schema: &str, table: &str) -> String {
- /// change event; `None` when it resolves nowhere or to a view, which leaves the election as it was.
+@@ -1085,7 +1085,7 @@ pub(crate) fn truncate_refusal_message(schema: &str, table: &str) -> String {
+ /// The schema a BARE configured name means: the one the connection's `search_path` resolves it in (`to_regclass`), as every SQL statement of the run reads it, when that relation can carry a change event.
  fn search_path_schema(client: &mut Client, cfg: &str) -> Result<Option<String>> {
      use anyhow::Context as _;
 -    if cfg.contains('.') {

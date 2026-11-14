@@ -1,22 +1,4 @@
 //! Postgres → Arrow conversion machinery.
-//!
-//! Everything that turns a `postgres::Row` (driver type) into an Arrow
-//! `RecordBatch` lives here, including:
-//!
-//! - the `Type → RivetType → DataType` mapping pipeline
-//!   (`pg_type_to_rivet`, `rivet_type_for_pg_column`, `pg_columns_to_schema`),
-//! - per-cell decoders for INTERVAL (`PgInterval` + ISO 8601 serializer),
-//!   UUID (`PgUuidDisplayed`), enum (`AnyAsString`), and NUMERIC (binary
-//!   wire decoding via `pg_numeric_optional_*`),
-//! - the row → array builders (`rows_to_record_batch_typed`, `build_array`,
-//!   `build_pg_list_array`) and decimal helpers
-//!   (`pg_numeric_to_decimal128`, `pg_numeric_to_decimal256`).
-//!
-//! Only three names cross the module boundary back into [`super`]:
-//! [`pg_columns_to_schema`] and [`rivet_type_for_pg_column`] are called by
-//! the `Source::export` / `Source::type_mappings` impls in `mod.rs`, and
-//! [`rows_to_record_batch_typed`] is called by `pg_run_export`. Everything
-//! else is private to this file.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -43,23 +25,9 @@ use crate::types::{
     build_arrow_field,
 };
 
-// ─── Pre-allocation per-value ceiling (security audit V22, CWE-770) ───────────
-
 use crate::source::value_within_ceiling;
 
-// ─── Wire-type adapters ──────────────────────────────────────────────────────
-
 /// PostgreSQL `uuid` rows materialised as their canonical 16-byte form.
-///
-/// Targets Arrow `FixedSizeBinary(16)` per ADR-0014: with the `arrow.uuid`
-/// extension type attached in [`crate::types::mapping::build_arrow_field`],
-/// parquet-rs emits native `LogicalType::Uuid` and downstream engines
-/// (DuckDB, ClickHouse, pyarrow, BigQuery autodetect) recover UUID
-/// semantics without a cast.
-///
-/// Most servers transmit UUIDs as 16 raw bytes under the binary protocol;
-/// the text branch covers the rare client/proxy that surfaces the
-/// hyphenated form instead, so we never silently null an export.
 #[derive(Clone)]
 struct PgUuidBytes([u8; 16]);
 
@@ -83,9 +51,6 @@ impl<'a> PgFromSql<'a> for PgUuidBytes {
 }
 
 /// PostgreSQL `time` as raw microseconds since midnight, refusing `24:00:00`.
-///
-/// The driver's `NaiveTime` decode adds the wire micros to midnight with chrono's
-/// wrapping `Add`, so PostgreSQL's legal `24:00:00` came back as `00:00:00`.
 struct PgTimeMicros(i64);
 
 impl<'a> PgFromSql<'a> for PgTimeMicros {
@@ -228,19 +193,6 @@ fn pg_int_cell<T: TryFrom<i64>>(row: &Row, col_idx: usize, declared: &str) -> Re
 }
 
 /// PostgreSQL `json` / `jsonb` cells borrowed as their raw source text.
-///
-/// The wire payload already IS the JSON text: `json_send` transmits the
-/// stored bytes verbatim and `jsonb_send` prefixes them with a one-byte
-/// format version (always `1`). The old `Json<serde_json::Value>` read
-/// re-serialized the document, rounding non-integer numbers through `f64`
-/// (>17 significant digits silently altered) and normalising the whitespace
-/// a PG `json` column stores verbatim. Validating UTF-8 and appending the
-/// payload directly keeps byte fidelity at zero parse cost.
-///
-/// Only the binary format is handled: every data-row fetch in this source
-/// goes through `client.query` (extended protocol, binary results), and the
-/// version-byte check mirrors the `postgres` crate's own `Json<T>` reader,
-/// so failure behavior is unchanged.
 pub(super) struct PgJsonRawText<'a>(pub(super) &'a str);
 
 impl<'a> PgFromSql<'a> for PgJsonRawText<'a> {
@@ -264,19 +216,7 @@ impl<'a> PgFromSql<'a> for PgJsonRawText<'a> {
     }
 }
 
-/// A PostgreSQL date/time/timestamp the Arrow type cannot hold — `infinity` and
-/// `-infinity`, PostgreSQL's standard "never expires" / "since forever" sentinels,
-/// or a `time` of `24:00:00`.
-///
-/// `Row::get` PANICS rather than returning `Err` when the driver cannot deserialize
-/// a column, and `chrono` has no representation for the sentinel — so a table with
-/// a single `'infinity'::timestamptz` aborted the whole export at
-/// `error retrieving column 1: error deserializing column 1`, exit 101, with no run
-/// summary, no error path and no ledger finalize (round-9 bughunt, reproduced on the
-/// pg stand). Nulling it instead would be worse: it is a real, ordered value that
-/// every count and checksum fold would then agree about losing.
-///
-/// So: `try_get`, and a loud error that names the column and what to do.
+/// A PostgreSQL date/time/timestamp the Arrow type cannot hold.
 fn unrepresentable_temporal(col: &str, kind: &str, cause: impl std::fmt::Display) -> anyhow::Error {
     let msg = format!(
         "postgres: column `{col}` holds a {kind} value Arrow cannot represent ({cause}) — \
@@ -304,12 +244,6 @@ fn pg_numeric_optional_utf8_string(row: &Row, col_idx: usize) -> Result<Option<S
 
 fn numeric_raw_to_optional_decimal_text(raw: &[u8]) -> Option<String> {
     numeric_wire_normalized_plain(raw)
-        // NaN / ±Infinity have no decimal literal, so `normalized_plain` returns
-        // None for them — but this is the STRING path, and text holds them
-        // losslessly. Without this the `or_else` below ran `from_utf8` over the
-        // BINARY wire header, failed, and emitted NULL: a silent degrade on the
-        // one path that could have carried the value intact, while the Decimal
-        // path (correctly) errors loudly on the same input.
         .or_else(|| numeric_wire_special_text(raw).map(str::to_owned))
         .or_else(|| {
             let text = simdutf8::basic::from_utf8(raw).ok()?.trim();
@@ -317,37 +251,17 @@ fn numeric_raw_to_optional_decimal_text(raw: &[u8]) -> Option<String> {
         })
 }
 
-// ─── Type mapping ────────────────────────────────────────────────────────────
-
 /// Map a PostgreSQL wire-protocol type to Rivet's canonical type.
-///
-/// This is the authoritative PostgreSQL → RivetType function. All other code
-/// must go through here rather than constructing Arrow types directly.
-///
-/// Key decisions vs. the old `pg_type_to_arrow`:
-/// - Unbounded server `NUMERIC` (OID only in row metadata) yields `Unsupported`
-///   unless overwritten by YAML `columns:` or by `pg_fetch_numeric_catalog_hints`
-///   for simple single-table selects (precision/scale from `information_schema`).
-/// - `TIMESTAMPTZ` → `Timestamp { timezone: Some("UTC") }` instead of `None`
-///   (roadmap §13: TIMESTAMPTZ must carry UTC semantics into Arrow/Parquet).
-/// - `UUID` / `JSON` / `JSONB` → `Uuid` / `Json` variants, so `build_arrow_field`
-///   attaches the `rivet.logical_type` metadata for downstream consumers.
 fn pg_type_to_rivet(t: &Type) -> RivetType {
     match *t {
         Type::BOOL => RivetType::Bool,
         Type::INT2 => RivetType::Int16,
         Type::INT4 => RivetType::Int32,
         Type::INT8 => RivetType::Int64,
-        // OID is u32; Int64 is a safe widening and avoids introducing a UInt32
-        // variant that has no natural downstream type in most warehouses.
         Type::OID => RivetType::Int64,
         Type::FLOAT4 => RivetType::Float32,
         Type::FLOAT8 => RivetType::Float64,
 
-        // The postgres wire protocol does NOT carry atttypmod (precision/scale)
-        // in RowDescription for arbitrary queries — only the OID is available.
-        // For unbounded server `NUMERIC`, see [`rivet_type_for_pg_column`] + catalog
-        // hints; this arm is the final fallback when no declared precision exists.
         Type::NUMERIC => RivetType::Unsupported {
             native_type: "numeric".into(),
             reason: "precision/scale unavailable from query metadata and catalog lookup; \
@@ -365,7 +279,6 @@ fn pg_type_to_rivet(t: &Type) -> RivetType {
             unit: RivetTimeUnit::Microsecond,
             timezone: None,
         },
-        // Roadmap §13: TIMESTAMPTZ is always normalized to UTC.
         Type::TIMESTAMPTZ => RivetType::Timestamp {
             unit: RivetTimeUnit::Microsecond,
             timezone: Some("UTC".into()),
@@ -374,18 +287,13 @@ fn pg_type_to_rivet(t: &Type) -> RivetType {
         Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME => RivetType::String,
         Type::BYTEA => RivetType::Binary,
 
-        // Roadmap §14: JSON/JSONB → Utf8 + rivet.logical_type=json metadata.
         Type::JSON | Type::JSONB => RivetType::Json,
-        // Roadmap §14: UUID → Utf8 + rivet.logical_type=uuid metadata.
         Type::UUID => RivetType::Uuid,
 
-        // Roadmap §13: interval → IntervalMonthDayNano.
         Type::INTERVAL => RivetType::Interval,
 
         _ => match t.kind() {
-            // M6: PG enum → Utf8 + metadata logical=enum.
             Kind::Enum(_) => RivetType::Enum,
-            // M6: 1-D arrays → List(inner). Nested arrays fall through to Unsupported.
             Kind::Array(elem_type) => RivetType::List {
                 inner: Box::new(pg_type_to_rivet(elem_type)),
             },
@@ -397,9 +305,7 @@ fn pg_type_to_rivet(t: &Type) -> RivetType {
     }
 }
 
-/// Apply per-column overrides + numeric catalog hints on top of the wire-type
-/// derived RivetType. The override path always wins; catalog hints are
-/// consulted only when no override exists and the wire type is NUMERIC.
+/// Apply per-column overrides + numeric catalog hints on top of the wire-type derived RivetType.
 pub(super) fn rivet_type_for_pg_column(
     col: &postgres::Column,
     column_overrides: &ColumnOverrides,
@@ -411,9 +317,6 @@ pub(super) fn rivet_type_for_pg_column(
         col.name(),
         col.type_().name(),
         || {
-            // Autodetect: a NUMERIC catalog hint (only available for a single-table
-            // SELECT) supplies the precision/scale the wire protocol omits;
-            // otherwise map the wire type directly.
             if *col.type_() == Type::NUMERIC
                 && let Some(&(p, s)) = numeric_hints.and_then(|h| h.get(col.name()))
             {
@@ -427,18 +330,7 @@ pub(super) fn rivet_type_for_pg_column(
     )
 }
 
-/// Build an Arrow `Schema` from PostgreSQL `Column` descriptors by routing
-/// each column through the `SourceColumn → RivetType → TypeMapping → Field`
-/// pipeline.
-///
-/// `column_overrides` takes priority over autodetection: if the user declared
-/// e.g. `amount: decimal(18,2)` in `rivet.yaml`, that `RivetType` replaces
-/// the autodetected `Unsupported` for `NUMERIC` columns.
-///
-/// Returns `Err` for any column that has no safe Rivet mapping and no override,
-/// rather than silently exporting wrong data as Utf8. When `numeric_catalog_hints`
-/// is populated (simple single-table `SELECT … FROM`), declared `numeric(p,s)` from
-/// the catalog is merged before falling back to `Unsupported`.
+/// Build an Arrow `Schema` from PostgreSQL `Column` descriptors by routing each column through the `SourceColumn → RivetType → TypeMapping → Field` pipeline.
 pub(super) fn pg_columns_to_schema(
     columns: &[postgres::Column],
     column_overrides: &ColumnOverrides,
@@ -476,12 +368,7 @@ pub(super) fn pg_columns_to_schema(
     Ok(Schema::new(fields))
 }
 
-// ─── INTERVAL decoder + ISO 8601 serializer ──────────────────────────────────
-
-/// Reads a PostgreSQL `INTERVAL` value from its 16-byte binary wire format:
-///   bytes 0–7  (i64 big-endian): microseconds within day
-///   bytes 8–11 (i32 big-endian): days
-///   bytes 12–15 (i32 big-endian): months
+/// Reads a PostgreSQL `INTERVAL` value from its 16-byte binary wire format.
 pub(super) struct PgInterval {
     pub(super) microseconds: i64,
     pub(super) days: i32,
@@ -511,12 +398,6 @@ impl<'a> postgres_types::FromSql<'a> for PgInterval {
 }
 
 /// Serialise a PostgreSQL INTERVAL to an ISO 8601 duration string.
-///
-/// Arrow `Interval(MonthDayNano)` cannot be written to Parquet, so we emit
-/// Utf8 instead.  The three components map as:
-///   months → years + months  (e.g. 14 → "P1Y2M")
-///   days   → days            (e.g. 3  → "3D")
-///   µs     → T…H…M…S        (e.g. 90_061_000_000 → "T25H1M1S")
 pub(crate) fn pg_interval_to_iso8601(months: i32, days: i32, microseconds: i64) -> String {
     use std::fmt::Write as _;
     let years = months / 12;
@@ -561,7 +442,6 @@ pub(crate) fn pg_interval_to_iso8601(months: i32, days: i32, microseconds: i64) 
 }
 
 /// Generic wrapper that reads any Postgres binary value as a UTF-8 string.
-/// Used for enum types whose OID is not a standard text OID.
 pub(super) struct AnyAsString(String);
 
 impl<'a> postgres_types::FromSql<'a> for AnyAsString {
@@ -575,8 +455,6 @@ impl<'a> postgres_types::FromSql<'a> for AnyAsString {
         true
     }
 }
-
-// ─── Row → RecordBatch dispatcher ────────────────────────────────────────────
 
 pub(super) fn rows_to_record_batch_typed(
     schema: &SchemaRef,
@@ -593,12 +471,6 @@ pub(super) fn rows_to_record_batch_typed(
     for (col_idx, (name, pg_type)) in columns.iter().enumerate() {
         let target_type = schema.field(col_idx).data_type();
         let arr = build_array(pg_type, target_type, col_idx, rows, name, max_value_bytes)?;
-        // Defensive invariant: `build_array` now dispatches on `target_type`, so
-        // the produced array matches the schema field by construction. This
-        // guard turns any future arm that builds the wrong width/unit into a
-        // clear column-named error instead of the opaque downstream
-        // `RecordBatch::try_new` type-mismatch — it should never fire for
-        // correct code.
         if arr.data_type() != target_type {
             crate::rivet_bail!(
                 crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH,
@@ -612,7 +484,6 @@ pub(super) fn rows_to_record_batch_typed(
         arrays.push(arr);
     }
     let batch = RecordBatch::try_new(schema.clone(), arrays)?;
-    // Form A value-checksum: side A (raw pg values, same decoders) vs side B (built batch).
     let a =
         crate::source::value_checksum::source_checksums(schema, &PgCellSource { columns, rows });
     let b = crate::source::value_checksum::arrow_batch_checksums(&batch);
@@ -620,14 +491,7 @@ pub(super) fn rows_to_record_batch_typed(
     Ok(batch)
 }
 
-/// Side A of the Form A value-checksum for Postgres — a second pass over the raw
-/// `Row` values that SHARES `build_array`'s cell decoders (`pg_cell`, `pg_int_cell`),
-/// so it catches builder/append faults, not decode faults (a decode fault is refused
-/// by the builder before the checksum runs). Drives the shared
-/// [`crate::source::value_checksum::source_checksums`] dispatch; each accessor holds
-/// the pg-specific extraction (OID widen, TIMESTAMPTZ, the text/json/numeric/uuid/
-/// interval/enum split, numeric wire → scaled i128). Bytes must match `feed_cell`
-/// or the matrix guard false-mismatches.
+/// Side A of the Form A value-checksum for Postgres.
 struct PgCellSource<'a> {
     columns: &'a [(String, Type)],
     rows: &'a [Row],
@@ -647,8 +511,6 @@ impl crate::source::value_checksum::CellSource for PgCellSource<'_> {
         side_a(pg_int_cell(&self.rows[row], col, "int8"))
     }
     fn uint64(&self, _col: usize, _row: usize) -> Option<u64> {
-        // Postgres never maps to UInt64 (OID widens to i64), so source_checksums
-        // never calls this — a UInt64 column is not produced by this engine.
         None
     }
     fn float32(&self, col: usize, row: usize) -> Option<f32> {
@@ -757,8 +619,6 @@ impl crate::source::value_checksum::CellSource for PgCellSource<'_> {
     ) -> Option<Vec<crate::source::value_checksum::ListElem>> {
         use crate::source::value_checksum::ListElem as E;
         let r = &self.rows[row];
-        // Mirrors build_pg_list_array element-by-element: Vec<Option<T>> so
-        // inner NULLs survive, per the same element-type set.
         macro_rules! l {
             ($T:ty, $mk:expr) => {
                 r.try_get::<_, Option<Vec<Option<$T>>>>(col)
@@ -785,14 +645,6 @@ impl crate::source::value_checksum::CellSource for PgCellSource<'_> {
 }
 
 /// Microseconds since midnight, truncating sub-microsecond nanos.
-///
-/// Pulled out of the `Time64` arm because it is the only ARITHMETIC in this
-/// mapper, and arithmetic is where an operator swap hides in plain sight: the
-/// `*`, `+` and `/` here carried six standing baseline entries with nothing able
-/// to tell them apart. Identical expression to the MySQL and SQL Server mappers —
-/// the same six mutants survived in all THREE engines, each for the same reason:
-/// no unit test, or a fixture at midnight, where `0 * n`, `0 + n` and `0 / n` are
-/// indistinguishable.
 fn naive_time_to_micros(t: chrono::NaiveTime) -> i64 {
     t.num_seconds_from_midnight() as i64 * 1_000_000 + t.nanosecond() as i64 / 1_000
 }
@@ -805,12 +657,6 @@ fn build_array(
     column: &str,
     max_value_bytes: Option<usize>,
 ) -> Result<Arc<dyn Array>> {
-    // Dispatch on the schema's resolved TARGET type — the single decision site.
-    // `pg_type` only chooses *how* to read the wire value (which `FromSql`),
-    // never *what* array to build, so the produced array always matches the
-    // schema field by construction. (The old dispatch-on-`pg_type` path was a
-    // second type-decision site that re-derived the Arrow type and could drift
-    // from the schema on overrides; slice A collapses it.)
     match target_type {
         DataType::Boolean => {
             let mut b = BooleanBuilder::with_capacity(rows.len());
@@ -834,7 +680,6 @@ fn build_array(
             Ok(Arc::new(b.finish()))
         }
         DataType::Int64 => {
-            // Any integer wire width (and OID) widens losslessly to i64.
             let mut b = Int64Builder::with_capacity(rows.len());
             for row in rows {
                 b.append_option(pg_int_cell::<i64>(row, col_idx, "int8")?);
@@ -855,7 +700,6 @@ fn build_array(
             }
             Ok(Arc::new(b.finish()))
         }
-        // Exact decimal — precision/scale come from the resolved target.
         DataType::Decimal128(p, s) => pg_numeric_to_decimal128(*p, *s, col_idx, rows),
         DataType::Decimal256(p, s) => pg_numeric_to_decimal256(*p, *s, col_idx, rows),
         DataType::Binary => {
@@ -863,9 +707,6 @@ fn build_array(
             for row in rows {
                 match pg_cell::<Vec<u8>>(row, col_idx, "bytes")? {
                     Some(v) => {
-                        // Pre-allocation ceiling: the driver copy (`Vec<u8>`) is
-                        // unavoidable, but bail before it is appended so the
-                        // Arrow buffer never grows to hold the oversized cell.
                         value_within_ceiling(column, v.len(), max_value_bytes)?;
                         b.append_value(&v);
                     }
@@ -904,9 +745,6 @@ fn build_array(
             }
             Ok(Arc::new(b.finish()))
         }
-        // Read by wire type — TIMESTAMPTZ as an instant, TIMESTAMP as wall-clock;
-        // the micros are identical, the UTC tag comes from the target type
-        // (roadmap §13: TIMESTAMPTZ carries isAdjustedToUTC=true).
         DataType::Timestamp(_, tz) => {
             let mut b = TimestampMicrosecondBuilder::with_capacity(rows.len());
             if *pg_type == Type::TIMESTAMPTZ {
@@ -936,8 +774,6 @@ fn build_array(
                 None => Arc::new(arr),
             })
         }
-        // UUID → 16-byte FixedSizeBinary (+ the `arrow.uuid` extension attached
-        // upstream lets parquet-rs emit native `LogicalType::Uuid`).
         DataType::FixedSizeBinary(16) => {
             let mut b = FixedSizeBinaryBuilder::with_capacity(rows.len(), 16);
             for row in rows {
@@ -950,9 +786,6 @@ fn build_array(
             }
             Ok(Arc::new(b.finish()))
         }
-        // Utf8 target: several wire types render to text. The read is chosen by
-        // `pg_type`, so this is where `col: string` overrides land (numeric/uuid
-        // → text) alongside the natural text/json/enum/interval columns.
         DataType::Utf8 => build_pg_text_array(pg_type, col_idx, rows, column, max_value_bytes),
         DataType::List(_) => build_pg_list_array(target_type, col_idx, rows),
         other => crate::rivet_bail!(
@@ -963,11 +796,7 @@ fn build_array(
     }
 }
 
-/// Build a `Utf8` array from whichever PostgreSQL wire type the schema resolved
-/// to text: the natural text types, JSON, an enum, an interval, or a numeric /
-/// uuid column an operator retyped to `string` via a `columns:` override. Bails
-/// on a wire type with no text rendering (fail-loud, slice A) instead of the old
-/// silent `try_get::<String>` → null.
+/// Build a `Utf8` array from whichever PostgreSQL wire type the schema resolved to text.
 fn build_pg_text_array(
     pg_type: &Type,
     col_idx: usize,
@@ -979,7 +808,6 @@ fn build_pg_text_array(
     match *pg_type {
         Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME => {
             for row in rows {
-                // Borrowed `&str` (zero-copy); invalid UTF-8 is a named refusal, not a panic.
                 match pg_cell::<&str>(row, col_idx, "string")? {
                     Some(s) => {
                         value_within_ceiling(column, s.len(), max_value_bytes)?;
@@ -989,10 +817,6 @@ fn build_pg_text_array(
                 }
             }
         }
-        // `postgres` rejects `String` for these OIDs. Read the wire payload as
-        // raw source text (`PgJsonRawText`) instead of round-tripping through
-        // `serde_json::Value`, which mangled high-precision numbers (via f64)
-        // and normalised `json` whitespace.
         Type::JSON | Type::JSONB => {
             for row in rows {
                 match row.try_get::<_, Option<PgJsonRawText<'_>>>(col_idx)? {
@@ -1004,14 +828,12 @@ fn build_pg_text_array(
                 }
             }
         }
-        // `numeric: string` override — exact text, never via float.
         Type::NUMERIC => {
             for row in rows {
                 let val = pg_numeric_optional_utf8_string(row, col_idx)?;
                 b.append_option(val.as_deref());
             }
         }
-        // `uuid: string` override — canonical hyphenated text.
         Type::UUID => {
             for row in rows {
                 match row.try_get::<_, Option<PgUuidBytes>>(col_idx)? {
@@ -1022,7 +844,6 @@ fn build_pg_text_array(
                 }
             }
         }
-        // INTERVAL → ISO 8601 (Arrow Interval(MonthDayNano) is not Parquet-writable).
         Type::INTERVAL => {
             for row in rows {
                 match pg_cell::<PgInterval>(row, col_idx, "string")? {
@@ -1033,7 +854,6 @@ fn build_pg_text_array(
                 }
             }
         }
-        // Enum labels arrive as binary; read as UTF-8.
         _ if matches!(pg_type.kind(), Kind::Enum(_)) => {
             for row in rows {
                 match pg_cell::<AnyAsString>(row, col_idx, "string")? {
@@ -1052,10 +872,7 @@ fn build_pg_text_array(
     Ok(Arc::new(b.finish()))
 }
 
-/// A PostgreSQL array cell failed to decode into a 1-D `Vec<Option<T>>` — almost
-/// always a MULTI-dimensional value in a `x[]` column (the OID does not encode
-/// dimensionality). Fail loud, naming the column and the fix, rather than the
-/// old `.ok().flatten()` that wrote a silent whole-cell NULL.
+/// A PostgreSQL array cell failed to decode into a 1-D `Vec<Option<T>>`.
 fn pg_array_decode_error(rows: &[Row], col_idx: usize, e: &postgres::Error) -> anyhow::Error {
     let col = rows
         .first()
@@ -1068,7 +885,7 @@ fn pg_array_decode_error(rows: &[Row], col_idx: usize, e: &postgres::Error) -> a
     )
 }
 
-/// The refusal text for an array cell that does not decode: names the column, the causes and the query-side remedy.
+/// The refusal text for an array cell that does not decode.
 fn array_decode_message(col: &str, e: &dyn std::fmt::Display) -> String {
     format!(
         "column '{col}': a PostgreSQL array value could not be decoded as a one-dimensional \
@@ -1082,11 +899,6 @@ fn array_decode_message(col: &str, e: &dyn std::fmt::Display) -> String {
 }
 
 /// Build an Arrow `ListArray` from a PostgreSQL array column.
-///
-/// Dispatches to `Vec<T>` deserialization based on the Arrow element type.
-/// Supports: bool, int16/32/64, float32/64, text. A decode error (e.g. a
-/// multi-dimensional value) FAILS LOUD via [`pg_array_decode_error`] rather than
-/// silently NULLing the cell; unsupported element types bail in the match tail.
 fn build_pg_list_array(
     target_type: &DataType,
     col_idx: usize,
@@ -1101,18 +913,6 @@ fn build_pg_list_array(
         );
     };
 
-    // PG arrays can legally contain NULL elements (`ARRAY[1, NULL, 3]`); the
-    // `Vec<Option<T>>` element type below carries those inner NULLs into the
-    // Arrow `ListBuilder`.
-    //
-    // But a decode ERROR must NOT be conflated with a NULL cell. The `postgres`
-    // crate's `Vec<Option<T>>` deserializer is ONE-DIMENSIONAL: a legal
-    // MULTI-dimensional value (`'{{1,2},{3,4}}'` — the OID `_int4` is shared by
-    // `integer[]` and `integer[][]`, so a 2-D value routes here) fails with
-    // "array contains too many dimensions". Swallowing that Err via
-    // `.ok().flatten()` wrote a WHOLE-CELL NULL — silent data loss the value-
-    // checksum can't catch (its side reads the same `try_get`). So match `Err`
-    // explicitly and FAIL LOUD, naming the fix (Arrow List is 1-D — cast to text).
     macro_rules! list_of {
         ($T:ty, $Builder:ty) => {{
             let mut lb = ListBuilder::new(<$Builder>::new());
@@ -1232,18 +1032,7 @@ fn build_pg_list_array(
     }
 }
 
-// ─── NUMERIC → Decimal128 / Decimal256 ───────────────────────────────────────
-
 /// Decode a single `NUMERIC` cell to a scaled `i128` for Arrow `Decimal128`.
-///
-/// The driver transmits `numeric` columns in Postgres wire binary (`numeric_recv`).
-/// We decode exactly (via [`crate::source::pg_numeric_wire`]), then stringify for
-/// [`crate::types::decimal::decimal_str_to_scaled_i128`] — never through `f64`.
-/// A trivial `Utf8` fallback remains for unconventional cast-to-text callers.
-/// Read one PG `NUMERIC` cell to its exact plain-text form (e.g. `"123.45"`),
-/// decoding the wire binary (`numeric_recv`) without `f64`. `None` for SQL NULL.
-/// Shared by the Decimal128 (i128) and Decimal256 (i256) scaling paths so the
-/// wire-read isn't duplicated.
 fn pg_numeric_optional_plain(row: &Row, col_idx: usize) -> Result<Option<String>> {
     match row.try_get::<_, Option<PgNumericWire<'_>>>(col_idx) {
         Ok(Some(wire)) => match numeric_wire_normalized_plain(wire.0) {
@@ -1363,45 +1152,21 @@ fn pg_numeric_to_decimal256(
 mod interval_render_tests {
     use super::pg_interval_to_iso8601;
 
-    /// `pg_interval_to_iso8601` is a pure renderer with seven arithmetic steps
-    /// and, until now, no direct test — it was reachable only through a live
-    /// PostgreSQL export, which is why the mutation baseline carried seven
-    /// operator survivors for it (and why this 1000-line file had no test module
-    /// at all).
-    ///
-    /// Every component is chosen so no two operators agree: months=25 makes
-    /// `months / 12` (2) differ from `months * 12` (300) and `months % 12` (1)
-    /// differ from every other combination, and the microsecond value decomposes
-    /// into four DISTINCT non-zero fields (1h 2m 3s 456789µs) so each successive
-    /// `/` and `%` is observable on its own. The obvious fixture — a whole
-    /// number of hours — collapses three of them to zero.
+    /// `pg_interval_to_iso8601` is a pure renderer with seven arithmetic steps and, until now, no direct test.
     #[test]
     fn interval_render_pins_every_arithmetic_step() {
-        // 25 months = 2Y1M; 5 days; 3_723_456_789 µs = 1H 2M 3.456789S
         assert_eq!(
             pg_interval_to_iso8601(25, 5, 3_723_456_789),
             "P2Y1M5DT1H2M3.456789S"
         );
-        // The sign rides on each time component, and the magnitudes are
-        // unchanged — `unsigned_abs` before the division, not after.
         assert_eq!(
             pg_interval_to_iso8601(25, 5, -3_723_456_789),
             "P2Y1M5DT-1H-2M-3.456789S"
         );
-        // A sub-second-only interval: seconds is 0 but the fraction must still
-        // print, so the `us != 0` arm cannot be folded into the `sec != 0` one.
         assert_eq!(pg_interval_to_iso8601(0, 0, 456_789), "PT0.456789S");
-        // Whole seconds with no fraction take the other arm.
         assert_eq!(pg_interval_to_iso8601(0, 0, 3_000_000), "PT3S");
-        // Exactly one hour: minutes and seconds are zero, and the trailing "0S"
-        // is suppressed because h is non-zero.
         assert_eq!(pg_interval_to_iso8601(0, 0, 3_600_000_000), "PT1H");
-        // Nothing at all still renders a valid ISO-8601 duration.
         assert_eq!(pg_interval_to_iso8601(0, 0, 0), "PT0S");
-        // Months that are a whole number of years drop the month field — and
-        // with no time component at all the `T` section is omitted entirely,
-        // which "P2Y" expresses correctly. (The "T0S" fallback fires only when
-        // NOTHING was written, i.e. the string is still bare "P".)
         assert_eq!(pg_interval_to_iso8601(24, 0, 0), "P2Y");
     }
 }
@@ -1412,10 +1177,6 @@ mod decimal_override_tests {
     use postgres::types::{FromSql, Type};
 
     /// A `decimal` override on a PG integer column reads the integer exactly.
-    ///
-    /// Before, only text fell back, so an INT2/INT4/INT8 cell under a decimal
-    /// override matched nothing and became NULL — the whole column, exit 0, both
-    /// checksum sides agreeing. Wire bytes are hand-built big-endian integers.
     #[test]
     fn an_integer_column_under_a_decimal_override_reads_its_value() {
         for ty in [
@@ -1545,11 +1306,6 @@ mod temporal_refusal_tests {
     use postgres::types::{FromSql, Type};
 
     /// PostgreSQL's legal `time '24:00:00'` is refused, not wrapped to midnight.
-    ///
-    /// The wire value is hand-built from the protocol (i64 big-endian micros since
-    /// midnight), independent of any rivet encoder. The driver's own `NaiveTime`
-    /// decode is pinned beside it: it returns 00:00:00 for the same bytes, which is
-    /// the silent 24h error the batch path used to write.
     #[test]
     fn a_time_of_24_00_is_refused_not_wrapped_to_midnight() {
         let raw = 86_400_000_000i64.to_be_bytes();
@@ -1569,11 +1325,6 @@ mod temporal_refusal_tests {
     }
 
     /// No temporal column is read with the PANICKING `Row::get`.
-    ///
-    /// `get` turns a decode error (`infinity` on a plain `timestamp`, which chrono
-    /// cannot hold) into a process panic, exit 101, with no summary or ledger
-    /// finalize; `try_get` lets the export refuse with a coded error. A `Row` cannot
-    /// be built offline, so this reads the product source itself.
     #[test]
     fn no_temporal_column_is_read_with_panicking_get() {
         let src = include_str!("arrow_convert.rs");
@@ -1645,26 +1396,14 @@ mod time_arithmetic_tests {
     use chrono::NaiveTime;
 
     /// Pins every arithmetic step of the `time` conversion.
-    ///
-    /// Deliberately no zeros. At 00:00:00.000000 the `*`, `+` and `/` in that
-    /// expression all yield 0, so a midnight fixture cannot tell the three
-    /// operators apart — which is exactly why six operator mutants stood in the
-    /// baseline here, and in the MySQL and SQL Server mappers, which carry the
-    /// identical expression. Third engine, same shape, same fix.
-    ///
-    /// The expectations are computed outside this codebase, not read back from a
-    /// run: 01:02:03 is 3723 seconds, and .456789 s is 456_789 microseconds.
     #[test]
     fn naive_time_to_micros_pins_every_arithmetic_step() {
         let t = NaiveTime::from_hms_nano_opt(1, 2, 3, 456_789_000).unwrap();
         assert_eq!(naive_time_to_micros(t), 3723 * 1_000_000 + 456_789);
 
-        // Sub-microsecond nanos TRUNCATE, they do not round: 999 ns is 0 us.
         let t = NaiveTime::from_hms_nano_opt(0, 0, 1, 999).unwrap();
         assert_eq!(naive_time_to_micros(t), 1_000_000);
 
-        // The last representable instant of the day, so a `*`/`+` swap cannot
-        // coincide with the right answer by accident.
         let t = NaiveTime::from_hms_nano_opt(23, 59, 59, 999_999_000).unwrap();
         assert_eq!(naive_time_to_micros(t), 86_399 * 1_000_000 + 999_999);
     }
@@ -1677,13 +1416,6 @@ mod type_map_tests {
     use postgres::types::Type;
 
     /// Every arm of `pg_type_to_rivet`, in one table.
-    ///
-    /// The mutation baseline carried NINETEEN "delete match arm" survivors for
-    /// this function: deleting an arm drops that type to the `_` fallback
-    /// (`Unsupported`), which nothing noticed because the mapping was only ever
-    /// exercised end-to-end through a live export. A table test makes each arm
-    /// individually load-bearing — remove one and exactly one row fails, naming
-    /// the type.
     #[test]
     fn every_pg_type_maps_to_its_declared_rivet_type() {
         let cases: &[(Type, RivetType)] = &[
@@ -1691,7 +1423,6 @@ mod type_map_tests {
             (Type::INT2, RivetType::Int16),
             (Type::INT4, RivetType::Int32),
             (Type::INT8, RivetType::Int64),
-            // OID is u32; Int64 is the safe widening the arm documents.
             (Type::OID, RivetType::Int64),
             (Type::FLOAT4, RivetType::Float32),
             (Type::FLOAT8, RivetType::Float64),
@@ -1722,9 +1453,7 @@ mod type_map_tests {
         }
     }
 
-    /// The two timestamp arms differ ONLY in the timezone field, which is the
-    /// whole point (roadmap §13: TIMESTAMPTZ carries UTC semantics into Arrow).
-    /// A test that checked only the variant would let the arms be swapped.
+    /// The two timestamp arms differ ONLY in the timezone field, which is the whole point (roadmap §13.
     #[test]
     fn timestamptz_carries_utc_and_timestamp_does_not() {
         match pg_type_to_rivet(&Type::TIMESTAMP) {
@@ -1743,9 +1472,7 @@ mod type_map_tests {
         }
     }
 
-    /// NUMERIC without declared precision is Unsupported ON PURPOSE, and the
-    /// reason must stay actionable: the wire protocol carries no atttypmod, so
-    /// the operator needs to be told the two ways out.
+    /// NUMERIC without declared precision is Unsupported ON PURPOSE, and the reason must stay actionable.
     #[test]
     fn bare_numeric_is_unsupported_with_an_actionable_reason() {
         match pg_type_to_rivet(&Type::NUMERIC) {
@@ -1766,32 +1493,17 @@ mod type_map_tests {
 mod numeric_string_path_tests {
     use super::numeric_raw_to_optional_decimal_text;
 
-    /// PostgreSQL `numeric` binary header, built from the wire spec by hand —
-    /// NOT through rivet's own encoder, so the fixture is an independent oracle.
-    /// Layout: ndigits(u16), weight(i16), sign(u16), dscale(u16), then digits.
+    /// PostgreSQL `numeric` binary header, built from the wire spec by hand.
     fn wire(sign: u16) -> Vec<u8> {
         let mut v = Vec::new();
-        v.extend_from_slice(&0u16.to_be_bytes()); // ndigits
-        v.extend_from_slice(&0i16.to_be_bytes()); // weight
+        v.extend_from_slice(&0u16.to_be_bytes());
+        v.extend_from_slice(&0i16.to_be_bytes());
         v.extend_from_slice(&sign.to_be_bytes());
-        v.extend_from_slice(&0u16.to_be_bytes()); // dscale
+        v.extend_from_slice(&0u16.to_be_bytes());
         v
     }
 
-    /// A `columns: { c: string }` override on a PG `numeric` must carry the three
-    /// non-finite values as text, not degrade them to NULL.
-    ///
-    /// They have no decimal literal, so the shared wire decoder returns None for
-    /// them — correct for the Decimal path, which turns that into a loud error
-    /// ("unsupported NaN/infinity payload"). The STRING path inherited the same
-    /// None and fell through to a `from_utf8` over the BINARY header, which fails,
-    /// yielding a null indistinguishable from a real one. Text loses nothing here,
-    /// so nulling was the one avoidable outcome — and the asymmetry meant the same
-    /// column exported loudly-wrong under one config and silently-empty under
-    /// another.
-    ///
-    /// Expected strings are PostgreSQL's own spellings, hard-coded rather than
-    /// derived from anything under test.
+    /// A `columns: { c: string }` override on a PG `numeric` must carry the three non-finite values as text, not degrade them to NULL.
     #[test]
     fn a_string_override_carries_nan_and_infinity_instead_of_nulling_them() {
         for (sign, expected) in [
@@ -1808,11 +1520,9 @@ mod numeric_string_path_tests {
         }
     }
 
-    /// The finite path is untouched, and a genuinely undecodable payload still
-    /// yields None rather than a bogus string.
+    /// The finite path is untouched, and a genuinely undecodable payload still yields None rather than a bogus string.
     #[test]
     fn finite_values_are_unaffected_and_garbage_still_yields_none() {
-        // ndigits=1, weight=0, sign=positive, dscale=0, digit=1 -> "1"
         let mut finite = Vec::new();
         finite.extend_from_slice(&1u16.to_be_bytes());
         finite.extend_from_slice(&0i16.to_be_bytes());
@@ -1867,8 +1577,7 @@ mod renderer_twins {
     }
 
     #[test]
-    /// Strict known divergence: ADR-0038 divergence: pg_interval_to_iso8601 keeps six fraction digits (PT0.500000S), iso8601_duration trims them (PT0.5S); unified by the PostgreSQL step of the migration
-    /// Passes while it diverges; when the step unifies it, this fails ("did not panic") and flips to a plain test.
+    /// Strict known divergence: ADR-0038 divergence.
     #[should_panic(expected = "assertion")]
     fn pg_interval_fraction_matches_the_canonical_duration() {
         for &(m, d, us) in &[(0, 0, 500_000), (0, 0, -1_500_000), (14, 3, 14_706_789_000)] {

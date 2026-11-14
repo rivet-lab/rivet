@@ -5,7 +5,7 @@ fn is_trail(b: u8) -> bool {
     matches!(b, 0x30..=0x39 | 0x40..=0x7e)
 }
 
-/// What the server folds to an ASCII letter: code point and letter, the `folds` of the statement-truth corpus header on 8.0.46 and 8.4.13.
+/// What the server folds to an ASCII letter.
 pub(crate) const FOLDED_TO_ASCII: [(u32, u8); 2] = [(0x0130, b'i'), (0x212A, b'k')];
 
 /// Whether a non-ASCII character can stand for the letter `c`.
@@ -53,7 +53,7 @@ fn folds_inside(name: &str, text: &[u8]) -> bool {
     false
 }
 
-/// The byte spelling of identifiers in the client character set of a statement: what decides which byte sequences stand for the letters the server folds.
+/// The byte spelling of identifiers in the client character set of a statement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Spelling {
     Utf8,
@@ -98,7 +98,7 @@ const PLAIN_COLLATIONS: &[(u16, u16)] = &[
 ];
 
 impl Spelling {
-    /// The spelling of the client character set a collation id names: `Unknown` for an id nothing is known of, which tries every spelling.
+    /// The spelling of the client character set a collation id names.
     pub(crate) fn of_collation(id: Option<u16>) -> Self {
         match id {
             None => Self::Unknown,
@@ -129,7 +129,7 @@ impl Spelling {
 
 const BYTE_BASE: u32 = 0xF700;
 
-/// Statement bytes as text that keeps every byte: UTF-8 text as it is, anything else with each byte from 0x80 up as one private-use character (`bytes_of` undoes it, and the flag says which of the two was made).
+/// Statement bytes as text that keeps every byte.
 pub(crate) fn lossless_text(raw: &[u8], spelling: Spelling) -> (String, bool) {
     if spelling.is_utf8_text()
         && let Ok(text) = std::str::from_utf8(raw)
@@ -165,7 +165,7 @@ fn bytes_of(text: &str, byte_per_char: bool) -> Vec<u8> {
     out
 }
 
-/// The name as the server compares it on a server that folds: ASCII lower case, with each spelling of a folded letter in this client character set replaced by the letter, every other byte kept.
+/// The name as the server compares it on a server that folds.
 pub(crate) fn folded(name: &str, byte_per_char: bool, spelling: Spelling) -> String {
     let bytes = bytes_of(name, byte_per_char);
     let spellings = spelling.spellings();
@@ -470,7 +470,7 @@ mod tests {
         }
     }
 
-    /// A multibyte character set spells a folded letter in its own bytes; the same bytes in another set are not that letter.
+    /// A multibyte character set spells a folded letter in its own bytes.
     #[test]
     fn each_character_set_folds_only_its_own_spelling() {
         let dotted_i = 0x0130;

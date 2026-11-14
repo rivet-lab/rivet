@@ -143,7 +143,7 @@ fn mixed_refusal(collection: &str, brackets: &BTreeSet<u8>) -> anyhow::Error {
     ))
 }
 
-/// Whether a `load:` block's `pk` keys a Mongo table's view: `auto` resolves to the source key `_id`, columns key it, `none` does not.
+/// Whether a `load:` block's `pk` keys a Mongo table's view.
 fn pk_keys_the_view(pk: &crate::config::load::KeyColumns) -> bool {
     use crate::config::load::KeyColumns;
     match pk {
