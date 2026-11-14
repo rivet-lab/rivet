@@ -59,8 +59,18 @@ ISLAND_GATE = "release-oracle-island"
 REDUCED_GATE = "release-oracle"
 #: The verdict of a run whose tree (HEAD or a tracked file) changed between its first stage and its report.
 TREE_MOVED = "TREE-MOVED"
+#: The two machines one gate sha is graded on (`--half`); each writes its own record kind, `half_gate(half)`.
+HOSTED, DEVBOX = "hosted", "devbox"
+HALVES = (HOSTED, DEVBOX)
+
+
+def half_gate(half: str) -> str:
+    """The record kind of one half of the full gate."""
+    return f"{FULL_GATE}-{half}"
+
+
 #: The gate kinds a tag rests on: an env skip no `skip_allow` entry excuses is ungraded in each, at the gate and at the tag.
-TAG_GATES = (FULL_GATE, ISLAND_GATE)
+TAG_GATES = (FULL_GATE, ISLAND_GATE, *map(half_gate, HALVES))
 
 
 class Status(str, Enum):
