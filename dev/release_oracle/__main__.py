@@ -45,10 +45,11 @@ import tempfile
 import time
 from pathlib import Path
 
-from .core import GATE_FAILURES, Ledger, SkipCause, Status, binary_stamp, keep_failure_log, release_bin_env, engine_container, verify_no_invariant_violations, docker, have, record_stage_runs, remove_engine_containers, rivet, rivet_bin, run, run_lanes, sqlcmd, target_dir, verify_nextest_grading, HERE, ROOT
+from .core import DEVBOX, GATE_FAILURES, HALVES, HOSTED, Ledger, SkipCause, Status, binary_stamp, keep_failure_log, release_bin_env, engine_container, verify_no_invariant_violations, docker, have, record_stage_runs, remove_engine_containers, rivet, rivet_bin, run, run_lanes, sqlcmd, target_dir, verify_nextest_grading, HERE, ROOT
 from ..pytools.release import CANONICAL_CONFIG, ISLAND_GATE, binary_is_tree
 from ..pytools.shell import find_keg_tools, loopback_publish, mysql_client
 from . import seed_charset
+from .halves import half_seeds, stage_half
 from . import (
     bigquery,
     blessed_flow,
@@ -189,8 +190,8 @@ _ENV_FLAG_TABLE = {
 }
 
 
-def verify_seeded_recall(led: Ledger, enabled: bool) -> None:
-    """Seeded-defect recall (dev/seeded): every known bug class re-introduced must turn its catching cells red."""
+def verify_seeded_recall(led: Ledger, enabled: bool, half: str = "") -> None:
+    """Seeded-defect recall (dev/seeded): every known bug class re-introduced must turn its catching cells red; under `half`, the seeds halves.py places there."""
     if not enabled:
         led.skipped("-", "harness", "seeded_recall", "-",
                     "seeded-defect recall: not run (--with-seeded-recall, on in release-oracle-full); "
@@ -200,7 +201,17 @@ def verify_seeded_recall(led: Ledger, enabled: bool) -> None:
 
     from dev.seeded import recall as seeded
 
-    seeded.recall(led, seeded.parse_manifest(yaml.safe_load(seeded.MANIFEST.read_text())))
+    rows = seeded.parse_manifest(yaml.safe_load(seeded.MANIFEST.read_text()))
+    if not half:
+        seeded.recall(led, rows)
+        return
+    names = sorted({r.seed for r in rows})
+    mine = half_seeds(half, names)
+    if not mine:
+        led.skipped("-", "harness", "seeded_recall", "-",
+                    f"seeded-defect recall: no shard of halves.py is placed in the {half} half", cause=SkipCause.DESIGN)
+        return
+    seeded.recall(led, seeded.select(rows, ",".join(mine), ""), complete=mine == names)
 
 
 def verify_seeded_platform_rows(led: Ledger) -> None:
@@ -225,14 +236,16 @@ def gate_config(ns: argparse.Namespace) -> dict:
 
 
 def gate_kind(ns: argparse.Namespace, config: dict | None = None) -> str:
-    """The record kind of a run that gave nothing up (a clean build, no escape, the canonical configuration): `release-oracle-island` for `--island`, `release-oracle-full` with seeded recall on; else `release-oracle`."""
-    from .core import FULL_GATE, REDUCED_GATE
+    """The record kind of a run that gave nothing up (a clean build, no escape, the canonical configuration): `release-oracle-island` for `--island`, `release-oracle-full` (`-hosted` or `-devbox` under `--half`) with seeded recall on; else `release-oracle`."""
+    from .core import FULL_GATE, REDUCED_GATE, half_gate
     reduced = (ns.engines or ns.versions or ns.no_cloud or ns.latest_only or ns.no_clean or ns.fast_clean
                or ns.without_prev_release_comparison or ns.without_replica_topologies
                or (config or gate_config(ns)) != CANONICAL_CONFIG)
     if reduced:
         return REDUCED_GATE
-    return ISLAND_GATE if ns.island else FULL_GATE if ns.with_seeded_recall else REDUCED_GATE
+    if not ns.with_seeded_recall and not ns.island:
+        return REDUCED_GATE
+    return ISLAND_GATE if ns.island else half_gate(ns.half) if ns.half else FULL_GATE
 
 
 def _live_stage_takes_the_selector_self_test() -> None:
@@ -263,13 +276,14 @@ def _narrowed_run_has_no_tag_self_test(full_argv: list[str]) -> None:
 
     assert refusal(full_argv) is None, "the control record of a full gate must be accepted"
     assert refusal([*full_argv, "--engines", "mysql"]) is not None, "release.py accepts a run narrowed by --engines"
+    assert all(refusal([*full_argv, "--half", h]) is not None for h in HALVES), "release.py accepts one half as the whole gate"
 
 
 def _gate_kind_self_test() -> None:
     """Only `make release-oracle-full`'s and `make release-oracle-island`'s arguments make their record kind; each escape, a missing recall or a narrowed scope makes a run reduced."""
     import re
 
-    from .core import FULL_GATE, GRADING_KNOBS, REDUCED_GATE
+    from .core import FULL_GATE, GRADING_KNOBS, REDUCED_GATE, half_gate
     makefile = (ROOT / "Makefile").read_text()
 
     def argv_of(target: str) -> list[str]:
@@ -300,6 +314,11 @@ def _gate_kind_self_test() -> None:
             assert gate_kind(parse_args(argv)) == REDUCED_GATE, f"an empty state URL grades SQLite only and still reads as a {kind} run"
             os.environ["RIVET_GATE_STATE_URL"] = "postgresql://state.invalid/rivet"
             assert gate_config(parse_args([*argv, "--state-url", "postgresql://state.invalid/rivet"])) == CANONICAL_CONFIG
+        full = argv_of("release-oracle-full")
+        for half in HALVES:
+            assert gate_kind(parse_args([*full, "--half", half])) == half_gate(half), f"--half {half} does not write its own record kind"
+            assert gate_kind(parse_args([*full, "--half", half, "--engines", "postgres"])) == REDUCED_GATE, f"a narrowed {half} half reads as a half"
+        assert gate_kind(parse_args(["--half", HOSTED])) == REDUCED_GATE, "a half without seeded recall is no half of a full gate"
         _switch_is_recorded_knob_check(GRADING_KNOBS)
         _narrowed_run_has_no_tag_self_test(argv_of("release-oracle-full"))
         assert "--island" not in argv_of("release-oracle-full") and "--island" in argv_of("release-oracle-island")
@@ -822,6 +841,44 @@ def _stage_table_self_test() -> None:
     print(f"self-test ok: the stage table keeps every stage in order, measurement stages run alone; overlapping: {overlapping}")
 
 
+def _halves_self_test() -> None:
+    """Every per-run stage and every recall seed runs in exactly one half and the two halves with the island re-form the table; the placement check names a stage in no half, in a non-half, a seed lost or doubled."""
+    import yaml
+
+    from dev.seeded import recall as seeded
+
+    from .halves import SEED_SHARD_HALF, STAGE_HALF, problems
+
+    seeds = sorted({r.seed for r in seeded.parse_manifest(yaml.safe_load(seeded.MANIFEST.read_text()))})
+    assert seeds, "the seeded-recall manifest names no seed"
+    for argv in ([], ["--no-cloud"], ["--no-clean"]):
+        ns = parse_args(argv)
+        table = gate_stages(ns)
+        per_run = [st.name for st in selected_stages(ns, table)]
+        cuts = {h: [st.name for st in selected_stages(parse_args([*argv, "--half", h]), table)] for h in HALVES}
+        both = set(cuts[HOSTED]) & set(cuts[DEVBOX])
+        assert not both, f"a stage runs in both halves: {sorted(both)}"
+        assert sorted(cuts[HOSTED] + cuts[DEVBOX]) == sorted(per_run), \
+            f"the halves drop a stage: {sorted(set(per_run) - set(cuts[HOSTED]) - set(cuts[DEVBOX]))}"
+        assert all(cuts[h] == [n for n in per_run if n in cuts[h]] for h in HALVES), "a half does not keep the table's order"
+        island = [st.name for st in selected_stages(parse_args([*argv, "--island"]), table)]
+        assert sorted(cuts[HOSTED] + cuts[DEVBOX] + island) == sorted(st.name for st in table), "the halves and the island are not the whole table"
+    names = [st.name for st in selected_stages(parse_args([]), gate_stages(parse_args([])))]
+    assert not problems(names, seeds), problems(names, seeds)
+    assert REPLICA_STAGE in names and STAGE_HALF[REPLICA_STAGE] == DEVBOX, "the stage that reads replica topologies runs where the replicas are"
+    dropped = {k: v for k, v in STAGE_HALF.items() if k != names[0]}
+    assert any("neither half" in p for p in problems(names, seeds, dropped)), "a stage dropped from the table goes unnoticed"
+    assert any("no gate stage" in p for p in problems(names, seeds, {**STAGE_HALF, "ghost": HOSTED})), "a row naming no stage goes unnoticed"
+    assert any("no half" in p for p in problems(names, seeds, {**STAGE_HALF, names[0]: "both"})), "a stage placed in a non-half goes unnoticed"
+    assert any("no half" in p for p in problems(names, seeds, shard_half=(*SEED_SHARD_HALF, "both"))), "a shard placed in a non-half goes unnoticed"
+    assert problems(names, seeds, shard_half=()), "an empty shard table goes unnoticed"
+    assert not problems(names, seeds, shard_half=(HOSTED, DEVBOX, HOSTED, DEVBOX)), "a split shard table must be a partition"
+    assert not problems(names, seeds, shard_half=(HOSTED,) * 4), "every seed on one half must be a partition"
+    for h in HALVES:
+        assert half_seeds(h, seeds, (h,) * 4) == seeds and half_seeds(h, seeds, ("x",) * 4) == [], "a shard belongs to the half it names"
+    print(f"self-test ok: {len(names)} per-run stages and {len(seeds)} seeds each run in exactly one half; the halves and the island re-form the table")
+
+
 def _matrix_exit_code_self_test() -> None:
     """Every property matrix CLI exits 1 on a red cell and 2 when it graded none, and a new `property_*.py` entry point must be added to the table here."""
     import ast
@@ -899,6 +956,7 @@ def _stages_self_test() -> None:
     _first_red_self_test()
     _tree_identity_self_test()
     _gate_kind_self_test()
+    _halves_self_test()
     release_path.hygiene_self_test()
     property_no_silent_null.self_test()
     property_no_silent_null_grants.self_test()
@@ -1087,7 +1145,7 @@ def _self_test() -> int:
         "the start floor follows the run's mode"
     assert "led.close_known_red(known_red.ISLAND if ns.island else known_red.GATE)" in inspect.getsource(main), \
         "a full run closes the known reds its own lane owes, the island its own tier included"
-    assert "stand_profiles.preflight(replica=not (ns.island or ns.without_replica_topologies))" in inspect.getsource(main), \
+    assert "stand_profiles.preflight(replica=replica)" in inspect.getsource(main), \
         "the gate must run the stand preflight (profiles, replica topologies, stores) before any cell"
     assert inspect.getsource(main).count("stand_images.record_to_target()") == 2 and "stand_images.record_to_target()" in inspect.getsource(bring_up), \
         "the gate must record the stand's images at the start, after every bring-up and at the end"
@@ -1665,6 +1723,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "previous-release differential, field symptom replay, scale memory, flat RSS) and record a `release-oracle-island` "
              "verdict line; every other run leaves them out. A tag needs this record green for the same commit "
              "(`make release-oracle-island`).")
+    ap.add_argument(
+        "--half", choices=HALVES, default="",
+        help="run ONE half of the full gate (the stages and the seeded-recall shards dev/release_oracle/halves.py places "
+             "there) and record a `release-oracle-full-<half>` verdict line; no --half is the whole gate and its `release-oracle-full` line.")
+    ap.add_argument("--list-stages", action="store_true", help="print the stages and seeded-recall seeds this run would execute, then exit")
     ap.add_argument("--images-file", default="",
                     help="JSON file the gate records every running container's image and RepoDigest into "
                          "(default: release-oracle-images.json in the cargo target directory)")
@@ -1703,6 +1766,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--bless-gifs", action="store_true",
                     help="re-capture docs/gifs/surface.lock.json AFTER re-rendering the GIFs")
     ns = ap.parse_args(argv)
+    if ns.half and ns.island:
+        ap.error("--half and --island are two ways to split the gate: the island is its own record")
     if ns.bless_local:
         ns.no_cloud = True
     return ns
@@ -1817,8 +1882,23 @@ def island_stages(table: Sequence[Stage]) -> list[Stage]:
 
 
 def selected_stages(ns: argparse.Namespace, table: Sequence[Stage]) -> list[Stage]:
-    """What this run executes of the table: only the island under `--island`, everything else otherwise."""
-    return [st for st in table if (ALONE in st.needs) is ns.island]
+    """What this run executes of the table: only the island under `--island`, else everything, of one half under `--half`."""
+    return [st for st in table if (ALONE in st.needs) is ns.island and (not ns.half or stage_half(st.name) == ns.half)]
+
+
+#: The stage that reads the replica topologies: the stand's replica check is a start condition only where it runs.
+REPLICA_STAGE = "replica read"
+
+
+def stage_listing(ns: argparse.Namespace) -> list[str]:
+    """What this run would execute: one `stage <name>` line per selected stage in table order, then its `seeds <n>` line."""
+    import yaml
+
+    from dev.seeded import recall as seeded
+
+    names = sorted({r.seed for r in seeded.parse_manifest(yaml.safe_load(seeded.MANIFEST.read_text()))})
+    seeds = len(half_seeds(ns.half, names)) if ns.half else len(names)
+    return [*(f"stage {st.name}" for st in selected_stages(ns, gate_stages(ns))), *([] if ns.island else [f"seeds {seeds}"])]
 
 
 def island_functions(table: Sequence[Stage]) -> frozenset[str]:
@@ -1868,7 +1948,7 @@ def gate_stages(ns: argparse.Namespace) -> list[Stage]:
         serial("flag surface", lambda led: blessed_flow.verify_flag_surface(led)),
         serial("run strict", lambda led: blessed_flow.verify_run_strict(led)),
         serial("gif currency", lambda led: gifs.verify_gif_currency(led, bless=ns.bless_gifs)),
-        serial("replica read", lambda led: scenarios.verify_replica_read(led)),
+        serial(REPLICA_STAGE, lambda led: scenarios.verify_replica_read(led)),
         serial("pool e2e", lambda led: scenarios.verify_pool_e2e(led)),
         serial("pool split", lambda led: scenarios.verify_pool_split(led)),
         serial("failed-run tail", lambda led: failure.verify_failed_run_tail(led)),
@@ -2347,10 +2427,10 @@ def _hold_gate_lock():
 
 def _warehouse_lines(ns: argparse.Namespace) -> list[str]:
     """Fill the BigQuery/GCS and Snowflake env (dev/pytools/warehouse_env.py): always on a release run, else as the branch's changes call for; the lines saying which."""
-    from .core import FULL_GATE
+    from .core import TAG_GATES
     from ..pytools import warehouse_env
 
-    if gate_kind(ns) in (FULL_GATE, ISLAND_GATE):
+    if gate_kind(ns) in TAG_GATES:
         return [warehouse_env.bigquery(), warehouse_env.snowflake()]
     paths = warehouse_env.changed_paths()
     return [warehouse_env.fill("bigquery", paths), warehouse_env.fill("snowflake", paths)]
@@ -2377,6 +2457,9 @@ def main(argv: list[str] | None = None) -> int:
             evidence.LEDGER = Path(d, "last-green.yaml")  # fixture cells never reach the real ledger
             return _self_test()
     ns = parse_args(argv)
+    if ns.list_stages:
+        print("\n".join(stage_listing(ns)))
+        return 0
     try:
         live_modules.engines_arg(ns.engines)
     except ValueError as e:
@@ -2405,7 +2488,9 @@ def main(argv: list[str] | None = None) -> int:
     from . import stand_profiles, stand_sweep
     for line in stand_sweep.sweep():
         print(f"  {line}")
-    refused = stand_profiles.preflight(replica=not (ns.island or ns.without_replica_topologies))
+    replica = not ns.without_replica_topologies and any(
+        st.name == REPLICA_STAGE for st in selected_stages(ns, gate_stages(ns)))
+    refused = stand_profiles.preflight(replica=replica)
     if refused:
         print(refused, file=sys.stderr)
         return 3
@@ -2535,14 +2620,18 @@ def main(argv: list[str] | None = None) -> int:
             keep_failure_log(work / "rivet-oracle.log", kept.name)
         if not ns.island:
             skip_census.verify_oracle_verdict_census(led, kept)
-            verify_seeded_recall(led, ns.with_seeded_recall)
+            verify_seeded_recall(led, ns.with_seeded_recall, ns.half)
         else:
             verify_seeded_platform_rows(led)
         verify_no_invariant_violations(led)
         # Only a FULL run can say a known red no longer fires, and only one writes a verdict line.
         full = not (ns.engines or ns.versions or ns.no_cloud or ns.latest_only)
         island = island_functions(table)
-        if full:
+        if full and ns.half:
+            led.skipped("-", "harness", "known_red_and_matrix_close", "-",
+                        f"known-red and matrix-row closing: the {ns.half} half cannot see the other half's cells; graded on a whole run",
+                        cause=SkipCause.DESIGN)
+        elif full:
             led.close_known_red(known_red.ISLAND if ns.island else known_red.GATE)
             # A bless run returns before most stages on purpose (run_scenarios), so it cannot grade the matrix.
             if not (ns.bless_local or ns.bless_cdc):
