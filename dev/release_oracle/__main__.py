@@ -548,6 +548,8 @@ def _skip_cause_self_test() -> None:
     rc, said, line, refusal = run_gate(stage_down(), core.FULL_GATE)
     assert rc == 1 and line["verdict"] == "NOT GRADED" and "NOT GRADED" in said and "RELEASE-READY" not in said, (rc, said)
     assert "INFRA" in said and "ENV 3" in said and line["skipped"] == 3, (said, line)
+    assert "    - postgres/-/verify_failed_run_tail/-: " in said and said.count("    - mongo/-/verify_failed_run_tail/-: ") == 2, \
+        "the NOT GRADED line names every cell it counts, whatever made it INFRA"
     assert line["skipped_env"] == [["verify_failed_run_tail", "mongo", "-"], ["verify_failed_run_tail", "postgres", "-"]], line
     assert refusal is not None and "NOT GRADED" in refusal, refusal
 
@@ -602,6 +604,9 @@ def _skip_cause_self_test() -> None:
     assert skip_allow.excused("fix_cells", "all", "a_fifth_fix_cell_that_self_skips_mysql", date(2026, 11, 3)) is None
     assert all(skip_allow.excused("fix_cells", "all", c, date(2026, 11, 3)) for c in skip_allow.FOLD_CELLS) and len(skip_allow.FOLD_CELLS) == 4
     assert all(skip_allow.excused("fix_cells", "all", c, date(2026, 11, 18)) is None for c in skip_allow.FOLD_CELLS), "an excuse ends on its day"
+    scale = [skip_allow.excused(regression._S_SCENARIO, e, regression._S_STORE, date(2026, 11, 14)) for e in ("postgres", "mysql", "mssql", "mongo")]
+    assert all(scale), "the scale-memory env skip the island records on every engine is excused today"
+    assert skip_allow.excused(regression._S_SCENARIO, "oracle", regression._S_STORE, date(2026, 11, 14)) is None, "the excuse names the four engines the stage loops"
 
     parent, child = Ledger(colour=False), Ledger(colour=False)
     child._buf = []
