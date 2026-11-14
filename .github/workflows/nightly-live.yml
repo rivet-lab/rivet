@@ -42,8 +42,7 @@ jobs:
   live-full:
     name: Full live suite (incl. content_load)
     needs: start
-    # Measured 57 min on 2026-10-02 (build 24, tests 27, the rest setup): ~1.6x.
-    timeout-minutes: 90
+    timeout-minutes: 180
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

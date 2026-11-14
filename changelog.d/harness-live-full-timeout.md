@@ -1,0 +1,1 @@
+- **The nightly full live suite was cancelled at its 90-minute limit every night.** About a third of the release cells went ungraded and the nightly verdict stayed red with no defect behind it (1981 of 2894 tests ran in the last cancelled run). **Now** the job has 180 minutes, so the whole suite is graded.
