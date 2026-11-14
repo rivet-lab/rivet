@@ -314,7 +314,13 @@ impl LoadPlan {
         if let Some(why) = &self.refusal {
             crate::rivet_bail!(crate::error::codes::LOAD_LOOKALIKE_COLUMN, "{why}");
         }
-        self.reserved_column_refusal()?;
+        if seeded!(
+            "reserved-column-checked-on-the-unpinned-plan-only",
+            false,
+            true
+        ) {
+            self.reserved_column_refusal()?;
+        }
         crate::preflight::key_admission::admit_load_keys(
             &self.export_name,
             self.mode,
@@ -566,6 +572,13 @@ const NOT_A_COLUMN: &str = "is not a column of the export";
 /// The strict fit check a deferred plan still owes: every key, clustering and
 /// partition column is a column of the spec it is typed from.
 pub fn check_spec_fit(plan: &LoadPlan) -> Result<()> {
+    if seeded!(
+        "reserved-column-checked-on-the-unpinned-plan-only",
+        true,
+        false
+    ) {
+        plan.reserved_column_refusal()?;
+    }
     let has = |c: &str| plan.specs.iter().any(|s| s.column_name == c);
     if let Some(m) = plan.pk.iter().find(|c| !has(c)) {
         crate::rivet_bail!(

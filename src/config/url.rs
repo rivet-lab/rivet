@@ -109,6 +109,11 @@ fn parse_request_url(url: &str) -> Option<reqwest::Url> {
 
 /// The lowercase host a request to `url` dials, IPv6 brackets removed; `None` when the URL does not parse or has no host.
 pub(crate) fn request_host(url: &str) -> Option<String> {
+    if seeded!("plaintext-gate-decides-by-text", true, false) {
+        url.split_once("://")?;
+        let host = host_port_span(url).split(':').next()?;
+        return (!host.is_empty()).then(|| host.to_ascii_lowercase());
+    }
     let parsed = parse_request_url(url)?;
     let host = parsed.host_str()?;
     Some(host.trim_matches(['[', ']']).to_ascii_lowercase())
@@ -129,7 +134,16 @@ pub(crate) fn require_https_or_loopback(
         );
     };
     let host = parsed.host_str().unwrap_or_default();
-    if parsed.scheme() == "http" && !super::is_loopback_host(host) {
+    if seeded!(
+        "plaintext-gate-decides-by-text",
+        url.trim_start()
+            .get(..7)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http://"))
+            && !host_is_loopback(url),
+        parsed.scheme() == "http"
+            && !super::is_loopback_host(host)
+            && seeded!("remote-plaintext-every-sink", sink.is_empty(), true)
+    ) {
         let shown = match parsed.port() {
             Some(port) => format!("{host}:{port}"),
             None => host.to_string(),

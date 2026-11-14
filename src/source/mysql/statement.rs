@@ -31,7 +31,12 @@ impl<'a> Tok<'a> {
                 quote: quote @ ('`' | '"'),
                 raw,
                 closed: true,
-            } => {
+            } if seeded!(
+                "statement-ansi-quoted-name-read-as-text",
+                *quote == '`',
+                true
+            ) =>
+            {
                 let inner = &raw[1..raw.len() - 1];
                 Some(inner.replace(&format!("{quote}{quote}"), &quote.to_string()))
             }
@@ -96,6 +101,13 @@ fn quote_end(sql: &str, start: usize, quote: char, mode: SqlMode) -> (usize, boo
 
 /// Whether `rest` opens a line comment: `#`, or `--` followed by whitespace, a control character or the end.
 fn line_comment_starts(rest: &str) -> bool {
+    if seeded!(
+        "statement-line-comment-read-as-text",
+        !rest.is_empty(),
+        false
+    ) {
+        return false;
+    }
     rest.starts_with('#')
         || rest.strip_prefix("--").is_some_and(|after| {
             after

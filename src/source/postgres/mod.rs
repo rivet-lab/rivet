@@ -83,7 +83,14 @@ pub(crate) fn prepare_fresh(
     sql: &str,
 ) -> std::result::Result<postgres::Statement, postgres::Error> {
     use rand::RngExt;
-    client.prepare(&fresh_text(sql, rand::rng().random::<u64>()))
+    client.prepare(&fresh_text(
+        sql,
+        seeded!(
+            "statement-described-by-another-read",
+            0,
+            rand::rng().random::<u64>()
+        ),
+    ))
 }
 
 /// `sql` followed by a comment carrying `nonce`.
@@ -669,7 +676,12 @@ impl super::Source for PostgresSource {
         if let Ok(Some(v)) = row.try_get::<_, Option<f64>>(0) {
             return Ok(Some(v.to_string()));
         }
-        if let Ok(Some(v)) = row.try_get::<_, Option<i16>>(0) {
+        let small = if seeded!("unreadable-probe-read-as-no-rows", false, true) {
+            row.try_get::<_, Option<i16>>(0)
+        } else {
+            Ok(None)
+        };
+        if let Ok(Some(v)) = small {
             return Ok(Some(v.to_string()));
         }
         if let Ok(Some(v)) = row.try_get::<_, Option<u32>>(0) {
@@ -701,6 +713,9 @@ impl super::Source for PostgresSource {
             row.try_get::<_, Option<arrow_convert::AnyAsString>>(0),
             Ok(None)
         ) {
+            return Ok(None);
+        }
+        if seeded!("unreadable-probe-read-as-no-rows", true, false) {
             return Ok(None);
         }
         crate::rivet_bail!(

@@ -2103,7 +2103,9 @@ fn whole_table_run_joins_the_log(
     changes: load::ObjectKind,
 ) -> bool {
     match kind {
-        load::ObjectKind::Table | load::ObjectKind::View => true,
+        load::ObjectKind::Table | load::ObjectKind::View => {
+            seeded!("whole-pass-replaces-the-base", !base_and_buffer, true)
+        }
         load::ObjectKind::Absent => !base_and_buffer && changes == load::ObjectKind::Table,
         load::ObjectKind::Other => false,
     }

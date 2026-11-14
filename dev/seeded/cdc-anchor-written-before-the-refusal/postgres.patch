@@ -1,5 +1,4 @@
 diff --git a/src/pipeline/cdc_release.rs b/src/pipeline/cdc_release.rs
-index 58a19a18..a275b860 100644
 --- a/src/pipeline/cdc_release.rs
 +++ b/src/pipeline/cdc_release.rs
 @@ -135,7 +135,7 @@ impl FirstRun {
@@ -12,18 +11,17 @@ index 58a19a18..a275b860 100644
          }
          match state.cdc_delivery_recorded(&self.export) {
 diff --git a/src/source/postgres/cdc.rs b/src/source/postgres/cdc.rs
-index eebc5fe4..79f687b2 100644
 --- a/src/source/postgres/cdc.rs
 +++ b/src/source/postgres/cdc.rs
-@@ -672,7 +672,6 @@ impl PgChangeStream {
-         let mut client = super::connect_client(conn_str, tls)?;
+@@ -695,7 +695,6 @@ impl PgChangeStream {
+         }
          // The one prerequisite check of a run, on the stream's own connection and before the
          // slot: its refusals carry rivet's `pg cdc:` prefix, so the setup hint is never prepended.
 -        Self::refuse_unmet_prerequisites_on(&mut client, configured_tables, mode, true)?;
          let mut bare_schema = HashMap::new();
          for cfg in configured_tables {
              if let Some(sch) = search_path_schema(&mut client, cfg)? {
-@@ -714,6 +713,7 @@ impl PgChangeStream {
+@@ -737,6 +736,7 @@ impl PgChangeStream {
                  )?;
              }
          }

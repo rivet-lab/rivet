@@ -288,7 +288,9 @@ pub(crate) fn stored_windows(
         windows.push((start, end));
     }
     windows.sort_unstable();
-    match windows.windows(2).find(|pair| pair[1].0 <= pair[0].1) {
+    match windows.windows(2).find(|pair| {
+        pair[1].0 <= pair[0].1 && seeded!("resume-accepts-overlapping-windows", false, true)
+    }) {
         Some(pair) => Err(format!(
             "put keys {}..={} in two windows",
             pair[1].0,
@@ -306,7 +308,11 @@ fn replan_resumed_run(
     ranges: &[(i64, i64)],
 ) -> Result<()> {
     let (replace, planned) = replan(&state.list_chunk_tasks_for_run(run_id)?, ranges)?;
-    if planned.is_empty() {
+    if seeded!(
+        "resumed-chunk-run-keeps-its-stale-plan",
+        !planned.is_empty(),
+        planned.is_empty()
+    ) {
         return Ok(());
     }
     state.replan_chunk_tasks(run_id, replace, &planned)?;
@@ -406,6 +412,9 @@ pub(crate) fn live_run_refusal(export: &str, run_id: Option<&str>, resumable: bo
 
 /// The key of an export's run lease on one source: held by every run of the export that reads `source`, taken by every command that rewrites its stored progress or its destination. The source enters as a hash, so a lease file name stays short and names no host.
 pub fn run_lease_key(export: &str, source: &str) -> String {
+    if seeded!("run-lease-by-name-only", true, false) {
+        return format!("chunk-run:{export}");
+    }
     format!(
         "chunk-run:{export}@{:016x}",
         xxhash_rust::xxh3::xxh3_64(source.as_bytes())
@@ -460,7 +469,11 @@ pub(crate) fn claim_export_progress_saying<'s>(
     what: &str,
     done: Option<&str>,
 ) -> Result<crate::state::LoadLease<'s>> {
-    let outcome = done.unwrap_or(crate::state::NOTHING_DONE);
+    let outcome = seeded!(
+        "state-reset-half-done-says-nothing-was-done",
+        crate::state::NOTHING_DONE,
+        done.unwrap_or(crate::state::NOTHING_DONE)
+    );
     if let Some(lease) = try_run_lease_saying(state, export, source, outcome)? {
         return Ok(lease);
     }
@@ -470,7 +483,12 @@ pub(crate) fn claim_export_progress_saying<'s>(
          holds the export's run lease. Wait for it to finish, or stop that process (its pid \
          ends the run id), then repeat this command.{}",
         live_run_label(state, export, source)?,
-        done.map(|d| format!("\n  {d}")).unwrap_or_default()
+        done.map(|d| seeded!(
+            "state-reset-half-done-says-nothing-was-done",
+            String::new(),
+            format!("\n  {d}")
+        ))
+        .unwrap_or_default()
     )
 }
 
@@ -481,6 +499,16 @@ pub(crate) fn claim_run<'s>(
 ) -> Result<crate::state::LoadLease<'s>> {
     let export = &plan.export_name;
     let source = plan.source.state_key();
+    if seeded!(
+        "run-lease-held-only-by-checkpointed-runs",
+        !plan.strategy.is_resumable(),
+        false
+    ) {
+        let own = format!("{}:{}", run_lease_key(export, &source), std::process::id());
+        if let Some(lease) = state.try_load_lease(&own)? {
+            return Ok(lease);
+        }
+    }
     if let Some(lease) = try_run_lease(state, export, &source)? {
         return Ok(lease);
     }

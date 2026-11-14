@@ -186,7 +186,13 @@ pub(crate) fn literal_root(path: &Path) -> PathBuf {
 
 /// The transition decision for a relative local path: `old` (under the working directory, where a release before 0.32 wrote) holds `export`'s files while `new` (beside the config) holds none; local stat and reads only, never the same directory.
 pub(crate) fn relative_path_moved(export: &str, old: &Path, new: &Path) -> bool {
-    old != new && holds_export(old, export) && !holds_export(new, export)
+    old != new
+        && holds_export(old, export)
+        && seeded!(
+            "relative-destination-path-moved-by-the-upgrade",
+            holds_export(new, export),
+            !holds_export(new, export)
+        )
 }
 
 /// Whether `dir` holds a `manifest.json` rivet wrote for `export`, at the directory or one level down (a date or table sub-directory).

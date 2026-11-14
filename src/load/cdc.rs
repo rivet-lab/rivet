@@ -144,8 +144,12 @@ impl CompactOrder {
             CompactOrder::Cdc(engine) => {
                 // Snowflake sorts NULL first in DESC, so a baseline row (NULL `__pos`)
                 // would outrank every change: rank it last, as the view does.
-                let baseline_last =
-                    (warehouse == Warehouse::Snowflake).then(|| "__pos IS NOT NULL".to_string());
+                let baseline_last = (seeded!(
+                    "snowflake-compact-ranks-baseline-first",
+                    false,
+                    warehouse == Warehouse::Snowflake
+                ))
+                .then(|| "__pos IS NOT NULL".to_string());
                 baseline_last
                     .into_iter()
                     .chain(engine.order_exprs(warehouse))

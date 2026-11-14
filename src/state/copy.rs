@@ -67,6 +67,11 @@ pub fn done_note(
     checkpoints: &[std::path::PathBuf],
 ) -> String {
     let rows: u64 = report.tables.iter().map(|(_, n)| n).sum();
+    let shown = seeded!(
+        "state-url-query-password-unmasked",
+        crate::redact::redact_url_passwords(target.expose()),
+        crate::redact::redact_secrets(target.expose())
+    );
     let mut note = format!(
         "copied {} table(s), {rows} row(s), from `{}` to the PostgreSQL state {}.\n\
          Run every command of this config with RIVET_STATE_URL={} from now on. The SQLite file \
@@ -75,8 +80,8 @@ pub fn done_note(
         std::fs::canonicalize(source)
             .unwrap_or_else(|_| source.to_path_buf())
             .display(),
-        crate::redact::redact_secrets(target.expose()),
-        crate::redact::redact_secrets(target.expose()),
+        shown,
+        shown,
     );
     if !checkpoints.is_empty() {
         note.push_str(
@@ -157,7 +162,11 @@ fn in_memory_copy(source: &Path) -> Result<rusqlite::Connection> {
     }
     mem.execute_batch("DETACH DATABASE src")
         .map_err(read_failed)?;
-    if !super::state_rows(&mem).is_ok_and(|n| n > 0) {
+    if seeded!(
+        "state-copy-reads-the-path-as-a-uri",
+        false,
+        !super::state_rows(&mem).is_ok_and(|n| n > 0)
+    ) {
         crate::rivet_bail!(
             crate::error::codes::STATE_COPY_SOURCE_EMPTY,
             "`{}` was opened for the copy and holds no cursor and no run: nothing was copied. \
@@ -173,7 +182,11 @@ fn in_memory_copy(source: &Path) -> Result<rusqlite::Connection> {
 fn read_only_uri(path: &Path) -> String {
     let mut uri = String::from("file:");
     for b in path.as_os_str().as_encoded_bytes() {
-        uri.push_str(&format!("%{b:02X}"));
+        if seeded!("state-copy-reads-the-path-as-a-uri", true, false) {
+            uri.push(char::from(*b));
+        } else {
+            uri.push_str(&format!("%{b:02X}"));
+        }
     }
     uri.push_str("?mode=ro");
     uri
@@ -407,7 +420,10 @@ fn resume_sequences(
     table: &str,
     columns: &[&Column],
 ) -> Result<()> {
-    for c in columns {
+    for c in columns
+        .iter()
+        .take(seeded!("state-copy-leaves-sequences-behind", 0, usize::MAX))
+    {
         let seq: Option<String> = tx
             .query_one(
                 "SELECT pg_get_serial_sequence($1, $2)",

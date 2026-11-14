@@ -1,5 +1,4 @@
 diff --git a/src/pipeline/cdc/sink.rs b/src/pipeline/cdc/sink.rs
-index a9815dfd..f793eef1 100644
 --- a/src/pipeline/cdc/sink.rs
 +++ b/src/pipeline/cdc/sink.rs
 @@ -1090,9 +1090,7 @@ fn flush(
@@ -23,7 +22,6 @@ index a9815dfd..f793eef1 100644
              r.into_error(&m.column_name, dt, overridden.contains(&m.column_name))
          };
 diff --git a/src/source/cdc/value.rs b/src/source/cdc/value.rs
-index de33279e..53ccd515 100644
 --- a/src/source/cdc/value.rs
 +++ b/src/source/cdc/value.rs
 @@ -977,12 +977,6 @@ fn hex_refusal(n: usize, digits: &str) -> String {
@@ -38,8 +36,8 @@ index de33279e..53ccd515 100644
 -
      /// Whether the fix wrote NULL over a held `input` date: the zero or partial date a MySQL column cannot hand on.
      pub(crate) fn nulled_a_date(&self, input: &RivetValue, out: &RivetValue) -> bool {
-         matches!(self, MysqlCellFix::ZeroDate | MysqlCellFix::TimestampEpoch)
-@@ -1036,13 +1030,7 @@ impl MysqlCellFix {
+         seeded!(
+@@ -1039,13 +1033,7 @@ impl MysqlCellFix {
              (MysqlCellFix::SetLabels(labels), V::UInt(u)) => set_labels(readable(labels)?, *u),
              (MysqlCellFix::TimeOfDay, V::TimeMicros(us)) if !crate::types::is_time_of_day(*us) => {
                  return Err(FixRefusal {
@@ -54,7 +52,7 @@ index de33279e..53ccd515 100644
                      code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
                  });
              }
-@@ -2437,19 +2425,8 @@ mod tests {
+@@ -2445,19 +2433,8 @@ mod tests {
          assert!(
              err.reason
                  .starts_with("mysql: TIME 838:59:59.000000 is outside 00:00..24:00")
@@ -77,10 +75,9 @@ index de33279e..53ccd515 100644
          assert_eq!(
              t.apply(&V::TimeMicros(1)).unwrap(),
 diff --git a/src/source/mysql/arrow_convert.rs b/src/source/mysql/arrow_convert.rs
-index 5b1cbe25..1546605f 100644
 --- a/src/source/mysql/arrow_convert.rs
 +++ b/src/source/mysql/arrow_convert.rs
-@@ -674,23 +674,15 @@ fn time_of_day_in_range(us: i64) -> Result<i64> {
+@@ -681,23 +681,15 @@ fn time_of_day_in_range(us: i64) -> Result<i64> {
      Ok(us)
  }
  
@@ -108,7 +105,6 @@ index 5b1cbe25..1546605f 100644
  fn fmt_micros_as_time(us: i64) -> String {
      let (sign, a) = if us.is_negative() {
 diff --git a/src/source/mysql/mod.rs b/src/source/mysql/mod.rs
-index 115de12c..47fd6d0f 100644
 --- a/src/source/mysql/mod.rs
 +++ b/src/source/mysql/mod.rs
 @@ -19,7 +19,7 @@

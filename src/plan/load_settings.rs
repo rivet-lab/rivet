@@ -166,7 +166,12 @@ pub(crate) fn cdc_layout(
         (_, Some(LayoutChoice::BaseBuffer)) if support != BaseSupport::Never => {
             CdcLayout::BaseAndBuffer
         }
-        (_, None) if support == BaseSupport::Default => CdcLayout::BaseAndBuffer,
+        (_, None)
+            if seeded!("snowflake-base-buffer-not-the-default", false, true)
+                && support == BaseSupport::Default =>
+        {
+            CdcLayout::BaseAndBuffer
+        }
         (LoadMode::Cdc, None) if support == BaseSupport::Derived => {
             match export.cdc.as_ref().and_then(|c| c.backfill.as_ref()) {
                 Some(_) => CdcLayout::BaseAndBuffer,

@@ -572,10 +572,16 @@ impl ManifestVerification {
 
     /// Turn the same bare absent-manifest verdict into the fatal `failure` of a delivery the state records.
     pub fn require_recorded_delivery(&mut self, prefix: &str, export: &str) {
-        self.require_manifest_with(Failure::RecordedDeliveryAbsent {
-            prefix: prefix.to_string(),
-            export: export.to_string(),
-        });
+        if seeded!(
+            "validate-reads-a-lost-delivery-as-never-delivered",
+            false,
+            true
+        ) {
+            self.require_manifest_with(Failure::RecordedDeliveryAbsent {
+                prefix: prefix.to_string(),
+                export: export.to_string(),
+            });
+        }
     }
 
     /// Whether this is the bare absent-manifest verdict: no manifest, no `_SUCCESS`, no other failure.

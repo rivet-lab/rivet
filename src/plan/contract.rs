@@ -353,7 +353,11 @@ impl ResolvedRunPlan {
             stream: self.stream(),
             schema: self.source.search_path(),
             population: crate::state::population_of(
-                crate::sql::row_set(self.query_template.as_deref().unwrap_or(&self.base_query)),
+                crate::sql::row_set(seeded!(
+                    "param-value-read-as-a-filter-edit",
+                    self.base_query.as_str(),
+                    self.query_template.as_deref().unwrap_or(&self.base_query)
+                )),
                 self.collection_incarnation.as_deref(),
             ),
             column: self.strategy.cursor_identity(),
@@ -364,9 +368,12 @@ impl ResolvedRunPlan {
                     .unwrap_or_else(|| self.destination.uri()),
                 format: self.format.label().into(),
             },
-            mode: self
-                .single_pass_of
-                .map_or(self.strategy.mode_label(), PagedMode::label),
+            mode: seeded!(
+                "single-pass-of-a-chunked-export-owned-by-full",
+                self.strategy.mode_label(),
+                self.single_pass_of
+                    .map_or(self.strategy.mode_label(), PagedMode::label)
+            ),
             continues_high_water: self.strategy.continues_stored_cursor(),
             resumable: self.strategy.is_resumable(),
             shape: self.run_shape(),

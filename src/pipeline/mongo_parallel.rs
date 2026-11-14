@@ -64,7 +64,11 @@ pub(crate) fn run_mongo_parallel(
         kp.chunk_size
     );
 
-    let stamp = super::summary::run_scoped_stamp(&summary.run_id, &plan.export_name);
+    let stamp = seeded!(
+        "part-named-by-the-clock",
+        chrono::Utc::now().format("%Y%m%d_%H%M%S_%3f").to_string(),
+        super::summary::run_scoped_stamp(&summary.run_id, &plan.export_name)
+    );
 
     let key_plan = IncrementalCursorPlan {
         primary_column: kp.key_column.clone(),
