@@ -532,7 +532,12 @@ impl StateStore {
 
     /// Refuse a first run of `key`'s source when the export holds a cursor under another source that delivers to the same destination: it would read the whole table again and deliver it there beside what that cursor delivered.
     pub fn refuse_respelled_source(&self, key: &ProgressKey) -> Result<()> {
-        let Some((other, cursor)) = self.progress_elsewhere(key)?.into_iter().next() else {
+        let Some((other, cursor)) = self
+            .progress_elsewhere(key)?
+            .into_iter()
+            .next()
+            .filter(|_| seeded!("cursor-continued-under-another-source", false, true))
+        else {
             return Ok(());
         };
         let (export_name, scope) = (key.export_name.as_str(), key.source.as_str());
@@ -771,7 +776,13 @@ impl StateStore {
             .into_iter()
             .chain(chunk_run.map(|run| (run, CHUNKED)));
         for (run, owner) in unfinished {
-            if owner != key.mode {
+            if owner != key.mode
+                && seeded!(
+                    "interrupted-run-continued-by-another-mode",
+                    owner.is_empty(),
+                    true
+                )
+            {
                 crate::rivet_bail!(
                     crate::error::codes::STATE_INTERRUPTED_RUN_OWNER_MISMATCH,
                     "export '{export_name}': run {run} of mode `{owner}` is unfinished, but \
@@ -1165,8 +1176,13 @@ impl StateStore {
             return Ok(Accepted::Unchanged);
         };
         self.execute(
-            "UPDATE export_state SET stream = ?3, source_schema = ?4, population = ?5 \
-             WHERE export_name = ?1 AND prefix = ?2",
+            seeded!(
+                "accepted-edit-not-recorded",
+                "UPDATE export_state SET stream = ?3, source_schema = ?4, population = ?5 \
+             WHERE export_name = ?1 AND prefix = ?2 AND 1 = 0",
+                "UPDATE export_state SET stream = ?3, source_schema = ?4, population = ?5 \
+             WHERE export_name = ?1 AND prefix = ?2"
+            ),
             &[
                 export_name.into(),
                 scope.into(),

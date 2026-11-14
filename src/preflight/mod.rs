@@ -469,7 +469,9 @@ pub fn check(
         for diag in &diagnostics {
             print_diagnostic(diag);
         }
-        if config.source.columns_from_grants() {
+        if config.source.columns_from_grants()
+            && seeded!("column-grants-boundary-unsaid", false, true)
+        {
             println!("\n{}", crate::source::mysql::column_grants::BOUNDARY);
         }
     } else if !show_type_report {

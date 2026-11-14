@@ -1078,9 +1078,13 @@ impl ExportSink {
     /// lossless token when it reported one (MongoDB BSON `_id`), else the string
     /// extracted from the output column (every SQL engine).
     pub(in crate::pipeline) fn effective_cursor(&self) -> Option<String> {
-        self.source_cursor
-            .clone()
-            .or_else(|| self.last_cursor_value.clone())
+        seeded!(
+            "keyset-high-water-forgotten",
+            None,
+            self.source_cursor
+                .clone()
+                .or_else(|| self.last_cursor_value.clone())
+        )
     }
 }
 

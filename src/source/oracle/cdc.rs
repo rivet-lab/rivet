@@ -1080,7 +1080,11 @@ impl OracleChangeStream {
             conn.execute(sql, &[]).ora()?;
         }
         let (_, con_name, con_dbid) = container(&conn)?;
-        let captured = vetted_tables(&conn, tables)?;
+        let captured_early = if seeded!("cdc-anchor-written-before-the-refusal", true, false) {
+            None
+        } else {
+            Some(vetted_tables(&conn, tables)?)
+        };
         let low_water = low_water_here(&conn)?;
         let identity = root_identity(&conn, con_name, con_dbid)?;
         let frontier = pin_frontier(&conn, low_water)?;
@@ -1095,6 +1099,10 @@ impl OracleChangeStream {
                 with_identity(&frontier.position(), &identity).save(checkpoint)?;
                 frontier
             }
+        };
+        let captured = match captured_early {
+            Some(captured) => captured,
+            None => vetted_tables(&conn, tables)?,
         };
         let mut stream = Self {
             conn,

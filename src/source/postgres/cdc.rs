@@ -682,7 +682,9 @@ impl PgChangeStream {
         let mut client = super::connect_client(conn_str, tls)?;
         // The one prerequisite check of a run, on the stream's own connection and before the
         // slot: its refusals carry rivet's `pg cdc:` prefix, so the setup hint is never prepended.
-        Self::refuse_unmet_prerequisites_on(&mut client, configured_tables, mode, true)?;
+        if seeded!("cdc-anchor-written-before-the-refusal", false, true) {
+            Self::refuse_unmet_prerequisites_on(&mut client, configured_tables, mode, true)?;
+        }
         let mut bare_schema = HashMap::new();
         for cfg in configured_tables {
             if let Some(sch) = search_path_schema(&mut client, cfg)? {
@@ -723,6 +725,9 @@ impl PgChangeStream {
                     &[&slot],
                 )?;
             }
+        }
+        if seeded!("cdc-anchor-written-before-the-refusal", true, false) {
+            Self::refuse_unmet_prerequisites_on(&mut client, configured_tables, mode, true)?;
         }
         // Snapshot the bound AFTER the slot exists, so a commit landing between
         // slot creation and this read is ≤ bound (captured this run, not lost

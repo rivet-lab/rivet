@@ -363,7 +363,9 @@ pub(crate) fn detect_and_generate_chunks(
     // NULL-keyed rows are excluded by `WHERE col BETWEEN min AND max` — refuse
     // rather than drop them silently.
     bail_if_null_keyed(src, base_query, chunk_column, export_name, source_type)?;
-    bail_if_fractional(src, base_query, chunk_column, export_name)?;
+    if seeded!("fractional-chunk-key-under-query", false, true) {
+        bail_if_fractional(src, base_query, chunk_column, export_name)?;
+    }
 
     // The parse is STRICT, deliberately not the float-tolerant `parse_scalar_i64`:
     // that one reads "998.75" as 998, and a max bound rounded DOWN drops every row

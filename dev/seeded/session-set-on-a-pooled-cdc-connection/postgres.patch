@@ -1,8 +1,6 @@
-diff --git a/src/source/postgres/cdc.rs b/src/source/postgres/cdc.rs
-index 60af90ac..1b4acfc0 100644
 --- a/src/source/postgres/cdc.rs
 +++ b/src/source/postgres/cdc.rs
-@@ -599,6 +599,10 @@ impl PgChangeStream {
+@@ -680,6 +680,10 @@ impl PgChangeStream {
      ) -> Result<Self> {
          // The batch dial: the plaintext gate, the forced-ssl connector, and a host:port-naming error.
          let mut client = super::connect_client(conn_str, tls)?;
@@ -12,4 +10,4 @@ index 60af90ac..1b4acfc0 100644
 +        )?;
          // The one prerequisite check of a run, on the stream's own connection and before the
          // slot: its refusals carry rivet's `pg cdc:` prefix, so the setup hint is never prepended.
-         Self::refuse_unmet_prerequisites_on(&mut client, configured_tables, mode, true)?;
+         if seeded!("cdc-anchor-written-before-the-refusal", false, true) {

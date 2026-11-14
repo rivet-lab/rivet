@@ -1,8 +1,7 @@
-diff --git a/src/pipeline/cdc/sink.rs b/src/pipeline/cdc/sink.rs
 --- a/src/pipeline/cdc/sink.rs
 +++ b/src/pipeline/cdc/sink.rs
-@@ -563,15 +563,16 @@
-                 yielded_this_pass += 1;
+@@ -618,15 +618,16 @@ pub(crate) fn run_to_files(
+                 yielded_this_pass += seeded!("cdc-drain-pass-count-pinned-at-zero", 0, 1);
                  txn_seq.stamp(&mut ev);
                  // The commit boundary is a property of the STREAM, not of any routed
 -                // table — record it for every event, whatever the routing filter does with
@@ -22,7 +21,7 @@ diff --git a/src/pipeline/cdc/sink.rs b/src/pipeline/cdc/sink.rs
                  // Routing is a BLOCK, not a `continue`: the soft cap below must run
                  // for every event, because a commit boundary is a STREAM property
                  // that can land on an UNCAPTURED table (the `commit_boundary_on_an_
-@@ -667,18 +668,11 @@
+@@ -725,18 +726,11 @@ pub(crate) fn run_to_files(
                          total_rows += 1;
                          emitted += 1;
                      }

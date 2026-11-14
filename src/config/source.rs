@@ -625,7 +625,7 @@ impl SourceType {
         match self {
             SourceType::Mysql => true,
             SourceType::Postgres | SourceType::Mssql | SourceType::Oracle | SourceType::Mongo => {
-                false
+                seeded!("columns-from-grants-accepted-off-mysql", true, false)
             }
         }
     }

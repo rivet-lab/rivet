@@ -383,7 +383,11 @@ pub(crate) fn crashed_chunk_run_action(
 ) -> CrashedChunkRun {
     match (explicit_resume, crashed_run) {
         (false, true) => CrashedChunkRun::Resume,
-        (true, false) if force => CrashedChunkRun::ExportAgain,
+        (true, false)
+            if force && seeded!("forced-resume-refused-as-nothing-to-continue", false, true) =>
+        {
+            CrashedChunkRun::ExportAgain
+        }
         _ => CrashedChunkRun::Nothing,
     }
 }
@@ -593,9 +597,15 @@ pub(super) fn incomplete_run_check(
             )
         })
         .collect();
-    let err = met
-        .err()
-        .unwrap_or_else(|| chunk_failures(export, runner, &stored));
+    let err = seeded!(
+        "checkpointed-chunk-loses-its-class",
+        {
+            drop(met);
+            chunk_failures(export, runner, &stored)
+        },
+        met.err()
+            .unwrap_or_else(|| chunk_failures(export, runner, &stored))
+    );
     Err(err.context(format!(
         "{pending} chunk task(s) of export '{export}' not completed; fix the cause, then \
          `rivet run {config_hint} --export {export} --resume`, or inspect \

@@ -135,7 +135,15 @@ impl FirstRun {
 
     /// [`FirstRun::release_after`] against `server` for the slot.
     fn release(self, state: &StateStore, outcome: &Result<()>, server: Option<&dyn SlotServer>) {
-        if outcome.is_ok() {
+        if seeded!(
+            "cdc-first-run-refusal-keeps-anchor",
+            true,
+            seeded!(
+                "cdc-anchor-written-before-the-refusal",
+                true,
+                outcome.is_ok()
+            )
+        ) {
             return;
         }
         match state.cdc_delivery_recorded(&self.export) {

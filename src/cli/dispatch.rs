@@ -325,7 +325,11 @@ struct CdcArgs {
 /// `--output`, write typed Parquet/CSV files through the commit seam. `--output`
 /// resolves the table's column schema from the source via `type_mappings`.
 fn dispatch_cdc(a: CdcArgs) -> Result<()> {
-    let rollover = crate::config::quantity::Knob::ROLLOVER.cli_count("--rollover", a.rollover)?;
+    let rollover = seeded!(
+        "cdc-rollover-flag-unrouted",
+        a.rollover,
+        crate::config::quantity::Knob::ROLLOVER.cli_count("--rollover", a.rollover)?
+    );
     let (url, _prov) = resolve_init_source(a.source, a.source_env, a.source_file)?;
     let ckpt = a.checkpoint.map(std::path::PathBuf::from);
     if let Some(c) = &ckpt {

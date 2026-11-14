@@ -308,7 +308,11 @@ fn refuse_a_cursor_case_miss(
         return err;
     };
     let names: Vec<&str> = columns.iter().map(|c| c.column_name.as_str()).collect();
-    match crate::types::refuse_cursor_case_miss(cursor, &names) {
+    match seeded!(
+        "cursor-case-uncoded",
+        Ok(()),
+        crate::types::refuse_cursor_case_miss(cursor, &names)
+    ) {
         Err(refusal) => refusal,
         Ok(()) => err,
     }
@@ -549,7 +553,11 @@ pub(super) fn commit_incremental_cursor(
     plan: &ResolvedRunPlan,
     summary: &RunSummary,
 ) -> Result<()> {
-    if let Some(cursor) = summary.cursor_high.clone() {
+    if let Some(cursor) = summary
+        .cursor_high
+        .clone()
+        .filter(|_| seeded!("incremental-cursor-never-committed", false, true))
+    {
         super::run_store::RunStore::finalize(state, plan, summary)
             .with_cursor(cursor.clone())
             .with_progression(super::run_store::Progression::Incremental { last_value: cursor })

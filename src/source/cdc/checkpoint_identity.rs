@@ -15,6 +15,9 @@ pub(crate) const RECOVER: &str = "Re-baseline the stream in one run: delete the 
 
 /// A refusal of `code` whose text is `why`.
 fn refusal(code: crate::error::Code, why: impl Into<String>) -> anyhow::Error {
+    if seeded!("cdc-refusal-without-a-code", true, false) {
+        return anyhow::anyhow!(why.into());
+    }
     anyhow::Error::new(crate::error::CodedError::new(code, why))
 }
 

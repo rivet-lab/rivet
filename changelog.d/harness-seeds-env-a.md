@@ -1,0 +1,1 @@
+- **Harness**: the first half of the patch-form seeded defects (63 seeds, `accepted-edit-not-recorded` to `keyset-key-alias-type-by-name`) became `seeded!` switches graded in the one shared build, so each costs a run instead of a build.
