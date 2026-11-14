@@ -30,13 +30,20 @@ class KnownRed:
 
 
 _EXPIRES = "2026-11-22"
-GATE, ISLAND, OFFLINE = "gate", "island", "offline"
+GATE, ISLAND, OFFLINE, NIGHTLY = "gate", "island", "offline", "nightly"
 _ISLAND_TIER = re.compile(r"\] full: ")
 _OFFLINE_TIER = re.compile(r"\[offline\]: ")
+_NIGHTLY_KEY = re.compile(r"^nightly\[")
+_GATE_CLASS = re.compile(r"^(?P<matrix>[a-z_]+)\[(?P<kind>[a-z_]+)\] (?:smoke|full): (?P<cause>[A-Z_]+) over ")
 _DATED = re.compile(r"\b20\d\d-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b")
 _ORACLE_CDC_LOAD = (
     "Oracle CDC does not load yet (ADR-0037; the Oracle GA work). The previous release's `rivet init --mode cdc` writes no `load:` block, and this cell still drives the previous release through `load`, which refuses. `upgrade[oracle/cdc-load/init=this]` grades what the scaffold does promise (the baseline Parquet equals the source). The cycle stays unsupported until Oracle CDC loads. Pinned 2026-11-01 to the whole refusal line; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it"
 )
+
+
+def nightly_key(matrix: str, kind: str, cause: str) -> str:
+    """The class of a nightly red: the matrix, the engine or kind its cell names, and the first word of its cause."""
+    return f"nightly[{matrix}|{kind}] {cause}"
 
 
 def _open(cell: str, symptom: str, reason: str) -> KnownRed:
@@ -201,11 +208,31 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     KnownRed("no_silent_null[mysql_cdc_grants] smoke: CHECK_RUN_SPLIT over 2 source->override pairs #3c225a11",
              "2026-11-10: grants-CDC leg, PR-PRECHECK: check exits 0 and run refuses by code (RIVET_SOURCE_VALUE_UNREPRESENTABLE) because check reads neither the values nor the format; open, closes when check refuses the same pair; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
              _EXPIRES),
+    KnownRed(nightly_key("refusal_names_true_cause", "cause", "uncoded"),
+             "2026-11-14: #917, the nightly refusal-names-true-cause part: refusals stay uncoded, name the wrong cause or a remedy flag that does not exist, or exit 0 on a refused config; open, closes with the fix of #917",
+             _EXPIRES,
+             alt=tuple(nightly_key("refusal_names_true_cause", kind, cause) for kind, cause in (
+                 ("cmd", "printed"), ("cmd", "uncoded"), ("decoy", "uncoded"), ("field", "uncoded"), ("guard", "printed"), ("reader", "the"),
+                 ("remedy", "remedy"), ("site", "remedy"), ("source", "named"), ("word", "printed"), ("wording", "remedy")))),
 )
 
 
+def nightly_classes() -> dict[str, KnownRed]:
+    """Every nightly red class the ledger acknowledges: its own `nightly[...]` entries and the per-cell-set entries of the gate, cut to (matrix, engine, cause)."""
+    out: dict[str, KnownRed] = {}
+    for k in KNOWN_RED:
+        for key in k.keys():
+            if _NIGHTLY_KEY.match(key):
+                out[key] = k
+            elif m := _GATE_CLASS.match(key):
+                out[nightly_key(m["matrix"], m["kind"], m["cause"])] = k
+    return out
+
+
 def lane_of(key: str) -> str:
-    """The run that grades a failure message: the weekly island for the full tier, the offline CLI test for the offline tier, else the per-run gate."""
+    """The run that grades a failure message: the nightly workflow for a `nightly[...]` class, the weekly island for the full tier, the offline CLI test for the offline tier, else the per-run gate."""
+    if _NIGHTLY_KEY.match(key):
+        return NIGHTLY
     if _ISLAND_TIER.search(key):
         return ISLAND
     return OFFLINE if _OFFLINE_TIER.search(key) else GATE
@@ -256,6 +283,12 @@ def self_test() -> int:
     assert problems((KnownRed(" ", "2026-11-04 why", "2026-11-15"),)), "an empty match must fail"
     assert problems((KnownRed("m", "2026-11-04 why", "soon"),)), "an expiry that is no date must fail"
     assert problems() == [], "the ledger itself must be clean"
+    own = nightly_key("refusal_names_true_cause", "cmd", "printed")
+    assert lane_of(own) == NIGHTLY and not any(owed_by(k, lane) for k in KNOWN_RED if own in k.keys() for lane in (GATE, ISLAND, OFFLINE)), \
+        "a nightly class is owed by no gate run: a full gate would block on it"
+    cut = nightly_classes()
+    assert nightly_key("no_silent_null", "mysql", "CHECK_RUN_SPLIT") in cut and nightly_key("no_silent_null", "mongo", "OVERRIDE_IGNORED") in cut, \
+        "a gate entry is cut to its (matrix, engine, cause) class"
     print("known_red self-test: ok")
     return 0
 
