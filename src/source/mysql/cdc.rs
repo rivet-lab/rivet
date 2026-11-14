@@ -765,9 +765,10 @@ impl MysqlChangeStream {
     fn note_statement(&mut self, raw: &[u8], log_pos: u64) {
         let (in_transaction, marks) = statement_frame(self.in_transaction, raw);
         self.in_transaction = in_transaction;
-        if seeded!("grant-change-not-seen-mid-run", false, true)
-            && re_read_marked(self.readable.is_some(), marks)
-        {
+        if re_read_marked(
+            self.readable.is_some(),
+            seeded!("grant-change-not-seen-mid-run", false, marks),
+        ) {
             self.grants_pending
                 .get_or_insert_with(|| (self.file.clone(), log_pos));
         }

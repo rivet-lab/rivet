@@ -347,7 +347,7 @@ impl MongoSource {
         );
         seeded!(
             "collection-refusal-uncoded-on-run",
-            refusal.map_err(|e| anyhow::anyhow!("{e}")),
+            refusal.map_err(|e| anyhow::Error::msg(e.to_string())),
             refusal
         )?;
         if let Some(uuid) = listed.as_deref().and_then(<[_]>::first) {
