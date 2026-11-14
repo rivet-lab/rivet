@@ -479,6 +479,65 @@ fn pg_cdc_resume_captures_only_new_changes() {
     );
 }
 
+/// A steady-state PostgreSQL CDC run opens at most two source connections: the run's own and the change stream's.
+#[test]
+#[ignore = "live: requires docker compose postgres (wal_level=logical)"]
+fn pg_cdc_steady_state_run_opens_at_most_two_source_connections() {
+    let (forward, via) = respelled_source(POSTGRES_CDC_URL);
+    let mut scn = CdcScenario::pg_with("conns_pg", "id BIGINT PRIMARY KEY, v BIGINT", |r, _| {
+        r.source_url(&via)
+    });
+    let opened = scn.steady_state_connections(&forward);
+    assert_eq!(
+        opened, 2,
+        "a steady-state PostgreSQL CDC run opens one connection for the run, one for the change stream, and no third"
+    );
+}
+
+/// A steady-state MySQL CDC run opens at most the two source connections the release before it opened.
+#[test]
+#[ignore = "live: requires docker compose mysql-cdc"]
+fn mysql_cdc_steady_state_run_opens_at_most_two_source_connections() {
+    let (forward, via) = respelled_source(MYSQL_CDC_URL);
+    let mut scn = CdcScenario::mysql_with("conns_my", "id BIGINT PRIMARY KEY, v BIGINT", |r, _| {
+        r.source_url(&via)
+    });
+    let opened = scn.steady_state_connections(&forward);
+    assert!(
+        (1..=2).contains(&opened),
+        "a steady-state MySQL CDC run opens the run's own connection and the stream's, got {opened}"
+    );
+}
+
+/// A steady-state SQL Server CDC run opens at most the two source connections the release before it opened.
+#[test]
+#[ignore = "live: requires docker compose mssql-cdc"]
+fn mssql_cdc_steady_state_run_opens_at_most_two_source_connections() {
+    let _serial = cross_process_serial("mssql_cdc");
+    let (forward, via) = respelled_source(MSSQL_CDC_URL);
+    let mut scn = CdcScenario::mssql_with("conns_ms", "id BIGINT PRIMARY KEY, v BIGINT", |r, _| {
+        r.source_url(&via)
+    });
+    let opened = scn.steady_state_connections(&forward);
+    assert!(
+        (1..=2).contains(&opened),
+        "a steady-state SQL Server CDC run opens the run's own connection and the stream's, got {opened}"
+    );
+}
+
+/// A steady-state MongoDB CDC run opens at most the six source connections the release before it opened.
+#[test]
+#[ignore = "live: requires docker compose mongo replica set"]
+fn mongo_cdc_steady_state_run_opens_at_most_six_source_connections() {
+    let (forward, _) = respelled_source(&mongo_rs_url());
+    let mut scn = CdcScenario::mongo_with("conns_mg", |r, _| r.source_url_through(&forward));
+    let opened = scn.steady_state_connections(&forward);
+    assert!(
+        (1..=6).contains(&opened),
+        "a steady-state MongoDB CDC run opens at most six source connections, got {opened}"
+    );
+}
+
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_intra_transaction_updates_get_distinct_seq() {

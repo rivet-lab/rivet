@@ -658,6 +658,10 @@ impl super::Source for PostgresSource {
         Ok(crate::source::split_key_list(self.query_scalar(&sql)?))
     }
 
+    fn replication_slot_exists(&mut self, slot: &str) -> Result<bool> {
+        cdc::slot_exists_on(&mut self.client, slot)
+    }
+
     fn query_scalar(&mut self, sql: &str) -> Result<Option<String>> {
         let rows = read_pinned(&mut self.client, |client| {
             let probe = prepare_fresh(client, sql)?;

@@ -143,7 +143,11 @@ pub(crate) fn slot_created_warning(slot: &str) -> String {
 
 /// Whether the replication slot `slot` exists on the server at `url`.
 pub(crate) fn slot_exists(url: &str, slot: &str, tls: Option<&TlsConfig>) -> Result<bool> {
-    let mut client = super::connect_client(url, tls)?;
+    slot_exists_on(&mut super::connect_client(url, tls)?, slot)
+}
+
+/// Whether the replication slot `slot` exists on the server `client` is connected to.
+pub(crate) fn slot_exists_on(client: &mut Client, slot: &str) -> Result<bool> {
     Ok(client
         .query_one(
             "SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)",
@@ -705,12 +709,7 @@ impl PgChangeStream {
             }
         }
         let domains = load_domains(&mut client)?;
-        let exists: bool = client
-            .query_one(
-                "SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)",
-                &[&slot],
-            )?
-            .get(0);
+        let exists = slot_exists_on(&mut client, slot)?;
         match slot_action(slot, exists, prior) {
             SlotAction::Reuse => {
                 refuse_a_slot_another_reader_advanced(&mut client, slot, checkpoint)?

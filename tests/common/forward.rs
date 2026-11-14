@@ -2,26 +2,41 @@
 
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 
 /// Relays every connection accepted on `addr()` to the upstream until dropped.
 pub struct TcpForward {
     addr: SocketAddr,
     stop: Arc<AtomicBool>,
+    accepted: Arc<AtomicUsize>,
 }
 
 impl TcpForward {
+    /// `url` with its `host:port` replaced by this forwarder's address.
+    pub fn respell(&self, url: &str) -> String {
+        let (scheme, rest) = url.split_once("://").expect("a URL with a scheme");
+        let end = rest.find(['/', '?']).unwrap_or(rest.len());
+        let (authority, tail) = rest.split_at(end);
+        let at = authority
+            .rsplit_once('@')
+            .map_or(String::new(), |(u, _)| format!("{u}@"));
+        format!("{scheme}://{at}{}{tail}", self.addr)
+    }
+
     /// Listen on 127.0.0.1 at a free port and relay to `upstream`.
     pub fn start(upstream: SocketAddr) -> Self {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind the forwarder");
         let addr = listener.local_addr().expect("forwarder address");
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let counted = accepted.clone();
         std::thread::spawn(move || {
             for client in listener.incoming().flatten() {
                 if stopped.load(SeqCst) {
                     break;
                 }
+                counted.fetch_add(1, SeqCst);
                 let Ok(server) = TcpStream::connect(upstream) else {
                     continue;
                 };
@@ -32,7 +47,16 @@ impl TcpForward {
                 relay(server, client);
             }
         });
-        TcpForward { addr, stop }
+        TcpForward {
+            addr,
+            stop,
+            accepted,
+        }
+    }
+
+    /// The connections this forwarder has accepted so far.
+    pub fn accepted(&self) -> usize {
+        self.accepted.load(SeqCst)
     }
 }
 
@@ -53,25 +77,34 @@ fn relay(mut from: TcpStream, mut to: TcpStream) {
     });
 }
 
+/// Source connections one `rivet run --config cfg` opens through `forward`; its exit is asserted, and nothing but the run is counted.
+pub fn connections_opened_by_run(forward: &TcpForward, cfg: &std::path::Path) -> usize {
+    let before = forward.accepted();
+    let (_, out) = super::runner::output_of(&mut super::runner::rivet_command(
+        &["run", "--config", cfg.to_str().unwrap()],
+        &[],
+    ));
+    let opened = forward.accepted() - before;
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    opened
+}
+
 /// `url` with its `host:port` replaced by a forwarder to it on another loopback port: the same server under another source key.
 pub fn respelled_source(url: &str) -> (TcpForward, String) {
-    let (scheme, rest) = url.split_once("://").expect("a URL with a scheme");
+    let (_, rest) = url.split_once("://").expect("a URL with a scheme");
     let end = rest.find(['/', '?']).unwrap_or(rest.len());
-    let (authority, tail) = rest.split_at(end);
-    let (userinfo, host_port) = authority
-        .rsplit_once('@')
-        .map_or(("", authority), |(u, h)| (u, h));
+    let authority = &rest[..end];
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
     let upstream = host_port
         .to_socket_addrs()
         .expect("the URL names host:port")
         .next()
         .expect("the host resolves");
     let forward = TcpForward::start(upstream);
-    let at = if userinfo.is_empty() {
-        String::new()
-    } else {
-        format!("{userinfo}@")
-    };
-    let respelled = format!("{scheme}://{at}{}{tail}", forward.addr);
+    let respelled = forward.respell(url);
     (forward, respelled)
 }

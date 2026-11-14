@@ -1506,7 +1506,14 @@ fn run_export_job_inner(
                 return (Err(e), summary);
             }
         };
-        let first_run = super::cdc_release::FirstRun::of(config, export, state, config_path);
+        let mut meta = crate::source::create_source(&config.source).ok();
+        let first_run = super::cdc_release::FirstRun::of(
+            config,
+            export,
+            state,
+            config_path,
+            meta.as_deref_mut(),
+        );
         let pending = match super::cdc_job::initial_snapshot_pending(
             config,
             export,
@@ -1542,6 +1549,7 @@ fn run_export_job_inner(
             crate::notify::maybe_send(config.notifications.as_ref(), &summary);
             return (stopped, summary);
         }
+        let meta = if pending.is_empty() { meta } else { None };
         let outcomes = if snapshot_legs_fan_out(opts.parallel_snapshots, pending.len()) {
             let _flags = super::run::RenderFlags::set(super::run::multi_export_mode(), Some(true));
             let (harm, _) = super::run::RunHarmBracket::open(&config.source);
@@ -1579,6 +1587,7 @@ fn run_export_job_inner(
                 state,
                 opts.strict,
                 grants,
+                meta,
             );
             super::cdc_job::record_file_anchor(config, export, state, config_path, &outcome.0);
             outcome
