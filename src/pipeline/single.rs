@@ -424,7 +424,11 @@ pub(super) fn run_single_export(
         &plan.tuning,
         &plan.column_overrides,
     )
-    .with_catalog_hint_query(plan.catalog_query.as_deref())
+    .with_catalog_hint_query(seeded!(
+        "partition-child-loses-catalog-hints",
+        None,
+        plan.catalog_query.as_deref()
+    ))
     .with_incremental(plan.strategy.incremental_plan())
     .with_cursor(cursor);
 
@@ -480,7 +484,11 @@ pub(super) fn run_single_export(
     let (dest, ext) = (frame.dest, frame.ext);
     let ext = ext.as_str();
 
-    let stamp = super::summary::run_scoped_stamp(&summary.run_id, &plan.export_name);
+    let stamp = seeded!(
+        "part-named-by-the-clock",
+        chrono::Utc::now().format("%Y%m%d_%H%M%S_%3f").to_string(),
+        super::summary::run_scoped_stamp(&summary.run_id, &plan.export_name)
+    );
 
     let (parts, wrote) = super::commit::write_sink_parts(
         dest.as_ref(),

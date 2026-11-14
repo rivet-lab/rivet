@@ -794,6 +794,18 @@ impl ExportSink {
 
     /// Write one slice that is known to fit the current part's partition budget.
     fn write_batch_part(&mut self, dest_batch: &RecordBatch) -> Result<()> {
+        let rows = dest_batch.num_rows();
+        let rotated;
+        let dest_batch = if seeded!(
+            "row-lost-at-rotation",
+            self.part_rows == 0 && self.total_rows > 0 && rows > 1,
+            false
+        ) {
+            rotated = dest_batch.slice(1, rows - 1);
+            &rotated
+        } else {
+            dest_batch
+        };
         self.total_rows += dest_batch.num_rows();
         // Feed the running row count to the progress bar *during* the read, not
         // only when the chunk completes (throttled to ~8/s).

@@ -1,0 +1,1 @@
+- **Harness**: 127 more seeded defects (the second half of the patch seeds, `mysql-session-set-per-chunk` onward) are `seeded!` switches in one build instead of source patches, each graded by the same cells; 3 stay patches.

@@ -1473,7 +1473,9 @@ fn write_lock_not_taken(db: Option<&str>, e: &rusqlite::Error) -> anyhow::Error 
         );
     }
     // READONLY is a third disease: no process holds the database and no wait ends it.
-    if e.sqlite_error_code() == Some(rusqlite::ErrorCode::ReadOnly) {
+    if seeded!("readonly-state-read-as-migration-lock", false, true)
+        && e.sqlite_error_code() == Some(rusqlite::ErrorCode::ReadOnly)
+    {
         let at = db.map_or(String::new(), |path| format!(" `{path}`"));
         return anyhow::Error::new(crate::error::CodedError::new(
             crate::error::codes::STATE_NOT_WRITABLE,

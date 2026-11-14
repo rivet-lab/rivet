@@ -70,6 +70,12 @@ pub(crate) fn source_type_supports_split(st: SourceType) -> bool {
 /// per-unit checkpoint, so a crashed unit could not resume without duplicating.
 /// Returns the key column, or `None` (leave the export whole).
 pub(crate) fn splittable_key(export: &ExportConfig) -> Option<String> {
+    if seeded!("split-key-is-a-constant", true, false) {
+        return Some("xyzzy".into());
+    }
+    if seeded!("split-key-never-found", true, false) {
+        return None;
+    }
     if export.mode == ExportMode::Cdc {
         return None; // a stream, not a range scan
     }
@@ -172,6 +178,15 @@ pub(crate) fn probe_and_synthesize(
     // MongoDB has no inline SQL range literal, so a range-split unit would panic at plan
     // build (inline_literal is unreachable for Mongo). Leave a Mongo giant whole — fail
     // fast BEFORE the boundary probe, never crash. Every SQL engine range-splits normally.
+    if seeded!("pool-split-into-no-units", true, false) {
+        return Ok(Some(vec![]));
+    }
+    if seeded!("pool-split-into-one-unit", true, false) {
+        return Ok(Some(vec![giant.clone()]));
+    }
+    if seeded!("pool-split-never-realized", true, false) {
+        return Ok(None);
+    }
     if !source_type_supports_split(config.source.source_type) {
         return Ok(None);
     }

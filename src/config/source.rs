@@ -707,6 +707,7 @@ pub(crate) fn canonical_source_key(key: &str) -> String {
     let hosts: Vec<String> = hosts
         .split(',')
         .map(|h| match names_a_port(h) {
+            _ if seeded!("source-key-as-spelled", port > 0, false) => h.to_string(),
             true => h.to_string(),
             false => format!("{}:{port}", h.strip_suffix(':').unwrap_or(h)),
         })
