@@ -335,11 +335,20 @@ impl MongoSource {
     /// Refuse `collection` when it is gone or listed under another UUID than this source first saw; the first listing pins the UUID.
     pub(crate) fn confirm_collection(&mut self, collection: &str) -> Result<()> {
         let listed = list_collection_uuids(&self.session, collection)?;
-        refuse_a_missing_collection(
+        let refusal = refuse_a_missing_collection(
             self.session.db(),
             collection,
             listed.as_deref(),
-            self.started_as.get(collection).map(Vec::as_slice),
+            seeded!(
+                "mongo-collection-uuid-not-compared",
+                None,
+                self.started_as.get(collection).map(Vec::as_slice)
+            ),
+        );
+        seeded!(
+            "collection-refusal-uncoded-on-run",
+            refusal.map_err(|e| anyhow::Error::msg(e.to_string())),
+            refusal
         )?;
         if let Some(uuid) = listed.as_deref().and_then(<[_]>::first) {
             self.started_as

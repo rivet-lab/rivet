@@ -243,9 +243,20 @@ pub(crate) fn table_matches(
     if engine == super::CdcEngine::Mongo {
         return cfg == table;
     }
+    if seeded!(
+        "qualified-table-matches-a-literal-dotted-name",
+        cfg == table,
+        false
+    ) {
+        return true;
+    }
     match cfg.split_once('.') {
         Some((cs, ct)) => cs == schema && ct == table,
-        None => cfg == table,
+        None => seeded!(
+            "qualified-table-matches-a-literal-dotted-name",
+            false,
+            cfg == table
+        ),
     }
 }
 

@@ -794,6 +794,18 @@ impl ExportSink {
 
     /// Write one slice that is known to fit the current part's partition budget.
     fn write_batch_part(&mut self, dest_batch: &RecordBatch) -> Result<()> {
+        let rows = dest_batch.num_rows();
+        let rotated;
+        let dest_batch = if seeded!(
+            "row-lost-at-rotation",
+            self.part_rows == 0 && self.total_rows > 0 && rows > 1,
+            false
+        ) {
+            rotated = dest_batch.slice(1, rows - 1);
+            &rotated
+        } else {
+            dest_batch
+        };
         self.total_rows += dest_batch.num_rows();
         // Feed the running row count to the progress bar *during* the read, not
         // only when the chunk completes (throttled to ~8/s).
@@ -1078,9 +1090,13 @@ impl ExportSink {
     /// lossless token when it reported one (MongoDB BSON `_id`), else the string
     /// extracted from the output column (every SQL engine).
     pub(in crate::pipeline) fn effective_cursor(&self) -> Option<String> {
-        self.source_cursor
-            .clone()
-            .or_else(|| self.last_cursor_value.clone())
+        seeded!(
+            "keyset-high-water-forgotten",
+            None,
+            self.source_cursor
+                .clone()
+                .or_else(|| self.last_cursor_value.clone())
+        )
     }
 }
 

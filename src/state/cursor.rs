@@ -40,7 +40,15 @@ pub(super) fn streams_differ(stored: &str, now: &str) -> bool {
         long.strip_suffix(short)
             .is_some_and(|q| q.is_empty() || q.ends_with('.'))
     };
-    !stored.is_empty() && !now.is_empty() && !qualifies(stored, now) && !qualifies(now, stored)
+    !stored.is_empty()
+        && !now.is_empty()
+        && !qualifies(stored, now)
+        && !qualifies(now, stored)
+        && seeded!(
+            "progress-inherited-by-another-stream",
+            stored.is_empty(),
+            true
+        )
 }
 
 /// What follows the rows in a population that names the collection incarnation its progress was written against.
@@ -164,7 +172,13 @@ impl StoredStream {
                 return Some((was, now));
             }
             let both_unqualified = !stream.contains('.') && !key.stream.contains('.');
-            if let Some(schema) = schema.filter(|s| both_unqualified && *s != key.schema) {
+            if let Some(schema) = schema.filter(|s| {
+                seeded!(
+                    "progress-inherited-by-another-schema",
+                    !both_unqualified,
+                    both_unqualified
+                ) && *s != key.schema
+            }) {
                 let under = |name: &str, s: &str| {
                     let name = if name.is_empty() { "its query" } else { name };
                     match s {
@@ -178,7 +192,13 @@ impl StoredStream {
         let rows = |population: &str| format!("{now} ({population})");
         self.population
             .as_ref()
-            .filter(|was| !key.population.is_empty() && !same_rows(was, &key.population))
+            .filter(|was| {
+                seeded!(
+                    "progress-inherited-by-an-edited-filter",
+                    key.population.is_empty(),
+                    !key.population.is_empty()
+                ) && !same_rows(was, &key.population)
+            })
             .map(|was| (rows(was), rows(&key.population)))
     }
 }
@@ -532,7 +552,12 @@ impl StateStore {
 
     /// Refuse a first run of `key`'s source when the export holds a cursor under another source that delivers to the same destination: it would read the whole table again and deliver it there beside what that cursor delivered.
     pub fn refuse_respelled_source(&self, key: &ProgressKey) -> Result<()> {
-        let Some((other, cursor)) = self.progress_elsewhere(key)?.into_iter().next() else {
+        let Some((other, cursor)) = self
+            .progress_elsewhere(key)?
+            .into_iter()
+            .next()
+            .filter(|_| seeded!("cursor-continued-under-another-source", false, true))
+        else {
             return Ok(());
         };
         let (export_name, scope) = (key.export_name.as_str(), key.source.as_str());
@@ -771,7 +796,13 @@ impl StateStore {
             .into_iter()
             .chain(chunk_run.map(|run| (run, CHUNKED)));
         for (run, owner) in unfinished {
-            if owner != key.mode {
+            if owner != key.mode
+                && seeded!(
+                    "interrupted-run-continued-by-another-mode",
+                    owner.is_empty(),
+                    true
+                )
+            {
                 crate::rivet_bail!(
                     crate::error::codes::STATE_INTERRUPTED_RUN_OWNER_MISMATCH,
                     "export '{export_name}': run {run} of mode `{owner}` is unfinished, but \
@@ -784,7 +815,13 @@ impl StateStore {
                     abandon_command(owner, export_name)
                 );
             }
-            if !key.resumable {
+            if !key.resumable
+                && seeded!(
+                    "unfinished-run-beside-an-uncheckpointed-run",
+                    owner.is_empty(),
+                    true
+                )
+            {
                 crate::rivet_bail!(
                     crate::error::codes::STATE_INTERRUPTED_RUN_OWNER_MISMATCH,
                     "export '{export_name}': run {run} of mode `{owner}` is unfinished, but \
@@ -821,7 +858,11 @@ impl StateStore {
     /// Refuse to continue `run` when the byte-shaping settings of `key` are not the ones it was opened with.
     pub(crate) fn refuse_changed_run_shape(&self, key: &ProgressKey, run: &str) -> Result<()> {
         let (export_name, owner) = (&key.export_name, key.mode);
-        let changed = self.run_shape_changes(export_name, run, &key.shape)?;
+        let changed = seeded!(
+            "resume-pins-only-the-chunk-plan",
+            Vec::new(),
+            self.run_shape_changes(export_name, run, &key.shape)?
+        );
         if changed.is_empty() {
             return Ok(());
         }
@@ -1060,6 +1101,14 @@ impl StateStore {
 
     /// The export names `source` holds progress under, in byte order: those with a cursor on `source` (under any spelling of it, or written before sources were recorded) and the boundaries no cursor owns and no chunk run of another source recorded.
     pub fn stored_export_names(&self, source: &str) -> Result<Vec<String>> {
+        if seeded!("state-reset-misreads-stored-partitions", true, false) {
+            return self.query(
+                "SELECT export_name FROM export_state WHERE prefix IN (?1, '') \
+                 UNION SELECT export_name FROM export_progression ORDER BY export_name",
+                &[source.into()],
+                |r| r.text(0),
+            );
+        }
         let cursors = self.query("SELECT export_name, prefix FROM export_state", &[], |r| {
             (r.text(0), r.text(1))
         })?;
@@ -1087,7 +1136,12 @@ impl StateStore {
             .map(|(name, _)| name.clone())
             .collect();
         names.extend(boundaries.into_iter().filter(|n| {
-            !cursor_of.contains_key(n) && chunked_here.get(n).copied().unwrap_or(true)
+            !cursor_of.contains_key(n)
+                && seeded!(
+                    "state-reset-takes-a-partition-of-another-sources-chunk-runs",
+                    true,
+                    chunked_here.get(n).copied().unwrap_or(true)
+                )
         }));
         Ok(names.into_iter().collect())
     }
@@ -1120,10 +1174,15 @@ impl StateStore {
                 let marks = placeholders(2, batch.len());
                 let mut params: Vec<StateParam> = vec![source.into()];
                 params.extend(batch.iter().map(|n| StateParam::from(n.as_str())));
+                let prefix_scope = seeded!(
+                    "reset-clears-another-source",
+                    "AND (prefix IN (?1, '') OR 1 = 1)",
+                    "AND prefix IN (?1, '')"
+                );
                 self.execute(
                     &format!(
                         "DELETE FROM export_state WHERE export_name IN ({marks}) \
-                         AND prefix IN (?1, '')"
+                         {prefix_scope}"
                     ),
                     &params,
                 )?;
@@ -1165,8 +1224,13 @@ impl StateStore {
             return Ok(Accepted::Unchanged);
         };
         self.execute(
-            "UPDATE export_state SET stream = ?3, source_schema = ?4, population = ?5 \
-             WHERE export_name = ?1 AND prefix = ?2",
+            seeded!(
+                "accepted-edit-not-recorded",
+                "UPDATE export_state SET stream = ?3, source_schema = ?4, population = ?5 \
+             WHERE export_name = ?1 AND prefix = ?2 AND 1 = 0",
+                "UPDATE export_state SET stream = ?3, source_schema = ?4, population = ?5 \
+             WHERE export_name = ?1 AND prefix = ?2"
+            ),
             &[
                 export_name.into(),
                 scope.into(),

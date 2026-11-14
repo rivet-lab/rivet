@@ -103,7 +103,7 @@ pub(super) fn entry_from_summary(s: &RunSummary) -> RunAggregateEntry {
             duration_ms: s.duration_ms,
             mode: s.mode.clone(),
             error_message: s.error_message.clone(),
-            skip_reason: s.skip_reason.clone(),
+            skip_reason: seeded!("summary-skip-reason-dropped", None, s.skip_reason.clone()),
         },
         &s.snapshot_legs,
     )
@@ -676,7 +676,15 @@ pub(super) fn collect_child_entries(
     for export in exports {
         let own = reports.get(&export.name).and_then(|r| r.run.as_ref());
         let mut entry: Option<RunAggregateEntry> = None;
-        match own.map(|(run_id, _)| state.get_metric_by_run_id(run_id)) {
+        match seeded!(
+            "child-entry-by-name-on-shared-state",
+            Some(
+                state
+                    .get_metrics(Some(&export.name), 1)
+                    .map(|rows| rows.into_iter().next())
+            ),
+            own.map(|(run_id, _)| state.get_metric_by_run_id(run_id))
+        ) {
             Some(Ok(row)) => {
                 // A `running` row is an IN-FLIGHT marker, not an outcome: a
                 // hard-crashed child (OOM-kill, panic — there is no catch_unwind)

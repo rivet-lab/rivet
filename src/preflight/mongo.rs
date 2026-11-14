@@ -35,10 +35,10 @@ pub(super) fn diagnose_export_mongo(
 
 /// The collection a batch export reads; `None` for a CDC stream, which may capture a collection before its first write.
 fn batch_collection(export: &ExportConfig) -> Option<&str> {
-    export
-        .table
-        .as_deref()
-        .filter(|_| export.mode != crate::config::ExportMode::Cdc)
+    export.table.as_deref().filter(|_| {
+        export.mode != crate::config::ExportMode::Cdc
+            && seeded!("plan-sealed-over-unreadable-source", false, true)
+    })
 }
 
 fn diagnose_mongo(

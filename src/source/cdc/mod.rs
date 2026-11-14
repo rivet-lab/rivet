@@ -67,10 +67,21 @@ pub(crate) fn partial_image_refusal(
              fabricating the missing cells as NULL. On MySQL this is \
              `binlog_row_image` set to something other than FULL when the \
              change was WRITTEN (a session override counts, and the open-time \
-             probe reads only the global). Setting `binlog_row_image = FULL` fixes only the \
-             changes written after it: this one stays in the binlog, and every run that \
-             resumes before it meets it again. Set FULL for every writer, then re-baseline: {}",
-            checkpoint_identity::RECOVER
+             probe reads only the global). {}{}",
+            seeded!(
+                "partial-image-refusal-names-a-remedy-that-loops",
+                "Set `binlog_row_image = FULL` and \
+                 re-capture from before the affected DDL/DML; the changes are \
+                 still in the binlog, so this is a delay rather than a loss.",
+                "Setting `binlog_row_image = FULL` fixes only the \
+                 changes written after it: this one stays in the binlog, and every run that \
+                 resumes before it meets it again. Set FULL for every writer, then re-baseline: "
+            ),
+            seeded!(
+                "partial-image-refusal-names-a-remedy-that-loops",
+                "",
+                checkpoint_identity::RECOVER
+            )
         ),
     )
 }
@@ -93,6 +104,9 @@ pub(crate) fn named_image_arity_mismatch(ev: &ChangeEvent) -> Option<(usize, usi
         let n = ev.after.as_ref().or(ev.before.as_ref()).map_or(0, Vec::len);
         (n != names.len()).then_some((n, names.len()))
     });
+    if seeded!("cdc-stdout-partial-before-image", true, false) {
+        return image;
+    }
     image.or_else(|| {
         let names = ev.before_names.as_deref().or(ev.image_names.as_deref())?;
         let n = ev.before.as_ref()?.len();
@@ -185,9 +199,13 @@ impl Position {
                     "checkpoint '{}' is corrupt or truncated (not valid JSON: {e}) — refusing to \
                      silently treat it as absent and re-anchor CDC at 'current', which would \
                      permanently skip every change since the last checkpoint. Restore the file, \
-                     or: {}",
+                     or{}",
                     path.display(),
-                    checkpoint_identity::RECOVER
+                    seeded!(
+                        "corrupt-checkpoint-remedy-reanchors",
+                        " delete it to accept a new anchor from a fresh snapshot.".to_string(),
+                        format!(": {}", checkpoint_identity::RECOVER)
+                    )
                 ))),
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -700,7 +718,9 @@ pub(crate) fn run(
     let mut last_commit: Option<Position> = None;
     let drained = emit_ndjson(stream, &checkpoint, &tables, max_events, &mut last_commit);
     // Every line up to `last_commit` is on stdout: release it at the source (PostgreSQL advances the slot).
-    let acked = last_commit.map_or(Ok(()), |p| stream.ack(&p));
+    let acked = last_commit.map_or(Ok(()), |p| {
+        seeded!("stdout-drain-never-acks", Ok(()), stream.ack(&p))
+    });
     drained.and(acked)
 }
 
@@ -770,6 +790,15 @@ fn emit_ndjson(
         // same place. `--checkpoint ck --max-events 100` against a bulk load made no
         // progress, ever. Overshooting to the boundary is the price of progressing.
         if committed && max_events.is_some_and(|m| emitted >= m) {
+            if seeded!("capped-run-skips-remainder", true, false) {
+                while let Some(Ok(rest)) = stream.next_change() {
+                    if rest.committed
+                        && let Some(p) = &checkpoint
+                    {
+                        stream.checkpoint_of(&rest.position).save(p)?;
+                    }
+                }
+            }
             break;
         }
     }

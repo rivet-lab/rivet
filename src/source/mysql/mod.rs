@@ -600,7 +600,7 @@ impl SessionPlan {
     /// The `max_execution_time` connection `id` still holds, or `None` when it must be set from
     /// scratch: always on a pool that resets a session it is handed back.
     fn given(&self, id: u32) -> Option<u64> {
-        if !self.keeps_session {
+        if seeded!("mysql-session-set-per-chunk", true, !self.keeps_session) {
             return None;
         }
         self.given

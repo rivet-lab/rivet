@@ -67,7 +67,11 @@ impl PlaceholderContext {
     /// plan's, so the apply resolves the day it runs on.
     pub fn keeping_date(export_name: impl Into<String>) -> Self {
         Self {
-            date: None,
+            date: seeded!(
+                "sealed-plan-freezes-the-date",
+                Some(Utc::now().date_naive()),
+                None
+            ),
             export_name: export_name.into(),
             run_id: None,
         }

@@ -24,7 +24,8 @@ impl Anchor {
             .as_ref()
             .filter(|_| !Path::new(written).is_absolute())
             .map(|c| destination::normalized(&c.join(written)));
-        if !Path::new(&anchored).exists()
+        if seeded!("url-file-moved-by-the-upgrade", false, true)
+            && !Path::new(&anchored).exists()
             && let Some(old) = old.filter(|o| o.exists())
         {
             crate::rivet_bail!(

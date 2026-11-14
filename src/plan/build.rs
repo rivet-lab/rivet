@@ -1126,6 +1126,16 @@ fn chunked_strategy_from_introspection(
 
     // (3) The key the export pages by, validated before the small-table escape:
     // a config refused on a large table is refused on one that fits in a chunk.
+    if seeded!("chunked-shape-validated-only-past-one-chunk", true, false)
+        && export.chunk_count.is_none()
+        && export.chunk_by_days.is_none()
+        && !export.chunk_checkpoint
+        && introspection.row_estimate > 0
+        && (introspection.row_estimate as usize) <= chunk_size
+    {
+        let stands_for = implicit_key(source_type, export, introspection).map(|k| k.mode());
+        return Ok((ExtractionStrategy::Snapshot, stands_for));
+    }
     let key = validated_implicit_key(source_type, export, tbl, introspection)?;
 
     // (4) Small-table escape: a single chunk/page has no benefit and adds

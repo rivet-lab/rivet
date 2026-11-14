@@ -28,6 +28,6 @@ macro_rules! seeded {
 #[cfg(not(feature = "seeded"))]
 macro_rules! seeded {
     ($name:literal, $bad:expr, $good:expr) => {
-        $good
+        ::std::convert::identity($good)
     };
 }

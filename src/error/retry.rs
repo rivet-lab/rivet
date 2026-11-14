@@ -138,7 +138,9 @@ fn classify_wire_io(err: &(dyn std::error::Error + 'static)) -> Option<RetryClas
 }
 
 pub fn classify_error(err: &anyhow::Error) -> RetryClass {
-    if let Some(kept) = crate::error::kept_verdict(err) {
+    if seeded!("stop-class", false, true)
+        && let Some(kept) = crate::error::kept_verdict(err)
+    {
         return kept;
     }
     // A typed stop (drift, integrity, a non-environment code) is permanent, whatever its text says.
@@ -344,7 +346,9 @@ pub fn classify_error(err: &anyhow::Error) -> RetryClass {
 fn mssql_number_class(code: u32) -> Option<RetryClass> {
     match code {
         1205 | 1222 => Some(TRANSIENT_SAME_CONN),
-        102 | 156 | 207 | 208 | 229 | 230 => Some(PERMANENT),
+        102 | 156 | 207 | 208 | 229 | 230 if seeded!("stop-class-number", false, true) => {
+            Some(PERMANENT)
+        }
         _ => None,
     }
 }
@@ -360,7 +364,12 @@ fn classify_mssql_error(err: &tiberius::error::Error) -> Option<RetryClass> {
 /// The class of an Oracle server number the driver reports: the numbers that name an invalid statement, identifier, object or privilege are final; any other is left to the text.
 #[cfg(feature = "oracle")]
 pub(crate) fn oracle_number_class(code: usize) -> Option<RetryClass> {
-    matches!(code, 900 | 904 | 933 | 936 | 942 | 1031).then_some(PERMANENT)
+    seeded!(
+        "stop-class-number",
+        matches!(code, 0),
+        matches!(code, 900 | 904 | 933 | 936 | 942 | 1031)
+    )
+    .then_some(PERMANENT)
 }
 
 /// The opendal error one link of an error chain is, or the one an `io::Error` from opendal's std writer wraps.
@@ -551,7 +560,10 @@ fn classify_mysql_error(err: &mysql::Error) -> Option<RetryClass> {
             3024 => Some(PERMANENT),
             // ER_CON_COUNT_ERROR (too many connections) / ER_SERVER_SHUTDOWN
             1040 | 1053 => Some(transient(true, 15_000)),
-            1045 | 1044 | 1049 | 1146 | 1064 | 1051 | 1052 | 1054 | 1142 | 1143 => Some(PERMANENT),
+            1045 | 1044 | 1049 | 1146 | 1064 => Some(PERMANENT),
+            1051 | 1052 | 1054 | 1142 | 1143 if seeded!("stop-class-number", false, true) => {
+                Some(PERMANENT)
+            }
             _ => None,
         },
         mysql::Error::IoError(_) => Some(TRANSIENT_RECONNECT),

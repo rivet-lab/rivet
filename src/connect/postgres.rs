@@ -154,12 +154,14 @@ fn read_under<T>(
 pub(crate) fn connect_client(url: &str, tls: Option<&TlsConfig>) -> Result<Client> {
     // Refuse remote plaintext (no `tls:` block) before any dial (CWE-319).
     super::require_tls_or_loopback(url, tls)?;
-    require_a_runtime(
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build(),
-    )?;
-    match tls {
+    if seeded!("postgres-dial-runtime-unwrapped", false, true) {
+        require_a_runtime(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build(),
+        )?;
+    }
+    let client = match tls {
         Some(cfg) if cfg.mode.is_enforced() => {
             let connector = build_native_tls(cfg)?;
             let make_tls = postgres_native_tls::MakeTlsConnector::new(connector);
@@ -171,7 +173,16 @@ pub(crate) fn connect_client(url: &str, tls: Option<&TlsConfig>) -> Result<Clien
                 .map_err(|e| super::describe_connect_error(url, e.into()))
         }
         _ => Client::connect(url, NoTls).map_err(|e| super::describe_connect_error(url, e.into())),
+    }?;
+    if seeded!("session-set-on-a-pooled-connection", true, false) {
+        let mut client = client;
+        client.batch_execute(
+            "SET TimeZone = 'UTC'; SET DateStyle = 'ISO, MDY'; \
+             SET IntervalStyle = 'postgres'; SET bytea_output = 'hex'",
+        )?;
+        return Ok(client);
     }
+    Ok(client)
 }
 
 /// The environment stop for a process that cannot start a runtime, read off a probe build: `postgres::Config::connect` unwraps its own runtime build (postgres 0.19 `src/config.rs`), so an `EMFILE` there would abort the process instead of failing with a code.

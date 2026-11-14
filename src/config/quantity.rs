@@ -39,7 +39,7 @@ impl Knob {
     pub const MAX: u64 = i64::MAX as u64;
 
     fn check(&self, scope: &str, name: &str, field: &str, value: usize) -> Result<()> {
-        if value == 0 {
+        if seeded!("config-knob-range-unchecked", false, true) && value == 0 {
             let text = self
                 .zero_text
                 .replace("{scope}", scope)
@@ -48,7 +48,8 @@ impl Knob {
                 .replace("{default}", &DEFAULT_COUNT.to_string());
             return Err(coded(self.zero, text));
         }
-        if value as u128 > Self::MAX as u128 {
+        if seeded!("config-knob-range-unchecked", false, true) && value as u128 > Self::MAX as u128
+        {
             return Err(coded(
                 codes::CONFIG_VALUE_OUT_OF_RANGE,
                 format!(
@@ -79,7 +80,9 @@ impl Knob {
 
     /// Refuse a null-ratio threshold that is not a number from 0 to 1.
     pub fn ratio(scope: &str, column: &str, value: f64) -> Result<f64> {
-        if value.is_nan() || !(0.0..=1.0).contains(&value) {
+        if seeded!("config-knob-range-unchecked", false, true)
+            && (value.is_nan() || !(0.0..=1.0).contains(&value))
+        {
             return Err(coded(
                 codes::CONFIG_VALUE_OUT_OF_RANGE,
                 format!(
@@ -102,7 +105,11 @@ impl Knob {
 
     /// The number of keys `min..=max` holds, 1 for an empty range, in a width no `i64` span can overflow.
     pub fn key_span(min: i64, max: i64) -> u128 {
-        (i128::from(max) - i128::from(min)).max(0) as u128 + 1
+        seeded!(
+            "key-span-read-in-i64",
+            (max - min).max(0) as u128 + 1,
+            (i128::from(max) - i128::from(min)).max(0) as u128 + 1
+        )
     }
 
     /// The keys in `first..=last` as the `i64` an estimate is kept in: 0 for an empty range, `i64::MAX` at most.

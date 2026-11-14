@@ -130,12 +130,17 @@ fn fill_sql(p: Poll<'_>) -> String {
         None => "sys.fn_cdc_get_max_lsn()".to_string(),
     };
     let recover = crate::source::cdc::checkpoint_identity::RECOVER.replace('\'', "''");
+    let lift = seeded!(
+        "position-below-log-start-moved-up",
+        "IF @from IS NOT NULL AND @min IS NOT NULL AND @from < @min SET @from = @min; ",
+        ""
+    );
     format!(
         "DECLARE @from binary(10) = {from_expr}; \
          DECLARE @min binary(10) = (SELECT start_lsn FROM cdc.change_tables \
              WHERE capture_instance = '{ci}'); \
          DECLARE @max binary(10) = {max_expr}; \
-         IF @from IS NOT NULL AND @min IS NOT NULL AND @from < @min \
+         {lift}IF @from IS NOT NULL AND @min IS NOT NULL AND @from < @min \
             THROW {RETENTION_GAP_ERROR}, 'rivet cdc: the resume position is older than the SQL Server \
 CDC change-table retention (the cleanup job removed it). Resuming would silently skip changes. {recover}', 1; \
          DECLARE @to binary(10) = NULL; \
@@ -958,6 +963,18 @@ impl ChangeStream for MssqlChangeStream {
             }
         }
         if let Some(ev) = self.pending.pop_front() {
+            if seeded!(
+                "pk-move-without-delete-mssql",
+                ev.op == crate::source::cdc::ChangeOp::Delete
+                    && self.pending.front().is_some_and(|n| {
+                        n.op == crate::source::cdc::ChangeOp::Insert
+                            && n.table == ev.table
+                            && n.position == ev.position
+                    }),
+                false
+            ) {
+                return self.next_change();
+            }
             return Some(Ok(ev));
         }
         // A spilled tail outranks another poll: its rows belong to transactions

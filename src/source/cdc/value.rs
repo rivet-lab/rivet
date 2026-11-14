@@ -985,8 +985,11 @@ impl MysqlCellFix {
 
     /// Whether the fix wrote NULL over a held `input` date: the zero or partial date a MySQL column cannot hand on.
     pub(crate) fn nulled_a_date(&self, input: &RivetValue, out: &RivetValue) -> bool {
-        matches!(self, MysqlCellFix::ZeroDate | MysqlCellFix::TimestampEpoch)
-            && matches!(out, RivetValue::Null)
+        seeded!(
+            "mysql-zero-date-count-misses-a-class",
+            matches!(self, MysqlCellFix::TimestampEpoch),
+            matches!(self, MysqlCellFix::ZeroDate | MysqlCellFix::TimestampEpoch)
+        ) && matches!(out, RivetValue::Null)
             && !matches!(input, RivetValue::Null)
     }
 

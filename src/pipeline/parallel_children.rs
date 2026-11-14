@@ -573,6 +573,9 @@ mod child_reaper {
 
     /// Record a live child PID so the handler can signal it.
     pub(super) fn register(pid: u32) {
+        if seeded!("children-orphaned-on-sigterm", true, false) {
+            return;
+        }
         let pid = pid as i32;
         for slot in &SLOTS {
             if slot

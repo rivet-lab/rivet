@@ -1,0 +1,1 @@
+- **Harness**: 63 patch-form seeded defects from the first half of the seed list (up to `mysql-session-off-utc-read`) became `seeded!` switches graded in the one shared build, so each costs a run instead of a build.

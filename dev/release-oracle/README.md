@@ -347,6 +347,23 @@ Run it nightly on main. Each matrix `test` row is owed by the run that owns its 
 run reports the other's rows as "never ran this gate". Perf and flat RSS record a span per section
 (`perf ...`, `flat rss <engine> ...`) in the timing breakdown.
 
+## The two halves — one sha, two machines
+
+`dev/release_oracle/halves.py` places every per-run stage (`STAGE_HALF`) and every seeded-recall shard
+(`SEED_SHARD_HALF`, one entry per shard of the nightly dealer) in exactly one of two halves; the island keeps its own record.
+
+```
+make release-oracle-full ARGS="--half hosted"     # python -m dev.release_oracle --with-seeded-recall --half hosted
+make release-oracle-full ARGS="--half devbox"
+python3 -m dev.release_oracle --half hosted --list-stages   # the stages and seed count that half runs
+```
+
+Each half appends its own line (`release-oracle-full-hosted`, `release-oracle-full-devbox`: sha, binary stamp, verdict,
+canonical config) and is graded like a tag gate (an unexcused env skip is NOT GRADED). A half does not close known reds or
+matrix rows: it cannot see the other half's cells. `dev/pytools/release.py` reads only `release-oracle-full` and
+`release-oracle-island` lines, so a half alone never supports a tag. `python3 -m dev.release_oracle --self-test` fails a stage in
+no half or in a non-half, a stage added without a row, a row naming no stage, and a seed run in no half or in two.
+
 ## Final stage — BigQuery
 
 The only non-emulator stage, and the load goes through rivet on BOTH legs:

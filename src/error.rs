@@ -619,6 +619,7 @@ pub(crate) fn stop_class(err: &anyhow::Error) -> Option<ExitClass> {
         ErrorKind::Busy | ErrorKind::Transient => Some(ExitClass::Retryable),
         ErrorKind::Internal => Some(ExitClass::Internal),
         ErrorKind::Integrity => Some(ExitClass::DataIntegrity),
+        ErrorKind::Environment(_) if seeded!("stop-class", true, false) => None,
         ErrorKind::Usage | ErrorKind::Environment(Retry::Never) => Some(ExitClass::Generic),
         ErrorKind::Environment(Retry::Always) => Some(ExitClass::Retryable),
         ErrorKind::Environment(Retry::ByCause) => coded.cause().map(|c| {
