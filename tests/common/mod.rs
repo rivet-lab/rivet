@@ -577,6 +577,7 @@ mod unique_name_tests {
     /// Prints this process's nonce when run as the probe child of `two_processes_never_share_a_nonce`.
     #[test]
     fn unique_name_probe_child() {
+        assert_eq!(process_nonce().len(), 6);
         if std::env::var_os(PROBE).is_some() {
             println!("NONCE={}", process_nonce());
         }
