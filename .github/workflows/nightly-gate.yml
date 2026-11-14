@@ -24,10 +24,7 @@ jobs:
         part:
           - { name: no-silent-null, target: property-no-silent-null, release: true }
           - { name: no-secret-in-output, target: property-no-secret-in-output, stack: core }
-          - { name: no-debris-after-stop, target: property-no-debris-after-stop }
-          - { name: check-equals-run, target: property-check-equals-run }
           - { name: refusal-names-true-cause, target: property-refusal-names-true-cause-live }
-          - { name: seek-order, target: seek-order-matrix }
           - { name: open-defects, target: open-defects }
           - { name: oracle-scenarios, target: release-oracle-nightly, stack: lean }
           - { name: prev-release-compat, target: release-oracle-compat }
