@@ -10,12 +10,14 @@ It runs last so the registry is complete.
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 from dataclasses import dataclass
 
 from . import live_owners
-from .core import RAN_LIVE_MODULES, RAN_LIVE_TESTS, ROOT, Ledger, SkipCause
+from .core import DEVBOX, HOSTED, RAN_LIVE_MODULES, RAN_LIVE_TESTS, ROOT, Ledger, SkipCause
+from .halves import devbox_only, slice_modules
 from .scenarios import _run_live_modules, cfg
 
 __all__ = ["verify_live_modules", "live_suite_modules", "exclusive_tests", "EXCLUDED", "select_modules", "engines_arg"]
@@ -97,6 +99,70 @@ def exclusive_tests(modules: set[str] | None = None) -> list[str]:
     return names
 
 
+#: A live test's `#[ignore = "<reason>"]` followed by its fn: (reason, fn name).
+IGNORED_TEST = re.compile(r'^\s*#\[ignore = "([^"\n]*)"\]\s*(?:(?:#\[|//)[^\n]*\n\s*)*(?:pub )?(?:async )?fn ([a-z0-9_]+)', re.M)
+IGNORE_ATTR = re.compile(r'^\s*#\[ignore = "', re.M)
+
+#: The calls through which a stage names the live tests or modules it runs itself.
+REGISTRARS = frozenset({"_drive_live_tests", "run_rig_tests", "_run_live_modules"})
+
+
+def live_test_table() -> list[tuple[str, str, str]]:
+    """Every ignored live test as (module, fn name, ignore reason), read from tests/live/*.rs."""
+    return [(f.stem, name, reason) for f in sorted((ROOT / "tests" / "live").glob("*.rs"))
+            for reason, name in IGNORED_TEST.findall(f.read_text())]
+
+
+def part_tests(part: str, table: list[tuple[str, str, str]] | None = None) -> set[str]:
+    """Bare names of the live tests the `part` ("hosted" or "devbox") half runs: the devbox half takes every test whose reason needs what only it holds."""
+    return {name for _, name, reason in (live_test_table() if table is None else table) if devbox_only(reason) is (part == DEVBOX)}
+
+
+def _strings(node: ast.AST, consts: dict[str, set[str]]) -> set[str]:
+    """Every string literal under `node`, with a bare name replaced by the strings of the constant it names."""
+    out: set[str] = set()
+    for n in ast.walk(node):
+        if isinstance(n, ast.Constant) and isinstance(n.value, str):
+            out.add(n.value)
+        elif isinstance(n, ast.Name) and n.id in consts:
+            out |= consts[n.id]
+    return out
+
+
+def dedicated_live(sources: dict[str, str] | None = None) -> tuple[set[str], set[str]]:
+    """(modules, tests) the gate's dedicated stages run, read from the harness's own calls to the registrars: a string an argument carries that names a live module or test."""
+    if sources is None:
+        sources = {f.name: f.read_text() for f in sorted(ROOT.joinpath("dev", "release_oracle").glob("*.py")) if f.name != "live_modules.py"}
+    trees = {name: ast.parse(text) for name, text in sources.items()}
+    consts: dict[str, set[str]] = {}
+    for tree in trees.values():
+        for n in tree.body:
+            if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+                consts.setdefault(n.targets[0].id, set()).update(_strings(n.value, {}))
+    named: set[str] = set()
+    for tree in trees.values():
+        for n in ast.walk(tree):
+            if not isinstance(n, ast.Call):
+                continue
+            f = n.func
+            fname = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+            registry = isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.value.id in ("RAN_LIVE_TESTS", "RAN_LIVE_MODULES")
+            if fname in REGISTRARS or registry:
+                named |= _strings(n, consts)
+    modules = {m for m in live_suite_modules() if m in named}
+    tests = {name for _, name, _ in live_test_table() if name in named}
+    return modules, tests
+
+
+def verify_registry_covered(led: Ledger) -> None:
+    """A test or module a stage registered at run time that `dedicated_live` did not read from source is a FAIL: the static set is what the other half and the live slices subtract."""
+    modules, tests = dedicated_live()
+    missed = sorted((set(RAN_LIVE_TESTS) - tests) | (set(RAN_LIVE_MODULES) - modules))
+    if missed:
+        led.failed("-", "-", "live_registry", "-", f"live registry: {len(missed)} registration(s) the static dedicated set does not hold: {', '.join(missed[:8])}",
+                   "static dedicated set incomplete")
+
+
 def derived_filter(modules: list[str], ran_modules: set[str], ran_tests: set[str],
                    owners: frozenset[str] = frozenset()) -> tuple[list[str], str]:
     """The modules left to run and the nextest filter over them, minus tests already run and, under `owners`, tests named for another engine."""
@@ -119,28 +185,75 @@ def live_modules_env(state: str) -> tuple[dict[str, str], tuple[str, dict[str, s
     return env, again
 
 
-def verify_live_modules(led: Ledger, engines: list[str] | None = None) -> None:
-    """Run every live_suite module and test no dedicated cell ran, those of `engines` only when named; one ledger row per test."""
+def part_filter(expr: str, part: str, table: list[tuple[str, str, str]]) -> str:
+    """`expr` narrowed to the tests `part` runs: the devbox part keeps the devbox-only tests, the hosted part drops them."""
+    names = "|".join(re.escape(n) for n in sorted(part_tests(DEVBOX, table)))
+    return f"({expr}) & test(/::({names})$/)" if part == DEVBOX else f"({expr}) - test(/::({names})$/)"
+
+
+def part_plan(table: list[tuple[str, str, str]], modules: list[str], part: str, gone: set[str], dedicated_modules: set[str],
+              shard: tuple[int, int] | None = None) -> dict[str, list[str]]:
+    """The tests each of `modules` runs in `part`, minus the dedicated modules and the tests in `gone`; under `shard` (i, n) the i-th slice of those modules only."""
+    own = part_tests(part, table)
+    plan = {m: sorted(name for mod, name, _ in table if mod == m and name in own and name not in gone) for m in modules if m not in dedicated_modules}
+    plan = {m: names for m, names in plan.items() if names}
+    if shard is not None:
+        keep = slice_modules({m: len(names) for m, names in plan.items()}, shard[1])[shard[0] - 1]
+        plan = {m: plan[m] for m in keep}
+    return plan
+
+
+def coverage_problems(table: list[tuple[str, str, str]], modules: list[str], dedicated_modules: set[str], dedicated_tests: set[str], slices: int) -> list[str]:
+    """Live tests that run in no place or in two: a dedicated test must run in no live part, every other one in exactly one of the devbox part and the hosted slices."""
+    runs: dict[tuple[str, str], int] = {}
+    plans = [part_plan(table, modules, DEVBOX, set(dedicated_tests), dedicated_modules)] + [
+        part_plan(table, modules, HOSTED, set(dedicated_tests), dedicated_modules, (i, slices)) for i in range(1, slices + 1)]
+    for plan in plans:
+        for m, names in plan.items():
+            for n in names:
+                runs[(m, n)] = runs.get((m, n), 0) + 1
+    out = []
+    for mod, name, _ in table:
+        if mod not in modules:
+            continue
+        want = 0 if mod in dedicated_modules or name in dedicated_tests else 1
+        if runs.get((mod, name), 0) != want:
+            out.append(f"{mod}::{name} runs {runs.get((mod, name), 0)} time(s) in the live parts, wants {want}")
+    return out
+
+
+def verify_live_modules(led: Ledger, engines: list[str] | None = None, part: str = HOSTED, shard: tuple[int, int] | None = None) -> None:
+    """Run the live_suite modules and tests no dedicated cell ran and `part` (hosted or devbox) can run, those of `engines` only when named and of slice `shard` (i, n) only when given; one ledger row per test."""
     engines = engines or []
     modules = [m for m in live_suite_modules() if m not in EXCLUDED]
     sel = select_modules(engines, modules, live_owners.module_owners(), cfg("engines").split())
     owners = frozenset(sel.engines)
+    table = live_test_table()
+    dedicated_modules, dedicated_tests = dedicated_live()
+    gone = set(RAN_LIVE_TESTS) | dedicated_tests
+    plan = part_plan(table, list(sel.run), part, gone, dedicated_modules | set(RAN_LIVE_MODULES), shard)
+    run_modules = list(plan)
     if sel.narrowed:
         led.skip(sel.line())
         for e, mods in sel.left_out.items():
             led.skipped(e, "-", "live modules", "-", f"--engines {','.join(sel.engines)}: {len(mods)} {e} live module(s) not run",
                         cause=SkipCause.REDUCED)
-    left, expr = derived_filter(list(sel.run), set(RAN_LIVE_MODULES), set(RAN_LIVE_TESTS), owners)
-    excl = [n for n in exclusive_tests(set(sel.run) if sel.narrowed else None) if n not in RAN_LIVE_TESTS]
+    label = "live modules" if part == HOSTED else "live modules devbox"
+    if not run_modules:
+        led.skipped("-", "-", label, "-", f"{label}: no live test left for this part and slice", cause=SkipCause.DESIGN)
+        return
+    left, expr = derived_filter(run_modules, set(RAN_LIVE_MODULES) | dedicated_modules, gone, owners)
+    expr = part_filter(expr, part, table)
+    excl = [n for n in exclusive_tests(set(run_modules)) if n in {t for names in plan.values() for t in names}]
     env, again = live_modules_env(os.environ.get("RIVET_CDC_STATE_URL") or os.environ.get("RIVET_GATE_STATE_URL") or "")
-    _run_live_modules(led, "live", "live modules",
+    _run_live_modules(led, "live" if part == HOSTED else "live_devbox", label,
                       f"every other live_suite module ({len(left)}), derived from tests/live_suite.rs",
-                      left, env=env, again=again, keep=True,
+                      left, env=env, again=again, keep=True, register=False,
                       expr=f"({expr}) - test(/::({'|'.join(excl)})$/)" if excl else expr)
     if excl:
-        _run_live_modules(led, "live_modules", "live modules (exclusive)",
+        _run_live_modules(led, "live_modules" if part == HOSTED else "live_devbox_excl", f"{label} (exclusive)",
                           f"tests that need the stand to themselves ({len(excl)}), one at a time",
-                          left, env={**env, **EXCLUSIVE_ENV}, threads=1, again=again, keep=True,
+                          left, env={**env, **EXCLUSIVE_ENV}, threads=1, again=again, keep=True, register=False,
                           expr=live_owners.narrow_foreign("(" + " | ".join(f"test(/::{n}$/)" for n in excl) + ")", left, set(owners)))
 
 
@@ -170,7 +283,9 @@ def self_test() -> None:
     gate_engines = cfg("engines").split()
     assert set(gate_engines) <= set(live_owners.SOURCE_ENGINES), f"a gate engine no live module can be tied to: {gate_engines}"
 
-    def stage(engines: list[str] | None) -> tuple[list[str], str, list]:
+    table = [(m, f"{m}_t{i}", "live: requires docker compose postgres") for m in mods for i in (1, 2)] + [("cloud", "cloud_bq", "live: requires BigQuery creds")]
+
+    def stage(engines: list[str] | None, part: str = HOSTED, shard: tuple[int, int] | None = None) -> tuple[list[str], str, list]:
         """Run verify_live_modules over the fake owners; return the modules handed to nextest, the report line and the ledger rows."""
         seen: list[list[str]] = []
         led = Ledger(colour=False)
@@ -181,9 +296,11 @@ def self_test() -> None:
             st.enter_context(mock.patch(f"{__name__}.live_suite_modules", lambda: mods))
             st.enter_context(mock.patch(f"{__name__}.cfg", lambda *q: " ".join(known)))
             st.enter_context(mock.patch(f"{__name__}.exclusive_tests", lambda modules=None: []))
+            st.enter_context(mock.patch(f"{__name__}.live_test_table", lambda: table))
+            st.enter_context(mock.patch(f"{__name__}.dedicated_live", lambda: (set(), set())))
             st.enter_context(mock.patch(f"{__name__}._run_live_modules", lambda led, s, label, phase, left, **k: seen.append(list(left))))
-            verify_live_modules(led, engines)
-        return seen[0], "\n".join(led._buf), led.cells
+            verify_live_modules(led, engines, part, shard)
+        return (seen[0] if seen else []), "\n".join(led._buf), led.cells
 
     ran, said, cells = stage(["mysql"])
     assert ran == list(one.run), ran
@@ -194,8 +311,42 @@ def self_test() -> None:
     assert select_modules(["mysql"], ["my_a"], owners, known).line().endswith("none"), "an empty engine-less set is said, not left blank"
     ran, said, cells = stage(None)
     assert ran == mods and "NARROWED" not in said and not cells, (ran, said)
+    dev_ran, _, _ = stage(None, DEVBOX)
+    assert dev_ran == ["cloud"], f"the devbox part runs the module with a credentials test and nothing else: {dev_ran}"
+    cut = [stage(None, HOSTED, (i, 3))[0] for i in (1, 2, 3)]
+    assert sorted(m for c in cut for m in c) == mods and sum(map(len, cut)) == len(mods), f"the slices do not partition the modules: {cut}"
+    assert cut == [stage(None, HOSTED, (i, 3))[0] for i in (1, 2, 3)], "the slices are not deterministic"
     left, expr = derived_filter(["live_cdc", "live_mssql_variant"], set(), set(), frozenset({"mysql"}))
     assert left == ["live_cdc", "live_mssql_variant"] and "mssql" in expr and expr.startswith("(test(/^(live_cdc|"), expr
     assert derived_filter(["live_cdc"], set(), set())[1] == "test(/^(live_cdc)::/)", "no selector narrows no test"
     live_owners.self_test()
+    real = live_test_table()
+    marked = sum(len(IGNORE_ATTR.findall(f.read_text())) for f in (ROOT / "tests" / "live").glob("*.rs"))
+    assert len(real) == marked, f"{marked - len(real)} ignored live test(s) the reason scan does not read: the hosted/devbox split would lose them"
+    assert part_tests(HOSTED, real) | part_tests(DEVBOX, real) == {n for _, n, _ in real} and not part_tests(HOSTED, real) & part_tests(DEVBOX, real), "a live test runs in neither part or in both"
+    assert part_tests(DEVBOX, real), "no live test needs the devbox half"
+    real_mods = [m for m in live_suite_modules() if m not in EXCLUDED]
+    real_dedicated = dedicated_live()
+    for n in (1, 3, 5):
+        bad = coverage_problems(real, real_mods, *real_dedicated, n)
+        assert not bad, f"{len(bad)} live test(s) run in no part or in two with {n} slice(s): {bad[:5]}"
+    dedicated_m, dedicated_t = dedicated_live({"a.py": 'X = ("same_named_configs_share_a_postgres_state_cdc_cycle",)\nrun_rig_tests(led, "s", X)\nother("live_cdc")\n'})
+    assert dedicated_t == {"same_named_configs_share_a_postgres_state_cdc_cycle"} and not dedicated_m, (dedicated_m, dedicated_t)
+    assert dedicated_live({"a.py": 'RAN_LIVE_TESTS.add(T)\nT = "roast_pg_cdc_bounded_on_a_standby_fails_loud"\n'})[1] == {"roast_pg_cdc_bounded_on_a_standby_fails_loud"}, "a registration through a named constant is not read"
+    real_dedicated_modules, real_dedicated_tests = dedicated_live()
+    held, ghost = sorted(real_dedicated_tests)[0], "a_test_no_source_names_registered_at_run_time"
+    saved_tests, saved_modules = set(RAN_LIVE_TESTS), set(RAN_LIVE_MODULES)
+    try:
+        for ran, red in (({held}, False), ({held, ghost}, True)):
+            RAN_LIVE_MODULES.clear()
+            RAN_LIVE_TESTS.clear()
+            RAN_LIVE_TESTS.update(ran)
+            led = Ledger(colour=False)
+            verify_registry_covered(led)
+            assert led.red is red, f"registered {sorted(ran)}: the static dedicated set reads as {'complete' if not red else 'incomplete'} wrongly"
+    finally:
+        RAN_LIVE_TESTS.clear()
+        RAN_LIVE_TESTS.update(saved_tests)
+        RAN_LIVE_MODULES.clear()
+        RAN_LIVE_MODULES.update(saved_modules)
     print("self-test ok: --engines runs the named engines' live modules and the engine-less ones, prints the rest as excluded, and no selector runs all")
