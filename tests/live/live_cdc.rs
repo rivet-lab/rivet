@@ -510,9 +510,9 @@ fn pg_cdc_steady_state_run_opens_at_most_two_source_connections() {
     std::fs::create_dir_all(&out2).unwrap();
     let opened = connections_opened_by_run(&forward, &config(&out2));
     assert_eq!(
-        manifest_rows(&out2),
+        duckdb_dir_scalar(&out2, "count(DISTINCT id)", None),
         2,
-        "the counted run drains the 2 changes"
+        "the counted run delivers the 2 changes"
     );
     assert_eq!(
         opened, 2,
