@@ -1273,15 +1273,24 @@ fn execute_load<R>(
     // Everything the selection can stop on happens before any warehouse write, so every
     // stop is typed and journaled as `refused` here: untyped and unrecorded, the load read
     // as never attempted, and a `failed` row would have counted as rivet's own attempt.
-    let inputs = match load::before_write(prepare_load(
+    let prepared = prepare_load(
         store,
         job.plan,
         job.state,
         &target_fqtn,
         job.allow_source_drift,
-    )) {
+    );
+    let inputs = match seeded!(
+        "load-refusal-not-journaled",
+        prepared,
+        load::before_write(prepared)
+    ) {
         Err(e) => {
-            ctx.record(&[], 0, load::ledger::ledger_status(&e));
+            seeded!(
+                "load-refusal-not-journaled",
+                (),
+                ctx.record(&[], 0, load::ledger::ledger_status(&e))
+            );
             return Err(e);
         }
         Ok(Some(i))

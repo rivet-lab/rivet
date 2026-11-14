@@ -1055,7 +1055,13 @@ impl MssqlSource {
             .query_scalar(SERVER_COUNTERS_GRANTED)
             .ok()
             .flatten()
-            .is_some_and(|v| v.trim() == "1");
+            .is_some_and(|v| {
+                seeded!(
+                    "mssql-denied-counters-queried",
+                    v.trim() != "x",
+                    v.trim() == "1"
+                )
+            });
         self.server_counters = Some(readable);
         readable
     }

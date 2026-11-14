@@ -942,7 +942,11 @@ impl PgChangeStream {
                     self.exhausted = true;
                     break;
                 }
-                self.frontier_text = Some(lsn);
+                self.frontier_text = seeded!(
+                    "message-only-window-ends-the-drain",
+                    self.frontier_text.take(),
+                    Some(lsn)
+                );
             } else if data.starts_with("BEGIN") {
                 // Dropping any spill too — a transaction that never reached its
                 // COMMIT in this window is re-read from the slot next time.
