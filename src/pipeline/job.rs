@@ -4053,4 +4053,16 @@ mod tests {
         let err = reconcile_run_gate(&summary, Some("source count query failed")).unwrap_err();
         crate::error::assert_coded(&err, "RIVET_RUN_RECONCILE_UNVERIFIED", 1);
     }
+
+    /// A manifest gap fails the run and carries its reason.
+    #[test]
+    fn a_manifest_gap_fails_the_run_with_its_reason() {
+        let mut summary = RunSummary::default();
+        fail_for_manifest_gap(&mut summary, "manifest gap: part 3 missing");
+        assert_eq!(summary.status, "failed");
+        assert_eq!(
+            summary.error_message.as_deref(),
+            Some("manifest gap: part 3 missing")
+        );
+    }
 }
