@@ -809,8 +809,12 @@ def _stage_table_self_test() -> None:
         assert {s.name for s in per_run} | {s.name for s in island} == {s.name for s in table}, "every stage runs in the gate or the island"
         assert not {s.name for s in per_run} & {s.name for s in island} and {s.name for s in island} == measuring, \
             "the island is exactly the measured stages and the per-run gate runs none of them"
-        assert island_functions(table) == {s.run.__name__ for s in island} and all(
+        assert island_functions(table) >= {s.run.__name__ for s in island} and all(
             f.startswith("verify_") for f in island_functions(table)), island_functions(table)
+        full_gate = Ledger(colour=False)
+        full_gate.close_matrix_rows({"preflights": [{"id": "seeded_platform_rows", "status": "test"}]},
+                                    owned=lambda fn: fn not in island_functions(table))
+        assert not full_gate.cells, "the island runs the seeded platform rows inline, so the full gate does not owe them"
         assert table[-1].name == "live modules" and [s.name for s in cut[-1]] == ["live modules"], \
             "live modules runs last and alone: it runs what no stage before it ran"
         assert "release hygiene" in {s.name for s in table}, "cargo deny check and docgen --check are gate stages"
@@ -1287,7 +1291,8 @@ def _self_test() -> int:
     from . import state_lib as _sl
     assert set(_sl.filters()) >= {"state::row::", "load::orchestrate::"}, _sl.filters()
     assert _sl.selected("load::orchestrate::load_ledger_tests::pg_a_mixed_split_generation_is_journaled_refused_and_refuses_again")
-    assert not _sl.selected("pipeline::cli::tests::x"), "the selection is the modules that read the state URL, not the lib"
+    assert _sl.selected("pipeline::cli::tests::a_reset_on_a_postgres_state"), "a module reading the URL through postgres_for_test is selected"
+    assert not _sl.selected("pipeline::chunked::tests::x"), "the selection is the modules that read the state URL, not the lib"
     assert _sl.vacuous("running 0 tests\ntest result: ok. 0 passed; 0 failed", {}), "a zero-match filter graded nothing"
     assert _sl.vacuous("test result: ok. 9 passed; 0 failed", {"state::x::t": "RIVET_TEST_STATE_URL unset"})
     assert _sl.vacuous("test result: ok. 9 passed; 0 failed", {}) == []
@@ -1822,8 +1827,8 @@ def selected_stages(ns: argparse.Namespace, table: Sequence[Stage]) -> list[Stag
 
 
 def island_functions(table: Sequence[Stage]) -> frozenset[str]:
-    """The stage functions the island runs, by name: the rows the per-run gate does not owe and the island run does."""
-    return frozenset(st.run.__name__ for st in island_stages(table))
+    """The functions the island runs, by name: the measured stages and the inline seeded platform rows; the per-run gate does not owe them."""
+    return frozenset(st.run.__name__ for st in island_stages(table)) | {verify_seeded_platform_rows.__name__}
 
 
 def build_stages(ns: argparse.Namespace, built: dict) -> list[Stage]:

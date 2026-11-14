@@ -81,15 +81,20 @@ def transient(e: BaseException) -> bool:
         "read session" in s and re.search(r"\b(CANCELLED|UNAVAILABLE|DEADLINE_EXCEEDED|ABORTED)\b", s))
 
 
+def attach_transient(e: BaseException) -> bool:
+    """Whether an ATTACH error is transport, or the extension's one-off failure to find the ADC it found for every other cell."""
+    return transient(e) or "No usable authentication credentials were found" in str(e)
+
+
 def retry(read, *, tries: int = READ_TRIES, budget: float = READ_BUDGET_S, pause: float = 5.0,
-          clock=time.monotonic, sleep=time.sleep):
-    """`read()`, again while it fails in transport, within `tries` and `budget` seconds; then `OracleUnavailable`."""
+          clock=time.monotonic, sleep=time.sleep, retryable=transient):
+    """`read()`, again while `retryable` says it failed in transport, within `tries` and `budget` seconds; then `OracleUnavailable`."""
     start = clock()
     for attempt in range(1, tries + 1):
         try:
             return read()
         except duckdb.Error as e:
-            if not transient(e):
+            if not retryable(e):
                 raise
             spent = clock() - start
             if attempt == tries or spent + pause >= budget:
@@ -170,7 +175,8 @@ class Oracle:
             # listing EVERY dataset, and one a concurrent cell drops mid-listing fails
             # the query (`Not found: Dataset …`).
             scope = f" dataset={bq_dataset}" if bq_dataset else ""
-            self.db.sql(f"ATTACH 'project={self.project}{scope}' AS bq (TYPE bigquery, READ_ONLY)")
+            retry(lambda: self.db.sql(f"ATTACH 'project={self.project}{scope}' AS bq (TYPE bigquery, READ_ONLY)"),
+                  retryable=attach_transient)
 
         if snowflake:
             import adbc_driver_snowflake

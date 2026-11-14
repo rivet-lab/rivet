@@ -117,6 +117,38 @@ FIX_SCOPE: dict[str, tuple[str, str]] = {
         r"^(?!cdc_to_files_still_refuses_a_partial_after_image_mysql$)",
         "2026-11-08: #882 the partial after image was refused by the file sink on 0.32.2 as well (the control of the new before-image check); the before-image and stdout cells fail there",
     ),
+    "43099914": (
+        r"^(?!a_columns_override_on_a_numeric_field_never_nulls_it_mongo$|a_declared_override_delivers_the_source_or_refuses_by_code_(mssql|oracle|postgres)$|an_integer_column_declared_float_is_delivered_with_its_values_oracle$|text_and_decimal_under_a_float_or_int_override_read_as_before_mysql$)",
+        "2026-11-14: #904 the fix is the MySQL reader; the mssql, oracle, postgres and mongo override cells and the mysql text and decimal read-as-before cell are controls 0.32.2 passes; the mysql int-under-float and unread-value cells fail there",
+    ),
+    "0ff06b83": (
+        r"^(?!a_lease_is_refused_while_held_and_free_the_moment_it_is_dropped$)",
+        "2026-11-14: #937 the lease cell was only re-typed for Secret and 0.32.2 refuses a held lease too; the fast-clock supersede cell fails there",
+    ),
+    "2c4ae204": (
+        r"^(?!(a_view_over_a_not_null_cursor|an_expression_over_a_not_null_cursor|not_null_cursor)_delivers_once_|coalesce_over_a_nullable_cursor_delivers_)",
+        "2026-11-14: #947 the admitted-cursor cells (not-null, view, expression, coalesce) are controls 0.32.2 delivers; the nullable, unrenderable and null-cell refusal cells fail there",
+    ),
+    "4f379a5d": (
+        r"^(?!an_unkeyed_mongo_cdc_export_of_mixed_id_types_still_runs_with_a_warning$)",
+        "2026-11-14: #939 an unkeyed export of mixed _id types ran with a warning on 0.32.2 as well; the keyed refusal, stream and checkpoint cells fail there",
+    ),
+    "06bef3fe": (
+        r"^(?!crashed_\w+_then_(an_unrelated_setting_edited_resumes_|nothing_edited_resumes_|format_edited_is_refused_by_the_owner_check_))",
+        "2026-11-14: #954 unrelated-setting, nothing-edited and format-owner-check cells are controls 0.32.2 passes (resume or refusal as before); the columns, compression and meta_columns edited cells fail there",
+    ),
+    "c5628137": (
+        r"^(?!order_equals_seek_(mysql|oracle|postgres)$)",
+        "2026-11-14: #948 the mssql text-key fix; the mysql, oracle and postgres order_equals_seek cells are controls 0.32.2 passes; the mssql cells fail there",
+    ),
+    "c955341c": (
+        r"^(?!pg_cdc_server_text_types_and_separator_values_are_delivered_unchanged$)",
+        "2026-11-14: #950 server text and separator values were delivered unchanged on 0.32.2 (the control of the one tokenizer); the bit-column, colon-space and bracket cells fail there",
+    ),
+    "1ef708e2": (
+        r"^(?!url_file_resolved_as_before_)",
+        "2026-11-14: #932 url_file_resolved_as_before is the control (a path resolved as before) 0.32.2 passes; the follows-the-config, working-directory and upgrade-moved cells fail there",
+    ),
 }
 #: Fix commit (short sha) → (a test that sees its defect, reason) for a fix that credits no live cell. Shrink-only.
 NO_LIVE_CELL: dict[str, tuple[str, str]] = {

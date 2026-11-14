@@ -2068,6 +2068,36 @@ def _self_test() -> None:
         duck.retry(dropped, clock=lambda: next(now), sleep=slept.append)
     except duck.OracleUnavailable:
         assert len(calls) == 1, "past the budget the oracle must give up, not wait for another try"
+    noauth = duckdb.InvalidInputException("BigQuery Authentication Failed\n\nNo usable authentication credentials were found.")
+    calls.clear()
+
+    def noauth_once():
+        calls.append(1)
+        if len(calls) == 1:
+            raise noauth
+        return "attached"
+
+    assert duck.retry(noauth_once, sleep=slept.append, retryable=duck.attach_transient) == "attached" and len(calls) == 2, \
+        "an ATTACH that once fails to find the credentials the other cells found is tried again"
+    try:
+        duck.retry(lambda: (_ for _ in ()).throw(noauth), sleep=slept.append)
+    except duckdb.InvalidInputException:
+        pass
+    else:
+        raise AssertionError("a read keeps treating absent credentials as an error")
+    from unittest import mock
+
+    attaches = []
+
+    def flaky_sql(stmt):
+        if stmt.startswith("ATTACH"):
+            attaches.append(stmt)
+            if len(attaches) == 1:
+                raise noauth
+
+    with mock.patch.object(duck.duckdb, "connect", return_value=mock.Mock(sql=flaky_sql)), mock.patch.object(duck.time, "sleep"):
+        duck.Oracle(bigquery=True, bq_project="p", bq_dataset="d")
+    assert len(attaches) == 2, "the BigQuery ATTACH itself is the read that is tried again"
     wrong = duckdb.BinderException('Referenced column "w" not found')
     try:
         duck.retry(lambda: (_ for _ in ()).throw(wrong), sleep=slept.append)
