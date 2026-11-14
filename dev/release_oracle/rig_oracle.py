@@ -2096,7 +2096,8 @@ def _self_test() -> None:
                 raise noauth
 
     with mock.patch.object(duck.duckdb, "connect", return_value=mock.Mock(sql=flaky_sql)), mock.patch.object(duck.time, "sleep"):
-        duck.Oracle(bigquery=True, bq_project="p", bq_dataset="d")
+        with duck.Oracle(bigquery=True, bq_project="p", bq_dataset="d"):
+            pass
     assert len(attaches) == 2, "the BigQuery ATTACH itself is the read that is tried again"
     wrong = duckdb.BinderException('Referenced column "w" not found')
     try:
