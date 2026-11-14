@@ -1,0 +1,122 @@
+name: Gate hosted half
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Commit to grade (full or short sha); empty grades the head of the ref the run was started on.
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  NO_COLOR: "1"
+  LIVE_SLICES: "3"
+
+jobs:
+  plan:
+    name: Resolve the commit and the slices
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - id: resolve
+        env:
+          INPUT_SHA: ${{ inputs.sha }}
+          REF_SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          sha=$(gh api "repos/$REPO/commits/${INPUT_SHA:-$REF_SHA}" --jq .sha)
+          [ "${#sha}" -eq 40 ]
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "matrix=$(python3 -c 'import json, os; print(json.dumps({"slice": list(range(int(os.environ["LIVE_SLICES"]) + 1))}))')" >> "$GITHUB_OUTPUT"
+
+  slice:
+    name: slice ${{ matrix.slice }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+
+      - name: The tree is the commit asked for
+        env:
+          WANT: ${{ needs.plan.outputs.sha }}
+        run: test "$(git rev-parse HEAD)" = "$WANT"
+
+      - uses: ./.github/actions/live-stack
+        with:
+          stack: lean
+
+      - name: Grade the slice
+        env:
+          SLICE: ${{ matrix.slice }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          CARGO_BUILD_JOBS: "2"
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
+        run: |
+          mkdir -p out
+          set +e
+          (while sleep 120; do date -u +%T; free -m | sed -n 2p; docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' | sort -k2 -h | tail -4; done) &
+          sampler=$!
+          make release-oracle-hosted-half ARGS="--live-shard $SLICE/$LIVE_SLICES" 2>&1 | tee out/gate.log
+          rc=${PIPESTATUS[0]}
+          kill "$sampler"
+          [ -s dev/release-oracle/timings.jsonl ] && tail -n 1 dev/release-oracle/timings.jsonl > out/record.json
+          echo "$rc" > out/exit-code.txt
+          exit "$rc"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: slice-${{ matrix.slice }}
+          path: out/
+          overwrite: true
+          if-no-files-found: warn
+
+      - name: Disk after the slice
+        if: always()
+        run: df -h / && free -m
+
+      - name: Stop services
+        if: always()
+        run: docker compose down -v
+
+  verdict:
+    name: Hosted half verdict
+    needs: [plan, slice]
+    if: ${{ always() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: slice-*
+          path: slices
+        continue-on-error: true
+
+      - name: One table for the hosted half
+        env:
+          SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          set -o pipefail
+          python3 .github/scripts/hosted_gate_verdict.py --artifacts slices --sha "$SHA" --slices "$LIVE_SLICES" | tee -a "$GITHUB_STEP_SUMMARY"

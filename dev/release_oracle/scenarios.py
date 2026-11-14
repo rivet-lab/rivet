@@ -2141,16 +2141,17 @@ def _module_red(led: Ledger, scenario: str, label: str, name: str, why: str, log
 def _run_live_modules(led: Ledger, scenario: str, label: str, phase: str,
                       modules: list[str], env: dict[str, str] | None = None,
                       expr: str | None = None, threads: int | None = None,
-                      again: tuple[str, dict[str, str]] | None = None, keep: bool = False) -> None:
+                      again: tuple[str, dict[str, str]] | None = None, keep: bool = False, register: bool = True) -> None:
     """Run live_suite `modules` (or the nextest filter `expr`) through the gate binary; one ledger row per test case.
 
     `again` is (an env var, the env that sets it): a test whose self-skip names the var runs a second time under that env, and that leg is its verdict.
-    `keep` copies each nextest log into target/gate-failures; every nextest leg is timed as a split."""
+    `keep` copies each nextest log into target/gate-failures; every nextest leg is timed as a split; `register` False leaves RAN_LIVE_MODULES alone."""
     led.phase(f"{label} · {phase}")
     if not have("cargo"):
         _skipped(led, scenario, "batch", "-", "-", f"{label}: cargo absent", "no cargo", cause=SkipCause.ENV)
         return
-    RAN_LIVE_MODULES.update(modules)
+    if register:
+        RAN_LIVE_MODULES.update(modules)
     log_path = work_dir() / f"{scenario}_{'_'.join(modules)[:120]}.log"
 
     def leg(path: Path, leg_expr: str, leg_env: dict[str, str] | None, split: str):

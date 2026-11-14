@@ -161,9 +161,11 @@ def _live_modules_self_test() -> None:
             for f in kept.glob("*"):
                 f.unlink()
     calls = []
+    runs = {n for names in live_modules.part_plan(live_modules.live_test_table(), live_modules.live_suite_modules(), "hosted", set(), set()).values() for n in names}
+    one = next(n for n in live_modules.exclusive_tests() if n in runs)
     with ExitStack() as st:
         st.enter_context(mock.patch.object(live_modules, "_run_live_modules", lambda *a, **k: calls.append(k)))
-        st.enter_context(mock.patch.object(live_modules, "exclusive_tests", lambda modules=None: ["a_test"]))
+        st.enter_context(mock.patch.object(live_modules, "exclusive_tests", lambda modules=None: [one]))
         live_modules.verify_live_modules(Ledger(colour=False))
     assert len(calls) == 2 and all(c.get("keep") for c in calls), calls
 

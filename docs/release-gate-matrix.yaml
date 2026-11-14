@@ -192,6 +192,9 @@ preflights:
   - id: seeded_platform_rows
     what: "the seeded-recall rows that declare a platform run on that platform in the island: --platform-rows grades only them, and an OWED row on the island host fails."
     status: test        # verify_seeded_platform_rows (dev/release_oracle/__main__.py)
+  - id: registry_covered
+    what: "every live test or module a stage registers at run time is held by the static dedicated set the hosted and devbox halves and the live slices subtract; a registration the set misses is a FAIL, so no slice runs it twice or none runs it."
+    status: test        # verify_registry_covered (dev/release_oracle/live_modules.py)
   - id: coverage_matrices
     what: "every docs/*-matrix.yaml drift-guard runs (chunking/behaviour/type-fidelity/... + release_gate + perf) so a rotted coverage ledger blocks the release, not just CI."
     status: test        # verify_coverage_matrices
