@@ -1687,12 +1687,15 @@ def verify_auth(led: Ledger) -> None:
     if not have("cargo"):
         _skipped(led, "infra", "mongo", "auth", "-", "mongo-auth: cargo absent", "no cargo", cause=SkipCause.ENV)
         return
-    if not _tcp_open("127.0.0.1", 27020):
+    from ..pytools import registry
+
+    port = urllib.parse.urlparse(registry.gate_profiles()["mongo-auth"]["url"]).port
+    if not _tcp_open("127.0.0.1", port):
         _skipped(
             led, "infra", "mongo", "auth", "-",
-            "mongo-auth: :27020 unreachable (docker compose up -d mongo-auth)",
+            f"mongo-auth: :{port} unreachable (docker compose up -d mongo-auth)",
             "mongo-auth down",
-            cause=SkipCause.ENV, target=stand_health.tcp_target("127.0.0.1", 27020),
+            cause=SkipCause.ENV, target=stand_health.tcp_target("127.0.0.1", port),
         )
         return
     _drive_live_tests(
@@ -2153,6 +2156,9 @@ def _run_live_modules(led: Ledger, scenario: str, label: str, phase: str,
     if register:
         RAN_LIVE_MODULES.update(modules)
     log_path = work_dir() / f"{scenario}_{'_'.join(modules)[:120]}.log"
+    if expr is None:
+        from .live_modules import dedicated_expr
+        expr = dedicated_expr(modules)
 
     def leg(path: Path, leg_expr: str, leg_env: dict[str, str] | None, split: str):
         """One nextest leg, timed as `split` and its log kept when `keep`."""
@@ -2165,7 +2171,7 @@ def _run_live_modules(led: Ledger, scenario: str, label: str, phase: str,
 
     since = stand_health.BOOK.mark()
     verdicts, started, skipped, panics = leg(
-        log_path, expr or " | ".join(f"test(/^{m}::/)" for m in modules), env, f"nextest {label}")
+        log_path, expr, env, f"nextest {label}")
     if started is not None and len(verdicts) != started:
         _failed(led, scenario, "batch", "-", "-",
                 f"{label}: graded {len(verdicts)} of the {started} tests nextest ran — the rest "

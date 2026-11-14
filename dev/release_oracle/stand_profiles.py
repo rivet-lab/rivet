@@ -268,8 +268,8 @@ def self_test() -> None:
     with tempfile.TemporaryDirectory() as d:
         mounts = json.dumps([{"Type": "bind", "Source": d}, {"Type": "bind", "Source": d + "/deleted"}, {"Type": "volume", "Source": "/var/lib/docker/volumes/x"}])
         assert missing_sources(mounts) == [d + "/deleted"] and missing_sources("") == [] and missing_sources("null") == []
-    assert set(registry.gate_profiles()) >= {"shard", "tz", "mysql-stmt", "clickhouse", "governor", "minio", "fake-gcs", "azurite"}, \
-        "the gate must start shard, tz, mysql-stmt, clickhouse, governor and the three object stores"
+    assert set(registry.gate_profiles()) >= {"shard", "tz", "mysql-stmt", "clickhouse", "governor", "minio", "fake-gcs", "azurite", "mongo-auth"}, \
+        "the gate must start shard, tz, mysql-stmt, clickhouse, governor, mongo-auth and the three object stores"
     compose_file = yaml.safe_load((ROOT / "docker-compose.yaml").read_text())["services"]
     for name, p in registry.gate_profiles().items():
         for svc in p["services"]:

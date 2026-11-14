@@ -182,6 +182,7 @@ TEMPORAL = re.compile(r"(DATE|TIMESTAMPTZ|TIMESTAMP|DATETIME2|DATETIME|SMALLDATE
 ZERO_DATE_LIT = re.compile(r"'(0000-00-00|\d{4}-00-\d\d|\d{4}-\d\d-00)( [0-9:.]+)?'")
 ALTER_TABLE = re.compile(r"\bALTER\s+TABLE\b", re.I)
 MYSQL_LAX = "SET SESSION sql_mode = ''; "
+ORACLE_ZONE = "ALTER SESSION SET TIME_ZONE = 'Europe/Brussels'; "
 
 
 def _zero_dates(engine: str, native: str) -> list[str]:
@@ -319,8 +320,9 @@ def mysql_text(statement: str) -> str:
 
 
 def sql(engine: str, url: str, statement: str) -> core.Proc:
-    """One source statement of this matrix, MySQL under the session mode mysql_text picks."""
-    return engines.sql(engine, url, mysql_text(statement) if engine == "mysql" else statement)
+    """One source statement of this matrix, MySQL under the session mode mysql_text picks, Oracle in the fixed session zone."""
+    text = mysql_text(statement) if engine == "mysql" else ORACLE_ZONE + statement if engine == "oracle" else statement
+    return engines.sql(engine, url, text)
 
 
 def seed(engine: str, url: str) -> tuple[list[Col], int]:
@@ -1196,6 +1198,15 @@ def self_test() -> None:
     finally:
         cdc._mysql, cdc._psql = real_mysql, real_psql
     assert [s.startswith(MYSQL_LAX) for s in sent] == [True, True, True, False, False], "a zero-date or ALTER statement on MySQL runs under an empty sql_mode, any other as it is"
+    zoned: list[str] = []
+    real_sql = engines.sql
+    engines.sql = lambda engine, url, text: zoned.append(text) or _proc(0)
+    try:
+        sql("oracle", "u", "INSERT INTO t VALUES (1)")
+        sql("postgres", "u", "SELECT 1")
+    finally:
+        engines.sql = real_sql
+    assert zoned == [ORACLE_ZONE + "INSERT INTO t VALUES (1)", "SELECT 1"], "an Oracle seed runs in the fixed session zone, not the host zone the known-red keys depend on"
     assert "C00" in config("oracle", "U", "incremental", "parquet", "c00", "int8", "o") and "cursor_column: ID" in config("oracle", "U", "incremental", "parquet", "c00", "none", "o")
     refused = grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] x"), _proc(2))
     assert refused.klass == "" and refused.verdict == REFUSED and refused.code == "RIVET_SOURCE_VALUE_UNREPRESENTABLE"

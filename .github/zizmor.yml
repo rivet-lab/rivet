@@ -14,6 +14,8 @@ rules:
       # 2026-11-14: same actionlint limit for the hosted gate half; closes with the entries above.
       - gate-hosted.yml
       - action.yml
+      # 2026-11-14: same actionlint limit for the nightly deny workflow; closes with the entries above.
+      - deny-nightly.yml
   cache-poisoning:
     ignore:
       # 2026-11-04: tag-scoped runs restore only default-branch caches (PR caches are ref-isolated); closes if release builds go cache-free.
