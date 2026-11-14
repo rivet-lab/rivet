@@ -51,6 +51,96 @@ const COMMON_BLANKET_ALLOW_CEILING: usize = 17; // ratchet-pin: tests-common-bla
 // 0 -> 1 (2026-10-31): first measurement on main ff0a4f2c; pipeline/mod.rs::clamp_line and pipeline/summary.rs::clamp_chars, closes when one calls the other.
 const DUPLICATE_BODY_CEILING: usize = 1; // ratchet-pin: duplicate-fn-bodies (review 2027-02-01)
 
+/// Lines a product function may span before it is ledgered in `LONG_FUNCTIONS`.
+const LONG_FUNCTION_LINES: usize = 150;
+
+/// Product functions over `LONG_FUNCTION_LINES`, as (`file::fn#occurrence`, ceiling). Every row: 2026-11-13, first measurement; closes when the function is split and the row is deleted.
+const LONG_FUNCTIONS: &[(&str, usize)] = &[
+    ("src/cli/dispatch.rs::dispatch#1", 195),
+    ("src/cli/dispatch.rs::dispatch_cdc#1", 155),
+    ("src/config/cdc.rs::validate_export_cdc#1", 174),
+    ("src/error/retry.rs::classify_error#1", 202),
+    ("src/format/csv.rs::write_csv_value#1", 239),
+    ("src/init/yaml_scaffold.rs::export_block_lines#1", 339),
+    ("src/load/bigquery/mod.rs::compact#1", 182),
+    ("src/load/compact.rs::run_compacts#1", 175),
+    ("src/load/orchestrate.rs::load_incremental_job#1", 172),
+    ("src/load/orchestrate.rs::load_one_cdc_base#1", 158),
+    ("src/load/orchestrate.rs::prepare_load#1", 176),
+    ("src/load/orchestrate.rs::run_loads#1", 256),
+    ("src/load/plan.rs::build_plans_keyed#1", 230),
+    ("src/pipeline/apply_cmd.rs::run_apply_command#1", 327),
+    ("src/pipeline/cdc/mod.rs::run_capture#1", 157),
+    ("src/pipeline/cdc/sink.rs::flush#1", 171),
+    ("src/pipeline/cdc/sink.rs::run_to_files#1", 315),
+    ("src/pipeline/cdc_job.rs::initial_snapshot_pending#1", 176),
+    ("src/pipeline/cdc_job.rs::run_cdc_inner#1", 162),
+    (
+        "src/pipeline/chunked/detect.rs::detect_and_generate_chunks#1",
+        180,
+    ),
+    ("src/pipeline/chunked/exec.rs::run_chunked_parallel#1", 253),
+    (
+        "src/pipeline/chunked/parallel_checkpoint.rs::run_chunked_parallel_checkpoint#1",
+        451,
+    ),
+    (
+        "src/pipeline/chunked/resume_m8.rs::apply_m8_resume_decisions#1",
+        353,
+    ),
+    (
+        "src/pipeline/chunked/sequential_checkpoint.rs::run_chunked_sequential_checkpoint#1",
+        246,
+    ),
+    ("src/pipeline/cli.rs::show_journal#1", 163),
+    ("src/pipeline/finalize.rs::write_run_manifest#1", 259),
+    ("src/pipeline/job.rs::execute_resolved_plan#1", 242),
+    ("src/pipeline/job.rs::run_export_job_inner#1", 215),
+    ("src/pipeline/keyset.rs::run_keyset#1", 322),
+    ("src/pipeline/keyset.rs::run_keyset_parallel#1", 428),
+    (
+        "src/pipeline/parallel_children.rs::run_exports_as_child_processes#1",
+        352,
+    ),
+    ("src/pipeline/plan_cmd.rs::run_plan_command#1", 200),
+    ("src/pipeline/repair_cmd.rs::execute_repair#1", 163),
+    ("src/pipeline/report.rs::render_markdown#1", 176),
+    ("src/pipeline/run.rs::run#1", 321),
+    ("src/pipeline/run.rs::run_pool#1", 448),
+    ("src/pipeline/run.rs::run_waves#1", 244),
+    ("src/pipeline/sink/cursor.rs::render_cursor_value#1", 155),
+    ("src/pipeline/validate_cmd.rs::run_validate_command#1", 186),
+    ("src/pipeline/validate_cmd.rs::verify_one_prefix#1", 173),
+    (
+        "src/pipeline/validate_manifest.rs::verify_at_destination#1",
+        313,
+    ),
+    ("src/plan/build.rs::build_plan_on#1", 226),
+    (
+        "src/plan/build.rs::chunked_strategy_from_introspection#1",
+        190,
+    ),
+    ("src/plan/build.rs::resolve_chunked_strategy#1", 175),
+    ("src/preflight/doctor.rs::doctor#1", 263),
+    ("src/preflight/mod.rs::check#1", 300),
+    ("src/source/cdc/mod.rs::create_change_stream#1", 195),
+    ("src/source/mongo/cdc.rs::open#1", 205),
+    ("src/source/mongo/mod.rs::export#1", 158),
+    ("src/source/mssql/arrow_convert.rs::build_array#1", 257),
+    ("src/source/mssql/cdc.rs::open#1", 161),
+    ("src/source/mssql/mod.rs::export#1", 192),
+    ("src/source/mysql/arrow_convert.rs::build_array#1", 331),
+    ("src/source/mysql/cdc.rs::fill#1", 351),
+    ("src/source/oracle/arrow_convert.rs::build_column#1", 171),
+    ("src/source/postgres/arrow_convert.rs::build_array#1", 158),
+    (
+        "src/source/postgres/cdc.rs::check_configured_tables_are_routable#1",
+        157,
+    ),
+    ("src/source/postgres/cdc.rs::fill#1", 196),
+    ("src/source/postgres/mod.rs::pg_run_export#1", 160),
+];
+
 /// Every text file under `dir` that may hold a reference, as (repo-relative path, text).
 fn corpus(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
     let Ok(read) = std::fs::read_dir(dir) else {
@@ -214,6 +304,27 @@ fn duplicate_bodies(files: &[Product], min_lines: usize) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// (`file::fn#occurrence`, lines) of every product function longer than `min`, sorted.
+fn long_functions(files: &[Product], min: usize) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    for f in files {
+        let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+        for (name, open, close) in fn_spans(&f.toks) {
+            let n = seen.entry(name.clone()).or_default();
+            *n += 1;
+            let (Some((_, first)), Some((_, last))) = (f.toks.get(open), f.toks.get(close)) else {
+                continue;
+            };
+            let lines = last - first + 1;
+            if lines > min {
+                out.push((format!("{}::{name}#{n}", f.rel), lines));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 /// The product files of src/.
 fn src_products() -> Vec<Product> {
     let raw: Vec<(String, String)> = src_files()
@@ -300,12 +411,67 @@ fn duplicate_function_bodies_in_src_never_grow() {
     );
 }
 
+#[test]
+fn long_functions_in_src_never_grow_and_new_ones_stay_short() {
+    let files = src_products();
+    super::nonvacuity::require_enumerated(files.len(), 100, "src product files", "src/ moved");
+    let found = long_functions(&files, LONG_FUNCTION_LINES);
+    if std::env::var_os("RIVET_PRINT_LONG_FUNCTIONS").is_some() {
+        for (k, n) in &found {
+            println!("    (\"{k}\", {n}),");
+        }
+    }
+    let ledger: BTreeMap<&str, usize> = LONG_FUNCTIONS.iter().copied().collect();
+    let mut problems = Vec::new();
+    for (key, lines) in &found {
+        match ledger.get(key.as_str()) {
+            None => problems.push(format!(
+                "{key}: {lines} lines, over {LONG_FUNCTION_LINES} and not ledgered: split it"
+            )),
+            Some(cap) if lines > cap => problems.push(format!(
+                "{key}: {lines} lines, ledger ceiling {cap}: split it, do not grow it"
+            )),
+            Some(cap) if lines < cap => problems.push(format!(
+                "{key}: {lines} lines, ledger ceiling {cap}: lower the row to {lines}"
+            )),
+            Some(_) => {}
+        }
+    }
+    for key in ledger.keys() {
+        if !found.iter().any(|(k, _)| k == key) {
+            problems.push(format!(
+                "{key}: no longer over {LONG_FUNCTION_LINES} lines or gone: delete the row"
+            ));
+        }
+    }
+    assert_eq!(
+        problems,
+        Vec::<String>::new(),
+        "long-function ledger: split, lower or delete the rows"
+    );
+}
+
 /// An in-memory text tree.
 fn tree(files: &[(&str, &str)]) -> Vec<(String, String)> {
     files
         .iter()
         .map(|(r, t)| (r.to_string(), t.to_string()))
         .collect()
+}
+
+#[test]
+fn a_function_over_the_limit_is_found_with_its_line_count_and_occurrence() {
+    let long = format!("fn big() {{\n{}}}\n", "let a = 1;\n".repeat(10));
+    let src = format!("{long}fn small() {{\nlet a = 1;\n}}\n{long}");
+    let files = product_files(&tree(&[("src/a.rs", &src)]));
+    assert_eq!(
+        long_functions(&files, 5),
+        vec![
+            ("src/a.rs::big#1".to_string(), 12),
+            ("src/a.rs::big#2".to_string(), 12)
+        ]
+    );
+    assert!(long_functions(&files, 12).is_empty());
 }
 
 #[test]
