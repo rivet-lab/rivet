@@ -566,8 +566,8 @@ def _fake_gcs_objects(base: str, bucket: str) -> list[str]:
 
 
 def _fake_gcs_orphaned(name: str) -> bool:
-    """An object whose path holds a segment named by a gone test process."""
-    return any(registry.orphaned(seg) for seg in name.split("/"))
+    """An object under a directory segment named by a gone test process."""
+    return any(registry.orphaned(seg) for seg in name.split("/")[:-1])
 
 
 def _fake_gcs_cruft(base: str) -> None:
@@ -764,7 +764,7 @@ def _fake_gcs_self_test() -> None:
 
     dead = 2**22 + 12345
     held = [f"chmcdc_{dead}_2/snapshot/_SUCCESS", f"rivet-live/chload_{dead}_7/a.parquet",
-            f"chmcdc_{os.getpid()}_2/snapshot/_SUCCESS", "fixtures/users.csv"]
+            f"chmcdc_{os.getpid()}_2/snapshot/_SUCCESS", "fixtures/users.csv", f"fixtures/export_{dead}_1"]
     deleted: list[str] = []
 
     class Stub(http.server.BaseHTTPRequestHandler):
