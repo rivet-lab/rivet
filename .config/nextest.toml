@@ -101,9 +101,6 @@ test-group = 'oracle'
 [profile.pr]
 retries = 0
 fail-fast = false
-
-[[profile.pr.overrides]]
-filter = 'all()'
 slow-timeout = { period = "300s", terminate-after = 4 }
 
 [[profile.default.overrides]]
