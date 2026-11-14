@@ -362,9 +362,29 @@ python3 -m dev.release_oracle --half hosted --list-stages   # the stages and see
 
 Each half appends its own line (`release-oracle-full-hosted`, `release-oracle-full-devbox`: sha, binary stamp, verdict,
 canonical config) and is graded like a tag gate (an unexcused env skip is NOT GRADED). A half does not close known reds or
-matrix rows: it cannot see the other half's cells. `dev/pytools/release.py` reads only `release-oracle-full` and
+matrix rows: it cannot see the other half's cells. Without `--halves`, `dev/pytools/release.py` reads only `release-oracle-full` and
 `release-oracle-island` lines, so a half alone never supports a tag. `python3 -m dev.release_oracle --self-test` fails a stage in
 no half or in a non-half, a stage added without a row, a row naming no stage, and a seed run in no half or in two.
+
+### Tagging on the two halves
+
+`release.py --halves` replaces the one `release-oracle-full` check (and only it: the seeded recall, the island and the satellites are
+still required) with the two halves of the gate, defined in `dev/pytools/release_halves.py`. Each half builds its own binary from
+the sha (the devbox arm64 macOS, the runner x86_64 Linux), so the binaries' hashes are not compared. Required, each refusal coded `HALVES_*`:
+
+- the devbox half: the latest `release-oracle-full-devbox` line of the full 40-hex sha in `--gate-record`, clean, `RELEASE-READY`,
+  stamped with the sha, canonical, no unexcused env skip, run on `Darwin/arm64`;
+- the hosted half: the `hosted-verdict` artifact of one finished, wholly green run of `.github/workflows/gate-hosted.yml` on `main` of this
+  repository (not a fork, a pull request, another branch or another event), whose every slice record is of the sha, clean, green, exit 0,
+  stamped, canonical, run on `Linux/x86_64`, and whose run and job list GitHub itself reports success for. It is fetched with `gh`
+  (the newest completed run of that sha), or read from `--hosted-record DIR` holding `verdict.json`, `run.json` (`gh api repos/R/actions/runs/ID`)
+  and `jobs.json` (`gh api repos/R/actions/runs/ID/jobs`);
+- coverage: every stage record names the stages it ran; the stages of the devbox half and of the hosted slices together are the whole gate
+  (`stage_names([])` in `dev/release_oracle/__main__.py`, the very selector a run uses), each in exactly one half. A stage in neither half, in
+  both, outside the gate, or run by the wrong half refuses. Per-stage verdicts are not recorded, so "both halves, different verdicts" is
+  refused as "both halves ran it".
+
+`--halves` cannot be combined with `--graded-sha`. The halves do not close known reds or matrix rows (see above); the whole-gate run still does.
 
 ## Final stage — BigQuery
 

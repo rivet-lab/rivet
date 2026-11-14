@@ -381,7 +381,7 @@ def _raising_stage_self_test() -> None:
         try:
             m.verify_boom(led, "postgres")
             m.verify_after(led)
-            rc = led.report(full=True)
+            rc = led.report(full=True, stages=["boom", "after"])
             wrote = core.TIMINGS_HISTORY.read_text()
         finally:
             core.TIMINGS_HISTORY = saved
@@ -390,6 +390,7 @@ def _raising_stage_self_test() -> None:
     assert fails[0].detail == "verify_boom raised SystemExit: uv sync in /x/tree failed:", fails[0].detail
     assert [c.scenario for c in led.cells] == ["verify_boom", "after"], led.cells
     assert rc == 1 and "NOT RELEASABLE" in out.getvalue() and '"verdict": "NOT RELEASABLE"' in wrote, (rc, wrote)
+    assert '"stages": ["boom", "after"]' in wrote, f"Ledger.report hands the stages it was given to the record: {wrote}"
     print("self-test ok: a stage that raises is one FAIL row naming it; the gate still reports and exits 1")
 
 
@@ -890,6 +891,10 @@ def _halves_self_test() -> None:
         assert sorted(slices[0] + slices[1]) == sorted(cuts[HOSTED]), "slice 0 and a live slice do not re-form the hosted half"
         assert slices[0] == [n for n in cuts[HOSTED] if n != LIVE_HOSTED_STAGE] and all(sl == [LIVE_HOSTED_STAGE] for sl in slices[1:]), \
             "slice 0 is every hosted stage but the live modules and each other slice is the live modules alone"
+        if not argv:
+            assert stage_names() == per_run and stage_names(["--half", HOSTED]) == cuts[HOSTED] and stage_names(["--half", DEVBOX]) == cuts[DEVBOX], \
+                "stage_names, which the two-halves tag reads, is not the cut a run makes"
+            assert [stage_names(["--half", HOSTED, "--live-shard", f"{i}/3"]) for i in range(4)] == slices, "stage_names does not cut a slice as a run does"
         island = [st.name for st in selected_stages(parse_args([*argv, "--island"]), table)]
         assert sorted(cuts[HOSTED] + cuts[DEVBOX] + island) == sorted(st.name for st in table), "the halves and the island are not the whole table"
     names = [st.name for st in selected_stages(parse_args([]), gate_stages(parse_args([])))]
@@ -1650,6 +1655,10 @@ def _self_test() -> int:
             core.rivet_bin = kept_bin
         assert stamped["binary"] == "abcdef123" and stamped["binary_sha256"] == core.file_sha256(stand_in) != "", "the record carries the SHA-256 of the binary it graded"
         assert core.file_sha256(Path(d) / "absent") == "", "an absent binary has no hash"
+        import platform as _platform
+        with_stages = record_timings(Path(d) / "stages.jsonl", [("A", 60.0)], [], "RELEASE-READY", 1, 0, stages=["x", "y"])
+        assert with_stages["stages"] == ["x", "y"] and with_stages["host"] == {"system": _platform.system(), "machine": _platform.machine()}, "the record names the stages it ran and the host it ran on"
+        assert stamped["stages"] == [], "a run that names no stages records an empty list, never a missing key"
         timed = Ledger(colour=False)
         timed._buf = []
         timed.phase("one")
@@ -1936,6 +1945,12 @@ def selected_stages(ns: argparse.Namespace, table: Sequence[Stage]) -> list[Stag
     shard = live_shard(ns)
     return [st for st in table if (ALONE in st.needs) is ns.island and (not ns.half or stage_half(st.name) == ns.half)
             and (shard is None or (st.name == LIVE_HOSTED_STAGE) is (shard[0] > 0))]
+
+
+def stage_names(argv: Sequence[str] = ()) -> list[str]:
+    """The names of the stages a run started with `argv` executes, in table order: `[]` is the whole per-run gate, `--half H` and `--live-shard i/n` cut it exactly as the run does."""
+    ns = parse_args(list(argv))
+    return [st.name for st in selected_stages(ns, gate_stages(ns))]
 
 
 #: The stage that reads the replica topologies: the stand's replica check is a start condition only where it runs.
@@ -2667,7 +2682,8 @@ def main(argv: list[str] | None = None) -> int:
                        f"not the tree's commit {tree[0][:9]} — the gate would grade another binary")
             return 1
         table = gate_stages(ns)
-        run_stages(led, selected_stages(ns, table))
+        ran = selected_stages(ns, table)
+        run_stages(led, ran)
         kept = GATE_FAILURES / f"rivet-oracle-{os.getpid()}.log"
         if (work / "rivet-oracle.log").is_file():
             keep_failure_log(work / "rivet-oracle.log", kept.name)
@@ -2692,7 +2708,7 @@ def main(argv: list[str] | None = None) -> int:
                 led.close_matrix_rows(owned=(lambda fn: fn in island) if ns.island else (lambda fn: fn not in island))
         led.stand_invalid = dog.stop()
         gate = gate_kind(ns, config)
-        rc = led.report(full=full and not (ns.bless_local or ns.bless_cdc), gate=gate, tree=tree, config=config, shard=ns.live_shard)
+        rc = led.report(full=full and not (ns.bless_local or ns.bless_cdc), gate=gate, tree=tree, config=config, shard=ns.live_shard, stages=[st.name for st in ran])
         if gate == ISLAND_GATE:
             print("  island record only: a tag also needs a green `make release-oracle-full` of this commit.")
         elif not ns.island:

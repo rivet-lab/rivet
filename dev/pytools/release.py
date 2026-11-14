@@ -35,6 +35,11 @@ Preconditions the script enforces, in order (1-5 unchanged from the bash):
    from A, differ only under the harness paths, and build a release binary (`--binary`) whose SHA-256
    equals the `binary_sha256` the latest full-gate and island runs of A recorded.
 
+11. `--halves` replaces 6 with the two halves of the gate (`dev/pytools/release_halves.py`): a clean, green,
+   canonical `release-oracle-full-devbox` line of exactly HEAD in the gate record, and the hosted half of a finished, wholly
+   green run of `gate-hosted.yml` on main of this repository, each built from HEAD by its own binary, together running every
+   stage of the gate once. 7-9 are unchanged; `--graded-sha` is refused beside it.
+
 WHAT THIS SCRIPT DOES **NOT** CHECK (reported, not invented):
 
 * The `cargo chef prepare` strict-TOML parse that broke 0.16.0's Docker images
@@ -45,7 +50,7 @@ WHAT THIS SCRIPT DOES **NOT** CHECK (reported, not invented):
   (`.github/workflows/ci.yml`, `cargo metadata --locked`), deliberately NOT a
   runtime file read, because `cargo` reconciles the working-tree lock before any
   in-process check could observe the staleness.
-* Anything `gh`-shaped: the bash script never invoked `gh`, so neither does this.
+* Anything `gh`-shaped, except under `--halves`, which fetches the hosted half's run with `gh` (or reads `--hosted-record DIR`).
 
 Both belong to the release path but sit in other layers; this port keeps its
 behaviour identical rather than growing new refusals. If they should gate the
@@ -66,7 +71,7 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -80,13 +85,13 @@ else:  # executed as a plain script: `python3 dev/pytools/release.py`
 ROOT = shell.ROOT
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from dev.pytools import satellite  # noqa: E402
+from dev.pytools import release_halves, satellite  # noqa: E402
 from dev.release_oracle.core import FULL_GATE, ISLAND_GATE, TAG_GATES, file_sha256, rivet_bin  # noqa: E402
 
 CARGO_TOML = ROOT / "Cargo.toml"
 CHANGELOG = ROOT / "CHANGELOG.md"
 
-USAGE = """Usage: python3 -m dev.pytools.release [--dry-run] [--push] [--tag vX.Y.Z] [--message TEXT] [--gate-record FILE] [--recall-record FILE] [--island-record FILE] [--satellite-record DIR] [--graded-sha SHA] [--binary FILE]
+USAGE = """Usage: python3 -m dev.pytools.release [--dry-run] [--push] [--tag vX.Y.Z] [--message TEXT] [--gate-record FILE] [--recall-record FILE] [--island-record FILE] [--satellite-record DIR] [--graded-sha SHA] [--binary FILE] [--halves [--hosted-record DIR]]
 
 Options:
   --dry-run     Validate only; do not create or push a tag
@@ -99,6 +104,8 @@ Options:
   --satellite-record  The gate's logs directory holding <sha>/satellite-<profile>/verdict.json (default: $RIVET_GATE_LOGS_DIR or ~/wt/gate-logs)
   --graded-sha  Tag HEAD on the account of the gates of this earlier commit: HEAD must descend from it, differ from it only under harness paths, and build the byte-identical release binary
   --binary      The release binary built from HEAD for --graded-sha (default: target/release/rivet under $CARGO_TARGET_DIR); build it with RIVET_GIT_SHA set to the graded binary's stamp
+  --halves      Read the gate from its two halves (the devbox half in --gate-record, the hosted half from the latest gate-hosted run on main) instead of one release-oracle-full line; see dev/pytools/release_halves.py
+  --hosted-record  With --halves, the directory holding the hosted half's verdict.json, run.json and jobs.json (default: fetched with `gh` from the latest run of that sha)
   --self-test   Check the gate-record precondition on fixtures; tags nothing
   -h, --help    Show this help"""
 
@@ -112,6 +119,8 @@ GATE_RECORD = ROOT / "dev" / "release-oracle" / "timings.jsonl"
 SATELLITE_PROFILES = ("linux", "mac")
 #: The configuration a full gate runs under: no bless mode, no tolerance override, both state backends graded.
 CANONICAL_CONFIG: dict = {"bless": [], "knobs": {}, "state": ["postgres", "sqlite"]}
+HALVES_HINT = ("a tag on two halves needs the devbox half in --gate-record (`python3 -m dev.release_oracle --with-seeded-recall --half devbox` on the devbox) "
+               "and the hosted half from a green `gate-hosted` run on main for this sha (dispatch it with sha=SHA); --hosted-record DIR reads it from a directory")
 #: Path prefixes and files whose change cannot alter what ships beside the binary: harness, ledgers, tests, docs, changelog fragments.
 HARNESS_PREFIXES = ("dev/", "docs/", "tests/", "changelog.d/", ".githooks/")
 HARNESS_FILES = ("CHANGELOG.md", ".cargo/mutants.toml")
@@ -135,6 +144,8 @@ class Args:
     satellite_record: str = ""
     graded_sha: str = ""
     binary: str = ""
+    halves: bool = False
+    hosted_record: str = ""
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -203,11 +214,23 @@ def parse_args(argv: list[str]) -> Args:
                 raise _Usage()
             a.binary = value
             i += 2
+        elif arg == "--halves":
+            a.halves = True
+            i += 1
+        elif arg == "--hosted-record":
+            value = argv[i + 1] if i + 1 < len(argv) else ""
+            if not value:
+                raise _Usage()
+            a.hosted_record = value
+            i += 2
         elif arg in ("-h", "--help"):
             raise _Usage()
         else:
             print(f"Unknown option: {arg}", file=sys.stderr)
             raise _Usage()
+    if a.hosted_record and not a.halves:
+        print("--hosted-record needs --halves", file=sys.stderr)
+        raise _Usage()
     return a
 
 
@@ -314,6 +337,21 @@ def gate_runs(sha: str, record: Path, kind: str) -> tuple[list[dict], int]:
     return runs, other
 
 
+def run_problem(last: dict, sha: str, kind: str) -> tuple[str, str] | None:
+    """What keeps one `kind` run record of `sha` from supporting a tag, as (code, what the record says): a tree with uncommitted changes, a verdict short of RELEASE-READY, a binary of another commit, a non-canonical configuration or an env skip with no excuse."""
+    if last.get("dirty") is not False:
+        return "DIRTY", "graded a tree with uncommitted changes"
+    if last.get("verdict") != "RELEASE-READY":
+        return "VERDICT", f"says {last.get('verdict')}"
+    if not binary_is_tree(last.get("binary"), sha):
+        return "BINARY", f"graded a binary stamped {last.get('binary')!r}, not this commit"
+    if last.get("config") != CANONICAL_CONFIG:
+        return "CONFIG", f"ran under {last.get('config')!r}, not the canonical configuration {CANONICAL_CONFIG!r}"
+    if kind in TAG_GATES and (why := env_skip_refusal(last.get("skipped_env"))):
+        return "ENV_SKIP", why
+    return None
+
+
 def gate_refusal(sha: str, record: Path, kind: str = FULL_GATE) -> str | None:
     """Why `sha` may not be tagged by the `kind` runs in `record`, or None when the latest such run is RELEASE-READY on a clean tree with a binary built from `sha`, under the canonical configuration."""
     if not record.is_file():
@@ -323,18 +361,8 @@ def gate_refusal(sha: str, record: Path, kind: str = FULL_GATE) -> str | None:
         also = f" ({other} run(s) of other kinds, which cannot support a tag)" if other else ""
         return f"no {kind} run of {sha[:12]} in {record}{also}"
     last = runs[-1]
-    if last.get("dirty") is not False:
-        return f"the latest {kind} run of {sha[:12]} ({last.get('at')}) graded a tree with uncommitted changes"
-    if last.get("verdict") != "RELEASE-READY":
-        return f"the latest {kind} run of {sha[:12]} ({last.get('at')}) says {last.get('verdict')}"
-    if not binary_is_tree(last.get("binary"), sha):
-        return (f"the latest {kind} run of {sha[:12]} ({last.get('at')}) graded a binary stamped "
-                f"{last.get('binary')!r}, not this commit")
-    if last.get("config") != CANONICAL_CONFIG:
-        return (f"the latest {kind} run of {sha[:12]} ({last.get('at')}) ran under {last.get('config')!r}, "
-                f"not the canonical configuration {CANONICAL_CONFIG!r}")
-    if kind in TAG_GATES and (why := env_skip_refusal(last.get("skipped_env"))):
-        return f"the latest {kind} run of {sha[:12]} ({last.get('at')}) {why}"
+    if problem := run_problem(last, sha, kind):
+        return f"the latest {kind} run of {sha[:12]} ({last.get('at')}) {problem[1]}"
     return None
 
 
@@ -429,11 +457,12 @@ def satellite_refusal(sha: str, logs: Path) -> str | None:
 
 
 def tag_refusal(sha: str, gate: Path, recall: Path | None, island: Path | None = None,
-                satellite_dir: Path | None = None) -> tuple[str, str] | None:
-    """The first record precondition `sha` fails, as (why, hint), in the order gate record, recall record, island record, satellite verdicts; None when all hold."""
-    why = gate_refusal(sha, gate)
+                satellite_dir: Path | None = None, halves: Callable[[], str | None] | None = None) -> tuple[str, str] | None:
+    """The first record precondition `sha` fails, as (why, hint), in the order gate record, recall record, island record, satellite verdicts; None when all hold. `halves`, when given, answers the gate-record check in place of the single `release-oracle-full` line."""
+    why = halves() if halves is not None else gate_refusal(sha, gate)
     if why:
-        return why, ("run `make release-oracle-full` on this commit and tag it once the gate says RELEASE-READY; "
+        return why, (HALVES_HINT if halves is not None else
+                     "run `make release-oracle-full` on this commit and tag it once the gate says RELEASE-READY; "
                      "pass --gate-record FILE when the gate ran on another machine")
     why = recall_refusal(sha, recall)
     if why:
@@ -452,12 +481,16 @@ def tag_refusal(sha: str, gate: Path, recall: Path | None, island: Path | None =
 
 
 def graded_refusal(sha: str, graded: str, changed: list[str] | None, built: str, gate: Path, recall: Path | None,
-                   island: Path | None = None, satellite_dir: Path | None = None) -> tuple[str, str] | None:
-    """`tag_refusal` of the records of `graded`, after `reuse_refusal` when `graded` is not `sha` itself."""
+                   island: Path | None = None, satellite_dir: Path | None = None,
+                   halves: Callable[[], str | None] | None = None) -> tuple[str, str] | None:
+    """`tag_refusal` of the records of `graded`, after `reuse_refusal` when `graded` is not `sha` itself; the two halves grade `sha` only, each with a binary of its own."""
+    if halves is not None and graded != sha:
+        return (release_halves.refuse("REUSE", "the two halves grade one commit with a binary each, so a descendant of the graded commit cannot be tagged on them"),
+                "drop --graded-sha, or tag on a single `release-oracle-full` record")
     if graded != sha and (why := reuse_refusal(graded, sha, changed, built, gate, island or gate)):
         return why, ("tagging a descendant of the graded commit needs a harness-only diff and the byte-identical release binary; "
                      "otherwise run `make release-oracle-full` on this commit")
-    return tag_refusal(graded, gate, recall, island, satellite_dir)
+    return tag_refusal(graded, gate, recall, island, satellite_dir, halves)
 
 
 def reuse_self_test(sha: str, rec, run, write_satellites) -> int:  # noqa: ANN001
@@ -561,6 +594,57 @@ def reuse_self_test(sha: str, rec, run, write_satellites) -> int:  # noqa: ANN00
         assert graded_refusal(other, other, [], "", path, good, None, sats), "no --graded-sha reads the records of the commit itself"
         assert graded_refusal(sha, sha, [], "", path, good, None, sats) is None, "the graded commit itself needs no binary comparison"
     print(f"self-test ok: graded-commit reuse — {len(cases)} record cases, git diff paths, ancestry")
+    return 0
+
+
+def halves_self_test(sha: str, rec, run, write_satellites) -> int:  # noqa: ANN001
+    """`--halves` replaces the gate-record check and only it: a green single line does not count under it, nothing else is waived by it, and without it the single line counts as before."""
+    import tempfile
+
+    good = release_halves.green()
+    assert good["devbox"][0]["sha"] == sha, "the halves fixture grades the commit these tests grade"
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        gate, hosted, recall_ok, recall_bad, sats = root / "gate.jsonl", root / "hosted", root / "ok.jsonl", root / "bad.jsonl", root / "sats"
+        hosted.mkdir()
+        for key, name in (("verdict", "verdict.json"), ("run", "run.json"), ("jobs", "jobs.json")):
+            (hosted / name).write_text(json.dumps(good[key]))
+        recall_ok.write_text(run() + "\n")
+        recall_bad.write_text(run(complete=False) + "\n")
+        write_satellites(sats, sha)
+        devbox, island_line = json.dumps(good["devbox"][0]), rec(gate=ISLAND_GATE)
+        halves = lambda: release_halves.tag_refusal(sha, gate, hosted)  # noqa: E731
+        gate.write_text(devbox + "\n" + island_line + "\n")
+        assert tag_refusal(sha, gate, recall_ok, None, sats, halves) is None, "two green halves, recall, island and satellites tag"
+        refused = tag_refusal(sha, gate, recall_ok, None, sats)
+        assert refused and "no release-oracle-full run" in refused[0], "without --halves the devbox line is not a full-gate line"
+        refused = tag_refusal(sha, gate, recall_bad, None, sats, halves)
+        assert refused and "seeded recall" in refused[1], f"the recall is still required under --halves: {refused}"
+        refused = tag_refusal(sha, gate, recall_ok, None, root / "no-sats", halves)
+        assert refused and "satellite linux verdict" in refused[0], f"the satellites are still required under --halves: {refused}"
+        gate.write_text(devbox + "\n")
+        refused = tag_refusal(sha, gate, recall_ok, None, sats, halves)
+        assert refused and "release-oracle-island" in refused[1], f"the island record is still required under --halves: {refused}"
+        gate.write_text(rec() + "\n" + island_line + "\n")
+        assert tag_refusal(sha, gate, recall_ok, None, sats) is None, "without --halves a single green full-gate line tags as before"
+        refused = tag_refusal(sha, gate, recall_ok, None, sats, halves)
+        assert refused and refused[0].startswith("HALVES_SHA: ") and "gate-hosted" in refused[1], f"a single full-gate line is not the devbox half: {refused}"
+        gate.write_text(devbox + "\n" + island_line + "\n")
+        (hosted / "run.json").write_text(json.dumps({**good["run"], "head_branch": "feature"}))
+        refused = tag_refusal(sha, gate, recall_ok, None, sats, halves)
+        assert refused and refused[0].startswith("HALVES_REF: "), refused
+        refused = graded_refusal(sha, sha, [], "", gate, recall_ok, None, sats, halves)
+        assert refused and refused[0].startswith("HALVES_REF: "), f"graded_refusal forwards the halves: {refused}"
+        refused = graded_refusal(sha, "b" * 40, [], "", gate, recall_ok, None, sats, halves)
+        assert refused and refused[0].startswith("HALVES_REUSE: "), "the halves do not reuse a graded ancestor"
+    parsed = parse_args(["--halves", "--hosted-record", "dir"])
+    assert parsed.halves and parsed.hosted_record == "dir" and not parse_args([]).halves
+    try:
+        parse_args(["--hosted-record", "dir"])
+    except _Usage:
+        pass
+    else:
+        raise AssertionError("--hosted-record without --halves is a usage error")
     return 0
 
 
@@ -739,11 +823,13 @@ def self_test() -> int:
     parsed = parse_args(["--graded-sha", "abc", "--binary", "bin"])
     assert (parsed.graded_sha, parsed.binary) == ("abc", "bin")
     reuse_self_test(sha, rec, run, write_satellites)
+    halves_self_test(sha, rec, run, write_satellites)
     declared = set(re.findall(r'Run\("(\w+)", args\.sha', Path(satellite.__file__).read_text()))
     assert declared == set(SATELLITE_PROFILES), f"satellite.py runs profiles {sorted(declared)}, release.py requires {SATELLITE_PROFILES}"
     print(f"self-test ok: release gate record — {len(cases)} cases, only a clean green full-gate run of this commit tags; "
           f"{len(recall_cases)} recall cases, only a complete green recall of it; {len(island_cases)} island cases; "
-          f"{len(satellite_cases)} satellite cases, only a blocking-free verdict of each profile for this commit")
+          f"{len(satellite_cases)} satellite cases, only a blocking-free verdict of each profile for this commit; "
+          "--halves replaces the gate-record check alone")
     return 0
 
 
@@ -830,7 +916,8 @@ def main_cli(argv: list[str] | None = None) -> int:
     refused = graded_refusal(sha, graded, changed_between(graded, sha) if reused else [],
                              file_sha256(Path(args.binary) if args.binary else rivet_bin()) if reused else "",
                              record, Path(args.recall_record) if args.recall_record else None, island,
-                             Path(args.satellite_record) if args.satellite_record else None)
+                             Path(args.satellite_record) if args.satellite_record else None,
+                             (lambda: release_halves.tag_refusal(sha, record, Path(args.hosted_record) if args.hosted_record else None)) if args.halves else None)
     if refused:
         raise shell.Fail(f"error: {refused[0]}", hint=refused[1])
     head = sha[:8]
@@ -850,7 +937,7 @@ def main_cli(argv: list[str] | None = None) -> int:
   tag:     {tag}
   version: {version}
   commit:  {head} ({branch})
-  gate:    {FULL_GATE} RELEASE-READY ({record}){f" of {graded[:8]}, binary byte-identical, harness-only diff" if reused else ""}
+  gate:    {f"{release_halves.half_gate(release_halves.DEVBOX)} ({record}) + {release_halves.WORKFLOW} on {release_halves.BRANCH}, every stage run once" if args.halves else f"{FULL_GATE} RELEASE-READY ({record})"}{f" of {graded[:8]}, binary byte-identical, harness-only diff" if reused else ""}
   recall:  complete green seeded recall of this commit
   island:  {ISLAND_GATE} RELEASE-READY
   satellites: {", ".join(SATELLITE_PROFILES)} verdicts of this commit, nothing blocking

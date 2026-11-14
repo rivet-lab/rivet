@@ -32,6 +32,7 @@ from __future__ import annotations
 import functools
 
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -454,7 +455,8 @@ class Ledger:
         return "NOT RELEASABLE" if self.red else "NOT GRADED" if self.ungraded_count(gate) else "RELEASE-READY"
 
     def report(self, *, full: bool = False, gate: str = REDUCED_GATE, tree: tuple[str, bool] | None = None,
-               config: dict | None = None, reread: Callable[[], tuple[str, bool]] | None = None, shard: str = "") -> int:
+               config: dict | None = None, reread: Callable[[], tuple[str, bool]] | None = None, shard: str = "",
+               stages: Sequence[str] = ()) -> int:
         """Print the table and the verdict; only a `full` gate run records a timings line (naming `gate`) and may say RELEASE-READY, and not when the tree `reread` returns is no longer the `tree` the run began on."""
         self.record_evidence()
         print()
@@ -542,7 +544,7 @@ class Ledger:
                 sum(c.status is Status.PASS for c in self.cells),
                 sum(c.status is Status.FAIL for c in self.cells),
                 self._phase_load, gate=gate, tree=tree, config=config, splits=self._splits,
-                skipped=sum(self.skip_counts().values()), skipped_env=self.env_skips(), shard=shard,
+                skipped=sum(self.skip_counts().values()), skipped_env=self.env_skips(), shard=shard, stages=stages,
             )
         known = [c for c in self.cells if c.status is Status.KNOWN]
         if known:
@@ -621,8 +623,8 @@ def record_timings(path: Path, phases: list[tuple[str, float]], spans: list[tupl
                    verdict: str, passed: int, failed: int, loads: dict[str, tuple[float, float]] | None = None,
                    gate: str = REDUCED_GATE, tree: tuple[str, bool] | None = None, config: dict | None = None,
                    splits: list[tuple[str, float]] | None = None, skipped: int = 0,
-                   skipped_env: list[tuple[str, str, str]] | None = None, shard: str = "") -> dict:
-    """Append this run's verdict (full commit, the graded binary's stamp and SHA-256, gate kind, the configuration it ran under, dirty tree, the skip count and every env-skipped cell), phase, span and split timings (`splits_min`, uncut) and load averages to `path`; print the phase deltas against the previous run."""
+                   skipped_env: list[tuple[str, str, str]] | None = None, shard: str = "", stages: Sequence[str] = ()) -> dict:
+    """Append this run's verdict (full commit, the graded binary's stamp and SHA-256, gate kind, the configuration it ran under, dirty tree, the skip count, every env-skipped cell, the stages it ran and the host's system and machine), phase, span and split timings (`splits_min`, uncut) and load averages to `path`; print the phase deltas against the previous run."""
     import datetime as _dt
     import json as _json
 
@@ -642,6 +644,8 @@ def record_timings(path: Path, phases: list[tuple[str, float]], spans: list[tupl
         "failed": failed,
         "skipped": skipped,
         "skipped_env": [list(i) for i in skipped_env or []],
+        "stages": list(stages),
+        "host": {"system": platform.system(), "machine": platform.machine()},
         "total_min": round(sum(d for _, d in phases) / 60.0, 1),
         "phases_min": {n.split(" — ")[0]: round(d / 60.0, 2) for n, d in phases},
         "phases_load1": {n.split(" — ")[0]: [round(x, 1) for x in v] for n, v in (loads or {}).items()},
