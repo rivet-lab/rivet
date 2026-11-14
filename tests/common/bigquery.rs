@@ -50,9 +50,12 @@ fn token(refresh: bool) -> Option<String> {
 pub fn warehouse_or_skip(label: &str) -> Option<(String, String)> {
     let (project, bucket) = super::registry::warehouse();
     if token(false).is_none() {
-        super::skip_live(&format!(
-            "{label}: no Google credential for BIGQUERY_TEST_PROJECT={project} (`gcloud auth print-access-token` failed: run `gcloud auth login` and `gcloud auth application-default login`)"
-        ));
+        super::skip_needs(
+            super::Need::Credential,
+            &format!(
+                "{label}: no Google credential for BIGQUERY_TEST_PROJECT={project} (`gcloud auth print-access-token` failed: run `gcloud auth login` and `gcloud auth application-default login`)"
+            ),
+        );
         return None;
     }
     Some((project, bucket))

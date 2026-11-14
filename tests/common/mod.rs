@@ -59,7 +59,42 @@ pub use warehouse::*;
 
 static NAME_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Build a globally-unique identifier safe to use as a SQL table name or an export name.
+/// What a live test needs that a hosted runner does not hold; the gate routes a test needing any of these to the devbox half.
+#[derive(Clone, Copy, Debug)]
+pub enum Need {
+    Credential,
+    MacOs,
+    Stand,
+    Timing,
+}
+
+impl Need {
+    /// The tag a self-skip for this need carries in its reason.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Credential => "credential",
+            Self::MacOs => "macos",
+            Self::Stand => "stand",
+            Self::Timing => "timing",
+        }
+    }
+}
+
+/// Record the skip of a test that lacks `need`, tagged so the gate reads which kind of environment it was missing.
+pub fn skip_needs(need: Need, why: &str) {
+    skip_live(&format!("[needs {}] {why}", need.tag()));
+}
+
+/// Fail unless `measured` is within `bound`: the one place a live test grades wall-clock time, which routes it to the devbox half.
+pub fn assert_wall_clock(measured: std::time::Duration, bound: std::time::Duration, what: &str) {
+    let _timing = Need::Timing;
+    assert!(
+        measured <= bound,
+        "{what}: took {measured:?}, bound {bound:?}"
+    );
+}
+
+/// Record a live-test skip: print `RIVET-SKIP <test> — <why>` and append it to the skip log the gate grades.
 pub fn skip_live(why: &str) {
     let who = std::thread::current()
         .name()
