@@ -59,8 +59,21 @@ ISLAND_GATE = "release-oracle-island"
 REDUCED_GATE = "release-oracle"
 #: The verdict of a run whose tree (HEAD or a tracked file) changed between its first stage and its report.
 TREE_MOVED = "TREE-MOVED"
+#: The two machines one gate sha is graded on (`--half`); each writes its own record kind, `half_gate(half)`.
+HOSTED, DEVBOX = "hosted", "devbox"
+HALVES = (HOSTED, DEVBOX)
+
+
+def half_gate(half: str) -> str:
+    """The record kind of one half of the full gate."""
+    return f"{FULL_GATE}-{half}"
+
+
+#: The record kind of one slice of the hosted half (`--live-shard i/n`): never the half, so no reader takes one slice for the whole of it.
+HOSTED_SHARD_GATE = f"{FULL_GATE}-{HOSTED}-shard"
+
 #: The gate kinds a tag rests on: an env skip no `skip_allow` entry excuses is ungraded in each, at the gate and at the tag.
-TAG_GATES = (FULL_GATE, ISLAND_GATE)
+TAG_GATES = (FULL_GATE, ISLAND_GATE, *map(half_gate, HALVES), HOSTED_SHARD_GATE)
 
 
 class Status(str, Enum):
@@ -441,7 +454,7 @@ class Ledger:
         return "NOT RELEASABLE" if self.red else "NOT GRADED" if self.ungraded_count(gate) else "RELEASE-READY"
 
     def report(self, *, full: bool = False, gate: str = REDUCED_GATE, tree: tuple[str, bool] | None = None,
-               config: dict | None = None, reread: Callable[[], tuple[str, bool]] | None = None) -> int:
+               config: dict | None = None, reread: Callable[[], tuple[str, bool]] | None = None, shard: str = "") -> int:
         """Print the table and the verdict; only a `full` gate run records a timings line (naming `gate`) and may say RELEASE-READY, and not when the tree `reread` returns is no longer the `tree` the run began on."""
         self.record_evidence()
         print()
@@ -529,7 +542,7 @@ class Ledger:
                 sum(c.status is Status.PASS for c in self.cells),
                 sum(c.status is Status.FAIL for c in self.cells),
                 self._phase_load, gate=gate, tree=tree, config=config, splits=self._splits,
-                skipped=sum(self.skip_counts().values()), skipped_env=self.env_skips(),
+                skipped=sum(self.skip_counts().values()), skipped_env=self.env_skips(), shard=shard,
             )
         known = [c for c in self.cells if c.status is Status.KNOWN]
         if known:
@@ -606,7 +619,7 @@ def record_timings(path: Path, phases: list[tuple[str, float]], spans: list[tupl
                    verdict: str, passed: int, failed: int, loads: dict[str, tuple[float, float]] | None = None,
                    gate: str = REDUCED_GATE, tree: tuple[str, bool] | None = None, config: dict | None = None,
                    splits: list[tuple[str, float]] | None = None, skipped: int = 0,
-                   skipped_env: list[tuple[str, str, str]] | None = None) -> dict:
+                   skipped_env: list[tuple[str, str, str]] | None = None, shard: str = "") -> dict:
     """Append this run's verdict (full commit, the graded binary's stamp and SHA-256, gate kind, the configuration it ran under, dirty tree, the skip count and every env-skipped cell), phase, span and split timings (`splits_min`, uncut) and load averages to `path`; print the phase deltas against the previous run."""
     import datetime as _dt
     import json as _json
@@ -619,6 +632,7 @@ def record_timings(path: Path, phases: list[tuple[str, float]], spans: list[tupl
         "binary": binary_stamp(),
         "binary_sha256": file_sha256(rivet_bin()),
         "gate": gate,
+        **({"shard": shard} if shard else {}),
         "config": config,
         "dirty": dirty,
         "verdict": verdict,
@@ -636,7 +650,7 @@ def record_timings(path: Path, phases: list[tuple[str, float]], spans: list[tupl
     prev = None
     if path.exists():
         lines = [x for x in path.read_text().splitlines() if x.strip()]
-        same = [r for r in map(_json.loads, lines) if r.get("gate") == gate]
+        same = [r for r in map(_json.loads, lines) if r.get("gate") == gate and r.get("shard", "") == shard]
         prev = same[-1] if same else None
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as f:

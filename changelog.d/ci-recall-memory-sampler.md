@@ -1,0 +1,1 @@
+- **CI**: the nightly recall shards log memory and the four biggest containers every two minutes, to tell an out-of-memory stop from a lost runner (all four shards were lost on 2026-11-14).

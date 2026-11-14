@@ -27,6 +27,7 @@ from dev.release_oracle import stand_health
 from dev.release_oracle.core import Ledger, SkipCause, isolate_state_db, nextest_filter, nextest_outcomes, nextest_panics, self_skipped
 from dev.release_oracle.live_modules import EXCLUSIVE_ENV, exclusive_tests, live_modules_env
 from dev.seeded import run_record
+from dev.seeded.patch_seeds import PATCH_SEEDS
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
@@ -178,6 +179,23 @@ def switch_problems(rows: list[Row], root: Path = ROOT, complete: bool = True) -
     named = {r.switch for r in rows if r.switch}
     return ([f"seed {r.seed}/{r.engine}: switch {r.switch!r} is in no `seeded!` site in src/" for r in rows if r.switch and r.switch not in found]
             + ([f"`seeded!({n!r})` in src/ is named by no manifest row" for n in sorted(set(found) - named)] if complete else []))
+
+
+PATCH_DATED = re.compile(r"\d{4}-\d{2}-\d{2}: \S")
+
+
+def patch_form_problems(rows: list[Row], ledger: dict[str, str]) -> list[str]:
+    """A patch the ledger does not list (a new patch-form seed), one borrowed from another seed's directory, a ledger line no row uses any more, or an undated reason."""
+    used = {r.patch for r in rows if r.patch}
+    owner = {r.patch: r.seed for r in rows if r.patch}
+    return ([f"seed {r.seed}: patch {r.patch} lives outside dev/seeded/{r.seed}/: a seed's patches sit in its own directory, so the ledger names one seed per line"
+             for r in rows if r.patch and r.patch.split("/")[0] != r.seed]
+            + [f"seed {owner[p]}: patch {p} is in patch form, which is frozen: write the defect as `seeded!(\"{owner[p]}\", defect, good)` at its site in src/ "
+             f"and name it with `switch: {owner[p]}` instead of `patch:` in dev/seeded/seeds.yaml (docs/seeded-recall.md, `Adding a seed`)"
+             for p in sorted(used - set(ledger))]
+            + [f"PATCH_SEEDS in dev/seeded/patch_seeds.py lists {p} but no manifest row uses that patch: delete the line (the ledger only shrinks)"
+               for p in sorted(set(ledger) - used)]
+            + [f"PATCH_SEEDS {p}: the reason must start `YYYY-MM-DD: ` and say what closes it" for p, why in sorted(ledger.items()) if not PATCH_DATED.match(why)])
 
 
 def _fn_names(tree: Path) -> set[str]:
@@ -647,7 +665,7 @@ def recall(led: Ledger, rows: list[Row], *, complete: bool = True, owed_fails: b
             if p.returncode != 0:
                 verdicts[r] = Verdict(r, STALE, stale_message(r.seed, text, p.stdout))
     live = [r for r in rows if r not in verdicts and not r.na and r.platform in (None, host_platform())]
-    for problem in switch_problems(rows, tree, complete):
+    for problem in switch_problems(rows, tree, complete) + (patch_form_problems(rows, PATCH_SEEDS) if complete else []):
         led.bad(problem)
     sw = [r for r in live if r.switch]
     live = [r for r in live if not r.switch]
@@ -846,6 +864,23 @@ def switch_self_test() -> None:
     assert clean.feature_args == [] and switched.feature_args == ["--features", "seeded"]
     flagged = [str(f) for f in [ROOT / "Makefile", *(ROOT / ".github").rglob("*.yml")] if "--all-features" in f.read_text()]
     assert not flagged, f"--all-features turns the `seeded` feature on: {flagged}"
+
+
+def patch_form_self_test() -> None:
+    """The patch-form freeze: the real manifest matches the ledger, a new patch seed, a stale ledger line and an undated reason are each named."""
+    rows = parse_manifest(yaml.safe_load(MANIFEST.read_text()))
+    assert not patch_form_problems(rows, PATCH_SEEDS), "\n".join(patch_form_problems(rows, PATCH_SEEDS))
+    assert PATCH_SEEDS, "the ledger lists no patch seed"
+    new = Row("brand-new", "postgres", "brand-new/shared.patch", ("c",))
+    found = patch_form_problems([*rows, new], PATCH_SEEDS)
+    assert len(found) == 1 and "brand-new" in found[0] and "seeded!" in found[0] and "switch: brand-new" in found[0] and "seeds.yaml" in found[0], found
+    found = patch_form_problems([*rows, Row("borrower", "postgres", next(iter(PATCH_SEEDS)), ("c",))], PATCH_SEEDS)
+    assert len(found) == 1 and "borrower" in found[0] and "outside" in found[0], found
+    converted = [r for r in rows if r.patch != next(iter(PATCH_SEEDS))]
+    found = patch_form_problems(converted, PATCH_SEEDS)
+    assert len(found) == 1 and next(iter(PATCH_SEEDS)) in found[0] and "delete the line" in found[0], found
+    found = patch_form_problems(rows, {**PATCH_SEEDS, next(iter(PATCH_SEEDS)): "patch form"})
+    assert len(found) == 1 and "YYYY-MM-DD" in found[0], found
 
 
 def self_test() -> int:
@@ -1116,6 +1151,7 @@ def self_test() -> int:
         run_record.append_run(rec, sha="a" * 40, complete=True, green=True, dirty=False)
         assert run_record.refusal("a" * 40, rec) is None and run_record.refusal("b" * 40, rec) is not None, "a written run must be the one the tag rule reads"
     pool_self_test()
+    patch_form_self_test()
     switch_self_test()
     print(f"self-test ok: seeded recall — manifest ({len(real)} rows), grading, build pool, stale and build checks, run record")
     return 0
