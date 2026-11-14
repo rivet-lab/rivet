@@ -19,8 +19,7 @@ use anyhow::Context as _;
 pub struct CompactArgs {
     pub config: String,
     pub run_id: Option<String>,
-    /// Worker threads to merge the config's tables on; `None` takes the default
-    /// pool (16, capped at the table count), not a sequential pass.
+    /// Worker threads to merge the config's tables on.
     pub pool: Option<usize>,
     /// The tables `--export` / `--table` name; every table when both are absent.
     pub selection: load::plan::Selection,
@@ -37,14 +36,7 @@ pub(crate) enum CompactGate {
     Refuse(crate::error::Code, String),
 }
 
-/// Whether the buffer may be merged into `base_fqtn`, from the two facts the
-/// glue can cheaply fetch: what the base currently IS, and whether the ledger
-/// knows rivet loaded it.
-///
-/// The load path checks both before it overwrites a table; compaction wrote
-/// through BigQuery's own error message instead — `Not found: Table ... in
-/// location US` for an absent base, and NOTHING at all for a base rivet never
-/// loaded, which a MERGE would happily rewrite.
+/// Whether the buffer may be merged into `base_fqtn`, from the two facts the glue can cheaply fetch.
 pub(crate) fn compact_gate(
     base: ObjectKind,
     ownership: Ownership,
@@ -62,14 +54,6 @@ pub(crate) fn compact_gate(
              across loads). Nothing was merged and the buffer is untouched"
             ),
         ),
-        // Both layout levers are named, written one FIRST, because they have a
-        // PRECEDENCE and this message used to name only the loser. `cdc_layout`
-        // matches a written `load.layout:` before it consults `cdc.backfill:`
-        // (plan.rs), and `rivet init` WRITES `layout: base_buffer` for every
-        // compactable export — so "remove `cdc.backfill:`" was a no-op on the
-        // generated config, returning this very refusal again, which left the
-        // destructive branch as the only instruction that worked. The sibling
-        // predicate `compact_skip_reason` has always named both.
         (ObjectKind::View, _) => CompactGate::Refuse(
             crate::error::codes::LOAD_TARGET_OBJECT_CONFLICT,
             format!(
@@ -117,22 +101,15 @@ fn compact_skip_reason(
     support: BaseSupport,
 ) -> Option<(&'static str, &'static str)> {
     match mode {
-        // A full load OVERWRITES the whole table on every pass, so there is never
-        // an accumulated buffer to merge — whatever a layout says.
         load::plan::LoadMode::Full => Some((
             "full_load",
             "a full load overwrites its table; nothing to merge",
         )),
-        // No layout makes a base here, so the layout hints below would be refused.
         _ if support == BaseSupport::Never => Some((
             "warehouse_never_compacts",
             "this warehouse keeps a change log behind a view and never compacts; nothing to merge",
         )),
-        // Otherwise compaction belongs to the LAYOUT, not the mode: any table kept
-        // as a physical base with a disposable buffer has something to merge. An
-        // incremental export asks for that with `load.layout: base_buffer`.
         _ if layout.compacts() => None,
-        // Where a base is the default only a written `log_view` gets here.
         _ if support == BaseSupport::Default => Some((
             "log_view",
             "a changelog + view table (`load.layout: log_view` is written); delete the key to \
@@ -153,9 +130,7 @@ fn compact_skip_reason(
 /// The compact's skip reason when the run found no buffer to merge.
 const NO_BUFFER: &str = "no_buffer";
 
-/// What decides the WINNER in this table's compaction: a CDC stream ranks by its
-/// log position, an incremental export by the cursor its current state is ordered
-/// on. One resolver so a mode that gains compaction cannot forget to say.
+/// What decides the WINNER in this table's compaction.
 fn compact_order_of(
     plan: &load::plan::LoadPlan,
     engine: Option<load::cdc::SourceEngine>,
@@ -187,8 +162,7 @@ fn compact_preflight(
     load::before_write(compact_gate_of(loader, table, state))
 }
 
-/// The two metadata reads [`compact_gate`] decides on, and the note it may
-/// print. Glue: it fetches the facts, the decision itself is the pure predicate.
+/// The two metadata reads [`compact_gate`] decides on, and the note it may print.
 fn compact_gate_of(
     loader: &dyn load::TargetLoader,
     table: &str,
@@ -196,14 +170,9 @@ fn compact_gate_of(
 ) -> Result<()> {
     let buffer = format!("{table}__changes");
     if !matches!(loader.object_kind(&buffer)?, load::ObjectKind::Table) {
-        // No buffer: `compact` says that no-op itself, and a missing base is not a
-        // problem when there is nothing to merge into it.
         return Ok(());
     }
     let base_fqtn = loader.fqtn(table);
-    // See the sibling in `prepare_load`: an UNANSWERABLE ledger must not read as an
-    // ABSENT one, or a failed probe turns compact's `Foreign` refusal into a note and
-    // the MERGE rewrites someone else's rows.
     let ownership = ownership_of(state, &base_fqtn, "compact");
     match compact_gate(
         loader.object_kind(table)?,
@@ -220,9 +189,7 @@ fn compact_gate_of(
     }
 }
 
-/// `rivet compact`: merge every base-and-buffer table's buffer into its base and
-/// drop the buffer. One MERGE per table (per partition window), labelled
-/// `rivet_op:merge`; a table without a buffer is a no-op, said so.
+/// `rivet compact`: merge every base-and-buffer table's buffer into its base and drop the buffer.
 pub fn run_compacts(args: CompactArgs) -> Result<()> {
     let plans = load::plan::plan_loads(&args.config, &args.selection)?;
     let run_id = resolve_run_id(args.run_id.clone());
@@ -233,20 +200,7 @@ pub fn run_compacts(args: CompactArgs) -> Result<()> {
     } else {
         None
     };
-    // Counted from several workers, so an atomic — read once after the join for
-    // the failure message below. Skipped tables are not attempts, so the count
-    // still happens AFTER the skip gate, exactly where `attempted += 1` sat.
-    //
-    // The cheaper shape — filter `plans` BEFORE the pool, so `attempted` is just
-    // `filtered.len()` and no atomic is needed — was considered and rejected: it
-    // moves every "skipped — <why>" line to the front of the run in one block,
-    // while the sequential loop interleaved them with the work. Keeping the skip
-    // INSIDE the worker keeps `--pool 1` printing exactly what it always printed.
     let attempted = std::sync::atomic::AtomicUsize::new(0);
-    // Same as the load leg: the parent migrated the schema before any thread starts
-    // and has handed over its `StateRef`. Holding it would leave `--pool 1` with TWO
-    // connections and TWO migrations — on both backends — where the sequential loop
-    // had one of each.
     let (state_ref, parent_had_state) = hand_off_state(state, args.pool, plans.len());
     let journals = journals_of(&plans);
     let outcomes = load::pool::run_workers(
@@ -261,20 +215,7 @@ pub fn run_compacts(args: CompactArgs) -> Result<()> {
                 eprintln!("  compact [{}]: skipped — {why}", plan.table);
                 return Ok(TableDone::Skipped(word));
             }
-            // Counted BEFORE the refusal below, not after: a refused table IS an
-            // attempt — the run took it up and then refused it — and it becomes a
-            // FAILURE in the fold. Counting it only on the far side of the refusal
-            // let the numerator include tables the denominator did not, so a run
-            // that refused two of three printed "2 of 1 compacted table(s) failed".
-            // The sequential loop could not reach that state: it had no refusal, so
-            // `n <= attempted` held by construction. A table the skip gate above
-            // dropped is still NOT an attempt, which is why this sits below it.
             attempted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            // AFTER the skip gate on purpose: a table this run would not compact
-            // anyway needs no ledger, so refusing it would be noise. One that WOULD
-            // compact must not proceed without a lease — `rivet load` may hold it,
-            // and a ledger-less worker takes no lease at all rather than being
-            // refused (the lease is `state.map(..)`, so `None` skips it).
             if load::pool::reconnect_failure_is_fatal(parent_had_state, state.is_some()) {
                 crate::rivet_bail!(
                     crate::error::codes::LOAD_LEDGER_UNREADABLE,
@@ -290,12 +231,6 @@ pub fn run_compacts(args: CompactArgs) -> Result<()> {
                 let loader = load::build_loader(&pinned, &run_id, journal);
                 let target_fqtn = loader.fqtn(&pinned.table);
                 let lease = take_table_lease(state.as_ref(), &target_fqtn)?;
-                // The export's OWN mode, not a hardcoded label. Compact runs on
-                // `incremental` exports too — `compact_skip_reason` says so in as many
-                // words — and telling the operator of a `mode: incremental` config that
-                // their export "is mode: cdc" sends them looking for a `cdc:` block
-                // their config cannot even contain (it is a config-load error there).
-                // Measured on a 60-table incremental run: two refusals, both mislabelled.
                 let pk = require_pk(&pinned, pinned.mode.ledger_str())?;
                 let report = match compact_preflight(loader.as_ref(), &pinned.table, state.as_ref())
                     .and_then(|()| load::before_write(compact_order_of(&pinned, engine)))
@@ -303,17 +238,7 @@ pub fn run_compacts(args: CompactArgs) -> Result<()> {
                         lease_still_held(holds(&lease), &target_fqtn, false).map(|()| order)
                     }) {
                     Err(e) => Err(e),
-                    // Past the wrap: from here a failure may genuinely have written,
-                    // so it must stay a `failed` row — that is what tells the next
-                    // cycle the table is rivet's own.
                     Ok(order) => {
-                        // The MERGE reads its tombstone arm off the specs it is HANDED,
-                        // and the recorded spec holds source columns only — the load leg
-                        // appends the flag to its own copy. Compact must do the same or
-                        // every delete merges as an ordinary upsert and every insert
-                        // lands with a NULL flag. `compact_skip_reason` already kept
-                        // non-compacting layouts out — that gate is the `true` here, so
-                        // the ONE predicate that owns this decision is the one asked.
                         let mut specs = pinned.specs.clone();
                         if load::plan::base_carries_delete_flag(true, pinned.deleted_flag) {
                             specs.push(load::cdc::flag_spec(loader.warehouse()));
@@ -337,9 +262,6 @@ pub fn run_compacts(args: CompactArgs) -> Result<()> {
                         rows_loaded: report.as_ref().map_or(0, |r| r.changes_rows as i64),
                         status: match &report {
                             Ok(_) => crate::state::LoadStatus::Success.as_str().to_string(),
-                            // A refusal is a stop before the write, exactly as on the
-                            // load path — never a `failed` row that makes the target
-                            // look like rivet's own on the next attempt.
                             Err(e) => ledger_status(e).to_string(),
                         },
                         finished_at: chrono::Utc::now().to_rfc3339(),
@@ -377,9 +299,6 @@ pub fn run_compacts(args: CompactArgs) -> Result<()> {
         },
         |plan| no_outcome_error("compact", &plan.table),
     );
-    // Folded in CONFIG order, like the load leg: the pool returns one result per
-    // table, indexed by the table, so the `|`-joined list below reads the same on
-    // every run of the same failing config.
     let result = command_result(&run_id, &plans, &outcomes, &journals, "compacted");
     let mut failures = failures_of(outcomes);
     let attempted = attempted
@@ -388,19 +307,12 @@ pub fn run_compacts(args: CompactArgs) -> Result<()> {
     let tables = match failures.len() {
         0 => Ok(()),
         1 => Err(failures.pop().unwrap()),
-        // COVERAGE, stated rather than implied: nothing calls `run_compacts` but
-        // `dispatch`, and no test — offline or live — drives this aggregate. The
-        // `n <= attempted` fix above is therefore correct by READING only. A unit
-        // test over the formatter would grade correct logic on inputs the supplier
-        // never produces (the ordering INSIDE the worker is the defect surface), so
-        // the honest close is a live compact whose ledger drops mid-run.
         n => Err(several_failed(n, attempted, &failures)),
     };
     load::result::exit_of(tables, args.report.finish(&result))
 }
 
-/// The base's row count after its merge, from the warehouse's table metadata (BigQuery
-/// `tables.get`, no job); `None`, said so, when it cannot be read: the merge itself succeeded.
+/// The base's row count after its merge, from the warehouse's table metadata (BigQuery `tables.get`, no job).
 fn base_rows_after(loader: &dyn load::TargetLoader, table: &str) -> Option<u64> {
     loader
         .row_count(table)
@@ -425,7 +337,6 @@ fn several_failed(n: usize, attempted: usize, failures: &[anyhow::Error]) -> any
     );
     let code = crate::error::representative_failure_idx(failures)
         .and_then(|i| crate::error::code_of(&failures[i]));
-    // An uncoded representative leaves the line uncoded too: its own site is where the code is owed.
     match code {
         Some(code) => crate::error::coded(code, message),
         None => anyhow::Error::msg(message),
@@ -488,8 +399,7 @@ mod tests {
         );
     }
 
-    /// `rivet compact` merges every base-and-buffer table, CDC or incremental; every
-    /// other plan is passed by with a reason that names what it is, never silently.
+    /// `rivet compact` merges every base-and-buffer table, CDC or incremental.
     #[test]
     fn compact_passes_by_everything_but_a_base_and_buffer_cdc_table() {
         use crate::load::plan::{CdcLayout, LoadMode};
@@ -501,8 +411,6 @@ mod tests {
             ),
             None
         );
-        // The layout is decided by `cdc.backfill:` / `load.layout:`, never by `initial:`
-        // — the reason must name the levers that exist, not one that changes nothing.
         assert!(
             super::compact_skip_reason(
                 &LoadMode::Cdc,
@@ -522,9 +430,6 @@ mod tests {
             )
             .is_some_and(|(word, w)| word == "full_load" && w.contains("overwrites its table"))
         );
-        // The LAYOUT decides, not the mode: an ordinary incremental export that
-        // asked for `load.layout: base_buffer` has a buffer to merge, and one that
-        // did not is skipped with the key that would give it one.
         assert_eq!(
             super::compact_skip_reason(
                 &LoadMode::Incremental,
@@ -541,8 +446,6 @@ mod tests {
             )
             .is_some_and(|(word, w)| word == "log_view" && w.contains("base_buffer"))
         );
-        // Snowflake makes a base by default: a skip there means `log_view` is written, and its
-        // hint offers deleting that key, never `backfill:` or a `base_buffer` it already has.
         for mode in [LoadMode::Cdc, LoadMode::Incremental] {
             let (word, why) =
                 super::compact_skip_reason(&mode, &CdcLayout::LogAndView, BaseSupport::Default)
@@ -563,7 +466,6 @@ mod tests {
             ),
             None
         );
-        // A warehouse that never compacts must not suggest a layout it refuses.
         for mode in [LoadMode::Cdc, LoadMode::Incremental] {
             let (word, why) =
                 super::compact_skip_reason(&mode, &CdcLayout::LogAndView, BaseSupport::Never)
@@ -703,10 +605,7 @@ mod base_rows_tests {
 mod compact_gate_tests {
     use super::*;
 
-    /// Every shape the base can be in when `rivet compact` reaches it. The two
-    /// silent ones are why this exists: an ABSENT base used to surface as
-    /// BigQuery's `Not found: Table`, and a FOREIGN one was not checked at all —
-    /// the MERGE would have rewritten rows rivet never loaded.
+    /// Every shape the base can be in when `rivet compact` reaches it.
     #[test]
     fn the_compact_gate_refuses_every_base_that_is_not_rivets_own_table() {
         let go = compact_gate(ObjectKind::Table, Ownership::Own, "p.d.t", "p.d.t__changes");
@@ -723,10 +622,6 @@ mod compact_gate_tests {
         };
         assert!(note.contains("no load ledger"), "{note}");
 
-        // An UNREADABLE ledger is not an ABSENT one, and the two must not share the
-        // Note arm: `Unknown` means the operator chose to run without a ledger, while
-        // `Unreadable` means the ledger that would have said "foreign" is the thing
-        // that broke. Both used to arrive here as `Unknown`.
         let unreadable = compact_gate(
             ObjectKind::Table,
             Ownership::Unreadable,
@@ -857,19 +752,6 @@ mod compact_gate_tests {
     }
 
     /// The VIEW refusal names the layout lever that actually DECIDES.
-    ///
-    /// It offered two escapes and the non-destructive one was inert on exactly the
-    /// configs rivet generates: `cdc_layout` matches a WRITTEN `load.layout:` before
-    /// it consults `cdc.backfill:`, and `rivet init` writes `layout: base_buffer` for
-    /// every compactable export. So "remove `cdc.backfill:` from the export" returned
-    /// this same refusal, and the only instruction that worked was the destructive
-    /// one — drop the view. On a `mode: incremental` export it was worse than inert:
-    /// a `cdc:` block is a config-load error there, so the key named cannot exist.
-    ///
-    /// This pins the SPELLINGS, not a fragment both would satisfy — the key with its
-    /// underscore and the block it lives in — because the assertion that let the
-    /// `--allow-source-drift` message stay wrong for months was one loose enough to
-    /// admit either form.
     #[test]
     fn the_view_refusal_names_the_written_layout_key_that_overrides_the_derived_one() {
         let gate = compact_gate(ObjectKind::View, Ownership::Own, "p.d.t", "p.d.t__changes");

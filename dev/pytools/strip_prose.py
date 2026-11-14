@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import argparse
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 KEEP = re.compile(r"SAFETY|clippy::|rustfmt|mutants::|cfg_attr")
@@ -148,12 +151,54 @@ def strip(src: str) -> str:
     return "".join(out)
 
 
+def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+
+
+def recut_seeds(root: Path) -> int:
+    """Re-cut every seed patch that no longer applies to the cleaned working tree."""
+    stripped = set(_git(["diff", "--name-only", "--", "src"], root).stdout.split())
+    patches = sorted((root / "dev/seeded").glob("*/*.patch"))
+    stale = [p for p in patches if _git(["apply", "--check", str(p)], root).returncode]
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp) / "base"
+        _git(["worktree", "add", "-q", "--detach", str(base), "HEAD"], root)
+        try:
+            for p in stale:
+                files = re.findall(r"^\+\+\+ b/(.+)$", p.read_text(), re.M)
+                if _git(["apply", str(p)], base).returncode:
+                    print(f"cannot re-cut {p}", file=sys.stderr)
+                    continue
+                old, new = Path(tmp) / "old", Path(tmp) / "new"
+                for d in (old, new):
+                    shutil.rmtree(d, ignore_errors=True)
+                for f in files:
+                    for d in (old, new):
+                        (d / f).parent.mkdir(parents=True, exist_ok=True)
+                    (old / f).write_text((root / f).read_text())
+                    body = (base / f).read_text()
+                    (new / f).write_text(strip(body) if f in stripped else body)
+                    if f in stripped:
+                        subprocess.run(["rustfmt", "--edition", "2024", str(new / f)], capture_output=True)
+                diff = _git(["diff", "--no-index", "--no-prefix", "old", "new"], Path(tmp)).stdout
+                diff = re.sub(r"^(diff --git |--- |\+\+\+ )(old|new)/", lambda m: m.group(1) + ("a/" if m.group(2) == "old" else "b/"), diff, flags=re.M)
+                diff = re.sub(r"^diff --git a/(\S+) new/(\S+)", r"diff --git a/\1 b/\2", diff, flags=re.M)
+                _git(["checkout", "--", "."], base)
+                if diff:
+                    p.write_text(diff)
+        finally:
+            _git(["worktree", "remove", "--force", str(base)], root)
+    return len(stale)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("paths", nargs="+")
+    ap.add_argument("paths", nargs="*")
     ap.add_argument("--check", action="store_true")
+    ap.add_argument("--recut-seeds", action="store_true", help="re-cut seed patches the strip made stale")
     a = ap.parse_args()
     changed = 0
+    done: set[str] = set()
     for p in a.paths:
         if p in EXEMPT:
             continue
@@ -162,11 +207,14 @@ def main() -> int:
         new = strip(src)
         if new != src:
             changed += 1
+            done.add(p)
             if a.check:
                 print(p)
             else:
                 path.write_text(new)
     print(f"changed: {changed}", file=sys.stderr)
+    if a.recut_seeds and not a.check:
+        print(f"seed patches re-cut: {recut_seeds(Path.cwd())}", file=sys.stderr)
     return 1 if a.check and changed else 0
 
 

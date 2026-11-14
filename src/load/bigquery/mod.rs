@@ -91,7 +91,6 @@ use crate::types::target::{BqType, TargetColumnSpec, TargetType};
 use anyhow::{Context as _, Result};
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
-// ── BigQuery ─────────────────────────────────────────────────────────────────
 
 mod ddl;
 mod shape;
@@ -109,31 +108,17 @@ pub(crate) const MAX_CLUSTER_COLUMNS: usize = 4;
 pub struct BigQueryLoader {
     pub project: String,
     pub dataset: String,
-    /// The resolved `load.partition` of the table the load writes. Applied only when
-    /// the table is created; its options are kept in step on a rivet-owned table.
+    /// The resolved `load.partition` of the table the load writes.
     pub partition: Option<TablePartition>,
-    /// Up to 4 clustering columns, and whether the config wrote them: a written
-    /// clustering is applied to an existing change log; an `auto` one leaves the
-    /// log's own. Applied only when a table is created.
+    /// Up to 4 clustering columns, and whether the config wrote them.
     pub clustering: Clustering,
-    /// Load-run correlation id, emitted as the automatic `rivet_run:<id>` job
-    /// label so every job of one `rivet load` invocation shares a run key —
-    /// cost slices per run (across tables) as well as per table. `None` omits
-    /// the label entirely.
+    /// Load-run correlation id, emitted as the automatic `rivet_run:<id>` job label so every job of one `rivet load` invocation shares a run key.
     pub run_id: Option<String>,
-    /// The destination the Parquet is staged under: it signs the footer reads that pack a
-    /// load into jobs of at most 4,000 partitions each, and its named credential signs
-    /// the BigQuery requests; `None` loads everything in one job as the ambient identity.
+    /// The destination the Parquet is staged under.
     pub destination: Option<crate::config::DestinationConfig>,
-    /// The CDC layout: under `BaseAndBuffer`, `<table>__changes` is a per-cycle
-    /// buffer — created without a partition (whole-scanned by one MERGE, then
-    /// dropped), never shape-settled — and `compact` merges it into the base.
+    /// The CDC layout: under `BaseAndBuffer`, `<table>__changes` is a per-cycle buffer.
     pub layout: crate::load::plan::CdcLayout,
-    /// The REST client, built on first use and shared by every clone — so one
-    /// access token serves a whole load instead of one per statement. Not part
-    /// of the loader's identity: constructing a loader must stay free of I/O
-    /// (the offline `materialize` refusal tests build one and never reach the
-    /// network).
+    /// The REST client, built on first use and shared by every clone.
     api: Arc<OnceLock<BigQueryApi>>,
     /// Columns loaded under their Parquet name and renamed after, as (file name, warehouse name).
     renames: Vec<crate::load::plan::Rename>,
@@ -175,8 +160,6 @@ impl BigQueryLoader {
     }
 
     /// Set the load-run correlation id, emitted as the `rivet_run` job label.
-    /// Pack every load into jobs within BigQuery's partition cap, reading the partition
-    /// column's range from each file's Parquet footer under `dest`.
     pub fn staged_under(mut self, dest: crate::config::DestinationConfig) -> Self {
         self.destination = Some(dest);
         self
@@ -188,7 +171,7 @@ impl BigQueryLoader {
         self
     }
 
-    /// Append `batches` to `changes` one job at a time: load a staging table under the file names, rename, then a free copy job.
+    /// Append `batches` to `changes` one job at a time.
     fn append_renamed(
         &self,
         changes: &str,
@@ -232,10 +215,7 @@ impl BigQueryLoader {
         self
     }
 
-    /// The load jobs `uris` need under the TARGET's partition: one when nothing bounds
-    /// them (an unpartitioned target, no partition column, or no footer source), else
-    /// footer-packed batches. The partition cap is the target table's, so a
-    /// disposable buffer (never partitioned) passes `None` whatever the base declares.
+    /// The load jobs `uris` need under the TARGET's partition.
     fn batches(
         &self,
         uris: &[String],
@@ -269,10 +249,6 @@ impl BigQueryLoader {
     }
 
     /// The REST client, built once per loader (and shared with its clones).
-    ///
-    /// `OnceLock::get_or_try_init` is unstable, so this is the hand-rolled
-    /// equivalent: a concurrent loser's client is simply dropped — both are
-    /// equivalent, and `set` never overwrites a winner.
     fn api(&self) -> Result<&BigQueryApi> {
         if let Some(api) = self.api.get() {
             return Ok(api);
@@ -292,10 +268,7 @@ impl BigQueryLoader {
         build_labels(op, table, self.run_id.as_deref())
     }
 
-    /// Run a SQL statement (free `LOAD DATA` load job or a billed CTAS/query),
-    /// tagged with `rivet_op:<op>` + `rivet_table:<table>` for cost attribution.
-    /// Two operations exist, `load` and `merge`; every DDL, count, clone or view
-    /// statement carries the operation it serves, so cost sums per table per op.
+    /// Run a SQL statement (free `LOAD DATA` load job or a billed CTAS/query), tagged with `rivet_op:<op>` + `rivet_table:<table>` for cost attribution.
     fn run_sql(&self, sql: &str, op: &str, table: &str) -> Result<()> {
         self.api()?
             .run_query(sql, &self.labels(op, table))
@@ -320,8 +293,7 @@ impl BigQueryLoader {
         check_cluster_columns(self.cluster_by())
     }
 
-    /// The partitioning, clustering and partition options of `table` from `tables.get`,
-    /// or `None` when it is no base table.
+    /// The partitioning, clustering and partition options of `table` from `tables.get`, or `None` when it is no base table.
     fn existing_shape(&self, table: &str) -> Result<Option<TableShape>> {
         Ok(self
             .api()?
@@ -334,7 +306,6 @@ impl BigQueryLoader {
 impl TargetLoader for BigQueryLoader {
     fn changes_has_prior_changes(&self, table: &str) -> Result<bool> {
         let fqtn = self.fqtn(&format!("{table}__changes"));
-        // LIMIT 1 inside: existence, not a full count, on an unbounded log.
         let sql = format!(
             "SELECT COUNT(*) AS n FROM (SELECT 1 FROM `{fqtn}` WHERE __op IS NOT NULL LIMIT 1)"
         );
@@ -343,7 +314,6 @@ impl TargetLoader for BigQueryLoader {
             .run_query_scalar(&sql, &self.labels("load", table))
         {
             Ok(n) => Ok(n > 0),
-            // A missing __changes table is the FIRST cycle, not an error.
             Err(e) if format!("{e:#}").contains("Not found") => Ok(false),
             Err(e) => Err(e),
         }
@@ -414,11 +384,6 @@ impl TargetLoader for BigQueryLoader {
         let target = self.fqtn(table);
         let schema = build_file_schema(specs, &self.renames);
 
-        // ONE free path: declaring each column's native `target_type` inline in
-        // LOAD DATA makes BigQuery coerce the Parquet on load — JSON, DATETIME,
-        // NUMERIC, … land natively for FREE (a load job, not a query). Partition
-        // options ride on the statement only when it CREATES the table; on an
-        // existing one BigQuery refuses different options, so they are altered.
         let existing = self.existing_shape(table)?;
         let options = creation_options(existing.is_none(), self.partition.as_ref());
         let cluster = table_clustering(&self.clustering, existing.as_ref());
@@ -437,8 +402,6 @@ impl TargetLoader for BigQueryLoader {
             return self.count_rows(table);
         }
         let batches = self.batches(uris, self.partition.as_ref())?;
-        // One job with nothing to rename OVERWRITES the target directly; anything else
-        // goes through staging below (`loads_directly`).
         if loads_directly(&self.renames, &batches) {
             let sql = build_load_data_sql(
                 &target,
@@ -457,11 +420,6 @@ impl TargetLoader for BigQueryLoader {
             }
             return self.count_rows(table);
         }
-        // Several jobs cannot OVERWRITE one table: they fill a fresh staging table,
-        // created with the declared shape by the first job, and the target becomes a
-        // zero-copy CLONE of it in one statement. The shape conflict of an existing
-        // target was refused before this point (`ensure_overwritable`), so the CLONE
-        // never changes a partitioning D5 forbids changing.
         let staging = format!("{table}__staging");
         let staging_fqtn = self.fqtn(&staging);
         eprintln!(
@@ -476,8 +434,6 @@ impl TargetLoader for BigQueryLoader {
             table,
         )?;
         let fresh = creation_options(true, self.partition.as_ref());
-        // The first batch CREATES the staging table with the declared shape; the
-        // rest append into it.
         if let Some((first, rest)) = batches.split_first() {
             let sql = build_load_data_sql(
                 &staging_fqtn,
@@ -512,8 +468,6 @@ impl TargetLoader for BigQueryLoader {
     ) -> Result<u64> {
         use crate::load::cdc::Warehouse;
         self.check_cluster_by()?;
-        // Full change-log schema: rivet's `__op`/`__pos`/`__seq` meta columns
-        // (not reported by `rivet check`) ahead of the resolved data columns.
         let mut full = crate::load::cdc::meta_column_specs(Warehouse::BigQuery);
         full.extend(
             specs
@@ -526,9 +480,6 @@ impl TargetLoader for BigQueryLoader {
         let changes = format!("{table}__changes");
         let changes_fqtn = self.fqtn(&changes);
 
-        // Ensure the append-only log exists, partitioned and clustered as the load
-        // declares. Idempotent: created once, appended forever. A BUFFER takes no
-        // partition: one MERGE reads all of it and `compact` drops it.
         let log_partition_decl = if self.layout.log_is_disposable() {
             None
         } else {
@@ -546,13 +497,6 @@ impl TargetLoader for BigQueryLoader {
         );
         self.run_sql(&create, "load", &changes)?;
 
-        // …and, for a log that ALREADY existed, add whatever the declared
-        // schema has and it does not. The CREATE above is a no-op on such a
-        // table, so without this a log rivet did not create — or one that predates a new
-        // meta column — fails the LOAD below on a schema mismatch. ALTER ADD,
-        // never a replace: the table may hold the customer's history.
-        // A log that did not exist a moment ago was just created from this very
-        // spec: nothing to add (metadata, not a query, says which).
         let alter = if existed {
             build_alter_add_columns_sql(&changes_fqtn, &full)
         } else {
@@ -561,8 +505,6 @@ impl TargetLoader for BigQueryLoader {
         if let Some(alter) = alter {
             self.run_sql(&alter, "load", &changes)?;
         }
-        // …and its partition options, as the log takes them (no filter, no load-date expiry).
-        // A buffer has no partition options to settle; a changelog's follow the config.
         let log_partition = self.partition.as_ref().map(changelog_partition);
         let settle = if self.layout.log_is_disposable() {
             None
@@ -578,10 +520,7 @@ impl TargetLoader for BigQueryLoader {
             eprintln!("  note: `{changes_fqtn}` partition options changed: {alter}");
         }
 
-        // Count before / append (free LOAD DATA INTO) / count after — the delta
-        // is what THIS load added; the driver gates it against the manifest total.
         let before = self.count_rows(&changes)?;
-        // No Parquet is no load job: an append of nothing only makes sure the log exists.
         if uris.is_empty() {
             return Ok(0);
         }
@@ -613,7 +552,6 @@ impl TargetLoader for BigQueryLoader {
         specs: &[TargetColumnSpec],
         pk: &[String],
     ) -> Result<u64> {
-        // An empty baseline appended nothing, so the buffer may not exist yet.
         self.append_changelog(table, specs, &[], pk)?;
         let changes = format!("{table}__changes");
         let columns: Vec<&str> = specs
@@ -654,30 +592,13 @@ impl TargetLoader for BigQueryLoader {
         let changes_fqtn = self.fqtn(&changes);
         let api = crate::load::before_write(self.api())?;
 
-        // Resolved once, because BOTH the recovery pass and the main script need it.
-        // A day-partitioned base (the partner shape, init's default) or an
-        // unpartitioned one compacts in ONE scripted job: the buffer's distinct days
-        // become a script variable and every MERGE prunes to exactly those partitions.
         let key = self.partition.as_ref().map(|p| &p.key);
         let arm = compact_arm(key);
 
-        // RECOVERY, before anything else. The scripted arm renames the live buffer to
-        // this deterministic name as its first act (see `CompactRename`), so a table
-        // sitting here means a previous compaction's JOB died between the rename and
-        // its drop. Those rows are merged into no base and appear in no buffer — only
-        // a later compaction can find them, and only because the name is fixed.
-        //
-        // It must run BEFORE the rename below, which would otherwise fail on the name
-        // already existing. Its rows are counted into this run's report: they really
-        // were merged now.
         let merging = format!("{table}__changes__merging");
         let merging_fqtn = self.fqtn(&merging);
         let leftover =
             crate::load::before_write(api.table_metadata(&self.dataset, &merging))?.is_some();
-        // No buffer table → nothing to merge, said so by the report. Metadata, not
-        // a query job: `tables.get` is free and answers the same question. Read
-        // BEFORE the base is touched: a table never loaded (an empty source) has no
-        // base to ALTER, and the field read that as `Not found: Table` every cycle.
         let buffer = crate::load::before_write(api.table_metadata(&self.dataset, &changes))?;
         if nothing_to_compact(buffer.is_some(), leftover) {
             return Ok(crate::load::CompactReport {
@@ -687,7 +608,6 @@ impl TargetLoader for BigQueryLoader {
                 had_buffer: false,
             });
         }
-        // A column the source gained reaches the base before any MERGE names it.
         if let Some(alter) = build_alter_add_columns_sql(&base, specs) {
             self.run_sql(&alter, "merge", table)?;
         }
@@ -702,13 +622,10 @@ impl TargetLoader for BigQueryLoader {
             let script = compact_script_sql(
                 &base,
                 &merging_fqtn,
-                None, // already renamed by the run that died; nothing to rename now
+                None,
                 specs,
                 pk,
                 order.clone(),
-                // The leftover can only have come from the scripted arm. If the config
-                // has since moved to a range key, fall back to the unbounded MERGE —
-                // correct, merely less pruned, and never a reason to strand the rows.
                 arm.recovery_day_column(),
             );
             let row = api.run_query_first_row(&script, &self.labels("merge", table))?;
@@ -718,10 +635,6 @@ impl TargetLoader for BigQueryLoader {
         }
 
         let Some(buffer) = buffer else {
-            // Recovered rows count even here: no LIVE buffer, yet this run really did
-            // merge a leftover. Reporting zero would print "nothing to merge" over work
-            // that just happened, and `had_buffer` follows the recovery for the same
-            // reason — it is what the caller prints.
             return Ok(crate::load::CompactReport {
                 base,
                 changes_rows: 0,
@@ -730,9 +643,6 @@ impl TargetLoader for BigQueryLoader {
             }
             .with_recovered(recovered_rows, recovered_jobs));
         };
-        // An EMPTY buffer (the metadata row count is exact after a load job) needs
-        // no probe and no MERGE — every statement that touches a table is billed a
-        // 10 MB floor; the DROP alone is free.
         if buffer.get("numRows").and_then(serde_json::Value::as_str) == Some("0") {
             self.run_sql(&format!("DROP TABLE `{changes_fqtn}`;"), "merge", table)?;
             return Ok(crate::load::CompactReport {
@@ -743,16 +653,8 @@ impl TargetLoader for BigQueryLoader {
             }
             .with_recovered(recovered_rows, recovered_jobs));
         }
-        // A crash BEFORE any MERGE: the buffer must survive whole, so the next
-        // compact applies every change exactly once (the sibling of
-        // `compact_after_merge`, where the script already dropped it).
         crate::test_hook::maybe_panic_at("compact_before_merge");
         if let CompactArm::Scripted { day_column } = arm {
-            // The rename is the script's first act, so the live name is free the moment
-            // the job starts and every later statement — MERGE and DROP alike — works
-            // on `merging_fqtn`. A job abandoned by a dying client therefore drops a
-            // table nothing else writes to, while `append_changelog` recreates the live
-            // buffer for the next load. See `CompactRename`.
             let script = compact_script_sql(
                 &base,
                 &merging_fqtn,
@@ -767,8 +669,6 @@ impl TargetLoader for BigQueryLoader {
             );
             let row = api.run_query_first_row(&script, &self.labels("merge", table))?;
             let (changes_rows, merge_jobs) = compact_summary(&row)?;
-            // The buffer is gone with the script; a crash HERE loses nothing — the
-            // next compact finds no buffer and says so.
             crate::test_hook::maybe_panic_at("compact_after_merge");
             return Ok(crate::load::CompactReport {
                 base,
@@ -778,11 +678,7 @@ impl TargetLoader for BigQueryLoader {
             }
             .with_recovered(recovered_rows, recovered_jobs));
         }
-        // Other keys (hour/month/year, integer ranges): the range probe, then one
-        // MERGE per window of constant bounds, then the DROP — separate jobs.
         let part_col = key.and_then(PartitionKey::column);
-        // A time key's column type decides whether the probe's `DATE()` is pinned to
-        // UTC; `TIMESTAMP` when the specs do not name the column.
         let time_type = matches!(key, Some(PartitionKey::Time { .. })).then(|| {
             part_col.map_or(BqType::Timestamp.into(), |c| {
                 crate::load::cdc::column_type_of(specs, c)
@@ -813,9 +709,6 @@ impl TargetLoader for BigQueryLoader {
         for sql in &merges {
             self.run_sql(sql, "merge", table)?;
         }
-        // The buffer is spent: the next load creates it anew from its run's spec. A
-        // crash between the MERGE and this DROP re-merges the same rows next time —
-        // the upsert is idempotent, so nothing is applied twice.
         crate::test_hook::maybe_panic_at("compact_after_merge");
         self.run_sql(&format!("DROP TABLE `{changes_fqtn}`;"), "merge", table)?;
         Ok(crate::load::CompactReport {
@@ -937,8 +830,6 @@ impl super::ShapeControl for BigQueryLoader {
     }
 
     fn rebuild_leftovers(&self, table: &str) -> Result<Vec<String>> {
-        // A buffer is never rebuilt in place (`compact` drops it), so it can leave
-        // no `__rebuild` / `__old` behind: nothing to look for, no query job.
         if self.layout.log_is_disposable() {
             return Ok(Vec::new());
         }
@@ -955,8 +846,7 @@ impl super::ShapeControl for BigQueryLoader {
     }
 }
 
-/// The `PARTITION BY` expression for a `partition:` form, from the column's BigQuery
-/// type (ADR-0034 D3); `column_type` looks a column up in the load's specs.
+/// The `PARTITION BY` expression for a `partition:` form, from the column's BigQuery type (ADR-0034 D3).
 pub(crate) fn partition_expr(
     export: &str,
     form: &PartitionForm,
@@ -1062,8 +952,7 @@ fn nothing_to_compact(buffer: bool, leftover: bool) -> bool {
     !buffer && !leftover
 }
 
-/// The `(changes_rows, merge_jobs)` row the compaction script ends with; an
-/// unreadable row is an error, never a report that reads like an empty buffer.
+/// The `(changes_rows, merge_jobs)` row the compaction script ends with.
 fn compact_summary(row: &[Option<String>]) -> Result<(u64, usize)> {
     let cell = |i: usize, what: &str| -> Result<u64> {
         row.get(i)
@@ -1084,14 +973,7 @@ fn is_meta_column(name: &str) -> bool {
     crate::load::cdc::is_meta_column(name)
 }
 
-/// The job's label SET: the automatic `managed_by:rivet` / `rivet_op:<op>` /
-/// `rivet_table:<table>` labels, plus `rivet_run:<id>` when a run id is set.
-/// Sent as `configuration.labels`, which is what `INFORMATION_SCHEMA.JOBS.labels`
-/// and the billing export project — so cost stays attributable per run and per
-/// table exactly as the module docs' query describes.
-///
-/// (Was `--label k:v` flag pairs under the CLI transport. The keys and values
-/// are unchanged; only the wire shape moved.)
+/// The job's label SET: the automatic `managed_by:rivet` / `rivet_op:<op>` / `rivet_table:<table>` labels, plus `rivet_run:<id>` when a run id is set.
 fn build_labels(op: &str, table: &str, run_id: Option<&str>) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::from([
         ("managed_by".to_string(), "rivet".to_string()),
@@ -1104,29 +986,7 @@ fn build_labels(op: &str, table: &str, run_id: Option<&str>) -> BTreeMap<String,
     labels
 }
 
-/// Coerce a string into BigQuery's label charset: lowercase `[a-z0-9_-]`, other
-/// characters become `_`, capped at 63 chars. Empty maps to `unnamed`.
-///
-/// INJECTIVE where it matters. The mapping is lossy three ways — case-folding,
-/// `[^a-z0-9_-] → _`, and the length cap — and this value is the per-table
-/// IDENTITY that the cost query in this module's own header groups by. Two tables
-/// folding to one label reported their jobs, bytes and spend as ONE line, with
-/// nothing saying a merge had happened: a confidently wrong answer, which is worse
-/// than a missing one.
-///
-/// The collisions are not exotic. `"CaseTwin"` beside `casetwin` is a shape
-/// `yaml_scaffold` records as live-proven on PostgreSQL; MSSQL's `sysname` runs to
-/// 128 characters and a Mongo collection name to ~235, so two names sharing their
-/// first 63 sanitized characters are ordinary.
-///
-/// So: a string the mapping leaves UNCHANGED keeps its exact label — the common
-/// case, and labels stay readable. Anything the mapping altered carries a digest of
-/// the ORIGINAL, which cannot collide unless the originals do. Injectivity cannot
-/// be restored inside BigQuery's charset any other way.
-///
-/// Scope, from the hunt's refuters and worth keeping: NOTHING in rivet reads these
-/// labels back, so no data or control flow ever depended on them. The harm was
-/// bounded to cost attribution.
+/// Coerce a string into BigQuery's label charset.
 fn sanitize_label(s: &str) -> String {
     let mapped: String = s
         .chars()
@@ -1140,13 +1000,11 @@ fn sanitize_label(s: &str) -> String {
         })
         .collect();
     if mapped.is_empty() {
-        // Only the empty string maps here, so `unnamed` collides with nothing.
         return "unnamed".to_string();
     }
     if mapped == s && mapped.len() <= MAX_LABEL_LEN {
         return mapped;
     }
-    // Lossy: disambiguate by the INPUT, not by the folded form.
     let digest = format!("{:08x}", xxhash_rust::xxh3::xxh3_64(s.as_bytes()) as u32);
     let mut out: String = mapped
         .chars()
@@ -1161,12 +1019,6 @@ fn sanitize_label(s: &str) -> String {
 const MAX_LABEL_LEN: usize = 63;
 
 /// Turn BigQuery's partition-quota failure into an actionable error.
-///
-/// TEXT-MATCHED, deliberately: the quota comes back as an ordinary
-/// `invalidQuery` job error whose MESSAGE names the limit ("Too many
-/// partitions produced by query, allowed 4000, …") — the REST envelope carries
-/// no distinct machine-readable code for it, so there is nothing sharper to
-/// match on. `bq_rest` puts that message verbatim into the error this reads.
 pub(crate) fn augment_partition_limit(e: anyhow::Error) -> anyhow::Error {
     let s = e.to_string().to_lowercase();
     if s.contains("partition")

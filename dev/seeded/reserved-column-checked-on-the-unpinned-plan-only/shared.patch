@@ -1,7 +1,8 @@
 diff --git a/src/load/plan.rs b/src/load/plan.rs
+index 4c41345..d181927 100644
 --- a/src/load/plan.rs
 +++ b/src/load/plan.rs
-@@ -314,7 +314,6 @@
+@@ -291,7 +291,6 @@ impl LoadPlan {
          if let Some(why) = &self.refusal {
              crate::rivet_bail!(crate::error::codes::LOAD_LOOKALIKE_COLUMN, "{why}");
          }
@@ -9,9 +10,9 @@ diff --git a/src/load/plan.rs b/src/load/plan.rs
          crate::preflight::key_admission::admit_load_keys(
              &self.export_name,
              self.mode,
-@@ -566,6 +565,7 @@
- /// The strict fit check a deferred plan still owes: every key, clustering and
- /// partition column is a column of the spec it is typed from.
+@@ -484,6 +483,7 @@ const NOT_A_COLUMN: &str = "is not a column of the export";
+ 
+ /// The strict fit check a deferred plan still owes.
  pub fn check_spec_fit(plan: &LoadPlan) -> Result<()> {
 +    plan.reserved_column_refusal()?;
      let has = |c: &str| plan.specs.iter().any(|s| s.column_name == c);

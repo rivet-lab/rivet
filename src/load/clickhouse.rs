@@ -1,8 +1,4 @@
-//! ClickHouse loader (ADR-0035): rivet reads each staged Parquet part and sends it
-//! as `INSERT … FORMAT Parquet` over the HTTP interface; a CDC change log is a
-//! `ReplacingMergeTree(__ver)` the view reads with `FINAL`.
-//!
-//! Transport and DDL started from @ssyusyukalov's loader in #145.
+//! ClickHouse loader (ADR-0035): rivet reads each staged Parquet part and sends it as `INSERT … FORMAT Parquet` over the HTTP interface.
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -25,7 +21,7 @@ const RETRY_BASE_MS: u64 = 250;
 enum Repeat {
     /// A second run changes nothing: a read, `IF NOT EXISTS`/`OR REPLACE` DDL, an insert into a log that collapses copies.
     Safe,
-    /// A second run changes the result (EXCHANGE, RENAME, a plain `MergeTree` insert): resend only what never connected.
+    /// A second run changes the result (EXCHANGE, RENAME, a plain `MergeTree` insert).
     Undelivered,
 }
 
@@ -155,8 +151,7 @@ impl ClickhouseLoader {
         Ok(self.client.get_or_init(|| c))
     }
 
-    /// POST `body` with `params`, waiting for the statement to finish and retrying what
-    /// `repeat` allows; returns the response text.
+    /// POST `body` with `params`, waiting for the statement to finish and retrying what `repeat` allows.
     fn post(&self, params: &[(&str, &str)], body: bytes::Bytes, repeat: Repeat) -> Result<String> {
         let pass =
             crate::secret::Secret::new(std::env::var(&self.password_env).with_context(|| {
@@ -270,10 +265,6 @@ impl ClickhouseLoader {
     }
 
     /// Insert every part in `uris` into `target`; the rows those parts hold.
-    ///
-    /// The count comes from each part, not from `X-ClickHouse-Summary`: that counts rows
-    /// materialized views write too and reads 0 under `async_insert`, while a statement that
-    /// returns 200 under `wait_end_of_query` inserted all of its rows (ADR-0035 CH6).
     fn insert_uris(
         &self,
         target: &str,
@@ -329,7 +320,7 @@ impl ClickhouseLoader {
         Ok(rows)
     }
 
-    /// Why an existing `<table>__changes` cannot take this load, read from the catalog; `None` when absent or matching.
+    /// Why an existing `<table>__changes` cannot take this load, read from the catalog.
     fn existing_changelog_conflict(
         &self,
         table: &str,
@@ -569,17 +560,14 @@ impl TargetLoader for ClickhouseLoader {
     }
 }
 
-/// Whether ClickHouse can read `bucket/key` through a table function as written: its
-/// functions decode `%` and expand `?`, `*` and `{…}` as globs, and reject spaces and
-/// non-ASCII, so any other key goes through rivet instead (measured: `a?b` read 5 objects).
+/// Whether ClickHouse can read `bucket/key` through a table function as written.
 fn pullable(bucket: &str, key: &str) -> bool {
     format!("{bucket}/{key}")
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '='))
 }
 
-/// The table function reading one part through `collection`: `gcs`/`s3` take the path under
-/// the collection's URL, `azureBlobStorage` the container and the blob.
+/// The table function reading one part through `collection`.
 fn pull_source(collection: &str, scheme: &str, bucket: &str, key: &str) -> String {
     match scheme {
         "az" => format!(
@@ -595,9 +583,7 @@ fn pull_source(collection: &str, scheme: &str, bucket: &str, key: &str) -> Strin
     }
 }
 
-/// The statements that put a filled `swap` table in `target`'s place, each with whether it
-/// may be resent and the fault point after it: a rename when there is nothing there yet,
-/// else an exchange (resent, it would swap the old table back) and a drop of what was there.
+/// The statements that put a filled `swap` table in `target`'s place, each with whether it may be resent and the fault point after it.
 fn swap_in(
     existing: ObjectKind,
     swap: &str,
@@ -620,8 +606,7 @@ fn swap_in(
     }
 }
 
-/// A CDC log collapses a resent part's copies by key and version; a plain `MergeTree`
-/// incremental log would keep both, so its inserts are resent only when undelivered.
+/// A CDC log collapses a resent part's copies by key and version.
 fn changelog_repeat(cdc: bool) -> Repeat {
     if cdc {
         Repeat::Safe
@@ -630,9 +615,7 @@ fn changelog_repeat(cdc: bool) -> Repeat {
     }
 }
 
-/// Whether attempt `attempt` failing with `failure` earns another for a `repeat` statement:
-/// a connection never made is always resent; a lost answer or an overloaded server only
-/// when a second run is harmless; any other answer is the server's decision.
+/// Whether attempt `attempt` failing with `failure` earns another for a `repeat` statement.
 fn retry_after(failure: Failure, repeat: Repeat, attempt: u32) -> bool {
     let transient = match failure {
         Failure::Connect => true,
@@ -654,8 +637,7 @@ fn query_id(headers: &reqwest::header::HeaderMap) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The HTTP client, trusting `ca_file`'s certificates beside the built-in roots; no pooled
-/// connection is reused, so a server-closed keep-alive cannot fail a statement.
+/// The HTTP client, trusting `ca_file`'s certificates beside the built-in roots.
 fn http_client(ca_file: Option<&str>) -> Result<reqwest::blocking::Client> {
     let mut builder = reqwest::blocking::Client::builder()
         .timeout(HTTP_TIMEOUT)
@@ -747,9 +729,7 @@ fn changelog_shape<'a>(
     })
 }
 
-/// Why an existing change log (`engine`, `sorting_key`, `partition_key`, column types) cannot
-/// take a load shaped `shape` over `wanted`, or `None`: another engine (the export changed
-/// mode), another key (a changed `load.pk`), another declared partition or another column type.
+/// Why an existing change log (`engine`, `sorting_key`, `partition_key`, column types) cannot take a load shaped `shape` over `wanted`, or `None`.
 fn changelog_conflict(
     changes: &str,
     view: &str,
@@ -849,8 +829,7 @@ fn zone_less_columns(
         .collect()
 }
 
-/// One row, tab-separated: how ClickHouse itself spells each of `types`, so a declared
-/// `Decimal64(6)` compares equal to the catalog's `Decimal(18, 6)`.
+/// One row, tab-separated: how ClickHouse itself spells each of `types`, so a declared `Decimal64(6)` compares equal to the catalog's `Decimal(18, 6)`.
 fn canonical_types_sql(types: &[String]) -> String {
     let cols = types
         .iter()
@@ -953,8 +932,6 @@ fn columns_ddl(specs: &[TargetColumnSpec], not_null: &[String]) -> String {
 }
 
 /// The native type a spec lands as: `Nullable(T)` unless it is a key column or a container.
-/// JSON and UUID are declared as what their Parquet converts into (`String`, the 16 raw
-/// bytes); a `JSON` or `UUID` column refuses the insert (measured).
 fn column_type(spec: &TargetColumnSpec, not_null: bool) -> String {
     let t = match &spec.target_type {
         TargetType::ClickHouse(t) => TargetType::ClickHouse(landed_type(t)),
@@ -1028,10 +1005,9 @@ fn object_kind_of(engine: &str) -> ObjectKind {
 }
 
 /// ClickHouse `DateTime64`'s range in Unix seconds: 1900-01-01 00:00:00 to 2299-12-31 23:59:59.
-/// Parts whose footers are read at once before a load.
 const FOOTER_READERS: usize = 8;
 
-/// The row count of every part in `uris`, in order, each footer checked for a timestamp ClickHouse would clamp and, for a change log, the head of `__pos` for a position it cannot version; the first part that fails is the one reported. The store is opened only when there is a part to read.
+/// The row count of every part in `uris`, in order, each footer checked for a timestamp ClickHouse would clamp and, for a change log, the head of `__pos` for a position it cannot version.
 fn checked_part_rows<'s>(
     store: impl FnOnce() -> Result<&'s GcsStore>,
     uris: &[String],
@@ -1091,9 +1067,7 @@ fn refuse_unorderable_positions(
     Ok(())
 }
 
-/// Refuse a part holding a timestamp ClickHouse would silently clamp (measured on 24.8:
-/// 9999-12-31 reads back as 2299-12-31 23:00, and `date_time_overflow_behavior` does not
-/// reach the Parquet reader).
+/// Refuse a part holding a timestamp ClickHouse would silently clamp (measured on 24.8.
 fn refuse_unholdable_timestamps(
     meta: &parquet::file::metadata::ParquetMetaData,
     uri: &str,
@@ -1203,8 +1177,7 @@ mod tests {
         );
     }
 
-    /// ClickHouse refuses a JSON or UUID column fed from Parquet, and `Array(Nullable(JSON))`
-    /// cannot even be created (measured on 24.8); their arrays land by element like the scalars.
+    /// ClickHouse refuses a JSON or UUID column fed from Parquet, and `Array(Nullable(JSON))` cannot even be created (measured on 24.8).
     #[test]
     fn json_and_uuid_land_as_their_parquet_types_also_inside_an_array() {
         let ddl = columns_ddl(
@@ -1255,8 +1228,7 @@ mod tests {
         assert_eq!(names, ["__op", "__pos", "__seq", "id"]);
     }
 
-    /// An existing log is refused before any write when the load would corrupt it:
-    /// another engine (a mode switch), another key (a changed `load.pk`), another type.
+    /// An existing log is refused before any write when the load would corrupt it.
     #[test]
     fn an_existing_change_log_that_this_load_would_corrupt_is_refused() {
         let pk = ["id".to_string()];
@@ -1380,8 +1352,7 @@ mod tests {
         );
     }
 
-    /// A declared partition must match the log's (as the catalog spells it); an undeclared
-    /// one leaves the log's partition alone.
+    /// A declared partition must match the log's (as the catalog spells it).
     #[test]
     fn a_change_log_partitioned_otherwise_than_declared_is_refused() {
         let pk = ["id".to_string()];
@@ -1414,8 +1385,7 @@ mod tests {
         assert!(added.contains("is partitioned by nothing"), "{added}");
     }
 
-    /// A timestamp column an earlier release declared without a zone loads on with a warning;
-    /// any other difference in its type is still refused.
+    /// A timestamp column an earlier release declared without a zone loads on with a warning.
     #[test]
     fn a_zone_less_timestamp_column_is_kept_with_a_warning() {
         let pk = ["id".to_string()];
@@ -1598,7 +1568,7 @@ mod tests {
         format!("gs://b/{name}")
     }
 
-    /// A Mongo part without clusterTime is refused before any write with the one re-baseline remedy; every other position loads as on main.
+    /// A Mongo part without clusterTime is refused before any write with the one re-baseline remedy.
     #[test]
     fn a_legacy_mongo_part_is_refused_before_any_write_and_every_other_shape_passes() {
         let dir = tempfile::tempdir().unwrap();
@@ -1675,8 +1645,7 @@ mod tests {
         }
     }
 
-    /// A part whose timestamp the footer cannot bound is refused: an all-NULL row group
-    /// beside 9999-12-31, and a part written without statistics.
+    /// A part whose timestamp the footer cannot bound is refused.
     #[test]
     fn a_part_the_footer_cannot_clear_is_refused() {
         use parquet::file::properties::{EnabledStatistics, WriterProperties};
@@ -1858,7 +1827,6 @@ mod tests {
         loader
             .append_changelog("t", &specs, &[], &["id".to_string()])
             .unwrap();
-        // (id, __pos, __seq, v), each key newest-first; `v` names the row that must win.
         let rows = [
             (1, r#"{"lsn":"3D/484A4908"}"#, 0, "win"),
             (1, r#"{"lsn":"A/0"}"#, -1, "snapshot"),
@@ -1953,8 +1921,7 @@ mod tests {
         assert!(e.contains("older than the clusterTime stamp"), "{e}");
     }
 
-    /// Through a named collection ClickHouse reads the part itself: columns match by
-    /// name whatever their order, the count is the insert's own, and a NULL key refuses.
+    /// Through a named collection ClickHouse reads the part itself.
     #[test]
     #[ignore = "live: requires docker compose clickhouse (with dev/clickhouse/named_collections.xml) + minio"]
     fn a_pulled_part_lands_by_column_name_and_a_null_key_refuses() {
@@ -1978,7 +1945,6 @@ mod tests {
         )
         .cdc(true)
         .named_collection(Some("rivet_stand_minio".into()));
-        // The MinIO container is found by the port it publishes, not by a compose project name.
         let ps = std::process::Command::new("docker")
             .args(["ps", "--filter", "publish=9000", "--format", "{{.Names}}"])
             .output()
@@ -2074,7 +2040,7 @@ mod tests {
         assert_eq!(parse_pair("x\t3"), None);
     }
 
-    /// The first statement of a remote `http://` loader is refused by code before any socket opens; https, loopback and the opt-in build the client.
+    /// The first statement of a remote `http://` loader is refused by code before any socket opens.
     #[test]
     fn a_remote_plaintext_url_is_refused_when_the_client_is_built() {
         let loader = |url: &str| ClickhouseLoader::new(url, "raw", "u", "P", Default::default());
@@ -2137,8 +2103,7 @@ mod tests {
         assert!(trimmed.starts_with("Code: 60."));
     }
 
-    /// build_loader marks a CDC plan's loader as CDC: adopting a full-load table then
-    /// refuses before any HTTP call, while an incremental loader would go to the server.
+    /// build_loader marks a CDC plan's loader as CDC.
     #[test]
     fn build_loader_wires_the_cdc_flag_from_the_plan_mode() {
         unsafe { std::env::set_var("RIVET_CH_WIRE_TEST_PASSWORD", "x") };
@@ -2207,8 +2172,7 @@ mod tests {
         );
     }
 
-    /// A lost answer is resent only where a second run is harmless; a connection never made
-    /// always is; a server's own refusal never is; and the budget ends every loop.
+    /// A lost answer is resent only where a second run is harmless.
     #[test]
     fn only_a_harmless_repeat_is_resent_and_never_past_the_budget() {
         use Failure::*;
@@ -2253,8 +2217,7 @@ mod tests {
         );
     }
 
-    /// `load.ca_file` is read when the client is built: a missing or non-PEM file refuses
-    /// naming the path, a CA certificate is accepted.
+    /// `load.ca_file` is read when the client is built.
     #[test]
     fn a_ca_file_must_exist_and_hold_a_certificate() {
         const CA: &str = "-----BEGIN CERTIFICATE-----

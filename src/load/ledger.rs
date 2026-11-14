@@ -22,24 +22,11 @@ pub(crate) fn ownership_of(state: Option<&StateStore>, fqtn: &str, op: &str) -> 
 }
 
 /// The `load_run` PRIMARY KEY for one table's row in one invocation.
-///
-/// The OP belongs in it because `rivet load` and `rivet compact` are two different
-/// RECORDS of the same table, and both derive their key from the same operator-supplied
-/// run id. Without it they computed the identical string, `load_run` upserts
-/// `ON CONFLICT (load_id) DO UPDATE`, and the compact's row — `mode=compact`,
-/// `source_run_ids=[]`, `rows_loaded=0` — REPLACED the load's. A scheduler that stamps
-/// one `RIVET_RUN_ID` per cycle and then runs load followed by compact is the ordinary
-/// shape that does it, and the release gate had already met this: `blessed_flow.py`
-/// works around it by minting a unique `--run-id` per cell, and says why in a comment.
-/// A harness workaround for a product behaviour is a bug report, not a fix.
-///
-/// The `{run_id}:` PREFIX is load-bearing and must stay first — the gate's ledger check
-/// scopes with `LIKE '<run-id>%'`.
 pub(crate) fn ledger_load_id(run_id: &str, op: &str, table: &str) -> String {
     format!("{run_id}:{op}:{table}")
 }
 
-/// How the ledger records a load that did not complete: `refused` when it stopped before any warehouse write, `failed` otherwise.
+/// How the ledger records a load that did not complete.
 pub(crate) fn ledger_status(e: &anyhow::Error) -> &'static str {
     match e.downcast_ref::<load::Refused>() {
         Some(_) => LoadStatus::Refused.as_str(),

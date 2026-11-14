@@ -1,12 +1,11 @@
+diff --git a/src/load/orchestrate.rs b/src/load/orchestrate.rs
+index b07a2fe..0a9cb46 100644
 --- a/src/load/orchestrate.rs
 +++ b/src/load/orchestrate.rs
-@@ -1220,21 +1220,14 @@
+@@ -974,18 +974,14 @@ fn execute_load<R>(
          active_at_fetch: None,
          marker_active: std::collections::HashSet::new(),
      };
--    // Everything the selection can stop on happens before any warehouse write, so every
--    // stop is typed and journaled as `refused` here: untyped and unrecorded, the load read
--    // as never attempted, and a `failed` row would have counted as rivet's own attempt.
 -    let inputs = match load::before_write(prepare_load(
 +    let inputs = match prepare_load(
          store,
@@ -25,7 +24,7 @@
              if nothing_to_load(holds_whole_table_pass(job.plan, &i.runs), i.uris.is_empty()) =>
          {
              ctx.active_at_fetch = i.active_at_fetch.clone();
-@@ -1243,13 +1236,13 @@
+@@ -994,13 +990,13 @@ fn execute_load<R>(
              ctx.record_empty_runs(&i.source_run_ids);
              return Ok(None);
          }
@@ -41,9 +40,11 @@
              print_up_to_date(&job);
              ctx.record_skip();
              return Ok(None);
+diff --git a/src/preflight/mod.rs b/src/preflight/mod.rs
+index 111fae0..76a1309 100644
 --- a/src/preflight/mod.rs
 +++ b/src/preflight/mod.rs
-@@ -757,33 +757,22 @@
+@@ -782,33 +782,22 @@ pub fn load_type_reports(
                          .map(|t| format!(" table '{t}'"))
                          .unwrap_or_default()
                  )),
