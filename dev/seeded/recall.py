@@ -400,6 +400,7 @@ class Cargo:
         if self.archive:
             self.base.mkdir(parents=True, exist_ok=True)
             p = sh(["tar", "--zstd", "-xf", str(self.archive), "-C", str(self.base)], cwd=self.base, env=self.env)
+            (self.base / "target" / "tmp").mkdir(parents=True, exist_ok=True)
         else:
             p = sh(self.nextest(["run", "--no-run"], cells), cwd=self.tree, env=self.env)
         log.write_text(p.stdout)
@@ -1172,6 +1173,14 @@ def self_test() -> int:
         run_record.append_run(rec, sha="a" * 40, complete=False, green=True, dirty=False, seeds=["s2"], not_graded_here=1)
         assert run_record.refusal("a" * 40, rec, want) is None and run_record.refusal("b" * 40, rec, want) is not None, "two runs that together cover the ledger must be the ones the tag rule reads"
         assert json.loads(rec.read_text().splitlines()[-1])["not_graded_here"] == 1, "a run must record its NOT-GRADED-HERE rows"
+    with tempfile.TemporaryDirectory() as td:
+        src, base, packed = Path(td) / "src", Path(td) / "base", Path(td) / "a.tar.zst"
+        (src / "target" / "nextest").mkdir(parents=True)
+        (src / "target" / "nextest" / "binaries-metadata.json").write_text("{}")
+        assert sh(["tar", "--zstd", "-cf", str(packed), "-C", str(src), "target"]).returncode == 0
+        done = Cargo(Path("/t"), base, None, ("seeded",), packed).build([], Path(td) / "unpack.log")
+        assert done.returncode == 0 and (base / "target" / "nextest" / "binaries-metadata.json").is_file(), done.stdout
+        assert (base / "target" / "tmp").is_dir(), "an unpacked build has no CARGO_TARGET_TMPDIR, which a test baked it in writes to"
     from dev.seeded import shards, verdict
     shards.self_test()
     verdict.self_test()
