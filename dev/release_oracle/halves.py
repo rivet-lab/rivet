@@ -1,12 +1,11 @@
-"""The release gate in two halves: the one table that places every stage and every seeded-recall shard on a machine."""
+"""The release gate in two halves: the one table that places every stage, and the derivation that places every seeded-recall seed, on a machine."""
 
 from __future__ import annotations
 
-import importlib.util
 import re
 from collections.abc import Iterable, Mapping, Sequence
 
-from .core import DEVBOX, HALVES, HOSTED, ROOT
+from .core import DEVBOX, HALVES, HOSTED
 
 #: Every per-run gate stage by name, in table order, with the half that runs it; the measured stages are the island's and are not here.
 STAGE_HALF: dict[str, str] = {
@@ -59,10 +58,6 @@ STAGE_HALF: dict[str, str] = {
     "live modules devbox": DEVBOX,
     "live modules": HOSTED,
 }
-
-#: The half of each seeded-recall shard, in shard order; its length is the shard count (the nightly workflow deals 4).
-SEED_SHARD_HALF: tuple[str, ...] = (DEVBOX, DEVBOX, DEVBOX, DEVBOX)
-
 
 #: The half each `Need` variant of tests/common/mod.rs places a live test in: a test whose call graph names a need runs where the need is held; a variant missing here fails `needs_problems`.
 NEED_HALF: dict[str, str] = {
@@ -119,33 +114,27 @@ def stage_half(name: str) -> str:
         raise SystemExit(f"stage {name!r} is placed in neither half: add it to STAGE_HALF in dev/release_oracle/halves.py") from None
 
 
-def deal(names: Sequence[str], shards: int) -> list[dict]:
-    """The nightly workflow's own dealer, loaded from its script: sorted names round-robin into shards."""
-    path = ROOT / ".github" / "scripts" / "recall_shards.py"
-    spec = importlib.util.spec_from_file_location("recall_shards", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod.deal(sorted(names), shards)
+def seed_homes() -> dict[str, str]:
+    """Seed -> half, derived from the ledger, the live-test table and the Need seam (`dev.seeded.shards.homes`); the hosted ones run in the Nightly Recall workflow, the rest in the devbox half."""
+    from dev.seeded import shards
+
+    rows, devbox_tests, _ = shards.load()
+    return {seed: half for seed, (half, _) in shards.homes(rows, devbox_tests).items()}
 
 
-def half_seeds(half: str, names: Iterable[str], shard_half: Sequence[str] = SEED_SHARD_HALF) -> list[str]:
-    """The seeds whose recall shard belongs to `half`, in sorted order."""
-    owned = [s for shard in deal(list(names), len(shard_half)) if shard_half[shard["index"]] == half for s in shard["seeds"].split(",")]
-    return sorted(owned)
+def half_seeds(half: str, homes: Mapping[str, str] | None = None) -> list[str]:
+    """The seeds placed in `half`, in sorted order."""
+    return sorted(s for s, h in (seed_homes() if homes is None else homes).items() if h == half)
 
 
 def problems(stage_names: Sequence[str], seed_names: Sequence[str], stage_table: Mapping[str, str] = STAGE_HALF,
-             shard_half: Sequence[str] = SEED_SHARD_HALF) -> list[str]:
-    """What is wrong with the placement: a stage in no half, a table row naming no stage, a value that is no half, a seed that runs in no half or in two."""
+             homes: Mapping[str, str] | None = None) -> list[str]:
+    """What is wrong with the placement: a stage in no half, a table row naming no stage, a value that is no half, a seed that runs in no half or in a half that does not exist."""
     out = [f"stage {n!r} is placed in neither half" for n in stage_names if n not in stage_table]
     out += [f"STAGE_HALF names {n!r}, which no gate stage has" for n in stage_table if n not in stage_names]
     out += [f"stage {n!r} is placed in {h!r}, which is no half of {HALVES}" for n, h in stage_table.items() if h not in HALVES]
-    if not shard_half:
-        return out + ["SEED_SHARD_HALF has no shard: no seed runs in any half"]
-    out += [f"shard {i} is placed in {h!r}, which is no half of {HALVES}" for i, h in enumerate(shard_half) if h not in HALVES]
-    if out:
-        return out
-    runs = [s for half in HALVES for s in half_seeds(half, seed_names, shard_half)]
-    out += [f"seed {s!r} runs in no half" for s in seed_names if s not in runs]
-    out += [f"seed {s!r} runs in {runs.count(s)} halves" for s in sorted(set(runs)) if runs.count(s) > 1]
+    homes = seed_homes() if homes is None else homes
+    out += [f"seed {s!r} is placed in no half" for s in seed_names if s not in homes]
+    out += [f"placement names seed {s!r}, which the ledger does not have" for s in homes if s not in seed_names]
+    out += [f"seed {s!r} is placed in {h!r}, which is no half of {HALVES}" for s, h in homes.items() if h not in HALVES]
     return out

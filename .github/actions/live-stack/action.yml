@@ -2,7 +2,7 @@ name: Live stack
 description: Rust toolchain, the seed tool, the docker stand of nightly-live started, waited for and seeded.
 inputs:
   stack:
-    description: full, lean (no MySQL replica trio) or core (the engines, loaders and object stores only).
+    description: full, lean (no MySQL replica trio), core (the engines, loaders and object stores only) or none (the toolchain and the Python environment, no service).
     default: full
 runs:
   using: composite
@@ -19,10 +19,12 @@ runs:
     - uses: ./.github/actions/cargo-deny
 
     - name: Build the seed tool before the stack starts
+      if: ${{ inputs.stack != 'none' }}
       shell: bash
       run: cargo build --release --bin seed --features dev-seed
 
     - name: Start services
+      if: ${{ inputs.stack != 'none' }}
       shell: bash
       env:
         STACK: ${{ inputs.stack }}
@@ -37,6 +39,7 @@ runs:
         sudo chmod -R 0777 tests/.live-tmp
 
     - name: Wait for services
+      if: ${{ inputs.stack != 'none' }}
       shell: bash
       run: |
         has() { [ -n "$(docker compose ps -q "$1")" ]; }
@@ -80,16 +83,19 @@ runs:
         true
 
     - name: Seed light fixtures (orders, etc.)
+      if: ${{ inputs.stack != 'none' }}
       shell: bash
       run: |
         PGPASSWORD=rivet psql -h localhost -U rivet -d rivet -f dev/e2e/seed_pg.sql
         mysql -h 127.0.0.1 -u rivet -privet rivet < dev/e2e/seed_mysql.sql
 
     - name: Seed Oracle database
+      if: ${{ inputs.stack != 'none' }}
       shell: bash
       run: docker compose exec -T oracle sqlplus -s rivet/rivet@localhost/FREEPDB1 < seeds/common/oracle.sql > /dev/null
 
     - name: Seed MSSQL database
+      if: ${{ inputs.stack != 'none' }}
       shell: bash
       run: |
         docker compose cp dev/mssql/init.sql mssql:/tmp/init.sql
@@ -97,6 +103,7 @@ runs:
           -S localhost -U sa -P 'Rivet_Passw0rd!' -C -i /tmp/init.sql
 
     - name: Seed heavy fixture (content_items)
+      if: ${{ inputs.stack != 'none' }}
       shell: bash
       run: |
         RIVET_SEED_I_KNOW=1 ./target/release/seed \
@@ -109,6 +116,7 @@ runs:
         PGPASSWORD=rivet psql -h localhost -U rivet -d rivet -c ANALYZE
 
     - name: Independent row-hash oracle deps
+      if: ${{ inputs.stack != 'none' }}
       shell: bash
       run: python3 -m pip install --break-system-packages xxhash
 
