@@ -113,12 +113,13 @@ delete the row.
 ## Adding a seed
 
 1. Pick a bug class from history: a fixed defect whose fix commit you can name.
-2. Write the smallest source change that brings it back, in a checkout with no other
-   edits, then save it as a patch:
-   `git diff -- src/the/file.rs > dev/seeded/<seed-name>/<engine>.patch`.
-   If the code path is shared by every engine, write one patch,
-   `dev/seeded/<seed-name>/shared.patch`, and set it as the seed-level `patch:`.
-   Restore the source from a copy you took before the edit.
+2. Write the defect as a `seeded!("<seed-name>", defect, good)` site in `src/` (see
+   `src/seeded.rs`) and name it in the manifest with `switch: <seed-name>`, at the seed level
+   or on an engine. A new seed is never a patch: patch form is frozen, and the seed-recall
+   self-test fails a `patch:` row that `dev/seeded/patch_seeds.py` does not list.
+   A seed that is still a patch is converted by writing its site, replacing `patch:` with
+   `switch:`, deleting `dev/seeded/<seed-name>/` and deleting its line from `PATCH_SEEDS`;
+   the self-test fails a ledger line no row uses. The ledger only shrinks.
 3. Add the seed to `dev/seeded/seeds.yaml`. Pick the scope of the axis the seed varies
    and list **every** member of it. `source`, `target` and `destination` are read from the Rust
    enums `SourceType`, `LoadTargetKind` and `DestinationType`, so a new variant is a new
