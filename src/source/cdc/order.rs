@@ -232,10 +232,16 @@ impl Sniff {
 }
 
 impl Row {
+    /// The parts the order is read from.
+    fn ordered(&self) -> impl Iterator<Item = &Part> {
+        self.parts.iter().filter(|p| {
+            p.kind != PartKind::Stamp || seeded!("mongo-warehouse-order-by-token", false, true)
+        })
+    }
+
     /// The order key of a position of this row's shape.
     pub(crate) fn key(&self, v: &Json) -> Option<Key> {
-        self.parts
-            .iter()
+        self.ordered()
             .map(|p| p.kind.value(v.get(p.field)))
             .collect::<Option<Vec<_>>>()
             .map(Key)
@@ -249,8 +255,7 @@ impl Row {
 
     /// The `ORDER BY` expressions for the dedup view, most significant first.
     pub(crate) fn sql(&self, dialect: Dialect) -> Vec<String> {
-        self.parts
-            .iter()
+        self.ordered()
             .flat_map(|p| p.kind.sql(dialect, p.field))
             .collect()
     }

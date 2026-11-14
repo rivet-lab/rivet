@@ -791,6 +791,9 @@ pub fn verify_at_destination(
     // path is reserved for *programmer* errors (caller passes a malformed
     // `manifest_dir`, a future destination breaks an internal invariant).
     let manifest_bytes = match dest.head(&manifest_key) {
+        Ok(None) if seeded!("marker-without-manifest-read-as-legacy", true, false) => {
+            return Ok(with_depth(ManifestVerification::legacy()));
+        }
         Ok(None) => {
             // No manifest is the legacy shape only while there is no marker either.
             let mut v = ManifestVerification::legacy();

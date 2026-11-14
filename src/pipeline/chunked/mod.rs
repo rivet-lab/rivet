@@ -516,15 +516,15 @@ pub(crate) fn claim_run<'s>(
     if let Some(lease) = try_run_lease(state, export, &source)? {
         return Ok(lease);
     }
-    crate::rivet_bail!(
-        crate::error::codes::STATE_RUN_IN_PROGRESS,
-        "{}",
-        live_run_refusal(
-            export,
-            state.newest_running_run(export, &source)?.as_deref(),
-            plan.strategy.is_resumable()
-        )
-    )
+    let refusal = live_run_refusal(
+        export,
+        state.newest_running_run(export, &source)?.as_deref(),
+        plan.strategy.is_resumable(),
+    );
+    if seeded!("live-run-refusal-without-a-code", true, false) {
+        return Err(anyhow::Error::msg(refusal));
+    }
+    crate::rivet_bail!(crate::error::codes::STATE_RUN_IN_PROGRESS, "{}", refusal)
 }
 
 /// Under the run lease, recover a chunk run whose process died: the plan to run in its place, if any; `force` is the run's `--force`.

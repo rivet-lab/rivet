@@ -299,11 +299,14 @@ pub(crate) fn column_nullable_on(
     let (Some(table), Some(attnum)) = (col.table_oid(), col.column_id()) else {
         return Ok(None);
     };
-    let row = client.query_opt(
+    let sql = seeded!(
+        "cursor-nullability-claimed-without-the-table-catalog",
         "SELECT a.attnotnull FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid \
-         WHERE a.attrelid = $1 AND a.attnum = $2 AND c.relkind IN ('r', 'p')",
-        &[&table, &attnum],
-    )?;
+         WHERE a.attrelid = $1 AND a.attnum = $2",
+        "SELECT a.attnotnull FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid \
+         WHERE a.attrelid = $1 AND a.attnum = $2 AND c.relkind IN ('r', 'p')"
+    );
+    let row = client.query_opt(sql, &[&table, &attnum])?;
     Ok(row.map(|r| !r.get::<_, bool>(0)))
 }
 

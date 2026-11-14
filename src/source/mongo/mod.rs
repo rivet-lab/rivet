@@ -946,7 +946,11 @@ impl Source for MongoSource {
             Ok::<usize, anyhow::Error>(total)
         })?;
 
-        self.confirm_collection(coll_name)?;
+        seeded!(
+            "mongo-empty-read-after-drop",
+            Ok(()),
+            self.confirm_collection(coll_name)
+        )?;
 
         log::info!("total: {total} documents (collection '{coll_name}')");
         Ok(())

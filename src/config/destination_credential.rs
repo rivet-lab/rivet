@@ -59,9 +59,17 @@ impl DestinationCredential {
             ));
         }
         match &config.aws_profile {
-            Some(_) if ak.is_some() || st.is_some() => Err(refuse(
-                "S3 aws_profile cannot be combined with access_key_env, secret_key_env or session_token_env: the profile alone would sign and the env keys would be ignored.\n  Fix: remove aws_profile to sign with the env keys, or remove the env key fields to sign with the profile.",
-            )),
+            Some(_)
+                if seeded!(
+                    "destination-credential-read-by-one-leg",
+                    false,
+                    ak.is_some() || st.is_some()
+                ) =>
+            {
+                Err(refuse(
+                    "S3 aws_profile cannot be combined with access_key_env, secret_key_env or session_token_env: the profile alone would sign and the env keys would be ignored.\n  Fix: remove aws_profile to sign with the env keys, or remove the env key fields to sign with the profile.",
+                ))
+            }
             Some(profile) => Ok(Self::S3Profile(profile.clone())),
             None if ak.is_some() || st.is_some() => Ok(Self::S3Env {
                 access_key_env: ak.clone(),

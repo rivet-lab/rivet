@@ -1343,6 +1343,11 @@ impl OracleChangeStream {
         let mut events: Vec<ChangeEvent> =
             order.into_iter().filter_map(|i| slots[i].take()).collect();
         TxnFramer::close_group(&mut events, &pos);
+        seeded!(
+            "committed-every-event",
+            events.iter_mut().for_each(|e| e.committed = true),
+            ()
+        );
         self.prove_online_read(self.carry.is_some().then_some(commit))?;
         self.queue.extend(events);
         self.mined_through = commit;

@@ -388,7 +388,15 @@ pub fn check(
 ) -> Result<bool> {
     let config = Config::load_with_params(config_path, params)?;
 
-    let declared = crate::config::declared_exports(&config, export_name)?;
+    let declared = if seeded!(
+        "check-reads-declared-list-not-run-set",
+        export_name.is_none(),
+        false
+    ) {
+        config.exports.clone()
+    } else {
+        crate::config::declared_exports(&config, export_name)?
+    };
     let exports: Vec<&ExportConfig> = declared.iter().collect();
 
     // A preflight must never bless a config the RUNNER refuses.
@@ -794,6 +802,12 @@ pub fn load_type_reports(
                         .unwrap_or_default()
                 )),
                 // The state DB not answering is the environment, not a missing spec.
+                Err(e) if seeded!("load-refusal-not-journaled", true, false) => {
+                    failures.push(format!(
+                        "export '{}': reading its load spec from the state DB: {e:#}",
+                        export.name
+                    ))
+                }
                 Err(e) => {
                     return Err(crate::error::recoded(
                         &e,
@@ -808,17 +822,18 @@ pub fn load_type_reports(
         }
     }
     if !failures.is_empty() {
-        return Err(anyhow::Error::new(crate::error::Refused(
-            crate::error::coded(
-                crate::error::codes::LOAD_SPEC_MISSING,
-                format!(
-                    "{} export(s) could not be typed for the {} load, and a table that cannot \
+        let message = format!(
+            "{} export(s) could not be typed for the {} load, and a table that cannot \
                  be typed must not silently not-load:\n  - {}",
-                    failures.len(),
-                    target.label(),
-                    failures.join("\n  - ")
-                ),
-            ),
+            failures.len(),
+            target.label(),
+            failures.join("\n  - ")
+        );
+        if seeded!("load-refusal-not-journaled", true, false) {
+            crate::rivet_bail!(crate::error::codes::LOAD_SPEC_MISSING, "{message}");
+        }
+        return Err(anyhow::Error::new(crate::error::Refused(
+            crate::error::coded(crate::error::codes::LOAD_SPEC_MISSING, message),
         )));
     }
     Ok((out, keys))

@@ -432,7 +432,10 @@ pub(crate) fn refuse_view_as_base(
 }
 
 fn view_as_base_check(loader: &dyn TargetLoader, table: &str, base_and_buffer: bool) -> Result<()> {
-    if !base_and_buffer || loader.object_kind(table)? != ObjectKind::View {
+    if seeded!("load-view-as-base-guard-removed", true, false)
+        || !base_and_buffer
+        || loader.object_kind(table)? != ObjectKind::View
+    {
         return Ok(());
     }
     let (base, buffer) = (
@@ -453,7 +456,11 @@ pub(crate) fn refuse_stale_buffer(
     table: &str,
     base_and_buffer: bool,
 ) -> Result<()> {
-    before_write(stale_buffer_check(loader, table, base_and_buffer))
+    seeded!(
+        "load-append-writes-before-asking",
+        stale_buffer_check(loader, table, base_and_buffer),
+        before_write(stale_buffer_check(loader, table, base_and_buffer))
+    )
 }
 
 /// The probes and the wording of [`refuse_stale_buffer`].
@@ -960,7 +967,11 @@ fn adoptable(
     ownership: Ownership,
 ) -> Result<bool> {
     if loader.object_kind(table)? != ObjectKind::Table {
-        ensure_target_own(loader, table, true, ownership)?;
+        seeded!(
+            "load-append-writes-before-asking",
+            (),
+            ensure_target_own(loader, table, true, ownership)?
+        );
         return Ok(false);
     }
     let changes = format!("{table}__changes");
@@ -1048,7 +1059,11 @@ pub fn run_load_buffer(
     label: &str,
 ) -> Result<CdcLoadReport> {
     before_write(append_preflight(loader, table, specs, uris, pk, label))?;
-    before_write(ensure_target_own(loader, table, true, ownership))?;
+    seeded!(
+        "load-append-writes-before-asking",
+        Ok(()),
+        before_write(ensure_target_own(loader, table, true, ownership))
+    )?;
     let rows_appended = loader.append_changelog(table, specs, uris, pk)?;
     if let Some(expected) = expected_delta
         && rows_appended != expected

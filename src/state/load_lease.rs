@@ -338,6 +338,9 @@ const LEASE_TOKEN_CHARS: usize = 64;
 /// A file-name token of the lease `key`: a readable part (lossy: `orders#1` and `orders-1` read
 /// alike) and a hash of the raw key, so two keys never share one lease file.
 fn lease_file_token(key: &str) -> String {
+    if seeded!("lease-file-named-by-a-lossy-token", true, false) {
+        return crate::manifest::file_token(key);
+    }
     let readable: String = crate::manifest::file_token(key)
         .chars()
         .take(LEASE_TOKEN_CHARS)
@@ -565,8 +568,12 @@ impl StateStore {
             StateRef::Postgres(url) => {
                 let ttl = lease_ttl_s();
                 let host = host_name();
-                let keeper =
-                    keeper_for(url.expose(), ttl).map_err(|e| keeper_unavailable(key, &e))?;
+                let made = keeper_for(url.expose(), ttl);
+                let keeper = seeded!(
+                    "lease-granted-without-a-keeper",
+                    made.as_ref().ok().cloned(),
+                    Some(made.map_err(|e| keeper_unavailable(key, &e))?)
+                );
                 let granted = Instant::now();
                 let holder = format!(
                     "{host}:{}:{}",
@@ -612,14 +619,17 @@ impl StateStore {
                 if got.is_none() {
                     return Ok(None);
                 }
-                let id = keeper.shared.keep(key, &holder, granted);
+                let kept = keeper.map(|k| {
+                    let id = k.shared.keep(key, &holder, granted);
+                    (k, id)
+                });
                 Ok(Some(LoadLease {
                     store: self,
                     key: key.to_string(),
                     holder,
                     _file: None,
                     _legacy: None,
-                    kept: Some((keeper, id)),
+                    kept,
                 }))
             }
             StateRef::Sqlite(db) => {

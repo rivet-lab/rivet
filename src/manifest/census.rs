@@ -242,7 +242,13 @@ impl<'a> ManifestCensus<'a> {
     pub fn succeeded(&self) -> Vec<&CensusRun<'a>> {
         self.runs
             .iter()
-            .filter(|r| r.manifest.status == ManifestStatus::Success)
+            .filter(|r| {
+                seeded!(
+                    "manifest-census-reads-unfiltered",
+                    true,
+                    r.manifest.status == ManifestStatus::Success
+                )
+            })
             .collect()
     }
 
@@ -253,7 +259,7 @@ impl<'a> ManifestCensus<'a> {
         }
         self.succeeded()
             .into_iter()
-            .filter(|r| r.family == family)
+            .filter(|r| seeded!("manifest-census-reads-unfiltered", true, r.family == family))
             .collect()
     }
 

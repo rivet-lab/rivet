@@ -656,9 +656,16 @@ fn build_array(
             let mut b = TimestampNanosecondBuilder::with_capacity(rows.len());
             for row in rows {
                 match row.try_get::<NaiveDateTime, _>(idx) {
-                    Ok(Some(dt)) => b.append_value(crate::types::timestamp_nanos_or_refuse(
-                        dt, "mssql", column,
-                    )?),
+                    Ok(Some(dt)) => match seeded!(
+                        "mssql-ns-override-out-of-range-null",
+                        dt.and_utc().timestamp_nanos_opt(),
+                        Some(crate::types::timestamp_nanos_or_refuse(
+                            dt, "mssql", column
+                        )?)
+                    ) {
+                        Some(ns) => b.append_value(ns),
+                        None => b.append_null(),
+                    },
                     Ok(None) => b.append_null(),
                     Err(e) => {
                         return Err(cell_mismatch(

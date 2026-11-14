@@ -50,6 +50,9 @@ type CachedTableMap = (
 /// How long the server keeps the binlog dump open while rivet is busy flushing a roll to the store (the server default is 60 s).
 const DUMP_WRITE_TIMEOUT_SECS: u32 = 3600;
 
+#[cfg(feature = "seeded")]
+static GRANTS_SESSION: std::sync::Mutex<Option<Conn>> = std::sync::Mutex::new(None);
+
 pub(crate) struct MysqlChangeStream {
     stream: BinlogStream,
     /// TABLE_MAP cache: the event (Arc — rows-event decode borrows it) plus
@@ -345,7 +348,10 @@ impl MysqlChangeStream {
         own_db: &str,
         matches: &[crate::source::cdc::identity::CatalogMatch],
     ) -> Option<String> {
-        if !own_db.is_empty() && matches.iter().any(|m| m.schema == own_db) {
+        if !own_db.is_empty()
+            && matches.iter().any(|m| m.schema == own_db)
+            && seeded!("mysql-cdc-bare-name-refused-beside-a-twin", false, true)
+        {
             return Some(own_db.to_string());
         }
         let mut base: Vec<&str> = matches
@@ -790,8 +796,24 @@ impl MysqlChangeStream {
         let (Some(before), Some((url, tls))) = (&self.readable, &self.grants_source) else {
             return Ok(());
         };
-        let mut conn = connect_conn(url, tls.as_ref())?;
+        let mut conn = seeded!(
+            "column-grants-reread-on-a-cached-session",
+            match GRANTS_SESSION.lock().ok().and_then(|mut g| g.take()) {
+                Some(cached) => cached,
+                None => connect_conn(url, tls.as_ref())?,
+            },
+            connect_conn(url, tls.as_ref())?
+        );
         let read = Self::readable_on(&mut conn, &self.configured_tables, true)?;
+        seeded!(
+            "column-grants-reread-on-a-cached-session",
+            {
+                if let Ok(mut g) = GRANTS_SESSION.lock() {
+                    *g = Some(conn);
+                }
+            },
+            ()
+        );
         let now = read.unwrap_or_default();
         let columns = |r: &HashMap<_, crate::source::cdc::ReadableColumns>, t: &String| {
             r.get(t).map(|c| c.columns.clone())
@@ -1287,7 +1309,16 @@ impl MysqlChangeStream {
             .close_transaction(&commit, &format_args!("{}:{log_pos}", self.file))
         {
             Ok((head, tail)) => {
-                self.pending.extend(head);
+                self.pending.extend(seeded!(
+                    "committed-every-event",
+                    head.into_iter()
+                        .map(|mut e| {
+                            e.committed = true;
+                            e
+                        })
+                        .collect::<Vec<_>>(),
+                    head
+                ));
                 self.spooled = tail;
             }
             // Sealing the spill can fail, and a silent drop would deliver the head

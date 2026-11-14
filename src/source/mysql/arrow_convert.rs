@@ -480,8 +480,12 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
         match self.rows[row].as_ref(col) {
             Some(Value::Float(v)) => Some(*v),
             Some(Value::Double(v)) => Some(*v as f32),
-            Some(Value::Int(v)) => Some(*v as f32),
-            Some(Value::UInt(v)) => Some(*v as f32),
+            Some(Value::Int(v)) if seeded!("mysql-override-unread-value-nulled", false, true) => {
+                Some(*v as f32)
+            }
+            Some(Value::UInt(v)) if seeded!("mysql-override-unread-value-nulled", false, true) => {
+                Some(*v as f32)
+            }
             Some(Value::Bytes(bv)) => {
                 bytes_to_str(bv).and_then(crate::types::decimal::decimal_text_to_float)
             }
@@ -492,8 +496,12 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
         match self.rows[row].as_ref(col) {
             Some(Value::Float(v)) => Some(*v as f64),
             Some(Value::Double(v)) => Some(*v),
-            Some(Value::Int(v)) => Some(*v as f64),
-            Some(Value::UInt(v)) => Some(*v as f64),
+            Some(Value::Int(v)) if seeded!("mysql-override-unread-value-nulled", false, true) => {
+                Some(*v as f64)
+            }
+            Some(Value::UInt(v)) if seeded!("mysql-override-unread-value-nulled", false, true) => {
+                Some(*v as f64)
+            }
             Some(Value::Bytes(bv)) => {
                 bytes_to_str(bv).and_then(crate::types::decimal::decimal_text_to_float)
             }
@@ -797,6 +805,7 @@ fn wire_kind(v: &Value) -> &'static str {
 fn null_or_refuse(column: &str, target: &DataType, cell: Option<&Value>) -> Result<()> {
     match cell {
         None | Some(Value::NULL) => Ok(()),
+        Some(_) if seeded!("mysql-override-unread-value-nulled", true, false) => Ok(()),
         Some(other) => crate::rivet_bail!(
             crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH,
             "column `{column}` is read as {target} but MySQL sends {} — rivet does not convert \
@@ -925,8 +934,16 @@ fn build_array(
                 match row.as_ref(col_idx) {
                     Some(Value::Float(v)) => b.append_value(*v),
                     Some(Value::Double(v)) => b.append_value(*v as f32),
-                    Some(Value::Int(v)) => b.append_value(exact_f32(*v as i128, column)?),
-                    Some(Value::UInt(v)) => b.append_value(exact_f32(*v as i128, column)?),
+                    Some(Value::Int(v))
+                        if seeded!("mysql-override-unread-value-nulled", false, true) =>
+                    {
+                        b.append_value(exact_f32(*v as i128, column)?)
+                    }
+                    Some(Value::UInt(v))
+                        if seeded!("mysql-override-unread-value-nulled", false, true) =>
+                    {
+                        b.append_value(exact_f32(*v as i128, column)?)
+                    }
                     Some(Value::Bytes(bv)) => match bytes_to_str(bv)
                         .and_then(crate::types::decimal::decimal_text_to_float)
                     {
@@ -947,8 +964,16 @@ fn build_array(
                 match row.as_ref(col_idx) {
                     Some(Value::Float(v)) => b.append_value(*v as f64),
                     Some(Value::Double(v)) => b.append_value(*v),
-                    Some(Value::Int(v)) => b.append_value(exact_f64(*v as i128, column)?),
-                    Some(Value::UInt(v)) => b.append_value(exact_f64(*v as i128, column)?),
+                    Some(Value::Int(v))
+                        if seeded!("mysql-override-unread-value-nulled", false, true) =>
+                    {
+                        b.append_value(exact_f64(*v as i128, column)?)
+                    }
+                    Some(Value::UInt(v))
+                        if seeded!("mysql-override-unread-value-nulled", false, true) =>
+                    {
+                        b.append_value(exact_f64(*v as i128, column)?)
+                    }
                     Some(Value::Bytes(bv)) => match bytes_to_str(bv)
                         .and_then(crate::types::decimal::decimal_text_to_float)
                     {

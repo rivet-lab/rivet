@@ -1,0 +1,1 @@
+- **Harness**: 34 more patch-form seeded defects (`absent-old-cell-read-as-moved-key` through `transient-warehouse-code-exits-by-text`, alphabetical, minus the Cargo-patch rows) became `seeded!` switches graded in the one shared build.

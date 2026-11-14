@@ -518,7 +518,11 @@ impl ExportSink {
 
     pub fn maybe_split(&mut self) -> Result<()> {
         let written = self.writer.as_ref().map(|w| w.bytes_written()).unwrap_or(0);
-        if should_split(written, self.max_file_size, self.part_rows) {
+        if seeded!(
+            "max-file-size-never-checked",
+            false,
+            should_split(written, self.max_file_size, self.part_rows)
+        ) {
             self.split_now()?;
         }
         Ok(())
