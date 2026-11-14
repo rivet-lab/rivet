@@ -379,9 +379,12 @@ exclude_re = [
     # pool_apply_two_heavy_exports_both_complete (the HeavyGuard reset between two
     # heavies; a stubbed drop / deleted `!` deadlocks the second heavy).
     "replace run_pool -> Result",
-    "replace == with != in run_pool",
+    "replace pool_worker with ()",
+    "replace advise_or_realize_split -> Result",
+    "replace predict_and_announce_pool -> ",
+    "replace select_pool_exports -> Result",
     "impl Drop for HeavyGuard",
-    "delete ! in run_pool",
+    "delete ! in pool_worker",
     # `check` (preflight/mod.rs) connects to the source and diagnoses every
     # export — no offline caller, so its body stub / the `==` in the overlay
     # export-match loop are unkillable HERE (live-only). It is live-guarded by
