@@ -5,7 +5,7 @@
 Prerequisites:
   * `vhs`, `ttyd`, `ffmpeg` on PATH (Homebrew: `brew install vhs`).
   * Docker Desktop up with the repo stack: `docker compose up -d postgres mysql`.
-  * `target/release/rivet` + `target/release/seed` (built here if missing).
+  * `target/release/rivet` (built here if missing).
 
 Each scenario is four steps, in this order:
   1. audit the tape's `rivet` commands against the BINARY (see `audit_tape`),
@@ -71,7 +71,6 @@ TAG = "gifs"
 
 HERE = ROOT / "docs" / "gifs"
 BIN = ROOT / "target" / "release" / "rivet"
-SEED = ROOT / "target" / "release" / "seed"
 BIN_DIR = ROOT / "target" / "release"
 COMPOSE_FILE = ROOT / "docker-compose.yaml"
 
@@ -157,11 +156,10 @@ def ensure_prereqs() -> None:
     shell.require("ttyd", hint="brew install ttyd")
     shell.require("ffmpeg", hint="brew install ffmpeg")
 
-    if not (os.access(BIN, os.X_OK) and os.access(SEED, os.X_OK)):
+    if not os.access(BIN, os.X_OK):
         log("building release binaries ...", tag=TAG)
         shell.stream(
-            ["cargo", "build", "--release", "--bin", "rivet", "--bin", "seed",
-             "--features", "dev-seed"],
+            ["cargo", "build", "--release", "--bin", "rivet"],
             cwd=ROOT, timeout=None,
         ).check("cargo build --release")
 

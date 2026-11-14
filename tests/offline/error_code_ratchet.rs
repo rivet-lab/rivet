@@ -14,7 +14,7 @@
 // 338 -> 152 (2026-10-15): every error site under `src/source/` (the five engines and the shared
 // CDC, spill, checksum and validate modules) carries a registered code (-186).
 // 152 -> 0 (2026-10-15): every remaining site (cli, destination, plan, init, state, preflight,
-// enrich, format, manifest, mcp, types, connect, scalar, workers, the seed tool) carries a
+// enrich, format, manifest, mcp, types, connect, scalar, workers) carries a
 // registered code (-152). The ceiling stays 0: a new bare `bail!` / `ensure!` / `anyhow!` fails.
 const CEILING: usize = 0; // ratchet-pin: uncoded-bail-sites (review 2027-02-01)
 

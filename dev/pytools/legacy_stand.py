@@ -73,9 +73,7 @@ shell reported success (or a nonsense verdict) for a run that had not happened:
    not evidence that it did), and also fails when the parsed `FAIL:` count is
    non-zero even if the child exited 0.
 7. **A missing build read as a compatibility failure.** An absent binary is exit
-   127, and the shell scored that as data: no `seed` binary gave
-   `FAIL <target>: seed` once per target (five verdicts blaming five Postgres
-   releases for an un-built tree), and an absent `rivet` with `seed` present gave
+   127, and the shell scored that as data: an absent `rivet` gave
    all eight per-target cells — `doctor`, `check`, three exports, the re-run,
    `time_window`, `init` — as engine failures. Both matrices now check the
    binaries up front and name the build command.
@@ -141,7 +139,7 @@ Commands:
   stand-verify                  cross-engine seed parity
 
 TARGET may also be supplied via $TARGETS (whitespace-separated).
-Binaries: $RIVET / $SEED (default target/release/{rivet,seed})."""
+Binary: $RIVET (default target/release/rivet). Seeding: seeds/fixture via dev.pytools.seed_fixture."""
 
 
 # ── plain output ───────────────────────────────────────────────────────────────
@@ -155,9 +153,6 @@ def say(msg: str = "") -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 # shared: binaries and seeding
 # ══════════════════════════════════════════════════════════════════════════════
-# The fixture size is part of the matrix contract: every target is seeded with
-# the SAME small fixture so file counts and incremental cursors are comparable
-# across engine versions.
 SEED_SHAPE: tuple[str, ...] = (
     "--users", "500",
     "--orders-per-user", "4",
@@ -168,7 +163,7 @@ SEED_SHAPE: tuple[str, ...] = (
 
 
 def _binary(env: str, default: Path) -> Path:
-    """The rivet/seed binary, honouring `$RIVET` / `$SEED` exactly as the shell's
+    """The rivet binary, honouring `$RIVET` exactly as the shell's
     `${RIVET:-$(pwd)/target/release/rivet}` did.
 
     DEVIATION 7: absence is a precondition failure, not a per-cell verdict. The
@@ -180,21 +175,19 @@ def _binary(env: str, default: Path) -> Path:
     if not path.is_file() or not os.access(path, os.X_OK):
         raise Fail(
             f"{env.lower()} binary not executable: {path}",
-            hint="cargo build --release --bin rivet --bin seed",
+            hint="cargo build --release --bin rivet",
         )
     return path
 
 
-def _seed_argv(seed: Path, kind: str, url: str) -> list[str]:
+def _seed_argv(kind: str, url: str) -> list[str]:
     """DEVIATION 5: an unknown kind is fatal. `run_full_matrix.sh`'s
     `case "$seed_kind"` had arms for `pg` and `mysql` and NO default, so any
     other value skipped seeding entirely and the script then printed
     "seed: ok" and ran the whole e2e suite against whatever was in the DB."""
-    if kind in ("pg", "postgres"):
-        return [str(seed), "--target", "postgres", "--pg-url", url, *SEED_SHAPE]
-    if kind == "mysql":
-        return [str(seed), "--target", "mysql", "--mysql-url", url, *SEED_SHAPE]
-    raise Fail(f"unknown seed kind '{kind}' (expected pg|mysql)", code=2)
+    if kind not in ("pg", "postgres", "mysql"):
+        raise Fail(f"unknown seed kind '{kind}' (expected pg|mysql)", code=2)
+    return [sys.executable, "-m", "dev.pytools.seed_fixture", "--yes", "--url", url, *SEED_SHAPE]
 
 
 def _tail(p: Proc, *, limit: int = 200) -> str:
@@ -302,7 +295,6 @@ def legacy_matrix(target_names: Sequence[str]) -> int:
     """`dev/legacy/run_legacy.sh`: doctor → check → full → chunked → incremental
     (×2) → time_window (PG only) → init, per legacy server."""
     rivet = _binary("RIVET", ROOT / "target" / "release" / "rivet")
-    seed = _binary("SEED", ROOT / "target" / "release" / "seed")
 
     out_dir = LEGACY_DIR / "output"
     led = Ledger()
@@ -342,7 +334,7 @@ def legacy_matrix(target_names: Sequence[str]) -> int:
             # One fresh seed per target so incremental cursors start clean.
             if not led.verdict(
                 f"{target.name}: seed",
-                run(_seed_argv(seed, seed_kind, target.url), timeout=None),
+                run(_seed_argv(seed_kind, target.url), timeout=None, cwd=ROOT),
             ):
                 continue
 
@@ -527,7 +519,6 @@ def full_matrix(target_names: Sequence[str]) -> int:
     """`dev/legacy/run_full_matrix.sh`: seed each version, then run the ENTIRE
     e2e suite against it via `RIVET_PG_URL` / `RIVET_MYSQL_URL`."""
     rivet = _binary("RIVET", ROOT / "target" / "release" / "rivet")
-    seed = _binary("SEED", ROOT / "target" / "release" / "seed")
     # The e2e suite is `dev.pytools.e2e`. Its module file is checked rather than
     # trusted to import, because the failure this guards is a missing/renamed
     # suite — and `-m` would report that as a target-level FAIL for every version
@@ -575,7 +566,7 @@ def full_matrix(target_names: Sequence[str]) -> int:
 
         # Seed the target DB fresh so incremental cursors and file counts are
         # deterministic for each matrix pass.
-        seeded = run(_seed_argv(seed, target.seed_kind, target.seed_url), timeout=None)
+        seeded = run(_seed_argv(target.seed_kind, target.seed_url), timeout=None, cwd=ROOT)
         if not seeded.ok:
             kind = "pg" if target.seed_kind in ("pg", "postgres") else "mysql"
             say(f"  FAIL: seed ({kind}: {target.seed_url}) — {_tail(seeded)}")

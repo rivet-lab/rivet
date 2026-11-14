@@ -20,12 +20,12 @@ If you just want to export one table, start with [Getting Started](../getting-st
 - `rivet --version` works.
 - A writable local path or an S3/GCS bucket for output.
 
-The repo ships a `docker-compose.yaml` with both engines pre-seeded by [`dev/postgres/init.sql`](https://github.com/rivet-lab/rivet/blob/main/dev/postgres/init.sql) / [`dev/mysql/init.sql`](https://github.com/rivet-lab/rivet/blob/main/dev/mysql/init.sql) and the bench seed tool (`cargo run --features dev-seed --bin seed` — the seeder is gated behind the off-by-default `dev-seed` cargo feature, so a bare `cargo run --bin seed` errors). Follow along on that if you don't have a source handy.
+The repo ships a `docker-compose.yaml` with both engines pre-seeded by [`dev/postgres/init.sql`](https://github.com/rivet-lab/rivet/blob/main/dev/postgres/init.sql) / [`dev/mysql/init.sql`](https://github.com/rivet-lab/rivet/blob/main/dev/mysql/init.sql) and the native fixture seed (`seeds/fixture/`, applied by `python3 -m dev.pytools.seed_fixture`). Follow along on that if you don't have a source handy.
 
 ```bash
 docker compose up -d postgres mysql
-cargo run --features dev-seed --bin seed -- --target both   # postgres + mysql: fills users, orders, events, page_views, content_items, orders_coalesce
-# orders_sparse is created and truncated but left EMPTY — add --sparse-chunk-demo to fill it
+make seed-postgres seed-mysql   # fills users, orders, events, page_views, content_items, orders_coalesce
+# orders_sparse is created and truncated but left EMPTY — add --sparse-rows N to fill it
 export DATABASE_URL='postgresql://rivet:rivet@localhost:5432/rivet'
 ```
 

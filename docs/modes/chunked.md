@@ -90,7 +90,7 @@ Use a **small `chunk_size`** relative to your table if you want many steps on th
 **Ready-made example in this repo:** [`dev/scenarios/chunked_postgres_bench.yaml`](https://github.com/rivet-lab/rivet/blob/main/dev/scenarios/chunked_postgres_bench.yaml) includes **`bench_content_p4_safe`**: PostgreSQL `content_items` with **`parallel: 4`** and **`tuning.profile: safe`** (good for trying the bar on a wide table without hammering the source). Other exports in the same file cover serial / highly parallel / fatchunk / balanced profiles.
 
 ```bash
-# From repo root; Postgres up + seeded (e.g. docker compose + cargo run --bin seed ...)
+# From repo root; Postgres up + seeded (e.g. docker compose + make seed-postgres)
 mkdir -p dev/scenarios/output/bench
 rivet check --config dev/scenarios/chunked_postgres_bench.yaml
 rivet run --config dev/scenarios/chunked_postgres_bench.yaml --export bench_content_p4_safe

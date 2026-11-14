@@ -1,5 +1,5 @@
 name: Live stack
-description: Rust toolchain, the seed tool, the docker stand of nightly-live started, waited for and seeded.
+description: Rust toolchain, the docker stand of nightly-live started, waited for and seeded.
 inputs:
   stack:
     description: full, lean (no MySQL replica trio) or core (the engines, loaders and object stores only).
@@ -16,10 +16,6 @@ runs:
     - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
       with:
         tool: cargo-nextest,uv
-
-    - name: Build the seed tool before the stack starts
-      shell: bash
-      run: cargo build --release --bin seed --features dev-seed
 
     - name: Start services
       shell: bash
@@ -98,13 +94,7 @@ runs:
     - name: Seed heavy fixture (content_items)
       shell: bash
       run: |
-        RIVET_SEED_I_KNOW=1 ./target/release/seed \
-          --target postgres \
-          --users 1000 \
-          --orders-per-user 5 \
-          --events-per-user 5 \
-          --page-views 5000 \
-          --content-items 60000
+        uv run --frozen python -m dev.pytools.seed_fixture --source postgres --tier standard --yes
         PGPASSWORD=rivet psql -h localhost -U rivet -d rivet -c ANALYZE
 
     - name: Independent row-hash oracle deps

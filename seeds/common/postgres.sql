@@ -1,6 +1,6 @@
 -- seeds/common/postgres.sql — SELF-CONTAINED canonical seed (DDL + data + garbage).
 -- Assembled from dev/postgres/init.sql (DDL) + a fast-profile fill + dev/garbage/postgres.sql.
--- Idempotent-ish: run against a fresh 'rivet' DB. RIVET_SEED_I_KNOW not required (plain SQL).
+-- Idempotent-ish: run against a fresh 'rivet' DB. Plain SQL.
 
 -- Idempotent: drop base tables (+ dependent views) before recreating. The
 -- garbage section drops its own `ext` schema (CASCADE).
@@ -250,9 +250,7 @@ line2', NULL),
       'unicode: 日本語 🚀', NULL);
 
 -- ============================================================================
--- DATA FILL — fast-profile reproduction of the Rust seeder (src/bin/seed/fast.rs).
--- generate_series is the SQL analog of the seeder's `fast` path (deterministic,
--- no Rust binary needed). Row counts are 150K/table — deliberately PAST `rivet
+-- DATA FILL — generate_series. Row counts are 150K/table — deliberately PAST `rivet
 -- init`'s 100K threshold so init scaffolds KEYSET (not full) on every clean-PK
 -- table, uniformly with the ext.* garbage. content_items' body is trimmed at this
 -- scale (repeat 20, not 200) so 150K rows stay ~100 MB, not ~750 MB.
