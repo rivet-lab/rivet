@@ -427,7 +427,7 @@ def self_test() -> int:
         assert (halves_refusal(SHA, Path(tmp) / "absent.jsonl", hosted, plan=d["plan"], repo=REPO) or "").startswith("HALVES_SHA: ")
     fetch_self_test(good)
     plan = workflow_plan()
-    assert plan["events"] == ["workflow_dispatch"] and job_names(plan, 2) == [plan["plan"], "slice 0", "slice 1", "slice 2", plan["verdict"]], plan
+    assert "workflow_dispatch" in plan["events"] and set(plan["events"]) <= {"workflow_dispatch", "schedule"} and job_names(plan, 2) == [plan["plan"], "slice 0", "slice 1", "slice 2", plan["verdict"]], plan
     assert repo_slug() == REPO, repo_slug()
     print(f"self-test ok: two halves of one commit — green control, {len(mutants())} mutants each refused under its own HALVES_ code, run selection")
     return 0

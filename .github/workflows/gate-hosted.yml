@@ -1,6 +1,8 @@
 name: Gate hosted half
 
 on:
+  schedule:
+    - cron: "30 0 * * *"
   workflow_dispatch:
     inputs:
       sha:
@@ -24,7 +26,12 @@ jobs:
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
       matrix: ${{ steps.resolve.outputs.matrix }}
+      seen: ${{ steps.seen.outputs.seen }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - id: resolve
         env:
           INPUT_SHA: ${{ inputs.sha }}
@@ -38,9 +45,17 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "matrix=$(python3 -c 'import json, os; print(json.dumps({"slice": list(range(int(os.environ["LIVE_SLICES"]) + 1))}))')" >> "$GITHUB_OUTPUT"
 
+      - id: seen
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+          EVENT: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/gate_history.py seen --sha "$SHA" --event "$EVENT"
+
   slice:
     name: slice ${{ matrix.slice }}
     needs: plan
+    if: ${{ needs.plan.outputs.seen != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 330
     strategy:
@@ -99,7 +114,7 @@ jobs:
   verdict:
     name: Hosted half verdict
     needs: [plan, slice]
-    if: ${{ always() && needs.plan.result == 'success' }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.seen != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -128,3 +143,34 @@ jobs:
           path: hosted-verdict.json
           overwrite: true
           if-no-files-found: warn
+
+  history:
+    name: Gate history line
+    needs: [plan, verdict]
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.seen != 'true' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    permissions:
+      contents: write
+    concurrency:
+      group: gate-history
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: slice-*
+          path: slices
+        continue-on-error: true
+
+      - name: Append the line of this sha to the gate-history branch
+        env:
+          SHA: ${{ needs.plan.outputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/gate_history.py record --artifacts slices --sha "$SHA" --slices "$LIVE_SLICES" | tee -a "$GITHUB_STEP_SUMMARY"
+        shell: bash
