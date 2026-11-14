@@ -483,40 +483,14 @@ fn pg_cdc_resume_captures_only_new_changes() {
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_steady_state_run_opens_at_most_two_source_connections() {
-    use postgres::NoTls;
-    let d = tempfile::tempdir().unwrap();
-    let tbl = unique_name("rivet_cdc_pg_conns");
-    let slot = unique_name("rivet_conns_slot");
-    let _slot = Slot::new(slot.clone());
-    let mut c = postgres::Client::connect(POSTGRES_CDC_URL, NoTls).expect("connect postgres");
-    c.batch_execute(&format!(
-        "DROP TABLE IF EXISTS {tbl}; CREATE TABLE {tbl} (id INT PRIMARY KEY, v INT)"
-    ))
-    .unwrap();
-    let _tbl = PgTable::adopt_on(POSTGRES_CDC_URL, tbl.clone());
     let (forward, via) = respelled_source(POSTGRES_CDC_URL);
-    let config = |out: &std::path::Path| {
-        Rig::pg_cdc(&tbl, &slot)
-            .source_url(&via)
-            .dest_path(out.to_path_buf())
-            .config_in(d.path())
-    };
-    let out1 = d.path().join("out1");
-    std::fs::create_dir_all(&out1).unwrap();
-    run_rivet_ok(&config(&out1));
-    c.execute(&format!("INSERT INTO {tbl} VALUES (1,10),(2,20)"), &[])
-        .unwrap();
-    let out2 = d.path().join("out2");
-    std::fs::create_dir_all(&out2).unwrap();
-    let opened = connections_opened_by_run(&forward, &config(&out2));
-    assert_eq!(
-        duckdb_dir_scalar(&out2, "count(DISTINCT id)", None),
-        2,
-        "the counted run delivers the 2 changes"
-    );
+    let mut scn = CdcScenario::pg_with("conns_pg", "id BIGINT PRIMARY KEY, v BIGINT", |r, _| {
+        r.source_url(&via)
+    });
+    let opened = scn.steady_state_connections(&forward);
     assert_eq!(
         opened, 2,
-        "a steady-state PostgreSQL CDC run opens the run's own connection and the stream's, and no third"
+        "a steady-state PostgreSQL CDC run opens one connection for the run, one for the change stream, and no third"
     );
 }
 
