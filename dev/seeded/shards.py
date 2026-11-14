@@ -17,6 +17,7 @@ from dev.seeded.recall import LIB, MANIFEST, Row, parse_manifest, patch_form_pro
 #: Measured on devbox (timings.jsonl a9d9209a): switch waves 13.18 min / 67 seeds, CONTROL 34 min / 260 cells.
 SEED_MIN, CELL_MIN = 0.2, 0.085
 #: Minutes a shard spends on its checkout, build download and docker stack before its first cell (hosted run 43615816196: 12-15).
+STATE_ENGINE = "postgres-state"
 SETUP_MIN = {"lean": 14.0, "none": 3.0}
 #: Work minutes one shard is dealt (setup is on top).
 SHARD_TARGET_MIN = 35.0
@@ -45,9 +46,11 @@ def cells_of(rows: Sequence[Row], seed: str) -> set[str]:
     return {c for r in rows if r.seed == seed and not r.na for c in r.cells}
 
 
-def stack_of(cells: Iterable[str], live_names: Collection[str]) -> str:
-    """The docker stack a seed's cells need: `none` when none of them is a live test, else `lean`."""
-    return "lean" if any(c.removeprefix(LIB) in live_names for c in cells) else "none"
+def stack_of(rows: Sequence[Row], seed: str, live_names: Collection[str]) -> str:
+    """The docker stack a seed's cells need: `lean` when one is a live test or a row grades the state store, else `none`."""
+    graded = [r for r in rows if r.seed == seed and not r.na]
+    live = any(c.removeprefix(LIB) in live_names for r in graded for c in r.cells)
+    return "lean" if live or any(r.engine == STATE_ENGINE for r in graded) else "none"
 
 
 def cost(rows: Sequence[Row], seed: str) -> float:
@@ -70,7 +73,7 @@ def plan(rows: Sequence[Row], devbox_tests: Collection[str], live_names: Collect
         if bad:
             raise SystemExit("not hosted seeds: " + "; ".join(f"{s} ({placed[s][1] if s in placed else 'not in the ledger'})" for s in bad))
         mine = sorted(set(only))
-    pools = {st: [s for s in mine if stack_of(cells_of(rows, s), live_names) == st] for st in ("lean", "none")}
+    pools = {st: [s for s in mine if stack_of(rows, s, live_names) == st] for st in ("lean", "none")}
     out: list[dict] = []
     for stack, seeds in pools.items():
         if not seeds:
@@ -115,15 +118,17 @@ def self_test() -> int:
         Row("e", "postgres", switch="se", cells=("t_live",), platform="macos"),
         Row("f", "postgres", switch="sf", cells=("t_live", f"{LIB}t_lib")),
         Row("g", "postgres", na="y" * 40),
+        Row("h", "postgres-state", switch="sh", cells=(f"{LIB}t_lib",)),
     ]
     devbox_tests, live_names = {"t_snow"}, {"t_live", "t_snow"}
     placed = homes(rows, devbox_tests)
-    assert {s: h for s, (h, _) in placed.items()} == {"a": HOSTED, "b": HOSTED, "c": DEVBOX, "d": DEVBOX, "e": DEVBOX, "f": HOSTED, "g": HOSTED}, placed
+    assert {s: h for s, (h, _) in placed.items()} == {"a": HOSTED, "b": HOSTED, "c": DEVBOX, "d": DEVBOX, "e": DEVBOX, "f": HOSTED, "g": HOSTED, "h": HOSTED}, placed
     assert all(placed[s][1] for s in "cde"), "a devbox seed names why"
     shards = plan(rows, devbox_tests, live_names)
     assert not coverage_problems(shards, expected(rows, devbox_tests)), coverage_problems(shards, expected(rows, devbox_tests))
     assert {sh["stack"] for sh in shards} == {"lean", "none"} and [sh["index"] for sh in shards] == list(range(len(shards)))
     assert [sh["seeds"] for sh in shards if sh["stack"] == "none"] == ["b,g"], "lib-only and all-N/A seeds share the stackless shard"
+    assert any("h" in sh["seeds"].split(",") for sh in shards if sh["stack"] == "lean"), "a seed that grades the state store needs the stack's Postgres"
     assert plan(rows, devbox_tests, live_names, ["a"])[0]["seeds"] == "a"
     for bad in ("c", "nope"):
         try:
