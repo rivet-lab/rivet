@@ -2174,6 +2174,23 @@ seeds:
       mongo:
         na: "no first-run refusal after the anchor is reachable on MongoDB: the baseline leg reads each document into one column and a `columns:` override names no column of it, so the file-anchor release is graded by the MySQL, SQL Server and Oracle cells (2026-11-06)"
 
+  - name: cdc-first-run-probe-opens-its-own-connection
+    class: a PostgreSQL CDC run asks the server whether its slot exists on a connection of its own instead of the one the run already holds, so a steady-state run opens three source connections where the release before it opened two
+    history: "2026-11-14 island leg perf[postgres/cdc-conns] 3/2 on 0.33.0 (3 of 3 runs); the extra connection is the first-run proof added by #877, which repeats on every run until the first delivery; RED on main 2026-11-14 (a counting proxy: 3 accepted connections in the counted run, 2 on v0.32.2)"
+    scope: source
+    patch: cdc-first-run-probe-opens-its-own-connection/shared.patch
+    engines:
+      postgres:
+        cells: [pg_cdc_steady_state_run_opens_at_most_two_source_connections, "lib:the_slot_is_asked_on_the_connection_the_run_holds"]
+      mysql:
+        na: "the seeded probe is the PostgreSQL slot proof and no replication slot exists on mysql; the engine count stays graded by mysql_cdc_steady_state_run_opens_at_most_two_source_connections, green with the seed (2026-11-14)"
+      mssql:
+        na: "the seeded probe is the PostgreSQL slot proof and no replication slot exists on mssql; the engine count stays graded by mssql_cdc_steady_state_run_opens_at_most_two_source_connections, green with the seed (2026-11-14)"
+      mongo:
+        na: "the seeded probe is the PostgreSQL slot proof and no replication slot exists on mongo; the engine count stays graded by mongo_cdc_steady_state_run_opens_at_most_six_source_connections, green with the seed (2026-11-14)"
+      oracle:
+        na: "the seeded probe is the PostgreSQL slot proof and no replication slot exists on oracle; the engine count stays graded by oracle_cdc_steady_state_run_opens_at_most_two_source_connections, green with the seed (2026-11-14)"
+
   - name: cdc-lost-file-anchor-reanchors
     class: a file-anchored CDC stream whose checkpoint file is gone anchors at the current position with a warning and exit 0, skipping every change committed since the lost position
     history: "2026-10-30 client report: MySQL binlog CDC with a Postgres state DB under Airflow, the checkpoint file lost when a task landed on another worker; `initial: none` re-anchored and the rows between the old and the new position were never delivered (rig oracle: source 2, delivered 1); on main and on v0.32.2"

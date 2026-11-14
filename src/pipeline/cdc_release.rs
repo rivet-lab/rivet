@@ -2,15 +2,29 @@
 
 use crate::config::{Config, ExportConfig};
 use crate::error::Result;
+use crate::source::Source;
 use crate::source::cdc::{CdcEngine, Position};
 use crate::state::{ProgressKey, StateStore};
 
-/// The server-side slot a first run may create, and how to ask about and remove it.
-pub(super) trait SlotServer {
+/// How to ask a server whether a slot exists.
+pub(super) trait SlotProbe {
     /// Whether the slot exists on the server.
     fn exists(&self, slot: &str) -> Result<bool>;
+}
+
+/// The server-side slot a first run may create, and how to ask about and remove it.
+pub(super) trait SlotServer: SlotProbe {
     /// Drop the slot.
     fn drop_slot(&self, slot: &str) -> Result<()>;
+}
+
+/// The connection the run already holds, asked about the slot.
+struct HeldConnection<'a, 'b>(std::cell::RefCell<&'a mut (dyn Source + 'b)>);
+
+impl SlotProbe for HeldConnection<'_, '_> {
+    fn exists(&self, slot: &str) -> Result<bool> {
+        self.0.borrow_mut().replication_slot_exists(slot)
+    }
 }
 
 /// The PostgreSQL server of a run's source.
@@ -19,11 +33,13 @@ pub(super) struct PgSlots<'a> {
     tls: Option<&'a crate::config::TlsConfig>,
 }
 
-impl SlotServer for PgSlots<'_> {
+impl SlotProbe for PgSlots<'_> {
     fn exists(&self, slot: &str) -> Result<bool> {
         crate::source::postgres::cdc::slot_exists(self.url.expose(), slot, self.tls)
     }
+}
 
+impl SlotServer for PgSlots<'_> {
     fn drop_slot(&self, slot: &str) -> Result<()> {
         crate::source::postgres::cdc::drop_slot(self.url.expose(), slot, self.tls)
     }
@@ -39,27 +55,21 @@ pub(super) struct FirstRun {
 }
 
 impl FirstRun {
-    /// The proof that `export` has never run: no record, no delivery, no checkpoint file, no slot; `None` when any is found or cannot be read.
+    /// The proof that `export` has never run: no record, no delivery, no checkpoint file, no slot, the slot asked on `meta`, the connection the run already holds; `None` when any is found or cannot be read.
     pub(super) fn of(
         config: &Config,
         export: &ExportConfig,
         state: &StateStore,
         config_path: &str,
+        meta: Option<&mut (dyn Source + '_)>,
     ) -> Option<Self> {
-        let server = match CdcEngine::from(config.source.source_type) {
-            CdcEngine::Postgres => Some(PgSlots {
-                url: config.source.resolve_url().ok()?,
-                tls: config.source.tls.as_ref(),
-            }),
-            _ => None,
-        };
-        Self::proven(
-            config,
-            export,
-            state,
-            config_path,
-            server.as_ref().map(|s| s as &dyn SlotServer),
-        )
+        match CdcEngine::from(config.source.source_type) {
+            CdcEngine::Postgres => {
+                let held = HeldConnection(std::cell::RefCell::new(meta?));
+                Self::proven(config, export, state, config_path, Some(&held))
+            }
+            _ => Self::proven(config, export, state, config_path, None),
+        }
     }
 
     /// [`FirstRun::of`] against `server` for the slot.
@@ -68,7 +78,7 @@ impl FirstRun {
         export: &ExportConfig,
         state: &StateStore,
         config_path: &str,
-        server: Option<&dyn SlotServer>,
+        server: Option<&dyn SlotProbe>,
     ) -> Option<Self> {
         let cdc = export.cdc.as_ref()?;
         let key = ProgressKey::cdc(
@@ -228,14 +238,16 @@ mod tests {
         }
     }
 
-    impl SlotServer for FakeSlots {
+    impl SlotProbe for FakeSlots {
         fn exists(&self, slot: &str) -> Result<bool> {
             match self.broken {
                 true => Err(anyhow::anyhow!("server unreachable")),
                 false => Ok(self.held.borrow().iter().any(|s| s == slot)),
             }
         }
+    }
 
+    impl SlotServer for FakeSlots {
         fn drop_slot(&self, slot: &str) -> Result<()> {
             match self.broken {
                 true => Err(anyhow::anyhow!("slot is active")),
@@ -463,12 +475,100 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (path, config, export) = config_with(dir.path(), "o", MYSQL_SOURCE);
         let state = StateStore::open_in_memory().unwrap();
-        let first = FirstRun::of(&config, &export, &state, &path).unwrap();
+        let first = FirstRun::of(&config, &export, &state, &path, None).unwrap();
         assert_eq!(first.slot, None);
         assert_eq!(first.checkpoint, Some(dir.path().join("./cdc/o.ckpt")));
         assert_eq!(first.export, "o");
         write_checkpoint(dir.path());
-        assert!(FirstRun::of(&config, &export, &state, &path).is_none());
+        assert!(FirstRun::of(&config, &export, &state, &path, None).is_none());
+    }
+
+    /// A source holding `slots` that counts how often it is asked about one.
+    struct HeldSource {
+        slots: Vec<String>,
+        asked: usize,
+        broken: bool,
+    }
+
+    impl HeldSource {
+        fn holding(slots: &[&str]) -> Self {
+            Self {
+                slots: slots.iter().map(|s| s.to_string()).collect(),
+                asked: 0,
+                broken: false,
+            }
+        }
+    }
+
+    impl Source for HeldSource {
+        fn export(
+            &mut self,
+            _request: &crate::source::ExportRequest<'_>,
+            _sink: &mut dyn crate::source::BatchSink,
+        ) -> Result<()> {
+            unreachable!("a first-run proof exports nothing")
+        }
+
+        fn query_scalar(&mut self, _sql: &str) -> Result<Option<String>> {
+            unreachable!("a first-run proof reads no scalar")
+        }
+
+        fn type_mappings(
+            &mut self,
+            _query: &str,
+            _overrides: &crate::types::ColumnOverrides,
+        ) -> Result<Vec<crate::types::TypeMapping>> {
+            unreachable!("a first-run proof reads no types")
+        }
+
+        fn replication_slot_exists(&mut self, slot: &str) -> Result<bool> {
+            self.asked += 1;
+            match self.broken {
+                true => Err(anyhow::anyhow!("connection lost")),
+                false => Ok(self.slots.iter().any(|s| s == slot)),
+            }
+        }
+    }
+
+    /// The proof asks the connection the run holds, once, and a slot there or a broken connection withholds it.
+    #[test]
+    fn the_slot_is_asked_on_the_connection_the_run_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, config, export) = config_in(dir.path());
+        let state = StateStore::open_in_memory().unwrap();
+        let mut held = HeldSource::holding(&["another"]);
+        let first = FirstRun::of(&config, &export, &state, &path, Some(&mut held)).unwrap();
+        assert_eq!(first.slot.as_deref(), Some("s_o"));
+        assert_eq!(held.asked, 1);
+        let mut there = HeldSource::holding(&["s_o"]);
+        assert!(FirstRun::of(&config, &export, &state, &path, Some(&mut there)).is_none());
+        assert_eq!(there.asked, 1);
+        let mut broken = HeldSource {
+            broken: true,
+            ..HeldSource::holding(&[])
+        };
+        assert!(FirstRun::of(&config, &export, &state, &path, Some(&mut broken)).is_none());
+    }
+
+    /// A stream with a stored delivery asks no connection, and an engine with no slots asks none either.
+    #[test]
+    fn no_connection_is_asked_when_the_state_or_the_engine_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, config, export) = config_in(dir.path());
+        let state = StateStore::open_in_memory().unwrap();
+        state
+            .record_captured_tables(&key_of(&config, &export), &export.destination.state_key())
+            .unwrap();
+        let mut held = HeldSource::holding(&[]);
+        assert!(FirstRun::of(&config, &export, &state, &path, Some(&mut held)).is_none());
+        assert_eq!(held.asked, 0);
+        let other = tempfile::tempdir().unwrap();
+        let (path, config, export) = config_with(other.path(), "o", MYSQL_SOURCE);
+        let state = StateStore::open_in_memory().unwrap();
+        let mut held = HeldSource::holding(&[]);
+        let first = FirstRun::of(&config, &export, &state, &path, Some(&mut held)).unwrap();
+        assert_eq!(first.slot, None);
+        assert_eq!(held.asked, 0);
     }
 
     /// A PostgreSQL source whose server cannot be asked is not proven a first run.
@@ -477,7 +577,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (path, config, export) = config_with(dir.path(), "o", PG_DOWN_SOURCE);
         let state = StateStore::open_in_memory().unwrap();
-        assert!(FirstRun::of(&config, &export, &state, &path).is_none());
+        assert!(FirstRun::of(&config, &export, &state, &path, None).is_none());
     }
 
     /// The server handle reports a server it cannot reach as an error, never as a slot that is there or gone.
@@ -498,7 +598,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let (path, config, export) = config_with(dir.path(), "o", MYSQL_SOURCE);
             let state = StateStore::open_in_memory().unwrap();
-            let first = FirstRun::of(&config, &export, &state, &path).unwrap();
+            let first = FirstRun::of(&config, &export, &state, &path, None).unwrap();
             write_checkpoint(dir.path());
             let key = key_of(&config, &export);
             let dest = export.destination.state_key();

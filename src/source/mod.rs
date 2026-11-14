@@ -404,6 +404,14 @@ pub trait Source: Send {
 
     fn query_scalar(&mut self, sql: &str) -> Result<Option<String>>;
 
+    /// Whether the logical replication slot `slot` exists on the server this connection reads; only PostgreSQL has slots.
+    fn replication_slot_exists(&mut self, _slot: &str) -> Result<bool> {
+        crate::rivet_bail!(
+            crate::error::codes::CONFIG_SOURCE_MODE_UNSUPPORTED,
+            "replication slots are not supported for this source"
+        )
+    }
+
     /// The chunk planner's catalog probe of `qualified_table`, on this connection.
     fn introspect_for_chunking(&mut self, _qualified_table: &str) -> Result<TableIntrospection> {
         crate::rivet_bail!(

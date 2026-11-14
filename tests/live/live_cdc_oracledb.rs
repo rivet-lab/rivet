@@ -246,6 +246,20 @@ fn oracle_cdc_transaction_open_across_a_run_keeps_its_early_rows() {
     );
 }
 
+/// A steady-state Oracle CDC run opens at most two source connections.
+#[test]
+#[ignore = "live: requires the oracle service with LogMiner prerequisites"]
+fn oracle_cdc_steady_state_run_opens_at_most_two_source_connections() {
+    let _serial = cross_process_serial("oracle_cdc");
+    let (forward, via) = respelled_source(ORACLE_CDC_URL);
+    let mut scn = CdcScenario::oracle_with("conns_or", |r, _| r.source_url(&via));
+    let opened = scn.steady_state_connections(&forward);
+    assert!(
+        (1..=2).contains(&opened),
+        "a steady-state Oracle CDC run opens at most two source connections, got {opened}"
+    );
+}
+
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn oracle_cdc_intra_transaction_updates_get_distinct_seq() {

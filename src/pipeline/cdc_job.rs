@@ -90,6 +90,7 @@ pub(super) fn run_cdc_export(
     state: &StateStore,
     strict: bool,
     grants: Option<RunGrants>,
+    meta: Option<Box<dyn crate::source::Source>>,
 ) -> (Result<()>, RunSummary) {
     for msg in [
         cdc_ignored_meta_warning(export),
@@ -138,7 +139,7 @@ pub(super) fn run_cdc_export(
         .unwrap_or_else(|| std::path::Path::new("."));
     let rss_before = crate::resource::get_rss_mb();
     let rss_sampler = crate::resource::RssPeakSampler::start(rss_before, 100);
-    let mut meta = crate::source::create_source(&config.source).ok();
+    let mut meta = meta.or_else(|| crate::source::create_source(&config.source).ok());
     let server_context = meta.as_mut().and_then(|s| s.server_context());
     let harm = super::job::HarmBracket::open_on(meta.as_deref_mut());
     let result = run_cdc_inner(
