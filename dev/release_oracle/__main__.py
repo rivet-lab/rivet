@@ -608,6 +608,7 @@ def _skip_cause_self_test() -> None:
     rc, said, line, refusal = run_gate(stage_down(), ISLAND_GATE)
     assert rc == 1 and line["verdict"] == "NOT GRADED" and "INFRA" in said and line["skipped_env"], (rc, said, line)
     assert refusal is not None and "NOT GRADED" in refusal, "an island run that env-skipped a cell is not green"
+    assert "postgres/verify_failed_run_tail/-: stand down" in said and "an env skip no skip_allow entry excuses" in said, said
     rc, said, line, refusal = run_gate(design, ISLAND_GATE)
     assert rc == 0 and line["verdict"] == "RELEASE-READY" and refusal is None, "an island run with design skips only is green"
 
