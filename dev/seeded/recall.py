@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -295,10 +296,17 @@ def scratch_base() -> Path:
     return run_record.seeded_dir()
 
 
+def drop_foreign_tree(tree: Path) -> None:
+    """Remove `tree` when it is a directory no git worktree owns (a cache restore leaves one), so a fresh worktree can take its place."""
+    if tree.exists() and not ((tree / ".git").exists() and sh(["git", "-C", str(tree), "rev-parse", "--git-dir"]).returncode == 0):
+        shutil.rmtree(tree)
+
+
 def prepare_tree(base: Path) -> tuple[Path, str]:
     """A clean scratch worktree at HEAD; refuses one a killed run left a seed in."""
     sha = git(ROOT, "rev-parse", "HEAD")
     tree = base / "tree"
+    drop_foreign_tree(tree)
     if (tree / ".git").exists():
         dirty = git(tree, "status", "--porcelain", "--untracked-files=no")
         if dirty:
@@ -1173,6 +1181,19 @@ def self_test() -> int:
         run_record.append_run(rec, sha="a" * 40, complete=False, green=True, dirty=False, seeds=["s2"], not_graded_here=1)
         assert run_record.refusal("a" * 40, rec, want) is None and run_record.refusal("b" * 40, rec, want) is not None, "two runs that together cover the ledger must be the ones the tag rule reads"
         assert json.loads(rec.read_text().splitlines()[-1])["not_graded_here"] == 1, "a run must record its NOT-GRADED-HERE rows"
+    with tempfile.TemporaryDirectory() as td:
+        stale, live = Path(td) / "stale", Path(td) / "live"
+        (stale / "src").mkdir(parents=True)
+        (stale / "src" / "f").write_text("x")
+        (stale / ".git").write_text("gitdir: /nowhere\n")
+        live.mkdir()
+        assert sh(["git", "init", "-q", str(live)]).returncode == 0
+        inner = live / "inner"
+        inner.mkdir()
+        drop_foreign_tree(stale)
+        drop_foreign_tree(inner)
+        drop_foreign_tree(live)
+        assert not stale.exists() and not inner.exists() and (live / ".git").is_dir(), "a directory no worktree owns must be cleared (even inside a repo) and a real one kept"
     with tempfile.TemporaryDirectory() as td:
         src, base, packed = Path(td) / "src", Path(td) / "base", Path(td) / "a.tar.zst"
         (src / "target" / "nextest").mkdir(parents=True)
