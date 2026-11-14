@@ -549,7 +549,7 @@ fn stem_dir(stem: Option<&str>, dir: &str) -> String {
 
 /// `name` prefixed with the `-o` stem (`<stem>_<name>`), so two configs never name one checkpoint.
 fn stemmed(stem: Option<&str>, name: &str) -> String {
-    match stem {
+    match seeded!("init-cdc-checkpoint-shared-by-name", None, stem) {
         Some(s) => format!("{s}_{name}"),
         None => name.to_string(),
     }
@@ -1409,7 +1409,11 @@ omitting differ per engine — see cdc.md)",
             slot_name(dest.cdc_name_stem.as_deref(), ident),
             per_cluster_note(dest)
         )),
-        "mssql" => lines.push(match &info.cdc_capture_instance {
+        "mssql" => lines.push(match seeded!(
+            "init-capture-instance-derived",
+            &None::<String>,
+            &info.cdc_capture_instance
+        ) {
             Some(ci) => format!(
                 "      capture_instance: {}  # the instance cdc.change_tables holds for this table; needs SQL Server Agent",
                 yaml_quote_if_needed(ci)

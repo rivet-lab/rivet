@@ -1522,7 +1522,11 @@ fn load_one_cdc_base(
 /// target when a baseline landed there, with the change log as its buffer when the stream also
 /// appended to it; the change log alone otherwise.
 fn cdc_work(report: &load::CdcLoadReport) -> Work {
-    match &report.baseline {
+    match seeded!(
+        "cdc-load-reports-the-stream-leg-only",
+        &None,
+        &report.baseline
+    ) {
         Some(base) => Work {
             buffer: (report.rows_appended > 0).then(|| report.changes_table.clone()),
             ..Work::loaded(base.rows_loaded + report.rows_appended, &base.target_table)

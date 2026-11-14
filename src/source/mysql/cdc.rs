@@ -692,7 +692,9 @@ impl MysqlChangeStream {
         configured_tables: Vec<String>,
     ) -> Result<Self> {
         let mut conn = connect_conn(url, tls)?;
-        Self::refuse_unmet_prerequisites_on(&mut conn, &configured_tables)?;
+        if seeded!("cdc-anchor-written-before-the-refusal", false, true) {
+            Self::refuse_unmet_prerequisites_on(&mut conn, &configured_tables)?;
+        }
         let identity = Self::server_identity(&mut conn)?;
         Self::open_on(
             conn,
@@ -731,7 +733,12 @@ impl MysqlChangeStream {
         configured: &[String],
     ) -> Result<HashMap<String, crate::source::cdc::ReadableColumns>> {
         let own_db = Self::own_db_on(conn);
-        super::column_grants::readable_columns_of(conn, configured, &own_db, &HashMap::new())
+        let bare = seeded!(
+            "column-grants-batch-bare-name-read-by-the-stream-rule",
+            Self::bare_name_databases(conn, &own_db, configured),
+            HashMap::new()
+        );
+        super::column_grants::readable_columns_of(conn, configured, &own_db, &bare)
     }
 
     /// The grants of a `columns_from: grants` run, read once on one connection before the anchor.
@@ -758,7 +765,10 @@ impl MysqlChangeStream {
     fn note_statement(&mut self, raw: &[u8], log_pos: u64) {
         let (in_transaction, marks) = statement_frame(self.in_transaction, raw);
         self.in_transaction = in_transaction;
-        if re_read_marked(self.readable.is_some(), marks) {
+        if re_read_marked(
+            self.readable.is_some(),
+            seeded!("grant-change-not-seen-mid-run", false, marks),
+        ) {
             self.grants_pending
                 .get_or_insert_with(|| (self.file.clone(), log_pos));
         }
@@ -1193,7 +1203,7 @@ impl MysqlChangeStream {
         // at a part commit — so an idle bounded run (zero changes drained) would
         // otherwise leave no checkpoint, the next run would re-anchor to a newer
         // "current" position, and every change in between would be silently skipped.
-        if !projecting {
+        if !projecting && seeded!("cdc-anchor-written-before-the-refusal", false, true) {
             Self::refuse_absent_tables_on(&mut conn, &configured_tables)?;
         }
         let (file, pos) = Self::current_coordinates(&mut conn)?;
@@ -1223,6 +1233,12 @@ impl MysqlChangeStream {
                 crate::source::cdc::checkpoint_identity::RECOVER
             );
             Self::write_anchor(path, &file, pos, &identity)?;
+        }
+        if seeded!("cdc-anchor-written-before-the-refusal", true, false) {
+            Self::refuse_unmet_prerequisites_on(&mut conn, &configured_tables)?;
+            if !projecting {
+                Self::refuse_absent_tables_on(&mut conn, &configured_tables)?;
+            }
         }
         Self::open_on(
             conn,
@@ -1672,7 +1688,14 @@ pub(crate) fn grants_difference(table: &str, before: &[String], now: &[String]) 
             .map(|c| format!("`{c}`"))
             .collect()
     };
-    let (gained, lost) = (missing(now, before), missing(before, now));
+    let (gained, lost) = seeded!(
+        "column-grants-schema-change-names-no-column",
+        (
+            missing(now, before).into_iter().take(0).collect::<Vec<_>>(),
+            missing(before, now).into_iter().take(0).collect::<Vec<_>>()
+        ),
+        (missing(now, before), missing(before, now))
+    );
     let mut changes = Vec::new();
     if !gained.is_empty() {
         changes.push(format!("gained {}", gained.join(", ")));
@@ -2272,7 +2295,11 @@ fn refused_column_rename(
     mode: SqlMode,
     configured: &[String],
 ) -> Option<(String, String)> {
-    if !projecting {
+    if seeded!(
+        "column-rename-in-the-backlog-read-as-before",
+        true,
+        !projecting
+    ) {
         return None;
     }
     column_rename_target(sql, event_db, mode)
@@ -2287,7 +2314,7 @@ fn refused_table_rename(
     mode: SqlMode,
     configured: &[String],
 ) -> Option<Option<(String, String)>> {
-    if !projecting {
+    if !projecting || seeded!("cdc-table-rename-not-refused", !sql.is_empty(), false) {
         return None;
     }
     renamed_tables(sql, event_db, mode)?.into_iter().find(|t| {

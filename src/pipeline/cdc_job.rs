@@ -319,7 +319,10 @@ pub(super) fn refuse_lost_file_anchor(
         return Ok(());
     };
     match crate::source::cdc::Position::load(&ckpt) {
-        Ok(None) if state.captured_tables(&key, &dest)?.is_some() => {
+        Ok(None)
+            if seeded!("cdc-lost-file-anchor-reanchors", false, true)
+                && state.captured_tables(&key, &dest)?.is_some() =>
+        {
             Err(crate::source::cdc::checkpoint_identity::lost_file_anchor(
                 CdcEngine::from(config.source.source_type).label(),
                 &ckpt,
@@ -368,7 +371,9 @@ pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<O
         (None, Some(t)) => vec![t.clone()],
         (None, None) => return Ok(None),
     };
-    log::info!("{}", crate::source::mysql::column_grants::BOUNDARY);
+    if seeded!("column-grants-boundary-unsaid", false, true) {
+        log::info!("{}", crate::source::mysql::column_grants::BOUNDARY);
+    }
     let declared = tables
         .iter()
         .filter_map(|t| {
@@ -483,9 +488,13 @@ pub(super) fn initial_snapshot_pending(
     }
     let capture = crate::state::ProgressKey::cdc(&export.name, &config.source.state_key(), &tables);
     let capture_dest = export.destination.state_key();
-    let captured = state
-        .captured_tables(&capture, &capture_dest)?
-        .unwrap_or_else(|| tables.clone());
+    let captured = seeded!(
+        "baseline-mark-outlives-capture",
+        tables.clone(),
+        state
+            .captured_tables(&capture, &capture_dest)?
+            .unwrap_or_else(|| tables.clone())
+    );
     if let Some(i) = rejoins_over_a_baseline(&captured, &tables, &done_flags) {
         let t = &tables[i];
         let snap = super::finalize::destination_uri_for_manifest(&table_dests[i].2);

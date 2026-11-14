@@ -245,7 +245,7 @@ pub fn doctor(config_path: &str, json: bool) -> Result<()> {
     }
 
     let mut cursor_refusal: Option<anyhow::Error> = None;
-    if source_ok {
+    if source_ok && seeded!("doctor-skips-cursor-admission", false, true) {
         let declared = crate::config::declared_exports(&config, None)?;
         for a in crate::plan::cursor_admission::admit_exports(&config, &declared, config_dir) {
             let (ok, detail) = match &a.verdict {

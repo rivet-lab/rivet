@@ -615,7 +615,7 @@ pub(crate) fn run_to_files(
             let mut yielded_this_pass = 0usize;
             while let Some(ev) = stream.next_change() {
                 let mut ev = ev?;
-                yielded_this_pass += 1;
+                yielded_this_pass += seeded!("cdc-drain-pass-count-pinned-at-zero", 0, 1);
                 txn_seq.stamp(&mut ev);
                 // The commit boundary is a property of the STREAM, not of any routed
                 // table — record it for every event, whatever the routing filter does with
@@ -647,8 +647,11 @@ pub(crate) fn run_to_files(
                     // (the checkpoint stays on the last commit) and the table continues in a new
                     // part with its columns as the source holds them now: dropping its values was
                     // #644. An old name is left to `image_cell`, which maps a rename by position.
-                    let lacking =
-                        columns_the_schema_lacks(&sinks[at].out.columns, &sinks[at].gone, &ev);
+                    let lacking = seeded!(
+                        "cdc-hot-added-column-dropped",
+                        Vec::<String>::new(),
+                        columns_the_schema_lacks(&sinks[at].out.columns, &sinks[at].gone, &ev)
+                    );
                     if !lacking.is_empty() {
                         let table = sinks[at].out.table.clone();
                         let fresh = match reschema.as_mut() {
@@ -746,6 +749,14 @@ pub(crate) fn run_to_files(
                 // block, so a boundary on an uncaptured table still honours it.
                 if committed && cfg.max_events.is_some_and(|m| emitted >= m) {
                     hit_max = true;
+                    if seeded!("capped-run-skips-remainder", true, false) {
+                        while let Some(Ok(rest)) = stream.next_change() {
+                            if rest.committed {
+                                last_commit = Some(rest.position.clone());
+                                unacked_commit = true;
+                            }
+                        }
+                    }
                     break;
                 }
             }
@@ -773,7 +784,10 @@ pub(crate) fn run_to_files(
         // column added while the run was open: asked again here, a table it no longer covers
         // whole stops the run by code instead of ending clean over values it never read.
         let tables: Vec<String> = sinks.iter().map(|s| s.out.table.clone()).collect();
-        if let crate::source::cdc::RowImage::Partial { why } = stream.row_image(&tables) {
+        if let (true, crate::source::cdc::RowImage::Partial { why }) = (
+            seeded!("cdc-hot-added-column-dropped", false, true),
+            stream.row_image(&tables),
+        ) {
             return Err(crate::source::cdc::open_partial_image_refusal(
                 run.engine, &why,
             ));

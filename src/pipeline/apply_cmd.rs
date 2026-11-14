@@ -150,8 +150,11 @@ pub fn run_apply_command(
     //    extracts nothing. A reusable plan continues the stored cursor instead.
     let reusable = artifact.is_reusable();
     if !reusable
-        && let Some(run_id) =
+        && let Some(run_id) = seeded!(
+            "applied-plan-replayed",
+            None::<String>,
             state.run_that_applied_plan(&artifact.export_name, &artifact.plan_id)?
+        )
     {
         if !force {
             let metric = state.get_metric_by_run_id(&run_id).ok().flatten();
@@ -160,11 +163,13 @@ pub fn run_apply_command(
                 already_applied_report(&artifact, &run_id, metric.as_ref())
             );
             let entry = already_applied_entry(&artifact, &run_id, metric.as_ref());
-            super::run::emit_machine_document(
-                &apply_document(entry, started_at, &artifact),
-                summary_output,
-                json_output,
-            );
+            if seeded!("already-applied-answer-text-only", false, true) {
+                super::run::emit_machine_document(
+                    &apply_document(entry, started_at, &artifact),
+                    summary_output,
+                    json_output,
+                );
+            }
             return Ok(());
         }
         force_bypassed.push("already_applied".into());

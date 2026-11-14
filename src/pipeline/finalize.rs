@@ -504,7 +504,10 @@ fn write_run_manifest(
         }
     };
 
-    if nothing && prefix_holds_a_manifest(&*dest) {
+    if nothing
+        && prefix_holds_a_manifest(&*dest)
+        && seeded!("failed-run-remarks-the-prefix-before-a-write", false, true)
+    {
         *left_alone = true;
         log::info!(
             "{} '{}': the run ({}) put no part at the destination; the manifest and _SUCCESS an earlier run left there stay as they were",

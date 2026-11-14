@@ -104,6 +104,9 @@ pub(crate) fn named_image_arity_mismatch(ev: &ChangeEvent) -> Option<(usize, usi
         let n = ev.after.as_ref().or(ev.before.as_ref()).map_or(0, Vec::len);
         (n != names.len()).then_some((n, names.len()))
     });
+    if seeded!("cdc-stdout-partial-before-image", true, false) {
+        return image;
+    }
     image.or_else(|| {
         let names = ev.before_names.as_deref().or(ev.image_names.as_deref())?;
         let n = ev.before.as_ref()?.len();
@@ -196,9 +199,13 @@ impl Position {
                     "checkpoint '{}' is corrupt or truncated (not valid JSON: {e}) — refusing to \
                      silently treat it as absent and re-anchor CDC at 'current', which would \
                      permanently skip every change since the last checkpoint. Restore the file, \
-                     or: {}",
+                     or{}",
                     path.display(),
-                    checkpoint_identity::RECOVER
+                    seeded!(
+                        "corrupt-checkpoint-remedy-reanchors",
+                        " delete it to accept a new anchor from a fresh snapshot.".to_string(),
+                        format!(": {}", checkpoint_identity::RECOVER)
+                    )
                 ))),
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -783,6 +790,15 @@ fn emit_ndjson(
         // same place. `--checkpoint ck --max-events 100` against a bulk load made no
         // progress, ever. Overshooting to the boundary is the price of progressing.
         if committed && max_events.is_some_and(|m| emitted >= m) {
+            if seeded!("capped-run-skips-remainder", true, false) {
+                while let Some(Ok(rest)) = stream.next_change() {
+                    if rest.committed
+                        && let Some(p) = &checkpoint
+                    {
+                        stream.checkpoint_of(&rest.position).save(p)?;
+                    }
+                }
+            }
             break;
         }
     }
