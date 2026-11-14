@@ -1,5 +1,5 @@
 diff --git a/src/config/destination_credential.rs b/src/config/destination_credential.rs
-index 4bcc18f1..37a9545d 100644
+index 4bcc18f..37a9545 100644
 --- a/src/config/destination_credential.rs
 +++ b/src/config/destination_credential.rs
 @@ -59,9 +59,6 @@ impl DestinationCredential {
@@ -13,11 +13,11 @@ index 4bcc18f1..37a9545d 100644
              None if ak.is_some() || st.is_some() => Ok(Self::S3Env {
                  access_key_env: ak.clone(),
 diff --git a/src/load/bq_rest.rs b/src/load/bq_rest.rs
-index 5ffa7358..e0837b57 100644
+index fe859e0..641eb48 100644
 --- a/src/load/bq_rest.rs
 +++ b/src/load/bq_rest.rs
-@@ -621,21 +621,12 @@ impl Auth {
-     /// The token source of a load run as `credential`: a destination's named key signs it, beside no static token; anything else resolves the ambient chain.
+@@ -518,21 +518,12 @@ impl Auth {
+     /// The token source of a load run as `credential`.
      fn resolve(
          http: &reqwest::blocking::Client,
 -        credential: &DestinationCredential,

@@ -1,12 +1,9 @@
-//! The SQL the BigQuery loader runs: `LOAD DATA`, the change-log DDL, the adoption and
-//! rebuild scripts, and the catalog probes.
+//! The SQL the BigQuery loader runs: `LOAD DATA`, the change-log DDL, the adoption and rebuild scripts, and the catalog probes.
 
 use super::*;
 use crate::load::plan::{Rename, file_name};
 
-/// `CREATE TABLE IF NOT EXISTS` for the change log, partitioned as the load declares and
-/// clustered on `cluster_by` (capped at BigQuery's 4 clustering columns; none when empty).
-/// Idempotent — the log is created once and appended to on every CDC load.
+/// `CREATE TABLE IF NOT EXISTS` for the change log, partitioned as the load declares and clustered on `cluster_by` (capped at BigQuery's 4 clustering columns.
 pub(super) fn build_create_changes_sql(
     fqtn: &str,
     schema: &str,
@@ -29,8 +26,7 @@ pub(super) fn build_create_changes_sql(
     )
 }
 
-/// The billed copy of the change log into `rebuild_fqtn`, shaped as the load declares and
-/// carrying the table properties a `CREATE TABLE … AS SELECT` would otherwise drop.
+/// The billed copy of the change log into `rebuild_fqtn`, shaped as the load declares and carrying the table properties a `CREATE TABLE … AS SELECT` would otherwise drop.
 pub(super) fn build_rebuild_copy_sql(
     rebuild_fqtn: &str,
     changes_fqtn: &str,
@@ -59,9 +55,7 @@ pub(super) fn sql_string(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// Swap the rebuilt log in: the old one steps aside, the copy takes the name, the old one
-/// is dropped. An interruption leaves `<name>__old` / `<name>__rebuild`, which the next
-/// load refuses to proceed past (`rebuild_leftovers`).
+/// Swap the rebuilt log in: the old one steps aside, the copy takes the name, the old one is dropped.
 pub(super) fn build_rebuild_swap_sql(
     changes_fqtn: &str,
     rebuild_fqtn: &str,
@@ -122,10 +116,7 @@ pub(super) fn build_column_overlap_sql(
     )
 }
 
-/// Turn the full-load table into `<table>__changes` without a query: a rename keeps its
-/// rows, partitioning, clustering and options, then the meta columns are added (NULL on
-/// every existing row). A partition filter requirement is dropped, since the current-state
-/// view reads the whole log, and so is expiry of load-date partitions.
+/// Turn the full-load table into `<table>__changes` without a query.
 pub(super) fn build_adoption_sql(
     src_fqtn: &str,
     table: &str,
@@ -150,23 +141,7 @@ pub(super) fn build_adoption_sql(
     out
 }
 
-/// Bring an EXISTING table's schema up to the declared one by ADDING what is
-/// missing — never by replacing the table.
-///
-/// `CREATE TABLE IF NOT EXISTS` is a no-op on a table that already exists, so a
-/// table rivet did not create — one an operator pointed rivet at — keeps
-/// whatever shape its previous owner gave it. The next `LOAD DATA` then declares
-/// columns the table does not have and fails; and a load written to overwrite
-/// instead would impose our schema and destroy the customer's data. Neither is
-/// acceptable on a table we were handed rather than created.
-///
-/// `ADD COLUMN IF NOT EXISTS` is the only verb that is safe here: additive,
-/// idempotent, and metadata-only on BigQuery — no rewrite, no scan, and existing
-/// rows read NULL for the new column, which is exactly the state §5i's per-key
-/// fallback is built to handle.
-///
-/// `None` when there is nothing to add, so the caller skips the round trip
-/// rather than sending a statement with an empty body.
+/// Bring an EXISTING table's schema up to the declared one by ADDING what is missing.
 pub(super) fn build_alter_add_columns_sql(
     fqtn: &str,
     specs: &[TargetColumnSpec],
@@ -187,8 +162,7 @@ pub(super) fn build_alter_add_columns_sql(
     Some(format!("ALTER TABLE `{fqtn}`\n  {adds};"))
 }
 
-/// `PARTITION BY … / CLUSTER BY … / OPTIONS(…)` clauses (empty when unset). All three
-/// apply only at table creation, per BigQuery.
+/// `PARTITION BY … / CLUSTER BY … / OPTIONS(…)` clauses (empty when unset).
 pub(super) fn table_shape_clauses(
     partition_expr: Option<&str>,
     cluster_by: &[String],
@@ -208,18 +182,12 @@ pub(super) fn table_shape_clauses(
     s
 }
 
-/// Replace `target` with a zero-copy clone of `staging` — the atomic hand-off of a
-/// whole-table load that arrived in several jobs.
+/// Replace `target` with a zero-copy clone of `staging`.
 pub(super) fn build_clone_sql(target: &str, staging: &str) -> String {
     format!("CREATE OR REPLACE TABLE `{target}` CLONE `{staging}`;")
 }
 
 /// A `FROM FILES(...)` Parquet source list.
-///
-/// `enable_list_inference = true` collapses rivet's 3-level Parquet LIST
-/// (`col.list.item`) one level, so an array column loads as the declared
-/// `ARRAY<STRUCT<item T>>` (== REPEATED RECORD{item}) instead of empty. It is a
-/// no-op for non-list columns, so it is always safe to set.
 pub(super) fn from_files(uris: &[String]) -> String {
     let list = uris
         .iter()
@@ -231,16 +199,8 @@ pub(super) fn from_files(uris: &[String]) -> String {
     )
 }
 
-/// The BigQuery column schema declared inline in LOAD DATA, from each spec's
-/// native `target_type`. Declaring native types makes BigQuery coerce the
-/// Parquet on load — for FREE (a load job, not a query) — so JSON / DATETIME /
-/// TIME / NUMERIC / … land natively without a post-load CTAS. Verified live.
+/// The BigQuery column schema declared inline in LOAD DATA, from each spec's native `target_type`.
 pub(super) fn build_schema(specs: &[TargetColumnSpec]) -> String {
-    // Backticked, like build_alter_add_columns_sql always was: names are
-    // pre-gated to plain idents, so quoting is always safe — and without it a
-    // reserved-word column (`end`, `order`, `interval`; `start`/`end` pairs
-    // are everywhere) died on BigQuery's raw syntax error AFTER the extract
-    // was paid, while cdc.rs promised backticks made it safe (round-6).
     specs
         .iter()
         .map(|s| format!("  `{}` {}", s.column_name, s.target_type))
@@ -260,7 +220,7 @@ pub(super) fn build_file_schema(specs: &[TargetColumnSpec], renames: &[Rename]) 
     build_schema(&file_specs)
 }
 
-/// One metadata-only statement renaming each file-named column to its warehouse name; `None` when nothing is renamed.
+/// One metadata-only statement renaming each file-named column to its warehouse name.
 pub(super) fn build_rename_columns_sql(fqtn: &str, renames: &[Rename]) -> Option<String> {
     let clauses = renames
         .iter()
@@ -298,8 +258,7 @@ pub(super) fn empty_run_note(fqtn: &str, exists: bool) -> String {
     }
 }
 
-/// A free `LOAD DATA` batch-load statement declaring the native `schema`, so
-/// BigQuery coerces the Parquet to native types on load.
+/// A free `LOAD DATA` batch-load statement declaring the native `schema`, so BigQuery coerces the Parquet to native types on load.
 pub(super) fn build_load_data_sql(
     fqtn: &str,
     overwrite: bool,
