@@ -57,6 +57,7 @@ jobs:
         run: |
           mkdir -p out
           set +e
+          (while sleep 120; do date -u +%T; free -m | sed -n 2p; docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' | sort -k2 -h | tail -4; done) &
           make seeded-recall SEEDED_ARGS="--seeds $SEEDS" 2>&1 | tee out/recall.txt
           rc=${PIPESTATUS[0]}
           grep -E "^[a-z0-9-]+ +\|" out/recall.txt > out/table.txt

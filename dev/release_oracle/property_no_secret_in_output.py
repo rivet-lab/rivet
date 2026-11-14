@@ -1293,6 +1293,7 @@ def state_role(port: int):
 
 def verify_credential_never_reaches_a_sink(led: Ledger, binary: Path | None = None, jobs: int = 8, only: str = "", live_tier: bool = True) -> None:
     """No credential canary in any credential slot reaches any sink of any command, engine, mode or path."""
+    led.phase("No secret in output (credential canaries over every command, engine and mode)")
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (hard if hard != resource.RLIM_INFINITY else 8192, hard))
     binary = (binary or rivet_bin()).resolve()
