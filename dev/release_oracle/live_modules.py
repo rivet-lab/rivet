@@ -15,9 +15,9 @@ import os
 import re
 from dataclasses import dataclass
 
-from . import live_owners
+from . import live_needs, live_owners
 from .core import DEVBOX, HOSTED, RAN_LIVE_MODULES, RAN_LIVE_TESTS, ROOT, Ledger, SkipCause
-from .halves import devbox_only, slice_modules
+from .halves import NEED_HALF, devbox_only, needs_problems, slice_modules
 from .scenarios import _run_live_modules, cfg
 
 __all__ = ["verify_live_modules", "live_suite_modules", "exclusive_tests", "EXCLUDED", "select_modules", "engines_arg"]
@@ -107,15 +107,19 @@ IGNORE_ATTR = re.compile(r'^\s*#\[ignore = "', re.M)
 REGISTRARS = frozenset({"_drive_live_tests", "run_rig_tests", "_run_live_modules"})
 
 
-def live_test_table() -> list[tuple[str, str, str]]:
-    """Every ignored live test as (module, fn name, ignore reason), read from tests/live/*.rs."""
-    return [(f.stem, name, reason) for f in sorted((ROOT / "tests" / "live").glob("*.rs"))
-            for reason, name in IGNORED_TEST.findall(f.read_text())]
+def live_test_table() -> list[tuple[str, str, bool]]:
+    """Every ignored live test as (module, fn name, runs in the devbox half), read from tests/live/*.rs: a test goes to the devbox when its reason names a topology only it holds or its call graph carries a need only it meets."""
+    problems = needs_problems(live_needs.need_variants())
+    if problems:
+        raise ValueError("; ".join(problems))
+    needs = live_needs.test_needs()
+    return [(f.stem, name, devbox_only(reason, needs.get((f.stem, name), ())))
+            for f in sorted((ROOT / "tests" / "live").glob("*.rs")) for reason, name in IGNORED_TEST.findall(f.read_text())]
 
 
-def part_tests(part: str, table: list[tuple[str, str, str]] | None = None) -> set[str]:
-    """Bare names of the live tests the `part` ("hosted" or "devbox") half runs: the devbox half takes every test whose reason needs what only it holds."""
-    return {name for _, name, reason in (live_test_table() if table is None else table) if devbox_only(reason) is (part == DEVBOX)}
+def part_tests(part: str, table: list[tuple[str, str, bool]] | None = None) -> set[str]:
+    """Bare names of the live tests the `part` ("hosted" or "devbox") half runs."""
+    return {name for _, name, devbox in (live_test_table() if table is None else table) if devbox is (part == DEVBOX)}
 
 
 def _strings(node: ast.AST, consts: dict[str, set[str]]) -> set[str]:
@@ -185,13 +189,13 @@ def live_modules_env(state: str) -> tuple[dict[str, str], tuple[str, dict[str, s
     return env, again
 
 
-def part_filter(expr: str, part: str, table: list[tuple[str, str, str]]) -> str:
+def part_filter(expr: str, part: str, table: list[tuple[str, str, bool]]) -> str:
     """`expr` narrowed to the tests `part` runs: the devbox part keeps the devbox-only tests, the hosted part drops them."""
     names = "|".join(re.escape(n) for n in sorted(part_tests(DEVBOX, table)))
     return f"({expr}) & test(/::({names})$/)" if part == DEVBOX else f"({expr}) - test(/::({names})$/)"
 
 
-def part_plan(table: list[tuple[str, str, str]], modules: list[str], part: str, gone: set[str], dedicated_modules: set[str],
+def part_plan(table: list[tuple[str, str, bool]], modules: list[str], part: str, gone: set[str], dedicated_modules: set[str],
               shard: tuple[int, int] | None = None) -> dict[str, list[str]]:
     """The tests each of `modules` runs in `part`, minus the dedicated modules and the tests in `gone`; under `shard` (i, n) the i-th slice of those modules only."""
     own = part_tests(part, table)
@@ -203,7 +207,7 @@ def part_plan(table: list[tuple[str, str, str]], modules: list[str], part: str, 
     return plan
 
 
-def coverage_problems(table: list[tuple[str, str, str]], modules: list[str], dedicated_modules: set[str], dedicated_tests: set[str], slices: int) -> list[str]:
+def coverage_problems(table: list[tuple[str, str, bool]], modules: list[str], dedicated_modules: set[str], dedicated_tests: set[str], slices: int) -> list[str]:
     """Live tests that run in no place or in two: a dedicated test must run in no live part, every other one in exactly one of the devbox part and the hosted slices."""
     runs: dict[tuple[str, str], int] = {}
     plans = [part_plan(table, modules, DEVBOX, set(dedicated_tests), dedicated_modules)] + [
@@ -283,7 +287,7 @@ def self_test() -> None:
     gate_engines = cfg("engines").split()
     assert set(gate_engines) <= set(live_owners.SOURCE_ENGINES), f"a gate engine no live module can be tied to: {gate_engines}"
 
-    table = [(m, f"{m}_t{i}", "live: requires docker compose postgres") for m in mods for i in (1, 2)] + [("cloud", "cloud_bq", "live: requires BigQuery creds")]
+    table = [(m, f"{m}_t{i}", False) for m in mods for i in (1, 2)] + [("cloud", "cloud_bq", True)]
 
     def stage(engines: list[str] | None, part: str = HOSTED, shard: tuple[int, int] | None = None) -> tuple[list[str], str, list]:
         """Run verify_live_modules over the fake owners; return the modules handed to nextest, the report line and the ledger rows."""
@@ -325,6 +329,13 @@ def self_test() -> None:
     assert len(real) == marked, f"{marked - len(real)} ignored live test(s) the reason scan does not read: the hosted/devbox split would lose them"
     assert part_tests(HOSTED, real) | part_tests(DEVBOX, real) == {n for _, n, _ in real} and not part_tests(HOSTED, real) & part_tests(DEVBOX, real), "a live test runs in neither part or in both"
     assert part_tests(DEVBOX, real), "no live test needs the devbox half"
+    derived = live_needs.test_needs()
+    carried = set().union(*derived.values())
+    strays = sorted(n for m, n, devbox in real if not devbox and any(NEED_HALF[v] == DEVBOX for v in derived.get((m, n), ())))
+    assert not strays, f"{len(strays)} live test(s) carry a need only the devbox half meets and run hosted: {strays[:5]}"
+    assert carried == set(NEED_HALF), f"a Need variant no live test carries, or one the scanner does not read: {sorted(carried ^ set(NEED_HALF))}"
+    assert needs_problems(live_needs.need_variants()) == [] and len(needs_problems([*live_needs.need_variants(), "Ghost"])) == 1 and len(needs_problems([])) == len(NEED_HALF), "the Need placement guard does not name an unplaced or a stale variant"
+    live_needs.self_test()
     real_mods = [m for m in live_suite_modules() if m not in EXCLUDED]
     real_dedicated = dedicated_live()
     for n in (1, 3, 5):
