@@ -1364,7 +1364,10 @@ fn a_cdc_stream_staged_on_real_gcs_is_pulled_by_clickhouse() {
         std::env::var("RIVET_TEST_GCS_HMAC_ID"),
         std::env::var("RIVET_TEST_GCS_HMAC_SECRET"),
     ) else {
-        skip_live("clickhouse_gcs_pull: RIVET_TEST_GCS_HMAC_ID / RIVET_TEST_GCS_HMAC_SECRET unset");
+        skip_needs(
+            Need::Credential,
+            "clickhouse_gcs_pull: RIVET_TEST_GCS_HMAC_ID / RIVET_TEST_GCS_HMAC_SECRET unset",
+        );
         return;
     };
     let pull = GcsPull {

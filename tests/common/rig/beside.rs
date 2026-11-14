@@ -155,7 +155,8 @@ impl TinyVolume {
     /// Mount a volume of `megabytes`; `None`, with the skip recorded, where the cell cannot mount one.
     pub fn mounted(megabytes: u32) -> Option<Self> {
         if !cfg!(target_os = "macos") {
-            crate::common::skip_live(
+            crate::common::skip_needs(
+                crate::common::Need::MacOs,
                 "no volume this cell may fill: it mounts a disk image with macOS `hdiutil` (a Linux tmpfs needs root)",
             );
             return None;

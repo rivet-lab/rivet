@@ -31,9 +31,10 @@ impl SfLive {
     pub fn from_env(label: &str) -> Option<Self> {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         let Some(connection) = var("RIVET_SF_CONNECTION") else {
-            super::skip_live(&format!(
-                "{label}: RIVET_SF_CONNECTION is unset (no Snowflake stand)"
-            ));
+            super::skip_needs(
+                super::Need::Credential,
+                &format!("{label}: RIVET_SF_CONNECTION is unset (no Snowflake stand)"),
+            );
             return None;
         };
         let (_, bucket) = warehouse_or_skip(label)?;
