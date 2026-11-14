@@ -145,13 +145,18 @@ def verdict_report(text: str, lane: str) -> list[str]:
     return out
 
 
-def verify_oracle_verdict_census(led, log: Path | None = None) -> None:
-    """Gate cell: the rig oracle graded the live modules this gate ran, and its ungraded first CDC runs stay within the gate's ceilings."""
+def verify_oracle_verdict_census(led, log: Path | None = None, may_be_empty: bool = False) -> None:
+    """Gate cell: the rig oracle graded the live modules this gate ran, and its ungraded first CDC runs stay within the gate's ceilings; `may_be_empty` records a DESIGN skip, not a FAIL, for a log with no verdict."""
     import os
+
+    from .core import SkipCause
 
     log = log or Path(os.environ.get("RIVET_ORACLE_LOG", ""))
     led.phase(f"Rig oracle verdict census · {log}")
     text = log.read_text() if log.is_file() else ""
+    if may_be_empty and not text.strip():
+        led.skipped("-", "-", "oracle-verdict-census", "-", "rig oracle verdict census: this slice ran no test the rig oracle grades", cause=SkipCause.DESIGN)
+        return
     for line in verdict_report(text, "gate"):
         print(f"  {line}")
     errs = verdict_errors(text, "gate")
@@ -242,6 +247,15 @@ def _verdict_self_test() -> None:
         led = Ledger(colour=False)
         verify_oracle_verdict_census(led, log)
         assert [c.status for c in led.cells] == [want], [(c.status, c.detail) for c in led.cells]
+    log.write_text("")
+    for empty_ok, want in ((False, Status.FAIL), (True, Status.SKIP)):
+        led = Ledger(colour=False)
+        verify_oracle_verdict_census(led, log, may_be_empty=empty_ok)
+        assert [c.status for c in led.cells] == [want], (empty_ok, [(c.status, c.detail) for c in led.cells])
+    log.write_text(at_ceiling("gate") + extra)
+    led = Ledger(colour=False)
+    verify_oracle_verdict_census(led, log, may_be_empty=True)
+    assert [c.status for c in led.cells] == [Status.FAIL], "a log that has verdicts is graded even where an empty one is allowed"
     print("self-test ok: the oracle verdict census fails one ungraded first CDC run past its ceiling, and an empty log")
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 from collections.abc import Iterable, Mapping, Sequence
 
 from .core import DEVBOX, HALVES, HOSTED, ROOT
@@ -55,11 +56,43 @@ STAGE_HALF: dict[str, str] = {
     "cloud legs": DEVBOX,
     "bigquery golden": DEVBOX,
     "fix cells": DEVBOX,
+    "live modules devbox": DEVBOX,
     "live modules": HOSTED,
 }
 
 #: The half of each seeded-recall shard, in shard order; its length is the shard count (the nightly workflow deals 4).
 SEED_SHARD_HALF: tuple[str, ...] = (DEVBOX, DEVBOX, DEVBOX, DEVBOX)
+
+
+#: A live test whose `#[ignore = "..."]` reason names what the hosted stack does not hold (cloud credentials, a gate-only stand, a replica topology) runs in the devbox half.
+DEVBOX_ONLY_REASON = re.compile(r"creds|gate-only|--profile replica|replica-profile|replica profile|mongo-rs2|mssql-ag|cdc-standby|oracle-latin1", re.I)
+
+#: The stage that runs the live tests the hosted stack can run, and the stage that runs the rest.
+LIVE_HOSTED_STAGE, LIVE_DEVBOX_STAGE = "live modules", "live modules devbox"
+
+
+def devbox_only(reason: str) -> bool:
+    """Whether a live test with this `#[ignore]` reason needs what only the devbox half holds."""
+    return DEVBOX_ONLY_REASON.search(reason) is not None
+
+
+def parse_live_shard(spec: str) -> tuple[int, int]:
+    """`i/n` as (i, n) with 0 <= i <= n and n >= 1; anything else raises ValueError."""
+    m = re.fullmatch(r"(\d+)/(\d+)", spec)
+    if not m or not (0 <= int(m[1]) <= int(m[2])) or int(m[2]) < 1:
+        raise ValueError(f"--live-shard wants i/n with 0 <= i <= n and n >= 1 (0 = the hosted stages but the live modules, 1..n = a slice of them), got {spec!r}")
+    return int(m[1]), int(m[2])
+
+
+def slice_modules(weights: Mapping[str, int], n: int) -> list[list[str]]:
+    """The modules dealt into `n` slices, heaviest first into the lightest slice; deterministic, each module in exactly one slice."""
+    slices: list[list[str]] = [[] for _ in range(n)]
+    load = [0] * n
+    for m in sorted(weights, key=lambda k: (-weights[k], k)):
+        i = load.index(min(load))
+        slices[i].append(m)
+        load[i] += weights[m]
+    return [sorted(s) for s in slices]
 
 
 def stage_half(name: str) -> str:
