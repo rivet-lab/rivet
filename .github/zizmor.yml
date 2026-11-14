@@ -11,6 +11,8 @@ rules:
       # 2026-11-13: same actionlint limit as above for the nightly workflows and the live-stack action; closes with the entries above.
       - nightly-recall.yml
       - nightly-gate.yml
+      # 2026-11-14: same actionlint limit for the hosted gate half; closes with the entries above.
+      - gate-hosted.yml
       - action.yml
   cache-poisoning:
     ignore:

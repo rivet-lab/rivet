@@ -49,7 +49,7 @@ from .core import DEVBOX, GATE_FAILURES, HALVES, HOSTED, Ledger, SkipCause, Stat
 from ..pytools.release import CANONICAL_CONFIG, ISLAND_GATE, binary_is_tree
 from ..pytools.shell import find_keg_tools, loopback_publish, mysql_client
 from . import seed_charset
-from .halves import half_seeds, stage_half
+from .halves import LIVE_DEVBOX_STAGE, LIVE_HOSTED_STAGE, half_seeds, parse_live_shard, stage_half
 from . import (
     bigquery,
     blessed_flow,
@@ -236,8 +236,8 @@ def gate_config(ns: argparse.Namespace) -> dict:
 
 
 def gate_kind(ns: argparse.Namespace, config: dict | None = None) -> str:
-    """The record kind of a run that gave nothing up (a clean build, no escape, the canonical configuration): `release-oracle-island` for `--island`, `release-oracle-full` (`-hosted` or `-devbox` under `--half`) with seeded recall on; else `release-oracle`."""
-    from .core import FULL_GATE, REDUCED_GATE, half_gate
+    """The record kind of a run that gave nothing up (a clean build, no escape, the canonical configuration): `release-oracle-island` for `--island`, `release-oracle-full` (`-hosted`, `-hosted-shard` under `--live-shard`, or `-devbox` under `--half`) with seeded recall on; else `release-oracle`."""
+    from .core import FULL_GATE, HOSTED_SHARD_GATE, REDUCED_GATE, half_gate
     reduced = (ns.engines or ns.versions or ns.no_cloud or ns.latest_only or ns.no_clean or ns.fast_clean
                or ns.without_prev_release_comparison or ns.without_replica_topologies
                or (config or gate_config(ns)) != CANONICAL_CONFIG)
@@ -245,7 +245,14 @@ def gate_kind(ns: argparse.Namespace, config: dict | None = None) -> str:
         return REDUCED_GATE
     if not ns.with_seeded_recall and not ns.island:
         return REDUCED_GATE
+    if live_shard(ns) is not None:
+        return HOSTED_SHARD_GATE
     return ISLAND_GATE if ns.island else half_gate(ns.half) if ns.half else FULL_GATE
+
+
+def live_shard(ns: argparse.Namespace) -> tuple[int, int] | None:
+    """The (i, n) `--live-shard` names, or None."""
+    return parse_live_shard(ns.live_shard) if ns.live_shard else None
 
 
 def _live_stage_takes_the_selector_self_test() -> None:
@@ -255,7 +262,7 @@ def _live_stage_takes_the_selector_self_test() -> None:
     for argv, want in ((["--engines", "mysql,mssql"], ["mysql", "mssql"]), ([], [])):
         seen: list = []
         stage = next(st for st in gate_stages(parse_args(argv)) if st.name == "live modules")
-        with mock.patch.object(live_modules, "verify_live_modules", lambda led, engines=None: seen.append(engines)):
+        with mock.patch.object(live_modules, "verify_live_modules", lambda led, engines=None, *a: seen.append(engines)):
             stage.run(Ledger(colour=False))
         assert seen == [want], f"the live-modules stage got {seen} for {argv}"
 
@@ -283,7 +290,7 @@ def _gate_kind_self_test() -> None:
     """Only `make release-oracle-full`'s and `make release-oracle-island`'s arguments make their record kind; each escape, a missing recall or a narrowed scope makes a run reduced."""
     import re
 
-    from .core import FULL_GATE, GRADING_KNOBS, REDUCED_GATE, half_gate
+    from .core import FULL_GATE, GRADING_KNOBS, HOSTED_SHARD_GATE, REDUCED_GATE, half_gate
     makefile = (ROOT / "Makefile").read_text()
 
     def argv_of(target: str) -> list[str]:
@@ -319,6 +326,13 @@ def _gate_kind_self_test() -> None:
             assert gate_kind(parse_args([*full, "--half", half])) == half_gate(half), f"--half {half} does not write its own record kind"
             assert gate_kind(parse_args([*full, "--half", half, "--engines", "postgres"])) == REDUCED_GATE, f"a narrowed {half} half reads as a half"
         assert gate_kind(parse_args(["--half", HOSTED])) == REDUCED_GATE, "a half without seeded recall is no half of a full gate"
+        hosted = argv_of("release-oracle-hosted-half")
+        assert gate_kind(parse_args(hosted)) == half_gate(HOSTED), "`make release-oracle-hosted-half` is not the hosted half"
+        for i in range(4):
+            assert gate_kind(parse_args([*hosted, "--live-shard", f"{i}/3"])) == HOSTED_SHARD_GATE, f"slice {i}/3 does not write the slice record kind"
+        assert gate_kind(parse_args([*hosted, "--live-shard", "1/3", "--engines", "postgres"])) == REDUCED_GATE, "a narrowed slice reads as a slice"
+        workflow = (ROOT / ".github" / "workflows" / "gate-hosted.yml").read_text()
+        assert 'make release-oracle-hosted-half ARGS="--live-shard $SLICE/$LIVE_SLICES"' in workflow, "the hosted workflow does not run the graded target"
         _switch_is_recorded_knob_check(GRADING_KNOBS)
         _narrowed_run_has_no_tag_self_test(argv_of("release-oracle-full"))
         assert "--island" not in argv_of("release-oracle-full") and "--island" in argv_of("release-oracle-island")
@@ -861,12 +875,23 @@ def _halves_self_test() -> None:
         assert sorted(cuts[HOSTED] + cuts[DEVBOX]) == sorted(per_run), \
             f"the halves drop a stage: {sorted(set(per_run) - set(cuts[HOSTED]) - set(cuts[DEVBOX]))}"
         assert all(cuts[h] == [n for n in per_run if n in cuts[h]] for h in HALVES), "a half does not keep the table's order"
+        slices = [[st.name for st in selected_stages(parse_args([*argv, "--half", HOSTED, "--live-shard", f"{i}/3"]), table)] for i in range(4)]
+        assert sorted(slices[0] + slices[1]) == sorted(cuts[HOSTED]), "slice 0 and a live slice do not re-form the hosted half"
+        assert slices[0] == [n for n in cuts[HOSTED] if n != LIVE_HOSTED_STAGE] and all(sl == [LIVE_HOSTED_STAGE] for sl in slices[1:]), \
+            "slice 0 is every hosted stage but the live modules and each other slice is the live modules alone"
         island = [st.name for st in selected_stages(parse_args([*argv, "--island"]), table)]
         assert sorted(cuts[HOSTED] + cuts[DEVBOX] + island) == sorted(st.name for st in table), "the halves and the island are not the whole table"
     names = [st.name for st in selected_stages(parse_args([]), gate_stages(parse_args([])))]
     assert not problems(names, seeds), problems(names, seeds)
     assert REPLICA_STAGE in names and STAGE_HALF[REPLICA_STAGE] == DEVBOX, "the stage that reads replica topologies runs where the replicas are"
     dropped = {k: v for k, v in STAGE_HALF.items() if k != names[0]}
+    assert LIVE_DEVBOX_STAGE in names and STAGE_HALF[LIVE_DEVBOX_STAGE] == DEVBOX and STAGE_HALF[LIVE_HOSTED_STAGE] == HOSTED, "the live modules have a part in each half"
+    for bad in ("4/3", "-1/3", "0/0", "x", "1/"):
+        try:
+            parse_live_shard(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"--live-shard accepted {bad!r}")
     assert any("neither half" in p for p in problems(names, seeds, dropped)), "a stage dropped from the table goes unnoticed"
     assert any("no gate stage" in p for p in problems(names, seeds, {**STAGE_HALF, "ghost": HOSTED})), "a row naming no stage goes unnoticed"
     assert any("no half" in p for p in problems(names, seeds, {**STAGE_HALF, names[0]: "both"})), "a stage placed in a non-half goes unnoticed"
@@ -1143,6 +1168,8 @@ def _self_test() -> int:
     import inspect
     assert "stand_disk.start_refusal(stand_disk.free_gib(), island=ns.island, hosted=ns.hosted)" in inspect.getsource(main), \
         "the start floor follows the run's mode"
+    assert "verify_oracle_verdict_census(led, kept, may_be_empty=(live_shard(ns) or (1, 1))[0] == 0)" in inspect.getsource(main), \
+        "only slice 0 of the hosted half may log no rig oracle verdict"
     assert "led.close_known_red(known_red.ISLAND if ns.island else known_red.GATE)" in inspect.getsource(main), \
         "a full run closes the known reds its own lane owes, the island its own tier included"
     assert "stand_profiles.preflight(replica=replica)" in inspect.getsource(main), \
@@ -1727,6 +1754,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--half", choices=HALVES, default="",
         help="run ONE half of the full gate (the stages and the seeded-recall shards dev/release_oracle/halves.py places "
              "there) and record a `release-oracle-full-<half>` verdict line; no --half is the whole gate and its `release-oracle-full` line.")
+    ap.add_argument(
+        "--live-shard", default="", metavar="i/n",
+        help="with `--half hosted`: i=0 runs every hosted stage but the live modules, 1<=i<=n runs the i-th of n slices of the live modules alone; "
+             "each slice writes a `release-oracle-full-hosted-shard` line, never the half's own")
     ap.add_argument("--list-stages", action="store_true", help="print the stages and seeded-recall seeds this run would execute, then exit")
     ap.add_argument("--images-file", default="",
                     help="JSON file the gate records every running container's image and RepoDigest into "
@@ -1768,6 +1799,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ns = ap.parse_args(argv)
     if ns.half and ns.island:
         ap.error("--half and --island are two ways to split the gate: the island is its own record")
+    if ns.live_shard:
+        try:
+            parse_live_shard(ns.live_shard)
+        except ValueError as e:
+            ap.error(str(e))
+        if ns.half != HOSTED:
+            ap.error("--live-shard slices the hosted half: it needs --half hosted")
     if ns.bless_local:
         ns.no_cloud = True
     return ns
@@ -1882,8 +1920,10 @@ def island_stages(table: Sequence[Stage]) -> list[Stage]:
 
 
 def selected_stages(ns: argparse.Namespace, table: Sequence[Stage]) -> list[Stage]:
-    """What this run executes of the table: only the island under `--island`, else everything, of one half under `--half`."""
-    return [st for st in table if (ALONE in st.needs) is ns.island and (not ns.half or stage_half(st.name) == ns.half)]
+    """What this run executes of the table: only the island under `--island`, else everything, of one half under `--half`; under `--live-shard i/n` slice 0 is every stage but the live modules and slice i>=1 is the live modules alone."""
+    shard = live_shard(ns)
+    return [st for st in table if (ALONE in st.needs) is ns.island and (not ns.half or stage_half(st.name) == ns.half)
+            and (shard is None or (st.name == LIVE_HOSTED_STAGE) is (shard[0] > 0))]
 
 
 #: The stage that reads the replica topologies: the stand's replica check is a start condition only where it runs.
@@ -1998,8 +2038,9 @@ def gate_stages(ns: argparse.Namespace) -> list[Stage]:
             frozenset({"the BigQuery golden's containers"})))
     # The cells a fix added or edited since the baseline, through the baseline: each must fail there.
     table.append(serial("fix cells", lambda led: fix_cells.verify_fix_cells(led)))
-    # Last: it runs every live_suite test no stage above already ran.
-    table.append(serial("live modules", lambda led: live_modules.verify_live_modules(led, live_modules.engines_arg(ns.engines))))
+    shard = live_shard(ns)
+    table.append(serial(LIVE_DEVBOX_STAGE, lambda led: live_modules.verify_live_modules(led, live_modules.engines_arg(ns.engines), DEVBOX)))
+    table.append(serial(LIVE_HOSTED_STAGE, lambda led: live_modules.verify_live_modules(led, live_modules.engines_arg(ns.engines), HOSTED, shard)))
     return table
 
 
@@ -2619,7 +2660,8 @@ def main(argv: list[str] | None = None) -> int:
         if (work / "rivet-oracle.log").is_file():
             keep_failure_log(work / "rivet-oracle.log", kept.name)
         if not ns.island:
-            skip_census.verify_oracle_verdict_census(led, kept)
+            skip_census.verify_oracle_verdict_census(led, kept, may_be_empty=(live_shard(ns) or (1, 1))[0] == 0)
+            live_modules.verify_registry_covered(led)
             verify_seeded_recall(led, ns.with_seeded_recall, ns.half)
         else:
             verify_seeded_platform_rows(led)
@@ -2638,7 +2680,7 @@ def main(argv: list[str] | None = None) -> int:
                 led.close_matrix_rows(owned=(lambda fn: fn in island) if ns.island else (lambda fn: fn not in island))
         led.stand_invalid = dog.stop()
         gate = gate_kind(ns, config)
-        rc = led.report(full=full and not (ns.bless_local or ns.bless_cdc), gate=gate, tree=tree, config=config)
+        rc = led.report(full=full and not (ns.bless_local or ns.bless_cdc), gate=gate, tree=tree, config=config, shard=ns.live_shard)
         if gate == ISLAND_GATE:
             print("  island record only: a tag also needs a green `make release-oracle-full` of this commit.")
         elif not ns.island:
