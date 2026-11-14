@@ -54,6 +54,8 @@ STAND_SKIPS = (
      "the stand brings up Oracle on the gate host"),
     *((f"no_secret_in_output/slot-reach/{sl}", "-", f"no command connects to the {sl} credential slot on the stand, so its cells are clean but ungraded",
        f"a stub or cloud account answers the {sl} slot") for sl in ("ambient", "bigquery", "load", "snowflake")),
+    *(("memory", e, f"the island sets no RIVET_SCALE_{e.upper()}_URL, so the scale-memory pair of tables is not measured on {e}; flat_rss grades peak RSS over 10 thousand, 1 million and 5 million seeded rows",
+       "the island names a batch-tier database with a large row-count ratio per engine, or the stage is retired for flat_rss") for e in ("postgres", "mysql", "mssql", "mongo")),
     ("cloud_legs", "-", "the gate host has no cloud credentials or bucket, so the cloud tier (no_silent_null_cloud, no_secret_in_output_cloud, no_debris_after_stop_cloud) is not graded",
      "the gate host is given a test project and bucket"),
 )

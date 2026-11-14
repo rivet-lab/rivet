@@ -592,3 +592,24 @@ pub fn peak_child_rss_bytes() -> u64 {
 pub fn peak_child_rss_bytes() -> u64 {
     0
 }
+
+#[cfg(test)]
+mod unique_name_tests {
+    use super::*;
+
+    /// A name is `<prefix>_<pid>_<n>` and nothing more: Oracle (30 bytes) and a MySQL user (32) leave no room for a third part.
+    #[test]
+    fn a_name_is_the_prefix_plus_pid_and_counter_only() {
+        let prefix = "pm_check_equals_run_u";
+        let name = unique_name(prefix);
+        let rest = name
+            .strip_prefix(prefix)
+            .and_then(|r| r.strip_prefix('_'))
+            .unwrap();
+        let parts: Vec<&str> = rest.split('_').collect();
+        assert_eq!(parts.len(), 2, "{name}");
+        assert_eq!(parts[0], std::process::id().to_string(), "{name}");
+        assert!(parts[1].parse::<u64>().is_ok(), "{name}");
+        assert!(prefix.len() + "_99999_999".len() <= 32, "{name}");
+    }
+}
