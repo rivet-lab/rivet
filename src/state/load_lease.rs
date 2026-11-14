@@ -568,10 +568,11 @@ impl StateStore {
             StateRef::Postgres(url) => {
                 let ttl = lease_ttl_s();
                 let host = host_name();
+                let made = keeper_for(url.expose(), ttl);
                 let keeper = seeded!(
                     "lease-granted-without-a-keeper",
-                    keeper_for(url.expose(), ttl).ok(),
-                    Some(keeper_for(url.expose(), ttl).map_err(|e| keeper_unavailable(key, &e))?)
+                    made.as_ref().ok().cloned(),
+                    Some(made.map_err(|e| keeper_unavailable(key, &e))?)
                 );
                 let granted = Instant::now();
                 let holder = format!(

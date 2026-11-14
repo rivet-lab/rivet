@@ -1792,10 +1792,9 @@ pub(crate) fn parse_test_decoding(
                     before.zip(before_names).map(|(v, bn)| {
                         names
                             .iter()
-                            .map(|n| {
-                                bn.iter()
-                                    .position(|b| b == n)
-                                    .map_or(RivetValue::Null, |i| v[i].clone())
+                            .map(|n| match bn.iter().position(|b| b == n) {
+                                Some(i) => v[i].clone(),
+                                None => RivetValue::Null,
                             })
                             .collect::<Vec<RivetValue>>()
                     }),
