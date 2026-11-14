@@ -65,15 +65,11 @@ index f2b2f384..38ec5fdc 100644
      }
  
      let entries = if parallel {
-@@ -1106,8 +1107,9 @@ pub(crate) fn run_pool(
-     };
-     let state = StateStore::open(config_path)?;
- 
--    let mut effective: Vec<ExportConfig> = RunSet::select(&config, None)?
--        .in_process(&config.source, &config_dir, None)?
-+    let mut effective: Vec<ExportConfig> = config
+@@ -1322,4 +1323,5 @@ fn select_pool_exports(
+ ) -> Result<Option<Vec<ExportConfig>>> {
+-    let effective: Vec<ExportConfig> = RunSet::select(config, None)?
+-        .in_process(&config.source, config_dir, None)?
++    let effective: Vec<ExportConfig> = config
 +        .exports
 +        .clone()
          .into_iter()
-         .filter(|e| {
-             if split {
