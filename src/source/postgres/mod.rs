@@ -676,9 +676,12 @@ impl super::Source for PostgresSource {
         if let Ok(Some(v)) = row.try_get::<_, Option<f64>>(0) {
             return Ok(Some(v.to_string()));
         }
-        if seeded!("unreadable-probe-read-as-no-rows", false, true)
-            && let Ok(Some(v)) = row.try_get::<_, Option<i16>>(0)
-        {
+        let small = if seeded!("unreadable-probe-read-as-no-rows", false, true) {
+            row.try_get::<_, Option<i16>>(0)
+        } else {
+            Ok(None)
+        };
+        if let Ok(Some(v)) = small {
             return Ok(Some(v.to_string()));
         }
         if let Ok(Some(v)) = row.try_get::<_, Option<u32>>(0) {

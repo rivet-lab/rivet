@@ -231,10 +231,12 @@ pub(crate) fn redact_query_secrets(s: &str) -> String {
             lower == f
                 || (lower.ends_with(f) && lower[..lower.len() - f.len()].ends_with(['_', '-']))
         };
-        if seeded!("query-password-key-by-suffix-family", true, false) {
-            return family("password") || FAMILIES.iter().any(|f| family(f)) || lower == "sas";
-        }
-        is_password_keyword(key) || FAMILIES.iter().any(|f| family(f)) || lower == "sas"
+        let keyword = seeded!(
+            "query-password-key-by-suffix-family",
+            family("password"),
+            is_password_keyword(key)
+        );
+        keyword || FAMILIES.iter().any(|f| family(f)) || lower == "sas"
     }
     let mut out = String::with_capacity(s.len());
     let mut rest = s;

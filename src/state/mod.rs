@@ -385,10 +385,11 @@ impl StateStore {
     /// Which state `config_path` uses and that it answers, without creating or migrating it: `postgres <redacted url>` or `sqlite <path>`.
     pub fn probe(config_path: &str) -> Result<String> {
         if let Some(url) = state_url_var()
+            && let text = url.expose()
             && let Some(url) = seeded!(
                 "state-url-typo-falls-back-to-sqlite",
-                postgres_state_url(url.expose()).ok().flatten(),
-                postgres_state_url(url.expose())?
+                postgres_state_url(text).ok().flatten(),
+                postgres_state_url(text)?
             )
         {
             let mut client = connect_pg(url)?;

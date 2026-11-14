@@ -67,6 +67,11 @@ pub fn done_note(
     checkpoints: &[std::path::PathBuf],
 ) -> String {
     let rows: u64 = report.tables.iter().map(|(_, n)| n).sum();
+    let shown = seeded!(
+        "state-url-query-password-unmasked",
+        crate::redact::redact_url_passwords(target.expose()),
+        crate::redact::redact_secrets(target.expose())
+    );
     let mut note = format!(
         "copied {} table(s), {rows} row(s), from `{}` to the PostgreSQL state {}.\n\
          Run every command of this config with RIVET_STATE_URL={} from now on. The SQLite file \
@@ -75,16 +80,8 @@ pub fn done_note(
         std::fs::canonicalize(source)
             .unwrap_or_else(|_| source.to_path_buf())
             .display(),
-        seeded!(
-            "state-url-query-password-unmasked",
-            crate::redact::redact_url_passwords(target.expose()),
-            crate::redact::redact_secrets(target.expose())
-        ),
-        seeded!(
-            "state-url-query-password-unmasked",
-            crate::redact::redact_url_passwords(target.expose()),
-            crate::redact::redact_secrets(target.expose())
-        ),
+        shown,
+        shown,
     );
     if !checkpoints.is_empty() {
         note.push_str(
