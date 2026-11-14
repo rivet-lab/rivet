@@ -349,8 +349,10 @@ run reports the other's rows as "never ran this gate". Perf and flat RSS record 
 
 ## The two halves — one sha, two machines
 
-`dev/release_oracle/halves.py` places every per-run stage (`STAGE_HALF`) and every seeded-recall shard
-(`SEED_SHARD_HALF`, one entry per shard of the nightly dealer) in exactly one of two halves; the island keeps its own record.
+`dev/release_oracle/halves.py` places every per-run stage (`STAGE_HALF`) in exactly one of two halves, and derives the half of every
+seeded-recall seed from the ledger (`dev/seeded/shards.py`: a patch-form row, a macOS row or a cell only the devbox stand holds puts
+a seed on the devbox, every other seed is hosted); the island keeps its own record. The hosted seeds run in the Nightly Recall
+workflow (below), not in the gate's hosted half, which reports its seeded-recall row as a design skip.
 
 ```
 make release-oracle-full ARGS="--half hosted"     # python -m dev.release_oracle --with-seeded-recall --half hosted
@@ -430,3 +432,14 @@ Re-bless the local goldens (verdicts + DuckDB type/fidelity) on purpose with
 Requires: docker, the `rivet` release binary, `duckdb`, `python3` (stdlib only),
 and — for the final stage — `bq` + ADC + a real GCS staging bucket
 (`BQ_ORACLE_BUCKET`, default: dev/stand/registry.yaml's `gcs.bucket`).
+
+### The hosted seeds: Nightly Recall
+
+`.github/workflows/nightly-recall.yml` (nightly, or `workflow_dispatch` with `sha` and an optional `seeds` list) resolves one full
+sha, builds the `seeded` test binaries once into a nextest archive (`make seeded-recall SEEDED_ARGS="--build-archive FILE"`), deals
+the hosted seeds into shards by estimated cost (`python -m dev.seeded.shards`; lib-only seeds get a shard with no docker stack) and
+grades each shard on the unpacked build (`--seeds ... --archive FILE`). `python -m dev.seeded.verdict` then reads every shard's
+record: each shard green, clean and on that sha, every expected seed in exactly one shard, NOT-GRADED-HERE rows under the matrix
+ceiling. It appends one line to `recall-runs.jsonl` (artifact `recall-verdict`). `release.py` accepts a tag when the devbox half's
+lines and that verdict line together cover every ledger seed with a green clean run of the sha: concatenate both files and pass
+`--recall-record FILE`.
