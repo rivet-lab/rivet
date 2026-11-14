@@ -22,7 +22,7 @@ seeds:
     class: "the roll a column added while a CDC run is open forces checkpoints and acknowledges the position of the change that carried the column before that change is written: a stop right after the roll resumes past it and the row is never delivered, exit 0 (PostgreSQL also advances the slot past it)"
     history: "found 2026-10-29 by a rivet-verifier probe (a MySQL continuous run, INSERT 3, ALTER TABLE ADD COLUMN, INSERT 4, run stopped after the roll: ck.json at the position of row 4, row 4 in no declared part); RED on main 2026-10-29 (the rig oracle: source row 4 not delivered, PostgreSQL and MySQL)"
     scope: source
-    patch: cdc-roll-checkpoints-its-trigger/shared.patch
+    switch: cdc-roll-checkpoints-its-trigger
     engines:
       postgres:
         cells: [pg_cdc_a_stop_after_the_column_added_roll_resumes_at_the_row_that_carried_it, "lib:a_roll_for_an_added_column_never_checkpoints_the_event_that_caused_it"]
@@ -194,10 +194,10 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: keyset-key-by-catalog-order/lib.patch
+        switch: keyset-key-by-catalog-order
         cells: ["lib:the_primary_key_comes_first_and_a_column_is_listed_once"]
       postgres:
-        patch: keyset-key-by-catalog-order/lib.patch
+        switch: keyset-key-by-catalog-order
         cells: ["lib:the_primary_key_comes_first_and_a_column_is_listed_once"]
       mssql:
         na: "its key query orders by is_pk DESC, name in SQL (src/source/mssql/mod.rs); the shared seam is covered under mysql/postgres"
@@ -211,16 +211,16 @@ seeds:
     scope: source
     engines:
       postgres:
-        patch: committed-every-event/postgres.patch
+        switch: committed-every-event
         cells: [roast_pg_cdc_large_transaction_is_atomic_across_a_mid_flush_crash]
       mysql:
-        patch: committed-every-event/mysql.patch
+        switch: committed-every-event
         cells: [roast_mysql_cdc_large_transaction_is_atomic_across_a_mid_flush_crash]
       mssql:
-        patch: committed-every-event/mssql.patch
+        switch: committed-every-event
         cells: [roast_mssql_cdc_large_transaction_is_atomic_across_a_mid_flush_crash]
       oracle:
-        patch: committed-every-event/oracle.patch
+        switch: committed-every-event
         cells: [roast_oracle_cdc_large_transaction_is_atomic_across_a_mid_flush_crash]
       mongo:
         na: "committed on every event IS the MongoDB contract (TxnFramer::single_event_commit, #158) - its consume-free resume token re-reads a mid-transaction tail, so there is no defect to seed"
@@ -252,7 +252,7 @@ seeds:
     class: a run that continues past its last key (SQL keyset_incremental, Mongo source.mongo.resume) plans its warehouse load as a whole-table overwrite instead of an append
     history: "#399 - BigQuery and ClickHouse held 100, then 20, then 20 rows; 2026-10-03 - a Mongo resume export loaded 500 of 2500 documents into ClickHouse"
     scope: source
-    patch: delta-run-loaded-as-overwrite/shared.patch
+    switch: delta-run-loaded-as-overwrite
     engines:
       postgres:
         cells: [a_keyset_incremental_export_into_clickhouse_accumulates_every_run]
@@ -263,7 +263,7 @@ seeds:
       oracle:
         cells: [a_keyset_incremental_export_from_oracle_accumulates_in_clickhouse]
       mongo:
-        patch: delta-run-loaded-as-overwrite/mongo.patch
+        switch: delta-run-loaded-as-overwrite
         cells: [a_mongo_resume_export_into_clickhouse_accumulates_every_run]
       lib:
         cells:
@@ -321,7 +321,7 @@ seeds:
     scope: source
     engines:
       postgres:
-        patch: absent-old-cell-read-as-moved-key/postgres.patch
+        switch: absent-old-cell-read-as-moved-key
         cells:
           - pg_cdc_an_update_of_a_replica_identity_index_that_is_not_the_key_stays_one_update
           - pg_cdc_a_declared_key_absent_from_the_old_key_does_not_split
@@ -340,7 +340,7 @@ seeds:
     class: an empty keyset page / chunk arrives as Schema::empty() and the quality gate reads it as a missing rule column
     history: "#419 - every keyset run under unique_columns whose range ended on an empty page failed"
     scope: source
-    patch: empty-page-fails-quality/shared.patch
+    switch: empty-page-fails-quality
     engines:
       postgres:
         cells:
@@ -479,7 +479,7 @@ seeds:
     scope: state
     engines:
       sqlite-state:
-        patch: lease-file-named-by-a-lossy-token/sqlite-state.patch
+        switch: lease-file-named-by-a-lossy-token
         cells:
           - "lib:keys_that_read_alike_get_their_own_lease_file"
           - a_run_beside_a_live_export_whose_name_reads_alike_delivers
@@ -536,7 +536,7 @@ seeds:
     class: "`rivet load` / `rivet compact` on a config without a `load:` block exit 1 with no RIVET_* code, so a scheduler cannot tell the config mistake from another failure"
     history: "0.32.2 hand sweep block 0 (D2), 2026-10-21: the stop said config has no top-level load block, exit 1, uncoded; through 0.32.1"
     scope: source
-    patch: load-block-missing-uncoded/shared.patch
+    switch: load-block-missing-uncoded
     engines:
       lib:
         cells: ["lib:plan_loads_gates_the_load_block_before_any_source_io"]
@@ -846,7 +846,7 @@ seeds:
     class: "a stop whose holder is a live rivet process (another run, load or compact holds the export's or table's lease) exits 5, \"a human decides\", while its remedy is to wait and run again, so a scheduler never retries an overlap the next attempt completes"
     history: "2026-10-16 - retry-matrix F2 - RIVET_STATE_RUN_IN_PROGRESS and RIVET_LOAD_TABLE_BUSY exited 5 on main 04c4a712f; a concurrent `rivet run`, a retry beside orphaned children and a concurrent `rivet load` each failed an Airflow task for good"
     scope: source
-    patch: busy-stop-not-retryable/shared.patch
+    switch: busy-stop-not-retryable
     engines:
       postgres:
         cells:
@@ -877,7 +877,7 @@ seeds:
     class: "a refusal that one command gives by code and another gives as plain text: a second run beside a live checkpointed run exited 1 with no `RIVET_*` code, while `state reset` in the same situation gave RIVET_STATE_RUN_IN_PROGRESS (5)"
     history: "2026-10-07 - operator-contract Sweep 11 - exit 1, no code, on PostgreSQL, MySQL, SQL Server, Oracle and MongoDB"
     scope: source
-    patch: live-run-refusal-without-a-code/shared.patch
+    switch: live-run-refusal-without-a-code
     engines:
       postgres:
         cells:
@@ -964,7 +964,7 @@ seeds:
     class: a load writes a warehouse name before asking whether the ledger has a record of it, or journals a stop before the write in a way the next load reads as ownership
     history: "2026-10-06 triage P-03, P-08, P-10 - an incremental or CDC load replaced a foreign view and appended to a foreign `__changes`, exit 0; the stale-buffer stop was journaled `failed` and the `writing` row preceded the ownership check, so the next load overwrote a table it had refused"
     scope: source
-    patch: load-append-writes-before-asking/shared.patch
+    switch: load-append-writes-before-asking
     engines:
       postgres:
         cells: [bigquery_incremental_onto_a_view_or_a_log_it_did_not_load_is_refused_every_time]
@@ -989,7 +989,7 @@ seeds:
     class: a base-and-buffer load consumes an empty baseline leg as "nothing to load" and creates no base, so the table's first change can never be compacted
     history: "field 2026-10-06 - tables empty at their CDC baseline had no BigQuery table; from their first change on `rivet compact` failed on each of them every cycle and the command exited non-zero (0.27 to 0.31)"
     scope: source
-    patch: empty-baseline-builds-no-base/shared.patch
+    switch: empty-baseline-builds-no-base
     engines:
       postgres:
         cells: [a_table_empty_at_baseline_takes_its_first_changes_postgres]
@@ -1348,7 +1348,7 @@ seeds:
     class: "a whole-config `check` or `doctor` reads the declared export list instead of the run set, so a CDC backfill recipe is described as an export, planned, counted in the `--target` tally and its unused destination probed"
     history: "found 2026-11-01 while closing #755: a whole-config `rivet check` printed `Export: <recipe>`, counted a refused column twice, and rejected a config over a recipe's `destination: stdout` that `plan` and `run` never use; closed 2026-11-01 by routing check, its planner and doctor through declared_exports"
     scope: source
-    patch: check-reads-declared-list-not-run-set/shared.patch
+    switch: check-reads-declared-list-not-run-set
     engines:
       postgres:
         cells:
@@ -1894,7 +1894,7 @@ seeds:
     class: "`rivet init` names a table's CDC export like its batch export and nests the CDC prefix (`exports/<t>/cdc/`) inside the batch one, so the two share a load spec and a batch load lists the stream's runs"
     history: "0.32.1 item 2, 2026-10-18: measured on main 935064e8 with SQL Server init (batch, then --mode cdc): `name: ab2_mssql_cdc_new` twice, `exports/ab2_mssql_cdc_new/` and `exports/ab2_mssql_cdc_new/cdc/`"
     scope: source
-    patch: init-cdc-shares-batch-name/shared.patch
+    switch: init-cdc-shares-batch-name
     engines:
       postgres:
         cells: ["lib:a_batch_and_a_cdc_scaffold_of_one_table_share_no_name_and_nest_no_prefix"]
@@ -2342,7 +2342,7 @@ seeds:
     scope: state
     engines:
       postgres-state:
-        patch: lease-granted-without-a-keeper/postgres-state.patch
+        switch: lease-granted-without-a-keeper
         cells: [a_load_that_cannot_open_its_lease_keeper_refuses_twice_then_loads]
       sqlite-state:
         na: the SQLite lease is an flock on a sidecar file, held by its descriptor until the holder ends - nothing renews it and no connection can fail to open
@@ -2957,7 +2957,7 @@ seeds:
     class: "a verdict every engine types (the relation the export reads does not exist) is recognised by no path, so each path ends with the raw driver error or a generic query-failed code instead of the one refusal"
     history: "2026-10-16 - found by hand on the pilot client's shape (MySQL -> GCS -> BigQuery, cron): an export whose source table was dropped failed as `MySqlError { ERROR 1146 (42S02): Table 'rivet.drop_probe_b' doesn't exist }` with no RIVET_* code (PostgreSQL too), RIVET_SOURCE_QUERY_FAILED on SQL Server and Oracle, through 0.31.0; fixed by one `names_a_missing_relation` / `code_a_missing_relation` on every path that reads the table"
     scope: source
-    patch: dropped-source-table-uncoded/shared.patch
+    switch: dropped-source-table-uncoded
     engines:
       postgres:
         cells: [a_dropped_source_table_is_refused_by_code_and_its_sibling_delivers_postgres]
@@ -3669,7 +3669,7 @@ seeds:
     class: "a planner probe reads an empty result (no row, so min and max are NULL) as an unreadable bound, so an empty table under `chunk_by_days` stops the run instead of exporting zero rows"
     history: "2026-10-15 - found while coding the src/pipeline error sites: the date planner stopped on `min(...) returned NULL — table may be empty` since date-native chunking (0.2.0-beta.3) through 0.31.0 (by source), exit 5 `RIVET_SOURCE_PROBE_UNREADABLE` once coded, while the same empty table range-chunked on its id exported zero rows with exit 0; fixed by `read_key_span`, the one span reader both chunk planners call"
     scope: source
-    patch: empty-table-under-chunk-by-days/shared.patch
+    switch: empty-table-under-chunk-by-days
     engines:
       postgres:
         cells: [stand_empty_table_under_chunk_by_days_postgres]
@@ -4188,7 +4188,7 @@ seeds:
     class: "RIVET_LOAD_WAREHOUSE_UNAVAILABLE is an environment code, so its exit is decided by the words of its message: a BigQuery HTTP 429/5xx that outlasts the retries, and a job failed with a retryable reason, exit 1 instead of 2"
     history: "2026-10-28 - found while fixing #707: the code existed for the REST layer's transient replies but its exit followed the text, which names no transient word, so a scheduler never retried it"
     scope: source
-    patch: transient-warehouse-code-exits-by-text/shared.patch
+    switch: transient-warehouse-code-exits-by-text
     engines:
       postgres:
         na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
@@ -4354,10 +4354,10 @@ seeds:
       postgres:
         na: "a PostgreSQL image is whole or key-only on deletes, never partial: the stdout loop prints key-only deletes as before (the_ndjson_driver_still_prints_whole_unlisted_and_key_only_images)"
       mysql:
-        patch: cdc-stdout-partial-image/shared.patch
+        switch: cdc-stdout-partial-image
         cells: [cdc_to_stdout_refuses_a_partial_image_mysql, "lib:the_ndjson_driver_refuses_a_partial_image_by_code_and_keeps_the_checkpoint", "lib:the_ndjson_driver_refuses_a_partial_open_time_image_before_reading"]
       mssql:
-        patch: cdc-stdout-partial-image/mssql.patch
+        switch: cdc-stdout-partial-image
         cells: [cdc_to_stdout_refuses_a_partial_image_mssql]
       mongo:
         na: "every MongoDB image is the fixed pair [_id, document] under the two IMAGE_NAMES (mongo/cdc.rs), so its values and its names cannot differ in length"
@@ -4557,7 +4557,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: column-grants-reread-on-a-cached-session/mysql.patch
+        switch: column-grants-reread-on-a-cached-session
         cells: [a_database_level_revoke_after_an_earlier_re_read_stops_an_open_run_mysql, a_default_role_taken_away_after_an_earlier_re_read_stops_an_open_run_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4861,7 +4861,7 @@ seeds:
     class: "a run whose terminal manifest.json write failed is recorded `success` in the run journal and on the run card, because the journal row and the card are finished before the manifest is written and the failed status is set only afterwards"
     history: "found 2026-10-30 by a rivet-verifier probe (manifest.json a directory: exit non-zero, ledger and metrics failed, `rivet journal` success with no error, a multi-export card still the success glyph); RED on main 2026-10-30 (journal read back through `rivet journal`, PostgreSQL)"
     scope: source
-    patch: journal-manifest-gap/shared.patch
+    switch: journal-manifest-gap
     engines:
       postgres:
         cells:
@@ -5177,7 +5177,7 @@ seeds:
     class: "a CDC run whose run-status row the state does not take reads its stream and writes anyway, so a load that trusts the ledger cannot tell the run from a finished one"
     history: "found 2026-11-03 by the seam packaging pass (HDW-1): cdc_job begin_run_under_lease was warn-only while batch ledger_begin_run refused; RED on main 2026-11-03 (a CDC run over a state that refuses run_status ended exit 0 with the change written)"
     scope: source
-    patch: cdc-run-without-ledger-row/shared.patch
+    switch: cdc-run-without-ledger-row
     engines:
       postgres:
         cells: [a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_postgres]
@@ -5194,7 +5194,7 @@ seeds:
     class: "a load records a CDC run consumed when the ledger holds no row for it, so the parts the run writes in later rolls are never loaded and the next load prints up to date, exit 0"
     history: "found 2026-11-03 by the seam packaging pass (HDW-1): the second load of a grown CDC run selected [] and recorded it consumed; RED on main 2026-11-03 (the warehouse held ids 1..8 of the source's 1..14)"
     scope: source
-    patch: load-consumes-cdc-run-without-ledger-row/shared.patch
+    switch: load-consumes-cdc-run-without-ledger-row
     engines:
       postgres:
         cells: ["lib:a_load_overlapping_a_cdc_run_with_no_row_delivers_every_part", "lib:a_cdc_run_without_a_row_is_writing_until_a_newer_run_of_its_family_exists"]
@@ -5368,7 +5368,7 @@ seeds:
     class: "the planner accepts a keyset key by a type list kept apart from what the cursor reader can advance: a MySQL BINARY(16), TIME or TINYINT(1) unique key is auto-picked and stops the run with exit 5 after page 0 (exit 0 as a snapshot on one chunk), a PostgreSQL bytea or time and a SQL Server varbinary or time chunk_by_key are accepted, and an MSSQL datetime2(7) chunk_by_key reads microseconds from 100 ns ticks and delivers duplicates with exit 0"
     history: "2026-11-03 - found by the seam packaging (ER-1, ER-3, ER-6, RHS-3): the MSSQL datetime2(7) key re-read the row at the end of every page; fixed by src/source/keyset_key.rs::keyset_key_refusal; owner decision Q11: a one-chunk table is refused too"
     scope: source
-    patch: keyset-key-type-unchecked/shared.patch
+    switch: keyset-key-type-unchecked
     engines:
       postgres:
         cells: [keyset_key_is_refused_postgres_bytea_unique_key, keyset_key_is_refused_postgres_time_unique_key, keyset_key_is_refused_on_a_one_chunk_table_postgres_bytea_unique_key, "lib:a_key_the_seam_admits_is_a_key_the_cursor_renders", "lib:a_keyset_key_the_cursor_cannot_advance_is_refused_whatever_the_table_size"]
@@ -5385,7 +5385,7 @@ seeds:
     class: "rivet init decides which key it scaffolds as a keyset key by a type list of its own instead of the seam the planner calls, so init scaffolds a key the planner refuses (a run that stops at plan) or withholds one the planner admits"
     history: "2026-11-04 - found verifying the keyset-key-type seam PR: init kept is_keysettable_type and per-engine catalog flags that mirrored the planner by hand; init now probes the delivered types and marks not_keyset through keyset_key::column_refusal"
     scope: source
-    patch: keyset-key-init-mirror/shared.patch
+    switch: keyset-key-init-mirror
     engines:
       postgres:
         cells: ["lib:init_and_the_planner_refuse_the_same_keyset_keys"]
@@ -5417,7 +5417,7 @@ seeds:
     class: a destination's named credential signs one leg of the run and another leg signs as the ambient identity, or two named identities are accepted and one is ignored
     history: "2026-11-03 seam packaging HFF-1 and HFF-2: with `credentials_file:` naming a service-account key every BigQuery request of `rivet load` carried the ambient ADC token; an S3 `aws_profile` beside `access_key_env` and `secret_key_env` signed with the profile alone and `rivet check` exited 0"
     scope: destination
-    patch: destination-credential-read-by-one-leg/shared.patch
+    switch: destination-credential-read-by-one-leg
     engines:
       local:
         na: "the seed edits the BigQuery token source and the credential chooser; a local directory names no credential"
@@ -5614,7 +5614,7 @@ seeds:
       mongo:
         na: "the seed removes an exemption that only an Oracle NUMBER held as exact text uses; MongoDB pages by _id and has no chunk_by_key"
       oracle:
-        patch: keyset-key-oracle-exact-number-refused/oracle.patch
+        switch: keyset-key-oracle-exact-number-refused
         cells: [a_bare_number_keyset_key_delivers_the_seeded_ids_once_oracle, keyset_over_a_bare_number_pk_reads_every_row_once, "lib:a_number_held_as_exact_text_keys_a_seek_on_oracle_alone"]
 
   - name: keyset-key-oracle-inexact-number-admitted
@@ -5631,7 +5631,7 @@ seeds:
       mongo:
         na: "the seed drops the Oracle catalog fact about a NUMBER's scale; MongoDB pages by _id and has no chunk_by_key"
       oracle:
-        patch: keyset-key-oracle-inexact-number-admitted/oracle.patch
+        switch: keyset-key-oracle-inexact-number-admitted
         cells: [a_binary_double_a_float_a_scaled_number_and_a_local_time_zone_keyset_key_stay_refused_oracle, "lib:an_oracle_number_keys_a_seek_exactly_when_the_catalog_filter_it_replaced_admitted_it", "lib:a_catalog_number_with_a_scale_or_a_float_is_inexact_and_nothing_else"]
 
   - name: keyset-key-oracle-override-lifts-the-catalog-fact
@@ -5648,7 +5648,7 @@ seeds:
       mongo:
         na: "the seed edits an Oracle-only early return; MongoDB pages by _id and has no chunk_by_key"
       oracle:
-        patch: keyset-key-oracle-override-lifts-the-catalog-fact/oracle.patch
+        switch: keyset-key-oracle-override-lifts-the-catalog-fact
         cells: [a_timestamp_9_keyset_key_under_the_timestamp_ns_override_stays_refused_oracle, a_scaled_number_a_float_and_a_negative_scale_keyset_key_stay_refused_under_a_columns_override_oracle, "lib:an_oracle_key_the_catalog_declares_wider_is_refused_whatever_it_is_delivered_as", "lib:an_oracle_column_the_catalog_declares_wider_is_refused_whatever_it_is_delivered_as"]
 
   - name: keyset-key-refuses-what-main-paged-correctly
@@ -5657,7 +5657,7 @@ seeds:
     scope: source
     engines:
       postgres:
-        patch: keyset-key-refuses-what-main-paged-correctly/postgres.patch
+        switch: keyset-key-refuses-what-main-paged-correctly
         cells: [a_jsonb_keyset_key_delivers_the_seeded_ids_once_postgres, "lib:json_keys_a_seek_on_postgres_alone", "lib:a_key_the_seam_admits_is_a_key_the_cursor_renders"]
       mysql:
         na: "the seed re-refuses a PostgreSQL jsonb or an Oracle composite FLOAT; a MySQL JSON key is refused on main and on this branch"
@@ -5666,14 +5666,14 @@ seeds:
       mongo:
         na: "the seed re-refuses a PostgreSQL jsonb or an Oracle composite FLOAT; MongoDB pages by _id and has no chunk_by_key"
       oracle:
-        patch: keyset-key-refuses-what-main-paged-correctly/oracle.patch
+        switch: keyset-key-refuses-what-main-paged-correctly
         cells: [a_float_and_a_scaled_number_composite_keyset_key_deliver_the_seeded_ids_once_oracle, "lib:a_composite_oracle_key_refuses_a_finer_timestamp_and_keeps_an_inexact_number", "lib:an_inexact_oracle_number_is_refused_as_a_single_key_alone"]
 
   - name: keyset-key-composite-ignores-the-catalog-fact
     class: "the composite keyset key check does not read the catalog fact the single-key check reads, so a composite key whose second column is a TIMESTAMP(7..9) (Oracle) or a datetime2(7) (SQL Server) passes check and pages on microseconds: duplicate rows with exit 0 (53 rows for 40 distinct ids on Oracle)"
     history: "2026-11-06 - found re-verifying the keyset-key-type seam PR: main delivered 53 rows for 40 ids on an Oracle composite TIMESTAMP(9) key; the composite check now passes the catalog fact into the same function"
     scope: source
-    patch: keyset-key-composite-ignores-the-catalog-fact/shared.patch
+    switch: keyset-key-composite-ignores-the-catalog-fact
     engines:
       postgres:
         na: "no PostgreSQL catalog fact says a column holds more than it delivers; the composite check has nothing to omit"
@@ -5691,9 +5691,9 @@ seeds:
     history: "issue #789; RED on main 2026-11-06 on Linux (a certificate from a CA installed through SSL_CERT_FILE was accepted with ca_file naming another CA, PostgreSQL, MySQL and SQL Server); the cell reads the system store through SSL_CERT_FILE, so it runs on Linux stands only; the mysql and mssql seeds restore the registry driver in place of the rivet-lab fork"
     scope: source
     platform: linux
-    patch: ca-file-second-trust-anchor/postgres.patch
     engines:
       postgres:
+        switch: ca-file-second-trust-anchor
         cells: [postgres_system_store_is_not_a_second_anchor]
       mysql:
         patch: ca-file-second-trust-anchor/mysql.patch
@@ -5868,7 +5868,7 @@ seeds:
     class: "`rivet init` writes a table or column name holding a line break inside the folded `query: >` block, and a folded block turns the break plus the next line's indent into one space: the scaffold exports a different table (a twin named with a space) with every check green"
     history: "audit 2026-11-08 finding H5-F1 (hunt 5, `rivet init` on a PostgreSQL and a MySQL table named with a line break); RED on main 2026-11-10 (`a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names`: the scaffold of table \"nl<LF>      tab\" does not parse back to that relation)"
     scope: source
-    patch: init-name-folded-into-query/shared.patch
+    switch: init-name-folded-into-query
     engines:
       postgres:
         cells: ["lib:a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names"]
@@ -5984,15 +5984,15 @@ seeds:
     scope: source
     engines:
       postgres:
-        patch: cursor-nullability-claimed-without-the-table-catalog/postgres.patch
+        switch: cursor-nullability-claimed-without-the-table-catalog
         cells: [a_view_over_a_not_null_cursor_delivers_once_postgres]
       mysql:
         na: "the MySQL NOT NULL column flag is exact for an expression over NOT NULL columns and for a view, so the claim needs no catalog confirmation"
       mssql:
-        patch: cursor-nullability-claimed-without-the-table-catalog/mssql.patch
+        switch: cursor-nullability-claimed-without-the-table-catalog
         cells: [an_expression_over_a_not_null_cursor_delivers_once_mssql]
       oracle:
-        patch: cursor-nullability-claimed-without-the-table-catalog/oracle.patch
+        switch: cursor-nullability-claimed-without-the-table-catalog
         cells: [an_expression_over_a_not_null_cursor_delivers_once_oracle]
       mongo:
         na: "a MongoDB export has no incremental cursor_column: mode full only"

@@ -55,7 +55,11 @@ pub(super) fn writers_at_record(
 /// The runs the bucket says may be writing: live `running` markers, and the CDC runs no ledger row accounts for.
 pub(super) fn bucket_writers(state: Option<&StateStore>, keyed: &Keyed) -> RunIds {
     let mut writers = load::reconcile::active_running_run_ids(keyed);
-    writers.extend(unlisted_cdc_runs(state, keyed));
+    writers.extend(seeded!(
+        "load-consumes-cdc-run-without-ledger-row",
+        RunIds::new(),
+        unlisted_cdc_runs(state, keyed)
+    ));
     writers
 }
 

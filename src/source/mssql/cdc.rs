@@ -880,7 +880,16 @@ impl MssqlChangeStream {
             crate::source::cdc::spill::decode_event,
             &max_lsn.as_deref().unwrap_or(""),
         )?;
-        self.pending.extend(evs);
+        self.pending.extend(seeded!(
+            "committed-every-event",
+            evs.into_iter()
+                .map(|mut e| {
+                    e.committed = true;
+                    e
+                })
+                .collect::<Vec<_>>(),
+            evs
+        ));
         self.spooled = spooled;
         match max_lsn {
             // Advance the internal cursor to @to; the next poll reads past it.
@@ -904,6 +913,9 @@ impl MssqlChangeStream {
 impl ChangeStream for MssqlChangeStream {
     fn row_image(&mut self, _tables: &[String]) -> crate::source::cdc::RowImage {
         use crate::source::cdc::RowImage;
+        if seeded!("cdc-stdout-partial-image", _tables.is_empty(), false) {
+            return RowImage::Whole;
+        }
         let sql = row_image_sql(&self.capture_instance);
         let Self { rt, client, .. } = self;
         let rows = rt.block_on(async { client.simple_query(sql).await?.into_first_result().await });

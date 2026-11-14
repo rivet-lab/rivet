@@ -626,6 +626,16 @@ pub(crate) fn run_to_files(
                 // forever, and duplicate the captured rows on every scheduler cycle.
                 let committed = ev.committed;
                 let commit_at = committed.then(|| ev.position.clone());
+                seeded!(
+                    "cdc-roll-checkpoints-its-trigger",
+                    {
+                        if committed {
+                            last_commit = Some(ev.position.clone());
+                            unacked_commit = true;
+                        }
+                    },
+                    ()
+                );
                 let mut buffered = false;
                 // Routing is a BLOCK, not a `continue`: the soft cap below must run
                 // for every event, because a commit boundary is a STREAM property

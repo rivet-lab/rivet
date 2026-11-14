@@ -388,7 +388,15 @@ pub fn check(
 ) -> Result<bool> {
     let config = Config::load_with_params(config_path, params)?;
 
-    let declared = crate::config::declared_exports(&config, export_name)?;
+    let declared = if seeded!(
+        "check-reads-declared-list-not-run-set",
+        export_name.is_none(),
+        false
+    ) {
+        config.exports.clone()
+    } else {
+        crate::config::declared_exports(&config, export_name)?
+    };
     let exports: Vec<&ExportConfig> = declared.iter().collect();
 
     // A preflight must never bless a config the RUNNER refuses.

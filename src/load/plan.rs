@@ -487,6 +487,10 @@ fn table_load_prefix(base_uri: &str, table: &str) -> Result<String> {
 fn load_block(cfg: &crate::config::Config) -> Result<crate::config::load::LoadSection> {
     match cfg.load.clone() {
         Some(load) => Ok(load),
+        None if seeded!("load-block-missing-uncoded", true, false) => Err(anyhow::Error::msg(
+            "config has no top-level `load:` block — add `load: { target, ... }` to load into a \
+             warehouse",
+        )),
         None => crate::rivet_bail!(
             crate::error::codes::LOAD_BLOCK_MISSING,
             "config has no top-level `load:` block — add `load: {{ target, ... }}` to load into a \

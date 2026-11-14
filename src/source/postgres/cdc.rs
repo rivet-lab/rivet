@@ -872,6 +872,16 @@ impl PgChangeStream {
                         // #158: commit LSN on all, committed on the transaction's LAST
                         // event — on disk when it spilled (`TxBuffer::close_transaction`).
                         let (head, tail) = tx.close_transaction(&commit, &lsn)?;
+                        let head = seeded!(
+                            "committed-every-event",
+                            head.into_iter()
+                                .map(|mut e| {
+                                    e.committed = true;
+                                    e
+                                })
+                                .collect::<Vec<_>>(),
+                            head
+                        );
                         self.owed_through = owed_after_yield(
                             self.owed_through,
                             commit_lsn,
@@ -1776,6 +1786,23 @@ pub(crate) fn parse_test_decoding(
         ChangeOp::Delete => (Some(cols), None, Some(names), None),
         ChangeOp::Update => {
             let (before, before_names) = old.unzip();
+            let (before, before_names) = seeded!(
+                "absent-old-cell-read-as-moved-key",
+                (
+                    before.zip(before_names).map(|(v, bn)| {
+                        names
+                            .iter()
+                            .map(|n| {
+                                bn.iter()
+                                    .position(|b| b == n)
+                                    .map_or(RivetValue::Null, |i| v[i].clone())
+                            })
+                            .collect::<Vec<RivetValue>>()
+                    }),
+                    None
+                ),
+                (before, before_names)
+            );
             (before, Some(cols), Some(names), before_names)
         }
         ChangeOp::Insert => (None, Some(cols), Some(names), None),

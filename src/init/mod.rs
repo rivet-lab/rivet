@@ -567,14 +567,21 @@ pub(super) fn mark_keyset_refusals(
     declared_wider: &[(String, crate::source::keyset_key::Wider)],
 ) {
     for c in columns {
-        c.not_keyset = crate::source::keyset_key::column_refusal(
-            source,
-            mappings,
-            declared_wider,
-            crate::source::keyset_key::KeyShape::Single,
-            &c.name,
-        )
-        .is_some();
+        c.not_keyset = seeded!(
+            "keyset-key-init-mirror",
+            mappings.iter().any(|m| {
+                m.column_name == c.name
+                    && matches!(m.rivet_type, crate::types::RivetType::Decimal { .. })
+            }),
+            crate::source::keyset_key::column_refusal(
+                source,
+                mappings,
+                declared_wider,
+                crate::source::keyset_key::KeyShape::Single,
+                &c.name,
+            )
+            .is_some()
+        );
     }
 }
 

@@ -559,7 +559,10 @@ fn stemmed(stem: Option<&str>, name: &str) -> String {
 fn mode_segment(info: &TableInfo, source_type: &str, mode: &str) -> String {
     let seg = export_segment(info, source_type);
     if mode == "cdc" {
-        format!("{seg}{CDC_NAME_SUFFIX}")
+        format!(
+            "{seg}{}",
+            seeded!("init-cdc-shares-batch-name", "", CDC_NAME_SUFFIX)
+        )
     } else {
         seg
     }
@@ -700,11 +703,14 @@ fn quote_ident(part: &str, source_type: &str) -> String {
 
 /// The `query:` lines reading `col_list` from `relation`: a folded block, or one double-quoted scalar when a name holds a character the fold would rewrite.
 fn export_query_lines(col_list: &str, relation: &str) -> Vec<String> {
-    if col_list
-        .chars()
-        .chain(relation.chars())
-        .any(is_yaml_special)
-    {
+    if seeded!(
+        "init-name-folded-into-query",
+        false,
+        col_list
+            .chars()
+            .chain(relation.chars())
+            .any(is_yaml_special)
+    ) {
         return vec![format!(
             "    query: {}",
             yaml_double_quote(&format!("SELECT {col_list} FROM {relation}"))
@@ -1365,7 +1371,11 @@ fn cdc_export_lines(
     let mut lines = vec![
         format!(
             "  - name: {}",
-            yaml_quote_if_needed(&format!("{}{CDC_NAME_SUFFIX}", info.table))
+            yaml_quote_if_needed(&format!(
+                "{}{}",
+                info.table,
+                seeded!("init-cdc-shares-batch-name", "", CDC_NAME_SUFFIX)
+            ))
         ),
         "    # change data capture — reads the transaction log (grants: docs/reference/cdc.md)"
             .to_string(),
