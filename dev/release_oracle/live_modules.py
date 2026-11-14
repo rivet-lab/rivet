@@ -191,11 +191,11 @@ def part_filter(expr: str, part: str, table: list[tuple[str, str, str]]) -> str:
     return f"({expr}) & test(/::({names})$/)" if part == DEVBOX else f"({expr}) - test(/::({names})$/)"
 
 
-def part_plan(table: list[tuple[str, str, str]], modules: list[str], part: str, gone: set[str], ded_modules: set[str],
+def part_plan(table: list[tuple[str, str, str]], modules: list[str], part: str, gone: set[str], dedicated_modules: set[str],
               shard: tuple[int, int] | None = None) -> dict[str, list[str]]:
     """The tests each of `modules` runs in `part`, minus the dedicated modules and the tests in `gone`; under `shard` (i, n) the i-th slice of those modules only."""
     own = part_tests(part, table)
-    plan = {m: sorted(name for mod, name, _ in table if mod == m and name in own and name not in gone) for m in modules if m not in ded_modules}
+    plan = {m: sorted(name for mod, name, _ in table if mod == m and name in own and name not in gone) for m in modules if m not in dedicated_modules}
     plan = {m: names for m, names in plan.items() if names}
     if shard is not None:
         keep = slice_modules({m: len(names) for m, names in plan.items()}, shard[1])[shard[0] - 1]
@@ -203,11 +203,11 @@ def part_plan(table: list[tuple[str, str, str]], modules: list[str], part: str, 
     return plan
 
 
-def coverage_problems(table: list[tuple[str, str, str]], modules: list[str], ded_modules: set[str], ded_tests: set[str], slices: int) -> list[str]:
+def coverage_problems(table: list[tuple[str, str, str]], modules: list[str], dedicated_modules: set[str], dedicated_tests: set[str], slices: int) -> list[str]:
     """Live tests that run in no place or in two: a dedicated test must run in no live part, every other one in exactly one of the devbox part and the hosted slices."""
     runs: dict[tuple[str, str], int] = {}
-    plans = [part_plan(table, modules, DEVBOX, set(ded_tests), ded_modules)] + [
-        part_plan(table, modules, HOSTED, set(ded_tests), ded_modules, (i, slices)) for i in range(1, slices + 1)]
+    plans = [part_plan(table, modules, DEVBOX, set(dedicated_tests), dedicated_modules)] + [
+        part_plan(table, modules, HOSTED, set(dedicated_tests), dedicated_modules, (i, slices)) for i in range(1, slices + 1)]
     for plan in plans:
         for m, names in plan.items():
             for n in names:
@@ -216,7 +216,7 @@ def coverage_problems(table: list[tuple[str, str, str]], modules: list[str], ded
     for mod, name, _ in table:
         if mod not in modules:
             continue
-        want = 0 if mod in ded_modules or name in ded_tests else 1
+        want = 0 if mod in dedicated_modules or name in dedicated_tests else 1
         if runs.get((mod, name), 0) != want:
             out.append(f"{mod}::{name} runs {runs.get((mod, name), 0)} time(s) in the live parts, wants {want}")
     return out
@@ -229,9 +229,9 @@ def verify_live_modules(led: Ledger, engines: list[str] | None = None, part: str
     sel = select_modules(engines, modules, live_owners.module_owners(), cfg("engines").split())
     owners = frozenset(sel.engines)
     table = live_test_table()
-    ded_modules, ded_tests = dedicated_live()
-    gone = set(RAN_LIVE_TESTS) | ded_tests
-    plan = part_plan(table, list(sel.run), part, gone, ded_modules | set(RAN_LIVE_MODULES), shard)
+    dedicated_modules, dedicated_tests = dedicated_live()
+    gone = set(RAN_LIVE_TESTS) | dedicated_tests
+    plan = part_plan(table, list(sel.run), part, gone, dedicated_modules | set(RAN_LIVE_MODULES), shard)
     run_modules = list(plan)
     if sel.narrowed:
         led.skip(sel.line())
@@ -242,7 +242,7 @@ def verify_live_modules(led: Ledger, engines: list[str] | None = None, part: str
     if not run_modules:
         led.skipped("-", "-", label, "-", f"{label}: no live test left for this part and slice", cause=SkipCause.DESIGN)
         return
-    left, expr = derived_filter(run_modules, set(RAN_LIVE_MODULES) | ded_modules, gone, owners)
+    left, expr = derived_filter(run_modules, set(RAN_LIVE_MODULES) | dedicated_modules, gone, owners)
     expr = part_filter(expr, part, table)
     excl = [n for n in exclusive_tests(set(run_modules)) if n in {t for names in plan.values() for t in names}]
     env, again = live_modules_env(os.environ.get("RIVET_CDC_STATE_URL") or os.environ.get("RIVET_GATE_STATE_URL") or "")
@@ -326,15 +326,15 @@ def self_test() -> None:
     assert part_tests(HOSTED, real) | part_tests(DEVBOX, real) == {n for _, n, _ in real} and not part_tests(HOSTED, real) & part_tests(DEVBOX, real), "a live test runs in neither part or in both"
     assert part_tests(DEVBOX, real), "no live test needs the devbox half"
     real_mods = [m for m in live_suite_modules() if m not in EXCLUDED]
-    real_ded = dedicated_live()
+    real_dedicated = dedicated_live()
     for n in (1, 3, 5):
-        bad = coverage_problems(real, real_mods, *real_ded, n)
+        bad = coverage_problems(real, real_mods, *real_dedicated, n)
         assert not bad, f"{len(bad)} live test(s) run in no part or in two with {n} slice(s): {bad[:5]}"
-    ded_m, ded_t = dedicated_live({"a.py": 'X = ("same_named_configs_share_a_postgres_state_cdc_cycle",)\nrun_rig_tests(led, "s", X)\nother("live_cdc")\n'})
-    assert ded_t == {"same_named_configs_share_a_postgres_state_cdc_cycle"} and not ded_m, (ded_m, ded_t)
+    dedicated_m, dedicated_t = dedicated_live({"a.py": 'X = ("same_named_configs_share_a_postgres_state_cdc_cycle",)\nrun_rig_tests(led, "s", X)\nother("live_cdc")\n'})
+    assert dedicated_t == {"same_named_configs_share_a_postgres_state_cdc_cycle"} and not dedicated_m, (dedicated_m, dedicated_t)
     assert dedicated_live({"a.py": 'RAN_LIVE_TESTS.add(T)\nT = "roast_pg_cdc_bounded_on_a_standby_fails_loud"\n'})[1] == {"roast_pg_cdc_bounded_on_a_standby_fails_loud"}, "a registration through a named constant is not read"
-    real_ded_modules, real_ded_tests = dedicated_live()
-    held, ghost = sorted(real_ded_tests)[0], "a_test_no_source_names_registered_at_run_time"
+    real_dedicated_modules, real_dedicated_tests = dedicated_live()
+    held, ghost = sorted(real_dedicated_tests)[0], "a_test_no_source_names_registered_at_run_time"
     saved_tests, saved_modules = set(RAN_LIVE_TESTS), set(RAN_LIVE_MODULES)
     try:
         for ran, red in (({held}, False), ({held, ghost}, True)):
