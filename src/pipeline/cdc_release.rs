@@ -66,7 +66,17 @@ impl FirstRun {
         match CdcEngine::from(config.source.source_type) {
             CdcEngine::Postgres => {
                 let held = HeldConnection(std::cell::RefCell::new(meta?));
-                Self::proven(config, export, state, config_path, Some(&held))
+                seeded!(
+                    "cdc-first-run-probe-opens-its-own-connection",
+                    {
+                        let own = PgSlots {
+                            url: config.source.resolve_url().ok()?,
+                            tls: config.source.tls.as_ref(),
+                        };
+                        Self::proven(config, export, state, config_path, Some(&own))
+                    },
+                    Self::proven(config, export, state, config_path, Some(&held))
+                )
             }
             _ => Self::proven(config, export, state, config_path, None),
         }
