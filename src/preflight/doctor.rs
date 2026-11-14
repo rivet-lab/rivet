@@ -273,7 +273,12 @@ pub fn doctor(config_path: &str, json: bool) -> Result<()> {
     }
 
     let mut seen_destinations: Vec<String> = Vec::new();
-    for export in &crate::config::declared_exports(&config, None)? {
+    let doctored = if seeded!("check-reads-declared-list-not-run-set", true, false) {
+        config.exports.clone()
+    } else {
+        crate::config::declared_exports(&config, None)?
+    };
+    for export in &doctored {
         let dest_key = super::destination_identity(&export.destination);
         if seen_destinations.contains(&dest_key) {
             continue;

@@ -280,7 +280,12 @@ impl StateStore {
                 unit.unwrap_or("").into(),
                 serde_json::to_string(primary_key)?.into(),
                 now.into(),
-                source.into(),
+                seeded!(
+                    "load-spec-last-writer-of-one-name",
+                    source.get(..0).unwrap_or(source),
+                    source
+                )
+                .into(),
             ],
         )?;
         Ok(())
@@ -295,7 +300,11 @@ impl StateStore {
         export_name: &str,
         unit: Option<&str>,
     ) -> Result<String> {
-        if let Some(source) = configured {
+        if let Some(source) = seeded!(
+            "load-spec-read-under-an-unresolved-source",
+            configured.or(Some(String::new())),
+            configured
+        ) {
             return Ok(source);
         }
         let mut sources = self.query(

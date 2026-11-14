@@ -487,7 +487,14 @@ fn build_column(
             let mut b = TimestampNanosecondBuilder::with_capacity(rows.len());
             for r in rows {
                 match r.get::<Option<OracleTimestamp>>(idx).ora()? {
-                    Some(t) => b.append_value(timestamp_nanos(&t, name)?),
+                    Some(t) => match seeded!(
+                        "mssql-ns-override-out-of-range-null",
+                        timestamp_nanos(&t, name).ok(),
+                        Some(timestamp_nanos(&t, name)?)
+                    ) {
+                        Some(n) => b.append_value(n),
+                        None => b.append_null(),
+                    },
                     None => b.append_null(),
                 }
             }

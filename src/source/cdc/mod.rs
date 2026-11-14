@@ -712,7 +712,11 @@ pub(crate) fn run(
     if max_events == Some(0) {
         return Ok(());
     }
-    if let RowImage::Partial { why } = stream.row_image(&tables) {
+    if let RowImage::Partial { why } = seeded!(
+        "cdc-stdout-partial-image",
+        RowImage::Whole,
+        stream.row_image(&tables)
+    ) {
         return Err(open_partial_image_refusal(stream.engine(), &why));
     }
     let mut last_commit: Option<Position> = None;
@@ -764,7 +768,11 @@ fn emit_ndjson(
         // corruption). An uncaptured table's poison was already dropped above.
         ev.raise_poison()?;
         ev.raise_before_poison()?;
-        if let Some((n, names)) = named_image_arity_mismatch(&ev) {
+        if let Some((n, names)) = seeded!(
+            "cdc-stdout-partial-image",
+            None,
+            named_image_arity_mismatch(&ev)
+        ) {
             return Err(partial_image_refusal(&ev.schema, &ev.table, n, names));
         }
         println!("{}", ndjson_line(&ev));

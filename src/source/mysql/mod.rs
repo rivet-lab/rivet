@@ -146,7 +146,14 @@ impl MysqlSource {
     /// first connection, by statements that leave a ProxySQL session multiplexed: no extra dial.
     fn connect_own(url: &str, tls: Option<&TlsConfig>) -> Result<Self> {
         let pool = connect_pool(url, tls)?;
-        let proxy_kind = proxy::proxy_kind_of(url, &pool);
+        let proxy_kind = seeded!(
+            "mysql-proxy-probe-dials-its-own-connection",
+            match dial_conn(url, tls) {
+                Ok(mut probe) => proxy::detect_proxy_on_conn(&mut probe),
+                Err(_) => proxy::proxy_kind_of(url, &pool),
+            },
+            proxy::proxy_kind_of(url, &pool)
+        );
         Ok(Self::with_kind(pool, true, proxy_kind))
     }
 
@@ -528,7 +535,7 @@ fn build_mysql_ssl_opts(cfg: &TlsConfig) -> SslOpts {
 /// elsewhere) shifts every value by the server's offset with exit 0. Only the offset decides: a
 /// server already in UTC reads right whatever the session says.
 fn refuse_a_session_off_utc(zone: &str, offset_s: i64) -> Result<()> {
-    if offset_s == 0 {
+    if offset_s == 0 || seeded!("mysql-session-off-utc-read", !zone.is_empty(), false) {
         return Ok(());
     }
     let hours = offset_s as f64 / 3600.0;

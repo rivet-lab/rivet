@@ -119,18 +119,21 @@ pub(super) fn run_cdc_export(
         &export.destination,
         &run_id,
     ) {
-        let summary = cdc_summary(
-            &run_id,
-            export,
-            "failed",
-            0,
-            0,
-            0,
-            0,
-            started.elapsed().as_millis() as i64,
-            Some(crate::redact::redact_error(&e)),
-        );
-        return (Err(e), summary);
+        if seeded!("cdc-run-without-ledger-row", false, true) {
+            let summary = cdc_summary(
+                &run_id,
+                export,
+                "failed",
+                0,
+                0,
+                0,
+                0,
+                started.elapsed().as_millis() as i64,
+                Some(crate::redact::redact_error(&e)),
+            );
+            return (Err(e), summary);
+        }
+        log::warn!("{e:#}");
     }
 
     let read_bytes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));

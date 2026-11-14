@@ -772,7 +772,11 @@ impl Source for OracleSource {
             .take(projection.native.len())
             .find(|m| m.name() == column)
             .map(|m| m.nullable());
-        if described != Some(true) {
+        if seeded!(
+            "cursor-nullability-claimed-without-the-table-catalog",
+            true,
+            described != Some(true)
+        ) {
             return Ok(described);
         }
         let Some(parts) = crate::sql::single_relation(query, false).filter(|p| p.len() <= 2) else {
@@ -860,6 +864,9 @@ pub(crate) fn is_inexact_number_type(
     precision: Option<u32>,
     scale: Option<i32>,
 ) -> bool {
+    if seeded!("keyset-key-oracle-inexact-number-admitted", true, false) {
+        return false;
+    }
     match data_type {
         "FLOAT" => true,
         "NUMBER" => scale != Some(0) && (precision.is_some() || scale.is_some()),

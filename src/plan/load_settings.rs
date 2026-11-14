@@ -77,7 +77,11 @@ pub fn load_mode_of(
         ExportMode::Incremental => LoadMode::Incremental,
         // only the keys past the last run's: a delta, never the whole table
         ExportMode::Full | ExportMode::Chunked
-            if crate::plan::build::continued_key(config, export).is_some() =>
+            if seeded!(
+                "delta-run-loaded-as-overwrite",
+                false,
+                crate::plan::build::continued_key(config, export).is_some()
+            ) =>
         {
             LoadMode::Incremental
         }

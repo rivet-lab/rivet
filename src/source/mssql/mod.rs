@@ -890,7 +890,7 @@ impl Source for MssqlSource {
                 .iter()
                 .find(|r| r.get::<&str, _>("name") == Some(column))
                 .and_then(|r| r.get::<bool, _>("is_nullable"));
-            if described != Some(true) {
+            if seeded!("cursor-nullability-claimed-without-the-table-catalog", true, described != Some(true)) {
                 return Ok(described);
             }
             let Some((schema, table)) = parse_mssql_simple_from_table(query) else {
@@ -1055,7 +1055,13 @@ impl MssqlSource {
             .query_scalar(SERVER_COUNTERS_GRANTED)
             .ok()
             .flatten()
-            .is_some_and(|v| v.trim() == "1");
+            .is_some_and(|v| {
+                seeded!(
+                    "mssql-denied-counters-queried",
+                    v.trim() != "x",
+                    v.trim() == "1"
+                )
+            });
         self.server_counters = Some(readable);
         readable
     }

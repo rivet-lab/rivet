@@ -398,6 +398,9 @@ impl<B: CloudBackend> CloudDestination<B> {
 impl<B: CloudBackend> CloudDestination<B> {
     /// `err` as `RIVET_DEST_CONTAINER_NOT_FOUND` when the operation failed with a kind the backend reports an absent container by and the bucket itself is absent now (it may have gone since it last answered); any other error unchanged.
     fn absent_container_or(&self, err: anyhow::Error) -> anyhow::Error {
+        if seeded!("missing-bucket-uncoded-on-write", true, false) {
+            return err;
+        }
         match write_error_may_mean_absent_container::<B>(&err)
             .then(|| self.refuse_an_absent_container())
         {

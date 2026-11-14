@@ -618,7 +618,15 @@ fn batch_plans(
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
     let run_set = crate::pipeline::run_set::RunSet::select(&config, export_name)?;
-    let selected = run_set.declared();
+    let selected = if seeded!(
+        "check-reads-declared-list-not-run-set",
+        export_name.is_none(),
+        false
+    ) {
+        config.exports.as_slice()
+    } else {
+        run_set.declared()
+    };
     let mut probe = if config.source.columns_from_grants() {
         Some(
             crate::source::create_source(&config.source)

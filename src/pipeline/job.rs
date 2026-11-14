@@ -1069,6 +1069,12 @@ fn promotes_to_success(current_status: &str) -> bool {
     current_status == "running"
 }
 
+/// Fail `summary` for the manifest gap `why`.
+fn fail_for_manifest_gap(summary: &mut RunSummary, why: &str) {
+    summary.status = "failed".into();
+    summary.error_message = Some(crate::redact::redact_secrets(why));
+}
+
 /// Does the `running` marker written under `opened` survive this run with nothing replacing it?
 fn marker_outlived_its_run(prefix_left_alone: bool, opened: &str, finished: &str) -> bool {
     prefix_left_alone || opened != finished
@@ -1301,9 +1307,9 @@ fn execute_resolved_plan(
 
     let finalized = finalize_manifest(plan, tail.family, state, &summary, tail.kind);
     let manifest_gap = finalized.gap;
-    if let Some(why) = &manifest_gap {
-        summary.status = "failed".into();
-        summary.error_message = Some(crate::redact::redact_secrets(why));
+    let early_gap: &Option<String> = seeded!("journal-manifest-gap", &None, &manifest_gap);
+    if let Some(why) = early_gap {
+        fail_for_manifest_gap(&mut summary, why);
     }
 
     summary.journal.record(RunEvent::RunCompleted {
@@ -1323,6 +1329,10 @@ fn execute_resolved_plan(
 
     summary.print();
     ledger_finish_owned_runs(state, &plan.export_name, &ledger_run_id, &summary);
+    let late_gap: &Option<String> = seeded!("journal-manifest-gap", &manifest_gap, &None);
+    if let Some(why) = late_gap {
+        fail_for_manifest_gap(&mut summary, why);
+    }
     if marker_outlived_its_run(finalized.left_alone, &ledger_run_id, &summary.run_id) {
         super::finalize::retire_running_marker(plan, &ledger_run_id);
     }
@@ -4051,5 +4061,17 @@ mod tests {
         };
         let err = reconcile_run_gate(&summary, Some("source count query failed")).unwrap_err();
         crate::error::assert_coded(&err, "RIVET_RUN_RECONCILE_UNVERIFIED", 1);
+    }
+
+    /// A manifest gap fails the run and carries its reason.
+    #[test]
+    fn a_manifest_gap_fails_the_run_with_its_reason() {
+        let mut summary = RunSummary::default();
+        fail_for_manifest_gap(&mut summary, "manifest gap: part 3 missing");
+        assert_eq!(summary.status, "failed");
+        assert_eq!(
+            summary.error_message.as_deref(),
+            Some("manifest gap: part 3 missing")
+        );
     }
 }
