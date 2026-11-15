@@ -202,6 +202,12 @@ pub trait Destination: Send + Sync {
         )
     }
 
+    /// Delete the staging subtree `_staging/<owner>/` and everything under it; an absent subtree is Ok.
+    fn remove_staged(&self, owner: &str) -> Result<()> {
+        let _ = owner;
+        Ok(())
+    }
+
     /// Delete the object at `key` under the destination prefix; an absent key is Ok.
     fn remove(&self, key: &str) -> Result<()> {
         let _ = key;
@@ -265,6 +271,14 @@ pub fn log_capabilities(
             max_retries,
         );
     }
+}
+
+/// The directory under the destination prefix that holds every run's staging subtree.
+pub const STAGING_DIR: &str = "_staging";
+
+/// Whether `key` lies in a run's staging subtree.
+pub fn is_staged_key(key: &str) -> bool {
+    key.split('/').next() == Some(STAGING_DIR)
 }
 
 pub fn create_destination(config: &DestinationConfig) -> Result<Box<dyn Destination>> {

@@ -29,6 +29,7 @@ mod partition_expand;
 mod plan_cmd;
 pub(crate) mod pool;
 pub(crate) mod progress;
+pub(crate) mod publish;
 mod reconcile_cmd;
 mod repair_cmd;
 pub(crate) mod report;

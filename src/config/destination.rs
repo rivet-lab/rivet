@@ -16,6 +16,10 @@ pub struct DestinationConfig {
     /// the config file, whatever directory rivet is started from (since 0.32; before, it was
     /// relative to the working directory).
     pub path: Option<String>,
+    /// The run that owns this destination's staging subtree `_staging/<owner>/`; set by the run, never by a config file.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub staging_owner: Option<String>,
     pub region: Option<String>,
     pub endpoint: Option<String>,
     pub credentials_file: Option<String>,

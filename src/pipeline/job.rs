@@ -1170,11 +1170,17 @@ fn execute_resolved_plan(
     let rss_sampler = crate::resource::RssPeakSampler::start(rss_before, 100);
     let mut summary = RunSummary::new(plan);
     summary.apply_context = tail.apply_context;
+    let staged_plan = ResolvedRunPlan {
+        destination: super::publish::staged_for(&plan.destination, &summary.run_id),
+        ..plan.clone()
+    };
+    let plan = &staged_plan;
     if let Err(e) = begin_batch_run(state, plan, tail.family, &summary.run_id) {
         rss_sampler.stop();
         let summary = synthetic_failed_summary(&plan.export_name, &e);
         return (Err(e), summary);
     }
+    super::publish::settle(state, &plan.destination);
     let ledger_run_id = summary.run_id.clone();
     capture_open_forensics(plan, state, &mut summary, tail.record_load_spec, &mut meta);
 
@@ -1306,6 +1312,7 @@ fn execute_resolved_plan(
     }
 
     let finalized = finalize_manifest(plan, tail.family, state, &summary, tail.kind);
+    super::publish::close(&plan.destination);
     let manifest_gap = finalized.gap;
     let early_gap: &Option<String> = seeded!("journal-manifest-gap", &None, &manifest_gap);
     if let Some(why) = early_gap {

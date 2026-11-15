@@ -5,6 +5,7 @@ use crate::error::Result;
 
 pub struct LocalDestination {
     base_path: String,
+    owner: String,
 }
 
 impl LocalDestination {
@@ -14,7 +15,18 @@ impl LocalDestination {
             .clone()
             .or_else(|| config.prefix.clone())
             .unwrap_or_else(|| ".".to_string());
-        Ok(Self { base_path })
+        let owner = config
+            .staging_owner
+            .clone()
+            .unwrap_or_else(|| format!("process-{}", std::process::id()));
+        Ok(Self { base_path, owner })
+    }
+
+    /// The staging directory of the run that owns this destination.
+    fn staging_dir(&self) -> PathBuf {
+        Path::new(&self.base_path)
+            .join(super::STAGING_DIR)
+            .join(&self.owner)
     }
 
     /// Join an attacker-influenceable `key` under `base_path` without letting
@@ -80,12 +92,7 @@ fn stage_copy(src: &Path, tmp: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The staging file name for one write of `file_name`.
-///
-/// Unique per process AND per call: two exports in one process can write the
-/// same key concurrently (the parallel runners), and two processes sharing a
-/// prefix certainly do. Still dot-prefixed and still a sibling of the target, so
-/// the rename stays same-filesystem and atomic.
+/// The unique staging file name for one write of `file_name`.
 fn staging_name(file_name: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -123,11 +130,6 @@ impl super::Destination for LocalDestination {
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        // Stage into a dot-prefixed sibling in the target directory (same
-        // filesystem, so the rename is atomic POSIX): a crash mid-copy can
-        // never leave a truncated file at the final key. The temp name is UNIQUE
-        // per writer — a deterministic one is shared by every process writing the
-        // same key into one prefix, and they deleted each other's staged file.
         let file_name = target
             .file_name()
             .ok_or_else(|| {
@@ -138,7 +140,9 @@ impl super::Destination for LocalDestination {
             })?
             .to_string_lossy()
             .into_owned();
-        let tmp = target.with_file_name(staging_name(&file_name));
+        let staging = self.staging_dir();
+        std::fs::create_dir_all(&staging)?;
+        let tmp = staging.join(staging_name(&file_name));
         if let Err(e) = stage_copy(local_path, &tmp) {
             let _ = std::fs::remove_file(&tmp);
             return Err(e);
@@ -179,6 +183,7 @@ impl super::Destination for LocalDestination {
             return Ok(Vec::new());
         }
         let base = Path::new(&self.base_path);
+        let hide_staging = !super::is_staged_key(prefix);
         let mut out = Vec::new();
         let mut stack = vec![root];
         while let Some(dir) = stack.pop() {
@@ -202,7 +207,11 @@ impl super::Destination for LocalDestination {
                 let path = entry.path();
                 let ftype = entry.file_type()?;
                 if ftype.is_dir() {
-                    stack.push(path);
+                    let staging_root =
+                        hide_staging && dir == base && entry.file_name() == super::STAGING_DIR;
+                    if !staging_root {
+                        stack.push(path);
+                    }
                 } else if ftype.is_file() {
                     let m = entry.metadata()?;
                     let rel = path
@@ -245,6 +254,13 @@ impl super::Destination for LocalDestination {
         }
     }
 
+    fn remove_staged(&self, owner: &str) -> Result<()> {
+        let dir = Path::new(&self.base_path)
+            .join(super::STAGING_DIR)
+            .join(owner);
+        Ok(absent_is_removed(std::fs::remove_dir_all(dir))?)
+    }
+
     fn remove(&self, key: &str) -> Result<()> {
         Ok(absent_is_removed(std::fs::remove_file(
             self.safe_join(key)?,
@@ -284,6 +300,7 @@ mod tests {
     fn dest() -> LocalDestination {
         LocalDestination {
             base_path: ".".into(),
+            owner: "test".into(),
         }
     }
 
@@ -337,6 +354,41 @@ mod tests {
     /// Writing into a nested key must auto-create every missing parent
     /// directory — operators rely on this when `prefix` contains date/hour
     /// partitions that do not yet exist.
+    /// A write stages under `_staging/<owner>/`, hidden from the prefix listing, and the owner removes that subtree.
+    #[test]
+    fn a_write_stages_under_the_owner_and_the_owner_removes_it() {
+        use crate::destination::Destination as _;
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = DestinationConfig {
+            path: Some(dir.path().to_string_lossy().into_owned()),
+            staging_owner: Some("run-a".into()),
+            ..Default::default()
+        };
+        let dest = LocalDestination::new(&cfg).unwrap();
+        let leftover = dir.path().join("_staging/run-a/.part.1.tmp");
+        std::fs::create_dir_all(leftover.parent().unwrap()).unwrap();
+        std::fs::write(&leftover, b"x").unwrap();
+        let src = source_file_with(b"payload\n");
+        dest.write(src.path(), "part.csv").unwrap();
+        let keys: Vec<_> = dest
+            .list_prefix("")
+            .unwrap()
+            .into_iter()
+            .map(|m| m.key)
+            .collect();
+        assert_eq!(keys, vec!["part.csv".to_string()]);
+        let staged: Vec<_> = dest
+            .list_prefix("_staging")
+            .unwrap()
+            .into_iter()
+            .map(|m| m.key)
+            .collect();
+        assert_eq!(staged, vec!["_staging/run-a/.part.1.tmp".to_string()]);
+        dest.remove_staged("run-a").unwrap();
+        assert!(!dir.path().join("_staging/run-a").exists());
+        dest.remove_staged("run-a").unwrap();
+    }
+
     #[test]
     fn write_auto_creates_nested_parent_directories() {
         let dir = tempfile::tempdir().unwrap();

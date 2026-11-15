@@ -490,6 +490,7 @@ pub(super) fn check_success_gate_for_resume(
         );
         return Ok(());
     }
+    super::publish::settle(state, &plan.destination);
     match dest.head(SUCCESS_FILENAME)? {
         Some(_) if last_run_failed(state, &plan.export_name)? => Ok(()),
         Some(_) => crate::rivet_bail!(
