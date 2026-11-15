@@ -417,30 +417,17 @@ def _declared_read(root: Path, suffix: str) -> str | None:
 
 
 def manifest_scoped_ids(store: str, bucket: str, prefix: str, work: Path, idc: str) -> str:
-    """Distinct id-set the store DELIVERS per its MANIFESTS (not raw parquet), comma-joined.
+    """Distinct `idc` values (comma-joined) of the parts the s3 store's manifests DECLARE; '' when the store is not s3 or declares nothing.
 
-    For the CDC crash oracle: at cdc_after_flush_before_ack the crashed run's part is durable
-    but UNMANIFESTED (the hook fires BEFORE write_manifest), so a raw `**/*.parquet` id-set is
-    fooled by that orphan — it cannot tell 'recovery re-read id=4' from 'id=4 left as an orphan
-    that rivet load never sees'. Reading only manifest-declared committed parts (what a consumer
-    reads) makes the orphan invisible, so a recovery that re-anchored PAST the un-acked change
-    reads back WITHOUT it. s3 only (the CDC store); '' if mc or a manifest is absent."""
-    if store != "s3" or not have("mc"):
+    The CDC crash oracle reads what a consumer reads: a part flushed before the ack and never
+    manifested is invisible here, so a recovery that re-anchored past the change reads back without it."""
+    if store != "s3":
         return ""
-    dl = work / f"cdcmanifest_{random.randint(0, 32767)}"
-    shutil.rmtree(dl, ignore_errors=True)
-    dl.mkdir(parents=True, exist_ok=True)
-    alias = "rivetcdcmani"
-    run(["mc", "alias", "set", alias, "http://127.0.0.1:9000", MINIO_ACCESS_KEY, MINIO_SECRET_KEY])
-    if not run(["mc", "cp", "--recursive", f"{alias}/{bucket}/{prefix}/", str(dl)]).ok:
+    parts = store_parts(store, bucket, prefix, work)
+    if parts is None:
         return ""
-    parts = _manifest_declared_parts(dl)
-    if not parts:
-        return ""
-    lst = ", ".join(f"'{f}'" for f in parts)
-    return _duckdb_list(
-        f"SELECT string_agg(DISTINCT CAST({idc} AS VARCHAR), ',') FROM read_parquet([{lst}])"
-    )
+    preamble, rel = parts
+    return _duckdb_list(f"{preamble}SELECT string_agg(DISTINCT CAST({idc} AS VARCHAR), ',') FROM {rel}")
 
 
 def _duckdb_json_normalized(sql: str) -> str:
@@ -604,6 +591,37 @@ def store_probe_self_test() -> None:
     cells = sc_load_rows(Proc([], 0, "0\n", ""))
     assert [(c.status, c.detail) for c in cells] == [(Status.FAIL, "empty-destination")], cells
     print("self-test ok: a slow fake-gcs list is retried; a failed list or download raises, never reads as 0 rows")
+
+
+def manifest_scoped_ids_self_test() -> None:
+    """The CDC crash oracle reads the s3 store through DuckDB alone, never `mc`, and only the parts its manifests declare committed."""
+    g = globals()
+    real = {k: g[k] for k in ("_duckdb_list", "run", "have")}
+    asked: list[str] = []
+
+    def fake_duckdb(sql: str) -> str:
+        """The manifest read answers one committed and one pending part; the id read answers a fixed set."""
+        asked.append(sql)
+        if "manifest-" in sql:
+            return json.dumps({"status": "success", "parts": [
+                {"path": "a.parquet", "status": "committed"}, {"path": "orphan.parquet", "status": "pending"}]})
+        return "1,2,4"
+
+    def no_client(*_a, **_k):
+        """Any subprocess call is a dependency on a client the hosted runner does not carry."""
+        raise AssertionError("manifest_scoped_ids must not shell out to a store client")
+
+    try:
+        g.update(_duckdb_list=fake_duckdb, run=no_client, have=lambda _t: False)
+        with tempfile.TemporaryDirectory() as d:
+            ids = manifest_scoped_ids("s3", "b", "p", Path(d), "id")
+            assert manifest_scoped_ids("gcs", "b", "p", Path(d), "id") == ""
+    finally:
+        g.update(real)
+    assert ids == "1,2,4", ids
+    read = asked[-1]
+    assert "s3://b/p/a.parquet" in read and "orphan" not in read, read
+    print("self-test ok: the CDC crash oracle reads manifest-declared s3 parts through DuckDB, with no store client")
 
 
 STORE_HEALTH = {
