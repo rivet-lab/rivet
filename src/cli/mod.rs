@@ -1,18 +1,4 @@
 //! CLI surface for the `rivet` binary.
-//!
-//! `main.rs` only calls [`run_binary`].
-//! Internally the module is split into four single-purpose siblings so the
-//! 900-line monolith stays out of `main.rs`:
-//!
-//! - [`args`] — clap derive types (`Cli`, `Commands`, `StateAction`,
-//!   `PlanFormat`, `ReconcileFormat`); pure grammar, no behavior.
-//! - [`validate`] — cross-flag invariants that clap cannot express.
-//! - [`params`] — `--param KEY=VALUE` parsing and `--source*` resolution.
-//! - [`dispatch`] — the `match` that routes each parsed subcommand to its
-//!   pipeline/init/preflight entry point.
-//!
-//! Each submodule keeps its own unit tests, so the suite is split along the
-//! same seams as the production code.
 
 mod args;
 mod dispatch;
@@ -33,7 +19,6 @@ pub fn run_binary() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let cli = parse_cli();
     let json_errors = cli.json_errors;
-    // Process-wide, so only the binary sets it: a library caller of dispatch keeps the immediate answer.
     crate::state::set_lock_wait(cli.lock_wait);
     if let Err(e) = dispatch(cli) {
         let msg = crate::pipeline::parent_ui::sanitize_terminal(&crate::redact::redact_error(&e));
