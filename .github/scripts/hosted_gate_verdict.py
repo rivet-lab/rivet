@@ -26,7 +26,20 @@ NOT_GREEN = ("FAIL", "INFRA", "SKIP", "KNOWN")
 VERDICT_KIND = "release-oracle-hosted-verdict"
 KEPT = ("at", "sha", "binary", "binary_sha256", "gate", "shard", "config", "dirty", "verdict", "passed", "failed", "skipped", "skipped_env", "stages", "host", "total_min")
 RUN_ENV = {"run_id": "GITHUB_RUN_ID", "run_attempt": "GITHUB_RUN_ATTEMPT", "repository": "GITHUB_REPOSITORY", "ref": "GITHUB_REF",
-           "event": "GITHUB_EVENT_NAME", "workflow_ref": "GITHUB_WORKFLOW_REF"}
+           "ref_name": "GITHUB_REF_NAME", "ref_type": "GITHUB_REF_TYPE", "event": "GITHUB_EVENT_NAME", "workflow_ref": "GITHUB_WORKFLOW_REF",
+           "workflow_sha": "GITHUB_SHA", "server_url": "GITHUB_SERVER_URL"}
+
+
+def run_identity(env: dict[str, str]) -> dict[str, str]:
+    """The identity of this run from `env`: its ref, event, run and the url of the run page; the one reader of GITHUB_*."""
+    gh = {k: env.get(v, "") for k, v in RUN_ENV.items()}
+    gh["run_url"] = f"{gh['server_url']}/{gh['repository']}/actions/runs/{gh['run_id']}" if gh["server_url"] and gh["run_id"] else ""
+    return gh
+
+
+def ref_line(gh: dict[str, str]) -> str:
+    """The summary line that names the ref the run was graded under."""
+    return f"Ref: `{gh.get('ref') or 'unknown'}` ({gh.get('ref_type') or '?'} `{gh.get('ref_name') or '?'}`), event `{gh.get('event') or '?'}`, run {gh.get('run_url') or 'unknown'}"
 
 
 def load_slice(root: Path, index: int) -> tuple[dict | None, str]:
@@ -80,8 +93,8 @@ def problems_of(rec: dict | None, sha: str) -> list[str]:
     return found
 
 
-def render(root: Path, sha: str, slices: int) -> tuple[str, bool]:
-    """The markdown table for every slice 0..`slices` and whether the whole hosted half is green."""
+def render(root: Path, sha: str, slices: int, github: dict[str, str] | None = None) -> tuple[str, bool]:
+    """The markdown table for every slice 0..`slices`, headed by the ref of `github`, and whether the whole hosted half is green."""
     rows, ok = [], True
     for i in range(slices + 1):
         rec, log = load_slice(root, i)
@@ -98,7 +111,7 @@ def render(root: Path, sha: str, slices: int) -> tuple[str, bool]:
         for scenario, c in sorted(scenario_counts(log).items()):
             if any(c[s] for s in NOT_GREEN):
                 rows.append(f"| slice {i}: {scenario} | " + " ".join(f"{s} {c[s]}" for s in NOT_GREEN if c[s]) + " | |")
-    head = [f"### Hosted gate half for {sha[:12]}: {'GREEN' if ok else 'RED'}", "", "| stage / slice | result | detail |", "|---|---|---|"]
+    head = [f"### Hosted gate half for {sha[:12]}: {'GREEN' if ok else 'RED'}", "", *([ref_line(github), ""] if github is not None else []), "| stage / slice | result | detail |", "|---|---|---|"]
     return "\n".join(head + rows) + "\n", ok
 
 
@@ -109,7 +122,7 @@ def verdict_record(root: Path, sha: str, slices: int, env: dict[str, str]) -> di
         rec, _ = load_slice(root, i)
         out.append({"slice": i, "exit_code": load_side(root, i, "exit-code.txt"), "record": None if rec is None else {k: rec.get(k) for k in KEPT}})
     return {"kind": VERDICT_KIND, "schema": 1, "sha": sha, "slices": slices,
-            "github": {k: env.get(v, "") for k, v in RUN_ENV.items()}, "records": out}
+            "github": run_identity(env), "records": out}
 
 
 def _fixture(root: Path, index: int, **over) -> None:
@@ -163,7 +176,12 @@ def self_test() -> None:
         root = Path(tmp)
         for i in range(4):
             _fixture(root, i)
-        got = verdict_record(root, sha, 3, {"GITHUB_RUN_ID": "7", "GITHUB_REF": "refs/heads/main"})
+        env = {"GITHUB_RUN_ID": "7", "GITHUB_REF": "refs/heads/main", "GITHUB_REF_NAME": "main", "GITHUB_REF_TYPE": "branch", "GITHUB_EVENT_NAME": "schedule",
+               "GITHUB_REPOSITORY": "o/r", "GITHUB_SERVER_URL": "https://github.com"}
+        text, _ = render(root, sha, 3, run_identity(env))
+        assert "Ref: `refs/heads/main` (branch `main`), event `schedule`, run https://github.com/o/r/actions/runs/7" in text, text
+        got = verdict_record(root, sha, 3, env)
+        assert got["github"]["ref_name"] == "main" and got["github"]["ref_type"] == "branch" and got["github"]["run_url"].endswith("/o/r/actions/runs/7"), got["github"]
         assert got["kind"] == VERDICT_KIND and got["sha"] == sha and got["slices"] == 3 and len(got["records"]) == 4, got
         assert got["github"]["run_id"] == "7" and got["github"]["ref"] == "refs/heads/main", got["github"]
         first = got["records"][0]
@@ -186,7 +204,7 @@ def main(argv: list[str]) -> int:
         return 0
     if ns.artifacts is None or not ns.sha or not ns.slices:
         ap.error("--artifacts, --sha and --slices are required")
-    text, ok = render(ns.artifacts, ns.sha, ns.slices)
+    text, ok = render(ns.artifacts, ns.sha, ns.slices, run_identity(dict(os.environ)))
     if ns.json:
         ns.json.write_text(json.dumps(verdict_record(ns.artifacts, ns.sha, ns.slices, dict(os.environ)), indent=1) + "\n")
     sys.stdout.write(text)
