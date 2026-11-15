@@ -61,15 +61,18 @@ fn entries_block(text: &str) -> &str {
     &rest[..end]
 }
 
-/// `(open cells, gate rows)`: the `module::fn` of every `_open(` entry and the match text of every bare `KnownRed(` entry.
-fn entries(text: &str) -> (Vec<String>, Vec<String>) {
+/// `(open cells, gate rows, nightly matrices)`: the `module::fn` of every `_open(` entry, the match text of every bare `KnownRed(` entry and the matrix of every `KnownRed(nightly_key(` entry.
+fn entries(text: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
     let block = entries_block(text);
     let mut open = Vec::new();
     let mut rows = Vec::new();
+    let mut nightly = Vec::new();
     for line in block.lines() {
         let t = line.trim_start();
         if let Some(rest) = t.strip_prefix("_open(\"") {
             open.push(rest.split('"').next().unwrap().to_string());
+        } else if let Some(rest) = t.strip_prefix("KnownRed(nightly_key(\"") {
+            nightly.push(rest.split('"').next().unwrap().to_string());
         } else if let Some(rest) = t
             .strip_prefix("KnownRed('")
             .or_else(|| t.strip_prefix("KnownRed(\""))
@@ -77,7 +80,7 @@ fn entries(text: &str) -> (Vec<String>, Vec<String>) {
             rows.push(rest.split(['\'', '"']).next().unwrap().to_string());
         }
     }
-    (open, rows)
+    (open, rows, nightly)
 }
 
 /// Run a Python module of the gate from the repo root.
@@ -107,15 +110,15 @@ fn ledger_count() -> usize {
 
 #[test]
 fn every_known_red_entry_carries_a_dated_reason() {
-    let (open, rows) = entries(&ledger());
+    let (open, rows, nightly) = entries(&ledger());
     super::nonvacuity::require_enumerated(
-        open.len() + rows.len(),
+        open.len() + rows.len() + nightly.len(),
         2,
         "known-red entries",
         "the ledger moved or changed shape",
     );
     assert_eq!(
-        open.len() + rows.len(),
+        open.len() + rows.len() + nightly.len(),
         ledger_count(),
         "the entry parser of this guard and the ledger disagree on how many entries there are"
     );
@@ -188,7 +191,7 @@ fn the_known_red_horizon_moves_only_with_this_guard() {
 
 #[test]
 fn every_open_entry_names_a_live_cell_that_exists() {
-    let (open, rows) = entries(&ledger());
+    let (open, rows, nightly) = entries(&ledger());
     let tests = super::chunking_matrix_guard::all_test_fn_names();
     let missing: Vec<&String> = open
         .iter()
@@ -226,12 +229,26 @@ fn every_open_entry_names_a_live_cell_that_exists() {
         Vec::<&String>::new(),
         "known-red gate rows whose cell family the gate no longer composes"
     );
+    let dead_nightly: Vec<&String> = nightly
+        .iter()
+        .filter(|m| {
+            !root()
+                .join(format!("tests/offline/property_{m}.rs"))
+                .is_file()
+        })
+        .collect();
+    assert_eq!(
+        dead_nightly,
+        Vec::<&String>::new(),
+        "nightly known-red entries whose matrix has no tests/offline/property_<matrix>.rs"
+    );
 }
 
 #[test]
-fn the_entry_parser_reads_both_shapes() {
-    let text = "x\nKNOWN_RED: tuple[KnownRed, ...] = (\n    _open(\"live_a::open_defect_one\",\n          \"s\", \"r\"),\n    KnownRed('upgrade[oracle/x]: boom',\n             \"why\",\n             \"2026-10-31\"),\n    KnownRed(\"sentinels[y]: z\", \"why\", \"2026-10-31\"),\n)\n\ndef match():\n";
-    let (open, rows) = entries(text);
+fn the_entry_parser_reads_every_shape() {
+    let text = "x\nKNOWN_RED: tuple[KnownRed, ...] = (\n    _open(\"live_a::open_defect_one\",\n          \"s\", \"r\"),\n    KnownRed('upgrade[oracle/x]: boom',\n             \"why\",\n             \"2026-10-31\"),\n    KnownRed(\"sentinels[y]: z\", \"why\", \"2026-10-31\"),\n    KnownRed(nightly_key(\"m_x\", \"k\", \"c\"),\n             \"why\", \"2026-10-31\"),\n)\n\ndef match():\n";
+    let (open, rows, nightly) = entries(text);
     assert_eq!(open, ["live_a::open_defect_one"]);
     assert_eq!(rows, ["upgrade[oracle/x]: boom", "sentinels[y]: z"]);
+    assert_eq!(nightly, ["m_x"]);
 }

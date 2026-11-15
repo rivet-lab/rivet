@@ -1,1 +1,0 @@
-- **Harness**: 33 more patch-form seeded defects (`load-key-landed-type-not-admitted` through `mysql-session-off-utc-read`, alphabetical) became `seeded!` switches graded in the one shared build; the Cargo-patch rows and `remedy-does-not-recover` (a `const` used as `&str` at about 100 sites) stay patches.

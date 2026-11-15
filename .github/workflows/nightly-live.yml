@@ -776,7 +776,8 @@ jobs:
           --skip url_file_resolved_as_before_oracle \
           --skip url_file_follows_the_config_oracle \
           --skip a_read_blocked_longer_than_thirty_seconds_still_completes \
-          --skip open_defect_
+          --skip open_defect_ \
+          --skip property_no_debris_after_stop
 
       - name: Kernel OOM kills (on failure)
         if: ${{ failure() }}

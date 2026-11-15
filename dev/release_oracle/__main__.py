@@ -206,10 +206,11 @@ def verify_seeded_recall(led: Ledger, enabled: bool, half: str = "") -> None:
         seeded.recall(led, rows)
         return
     names = sorted({r.seed for r in rows})
-    mine = half_seeds(half, names)
-    if not mine:
+    mine = half_seeds(half)
+    if half == HOSTED or not mine:
         led.skipped("-", "harness", "seeded_recall", "-",
-                    f"seeded-defect recall: no shard of halves.py is placed in the {half} half", cause=SkipCause.DESIGN)
+                    f"seeded-defect recall: the {half} half runs none of its seeds here; the hosted ones run in the Nightly Recall workflow (one verdict per sha)",
+                    cause=SkipCause.DESIGN)
         return
     seeded.recall(led, seeded.select(rows, ",".join(mine), ""), complete=mine == names)
 
@@ -872,7 +873,7 @@ def _halves_self_test() -> None:
 
     from dev.seeded import recall as seeded
 
-    from .halves import SEED_SHARD_HALF, STAGE_HALF, problems
+    from .halves import STAGE_HALF, problems, seed_homes
 
     seeds = sorted({r.seed for r in seeded.parse_manifest(yaml.safe_load(seeded.MANIFEST.read_text()))})
     assert seeds, "the seeded-recall manifest names no seed"
@@ -910,12 +911,12 @@ def _halves_self_test() -> None:
     assert any("neither half" in p for p in problems(names, seeds, dropped)), "a stage dropped from the table goes unnoticed"
     assert any("no gate stage" in p for p in problems(names, seeds, {**STAGE_HALF, "ghost": HOSTED})), "a row naming no stage goes unnoticed"
     assert any("no half" in p for p in problems(names, seeds, {**STAGE_HALF, names[0]: "both"})), "a stage placed in a non-half goes unnoticed"
-    assert any("no half" in p for p in problems(names, seeds, shard_half=(*SEED_SHARD_HALF, "both"))), "a shard placed in a non-half goes unnoticed"
-    assert problems(names, seeds, shard_half=()), "an empty shard table goes unnoticed"
-    assert not problems(names, seeds, shard_half=(HOSTED, DEVBOX, HOSTED, DEVBOX)), "a split shard table must be a partition"
-    assert not problems(names, seeds, shard_half=(HOSTED,) * 4), "every seed on one half must be a partition"
-    for h in HALVES:
-        assert half_seeds(h, seeds, (h,) * 4) == seeds and half_seeds(h, seeds, ("x",) * 4) == [], "a shard belongs to the half it names"
+    homes = seed_homes()
+    assert set(homes.values()) == set(HALVES), "the ledger places seeds in both halves"
+    assert any("no half" in p for p in problems(names, seeds, homes={**homes, seeds[0]: "both"})), "a seed placed in a non-half goes unnoticed"
+    assert any("in no half" in p for p in problems(names, seeds, homes={k: v for k, v in homes.items() if k != seeds[0]})), "a seed placed nowhere goes unnoticed"
+    assert any("does not have" in p for p in problems(names, seeds, homes={**homes, "ghost-seed": HOSTED})), "a placement naming no seed goes unnoticed"
+    assert sorted(half_seeds(HOSTED, homes) + half_seeds(DEVBOX, homes)) == seeds, "the halves do not re-form the ledger"
     print(f"self-test ok: {len(names)} per-run stages and {len(seeds)} seeds each run in exactly one half; the halves and the island re-form the table")
 
 
@@ -1051,6 +1052,7 @@ def _imports_shadowed_by_a_local() -> list[str]:
 
 def _oracle_restart_self_test() -> None:
     """`_oracle_restarted` on scripted answers: a slow restart is waited out, a dead one is named by its ORA- line and its log."""
+    import subprocess
     from unittest import mock
 
     from .core import Proc
@@ -1067,6 +1069,14 @@ def _oracle_restart_self_test() -> None:
             mock.patch(f"{__name__}.docker", fake(f"line one\n{log}")):
         why = _oracle_restarted("c", lambda: False, tries=3, delay=0)
     assert "no answer in 3 polls" in why and "ORA-27102" in why and "SP2-0640" in why and "rc=1" in why and log in why, why
+    with tempfile.TemporaryDirectory() as d:
+        for name, body in (("healthcheck.sh", "exit $HC_RC"), ("sqlplus", "echo rivet-ready")):
+            (Path(d) / name).write_text(f"#!/bin/sh\n{body}\n")
+            (Path(d) / name).chmod(0o755)
+        for hc_rc, answers in (("4", False), ("0", True)):
+            env = {**os.environ, "PATH": f"{d}:{os.environ['PATH']}", "HC_RC": hc_rc}
+            got = subprocess.run(["bash", "-c", ORACLE_READY_PROBE], env=env, capture_output=True).returncode == 0
+            assert got is answers, f"healthcheck.sh exit {hc_rc} with the app user answering: the ready probe says {got}, want {answers}"
 
 
 def _stand_down_self_test() -> None:
@@ -1963,7 +1973,7 @@ def stage_listing(ns: argparse.Namespace) -> list[str]:
     from dev.seeded import recall as seeded
 
     names = sorted({r.seed for r in seeded.parse_manifest(yaml.safe_load(seeded.MANIFEST.read_text()))})
-    seeds = len(half_seeds(ns.half, names)) if ns.half else len(names)
+    seeds = (0 if ns.half == HOSTED else len(half_seeds(ns.half))) if ns.half else len(names)
     return [*(f"stage {st.name}" for st in selected_stages(ns, gate_stages(ns))), *([] if ns.island else [f"seeds {seeds}"])]
 
 
@@ -2086,6 +2096,9 @@ def _usable_port(port: int) -> int:
 
 #: Polls, two seconds apart, that Oracle gets to answer: after its first start and again after the processes restart.
 ORACLE_READY_TRIES = 150
+#: The image's own init-finished marker (healthcheck.sh exits non-zero while its user scripts run), then the app user's session.
+ORACLE_READY_PROBE = ("healthcheck.sh && echo \"select 'rivet-ready' from dual;\" | sqlplus -s -L "
+                      "rivet/rivet@localhost/FREEPDB1 | grep -q rivet-ready")
 #: processes=200 lets the listener's lagging handler count refuse a 16-cell connect burst (ORA-12516); measured 189/300 refused at 200, 0/300 at 1000.
 ORACLE_RESTART_SQL = "alter system set processes=1000 scope=spfile;\nshutdown immediate\nstartup\nexit\n"
 
@@ -2240,9 +2253,7 @@ def bring_up(led: Ledger, engine: str, tag: str, image: str, port: int) -> str:
                    "-P", "Rivet_Passw0rd!", "-Q", "SELECT 1"]],
         "mongo": [["mongosh", "--quiet", "--eval", "db.runCommand({ping:1})"],
                   ["mongo", "--quiet", "--eval", "db.runCommand({ping:1})"]],
-        # The APP_USER exists only once the entrypoint has created it, after the DB opens.
-        "oracle": [["bash", "-c", "echo \"select 'rivet-ready' from dual;\" | sqlplus -s -L "
-                    "rivet/rivet@localhost/FREEPDB1 | grep -q rivet-ready"]],
+        "oracle": [["bash", "-c", ORACLE_READY_PROBE]],
     }[engine]
     if engine == "mssql":
         probes = [[x for a in p for x in (sqlcmd(name) if a == "__SQLCMD__" else (a,))]

@@ -195,6 +195,8 @@ def verify_registry_covered(led: Ledger) -> None:
     if missed:
         led.failed("-", "-", "live_registry", "-", f"live registry: {len(missed)} registration(s) the static dedicated set does not hold: {', '.join(missed[:8])}",
                    "static dedicated set incomplete")
+        return
+    led.passed("-", "-", "live_registry", "-", f"live registry: {len(RAN_LIVE_TESTS)} test(s) and {len(RAN_LIVE_MODULES)} module(s) registered, all held by the static dedicated set")
 
 
 def derived_filter(modules: list[str], ran_modules: set[str], ran_tests: set[str],
@@ -396,6 +398,7 @@ def self_test() -> None:
             led = Ledger(colour=False)
             verify_registry_covered(led)
             assert led.red is red, f"registered {sorted(ran)}: the static dedicated set reads as {'complete' if not red else 'incomplete'} wrongly"
+            assert len(led.cells) == 1, f"registered {sorted(ran)}: the stage recorded {len(led.cells)} ledger row(s), want exactly one whichever way it grades"
     finally:
         RAN_LIVE_TESTS.clear()
         RAN_LIVE_TESTS.update(saved_tests)

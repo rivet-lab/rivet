@@ -71,7 +71,7 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -416,13 +416,14 @@ def island_refusal(sha: str, record: Path) -> str | None:
     return gate_refusal(sha, record, ISLAND_GATE)
 
 
-def recall_refusal(sha: str, record: Path | None) -> str | None:
-    """Why `sha` may not be tagged on the seeded recall's account: no complete green recall of exactly this commit from a clean tree."""
+def recall_refusal(sha: str, record: Path | None, required: Sequence[str] | None = None) -> str | None:
+    """Why `sha` may not be tagged on the seeded recall's account: a ledger seed with no green clean run of exactly this commit, from the devbox run and the hosted verdict together."""
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
     from dev.seeded import run_record
 
-    return run_record.refusal(sha, record or run_record.seeded_dir() / run_record.RUNS_FILE)
+    return run_record.refusal(sha, record or run_record.seeded_dir() / run_record.RUNS_FILE,
+                              run_record.ledger_seeds() if required is None else required)
 
 
 def satellite_logs() -> Path:
@@ -722,24 +723,32 @@ def self_test() -> int:
     recall_cases = [
         ([], "no seeded-recall record"),
         ([run(sha=other)], "no complete green"),
-        ([run(complete=False)], "latest of 1 run(s)"),
-        ([run(green=False)], "latest of 1 run(s)"),
-        ([run(dirty=True)], "latest of 1 run(s)"),
-        ([run(dirty=None)], "latest of 1 run(s)"),
+        ([run(complete=False)], "no run of it covers"),
+        ([run(green=False)], "red or dirty"),
+        ([run(dirty=True)], "red or dirty"),
+        ([run(dirty=None)], "red or dirty"),
         (["not json", run()], None),
         ([run(complete=False), run()], None),
         ([run(green=False), run()], None),
-        ([run(), run(green=False)], "latest of 2 run(s)"),
-        ([run(), run(complete=False)], "latest of 2 run(s)"),
-        ([run(), run(dirty=True)], "latest of 2 run(s)"),
-        ([run(), run(green=False), run(sha=other)], "latest of 2 run(s)"),
+        ([run(), run(green=False)], "red or dirty"),
+        ([run(), run(complete=False)], None),
+        ([run(), run(dirty=True)], "red or dirty"),
+        ([run(), run(green=False), run(sha=other)], "red or dirty"),
+        ([run(complete=False, seeds=["s1"])], "no run of it covers"),
+        ([run(complete=False, seeds=["s1"]), run(complete=False, seeds=["s2"])], None),
+        ([run(complete=False, seeds=["s1"]), run(complete=False, seeds=["s2"], green=False)], "red or dirty"),
+        ([run(complete=False, seeds=["s1", "s2"], green=False), run(complete=False, seeds=["s1"])], "red or dirty"),
+        ([run(complete=False, seeds=["s1", "s2"], green=False), run(complete=False, seeds=["s1", "s2"])], None),
+        ([run(complete=False, seeds=["s1"]), run(complete=False, seeds=["s2"], dirty=True)], "red or dirty"),
+        ([run(complete=False, seeds=["s1"]), run(complete=False, seeds=["s2", "s9"], sha=other)], "no run of it covers"),
+        ([run(complete=False, seeds=[]), run(complete=False, seeds=["s1", "s2"])], None),
     ]
     with tempfile.TemporaryDirectory() as d:
         for i, (lines, want) in enumerate(recall_cases):
             path = Path(d) / f"r{i}.jsonl"
             if lines:
                 path.write_text("\n".join(lines) + "\n")
-            got = recall_refusal(sha, path)
+            got = recall_refusal(sha, path, ["s1", "s2"])
             assert (got is None) if want is None else (got is not None and want in got), (i, lines, got)
     isl = lambda **kw: rec(gate=ISLAND_GATE, **kw)  # noqa: E731
     island_cases = [

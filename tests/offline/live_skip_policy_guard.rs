@@ -19,10 +19,16 @@ use std::path::{Path, PathBuf};
 const NIGHTLY: &str = ".github/workflows/nightly-live.yml";
 
 /// Tests the E2E job skips although the nightly runs them, each with its reason.
-const E2E_ONLY_SKIPS: &[(&str, &str)] = &[(
-    "content_export",
-    "the 50K-row content_items fixture takes minutes to seed; the nightly runs it",
-)];
+const E2E_ONLY_SKIPS: &[(&str, &str)] = &[
+    (
+        "content_export",
+        "the 50K-row content_items fixture takes minutes to seed; the nightly runs it",
+    ),
+    (
+        "property_no_debris_after_stop",
+        "the matrix outlasts the pr profile's 1200 s kill on a hosted leg; live-full grades it with no kill",
+    ),
+];
 
 struct IgnoredTest {
     path: String,
@@ -304,6 +310,16 @@ fn e2e_runs_what_the_nightly_runs_minus_the_named_cuts() {
     assert!(
         live_tests_checked().iter().any(|t| hit(&t.path, &cuts)),
         "E2E_ONLY_SKIPS names no live test — a stale cut"
+    );
+    let still_run: Vec<String> = live_tests_checked()
+        .iter()
+        .filter(|t| !t.gate_only() && hit(&t.path, &cuts) && r.e2e(t))
+        .map(|t| t.path.clone())
+        .collect();
+    assert!(
+        still_run.is_empty(),
+        "E2E_ONLY_SKIPS names tests the E2E job still runs; its `--skip` list must carry every cut:\n{}",
+        still_run.join("\n")
     );
 }
 
