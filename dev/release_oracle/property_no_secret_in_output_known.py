@@ -40,15 +40,6 @@ KNOWN_LEAKS: tuple[KnownLeak, ...] = (
                    "s3:access_key_env+allow_anonymous", "s3:session_token_env+allow_anonymous"),
         sinks=("request",),
     ),
-    KnownLeak(
-        reason="2026-11-10 PR-CRED: the Azure SAS token rides the request URI that the OpenDAL error context carries into "
-               "the retry WARN and the error text; closes when destination error text masks the SAS query",
-        expires="2026-12-10",
-        commands=("run", "validate"),
-        slots=("dest",),
-        spellings=("azure:sas_token_env",),
-        sinks=("stderr", "file"),
-    ),
 )
 
 

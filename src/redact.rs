@@ -214,7 +214,7 @@ fn unescaped_whitespace(text: &str) -> usize {
     text.len()
 }
 
-/// Mask the value of every secret-bearing URL query pair (`?token=`, `&client_secret=`, `sig=`, `sas=`, and any key [`is_password_keyword`] accepts), keeping the key's spelling; a percent-encoded key is read decoded.
+/// Mask a bare URL query (`https://h/p?<token>`, a SAS token spelled without a key) and the value of every secret-bearing URL query pair (`?token=`, `&client_secret=`, `sig=`, `sas=`, and any key [`is_password_keyword`] accepts), keeping the key's spelling; a percent-encoded key is read decoded.
 pub(crate) fn redact_query_secrets(s: &str) -> String {
     const FAMILIES: [&str; 7] = [
         "token",
@@ -240,9 +240,28 @@ pub(crate) fn redact_query_secrets(s: &str) -> String {
     }
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
+    let mut in_url = false;
     while let Some(q) = rest.find(['?', '&']) {
+        let span = &rest[..q];
+        match span.rfind(|c: char| c.is_whitespace() || matches!(c, '(' | '\'' | '"' | ',')) {
+            Some(i) => in_url = span[i..].contains("://"),
+            None => in_url |= span.contains("://"),
+        }
+        let bare_url_query = in_url && rest.as_bytes()[q] == b'?';
         out.push_str(&rest[..=q]);
         rest = &rest[q + 1..];
+        if bare_url_query {
+            let end = rest
+                .find(|c: char| {
+                    matches!(c, '&' | '\'' | '"' | ')' | ';' | '=' | ',') || c.is_whitespace()
+                })
+                .unwrap_or(rest.len());
+            if end > 0 && rest.as_bytes().get(end) != Some(&b'=') {
+                out.push_str("***");
+                rest = &rest[end..];
+                continue;
+            }
+        }
         let key_end = rest
             .find(|c: char| {
                 seeded!(
@@ -611,6 +630,25 @@ mod tests {
             ),
             // Azure's service VERSION is diagnostic, not a secret.
             ("?sv=2020-08-04&sig=abc", "?sv=2020-08-04&sig=***"),
+        ] {
+            assert_eq!(redact_secrets(input), want, "{input}");
+        }
+        for (input, want) in [
+            (
+                "url: http://h:1/a/b?QxBare0123Vm, called: x",
+                "url: http://h:1/a/b?***, called: x",
+            ),
+            (
+                "for url (http://h/p?QxBare0123Vm)",
+                "for url (http://h/p?***)",
+            ),
+            ("http://h/p?QxBare&page=2", "http://h/p?***&page=2"),
+            (
+                "INSERT INTO t VALUES (?,?) failed",
+                "INSERT INTO t VALUES (?,?) failed",
+            ),
+            ("is it ok?", "is it ok?"),
+            ("see http://h/p? then", "see http://h/p? then"),
         ] {
             assert_eq!(redact_secrets(input), want, "{input}");
         }
@@ -1094,6 +1132,17 @@ mod tests {
         let same = |unit: &str| same(unit, mb);
         vec![
             ("`?` alone", same("?")),
+            (
+                "`a://?` repeated",
+                ("a://?".repeat(mb / 5), "a://?***".to_string()),
+            ),
+            (
+                "a megabyte bare query",
+                (
+                    format!("a://h/p?{}", "x".repeat(mb)),
+                    "a://h/p?***".to_string(),
+                ),
+            ),
             ("`&a` repeated, no `=`", same("&a")),
             ("`&a=1` repeated, no secret", same("&a=1")),
             (

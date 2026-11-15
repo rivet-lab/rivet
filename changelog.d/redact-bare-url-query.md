@@ -1,0 +1,1 @@
+- **Security**: a credential spelled as a bare URL query (`https://acct.blob.core.windows.net/c/p?<token>`, the form an Azure SAS token takes in an OpenDAL error's `url:` field) is masked as `?***` by the shared redactor, so it no longer reaches the retry WARN on stderr or the validate output file. Keyed pairs (`sig=`, `token=`) and non-URL `?` are unchanged.

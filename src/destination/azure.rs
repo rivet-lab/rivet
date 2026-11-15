@@ -302,6 +302,36 @@ mod tests {
         );
     }
 
+    /// The error text of a real failed request against a closed port with `sas` as the SAS token, redacted as the log sink redacts it.
+    fn failed_request_text(sas: &str, var: &str) -> String {
+        unsafe { std::env::set_var(var, sas) };
+        let cfg = DestinationConfig {
+            destination_type: DestinationType::Azure,
+            bucket: Some("data".into()),
+            account_name: Some("acct".into()),
+            sas_token_env: Some(var.into()),
+            endpoint: Some("http://127.0.0.1:1/acct".into()),
+            ..Default::default()
+        };
+        let op = AzureBackend::build_operator(&cfg).expect("operator");
+        let rt = crate::destination::cloud::io_runtime().expect("runtime");
+        let err = rt.block_on(op.stat("probe")).expect_err("closed port");
+        crate::redact::redact_secrets(&format!("{err:#}"))
+    }
+
+    #[test]
+    fn a_sas_token_never_reaches_the_text_of_a_failed_request() {
+        let plain = "QxPlainSasCanary0123VmPlainSasCanary4567";
+        let signed = "sv=2022-11-02&se=2099-01-01T00:00:00Z&sp=rw&sr=c&sig=QxKeyCanary0123Vm";
+        for (sas, var, canary) in [
+            (plain, "RIVET_TEST_SAS_PLAIN_922", plain),
+            (signed, "RIVET_TEST_SAS_SIGNED_922", "QxKeyCanary0123Vm"),
+        ] {
+            let text = failed_request_text(sas, var);
+            assert!(!text.contains(canary), "SAS canary in error text: {text}");
+        }
+    }
+
     #[test]
     fn azure_destination_account_key_env_missing_var_errors() {
         let cfg = DestinationConfig {
