@@ -541,6 +541,8 @@ exclude_re = [
     "replace <impl ChangeStream for PgChangeStream>::ack -> Result<\\(\\)> with Ok\\(\\(\\)\\)$",
     # 2026-10-31 #728: `note_statement` only sets `in_transaction` and `grants_pending`, both live-only; the live_cdc_column_grants:: cells kill its stub.
     "replace MysqlChangeStream::note_statement with \\(\\)",
+    # 2026-11-15: the stub of each MySQL grants catalog read (readable_columns, readable_columns_of, resolve_grants, MysqlKeys::relation, primary_key, denies) needs a live connection and is killed only by live_cdc_column_grants:: cells (a_column_grant_account_delivers_no_hidden_column_by_name_or_value_mysql, a_column_grant_account_is_refused_without_the_policy_or_without_the_key_mysql, a_primary_key_the_account_cannot_read_is_refused_by_code_with_the_remedy_mysql, a_declared_key_the_account_cannot_read_is_refused_by_code_before_anything_is_written_mysql); each of the 12 stubs was applied, the cells ran RED, the file was restored.
+    "^src/source/mysql/column_grants\\.rs:\\d+:\\d+: replace (readable_columns -> Result<Vec<String>>|readable_columns_of -> Result<HashMap<String, ReadableColumns>>|resolve_grants -> Result<HashMap<String, ReadableColumns>>|<impl KeyCatalog for MysqlKeys<'_>>::(relation|primary_key|denies) -> Result<(String|Vec<String>|bool)>) with .*$",
     # 2026-10-31 #728: pre-existing arm, killed only by live cell a_prepared_xa_branch_is_never_published_by_another_transactions_commit (proven RED 2026-10-31).
     "^src/source/mysql/cdc\\.rs:\\d+:\\d+: delete match arm Some\\(EventData::XaPrepareLogEvent\\(_\\)\\) in MysqlChangeStream::fill$",
 
