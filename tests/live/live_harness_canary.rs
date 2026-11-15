@@ -213,29 +213,38 @@ fn rivet_binary_reachable_via_env_constant() {
 
 #[test]
 #[ignore = "live: requires docker compose duckdb"]
-fn a_dir_restaged_under_one_label_is_read_whole_by_the_container() {
+fn a_dir_restaged_under_one_label_never_reuses_a_container_path() {
     require_alive(LiveService::DuckDb);
     let src = tempfile::tempdir().unwrap();
     let names = ["part#0_chunk0.csv", "part#1_chunk0.csv"];
+    let mut seen: Vec<String> = Vec::new();
     for round in 1..=5usize {
-        let rows = round * 40;
         for name in names {
-            let body: String = std::iter::once("id\n".to_string())
-                .chain((0..rows).map(|i| format!("{i}\n")))
-                .collect();
+            let body = format!("id\n{}", "0123456789\n".repeat(round * 40));
             std::fs::write(src.path().join(name), body).unwrap();
         }
         let container = stage_for_duckdb(src.path());
-        let list = names
-            .iter()
-            .map(|n| format!("'{container}/{n}'"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let v = duckdb_run_sql_json(&format!("SELECT count(*) FROM read_csv([{list}])"));
-        assert_eq!(
-            v["rows"][0][0].as_str(),
-            Some((2 * rows).to_string().as_str()),
-            "round {round}: files restaged under the same names must be read whole, not at their previous size"
+        assert!(
+            !seen.contains(&container),
+            "round {round}: container path {container} was handed out before; its names are cached by the container"
         );
+        for name in names {
+            let read = std::process::Command::new("docker")
+                .args([
+                    "exec",
+                    DUCKDB_CONTAINER,
+                    "cat",
+                    &format!("{container}/{name}"),
+                ])
+                .output()
+                .expect("spawn docker exec cat");
+            assert_eq!(
+                read.stdout,
+                std::fs::read(src.path().join(name)).unwrap(),
+                "round {round}: {name} must read whole inside the container: {}",
+                String::from_utf8_lossy(&read.stderr)
+            );
+        }
+        seen.push(container);
     }
 }
