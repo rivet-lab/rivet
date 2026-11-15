@@ -115,15 +115,20 @@ pub(crate) fn latest_chunk_run_under_this_plan(
         return Ok(None);
     };
     if let ExtractionStrategy::Chunked(cp) = &plan.strategy {
-        super::chunked::refuse_changed_chunk_plan(
-            state,
-            plan,
-            &run_id,
-            cp,
-            &stored_hash,
-            action,
-            config_path,
-        )?;
+        if seeded!("repair-under-a-changed-chunk-plan", true, false) {
+            let _ = (cp, &stored_hash, action, config_path);
+            state.refuse_changed_run_shape(&plan.progress_key(), &run_id)?;
+        } else {
+            super::chunked::refuse_changed_chunk_plan(
+                state,
+                plan,
+                &run_id,
+                cp,
+                &stored_hash,
+                action,
+                config_path,
+            )?;
+        }
     }
     Ok(Some(run_id))
 }

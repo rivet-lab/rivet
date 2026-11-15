@@ -377,6 +377,12 @@ impl Rig {
         self
     }
 
+    /// The source URL respelled to reach its server through `forward`.
+    pub fn source_url_through(mut self, forward: &super::forward::TcpForward) -> Self {
+        self.source_url = forward.respell(&self.source_url);
+        self
+    }
+
     /// Extra `cdc:` map entries, e.g. `initial: snapshot`.
     pub fn cdc(mut self, line: &str) -> Self {
         self.cdc_lines.push(line.to_string());
@@ -1376,6 +1382,15 @@ impl CdcScenario {
         if let ScnExec::Mssql { ci, changes } = &self.exec {
             super::mssql::wait_for_capture(ci, *changes);
         }
+    }
+
+    /// Source connections the second run of this stream opens through `forward`, after an anchoring run and two inserts.
+    pub fn steady_state_connections(&mut self, forward: &super::forward::TcpForward) -> usize {
+        self.rig.run_ok();
+        self.insert(1);
+        self.insert(2);
+        self.settle();
+        super::forward::connections_opened_by_run(forward, &self.rig.config_path())
     }
 
     /// Drain the stream and read every part back.

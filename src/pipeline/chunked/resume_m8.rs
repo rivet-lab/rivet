@@ -99,7 +99,11 @@ pub(crate) fn prune_superseded_attempts(
 
 /// Whether `t` is marked completed with no part and no record of having read zero rows.
 fn completed_without_a_part(t: &crate::state::ChunkTaskInfo) -> bool {
-    t.status == "completed" && t.file_name.is_none() && t.rows_written != Some(0)
+    seeded!(
+        "resume-trusts-a-completion-without-a-part",
+        false,
+        t.status == "completed" && t.file_name.is_none() && t.rows_written != Some(0)
+    )
 }
 
 /// Completed chunks whose surviving attempt's `file_log` rows are absent or short of the chunk's rows, declared by a manifest or not.
@@ -152,7 +156,16 @@ pub(crate) fn rehydrate_manifest_parts_probed(
     let tasks = state.list_chunk_tasks_for_run(run_id)?;
     let mut surviving = surviving_attempts(&tasks);
     let mut missing: Vec<MissingPart> = Vec::new();
-    for (idx, name) in under_logged_chunks(&tasks, &files) {
+    for (idx, name) in under_logged_chunks(&tasks, &files)
+        .into_iter()
+        .filter(|(_, _name)| {
+            seeded!(
+                "resume-trusts-a-declared-part-without-a-file-log-row",
+                !summary.manifest_parts.iter().any(|p| p.path == *_name),
+                true
+            )
+        })
+    {
         surviving.remove(&idx.to_string());
         missing.push((u32::try_from(idx).ok(), name));
     }
@@ -182,7 +195,11 @@ pub(crate) fn rehydrate_manifest_parts_probed(
         }
         if let Some(present) = present {
             let base = f.file_name.rsplit('/').next().unwrap_or(&f.file_name);
-            if present.get(base).copied() != u64::try_from(f.bytes).ok() {
+            if seeded!(
+                "resume-trusts-a-part-of-another-size",
+                !present.contains_key(base),
+                present.get(base).copied() != u64::try_from(f.bytes).ok()
+            ) {
                 let idx = super::chunk_index_of(&f.file_name).and_then(|i| i.parse::<u32>().ok());
                 surviving.remove(super::chunk_index_of(&f.file_name).unwrap_or_default());
                 missing.push((idx, f.file_name.clone()));
@@ -529,7 +546,12 @@ fn rehydrate_and_reset(
     if reset {
         for path in prune_superseded_attempts(summary, &state.list_chunk_tasks_for_run(run_id)?) {
             let base = path.rsplit('/').next().unwrap_or(&path);
-            if listed.is_none_or(|l| l.contains_key(base)) {
+            if seeded!(
+                "resume-leaves-a-re-read-chunks-part-in-the-prefix",
+                false,
+                true
+            ) && listed.is_none_or(|l| l.contains_key(base))
+            {
                 quarantine_move(dest, &path, run_id, &summary.export_name, stats);
             }
         }

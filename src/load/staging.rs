@@ -54,7 +54,11 @@ pub(super) fn writers_at_record(
 /// The runs the bucket says may be writing: live `running` markers, and the CDC runs no ledger row accounts for.
 pub(super) fn bucket_writers(state: Option<&StateStore>, keyed: &Keyed) -> RunIds {
     let mut writers = load::reconcile::active_running_run_ids(keyed);
-    writers.extend(unlisted_cdc_runs(state, keyed));
+    writers.extend(seeded!(
+        "load-consumes-cdc-run-without-ledger-row",
+        RunIds::new(),
+        unlisted_cdc_runs(state, keyed)
+    ));
     writers
 }
 
@@ -134,7 +138,11 @@ pub(super) fn prefix_has_active_run(
         return true;
     }
     let manifest_active = match load::reconcile::fetch_manifests_keyed(store, prefix) {
-        Ok(keyed) => !bucket_writers(state, &keyed).is_empty(),
+        Ok(keyed) => seeded!(
+            "gc-and-cleanup-spare-unlisted-cdc-run",
+            load::reconcile::has_active_running_manifest(&keyed),
+            !bucket_writers(state, &keyed).is_empty()
+        ),
         Err(_) => true,
     };
     prefix_is_active(ledger_active, manifest_active)
@@ -357,7 +365,14 @@ pub(super) fn maybe_gc_orphans(
         }
     };
     let ledger_active = ledger_says_writing(state, &plan.gcs_prefix);
-    let active = prefix_is_active(ledger_active, !bucket_writers(state, &keyed).is_empty());
+    let active = prefix_is_active(
+        ledger_active,
+        seeded!(
+            "gc-and-cleanup-spare-unlisted-cdc-run",
+            load::reconcile::has_active_running_manifest(&keyed),
+            !bucket_writers(state, &keyed).is_empty()
+        ),
+    );
     let dead_marker_run_ids: std::collections::HashSet<String> = match state {
         Some(s) => keyed
             .iter()

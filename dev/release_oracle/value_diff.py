@@ -340,6 +340,26 @@ def oracle_describe(url: str, sql: str) -> list[tuple[str, bool]]:
         return [(d[0], d[1] in zoned) for d in cur.description]
 
 
+def mysql_describe(url: str, sql: str) -> list[tuple[str, int, int]]:
+    """`(column name, MySQL field type code, fractional digits)` of the SELECT `sql` from the result metadata of a zero-row read; `[]` for a query whose columns cannot be wrapped (duplicate names)."""
+    from urllib.parse import unquote, urlsplit
+
+    import pymysql
+
+    u = urlsplit(url)
+    with pymysql.connect(
+        host=u.hostname, port=u.port or 3306, user=unquote(u.username or ""), password=unquote(u.password or ""),
+        database=u.path.lstrip("/") or None, connect_timeout=10,
+    ) as con, con.cursor() as cur:
+        try:
+            cur.execute(f"SELECT * FROM (\n{sql.rstrip().rstrip(';')}\n) AS rivet_oracle_q LIMIT 0")
+        except pymysql.err.OperationalError as e:
+            if e.args[0] != 1060:
+                raise
+            return []
+        return [(d[0], d[1], d[5]) for d in cur.description]
+
+
 def oracle_result(url: str, sql: str) -> tuple[list[str], list[tuple]]:
     """(column names, rows) of `sql` read by python-oracledb, as `oracle_rows` reads them — the names survive an empty result. A LOB arrives inline as str/bytes (no round trip per LOB); the server's own LOB length tells an empty LOB from a NULL one."""
     import oracledb

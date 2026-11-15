@@ -106,8 +106,11 @@ pub fn run_apply_command(
 
     let reusable = artifact.is_reusable();
     if !reusable
-        && let Some(run_id) =
+        && let Some(run_id) = seeded!(
+            "applied-plan-replayed",
+            None::<String>,
             state.run_that_applied_plan(&artifact.export_name, &artifact.plan_id)?
+        )
     {
         if !force {
             let metric = state.get_metric_by_run_id(&run_id).ok().flatten();
@@ -116,11 +119,13 @@ pub fn run_apply_command(
                 already_applied_report(&artifact, &run_id, metric.as_ref())
             );
             let entry = already_applied_entry(&artifact, &run_id, metric.as_ref());
-            super::run::emit_machine_document(
-                &apply_document(entry, started_at, &artifact),
-                summary_output,
-                json_output,
-            );
+            if seeded!("already-applied-answer-text-only", false, true) {
+                super::run::emit_machine_document(
+                    &apply_document(entry, started_at, &artifact),
+                    summary_output,
+                    json_output,
+                );
+            }
             return Ok(());
         }
         force_bypassed.push("already_applied".into());
@@ -179,11 +184,15 @@ pub fn run_apply_command(
         let source = artifact.resolved_plan.source.state_key();
         let current = state.get(&artifact.export_name, &source)?.last_cursor_value;
         if !artifact.cursor_matches(current.as_deref())
-            && !state.cursor_last_moved_by_plan(
-                &artifact.export_name,
-                &source,
-                &artifact.plan_id,
-            )?
+            && seeded!(
+                "own-apply-cursor-read-as-drift",
+                true,
+                !state.cursor_last_moved_by_plan(
+                    &artifact.export_name,
+                    &source,
+                    &artifact.plan_id
+                )?
+            )
         {
             if !force {
                 crate::rivet_bail!(

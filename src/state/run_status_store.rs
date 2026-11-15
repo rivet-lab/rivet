@@ -205,7 +205,11 @@ impl StateStore {
         started_at: &str,
     ) -> Result<()> {
         self.transaction(|| {
-            self.interrupt_dead_runs(export_name, source, started_at)?;
+            seeded!(
+                "dead-runs-stay-running",
+                0,
+                self.interrupt_dead_runs(export_name, source, started_at)?
+            );
             self.begin_run(run_id, export_name, prefix, started_at)?;
             self.record_run_source(run_id, source)
         })
@@ -390,6 +394,13 @@ impl StateStore {
 /// The prefix-containment predicate on LITERAL path text, either direction: equal; the run at-or-under the query; the query at-or-under the run.
 /// No `LIKE`, so `\`, `%`, `_` and case mean the same on SQLite and Postgres. `alias` is the `run_status` row, `param` the query prefix.
 fn prefix_overlaps(alias: &str, param: &str) -> String {
+    if seeded!("state-prefix-match-reads-text-as-pattern", true, false) {
+        return format!(
+            "(rtrim({alias}.prefix, '/') = rtrim({param}, '/') \
+             OR {alias}.prefix LIKE rtrim({param}, '/') || '/%' \
+             OR rtrim({param}, '/') LIKE rtrim({alias}.prefix, '/') || '/%')"
+        );
+    }
     format!(
         "(rtrim({alias}.prefix, '/') = rtrim({param}, '/') \
          OR substr({alias}.prefix, 1, length(rtrim({param}, '/')) + 1) = rtrim({param}, '/') || '/' \

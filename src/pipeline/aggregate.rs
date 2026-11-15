@@ -83,7 +83,7 @@ pub(super) fn entry_from_summary(s: &RunSummary) -> RunAggregateEntry {
             duration_ms: s.duration_ms,
             mode: s.mode.clone(),
             error_message: s.error_message.clone(),
-            skip_reason: s.skip_reason.clone(),
+            skip_reason: seeded!("summary-skip-reason-dropped", None, s.skip_reason.clone()),
         },
         &s.snapshot_legs,
     )
@@ -94,7 +94,10 @@ fn with_snapshot_legs(
     mut entry: RunAggregateEntry,
     legs: &[RunAggregateEntry],
 ) -> RunAggregateEntry {
-    for leg in legs {
+    for leg in legs
+        .iter()
+        .take(seeded!("cdc-entry-without-snapshot-legs", 0, legs.len()))
+    {
         entry.rows += leg.rows;
         entry.snapshot_rows += leg.rows;
         entry.files += leg.files;
@@ -556,7 +559,15 @@ pub(super) fn collect_child_entries(
     for export in exports {
         let own = reports.get(&export.name).and_then(|r| r.run.as_ref());
         let mut entry: Option<RunAggregateEntry> = None;
-        match own.map(|(run_id, _)| state.get_metric_by_run_id(run_id)) {
+        match seeded!(
+            "child-entry-by-name-on-shared-state",
+            Some(
+                state
+                    .get_metrics(Some(&export.name), 1)
+                    .map(|rows| rows.into_iter().next())
+            ),
+            own.map(|(run_id, _)| state.get_metric_by_run_id(run_id))
+        ) {
             Some(Ok(row)) => {
                 if let Some(m) = row
                     && m.status != "running"

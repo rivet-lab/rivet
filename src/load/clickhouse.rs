@@ -756,15 +756,19 @@ fn changelog_conflict(
         ));
     }
     let sorting_key = sorting_key.trim();
-    let key: Vec<String> = sorting_key
-        .strip_prefix('(')
-        .and_then(|k| k.strip_suffix(')'))
-        .filter(|k| !k.contains(['(', ')']))
-        .unwrap_or(sorting_key)
-        .split(',')
-        .map(|c| c.trim().trim_matches('`').to_string())
-        .filter(|c| !c.is_empty())
-        .collect();
+    let key: Vec<String> = seeded!(
+        "clickhouse-paren-sorting-key",
+        sorting_key,
+        sorting_key
+            .strip_prefix('(')
+            .and_then(|k| k.strip_suffix(')'))
+            .filter(|k| !k.contains(['(', ')']))
+            .unwrap_or(sorting_key)
+    )
+    .split(',')
+    .map(|c| c.trim().trim_matches('`').to_string())
+    .filter(|c| !c.is_empty())
+    .collect();
     if want_engine == "ReplacingMergeTree" && key != pk {
         return Some(format!(
             "`{changes}` collapses versions by ({}), but `load.pk` is now ({}): rows the old key \

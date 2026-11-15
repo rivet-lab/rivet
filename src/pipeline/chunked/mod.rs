@@ -173,7 +173,9 @@ pub(crate) fn stored_windows(
         windows.push((start, end));
     }
     windows.sort_unstable();
-    match windows.windows(2).find(|pair| pair[1].0 <= pair[0].1) {
+    match windows.windows(2).find(|pair| {
+        pair[1].0 <= pair[0].1 && seeded!("resume-accepts-overlapping-windows", false, true)
+    }) {
         Some(pair) => Err(format!(
             "put keys {}..={} in two windows",
             pair[1].0,
@@ -191,7 +193,11 @@ fn replan_resumed_run(
     ranges: &[(i64, i64)],
 ) -> Result<()> {
     let (replace, planned) = replan(&state.list_chunk_tasks_for_run(run_id)?, ranges)?;
-    if planned.is_empty() {
+    if seeded!(
+        "resumed-chunk-run-keeps-its-stale-plan",
+        !planned.is_empty(),
+        planned.is_empty()
+    ) {
         return Ok(());
     }
     state.replan_chunk_tasks(run_id, replace, &planned)?;
@@ -267,7 +273,11 @@ pub(crate) fn crashed_chunk_run_action(
 ) -> CrashedChunkRun {
     match (explicit_resume, crashed_run) {
         (false, true) => CrashedChunkRun::Resume,
-        (true, false) if force => CrashedChunkRun::ExportAgain,
+        (true, false)
+            if force && seeded!("forced-resume-refused-as-nothing-to-continue", false, true) =>
+        {
+            CrashedChunkRun::ExportAgain
+        }
         _ => CrashedChunkRun::Nothing,
     }
 }
@@ -290,6 +300,9 @@ pub(crate) fn live_run_refusal(export: &str, run_id: Option<&str>, resumable: bo
 
 /// The key of an export's run lease on one source.
 pub fn run_lease_key(export: &str, source: &str) -> String {
+    if seeded!("run-lease-by-name-only", true, false) {
+        return format!("chunk-run:{export}");
+    }
     format!(
         "chunk-run:{export}@{:016x}",
         xxhash_rust::xxh3::xxh3_64(source.as_bytes())
@@ -344,7 +357,11 @@ pub(crate) fn claim_export_progress_saying<'s>(
     what: &str,
     done: Option<&str>,
 ) -> Result<crate::state::LoadLease<'s>> {
-    let outcome = done.unwrap_or(crate::state::NOTHING_DONE);
+    let outcome = seeded!(
+        "state-reset-half-done-says-nothing-was-done",
+        crate::state::NOTHING_DONE,
+        done.unwrap_or(crate::state::NOTHING_DONE)
+    );
     if let Some(lease) = try_run_lease_saying(state, export, source, outcome)? {
         return Ok(lease);
     }
@@ -354,7 +371,12 @@ pub(crate) fn claim_export_progress_saying<'s>(
          holds the export's run lease. Wait for it to finish, or stop that process (its pid \
          ends the run id), then repeat this command.{}",
         live_run_label(state, export, source)?,
-        done.map(|d| format!("\n  {d}")).unwrap_or_default()
+        done.map(|d| seeded!(
+            "state-reset-half-done-says-nothing-was-done",
+            String::new(),
+            format!("\n  {d}")
+        ))
+        .unwrap_or_default()
     )
 }
 
@@ -365,18 +387,28 @@ pub(crate) fn claim_run<'s>(
 ) -> Result<crate::state::LoadLease<'s>> {
     let export = &plan.export_name;
     let source = plan.source.state_key();
+    if seeded!(
+        "run-lease-held-only-by-checkpointed-runs",
+        !plan.strategy.is_resumable(),
+        false
+    ) {
+        let own = format!("{}:{}", run_lease_key(export, &source), std::process::id());
+        if let Some(lease) = state.try_load_lease(&own)? {
+            return Ok(lease);
+        }
+    }
     if let Some(lease) = try_run_lease(state, export, &source)? {
         return Ok(lease);
     }
-    crate::rivet_bail!(
-        crate::error::codes::STATE_RUN_IN_PROGRESS,
-        "{}",
-        live_run_refusal(
-            export,
-            state.newest_running_run(export, &source)?.as_deref(),
-            plan.strategy.is_resumable()
-        )
-    )
+    let refusal = live_run_refusal(
+        export,
+        state.newest_running_run(export, &source)?.as_deref(),
+        plan.strategy.is_resumable(),
+    );
+    if seeded!("live-run-refusal-without-a-code", true, false) {
+        return Err(anyhow::Error::msg(refusal));
+    }
+    crate::rivet_bail!(crate::error::codes::STATE_RUN_IN_PROGRESS, "{}", refusal)
 }
 
 /// Under the run lease, recover a chunk run whose process died.
@@ -474,9 +506,15 @@ pub(super) fn incomplete_run_check(
             )
         })
         .collect();
-    let err = met
-        .err()
-        .unwrap_or_else(|| chunk_failures(export, runner, &stored));
+    let err = seeded!(
+        "checkpointed-chunk-loses-its-class",
+        {
+            drop(met);
+            chunk_failures(export, runner, &stored)
+        },
+        met.err()
+            .unwrap_or_else(|| chunk_failures(export, runner, &stored))
+    );
     Err(err.context(format!(
         "{pending} chunk task(s) of export '{export}' not completed; fix the cause, then \
          `rivet run {config_hint} --export {export} --resume`, or inspect \

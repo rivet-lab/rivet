@@ -870,7 +870,7 @@ impl Source for MssqlSource {
                 .iter()
                 .find(|r| r.get::<&str, _>("name") == Some(column))
                 .and_then(|r| r.get::<bool, _>("is_nullable"));
-            if described != Some(true) {
+            if seeded!("cursor-nullability-claimed-without-the-table-catalog", true, described != Some(true)) {
                 return Ok(described);
             }
             let Some((schema, table)) = parse_mssql_simple_from_table(query) else {
@@ -1035,7 +1035,13 @@ impl MssqlSource {
             .query_scalar(SERVER_COUNTERS_GRANTED)
             .ok()
             .flatten()
-            .is_some_and(|v| v.trim() == "1");
+            .is_some_and(|v| {
+                seeded!(
+                    "mssql-denied-counters-queried",
+                    v.trim() != "x",
+                    v.trim() == "1"
+                )
+            });
         self.server_counters = Some(readable);
         readable
     }
@@ -1268,12 +1274,20 @@ pub(crate) fn keyset_keys_sql(schema: &str, table: &str) -> String {
 
 /// SQL for the CHAR(31)-joined `datetime2` / `datetimeoffset` columns of `schema.table` declared finer than a microsecond, through an alias type too.
 pub(crate) fn finer_than_microsecond_sql(schema: &str, table: &str) -> String {
+    let (types_join, type_name) = seeded!(
+        "keyset-key-alias-type-by-name",
+        (
+            "JOIN sys.types t ON t.user_type_id = c.user_type_id ",
+            "t.name"
+        ),
+        ("", "TYPE_NAME(c.system_type_id)")
+    );
     format!(
         "SELECT STRING_AGG(CONVERT(nvarchar(max), c.name), CHAR(31)) FROM sys.columns c \
-         JOIN sys.objects o ON o.object_id = c.object_id \
+         {types_join}JOIN sys.objects o ON o.object_id = c.object_id \
          JOIN sys.schemas s ON s.schema_id = o.schema_id \
          WHERE s.name = N'{}' AND o.name = N'{}' \
-           AND TYPE_NAME(c.system_type_id) IN ('datetime2', 'datetimeoffset') AND c.scale > {}",
+           AND {type_name} IN ('datetime2', 'datetimeoffset') AND c.scale > {}",
         schema.replace('\'', "''"),
         table.replace('\'', "''"),
         crate::source::keyset_key::MICROSECOND_DIGITS

@@ -130,12 +130,17 @@ fn fill_sql(p: Poll<'_>) -> String {
         None => "sys.fn_cdc_get_max_lsn()".to_string(),
     };
     let recover = crate::source::cdc::checkpoint_identity::RECOVER.replace('\'', "''");
+    let lift = seeded!(
+        "position-below-log-start-moved-up",
+        "IF @from IS NOT NULL AND @min IS NOT NULL AND @from < @min SET @from = @min; ",
+        ""
+    );
     format!(
         "DECLARE @from binary(10) = {from_expr}; \
          DECLARE @min binary(10) = (SELECT start_lsn FROM cdc.change_tables \
              WHERE capture_instance = '{ci}'); \
          DECLARE @max binary(10) = {max_expr}; \
-         IF @from IS NOT NULL AND @min IS NOT NULL AND @from < @min \
+         {lift}IF @from IS NOT NULL AND @min IS NOT NULL AND @from < @min \
             THROW {RETENTION_GAP_ERROR}, 'rivet cdc: the resume position is older than the SQL Server \
 CDC change-table retention (the cleanup job removed it). Resuming would silently skip changes. {recover}', 1; \
          DECLARE @to binary(10) = NULL; \
@@ -875,7 +880,16 @@ impl MssqlChangeStream {
             crate::source::cdc::spill::decode_event,
             &max_lsn.as_deref().unwrap_or(""),
         )?;
-        self.pending.extend(evs);
+        self.pending.extend(seeded!(
+            "committed-every-event",
+            evs.into_iter()
+                .map(|mut e| {
+                    e.committed = true;
+                    e
+                })
+                .collect::<Vec<_>>(),
+            evs
+        ));
         self.spooled = spooled;
         match max_lsn {
             // Advance the internal cursor to @to; the next poll reads past it.
@@ -899,6 +913,9 @@ impl MssqlChangeStream {
 impl ChangeStream for MssqlChangeStream {
     fn row_image(&mut self, _tables: &[String]) -> crate::source::cdc::RowImage {
         use crate::source::cdc::RowImage;
+        if seeded!("cdc-stdout-partial-image", _tables.is_empty(), false) {
+            return RowImage::Whole;
+        }
         let sql = row_image_sql(&self.capture_instance);
         let Self { rt, client, .. } = self;
         let rows = rt.block_on(async { client.simple_query(sql).await?.into_first_result().await });
@@ -958,6 +975,18 @@ impl ChangeStream for MssqlChangeStream {
             }
         }
         if let Some(ev) = self.pending.pop_front() {
+            if seeded!(
+                "pk-move-without-delete-mssql",
+                ev.op == crate::source::cdc::ChangeOp::Delete
+                    && self.pending.front().is_some_and(|n| {
+                        n.op == crate::source::cdc::ChangeOp::Insert
+                            && n.table == ev.table
+                            && n.position == ev.position
+                    }),
+                false
+            ) {
+                return self.next_change();
+            }
             return Some(Ok(ev));
         }
         // A spilled tail outranks another poll: its rows belong to transactions

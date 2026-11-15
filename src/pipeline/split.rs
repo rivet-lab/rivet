@@ -29,6 +29,12 @@ pub(crate) fn source_type_supports_split(st: SourceType) -> bool {
 
 /// Whether an export may be split into range sub-exports, and on which key.
 pub(crate) fn splittable_key(export: &ExportConfig) -> Option<String> {
+    if seeded!("split-key-is-a-constant", true, false) {
+        return Some("xyzzy".into());
+    }
+    if seeded!("split-key-never-found", true, false) {
+        return None;
+    }
     if export.mode == ExportMode::Cdc {
         return None;
     }
@@ -85,6 +91,15 @@ pub(crate) fn probe_and_synthesize(
     config_dir: &Path,
     n: usize,
 ) -> Result<Option<Vec<ExportConfig>>> {
+    if seeded!("pool-split-into-no-units", true, false) {
+        return Ok(Some(vec![]));
+    }
+    if seeded!("pool-split-into-one-unit", true, false) {
+        return Ok(Some(vec![giant.clone()]));
+    }
+    if seeded!("pool-split-never-realized", true, false) {
+        return Ok(None);
+    }
     if !source_type_supports_split(config.source.source_type) {
         return Ok(None);
     }

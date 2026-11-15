@@ -194,15 +194,6 @@ const BASELINE: &[(&str, usize, usize, usize, usize)] = &[
     ("src/source/postgres/mod.rs::pg_run_export", 1, 0, 1, 2),
     // 2026-11-11: mysql_run_export entered the in-diff scope with the zero-date count; its Ok(0) stub is live-guarded, its inline decisions are pre-existing; closes when they move to named predicates.
     ("src/source/mysql/mod.rs::mysql_run_export", 2, 0, 2, 3),
-    // ── preflight ────────────────────────────────────────────────────────
-    // `check` diagnoses every export against a live source. The `==` in its
-    // overlay export-match loop is already a named mutants.toml entry
-    // (`replace == with != in check$`, anchored) — same story as run_pool.
-    // 6→5 `and`: the target-FAIL tally (`if let Some(t) = eff_target && report
-    // .has_target_fail()`, plus the `+=` it guarded) moved out to the pure
-    // `TargetFailTally::add_export`, where the in-diff gate's `+=` → `*=`/`-=`
-    // mutants are graded instead of MISSED.
-    ("src/preflight/mod.rs::check", 1, 0, 5, 1),
 ]; // ratchet-pin: end
 
 // ── reading the live-only set out of the mutation config ─────────────────
@@ -986,7 +977,7 @@ fn only_whole_function_exclusions_are_read_as_live_only_claims() {
     let names: Vec<&str> = real.iter().map(|(n, _, _)| n.as_str()).collect();
     for expect in [
         "run_pool",
-        "check",
+        "capture_load_units",
         "density_probe",
         "pg_run_export",
         "append_renamed",
@@ -1008,15 +999,13 @@ fn only_whole_function_exclusions_are_read_as_live_only_claims() {
              but this gate graded it: {names:?}"
         );
     }
-    // The return type is what tells same-named siblings apart; losing it makes
-    // `check` mean every `fn check` in the tree.
-    let check_ret = real
+    let load_units_ret = real
         .iter()
-        .find(|(n, _, _)| n == "check")
+        .find(|(n, _, _)| n == "capture_load_units")
         .and_then(|(_, r, _)| r.clone());
     assert_eq!(
-        check_ret.as_deref(),
-        Some("Result<bool>"),
-        "the `check` exclusion's return-type discriminator was not decoded"
+        load_units_ret.as_deref(),
+        Some("Result<Vec<CapturedUnit>>"),
+        "the `capture_load_units` exclusion's return-type discriminator was not decoded"
     );
 }

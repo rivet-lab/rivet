@@ -524,7 +524,11 @@ impl Auth {
         let static_given = static_token
             .as_deref()
             .is_some_and(|t| !t.trim().is_empty());
-        if let DestinationCredential::GcsKeyFile(path) = credential {
+        if let DestinationCredential::GcsKeyFile(path) = seeded!(
+            "destination-credential-read-by-one-leg",
+            &DestinationCredential::Ambient,
+            credential
+        ) {
             if static_given {
                 crate::rivet_bail!(
                     crate::error::codes::CONFIG_DESTINATION_AUTH_INVALID,

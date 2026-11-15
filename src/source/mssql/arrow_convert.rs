@@ -280,12 +280,16 @@ pub(super) fn mssql_columns_to_schema(
                     .as_ref()
                     .filter(|_| overrides.contains_key(col.name()))
                 {
-                    crate::source::refuse_unbuildable_override(
-                        "mssql",
-                        col.name(),
-                        &mapping.rivet_type,
-                        build_array(dt, idx, &[], col.name(), None, Some(&mapping.rivet_type)),
-                    )?;
+                    let built =
+                        build_array(dt, idx, &[], col.name(), None, Some(&mapping.rivet_type));
+                    if seeded!("override-without-builder-internal-stop", false, true) {
+                        crate::source::refuse_unbuildable_override(
+                            "mssql",
+                            col.name(),
+                            &mapping.rivet_type,
+                            built,
+                        )?;
+                    }
                 }
                 fields.push(field);
                 decoders.push((col.name().to_string(), col.column_type()));
@@ -658,9 +662,16 @@ fn build_array(
             let mut b = TimestampNanosecondBuilder::with_capacity(rows.len());
             for row in rows {
                 match row.try_get::<NaiveDateTime, _>(idx) {
-                    Ok(Some(dt)) => b.append_value(crate::types::timestamp_nanos_or_refuse(
-                        dt, "mssql", column,
-                    )?),
+                    Ok(Some(dt)) => match seeded!(
+                        "mssql-ns-override-out-of-range-null",
+                        dt.and_utc().timestamp_nanos_opt(),
+                        Some(crate::types::timestamp_nanos_or_refuse(
+                            dt, "mssql", column
+                        )?)
+                    ) {
+                        Some(ns) => b.append_value(ns),
+                        None => b.append_null(),
+                    },
                     Ok(None) => b.append_null(),
                     Err(e) => {
                         return Err(cell_mismatch(
@@ -719,11 +730,11 @@ fn cell_mismatch(
     detail: &str,
 ) -> anyhow::Error {
     match declared {
-        Some(d) => {
+        Some(d) if seeded!("override-without-builder-internal-stop", false, true) => {
             let sent = cell.map_or_else(|| "no value".to_string(), cell_type_name);
             declared_mismatch(column, &d.label(), &sent)
         }
-        None => crate::error::coded(
+        _ => crate::error::coded(
             crate::error::codes::INTERNAL_TYPE_BUILDER,
             format!("mssql column `{column}`: no {target} from {cell:?} {detail}"),
         ),

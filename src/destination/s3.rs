@@ -26,6 +26,14 @@ fn read_credential_env(env_name: &str, label: &str) -> Result<crate::secret::Sec
 
 /// Resolve the shared-file profile `profile` and nothing else: refuses by `RIVET_DEST_CREDENTIALS_INVALID` when an ambient `AWS_PROFILE` selects another profile or the profile holds no static keys or web-identity role, and disables the instance-metadata fallback.
 fn named_profile_config(profile: &str) -> Result<reqsign::AwsConfig> {
+    if seeded!("named-profile-falls-back", true, false) {
+        return Ok(reqsign::AwsConfig {
+            ec2_metadata_disabled: false,
+            ..profile_only(profile)
+        }
+        .from_profile()
+        .from_env());
+    }
     let cfg = profile_only(profile).from_profile();
     let invalid =
         |why: String| crate::error::coded(crate::error::codes::DEST_CREDENTIALS_INVALID, why);

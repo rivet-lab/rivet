@@ -73,10 +73,11 @@ Every recall appends one line to `recall-runs.jsonl` in the seeded state dir
 NOT-GRADED-HERE ceiling held) and whether the repo tree was `dirty`.
 
 `python3 dev/pytools/release.py` refuses to tag a sha unless the latest line of that file for
-the sha is a complete, green, clean-tree recall of exactly that sha: a later red, narrowed or
-dirty run revokes an earlier green. When the recall ran on another machine,
-copy the file and pass `--recall-record FILE`. A recall of another commit, a narrowed
-one, a red one, one from a dirty tree and a missing record are each refused.
+every ledger seed has a green clean-tree run of exactly that sha: a line names the `seeds` it covered,
+and the latest line covering a seed decides it, so a later red or dirty run revokes an earlier green.
+The devbox half's run and the Nightly Recall's hosted verdict (`recall-verdict` artifact) are two files of
+lines: concatenate them and pass `--recall-record FILE`. A recall of another commit, a seed no run covers,
+a red one, one from a dirty tree and a missing record are each refused.
 
 ## What a row means
 
@@ -113,12 +114,13 @@ delete the row.
 ## Adding a seed
 
 1. Pick a bug class from history: a fixed defect whose fix commit you can name.
-2. Write the smallest source change that brings it back, in a checkout with no other
-   edits, then save it as a patch:
-   `git diff -- src/the/file.rs > dev/seeded/<seed-name>/<engine>.patch`.
-   If the code path is shared by every engine, write one patch,
-   `dev/seeded/<seed-name>/shared.patch`, and set it as the seed-level `patch:`.
-   Restore the source from a copy you took before the edit.
+2. Write the defect as a `seeded!("<seed-name>", defect, good)` site in `src/` (see
+   `src/seeded.rs`) and name it in the manifest with `switch: <seed-name>`, at the seed level
+   or on an engine. A new seed is never a patch: patch form is frozen, and the seed-recall
+   self-test fails a `patch:` row that `dev/seeded/patch_seeds.py` does not list.
+   A seed that is still a patch is converted by writing its site, replacing `patch:` with
+   `switch:`, deleting `dev/seeded/<seed-name>/` and deleting its line from `PATCH_SEEDS`;
+   the self-test fails a ledger line no row uses. The ledger only shrinks.
 3. Add the seed to `dev/seeded/seeds.yaml`. Pick the scope of the axis the seed varies
    and list **every** member of it. `source`, `target` and `destination` are read from the Rust
    enums `SourceType`, `LoadTargetKind` and `DestinationType`, so a new variant is a new

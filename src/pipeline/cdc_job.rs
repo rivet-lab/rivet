@@ -90,6 +90,7 @@ pub(super) fn run_cdc_export(
     state: &StateStore,
     strict: bool,
     grants: Option<RunGrants>,
+    meta: Option<Box<dyn crate::source::Source>>,
 ) -> (Result<()>, RunSummary) {
     for msg in [
         cdc_ignored_meta_warning(export),
@@ -118,18 +119,21 @@ pub(super) fn run_cdc_export(
         &export.destination,
         &run_id,
     ) {
-        let summary = cdc_summary(
-            &run_id,
-            export,
-            "failed",
-            0,
-            0,
-            0,
-            0,
-            started.elapsed().as_millis() as i64,
-            Some(crate::redact::redact_error(&e)),
-        );
-        return (Err(e), summary);
+        if seeded!("cdc-run-without-ledger-row", false, true) {
+            let summary = cdc_summary(
+                &run_id,
+                export,
+                "failed",
+                0,
+                0,
+                0,
+                0,
+                started.elapsed().as_millis() as i64,
+                Some(crate::redact::redact_error(&e)),
+            );
+            return (Err(e), summary);
+        }
+        log::warn!("{e:#}");
     }
 
     let read_bytes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -138,7 +142,7 @@ pub(super) fn run_cdc_export(
         .unwrap_or_else(|| std::path::Path::new("."));
     let rss_before = crate::resource::get_rss_mb();
     let rss_sampler = crate::resource::RssPeakSampler::start(rss_before, 100);
-    let mut meta = crate::source::create_source(&config.source).ok();
+    let mut meta = meta.or_else(|| crate::source::create_source(&config.source).ok());
     let server_context = meta.as_mut().and_then(|s| s.server_context());
     let harm = super::job::HarmBracket::open_on(meta.as_deref_mut());
     let result = run_cdc_inner(
@@ -319,7 +323,10 @@ pub(super) fn refuse_lost_file_anchor(
         return Ok(());
     };
     match crate::source::cdc::Position::load(&ckpt) {
-        Ok(None) if state.captured_tables(&key, &dest)?.is_some() => {
+        Ok(None)
+            if seeded!("cdc-lost-file-anchor-reanchors", false, true)
+                && state.captured_tables(&key, &dest)?.is_some() =>
+        {
             Err(crate::source::cdc::checkpoint_identity::lost_file_anchor(
                 CdcEngine::from(config.source.source_type).label(),
                 &ckpt,
@@ -368,7 +375,9 @@ pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<O
         (None, Some(t)) => vec![t.clone()],
         (None, None) => return Ok(None),
     };
-    log::info!("{}", crate::source::mysql::column_grants::BOUNDARY);
+    if seeded!("column-grants-boundary-unsaid", false, true) {
+        log::info!("{}", crate::source::mysql::column_grants::BOUNDARY);
+    }
     let declared = tables
         .iter()
         .filter_map(|t| {
@@ -483,9 +492,13 @@ pub(super) fn initial_snapshot_pending(
     }
     let capture = crate::state::ProgressKey::cdc(&export.name, &config.source.state_key(), &tables);
     let capture_dest = export.destination.state_key();
-    let captured = state
-        .captured_tables(&capture, &capture_dest)?
-        .unwrap_or_else(|| tables.clone());
+    let captured = seeded!(
+        "baseline-mark-outlives-capture",
+        tables.clone(),
+        state
+            .captured_tables(&capture, &capture_dest)?
+            .unwrap_or_else(|| tables.clone())
+    );
     if let Some(i) = rejoins_over_a_baseline(&captured, &tables, &done_flags) {
         let t = &tables[i];
         let snap = super::finalize::destination_uri_for_manifest(&table_dests[i].2);
@@ -523,7 +536,11 @@ pub(super) fn initial_snapshot_pending(
             url.expose(),
             tls,
             &tables,
-            DrainMode::from_until_current(cdc.until_current),
+            seeded!(
+                "bounded-standby-refused-after-the-baseline",
+                DrainMode::Continuous,
+                DrainMode::from_until_current(cdc.until_current)
+            ),
             config.source.columns_from_grants(),
         )?;
     }

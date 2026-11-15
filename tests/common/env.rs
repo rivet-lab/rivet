@@ -404,6 +404,22 @@ pub fn require_alive(service: LiveService) {
     }
 }
 
+/// Fail naming the compose `service` when nothing listens where `url` points.
+pub fn require_url_reachable(url: &str, service: &str) {
+    let target = url.rsplit_once('@').map_or(url, |(_, t)| t);
+    let hostport = target.split(['/', '?']).next().unwrap_or_default();
+    let alive = std::net::ToSocketAddrs::to_socket_addrs(hostport)
+        .ok()
+        .and_then(|mut a| a.next())
+        .is_some_and(|a| TcpStream::connect_timeout(&a, Duration::from_millis(500)).is_ok());
+    if !alive {
+        panic!(
+            "live test requires the `{service}` compose service reachable at {hostport} ({url}).\n\
+             hint: `docker compose up -d {service}`; the CI stacks do not start it, so the test is `live+gate-only`."
+        );
+    }
+}
+
 fn require_docker_healthy(container: &str, compose_service: &str) {
     let output = std::process::Command::new("docker")
         .args(["inspect", "-f", "{{.State.Health.Status}}", container])

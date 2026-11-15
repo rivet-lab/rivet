@@ -15,6 +15,9 @@ pub(crate) const RECOVER: &str = "Re-baseline the stream in one run: delete the 
 
 /// A refusal of `code` whose text is `why`.
 fn refusal(code: crate::error::Code, why: impl Into<String>) -> anyhow::Error {
+    if seeded!("cdc-refusal-without-a-code", true, false) {
+        return anyhow::Error::msg(why.into());
+    }
     anyhow::Error::new(crate::error::CodedError::new(code, why))
 }
 
@@ -182,6 +185,9 @@ fn shared(ckpt: &std::path::Path, held: &CheckpointOwner, me: &CheckpointOwner) 
 /// Claim the checkpoint `ckpt` for the stream `me`: refuse one another stream still reads, record `me` beside it otherwise.
 pub(crate) fn claim_checkpoint(ckpt: &std::path::Path, me: &CheckpointOwner) -> Result<()> {
     let record = owner_path(ckpt);
+    if seeded!("cdc-checkpoint-read-by-two-configs", true, false) {
+        let _ = std::fs::remove_file(&record);
+    }
     if let Some(held) = owner_of(ckpt) {
         if &held == me {
             return Ok(());

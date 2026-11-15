@@ -10,8 +10,10 @@ See docs/seeded-recall.md for what a row means and how to add a seed.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -27,6 +29,7 @@ from dev.release_oracle import stand_health
 from dev.release_oracle.core import Ledger, SkipCause, isolate_state_db, nextest_filter, nextest_outcomes, nextest_panics, self_skipped
 from dev.release_oracle.live_modules import EXCLUSIVE_ENV, exclusive_tests, live_modules_env
 from dev.seeded import run_record
+from dev.seeded.patch_seeds import PATCH_SEEDS
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
@@ -180,6 +183,23 @@ def switch_problems(rows: list[Row], root: Path = ROOT, complete: bool = True) -
             + ([f"`seeded!({n!r})` in src/ is named by no manifest row" for n in sorted(set(found) - named)] if complete else []))
 
 
+PATCH_DATED = re.compile(r"\d{4}-\d{2}-\d{2}: \S")
+
+
+def patch_form_problems(rows: list[Row], ledger: dict[str, str]) -> list[str]:
+    """A patch the ledger does not list (a new patch-form seed), one borrowed from another seed's directory, a ledger line no row uses any more, or an undated reason."""
+    used = {r.patch for r in rows if r.patch}
+    owner = {r.patch: r.seed for r in rows if r.patch}
+    return ([f"seed {r.seed}: patch {r.patch} lives outside dev/seeded/{r.seed}/: a seed's patches sit in its own directory, so the ledger names one seed per line"
+             for r in rows if r.patch and r.patch.split("/")[0] != r.seed]
+            + [f"seed {owner[p]}: patch {p} is in patch form, which is frozen: write the defect as `seeded!(\"{owner[p]}\", defect, good)` at its site in src/ "
+             f"and name it with `switch: {owner[p]}` instead of `patch:` in dev/seeded/seeds.yaml (docs/seeded-recall.md, `Adding a seed`)"
+             for p in sorted(used - set(ledger))]
+            + [f"PATCH_SEEDS in dev/seeded/patch_seeds.py lists {p} but no manifest row uses that patch: delete the line (the ledger only shrinks)"
+               for p in sorted(set(ledger) - used)]
+            + [f"PATCH_SEEDS {p}: the reason must start `YYYY-MM-DD: ` and say what closes it" for p, why in sorted(ledger.items()) if not PATCH_DATED.match(why)])
+
+
 def _fn_names(tree: Path) -> set[str]:
     """Every name a `fn <name>(` declares under one tree, read in one pass."""
     return {m for p in tree.rglob("*.rs") for m in re.findall(r"\bfn (\w+)\(", p.read_text())}
@@ -276,10 +296,17 @@ def scratch_base() -> Path:
     return run_record.seeded_dir()
 
 
+def drop_foreign_tree(tree: Path) -> None:
+    """Remove `tree` when it is a directory no git worktree owns (a cache restore leaves one), so a fresh worktree can take its place."""
+    if tree.exists() and not ((tree / ".git").exists() and sh(["git", "-C", str(tree), "rev-parse", "--git-dir"]).returncode == 0):
+        shutil.rmtree(tree)
+
+
 def prepare_tree(base: Path) -> tuple[Path, str]:
     """A clean scratch worktree at HEAD; refuses one a killed run left a seed in."""
     sha = git(ROOT, "rev-parse", "HEAD")
     tree = base / "tree"
+    drop_foreign_tree(tree)
     if (tree / ".git").exists():
         dirty = git(tree, "status", "--porcelain", "--untracked-files=no")
         if dirty:
@@ -325,8 +352,8 @@ SCRATCH_STATE_VARS = ("RIVET_CDC_STATE_URL", "RIVET_CONC_STATE_URL")
 class Cargo:
     """Builds and runs nextest in the scratch tree with its own target dir and the tree's own rivet binary."""
 
-    def __init__(self, tree: Path, base: Path, state_url: str | None, features: tuple[str, ...] = ()) -> None:
-        self.tree, self.base = tree, base
+    def __init__(self, tree: Path, base: Path, state_url: str | None, features: tuple[str, ...] = (), archive: Path | None = None) -> None:
+        self.tree, self.base, self.archive = tree, base, archive
         self.feature_args = ["--features", ",".join(features)] if features else []
         env = {k: v for k, v in os.environ.items()
                if k not in ("RIVET_BIN", "RIVET_BIN_OVERRIDE", "RIVET_STATE_URL", "RIVET_TEST_STATE_URL", "RIVET_SEED")}
@@ -368,9 +395,28 @@ class Cargo:
                 picked.append(one)
         return [flag for one in picked for flag in one]
 
+    def nextest(self, verb: list[str], cells) -> list[str]:
+        """The `cargo nextest` argv for `cells`: the tree's own binaries, or the extracted shared build when an archive is named."""
+        if self.archive:
+            return ["cargo", "nextest", *verb, "--binaries-metadata", str(self.base / "target" / "nextest" / "binaries-metadata.json"),
+                    "--cargo-metadata", str(self.base / "target" / "nextest" / "cargo-metadata.json"),
+                    "--workspace-remap", str(self.tree), "--target-dir-remap", str(self.base / "target")]
+        return ["cargo", "nextest", *verb, "--manifest-path", str(self.tree / "Cargo.toml"), *self.feature_args, *self.binaries(cells)]
+
     def build(self, cells, log: Path) -> subprocess.CompletedProcess:
-        """Compile the test binaries (and the rivet binary they drive)."""
-        p = sh(["cargo", "nextest", "run", "--no-run", "--manifest-path", str(self.tree / "Cargo.toml"),
+        """Compile the test binaries (and the rivet binary they drive), or unpack the shared build once."""
+        if self.archive:
+            self.base.mkdir(parents=True, exist_ok=True)
+            p = sh(["tar", "--zstd", "-xf", str(self.archive), "-C", str(self.base)], cwd=self.base, env=self.env)
+            (self.base / "target" / "tmp").mkdir(parents=True, exist_ok=True)
+        else:
+            p = sh(self.nextest(["run", "--no-run"], cells), cwd=self.tree, env=self.env)
+        log.write_text(p.stdout)
+        return p
+
+    def archive_to(self, cells, file: Path, log: Path) -> subprocess.CompletedProcess:
+        """Compile and pack the test binaries of `cells` into `file`: the one build every hosted shard unpacks."""
+        p = sh(["cargo", "nextest", "archive", "--archive-file", str(file), "--manifest-path", str(self.tree / "Cargo.toml"),
                 *self.feature_args, *self.binaries(cells)], cwd=self.tree, env=self.env)
         log.write_text(p.stdout)
         return p
@@ -395,8 +441,7 @@ class Cargo:
         threads = ["--test-threads", "1"] if extra else []
         skip_log = log.with_suffix(".skips")
         skip_log.write_text("")
-        p = sh(["cargo", "nextest", "run", "--manifest-path", str(self.tree / "Cargo.toml"),
-                *self.feature_args, *self.binaries(cells), "--run-ignored", "all", "--no-fail-fast", "--retries", "0", *threads,
+        p = sh([*self.nextest(["run"], cells), "--run-ignored", "all", "--no-fail-fast", "--retries", "0", *threads,
                 "-E", nextest_filter([c.removeprefix(LIB) for c in cells])],
                cwd=self.tree, env={**self.env, **extra, "RIVET_SKIP_LOG": str(skip_log)})
         log.write_text(p.stdout)
@@ -408,8 +453,7 @@ class Cargo:
             # As the stage does: a self-skip naming the gate's state var runs again under it, and that leg is its verdict.
             again_log = log.with_suffix(".again.skips")
             again_log.write_text("")
-            q = sh(["cargo", "nextest", "run", "--manifest-path", str(self.tree / "Cargo.toml"),
-                    *self.feature_args, *self.binaries(owed), "--run-ignored", "all", "--no-fail-fast", "--retries", "0", *threads,
+            q = sh([*self.nextest(["run"], owed), "--run-ignored", "all", "--no-fail-fast", "--retries", "0", *threads,
                     "-E", nextest_filter([c.removeprefix(LIB) for c in owed])],
                    cwd=self.tree, env={**self.env, **extra, **self.again[1], "RIVET_SKIP_LOG": str(again_log)})
             log.with_suffix(".again.log").write_text(q.stdout)
@@ -623,8 +667,8 @@ def grade_switches(led: Ledger, live: list[Row], control_skips: dict[str, str], 
     return out
 
 
-def recall(led: Ledger, rows: list[Row], *, complete: bool = True, owed_fails: bool = False) -> list[Verdict]:
-    """Grade every row (a row of another platform is OWED, a FAIL under `owed_fails`): STALE check, one CONTROL run on the unpatched tree, then one build+run per patch; appends the run to the record."""
+def recall(led: Ledger, rows: list[Row], *, complete: bool = True, owed_fails: bool = False, archive: Path | None = None) -> list[Verdict]:
+    """Grade every row (a row of another platform is OWED, a FAIL under `owed_fails`): STALE check, one CONTROL run on the unpatched tree, then one build+run per patch (or the shared `archive` build for the switches); appends the run to the record."""
     t0 = time.perf_counter()
     led.phase("Seeded-defect recall — does the harness catch known bug classes re-introduced?")
     verdicts: dict[Row, Verdict] = {}
@@ -647,12 +691,12 @@ def recall(led: Ledger, rows: list[Row], *, complete: bool = True, owed_fails: b
             if p.returncode != 0:
                 verdicts[r] = Verdict(r, STALE, stale_message(r.seed, text, p.stdout))
     live = [r for r in rows if r not in verdicts and not r.na and r.platform in (None, host_platform())]
-    for problem in switch_problems(rows, tree, complete):
+    for problem in switch_problems(rows, tree, complete) + (patch_form_problems(rows, PATCH_SEEDS) if complete else []):
         led.bad(problem)
     sw = [r for r in live if r.switch]
     live = [r for r in live if not r.switch]
     if sw:
-        verdicts.update(grade_switches(led, sw, {}, Cargo(tree, base / "sw", state_url, ("seeded",)), logs))
+        verdicts.update(grade_switches(led, sw, {}, Cargo(tree, base / "sw", state_url, ("seeded",), archive), logs))
     workers = [cargo] + [Cargo(prepare_tree(base / f"w{k}")[0], base / f"w{k}", state_url)
                          for k in range(1, min(POOL, len({r.patch for r in live})))]
     control_cells = sorted({c for r in live for c in r.cells})
@@ -677,7 +721,8 @@ def recall(led: Ledger, rows: list[Row], *, complete: bool = True, owed_fails: b
     out = [verdicts.get(r) or grade(r, control, {}, control_skips, control_stand) for r in rows]
     green = record(led, out, owed_fails=owed_fails)
     dirty = evidence.tree_dirty(ROOT)
-    run_record.append_run(base / run_record.RUNS_FILE, sha=sha, complete=complete, green=green, dirty=dirty)
+    run_record.append_run(base / run_record.RUNS_FILE, sha=sha, complete=complete, green=green, dirty=dirty,
+                          seeds=sorted({r.seed for r in rows}), not_graded_here=sum(v.status == NOT_GRADED_HERE for v in out))
     print(render(out))
     print(f"  seeded-defect recall took {(time.perf_counter() - t0) / 60:.1f} min; logs under {logs}")
     return out
@@ -846,6 +891,23 @@ def switch_self_test() -> None:
     assert clean.feature_args == [] and switched.feature_args == ["--features", "seeded"]
     flagged = [str(f) for f in [ROOT / "Makefile", *(ROOT / ".github").rglob("*.yml")] if "--all-features" in f.read_text()]
     assert not flagged, f"--all-features turns the `seeded` feature on: {flagged}"
+
+
+def patch_form_self_test() -> None:
+    """The patch-form freeze: the real manifest matches the ledger, a new patch seed, a stale ledger line and an undated reason are each named."""
+    rows = parse_manifest(yaml.safe_load(MANIFEST.read_text()))
+    assert not patch_form_problems(rows, PATCH_SEEDS), "\n".join(patch_form_problems(rows, PATCH_SEEDS))
+    assert PATCH_SEEDS, "the ledger lists no patch seed"
+    new = Row("brand-new", "postgres", "brand-new/shared.patch", ("c",))
+    found = patch_form_problems([*rows, new], PATCH_SEEDS)
+    assert len(found) == 1 and "brand-new" in found[0] and "seeded!" in found[0] and "switch: brand-new" in found[0] and "seeds.yaml" in found[0], found
+    found = patch_form_problems([*rows, Row("borrower", "postgres", next(iter(PATCH_SEEDS)), ("c",))], PATCH_SEEDS)
+    assert len(found) == 1 and "borrower" in found[0] and "outside" in found[0], found
+    converted = [r for r in rows if r.patch != next(iter(PATCH_SEEDS))]
+    found = patch_form_problems(converted, PATCH_SEEDS)
+    assert len(found) == 1 and next(iter(PATCH_SEEDS)) in found[0] and "delete the line" in found[0], found
+    found = patch_form_problems(rows, {**PATCH_SEEDS, next(iter(PATCH_SEEDS)): "patch form"})
+    assert len(found) == 1 and "YYYY-MM-DD" in found[0], found
 
 
 def self_test() -> int:
@@ -1112,13 +1174,61 @@ def self_test() -> int:
     assert not stale, "a seed that no longer applies is a STALE row in the gate; re-cut it on this tree: " + "; ".join(stale)
     with tempfile.TemporaryDirectory() as td:
         rec = Path(td) / "sub" / run_record.RUNS_FILE
-        assert "no seeded-recall record" in run_record.refusal("a" * 40, rec)
-        run_record.append_run(rec, sha="a" * 40, complete=True, green=True, dirty=False)
-        assert run_record.refusal("a" * 40, rec) is None and run_record.refusal("b" * 40, rec) is not None, "a written run must be the one the tag rule reads"
+        want = ["s1", "s2"]
+        assert "no seeded-recall record" in run_record.refusal("a" * 40, rec, want)
+        run_record.append_run(rec, sha="a" * 40, complete=False, green=True, dirty=False, seeds=["s1"])
+        assert "no run of it covers" in run_record.refusal("a" * 40, rec, want), "a run of half the seeds must not read as a whole recall"
+        run_record.append_run(rec, sha="a" * 40, complete=False, green=True, dirty=False, seeds=["s2"], not_graded_here=1)
+        assert run_record.refusal("a" * 40, rec, want) is None and run_record.refusal("b" * 40, rec, want) is not None, "two runs that together cover the ledger must be the ones the tag rule reads"
+        assert json.loads(rec.read_text().splitlines()[-1])["not_graded_here"] == 1, "a run must record its NOT-GRADED-HERE rows"
+    with tempfile.TemporaryDirectory() as td:
+        stale, live = Path(td) / "stale", Path(td) / "live"
+        (stale / "src").mkdir(parents=True)
+        (stale / "src" / "f").write_text("x")
+        (stale / ".git").write_text("gitdir: /nowhere\n")
+        live.mkdir()
+        assert sh(["git", "init", "-q", str(live)]).returncode == 0
+        inner = live / "inner"
+        inner.mkdir()
+        drop_foreign_tree(stale)
+        drop_foreign_tree(inner)
+        drop_foreign_tree(live)
+        assert not stale.exists() and not inner.exists() and (live / ".git").is_dir(), "a directory no worktree owns must be cleared (even inside a repo) and a real one kept"
+    with tempfile.TemporaryDirectory() as td:
+        src, base, packed = Path(td) / "src", Path(td) / "base", Path(td) / "a.tar.zst"
+        (src / "target" / "nextest").mkdir(parents=True)
+        (src / "target" / "nextest" / "binaries-metadata.json").write_text("{}")
+        assert sh(["tar", "--zstd", "-cf", str(packed), "-C", str(src), "target"]).returncode == 0
+        done = Cargo(Path("/t"), base, None, ("seeded",), packed).build([], Path(td) / "unpack.log")
+        assert done.returncode == 0 and (base / "target" / "nextest" / "binaries-metadata.json").is_file(), done.stdout
+        assert (base / "target" / "tmp").is_dir(), "an unpacked build has no CARGO_TARGET_TMPDIR, which a test baked it in writes to"
+    from dev.seeded import shards, verdict
+    shards.self_test()
+    verdict.self_test()
     pool_self_test()
+    patch_form_self_test()
     switch_self_test()
     print(f"self-test ok: seeded recall — manifest ({len(real)} rows), grading, build pool, stale and build checks, run record")
     return 0
+
+
+def build_archive(rows: list[Row], file: Path) -> int:
+    """Build the `seeded` test binaries of every hosted switch seed once into the nextest archive `file`: the build each hosted shard unpacks."""
+    from dev.seeded import shards
+
+    _, devbox_tests, _ = shards.load()
+    hosted = set(shards.expected(rows, devbox_tests))
+    cells = sorted({c for r in rows if r.seed in hosted and not r.na and r.switch for c in r.cells})
+    base = scratch_base()
+    tree, sha = prepare_tree(base)
+    logs = base / "logs"
+    logs.mkdir(exist_ok=True)
+    file.parent.mkdir(parents=True, exist_ok=True)
+    p = Cargo(tree, base / "sw", None, ("seeded",)).archive_to(cells, file.resolve(), logs / "archive.build.log")
+    print(f"archive of {len(cells)} cell(s) at {sha[:12]} -> {file} (rc {p.returncode})")
+    if p.returncode != 0:
+        print(p.stdout[-3000:])
+    return p.returncode
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1127,15 +1237,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--seeds", default="", help="comma-separated seed names (default: all)")
     ap.add_argument("--engines", default="", help="comma-separated engines (default: all)")
     ap.add_argument("--platform-rows", action="store_true", help="only the rows that declare a platform, failing a row of another platform (the island's run)")
+    ap.add_argument("--archive", default="", metavar="FILE", help="grade the switch rows on the shared nextest archive built by --build-archive")
+    ap.add_argument("--build-archive", default="", metavar="FILE", help="build the hosted switch seeds' `seeded` test binaries into this nextest archive and exit")
     ap.add_argument("--self-test", action="store_true", help="check the manifest and the grading logic; no build")
     ns = ap.parse_args(argv)
     if ns.self_test:
         return self_test()
+    if ns.build_archive:
+        return build_archive(parse_manifest(yaml.safe_load(MANIFEST.read_text())), Path(ns.build_archive))
     rows = select(parse_manifest(yaml.safe_load(MANIFEST.read_text())), ns.seeds, ns.engines)
     if ns.platform_rows:
         rows = platform_rows(rows)
     led = Ledger()
-    recall(led, rows, complete=not (ns.seeds or ns.engines or ns.platform_rows), owed_fails=ns.platform_rows)
+    recall(led, rows, complete=not (ns.seeds or ns.engines or ns.platform_rows), owed_fails=ns.platform_rows,
+           archive=Path(ns.archive).resolve() if ns.archive else None)
     return 1 if led.red else 0
 
 

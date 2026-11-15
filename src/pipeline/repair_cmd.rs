@@ -127,12 +127,16 @@ fn execute_repair(
     let mut results: Vec<(RepairAction, RepairOutcome)> =
         Vec::with_capacity(repair_plan.actions.len());
 
-    let _run_lease = super::chunked::claim_export_progress(
-        state,
-        &plan.export_name,
-        &plan.source.state_key(),
-        "repair its chunks",
-    )?;
+    let _run_lease = if seeded!("repair-rewrites-chunks-beside-a-live-run", false, true) {
+        Some(super::chunked::claim_export_progress(
+            state,
+            &plan.export_name,
+            &plan.source.state_key(),
+            "repair its chunks",
+        )?)
+    } else {
+        None
+    };
     let run_id = state.claim(plan.progress_key())?.latest_chunk_run()?;
 
     let mut src = source::create_source(&plan.source)?;

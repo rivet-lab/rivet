@@ -23,7 +23,14 @@ pub(crate) fn extract_first_cursor_value(
     cursor_column: &str,
     schema: &SchemaRef,
 ) -> Option<String> {
-    extract_cursor_value_at(batch, cursor_column, schema, false)
+    seeded!(
+        "first-cursor-value-is-a-constant",
+        {
+            let _ = extract_cursor_value_at(batch, cursor_column, schema, false);
+            Some("xyzzy".into())
+        },
+        extract_cursor_value_at(batch, cursor_column, schema, false)
+    )
 }
 
 fn extract_cursor_value_at(

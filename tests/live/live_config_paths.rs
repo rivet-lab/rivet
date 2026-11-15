@@ -204,14 +204,14 @@ fn url_file_follows_the_config_mssql() {
 
 #[cfg(feature = "oracle")]
 #[test]
-#[ignore = "live: requires docker compose oracle"]
+#[ignore = "live+gate-only: requires the oracle-latin1 service"]
 fn url_file_resolved_as_before_oracle() {
     url_file_resolved_as_before(SqlEngine::Oracle);
 }
 
 #[cfg(feature = "oracle")]
 #[test]
-#[ignore = "live: requires docker compose oracle"]
+#[ignore = "live+gate-only: requires the oracle-latin1 service"]
 fn url_file_follows_the_config_oracle() {
     url_file_follows_the_config(SqlEngine::Oracle);
 }

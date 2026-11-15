@@ -41,7 +41,9 @@ pub(crate) fn build_native_tls(cfg: &TlsConfig) -> Result<native_tls::TlsConnect
                 format!("tls: ca_file is not valid PEM: {}", e),
             )
         })?;
-        builder.disable_built_in_roots(true);
+        if seeded!("ca-file-second-trust-anchor", false, true) {
+            builder.disable_built_in_roots(true);
+        }
         builder.add_root_certificate(cert);
     }
 

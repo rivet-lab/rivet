@@ -143,7 +143,11 @@ pub(crate) fn slot_created_warning(slot: &str) -> String {
 
 /// Whether the replication slot `slot` exists on the server at `url`.
 pub(crate) fn slot_exists(url: &str, slot: &str, tls: Option<&TlsConfig>) -> Result<bool> {
-    let mut client = super::connect_client(url, tls)?;
+    slot_exists_on(&mut super::connect_client(url, tls)?, slot)
+}
+
+/// Whether the replication slot `slot` exists on the server `client` is connected to.
+pub(crate) fn slot_exists_on(client: &mut Client, slot: &str) -> Result<bool> {
     Ok(client
         .query_one(
             "SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)",
@@ -314,7 +318,12 @@ pub(crate) fn classify_routing(rel: &RelationRouting<'_>) -> RoutingVerdict {
         rs,
         rt,
     ) {
-        if rt.contains('.') {
+        if seeded!(
+            "pg-dotted-relname-routing-refusal-names-a-spelling-that-cannot-match",
+            false,
+            true
+        ) && rt.contains('.')
+        {
             return RoutingVerdict::Never(format!(
                 "pg cdc: `{cfg}` resolves to the relation `{rs}.{rt}`, whose NAME holds a dot. \
                  Routing reads a dotted `table:` as `schema.table`, so no spelling of `table:` \
@@ -479,7 +488,9 @@ impl PgChangeStream {
                     &[&cfg.as_str()],
                 )
                 .map_err(|e| {
-                    if e.code() == Some(&postgres::error::SqlState::FEATURE_NOT_SUPPORTED) {
+                    if seeded!("pg-dotted-relname-catalog-error-uncoded", false, true)
+                        && e.code() == Some(&postgres::error::SqlState::FEATURE_NOT_SUPPORTED)
+                    {
                         crate::error::coded(
                             crate::error::codes::SOURCE_CDC_TABLE_UNRESOLVED,
                             format!(
@@ -680,9 +691,17 @@ impl PgChangeStream {
     ) -> Result<Self> {
         // The batch dial: the plaintext gate, the forced-ssl connector, and a host:port-naming error.
         let mut client = super::connect_client(conn_str, tls)?;
+        if seeded!("session-set-on-a-pooled-cdc-connection", true, false) {
+            client.batch_execute(
+                "SET datestyle = 'ISO, MDY'; SET bytea_output = 'hex'; SET intervalstyle = 'postgres'; \
+                 SET extra_float_digits = 3; SET TimeZone = 'UTC';",
+            )?;
+        }
         // The one prerequisite check of a run, on the stream's own connection and before the
         // slot: its refusals carry rivet's `pg cdc:` prefix, so the setup hint is never prepended.
-        Self::refuse_unmet_prerequisites_on(&mut client, configured_tables, mode, true)?;
+        if seeded!("cdc-anchor-written-before-the-refusal", false, true) {
+            Self::refuse_unmet_prerequisites_on(&mut client, configured_tables, mode, true)?;
+        }
         let mut bare_schema = HashMap::new();
         for cfg in configured_tables {
             if let Some(sch) = search_path_schema(&mut client, cfg)? {
@@ -690,12 +709,7 @@ impl PgChangeStream {
             }
         }
         let domains = load_domains(&mut client)?;
-        let exists: bool = client
-            .query_one(
-                "SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)",
-                &[&slot],
-            )?
-            .get(0);
+        let exists = slot_exists_on(&mut client, slot)?;
         match slot_action(slot, exists, prior) {
             SlotAction::Reuse => {
                 refuse_a_slot_another_reader_advanced(&mut client, slot, checkpoint)?
@@ -723,6 +737,9 @@ impl PgChangeStream {
                     &[&slot],
                 )?;
             }
+        }
+        if seeded!("cdc-anchor-written-before-the-refusal", true, false) {
+            Self::refuse_unmet_prerequisites_on(&mut client, configured_tables, mode, true)?;
         }
         // Snapshot the bound AFTER the slot exists, so a commit landing between
         // slot creation and this read is ≤ bound (captured this run, not lost
@@ -854,6 +871,16 @@ impl PgChangeStream {
                         // #158: commit LSN on all, committed on the transaction's LAST
                         // event — on disk when it spilled (`TxBuffer::close_transaction`).
                         let (head, tail) = tx.close_transaction(&commit, &lsn)?;
+                        let head = seeded!(
+                            "committed-every-event",
+                            head.into_iter()
+                                .map(|mut e| {
+                                    e.committed = true;
+                                    e
+                                })
+                                .collect::<Vec<_>>(),
+                            head
+                        );
                         self.owed_through = owed_after_yield(
                             self.owed_through,
                             commit_lsn,
@@ -914,7 +941,11 @@ impl PgChangeStream {
                     self.exhausted = true;
                     break;
                 }
-                self.frontier_text = Some(lsn);
+                self.frontier_text = seeded!(
+                    "message-only-window-ends-the-drain",
+                    self.frontier_text.take(),
+                    Some(lsn)
+                );
             } else if data.starts_with("BEGIN") {
                 // Dropping any spill too — a transaction that never reached its
                 // COMMIT in this window is re-read from the slot next time.
@@ -1166,8 +1197,16 @@ enum OpenVerdict {
 fn open_verdict(slot: &str, saved: &Position, own: &str, confirmed: Option<&str>) -> OpenVerdict {
     let marked = saved.json().get(CONFIRMED_FIRST).and_then(|v| v.as_bool()) == Some(true);
     match (slot_advanced_by_another(slot, own, confirmed), marked) {
-        (Some(why), true) => OpenVerdict::Refuse(why),
-        (Some(_), false) => OpenVerdict::Adopt(confirmed.unwrap_or_default().to_string()),
+        (Some(why), true) => seeded!(
+            "pg-foreign-advance-adopted",
+            OpenVerdict::Adopt(confirmed.unwrap_or_default().to_string()),
+            OpenVerdict::Refuse(why)
+        ),
+        (Some(_why), false) => seeded!(
+            "pg-upgrade-false-log-gap",
+            OpenVerdict::Refuse(_why),
+            OpenVerdict::Adopt(confirmed.unwrap_or_default().to_string())
+        ),
         (None, false) => OpenVerdict::Mark,
         (None, true) => OpenVerdict::Keep,
     }
@@ -1185,7 +1224,13 @@ fn adopted(saved: &Position, lsn: &str) -> Position {
 /// The refusal for a slot confirmed past `own`, the checkpoint's position; `None` when it is not.
 fn slot_advanced_by_another(slot: &str, own: &str, confirmed: Option<&str>) -> Option<String> {
     let (own_n, conf_n) = (parse_lsn(own)?, parse_lsn(confirmed?)?);
-    (conf_n > own_n).then(|| {
+    (conf_n > own_n
+        && seeded!(
+            "pg-slot-advanced-by-another-reader",
+            own_n == u64::MAX,
+            true
+        ))
+    .then(|| {
         format!(
             "pg cdc: slot '{slot}' is confirmed at {}, past {own}, the last position rivet \
              confirmed for this export (its checkpoint): another reader consumed the changes \
@@ -1284,7 +1329,13 @@ fn owed_after_yield(
 
 /// What stays owed downstream after the sink acked `acked`: nothing once the ack covers the last data-bearing commit yielded.
 fn owed_after_ack(owed_through: Option<u64>, acked: Option<u64>) -> Option<u64> {
-    owed_through.filter(|owed| acked.is_none_or(|a| a < *owed))
+    owed_through.filter(|owed| {
+        seeded!(
+            "ack-past-unwritten",
+            acked.is_none(),
+            acked.is_none_or(|a| a < *owed)
+        )
+    })
 }
 
 /// Wire budget per peek: the sink's ack cadence (the part rollover), clamped to
@@ -1572,7 +1623,13 @@ pub(crate) fn truncate_refusal_message(schema: &str, table: &str) -> String {
 /// change event; `None` when it resolves nowhere or to a view, which leaves the election as it was.
 fn search_path_schema(client: &mut Client, cfg: &str) -> Result<Option<String>> {
     use anyhow::Context as _;
-    if cfg.contains('.') {
+    if cfg.contains('.')
+        || seeded!(
+            "pg-cdc-bare-name-routes-every-schema",
+            !cfg.is_empty(),
+            false
+        )
+    {
         return Ok(None);
     }
     Ok(client
@@ -1732,6 +1789,22 @@ pub(crate) fn parse_test_decoding(
         ChangeOp::Delete => (Some(cols), None, Some(names), None),
         ChangeOp::Update => {
             let (before, before_names) = old.unzip();
+            let (before, before_names) = seeded!(
+                "absent-old-cell-read-as-moved-key",
+                (
+                    before.zip(before_names).map(|(v, bn)| {
+                        names
+                            .iter()
+                            .map(|n| match bn.iter().position(|b| b == n) {
+                                Some(i) => v[i].clone(),
+                                None => RivetValue::Null,
+                            })
+                            .collect::<Vec<RivetValue>>()
+                    }),
+                    None
+                ),
+                (before, before_names)
+            );
             (before, Some(cols), Some(names), before_names)
         }
         ChangeOp::Insert => (None, Some(cols), Some(names), None),
@@ -1874,6 +1947,15 @@ struct ParsedColumn {
 /// Types whose `test_decoding` text is not the server's text for the value: a bit string prints as `B'110'`, the server's text is `110`.
 const DECODER_REWRITTEN_TYPES: &[&str] = &["bit", "bit varying"];
 
+/// The decoder-rewritten types, none when the defect is seeded.
+fn decoder_rewritten_types() -> &'static [&'static str] {
+    seeded!(
+        "pg-bit-literal-delivered-as-server-text",
+        &[],
+        DECODER_REWRITTEN_TYPES
+    )
+}
+
 /// The `name (type)` of each column whose wire type is one the decoder rewrites.
 fn decoder_rewritten_columns<'a>(
     columns: impl IntoIterator<Item = (&'a str, &'a postgres::types::Type)>,
@@ -1886,7 +1968,7 @@ fn decoder_rewritten_columns<'a>(
                 postgres::types::Type::VARBIT => "bit varying",
                 _ => return None,
             };
-            DECODER_REWRITTEN_TYPES
+            decoder_rewritten_types()
                 .contains(&label)
                 .then(|| format!("{name} ({label})"))
         })
@@ -1948,7 +2030,7 @@ fn map_columns(raw: Vec<td_line::RawColumn>, domains: &Domains) -> Vec<ParsedCol
             let toast_unchanged = !c.quoted && c.value == "unchanged-toast-datum";
             let mapped = map_pg_value(base, &c.value, c.quoted);
             let unrepresentable = mapped.is_none() && !toast_unchanged;
-            let rewritten_type = DECODER_REWRITTEN_TYPES
+            let rewritten_type = decoder_rewritten_types()
                 .contains(&base)
                 .then(|| base.to_string());
             ParsedColumn {

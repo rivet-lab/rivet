@@ -551,7 +551,7 @@ fn stem_dir(stem: Option<&str>, dir: &str) -> String {
 
 /// `name` prefixed with the `-o` stem (`<stem>_<name>`), so two configs never name one checkpoint.
 fn stemmed(stem: Option<&str>, name: &str) -> String {
-    match stem {
+    match seeded!("init-cdc-checkpoint-shared-by-name", None, stem) {
         Some(s) => format!("{s}_{name}"),
         None => name.to_string(),
     }
@@ -561,7 +561,10 @@ fn stemmed(stem: Option<&str>, name: &str) -> String {
 fn mode_segment(info: &TableInfo, source_type: &str, mode: &str) -> String {
     let seg = export_segment(info, source_type);
     if mode == "cdc" {
-        format!("{seg}{CDC_NAME_SUFFIX}")
+        format!(
+            "{seg}{}",
+            seeded!("init-cdc-shares-batch-name", "", CDC_NAME_SUFFIX)
+        )
     } else {
         seg
     }
@@ -702,11 +705,14 @@ fn quote_ident(part: &str, source_type: &str) -> String {
 
 /// The `query:` lines reading `col_list` from `relation`: a folded block, or one double-quoted scalar when a name holds a character the fold would rewrite.
 fn export_query_lines(col_list: &str, relation: &str) -> Vec<String> {
-    if col_list
-        .chars()
-        .chain(relation.chars())
-        .any(is_yaml_special)
-    {
+    if seeded!(
+        "init-name-folded-into-query",
+        false,
+        col_list
+            .chars()
+            .chain(relation.chars())
+            .any(is_yaml_special)
+    ) {
         return vec![format!(
             "    query: {}",
             yaml_double_quote(&format!("SELECT {col_list} FROM {relation}"))
@@ -1415,7 +1421,11 @@ fn cdc_export_lines(
     let mut lines = vec![
         format!(
             "  - name: {}",
-            yaml_quote_if_needed(&format!("{}{CDC_NAME_SUFFIX}", info.table))
+            yaml_quote_if_needed(&format!(
+                "{}{}",
+                info.table,
+                seeded!("init-cdc-shares-batch-name", "", CDC_NAME_SUFFIX)
+            ))
         ),
         "    # change data capture — reads the transaction log (grants: docs/reference/cdc.md)"
             .to_string(),
@@ -1462,7 +1472,11 @@ omitting differ per engine — see cdc.md)",
             slot_name(dest.cdc_name_stem.as_deref(), ident),
             per_cluster_note(dest)
         )),
-        "mssql" => lines.push(match &info.cdc_capture_instance {
+        "mssql" => lines.push(match seeded!(
+            "init-capture-instance-derived",
+            &None::<String>,
+            &info.cdc_capture_instance
+        ) {
             Some(ci) => format!(
                 "      capture_instance: {}  # the instance cdc.change_tables holds for this table; needs SQL Server Agent",
                 yaml_quote_if_needed(ci)

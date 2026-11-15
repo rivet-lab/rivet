@@ -195,7 +195,11 @@ fn seeded_range_max(total: usize, committed: Vec<(usize, Option<String>)>) -> Ve
     let mut max = vec![None; total];
     for (idx, key) in committed {
         if let Some(slot) = max.get_mut(idx) {
-            *slot = key;
+            *slot = seeded!(
+                "resumed-run-cursor-below-its-maximum",
+                key.filter(|_| false),
+                key
+            );
         }
     }
     max
@@ -334,7 +338,13 @@ enum UnreadTail {
 
 /// The tail a resumed run still owes: `None` unless its last range is open-ended and committed.
 fn unread_tail(ranges: &[crate::state::KeysetRangeRow]) -> Option<UnreadTail> {
-    let last = ranges.last().filter(|r| r.done && r.hi.is_none())?;
+    let last = ranges.last().filter(|r| {
+        seeded!(
+            "resumed-parallel-keyset-stops-at-its-last-range",
+            !r.done,
+            r.done
+        ) && r.hi.is_none()
+    })?;
     Some(match &last.max_key {
         Some(key) => UnreadTail::Past(key.clone()),
         None => UnreadTail::Again,

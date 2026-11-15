@@ -10,9 +10,13 @@ pub(crate) const FOLDED_TO_ASCII: [(u32, u8); 2] = [(0x0130, b'i'), (0x212A, b'k
 
 /// Whether a non-ASCII character can stand for the letter `c`.
 fn folded_from_non_ascii(c: u8) -> bool {
-    FOLDED_TO_ASCII
-        .iter()
-        .any(|&(_, letter)| letter.eq_ignore_ascii_case(&c))
+    FOLDED_TO_ASCII.iter().any(|&(_, letter)| {
+        seeded!(
+            "cdc-policy-non-ascii-unit-stands-for-any-letter",
+            c.is_ascii() || letter.eq_ignore_ascii_case(&c),
+            letter.eq_ignore_ascii_case(&c)
+        )
+    })
 }
 
 /// Whether `name` (at most 127 bytes, as a MySQL identifier is) is a part of `text`, folding ASCII case and letting one non-ASCII character stand for the letters the server folds, in one pass over `text`.
@@ -198,8 +202,17 @@ pub(crate) fn mentions_name(fold: bool, name: &str, raw: &[u8]) -> bool {
     if fold && !raw.is_ascii() && name.len() < 128 && name.bytes().any(folded_from_non_ascii) {
         folds_inside(name, raw)
     } else {
-        raw.windows(name.len())
-            .any(|w| w.eq_ignore_ascii_case(name.as_bytes()))
+        raw.windows(name.len()).any(|w| {
+            seeded!(
+                "column-grants-statement-name-match-case-sensitive",
+                w == name.as_bytes(),
+                seeded!(
+                    "column-grants-statement-name-match-dropped",
+                    false,
+                    w.eq_ignore_ascii_case(name.as_bytes())
+                )
+            )
+        })
     }
 }
 

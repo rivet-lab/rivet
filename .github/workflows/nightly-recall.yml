@@ -1,0 +1,229 @@
+name: Nightly Recall
+
+on:
+  schedule:
+    - cron: "15 1 * * *"
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Commit to grade (full or short sha); empty grades the head of the ref the run was started on.
+        required: false
+        default: ""
+      seeds:
+        description: "Comma-separated hosted seed names (empty = every hosted seed, sharded)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  NO_COLOR: "1"
+
+jobs:
+  plan:
+    name: Resolve the commit and deal the seeds
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      shards: ${{ steps.deal.outputs.shards }}
+      expected: ${{ steps.deal.outputs.expected }}
+      count: ${{ steps.deal.outputs.count }}
+    steps:
+      - id: resolve
+        env:
+          INPUT_SHA: ${{ inputs.sha }}
+          REF_SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          sha=$(gh api "repos/$REPO/commits/${INPUT_SHA:-$REF_SHA}" --jq .sha)
+          [ "${#sha}" -eq 40 ]
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.resolve.outputs.sha }}
+          persist-credentials: false
+
+      - name: The tree is the commit asked for
+        env:
+          WANT: ${{ steps.resolve.outputs.sha }}
+        run: test "$(git rev-parse HEAD)" = "$WANT"
+
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        with:
+          tool: uv
+
+      - id: deal
+        env:
+          SEEDS: ${{ inputs.seeds }}
+        run: |
+          set -eu
+          uv sync --frozen
+          uv run python -m dev.seeded.shards --seeds "$SEEDS" | tee plan.txt
+          grep -E '^(shards|expected)=' plan.txt >> "$GITHUB_OUTPUT"
+          echo "count=$(sed -n 's/^shards=//p' plan.txt | python3 -c 'import json, sys; print(len(json.load(sys.stdin)))')" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build the seeded binaries once
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+
+      - name: The tree is the commit asked for
+        env:
+          WANT: ${{ needs.plan.outputs.sha }}
+        run: test "$(git rev-parse HEAD)" = "$WANT"
+
+      - uses: ./.github/actions/live-stack
+        with:
+          stack: none
+
+      - name: Build the archive every shard unpacks
+        env:
+          CARGO_BUILD_JOBS: "4"
+        run: |
+          mkdir -p out
+          set +e
+          make seeded-recall SEEDED_ARGS="--build-archive out/seeded-build.tar.zst" 2>&1 | tee out/build.log
+          rc=${PIPESTATUS[0]}
+          du -h out/seeded-build.tar.zst | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: seeded-build
+          path: out/seeded-build.tar.zst
+          compression-level: 0
+          if-no-files-found: error
+
+  recall:
+    name: Recall shard ${{ matrix.shard.index }} (${{ matrix.shard.stack }}, ~${{ matrix.shard.minutes }} min)
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+
+      - name: The tree is the commit asked for
+        env:
+          WANT: ${{ needs.plan.outputs.sha }}
+        run: test "$(git rev-parse HEAD)" = "$WANT"
+
+      - uses: ./.github/actions/live-stack
+        with:
+          stack: ${{ matrix.shard.stack }}
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: seeded-build
+          path: out/build
+
+      - name: Seeded recall for this shard
+        env:
+          SEEDS: ${{ matrix.shard.seeds }}
+          INDEX: ${{ matrix.shard.index }}
+          STACK: ${{ matrix.shard.stack }}
+          RIVET_TEST_STATE_URL: postgresql://rivet:rivet@127.0.0.1:5433/rivet_state_ci
+        run: |
+          mkdir -p out/verdict
+          set +e
+          (while sleep 60; do echo "$(date -u +%T) $(free -m | awk 'NR==2{print $3, $7}')" >> out/mem.log; docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' 2>/dev/null | sort -k2 -h | tail -4 >> out/containers.log; done) &
+          sampler=$!
+          make seeded-recall SEEDED_ARGS="--seeds $SEEDS --archive out/build/seeded-build.tar.zst" 2>&1 | tee out/recall.txt
+          rc=${PIPESTATUS[0]}
+          kill "$sampler"
+          echo "$rc" > out/verdict/exit-code.txt
+          cp target/seeded/recall-runs.jsonl out/verdict/record.jsonl
+          grep -E "^[a-z0-9-]+ +\|" out/recall.txt > out/verdict/table.txt
+          peak=$(awk 'NR==1||$2>m{m=$2} END{print m+0}' out/mem.log)
+          low=$(awk 'NR==1||$3<l{l=$3} END{print l+0}' out/mem.log)
+          { echo "### Recall shard $INDEX (exit $rc, stack $STACK)"; echo "memory used peak ${peak} MB, available low ${low} MB"; echo '```'; cat out/verdict/table.txt; echo '```'; grep -E "took|MISSED|NOT GRADED|STALE" out/recall.txt | head -40; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: recall-shard-${{ matrix.shard.index }}
+          path: out/verdict/
+          overwrite: true
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: recall-logs-${{ matrix.shard.index }}
+          path: |
+            out/
+            !out/build/
+            target/seeded/logs/
+          overwrite: true
+          if-no-files-found: warn
+
+      - name: Disk after the recall
+        if: always()
+        run: df -h / && free -m
+
+      - name: Stop services
+        if: always()
+        run: docker compose down -v
+
+  verdict:
+    name: Recall verdict
+    needs: [plan, recall]
+    if: ${{ always() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        with:
+          tool: uv
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: recall-shard-*
+          path: shards
+        continue-on-error: true
+
+      - name: One verdict for the commit
+        env:
+          SHA: ${{ needs.plan.outputs.sha }}
+          COUNT: ${{ needs.plan.outputs.count }}
+          EXPECTED: ${{ needs.plan.outputs.expected }}
+        run: |
+          set +e
+          mkdir -p out
+          uv sync --frozen
+          uv run python -m dev.seeded.verdict --dir shards --sha "$SHA" --shards "$COUNT" --expected "$EXPECTED" --record out/recall-runs.jsonl 2>&1 | tee out/verdict.txt
+          rc=${PIPESTATUS[0]}
+          { echo "### Nightly recall of ${SHA:0:12}"; echo '```'; cat shards/*/table.txt 2>/dev/null; cat out/verdict.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: recall-verdict
+          path: out/
+          overwrite: true
+          if-no-files-found: warn

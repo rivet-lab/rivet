@@ -1,1 +1,0 @@
-- **Every seeded-defect class was a source patch that needed its own build of rivet.** **Now** eleven of them are `seeded!` switches compiled only under the cargo feature `seeded`, and the shipped binary holds none of that code; behaviour of rivet is unchanged. **What to do:** nothing.

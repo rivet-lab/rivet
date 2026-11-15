@@ -248,10 +248,12 @@ seed-garbage-mssql:
 # its closing line are keyed on the baseline rather than on this flag, so such a
 # run is reported honestly instead of being announced as a skip it was not.
 property-no-silent-null:  ## Property matrix: every non-NULL source value is delivered equal or refused by code, never NULL (smoke tier; ARGS="--tier full" for the weekly one). Takes one live slot.
-	$(LIVE) $(PY) -m dev.release_oracle.property_no_silent_null --engine all $(ARGS)
-	$(LIVE) $(PY) -m dev.release_oracle.property_no_silent_null_grants
-	$(LIVE) $(PY) -m dev.release_oracle.property_no_silent_null_cdc --engine all
-	$(LIVE) $(PY) -m dev.release_oracle.property_no_silent_null_load
+	@rc=0; \
+	 $(LIVE) $(PY) -m dev.release_oracle.property_no_silent_null --engine all $(ARGS) || rc=$$?; \
+	 $(LIVE) $(PY) -m dev.release_oracle.property_no_silent_null_grants || rc=$$?; \
+	 $(LIVE) $(PY) -m dev.release_oracle.property_no_silent_null_cdc --engine all || rc=$$?; \
+	 $(LIVE) $(PY) -m dev.release_oracle.property_no_silent_null_load || rc=$$?; \
+	 exit $$rc
 
 release-oracle:  ## Release gate, BARE: only what is already in your shell. With no RIVET_PREV_RELEASE_BIN in your environment the prev-release comparison is GIVEN UP by name (cannot support a tag); with one exported, those three stages run and grade. The replica/standby topology rows are GIVEN UP by name too (a down stand is SKIP here, FAIL in release-oracle-full). Read the SKIP count — with nothing set it is ~95 PASS / 60 SKIP and still prints RELEASE-READY.
 	$(LIVE_ALL) $(PY) -m dev.release_oracle --without-prev-release-comparison --without-replica-topologies $(ARGS)
@@ -317,8 +319,7 @@ MIGRATION_CARRIER_TAG     ?= v0.31.0
 MIGRATION_CARRIER_BIN     ?= $(PREV_RELEASE_DIR)/field/rivet-$(MIGRATION_CARRIER_TAG)-$(TRIPLE)/rivet
 # The LEASE carrier: a release that holds the run and load leases this tree's migration waits for
 # (0.32.0+), writes an older state schema (v37), and still advances a Postgres slot past its checkpoint
-# (#649, fixed in 0.32.2). PINNED like the carriers above, and found in the field cache `field_state
-# --fetch` fills below; the cells that run it beside this tree fail the census when it is missing.
+# (#649, fixed in 0.32.2). PINNED like the carriers above.
 LEASE_CARRIER_TAG         ?= v0.32.1
 LEASE_CARRIER_BIN         ?= $(PREV_RELEASE_DIR)/field/rivet-$(LEASE_CARRIER_TAG)-$(TRIPLE)/rivet
 # The release whose state `rivet state copy` must carry to PostgreSQL: 0.30.0 (state v31), the one a
@@ -354,22 +355,36 @@ GATE_ENV = \
   BQ_ORACLE_DATASET='$(BQ_ORACLE_DATASET)' \
   BQ_ORACLE_BUCKET='$(BQ_ORACLE_BUCKET)'
 
+define FETCH_PINNED
+	-@if [ ! -x "$(2)" ]; then \
+	 $(PY) -m dev.release_oracle.field_state --fetch-release $(3) $(1); \
+	fi
+	@[ -x "$(2)" ] || { echo "  $(4): $(1) was not downloaded to $(2)"; exit 1; }
+	@echo "  $(4): $$($(2) --version)"
+endef
+
 release-oracle-prev-bin:  ## Download the PREVIOUS release binary (the regression + scale baseline) and the pinned carriers. A downloaded asset, never a locally rebuilt parent.
 	@rm -rf $(PREV_RELEASE_DIR) && mkdir -p $(PREV_RELEASE_DIR)
 	@$(PY) -m dev.release_oracle.field_state --fetch-release $(PREV_RELEASE_DIR) latest
-	-@if [ ! -x "$(FIELD_REPLAY_CARRIER_BIN)" ]; then \
-	 $(PY) -m dev.release_oracle.field_state --fetch-release $(PREV_RELEASE_DIR)/carrier $(FIELD_REPLAY_CARRIER_TAG); \
-	fi
-	@echo "  field-replay carrier: $$($(FIELD_REPLAY_CARRIER_BIN) --version)"
+	$(call FETCH_PINNED,$(FIELD_REPLAY_CARRIER_TAG),$(FIELD_REPLAY_CARRIER_BIN),$(PREV_RELEASE_DIR)/carrier,field-replay carrier)
 	-@$(PY) -m dev.release_oracle.field_state --fetch $(PREV_RELEASE_DIR)/field
-	-@if [ ! -x "$(MIGRATION_CARRIER_BIN)" ]; then \
-	 $(PY) -m dev.release_oracle.field_state --fetch-release $(PREV_RELEASE_DIR)/field $(MIGRATION_CARRIER_TAG); \
-	fi
-	@echo "  migration carrier: $$($(MIGRATION_CARRIER_BIN) --version)"
-	-@if [ ! -x "$(STATE_COPY_FROM_BIN)" ]; then \
-	 $(PY) -m dev.release_oracle.field_state --fetch-release $(PREV_RELEASE_DIR)/field $(STATE_COPY_FROM_TAG); \
-	fi
-	@echo "  state-copy source release: $$($(STATE_COPY_FROM_BIN) --version)"
+	$(call FETCH_PINNED,$(MIGRATION_CARRIER_TAG),$(MIGRATION_CARRIER_BIN),$(PREV_RELEASE_DIR)/field,migration carrier)
+	$(call FETCH_PINNED,$(LEASE_CARRIER_TAG),$(LEASE_CARRIER_BIN),$(PREV_RELEASE_DIR)/field,lease carrier)
+	$(call FETCH_PINNED,$(STATE_COPY_FROM_TAG),$(STATE_COPY_FROM_BIN),$(PREV_RELEASE_DIR)/field,state-copy source release)
+
+
+.PHONY: release-oracle-nightly release-oracle-compat release-oracle-hosted-half
+release-oracle-nightly:  ## The per-run gate with the whole GATE_ENV and no prev-release comparison: the part of the gate a hosted runner can grade.
+	$(LIVE_ALL) env $(GATE_ENV) $(PY) -m dev.release_oracle --without-prev-release-comparison --without-replica-topologies --no-cloud --hosted $(ARGS)
+
+release-oracle-compat: release-oracle-prev-bin  ## The measured stages (previous-release differential, field replay, regression) against the downloaded previous release.
+	@prev=$$(ls -t -d $(PREV_RELEASE_DIR)/rivet-v*/rivet 2>/dev/null | head -1); \
+	 $(LIVE_ALL) env $(GATE_ENV) RIVET_PREV_RELEASE_BIN="$$prev" $(PY) -m dev.release_oracle --island --no-cloud --hosted $(ARGS)
+
+release-oracle-hosted-half: release-oracle-prev-bin sweep-test-db  ## The hosted half of the release gate (dev/release_oracle/halves.py) on a hosted runner: seeded recall on, no cloud sweep; ARGS picks the slice with --live-shard i/n.
+	@prev=$$(ls -t -d $(PREV_RELEASE_DIR)/rivet-v*/rivet 2>/dev/null | head -1); \
+	 echo "  previous release: $${prev:-<none>}"; \
+	 $(LIVE_ALL) env $(GATE_ENV) RIVET_PREV_RELEASE_BIN="$$prev" $(PY) -m dev.release_oracle --with-seeded-recall --half hosted --hosted $(ARGS)
 
 release-oracle-full: release-oracle-prev-bin sweep-test-db sweep-test-cloud  ## Release gate with the WHOLE environment against the local dev stand, seeded-defect recall included. This is the one a release is judged by: its green verdict for HEAD is what dev/pytools/release.py requires.
 	@# The gate grades `target/release/rivet`. A stale one grades yesterday's

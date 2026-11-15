@@ -374,10 +374,16 @@ impl ManifestVerification {
 
     /// Turn the same bare absent-manifest verdict into the fatal `failure` of a delivery the state records.
     pub fn require_recorded_delivery(&mut self, prefix: &str, export: &str) {
-        self.require_manifest_with(Failure::RecordedDeliveryAbsent {
-            prefix: prefix.to_string(),
-            export: export.to_string(),
-        });
+        if seeded!(
+            "validate-reads-a-lost-delivery-as-never-delivered",
+            false,
+            true
+        ) {
+            self.require_manifest_with(Failure::RecordedDeliveryAbsent {
+                prefix: prefix.to_string(),
+                export: export.to_string(),
+            });
+        }
     }
 
     /// Whether this is the bare absent-manifest verdict: no manifest, no `_SUCCESS`, no other failure.
@@ -488,6 +494,9 @@ pub fn verify_at_destination(
     };
 
     let manifest_bytes = match dest.head(&manifest_key) {
+        Ok(None) if seeded!("marker-without-manifest-read-as-legacy", true, false) => {
+            return Ok(with_depth(ManifestVerification::legacy()));
+        }
         Ok(None) => {
             let mut v = ManifestVerification::legacy();
             let orphan_marker = match dest.head(&success_key) {

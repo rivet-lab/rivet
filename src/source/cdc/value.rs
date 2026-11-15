@@ -938,25 +938,27 @@ fn parse_enum_labels(native: &str) -> Labels {
                     label.push('\'');
                 }
                 Some('\'') | None => break,
-                Some('\\') => match chars.peek() {
-                    Some('\\') => {
-                        chars.next();
-                        label.push('\\');
+                Some('\\') if seeded!("mysql-enum-label-escapes-unread", false, true) => {
+                    match chars.peek() {
+                        Some('\\') => {
+                            chars.next();
+                            label.push('\\');
+                        }
+                        Some('n') => {
+                            chars.next();
+                            label.push('\n');
+                        }
+                        Some('r') => {
+                            chars.next();
+                            label.push('\r');
+                        }
+                        Some('0') => {
+                            chars.next();
+                            label.push('\0');
+                        }
+                        _ => label.push('\\'),
                     }
-                    Some('n') => {
-                        chars.next();
-                        label.push('\n');
-                    }
-                    Some('r') => {
-                        chars.next();
-                        label.push('\r');
-                    }
-                    Some('0') => {
-                        chars.next();
-                        label.push('\0');
-                    }
-                    _ => label.push('\\'),
-                },
+                }
                 Some(other) => label.push(other),
             }
         }
@@ -985,8 +987,11 @@ impl MysqlCellFix {
 
     /// Whether the fix wrote NULL over a held `input` date: the zero or partial date a MySQL column cannot hand on.
     pub(crate) fn nulled_a_date(&self, input: &RivetValue, out: &RivetValue) -> bool {
-        matches!(self, MysqlCellFix::ZeroDate | MysqlCellFix::TimestampEpoch)
-            && matches!(out, RivetValue::Null)
+        seeded!(
+            "mysql-zero-date-count-misses-a-class",
+            matches!(self, MysqlCellFix::TimestampEpoch),
+            matches!(self, MysqlCellFix::ZeroDate | MysqlCellFix::TimestampEpoch)
+        ) && matches!(out, RivetValue::Null)
             && !matches!(input, RivetValue::Null)
     }
 
@@ -1036,12 +1041,19 @@ impl MysqlCellFix {
             (MysqlCellFix::SetLabels(labels), V::UInt(u)) => set_labels(readable(labels)?, *u),
             (MysqlCellFix::TimeOfDay, V::TimeMicros(us)) if !crate::types::is_time_of_day(*us) => {
                 return Err(FixRefusal {
-                    reason: format!(
-                        "{} A stream has no query to cast it in: declare the column `string` in \
-                         `columns:` to carry it as text, or leave the column out of the capture, \
-                         then: {}",
-                        crate::source::mysql::time_outside_day(*us),
-                        crate::source::cdc::checkpoint_identity::RECOVER
+                    reason: seeded!(
+                        "mysql-cdc-time-remedy-names-the-batch-cast",
+                        format!(
+                            "{} Cast it in a query, e.g. TIME_TO_SEC(col) or CAST(col AS CHAR)",
+                            crate::source::mysql::time_outside_day(*us)
+                        ),
+                        format!(
+                            "{} A stream has no query to cast it in: declare the column `string` in \
+                             `columns:` to carry it as text, or leave the column out of the capture, \
+                             then: {}",
+                            crate::source::mysql::time_outside_day(*us),
+                            crate::source::cdc::checkpoint_identity::RECOVER
+                        )
                     ),
                     code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
                 });

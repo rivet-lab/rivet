@@ -464,7 +464,11 @@ impl ExportSink {
 
     pub fn maybe_split(&mut self) -> Result<()> {
         let written = self.writer.as_ref().map(|w| w.bytes_written()).unwrap_or(0);
-        if should_split(written, self.max_file_size, self.part_rows) {
+        if seeded!(
+            "max-file-size-never-checked",
+            false,
+            should_split(written, self.max_file_size, self.part_rows)
+        ) {
             self.split_now()?;
         }
         Ok(())
@@ -675,6 +679,18 @@ impl ExportSink {
 
     /// Write one slice that is known to fit the current part's partition budget.
     fn write_batch_part(&mut self, dest_batch: &RecordBatch) -> Result<()> {
+        let rows = dest_batch.num_rows();
+        let rotated;
+        let dest_batch = if seeded!(
+            "row-lost-at-rotation",
+            self.part_rows == 0 && self.total_rows > 0 && rows > 1,
+            false
+        ) {
+            rotated = dest_batch.slice(1, rows - 1);
+            &rotated
+        } else {
+            dest_batch
+        };
         self.total_rows += dest_batch.num_rows();
         if let Some(rp) = self.row_progress.as_mut() {
             let n = dest_batch.num_rows() as i64;
@@ -920,9 +936,13 @@ impl ExportSink {
 
     /// The keyset high-water mark to advance/checkpoint from.
     pub(in crate::pipeline) fn effective_cursor(&self) -> Option<String> {
-        self.source_cursor
-            .clone()
-            .or_else(|| self.last_cursor_value.clone())
+        seeded!(
+            "keyset-high-water-forgotten",
+            None,
+            self.source_cursor
+                .clone()
+                .or_else(|| self.last_cursor_value.clone())
+        )
     }
 }
 

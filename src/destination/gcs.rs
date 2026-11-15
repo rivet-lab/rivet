@@ -230,11 +230,18 @@ impl CloudBackend for GcsBackend {
                 .disable_config_load();
             log::info!("GCS: allow_anonymous (emulator mode; no OAuth / service account)");
         } else if let DestinationCredential::GcsKeyFile(cred_file) = &credential {
-            crate::config::credential_file::google_key("destination.credentials_file", cred_file)?;
-            builder = builder
-                .credential_path(cred_file)
-                .disable_vm_metadata()
-                .disable_config_load();
+            if seeded!("named-credential-falls-back", false, true) {
+                crate::config::credential_file::google_key(
+                    "destination.credentials_file",
+                    cred_file,
+                )?;
+                builder = builder
+                    .credential_path(cred_file)
+                    .disable_vm_metadata()
+                    .disable_config_load();
+            } else {
+                builder = builder.credential_path(cred_file);
+            }
             log::info!("GCS: using credentials_file from config: {}", cred_file);
         } else if let Some(loader) = gcp_auth::try_authorized_user_loader()? {
             // A refreshing loader, not a static `.token()`: opendal pins a

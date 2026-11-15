@@ -517,7 +517,13 @@ impl MongoChangeStream {
         };
         let clock = loaded
             .as_ref()
-            .map(|pos| OrdinalClock::from_checkpoint(&pos.0))
+            .map(|pos| {
+                seeded!(
+                    "mongo-cdc-ordinal-restarts-on-resume",
+                    OrdinalClock::default(),
+                    OrdinalClock::from_checkpoint(&pos.0)
+                )
+            })
             .unwrap_or_default();
         let known = loaded
             .as_ref()
@@ -759,7 +765,12 @@ pub(crate) struct MongoCdcCapability {
 impl MongoCdcCapability {
     /// The pre-image request the stream may carry: servers before 6.0 have none and a sharded one refuses the option (51771); an unprobed version keeps the request.
     pub(crate) fn before_image_request(&self) -> Option<FullDocumentBeforeChangeType> {
-        (self.major == 0 || self.major >= 6).then_some(FullDocumentBeforeChangeType::WhenAvailable)
+        seeded!(
+            "mongo-sharded-cdc-requests-pre-images-below-6-0",
+            Some(FullDocumentBeforeChangeType::WhenAvailable),
+            (self.major == 0 || self.major >= 6)
+                .then_some(FullDocumentBeforeChangeType::WhenAvailable)
+        )
     }
 
     /// One-line fidelity declaration for the log / `doctor`.
@@ -1005,10 +1016,14 @@ fn diagnose_stream_error(e: mongodb::error::Error) -> anyhow::Error {
         return crate::source::cdc::checkpoint_identity::log_gap(history_lost_message(&text));
     }
     if names_standalone(&text) {
-        return anyhow::Error::new(crate::error::CodedError::new(
-            crate::error::codes::SOURCE_CDC_PREREQUISITE,
-            STANDALONE_MESSAGE,
-        ));
+        return seeded!(
+            "mongo-standalone-uncoded",
+            anyhow::Error::from(e),
+            anyhow::Error::new(crate::error::CodedError::new(
+                crate::error::codes::SOURCE_CDC_PREREQUISITE,
+                STANDALONE_MESSAGE,
+            ))
+        );
     }
     if names_oversize_event(&text) {
         return crate::source::cdc::checkpoint_identity::undecodable(format!(

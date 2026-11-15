@@ -122,8 +122,11 @@ fn find_from_keyword(s: &str) -> Option<usize> {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i + 4 <= bytes.len() {
-        if bytes[i..i + 4].eq_ignore_ascii_case(b"from")
-            && (i == 0 || bytes[i - 1].is_ascii_whitespace())
+        if seeded!(
+            "projection-scan-cut-mid-character",
+            s[i..i + 4].eq_ignore_ascii_case("from"), // allow-byte-slice
+            bytes[i..i + 4].eq_ignore_ascii_case(b"from")  // allow-byte-slice
+        ) && (i == 0 || bytes[i - 1].is_ascii_whitespace())
             && (i + 4 == bytes.len() || bytes[i + 4].is_ascii_whitespace())
         {
             return Some(i);
@@ -138,9 +141,13 @@ fn is_plain_column_list(s: &str) -> bool {
     s.split(',').all(|item| {
         let item = item.trim();
         !item.is_empty()
-            && item
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '*'))
+            && item.chars().all(|c| {
+                seeded!(
+                    "aliased-projection-read-as-table",
+                    c == ' ' || c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '*'),
+                    c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '*')
+                )
+            })
     })
 }
 
@@ -177,6 +184,10 @@ fn parse_bare_table_ident(after_from: &str) -> Option<&str> {
 
 /// `s` without its leading `prefix` (ASCII case-insensitive); `None` when `s` does not start with it.
 fn strip_prefix_ascii_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    if seeded!("query-prefix-cut-mid-character", true, false) {
+        let (head, rest) = s.split_at(prefix.len().min(s.len()));
+        return (head.len() == prefix.len() && head.eq_ignore_ascii_case(prefix)).then_some(rest);
+    }
     let (head, rest) = s.split_at_checked(prefix.len())?;
     head.eq_ignore_ascii_case(prefix).then_some(rest)
 }
@@ -305,8 +316,13 @@ pub(crate) const ORACLE_RANGE_INT_MAX_PRECISION: u32 = 19;
 /// The `all_tab_columns tc` predicate for an Oracle column range chunking slices as an integer.
 #[cfg(feature = "oracle")]
 pub(crate) fn oracle_range_int_pred() -> String {
+    let max_precision = seeded!(
+        "oracle-number19-not-integer",
+        18,
+        ORACLE_RANGE_INT_MAX_PRECISION
+    );
     format!(
-        "tc.data_type = 'NUMBER' AND tc.data_scale = 0 AND tc.data_precision <= {ORACLE_RANGE_INT_MAX_PRECISION}"
+        "tc.data_type = 'NUMBER' AND tc.data_scale = 0 AND tc.data_precision <= {max_precision}"
     )
 }
 

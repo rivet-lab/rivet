@@ -62,6 +62,9 @@ pub fn generate_chunks(min: i64, max: i64, chunk_size: i64) -> Vec<(i64, i64)> {
 /// The pieces of the inclusive `ranges` that no window of `windows` covers, in order.
 pub(crate) fn ranges_uncovered(ranges: &[(i64, i64)], windows: &[(i64, i64)]) -> Vec<(i64, i64)> {
     let mut out = Vec::new();
+    if seeded!("resume-plans-no-hole-in-stored-windows", true, false) {
+        return out;
+    }
     for &(start, end) in ranges {
         let mut from = Some(start);
         for &(lo, hi) in windows.iter().filter(|w| w.1 >= start && w.0 <= end) {

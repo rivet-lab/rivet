@@ -1687,12 +1687,15 @@ def verify_auth(led: Ledger) -> None:
     if not have("cargo"):
         _skipped(led, "infra", "mongo", "auth", "-", "mongo-auth: cargo absent", "no cargo", cause=SkipCause.ENV)
         return
-    if not _tcp_open("127.0.0.1", 27020):
+    from ..pytools import registry
+
+    port = urllib.parse.urlparse(registry.gate_profiles()["mongo-auth"]["url"]).port
+    if not _tcp_open("127.0.0.1", port):
         _skipped(
             led, "infra", "mongo", "auth", "-",
-            "mongo-auth: :27020 unreachable (docker compose up -d mongo-auth)",
+            f"mongo-auth: :{port} unreachable (docker compose up -d mongo-auth)",
             "mongo-auth down",
-            cause=SkipCause.ENV, target=stand_health.tcp_target("127.0.0.1", 27020),
+            cause=SkipCause.ENV, target=stand_health.tcp_target("127.0.0.1", port),
         )
         return
     _drive_live_tests(
@@ -2141,17 +2144,21 @@ def _module_red(led: Ledger, scenario: str, label: str, name: str, why: str, log
 def _run_live_modules(led: Ledger, scenario: str, label: str, phase: str,
                       modules: list[str], env: dict[str, str] | None = None,
                       expr: str | None = None, threads: int | None = None,
-                      again: tuple[str, dict[str, str]] | None = None, keep: bool = False) -> None:
+                      again: tuple[str, dict[str, str]] | None = None, keep: bool = False, register: bool = True) -> None:
     """Run live_suite `modules` (or the nextest filter `expr`) through the gate binary; one ledger row per test case.
 
     `again` is (an env var, the env that sets it): a test whose self-skip names the var runs a second time under that env, and that leg is its verdict.
-    `keep` copies each nextest log into target/gate-failures; every nextest leg is timed as a split."""
+    `keep` copies each nextest log into target/gate-failures; every nextest leg is timed as a split; `register` False leaves RAN_LIVE_MODULES alone."""
     led.phase(f"{label} · {phase}")
     if not have("cargo"):
         _skipped(led, scenario, "batch", "-", "-", f"{label}: cargo absent", "no cargo", cause=SkipCause.ENV)
         return
-    RAN_LIVE_MODULES.update(modules)
+    if register:
+        RAN_LIVE_MODULES.update(modules)
     log_path = work_dir() / f"{scenario}_{'_'.join(modules)[:120]}.log"
+    if expr is None:
+        from .live_modules import dedicated_expr
+        expr = dedicated_expr(modules)
 
     def leg(path: Path, leg_expr: str, leg_env: dict[str, str] | None, split: str):
         """One nextest leg, timed as `split` and its log kept when `keep`."""
@@ -2164,7 +2171,7 @@ def _run_live_modules(led: Ledger, scenario: str, label: str, phase: str,
 
     since = stand_health.BOOK.mark()
     verdicts, started, skipped, panics = leg(
-        log_path, expr or " | ".join(f"test(/^{m}::/)" for m in modules), env, f"nextest {label}")
+        log_path, expr, env, f"nextest {label}")
     if started is not None and len(verdicts) != started:
         _failed(led, scenario, "batch", "-", "-",
                 f"{label}: graded {len(verdicts)} of the {started} tests nextest ran — the rest "

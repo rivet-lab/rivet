@@ -169,7 +169,10 @@ fn deliver_number_text(
     precision: u8,
     scale: i8,
 ) -> TypeMapping {
-    if kind == OraKind::Number && number_type(precision, scale) == RivetType::String {
+    if kind == OraKind::Number
+        && number_type(precision, scale) == RivetType::String
+        && seeded!("number-text-without-its-label", false, true)
+    {
         mapping.with_text(TextForm::DecimalPlain)
     } else {
         mapping
@@ -191,7 +194,11 @@ fn with_oracle_warning(mapping: TypeMapping, bare_number: bool, sub_us: bool) ->
             ..mapping
         };
         if timestamp {
-            lossy.with_refusal(timestamp_ns_refusal(&name, zoned))
+            seeded!(
+                "oracle-timestamp-ns-undeclared-truncated",
+                lossy.with_warning(timestamp_ns_refusal(&name, zoned)),
+                lossy.with_refusal(timestamp_ns_refusal(&name, zoned))
+            )
         } else {
             lossy.with_warning(INTERVAL_NS_WARNING)
         }
@@ -226,12 +233,15 @@ fn schema_from_mappings(mappings: Vec<TypeMapping>, overrides: &ColumnOverrides)
                     .as_ref()
                     .filter(|_| overrides.contains_key(&mapping.column_name))
                 {
-                    crate::source::refuse_unbuildable_override(
-                        "oracle",
-                        &mapping.column_name,
-                        &mapping.rivet_type,
-                        build_column(&[], 0, &mapping.column_name, dt, None, None),
-                    )?;
+                    let built = build_column(&[], 0, &mapping.column_name, dt, None, None);
+                    if seeded!("override-without-builder-internal-stop", false, true) {
+                        crate::source::refuse_unbuildable_override(
+                            "oracle",
+                            &mapping.column_name,
+                            &mapping.rivet_type,
+                            built,
+                        )?;
+                    }
                 }
                 fields.push(f)
             }
@@ -496,7 +506,14 @@ fn build_column(
             let mut b = TimestampNanosecondBuilder::with_capacity(rows.len());
             for r in rows {
                 match r.get::<Option<OracleTimestamp>>(idx).ora()? {
-                    Some(t) => b.append_value(timestamp_nanos(&t, name)?),
+                    Some(t) => match seeded!(
+                        "mssql-ns-override-out-of-range-null",
+                        timestamp_nanos(&t, name).ok(),
+                        Some(timestamp_nanos(&t, name)?)
+                    ) {
+                        Some(n) => b.append_value(n),
+                        None => b.append_null(),
+                    },
                     None => b.append_null(),
                 }
             }

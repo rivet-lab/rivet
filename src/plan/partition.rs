@@ -43,6 +43,13 @@ pub(crate) fn is_child_label(value: &str) -> bool {
             PartitionGranularity::Year,
         ]
         .into_iter()
+        .filter(|_g| {
+            seeded!(
+                "state-reset-takes-only-the-current-granularity",
+                matches!(_g, PartitionGranularity::Day),
+                true
+            )
+        })
         .any(|g| is_label_at(value, g))
 }
 

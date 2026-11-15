@@ -34,7 +34,12 @@ impl<'a> ContentCheck<'a> {
         let ExtractionStrategy::Chunked(cp) = &plan.strategy else {
             return None;
         };
-        plan.verify.requires_content().then(|| Self {
+        (seeded!(
+            "resume-trusts-a-same-size-part-under-verify-content",
+            false,
+            true
+        ) && plan.verify.requires_content())
+        .then(|| Self {
             dest,
             column: cp.column.clone(),
             by_days: cp.by_days.is_some(),

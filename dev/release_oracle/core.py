@@ -32,6 +32,7 @@ from __future__ import annotations
 import functools
 
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -59,8 +60,21 @@ ISLAND_GATE = "release-oracle-island"
 REDUCED_GATE = "release-oracle"
 #: The verdict of a run whose tree (HEAD or a tracked file) changed between its first stage and its report.
 TREE_MOVED = "TREE-MOVED"
+#: The two machines one gate sha is graded on (`--half`); each writes its own record kind, `half_gate(half)`.
+HOSTED, DEVBOX = "hosted", "devbox"
+HALVES = (HOSTED, DEVBOX)
+
+
+def half_gate(half: str) -> str:
+    """The record kind of one half of the full gate."""
+    return f"{FULL_GATE}-{half}"
+
+
+#: The record kind of one slice of the hosted half (`--live-shard i/n`): never the half, so no reader takes one slice for the whole of it.
+HOSTED_SHARD_GATE = f"{FULL_GATE}-{HOSTED}-shard"
+
 #: The gate kinds a tag rests on: an env skip no `skip_allow` entry excuses is ungraded in each, at the gate and at the tag.
-TAG_GATES = (FULL_GATE, ISLAND_GATE)
+TAG_GATES = (FULL_GATE, ISLAND_GATE, *map(half_gate, HALVES), HOSTED_SHARD_GATE)
 
 
 class Status(str, Enum):
@@ -346,11 +360,11 @@ class Ledger:
         except Exception as e:  # noqa: BLE001 — evidence must not fail the gate it describes
             print(f"  evidence: NOT recorded ({e})")
 
-    def close_known_red(self) -> None:
-        """After a FULL run: a known-red entry no failure matched is fixed — it must be removed."""
+    def close_known_red(self, lane: str = "gate") -> None:
+        """After a FULL run of `lane`: a known-red entry that lane owes and no failure matched is fixed, so it must be removed."""
         from . import known_red
         for k in known_red.KNOWN_RED:
-            if k.match not in self.known_seen:
+            if known_red.owed_by(k, lane) and k.match not in self.known_seen:
                 # Straight to FAIL: the message quotes the entry, so `failed` would match it.
                 passed = k.match in self.known_passed
                 why = ("its cell PASSED this run — it is fixed; remove it from dev/release_oracle/known_red.py"
@@ -441,7 +455,8 @@ class Ledger:
         return "NOT RELEASABLE" if self.red else "NOT GRADED" if self.ungraded_count(gate) else "RELEASE-READY"
 
     def report(self, *, full: bool = False, gate: str = REDUCED_GATE, tree: tuple[str, bool] | None = None,
-               config: dict | None = None, reread: Callable[[], tuple[str, bool]] | None = None) -> int:
+               config: dict | None = None, reread: Callable[[], tuple[str, bool]] | None = None, shard: str = "",
+               stages: Sequence[str] = ()) -> int:
         """Print the table and the verdict; only a `full` gate run records a timings line (naming `gate`) and may say RELEASE-READY, and not when the tree `reread` returns is no longer the `tree` the run began on."""
         self.record_evidence()
         print()
@@ -529,14 +544,16 @@ class Ledger:
                 sum(c.status is Status.PASS for c in self.cells),
                 sum(c.status is Status.FAIL for c in self.cells),
                 self._phase_load, gate=gate, tree=tree, config=config, splits=self._splits,
-                skipped=sum(self.skip_counts().values()), skipped_env=self.env_skips(),
+                skipped=sum(self.skip_counts().values()), skipped_env=self.env_skips(), shard=shard, stages=stages,
             )
         known = [c for c in self.cells if c.status is Status.KNOWN]
         if known:
             print(self._c("1;33", f"  {len(known)} KNOWN RED cell(s), each recorded in known_red.py with a reason and an expiry."))
         if ungraded:
-            print(self._c("1;35", f"  {ungraded} cell(s) NOT GRADED: the oracle's own read failed (see ⚠ above). "
+            print(self._c("1;35", f"  {ungraded} cell(s) NOT GRADED: the oracle's own read failed or an env skip no skip_allow entry excuses. "
                                   "Not a product verdict; re-run them."))
+            for c in (c for c in self.graded(gate) if c.status is Status.INFRA):
+                print(self._c("1;35", f"    {c.engine}/{c.scenario}/{c.store}: {c.detail[:160]}"))
         if moved:
             print(self._c("1;31", f"  {TREE_MOVED} — the tree was {tree} when the run began and {end_tree} when it ended; the stages "
                                   "graded more than one tree. Run the gate again on a tree nobody touches."))
@@ -606,8 +623,8 @@ def record_timings(path: Path, phases: list[tuple[str, float]], spans: list[tupl
                    verdict: str, passed: int, failed: int, loads: dict[str, tuple[float, float]] | None = None,
                    gate: str = REDUCED_GATE, tree: tuple[str, bool] | None = None, config: dict | None = None,
                    splits: list[tuple[str, float]] | None = None, skipped: int = 0,
-                   skipped_env: list[tuple[str, str, str]] | None = None) -> dict:
-    """Append this run's verdict (full commit, the graded binary's stamp and SHA-256, gate kind, the configuration it ran under, dirty tree, the skip count and every env-skipped cell), phase, span and split timings (`splits_min`, uncut) and load averages to `path`; print the phase deltas against the previous run."""
+                   skipped_env: list[tuple[str, str, str]] | None = None, shard: str = "", stages: Sequence[str] = ()) -> dict:
+    """Append this run's verdict (full commit, the graded binary's stamp and SHA-256, gate kind, the configuration it ran under, dirty tree, the skip count, every env-skipped cell, the stages it ran and the host's system and machine), phase, span and split timings (`splits_min`, uncut) and load averages to `path`; print the phase deltas against the previous run."""
     import datetime as _dt
     import json as _json
 
@@ -619,6 +636,7 @@ def record_timings(path: Path, phases: list[tuple[str, float]], spans: list[tupl
         "binary": binary_stamp(),
         "binary_sha256": file_sha256(rivet_bin()),
         "gate": gate,
+        **({"shard": shard} if shard else {}),
         "config": config,
         "dirty": dirty,
         "verdict": verdict,
@@ -626,6 +644,8 @@ def record_timings(path: Path, phases: list[tuple[str, float]], spans: list[tupl
         "failed": failed,
         "skipped": skipped,
         "skipped_env": [list(i) for i in skipped_env or []],
+        "stages": list(stages),
+        "host": {"system": platform.system(), "machine": platform.machine()},
         "total_min": round(sum(d for _, d in phases) / 60.0, 1),
         "phases_min": {n.split(" — ")[0]: round(d / 60.0, 2) for n, d in phases},
         "phases_load1": {n.split(" — ")[0]: [round(x, 1) for x in v] for n, v in (loads or {}).items()},
@@ -636,7 +656,7 @@ def record_timings(path: Path, phases: list[tuple[str, float]], spans: list[tupl
     prev = None
     if path.exists():
         lines = [x for x in path.read_text().splitlines() if x.strip()]
-        same = [r for r in map(_json.loads, lines) if r.get("gate") == gate]
+        same = [r for r in map(_json.loads, lines) if r.get("gate") == gate and r.get("shard", "") == shard]
         prev = same[-1] if same else None
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as f:
@@ -969,6 +989,9 @@ SKIP_ALLOWED: dict[str, str] = {
     "live_clickhouse_load::a_cdc_stream_staged_on_real_gcs_is_pulled_by_clickhouse":
         "2026-11-02: needs a GCS HMAC key pair (RIVET_TEST_GCS_HMAC_ID / _SECRET) that no gate host holds, "
         "and minting one is an owner action; closes when the keys are provisioned and the gate env exports them (review 2027-02-01)",
+    "live_load_key_admission::an_oracle_number_cursor_is_refused_into_clickhouse":
+        "2026-11-13: the refuse-then-remedy copy-back (tests/common/rig/remedy.rs) cannot restore a cloud destination to the refused state; "
+        "0.33 ships it ungraded, 0.34 closes it (review 2027-02-01)",
 }
 
 

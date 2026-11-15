@@ -581,14 +581,21 @@ pub(super) fn mark_keyset_refusals(
     declared_wider: &[(String, crate::source::keyset_key::Wider)],
 ) {
     for c in columns {
-        c.not_keyset = crate::source::keyset_key::column_refusal(
-            source,
-            mappings,
-            declared_wider,
-            crate::source::keyset_key::KeyShape::Single,
-            &c.name,
-        )
-        .is_some();
+        c.not_keyset = seeded!(
+            "keyset-key-init-mirror",
+            mappings.iter().any(|m| {
+                m.column_name == c.name
+                    && matches!(m.rivet_type, crate::types::RivetType::Decimal { .. })
+            }),
+            crate::source::keyset_key::column_refusal(
+                source,
+                mappings,
+                declared_wider,
+                crate::source::keyset_key::KeyShape::Single,
+                &c.name,
+            )
+            .is_some()
+        );
     }
 }
 
@@ -856,7 +863,11 @@ pub fn init(
     let mut yaml_destination = yaml_destination;
     if matches!(format, InitFormat::Yaml) {
         refuse_unsupported_forced_mode(source_url, mode_override)?;
-        yaml_destination.cdc_name_stem = output.and_then(yaml_scaffold::output_stem);
+        yaml_destination.cdc_name_stem = seeded!(
+            "init-cdc-stream-names-shared",
+            output.and(None),
+            output.and_then(yaml_scaffold::output_stem)
+        );
     }
     let (scaffold, snapshots) = match format {
         InitFormat::Yaml => init_yaml(
@@ -1347,9 +1358,15 @@ fn reject_mongo_schema(schema_flag: Option<&str>) -> Result<()> {
 
 /// Whether the PostgreSQL server at `source_url` answers that it is in recovery (a standby); an unanswered probe is not one.
 fn pg_in_recovery(source_url: &str, tls: Option<&crate::config::TlsConfig>) -> bool {
-    crate::source::postgres::connect_client(source_url, tls)
-        .and_then(|mut c| Ok(c.query_one("SELECT pg_is_in_recovery()", &[])?.get(0)))
-        .unwrap_or(false)
+    let probe = crate::source::postgres::connect_client(source_url, tls).and_then(|mut c| {
+        Ok(c.query_one("SELECT pg_is_in_recovery()", &[])?
+            .get::<_, bool>(0))
+    });
+    seeded!(
+        "init-bounds-a-drain-on-a-standby",
+        probe.is_err(),
+        probe.unwrap_or(false)
+    )
 }
 
 #[allow(clippy::too_many_arguments)] // mirrors `init`'s own surface; a params

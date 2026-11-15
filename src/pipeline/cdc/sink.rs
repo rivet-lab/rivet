@@ -311,7 +311,7 @@ fn roll_all(
     let unmarked: Vec<usize> = pending
         .iter()
         .copied()
-        .filter(|&i| !sinks[i].marked)
+        .filter(|&i| seeded!("cdc-run-start-marker", false, !sinks[i].marked))
         .collect();
     let markers: Vec<(&dyn crate::destination::Destination, RunManifest)> = unmarked
         .iter()
@@ -442,18 +442,31 @@ pub(crate) fn run_to_files(
             let mut yielded_this_pass = 0usize;
             while let Some(ev) = stream.next_change() {
                 let mut ev = ev?;
-                yielded_this_pass += 1;
+                yielded_this_pass += seeded!("cdc-drain-pass-count-pinned-at-zero", 0, 1);
                 txn_seq.stamp(&mut ev);
                 let committed = ev.committed;
                 let commit_at = committed.then(|| ev.position.clone());
+                seeded!(
+                    "cdc-roll-checkpoints-its-trigger",
+                    {
+                        if committed {
+                            last_commit = Some(ev.position.clone());
+                            unacked_commit = true;
+                        }
+                    },
+                    ()
+                );
                 let mut buffered = false;
                 if let Some(at) = sinks
                     .iter()
                     .position(|s| table_matches(cfg.engine, &s.out.table, &ev.schema, &ev.table))
                 {
                     ev.raise_poison()?;
-                    let lacking =
-                        columns_the_schema_lacks(&sinks[at].out.columns, &sinks[at].gone, &ev);
+                    let lacking = seeded!(
+                        "cdc-hot-added-column-dropped",
+                        Vec::<String>::new(),
+                        columns_the_schema_lacks(&sinks[at].out.columns, &sinks[at].gone, &ev)
+                    );
                     if !lacking.is_empty() {
                         let table = sinks[at].out.table.clone();
                         let fresh = match reschema.as_mut() {
@@ -535,6 +548,14 @@ pub(crate) fn run_to_files(
                 }
                 if committed && cfg.max_events.is_some_and(|m| emitted >= m) {
                     hit_max = true;
+                    if seeded!("capped-run-skips-remainder", true, false) {
+                        while let Some(Ok(rest)) = stream.next_change() {
+                            if rest.committed {
+                                last_commit = Some(rest.position.clone());
+                                unacked_commit = true;
+                            }
+                        }
+                    }
                     break;
                 }
             }
@@ -549,7 +570,10 @@ pub(crate) fn run_to_files(
             }
         }
         let tables: Vec<String> = sinks.iter().map(|s| s.out.table.clone()).collect();
-        if let crate::source::cdc::RowImage::Partial { why } = stream.row_image(&tables) {
+        if let (true, crate::source::cdc::RowImage::Partial { why }) = (
+            seeded!("cdc-hot-added-column-dropped", false, true),
+            stream.row_image(&tables),
+        ) {
             return Err(crate::source::cdc::open_partial_image_refusal(
                 run.engine, &why,
             ));
@@ -756,7 +780,13 @@ fn flush(
     let schema_names: Vec<&str> = columns.iter().map(|m| m.column_name.as_str()).collect();
     for (i, m) in columns.iter().enumerate() {
         let dt = schema.field(arrays.len()).data_type();
-        let fix = value::mysql_cell_fix(engine, &m.source_native_type).filter(|f| f.applies_to(dt));
+        let fix = value::mysql_cell_fix(engine, &m.source_native_type).filter(|f| {
+            seeded!(
+                "mysql-cdc-time-remedy-names-the-batch-cast",
+                true,
+                f.applies_to(dt)
+            )
+        });
         let memo = image_name_memo(events, &m.column_name);
         let refuse = |r: value::CellRefusal| {
             r.into_error(&m.column_name, dt, overridden.contains(&m.column_name))

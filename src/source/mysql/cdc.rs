@@ -50,6 +50,9 @@ type CachedTableMap = (
 /// How long the server keeps the binlog dump open while rivet is busy flushing a roll to the store (the server default is 60 s).
 const DUMP_WRITE_TIMEOUT_SECS: u32 = 3600;
 
+#[cfg(feature = "seeded")]
+static GRANTS_SESSION: std::sync::Mutex<Option<Conn>> = std::sync::Mutex::new(None);
+
 pub(crate) struct MysqlChangeStream {
     stream: BinlogStream,
     /// TABLE_MAP cache: the event (Arc — rows-event decode borrows it) plus
@@ -345,7 +348,10 @@ impl MysqlChangeStream {
         own_db: &str,
         matches: &[crate::source::cdc::identity::CatalogMatch],
     ) -> Option<String> {
-        if !own_db.is_empty() && matches.iter().any(|m| m.schema == own_db) {
+        if !own_db.is_empty()
+            && matches.iter().any(|m| m.schema == own_db)
+            && seeded!("mysql-cdc-bare-name-refused-beside-a-twin", false, true)
+        {
             return Some(own_db.to_string());
         }
         let mut base: Vec<&str> = matches
@@ -692,7 +698,9 @@ impl MysqlChangeStream {
         configured_tables: Vec<String>,
     ) -> Result<Self> {
         let mut conn = connect_conn(url, tls)?;
-        Self::refuse_unmet_prerequisites_on(&mut conn, &configured_tables)?;
+        if seeded!("cdc-anchor-written-before-the-refusal", false, true) {
+            Self::refuse_unmet_prerequisites_on(&mut conn, &configured_tables)?;
+        }
         let identity = Self::server_identity(&mut conn)?;
         Self::open_on(
             conn,
@@ -731,7 +739,12 @@ impl MysqlChangeStream {
         configured: &[String],
     ) -> Result<HashMap<String, crate::source::cdc::ReadableColumns>> {
         let own_db = Self::own_db_on(conn);
-        super::column_grants::readable_columns_of(conn, configured, &own_db, &HashMap::new())
+        let bare = seeded!(
+            "column-grants-batch-bare-name-read-by-the-stream-rule",
+            Self::bare_name_databases(conn, &own_db, configured),
+            HashMap::new()
+        );
+        super::column_grants::readable_columns_of(conn, configured, &own_db, &bare)
     }
 
     /// The grants of a `columns_from: grants` run, read once on one connection before the anchor.
@@ -758,7 +771,10 @@ impl MysqlChangeStream {
     fn note_statement(&mut self, raw: &[u8], log_pos: u64) {
         let (in_transaction, marks) = statement_frame(self.in_transaction, raw);
         self.in_transaction = in_transaction;
-        if re_read_marked(self.readable.is_some(), marks) {
+        if re_read_marked(
+            self.readable.is_some(),
+            seeded!("grant-change-not-seen-mid-run", false, marks),
+        ) {
             self.grants_pending
                 .get_or_insert_with(|| (self.file.clone(), log_pos));
         }
@@ -780,8 +796,24 @@ impl MysqlChangeStream {
         let (Some(before), Some((url, tls))) = (&self.readable, &self.grants_source) else {
             return Ok(());
         };
-        let mut conn = connect_conn(url, tls.as_ref())?;
+        let mut conn = seeded!(
+            "column-grants-reread-on-a-cached-session",
+            match GRANTS_SESSION.lock().ok().and_then(|mut g| g.take()) {
+                Some(cached) => cached,
+                None => connect_conn(url, tls.as_ref())?,
+            },
+            connect_conn(url, tls.as_ref())?
+        );
         let read = Self::readable_on(&mut conn, &self.configured_tables, true)?;
+        seeded!(
+            "column-grants-reread-on-a-cached-session",
+            {
+                if let Ok(mut g) = GRANTS_SESSION.lock() {
+                    *g = Some(conn);
+                }
+            },
+            ()
+        );
         let now = read.unwrap_or_default();
         let columns = |r: &HashMap<_, crate::source::cdc::ReadableColumns>, t: &String| {
             r.get(t).map(|c| c.columns.clone())
@@ -815,7 +847,13 @@ impl MysqlChangeStream {
         resolved: &HashMap<String, crate::source::cdc::ReadableColumns>,
         now: &HashMap<String, crate::source::cdc::ReadableColumns>,
     ) -> Result<()> {
-        for table in configured {
+        for table in configured.iter().filter(|_| {
+            seeded!(
+                "column-grants-moved-between-reads-mixed-in-one-run",
+                false,
+                true
+            )
+        }) {
             let (before, after) = (resolved.get(table), now.get(table));
             if before.map(|c| &c.columns) == after.map(|c| &c.columns) {
                 continue;
@@ -1187,7 +1225,7 @@ impl MysqlChangeStream {
         // at a part commit — so an idle bounded run (zero changes drained) would
         // otherwise leave no checkpoint, the next run would re-anchor to a newer
         // "current" position, and every change in between would be silently skipped.
-        if !projecting {
+        if !projecting && seeded!("cdc-anchor-written-before-the-refusal", false, true) {
             Self::refuse_absent_tables_on(&mut conn, &configured_tables)?;
         }
         let (file, pos) = Self::current_coordinates(&mut conn)?;
@@ -1217,6 +1255,12 @@ impl MysqlChangeStream {
                 crate::source::cdc::checkpoint_identity::RECOVER
             );
             Self::write_anchor(path, &file, pos, &identity)?;
+        }
+        if seeded!("cdc-anchor-written-before-the-refusal", true, false) {
+            Self::refuse_unmet_prerequisites_on(&mut conn, &configured_tables)?;
+            if !projecting {
+                Self::refuse_absent_tables_on(&mut conn, &configured_tables)?;
+            }
         }
         Self::open_on(
             conn,
@@ -1265,7 +1309,16 @@ impl MysqlChangeStream {
             .close_transaction(&commit, &format_args!("{}:{log_pos}", self.file))
         {
             Ok((head, tail)) => {
-                self.pending.extend(head);
+                self.pending.extend(seeded!(
+                    "committed-every-event",
+                    head.into_iter()
+                        .map(|mut e| {
+                            e.committed = true;
+                            e
+                        })
+                        .collect::<Vec<_>>(),
+                    head
+                ));
                 self.spooled = tail;
             }
             // Sealing the spill can fail, and a silent drop would deliver the head
@@ -1431,7 +1484,11 @@ impl MysqlChangeStream {
                         .and_then(|cfg| readable.get(cfg))
                         .map(|r| super::column_grants::kept_positions(&image_names, &r.columns))
                 });
-                let captured = matches!(captured_keep, Some(Some(_)));
+                let captured = seeded!(
+                    "cdc-partial-image-projected",
+                    false,
+                    matches!(captured_keep, Some(Some(_)))
+                );
                 let keep = captured_keep.map(Option::unwrap_or_default);
                 let full_arity = image_names.len();
                 let image_names: std::sync::Arc<[String]> = match &keep {
@@ -1465,11 +1522,17 @@ impl MysqlChangeStream {
                         before.as_ref(),
                         after.as_ref(),
                     ) {
-                        self.tx.push(
-                            boundary_marker(op, &position),
-                            crate::source::cdc::spill::encode_event,
-                            &format_args!("{}:{log_pos}", self.file),
-                        )?;
+                        if seeded!(
+                            "update-delivering-nothing-leaves-the-checkpoint-behind",
+                            false,
+                            true
+                        ) {
+                            self.tx.push(
+                                boundary_marker(op, &position),
+                                crate::source::cdc::spill::encode_event,
+                                &format_args!("{}:{log_pos}", self.file),
+                            )?;
+                        }
                         continue;
                     }
                     // A cell with no faithful representation is a DEFERRED refusal,
@@ -1656,7 +1719,14 @@ pub(crate) fn grants_difference(table: &str, before: &[String], now: &[String]) 
             .map(|c| format!("`{c}`"))
             .collect()
     };
-    let (gained, lost) = (missing(now, before), missing(before, now));
+    let (gained, lost) = seeded!(
+        "column-grants-schema-change-names-no-column",
+        (
+            missing(now, before).into_iter().take(0).collect::<Vec<_>>(),
+            missing(before, now).into_iter().take(0).collect::<Vec<_>>()
+        ),
+        (missing(now, before), missing(before, now))
+    );
     let mut changes = Vec::new();
     if !gained.is_empty() {
         changes.push(format!("gained {}", gained.join(", ")));
@@ -2014,7 +2084,11 @@ pub(crate) fn classify_mysql_routing(
 
 /// The `sql_mode` a QUERY event was logged under; the default lexing when the event carries none.
 fn event_mode(qe: &QueryEvent<'_>) -> SqlMode {
-    mode_of(qe.status_vars_raw())
+    mode_of(seeded!(
+        "cdc-sql-mode-not-read",
+        &qe.status_vars_raw()[..0],
+        qe.status_vars_raw()
+    ))
 }
 
 /// The `sql_mode` among the raw status variables of a QUERY event; the default lexing when there is none.
@@ -2166,7 +2240,14 @@ pub(crate) fn column_rename_target(
     event_db: &str,
     mode: SqlMode,
 ) -> Option<(String, String)> {
-    let tokens = alter_tokens(sql, mode)?;
+    let tokens = alter_tokens(
+        seeded!(
+            "column-rename-in-an-executable-comment-missed",
+            sql.split("/*").next().unwrap_or(""),
+            sql
+        ),
+        mode,
+    )?;
     let (table, at) = alter_header(&tokens, event_db)?;
     alter_spec_starts(&tokens, at)
         .into_iter()
@@ -2245,7 +2326,11 @@ fn refused_column_rename(
     mode: SqlMode,
     configured: &[String],
 ) -> Option<(String, String)> {
-    if !projecting {
+    if seeded!(
+        "column-rename-in-the-backlog-read-as-before",
+        true,
+        !projecting
+    ) {
         return None;
     }
     column_rename_target(sql, event_db, mode)
@@ -2260,7 +2345,7 @@ fn refused_table_rename(
     mode: SqlMode,
     configured: &[String],
 ) -> Option<Option<(String, String)>> {
-    if !projecting {
+    if !projecting || seeded!("cdc-table-rename-not-refused", !sql.is_empty(), false) {
         return None;
     }
     renamed_tables(sql, event_db, mode)?.into_iter().find(|t| {
@@ -2430,7 +2515,12 @@ pub(crate) fn query_refusal(
     let spelling = Spelling::of_collation(text.collation);
     let (sql, byte_per_char) = lossless_text(text.raw, spelling);
     let (db, db_bytes) = lossless_text(text.db, Spelling::Utf8);
-    let fold = fold.then_some(NameFold {
+    let fold = seeded!(
+        "cdc-no-policy-name-compare-ignores-the-fold",
+        policy && fold,
+        fold
+    )
+    .then_some(NameFold {
         byte_per_char,
         spelling,
     });
@@ -2459,12 +2549,13 @@ pub(crate) fn query_refusal(
         return Some(QueryRefusal::Drop(t));
     }
     if let Some(db) = drop_database_target(sql, mode)
+        .filter(|_| seeded!("cdc-drop-database-not-refused", false, true))
         .and_then(|name| captured_database(name.as_deref(), configured, databases, fold))
     {
         return Some(QueryRefusal::DropDatabase(db));
     }
     if let Some(t) = partition_rows_targets(sql, event_db, mode)
-        .filter(|_| by_text)
+        .filter(|_| seeded!("cdc-partition-data-change-not-refused", false, by_text))
         .and_then(|ts| ts.into_iter().find_map(|t| ours(t.as_ref())))
     {
         return Some(QueryRefusal::PartitionRows(t));
@@ -2805,7 +2896,11 @@ pub(crate) fn xa_prepare_refusal_message(schema: &str, table: &str) -> String {
 /// Whether a pending grants re-read may wait past this event.
 fn defers_the_grants_re_read(data: &Option<EventData<'_>>) -> bool {
     match data {
-        Some(EventData::QueryEvent(qe)) => !is_transaction_control(qe.query_raw()),
+        Some(EventData::QueryEvent(qe)) => seeded!(
+            "column-grants-privilege-statement-reconnects",
+            false,
+            !is_transaction_control(qe.query_raw())
+        ),
         Some(
             EventData::GtidEvent(_)
             | EventData::AnonymousGtidEvent(_)
@@ -2848,7 +2943,13 @@ fn mention_under_policy<'a>(
     configured: &'a [String],
 ) -> Option<&'a str> {
     policy
-        .then(|| statement_mentions(fold, raw, configured))
+        .then(|| {
+            statement_mentions(
+                seeded!("cdc-policy-name-arm-ignores-the-case-fold", false, fold),
+                raw,
+                configured,
+            )
+        })
         .flatten()
 }
 

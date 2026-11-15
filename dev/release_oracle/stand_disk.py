@@ -20,11 +20,12 @@ try:
 except ImportError:  # pragma: no cover - bare sys.path entry
     from core import ROOT  # type: ignore
 
-__all__ = ["HELPER_IMAGE", "START_FLOOR_GIB", "ISLAND_START_FLOOR_GIB", "WATCH_FLOOR_GIB", "free_gib", "start_refusal", "low",
+__all__ = ["HELPER_IMAGE", "START_FLOOR_GIB", "ISLAND_START_FLOOR_GIB", "HOSTED_START_FLOOR_GIB", "WATCH_FLOOR_GIB", "free_gib", "start_refusal", "low",
            "disk_reason", "vm_run"]
 
 START_FLOOR_GIB = 150  # ratchet-pin: gate-start-free-disk-floor (review 2027-02-01)
 ISLAND_START_FLOOR_GIB = 60  # ratchet-pin: island-start-free-disk-floor (review 2027-02-01)
+HOSTED_START_FLOOR_GIB = 40  # ratchet-pin: hosted-start-free-disk-floor (review 2027-02-01)
 WATCH_FLOOR_GIB = 20  # ratchet-pin: gate-watchdog-free-disk-floor (review 2027-02-01)
 GIB = 1024 ** 3
 HELPER_IMAGE = "alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a"
@@ -72,9 +73,12 @@ def shown(free: dict[str, float | None]) -> str:
     return ", ".join(f"{k} {'unreadable' if v is None else f'{v:.0f} GiB'}" for k, v in free.items())
 
 
-def start_refusal(free: dict[str, float | None], island: bool = False) -> str:
-    """Why the run must not start ("" = it may): the floor is the full gate's, or the island's; an unreadable disk is refused like a full one."""
-    floor, what = (ISLAND_START_FLOOR_GIB, "an island run writes ~25 GiB") if island else (START_FLOOR_GIB, "a full gate writes ~170 GiB")
+def start_refusal(free: dict[str, float | None], island: bool = False, hosted: bool = False) -> str:
+    """Why the run must not start ("" = it may): the floor is the full gate's, the island's or the hosted runner's; an unreadable disk is refused like a full one."""
+    if hosted:
+        floor, what = HOSTED_START_FLOOR_GIB, "a hosted-runner gate writes far less than a full one, the watchdog still stops a filling disk"
+    else:
+        floor, what = (ISLAND_START_FLOOR_GIB, "an island run writes ~25 GiB") if island else (START_FLOOR_GIB, "a full gate writes ~170 GiB")
     short = [k for k, v in free.items() if v is None or v < floor]
     if not short:
         return ""
@@ -104,6 +108,8 @@ def self_test() -> None:
     assert "host below" in start_refusal({"host": 149.9, "docker VM": 177.0})
     assert "docker VM below" in start_refusal({"host": 201.0, "docker VM": None}), "an unreadable VM disk refuses"
     assert start_refusal({"host": 129.0, "docker VM": 129.0}, island=True) == "", "the island starts on 129 GiB"
+    assert start_refusal({"host": 63.0, "docker VM": 63.0}, hosted=True) == "", "a hosted runner starts on 63 GiB"
+    assert "40 GiB start floor" in start_refusal({"host": 39.0, "docker VM": 63.0}, hosted=True)
     assert "150 GiB start floor" in start_refusal({"host": 129.0, "docker VM": 129.0}), "a full gate does not start on 129 GiB"
     assert "60 GiB start floor" in start_refusal({"host": 59.0, "docker VM": 129.0}, island=True)
     assert START_FLOOR_GIB > ISLAND_START_FLOOR_GIB > WATCH_FLOOR_GIB

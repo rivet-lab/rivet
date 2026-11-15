@@ -30,7 +30,13 @@ fn owner_of(config: &Config, name: &str) -> Option<Owner> {
                 && name
                     .strip_prefix(e.name.as_str())
                     .and_then(|rest| rest.strip_prefix("__"))
-                    .is_some_and(crate::plan::partition::is_child_label)
+                    .is_some_and(|label| {
+                        seeded!(
+                            "state-reset-takes-undeclared-name-with-parent-prefix",
+                            !label.is_empty(),
+                            crate::plan::partition::is_child_label(label)
+                        )
+                    })
         })
         .cloned()
         .map(Owner::PartitionChild)
@@ -38,11 +44,14 @@ fn owner_of(config: &Config, name: &str) -> Option<Owner> {
 
 /// Whether the stored `name` belongs to the declared export `export`.
 fn belongs_to(config: &Config, name: &str, export: &str) -> bool {
-    name == export
-        || match owner_of(config, name) {
-            Some(Owner::Declared(e) | Owner::PartitionChild(e)) => e.name == export,
-            None => false,
-        }
+    seeded!(
+        "state-inspect-of-a-partition-shows-nothing",
+        false,
+        name == export
+    ) || match owner_of(config, name) {
+        Some(Owner::Declared(e) | Owner::PartitionChild(e)) => e.name == export,
+        None => false,
+    }
 }
 
 /// Bail if `export_name` is neither declared in `config` nor a partition child of a declared export, listing the known names.
@@ -76,7 +85,11 @@ fn open_for_export(
     require_known_export(config, config_path, name)?;
     let state = StateStore::open(config_path)?;
     if let Some(Owner::PartitionChild(parent)) = owner_of(config, name)
-        && !state.holds_export(name)?
+        && seeded!(
+            "state-inspect-accepts-a-label-the-state-does-not-hold",
+            false,
+            !state.holds_export(name)?
+        )
     {
         crate::rivet_bail!(
             crate::error::codes::CLI_EXPORT_UNKNOWN,
@@ -280,12 +293,19 @@ pub fn reset_state(config_path: &str, export_name: &str) -> Result<()> {
             stored
                 .iter()
                 .filter(|n| n.as_str() != export_name && belongs_to(&config, n, export_name))
+                .filter(|_| seeded!("state-reset-skips-partition-children", false, true))
                 .cloned(),
         ),
         Owner::PartitionChild(parent) if !stored.iter().any(|n| n == export_name) => {
             let children: Vec<&String> = stored
                 .iter()
-                .filter(|n| n.as_str() != parent.name && belongs_to(&config, n, &parent.name))
+                .filter(|n| {
+                    seeded!(
+                        "state-reset-lists-the-parent-as-a-partition",
+                        false,
+                        n.as_str() != parent.name
+                    ) && belongs_to(&config, n, &parent.name)
+                })
                 .collect();
             crate::rivet_bail!(
                 crate::error::codes::CLI_EXPORT_UNKNOWN,
@@ -324,21 +344,35 @@ fn reset_family(
         super::chunked::claim_export_progress_saying(state, n, source, "reset its state", done)
     };
     let (export, children) = family.split_first().expect("the family names the export");
-    let _export_lease = claim(export, None)?;
-    children.iter().try_for_each(|n| claim(n, None).map(drop))?;
+    let _export_lease = if seeded!("reset-under-a-live-run", false, true) {
+        Some(claim(export, None)?)
+    } else {
+        None
+    };
+    if seeded!("reset-under-a-live-run", false, true) {
+        children.iter().try_for_each(|n| claim(n, None).map(drop))?;
+    }
     between();
     let mut cleared = 0;
-    for batch in children.chunks(RESET_LEASES) {
+    for batch in children.chunks(seeded!(
+        "state-reset-holds-every-lease-at-once",
+        children.len().max(1),
+        RESET_LEASES
+    )) {
         let done = (cleared > 0).then(|| {
             format!(
                 "{cleared} of {} partition(s) were already reset and '{export}' kept its state, so the reset is half done; `rivet state reset -c {config_path} --export {export}` finishes it once the run ends",
                 children.len()
             )
         });
-        let _held = batch
-            .iter()
-            .map(|n| claim(n, done.as_deref()))
-            .collect::<Result<Vec<_>>>()?;
+        let _held = if seeded!("reset-under-a-live-run", false, true) {
+            batch
+                .iter()
+                .map(|n| claim(n, done.as_deref()))
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            Vec::new()
+        };
         state.reset_all(batch, source)?;
         cleared += batch.len();
     }
@@ -602,12 +636,16 @@ pub fn reset_chunk_checkpoint(config_path: &str, export_name: &str) -> Result<()
     }
     let source = reset_chunks_source(&config, &format!("export '{export_name}'"))?;
     let state = StateStore::open(config_path)?;
-    let _held = super::chunked::claim_export_progress(
-        &state,
-        export_name,
-        &source,
-        "remove its chunk checkpoint",
-    )?;
+    let _held = if seeded!("reset-under-a-live-run", false, true) {
+        Some(super::chunked::claim_export_progress(
+            &state,
+            export_name,
+            &source,
+            "remove its chunk checkpoint",
+        )?)
+    } else {
+        None
+    };
     let n = state.reset_chunk_checkpoint(export_name, &source)?;
     state.delete_progression(export_name)?;
     println!(
@@ -619,6 +657,9 @@ pub fn reset_chunk_checkpoint(config_path: &str, export_name: &str) -> Result<()
 
 /// The source `state reset-chunks` removes checkpoints of, or the refusal when `config`'s source does not resolve.
 fn reset_chunks_source(config: &Config, scope: &str) -> Result<String> {
+    if seeded!("reset-chunks-by-export-name", true, false) {
+        return Ok(config.source.state_key());
+    }
     config.source.try_state_key().map_err(|e| {
         crate::error::recoded(
             &e,
@@ -674,13 +715,18 @@ pub fn reset_chunk_checkpoints_stuck(config_path: &str) -> Result<()> {
     );
 
     for name in targets {
-        let Some(_held) = super::chunked::try_run_lease(&state, &name, &source)? else {
-            println!(
-                "Skipping '{}': {} is in progress in a live rivet process, so its checkpoint is not stuck.",
-                name,
-                super::chunked::live_run_label(&state, &name, &source)?
-            );
-            continue;
+        let _held = if seeded!("reset-under-a-live-run", true, false) {
+            None
+        } else {
+            let Some(held) = super::chunked::try_run_lease(&state, &name, &source)? else {
+                println!(
+                    "Skipping '{}': {} is in progress in a live rivet process, so its checkpoint is not stuck.",
+                    name,
+                    super::chunked::live_run_label(&state, &name, &source)?
+                );
+                continue;
+            };
+            Some(held)
         };
         let n = state.reset_chunk_checkpoint(&name, &source)?;
         println!("Removed {} chunk run record(s) for export '{}'.", n, name);

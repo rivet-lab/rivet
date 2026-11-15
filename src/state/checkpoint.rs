@@ -19,7 +19,11 @@ pub struct ChunkTaskInfo {
 
 /// Whether a chunk run stored under `stored` (`None`: it recorded no source) belongs to the stream reading `source`, however its source was spelled when it was stored.
 pub(super) fn chunk_run_is_of(source: &str, stored: Option<&str>) -> bool {
-    stored.is_none_or(|s| s == source || crate::config::canonical_source_key(s) == source)
+    seeded!(
+        "reset-chunks-by-export-name",
+        true,
+        stored.is_none_or(|s| s == source || crate::config::canonical_source_key(s) == source)
+    )
 }
 
 /// Chunk checkpoint store — reads and writes `chunk_run` and `chunk_task`.
@@ -76,7 +80,11 @@ impl StateStore {
         source: Option<&str>,
     ) -> Result<Option<(String, String)>> {
         let by = match source {
-            Some(_) => "source = ?2",
+            Some(_) => seeded!(
+                "chunk-run-resumed-by-another-source",
+                "?2 = ?2",
+                "source = ?2"
+            ),
             None => "source IS NULL AND ?2 = ''",
         };
         self.query_opt(
@@ -479,7 +487,11 @@ impl StateStore {
     ) -> Result<(i64, Vec<ChunkTaskInfo>)> {
         let lock = match &self.conn {
             StateConn::Sqlite(_) => "",
-            StateConn::Postgres(_) => " FOR UPDATE",
+            StateConn::Postgres(_) => seeded!(
+                "chunk-run-end-check-blind-to-removed-rows",
+                "",
+                seeded!("checkpoint-gone-at-completion", "", " FOR UPDATE")
+            ),
         };
         let tasks = self.chunk_tasks_of(run_id, lock)?;
         let run = self.query_opt(
@@ -487,7 +499,13 @@ impl StateStore {
             &[run_id.into()],
             |r| r.text(0),
         )?;
-        if run.is_none() || tasks.len() != planned {
+        if (run.is_none() || tasks.len() != planned)
+            && seeded!(
+                "chunk-run-end-check-blind-to-removed-rows",
+                false,
+                seeded!("checkpoint-gone-at-completion", false, true)
+            )
+        {
             self.execute(
                 "UPDATE export_state SET resume_run_id = NULL, resume_owner = NULL \
                  WHERE resume_run_id = ?1",
@@ -518,7 +536,7 @@ impl StateStore {
                 &[now.as_str().into(), run_id.into()],
             )
         })?;
-        if updated == 0 {
+        if updated == 0 && seeded!("checkpoint-gone-at-completion", false, true) {
             crate::rivet_bail!(
                 crate::error::codes::STATE_CHUNK_CHECKPOINT_GONE,
                 "chunk checkpoint run '{run_id}' has no `chunk_run` row left to complete: its \

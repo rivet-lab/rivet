@@ -121,7 +121,11 @@ fn refuse_hidden_read_columns(
         .filter_map(|(setting, column)| column.as_deref().map(|c| (setting, c)))
         .chain(key.map(|c| ("chunk_by_key", c.as_str())));
     for (setting, column) in named {
-        if !readable.iter().any(|c| c.eq_ignore_ascii_case(column)) {
+        if seeded!(
+            "column-grants-hidden-cursor-column-uncoded",
+            false,
+            !readable.iter().any(|c| c.eq_ignore_ascii_case(column))
+        ) {
             crate::rivet_bail!(
                 crate::error::codes::SOURCE_COLUMNS_UNREADABLE,
                 "`{table}`: `{setting}: {column}` names a column `{column}` this account may not SELECT \
@@ -151,11 +155,13 @@ pub(crate) fn project_table_read(
     source: &crate::config::SourceConfig,
     export: &ExportConfig,
 ) -> Result<Option<ExportConfig>> {
-    let Some(table) = export
-        .table
-        .as_ref()
-        .filter(|_| source.columns_from_grants() && export.table_select.is_none())
-    else {
+    let Some(table) = export.table.as_ref().filter(|_| {
+        seeded!(
+            "column-grants-batch-read-unprojected",
+            false,
+            source.columns_from_grants()
+        ) && export.table_select.is_none()
+    }) else {
         return Ok(None);
     };
     let readable = match probe {
@@ -1120,6 +1126,16 @@ fn chunked_strategy_from_introspection(
 
     // (3) The key the export pages by, validated before the small-table escape:
     // a config refused on a large table is refused on one that fits in a chunk.
+    if seeded!("chunked-shape-validated-only-past-one-chunk", true, false)
+        && export.chunk_count.is_none()
+        && export.chunk_by_days.is_none()
+        && !export.chunk_checkpoint
+        && introspection.row_estimate > 0
+        && (introspection.row_estimate as usize) <= chunk_size
+    {
+        let stands_for = implicit_key(source_type, export, introspection).map(|k| k.mode());
+        return Ok((ExtractionStrategy::Snapshot, stands_for));
+    }
     let key = validated_implicit_key(source_type, export, tbl, introspection)?;
 
     // (4) Small-table escape: a single chunk/page has no benefit and adds

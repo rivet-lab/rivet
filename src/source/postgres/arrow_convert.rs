@@ -1186,37 +1186,53 @@ fn build_pg_list_array(
             }
             Ok(Arc::new(lb.finish()))
         }
-        DataType::Date32 => list_mapped!(
-            chrono::NaiveDate,
-            Date32Builder::new(),
-            b,
-            d => {
-                let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is valid");
-                b.append_value((d - epoch).num_days() as i32)
-            }
-        ),
-        DataType::Time64(_) => {
+        DataType::Date32 if seeded!("pg-temporal-uuid-bytea-array-refused", false, true) => {
+            list_mapped!(
+                chrono::NaiveDate,
+                Date32Builder::new(),
+                b,
+                d => {
+                    let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is valid");
+                    b.append_value((d - epoch).num_days() as i32)
+                }
+            )
+        }
+        DataType::Time64(_) if seeded!("pg-temporal-uuid-bytea-array-refused", false, true) => {
             list_mapped!(PgTimeMicros, Time64MicrosecondBuilder::new(), b, t => b.append_value(t.0))
         }
-        DataType::Timestamp(_, Some(tz)) => list_mapped!(
-            chrono::DateTime<chrono::Utc>,
-            TimestampMicrosecondBuilder::new().with_timezone(tz.as_ref()),
-            b,
-            ts => b.append_value(ts.timestamp_micros())
-        ),
-        DataType::Timestamp(_, None) => list_mapped!(
-            chrono::NaiveDateTime,
-            TimestampMicrosecondBuilder::new(),
-            b,
-            ts => b.append_value(ts.and_utc().timestamp_micros())
-        ),
-        DataType::FixedSizeBinary(16) => list_mapped!(
-            PgUuidBytes,
-            FixedSizeBinaryBuilder::new(16),
-            b,
-            u => b.append_value(u.0).expect("a uuid is 16 bytes")
-        ),
-        DataType::Binary => list_mapped!(Vec<u8>, BinaryBuilder::new(), b, v => b.append_value(v)),
+        DataType::Timestamp(_, Some(tz))
+            if seeded!("pg-temporal-uuid-bytea-array-refused", false, true) =>
+        {
+            list_mapped!(
+                chrono::DateTime<chrono::Utc>,
+                TimestampMicrosecondBuilder::new().with_timezone(tz.as_ref()),
+                b,
+                ts => b.append_value(ts.timestamp_micros())
+            )
+        }
+        DataType::Timestamp(_, None)
+            if seeded!("pg-temporal-uuid-bytea-array-refused", false, true) =>
+        {
+            list_mapped!(
+                chrono::NaiveDateTime,
+                TimestampMicrosecondBuilder::new(),
+                b,
+                ts => b.append_value(ts.and_utc().timestamp_micros())
+            )
+        }
+        DataType::FixedSizeBinary(16)
+            if seeded!("pg-temporal-uuid-bytea-array-refused", false, true) =>
+        {
+            list_mapped!(
+                PgUuidBytes,
+                FixedSizeBinaryBuilder::new(16),
+                b,
+                u => b.append_value(u.0).expect("a uuid is 16 bytes")
+            )
+        }
+        DataType::Binary if seeded!("pg-temporal-uuid-bytea-array-refused", false, true) => {
+            list_mapped!(Vec<u8>, BinaryBuilder::new(), b, v => b.append_value(v))
+        }
         other => {
             let col = rows
                 .first()

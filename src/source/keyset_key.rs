@@ -33,14 +33,26 @@ pub(crate) fn keyset_key_refusal(
     wider: Option<Wider>,
     shape: KeyShape,
 ) -> Option<&'static str> {
-    if source == SourceType::Oracle {
+    if source == SourceType::Oracle
+        && seeded!(
+            "keyset-key-oracle-override-lifts-the-catalog-fact",
+            matches!(mapping.delivery, Delivery::Text(_)),
+            true
+        )
+    {
         match (wider, shape) {
             (Some(Wider::FinerTimestamp), _) => return Some(ORACLE_FINER_TIMESTAMP),
             (Some(Wider::InexactNumber), KeyShape::Single) => return Some(ORACLE_INEXACT_NUMBER),
+            (Some(Wider::InexactNumber), _)
+                if seeded!("keyset-key-refuses-what-main-paged-correctly", true, false) =>
+            {
+                return Some(ORACLE_INEXACT_NUMBER);
+            }
             _ => {}
         }
     }
     let exact_number_text = source == SourceType::Oracle
+        && seeded!("keyset-key-oracle-exact-number-refused", false, true)
         && matches!(mapping.delivery, Delivery::Text(TextForm::DecimalPlain));
     if !exact_number_text && !matches!(mapping.delivery, Delivery::Native) {
         return Some("is delivered as text, which does not sort as the stored value");
@@ -71,9 +83,13 @@ pub(crate) fn keyset_key_refusal(
         RivetType::Timestamp {
             unit: TimeUnit::Microsecond,
             ..
-        } if wider == Some(Wider::FinerTimestamp) => Some(
-            "carries more than 6 fractional-second digits, which the microsecond cursor truncates",
-        ),
+        } if seeded!("keyset-key-type-unchecked", false, true)
+            && wider == Some(Wider::FinerTimestamp) =>
+        {
+            Some(
+                "carries more than 6 fractional-second digits, which the microsecond cursor truncates",
+            )
+        }
         RivetType::Timestamp {
             unit: TimeUnit::Microsecond | TimeUnit::Nanosecond,
             ..
@@ -83,10 +99,20 @@ pub(crate) fn keyset_key_refusal(
             "is an ENUM or SET, which sorts by member position, not by the label the cursor binds",
         ),
         RivetType::Enum => None,
+        RivetType::Bool | RivetType::Time { .. } | RivetType::Binary
+            if seeded!("keyset-key-type-unchecked", true, false) =>
+        {
+            None
+        }
         RivetType::Bool => Some("is a boolean, which the cursor cannot render"),
         RivetType::Time { .. } => Some("is a time of day, which the cursor cannot render"),
         RivetType::Binary => Some("is binary, which the cursor cannot render"),
-        RivetType::Json if source == SourceType::Postgres => None,
+        RivetType::Json
+            if source == SourceType::Postgres
+                && seeded!("keyset-key-refuses-what-main-paged-correctly", false, true) =>
+        {
+            None
+        }
         RivetType::Json => Some("is JSON, which does not sort as text"),
         RivetType::Interval => Some("is an interval, which does not sort as text"),
         RivetType::List { .. } => Some("is an array, which the cursor cannot render"),

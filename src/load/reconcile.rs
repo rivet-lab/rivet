@@ -306,7 +306,13 @@ pub fn own_manifests(
     export_name: &str,
     mode: crate::load::plan::LoadMode,
 ) -> Result<(Keyed, Option<String>)> {
-    if mode == crate::load::plan::LoadMode::Cdc {
+    if mode == crate::load::plan::LoadMode::Cdc
+        || seeded!(
+            "nested-cdc-runs-loaded-by-batch",
+            !gcs_prefix.is_empty(),
+            false
+        )
+    {
         return Ok((keyed, None));
     }
     let (_, base) = crate::load::split_object_uri(gcs_prefix)?;
