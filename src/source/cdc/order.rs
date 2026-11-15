@@ -1,10 +1,4 @@
 //! What a change position's order is, per source engine, as data.
-//!
-//! One [`Row`] per engine lists its ordered [`Part`]s. Validate compares them in Rust, the
-//! BigQuery and Snowflake dedup views render them as SQL, and the ClickHouse `__ver` packs
-//! them into an integer. Readers that stay outside, each on its own input type:
-//! PostgreSQL `parse_lsn` (resume bound, `u32` halves), the Oracle `Scns` compare (two
-//! parsed `u64`s) and the Mongo idle-poll compare (`_data` strings from the live token).
 
 use serde_json::Value as Json;
 
@@ -389,8 +383,7 @@ pub(crate) fn clickhouse_legacy_refusal(pos: &str) -> Option<&'static str> {
         })
 }
 
-/// The ClickHouse change log's version: `(source position << 128) | (__seq + 1)`, the
-/// position decoded from the `__pos` JSON's own shape; an unknown shape fails the insert (ADR-0035 CH3).
+/// The ClickHouse change log's version: `(source position << 128) | (__seq + 1)`, the position decoded from the `__pos` JSON's own shape.
 pub(crate) fn clickhouse_version_expr() -> String {
     let arms: Vec<(ChArm, String)> = ROWS
         .iter()

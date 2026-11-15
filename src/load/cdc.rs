@@ -29,20 +29,16 @@
 use crate::source::cdc::order;
 use crate::types::target::{BqType, ChType, SfType, TargetColumnSpec, TargetStatus, TargetType};
 
-/// The source engine a change log came from — selects how `__pos` is parsed
-/// into a sortable key.
+/// The source engine a change log came from — selects how `__pos` is parsed into a sortable key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceEngine {
     /// `{"file":"binlog.000047","pos":10840633}` — order by file, then numeric pos.
     MySql,
-    /// `{"lsn":"3D/484A4908"}` — hex `hi/lo`; zero-pad each half to fixed width
-    /// so a lexical compare equals a numeric one (raw `"9" > "10"` otherwise).
+    /// `{"lsn":"3D/484A4908"}` — hex `hi/lo`; zero-pad each half to fixed width so a lexical compare equals a numeric one (raw `"9" > "10"` otherwise).
     Postgres,
     /// `{"lsn":"0000002d000000d80194"}` — fixed-width hex; lexical == numeric.
     SqlServer,
-    /// `{"_data":"826A4E0001...","ct":N,"ord":N}` — the change-stream resume token
-    /// with its clusterTime stamp; the order is `(ct, ord)` then `_data`, and the
-    /// primary key is the document's `_id` column. See `source::cdc::order`.
+    /// `{"_data":"826A4E0001...","ct":N,"ord":N}`.
     Mongo,
 }
 
@@ -59,8 +55,7 @@ impl SourceEngine {
     }
 }
 
-/// The warehouse the view is defined in — selects the JSON-parse dialect and
-/// the `SELECT * EXCEPT/EXCLUDE` keyword.
+/// The warehouse the view is defined in — selects the JSON-parse dialect and the `SELECT * EXCEPT/EXCLUDE` keyword.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Warehouse {
     BigQuery,
@@ -78,8 +73,7 @@ impl Warehouse {
         }
     }
 
-    /// The `SELECT *`-minus-columns keyword: BigQuery and ClickHouse spell it
-    /// `EXCEPT`, Snowflake `EXCLUDE`.
+    /// The `SELECT *`-minus-columns keyword: BigQuery and ClickHouse spell it `EXCEPT`, Snowflake `EXCLUDE`.
     fn except_keyword(self) -> &'static str {
         match self {
             Warehouse::BigQuery | Warehouse::ClickHouse => "EXCEPT",
@@ -87,11 +81,7 @@ impl Warehouse {
         }
     }
 
-    /// Quote a `project.dataset.table` / `db.schema.table` identifier for this
-    /// warehouse. BigQuery back-ticks the whole path; Snowflake leaves it bare
-    /// (matching the unquoted identifiers the Snowflake loader creates, so a
-    /// lowercase name resolves to the same upper-cased object) — a back-tick
-    /// there is a syntax error. ClickHouse back-ticks each dot-separated segment.
+    /// Quote a `project.dataset.table` / `db.schema.table` identifier for this warehouse.
     pub(crate) fn quote_fqtn(self, fqtn: &str) -> String {
         match self {
             Warehouse::BigQuery => format!("`{fqtn}`"),
@@ -105,11 +95,6 @@ impl Warehouse {
     }
 
     /// Quote a single column identifier for the view's `PARTITION BY`/`ORDER BY`.
-    /// BigQuery back-ticks (case-preserving, so a reserved-word column like
-    /// `order`/`end` is safe). Snowflake is left BARE — the loader creates its
-    /// columns unquoted (upper-cased), and a case-sensitive `"col"` there would
-    /// miss them; a reserved-word column already fails at the Snowflake `__changes`
-    /// DDL, a narrower pre-existing limitation.
     pub(crate) fn quote_ident(self, col: &str) -> String {
         match self {
             Warehouse::BigQuery | Warehouse::ClickHouse => format!("`{col}`"),
@@ -118,13 +103,7 @@ impl Warehouse {
     }
 }
 
-/// What decides the WINNER when a key appears more than once in a compaction
-/// buffer: a CDC stream's log position, or an incremental export's cursor.
-///
-/// One type so the two cannot drift: the cursor arm renders the SAME order the
-/// incremental current-state view ranks by (`inc_dedup_view_sql`), including the
-/// NULL-baseline guard — a first pass has no cursor bound, so its rows carry a
-/// NULL cursor and must lose to any later value.
+/// What decides the WINNER when a key appears more than once in a compaction buffer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompactOrder {
     Cdc(SourceEngine),
@@ -142,8 +121,6 @@ impl CompactOrder {
     pub(crate) fn order_by(&self, warehouse: Warehouse) -> String {
         match self {
             CompactOrder::Cdc(engine) => {
-                // Snowflake sorts NULL first in DESC, so a baseline row (NULL `__pos`)
-                // would outrank every change: rank it last, as the view does.
                 let baseline_last = (seeded!(
                     "snowflake-compact-ranks-baseline-first",
                     false,
@@ -173,9 +150,7 @@ impl SourceEngine {
         }
     }
 
-    /// The `ORDER BY` expressions (most-significant first) that totally-order
-    /// the change log for this engine in `warehouse`'s SQL dialect: the parsed
-    /// commit position, then `__seq`.
+    /// The `ORDER BY` expressions (most-significant first) that totally-order the change log for this engine in `warehouse`'s SQL dialect.
     pub(crate) fn order_exprs(self, warehouse: Warehouse) -> Vec<String> {
         let pos = match warehouse {
             Warehouse::BigQuery => self.order_row().sql(order::Dialect::BigQuery),
@@ -188,14 +163,7 @@ impl SourceEngine {
     }
 }
 
-/// The three CDC meta columns rivet's change log carries, typed for
-/// `warehouse`. rivet CDC writes `__op` (Utf8), `__pos` (Utf8), `__seq` (Int64)
-/// ahead of the after-image columns (OSS `cdc::sink`); `rivet check` reports
-/// only the data columns, so the loader must prepend these to build the
-/// `<table>__changes` schema.
-/// The reserved CDC meta-column vocabulary — the one home for `__op/__pos/__seq`
-/// so a warehouse adapter can't drift from the view builder. Both `bigquery` and
-/// `snowflake` delegate here.
+/// The three CDC meta columns rivet's change log carries, typed for `warehouse`.
 pub(crate) fn is_meta_column(name: &str) -> bool {
     matches!(name, "__op" | "__pos" | "__seq")
 }
@@ -227,23 +195,11 @@ fn meta_spec(name: &str, ty: TargetType) -> TargetColumnSpec {
 pub use crate::enrich::DELETE_FLAG_COLUMN;
 
 /// Every name rivet OWNS in a changelog or base+buffer table.
-///
-/// The vocabulary lived in two places — [`is_meta_column`]'s three names and
-/// [`DELETE_FLAG_COLUMN`] — and neither was ever checked against the SOURCE's
-/// columns, while this constant's own doc claimed the `__` namespace meant a
-/// collision "can never" happen. Nothing enforced that. A source column named
-/// `__op`/`__pos`/`__seq` is filtered straight out of a MERGE's carried set by
-/// `is_meta_column`, so its values vanish; one named `__is_deleted` is worse,
-/// because `merge_inputs` infers the tombstone arm from that name being PRESENT
-/// and so turns soft-delete semantics on for a column the source owns.
-///
-/// One predicate owns the whole vocabulary now, and `LoadPlan::refused` asks it.
 pub(crate) fn is_reserved_column(name: &str) -> bool {
     is_meta_column(name) || name == DELETE_FLAG_COLUMN
 }
 
-/// The base table's delete flag as a column spec, appended to the source columns
-/// of a base-and-buffer load (the baseline Parquet carries it as `false`).
+/// The base table's delete flag as a column spec, appended to the source columns of a base-and-buffer load (the baseline Parquet carries it as `false`).
 pub fn flag_spec(warehouse: Warehouse) -> TargetColumnSpec {
     let ty = match warehouse {
         Warehouse::BigQuery => BqType::Bool.into(),
@@ -253,12 +209,7 @@ pub fn flag_spec(warehouse: Warehouse) -> TargetColumnSpec {
     meta_spec(DELETE_FLAG_COLUMN, ty)
 }
 
-/// A half-open window on the partition column, as typed SQL literals: `lo..hi_exclusive`
-/// selects the buffer's winners one MERGE takes, `all_lo..all_hi_exclusive` is the whole
-/// range a compaction touches — buffer values AND the base rows of the buffer's keys —
-/// and bounds the base side. A key whose value moved from one window into another sits
-/// in the base under the OLD value; bounding the base by the winner's window alone
-/// missed it and inserted a second row (only constants prune a MERGE target).
+/// A half-open window on the partition column, as typed SQL literals.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RangeBound {
     pub column: String,
@@ -273,8 +224,7 @@ fn key_join(pk: &[&str]) -> String {
     key_equality(Warehouse::BigQuery, "__rivet_t", "__rivet_s", pk)
 }
 
-/// `left.k = right.k AND …` over the key columns, quoted for `warehouse`; plain `=`, so a
-/// NULL key matches nothing.
+/// `left.k = right.k AND …` over the key columns, quoted for `warehouse`.
 fn key_equality(warehouse: Warehouse, left: &str, right: &str, pk: &[&str]) -> String {
     pk.iter()
         .map(|k| {
@@ -285,9 +235,7 @@ fn key_equality(warehouse: Warehouse, left: &str, right: &str, pk: &[&str]) -> S
         .join(" AND ")
 }
 
-/// The tombstones a re-baseline buffers: every live base row whose key the buffer holds
-/// no row for, with the base's last values and `__op = 'delete'`. `rivet compact` then
-/// flags each one `__is_deleted` in the base.
+/// The tombstones a re-baseline buffers: every live base row whose key the buffer holds no row for, with the base's last values and `__op = 'delete'`.
 pub fn absent_as_deleted_sql(
     warehouse: Warehouse,
     base_fqtn: &str,
@@ -317,9 +265,7 @@ pub fn absent_as_deleted_sql(
     )
 }
 
-/// The partition column over every row a compaction can touch, as one column `v`:
-/// the buffer's rows and the base rows of the buffer's keys. The buffer alone names
-/// only a key's NEW value; the base holds the row under its old one.
+/// The partition column over every row a compaction can touch, as one column `v`.
 fn touched_values_sql(
     changes_fqtn: &str,
     base_fqtn: &str,
@@ -341,12 +287,10 @@ fn touched_values_sql(
     )
 }
 
-/// Script-variable budget for keys: BigQuery refuses a variable over 1,048,576 bytes
-/// (measured: 60,000 INT64 keys fit, 80,000 do not; 10,000 45-char strings fit, 20,000 do not).
+/// Script-variable budget for keys: BigQuery refuses a variable over 1,048,576 bytes (measured.
 const KEY_ARRAY_BYTES: u64 = 700_000;
 
-/// The script-variable element type for a key column's warehouse type; `None` for a type
-/// an `IN UNNEST` key filter does not cover (floats, bytes, containers).
+/// The script-variable element type for a key column's warehouse type.
 fn key_array_type(target_type: &TargetType) -> Option<&'static str> {
     let TargetType::BigQuery(t) = target_type else {
         return None;
@@ -368,9 +312,7 @@ fn key_array_type(target_type: &TargetType) -> Option<&'static str> {
     }
 }
 
-/// Script statements that set `days` to the partition days a compaction touches, reading the
-/// base only for the updated/deleted keys whose row the buffer's own days do not contain
-/// (a key whose partition value changed, or a delete that carries no partition value).
+/// Script statements that set `days` to the partition days a compaction touches, reading the base only for the updated/deleted keys whose row the buffer's own days do not contain (a key whose partition value changed, or a delete that carries no partition value).
 fn touched_days_script(
     changes_fqtn: &str,
     base_fqtn: &str,
@@ -419,17 +361,12 @@ fn touched_days_script(
     )
 }
 
-/// Whether a compaction takes its partitions from the buffer alone: a MySQL stream
-/// refuses a change that moves a row to another partition (`partition_guard`).
+/// Whether a compaction takes its partitions from the buffer alone.
 pub fn trusts_buffer_days(order: &CompactOrder) -> bool {
     matches!(order, CompactOrder::Cdc(SourceEngine::MySql))
 }
 
-/// The partition column as a `DATE`. A TIMESTAMP is pinned to UTC: an unqualified
-/// `DATE(timestamp)` follows the project's `default_time_zone`, while the bounds it
-/// feeds are rendered `+00` and the table's partitions ARE UTC days — under any other
-/// default the two disagreed by up to a day at both ends (a skipped winner, a
-/// re-inserted key). A DATE or DATETIME takes no zone.
+/// The partition column as a `DATE`.
 fn date_of(col_sql: &str, target_type: &TargetType) -> String {
     if *target_type == TargetType::BigQuery(BqType::Timestamp) {
         format!("DATE({col_sql}, 'UTC')")
@@ -438,8 +375,7 @@ fn date_of(col_sql: &str, target_type: &TargetType) -> String {
     }
 }
 
-/// The partition column's warehouse type, `TIMESTAMP` when the specs do not name it —
-/// the conservative reading, since only that one carries a zone.
+/// The partition column's warehouse type, `TIMESTAMP` when the specs do not name it.
 pub(crate) fn column_type_of(specs: &[TargetColumnSpec], col: &str) -> TargetType {
     specs
         .iter()
@@ -449,13 +385,7 @@ pub(crate) fn column_type_of(specs: &[TargetColumnSpec], col: &str) -> TargetTyp
         })
 }
 
-/// `(rows, min, max, null_count)` — rows and NULLs of the buffer, min/max of the
-/// partition column over everything the compaction touches ([`touched_values_sql`]) —
-/// as strings; the MERGE's pruning bounds come from here. `time_type` (the column's
-/// DATE / DATETIME / TIMESTAMP) normalises a time key to one `YYYY-MM-DD` shape via
-/// [`date_of`]; an integer range column is cast. A time key adds `(in_lo, in_hi)`, the
-/// min/max inside [`PARTITIONED_DAYS`] ([`NOTHING_INSIDE`] when no value is), the span
-/// the plan steps through.
+/// `(rows, min, max, null_count)` — rows and NULLs of the buffer, min/max of the partition column over everything the compaction touches ([`touched_values_sql`]).
 pub fn compact_probe_sql(
     changes_fqtn: &str,
     base_fqtn: &str,
@@ -494,16 +424,13 @@ pub fn compact_probe_sql(
     )
 }
 
-/// The days BigQuery's time-unit partitions cover, `[from, until)`; a value outside
-/// them sits in the one `__UNPARTITIONED__` partition.
+/// The days BigQuery's time-unit partitions cover, `[from, until)`.
 pub const PARTITIONED_DAYS: (&str, &str) = ("1960-01-01", "2160-01-01");
 
 /// The probe's `in_lo`/`in_hi` when no value lies inside [`PARTITIONED_DAYS`].
 pub const NOTHING_INSIDE: &str = "none";
 
-/// Split `[lo, hi]` (inclusive dates) into half-open day windows of at most
-/// `step_days` — one MERGE per window keeps each job under BigQuery's cap on the
-/// partitions one statement may modify.
+/// Split `[lo, hi]` (inclusive dates) into half-open day windows of at most `step_days`.
 pub fn day_windows(
     lo: chrono::NaiveDate,
     hi: chrono::NaiveDate,
@@ -530,22 +457,7 @@ pub fn time_literal(target_type: &TargetType, date: chrono::NaiveDate) -> String
     }
 }
 
-/// The compaction MERGE: the latest change per key in `changes` (the buffer) is
-/// upserted into `base`; a tombstone flags the base row (`__is_deleted = TRUE`,
-/// values kept — the warehouse deletes nothing), a later insert un-flags it.
-/// `columns` are the source columns both tables share; `bound`, when given, is
-/// applied to the buffer AND to the base in `ON`, so the base's partitions prune.
-/// `nulls_only` selects the buffer rows whose partition column is NULL (a
-/// tombstone with a minimal before-image) — merged unpruned, on their own.
-///
-/// The winner per key is ranked over the WHOLE buffer and only then filtered by
-/// the bound, so a key with changes on both sides of a split (a window and the
-/// NULL set, or two windows) lands in exactly ONE job — the one its latest change
-/// belongs to. Ranking inside the filter picked a stale winner per subset and let
-/// the job order decide the row (RED: `a_key_changed_across_the_partition_split…`).
-// The arity IS the statement: two tables, the shared columns, the dedup key, what
-// ranks the winner, the bound, the NULL-key pass, and whether the base carries the
-// delete flag. Bundling them would only move the same seven facts elsewhere.
+/// The compaction MERGE: the latest change per key in `changes` (the buffer) is upserted into `base`.
 #[allow(clippy::too_many_arguments)]
 pub fn compact_merge_sql(
     base_fqtn: &str,
@@ -573,17 +485,12 @@ pub fn compact_merge_sql(
     )
 }
 
-/// Which of the buffer's WINNERS one MERGE takes, and the matching constant
-/// predicate on the base so BigQuery prunes it. `Days` names a script variable
-/// (`ARRAY<DATE>`) — measured: `DATE(__rivet_t.col) IN UNNEST(var)` reads only the listed
-/// partitions (172 bytes against 48 KB for the MIN..MAX range on the same buffer).
+/// Which of the buffer's WINNERS one MERGE takes, and the matching constant predicate on the base so BigQuery prunes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MergeFilter {
     All,
     Range(RangeBound),
-    /// A day-partitioned base: the winners in `DATE(column) IN UNNEST(chunk)`, the base
-    /// bounded by `all` — every day the compaction touches, old values included.
-    /// `column_type` decides whether `DATE()` is pinned to UTC (see [`date_of`]).
+    /// A day-partitioned base: the winners in `DATE(column) IN UNNEST(chunk)`, the base bounded by `all`.
     Days {
         column: String,
         column_type: TargetType,
@@ -594,10 +501,7 @@ pub enum MergeFilter {
 }
 
 impl MergeFilter {
-    /// The predicate on a row of `alias` — no alias for the buffer's own columns, `T`
-    /// for the base. The base side is bounded by the WHOLE touched range, plus the
-    /// NULL partition: a base row's value is the OLD one, which no window of the
-    /// winners has to contain.
+    /// The predicate on a row of `alias` — no alias for the buffer's own columns, `T` for the base.
     fn predicate(&self, alias: &str) -> String {
         let base = !alias.is_empty();
         let q = |c: &str| {
@@ -607,8 +511,6 @@ impl MergeFilter {
                 format!("`{c}`")
             }
         };
-        // An empty upper bound is "no upper bound": the warehouse's last representable
-        // day has no successor to write `< …` against.
         let upper = |c: &str, hi: &str| {
             if hi.is_empty() {
                 String::new()
@@ -654,9 +556,7 @@ impl MergeFilter {
     }
 }
 
-/// The latest row per key of `changes_fqtn` under `order`, with the ranking column dropped
-/// and `filter` (a leading ` AND …` or empty) on the winners. Ranked over the WHOLE buffer
-/// and only then filtered, so a key changed on both sides of a filter has one winner.
+/// The latest row per key of `changes_fqtn` under `order`, with the ranking column dropped and `filter` (a leading ` AND …` or empty) on the winners.
 fn winners_sql(
     warehouse: Warehouse,
     changes_fqtn: &str,
@@ -676,12 +576,7 @@ fn winners_sql(
     )
 }
 
-/// The one transaction that folds a spent buffer into its base on a warehouse that
-/// replaces rows instead of merging them (Snowflake): the buffer's winners delete the base
-/// rows they replace and are inserted whole, a tombstone flags its base row when the base
-/// carries `__is_deleted` and deletes nothing it did not find. Replaying the same winners
-/// leaves the same base, which is what makes a leftover buffer safe to merge again.
-/// Semantics are those of [`compact_merge_filtered_sql`]'s MERGE, statement for statement.
+/// The one transaction that folds a spent buffer into its base on a warehouse that replaces rows instead of merging them (Snowflake).
 pub(crate) fn replace_compact_sql(
     warehouse: Warehouse,
     base_fqtn: &str,
@@ -710,7 +605,6 @@ pub(crate) fn replace_compact_sql(
         .collect::<Vec<_>>()
         .join(", ");
     let upsert = "COALESCE(__rivet_s.__op, '') <> 'delete'";
-    // Without the flag column a delete deletes; with it the base row stays, flagged.
     let replaced = if deleted_flag {
         format!("{on} AND {upsert}")
     } else {
@@ -734,8 +628,7 @@ pub(crate) fn replace_compact_sql(
     )
 }
 
-/// [`compact_merge_sql`] over a [`MergeFilter`]: the filter is applied to the
-/// buffer's winners AND, for a partition filter, to the base in `ON`.
+/// [`compact_merge_sql`] over a [`MergeFilter`].
 pub fn compact_merge_filtered_sql(
     base_fqtn: &str,
     changes_fqtn: &str,
@@ -748,7 +641,6 @@ pub fn compact_merge_filtered_sql(
     let wh = Warehouse::BigQuery;
     let winners = winners_sql(wh, changes_fqtn, pk, order, &filter.predicate(""));
     let on_keys = key_join(pk);
-    // NULL-keyed winners match the base by key alone: their partition is unknown.
     let on_bound = match filter {
         MergeFilter::NullKeys(_) => String::new(),
         other => other.predicate("__rivet_t"),
@@ -772,10 +664,6 @@ pub fn compact_merge_filtered_sql(
         .chain(flag("FALSE".to_string()))
         .collect::<Vec<_>>()
         .join(", ");
-    // Without the flag column there is no tombstone to write, so a delete deletes:
-    // a stream with `deleted_flag: false` still delivers `__op = 'delete'` rows
-    // (a query-based export never does), and letting one fall through to the
-    // upsert arm overwrote the live row with the delete's key-only image.
     let tombstone = if deleted_flag {
         format!(
             "WHEN MATCHED AND __rivet_s.__op = 'delete' THEN UPDATE SET `{DELETE_FLAG_COLUMN}` = TRUE\n"
@@ -794,46 +682,7 @@ pub fn compact_merge_filtered_sql(
     )
 }
 
-/// Build the current-state dedup view over a `<table>__changes` log for
-/// `warehouse`. `pk` is the change log's primary key column(s); `engine`
-/// selects the `__pos` parse. The view is free to define; reading it scans
-/// `__changes` (billed), kept cheap by clustering the log on `pk`.
-///
-/// **Soft delete.** The view keeps the latest change per PK unconditionally and
-/// projects the winning row's `__op` into a boolean [`DELETE_FLAG_COLUMN`]
-/// (`__op = 'delete'`), rather than dropping deleted rows. A tombstone therefore
-/// survives with its last-known column values — an auditable delete instead of
-/// a silent disappearance. Consumers read live state with
-/// `WHERE NOT __is_deleted`.
-///
-/// **Backfill.** `cdc.initial: snapshot` preexisting rows load from a plain
-/// full-snapshot parquet, so their `__op`/`__pos` are NULL in `__changes`. The
-/// flag is `COALESCE(.. , FALSE)` (a NULL `__op` is a live snapshot insert, not a
-/// delete — otherwise `WHERE NOT __is_deleted` drops the whole backfill), and the
-/// order ranks NULL `__pos` last (see below) so a later change beats the FIRST
-/// baseline.
-///
-/// KNOWN LIMIT (round-6, proven on the verbatim view SQL): "later change wins"
-/// is TRUE only against the first snapshot. A RE-baseline (slot-loss/binlog-purge
-/// recovery re-snapshot) appends NEW NULL-`__pos` rows beside the OLD change
-/// rows — and loses to all of them, so the view silently serves pre-gap values
-/// for exactly the PKs the re-snapshot exists to fix (two snapshots for one PK
-/// even tie nondeterministically). The recovery bail and cdc-failure-modes.md
-/// therefore prescribe truncating `__changes` before the post-recovery load,
-/// and the CDC load driver REFUSES when it detects the shape on a ledgered
-/// load (rebaseline_action in orchestrate.rs; stateless degrades to a note).
-/// The anchor stamp SHIPPED (round-10: checkpointed MySQL/MSSQL/Mongo flows
-/// stamp constant `__pos`/`__seq=-1`; PG-no-checkpoint and legacy legs stay
-/// NULL) — it fixes the ORDERING half only. TRUNCATE remains the remedy
-/// because no snapshot can express a PK DELETED during the gap (no row, no
-/// tombstone: its pre-gap rows would win), so the refusal stands for stamped
-/// legs too.
-///
-/// The subquery + `__rn` structure (rather than a `QUALIFY`) is deliberate: the
-/// flag must reflect the *winning* row per PK, computed **after** `ROW_NUMBER`.
-/// Note `__op` is both dropped from the `*` expansion and referenced by the flag
-/// expression — both BigQuery `EXCEPT` and Snowflake `EXCLUDE` allow that (the
-/// exclusion only affects `*`, not an explicit reference).
+/// Build the current-state dedup view over a `<table>__changes` log for `warehouse`.
 pub fn dedup_view_sql(
     warehouse: Warehouse,
     view_fqtn: &str,
@@ -842,12 +691,6 @@ pub fn dedup_view_sql(
     engine: SourceEngine,
 ) -> String {
     let partition = quote_partition(warehouse, pk);
-    // `initial: snapshot` backfill rows load as a plain full-snapshot parquet —
-    // no `__op`/`__pos`/`__seq` — so they land in `__changes` with those NULL.
-    // `__pos IS NOT NULL DESC` FIRST in the order ranks any real change above the
-    // snapshot baseline deterministically across dialects: without it BigQuery
-    // sorts a NULL `__pos` last (snapshot loses — correct by luck) but Snowflake
-    // sorts it first (snapshot would WIN a later update → stale current state).
     let order = std::iter::once("__pos IS NOT NULL".to_string())
         .chain(engine.order_exprs(warehouse))
         .map(|e| format!("{e} DESC"))
@@ -886,12 +729,7 @@ fn quote_partition(warehouse: Warehouse, pk: &[&str]) -> String {
         .join(", ")
 }
 
-/// The shared current-state view envelope: keep the winning row per PK
-/// (`ROW_NUMBER … WHERE __rn = 1`), drop the meta columns from `*`, and project
-/// `delete_flag` into [`DELETE_FLAG_COLUMN`]. The two public builders differ only
-/// in `order_by` (how "winning" is decided) and `delete_flag` — everything else,
-/// including the `EXCEPT`/`EXCLUDE` dialect keyword and identifier quoting, lives
-/// here so CDC and incremental can never drift on the view shape.
+/// The shared current-state view envelope: keep the winning row per PK (`ROW_NUMBER … WHERE __rn = 1`), drop the meta columns from `*`, and project `delete_flag` into [`DELETE_FLAG_COLUMN`].
 fn build_dedup_view(
     warehouse: Warehouse,
     view_fqtn: &str,
@@ -920,16 +758,6 @@ fn build_dedup_view(
 }
 
 /// Build the current-state dedup view for an **incremental** load's change log.
-/// Unlike CDC ([`dedup_view_sql`]), an incremental delta has no `__op`/`__pos`/
-/// `__seq` (the change log reuses the CDC append so those columns exist but are
-/// NULL): current state is simply the row with the greatest `cursor_column` per
-/// PK. Incremental can't observe deletes, so [`DELETE_FLAG_COLUMN`] is a constant
-/// `FALSE` — the view SHAPE matches CDC so downstream reads `WHERE NOT
-/// __is_deleted` uniformly across both modes.
-/// The order an incremental key's latest row wins by: real cursor values above
-/// NULL — a first pass has no cursor bound, so its rows carry a NULL cursor and
-/// must lose to any later value — then newest first. Shared by the current-state
-/// view and the compaction merge so the two can never rank one key differently.
 fn cursor_order_by(warehouse: Warehouse, cursor_column: &str) -> String {
     let cur = warehouse.quote_ident(cursor_column);
     format!("{cur} IS NOT NULL DESC, {cur} DESC")
@@ -943,15 +771,6 @@ pub fn inc_dedup_view_sql(
     cursor_column: &str,
 ) -> String {
     let partition = quote_partition(warehouse, pk);
-    // `<cursor> IS NOT NULL DESC` FIRST — the same NULL-baseline guard the CDC
-    // view uses for `__pos` (see dedup_view_sql). A nullable cursor lands NULL
-    // rows in `<table>__changes` (the first incremental run has no cursor bound,
-    // so it extracts every row, NULL cursor included). Without the guard the
-    // order is a bare `<cursor> DESC`, and Snowflake sorts NULLs FIRST in DESC —
-    // so a NULL-cursor baseline row would win ROW_NUMBER=1 and HIDE a later
-    // non-NULL-cursor update (stale current state; BigQuery sorts NULLs last, so
-    // it was correct only by luck). Ranking real cursor values above NULL makes
-    // the dedup deterministic across both dialects.
     let order = cursor_order_by(warehouse, cursor_column);
     build_dedup_view(
         warehouse,
@@ -1007,7 +826,6 @@ mod tests {
         for wh in WAREHOUSES {
             for engine in ENGINES {
                 let sql = dedup_view_sql(wh, "p.d.orders", "p.d.orders__changes", &["id"], engine);
-                // The intra-transaction tiebreak is present and LAST in the order.
                 assert!(sql.contains("__seq DESC"), "{wh:?}/{engine:?}: {sql}");
                 let order = sql.split("ORDER BY").nth(1).unwrap();
                 let seq_at = order.find("__seq DESC").unwrap();
@@ -1016,8 +834,6 @@ mod tests {
                     pos_at < seq_at,
                     "{wh:?}/{engine:?}: __pos must sort before __seq"
                 );
-                // Soft delete: latest row per PK is kept (no delete filter); the
-                // winning `__op` becomes the boolean tombstone flag.
                 assert!(sql.contains("WHERE __rn = 1;"), "{wh:?}/{engine:?}: {sql}");
                 assert!(
                     !sql.contains("!= 'delete'"),
@@ -1038,7 +854,6 @@ mod tests {
     #[test]
     fn bigquery_uses_json_value_and_except() {
         let sql = dedup_view_sql(Warehouse::BigQuery, "v", "c", &["id"], SourceEngine::MySql);
-        // numeric binlog ordinal, not the raw string (rollover fix, sibling #169)
         assert!(sql.contains(
             "CAST(REGEXP_EXTRACT(JSON_VALUE(__pos,'$.file'), r'[0-9]+$') AS INT64) DESC"
         ));
@@ -1076,7 +891,6 @@ mod tests {
             &["id"],
             SourceEngine::Postgres,
         );
-        // Snowflake splits the LSN with SPLIT_PART (1-indexed), not OFFSET.
         assert!(sf.contains("SPLIT_PART(PARSE_JSON(__pos):lsn::string,'/',1)"));
         assert!(sf.contains("SPLIT_PART(PARSE_JSON(__pos):lsn::string,'/',2)"));
     }
@@ -1124,7 +938,6 @@ COALESCE(PARSE_JSON(__pos):ct::NUMBER(38,0), -1) DESC, \
 COALESCE(PARSE_JSON(__pos):ord::NUMBER(38,0), -1) DESC, \
 PARSE_JSON(__pos):_data::string DESC, __seq DESC"
         ));
-        // Soft-delete parity holds for Mongo too.
         assert!(sf.contains("COALESCE(__op = 'delete', FALSE) AS __is_deleted"));
     }
 
@@ -1148,11 +961,6 @@ PARSE_JSON(__pos):_data::string DESC, __seq DESC"
 
     #[test]
     fn snapshot_backfill_rows_are_live_and_rank_oldest_on_every_dialect() {
-        // `cdc.initial: snapshot` rows carry NULL __op/__pos in `__changes`. The
-        // view must (1) read a NULL __op as a live insert — not a NULL flag that
-        // `WHERE NOT __is_deleted` silently drops — and (2) rank a NULL __pos below
-        // any real change on BOTH dialects, not rely on the engine's NULL-order
-        // default (BigQuery NULLS-last vs Snowflake NULLS-first would disagree).
         for wh in WAREHOUSES {
             for engine in ENGINES {
                 let sql = dedup_view_sql(wh, "p.d.t", "p.d.t__changes", &["id"], engine);
@@ -1160,7 +968,6 @@ PARSE_JSON(__pos):_data::string DESC, __seq DESC"
                     sql.contains("COALESCE(__op = 'delete', FALSE) AS __is_deleted"),
                     "{wh:?}/{engine:?}: NULL __op must read as not-deleted (live): {sql}"
                 );
-                // The null-rank guard is the FIRST, most-significant order key.
                 let order = sql.split("ORDER BY").nth(1).unwrap();
                 assert!(
                     order.contains("__pos IS NOT NULL DESC"),
@@ -1200,7 +1007,6 @@ PARSE_JSON(__pos):_data::string DESC, __seq DESC"
             &["id"],
             SourceEngine::MySql,
         );
-        // Back-ticks would be a Snowflake syntax error — identifiers stay bare.
         assert!(!sf.contains('`'), "snowflake view must not back-tick: {sf}");
         assert!(sf.contains("VIEW db.sc.orders AS"));
         assert!(sf.contains("FROM db.sc.orders__changes"));
@@ -1220,18 +1026,11 @@ PARSE_JSON(__pos):_data::string DESC, __seq DESC"
                 sql.contains(&format!("PARTITION BY {}", wh.quote_ident("id"))),
                 "{wh:?}: {sql}"
             );
-            // Latest-per-PK is the greatest cursor value — but a NULL-cursor
-            // baseline row must NOT win the dedup. Rank real cursor values above
-            // NULL (the same `IS NOT NULL DESC` guard the CDC view uses for
-            // __pos), else Snowflake (NULLs sort FIRST in DESC) keeps the stale
-            // baseline over a later non-NULL-cursor update.
             let cur = wh.quote_ident("updated_at");
             assert!(
                 sql.contains(&format!("ORDER BY {cur} IS NOT NULL DESC, {cur} DESC")),
                 "{wh:?}: cursor order must guard NULL-baseline first: {sql}"
             );
-            // Incremental can't observe deletes → the flag is a constant FALSE,
-            // with none of CDC's `__op = 'delete'` logic.
             assert!(sql.contains("FALSE AS __is_deleted"), "{wh:?}: {sql}");
             assert!(
                 !sql.contains("'delete'"),
@@ -1284,9 +1083,6 @@ PARSE_JSON(__pos):_data::string DESC, __seq DESC"
 
     #[test]
     fn identifiers_are_quoted_per_dialect_so_a_reserved_word_column_is_safe() {
-        // BigQuery back-ticks pk + cursor (a column named `order`/`end` would be a
-        // syntax error unquoted); Snowflake leaves them bare (matching its
-        // unquoted/upper-cased loader columns).
         let bq = inc_dedup_view_sql(Warehouse::BigQuery, "v", "c", &["order"], "end");
         assert!(bq.contains("PARTITION BY `order`"), "{bq}");
         assert!(
@@ -1299,7 +1095,6 @@ PARSE_JSON(__pos):_data::string DESC, __seq DESC"
             sf.contains("ORDER BY end IS NOT NULL DESC, end DESC"),
             "{sf}"
         );
-        // CDC composite pk: each column quoted for BigQuery.
         let cdc = dedup_view_sql(
             Warehouse::BigQuery,
             "v",
@@ -1348,25 +1143,19 @@ PARSE_JSON(__pos):_data::string DESC, __seq DESC"
     }
 }
 
-/// What the compaction probe read from the buffer: its rows, the partition
-/// column's MIN/MAX as text (dates for a time key, integers for a range key),
-/// and how many rows carry a NULL partition column.
+/// What the compaction probe read from the buffer.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CompactProbe {
     pub rows: u64,
     pub lo: String,
     pub hi: String,
     pub nulls: u64,
-    /// A time key's min/max inside [`PARTITIONED_DAYS`], or [`NOTHING_INSIDE`]; anything
-    /// else unread steps the whole clamped span, so no value is left out of a window.
+    /// A time key's min/max inside [`PARTITIONED_DAYS`], or [`NOTHING_INSIDE`].
     pub in_lo: String,
     pub in_hi: String,
 }
 
-/// What every compaction MERGE is built from: the data columns (meta columns and
-/// the delete flag excluded), the key columns, and whether the base carries the
-/// delete flag at all — the one fact that turns the tombstone arm on. One derivation
-/// for both builders, so the filter and the flag cannot drift between them.
+/// What every compaction MERGE is built from.
 pub(crate) fn merge_inputs<'a>(
     specs: &'a [TargetColumnSpec],
     pk: &'a [String],
@@ -1381,12 +1170,7 @@ pub(crate) fn merge_inputs<'a>(
     (columns, pk_refs, deleted_flag)
 }
 
-/// The MERGE statements one compaction runs, decided from the probe alone: none
-/// for an empty buffer; one unbounded MERGE when the base has no partition key
-/// (or the key is the load time); otherwise one per window of the key's range —
-/// at most 4,000 partitions each, the cap on what one statement may modify, and for
-/// a time key one per side outside [`PARTITIONED_DAYS`] — plus one for the rows
-/// whose key is NULL. Pure, so the loader is glue.
+/// The MERGE statements one compaction runs, decided from the probe alone.
 pub fn plan_compact_merges(
     base: &str,
     changes_fqtn: &str,
@@ -1419,9 +1203,6 @@ pub fn plan_compact_merges(
     match (key, part_col) {
         (Some(PartitionKey::Time { granularity, .. }), Some(col)) if !probe.lo.is_empty() => {
             let ty = &column_type_of(specs, col);
-            // Days per window such that no window touches more than 4,000 partitions
-            // of this granularity. Finite on every arm: `chrono` panics past
-            // ~10^11 days, and a sentinel here did exactly that on a monthly table.
             let step = match granularity {
                 Granularity::Hour => 166,
                 Granularity::Day => 4000,
@@ -1432,9 +1213,6 @@ pub fn plan_compact_merges(
             let (Ok(lo_d), Ok(hi_d)) = (parse(&probe.lo), parse(&probe.hi)) else {
                 return Err(unreadable_range(base, col, &probe.lo, &probe.hi));
             };
-            // The day AFTER `9999-12-31` (the SCD "end of time" sentinel, a legal
-            // value) is past the warehouse's range: `DATE '+10000-01-01'` was a hard
-            // error that wedged every compaction of the table. No successor, no bound.
             let upper = |d: chrono::NaiveDate| {
                 if chrono::Datelike::year(&d) > 9999 {
                     String::new()
@@ -1445,9 +1223,6 @@ pub fn plan_compact_merges(
             let all_lo = time_literal(ty, lo_d);
             let past_hi = hi_d + chrono::Duration::days(1);
             let all_hi = upper(past_hi);
-            // Only the span inside the partitioned days is stepped; each side outside
-            // them is one partition, so one window. Stepping an hourly key up to a
-            // `9999-12-31` sentinel planned 17,544 serial MERGE jobs for two rows.
             let (Ok(from_d), Ok(until_d)) = (parse(PARTITIONED_DAYS.0), parse(PARTITIONED_DAYS.1))
             else {
                 unreachable!("PARTITIONED_DAYS are dates");
@@ -1499,15 +1274,11 @@ pub fn plan_compact_merges(
             let (Ok(lo_i), Ok(hi_i)) = (probe.lo.parse::<i64>(), probe.hi.parse::<i64>()) else {
                 return Err(unreadable_range(base, col, &probe.lo, &probe.hi));
             };
-            // A value outside `[start, end)` lives in the one unpartitioned bucket, which
-            // no window reaches and which windowing up to it would count in the millions
-            // (a legal BIGINT far past `end`): such a buffer merges once, unbounded.
             if lo_i < *start || hi_i >= *end {
                 merges.push(merge(None, None));
                 return Ok(merges);
             }
             let step = interval.saturating_mul(4000).max(1);
-            // No successor past `i64::MAX`: an empty bound is "no upper bound".
             let all_hi = hi_i
                 .checked_add(1)
                 .map_or_else(String::new, |h| h.to_string());
@@ -1540,54 +1311,22 @@ pub fn plan_compact_merges(
 pub const MERGE_PARTITION_CAP: usize = 4000;
 
 /// Rename the LIVE buffer out of the way as the script's first act.
-///
-/// The scripted compaction is ONE BigQuery job, and a BigQuery job OUTLIVES the
-/// client that submitted it. So a compact killed after submission kept running
-/// server-side while its LEASE — a `flock` sidecar or a session advisory lock —
-/// died with the process. `rivet load` then took that lease, appended into
-/// `<t>__changes`, and MARKED THOSE RUNS LOADED; the abandoned script's trailing
-/// `DROP TABLE <t>__changes` destroyed them, and a marked-loaded run is never
-/// read again. Silent loss, and no clock or timeout can see it.
-///
-/// Renaming first closes it by CONSTRUCTION rather than by timing: after the
-/// rename the live name is free, `append_changelog` recreates it on its next use
-/// ("Idempotent: created once, appended forever"), and the abandoned script goes
-/// on to merge and drop a table nothing else writes to.
-///
-/// The name is DETERMINISTIC, which is what makes recovery possible — a job that
-/// dies BETWEEN the rename and the drop leaves rows that only a later compact can
-/// find. It must merge that table FIRST; see `compact`'s recovery step. A
-/// run-unique name would make each such leftover invisible instead.
 #[derive(Clone, Copy)]
 pub struct CompactRename<'a> {
     /// The live buffer, fully qualified — what the script renames AWAY.
     pub from_fqtn: &'a str,
-    /// The bare table name it becomes. Bare because BigQuery's `RENAME TO` takes
-    /// an unqualified name, and passed in rather than parsed out of the fqtn
-    /// because a table name may itself contain a dot.
+    /// The bare table name it becomes.
     pub to_bare: &'a str,
 }
 
 /// The `ALTER TABLE … RENAME TO …` line, or nothing on the recovery pass.
-///
-/// It lands AFTER the `DECLARE`s: BigQuery requires variable declarations at the
-/// start of a script, so the rename cannot be literally first — only first among
-/// the statements that touch a table, which is what matters.
 fn rename_stmt(rename: Option<CompactRename<'_>>) -> String {
     rename.map_or_else(String::new, |r| {
         format!("ALTER TABLE `{}` RENAME TO `{}`;\n", r.from_fqtn, r.to_bare)
     })
 }
 
-/// ONE multi-statement job that compacts a base whose partition key is a DAY
-/// column — or no key at all — and drops the buffer: the probe, the MERGEs and
-/// the DROP are statements of one script, so a cycle costs one round trip and one
-/// labelled job (its children inherit the labels). The distinct days of every row
-/// the compaction touches — the buffer's, and the base's rows of the buffer's keys,
-/// whose day may be the OLD one — are collected into a script variable and the
-/// MERGE prunes the base with `DATE(col) IN UNNEST(days) OR col IS NULL`, the
-/// winners taken in chunks of [`MERGE_PARTITION_CAP`]; NULL-keyed winners merge on
-/// their own, unpruned. The last statement returns `(changes_rows, merge_jobs)`.
+/// ONE multi-statement job that compacts a base whose partition key is a DAY column.
 pub fn compact_script_sql(
     base_fqtn: &str,
     changes_fqtn: &str,
@@ -1810,30 +1549,6 @@ mod compact_tests {
     }
 
     /// The script renames the LIVE buffer away first, and never drops it by name.
-    ///
-    /// A BigQuery job outlives the client that submitted it; a `flock` sidecar or a
-    /// session advisory lock does not. So a compact killed after submission kept
-    /// merging server-side while its lease died, `rivet load` took that lease,
-    /// appended into `<t>__changes` and MARKED THOSE RUNS LOADED — and the abandoned
-    /// script's trailing `DROP TABLE <t>__changes` destroyed them. A marked-loaded run
-    /// is never read again, so the loss is silent and no timeout can see it.
-    ///
-    /// The fix is structural, not a timing window narrowed: once the live name is
-    /// renamed away, `append_changelog` recreates it for the next load and the
-    /// abandoned script goes on to drop a table nothing else writes to.
-    ///
-    /// The load-bearing assertion is the NEGATIVE one — the live name must appear
-    /// EXACTLY once, in the rename, and never in the DROP. Asserting that the rename
-    /// is present would pass just as well on a script that renamed and then dropped
-    /// the live buffer anyway.
-    ///
-    /// SCOPE, stated because it is a real gap rather than an oversight: this pins the
-    /// BUILDER. Whether the ADAPTER hands it the merging name and the rename — rather
-    /// than the live name and `None`, which is the pre-fix shape and compiles fine —
-    /// is not graded offline. There is no seam that captures the SQL `compact` sends
-    /// without a live BigQuery (`bq_rest`'s stub listener covers the REST transport,
-    /// not the loader's statements), so the argument wiring is covered only by the
-    /// live compaction cells.
     #[test]
     fn the_compaction_script_renames_the_live_buffer_away_before_it_merges() {
         let script = |rename| {
@@ -1867,8 +1582,6 @@ mod compact_tests {
             renaming.contains("DROP TABLE `p.d.t__changes__merging`;"),
             "and the DROP takes the renamed table: {renaming}"
         );
-        // The rename must precede every statement that touches a table. It cannot be
-        // literally first — BigQuery requires DECLAREs at the top of a script.
         let alter = renaming.find("ALTER TABLE").expect("the rename");
         for stmt in ["SET (n, null_keys)", "MERGE", "DROP TABLE"] {
             assert!(
@@ -1877,8 +1590,6 @@ mod compact_tests {
             );
         }
 
-        // RECOVERY pass: the table was renamed by the run that died, so there is
-        // nothing left to rename and the script must emit no ALTER at all.
         let recovering = script(None);
         assert!(
             !recovering.contains("ALTER TABLE"),
@@ -1890,10 +1601,7 @@ mod compact_tests {
         );
     }
 
-    /// The day-key script: one job — probe, chunked `IN UNNEST(chunk)` MERGEs (≤ 4,000
-    /// days each, the base pruned to exactly those days), the NULL-keyed pass, the
-    /// DROP, and the `(changes_rows, merge_jobs)` row last. No key: one unbounded
-    /// MERGE guarded by the row count, then the DROP.
+    /// The day-key script: one job — probe, chunked `IN UNNEST(chunk)` MERGEs (≤ 4,000 days each, the base pruned to exactly those days), the NULL-keyed pass, the DROP, and the `(changes_rows, merge_jobs)` row last.
     #[test]
     fn the_compaction_script_probes_merges_by_day_list_and_drops_in_one_job() {
         let s = compact_script_sql(
@@ -2008,10 +1716,6 @@ mod compact_tests {
             "{plain}"
         );
 
-        // A TIMESTAMP day column is read as a UTC day at every site of the script — the
-        // day list, the winners' chunk filter and the base's bound — or the project's
-        // default time zone decides which day a row is, against `+00` literals and
-        // UTC-day partitions. A DATETIME (`specs()` above) takes no zone.
         let utc = compact_script_sql(
             "p.d.t",
             "p.d.t__changes",
@@ -2032,8 +1736,6 @@ mod compact_tests {
             "{utc}"
         );
 
-        // Hostile names: a reserved-word key and a dashed table id are quoted
-        // everywhere they appear — the ON clause, the window, the buffer filter.
         let hostile = compact_script_sql(
             "p.d.my-orders",
             "p.d.my-orders__changes",
@@ -2104,10 +1806,7 @@ mod compact_tests {
         .expect("a plan")
     }
 
-    /// An empty buffer plans nothing; no key plans one unbounded MERGE; a day
-    /// key over 5,000 days plans two windows (+ one for the NULL rows when there
-    /// are any); a range key steps by interval × 4,000; the flag column never
-    /// appears among the merged columns.
+    /// An empty buffer plans nothing; no key plans one unbounded MERGE.
     #[test]
     fn the_compaction_plan_follows_the_probe_and_the_key() {
         let day = PartitionKey::Time {
@@ -2173,9 +1872,6 @@ mod compact_tests {
             "{}",
             two[1]
         );
-        // Both windows bound the BASE by the whole touched range: a key whose value
-        // moved from the first window into the second sits in the base under the old
-        // value, and a base bound by the winner's window alone re-inserted it.
         let base_bound = "ON __rivet_t.`id` = __rivet_s.`id` AND (__rivet_t.`created_at` >= DATETIME '2000-01-01T00:00:00' AND __rivet_t.`created_at` < DATETIME '2013-09-09T00:00:00' OR __rivet_t.`created_at` IS NULL)";
         assert!(
             two[0].contains(base_bound) && two[1].contains(base_bound),
@@ -2215,8 +1911,6 @@ mod compact_tests {
             stepped[1]
         );
 
-        // A value outside the key's `[start, end)` lives in the unpartitioned bucket no
-        // window reaches: one unbounded MERGE, not a million windows up to it.
         let stray = plan(Some(&range), &probe(5, "0", "4000000000", 0));
         assert_eq!(stray.len(), 1, "{stray:?}");
         assert!(
@@ -2225,9 +1919,6 @@ mod compact_tests {
             stray[0]
         );
 
-        // The warehouse's last day has no successor: a `9999-12-31` sentinel (the SCD
-        // "end of time", a legal value) must not render `DATE '+10000-01-01'` — a hard
-        // error that wedged every compaction of the table. RED against `hi + 1 day`.
         let eot = plan(Some(&month), &probe(2, "9999-01-01", "9999-12-31", 0));
         assert_eq!(eot.len(), 1, "{eot:?}");
         assert!(
@@ -2238,12 +1929,8 @@ mod compact_tests {
             eot[0]
         );
 
-        // A monthly key steps 4,000 × 28 days: 400 years span two windows, not one
-        // and not hundreds.
         let long_month = plan(Some(&month), &probe(4, "1600-01-01", "2000-01-01", 0));
         assert_eq!(long_month.len(), 2, "146,000 days at 112,000 per window");
-        // A range key without NULL keys plans no NULL pass; one whose every key is
-        // NULL (no range to read) merges once, unbounded.
         assert_eq!(plan(Some(&range), &probe(5, "0", "45000", 0)).len(), 2);
         let range_nulls = plan(Some(&range), &probe(2, "", "", 2));
         assert_eq!(range_nulls.len(), 1);
@@ -2288,10 +1975,7 @@ mod compact_tests {
         );
     }
 
-    /// A time key's value outside the partitioned days sits in the one unpartitioned
-    /// partition: each side outside is one window, and only the span the probe found
-    /// inside is stepped. RED: stepping an hourly key up to the `9999-12-31` sentinel
-    /// planned 17,544 serial MERGE jobs for two buffer rows.
+    /// A time key's value outside the partitioned days sits in the one unpartitioned partition.
     #[test]
     fn a_time_key_outside_the_partitioned_days_is_one_window_per_side() {
         let hour = PartitionKey::Time {
@@ -2337,8 +2021,6 @@ mod compact_tests {
                 "the base stays bounded by the whole touched span: {merge}"
             );
         }
-        // A probe that did not say steps every partitioned day of the span: slower, and
-        // no winner is left outside every window.
         let half = plan(Some(&hour), &probe("2026-10-01", "9999-12-31", "none", ""));
         assert_eq!(
             half.len(),
@@ -2370,9 +2052,7 @@ mod compact_tests {
         }
     }
 
-    /// The MERGE upserts the latest change per key, flags a tombstone instead of
-    /// deleting, un-flags a re-insert, never inserts a delete — and prunes BOTH sides
-    /// by the same constant bound, since only constants prune a MERGE target.
+    /// The MERGE upserts the latest change per key, flags a tombstone instead of deleting, un-flags a re-insert, never inserts a delete.
     #[test]
     fn compact_merge_flags_deletes_and_prunes_both_sides_by_constants() {
         let sql = compact_merge_sql(
@@ -2413,15 +2093,13 @@ mod compact_tests {
             !sql.contains("THEN DELETE"),
             "the warehouse deletes nothing: {sql}"
         );
-        // MySQL orders by the binlog file's ordinal then position, `__seq` last.
         assert!(
             sql.contains("JSON_VALUE(__pos,'$.file')") && sql.contains("__seq DESC"),
             "{sql}"
         );
     }
 
-    /// Rows whose partition column is NULL (a tombstone with a minimal before-image)
-    /// merge on their own, unpruned, so a bounded pass cannot skip them.
+    /// Rows whose partition column is NULL (a tombstone with a minimal before-image) merge on their own, unpruned, so a bounded pass cannot skip them.
     #[test]
     fn compact_merge_of_null_partition_rows_is_unbounded() {
         let sql = compact_merge_sql(
@@ -2445,8 +2123,7 @@ mod compact_tests {
         );
     }
 
-    /// Windows of at most `step` days cover `[lo, hi]` exactly once each — 5,000
-    /// days at BigQuery's 4,000-partition cap is two MERGEs, not one refusal.
+    /// Windows of at most `step` days cover `[lo, hi]` exactly once each.
     #[test]
     fn day_windows_cover_the_span_once_in_cap_sized_steps() {
         let lo = chrono::NaiveDate::from_ymd_opt(2000, 1, 1).unwrap();
@@ -2503,10 +2180,6 @@ mod compact_tests {
                 && t.contains("MAX(IF(v >= DATE '1960-01-01' AND v < DATE '2160-01-01', v, NULL)) AS STRING), 'none') AS in_hi"),
             "a time key reads the span inside the partitioned days: {t}"
         );
-        // A TIMESTAMP is read as a UTC day: an unqualified `DATE(timestamp)` follows the
-        // project's default time zone, while the bounds it feeds are rendered `+00` and
-        // the partitions are UTC days — under `Asia/Tokyo` the two disagreed by a day at
-        // both ends (a skipped winner, a re-inserted key). A DATETIME takes no zone.
         let ts = compact_probe_sql(
             "p.d.t__changes",
             "p.d.t",
@@ -2564,9 +2237,7 @@ mod compact_column_tests {
         }
     }
 
-    /// A YEAR key steps 4,000 x 365 days, so the two partitioned centuries are ONE
-    /// window. RED against `4000 + 365` (17 windows) and `4000 / 365` (7,305) — the
-    /// arm the day/hour/month cases never reach.
+    /// A YEAR key steps 4,000 x 365 days, so the two partitioned centuries are ONE window.
     #[test]
     fn a_yearly_key_plans_one_window_for_the_partitioned_centuries() {
         let year = PartitionKey::Time {
@@ -2597,9 +2268,7 @@ mod compact_column_tests {
         );
     }
 
-    /// The scripted MERGE carries the DATA columns only. The buffer's `__op` /
-    /// `__pos` / `__seq` are its own bookkeeping, and `__is_deleted` is DECIDED by
-    /// the merge, never copied from a buffer row that has no such column.
+    /// The scripted MERGE carries the DATA columns only.
     #[test]
     fn the_compaction_script_merges_data_columns_only() {
         let mut specs = meta_column_specs(Warehouse::BigQuery);
@@ -2642,9 +2311,7 @@ mod compact_column_tests {
 mod compact_order_tests {
     use super::*;
 
-    /// The compaction and the current-state view must rank ONE key the same way,
-    /// or a compacted base and a view over the same rows disagree about which is
-    /// latest. The cursor arm renders the view's own order, NULL guard included.
+    /// The compaction and the current-state view must rank ONE key the same way, or a compacted base and a view over the same rows disagree about which is latest.
     #[test]
     fn the_cursor_order_is_the_one_the_incremental_view_ranks_by() {
         let order = CompactOrder::Cursor("updated_at".into()).order_by(Warehouse::BigQuery);
@@ -2676,11 +2343,7 @@ mod compact_order_tests {
 mod compact_flag_tests {
     use super::*;
 
-    /// A query-based export cannot express a DELETE, so its base need not carry
-    /// `__is_deleted` — an extra column per row on the warehouse side. With the
-    /// column absent the MERGE must not name it ANYWHERE: not in the SET list, not
-    /// among the inserted columns, and not as a tombstone arm, or it would fail
-    /// against a base that does not have it.
+    /// A query-based export cannot express a DELETE, so its base need not carry `__is_deleted`.
     #[test]
     fn a_base_without_the_delete_flag_merges_without_naming_it() {
         let data = vec![

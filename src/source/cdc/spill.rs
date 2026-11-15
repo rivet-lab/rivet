@@ -1,40 +1,4 @@
 //! Spilling a buffered transaction to disk — the frame, shared by both encodings.
-//!
-//! A transaction is buffered WHOLE (it is never split across parts, which is what
-//! makes a crash resume transaction-atomic), so a large one used to be REFUSED:
-//! `check_tx_buffer_caps` bails, and capture stops until someone splits the source
-//! transaction or raises a cap. That is a memory ceiling wearing a refusal.
-//!
-//! MEASURED LIMIT, so nobody has to rediscover it: this bounds the ADAPTER's copy
-//! and not the run. `sink::RolloverPolicy::should_roll` requires a `committed`
-//! event — the "never split a transaction across parts" invariant that makes crash
-//! resume transaction-atomic — so the sink buffers a whole transaction whatever the
-//! adapter does. A 100k-row transaction peaked at 202 MB with spilling and 226 MB
-//! without: ~11%, not a ceiling. What this DOES buy is that the run no longer fails
-//! outright, which was the point. An end-to-end ceiling needs the SINK to spill too,
-//! and that is a separate piece of work — the soak stand
-//! (`tests/live/soak_spill.rs`) is where the two numbers are produced, so the claim
-//! stays honest as the code changes.
-//!
-//! This is the container, not the encoding. Two encodings ride on it and the choice
-//! is per adapter:
-//!
-//! * **raw wire bytes** where the engine gives them — PostgreSQL only: its
-//!   `test_decoding` rows arrive as text, so there is nothing to encode and the
-//!   same parser reads them back. (NOT `pgoutput` — that module is staged, unused
-//!   here — and NOT MongoDB, which spills nothing by construction: it has no
-//!   transaction buffer, every event is its own commit, and it serves as the soak
-//!   stand's control. An earlier header listed both wrongly; the mid-file
-//!   encoding note already told the true story while this summary contradicted
-//!   it, which is exactly how a contributor gets sent the wrong way.) SQL Server
-//!   has no wire to keep (its "stream" is a query result set) and MySQL's crate
-//!   hands over parsed events, so neither can use this path;
-//! * **Arrow IPC** as the general fallback — rivet already converts events to Arrow
-//!   to write Parquet, so this reuses machinery that exists and is tested, in a
-//!   self-describing format with a stable reader.
-//!
-//! What this file owns is the part both need and neither should re-invent: append
-//! a record, read them back IN ORDER, and never leave the file behind.
 
 use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::PathBuf;
@@ -44,20 +8,9 @@ use crate::source::cdc::value::RivetValue;
 use crate::source::cdc::{ChangeEvent, ChangeOp, Position};
 
 /// A length-prefixed record log in a temp file, deleted when dropped.
-///
-/// Records are read back in the order written — which is the whole contract, since
-/// a transaction's rows are ordered and `__seq` is derived from that order.
-///
-/// The prefix is a `u32` length, and the reader REFUSES a length that runs past the
-/// file rather than reading what it can: a truncated spill is a torn transaction,
-/// and half of one is worse than none. That is the same rule the sink applies to a
-/// torn part.
 #[derive(Debug)]
 pub(crate) struct SpillFile {
-    /// `None` once [`SpillFile::into_reader`] has handed the file over — the
-    /// reader owns the cleanup from that point, and a `Drop` that deleted it
-    /// anyway would pull the log out from under the read on any platform that
-    /// does not allow an unlinked-but-open file.
+    /// `None` once [`SpillFile::into_reader`] has handed the file over.
     path: Option<PathBuf>,
     writer: Option<BufWriter<std::fs::File>>,
     records: usize,
@@ -65,13 +18,6 @@ pub(crate) struct SpillFile {
 }
 
 /// This process's spill identity: `{pid}-{startup-hex}`.
-///
-/// The pid ALONE was the identity, and two container generations are both pid 1 —
-/// so a name could collide across namespaces (`create` then truncated a live
-/// neighbour's inode through the shared volume) and the sweep's pid probe read a
-/// foreign namespace's live writer as dead-or-self. The startup stamp makes the
-/// name unique per PROCESS INSTANCE, not per pid number; the pid stays in front
-/// for traceability.
 fn process_token() -> &'static str {
     static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     TOKEN.get_or_init(|| {
@@ -84,16 +30,8 @@ fn process_token() -> &'static str {
 }
 
 /// The pid a spill file's name carries, if it is one of ours.
-///
-/// The label can itself hold dashes (`pg-tx`, `mssql-batch`), so the pid is the
-/// segment between the LAST dash and the extension — not the third field.
 pub(crate) fn spill_file_pid(name: &str) -> Option<u32> {
     let core = name.strip_prefix("rivet-spill-")?.strip_suffix(".bin")?;
-    // `{label}-{seq}-{pid}-{startup}`: the pid is SECOND from the end — the
-    // startup token took the last slot when pid alone stopped being an identity
-    // (two containers on one volume are both pid 1). A name without the token
-    // (the short-lived pre-token shape) still parses via the fallback, so a
-    // dev-machine orphan from that window is recognised rather than immortal.
     let (rest, last) = core.rsplit_once('-')?;
     if let Some((_, pid)) = rest.rsplit_once('-')
         && let Ok(p) = pid.parse()
@@ -104,31 +42,13 @@ pub(crate) fn spill_file_pid(name: &str) -> Option<u32> {
 }
 
 /// Remove spill files left behind by a process that is no longer running.
-///
-/// `Drop` does not run on SIGKILL, so a hard-killed rivet leaves its spill on disk —
-/// one per oversized transaction, which fills a disk on a scheduler. The name
-/// carries the writer's pid, and pid LIVENESS is the authoritative, clock-free
-/// discriminator: the spill directory is local, so the pid is local too.
-///
-/// Deliberately one-directional about doubt. A pid number can be REUSED by an
-/// unrelated process, and in that case this spares a file that is genuinely dead —
-/// wasted disk, which a later sweep under a different pid landscape reclaims.
-/// Deleting a file a LIVE writer is still appending to would tear a transaction in
-/// half. Same rule as the orphan GC: gate the ambiguous case on a lifecycle signal,
-/// and where it is unclear, spare.
-/// Sweep with the PRODUCTION liveness probe — the CDC open calls this once per
-/// run so an orphan does not wait for the NEXT spill to be born in the same
-/// dir (round-5 lifecycle: the likeliest spill producer is a one-off giant
-/// backfill transaction that also crashed the run — its multi-GB file leaked
-/// until another transaction crossed the cap in the same directory, possibly
-/// never).
 pub(crate) fn sweep_dead_spills_now(dir: &std::path::Path) {
     sweep_dead_spills(dir, pid_is_alive);
 }
 
 pub(crate) fn sweep_dead_spills(dir: &std::path::Path, is_alive: impl Fn(u32) -> bool) {
     let Ok(rd) = std::fs::read_dir(dir) else {
-        return; // no directory yet is not an error — there is nothing to sweep
+        return;
     };
     for e in rd.flatten() {
         let path = e.path();
@@ -137,34 +57,20 @@ pub(crate) fn sweep_dead_spills(dir: &std::path::Path, is_alive: impl Fn(u32) ->
             .and_then(|n| n.to_str())
             .and_then(spill_file_pid)
         else {
-            continue; // not ours; never touch a file we did not name
+            continue;
         };
-        let _ = pid; // recognised as OURS by the name shape; liveness comes below
-        // The discriminator is the WRITER-HELD FLOCK, not pid liveness. Pid
-        // numbers do not survive namespaces (two containers on one volume are
-        // both pid 1 — the old probe read a live neighbour as "self", i.e. an
-        // orphan, and deleted its in-flight spill) and are recycled within one.
-        // The lock is a true lifecycle record: held while any writer or reader
-        // owns the fd, released by the kernel on any death including SIGKILL.
-        // `is_alive` remains the fallback where flock does not exist.
+        let _ = pid;
         if spill_is_held(&path, &is_alive, pid) {
             continue;
         }
         match std::fs::remove_file(&path) {
             Ok(()) => log::info!("cdc spill: removed an orphan left by pid {pid}"),
-            // Best effort: a sweep that failed a run would turn tidy-up into an
-            // outage, and a file it could not remove costs disk, not correctness.
             Err(err) => log::debug!("cdc spill: could not remove {}: {err}", path.display()),
         }
     }
 }
 
-/// Is this spill file still OWNED — i.e. does a live writer/reader hold its lock?
-///
-/// `flock` where it exists (unix): try to take the lock; failure means a live
-/// owner in ANY pid namespace, success means the kernel already released it —
-/// the owner is dead, whatever its pid number said. Elsewhere, fall back to the
-/// pid probe, sparing on doubt.
+/// Is this spill file still OWNED — i.e.
 fn spill_is_held(path: &std::path::Path, is_alive: &impl Fn(u32) -> bool, pid: u32) -> bool {
     #[cfg(unix)]
     {
@@ -172,11 +78,8 @@ fn spill_is_held(path: &std::path::Path, is_alive: &impl Fn(u32) -> bool, pid: u
         match std::fs::OpenOptions::new().read(true).open(path) {
             Ok(f) => {
                 let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-                // rc == 0: we got the lock — nobody held it — the file is an
-                // orphan (the lock dies with `f` at the end of this scope).
                 rc != 0
             }
-            // Unreadable: cannot prove it is dead — spare, the safe direction.
             Err(_) => {
                 let _ = (is_alive, pid);
                 true
@@ -190,17 +93,6 @@ fn spill_is_held(path: &std::path::Path, is_alive: &impl Fn(u32) -> bool, pid: u
 }
 
 /// Whether a local process is running.
-///
-/// `kill(pid, 0)` sends no signal and reports reachability. `EPERM` means the
-/// process EXISTS and is not ours, which is still alive — reading it as dead would
-/// delete another user's in-flight spill.
-/// ONE function with the platform split INSIDE, not two `#[cfg]` siblings: as two
-/// functions, the `not(unix)` stub was a separate mutation target that no machine
-/// running mutants can ever compile IN — a permanently-missed mutant that invited
-/// an exclusion, and the first exclusion written for it matched the unix arm's
-/// mutants too. Off unix there is no portable liveness probe, and a wrong answer
-/// here DELETES data, so the answer is "alive": the sweep does nothing rather than
-/// guessing — a leaked spill costs disk; a deleted live one tears a transaction.
 fn pid_is_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
@@ -238,18 +130,8 @@ fn flush_refusal(err: std::io::Error) -> anyhow::Error {
 
 impl SpillFile {
     /// Create one in `dir`, named for the caller so a leaked file says who left it.
-    ///
-    /// In a caller-supplied directory rather than the system temp: a CDC run's
-    /// spill can be gigabytes, and the system temp is often a small tmpfs — filling
-    /// it takes down more than rivet. The caller passes somewhere it already knows
-    /// is sized for the data.
     pub(crate) fn create(dir: &std::path::Path, label: &str) -> Result<Self> {
         std::fs::create_dir_all(dir)?;
-        // Per DIRECTORY, not per process: a run with two CDC exports whose
-        // checkpoints live in different directories spills into both, and a
-        // process-wide `Once` (the first version) swept only whichever came
-        // first — the second directory's orphans lived forever. A readdir per
-        // spill-open is cheap next to the spill itself.
         {
             static SWEPT: std::sync::Mutex<Option<std::collections::BTreeSet<PathBuf>>> =
                 std::sync::Mutex::new(None);
@@ -263,45 +145,19 @@ impl SpillFile {
                 sweep_dead_spills(dir, pid_is_alive);
             }
         }
-        // `{label}-{seq}-{pid}-{startup}`: the counter makes the name unique
-        // WITHIN a process, the token across PROCESS INSTANCES — two containers
-        // sharing a checkpoint volume are both pid 1, so a pid-only name collided
-        // across namespaces and `truncate` then destroyed a live neighbour's
-        // spilled transaction through the shared inode.
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = dir.join(format!("rivet-spill-{label}-{seq}-{}.bin", process_token()));
-        // read+write, not `File::create`: `drain` rewinds and reads the same
-        // handle back, and a write-only descriptor fails there with `Bad file
-        // descriptor` — which reads as a TRUNCATED log, i.e. the one error this
-        // type raises to mean "your transaction is torn". And `create_new`, never
-        // `truncate`: a name collision must be an ERROR, not a silent truncation
-        // of whoever owns the existing inode. With the startup token in the name
-        // a collision means a bug, and a bug must be loud.
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
             .open(&path)?;
-        // The WRITER-HELD LOCK is the liveness signal the sweep reads. Pid
-        // liveness cannot cross a pid namespace (two containers on one volume are
-        // both pid 1: a live neighbour probed as "self" or as "dead"), and the
-        // GC rule is that ambiguity gates on a LIFECYCLE signal, never a clock —
-        // flock IS that signal: held for the file's whole life (the fd passes
-        // into the reader), released by the kernel on ANY death including
-        // SIGKILL, and visible through shared volumes.
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd as _;
             let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
             if rc != 0 {
-                // This branch runs on a file `create_new` JUST made — no other
-                // writer can hold it. A failing flock here means the FILESYSTEM
-                // refused the lock (NFS without lockd → ENOLCK, some FUSE/SMB →
-                // EOPNOTSUPP) — and flock is the sweep's liveness signal, so
-                // continuing would leave a spill the sweep could later mistake
-                // for an orphan mid-write. (Round-5: the old text asserted an
-                // impossible live neighbour, for a case that cannot reach here.)
                 return Err(flock_refusal(&path, std::io::Error::last_os_error()));
             }
         }
@@ -347,15 +203,6 @@ impl SpillFile {
     }
 
     /// Seal the log and hand back a STREAMING reader over it.
-    ///
-    /// A `Vec<Vec<u8>>` return would defeat the point: spilling exists to keep an
-    /// oversized transaction OUT of memory, and materialising every record to read
-    /// it back trades one whole-transaction allocation for another plus the disk
-    /// write. The caller pulls one record, decodes it, hands the event on, and
-    /// drops it — so the ceiling is one record, not one transaction.
-    ///
-    /// Consuming, because a spill is read ONCE: the transaction it holds is
-    /// released at its commit and the file has no reason to outlive that.
     pub(crate) fn into_reader(mut self) -> Result<SpillReader> {
         let Some(w) = self.writer.take() else {
             crate::rivet_bail!(
@@ -367,9 +214,6 @@ impl SpillFile {
         file.flush()?;
         file.rewind()?;
         Ok(SpillReader {
-            // Taken, not cloned: `self` is dropped at the end of this function, and
-            // a `Drop` still holding the path would delete the file the reader is
-            // about to read.
             path: self.path.take(),
             reader: BufReader::new(file),
             read: 0,
@@ -378,17 +222,9 @@ impl SpillFile {
     }
 
     /// Read every record back into memory, in order — TESTS only.
-    ///
-    /// Convenient for a round-trip assertion and wrong for the product, for the
-    /// reason [`SpillFile::into_reader`] gives.
     #[cfg(test)]
     pub(crate) fn drain(self) -> Result<Vec<Vec<u8>>> {
         let mut r = self.into_reader()?;
-        // Exactly `len()` pulls, then assert DONE — never `while let Some(..)`.
-        // The unbounded loop turned a "reader always answers Some" mutant into an
-        // infinite hang: twelve mutants survived as TIMEOUTs, a CI stall where an
-        // assertion should be. The count is the writer's own, so a reader that
-        // disagrees with it in either direction fails here, loudly.
         let mut out = Vec::with_capacity(r.len());
         for _ in 0..r.len() {
             out.push(r.next_record().expect("len() promises this record")?);
@@ -403,12 +239,6 @@ impl SpillFile {
 }
 
 /// One-pass reader over a sealed [`SpillFile`], deleting the file when dropped.
-///
-/// The record COUNT is carried from the writer rather than inferred from EOF, so a
-/// log that ends early is a named error instead of a short read. That distinction is
-/// the whole reason this type refuses to be lenient: a spilled transaction read short
-/// is a TORN transaction, the sink would flush it, checkpoint past its commit, and
-/// the tail would be gone from both the source log and the destination.
 pub(crate) struct SpillReader {
     path: Option<PathBuf>,
     reader: BufReader<std::fs::File>,
@@ -417,8 +247,7 @@ pub(crate) struct SpillReader {
 }
 
 impl SpillReader {
-    /// How many records the log holds in total — the transaction's tail length,
-    /// which is what tells the caller WHICH record carries the commit flag.
+    /// How many records the log holds in total — the transaction's tail length, which is what tells the caller WHICH record carries the commit flag.
     pub(crate) fn len(&self) -> usize {
         self.total
     }
@@ -429,9 +258,6 @@ impl SpillReader {
     }
 
     /// The next record, or `None` once all `len()` of them have been read.
-    ///
-    /// `None` means DONE, never "the file ended sooner than expected" — that is an
-    /// `Err`. Collapsing the two is how half a transaction ships as a whole one.
     pub(crate) fn next_record(&mut self) -> Option<Result<Vec<u8>>> {
         if self.read >= self.total {
             return None;
@@ -454,10 +280,6 @@ impl SpillReader {
             ))
         })?;
         let len = u32::from_be_bytes(len) as usize;
-        // Bounded pre-allocation: one corrupt length prefix can declare up to
-        // 4 GiB, and `vec![0u8; len]` commits that much memory BEFORE
-        // `read_exact` refuses (round-4 fuzz sweep). Grow through a capped
-        // `take`-reader instead, so a lying prefix costs at most one chunk.
         let mut buf = Vec::with_capacity(len.min(1 << 20));
         let got = std::io::Read::take(&mut self.reader, len as u64)
             .read_to_end(&mut buf)
@@ -492,9 +314,7 @@ impl Drop for SpillReader {
 }
 
 impl Drop for SpillFile {
-    /// Best effort, and deliberately silent: a leaked spill file is a disk-space
-    /// problem, and failing a run in `Drop` over one would turn a tidy-up into an
-    /// outage. The name carries the pid so a leak can be traced.
+    /// Best effort, and deliberately silent: a leaked spill file is a disk-space problem, and failing a run in `Drop` over one would turn a tidy-up into an outage.
     fn drop(&mut self) {
         self.writer.take();
         if let Some(p) = self.path.take() {
@@ -512,17 +332,10 @@ mod tests {
     }
 
     /// Records come back in ORDER and byte-identical.
-    ///
-    /// Order is the contract, not a nicety: a transaction's rows are ordered and
-    /// `__seq` is derived from that order, so a spill that reorders silently
-    /// rewrites which change won for a key.
     #[test]
     fn records_round_trip_in_the_order_they_were_written() {
         let d = dir();
         let mut s = SpillFile::create(d.path(), "order").expect("create");
-        // THREE records, not two: with one, order is meaningless; with two, a
-        // reversal and a swap are the same mutation. Distinct LENGTHS too, so a
-        // frame that reads a fixed size cannot pass.
         let written: Vec<Vec<u8>> = vec![b"a".to_vec(), b"bbbb".to_vec(), b"cc".to_vec()];
         for r in &written {
             s.push(r).expect("push");
@@ -558,8 +371,7 @@ mod tests {
         assert_eq!(s.drain().expect("drain"), vec![nasty]);
     }
 
-    /// A large record crosses the buffered-writer boundary rather than sitting
-    /// inside one buffer — the threshold a small fixture never reaches.
+    /// A large record crosses the buffered-writer boundary rather than sitting inside one buffer.
     #[test]
     fn a_record_larger_than_the_write_buffer_round_trips() {
         let d = dir();
@@ -579,11 +391,6 @@ mod tests {
     }
 
     /// The file is GONE once the spill is dropped.
-    ///
-    /// A CDC spill can be gigabytes, and one leaked per oversized transaction fills
-    /// a disk on a scheduler. The cleanup is in `Drop` so a panic mid-transaction
-    /// cannot skip it — the same reason the server-setting guard puts its revert
-    /// there.
     #[test]
     fn the_file_does_not_outlive_the_spill() {
         let d = dir();
@@ -600,7 +407,6 @@ mod tests {
             path.display()
         );
 
-        // …and after a PANIC too, which is the case a manual delete misses.
         let path = std::panic::catch_unwind(|| {
             let mut s = SpillFile::create(d.path(), "panicky").expect("create");
             s.push(b"payload").expect("push");
@@ -613,22 +419,16 @@ mod tests {
     }
 
     /// A truncated log is an ERROR, never a short read.
-    ///
-    /// Half a transaction is worse than none: the sink would flush it, checkpoint
-    /// past its commit, and the tail would be gone from both the source log and the
-    /// destination. Same rule the sink applies to a torn part.
     #[test]
     fn a_truncated_log_is_refused_rather_than_partially_read() {
         let d = dir();
         let mut s = SpillFile::create(d.path(), "torn").expect("create");
         s.push(b"one").expect("push");
         s.push(b"two").expect("push");
-        // Cut the file to the first record plus a partial second.
         let path = s.path.clone().expect("owned");
-        s.writer.take(); // close the writer without dropping the guard
+        s.writer.take();
         let full = std::fs::read(&path).expect("read the log");
         std::fs::write(&path, &full[..full.len() - 2]).expect("truncate");
-        // Reopen so `drain` reads the truncated file.
         let mut torn = SpillFile::create(d.path(), "torn2").expect("create");
         torn.records = s.records;
         let torn_path = torn.path.clone().expect("owned");
@@ -650,14 +450,6 @@ mod tests {
     }
 
     /// Two spills open at once never share a path.
-    ///
-    /// `create` TRUNCATES, so a shared name means the second spill destroys the
-    /// first's transaction while its reader still holds the file — silent, and
-    /// silent in the worst way: the reader's `read_exact` then fails as a TORN
-    /// LOG, which is the error that means "your transaction is half gone".
-    ///
-    /// One process drives one CDC stream today, so label+pid would not actually
-    /// collide. This pins the property rather than the circumstance.
     #[test]
     fn two_spills_in_one_process_do_not_share_a_file() {
         let d = dir();
@@ -693,19 +485,11 @@ mod tests {
         );
     }
 
-    /// `create` REFUSES an existing path — it must never truncate whoever owns
-    /// the inode. The pre-token behaviour (`truncate(true)`) destroyed a live
-    /// neighbour's spilled transaction through a shared volume when two pid-1
-    /// containers collided on `{label}-{seq}-{pid}`.
-    ///
-    /// The SEQ is process-global and every parallel test advances it, so the
-    /// "plant the next name" fixture retries until its prediction lands — a
-    /// missed prediction is a sibling test racing, not a failure.
+    /// `create` REFUSES an existing path — it must never truncate whoever owns the inode.
     #[test]
     fn create_refuses_an_existing_path_rather_than_truncating_it() {
         let d = dir();
         for _ in 0..50 {
-            // Probe the counter: this create's name carries the CURRENT seq.
             let probe = SpillFile::create(d.path(), "collide").expect("probe");
             let probe_name = probe
                 .path
@@ -736,7 +520,6 @@ mod tests {
                     return;
                 }
                 Ok(second) => {
-                    // A sibling test consumed our predicted seq — clean up, retry.
                     drop(second);
                     let _ = std::fs::remove_file(&victim);
                 }
@@ -745,21 +528,13 @@ mod tests {
         panic!("50 predictions raced away — the fixture never landed");
     }
 
-    /// An UNLOCKED spill is collected; a LOCKED one is spared; a foreign file is
-    /// untouched.
-    ///
-    /// The discriminator is the writer-held flock, because pid liveness cannot
-    /// cross a pid namespace: two containers sharing a checkpoint volume are both
-    /// pid 1, and the pid probe read a live neighbour as "self" — an orphan — and
-    /// deleted its in-flight spill. The lock is a true lifecycle record: held
-    /// while any writer/reader owns the fd, released by the kernel on any death
-    /// including SIGKILL, visible through shared volumes.
+    /// An UNLOCKED spill is collected; a LOCKED one is spared; a foreign file is untouched.
     #[cfg(unix)]
     #[test]
     fn a_sweep_collects_unlocked_spills_and_spares_locked_ones() {
         use std::os::fd::AsRawFd as _;
         let d = dir();
-        let token = "9999-cafef00d"; // a foreign process instance's token
+        let token = "9999-cafef00d";
         let live = d.path().join(format!("rivet-spill-pg-tx-0-{token}.bin"));
         let dead = d
             .path()
@@ -768,7 +543,6 @@ mod tests {
         for f in [&live, &dead, &foreign] {
             std::fs::write(f, b"x").expect("stage");
         }
-        // The "live" file's owner: a held flock, exactly what a writer holds.
         let holder = std::fs::OpenOptions::new()
             .read(true)
             .open(&live)
@@ -798,10 +572,6 @@ mod tests {
     }
 
     /// Off unix the fallback is the injected pid probe, sparing on doubt.
-    /// Seed generator for `fuzz/seeds/spill_frame_decode/` — gated like the
-    /// fixture regenerator: writes only under RIVET_REGENERATE_FIXTURES=1.
-    /// Seeds are REAL encode_event output, so the fuzzer starts from valid
-    /// frames instead of discovering the format from zero.
     #[test]
     fn regenerate_spill_fuzz_seeds() {
         if std::env::var("RIVET_REGENERATE_FIXTURES").as_deref() != Ok("1") {
@@ -841,9 +611,7 @@ mod tests {
         }
     }
 
-    /// Round-10 mutants: `sweep_dead_spills_now` stubbed to () survived — the
-    /// CDC-open sweep (round-5) had wiring but no direct grade. A flock-free
-    /// rivet-shaped file is an orphan and must go; a foreign file stays.
+    /// Round-10 mutants: `sweep_dead_spills_now` stubbed to () survived.
     #[test]
     fn sweep_now_reaps_an_unlocked_orphan_and_spares_foreign_files() {
         let d = dir();
@@ -869,8 +637,7 @@ mod tests {
         assert!(live.exists() && !dead.exists());
     }
 
-    /// The pid still parses out of the token-bearing name — second from the end —
-    /// and the pre-token shape stays recognisable so its orphans are not immortal.
+    /// The pid still parses out of the token-bearing name.
     #[test]
     fn a_spill_name_yields_the_writer_pid() {
         assert_eq!(
@@ -882,27 +649,14 @@ mod tests {
             spill_file_pid("rivet-spill-mssql-batch-7-9-deadbeef.bin"),
             Some(9)
         );
-        // The `{label}-{pid}` fallback shape. HONESTY (round-4): the REAL
-        // pre-token production name was `{label}-{seq}-{pid}.bin`, for which the
-        // primary branch fires and returns the SEQ — usually 0 — as the "pid".
-        // Harmless today: on unix flock decides and the pid only feeds a log
-        // line; off unix the probe never deletes. What matters is the Some/None
-        // SHAPE (a rivet spill is recognised, a foreign file is not); do NOT
-        // wire the VALUE into any decision without fixing the parse first.
         assert_eq!(spill_file_pid("rivet-spill-pg-tx-4242.bin"), Some(4242));
         assert_eq!(spill_file_pid("some-other-tool-9.bin"), None);
         assert_eq!(spill_file_pid("rivet-spill-pg-tx-4242.txt"), None);
     }
 
-    /// A corrupt frame of nested `ARRAY(len=1)` units must come back as an
-    /// `Err`, never a stack overflow: each 9-byte unit used to cost one stack
-    /// frame, so a few MB of corruption was a SIGSEGV no caller could catch
-    /// (round-4 fuzz sweep). RED against removing the depth cap — with it gone
-    /// this test dies by signal rather than failing an assert.
+    /// A corrupt frame of nested `ARRAY(len=1)` units must come back as an `Err`, never a stack overflow.
     #[test]
     fn a_nesting_bomb_is_refused_not_a_stack_overflow() {
-        // 200_000 levels of ARRAY(1) — far past the cap, far below what would
-        // fit legitimate data.
         let mut frame = Vec::new();
         for _ in 0..200_000 {
             frame.push(tag::ARRAY);
@@ -917,17 +671,12 @@ mod tests {
         );
     }
 
-    /// A record whose length prefix LIES (declares 4 GiB the file does not hold)
-    /// must refuse after reading what is actually there — never pre-commit the
-    /// declared allocation (round-4: `vec![0u8; len]` committed up to 4 GiB from
-    /// one corrupt u32 before `read_exact` could refuse).
+    /// A record whose length prefix LIES (declares 4 GiB the file does not hold) must refuse after reading what is actually there.
     #[test]
     fn a_lying_length_prefix_refuses_without_committing_the_declared_bytes() {
         let d = dir();
         let mut s = SpillFile::create(d.path(), "liar").expect("create");
         s.push(b"real record").expect("push");
-        // Seal first (flushes + rewinds), THEN corrupt the bytes on disk: the
-        // reader's first pull sees the rewritten inode.
         let mut r = s.into_reader().expect("seal");
         let path = r.path.clone().expect("reader owns the path");
         let mut bytes = std::fs::read(&path).expect("read spill");
@@ -944,13 +693,6 @@ mod tests {
     }
 
     /// The PRODUCTION probe, all three arms: alive, dead, and exists-but-foreign.
-    ///
-    /// The sweep tests above use an injected probe, which grades the sweep and says
-    /// nothing about `kill(pid, 0)` itself. Each arm fails in its own direction: a
-    /// probe that cannot see a LIVE process deletes a spill being written right now;
-    /// one that reports a DEAD process alive never collects an orphan (the mutant
-    /// `pid_is_alive -> true` survived the suite until the dead arm was added); and
-    /// reading EPERM as dead deletes another user's in-flight spill.
     #[cfg(unix)]
     #[test]
     fn the_real_liveness_probe_tells_alive_dead_and_foreign_apart() {
@@ -960,11 +702,6 @@ mod tests {
              it finds, including one being written right now"
         );
 
-        // A pid the test KNOWS is dead: spawn a child, wait for it, probe its pid.
-        // Reaping it first is what makes this deterministic — an un-reaped child is
-        // a zombie, which `kill(pid, 0)` still reaches. (A recycled pid could in
-        // principle be live again, but recycling within microseconds of the reap
-        // would have to wrap the whole pid space; accepted.)
         let dead = std::process::Command::new("true")
             .status()
             .map(|_| ())
@@ -982,10 +719,6 @@ mod tests {
              never collects any orphan, and the sweep exists for nothing"
         );
 
-        // Pid 1 exists on every unix and is not ours, so an unprivileged probe gets
-        // EPERM — which must read ALIVE: the process is real, merely foreign, and
-        // deleting its spill would tear another user's transaction. (Under root the
-        // call succeeds outright and the assertion holds through the other arm.)
         assert!(
             pid_is_alive(1),
             "EPERM means the process EXISTS — reading it as dead deletes another \
@@ -1017,11 +750,6 @@ mod tests {
     }
 
     /// A reader that ends EARLY errors; it does not quietly return `None`.
-    ///
-    /// This is the distinction the type exists for: `None` means the transaction was
-    /// delivered whole, so a truncated log answering `None` would ship half a
-    /// transaction as a complete one — the sink flushes it, checkpoints past its
-    /// commit, and the tail is gone from the source log too.
     #[test]
     fn a_short_log_errors_rather_than_ending_the_stream() {
         let d = dir();
@@ -1080,17 +808,6 @@ mod tests {
 }
 
 /// A committed transaction whose tail is on disk, streaming out one row at a time.
-///
-/// Shared by every engine that spills, because the rule it enforces is not
-/// engine-specific: each row of the tail carries the transaction's COMMIT position,
-/// and only the LAST row closes the transaction. Two copies of that rule is one
-/// copy too many — a `committed` flag on the wrong row lets the sink roll,
-/// checkpoint and ack MID-transaction, and a crash before the tail's flush advances
-/// the resume position past the commit.
-///
-/// What differs per engine is only how a record DECODES (raw wire rows for
-/// PostgreSQL, the tagged frame above for MySQL and SQL Server), which is why the
-/// decoder arrives as a closure rather than as a second implementation of this.
 pub(crate) struct SpooledTx {
     reader: SpillReader,
     commit: Position,
@@ -1131,32 +848,15 @@ impl SpooledTx {
     }
 }
 
-/// A row closes its transaction when nothing follows it, or what follows belongs to
-/// a different one.
-///
-/// A NAMED predicate rather than a condition inline in the drain: it is the whole
-/// of the group-boundary decision, and the consequence of getting it wrong is not
-/// visible in the delivered rows — `committed` decides when the sink ROLLS, so an
-/// early one lets it checkpoint and ack mid-transaction.
+/// A row closes its transaction when nothing follows it, or what follows belongs to a different one.
 pub(crate) fn closes_group(this: &Position, next: Option<&Position>) -> bool {
     next.is_none_or(|n| n.0 != this.0)
 }
 
 /// A spilled tail holding MORE THAN ONE transaction — SQL Server's shape.
-///
-/// PostgreSQL and MySQL buffer exactly one transaction at a time, so their tail
-/// length alone says which row closes it ([`SpooledTx`]). SQL Server's poll buffer
-/// holds a whole batch: several runs of rows sharing a `__$start_lsn`, with the
-/// boundaries only visible by comparing neighbours. So this one reads ONE RECORD
-/// AHEAD — a row cannot be handed out until the row after it is known, because that
-/// is what says whether it closes its transaction.
-///
-/// The lookahead is one record, not one group: a group can be arbitrarily large,
-/// and buffering a whole one would put back exactly the memory the spill removed.
 pub(crate) struct SpooledGroups {
     reader: SpillReader,
-    /// Decoded, not yet handed out — held so the NEXT row's position can decide
-    /// whether this one closes its transaction.
+    /// Decoded, not yet handed out — held so the NEXT row's position can decide whether this one closes its transaction.
     peeked: Option<ChangeEvent>,
 }
 
@@ -1185,10 +885,6 @@ impl SpooledGroups {
     }
 
     /// The position of the FIRST row on disk.
-    ///
-    /// The caller needs it to decide whether the IN-MEMORY head's last group
-    /// continues onto disk: if it does, the head's last row must NOT be marked
-    /// committed, because the transaction it belongs to has not ended yet.
     pub(crate) fn first_position(&self) -> Option<&Position> {
         self.peeked.as_ref().map(|e| &e.position)
     }
@@ -1212,41 +908,7 @@ impl SpooledGroups {
     }
 }
 
-// ─── the general fallback encoding ───────────────────────────────────────────
-//
-// PostgreSQL spills the RAW WIRE bytes: the row arrived as text and the decoder
-// that reads it back is the one the in-memory path uses, so a spilled row and a
-// buffered one cannot decode differently. MySQL's crate hands over PARSED events
-// and SQL Server's "stream" is a query result set — neither has a wire to keep, so
-// their events need an encoding of their own. MongoDB spills NOTHING, by
-// construction rather than omission: it has no transaction buffer at all (every
-// change-stream event is its own commit), which is why it serves as the soak
-// stand's CONTROL — an earlier version of this comment listed it beside
-// PostgreSQL as a raw-BSON spiller, and a contributor adding Mongo buffering
-// would have believed the encoding decision already covered it.
-//
-// ARROW IPC was the plan here, on the argument that rivet already turns events into
-// Arrow to write Parquet, so the machinery exists and is tested. Checking that
-// against what the sink actually does shows it is the wrong fit, for a reason that
-// is specific rather than aesthetic: the Arrow type of a column is decided by the
-// SINK, at its first flush, from the export's type mapping — and
-// `sink::refine_decimal_scales` derives a Decimal column's SCALE from the values in
-// that first batch. `RivetValue::Bytes` is deliberately undecided until then (Utf8,
-// Binary, or a Decimal string). An adapter that spilled through Arrow would have to
-// invent a schema BEFORE any of that, so a SQL Server placeholder-scale column
-// would take its scale from whichever rows happened to still be in memory — the
-// spilled tail and the buffered head would disagree about the same column's type.
-// The reuse argument does not survive either: nothing in rivet builds an Arrow
-// union today, so a lossless Arrow encoding of a sum type would be new, untested
-// code exactly like this one, with a schema negotiation on top.
-//
-// So the fallback is a TAGGED frame: one byte of variant tag, everything
-// length-prefixed, values recursive for arrays. It is lossless, self-describing,
-// and — the property that matters — it makes no type decision at all, which is
-// precisely what the sink needs it not to do.
-
-/// Wire tags. Explicit discriminants, never the enum's declaration order: a spill
-/// written before a variant is added must not be read as a different variant after.
+/// Wire tags.
 mod tag {
     pub(super) const NULL: u8 = 0;
     pub(super) const BOOL: u8 = 1;
@@ -1272,8 +934,7 @@ fn put_str(out: &mut Vec<u8>, s: &str) {
     put_bytes(out, s.as_bytes());
 }
 
-/// Cursor over a frame. Every read is bounds-checked and every shortfall is an
-/// error — a spilled transaction read short is a TORN transaction.
+/// Cursor over a frame.
 struct Cur<'a> {
     b: &'a [u8],
     at: usize,
@@ -1345,15 +1006,10 @@ fn put_value(out: &mut Vec<u8>, v: &RivetValue) {
             out.push(tag::UINT);
             out.extend_from_slice(&u.to_be_bytes());
         }
-        // The BIT PATTERN, not a rendering: `to_be_bytes` round-trips every f64
-        // including NaN and the two zeros, where a decimal string does not.
         RivetValue::Float(f) => {
             out.push(tag::FLOAT);
             out.extend_from_slice(&f.to_be_bytes());
         }
-        // Structural: seconds since the epoch plus nanoseconds, never a formatted
-        // string — a text rendering is exactly the session-dependent leg this repo
-        // has been bitten by, and a spill must not introduce one.
         RivetValue::DateTime(dt) => {
             out.push(tag::DATETIME);
             out.extend_from_slice(&dt.and_utc().timestamp().to_be_bytes());
@@ -1381,18 +1037,11 @@ fn get_value(c: &mut Cur<'_>) -> Result<RivetValue> {
     get_value_at(c, 0)
 }
 
-/// Nesting ceiling for ARRAY frames. No engine produces depth past LOW single
-/// digits (only PostgreSQL builds `RivetValue::Array` at all, and PG spills raw
-/// wire bytes — this frame never carries its arrays), so the cap only ever
-/// fires on CORRUPTION: a repeated 9-byte `ARRAY(len=1)` unit recurses once per
-/// nesting level, and a few MB of it is hundreds of thousands of stack frames —
-/// a SIGSEGV, not an `Err`, which no caller can catch (round-4 fuzz sweep).
+/// Nesting ceiling for ARRAY frames.
 const MAX_VALUE_DEPTH: u32 = 128;
 
 fn get_value_at(c: &mut Cur<'_>, depth: u32) -> Result<RivetValue> {
     if depth > MAX_VALUE_DEPTH {
-        // Refuse, never recurse on: past the cap this is a corrupt frame, and a
-        // stack overflow is a crash no `Result` can report.
         crate::rivet_bail!(
             crate::error::codes::INTERNAL_SPILL,
             "cdc spill: value nesting deeper than {MAX_VALUE_DEPTH} — the frame is corrupt"
@@ -1431,10 +1080,6 @@ fn get_value_at(c: &mut Cur<'_>, depth: u32) -> Result<RivetValue> {
             }
             RivetValue::Array(items)
         }
-        // NEVER a lenient default. An unknown tag means the frame and this build
-        // disagree, and guessing NULL would turn that into a column of nulls that
-        // every count and sum check passes — the exact silent-loss shape a
-        // "degrade to null" cell path produces.
         other => crate::rivet_bail!(
             crate::error::codes::INTERNAL_SPILL,
             "cdc spill: unknown value tag {other}"
@@ -1452,9 +1097,6 @@ pub(crate) fn encode_event(ev: &ChangeEvent) -> Vec<u8> {
     });
     put_str(&mut out, &ev.schema);
     put_str(&mut out, &ev.table);
-    // `position` and `committed` are re-stamped at the commit boundary by the
-    // framer, and carried anyway: a spill that dropped them would be a second place
-    // where the transaction's framing is decided.
     put_str(&mut out, &ev.position.json().to_string());
     out.push(u8::from(ev.committed));
     out.extend_from_slice(&ev.seq.to_be_bytes());
@@ -1506,10 +1148,6 @@ fn put_opt_str(out: &mut Vec<u8>, s: Option<&str>) {
 }
 
 /// An image is `None` (absent) or a list of values — and the two are DISTINCT.
-///
-/// `None` means the engine sent no such image (a DELETE has no after-image); an
-/// EMPTY list means it sent one with no columns. Encoding both as "zero values"
-/// would let a spilled DELETE come back looking like an INSERT of nothing.
 fn put_image(out: &mut Vec<u8>, img: Option<&[RivetValue]>) {
     match img {
         None => out.push(0),
@@ -1576,9 +1214,6 @@ pub(crate) fn decode_event(rec: &[u8]) -> Result<ChangeEvent> {
     let before_names = get_names(&mut c)?;
     let before = get_image(&mut c)?;
     let after = get_image(&mut c)?;
-    // TRAILING BYTES are an error, not slack. A frame this build reads as complete
-    // while the writer wrote more means the two disagree about the layout, and
-    // accepting it delivers a silently truncated event.
     if c.at != rec.len() {
         crate::rivet_bail!(
             crate::error::codes::INTERNAL_SPILL,
@@ -1619,10 +1254,6 @@ mod frame_tests {
             position: Position::new(json!({ "lsn": "0/ABC" })),
             committed: false,
             image_names: None,
-            // NON-ZERO on purpose. With `seq: 0` everywhere, a codec that drops the
-            // field entirely round-trips perfectly — measured, the mutant was
-            // unkillable until this line changed. Same class as a one-row fixture
-            // hiding accumulation arithmetic.
             seq: 7,
             poison: None,
             row_id: None,
@@ -1632,17 +1263,6 @@ mod frame_tests {
     }
 
     /// Compare the DECODED event against the ORIGINAL, field by field.
-    ///
-    /// The first cut compared `encode(decode(encode(e)))` to `encode(e)` and was a
-    /// self-oracle: a LOSSY encode agrees with itself perfectly. Proven — dropping
-    /// the sub-second part of a date-time left it green, because the re-encode
-    /// dropped the same nanoseconds. The oracle has to be the value the test built,
-    /// which is the one thing the codec did not produce.
-    ///
-    /// `ChangeEvent` has no `PartialEq`, so the fields are compared one by one —
-    /// and every field is named here on purpose: a new field defaulted by the
-    /// decoder shows up as a compile error in this destructuring, not as a silent
-    /// pass.
     fn round_trips(e: &ChangeEvent) {
         let back = decode_event(&encode_event(e)).expect("decode");
         let ChangeEvent {
@@ -1679,20 +1299,11 @@ mod frame_tests {
             e.image_names.as_deref(),
             "image_names"
         );
-        // NaN != NaN, so the images are compared through their DEBUG rendering,
-        // which distinguishes NaN from a number, -0.0 from 0.0, and a NULL element
-        // from an empty one — everything `PartialEq` gets right plus the one case
-        // it deliberately does not.
         assert_eq!(format!("{before:?}"), format!("{:?}", e.before), "before");
         assert_eq!(format!("{after:?}"), format!("{:?}", e.after), "after");
     }
 
-    /// EVERY `RivetValue` variant survives, including the ones a text rendering
-    /// loses.
-    ///
-    /// A new variant added without a case here is a spill that decodes it as an
-    /// error at best and silently as something else at worst — the reason the tags
-    /// are explicit discriminants rather than declaration order.
+    /// EVERY `RivetValue` variant survives, including the ones a text rendering loses.
     #[test]
     fn every_value_variant_round_trips() {
         let values = vec![
@@ -1702,8 +1313,6 @@ mod frame_tests {
             RivetValue::Int(i64::MIN),
             RivetValue::Int(-1),
             RivetValue::UInt(u64::MAX),
-            // The two zeros and NaN: a decimal RENDERING collapses -0.0 into 0.0
-            // and cannot express NaN, which is why the bit pattern is stored.
             RivetValue::Float(-0.0),
             RivetValue::Float(0.0),
             RivetValue::Float(f64::NAN),
@@ -1715,15 +1324,9 @@ mod frame_tests {
             ),
             RivetValue::TimeMicros(-1),
             RivetValue::Bytes(Vec::new()),
-            // Invalid UTF-8 and an embedded NUL: a cell path that went through a
-            // string would lose both.
             RivetValue::Bytes(vec![0x00, 0xff, 0xc3, 0x28]),
             RivetValue::Array(Vec::new()),
-            // A NULL *inside* an array is not the same as an absent element —
-            // Arrow's container display renders both as the empty string, which is
-            // exactly how the row-hash lost them.
             RivetValue::Array(vec![RivetValue::Null, RivetValue::Bytes(b"a".to_vec())]),
-            // Nested, so the recursion is exercised past one level.
             RivetValue::Array(vec![RivetValue::Array(vec![RivetValue::Int(1)])]),
         ];
         for v in &values {
@@ -1731,32 +1334,22 @@ mod frame_tests {
             e.after = Some(vec![v.clone()]);
             round_trips(&e);
         }
-        // EVERY op, not just the fixture's. A codec that maps DELETE onto INSERT
-        // resurrects the row it was deleting, and one op in the fixture cannot see
-        // it (measured — `ChangeOp::Delete => 0` was unkillable).
         for op in [ChangeOp::Insert, ChangeOp::Update, ChangeOp::Delete] {
             let mut e = ev();
             e.op = op;
             e.before = Some(vec![RivetValue::Int(1)]);
             round_trips(&e);
         }
-        // …and all of them in ONE image, so a per-value cursor bug that only shows
-        // when a value FOLLOWS another is reachable.
         let mut e = ev();
         e.after = Some(values);
         round_trips(&e);
     }
 
     /// Two different events NEVER encode alike.
-    ///
-    /// This is the injectivity question, and one field cannot express it: the ways a
-    /// value imitates a DELIMITER, a LENGTH, or ABSENCE all need a neighbour to
-    /// imitate it against. Each pair below is one of those three.
     #[test]
     fn distinct_events_have_distinct_frames() {
         let mut cases: Vec<(&str, ChangeEvent)> = Vec::new();
 
-        // DELIMITER: the split between two adjacent strings must not be forgeable.
         let mut a = ev();
         (a.schema, a.table) = ("a".into(), "bc".into());
         cases.push(("schema a | table bc", a));
@@ -1764,8 +1357,6 @@ mod frame_tests {
         (b.schema, b.table) = ("ab".into(), "c".into());
         cases.push(("schema ab | table c", b));
 
-        // ABSENCE: an image the engine never sent vs one it sent empty. A DELETE
-        // carries no after-image; conflating the two makes it an INSERT of nothing.
         let mut c = ev();
         c.after = None;
         cases.push(("after absent", c));
@@ -1773,7 +1364,6 @@ mod frame_tests {
         d.after = Some(Vec::new());
         cases.push(("after empty", d));
 
-        // ABSENCE again, one level down: no value vs a NULL value vs an empty one.
         for (name, v) in [
             ("after [null]", RivetValue::Null),
             ("after [empty bytes]", RivetValue::Bytes(Vec::new())),
@@ -1784,8 +1374,6 @@ mod frame_tests {
             cases.push((name, e));
         }
 
-        // LENGTH: one array of two vs two arrays of one — same elements, different
-        // structure.
         let mut f = ev();
         f.after = Some(vec![RivetValue::Array(vec![
             RivetValue::Int(1),
@@ -1799,7 +1387,6 @@ mod frame_tests {
         ]);
         cases.push(("after [[1],[2]]", g));
 
-        // The remaining optional fields, each absent vs present-and-empty.
         let mut h = ev();
         h.poison = Some(String::new());
         cases.push(("poison empty", h));
@@ -1821,11 +1408,6 @@ mod frame_tests {
         let mut j = ev();
         j.committed = true;
         cases.push(("committed", j));
-        // Each op is a distinct change: a DELETE that shares a frame with an INSERT
-        // of the same row is a row that comes back from the dead.
-        // UPDATE is the base fixture's own op, so only the other two are added —
-        // a third case identical to the base makes this test fail on itself, which
-        // is how this comment exists.
         for (n, op) in [
             ("op insert", ChangeOp::Insert),
             ("op delete", ChangeOp::Delete),
@@ -1834,8 +1416,6 @@ mod frame_tests {
             e.op = op;
             cases.push((n, e));
         }
-        // …and a different `seq` is a different change, since `(__pos, __seq)` is
-        // the total order the load dedup sorts by.
         let mut k = ev();
         k.seq = 8;
         cases.push(("seq 8", k));
@@ -1857,9 +1437,6 @@ mod frame_tests {
     }
 
     /// A frame that is short, long, or carries an unknown tag is REFUSED.
-    ///
-    /// Never a lenient default: an unknown tag decoded as NULL would turn a version
-    /// disagreement into a column of nulls that every count and sum check passes.
     #[test]
     fn a_frame_that_does_not_decode_exactly_is_refused() {
         let mut e = ev();
@@ -1881,10 +1458,6 @@ mod frame_tests {
             "trailing bytes mean the writer and this build disagree about the \
              layout; accepting them delivers a silently truncated event"
         );
-        // A one-value image whose only value is NULL ends with the TAG byte, so
-        // flipping the last byte really does forge an unknown variant. (The first
-        // cut flipped the last byte of an `Int`, which only changes the number —
-        // the mutation has to land on the tag to test the tag.)
         let mut null_ev = ev();
         null_ev.after = Some(vec![RivetValue::Null]);
         let mut bad_tag = encode_event(&null_ev);
@@ -1906,39 +1479,21 @@ mod frame_tests {
         );
     }
 
-    /// A drained tail carries the commit position on every row and `committed` on
-    /// exactly ONE — the last.
-    ///
-    /// This grades `SpooledTx` itself, which the live tests cannot: they count rows,
-    /// and every arrangement of the flag delivers the same rows. What the flag
-    /// decides is when the sink ROLLS — a `committed` on an early row lets it flush,
-    /// checkpoint and ack MID-transaction, and a crash before the rest is written
-    /// advances the resume position past the commit. The rows are all present right
-    /// up until the crash that loses them.
-    ///
-    /// Measured: stamping every tail row committed was unkillable by the live suite.
+    /// A drained tail carries the commit position on every row and `committed` on exactly ONE — the last.
     #[test]
     fn a_drained_tail_closes_on_its_last_row_only() {
         let d = tempfile::tempdir().expect("dir");
-        // THREE rows: with one, "first" and "last" are the same row; with two, so
-        // are "every" and "the last two".
         const N: usize = 3;
         let mut f = SpillFile::create(d.path(), "tail").expect("create");
         for i in 0..N {
             let mut e = ev();
             e.after = Some(vec![RivetValue::Int(i as i64)]);
-            // Poisoned, so the stamp has to CLEAR it rather than merely leave it.
             e.committed = true;
             f.push(&encode_event(&e)).expect("push");
         }
         let commit = Position::new(json!({ "lsn": "0/FEED" }));
         let mut sp = SpooledTx::new(f.into_reader().expect("seal"), commit.clone());
 
-        // `remaining` must COUNT DOWN as the tail drains: the engines' `next_spooled`
-        // drop the reader the moment it hits zero, so a `remaining` pinned at 0
-        // (the surviving mutant) would drop the tail after its FIRST row — the rest
-        // of the transaction silently gone. Only the final `== 0` was asserted, and
-        // that is the one value the mutant agrees with.
         assert_eq!(sp.remaining(), N, "all rows still on disk before the drain");
         let mut flags = Vec::new();
         while let Some(e) = sp.next_event(decode_event).expect("decode") {
@@ -1971,17 +1526,6 @@ mod frame_tests {
     }
 
     /// A spilled tail holding SEVERAL transactions closes each one on ITS last row.
-    ///
-    /// SQL Server's poll buffer is not one transaction: it is a batch of runs
-    /// sharing a `__$start_lsn`. A tail that marked only its final row committed
-    /// would fuse every spilled transaction into one — the sink would then hold them
-    /// all before rolling, and a crash would replay the lot. A tail that marked
-    /// every row would roll mid-transaction, which is the at-least-once break.
-    ///
-    /// The fixture is 2-1-2, so it crosses three thresholds a flatter one misses: a
-    /// group of more than one row (a boundary exists to get wrong), a group of
-    /// EXACTLY one (first and last are the same row), and a group boundary that is
-    /// not the end of the tail.
     #[test]
     fn a_spilled_batch_closes_each_transaction_on_its_own_last_row() {
         let d = tempfile::tempdir().expect("dir");
@@ -1991,7 +1535,6 @@ mod frame_tests {
             let mut e = ev();
             e.position = Position::new(json!({ "lsn": l }));
             e.after = Some(vec![RivetValue::Int(i as i64)]);
-            // Poisoned, so the drain has to CLEAR it rather than leave it.
             e.committed = true;
             f.push(&encode_event(&e)).expect("push");
         }
@@ -2053,24 +1596,13 @@ mod frame_tests {
     }
 }
 
-/// MEASURED cost of spilling, not estimated — the repo's rule about latency claims
-/// applies to size and throughput too.
-///
-/// `#[ignore]`d because it is a measurement, not an assertion about behaviour, and
-/// it wants a release build to mean anything:
-///     cargo test --release --lib spill_cost -- --ignored --nocapture
+/// MEASURED cost of spilling, not estimated.
 #[cfg(test)]
 mod spill_cost {
     use super::*;
     use serde_json::json;
 
-    /// Measurements must be ASKED for, not swept up. CI's offline job runs
-    /// `cargo test -- --ignored`, which selects every `#[ignore]`d test at default
-    /// parallelism — and `ru_maxrss` is a process-wide monotonic peak, so these
-    /// arms racing each other (or any sibling) corrupt every delta and the budget
-    /// assertion grades noise. Measured: 1497 B/event reported where a clean
-    /// sequential run reports 772. The env var is the same opt-in shape as the
-    /// fixture regenerator: a run that did not ask must not produce a verdict.
+    /// Measurements must be ASKED for, not swept up.
     fn measuring() -> bool {
         if std::env::var("RIVET_MEASURE").is_ok() {
             return true;
@@ -2082,9 +1614,7 @@ mod spill_cost {
         false
     }
 
-    /// A row shaped like a real captured one: a key, some text, a timestamp, a
-    /// decimal carried as bytes, a flag, and a wide column. A one-integer fixture
-    /// would report a bytes-per-row that no real table produces.
+    /// A row shaped like a real captured one: a key, some text, a timestamp, a decimal carried as bytes, a flag, and a wide column.
     fn realistic(i: u64) -> ChangeEvent {
         ChangeEvent {
             op: ChangeOp::Update,
@@ -2119,9 +1649,6 @@ mod spill_cost {
     }
 
     /// Bytes ON DISK per row, against the in-memory footprint the cap counts.
-    ///
-    /// The ratio is the number that matters operationally: it says how much disk a
-    /// given `RIVET_CDC_MAX_TX_BYTES` overflow actually costs.
     #[test]
     #[ignore = "measurement: run with --release --nocapture"]
     fn how_much_disk_does_a_spilled_row_take() {
@@ -2149,8 +1676,7 @@ mod spill_cost {
         );
     }
 
-    /// How fast the log is written and read back — the cost the spill adds to a
-    /// transaction that would otherwise have failed the run outright.
+    /// How fast the log is written and read back.
     #[test]
     #[ignore = "measurement: run with --release --nocapture"]
     fn how_fast_is_a_spilled_transaction_written_and_parsed() {
@@ -2175,7 +1701,6 @@ mod spill_cost {
         let mut cells = 0usize;
         while let Some(rec) = r.next_record() {
             let e = decode_event(&rec.expect("record")).expect("decode");
-            // Touch the decoded values so the work cannot be optimised away.
             cells += e.after.as_ref().map_or(0, Vec::len);
             n += 1;
         }
@@ -2194,8 +1719,7 @@ mod spill_cost {
         );
     }
 
-    /// The same two numbers for PostgreSQL's RAW-ROW encoding, which is a different
-    /// shape: no per-value framing at all, just the text the server sent.
+    /// The same two numbers for PostgreSQL's RAW-ROW encoding, which is a different shape.
     #[test]
     #[ignore = "measurement: run with --release --nocapture"]
     fn how_much_does_a_raw_wire_row_cost() {
@@ -2216,8 +1740,6 @@ mod spill_cost {
         let mut f = SpillFile::create(d.path(), "raw").expect("create");
         let t0 = std::time::Instant::now();
         for i in 0..N {
-            // Mirrors `postgres::cdc::encode_wire_row`: a u32 lsn length, the lsn,
-            // then the row text.
             let (lsn, data) = ("0/16B2E00", line(i));
             let mut rec = Vec::with_capacity(4 + lsn.len() + data.len());
             rec.extend_from_slice(&(lsn.len() as u32).to_be_bytes());
@@ -2248,22 +1770,13 @@ mod spill_cost {
     }
 }
 
-/// What ONE buffered change actually costs in memory — measured, because the cap
-/// that is supposed to bound it charges a number computed a different way.
-///
-///     cargo test --release --lib event_cost -- --ignored --nocapture
+/// What ONE buffered change actually costs in memory.
 #[cfg(test)]
 mod event_cost {
     use super::*;
     use serde_json::json;
 
-    /// Measurements must be ASKED for, not swept up. CI's offline job runs
-    /// `cargo test -- --ignored`, which selects every `#[ignore]`d test at default
-    /// parallelism — and `ru_maxrss` is a process-wide monotonic peak, so these
-    /// arms racing each other (or any sibling) corrupt every delta and the budget
-    /// assertion grades noise. Measured: 1497 B/event reported where a clean
-    /// sequential run reports 772. The env var is the same opt-in shape as the
-    /// fixture regenerator: a run that did not ask must not produce a verdict.
+    /// Measurements must be ASKED for, not swept up.
     fn measuring() -> bool {
         if std::env::var("RIVET_MEASURE").is_ok() {
             return true;
@@ -2277,8 +1790,6 @@ mod event_cost {
 
     #[cfg(target_os = "macos")]
     fn rss_bytes() -> u64 {
-        // `ru_maxrss` is BYTES on macOS, KILOBYTES on Linux — one field, two
-        // meanings, and reading it wrong is a 1024x error.
         let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
         if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) } != 0 {
             return 0;
@@ -2317,11 +1828,6 @@ mod event_cost {
     }
 
     /// Where a buffered transaction's memory actually goes.
-    ///
-    /// The soak measures a whole process; this measures the events alone, so the
-    /// cost can be ATTRIBUTED instead of guessed. Peak RSS is monotonic, so each
-    /// arm runs from a fresh high-water mark by allocating the largest arm first
-    /// and reporting deltas — read the per-event numbers, not the totals.
     #[test]
     #[ignore = "measurement: run with --release --nocapture"]
     fn what_does_one_buffered_change_actually_cost() {
@@ -2355,10 +1861,6 @@ mod event_cost {
             per / (estimated as f64 / N as f64),
         );
 
-        // What a position costs when it is NOT shared: `Position` wraps a
-        // `serde_json::Value`, an object whose map, key and value are separate
-        // allocations. The framer shares one across a transaction; this is the price
-        // each event of a single-event transaction still pays.
         let mid = rss_bytes();
         let shared: Vec<serde_json::Value> = (0..N).map(|_| pos.json().clone()).collect();
         let end = rss_bytes();
@@ -2367,21 +1869,9 @@ mod event_cost {
             (end - mid) as f64 / 1e6,
             (end - mid) as f64 / N as f64,
         );
-        // Touch both so nothing is optimised away.
         assert_eq!(v.len(), N as usize);
         assert_eq!(shared.len(), N as usize);
 
-        // …and the BUDGETS' estimate must track the real cost, within 25% either
-        // way. Both directions are failures, and this function produced both within
-        // an hour: 12.7x UNDER (silent — `RIVET_CDC_MAX_TX_BYTES: 2 GiB` meant ~25
-        // GiB of real memory, so the guard fired long after the machine was in
-        // trouble), then 1.8x OVER (loud, and still wrong: it fails runs that were
-        // fine). The constants in `json_resident_bytes` are pinned by nothing else.
-        //
-        // Asserted HERE rather than in its own test because `ru_maxrss` is a
-        // process-wide monotonic peak: two measurements in one process run as
-        // parallel threads and corrupt each other's deltas — which is exactly what
-        // happened, reporting 1497 B/event where a clean run reports 772.
         let ratio = (estimated as f64 / N as f64) / per;
         println!(
             "budget check: charged {:.0} B/event vs real {per:.0} B/event — {ratio:.2}x",
@@ -2399,8 +1889,7 @@ mod event_cost {
 mod error_code_tests {
     use super::*;
 
-    /// The two environment refusals of the spill directory, driven through their builders (an
-    /// `flock`-refusing or full filesystem cannot be staged offline), and a corrupt frame.
+    /// The two environment refusals of the spill directory, driven through their builders (an `flock`-refusing or full filesystem cannot be staged offline), and a corrupt frame.
     #[cfg(unix)]
     #[test]
     fn spill_refusals_carry_their_codes() {

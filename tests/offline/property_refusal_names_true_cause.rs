@@ -1511,18 +1511,27 @@ fn ungraded_leaves(commands: &[String]) -> Vec<(String, Verdict)> {
         .collect()
 }
 
-/// The `--help` text of `rivet <args>`, from the binary itself.
+/// The `--help` text of `rivet <args>`, from the binary itself, read once per argument list.
 fn help(args: &[&str]) -> String {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<BTreeMap<String, String>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let key = args.join(" ");
+    if let Some(text) = cache.lock().unwrap().get(&key) {
+        return text.clone();
+    }
     let o = Command::new(RIVET_BIN)
         .args(args)
         .arg("--help")
         .output()
         .expect("spawn rivet");
-    format!(
+    let text = format!(
         "{}{}",
         String::from_utf8_lossy(&o.stdout),
         String::from_utf8_lossy(&o.stderr)
-    )
+    );
+    cache.lock().unwrap().insert(key, text.clone());
+    text
 }
 
 /// Every `--flag` a remedy names, with the command words after `rivet` it belongs to.
@@ -2036,16 +2045,118 @@ fn line(key: &str, v: &Verdict) -> String {
     }
 }
 
-/// Every cell of the matrix, as `(key, verdict)`.
+/// The cells one job produced, and the printed code of its base cause run when it had one.
+struct Slice {
+    cells: Vec<(String, Verdict)>,
+    cause: Option<(&'static str, (&'static str, String, i32))>,
+}
+
+type Job<'a> = Box<dyn FnOnce() -> Slice + Send + 'a>;
+
+/// A job that only pushes cells.
+fn cells_job<'a>(f: impl FnOnce(&mut Vec<(String, Verdict)>) + Send + 'a) -> Job<'a> {
+    Box::new(move || {
+        let mut cells = vec![];
+        f(&mut cells);
+        Slice { cells, cause: None }
+    })
+}
+
+/// Runs every job on a bounded pool and returns the slices in job order.
+fn run_jobs(jobs: Vec<Job<'_>>) -> Vec<Slice> {
+    let n = jobs.len();
+    let workers = std::thread::available_parallelism()
+        .map_or(4, |c| c.get())
+        .clamp(1, 8)
+        .min(n.max(1));
+    let queue = std::sync::Mutex::new(jobs.into_iter().enumerate().rev().collect::<Vec<_>>());
+    let done = std::sync::Mutex::new((0..n).map(|_| None).collect::<Vec<Option<Slice>>>());
+    std::thread::scope(|s| {
+        for _ in 0..workers {
+            s.spawn(|| {
+                loop {
+                    let next = queue.lock().unwrap().pop();
+                    let Some((i, job)) = next else { break };
+                    let slice = job();
+                    done.lock().unwrap()[i] = Some(slice);
+                }
+            });
+        }
+    });
+    done.into_inner()
+        .unwrap()
+        .into_iter()
+        .map(|s| s.expect("every job ran"))
+        .collect()
+}
+
+/// The jobs of one injected cause on one engine: its base run, then every axis of the probe.
+fn cause_job<'a>(
+    id: &'static str,
+    inj: Inj,
+    e: SourceType,
+    doc: &'a Doc,
+    commands: &'a [String],
+) -> Job<'a> {
+    Box::new(move || {
+        let mut cells = vec![];
+        let (Inj::Offline(f) | Inj::OfflineSql(f)) = inj else {
+            unreachable!("a cause job holds an offline injector")
+        };
+        if matches!(inj, Inj::OfflineSql(_)) && !sql_engine(e) {
+            let ev = format!("{} has no SQL read path for this cause", engine_name(e));
+            cells.push((
+                format!("cause/{id}/{}", engine_name(e)),
+                Verdict::NotGraded(ev),
+            ));
+            return Slice { cells, cause: None };
+        }
+        let p = f(e);
+        let o = execute(&p);
+        let printed = error_section(&o.stderr)
+            .and_then(printed_code)
+            .unwrap_or("uncoded")
+            .to_string();
+        let cause = Some((id, (engine_name(e), printed, o.exit)));
+        let v = verdict(grade(id, doc, &p, &o));
+        cells.push((format!("cause/{id}/{}", engine_name(e)), v));
+        offline_axes(id, doc, e, &p, commands, &mut cells);
+        Slice { cells, cause }
+    })
+}
+
+/// The cell of a cause that no offline run injects.
+fn standing_cell(id: &str, inj: Inj, doc: &Doc, rows: &BTreeSet<String>) -> (String, Verdict) {
+    let ev = match inj {
+        Inj::Stand => {
+            let row = format!("refusal_{}", id.trim_start_matches("RIVET_").to_lowercase());
+            if rows.contains(&row) {
+                format!("needs the live stand; sabotage row {row} injects it")
+            } else {
+                format!(
+                    "needs the live stand; no sabotage row {row}, kind {}",
+                    doc.kind
+                )
+            }
+        }
+        _ => format!(
+            "kind {}: an invariant with no operator cause; no test hook raises it (RIVET_TEST_PANIC_AT simulates a crash, not this stop), grading needs a product hook",
+            doc.kind
+        ),
+    };
+    (format!("cause/{id}/-"), Verdict::NotGraded(ev))
+}
+
+/// Every cell of the matrix, as `(key, verdict)`, in a fixed order whatever order the jobs finish in.
 fn cells() -> Vec<(String, Verdict)> {
     let docs = doc_codes();
     let rows = sabotage_rows();
-    let mut out: Vec<(String, Verdict)> = vec![];
     let (subs, commands) = subcommands();
     let registry: BTreeSet<&str> = codes::ALL.iter().map(|c| c.id).collect();
     let mut every: BTreeSet<String> = docs.keys().cloned().collect();
     every.extend(registry.iter().map(|s| s.to_string()));
     every.extend(literal_codes());
+    let mut out: Vec<(String, Verdict)> = vec![];
     for id in &every {
         let (in_doc, in_reg) = (docs.contains_key(id), registry.contains(id.as_str()));
         let v = match (in_doc, in_reg) {
@@ -2058,129 +2169,125 @@ fn cells() -> Vec<(String, Verdict)> {
         };
         out.push((format!("source/{id}"), v));
     }
-    let mut seen: BTreeMap<&str, Vec<(&str, String, i32)>> = BTreeMap::new();
+    let mut jobs: Vec<Job> = vec![];
     for (id, inj) in INJECTORS {
         let Some(doc) = docs.get(*id) else { continue };
         match inj {
-            Inj::Offline(f) | Inj::OfflineSql(f) => {
+            Inj::Offline(_) | Inj::OfflineSql(_) => {
                 for e in ENGINES {
-                    if matches!(inj, Inj::OfflineSql(_)) && !sql_engine(e) {
-                        let ev = format!("{} has no SQL read path for this cause", engine_name(e));
-                        out.push((
-                            format!("cause/{id}/{}", engine_name(e)),
-                            Verdict::NotGraded(ev),
-                        ));
-                        continue;
-                    }
-                    let p = f(e);
-                    let o = execute(&p);
-                    let printed = error_section(&o.stderr)
-                        .and_then(printed_code)
-                        .unwrap_or("uncoded")
-                        .to_string();
-                    seen.entry(*id)
-                        .or_default()
-                        .push((engine_name(e), printed, o.exit));
-                    let v = verdict(grade(id, doc, &p, &o));
-                    out.push((format!("cause/{id}/{}", engine_name(e)), v));
-                    offline_axes(id, doc, e, &p, &commands, &mut out);
+                    jobs.push(cause_job(id, *inj, e, doc, &commands));
                 }
             }
-            Inj::Stand => {
-                let row = format!("refusal_{}", id.trim_start_matches("RIVET_").to_lowercase());
-                let ev = if rows.contains(&row) {
-                    format!("needs the live stand; sabotage row {row} injects it")
-                } else {
-                    format!(
-                        "needs the live stand; no sabotage row {row}, kind {}",
-                        doc.kind
-                    )
-                };
-                out.push((format!("cause/{id}/-"), Verdict::NotGraded(ev)));
-            }
-            Inj::Internal => {
-                let ev = format!(
-                    "kind {}: an invariant with no operator cause; no test hook raises it (RIVET_TEST_PANIC_AT simulates a crash, not this stop), grading needs a product hook",
-                    doc.kind
-                );
-                out.push((format!("cause/{id}/-"), Verdict::NotGraded(ev)));
+            Inj::Stand | Inj::Internal => {
+                let cell = standing_cell(id, *inj, doc, &rows);
+                jobs.push(cells_job(move |c| c.push(cell)));
             }
         }
+    }
+    let causes = jobs.len();
+    for (id, label, f) in FIELDS {
+        let Some(doc) = docs.get(*id) else { continue };
+        for e in ENGINES {
+            jobs.push(cells_job(move |c| {
+                let p = f(e);
+                let v = match verdict(grade(id, doc, &p, &execute(&p))) {
+                    Verdict::Red(ev) if ev.contains("nothing is listening") => Verdict::NotGraded(
+                        "connect runs before this check; the offline stand refuses first, graded live"
+                            .to_string(),
+                    ),
+                    v => v,
+                };
+                c.push((format!("field/{id}/{label}/{}", engine_name(e)), v));
+            }));
+        }
+    }
+    for (id, doc) in &docs {
+        let subs = &subs;
+        jobs.push(cells_job(move |c| {
+            c.push((format!("remedy/{id}"), verdict(grade_remedy(doc, subs))));
+            c.push((format!("wording/{id}"), verdict(grade_wording(doc))));
+        }));
+    }
+    let subs_ref = &subs;
+    jobs.push(cells_job(move |c| {
+        for (key, text) in raise_sites() {
+            let site = Doc {
+                kind: String::new(),
+                exits: BTreeSet::new(),
+                action: text,
+            };
+            c.push((key, verdict(grade_remedy(&site, subs_ref))));
+        }
+    }));
+    let invalid = "RIVET_PLAN_ARTIFACT_INVALID";
+    let doc = docs.get(invalid).expect("plan artifact code in errors.md");
+    for (variant, body) in ARTIFACTS {
+        jobs.push(cells_job(move |c| {
+            let p = artifact(body);
+            c.push((
+                format!("artifact/{variant}"),
+                verdict(grade(invalid, doc, &p, &execute(&p))),
+            ));
+            let mut q = p.clone();
+            q.argv.insert(1, "--json-errors".to_string());
+            c.push((
+                format!("artifact-json/{variant}"),
+                verdict(grade_json(invalid, &execute(&q))),
+            ));
+        }));
+    }
+    let docs_ref = &docs;
+    jobs.push(cells_job(move |c| {
+        let mut gone = artifact("");
+        gone.files = vec![];
+        c.push((
+            "artifact/absent".to_string(),
+            verdict(grade_coded(docs_ref, &gone, &execute(&gone))),
+        ));
+    }));
+    let commands_ref = &commands;
+    jobs.push(cells_job(move |c| c.extend(ungraded_leaves(commands_ref))));
+    for (name, argv) in UNCODED {
+        jobs.push(cells_job(move |c| {
+            let p = Probe {
+                yaml: String::new(),
+                argv: cmd(argv),
+                env: vec![],
+                files: vec![],
+                witness: vec![],
+                absent: vec![],
+            };
+            let v = match grade_uncoded(&execute(&p)) {
+                Ok(ev) => Verdict::Pass(ev),
+                Err(ev) => Verdict::Red(ev),
+            };
+            c.push((format!("uncoded/{name}"), v));
+        }));
+    }
+    jobs.push(cells_job(move |c| guard_cells(docs_ref, c)));
+    for e in ENGINES {
+        jobs.push(cells_job(move |c| {
+            reader_cells(
+                &format!("reader/RIVET_SOURCE_CONNECT_FAILED/{}", engine_name(e)),
+                &connect_refused(e),
+                c,
+            );
+            stand_axes(e, docs_ref, c);
+        }));
+    }
+    let mut slices = run_jobs(jobs).into_iter();
+    let mut seen: BTreeMap<&str, Vec<(&str, String, i32)>> = BTreeMap::new();
+    for slice in slices.by_ref().take(causes) {
+        if let Some((id, run)) = slice.cause {
+            seen.entry(id).or_default().push(run);
+        }
+        out.extend(slice.cells);
     }
     for (id, runs) in &seen {
         out.push((format!("uniform/{id}"), verdict(grade_uniform(runs))));
     }
-    for (id, label, f) in FIELDS {
-        let Some(doc) = docs.get(*id) else { continue };
-        for e in ENGINES {
-            let p = f(e);
-            let v = match verdict(grade(id, doc, &p, &execute(&p))) {
-                Verdict::Red(ev) if ev.contains("nothing is listening") => Verdict::NotGraded(
-                    "connect runs before this check; the offline stand refuses first, graded live"
-                        .to_string(),
-                ),
-                v => v,
-            };
-            out.push((format!("field/{id}/{label}/{}", engine_name(e)), v));
-        }
-    }
-    for (id, doc) in &docs {
-        out.push((format!("remedy/{id}"), verdict(grade_remedy(doc, &subs))));
-        out.push((format!("wording/{id}"), verdict(grade_wording(doc))));
-    }
-    for (key, text) in raise_sites() {
-        let site = Doc {
-            kind: String::new(),
-            exits: BTreeSet::new(),
-            action: text,
-        };
-        out.push((key, verdict(grade_remedy(&site, &subs))));
-    }
-    let invalid = "RIVET_PLAN_ARTIFACT_INVALID";
-    let doc = docs.get(invalid).expect("plan artifact code in errors.md");
-    for (variant, body) in ARTIFACTS {
-        let p = artifact(body);
-        out.push((
-            format!("artifact/{variant}"),
-            verdict(grade(invalid, doc, &p, &execute(&p))),
-        ));
-        let mut q = p.clone();
-        q.argv.insert(1, "--json-errors".to_string());
-        out.push((
-            format!("artifact-json/{variant}"),
-            verdict(grade_json(invalid, &execute(&q))),
-        ));
-    }
-    let mut gone = artifact("");
-    gone.files = vec![];
-    out.push((
-        "artifact/absent".to_string(),
-        verdict(grade_coded(&docs, &gone, &execute(&gone))),
-    ));
-    out.extend(ungraded_leaves(&commands));
-    for (name, argv) in UNCODED {
-        let p = Probe {
-            yaml: String::new(),
-            argv: cmd(argv),
-            env: vec![],
-            files: vec![],
-            witness: vec![],
-            absent: vec![],
-        };
-        let v = match grade_uncoded(&execute(&p)) {
-            Ok(ev) => Verdict::Pass(ev),
-            Err(ev) => Verdict::Red(ev),
-        };
-        out.push((format!("uncoded/{name}"), v));
-    }
-    guard_cells(&docs, &mut out);
-    for e in ENGINES {
-        reader_cells(
-            &format!("reader/RIVET_SOURCE_CONNECT_FAILED/{}", engine_name(e)),
-            &connect_refused(e),
-            &mut out,
-        );
-        stand_axes(e, &docs, &mut out);
+    for slice in slices {
+        out.extend(slice.cells);
     }
     out
 }

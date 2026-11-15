@@ -16,18 +16,12 @@ use crate::error::codes;
 const ENDPOINT: &str = "https://secretmanager.googleapis.com/v1";
 
 /// The value of the secret version `reference` names, fetched at most once per process.
-///
-/// `reference` is `projects/<project>/secrets/<secret>` (the `latest` version) or
-/// `projects/<project>/secrets/<secret>/versions/<n|latest>`. The token comes from the
-/// same ADC credential the BigQuery and GCS legs use (`GOOGLE_APPLICATION_CREDENTIALS`).
 pub(crate) fn gcp_secret(reference: &str) -> Result<Secret> {
     let name = version_name(reference)?;
     let mut cache = cache().lock().expect("secret cache poisoned");
     if let Some(value) = cache.get(&name) {
         return Ok(value.clone());
     }
-    // reqwest's blocking client panics inside a tokio runtime, and a source URL is
-    // resolved from async callers too; a fresh thread is never inside one.
     let fetched = {
         let name = name.clone();
         std::thread::spawn(move || fetch_with_adc(ENDPOINT, &name))
@@ -196,7 +190,6 @@ mod tests {
         let stand = Stand::start(|seen, _| match seen.path.as_str() {
             "/projects/p/secrets/ok/versions/latest:access" => {
                 assert_eq!(seen.authorization, "Bearer tok");
-                // "postgresql://u:p%40ss@h/db\n"
                 json(
                     200,
                     r#"{"payload":{"data":"cG9zdGdyZXNxbDovL3U6cCU0MHNzQGgvZGIK"}}"#,

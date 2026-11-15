@@ -1,8 +1,4 @@
-//! The partitions a load touches, estimated from the Parquet footers it is about to
-//! load — before any BigQuery job runs (ADR-0034 D4). BigQuery writes at most 4,000
-//! partitions per job; a finer granularity than the data's span allows fails only after
-//! the free load job ran, with no way to split the load from rivet. Footer statistics
-//! give the partition column's range per file for two small range reads each.
+//! The partitions a load touches, estimated from the Parquet footers it is about to load.
 
 use crate::destination::gcs::GcsStore;
 use crate::load;
@@ -34,8 +30,7 @@ struct Span {
     unit: Unit,
 }
 
-/// One file to pack: its span, its rows, and whether any value is NULL — a partition of
-/// its own that `min`/`max` cannot see.
+/// One file to pack: its span, its rows, and whether any value is NULL.
 struct Part {
     uri: String,
     span: Span,
@@ -43,15 +38,12 @@ struct Part {
     has_nulls: bool,
 }
 
-/// The partitions a file or batch writes: its span's buckets, one more for the NULL
-/// partition, and never more than its rows.
+/// The partitions a file or batch writes: its span's buckets, one more for the NULL partition, and never more than its rows.
 fn budgeted(key: &PartitionKey, span: Span, rows: i64, has_nulls: bool) -> i64 {
     (partitions_touched(key, span) + i64::from(has_nulls)).min(rows)
 }
 
-/// Refuse a load one of whose files alone spans more partitions than one BigQuery job
-/// may write — the shape no batching can split. Everything else is loadable in batches
-/// (see [`plan_load_batches`]).
+/// Refuse a load one of whose files alone spans more partitions than one BigQuery job may write.
 pub(crate) fn check_partition_budget(
     store: &GcsStore,
     uris: &[String],
@@ -60,13 +52,7 @@ pub(crate) fn check_partition_budget(
     plan_load_batches(store, uris, partition).map(|_| ())
 }
 
-/// The load jobs this Parquet needs: files packed, in order of their lowest value, into
-/// batches whose combined span stays within BigQuery's per-job partition cap. Files are
-/// date-local when the extraction key grows with time (an autoincrement key over a
-/// `created_at` history), so a history far wider than one job may write still loads
-/// under its declared granularity. A file without statistics for the column rides in
-/// the first batch — BigQuery is its backstop, as before. One file wider than the cap
-/// is refused, by name: nothing splits it.
+/// The load jobs this Parquet needs: files packed, in order of their lowest value, into batches whose combined span stays within BigQuery's per-job partition cap.
 pub(crate) fn plan_load_batches(
     store: &GcsStore,
     uris: &[String],
@@ -82,8 +68,6 @@ pub(crate) fn plan_load_batches(
         let meta = read_footer(store, key)
             .with_context(|| format!("reading the Parquet footer of {uri}"))?;
         let rows = meta.file_metadata().num_rows();
-        // A part the writer budgeted says how many partitions it holds — the bound the
-        // span cannot give for a scattered part (4,000 distinct days across 5,600).
         let rows = footer_buckets(&meta, &partition.key).map_or(rows, |b| rows.min(b));
         match column_span(&meta, column) {
             ColumnStats::Span(span, has_nulls) => spanned.push(Part {
@@ -105,29 +89,10 @@ pub(crate) fn plan_load_batches(
     Ok(batches)
 }
 
-/// Pure packing: sort by the low end, then extend the current batch while the partitions
-/// it would write stay within the cap. Refuses a single file over the cap, naming it.
-///
-/// A file's partitions are bounded BOTH by the span of its values and by its ROW COUNT —
-/// N rows cannot occupy more than N partitions, whatever they span. The footer carries
-/// min/max but no distinct count, so the span alone badly over-counts a scattered file:
-/// measured on a live export, a 1,001-row part spanning 9,758 days occupies exactly 1,001
-/// partitions and BigQuery loaded it, while this check refused it by name.
-///
-/// BOTH the refusal and the packing take the smaller bound. The refusal always did,
-/// because that is where a wrong answer costs the operator a load they cannot perform.
-/// The packing used to stay on the span alone, on the reasoning that being conservative
-/// there "can only cost one more load job than strictly needed" — which is false for the
-/// shape this same file documents as NORMAL below: an incremental export orders rows by
-/// its cursor, so its parts are each scattered across the whole history, every pairwise
-/// merge busts the span cap, and each part becomes its own load job. The cost grows with
-/// the PART COUNT, not by one. Taking `min(rows)` here can only merge MORE, never refuse,
-/// so it cannot turn a loadable batch into a rejection.
+/// Pure packing: sort by the low end, then extend the current batch while the partitions it would write stay within the cap.
 fn pack_batches(key: &PartitionKey, mut files: Vec<Part>) -> Result<Vec<Vec<String>>> {
     files.sort_by_key(|p| p.span.lo);
     let mut batches: Vec<Vec<String>> = Vec::new();
-    // The batch under construction carries the same three facts as a file, because the
-    // merge decision below applies the same bound as the per-file check above.
     let mut current: Option<(Vec<String>, Span, i64, bool)> = None;
     for Part {
         uri,
@@ -166,8 +131,7 @@ fn pack_batches(key: &PartitionKey, mut files: Vec<Part>) -> Result<Vec<Vec<Stri
     Ok(batches)
 }
 
-/// The distinct partitions the writer recorded for this file, when it budgeted the same
-/// column at the same granularity the load partitions by.
+/// The distinct partitions the writer recorded for this file, when it budgeted the same column at the same granularity the load partitions by.
 fn footer_buckets(meta: &ParquetMetaData, key: &PartitionKey) -> Option<i64> {
     use crate::plan::rollover::{PARTITION_BUCKETS_KEY, parse_partition_buckets_note};
     let PartitionKey::Time {
@@ -191,8 +155,7 @@ fn footer_buckets(meta: &ParquetMetaData, key: &PartitionKey) -> Option<i64> {
 /// Bytes of an object's end read in one request; a footer that fits needs no second read.
 const FOOTER_GUESS: u64 = 65_536;
 
-/// The footer of the Parquet object at the bucket-relative `key`: its last 8 bytes name
-/// the metadata length, and the metadata sits right before them.
+/// The footer of the Parquet object at the bucket-relative `key`.
 pub(crate) fn read_footer(store: &GcsStore, key: &str) -> Result<ParquetMetaData> {
     read_footer_guessing(store, key, FOOTER_GUESS)
 }
@@ -228,7 +191,7 @@ fn read_footer_guessing(store: &GcsStore, key: &str, guess: u64) -> Result<Parqu
     Ok(ParquetMetaDataReader::decode_metadata(&bytes)?)
 }
 
-/// The `len` metadata bytes that sit before the 8-byte tail of `end`, an object's last bytes; `None` when `end` is too short to hold them.
+/// The `len` metadata bytes that sit before the 8-byte tail of `end`, an object's last bytes.
 fn metadata_in(end: &[u8], len: u64) -> Option<&[u8]> {
     let stop = end.len().checked_sub(FOOTER_SIZE)?;
     let start = stop.checked_sub(usize::try_from(len).ok()?)?;
@@ -263,14 +226,6 @@ fn column_span_at(meta: &ParquetMetaData, idx: usize) -> ColumnStats {
         return ColumnStats::Unknown;
     };
     let mut span: Option<Span> = None;
-    // NULL rows occupy a partition of their own, and `min`/`max` exclude them by
-    // definition — so the span alone can never see it. Only a KNOWN non-zero count
-    // sets the bit: parquet's own docs warn that a missing null-count statistic
-    // means UNKNOWN (writers before 53.1.0 omitted it when the count was zero), and
-    // treating unknown as "has nulls" would inflate the count toward a REFUSAL of a
-    // load that is perfectly performable. This module's rule is that the refusal
-    // takes the smaller bound, because a wrong answer there costs the operator a
-    // load they cannot make; being cautious the other way costs at most a job.
     let mut nulls = false;
     for rg in meta.row_groups() {
         let Some(stats) = rg.column(idx).statistics() else {
@@ -287,7 +242,6 @@ fn column_span_at(meta: &ParquetMetaData, idx: usize) -> ColumnStats {
             _ => return ColumnStats::Unknown,
         };
         let Some((lo, hi)) = bounds else {
-            // No min/max means "no values" only when the null count says every row is NULL.
             if null_count.is_some_and(|n| i64::try_from(n) == Ok(rg.num_rows())) {
                 continue;
             }
@@ -302,8 +256,7 @@ fn column_span_at(meta: &ParquetMetaData, idx: usize) -> ColumnStats {
     span.map_or(ColumnStats::NoValues, |s| ColumnStats::Span(s, nulls))
 }
 
-/// The first timestamp column the footer does not show inside `[lo_secs, hi_secs]` (Unix
-/// seconds): with the offending value rendered, or `None` when the footer cannot bound it.
+/// The first timestamp column the footer does not show inside `[lo_secs, hi_secs]` (Unix seconds).
 pub(crate) fn timestamp_outside(
     meta: &ParquetMetaData,
     lo_secs: i64,
@@ -390,7 +343,6 @@ fn partitions_touched(key: &PartitionKey, span: Span) -> i64 {
             } else {
                 0
             };
-            // Values outside the range share one extra partition.
             let outside = i64::from(!inside(span.lo) || !inside(span.hi));
             within + outside
         }
@@ -465,18 +417,7 @@ fn over_budget_message(key: &PartitionKey, span: Span, touched: i64) -> String {
     }
 }
 
-/// The URIs the partition budget applies to: the files that land in the
-/// PARTITIONED target. Under `BaseAndBuffer` the stream's files land in the
-/// BUFFER, which is created WITHOUT a partition and read whole by one MERGE, so
-/// budgeting them against the base's granularity refuses a load that would have
-/// worked. Found by dogfooding (2026-09-18): a 5,000-day buffer file on a
-/// day-partitioned base was refused by name, although no job would ever write
-/// those partitions — the adapter had already stopped packing the buffer, but
-/// this preflight still measured it.
-///
-/// A baseline manifest that resolves to no present part makes `select_load_keys`
-/// fall back to the whole listing; the check then covers everything again, which
-/// is the conservative direction.
+/// The URIs the partition budget applies to: the files that land in the PARTITIONED target.
 pub(crate) fn budgeted_uris(
     layout: load::plan::CdcLayout,
     runs: &[(String, crate::manifest::RunManifest)],
@@ -507,8 +448,7 @@ pub(crate) fn budgeted_uris(
         .collect()
 }
 
-/// The pre-load partition budget of a BigQuery plan (ADR-0034 D4); no other target
-/// caps the partitions one job writes.
+/// The pre-load partition budget of a BigQuery plan (ADR-0034 D4).
 pub(crate) fn partition_budget_ok(
     store: &crate::destination::gcs::GcsStore,
     plan: &load::plan::LoadPlan,
@@ -744,8 +684,7 @@ mod tests {
         meta
     }
 
-    /// An all-NULL row group has no min/max; it must not hide an out-of-range value in
-    /// another row group of the same part.
+    /// An all-NULL row group has no min/max; it must not hide an out-of-range value in another row group of the same part.
     #[test]
     fn an_all_null_row_group_does_not_hide_an_out_of_range_timestamp() {
         let (lo, hi) = (at(1900, 1, 1, 0), at(2299, 12, 31, 23));
@@ -762,8 +701,7 @@ mod tests {
         }
     }
 
-    /// The budget spans the bounded row groups and counts an all-NULL one as the NULL
-    /// partition; a file of only NULLs has no span and rides as blind, as before.
+    /// The budget spans the bounded row groups and counts an all-NULL one as the NULL partition.
     #[test]
     fn an_all_null_row_group_is_the_null_partition_not_an_unknown_file() {
         let (a, b) = (at(2020, 1, 1, 0), at(2020, 1, 3, 0));
@@ -872,17 +810,11 @@ mod tests {
         write(dir, name, field, column, stats);
     }
 
-    /// The writer rotates parts at 4,000 DISTINCT partitions, and a part cut there over
-    /// a gappy history spans far more calendar days than it occupies — 4,000 business
-    /// days are ~5,600 calendar days. Its footer min/max, and its row count once it is
-    /// large, both say "over the cap"; the count the writer recorded in the footer is
-    /// the truth, and only for the column and granularity the load partitions by.
-    /// RED against ignoring the footer note.
+    /// The writer rotates parts at 4,000 DISTINCT partitions, and a part cut there over a gappy history spans far more calendar days than it occupies.
     #[test]
     fn a_part_the_writer_budgeted_is_bounded_by_the_count_it_recorded() {
         let dir = tempfile::tempdir().unwrap();
         let start = at(2000, 1, 1, 0);
-        // 4,000 distinct days two days apart (an 8,000-day span), 100 of them twice.
         let mut days: Vec<i64> = (0..4000).map(|i| start + i * 2 * DAY).collect();
         days.extend((0..100).map(|i| start + i * 2 * DAY));
         let key = time("ts", Granularity::Day);
@@ -914,8 +846,6 @@ mod tests {
             "4,000 recorded partitions fit one job, whatever the span"
         );
 
-        // A note about another column, or another granularity, says nothing about
-        // this load and must not be trusted.
         for foreign in ["other|day|4000", "ts|month|4000"] {
             let (field, column) = ts_column(&days);
             write_noted(
@@ -956,14 +886,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let start = at(2026, 1, 1, 0);
         ts_file(dir.path(), "a.parquet", &[start, start + 3 * DAY], true);
-        // One row per hour across the span: the row count must not be the binding bound
-        // here, or this would assert the refusal for the wrong reason (a two-row file
-        // cannot occupy 4,681 partitions and is accepted on its row count alone).
         let hourly: Vec<i64> = (0..=4680).map(|h| start + 5 * DAY + h * HOUR).collect();
         ts_file(dir.path(), "b.parquet", &hourly, true);
         let files = ["a.parquet", "b.parquet"];
         assert!(check(dir.path(), &files, &time("ts", Granularity::Day)).is_ok());
-        // `b` ALONE spans 4681 hours: no batching splits one file, so it is named.
         let err = check(dir.path(), &files, &time("ts", Granularity::Hour))
             .unwrap_err()
             .to_string();
@@ -978,14 +904,11 @@ mod tests {
         assert!(err.contains("use `granularity: day` (about 196)"), "{err}");
     }
 
-    /// The cap is inclusive: a file (or a batch) touching EXACTLY 4,000 partitions is
-    /// one job; one more partition splits or refuses.
+    /// The cap is inclusive: a file (or a batch) touching EXACTLY 4,000 partitions is one job.
     #[test]
     fn exactly_the_cap_is_one_job_and_one_more_is_not() {
         let dir = tempfile::tempdir().unwrap();
         let start = at(2000, 1, 1, 0);
-        // One row per day, so the row count is never the binding bound and the boundary
-        // under test is the partition count itself.
         let daily = |n: i64| -> Vec<i64> { (0..n).map(|d| start + d * DAY).collect() };
         ts_file(dir.path(), "cap.parquet", &daily(4000), true);
         ts_file(dir.path(), "over.parquet", &daily(4001), true);
@@ -1014,14 +937,7 @@ mod tests {
         write(dir, name, field, column, true);
     }
 
-    /// NULL values land in a partition of their own, which `min`/`max` cannot see: a
-    /// dense 4,000-day file with a few NULL rows writes 4,001 partitions, and so do two
-    /// 2,000-day files when one of them carries a NULL. The writer's budget counts that
-    /// partition when it cuts a part; the load must count it too, or it admits a job
-    /// BigQuery rejects after the load ran. A nullable column holding NO null is not
-    /// charged — parquet records the count as `Some(0)`, and only a known non-zero
-    /// count sets the bit.
-    /// RED against dropping the bit at either site (accepted as 4,000 / one batch).
+    /// NULL values land in a partition of their own, which `min`/`max` cannot see.
     #[test]
     fn a_null_value_occupies_a_partition_of_its_own() {
         let dir = tempfile::tempdir().unwrap();
@@ -1046,9 +962,6 @@ mod tests {
             "4,000 days plus the NULL partition: {err}"
         );
 
-        // One day twice, so the ROW clamp (4,001) is not what holds this at 4,000: a
-        // `Some(0)` charged a partition would read 4,001 and refuse. With exactly 4,000
-        // rows the clamp hid that mutant — measured, not reasoned.
         let mut clean = daily(0, 4000);
         clean.push(Some(start));
         ts_nullable(dir.path(), "clean.parquet", &clean);
@@ -1069,24 +982,11 @@ mod tests {
         );
     }
 
-    /// A file whose values are SCATTERED over a huge range occupies one partition per
-    /// distinct value, not one per day of its range — and a file of N rows can never
-    /// occupy more than N partitions. Refusing it on the span alone rejects a file the
-    /// warehouse loads happily.
-    ///
-    /// Measured 2026-09-18 on a live export: a 1,001-row part spanning 9,758 days was
-    /// refused here, while `bq load` of the same file into a DAY-partitioned table
-    /// succeeded and `INFORMATION_SCHEMA.PARTITIONS` reported exactly 1,001 partitions.
-    /// An incremental export orders rows by its CURSOR, so its parts are scattered over
-    /// the date column by construction — this is the normal shape, not a corner case.
-    ///
-    /// RED against taking the span alone: "alone spans about 9758 day partitions".
+    /// A file whose values are SCATTERED over a huge range occupies one partition per distinct value, not one per day of its range.
     #[test]
     fn a_scattered_file_is_bounded_by_its_rows_not_its_span() {
         let dir = tempfile::tempdir().unwrap();
         let start = at(2000, 1, 1, 0);
-        // 1,001 rows spread every ~9 days across 26 years: a 9,758-day span, 1,001
-        // partitions. Under the cap by rows, far over it by span.
         let scattered: Vec<i64> = (0..1001).map(|i| start + i * 9 * DAY).collect();
         ts_file(dir.path(), "scattered.parquet", &scattered, true);
         let store = GcsStore::open_fs(dir.path().to_str().unwrap()).unwrap();
@@ -1098,19 +998,11 @@ mod tests {
         );
     }
 
-    /// Files that are each narrow but together wide load in BATCHES: packed by their
-    /// low end, a batch closed the moment the next file would push its span past the
-    /// cap. Three files over 6000 days → two jobs, never one refusal.
+    /// Files that are each narrow but together wide load in BATCHES.
     #[test]
     fn narrow_files_over_a_wide_history_are_packed_into_batches_under_the_cap() {
         let dir = tempfile::tempdir().unwrap();
         let start = at(2000, 1, 1, 0);
-        // Written out of order on purpose: packing sorts by the low end.
-        // DENSE, one row per day, so the SPAN is the binding bound and this test
-        // still measures span packing. With the old two-row files the row bound
-        // (`min(rows)`, added when packing stopped over-counting scattered parts)
-        // dominated completely and everything merged into one job — the fixture
-        // would have stopped crossing the threshold it exists to cross.
         let days =
             |from: i64, to: i64| -> Vec<i64> { (from..=to).map(|d| start + d * DAY).collect() };
         ts_file(dir.path(), "c.parquet", &days(4200, 6000), true);
@@ -1133,22 +1025,16 @@ mod tests {
             ],
             "a+b span exactly 4000 days and fit one job; c starts the next"
         );
-        // A month granularity fits everything in one job.
         let one = plan_load_batches(&store, &uris, &time("ts", Granularity::Month)).unwrap();
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].len(), 3);
     }
 
-    /// A file with no statistics cannot be placed; it rides in the first batch and
-    /// BigQuery remains its backstop — it is never dropped from the load.
+    /// A file with no statistics cannot be placed.
     #[test]
     fn a_stats_less_file_rides_in_the_first_batch() {
         let dir = tempfile::tempdir().unwrap();
         let start = at(2000, 1, 1, 0);
-        // Dense for the same reason as the packing test above: two-row files let the
-        // row bound decide, and then a+z merge into ONE batch and the blind file has
-        // no second batch to be absent from. The subject here is that the blind file
-        // is never DROPPED, which needs a real two-batch split to be worth asserting.
         let days =
             |from: i64, to: i64| -> Vec<i64> { (from..=to).map(|d| start + d * DAY).collect() };
         ts_file(dir.path(), "a.parquet", &days(0, 2099), true);
@@ -1206,9 +1092,6 @@ mod tests {
     fn a_date_column_counts_days_from_its_day_numbers() {
         let dir = tempfile::tempdir().unwrap();
         let field = Field::new("d", DataType::Date32, false);
-        // One row per day across the span: the subject here is the day-number arithmetic,
-        // so the ROW COUNT must not be the binding bound (a two-row file can occupy at
-        // most two partitions and is accepted on that alone).
         let days: Vec<i32> = (20_000..=20_000 + 4_500).collect();
         let column: ArrayRef = Arc::new(Date32Array::from(days));
         write(dir.path(), "d.parquet", field, column, true);
@@ -1227,8 +1110,6 @@ mod tests {
     fn a_range_counts_its_buckets_plus_one_for_values_outside() {
         let dir = tempfile::tempdir().unwrap();
         let field = Field::new("n", DataType::Int64, false);
-        // The bounds under test, padded to more rows than the cap so the row count is not
-        // the binding bound — the subject is the range-bucket arithmetic.
         let mut values: Vec<i64> = vec![-5_i64, 6_000];
         values.extend(0..5_000);
         let column: ArrayRef = Arc::new(Int64Array::from(values));
@@ -1253,13 +1134,10 @@ mod tests {
         assert!(check(dir.path(), &["n.parquet"], &range(2)).is_ok());
     }
 
-    /// A narrower integer column (PG `integer`, MySQL `int`) is stored as INT32 with the
-    /// same statistics; the range budget reads it like INT64.
+    /// A narrower integer column (PG `integer`, MySQL `int`) is stored as INT32 with the same statistics.
     #[test]
     fn a_range_on_an_int32_column_is_budgeted_like_int64() {
         let dir = tempfile::tempdir().unwrap();
-        // Padded past the cap for the same reason as the INT64 case: the row count must
-        // not stand in for the bucket arithmetic this test is about.
         let mut i32_values: Vec<i32> = vec![-5_i32, 6_000];
         i32_values.extend(0..5_000);
         let i32_col: ArrayRef = Arc::new(Int32Array::from(i32_values));
@@ -1298,14 +1176,11 @@ mod tests {
         }
     }
 
-    /// One part without statistics leaves the check to BigQuery for ITS rows only: the
-    /// span the other parts prove is still refused, whichever order the parts come in.
+    /// One part without statistics leaves the check to BigQuery for ITS rows only.
     #[test]
     fn a_stats_less_file_does_not_hide_the_other_files_span() {
         let dir = tempfile::tempdir().unwrap();
         let start = at(2026, 1, 1, 0);
-        // One row per hour over the span, so `a`'s refusal rests on its 4,801 partitions
-        // rather than on a two-row file that could never occupy them.
         let hourly: Vec<i64> = (0..=4800).map(|h| start + h * HOUR).collect();
         ts_file(dir.path(), "a.parquet", &hourly, true);
         ts_file(dir.path(), "b.parquet", &[start], false);

@@ -359,9 +359,12 @@ exclude_re = [
     # pool_apply_two_heavy_exports_both_complete (the HeavyGuard reset between two
     # heavies; a stubbed drop / deleted `!` deadlocks the second heavy).
     "replace run_pool -> Result",
-    "replace == with != in run_pool",
+    "replace pool_worker with ()",
+    "replace advise_or_realize_split -> Result",
+    "replace predict_and_announce_pool -> ",
+    "replace select_pool_exports -> Result",
     "impl Drop for HeavyGuard",
-    "delete ! in run_pool",
+    "delete ! in pool_worker",
     # MongoSession::require_collection lists the database's collections: it needs
     # a live MongoDB, so its whole-fn `Ok(())` stub is unkillable under `--lib
     # --bins`. Its DECISION is unit-tested (missing_collection_refusal). Stub
@@ -863,11 +866,11 @@ exclude_re = [
     "replace interval_iso -> Result<Option<String>>",
     "delete match arm OraKind::IntervalDs in interval_iso",
     "delete match arm OraKind::(BinaryFloat|BinaryDouble|Boolean|Date \\| OraKind::Timestamp|Raw \\| OraKind::Blob) in build_column",
-    # - oracle_type_mappings -> vec![] fails every live_oracle export ("must either specify
+    # - oracle_type_mappings -> Ok(vec![]) fails every live_oracle export ("must either specify
     #   a row count or at least one column"); its warning decision is the unit-tested
     #   with_oracle_warning. export_within_budget without the re-projected query fails
     #   edge_oracle_types_export_losslessly ("unsupported database type DB_TYPE_OBJECT").
-    "replace oracle_type_mappings -> Vec<TypeMapping> with vec!\\[\\]",
+    "replace oracle_type_mappings -> Result<Vec<TypeMapping>> with Ok\\(vec!\\[\\]\\)",
     "delete field query from struct ExportRequest expression in OracleSource::export_within_budget",
     # - MssqlSource::export -> Ok(()) writes nothing: mssql_batch_and_cdc_deliver_every_ledger_row_alike
     #   fails "no parquet part under ..." and the sql_variant batch test finds no file to read.

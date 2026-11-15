@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 from . import live_needs, live_owners
 from .core import DEVBOX, HOSTED, RAN_LIVE_MODULES, RAN_LIVE_TESTS, ROOT, Ledger, SkipCause
-from .halves import NEED_HALF, devbox_only, needs_problems, slice_modules
+from .halves import NEED_HALF, STAGE_HALF, devbox_only, needs_problems, slice_modules
 from .scenarios import _run_live_modules, cfg
 
 __all__ = ["verify_live_modules", "live_suite_modules", "exclusive_tests", "EXCLUDED", "select_modules", "engines_arg"]
@@ -175,7 +175,6 @@ def dedicated_stage_problems(sources: dict[str, str] | None = None) -> list[str]
     """A stage that runs whole live modules (a `_run_live_modules` call with no `expr`) and is not placed in the hosted half: it filters its modules to the hosted tests, so another half would leave them to no one."""
     if sources is None:
         sources = {f.name: f.read_text() for f in sorted(ROOT.joinpath("dev", "release_oracle").glob("*.py")) if f.name != "live_modules.py"}
-    from .halves import STAGE_HALF
     mods = set(live_suite_modules())
     out = []
     for name, text in sources.items():
@@ -417,9 +416,10 @@ def self_test() -> None:
     live_needs.self_test()
     assert dedicated_stage_problems() == [], dedicated_stage_problems()
     audit = 'x = 1\n_run_live_modules(led, "a", "{}", "p", ["live_audit_suspects"]%s)\n'
+    devbox_stage = next(n for n, h in STAGE_HALF.items() if h == DEVBOX)
     assert dedicated_stage_problems({"a.py": audit.replace("{}", "audit suspects") % ""}) == [], "a hosted stage over whole modules is refused"
-    assert len(dedicated_stage_problems({"a.py": audit.replace("{}", "cdc e2e") % ""})) == 1, "a devbox stage over whole modules goes unnoticed"
-    assert dedicated_stage_problems({"a.py": audit.replace("{}", "cdc e2e") % ", expr=E"}) == [], "a stage with its own filter is not a whole-module run"
+    assert len(dedicated_stage_problems({"a.py": audit.replace("{}", devbox_stage) % ""})) == 1, "a devbox stage over whole modules goes unnoticed"
+    assert dedicated_stage_problems({"a.py": audit.replace("{}", devbox_stage) % ", expr=E"}) == [], "a stage with its own filter is not a whole-module run"
     audit_devbox = sorted(n for m, n, devbox in real if m == "live_audit_suspects" and devbox)
     assert audit_devbox, f"the audit stage's credential tests are not placed in the devbox half: {audit_devbox}"
     audit_expr = dedicated_expr(["live_audit_suspects"])

@@ -1,17 +1,7 @@
 //! **Layer: Coordinator** (planning → execution → persistence/observability)
-//!
-//! `pipeline/mod.rs` is the only module allowed to bridge all three layers.
-//! It reads a resolved plan (planning), dispatches to execution modules, then
-//! records metrics and sends notifications (persistence/observability).
-//!
-//! See `docs/adr/0003-layer-classification.md` for the full module taxonomy.
 
 mod aggregate;
 mod apply_cmd;
-// `pub(crate)`: the multiplex destination layout (`dest_for_table` — one
-// sub-prefix per captured table) is written HERE and read by everything that has
-// to find those files again — `rivet validate`, and the warehouse load planner.
-// One definition of where a table's parts live, not one per reader.
 pub(crate) mod cdc;
 pub(crate) mod cdc_job;
 pub(crate) mod cdc_release;
@@ -49,11 +39,6 @@ pub(crate) mod retry {
     pub use crate::error::retry::{Attempt, RetryClass, classify_error, should_retry};
     pub(crate) use crate::tuning::retry_backoff_ms;
 }
-// The `rivet run` orchestrator (~290 LOC) lives next door so this facade
-// stays a thin re-export layer.  Module name shadows `pub fn run` below;
-// the duplicate is resolved by Rust's namespace rules (modules live in
-// the type namespace, fns in the value namespace) and unambiguous at
-// every call site (`pipeline::run(...)` is the function).
 pub(crate) mod run;
 pub(crate) mod run_set;
 mod run_store;
@@ -66,12 +51,6 @@ pub(crate) mod validate;
 mod validate_cmd;
 pub(crate) mod validate_manifest;
 
-// ── Public API surface (consumed by `src/cli/dispatch.rs` + binaries) ──────
-//
-// These items are the contract the binary depends on.  Adding to this list
-// is an API change that requires a release-note entry; removing or
-// renaming requires a deprecation cycle.
-
 pub use apply_cmd::run_apply_command;
 pub use cli::{
     accept_state, reset_chunk_checkpoint, reset_chunk_checkpoints_stuck, reset_state,
@@ -81,38 +60,15 @@ pub use plan_cmd::{PlanOutputFormat, run_plan_command};
 pub use reconcile_cmd::{ReconcileOutputFormat, run_reconcile_command};
 pub use repair_cmd::{RepairOutputFormat, RepairReportSource, run_repair_command};
 pub use validate_cmd::{ValidateOutputFormat, ValidateTarget, run_validate_command};
-// The graded verify depth is part of the CLI contract (`--depth`) and is the
-// same enum that gates the checks in `verify_at_destination`.  Defined in the
-// pipeline layer; re-exported here so `cli::args` can parse it on the flag
-// without the CLI→pipeline layering inversion of defining it in `cli`.
 pub use validate_manifest::ValidateDepth;
 
-// `RunSummary` is consumed by `notify::*` (via the Coordinator path) plus
-// integration-test fixtures.  It is the canonical observability struct so
-// it stays in the regular public surface.
 pub use summary::RunSummary;
-
-// ── Crate-internal cross-module use ────────────────────────────────────────
 
 pub(crate) use job::run_export_job_with_chunk_source;
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use retry::is_transient;
 pub(crate) use single::attach_connect_hint;
-
-// ── Test-only surface ──────────────────────────────────────────────────────
-//
-// The integration tests in `tests/*.rs` exercise the trust-contract writers,
-// readers, and decision logic without spinning up a full pipeline.  These
-// items are NOT part of the public CLI contract — operators get them only
-// transitively (via `summary.json`, `manifest.json`, `--validate`, etc.).
-//
-// Hidden behind `#[doc(hidden)] pub mod for_tests` so they don't pollute
-// the rendered crate docs and so a renaming refactor here is a clear
-// "test-only" change rather than appearing as a public API break.
-//
-// Convention matches the existing `destination_for_tests` window in
-// `lib.rs`: tests reach these via `rivet::pipeline::for_tests::*`.
 
 #[doc(hidden)]
 pub mod for_tests {
@@ -131,28 +87,12 @@ pub mod for_tests {
     pub use crate::plan::build_time_window_query;
 }
 
-// The orchestrator and its `RunOptions` live in `run.rs`.  Re-exported
-// here so external call sites keep using `pipeline::run(...)` and
-// `pipeline::RunOptions`.  Multi-export render-mode flags ride along
-// because `RunSummary::print` and the in-place card renderer read them.
 pub(crate) use run::multi_export_mode;
 pub use run::{RunOptions, run};
 
 pub(crate) use crate::config::resolve::format_bytes;
 
-/// Strip the trailing recovery-hint portion of a chunked-pipeline error
-/// message produced by `pipeline::chunked`.  Returns the cause prefix and
-/// whether a chunked-checkpoint hint was detected.
-///
-/// Hints emitted by `pipeline::chunked` always follow the pattern
-/// `<cause>; <connector> \`rivet …\` …`, so we cut at the first `; ` whose
-/// remainder contains a backtick-quoted `rivet` invocation: the first `; ` that
-/// ends before the LAST such invocation, found in one pass each way.
-///
-/// Used by both the per-export card renderer (`parent_ui`) and the run
-/// aggregator (`aggregate`) so the long inline command doesn't wrap, distort
-/// the in-place card layout, and doesn't repeat the consolidated recovery
-/// block printed by the aggregator.
+/// Strip the trailing recovery-hint portion of a chunked-pipeline error message produced by `pipeline::chunked`.
 pub(crate) fn strip_chunked_recovery_hint(msg: &str) -> (&str, bool) {
     let cut = msg.rfind("`rivet ").and_then(|last| msg[..last].find("; "));
     match cut {
@@ -161,11 +101,7 @@ pub(crate) fn strip_chunked_recovery_hint(msg: &str) -> (&str, bool) {
     }
 }
 
-/// Truncate `s` to at most `max_chars` Unicode characters, appending `…`
-/// when truncated.  Returns `s` unchanged if already short enough.  Used by
-/// the in-place card renderer to keep every line within the chosen
-/// terminal width — line wrapping breaks the cursor-up redraw math and
-/// causes cards to drift down the screen.
+/// Truncate `s` to at most `max_chars` Unicode characters, appending `…` when truncated.
 pub(crate) fn clamp_line(s: &str, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
@@ -348,10 +284,7 @@ mod tests {
         );
     }
 
-    // ─── RunSummary::new() journal invariants ────────────────────────────────
-
-    /// `RunSummary::new()` must immediately record a `PlanResolved` event as the
-    /// first journal entry.  This satisfies the "what was planned?" query from ADR-0001.
+    /// `RunSummary::new()` must immediately record a `PlanResolved` event as the first journal entry.
     #[test]
     fn run_summary_new_records_plan_resolved_as_first_event() {
         let plan = minimal_plan();
@@ -371,8 +304,7 @@ mod tests {
         );
     }
 
-    /// The `PlanSnapshot` recorded inside `PlanResolved` must faithfully capture
-    /// key fields from the `ResolvedRunPlan`.
+    /// The `PlanSnapshot` recorded inside `PlanResolved` must faithfully capture key fields from the `ResolvedRunPlan`.
     #[test]
     fn run_summary_plan_snapshot_matches_plan_fields() {
         let plan = minimal_plan();
@@ -401,20 +333,10 @@ mod tests {
         );
     }
 
-    // ─── Rejected plan gate ──────────────────────────────────────────────────
-
-    /// Gap 7 — `run_export_job` bails before execution when `validate_plan` returns
-    /// a `Rejected` diagnostic.  The wiring is in `run_export_job` (this file,
-    /// ~line 210): if `rejected` is non-empty, the function returns `anyhow::bail!`.
-    ///
-    /// This test verifies the *condition* that triggers the bail: that `validate_plan`
-    /// does in fact produce a `Rejected` diagnostic for the stdout+split combination.
-    /// The gate itself (`run_export_job`) cannot be called directly in tests because
-    /// it requires a live database connection and config; we test its precondition here.
+    /// Gap 7 — `run_export_job` bails before execution when `validate_plan` returns a `Rejected` diagnostic.
     #[test]
     fn rejected_plan_produces_rejected_diagnostic_blocking_run_export_job() {
         let mut plan = minimal_plan();
-        // stdout + max_file_size triggers check_stdout_split → Rejected.
         plan.destination.destination_type = DestinationType::Stdout;
         plan.max_file_size_bytes = Some(10 * 1024 * 1024);
 
@@ -458,12 +380,7 @@ mod tests {
         );
     }
 
-    // ─── synthetic_failed_summary ────────────────────────────────────────────
-
-    /// Pre-`RunSummary::new` failures (plan-build error, plan-validation
-    /// rejection) still need to be aggregated.  `synthetic_failed_summary`
-    /// produces a minimally-populated summary that aggregation can consume
-    /// without panicking.
+    /// Pre-`RunSummary::new` failures (plan-build error, plan-validation rejection) still need to be aggregated.
     #[test]
     fn synthetic_failed_summary_carries_error_and_status() {
         let err = anyhow::anyhow!("could not connect to source: timeout");
@@ -479,16 +396,13 @@ mod tests {
             "run_id must be derived from export name, got {}",
             s.run_id
         );
-        // Aggregation reads these fields directly — they must default to zero.
         assert_eq!(s.total_rows, 0);
         assert_eq!(s.files_produced, 0);
         assert_eq!(s.bytes_written, 0);
         assert_eq!(s.duration_ms, 0);
     }
 
-    /// `entry_from_summary` must faithfully copy fields the aggregate cares
-    /// about.  This guards against silent drift if `RunAggregateEntry` or
-    /// `RunSummary` gain new fields.
+    /// `entry_from_summary` must faithfully copy fields the aggregate cares about.
     #[test]
     fn aggregate_entry_from_summary_copies_observable_fields() {
         let plan = minimal_plan();

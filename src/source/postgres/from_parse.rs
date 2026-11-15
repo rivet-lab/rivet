@@ -1,11 +1,6 @@
 //! The relation of a simple Postgres `SELECT … FROM <table>` query, as a `regclass` literal.
-//!
-//! Used by the catalog-hints path ([`super::pg_fetch_numeric_catalog_hints`])
-//! to ask `pg_catalog` for the numeric `(precision, scale)` of each column.
-//! The query text is read by [`crate::sql::single_relation`]; anything but one
-//! `[schema.]table` gives `None`, and the caller falls back to the result set.
 
-/// The `<schema>.<table>` (or `<table>`) literal to cast to `regclass`: a part the query quoted stays quoted. `None` for a join, a comma list, a subquery or a name of more than two parts.
+/// The `<schema>.<table>` (or `<table>`) literal to cast to `regclass`: a part the query quoted stays quoted.
 pub(super) fn try_parse_pg_simple_from_regclass_literal(query: &str) -> Option<String> {
     let parts = crate::sql::single_relation(query, true)?;
     let segment = |p: &crate::sql::NamePart| match p.quoted {

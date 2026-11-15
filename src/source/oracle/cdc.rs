@@ -1,5 +1,4 @@
-//! Oracle change capture through LogMiner (ADR-0037): mined from the root, framed by XID,
-//! resumed from a two-SCN checkpoint that records the database it belongs to.
+//! Oracle change capture through LogMiner (ADR-0037).
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -43,7 +42,6 @@ impl ColKind {
             "VARCHAR2" | "NVARCHAR2" | "CHAR" | "NCHAR" => Self::Text,
             "RAW" => Self::Raw,
             _ if t.starts_with("TIMESTAMP") && t.ends_with("WITH TIME ZONE") => Self::TimestampTz,
-            // WITH LOCAL TIME ZONE renders in the session zone, pinned to UTC.
             _ if t.starts_with("TIMESTAMP") => Self::Timestamp,
             _ => return None,
         })
@@ -305,8 +303,7 @@ pub(crate) struct LogFile {
     pub next: u64,
 }
 
-/// The files that cover `[start, end]` — archived copies preferred, one per (thread, sequence) —
-/// or a data-loss refusal when the history no longer reaches `start` or a sequence is missing.
+/// The files that cover `[start, end]` — archived copies preferred, one per (thread, sequence).
 pub(crate) fn plan_logs(
     archived: &[LogFile],
     online: &[LogFile],
@@ -382,15 +379,12 @@ pub(crate) fn frontier_is_due(
 /// How many times one stream re-plans its logs after the redo log set changed under LogMiner.
 const REMINE_ATTEMPTS: u32 = 5;
 
-/// Whether an ORA code means a registered redo file no longer holds what was listed: ORA-00310
-/// (archived log holds another sequence), ORA-01291 (missing log file), ORA-01368 (log header
-/// mismatch). Oracle's action for each is to register the right file, so none is a setup error.
+/// Whether an ORA code means a registered redo file no longer holds what was listed.
 pub(crate) fn log_set_changed(code: u32) -> bool {
     matches!(code, 310 | 1291 | 1368)
 }
 
-/// Whether a rendered driver error (never rivet's own `oracle cdc:` verdict) carries any ORA code
-/// [`log_set_changed`] accepts.
+/// Whether a rendered driver error (never rivet's own `oracle cdc:` verdict) carries any ORA code [`log_set_changed`] accepts.
 pub(crate) fn names_a_log_set_change(rendered: &str) -> bool {
     !rendered.contains("oracle cdc:")
         && rendered
@@ -429,8 +423,7 @@ impl std::fmt::Display for LogSetFault {
 
 impl std::error::Error for LogSetFault {}
 
-/// Whether `e` may be cured by re-listing the logs: a log-set-change ORA code, or a
-/// [`LogSetFault`] (an online file reused between the listing and the read).
+/// Whether `e` may be cured by re-listing the logs.
 pub(crate) fn re_plannable(e: &anyhow::Error) -> bool {
     e.is::<LogSetFault>() || names_a_log_set_change(&format!("{e:#}"))
 }
@@ -440,14 +433,12 @@ pub(crate) fn still_holds(count: Option<&str>) -> bool {
     count.is_some_and(|c| c != "0")
 }
 
-/// Whether the read of online file `f` must be proven whole before a group committed at
-/// `commit` is queued (`None`: the window is drained): the group lies past the file's end.
+/// Whether the read of online file `f` must be proven whole before a group committed at `commit` is queued (`None`.
 pub(crate) fn read_past(f: &LogFile, commit: Option<u64>) -> bool {
     commit.is_none_or(|c| c >= f.next)
 }
 
-/// The wait before re-plan `attempt` (0-based) after `e`, or `None` when `e` is not
-/// [`re_plannable`] or the attempts are spent.
+/// The wait before re-plan `attempt` (0-based) after `e`, or `None` when `e` is not [`re_plannable`] or the attempts are spent.
 pub(crate) fn remine_backoff(e: &anyhow::Error, attempt: u32) -> Option<std::time::Duration> {
     (attempt < REMINE_ATTEMPTS && re_plannable(e))
         .then(|| std::time::Duration::from_millis(200 << attempt))
@@ -572,7 +563,6 @@ fn container(conn: &Connection) -> Result<(String, String, String)> {
     )?;
     let r = r.into_iter().next().unwrap_or_default();
     let cell = |i: usize| r.get(i).cloned().flatten().unwrap_or_default();
-    // CON_ID 0 is a non-CDB; 1 is the root, where there is no PDB to capture from.
     match cell(0).as_str() {
         "0" => Ok((cell(0), String::new(), String::new())),
         "1" => crate::rivet_bail!(
@@ -593,8 +583,7 @@ pub(crate) struct CatalogColumn {
     pub virtual_col: bool,
 }
 
-/// The columns of the table `owner_pred`.`table_pred` name (SQL predicates), as the capture reads them:
-/// `(owner, table_name, column_name, data_type, identity_column, virtual_column)`.
+/// The columns of the table `owner_pred`.`table_pred` name (SQL predicates), as the capture reads them.
 pub(crate) fn catalog_columns_sql(owner_pred: &str, table_pred: &str) -> String {
     format!(
         "SELECT owner, table_name, column_name, data_type, identity_column, \
@@ -608,9 +597,7 @@ pub(crate) fn catalog_columns_sql(owner_pred: &str, table_pred: &str) -> String 
 pub(crate) const MAJOR_VERSION_SQL: &str = "SELECT TO_CHAR(MAX(TO_NUMBER(REGEXP_SUBSTR(version, '^[0-9]+')))) \
      FROM product_component_version";
 
-/// Why LogMiner cannot capture `owner.table` whole in this preview, or `None` when it can: a name
-/// past its limit, a column it cannot address or never decodes, or more columns than the preview
-/// mines. `rivet init` asks this before it writes a CDC export, and the capture before it mines.
+/// Why LogMiner cannot capture `owner.table` whole in this preview, or `None` when it can.
 pub(crate) fn unmineable(
     owner: &str,
     table: &str,
@@ -817,9 +804,7 @@ fn root_identity(conn: &Connection, con_name: String, con_dbid: String) -> Resul
     })
 }
 
-/// The oldest open transaction's start SCN (or the current SCN), read in the capture's OWN
-/// container: from `CDB$ROOT` a common user's `V$TRANSACTION` shows only the root's rows
-/// (measured), so it must be read in the PDB before the switch.
+/// The oldest open transaction's start SCN (or the current SCN), read in the capture's OWN container.
 fn low_water_here(conn: &Connection) -> Result<u64> {
     let r = rows(
         conn,
@@ -844,8 +829,7 @@ fn low_water_here(conn: &Connection) -> Result<u64> {
         })
 }
 
-/// The oldest open transaction's start SCN, or `current`; a `START_SCN` of 0 is a transaction
-/// not yet assigned one (it has written no change), never SCN 0.
+/// The oldest open transaction's start SCN, or `current`.
 fn low_water_of(current: u64, starts: &[u64]) -> u64 {
     starts
         .iter()
@@ -863,8 +847,7 @@ fn pin_frontier(conn: &Connection, low_water: u64) -> Result<Scns> {
     })
 }
 
-/// The available redo files of the current incarnation, online read FIRST: a group is archived
-/// before it is reused, so a sequence that leaves the online list in between is already archived.
+/// The available redo files of the current incarnation, online read FIRST.
 fn list_logs(conn: &Connection, resetlogs: &str) -> Result<(Vec<LogFile>, Vec<LogFile>)> {
     let parse = |r: Vec<Option<String>>| -> Option<LogFile> {
         let n = |i: usize| r.get(i)?.as_deref()?.parse::<u64>().ok();
@@ -1030,7 +1013,7 @@ pub(crate) struct OracleChangeStream {
 }
 
 /// One mined row that matters to the stream.
-#[allow(clippy::large_enum_variant)] // one per row in flight, never collected
+#[allow(clippy::large_enum_variant)]
 enum Mine {
     Change(Mined),
     /// The refusal for a TRUNCATE of a captured table.
@@ -1044,8 +1027,7 @@ pub(crate) enum Side {
     Undo,
 }
 
-/// `(before, after)` sources for one column of `op`, from its `COLUMN_PRESENT` bits (redo 2, undo 1);
-/// `None` when an image the op carries has the column in neither side.
+/// `(before, after)` sources for one column of `op`, from its `COLUMN_PRESENT` bits (redo 2, undo 1).
 pub(crate) fn image_sides(op: ChangeOp, present: u8) -> Option<(Option<Side>, Option<Side>)> {
     let (redo, undo) = (present & 2 != 0, present & 1 != 0);
     let either = |first: Side| match (first, redo, undo) {
@@ -1101,7 +1083,6 @@ impl OracleChangeStream {
                 Scns::from_position(&pos, &path)?
             }
             None => {
-                // An idle first run must still leave an anchor, or the next run starts at "now".
                 with_identity(&frontier.position(), &identity).save(checkpoint)?;
                 frontier
             }
@@ -1134,8 +1115,7 @@ impl OracleChangeStream {
         Ok(stream)
     }
 
-    /// (Re)start mining the same window after the last queued commit group, re-planning the logs
-    /// with backoff while the log set changes under LogMiner.
+    /// (Re)start mining the same window after the last queued commit group, re-planning the logs with backoff while the log set changes under LogMiner.
     fn mine(&mut self) -> Result<()> {
         self.cursor = None;
         self.carry = None;
@@ -1354,8 +1334,7 @@ impl OracleChangeStream {
         Ok(true)
     }
 
-    /// Prove every online file [`read_past`] `commit` still holds its sequence (a reuse would have
-    /// cut its tail unseen), or fail with [`LogSetFault::Reused`] so the window is re-mined.
+    /// Prove every online file [`read_past`] `commit` still holds its sequence (a reuse would have cut its tail unseen), or fail with [`LogSetFault::Reused`] so the window is re-mined.
     fn prove_online_read(&mut self, commit: Option<u64>) -> Result<()> {
         while let Some(i) = self.unverified.iter().position(|f| read_past(f, commit)) {
             let f = self.unverified.remove(i);
@@ -1396,8 +1375,7 @@ impl OracleChangeStream {
     }
 }
 
-/// Add the files covering `[from.low_water, frontier]`, start LogMiner, and open the contents
-/// query; also the planned files that are online members (reusable while read).
+/// Add the files covering `[from.low_water, frontier]`, start LogMiner, and open the contents query.
 fn start_mining(
     conn: &Connection,
     identity: &OraIdentity,
@@ -1449,7 +1427,7 @@ fn start_mining(
     Ok((cursor, reusable))
 }
 
-/// Whether a mined DDL statement removes rows without redo per row: `TRUNCATE …` or `ALTER … TRUNCATE [SUB]PARTITION`.
+/// Whether a mined DDL statement removes rows without redo per row.
 pub(crate) fn ddl_truncates(sql: &str) -> bool {
     let mut s = sql.trim_start();
     loop {
@@ -1498,8 +1476,7 @@ pub(crate) fn joins_commit_group(commit: u64, next: u64) -> bool {
     next == commit
 }
 
-/// The order of one commit SCN's rows `(xid, sequence)`: each transaction stays contiguous in
-/// arrival order, its rows by `SEQUENCE#`.
+/// The order of one commit SCN's rows `(xid, sequence)`.
 pub(crate) fn commit_group_order(rows: &[(&str, u64)]) -> Vec<usize> {
     let mut run = 0usize;
     let mut keys = Vec::with_capacity(rows.len());
@@ -1616,7 +1593,6 @@ pub(crate) fn checkpoint_problem(pos: &Position, path: &str) -> Option<String> {
 }
 
 /// Anchor a first run: persist the open-time frontier so an idle first run still has a start.
-/// The configured tables resolved and vetted, refused unless every one is logged with ALL columns.
 fn vetted_tables(conn: &Connection, tables: &[String]) -> Result<Vec<Captured>> {
     let captured = resolve_tables(conn, tables)?;
     if let Some(why) = logging_check(conn, &captured)? {
@@ -2029,7 +2005,6 @@ mod tests {
             Some(dt("2026-09-28 01:02:03.5"))
         );
         assert_eq!(parse_datetime("28-SEP-26 01.02.03"), None);
-        // SYYYY: an AD year renders with a leading blank, a BC one with `-` (Oracle -N = chrono 1-N).
         assert_eq!(
             parse_datetime(" 2026-09-28T00:00:00.000000"),
             Some(dt("2026-09-28 00:00:00"))
@@ -2038,7 +2013,6 @@ mod tests {
             parse_datetime("-0044-03-15T00:00:00.000000"),
             Some(dt("-0043-03-15 00:00:00"))
         );
-        // 1 BC is chrono year 0; DuckDB's make_date(0, 6, 15) is the independent value.
         assert_eq!(
             decode(ColKind::TimestampTz, "-0001-06-15T00:00:00.000000 +00:00").unwrap(),
             RivetValue::DateTime(
@@ -2366,8 +2340,7 @@ mod renderer_twins {
     }
 
     #[test]
-    /// Strict known divergence: ADR-0038 divergence: canonical_number trims trailing fraction zeros (1.5, 0), decimal_plain keeps the column scale (1.50, 0.000); unified by the Oracle step of the migration
-    /// Passes while it diverges; when the step unifies it, this fails ("did not panic") and flips to a plain test.
+    /// Strict known divergence: ADR-0038 divergence.
     #[should_panic(expected = "assertion")]
     fn canonical_number_keeps_the_scale_like_decimal_plain() {
         for (mined, u, s) in [("1.50", 150, 2), ("0.000", 0, 3)] {
@@ -2403,7 +2376,6 @@ mod error_code_tests {
         let long = unmineable("O", &"T".repeat(MAX_MINED_NAME + 1), &id, 19).unwrap();
         assert!(long.contains("over 30 bytes"), "{long}");
         assert!(unmineable("O", &"T".repeat(MAX_MINED_NAME), &id, 19).is_none());
-        // The owner and each column name meet the same limit, at it and one byte over.
         assert!(unmineable(&"O".repeat(MAX_MINED_NAME), "T", &id, 19).is_none());
         let owner = unmineable(&"O".repeat(MAX_MINED_NAME + 1), "T", &id, 19).unwrap();
         assert!(owner.contains("over 30 bytes"), "{owner}");

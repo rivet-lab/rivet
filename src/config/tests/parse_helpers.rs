@@ -2,8 +2,6 @@
 
 use super::*;
 
-// ─── resolve_vars regression tests ───────────────────────────
-
 #[test]
 fn resolve_vars_multiple_vars_in_one_string() {
     let mut params = std::collections::HashMap::new();
@@ -48,15 +46,11 @@ fn resolve_vars_dollar_without_brace_ignored() {
 
 #[test]
 fn resolve_vars_value_containing_dollar_does_not_recurse() {
-    // Regression: after replacing `${VAR}` with a value that itself contains `${`,
-    // the loop must not re-interpret the expansion. `search_from` advance guards this.
     let mut params = std::collections::HashMap::new();
     params.insert("RAW".into(), "${NOT_A_VAR}".into());
     let resolved = resolve_vars("x=${RAW}", Some(&params)).unwrap();
     assert_eq!(resolved, "x=${NOT_A_VAR}");
 }
-
-// ─── parse_file_size regression tests ────────────────────────
 
 #[test]
 fn parse_file_size_fractional() {
@@ -89,17 +83,10 @@ fn parse_file_size_invalid_errors() {
 
 #[test]
 fn parse_file_size_zero_is_rejected() {
-    // #dogfood LOW: `0` / `0MB` used to parse to a 0-byte rotation threshold
-    // (a part after every row), silently. This test previously PINNED that bug
-    // (asserting `unwrap() == 0`); a zero/negative size is now a loud error.
     assert!(parse_file_size("0MB").is_err());
     assert!(parse_file_size("0").is_err());
     assert!(parse_file_size("-5MB").is_err());
 }
-
-// =============================================================================
-// Placeholder / parameter resolution — QA backlog Task 5.2 (edge cases)
-// =============================================================================
 
 #[test]
 fn resolve_vars_unicode_value_preserved_exactly() {
@@ -111,10 +98,6 @@ fn resolve_vars_unicode_value_preserved_exactly() {
 
 #[test]
 fn resolve_vars_value_with_quotes_newlines_braces_passes_through() {
-    // These characters often break naive substitution (they look "structural"
-    // in YAML and SQL).  `resolve_vars` is a literal text substitution;
-    // downstream escaping is the caller's responsibility.  Values must land
-    // verbatim.
     let mut params = std::collections::HashMap::new();
     params.insert(
         "NASTY".into(),
@@ -153,10 +136,6 @@ fn resolve_vars_repeated_placeholder_uses_value_each_time() {
     assert_eq!(got, "alphaalpha-beta-alpha");
 }
 
-// =============================================================================
-// parse_file_size boundaries + fuzz — QA backlog Task 2.3
-// =============================================================================
-
 #[test]
 fn parse_file_size_rejects_empty_and_garbage() {
     assert!(parse_file_size("").is_err());
@@ -174,8 +153,6 @@ fn parse_file_size_boundary_exact_kb() {
 
 #[test]
 fn parse_file_size_does_not_panic_on_huge_inputs_and_is_deterministic() {
-    // Absurd inputs either parse (possibly saturating) or return Err — but
-    // never panic.  Same input must produce the same Ok/Err verdict.
     let inputs = [
         "1000000000000000000000000GB",
         "1e308GB",
@@ -191,9 +168,6 @@ fn parse_file_size_does_not_panic_on_huge_inputs_and_is_deterministic() {
 
 #[test]
 fn parse_file_size_negative_values_are_not_huge_positive() {
-    // A negative file size is nonsense; callers rely on max_file_size being
-    // a usable upper bound.  Assert the behaviour is either "error" or "zero",
-    // never a huge positive number that would silently disable splitting.
     match parse_file_size("-1GB").ok() {
         None => {}
         Some(v) => assert_eq!(v, 0, "negative must coerce to 0 if accepted, got {v}"),

@@ -1,36 +1,4 @@
 //! **Layer: Execution**
-//!
-//! `PipelinedSink` decouples the source fetch/convert stage from the
-//! encode/compress/write stage. The source thread only fetches rows, converts
-//! them to Arrow, and hands each `RecordBatch` to a bounded channel; a dedicated
-//! worker thread owns the real [`ExportSink`] and does the CPU-heavy work
-//! (parquet encode + compression, quality hashing, file rotation).
-//!
-//! This overlaps the database round-trip wait with the compression CPU work,
-//! which today run serially on one thread (see `on_batch` in [`super`]).
-//!
-//! Ordering and invariants are preserved: a single FIFO worker processes
-//! batches in arrival order, so `content_fingerprint` determinism (ADR-0012)
-//! and the I1–I8 ordering contracts are unaffected.
-//!
-//! Memory: the synchronous path holds ~1–2 batches in flight (one being
-//! converted, one being encoded). Pipelining raises the ceiling to roughly
-//! `(DEPTH + 2) × batch_size` — the in-channel queue plus the batch the
-//! encoder is working on plus the one the fetcher is building. It stays
-//! *bounded*: the `sync_channel` blocks the fetch thread once the queue is
-//! full (backpressure), and the per-batch byte budget (MySQL 64 MB cap / PG
-//! `work_mem × 0.7`) is unchanged. `DEPTH` is the memory↔overlap knob:
-//! lower it to spend less memory, raise it to absorb burstier fetch latency.
-//!
-//! **On by default** (depth [`DEFAULT_CHANNEL_DEPTH`]): the overlap is free —
-//! no RSS penalty measured at depth 2, FIFO order preserved, and the
-//! commit-critical finalize (`writer.finish()`) still runs on the caller's
-//! thread after the worker is joined, so crash/ordering semantics are
-//! unchanged. Override with `RIVET_PIPELINE_WRITES`: `0` disables it (the old
-//! synchronous path), a positive integer sets the channel depth (the
-//! memory↔overlap knob). Wired into the single/snapshot export path
-//! (`pipeline::single`); the chunked runners are not pipelined yet (each chunk
-//! already runs on its own worker — intra-chunk overlap there is a follow-up).
 
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread::JoinHandle;
@@ -43,18 +11,13 @@ use crate::error::Result;
 use crate::plan::ResolvedRunPlan;
 use crate::source::BatchSink;
 
-/// Channel depth: how many batches may sit between fetch and encode. Small, so
-/// peak extra memory stays at ~`DEPTH × batch_size` while still giving the
-/// encoder a runway to stay busy across a fetch round-trip.
+/// Channel depth: how many batches may sit between fetch and encode.
 const DEFAULT_CHANNEL_DEPTH: usize = 3;
 
 enum SinkMsg {
     Schema(SchemaRef),
     Batch(RecordBatch),
-    /// A lossless keyset token from the source (Mongo's typed BSON `_id`) —
-    /// forwarded so the decorator is a FAITHFUL BatchSink: the trait's no-op
-    /// default silently swallowed it, a latent wrong-cursor bug the moment a
-    /// cursor-reporting runner is pipelined (roast 2026-08-09, #173).
+    /// A lossless keyset token from the source (Mongo's typed BSON `_id`).
     SourceCursor(String),
 }
 
@@ -71,14 +34,10 @@ impl PipelinedSink {
         Self::configured_depth().is_some()
     }
 
-    /// Resolve the encode-worker channel depth. **On by default**
-    /// ([`DEFAULT_CHANNEL_DEPTH`]) — the overlap is free (no RSS penalty
-    /// measured at depth 2) and FIFO-ordered, so the source thread's DB
-    /// round-trip wait overlaps the writer thread's parquet/zstd CPU. Disable
-    /// with `RIVET_PIPELINE_WRITES=0`; tune the depth with a positive integer.
+    /// Resolve the encode-worker channel depth.
     fn configured_depth() -> Option<usize> {
         match std::env::var("RIVET_PIPELINE_WRITES") {
-            Ok(v) if v == "0" => None, // explicit opt-out
+            Ok(v) if v == "0" => None,
             Ok(v) if v.is_empty() => Some(DEFAULT_CHANNEL_DEPTH),
             Ok(v) => Some(
                 v.parse::<usize>()
@@ -86,13 +45,11 @@ impl PipelinedSink {
                     .filter(|&n| n > 0)
                     .unwrap_or(DEFAULT_CHANNEL_DEPTH),
             ),
-            Err(_) => Some(DEFAULT_CHANNEL_DEPTH), // unset → on by default
+            Err(_) => Some(DEFAULT_CHANNEL_DEPTH),
         }
     }
 
-    /// Spawn the encode worker. The worker creates and owns the `ExportSink`
-    /// (so the writer trait object never crosses a thread boundary while in
-    /// use); `finish` returns the fully-populated sink back to the caller.
+    /// Spawn the encode worker.
     pub fn spawn(plan: &ResolvedRunPlan) -> Result<Self> {
         let nulled_cells = std::sync::Arc::clone(&plan.nulled_cells);
         let plan = plan.clone();
@@ -118,8 +75,7 @@ impl PipelinedSink {
         })
     }
 
-    /// Test-only: wrap an already-built `ExportSink` (bypasses plan
-    /// construction). Same worker loop as `spawn`.
+    /// Test-only: wrap an already-built `ExportSink` (bypasses plan construction).
     #[cfg(test)]
     pub(crate) fn spawn_with_sink(sink: ExportSink) -> Self {
         let nulled_cells = std::sync::Arc::clone(&sink.nulled_cells);
@@ -152,10 +108,6 @@ impl PipelinedSink {
                 "pipelined sink already finished"
             );
         };
-        // A send error means the worker hit an error and dropped the
-        // receiver. We return a generic abort here; `finish` joins the
-        // worker and surfaces the *real* error, which the caller checks
-        // before the source-side error (see `run_single_export`).
         if tx.send(msg).is_err() {
             crate::rivet_bail!(
                 crate::error::codes::INTERNAL_RUN_INVARIANT,
@@ -165,10 +117,8 @@ impl PipelinedSink {
         Ok(())
     }
 
-    /// Close the channel, join the worker, and recover the populated
-    /// `ExportSink`. Propagates a worker error or panic.
+    /// Close the channel, join the worker, and recover the populated `ExportSink`.
     pub fn finish(mut self) -> Result<ExportSink> {
-        // Drop the sender so the worker's `recv` loop terminates.
         self.tx.take();
         let Some(handle) = self.worker.take() else {
             crate::rivet_bail!(
@@ -196,15 +146,10 @@ impl BatchSink for PipelinedSink {
     }
 
     fn set_source_cursor(&mut self, token: String) {
-        // Best-effort like the underlying setter (no Result to surface): a
-        // closed channel means the worker already failed and finish() reports it.
         let _ = self.send(SinkMsg::SourceCursor(token));
     }
 
     fn on_batch(&mut self, batch: &RecordBatch) -> Result<()> {
-        // RecordBatch clone is a shallow Arc bump per column — cheap. The
-        // batch crosses to the worker by value so the source loop can free
-        // its own reference immediately on the next fetch.
         self.send(SinkMsg::Batch(batch.clone()))
     }
 }

@@ -1,26 +1,4 @@
 //! **Layer: Planning** (decision-only, no I/O)
-//!
-//! Pure decision logic for ADR-0012 M8 — "given the prior manifest and the
-//! current destination listing, what should resume do with each part?".
-//!
-//! No I/O, no state reads, no `Destination` calls.  The caller (in the
-//! Execution layer) gathers the inputs (manifest body via `dest.read`,
-//! prefix listing via `dest.list_prefix`), passes them in, and consumes
-//! the resulting `ResumePlan`.  This separation lets every row of the M8
-//! decision matrix be unit-tested without spinning up a destination.
-//!
-//! This module is intentionally side-effect-free: it consumes a `RunManifest`
-//! plus a `Vec<ObjectMeta>` listing of the destination prefix and returns a
-//! decision per part name (plus a separate decision per untracked surplus).
-//! The wiring that actually executes the decisions — skipping a chunk task,
-//! moving an object to `_quarantine/`, recording a "rewrite" — lives in
-//! [`pipeline::chunked`] and [`pipeline::manifest_writer`] respectively.
-//!
-//! Keeping this layer pure means:
-//! - Every row of the M8 decision matrix is unit-testable without I/O.
-//! - The chunked executor can mock the listing for tests of its own logic.
-//! - Future backends (resume against a state snapshot from the journal,
-//!   say) can drive the same matrix without re-implementing it.
 
 use std::collections::BTreeMap;
 
@@ -29,29 +7,17 @@ use crate::manifest::RunManifest;
 use crate::pipeline::manifest_reconcile::{PartPresence, reconcile_manifest_against_listing};
 
 /// What `--resume` should do with a single part on the next run.
-///
-/// The variants mirror ADR-0012 M8's decision table 1:1.  The names match
-/// the table column "Decision" so a reviewer can grep both ways.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResumeDecision {
-    /// Manifest entry exists, object exists, size matches, fingerprint
-    /// matches → already committed; resume must NOT re-export this part.
+    /// Manifest entry exists, object exists, size matches, fingerprint matches → already committed.
     Skip,
-    /// Manifest entry exists but the object is missing at the destination
-    /// (e.g. someone deleted it; partial bucket lifecycle policy ate it;
-    /// the prior run never finished its M1 part-write).  Resume re-runs
-    /// the corresponding chunk so the part is rewritten.
+    /// Manifest entry exists but the object is missing at the destination (e.g.
     Rewrite,
-    /// Manifest entry exists, object exists, but `size_bytes` differs
-    /// from the recorded value (or the listing surfaced a fingerprint
-    /// drift the caller decoded into the args).  M9 — move the object
-    /// to the quarantine prefix and re-export the chunk.
+    /// Manifest entry exists, object exists, but `size_bytes` differs from the recorded value (or the listing surfaced a fingerprint drift the caller decoded into the args).
     Quarantine { reason: QuarantineReason },
 }
 
-/// What to do with an object that exists at the destination but has no
-/// manifest entry pointing at it.  Distinct from [`ResumeDecision`] because
-/// the carrier is "object key" rather than "part_id".
+/// What to do with an object that exists at the destination but has no manifest entry pointing at it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UntrackedDecision {
     /// Move to `<prefix>/_quarantine/<run_id>/<original-name>` (best-effort).
@@ -62,21 +28,16 @@ pub enum UntrackedDecision {
 pub enum QuarantineReason {
     /// `size_bytes` on the destination differs from the manifest entry.
     SizeMismatch,
-    /// The object's content MD5 (from the listing metadata) diverged from
-    /// the manifest's — corruption at the same size, caught with no download.
-    /// Produced when the reconciliation surfaces a `ChecksumMismatch`.
+    /// The object's content MD5 (from the listing metadata) diverged from the manifest's.
     FingerprintMismatch,
 }
 
 /// Aggregate output of one matrix evaluation.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ResumePlan {
-    /// Per-part decisions, keyed by `manifest.parts[].path`.  Sorted so
-    /// callers iterating in deterministic order don't need to sort
-    /// themselves.
+    /// Per-part decisions, keyed by `manifest.parts[].path`.
     pub per_part: BTreeMap<String, PartDecision>,
-    /// Surplus objects under the prefix that are not referenced by any
-    /// committed manifest entry (M9 untracked).  Keyed by relative key.
+    /// Surplus objects under the prefix that are not referenced by any committed manifest entry (M9 untracked).
     pub untracked: BTreeMap<String, UntrackedDecision>,
 }
 
@@ -87,8 +48,7 @@ pub struct PartDecision {
 }
 
 impl ResumePlan {
-    /// Number of parts whose decision is `Skip` — the resume work-saving
-    /// metric an operator wants to see in the run report.
+    /// Number of parts whose decision is `Skip`.
     pub fn skipped(&self) -> usize {
         self.per_part
             .values()
@@ -114,34 +74,17 @@ impl ResumePlan {
 }
 
 /// Apply ADR-0012 M8's decision matrix.
-///
-/// `manifest` is the prior run's manifest read from the destination (post-
-/// `_SUCCESS` or pre-`_SUCCESS` — both are valid inputs; the gate logic
-/// above this module already covered the "_SUCCESS without --force" case).
-/// `listing` is the recursive listing of the destination prefix; entries
-/// whose key starts with [`crate::manifest::QUARANTINE_PREFIX`] are
-/// silently filtered (they are evidence of prior quarantine moves).
-///
-/// The function does **not** mutate either input.  A chunked executor may
-/// run this once at the start of a resume to populate its skip-set.
 pub fn build_resume_plan(manifest: &RunManifest, listing: &[ObjectMeta]) -> ResumePlan {
-    // Resume reads the destination at the prefix root (`list_prefix("")`), so
-    // part keys are the bare `part.path` — `manifest_dir = ""`.
     let rec = reconcile_manifest_against_listing(manifest, listing, "");
 
     let mut plan = ResumePlan::default();
     for check in rec.per_part {
-        // Resume time trusts a size match (ADR-0012 M3 — the fingerprint
-        // compare is `--validate --deep`, deliberately not paid on the hot
-        // resume path).  Missing → re-export; size drift → quarantine + rewrite.
         let decision = match check.presence {
             PartPresence::Present { .. } => ResumeDecision::Skip,
             PartPresence::Missing => ResumeDecision::Rewrite,
             PartPresence::SizeMismatch { .. } => ResumeDecision::Quarantine {
                 reason: QuarantineReason::SizeMismatch,
             },
-            // Content drift at the same size — quarantine the corrupt object
-            // and re-export, same as a size mismatch.
             PartPresence::ChecksumMismatch { .. } => ResumeDecision::Quarantine {
                 reason: QuarantineReason::FingerprintMismatch,
             },
@@ -232,8 +175,6 @@ mod tests {
         }
     }
 
-    // ── M8 decision matrix rows ────────────────────────────────────────
-
     /// Row: manifest yes + obj yes + size match → skip (committed).
     #[test]
     fn part_present_with_matching_size_is_skipped() {
@@ -271,7 +212,7 @@ mod tests {
             part(1, "part-000001.parquet", 4096),
             part(2, "part-000002.parquet", 8192),
         ]);
-        let listing = vec![obj("part-000001.parquet", 4096)]; // 2 missing
+        let listing = vec![obj("part-000001.parquet", 4096)];
         let plan = build_resume_plan(&m, &listing);
         assert_eq!(plan.skipped(), 1);
         assert_eq!(plan.rewrites(), 1);
@@ -296,26 +237,18 @@ mod tests {
         );
     }
 
-    /// Row: manifest no + obj no → new (write).  Modeled by absence —
-    /// `build_resume_plan` returns no per_part entry for a part the
-    /// caller hasn't yet committed; the caller's chunked executor knows
-    /// to write it because no decision says skip.
+    /// Row: manifest no + obj no → new (write).
     #[test]
     fn new_part_not_yet_committed_has_no_decision_entry() {
-        let m = manifest(vec![]); // no parts committed yet
-        let listing: Vec<ObjectMeta> = vec![]; // nothing on destination
+        let m = manifest(vec![]);
+        let listing: Vec<ObjectMeta> = vec![];
         let plan = build_resume_plan(&m, &listing);
         assert!(plan.per_part.is_empty());
         assert!(plan.untracked.is_empty());
     }
 
-    // ── trust-artifact filtering ───────────────────────────────────────
-
     #[test]
     fn manifest_and_success_themselves_are_not_flagged_as_untracked() {
-        // The decision matrix runs over data parts, not over the trust
-        // contract files themselves.  Otherwise we'd loop trying to
-        // quarantine our own manifest.
         let m = manifest(vec![part(1, "part-000001.parquet", 4096)]);
         let listing = vec![
             obj("part-000001.parquet", 4096),
@@ -331,8 +264,6 @@ mod tests {
 
     #[test]
     fn objects_under_quarantine_prefix_are_silently_ignored() {
-        // Already-quarantined artifacts must not be re-quarantined or
-        // confused with new untracked drift.  The prefix is reserved.
         let m = manifest(vec![part(1, "part-000001.parquet", 4096)]);
         let listing = vec![
             obj("part-000001.parquet", 4096),
@@ -342,13 +273,8 @@ mod tests {
         assert!(plan.untracked.is_empty());
     }
 
-    // ── status: only Committed parts get decisions ─────────────────────
-
     #[test]
     fn quarantined_manifest_entries_do_not_get_resume_decisions() {
-        // `manifest.parts` may carry old quarantined entries for audit
-        // (M9 leaves them in the manifest as evidence).  Resume should
-        // not act on them — they belong to the prior run's history.
         let mut quarantined_part = part(2, "old-corrupt.parquet", 999);
         quarantined_part.status = PartStatus::Quarantined;
         let m = manifest(vec![part(1, "part-000001.parquet", 4096), quarantined_part]);
@@ -362,23 +288,19 @@ mod tests {
         assert!(!plan.per_part.contains_key("old-corrupt.parquet"));
     }
 
-    // ── multiple parts, mixed outcomes ─────────────────────────────────
-
     #[test]
     fn mixed_run_produces_per_decision_counts() {
-        // Realistic resume: some parts already committed, some lost,
-        // some drifted, plus surplus.  Verifies the aggregate counters.
         let m = manifest(vec![
-            part(1, "p1.parquet", 100), // present + matching → skip
-            part(2, "p2.parquet", 200), // missing → rewrite
-            part(3, "p3.parquet", 300), // size drift → quarantine
-            part(4, "p4.parquet", 400), // present + matching → skip
+            part(1, "p1.parquet", 100),
+            part(2, "p2.parquet", 200),
+            part(3, "p3.parquet", 300),
+            part(4, "p4.parquet", 400),
         ]);
         let listing = vec![
             obj("p1.parquet", 100),
-            obj("p3.parquet", 9999), // drift
+            obj("p3.parquet", 9999),
             obj("p4.parquet", 400),
-            obj("rogue.parquet", 50), // untracked
+            obj("rogue.parquet", 50),
         ];
         let plan = build_resume_plan(&m, &listing);
         assert_eq!(plan.skipped(), 2);
@@ -397,13 +319,8 @@ mod tests {
         assert_eq!(plan.per_part["p4.parquet"].decision, ResumeDecision::Skip);
     }
 
-    // ── determinism ────────────────────────────────────────────────────
-
     #[test]
     fn build_resume_plan_is_deterministic_for_same_inputs() {
-        // ADR-0012 M8: "Given the same destination prefix and the same
-        // source/cursor state, --resume makes identical decisions on
-        // every run."  The pure layer makes that easy to test.
         let m = manifest(vec![part(1, "p1.parquet", 100), part(2, "p2.parquet", 200)]);
         let listing = vec![obj("p1.parquet", 100), obj("p2.parquet", 9999)];
         let plan1 = build_resume_plan(&m, &listing);
@@ -413,8 +330,6 @@ mod tests {
 
     #[test]
     fn build_resume_plan_is_listing_order_insensitive() {
-        // The destination listing has unspecified order; the plan must
-        // not depend on which order opendal/local-walk surfaces objects.
         let m = manifest(vec![part(1, "p1.parquet", 100), part(2, "p2.parquet", 200)]);
         let listing_a = vec![obj("p1.parquet", 100), obj("p2.parquet", 200)];
         let listing_b = vec![obj("p2.parquet", 200), obj("p1.parquet", 100)];

@@ -1,47 +1,4 @@
-//! Always-on value checksum — a cheap, order-independent per-column `xxh3`,
-//! cross-checked at two stages.
-//!
-//! **Form A (in-process).** A source-side pass (per engine — e.g. Postgres'
-//! `PgCellSource`) computes a per-column checksum from the raw driver values;
-//! [`arrow_batch_checksums`] ("side B") computes the same over the *built* Arrow
-//! [`RecordBatch`]; [`verify`] compares them on the spot. A mismatch means the
-//! builder/append step changed a value between read and Arrow build — caught in
-//! process, no re-read. It does NOT catch a decode fault: Postgres' side A shares
-//! the builder's cell decoders, so a wrong decode is wrong identically on both sides. Always-on (~+7% CPU, ~0% wall on the
-//! I/O-bound export path).
-//!
-//! **Form B (validate-time).** The sink records the per-column checksum in the
-//! manifest (name-keyed [`crate::manifest::ColumnChecksum`]); `rivet validate`
-//! re-reads the Parquet and recompares ([`validate_manifest_checksums`]), catching
-//! an `Arrow→Parquet` encode / post-write fault Form A cannot see.
-//!
-//! **Form B is recorded on EVERY runner.** The sink computes the per-column
-//! checksum on every runner (`track_checksum`); the MULTI-PART runners (chunked,
-//! keyset, parallel-Mongo) each write through several sinks, so they XOR-combine
-//! the per-part maps run-wide through the shared
-//! `pipeline::commit::{accumulate,harvest}_column_checksums` seam before finalize —
-//! producing the SAME run-wide checksum single mode records from its one sink
-//! (XOR is order- and count-independent). So `rivet validate`'s Form-B re-read
-//! verifies chunked/keyset/parallel-Mongo exports too (round-9 closed the earlier
-//! gap where the multi-part runners computed the checksum then discarded it). Two
-//! engines have no Form A: **Mongo** by design (the verbatim `document` blob has no
-//! per-column source pass) and **Oracle**, a known gap until it gains a `CellSource`;
-//! their value integrity rests on Form B + the per-part content-MD5. The list is
-//! enforced by `tests/offline/form_a_checksum_guard.rs`. See `docs/runner-coverage-matrix.yaml` (`value_checksum_form_b`).
-//!
-//! The per-column value is `xxh3` of each cell's value **bytes**, XOR-combined
-//! (order-independent, so chunk/parallel order doesn't matter) — keyed to the row
-//! cursor/key column when present (`xxh3(key ‖ value)`, swap-resistant). Hashing
-//! the bytes — not summing values or lengths — makes it sensitive to content
-//! corruption that preserves length or sum (a byte flip, two compensating changes)
-//! the earlier value-sum silently missed. It complements the content-MD5 (file-byte
-//! integrity) and the differential fingerprint (test-time).
-//!
-//! Coverage (both sides MUST agree, or the check false-mismatches): int / uint /
-//! float / bool / date / timestamp(µs) / time64(µs) / utf8 / binary / fixed-size
-//! binary (UUID, BINARY(n)) / decimal128 / decimal256 / one-dimensional lists
-//! over {bool, i16..i64, f32, f64, utf8}. Nanosecond timestamps and exotic list
-//! elements contribute 0 on BOTH sides (declared skips, surfaced per export).
+//! Always-on value checksum — a cheap, order-independent per-column `xxh3`, cross-checked at two stages.
 
 use std::borrow::Cow;
 
@@ -55,13 +12,7 @@ use xxhash_rust::xxh3::{Xxh3, xxh3_64};
 
 use crate::error::Result;
 
-/// Side B — order-independent per-column checksum over a built batch: `xxh3` of
-/// each cell's **value bytes**, combined by a wrapping sum (`Fold::Sum`). Coverage is
-/// declared once in `check_rule`; an uncovered type (ns-timestamps, lists of an
-/// unmatched element type, anything unlisted) contributes 0 on BOTH sides. Hashing
-/// every cell (vs the old value-sum) makes the
-/// check sensitive to **content** corruption that preserves length or sum — a byte
-/// flip, or two compensating changes — which a sum/length silently misses.
+/// Side B — order-independent per-column checksum over a built batch.
 pub fn arrow_batch_checksums(batch: &RecordBatch) -> Vec<u64> {
     batch.columns().iter().map(|c| column_checksum(c)).collect()
 }
@@ -70,23 +21,16 @@ fn column_checksum(arr: &dyn Array) -> u64 {
     column_xxh3(arr, None)
 }
 
-/// Side B for ONE column — the CDC sink verifies per column as it builds (the
-/// batch path verifies whole batches via [`arrow_batch_checksums`]).
+/// Side B for ONE column — the CDC sink verifies per column as it builds (the batch path verifies whole batches via [`arrow_batch_checksums`]).
 pub fn array_checksum(arr: &dyn Array) -> u64 {
     column_xxh3(arr, None)
 }
 
-/// What the value checksum does with a column of a given Arrow type — the single
-/// declared source of truth for coverage, consulted by both the keyed and un-keyed
-/// paths and by [`coverage_skips`]. Adding a covered type is one edit here plus the
-/// matching extraction arm in [`feed_cell`] (a unit test pins the two together); an
-/// uncovered type is a DECLARED skip whose reason is surfaced (logged once per
-/// export) — never a silent zero that reads as "verified".
+/// What the value checksum does with a column of a given Arrow type.
 enum CheckRule {
     /// Covered — [`feed_cell`] knows how to hash this type's value bytes.
     Covered,
-    /// Not yet matched between the source pass and the Arrow pass; contributes 0 on
-    /// BOTH sides (so A==B holds for it). Reason surfaced via [`coverage_skips`].
+    /// Not yet matched between the source pass and the Arrow pass.
     Skipped(&'static str),
 }
 
@@ -107,7 +51,6 @@ fn check_rule(dt: &DataType) -> CheckRule {
         | DataType::Boolean
         | DataType::Utf8
         | DataType::Binary => CheckRule::Covered,
-        // One-dimensional lists over the element set the exporters produce.
         DataType::List(f) if list_elem_covered(f.data_type()) => CheckRule::Covered,
         DataType::List(_) | DataType::LargeList(_) => {
             CheckRule::Skipped("List element type not matched")
@@ -132,9 +75,7 @@ fn list_elem_covered(dt: &DataType) -> bool {
     )
 }
 
-/// One element of a list cell, as its source pass hands it over — the shared
-/// vocabulary both sides encode through [`encode_list_cell`], so the two passes
-/// cannot drift on list byte layout.
+/// One element of a list cell, as its source pass hands it over.
 pub enum ListElem {
     Null,
     Bool(bool),
@@ -146,11 +87,7 @@ pub enum ListElem {
     Str(Vec<u8>),
 }
 
-/// Canonical byte encoding of ONE list cell: per element a tag byte, then a
-/// little-endian u32 length, then the value bytes (empty for `Null`). Order
-/// matters INSIDE a cell (`[a,b] ≠ [b,a]`), unlike the per-column XOR across
-/// cells. Both [`with_cell_bytes`] (Arrow side) and every engine's source pass
-/// encode through this one function.
+/// Canonical byte encoding of ONE list cell.
 pub fn encode_list_cell(elems: &[ListElem]) -> Vec<u8> {
     let mut out = Vec::with_capacity(elems.len() * 8);
     let mut put = |tag: u8, bytes: &[u8]| {
@@ -173,8 +110,7 @@ pub fn encode_list_cell(elems: &[ListElem]) -> Vec<u8> {
     out
 }
 
-/// Cell `r` of a `List` array as [`ListElem`]s — the Arrow-side twin of the
-/// engines' list accessors, feeding the same [`encode_list_cell`] canon.
+/// Cell `r` of a `List` array as [`ListElem`]s.
 fn list_cell_elems(arr: &dyn Array, r: usize) -> Vec<ListElem> {
     use arrow::array::ListArray;
     let list = arr.as_any().downcast_ref::<ListArray>().expect("List");
@@ -195,46 +131,26 @@ fn list_cell_elems(arr: &dyn Array, r: usize) -> Vec<ListElem> {
                 DataType::Utf8 => {
                     ListElem::Str(inner.as_string::<i32>().value(i).as_bytes().to_vec())
                 }
-                _ => ListElem::Null, // unreachable: gated by list_elem_covered
+                _ => ListElem::Null,
             }
         })
         .collect()
 }
 
 /// How per-cell hashes are combined into one column checksum.
-///
-/// Both must be COMMUTATIVE: parts arrive from chunked / keyset / parallel
-/// runners in no fixed order, and their per-column checksums are folded together
-/// afterwards. That requirement is real; the question is which commutative
-/// operation, and the first answer was wrong.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Fold {
-    /// `v1`, XOR. Commutative — and ANNIHILATING: `h ^ h == 0`, so any value
-    /// occurring an EVEN number of times contributes nothing. Measured on a real
-    /// export: a column of `["x","x"]` checksums to 0, as does `["y","y"]`, as
-    /// does the EMPTY column — so post-write corruption of a duplicated value is
-    /// invisible, and `rivet validate --depth full` returned PASSED on a part
-    /// whose values DuckDB and rivet's own Arrow reader both showed as changed.
-    /// Kept ONLY to re-verify manifests recorded before v2; never for new runs.
+    /// `v1`, XOR.
     Xor,
-    /// `v2`, wrapping addition. Equally commutative and equally order-free, but
-    /// `h + h == 2h`, so duplicates accumulate instead of cancelling and a
-    /// duplicated column no longer collapses to zero. This is the standard
-    /// multiset-hash combiner for exactly this reason.
+    /// `v2`, wrapping addition.
     Sum,
 }
 
 /// The rendering identity of a manifest's `column_checksums`.
-///
-/// Recorded per run so a reader can tell "these were folded by an algorithm I
-/// know" from "…by one I do not", and re-verify with the fold that PRODUCED
-/// them rather than comparing incomparable numbers. An older manifest carries no
-/// marker, which is itself the v1 signal — see [`Fold::from_render_id`].
 pub const CHECKSUM_RENDER_ID: &str = "xxh3-64-sum-v2";
 
 impl Fold {
-    /// The fold that produced a manifest's checksums. `None` (no marker) means a
-    /// run written before the id existed, i.e. the XOR fold.
+    /// The fold that produced a manifest's checksums.
     pub(crate) fn from_render_id(id: Option<&str>) -> Self {
         match id {
             Some(CHECKSUM_RENDER_ID) => Fold::Sum,
@@ -250,12 +166,7 @@ impl Fold {
     }
 }
 
-/// The single per-column hasher behind both [`arrow_batch_checksums`] (un-keyed,
-/// `key = None`) and [`arrow_batch_checksums_keyed`] (swap-resistant, `key = Some`).
-/// Each non-null cell hashes `xxh3(key_bytes ‖ value_bytes)` — or just the value
-/// bytes when un-keyed — via [`feed_cell`], then combined by [`Fold`]
-/// (order-independent, so chunk/parallel order is irrelevant). A
-/// [`CheckRule::Skipped`] column short-circuits to 0 on both paths.
+/// The single per-column hasher behind both [`arrow_batch_checksums`] (un-keyed, `key = None`) and [`arrow_batch_checksums_keyed`] (swap-resistant, `key = Some`).
 fn column_xxh3(arr: &dyn Array, key: Option<&dyn Array>) -> u64 {
     column_xxh3_with(arr, key, Fold::Sum)
 }
@@ -270,11 +181,7 @@ pub(crate) fn column_xxh3_with(arr: &dyn Array, key: Option<&dyn Array>, fold: F
             continue;
         }
         match key {
-            // Un-keyed: one-shot `xxh3_64` — ~2.5× faster than constructing a
-            // streaming `Xxh3` per cell (which inits the full ~576-byte state).
             None => acc = fold.combine(acc, with_cell_bytes(arr, r, xxh3_64)),
-            // Keyed: stream `key ‖ value` so the swap-resistant hash needs no
-            // concat alloc; same hash value as one-shot over the concatenation.
             Some(k) => {
                 let keyed = |kb: &[u8]| {
                     with_cell_bytes(arr, r, |vb| {
@@ -307,17 +214,12 @@ fn null_key_width(k: &dyn Array, r: usize) -> Option<usize> {
     }
 }
 
-/// Whether this Arrow type participates in the value checksum (both sides hash
-/// it) — the CDC sink's independent fold consults this so its skip set can
-/// never drift from the batch pass's.
+/// Whether this Arrow type participates in the value checksum (both sides hash it).
 pub fn is_covered(dt: &DataType) -> bool {
     matches!(check_rule(dt), CheckRule::Covered)
 }
 
-/// The columns the value checksum does NOT cover, each with the reason — so a
-/// `UUID` / `List` / `Decimal256` / ns-timestamp column yields a visible "not
-/// checked" line (logged once per export by the sink) instead of a silent zero that
-/// reads as "verified". Empty ⇒ full coverage.
+/// The columns the value checksum does NOT cover, each with the reason.
 pub fn coverage_skips(schema: &SchemaRef) -> Vec<(String, &'static str)> {
     schema
         .fields()
@@ -329,14 +231,7 @@ pub fn coverage_skips(schema: &SchemaRef) -> Vec<(String, &'static str)> {
         .collect()
 }
 
-/// Keyed side B — the **swap-resistant** variant. Each cell's contribution is
-/// `xxh3(key_value_bytes ‖ cell_value_bytes)` instead of `xxh3(cell_value_bytes)`,
-/// so the per-column XOR stays order-independent (chunk/parallel safe) yet a value
-/// **swap between two rows** — invisible to the un-keyed XOR because it preserves
-/// the column's multiset — now changes each row's prepended key and diverges.
-/// `key_col` is the keyset / incremental cursor column resolved to a schema index.
-/// Used by the sink's Form B recording; the source pass prepends the SAME key-column
-/// bytes, so a correct build keeps A==B and a swap breaks it on both.
+/// Keyed side B — the **swap-resistant** variant.
 pub fn arrow_batch_checksums_keyed(batch: &RecordBatch, key_col: usize) -> Vec<u64> {
     let key = batch.column(key_col).as_ref();
     batch
@@ -346,13 +241,7 @@ pub fn arrow_batch_checksums_keyed(batch: &RecordBatch, key_col: usize) -> Vec<u
         .collect()
 }
 
-/// Hand cell `r` of `arr` to `f` as its canonical value bytes — the single per-type
-/// byte extraction behind [`column_xxh3`]. The un-keyed path one-shots
-/// `xxh3_64(bytes)` (fast); the keyed path feeds two calls (`key ‖ value`) into a
-/// streaming `Xxh3`. The `_` arm is unreachable for a (covered) cell —
-/// [`column_xxh3`] short-circuits `Skipped` first — but a Skipped KEY column (e.g. a
-/// UUID cursor) lands there and feeds an empty key; a unit test pins the covered set
-/// to [`check_rule`].
+/// Hand cell `r` of `arr` to `f` as its canonical value bytes.
 fn with_cell_bytes<R>(arr: &dyn Array, r: usize, f: impl FnOnce(&[u8]) -> R) -> R {
     macro_rules! fp {
         ($t:ty) => {
@@ -380,14 +269,7 @@ fn with_cell_bytes<R>(arr: &dyn Array, r: usize, f: impl FnOnce(&[u8]) -> R) -> 
     }
 }
 
-/// A per-engine source of typed cell values — a second read of the
-/// same rows, the side-A twin of side B's Arrow read. Each accessor returns the
-/// cell's canonical value (the generic [`source_checksums`] byte-encodes it
-/// identically to [`with_cell_bytes`]) or `None` for a NULL / absent cell; the
-/// variable-length `utf8`/`binary` return the bytes as a `Cow` — borrowed for plain
-/// text / driver bytes, owned for a computed string (uuid, interval, enum label,
-/// numeric-as-text). A new covered type is a new required method here — a compile
-/// requirement on all three engines, the point of one dispatch instead of three.
+/// A per-engine source of typed cell values.
 pub trait CellSource {
     fn num_rows(&self) -> usize;
     fn int16(&self, col: usize, row: usize) -> Option<i16>;
@@ -408,17 +290,11 @@ pub trait CellSource {
     fn fixed_binary(&self, col: usize, row: usize) -> Option<Cow<'_, [u8]>>;
     /// Unscaled `i256` of a `Decimal256(_, scale)` cell (precision > 38).
     fn decimal256(&self, col: usize, row: usize, scale: i8) -> Option<arrow::datatypes::i256>;
-    /// A list cell's elements — encoded via [`encode_list_cell`] by the
-    /// dispatcher, so engines only extract, never encode. Engines whose type
-    /// system has no arrays return `None` unconditionally.
+    /// A list cell's elements — encoded via [`encode_list_cell`] by the dispatcher, so engines only extract, never encode.
     fn list(&self, col: usize, row: usize, elem: &DataType) -> Option<Vec<ListElem>>;
 }
 
-/// Side A — the per-column checksum computed from a [`CellSource`]
-/// (the raw driver values), the single dispatch behind every engine's source pass.
-/// Dispatches on the target Arrow type, byte-encodes each non-null cell **identically
-/// to [`feed_cell`]** (so a correct build keeps A==B and the matrix guard fires on
-/// any drift), XOR-combined. Un-keyed: the in-process Form A check is un-keyed today.
+/// Side A — the per-column checksum computed from a [`CellSource`] (the raw driver values), the single dispatch behind every engine's source pass.
 pub fn source_checksums<S: CellSource>(schema: &SchemaRef, src: &S) -> Vec<u64> {
     schema
         .fields()
@@ -431,8 +307,6 @@ pub fn source_checksums<S: CellSource>(schema: &SchemaRef, src: &S) -> Vec<u64> 
             }
             let mut acc: u64 = 0;
             for row in 0..src.num_rows() {
-                // One-shot `xxh3_64` per non-null cell — un-keyed (Form A is
-                // un-keyed), byte-encoded identically to `with_cell_bytes`.
                 macro_rules! le {
                     ($opt:expr) => {
                         if let Some(v) = $opt {
@@ -492,8 +366,6 @@ pub fn source_checksums<S: CellSource>(schema: &SchemaRef, src: &S) -> Vec<u64> 
 }
 
 /// Compare the source-side ("A") and Arrow-side ("B") checksums column-by-column.
-/// A mismatch means the value converter produced a value the source did not — fail
-/// loud, naming the column, rather than write the corrupted batch.
 pub fn verify(source: &[u64], arrow: &[u64], schema: &SchemaRef) -> Result<()> {
     for (i, (a, b)) in source.iter().zip(arrow.iter()).enumerate() {
         if a != b {
@@ -508,21 +380,7 @@ pub fn verify(source: &[u64], arrow: &[u64], schema: &SchemaRef) -> Result<()> {
     Ok(())
 }
 
-/// Form B: re-read the exported Parquet parts and recompute the per-column
-/// checksum ("side C") BY NAME — keyed to the same cursor column as the export
-/// when `key_col_name` is set — comparing each to the value recorded in the
-/// manifest's `column_checksums`. Catches an `Arrow→Parquet` encode fault or
-/// post-write corruption that the in-process Form A check (source↔Arrow) cannot
-/// see. The recorded values are the per-column u64 xxh3 hashes as decimal strings
-/// (JSON-stable in the manifest). Wired via [`validate_manifest_checksums`] (the
-/// destination entry point) into `rivet validate`.
-/// `Ok(None)` — every recorded column re-read and MATCHED. `Ok(Some(detail))` —
-/// a comparison COMPLETED and disagreed (a hash mismatch, or a recorded column
-/// absent from the re-read): verified-wrong, the caller exits 3. `Err(e)` — the
-/// verification could NOT complete (a part would not open/decode, or the
-/// manifest's recorded hash is not a u64): could-not-verify, exit 1 — NEVER
-/// mislabelled corruption (#104 bughunt: operational Errs here were folded into
-/// the mismatch channel and reported as post-write corruption).
+/// Form B: re-read the exported Parquet parts and recompute the per-column checksum ("side C") BY NAME.
 pub fn validate_recorded_checksums(
     recorded: &[crate::manifest::ColumnChecksum],
     part_paths: &[std::path::PathBuf],
@@ -534,8 +392,6 @@ pub fn validate_recorded_checksums(
         Err(detail) => return Ok(Some(detail)),
     };
 
-    // Compare each recorded (data) column to the re-read value by name. Re-read
-    // columns absent from `recorded` (enrichment / meta columns) are not compared.
     for rec in recorded {
         let want: u64 = rec.checksum.parse().map_err(|_| {
             crate::error::coded(
@@ -548,7 +404,6 @@ pub fn validate_recorded_checksums(
         })?;
         match actual.get(&rec.name) {
             Some(&got) if got == want => {}
-            // A COMPLETED comparison that disagreed → verified-wrong (Ok(Some), exit 3).
             Some(&got) => {
                 return Ok(Some(format!(
                     "value checksum mismatch in column '{}': manifest={want} re-read={got} \
@@ -578,22 +433,14 @@ pub(crate) fn reread_column_checksums(
 
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-    // Re-read every part, accumulate side C per column BY NAME — keyed to the same
-    // cursor column as the export when `key_col_name` is set, so the keyed hashes
-    // match. Name-keyed so a column reorder can't silently misalign the compare.
     let mut actual: BTreeMap<String, u64> = BTreeMap::new();
     for path in part_paths {
-        // File::open failing (EMFILE, a permissions blip) is OPERATIONAL — the
-        // verification could not run, so it must not be reported as corruption.
         let file = std::fs::File::open(path).map_err(|e| {
             crate::error::coded(
                 crate::error::codes::VALIDATE_UNVERIFIED,
                 format!("value checksum: open {}: {e}", path.display()),
             )
         })?;
-        // A part the manifest recorded as committed Parquet that will NOT decode
-        // is post-write CORRUPTION — verified-wrong (Ok(Some), exit 3), not an
-        // operational could-not-verify. Distinct from File::open above.
         let reader = match ParquetRecordBatchReaderBuilder::try_new(file).and_then(|b| b.build()) {
             Ok(r) => r,
             Err(e) => {
@@ -614,12 +461,6 @@ pub(crate) fn reread_column_checksums(
                 }
             };
             let key_col = key_col_name.and_then(|n| batch.schema().index_of(n).ok());
-            // Re-derive with the fold that WROTE these numbers, not today's.
-            // EVERY column is keyed when a key exists — including the key column
-            // itself, exactly as `arrow_batch_checksums_keyed` does on the write
-            // side. Excluding it (an exception I invented on the first cut) makes
-            // the key column's re-read disagree with what was recorded, which a
-            // 4-part keyset export reported as post-write corruption.
             let key_arr = key_col.map(|k| batch.column(k).clone());
             let sums: Vec<u64> = batch
                 .columns()
@@ -627,9 +468,6 @@ pub(crate) fn reread_column_checksums(
                 .map(|c| column_xxh3_with(c.as_ref(), key_arr.as_deref(), fold))
                 .collect();
             for (i, f) in batch.schema().fields().iter().enumerate() {
-                // Folded by the SAME rule that produced the recorded value —
-                // see `Fold`. Combining batches with a different operation than
-                // the writer used would report every multi-batch part as corrupt.
                 let e = actual.entry(f.name().clone()).or_insert(0);
                 *e = fold.combine(*e, sums[i]);
             }
@@ -638,23 +476,16 @@ pub(crate) fn reread_column_checksums(
     Ok(Ok(actual))
 }
 
-/// What a destination-side re-read found wrong, typed so the caller classifies it
-/// without sniffing the message. Both are verified-wrong (exit 3); they differ in
-/// WHERE the operator should look — the data, or the manifest describing it.
+/// What a destination-side re-read found wrong, typed so the caller classifies it without sniffing the message.
 #[derive(Debug)]
 pub enum ReadbackFault {
     /// A per-column value digest disagreed: the bytes are not what was written.
     ValueChecksum(String),
-    /// A part's declared row count disagreed: the bytes may be fine and the
-    /// manifest is wrong.
+    /// A part's declared row count disagreed: the bytes may be fine and the manifest is wrong.
     PartRowCount(String),
 }
 
 /// Each part's DECLARED row count against the rows the file actually holds.
-///
-/// `Ok(None)` — every part agrees (or the manifest declares none). `Ok(Some)` —
-/// a genuine disagreement, which is verified-wrong, not an operational failure.
-/// `Err` — the Parquet footer could not be read at all.
 fn part_row_count_mismatch(
     manifest: &crate::manifest::RunManifest,
     paths: &[std::path::PathBuf],
@@ -688,19 +519,8 @@ fn part_row_count_mismatch(
                 format!("part row count: open {}: {e}", part.path),
             )
         })?;
-        // Footer only — `num_rows` lives in the file metadata, so this does not
-        // decode a single value.
         let actual = match SerializedFileReader::new(file) {
             Ok(r) => r.metadata().file_metadata().num_rows(),
-            // VERIFIED-WRONG, not skipped (round-10, closing the round-7 find):
-            // the presence reconcile already confirmed this part EXISTS at its
-            // declared size, so a body that will not open as Parquet is
-            // corrupt bytes — and skipping it here meant `--depth full`
-            // printed PASSED over literal garbage whenever the manifest
-            // recorded no checksums (every keyset/chunked/mongo_parallel run
-            // today). The old narrowness was a test-workaround leaked into the
-            // product; the fixtures now carry checksums and fail one gate
-            // earlier either way.
             Err(e) => {
                 return Ok(Some(format!(
                     "part '{}' is present at its declared size but does not decode \
@@ -724,19 +544,7 @@ fn part_row_count_mismatch(
     Ok(None)
 }
 
-/// Form B at the destination: read the manifest + every part via `dest`,
-/// materialise each part to a temp file (a part may be remote), and verify the
-/// re-read per-column checksums against the manifest's `column_checksums`. A
-/// no-op (`Ok`) when the manifest records none (older run / non-Parquet). Mirrors
-/// [`crate::source::cdc::validate::check_positions`]; called by `rivet validate`
-/// for Parquet runs.
-/// Re-read the parts and recompare per-column checksums against the manifest.
-/// `Ok(None)` — verified equal (or no checksums recorded). `Ok(Some(detail))` —
-/// a genuine MISMATCH (post-write corruption, verified-wrong → the caller
-/// classifies exit 3). `Err(e)` — an OPERATIONAL failure (could not read the
-/// manifest / a part / a temp file): could-not-verify, NOT corruption, so it must
-/// NOT be labelled a checksum mismatch (bughunt MED: every Err was mislabelled
-/// data-integrity).
+/// Form B at the destination: read the manifest + every part via `dest`, materialise each part to a temp file (a part may be remote), and verify the re-read per-column checksums against the manifest's `column_checksums`.
 pub fn validate_manifest_checksums(
     dest: &dyn crate::destination::Destination,
     prefix: &str,
@@ -746,13 +554,6 @@ pub fn validate_manifest_checksums(
     let manifest_key = join_key(prefix, MANIFEST_FILENAME);
     let manifest: RunManifest = serde_json::from_slice(&dest.read(&manifest_key)?)?;
 
-    // #167: a `--pool --split` prefix holds N unit manifests, each with its OWN parts and
-    // per-unit `column_checksums`; the canonical `manifest.json` is last-writer-wins — one
-    // unit's parts/checksums. Re-reading only the canonical Form-B-checked exactly ONE of the N
-    // units, so a value corruption or row mis-count in a NON-last unit was silently PASSED — the
-    // value-integrity twin of the presence-check split-fold gap #167 already closed (validate's
-    // merge_split_unit_parts). Check every same-family SPLIT-UNIT sibling here too. A non-split /
-    // legacy manifest (empty family) checks the canonical alone, unchanged.
     for unit in split_unit_manifests(dest, prefix, manifest)? {
         if let Some(fault) = validate_one_manifest_checksums(dest, prefix, &unit)? {
             return Ok(Some(fault));
@@ -761,11 +562,7 @@ pub fn validate_manifest_checksums(
     Ok(None)
 }
 
-/// The unit manifests whose value-integrity [`validate_manifest_checksums`] must check: for a
-/// split family, the canonical plus every same-family SPLIT-UNIT sibling copy (deduped by
-/// run_id — the canonical's own copy is among them); for a plain/legacy export (empty family),
-/// just the canonical. Gated on `split_window` so a plain export's superseded historical copies
-/// are not re-checked (mirrors validate's `merge_split_unit_parts`).
+/// The unit manifests whose value-integrity [`validate_manifest_checksums`] must check.
 fn split_unit_manifests(
     dest: &dyn crate::destination::Destination,
     prefix: &str,
@@ -798,8 +595,7 @@ fn split_unit_manifests(
     Ok(out)
 }
 
-/// Re-read ONE manifest's parts and check per-part row counts + per-column checksums against
-/// what THAT manifest recorded — the per-unit body of [`validate_manifest_checksums`].
+/// Re-read ONE manifest's parts and check per-part row counts + per-column checksums against what THAT manifest recorded.
 fn validate_one_manifest_checksums(
     dest: &dyn crate::destination::Destination,
     prefix: &str,
@@ -809,15 +605,8 @@ fn validate_one_manifest_checksums(
 
     use crate::manifest::join_key;
 
-    // Materialise each part to a temp file so the Parquet reader can seek (the
-    // dest may be a cloud backend); keep the temp files alive for the re-read.
     let mut tmps: Vec<tempfile::NamedTempFile> = Vec::with_capacity(manifest.parts.len());
     for part in &manifest.parts {
-        // Committed only (round-7): a Quarantined audit entry's file was MOVED
-        // to _quarantine/ — reading it here errors (exit 1) or, half-moved,
-        // folds quarantined rows into the checksum (false corruption). The
-        // presence reconcile and both folds already filter; this reader must
-        // agree.
         if part.status != crate::manifest::PartStatus::Committed {
             continue;
         }
@@ -829,19 +618,6 @@ fn validate_one_manifest_checksums(
     }
     let paths: Vec<std::path::PathBuf> = tmps.iter().map(|t| t.path().to_path_buf()).collect();
 
-    // PER-PART ROW COUNTS, before anything about checksums.
-    //
-    // Nothing else compares a part's DECLARED `rows` to the rows the part holds.
-    // `RunManifest::validate_self_consistency` checks the run total against the
-    // SUM of the declared numbers — manifest against manifest — so a writer that
-    // mis-counts one part and compensates in another is self-consistent and
-    // wrong, while the loader's `expected_delta` and reconcile's exported side
-    // both sum exactly those numbers. Read from the Parquet FOOTER, so this costs
-    // a metadata parse, not a decode, on bodies Full depth has already fetched.
-    //
-    // Deliberately ABOVE the `column_checksums` early return: a run that recorded
-    // no checksums (older artifact, non-Parquet leg) still has parts whose counts
-    // can be checked, and the previous shape skipped everything for it.
     if let Some(detail) = part_row_count_mismatch(manifest, &paths)? {
         return Ok(Some(ReadbackFault::PartRowCount(detail)));
     }
@@ -853,14 +629,6 @@ fn validate_one_manifest_checksums(
         return Ok(None);
     }
 
-    // `validate_recorded_checksums` now classifies for us: Ok(None) clean,
-    // Ok(Some) verified-wrong (exit 3), Err operational (exit 1). Everything
-    // ABOVE this line (`?` on dest.read / tempfile) is likewise operational, so
-    // propagating its result verbatim is correct.
-    // The fold is chosen by what the manifest SAYS produced these numbers. An
-    // older run carries no marker, which is itself the v1 (XOR) signal — so a
-    // pre-v2 artifact stays verifiable with the algorithm that attested it,
-    // instead of every historical manifest reading as corrupt overnight.
     let fold = Fold::from_render_id(manifest.checksum_render.as_deref());
     Ok(validate_recorded_checksums(
         recorded,
@@ -873,7 +641,7 @@ fn validate_one_manifest_checksums(
 
 #[cfg(test)]
 mod tests {
-    /// The legacy fold is XOR and the current one a wrapping sum: each is told from the other and from OR / AND on two operands.
+    /// The legacy fold is XOR and the current one a wrapping sum.
     #[test]
     fn the_two_folds_combine_as_xor_and_as_a_wrapping_sum() {
         use super::Fold;
@@ -972,18 +740,7 @@ mod tests {
         );
     }
 
-    // ── mutation-tier2 gap closures ──────────────────────────────────────────
-    // cargo-mutants found 78 missed mutants here — in the INTEGRITY layer whose
-    // last line of defense is exactly these lib tests. The four tests below
-    // pin: (1) source(A)↔arrow(B) parity per covered type through INDEPENDENT
-    // code paths, (2) the fold is XOR (an `|=` mutant saturates and passes any
-    // corruption), (3) the cross-part fold in validate is XOR too (a single-part
-    // fixture folds once — `0^s == 0|s` — and cannot see the operator), (4) the
-    // List coverage gate skips unmatched element types with the exact reason.
-
-    /// Fake source cells mirroring `covered_arrays()` row-for-row: 3 rows per
-    /// column, row 2 null. Each column has a distinct type, so each accessor
-    /// serves exactly one column and may ignore `col`.
+    /// Fake source cells mirroring `covered_arrays()` row-for-row: 3 rows per column, row 2 null.
     struct FakeCells;
 
     impl CellSource for FakeCells {
@@ -1074,8 +831,8 @@ mod tests {
         lb.values().append_value(1);
         lb.values().append_value(2);
         lb.append(true);
-        lb.append(true); // empty, non-null
-        lb.append(false); // null list cell
+        lb.append(true);
+        lb.append(false);
         let list = lb.finish();
         let list_dt = DataType::List(Arc::new(Field::new("item", DataType::Int64, true)));
 
@@ -1154,9 +911,6 @@ mod tests {
 
     #[test]
     fn source_checksums_match_arrow_side_for_every_covered_type() {
-        // Kills the 50+ missed mutants in `source_checksums` (stub -> vec![],
-        // every deleted per-type match arm): the source(A) pass must reproduce
-        // the arrow(B) fold for EVERY covered type, through independent code.
         let (schema, arrays) = covered_arrays();
         let a = source_checksums(&schema, &FakeCells);
         assert_eq!(a.len(), arrays.len(), "one checksum per column");
@@ -1180,14 +934,6 @@ mod tests {
 
     #[test]
     fn column_fold_sums_per_cell_hashes_and_never_cancels() {
-        // v1 pinned an XOR fold here. XOR is commutative — which is the real
-        // requirement, since parts arrive from parallel runners in no order — but
-        // it is also ANNIHILATING: `h ^ h == 0`. A column of duplicated values
-        // therefore checksummed to ZERO whatever the values were, and
-        // `rivet validate --depth full` returned PASSED on a part whose bytes had
-        // been changed under it (measured end-to-end, with DuckDB as the
-        // independent reader). Wrapping addition keeps the commutativity and
-        // drops the annihilation.
         use xxhash_rust::xxh3::xxh3_64;
         let expect = xxh3_64(&10_i64.to_le_bytes())
             .wrapping_add(xxh3_64(&20_i64.to_le_bytes()))
@@ -1201,8 +947,6 @@ mod tests {
             "the fold must stay order-independent — parts combine in no fixed order"
         );
 
-        // The property the old fold did not have, stated as its own assertion so
-        // a future "simplification" back to XOR cannot pass.
         let dup = Int64Array::from(vec![7_i64, 7]);
         let other = Int64Array::from(vec![9_i64, 9]);
         let empty = Int64Array::from(Vec::<i64>::new());
@@ -1221,11 +965,6 @@ mod tests {
 
     #[test]
     fn validate_folds_multiple_parts_by_summing_them() {
-        // Two parts, because a one-part fixture folds once from 0 and cannot see
-        // the operator at all (`0^s == 0+s == 0|s`) — the degenerate-fixture trap.
-        // The recorded value is built the way the WRITER builds it, by summing the
-        // per-part checksums; if validate folded differently the two parts would
-        // read as corrupt.
         let b1 = batch3(2);
         let b2 = batch3(7);
         let dir = tempfile::tempdir().unwrap();
@@ -1255,10 +994,6 @@ mod tests {
 
     #[test]
     fn list_parity_holds_for_every_covered_element_type() {
-        // Verify-run find: the A<->B parity fixture exercised only List<Int64>,
-        // so deleting the Bool/I16/F32/F64 arms in `list_cell_elems` (the
-        // arrow-side list extraction) survived. One list column per covered
-        // element type, hashed through both independent paths.
         use arrow::array::{
             BooleanBuilder, Float32Builder, Float64Builder, Int16Builder, Int32Builder,
             ListBuilder, StringBuilder,
@@ -1329,7 +1064,6 @@ mod tests {
             }
         }
 
-        // Arrow-side twins, one ListArray per element type, same values.
         let mut b_bool = ListBuilder::new(BooleanBuilder::new());
         b_bool.values().append_value(true);
         b_bool.values().append_value(false);
@@ -1399,10 +1133,6 @@ mod tests {
 
     #[test]
     fn is_covered_rejects_skipped_types() {
-        // `is_covered -> true` survived: the CDC sink consults this to keep
-        // its skip set aligned with the batch pass — a hardwired `true` makes
-        // the sink hash types the batch side skips, guaranteeing a false
-        // checksum mismatch on the next ns-timestamp/exotic-list export.
         assert!(is_covered(&DataType::Int64));
         assert!(is_covered(&DataType::Utf8));
         assert!(!is_covered(&DataType::Timestamp(
@@ -1418,10 +1148,6 @@ mod tests {
 
     #[test]
     fn check_rule_gates_list_element_types() {
-        // Kills the List-arm mutants in check_rule: dropping the guard (every
-        // list "covered") silently checksums lists the encoder can't represent;
-        // dropping the arm changes the skip REASON (lists must be named as
-        // list-skips, not lumped into the generic uncovered bucket).
         let covered = DataType::List(Arc::new(Field::new("item", DataType::Int64, true)));
         assert!(
             matches!(check_rule(&covered), CheckRule::Covered),
@@ -1446,7 +1172,6 @@ mod tests {
             Field::new("id", DataType::Int64, false),
             Field::new("t", DataType::Timestamp(TimeUnit::Nanosecond, None), true),
         ]));
-        // The skip is declared + named, not silent.
         let skips = coverage_skips(&schema);
         assert_eq!(
             skips.len(),
@@ -1459,8 +1184,6 @@ mod tests {
             "reason names the type: {}",
             skips[0].1
         );
-        // ...and it short-circuits to 0 (feed_cell's skip set == check_rule's
-        // Skipped), so an uncovered column can never false-mismatch (0 on both sides).
         let batch = RecordBatch::try_new(
             schema,
             vec![
@@ -1551,11 +1274,6 @@ mod tests {
 
     #[test]
     fn checksum_distinguishes_a_changed_value_so_verify_fires() {
-        // A single corrupted cell must move that column's checksum — proves the
-        // cross-check is sensitive to value corruption, not a constant/no-op that
-        // would trivially agree. (Guards against the "self-oracle" blind spot:
-        // the sanity run only shows it PASSES on correct data; this shows it FIRES
-        // when the value converter diverges.)
         let s = schema3();
         let good = RecordBatch::try_new(
             s.clone(),
@@ -1566,7 +1284,6 @@ mod tests {
             ],
         )
         .unwrap();
-        // simulate build_array corrupting column `b`'s middle row (2 -> 999).
         let bad = RecordBatch::try_new(
             s.clone(),
             vec![
@@ -1580,7 +1297,6 @@ mod tests {
         let cb = arrow_batch_checksums(&bad);
         assert_eq!(cg[0], cb[0], "the unchanged column must still match");
         assert_ne!(cg[1], cb[1], "the changed column's checksum must diverge");
-        // The "source" (good) vs the corrupted "arrow" (bad) → verify must catch it.
         assert!(
             verify(&cg, &cb, &s).is_err(),
             "verify must fire when a column diverges"
@@ -1589,17 +1305,11 @@ mod tests {
 
     #[test]
     fn keyed_checksum_catches_a_value_swap_that_unkeyed_misses() {
-        // The order-independent XOR's known blind spot: swap two rows' values in a
-        // column and the column's multiset is unchanged, so the un-keyed checksum is
-        // identical — a corruption it cannot see. Keying each cell to its row's PK
-        // (`xxh3(id ‖ value)`) makes the same swap diverge. This test is the proof
-        // the keyed variant earns its cost.
         use arrow::array::StringArray;
         let s: SchemaRef = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int64, false),
             Field::new("val", DataType::Utf8, false),
         ]));
-        // id=1 -> "alpha", id=2 -> "beta".
         let id = Int64Array::from(vec![1_i64, 2]);
         let original = RecordBatch::try_new(
             s.clone(),
@@ -1609,7 +1319,6 @@ mod tests {
             ],
         )
         .unwrap();
-        // Same ids, values swapped: id=1 -> "beta", id=2 -> "alpha".
         let swapped = RecordBatch::try_new(
             s.clone(),
             vec![
@@ -1619,8 +1328,6 @@ mod tests {
         )
         .unwrap();
 
-        // Un-keyed: the `val` column's multiset {"alpha","beta"} is unchanged, so the
-        // XOR-combined checksum is blind to the swap.
         let uk = arrow_batch_checksums(&original);
         let uk_swapped = arrow_batch_checksums(&swapped);
         assert_eq!(
@@ -1628,16 +1335,12 @@ mod tests {
             "un-keyed XOR cannot distinguish a same-multiset row swap"
         );
 
-        // Keyed on `id` (col 0): each value is hashed with its row's id, so the swap
-        // diverges — exactly the corruption the un-keyed variant missed.
         let k = arrow_batch_checksums_keyed(&original, 0);
         let k_swapped = arrow_batch_checksums_keyed(&swapped, 0);
         assert_ne!(
             k[1], k_swapped[1],
             "keying to the PK must catch a value swap the un-keyed check missed"
         );
-        // The key column itself is identical in both, so its own checksum must not move
-        // (and feeding id‖id is deterministic).
         assert_eq!(
             k[0], k_swapped[0],
             "the id column is identical in both batches"
@@ -1646,9 +1349,6 @@ mod tests {
 
     #[test]
     fn decimal128_checksum_distinguishes_a_scaling_bug() {
-        // The decimal arm must be sensitive too: a build-time scaling bug (12.34
-        // scaled to 1234, but built as 123) must move the column checksum and fire
-        // verify — not pass silently.
         use arrow::array::Decimal128Array;
         let s: SchemaRef = Arc::new(Schema::new(vec![Field::new(
             "amount",
@@ -1666,8 +1366,8 @@ mod tests {
             )
             .unwrap()
         };
-        let good = mk(5000); // 50.00
-        let bad = mk(500); //  5.00 — a 10x scaling slip
+        let good = mk(5000);
+        let bad = mk(500);
         let cg = arrow_batch_checksums(&good);
         let cb = arrow_batch_checksums(&bad);
         assert_ne!(cg[0], cb[0], "a decimal scaling bug must move the checksum");
@@ -1765,15 +1465,10 @@ mod tests {
 
     #[test]
     fn form_b_validate_fires_on_corrupted_part() {
-        // The manifest recorded the checksum of the correct batch (col `b` mid = 2)...
         let recorded = recorded_of(&batch3(2));
-        // ...but the Parquet on disk holds a corrupted `b` (2 -> 999).
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("part.parquet");
         write_parquet(&batch3(999), &p);
-        // A COMPLETED re-read that DISAGREES is verified-wrong: Ok(Some(detail)),
-        // NOT an operational Err. (#104 bughunt: the mismatch must reach the caller
-        // as the exit-3 corruption channel, distinct from could-not-verify Errs.)
         let verdict = validate_recorded_checksums(&recorded, &[p], None, Fold::Sum)
             .expect("a corrupted re-read is verified-wrong, not an operational error");
         let detail = verdict.expect("a corrupted re-read must fire a mismatch");
@@ -1785,9 +1480,6 @@ mod tests {
 
     #[test]
     fn form_b_operational_error_is_not_a_mismatch() {
-        // #104 bughunt regression: a manifest whose recorded hash is not a u64 is a
-        // could-not-verify (operational) condition, NOT post-write corruption. It
-        // must surface as Err (exit 1), never Ok(Some) (exit 3, "corruption").
         let batch = batch3(2);
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("part.parquet");
@@ -1801,7 +1493,6 @@ mod tests {
         );
     }
 
-    // Minimal split-unit manifest (only the fields split_unit_manifests reads matter).
     fn split_unit(run: &str, name: &str, family: &str) -> crate::manifest::RunManifest {
         use crate::manifest::{
             MANIFEST_VERSION, ManifestDestination, ManifestSource, ManifestStatus, RunManifest,
@@ -1846,13 +1537,9 @@ mod tests {
 
     #[test]
     fn split_unit_manifests_folds_every_same_family_split_sibling() {
-        // The value-integrity fold must return ALL same-family split units (each has its OWN
-        // parts + per-unit checksums to re-read), not just the canonical (last-writer). Reading
-        // only the canonical Form-B-checked one of N units — a NON-last unit's corruption passed.
         use crate::destination::local::LocalDestination;
         use crate::manifest::run_unique_manifest_name;
         let dir = tempfile::tempdir().unwrap();
-        // Two split units of family "orders" (+ a FOREIGN family unit that must NOT be folded).
         for (run, name, fam) in [
             ("r0", "orders#0", "orders"),
             ("r1", "orders#1", "orders"),
@@ -1872,7 +1559,6 @@ mod tests {
         })
         .unwrap();
 
-        // Canonical = orders#1 (last writer). Fold must yield BOTH orders units, not the foreign.
         let canonical = split_unit("r1", "orders#1", "orders");
         let units = split_unit_manifests(&dest, "", canonical).unwrap();
         let mut runs: Vec<&str> = units.iter().map(|m| m.run_id.as_str()).collect();
@@ -1958,8 +1644,7 @@ mod error_code_tests {
     use super::*;
     use arrow::datatypes::{DataType, Field, Schema};
 
-    /// A converter mismatch is internal (exit 6); a manifest hash that is not a u64 is the
-    /// control-artifact refusal (exit 5).
+    /// A converter mismatch is internal (exit 6).
     #[test]
     fn a_checksum_mismatch_and_a_malformed_manifest_hash_carry_their_codes() {
         let schema: SchemaRef = Arc::new(Schema::new(vec![Field::new("c", DataType::Int64, true)]));

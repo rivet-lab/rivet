@@ -80,7 +80,8 @@ expected to work, and nothing in the repository starts them.
 > oracles (UTC instant + tz-awareness, positive/negative offsets + NULL).
 
 SQL Server is a source engine (`source.type: mssql`, scheme `sqlserver://`,
-default port 1433), driven by the async `tiberius` client. Supported today:
+default port 1433; a bracketed IPv6 host such as `[::1]` needs no port; user, password
+and database are percent-decoded), driven by the async `tiberius` client. Supported today:
 
 - **Modes**: `full` / snapshot, `incremental`, `chunked` (range + dense),
   **keyset (seek)** via explicit `chunk_by_key` — the ideal shape for a
