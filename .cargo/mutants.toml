@@ -385,12 +385,6 @@ exclude_re = [
     "replace select_pool_exports -> Result",
     "impl Drop for HeavyGuard",
     "delete ! in pool_worker",
-    # `check` (preflight/mod.rs) connects to the source and diagnoses every
-    # export — no offline caller, so its body stub / the `==` in the overlay
-    # export-match loop are unkillable HERE (live-only). It is live-guarded by
-    # audit_preflight_table + the check scenarios (cli/blessed-flow). The overlay
-    # DECISIONS are unit-tested in overlay_measured_rows.
-    "replace check -> Result<bool> with Ok",
     # MongoSession::require_collection lists the database's collections: it needs
     # a live MongoDB, so its whole-fn `Ok(())` stub is unkillable under `--lib
     # --bins`. Its DECISION is unit-tested (missing_collection_refusal). Stub
