@@ -465,13 +465,21 @@ impl SourceConfig {
         Ok(())
     }
 
+    /// The inline `url:` as text, empty when none is set.
+    fn inline_url_text(&self) -> String {
+        self.url
+            .as_ref()
+            .map(|u| u.expose().to_string())
+            .unwrap_or_default()
+    }
+
     /// The scheme check of every URL the config holds without I/O: an inline `url:`, a set `url_env` and a readable `url_file`.
     pub fn check_url_scheme_offline(&self) -> crate::error::Result<()> {
         if self.has_structured_fields() {
             return Ok(());
         }
         let raw = match (&self.url, &self.url_env, &self.url_file) {
-            (Some(u), None, None) => Some(u.expose().to_string()),
+            (Some(_), None, None) => Some(self.inline_url_text()),
             (None, Some(env), None) => std::env::var(env).ok(),
             (None, None, Some(file)) => std::fs::read_to_string(file).ok(),
             _ => None,
@@ -499,7 +507,7 @@ impl SourceConfig {
             Secret(&'a str),
         }
         let (raw, source) = match (&self.url, &self.url_env, &self.url_file, &self.url_secret) {
-            (Some(u), None, None, None) => (u.expose().to_string(), UrlSource::InlineYaml),
+            (Some(_), None, None, None) => (self.inline_url_text(), UrlSource::InlineYaml),
             (None, Some(env), None, None) => (
                 std::env::var(env).map_err(|_| {
                     crate::error::coded(

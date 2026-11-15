@@ -371,7 +371,8 @@ fn the_neighbours_of_the_load_refusals_still_load() {
         yaml("", QUERY).replace("name: users", &format!("name: {}", "a".repeat(200))),
         yaml("", QUERY),
     ] {
-        Config::from_yaml(&text).expect("a valid neighbour loads");
+        let cfg = Config::from_yaml(&text).expect("a valid neighbour loads");
+        assert_eq!(cfg.exports.len(), 1);
     }
 }
 
@@ -383,10 +384,12 @@ fn a_url_scheme_of_another_engine_is_refused_at_load_and_a_matching_one_loads() 
         crate::error::codes::CONFIG_SOURCE_URL_SCHEME_MISMATCH,
         "the url scheme names mysql",
     );
-    Config::from_yaml(&yaml("", QUERY)).expect("a matching scheme loads");
-    Config::from_yaml(&yaml("", QUERY).replace(
+    let matching = Config::from_yaml(&yaml("", QUERY)).expect("a matching scheme loads");
+    assert_eq!(matching.source.source_type, SourceType::Postgres);
+    let unset = yaml("", QUERY).replace(
         "url: \"postgresql://localhost/test\"",
         "url_env: RIVET_I4_UNSET_URL",
-    ))
-    .expect("an unset url_env is left to the connect");
+    );
+    let cfg = Config::from_yaml(&unset).expect("an unset url_env is left to the connect");
+    assert_eq!(cfg.exports[0].name, "users");
 }

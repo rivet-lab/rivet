@@ -1455,7 +1455,7 @@ pub mod codes {
     /// The reconcile report passed to `rivet repair` does not parse or belongs to another export.
     pub const CLI_REPORT_INVALID: Code = usage(
         "RIVET_CLI_REPORT_INVALID",
-        "pass the report `rivet reconcile --report` wrote for this export",
+        "pass the report `rivet reconcile --format json --output <file>` wrote for this export",
     );
     /// A plan, report or run artifact file the command writes beside the config could not be written.
     pub const CLI_OUTPUT_UNWRITABLE: Code = environment(
@@ -1489,7 +1489,7 @@ pub mod codes {
     /// A plan artifact older than 24 h, or whose cursor snapshot the state no longer matches.
     pub const PLAN_ARTIFACT_STALE: Code = refusal(
         "RIVET_PLAN_ARTIFACT_STALE",
-        "regenerate the plan with `rivet plan`, or pass `--force` to apply it as it is",
+        "regenerate the plan with `rivet plan`, or apply it as it is with `rivet apply --force`",
     );
     /// A plan artifact made from an inline `url:` config, whose password was never persisted.
     pub const PLAN_ARTIFACT_NO_CREDENTIALS: Code = usage(

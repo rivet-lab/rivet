@@ -11,27 +11,17 @@ use std::time::Duration;
 const RIVET_BIN: &str = env!("CARGO_BIN_EXE_rivet");
 const MATRIX: &str = "refusal_names_true_cause";
 
-const R_PREFIX: &str = "2026-11-08: the oversized-value message opens with an unregistered RIVET_VALUE_TOO_LARGE prefix; closes when the prefix is dropped from both raise sites";
 const R_VERIFY: &str = "2026-11-08: validate prints a second code vocabulary absent from errors.md; closes when it joins codes::ALL or the docs list it";
 
-const R_REMEDY_REPORT: &str = "2026-11-10: the remedy names `rivet reconcile --report`, which reconcile does not accept; closes when the remedy names repair's --report or reconcile's --output";
-const R_REMEDY_FORCE: &str = "2026-11-10: the stale-plan remedy names --force without naming `rivet apply`; closes when the message names the apply command";
 const R_COPY_EMPTY: &str = "2026-11-10: state copy reads a corrupt SQLite state as empty and stops RIVET_STATE_COPY_SOURCE_EMPTY; closes when the copy opens the file through the corrupt-state check";
 const R_WORDING_GONE: &str = "2026-11-10: the lost-checkpoint remedy leads with a bare `run the export again` while exit 5 tells a scheduler not to retry; closes when the remedy names the operator's decision first or the exit becomes retryable";
 const R_READER_CODE: &str = "2026-11-10: metrics and journal repeat a stopped run's words without the code the run printed; closes when the run history records the refusal code beside its text";
 const R_WORD_CLASSIFY: &str = "2026-11-10: a missing MySQL table named after a classifier word is refused as that word's cause (STATEMENT_TIMEOUT for `max_execution_time`); closes when the classifier reads the server's error number, not words that echo the relation name";
 /// Accepted RED cells on main, each with the date and what closes it; a new RED or a stale entry fails.
 const ACCEPTED_RED: &[(&str, &str)] = &[
-    ("remedy/RIVET_CLI_REPORT_INVALID", R_REMEDY_REPORT),
-    (
-        "site/src/error.rs/rivet_reconcile_--report",
-        R_REMEDY_REPORT,
-    ),
     ("wording/RIVET_STATE_CHUNK_CHECKPOINT_GONE", R_WORDING_GONE),
     ("guard/state_copy_--to_URL/state_corrupt/*", R_COPY_EMPTY),
-    ("remedy/RIVET_PLAN_ARTIFACT_STALE", R_REMEDY_FORCE),
     ("source/RIVET_VERIFY_*", R_VERIFY),
-    ("source/RIVET_VALUE_TOO_LARGE", R_PREFIX),
     (
         "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/postgres/metrics",
         R_READER_CODE,
@@ -2390,7 +2380,7 @@ fn the_uncoded_grader_refuses_a_coded_message_and_a_zero_exit() {
 #[test]
 fn the_literal_scan_sees_a_message_prefix_and_a_verify_token() {
     let lits = literal_codes();
-    assert!(lits.contains("RIVET_VALUE_TOO_LARGE"), "{lits:?}");
+    assert!(!lits.contains("RIVET_VALUE_TOO_LARGE"), "{lits:?}");
     assert!(lits.contains("RIVET_VERIFY_PART_MISSING"), "{lits:?}");
     assert!(
         !lits.contains("RIVET_STATE_URL"),
