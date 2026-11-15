@@ -1,7 +1,8 @@
 diff --git a/src/pipeline/cdc_job.rs b/src/pipeline/cdc_job.rs
+index c168684..420e2c1 100644
 --- a/src/pipeline/cdc_job.rs
 +++ b/src/pipeline/cdc_job.rs
-@@ -382,7 +382,6 @@
+@@ -368,7 +368,6 @@ pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<O
          (None, Some(t)) => vec![t.clone()],
          (None, None) => return Ok(None),
      };
@@ -10,13 +11,14 @@ diff --git a/src/pipeline/cdc_job.rs b/src/pipeline/cdc_job.rs
          .iter()
          .filter_map(|t| {
 diff --git a/src/preflight/mod.rs b/src/preflight/mod.rs
+index 2b0b70e..5f4b450 100644
 --- a/src/preflight/mod.rs
 +++ b/src/preflight/mod.rs
-@@ -470,7 +470,6 @@
+@@ -376,7 +376,6 @@ pub fn check(
              print_diagnostic(diag);
          }
          if config.source.columns_from_grants() {
 -            println!("\n{}", crate::source::mysql::column_grants::BOUNDARY);
          }
      } else if !show_type_report {
-         // `--json` WITHOUT a type report (the CLI forces `show_type_report` on
+         for diag in &diagnostics {

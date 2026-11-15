@@ -41,14 +41,13 @@ index b07a2fe..0a9cb46 100644
              ctx.record_skip();
              return Ok(None);
 diff --git a/src/preflight/mod.rs b/src/preflight/mod.rs
-index 111fae0..76a1309 100644
+index 2b0b70e..7821c0e 100644
 --- a/src/preflight/mod.rs
 +++ b/src/preflight/mod.rs
-@@ -782,33 +782,22 @@ pub fn load_type_reports(
+@@ -623,32 +623,22 @@ pub fn load_type_reports(
                          .map(|t| format!(" table '{t}'"))
                          .unwrap_or_default()
                  )),
--                // The state DB not answering is the environment, not a missing spec.
 -                Err(e) => {
 -                    return Err(crate::error::recoded(
 -                        &e,

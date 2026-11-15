@@ -1,6 +1,6 @@
 mod analysis;
 pub(crate) use analysis::overlay_measured_rows;
-#[allow(unused_imports)] // the binary's `init` tests
+#[allow(unused_imports)]
 pub(crate) use postgres::table_from_simple_query;
 pub(crate) mod cdc_health;
 pub(crate) mod cursor_expr;
@@ -24,8 +24,6 @@ use analysis::{
 };
 #[allow(unused_imports)]
 pub use doctor::doctor;
-// Reused at the run-time connect seam (src/pipeline/single.rs) so a failed
-// `rivet run` carries the same category + remediation hint `rivet doctor` gives.
 pub(crate) use doctor::{categorize_source_error, source_error_hint};
 #[cfg(test)]
 use postgres::{extract_scan_type, parse_pg_row_estimate};
@@ -37,10 +35,7 @@ use crate::error::Result;
 use crate::types::policy::TypePolicy;
 use crate::types::target::{ExportTarget, TargetStatus};
 
-/// Serializes lowercase ("efficient"/"acceptable"/"degraded"/"unsafe") so
-/// `rivet check --json` consumers (CI gates, orchestrators) match on a stable,
-/// case-insensitive token rather than the SHOUTING `Display` form used in the
-/// human-readable table.
+/// Serializes lowercase ("efficient"/"acceptable"/"degraded"/"unsafe") so `rivet check --json` consumers (CI gates, orchestrators) match on a stable, case-insensitive token rather than the SHOUTING `Display` form used in the human-readable table.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HealthVerdict {
@@ -67,15 +62,9 @@ pub(crate) struct ExportDiagnostic {
     pub mode: String,
     pub cursor_column: Option<String>,
     pub row_estimate: Option<i64>,
-    /// WHERE the row figure came from (#149): `measured YYYY-MM-DD` when the
-    /// state store's freshest successful actual replaced the catalog, else
-    /// `catalog estimate` (with the set-aside said when a stale divergent
-    /// actual was skipped). None = overlay not run (no state in scope).
+    /// WHERE the row figure came from (#149): `measured YYYY-MM-DD` when the state store's freshest successful actual replaced the catalog, else `catalog estimate` (with the set-aside said when a stale divergent actual was skipped).
     pub row_source: Option<String>,
-    /// Average bytes per row from catalog/plan stats (PG EXPLAIN `width`,
-    /// MSSQL `dm_db_partition_stats` pages/row). `None` when unavailable
-    /// (e.g. MySQL, with no trustworthy scan-free estimate). Feeds the
-    /// oversized-chunk warning and is shown as the `Row width` line.
+    /// Average bytes per row from catalog/plan stats (PG EXPLAIN `width`, MSSQL `dm_db_partition_stats` pages/row).
     pub avg_row_bytes: Option<i64>,
     pub cursor_min: Option<String>,
     pub cursor_max: Option<String>,
@@ -86,25 +75,12 @@ pub(crate) struct ExportDiagnostic {
     pub recommended_parallel: (u32, &'static str),
     pub warnings: Vec<analysis::Warning>,
     pub suggestion: Option<String>,
-    /// The three `collect_warnings` inputs NOT otherwise on the diagnostic —
-    /// stored so the #149 overlay can RE-RUN the row-estimate-scaled warnings
-    /// after it moves `row_estimate` (else the warnings keep quoting the catalog
-    /// figure while the verdict/row line stands on the measure — #202). Not
-    /// serialized (internal recompute inputs, not part of the JSON surface).
+    /// The three `collect_warnings` inputs NOT otherwise on the diagnostic.
     pub chunk_min: Option<String>,
     pub chunk_max: Option<String>,
     pub db_max_connections: Option<u32>,
 }
 
-// Hand-rolled `Serialize` (rather than `#[derive]`) so the JSON shape stays
-// fully under our control without touching the three engine construction sites:
-//   - `recommended_parallel` (a raw `(u32, &str)`) becomes a self-describing
-//     `{ "level": N, "reason": "…" }` object instead of a positional 2-array;
-//   - a derived `capabilities` object ({uses_index, has_cursor, can_parallel})
-//     is computed from the sibling fields at serialization time — no stored
-//     field, no extra probe;
-//   - `None` optionals are skipped to keep the object lean for CI consumers.
-// `HealthVerdict` rides its own `#[derive(Serialize)]` (lowercase tokens).
 impl Serialize for ExportDiagnostic {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
@@ -176,8 +152,6 @@ impl Serialize for ExportDiagnostic {
 }
 
 /// Return the diagnostic for a single export without printing anything.
-///
-/// Used by `rivet plan` to capture preflight data into a `PlanArtifact`.
 pub(crate) fn get_export_diagnostic(
     config: &Config,
     export: &ExportConfig,
@@ -202,12 +176,7 @@ pub(crate) fn get_export_diagnostic(
     }
 }
 
-/// Dedup identity for a destination, shared by `check`'s credential probe
-/// and `doctor`'s write probe. Must include every field that changes where
-/// a probe lands — notably `path`, so two local destinations with different
-/// paths are probed separately. Keeping one helper prevents the two call
-/// sites from drifting apart (doctor's inline copy once omitted `path` and
-/// silently skipped the second local destination).
+/// Dedup identity for a destination, shared by `check`'s credential probe and `doctor`'s write probe.
 fn destination_identity(d: &crate::config::DestinationConfig) -> String {
     format!(
         "{:?}:{}:{}:{}",
@@ -218,11 +187,7 @@ fn destination_identity(d: &crate::config::DestinationConfig) -> String {
     )
 }
 
-/// One-line note for the "fail ✗ but rc 0" case: a column rendered `fail ✗`
-/// for `--target` does NOT gate the exit code unless `--strict` is also passed
-/// (that is the gate by design). Without this note an operator or CI reading
-/// the glyph alone would wrongly assume a non-zero exit. Pure so the exact text
-/// is unit-tested.
+/// One-line note for the "fail ✗ but rc 0" case.
 fn target_fail_note(n: usize, target_label: &str) -> String {
     let col = if n == 1 { "column" } else { "columns" };
     format!(
@@ -231,27 +196,13 @@ fn target_fail_note(n: usize, target_label: &str) -> String {
 }
 
 /// The `--target` epilogue's inputs, folded across every REPORT of every export.
-///
-/// Extracted from [`check`]'s render loop rather than accumulated inline,
-/// because the sum IS the epilogue's honesty: `check` prints "N column(s) FAIL
-/// …" and still exits 0 without `--strict`, so an under-count silently retracts
-/// the warning the "fail ✗" glyph already made — and inline in a function that
-/// needs a live database, no offline test can observe the arithmetic at all (the
-/// in-diff mutation gate graded `+=` → `*=`/`-=` on that line as MISSED).
-///
-/// The fold now crosses TABLES as well as exports: a multiplex `tables:` export
-/// contributes one report PER CAPTURED TABLE, so a tally that stopped at the
-/// first report of an export would under-count a whole schema to one table's
-/// worth.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct TargetFailTally {
     /// Columns the target refuses outright, summed over every report.
     columns: usize,
-    /// The label of the FIRST target that refused anything — the note names one
-    /// warehouse, and a config can set `target:` per export.
+    /// The label of the FIRST target that refused anything.
     label: Option<&'static str>,
-    /// Any fatal policy violation, or any target-refused column: what `--strict`
-    /// bails on.
+    /// Any fatal policy violation, or any target-refused column: what `--strict` bails on.
     any_fatal: bool,
     /// Any column its own mapping refuses: fails the check with or without `--strict`.
     any_refused: bool,
@@ -269,7 +220,7 @@ enum TypeReportOutcome {
 }
 
 impl TargetFailTally {
-    /// The outcome for this tally. The note is text, so `--json` never gets it.
+    /// The outcome for this tally.
     fn outcome(&self, strict: bool, json_output: bool) -> TypeReportOutcome {
         if self.any_refused || (strict && self.any_fatal) {
             TypeReportOutcome::Fail
@@ -280,9 +231,7 @@ impl TargetFailTally {
         }
     }
 
-    /// Fold ONE export's reports in — all of them, `target` being the export's
-    /// effective target (`None` when nothing was resolved against one, in which
-    /// case a report can carry no target failure to count).
+    /// Fold ONE export's reports in — all of them, `target` being the export's effective target (`None` when nothing was resolved against one, in which case a report can carry no target failure to count).
     fn add_export(
         &mut self,
         target: Option<ExportTarget>,
@@ -310,11 +259,7 @@ impl TargetFailTally {
     }
 }
 
-/// Build one [`ExportDiagnostic`] per export via `diagnose`, collecting them (or
-/// short-circuiting on the first error). Single-sources the connect → loop →
-/// return contract every engine's `check_*` shares — only the per-export
-/// `diagnose` call differs — so the deferred print-vs-collect decision lives in
-/// one place rather than triplicated across postgres / mysql / mssql.
+/// Build one [`ExportDiagnostic`] per export via `diagnose`, collecting them (or short-circuiting on the first error).
 pub(super) fn collect_diagnostics<F>(
     exports: &[&ExportConfig],
     mut diagnose: F,
@@ -326,13 +271,6 @@ where
 }
 
 /// The exports in this config the PLANNER would refuse, each with its reason.
-///
-/// Pure, and separate from [`check`] so the rule is testable without a live
-/// source — `check` itself needs one, so a mutant inside it (the `mode ==
-/// Chunked` filter, say) survives every offline test by construction. Asks
-/// `plan::build`'s own function rather than re-deriving the rule: two copies
-/// of "what is plannable" is exactly how the preflight and the runner drifted
-/// apart in the first place.
 pub(crate) fn unplannable_exports(exports: &[&ExportConfig]) -> Vec<String> {
     exports
         .iter()
@@ -387,21 +325,6 @@ pub fn check(
     let declared = crate::config::declared_exports(&config, export_name)?;
     let exports: Vec<&ExportConfig> = declared.iter().collect();
 
-    // A preflight must never bless a config the RUNNER refuses.
-    //
-    // `check` resolved its own view of the strategy and printed `Verdict:
-    // ACCEPTABLE` for two shapes `plan::build` bails on — `query:` (no
-    // `table:`) with `chunk_size_memory_mb`, and the same with `chunk_by_key`.
-    // The operator reads ACCEPTABLE, schedules the export, and the run refuses
-    // the file: the trust the preflight exists to earn is spent on something
-    // that cannot run. Asking the planner's own rule (one function, both
-    // callers) is what keeps the two from drifting again — a re-implemented
-    // copy here would be a second definition, and it would drift on the first
-    // change.
-    //
-    // Reported BEFORE the engine probe: the config is illegal on its face, so
-    // connecting to say so would only delay the answer (and fail differently
-    // when the source is unreachable).
     let illegal = unplannable_exports(&exports);
     if !illegal.is_empty() {
         for why in &illegal {
@@ -418,18 +341,7 @@ pub fn check(
 
     let url = url.expose();
     let tls = config.source.tls.as_ref();
-    // Surface the plaintext-transport warning at preflight time too —
-    // operators should hear it from `rivet check` before they wait
-    // through a full `rivet run` to learn the same thing. `Once` inside
-    // the helper keeps emission to one line per process even when both
-    // `check` and `run` flow through it.
     crate::source::warn_if_tls_disabled(&config.source);
-    // Each engine connects once and returns one diagnostic per export without
-    // printing. Rendering is decided here: TEXT (the per-export table) for the
-    // default human path, or — under `--json` — the diagnostic is merged into
-    // each export's type-report JSON object below (see the `if show_type_report`
-    // block). `get_export_diagnostic` already proved the diag is computable
-    // without printing; this is the multi-export variant of that path.
     let planned = exports_as_planned(&exports, strategies);
     let described: Vec<&ExportConfig> = planned.iter().collect();
     let diagnostics: Vec<ExportDiagnostic> = match config.source.source_type {
@@ -446,8 +358,6 @@ pub fn check(
             mongo::check_mongo(url, tls, &described, config.source.mongo.as_ref())?
         }
     };
-    // #149: measured beats declared — overlay the state store's actuals and
-    // label every row figure with its source. Best-effort (no state = catalog).
     let mut diagnostics = diagnostics;
     if let Ok(state) = crate::state::StateStore::open(config_path) {
         for d in &mut diagnostics {
@@ -469,20 +379,10 @@ pub fn check(
             println!("\n{}", crate::source::mysql::column_grants::BOUNDARY);
         }
     } else if !show_type_report {
-        // `--json` WITHOUT a type report (the CLI forces `show_type_report` on
-        // under `--json`, so this only fires if `check` is called directly with
-        // `json_output=true, show_type_report=false`): there is no per-export
-        // type-report object to nest the diagnostic into, so emit the diagnostic
-        // alone — still NDJSON, one object per export per line. Keeps the
-        // verdict from being silently dropped regardless of caller.
         for diag in &diagnostics {
             println!("{}", serde_json::to_string(diag)?);
         }
     }
-    // Under `--json` WITH a type report, the diagnostics are emitted nested
-    // inside each export's type-report object (the `show_type_report` block)
-    // rather than as a standalone array — see the design note there. Built only
-    // on the `--json` path (empty otherwise) since the TEXT path printed above.
     let diag_by_export: std::collections::HashMap<&str, &ExportDiagnostic> = if json_output {
         diagnostics
             .iter()
@@ -492,14 +392,6 @@ pub fn check(
         std::collections::HashMap::new()
     };
 
-    // Destination credential-resolution preflight.  Until 0.7.6 `check` only
-    // probed the source: a config with `AWS_ACCESS_KEY_ID` unset would pass
-    // `rivet check` (rc=0) and then explode on `run`, while `rivet doctor`
-    // caught it.  We don't issue a write-probe here (that is `doctor`'s job
-    // and has side effects) — but we *do* call `create_destination`, which
-    // resolves env vars / credentials_file existence at construction time.
-    // Each unique destination is probed once per `check` to keep multi-export
-    // configs cheap.
     let mut seen_destinations: std::collections::HashSet<String> = std::collections::HashSet::new();
     for export in &exports {
         let dest_key = destination_identity(&export.destination);
@@ -544,29 +436,17 @@ pub fn check(
         )?;
     }
 
-    // Whether the check ends clean (no strict failure, no target-fail column).
-    // Stays true for the default `rivet check` (no type report), so the "Next:
-    // rivet run" pointer still fires.
     let mut clean = true;
 
     if show_type_report {
         let policy = TypePolicy::from_strict(strict);
-        // Every fatal violation of every report, for the one refusal `run --strict` also raises.
         let mut fatal = Vec::new();
 
-        // Count hard target-FAIL columns (and remember which target) so that —
-        // when --strict was NOT passed and the exit code is therefore 0 — we can
-        // print a note. The "fail ✗" glyph in the table implies a hard failure,
-        // but exit is gated only by --strict; without this note an operator or CI
-        // reading the glyph alone would be misled into thinking rc != 0.
         let mut tally = TargetFailTally::default();
         let mut reports_failed = 0usize;
         for export in &exports {
             let column_overrides =
                 crate::plan::parse_column_overrides_pub(&export.columns, &export.name)?;
-            // CLI `--target` wins; otherwise fall back to the per-export
-            // `target:` from the config (slice #2a). A declared-but-unknown
-            // target is a loud error — never silently ignored.
             refuse_unknown_target(&export.name, export.target.as_deref())?;
             let eff_target = target.or_else(|| {
                 export
@@ -577,9 +457,6 @@ pub fn check(
             let config_dir = std::path::Path::new(config_path)
                 .parent()
                 .unwrap_or_else(|| std::path::Path::new("."));
-            // One report per UNIT, not per export: a multiplex `tables:` CDC
-            // export resolves one document per captured table (#252), each of
-            // which is a separate warehouse table downstream.
             match type_report::collect_reports(
                 &config,
                 export,
@@ -597,19 +474,6 @@ pub fn check(
                     fatal.extend(fatal_violations(&reports));
                     for report in &reports {
                         if json_output {
-                            // `--json` + `--type-report` interaction (DESIGN):
-                            // emit BOTH, nested. Each export gets ONE JSON object
-                            // (NDJSON, one per line, unchanged) keeping the
-                            // top-level type-report keys (`export`/`columns`/
-                            // `violations`) so existing consumers and the
-                            // `check_json_flag_outputs_type_report_as_json` test
-                            // stay green — and we attach the per-export DIAGNOSTIC
-                            // verdict under a new `"diagnostic"` key. This is the
-                            // least-surprising shape because `check --json` already
-                            // emitted one type-report object per export; we simply
-                            // enrich each with its verdict rather than printing a
-                            // second, separate JSON value (which would break a
-                            // single-`from_str` parse of stdout).
                             print_report_json_with_diagnostic(
                                 report,
                                 diag_by_export.get(export.name.as_str()).copied(),
@@ -621,13 +485,8 @@ pub fn check(
                 }
                 Err(e) => {
                     log::warn!("type report for '{}' failed: {:#}", export.name, e);
-                    // An export whose column types cannot be described is not "Looks good".
                     clean = false;
                     reports_failed += 1;
-                    // The type report could not be collected, but the diagnostic
-                    // was. Under --json the verdict must still reach the
-                    // consumer, so emit a diagnostic-only object (no `columns`/
-                    // `violations`) rather than silently dropping this export.
                     if json_output
                         && let Some(diag) = diag_by_export.get(export.name.as_str()).copied()
                     {
@@ -652,7 +511,6 @@ pub fn check(
                 )
             }
             TypeReportOutcome::Note => {
-                // The table showed "fail ✗" but rc is 0 — say so explicitly.
                 clean = false;
                 println!();
                 println!(
@@ -665,20 +523,12 @@ pub fn check(
     }
 
     if !json_output {
-        // Verdict legend — decode the EFFICIENT/ACCEPTABLE/DEGRADED/UNSAFE words
-        // printed above and reassure that `check` is advisory: never blocks a run.
         println!();
         println!(
             "Verdicts: EFFICIENT > ACCEPTABLE > DEGRADED > UNSAFE — advisory only; the run is never blocked."
         );
-        // The "Looks good. Next: …" epilogue is printed by the CALLER
-        // (`dispatch_check`) only after the plan-compatibility gate also passes —
-        // otherwise a config the plan-gate REJECTS printed "Looks good" and then
-        // "Rejected: …" in the same output, a self-contradiction (dogfood MED).
     }
 
-    // `clean` = the type check surfaced no fatal mapping. The caller ANDs this
-    // with the plan-compatibility gate before printing the success epilogue.
     Ok(clean)
 }
 
@@ -723,16 +573,7 @@ fn strict_fails_on_unbuilt_reports(strict: bool, reports_failed: usize) -> bool 
     strict && reports_failed > 0
 }
 
-/// One type report per export unit against `target`, typed from the load spec
-/// `rivet run` recorded in the state DB, so `rivet load` never reads the source;
-/// returned with the source primary keys it recorded.
-///
-/// The recorded columns went through the same resolver `rivet check` renders from
-/// (`type_report::capture_load_units`), so the types a load declares cannot differ
-/// from the ones the run wrote. The policy is `warn_only`: the load's own
-/// `validate_specs` is what refuses a `Fail` column. A unit with nothing recorded
-/// is an ERROR, accumulated across exports, because a table that cannot be typed
-/// must not silently not-load.
+/// One type report per export unit against `target`, typed from the load spec `rivet run` recorded in the state DB, so `rivet load` never reads the source.
 pub fn load_type_reports(
     config: &Config,
     state: &crate::state::StateStore,
@@ -782,7 +623,6 @@ pub fn load_type_reports(
                         .map(|t| format!(" table '{t}'"))
                         .unwrap_or_default()
                 )),
-                // The state DB not answering is the environment, not a missing spec.
                 Err(e) => {
                     return Err(crate::error::recoded(
                         &e,
@@ -813,15 +653,7 @@ pub fn load_type_reports(
     Ok((out, keys))
 }
 
-/// Emit one export's `--json` line: the type report (`export`/`columns`/
-/// `violations`/…) with the per-export DIAGNOSTIC verdict attached under a new
-/// `"diagnostic"` key. NDJSON — exactly one JSON object, terminated by a
-/// newline, so a multi-export config prints one parseable object per line
-/// (preserving the prior `check --json` type-report wire shape, now enriched).
-///
-/// `diag` is `None` only if the diagnostic could not be paired by export name
-/// (it always can in practice); in that case the type report is emitted as
-/// before, so the worst case is a missing `diagnostic` key, never a panic.
+/// Emit one export's `--json` line: the type report (`export`/`columns`/ `violations`/…) with the per-export DIAGNOSTIC verdict attached under a new `"diagnostic"` key.
 fn print_report_json_with_diagnostic(
     report: &type_report::ExportTypeReport,
     diag: Option<&ExportDiagnostic>,
@@ -862,10 +694,6 @@ fn print_diagnostic(diag: &ExportDiagnostic) {
     if let Some(col) = &diag.cursor_column {
         println!("  Cursor col:   {}", col);
     }
-    // Plain-language access path instead of a raw EXPLAIN node dump
-    // (`Result (cost=0.00..0.01 rows=1 width=36)`). Keyed off the authoritative
-    // `uses_index` bool, gated on `scan_type.is_some()` so engines without an
-    // EXPLAIN probe (MSSQL) stay silent.
     if diag.scan_type.is_some() {
         let access = if diag.uses_index {
             "index scan (the cursor/chunk column is indexed)"
@@ -904,11 +732,6 @@ mod tests {
     }
 
     /// The preflight must refuse exactly what the planner refuses — no more.
-    ///
-    /// The `mode == Chunked` filter is the part a live-only `check` cannot have
-    /// tested: an `incremental` export with no `table:` is perfectly legal, and
-    /// a filter that forgot the mode would refuse it. Both directions, so
-    /// neither an over-strict nor an under-strict preflight passes.
     #[test]
     fn unplannable_lists_the_chunked_refusals_and_leaves_other_modes_alone() {
         let chunked_no_table = ExportConfig {
@@ -957,8 +780,6 @@ mod tests {
     use serde_json::Value;
 
     fn make_export(name: &str, mode: ExportMode, cursor: Option<&str>) -> ExportConfig {
-        // Baseline from the canonical test fixture; override only the fields
-        // these preflight tests vary (mode, cursor, CSV format, query, dest).
         ExportConfig {
             mode,
             cursor_column: cursor.map(|s| s.to_string()),
@@ -973,10 +794,7 @@ mod tests {
         }
     }
 
-    /// A representative incremental diagnostic for the `--json` serialization
-    /// tests: a cursor column (so `has_cursor` is true), an index (so
-    /// `uses_index` is true), a >1 parallel recommendation (so `can_parallel`
-    /// is true), and a couple of warnings.
+    /// A representative incremental diagnostic for the `--json` serialization tests.
     fn sample_diagnostic(name: &str) -> ExportDiagnostic {
         ExportDiagnostic {
             row_source: None,
@@ -1004,23 +822,18 @@ mod tests {
         }
     }
 
-    // ── `rivet check --json`: the per-export DIAGNOSTIC verdict as JSON ───────
-
     #[test]
     fn diagnostic_json_has_lowercase_verdict_and_core_fields() {
         let diag = sample_diagnostic("orders");
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&diag).unwrap()).unwrap();
 
-        // Verdict serializes to a stable lowercase token (not the SHOUTING
-        // Display form), so CI can match on it case-sensitively.
         assert_eq!(v["verdict"], "degraded", "got: {v}");
         assert_eq!(v["strategy"], "incremental(updated_at)", "got: {v}");
         assert_eq!(v["mode"], "incremental", "got: {v}");
         assert_eq!(v["recommended_profile"], "safe", "got: {v}");
         assert!(v["warnings"].is_array(), "warnings must be an array: {v}");
         assert_eq!(v["warnings"].as_array().unwrap().len(), 2, "got: {v}");
-        // Each warning is a `{ severity, message }` object (per-warning severity).
         assert_eq!(v["warnings"][0]["severity"], "medium", "got: {v}");
         assert_eq!(v["warnings"][0]["message"], "Sparse key range", "got: {v}");
         assert_eq!(v["warnings"][1]["severity"], "high", "got: {v}");
@@ -1045,8 +858,6 @@ mod tests {
 
     #[test]
     fn diagnostic_json_recommended_parallel_is_named_object_not_tuple() {
-        // The raw `(u32, &str)` must NOT leak as a positional 2-array; consumers
-        // read `recommended_parallel.level` / `.reason`.
         let diag = sample_diagnostic("t");
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&diag).unwrap()).unwrap();
@@ -1075,7 +886,6 @@ mod tests {
 
     #[test]
     fn diagnostic_json_capabilities_flip_with_fields() {
-        // A non-cursor, no-index, single-worker diagnostic flips all three.
         let mut diag = sample_diagnostic("t");
         diag.cursor_column = None;
         diag.uses_index = false;
@@ -1090,7 +900,6 @@ mod tests {
 
     #[test]
     fn diagnostic_json_skips_none_optionals() {
-        // `None` optionals are omitted (not `null`) to keep the object lean.
         let mut diag = sample_diagnostic("t");
         diag.suggestion = None;
         diag.scan_type = None;
@@ -1101,8 +910,7 @@ mod tests {
         assert!(!obj.contains_key("scan_type"), "None must be omitted: {v}");
     }
 
-    /// Build the same `Value` `print_report_json_with_diagnostic` prints, so the
-    /// merged shape is asserted without capturing stdout.
+    /// Build the same `Value` `print_report_json_with_diagnostic` prints, so the merged shape is asserted without capturing stdout.
     fn merged_check_json(report: &type_report::ExportTypeReport, diag: &ExportDiagnostic) -> Value {
         let mut value = serde_json::to_value(report).unwrap();
         value.as_object_mut().unwrap().insert(
@@ -1172,24 +980,10 @@ mod tests {
         }
     }
 
-    /// The `--target` epilogue's count must be the EXACT number of refused
-    /// columns across every report of every export.
-    ///
-    /// `check` prints "N column(s) FAIL <target> compatibility" and still exits 0
-    /// without `--strict`, so the number IS the warning — an under-count retracts
-    /// what the "fail ✗" glyph already promised, and a zero suppresses the note
-    /// entirely. The arithmetic used to live inline in `check`, which needs a live
-    /// database: the in-diff mutation gate graded `+=` → `*=` and `+=` → `-=`
-    /// there as MISSED, and both are silent (`*=` pins the total at 0 forever,
-    /// since it starts at 0).
-    ///
-    /// The fixture crosses BOTH folds — two exports, and two reports within the
-    /// first, because a multiplex `tables:` export now contributes one report per
-    /// captured table. A single-report fixture cannot distinguish the operators.
+    /// The `--target` epilogue's count must be the EXACT number of refused columns across every report of every export.
     #[test]
     fn target_fail_tally_sums_every_refused_column_across_tables_and_exports() {
         let mut tally = TargetFailTally::default();
-        // One export, two TABLES (a multiplex stream): 2 + 1 refused columns.
         tally.add_export(
             Some(ExportTarget::BigQuery),
             &[
@@ -1202,7 +996,6 @@ mod tests {
             "every captured table's refused columns count — stopping at the first \
              report under-counts a whole schema to one table"
         );
-        // A second export adds to the same total.
         tally.add_export(
             Some(ExportTarget::BigQuery),
             &[failing_table_report("events", "events", 4)],
@@ -1218,7 +1011,6 @@ mod tests {
             "7 refused columns, the FIRST target's label, and --strict must bail"
         );
 
-        // A clean export adds nothing and does not clear what came before.
         tally.add_export(Some(ExportTarget::BigQuery), &[empty_report("clean")]);
         assert_eq!(tally.columns, 7, "a clean export is a no-op, not a reset");
 
@@ -1240,7 +1032,6 @@ mod tests {
             "nothing refused, nothing to say"
         );
 
-        // No target resolved ⇒ nothing to refuse, whatever the report says.
         let mut untargeted = TargetFailTally::default();
         untargeted.add_export(None, &[failing_table_report("cdc", "orders", 2)]);
         assert_eq!(
@@ -1252,20 +1043,14 @@ mod tests {
 
     #[test]
     fn check_json_merges_diagnostic_into_type_report_object() {
-        // The `--json` + `--type-report` interaction: ONE object per export
-        // keeping the type-report keys (`export`/`columns`/`violations`) — so
-        // the existing `check_json_flag_outputs_type_report_as_json` contract
-        // holds — PLUS a nested `diagnostic` carrying the verdict.
         let report = empty_report("orders");
         let diag = sample_diagnostic("orders");
         let v = merged_check_json(&report, &diag);
 
-        // Pre-existing type-report keys still at the root.
         assert_eq!(v["export"], "orders", "got: {v}");
         assert!(v["columns"].is_array(), "columns at root: {v}");
         assert!(v["violations"].is_array(), "violations at root: {v}");
 
-        // The diagnostic is nested and carries the verdict + advice.
         let d = &v["diagnostic"];
         assert_eq!(d["verdict"], "degraded", "got: {d}");
         assert_eq!(d["strategy"], "incremental(updated_at)", "got: {d}");
@@ -1277,9 +1062,6 @@ mod tests {
 
     #[test]
     fn check_json_object_is_a_single_parseable_line() {
-        // NDJSON: serializing yields exactly one JSON value with no trailing
-        // data, so `serde_json::from_str(line.trim())` (as the live test does)
-        // parses it whole.
         let report = empty_report("orders");
         let diag = sample_diagnostic("orders");
         let line = serde_json::to_string(&merged_check_json(&report, &diag)).unwrap();
@@ -1288,9 +1070,6 @@ mod tests {
         assert_eq!(parsed["export"], "orders");
     }
 
-    // ── L8: 'fail ✗' note when --target FAILs but --strict was not passed ─────
-    // The glyph implies a hard failure; exit is gated only by --strict. The note
-    // tells an operator/CI the exit is 0 so the glyph doesn't mislead.
     #[test]
     fn target_fail_note_names_count_target_and_strict_gate() {
         let note = target_fail_note(2, "bigquery");
@@ -1300,16 +1079,7 @@ mod tests {
         assert!(note.contains("exit 0"), "got: {note}");
     }
 
-    /// A `cdc.backfill` recipe must NOT be typed for the load. The run loop
-    /// deliberately never runs it — it is the READ recipe the CDC export runs
-    /// after the anchor, and its rows land in the CDC export's own `snapshot/`
-    /// prefix — so it has no recorded load spec and never will. Demanding one
-    /// refused EVERY config pairing `backfill:` with `load:`: "no column types
-    /// recorded … run `rivet run` for this export first", advice no run can
-    /// satisfy.
-    ///
-    /// Found by the live BigQuery cycle, pinned here where it costs no
-    /// warehouse: this goes RED the moment the recipe filter is dropped.
+    /// A `cdc.backfill` recipe must NOT be typed for the load.
     #[test]
     fn an_unknown_target_and_an_export_with_no_recorded_spec_are_refused_by_code() {
         let err = refuse_unknown_target("orders", Some("nope")).unwrap_err();
@@ -1328,9 +1098,7 @@ mod tests {
         crate::error::assert_coded(&err, "RIVET_LOAD_SPEC_MISSING", 5);
     }
 
-    /// The two reasons an export cannot be typed are two codes and two exits: no
-    /// recorded spec is a refusal, typed as the load's stop before any write; a state
-    /// DB that cannot answer is the environment, never a refusal.
+    /// The two reasons an export cannot be typed are two codes and two exits.
     #[test]
     fn a_missing_spec_and_an_unreadable_spec_store_are_two_codes() {
         let yaml = "\nsource:\n  type: mysql\n  url: \"mysql://u:p@localhost:3306/db\"\n\
@@ -1374,7 +1142,6 @@ mod tests {
              \x20   destination: { type: local, path: \"/tmp/x\" }\n";
         let cfg = crate::config::Config::from_yaml(yaml).expect("the valid backfill shape parses");
         let state = crate::state::StateStore::open_in_memory().expect("in-memory state");
-        // Only the CDC export ever records a spec; the recipe cannot have one.
         state
             .record_load_spec(
                 "stream",
@@ -1561,10 +1328,6 @@ mod tests {
         }
     }
 
-    // Regression (doctor-dedup): doctor's inline dedup key omitted `path`,
-    // so two local destinations with different paths collapsed to one entry
-    // and the second was never write-probed. The shared identity must keep
-    // them distinct.
     #[test]
     fn destination_identity_distinguishes_local_paths() {
         assert_ne!(
@@ -1594,8 +1357,6 @@ mod tests {
         assert_ne!(destination_identity(&a), destination_identity(&b));
     }
 
-    // Same bucket name on different endpoints (e.g. AWS vs MinIO) is two
-    // distinct destinations and must be probed separately.
     #[test]
     fn destination_identity_distinguishes_endpoints_for_same_bucket() {
         let aws = dest_config(DestinationType::S3);
@@ -2047,14 +1808,11 @@ mod tests {
     #[test]
     fn connection_limit_suggests_headroom() {
         let w = check_connection_limit(25, Some(20)).unwrap();
-        // Suggested safe max should be max_connections - 3 = 17
         assert!(
             w.contains("17"),
             "should suggest leaving headroom, got: {w}"
         );
     }
-
-    // ── v0.7.4: actionable hints next to categorised errors ───────────
 
     fn src_hint(msg: &str, st: SourceType) -> Option<&'static str> {
         let err = anyhow::anyhow!("{}", msg);
@@ -2109,8 +1867,6 @@ mod tests {
 
     #[test]
     fn source_unknown_error_returns_no_hint() {
-        // Generic "error" category should yield no hint — better to
-        // print the raw driver message than to mislead.
         let h = src_hint("totally unexpected", SourceType::Postgres);
         assert!(h.is_none(), "unknown errors should not produce a hint");
     }
@@ -2135,10 +1891,6 @@ mod tests {
 
     #[test]
     fn categorize_dest_error_sas_expired_message_returns_sas_expired_category() {
-        // Guard the load-bearing ordering in categorize_dest_error: the
-        // "sas expired" early-return must fire before the generic "token"
-        // branch, or destination_error_hint produces the wrong hint.
-        // This test pins the *category string*, not just the final hint text.
         let err = anyhow::anyhow!(
             "Azure SAS token already expired (se=2024-01-01T00:00:00Z). Generate a new SAS and re-export."
         );
@@ -2156,9 +1908,6 @@ mod tests {
 
     #[test]
     fn dest_azure_sas_expired_returns_regenerate_hint() {
-        // The Azure preflight (v0.7.4) bails with "expired (se=…)" —
-        // the hint must steer the operator to `az storage container
-        // generate-sas` not "your IAM role is broken".
         let h = dest_hint(
             "Azure SAS token already expired (se=2024-01-01T00:00:00Z)",
             DestinationType::Azure,

@@ -1,31 +1,6 @@
-//! The shared shape of a *preflight schema error* — a permanent, author-fixable
-//! failure (missing table/column, no SELECT grant, query syntax) that must make
-//! `rivet check` FAIL loudly instead of sailing through to run time.
-//!
-//! A MISSING RELATION is not mapped here: every engine's probe asks
-//! `crate::source::names_a_missing_relation` first and raises the one
-//! `RIVET_SOURCE_TABLE_NOT_FOUND` the run raises (`code_a_missing_relation`).
-//!
-//! ADR-0015 pattern: the seam lives at this **named data shape**, not a trait.
-//! Each engine detects its own native error taxonomy and maps it here —
-//!
-//! - `postgres::schema_fail_pg`    — SQLSTATE class 42 (typed `postgres::Error`)
-//! - `mysql::mysql_schema_error`  — codes 1146/1054/1142/1064 (typed `mysql::Error`)
-//! - `mssql::mssql_schema_verdict` — "Invalid object/column name" + the SQL
-//!   Server number parsed from the error string. The `query_scalar` seam erases
-//!   the *typed* tiberius error; the number survives only in its Display, so a
-//!   *typed* code would need probing off that seam (the ADR-0011 boundary).
-//!
-//! The actionable sentence and the `preflight:` framing live here, once, so they
-//! cannot drift across engines. (They had: "the user" vs "the login", "the
-//! export's query" vs "the query", and inconsistent code placement.)
+//! The shared shape of a *preflight schema error*.
 
 /// A permanent, author-fixable schema error surfaced by preflight.
-///
-/// `detail` is the engine-phrased reason (`relation "ordrs" does not exist`);
-/// `code_label` is the engine's parenthetical tag (`SQLSTATE 42P01`, `MySQL
-/// error 1146`, or the SQL Server reason line). Build with [`Self::new`] and
-/// render with [`Self::into_error`] — the message template lives in one place.
 pub(crate) struct PreflightSchemaError {
     detail: String,
     code_label: String,
@@ -73,8 +48,6 @@ mod tests {
 
     #[test]
     fn every_engine_lands_in_the_same_sentence() {
-        // MySQL- and MSSQL-shaped inputs fill the same slots — no per-engine
-        // drift in wording, only the detail and code label vary.
         for (detail, code) in [
             ("Unknown column 'totl' in 'field list'", "MySQL error 1054"),
             (

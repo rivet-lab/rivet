@@ -1,29 +1,4 @@
-//! SQL Server preflight diagnostics for `rivet check` / `rivet plan` (parity
-//! with [`super::postgres`] / [`super::mysql`]).
-//!
-//! The shape mirrors the MySQL module — connect once, build one
-//! [`ExportDiagnostic`] per export, reuse every engine-neutral analysis helper
-//! in [`super::analysis`] — but the probes the diagnostic *can* run are narrower
-//! because the source seam ([`MssqlSource`]) exposes only
-//! [`query_scalar`](crate::source::Source::query_scalar) (one scalar cell), and
-//! SQL Server has no portable `EXPLAIN` that returns a parseable row estimate
-//! over that seam.
-//!
-//! What is probed (all through `query_scalar`, the same seam `init` uses):
-//! - **row estimate** — `SUM(rows)` from the `sys.partitions` catalog
-//!   (heap/clustered index, `index_id IN (0,1)`), the exact SQL `rivet init`
-//!   and `introspect_mssql_on` already run; `None` when the base
-//!   query does not read every row of one table (a filter, TOP, join, subquery).
-//! - **cursor / range min-max** — `MIN`/`MAX` of the cursor/chunk column for
-//!   incremental/chunked modes, surfaced as the `Cursor range` line.
-//! - **`uses_index`** — an honest catalog probe: is the range/cursor column the
-//!   single leading key of *some* index on the base table? No query-plan
-//!   inspection is fabricated, so `scan_type` is left `None` (the printer simply
-//!   omits the `Scan type` line) and the verdict rests on the catalog fact.
-//!
-//! Everything downstream (strategy, profile, parallelism, verdict, warnings,
-//! suggestion) is the shared `analysis` surface PG/MySQL feed, so MSSQL gets the
-//! same advice.
+//! SQL Server preflight diagnostics for `rivet check` / `rivet plan` (parity with [`super::postgres`] / [`super::mysql`]).
 
 use super::ExportDiagnostic;
 use super::analysis::*;
@@ -34,9 +9,7 @@ use crate::error::Result;
 use crate::source::Source;
 use crate::source::mssql::MssqlSource;
 
-/// Connect once and build one [`ExportDiagnostic`] per export. Rendering
-/// (TEXT table vs `--json`) is the caller's job in [`super::check`], so this
-/// returns the diagnostics rather than printing inline.
+/// Connect once and build one [`ExportDiagnostic`] per export.
 pub(super) fn check_mssql(
     url: &str,
     tls: Option<&TlsConfig>,
@@ -57,10 +30,7 @@ pub(super) fn diagnose_export_mssql(
     diagnose_mssql(&mut conn, export)
 }
 
-/// `@@MAX_CONNECTIONS` — SQL Server's configured `user connections` cap and the
-/// portable analogue of PG `max_connections` / MySQL `@@max_connections`. Read
-/// over the scalar seam; `None` when the probe fails (fail-soft, like the other
-/// engines) — the connection-limit check then only emits its skipped-note.
+/// `@@MAX_CONNECTIONS` — SQL Server's configured `user connections` cap and the portable analogue of PG `max_connections` / MySQL `@@max_connections`.
 fn fetch_max_connections_mssql(conn: &mut MssqlSource) -> Option<u32> {
     conn.query_scalar("SELECT @@MAX_CONNECTIONS")
         .ok()
@@ -73,8 +43,6 @@ fn diagnose_mssql(conn: &mut MssqlSource, export: &ExportConfig) -> Result<Expor
     let base_query = resolve_preflight_base_query(export);
     let base_query = base_query.as_str();
 
-    // `TOP 0` over a derived table executes the relations without scanning rows; the
-    // catalog-based probes below never touch them, so this is the schema check.
     let probe = format!("SELECT TOP 0 1 AS _ok FROM ({base_query}) AS _rivet_probe");
     if let Some(fail) = conn
         .query_scalar(&probe)
@@ -84,43 +52,21 @@ fn diagnose_mssql(conn: &mut MssqlSource, export: &ExportConfig) -> Result<Expor
         return Err(fail);
     }
 
-    // Recover the base relation (`[schema.]table`) the probes key on. `init`
-    // emits `query: SELECT cols FROM <table>`, and the `table:` shortcut emits
-    // `SELECT * FROM <table>` — both resolve to a single relation here. Anything
-    // the parser can't reduce to one base table (joins, subqueries, hand-written
-    // inline SQL) yields `None`, and the row-estimate / index probes degrade to
-    // an honest "unknown" rather than guessing the wrong relation. Resolved from
-    // the RENDERED query (not `preflight_base_table`'s configured-`table:` first
-    // order) because the MSSQL catalog probes key on the emitted relation.
     let base_table_owned = strip_select_star_from(base_query)
         .map(std::borrow::Cow::Borrowed)
         .or_else(|| table_from_simple_query(base_query));
     let base_table = base_table_owned.as_deref();
-    // Catalog counts and bare-table MIN/MAX describe the export only when it reads every row.
     let unfiltered_table = whole_table_relation(base_table, base_query);
 
-    // build_plan auto-resolves an UNSET chunked chunk_column to the single-integer PK, and
-    // `auto_pk_probe_target` is that gate — so range_col / the strategy label / the index
-    // probe target the SAME column, not a `?` placeholder on a PK-indexed table.
     let auto_pk: Option<String> =
         auto_pk_probe_target(export, base_table).and_then(|t| single_int_pk_mssql(conn, t));
 
-    // chunk_column (range) OR chunk_by_key (keyset) OR cursor_column (incremental) OR the
-    // auto-resolved PK above — the run's real read column.
     let range_col = preflight_range_col_resolved(export, auto_pk.as_deref());
 
-    // Row estimate from the `sys.partitions` catalog — the same fast,
-    // no-`COUNT(*)` probe `rivet init` and `introspect_mssql_on`
-    // run. `None` (printer omits the line) when the query does not read the whole
-    // table or the stats row is absent.
     let row_estimate = unfiltered_table.and_then(|table| row_estimate_mssql(conn, table));
 
-    // Average bytes/row from the `dm_db_partition_stats` DMV — feeds the
-    // oversized-chunk warning. `None` unless the query reads the whole table.
     let avg_row_bytes = unfiltered_table.and_then(|table| avg_row_bytes_mssql(conn, table));
 
-    // Cursor / chunk range. Incremental mode orders on the (possibly COALESCE'd)
-    // key expression; chunked/cursor modes take MIN/MAX of the range column.
     let (range_min, range_max) = if export.mode == ExportMode::Incremental {
         match incremental_key_expr(export, SourceType::Mssql) {
             Some(expr) => range_min_max_mssql(conn, base_query, unfiltered_table, &expr),
@@ -133,22 +79,9 @@ fn diagnose_mssql(conn: &mut MssqlSource, export: &ExportConfig) -> Result<Expor
         (None, None)
     };
 
-    // Honest index signal: no query plan is parsed (SQL Server has no portable
-    // `EXPLAIN` over the scalar seam), so `scan_type` stays `None` and the plan
-    // hint is a hard `false`. For chunked/incremental modes the catalog *can*
-    // answer the question that actually matters for the run
-    // (`WHERE range_col > $last` / `BETWEEN`): is the range column the single
-    // leading key of some index? With no plan hint to fall back on, that fact
-    // alone drives `uses_index` through the shared override policy.
     let catalog_index = index_probe_target(export, auto_pk.as_deref(), base_table)
         .and_then(|(table, col)| column_has_index_mssql(conn, table, col));
 
-    // SQL Server's `@@MAX_CONNECTIONS` IS the portable analogue of PG
-    // max_connections / MySQL @@max_connections (the configured `user
-    // connections` cap; default 32767 ≈ unlimited, so the warning is inert on a
-    // default install and fires only when an admin lowers it). Read it over the
-    // same query_scalar seam so the connection-limit check has parity with the
-    // other engines.
     let db_max_connections = fetch_max_connections_mssql(conn);
 
     Ok(assemble_diagnostic(
@@ -167,13 +100,7 @@ fn diagnose_mssql(conn: &mut MssqlSource, export: &ExportConfig) -> Result<Expor
     ))
 }
 
-/// Row estimate from the `sys.partitions` catalog for `[schema.]table`. Mirrors
-/// the SQL `rivet init` (`src/init/mssql.rs`) and
-/// `introspect_mssql_on` already run — rows in the heap /
-/// clustered index (`index_id IN (0,1)`), no `COUNT(*)` scan. `None` when the
-/// stats row is absent (view, no stats) or the probe fails; preflight is
-/// non-fatal, so a failure is logged at debug, never aborted.
-/// The preflight's verdict on a failed probe: a missing relation (208) as the shared refusal, a missing column (207) as the loud schema error, `None` for an operational failure.
+/// Row estimate from the `sys.partitions` catalog for `[schema.]table`.
 fn mssql_schema_verdict(e: anyhow::Error, export: &ExportConfig) -> Option<anyhow::Error> {
     if crate::source::names_a_missing_relation(&e) {
         return Some(crate::source::code_a_missing_relation(
@@ -187,22 +114,15 @@ fn mssql_schema_verdict(e: anyhow::Error, export: &ExportConfig) -> Option<anyho
     let detail = if m.contains("Invalid column name") {
         "a column in the export's query does not exist"
     } else {
-        return None; // operational → fail-soft
+        return None;
     };
-    // The `query_scalar` seam erases the *typed* tiberius error, but the SQL
-    // Server number survives in its Display string ("… (code: 208, …)"), so we
-    // parse it out for an "error 208" label matching PG's SQLSTATE / MySQL's
-    // code. A *typed* code would mean probing off the `query_scalar` seam — the
-    // ADR-0011 boundary noted in `schema_error.rs`.
     let code_label = mssql_error_code(&m)
         .map(|c| format!("error {c}"))
         .unwrap_or_else(|| "SQL Server schema error".into());
     Some(PreflightSchemaError::new(detail, code_label).into_error())
 }
 
-/// Pull the SQL Server error number from a tiberius error's Display string
-/// (`"… (code: 208, state: 1, class: 16)"`). `None` if tiberius ever changes the
-/// format — `mssql_schema_verdict` then falls back to a generic label, never panics.
+/// Pull the SQL Server error number from a tiberius error's Display string (`"… (code.
 fn mssql_error_code(msg: &str) -> Option<u16> {
     msg.split("code: ")
         .nth(1)?
@@ -232,11 +152,7 @@ fn row_estimate_mssql(conn: &mut MssqlSource, qualified_table: &str) -> Option<i
     }
 }
 
-/// Average bytes/row from `dm_db_partition_stats` for `[schema.]table`:
-/// `SUM(used_page_count) * 8192 / SUM(row_count)` over the heap / clustered
-/// index (`index_id IN (0,1)`) — a maintained stat, no scan (8 KB is SQL
-/// Server's fixed page size). `None` when the table is empty, the stats row is
-/// absent, or the probe fails (preflight is non-fatal).
+/// Average bytes/row from `dm_db_partition_stats` for `[schema.]table`.
 fn avg_row_bytes_mssql(conn: &mut MssqlSource, qualified_table: &str) -> Option<i64> {
     let (schema, table) = split_qualified(qualified_table);
     let sql = format!(
@@ -259,20 +175,12 @@ fn avg_row_bytes_mssql(conn: &mut MssqlSource, qualified_table: &str) -> Option<
 }
 
 /// `MIN`/`MAX` of `expr` over the export's base relation, as display strings.
-///
-/// When the base query reads every row of `<table>` we run
-/// `MIN/MAX … FROM <table>` directly (no subquery wrap); otherwise we wrap the
-/// user's query as a derived table so the bounds still come from exactly the
-/// rows the export reads. `CONVERT(varchar(64), …)` renders any orderable type
-/// (int, date, datetime2, uniqueidentifier) to the text form the printer shows.
 fn range_min_max_mssql(
     conn: &mut MssqlSource,
     base_query: &str,
     base_table: Option<&str>,
     expr: &str,
 ) -> (Option<String>, Option<String>) {
-    // One scalar cell only (the seam returns the first column), so MIN and MAX
-    // are folded into a single `US`-delimited value and split back apart.
     const US: char = '\u{1f}';
     let select_list = format!(
         "CONCAT(CONVERT(varchar(64), MIN({expr})), CHAR(31), CONVERT(varchar(64), MAX({expr})))"
@@ -296,16 +204,7 @@ fn range_min_max_mssql(
     }
 }
 
-/// `Some(true)` when `column` is the single leading key of *some* index on
-/// `[schema.]table`, `Some(false)` when the catalog probe ran cleanly and found
-/// none, `None` when the probe itself failed.
-///
-/// Range chunking (`WHERE col >= $lo AND col < $hi`) and incremental cursors
-/// (`WHERE col > $last ORDER BY col`) only benefit when the column leads an
-/// index (`ic.key_ordinal = 1`). This is the SQL Server analogue of the
-/// PG/MySQL leading-key probe; it asks `sys.index_columns` directly rather than
-/// inspect a query plan, so the signal is a catalog fact, not a heuristic.
-/// The single-integer PK `build_plan` auto-resolves an UNSET chunked `chunk_column` to, via the planner's own SQL.
+/// `Some(true)` when `column` is the single leading key of *some* index on `[schema.]table`, `Some(false)` when the catalog probe ran cleanly and found none, `None` when the probe itself failed.
 fn single_int_pk_mssql(conn: &mut MssqlSource, qualified_table: &str) -> Option<String> {
     let (schema, table) = split_qualified(qualified_table);
     conn.query_scalar(&crate::source::mssql::single_int_pk_sql(schema, table))
@@ -340,9 +239,7 @@ fn column_has_index_mssql(
     }
 }
 
-/// Split a `[schema.]table` name into `(schema, table)`, defaulting the schema
-/// to `dbo` when unqualified (SQL Server's default schema — matches `init` and
-/// `introspect_mssql_on`).
+/// Split a `[schema.]table` name into `(schema, table)`, defaulting the schema to `dbo` when unqualified (SQL Server's default schema.
 fn split_qualified(qualified_table: &str) -> (&str, &str) {
     match qualified_table.split_once('.') {
         Some((s, t)) => (s, t),
@@ -350,11 +247,6 @@ fn split_qualified(qualified_table: &str) -> (&str, &str) {
     }
 }
 
-// Reuse the PG simple-FROM parser for the `query: SELECT cols FROM <table>`
-// shape `init` emits — it recovers a single bare/dotted relation and rejects
-// joins/comma-lists/subqueries, exactly the conservatism the catalog probes
-// need. `strip_select_star_from` covers the `table:`-shortcut `SELECT * FROM …`
-// form (and is what the chunk runner keys on), so we try it first.
 use super::postgres::table_from_simple_query;
 use crate::sql::strip_select_star_from;
 
@@ -372,14 +264,6 @@ mod tests {
         assert_eq!(split_qualified("dbo.orders"), ("dbo", "orders"));
         assert_eq!(split_qualified("sales.line_items"), ("sales", "line_items"));
     }
-
-    // ── base-relation recovery: the row-estimate / index probes must key on
-    // the real table for both YAML shapes `rivet init` emits ──────────────────
-    //
-    // `init` renders `query: SELECT cols FROM <table>` to lock the column list;
-    // the `table:` shortcut renders `SELECT * FROM <table>`. Both must reduce to
-    // the single base relation so the partition-stats / index probes describe
-    // the real table — never a 1-row stub or the wrong relation.
 
     fn base_table_of(q: &str) -> Option<String> {
         strip_select_star_from(q)
@@ -401,22 +285,12 @@ mod tests {
 
     #[test]
     fn base_table_from_init_column_list_query() {
-        // The exact shape `rivet init` emits (explicit column list, schema-
-        // qualified relation). `strip_select_star_from` rejects it (not `*`),
-        // so the `table_from_simple_query` fallback must recover the relation.
         let q = "SELECT id, user_id, product FROM dbo.orders";
         assert_eq!(base_table_of(q).as_deref(), Some("dbo.orders"));
     }
 
     #[test]
     fn base_table_none_for_multi_relation_query() {
-        // A genuinely multi-relation FROM (an immediate JOIN, or a comma list)
-        // can't be reduced to one base relation — the probes must see `None`
-        // and degrade to "unknown" rather than catalog-probe the wrong table
-        // and falsely promote the verdict. A FROM-clause subquery is likewise
-        // not a base table. (Note: `strip_select_star_from` is the first gate
-        // and already rejects every trailing clause, so the `table:` shortcut
-        // never reaches the looser `table_from_simple_query` fallback here.)
         assert_eq!(
             base_table_of("SELECT * FROM orders JOIN users ON orders.user_id = users.id"),
             None
@@ -471,7 +345,6 @@ mod tests {
 
     #[test]
     fn mssql_error_code_parsed_from_tiberius_display() {
-        // The exact shape tiberius renders for a missing relation (verified live).
         let m = "mssql: scalar query failed: Token error: 'Invalid object name \
                  'ordrs'.' on server x executing  on line 1 (code: 208, state: 1, class: 16)";
         assert_eq!(mssql_error_code(m), Some(208));

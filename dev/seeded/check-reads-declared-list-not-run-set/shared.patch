@@ -1,35 +1,8 @@
---- a/src/preflight/mod.rs
-+++ b/src/preflight/mod.rs
-@@ -377,8 +377,13 @@
- ) -> Result<bool> {
-     let config = Config::load_with_params(config_path, params)?;
- 
--    let declared = crate::config::declared_exports(&config, export_name)?;
--    let exports: Vec<&ExportConfig> = declared.iter().collect();
-+    let named = export_name
-+        .map(|name| crate::config::declared_exports(&config, Some(name)))
-+        .transpose()?;
-+    let exports: Vec<&ExportConfig> = match &named {
-+        Some(declared) => declared.iter().collect(),
-+        None => config.exports.iter().collect(),
-+    };
- 
-     // A preflight must never bless a config the RUNNER refuses.
-     //
---- a/src/preflight/doctor.rs
-+++ b/src/preflight/doctor.rs
-@@ -218,7 +218,7 @@
-     }
- 
-     let mut seen_destinations: Vec<String> = Vec::new();
--    for export in &crate::config::declared_exports(&config, None)? {
-+    for export in &config.exports {
-         let dest_key = super::destination_identity(&export.destination);
-         if seen_destinations.contains(&dest_key) {
-             continue;
+diff --git a/src/cli/dispatch.rs b/src/cli/dispatch.rs
+index aa63edf..8947d02 100644
 --- a/src/cli/dispatch.rs
 +++ b/src/cli/dispatch.rs
-@@ -599,8 +599,13 @@
+@@ -604,8 +604,13 @@ fn batch_plans(
      let config_dir = std::path::Path::new(config_path)
          .parent()
          .unwrap_or_else(|| std::path::Path::new("."));
@@ -45,7 +18,7 @@
      let mut probe = if config.source.columns_from_grants() {
          Some(
              crate::source::create_source(&config.source)
-@@ -611,7 +616,7 @@
+@@ -616,7 +621,7 @@ fn batch_plans(
      };
      let mut plans = Vec::new();
      for e in selected
@@ -54,3 +27,36 @@
          .filter(|e| e.mode != crate::config::ExportMode::Cdc)
      {
          let plan = crate::plan::build::build_plan_on(
+diff --git a/src/preflight/doctor.rs b/src/preflight/doctor.rs
+index 83b4dbb..103dbe7 100644
+--- a/src/preflight/doctor.rs
++++ b/src/preflight/doctor.rs
+@@ -257,7 +257,7 @@ pub fn doctor(config_path: &str, json: bool) -> Result<()> {
+     }
+ 
+     let mut seen_destinations: Vec<String> = Vec::new();
+-    for export in &crate::config::declared_exports(&config, None)? {
++    for export in &config.exports {
+         let dest_key = super::destination_identity(&export.destination);
+         if seen_destinations.contains(&dest_key) {
+             continue;
+diff --git a/src/preflight/mod.rs b/src/preflight/mod.rs
+index 2b0b70e..5d82889 100644
+--- a/src/preflight/mod.rs
++++ b/src/preflight/mod.rs
+@@ -322,8 +322,13 @@ pub fn check(
+ ) -> Result<bool> {
+     let config = Config::load_with_params(config_path, params)?;
+ 
+-    let declared = crate::config::declared_exports(&config, export_name)?;
+-    let exports: Vec<&ExportConfig> = declared.iter().collect();
++    let named = export_name
++        .map(|name| crate::config::declared_exports(&config, Some(name)))
++        .transpose()?;
++    let exports: Vec<&ExportConfig> = match &named {
++        Some(declared) => declared.iter().collect(),
++        None => config.exports.iter().collect(),
++    };
+ 
+     let illegal = unplannable_exports(&exports);
+     if !illegal.is_empty() {
