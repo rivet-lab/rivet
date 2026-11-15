@@ -23,7 +23,7 @@ use analysis::{
     recommend_parallelism, recommend_profile,
 };
 #[allow(unused_imports)]
-pub use doctor::doctor;
+pub use doctor::{RunPlanProbe, doctor};
 // Reused at the run-time connect seam (src/pipeline/single.rs) so a failed
 // `rivet run` carries the same category + remediation hint `rivet doctor` gives.
 pub(crate) use doctor::{categorize_source_error, source_error_hint};

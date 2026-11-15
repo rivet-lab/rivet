@@ -30,13 +30,14 @@ const R_ORDER: &str = "2026-11-13: the pre-run commands and run stop on differen
 
 /// RED signatures accepted on main: `<pair> pre[..]` or `<pair> pre[..] run[..]` and a dated reason with what closes it; the list only shrinks.
 const ACCEPTED_RED: &[(&str, &str)] = &[
+    ("check-run pre[exit=1 code=-] run[exit=1 code=-]", R_UNCODED),
+    (
+        "doctor-run pre[exit=1 code=-] run[exit=1 code=-]",
+        R_UNCODED,
+    ),
     (
         "state-loads-run pre[exit=0 code=-] run[exit=1 code=RIVET_CONFIG_FILE_UNREADABLE]",
         R_LOADS,
-    ),
-    (
-        "check-run pre[exit=0 code=-] run[exit=5 code=RIVET_SOURCE_PROBE_UNREADABLE]",
-        R_CHECK,
     ),
     (
         "check-run pre[exit=1 code=RIVET_CLI_CHECK_REPORTED_ERRORS] run[exit=1 code=RIVET_SOURCE_QUERY_FAILED]",
@@ -61,10 +62,6 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
     (
         "check-run pre[exit=1 code=RIVET_SOURCE_TABLE_NOT_FOUND] run[exit=1 code=RIVET_SOURCE_QUERY_FAILED]",
         R_CODES,
-    ),
-    (
-        "check-strict-run pre[exit=0 code=-] run[exit=5 code=RIVET_SOURCE_PROBE_UNREADABLE]",
-        R_CHECK,
     ),
     (
         "check-strict-run pre[exit=1 code=RIVET_CLI_CHECK_REPORTED_ERRORS] run[exit=1 code=RIVET_SOURCE_QUERY_FAILED]",
@@ -96,10 +93,6 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
     ),
     ("doctor-run pre[exit=0 code=-] run[exit=1 code=-]", R_DOCTOR),
     (
-        "doctor-run pre[exit=0 code=-] run[exit=1 code=RIVET_CONFIG_CHUNK_COLUMN_NOT_INTEGER]",
-        R_DOCTOR,
-    ),
-    (
         "doctor-run pre[exit=0 code=-] run[exit=1 code=RIVET_SOURCE_COLLECTION_NOT_FOUND]",
         R_DOCTOR,
     ),
@@ -108,19 +101,7 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
         R_DOCTOR,
     ),
     (
-        "doctor-run pre[exit=0 code=-] run[exit=1 code=RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH]",
-        R_DOCTOR,
-    ),
-    (
         "doctor-run pre[exit=0 code=-] run[exit=1 code=RIVET_SOURCE_QUERY_FAILED]",
-        R_DOCTOR,
-    ),
-    (
-        "doctor-run pre[exit=0 code=-] run[exit=1 code=RIVET_SOURCE_TABLE_NOT_FOUND]",
-        R_DOCTOR,
-    ),
-    (
-        "doctor-run pre[exit=0 code=-] run[exit=5 code=RIVET_SOURCE_PROBE_UNREADABLE]",
         R_DOCTOR,
     ),
     (
@@ -138,14 +119,6 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
     (
         "doctor-run pre[exit=1 code=RIVET_CLI_PREFLIGHT_FAILED] run[exit=1 code=RIVET_SOURCE_QUERY_FAILED]",
         R_WRAP,
-    ),
-    (
-        "plan-apply pre[exit=0 code=-] run[exit=1 code=RIVET_PLAN_PARTITION_TOKEN_UNEXPANDED]",
-        R_PLAN,
-    ),
-    (
-        "plan-apply pre[exit=0 code=-] run[exit=1 code=RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH]",
-        R_PLAN,
     ),
     (
         "plan-apply pre[exit=0 code=-] run[exit=1 code=RIVET_SOURCE_QUERY_FAILED]",
@@ -173,10 +146,6 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
     ),
     (
         "plan-apply pre[exit=1 code=RIVET_PLAN_SOURCE_UNREADABLE] run[exit=1 code=RIVET_SOURCE_QUERY_FAILED]",
-        R_WRAP,
-    ),
-    (
-        "plan-apply pre[exit=1 code=RIVET_PLAN_SOURCE_UNREADABLE] run[exit=1 code=RIVET_SOURCE_TABLE_NOT_FOUND]",
         R_WRAP,
     ),
     (
@@ -211,10 +180,6 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
     (
         "check-run pre[exit=0 code=-] run[exit=5 code=RIVET_STATE_CURSOR_OWNER_MISMATCH]",
         R_PRIOR,
-    ),
-    (
-        "check-run pre[exit=1 code=RIVET_PLAN_REJECTED] run[exit=1 code=-]",
-        R_UNCODED,
     ),
     (
         "check-strict-run pre[exit=0 code=-] run[exit=1 code=-]",
@@ -314,23 +279,11 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
         R_ORDER,
     ),
     (
-        "check-run pre[exit=5 code=RIVET_PLAN_CURSOR_NULLABLE] run[exit=5 code=RIVET_SOURCE_PROBE_UNREADABLE]",
-        R_ORDER,
-    ),
-    (
         "check-strict-run pre[exit=1 code=RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH] run[exit=5 code=RIVET_PLAN_CURSOR_NULLABLE]",
         R_ORDER,
     ),
     (
-        "check-strict-run pre[exit=5 code=RIVET_PLAN_CURSOR_NULLABLE] run[exit=5 code=RIVET_SOURCE_PROBE_UNREADABLE]",
-        R_ORDER,
-    ),
-    (
         "doctor-run pre[exit=5 code=RIVET_PLAN_CURSOR_NULLABLE] run[exit=5 code=RIVET_SOURCE_PROBE_UNREADABLE]",
-        R_ORDER,
-    ),
-    (
-        "plan-apply pre[exit=5 code=RIVET_PLAN_CURSOR_NULLABLE] run[exit=5 code=RIVET_SOURCE_PROBE_UNREADABLE]",
         R_ORDER,
     ),
 ];

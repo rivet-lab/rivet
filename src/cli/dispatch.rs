@@ -103,7 +103,18 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             json,
             target,
         } => dispatch_check(config, export, params, type_report, strict, json, target),
-        Commands::Doctor { config, json } => preflight::doctor(&config, json),
+        Commands::Doctor { config, json } => preflight::doctor(&config, json, &|config, dir| {
+            Ok(crate::pipeline::planning::plan_run(
+                config,
+                dir,
+                None,
+                None,
+                crate::pipeline::planning::PlanFlags::default(),
+            )?
+            .into_iter()
+            .map(|(name, verdict)| (name, verdict.map(|_| ())))
+            .collect())
+        }),
         Commands::Cdc {
             source,
             source_env,

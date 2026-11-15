@@ -125,7 +125,11 @@ mod transient_tests {
     }
 }
 
-pub fn doctor(config_path: &str, json: bool) -> Result<()> {
+/// What `run` would plan for every batch export of a config, one verdict per export; supplied by the caller above the preflight layer.
+pub type RunPlanProbe<'a> =
+    &'a dyn Fn(&Config, &std::path::Path) -> Result<Vec<(String, Result<()>)>>;
+
+pub fn doctor(config_path: &str, json: bool, run_plan: RunPlanProbe<'_>) -> Result<()> {
     if !json {
         println!("rivet doctor: verifying auth for config '{}'", config_path);
         println!();
@@ -274,17 +278,11 @@ pub fn doctor(config_path: &str, json: bool) -> Result<()> {
 
     let mut run_refusal: Option<anyhow::Error> = None;
     if source_ok {
-        let planned = crate::pipeline::planning::plan_run(
-            &config,
-            config_dir,
-            None,
-            None,
-            crate::pipeline::planning::PlanFlags::default(),
-        )
-        .unwrap_or_else(|e| vec![("config".to_string(), Err(e))]);
+        let planned =
+            run_plan(&config, config_dir).unwrap_or_else(|e| vec![("config".to_string(), Err(e))]);
         for (name, verdict) in planned {
             let (ok, detail) = match verdict {
-                Ok(_) => (true, None),
+                Ok(()) => (true, None),
                 Err(e) => {
                     let detail = trim_probe_error(&e);
                     all_ok = false;
@@ -1049,7 +1047,10 @@ mod tests {
         let err = doctor_failure_error(Some(transient_probe("connection refused (os error 61)")));
         crate::error::assert_coded(&err, "RIVET_CLI_PREFLIGHT_UNVERIFIED", 2);
         // A config that does not load keeps the config error's own code.
-        let err = doctor("/nonexistent/rivet-doctor-test.yaml", false).unwrap_err();
+        let err = doctor("/nonexistent/rivet-doctor-test.yaml", false, &|_, _| {
+            Ok(vec![])
+        })
+        .unwrap_err();
         crate::error::assert_coded(&err, "RIVET_CONFIG_FILE_UNREADABLE", 1);
     }
 
@@ -1126,7 +1127,7 @@ exports:
         std::fs::write(&config_path, yaml).unwrap();
 
         // Source auth fails on the unset env var, and doctor must say so — then still probe both paths.
-        let err = doctor(config_path.to_str().unwrap(), false)
+        let err = doctor(config_path.to_str().unwrap(), false, &|_, _| Ok(vec![]))
             .expect_err("an unresolvable source must fail doctor, not pass it");
         assert!(
             format!("{err:#}").contains("one or more preflight checks failed"),
@@ -1645,7 +1646,7 @@ exports:
         // Invalid YAML structure → Config::load fails with a parse/missing-field
         // message; doctor must convert that to a pointer error.
         std::fs::write(&cfg, "source: not-a-mapping\n").unwrap();
-        let err = doctor(cfg.to_str().unwrap(), false)
+        let err = doctor(cfg.to_str().unwrap(), false, &|_, _| Ok(vec![]))
             .expect_err("doctor must return Err when the config fails to load");
         let msg = err.to_string();
         assert!(
@@ -1678,7 +1679,7 @@ exports:
         let config_path = dir.path().join("rivet.yaml");
         std::fs::write(&config_path, yaml).unwrap();
 
-        let err = doctor(config_path.to_str().unwrap(), true)
+        let err = doctor(config_path.to_str().unwrap(), true, &|_, _| Ok(vec![]))
             .expect_err("a directory under a regular file cannot be written");
         assert_eq!(
             format!("{err:#}"),
@@ -1716,8 +1717,8 @@ exports:
             "fixture: a failed CDC health check with a detail: {cdc:?}"
         );
 
-        let err =
-            doctor(config_path.to_str().unwrap(), true).expect_err("the source URL is not set");
+        let err = doctor(config_path.to_str().unwrap(), true, &|_, _| Ok(vec![]))
+            .expect_err("the source URL is not set");
         assert_eq!(
             format!("{err:#}"),
             "doctor: one or more preflight checks failed (see output above)"
