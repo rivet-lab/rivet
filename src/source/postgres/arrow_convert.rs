@@ -404,21 +404,27 @@ pub(super) fn rivet_type_for_pg_column(
     col: &postgres::Column,
     column_overrides: &ColumnOverrides,
     numeric_hints: Option<&HashMap<String, (u8, i8)>>,
-) -> RivetType {
-    crate::types::resolve_or(column_overrides, col.name(), || {
-        // Autodetect: a NUMERIC catalog hint (only available for a single-table
-        // SELECT) supplies the precision/scale the wire protocol omits;
-        // otherwise map the wire type directly.
-        if *col.type_() == Type::NUMERIC
-            && let Some(&(p, s)) = numeric_hints.and_then(|h| h.get(col.name()))
-        {
-            return RivetType::Decimal {
-                precision: p,
-                scale: s,
-            };
-        }
-        pg_type_to_rivet(col.type_())
-    })
+) -> crate::error::Result<RivetType> {
+    crate::types::resolve_column(
+        crate::types::override_table::Engine::Postgres,
+        column_overrides,
+        col.name(),
+        col.type_().name(),
+        || {
+            // Autodetect: a NUMERIC catalog hint (only available for a single-table
+            // SELECT) supplies the precision/scale the wire protocol omits;
+            // otherwise map the wire type directly.
+            if *col.type_() == Type::NUMERIC
+                && let Some(&(p, s)) = numeric_hints.and_then(|h| h.get(col.name()))
+            {
+                return RivetType::Decimal {
+                    precision: p,
+                    scale: s,
+                };
+            }
+            pg_type_to_rivet(col.type_())
+        },
+    )
 }
 
 /// Build an Arrow `Schema` from PostgreSQL `Column` descriptors by routing
@@ -441,7 +447,7 @@ pub(super) fn pg_columns_to_schema(
     let mut fields: Vec<Field> = Vec::with_capacity(columns.len());
     let mut errors: Vec<String> = Vec::new();
     for col in columns {
-        let rivet = rivet_type_for_pg_column(col, column_overrides, numeric_catalog_hints);
+        let rivet = rivet_type_for_pg_column(col, column_overrides, numeric_catalog_hints)?;
         let source = SourceColumn::simple(col.name(), col.type_().name(), true);
         let mapping = TypeMapping::from_source(&source, rivet);
         match build_arrow_field(&mapping) {

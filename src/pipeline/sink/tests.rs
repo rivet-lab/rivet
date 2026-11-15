@@ -1,14 +1,9 @@
-//! Unit tests for `ExportSink` — extracted from `mod.rs` to keep the
-//! implementation file focused.  See [`super`] for the public surface.
+//! Unit tests for `ExportSink` — extracted from `mod.rs` to keep the implementation file focused.
 
 use super::*;
 use arrow::array::*;
 use arrow::datatypes::{DataType, Field, Schema};
 use std::sync::Arc;
-
-// ─── extract_last_cursor_value tests live in src/pipeline/sink/cursor.rs
-
-// ─── schema_without_internal / record_batch_without_internal ──
 
 #[test]
 fn strip_internal_column_from_schema() {
@@ -56,19 +51,7 @@ fn strip_internal_column_from_batch() {
     assert_eq!(ids.value(1), 2);
 }
 
-// ─── I1: Finalize Before Write ───────────────────────────────────────────────
-
-/// I1 (ADR-0001) — The temp-file writer must be finalized (`w.finish()`) before
-/// the file is transferred to the destination.
-///
-/// This test verifies that after `writer.take()` + `w.finish()`, the temp file
-/// is non-empty and complete — i.e. the destination would receive a valid,
-/// non-truncated file.
-///
-/// Implementation: `pipeline/single.rs` calls `sink.writer.take()` and `w.finish()`
-/// (lines 149–151) *before* entering the `dest.write()` loop.  This unit test
-/// anchors the contract at the sink layer: a finished writer always yields a
-/// readable, complete file.
+/// I1 (ADR-0001) — The temp-file writer must be finalized (`w.finish()`) before the file is transferred to the destination.
 #[test]
 fn i1_writer_finish_produces_complete_file_before_destination_write() {
     use crate::source::BatchSink;
@@ -78,8 +61,6 @@ fn i1_writer_finish_produces_complete_file_before_destination_write() {
     use std::sync::Arc;
 
     let mut sink = minimal_sink();
-    // Switch to Parquet so we can verify the footer is present (CSV also works).
-    // Use the default Csv format from minimal_sink() — simpler, no codec deps.
 
     let schema = Arc::new(Schema::new(vec![Field::new("name", DataType::Utf8, false)]));
     let batch = RecordBatch::try_new(
@@ -88,7 +69,6 @@ fn i1_writer_finish_produces_complete_file_before_destination_write() {
     )
     .unwrap();
 
-    // Writer is absent until the first schema arrives.
     assert!(sink.writer.is_none(), "writer must start as None");
 
     sink.on_schema(schema).unwrap();
@@ -99,8 +79,6 @@ fn i1_writer_finish_produces_complete_file_before_destination_write() {
 
     sink.on_batch(&batch).unwrap();
 
-    // I1: take and finish the writer before any destination write.
-    // This mirrors single.rs:149-151: `if let Some(w) = sink.writer.take() { w.finish()?; }`
     if let Some(w) = sink.writer.take() {
         w.finish()
             .expect("I1: writer.finish() must succeed before destination write");
@@ -110,9 +88,6 @@ fn i1_writer_finish_produces_complete_file_before_destination_write() {
         "writer must be consumed after finish()"
     );
 
-    // The temp file must be non-empty — a finished writer produces a complete file.
-    // An unfinished Parquet file (no footer) or CSV (missing last line) would be
-    // detected by the destination consumer; finish() prevents this.
     let file_len = std::fs::metadata(sink.tmp.path())
         .expect("temp file must be accessible after finish()")
         .len();
@@ -123,13 +98,10 @@ fn i1_writer_finish_produces_complete_file_before_destination_write() {
         file_len
     );
 
-    // Total rows must reflect the written batch.
     assert_eq!(sink.total_rows, 3, "total_rows must count written rows");
     assert!(!sink.is_empty(), "a sink that streamed rows is not empty");
     assert!(minimal_sink().is_empty(), "a fresh sink is empty");
 }
-
-// ─── quality tracking ────────────────────────────────────────
 
 #[test]
 fn track_quality_counts_nulls() {
@@ -194,9 +166,7 @@ fn run_quality_checks_detects_excess_nulls() {
     assert!(issues[0].message.contains("null ratio"));
 }
 
-/// The null-ratio rule is a strict `>` on `nulls / rows`: exactly the cap passes, one
-/// more null fails, and a small count over a large total stays small. RED against
-/// `>=` at the boundary and against `*` / `%` in place of the division.
+/// The null-ratio rule is a strict `>` on `nulls / rows`.
 #[test]
 fn null_ratio_at_exactly_the_cap_passes_and_one_null_over_it_fails() {
     let mut sink = minimal_sink_with_quality(vec!["col".into()], vec![]);
@@ -234,12 +204,7 @@ fn the_byte_cap_splits_at_the_cap_and_never_an_empty_part() {
     assert!(!should_split(5000, None, 5), "no cap declared");
 }
 
-/// Every date/timestamp Arrow type has a unit — the engines produce `Date32` (a DATE)
-/// and microsecond `Timestamp` (PostgreSQL/MySQL/SQL Server date-times; nanoseconds
-/// under the `timestamp_ns` override); the other arms are the type's remaining units.
-/// A type mapped to `None` is a part the writer never budgets and a wide history
-/// refused at load time — which is what a non-temporal column named as the partition
-/// gets (SQL Server's `rowversion`, `BYTES` in the warehouse), by design, with a warning.
+/// Every date/timestamp Arrow type has a unit.
 #[test]
 fn every_date_and_timestamp_arrow_type_has_a_partition_unit() {
     use arrow::datatypes::TimeUnit;
@@ -290,8 +255,6 @@ fn run_quality_checks_detects_duplicates() {
     assert!(issues[0].message.contains("duplicate"));
 }
 
-// ─── unique_max_entries cap ───────────────────────────────────
-
 fn sink_with_unique_cap(unique_cols: Vec<String>, cap: usize) -> ExportSink {
     ExportSink {
         quality: QualityTracker::new(Some(crate::config::QualityConfig {
@@ -307,7 +270,6 @@ fn sink_with_unique_cap(unique_cols: Vec<String>, cap: usize) -> ExportSink {
 
 #[test]
 fn unique_cap_stops_inserting_at_limit() {
-    // cap=3 with 5 distinct rows — set must stop growing at 3
     let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
     let batch = RecordBatch::try_new(
         schema.clone(),
@@ -376,7 +338,6 @@ fn duplicates_found_before_the_unique_cap_still_fail_the_run() {
 #[test]
 fn unique_no_cap_grows_unbounded() {
     use crate::source::BatchSink;
-    // No unique_max_entries — all 10 rows must be tracked
     let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
     let batch = RecordBatch::try_new(
         schema.clone(),
@@ -399,7 +360,6 @@ fn unique_no_cap_grows_unbounded() {
 
 #[test]
 fn unique_cap_column_skipped_in_subsequent_batches() {
-    // After cap is hit in batch 1, batch 2 must be skipped entirely for that column.
     let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
     let batch1 = RecordBatch::try_new(
         schema.clone(),
@@ -413,14 +373,14 @@ fn unique_cap_column_skipped_in_subsequent_batches() {
     .unwrap();
     let mut sink = sink_with_unique_cap(vec!["id".into()], 2);
     sink.quality.unique_indices = vec![(0, "id".into())];
-    sink.track_quality(&batch1).unwrap(); // cap hit here
+    sink.track_quality(&batch1).unwrap();
     let len_after_first = sink
         .quality
         .unique_sets
         .get("id")
         .map(|s| s.len())
         .unwrap_or(0);
-    sink.track_quality(&batch2).unwrap(); // must be a no-op
+    sink.track_quality(&batch2).unwrap();
     let len_after_second = sink
         .quality
         .unique_sets
@@ -433,8 +393,6 @@ fn unique_cap_column_skipped_in_subsequent_batches() {
     );
 }
 
-// ─── per-value ceiling (OPT-1) ────────────────────────────────
-
 fn utf8_batch(values: Vec<&str>) -> RecordBatch {
     let schema = Arc::new(Schema::new(vec![Field::new("body", DataType::Utf8, true)]));
     RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(values))]).unwrap()
@@ -443,7 +401,7 @@ fn utf8_batch(values: Vec<&str>) -> RecordBatch {
 #[test]
 fn value_ceiling_rejects_oversized_cell() {
     let mut sink = minimal_sink();
-    sink.max_value_bytes = Some(1024); // 1 KiB ceiling for the test
+    sink.max_value_bytes = Some(1024);
     let big = "x".repeat(2048);
     let batch = utf8_batch(vec!["small", &big]);
     let err = sink.check_value_ceiling(&batch).unwrap_err();
@@ -464,7 +422,7 @@ fn value_ceiling_passes_under_limit() {
 #[test]
 fn value_ceiling_disabled_when_none() {
     let mut sink = minimal_sink();
-    sink.max_value_bytes = None; // guard off
+    sink.max_value_bytes = None;
     let big = "x".repeat(10 * 1024 * 1024);
     let batch = utf8_batch(vec![&big]);
     assert!(
@@ -610,8 +568,6 @@ fn a_pipelined_sink_reports_nulled_cells_into_the_plan_shared_counter() {
     );
 }
 
-// ─── helpers ─────────────────────────────────────────────────
-
 fn minimal_sink() -> ExportSink {
     ExportSink {
         bytes_read: Default::default(),
@@ -671,8 +627,6 @@ fn minimal_sink_with_quality(null_cols: Vec<String>, unique_cols: Vec<String>) -
     }
 }
 
-// ── partition budget rollover ────────────────────────────────────────────
-
 /// A sink budgeted to `cap` partitions of a `Date32` column named `d`.
 fn sink_with_partition_budget(cap: usize) -> (ExportSink, Arc<Schema>) {
     let schema = Arc::new(Schema::new(vec![Field::new("d", DataType::Date32, true)]));
@@ -691,15 +645,7 @@ fn day_batch(schema: &Arc<Schema>, days: Vec<Option<i32>>) -> RecordBatch {
     RecordBatch::try_new(schema.clone(), vec![Arc::new(Date32Array::from(days))]).unwrap()
 }
 
-/// Nothing splits one Parquet file at load time, so a part that outgrows the load job's
-/// partition budget cannot be loaded at all. The sink must close the part on the row
-/// that would overspend it, mid-batch, and carry the rest into the next one.
-///
-/// RED-proven against deleting the rotation from `on_batch_inner`: no part is completed
-/// and all five days land in one file. It also caught the shipping bug it was written
-/// for — a rotation that did not clear `part_buckets` re-rotated on the same rows for
-/// ever, which surfaced here as a stack overflow. It does NOT grade distinctness (it
-/// stays green when every row is counted as its own partition); the two tests below do.
+/// Nothing splits one Parquet file at load time, so a part that outgrows the load job's partition budget cannot be loaded at all.
 #[test]
 fn a_batch_past_the_partition_budget_closes_the_part_mid_batch() {
     let (mut sink, schema) = sink_with_partition_budget(3);
@@ -709,8 +655,6 @@ fn a_batch_past_the_partition_budget_closes_the_part_mid_batch() {
         "the fixture must resolve the partition column, or it grades nothing"
     );
 
-    // Five distinct days against a budget of three: days 0,1,2 fill the first part and
-    // day 3 opens the second.
     sink.on_batch_inner(&day_batch(
         &schema,
         vec![Some(0), Some(1), Some(2), Some(3), Some(4)],
@@ -722,10 +666,6 @@ fn a_batch_past_the_partition_budget_closes_the_part_mid_batch() {
         1,
         "the part must be closed before the fourth partition is written"
     );
-    // A closing part tells the loader how many partitions it holds (the footer note
-    // `split_now` writes): the loader's own bound is the footer's min/max, which
-    // over-counts a part cut at 4,000 DISTINCT days over a gappy history — and
-    // refused, by name, a file the writer sized to fit. The open part holds two days.
     assert_eq!(
         sink.partition.footer_note().as_deref(),
         Some("d|day|2"),
@@ -743,10 +683,7 @@ fn a_batch_past_the_partition_budget_closes_the_part_mid_batch() {
     assert_eq!(sink.total_rows, 5, "no row is dropped by the rotation");
 }
 
-/// The LAST part of an export never rotates — it is closed by the runner — and it is
-/// the one part every export has. It must carry the footer note too, or the loader
-/// bounds it by its span and refuses the file the writer sized to fit. Read back from
-/// the Parquet the sink wrote. RED against a bare `writer.take()` + `finish()`.
+/// The LAST part of an export never rotates.
 #[test]
 fn the_final_part_records_its_partitions_in_the_footer_like_a_rotated_one() {
     use parquet::file::reader::FileReader as _;
@@ -784,11 +721,7 @@ fn the_final_part_records_its_partitions_in_the_footer_like_a_rotated_one() {
     );
 }
 
-/// The budget counts DISTINCT partitions, not rows: a wide batch that all lands in one
-/// day costs one partition and must never rotate.
-///
-/// RED-proven against dropping the already-held check in `rows_that_fit`, which makes
-/// every row spend budget: 5,000 rows then demand 5,000 rotations.
+/// The budget counts DISTINCT partitions, not rows.
 #[test]
 fn a_wide_batch_inside_one_partition_never_rotates() {
     let (mut sink, schema) = sink_with_partition_budget(1);
@@ -804,11 +737,7 @@ fn a_wide_batch_inside_one_partition_never_rotates() {
     assert_eq!(sink.total_rows, 5_000);
 }
 
-/// Rows with a NULL key share the warehouse's one NULL partition, so they cost one
-/// bucket between them — not one each, which would rotate on every row.
-///
-/// RED-proven against the same mutant as the test above: with every row spending budget,
-/// three NULLs rotate twice instead of never.
+/// Rows with a NULL key share the warehouse's one NULL partition, so they cost one bucket between them.
 #[test]
 fn null_keys_cost_a_single_partition() {
     let (mut sink, schema) = sink_with_partition_budget(1);
@@ -821,14 +750,7 @@ fn null_keys_cost_a_single_partition() {
     assert_eq!(sink.total_rows, 3);
 }
 
-/// An export the load does not partition is sized by `max_file_size` alone — the
-/// counting path must stay off rather than rotate on some default.
-///
-/// This one pins the OFF switch and nothing else: it stays green against every mutant
-/// tried on the budget (the rotation deleted, the distinctness check dropped, the
-/// boundary loosened), because with no partition declared the code under test never
-/// runs. Kept as a guard against a default creeping in, not offered as evidence that
-/// the budget works.
+/// An export the load does not partition is sized by `max_file_size` alone.
 #[test]
 fn an_unpartitioned_export_is_never_rotated_by_the_budget() {
     let schema = Arc::new(Schema::new(vec![Field::new("d", DataType::Date32, true)]));
@@ -842,8 +764,6 @@ fn an_unpartitioned_export_is_never_rotated_by_the_budget() {
     assert!(sink.completed_parts.is_empty());
     assert_eq!(sink.total_rows, 500);
 }
-
-// ── batch memory cap ─────────────────────────────────────────────────────
 
 fn make_int_batch(n_rows: usize, n_cols: usize) -> RecordBatch {
     use arrow::array::Int64Array;
@@ -862,16 +782,15 @@ fn make_int_batch(n_rows: usize, n_cols: usize) -> RecordBatch {
 
 #[test]
 fn warn_policy_does_not_fail_on_oversized_batch() {
-    let batch = make_int_batch(1_000, 10); // 10 × 1000 × 8 B = ~80 KB
+    let batch = make_int_batch(1_000, 10);
     let batch_bytes = crate::tuning::SourceTuning::batch_memory_bytes(&batch);
     assert!(batch_bytes > 0);
 
     let mut sink = ExportSink {
-        max_batch_memory_bytes: Some(1), // 1 byte — every batch will exceed
+        max_batch_memory_bytes: Some(1),
         batch_memory_policy: crate::tuning::BatchMemoryPolicy::Warn,
         ..minimal_sink()
     };
-    // Provide an enriched schema so on_batch_inner can write batches
     use arrow::datatypes::{DataType, Field, Schema};
     let schema = Arc::new(Schema::new(
         (0..10)
@@ -880,9 +799,8 @@ fn warn_policy_does_not_fail_on_oversized_batch() {
     ));
     sink.enriched_schema = Some(schema);
 
-    // Should not return an error even though limit is exceeded
     assert!(sink.on_batch_inner(&batch).is_ok());
-    assert_eq!(sink.oversized_batch_count, 0); // counter is set in on_batch, not inner
+    assert_eq!(sink.oversized_batch_count, 0);
 }
 
 #[test]
@@ -906,7 +824,7 @@ fn fail_policy_returns_error_on_oversized_batch() {
     .unwrap();
 
     let mut sink = ExportSink {
-        max_batch_memory_bytes: Some(1), // always exceeded
+        max_batch_memory_bytes: Some(1),
         batch_memory_policy: crate::tuning::BatchMemoryPolicy::Fail,
         enriched_schema: Some(schema),
         ..minimal_sink()
@@ -925,11 +843,8 @@ fn fail_policy_returns_error_on_oversized_batch() {
 fn batch_memory_bytes_returns_positive_for_non_empty_batch() {
     let batch = make_int_batch(1_000, 4);
     let bytes = crate::tuning::SourceTuning::batch_memory_bytes(&batch);
-    // 4 cols × 1000 rows × 8 B/elem = 32,000 B plus nullmap overhead
     assert!(bytes >= 32_000, "got {}", bytes);
 }
-
-// ── auto_shrink policy ───────────────────────────────────────────────────
 
 fn sink_with_auto_shrink(limit_bytes: usize, n_cols: usize) -> ExportSink {
     use arrow::datatypes::{DataType, Field, Schema};
@@ -948,11 +863,9 @@ fn sink_with_auto_shrink(limit_bytes: usize, n_cols: usize) -> ExportSink {
 
 #[test]
 fn auto_shrink_preserves_row_count_exact() {
-    // 100 rows × 4 cols × 8 B = 3200 B — limit set to 1 B so every batch splits.
     let batch = make_int_batch(100, 4);
     let mut sink = sink_with_auto_shrink(1, 4);
 
-    // Must succeed and accumulate all 100 rows.
     assert!(sink.on_batch(&batch).is_ok());
     assert_eq!(
         sink.total_rows, 100,
@@ -963,9 +876,7 @@ fn auto_shrink_preserves_row_count_exact() {
 
 #[test]
 fn auto_shrink_recursive_split_large_batch() {
-    // 1000 rows — with a tiny limit the batch must be split many levels deep.
-    // Row count is the only correctness invariant we can assert without a live writer.
-    let batch = make_int_batch(1_000, 8); // 64 KB+
+    let batch = make_int_batch(1_000, 8);
     let mut sink = sink_with_auto_shrink(1, 8);
 
     assert!(sink.on_batch(&batch).is_ok());
@@ -978,7 +889,6 @@ fn auto_shrink_recursive_split_large_batch() {
 
 #[test]
 fn auto_shrink_odd_row_count_no_row_lost() {
-    // Odd-sized batches: mid = n/2 (floor), so one half has one more row.
     let batch = make_int_batch(101, 4);
     let mut sink = sink_with_auto_shrink(1, 4);
 
@@ -992,8 +902,6 @@ fn auto_shrink_odd_row_count_no_row_lost() {
 
 #[test]
 fn auto_shrink_single_row_over_limit_writes_and_does_not_panic() {
-    // A single-row batch that exceeds the limit cannot be split further.
-    // The policy must warn and write it as-is rather than loop infinitely.
     let batch = make_int_batch(1, 4);
     let mut sink = sink_with_auto_shrink(1, 4);
 
@@ -1012,7 +920,6 @@ fn auto_shrink_single_row_over_limit_writes_and_does_not_panic() {
 
 #[test]
 fn auto_shrink_oversized_count_tracks_original_batches_only() {
-    // oversized_batch_count must count original batches, not recursive sub-batches.
     let batch = make_int_batch(100, 4);
     let mut sink = sink_with_auto_shrink(1, 4);
 
@@ -1026,10 +933,9 @@ fn auto_shrink_oversized_count_tracks_original_batches_only() {
 
 #[test]
 fn auto_shrink_batch_within_limit_writes_directly() {
-    // When the batch fits within the limit, no splitting should occur.
-    let batch = make_int_batch(10, 2); // small — well under any reasonable limit
+    let batch = make_int_batch(10, 2);
     let actual_bytes = crate::tuning::SourceTuning::batch_memory_bytes(&batch);
-    let mut sink = sink_with_auto_shrink(actual_bytes * 2, 2); // limit = 2× actual size
+    let mut sink = sink_with_auto_shrink(actual_bytes * 2, 2);
 
     sink.on_batch(&batch).unwrap();
     assert_eq!(sink.total_rows, 10, "in-limit batch: all rows written");
@@ -1039,13 +945,8 @@ fn auto_shrink_batch_within_limit_writes_directly() {
     );
 }
 
-// ─── bug regression: row_count_min on empty export ────────────────────────
-
 #[test]
 fn row_count_min_fires_when_total_rows_is_zero() {
-    // Regression for the bug where run_quality_checks() was called AFTER the
-    // total_rows == 0 early return in single.rs, silently bypassing the gate.
-    // The check itself is correct — the bug was in the call site.
     let mut sink = minimal_sink();
     sink.quality.columns = Some(crate::config::QualityConfig {
         row_count_min: Some(100),
@@ -1054,7 +955,6 @@ fn row_count_min_fires_when_total_rows_is_zero() {
         unique_columns: vec![],
         unique_max_entries: None,
     });
-    // total_rows is 0 (no data exported)
     let issues = sink.run_quality_checks();
     assert_eq!(issues.len(), 1, "must emit exactly one issue");
     assert_eq!(issues[0].severity, crate::quality::Severity::Fail);
@@ -1082,12 +982,6 @@ fn row_count_min_passes_when_row_count_meets_threshold() {
     );
 }
 
-// ─── gremlin tests ────────────────────────────────────────────────────────
-//
-// Fault-injection scenarios that verify sink invariants under adversarial
-// conditions: writer failures mid-auto_shrink, file-split interaction with
-// auto_shrink, and exact cap boundary for uniqueness tracking.
-
 /// A writer that succeeds on the first N `write_batch` calls, then fails.
 struct FailingWriter {
     calls: usize,
@@ -1109,8 +1003,7 @@ impl crate::format::FormatWriter for FailingWriter {
     }
 }
 
-/// A writer that always reports enormous bytes_written, forcing `maybe_split`
-/// to trigger after every batch, while never actually failing.
+/// A writer that always reports enormous bytes_written, forcing `maybe_split` to trigger after every batch, while never actually failing.
 struct SplitTriggerWriter {
     write_count: usize,
 }
@@ -1123,18 +1016,15 @@ impl crate::format::FormatWriter for SplitTriggerWriter {
         Ok(())
     }
     fn bytes_written(&self) -> u64 {
-        999_999_999 // always > any max_file_size → triggers split
+        999_999_999
     }
 }
 
 #[test]
 fn gremlin_writer_fail_on_second_subbatch_propagates_error() {
-    // auto_shrink splits a batch into 2 sub-batches.
-    // The writer succeeds on sub-batch #1 but fails on #2.
-    // on_batch must propagate the error — no silent data loss.
-    let batch = make_int_batch(4, 2); // 4 rows → splits to 2+2
+    let batch = make_int_batch(4, 2);
     let mut sink = ExportSink {
-        max_batch_memory_bytes: Some(1), // forces splitting on every batch
+        max_batch_memory_bytes: Some(1),
         batch_memory_policy: crate::tuning::BatchMemoryPolicy::AutoShrink,
         enriched_schema: Some(Arc::new(Schema::new(vec![
             Field::new("c0", DataType::Int64, false),
@@ -1156,7 +1046,6 @@ fn gremlin_writer_fail_on_second_subbatch_propagates_error() {
 
 #[test]
 fn gremlin_writer_fail_before_any_write_propagates_error() {
-    // Writer fails immediately on the first write.
     let batch = make_int_batch(2, 2);
     let mut sink = ExportSink {
         enriched_schema: Some(Arc::new(Schema::new(vec![
@@ -1178,12 +1067,6 @@ fn gremlin_writer_fail_before_any_write_propagates_error() {
 
 #[test]
 fn gremlin_auto_shrink_plus_file_split_total_rows_consistent() {
-    // auto_shrink (limit=1 byte) + max_file_size (1 byte) both active.
-    // Every sub-batch triggers a file split. After N original batches:
-    //   total_rows == sum(completed_parts[].rows) + part_rows
-    // This ensures no rows are silently dropped or double-counted when
-    // the two splitting mechanisms interleave.
-
     let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
 
     let mut sink = ExportSink {
@@ -1194,7 +1077,6 @@ fn gremlin_auto_shrink_plus_file_split_total_rows_consistent() {
         writer: Some(Box::new(SplitTriggerWriter { write_count: 0 })),
         ..minimal_sink()
     };
-    // Provide real schema so on_schema-driven code paths work if needed
     sink.schema = Some(schema.clone());
 
     let batch = RecordBatch::try_new(
@@ -1203,7 +1085,6 @@ fn gremlin_auto_shrink_plus_file_split_total_rows_consistent() {
     )
     .unwrap();
 
-    // Feed 3 batches of 20 rows each
     for _ in 0..3 {
         sink.on_batch(&batch).unwrap();
     }
@@ -1222,12 +1103,8 @@ fn gremlin_auto_shrink_plus_file_split_total_rows_consistent() {
 
 #[test]
 fn gremlin_unique_cap_exact_boundary_no_false_capped_flag() {
-    // Exactly `unique_max_entries` distinct values → set reaches the cap but
-    // the cap flag must NOT be set (we cap at `>= cap`, not `> cap`).
-    // On the row that would push it to cap+1, the flag is set.
     let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
 
-    // Batch of exactly 5 distinct values with cap=5 → no flag
     let exact_batch = RecordBatch::try_new(
         schema.clone(),
         vec![Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5]))],
@@ -1247,7 +1124,6 @@ fn gremlin_unique_cap_exact_boundary_no_false_capped_flag() {
         "all 5 distinct values must be tracked"
     );
 
-    // Now add one more distinct value → cap flag must fire
     let overflow_batch =
         RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![6]))]).unwrap();
     sink.track_quality(&overflow_batch).unwrap();
@@ -1260,7 +1136,6 @@ fn gremlin_unique_cap_exact_boundary_no_false_capped_flag() {
 
 #[test]
 fn gremlin_zero_row_batch_does_not_panic_or_increment_rows() {
-    // A zero-row batch fed to on_batch must be a no-op: no crash, no row count change.
     let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
     let empty =
         RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(Vec::<i64>::new()))]).unwrap();
@@ -1272,8 +1147,6 @@ fn gremlin_zero_row_batch_does_not_panic_or_increment_rows() {
     );
 }
 
-// ── pipelined sink equivalence ───────────────────────────────────────────
-
 #[test]
 fn pipelined_sink_output_is_byte_identical_to_synchronous() {
     use crate::pipeline::manifest_writer::compute_part_checksums;
@@ -1282,7 +1155,6 @@ fn pipelined_sink_output_is_byte_identical_to_synchronous() {
     let batches: Vec<RecordBatch> = (0..3).map(|_| make_int_batch(100, 4)).collect();
     let schema_ref = batches[0].schema();
 
-    // Synchronous reference.
     let mut sync_sink = minimal_sink();
     sync_sink.on_schema(schema_ref.clone()).unwrap();
     for b in &batches {
@@ -1293,7 +1165,6 @@ fn pipelined_sink_output_is_byte_identical_to_synchronous() {
     let sync_fp = compute_part_checksums(sync_sink.tmp.path()).unwrap().0;
     let sync_rows = sync_sink.total_rows;
 
-    // Pipelined path through the worker thread.
     let mut p = PipelinedSink::spawn_with_sink(minimal_sink());
     p.on_schema(schema_ref.clone()).unwrap();
     for b in &batches {
@@ -1312,13 +1183,6 @@ fn pipelined_sink_output_is_byte_identical_to_synchronous() {
     );
 }
 
-// ─── ROAST-RED: NULLs in unique-checked columns ──────────────────────────
-
-// ROAST-RED sink-null-uniq: track_quality hashes NULL rows of unique-checked
-// columns (each NULL formats to "" and all collapse into one xxh3 entry), so a
-// nullable unique column with k>=2 NULLs reports k-1 false duplicates and the
-// quality gate fails the export. SQL UNIQUE semantics: NULLs are not duplicates.
-// Asserts CORRECT behavior; expected to FAIL until the fix lands.
 #[test]
 fn roast_unique_check_treats_nulls_as_non_duplicates() {
     use crate::source::BatchSink;
@@ -1336,7 +1200,7 @@ fn roast_unique_check_treats_nulls_as_non_duplicates() {
 
     let mut sink = minimal_sink_with_quality(vec![], vec!["name".into()]);
     sink.on_schema(schema).unwrap();
-    sink.on_batch(&batch).unwrap(); // total_rows = 4, quality tracked inline
+    sink.on_batch(&batch).unwrap();
 
     let issues = sink.run_quality_checks();
     let dupe_issues: Vec<String> = issues
@@ -1353,8 +1217,6 @@ fn roast_unique_check_treats_nulls_as_non_duplicates() {
     );
 }
 
-// ─── regression edge cases: NULLs vs uniqueness (companions to the roast test) ──
-
 #[test]
 fn unique_check_all_null_column_reports_zero_issues() {
     use crate::source::BatchSink;
@@ -1367,7 +1229,7 @@ fn unique_check_all_null_column_reports_zero_issues() {
 
     let mut sink = minimal_sink_with_quality(vec![], vec!["name".into()]);
     sink.on_schema(schema).unwrap();
-    sink.on_batch(&batch).unwrap(); // total_rows = 3, all NULL
+    sink.on_batch(&batch).unwrap();
 
     let issues = sink.run_quality_checks();
     assert!(
@@ -1384,7 +1246,6 @@ fn unique_check_all_null_column_reports_zero_issues() {
 fn unique_check_counts_only_real_duplicates_when_nulls_present() {
     use crate::source::BatchSink;
     let schema = Arc::new(Schema::new(vec![Field::new("name", DataType::Utf8, true)]));
-    // 7 rows: 'a' twice, 'b' twice, 'c' once, 2 NULLs → exactly 2 real duplicates.
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![Arc::new(StringArray::from(vec![
@@ -1401,7 +1262,7 @@ fn unique_check_counts_only_real_duplicates_when_nulls_present() {
 
     let mut sink = minimal_sink_with_quality(vec![], vec!["name".into()]);
     sink.on_schema(schema).unwrap();
-    sink.on_batch(&batch).unwrap(); // total_rows = 7
+    sink.on_batch(&batch).unwrap();
 
     let issues = sink.run_quality_checks();
     assert_eq!(
@@ -1424,8 +1285,6 @@ fn unique_check_counts_only_real_duplicates_when_nulls_present() {
 #[test]
 fn unique_check_empty_string_distinct_from_null() {
     use crate::source::BatchSink;
-    // ArrayFormatter renders both NULL and "" as "" — the NULL skip must keep a
-    // real empty string from colliding with a NULL.
     let schema = Arc::new(Schema::new(vec![Field::new("name", DataType::Utf8, true)]));
     let batch = RecordBatch::try_new(
         schema.clone(),
@@ -1451,8 +1310,6 @@ fn unique_check_empty_string_distinct_from_null() {
 #[test]
 fn unique_check_duplicate_empty_strings_counted_nulls_excluded() {
     use crate::source::BatchSink;
-    // A genuinely repeated "" is a real duplicate; the NULL beside it (which
-    // formats identically to "") must not inflate the count: exactly 1 dupe.
     let schema = Arc::new(Schema::new(vec![Field::new("name", DataType::Utf8, true)]));
     let batch = RecordBatch::try_new(
         schema.clone(),
@@ -1467,7 +1324,7 @@ fn unique_check_duplicate_empty_strings_counted_nulls_excluded() {
 
     let mut sink = minimal_sink_with_quality(vec![], vec!["name".into()]);
     sink.on_schema(schema).unwrap();
-    sink.on_batch(&batch).unwrap(); // total_rows = 4
+    sink.on_batch(&batch).unwrap();
 
     let issues = sink.run_quality_checks();
     assert_eq!(
@@ -1499,7 +1356,7 @@ fn unique_check_non_null_counter_accumulates_across_batches() {
     let mut sink = minimal_sink_with_quality(vec![], vec!["name".into()]);
     sink.on_schema(schema).unwrap();
     sink.on_batch(&batch).unwrap();
-    sink.on_batch(&batch).unwrap(); // total_rows = 4: 'a' twice + 2 NULLs
+    sink.on_batch(&batch).unwrap();
 
     let issues = sink.run_quality_checks();
     assert_eq!(
@@ -1520,8 +1377,6 @@ fn unique_check_non_null_counter_accumulates_across_batches() {
 
 #[test]
 fn unique_cap_with_nulls_emits_warn_only_no_false_duplicate_fail() {
-    // Capped column: the check is abandoned (Warn) and the non-null counter
-    // must not resurrect it as a Fail-severity duplicate report.
     let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
     let batch = RecordBatch::try_new(
         schema,
@@ -1564,8 +1419,6 @@ fn unique_cap_with_nulls_emits_warn_only_no_false_duplicate_fail() {
 
 #[test]
 fn unique_cap_exact_boundary_trailing_nulls_do_not_trip_cap() {
-    // Exactly cap distinct values followed by NULLs: a NULL row reaching the
-    // cap comparison would falsely flag the column — the NULL skip must come first.
     let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
     let batch = RecordBatch::try_new(
         schema,
@@ -1599,10 +1452,7 @@ fn unique_cap_exact_boundary_trailing_nulls_do_not_trip_cap() {
     );
 }
 
-/// #175: bytes_read accumulates on the RUN-wide shared counter — two sinks
-/// sharing one `Arc` (the per-chunk / per-worker shape every runner produces)
-/// must SUM into it, and the count is the batch's in-memory Arrow size as
-/// received. RED against dropping the `fetch_add` in `on_batch`.
+/// #175: bytes_read accumulates on the RUN-wide shared counter.
 #[test]
 fn bytes_read_accumulates_across_sinks_sharing_the_plan_counter() {
     use crate::source::BatchSink;
@@ -1622,8 +1472,6 @@ fn bytes_read_accumulates_across_sinks_sharing_the_plan_counter() {
     let expect_one = batch.get_array_memory_size() as u64;
     assert!(expect_one > 0, "fixture batch must have a non-zero size");
 
-    // Two sinks share the counter — the per-chunk shape (chunked builds a fresh
-    // sink per chunk; workers clone the plan, sharing the Arc).
     for _ in 0..2 {
         let mut sink = minimal_sink();
         sink.bytes_read = Arc::clone(&counter);
@@ -1640,16 +1488,7 @@ fn bytes_read_accumulates_across_sinks_sharing_the_plan_counter() {
     );
 }
 
-// ── Form B value checksums ───────────────────────────────────────────────
-//
-// `value_checksum.rs` grades the fold INSIDE a column and the cross-PART fold in
-// `validate_recorded_checksums`, but that test builds its `recorded` input by
-// summing the parts itself. The producer of that input — `track_checksum` — was
-// observed by nothing, so the sink's own cross-BATCH fold, its Parquet gate and
-// its keyed/un-keyed routing were all ungraded.
-
-/// Two Int64 columns and two rows: one column cannot express a `key ‖ value`
-/// boundary, and one row cannot distinguish `+` from `^` in the fold.
+/// Two Int64 columns and two rows: one column cannot express a `key ‖ value` boundary, and one row cannot distinguish `+` from `^` in the fold.
 fn checksum_batch(vs: [i64; 2]) -> RecordBatch {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int64, false),
@@ -1674,8 +1513,6 @@ fn parquet_sink(checksum_key_col: Option<usize>) -> ExportSink {
 }
 
 /// A part spanning more than one read batch must ACCUMULATE, not annihilate.
-/// The oracle is relational — two identical contributions must land on exactly
-/// twice one of them — so it grades the operator without re-deriving any hash.
 #[test]
 fn track_checksum_sums_across_batches_within_one_part() {
     let batch = checksum_batch([10, 20]);
@@ -1699,9 +1536,7 @@ fn track_checksum_sums_across_batches_within_one_part() {
     }
 }
 
-/// With a cursor column resolved the sink must hash `key ‖ value`. A row swap is
-/// invisible to the un-keyed fold by construction (the multiset is unchanged),
-/// which is exactly the corruption the keyed path exists to catch.
+/// With a cursor column resolved the sink must hash `key ‖ value`.
 #[test]
 fn track_checksum_routes_through_the_keyed_path_when_a_key_column_is_resolved() {
     let recorded = |vs: [i64; 2], key: Option<usize>| {
@@ -1723,8 +1558,7 @@ fn track_checksum_routes_through_the_keyed_path_when_a_key_column_is_resolved() 
     );
 }
 
-/// Only Parquet records Form B: a CSV→Arrow re-read is not byte-faithful, so a
-/// recorded checksum would make `validate --depth full` report phantom corruption.
+/// Only Parquet records Form B: a CSV→Arrow re-read is not byte-faithful, so a recorded checksum would make `validate --depth full` report phantom corruption.
 #[test]
 fn track_checksum_records_nothing_for_a_non_parquet_export() {
     let mut sink = minimal_sink();
@@ -1736,10 +1570,7 @@ fn track_checksum_records_nothing_for_a_non_parquet_export() {
     );
 }
 
-/// #173: PipelinedSink must FORWARD `set_source_cursor` — the trait's no-op
-/// default silently swallowed the source's lossless keyset token, a latent
-/// wrong-cursor bug the moment a cursor-reporting runner is pipelined. RED
-/// against removing the override / the worker's SourceCursor arm.
+/// #173: PipelinedSink must FORWARD `set_source_cursor`.
 #[test]
 fn pipelined_forwards_the_source_cursor_to_the_inner_sink() {
     use crate::source::BatchSink;
@@ -1800,13 +1631,11 @@ fn a_byte_cap_sizes_row_groups_so_it_can_rotate_between_them() {
         vec![(0, 1), (1, 1)],
         "a zero step never loops"
     );
-    // No cap: the configured group stands.
     assert_eq!(
         row_group_rows_for_cap(Some(1_000_000), None, 100),
         Some(1_000_000)
     );
     assert_eq!(row_group_rows_for_cap(None, None, 100), None);
-    // A 400 KB cap over 100-byte rows: a quarter-cap group is 1,024 rows.
     assert_eq!(
         row_group_rows_for_cap(Some(1_000_000), Some(400 * 1024), 100),
         Some(1024)
@@ -1815,13 +1644,11 @@ fn a_byte_cap_sizes_row_groups_so_it_can_rotate_between_them() {
         row_group_rows_for_cap(None, Some(400 * 1024), 100),
         Some(1024)
     );
-    // A smaller configured group is kept; a row wider than the quarter-cap still gets one row.
     assert_eq!(
         row_group_rows_for_cap(Some(10), Some(400 * 1024), 100),
         Some(10)
     );
     assert_eq!(row_group_rows_for_cap(None, Some(8), 1_000), Some(1));
-    // Pieces follow the group only under a cap.
     assert_eq!(cap_piece_rows(Some(1), Some(300), 10_000), 300);
     assert_eq!(cap_piece_rows(None, Some(300), 10_000), 10_000);
     assert_eq!(cap_piece_rows(Some(1), None, 10_000), 10_000);
@@ -1875,8 +1702,6 @@ fn a_byte_capped_parquet_sink_sizes_its_row_groups_and_a_csv_sink_does_not() {
     );
     assert_eq!(capped(crate::config::FormatType::Csv), None);
 }
-
-// ── sealing and draining parts ───────────────────────────────────────────
 
 /// A sink holding two rotated parts and an open tail of one row each.
 fn sink_with_three_parts() -> ExportSink {

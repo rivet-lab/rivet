@@ -1,13 +1,4 @@
-//! Warehouse load layer — the `TargetLoader` seam, its per-warehouse adapters,
-//! and the warehouse-neutral load driver.
-//!
-//! OSS decides *what* a column becomes in the warehouse (`TargetColumnSpec` via
-//! `ExportTarget::resolve_table`). A [`TargetLoader`] **adapter** runs the
-//! warehouse-specific load ([`bigquery`] — free `LOAD DATA`; [`snowflake`] —
-//! `COPY` off a GCS external stage). The **driver** ([`run_load`] /
-//! [`run_load_cdc`]) owns the invariant orchestration — spec validation, the
-//! count-integrity gate, the dedup-view wiring, and cleanup ordering — so those
-//! invariants are exercised once through a fake adapter, not per warehouse.
+//! Warehouse load layer — the `TargetLoader` seam, its per-warehouse adapters, and the warehouse-neutral load driver.
 
 use crate::destination::gcs::GcsStore;
 use crate::types::target::{TargetColumnSpec, TargetStatus};
@@ -44,9 +35,7 @@ pub struct LoadReport {
     pub source_cleaned: bool,
 }
 
-/// Outcome of a CDC change-log load: rows appended to the `<table>__changes`
-/// log plus the current-state dedup view rebuilt over it.
-/// What one `rivet compact` did to one table.
+/// Outcome of a CDC change-log load: rows appended to the `<table>__changes` log plus the current-state dedup view rebuilt over it.
 #[derive(Debug, Clone)]
 pub struct CompactReport {
     pub base: String,
@@ -72,20 +61,16 @@ impl CompactReport {
 pub struct CdcLoadReport {
     pub rows_appended: u64,
     pub changes_table: String,
-    /// The table consumers read, named by the driver that built it: the dedup VIEW
-    /// over the changelog, or the physical BASE the buffer is compacted into.
+    /// The table consumers read, named by the driver that built it.
     pub target: String,
     pub target_kind: ChangelogTarget,
-    /// Whether `cleanup_source` wiped the staged Parquet after this load — mirrors
-    /// [`LoadReport::source_cleaned`] so the report + logs reflect it for CDC/
-    /// incremental too, instead of discarding it.
+    /// Whether `cleanup_source` wiped the staged Parquet after this load.
     pub source_cleaned: bool,
     /// The baseline leg this load landed in the base (base-and-buffer layout), before the buffer append.
     pub baseline: Option<LoadReport>,
 }
 
-/// What `CdcLoadReport::target` is: the dedup view of the changelog + view layout,
-/// or the physical base of the base-and-buffer layout (compacted from the buffer).
+/// What `CdcLoadReport::target` is: the dedup view of the changelog + view layout, or the physical base of the base-and-buffer layout (compacted from the buffer).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangelogTarget {
     View,
@@ -117,22 +102,12 @@ impl ObjectKind {
     }
 }
 
-/// A warehouse **adapter** — the small, warehouse-specific seam the
-/// [driver](run_load) drives. Dialect + transport (BigQuery's REST API since
-/// #264, Snowflake's SQL API), the external stage,
-/// BigQuery's 4,000-partition batch split, and `PARSE_JSON` all live *behind*
-/// these primitives.
-///
-/// Idempotent under retry: Rivet is at-least-once at the file layer, so the same
-/// Parquet object may be presented more than once; `materialize` overwrites.
+/// A warehouse **adapter** — the small, warehouse-specific seam the [driver](run_load) drives.
 pub trait TargetLoader {
-    /// Fully-qualify `table` for this warehouse (`project.dataset.t` /
-    /// `db.schema.t`).
+    /// Fully-qualify `table` for this warehouse (`project.dataset.t` / `db.schema.t`).
     fn fqtn(&self, table: &str) -> String;
 
-    /// Overwrite `table` with the Parquet at `uris`, materializing the native
-    /// column types in `specs`. Returns the rows the load landed; an adapter that
-    /// lands beside the table refuses `expected_rows` mismatches before it swaps in.
+    /// Overwrite `table` with the Parquet at `uris`, materializing the native column types in `specs`.
     fn materialize(
         &self,
         table: &str,
@@ -141,9 +116,7 @@ pub trait TargetLoader {
         expected_rows: Option<u64>,
     ) -> Result<u64>;
 
-    /// Append the CDC change Parquet into `<table>__changes` (created if absent),
-    /// prepending the `__op` / `__pos` / `__seq` meta columns to `specs`. Returns
-    /// the rows this call appended.
+    /// Append the CDC change Parquet into `<table>__changes` (created if absent), prepending the `__op` / `__pos` / `__seq` meta columns to `specs`.
     fn append_changelog(
         &self,
         table: &str,
@@ -152,9 +125,7 @@ pub trait TargetLoader {
         pk: &[String],
     ) -> Result<u64>;
 
-    /// Merge `<table>__changes` (the base-and-buffer layout's per-cycle buffer)
-    /// into the base `table` and drop the buffer. `specs` are the base's source
-    /// columns, `pk` the merge key, `engine` how `__pos` orders the changes.
+    /// Merge `<table>__changes` (the base-and-buffer layout's per-cycle buffer) into the base `table` and drop the buffer.
     fn compact(
         &self,
         table: &str,
@@ -170,9 +141,7 @@ pub trait TargetLoader {
         )
     }
 
-    /// Buffer a tombstone into `<table>__changes` for every live row of the base `table`
-    /// whose key the buffer does not hold, after a re-baseline joined the buffer. Returns
-    /// the rows buffered. Only a warehouse that compacts has a base to read.
+    /// Buffer a tombstone into `<table>__changes` for every live row of the base `table` whose key the buffer does not hold, after a re-baseline joined the buffer.
     fn flag_absent_from_buffer(
         &self,
         table: &str,
@@ -187,16 +156,13 @@ pub trait TargetLoader {
         )
     }
 
-    /// The warehouse this adapter targets — lets the shared driver build the
-    /// current-state view SQL (dialect keyword + identifier quoting) in ONE place
-    /// per mode instead of once per adapter.
+    /// The warehouse this adapter targets — lets the shared driver build the current-state view SQL (dialect keyword + identifier quoting) in ONE place per mode instead of once per adapter.
     fn warehouse(&self) -> cdc::Warehouse;
 
-    /// Run a `CREATE OR REPLACE VIEW` statement its way (e.g. Snowflake prefixes a `QUERY_TAG`).
+    /// Run a `CREATE OR REPLACE VIEW` statement its way (e.g.
     fn create_view(&self, table: &str, view_sql: &str) -> Result<()>;
 
-    /// Build the current-state view `<table>` over `<table>__changes`: the latest row per
-    /// `pk` by `order`; the default is the shared `ROW_NUMBER` view in this warehouse's dialect.
+    /// Build the current-state view `<table>` over `<table>__changes`.
     fn create_current_view(
         &self,
         table: &str,
@@ -216,12 +182,7 @@ pub trait TargetLoader {
         self.create_view(table, &sql)
     }
 
-    /// Does `<table>__changes` already hold REAL change rows (`__pos IS NOT
-    /// NULL`)? The RE-baseline refusal's condition (round-7): the truth about
-    /// whether a snapshot append would lose the dedup lives in the WAREHOUSE,
-    /// never in rivet's ledger — after the prescribed TRUNCATE the recovery
-    /// load must sail through, and ledger rows survive a truncate. A missing
-    /// `__changes` table reads `false` (the first cycle).
+    /// Does `<table>__changes` already hold REAL change rows (`__pos IS NOT NULL`)?
     fn changes_has_prior_changes(&self, table: &str) -> Result<bool>;
 
     /// What `table` currently is: absent, a table, a view, or another object.
@@ -233,13 +194,10 @@ pub trait TargetLoader {
     /// Row count of `table`.
     fn row_count(&self, table: &str) -> Result<u64>;
 
-    /// Rename `table` to `<table>__changes` and add `__op` / `__pos` / `__seq` (NULL on
-    /// every existing row), keeping its rows, partitioning and clustering.
+    /// Rename `table` to `<table>__changes` and add `__op` / `__pos` / `__seq` (NULL on every existing row), keeping its rows, partitioning and clustering.
     fn adopt_as_changelog(&self, table: &str) -> Result<()>;
 
-    /// The warehouse's shape control, when it has one: reading and changing the
-    /// partitioning and clustering of the tables the load writes. `None` means the
-    /// driver cannot verify a shape here and says so, rather than assuming it matches.
+    /// The warehouse's shape control, when it has one.
     fn shape(&self) -> Option<&dyn ShapeControl> {
         None
     }
@@ -247,23 +205,19 @@ pub trait TargetLoader {
 
 /// Reading and changing the shape of the tables a load writes (ADR-0034 D5).
 pub trait ShapeControl {
-    /// How the existing `table` differs from what this load would create (partitioning,
-    /// clustering), or `None` when it matches.
+    /// How the existing `table` differs from what this load would create (partitioning, clustering), or `None` when it matches.
     fn table_shape_conflict(&self, table: &str) -> Result<Option<String>>;
 
-    /// How `<table>__changes` differs from what the load DECLARES, or `None` when it
-    /// matches, is absent, or nothing is declared.
+    /// How `<table>__changes` differs from what the load DECLARES, or `None` when it matches, is absent, or nothing is declared.
     fn changelog_drift(&self, table: &str) -> Result<Option<ChangelogDrift>>;
 
-    /// The same question of the whole-table `<table>` an append is about to ADOPT as its
-    /// change log — asked BEFORE the rename, so a refusal here changes nothing.
+    /// The same question of the whole-table `<table>` an append is about to ADOPT as its change log.
     fn adoption_drift(&self, table: &str) -> Result<Option<ChangelogDrift>>;
 
     /// Re-cluster `<table>__changes` in place to the load's `cluster_by`.
     fn recluster_changelog(&self, table: &str) -> Result<()>;
 
-    /// Rebuild `<table>__changes` with the load's partition — a billed copy of every
-    /// row — and swap it in.
+    /// Rebuild `<table>__changes` with the load's partition — a billed copy of every row — and swap it in.
     fn rebuild_changelog(&self, table: &str) -> Result<()>;
 
     /// Objects an interrupted rebuild of `<table>__changes` left behind.
@@ -302,8 +256,7 @@ pub enum ChangelogDrift {
     },
 }
 
-/// Bring `<table>__changes` to the shape the load declares: re-cluster in place; rebuild
-/// a changed partition only when asked for, else refuse naming the cost.
+/// Bring `<table>__changes` to the shape the load declares.
 fn settle_changelog_shape(loader: &dyn TargetLoader, table: &str, rebuild: bool) -> Result<()> {
     let changes = loader.fqtn(&format!("{table}__changes"));
     let Some(shape) = loader.shape() else {
@@ -410,7 +363,7 @@ pub(crate) fn before_write<T>(r: Result<T>) -> Result<T> {
     })
 }
 
-/// The refusal for a base name that is a VIEW: the current-state view of a changelog+view table, which has no base to land rows in or merge into.
+/// The refusal for a base name that is a VIEW.
 pub(crate) fn view_as_base_refusal(base_fqtn: &str, buffer_fqtn: &str) -> String {
     format!(
         "that name is a VIEW — the current-state view of the changelog+view layout, which has no \
@@ -449,8 +402,7 @@ fn view_as_base_check(loader: &dyn TargetLoader, table: &str, base_and_buffer: b
     )
 }
 
-/// Stop a whole-table pass over a base whose buffer still holds rows from before it: the
-/// next `rivet compact` would merge those older values over the new base.
+/// Stop a whole-table pass over a base whose buffer still holds rows from before it.
 pub(crate) fn refuse_stale_buffer(
     loader: &dyn TargetLoader,
     table: &str,
@@ -511,11 +463,7 @@ pub enum Ownership {
     Foreign,
     /// No ledger to ask (a stateless load) — absent BY DESIGN, so proceed with a note.
     Unknown,
-    /// A ledger exists and could NOT ANSWER. Never the same as having none: the
-    /// table may well be someone else's, and the ledger that would have said so
-    /// is the thing that broke. Treating this as [`Unknown`](Ownership::Unknown)
-    /// turned the `Foreign` REFUSAL into proceed-with-a-note, so a transient state
-    /// backend error silently licensed overwriting a foreign table.
+    /// A ledger exists and could NOT ANSWER.
     Unreadable,
 }
 
@@ -549,8 +497,7 @@ fn ensure_own(fqtn: &str, ownership: Ownership, verb: &str) -> Result<()> {
     }
 }
 
-/// The question every load asks before its first write: a name it would write that already
-/// holds something must be one this ledger recorded rivet loading. `appends` adds the change log.
+/// The question every load asks before its first write.
 pub(crate) fn ensure_target_own(
     loader: &dyn TargetLoader,
     table: &str,
@@ -614,26 +561,9 @@ fn ensure_overwritable(loader: &dyn TargetLoader, table: &str, ownership: Owners
 
 pub(crate) use crate::types::ident::{is_safe_load_ident, latin_fold};
 
-/// Refuse any Parquet URI that can't be splice-safely single-quoted into the
-/// warehouse load statement. The drivers emit each URI as `'{uri}'` into
-/// Snowflake `COPY … FILES=(…)` and BigQuery `LOAD DATA … uris=[…]` with NO
-/// escaping (snowflake::copy_files_clause, bigquery::from_files) — so a URI
-/// carrying the string delimiter `'`, a backslash (Snowflake treats `\` as an
-/// in-string escape), or a control char could break out of the literal and
-/// inject SQL that runs with the warehouse's (broad) role. Unlike the operator-
-/// typed dataset/warehouse names, these URIs come from the LIVE GCS object
-/// listing (reconcile::select_load_uris → store.list_files), and GCS object
-/// names legally permit `'`/`\`/`;` — so a party with staging-bucket write plus
-/// a crafted passing manifest is otherwise an injection vector. This is the
-/// storage-sourced sibling of the column/table/pk gate; rivet names its own
-/// parts run-uniquely and filename-sanitized, so a legitimate URI never trips
-/// it — default-deny, fail loud rather than escape-and-hope.
+/// Refuse any Parquet URI that can't be splice-safely single-quoted into the warehouse load statement.
 fn ensure_safe_load_uris(uris: &[String]) -> Result<()> {
     for u in uris {
-        // `*` is in the deny set because BigQuery expands ONE wildcard per
-        // `uris=[...]` entry — a planted object name containing `*` would widen
-        // the load past the manifest-declared file set (round-6; Snowflake's
-        // FILES= is literal, but one deny set guards both).
         if let Some(bad) = u
             .chars()
             .find(|&c| c == '\'' || c == '\\' || c == '*' || c.is_control())
@@ -652,8 +582,7 @@ fn ensure_safe_load_uris(uris: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Refuse a load whose specs can't materialize: empty, any `Fail`-status column
-/// (a silent-loss class — never drop it, name it), or an unsafe column identifier.
+/// Refuse a load whose specs can't materialize.
 fn validate_specs(table: &str, specs: &[TargetColumnSpec]) -> Result<()> {
     if specs.is_empty() {
         crate::rivet_bail!(
@@ -661,9 +590,6 @@ fn validate_specs(table: &str, specs: &[TargetColumnSpec]) -> Result<()> {
             "no column specs for `{table}` — nothing to build a schema from"
         );
     }
-    // Round-6: the target table name is interpolated raw into the fqtn / DDL / dedup
-    // view too (a sibling injection surface of the column names). Gate it, tolerating
-    // a qualified `dataset.table` — each dot-separated component must be a plain ident.
     if table.is_empty() || !table.split('.').all(is_safe_load_ident) {
         crate::rivet_bail!(
             crate::error::codes::LOAD_IDENTIFIER_UNSAFE,
@@ -672,10 +598,6 @@ fn validate_specs(table: &str, specs: &[TargetColumnSpec]) -> Result<()> {
             table.escape_default()
         );
     }
-    // Round-5: refuse a source-derived column name that isn't a plain identifier —
-    // the warehouse drivers interpolate it into executed DDL/COPY with no quoting,
-    // so a hostile/odd name (`x); DROP TABLE …`, an embedded quote/backtick) must
-    // fail LOUDLY here rather than run as SQL. The one gate covers every load target.
     for s in specs {
         if !is_safe_load_ident(&s.column_name) {
             crate::rivet_bail!(
@@ -704,14 +626,7 @@ fn validate_specs(table: &str, specs: &[TargetColumnSpec]) -> Result<()> {
     Ok(())
 }
 
-/// **Batch load driver.** Materialize `table` from `uris`, gate the landed rows
-/// against `expected_rows` (the reconciled file count; `None` skips the gate),
-/// and — only after the gate passes — clean up the source via `cleanup`
-/// (`Some((store, gs_prefix))` to delete, `None` to keep it).
-///
-/// `#[allow(private_interfaces)]` for the injected `GcsStore` — same rationale as
-/// [`reconcile::fetch_manifests_keyed`]: a `pub` public-API root over a
-/// deliberately crate-private `destination` type.
+/// **Batch load driver.** Materialize `table` from `uris`, gate the landed rows against `expected_rows` (the reconciled file count.
 #[allow(private_interfaces)]
 pub fn run_load(
     loader: &dyn TargetLoader,
@@ -779,19 +694,9 @@ fn whole_table_preflight(
     ensure_overwritable(loader, table, ownership)
 }
 
-/// **CDC load driver.** Append the change log, gate the appended delta against
-/// `expected_delta` (`None` skips the gate), (re)build the current-state dedup
-/// view, then clean up the source.
-// The arity is the CDC load's real surface: adapter + table + specs + uris are
-// the load, pk + engine shape the dedup view, expected_delta + cleanup are the
-// gate and cleanup. Bundling them would only move the fields elsewhere.
-// `allow(private_interfaces)` for the injected `GcsStore` — see [`run_load`].
+/// **CDC load driver.** Append the change log, gate the appended delta against `expected_delta` (`None` skips the gate), (re)build the current-state dedup view, then clean up the source.
 #[allow(clippy::too_many_arguments, private_interfaces)]
-/// The shared append-log + dedup-view driver for the two append modes (CDC and
-/// incremental). They differ ONLY in a label (for error text) and which view the
-/// `build_view` closure creates; everything else — the empty-uris/pk bails, the
-/// `__changes` append, the count gate, cleanup ordering, and the report — is
-/// identical, so it lives here. `label` is `"CDC"` / `"incremental"`.
+/// The shared append-log + dedup-view driver for the two append modes (CDC and incremental).
 fn append_and_view(
     loader: &dyn TargetLoader,
     table: &str,
@@ -833,11 +738,6 @@ fn append_and_view(
 
     build_view(loader)?;
     crate::test_hook::maybe_panic_at("load_after_append");
-    // Cleanup runs here (inside the driver, after the gate), BEFORE the caller
-    // records the ledger in `execute_load`. A crash between the two re-appends
-    // this run next load — an at-least-once double-append the dedup view absorbs
-    // (and the count gate still guards) — accepted rather than ordering the
-    // irreversible delete after the durable record.
     let source_cleaned = maybe_cleanup(cleanup);
 
     Ok(CdcLoadReport {
@@ -850,8 +750,7 @@ fn append_and_view(
     })
 }
 
-/// Everything an append checks before it writes: URIs, the dedup key, the specs, and no
-/// remains of an interrupted rebuild.
+/// Everything an append checks before it writes.
 fn append_preflight(
     loader: &dyn TargetLoader,
     table: &str,
@@ -874,13 +773,6 @@ fn append_preflight(
              `pk: [<column>]` under the export's `load:` block (no --pk flag exists)"
         );
     }
-    // Gate the PK columns at the SHARED seam: both the CDC and the INCREMENTAL
-    // driver splice them into the dedup view's `PARTITION BY` via quote_ident
-    // (Snowflake emits them bare; BigQuery wraps in backticks WITHOUT escaping an
-    // internal backtick), so a name outside a plain identifier is an injection
-    // vector. Round-6 gated this inline in the CDC path only — the incremental
-    // path (`run_load_incremental`) reached the same splice UNGATED. Hoisting it
-    // here covers both, so no load driver can bypass it (the runner-bypass class).
     for c in pk {
         if !is_safe_load_ident(c) {
             crate::rivet_bail!(
@@ -907,12 +799,7 @@ fn append_preflight(
     Ok(())
 }
 
-/// Turn a table an earlier whole-table load left at the view's name into `<table>__changes`
-/// by renaming it; its rows become the change log's baseline. `None` when there is no such table.
-///
-/// A partition the load cannot re-shape in place is refused HERE, before the rename:
-/// refusing after it left the serving name gone and the view unbuilt, under an error
-/// that said "nothing was changed".
+/// Turn a table an earlier whole-table load left at the view's name into `<table>__changes` by renaming it.
 pub(crate) fn adopt_full_load_table(
     loader: &dyn TargetLoader,
     table: &str,
@@ -958,8 +845,7 @@ pub(crate) fn adopt_full_load_table(
     Ok(Some(rows))
 }
 
-/// Whether `<table>` is a whole-table load this append may turn into its change log:
-/// `false` when nothing is there to adopt, an error when what is there cannot be.
+/// Whether `<table>` is a whole-table load this append may turn into its change log.
 fn adoptable(
     loader: &dyn TargetLoader,
     table: &str,
@@ -1021,9 +907,6 @@ pub fn run_load_cdc(
     ownership: Ownership,
     rebuild_changelog: bool,
 ) -> Result<CdcLoadReport> {
-    // PK-injection gating lives in the SHARED seam `append_and_view` (below), which
-    // covers both the CDC and incremental drivers — no per-driver copy (the old
-    // Round-6 inline gate here was dead once the shared one was hoisted).
     append_and_view(
         loader,
         table,
@@ -1042,10 +925,7 @@ pub fn run_load_cdc(
     )
 }
 
-/// Append a base-and-buffer stream's change Parquet into `<table>__changes` — the
-/// per-cycle BUFFER `rivet compact` merges into the base and drops. No view, no
-/// adoption of an earlier full table (the base IS a table, by design), no shape
-/// settling: the buffer is created fresh each cycle from the run's own spec.
+/// Append a base-and-buffer stream's change Parquet into `<table>__changes`.
 #[allow(clippy::too_many_arguments, private_interfaces)]
 pub fn run_load_buffer(
     loader: &dyn TargetLoader,
@@ -1086,14 +966,7 @@ pub fn run_load_buffer(
     })
 }
 
-/// Load an INCREMENTAL export's delta: APPEND the parquet into `<table>__changes`
-/// (reusing the CDC changelog append — the delta's rows land with NULL `__op`/
-/// `__pos`/`__seq`, which the view drops) and (re)build a current-state view
-/// deduped to the latest row per PK by `cursor_column`. The manifests' summed
-/// `row_count` gates the appended delta, and cleanup runs (only) after the gate —
-/// safe because the ledger, not the file prefix, records what's loaded.
-// Same arity shape as [`run_load_cdc`] (the cursor replaces the engine);
-// `allow(private_interfaces)` for the injected `GcsStore` — see [`run_load`].
+/// Load an INCREMENTAL export's delta: APPEND the parquet into `<table>__changes` (reusing the CDC changelog append.
 #[allow(clippy::too_many_arguments, private_interfaces)]
 pub fn run_load_incremental(
     loader: &dyn TargetLoader,
@@ -1107,7 +980,6 @@ pub fn run_load_incremental(
     ownership: Ownership,
     rebuild_changelog: bool,
 ) -> Result<CdcLoadReport> {
-    // uris + pk are checked by `append_and_view`; the cursor guards are incremental-only.
     before_write(cursor_preflight(table, specs, cursor_column))?;
     append_and_view(
         loader,
@@ -1131,9 +1003,7 @@ pub fn run_load_incremental(
     )
 }
 
-/// The cursor the dedup view orders by must be named and exported: a cursor used only in
-/// the extract's WHERE (or a coalesce cursor stripped from the output) is absent from
-/// `__changes`, so the view would fail AFTER the append and the delta be re-appended.
+/// The cursor the dedup view orders by must be named and exported.
 fn cursor_preflight(table: &str, specs: &[TargetColumnSpec], cursor_column: &str) -> Result<()> {
     if cursor_column.is_empty() {
         crate::rivet_bail!(
@@ -1155,22 +1025,13 @@ fn cursor_preflight(table: &str, specs: &[TargetColumnSpec], cursor_column: &str
     Ok(())
 }
 
-/// Split a `gs://bucket/path` URI into `(bucket, bucket-relative path)` — the
-/// shape opendal's bucket-scoped operator wants.
+/// Split a `gs://bucket/path` URI into `(bucket, bucket-relative path)`.
 pub(crate) fn split_object_uri(uri: &str) -> Result<(&str, &str)> {
     let (bucket, key) = ["gs://", "s3://", "az://"]
         .iter()
         .find_map(|s| uri.strip_prefix(s))
         .and_then(|rest| rest.split_once('/'))
         .with_context(|| format!("not a `gs://`, `s3://` or `az://` bucket/path URI: {uri}"))?;
-    // Refuse an EMPTY bucket-relative key. It addresses the bucket ROOT, and the
-    // load's recursive cleanup (delete_under → remove_all) and gc_orphans (list +
-    // remove) would then wipe the ENTIRE bucket — including unrelated exports and
-    // pre-existing objects — on a LEGAL config: a GCS export with no
-    // `destination.prefix`, or a prefix that leads with `{partition}` so the
-    // pre-`{partition}` base collapses to "". No load/cleanup lifecycle ever
-    // legitimately targets the bucket root, so fail LOUD here rather than delete
-    // everything. (Trailing/only slashes collapse to empty too.)
     if key.trim_matches('/').is_empty() {
         crate::rivet_bail!(
             crate::error::codes::LOAD_STAGING_PREFIX_INVALID,
@@ -1197,23 +1058,13 @@ pub(crate) fn scheme_of(uri: &str) -> &str {
     uri.split("://").next().unwrap_or("gs")
 }
 
-/// Open the one [`GcsStore`] a load reuses for reconcile, URI listing, and
-/// post-gate cleanup — the single production constructor `cli::dispatch` calls.
-///
-/// `pub` (a public-API root the lib keeps alive) even though its only caller is
-/// the binary-only dispatch: it re-anchors `GcsStore`'s real-GCS constructor in
-/// the lib compilation unit, which no longer reaches it through a load adapter.
-/// `#[allow(private_interfaces)]` for the crate-private return — same rationale
-/// as [`reconcile::fetch_manifests_keyed`].
+/// Open the one [`GcsStore`] a load reuses for reconcile, URI listing, and post-gate cleanup.
 #[allow(private_interfaces)]
 pub fn open_store(dest: &crate::config::DestinationConfig) -> Result<GcsStore> {
     GcsStore::new(dest)
 }
 
-/// The one place a resolved plan's [`LoadTarget`](plan::LoadTarget) maps to a
-/// concrete [`TargetLoader`] adapter — wiring partition / cluster / connection /
-/// run-id from the config. The count gate and cleanup are the driver's, so the
-/// adapter carries no `expected_rows`. Every job it runs is recorded in `journal`.
+/// The one place a resolved plan's [`LoadTarget`](plan::LoadTarget) maps to a concrete [`TargetLoader`] adapter.
 pub fn build_loader(
     plan: &plan::LoadPlan,
     run_id: &str,
@@ -1260,7 +1111,6 @@ pub fn build_loader(
             l.partition_expr = plan.partition.as_ref().map(|p| p.expr.clone());
             l.run_id = Some(run_id.to_string());
             l.layout = plan.layout;
-            // Snowflake's external stage wants the `gcs://` scheme, not `gs://`.
             l.gcs_url = plan.gcs_prefix.replacen("gs://", "gcs://", 1);
             Box::new(l)
         }
@@ -1310,11 +1160,7 @@ fn snowflake_login(
     l
 }
 
-/// Wire a [`BigQueryLoader`] from a resolved plan's fields — `partition` and
-/// `cluster_by` applied ONLY when set. A concrete return (not the boxed trait)
-/// so the wiring is unit-testable: a mis-guarded key would silently DROP the
-/// clustering/partitioning the config asked for — a degradation invisible
-/// through `Box<dyn TargetLoader>`.
+/// Wire a [`BigQueryLoader`] from a resolved plan's fields — `partition` and `cluster_by` applied ONLY when set.
 fn build_bigquery_loader(
     project: &str,
     dataset: &str,
@@ -1439,8 +1285,7 @@ pub(crate) mod tests {
     /// What a fake warehouse runs when a name is probed.
     type ProbeHook = Box<dyn Fn(&str)>;
 
-    /// Records every call and returns a canned row count — the seam the driver's
-    /// invariants are asserted through, offline.
+    /// Records every call and returns a canned row count.
     #[derive(Default)]
     pub(crate) struct FakeLoader {
         rows: u64,
@@ -1448,10 +1293,7 @@ pub(crate) mod tests {
         appended: RefCell<Vec<String>>,
         views: RefCell<Vec<String>>,
         kinds: RefCell<std::collections::HashMap<String, ObjectKind>>,
-        /// Make `object_kind` FAIL — the shape a 503, a quota error or expired
-        /// credentials takes at a metadata probe. `kinds` can only say what an object
-        /// IS; it cannot say "the warehouse would not answer", which is the case that
-        /// decides whether a stop is recorded as a refusal or as a failure.
+        /// Make `object_kind` FAIL — the shape a 503, a quota error or expired credentials takes at a metadata probe.
         pub(crate) kind_error: Option<String>,
         counts: RefCell<std::collections::HashMap<String, u64>>,
         overlap: Option<(u64, u64)>,
@@ -1475,11 +1317,7 @@ pub(crate) mod tests {
     }
 
     impl FakeLoader {
-        /// A loader whose metadata probe will not ANSWER — a 503, a quota error, an
-        /// expired credential. Distinct from every `kinds` entry, which can only say
-        /// what an object IS; the difference decides whether a stop is journaled as a
-        /// refusal or as a failure, and only the failure forges ownership.
-        /// Say what `table` is when the driver probes it.
+        /// A loader whose metadata probe will not ANSWER — a 503, a quota error, an expired credential.
         pub(crate) fn with_kind(self, table: &str, kind: ObjectKind) -> Self {
             self.kinds.borrow_mut().insert(table.into(), kind);
             self
@@ -1688,9 +1526,7 @@ pub(crate) mod tests {
         f.calls.borrow().clone()
     }
 
-    /// A fake for a driver-level test in a SIBLING module (`orchestrate` drives the load
-    /// envelope). The fields stay private — the adapter is reached through this seam, the
-    /// way a test in this module reaches it through the literal.
+    /// A fake for a driver-level test in a SIBLING module (`orchestrate` drives the load envelope).
     pub(crate) fn fake_loader(rows: u64) -> FakeLoader {
         FakeLoader {
             rows,
@@ -1759,9 +1595,7 @@ pub(crate) mod tests {
         assert_eq!(calls(&f), ["rebuild t", "append t"]);
     }
 
-    /// The ledger tells a stop before the write (never makes the table rivet's own) from a
-    /// failure after it (may have) by the error's type: every pre-write check of the three
-    /// drivers stops as `Refused`; the count gate after the write fails plainly.
+    /// The ledger tells a stop before the write (never makes the table rivet's own) from a failure after it (may have) by the error's type.
     #[test]
     fn a_stop_before_the_write_is_typed_and_a_failure_after_it_is_not() {
         let stops: Vec<(&str, anyhow::Error)> = vec![
@@ -1908,10 +1742,7 @@ pub(crate) mod tests {
         assert_eq!(f.object_kind("t__changes").unwrap(), ObjectKind::Table);
     }
 
-    /// A whole-table load whose partition the append cannot re-shape is refused
-    /// BEFORE the rename, so the table keeps its name and the operator's next
-    /// command starts from an unchanged warehouse. Refusing after the rename left
-    /// `t` gone and no view, under an error that said "nothing was changed".
+    /// A whole-table load whose partition the append cannot re-shape is refused BEFORE the rename, so the table keeps its name and the operator's next command starts from an unchanged warehouse.
     #[test]
     fn a_partition_drift_is_refused_before_the_full_load_table_is_adopted() {
         let f = full_load_left(5);
@@ -1937,7 +1768,6 @@ pub(crate) mod tests {
         );
         assert_eq!(f.object_kind("t__changes").unwrap(), ObjectKind::Absent);
 
-        // Asked for, the rebuild adopts and then rebuilds — the same drift, resolved.
         let f = full_load_left(5);
         *f.drift.borrow_mut() = Some(ChangelogDrift::Partition {
             existing: "`ts` by day".into(),
@@ -1970,16 +1800,6 @@ pub(crate) mod tests {
     }
 
     /// A ledger that cannot ANSWER is not a ledger that is ABSENT.
-    ///
-    /// The pair above and below is the whole point: `Unknown` — the operator ran
-    /// without a state DB — takes the table over on its shape and is unchanged here.
-    /// `Unreadable` is the state where a ledger IS configured and its query failed,
-    /// so the record that would have said `Foreign` is exactly what is missing. Both
-    /// arrived at this function as `Unknown` until the probe became tri-state, which
-    /// is why one failed `SELECT COUNT(*)` could license overwriting a foreign table.
-    ///
-    /// RED against `Err(_) => Ownership::Unknown` at the two probe sites: with that
-    /// mapping this call succeeds and the loader records `adopt`/`append`.
     #[test]
     fn an_unreadable_ledger_refuses_where_an_absent_one_proceeds() {
         let f = full_load_left(5);
@@ -1997,8 +1817,6 @@ pub(crate) mod tests {
             calls(&f)
         );
 
-        // The whole-table path takes the same probe, so it refuses too — while the
-        // stateless run one line below it still proceeds.
         assert!(
             full_load(&full_load_left(5), Ownership::Unreadable).is_err(),
             "a full load overwrites; an unreadable ledger must not license that"
@@ -2081,7 +1899,7 @@ pub(crate) mod tests {
         assert_eq!(calls(&f), ["adopt t", "append t"]);
     }
 
-    /// The table to adopt is compared with the export's own columns: the change-log columns rivet adds are not among them.
+    /// The table to adopt is compared with the export's own columns.
     #[test]
     fn an_adopted_table_is_compared_by_the_exports_columns_without_the_meta_ones() {
         let f = full_load_left(5);
@@ -2117,7 +1935,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// The loader takes the plan's clustering when it names columns or was written, even as an empty list; an unwritten empty one leaves the loader's own.
+    /// The loader takes the plan's clustering when it names columns or was written, even as an empty list.
     #[test]
     fn the_bigquery_loader_takes_the_clustering_the_plan_states() {
         use plan::Clustering::{Auto, Written};
@@ -2388,8 +2206,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// The same targets under a ledger that vouches for them, or under none, load as before;
-    /// so does a ledger with no record when both names are free.
+    /// The same targets under a ledger that vouches for them, or under none, load as before.
     #[test]
     fn an_append_onto_its_own_names_or_free_ones_is_unchanged() {
         let landed = vec!["append t".to_string(), "view t".to_string()];
@@ -2483,8 +2300,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// The buffer append asks the same question: a base or a buffer this ledger has no
-    /// record of is not written, and rivet's own are, as before.
+    /// The buffer append asks the same question.
     #[test]
     fn a_buffer_append_onto_a_base_or_buffer_the_ledger_has_no_record_of_is_refused() {
         let buffer = |f: &FakeLoader, ownership| {
@@ -2534,9 +2350,7 @@ pub(crate) mod tests {
         assert_eq!(*free.writes().borrow(), ["append t"], "free names");
     }
 
-    /// A base replaced while its buffer still holds rows is refused by name; an absent
-    /// or empty buffer (the first cycle, or right after a compaction) lets the pass
-    /// through. RED against landing the whole-table pass regardless.
+    /// A base replaced while its buffer still holds rows is refused by name.
     #[test]
     fn a_whole_table_pass_over_a_buffered_base_is_refused_until_the_buffer_is_dealt_with() {
         let first_cycle = FakeLoader::default();
@@ -2583,10 +2397,7 @@ pub(crate) mod tests {
         assert!(ObjectKind::from_probe(3).is_err());
     }
 
-    /// An fs-backed [`GcsStore`] seeded with one object under the bucket-relative
-    /// `rel` — stands in for the export's live GCS source prefix so the driver's
-    /// real delete path (`delete_under` → `remove_all`) runs offline. Returns the
-    /// store; the caller keeps `dir` alive for the store's lifetime.
+    /// An fs-backed [`GcsStore`] seeded with one object under the bucket-relative `rel`.
     fn fs_store_with_prefix(dir: &tempfile::TempDir, rel: &str) -> GcsStore {
         let obj = dir.path().join(rel).join("x.parquet");
         std::fs::create_dir_all(obj.parent().unwrap()).unwrap();
@@ -2601,11 +2412,6 @@ pub(crate) mod tests {
 
     #[test]
     fn gc_orphans_refuses_the_bucket_root_and_spares_siblings() {
-        // #8 e2e against the REAL opendal fs-backed store (the load layer's offline
-        // e2e seam — `gc_orphans` runs its real delete
-        // here). A bucket-ROOT prefix (the empty resolved key a no-`prefix` or
-        // `{partition}`-leading GCS export + cleanup_source produces) must be
-        // REFUSED, never wiped — a real `remove_all("")` destroys UNRELATED exports.
         let dir = tempfile::tempdir().unwrap();
         for rel in ["exportA/part.parquet", "innocent-neighbour/keep.parquet"] {
             let obj = dir.path().join(rel);
@@ -2614,12 +2420,10 @@ pub(crate) mod tests {
         }
         let store = GcsStore::open_fs(dir.path().to_str().unwrap()).unwrap();
 
-        // The destructive path refuses the root — BEFORE touching the store.
         assert!(
             reconcile::gc_orphans(&store, "gs://bucket/", &[], false, &Default::default()).is_err(),
             "gc_orphans must REFUSE a bucket-root prefix, not list+delete the whole bucket"
         );
-        // Nothing was deleted — both independent exports survive intact.
         assert!(prefix_populated(&store, "exportA"), "exportA must survive");
         assert!(
             prefix_populated(&store, "innocent-neighbour"),
@@ -2689,8 +2493,7 @@ pub(crate) mod tests {
     fn uris() -> Vec<String> {
         vec!["gs://b/p/x.parquet".into()]
     }
-    /// The cleanup prefix the driver receives (a `gs://bucket/…` URI) and its
-    /// bucket-relative form the fs store is keyed by.
+    /// The cleanup prefix the driver receives (a `gs://bucket/…` URI) and its bucket-relative form the fs store is keyed by.
     const REL: &str = "p";
 
     /// Make `run` the directory's committed run at `REL`, the way an extract's commit leaves it.
@@ -2847,8 +2650,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// A full load whose newest run exported nothing hands the loader an empty file list,
-    /// and the count gate still holds the table to the run's own total.
+    /// A full load whose newest run exported nothing hands the loader an empty file list, and the count gate still holds the table to the run's own total.
     #[test]
     fn an_empty_file_list_reaches_the_loader_and_the_count_gate_still_applies() {
         let empty = FakeLoader::default();
@@ -2977,7 +2779,6 @@ pub(crate) mod tests {
             rows: 999,
             ..Default::default()
         };
-        // No expected count → any landed rows pass (an ad-hoc load).
         assert!(
             run_load(
                 &f,
@@ -3057,9 +2858,7 @@ pub(crate) mod tests {
         assert!(format!("{err:#}").contains("incremental count validation failed"));
     }
 
-    /// The buffer append has the same count gate as the changelog append: a short
-    /// buffer fails BEFORE cleanup and before `compact` can merge a partial cycle;
-    /// an exact one reports what it buffered.
+    /// The buffer append has the same count gate as the changelog append.
     #[test]
     fn buffer_delta_mismatch_bails_and_an_exact_delta_reports() {
         let f = FakeLoader {
@@ -3142,10 +2941,6 @@ pub(crate) mod tests {
 
     #[test]
     fn build_bigquery_loader_wires_partition_and_cluster_keys() {
-        // A non-empty cluster/partition MUST reach the loader; if the guard
-        // inverts, a real key is silently dropped and the load omits the
-        // clustering the config asked for. Reading cluster_by/partition pins
-        // the wiring that `Box<dyn TargetLoader>` hides.
         let daily = plan::TablePartition {
             key: plan::PartitionKey::Time {
                 column: Some("ts".into()),
@@ -3161,7 +2956,6 @@ pub(crate) mod tests {
         assert!(l.clustering.is_written());
         assert_eq!(l.partition.as_ref(), Some(&daily));
 
-        // No keys set → neither clause (the default), never a spurious one.
         let auto = plan::Clustering::Auto(vec![]);
         let bare = build_bigquery_loader("proj", "ds", None, &auto, "run-1");
         assert!(bare.cluster_by().is_empty());
@@ -3171,11 +2965,6 @@ pub(crate) mod tests {
 
     #[test]
     fn split_object_uri_parses_bucket_and_bucket_relative_key() {
-        // The parse every load op addresses through: (bucket, bucket-relative
-        // key). The `delete_under` test above can't pin this — it drains by REL
-        // regardless of what split returns — so a mangled split (wrong bucket, or
-        // an empty key that lists/deletes the whole bucket root) is invisible
-        // there. Pin it directly.
         assert_eq!(split_object_uri("gs://b/p").unwrap(), ("b", "p"));
         assert_eq!(
             split_object_uri("gs://bucket/a/b/c.parquet").unwrap(),
@@ -3200,18 +2989,12 @@ pub(crate) mod tests {
             split_object_uri("gs://bucket-only").is_err(),
             "a bucket with no '/' has no (bucket, key) split"
         );
-        // The bucket-ROOT prefix must be REFUSED, never returned as an empty key:
-        // an empty key sends delete_under → remove_all("") / gc_orphans across the
-        // WHOLE bucket. A GCS export with no prefix, or a `{partition}`-leading
-        // prefix (base collapses to ""), resolves to exactly these — a legal config
-        // that would otherwise wipe unrelated data. (RED before the empty-key guard.)
         for root in ["gs://bucket/", "gs://bucket//", "gs://bucket///"] {
             assert!(
                 split_object_uri(root).is_err(),
                 "bucket-root prefix {root:?} must be refused, not parsed to an empty (root) key"
             );
         }
-        // A non-empty key with a trailing slash is still a real prefix.
         assert_eq!(
             split_object_uri("gs://b/exports/").unwrap(),
             ("b", "exports/")
@@ -3241,15 +3024,10 @@ pub(crate) mod tests {
 
     #[test]
     fn a_uri_with_a_quote_backslash_or_control_char_bails_before_the_driver_runs() {
-        // Storage-sourced injection: URIs come from the live GCS listing and are
-        // spliced single-quoted, UNESCAPED, into COPY FILES=()/LOAD uris=[]. A
-        // planted object key carrying the delimiter must be REFUSED loudly before
-        // any driver SQL runs — never escaped-and-hoped. The driver must not be
-        // touched (materialize/append never called).
         for bad in [
-            "gs://b/p/x'; drop table t --.parquet", // breaks out of the '…' literal
-            "gs://b/p/x\\.parquet",                 // backslash: Snowflake in-string escape
-            "gs://b/p/x\n.parquet",                 // control char
+            "gs://b/p/x'; drop table t --.parquet",
+            "gs://b/p/x\\.parquet",
+            "gs://b/p/x\n.parquet",
         ] {
             let f = FakeLoader {
                 rows: 1,
@@ -3294,17 +3072,12 @@ pub(crate) mod tests {
                 "the CDC driver must not be reached for {bad:?}"
             );
         }
-        // A normal rivet-produced URI still passes the gate.
         assert!(ensure_safe_load_uris(&uris()).is_ok());
     }
 
     #[test]
     fn incremental_cursor_not_in_specs_bails_before_append() {
         let f = FakeLoader::default();
-        // The exported columns are just `id`; a cursor `updated_at` used only in
-        // the extract's WHERE (not projected) is absent from `__changes`. The
-        // driver must bail BEFORE appending — else the view creation fails after
-        // the append and every retry re-appends (bloat).
         let err = run_load_incremental(
             &f,
             "t",
@@ -3329,21 +3102,16 @@ pub(crate) mod tests {
         );
     }
 
-    // RED before the pk gate moved into append_and_view: the CDC path gated its
-    // PK columns (round-6), but the INCREMENTAL path spliced pk into the dedup
-    // view's PARTITION BY (via quote_ident — bare on Snowflake, unescaped
-    // backticks on BigQuery) WITHOUT the same gate. A non-identifier PK name is
-    // an injection vector, and it must be refused before the driver runs.
     #[test]
     fn incremental_hostile_pk_is_refused_before_the_view_splice() {
         let f = FakeLoader::default();
         let err = run_load_incremental(
             &f,
             "t",
-            &spec(TargetStatus::Ok), // exported column: `id`
+            &spec(TargetStatus::Ok),
             &uris(),
-            &["id) OR (1=1) --".to_string()], // hostile PK spliced into PARTITION BY
-            "id",                             // valid cursor (in specs) so we reach the pk gate
+            &["id) OR (1=1) --".to_string()],
+            "id",
             None,
             None,
             Ownership::Own,

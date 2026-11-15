@@ -1,15 +1,4 @@
 //! Single-threaded chunk-checkpoint runner.
-//!
-//! `run_chunked_sequential_checkpoint` claims chunk tasks from the state DB
-//! one at a time, runs each through `export_one_chunk_range` (under the shared
-//! retry policy `super::attempt::run_with_retries`), and records progress in
-//! the manifest + chunk_task tables. This is the path used when `parallel: 1`
-//! or when `chunk_checkpoint: true` is set on a non-parallel export.
-//!
-//! Shared chunked-orchestration helpers (`chunked_plan`, `config_hint`,
-//! `ensure_chunk_checkpoint_plan`, `record_chunked_commit`) live in
-//! [`super`]. The parallel-worker checkpoint loop lives in
-//! [`super::parallel_checkpoint`].
 
 use std::time::Duration;
 
@@ -26,12 +15,8 @@ use super::math::build_chunk_query_sql;
 
 use super::ChunkOutcome;
 
-/// Returns `(rows, parts)` — one [`PartRecord`] per written part: empty for
-/// an empty chunk, several when `max_file_size` rotation split the chunk.
-/// Uses [`commit::write_sink_parts`] for the worker-safe I1 → dest.write →
-/// fingerprint half; the caller threads each record through
-/// [`commit::record_part`].
-#[allow(clippy::too_many_arguments)] // chunk + plan + summary threading is the actual arity here
+/// Returns `(rows, parts)` — one [`PartRecord`] per written part.
+#[allow(clippy::too_many_arguments)]
 fn export_one_chunk_range(
     src: &mut dyn Source,
     base_query: &str,
@@ -70,21 +55,7 @@ fn export_one_chunk_range(
         .with_catalog_hint_query(plan.catalog_query.as_deref()),
         &mut sink,
     )?;
-    // NO bare `writer.take() + finish()` here. `ExportSink::finish_writer` is the
-    // ONE close path and says so: it stamps PARTITION_BUCKETS_KEY into the part's
-    // footer before closing, and `load::plan_load_batches` reads that note FIRST,
-    // falling back to the raw row count when it is missing
-    // (src/load/partition_budget.rs:72). Closing by hand here left `writer` None,
-    // so the `sink.finish_writer()?` that opens `write_sink_parts` below
-    // (src/pipeline/commit.rs:487) became a no-op and the last part of EVERY chunk
-    // on this runner shipped without the bound — the load then over-counts a
-    // scattered part's partitions, silently, on this runner only.
-    // The schema fingerprint below only needs `sink.dest_schema`, which the sink
-    // resolves during `export` and keeps after the writer is closed.
     sink.finish_writer()?;
-    // ADR-0012 M3: capture the dest schema fingerprint as soon as the sink
-    // resolves it.  Idempotent: the helper no-ops once `summary` already
-    // carries one, and the schema is identical across chunks of one run.
     if let Some(s) = sink.dest_schema.as_deref() {
         super::super::manifest_writer::record_run_schema_fingerprint(summary, s);
     }
@@ -93,14 +64,9 @@ fn export_one_chunk_range(
         return Ok((0, Vec::new(), Default::default(), Default::default()));
     }
 
-    // Per-chunk writer: the cross-shape guard already fired at run start
-    // (the probe frame in run_chunked_sequential_checkpoint). open_unguarded
-    // avoids a manifest GET per chunk — restores main's behavior here.
     let frame = crate::pipeline::frame::RunnerFrame::open_unguarded(plan)?;
     let base = super::chunk_part_filename(&plan.export_name, chunk_index, &frame.ext);
     let dest = frame.dest;
-    // Worker-safe half of commit (I1 + dest.write + fingerprint), draining
-    // every part the sink produced (max_file_size rotation included).
     let (mut recs, wrote) = super::super::commit::write_sink_parts(
         dest.as_ref(),
         &mut sink,
@@ -130,34 +96,16 @@ pub(crate) fn run_chunked_sequential_checkpoint(
 ) -> Result<()> {
     let cp = chunked_plan(plan);
 
-    // Same cross-shape guard as single/keyset/exec: refuse to overwrite a CDC
-    // manifest with this batch export's manifest (they would silently destroy
-    // each other's audit trail). The two checkpoint runners were the ones that
-    // bypassed it — graph-surfaced runner-bypass, same class as the Form B gap.
-    // A resume of our own batch manifest matches mode and passes.
     {
-        // Probe-only open: the guard must fire before any chunk work starts.
         let _ = crate::pipeline::frame::RunnerFrame::open(plan)?;
     }
 
     let chunks = if plan.resume {
-        // A resume re-executes the STORED plan, and one thing must still be true
-        // for that to be sound — and it was not checked, because this arm
-        // skipped the whole match below (round-11 bughunt).
-        //
-        // The SCHEMA must not have drifted. `on_schema_drift: fail` was inert
-        //    here: DEMONSTRATED — a `DROP COLUMN` between the crash and the resume
-        //    produced exit 0, `rows: 300`, and three parts under ONE
-        //    `schema_fingerprint` whose schemas disagree. The identical drop without
-        //    `--resume` fails loudly. The gap between a crash and its resume is
-        //    exactly where a schema change is most likely.
         super::resumed_chunk_plan(src, plan, state, summary, &chunk_source)?
     } else {
         match chunk_source {
-            // Detect: compute ranges + run the pre-chunk drift check (ADR-0021).
             ChunkSource::Detect => super::prepare_chunk_plan(src, plan, Some(state), summary)?,
             ChunkSource::Precomputed(ranges) => {
-                // Ranges come from the artifact; the DRIFT GATE still runs.
                 summary.chunks_precomputed = true;
                 super::check_drift_only(src, plan, Some(state), summary)?;
                 ranges
@@ -168,13 +116,8 @@ pub(crate) fn run_chunked_sequential_checkpoint(
     let run_id =
         ensure_chunk_checkpoint_plan(state, plan, cp, summary, &chunks, config_path, progress)?;
 
-    // ADR-0012 M8: same manifest-aware preamble as the parallel runner —
-    // reconcile destination state with chunk_task table before claiming work.
     if plan.resume {
         let stats = super::apply_m8_resume_decisions(state, &run_id, plan, summary)?;
-        // #3: mark the run as a crash-recovery resume when it adopted prior work,
-        // so run_diagnosis emits "resumed a prior CRASHED run" — the field-log
-        // crash signal, previously set only by the keyset runner.
         summary.resumed = stats.adopted_prior_work();
         crate::test_hook::maybe_transient_once("after_resume_adopt")?;
     }
@@ -182,20 +125,15 @@ pub(crate) fn run_chunked_sequential_checkpoint(
     let planned = state.count_chunk_tasks_total(&run_id)?;
     let pb = ChunkProgress::new(&plan.export_name, planned);
     let pb_handle = pb.handle();
-    // Per-batch progress feed: bar ticks during a chunk's read, not only at end.
     let streamed_rows = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
-    // Form B: XOR-combine each chunk's checksums run-wide (order-independent), then
-    // harvest once — so the CHECKPOINT chunked path records Form B like exec.rs.
 
     if !plan.resume && !resource::check_memory(plan.tuning.memory_threshold_mb) {
         log::warn!("memory threshold exceeded before chunk export; pausing 5s");
         std::thread::sleep(Duration::from_secs(5));
     }
 
-    // One connection carried across chunks; a retry reconnects.
     let idle = super::IdleSources::default();
     let tally = super::attempt::RetryTally::default();
-    // Every failed chunk's typed error: the run's code and class come from these, not from `chunk_task`.
     let mut failures: Vec<(String, anyhow::Error)> = Vec::new();
     while let Some((chunk_index, sk, ek)) = state.claim_next_chunk_task(&run_id)? {
         if !resource::check_memory(plan.tuning.memory_threshold_mb) {
@@ -233,13 +171,7 @@ pub(crate) fn run_chunked_sequential_checkpoint(
             end_key: ek.clone(),
         });
 
-        // Parts a FAILED chunk left durable: counted and logged below, never lost.
         let mut debris = Vec::new();
-        // Test-only: make ONE chunk fail without killing the process, so the
-        // "not every claimed chunk completed" guard below can be exercised. A
-        // panic hook cannot reach it — the guard only runs when the loop
-        // finishes, which a crash never does. (`sink_part_write:N` fails a chunk
-        // MID-write instead, after its earlier parts are durable.)
         let chunk_result = match crate::test_hook::maybe_error_at_index("chunk_export", chunk_index)
         {
             Err(e) => Err(e),
@@ -274,13 +206,7 @@ pub(crate) fn run_chunked_sequential_checkpoint(
         match chunk_result {
             Ok((rows, parts, chunk_checksums, chunk_shape)) => {
                 pb.inc(summary.total_rows + rows as i64);
-                // chunk_task carries one file name; for a rotation-split chunk store
-                // the first sibling. The manifest records all siblings, so a missing
-                // one fails destination verification loudly instead of being
-                // silently skipped on resume.
                 let fname = parts.first().map(|p| p.file_name.clone());
-                // Shape only — chunked's drift gate stays pre-chunk, ADR-0021. The
-                // chunk_task flip is this runner's checkpoint, after its parts.
                 crate::pipeline::fan_in::commit_unit(
                     plan,
                     summary,
@@ -305,8 +231,6 @@ pub(crate) fn run_chunked_sequential_checkpoint(
             }
             Err(e) => {
                 let msg = crate::redact::redact_error(&e);
-                // The classifier already knows whether another attempt can help;
-                // the chunk layer used to re-dispatch regardless.
                 let retryable = crate::pipeline::retry::is_transient(&e);
                 log::error!(
                     "export '{}': chunk {} failed: {}",
@@ -319,8 +243,6 @@ pub(crate) fn run_chunked_sequential_checkpoint(
                     error: msg.clone(),
                     attempt: 1,
                 });
-                // The failed chunk's durable parts are recorded; the error it hands
-                // back is `e`, already logged above.
                 let failed = crate::pipeline::fan_in::commit_unit(
                     plan,
                     summary,
@@ -360,9 +282,6 @@ pub(crate) fn run_chunked_sequential_checkpoint(
     super::prune_superseded_attempts(summary, &tasks);
     pb.finish(summary.total_rows);
     state.finalize_chunk_run_completed(&run_id)?;
-    // ADR-0008 PG2 committed boundary via the shared finalize seam — the
-    // chunked variant walks chunk_task internally. See
-    // `super::super::run_store::RunStore`.
     super::super::run_store::RunStore::finalize(state, plan, summary)
         .with_progression(super::super::run_store::Progression::Chunked)
         .commit()?;

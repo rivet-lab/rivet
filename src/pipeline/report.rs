@@ -1,18 +1,4 @@
 //! **Layer: Observability**
-//!
-//! Per-run report artifacts written to `.rivet/runs/<run_id>/`.
-//!
-//! Two files are produced after every run (success or failure):
-//! - `summary.json` — machine-readable [`RunReport`] (stable contract)
-//! - `summary.md`   — operator-friendly Markdown (PRs, support tickets, incident reviews)
-//!
-//! Failures to write the report are non-fatal: callers log and continue, matching
-//! the same policy used for `file_log` writes (invariant I7 — observability must
-//! not break pipelines).
-//!
-//! The report is built from [`RunSummary`] + its embedded [`RunJournal`].  The
-//! report struct is decoupled from `RunSummary` so the on-disk JSON schema can
-//! evolve independently from internal accumulator fields.
 
 use std::path::{Path, PathBuf};
 
@@ -23,19 +9,12 @@ use crate::journal::{RunEvent, RunJournal};
 use crate::pipeline::summary::RunSummary;
 
 /// Compute the on-disk report directory for a run.
-///
-/// Layout: `dirname(config_path)/.rivet/runs/<run_id>/`, placed beside
-/// `.rivet_state.db` to mirror the existing state-file convention.
 pub fn report_dir(config_path: &str, run_id: &str) -> PathBuf {
     let config_dir = Path::new(config_path).parent().unwrap_or(Path::new("."));
     config_dir.join(".rivet").join("runs").join(run_id)
 }
 
 /// Public, stable JSON schema for a single export run.
-///
-/// Field additions are backwards-compatible (consumers must ignore unknown
-/// fields); field removals or type changes require a versioned bump and are
-/// avoided where possible.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunReport {
     pub run_id: String,
@@ -59,9 +38,6 @@ pub struct RunReport {
     pub retries: u32,
 
     /// Postgres temp-spill delta in bytes (None on non-PG or when probe failed).
-    /// DATABASE-wide, so it is a WINDOW delta: under any concurrent-sibling mode
-    /// every concurrent export reports the same shared window (see
-    /// `RunSummary::pg_temp_bytes_delta`) — never sum it across exports.
     pub pg_temp_bytes_delta: Option<i64>,
 
     pub validation: Option<ValidationOutcome>,
@@ -71,32 +47,21 @@ pub struct RunReport {
     pub plan_warnings: Vec<PlanWarningEntry>,
 
     pub error_message: Option<String>,
-    /// True when the run failed *and* at least one file was already committed,
-    /// so resuming would skip work rather than start from zero.
+    /// True when the run failed *and* at least one file was already committed, so resuming would skip work rather than start from zero.
     pub resumable: bool,
-    /// Suggested invocation to continue an interrupted run, or `None` when the
-    /// run completed successfully.
+    /// Suggested invocation to continue an interrupted run, or `None` when the run completed successfully.
     pub resume_command: Option<String>,
 
-    /// Apply-time context (plan_id, --force usage, bypassed checks).  `None`
-    /// when this run came from `rivet run` rather than `rivet apply`.  Added
-    /// in 0.7.5 to close the audit-trail gap surfaced by finding F5 (forced
-    /// applies left no record).  Existing consumers that ignore unknown
-    /// fields are unaffected.
+    /// Apply-time context (plan_id, --force usage, bypassed checks).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub apply_context: Option<crate::pipeline::summary::ApplyContext>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidationOutcome {
-    /// Composite verdict: per-file row counts pass AND, when applicable,
-    /// manifest-aware verification (M5) passes.  Stays `true` for the
-    /// legacy-run path where only row counts ran.
+    /// Composite verdict: per-file row counts pass AND, when applicable, manifest-aware verification (M5) passes.
     pub passed: bool,
-    /// Embedded manifest-aware verdict (ADR-0012 M5/M6, ADR-0013 — same
-    /// `--validate` flag, no new flag added).  `None` for runs that didn't
-    /// reach the manifest-write step (e.g. failed-before-any-part) or that
-    /// targeted streaming destinations where no manifest exists.
+    /// Embedded manifest-aware verdict (ADR-0012 M5/M6, ADR-0013 — same `--validate` flag, no new flag added).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub manifest: Option<crate::pipeline::validate_manifest::ManifestVerification>,
 }
@@ -178,10 +143,6 @@ impl RunReport {
 }
 
 /// Write `summary.json` and `summary.md` to `.rivet/runs/<run_id>/`.
-///
-/// Returns the directory path on success.  Failures (permission denied, disk
-/// full, etc.) are returned as `Err` — callers should log-and-continue rather
-/// than propagate (see invariant I7).
 pub fn write_run_report(config_path: &str, summary: &RunSummary, kind: &str) -> Result<PathBuf> {
     let dir = report_dir(config_path, &summary.run_id);
     std::fs::create_dir_all(&dir)?;
@@ -249,13 +210,8 @@ fn plan_origin(summary: &RunSummary) -> (Option<String>, Option<String>) {
         .unwrap_or((None, None))
 }
 
-/// The plan snapshot doesn't carry the source-engine label explicitly; infer
-/// it from the resolved `base_query` shape.  Returns `None` if neither hint is
-/// present (callers display the field as missing rather than fabricating one).
+/// The plan snapshot doesn't carry the source-engine label explicitly.
 fn engine_from_base_query(_q: &str) -> Option<String> {
-    // The base_query is the rendered SQL, which doesn't reliably encode the
-    // engine.  Real engine identification belongs in a future PlanSnapshot
-    // field; until then we leave this absent rather than guess.
     None
 }
 
@@ -368,8 +324,6 @@ pub fn render_markdown(r: &RunReport) -> String {
                 "  - Manifest: {} parts verified",
                 m.parts_verified
             ));
-            // Spell out content coverage: how many were md5-checked vs size-only,
-            // so "verified" doesn't imply content verification it didn't do.
             if m.parts_verified > 0 {
                 let size_only = m.parts_verified.saturating_sub(m.parts_md5_verified);
                 out.push_str(&format!(
@@ -390,8 +344,6 @@ pub fn render_markdown(r: &RunReport) -> String {
             ));
             out.push('\n');
             for failure in &m.failures {
-                // Failure has its own `Display` impl in `validate_manifest.rs`
-                // — single source of truth for operator-facing failure lines.
                 out.push_str(&format!("    - {}\n", failure));
             }
         }
@@ -473,20 +425,6 @@ pub fn render_markdown(r: &RunReport) -> String {
 }
 
 /// Render run journals as a pretty-printed JSON array for `rivet journal --json`.
-///
-/// `RunJournal` (and its embedded `JournalEntry` / `RunEvent`) already derive
-/// `Serialize`, so the wire form is the canonical journal — no lossy projection.
-/// Each element carries the full typed event stream (`FileWritten`, retries,
-/// schema changes, the terminal `RunCompleted`, …) that the human view
-/// summarises; a machine consumer gets every event with its `recorded_at`
-/// timestamp.  An empty slice renders as `[]` (a valid JSON array), never the
-/// human "No journal entries …" text, so consumers always parse cleanly.  The
-/// caller is responsible for the `--config` existence check (finding #9) before
-/// reaching here — this function is pure formatting.
-///
-/// `dead_code`-allowed until the `rivet journal --json` flag dispatch (a later
-/// wave, in the off-limits `cli.rs`/`args.rs`) calls it; exercised today by the
-/// module's unit tests.
 #[allow(dead_code)]
 pub(super) fn journals_to_json(journals: &[RunJournal]) -> Result<String> {
     Ok(serde_json::to_string_pretty(journals)?)
@@ -501,9 +439,7 @@ fn verdict_badge(status: &str) -> &'static str {
     }
 }
 
-/// Quote a path for inclusion in a copy-pasteable shell command.  Defensive
-/// against spaces or quotes in the config path.  Single-quote wrapping is
-/// POSIX-portable; embedded single quotes are escaped with `'\''`.
+/// Quote a path for inclusion in a copy-pasteable shell command.
 pub(super) fn shell_quote(s: &str) -> String {
     if s.chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/'))
@@ -739,7 +675,6 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(parsed.is_array(), "empty journals must serialize as []");
         assert_eq!(parsed.as_array().unwrap().len(), 0);
-        // Must NOT leak the human-view sentinel into the machine contract.
         assert!(!json.contains("No journal entries"));
     }
 
@@ -769,16 +704,11 @@ mod tests {
 
         let entries = run["entries"].as_array().unwrap();
         assert_eq!(entries.len(), 2);
-        // Each entry carries a timestamp and a typed event (serde externally
-        // tagged enum → the variant name is the key).
         assert!(entries[0]["recorded_at"].is_string());
         let file_event = &entries[0]["event"]["FileWritten"];
         assert_eq!(file_event["file_name"], "part-000.parquet");
         assert_eq!(file_event["rows"], 100);
-        // The produced file name (finding #24's human-view gap) is present in
-        // the machine contract too, so `--json` consumers can cross-check it.
         assert!(json.contains("part-000.parquet"));
-        // Terminal outcome is the second entry.
         assert_eq!(entries[1]["event"]["RunCompleted"]["status"], "success");
     }
 }

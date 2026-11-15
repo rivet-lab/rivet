@@ -1,20 +1,4 @@
 //! Snowflake loader.
-//!
-//! Loads Rivet Parquet from GCS into a native-typed Snowflake table via a
-//! `COPY INTO` off an external stage (a GCS `STORAGE INTEGRATION`). Unlike
-//! BigQuery — where `LOAD DATA` with a declared schema coerces the Parquet for
-//! free — Snowflake:
-//!   * bills warehouse compute for the `COPY` (there is no free load), and
-//!   * does NOT parse a Parquet JSON string into a navigable `VARIANT`: a plain
-//!     `COPY` lands it as a `VARIANT`-wrapped string (`meta:key` → NULL). So a
-//!     `VARIANT` column is loaded through a `PARSE_JSON($1:col)` transform in
-//!     the same `COPY` (one billed pass), which yields a navigable `OBJECT`.
-//!
-//! Both facts were verified live before this was written.
-//!
-//! Cost attribution rides a `QUERY_TAG` (Snowflake's analogue of BigQuery job
-//! labels): the tag shows up in `ACCOUNT_USAGE.QUERY_HISTORY`, so per-`rivet_op`
-//! warehouse credits can be summed after the fact.
 
 use super::TargetLoader;
 use super::snowflake_rest::SnowflakeApi;
@@ -33,27 +17,19 @@ pub struct SnowflakeLoader {
     pub warehouse: String,
     pub database: String,
     pub schema: String,
-    /// A pre-created GCS `STORAGE INTEGRATION` (grants Snowflake read on the
-    /// bucket). The external stage is created per-load using it.
+    /// A pre-created GCS `STORAGE INTEGRATION` (grants Snowflake read on the bucket).
     pub storage_integration: String,
-    /// `gcs://bucket/prefix/` — the external stage's URL (Snowflake wants the
-    /// `gcs://` scheme, not `gs://`).
+    /// `gcs://bucket/prefix/` — the external stage's URL (Snowflake wants the `gcs://` scheme, not `gs://`).
     pub gcs_url: String,
-    /// Clustering key — column(s)/expression(s) for `CLUSTER BY`, enabling
-    /// background auto-clustering. Empty = no clustering key. Applies only at
-    /// table creation.
+    /// Clustering key — column(s)/expression(s) for `CLUSTER BY`, enabling background auto-clustering.
     pub cluster_by: Vec<String>,
-    /// The `load.partition` mapped to a leading clustering expression
-    /// (`DATE_TRUNC('DAY', c)`), ahead of `cluster_by` — Snowflake has no partitions.
+    /// The `load.partition` mapped to a leading clustering expression (`DATE_TRUNC('DAY', c)`), ahead of `cluster_by`.
     pub partition_expr: Option<String>,
     /// The unencrypted PKCS#8 private key file, read once when the first statement runs.
     pub private_key_path: String,
-    /// Load-run correlation id, emitted in the `QUERY_TAG` JSON as `rivet_run`
-    /// so every statement of one `rivet load` invocation shares a run key —
-    /// cost slices per run (across tables) as well as per table. `None` omits it.
+    /// Load-run correlation id, emitted in the `QUERY_TAG` JSON as `rivet_run` so every statement of one `rivet load` invocation shares a run key.
     pub run_id: Option<String>,
-    /// The CDC layout: under `BaseAndBuffer`, `<table>__changes` is a per-cycle buffer
-    /// `rivet compact` drops, created transient with no time travel.
+    /// The CDC layout: under `BaseAndBuffer`, `<table>__changes` is a per-cycle buffer `rivet compact` drops, created transient with no time travel.
     pub layout: crate::load::plan::CdcLayout,
     /// The SQL API client, built when the first statement runs.
     api: std::sync::OnceLock<SnowflakeApi>,
@@ -79,11 +55,7 @@ impl SnowflakeLoader {
             .join(",\n")
     }
 
-    /// The `COPY` transform projection: a `VARIANT` column is parsed with
-    /// `PARSE_JSON` (a plain `COPY` would leave it a string), everything else is
-    /// passed through `$1:col` (the path key preserves the Parquet field case)
-    /// and coerced by the target column's type. The delete flag is `FALSE` for a row the
-    /// file does not flag: a baseline staged without the column must not land NULL.
+    /// The `COPY` transform projection: a `VARIANT` column is parsed with `PARSE_JSON` (a plain `COPY` would leave it a string), everything else is passed through `$1:col` (the path key preserves the Parquet field case) and coerced by the target column's type.
     fn build_copy_select(specs: &[TargetColumnSpec]) -> String {
         specs
             .iter()
@@ -118,8 +90,7 @@ impl SnowflakeLoader {
             .join(", ")
     }
 
-    /// ` CLUSTER BY (created, region)` — the clustering-key clause (empty when
-    /// no key). Snowflake wraps the key in parentheses (unlike BigQuery).
+    /// ` CLUSTER BY (created, region)` — the clustering-key clause (empty when no key).
     fn cluster_clause(cluster_by: &[String]) -> String {
         if cluster_by.is_empty() {
             String::new()
@@ -138,8 +109,6 @@ impl SnowflakeLoader {
     }
 
     /// A JSON query tag for post-hoc cost attribution in `QUERY_HISTORY`.
-    /// Carries `rivet_run` too when a load-run id is set, so credits summed from
-    /// `QUERY_ATTRIBUTION_HISTORY` slice per run as well as per table.
     fn query_tag(&self, table: &str) -> String {
         self.query_tag_for("load", table)
     }
@@ -239,14 +208,6 @@ impl TargetLoader for SnowflakeLoader {
     }
 
     fn changes_has_prior_changes(&self, table: &str) -> Result<bool> {
-        // A missing `__changes` table is the FIRST cycle, and the catalog says whether it is
-        // there. The text of a failed SELECT is not asked: a wording is not a verdict, and the
-        // catalog answers the same on every client.
-        //
-        // The catalog lists only what the role may see, so a log the role cannot SELECT reads as
-        // absent here; the residual is SELF-LIMITING (round-9): append_changelog's own
-        // BEFORE_/AFTER_ COUNT gates need SELECT, so that role fails the load loudly one
-        // statement later, never a silent doomed append.
         if seeded!(
             "snowflake-change-log-told-by-error-text",
             false,
@@ -254,8 +215,6 @@ impl TargetLoader for SnowflakeLoader {
         ) {
             return Ok(false);
         }
-        // FAIL-CLOSED (round-8): a drift in the answer's shape must not read as "first cycle" and
-        // silently disarm the refusal. BigQuery's scalar path already errors; parity.
         let v = self.run_sql(&self.build_prior_changes_sql(table))?;
         extract_named(&v, "PROBE_")
             .map(|n| n > 0)
@@ -385,8 +344,6 @@ impl TargetLoader for SnowflakeLoader {
     }
 
     fn create_view(&self, table: &str, view_sql: &str) -> Result<()> {
-        // Fully-qualified DDL; a QUERY_TAG keeps it cost-attributable. CREATE VIEW
-        // is metadata — no warehouse compute needed.
         let sql = format!(
             "ALTER SESSION SET QUERY_TAG = '{tag}';\n{view_sql}",
             tag = self.query_tag(table),
@@ -418,17 +375,11 @@ impl SnowflakeLoader {
         let ddl = Self::build_schema_ddl(specs);
         let select = Self::build_copy_select(specs);
         let columns = Self::build_column_list(specs);
-        // A per-load external stage over the export's GCS prefix; the COPY loads
-        // exactly the driver-selected files (`FILES=(…)`), NOT every Parquet under
-        // the prefix — so the mode-aware/ledger per-run selection is honored (a
-        // `PATTERN` over the prefix would load stale runs and fail the count gate).
         let stage = format!("rivet_stage_{}", sanitize_tag(table));
         let files = copy_files_clause(&self.gcs_url, uris)?;
         let cluster = Self::cluster_clause(&self.cluster_keys());
         let pf = parquet_format();
 
-        // Pin the session to UTC before the COPY — Snowflake otherwise stamps a
-        // Parquet timestamp with the session offset, shifting a `timestamptz`.
         let sql = format!(
             "ALTER SESSION SET QUERY_TAG = '{tag}';\n\
              ALTER SESSION SET TIMEZONE = 'UTC';\n\
@@ -451,7 +402,7 @@ impl SnowflakeLoader {
         Ok(sql)
     }
 
-    /// The publish script: `table` becomes a zero-copy clone of the loaded `staging` in one statement, keeping the grants made on it; then `staging` is dropped.
+    /// The publish script: `table` becomes a zero-copy clone of the loaded `staging` in one statement, keeping the grants made on it.
     fn build_clone_in_sql(&self, table: &str, staging: &str) -> String {
         format!(
             "ALTER SESSION SET QUERY_TAG = '{tag}';\n\
@@ -472,14 +423,6 @@ impl SnowflakeLoader {
     }
 
     /// The re-baseline probe, as one request.
-    ///
-    /// Behind a `build_*` seam like its siblings — and now carrying `USE WAREHOUSE`
-    /// like them too. This was the ONE query in the adapter that omitted it, so on a
-    /// connection whose `connections.toml` declares no default warehouse (rivet does
-    /// not require one there: it takes `warehouse:` in the load target and wires it
-    /// here) Snowflake answers "No active warehouse selected in the current session".
-    /// That text does not contain "does not exist", so the first-cycle arm in the
-    /// caller cannot absorb it, and a load fails on a probe that never ran.
     fn build_prior_changes_sql(&self, table: &str) -> String {
         let changes_fqtn = self.fqtn(&format!("{table}__changes"));
         let tag = sanitize_tag(table);
@@ -492,7 +435,7 @@ impl SnowflakeLoader {
         )
     }
 
-    /// Probe returning `KIND_` = 1·table + 2·view + 4·other for `table`, and 0 when the name is free: `COUNT` over no rows is 0, where Snowflake's `COUNT_IF` over no rows is NULL.
+    /// Probe returning `KIND_` = 1·table + 2·view + 4·other for `table`, and 0 when the name is free.
     fn build_object_kind_sql(&self, table: &str) -> String {
         format!(
             "ALTER SESSION SET QUERY_TAG = '{tag}';\n\
@@ -549,8 +492,7 @@ impl SnowflakeLoader {
         )
     }
 
-    /// Rename `table` to `<table>__changes` and add the meta columns (NULL on every row),
-    /// keeping its rows and clustering.
+    /// Rename `table` to `<table>__changes` and add the meta columns (NULL on every row), keeping its rows and clustering.
     fn build_adoption_sql(&self, table: &str) -> String {
         let changes = self.fqtn(&format!("{table}__changes"));
         let meta = crate::load::cdc::meta_column_specs(crate::load::cdc::Warehouse::Snowflake);
@@ -578,8 +520,7 @@ impl SnowflakeLoader {
         full
     }
 
-    /// Ensure the change log exists: a permanent clustered table, or under a base and buffer a
-    /// transient one with no time travel and no clustering — it is read once and dropped.
+    /// Ensure the change log exists: a permanent clustered table, or under a base and buffer a transient one with no time travel and no clustering.
     fn build_create_changes_sql(&self, changes_fqtn: &str, ddl: &str) -> String {
         if self.layout.log_is_disposable() {
             format!(
@@ -592,8 +533,7 @@ impl SnowflakeLoader {
         }
     }
 
-    /// The re-baseline script: ensure the buffer, then buffer a tombstone for every live base row
-    /// the buffer holds no key for, counting the buffer around the insert.
+    /// The re-baseline script: ensure the buffer, then buffer a tombstone for every live base row the buffer holds no key for, counting the buffer around the insert.
     fn build_flag_absent_sql(
         &self,
         table: &str,
@@ -634,11 +574,7 @@ impl SnowflakeLoader {
         )
     }
 
-    /// The compaction script, one `snow` invocation (one warehouse resume): reconcile the base's
-    /// columns, merge a leftover `__merging` table, then rename the buffer to `__merging`, count
-    /// it, replace its winners into the base in one transaction, and drop it AFTER the commit
-    /// (a DDL commits implicitly). A failure anywhere leaves the renamed table to be merged
-    /// again by the next compaction, which is safe because the replace is idempotent.
+    /// The compaction script, one `snow` invocation (one warehouse resume).
     fn build_compact_sql(
         &self,
         table: &str,
@@ -688,18 +624,13 @@ impl SnowflakeLoader {
         sql
     }
 
-    /// The append script for one CDC load, separated from its EXECUTION so the
-    /// schema-reconciliation step can be asserted without a Snowflake account.
-    /// The reconciling `ALTER` shipped on BigQuery only, so "the builder exists"
-    /// is not evidence that this adapter calls it — that is what the test pins.
+    /// The append script for one CDC load, separated from its EXECUTION so the schema-reconciliation step can be asserted without a Snowflake account.
     fn build_append_changelog_sql(
         &self,
         table: &str,
         specs: &[TargetColumnSpec],
         uris: &[String],
     ) -> Result<String> {
-        // Full change-log schema: rivet's `__op`/`__pos`/`__seq` meta columns
-        // (not reported by `rivet check`) ahead of the resolved data columns.
         let full = Self::changes_specs(specs);
 
         let changes = format!("{table}__changes");
@@ -712,8 +643,6 @@ impl SnowflakeLoader {
         let files = copy_files_clause(&self.gcs_url, uris)?;
         let pf = parquet_format();
 
-        // Ensure the log exists (clustered on PK), COUNT before, append via COPY,
-        // COUNT after — the delta is what THIS load added; the driver gates it.
         let sql = format!(
             "ALTER SESSION SET QUERY_TAG = '{tag}';\n\
              ALTER SESSION SET TIMEZONE = 'UTC';\n\
@@ -738,8 +667,7 @@ impl SnowflakeLoader {
     }
 }
 
-/// Snowflake has no partitions: a `partition:` column maps to a leading `DATE_TRUNC`
-/// clustering expression; the BigQuery-only forms and options are refused (ADR-0034 D6).
+/// Snowflake has no partitions: a `partition:` column maps to a leading `DATE_TRUNC` clustering expression.
 pub(crate) fn partition_expr(
     export: &str,
     spec: &crate::load::plan::PartitionSpec,
@@ -790,35 +718,13 @@ fn is_meta_column(name: &str) -> bool {
     crate::load::cdc::is_meta_column(name)
 }
 
-/// Bring an EXISTING change log's schema up to the declared one by ADDING what
-/// is missing — never by replacing the table, which would impose rivet's schema
-/// on history rivet does not own.
-///
-/// `CREATE TABLE IF NOT EXISTS` is a no-op on a table that already exists, so a
-/// log rivet did not create — one an operator pointed rivet at — keeps whatever shape its previous
-/// owner gave it, and a log that predates a new column keeps the old one. The
-/// `COPY INTO … (<declared columns>)` below then names a column the table lacks
-/// and Snowflake fails the whole load with `invalid identifier` — after the
-/// extract has already been paid for. `_rivet_row_hash` made that concrete: it
-/// is written at extraction and gained a load spec, so every pre-existing log
-/// was suddenly one column short.
-///
-/// `ADD COLUMN` with `IF NOT EXISTS` per column is the only safe verb: additive, idempotent,
-/// metadata-only, and existing rows read NULL for the new column. Trailing
-/// newline (not `Option`) so the caller interpolates it unconditionally; an
-/// empty spec list yields an empty string rather than a bare `ALTER TABLE t ;`.
+/// Bring an EXISTING change log's schema up to the declared one by ADDING what is missing.
 fn build_alter_add_columns_sql(fqtn: &str, specs: &[TargetColumnSpec]) -> String {
     if specs.is_empty() {
         return String::new();
     }
     let adds = specs
         .iter()
-        // Bare identifiers, matching `build_schema_ddl` / `build_column_list`:
-        // this loader creates its columns unquoted (Snowflake upper-cases them),
-        // so a quoted `"col"` here would ADD a second, case-sensitive column
-        // instead of matching the one the COPY names.
-        // Snowflake takes `ADD COLUMN` once per statement and `IF NOT EXISTS` per column:
-        // `ADD COLUMN IF NOT EXISTS a T, ADD COLUMN IF NOT EXISTS b T` is a syntax error there.
         .map(|s| {
             format!(
                 "{}IF NOT EXISTS {} {}",
@@ -835,7 +741,7 @@ fn build_alter_add_columns_sql(fqtn: &str, specs: &[TargetColumnSpec]) -> String
     )
 }
 
-/// The stage URL: the export prefix closed with one `/`. Snowflake joins a stage URL and a `FILES` entry as text, so a prefix written without the slash named `…/orderspart-0.parquet`.
+/// The stage URL: the export prefix closed with one `/`.
 fn stage_url(gcs_url: &str) -> String {
     seeded!(
         "snowflake-stage-url-left-open",
@@ -844,7 +750,7 @@ fn stage_url(gcs_url: &str) -> String {
     )
 }
 
-/// How every stage and `COPY` reads a part, spelled inline: a named format made by `CREATE … IF NOT EXISTS` is whatever object already has that name. Logical types on, so a Parquet timestamp or time is read as one and not as its raw integer; binary kept as bytes.
+/// How every stage and `COPY` reads a part, spelled inline.
 fn parquet_format() -> &'static str {
     seeded!(
         "snowflake-parquet-read-without-logical-types",
@@ -853,9 +759,7 @@ fn parquet_format() -> &'static str {
     )
 }
 
-/// A column is loaded through `PARSE_JSON` iff its native type is `VARIANT`
-/// (Rivet's Snowflake resolver maps JSON → `VARIANT`); a plain `COPY` would
-/// leave it a string.
+/// A column is loaded through `PARSE_JSON` iff its native type is `VARIANT` (Rivet's Snowflake resolver maps JSON → `VARIANT`).
 fn needs_parse_json(spec: &TargetColumnSpec) -> bool {
     spec.target_type == TargetType::Snowflake(SfType::Variant)
 }
@@ -873,20 +777,14 @@ fn sanitize_tag(s: &str) -> String {
         .collect()
 }
 
-/// Strip either GCS URI scheme — `gcs://` (Snowflake's stage scheme) or `gs://`
-/// (what the load driver hands us) — so a stage URL and a driver-selected URI
-/// compare on bucket/key alone, not scheme. Without this the two never matched.
+/// Strip either GCS URI scheme — `gcs://` (Snowflake's stage scheme) or `gs://` (what the load driver hands us).
 fn strip_gcs_scheme(s: &str) -> &str {
     s.strip_prefix("gcs://")
         .or_else(|| s.strip_prefix("gs://"))
         .unwrap_or(s)
 }
 
-/// Build the COPY `FILES=('a.parquet', 'b/c.parquet', …)` clause from the
-/// driver-selected `uris`, each made relative to the stage URL (`gcs_url`). This
-/// is what makes Snowflake honor the mode-aware/ledger per-run selection instead
-/// of loading every Parquet under the prefix — a `PATTERN` over the prefix would
-/// re-load stale/already-loaded runs and fail the count gate.
+/// Build the COPY `FILES=('a.parquet', 'b/c.parquet', …)` clause from the driver-selected `uris`, each made relative to the stage URL (`gcs_url`).
 fn copy_files_clause(gcs_url: &str, uris: &[String]) -> Result<String> {
     if uris.is_empty() {
         crate::rivet_bail!(
@@ -894,9 +792,6 @@ fn copy_files_clause(gcs_url: &str, uris: &[String]) -> Result<String> {
             "Snowflake COPY: no Parquet URIs selected to load"
         );
     }
-    // Snowflake caps an explicit FILES=() list at 1000 entries; a normal run is a
-    // handful. Batching past that is a follow-up — fail loud rather than silently
-    // fall back to a whole-prefix PATTERN (the bug this fix closes).
     if uris.len() > 1000 {
         crate::rivet_bail!(
             crate::error::codes::LOAD_FILE_LIMIT_EXCEEDED,
@@ -904,11 +799,6 @@ fn copy_files_clause(gcs_url: &str, uris: &[String]) -> Result<String> {
             uris.len()
         );
     }
-    // Scheme-blind: the stage URL is `gcs://` (Snowflake's scheme) but the driver
-    // hands `gs://` uris. Strip both before matching so FILES entries come out
-    // stage-RELATIVE — else strip_prefix never matches, the FULL uri leaks into
-    // FILES=(), and Snowflake resolves it relative to the stage → a doubled
-    // `gcs://…/gs://…` path (the live-caught "file not found" bug).
     let base = strip_gcs_scheme(gcs_url).trim_end_matches('/');
     let files = uris
         .iter()
@@ -930,9 +820,7 @@ fn extract_count(value: &serde_json::Value) -> Option<u64> {
     extract_named(value, "ROWS_")
 }
 
-/// Pull a named integer column (e.g. `BEFORE_` / `AFTER_` / `ROWS_`) out of
-/// the answer — an array of statement result blocks, each an array of row
-/// objects. Returns the first block carrying the key.
+/// Pull a named integer column (e.g.
 fn extract_named(value: &serde_json::Value, key: &str) -> Option<u64> {
     let blocks = value.as_array()?;
     for block in blocks {
@@ -965,12 +853,6 @@ mod tests {
 
     #[test]
     fn copy_files_clause_lists_the_selected_files_relative_to_the_stage() {
-        // PRODUCTION REALITY: the stage URL is `gcs://` (Snowflake's scheme) while
-        // the driver hands `gs://` uris. FILES must still come out stage-RELATIVE
-        // across the scheme gap — a scheme-blind strip_prefix leaks the FULL uri,
-        // which Snowflake resolves relative to the stage → a doubled
-        // `gcs://…/gs://…` path ("file not found", caught live). This test now
-        // mixes the schemes so it reproduces that bug.
         let clause = copy_files_clause(
             "gcs://bucket/exports/orders/",
             &[
@@ -988,13 +870,10 @@ mod tests {
             !clause.contains("gs://") && !clause.contains("gcs://"),
             "no absolute URI may leak into FILES=() — that doubles the stage prefix"
         );
-        // A `gcs://` stage URL without a trailing slash still strips a `gs://` uri.
         assert_eq!(
             copy_files_clause("gcs://b/p", &["gs://b/p/f.parquet".to_string()]).unwrap(),
             "FILES=('f.parquet')"
         );
-        // Empty selection and the 1000-file cap both bail (never a silent
-        // whole-prefix fallback).
         assert!(copy_files_clause("gcs://b/p/", &[]).is_err());
         let many: Vec<String> = (0..1001)
             .map(|i| format!("gs://b/p/f{i}.parquet"))
@@ -1111,14 +990,7 @@ mod tests {
         );
     }
 
-    /// An existing change log must be reconciled by ADDING what it lacks, never
-    /// by a replace. `CREATE TABLE IF NOT EXISTS` is a no-op on a table that
-    /// already exists, so without this the `COPY INTO … (<declared columns>)`
-    /// names a column the table does not have and Snowflake fails the load with
-    /// `invalid identifier` — after the extract was already paid for. This is
-    /// the Snowflake twin of bigquery.rs's `build_alter_add_columns_sql`; the
-    /// reconciliation lives in each adapter, so one adapter having it proves
-    /// nothing about the other (it shipped on BigQuery alone).
+    /// An existing change log must be reconciled by ADDING what it lacks, never by a replace.
     #[test]
     fn alter_add_columns_reconciles_an_existing_log_and_never_replaces_it() {
         let specs = vec![
@@ -1146,18 +1018,11 @@ mod tests {
             "reconciliation must never replace or drop — the log holds history \
              rivet does not own; got: {sql}"
         );
-        // Bare identifiers: the loader creates its columns unquoted, so a quoted
-        // name would add a SECOND case-sensitive column the COPY never names.
         assert!(!sql.contains('"'), "identifiers stay bare; got: {sql}");
-        // Empty spec list ⇒ no statement at all, not a bare `ALTER TABLE t ;`.
         assert_eq!(build_alter_add_columns_sql("DB.SC.t", &[]), "");
     }
 
-    /// The reconciliation must actually be IN the append script — a correct
-    /// builder that no caller invokes is the bug this release shipped on
-    /// Snowflake. Asserted on the emitted SQL's ORDER: the ALTER has to sit
-    /// after the CREATE (which is the no-op on an existing table) and before
-    /// the COPY that names the columns.
+    /// The reconciliation must actually be IN the append script.
     #[test]
     fn the_append_script_alters_between_the_create_and_the_copy() {
         let specs = vec![spec("id", SfType::Number), spec("__op", SfType::Varchar)];
@@ -1205,9 +1070,6 @@ mod tests {
             l.query_tag("Orders"),
             r#"{"managed_by":"rivet","rivet_op":"load","rivet_table":"Orders"}"#
         );
-        // Non-alphanumerics in the id are coerced to `_` so QUERY_TAG stays
-        // valid JSON. The generated run id is pure hex, so this only bites a
-        // user-supplied `--run-id` with punctuation.
         l.run_id = Some("r-7".to_string());
         assert_eq!(
             l.query_tag("Orders"),
@@ -1226,7 +1088,6 @@ mod tests {
 
     #[test]
     fn cdc_before_and_after_counts_are_extracted_by_name() {
-        // The CDC script emits BEFORE_ and AFTER_ counts in separate blocks.
         let v = serde_json::json!([
             [{"status": "Statement executed successfully."}],
             [{"BEFORE_": 10}],
@@ -1291,14 +1152,6 @@ mod tests {
     }
 
     /// The re-baseline probe selects a warehouse, like every other query here.
-    ///
-    /// It was the ONE query in this adapter that omitted `USE WAREHOUSE`, and the
-    /// omission is invisible on a connection that happens to have a default: rivet
-    /// does not require one in `connections.toml` because it takes `warehouse:` in
-    /// the load target. Without a default, Snowflake answers "No active warehouse
-    /// selected in the current session" — which does not contain "does not exist",
-    /// so the caller's first-cycle arm cannot absorb it and the load dies on a probe
-    /// that never ran. RED against the adapter as it stood before the seam.
     #[test]
     fn the_rebaseline_probe_selects_a_warehouse_like_every_other_query() {
         let sql = adoption_loader().build_prior_changes_sql("orders");
@@ -1373,7 +1226,7 @@ mod tests {
     }
 
     impl Stand {
-        /// Answer by `rules`: `(text the statement holds, exit code, the blocks one per statement, the error text)`; a non-zero exit is the API refusing the request with that text.
+        /// Answer by `rules`: `(text the statement holds, exit code, the blocks one per statement, the error text)`.
         fn scripted(rules: &[(&str, i32, &str, &str)]) -> Self {
             let rules: Vec<(String, i32, serde_json::Value, String)> = rules
                 .iter()
@@ -1445,14 +1298,13 @@ mod tests {
             .to_string()
     }
 
-    /// A full load lands in a fresh staging table and clones it over the table only after the COPY and the count; any failure before leaves the table alone and drops the staging table.
+    /// A full load lands in a fresh staging table and clones it over the table only after the COPY and the count.
     #[test]
     fn a_full_load_swaps_in_only_a_counted_copy_and_drops_its_staging_table() {
         let specs = [col("id", SfType::NumberPs(38, 0))];
         let uris = ["gs://bkt/exports/orders/part-0.parquet".to_string()];
         let rows = |n: u64| format!(r#"[[{{"status":"ok"}}],[{{"ROWS_":{n}}}]]"#);
         let (two, three) = (rows(2), rows(3));
-        // (what the COPY answers, what the clone answers, expected rows, the code, sent the clone)
         type Case<'a> = (&'a str, i32, i32, Option<u64>, Option<&'a str>, bool);
         let cases: [Case; 5] = [
             (&two, 0, 0, Some(2), None, true),
@@ -1561,7 +1413,7 @@ mod tests {
             && crate::load::is_safe_load_ident(n)));
     }
 
-    /// What Snowflake's catalog answers for a name: `[[status], [status], [row]]`, as the loader reads three statements.
+    /// What Snowflake's catalog answers for a name.
     fn answer(row: &str) -> String {
         format!(r#"[[{{"status":"ok"}}],[{{"status":"ok"}}],[{row}]]"#)
     }
@@ -1586,7 +1438,6 @@ mod tests {
             assert_eq!(stand.loader().object_kind("orders").unwrap(), want, "{row}");
             assert_eq!(stand.sent().len(), 1);
         }
-        // What `COUNT_IF` over no rows gave: a NULL the loader does not take for "absent".
         let stand = Stand::scripted(&[(
             "INFORMATION_SCHEMA.TABLES",
             0,
@@ -1602,7 +1453,7 @@ mod tests {
         assert!(stand.loader().object_kind("orders").is_err());
     }
 
-    /// Whether a change log holds prior changes is asked of the catalog first: a log that is not there is the first cycle and is never selected from, whatever the warehouse would say about it.
+    /// Whether a change log holds prior changes is asked of the catalog first.
     #[test]
     fn a_missing_change_log_is_the_first_cycle_by_the_catalog_not_by_an_error_text() {
         let absent = Stand::scripted(&[
@@ -1649,7 +1500,6 @@ mod tests {
             assert_eq!(there.sent().len(), 2);
         }
 
-        // A log that is there and cannot be read is an error, not a first cycle.
         let unreadable = Stand::scripted(&[
             (
                 "INFORMATION_SCHEMA.TABLES",
@@ -1909,7 +1759,7 @@ mod tests {
             .unwrap_or_else(|| panic!("`{needle}` missing from:\n{sql}"))
     }
 
-    /// The buffer is renamed, replaced into the base inside one transaction, and dropped only after the COMMIT: a DDL commits implicitly, so a DROP inside would end the transaction early.
+    /// The buffer is renamed, replaced into the base inside one transaction, and dropped only after the COMMIT.
     #[test]
     fn the_compact_script_renames_then_replaces_then_drops_after_the_commit() {
         let l = base_buffer_loader();
@@ -2006,7 +1856,7 @@ mod tests {
         assert!(!sql.contains("UPDATE"), "{sql}");
     }
 
-    /// A buffer is disposable under a base and buffer: transient, no time travel, not clustered; the log+view table is the permanent clustered table it always was.
+    /// A buffer is disposable under a base and buffer.
     #[test]
     fn the_buffer_is_transient_only_under_a_base_and_buffer() {
         let specs = compact_specs(false);

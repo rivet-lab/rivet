@@ -1,39 +1,4 @@
 //! The BigQuery **REST transport** — `jobs.insert` + poll, in process.
-//!
-//! This is the seam that used to be one `Command::new("bq")`. Everything the
-//! loader does is a query job (a free `LOAD DATA`, a billed CTAS, a `COUNT(*)`
-//! metadata read), so one verb serves all of them:
-//!
-//! 1. `POST /bigquery/v2/projects/{project}/jobs` — insert the query job,
-//!    labels in `configuration.labels`.
-//! 2. `GET  /bigquery/v2/projects/{project}/jobs/{jobId}?location=…` — poll
-//!    until `status.state == "DONE"`; `status.errorResult` is the verdict.
-//! 3. `GET  /bigquery/v2/projects/{project}/queries/{jobId}?location=…` —
-//!    `getQueryResults`, only when the caller wants the rows back (the count).
-//!
-//! ## What decides success
-//!
-//! Exactly what `bq`'s exit status decided: the job's `status.errorResult`. A
-//! `status.errors[]` entry WITHOUT an `errorResult` is a non-fatal warning and
-//! stays non-fatal here — it only enriches the message when the job did fail.
-//!
-//! ## Location
-//!
-//! Not sent by default: BigQuery infers a query job's location from the
-//! datasets it references, exactly as the CLI relied on (verified live against
-//! an `EU` dataset — the insert response came back `jobReference.location:
-//! "EU"`). Polling then uses the `jobReference` the insert RETURNED, so a
-//! non-US job is found by its `jobs.get`. `RIVET_BQ_LOCATION` pins it for the
-//! case where inference cannot see a dataset.
-//!
-//! ## Retries
-//!
-//! The polling GETs are retried (they are idempotent). So is `jobs.insert`, but
-//! only because every job is sent under a CLIENT job id: a repeat of an insert
-//! that did land answers `409 Already Exists`, and the job is fetched instead of
-//! run again — `LOAD DATA INTO` (the change-log append) is not idempotent, and a
-//! duplicate append is silent row inflation. Before the client id, a transport
-//! timeout on insert failed the load outright (seen repeatedly on live runs).
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -47,13 +12,10 @@ use crate::error::retry::MAX_TRANSIENT_RETRIES;
 pub(super) use crate::error::retry::{is_transient_status, poll_interval, should_back_off};
 use crate::gcp_auth::{self, BlockingAdcTokenSource};
 
-/// BigQuery's JSON API root. Overridable so a live check can be pointed at a
-/// stub; not a config knob.
+/// BigQuery's JSON API root.
 const DEFAULT_ENDPOINT: &str = "https://bigquery.googleapis.com";
 
-/// Per-request ceiling. Generous: a `LOAD DATA` insert only ENQUEUES the job
-/// (the wait happens in the poll loop), but a large statement body plus a slow
-/// link should not trip a short timeout.
+/// Per-request ceiling.
 #[cfg(not(test))]
 const HTTP_TIMEOUT: Duration = Duration::from_secs(120);
 /// One second in the unit tests, where a request is watched reaching the ceiling.
@@ -61,24 +23,14 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(120);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// How long the poll loop waits for ONE job before giving up on it.
-///
-/// Generous on purpose — a large `LOAD DATA` or a CTAS rebuild can legitimately
-/// run for a long time, and a deadline that fires on healthy work is worse than
-/// none. What it rules out is the unbounded case: before this, `await_job` looped
-/// `for attempt in 0..` with no ceiling at all, so a job BigQuery never finishes
-/// hung rivet with no diagnostic and no exit.
 const JOB_POLL_DEADLINE: Duration = Duration::from_secs(4 * 60 * 60);
-
-// ── the client ───────────────────────────────────────────────────────────────
 
 /// A blocking BigQuery JSON-API client scoped to one project.
 pub(crate) struct BigQueryApi {
     project: String,
-    /// `jobReference.location` for inserted jobs; `None` lets BigQuery infer it
-    /// from the referenced datasets (the CLI's behaviour).
+    /// `jobReference.location` for inserted jobs.
     location: Option<String>,
-    /// The dataset the jobs write, whose location a job inserted without an answer
-    /// is fetched in (`jobs.get` 404s without one outside the US/EU multi-regions).
+    /// The dataset the jobs write, whose location a job inserted without an answer is fetched in (`jobs.get` 404s without one outside the US/EU multi-regions).
     dataset: Option<String>,
     /// That dataset's location, read once from `datasets.get` when first needed.
     dataset_location: std::sync::OnceLock<Option<String>>,
@@ -91,7 +43,6 @@ pub(crate) struct BigQueryApi {
 
 impl std::fmt::Debug for BigQueryApi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // SecOps: never render `auth` — it can hold a bearer token.
         f.debug_struct("BigQueryApi")
             .field("project", &self.project)
             .field("location", &self.location)
@@ -101,17 +52,11 @@ impl std::fmt::Debug for BigQueryApi {
 
 /// Where a bearer token comes from, resolved once at client construction.
 enum Auth {
-    /// An operator-supplied token (`RIVET_BQ_ACCESS_TOKEN`) — impersonation,
-    /// CI, or any credential shape rivet cannot mint itself.
+    /// An operator-supplied token (`RIVET_BQ_ACCESS_TOKEN`).
     Static(Secret),
-    /// ADC credentials — `authorized_user` (refresh_token grant) or a
-    /// `service_account` key file (RS256 jwt-bearer grant), both minted in
-    /// process through the shared `gcp_auth` seam.
+    /// ADC credentials — `authorized_user` (refresh_token grant) or a `service_account` key file (RS256 jwt-bearer grant), both minted in process through the shared `gcp_auth` seam.
     Adc(std::sync::Arc<BlockingAdcTokenSource>),
-    /// Documented fallback for the credential shapes rivet has no in-process
-    /// minting path for: `external_account` / workload identity (needs an STS
-    /// exchange against a provider rivet does not model) and GCE/GKE metadata
-    /// (no ADC file at all). One token from the CLI, not the whole transport.
+    /// Documented fallback for the credential shapes rivet has no in-process minting path for.
     GcloudCli,
 }
 
@@ -128,7 +73,7 @@ fn shared_http() -> Result<reqwest::blocking::Client> {
     Ok(HTTP.get_or_init(|| built).clone())
 }
 
-/// The API endpoint: `override_` when set and not empty, else Google's; a remote `http://` one is refused, since every request carries the OAuth bearer token.
+/// The API endpoint: `override_` when set and not empty, else Google's.
 fn api_endpoint(override_: Option<String>) -> Result<String> {
     let Some(endpoint) = override_.filter(|s| !s.is_empty()) else {
         return Ok(DEFAULT_ENDPOINT.to_string());
@@ -138,8 +83,7 @@ fn api_endpoint(override_: Option<String>) -> Result<String> {
 }
 
 impl BigQueryApi {
-    /// Build a client for `project`, resolving the token source eagerly so a
-    /// missing credential is reported before the first job is enqueued.
+    /// Build a client for `project`, resolving the token source eagerly so a missing credential is reported before the first job is enqueued.
     pub(crate) fn new(project: &str, credential: &DestinationCredential) -> Result<Self> {
         let http = shared_http()?;
         Ok(Self {
@@ -162,8 +106,7 @@ impl BigQueryApi {
         self
     }
 
-    /// A client whose jobs write `dataset`, so a job it has to fetch by id is polled in
-    /// that dataset's location.
+    /// A client whose jobs write `dataset`, so a job it has to fetch by id is polled in that dataset's location.
     pub(crate) fn for_dataset(
         project: &str,
         dataset: &str,
@@ -174,8 +117,7 @@ impl BigQueryApi {
         Ok(api)
     }
 
-    /// The location a job inserted without an answer is fetched in: the configured
-    /// one, else the dataset's (read once), else none (a US/EU multi-region job).
+    /// The location a job inserted without an answer is fetched in.
     fn fetch_location(&self) -> Option<String> {
         if self.location.is_some() {
             return self.location.clone();
@@ -207,16 +149,13 @@ impl BigQueryApi {
             .and_then(parse_dataset_location))
     }
 
-    /// Run a query job to completion, tagged with `labels`. `Ok(job_id)` when
-    /// BigQuery reports no `errorResult`.
+    /// Run a query job to completion, tagged with `labels`.
     pub(crate) fn run_query(&self, sql: &str, labels: &BTreeMap<String, String>) -> Result<String> {
         let job_ref = self.settle(self.insert_query_job(sql, labels)?)?;
         Ok(job_ref.job_id)
     }
 
-    /// Run a query job and read the first cell of its first row as a `u64` —
-    /// the `COUNT(*)` shape. Separate from [`BigQueryApi::run_query`] so the
-    /// ordinary statement path never pays a `getQueryResults` round trip.
+    /// Run a query job and read the first cell of its first row as a `u64` — the `COUNT(*)` shape.
     pub(crate) fn run_query_scalar(
         &self,
         sql: &str,
@@ -227,8 +166,7 @@ impl BigQueryApi {
         parse_scalar_u64(&results)
     }
 
-    /// Run a query job and read its first row as strings (`NULL` → `None`) — the
-    /// small-probe shape (`MIN` / `MAX` / `COUNT` in one statement).
+    /// Run a query job and read its first row as strings (`NULL` → `None`).
     pub(crate) fn run_query_first_row(
         &self,
         sql: &str,
@@ -239,8 +177,7 @@ impl BigQueryApi {
         parse_first_row(&results)
     }
 
-    /// The `tables.get` resource of `dataset.table` when it is a table: metadata, no
-    /// query job. `None` for a view, or when nothing has that name.
+    /// The `tables.get` resource of `dataset.table` when it is a table: metadata, no query job.
     pub(crate) fn table_metadata(&self, dataset: &str, table: &str) -> Result<Option<Value>> {
         let url = format!(
             "{}/bigquery/v2/projects/{}/datasets/{dataset}/tables/{table}",
@@ -258,8 +195,7 @@ impl BigQueryApi {
         kind_of_resource(self.get_json_if_found(&url, "tables.get")?.as_ref())
     }
 
-    /// How many row access policies `dataset.table` has (`rowAccessPolicies.list`); a
-    /// rebuilt copy of the table carries none.
+    /// How many row access policies `dataset.table` has (`rowAccessPolicies.list`).
     pub(crate) fn row_access_policy_count(&self, dataset: &str, table: &str) -> Result<usize> {
         let url = format!(
             "{}/bigquery/v2/projects/{}/datasets/{dataset}/tables/{table}/rowAccessPolicies",
@@ -273,8 +209,7 @@ impl BigQueryApi {
             .map_or(0, Vec::len))
     }
 
-    /// `tables.patch` on `dataset.table` with `body` — the metadata-only changes
-    /// (clustering) no DDL statement can make.
+    /// `tables.patch` on `dataset.table` with `body`.
     pub(crate) fn patch_table(&self, dataset: &str, table: &str, body: &Value) -> Result<Value> {
         let url = format!(
             "{}/bigquery/v2/projects/{}/datasets/{dataset}/tables/{table}",
@@ -288,9 +223,7 @@ impl BigQueryApi {
         self.read_json(resp, "tables.patch")
     }
 
-    /// `numRows` of `dataset.table` from `tables.get`: table metadata, no query job, so
-    /// it needs no partition filter on a table that requires one. `None` for anything
-    /// but a table — a view reports a meaningless zero.
+    /// `numRows` of `dataset.table` from `tables.get`.
     pub(crate) fn table_num_rows(&self, dataset: &str, table: &str) -> Result<Option<u64>> {
         let Some(meta) = self.table_metadata(dataset, table)? else {
             return Ok(None);
@@ -304,11 +237,7 @@ impl BigQueryApi {
             .with_context(|| format!("BigQuery returned a non-numeric numRows: {rows}"))
     }
 
-    /// Take an inserted job to a terminal state. A short statement often
-    /// completes inside the insert call, so the body already in hand is graded
-    /// before a poll is spent.
-    ///
-    /// Every terminal job is recorded in the journal, a failed one too: it may have been billed.
+    /// Take an inserted job to a terminal state.
     fn settle(&self, job: Value) -> Result<JobRef> {
         let job_ref = parse_job_reference(&job, &self.project)?;
         let terminal = match job_outcome(&job) {
@@ -326,8 +255,7 @@ impl BigQueryApi {
         }
     }
 
-    /// The summed `dmlStats` of a script's child jobs (`jobs.list?parentJobId=`), or `None`
-    /// when no child reported any or the list could not be read: a script reports none itself.
+    /// The summed `dmlStats` of a script's child jobs (`jobs.list?parentJobId=`), or `None` when no child reported any or the list could not be read.
     fn child_dml(&self, parent: &JobRef) -> Option<crate::load::result::DmlCounts> {
         let mut total: Option<crate::load::result::DmlCounts> = None;
         let mut page: Option<String> = None;
@@ -368,9 +296,7 @@ impl BigQueryApi {
         }
     }
 
-    /// Insert a query job under a client-chosen job id, so a request that times out or
-    /// is refused transiently can be sent again without running the statement twice:
-    /// a repeat of an insert that did land answers 409, and the job is fetched instead.
+    /// Insert a query job under a client-chosen job id, so a request that times out or is refused transiently can be sent again without running the statement twice.
     fn insert_query_job(&self, sql: &str, labels: &BTreeMap<String, String>) -> Result<Value> {
         let job_id = new_job_id();
         let body = query_job_body(
@@ -422,8 +348,6 @@ impl BigQueryApi {
                         last = transient_reply(resp.status().as_u16());
                     }
                 },
-                // A timeout or reset: the job may or may not have been created; the
-                // same id makes the repeat safe either way.
                 Err(e) => {
                     last = anyhow::Error::new(e).context("BigQuery jobs.insert request failed");
                 }
@@ -435,8 +359,7 @@ impl BigQueryApi {
         ))
     }
 
-    /// The job an earlier, unanswered insert created under `job_id`, fetched in the
-    /// dataset's location: the insert's answer, which would have named it, never came.
+    /// The job an earlier, unanswered insert created under `job_id`, fetched in the dataset's location.
     fn fetch_inserted(&self, job_id: &str) -> Result<Value> {
         let job_ref = JobRef {
             project: self.project.clone(),
@@ -450,11 +373,6 @@ impl BigQueryApi {
     }
 
     /// Poll `jobs.get` until the job reaches a terminal state, or `budget` is spent.
-    ///
-    /// `budget` is a PARAMETER rather than the constant read inline, so a test can
-    /// drive the expiry in milliseconds; every caller passes [`JOB_POLL_DEADLINE`].
-    /// The check sits in the `Running` arm, so a job that is already terminal is
-    /// never refused for being slow to answer.
     #[cfg(test)]
     fn await_job(&self, job_ref: &JobRef, budget: Duration) -> Result<String> {
         let job = self.await_terminal(job_ref, budget)?;
@@ -502,7 +420,6 @@ impl BigQueryApi {
             self.endpoint,
             job_ref.project,
             job_ref.job_id,
-            // `?location=…` when set, else a bare `?` so `&maxResults` parses.
             match job_ref.location.as_deref() {
                 Some(loc) => format!("?location={loc}"),
                 None => "?".to_string(),
@@ -510,9 +427,7 @@ impl BigQueryApi {
         )
     }
 
-    /// An idempotent GET with transient-failure retries. `what` names the
-    /// endpoint in any error, so an operator reading the message knows whether
-    /// the poll or the result fetch was refused.
+    /// An idempotent GET with transient-failure retries.
     fn get_json(&self, url: &str, what: &str) -> Result<Value> {
         let resp = self.get_response(url, what)?;
         self.read_json(resp, what)
@@ -540,7 +455,6 @@ impl BigQueryApi {
                     last = transient_reply(resp.status().as_u16());
                 }
                 Ok(resp) => return Ok(resp),
-                // A connection reset mid-poll is the same class as a 503.
                 Err(e) => last = anyhow::Error::new(e).context("BigQuery request failed"),
             }
         }
@@ -567,20 +481,13 @@ impl BigQueryApi {
             .with_context(|| format!("parsing the BigQuery {what} response as JSON"))
     }
 
-    /// Attach the bearer token and, for a USER credential, the quota project
-    /// BigQuery bills the call to.
+    /// Attach the bearer token and, for a USER credential, the quota project BigQuery bills the call to.
     fn authorized(
         &self,
         req: reqwest::blocking::RequestBuilder,
     ) -> Result<reqwest::blocking::RequestBuilder> {
         let token = self.auth.access_token()?;
         let mut req = req.header("Authorization", format!("Bearer {}", token.expose()));
-        // ADC USER credentials are not billable on their own: a metered JSON
-        // API rejects them without a quota project. A SERVICE ACCOUNT is
-        // billable on its own and must NOT be sent one — the header would make
-        // BigQuery demand `serviceusage.services.use`, which the roles that
-        // grant a load (`bigquery.jobUser` + `bigquery.dataOwner`) do not
-        // include. The credential decides; see `quota_project_header`.
         if let Auth::Adc(src) = &self.auth
             && let Some(quota_project) = src.quota_project_header(&self.project)
         {
@@ -590,14 +497,7 @@ impl BigQueryApi {
     }
 }
 
-/// Which token source wins, given what is available. Pure, so the precedence
-/// is graded offline — the resolution itself reads process env and an ADC file
-/// on disk, which no unit test can pin without racing its siblings.
-///
-/// An explicit token beats a discovered credential (that is the point of
-/// setting one); a BLANK one is treated as unset, since an empty
-/// `RIVET_BQ_ACCESS_TOKEN` from an unset shell variable must not shadow working
-/// ADC credentials with a guaranteed 401.
+/// Which token source wins, given what is available.
 pub(crate) fn choose_token_source(static_token: Option<&str>, has_adc: bool) -> TokenSourceKind {
     match static_token {
         Some(t) if !t.trim().is_empty() => TokenSourceKind::Static,
@@ -606,8 +506,7 @@ pub(crate) fn choose_token_source(static_token: Option<&str>, has_adc: bool) -> 
     }
 }
 
-/// The choice [`choose_token_source`] makes, named so a test can assert it
-/// without holding a credential.
+/// The choice [`choose_token_source`] makes, named so a test can assert it without holding a credential.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum TokenSourceKind {
     Static,
@@ -616,7 +515,7 @@ pub(crate) enum TokenSourceKind {
 }
 
 impl Auth {
-    /// The token source of a load run as `credential`: a destination's named key signs it, beside no static token; anything else resolves the ambient chain.
+    /// The token source of a load run as `credential`.
     fn resolve(
         http: &reqwest::blocking::Client,
         credential: &DestinationCredential,
@@ -653,10 +552,6 @@ impl Auth {
                     adc.expect("an Adc choice implies credentials"),
                     http,
                 );
-                // Say WHICH identity the jobs will run as, at resolution time.
-                // A load that silently acts as a different principal than the
-                // operator configured is an audit trail that reads as fiction
-                // — and the only cheap way to notice is for rivet to name it.
                 log::info!(
                     "BigQuery: authenticating with ADC {} credentials as {}",
                     src.credential_kind(),
@@ -668,7 +563,7 @@ impl Auth {
         }
     }
 
-    /// The token source minted in process from the service-account key file `path`; a key shape rivet cannot mint is refused, never replaced by another identity.
+    /// The token source minted in process from the service-account key file `path`.
     fn named_key(http: &reqwest::blocking::Client, path: &str) -> Result<Self> {
         let key = crate::config::credential_file::google_key("destination.credentials_file", path)?;
         let creds = gcp_auth::parse_adc_file(&String::from_utf8_lossy(&key))?.ok_or_else(|| {
@@ -698,41 +593,10 @@ impl Auth {
 }
 
 /// The fallback's argv, as a VALUE rather than a literal buried in the spawn.
-///
-/// A test that greps this file's TEXT would kill mutants here without ever
-/// executing the code — which contradicts the mutation gate's coverage-based
-/// classification (`mint_token_via_gcloud_cli` measures at zero executions and
-/// lands in the report-only class, yet a source-lint kills its mutants, and the
-/// gate's own P2 audit correctly flags that as an oracle that lied). Naming the
-/// argv makes the verb observable by VALUE, so the test executes real code and
-/// the classification stays honest.
 pub(crate) const GCLOUD_TOKEN_ARGV: [&str; 3] =
     ["auth", "application-default", "print-access-token"];
 
 /// The ONE place rivet still shells out for BigQuery, and only for a token.
-///
-/// Reached when the ADC file is absent, or holds a shape rivet cannot mint in
-/// process. That set is now exactly:
-///
-/// - `external_account` / workload identity — an STS token exchange against a
-///   provider (AWS, OIDC, SAML, an executable source) rivet does not model. A
-///   half-implemented subset here would be worse than the subprocess.
-/// - GCE / GKE / Cloud Run metadata — no ADC file at all; the token comes from
-///   the instance metadata server.
-///
-/// `authorized_user` (refresh_token) and `service_account` (RS256 jwt-bearer)
-/// are BOTH minted in process by `gcp_auth` and never reach here.
-/// Nothing else about the transport is a subprocess.
-///
-/// THE VERB IS STILL LOAD-BEARING for the two shapes above: `auth
-/// application-default print-access-token` resolves the SAME credential chain
-/// the GCS leg uses, honouring `GOOGLE_APPLICATION_CREDENTIALS`. The bare `auth
-/// print-access-token` mints for whatever human account `gcloud` happens to be
-/// logged in as — measured 2026-08-23 against a real service account, before
-/// that shape moved in process: the bare verb produced `user_email = <a human>`
-/// in INFORMATION_SCHEMA.JOBS_BY_PROJECT while the GCS leg wrote as the service
-/// account. A load must act as the identity the operator configured, or its
-/// audit trail is fiction.
 fn mint_token_via_gcloud_cli() -> Result<Secret> {
     let out = std::process::Command::new("gcloud")
         .args(GCLOUD_TOKEN_ARGV)
@@ -760,16 +624,7 @@ fn mint_token_via_gcloud_cli() -> Result<Secret> {
     Ok(token)
 }
 
-// ── pure request / response shapes ───────────────────────────────────────────
-
-/// The `jobs.insert` body for a query job: the statement, `useLegacySql:false`
-/// (the CLI's `--use_legacy_sql=false`), and the cost-attribution labels in
-/// `configuration.labels` — where `INFORMATION_SCHEMA.JOBS.labels` reads them
-/// from, so the billing queries in the loader's docs keep working unchanged.
-///
-/// `jobReference.jobId` is the client's, so a repeated insert is idempotent; the
-/// location is pinned only when configured — otherwise BigQuery infers it from the
-/// referenced datasets.
+/// The `jobs.insert` body for a query job: the statement, `useLegacySql:false` (the CLI's `--use_legacy_sql=false`), and the cost-attribution labels in `configuration.labels`.
 pub(crate) fn query_job_body(
     sql: &str,
     labels: &BTreeMap<String, String>,
@@ -816,8 +671,7 @@ pub(crate) fn copy_append_job_body(
     body
 }
 
-/// A job id unique to this process and moment: `rivet_<micros hex>_<pid hex>_<n>`,
-/// within BigQuery's `[A-Za-z0-9_-]` job-id charset.
+/// A job id unique to this process and moment.
 pub(crate) fn new_job_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -860,8 +714,7 @@ pub(crate) fn parse_dataset_location(meta: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The identity a job is polled by. `location` comes from what the insert
-/// RETURNED — `jobs.get` on a non-US job 404s without it.
+/// The identity a job is polled by.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct JobRef {
     pub(crate) project: String,
@@ -869,8 +722,7 @@ pub(crate) struct JobRef {
     pub(crate) location: Option<String>,
 }
 
-/// Read the `jobReference` out of an inserted job. Falls back to the requesting
-/// project so a reply missing `projectId` still polls the right project.
+/// Read the `jobReference` out of an inserted job.
 pub(crate) fn parse_job_reference(job: &Value, fallback_project: &str) -> Result<JobRef> {
     let r = job.get("jobReference");
     let job_id = r
@@ -891,8 +743,7 @@ pub(crate) fn parse_job_reference(job: &Value, fallback_project: &str) -> Result
     })
 }
 
-/// A terminal job as the journal keeps it: its id, the bytes it processed and billed, and
-/// its `dmlStats` (BigQuery sends each count as a string; an absent count is 0).
+/// A terminal job as the journal keeps it: its id, the bytes it processed and billed, and its `dmlStats` (BigQuery sends each count as a string.
 pub(crate) fn warehouse_job(job_id: &str, job: &Value) -> crate::load::result::WarehouseJob {
     let query = job.get("statistics").and_then(|s| s.get("query"));
     let number = |key: &str| query.and_then(|q| q.get(key)).and_then(json_u64);
@@ -940,10 +791,6 @@ pub(crate) enum JobOutcome {
 }
 
 /// The success verdict, and the ONLY one: `status.errorResult`.
-///
-/// `status.errors[]` without an `errorResult` is BigQuery's non-fatal warning
-/// channel (it appears on jobs that succeeded), so it must not fail a load —
-/// the CLI's exit status did not, either. It only enriches a failure message.
 pub(crate) fn job_outcome(job: &Value) -> JobOutcome {
     let status = job.get("status");
     if let Some(err) = status.and_then(|s| s.get("errorResult")) {
@@ -955,9 +802,7 @@ pub(crate) fn job_outcome(job: &Value) -> JobOutcome {
     }
 }
 
-/// The user-visible reason a job failed: `errorResult.message`, then any
-/// `errors[]` message that says something new, `|`-joined — the same
-/// multi-part detail the CLI path assembled from stdout+stderr.
+/// The user-visible reason a job failed: `errorResult.message`, then any `errors[]` message that says something new, `|`-joined.
 fn job_error_detail(error_result: &Value, errors: Option<&Value>) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(m) = error_result.get("message").and_then(Value::as_str) {
@@ -976,8 +821,6 @@ fn job_error_detail(error_result: &Value, errors: Option<&Value>) -> String {
         }
     }
     if parts.is_empty() {
-        // No message at all — surface the reason code rather than an empty
-        // "failed:" that tells the operator nothing.
         parts.push(format!(
             "reason: {}",
             error_result
@@ -989,13 +832,12 @@ fn job_error_detail(error_result: &Value, errors: Option<&Value>) -> String {
     parts.join(" | ")
 }
 
-/// The failure message a caller sees, naming the job so the operator can look
-/// it up in `INFORMATION_SCHEMA.JOBS` / the console.
+/// The failure message a caller sees, naming the job so the operator can look it up in `INFORMATION_SCHEMA.JOBS` / the console.
 pub(crate) fn job_failed_message(job_id: &str, detail: &str) -> String {
     format!("BigQuery job {job_id} failed: {detail}")
 }
 
-/// The `errorResult.reason`s BigQuery documents as retryable (<https://docs.cloud.google.com/bigquery/docs/error-messages>); `quotaExceeded` is not one.
+/// The `errorResult.reason`s BigQuery documents as retryable (<https://docs.cloud.google.com/bigquery/docs/error-messages>).
 const TRANSIENT_JOB_REASONS: [&str; 6] = [
     "backendError",
     "internalError",
@@ -1005,7 +847,7 @@ const TRANSIENT_JOB_REASONS: [&str; 6] = [
     "jobRateLimitExceeded",
 ];
 
-/// A job that reached DONE with an `errorResult`: unavailable when its `reason` is a documented retryable one, else the warehouse rejected its statement.
+/// A job that reached DONE with an `errorResult`.
 fn job_failed(job_id: &str, detail: &str, job: &Value) -> anyhow::Error {
     let message = job_failed_message(job_id, detail);
     let reason = job
@@ -1042,10 +884,7 @@ pub(super) fn no_attempt_made() -> anyhow::Error {
     )
 }
 
-/// The reason behind a non-2xx JSON-API reply: `error.message`, plus any
-/// `error.errors[]` message that adds something. Falls back to the raw body
-/// (bounded) when the payload is not the standard error envelope — an HTML
-/// proxy error must still reach the operator.
+/// The reason behind a non-2xx JSON-API reply.
 pub(crate) fn api_error_detail(status: u16, body: &str) -> String {
     let parsed: Option<Value> = serde_json::from_str(body).ok();
     let err = parsed.as_ref().and_then(|v| v.get("error"));
@@ -1071,12 +910,6 @@ pub(super) fn truncate(s: &str, max: usize) -> String {
 }
 
 /// The first cell of the first row of a `getQueryResults` reply, as a `u64`.
-///
-/// BigQuery renders every cell as a STRING (`rows[0].f[0].v`), including
-/// INT64 — so this parses text, and an absent row is an error rather than a
-/// silent zero (a `COUNT(*)` that returns nothing means the query did not run,
-/// not that the table is empty).
-/// Every cell of `rows[0]` as a string, `None` for a NULL cell.
 pub(crate) fn parse_first_row(results: &Value) -> Result<Vec<Option<String>>> {
     let fields = results
         .get("rows")
@@ -1127,13 +960,7 @@ fn location_query(location: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
-/// Whether a `tables.get` resource describes a TABLE — a view (or anything else)
-/// is not one.
-///
-/// Extracted for the same reason: the inline `== Some("TABLE")` was ungraded
-/// offline, and inverting it makes every real table read as absent — which turns
-/// `compact` into a silent no-op that reports "nothing to merge" on a table that
-/// has a buffer.
+/// Whether a `tables.get` resource describes a TABLE — a view (or anything else) is not one.
 fn is_table(meta: &Value) -> bool {
     meta.get("type").and_then(Value::as_str) == Some("TABLE")
 }
@@ -1181,7 +1008,7 @@ mod tests {
         assert!(text.contains("Unset `RIVET_BQ_API_ENDPOINT`"), "{text}");
     }
 
-    /// A request through the shared client ends at `HTTP_TIMEOUT`: a server that accepts and never answers is not waited on past it, nor given up on before it.
+    /// A request through the shared client ends at `HTTP_TIMEOUT`.
     #[test]
     fn the_shared_client_gives_up_on_a_silent_server_at_the_http_timeout() {
         let silent = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a silent port");
@@ -1254,9 +1081,7 @@ mod tests {
     use super::*;
     use crate::error::retry::{POLL_MAX, POLL_MIN};
 
-    /// The compaction probe reads one row of mixed cells: text stays text, a
-    /// number renders as its digits, a NULL cell is `None`, and a response with
-    /// no row is an error — never an empty or all-NULL row that reads as "0".
+    /// The compaction probe reads one row of mixed cells.
     #[test]
     fn the_first_row_keeps_every_cell_and_a_missing_row_is_an_error() {
         let results = serde_json::json!({
@@ -1278,28 +1103,9 @@ mod tests {
         assert!(err.contains("no rows[0].f"), "{err}");
     }
 
-    /// The gcloud fallback must ask for the APPLICATION-DEFAULT token, not the
-    /// logged-in user's.
-    ///
-    /// `gcloud auth print-access-token` mints for whatever human account gcloud
-    /// is logged in as and ignores `GOOGLE_APPLICATION_CREDENTIALS`; only
-    /// `gcloud auth application-default print-access-token` resolves the same
-    /// credential chain the GCS leg uses. With a service-account credential
-    /// configured, the bare verb made rivet write GCS as the service account
-    /// and call BigQuery as a PERSON — and the load still SUCCEEDED whenever
-    /// that person held the rights, so nothing surfaced the substitution.
-    /// Measured 2026-08-23 against a real service account: bare verb →
-    /// `user_email = <a human>` in INFORMATION_SCHEMA.JOBS_BY_PROJECT, ADC verb
-    /// → the service account.
-    ///
-    /// The source text is the subject because the verb is an argv, not a value
-    /// this crate can observe without spawning gcloud. RED against the
-    /// pre-fix argv.
+    /// The gcloud fallback must ask for the APPLICATION-DEFAULT token, not the logged-in user's.
     #[test]
     fn the_gcloud_fallback_asks_for_the_application_default_token() {
-        // By VALUE, not by grepping this file: a source-lint would kill mutants
-        // in a function the offline suite never executes, which is exactly the
-        // contradiction the gate's P2 audit exists to catch.
         assert_eq!(
             GCLOUD_TOKEN_ARGV,
             ["auth", "application-default", "print-access-token"],
@@ -1321,11 +1127,7 @@ mod tests {
         ])
     }
 
-    /// The insert body must put the statement where BigQuery reads it, disable
-    /// legacy SQL (the CLI's `--use_legacy_sql=false`), and put the labels in
-    /// `configuration.labels` — the field `INFORMATION_SCHEMA.JOBS.labels`
-    /// projects. A label map written anywhere else costs cost-attribution
-    /// silently: the job runs, the billing query returns nothing.
+    /// The insert body must put the statement where BigQuery reads it, disable legacy SQL (the CLI's `--use_legacy_sql=false`), and put the labels in `configuration.labels`.
     #[test]
     fn query_job_body_carries_sql_and_labels_where_bigquery_reads_them() {
         let b = query_job_body("SELECT 1", &labels(), "proj", None, "rivet_1");
@@ -1333,8 +1135,6 @@ mod tests {
         assert_eq!(b["configuration"]["query"]["useLegacySql"], false);
         assert_eq!(b["configuration"]["labels"]["managed_by"], "rivet");
         assert_eq!(b["configuration"]["labels"]["rivet_op"], "load");
-        // The client's job id makes a repeated insert idempotent; no location asked
-        // for ⇒ none pinned, so BigQuery infers it from the datasets.
         assert_eq!(b["jobReference"]["jobId"], "rivet_1");
         assert_eq!(b["jobReference"]["projectId"], "proj");
         assert!(b["jobReference"].get("location").is_none(), "{b}");
@@ -1375,9 +1175,7 @@ mod tests {
         assert_eq!(b["jobReference"]["jobId"], "rivet_2");
     }
 
-    /// A job inserted under the client's id whose insert never answered is fetched by
-    /// `jobs.get`, which 404s on a single-region dataset without `?location=`; the
-    /// insert's answer would have named the location, so the dataset's is read instead.
+    /// A job inserted under the client's id whose insert never answered is fetched by `jobs.get`, which 404s on a single-region dataset without `?location=`.
     #[test]
     fn a_dataset_resource_names_the_location_the_fetch_polls_in() {
         assert_eq!(
@@ -1388,8 +1186,7 @@ mod tests {
         assert_eq!(parse_dataset_location(&json!({"id": "p:d"})), None);
     }
 
-    /// The fetch of an unanswered insert polls in the configured location when there is
-    /// one, and asks nothing of a client that knows no dataset.
+    /// The fetch of an unanswered insert polls in the configured location when there is one, and asks nothing of a client that knows no dataset.
     #[test]
     fn fetch_location_prefers_the_configured_one_and_needs_a_dataset_otherwise() {
         let api = |location: Option<&str>, dataset: Option<&str>| BigQueryApi {
@@ -1440,9 +1237,7 @@ mod tests {
         assert_eq!(insert_outcome(503), InsertOutcome::Transient);
     }
 
-    /// Polling a non-US job by id alone 404s, so the location the insert
-    /// RETURNED has to survive into the JobRef. Fixture is the shape verified
-    /// live against an EU dataset (2026-08-22).
+    /// Polling a non-US job by id alone 404s, so the location the insert RETURNED has to survive into the JobRef.
     #[test]
     fn job_reference_keeps_the_location_the_insert_returned() {
         let job = json!({"jobReference": {
@@ -1477,7 +1272,6 @@ mod tests {
             job_outcome(&json!({"status": {"state": "PENDING"}})),
             JobOutcome::Running
         );
-        // No status at all is NOT success — poll again rather than declare done.
         assert_eq!(job_outcome(&json!({})), JobOutcome::Running);
     }
 
@@ -1489,11 +1283,7 @@ mod tests {
         );
     }
 
-    /// THE verdict test. `errorResult` fails the job; `errors[]` WITHOUT an
-    /// `errorResult` is BigQuery's non-fatal warning channel and must stay
-    /// non-fatal — treating it as failure would fail loads the `bq` exit status
-    /// passed, which is exactly the "don't silently change what counts as
-    /// success" line.
+    /// THE verdict test.
     #[test]
     fn error_result_fails_the_job_but_a_bare_errors_list_does_not() {
         let failed = json!({"status": {
@@ -1501,7 +1291,6 @@ mod tests {
             "errorResult": {"reason": "notFound", "message": "Not found: Table p:d.t"},
             "errors": [{"reason": "notFound", "message": "Not found: Table p:d.t"}]
         }});
-        // The duplicate `errors[]` copy is folded away, not repeated.
         assert_eq!(
             job_outcome(&failed),
             JobOutcome::Failed("Not found: Table p:d.t".into())
@@ -1514,8 +1303,7 @@ mod tests {
         assert_eq!(job_outcome(&warned), JobOutcome::Done);
     }
 
-    /// A distinct `errors[]` entry ADDS detail; the old CLI path joined its two
-    /// streams with " | " and this keeps that shape.
+    /// A distinct `errors[]` entry ADDS detail; the old CLI path joined its two streams with " | " and this keeps that shape.
     #[test]
     fn distinct_error_messages_are_pipe_joined() {
         let job = json!({"status": {
@@ -1532,8 +1320,7 @@ mod tests {
         );
     }
 
-    /// A failure with no message must not render as "failed: " — the reason
-    /// code is the last informative thing left.
+    /// A failure with no message must not render as "failed: " — the reason code is the last informative thing left.
     #[test]
     fn a_messageless_failure_still_names_its_reason() {
         let job = json!({"status": {"state": "DONE", "errorResult": {"reason": "backendError"}}});
@@ -1543,13 +1330,7 @@ mod tests {
         );
     }
 
-    /// The partition-quota augmentation is the one error-mapping the loader
-    /// promises by name. This drives BigQuery's REAL job-failure envelope
-    /// through the outcome mapper into `augment_partition_limit`, proving the
-    /// reason survives the REST transport the way it used to survive `bq`'s
-    /// stdout. TEXT-MATCHED: the quota surfaces as an ordinary `invalidQuery`
-    /// errorResult whose MESSAGE names the limit — there is no distinct
-    /// machine-readable reason code for it, so the augmenter matches the words.
+    /// The partition-quota augmentation is the one error-mapping the loader promises by name.
     #[test]
     fn the_partition_quota_reason_survives_the_rest_transport_and_is_augmented() {
         let job = json!({"status": {
@@ -1569,9 +1350,6 @@ mod tests {
             job_failed_message("job_x", &detail)
         ));
         assert!(err.to_string().contains("split the"), "{err}");
-        // The augmentation is a `.context()`, so the reason and the job id live
-        // in the CHAIN — the rendering an operator sees (`{:#}`), not the
-        // headline alone.
         let chain = format!("{err:#}");
         assert!(
             chain.contains("job_x"),
@@ -1581,7 +1359,6 @@ mod tests {
     }
 
     /// HTTP-level rejections carry a different envelope than job failures.
-    /// Fixture is the shape verified live (a bad label key, 2026-08-22).
     #[test]
     fn http_error_detail_reads_the_api_error_envelope() {
         let body = r#"{"error": {"code": 400,
@@ -1592,13 +1369,10 @@ mod tests {
         let d = api_error_detail(400, body);
         assert!(d.contains("HTTP 400"), "{d}");
         assert!(d.contains("Label key"), "{d}");
-        // The duplicated `errors[]` copy folds away.
         assert_eq!(d.matches("Label key").count(), 1, "{d}");
     }
 
-    /// A proxy / load balancer answers with HTML, not the API envelope. The
-    /// operator still needs to see it — dropping an unparseable body is how a
-    /// "failed: " with no reason reaches a bug report.
+    /// A proxy / load balancer answers with HTML, not the API envelope.
     #[test]
     fn http_error_detail_falls_back_to_a_bounded_raw_body() {
         let d = api_error_detail(502, "<html>Bad Gateway</html>");
@@ -1612,7 +1386,6 @@ mod tests {
     }
 
     /// BigQuery renders every cell as a STRING, so the count arrives as `"42"`.
-    /// Fixture is the shape verified live (2026-08-22).
     #[test]
     fn scalar_count_parses_the_string_cell() {
         let r = json!({"rows": [{"f": [{"v": "42"}]}], "totalRows": "1"});
@@ -1623,23 +1396,17 @@ mod tests {
         );
     }
 
-    /// A reply with no rows means the query did not produce one — that must be
-    /// an ERROR, never a silent 0. A `COUNT(*)` that reads as 0 when nothing
-    /// ran would let the load driver's row gate pass on a missing table.
+    /// A reply with no rows means the query did not produce one — that must be an ERROR, never a silent 0.
     #[test]
     fn scalar_count_refuses_to_invent_a_zero() {
         assert!(parse_scalar_u64(&json!({"totalRows": "0"})).is_err());
         assert!(parse_scalar_u64(&json!({"rows": []})).is_err());
         assert!(parse_scalar_u64(&json!({"rows": [{"f": []}]})).is_err());
         assert!(parse_scalar_u64(&json!({"rows": [{"f": [{"v": "abc"}]}]})).is_err());
-        // NULL cell (`{"v": null}`) is not a count either.
         assert!(parse_scalar_u64(&json!({"rows": [{"f": [{"v": null}]}]})).is_err());
     }
 
-    /// The full precedence truth table. The blank-token row is the one that
-    /// bites in practice: `RIVET_BQ_ACCESS_TOKEN=""` (an unset shell variable
-    /// expanded into the environment) must fall THROUGH to ADC, not pin an
-    /// empty bearer token that 401s every job.
+    /// The full precedence truth table.
     #[test]
     fn an_explicit_token_wins_but_a_blank_one_falls_through_to_adc() {
         use TokenSourceKind::*;
@@ -1648,7 +1415,6 @@ mod tests {
         assert_eq!(choose_token_source(Some(""), true), Adc);
         assert_eq!(choose_token_source(Some("   "), true), Adc);
         assert_eq!(choose_token_source(None, true), Adc);
-        // Nothing rivet can mint in process ⇒ the documented CLI token fallback.
         assert_eq!(choose_token_source(None, false), GcloudCli);
         assert_eq!(choose_token_source(Some(""), false), GcloudCli);
     }
@@ -1658,7 +1424,6 @@ mod tests {
         assert_eq!(poll_interval(0), POLL_MIN);
         assert_eq!(poll_interval(1), POLL_MIN * 2);
         assert_eq!(poll_interval(3), POLL_MIN * 8);
-        // Capped, and never longer than the cap however far the loop runs.
         assert_eq!(poll_interval(9), POLL_MAX);
         assert_eq!(poll_interval(1_000), POLL_MAX);
         assert!(
@@ -1668,11 +1433,6 @@ mod tests {
     }
 
     /// The first try is immediate; every retry waits.
-    ///
-    /// Both halves matter and neither is redundant: without the `false` case a
-    /// mutant that always backs off pays `POLL_MIN` on every first request, and
-    /// without the `true` cases a mutant that never backs off hammers BigQuery
-    /// through all five retries with no pause. Both survived before this test.
     #[test]
     fn only_a_retry_backs_off_never_the_first_try() {
         assert!(!should_back_off(0), "the first request waits for nothing");
@@ -1682,37 +1442,23 @@ mod tests {
     }
 
     /// A table is a TABLE; a view, an absent `type`, and an unexpected one are not.
-    ///
-    /// The inverted form of this predicate makes every real table read as absent,
-    /// which turns `compact` into a silent "nothing to merge" on a table that has
-    /// a buffer — caught live today, ungraded offline until now.
     #[test]
     fn only_a_table_resource_is_a_table() {
         assert!(is_table(&json!({"type": "TABLE"})));
         assert!(!is_table(&json!({"type": "VIEW"})));
         assert!(!is_table(&json!({"type": "MATERIALIZED_VIEW"})));
         assert!(!is_table(&json!({"type": "EXTERNAL"})));
-        // No `type` at all, and a `type` that is not a string: neither is a table.
         assert!(!is_table(&json!({})));
         assert!(!is_table(&json!({"type": 1})));
     }
 
     /// A job that never finishes ends the WAIT, not the process.
-    ///
-    /// `await_job` looped `for attempt in 0..` with no ceiling, no deadline and no
-    /// `jobs.cancel`, so a job BigQuery never finished hung rivet with no
-    /// diagnostic and no exit. The stub is a real socket answering `RUNNING` for
-    /// ever, because that is the only shape that reaches the loop — the crash hook
-    /// (`maybe_panic_at`) kills rather than stalls, so it cannot express this.
     #[test]
     fn a_job_that_never_finishes_ends_the_wait_with_a_typed_timeout() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a stub port");
         let addr = listener.local_addr().expect("the stub's address");
         std::thread::spawn(move || {
             use std::io::{Read, Write};
-            // Accept in a LOOP: the poll asks again after every interval, and a
-            // one-shot accept (the `notify.rs` idiom) would answer once and hang
-            // the rest on connect — proving a timeout for the wrong reason.
             while let Ok((mut stream, _)) = listener.accept() {
                 let mut buf = [0u8; 8192];
                 let _ = stream.read(&mut buf);
@@ -1744,11 +1490,6 @@ mod tests {
             location: None,
         };
 
-        // The elapsed WALL TIME is half the oracle, and the half that makes this a
-        // test of the DEADLINE rather than of the error type. Asserting only the
-        // type let three mutants through — the guard forced to `true`, and `>`
-        // flipped to `<` or `>=` — because each of those returns the very same
-        // typed error on the FIRST poll, having waited for nothing at all.
         let budget = Duration::from_millis(300);
         let started = std::time::Instant::now();
         let err = api
@@ -1772,9 +1513,7 @@ mod tests {
         );
     }
 
-    /// Retrying a 4xx repeats a decision BigQuery already made; retrying a 5xx
-    /// or a 429 is the only thing that survives a blip. Pins both sides — a
-    /// predicate that returned `true` for 403 would spin on a permission error.
+    /// Retrying a 4xx repeats a decision BigQuery already made.
     #[test]
     fn only_rate_limits_and_server_faults_are_transient() {
         for code in [429, 500, 502, 503, 504] {
@@ -1791,9 +1530,7 @@ mod tests {
         assert_eq!(location_query(None), "");
     }
 
-    /// The `getQueryResults` URL must keep `maxResults` parseable whether or not
-    /// a location is present — a `?location=…&maxResults=1` and a bare
-    /// `?&maxResults=1` are both valid; `…queries/id&maxResults=1` is not.
+    /// The `getQueryResults` URL must keep `maxResults` parseable whether or not a location is present.
     #[test]
     fn query_results_url_always_opens_a_query_string() {
         let api = BigQueryApi {
@@ -1843,15 +1580,13 @@ mod tests {
             job_id: "j".into(),
             location: Some("EU".into()),
         });
-        // Polls the job's OWN project, not the client's.
         assert_eq!(
             url,
             "https://e/bigquery/v2/projects/other/jobs/j?location=EU"
         );
     }
 
-    /// SecOps: the client is reachable from a `Debug`-derived loader, so its
-    /// rendering must never contain a bearer token.
+    /// SecOps: the client is reachable from a `Debug`-derived loader, so its rendering must never contain a bearer token.
     #[test]
     fn debug_never_renders_the_token() {
         let api = BigQueryApi {
@@ -1978,7 +1713,7 @@ mod tests {
         );
     }
 
-    /// A job runs under the id the client chose: the statement and the copy reach BigQuery in the body, the scalar is the first cell, a failed job names its reason, and an insert that already landed is fetched instead of sent twice.
+    /// A job runs under the id the client chose.
     #[test]
     fn a_job_is_inserted_under_the_clients_id_and_read_back() {
         use stand::{Stand, json};
@@ -2106,8 +1841,7 @@ mod tests {
         assert_eq!(patch.body["clustering"]["fields"][0], "a");
     }
 
-    /// What BigQuery answers decides the code: a refused credential, a missing permission, a
-    /// missing job, a failed job, a transient reply and an answer rivet cannot read.
+    /// What BigQuery answers decides the code: a refused credential, a missing permission, a missing job, a failed job, a transient reply and an answer rivet cannot read.
     #[test]
     fn each_bigquery_answer_carries_its_code() {
         use stand::{Stand, json};
@@ -2173,7 +1907,7 @@ mod tests {
         (crate::error::error_code(e), crate::error::classify_exit(e))
     }
 
-    /// A stand whose every job ends in `errorResult`: the reason and mode ride in the statement (`now:<reason>` answers DONE at the insert, `later:<reason>` is polled to it), `-` is no reason at all.
+    /// A stand whose every job ends in `errorResult`.
     fn failing_jobs(message: &'static str) -> stand::Stand {
         use stand::{Stand, json};
         let reasons = std::sync::Mutex::new(std::collections::HashMap::<String, String>::new());
@@ -2240,7 +1974,7 @@ mod tests {
         failures
     }
 
-    /// A job BigQuery documents as retryable (`errorResult.reason`) is unavailable and exits 2, whichever way it was run; the job id and BigQuery's words stay in the text.
+    /// A job BigQuery documents as retryable (`errorResult.reason`) is unavailable and exits 2, whichever way it was run.
     #[test]
     fn a_job_failed_with_a_transient_reason_is_unavailable_and_retryable() {
         let message = "Error encountered during execution. Retrying may solve the problem.";
@@ -2329,7 +2063,7 @@ mod tests {
         );
     }
 
-    /// Every other reason, and a failure with none, stays a rejection that exits 1: the reason decides, never the words of the message.
+    /// Every other reason, and a failure with none, stays a rejection that exits 1.
     #[test]
     fn a_job_failed_with_any_other_reason_stays_rejected() {
         let stand =
@@ -2356,9 +2090,7 @@ mod tests {
         }
     }
 
-    /// Every job the client finishes is journaled with what BigQuery reported of it: the
-    /// bytes it processed and billed, its `dmlStats`, a script's DML summed over its child
-    /// jobs (every page of `jobs.list`), and a failed job too, which may have been billed.
+    /// Every job the client finishes is journaled with what BigQuery reported of it.
     #[test]
     fn every_finished_job_is_journaled_with_what_bigquery_reported() {
         use crate::load::result::{DmlCounts, JobJournal, WarehouseJob};
