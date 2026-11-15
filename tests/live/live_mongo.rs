@@ -658,3 +658,57 @@ fn roast_nan_id_refused_for_keyset_and_parallel_full_scan_complete() {
         "full scan must read every doc including the NaN _id"
     );
 }
+
+/// The `rivet.native_type` and `rivet.fidelity` of the delivered `_id` field.
+fn id_field_labels(rig: &Rig) -> (String, String) {
+    let schema = read_one_batch(&rig.out_dir()).schema();
+    let md = schema.field_with_name("_id").unwrap().metadata().clone();
+    (
+        md["rivet.native_type"].clone(),
+        md["rivet.fidelity"].clone(),
+    )
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d mongo"]
+fn mongo_id_column_label_names_what_the_collection_holds() {
+    require_alive(LiveService::Mongo);
+    use mongodb::bson::doc;
+    let db = unique_name("mlabel");
+    let m = MongoTest::connect(PORT, &db);
+    m.seed_objectid("oid", 3);
+    m.seed_int_id("ints", 3);
+    m.seed_string_id("strs", 3);
+    m.drop_collection("mixed");
+    m.insert_many("mixed", vec![doc! {"_id": 1001_i64}, doc! {"_id": "1001"}]);
+    for (coll, native, fidelity) in [
+        ("oid", "objectid", "exact"),
+        ("ints", "bson_id", "logical_string"),
+        ("strs", "bson_id", "logical_string"),
+        ("mixed", "bson_id", "logical_string"),
+    ] {
+        let rig = batch(&db, coll);
+        rig.run_ok();
+        assert_eq!(
+            id_field_labels(&rig),
+            (native.to_string(), fidelity.to_string()),
+            "{coll}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d mongo"]
+fn mongo_id_override_is_refused_not_ignored() {
+    require_alive(LiveService::Mongo);
+    let db = unique_name("movr");
+    MongoTest::connect(PORT, &db).seed_int_id("t", 3);
+    let rig = batch(&db, "t")
+        .export_line("columns:")
+        .export_line("  _id: int8");
+    let stderr = rig.run_expect_fail();
+    assert!(
+        stderr.contains("RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH") && stderr.contains("`_id`"),
+        "{stderr}"
+    );
+}

@@ -317,6 +317,21 @@ impl MongoSource {
         id_types::id_span_on(&self.session, collection)
     }
 
+    /// The `_id` label for `collection`: ObjectId only when its lowest and highest `_id` are both ObjectIds.
+    fn id_native(&self, collection: &str) -> Result<&'static str> {
+        let all_oid = match self.id_span(collection)? {
+            Some((lo, hi)) => [lo, hi]
+                .iter()
+                .all(|d| matches!(d.get("_id"), Some(Bson::ObjectId(_)))),
+            None => true,
+        };
+        Ok(if all_oid {
+            OBJECTID_NATIVE
+        } else {
+            BSON_ID_NATIVE
+        })
+    }
+
     /// Guard against silent loss on a heterogeneous-`_id` collection.
     pub(crate) fn ensure_uniform_id_type(&self, collection: &str) -> Result<()> {
         if let Some((lo, hi)) = self.id_span(collection)?
@@ -390,10 +405,16 @@ impl MongoSource {
     }
 }
 
+/// The native label of the `_id` column when every `_id` is an ObjectId.
+const OBJECTID_NATIVE: &str = "objectid";
+
+/// The native label of the `_id` column when any `_id` is not an ObjectId.
+const BSON_ID_NATIVE: &str = "bson_id";
+
 /// The two fixed columns of the JSON-blob model, each retyped by its `columns:` override where the override table reads that pair.
-fn blob_mappings(overrides: &ColumnOverrides) -> Result<Vec<TypeMapping>> {
+fn blob_mappings(overrides: &ColumnOverrides, id_native: &str) -> Result<Vec<TypeMapping>> {
     [
-        ("_id", "objectid", false, RivetType::String),
+        ("_id", id_native, false, RivetType::String),
         ("document", "document", true, RivetType::Json),
     ]
     .into_iter()
@@ -405,17 +426,19 @@ fn blob_mappings(overrides: &ColumnOverrides) -> Result<Vec<TypeMapping>> {
             native,
             || detected,
         )?;
-        Ok(TypeMapping::from_source(
-            &SourceColumn::simple(name, native, nullable),
-            t,
-        ))
+        let mut mapping =
+            TypeMapping::from_source(&SourceColumn::simple(name, native, nullable), t);
+        if native == BSON_ID_NATIVE {
+            mapping.fidelity = crate::types::TypeFidelity::LogicalString;
+        }
+        Ok(mapping)
     })
     .collect()
 }
 
 /// Arrow schema for the JSON-blob model (`_id: Utf8`, `document: Utf8 + json`) under `overrides`.
-fn blob_schema(overrides: &ColumnOverrides) -> Result<SchemaRef> {
-    let fields = blob_mappings(overrides)?
+fn blob_schema(overrides: &ColumnOverrides, id_native: &str) -> Result<SchemaRef> {
+    let fields = blob_mappings(overrides, id_native)?
         .iter()
         .map(|m| {
             crate::types::build_arrow_field(m)
@@ -622,7 +645,8 @@ impl Source for MongoSource {
         })?;
         let db = self.session.client().database(self.session.db());
         self.confirm_before_read(coll_name)?;
-        let schema = blob_schema(request.column_overrides)?;
+        let id_native = self.id_native(coll_name)?;
+        let schema = blob_schema(request.column_overrides, id_native)?;
         sink.on_schema(schema.clone())?;
 
         let coll = if self.snapshot {
@@ -736,7 +760,7 @@ impl Source for MongoSource {
         _query: &str,
         column_overrides: &ColumnOverrides,
     ) -> Result<Vec<TypeMapping>> {
-        blob_mappings(column_overrides)
+        blob_mappings(column_overrides, OBJECTID_NATIVE)
     }
 
     fn primary_key(&mut self, _table: &str) -> Result<Option<Vec<String>>> {
@@ -1208,8 +1232,22 @@ mod tests {
     }
 
     #[test]
+    fn the_id_label_is_objectid_exact_only_for_objectid_ids() {
+        let md = |native: &str| {
+            let schema = blob_schema(&ColumnOverrides::default(), native).unwrap();
+            let m = schema.field_with_name("_id").unwrap().metadata().clone();
+            (m["rivet.native_type"].clone(), m["rivet.fidelity"].clone())
+        };
+        assert_eq!(md(OBJECTID_NATIVE), ("objectid".into(), "exact".into()));
+        assert_eq!(
+            md(BSON_ID_NATIVE),
+            ("bson_id".into(), "logical_string".into())
+        );
+    }
+
+    #[test]
     fn blob_schema_is_two_columns_id_and_document_json() {
-        let schema = blob_schema(&ColumnOverrides::default()).unwrap();
+        let schema = blob_schema(&ColumnOverrides::default(), OBJECTID_NATIVE).unwrap();
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert_eq!(names, vec!["_id", "document"]);
         let doc_field = schema.field_with_name("document").unwrap();
