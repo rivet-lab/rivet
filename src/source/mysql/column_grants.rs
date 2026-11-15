@@ -81,7 +81,7 @@ pub(crate) fn readable_columns(
     Ok(readable)
 }
 
-/// The database and table a configured name means: a bare name is read in `bare_db`'s database for it, else in `own_db`.
+/// The database and table a configured name means.
 fn relation_of(
     cfg: &str,
     own_db: &str,

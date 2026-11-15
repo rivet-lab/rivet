@@ -183,11 +183,6 @@ exports:
 
 #[test]
 fn chunk_by_key_with_query_is_not_the_generic_pick_a_strategy_error() {
-    // #dogfood MED: `chunk_by_key` + `query:` (no table:) hit the config-level
-    // "chunked mode needs a chunking strategy. Pick one: … chunk_by_key …" — a
-    // dead-end recommending the option already set. `chunk_by_key` IS a strategy,
-    // so config validation must pass (the accurate "needs table:" error fires
-    // later, at plan build). Contrast: a strategy-LESS config still gets it.
     let with_key = r#"
 source:
   type: postgres
@@ -607,7 +602,6 @@ exports:
 "#,
     )
     .unwrap_err();
-    // serde-yaml gives an "unknown variant" error
     let msg = err.to_string().to_lowercase();
     assert!(
         msg.contains("environment") || msg.contains("unknown variant") || msg.contains("staging"),
@@ -617,7 +611,6 @@ exports:
 
 #[test]
 fn source_environment_absent_keeps_balanced_default() {
-    // Sanity check: no `environment:` field → still parses, defaults preserved.
     let cfg = Config::from_yaml(
         r#"
 source:
@@ -745,9 +738,6 @@ exports:
 
 #[test]
 fn no_url_at_all_rejected() {
-    // First-user-friendly error: a source: block with no connection
-    // method must guide the operator to `url_env` + an example
-    // `DATABASE_URL` rather than just rejecting silently.
     let err = Config::from_yaml(
         r#"
 source:
@@ -842,16 +832,11 @@ fn param_substitution_falls_back_to_env() {
 
 #[test]
 fn env_var_substitution_missing_var_is_hard_error() {
-    // SecOps: a missing env var must fail, not silently substitute an empty string.
-    // Previously `postgres://u:${UNSET}@host/db` → `postgres://u:@host/db` (anonymous
-    // auth footgun). Now the loader refuses to proceed.
     unsafe {
         std::env::remove_var("RIVET_NONEXISTENT_VAR");
     }
     let err = resolve_env_vars("prefix_${RIVET_NONEXISTENT_VAR}_suffix").unwrap_err();
     let msg = err.to_string();
-    // Names the missing var AND (dogfood MED) points at `--param` as the
-    // CLI-native resolution, not only the environment variable.
     assert!(
         msg.contains("RIVET_NONEXISTENT_VAR") && msg.contains("--param"),
         "expected error to name the var and mention --param, got: {msg}"
@@ -860,7 +845,6 @@ fn env_var_substitution_missing_var_is_hard_error() {
 
 #[test]
 fn env_var_substitution_empty_value_is_accepted() {
-    // Setting VAR="" explicitly is a deliberate operator choice — keep it working.
     unsafe {
         std::env::set_var("RIVET_TEST_EMPTY", "");
     }

@@ -39,7 +39,7 @@ fn reaches_reader(row: &Row) -> bool {
     row.src == "event"
 }
 
-/// The class a run without `columns_from: grants` gives a statement; renames and privilege changes are not read without the policy.
+/// The class a run without `columns_from: grants` gives a statement.
 fn read_without_policy(row: &Row, fold: bool, configured: &[String]) -> Class {
     if !reaches_reader(row) {
         return Class::None;
@@ -63,7 +63,7 @@ fn caught_with_policy(row: &Row, fold: bool, configured: &[String]) -> bool {
         || (row.owed() == Class::Privilege && statement_frame(false, &row.bytes()).1)
 }
 
-/// The class a run under `columns_from: grants` gives a statement: the class owed when it is caught, a write when it is stopped without cause.
+/// The class a run under `columns_from: grants` gives a statement.
 fn read_with_policy(row: &Row, fold: bool, configured: &[String]) -> Class {
     if !reaches_reader(row) {
         return Class::None;

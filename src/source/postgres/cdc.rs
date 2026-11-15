@@ -1,23 +1,4 @@
-//! PostgreSQL CDC adapter — logical replication slot → canonical
-//! [`cdc::ChangeEvent`].
-//!
-//! Consumes a `test_decoding` slot via `pg_logical_slot_get_changes()` with the
-//! sync `postgres` crate rivet already depends on — the *poll* model (no
-//! streaming-protocol crate; `START_REPLICATION` needs the immature
-//! `pg_walstream`/`pgwire-replication` ecosystem). `next_change` polls the slot
-//! once into a buffer and drains it; a continuous daemon wraps [`crate::source::cdc::run`]
-//! in an outer poll loop.
-//!
-//! Pre-images / typed values are deferred — like MySQL was before its typed pass,
-//! this adapter carries op + schema + table + position; the `test_decoding`
-//! payload parse into typed before/after is the PostgreSQL completion step.
-//!
-//! Prereqs: `wal_level = logical`, a role with `REPLICATION`, `pg_hba.conf`
-//! allowing it. Caveat: a logical slot **pins WAL** until consumed — an abandoned
-//! slot fills the disk.
-//!
-//! `#![allow(dead_code)]`: consumed by `cli::dispatch` (binary crate); the lib
-//! crate compiles `source` for tests but has no CDC consumer of its own.
+//! PostgreSQL CDC adapter — logical replication slot → canonical [`cdc::ChangeEvent`].
 #![allow(dead_code)]
 
 use std::collections::{HashMap, VecDeque};
@@ -36,7 +17,6 @@ use crate::source::postgres::td_line::{
 };
 
 /// Polls a logical slot and yields canonical changes.
-/// Domain type label -> its base type label, as `test_decoding` names both.
 pub(crate) type Domains = std::collections::HashMap<String, String>;
 
 pub(crate) struct PgChangeStream {
@@ -45,91 +25,35 @@ pub(crate) struct PgChangeStream {
     domains: Domains,
     slot: String,
     pending: VecDeque<ChangeEvent>,
-    /// Directory for an oversized transaction's spill, or `None` when the run has
-    /// nowhere it knows is sized for it — then the memory cap goes back to being a
-    /// refusal, which is the honest answer rather than filling a tmpfs.
+    /// Directory for an oversized transaction's spill, or `None` when the run has nowhere it knows is sized for it.
     spill_dir: Option<std::path::PathBuf>,
     /// A committed transaction whose tail is on disk, still being handed out.
-    ///
-    /// A field rather than a local of `fill`, because it OUTLIVES the peek window
-    /// that produced it: the rows leave one at a time through `next_change`, which
-    /// is the whole point — the tail never exists in memory as a whole.
     spooled: Option<SpooledTail>,
-    /// Wire budget per `peek` — the memory bound of the drain (O(batch), not
-    /// O(total backlog)). One ack cadence (the part rollover); see
-    /// [`wire_budget`]. Slot progress past a foreign/empty span larger than one
-    /// window is NOT this budget's job — it comes from the sink's re-drain loop
-    /// acking the consumed span so the next peek slides forward (see
-    /// [`crate::source::cdc::sink::run_to_files`]).
+    /// Wire budget per `peek` — the memory bound of the drain (O(batch), not O(total backlog)).
     batch_limit: i32,
-    /// Largest COMMIT LSN already yielded THIS run. A refill re-peeks from the
-    /// slot's (un-acked) `restart_lsn`, so any transaction at/below this was
-    /// already delivered — it is dropped, making the refill idempotent.
+    /// Largest COMMIT LSN already yielded THIS run.
     frontier: u64,
-    /// A peek that yields no NEW transaction, or returns fewer than a full
-    /// batch, has drained everything readable *from the current slot position*.
-    /// It is NOT terminal for an acking consumer: [`ChangeStream::ack`] (and the
-    /// zero-yield [`Self::release_empty_frontier`]) advance the slot and clear
-    /// this, so the sink's re-drain loop peeks fresh WAL past a consumed
-    /// foreign/empty span. Only a non-acking consumer (NDJSON, one big
-    /// `Unbounded` peek) treats it as the end.
+    /// A peek that yields no NEW transaction, or returns fewer than a full batch, has drained everything readable *from the current slot position*.
     exhausted: bool,
     /// A TRUNCATE of a captured table, seen but NOT yet raised.
-    ///
-    /// Raising it the instant the line is scanned discards everything already read
-    /// in the same peek window: the run fails with `rows: 0`, so nothing flushes,
-    /// nothing acks, and the slot has not moved. The refusal's own remedy —
-    /// re-snapshot, then `pg_replication_slot_advance` past the truncate — then
-    /// throws those transactions away. MEASURED: a two-table export where
-    /// `public.tb` committed an insert BEFORE `public.ta` was truncated lost that
-    /// insert entirely when the remedy was followed verbatim; `tb` was never
-    /// truncated and the message names only `ta`.
-    ///
-    /// So the truncate ENDS the window instead (`exhausted`), the sink flushes +
-    /// checkpoints + acks everything that precedes it, and the refusal is raised on
-    /// the next `fill`. The slot then sits exactly at the last commit before the
-    /// truncate, which is what makes "advance past it" lossless for everything else.
     pending_truncate_refusal: Option<String>,
-    /// Open-time COMMIT-LSN ceiling for a bounded run — the first transaction
-    /// committing past it ends the stream; `None` (daemon / anchor-only open)
-    /// keeps the pure catch-up exit. The contract lives on [`DrainMode`].
+    /// Open-time COMMIT-LSN ceiling for a bounded run.
     bound: Option<u64>,
-    /// COMMIT LSN of the last DATA-bearing transaction yielded and not yet covered
-    /// by an ack; `None` when nothing is owed downstream. While `Some` the slot
-    /// moves only through [`ChangeStream::ack`]; at `None` the frontier-covered span
-    /// is data-free and [`Self::release_empty_frontier`] may advance past it.
+    /// COMMIT LSN of the last DATA-bearing transaction yielded and not yet covered by an ack.
     owed_through: Option<u64>,
-    /// Rendered LSN of the last frontier advance — the zero-yield release
-    /// target. `take()`n once at exhaust.
+    /// Rendered LSN of the last frontier advance — the zero-yield release target.
     frontier_text: Option<String>,
-    /// The `table:` values this run captures — what a TRUNCATE is checked against
-    /// before it is allowed to fail the run. See [`truncate_is_ours`].
+    /// The `table:` values this run captures — what a TRUNCATE is checked against before it is allowed to fail the run.
     configured_tables: Vec<String>,
     /// The schema each bare configured name resolves to through the search_path, read at open.
     bare_schema: HashMap<String, String>,
     /// The nonce of the BARRIER this bounded run emitted at open, if it could.
-    ///
-    /// Reaching it is an EXACT boundary — everything before it provably committed
-    /// before rivet asked — where [`Self::bound`] is a snapshot of
-    /// `pg_current_wal_lsn()` and therefore approximate at the edges. The LSN
-    /// ceiling stays as the BACKSTOP: if the barrier is never seen (emit failed, a
-    /// message was lost, `pg_logical_emit_message` is unavailable) the run still
-    /// terminates at the ceiling. Failing OPEN is the rule — a delayed termination
-    /// is recoverable, an early exit is a dropped commit.
     barrier_nonce: Option<String>,
     /// The export's checkpoint file, kept at the slot's position before every advance rivet makes.
     checkpoint: Option<std::path::PathBuf>,
 }
 
-/// The run-start warning emitted when a logical replication slot has to be
-/// CREATED — i.e. capture starts at the current WAL position and nothing written
-/// before now is reachable.
-///
-/// `warn`, never `info`: the default log level hides `info`, so an info-level
-/// "this may have skipped your data" is functionally silent — the same rule the
-/// sparse-chunk diagnostic was fixed under. Pure and unit-tested because the
-/// branch that emits it needs a live PostgreSQL, so the message itself is the
-/// only part an offline test can hold.
+/// The run-start warning emitted when a logical replication slot has to be CREATED — i.e.
 pub(crate) fn slot_created_warning(slot: &str) -> String {
     format!(
         "pg cdc: creating replication slot '{slot}' — capture starts at the CURRENT WAL \
@@ -225,7 +149,7 @@ pub(crate) fn drop_slot(url: &str, slot: &str, tls: Option<&TlsConfig>) -> Resul
 /// How many times a failed slot drop is retried before its error is returned.
 const DROP_SLOT_RETRIES: u32 = 25;
 
-/// Runs `attempt`, retrying a failure up to [`DROP_SLOT_RETRIES`] times with `pause` between tries; the last failure is returned.
+/// Runs `attempt`, retrying a failure up to [`DROP_SLOT_RETRIES`] times with `pause` between tries.
 fn retry_drop<E>(
     mut attempt: impl FnMut() -> std::result::Result<(), E>,
     mut note: impl FnMut(&E),
@@ -281,51 +205,23 @@ pub(crate) fn slot_action(slot: &str, exists: bool, prior: PriorRun) -> SlotActi
     }
 }
 
-/// What one CONFIGURED table can contribute to a `test_decoding` stream —
-/// the pure half of [`PgChangeStream::check_configured_tables_are_routable`].
-///
-/// `test_decoding` names the relation a row PHYSICALLY landed in, and the sink
-/// routes by byte-exact comparison against the config's `table:` string. When
-/// those two can never agree, capture is a silent 100% drop — and on PostgreSQL
-/// that is terminal, not a delay: the commit boundary is recorded BEFORE the
-/// routing filter (`cdc/sink.rs`), so the pass checkpoints and acks the slot over
-/// events it never captured, PostgreSQL frees the WAL, and the run writes
-/// `_SUCCESS` with `status: success` and zero rows.
-///
-/// Measured on a real partitioned table (2026-08-24, pg14 stand): 2 committed
-/// rows, `rows: 0`, slot `0/AE5F8BB8` → `0/AE6010D8`, peek empty afterwards, and
-/// re-running with the config corrected recovered NOTHING while the source still
-/// held both rows. That is worse than the SQL Server case this guard is modelled
-/// on (`mssql/cdc.rs`), where the change table's own retention made the same
-/// routing bug a delay.
+/// What one CONFIGURED table can contribute to a `test_decoding` stream.
 pub(crate) struct RelationRouting<'a> {
     /// The `table:` string the config asked for — what the sink routes BY.
     pub configured: &'a str,
     /// `pg_class.relkind` of the relation that name resolves to.
     pub relkind: char,
-    /// `pg_class.relpersistence` — `u` for UNLOGGED. An unlogged table writes no
-    /// WAL, so logical decoding never emits a single event for it.
+    /// `pg_class.relpersistence` — `u` for UNLOGGED.
     pub relpersistence: char,
-    /// The CATALOG's spelling of the relation the config string resolved to, as
-    /// `(schema, table)`. The probe resolves through SQL rules (which FOLD an
-    /// unquoted name); the router compares BYTE-EXACT. When those two disagree the
-    /// config means one relation to the probe and another to routing.
+    /// The CATALOG's spelling of the relation the config string resolved to, as `(schema, table)`.
     pub resolved: (String, String),
-    /// Relations that inherit from it — partitions, or legacy `INHERITS`
-    /// children — schema-qualified the way `test_decoding` renders them.
+    /// Relations that inherit from it — partitions, or legacy `INHERITS` children.
     pub children: Vec<String>,
     /// For a partitioned parent: the LEAF partitions, from `pg_partition_tree`.
-    ///
-    /// Not the same as `children` on a sub-partitioned table, and the difference is
-    /// a dead-end remediation: `children` there is the intermediate PARTITIONED
-    /// table, which stores no rows either and is refused by this same guard on the
-    /// next run. Only a leaf ever appears in the WAL.
     pub leaves: Vec<String>,
 }
 
-/// The verdict for one configured table. `Never` is a hard error (a guaranteed
-/// total, unrecoverable drop); `Partial` is a warning, because the parent's OWN
-/// rows do route and refusing would break a working config.
+/// The verdict for one configured table.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum RoutingVerdict {
     Routable,
@@ -333,33 +229,11 @@ pub(crate) enum RoutingVerdict {
     Partial(String),
 }
 
-/// Classify one configured relation. Pure: the catalog read that fills
-/// [`RelationRouting`] needs a live PostgreSQL, so this — every decision the
-/// guard makes — is what an offline test can hold and mutants can grade.
+/// Classify one configured relation.
 pub(crate) fn classify_routing(rel: &RelationRouting<'_>) -> RoutingVerdict {
     let cfg = rel.configured;
     let (rs, rt) = (&rel.resolved.0, &rel.resolved.1);
 
-    // FIRST, because it is the case where the schema is resolved from one relation
-    // and the events come from another. The config string is read by two resolvers
-    // with different case rules: the schema probe interpolates it into
-    // `SELECT * FROM {table}` and lets PostgreSQL FOLD it, while the sink routes
-    // byte-exact against the unquoted wire identity. They agree for an ordinary
-    // lowercase name and diverge the moment a folded twin exists.
-    //
-    // MEASURED (adversarial pass, 2026-08-24) with BOTH `"MixedCase"(id,v)` and
-    // `mixedcase(id,other_col,extra)` present and `table: MixedCase` configured:
-    // exit 0 and `status: success` throughout, while (a) writes to `mixedcase` —
-    // the relation the probe actually resolved — captured `rows: 0` with no
-    // warning, and (b) writes to `"MixedCase"` were written under the WRONG
-    // table's schema: columns `id, other_col, extra`, the real `v` values absent
-    // entirely and no `v` column in the output. Silent column loss on top of
-    // silent event loss.
-    //
-    // This also catches the 3-part `db.schema.table` form: PostgreSQL's
-    // `to_regclass` accepts it when `db` is the current database, so the probe
-    // resolves happily while `table_matches` splits on the FIRST dot and compares
-    // `db` against the schema — never matching.
     if !crate::source::cdc::sink::table_matches(
         crate::source::cdc::CdcEngine::Postgres,
         cfg,
@@ -384,8 +258,6 @@ pub(crate) fn classify_routing(rel: &RelationRouting<'_>) -> RoutingVerdict {
         ));
     }
 
-    // An UNLOGGED table writes no WAL at all, so no logical-decoding event can ever
-    // exist for it — the same total, silent drop as a view, by a different route.
     if rel.relpersistence == 'u' {
         return RoutingVerdict::Never(format!(
             "pg cdc: `{cfg}` is an UNLOGGED table. Unlogged tables write no WAL, so logical              decoding never produces a single event for them and the capture would report              success with zero rows forever while the slot advanced past other traffic.              `ALTER TABLE {rs}.{rt} SET LOGGED` to capture it, or drop it from the config."
@@ -393,12 +265,7 @@ pub(crate) fn classify_routing(rel: &RelationRouting<'_>) -> RoutingVerdict {
     }
 
     match rel.relkind {
-        // A partitioned parent stores NO rows of its own: every change carries a
-        // PARTITION's name. Byte-exact routing can never match it.
         'p' => {
-            // LEAVES, not children. On a sub-partitioned table the immediate child
-            // is another partitioned table that stores no rows, so naming it sends
-            // the operator to a config this same guard refuses on the next run.
             let named = if rel.leaves.is_empty() {
                 "it has no partitions yet".to_string()
             } else {
@@ -414,18 +281,6 @@ pub(crate) fn classify_routing(rel: &RelationRouting<'_>) -> RoutingVerdict {
                  snapshot the parent with `mode: full`, which reads through the parent normally."
             ))
         }
-        // A MATERIALIZED VIEW is the one of the three that CAN emit under its own
-        // name, so it is a partial, not a refusal. MEASURED on the pg16 CDC stand,
-        // three forms against one `test_decoding` slot:
-        //   CREATE MATERIALIZED VIEW … WITH DATA      → `table s.mv: INSERT: …`
-        //   REFRESH MATERIALIZED VIEW …               → nothing under its own name
-        //   REFRESH MATERIALIZED VIEW CONCURRENTLY …  → `table s.mv: INSERT: …`
-        // The earlier comment here measured only the middle form and generalised it
-        // to "a guaranteed zero" — while the candidate query 200 lines below was
-        // rewritten on the OPPOSITE measurement (`'m'` is capturable). Two halves of
-        // one file disagreeing, and the false half was the one reaching operators:
-        // CONCURRENTLY is the standard production refresh (it does not lock readers),
-        // so the refused config was the common one.
         'm' => RoutingVerdict::Partial(format!(
             "pg cdc: `{cfg}` is a MATERIALIZED VIEW. It CAN be captured — a `REFRESH \
              MATERIALIZED VIEW CONCURRENTLY` decodes as ordinary row events under its \
@@ -435,7 +290,6 @@ pub(crate) fn classify_routing(rel: &RelationRouting<'_>) -> RoutingVerdict {
              at 0 rows forever while reporting success. Capture the base table(s) \
              instead if you want the source's changes."
         )),
-        // A view and a foreign table have no WAL of their own under any operation.
         'v' | 'f' => {
             let what = match rel.relkind {
                 'v' => "a VIEW",
@@ -448,9 +302,6 @@ pub(crate) fn classify_routing(rel: &RelationRouting<'_>) -> RoutingVerdict {
                  reads instead."
             ))
         }
-        // A plain table with inheritance children routes its OWN rows correctly;
-        // only rows written directly to a child are dropped. A partial gap — loud
-        // enough to see, not fatal enough to refuse a config that works today.
         'r' | 'P' if !rel.children.is_empty() => RoutingVerdict::Partial(format!(
             "pg cdc: `{cfg}` has {} inheritance child table(s) ({}). test_decoding names the CHILD \
              a row landed in, so changes written directly to a child route NOWHERE while the \
@@ -490,36 +341,16 @@ impl PgChangeStream {
             .collect()
     }
 
-    /// Live half of the routing guard: ask the CATALOG what each configured
-    /// table actually is, and refuse a capture that could only ever drop
-    /// everything. Decisions live in [`classify_routing`]; this is glue.
-    ///
-    /// Runs on the stream's OWN connection, before the slot is created and long
-    /// before any ack — which is the whole point. A guard that fires after the
-    /// first roll has already let PostgreSQL free the WAL.
-    ///
-    /// `to_regclass` (not `::regclass`) so a name that resolves to nothing
-    /// returns NULL instead of raising: an absent table is the schema probe's
-    /// error to report (`SELECT * FROM {table}`, `cdc/mod.rs`), with a message
-    /// that already names it. Resolution follows the same SQL rules that probe
-    /// does, so the two agree about which relation a config string means.
+    /// Live half of the routing guard: ask the CATALOG what each configured table actually is, and refuse a capture that could only ever drop everything.
     pub(crate) fn check_configured_tables_are_routable(
         client: &mut Client,
         configured: &[String],
-        // Whether to LOG the inert-twin note — once per run, from `open`. A reporting
-        // view named after a table is not a condition that resolves, so a note said
-        // more than once per run would repeat on every scheduler cycle, forever.
         say_note: bool,
     ) -> Result<()> {
         use anyhow::Context as _;
         for cfg in configured {
             let matches: Vec<crate::source::cdc::identity::CatalogMatch> = client
                 .query(
-                    // Every relkind logical decoding can name, VIEWS included: a view
-                    // sharing the name is a CANDIDATE for the ambiguity message, not
-                    // something to filter out. Hiding it makes resolution pick the
-                    // table silently while classification refuses the view — two
-                    // reads of one fact naming two relations (measured on MySQL).
                     "SELECT n.nspname::text, c.relname::text, c.relkind::text, \
                             (c.relkind IN ('r','m') AND c.relpersistence = 'p') \
                               AS capturable \
@@ -555,55 +386,21 @@ impl PgChangeStream {
                     schema: r.get(0),
                     table: r.get(1),
                     kind: r.get::<_, String>(2),
-                    // Which relkinds can actually CARRY an event, measured rather
-                    // than assumed. `'p'` is NOT one: a partitioned PARENT stores no
-                    // rows, and `test_decoding` names the LEAF — measured, an insert
-                    // into `hunt_arch.hunt_pt` decodes as `table
-                    // hunt_arch.hunt_pt_p1: INSERT`, which a bare `hunt_pt` never
-                    // matches. `classify_routing` says the same thing 200 lines below,
-                    // and counting the parent as a competitor hard-refused a healthy
-                    // config over a twin that cannot put one row in the export.
-                    //
-                    // `'m'` IS capturable because `test_decoding` DOES
-                    // decode a materialized view — `CREATE MATERIALIZED VIEW … WITH
-                    // DATA` renders as ordinary INSERTs, which is how a same-named
-                    // matview injected a fabricated row into an export earlier today.
-                    // A plain view (`'v'`) and a foreign table (`'f'`) emit nothing,
-                    // and neither does an UNLOGGED relation, so those are context
-                    // rather than competing identities. TEMP schemas are excluded by
-                    // the query itself: a STRANGER's `CREATE TEMP TABLE` of the same
-                    // name made capture flap green/red on a config nobody touched.
                     capturable: r.get::<_, bool>(3),
                 })
                 .collect();
-            // A bare name means the relation the search_path resolves, as every statement of the run
-            // reads it: a same-named relation in another schema is not a candidate.
             let matches: Vec<_> = match search_path_schema(client, cfg)? {
                 Some(sch) => matches.into_iter().filter(|m| m.schema == sch).collect(),
                 None => matches,
             };
             let mut resolved: Option<(String, String)> = None;
             if !matches.is_empty() {
-                // The ambiguity decision. A NO-match stays with the schema probe
-                // below for now — it reports the missing relation today and tests
-                // assert its message; unifying that report is a later pass, said
-                // here rather than silently deferred.
                 let elected = crate::source::cdc::identity::resolve_captured_table(cfg, &matches)?;
-                if let Some(note) = &elected.note {
-                    // Resolution succeeded, but the name also matched something that
-                    // emits nothing. Very often that inert twin is what the operator
-                    // meant, and silence sends them hunting.
-                    if say_note {
-                        log::warn!("pg cdc: {note}");
-                    }
+                if let Some(note) = &elected.note
+                    && say_note
+                {
+                    log::warn!("pg cdc: {note}");
                 }
-                // CARRY the election forward. Re-resolving the configured string
-                // below through `to_regclass` (i.e. `search_path`) is how one run
-                // came to print two contradictory sentences: a warning that `vv`
-                // resolves to deep.vv, then an error that `vv` is a VIEW and to
-                // "capture the BASE table(s) it reads" — naming the relation the
-                // warning had just elected. MySQL got this half in 62a7876 and
-                // PostgreSQL did not.
                 resolved = Some((elected.schema, elected.table));
             }
             let (rs, rt): (Option<&str>, Option<&str>) = match &resolved {
@@ -634,7 +431,7 @@ impl PgChangeStream {
                     format!("pg cdc: reading pg_class to check that `{cfg}` is routable")
                 })?
             else {
-                continue; // unresolvable here — the schema probe reports it, loudly
+                continue;
             };
             let relkind: String = row.get(0);
             let relpersistence: String = row.get(1);
@@ -652,11 +449,6 @@ impl PgChangeStream {
             };
             match classify_routing(&rel) {
                 RoutingVerdict::Routable => {}
-                // Gated exactly like the note above, and for a stronger reason: a
-                // `Partial` config SUCCEEDS, so this repeats on every scheduler
-                // cycle forever, while a note usually precedes a bail and is seen
-                // once anyway. The precheck runs twice per run (preflight, then
-                // open).
                 RoutingVerdict::Partial(why) => {
                     if say_note {
                         log::warn!("{why}");
@@ -694,7 +486,6 @@ impl PgChangeStream {
             crate::rivet_bail!(crate::error::codes::SOURCE_CDC_PREREQUISITE, "{why}");
         }
         Self::check_configured_tables_are_routable(client, configured_tables, say_note)?;
-        // The schema probe's own statement, prepared only: a table it could not read is refused here.
         for table in configured_tables {
             crate::source::cdc::validate_table_ident(table)?;
             let probe =
@@ -711,20 +502,7 @@ impl PgChangeStream {
         Ok(())
     }
 
-    /// Connect and ensure a `test_decoding` logical slot named `slot` exists
-    /// (idempotent — reuses an existing slot, which is how a real run resumes).
-    ///
-    /// `prior` = the prior-run evidence the caller found. With any, a
-    /// MISSING slot is a loud error, never a silent re-create: the slot was
-    /// dropped or invalidated, and a fresh slot would anchor at the *current*
-    /// position — silently skipping every change since the drop.
-    ///
-    /// A [`DrainMode::BoundedAtOpen`] run snapshots `pg_current_wal_lsn()` once
-    /// and stops at the first commit past it — see [`Self::bound`].
-    // Eight positional arguments, and a struct would not improve it: every one is
-    // a distinct decision the caller must make consciously (which slot, whether a
-    // resume is expected, the peek budget, the drain bound, what may be routed,
-    // where a spill may go), and a builder would let one be forgotten silently.
+    /// Connect and ensure a `test_decoding` logical slot named `slot` exists (idempotent.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn open(
         conn_str: &str,
@@ -737,7 +515,6 @@ impl PgChangeStream {
         spill_dir: Option<&std::path::Path>,
         checkpoint: Option<&std::path::Path>,
     ) -> Result<Self> {
-        // The batch dial: the plaintext gate, the forced-ssl connector, and a host:port-naming error.
         let mut client = super::connect_client(conn_str, tls)?;
         if seeded!("session-set-on-a-pooled-cdc-connection", true, false) {
             client.batch_execute(
@@ -745,8 +522,6 @@ impl PgChangeStream {
                  SET extra_float_digits = 3; SET TimeZone = 'UTC';",
             )?;
         }
-        // The one prerequisite check of a run, on the stream's own connection and before the
-        // slot: its refusals carry rivet's `pg cdc:` prefix, so the setup hint is never prepended.
         if seeded!("cdc-anchor-written-before-the-refusal", false, true) {
             Self::refuse_unmet_prerequisites_on(&mut client, configured_tables, mode, true)?;
         }
@@ -773,19 +548,6 @@ impl PgChangeStream {
                 return Err(crate::source::cdc::checkpoint_identity::log_gap(why));
             }
             SlotAction::Create => {
-                // Creating the slot anchors capture at the CURRENT WAL position:
-                // everything already written is unreachable from here. That is correct
-                // and expected on a first run — and indistinguishable, from inside this
-                // process, from a slot an admin or a failover dropped out from under a
-                // running deployment.
-                //
-                // `Refuse` only fires on prior-run evidence (a checkpoint
-                // position, or at the anchor step a completed snapshot), and
-                // `cdc.checkpoint` is optional on PostgreSQL precisely because
-                // the slot itself is the server-side anchor. So the configuration most
-                // reliant on the slot is the one with no evidence that it ever existed,
-                // and the silent branch was the one it took. Loud beats silent: rivet
-                // cannot know which case this is, but the operator can.
                 log::warn!("{}", slot_created_warning(slot));
                 client.execute(
                     "SELECT pg_create_logical_replication_slot($1, 'test_decoding')",
@@ -796,10 +558,6 @@ impl PgChangeStream {
         if seeded!("cdc-anchor-written-before-the-refusal", true, false) {
             Self::refuse_unmet_prerequisites_on(&mut client, configured_tables, mode, true)?;
         }
-        // Snapshot the bound AFTER the slot exists, so a commit landing between
-        // slot creation and this read is ≤ bound (captured this run, not lost
-        // between the anchor and the ceiling). A malformed rendering falls back
-        // to unbounded — pure catch-up — never an early exit.
         let bound = if mode.is_bounded() {
             use anyhow::Context as _;
             let lsn: String = client
@@ -814,23 +572,10 @@ impl PgChangeStream {
         } else {
             None
         };
-        // The BARRIER, emitted after the slot exists for the same reason the bound
-        // is snapshotted there: a commit landing between slot creation and this
-        // point is BEFORE the marker, so it is captured this run rather than lost
-        // between the anchor and the ceiling.
-        //
-        // Best-effort by design. `pg_logical_emit_message` needs no special
-        // privilege but can fail (a read-only transaction, an older server), and a
-        // failure must not stop a run that the LSN ceiling can still bound — the
-        // exactness is an improvement over the ceiling, not a replacement for it.
         let barrier_nonce = mode
             .is_bounded()
             .then(|| {
                 let nonce = format!("{}-{}", slot, run_nonce());
-                // A non-transactional message is not flushed, and a slot reads only up to
-                // the flush point: `txid_current()` makes this a committing transaction,
-                // whose commit flushes the message with it (measured: unflushed, a peek
-                // right after the emit missed the barrier in 8 of 8 runs on PostgreSQL 16).
                 match client.execute(
                     "SELECT pg_logical_emit_message(false, $1, $2), txid_current()",
                     &[&BARRIER_PREFIX, &nonce],
@@ -870,27 +615,11 @@ impl PgChangeStream {
         })
     }
 
-    /// Peek **one bounded batch** into `pending` **without consuming it**
-    /// (`pg_logical_slot_peek_changes(slot, NULL, batch_limit)`). `upto_nchanges`
-    /// caps the batch at a **commit boundary** (PostgreSQL only stops after a
-    /// whole transaction), so memory is O(batch), never O(total backlog). The
-    /// slot is advanced later, in [`ChangeStream::ack`], once the changes are
-    /// durably written — a crash before durability re-reads them (at-least-once).
-    ///
-    /// Refill safety: a peek always starts at the slot's `restart_lsn`, which the
-    /// consumer's ack advances between batches. Until that ack lands the same
-    /// changes are visible again, so this drops any transaction whose COMMIT LSN
-    /// is at or below [`Self::frontier`] (already yielded). A peek that adds no
-    /// new transaction — or returns less than a full batch — has drained
-    /// everything past the ack frontier and marks the stream [`Self::exhausted`].
+    /// Peek **one bounded batch** into `pending` **without consuming it** (`pg_logical_slot_peek_changes(slot, NULL, batch_limit)`).
     fn fill(&mut self) -> Result<()> {
-        // The refusal deferred by the previous window. By now the sink has flushed,
-        // checkpointed and acked everything that preceded the truncate, so the slot
-        // sits at the last commit before it and the remedy is lossless for the rest.
         if let Some(why) = self.pending_truncate_refusal.take() {
             return Err(crate::source::cdc::checkpoint_identity::truncated(why));
         }
-        // test_decoding renders each value as text in the formats of the transaction that peeks.
         let rows = read_pinned_text(&mut self.client, |c| {
             c.query(
                 "SELECT lsn::text, data FROM pg_logical_slot_peek_changes($1, NULL, $2)",
@@ -898,21 +627,10 @@ impl PgChangeStream {
             )
         })?;
         let n_rows = rows.len();
-        // Frame transactions (BEGIN … changes … COMMIT) and stamp every change with
-        // its transaction's COMMIT LSN — the only valid slot-advance boundary and
-        // the commit-boundary resume position. Logical decoding only ever emits
-        // complete, committed transactions.
-        // The transaction being framed, with its memory cap and spill (`tx_buffer`).
-        // Local: `upto_nchanges` only ever stops at a commit boundary, so a
-        // transaction cannot straddle two peek windows.
         let mut tx = TxBuffer::new(
             crate::source::cdc::CdcEngine::Postgres,
             self.spill_dir.clone(),
         );
-        // Set when the window ended EARLY to hand out a spilled tail in order —
-        // which is not the same thing as the window being drained. Conflating them
-        // would end a bounded run at the first oversized transaction, deferring
-        // everything behind it to the next cycle for no reason.
         let mut stopped_to_spool = false;
         let mut yielded_any = false;
         for r in rows {
@@ -923,8 +641,6 @@ impl PgChangeStream {
                 match tx_disposition(commit_lsn, self.frontier, self.bound) {
                     TxDisposition::Yield => {
                         let commit = Position::new(json!({ "lsn": lsn }));
-                        // #158: commit LSN on all, committed on the transaction's LAST
-                        // event — on disk when it spilled (`TxBuffer::close_transaction`).
                         let (head, tail) = tx.close_transaction(&commit, &lsn)?;
                         let head = seeded!(
                             "committed-every-event",
@@ -948,24 +664,11 @@ impl PgChangeStream {
                         yielded_any = true;
                         if tail.is_some() {
                             self.spooled = tail;
-                            // END the window here. The tail leaves through
-                            // `next_change` one row at a time, and a LATER
-                            // transaction in this same peek would otherwise reach
-                            // `pending` first and be handed out AHEAD of it —
-                            // re-ordering two transactions and breaking the commit
-                            // order the resume position depends on. Nothing is lost
-                            // by stopping: the peek does not consume, so the next
-                            // `fill` re-reads the rest of this window and `frontier`
-                            // drops what was already yielded.
                             stopped_to_spool = true;
                             break;
                         }
                     }
-                    // Already yielded on a prior (un-acked) peek ⇒ drop, idempotent.
                     TxDisposition::AlreadyYielded => tx.clear(),
-                    // Committed after this bounded run opened — the next run's
-                    // work. Peeks return transactions in commit order, so
-                    // everything after this one is past the bound too: stop.
                     TxDisposition::PastBound => {
                         tx.clear();
                         self.exhausted = true;
@@ -977,21 +680,10 @@ impl PgChangeStream {
                 .as_deref()
                 .is_some_and(|n| is_barrier_line(&data, n))
             {
-                // OUR barrier, and therefore the EXACT end of this drain: it was
-                // emitted at open, so everything decoded before it committed before
-                // rivet asked. Whatever the LSN ceiling would have said, this is the
-                // boundary — and unlike the ceiling it cannot include a commit that
-                // raced the snapshot or exclude one that did not.
-                //
-                // `tx` is empty here by construction: a logical message emitted
-                // non-transactionally arrives between transactions, never inside
-                // one. Clearing anyway keeps that assumption from being load-bearing.
                 tx.clear();
                 self.exhausted = true;
                 break;
             } else if is_standalone_message(&data) {
-                // A marker outside any transaction (an earlier run's barrier, another tool's):
-                // a data-free span the zero-yield release may step over, up to the bound.
                 if past_the_bound(&lsn, self.bound) {
                     self.exhausted = true;
                     break;
@@ -1002,59 +694,12 @@ impl PgChangeStream {
                     Some(lsn)
                 );
             } else if data.starts_with("BEGIN") {
-                // Dropping any spill too — a transaction that never reached its
-                // COMMIT in this window is re-read from the slot next time.
                 tx.clear();
             } else if let Some((schema, table)) = truncate_targets(&data)
                 .into_iter()
                 .find(|(sc, tb)| routes(&self.configured_tables, &self.bare_schema, sc, tb))
             {
-                // A TRUNCATE carries no rows, so the parser below has nothing to
-                // build and dropped it silently — leaving the destination holding
-                // rows the source no longer has, with no DELETE to retract them
-                // and no later capture able to reconcile it.
-                //
-                // ONE line can name MANY relations (`TRUNCATE a, b`, and every
-                // CASCADE that pulls in referencing tables), so this searches the
-                // whole list for one of OURS rather than testing the first. A
-                // truncate naming only other tables falls through — the routing
-                // filter would drop their rows anyway, and failing on them would
-                // make one truncated table an outage for every export on this
-                // server (the MySQL undecodable-rows guard's measured lesson).
-                // WHEN to raise it depends on whether anything is at stake.
-                //
-                // Nothing yielded in this window yet ⇒ there is nothing to flush and
-                // nothing an ack could save, so raise NOW: deferring would leave a
-                // BOUNDED run (`until_current`) free to reach its ceiling and
-                // terminate without ever calling `fill` again — reporting SUCCESS over
-                // a truncate, which is worse than the immediate bail. (Measured: the
-                // pre-existing single-table truncate test went GREEN against the first
-                // cut of this change, which is how that hole surfaced.)
-                //
-                // Something WAS yielded ⇒ those transactions precede the truncate and
-                // are still owed to the destination. Bailing now discards them, and the
-                // refusal's own remedy — advance the slot past the truncate — then
-                // destroys them for good. So end the window instead: the sink flushes,
-                // checkpoints and acks that span, and `fill` raises on the next pass
-                // with the slot sitting exactly at the last commit before the truncate.
                 let why = truncate_refusal_message(&schema, &table);
-                // `yielded_any` ALONE. The first cut also required `tx.is_empty()`,
-                // and that wedged the capture permanently: events sit in `tx` until
-                // their COMMIT line moves them to `pending`, and the `break` below
-                // means that COMMIT is never reached — so `BEGIN; INSERT; TRUNCATE;
-                // COMMIT` deferred the refusal with `pending` empty, the drain ended
-                // clean, `fill` was never called again, and the refusal never fired.
-                //
-                // MEASURED: `status: success, rows: 0`, exit 0, `_SUCCESS` written,
-                // zero warnings — and it does not recover. The slot never advances,
-                // so that transaction heads EVERY later window: two rows inserted
-                // afterwards were invisible across three more runs, all green, with
-                // WAL accumulating.
-                //
-                // Nothing is at stake in the in-flight `tx`: it was never handed to
-                // the sink, so bailing discards only uncommitted events the next run
-                // re-reads. What must be protected is what was already YIELDED —
-                // exactly what `yielded_any` measures.
                 if !yielded_any {
                     return Err(crate::source::cdc::checkpoint_identity::truncated(why));
                 }
@@ -1062,7 +707,6 @@ impl PgChangeStream {
                 self.exhausted = true;
                 break;
             } else if let Some(ev) = parse_test_decoding(&lsn, &data, &self.domains)? {
-                // A same-named relation of another schema than the one a bare name means.
                 if is_a_foreign_twin(
                     &self.configured_tables,
                     &self.bare_schema,
@@ -1071,35 +715,16 @@ impl PgChangeStream {
                 ) {
                     continue;
                 }
-                // Past the cap the RAW wire row is spilled and the parse above only
-                // proved the line IS a change: a line that decodes to nothing must not
-                // enter the spill, since the tail's length decides which row closes it.
                 tx.push(ev, |_| encode_wire_row(&lsn, &data), &lsn)?;
             }
         }
-        // Short window (backlog fit in one peek) OR a full window that yielded
-        // nothing new (every transaction in it was already yielded on a prior
-        // un-acked peek — the slot is starved because the sink has not yet acked
-        // past the consumed span): either way there is nothing more readable
-        // from the CURRENT slot position. Mark exhausted and hand control back
-        // to the sink. The sink's re-drain loop then flushes + acks the consumed
-        // span (`run_to_files`), which advances the slot and clears `exhausted`,
-        // so the NEXT peek slides past a foreign/empty span of ANY size — no
-        // budget escalation, no premature "caught up" while in-bound data
-        // remains (the bug the escalation only partially covered: a foreign or
-        // empty span larger than the escalated window still exhausted early).
         if !stopped_to_spool && (n_rows < self.batch_limit as usize || !yielded_any) {
             self.exhausted = true;
         }
         Ok(())
     }
 
-    /// One row of a spilled tail: decode it, stamp it, and drop the reader once the
-    /// last row is out.
-    ///
-    /// `Ok(None)` only when the tail is finished. A row that decodes to no event is
-    /// an ERROR rather than a skip: the tail's length decides which row carries
-    /// `committed`, so a silently skipped row would move the transaction's end.
+    /// One row of a spilled tail: decode it, stamp it, and drop the reader once the last row is out.
     fn next_spooled(&mut self) -> Result<Option<ChangeEvent>> {
         replay(&mut self.spooled, |rec| {
             let (lsn, data) = decode_wire_row(rec)?;
@@ -1115,14 +740,7 @@ impl PgChangeStream {
         })
     }
 
-    /// Zero-yield release: called at clean exhaust. A run whose every
-    /// frontier-covered transaction was EMPTY (see [`Self::owed_through`])
-    /// advances the slot itself — the sink will never ack (it has nothing to
-    /// flush), and a data-free span has nothing to lose. A run that yielded
-    /// data leaves acking to the sink (the flush→checkpoint→ack durability
-    /// order); its trailing empty span becomes the NEXT run's zero-yield case
-    /// and is released then. Failure here only delays WAL release — warn, never
-    /// fail an otherwise-clean run.
+    /// Zero-yield release: called at clean exhaust.
     fn release_empty_frontier(&mut self) {
         if self.owed_through.is_some() {
             return;
@@ -1130,8 +748,6 @@ impl PgChangeStream {
         let Some(lsn) = self.frontier_text.take() else {
             return;
         };
-        // The checkpoint first, then the slot: the checkpoint is the last position rivet
-        // confirmed, which the open compares the slot with to see another reader's advance.
         if let Err(e) = self.record_confirmed(&lsn) {
             log::warn!("pg cdc: could not record the empty-transaction span at {lsn}: {e:#}");
             return;
@@ -1149,12 +765,7 @@ impl PgChangeStream {
         }
     }
 
-    /// Advance the slot's `confirmed_flush_lsn` to `lsn`, validated to the
-    /// pg_lsn charset before interpolation — never trust a value into SQL
-    /// unchecked, even the slot's own output. Advancing frees the WAL up to
-    /// `lsn`, so the next peek starts THERE: clear `exhausted` so the sink's
-    /// re-drain reads the fresh span instead of stopping (the slot moved, there
-    /// may now be readable WAL that a prior starved peek could not reach).
+    /// Advance the slot's `confirmed_flush_lsn` to `lsn`, validated to the pg_lsn charset before interpolation.
     fn advance_slot(&mut self, lsn: &str) -> Result<()> {
         if lsn.is_empty() || !lsn.bytes().all(|b| b.is_ascii_hexdigit() || b == b'/') {
             crate::rivet_bail!(
@@ -1162,7 +773,6 @@ impl PgChangeStream {
                 "pg cdc: refusing to advance to a malformed LSN {lsn:?}"
             );
         }
-        // The postgres crate can't bind `&str` → `pg_lsn`, so the LSN is inlined.
         self.client.execute(
             &format!("SELECT pg_replication_slot_advance($1, '{lsn}'::pg_lsn)"),
             &[&self.slot],
@@ -1172,8 +782,7 @@ impl PgChangeStream {
     }
 }
 
-/// The checkpoint key that says it was written by a release that saves the checkpoint before
-/// every slot advance (0.32.2 and later); a checkpoint without it may be behind its own slot.
+/// The checkpoint key that says it was written by a release that saves the checkpoint before every slot advance (0.32.2 and later).
 const CONFIRMED_FIRST: &str = "confirmed_first";
 
 /// `position` as a checkpoint this release writes: marked [`CONFIRMED_FIRST`].
@@ -1186,15 +795,6 @@ fn confirmed_first(position: &Position) -> Position {
 }
 
 /// Refuse a slot another reader advanced past the last position rivet confirmed for this export.
-///
-/// rivet writes the checkpoint before it advances the slot (the sink's ack, the empty-span
-/// release), so its own slot is never past its checkpoint. A slot that is was consumed by another
-/// reader (a second config of this cluster sharing the slot name): the changes between the two
-/// positions went to it and are gone from this stream, which would otherwise continue past them
-/// with exit 0. A checkpoint an older release wrote (no [`CONFIRMED_FIRST`]) may be behind the
-/// slot by that release's own empty-span release: its slot is adopted once, with a warning, and
-/// the checkpoint rewritten in this release's form, after which the comparison is strict. Without
-/// a checkpoint there is no position to compare and nothing is refused.
 fn refuse_a_slot_another_reader_advanced(
     client: &mut postgres::Client,
     slot: &str,
@@ -1307,7 +907,7 @@ pub(crate) fn absent_table_refusal(configured: &str) -> String {
     )
 }
 
-/// Why a configured table the schema probe cannot prepare is refused: absent (SQLSTATE 42P01) by code, anything else in the server's words.
+/// Why a configured table the schema probe cannot prepare is refused.
 pub(crate) fn table_probe_refusal(
     table: &str,
     sqlstate: Option<&str>,
@@ -1342,22 +942,18 @@ pub(crate) fn server_refusal(wal_level: &str, bounded: bool, in_recovery: bool) 
     })
 }
 
-/// Where one decoded transaction goes, given its COMMIT LSN — the pure heart of
-/// the drain's termination contract (see [`PgChangeStream::bound`]).
+/// Where one decoded transaction goes, given its COMMIT LSN.
 #[derive(Debug, PartialEq)]
 enum TxDisposition {
     /// New and in-bound — yield it and advance the frontier.
     Yield,
     /// At/below the frontier: an un-acked re-read from a prior peek — drop.
     AlreadyYielded,
-    /// Past the open-time bound: the bounded run stops here; the next run's
-    /// resume (from the un-advanced slot) picks it up.
+    /// Past the open-time bound: the bounded run stops here.
     PastBound,
 }
 
-/// Bound check FIRST: a commit past the ceiling must stop the run even on the
-/// very first peek (frontier still 0). A parse-miss `commit_lsn` of 0 can never
-/// test past the bound — a malformed LSN delays termination, never loses data.
+/// Bound check FIRST: a commit past the ceiling must stop the run even on the very first peek (frontier still 0).
 fn tx_disposition(commit_lsn: u64, frontier: u64, bound: Option<u64>) -> TxDisposition {
     if bound.is_some_and(|b| commit_lsn > b) {
         TxDisposition::PastBound
@@ -1368,7 +964,7 @@ fn tx_disposition(commit_lsn: u64, frontier: u64, bound: Option<u64>) -> TxDispo
     }
 }
 
-/// What is owed downstream once a transaction is yielded: its own commit when it carried data, else what was owed before.
+/// What is owed downstream once a transaction is yielded.
 fn owed_after_yield(
     owed_through: Option<u64>,
     commit_lsn: u64,
@@ -1382,7 +978,7 @@ fn owed_after_yield(
     }
 }
 
-/// What stays owed downstream after the sink acked `acked`: nothing once the ack covers the last data-bearing commit yielded.
+/// What stays owed downstream after the sink acked `acked`.
 fn owed_after_ack(owed_through: Option<u64>, acked: Option<u64>) -> Option<u64> {
     owed_through.filter(|owed| {
         seeded!(
@@ -1393,22 +989,12 @@ fn owed_after_ack(owed_through: Option<u64>, acked: Option<u64>) -> Option<u64> 
     })
 }
 
-/// Wire budget per peek: the sink's ack cadence (the part rollover), clamped to
-/// the `pg_logical_slot_peek_changes` int4 arg. Slot progress past a span larger
-/// than one window is the sink re-drain loop's job (ack → slide), not a bigger
-/// budget's — so this is a flat 1×, and drain RSS stays O(rollover). Pure — an
-/// offline mutation guard for the budget.
+/// Wire budget per peek: the sink's ack cadence (the part rollover), clamped to the `pg_logical_slot_peek_changes` int4 arg.
 fn wire_budget(peek: crate::source::cdc::PeekBound) -> i32 {
     peek.rows_capped().min(i32::MAX as usize) as i32
 }
 
 /// A per-run nonce for the drain barrier.
-///
-/// Uniqueness across CYCLES is what matters, not unpredictability: a scheduler runs
-/// the same config on an interval and every cycle emits a barrier carrying the same
-/// prefix, so cycle N+1 must not stop at cycle N's leftover marker. The process id
-/// plus a monotonic counter plus the open time separates them without pulling in a
-/// random source.
 fn run_nonce() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -1423,35 +1009,6 @@ fn run_nonce() -> String {
 }
 
 /// Is this `test_decoding` line rivet's own barrier, carrying `nonce`?
-///
-/// `until_current` today stops at the first commit past a snapshot of
-/// `pg_current_wal_lsn()` — "everything whose commit LSN is at or below a number we
-/// read", which is approximate at the edges. A barrier makes it exact:
-/// `pg_logical_emit_message` puts a marker in WAL at a definite point, and reaching
-/// it proves everything before it committed BEFORE rivet asked.
-///
-/// The line the server renders, measured on the stand:
-///
-/// ```text
-/// message: transactional: 0 prefix: rivet, sz: 20 content:rivet-barrier-abc123
-/// ```
-///
-/// Both halves of the match are load-bearing. The PREFIX stops another tool's
-/// logical message ending a rivet drain — a slot decodes the WHOLE database, so a
-/// foreign marker really does arrive. The NONCE stops a PREVIOUS run's barrier
-/// ending this one: a scheduler emits one per cycle and they all carry the prefix,
-/// so matching on the prefix alone lets cycle N+1 stop at cycle N's leftover and
-/// report a clean drain over an unread backlog.
-///
-/// Deliberately NOT anchored on `sz:` — the size is redundant with the content and
-/// a mismatch there would silently stop matching rather than fail.
-///
-/// The `message: ` prefix is defence in depth rather than the load-bearing check,
-/// and the test says so: `test_decoding` QUOTES text values, so a row whose data is
-/// SHAPED like a barrier still ends its content with `'` and cannot equal the nonce
-/// exactly. Removing the anchor survives its own mutant for that reason — recorded
-/// rather than left looking graded. What actually separates a marker from data here
-/// is the exact content comparison.
 pub(crate) fn is_barrier_line(line: &str, nonce: &str) -> bool {
     let Some((head, content)) = td_line::message_parts(line) else {
         return false;
@@ -1469,13 +1026,10 @@ pub(crate) fn is_standalone_message(line: &str) -> bool {
     line.starts_with("message: transactional: 0 ")
 }
 
-/// The prefix rivet stamps on its own logical messages. Shared with the `pgoutput`
-/// reader so both spellings of the barrier agree on whose marker is whose.
+/// The prefix rivet stamps on its own logical messages.
 pub(crate) use crate::source::postgres::pgoutput::BARRIER_PREFIX;
 
-/// Parse a `pg_lsn` rendering `X/Y` (two hex halves of a 64-bit position) into a
-/// comparable `u64`. `None` on a malformed value — the frontier check then treats
-/// it as `0` (never drops a real transaction on a parse miss).
+/// Parse a `pg_lsn` rendering `X/Y` (two hex halves of a 64-bit position) into a comparable `u64`.
 fn parse_lsn(lsn: &str) -> Option<u64> {
     let (hi, lo) = lsn.split_once('/')?;
     let hi = u32::from_str_radix(hi.trim(), 16).ok()?;
@@ -1484,16 +1038,6 @@ fn parse_lsn(lsn: &str) -> Option<u64> {
 }
 
 /// Frame one raw `test_decoding` wire row — `(lsn, data)` — as spill bytes.
-///
-/// RAW, not the parsed event: the row arrived as text and the decoder that reads it
-/// back is the same one the in-memory path uses, so a spilled row and a buffered one
-/// cannot decode differently. Encoding the parsed event instead would mean a second
-/// representation of a change, and a second thing to keep in step.
-///
-/// The `lsn` is length-prefixed rather than delimited because `data` is arbitrary
-/// text: a column value can hold any byte, newline and tab included, so any delimiter
-/// picked out of the payload's own alphabet is a value away from cutting a row in
-/// half.
 fn encode_wire_row(lsn: &str, data: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + lsn.len() + data.len());
     out.extend_from_slice(&(lsn.len() as u32).to_be_bytes());
@@ -1502,9 +1046,7 @@ fn encode_wire_row(lsn: &str, data: &str) -> Vec<u8> {
     out
 }
 
-/// Inverse of [`encode_wire_row`]. Errors rather than guessing: a record that does
-/// not frame is a torn spill, and the caller must not decode half a row into an
-/// event.
+/// Inverse of [`encode_wire_row`].
 fn decode_wire_row(rec: &[u8]) -> Result<(String, String)> {
     if rec.len() < 4 {
         crate::rivet_bail!(
@@ -1567,10 +1109,6 @@ impl ChangeStream for PgChangeStream {
 
     fn next_change(&mut self) -> Option<Result<ChangeEvent>> {
         loop {
-            // Refill a bounded batch whenever the buffer drains — the ack (from
-            // the sink, after a durable part) has advanced the slot, so the next
-            // peek reads fresh changes. `fill` marks `exhausted` once nothing new
-            // remains readable from the current slot position.
             while self.pending.is_empty() && self.spooled.is_none() && !self.exhausted {
                 if let Err(e) = self.fill() {
                     return Some(Err(e));
@@ -1579,9 +1117,6 @@ impl ChangeStream for PgChangeStream {
             if !self.pending.is_empty() {
                 return self.pending.pop_front().map(Ok);
             }
-            // A spilled tail outranks another `fill`: its rows belong to a
-            // transaction already framed, and reading more WAL before finishing it
-            // would interleave a later transaction into it.
             if self.spooled.is_some() {
                 match self.next_spooled() {
                     Ok(Some(ev)) => return Some(Ok(ev)),
@@ -1589,29 +1124,14 @@ impl ChangeStream for PgChangeStream {
                     Err(e) => return Some(Err(e)),
                 }
             }
-            // Exhausted with nothing to yield. A pure-empty span (DDL churn: many
-            // row-less transactions) yields no events to the sink, so the sink's
-            // re-drain loop never acks and would stop here — but the span may be
-            // LARGER than one peek window. Release the empty prefix (advance the
-            // slot past it, which clears `exhausted`), then LOOP to re-peek the
-            // fresh WAL beyond it, walking the WHOLE empty span in one call rather
-            // than one window per scheduler run. `release_empty_frontier` is a
-            // no-op once any data was yielded (the sink owns acking then) or when
-            // there is nothing left to release, and `frontier_text.take()` makes
-            // it advance at most once per new window — so a run that cannot
-            // advance falls through to `None` and the loop terminates.
             self.release_empty_frontier();
             if self.exhausted {
-                // Release did not advance the slot (data was yielded, or the span
-                // is fully drained) — genuinely nothing more.
                 return None;
             }
         }
     }
 
-    /// Advance the slot's `confirmed_flush_lsn` to the last durably-written change
-    /// — only now is it safe to let PostgreSQL free that WAL and skip those changes
-    /// on the next peek. Called by the sink after a part commits.
+    /// Advance the slot's `confirmed_flush_lsn` to the last durably-written change.
     fn ack(&mut self, position: &Position) -> Result<()> {
         let lsn = position
             .0
@@ -1641,11 +1161,6 @@ pub(crate) fn truncate_targets(data: &str) -> Vec<(String, String)> {
 }
 
 /// Refuse a TRUNCATE on a captured table, naming why re-running cannot fix it.
-///
-/// Loud, not a warning: this is an UNRECOVERABLE divergence, and the repo's rule
-/// is that those fail rather than degrade. A warning would leave a destination
-/// that silently disagrees with the source forever, which is the outcome the
-/// `unknown -> default` shape exists to prevent.
 pub(crate) fn truncate_refusal_message(schema: &str, table: &str) -> String {
     let qualified = if schema.is_empty() {
         table.to_string()
@@ -1673,9 +1188,7 @@ pub(crate) fn truncate_refusal_message(schema: &str, table: &str) -> String {
     )
 }
 
-/// The schema a BARE configured name means: the one the connection's `search_path` resolves it
-/// in (`to_regclass`), as every SQL statement of the run reads it, when that relation can carry a
-/// change event; `None` when it resolves nowhere or to a view, which leaves the election as it was.
+/// The schema a BARE configured name means: the one the connection's `search_path` resolves it in (`to_regclass`), as every SQL statement of the run reads it, when that relation can carry a change event.
 fn search_path_schema(client: &mut Client, cfg: &str) -> Result<Option<String>> {
     use anyhow::Context as _;
     if cfg.contains('.')
@@ -1713,10 +1226,7 @@ pub(crate) fn search_path_relation(
         .map(|r| (r.get(0), r.get(1))))
 }
 
-/// Whether a change of `schema.table` is captured: some configured name routes it, a bare name
-/// only in the schema the search_path resolved it to (`bare_schema`; a bare name it resolved
-/// nowhere routes as before). The one rule the catalog check, the TRUNCATE guard and the
-/// stream's routing take.
+/// Whether a change of `schema.table` is captured.
 pub(crate) fn routes(
     configured: &[String],
     bare_schema: &HashMap<String, String>,
@@ -1734,8 +1244,7 @@ pub(crate) fn routes(
         })
 }
 
-/// Whether a change of `schema.table` reaches a configured name only as a bare name's same-named
-/// relation of another schema than the one the search_path resolved: dropped, never routed.
+/// Whether a change of `schema.table` reaches a configured name only as a bare name's same-named relation of another schema than the one the search_path resolved.
 pub(crate) fn is_a_foreign_twin(
     configured: &[String],
     bare_schema: &HashMap<String, String>,
@@ -1747,13 +1256,7 @@ pub(crate) fn is_a_foreign_twin(
         && routes(configured, &HashMap::new(), schema, table)
 }
 
-/// Is a TRUNCATE this run's problem? Same asymmetry as the MySQL undecodable-rows
-/// guard, and for the same measured reason: one server's stream carries every
-/// table's changes, so refusing without asking whose relation it is makes one
-/// truncated table an outage for exports that never read it.
-///
-/// Empty `configured` means "capture whatever the stream emits", which makes every
-/// truncate ours.
+/// Is a TRUNCATE this run's problem?
 pub(crate) fn truncate_is_ours(schema: &str, table: &str, configured: &[String]) -> bool {
     configured.is_empty()
         || configured.iter().any(|c| {
@@ -1784,21 +1287,7 @@ pub(crate) fn parse_test_decoding(
     let mut named = map_columns(line.new, domains);
     let old_named = line.old.map(|o| map_columns(o, domains));
 
-    // An UPDATE that leaves an externally-stored TOAST column untouched renders
-    // that column as `col[type]:unchanged-toast-datum` in the NEW tuple — the
-    // value itself is NOT in the WAL (logical decoding never re-logs an
-    // unchanged out-of-line datum). REPLICA IDENTITY FULL puts the real value in
-    // the pre-image (`old-key`), so recover it by name; otherwise the value is
-    // genuinely unavailable and we must NOT write the literal marker as data
-    // (silent corruption — same class as the uuid→null loss caught live on GCS).
-    // An unrecoverable unchanged-TOAST column is a refusal — but a DEFERRED one.
-    // The slot decodes every table in the database, so bailing here would poison
-    // capture of unrelated tables that merely share the slot. Record it as the
-    // event's `poison`; the sink raises it ONLY if this event routes to a captured
-    // table (uncaptured tables are dropped without ever surfacing it).
     let unrecovered = recover_unchanged_toast(&mut named, old_named.as_deref());
-    // Same deferral, same reason: the slot decodes every table in the database, so
-    // an unrepresentable value on an UNCAPTURED table must not bail this run.
     let undecodable = |cols: &[ParsedColumn]| {
         let bad: Vec<&str> = cols
             .iter()
@@ -1846,11 +1335,6 @@ pub(crate) fn parse_test_decoding(
 
     let names: std::sync::Arc<[String]> = named.iter().map(|c| c.name.clone()).collect();
     let cols: Vec<RivetValue> = named.into_iter().map(|c| c.value).collect();
-    // The wire text names EVERY column — carry the names for every op, so
-    // the sink maps by NAME and the whole positional-corruption class
-    // (findings #37/#41/#42) is unrepresentable on PostgreSQL.
-    // The old key (or, under REPLICA IDENTITY FULL, the old row) rides `before` under its OWN
-    // names: a column the pre-image does not carry is absent, never a NULL.
     let old: Option<(Vec<RivetValue>, std::sync::Arc<[String]>)> = old_named.map(|o| {
         let kept: Vec<ParsedColumn> = o.into_iter().filter(|c| !c.toast_unchanged).collect();
         let old_names = kept.iter().map(|c| c.name.clone()).collect();
@@ -1888,12 +1372,8 @@ pub(crate) fn parse_test_decoding(
         after,
         image_names,
         position: Position::new(json!({ "lsn": lsn })),
-        // Placeholder — `fill` overrides this, marking only the LAST event of the
-        // transaction as the commit boundary (so the sink never rolls mid-tx).
-        // Default `false` is the safe value: a stray event that bypassed `fill`
-        // would not trigger a premature roll.
         committed: false,
-        seq: 0, // stamped by TxnSeq as the stream is consumed
+        seq: 0,
         poison: poison.or(infinity_poison),
         row_id: None,
         before_names,
@@ -2015,7 +1495,7 @@ struct ParsedColumn {
     rewritten_type: Option<String>,
 }
 
-/// Types whose `test_decoding` text is not the server's text for the value: a bit string prints as `B'110'`, the server's text is `110`.
+/// Types whose `test_decoding` text is not the server's text for the value.
 const DECODER_REWRITTEN_TYPES: &[&str] = &["bit", "bit varying"];
 
 /// The decoder-rewritten types, none when the defect is seeded.
@@ -2115,12 +1595,7 @@ fn map_columns(raw: Vec<td_line::RawColumn>, domains: &Domains) -> Vec<ParsedCol
         .collect()
 }
 
-/// Substitute each NEW-tuple `unchanged-toast-datum` column with the real value
-/// from the pre-image (`before`, present under REPLICA IDENTITY FULL), matched
-/// by column NAME. Returns the names of columns still unavailable — the DEFAULT
-/// replica-identity case, where the pre-image carries only the key so the value
-/// is not in the WAL at all and the caller must fail loud (never fabricate).
-/// Pure; unit-tested.
+/// Substitute each NEW-tuple `unchanged-toast-datum` column with the real value from the pre-image (`before`, present under REPLICA IDENTITY FULL), matched by column NAME.
 fn recover_unchanged_toast(
     after: &mut [ParsedColumn],
     before: Option<&[ParsedColumn]>,
@@ -2146,14 +1621,11 @@ fn recover_unchanged_toast(
     unrecovered
 }
 
-/// Map a `test_decoding` `(type, value)` to a typed [`RivetValue`]; `None` is a non-NULL value with no faithful reading.
+/// Map a `test_decoding` `(type, value)` to a typed [`RivetValue`].
 fn map_pg_value(typ: &str, val: &str, quoted: bool) -> Option<RivetValue> {
     if !quoted && val == "null" {
         return Some(RivetValue::Null);
     }
-    // One-dimensional arrays: `text[]` / `integer[]` / … render as the PG
-    // array literal (`{a,"with,comma",NULL}`); parse to element values so the
-    // sink builds a real List column (batch parity), never the literal text.
     if let Some(inner) = typ.strip_suffix("[]") {
         if !array_elem_is_listed(inner) {
             return Some(RivetValue::Bytes(val.as_bytes().to_vec()));
@@ -2177,14 +1649,9 @@ fn map_pg_value(typ: &str, val: &str, quoted: bool) -> Option<RivetValue> {
         return parse_pg_timestamp(val);
     }
     if t == "time" || t == "time without time zone" {
-        // "HH:MM:SS[.ffffff]" → microseconds since midnight (the Time64 column
-        // the batch export uses; the text rendering would silently null there).
         return parse_pg_time_micros(val).map(RivetValue::TimeMicros);
     }
     if t == "interval" {
-        // Canonicalise the text rendering ("1 year 2 mons 3 days") to the SAME
-        // ISO 8601 string the batch export emits ("P1Y2M3D") — one canon, so
-        // CDC and batch outputs of the same value are byte-identical.
         return Some(
             parse_pg_interval(val)
                 .map(|(months, days, us)| {
@@ -2205,16 +1672,11 @@ fn map_pg_value(typ: &str, val: &str, quoted: bool) -> Option<RivetValue> {
             .map(RivetValue::DateTime);
     }
     if t == "uuid" {
-        // test_decoding renders the uuid as 36-char hyphenated text; the sink's
-        // FixedSizeBinary(16) column (same as the batch export) needs the raw
-        // 16 bytes — the text rendering would silently degrade to NULL there.
         return decode_hex(&val.replace('-', ""))
             .filter(|b| b.len() == 16)
             .map(RivetValue::Bytes);
     }
     if t == "bytea" {
-        // Rendered as `\x…` hex; a Binary column must carry the raw bytes, not
-        // the hex string.
         if let Some(hex) = val.strip_prefix("\\x")
             && let Some(b) = decode_hex(hex)
         {
@@ -2222,7 +1684,6 @@ fn map_pg_value(typ: &str, val: &str, quoted: bool) -> Option<RivetValue> {
         }
         return Some(RivetValue::Bytes(val.as_bytes().to_vec()));
     }
-    // text / varchar / char / json / numeric / … → string bytes.
     Some(RivetValue::Bytes(val.as_bytes().to_vec()))
 }
 
@@ -2250,10 +1711,7 @@ fn array_elem_is_listed(inner: &str) -> bool {
         .any(|p| inner.starts_with(p))
 }
 
-/// Parse a PG array literal (`{alpha,"with,comma","he said \"hi\"",NULL}`)
-/// into element values, mapped through [`map_pg_value`] with the element type.
-/// Quoted elements un-escape `\"` and `\\`; the bare token `NULL` is an inner
-/// NULL. `None` for anything that isn't a `{…}` literal (fail open to text).
+/// Parse a PG array literal (`{alpha,"with,comma","he said \"hi\"",NULL}`) into element values, mapped through [`map_pg_value`] with the element type.
 fn parse_pg_array_literal(inner_type: &str, val: &str) -> Option<Vec<RivetValue>> {
     let body = val.strip_prefix('{')?.strip_suffix('}')?;
     if body.is_empty() {
@@ -2264,16 +1722,10 @@ fn parse_pg_array_literal(inner_type: &str, val: &str) -> Option<Vec<RivetValue>
     let mut i = 0;
     while i <= b.len() {
         if b.get(i) == Some(&b'"') {
-            // Quoted element: copy until the closing quote, un-escaping.
             let mut elem = String::new();
             i += 1;
             while i < b.len() && b[i] != b'"' {
                 if b[i] == b'\\' && i + 1 < b.len() {
-                    // The escaped char may be multi-byte UTF-8 — copy the WHOLE char.
-                    // Round-6: `b[i+1] as char` + `i += 2` interpreted one byte as a
-                    // codepoint and left `i` mid-char, so the next `body[i..i+n]` slice
-                    // panicked on a non-char boundary — a process-abort DoS (release is
-                    // panic=abort) on a crafted `test_decoding` quoted array element.
                     let n = utf8_len(b[i + 1]);
                     let end = (i + 1 + n).min(b.len());
                     elem.push_str(&body[i + 1..end]);
@@ -2284,7 +1736,7 @@ fn parse_pg_array_literal(inner_type: &str, val: &str) -> Option<Vec<RivetValue>
                     i += n;
                 }
             }
-            i += 1; // closing quote
+            i += 1;
             out.push(map_pg_value(inner_type, &elem, true)?);
             if b.get(i) == Some(&b',') {
                 i += 1;
@@ -2292,14 +1744,6 @@ fn parse_pg_array_literal(inner_type: &str, val: &str) -> Option<Vec<RivetValue>
                 break;
             }
         } else if b.get(i) == Some(&b'{') {
-            // A top-level `{` where a scalar token is expected is a NESTED
-            // (multi-dimensional) array literal, e.g. `{{1,2},{3,4}}`. rivet's
-            // List column is one-dimensional and cannot hold it, so return None:
-            // the caller preserves the raw literal as text bytes and the sink
-            // fails LOUD (batch parity, src/source/postgres/arrow_convert.rs),
-            // never flattening it to a bogus flat array of NULLs. A `{` inside a
-            // quoted text element is handled by the quoted branch above, so this
-            // arm fires only on genuine nesting.
             return None;
         } else {
             let end = body[i..].find(',').map(|p| i + p).unwrap_or(body.len());
@@ -2328,12 +1772,6 @@ fn parse_pg_time_micros(val: &str) -> Option<i64> {
     let h: i64 = parts.next()?.parse().ok()?;
     let m: i64 = parts.next()?.parse().ok()?;
     let s: i64 = parts.next()?.parse().ok()?;
-    // Range-validate EVERY field, not just the hour: `m`/`s` were parsed as
-    // unbounded i64, so an untrusted `12:9999999999999999:00` overflowed `m * 60`
-    // (fuzz-found panic, cdc.rs — a `panic=abort` DoS on the CDC stream). Bounding
-    // h∈0..24, m∈0..60, s∈0..60 both rejects a malformed time (→ None, handled by
-    // the caller) AND makes the arithmetic below unconditionally overflow-free
-    // (max 23*3600+59*60+59 = 86399, ×1e6 = 8.6e10, well within i64).
     if parts.next().is_some()
         || !(0..24).contains(&h)
         || !(0..60).contains(&m)
@@ -2344,21 +1782,17 @@ fn parse_pg_time_micros(val: &str) -> Option<i64> {
     let us: i64 = if frac.is_empty() {
         0
     } else {
-        // Right-pad to 6 digits: ".5" ⇒ 500000 µs.
         format!("{frac:0<6}").get(..6)?.parse().ok()?
     };
     Some(((h * 3600 + m * 60 + s) * 1_000_000) + us)
 }
 
-/// Parse PostgreSQL's `postgres`-style interval text rendering —
-/// `[N year(s)] [N mon(s)] [N day(s)] [±HH:MM:SS[.ffffff]]`, each part
-/// optional — into `(months, days, microseconds)`.
+/// Parse PostgreSQL's `postgres`-style interval text rendering.
 fn parse_pg_interval(val: &str) -> Option<(i32, i32, i64)> {
     let (mut months, mut days, mut micros) = (0i32, 0i32, 0i64);
     let mut tokens = val.split_whitespace().peekable();
     while let Some(tok) = tokens.next() {
         if tok.contains(':') {
-            // The time tail: ±HH:MM:SS[.ffffff].
             let (sign, rest) = match tok.strip_prefix('-') {
                 Some(r) => (-1i64, r),
                 None => (1i64, tok),
@@ -2367,9 +1801,6 @@ fn parse_pg_interval(val: &str) -> Option<(i32, i32, i64)> {
             micros = t.checked_mul(sign)?;
             continue;
         }
-        // Checked arithmetic on the untrusted count: `n` is an unbounded i32 from
-        // the wire, so `n * 12` (years→months) and the running accumulation could
-        // overflow — the same fuzz-found panic class as the time parsers above.
         let n: i32 = tok.parse().ok()?;
         match tokens.next()? {
             u if u.starts_with("year") => months = months.checked_add(n.checked_mul(12)?)?,
@@ -2381,8 +1812,7 @@ fn parse_pg_interval(val: &str) -> Option<(i32, i32, i64)> {
     Some((months, days, micros))
 }
 
-/// As [`parse_pg_time_micros`] but without the 24h bound — an interval's time
-/// component may exceed a day (e.g. "25:00:00").
+/// As [`parse_pg_time_micros`] but without the 24h bound — an interval's time component may exceed a day (e.g.
 fn parse_pg_time_micros_unbounded(val: &str) -> Option<i64> {
     let (hms, frac) = match val.split_once('.') {
         Some((h, f)) => (h, f),
@@ -2400,11 +1830,6 @@ fn parse_pg_time_micros_unbounded(val: &str) -> Option<i64> {
     } else {
         format!("{frac:0<6}").get(..6)?.parse().ok()?
     };
-    // Interval time tails are genuinely unbounded (h may exceed 24: "25:00:00"), so
-    // the fields cannot be range-bounded like a time-of-day. Use CHECKED arithmetic
-    // instead — a value so large its microseconds overflow i64 cannot be
-    // represented, so return None (fail the parse) rather than panic=abort the
-    // stream. Same fuzz-found overflow class as parse_pg_time_micros.
     let secs = h
         .checked_mul(3600)?
         .checked_add(m.checked_mul(60)?)?
@@ -2414,14 +1839,6 @@ fn parse_pg_time_micros_unbounded(val: &str) -> Option<i64> {
 
 /// Decode an even-length hex string to bytes; `None` on any non-hex input.
 fn decode_hex(s: &str) -> Option<Vec<u8>> {
-    // Byte-index slicing (`&s[i..i+2]`) below panics on a non-char-boundary, and
-    // under the release `panic=abort` profile that aborts the whole process. The
-    // uuid/bytea arms of `map_pg_value` feed this arbitrary `test_decoding` wire
-    // text, so a crafted non-ASCII even-byte-length cell (e.g. "€€") would be a
-    // process-abort DoS mid-CDC. Hex is ASCII by definition, so any non-ASCII
-    // input is non-hex → `None` is the correct answer AND makes the slice safe
-    // (mirrors mongo::hex_to_bytes). Length is a BYTE length, which now equals
-    // the char count.
     if !s.is_ascii() || !s.len().is_multiple_of(2) {
         return None;
     }
@@ -2432,15 +1849,8 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
 }
 
 /// Parse a PostgreSQL timestamp rendering (`YYYY-MM-DD HH:MM:SS[.ffffff][±TZ]`).
-/// For `timestamptz` the trailing offset is DATA, not decoration: test_decoding
-/// renders the instant in the polling session's zone, so at any non-UTC
-/// session the offset is non-zero ('… 12:00:00+09') — convert to the UTC
-/// instant. (The old code stripped '+…' and treated the wall-clock as UTC —
-/// +9h corruption at a Tokyo session — and failed outright on negative
-/// offsets, silently nulling every value at a western session.)
 fn parse_pg_timestamp(val: &str) -> Option<RivetValue> {
     let v = val.trim_end();
-    // tz-aware renderings first: %#z accepts +09 / +09:30 / +0930.
     for fmt in ["%Y-%m-%d %H:%M:%S%.f%#z", "%Y-%m-%d %H:%M:%S%#z"] {
         if let Ok(dt) = chrono::DateTime::parse_from_str(v, fmt) {
             return Some(RivetValue::DateTime(dt.naive_utc()));
@@ -2502,8 +1912,7 @@ mod tests {
         assert_eq!((pauses, noted), (0, 0));
     }
 
-    /// A bare name routes only the schema the search_path resolved it to; a qualified name its own;
-    /// a bare name resolved nowhere routes as before.
+    /// A bare name routes only the schema the search_path resolved it to.
     #[test]
     fn a_bare_name_routes_only_its_search_path_schema() {
         let cfg = vec![
@@ -2540,12 +1949,6 @@ mod tests {
     }
 
     /// The barrier line, against what the SERVER actually renders.
-    ///
-    /// The literal below was captured from the pg-cdc stand, not composed: the
-    /// spacing, the comma after the prefix and the absent space after `content:`
-    /// are all the server's, and a predicate written against a guessed shape
-    /// matches nothing while looking right.
-    /// The server verdict: `wal_level` first, then a bounded drain on a standby; anything else runs.
     #[test]
     fn the_server_is_refused_for_wal_level_or_a_bounded_drain_in_recovery() {
         assert_eq!(server_refusal("logical", true, false), None);
@@ -2646,17 +2049,11 @@ mod tests {
         let real = "message: transactional: 0 prefix: rivet, sz: 20 content:rivet-barrier-abc123";
         assert!(is_barrier_line(real, "rivet-barrier-abc123"));
 
-        // A PREVIOUS cycle's barrier. Same prefix, different nonce — and a
-        // scheduler emits one per cycle, so this is the ordinary case, not an
-        // exotic one. Matching on the prefix alone would stop cycle N+1 at cycle
-        // N's leftover and report a clean drain over an unread backlog.
         assert!(
             !is_barrier_line(real, "rivet-barrier-DIFFERENT"),
             "the nonce is the only thing separating one cycle's barrier from the next"
         );
 
-        // Another tool's logical message on the same database. The slot decodes
-        // EVERY database object, so this really does arrive.
         assert!(
             !is_barrier_line(
                 "message: transactional: 0 prefix: someone_else, sz: 20 content:rivet-barrier-abc123",
@@ -2665,14 +2062,11 @@ mod tests {
             "a foreign prefix must never end a rivet drain, whatever it carries"
         );
 
-        // A prefix that merely STARTS with ours — the comma is what makes the
-        // match exact, and without it `rivet_other` would pass.
         assert!(!is_barrier_line(
             "message: transactional: 0 prefix: rivet_other, sz: 20 content:rivet-barrier-abc123",
             "rivet-barrier-abc123"
         ));
 
-        // Ordinary change lines are never barriers.
         for line in [
             "table public.t: INSERT: id[integer]:1",
             "BEGIN 12345",
@@ -2682,12 +2076,6 @@ mod tests {
             assert!(!is_barrier_line(line, "rivet-barrier-abc123"), "{line}");
         }
 
-        // A ROW whose text value is SHAPED like a barrier. This is why the line
-        // must start with `message: ` and not merely contain the prefix: the same
-        // "data indistinguishable from a marker" class that made
-        // `unchanged-toast-datum` unusable as a signal, one layer over. A column
-        // holding this text is contrived; a column holding a log line, a config
-        // snippet or a captured error is not.
         assert!(
             !is_barrier_line(
                 "table public.t: INSERT: id[integer]:1 note[text]:'prefix: rivet, sz: 20 content:rivet-barrier-abc123'",
@@ -2695,13 +2083,6 @@ mod tests {
             ),
             "a ROW is never a barrier, however its values are spelled"
         );
-        // …and the honest note about WHY that holds, because it is not the
-        // `message: ` anchor doing the work. `test_decoding` QUOTES text values, so
-        // a row's rendering always ends the content with `'` and can never equal
-        // the nonce exactly — witness-searched, and the anchor mutant survives
-        // because of it. The anchor is defence in depth, not the load-bearing
-        // check; the exact content comparison is. Said here rather than left as a
-        // guard that looks graded and is not.
         assert!(
             !is_barrier_line(
                 "table public.t: INSERT: note[text]:'prefix: rivet, sz: 1 content:x'",
@@ -2710,7 +2091,6 @@ mod tests {
             "even a minimal row rendering keeps its closing quote"
         );
 
-        // A CONTENT that merely contains the nonce is not the nonce.
         assert!(
             !is_barrier_line(
                 "message: transactional: 0 prefix: rivet, sz: 24 content:rivet-barrier-abc123-x",
@@ -2720,16 +2100,7 @@ mod tests {
         );
     }
 
-    /// Every arm of the infinity predicate, and the doubled-quote path of both
-    /// scanners — eleven mutants that the parsers' existing tests could not reach.
-    ///
-    /// The predicate had SIX: each of `(timestamp || date) && (infinity ||
-    /// -infinity)` could be flipped and the live test still passed, because one row
-    /// shape cannot distinguish four boolean arms. The scanners had five, all in the
-    /// `i += 2` that skips an ESCAPED quote (`''`) — no fixture contained one, so
-    /// the cursor arithmetic was never exercised. (Their siblings show up as
-    /// TIMEOUTs rather than survivors: a mutated cursor stops advancing and the test
-    /// hangs, which is detection, just not by assertion.)
+    /// Every arm of the infinity predicate, and the doubled-quote path of both scanners.
     #[test]
     fn a_value_the_decoder_cannot_read_is_unrepresentable_never_null() {
         for (typ, val) in [
@@ -2757,20 +2128,15 @@ mod tests {
     fn the_infinity_predicate_and_the_escaped_quote_path_are_graded() {
         let inf = |typ: &str, val: &str| super::map_pg_value(typ, val, true).is_none();
 
-        // Both temporal types, both spellings — the four TRUE corners.
         assert!(inf("timestamp with time zone", "infinity"));
         assert!(inf("timestamp without time zone", "-infinity"));
         assert!(inf("date", "infinity"));
         assert!(inf("date", "-infinity"));
 
-        // A temporal type with an ordinary value decodes.
         assert!(!inf("timestamp with time zone", "2026-01-02 03:04:05+00"));
-        // The sentinel spelling on a NON-temporal type: a text column may legally
-        // hold the word, and refusing it would be a false loss report.
         assert!(!inf("text", "infinity"));
         assert!(!inf("datemark", "infinity"));
 
-        // Every integer spelling reads as an Int, and the other scalar arms decode.
         for typ in ["integer", "bigint", "smallint", "oid"] {
             assert_eq!(
                 map_pg_value(typ, "42", false),
@@ -2805,10 +2171,6 @@ mod tests {
             );
         }
 
-        // The scanners' escaped-quote path. A doubled quote inside a literal is ONE
-        // escaped character, not the end of the literal — so a TRUNCATE marker that
-        // follows it must still be found, and a `,` inside it must not be read as a
-        // separator.
         let line = "table public.\"o''brien\": TRUNCATE: (no-flags)";
         assert!(
             super::td_line::find_outside_quotes(line, ": TRUNCATE:").is_some(),
@@ -2828,13 +2190,6 @@ mod tests {
     use postgres::NoTls;
 
     /// The TRUNCATE recogniser and its addressing, graded offline.
-    ///
-    /// The multi-relation case is here because the FIRST version of this guard
-    /// shipped without it and an adversarial pass measured the consequence: with
-    /// `public.tmulti_a` configured, `TRUNCATE tmulti_a, tmulti_b` left the source
-    /// EMPTY while the run reported `status: success, rows: 1`. One line names
-    /// every relation, and every CASCADE that pulls in referencing tables produces
-    /// the same shape.
     #[test]
     fn a_truncate_is_recognised_across_a_relation_list_and_refused_only_for_ours() {
         let one = |d: &str| truncate_targets(d);
@@ -2844,7 +2199,6 @@ mod tests {
             vec![("public".to_string(), "orders".to_string())],
             "the exact line test_decoding emits for a single relation (measured on pg14)"
         );
-        // MEASURED wire text for `TRUNCATE tmulti_a, tmulti_b`.
         assert_eq!(
             one("table public.a, public.b: TRUNCATE: (no-flags)"),
             vec![
@@ -2860,19 +2214,11 @@ mod tests {
             "a quoted identifier unquotes like every other wire identity (#279) — a \
              dot INSIDE quotes belongs to the name"
         );
-        // A comma inside a quoted name is part of the name, not a list separator.
         assert_eq!(
             one("table public.\"odd,name\": TRUNCATE: (no-flags)"),
             vec![("public".to_string(), "odd,name".to_string())],
             "splitting on a quoted comma would invent two relations that do not exist"
         );
-        // A DOUBLED quote is an escaped quote INSIDE the name, not the end of it.
-        // Mutation testing found this: five mutants in `split_top_level_commas`'
-        // escape branch survived, because every quoted fixture above closes its
-        // quote immediately and the escape path was never taken. A name like
-        // `od"d` re-opens the quoted span if the doubling is mishandled, and the
-        // following comma is then read as part of the name — one relation instead
-        // of two, and OUR table silently not among them.
         assert_eq!(
             one("table public.\"od\"\"d\", public.b: TRUNCATE: (no-flags)"),
             vec![
@@ -2882,21 +2228,12 @@ mod tests {
             "a doubled quote is an ESCAPE; mishandling it swallows the separator and \
              loses every relation after it — including possibly ours"
         );
-        // …and the same escape inside a name that also carries a comma, which is
-        // where the two rules interact.
         assert_eq!(
             one("table public.\"a\"\",b\": TRUNCATE: (no-flags)"),
             vec![("public".to_string(), "a\",b".to_string())],
             "escape then comma: still ONE relation"
         );
 
-        // A name ENDING in the escaped quote — `a"` renders as `"a"""`, three quotes
-        // in a row. The fixtures above all have text after the doubling, so the
-        // lookahead `b.get(i + 1)` was never asked about a position where reading
-        // BACKWARD would answer differently: `replace + with -` survived CI
-        // (2026-08-25) against every case here. Proven to be the discriminator by
-        // exhaustive search over 97 655 strings on the alphabet `",.ax` — the
-        // shortest witness is `"",`, and this is its realistic form.
         assert_eq!(
             one("table public.\"a\"\"\", public.b: TRUNCATE: (no-flags)"),
             vec![
@@ -2907,13 +2244,6 @@ mod tests {
              comma is read as part of it and every later relation disappears"
         );
 
-        // An APOSTROPHE inside a quoted IDENTIFIER — legal SQL, real wire output.
-        // The scanner tracked string literals only, so `"o'brien"` opened a literal
-        // that never closed and the `: TRUNCATE:` marker was never found: the line
-        // fell through and was dropped. MEASURED end to end on a pg16 stand — source
-        // 0 rows after the truncate, run reported `status: success, rows: 2` with
-        // both rows still at the destination. One apostrophe in a NEIGHBOURING
-        // relation walked around the whole guard.
         assert_eq!(
             one("table public.tord, public.\"o'brien\": TRUNCATE: (no-flags)"),
             vec![
@@ -2924,8 +2254,6 @@ mod tests {
              scan — the truncate is then silently dropped and the destination keeps \
              rows the source no longer has"
         );
-        // ...and the same character inside a string VALUE must still hide a marker
-        // that occurs within it. Both quoting worlds, both directions.
         assert!(
             one("table public.t: INSERT: v[text]:'not a : TRUNCATE: marker'").is_empty(),
             "a marker inside a string literal is data, not an operation"
@@ -2961,7 +2289,6 @@ mod tests {
             "a bare config name matches any schema, exactly as sink::table_matches \
              routes it — a guard asking a different question protects the wrong set"
         );
-        // The whole point of parsing the LIST: ours can be anywhere in it.
         let multi = one("table public.other, public.orders: TRUNCATE: (no-flags)");
         assert!(
             multi.iter().any(|(s, t)| truncate_is_ours(s, t, &cfg)),
@@ -2993,16 +2320,11 @@ mod tests {
             configured: "public.t",
             relkind: kind,
             relpersistence: 'p',
-            // The catalog agrees with the config here, so these cases exercise the
-            // relkind arms rather than the identity check above them.
             resolved: ("public".to_string(), "t".to_string()),
             leaves: children.iter().map(|c| c.to_string()).collect(),
             children: children.iter().map(|c| c.to_string()).collect(),
         };
 
-        // A partitioned parent stores no rows: 100% drop, and the slot advances
-        // past it. This is the case measured live (2 rows in, 0 captured,
-        // unrecoverable).
         let RoutingVerdict::Never(why) = classify_routing(&rel('p', &["public.t_2026_01"])) else {
             panic!("a partitioned parent can never be routed — it must be refused");
         };
@@ -3012,17 +2334,13 @@ mod tests {
              remediation: {why}"
         );
 
-        // SUB-PARTITIONED: the remediation must name a LEAF, never the intermediate
-        // partitioned table. `children` there is `ml_2026`, which stores no rows
-        // either and is refused by this same guard on the next run — a dead-end
-        // remediation, found by an adversarial pass over the first version.
         let sub = RelationRouting {
             configured: "public.ml",
             relkind: 'p',
             relpersistence: 'p',
             resolved: ("public".to_string(), "ml".to_string()),
-            children: vec!["public.ml_2026".to_string()], // intermediate, unroutable
-            leaves: vec!["public.ml_2026_01".to_string()], // the only relation in the WAL
+            children: vec!["public.ml_2026".to_string()],
+            leaves: vec!["public.ml_2026_01".to_string()],
         };
         let RoutingVerdict::Never(why) = classify_routing(&sub) else {
             panic!("a sub-partitioned parent is still unroutable");
@@ -3033,9 +2351,6 @@ mod tests {
              operator to a config this same guard refuses next run: {why}"
         );
 
-        // …and with no partitions yet, it is still unroutable — the message just
-        // cannot name one. A guard that only fired when children exist would miss
-        // the empty-parent config entirely.
         let RoutingVerdict::Never(why) = classify_routing(&rel('p', &[])) else {
             panic!("a partitioned parent with no partitions yet is still unroutable");
         };
@@ -3048,16 +2363,6 @@ mod tests {
             assert!(why.contains(word), "the refusal must say what it is: {why}");
         }
 
-        // A MATERIALIZED VIEW is NOT in that list, and this assertion is the
-        // correction of a measured falsehood rather than a relaxation. This loop
-        // held `'m'` until the round-3 bughunt, on a comment that had measured one
-        // refresh form and generalised it; the candidate query 200 lines below was
-        // meanwhile rewritten on the OPPOSITE measurement, so the file contradicted
-        // itself and the false half was the one operators saw. MEASURED, pg16 CDC
-        // stand, one `test_decoding` slot: `CREATE … WITH DATA` and `REFRESH …
-        // CONCURRENTLY` both decode under the matview's own name; only the plain
-        // `REFRESH` is silent. CONCURRENTLY is the standard production refresh, so
-        // `Never` refused the common case.
         let RoutingVerdict::Partial(why) = classify_routing(&rel('m', &[])) else {
             panic!(
                 "a matview refreshed CONCURRENTLY emits row events under its own \
@@ -3077,21 +2382,12 @@ mod tests {
              source CDC: {why}"
         );
 
-        // A plain table is routable, and stays routable — refusing it would break
-        // every working config.
         assert_eq!(classify_routing(&rel('r', &[])), RoutingVerdict::Routable);
 
-        // ── the identity check, which runs BEFORE any relkind arm ──────────────
-        //
-        // Both cases below were MEASURED by an adversarial pass over the first
-        // version of this guard, which read only relkind and passed them through.
         let mismatched = RelationRouting {
             configured: "MixedCase",
             relkind: 'r',
             relpersistence: 'p',
-            // What `SELECT * FROM MixedCase` actually resolves to: PostgreSQL folds
-            // the unquoted name, so the probe reads THIS relation's columns while
-            // events spelled `MixedCase` route nowhere.
             resolved: ("public".to_string(), "mixedcase".to_string()),
             leaves: vec![],
             children: vec![],
@@ -3109,9 +2405,6 @@ mod tests {
              remediation: {why}"
         );
 
-        // The 3-part `db.schema.table` form: to_regclass accepts it when db is the
-        // current database, so the probe resolves while table_matches splits on the
-        // FIRST dot and compares `db` against the schema.
         let three_part = RelationRouting {
             configured: "rivet.public.orders",
             relkind: 'r',
@@ -3125,7 +2418,6 @@ mod tests {
             "a 3-part name resolves for the probe and never matches the router"
         );
 
-        // UNLOGGED: writes no WAL, so no event can ever exist for it.
         let unlogged = RelationRouting {
             configured: "public.t",
             relkind: 'r',
@@ -3141,12 +2433,8 @@ mod tests {
             why.contains("SET LOGGED"),
             "the refusal must name the one-line fix: {why}"
         );
-        // …and a plain permanent table with a matching identity stays routable, or
-        // the guard would refuse every working config.
         assert_eq!(classify_routing(&rel('r', &[])), RoutingVerdict::Routable);
 
-        // Inheritance children are a PARTIAL gap: the parent's own rows route
-        // fine, so this warns rather than refusing.
         let RoutingVerdict::Partial(why) = classify_routing(&rel('r', &["public.t_child"])) else {
             panic!("an inheritance parent routes its OWN rows — warn, never refuse");
         };
@@ -3158,48 +2446,29 @@ mod tests {
 
     #[test]
     fn parse_pg_array_backslash_before_multibyte_does_not_panic() {
-        // Round-6: a quoted array element with a backslash BEFORE a multi-byte UTF-8
-        // char (`\é`, `\🎉`) made the parser advance i by 2 and slice mid-char on the
-        // next iteration — a process-abort DoS (release panic=abort) on a crafted
-        // test_decoding array. It must decode the whole escaped char, not panic.
-        // RED before the utf8-aware backslash handling (the old code panicked here).
         let got = parse_pg_array_literal("text", "{\"a\\éb\"}").expect("must parse, not panic");
         assert_eq!(
             got.len(),
             1,
             "one element decoded from the escaped multibyte"
         );
-        // A backslash before an emoji, and a truncated multi-byte escape at the end —
-        // none may panic.
         for lit in ["{\"\\🎉\"}", "{\"x\\é\"}", "{\"a\",\"\\é\"}", "{\"z\\"] {
             let _ = parse_pg_array_literal("text", lit);
         }
     }
 
-    // URL form (not key=value) so the require_tls_or_loopback gate recognises
-    // 127.0.0.1 as loopback.
-    // The `postgres-cdc` instance (cdc profile, :5434) — wal_level=logical.
     const CONN: &str = "postgresql://rivet:rivet@127.0.0.1:5434/rivet";
     const SLOT: &str = "rivet_cdc_test";
 
-    // The until_current termination contract, as a pure matrix: the bound wins
-    // over the frontier (stop even on the first peek), the frontier dedups
-    // un-acked re-reads, and a parse-miss LSN (0) can never trip the bound —
-    // a malformed rendering delays termination, never loses data.
     #[test]
     fn tx_disposition_bound_frontier_matrix() {
         use TxDisposition::*;
-        // Unbounded (daemon / anchor-only): pure frontier behaviour.
         assert_eq!(tx_disposition(10, 0, None), Yield);
         assert_eq!(tx_disposition(10, 10, None), AlreadyYielded);
         assert_eq!(tx_disposition(9, 10, None), AlreadyYielded);
-        // Bounded: at the bound is IN scope (committed before open), past is not.
         assert_eq!(tx_disposition(10, 0, Some(10)), Yield);
         assert_eq!(tx_disposition(11, 0, Some(10)), PastBound);
-        // Bound wins over the frontier — even a would-be re-read stops the run.
         assert_eq!(tx_disposition(11, 11, Some(10)), PastBound);
-        // Parse-miss commit (0) never trips the bound — it falls through to the
-        // frontier path, same as the unbounded stream.
         assert_eq!(tx_disposition(0, 0, Some(10)), AlreadyYielded);
         assert_eq!(tx_disposition(0, 0, None), AlreadyYielded);
     }
@@ -3242,37 +2511,20 @@ mod tests {
         assert_eq!(owed_after_ack(None, Some(9)), None);
     }
 
-    // The offline mutation guard for the peek-budget contract: the CI mutants
-    // gate runs `--lib` only, so without this a clamp/cap mutant survives
-    // everything but a live run.
     #[test]
     fn wire_budget_is_the_ack_cadence_clamped_to_int4() {
         use crate::source::cdc::PeekBound;
         assert_eq!(wire_budget(PeekBound::Sized(100_000)), 100_000);
-        assert_eq!(wire_budget(PeekBound::Sized(0)), 1); // rows_capped clamps up
+        assert_eq!(wire_budget(PeekBound::Sized(0)), 1);
         assert_eq!(wire_budget(PeekBound::Unbounded), i32::MAX);
     }
 
-    // Staff class #6 (generative fuzz, stable-toolchain flavour): the parsers
-    // that face WIRE TEXT must never panic on arbitrary input — they return
-    // Option/skip, loudly or silently, but never bring the stream down. The
-    // timestamptz-offset and array-escape bugs were classic fuzz shapes; this
-    // keeps a generative net under every future parser edit.
-
-    // Regression: a non-ASCII `uuid`/`bytea` cell must not abort the process.
-    // decode_hex byte-slices `&s[i..i+2]`; before the `!s.is_ascii()` guard a
-    // non-ASCII even-BYTE-length value ("€€" = 6 bytes) sliced mid-char and
-    // panicked → under release `panic=abort` a whole-process DoS mid-CDC, fed
-    // straight from untrusted test_decoding wire text. RED without the guard.
     #[test]
     fn map_pg_value_non_ascii_uuid_bytea_never_panics() {
-        // decode_hex itself: non-ASCII even byte length → None (not a panic).
-        assert_eq!(decode_hex("€€"), None); // 6 bytes, even, non-char-boundary
+        assert_eq!(decode_hex("€€"), None);
         assert_eq!(decode_hex("aa"), Some(vec![0xaa]));
-        // The two arms that feed it arbitrary wire text.
-        let _ = map_pg_value("uuid", "€€€€€€€€€€€€€€€€€€", false); // even byte len
+        let _ = map_pg_value("uuid", "€€€€€€€€€€€€€€€€€€", false);
         let _ = map_pg_value("bytea", "\\x€€", false);
-        // A malformed uuid is unreadable (the run refuses it), not a crash and not a NULL.
         assert_eq!(map_pg_value("uuid", "not-hex", false), None);
     }
 
@@ -3590,7 +2842,7 @@ mod tests {
         found
     }
 
-    /// No function of the CDC reader other than a value or LSN parser cuts text with a split or a find: the line has one reader, `td_line`.
+    /// No function of the CDC reader other than a value or LSN parser cuts text with a split or a find.
     #[test]
     fn only_value_parsers_cut_text_outside_the_one_line_tokenizer() {
         let found = functions_cutting_text(production_text());
@@ -3631,13 +2883,6 @@ mod tests {
 
         #[test]
         fn map_pg_value_never_panics(
-            // The `typ` generator MUST reach the byte-slicing arms (uuid/bytea →
-            // decode_hex), else the totality claim has a blind spot: a plain
-            // `[a-z ]{1,20}` regex realistically never emits the exact tokens
-            // `uuid`/`bytea`, so a non-ASCII `val` that panics `decode_hex`'s
-            // char-boundary slice slipped past this guard for months. Mix the
-            // random regex with the real PG type-name set so those arms are
-            // actually exercised against arbitrary (incl. non-ASCII) `val`.
             typ in proptest::prop_oneof![
                 "[a-z ]{1,20}(\\[\\])?",
                 proptest::sample::select(vec![
@@ -3658,9 +2903,7 @@ mod tests {
             h in 0u32..24, mi in 0u32..60, sec in 0u32..60,
             off_h in -12i32..=14, junk in ".{0,40}",
         ) {
-            // Total on junk:
             let _ = parse_pg_timestamp(&junk);
-            // Correct on every well-formed offset rendering:
             let rendered = format!("2024-06-15 {h:02}:{mi:02}:{sec:02}{off_h:+03}");
             if let Some(RivetValue::DateTime(dt)) = parse_pg_timestamp(&rendered) {
                 let wall = chrono::NaiveDate::from_ymd_opt(2024, 6, 15)
@@ -3680,9 +2923,6 @@ mod tests {
                 proptest::option::of("[^\u{0}]{0,24}"), 0..6
             )
         ) {
-            // Render the PG literal the way test_decoding would (quote +
-            // escape every non-NULL element), parse, and require the exact
-            // element vector back — inner NULLs included.
             let body: Vec<String> = elems
                 .iter()
                 .map(|e| match e {
@@ -3709,11 +2949,6 @@ mod tests {
         }
     }
 
-    // Finding #42: a PK-changing UPDATE renders `old-key: … new-tuple: …`.
-    // The naive scan glued both sections into one over-long after-image and
-    // the arity guard then PERMANENTLY bricked the stream on a legal
-    // operation. The after-image must be exactly the new tuple; the old key
-    // rides `before`.
     #[test]
     fn pk_changing_update_splits_old_key_from_new_tuple() {
         let line = "table public.t: UPDATE: old-key: id[integer]:1 \
@@ -3734,7 +2969,6 @@ mod tests {
             ),
             "the old key rides before under its own name; `v` is absent, not NULL"
         );
-        // A key that is not the leading column keeps its own name, never column 0's.
         let ev = parse_test_decoding(
             "0/ABC",
             "table public.t: UPDATE: old-key: id[integer]:1 new-tuple: v[text]:'a' id[integer]:2",
@@ -3749,7 +2983,6 @@ mod tests {
                 Some(&["id".to_string()][..])
             )
         );
-        // A normal (non-PK) update stays a plain after-image.
         let ev = parse_test_decoding(
             "0/ABC",
             "table public.t: UPDATE: id[integer]:1 v[text]:'b'",
@@ -3783,13 +3016,8 @@ mod tests {
         );
     }
 
-    // Finding #7: the old-key/new-tuple split must be quote-aware. A text key
-    // whose value literally contains ` new-tuple: ` (a legal string) must NOT
-    // split the images there — a quote-blind split_once cut mid-value, garbling
-    // BOTH before and after. The real separator is the top-level one.
     #[test]
     fn pk_change_split_ignores_new_tuple_literal_inside_a_quoted_key() {
-        // The old key's text value contains the section-separator substring.
         let line = "table public.t: UPDATE: old-key: k[text]:'a new-tuple: b' \
                     new-tuple: k[text]:'c' v[integer]:9";
         let ev = parse_test_decoding("0/ABC", line, &Domains::new())
@@ -3807,13 +3035,6 @@ mod tests {
         );
     }
 
-    // RED for finding #24 (non-UTC session): test_decoding renders timestamptz
-    // in the POLLING SESSION's zone — at a Tokyo session '03:00Z' renders as
-    // '2024-06-15 12:00:00+09'. The parser stripped the offset and treated the
-    // wall-clock as UTC (+9h corruption); a NEGATIVE offset ('-05') was not
-    // even stripped, so the parse failed and the value silently became NULL.
-    // Every prior test ran the session at UTC, where the offset is always +00
-    // and the bug is invisible.
     #[test]
     fn a_domain_typed_cell_decodes_as_its_base_type() {
         use crate::source::cdc::value::build_column;
@@ -3931,12 +3152,6 @@ mod tests {
         }
     }
 
-    // RED tests for the all-types matrix audit findings: TIME arrived as text
-    // (the "timestamp" prefix check does not match "time without time zone"),
-    // so the strict Time64 builder silently nulled every value; INTERVAL rode
-    // as PostgreSQL's text rendering ("1 year 2 mons 3 days") while the batch
-    // export canonicalises to ISO 8601 ("P1Y2M3D") — same value, two spellings,
-    // breaking CDC↔batch parity.
     #[test]
     fn time_parses_to_micros_and_interval_canonicalises_to_iso8601() {
         let line = "table public.t: INSERT: \
@@ -3960,13 +3175,6 @@ mod tests {
         assert_eq!(after[4], RivetValue::Bytes(b"P3DT4H5M6.789000S".to_vec()));
     }
 
-    // RED test for the finding (caught live on a GCS export, by eye): a uuid
-    // column rode through as its 36-char TEXT rendering, but the sink's
-    // FixedSizeBinary(16) builder accepts only exactly-16-byte values and
-    // silently degrades everything else to NULL — so 100% of the column was
-    // lost while every count/sum check still passed. The parse must produce
-    // the same raw 16 bytes the batch path produces. Same class: bytea rides
-    // as its `\x…` hex TEXT — a Binary column would store the hex string.
     #[test]
     fn uuid_and_bytea_decode_to_raw_bytes_not_their_text_rendering() {
         let line = "table public.t: INSERT: \
@@ -3996,9 +3204,6 @@ mod tests {
         );
     }
 
-    // Arrays parse to element values (a real List column downstream), never
-    // the literal text — including the hostile shapes: commas inside quoted
-    // elements, escaped quotes, inner NULLs, and the empty array.
     #[test]
     fn array_literals_parse_to_typed_elements() {
         let line = "table public.t: INSERT: \
@@ -4029,19 +3234,10 @@ mod tests {
         assert_eq!(after[2], RivetValue::Array(Vec::new()));
     }
 
-    // Finding #6 (CDC sibling of the batch #5 multi-dim array fix): a nested /
-    // multi-dimensional array literal must NOT flatten into a bogus flat array
-    // of NULLs — rivet's List column is one-dimensional and cannot represent it.
-    // parse_pg_array_literal returns None on nesting so the caller keeps the raw
-    // literal as text bytes and the sink fails LOUD (batch parity), while a
-    // legitimate 1-D array still parses. RED against the pre-fix flatten:
-    // `{{1,2},{3,4}}` used to return Some([Null, Null, Null, Null]).
     #[test]
     fn multidim_array_literal_is_refused_not_flattened_to_bogus_nulls() {
-        // Nested integer / text arrays → None (unrepresentable, fail open to text).
         assert_eq!(parse_pg_array_literal("integer", "{{1,2},{3,4}}"), None);
         assert_eq!(parse_pg_array_literal("text", "{{a,b},{c,d}}"), None);
-        // A one-dimensional array is unaffected.
         assert_eq!(
             parse_pg_array_literal("integer", "{1,2,3}"),
             Some(vec![
@@ -4050,13 +3246,10 @@ mod tests {
                 RivetValue::Int(3),
             ])
         );
-        // A `{` INSIDE a quoted text element is a literal brace, not nesting.
         assert_eq!(
             parse_pg_array_literal("text", "{\"{not nested}\"}"),
             Some(vec![RivetValue::Bytes(b"{not nested}".to_vec())])
         );
-        // The full test_decoding row keeps the raw literal (Bytes), never a
-        // flat Array of NULLs, so the sink can fail loud on it.
         let line = "table public.t: INSERT: grid[integer[]]:'{{1,2},{3,4}}'";
         let ev = parse_test_decoding("0/ABC", line, &Domains::new())
             .unwrap()
@@ -4080,20 +3273,13 @@ mod tests {
         assert_eq!(ev.table, "t");
         let after = ev.after.unwrap();
         assert_eq!(after[0], RivetValue::Int(1));
-        assert_eq!(after[1], RivetValue::Bytes(b"alice o'brien".to_vec())); // '' → '
-        assert_eq!(after[2], RivetValue::Bytes(b"150.05".to_vec())); // decimal text
+        assert_eq!(after[1], RivetValue::Bytes(b"alice o'brien".to_vec()));
+        assert_eq!(after[2], RivetValue::Bytes(b"150.05".to_vec()));
         assert!(matches!(after[3], RivetValue::DateTime(_)));
         assert_eq!(after[4], RivetValue::Bool(true));
         assert_eq!(after[5], RivetValue::Null);
     }
 
-    // RED for the unchanged-TOAST corruption: an UPDATE that leaves an
-    // externally-stored TOAST column untouched renders it as the unquoted
-    // `unchanged-toast-datum` marker in the new tuple. The old parser wrote that
-    // literal string into the column (silent corruption). With REPLICA IDENTITY
-    // FULL the real value rides the `old-key` pre-image — recover it by NAME.
-    // (Wire format proven live: see `docs`/the process rules; the pre-image carries the
-    // real value under FULL, only the marker under DEFAULT.)
     #[test]
     fn unchanged_toast_recovers_from_full_pre_image() {
         let line = "table public.t: UPDATE: \
@@ -4103,29 +3289,13 @@ mod tests {
             .unwrap()
             .unwrap();
         let after = ev.after.unwrap();
-        // The after-image's `big` must be the recovered pre-image value, NOT the
-        // literal marker text.
         assert_eq!(after[2], RivetValue::Bytes(b"REAL-VALUE".to_vec()));
         assert_eq!(after[1], RivetValue::Bytes(b"b".to_vec()));
     }
 
     /// A pre-image that is ITSELF unchanged-TOAST is not a recovery source.
-    ///
-    /// `recover_unchanged_toast` looks for a pre-image column `pre.name == col.name
-    /// && !pre.toast_unchanged`. The name half was graded; the SECOND half was not,
-    /// and dropping it survives the whole lib suite.
-    ///
-    /// What that costs: when both images carry the marker — which is what
-    /// PostgreSQL emits for a large column that changed in NEITHER the old nor the
-    /// new tuple under FULL — the marker string is copied in as the VALUE,
-    /// `toast_unchanged` is cleared, and the column drops out of `unrecovered`. So
-    /// the parser reports a clean recovery, no poison is raised, and the
-    /// destination receives the literal text `unchanged-toast-datum` where the
-    /// data belongs. That is the exact silent corruption the surrounding code was
-    /// written to remove, reintroduced through the fallback that removes it.
     #[test]
     fn a_pre_image_that_is_also_unchanged_toast_cannot_recover_anything() {
-        // BOTH tuples carry the marker for `big`.
         let line = "table public.t: UPDATE: \
                     old-key: id[integer]:1 big[text]:unchanged-toast-datum \
                     new-tuple: id[integer]:1 big[text]:unchanged-toast-datum";
@@ -4139,29 +3309,12 @@ mod tests {
         );
         assert!(msg.contains("big"), "must name the column, got: {msg}");
 
-        // The value SLOT still carries the marker, and that is correct: the contract
-        // is the deferred poison, not a scrubbed value. Nothing may consume an event
-        // without calling `raise_poison` first (the rule the slot's own docs state),
-        // so the marker is unreachable rather than absent. A first draft of this
-        // test asserted the stronger "the marker never reaches a value slot" and
-        // FAILED against correct code — a test can be wrong about the contract as
-        // easily as the code can be wrong about the world.
-        //
-        // What must hold is that the column is not silently CLEARED of its
-        // unrecovered status, which is what dropping `!pre.toast_unchanged` does.
         assert!(
             ev.after.is_some(),
             "the event is still produced; only its consumption is gated"
         );
     }
 
-    // The DEFAULT replica-identity case: no pre-image value for the toasted
-    // column exists anywhere in the WAL, so the parser must refuse to fabricate
-    // the marker as data — but as a DEFERRED `poison`, not an immediate bail. The
-    // slot decodes every table in the DB; bailing here would poison capture of
-    // unrelated tables sharing the slot (the parallel-CDC contamination that RED'd
-    // two live PG CDC tests off one un-captured DEFAULT-identity table). The sink
-    // raises the poison only when the event routes to a captured table.
     #[test]
     fn unchanged_toast_without_pre_image_is_deferred_to_poison_not_an_immediate_bail() {
         let line = "table public.t: UPDATE: \
@@ -4180,8 +3333,6 @@ mod tests {
         );
     }
 
-    // The clean case: a recoverable/absent TOAST column leaves `poison` None, so
-    // the sink never raises anything for this event.
     #[test]
     fn recoverable_toast_update_leaves_poison_none() {
         let line = "table public.t: UPDATE: old-key: id[integer]:1 big[text]:'real' \
@@ -4196,20 +3347,12 @@ mod tests {
         );
     }
 
-    // Fuzz-found (nightly pg_test_decoding): an untrusted time/interval with an
-    // out-of-range or huge field overflowed the `* 1_000_000` / `n * 12` arithmetic
-    // → `attempt to multiply with overflow` → panic=abort DoS on the CDC stream.
-    // Every parser must now return None (reject the value), never panic.
     #[test]
     fn hostile_time_and_interval_text_never_panics_returns_none() {
-        // time-of-day: m/s out of 0..60 range is rejected before the multiply.
         assert_eq!(parse_pg_time_micros("12:9999999999999999:00"), None);
         assert_eq!(parse_pg_time_micros("12:00:9999999999999999"), None);
-        assert_eq!(parse_pg_time_micros("99:00:00"), None); // hour out of range too
-        // A valid time still parses.
+        assert_eq!(parse_pg_time_micros("99:00:00"), None);
         assert_eq!(parse_pg_time_micros("01:02:03"), Some(3_723_000_000));
-        // Unbounded interval time tail: huge hours can't be range-bounded, so the
-        // checked arithmetic returns None instead of overflowing.
         assert_eq!(
             parse_pg_time_micros_unbounded("9999999999999999:00:00"),
             None
@@ -4217,18 +3360,13 @@ mod tests {
         assert_eq!(
             parse_pg_time_micros_unbounded("25:00:00"),
             Some(90_000_000_000)
-        ); // valid >24h
-        // Interval count overflow (years→months, and the running accumulation).
+        );
         assert_eq!(parse_pg_interval("9999999999 years"), None);
         assert_eq!(parse_pg_interval("2 years 3 mons 4 days"), Some((27, 4, 0)));
-        // And the top-level fuzz entry point must not panic on the hostile time.
         let line = "table public.t: INSERT: id[integer]:1 t[time]:12:9999999999999999:00";
-        let _ = parse_test_decoding("0/ABC", line, &Domains::new()); // must not panic
+        let _ = parse_test_decoding("0/ABC", line, &Domains::new());
     }
 
-    // A genuine text value that happens to equal the marker is QUOTED on the
-    // wire, so it must survive verbatim — the quoted flag disambiguates the
-    // sentinel from real data (no false-positive corruption/refusal).
     #[test]
     fn quoted_marker_text_is_real_data_not_the_sentinel() {
         let line = "table public.t: INSERT: id[integer]:1 note[text]:'unchanged-toast-datum'";
@@ -4383,7 +3521,6 @@ mod tests {
     #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
     fn streams_insert_update_delete() {
         let mut admin = Client::connect(CONN, NoTls).unwrap();
-        // Fresh slot so the test owns its watermark.
         admin
             .execute(
                 "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1",
@@ -4391,8 +3528,6 @@ mod tests {
             )
             .unwrap();
 
-        // Slot must exist BEFORE the changes for them to be captured. No bound:
-        // this test's changes are committed AFTER the open.
         let mut s = PgChangeStream::open(
             CONN,
             SLOT,
@@ -4400,7 +3535,7 @@ mod tests {
             None,
             crate::source::cdc::PeekBound::Sized(10_000),
             DrainMode::Continuous,
-            &[], // this test routes nothing — it reads the stream directly
+            &[],
             None,
             None,
         )
@@ -4426,7 +3561,6 @@ mod tests {
             }
         }
 
-        // cleanup before asserting (slot pins WAL).
         admin
             .execute("SELECT pg_drop_replication_slot($1)", &[&SLOT])
             .ok();
@@ -4438,13 +3572,9 @@ mod tests {
         );
     }
 
-    /// The class: `test_decoding` prints identifiers through `quote_ident`, rivet
-    /// consumed them raw, every downstream compare is byte-exact, and the config
-    /// validator refuses `"` — so a quoted table was unmatchable from BOTH sides.
-    /// The slot is acked past the dropped events, which makes the loss terminal.
+    /// The class: `test_decoding` prints identifiers through `quote_ident`, rivet consumed them raw, every downstream compare is byte-exact, and the config validator refuses `"`.
     #[test]
     fn quoted_identifiers_are_unquoted_so_routing_can_match_them() {
-        // A reserved word — quote_ident quotes it.
         let ev = parse_test_decoding(
             "0/1",
             "table app.\"order\": INSERT: id[integer]:1",
@@ -4459,8 +3589,6 @@ mod tests {
              router cannot match `\"order\"`, and no config string can spell it either"
         );
 
-        // Mixed case — the ORM default (`public.\"User\"`), the same trap without a
-        // reserved word in sight.
         let ev = parse_test_decoding(
             "0/2",
             "table public.\"User\": INSERT: id[integer]:7",
@@ -4471,8 +3599,7 @@ mod tests {
         assert_eq!((ev.schema.as_str(), ev.table.as_str()), ("public", "User"));
     }
 
-    /// A dot INSIDE a quoted part is not a qualifier separator. `split_once('.')` cut
-    /// there and produced two identifiers that never existed.
+    /// A dot INSIDE a quoted part is not a qualifier separator.
     #[test]
     fn a_dot_inside_a_quoted_identifier_is_not_a_qualifier_split() {
         let ev = parse_test_decoding(
@@ -4493,11 +3620,7 @@ mod tests {
         assert_eq!(td_line::unquote_ident("\"\""), "");
     }
 
-    /// The COLUMN twin. A key-only DELETE maps its image BY NAME (a positional rescue
-    /// needs full arity, which a key-only image never has), so a quoted key column made
-    /// every tombstone an all-NULL row — the load's merge then partitions by a NULL pk,
-    /// the tombstone never wins, and the deleted row survives in the warehouse forever
-    /// while counts and sums reconcile.
+    /// The COLUMN twin.
     #[test]
     fn a_quoted_column_name_is_unquoted_so_a_key_only_delete_maps_by_name() {
         let ev = parse_test_decoding(
@@ -4514,26 +3637,14 @@ mod tests {
         );
     }
 
-    /// The byte walk's ESCAPE branch, which the direct `unquote_ident` cases cannot
-    /// reach: a doubled quote must not be read as the END of the quoted part, or the
-    /// walker leaves quoted state early and the next `.` splits inside an identifier.
-    ///
-    /// Every one of these goes through `split_qualified_ident`, not the helper — the
-    /// mutation gate found the whole loop ungraded because the doubled-quote test
-    /// called the helper directly.
+    /// The byte walk's ESCAPE branch, which the direct `unquote_ident` cases cannot reach.
     #[test]
     fn the_qualifier_walk_treats_a_doubled_quote_as_an_escape_not_a_terminator() {
         let cases: &[(&str, &str, &str)] = &[
-            // an escaped quote in the SCHEMA, then a real separator
             ("\"a\"\"b\".t", "a\"b", "t"),
-            // an escaped quote in the TABLE
             ("app.\"c\"\"d\"", "app", "c\"d"),
-            // a dot INSIDE a part that also carries an escaped quote — the walker must
-            // stay quoted across both
             ("\"a\"\".b\".t", "a\".b", "t"),
-            // an escaped quote immediately before the separator
             ("\"x\"\"\".t", "x\"", "t"),
-            // no qualifier at all
             ("\"order\"", "", "order"),
         ];
         for (input, schema, table) in cases {
@@ -4601,11 +3712,6 @@ mod spill_tests {
     use super::*;
 
     /// The wire-row codec round-trips text that would break any delimiter.
-    ///
-    /// `test_decoding` renders a column's VALUE into the line, so the payload's
-    /// alphabet is the payload's — a newline, a tab, a NUL, a non-ASCII byte.
-    /// Anything picked out of that alphabet as a separator is one value away from
-    /// cutting a row in half, which is why the lsn is length-prefixed.
     #[test]
     fn a_wire_row_round_trips_through_the_spill_frame() {
         let cases: &[(&str, &str)] = &[
@@ -4615,7 +3721,6 @@ mod spill_tests {
                 "table public.t: INSERT: v[text]:'line1\nline2\tand\u{0}more'",
             ),
             ("0/1", "table public.t: INSERT: v[text]:'Ω≈ç√∫˜µ 日本語'"),
-            // An EMPTY data line — a record, not a terminator.
             ("0/1", ""),
         ];
         for (lsn, data) in cases {
@@ -4641,17 +3746,7 @@ mod spill_tests {
         );
     }
 
-    /// A transaction split between memory and disk carries EXACTLY ONE `committed`,
-    /// on its true last row — wherever the split falls.
-    ///
-    /// This is the invariant the spill could quietly break. `committed` marks a
-    /// TRANSACTION boundary: the sink rolls, checkpoints and acks on it, so a flag
-    /// on the head's last row would let a crash before the tail's flush advance the
-    /// slot past the commit, and the resume would read strictly after it. The tail
-    /// would be gone from the source log and the destination both.
-    ///
-    /// Every split is walked, including the two ends: a wholly-spilled transaction
-    /// (empty head) and an unspilled one (empty tail) are the same rule.
+    /// A transaction split between memory and disk carries EXACTLY ONE `committed`, on its true last row.
     #[test]
     fn a_split_transaction_closes_on_its_true_last_row() {
         use crate::source::cdc::TxnFramer;
@@ -4665,7 +3760,6 @@ mod spill_tests {
             )
             .expect("parse")
             .expect("an event");
-            // Poison the flag so the stamp has to CLEAR it, not merely leave it.
             ev.committed = true;
             ev
         };
@@ -4704,18 +3798,7 @@ mod spill_tests {
 mod slot_creation_warning_tests {
     use super::slot_created_warning;
 
-    /// A created slot means capture starts at the CURRENT WAL position, so
-    /// anything written earlier is unreachable. On a first run that is correct;
-    /// on a slot an admin or a failover dropped it is silent data loss, and from
-    /// inside the process the two are indistinguishable.
-    ///
-    /// The hard bail in `open` only fires when a checkpoint FILE proves a prior
-    /// run — and `cdc.checkpoint` is optional on PostgreSQL exactly because the
-    /// slot is the server-side anchor. So the config most dependent on the slot
-    /// had no guard at all and took the silent branch.
-    ///
-    /// This pins the message because the branch that emits it needs a live
-    /// server; the remedy is the re-baseline the live cell runs.
+    /// A created slot means capture starts at the CURRENT WAL position, so anything written earlier is unreachable.
     #[test]
     fn the_created_slot_warning_names_the_loss_and_the_remedy() {
         assert_eq!(
@@ -4892,9 +3975,7 @@ mod slot_creation_warning_tests {
 mod foreign_advance_tests {
     use super::slot_advanced_by_another;
 
-    /// A checkpoint an older release wrote (no `confirmed_first`) behind its slot is adopted once
-    /// and rewritten; the rewritten one, and any this release writes, is strict: a slot past it is
-    /// refused, every time.
+    /// A checkpoint an older release wrote (no `confirmed_first`) behind its slot is adopted once and rewritten.
     #[test]
     fn an_older_releases_checkpoint_behind_its_slot_is_adopted_once_then_the_guard_is_strict() {
         use super::{CONFIRMED_FIRST, OpenVerdict, adopted, confirmed_first, open_verdict};

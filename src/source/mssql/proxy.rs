@@ -1,61 +1,28 @@
-//! SQL Server connection-proxy classifier — distinguishes a direct connection
-//! from a transaction-mode multiplexer or an Azure SQL gateway in front of the
-//! instance.
-//!
-//! The SQL Server analogue of [`crate::source::mysql::proxy`] and the Postgres
-//! `detect_pg_transaction_pooler`: it runs once at connect time so the operator
-//! gets a one-line warning when a pooler/gateway sits in front of the database
-//! (session `SET` options, `#temp` tables, and any open cursor may not survive
-//! statement-level multiplexing). [`classify_mssql_proxy`] is a pure function,
-//! exhaustively unit-tested in this file; the I/O wrapper
-//! [`detect_mssql_proxy_kind`] collects the live signals and delegates.
+//! SQL Server connection-proxy classifier — distinguishes a direct connection from a transaction-mode multiplexer or an Azure SQL gateway in front of the instance.
 
 use tokio::runtime::Runtime;
 
 use super::{MssqlClient, scalar_to_string};
 
 /// What the SQL Server connection is actually talking to.
-///
-/// Detection happens once at connect time via [`detect_mssql_proxy_kind`].
-///
-/// `pub` for integration-test reachability via `MssqlSource::proxy_kind()`;
-/// same "no external API contract" disclaimer applies as for the rest of
-/// `rivet::source::mssql::*`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MssqlProxyKind {
     /// Direct connection to a SQL Server instance — no proxy detected.
     Direct,
-    /// A transaction-mode multiplexer / connection router: detected because
-    /// `@@SPID` returned different session ids across two consecutive queries
-    /// on the same connection. The proxy is handing each statement to a
-    /// different backend session, so `SET` options, `#temp` tables, and cursors
-    /// will not persist across statements.
-    ///
-    /// False negatives are possible when the proxy's backend pool size is 1
-    /// (the same physical session is always reused).
+    /// A transaction-mode multiplexer / connection router.
     Multiplexed,
-    /// Azure SQL Database / Managed Instance: detected via
-    /// `SERVERPROPERTY('EngineEdition')` of `5` (Azure SQL DB) or `8` (Managed
-    /// Instance), falling back to the `@@VERSION` banner. These instances are
-    /// always fronted by the Azure SQL gateway — the session is preserved, but
-    /// the gateway may proxy *or* redirect the connection, enforces idle
-    /// timeouts, and injects transient faults.
+    /// Azure SQL Database / Managed Instance: detected via `SERVERPROPERTY('EngineEdition')` of `5` (Azure SQL DB) or `8` (Managed Instance), falling back to the `@@VERSION` banner.
     AzureGateway,
 }
 
 impl MssqlProxyKind {
-    /// True for any non-direct connection (`is_proxy() == false` only for
-    /// [`MssqlProxyKind::Direct`]).
-    ///
-    /// `#[allow(dead_code)]` because the binary compilation unit (which
-    /// re-declares `mod source`) does not reference this; the lib + tests do.
+    /// True for any non-direct connection (`is_proxy() == false` only for [`MssqlProxyKind::Direct`]).
     #[allow(dead_code)]
     pub fn is_proxy(self) -> bool {
         !matches!(self, MssqlProxyKind::Direct)
     }
 
-    /// Stable label for diagnostic logs. Keep terse and stable: external log
-    /// parsers grep on these strings.
+    /// Stable label for diagnostic logs.
     #[allow(dead_code)]
     pub fn log_label(self) -> &'static str {
         match self {
@@ -65,8 +32,7 @@ impl MssqlProxyKind {
         }
     }
 
-    /// One-time warning emitted at connect time. Returns `None` for
-    /// [`MssqlProxyKind::Direct`] (the common case, no warning needed).
+    /// One-time warning emitted at connect time.
     fn warn_message(self) -> Option<&'static str> {
         match self {
             MssqlProxyKind::Direct => None,
@@ -85,18 +51,7 @@ impl MssqlProxyKind {
     }
 }
 
-/// Pure classifier for SQL Server proxy detection signals. Kept separate from
-/// [`detect_mssql_proxy_kind`] so it can be exhaustively unit-tested without a
-/// live SQL Server. See [`MssqlProxyKind`] for the meaning of each variant.
-///
-/// Precedence is intentional:
-///
-/// 1. `@@SPID` differing across two queries → [`MssqlProxyKind::Multiplexed`].
-///    This is the strongest *risk* signal: a true statement-level multiplexer
-///    breaks session state even on Azure, so it wins over the edition probe.
-/// 2. `SERVERPROPERTY('EngineEdition')` of `5`/`8`, or an Azure `@@VERSION`
-///    banner → [`MssqlProxyKind::AzureGateway`].
-/// 3. Otherwise → [`MssqlProxyKind::Direct`].
+/// Pure classifier for SQL Server proxy detection signals.
 fn classify_mssql_proxy(
     spid_pair: Option<(i32, i32)>,
     engine_edition: Option<i32>,
@@ -119,16 +74,9 @@ fn classify_mssql_proxy(
     MssqlProxyKind::Direct
 }
 
-/// I/O wrapper around [`classify_mssql_proxy`]: collects the detection signals
-/// from a live connection and returns the classification. On any query failure
-/// the missing signal is simply dropped — detection is best-effort and must
-/// never break a real export (worst case it reports [`MssqlProxyKind::Direct`]).
+/// I/O wrapper around [`classify_mssql_proxy`].
 pub(super) fn detect_mssql_proxy_kind(rt: &Runtime, client: &mut MssqlClient) -> MssqlProxyKind {
     rt.block_on(async {
-        // `@@SPID` is the session id; comparing two consecutive calls on the
-        // same connection detects transaction-mode multiplexers that hand each
-        // statement to a different backend session. `CAST(... AS INT)` so the
-        // value decodes uniformly (raw `@@SPID` is smallint).
         let spid1 = scalar_i32(client, "SELECT CAST(@@SPID AS INT)").await;
         let spid2 = scalar_i32(client, "SELECT CAST(@@SPID AS INT)").await;
         let edition = scalar_i32(
@@ -151,15 +99,13 @@ async fn scalar_i32(client: &mut MssqlClient, sql: &str) -> Option<i32> {
     row.get::<i32, _>(0)
 }
 
-/// Fetch a single string scalar via the shared [`scalar_to_string`] decoder;
-/// `None` on any driver error or NULL.
+/// Fetch a single string scalar via the shared [`scalar_to_string`] decoder; `None` on any driver error or NULL.
 async fn scalar_string(client: &mut MssqlClient, sql: &str) -> Option<String> {
     let row = client.query(sql, &[]).await.ok()?.into_row().await.ok()??;
     scalar_to_string(&row)
 }
 
 /// Emit the one-time connect-time warning for a non-direct proxy kind.
-/// Centralized so the wording stays consistent across connect entry points.
 pub(super) fn warn_proxy_kind(kind: MssqlProxyKind) {
     if let Some(msg) = kind.warn_message() {
         log::warn!("{msg}");
@@ -180,7 +126,6 @@ mod tests {
 
     #[test]
     fn classify_direct_when_spids_match_and_on_prem_edition() {
-        // EngineEdition 3 = Enterprise/Developer (the dev container).
         assert_eq!(
             classify_mssql_proxy(Some((53, 53)), Some(3), Some("Microsoft SQL Server 2022")),
             MssqlProxyKind::Direct
@@ -225,8 +170,6 @@ mod tests {
 
     #[test]
     fn classify_multiplexed_takes_precedence_over_azure() {
-        // A real statement-level multiplexer breaks session state even on
-        // Azure, so SPID drift must win over the edition probe.
         assert_eq!(
             classify_mssql_proxy(Some((1, 2)), Some(5), Some("Microsoft SQL Azure")),
             MssqlProxyKind::Multiplexed
@@ -248,8 +191,6 @@ mod tests {
             MssqlProxyKind::AzureGateway
         );
     }
-
-    // ── Warning / label contract ────────────────────────────────────────
 
     #[test]
     fn is_proxy_helper_matches_variants() {

@@ -12,8 +12,6 @@ pub enum FormatType {
 
 impl FormatType {
     /// Stable lowercase string label for persistence and display.
-    /// Prefer this over `format!("{:?}", self).to_lowercase()` — `Debug` output
-    /// is not a stable format contract.
     pub fn label(self) -> &'static str {
         match self {
             FormatType::Parquet => "parquet",
@@ -23,13 +21,6 @@ impl FormatType {
 }
 
 /// Whether `format` actually encodes `compression` on write.
-///
-/// Only Parquet has a compression encoder (see [`crate::format::parquet`]); the
-/// CSV writer ([`crate::format::csv`]) ignores the codec entirely. Accepting a
-/// non-`None` codec for CSV would be a silent no-op — the file stays
-/// uncompressed while the run manifest records the codec — so config validation
-/// rejects that combination up-front (Finding #10). `None` is always supported
-/// (it means "do not compress").
 pub fn compression_supported(format: FormatType, compression: CompressionType) -> bool {
     match format {
         FormatType::Parquet => true,
@@ -61,11 +52,6 @@ impl CompressionType {
     }
 
     /// Parse a [`label`](Self::label)-shaped string back to a codec.
-    ///
-    /// Used by config validation to evaluate an *explicitly-written* codec
-    /// against [`compression_supported`] without re-deriving the serde mapping.
-    /// Returns `None` for any unrecognised string (serde rejects those during
-    /// the real parse anyway).
     pub fn from_label(s: &str) -> Option<Self> {
         match s {
             "zstd" => Some(CompressionType::Zstd),
@@ -127,17 +113,9 @@ impl ParquetConfig {
     pub const DEFAULT_TARGET_ROW_GROUP_MB: usize = 128;
 
     /// Compute the effective rows-per-group from schema column types.
-    ///
-    /// Returns `None` for `fixed_rows` when `row_group_rows` is not set (caller
-    /// falls back to the parquet library default of 1,048,576 rows).
     pub fn effective_row_group_rows(&self, schema: &arrow::datatypes::SchemaRef) -> Option<usize> {
         let strategy = self.row_group_strategy.unwrap_or_default();
         match strategy {
-            // Clamp to >= 1 like the Auto/FixedMemory arms below: a row group cannot
-            // hold 0 rows, so `row_group_rows: 0` would panic parquet-rs's
-            // set_max_row_group_row_count(0) mid-export (config passed, run crashed).
-            // Any positive count the user pins still stands (this arm is deliberately
-            // unclamped-above so an exact large/small group size is honoured).
             RowGroupStrategy::FixedRows => self.row_group_rows.map(|n| n.max(1)),
             RowGroupStrategy::Auto | RowGroupStrategy::FixedMemory => {
                 let target_mb = self
@@ -145,9 +123,7 @@ impl ParquetConfig {
                     .unwrap_or(Self::DEFAULT_TARGET_ROW_GROUP_MB);
                 let row_bytes = crate::tuning::estimate_row_bytes(schema).max(1);
                 let rows = (target_mb * 1024 * 1024) / row_bytes;
-                // Clamp to a safe range: at least 1 000 rows, at most 10 M rows.
                 let rows = rows.clamp(1_000, 10_000_000);
-                // Apply optional max_row_group_mb cap.
                 let rows = if let Some(max_mb) = self.max_row_group_mb {
                     let max_rows = ((max_mb * 1024 * 1024) / row_bytes).max(1_000);
                     rows.min(max_rows)
@@ -202,14 +178,7 @@ impl CompressionProfile {
     }
 }
 
-/// L24: when a `compression_profile` is set *and* the user also wrote an
-/// explicit codec the profile silently discards, return a one-line warning
-/// naming both — otherwise `None`.
-///
-/// Pure (no logging) so it can be unit-tested; the caller emits the message.
-/// `explicit_compression` is `Some` only when the user actually wrote a
-/// `compression:` codec — a `#[serde(default)]` Zstd cannot be distinguished
-/// from an omitted field, so the caller passes `None` for the defaulted case.
+/// L24: when a `compression_profile` is set *and* the user also wrote an explicit codec the profile silently discards, return a one-line warning naming both.
 pub fn compression_profile_override_warning(
     profile: CompressionProfile,
     explicit_compression: Option<CompressionType>,
@@ -238,8 +207,6 @@ pub fn compression_profile_override_warning(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── Label methods stability ──────────────────────────────────────────────
 
     #[test]
     fn format_type_labels_stable() {
@@ -271,12 +238,8 @@ mod tests {
         assert_eq!(CompressionType::from_label("brotli"), None);
     }
 
-    // ── L24: compression_profile override warning ───────────────────────────
-
     #[test]
     fn profile_override_warns_on_conflicting_explicit_codec() {
-        // `compression_profile: fast` (snappy) with explicit `compression: gzip`
-        // must warn, naming both codecs and the winner.
         let msg = compression_profile_override_warning(
             CompressionProfile::Fast,
             Some(CompressionType::Gzip),
@@ -297,8 +260,6 @@ mod tests {
 
     #[test]
     fn profile_override_silent_when_codec_matches_profile() {
-        // Profile `fast` resolves to snappy; an explicit `snappy` is not a
-        // conflict, so no warning.
         assert!(
             compression_profile_override_warning(
                 CompressionProfile::Fast,
@@ -315,8 +276,6 @@ mod tests {
             compression_profile_override_warning(CompressionProfile::Compact, None, None).is_none()
         );
     }
-
-    // ── ParquetConfig::effective_row_group_rows ─────────────────────────────
 
     fn narrow_schema() -> arrow::datatypes::SchemaRef {
         use arrow::datatypes::{DataType, Field, Schema};
@@ -346,9 +305,6 @@ mod tests {
 
     #[test]
     fn parquet_config_fixed_rows_zero_is_clamped_to_one_not_a_panic() {
-        // RED before the .max(1) clamp: `row_group_rows: 0` returned Some(0), which
-        // panics parquet-rs's set_max_row_group_row_count(0) mid-export (config
-        // passed `check`, run crashed). A row group needs >= 1 row.
         let pc = ParquetConfig {
             row_group_strategy: Some(RowGroupStrategy::FixedRows),
             row_group_rows: Some(0),
@@ -484,7 +440,7 @@ mod tests {
         );
     }
 
-    /// Under `max_row_group_mb` a group is the most rows that fit the cap: one more row would pass it. The cap never raises a smaller target and never goes under 1 000 rows.
+    /// Under `max_row_group_mb` a group is the most rows that fit the cap: one more row would pass it.
     #[test]
     fn max_row_group_mb_caps_a_group_at_the_rows_that_fit() {
         let capped = |schema: &arrow::datatypes::SchemaRef, target_mb, max_mb| {

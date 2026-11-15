@@ -1,22 +1,4 @@
 //! MySQL `Source` implementation.
-//!
-//! Module layout (mirrors `postgres/`):
-//!
-//! - `mod.rs` (this file) — `MysqlSource` struct + connect/TLS path, the
-//!   extraction-pressure sampler, the `lean_pool_opts` / `connect_pool` /
-//!   `build_mysql_ssl_opts` helpers, `introspect_mysql_on`
-//!   together with the InnoDB `AVG_ROW_LENGTH` correction, the cursor-bound
-//!   `exec_iter` export loop (`mysql_run_export`), and the `Source` trait impl.
-//! - [`arrow_convert`] — the entire row → Arrow `RecordBatch` pipeline:
-//!   `mysql_type_to_rivet` + `mysql_native_type_name`,
-//!   `mysql_schema_and_arrow_types`, BIT / TIME / DECIMAL decoders, and the
-//!   array builders. Kept in a sibling because it is the largest
-//!   single-purpose cluster in this driver (~510 LoC) and has zero reverse
-//!   dependency back into the connection / pool / cursor layer.
-//! - [`proxy`] — `MysqlProxyKind` enum, the pure `classify_mysql_proxy`
-//!   classifier, the I/O wrapper `detect_mysql_proxy_kind`, and
-//!   `warn_proxy_kind`. Detection runs once at connect time; the classifier
-//!   is exhaustively unit-tested in isolation (no live MySQL needed).
 
 mod arrow_convert;
 pub(crate) use arrow_convert::{time_outside_day, zero_date_warning};
@@ -43,19 +25,14 @@ use crate::source::query::build_export_query;
 use crate::tuning::SourceTuning;
 use crate::types::ColumnOverrides;
 
+#[cfg(test)]
+use arrow_convert::bit_bytes_to_u64;
 use arrow_convert::{
     mysql_native_type_name, mysql_schema_and_arrow_types, mysql_type_to_rivet, nulled_dates,
     rows_to_record_batch_typed,
 };
-// `bit_bytes_to_u64` is only referenced by the `tests` module below — gate the
-// re-import on `cfg(test)` so non-test builds don't see an unused-import warning.
-#[cfg(test)]
-use arrow_convert::bit_bytes_to_u64;
 use proxy::{detect_mysql_proxy_kind, warn_proxy_kind};
 
-// Re-exported so external code (`tests/live_pool_safety.rs`) can still write
-// `use rivet::source::mysql::MysqlProxyKind` after the proxy block moved to
-// the `proxy` submodule.
 pub use proxy::MysqlProxyKind;
 
 pub struct MysqlSource {
@@ -64,25 +41,14 @@ pub struct MysqlSource {
     session: std::sync::Arc<SessionPlan>,
 }
 
-/// Pool options that prevent eager pre-connection. The default mysql::Pool
-/// opens `min=10` connections immediately, which overflows MySQL's
-/// max_connections when many parallel exports run simultaneously.
+/// Pool options that prevent eager pre-connection.
 fn lean_pool_opts() -> PoolOpts {
     PoolOpts::default()
         .with_constraints(PoolConstraints::new(1, 100).expect("valid pool constraints"))
-        // The session settings stay on a connection rivet's own pool hands back, so a reused
-        // connection needs no SET (`MysqlSessionGuard`); a reset would drop them unseen.
         .with_reset_connection(false)
 }
 
-/// Sample the FOREIGN-pressure proxy for the concurrency governor:
-/// `Innodb_log_waits` — redo-log-buffer waits, pure WRITE pressure. A
-/// read-only export barely moves it (the exact reason it is unfit as the batch
-/// loop's own-extraction proxy — see [`mysql_sample_extraction_pressure`]),
-/// which is precisely what the governor needs: it rises only when someone ELSE
-/// is writing hard, so the export's own keyset pages cannot talk the governor
-/// into shedding its own workers (field find, 2026-08-13 — see
-/// `Source::sample_governor_pressure`).
+/// Sample the FOREIGN-pressure proxy for the concurrency governor.
 fn mysql_sample_foreign_pressure(pool: &Pool) -> Option<u64> {
     let mut conn = pool.get_conn().ok()?;
     let rows: Vec<(String, u64)> = conn
@@ -94,25 +60,7 @@ fn mysql_sample_foreign_pressure(pool: &Pool) -> Option<u64> {
     Some(rows.iter().map(|(_, v)| *v).sum())
 }
 
-/// Sample an **extraction-pressure** proxy (Epic 18 C1) — the MySQL analogue of
-/// PG's `temp_bytes`, for the ADAPTIVE BATCH loop only (never the governor).
-/// Sums two monotonic global counters:
-///
-/// - `Created_tmp_disk_tables` — a query spilled an internal temp table to disk
-///   (a `GROUP BY` / `DISTINCT` / `ORDER BY` that exceeded `tmp_table_size`).
-/// - `Innodb_buffer_pool_wait_free` — InnoDB had to wait for a free buffer-pool
-///   page, i.e. the read is evicting pages under memory pressure.
-///
-/// Either moving means "MY extraction is stressing the source"; their sum is
-/// monotonic, so a `cur > prev` comparison works unchanged. The sum is robust
-/// to MySQL 8.0's `TempTable` engine, where a spill may not bump
-/// `Created_tmp_disk_tables` — `Innodb_buffer_pool_wait_free` carries the
-/// signal then (and `Created_tmp_disk_tables` adds it on 5.7 / MariaDB).
-///
-/// Because the export's OWN reads move it, this counter must never reach the
-/// concurrency governor: feeding it there is the 2026-08-13 field regression
-/// (self-exhaust spiral 4→3→2→1). The governor samples
-/// [`mysql_sample_foreign_pressure`] instead.
+/// Sample an **extraction-pressure** proxy (Epic 18 C1).
 fn mysql_sample_extraction_pressure(pool: &Pool) -> Option<u64> {
     let mut conn = pool.get_conn().ok()?;
     let rows: Vec<(String, u64)> = conn
@@ -128,10 +76,7 @@ fn mysql_sample_extraction_pressure(pool: &Pool) -> Option<u64> {
 }
 
 impl MysqlSource {
-    /// Build a source from an existing pool: the single place that detects the
-    /// proxy kind, warns once, and wraps the pool. The `connect*` entry points
-    /// all funnel through here (also handy in tests that share the pool for
-    /// post-export state inspection).
+    /// Build a source from an existing pool: the single place that detects the proxy kind, warns once, and wraps the pool.
     pub fn from_pool(pool: Pool) -> Self {
         Self::over(pool, false)
     }
@@ -142,8 +87,7 @@ impl MysqlSource {
         Self::with_kind(pool, keeps_session, proxy_kind)
     }
 
-    /// Connect rivet's own pool to `url`. The proxy is probed once per process on the pool's own
-    /// first connection, by statements that leave a ProxySQL session multiplexed: no extra dial.
+    /// Connect rivet's own pool to `url`.
     fn connect_own(url: &str, tls: Option<&TlsConfig>) -> Result<Self> {
         let pool = connect_pool(url, tls)?;
         let proxy_kind = seeded!(
@@ -170,8 +114,7 @@ impl MysqlSource {
         }
     }
 
-    /// Connect with no transport security (legacy path); the live tests reach it
-    /// through the library surface, so the binary unit sees it as unused.
+    /// Connect with no transport security (legacy path).
     #[allow(dead_code)]
     pub fn connect(url: &str) -> Result<Self> {
         Self::connect_own(url, None)
@@ -182,13 +125,7 @@ impl MysqlSource {
         Self::connect_own(url, tls)
     }
 
-    /// Expose the proxy classification for diagnostic tools (preflight,
-    /// integration tests). Not part of the public Source trait — same
-    /// internal-may-change contract as the rest of `rivet::source::mysql::*`.
-    ///
-    /// `#[allow(dead_code)]` covers the binary compilation unit; the lib +
-    /// integration tests reference this through the `rivet::source::mysql`
-    /// public surface.
+    /// Expose the proxy classification for diagnostic tools (preflight, integration tests).
     #[allow(dead_code)]
     pub fn proxy_kind(&self) -> MysqlProxyKind {
         self.proxy_kind
@@ -196,18 +133,13 @@ impl MysqlSource {
 }
 
 /// Build a MySQL connection pool honoring the configured TLS policy.
-///
-/// Shared by preflight, doctor, init, and anywhere else we need a pool outside
-/// the `Source` trait. `tls = None` falls back to plaintext (legacy behavior).
 pub(crate) fn connect_pool(url: &str, tls: Option<&TlsConfig>) -> Result<Pool> {
-    // Refuse remote plaintext (no `tls:` block) before any dial (CWE-319).
     crate::source::require_tls_or_loopback(url, tls)?;
     let opts = with_tls(
         session_opts(OptsBuilder::from_opts(Opts::from_url(url)?)).pool_opts(lean_pool_opts()),
         tls,
     );
     let pool = Pool::new(opts).map_err(|e| crate::source::describe_connect_error(url, e.into()))?;
-    // Dial now, so a wrong host or port fails here with its name and not at the first query.
     pool.get_conn()
         .map_err(|e| crate::source::describe_connect_error(url, e.into()))?;
     Ok(pool)
@@ -226,8 +158,7 @@ pub(crate) fn dial_conn(url: &str, tls: Option<&TlsConfig>) -> Result<Conn> {
 /// The largest packet the driver splits its own writes at, given so it does not ask the server.
 const CLIENT_MAX_ALLOWED_PACKET: usize = 64 * 1024 * 1024;
 
-/// Options under which the driver's handshake reads no `@@` variable (`@@socket`,
-/// `@@max_allowed_packet`): ProxySQL stops multiplexing a session that reads one.
+/// Options under which the driver's handshake reads no `@@` variable (`@@socket`, `@@max_allowed_packet`).
 fn session_opts(builder: OptsBuilder) -> OptsBuilder {
     builder
         .prefer_socket(false)
@@ -244,22 +175,13 @@ fn with_tls(builder: OptsBuilder, tls: Option<&TlsConfig>) -> Opts {
     }
 }
 
-/// Threshold above which `AVG_ROW_LENGTH` is treated as inflated by InnoDB BLOB
-/// overflow pages and divided down. Rows under 8 KB fit inline (no overflow),
-/// so the raw figure is accurate; above it the divisor compensates.
+/// Threshold above which `AVG_ROW_LENGTH` is treated as inflated by InnoDB BLOB overflow pages and divided down.
 const INNODB_BLOB_OVERFLOW_THRESHOLD_BYTES: i64 = 8 * 1024;
 
-/// Empirical divisor for InnoDB BLOB-page inflation. A wide-text row that
-/// allocates eight 16 KB overflow pages reports ~128 KB in `AVG_ROW_LENGTH`
-/// while the actual wire content is ~40 KB → factor of ~3.
+/// Empirical divisor for InnoDB BLOB-page inflation.
 const INNODB_BLOB_OVERFLOW_DIVISOR: i64 = 3;
 
 /// Apply the InnoDB BLOB-overflow correction to a raw `AVG_ROW_LENGTH` value.
-/// Pure function for unit testability — the live introspection helper calls
-/// this on the figure returned by `information_schema.TABLES`.
-///
-/// - Below the 8 KB threshold: raw value is accurate (no overflow).
-/// - Above: divide by 3, floored at threshold/2 so we never undershoot too far.
 fn correct_innodb_avg_row_length(raw_bytes: i64) -> i64 {
     if raw_bytes > INNODB_BLOB_OVERFLOW_THRESHOLD_BYTES {
         (raw_bytes / INNODB_BLOB_OVERFLOW_DIVISOR).max(INNODB_BLOB_OVERFLOW_THRESHOLD_BYTES / 2)
@@ -312,23 +234,6 @@ pub(crate) fn column_nullable_on(
 }
 
 /// Probe `information_schema` for stats chunked-mode planning needs.
-///
-/// MySQL analogue of the Postgres chunk-planner probe:
-/// returns the same source-neutral [`crate::source::TableIntrospection`] so
-/// `plan/build.rs` can dispatch on `source_type` and reuse the same downstream
-/// logic for chunk-column / chunk_size derivation.
-///
-/// Two queries per call, both against `information_schema` (no extra grants
-/// required for a normal app user):
-/// - `TABLES.AVG_ROW_LENGTH` + `TABLE_ROWS` for the row-size and row-count estimate.
-///   These come from `mysql.innodb_table_stats` and are only as fresh as the
-///   last `ANALYZE TABLE` / autostat run. Empty / unanalysed → zero.
-/// - `STATISTICS` filtered to `INDEX_NAME='PRIMARY'` with `SEQ_IN_INDEX=1` and a
-///   second probe ensuring no `SEQ_IN_INDEX=2` row exists — single-column PK only.
-///
-/// `qualified_table` is `<schema>.<table>` or bare `<table>` (resolved under the
-/// current database for the connection). Same strict ident rules as the YAML
-/// `table:` shortcut so the SQL stays trivially safe.
 fn introspect_mysql_on(
     conn: &mut mysql::PooledConn,
     qualified_table: &str,
@@ -341,10 +246,6 @@ fn introspect_mysql_on(
         None => (default_db, qualified_table.to_string()),
     };
 
-    // (1) Row count + avg row bytes. AVG_ROW_LENGTH already accounts for
-    // overflow pages on InnoDB, so we use it directly rather than dividing
-    // DATA_LENGTH by TABLE_ROWS (which under-counts for tables with TOAST-like
-    // overflow). Fall back to division when AVG_ROW_LENGTH is 0.
     let row_stats: Option<(i64, i64, i64)> = conn.exec_first(
         "SELECT CAST(IFNULL(TABLE_ROWS, 0) AS SIGNED), \
                 CAST(IFNULL(AVG_ROW_LENGTH, 0) AS SIGNED), \
@@ -354,29 +255,10 @@ fn introspect_mysql_on(
         (&schema, &table),
     )?;
     let (row_estimate, avg_row_bytes) = match row_stats {
-        Some((rows, avg, data_len)) => {
-            // InnoDB stores TEXT/BLOB > ~768 B off-page in 16 KB BLOB pages,
-            // and `AVG_ROW_LENGTH` counts the allocated page bytes — not the
-            // actual content. On wide-text workloads (CMS bodies, JSON logs,
-            // audit trails) this inflates the per-row estimate 3-5× compared
-            // to what the client driver actually buffers over the wire.
-            //
-            // We empirically divide by 3 above an 8 KB threshold. Below 8 KB
-            // a row fits inline with no overflow, so the raw figure is
-            // accurate. Above it, dividing by 3 brings content_items' 41 KB
-            // estimate down to ~14 KB — still conservative vs the ~10 KB the
-            // PG side reports for the same payload via `pg_total_relation_size`.
-            //
-            // Pilots who want exact control can set `chunk_size:` explicitly
-            // (it always wins over the budget-derived size).
-            mysql_row_stats(rows, avg, data_len)
-        }
+        Some((rows, avg, data_len)) => mysql_row_stats(rows, avg, data_len),
         None => (0, None),
     };
 
-    // (2) Single-column int PK probe. STATISTICS has one row per (column,
-    // index) so we filter to PRIMARY + SEQ_IN_INDEX=1 and then check that
-    // the PRIMARY index has no SEQ_IN_INDEX=2 row (composite).
     let pk_first: Option<(String,)> = conn.exec_first(
         "SELECT COLUMN_NAME \
          FROM information_schema.STATISTICS \
@@ -396,7 +278,6 @@ fn introspect_mysql_on(
             );
             None
         } else {
-            // Column type must be integer-family for safe range chunking.
             let type_row: Option<(String,)> = conn.exec_first(
                 "SELECT DATA_TYPE FROM information_schema.COLUMNS \
                  WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?",
@@ -417,12 +298,6 @@ fn introspect_mysql_on(
         None
     };
 
-    // (3) Keyset keys (OPT-4): single-column, NOT NULL, UNIQUE index columns —
-    // usable as a seek-pagination key. NON_UNIQUE=0 filters to unique indexes
-    // (PRIMARY included); SEQ_IN_INDEX=1 with no SEQ_IN_INDEX=2 row keeps only
-    // single-column indexes; IS_NULLABLE='NO' guarantees `> last` never has to
-    // reason about NULL ordering. Index-backed by definition, so keyset's
-    // `ORDER BY key LIMIT n` is a range scan, not a filesort.
     let keyset_rows: Vec<(String, String, String)> = conn.exec(
         "SELECT s.COLUMN_NAME, s.INDEX_NAME, c.IS_NULLABLE \
          FROM information_schema.STATISTICS s \
@@ -437,12 +312,8 @@ fn introspect_mysql_on(
                AND s2.INDEX_NAME = s.INDEX_NAME AND s2.SEQ_IN_INDEX = 2)",
         (&schema, &table),
     )?;
-    // PRIMARY first (most efficient — clustered), then other unique indexes.
     let keyset_keys = super::keyset_keys_primary_first(&mysql_keyset_columns(keyset_rows));
 
-    // Integer-family columns — the safety set for an explicit `chunk_column`
-    // (see TableIntrospection::int_columns). `DATA_TYPE` is unsigned-agnostic
-    // (`int unsigned` still has DATA_TYPE `int`).
     let int_columns: Vec<String> = conn
         .exec::<(String,), _, _>(
             "SELECT COLUMN_NAME FROM information_schema.COLUMNS \
@@ -464,7 +335,7 @@ fn introspect_mysql_on(
     })
 }
 
-/// The row count and the bytes one row takes, from a table's `information_schema.TABLES` row: the reported average row length, else the data length spread over the rows, corrected for InnoDB's off-page pages; a figure that is not positive is no estimate.
+/// The row count and the bytes one row takes, from a table's `information_schema.TABLES` row.
 fn mysql_row_stats(rows: i64, avg: i64, data_len: i64) -> (i64, Option<i64>) {
     let row_count = rows.max(0);
     let raw_per_row = if avg > 0 {
@@ -513,12 +384,8 @@ fn build_mysql_ssl_opts(cfg: &TlsConfig) -> SslOpts {
         TlsMode::VerifyCa => {
             ssl = ssl.with_danger_skip_domain_validation(true);
         }
-        TlsMode::VerifyFull => {
-            // Strict: verify chain + hostname.
-        }
-        TlsMode::Disable => {
-            // Never invoked: gated in connect_with_tls.
-        }
+        TlsMode::VerifyFull => {}
+        TlsMode::Disable => {}
     }
     if cfg.accept_invalid_certs {
         ssl = ssl.with_danger_accept_invalid_certs(true);
@@ -530,11 +397,6 @@ fn build_mysql_ssl_opts(cfg: &TlsConfig) -> SslOpts {
 }
 
 /// Refuse a session whose clock is not UTC after rivet set `time_zone = '+00:00'`.
-///
-/// Every TIMESTAMP is read in the session time zone and written as UTC, so a SET that did not
-/// reach the backend that reads (a proxy that answered it without forwarding, or routed the read
-/// elsewhere) shifts every value by the server's offset with exit 0. Only the offset decides: a
-/// server already in UTC reads right whatever the session says.
 fn refuse_a_session_off_utc(zone: &str, offset_s: i64) -> Result<()> {
     if offset_s == 0 || seeded!("mysql-session-off-utc-read", !zone.is_empty(), false) {
         return Ok(());
@@ -586,16 +448,14 @@ struct ServerDefaults {
     max_exec_ms: u64,
 }
 
-/// Reads the server's `sql_mode` and `max_execution_time` without a `@@` variable, whose read
-/// makes ProxySQL stop multiplexing the session.
+/// Reads the server's `sql_mode` and `max_execution_time` without a `@@` variable, whose read makes ProxySQL stop multiplexing the session.
 const SERVER_DEFAULTS: &str =
     "SHOW GLOBAL VARIABLES WHERE Variable_name IN ('sql_mode', 'max_execution_time')";
 
 /// The session clock's offset from UTC, read without a session variable so a multiplexing proxy keeps multiplexing.
 const SESSION_OFFSET: &str = "SELECT TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(6), NOW(6))";
 
-/// The session settings of one pool's connections: the server defaults, read once, and the
-/// `max_execution_time` each connection was last given, by connection id.
+/// The session settings of one pool's connections.
 #[derive(Debug, Default)]
 struct SessionPlan {
     /// Whether the pool keeps a connection's session when it is handed back (rivet's own pool).
@@ -605,8 +465,7 @@ struct SessionPlan {
 }
 
 impl SessionPlan {
-    /// The `max_execution_time` connection `id` still holds, or `None` when it must be set from
-    /// scratch: always on a pool that resets a session it is handed back.
+    /// The `max_execution_time` connection `id` still holds, or `None` when it must be set from scratch.
     fn given(&self, id: u32) -> Option<u64> {
         if seeded!("mysql-session-set-per-chunk", true, !self.keeps_session) {
             return None;
@@ -657,10 +516,7 @@ fn wanted_sql_mode(global: &str) -> String {
         .join(",")
 }
 
-/// The literal SETs a connection needs: all three the first time (`given` is `None`), else only
-/// `max_execution_time` when this read wants another one than the connection was given. The
-/// time zone is UTC (Parquet writes `isAdjustedToUTC=true`), `sql_mode` the server's without
-/// `NO_BACKSLASH_ESCAPES`, and `max_execution_time` the configured one, else the server's.
+/// The literal SETs a connection needs: all three the first time (`given` is `None`), else only `max_execution_time` when this read wants another one than the connection was given.
 fn session_sets(
     defaults: &ServerDefaults,
     given: Option<u64>,
@@ -684,14 +540,6 @@ fn session_sets(
 }
 
 /// A pooled connection in the session a read needs.
-///
-/// The settings are literal SETs, sent once per connection and kept on it: the pool is rivet's
-/// own, and a later read that wants another `max_execution_time` sends that one literal. A literal
-/// SET is what ProxySQL tracks and replays on whichever backend connection it multiplexes the
-/// session onto; an expression (`REPLACE(@@sql_mode, ..)`, `@@global.time_zone`) it cannot parse
-/// and locks the session to one hostgroup, and a read of a session variable stops multiplexing.
-/// The session clock is checked on every checkout, so a proxy that dropped the SET is refused
-/// before a row is read.
 struct MysqlSessionGuard<'a> {
     conn: &'a mut mysql::PooledConn,
 }
@@ -759,8 +607,7 @@ mod session_set_tests {
         }
     }
 
-    /// The driver's options read no `@@` at the handshake: no socket lookup, and a packet size
-    /// given rather than asked for, exactly 64 MiB.
+    /// The driver's options read no `@@` at the handshake.
     #[test]
     fn the_session_options_ask_the_server_for_no_variable() {
         let opts = Opts::from(session_opts(OptsBuilder::new()));
@@ -769,8 +616,7 @@ mod session_set_tests {
         assert_eq!(CLIENT_MAX_ALLOWED_PACKET, 67_108_864);
     }
 
-    /// A source over rivet's own pool keeps each connection's settings, so a reused connection
-    /// is not set again; over a pool that resets sessions every checkout is set from scratch.
+    /// A source over rivet's own pool keeps each connection's settings, so a reused connection is not set again.
     #[test]
     fn only_a_pool_that_keeps_sessions_skips_the_sets_on_a_reused_connection() {
         let pool = || {
@@ -807,18 +653,6 @@ mod session_set_tests {
 }
 
 /// Execute the MySQL query and stream results to sink.
-///
-/// The session (`time_zone`, `sql_mode`, `max_execution_time`) is set by the caller's
-/// [`MysqlSessionGuard`] before the read.
-///
-/// `sample_pool`: when `tuning.adaptive` is true, a clone of the source pool used
-/// to obtain a second connection for extraction-pressure sampling without interfering
-/// with the streaming result set on `conn`.
-/// Whether a MySQL driver error is the server-side `max_execution_time` /
-/// ER_QUERY_TIMEOUT (3024) statement-duration timeout — so the export path can
-/// re-wrap it as an actionable `StatementDurationTimeout` instead of leaking the
-/// terse driver prose. Matched by code AND message so it survives a MariaDB
-/// spelling (`max_statement_time` / 1969) or a reworded server string.
 fn is_statement_timeout(e: &mysql::Error) -> bool {
     if let mysql::Error::MySqlError(db) = e
         && (db.code == 3024 || db.code == 1969)
@@ -840,10 +674,6 @@ fn mysql_run_export(
     column_overrides: &ColumnOverrides,
     sink: &mut dyn super::BatchSink,
 ) -> Result<usize> {
-    // Re-wrap a server-side `max_execution_time` timeout (ERROR 3024) as an
-    // actionable StatementDurationTimeout (the classifier downcasts the TYPE →
-    // permanent; the Display carries the fix). The raw driver error is terse and
-    // gave the field's `*_version` timeouts no guidance (#field-3024).
     let wrap_timeout = |e: mysql::Error| -> anyhow::Error {
         if tuning.statement_timeout_s > 0 && is_statement_timeout(&e) {
             super::StatementDurationTimeout::mysql(tuning.statement_timeout_s).into()
@@ -852,39 +682,18 @@ fn mysql_run_export(
         }
     };
 
-    // SecOps: cursor value is bound via exec_iter rather than string-interpolated.
-    // Using exec_iter uniformly (even with empty params) keeps match arms
-    // type-compatible — query_iter returns a Text-protocol result, exec_iter Binary.
     let mut result = match cursor_param {
         Some(val) => conn.exec_iter(sql, (val,)).map_err(&wrap_timeout)?,
         None => conn.exec_iter(sql, ()).map_err(&wrap_timeout)?,
     };
     let columns = result.columns().as_ref().to_vec();
 
-    // Compute TypeMappings once; derive both the Arrow schema and the
-    // per-column DataType vec from the same source so they can never diverge.
     let (schema, arrow_types) = mysql_schema_and_arrow_types(&columns, column_overrides)?;
     let schema = Arc::new(schema);
 
     sink.on_schema(schema.clone())?;
 
-    // PG path uses `work_mem × 0.7 / row_bytes` for FETCH N — the analogous
-    // bottleneck on MySQL is *our* `row_buf` accumulator. The mysql crate
-    // streams rows from the wire one-at-a-time, but we pile up `effective_bs`
-    // of them in a `Vec<Row>` before flushing to Arrow → for `batch_size: 50000`
-    // (fast profile) on content_items that's ~650 MB just for the row_buf,
-    // plus another ~650 MB for the Arrow batch it feeds — RSS scales with
-    // `batch_size`, not chunk size.
-    //
-    // Fix: start with a small probe (`PROBE_BATCH_SIZE`), measure the actual
-    // Arrow bytes per row after the first batch, then cap `effective_bs` so
-    // each flush fits in roughly `MYSQL_BATCH_TARGET_MB` of Arrow memory.
-    // Caller's `batch_size_memory_mb` wins when set; the default is 64 MB —
-    // chosen to keep peak RSS well under 200 MB on wide-row tables while
-    // keeping batches large enough to be efficient for the parquet writer.
     let configured_batch_size = tuning.effective_batch_size(Some(&schema));
-    // Shared batch-size state machine (probe → memory-cap → adaptive → throttle);
-    // MySQL provides only the row source + the target-MB cap formula below.
     let mut ctl = AdaptiveBatchController::new(tuning, configured_batch_size);
     ctl.seed_pressure(if tuning.adaptive {
         sample_pool
@@ -902,14 +711,9 @@ fn mysql_run_export(
     let mut row_buf: Vec<mysql::Row> = Vec::with_capacity(ctl.target());
     let mut total_rows: usize = 0;
     let mut memory_cap_applied = false;
-    // Per-value ceiling (MB→bytes; `0`/None disables), enforced pre-allocation
-    // inside the batch builder so an oversized cell bails before Arrow reserves
-    // the buffer. Same source of truth as the sink's backstop guard.
     let max_value_bytes = tuning.max_value_bytes();
 
     for row_result in row_set {
-        // The timeout usually fires mid-stream (the query runs while rows are
-        // pulled), so wrap here too, not only at exec_iter above.
         let row = row_result.map_err(&wrap_timeout)?;
         row_buf.push(row);
 
@@ -923,9 +727,6 @@ fn mysql_run_export(
             let batch_rows = row_buf.len();
             row_buf.clear();
 
-            // After the first (probe-sized) batch we know how many bytes per
-            // row Arrow actually uses. Cap subsequent flushes to a memory
-            // target. The controller clamps it to the configured `batch_size`.
             if !memory_cap_applied && batch_rows > 0 {
                 let arrow_bytes = crate::tuning::SourceTuning::batch_memory_bytes(&batch);
                 let arrow_per_row = (arrow_bytes / batch_rows).max(64);
@@ -1014,9 +815,6 @@ impl super::Source for MysqlSource {
 
         let mut conn = self.pool.get_conn()?;
 
-        // The session a read needs, set once per pooled connection by literal SETs (ProxySQL
-        // tracks `time_zone`, `sql_mode` and `max_execution_time` and replays them on the backend
-        // it multiplexes the session onto).
         let max_exec_ms = max_execution_ms(request.tuning.statement_timeout_s);
         let mut guard = MysqlSessionGuard::apply(&mut conn, &self.session, max_exec_ms)?;
 
@@ -1035,10 +833,6 @@ impl super::Source for MysqlSource {
             sink,
         );
 
-        // The empty-result fallback to `Schema::empty()` lives here for
-        // parity with the PG implementation, even though `exec_iter` always
-        // returns the column metadata before yielding any rows so
-        // mysql_run_export's `on_schema` already fired.
         let total_rows = result?;
         if total_rows == 0 {
             sink.on_schema(Arc::new(Schema::empty()))?;
@@ -1053,9 +847,6 @@ impl super::Source for MysqlSource {
             Some((s, t)) => (format!("'{}'", s.replace('\'', "''")), t.to_string()),
             None => ("DATABASE()".to_string(), bare.clone()),
         };
-        // One row per column, assembled here — not `GROUP_CONCAT`, which silently
-        // TRUNCATES at `group_concat_max_len` (1024 bytes by default) and handed the
-        // load a partial merge key that collapses distinct rows.
         let sql = format!(
             "SELECT COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE \
              WHERE CONSTRAINT_NAME = 'PRIMARY' AND TABLE_SCHEMA = {schema} \
@@ -1070,11 +861,6 @@ impl super::Source for MysqlSource {
 
     fn query_scalar(&mut self, sql: &str) -> Result<Option<String>> {
         let mut conn = self.pool.get_conn()?;
-        // Pin the SAME session state the export/worker connections get (sql_mode with
-        // NO_BACKSLASH_ESCAPES stripped + UTC time_zone) via the shared guard.
-        // sample_key_boundaries runs INLINE escaped boundary literals through here; a
-        // sampler whose sql_mode disagrees with the workers' mis-parses a backslash-
-        // bearing key and drifts the percentile split points (the M1 hole this closes).
         let mut guard = MysqlSessionGuard::apply(&mut conn, &self.session, None)?;
         let row: Option<mysql::Row> = guard.conn().query_first(sql)?;
         match row {
@@ -1109,23 +895,12 @@ impl super::Source for MysqlSource {
         column_nullable_on(&mut conn, query, column)
     }
 
-    /// Governor FOREIGN-pressure proxy: `Innodb_log_waits` (redo-write
-    /// pressure a read-only export cannot move) — deliberately NOT the batch
-    /// loop's extraction-pressure sum, which the export's own pages inflate
-    /// (see [`mysql_sample_foreign_pressure`] and
-    /// `Source::sample_governor_pressure`).
+    /// Governor FOREIGN-pressure proxy: `Innodb_log_waits` (redo-write pressure a read-only export cannot move).
     fn sample_governor_pressure(&mut self) -> Option<u64> {
         mysql_sample_foreign_pressure(&self.pool)
     }
 
-    /// Snapshot the broader source-harm counters from `SHOW GLOBAL STATUS` — a
-    /// superset of the batch loop's [`mysql_sample_extraction_pressure`].
-    /// Returns `(metric, cumulative_value)` pairs the pipeline deltas around
-    /// the export and stores in `export_harm`. `SHOW GLOBAL STATUS` needs **no
-    /// special privilege**. These are global counters, so concurrent load
-    /// inflates the delta (accurate on a quiet pilot box). `Innodb_rows_read`
-    /// is the read-amplification signal the 0.12 harm A/B keyed on. `None` on
-    /// connect/query failure — never blocks the export.
+    /// Snapshot the broader source-harm counters from `SHOW GLOBAL STATUS`.
     fn harm_counters(&mut self) -> Option<Vec<(String, i64)>> {
         let pool = &self.pool;
         let mut conn = pool.get_conn().ok()?;
@@ -1147,9 +922,6 @@ impl super::Source for MysqlSource {
     }
 
     fn native_column_types(&mut self, table: &str) -> Result<Vec<(String, String)>> {
-        // A qualified `db.table` carries its OWN schema, which may differ from the
-        // connection's DATABASE() (a cross-database capture), and a db-less URL has no
-        // DATABASE() at all — so the qualifier wins and only a bare name asks.
         let mut conn = self.pool.get_conn()?;
         let default_db: Option<String> = if table.contains('.') {
             None
@@ -1166,11 +938,6 @@ impl super::Source for MysqlSource {
     }
 
     fn server_context(&mut self) -> Option<String> {
-        // One `SHOW GLOBAL VARIABLES`, never a `@@` read: ProxySQL stops multiplexing a session
-        // that reads one. Global values: the server truth this forensic snapshot exists for, not
-        // the session the guard set (+00:00, NO_BACKSLASH_ESCAPES stripped). Best-effort per
-        // variable (a proxy or older server may omit one). `max_execution_time` (ms) is the limit
-        // that surfaces as ERROR 3024.
         let rows: Vec<(String, String)> = (|| -> Result<Vec<(String, String)>> {
             let mut conn = self.pool.get_conn()?;
             let mut guard = MysqlSessionGuard::apply(&mut conn, &self.session, None)?;
@@ -1368,10 +1135,6 @@ mod tests {
         assert!(!ssl(None));
     }
 
-    // Proxy classifier tests live in `proxy.rs` alongside the classifier.
-
-    // ── bit_bytes_to_u64 (lives in arrow_convert.rs, exported pub(super)) ──
-
     #[test]
     fn bit_bytes_single_byte() {
         assert_eq!(bit_bytes_to_u64(&[0x00]), 0);
@@ -1392,14 +1155,10 @@ mod tests {
 
     #[test]
     fn bit_bytes_ascii_digit_bytes_are_bits_not_text() {
-        // Regression (mysql-bit): BIT bytes that happen to be ASCII digits are
-        // still big-endian bits — never decimal text.
-        assert_eq!(bit_bytes_to_u64(&[0x39]), 57); // "9" as text, BIT(8) 57
-        assert_eq!(bit_bytes_to_u64(&[0x31, 0x32]), 0x3132); // b"12" → 12594
-        assert_eq!(bit_bytes_to_u64(&[0x31, 0xFF]), 12799); // digit head, non-digit tail
+        assert_eq!(bit_bytes_to_u64(&[0x39]), 57);
+        assert_eq!(bit_bytes_to_u64(&[0x31, 0x32]), 0x3132);
+        assert_eq!(bit_bytes_to_u64(&[0x31, 0xFF]), 12799);
     }
-
-    // ── InnoDB AVG_ROW_LENGTH correction ────────────────────────────────
 
     #[test]
     fn innodb_correction_below_threshold_is_identity() {

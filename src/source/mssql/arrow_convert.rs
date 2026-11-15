@@ -1,15 +1,4 @@
 //! SQL Server `Row` → Arrow `RecordBatch` pipeline.
-//!
-//! Mirrors `postgres::arrow_convert` / `mysql::arrow_convert`: map each
-//! `tiberius::ColumnType` to a `RivetType` (the one semantic layer — ADR-0014),
-//! build the Arrow schema via the shared `build_arrow_field`, then fill arrays
-//! cell-by-cell from `tiberius::ColumnData`.
-//!
-//! Extraction goes through `ColumnData` (not typed `Row::get::<T>`) so the
-//! `uuid` version tiberius vendors (1.x) does not have to match the crate's own
-//! (`uuid` 0.8) — a `Guid` is read as its 16 canonical bytes directly. Temporal
-//! values use tiberius' `chrono` `FromSql` impls via `try_get`, which already
-//! normalise the raw TDS day/second counts.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -57,7 +46,6 @@ pub(crate) fn renders_as_text(ct: ColumnType) -> bool {
 
 /// A cell rendered as text (ISO temporals, exact decimals, lowercase hex bytes); `None` for SQL NULL.
 pub(crate) fn cell_text(c: &ColumnData<'_>) -> Option<String> {
-    // Days from 0001-01-01 to 1900-01-01, the legacy datetime epoch.
     const DAYS_TO_1900: i64 = 693_595;
     const NANOS_PER_DAY: i128 = 86_400_000_000_000;
     let frac = |nanos: u64, digits: u8| {
@@ -170,9 +158,7 @@ const UNIX_EPOCH_DAY: i32 = 0;
 
 use crate::source::value_within_ceiling;
 
-/// Map a SQL Server column type to its `RivetType`. An explicit
-/// `exports[].columns:` override wins (lets a `decimal` without resolvable
-/// precision still ride as a declared type, same as PG/MySQL).
+/// Map a SQL Server column type to its `RivetType`.
 pub(super) fn mssql_type_to_rivet(col: &Column, overrides: &ColumnOverrides) -> Result<RivetType> {
     resolve_column(
         crate::types::override_table::Engine::Mssql,
@@ -181,13 +167,11 @@ pub(super) fn mssql_type_to_rivet(col: &Column, overrides: &ColumnOverrides) -> 
         &format!("{:?}", col.column_type()).to_lowercase(),
         || match col.column_type() {
             ColumnType::Bit | ColumnType::Bitn => RivetType::Bool,
-            // tinyint (0-255, unsigned) widens to i16 losslessly.
             ColumnType::Int1 | ColumnType::Int2 => RivetType::Int16,
             ColumnType::Int4 => RivetType::Int32,
             ColumnType::Int8 | ColumnType::Intn => RivetType::Int64,
             ColumnType::Float4 => RivetType::Float32,
             ColumnType::Float8 | ColumnType::Floatn => RivetType::Float64,
-            // money / smallmoney are fixed decimal(19,4) / (10,4).
             ColumnType::Money => RivetType::Decimal {
                 precision: 19,
                 scale: 4,
@@ -196,8 +180,6 @@ pub(super) fn mssql_type_to_rivet(col: &Column, overrides: &ColumnOverrides) -> 
                 precision: 10,
                 scale: 4,
             },
-            // Precision/scale beyond this default land via wire metadata in a
-            // follow-up; default keeps integer-valued numerics lossless.
             ColumnType::Decimaln | ColumnType::Numericn => RivetType::Decimal {
                 precision: 38,
                 scale: 0,
@@ -234,20 +216,7 @@ pub(super) fn mssql_type_to_rivet(col: &Column, overrides: &ColumnOverrides) -> 
     )
 }
 
-/// Build the Arrow schema for a result set's columns + the per-column
-/// `(name, ColumnType)` the row decoder dispatches on.
-///
-/// `decimal_hints` carries each decimal/numeric column's *declared*
-/// `(precision, scale)` read from `sys.columns` for a simple single-table
-/// `SELECT` (the MSSQL twin of the PG catalog-hint path). tiberius drops the
-/// declared precision/scale off `Column` (only the type tag survives), so
-/// without the hint the scale would be inferred from the data — which freezes
-/// at the placeholder `0` when the first emitted batch is all NULL. The
-/// catalog hint is the upstream, lossless recovery; the data-inference
-/// (`decimal_scale_from_rows`) stays ONLY as the fallback for expression /
-/// computed columns that have no `sys.columns` entry. `None` ⇒ no catalog
-/// lookup was possible (joins, subqueries, multi-table FROM), so keep today's
-/// data-inference behaviour.
+/// Build the Arrow schema for a result set's columns + the per-column `(name, ColumnType)` the row decoder dispatches on.
 pub(super) fn mssql_columns_to_schema(
     columns: &[Column],
     overrides: &ColumnOverrides,
@@ -259,10 +228,6 @@ pub(super) fn mssql_columns_to_schema(
     let mut errors: Vec<String> = Vec::new();
 
     for (idx, col) in columns.iter().enumerate() {
-        // tiberius' `Column` drops a decimal's declared precision/scale, so recover
-        // it — via the shared `resolve_decimal`, the same logic the scan-free
-        // `mssql_type_mappings` probe uses, so a full export and a CDC/`check` probe
-        // land the identical decimal type.
         let rivet = resolve_decimal(
             mssql_type_to_rivet(col, overrides)?,
             col.name(),
@@ -327,11 +292,6 @@ pub(super) fn mssql_type_mappings(
     columns
         .iter()
         .map(|col| {
-            // Same decimal recovery the full-export schema builder uses — without
-            // rows there is no data-inference fallback, but the sys.columns catalog
-            // hint is exactly what gives the declared precision/scale, so a scan-free
-            // probe (CDC resolve, `rivet check`) lands the identical type a batch
-            // export does.
             let rivet = resolve_decimal(
                 mssql_type_to_rivet(col, overrides)?,
                 col.name(),
@@ -342,14 +302,6 @@ pub(super) fn mssql_type_mappings(
             let native = format!("{:?}", col.column_type()).to_lowercase();
             let source = SourceColumn::simple(col.name(), native.clone(), true);
             let mapping = TypeMapping::from_source(&source, rivet);
-            // Round-2 audit #19: datetime2 maps to Timestamp(µs); a scale-7 column
-            // (the bare `datetime2` default) silently loses its 100ns sub-microsecond
-            // tick, yet the derived fidelity is a blanket `Exact`. rivet does not read
-            // datetime2's declared scale from sys.columns (only decimal's), so surface
-            // the µs truncation as a warning in the type-report — the honest lever the
-            // finding calls for (Compatible/warn, never Lossy, which would break
-            // --strict for every bare datetime2). Value truncation itself is the
-            // documented "known gap 4" with a `timestamp_ns` opt-in.
             Ok(if native == "datetime2" {
                 mapping.with_warning(
                     "datetime2 → Timestamp(microsecond): a scale-7 column (the bare `datetime2` \
@@ -358,15 +310,6 @@ pub(super) fn mssql_type_mappings(
                      datetime2(0..6) is exact.",
                 )
             } else if native == "timen" {
-                // Sibling of the datetime2 gap above: `time` maps to Time64(µs), but
-                // MSSQL's default `time` (== time(7)) and time(4..6) carry a 100ns
-                // sub-microsecond tick that the build arm truncates (`nanosecond()/1000`,
-                // build_array Time64 arm). rivet does not read time's declared scale
-                // (only decimal's), so the bare `time` is treated as scale-7. The
-                // value-checksum can't flag it — both sides do the same `/1000` — so
-                // surface the truncation as an honest Compatible/warn (never Lossy,
-                // which would break --strict for every bare time). There is no
-                // narrower target: Parquet Time64 has no 100ns unit.
                 mapping.with_warning(
                     "time → Time64(microsecond): a scale-7 column (the bare `time` default, and \
                      time(4..7)) loses its 100ns sub-microsecond tick — Parquet Time64 has no \
@@ -379,13 +322,7 @@ pub(super) fn mssql_type_mappings(
         .collect()
 }
 
-/// Recover an autodetected decimal's declared precision/scale. A user `columns:`
-/// override always wins; then the `sys.columns` catalog hint (the upstream,
-/// lossless declared `(precision, scale)`); then, when rows are available, the
-/// scale inferred from the first non-null value. The single source of truth shared
-/// by the full-export schema builder ([`mssql_columns_to_schema`]) and the
-/// scan-free [`mssql_type_mappings`] probe, so CDC and a batch export resolve a
-/// decimal identically by construction (no drift).
+/// Recover an autodetected decimal's declared precision/scale.
 fn resolve_decimal(
     rivet: RivetType,
     col_name: &str,
@@ -416,7 +353,6 @@ fn resolve_decimal(
 }
 
 /// Fetch the `ColumnData` of column `idx` from a row without consuming it.
-/// Microseconds of a naive timestamp: rounded for a legacy DATETIME, whose 1/300 s tick has no exact microsecond, truncated otherwise.
 fn naive_micros(dt: NaiveDateTime, legacy_datetime: bool) -> i64 {
     let dt = if legacy_datetime {
         nearest_micro(dt)
@@ -437,9 +373,7 @@ fn cell(row: &Row, idx: usize) -> Option<&ColumnData<'static>> {
     row.cells().nth(idx).map(|(_, d)| d)
 }
 
-/// The decimal scale of column `idx`, read from the first non-null `Numeric`
-/// value (all values in a column share it). `None` when the column is all-null
-/// or empty — the caller keeps its placeholder scale (no values to misalign).
+/// The decimal scale of column `idx`, read from the first non-null `Numeric` value (all values in a column share it).
 fn decimal_scale_from_rows(idx: usize, rows: &[Row]) -> Option<u8> {
     rows.iter().find_map(|row| match cell(row, idx) {
         Some(ColumnData::Numeric(Some(n))) => Some(n.scale()),
@@ -447,8 +381,7 @@ fn decimal_scale_from_rows(idx: usize, rows: &[Row]) -> Option<u8> {
     })
 }
 
-/// Build one Arrow array for column `idx`, dispatching on the Arrow target type
-/// (so the array always matches the schema field by construction).
+/// Build one Arrow array for column `idx`, dispatching on the Arrow target type (so the array always matches the schema field by construction).
 fn build_array(
     target: &DataType,
     idx: usize,
@@ -487,11 +420,6 @@ fn build_array(
     let arr: ArrayRef = match target {
         DataType::Boolean => simple!(BooleanBuilder, Some(ColumnData::Bit(Some(v))) => *v),
         DataType::Int16 => {
-            // Hand-rolled (not `simple!`) because it accepts two value variants
-            // — I16 and a U8 widened to i16. Mismatch policy must still match
-            // its numeric siblings: genuine NULLs append null, an unexpected
-            // *valued* variant bails loud rather than silently nulling (this
-            // arm was the one MSSQL type that broke that rule).
             let mut b = Int16Builder::with_capacity(rows.len());
             for row in rows {
                 match cell(row, idx) {
@@ -547,9 +475,6 @@ fn build_array(
             for row in rows {
                 match cell(row, idx) {
                     Some(ColumnData::String(Some(s))) => {
-                        // Pre-allocation ceiling: the driver copy is unavoidable,
-                        // but bail before the append so the Arrow buffer never
-                        // grows to hold the oversized cell.
                         value_within_ceiling(column, s.len(), max_value_bytes)?;
                         b.append_value(s.as_ref());
                     }
@@ -628,9 +553,6 @@ fn build_array(
         DataType::Timestamp(TimeUnit::Microsecond, tz) => {
             let mut b = TimestampMicrosecondBuilder::with_capacity(rows.len());
             for row in rows {
-                // datetime/datetime2 are naive; datetimeoffset is tz-aware and is NOT
-                // a NaiveDateTime (reading it as one errors and fails the whole
-                // export). Fall back to its UTC instant via FixedOffset.
                 let legacy = matches!(cell(row, idx), Some(ColumnData::DateTime(_)));
                 let micros = match row.try_get::<NaiveDateTime, _>(idx) {
                     Ok(v) => v.map(|dt| naive_micros(dt, legacy)),
@@ -721,7 +643,7 @@ fn build_array(
     Ok(arr)
 }
 
-/// The stop for a cell the `target` builder cannot read: the coded usage refusal naming the declared type when a `columns:` override set it, an internal stop for a native column.
+/// The stop for a cell the `target` builder cannot read.
 fn cell_mismatch(
     declared: Option<&RivetType>,
     column: &str,
@@ -764,8 +686,6 @@ fn decimal_cell(c: Option<&ColumnData<'_>>, scale: u8, column: &str) -> Result<O
     let int = |v: i128| rescale_i128(v, 0, scale).map(Some);
     match c {
         Some(ColumnData::Numeric(Some(n))) => rescale_i128(n.value(), n.scale(), scale).map(Some),
-        // MONEY / SMALLMONEY: tiberius delivers the fixed-point 1/10000 value as
-        // F64; a non-finite OR beyond-2^53 value fails loudly (round-2 #18).
         Some(ColumnData::F64(Some(v))) => f64_to_scaled_i128(*v, scale).map(Some),
         Some(ColumnData::U8(Some(v))) => int(i128::from(*v)),
         Some(ColumnData::I16(Some(v))) => int(i128::from(*v)),
@@ -805,10 +725,7 @@ fn binary_cell<'a>(c: Option<&'a ColumnData<'_>>, column: &str) -> Result<Option
     }
 }
 
-/// An f64-delivered fixed-point value (MONEY/SMALLMONEY) as the unscaled i128
-/// of a `Decimal128(_, scale)` column: render at the declared scale, then the
-/// ONE decimal-string canon (`types::decimal`) parses the digits exactly.
-/// Non-finite input is a loud error, never a silent NULL.
+/// An f64-delivered fixed-point value (MONEY/SMALLMONEY) as the unscaled i128 of a `Decimal128(_, scale)` column.
 fn f64_to_scaled_i128(v: f64, scale: u8) -> Result<i128> {
     if !v.is_finite() {
         crate::rivet_bail!(
@@ -816,13 +733,6 @@ fn f64_to_scaled_i128(v: f64, scale: u8) -> Result<i128> {
             "non-finite money value {v:?}"
         );
     }
-    // Round-2 audit #18: tiberius decodes MONEY as an f64. Above 2^53 the scaled
-    // integer (value·10^scale) is no longer integer-exact in f64, so a value this
-    // large was ALREADY rounded before rivet saw it — persisting it as an exact-
-    // looking DECIMAL(19,4) would be silent corruption under an `Exact` fidelity
-    // label. The loss is upstream (in the driver) and unrecoverable here, so fail
-    // LOUDLY like rescale_i128 rather than store a rounded value. Failing keeps the
-    // `Exact` label honest: every MONEY rivet DOES export is exactly representable.
     let scaled_abs = v.abs() * 10f64.powi(scale as i32);
     if scaled_abs >= 9_007_199_254_740_992.0 {
         crate::rivet_bail!(
@@ -845,11 +755,7 @@ fn f64_to_scaled_i128(v: f64, scale: u8) -> Result<i128> {
     })
 }
 
-/// Rescale an unscaled decimal from `from_scale` to `to_scale` (Arrow's fixed
-/// column scale). Loses no information when `to_scale >= from_scale`; a
-/// down-scale is accepted only when the dropped digits are all zero — anything
-/// else is lossy degradation and must surface as an `Err`, never as silently
-/// truncated data.
+/// Rescale an unscaled decimal from `from_scale` to `to_scale` (Arrow's fixed column scale).
 fn rescale_i128(value: i128, from_scale: u8, to_scale: u8) -> Result<i128> {
     use std::cmp::Ordering;
     match to_scale.cmp(&from_scale) {
@@ -912,20 +818,13 @@ pub(super) fn mssql_rows_to_record_batch(
         );
     }
     let batch = arrow::record_batch::RecordBatch::try_new(schema.clone(), arrays)?;
-    // Form A value-checksum (always-on): source-side pass (A) vs the built batch
-    // (B) — fail loud if the value converter diverged between read and Arrow build.
     let a = crate::source::value_checksum::source_checksums(schema, &MssqlCellSource { rows });
     let b = crate::source::value_checksum::arrow_batch_checksums(&batch);
     crate::source::value_checksum::verify(&a, &b, schema)?;
     Ok(batch)
 }
 
-/// Side A of the Form A value-checksum for SQL Server — an INDEPENDENT decode of the
-/// raw `ColumnData` (mirroring `build_array`) so it equals side B on a correct build.
-/// Drives the shared [`crate::source::value_checksum::source_checksums`] dispatch;
-/// each accessor holds the tiberius extraction (`cell`, the I16/U8 widen, datetime /
-/// datetimeoffset via `try_get`, numeric via `BigDecimal`). Bytes must match
-/// `feed_cell` or the matrix guard false-mismatches.
+/// Side A of the Form A value-checksum for SQL Server.
 struct MssqlCellSource<'a> {
     rows: &'a [Row],
 }
@@ -960,7 +859,7 @@ impl crate::source::value_checksum::CellSource for MssqlCellSource<'_> {
         }
     }
     fn uint64(&self, _col: usize, _row: usize) -> Option<u64> {
-        None // SQL Server never maps to UInt64.
+        None
     }
     fn float32(&self, col: usize, row: usize) -> Option<f32> {
         match cell(&self.rows[row], col) {
@@ -986,8 +885,6 @@ impl crate::source::value_checksum::CellSource for MssqlCellSource<'_> {
                     .0
                     .to_i128()
             }
-            // MONEY / SMALLMONEY arrive as F64 — fold the SAME scaled value the
-            // Arrow build writes, or the checksum flags a false mismatch.
             Some(ColumnData::F64(Some(v))) => f64_to_scaled_i128(*v, scale.max(0) as u8).ok(),
             Some(ColumnData::U8(Some(v))) => int(i128::from(*v)),
             Some(ColumnData::I16(Some(v))) => int(i128::from(*v)),
@@ -1049,7 +946,6 @@ impl crate::source::value_checksum::CellSource for MssqlCellSource<'_> {
         }
     }
     fn decimal256(&self, _col: usize, _row: usize, _scale: i8) -> Option<arrow::datatypes::i256> {
-        // SQL Server DECIMAL caps at precision 38 — Decimal256 never resolves.
         None
     }
     fn list(
@@ -1058,7 +954,6 @@ impl crate::source::value_checksum::CellSource for MssqlCellSource<'_> {
         _row: usize,
         _elem: &DataType,
     ) -> Option<Vec<crate::source::value_checksum::ListElem>> {
-        // SQL Server has no array types.
         None
     }
 }
@@ -1246,10 +1141,6 @@ mod tests {
     }
 
     /// A `decimal` override on an integer column scales the integer exactly.
-    ///
-    /// Before, the Decimal128 arm matched only Numeric and MONEY's F64, so a
-    /// bigint/int under `columns: {id: "decimal(38,0)"}` fell to `append_null`:
-    /// the whole column NULL, exit 0, both checksum sides agreeing.
     #[test]
     fn an_integer_column_under_a_decimal_override_is_scaled_not_nulled() {
         let d = |c: ColumnData<'static>, s: u8| decimal_cell(Some(&c), s, "v").unwrap();
@@ -1319,16 +1210,8 @@ mod tests {
         assert_eq!(cell_type_name(&ColumnData::F64(Some(1.0))), "F64");
     }
 
-    // ROAST-RED mssql-rescale-loud: rescale_i128's down-scale arm does plain
-    // integer division (`value / factor`), silently truncating non-zero
-    // fractional remainders (123.45 at scale 2 -> scale 0 becomes 123, cents
-    // gone). Lossy degradation must be LOUD: a down-scale that drops digits
-    // must return Err, never an Ok with corrupted data.
-    // Asserts CORRECT behavior; expected to FAIL until the fix lands.
     #[test]
     fn roast_rescale_i128_lossy_downscale_must_err() {
-        // 12345 at scale 2 is 123.45; rescaling to scale 0 cannot represent
-        // the .45 — the only honest answer is Err.
         let got = rescale_i128(12345, 2, 0);
         assert!(
             got.is_err(),
@@ -1340,53 +1223,36 @@ mod tests {
 
     #[test]
     fn non_finite_money_is_a_loud_error_not_a_silent_null() {
-        // MONEY/SMALLMONEY arrive as f64 from tiberius; a NaN/Inf (a corrupt or
-        // hostile wire payload) must bail LOUD, never silently NULL or truncate
-        // to 0. The bail existed but was untested (fail-loud coverage matrix).
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             assert!(
                 f64_to_scaled_i128(bad, 4).is_err(),
                 "non-finite money {bad:?} must be a loud error, not a silent null"
             );
         }
-        // Guard-rail: the finite happy path still works (the bail didn't over-reach).
         assert!(f64_to_scaled_i128(12.34, 4).is_ok());
     }
 
     #[test]
     fn money_beyond_f64_exact_range_fails_loudly_not_silently_rounded() {
-        // Round-2 audit #18: above 2^53 the scaled integer (value·10^4) is no
-        // longer integer-exact in f64, so tiberius already rounded the value —
-        // storing it as an exact-looking DECIMAL(19,4) would be silent corruption
-        // under an `Exact` label. It must fail loudly instead. RED before the
-        // magnitude guard (the value was rendered + stored as if exact).
-        // 2^53 / 10^4 ≈ 9.007e11; pick a MONEY value comfortably past it.
-        let huge = 1.0e12_f64; // 1,000,000,000,000 currency units, scale 4 → 1e16 > 2^53
+        let huge = 1.0e12_f64;
         assert!(
             f64_to_scaled_i128(huge, 4).is_err(),
             "a MONEY value past the f64-exact range must fail loudly, not store a rounded value"
         );
-        // Just under the threshold still succeeds (the guard doesn't over-reach):
-        // 9.0e11 · 10^4 = 9.0e15 < 2^53 ≈ 9.007e15.
         assert!(
             f64_to_scaled_i128(9.0e11, 4).is_ok(),
             "a MONEY value within the exact range must still export"
         );
     }
 
-    // ROAST-RED mssql-rescale-loud: lossless guards — these already pass and
-    // must keep passing once the lossy-down-scale fix lands (the fix must only
-    // reject down-scales with a non-zero remainder, not all down-scales).
     #[test]
     fn roast_rescale_i128_lossless_paths_stay_ok() {
-        // Exact down-scale: 12300 at scale 2 is 123.00 — scale 0 holds it.
         let down = rescale_i128(12300, 2, 0)
             .expect("lossless down-scale of 12300 (scale 2 -> 0) must stay Ok");
         assert_eq!(
             down, 123,
             "lossless down-scale of 12300 (scale 2 -> 0): expected 123, got {down}"
         );
-        // Up-scale never loses information.
         let up = rescale_i128(123, 0, 2).expect("up-scale of 123 (scale 0 -> 2) must stay Ok");
         assert_eq!(
             up, 12300,
@@ -1400,8 +1266,6 @@ mod tests {
         assert_eq!(rescale_i128(0, 0, 0).unwrap(), 0);
     }
 
-    // Greater-arm regression: an up-scale that exceeds i128 must Err via
-    // checked_mul, never wrap.
     #[test]
     fn rescale_i128_upscale_overflow_must_err() {
         let got = rescale_i128(i128::MAX, 0, 2);
@@ -1417,8 +1281,6 @@ mod tests {
         );
     }
 
-    // Rust's `%` keeps the dividend's sign; the lossy check must catch negative
-    // remainders too, and a lossless negative down-scale must stay exact.
     #[test]
     fn a_legacy_datetime_rounds_to_the_nearest_microsecond_and_datetime2_truncates() {
         let at = |nanos| {
@@ -1450,30 +1312,18 @@ mod tests {
         assert_eq!(rescale_i128(-12300, 2, 0).unwrap(), -123);
     }
 
-    // Zero has no non-zero digits to drop at any scale.
     #[test]
     fn rescale_i128_zero_downscales_losslessly() {
         assert_eq!(rescale_i128(0, 38, 0).unwrap(), 0);
     }
 
-    // Both scale ARITHMETIC arms, with from_scale > 0 on purpose.
-    //
-    // Every other rescale test uses from_scale = 0 or equal scales, where
-    // `to_scale - from_scale` and `to_scale + from_scale` produce the SAME
-    // factor — so the whole suite was blind to a sign flip in either arm, and
-    // the mutation baseline recorded both as uncaught. The exponent is only
-    // observable when neither scale is zero and they differ.
     #[test]
     fn rescale_i128_scale_arithmetic_is_a_difference_not_a_sum() {
-        // Up-scale 1 -> 3: factor 10^(3-1) = 100. A `+` would give 10^4.
         assert_eq!(
             rescale_i128(123, 1, 3).unwrap(),
             12_300,
             "up-scale must multiply by 10^(to-from), not 10^(to+from)"
         );
-        // Down-scale 3 -> 1: factor 10^(3-1) = 100, and 12_300 is divisible by
-        // it. A `+` would give 10^4, under which 12_300 has a remainder and the
-        // call would wrongly report a LOSSY rescale.
         assert_eq!(
             rescale_i128(12_300, 3, 1).unwrap(),
             123,
@@ -1481,8 +1331,6 @@ mod tests {
         );
     }
 
-    // SQL Server's max scale is 38; 10^38 still fits i128 (~1.7e38), so the
-    // factor computation must not panic at the boundary in either direction.
     #[test]
     fn rescale_i128_max_scale_boundary_no_panic() {
         assert!(
@@ -1492,9 +1340,6 @@ mod tests {
         assert_eq!(rescale_i128(1, 0, 38).unwrap(), 10i128.pow(38));
     }
 
-    // The lossy Err must be actionable: name the value, both scales, and point
-    // at the column-override remediation (the upstream fix — per the repo rule,
-    // no post-hoc recovery exists once digits are dropped).
     #[test]
     fn rescale_i128_lossy_err_is_actionable() {
         let msg = format!("{:#}", rescale_i128(12345, 2, 0).unwrap_err());
@@ -1557,8 +1402,7 @@ mod renderer_twins {
     }
 
     #[test]
-    /// Strict known divergence: ADR-0038 divergence: cell_text renders a GUID upper-case, CP5 fixes Uuid36 lower-case; unified by the SQL Server step of the migration
-    /// Passes while it diverges; when the step unifies it, this fails ("did not panic") and flips to a plain test.
+    /// Strict known divergence: ADR-0038 divergence.
     #[should_panic(expected = "assertion")]
     fn guid_cell_text_matches_uuid36() {
         let g = tiberius::Uuid::from_bytes([0xAB; 16]);
@@ -1573,8 +1417,7 @@ mod renderer_twins {
 mod error_code_tests {
     use super::*;
 
-    /// A MONEY the driver already rounded or a non-finite one is unrepresentable (exit 5); a
-    /// decimal whose declared scale was lost is an override mismatch (exit 1).
+    /// A MONEY the driver already rounded or a non-finite one is unrepresentable (exit 5).
     #[test]
     fn money_and_decimal_refusals_carry_their_codes() {
         for v in [f64::NAN, 1e20] {

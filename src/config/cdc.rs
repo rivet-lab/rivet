@@ -1,4 +1,4 @@
-//! CDC export config: the `cdc:` block's types, the baseline pairing, and every rule that validates a `mode: cdc` export.
+//! CDC export config: the `cdc:` block's types, the baseline pairing, and every rule that validates a `mode.
 
 use super::quantity::Knob;
 use schemars::JsonSchema;
@@ -11,42 +11,14 @@ use super::{
 /// Why Oracle refuses `until_current: false` / `--stream`: LogMiner here only drains to the open-time SCN.
 pub(crate) const ORACLE_CONTINUOUS_REFUSAL: &str = "Oracle CDC is always a bounded drain to the SCN current at open, so `until_current: false` (`rivet cdc --stream`) would still exit on catch-up — omit it (or set `until_current: true`) and run on a schedule";
 
-/// `until_current` defaults to `true` — the OSS model is the BOUNDED, scheduler-
-/// driven drain ("read to the log end and exit"). `until_current: false` is an
-/// explicit opt-in to the continuous model; making it the default would silently
-/// put a hand-written CDC config onto it.
-///
-/// What `false` actually means is ENGINE-SPECIFIC, and the earlier wording
-/// ("the never-terminating streaming path") was only true for one of them:
-///
-/// * **MySQL** — genuinely long-lived: a continuous run omits
-///   `BINLOG_DUMP_NON_BLOCK` (`source/mysql/cdc.rs`), so the dump BLOCKS on the
-///   binlog and the process stays up with an idle source.
-/// * **PostgreSQL / SQL Server** — POLL adapters. `false` removes the open-time
-///   ceiling, nothing more: the run still exits on CATCH-UP, so any moment the
-///   source falls quiet ends it. `DrainMode`'s own doc says these "exit on
-///   catch-up and an outer loop re-wraps them" — that outer loop does not exist
-///   (`run_capture` has exactly two call sites, neither looping), so the run is
-///   one unbounded pass, not a daemon. Measured on the PG CDC stand: exit 0
-///   within seconds, both idle and under a 200-row/0.3 s writer.
-/// * **MongoDB** — a tailable change stream: it keeps returning events under
-///   sustained writes and stops on an empty poll, so it behaves like MySQL while
-///   traffic lasts and like the poll adapters when it stops.
-///
-/// No data is at risk either way — the checkpoint stops at the last committed
-/// position and the next run resumes there (defer-not-drop). The hazard is
-/// operational: on a poll engine, `false` needs a supervisor to re-run it, or the
-/// stream simply stops. If you want a scheduler, use the default.
+/// `until_current` defaults to `true` — the OSS model is the BOUNDED, scheduler- driven drain ("read to the log end and exit").
 fn default_true() -> bool {
     true
 }
 
-/// Default PostgreSQL logical slot when `cdc.slot` is omitted — shared by the
-/// runner ([`crate::pipeline`]'s cdc job) and config validation, so the
-/// same-slot conflict check sees the value that will actually be used.
+/// Default PostgreSQL logical slot when `cdc.slot` is omitted.
 pub const DEFAULT_PG_SLOT: &str = "rivet_slot";
-/// Default MySQL replica `server_id` when `cdc.server_id` is omitted (see
-/// [`DEFAULT_PG_SLOT`] for why this is a shared const).
+/// Default MySQL replica `server_id` when `cdc.server_id` is omitted (see [`DEFAULT_PG_SLOT`] for why this is a shared const).
 pub const DEFAULT_MYSQL_SERVER_ID: u32 = 4271;
 
 /// What the FIRST CDC run does before draining changes.
@@ -61,13 +33,6 @@ pub enum CdcInitialMode {
     /// overlap (dedupe by PK + `__op`), never a gap. The safe switch ordering,
     /// enforced by construction instead of operator discipline.
     Snapshot,
-    // NOTE: `adopt` (anchor an already-loaded table, move no rows) is NOT an OSS
-    // mode — it belongs to the paid tier, whose audit is what consumes the
-    // anchor (the one-way extension seam, ADR-0026; docs may name the crate,
-    // this tree may not). Adding a variant here would put it in the published
-    // config schema, the generated reference and the OSS binary — irreversibly,
-    // once the crate is published. `oss_rejects_the_pro_only_initial_adopt` is
-    // the guard.
 }
 
 /// Per-export CDC settings, required when `mode: cdc`. The output `table`,
@@ -149,33 +114,16 @@ pub struct CdcExportConfig {
 }
 
 /// The exports whose read strategy the baseline legs borrow.
-///
-/// A multiplex stream carries tables that do not agree on how they are read: on
-/// the dev stand `orders` and `users` resolve to keyset-parallel over `id` while
-/// `ext_ref_id_history` must range-chunk `ref_id`, having no unique key. One
-/// strategy stated inside the `cdc:` block cannot cover them, and a per-table map
-/// there would be a second vocabulary for what an export block already says — two
-/// ways to declare a key is two truths, the same argument that keeps the type
-/// overrides in one place.
-///
-/// So the baseline is declared by REFERENCE: each table names the ordinary batch
-/// export that already describes how to read it — mode, key, page size, workers,
-/// `chunk_checkpoint`, `tuning`, `columns`. The leg still WRITES where the
-/// snapshot leg always wrote (`<destination>/<table>/snapshot/`), so every load
-/// invariant is untouched: one export owns the prefix, and the referenced export
-/// contributes a recipe, not a second load target.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum CdcBackfill {
     /// `auto` — pair each captured table with the export whose `table:` names it.
     Auto(AutoWord),
-    /// An explicit list of export names, for a config where the pairing is not
-    /// one-to-one by name.
+    /// An explicit list of export names, for a config where the pairing is not one-to-one by name.
     Exports(Vec<String>),
 }
 
-/// `backfill:` written with no value (YAML null) is refused, not read as absent —
-/// absent means "no baseline", and a key the operator typed must say which one.
+/// `backfill:` written with no value (YAML null) is refused, not read as absent.
 fn backfill_written_means_a_value<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> std::result::Result<Option<CdcBackfill>, D::Error> {
@@ -187,9 +135,7 @@ fn backfill_written_means_a_value<'de, D: serde::Deserializer<'de>>(
     })
 }
 
-/// The literal `auto`, as its own type so the untagged enum cannot swallow a
-/// mistyped word: `backfill: atuo` must fail the parse, not fall through to the
-/// list arm and then to a confusing "expected a sequence".
+/// The literal `auto`, as its own type so the untagged enum cannot swallow a mistyped word.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AutoWord {
@@ -214,10 +160,6 @@ impl schemars::JsonSchema for CdcBackfill {
 }
 
 /// The tables one `mode: cdc` export captures, in configured order.
-///
-/// `tables:` is the multiplex form and `table:` the single one; every caller that
-/// asks "which tables does this stream carry" must get the same answer, so the
-/// two spellings are folded HERE rather than at each call site.
 pub fn cdc_captured_tables(export: &ExportConfig) -> Vec<String> {
     match (&export.tables, &export.table) {
         (Some(ts), _) => ts.clone(),
@@ -232,15 +174,6 @@ fn bare(name: &str) -> &str {
 }
 
 /// Whether two configured relation names name ONE table.
-///
-/// Both QUALIFIED: they must agree in full — `sales.orders` is not `public.orders`,
-/// and a MongoDB collection named `audit.events` is not `app.events` (a dot is a
-/// legal character there, not a qualifier). A BARE side pairs only with the
-/// DEFAULT schema's spelling: `orders` is `public.orders` (`dbo.orders`) to whoever
-/// left the schema off, and is NOT `sales.orders` — pairing those made an unrelated
-/// export the recipe and the run loop stopped running it.
-/// ponytail: the default-schema list is `public`/`dbo`; MySQL's `db.table` needs
-/// the qualified spelling on both sides.
 fn same_relation(a: &str, b: &str) -> bool {
     match (a.contains('.'), b.contains('.')) {
         (true, true) => a == b,
@@ -254,7 +187,7 @@ fn same_relation(a: &str, b: &str) -> bool {
 }
 
 impl CdcExportConfig {
-    /// Whether the stream has a baseline leg (`initial: snapshot` or `backfill:`) and so writes the `snapshot/` child.
+    /// Whether the stream has a baseline leg (`initial.
     pub fn has_baseline(&self) -> bool {
         self.initial == Some(CdcInitialMode::Snapshot) || self.backfill.is_some()
     }
@@ -271,12 +204,6 @@ impl CdcExportConfig {
 }
 
 /// Why a baseline on this engine needs `cdc.checkpoint:`, or `None` when it does not.
-///
-/// ONE rule for both ways to declare a baseline (`initial:` in any mode, so a future
-/// mode inherits it; `backfill:`): every engine but PostgreSQL has no server-side
-/// anchor, so the checkpoint file IS the anchor — the baseline is only safe because
-/// the anchor precedes it, and without it each run re-anchors at the current log
-/// position and silently skips every change since the last one.
 pub fn baseline_checkpoint_refusal(
     export: &ExportConfig,
     source_type: crate::config::SourceType,
@@ -301,24 +228,14 @@ pub fn baseline_checkpoint_refusal(
     ))
 }
 
-/// The `columns:` a `mode: cdc` export resolves types with: its own, plus every
-/// backfill recipe's — each recipe's bare keys QUALIFIED to its table, so one
-/// table's declaration cannot reach a same-named column elsewhere. The CDC
-/// export's own keys win. One map for the baseline leg, the stream and the
-/// recorded load spec: they write one `<table>__changes`, so a column typed on
-/// the recipe alone (the placement the conflict refusal recommends) must reach
-/// all three, not only the leg.
+/// The `columns:` a `mode: cdc` export resolves types with.
 pub fn effective_columns(
     export: &ExportConfig,
     all: &[ExportConfig],
 ) -> std::collections::HashMap<String, String> {
     let mut merged = std::collections::HashMap::new();
     for (table, recipe) in resolve_backfill(export, all).unwrap_or_default() {
-        // Bare keys first, qualified second: a recipe naming both `price` and
-        // `orders.price` resolves to the qualified one, whatever the map order.
         for (k, v) in recipe.columns.iter().filter(|(k, _)| !k.contains('.')) {
-            // BARE table: `overrides_for_unit` narrows a `table.column` key by its
-            // first dot, so `dbo.orders.price` would never reach unit `dbo.orders`.
             merged.insert(format!("{}.{k}", bare(&table)), v.clone());
         }
         for (k, v) in recipe.columns.iter().filter(|(k, _)| k.contains('.')) {
@@ -330,11 +247,6 @@ pub fn effective_columns(
 }
 
 /// Every export some `mode: cdc` export claims as a baseline recipe.
-///
-/// The run loop asks this to avoid reading one table twice in a single
-/// invocation: the CDC export pulls its recipes itself, after the anchor. Names
-/// only — an unresolvable reference is config load's business, and this must stay
-/// usable (and silent) on a config that would not validate.
 pub fn backfill_recipe_names(exports: &[ExportConfig]) -> std::collections::HashSet<String> {
     exports
         .iter()
@@ -413,9 +325,7 @@ pub fn declared_exports(
     }
 }
 
-/// Two captured tables that share a LEAF name (`sales.orders`, `archive.orders`)
-/// while a recipe of either declares `columns:` — a `table.column` type key is
-/// narrowed by leaf, so one recipe's types would reach BOTH tables.
+/// Two captured tables that share a LEAF name (`sales.orders`, `archive.orders`) while a recipe of either declares `columns:`.
 pub fn same_leaf_typed_pair(pairs: &[(String, &ExportConfig)]) -> Option<(String, String)> {
     for (i, (a, ra)) in pairs.iter().enumerate() {
         for (b, rb) in pairs.iter().skip(i + 1) {
@@ -427,12 +337,7 @@ pub fn same_leaf_typed_pair(pairs: &[(String, &ExportConfig)]) -> Option<(String
     None
 }
 
-/// Refuse a column `table`'s recipe and the CDC export type DIFFERENTLY — parsed
-/// types, so two spellings of one type (`decimal(11,4)` / `numeric(11,4)`) are
-/// not a conflict. The two legs write into one warehouse table, so one column
-/// cannot have two types; a pure config decision, so it is made at config load
-/// (every pair, not only the tables still pending a baseline — a conflict added
-/// after the baseline landed must refuse the next run too).
+/// Refuse a column `table`'s recipe and the CDC export type DIFFERENTLY.
 pub fn refuse_backfill_type_conflict(
     cdc_export: &ExportConfig,
     table: &str,
@@ -440,8 +345,6 @@ pub fn refuse_backfill_type_conflict(
 ) -> anyhow::Result<()> {
     let parsed = |e: &ExportConfig| crate::types::parse_column_overrides(&e.columns, &e.name);
     let (recipe_types, cdc_types) = (parsed(recipe)?, parsed(cdc_export)?);
-    // BOTH sides narrowed: a qualified recipe key (`orders.price`) against a bare
-    // CDC key (`price`) is the same column, and compared raw it was never seen.
     let cdc_for_table = crate::types::overrides_for_unit(&cdc_types, Some(table));
     let recipe_for_table = crate::types::overrides_for_unit(&recipe_types, Some(table));
     for (col, mine) in &recipe_for_table {
@@ -471,15 +374,6 @@ pub fn backfill_recipe_for<'a>(
 }
 
 /// Pair every captured table with the export that supplies its baseline read.
-///
-/// The ONE definition of the pairing, called by config validation (so a broken
-/// reference fails at load, before an anchor exists) and by the CDC job (so the
-/// legs it builds cannot disagree with what validation admitted).
-///
-/// Every refusal here is a case that would otherwise present as success: a table
-/// with no recipe would simply not be backfilled, and a run that captures changes
-/// over a table whose history was never loaded looks exactly like a healthy one
-/// until someone counts rows in the warehouse.
 pub fn resolve_backfill<'a>(
     cdc: &ExportConfig,
     all: &'a [ExportConfig],
@@ -496,9 +390,6 @@ pub fn resolve_backfill<'a>(
         ));
     }
 
-    // A candidate is any export that reads ONE named relation: a `query:` export
-    // describes rows, not a table, so it can never be the baseline of a captured
-    // table, and another `mode: cdc` export reads a log rather than the table.
     let candidate = |e: &ExportConfig| -> bool {
         e.name != cdc.name && e.mode != ExportMode::Cdc && e.table.is_some()
     };
@@ -587,8 +478,6 @@ pub fn resolve_backfill<'a>(
                 }
                 pairs.push((captured.clone(), e));
             }
-            // Partial coverage is the silent-success shape: the covered tables get a
-            // baseline, the rest capture changes over history nobody loaded.
             let missing: Vec<&str> = tables
                 .iter()
                 .filter(|t| !pairs.iter().any(|(c, _)| c == *t))
@@ -607,9 +496,6 @@ pub fn resolve_backfill<'a>(
             }
         }
     }
-    // A baseline must read the WHOLE table. An incremental / time-window recipe
-    // reads a slice, and copying its mode without its cursor fails at plan build —
-    // after the anchor already exists, on every run until the config changes.
     for (t, e) in &pairs {
         if !matches!(e.mode, ExportMode::Full | ExportMode::Chunked) {
             return Err(format!(
@@ -623,15 +509,6 @@ pub fn resolve_backfill<'a>(
     Ok(pairs)
 }
 
-// Hand-written so the Rust `Default` MATCHES the serde default: `until_current`
-// must be `true` (bounded). The derived `Default` would use `bool::default()` =
-// `false`, and serde's `default = "default_true"` only affects Deserialize — so
-// `CdcExportConfig::default()` would silently mean `DrainMode::Continuous`. That
-// default is reached on the drain path (`cdc_job.rs`: `export.cdc.clone()
-// .unwrap_or_default()`) whenever a `mode: cdc` export omits the whole `cdc:`
-// block (valid for PG/MySQL), turning a minimal bounded drain into a
-// never-terminating daemon that persists no resume position — the exact footgun
-// `default_true` was added to kill. Mirrors `MongoConfig`'s hand-written Default.
 impl Default for CdcExportConfig {
     fn default() -> Self {
         Self {
@@ -651,24 +528,13 @@ impl Default for CdcExportConfig {
 }
 
 impl Config {
-    /// CDC stream resources are per-export and their **defaults collide**: two
-    /// PostgreSQL cdc exports without an explicit `slot:` both resolve to
-    /// `rivet_slot` — each export's ack advances `confirmed_flush_lsn` past
-    /// changes the *other* never read (mutual, silent data loss). Two MySQL
-    /// exports both default to `server_id: 4271` — the server kills the older
-    /// replica connection. A shared `checkpoint:` path makes exports overwrite
-    /// each other's resume position on any engine. All three are config bugs a
-    /// naive multi-table CDC config hits by default, so reject them at load, on
-    /// the RESOLVED values (defaults included). SQL Server `capture_instance`
-    /// sharing is deliberately allowed: the change-table poll is read-only and
-    /// resume state lives in the per-export checkpoint.
+    /// CDC stream resources are per-export and their **defaults collide**.
     pub(super) fn validate_cdc_resource_conflicts(&self) -> crate::error::Result<()> {
         use std::collections::HashMap;
 
         let mut slots: HashMap<String, &str> = HashMap::new();
         let mut publications: HashMap<String, &str> = HashMap::new();
         let mut server_ids: HashMap<u32, &str> = HashMap::new();
-        // Keyed by the NORMALISED, case-folded path (see the insert below).
         let mut checkpoints: HashMap<String, &str> = HashMap::new();
 
         for e in self.exports.iter().filter(|e| e.mode == ExportMode::Cdc) {
@@ -686,10 +552,6 @@ impl Config {
                         e.name
                     );
                 }
-                // Checked at VALIDATION, where the error can name the field: the
-                // runtime multiply (`mb * 1024 * 1024`) wraps in release, and a
-                // wrapped budget of 0 is the file explosion above wearing a
-                // plausible-looking huge number.
                 if let Some(mb) = c.rollover_memory_mb
                     && mb.checked_mul(1024 * 1024).is_none()
                 {
@@ -748,32 +610,10 @@ impl Config {
                     }
                 }
                 SourceType::Mssql => {}
-                // MongoDB change streams watch the whole database — no per-export
-                // slot or server_id to collide. Two Mongo CDC exports sharing a
-                // `checkpoint:` path IS still a conflict, caught by the shared
-                // checkpoint check below.
                 SourceType::Mongo | SourceType::Oracle => {}
             }
-            // RESOLVED, not the raw string — the function's own doc promises "on
-            // the RESOLVED values", and the runtime maps every relative path
-            // through the config dir (`resolve_checkpoint`), so `./cdc/x.ckpt`
-            // (init's own scaffold form) and `cdc/x.ckpt` are ONE file the raw
-            // comparison called two. With `parallel_exports` the miss became two
-            // streams acking one resume file concurrently; the next run resumed
-            // from whichever wrote last and silently skipped the other's span.
-            // Validation has no config-dir, so it NORMALISES both spellings the
-            // same way the resolver does (component-wise, `.` dropped) — equal
-            // normalised relatives resolve equal absolutely, whatever the dir.
             if let Some(ckpt) = cdc.and_then(|c| c.checkpoint.as_deref())
                 && let Some(prev) = checkpoints.insert(
-                    // `components()` KEEPS a leading `./` (only interior dots are
-                    // normalised — measured: the first cut of this fix compared
-                    // `[CurDir, cdc, x]` with `[cdc, x]` and still called them
-                    // two), so CurDir is filtered explicitly. The resolver never
-                    // sees it either: `config_dir.join(p)` makes every dot
-                    // interior before ITS components() pass.
-                    // Case-folded as well: `Orders.ckpt` and `orders.ckpt` are ONE file
-                    // on macOS and Windows, and a config written on Linux is run there.
                     std::path::Path::new(ckpt)
                         .components()
                         .filter(|c| !matches!(c, std::path::Component::CurDir))
@@ -827,15 +667,6 @@ impl Config {
                         );
                     }
                 }
-                // Two DISTINCT strings can still name one relation, and the
-                // sink routes each event to the FIRST that matches — so the
-                // loser's prefix collects a `_SUCCESS` and a `row_count: 0`
-                // manifest on every run, which a downstream loader reads as
-                // a healthy, complete, empty export rather than as a config
-                // error (round-3B bughunt, DEMONSTRATED live on PostgreSQL:
-                // three inserts, `status: success, rows: 3`, all three under
-                // `bh_orders/` while `public.bh_orders/` published emptiness).
-                // The distinct-string check above cannot see it.
                 if self.source.source_type != SourceType::Mongo
                     && let Some((a, b)) = overlapping_table_pair(ts)
                 {
@@ -851,11 +682,6 @@ impl Config {
                         b
                     );
                 }
-                // A local destination writes each table under `<path>/<table>/`,
-                // and on a case-insensitive filesystem (macOS, Windows) `Orders/` and
-                // `orders/` are ONE directory: same-named parts overwrite each other
-                // and the checkpoint moves past the lost rows (bughunt 2026-09-25,
-                // measured on MySQL with `lower_case_table_names=0`).
                 if export.destination.destination_type == DestinationType::Local
                     && let Some((a, b)) = super::case_colliding_table_pair(ts)
                 {
@@ -872,14 +698,6 @@ impl Config {
                         b
                     );
                 }
-                // A streaming destination has no per-table sub-prefix to
-                // extend — `dest_for_table`'s `Stdout` arm is a no-op while
-                // the local and cloud arms both append `<table>/`. So every
-                // captured table shares ONE stream: round-10 measured two
-                // tables emitting two different CSV headers into one output,
-                // which any reader downstream mixes silently. No manifest is
-                // written for a streaming destination either, so the stream
-                // is the only artifact and nothing records the interleave.
                 if export.destination.destination_type == DestinationType::Stdout {
                     crate::config_bail!(
                         crate::error::codes::CONFIG_CDC_SHAPE_INVALID,
@@ -903,7 +721,6 @@ impl Config {
                     );
                 }
             }
-            // `table:` + `tables:` is refused earlier, by `validate_export_source`.
             (Some(_), _) => {}
         }
         Ok(())
@@ -953,9 +770,6 @@ impl Config {
 
     /// CDC baselines, checkpoints and resume anchors.
     pub(super) fn validate_export_cdc(&self, export: &ExportConfig) -> crate::error::Result<()> {
-        // A baseline (`initial: snapshot` or `backfill:`) writes each table's
-        // snapshot under the reserved sub-prefix `snapshot/` — a table actually
-        // NAMED "snapshot" would share a prefix with another table's marker.
         if let Some(cdc) = &export.cdc
             && cdc.has_baseline()
         {
@@ -974,14 +788,6 @@ impl Config {
             }
         }
 
-        // `initial:` needs a durable anchor BEFORE anything reads. PostgreSQL
-        // pins server-side (the slot); MySQL / SQL Server / Mongo / Oracle have no server-side
-        // anchor, so the checkpoint file IS the anchor there. Stated against the
-        // MODE rather than only `snapshot` by name, so a future `initial:` mode
-        // inherits the requirement instead of silently deferring the failure to
-        // `ensure_anchor` — which demands a checkpoint on these engines for ANY
-        // mode, i.e. after the run has already started.
-        // One predicate for both baselines (`initial:` and `backfill:`).
         if let Some(why) = baseline_checkpoint_refusal(export, self.source.source_type) {
             crate::config_bail!(crate::error::codes::CONFIG_MODE_SETTING_INVALID, "{why}");
         }
@@ -997,11 +803,6 @@ impl Config {
             );
         }
 
-        // `cdc.backfill` is the other way to get a baseline, and it is the same
-        // step: anchor first, then read the table. Declaring both would run two
-        // baselines over one anchor — the synthesized `mode: full` leg AND the
-        // referenced export's — into one prefix, which is not a merge but a
-        // duplicate nobody asked for.
         if let Some(cdc) = &export.cdc
             && cdc.backfill.is_some()
             && cdc.initial.is_some()
@@ -1016,20 +817,12 @@ impl Config {
             );
         }
 
-        // The pairing itself, resolved by the ONE function the CDC job also calls,
-        // so a reference the run would reject cannot pass validation.
-        // (The checkpoint requirement is `baseline_checkpoint_refusal`, above.)
         if let Some(cdc) = &export.cdc
             && cdc.backfill.is_some()
         {
             let pairs = resolve_backfill(export, &self.exports).map_err(|why| {
                 crate::error::coded(crate::error::codes::CONFIG_CDC_SHAPE_INVALID, why)
             })?;
-            // A document store has no schema qualifier: `audit.events` is a
-            // collection, not `events` in schema `audit`. The bare-name fold that
-            // pairs `orders` with `public.orders` on SQL would pair two DIFFERENT
-            // collections here — and turn the other one's export into a recipe the
-            // run loop stops running.
             if !self.source.source_type.is_sql() {
                 for (captured, recipe) in &pairs {
                     if recipe.table.as_deref() != Some(captured.as_str()) {
@@ -1046,9 +839,6 @@ impl Config {
                     }
                 }
             }
-            // The recipe's READ is validated here, not at the leg: `plan`/`check`
-            // skip a recipe, so its table shortcut and `columns:` were first parsed
-            // by the leg — after the anchor had been taken.
             for (table, recipe) in &pairs {
                 if self.source.source_type.is_sql()
                     && let Some(t) = recipe.table.as_deref()
@@ -1056,14 +846,8 @@ impl Config {
                     super::export::validate_table_shortcut_ident(&recipe.name, t)?;
                 }
                 crate::types::parse_column_overrides(&recipe.columns, &recipe.name)?;
-                // One column, one type across the recipe and the stream — decided
-                // here, for every pair, so a conflict added after the baseline
-                // refuses the next run at config load, not after its anchor.
                 refuse_backfill_type_conflict(export, table, recipe)?;
             }
-            // A `table.column` type key is narrowed by LEAF, so two captured tables
-            // with one leaf cannot be typed apart: a recipe's `columns:` on either
-            // would type both. Refuse rather than let the later recipe win silently.
             if let Some((a, b)) = same_leaf_typed_pair(&pairs) {
                 crate::config_bail!(
                     crate::error::codes::CONFIG_CDC_SHAPE_INVALID,
@@ -1076,23 +860,6 @@ impl Config {
             }
         }
 
-        // MongoDB change streams and the MySQL binlog have NO server-side resume
-        // anchor (unlike a PostgreSQL slot, or SQL Server's change table whose
-        // min-LSN floors a missing from-LSN into an over-read): the checkpoint
-        // file IS the anchor. Without it every run re-anchors at "now" and
-        // silently loses every change since the last one — so `mode: cdc` on
-        // these two requires `cdc.checkpoint:` ALWAYS, not only under
-        // `initial: snapshot`.
-        //
-        // MySQL was left out when this rule was first added for mongo, and the
-        // hole was total: `cdc.initial` absent skips the `initial.is_some()` rule
-        // above, and the run-time backstop that would catch it —
-        // `CdcEngine::ensure_anchor`, which demands a checkpoint for
-        // Mysql|Mssql|Mongo|Oracle — is unreachable, because its only production caller
-        // sits inside `initial_snapshot_pending`, which returns early when
-        // `cdc.initial.is_none()`. Measured on a live stand: two runs with three
-        // changes between them captured ZERO events, both exiting 0. `rivet
-        // doctor` already prints the exact diagnosis, but `run` never invokes it.
         if export.mode == ExportMode::Cdc
             && matches!(
                 self.source.source_type,
@@ -1115,15 +882,6 @@ impl Config {
             );
         }
 
-        // (A `mode: cdc` refusal of DOTTED Mongo collection names lived here until
-        // round-3B. It was written when a dotted name really was dropped — the
-        // router split it into a bogus `schema.table` — and the ROUTER was fixed
-        // while the guard that existed because of the bug stayed, refusing a
-        // capture that works and telling operators to rename a production
-        // collection. Mongo's routing now has no split arm at all, so the string
-        // has one reading; see `a_mongo_dotted_name_never_splits_into_a_schema_
-        // qualifier` and `mongo_cdc_accepts_a_dotted_collection_name_because_the_
-        // router_addresses_it`.)
         Ok(())
     }
 }
@@ -1237,8 +995,6 @@ mod tests {
         crate::config::Config::from_yaml(&ok).expect("63 bytes is the identifier limit");
     }
 
-    // ── cdc.backfill: the pairing ────────────────────────────────────────────
-
     /// A batch export reading one table, named as a recipe candidate.
     fn recipe(name: &str, table: &str) -> ExportConfig {
         let mut e = sample_export(name);
@@ -1262,10 +1018,7 @@ mod tests {
         e
     }
 
-    /// A candidate reads ONE table by `table:` and is not itself a stream: a second
-    /// `mode: cdc` export over the same table (a per-table capture kept beside the
-    /// multiplex) reads a log, so it must not make the pairing ambiguous. RED against
-    /// `e.name != cdc.name || …`, under which the other stream pairs too.
+    /// A candidate reads ONE table by `table:` and is not itself a stream.
     #[test]
     fn resolve_backfill_never_pairs_a_table_with_another_stream() {
         let orders = recipe("orders", "orders");
@@ -1278,16 +1031,11 @@ mod tests {
         assert_eq!(pairs[0].1.name, "orders");
     }
 
-    /// The happy path both spellings must agree on: every captured table pairs
-    /// with the export that reads it, and the recipes keep their own strategies —
-    /// which is the whole point, since a multiplex stream's tables do not agree on
-    /// how they are read.
+    /// The happy path both spellings must agree on.
     #[test]
     fn resolve_backfill_pairs_tables_with_their_recipe_exports() {
         let orders = recipe("orders", "orders");
         let mut history = recipe("ext_ref_id_history", "ext_ref_id_history");
-        // Different strategy per table — the case a single `cdc:`-level block
-        // could not express.
         history.chunk_by_key = None;
         history.chunk_column = Some("ref_id".into());
 
@@ -1309,7 +1057,6 @@ mod tests {
             ]
         );
 
-        // The explicit spelling resolves to the same pairs, in the captured order.
         let listed = stream(
             &["orders", "ext_ref_id_history"],
             CdcBackfill::Exports(vec!["orders".into(), "ext_ref_id_history".into()]),
@@ -1318,7 +1065,6 @@ mod tests {
         let pairs = resolve_backfill(&listed, &all).expect("both named");
         assert_eq!(pairs.len(), 2);
 
-        // A schema-qualified capture still names the same relation.
         let qualified = stream(&["public.orders"], CdcBackfill::Auto(AutoWord::Auto));
         let all = vec![orders.clone(), qualified.clone()];
         assert_eq!(
@@ -1328,15 +1074,12 @@ mod tests {
             "orders"
         );
 
-        // No `backfill:` at all ⇒ no pairs, not an error: capture-only is a mode.
         let mut plain = auto.clone();
         plain.cdc = Some(CdcExportConfig::default());
         assert!(resolve_backfill(&plain, &all).unwrap().is_empty());
     }
 
-    /// Every refusal here is a shape that would otherwise present as SUCCESS: the
-    /// stream captures changes over a table whose history nobody loaded, and the
-    /// run exits 0. RED against returning `Ok` for any of them.
+    /// Every refusal here is a shape that would otherwise present as SUCCESS.
     #[test]
     fn resolve_backfill_refuses_every_pairing_that_would_look_like_success() {
         let orders = recipe("orders", "orders");
@@ -1344,21 +1087,17 @@ mod tests {
             resolve_backfill(cdc, all).expect_err("must refuse")
         };
 
-        // A captured table with no export to read it.
         let auto = stream(&["orders", "payments"], CdcBackfill::Auto(AutoWord::Auto));
         let all = vec![orders.clone(), auto.clone()];
         let e = err(&auto, &all);
         assert!(e.contains("payments"), "{e}");
 
-        // Two exports read the same table: the pairing is a guess.
         let twin = recipe("orders_copy", "orders");
         let auto1 = stream(&["orders"], CdcBackfill::Auto(AutoWord::Auto));
         let all = vec![orders.clone(), twin.clone(), auto1.clone()];
         let e = err(&auto1, &all);
         assert!(e.contains("ambiguous") && e.contains("orders_copy"), "{e}");
 
-        // Named explicitly, two exports for ONE table: both would be claimed as
-        // recipes (`orders_copy` silently stops running) and the leg takes the first.
         let listed_twice = stream(
             &["orders"],
             CdcBackfill::Exports(vec!["orders".into(), "orders_copy".into()]),
@@ -1367,7 +1106,6 @@ mod tests {
         let e = err(&listed_twice, &all);
         assert!(e.contains("two exports for table 'orders'"), "{e}");
 
-        // A `query:` export describes rows, not a relation.
         let mut q = recipe("q", "orders");
         q.table = None;
         q.query = Some("SELECT 1".into());
@@ -1376,7 +1114,6 @@ mod tests {
         let e = err(&listed, &all);
         assert!(e.contains("no `table:`"), "{e}");
 
-        // Another change stream is not a baseline.
         let other_cdc = {
             let mut c = stream(&["orders"], CdcBackfill::Auto(AutoWord::Auto));
             c.name = "other_cdc".into();
@@ -1387,14 +1124,12 @@ mod tests {
         let e = err(&listed, &all);
         assert!(e.contains("mode: cdc"), "{e}");
 
-        // An export reading a table this stream does not capture.
         let elsewhere = recipe("elsewhere", "payments");
         let listed = stream(&["orders"], CdcBackfill::Exports(vec!["elsewhere".into()]));
         let all = vec![orders.clone(), elsewhere.clone(), listed.clone()];
         let e = err(&listed, &all);
         assert!(e.contains("does not capture"), "{e}");
 
-        // Partial coverage: the uncovered table is the silent half.
         let history = recipe("hist", "ext_ref_id_history");
         let listed = stream(
             &["orders", "ext_ref_id_history"],
@@ -1407,7 +1142,6 @@ mod tests {
             "{e}"
         );
 
-        // A stream with nothing to capture cannot be paired with anything.
         let mut tableless = stream(&["orders"], CdcBackfill::Auto(AutoWord::Auto));
         tableless.tables = None;
         tableless.table = None;
@@ -1415,8 +1149,6 @@ mod tests {
         let e = err(&tableless, &all);
         assert!(e.contains("nothing to pair"), "{e}");
 
-        // A recipe that reads a SLICE of the table is not a baseline — refused
-        // here, before an anchor exists, not at plan build after it.
         let mut inc = recipe("orders_inc", "orders");
         inc.mode = ExportMode::Incremental;
         let listed = stream(&["orders"], CdcBackfill::Exports(vec!["orders_inc".into()]));
@@ -1426,7 +1158,6 @@ mod tests {
             e.contains("whole table") && e.contains("Incremental"),
             "{e}"
         );
-        // …and a time-window recipe is the same slice-read class.
         let mut win = recipe("orders_win", "orders");
         win.mode = ExportMode::TimeWindow;
         let listed = stream(&["orders"], CdcBackfill::Exports(vec!["orders_win".into()]));
@@ -1434,10 +1165,6 @@ mod tests {
         let e = err(&listed, &all);
         assert!(e.contains("whole table") && e.contains("TimeWindow"), "{e}");
 
-        // Two QUALIFIED names that differ are two relations, whatever their last
-        // segment says: `sales.orders` is not `public.orders`. Pairing them bound
-        // the wrong export's read strategy and types onto the captured table — and
-        // then skipped that export from the run and the load, exit 0.
         let foreign = recipe("sales_orders", "sales.orders");
         let auto = stream(&["public.orders"], CdcBackfill::Auto(AutoWord::Auto));
         let all = vec![foreign.clone(), auto.clone()];
@@ -1447,8 +1174,6 @@ mod tests {
             "{e}"
         );
 
-        // A BARE name still pairs with a qualified one: `orders` is `public.orders`
-        // to an operator who wrote one of them without the schema.
         let bare_recipe = recipe("orders", "orders");
         let all = vec![bare_recipe.clone(), auto.clone()];
         assert_eq!(
@@ -1457,23 +1182,13 @@ mod tests {
                 .len(),
             1
         );
-        // …but only with the DEFAULT schema's: a bare `orders` reads `public.orders`,
-        // so it is not the recipe of `sales.orders` — pairing them silently stopped
-        // running the unrelated `orders` export.
         let sales = stream(&["sales.orders"], CdcBackfill::Auto(AutoWord::Auto));
         let all = vec![bare_recipe.clone(), sales.clone()];
         let e = resolve_backfill(&sales, &all).expect_err("bare does not fold onto sales");
         assert!(e.contains("sales.orders") && e.contains("no export"), "{e}");
     }
 
-    /// A schema-qualified capture (`dbo.orders` — what init writes on SQL Server
-    /// and for a non-`public` PostgreSQL schema) must qualify the recipe's bare
-    /// key by the BARE table name: the consumer, `types::overrides_for_unit`,
-    /// narrows by `split_once('.')` on a `table.column` key, so `dbo.orders.price`
-    /// splits as (`dbo`, `orders.price`) and never applies — the baseline leg
-    /// (which gets the bare key) is typed by the recipe while the stream and the
-    /// recorded spec are not: two types in one `__changes`. The oracle is the
-    /// consumer's answer, not the map's key shape.
+    /// A schema-qualified capture (`dbo.orders`.
     #[test]
     fn effective_columns_reach_the_stream_for_a_schema_qualified_capture() {
         use std::collections::HashMap;
@@ -1492,9 +1207,7 @@ mod tests {
         );
     }
 
-    /// One map for the leg, the stream and the spec: a recipe's bare keys arrive
-    /// qualified to ITS table, the CDC export's own keys win, and a stream with no
-    /// recipes is exactly its own `columns:`.
+    /// One map for the leg, the stream and the spec.
     #[test]
     fn effective_columns_qualifies_each_recipe_to_its_table_and_lets_the_stream_win() {
         use std::collections::HashMap;
@@ -1533,7 +1246,6 @@ mod tests {
             "no bare recipe key may bleed across tables: {m:?}"
         );
 
-        // The stream's own declaration wins over a recipe's for the same column.
         auto.columns
             .insert("orders.price".to_string(), "decimal(14,6)".to_string());
         let all = vec![orders.clone(), history.clone(), auto.clone()];
@@ -1544,13 +1256,10 @@ mod tests {
             Some("decimal(14,6)")
         );
 
-        // No recipes: exactly the export's own map.
         let mut plain = auto.clone();
         plain.cdc = None;
         assert_eq!(effective_columns(&plain, &all), plain.columns);
 
-        // A recipe naming BOTH `price` and `orders.price`: the qualified key wins
-        // deterministically (a HashMap walk made it a coin toss per process).
         let mut twin = orders.clone();
         twin.columns = std::collections::HashMap::from([
             ("price".to_string(), "decimal(8,2)".to_string()),
@@ -1569,9 +1278,7 @@ mod tests {
         }
     }
 
-    /// One predicate for "a baseline on this engine needs a checkpoint": both ways to
-    /// declare the baseline, every engine but PostgreSQL, and a present checkpoint
-    /// satisfies it. It was two rules with two wordings, one per spelling.
+    /// One predicate for "a baseline on this engine needs a checkpoint".
     #[test]
     fn baseline_checkpoint_refusal_is_one_rule_for_both_baselines() {
         use crate::config::{CdcInitialMode, SourceType};
@@ -1597,8 +1304,6 @@ mod tests {
             let why = baseline_checkpoint_refusal(&e, engine).expect("must refuse");
             assert!(why.contains("cdc.checkpoint"), "{why}");
         }
-        // PostgreSQL anchors in the slot; a present checkpoint satisfies any engine;
-        // no baseline means nothing to anchor first.
         assert!(
             baseline_checkpoint_refusal(&with(snap, None, false), SourceType::Postgres).is_none()
         );
@@ -1612,9 +1317,6 @@ mod tests {
     }
 
     /// The run loop asks this to avoid reading one table twice in one invocation.
-    /// It must stay silent on a config that would NOT validate — it runs before
-    /// validation has a chance to speak, and a panic here would replace a clear
-    /// config error with a crash.
     #[test]
     fn backfill_recipe_names_lists_claimed_exports_and_tolerates_a_broken_config() {
         let orders = recipe("orders", "orders");
@@ -1625,13 +1327,11 @@ mod tests {
             vec!["orders"]
         );
 
-        // Unresolvable: no export for the captured table. Empty, not a panic.
         let broken = stream(&["payments"], CdcBackfill::Auto(AutoWord::Auto));
         assert!(backfill_recipe_names(&[orders, broken]).is_empty());
     }
 
-    /// The whole-config loops decide through these two, not inline: `rivet run` /
-    /// `apply` drop the recipes, `rivet plan` drops the recipes AND the streams.
+    /// The whole-config loops decide through these two, not inline.
     #[test]
     fn whole_config_loops_skip_recipes_and_plan_skips_streams_too() {
         let orders = recipe("orders", "orders");
@@ -1660,14 +1360,12 @@ mod tests {
             batch_plan_skip_reason(&auto, &recipes).is_some_and(|w| w.contains("CDC export")),
             "the stream is skipped for being a stream"
         );
-        // A CDC export that is (wrongly) also named as a recipe is still a stream first.
         let mut both = auto;
         both.name = "orders".into();
         assert!(batch_plan_skip_reason(&both, &recipes).is_some_and(|w| w.contains("CDC export")));
     }
 
-    /// The three predicates the CDC job's live-only bodies decide through
-    /// (extracted from inline operators the purity gate flagged, 2026-09-17).
+    /// The three predicates the CDC job's live-only bodies decide through (extracted from inline operators the purity gate flagged, 2026-09-17).
     #[test]
     fn cdc_job_predicates_have_their_truth_tables() {
         let orders = recipe("orders", "orders");

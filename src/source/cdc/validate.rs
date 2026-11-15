@@ -1,16 +1,4 @@
 //! Post-hoc `__pos` continuity check for CDC outputs.
-//!
-//! Reads a CDC run's parts back from the destination (in manifest order) and
-//! verifies the `__pos` column is **monotonically non-decreasing** — every change
-//! stayed in source-log order, no part was reordered, and no part boundary
-//! overlaps the previous one. That proves *ordering + no-duplication + no-reorder*
-//! integrity of what landed in the bucket.
-//!
-//! It deliberately does **not** claim "no transaction was missed": log positions
-//! are byte offsets (MySQL) / LSNs (PostgreSQL, SQL Server), not a dense counter,
-//! so a skipped transaction is indistinguishable from a large one. Completeness at
-//! the *seam between runs* is instead guaranteed by the commit-boundary checkpoint
-//! (and, for PostgreSQL, the slot only advancing after a durable write).
 
 use crate::destination::Destination;
 use crate::error::Result;
@@ -39,8 +27,7 @@ fn parse_pos(s: &str) -> Option<Key> {
     order::key(&serde_json::from_str(s).ok()?)
 }
 
-/// Read the `__pos` column (Utf8) out of a Parquet part body. The body is staged
-/// to a temp file so the parquet reader's `File` `ChunkReader` can seek the footer.
+/// Read the `__pos` column (Utf8) out of a Parquet part body.
 fn read_pos_column(body: Vec<u8>) -> Result<Vec<String>> {
     use std::io::Write;
 
@@ -79,33 +66,9 @@ fn read_pos_column(body: Vec<u8>) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// Verify `__pos` is monotonically non-decreasing across a CDC run's Parquet parts
-/// at `dest`/`prefix`. Returns the range covered and any ordering violations.
+/// Verify `__pos` is monotonically non-decreasing across a CDC run's Parquet parts at `dest`/`prefix`.
 pub(crate) fn check_positions(dest: &dyn Destination, prefix: &str) -> Result<PositionCheck> {
     let manifest_key = join_key(prefix, MANIFEST_FILENAME);
-    // The canonical manifest.json is ABSENT on a daemon/crashed CDC prefix (the
-    // per-roll durability write emits only the run-unique copy). Do NOT report a
-    // false-clean OK over ZERO parts (roast 2026-08-09, #173): fall back to the
-    // run-unique copies (manifest-<run_id>.json) — the same set `load` reconciles
-    // — so validate actually checks the parts that are physically present. Only
-    // an empty result when there is NO manifest of any kind.
-    // The run-unique COPIES first, and the canonical only when there are none.
-    //
-    // The canonical `manifest.json` is a LATEST-RUN POINTER, and an `until_current`
-    // cycle that finds no changes legitimately declares zero parts — which is the
-    // steady state for a scheduled capture, and for most tables of a `tables:`
-    // multiplex most of the time. Reading it alone therefore answered "what did the
-    // last run deliver", while every field printed said "the prefix". MEASURED: a
-    // run captured 3 changes and `validate --depth full` verified 1 part; ONE idle
-    // cycle later the canonical read `parts: []` and the same command reported
-    // `PASSED, 0 parts verified` — then still PASSED after the parquet was
-    // overwritten with junk, and again after it was DELETED, with the copy declaring
-    // it sitting unread beside it.
-    //
-    // The copies are the set `load` reconciles, so validate now asks the same
-    // question the loader does. They do not overlap (one per run) and the canonical
-    // duplicates one of them, so preferring the copies also avoids double-counting.
-    // The canonical stays the fallback for prefixes written before copies existed.
     let mut copies: Vec<(String, RunManifest)> = Vec::new();
     for m in dest.list_prefix(prefix)? {
         let rel = m
@@ -134,10 +97,6 @@ pub(crate) fn check_positions(dest: &dyn Destination, prefix: &str) -> Result<Po
         return Ok(PositionCheck::default());
     }
 
-    // Check each manifest's parts INDEPENDENTLY: a run-unique copy is one run's
-    // full manifest, and __pos is one monotonic sequence WITHIN a run — not
-    // across runs — so concatenating parts from different runs would forge false
-    // backwards-violations. Sum parts/rows; collect every run's violations.
     let (mut parts, mut rows) = (0usize, 0usize);
     let (mut first, mut last): (Option<String>, Option<String>) = (None, None);
     let mut violations = Vec::new();
@@ -147,17 +106,8 @@ pub(crate) fn check_positions(dest: &dyn Destination, prefix: &str) -> Result<Po
             if part.status != crate::manifest::PartStatus::Committed {
                 continue;
             }
-            // A DECLARED part that is missing or undecodable is VERIFIED-WRONG
-            // (a violation in the verdict), not could-not-verify: the manifest
-            // promises the part and the destination refutes the promise —
-            // round-7 measured the old `?` propagation grading a permanently
-            // deleted part as retryable exit 1 while the headline said PASSED.
             let body = match dest.read(&join_key(prefix, &part.path)) {
                 Ok(b) => b,
-                // NOT-FOUND is verified-wrong (the manifest promises, the
-                // destination refutes); any OTHER read error — auth, outage
-                // past the retry budget — is could-not-verify and must stay
-                // exit 1, not page data-integrity (round-8 split).
                 Err(e)
                     if format!("{e:#}").contains("NotFound")
                         || format!("{e:#}").contains("No such file") =>
@@ -199,8 +149,7 @@ pub(crate) fn check_positions(dest: &dyn Destination, prefix: &str) -> Result<Po
     })
 }
 
-/// Pure half: the monotonicity invariant over `(part_id, __pos)` in part→row
-/// order, lifted out of the IO so it is testable without a destination.
+/// Pure half: the monotonicity invariant over `(part_id, __pos)` in part→row order, lifted out of the IO so it is testable without a destination.
 fn check_order(items: &[(u32, String)]) -> (Option<String>, Option<String>, Vec<String>) {
     let mut prev: Option<Key> = None;
     let (mut first, mut last, mut violations) = (None, None, Vec::new());
@@ -223,22 +172,7 @@ fn check_order(items: &[(u32, String)]) -> (Option<String>, Option<String>, Vec<
 
 #[cfg(test)]
 mod v016_checkpoint_compat {
-    //! A checkpoint written by rivet 0.16 must still LOAD and still yield the
-    //! same resume coordinates.
-    //!
-    //! `tests/compat_gate.rs` freezes the same three files but reads them with a
-    //! bare `serde_json::Value` and asks only "does key X exist" — one key per
-    //! engine, and `pos` is never asserted at all. That cannot fail when rivet
-    //! changes: the fixture is what it inspects. It could not, as written —
-    //! `Position` is `pub(crate)`, so an integration test has no access to the
-    //! real loader. Hence this module, beside the code that owns the type.
-    //!
-    //! The two real consumers are both exercised: `Position::load` (does the
-    //! file still deserialize) and `parse_pos` (are the coordinates still
-    //! extracted, and as the right variant). Rename `file` to `binlog_file`,
-    //! or add a required field to the persisted shape, and this goes red where
-    //! the shape-only check stays green — while a user's 0.16 checkpoint
-    //! silently re-anchors and skips every change since it was written.
+    //! A checkpoint written by rivet 0.16 must still LOAD and still yield the same resume coordinates.
 
     use super::parse_pos;
     use crate::source::cdc::Position;
@@ -256,19 +190,8 @@ mod v016_checkpoint_compat {
     }
 
     /// The five decisions a mutation run over this PURE file found ungraded.
-    ///
-    /// `validate.rs` does no I/O of its own beyond a `Destination` trait a test can
-    /// supply, so every mutant in it is offline-reachable and a survivor is a plain
-    /// gap — no live-only argument available. 92 mutants, 80 caught, 5 missed.
-    /// Round-10 STRUCT ordering, executed (the refuter found no test ordered
-    /// the ANCHOR shapes against EVENT shapes anywhere): each engine's
-    /// checkpoint/pin rendering — the exact string the snapshot stamp writes
-    /// into `__pos` — must parse and rank BELOW a later event and ABOVE an
-    /// earlier one. The MySQL pin carries 4 fields (uuid + gtid ride along);
-    /// extras must not break the parse.
     #[test]
     fn anchor_shaped_positions_order_against_event_positions() {
-        // MySQL: 4-field pin vs 2-field events.
         let anchor = r#"{"file":"binlog.000007","pos":500,"server_uuid":"u","gtid_executed":""}"#;
         let earlier = r#"{"file":"binlog.000007","pos":100}"#;
         let later = r#"{"file":"binlog.000008","pos":4}"#;
@@ -278,17 +201,12 @@ mod v016_checkpoint_compat {
         );
         assert!(parse_pos(earlier) < parse_pos(anchor));
         assert!(parse_pos(anchor) < parse_pos(later));
-        // PostgreSQL: slot LSN text vs a later commit LSN.
         let pos = |lsn: &str| format!(r#"{{"lsn":"{lsn}"}}"#);
         assert!(parse_pos(&pos("0/16B2D48")) < parse_pos(&pos("0/16B2D50")));
-        // SQL Server: the pinned anchor carries {"lsn","pinned"}; events carry
-        // {"lsn"} — the same JSON family, extras ignored, fixed-width hex
-        // orders lexically == numerically.
         assert!(
             parse_pos(r#"{"lsn":"0000002a000001f80003","pinned":true}"#)
                 < parse_pos(r#"{"lsn":"0000002a000002000001"}"#)
         );
-        // MongoDB: the pin IS a resume token — same keystring family as events.
         assert!(
             parse_pos(r#"{"_data":"8264AA00000000000129"}"#)
                 < parse_pos(r#"{"_data":"8264AB00000000000129"}"#)
@@ -299,9 +217,6 @@ mod v016_checkpoint_compat {
     fn the_position_verdict_the_order_check_and_the_lsn_key_all_answer_for_themselves() {
         use super::{PositionCheck, check_order, parse_pos};
 
-        // THE VERDICT. `is_ok -> true` makes every `rivet validate` pass whatever it
-        // found; `-> false` makes every one fail. Nothing graded the accessor that
-        // turns the whole check into a yes or no.
         assert!(
             PositionCheck::default().is_ok(),
             "a check with no violations is OK — `-> false` fails every correct export"
@@ -316,10 +231,6 @@ mod v016_checkpoint_compat {
              clean run, which is the only thing this check produces"
         );
 
-        // THE ORDER CHECK. `<` -> `<=` flags EQUAL positions as backwards, and equal
-        // is the normal case: every row of one transaction shares its commit
-        // position and is disambiguated by `__seq`. That mutant turns each
-        // multi-row transaction into a violation.
         let pos = |lsn: &str| format!(r#"{{"lsn":"{lsn}"}}"#);
         let (_, _, v) = check_order(&[(0, pos("0/10")), (0, pos("0/10")), (0, pos("0/20"))]);
         assert!(
@@ -333,16 +244,10 @@ mod v016_checkpoint_compat {
         assert_eq!(first.as_deref(), Some(pos("0/20").as_str()));
         assert_eq!(last.as_deref(), Some(pos("0/10").as_str()));
 
-        // An unparseable value is reported, not skipped — a run whose every position
-        // is junk must not read as clean.
         let (_, _, v) = check_order(&[(7, "not json".into())]);
         assert_eq!(v.len(), 1);
         assert!(v[0].contains("part 7") && v[0].contains("unparseable"));
 
-        // THE LSN KEY. The halves must not bleed into each other: `1/0` is one full
-        // 32-bit step above `0/FFFFFFFF`, and `(hi << 32) ^ lo` only differs from
-        // `|` when the low half overflows 32 bits — which is malformed input, now
-        // refused rather than folded into a meaningless key.
         assert!(parse_pos(&pos("0/FFFFFFFF")) < parse_pos(&pos("1/0")));
         assert!(parse_pos(&pos("0/2")) > parse_pos(&pos("0/1")));
         assert_eq!(
@@ -354,18 +259,6 @@ mod v016_checkpoint_compat {
     }
 
     /// The nested-leg skip must actually skip — measured ungraded by BOTH suites.
-    ///
-    /// `check_positions` lists the prefix RECURSIVELY, so an `initial: snapshot`
-    /// export's `<prefix>/snapshot/manifest-<run_id>.json` was swept up with the CDC
-    /// leg's own copies. Its `parts[].path` is relative to `snapshot/`, so validate
-    /// looked for those parts at the CDC root and reported `could not complete: No
-    /// such file or directory`, exit 1, on a correct export — breaking every
-    /// `rivet validate && deploy` gate on the documented production shape.
-    ///
-    /// The guard was added earlier this session and shipped with nothing grading it:
-    /// deleting it survives the lib suite AND all 106 live CDC tests (both measured
-    /// 2026-08-27). A guard nothing can fail is a guard nobody can trust to still be
-    /// there — which is the whole point of this file's mutation pass.
     #[test]
     fn a_nested_snapshot_legs_manifest_is_not_read_as_this_prefixs_own() {
         use std::sync::Arc;
@@ -379,7 +272,6 @@ mod v016_checkpoint_compat {
         let root = dir.path().join("cdc");
         std::fs::create_dir_all(root.join("snapshot")).expect("nested leg");
 
-        // One parquet with a monotonic `__pos`, at the CDC root.
         let write_part = |at: &std::path::Path, vals: &[&str]| {
             let schema = Arc::new(Schema::new(vec![Field::new(
                 "__pos",
@@ -401,10 +293,6 @@ mod v016_checkpoint_compat {
             &[r#"{"lsn":"0/10"}"#, r#"{"lsn":"0/20"}"#],
         );
 
-        // Built from the type via `RunManifest::for_test`, not hand-written JSON.
-        // The first draft WAS hand-written and took six rounds of `missing field`
-        // before it deserialized; a fixture that drifts from the struct fails on
-        // parse rather than on the property it guards.
         let manifest = |part: &str| {
             serde_json::to_string(&crate::manifest::RunManifest::for_test("r1", &[(part, 2)]))
                 .expect("serialize the manifest")
@@ -415,19 +303,12 @@ mod v016_checkpoint_compat {
             manifest("cdc-000000.parquet"),
         )
         .expect("this leg's own copy");
-        // The nested leg's copy — its part path is relative to `snapshot/`, so a
-        // reader that adopts it looks for `<cdc-root>/snap-000000.parquet`, which
-        // does not exist. That is the exit-1 the guard exists to prevent.
         std::fs::write(
             root.join("snapshot").join("manifest-r9.json"),
             manifest("snap-000000.parquet"),
         )
         .expect("nested leg's copy");
 
-        // A CANONICAL manifest beside the run-unique copy. The fallback reads
-        // `manifests.is_empty() && canonical exists`; with `&&` -> `||` the canonical
-        // is adopted TOO and the same run's parts are counted twice. Without this
-        // file present both operators agree and the mutant survives — measured.
         std::fs::write(
             root.join(crate::manifest::MANIFEST_FILENAME),
             manifest("cdc-000000.parquet"),
@@ -549,7 +430,6 @@ mod v016_checkpoint_compat {
     fn v016_pg_and_mssql_checkpoints_still_yield_their_lsns() {
         let pg = load("pg_cdc.ckpt");
         let raw = serde_json::to_string(&pg.0).expect("serialize");
-        // PG's `0/1A2B3C4D` is parsed into a single u64 (hi<<32 | lo).
         assert_eq!(
             parse_pos(&raw),
             Some(Key(vec![Val::Num(0x1A2B_3C4D)])),
@@ -572,12 +452,10 @@ mod tests {
 
     #[test]
     fn pos_ordering_per_engine() {
-        // MySQL: same file, increasing pos.
         assert!(
             parse_pos(r#"{"file":"binlog.000046","pos":100}"#).unwrap()
                 < parse_pos(r#"{"file":"binlog.000046","pos":200}"#).unwrap()
         );
-        // MySQL: file rotation dominates.
         assert!(
             parse_pos(r#"{"file":"binlog.000046","pos":999}"#).unwrap()
                 < parse_pos(r#"{"file":"binlog.000047","pos":4}"#).unwrap()
@@ -591,8 +469,6 @@ mod tests {
             parse_pos(r#"{"file":"binlog","pos":1}"#).unwrap(),
             parse_pos(r#"{"file":"binlog.000001","pos":1}"#).unwrap()
         );
-        // PostgreSQL LSN: hi/lo hex parsed numerically (not string — "9" > "1A" as
-        // strings would be wrong).
         assert!(parse_pos(r#"{"lsn":"3C/9"}"#).unwrap() < parse_pos(r#"{"lsn":"3C/1A"}"#).unwrap());
         assert!(
             parse_pos(r#"{"lsn":"3C/FFFFFFFF"}"#).unwrap()
@@ -602,15 +478,9 @@ mod tests {
 
     #[test]
     fn roast_mongo_pos_parses_and_orders_by_data_keystring() {
-        // MongoDB `__pos` is `{"_data": <hex>, "rt": <hex>}` — before the mongo
-        // arm parse_pos returned None and `validate` hard-failed every healthy
-        // mongo CDC output. Key on `_data`, the order-preserving resume keystring.
         let a = r#"{"_data":"826A4E0001","rt":"0eFFFFFF"}"#;
         let b = r#"{"_data":"826A4E0002","rt":"0e00"}"#;
         assert!(parse_pos(a).is_some(), "mongo __pos must parse");
-        // Ordering follows `_data`, NOT `rt`: here b's `_data` > a's `_data` even
-        // though b's `rt` sorts before a's — the exact mis-order a rt-first
-        // `__pos` would produce.
         assert!(parse_pos(a).unwrap() < parse_pos(b).unwrap());
     }
 
@@ -624,7 +494,7 @@ mod tests {
     fn check_order_flags_a_backwards_jump() {
         let items = vec![
             (1, r#"{"lsn":"3C/10"}"#.into()),
-            (2, r#"{"lsn":"3C/05"}"#.into()), // earlier LSN in a later part
+            (2, r#"{"lsn":"3C/05"}"#.into()),
         ];
         let (.., violations) = check_order(&items);
         assert_eq!(violations.len(), 1);
@@ -635,7 +505,7 @@ mod tests {
     fn check_order_clean_when_monotonic() {
         let items = vec![
             (1, r#"{"file":"b.000001","pos":100}"#.into()),
-            (2, r#"{"file":"b.000002","pos":4}"#.into()), // file rotation still forward
+            (2, r#"{"file":"b.000002","pos":4}"#.into()),
         ];
         let (first, last, violations) = check_order(&items);
         assert!(violations.is_empty());

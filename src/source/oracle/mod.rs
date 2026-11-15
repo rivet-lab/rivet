@@ -1,10 +1,4 @@
 //! Oracle Database source (19c+) over Oracle's pure-Rust thin driver `oracledb`.
-//!
-//! Design notes live in `dev/research/oracle-source.md`. The two load-bearing
-//! choices: every connection pins its session formats (a cursor is re-injected as
-//! text and Oracle converts it through the session's NLS masks), and every export
-//! query is re-projected server-side so types the driver decodes wrongly never
-//! reach it (`TIMESTAMP WITH TIME ZONE` holding a region name panics the driver).
 
 mod arrow_convert;
 pub(crate) mod cdc;
@@ -44,7 +38,6 @@ fn server_verdict(e: &oracledb::Error) -> Option<crate::error::retry::RetryClass
 }
 
 /// An actionable hint for failures whose cause rivet has measured.
-/// The driver's error as rivet's: the server's words kept, a known failure's hint appended, coded by phase.
 fn driver_failure(msg: String, verdict: Option<crate::error::retry::RetryClass>) -> anyhow::Error {
     let code = driver_failure_code(&msg);
     let text = match known_failure_hint(&msg) {
@@ -82,23 +75,19 @@ fn known_failure_hint(msg: &str) -> Option<&'static str> {
     )
 }
 
-/// Session state pinned on every connection: rendering and implicit conversion
-/// must not depend on the database's or the client host's defaults.
+/// Session state pinned on every connection.
 const SESSION_PIN: &[&str] = &[
     "ALTER SESSION SET TIME_ZONE = '+00:00'",
     "ALTER SESSION SET NLS_CALENDAR = 'GREGORIAN'",
     "ALTER SESSION SET NLS_NUMERIC_CHARACTERS = '.,'",
-    // A keyset / cursor seek compares keys the way ORDER BY sorts them: bytewise.
     "ALTER SESSION SET NLS_SORT = BINARY",
     "ALTER SESSION SET NLS_COMP = BINARY",
-    // A DATE cursor is rendered from a microsecond timestamp, so its fraction is always zero.
     "ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY-MM-DD\"T\"HH24:MI:SS\".000000\"'",
     "ALTER SESSION SET NLS_TIMESTAMP_FORMAT = 'YYYY-MM-DD\"T\"HH24:MI:SS.FF'",
     "ALTER SESSION SET NLS_TIMESTAMP_TZ_FORMAT = 'YYYY-MM-DD\"T\"HH24:MI:SS.FF TZH:TZM'",
 ];
 
-/// The run-window harm counters: lock waits (count + ms), disk sorts (the temp
-/// spill `job::spill_total` folds via its `temp_files` key), and read volume.
+/// The run-window harm counters: lock waits (count + ms), disk sorts (the temp spill `job::spill_total` folds via its `temp_files` key), and read volume.
 const HARM_COUNTERS_SQL: &str = "\
     SELECT 'oracle_lock_waits', NVL(SUM(total_waits), 0) FROM v$system_event \
       WHERE event LIKE 'enq: TX%' OR event LIKE 'enq: TM%' \
@@ -208,14 +197,11 @@ fn connect_string(parts: &OracleUrl, tls: Option<&TlsConfig>) -> Result<String> 
 pub(crate) fn connect(url: &str, tls: Option<&TlsConfig>) -> Result<Connection> {
     let parts = parse_oracle_url(url)?;
     crate::source::require_tls_or_loopback(url, tls)?;
-    // The driver builds its TLS config from the process default provider, and the
-    // binary links two (ring via reqwest, aws-lc via the driver): pick one.
     let _ = rustls::crypto::ring::default_provider().install_default();
     let config = oracledb::Config::default()
         .set_credentials(&parts.user, parts.password.expose())
         .set_connect_string(&connect_string(&parts, tls)?)
         .ora()?
-        // Re-executing a cached statement over a wide row desyncs the beta driver.
         .set_stmtcachesize(0);
     let conn = oracledb::connect(config)
         .ora()
@@ -226,8 +212,7 @@ pub(crate) fn connect(url: &str, tls: Option<&TlsConfig>) -> Result<Connection> 
     Ok(conn)
 }
 
-/// Rows to fetch per round trip and in the first (probe) batch: few when a LOB
-/// makes the row width unknowable up front, else the controller's target.
+/// Rows to fetch per round trip and in the first (probe) batch.
 fn probe_rows(has_lob: bool, target: usize) -> usize {
     const LOB_PROBE_ROWS: usize = 16;
     if has_lob {
@@ -259,9 +244,7 @@ fn unique_alias(base: &str, names: &[&str]) -> String {
     alias
 }
 
-/// A result column name an outer query cannot reference: the ROWID pseudo-column
-/// shadows it, or it cannot be written as a quoted identifier.
-/// Refuse a re-projected column whose name an outer query cannot reference; the alias is the remedy.
+/// A result column name an outer query cannot reference.
 fn alias_required(name: &str) -> anyhow::Error {
     crate::error::coded(
         crate::error::codes::SOURCE_QUERY_COLUMN_UNREFERENCEABLE,
@@ -377,7 +360,6 @@ impl OracleSource {
     }
 
     /// Can this user read V$SYSSTAT and V$SYSTEM_EVENT, the harm and governor probes' views?
-    /// `None` when the connection itself fails.
     pub(crate) fn sample_harm_views(url: &str, tls: Option<&TlsConfig>) -> Option<bool> {
         let src = Self::connect_with_tls(url, tls).ok()?;
         let mut readable = true;
@@ -431,10 +413,8 @@ impl OracleSource {
         Some(out)
     }
 
-    /// Column metadata of `query` without fetching a row. Locator mode, so a LOB is
-    /// described as CLOB/BLOB (an inline fetch reports it as LONG / LONG RAW).
+    /// Column metadata of `query` without fetching a row.
     fn describe(&self, query: &str) -> Result<Vec<Metadata>> {
-        // Parse-only: a `WHERE 1 = 0` wrap still EXECUTES an aggregate query in full.
         let mut stmt = self
             .conn
             .statement(query)
@@ -543,12 +523,9 @@ impl OracleSource {
             .statement(&built.sql)
             .ora()?
             .fetch_array_size(fetch)
-            // A larger prefetch with a LOB in a wide row desyncs the thin driver's
-            // protocol (measured: fails at 3+, correct at 0..=2).
             .prefetch_rows(1)
             .build()
             .ora()?;
-        // The budget bounds each server round trip too, not only the gaps between rows.
         self.conn.set_call_timeout(stmt_timeout).ora()?;
         let timed_out = |e: anyhow::Error| match stmt_timeout {
             Some(budget) if budget_spent(started.elapsed(), budget) => {
@@ -655,8 +632,7 @@ impl OracleSource {
     }
 }
 
-/// The refusal for an incremental cursor on a TIMESTAMP finer than the microsecond rivet
-/// stores: the saved cursor falls below its own row, which every run then re-exports.
+/// The refusal for an incremental cursor on a TIMESTAMP finer than the microsecond rivet stores.
 fn sub_micro_cursor_refusal(
     cursor: Option<&crate::plan::IncrementalCursorPlan>,
     cols: &[(&str, bool, &str)],
@@ -683,10 +659,7 @@ fn sub_micro_cursor_refusal(
     })
 }
 
-/// The result columns the schema carries, and where each sits in a row: the query's own
-/// columns, then whatever an outer wrapper added after the LOB empty-value flags (the
-/// coalesce cursor), skipping the flags themselves. None when the result holds fewer
-/// columns than the probe described.
+/// The result columns the schema carries, and where each sits in a row.
 fn result_columns<M: Clone>(
     all: &[M],
     native: usize,
@@ -720,7 +693,6 @@ impl Source for OracleSource {
 
     fn export(&mut self, request: &ExportRequest<'_>, sink: &mut dyn BatchSink) -> Result<()> {
         let result = self.export_within_budget(request, sink);
-        // The call timeout is per connection: clear it on every exit, not only on success.
         let reset = self.conn.set_call_timeout(None).ora();
         result.and(reset)
     }
@@ -790,14 +762,12 @@ impl Source for OracleSource {
             .map(|v| v == "Y"))
     }
 
-    /// Source-harm counters over the run window (needs SELECT on V$SYSSTAT /
-    /// V$SYSTEM_EVENT, e.g. `SELECT_CATALOG_ROLE`; `None` without it).
+    /// Source-harm counters over the run window (needs SELECT on V$SYSSTAT / V$SYSTEM_EVENT, e.g.
     fn harm_counters(&mut self) -> Option<Vec<(String, i64)>> {
         self.named_counters(HARM_COUNTERS_SQL)
     }
 
-    /// Foreign redo-write pressure for the governor: `redo log space requests`
-    /// — sessions waiting for log space, which a read-only export cannot cause.
+    /// Foreign redo-write pressure for the governor.
     fn sample_governor_pressure(&mut self) -> Option<u64> {
         self.query_scalar("SELECT value FROM v$sysstat WHERE name = 'redo log space requests'")
             .ok()
@@ -842,7 +812,7 @@ pub(crate) fn is_sub_microsecond_type(data_type: &str, scale: Option<i32>) -> bo
     )
 }
 
-/// Whether a catalog `(data_type, precision, scale)` is a NUMBER with a scale or a FLOAT: an integer or bare NUMBER is neither.
+/// Whether a catalog `(data_type, precision, scale)` is a NUMBER with a scale or a FLOAT.
 pub(crate) fn is_inexact_number_type(
     data_type: &str,
     precision: Option<u32>,
@@ -858,7 +828,7 @@ pub(crate) fn is_inexact_number_type(
     }
 }
 
-/// The columns of the table named by the catalog literals `owner` and `table` that the catalog declares wider than the type the driver delivers: a TIMESTAMP finer than a microsecond, a NUMBER with a scale, a FLOAT.
+/// The columns of the table named by the catalog literals `owner` and `table` that the catalog declares wider than the type the driver delivers.
 pub(crate) fn declared_wider_columns(
     src: &mut OracleSource,
     owner: &str,
@@ -1184,7 +1154,6 @@ mod tests {
 
     #[test]
     fn a_raw_delimiter_in_the_password_is_refused_not_read_two_ways() {
-        // A raw '/' made the redactor and the TLS gate read a different host than the driver.
         for bad in [
             "oracle://u:Qm4/Tz8@127.0.0.1:1521/FREEPDB1",
             "oracle://u:k@localhost/q@192.168.0.165:1521/FREEPDB1",
@@ -1320,18 +1289,15 @@ mod error_code_tests {
         }
     }
 
-    /// A malformed URL (usage), the driver's failures by phase (environment), an alias-less
-    /// re-read column (usage) and an unsupported `tls.ca_file` (usage) carry their codes.
+    /// A malformed URL (usage), the driver's failures by phase (environment), an alias-less re-read column (usage) and an unsupported `tls.ca_file` (usage) carry their codes.
     #[test]
     fn oracle_url_driver_alias_and_tls_refusals_carry_their_codes() {
         let err = parse_oracle_url("oracle://h:1521/svc").unwrap_err();
         crate::error::assert_coded(&err, "RIVET_CONFIG_SOURCE_URL_INVALID", 1);
-        // "no listener" is a transient failure to the retry classifier: environment, exit 2.
         let err = driver_failure("ORA-12541: TNS:no listener".into(), None);
         crate::error::assert_coded(&err, "RIVET_SOURCE_CONNECT_FAILED", 2);
         let err = driver_failure("ORA-00942: table or view does not exist".into(), None);
         crate::error::assert_coded(&err, "RIVET_SOURCE_QUERY_FAILED", 1);
-        // A connection closed during setup is transient to the retry classifier: exit 2.
         let err = driver_failure("unexpected end of file".into(), None);
         crate::error::assert_coded(&err, "RIVET_SOURCE_CONNECT_FAILED", 2);
         assert!(err.to_string().contains("hint:"), "{err}");

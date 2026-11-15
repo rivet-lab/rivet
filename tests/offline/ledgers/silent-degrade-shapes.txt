@@ -1,4 +1,3 @@
-src/source/cdc/mod.rs::corrupt_checkpoint_fails_loud_not_silently_absent: .ok().flatten()	2026-11-08 counted at the 35 -> 24 cut; refuse with SOURCE_VALUE_UNREPRESENTABLE when the arm is not a genuine NULL
 src/source/cdc/spill.rs::get_value_at: => RivetValue::Null	2026-11-08 counted at the 35 -> 24 cut; refuse with SOURCE_VALUE_UNREPRESENTABLE when the arm is not a genuine NULL
 src/source/cdc/value.rs::from_mysql: => RivetValue::Null	2026-11-08 counted at the 35 -> 24 cut; refuse with SOURCE_VALUE_UNREPRESENTABLE when the arm is not a genuine NULL
 src/source/mongo/cdc.rs::to_change_event: => RivetValue::Null	2026-11-08 counted at the 35 -> 24 cut; refuse with SOURCE_VALUE_UNREPRESENTABLE when the arm is not a genuine NULL
@@ -13,9 +12,6 @@ src/source/mssql/mod.rs::fetch_mssql_decimal_catalog_hints: .ok().flatten() #2	2
 src/source/mssql/mod.rs::fetch_mssql_decimal_catalog_hints: .ok().flatten() #3	2026-11-08 counted at the 35 -> 24 cut; refuse with SOURCE_VALUE_UNREPRESENTABLE when the arm is not a genuine NULL
 src/source/mysql/arrow_convert.rs::int64: .ok().flatten()	2026-11-08 counted at the 35 -> 24 cut; refuse with SOURCE_VALUE_UNREPRESENTABLE when the arm is not a genuine NULL
 src/source/mysql/arrow_convert.rs::time64_micros: .ok().flatten()	2026-11-08 counted at the 35 -> 24 cut; refuse with SOURCE_VALUE_UNREPRESENTABLE when the arm is not a genuine NULL
-src/source/mysql/cdc.rs::open_on: .ok().flatten()	2026-11-08 counted at the 35 -> 24 cut; refuse with SOURCE_VALUE_UNREPRESENTABLE when the arm is not a genuine NULL
-src/source/postgres/arrow_convert.rs::build_pg_list_array: .ok().flatten()	2026-11-08 counted at the 35 -> 24 cut; refuse with SOURCE_VALUE_UNREPRESENTABLE when the arm is not a genuine NULL
-src/source/postgres/arrow_convert.rs::build_pg_text_array: .ok().flatten()	2026-11-08 counted at the 35 -> 24 cut; refuse with SOURCE_VALUE_UNREPRESENTABLE when the arm is not a genuine NULL
 src/source/postgres/arrow_convert.rs::side_a: .ok().flatten()	2026-11-08 counted at the 35 -> 24 cut; refuse with SOURCE_VALUE_UNREPRESENTABLE when the arm is not a genuine NULL
 src/source/postgres/cdc.rs::map_columns: unwrap_or(RivetValue::Null)	2026-11-08 counted at the 35 -> 24 cut; refuse with SOURCE_VALUE_UNREPRESENTABLE when the arm is not a genuine NULL
 src/source/postgres/mod.rs::server_context: .ok().flatten()	2026-11-08 counted at the 35 -> 24 cut; refuse with SOURCE_VALUE_UNREPRESENTABLE when the arm is not a genuine NULL

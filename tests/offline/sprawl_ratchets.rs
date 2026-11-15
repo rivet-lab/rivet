@@ -58,7 +58,6 @@ const LONG_FUNCTION_LINES: usize = 150;
 const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ("src/cli/dispatch.rs::dispatch#1", 195),
     ("src/cli/dispatch.rs::dispatch_cdc#1", 162),
-    ("src/config/cdc.rs::validate_export_cdc#1", 174),
     ("src/error/retry.rs::classify_error#1", 206),
     ("src/format/csv.rs::write_csv_value#1", 239),
     ("src/init/yaml_scaffold.rs::export_block_lines#1", 339),
@@ -112,26 +111,10 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ("src/plan/build.rs::resolve_chunked_strategy#1", 175),
     ("src/preflight/doctor.rs::doctor#1", 268),
     ("src/preflight/mod.rs::check#1", 315),
-    ("src/source/cdc/mod.rs::create_change_stream#1", 195),
-    ("src/source/mongo/cdc.rs::open#1", 211),
-    ("src/source/mongo/mod.rs::export#1", 162),
-    ("src/source/mssql/arrow_convert.rs::build_array#1", 264),
-    ("src/source/mssql/cdc.rs::open#1", 161),
-    ("src/source/mssql/mod.rs::export#1", 192),
-    ("src/source/mysql/arrow_convert.rs::build_array#1", 347),
-    ("src/source/mysql/cdc.rs::fill#1", 361),
+    ("src/source/mssql/arrow_convert.rs::build_array#1", 253),
+    ("src/source/mysql/arrow_convert.rs::build_array#1", 315),
+    ("src/source/mysql/cdc.rs::fill#1", 263),
     ("src/source/oracle/arrow_convert.rs::build_column#1", 178),
-    ("src/source/postgres/arrow_convert.rs::build_array#1", 158),
-    (
-        "src/source/postgres/arrow_convert.rs::build_pg_list_array#1",
-        156,
-    ),
-    (
-        "src/source/postgres/cdc.rs::check_configured_tables_are_routable#1",
-        159,
-    ),
-    ("src/source/postgres/cdc.rs::fill#1", 210),
-    ("src/source/postgres/mod.rs::pg_run_export#1", 160),
 ];
 
 /// Every text file under `dir` that may hold a reference, as (repo-relative path, text).
