@@ -1288,8 +1288,8 @@ fn mssql_cdc_a_column_in_another_codepage_is_refused_not_stored_as_question_mark
         "the refusal must name the column and the cause; stderr:\n{stderr}"
     );
     assert!(
-        duckdb_dir_parquet_distinct_strings(&out, "v").is_empty(),
-        "a refused run must deliver no value"
+        read_all_parts(&out).is_empty(),
+        "a refused run must deliver no part"
     );
 }
 
@@ -1326,9 +1326,16 @@ fn mssql_cdc_a_column_in_the_same_codepage_is_still_captured() {
         "same-codepage columns must still be captured; stderr:\n{}",
         String::from_utf8_lossy(&res.stderr)
     );
+    let batches = read_all_parts(&out);
+    let v = batches[0]
+        .column_by_name("v")
+        .expect("column v")
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .expect("v is a string column");
     assert_eq!(
-        duckdb_dir_parquet_distinct_strings(&out, "v"),
-        std::collections::BTreeSet::from(["café".to_string()]),
+        v.value(0),
+        "café",
         "the same-codepage value must arrive byte-equal"
     );
 }
