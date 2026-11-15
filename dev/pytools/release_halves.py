@@ -242,12 +242,23 @@ def tag_refusal(sha: str, gate: Path, hosted: Path | None, gh: Gh = run_gh) -> s
         return fetch_hosted(sha, Path(tmp), repo_slug(), gh) or halves_refusal(sha, gate, Path(tmp))
 
 
-def fetch_hosted(sha: str, out: Path, repo: str, gh: Gh = run_gh) -> str | None:
-    """Download into `out` the newest hosted-workflow run on main whose verdict artifact is of `sha`, with its run.json and jobs.json; the refusal when there is none."""
+def hosted_runs(repo: str, gh: Gh = run_gh) -> list[dict]:
+    """The last `RUN_LIMIT` runs of the hosted workflow on main, newest first, as `gh run list` reports them."""
+    return json.loads(gh(["run", "list", "--repo", repo, "--workflow", Path(WORKFLOW).name, "--branch", BRANCH, "--limit", str(RUN_LIMIT),
+                          "--json", "databaseId,status,headSha,conclusion"]))
+
+
+def run_records(repo: str, run_id: object, gh: Gh = run_gh) -> tuple[str, str]:
+    """The run record and the job list of run `run_id` exactly as GitHub reports them."""
+    base = f"repos/{repo}/actions/runs/{run_id}"
+    return gh(["api", base]), gh(["api", f"{base}/jobs?filter=latest&per_page=100"])
+
+
+def fetch_hosted(sha: str, out: Path, repo: str, gh: Gh = run_gh, run_id: object = None) -> str | None:
+    """Download into `out` the newest hosted-workflow run on main (or run `run_id`) whose verdict artifact is of `sha`, with its run.json and jobs.json; the refusal when there is none."""
     artifact = fill(workflow_plan()["artifact"])
     try:
-        runs = json.loads(gh(["run", "list", "--repo", repo, "--workflow", Path(WORKFLOW).name, "--branch", BRANCH, "--limit", str(RUN_LIMIT),
-                              "--json", "databaseId,status"]))
+        runs = [{"databaseId": run_id, "status": "completed"}] if run_id else hosted_runs(repo, gh)
     except (subprocess.CalledProcessError, OSError, ValueError) as e:
         return refuse("HOSTED", f"could not list the runs of {WORKFLOW} with gh ({e}); pass --hosted-record DIR instead")
     for run in runs:
@@ -260,11 +271,13 @@ def fetch_hosted(sha: str, out: Path, repo: str, gh: Gh = run_gh) -> str | None:
             continue
         verdict = load_json(got / "hosted-verdict.json")
         if isinstance(verdict, dict) and verdict.get("sha") == sha:
-            base = f"repos/{repo}/actions/runs/{run['databaseId']}"
+            run_text, jobs_text = run_records(repo, run["databaseId"], gh)
             (out / "verdict.json").write_text(json.dumps(verdict))
-            (out / "run.json").write_text(gh(["api", base]))
-            (out / "jobs.json").write_text(gh(["api", f"{base}/jobs?filter=latest&per_page=100"]))
+            (out / "run.json").write_text(run_text)
+            (out / "jobs.json").write_text(jobs_text)
             return None
+    if run_id:
+        return refuse("HOSTED", f"run {run_id} of {WORKFLOW} holds no artifact {artifact!r} with a hosted verdict of {sha[:12]}")
     return refuse("HOSTED", f"none of the last {RUN_LIMIT} completed runs of {WORKFLOW} on {BRANCH} in {repo} holds a hosted verdict of {sha[:12]}: dispatch `gate-hosted` with sha={sha}")
 
 
@@ -389,7 +402,7 @@ def fetch_self_test(good: dict) -> None:
                 return json.dumps([{"databaseId": i, "status": status[i]} for i in artifacts])
             if args[:2] == ["run", "download"]:
                 assert args[args.index("--name") + 1] == "hosted-verdict-main", args
-                body = artifacts[int(args[2])]
+                body = artifacts.get(int(args[2]))
                 if body is None:
                     raise subprocess.CalledProcessError(1, args)
                 out = Path(args[args.index("--dir") + 1])
@@ -415,6 +428,12 @@ def fetch_self_test(good: dict) -> None:
                 gate = Path(tmp) / "timings.jsonl"
                 gate.write_text(json.dumps(good["devbox"][0]) + "\n")
                 assert halves_refusal(SHA, gate, Path(tmp), plan=good["plan"], repo=REPO) is None, name
+    pinned = fake({RUN_ID: good["verdict"], 9: other}, {RUN_ID: "completed", 9: "completed"})
+    no_list = lambda args: pinned(args) if args[:2] != ["run", "list"] else (_ for _ in ()).throw(AssertionError("a pinned run is never searched for"))  # noqa: E731
+    for run_id, want in ((RUN_ID, None), (9, "HALVES_HOSTED"), (77, "HALVES_HOSTED")):
+        with tempfile.TemporaryDirectory() as tmp:
+            got = fetch_hosted(SHA, Path(tmp), REPO, no_list, run_id=run_id)
+            assert (got is None and want is None) or (got and want and got.startswith(want) and f"run {run_id}" in got), (run_id, got)
 
 
 def self_test() -> int:
