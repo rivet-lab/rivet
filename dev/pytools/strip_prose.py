@@ -10,7 +10,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-KEEP = re.compile(r"SAFETY|clippy::|rustfmt|mutants::|cfg_attr")
+KEEP = re.compile(r"SAFETY|clippy::|rustfmt|mutants::|cfg_attr|allow-cyrillic|allow-catch-unwind|allow-byte-slice")
 EXEMPT = {"tests/offline/rig_oracle_ratchet.rs", "tests/offline/sprawl_ratchets.rs"}
 
 

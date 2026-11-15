@@ -1,12 +1,4 @@
-//! An UPDATE that moves its row: to another primary key, or to another partition of a
-//! base-and-buffer table.
-//!
-//! Either move is written as a delete of the old row and an insert of the new one (ADR-0030).
-//! A key move must retract the old key, or every latest-image-per-key merge keeps it live
-//! beside the new one; a partition move must carry the old partition into the buffer, because
-//! `rivet compact` merges only within the partitions the buffer's own rows name. The delete
-//! keeps the event's ordinal and the insert takes the next one, so the insert is the key's
-//! latest change.
+//! An UPDATE that moves its row: to another primary key, or to another partition of a base-and-buffer table.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -337,7 +329,6 @@ fn partition_moves(
         Some(fix) => fix.apply(&v).ok(),
         None => Some(v),
     };
-    // A cell the decoder cannot read is refused by the part writer with its own code.
     let (Some(before), Some(after)) = (fixed(before), fixed(after)) else {
         return Ok(false);
     };
@@ -486,7 +477,6 @@ mod tests {
     #[test]
     fn a_mysql_timestamp_update_splits_only_when_its_utc_day_changes() {
         let (cols, g) = (ts_col(), day_guard());
-        // 2023-12-31 23:59:59 UTC and 2024-01-01 00:00:00 UTC, one second apart.
         let ev = update(Some("1704067199"), "1704067200");
         let (delete, insert) = split_move(&ev, &[], Some(&g), &cols, CdcEngine::Mysql)
             .unwrap()

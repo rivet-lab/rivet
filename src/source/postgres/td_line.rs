@@ -17,7 +17,7 @@ pub(crate) struct RawColumn {
     pub quoted: bool,
 }
 
-/// One `table <relations>: <OP>: <cells>` line cut once: the relation list, the operation, the old-key cells and the new cells.
+/// One `table <relations>: <OP>: <cells>` line cut once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Line<'a> {
     pub relations: &'a str,
@@ -101,7 +101,7 @@ fn column(s: &str) -> Option<(RawColumn, &str)> {
     ))
 }
 
-/// A column name at the start of `s`: a quoted identifier to its closing quote, or a bare `[A-Za-z0-9_]` run; followed by the `[` of its type.
+/// A column name at the start of `s`: a quoted identifier to its closing quote, or a bare `[A-Za-z0-9_]` run.
 fn read_name(s: &str) -> Option<(String, &str)> {
     if seeded!("pg-test-decoding-column-name-cut-at-bracket", true, false) {
         let end = s.find('[')?;
@@ -367,7 +367,7 @@ mod tests {
         );
     }
 
-    /// An array type label carries its own `[]`, and a quoted type name may hold `]:`; the value follows the first `]:` outside quotes.
+    /// An array type label carries its own `[]`, and a quoted type name may hold `]:`.
     #[test]
     fn a_type_label_is_read_to_its_own_end() {
         let line = tokenize(
