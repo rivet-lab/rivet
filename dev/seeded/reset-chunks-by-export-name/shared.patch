@@ -1,5 +1,5 @@
 diff --git a/src/pipeline/cli.rs b/src/pipeline/cli.rs
-index 19eaed5e..3c5b2ff2 100644
+index 19eaed5..3c5b2ff 100644
 --- a/src/pipeline/cli.rs
 +++ b/src/pipeline/cli.rs
 @@ -618,14 +618,8 @@ pub fn reset_chunk_checkpoint(config_path: &str, export_name: &str) -> Result<()
@@ -20,12 +20,12 @@ index 19eaed5e..3c5b2ff2 100644
  
  /// Clear chunk checkpoints for every export **named in `config_path`'s YAML** that currently has an `in_progress` chunk run (`chunk_run.status = 'in_progress'`).
 diff --git a/src/state/checkpoint.rs b/src/state/checkpoint.rs
-index 8ac6a580..156ea3a1 100644
+index 5dbbffc..40e8535 100644
 --- a/src/state/checkpoint.rs
 +++ b/src/state/checkpoint.rs
 @@ -19,7 +19,8 @@ pub struct ChunkTaskInfo {
  
- /// Whether a chunk run stored under `stored` (`None`: it recorded no source) belongs to the stream reading `source`, however its source was spelled when it was stored.
+ /// Whether a chunk run stored under `stored` (`None`: it recorded no source) belongs to the stream reading `source`.
  pub(super) fn chunk_run_is_of(source: &str, stored: Option<&str>) -> bool {
 -    stored.is_none_or(|s| s == source || crate::config::canonical_source_key(s) == source)
 +    let _ = (source, stored);

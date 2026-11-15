@@ -5,9 +5,6 @@ use super::StateStore;
 
 impl StateStore {
     /// Persist a completed `RunJournal` to the state DB.
-    ///
-    /// Called once per export run, after `RunCompleted` has been recorded.
-    /// Overwrites any existing row for the same `run_id` (idempotent on retry).
     pub fn store_journal(&self, journal: &RunJournal) -> Result<()> {
         let json = serde_json::to_string(journal)?;
         let now = chrono::Utc::now().to_rfc3339();
@@ -28,7 +25,7 @@ impl StateStore {
         Ok(())
     }
 
-    /// Load a journal by `run_id`.  Returns `None` if the run is not found.
+    /// Load a journal by `run_id`.
     #[allow(dead_code)]
     pub fn load_journal(&self, run_id: &str) -> Result<Option<RunJournal>> {
         let json = self.query_opt(

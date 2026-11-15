@@ -4,26 +4,7 @@ use std::collections::HashSet;
 
 use super::StateStore;
 
-/// The `run_status` ledger — a best-effort ADVISORY record of each export run's
-/// lifecycle: written `running` at run START (before any part lands) and
-/// transitioned to a terminal status at finalize. The bucket manifest is a
-/// companion PROJECTION (its status written FROM the same lifecycle), so a
-/// cross-boundary reader (Airflow over the bucket) and a rivet process over a
-/// shared state DB read the same signal. Row columns: `run_id` PK, `export_name`,
-/// `prefix` (the run's write URI — the key `gc_orphans` matches at-or-under
-/// `plan.gcs_prefix`), `status` (`running`|`success`|`failed`|`interrupted`),
-/// `started_at`, `finished_at`.
-///
-/// NOT authoritative, by design: every write is best-effort (a miss only warns)
-/// and `gc_orphans` reads it FAIL-OPEN — an unwritten or unreadable ledger makes
-/// gc `active` (spare everything), the same safe behaviour as no ledger at all.
-/// It only ever REFINES gc toward deleting a dead orphan; it never risks deleting
-/// a live one. `gc_orphans` uses it to tell a LIVE extract (a `running` run NOT
-/// superseded by a newer run of the same export) from a crash orphan — no
-/// wall-clock heuristic. A hard-crashed run leaves a stale `running` row; a later
-/// run of the same export SUPERSEDES it (higher `started_at`), so it stops
-/// counting as active without any age/lease timer.
-/// One `run_status` row, as `rivet state runs` prints it.
+/// The `run_status` ledger — a best-effort ADVISORY record of each export run's lifecycle.
 pub struct RunStatusRow {
     pub run_id: String,
     pub export_name: String,
@@ -45,9 +26,7 @@ pub enum FinishOutcome {
 }
 
 impl StateStore {
-    /// Record an export run as `running` at its START. Upsert on `run_id` so a
-    /// RESUMED run reuses its row and re-arms `running` (clearing any prior
-    /// terminal status / `finished_at` from an earlier attempt).
+    /// Record an export run as `running` at its START.
     pub fn begin_run(
         &self,
         run_id: &str,
@@ -55,8 +34,6 @@ impl StateStore {
         prefix: &str,
         started_at: &str,
     ) -> Result<()> {
-        // On a shared Postgres state the SERVER stamps the start: supersession ranks runs by
-        // it, and writers on hosts with skewed clocks would otherwise rank by their own clocks.
         let (stamp, params) = match &self.state_ref {
             super::StateRef::Postgres(_) => (
                 "to_char(clock_timestamp() AT TIME ZONE 'UTC', \
@@ -90,9 +67,7 @@ impl StateStore {
         Ok(())
     }
 
-    /// Transition a run to a terminal status (`success` | `failed` |
-    /// `interrupted`) at finalize. A no-op if the row is absent (a run that
-    /// never called `begin_run` — e.g. a legacy/in-memory path).
+    /// Transition a run to a terminal status (`success` | `failed` | `interrupted`) at finalize.
     pub fn finish_run(&self, run_id: &str, status: &str, finished_at: &str) -> Result<()> {
         self.execute(
             "UPDATE run_status SET status = ?2, finished_at = ?3 WHERE run_id = ?1",
@@ -101,13 +76,7 @@ impl StateStore {
         Ok(())
     }
 
-    /// Is a LIVE extract writing `prefix`? True iff some `running` run on that
-    /// prefix is NOT superseded by a newer run of the SAME export that also wrote
-    /// at-or-under/over `prefix` (a newer `started_at` means the old run crashed
-    /// and its successor already re-ran, so the stale `running` no longer protects
-    /// anything). A same-named export of ANOTHER config on a shared state DB
-    /// writes elsewhere and supersedes nothing here. Supersession, not a clock —
-    /// the reconciliation is record-vs-record, never record-vs-`now`.
+    /// Is a LIVE extract writing `prefix`?
     pub fn has_active_run_on_prefix(&self, prefix: &str) -> Result<bool> {
         let sql = format!(
             "SELECT 1 FROM run_status r WHERE {} LIMIT 1",
@@ -116,12 +85,7 @@ impl StateStore {
         Ok(self.query_opt(&sql, &[prefix.into()], |_| ())?.is_some())
     }
 
-    /// The status of ONE run-status row, or `None` when no row exists — the gc
-    /// marker sweep's ledger probe: a `Running` BUCKET marker whose ledger row
-    /// is TERMINAL is a dead crash marker even though no Success ever
-    /// superseded it (an abandoned export's marker can never be superseded —
-    /// round-5, three agents independently). Co-located only; a stateless gc
-    /// has no ledger and keeps the conservative supersession-only sweep.
+    /// The status of ONE run-status row, or `None` when no row exists.
     pub fn run_status_of(&self, run_id: &str) -> Result<Option<String>> {
         let sql = "SELECT status FROM run_status WHERE run_id = ?1";
         Ok(self
@@ -130,7 +94,7 @@ impl StateStore {
             .next())
     }
 
-    /// Whether a run of `export` finished `success` at the destination `uri`: the same text, with or without a trailing `/`, or a relative local path as a run before 0.32 recorded it.
+    /// Whether a run of `export` finished `success` at the destination `uri`.
     pub fn has_recorded_success(&self, export: &str, uri: &str) -> Result<bool> {
         let recorded = self.query(
             "SELECT DISTINCT prefix FROM run_status WHERE export_name = ?1 AND status = 'success'",
@@ -163,18 +127,8 @@ impl StateStore {
         )
     }
 
-    /// The run-status rows, newest first — `rivet state runs`. `running_only`
-    /// narrows to the rows that can freeze a prefix (gc/cleanup read them).
+    /// The run-status rows, newest first — `rivet state runs`.
     pub fn recent_run_status(&self, last: usize, running_only: bool) -> Result<Vec<RunStatusRow>> {
-        // COALESCE: `begin_run` leaves finished_at NULL until finalize, and the
-        // row mapper's text() refuses NULL — the running rows are exactly the
-        // ones this listing exists for (caught by the e2e test seeding through
-        // the REAL begin_run; a hand-seeded '' fixture hid it).
-        // ONE column list for both branches, because the mapper below reads by
-        // POSITION (`r.text(0)`..`r.text(5)`): a column added to one arm and not
-        // the other shifts every field after it, silently and with no compile
-        // error to catch it. The arms may differ in their predicate, never in
-        // what they select.
         const COLS: &str =
             "run_id, export_name, prefix, status, started_at, COALESCE(finished_at, '')";
         let sql = if running_only {
@@ -195,7 +149,7 @@ impl StateStore {
         })
     }
 
-    /// [`Self::begin_run`] by a run that holds the export's run lease on `source`: that source's dead `running` rows (and rows written before sources were recorded) are stamped `interrupted` in the same transaction, so a refused begin leaves them as they were.
+    /// [`Self::begin_run`] by a run that holds the export's run lease on `source`.
     pub fn begin_run_under_lease(
         &self,
         run_id: &str,
@@ -234,7 +188,7 @@ impl StateStore {
         )
     }
 
-    /// Whether the newest successful run of `export_name` from `source` applied the sealed plan `plan_id`: the stored cursor was last moved by that plan.
+    /// Whether the newest successful run of `export_name` from `source` applied the sealed plan `plan_id`.
     pub fn cursor_last_moved_by_plan(
         &self,
         export_name: &str,
@@ -260,7 +214,7 @@ impl StateStore {
         Ok(())
     }
 
-    /// Stamp `interrupted` on every `running` row of `export_name` reading `source` or recorded before sources were (run status, and the metrics of those runs or of runs with no status row); returns the run-status rows stamped.
+    /// Stamp `interrupted` on every `running` row of `export_name` reading `source` or recorded before sources were (run status, and the metrics of those runs or of runs with no status row).
     pub fn interrupt_dead_runs(
         &self,
         export_name: &str,
@@ -285,22 +239,8 @@ impl StateStore {
         })
     }
 
-    /// The `rivet state finish-run` escape hatch: stamp a row `interrupted`
-    /// ONLY if it exists and is still `running` — the outcome says which, so
-    /// the CLI can refuse loudly instead of "success" on a typo'd id.
-    ///
-    /// Exists because a hard-crashed run with no SUCCESSFUL successor has no
-    /// other exit (round-4): supersession is success-only, nothing ages rows
-    /// out, and gc/cleanup/consumed-exclusion all freeze on the stale row —
-    /// with every message telling the operator to wait for a run that will
-    /// never finish.
+    /// The `rivet state finish-run` escape hatch.
     pub fn finish_run_checked(&self, run_id: &str, finished_at: &str) -> Result<FinishOutcome> {
-        // ATOMIC: the UPDATE itself carries the status guard, and Stamped is
-        // derived from rows-affected — a run finalizing `success` between a
-        // SELECT and an unconditional UPDATE would be downgraded to
-        // `interrupted`, possibly un-superseding an older stale row the
-        // success had just retired (round-5 refuter). The SELECT afterwards
-        // only names which of the two remaining answers is true.
         let n = self.execute(
             "UPDATE run_status SET status = 'interrupted', finished_at = ?2
              WHERE run_id = ?1 AND status = 'running'",
@@ -317,19 +257,7 @@ impl StateStore {
         }
     }
 
-    /// Terminal-stamp the `running` rows of split units a `--split --resume`
-    /// RECONSTRUCTION has ceased to exist — ordinals at/past `kept`.
-    ///
-    /// A trailing-adjacent crash makes the reconstructed partition SMALLER than
-    /// the crashed one (the open tail absorbs the crashed range), so
-    /// `{giant}#5..#7` will never run again under this lineage — no SUCCESS of
-    /// those names can ever supersede their rows, and an unstamped row wedges
-    /// `has_active_run_on_prefix` (and with it gc/cleanup on the whole shared
-    /// prefix) FOREVER (round-4). The moment that KNOWS an ordinal ceased is
-    /// the reconstruction, so its caller stamps here.
-    ///
-    /// Returns the stamped export names. Ordinal-scoped, never a blanket LIKE
-    /// delete: `#4` of a 5-unit reconstruction is still a live name.
+    /// Terminal-stamp the `running` rows of split units a `--split --resume` RECONSTRUCTION has ceased to exist.
     pub fn interrupt_ceased_split_units(
         &self,
         giant: &str,
@@ -337,10 +265,6 @@ impl StateStore {
         kept: usize,
         finished_at: &str,
     ) -> Result<Vec<String>> {
-        // PREFIX-SCOPED (round-5 refuter): on a shared-Postgres state DB two
-        // configs can both carry a split giant named `orders` — a name-only
-        // stamp would close the OTHER config's live rows. Same containment
-        // predicate as `active_run_ids_on_prefix`.
         let sql = format!(
             "SELECT r.run_id, r.export_name FROM run_status r
              WHERE r.export_name LIKE ?1 || '#%' AND r.status = 'running' AND {}",
@@ -365,16 +289,7 @@ impl StateStore {
         Ok(stamped)
     }
 
-    /// The run_ids of the runs [`has_active_run_on_prefix`] answers `true` for —
-    /// same predicate, named rather than counted.
-    ///
-    /// The load needs the NAMES because a run still writing into the prefix can
-    /// still GROW its manifest: the CDC sink rewrites a `Success` superset at
-    /// every commit-boundary roll under ONE run_id. Recording such a run as
-    /// consumed strands every part it writes afterwards — silently, forever,
-    /// since the skip set is keyed on the run_id alone. Excluding exactly the
-    /// active runs leaves them retryable while every terminal run is still
-    /// recorded, so a completed run is never re-loaded.
+    /// The run_ids of the runs [`has_active_run_on_prefix`] answers `true` for.
     pub fn active_run_ids_on_prefix(&self, prefix: &str) -> Result<HashSet<String>> {
         let sql = format!(
             "SELECT r.run_id FROM run_status r WHERE {}",
@@ -387,8 +302,7 @@ impl StateStore {
     }
 }
 
-/// The prefix-containment predicate on LITERAL path text, either direction: equal; the run at-or-under the query; the query at-or-under the run.
-/// No `LIKE`, so `\`, `%`, `_` and case mean the same on SQLite and Postgres. `alias` is the `run_status` row, `param` the query prefix.
+/// The prefix-containment predicate on LITERAL path text, either direction.
 fn prefix_overlaps(alias: &str, param: &str) -> String {
     format!(
         "(rtrim({alias}.prefix, '/') = rtrim({param}, '/') \
@@ -397,20 +311,7 @@ fn prefix_overlaps(alias: &str, param: &str) -> String {
     )
 }
 
-/// A `running` row on the prefix that no newer SUCCESS of the same export has
-/// superseded — "is this prefix live?", the one decision `gc_orphans` exists for.
-///
-/// Supersession requires a newer SUCCESS, not merely a newer terminal row. The
-/// first cut accepted any non-running successor, and a FAILED one proves
-/// nothing: under the documented overlap model (interval overrun, cron
-/// double-fire) cycle N+1 can start, fail at open (cycle N holds the slot), and
-/// finish terminal while N is still streaming — the inference "newer terminal ⇒
-/// the old run crashed and was re-run" then declared the LIVE run dead,
-/// `gc_orphans` collected its just-flushed unmanifested parts in the
-/// flush→manifest window, and the ack advanced the source past them: gone from
-/// both ends, manifest says Success. A newer SUCCESS over the same export
-/// genuinely proves a full pass happened after the stale row; a newer failure
-/// only proves somebody tried. Supersession, not a clock — record vs record.
+/// A `running` row on the prefix that no newer SUCCESS of the same export has superseded.
 fn live_on_prefix(alias: &str, param: &str) -> String {
     format!(
         "{overlap} AND {alias}.status = 'running' AND NOT EXISTS (\
@@ -507,7 +408,7 @@ mod tests {
         );
     }
 
-    /// The run a refusal names is the export's newest row still `running` on its source: not a finished one, not another source's, not another export's.
+    /// The run a refusal names is the export's newest row still `running` on its source.
     #[test]
     fn the_newest_running_run_of_an_export_is_its_own_latest_unfinished_row() {
         let s = StateStore::open_in_memory().unwrap();
@@ -539,9 +440,7 @@ mod tests {
         );
     }
 
-    /// The three queries that decide "is this prefix live?" compose ONE
-    /// containment fragment and ONE supersession fragment — a change to either
-    /// reaches every reader, and the fragments say what they mean.
+    /// The three queries that decide "is this prefix live?" compose ONE containment fragment and ONE supersession fragment.
     #[test]
     fn the_liveness_predicate_is_one_fragment() {
         let overlap = prefix_overlaps("r", "?1");
@@ -564,10 +463,7 @@ mod tests {
         );
     }
 
-    /// The escape hatch's three answers, each decisive: a typo'd id must not
-    /// read as success, an already-terminal row must say its status, and only
-    /// a `running` row gets stamped. RED against collapsing NotFound into
-    /// Stamped (the UPDATE-only shape, which no-ops silently on both).
+    /// The escape hatch's three answers, each decisive.
     #[test]
     fn finish_run_checked_stamps_only_a_live_row_and_says_why_otherwise() {
         let s = StateStore::open_in_memory().unwrap();
@@ -587,7 +483,6 @@ mod tests {
             s.finish_run_checked("r1", "2026-08-21T02:00:00Z").unwrap(),
             FinishOutcome::AlreadyTerminal("interrupted".into())
         );
-        // And the listing surfaces what the operator needs to find the id.
         let rows = s.recent_run_status(10, false).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].run_id, "r1");
@@ -595,8 +490,7 @@ mod tests {
         assert!(s.recent_run_status(10, true).unwrap().is_empty());
     }
 
-    /// Round-10 mutants: `run_status_of` stubbed to Some("xyzzy") survived —
-    /// the gc dead-marker path reads it, and a lying status mis-sweeps.
+    /// Round-10 mutants: `run_status_of` stubbed to Some("xyzzy") survived.
     #[test]
     fn run_status_of_reports_the_row_or_none() {
         let s = StateStore::open_in_memory().unwrap();
@@ -609,11 +503,7 @@ mod tests {
         assert_eq!(s.run_status_of("r1").unwrap().as_deref(), Some("success"));
     }
 
-    /// Round-4 split-wedge closure, ledger half: a reconstruction that kept 5
-    /// units stamps `#5..` interrupted; `#0..#4` and a FOREIGN export are
-    /// untouched, and the prefix stops reading active. RED against `>` in the
-    /// ordinal compare (off-by-one keeps `#5` wedged) and against a blanket
-    /// stamp (would kill `#4`).
+    /// Round-4 split-wedge closure, ledger half.
     #[test]
     fn ceased_split_units_are_stamped_and_live_ordinals_survive() {
         let s = StateStore::open_in_memory().unwrap();
@@ -628,7 +518,6 @@ mod tests {
         }
         s.begin_run("rx", "unrelated", "gs://b/other", "2026-08-21T00:00:00Z")
             .unwrap();
-        // A FOREIGN config's same-name giant on ANOTHER prefix must survive.
         s.begin_run(
             "rf",
             "orders#7",
@@ -642,12 +531,10 @@ mod tests {
         let mut names = stamped.clone();
         names.sort();
         assert_eq!(names, ["orders#5", "orders#6", "orders#7"]);
-        // #0..#4 still running (their ordinals exist in the reconstruction)…
         let active = s.active_run_ids_on_prefix("gs://b/orders").unwrap();
         for ord in 0..5 {
             assert!(active.contains(&format!("r{ord}")), "r{ord} must stay live");
         }
-        // …and the ceased ones no longer wedge the prefix once the rest finish.
         for ord in 0..5 {
             s.finish_run(&format!("r{ord}"), "success", "2026-08-21T02:00:00Z")
                 .unwrap();
@@ -664,13 +551,7 @@ mod tests {
         );
     }
 
-    /// The load's skip set is keyed on `run_id` alone, and a CDC run's manifest
-    /// GROWS under one id (the sink rewrites a `Success` superset at every
-    /// commit-boundary roll). So a load that samples an in-flight run must not
-    /// record it consumed — this accessor is what tells it which runs those are.
-    ///
-    /// Pins both halves: an ACTIVE run is named (so it stays retryable), and a
-    /// FINISHED one is not (so a completed run is recorded and never re-loaded).
+    /// The load's skip set is keyed on `run_id` alone, and a CDC run's manifest GROWS under one id (the sink rewrites a `Success` superset at every commit-boundary roll).
     #[test]
     fn active_run_ids_names_the_in_flight_run_and_forgets_the_finished_one() {
         let dir = tempfile::tempdir().unwrap();
@@ -701,27 +582,7 @@ mod tests {
 
     const P: &str = "gs://b/exports/orders/";
 
-    /// Two independent StateStore connections to ONE shared Postgres state db behave
-    /// like two rivet PROCESSES on a shared-Postgres deployment: a run begun on
-    /// connection A is immediately visible to connection B's has_active_run_on_prefix
-    /// (the gc_orphans concurrency signal — the whole reason PG state exists over the
-    /// per-host SQLite file), and a newer run of the same export SUPERSEDES the older
-    /// one CLOCK-FREE. The gate is otherwise single-process; gc_survival only simulates
-    /// a running manifest. Env-gated on RIVET_TEST_STATE_URL; unique names so the shared
-    /// public schema never collides with a sibling test.
-    /// Supersession requires a TERMINAL successor — on the default backend, so it
-    /// actually runs.
-    ///
-    /// The rule lived only in the Postgres test above, which early-returns unless
-    /// `RIVET_TEST_STATE_URL` points at one — so on an ordinary `cargo test` it was
-    /// SKIPPED, and mutating the status clause away left everything green. Skip is
-    /// not a pass, and this file had no other home for the rule.
-    ///
-    /// What the clause protects: two concurrently LIVE runs of one export are
-    /// ordinary — a `{date}` prefix straddling UTC midnight while the next
-    /// scheduled cycle starts. Without it the older one reads as INACTIVE, which
-    /// un-gates `gc_orphans` against its prefix and deletes parts a live writer has
-    /// committed but not yet manifested.
+    /// Two independent StateStore connections to ONE shared Postgres state db behave like two rivet PROCESSES on a shared-Postgres deployment.
     #[test]
     fn a_running_successor_does_not_supersede_but_a_finished_one_does() {
         let st = StateStore::open_in_memory().expect("state");
@@ -729,7 +590,6 @@ mod tests {
         st.begin_run("r1", "e", pa, "2026-01-01T00:00:01Z").unwrap();
         assert!(st.has_active_run_on_prefix(pa).unwrap(), "r1 is running");
 
-        // A newer run of the SAME export, itself still running.
         st.begin_run("r2", "e", pb, "2026-01-01T00:00:02Z").unwrap();
         assert!(
             st.has_active_run_on_prefix(pa).unwrap(),
@@ -738,10 +598,6 @@ mod tests {
              writer's committed parts"
         );
 
-        // Terminal successor: now the crashed r1 is releasable, clock-free — as
-        // seen from the BASE both runs wrote under (the prefix a load gc's). Seen
-        // from r1's own sub-prefix, r2 wrote nothing there and supersedes nothing:
-        // that is the same-named export of ANOTHER config on a shared state DB.
         st.finish_run("r2", "success", "2026-01-01T00:00:09Z")
             .unwrap();
         assert!(
@@ -762,7 +618,6 @@ mod tests {
         if !url.starts_with("postgres") {
             return crate::test_hook::skip_live("RIVET_TEST_STATE_URL is not a postgres URL");
         }
-        // Two connections = two processes on the same shared Postgres state.
         let pg = crate::state::StateRef::Postgres(url.into());
         let a = StateStore::open_at_ref(&pg).expect("conn A");
         let b = StateStore::open_at_ref(&pg).expect("conn B");
@@ -773,25 +628,12 @@ mod tests {
         let pa = format!("gs://b/{exp}/runA/");
         let pb = format!("gs://b/{exp}/runB/");
 
-        // A begins run1; B — a SEPARATE connection — must SEE it active.
         a.begin_run(&r1, &exp, &pa, "2026-01-01T00:00:01Z").unwrap();
         assert!(
             b.has_active_run_on_prefix(&pa).unwrap(),
             "conn B must see conn A's active run on the shared Postgres state (multi-process gc signal)"
         );
 
-        // B begins run2 (newer started_at, same export). It is still RUNNING, so it
-        // supersedes NOTHING — and this assertion is the correction of a spec the
-        // test itself used to pin.
-        //
-        // Supersession answers "did a later run already re-do this crashed one's
-        // work"; only a run that REACHED a terminal status has. Two concurrently
-        // live runs of one export are ordinary — a `{date}` prefix straddling UTC
-        // midnight while the next scheduled cycle starts — and under the old rule
-        // the older one read as INACTIVE, which un-gates `gc_orphans` against its
-        // prefix and deletes parts a live writer has committed but not yet
-        // manifested. That is precisely the harm the three-way classification
-        // exists to prevent, and the test asserted the bug.
         b.begin_run(&r2, &exp, &pb, "2026-01-01T00:00:02Z").unwrap();
         assert!(
             a.has_active_run_on_prefix(&pa).unwrap(),
@@ -799,8 +641,6 @@ mod tests {
              re-done anything, so it cannot release run1's prefix to the collector"
         );
 
-        // Once the successor is TERMINAL, supersession applies — still clock-free,
-        // still no age timer.
         b.finish_run(&r2, "success", "2026-01-01T00:00:09Z")
             .unwrap();
         assert!(
@@ -819,7 +659,6 @@ mod tests {
             "run2 (newest, same export) is the active run"
         );
 
-        // Finishing run2 clears it — a terminal run is never active.
         b.finish_run(&r2, "success", "2026-01-01T00:00:03Z")
             .unwrap();
         assert!(
@@ -862,13 +701,6 @@ mod tests {
     }
 
     /// A newer FAILED run does not supersede a live one — only a SUCCESS does.
-    ///
-    /// The overlap model makes this load-bearing: cycle N streams while cycle
-    /// N+1 starts, fails at open (N holds the slot), and lands terminal. The
-    /// old predicate read any newer terminal row as "the old run crashed and
-    /// was re-run", declared the LIVE run inactive, and `gc_orphans` then
-    /// collected its just-flushed unmanifested parts while the ack advanced the
-    /// source past them — gone from both ends under a Success manifest.
     #[test]
     fn a_newer_failed_run_does_not_supersede_a_live_one() {
         let s = StateStore::open_in_memory().unwrap();
@@ -884,10 +716,6 @@ mod tests {
              dead — treating it as supersession lets gc delete a live run's \
              just-flushed parts"
         );
-        // BOTH predicates — they are one rule in two spellings, and the second
-        // (`active_run_ids`) is what the load's consumed-exclusion reads; a fix
-        // landing on only one lets the load consume the live run's growing
-        // manifest and strand its later parts.
         assert_eq!(
             s.active_run_ids_on_prefix(P).unwrap(),
             std::collections::HashSet::from(["old".to_string()]),
@@ -905,12 +733,9 @@ mod tests {
 
     #[test]
     fn a_superseded_running_row_no_longer_counts_as_active() {
-        // The clock-free staleness contract. r1 hard-crashed (still `running`,
-        // never finished). Its successor r2 (newer started_at, SAME export) ran
-        // and SUCCEEDED. r1 must stop counting as active — WITHOUT any age timer.
         let s = StateStore::open_in_memory().unwrap();
         s.begin_run("r1", "orders", P, "2026-01-01T00:00:00Z")
-            .unwrap(); // crashed, left running
+            .unwrap();
         s.begin_run("r2", "orders", P, "2026-01-01T00:00:05Z")
             .unwrap();
         assert!(
@@ -925,9 +750,7 @@ mod tests {
         );
     }
 
-    /// Shared state DB, two configs both exporting `users` into DIFFERENT prefixes:
-    /// the other config's finished run is not this run's successor, so it must not
-    /// declare this LIVE run dead (gc would collect its in-flight parts).
+    /// Shared state DB, two configs both exporting `users` into DIFFERENT prefixes.
     #[test]
     fn a_success_of_a_same_named_export_on_another_prefix_does_not_supersede() {
         let s = StateStore::open_in_memory().unwrap();
@@ -949,9 +772,6 @@ mod tests {
 
     #[test]
     fn a_lone_crashed_running_row_still_counts_as_active() {
-        // The documented residual: a hard-crash with NO successor leaves a
-        // `running` row that keeps the prefix active — gc defers (safe: never
-        // deletes) until the export re-runs and supersedes it.
         let s = StateStore::open_in_memory().unwrap();
         s.begin_run("r1", "orders", P, "2026-01-01T00:00:00Z")
             .unwrap();
@@ -969,7 +789,6 @@ mod tests {
         s.finish_run("r1", "failed", "2026-01-01T00:01:00Z")
             .unwrap();
         assert!(!s.has_active_run_on_prefix(P).unwrap());
-        // A resume reuses the run_id → re-arm running (upsert).
         s.begin_run("r1", "orders", P, "2026-01-01T00:02:00Z")
             .unwrap();
         assert!(
@@ -988,8 +807,6 @@ mod tests {
 
     #[test]
     fn active_matches_a_partitioned_child_prefix() {
-        // A run records its FULL write URI (partition replaced); the load asks
-        // about the BASE (truncated at `{partition}`). The child must still match.
         let s = StateStore::open_in_memory().unwrap();
         let child = "gs://b/exports/orders/created_at=2023-01-01/";
         s.begin_run("r1", "orders", child, "2026-01-01T00:00:00Z")
@@ -1003,8 +820,6 @@ mod tests {
 
     #[test]
     fn active_matches_a_load_prefix_under_a_cdc_base() {
-        // A CDC run records its BASE prefix; the load gc's a per-table CHILD under
-        // it. The overlap match (query-under-run direction) must still see it live.
         let s = StateStore::open_in_memory().unwrap();
         s.begin_run("cdc1", "cdc", "gs://b/exports/", "2026-01-01T00:00:00Z")
             .unwrap();
@@ -1021,8 +836,6 @@ mod tests {
 
     #[test]
     fn active_is_boundary_safe_against_a_string_sibling() {
-        // `exports/orders` must NOT match a run under `exports/orders_archive/`
-        // (the classic string-prefix-vs-path-boundary trap).
         let s = StateStore::open_in_memory().unwrap();
         s.begin_run(
             "r1",

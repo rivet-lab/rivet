@@ -4,17 +4,12 @@ use crate::error::Result;
 
 use super::StateStore;
 
-/// One `rivet load` invocation's ledger record: the `load_run` audit row plus
-/// the extraction `source_run_ids` it consumed (written into `loaded_source_run`
-/// so a later load skips them). `status` ∈ `success` | `failed` | `refused` — a
-/// `refused` load stopped before touching the warehouse.
+/// One `rivet load` invocation's ledger record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadRecord {
     pub load_id: String,
     pub export_name: String,
-    /// Fully-qualified target the rows landed in (`proj.ds.table` /
-    /// `db.schema.table`) — the ledger key, so two configs targeting different
-    /// datasets never share a skip set.
+    /// Fully-qualified target the rows landed in (`proj.ds.table` / `db.schema.table`).
     pub target_table: String,
     pub warehouse: String,
     pub mode: String,
@@ -22,9 +17,7 @@ pub struct LoadRecord {
     pub rows_loaded: i64,
     pub status: String,
     pub finished_at: String,
-    /// WHICH SOURCE these rows came from (`engine:schema.table`), so a later load
-    /// of the same target from a DIFFERENT database is refusable. Empty when the
-    /// manifests did not say — treated as unknown, never as a mismatch.
+    /// WHICH SOURCE these rows came from (`engine:schema.table`), so a later load of the same target from a DIFFERENT database is refusable.
     pub source_ident: String,
 }
 
@@ -50,21 +43,10 @@ impl LoadStatus {
 }
 
 impl StateStore {
-    /// Log one load into `load_run` and — only for a **successful** load — mark
-    /// each consumed extraction run in `loaded_source_run` (the skip set). A
-    /// FAILED load still records its audit row with the attempted run_ids but
-    /// marks none loaded, so the next load RETRIES those runs instead of
-    /// skipping their never-loaded data forever (silent loss). Idempotent:
-    /// `load_id` and `(target_table, source_run_id)` upsert, so a retried load
-    /// never double-inserts.
+    /// Log one load into `load_run` and — only for a **successful** load.
     pub fn store_load(&self, rec: &LoadRecord) -> Result<()> {
         let run_ids_json = serde_json::to_string(&rec.source_run_ids)?;
-        // A run is "loaded" only when its load succeeded; a failed load must
-        // leave its runs retryable, never mark them loaded (else their data is
-        // skipped on every subsequent load).
         let mark_loaded = rec.status == LoadStatus::Success.as_str();
-        // One transaction: the audit row and the skip-set rows commit together, so a
-        // crash mid-write never leaves a `success` load_run with a PARTIAL skip set.
         self.transaction(|| {
             self.execute(
                 "INSERT INTO load_run
@@ -116,11 +98,7 @@ impl StateStore {
         })
     }
 
-    /// The extraction run_ids already loaded into `target_table` — the skip set
-    /// an incremental load filters its candidate manifests against.
-    /// The DISTINCT non-empty source identities a target table has been loaded
-    /// from. More than one means two different databases wrote the same
-    /// warehouse table — the second silently replaced the first.
+    /// The extraction run_ids already loaded into `target_table`.
     pub fn loaded_source_idents(&self, target_table: &str) -> Result<Vec<String>> {
         let mut out = self.query(
             "SELECT DISTINCT source_ident FROM loaded_source_run \
@@ -147,7 +125,7 @@ impl StateStore {
             > 0)
     }
 
-    /// The baseline legs loaded into `target_table`, by this state's own run records: `(successful non-stream runs, the most rows one exported)`.
+    /// The baseline legs loaded into `target_table`, by this state's own run records.
     pub fn loaded_baseline_legs(&self, target_table: &str) -> Result<(i64, i64)> {
         Ok(self
             .query_opt(
@@ -193,8 +171,6 @@ impl StateStore {
         const COLS: &str = "load_id, export_name, target_table, warehouse, mode, \
                             source_run_ids, rows_loaded, status, finished_at";
         let build = |r: &dyn super::row::StateRow| LoadRecord {
-            // Reading back a historical row: the identity is not part of the
-            // load_run projection, and no caller of this reader needs it.
             source_ident: String::new(),
             load_id: r.text(0),
             export_name: r.text(1),
@@ -228,7 +204,7 @@ impl StateStore {
 mod tests {
     use super::*;
 
-    /// Only a successful load that consumed runs makes a table rivet's own; a skip, a stop, a failure or a crash marker does not.
+    /// Only a successful load that consumed runs makes a table rivet's own.
     #[test]
     fn a_table_is_rivets_own_only_after_its_first_successful_load() {
         let s = StateStore::open_in_memory().unwrap();
@@ -342,23 +318,7 @@ mod tests {
         }
     }
 
-    /// The source-ownership guard reads `loaded_source_idents`; this asserts the
-    /// value it reads is the value `store_load` WROTE, on the default backend.
-    ///
-    /// It was not: the SQLite arm inserted four columns and omitted
-    /// `source_ident` entirely (the Postgres arm wrote all five), so
-    /// `loaded_source_idents` — which filters `IS NOT NULL AND <> ''` — always
-    /// came back empty, and the guard that refuses "two sources into one
-    /// warehouse table" never fired on the backend almost everyone runs. It also
-    /// explains an asymmetry in the release gate: its BigQuery stage loads three
-    /// engines into one table and PASSED on the SQLite pass while failing on the
-    /// Postgres one.
-    ///
-    /// Nothing caught it because the shared `rec()` fixture sets
-    /// `source_ident: String::new()` — the empty string the reader filters out.
-    /// A field can only be tested by a fixture that crosses its threshold, and a
-    /// value that decides something must be observed AT the boundary, produced by
-    /// the real producer rather than handed over by the test.
+    /// The source-ownership guard reads `loaded_source_idents`.
     #[test]
     fn a_load_records_the_source_identity_the_ownership_guard_reads_back() {
         let s = StateStore::open_in_memory().unwrap();
@@ -372,9 +332,6 @@ mod tests {
             "the guard cannot refuse a second source if the first one's identity was never stored"
         );
 
-        // A SECOND source into the same table is what the guard exists to catch,
-        // so both identities must be visible to it — one row is not enough to
-        // prove the reader distinguishes them.
         let mut r2 = rec("L2", "p.d.orders", &["r2"], 50, "success");
         r2.source_ident = "mysql:rivet.orders".into();
         s.store_load(&r2).unwrap();
@@ -389,8 +346,6 @@ mod tests {
             "two sources under one target table must both be recorded — that pair IS the refusal"
         );
 
-        // An empty ident stays filtered: a stateless/legacy load must not be
-        // mistaken for a competing source.
         let mut r3 = rec("L3", "p.d.other", &["r3"], 10, "success");
         r3.source_ident = String::new();
         s.store_load(&r3).unwrap();
@@ -420,7 +375,6 @@ mod tests {
 
         let loaded = s.loaded_source_run_ids("p.d.customers").unwrap();
         assert_eq!(loaded, HashSet::from(["r1".to_string(), "r2".to_string()]));
-        // A different target has its own (empty) skip set.
         assert!(s.loaded_source_run_ids("p.d.other").unwrap().is_empty());
 
         let loads = s.recent_loads(Some("p.d.customers"), 10).unwrap();
@@ -432,8 +386,6 @@ mod tests {
     #[test]
     fn failed_load_leaves_its_source_runs_retryable() {
         let s = StateStore::open_in_memory().unwrap();
-        // A failed load records its audit row (with the attempted runs) but must
-        // NOT mark them loaded — else the next load skips their never-loaded data.
         s.store_load(&rec("L1", "p.d.t", &["r1", "r2"], 0, "failed"))
             .unwrap();
         assert!(
@@ -449,7 +401,6 @@ mod tests {
             "the audit row still records what the failed load attempted"
         );
 
-        // A later SUCCESS over the same runs marks them loaded (the retry landed).
         s.store_load(&rec("L2", "p.d.t", &["r1", "r2"], 100, "success"))
             .unwrap();
         assert_eq!(
@@ -463,7 +414,7 @@ mod tests {
         let s = StateStore::open_in_memory().unwrap();
         let r = rec("L1", "p.d.t", &["r1"], 10, "success");
         s.store_load(&r).unwrap();
-        s.store_load(&r).unwrap(); // replay
+        s.store_load(&r).unwrap();
         assert_eq!(s.recent_loads(None, 10).unwrap().len(), 1);
         assert_eq!(s.loaded_source_run_ids("p.d.t").unwrap().len(), 1);
     }
@@ -480,7 +431,6 @@ mod tests {
 
         let all = s.recent_loads(None, 10).unwrap();
         assert_eq!(all.len(), 3);
-        // finished_at is keyed off load_id length in the fixture (3 > 2 > …).
         assert_eq!(all[0].load_id, "Lccc");
 
         let only_b = s.recent_loads(Some("p.d.b"), 10).unwrap();

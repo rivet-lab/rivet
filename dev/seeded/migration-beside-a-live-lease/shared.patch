@@ -1,9 +1,10 @@
 diff --git a/src/state/migrations.rs b/src/state/migrations.rs
+index 71f5b47..b99303f 100644
 --- a/src/state/migrations.rs
 +++ b/src/state/migrations.rs
-@@ -1181,7 +1181,7 @@
+@@ -980,7 +980,7 @@ fn copy_state_before_migration(conn: &Connection, old: i64) -> Result<Option<std
  
- /// Refuse to migrate a v`old` state while `held`, a lease on it, is another live process's `(lease, holder)`: the new schema would land under that run.
+ /// Refuse to migrate a v`old` state while `held`, a lease on it, is another live process's `(lease, holder)`.
  fn refuse_beside_a_live_lease(old: i64, held: Option<(String, String)>) -> Result<()> {
 -    let Some((lease, holder)) = held else {
 +    let Some((lease, holder)) = held.filter(|_| false) else {

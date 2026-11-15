@@ -17,22 +17,14 @@ pub struct ChunkTaskInfo {
     pub file_name: Option<String>,
 }
 
-/// Whether a chunk run stored under `stored` (`None`: it recorded no source) belongs to the stream reading `source`, however its source was spelled when it was stored.
+/// Whether a chunk run stored under `stored` (`None`: it recorded no source) belongs to the stream reading `source`.
 pub(super) fn chunk_run_is_of(source: &str, stored: Option<&str>) -> bool {
     stored.is_none_or(|s| s == source || crate::config::canonical_source_key(s) == source)
 }
 
 /// Chunk checkpoint store — reads and writes `chunk_run` and `chunk_task`.
-///
-/// Governs Invariant I5 (Chunk Task Acyclicity): transitions are strictly
-/// forward (`pending → running → completed | failed`).  Completed tasks are
-/// never re-claimed.  Failed tasks return to `running` only while
-/// `attempts < max_chunk_attempts`.
-///
-/// Some methods accept an explicit `state_ref` and open a fresh connection.
-/// This is required for parallel workers that cannot share one `Connection`.
 impl StateStore {
-    /// Distinct `export_name` values with an `in_progress` chunk run of `source` (interrupted run — resume or reset); one that recorded no source counts.
+    /// Distinct `export_name` values with an `in_progress` chunk run of `source`; one that recorded no source counts.
     pub fn list_export_names_with_in_progress_chunk_runs(
         &self,
         source: &str,
@@ -51,12 +43,7 @@ impl StateStore {
         Ok(names)
     }
 
-    /// Whether this export has a resumable checkpoint — an in-progress chunk run
-    /// (range/keyset chunking) OR a persisted keyset resume run id. The pool uses
-    /// it to decide a `--split` unit's resume flag (#167): a crashed unit has
-    /// resumable state → resume it (reuse the run_id, overwrite the partial parts
-    /// in place); a never-started unit has none → run it fresh (so `--resume` does
-    /// not bail on "no in-progress checkpoint").
+    /// Whether this export has a resumable checkpoint.
     pub fn has_resumable_checkpoint(&self, export_name: &str) -> Result<bool> {
         let in_progress = self.query_opt(
             "SELECT 1 FROM chunk_run WHERE export_name = ?1 AND status = 'in_progress' LIMIT 1",
@@ -90,7 +77,7 @@ impl StateStore {
         )
     }
 
-    /// The in-progress chunk run of `export_name` under `source`; one that recorded no source counts while the name holds progress under no other source.
+    /// The in-progress chunk run of `export_name` under `source`.
     pub(super) fn unfinished_chunk_run(
         &self,
         export_name: &str,
@@ -136,7 +123,7 @@ impl StateStore {
         )
     }
 
-    /// Open an `in_progress` chunk run that records no source and no tasks: the row a rivet before v34 left (fixtures).
+    /// Open an `in_progress` chunk run that records no source and no tasks.
     pub fn create_chunk_run(
         &self,
         run_id: &str,
@@ -223,7 +210,7 @@ impl StateStore {
         self.insert_chunk_tasks_from(run_id, 0, ranges)
     }
 
-    /// Plan `ranges` as `pending` tasks after the last task of `run_id`; `replace` drops the tasks it holds first. All or none.
+    /// Plan `ranges` as `pending` tasks after the last task of `run_id`; `replace` drops the tasks it holds first.
     pub fn replan_chunk_tasks(
         &self,
         run_id: &str,
@@ -280,21 +267,6 @@ impl StateStore {
     }
 
     /// Un-pin chunks a prior run gave up on so an explicit `--resume` retries them.
-    ///
-    /// `fail_chunk_task(retryable=false)` pins `attempts = max_chunk_attempts` to
-    /// stop the SAME run burning the whole timeout budget on a deterministic
-    /// failure (the 300-minutes-for-nothing case its doc names). But that pin also
-    /// makes `claim_next_chunk_task` — whose predicate is `attempts <
-    /// max_chunk_attempts` — skip the chunk FOREVER, so the run's own remediation
-    /// ("fix the errors, then `rivet run --resume`") could not actually re-run it:
-    /// resume rescued only `running` (crash) tasks, never `failed` ones, and the
-    /// operator's fix was silently never retried.
-    ///
-    /// `--resume` is a DELIBERATE operator action after fixing the cause, so it is
-    /// exactly the moment to give every failed chunk (pinned-permanent OR
-    /// budget-exhausted) a fresh attempt budget. Reset only `failed` tasks —
-    /// `completed` and `pending` are untouched, so it never re-does finished work.
-    /// Returns the number of chunks un-pinned.
     pub fn reset_failed_chunk_tasks_for_resume(&self, run_id: &str) -> Result<usize> {
         let now = chrono::Utc::now().to_rfc3339();
         self.execute(
@@ -335,11 +307,6 @@ impl StateStore {
     }
 
     /// Atomically claim the next pending or retryable failed chunk on this store's connection.
-    ///
-    /// Divergent-by-design (row.rs exemption): genuinely different SQL per backend
-    /// (Postgres `FOR UPDATE SKIP LOCKED` vs SQLite rowid + IMMEDIATE tx) — do not
-    /// re-migrate this onto the ceremony seam. Parallel workers each hold their own
-    /// store (`open_at_ref` once per worker), so claims still run on distinct connections.
     pub fn claim_next_chunk_task(&self, run_id: &str) -> Result<Option<(i64, String, String)>> {
         let now = chrono::Utc::now().to_rfc3339();
         match &self.conn {
@@ -357,7 +324,6 @@ impl StateStore {
             }
             StateConn::Postgres(client) => {
                 let mut client = client.borrow_mut();
-                // FOR UPDATE SKIP LOCKED ensures concurrent workers each get a distinct task.
                 let rows = client
                     .query(
                         "UPDATE chunk_task
@@ -413,20 +379,6 @@ impl StateStore {
     }
 
     /// Mark a chunk failed.
-    ///
-    /// `retryable` is the CALLER's verdict on the error, not a guess made here:
-    /// the pipeline holds the typed error and already classifies it
-    /// (`retry::classify_error`), while this layer sees only text. When it is
-    /// false the attempt counter is driven to the run's cap, so
-    /// `claim_next_chunk_task` — whose predicate is `attempts <
-    /// max_chunk_attempts` — will not hand the chunk out again.
-    ///
-    /// Before this, the classification stopped at the inner retry loop and the
-    /// chunk-level re-claim re-dispatched a deterministically failing chunk to
-    /// exhaustion. Measured in the field: 15 chunks x 4 attempts x a 300 s
-    /// statement timeout, 300 minutes of production query time for nothing.
-    /// Exhausting the counter rather than adding a column keeps the existing
-    /// claim predicate as the single place that decides eligibility.
     pub fn fail_chunk_task(
         &self,
         run_id: &str,
@@ -471,7 +423,7 @@ impl StateStore {
             .unwrap_or(0))
     }
 
-    /// The count of `run_id`'s tasks not completed and all its tasks, read behind any writer removing the run's rows; refuses, and drops the resume pointer to it, when the run or a planned task is gone.
+    /// The count of `run_id`'s tasks not completed and all its tasks, read behind any writer removing the run's rows.
     pub fn settle_chunk_run(
         &self,
         run_id: &str,
@@ -529,26 +481,7 @@ impl StateStore {
         Ok(())
     }
 
-    /// Reset a single completed chunk task back to `pending` so the next
-    /// `--resume` run re-exports it.
-    ///
-    /// Used by ADR-0012 M8 reconciliation: when the destination's manifest
-    /// says a part was committed but the actual object is missing or has
-    /// drifted (size mismatch), the chunk_task that produced it must run
-    /// again.  Without this reset, `claim_next_chunk_task` would skip the
-    /// completed row and the destination would stay broken across resumes.
-    ///
-    /// Distinct from `reset_chunk_checkpoint(export_name, source)` (which wipes
-    /// every run+task of an export under one source — the operator-facing "abandon resume"
-    /// nuke) and from `reset_stale_running_chunk_tasks` (which only
-    /// rescues tasks left in 'running' after a crash).  This one is
-    /// surgical: a single (run_id, chunk_index) goes from completed
-    /// back to pending, attempts reset to 0, file_name cleared, and
-    /// last_error annotated with the M8 reason so the journal/audit
-    /// trail records why.
-    ///
-    /// Returns the number of rows updated (0 or 1).  Idempotent —
-    /// calling it on a non-completed task is a no-op.
+    /// Reset a single completed chunk task back to `pending` so the next `--resume` run re-exports it.
     pub fn reset_chunk_task_for_re_export(
         &self,
         run_id: &str,
@@ -571,7 +504,7 @@ impl StateStore {
         )
     }
 
-    /// Remove the chunk runs and tasks of `export_name` that belong to `source` (one that recorded no source belongs to every source) and the chunked resume anchor of `source`, a respelling of it re-keyed onto it first (abandon resume); another source's stay.
+    /// Remove the chunk runs and tasks of `export_name` that belong to `source` (one that recorded no source belongs to every source) and the chunked resume anchor of `source`, a respelling of it re-keyed onto it first (abandon resume).
     pub fn reset_chunk_checkpoint(&self, export_name: &str, source: &str) -> Result<usize> {
         seeded!(
             "reset-chunks-respelled-source-kept",
@@ -736,20 +669,13 @@ mod tests {
 
     #[test]
     fn two_in_progress_runs_for_one_export_are_rejected_by_the_partial_unique_index() {
-        // Round-2 audit #13: the v15 partial-unique index closes the check-then-act
-        // TOCTOU — two overlapping runs of ONE export cannot both hold an in_progress
-        // row (which would double the destination data). RED before the index (both
-        // creates succeeded).
         let (_dir, s) = store_on_disk();
         s.create_chunk_run("run_1", "orders", "h", 1).unwrap();
         assert!(
             s.create_chunk_run("run_2", "orders", "h", 1).is_err(),
             "a second in_progress run for the same export must be rejected"
         );
-        // A different export is unaffected.
         assert!(s.create_chunk_run("run_3", "widgets", "h", 1).is_ok());
-        // Once the first finalizes (status leaves in_progress), a fresh run for
-        // `orders` is allowed again.
         s.finalize_chunk_run_completed("run_1").unwrap();
         assert!(s.create_chunk_run("run_4", "orders", "h", 1).is_ok());
     }
@@ -785,17 +711,6 @@ mod tests {
     }
 
     /// A chunk that failed for a DETERMINISTIC reason must not be re-claimed.
-    ///
-    /// `retry.rs` already classifies a MySQL statement timeout (3024) as
-    /// PERMANENT and `should_retry` honours it — inside one chunk's attempt. The
-    /// chunk-level re-claim then re-dispatches the same chunk anyway, because it
-    /// tests only `attempts < max_chunk_attempts` with no notion of WHY the
-    /// attempt failed. Measured in the field: a 6M-row export burned 97.9 minutes
-    /// on 15 chunks x 4 attempts x 300s, every attempt hitting the same wall,
-    /// 300 minutes of source query time against a production replica for nothing.
-    ///
-    /// The classification is correct; the layer above never asks. Same shape as
-    /// the runner-bypass class — a value computed right and dropped on the floor.
     #[test]
     fn a_permanently_failed_chunk_is_not_reclaimed() {
         let (_dir, s) = store_on_disk();
@@ -803,7 +718,6 @@ mod tests {
         s.insert_chunk_tasks("run_p", &[(1, 5)]).unwrap();
         s.claim_next_chunk_task("run_p").unwrap().expect("claim");
 
-        // The exact text the field produced.
         s.fail_chunk_task(
             "run_p",
             0,
@@ -821,12 +735,7 @@ mod tests {
         );
     }
 
-    /// #200-4: an explicit `--resume` must un-pin a permanently-failed chunk so
-    /// the operator's fix is actually retried. Without
-    /// `reset_failed_chunk_tasks_for_resume` the pin (`attempts =
-    /// max_chunk_attempts`) survives resume and `claim_next_chunk_task` skips the
-    /// chunk forever — the run's own "fix errors and --resume" hint is a lie.
-    /// RED: drop the reset call and the second claim stays `None`.
+    /// #200-4: an explicit `--resume` must un-pin a permanently-failed chunk so the operator's fix is actually retried.
     #[test]
     fn resume_un_pins_a_permanently_failed_chunk() {
         let (_dir, s) = store_on_disk();
@@ -835,18 +744,14 @@ mod tests {
         s.claim_next_chunk_task("run_r").unwrap().expect("claim");
         s.fail_chunk_task("run_r", 0, "deterministic boom (ERROR 3024)", false)
             .unwrap();
-        // Precondition: pinned, so a bare re-claim (what resume did before) skips it.
         assert!(
             s.claim_next_chunk_task("run_r").unwrap().is_none(),
             "precondition: a permanently-failed chunk is not re-claimable while pinned"
         );
 
-        // The resume un-pin the operator's `--resume` now performs.
         let n = s.reset_failed_chunk_tasks_for_resume("run_r").unwrap();
         assert_eq!(n, 1, "exactly the one failed chunk is re-queued");
 
-        // Now the operator's fix gets a real retry: the chunk is claimable again,
-        // and it is the SAME chunk (index 0, keyspace 1..5), attempts reset.
         let claimed = s
             .claim_next_chunk_task("run_r")
             .unwrap()
@@ -855,15 +760,12 @@ mod tests {
         assert_eq!((claimed.1.as_str(), claimed.2.as_str()), ("1", "5"));
     }
 
-    /// The reset is surgical: a COMPLETED chunk is never re-queued (that would
-    /// re-do finished work), only `failed` ones are. RED against a `WHERE` that
-    /// forgets the `status = 'failed'` clause.
+    /// The reset is surgical: a COMPLETED chunk is never re-queued (that would re-do finished work), only `failed` ones are.
     #[test]
     fn resume_reset_leaves_completed_chunks_alone() {
         let (_dir, s) = store_on_disk();
         s.create_chunk_run("run_c", "orders", "h", 4).unwrap();
         s.insert_chunk_tasks("run_c", &[(1, 5), (6, 10)]).unwrap();
-        // chunk 0 completes; chunk 1 fails permanently.
         s.claim_next_chunk_task("run_c").unwrap().unwrap();
         s.complete_chunk_task("run_c", 0, 3, Some("part0.csv"))
             .unwrap();
@@ -875,7 +777,6 @@ mod tests {
             n, 1,
             "only the failed chunk is re-queued, not the completed one"
         );
-        // The completed chunk stays completed: the only claimable task is chunk 1.
         let claimed = s.claim_next_chunk_task("run_c").unwrap().expect("claim");
         assert_eq!(claimed.0, 1, "the completed chunk 0 must not be re-queued");
         assert!(
@@ -884,8 +785,7 @@ mod tests {
         );
     }
 
-    /// The control: a TRANSIENT failure must still be retried, or the fix above
-    /// would have turned a retry budget into a one-shot.
+    /// The control: a TRANSIENT failure must still be retried, or the fix above would have turned a retry budget into a one-shot.
     #[test]
     fn a_transiently_failed_chunk_is_still_reclaimed() {
         let (_dir, s) = store_on_disk();
@@ -935,7 +835,7 @@ mod tests {
         assert_eq!(plan("run_b"), [task(0, "1", "5", "pending")], "another run");
     }
 
-    /// A resumed unit extends its plan while its sibling writes the same state file: no replan is lost to `database is locked`.
+    /// A resumed unit extends its plan while its sibling writes the same state file.
     #[test]
     fn a_replan_beside_another_writer_of_the_state_waits_for_it() {
         let (dir, s) = store_on_disk();
@@ -977,9 +877,7 @@ mod tests {
         assert_eq!(s.count_chunk_tasks_total("run_a").unwrap(), 1001);
     }
 
-    /// A sibling store that holds the write lock 4 ms at a time and takes it again at once must not
-    /// starve a replan: each gets the lock within a turn of the sibling's, not after SQLite's busy
-    /// timeout (main: refused `database is locked` after ~15 s, the CI flake of the cell above).
+    /// A sibling store that holds the write lock 4 ms at a time and takes it again at once must not starve a replan.
     #[test]
     fn a_replan_beside_a_writer_that_never_lets_go_gets_its_turn() {
         let (dir, s) = store_on_disk();
@@ -1022,10 +920,7 @@ mod tests {
             "every replan landed"
         );
     }
-    /// The same sibling, each of its transactions held past the turn queue's patience (a slow
-    /// or descheduled writer, the CI load of #660): a replan that ran out of patience keeps its
-    /// place, so it still writes within a turn of the sibling's (main: `database is locked` after
-    /// SQLite's busy timeout, every time).
+    /// The same sibling, each of its transactions held past the turn queue's patience (a slow or descheduled writer, the CI load of #660).
     #[test]
     fn a_replan_beside_a_writer_slower_than_the_turn_patience_gets_its_turn() {
         let (dir, s) = store_on_disk();
@@ -1084,7 +979,7 @@ mod tests {
         }
     }
 
-    /// A second writer that ran out of patience behind a held lock keeps a place beside the first overdue one (main: it leaves the queue for SQLite's busy wait).
+    /// A second writer that ran out of patience behind a held lock keeps a place beside the first overdue one.
     #[test]
     fn a_replan_that_runs_out_of_patience_behind_an_overdue_writer_gets_its_turn() {
         use std::sync::mpsc::channel;
@@ -1146,7 +1041,7 @@ mod tests {
         assert_eq!(s.count_chunk_tasks_total("run_a").unwrap(), 1);
     }
 
-    /// A chunk claim takes its turn in the in-process write queue like any other write (main: it goes straight to SQLite's busy wait).
+    /// A chunk claim takes its turn in the in-process write queue like any other write.
     #[test]
     fn a_chunk_claim_beside_a_writer_that_never_lets_go_gets_its_turn() {
         let (_dir, s) = store_on_disk();
@@ -1197,9 +1092,6 @@ mod tests {
         s.create_chunk_run("run_b", "orders", "ab", 2).unwrap();
         s.insert_chunk_tasks("run_b", &[(1, 2)]).unwrap();
 
-        // `true` — this test's subject is the ATTEMPT CAP, so the failures must be
-        // retryable ones; a permanent failure is exhausted on the spot and is
-        // covered by `a_permanently_failed_chunk_is_not_reclaimed`.
         let t = s.claim_next_chunk_task("run_b").unwrap().unwrap();
         assert_eq!(t.0, 0);
         s.fail_chunk_task("run_b", 0, "boom", true).unwrap();
@@ -1242,53 +1134,21 @@ mod tests {
 }
 
 /// One table's SHAPE at the moment a strategy was chosen for it.
-///
-/// Recorded by `rivet init`, which reads every one of these facts from the
-/// catalog to make the choice and — before this — threw them away. The config it
-/// writes carries the DECISION; nothing carried the EVIDENCE, so six months
-/// later there is no way to ask "what did the table look like when we picked
-/// this?" without guessing.
-///
-/// The field pipeline's own generator already works this way: its
-/// `aa_imports_config.json` stores `table_size_gb` beside `copying_strategy`,
-/// which is exactly what makes their choices auditable. This is that idea with
-/// the two facts they omit and today's failures needed — the ROW WIDTH and the
-/// KEY — plus a timestamp, because a snapshot with no date cannot tell you it
-/// has gone stale.
-///
-/// Why those two. `aa_import_partnerize` was 94k rows — BELOW the 100k threshold
-/// that routes to `mode: full` — and 1010 bytes per row, four to ten times wider
-/// than its siblings. It is the one that crossed the statement timeout. The
-/// threshold counted rows where the cost is bytes, and the byte figure was read
-/// and discarded. Separately, `ref_id` on the versioned tables is indexed but
-/// NOT unique (2.16 rows per key, measured), which is why keyset is impossible
-/// there — a property of the data that no config field records.
-///
-/// INIT ONLY, deliberately: writing this on every run would show a shape
-/// DRIFTING away from the strategy that suits it, which is the more useful
-/// signal and the larger feature. This is the decision point alone.
 #[derive(Debug, Clone)]
 pub struct StrategySnapshot {
     pub export_name: String,
     pub source_schema: Option<String>,
     pub source_table: String,
     pub row_estimate: Option<i64>,
-    /// Physical size from the catalog — `DATA_LENGTH` on MySQL, `pg_total_
-    /// relation_size` on PostgreSQL. `None` where the engine has no scan-free
-    /// figure (SQL Server and Mongo do not populate it), and `None` is recorded
-    /// as `None` rather than 0: "unknown" and "empty" are different answers.
+    /// Physical size from the catalog — `DATA_LENGTH` on MySQL, `pg_total_ relation_size` on PostgreSQL.
     pub total_bytes: Option<i64>,
     pub avg_row_bytes: Option<i64>,
     pub chosen_mode: String,
-    /// `keyset` / `range` / `full` / `incremental` — the shape the scaffold
-    /// emitted, which is finer than `mode:` alone (both keyset and range are
-    /// `mode: chunked`).
+    /// `keyset` / `range` / `full` / `incremental`.
     pub strategy_kind: Option<String>,
     pub key_column: Option<String>,
     pub chunk_size: Option<i64>,
-    // ── v24: density-probe audit (#148) ──
-    /// The catalog's ORIGINAL row claim when a probe replaced it (None = the
-    /// snapshot's row_estimate IS the catalog figure).
+    /// The catalog's ORIGINAL row claim when a probe replaced it (None = the snapshot's row_estimate IS the catalog figure).
     pub catalog_rows: Option<i64>,
     /// Rows per key-unit from the stratified sample (None = not probed).
     pub density: Option<f64>,
@@ -1299,9 +1159,7 @@ pub struct StrategySnapshot {
 }
 
 impl StateStore {
-    /// Append a strategy snapshot. Append-only: a later `init` over the same
-    /// config adds a row rather than replacing one, so the sequence shows how
-    /// the answer changed.
+    /// Append a strategy snapshot.
     pub fn record_strategy_snapshot(&self, s: &StrategySnapshot) -> Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let ver = env!("CARGO_PKG_VERSION");

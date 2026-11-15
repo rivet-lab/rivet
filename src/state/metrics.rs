@@ -33,12 +33,6 @@ pub struct ExportMetric {
 }
 
 /// Every column written to one `export_metrics` row.
-///
-/// Bundles the original 15 metrics with the v9 additions (source harm,
-/// completeness, memory, config dimensions) so a new metric is a struct field +
-/// a column, not another positional argument to a 30-arg function. `Default`
-/// lets a call site fill only the signals it actually has; the run path builds
-/// the whole thing via `pipeline::job::build_metric_row`.
 #[derive(Debug, Default, Clone)]
 pub struct MetricRow {
     pub export_name: String,
@@ -58,7 +52,6 @@ pub struct MetricRow {
     pub retries: i64,
     pub validated: Option<bool>,
     pub schema_changed: Option<bool>,
-    // ── v9: post-pilot analysis signals ──
     pub files_committed: i64,
     pub reconciled: Option<bool>,
     pub source_count: Option<i64>,
@@ -73,40 +66,24 @@ pub struct MetricRow {
     pub source_type: Option<String>,
     pub destination_type: Option<String>,
     pub rivet_version: Option<String>,
-    // ── v10: timing ──
     pub longest_chunk_ms: Option<i64>,
-    // ── v12: chunking diagnostics — which key was chunked (the resolved strategy
-    // is already the `mode` column; whether the key is a PK is a follow-up that
-    // needs a run-time probe, so it is not derived-from-strategy here) ──
     pub chunk_key: Option<String>,
-    // ── v18: failure forensics — populated so a `status='failed'` row reconstructs
-    // the failure without the source DB (export_schema is success-only). See
-    // `pipeline::job::build_metric_row` for the per-field write points. ──
-    /// Stable error CLASS (`keyset_unreadable_key` | `statement_timeout` |
-    /// `parallel_checkpoint` | `schema_drift` | …) classified from `error_message`,
-    /// so failures group/trend without `LIKE '%…%'`.
+    /// Stable error CLASS (`keyset_unreadable_key` | `statement_timeout` | `parallel_checkpoint` | `schema_drift` | …) classified from `error_message`, so failures group/trend without `LIKE '%…%'`.
     pub error_class: Option<String>,
     /// The key RANGE the run covered/died in (from the summary cursor bounds).
     pub cursor_min: Option<String>,
     pub cursor_max: Option<String>,
-    /// The keyset/chunk key's SHAPE as JSON (`{key, db_type, signed, is_primary_key,
-    /// …}`) — the answer to "was the key indexed / unsigned" without the source.
+    /// The keyset/chunk key's SHAPE as JSON (`{key, db_type, signed, is_primary_key, …}`).
     pub key_descriptor_json: Option<String>,
-    /// The raw value that could not be read/advanced (e.g. a u64 past i64::MAX) —
-    /// turns "unsupported type" into a concrete number.
+    /// The raw value that could not be read/advanced, such as a u64 past i64::MAX.
     pub offending_value: Option<String>,
-    /// Source SERVER context as JSON (`{version, max_execution_time, sql_mode,
-    /// time_zone, …}`) — the ERROR 3024 timeout is unexplainable without the limit.
+    /// Source SERVER context as JSON (`{version, max_execution_time, sql_mode, time_zone, …}`).
     pub server_context_json: Option<String>,
 }
 
 /// Metrics store — reads and writes `export_metrics`.
-///
-/// Invariant I4 (Metric After Verdict) governs when `record_metric` is called:
-/// only after the terminal run outcome is determined.
 impl StateStore {
-    /// Drop a run's in-flight `running` aggregate. Only ever called by
-    /// [`record_metric_full`], immediately before the terminal row replaces it.
+    /// Drop a run's in-flight `running` aggregate.
     fn clear_running_metric(&self, run_id: &str) -> Result<()> {
         self.execute(
             "DELETE FROM export_metrics WHERE run_id = ?1 AND status = 'running'",
@@ -116,18 +93,6 @@ impl StateStore {
     }
 
     /// Refresh the run's in-flight aggregate FROM `file_log`.
-    ///
-    /// A projection, not a second opinion: the totals are summed from the parts
-    /// this run has actually recorded, so the aggregate cannot drift from them and
-    /// no caller has to accumulate anything. Called by
-    /// [`StateStore::record_durable_part`], which is the only place that should.
-    ///
-    /// ONE row per run, always. `export_metrics` used to appear only at finalize,
-    /// so a run that died mid-stream had parts and no aggregate. Writing a NEW row
-    /// per part instead would be worse than the gap: a five-part run would be five
-    /// rows and every sum over the table would count it five times. Hence UPDATE
-    /// the run's `running` row, INSERT only when there is none, and let
-    /// [`record_metric_full`] clear it when the terminal row lands.
     pub(crate) fn project_running_aggregate(
         &self,
         run_id: &str,
@@ -150,16 +115,6 @@ impl StateStore {
                           count(*), count(*), coalesce(sum(bytes),0), 0 \
                    FROM file_log WHERE run_id = ?2 \
                    ON CONFLICT DO NOTHING";
-        // INSERT-if-absent then UPDATE, never UPDATE-else-INSERT.
-        //
-        // The old order was a read-then-write race: the parallel chunk-checkpoint
-        // runner gives every worker its OWN connection, so two workers finishing
-        // their first chunk together both saw the UPDATE affect zero rows and both
-        // inserted — two `running` aggregates for one run, in the table that is
-        // supposed to hold exactly one. `ON CONFLICT DO NOTHING` makes the insert
-        // idempotent against the v21 partial unique index, and the UPDATE that
-        // follows recomputes the whole projection from `file_log`, so the final
-        // row is correct no matter which worker won or in what order they ran.
         self.execute(
             ins,
             &[
@@ -175,12 +130,6 @@ impl StateStore {
     }
 
     /// Insert one fully-populated `export_metrics` row (all v1 + v9 columns).
-    /// The production run/apply path builds the complete [`MetricRow`]; the
-    /// 15-field [`record_metric`] shim covers callers with only the core signals.
-    ///
-    /// Clears this run's in-flight `running` row first, so a run leaves exactly
-    /// ONE row at rest — see [`record_metric_progress`] for why that matters more
-    /// than keeping the progress history.
     pub fn record_metric_full(&self, m: &MetricRow) -> Result<()> {
         self.clear_running_metric(&m.run_id)?;
         let now = chrono::Utc::now().to_rfc3339();
@@ -244,11 +193,7 @@ impl StateStore {
         Ok(())
     }
 
-    /// Record per-run source-harm deltas (Tier 2): one row per counter into
-    /// `export_harm`, keyed on `run_id`. Best-effort observability — the caller
-    /// logs and ignores any error; a missing harm row never affects the run
-    /// verdict. No-op for an empty delta set (e.g. a non-Postgres source whose
-    /// probe was skipped, or a counter set that didn't move).
+    /// Record per-run source-harm deltas (Tier 2): one row per counter into `export_harm`, keyed on `run_id`.
     pub fn record_harm(
         &self,
         run_id: &str,
@@ -276,11 +221,7 @@ impl StateStore {
         Ok(())
     }
 
-    /// Test-only read of the `export_harm` rows for a run, `(metric, delta)`
-    /// sorted by metric — lets tests trace the harm signal through the table.
-    ///
-    /// Divergent-by-design (row.rs exemption): a sqlite-only test probe (the
-    /// non-sqlite arm deliberately returns empty), so it keeps its raw match.
+    /// Test-only read of the `export_harm` rows for a run, `(metric, delta)` sorted by metric.
     #[cfg(test)]
     pub(crate) fn harm_rows_for_test(&self, run_id: &str) -> Vec<(String, i64)> {
         match &self.conn {
@@ -301,12 +242,7 @@ impl StateStore {
         }
     }
 
-    /// Test-only raw scalar read of a v9 metric column the typed `get_metrics`
-    /// path intentionally doesn't surface — lets tests pin that the wide INSERT
-    /// mapped each field to the right column (catches a positional param swap).
-    ///
-    /// Divergent-by-design (row.rs exemption): a sqlite-only test probe with a
-    /// `format!`-interpolated column name, so it keeps its raw match.
+    /// Test-only raw scalar read of a v9 metric column the typed `get_metrics` path intentionally doesn't surface.
     #[cfg(test)]
     pub(crate) fn metric_scalar_i64(&self, run_id: &str, column: &str) -> Option<i64> {
         match &self.conn {
@@ -322,9 +258,7 @@ impl StateStore {
         }
     }
 
-    /// [`Self::get_last_success_metric`], excluding one run_id — the caller's
-    /// own freshly-recorded row, so a run can baseline against its
-    /// predecessor rather than itself.
+    /// [`Self::get_last_success_metric`], excluding one run_id.
     pub fn get_last_success_metric_excluding(
         &self,
         export_name: &str,
@@ -346,11 +280,7 @@ impl StateStore {
             .next())
     }
 
-    /// The most recent SUCCESS row for `export_name`, regardless of how many
-    /// failed/interrupted attempts sit between it and now. A fixed recent
-    /// window (`get_metrics(_, N)`) goes blind after N consecutive failures —
-    /// exactly during the degraded period the pool predictor and the
-    /// run-over-run regression baseline exist for (bughunt 2026-08-13).
+    /// The most recent SUCCESS row for `export_name`, regardless of how many failed/interrupted attempts sit between it and now.
     pub fn get_last_success_metric(&self, export_name: &str) -> Result<Option<ExportMetric>> {
         let cols = METRIC_COLUMNS;
         Ok(self
@@ -372,7 +302,6 @@ impl StateStore {
         export_name: Option<&str>,
         limit: usize,
     ) -> Result<Vec<ExportMetric>> {
-        // One projection, written once for both backends (was duplicated per arm).
         let extract = metric_from_row;
         let cols = METRIC_COLUMNS;
         match export_name {
@@ -406,9 +335,7 @@ impl StateStore {
     }
 }
 
-/// Shared row→struct projection for every `export_metrics` query, written once
-/// for both state backends.
-/// The columns [`metric_from_row`] reads by POSITION — one list for every query it projects.
+/// Shared row→struct projection for every `export_metrics` query, written once for both state backends.
 const METRIC_COLUMNS: &str = "export_name, run_id, run_at, duration_ms, total_rows, peak_rss_mb, \
     status, error_message, tuning_profile, format, mode, files_produced, bytes_written, retries, \
     validated, schema_changed, bytes_read, source_type, skip_reason";
@@ -441,22 +368,6 @@ fn metric_from_row(r: &dyn super::row::StateRow) -> ExportMetric {
 mod tests {
 
     /// The DATABASE must refuse a second in-flight aggregate for one run.
-    ///
-    /// Scope, stated plainly because it matters: this pins the CONSTRAINT, not
-    /// the interleaving. `project_running_aggregate` was UPDATE-else-INSERT, and
-    /// the parallel chunk-checkpoint runner opens a connection PER WORKER, so two
-    /// workers finishing their first chunk together could both see the UPDATE
-    /// affect zero rows and both insert. That window lives INSIDE one call, so no
-    /// black-box test can force it — two sequential calls never duplicate, and a
-    /// two-thread version passed 3/3 against the unfixed code. A test that cannot
-    /// be made RED should say so rather than pass quietly.
-    ///
-    /// What CAN be pinned is what makes the interleaving harmless whichever way
-    /// it lands: a partial unique index (v21) on `run_id` where the row is
-    /// `running`. With it the loser's insert is a no-op (`ON CONFLICT DO
-    /// NOTHING`) and the UPDATE that follows recomputes the projection from
-    /// `file_log` regardless of order. Without it, the second row lands — which
-    /// is what this asserts, by trying.
     #[test]
     fn the_database_refuses_a_second_running_aggregate_for_one_run() {
         let dir = tempfile::tempdir().unwrap();
@@ -476,7 +387,6 @@ mod tests {
         st.project_running_aggregate("r1", "orders", "chunked", "parquet")
             .expect("first projection");
 
-        // The raw insert a losing worker would issue. It must not add a row.
         let second = st.execute(
             "INSERT INTO export_metrics (export_name, run_id, run_at, duration_ms, total_rows, \
              status, mode, format, files_produced, files_committed, bytes_written, retries) \
@@ -501,8 +411,6 @@ mod tests {
              what projecting instead of appending was supposed to prevent"
         );
 
-        // A TERMINAL row is a different thing and must still be allowed — the
-        // index is partial on purpose, and a run legitimately gets one per attempt.
         st.execute(
             "INSERT INTO export_metrics (export_name, run_id, run_at, duration_ms, total_rows, \
              status, mode, format, files_produced, files_committed, bytes_written, retries) \
@@ -583,8 +491,6 @@ mod tests {
             duration_ms: 1200,
             total_rows: 50_000,
             status: "success".into(),
-            // v9 signals, chosen as distinct values so a positional param swap
-            // in the 30-column INSERT shows up as a wrong-column read below.
             files_committed: 11,
             source_count: Some(50_000),
             pg_temp_bytes_delta: Some(1_048_576),
@@ -596,15 +502,11 @@ mod tests {
         })
         .unwrap();
 
-        // Core read path is unchanged.
         let got = s.get_metrics(Some("orders"), 1).unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].total_rows, 50_000);
         assert_eq!(got[0].run_id.as_deref(), Some("r1"));
 
-        // v9 columns round-trip to the right column (chunk_size=100000 vs
-        // parallel=4 pinned separately so a swap of the two Option<i64> params
-        // can't pass).
         assert_eq!(s.metric_scalar_i64("r1", "files_committed"), Some(11));
         assert_eq!(s.metric_scalar_i64("r1", "source_count"), Some(50_000));
         assert_eq!(
@@ -619,10 +521,6 @@ mod tests {
 
     #[test]
     fn record_harm_round_trips_per_counter_rows() {
-        // Traces the Tier 2 signal through SQLite: v11 migration creates
-        // export_harm, record_harm writes one row per counter, the read returns
-        // them. (The live source-probe that produces these deltas needs a real
-        // DB; this validates the storage path it lands in.)
         let s = store();
         let deltas = vec![
             ("pg_tup_returned".to_string(), 1_000_000),
@@ -631,7 +529,6 @@ mod tests {
         ];
         s.record_harm("run-h", "content_items", &deltas).unwrap();
 
-        // One row per counter, keyed on run_id (read sorted by metric).
         assert_eq!(
             s.harm_rows_for_test("run-h"),
             vec![
@@ -641,7 +538,6 @@ mod tests {
             ]
         );
 
-        // Empty delta set (probe skipped / counters unmoved) → no rows, no error.
         s.record_harm("run-empty", "x", &[]).unwrap();
         assert!(s.harm_rows_for_test("run-empty").is_empty());
     }

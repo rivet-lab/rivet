@@ -17,17 +17,6 @@ pub struct FileRecord {
 }
 
 /// File log store — reads and writes `file_log`.
-///
-/// Historical note: this table was named `file_manifest` prior to schema v8.
-/// The name was reclaimed for the 0.7.0 cloud-output JSON manifest contract;
-/// the internal SQLite log was renamed to `file_log` to remove the overload.
-///
-/// Invariant I2 (Write Before Log) governs when `record_file` is called:
-/// only after a destination write succeeds.  Failed writes produce no log entry.
-/// Invariant I7 (File-Log Failure Is Non-Fatal) means callers use `let _ = record_file(...)`.
-/// The seven facts about a part that `record_file` stores. Named, because seven
-/// positional arguments — three of them same-typed strings in a row — say nothing
-/// at the call site about which string is the export and which is the file.
 pub struct FilePart<'a> {
     pub run_id: &'a str,
     pub export_name: &'a str,
@@ -40,9 +29,7 @@ pub struct FilePart<'a> {
     pub cursor_high: Option<&'a str>,
 }
 
-/// One part of one run, as it lands. A named value rather than eight
-/// positional arguments — three of them same-typed strings in an order nothing
-/// checks, which is exactly the mix-up a parameter object exists to prevent.
+/// One part of one run, as it lands.
 pub struct DurablePart<'a> {
     pub run_id: &'a str,
     pub export_name: &'a str,
@@ -51,36 +38,14 @@ pub struct DurablePart<'a> {
     pub bytes: i64,
     pub format: &'a str,
     pub compression: Option<&'a str>,
-    /// The extraction strategy that produced it (`full`, `chunked`, `cdc`, …) —
-    /// recorded on the run's aggregate, which may not exist yet when the first
-    /// part lands.
+    /// The extraction strategy that produced it (`full`, `chunked`, `cdc`, …).
     pub mode: &'a str,
-    /// v25: the page's high-water key, for the keyset checkpoint's cursor-atomic resume — written
-    /// in this SAME row as the part, so a resume reconciles the cursor from committed parts and
-    /// never re-reads a committed page. `None` for every non-keyset-checkpoint part.
+    /// v25: the page's high-water key, for the keyset checkpoint's cursor-atomic resume.
     pub cursor_high: Option<&'a str>,
 }
 
 impl StateStore {
     /// ONE part became durable: record the part AND the run's aggregate.
-    ///
-    /// "A part just landed" is a single moment in the domain, and the code said it
-    /// in three production places — `commit.rs`, `parallel_checkpoint.rs`, the CDC
-    /// sink — of which exactly ONE also wrote the run's in-flight aggregate. So a
-    /// crashed CDC run left both records and a crashed BATCH run left half: its
-    /// parts in `file_log` and nothing saying what run they amounted to. Nothing
-    /// in the types said the two travel together, so the pairing arrived one call
-    /// site at a time and stopped at the first.
-    ///
-    /// The aggregate is DERIVED from `file_log` rather than passed in. That is the
-    /// point of the seam: two numbers computed by two writers can disagree, a
-    /// projection cannot. No caller accumulates totals, no caller can forget to,
-    /// and a re-recorded part corrects the aggregate instead of double-counting
-    /// it.
-    ///
-    /// Non-fatal by ADR-0001 I7 — the file is already durable at the destination,
-    /// so a ledger failure is worth logging and never worth failing a run whose
-    /// data is safe. Returns the error for the caller to log with its own words.
     pub fn record_durable_part(&self, p: DurablePart<'_>) -> Result<()> {
         let DurablePart {
             run_id,
@@ -93,13 +58,6 @@ impl StateStore {
             mode,
             cursor_high,
         } = p;
-        // A part is identified by its NAME within its run. Recording it twice is the
-        // same fact stated twice, not two parts — and `file_log` has no uniqueness
-        // to say so, so a retried attempt that rewrites the same file name would
-        // add a second row and inflate every total derived from it. The projection
-        // made that visible the first time it was asserted: three parts summing 42
-        // became 52 after one re-record. Delete-then-insert keeps the table a SET
-        // of parts, which is what "the parts this run produced" means.
         self.forget_part(run_id, file_name)?;
         self.record_file(FilePart {
             run_id,
@@ -114,9 +72,7 @@ impl StateStore {
         self.project_running_aggregate(run_id, export_name, mode, format)
     }
 
-    /// Drop any prior row for this run's part, so re-recording replaces rather
-    /// than accumulates. Scoped to (run_id, file_name): another run's part with
-    /// the same name is a different part.
+    /// Drop any prior row for this run's part, so re-recording replaces rather than accumulates.
     fn forget_part(&self, run_id: &str, file_name: &str) -> Result<()> {
         self.execute(
             "DELETE FROM file_log WHERE run_id = ?1 AND file_name = ?2",
@@ -173,12 +129,7 @@ impl StateStore {
         }
     }
 
-    /// Every `file_log` row for one `run_id`, in write order. Unlike `chunk_task`
-    /// (one `file_name` per chunk, the FIRST rotation sibling only), file_log
-    /// records EVERY committed part — including all `max_file_size` rotation
-    /// siblings — with its real `bytes`, written per-part before `complete_chunk_
-    /// task`. This is the crash-consistent source the chunked resume reconstructs a
-    /// COMPLETE destination manifest from when none exists (round-5 fix).
+    /// Every `file_log` row for one `run_id`, in write order.
     pub fn list_files_for_run(&self, run_id: &str) -> Result<Vec<FileRecord>> {
         let cols =
             "run_id, export_name, file_name, row_count, bytes, format, compression, created_at";
@@ -189,11 +140,7 @@ impl StateStore {
         )
     }
 
-    /// v25: the high-water key of the LAST committed keyset page for `run_id` — the resume point
-    /// for the cursor-atomic checkpoint. Keyset pages commit in KEY ORDER (monotonic), so the
-    /// highest-`id` row carrying a `cursor_high` holds the max key; `ORDER BY id DESC LIMIT 1`
-    /// deliberately avoids a LEXICAL SQL `MAX()` (which mis-orders numeric-as-text keys — "999" >
-    /// "1000"). `None` when this run committed no keyset page (a non-keyset or first-page-crash run).
+    /// v25: the high-water key of the LAST committed keyset page for `run_id`.
     pub fn last_committed_cursor_high(&self, run_id: &str) -> Result<Option<String>> {
         let rows = self.query(
             "SELECT cursor_high FROM file_log \
@@ -214,7 +161,7 @@ impl StateStore {
         Ok(!rows.is_empty())
     }
 
-    /// A format other than `format` among the parts `run_id` logged; `None` when every part is `format` or `format` is empty.
+    /// A format other than `format` among the parts `run_id` logged.
     pub(super) fn another_format_of_run(
         &self,
         run_id: &str,
@@ -230,7 +177,7 @@ impl StateStore {
         )
     }
 
-    /// Forget the named parts of `run_id`, so a resume that reads their rows again does not declare them too; all or none.
+    /// Forget the named parts of `run_id`, so a resume that reads their rows again does not declare them too.
     pub fn forget_parts(&self, run_id: &str, file_names: &[String]) -> Result<()> {
         self.transaction(|| {
             file_names
@@ -239,8 +186,7 @@ impl StateStore {
         })
     }
 
-    /// Forget the parts a keyset page logged before it finished — every row after the last
-    /// one carrying a `cursor_high` — so a resume re-reads that page whole; returns how many.
+    /// Forget the parts a keyset page logged before it finished.
     pub fn forget_unfinished_page_parts(&self, run_id: &str) -> Result<usize> {
         self.execute(
             "DELETE FROM file_log WHERE run_id = ?1 AND id > COALESCE( \
@@ -267,17 +213,7 @@ fn file_record(r: &dyn super::row::StateRow) -> FileRecord {
 #[cfg(test)]
 mod tests {
 
-    /// Recording a durable part writes BOTH records, and the aggregate is a
-    /// PROJECTION of the parts rather than a second opinion.
-    ///
-    /// The pairing used to live in the callers: three production sites wrote the
-    /// part and exactly ONE also wrote the aggregate, so a crashed batch run left
-    /// its parts in `file_log` with nothing saying what run they amounted to.
-    /// Deriving the totals from `file_log` is what makes the two unable to
-    /// disagree — no caller accumulates, so no caller can forget.
-    ///
-    /// THREE parts, not one: with a single part every arithmetic is the identity
-    /// and a sum that ignored its input would still look right.
+    /// Recording a durable part writes BOTH records, and the aggregate is a PROJECTION of the parts rather than a second opinion.
     #[test]
     fn recording_a_durable_part_projects_the_run_aggregate_from_the_parts() {
         let s = StateStore::open_in_memory().expect("in-memory state");
@@ -311,7 +247,6 @@ mod tests {
         );
         assert_eq!(s.list_files_for_run("r1").expect("files").len(), 3);
 
-        // The projection corrects itself: re-recording a part must not double it.
         s.record_durable_part(DurablePart {
             run_id: "r1",
             export_name: "orders",
@@ -334,8 +269,7 @@ mod tests {
 
     use super::*;
 
-    /// A page that rotated into parts and crashed before its last one is not committed:
-    /// its earlier parts are forgotten, every finished page is kept.
+    /// A page that rotated into parts and crashed before its last one is not committed.
     #[test]
     fn a_resume_forgets_only_the_parts_of_an_unfinished_page() {
         let s = StateStore::open_in_memory().expect("in-memory state");
@@ -353,12 +287,11 @@ mod tests {
             })
             .expect("record");
         };
-        // Page 0: two parts, finished. Page 1: two parts written, crashed before its last.
         part("r1", "p0a", None);
         part("r1", "p0b", Some("k300"));
         part("r1", "p1a", None);
         part("r1", "p1b", None);
-        part("r2", "other", None); // another run is untouched
+        part("r2", "other", None);
         assert!(s.is_committed_cursor_high("r1", "k300").unwrap());
         assert!(
             !s.is_committed_cursor_high("r2", "k300").unwrap(),
@@ -377,7 +310,6 @@ mod tests {
             .collect();
         assert_eq!(kept, vec!["p0a", "p0b"]);
         assert_eq!(s.list_files_for_run("r2").unwrap().len(), 1);
-        // A first page that never finished leaves nothing committed.
         part("r3", "q0a", None);
         assert_eq!(s.forget_unfinished_page_parts("r3").expect("forget"), 1);
     }

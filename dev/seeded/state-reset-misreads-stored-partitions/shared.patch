@@ -1,9 +1,10 @@
 diff --git a/src/state/cursor.rs b/src/state/cursor.rs
+index 53c41ea..1854696 100644
 --- a/src/state/cursor.rs
 +++ b/src/state/cursor.rs
-@@ -1026,36 +1026,12 @@
+@@ -1021,36 +1021,12 @@ impl StateStore {
  
-     /// The export names `source` holds progress under, in byte order: those with a cursor on `source` (under any spelling of it, or written before sources were recorded) and the boundaries no cursor owns and no chunk run of another source recorded.
+     /// The export names `source` holds progress under, in byte order.
      pub fn stored_export_names(&self, source: &str) -> Result<Vec<String>> {
 -        let cursors = self.query("SELECT export_name, prefix FROM export_state", &[], |r| {
 -            (r.text(0), r.text(1))
@@ -43,4 +44,4 @@ diff --git a/src/state/cursor.rs b/src/state/cursor.rs
 +        )
      }
  
-     /// Whether the state holds anything under `export_name`: a cursor, a boundary, a chunk run, a run, a file or a journal.
+     /// Whether the state holds anything under `export_name`.

@@ -1,5 +1,4 @@
-//! `rivet state copy`: a config's SQLite state into an empty PostgreSQL state, every table, in one
-//! transaction, each table's row count checked before the commit; the SQLite file is only read.
+//! `rivet state copy`: a config's SQLite state into an empty PostgreSQL state, every table, in one transaction, each table's row count checked before the commit.
 
 use std::path::Path;
 
@@ -19,8 +18,7 @@ pub struct CopyReport {
     pub tables: Vec<(String, u64)>,
 }
 
-/// The SQLite file `config` keeps its state in and the PostgreSQL state to copy it into:
-/// `--to`, else a PostgreSQL `RIVET_STATE_URL`.
+/// The SQLite file `config` keeps its state in and the PostgreSQL state to copy it into.
 pub fn endpoints(
     config: &str,
     to: Option<crate::secret::Secret>,
@@ -100,7 +98,6 @@ pub fn copy_sqlite_to_postgres(source: &Path, target_url: &str) -> Result<CopyRe
             source.display()
         );
     }
-    // An in-memory copy, brought to this release's schema; the source is only read.
     let from = in_memory_copy(source)?;
     super::migrations::migrate(&from)?;
     drop(super::StateStore::open_at_ref(&super::StateRef::Postgres(

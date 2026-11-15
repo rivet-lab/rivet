@@ -1,7 +1,8 @@
 diff --git a/src/state/mod.rs b/src/state/mod.rs
+index 16c1a46..266dbfa 100644
 --- a/src/state/mod.rs
 +++ b/src/state/mod.rs
-@@ -339,7 +339,7 @@
+@@ -284,7 +284,7 @@ impl StateStore {
                  refuse_a_state_left_behind(&config_dir_of(config_path).join(STATE_DB_NAME), &path)?;
                  return Self::open_at_path(&path);
              }
@@ -10,8 +11,8 @@ diff --git a/src/state/mod.rs b/src/state/mod.rs
                  return Self::open_postgres(url);
              }
          }
-@@ -359,7 +359,7 @@
-     /// Which state `config_path` uses and that it answers, without creating or migrating it: `postgres <redacted url>` or `sqlite <path>`.
+@@ -312,7 +312,7 @@ impl StateStore {
+     /// Which state `config_path` uses and that it answers, without creating or migrating it.
      pub fn probe(config_path: &str) -> Result<String> {
          if let Some(url) = state_url_var()
 -            && let Some(url) = postgres_state_url(url.expose())?

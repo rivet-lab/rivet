@@ -7,11 +7,7 @@ use crate::error::{CodedError, Result, codes};
 
 use super::{StateRef, StateStore};
 
-/// One holder at a time per key (a warehouse table, an export's checkpointed run). On a
-/// Postgres state it is a `state_lease` row renewed by this process's lease keeper and
-/// expired by the SERVER's clock — a single statement, so it holds behind a
-/// transaction-mode pooler, where a session advisory lock does not. On a SQLite state it
-/// is an `flock` on a sidecar, released by the OS when the holder dies.
+/// One holder at a time per key (a warehouse table, an export's checkpointed run).
 pub struct LoadLease<'a> {
     store: &'a StateStore,
     key: String,
@@ -23,7 +19,7 @@ pub struct LoadLease<'a> {
 }
 
 impl LoadLease<'_> {
-    /// Whether this process still holds the lease: always under an `flock`; on Postgres, while the keeper runs and renewed the row within the TTL.
+    /// Whether this process still holds the lease.
     pub fn is_held(&self) -> bool {
         self.kept
             .as_ref()
@@ -33,7 +29,6 @@ impl LoadLease<'_> {
 
 impl Drop for LoadLease<'_> {
     fn drop(&mut self) {
-        // Unlock before close: a forked child may still hold a copy of the descriptor.
         for file in [&self._file, &self._legacy].into_iter().flatten() {
             use std::os::unix::io::AsRawFd;
             unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
@@ -335,8 +330,7 @@ fn holder_is_dead_here(holder: &str, host: &str) -> bool {
 /// The longest readable part of a lease file name; the hash after it keeps the name one per key.
 const LEASE_TOKEN_CHARS: usize = 64;
 
-/// A file-name token of the lease `key`: a readable part (lossy: `orders#1` and `orders-1` read
-/// alike) and a hash of the raw key, so two keys never share one lease file.
+/// A file-name token of the lease `key`: a readable part and a hash of the raw key, so two keys never share one lease file.
 fn lease_file_token(key: &str) -> String {
     let readable: String = crate::manifest::file_token(key)
         .chars()
@@ -359,8 +353,7 @@ fn lease_path(db: &std::path::Path, key: &str) -> std::path::PathBuf {
     db.with_file_name(name)
 }
 
-/// `path` opened and locked `how` (`LOCK_EX` / `LOCK_SH`) without waiting; `None` while another
-/// descriptor holds a lock that excludes it.
+/// `path` opened and locked `how` (`LOCK_EX` / `LOCK_SH`) without waiting.
 fn flocked(path: &std::path::Path, how: libc::c_int) -> Result<Option<std::fs::File>> {
     use std::os::unix::io::AsRawFd;
     let file = std::fs::File::create(path)?;
@@ -374,9 +367,7 @@ fn flocked(path: &std::path::Path, how: libc::c_int) -> Result<Option<std::fs::F
     Err(err.into())
 }
 
-/// The lease file 0.32.1 locked for `key` (named by the lossy token alone), while a run of that
-/// release may still hold it: taken shared after the new file, so it excludes a 0.32.1 holder and
-/// no holder of this release. To be removed in 0.34.0. `None` for an in-memory store.
+/// The lease file 0.32.1 locked for `key` (named by the lossy token alone), while a run of that release may still hold it.
 fn legacy_lease_path(db: &std::path::Path, key: &str) -> Option<std::path::PathBuf> {
     if seeded!(
         "lease-upgrade-window-unguarded",
@@ -390,7 +381,7 @@ fn legacy_lease_path(db: &std::path::Path, key: &str) -> Option<std::path::PathB
     Some(db.with_file_name(name))
 }
 
-/// The first lease file beside the SQLite state `db`, by name, that another open file holds, as `(file name, holder)`; `None` when every one is free.
+/// The first lease file beside the SQLite state `db`, by name, that another open file holds, as `(file name, holder)`.
 pub(super) fn sqlite_lease_held(db: &std::path::Path) -> std::io::Result<Option<(String, String)>> {
     use std::os::unix::io::AsRawFd;
     let Some(name) = db.file_name() else {
@@ -427,7 +418,7 @@ fn lease_holder_on_sqlite() -> String {
     "another rivet process on this host".to_string()
 }
 
-/// The first `state_lease` row, by key, a live holder keeps (unexpired, and not a dead pid on this host), as `(key, holder)`; `None` when there is none or no such table yet.
+/// The first `state_lease` row, by key, a live holder keeps (unexpired, and not a dead pid on this host), as `(key, holder)`.
 pub(super) fn pg_lease_held(
     tx: &mut impl postgres::GenericClient,
 ) -> std::result::Result<Option<(String, String)>, postgres::Error> {
@@ -477,9 +468,7 @@ pub(super) fn note_due(noted: Option<Instant>, every: Duration) -> bool {
 pub(super) const WAIT_POLL: Duration = Duration::from_secs(1);
 
 impl StateStore {
-    /// Take `key`, trying again while another live process holds it for up to `--lock-wait`:
-    /// `None` at once when the wait is 0 (the caller's own refusal), the lease once it is free, and
-    /// `RIVET_STATE_LOCK_TIMEOUT` when the wait ran out. `what` names the lease and its holder.
+    /// Take `key`, trying again while another live process holds it for up to `--lock-wait`.
     pub fn take_lease_waiting(
         &self,
         key: &str,
@@ -554,8 +543,7 @@ impl StateStore {
         Ok(holder.map_or_else(|| "another rivet process".to_string(), |h| holder_text(&h)))
     }
 
-    /// Try to take the load lease for `key` (the target table); `None` when
-    /// another process holds it.
+    /// Try to take the load lease for `key` (the target table); `None` when another process holds it.
     pub fn try_load_lease(&self, key: &str) -> Result<Option<LoadLease<'_>>> {
         match &self.state_ref {
             StateRef::Postgres(url) => {
@@ -583,8 +571,6 @@ impl StateStore {
                     |r| r.i64(0),
                 )?;
                 if got.is_none() {
-                    // A holder that died on this host is taken over at once; the TTL only
-                    // decides for a holder on another host, whose pid means nothing here.
                     let current = self.query_opt(
                         "SELECT holder FROM state_lease WHERE lease_key = ?1",
                         &[key.into()],
@@ -671,7 +657,6 @@ mod tests {
             !holder_is_dead_here("garbage", &host),
             "an unparseable holder"
         );
-        // A negative pid names a process GROUP to kill(2); it must never read as a dead holder.
         assert!(
             !holder_is_dead_here(&format!("{host}:-99999:1"), &host),
             "a negative pid"
@@ -752,7 +737,7 @@ mod tests {
         assert!(other.is_held(), "another keeper's row is untouched");
     }
 
-    /// A keeper whose thread needs no connection: told to stop, it lingers for `linger`, then ends and marks the keeper dead as `keep_alive` does.
+    /// A keeper whose thread needs no connection.
     fn keeper_with_thread(linger: Duration) -> Keeper {
         let shared = Arc::new(shared(30));
         let (stop, stopped) = mpsc::channel::<()>();
@@ -856,8 +841,7 @@ mod tests {
         );
     }
 
-    /// Two loads of one table: the second is refused while the first holds the
-    /// lease, and admitted once it is dropped — no timer, no cleanup step.
+    /// Two loads of one table: the second is refused while the first holds the lease, and admitted once it is dropped.
     #[test]
     fn a_second_load_of_the_same_table_waits_for_the_first_to_release() {
         let a = StateStore::open_in_memory().unwrap();
@@ -877,14 +861,12 @@ mod tests {
         );
     }
 
-    /// A released lease is free at once even while a forked child still holds a copy of its
-    /// descriptor (a sibling thread spawning a process between fork and exec).
+    /// A released lease is free at once even while a forked child still holds a copy of its descriptor (a sibling thread spawning a process between fork and exec).
     #[test]
     fn a_released_lease_is_free_while_a_forked_child_still_holds_its_descriptor() {
         let a = StateStore::open_in_memory().unwrap();
         let key = format!("p.d.forked_{}", std::process::id());
         let held = a.try_load_lease(&key).unwrap().expect("first holder");
-        // The child only sleeps (async-signal-safe) and is killed below.
         let child = unsafe { libc::fork() };
         assert!(child >= 0, "fork");
         if child == 0 {
@@ -907,10 +889,7 @@ mod tests {
 mod lease_path_tests {
     use super::*;
 
-    /// Where the SQLite lease sidecar lives: BESIDE the state DB for a real file,
-    /// in the temp dir (per process) only for `:memory:`. Flipping the two gives
-    /// every file-backed store a per-process path, so two rivets sharing one state
-    /// DB would each "hold" the same table's lease.
+    /// Where the SQLite lease sidecar lives: BESIDE the state DB for a real file, in the temp dir (per process) only for `:memory:`.
     #[test]
     fn the_lease_sidecar_sits_beside_the_state_db() {
         let beside = lease_path(
@@ -942,8 +921,7 @@ mod lease_path_tests {
 mod lease_file_tests {
     use super::*;
 
-    /// Keys a lossy token reads alike get two lease files, and two stores holding them do not
-    /// refuse each other; one key is one file whatever its length.
+    /// Keys a lossy token reads alike get two lease files, and two stores holding them do not refuse each other.
     #[test]
     fn keys_that_read_alike_get_their_own_lease_file() {
         let pairs = [
@@ -983,8 +961,7 @@ mod lease_file_tests {
         }
     }
 
-    /// A 0.32.1 run (an exclusive lock on the lossy-named file) and a run of this release on the
-    /// same key exclude each other in both orders; two keys that read alike still do not.
+    /// A 0.32.1 run (an exclusive lock on the lossy-named file) and a run of this release on the same key exclude each other in both orders.
     #[test]
     fn a_holder_of_the_old_lease_name_and_this_release_exclude_each_other() {
         use std::os::unix::io::AsRawFd;
@@ -1032,8 +1009,7 @@ mod lease_file_tests {
 mod lock_wait_tests {
     use super::*;
 
-    /// A timeout says what the command did before it: the plain take says nothing was done, a take
-    /// told otherwise says that and never the plain claim.
+    /// A timeout says what the command did before it.
     #[test]
     fn a_timeout_says_what_the_command_did_before_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -1058,8 +1034,7 @@ mod lock_wait_tests {
         assert!(!half.contains("nothing was done"), "{half}");
     }
 
-    /// A waiting take of a held lease stops by code once `wait` ran out, not before and not a
-    /// poll later; free, it takes the lease at once.
+    /// A waiting take of a held lease stops by code once `wait` ran out, not before and not a poll later.
     #[test]
     fn a_waiting_take_times_out_by_code_when_the_wait_runs_out() {
         let dir = tempfile::tempdir().unwrap();
