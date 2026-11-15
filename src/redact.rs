@@ -1574,4 +1574,16 @@ mod tests {
             "normal password redaction unchanged: {normal_out}"
         );
     }
+
+    /// A value of exactly the minimum length is masked, raw and percent-encoded; one byte shorter is not.
+    #[test]
+    fn a_value_at_the_minimum_length_is_masked_and_a_shorter_one_is_not() {
+        super::mask_value_in_output("Qz8#mW2v");
+        super::mask_value_in_output("Kp4!xR7");
+        assert_eq!(
+            redact_secrets("a Qz8#mW2v b Qz8%23mW2v c"),
+            format!("a {MASK} b {MASK} c")
+        );
+        assert_eq!(redact_secrets("a Kp4!xR7 b"), "a Kp4!xR7 b");
+    }
 }
