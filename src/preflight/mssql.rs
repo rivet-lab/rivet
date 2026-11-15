@@ -41,10 +41,11 @@ pub(super) fn check_mssql(
     url: &str,
     tls: Option<&TlsConfig>,
     exports: &[&ExportConfig],
+    grants: bool,
 ) -> Result<Vec<ExportDiagnostic>> {
     let mut conn = MssqlSource::connect_with_tls(url, tls)?;
 
-    super::collect_diagnostics(exports, |export| diagnose_mssql(&mut conn, export))
+    super::collect_diagnostics(exports, |export| diagnose_mssql(&mut conn, export, grants))
 }
 
 /// Diagnose a single export without printing — used by `rivet plan`.
@@ -52,9 +53,10 @@ pub(super) fn diagnose_export_mssql(
     url: &str,
     tls: Option<&TlsConfig>,
     export: &ExportConfig,
+    grants: bool,
 ) -> Result<super::ExportDiagnostic> {
     let mut conn = MssqlSource::connect_with_tls(url, tls)?;
-    diagnose_mssql(&mut conn, export)
+    diagnose_mssql(&mut conn, export, grants)
 }
 
 /// `@@MAX_CONNECTIONS` — SQL Server's configured `user connections` cap and the
@@ -69,8 +71,27 @@ fn fetch_max_connections_mssql(conn: &mut MssqlSource) -> Option<u32> {
         .filter(|&n| n > 0)
 }
 
-fn diagnose_mssql(conn: &mut MssqlSource, export: &ExportConfig) -> Result<ExportDiagnostic> {
-    let base_query = resolve_preflight_base_query(export);
+/// The `columns_from: grants` projection of a `table:`, which the run reads instead of `SELECT *`.
+fn grants_projection(
+    conn: &mut MssqlSource,
+    export: &ExportConfig,
+    grants: bool,
+) -> Result<Option<String>> {
+    let Some(table) = export.table.as_ref().filter(|_| grants) else {
+        return Ok(None);
+    };
+    Ok(conn.readable_columns(table)?.map(|r| r.select))
+}
+
+fn diagnose_mssql(
+    conn: &mut MssqlSource,
+    export: &ExportConfig,
+    grants: bool,
+) -> Result<ExportDiagnostic> {
+    let base_query = match grants_projection(conn, export, grants)? {
+        Some(select) => select,
+        None => resolve_preflight_base_query(export),
+    };
     let base_query = base_query.as_str();
 
     // `TOP 0` over a derived table executes the relations without scanning rows; the

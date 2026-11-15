@@ -191,7 +191,9 @@ pub(crate) fn get_export_diagnostic(
         SourceType::Mysql => {
             mysql::diagnose_export_mysql(url, tls, export, config.source.columns_from_grants())
         }
-        SourceType::Mssql => mssql::diagnose_export_mssql(url, tls, export),
+        SourceType::Mssql => {
+            mssql::diagnose_export_mssql(url, tls, export, config.source.columns_from_grants())
+        }
         #[cfg(feature = "oracle")]
         SourceType::Oracle => oracle::diagnose_export_oracle(url, tls, export),
         #[cfg(not(feature = "oracle"))]
@@ -449,7 +451,9 @@ pub fn check(
         SourceType::Mysql => {
             mysql::check_mysql(url, tls, &described, config.source.columns_from_grants())?
         }
-        SourceType::Mssql => mssql::check_mssql(url, tls, &described)?,
+        SourceType::Mssql => {
+            mssql::check_mssql(url, tls, &described, config.source.columns_from_grants())?
+        }
         #[cfg(feature = "oracle")]
         SourceType::Oracle => oracle::check_oracle(url, tls, &described)?,
         #[cfg(not(feature = "oracle"))]
@@ -483,7 +487,7 @@ pub fn check(
                 seeded!(
                     "column-grants-boundary-unsaid",
                     "",
-                    crate::source::mysql::column_grants::BOUNDARY
+                    crate::source::columns_from_grants_boundary(config.source.source_type)
                 )
             );
         }

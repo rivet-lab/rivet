@@ -603,6 +603,8 @@ pub(crate) enum CdcEngineOpts {
         capture_instance: Option<String>,
         /// The `table:` values the CONFIG asked for.
         configured_tables: Vec<String>,
+        /// The grants the run resolved before its anchor.
+        resolved_grants: Option<std::sync::Arc<std::collections::HashMap<String, ReadableColumns>>>,
     },
     /// Render the `document` blob as canonical (type-tagged) extended JSON.
     Oracle { configured_tables: Vec<String> },
@@ -1062,6 +1064,7 @@ pub(crate) fn create_change_stream(
         CdcEngineOpts::Mssql {
             capture_instance,
             configured_tables,
+            resolved_grants,
         } => {
             let ci = capture_instance.as_deref().ok_or_else(|| {
                 crate::error::coded(
@@ -1087,6 +1090,7 @@ pub(crate) fn create_change_stream(
                     cfg.drain,
                     configured_tables,
                     spill_dir_for(cfg.checkpoint.as_deref(), &cfg.config_dir),
+                    resolved_grants.clone(),
                 )
                 .map_err(|e| with_setup_hint(e, MSSQL_CDC_HINT))?,
             ))
@@ -1984,6 +1988,7 @@ mod setup_hint {
             super::DrainMode::Continuous,
             &[],
             None,
+            None,
         );
         assert_names_refused_port(open.map(drop), super::MSSQL_CDC_HINT);
     }
@@ -2026,6 +2031,7 @@ mod engine_identity {
                 CdcEngineOpts::Mssql {
                     capture_instance: None,
                     configured_tables: t(&["a"]),
+                    resolved_grants: None,
                 },
                 SourceType::Mssql,
                 "sqlserver://h/d",
@@ -2303,6 +2309,7 @@ mod tests {
             engine: CdcEngineOpts::Mssql {
                 capture_instance: None,
                 configured_tables: Vec::new(),
+                resolved_grants: None,
             },
         };
         let err = match create_change_stream(&cfg, PeekBound::Unbounded) {

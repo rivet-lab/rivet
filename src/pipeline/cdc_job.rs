@@ -365,7 +365,7 @@ pub(super) fn record_file_anchor(
 pub(super) type RunGrants =
     std::sync::Arc<std::collections::HashMap<String, crate::source::cdc::ReadableColumns>>;
 
-/// Read the account's grants once for a `columns_from: grants` MySQL CDC run.
+/// Read the account's grants once for a `columns_from: grants` MySQL or SQL Server CDC run.
 pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<Option<RunGrants>> {
     if !config.source.columns_from_grants() {
         return Ok(None);
@@ -376,7 +376,10 @@ pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<O
         (None, None) => return Ok(None),
     };
     if seeded!("column-grants-boundary-unsaid", false, true) {
-        log::info!("{}", crate::source::mysql::column_grants::BOUNDARY);
+        log::info!(
+            "{}",
+            crate::source::columns_from_grants_boundary(config.source.source_type)
+        );
     }
     let declared = tables
         .iter()
@@ -386,12 +389,26 @@ pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<O
                 .map(|k| (t.clone(), k))
         })
         .collect();
-    crate::source::mysql::cdc::MysqlChangeStream::resolve_grants(
-        config.source.resolve_url()?.expose(),
-        config.source.tls.as_ref(),
-        &tables,
-        &declared,
-    )
+    let url = config.source.resolve_url()?;
+    let tls = config.source.tls.as_ref();
+    match config.source.source_type {
+        crate::config::SourceType::Mssql => crate::source::mssql::column_grants::resolve_grants(
+            url.expose(),
+            tls,
+            &tables,
+            export
+                .cdc
+                .as_ref()
+                .and_then(|c| c.capture_instance.as_deref()),
+            &declared,
+        ),
+        _ => crate::source::mysql::cdc::MysqlChangeStream::resolve_grants(
+            url.expose(),
+            tls,
+            &tables,
+            &declared,
+        ),
+    }
     .map(Some)
 }
 
@@ -830,6 +847,7 @@ fn run_cdc_inner(
                     crate::config::SourceType::Mssql => CdcEngineOpts::Mssql {
                         capture_instance: cdc.capture_instance.clone(),
                         configured_tables: wired.iter().map(|(t, _, _)| t.clone()).collect(),
+                        resolved_grants: grants,
                     },
                     crate::config::SourceType::Oracle => CdcEngineOpts::Oracle {
                         configured_tables: wired.iter().map(|(t, _, _)| t.clone()).collect(),

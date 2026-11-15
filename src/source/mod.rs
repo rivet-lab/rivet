@@ -446,6 +446,14 @@ pub(crate) fn code_a_missing_relation(
     ))
 }
 
+/// What `columns_from: grants` guarantees on `engine`, said to the operator at `rivet check` and at the start of a change-stream run.
+pub(crate) fn columns_from_grants_boundary(engine: crate::config::SourceType) -> &'static str {
+    match engine {
+        crate::config::SourceType::Mssql => mssql::column_grants::BOUNDARY,
+        _ => mysql::column_grants::BOUNDARY,
+    }
+}
+
 /// Code an export error under `columns_from.
 pub(crate) fn code_a_revoked_column(
     err: anyhow::Error,

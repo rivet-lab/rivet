@@ -381,6 +381,7 @@ fn dispatch_cdc(a: CdcArgs) -> Result<()> {
                 // cross-check, capture whatever the instance emits.
                 configured_tables: a.table.clone(),
                 capture_instance: a.capture_instance,
+                resolved_grants: None,
             },
             // Same contract as the SQL arms above: a bare `rivet cdc` with no
             // `--table` names nothing, so there is nothing to cross-check.

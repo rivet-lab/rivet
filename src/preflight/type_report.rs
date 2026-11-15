@@ -441,10 +441,24 @@ fn resolved_units(
             (Err(_), None) | (Ok(None), None) => unreachable!("every non-resolution has a reason"),
         }
     }
-    if config.source.source_type == SourceType::Mysql && config.source.columns_from_grants() {
+    if config.source.columns_from_grants() {
         let tables: Vec<String> = units.iter().filter_map(|u| u.relation.clone()).collect();
-        let readable =
-            crate::source::mysql::cdc::MysqlChangeStream::readable_columns_at(url, tls, &tables)?;
+        let readable = match config.source.source_type {
+            SourceType::Mysql => crate::source::mysql::cdc::MysqlChangeStream::readable_columns_at(
+                url, tls, &tables,
+            )?,
+            SourceType::Mssql => {
+                let mut src = crate::source::mssql::MssqlSource::connect_with_tls(url, tls)?;
+                let mut by_table = std::collections::HashMap::new();
+                for t in &tables {
+                    if let Some(r) = crate::source::Source::readable_columns(&mut src, t)? {
+                        by_table.insert(t.clone(), r);
+                    }
+                }
+                by_table
+            }
+            _ => std::collections::HashMap::new(),
+        };
         for unit in &mut units {
             if let Some(r) = unit.relation.as_ref().and_then(|t| readable.get(t)) {
                 unit.query = r.select.clone();

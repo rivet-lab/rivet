@@ -18,12 +18,15 @@ use crate::source::cdc::{ChangeEvent, ChangeOp, ChangeStream, DrainMode, Positio
 use crate::source::require_tls_or_loopback;
 use crate::types::hex_bytes;
 
-/// The query for the captured vs source column count of the capture instance rivet reads, as `name:got/all`.
-fn row_image_sql(capture_instance: &str) -> String {
+/// The query for the captured vs expected column count of the capture instance rivet reads, as `name:got/all`; `all` is the table's column count, or the readable count under `columns_from: grants`.
+fn row_image_sql(capture_instance: &str, readable: Option<usize>) -> String {
+    let all = match readable {
+        Some(n) => n.to_string(),
+        None => "(SELECT COUNT(*) FROM sys.columns sc WHERE sc.object_id = t.object_id)".into(),
+    };
     format!(
         "SELECT t.name + ':' + CAST(COUNT(cc.column_name) AS varchar(12)) + '/' + \
-                CAST((SELECT COUNT(*) FROM sys.columns sc WHERE sc.object_id = t.object_id) \
-                     AS varchar(12)) \
+                CAST({all} AS varchar(12)) \
          FROM cdc.change_tables ct \
          JOIN sys.tables t ON t.object_id = ct.source_object_id \
          JOIN cdc.captured_columns cc ON cc.object_id = ct.object_id \
@@ -33,20 +36,34 @@ fn row_image_sql(capture_instance: &str) -> String {
     )
 }
 
-/// Pure verdict half of [`row_image`] (#161, the compression_refusal split).
-pub(crate) fn row_image_verdict(rows: &[String]) -> crate::source::cdc::RowImage {
+/// Pure verdict half of [`row_image`] (#161, the compression_refusal split); `grants` judges against the readable columns, where a capture wider than them is as partial as a narrower one.
+pub(crate) fn row_image_verdict(rows: &[String], grants: bool) -> crate::source::cdc::RowImage {
     use crate::source::cdc::RowImage;
     let short: Vec<String> = rows
         .iter()
         .filter_map(|r| {
             let (name, counts) = r.split_once(':')?;
             let (got, all) = counts.split_once('/')?;
-            (got.trim().parse::<i64>().ok()? < all.trim().parse::<i64>().ok()?)
+            let (g, a) = (
+                got.trim().parse::<i64>().ok()?,
+                all.trim().parse::<i64>().ok()?,
+            );
+            (if grants { g != a } else { g < a })
                 .then(|| format!("{name} ({got} of {all} columns)"))
         })
         .collect();
     if short.is_empty() {
         return RowImage::Whole;
+    }
+    if grants {
+        return RowImage::Partial {
+            why: format!(
+                "the capture instance(s) for {} do not carry exactly the columns this account \
+                 may SELECT under `columns_from: grants`. Create an instance over exactly the \
+                 readable columns (sys.sp_cdc_enable_table @captured_column_list) and re-run",
+                short.join(", ")
+            ),
+        };
     }
     RowImage::Partial {
         why: format!(
@@ -369,6 +386,10 @@ pub(crate) struct MssqlChangeStream {
     exhausted: bool,
     /// Open-time max-LSN ceiling (bare hex) for a bounded run.
     bound: Option<String>,
+    /// The grants the run resolved before its anchor.
+    readable: Option<
+        std::sync::Arc<std::collections::HashMap<String, crate::source::cdc::ReadableColumns>>,
+    >,
 }
 
 impl MssqlChangeStream {
@@ -504,6 +525,7 @@ impl MssqlChangeStream {
             batch_limit: peek.rows_capped() as i64,
             exhausted: false,
             bound,
+            readable: None,
         })
     }
 
@@ -518,6 +540,9 @@ impl MssqlChangeStream {
         mode: DrainMode,
         configured_tables: &[String],
         spill_dir: Option<std::path::PathBuf>,
+        readable: Option<
+            std::sync::Arc<std::collections::HashMap<String, crate::source::cdc::ReadableColumns>>,
+        >,
     ) -> Result<Self> {
         require_tls_or_loopback(url, tls)?;
         let p = crate::source::mssql::parse_mssql_url(url)?;
@@ -539,6 +564,7 @@ impl MssqlChangeStream {
         )
         .map(|mut s| {
             s.spill_dir = spill_dir;
+            s.readable = readable;
             s
         })
     }
@@ -655,6 +681,22 @@ impl MssqlChangeStream {
         Ok(())
     }
 
+    /// The number of columns the run may deliver of this stream's table; `None` without `columns_from: grants`.
+    fn readable_count(&self) -> Option<usize> {
+        self.readable
+            .as_ref()?
+            .iter()
+            .find(|(cfg, _)| {
+                crate::source::cdc::sink::table_matches(
+                    crate::source::cdc::CdcEngine::Mssql,
+                    cfg,
+                    &self.schema,
+                    &self.table,
+                )
+            })
+            .map(|(_, r)| r.columns.len())
+    }
+
     /// One row of a spilled tail, group-aware: `committed` comes from the row that FOLLOWS it, which is why the tail reads one record ahead.
     fn next_spooled(&mut self) -> Result<Option<ChangeEvent>> {
         crate::source::cdc::tx_buffer::replay(
@@ -670,7 +712,8 @@ impl ChangeStream for MssqlChangeStream {
         if seeded!("cdc-stdout-partial-image", _tables.is_empty(), false) {
             return RowImage::Whole;
         }
-        let sql = row_image_sql(&self.capture_instance);
+        let readable = self.readable_count();
+        let sql = row_image_sql(&self.capture_instance, readable);
         let Self { rt, client, .. } = self;
         let rows = rt.block_on(async { client.simple_query(sql).await?.into_first_result().await });
         let Ok(rows) = rows else {
@@ -680,11 +723,15 @@ impl ChangeStream for MssqlChangeStream {
             .iter()
             .filter_map(|r| r.get::<&str, _>(0).map(str::to_string))
             .collect();
-        row_image_verdict(&named)
+        row_image_verdict(&named, readable.is_some())
     }
 
     fn engine(&self) -> crate::source::cdc::CdcEngine {
         crate::source::cdc::CdcEngine::Mssql
+    }
+
+    fn readable_columns(&self, configured: &str) -> Option<crate::source::cdc::ReadableColumns> {
+        self.readable.as_ref()?.get(configured).cloned()
     }
 
     /// The capture instance names its source object in `cdc.change_tables`, so this engine ALWAYS knows the real pair.
@@ -1366,14 +1413,53 @@ mod tests {
     /// The catalog query is scoped by the capture instance alone, quote-escaped, whatever tables are listed.
     #[test]
     fn the_row_image_query_names_the_capture_instance_and_escapes_it() {
-        let sql = row_image_sql("dbo_orders");
+        let sql = row_image_sql("dbo_orders", None);
         assert!(
             sql.contains("WHERE ct.capture_instance = 'dbo_orders' GROUP BY t.name, t.object_id"),
             "{sql}"
         );
         assert!(
-            row_image_sql("a'b").contains("ct.capture_instance = 'a''b'"),
+            row_image_sql("a'b", None).contains("ct.capture_instance = 'a''b'"),
             "a quote in the instance name is doubled"
+        );
+    }
+
+    /// The denominator is the table's column count, or the readable count under `columns_from: grants`.
+    #[test]
+    fn the_row_image_query_counts_against_the_table_or_the_readable_columns() {
+        assert!(
+            row_image_sql("ci", None)
+                .contains("CAST((SELECT COUNT(*) FROM sys.columns sc WHERE sc.object_id = t.object_id) AS varchar(12))")
+        );
+        let grants = row_image_sql("ci", Some(2));
+        assert!(grants.contains("'/' + CAST(2 AS varchar(12))"), "{grants}");
+        assert!(!grants.contains("sys.columns"), "{grants}");
+    }
+
+    /// Under `columns_from: grants` a capture of exactly the readable columns is whole and any other count is partial.
+    #[test]
+    fn the_grants_verdict_accepts_a_subset_capture_and_refuses_any_other_count() {
+        use crate::source::cdc::RowImage;
+        assert!(matches!(
+            row_image_verdict(&["t:2/2".into()], true),
+            RowImage::Whole
+        ));
+        for bad in ["t:3/2", "t:1/2"] {
+            match row_image_verdict(&[bad.into()], true) {
+                RowImage::Partial { why } => assert!(
+                    why.contains("do not carry exactly the columns this account may SELECT")
+                        && why.contains("@captured_column_list"),
+                    "{why}"
+                ),
+                other => panic!("{bad} must refuse, got {other:?}"),
+            }
+        }
+        assert!(
+            matches!(
+                row_image_verdict(&["t:2/3".into()], false),
+                RowImage::Partial { .. }
+            ),
+            "without the policy a subset capture is still partial"
         );
     }
 
@@ -1382,11 +1468,11 @@ mod tests {
     fn row_image_verdict_both_directions() {
         use crate::source::cdc::RowImage;
         assert!(matches!(
-            row_image_verdict(&["orders_ci:5/5".into(), "garbage".into()]),
+            row_image_verdict(&["orders_ci:5/5".into(), "garbage".into()], false),
             RowImage::Whole
         ));
-        assert!(matches!(row_image_verdict(&[]), RowImage::Whole));
-        match row_image_verdict(&["orders_ci:3/5".into(), "items_ci:4/4".into()]) {
+        assert!(matches!(row_image_verdict(&[], false), RowImage::Whole));
+        match row_image_verdict(&["orders_ci:3/5".into(), "items_ci:4/4".into()], false) {
             RowImage::Partial { why } => {
                 assert!(why.contains("orders_ci (3 of 5 columns)"), "{why}");
                 assert!(
