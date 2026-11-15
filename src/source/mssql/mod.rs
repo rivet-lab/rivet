@@ -896,11 +896,23 @@ impl Source for MssqlSource {
             let Some((schema, table)) = parse_mssql_simple_from_table(query) else {
                 return Ok(None);
             };
+            let base = match crate::sql::bare_column_source(query, column) {
+                _ if seeded!(
+                    "cursor-nullability-not-traced-to-its-source-column",
+                    true,
+                    false
+                ) =>
+                {
+                    column.to_string()
+                }
+                Some(part) => part.name,
+                None => return Ok(None),
+            };
             let catalog = format!(
                 "SELECT c.is_nullable FROM sys.columns c WHERE c.object_id = OBJECT_ID(N'[{}].[{}]') AND c.name = N'{}'",
                 schema.replace(']', "]]").replace('\'', "''"),
                 table.replace(']', "]]").replace('\'', "''"),
-                column.replace('\'', "''")
+                base.replace('\'', "''")
             );
             let row = client
                 .query(catalog.as_str(), &[])
