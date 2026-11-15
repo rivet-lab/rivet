@@ -62,6 +62,17 @@ fn profile_only(profile: &str) -> reqsign::AwsConfig {
     }
 }
 
+/// A signer that reads exactly `config` and never the ambient environment, the shared files or the instance metadata.
+fn only_loader(config: reqsign::AwsConfig) -> Box<reqsign::AwsDefaultLoader> {
+    Box::new(reqsign::AwsDefaultLoader::new(
+        reqwest::Client::new(),
+        reqsign::AwsConfig {
+            ec2_metadata_disabled: true,
+            ..config
+        },
+    ))
+}
+
 impl CloudBackend for S3Backend {
     // opendal's S3 lister puts the ETag in `content_md5`; its writer does not. On an
     // SSE-KMS / SSE-C object the ETag is not the MD5, so trusting it turns every
@@ -106,21 +117,27 @@ impl CloudBackend for S3Backend {
                 secret_key_env,
                 session_token_env,
             } => {
-                if let Some(env_name) = &access_key_env {
-                    let key = read_credential_env(env_name, "access key")?;
-                    builder = builder.access_key_id(key.expose());
-                }
-                if let Some(env_name) = &secret_key_env {
-                    let secret = read_credential_env(env_name, "secret key")?;
-                    builder = builder.secret_access_key(secret.expose());
-                }
-                if let Some(env_name) = &session_token_env {
-                    let token = read_credential_env(env_name, "session token")?;
-                    builder = builder.session_token(token.expose());
-                }
+                let read = |name: &Option<String>, label: &str| {
+                    name.as_deref()
+                        .map(|n| read_credential_env(n, label))
+                        .transpose()
+                };
+                let key = read(&access_key_env, "access key")?;
+                let secret = read(&secret_key_env, "secret key")?;
+                let token = read(&session_token_env, "session token")?;
+                builder = builder.customized_credential_load(only_loader(reqsign::AwsConfig {
+                    access_key_id: key.map(|k| k.expose().to_string()),
+                    secret_access_key: secret.map(|k| k.expose().to_string()),
+                    session_token: token.map(|k| k.expose().to_string()),
+                    ..Default::default()
+                }));
+            }
+            DestinationCredential::Anonymous => {
+                builder = builder
+                    .allow_anonymous()
+                    .customized_credential_load(only_loader(reqsign::AwsConfig::default()));
             }
             DestinationCredential::Ambient
-            | DestinationCredential::Anonymous
             | DestinationCredential::GcsKeyFile(_)
             | DestinationCredential::AzureKey { .. }
             | DestinationCredential::AzureSas { .. } => {}
