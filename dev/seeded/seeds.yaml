@@ -6014,6 +6014,25 @@ seeds:
       mongo:
         na: "a MongoDB export has no incremental cursor_column: mode full only"
 
+  - name: cursor-nullability-not-traced-to-its-source-column
+    class: "a cursor column's nullability is read by its output name instead of the base column it is a bare reference to, so COALESCE(c, d) AS c over a nullable c is refused as a nullable cursor on SQL Server and Oracle, and a PostgreSQL view over a nullable c is admitted"
+    history: "2026-11-15 - issue 966 residuals of the cursor admission: RED on main (SQL Server and Oracle refused an aliased COALESCE with exit 5; PostgreSQL admitted a view over a nullable column with exit 0)"
+    scope: source
+    engines:
+      postgres:
+        switch: cursor-nullability-not-traced-to-its-source-column
+        cells: [a_view_over_a_nullable_cursor_is_refused_postgres]
+      mysql:
+        na: "the MySQL NOT NULL column flag is exact for an expression and for a view, so no catalog trace is read"
+      mssql:
+        switch: cursor-nullability-not-traced-to-its-source-column
+        cells: [an_aliased_expression_over_a_nullable_column_delivers_mssql]
+      oracle:
+        switch: cursor-nullability-not-traced-to-its-source-column
+        cells: [an_aliased_expression_over_a_nullable_column_delivers_oracle]
+      mongo:
+        na: "a MongoDB export has no incremental cursor_column: mode full only"
+
   - name: remote-plaintext-every-sink
     class: "the remote-plaintext gate lets an http:// URL on a remote host through, so a ClickHouse load.url, a Slack webhook_url or a BigQuery RIVET_BQ_API_ENDPOINT sends the loader password and every row, the webhook secret or the OAuth bearer token across the network unencrypted"
     history: "bughunt axis 4 (security defaults), 2026-11-10: require_tls_or_loopback guarded the source and state dials only; RED on main 2026-11-11 (rivet check accepted a remote http:// ClickHouse load.url and Slack webhook_url on every source engine)"
