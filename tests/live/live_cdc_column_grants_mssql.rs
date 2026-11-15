@@ -94,14 +94,6 @@ fn parquet_dirs(dir: &Path) -> Vec<std::path::PathBuf> {
     dirs
 }
 
-/// Every part under `dir`, at any depth.
-fn all_parts(dir: &Path) -> Vec<arrow::record_batch::RecordBatch> {
-    parquet_dirs(dir)
-        .iter()
-        .flat_map(|d| read_all_parts(d))
-        .collect()
-}
-
 /// Every column name and every rendered cell of `parts`.
 fn names_and_cells(parts: &[arrow::record_batch::RecordBatch]) -> (Vec<String>, Vec<String>) {
     let (mut names, mut cells) = (Vec::new(), Vec::new());
@@ -192,7 +184,10 @@ fn a_column_grant_login_delivers_no_hidden_column_by_name_or_value_mssql() {
     wait_for_capture(&ci, 3);
     rig.run_ok();
 
-    let parts = all_parts(&rig.out_dir());
+    let parts = parquet_dirs(&rig.out_dir())
+        .iter()
+        .flat_map(|d| read_all_parts(d))
+        .collect::<Vec<_>>();
     let (names, cells) = names_and_cells(&parts);
     assert!(
         !names.iter().any(|n| n.eq_ignore_ascii_case("pass")),
@@ -255,7 +250,13 @@ fn a_column_grant_login_is_refused_for_a_capture_wider_than_its_grant_or_a_missi
         .cdc("initial: snapshot")
         .source_line("columns_from: grants");
     rig.run_ok();
-    assert_no_hidden(&all_parts(&rig.out_dir()), "the remedy");
+    assert_no_hidden(
+        &parquet_dirs(&rig.out_dir())
+            .iter()
+            .flat_map(|d| read_all_parts(d))
+            .collect::<Vec<_>>(),
+        "the remedy",
+    );
 
     let keyless = GrantLogin::new(&table, "name");
     let out = Rig::mssql_cdc(&table, &ci2)
@@ -299,7 +300,13 @@ fn a_column_grant_login_reads_only_its_columns_in_every_batch_mode_mssql() {
             said_by(&check)
         );
         rig.run_ok();
-        let cells = assert_no_hidden(&all_parts(&rig.out_dir()), mode);
+        let cells = assert_no_hidden(
+            &parquet_dirs(&rig.out_dir())
+                .iter()
+                .flat_map(|d| read_all_parts(d))
+                .collect::<Vec<_>>(),
+            mode,
+        );
         for name in ["ann", "bob", "cid"] {
             assert!(
                 cells.iter().any(|v| v == name),
@@ -331,7 +338,12 @@ fn a_login_that_may_read_every_column_delivers_every_column_under_the_policy_mss
     ));
     wait_for_capture(&ci, 1);
     rig.run_ok();
-    let (names, cells) = names_and_cells(&all_parts(&rig.out_dir()));
+    let (names, cells) = names_and_cells(
+        &parquet_dirs(&rig.out_dir())
+            .iter()
+            .flat_map(|d| read_all_parts(d))
+            .collect::<Vec<_>>(),
+    );
     assert!(
         names.iter().any(|n| n == "pass") && cells.iter().any(|v| v == &format!("{SECRET}u")),
         "a login that may read `pass` is delivered it: {names:?} {cells:?}"
@@ -366,7 +378,12 @@ fn a_column_revoked_between_runs_is_refused_by_the_next_run_mssql() {
     wait_for_capture(&ci, 1);
     let out = rig.run();
     assert_refused(&out, Refused::by_code("RIVET_SOURCE_CDC_PREREQUISITE", 1));
-    let (_, cells) = names_and_cells(&all_parts(&rig.out_dir()));
+    let (_, cells) = names_and_cells(
+        &parquet_dirs(&rig.out_dir())
+            .iter()
+            .flat_map(|d| read_all_parts(d))
+            .collect::<Vec<_>>(),
+    );
     assert!(
         !cells.iter().any(|v| v == "ann2"),
         "a column revoked since the last run is not delivered: {cells:?}"

@@ -438,22 +438,13 @@ pub fn check(
     // the helper keeps emission to one line per process even when both
     // `check` and `run` flow through it.
     crate::source::warn_if_tls_disabled(&config.source);
-    // Each engine connects once and returns one diagnostic per export without
-    // printing. Rendering is decided here: TEXT (the per-export table) for the
-    // default human path, or — under `--json` — the diagnostic is merged into
-    // each export's type-report JSON object below (see the `if show_type_report`
-    // block). `get_export_diagnostic` already proved the diag is computable
-    // without printing; this is the multi-export variant of that path.
     let planned = exports_as_planned(&exports, strategies);
     let described: Vec<&ExportConfig> = planned.iter().collect();
+    let grants = config.source.columns_from_grants();
     let diagnostics: Vec<ExportDiagnostic> = match config.source.source_type {
         SourceType::Postgres => postgres::check_postgres(url, tls, &described)?,
-        SourceType::Mysql => {
-            mysql::check_mysql(url, tls, &described, config.source.columns_from_grants())?
-        }
-        SourceType::Mssql => {
-            mssql::check_mssql(url, tls, &described, config.source.columns_from_grants())?
-        }
+        SourceType::Mysql => mysql::check_mysql(url, tls, &described, grants)?,
+        SourceType::Mssql => mssql::check_mssql(url, tls, &described, grants)?,
         #[cfg(feature = "oracle")]
         SourceType::Oracle => oracle::check_oracle(url, tls, &described)?,
         #[cfg(not(feature = "oracle"))]
