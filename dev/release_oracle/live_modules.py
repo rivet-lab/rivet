@@ -14,6 +14,7 @@ import ast
 import functools
 import os
 import re
+import sys
 from dataclasses import dataclass
 
 from . import live_needs, live_owners
@@ -259,6 +260,50 @@ def coverage_problems(table: list[tuple[str, str, bool]], modules: list[str], de
     return out
 
 
+#: 2026-11-14: a hosted slice over this many minutes lost its runner twice (run 43633356678, slice 2 of 3, 902 tests); closes when a slice is cut by measured minutes instead of test count.
+SLICE_CEILING_MIN = 50
+#: 2026-11-14: every slice builds the release binary from nothing; measured 16.4-16.8 min on slices 1 and 3 of run 43633356678.
+SLICE_BUILD_MIN = 17.0
+#: 2026-11-14: the slowest measured hosted rate, slice 3 of run 43633356678: 45.6 min over 902 tests; closes with a per-module cost read from the slices' nextest logs.
+SLICE_SEC_PER_TEST = 3.1
+
+
+def slice_minutes(tests: int) -> float:
+    """The minutes a hosted slice of `tests` live tests takes: the build, then each test at the slowest measured rate."""
+    return SLICE_BUILD_MIN + tests * SLICE_SEC_PER_TEST / 60
+
+
+def hosted_slice_plans(slices: int) -> list[dict[str, list[str]]]:
+    """The tests each live slice 1..`slices` runs, planned exactly as `verify_live_modules` plans a slice of an unnarrowed run."""
+    modules = [m for m in live_suite_modules() if m not in EXCLUDED]
+    run = select_modules([], modules, live_owners.module_owners(), []).run
+    dedicated_modules, dedicated_tests = dedicated_live()
+    return [part_plan(live_test_table(), list(run), HOSTED, set(dedicated_tests), set(dedicated_modules), (i, slices)) for i in range(1, slices + 1)]
+
+
+def slice_budget_problems(plans: list[dict[str, list[str]]], ceiling: float = SLICE_CEILING_MIN) -> list[str]:
+    """One line per slice whose estimated minutes exceed `ceiling`: the planner refuses to start a slice a runner is not known to survive."""
+    out = []
+    for i, plan in enumerate(plans, 1):
+        tests = sum(len(v) for v in plan.values())
+        if (m := slice_minutes(tests)) > ceiling:
+            out.append(f"live slice {i}/{len(plans)}: {tests} tests in {len(plan)} modules estimate {m:.0f} min, over the {ceiling:.0f} min ceiling; raise LIVE_SLICES in gate-hosted.yml")
+    return out
+
+
+def plan_matrix(slices: int) -> str:
+    """The gate-hosted matrix JSON for `slices` live slices plus slice 0, or a SystemExit naming every slice over the ceiling."""
+    import json
+
+    plans = hosted_slice_plans(slices)
+    for i, plan in enumerate(plans, 1):
+        tests = sum(len(v) for v in plan.values())
+        print(f"live slice {i}/{slices}: {tests} tests, {len(plan)} modules, ~{slice_minutes(tests):.0f} min", file=sys.stderr)
+    if bad := slice_budget_problems(plans):
+        raise SystemExit("\n".join(bad))
+    return json.dumps({"slice": list(range(slices + 1))})
+
+
 def verify_live_modules(led: Ledger, engines: list[str] | None = None, part: str = HOSTED, shard: tuple[int, int] | None = None) -> None:
     """Run the live_suite modules and tests no dedicated cell ran and `part` (hosted or devbox) can run, those of `engines` only when named and of slice `shard` (i, n) only when given; one ledger row per test."""
     engines = engines or []
@@ -404,4 +449,16 @@ def self_test() -> None:
         RAN_LIVE_TESTS.update(saved_tests)
         RAN_LIVE_MODULES.clear()
         RAN_LIVE_MODULES.update(saved_modules)
+    even = [{"m": ["t"] * 100}] * 2
+    assert slice_budget_problems(even) == [] and len(slice_budget_problems([{"m": ["t"] * 1000}, *even])) == 1, "a slice over the ceiling is not refused alone"
+    assert slice_budget_problems(even, 1.0) and slice_minutes(0) == SLICE_BUILD_MIN, "the ceiling or the build floor is not read"
+    declared = int(re.search(r'^  LIVE_SLICES: "(\d+)"', (ROOT / ".github" / "workflows" / "gate-hosted.yml").read_text(), re.M)[1])
+    assert declared >= 1 and not slice_budget_problems(hosted_slice_plans(declared)), f"gate-hosted.yml runs {declared} live slices and the planner refuses them: {slice_budget_problems(hosted_slice_plans(declared))}"
     print("self-test ok: --engines runs the named engines' live modules and the engine-less ones, prints the rest as excluded, and no selector runs all")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "plan":
+        print(plan_matrix(int(sys.argv[2])))
+    else:
+        raise SystemExit("usage: python3 -m dev.release_oracle.live_modules plan N")
