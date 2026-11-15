@@ -154,3 +154,25 @@ pub(crate) fn plan_run(
 pub(crate) fn refuse_to_seal(plan: &ResolvedRunPlan) -> Result<()> {
     unexpanded_partition_error(plan).map_or(Ok(()), Err)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Sealing refuses a destination holding `{partition}` by code and passes an expanded one.
+    #[test]
+    fn refuse_to_seal_refuses_the_partition_token_and_passes_an_expanded_plan() {
+        let plan = crate::plan::test_support::test_plan();
+        assert!(refuse_to_seal(&plan).is_ok());
+        for in_prefix in [false, true] {
+            let mut p = plan.clone();
+            if in_prefix {
+                p.destination.prefix = Some("x/{partition}".into());
+            } else {
+                p.destination.path = Some("./out/{partition}".into());
+            }
+            let err = refuse_to_seal(&p).unwrap_err();
+            crate::error::assert_coded(&err, "RIVET_PLAN_PARTITION_TOKEN_UNEXPANDED", 1);
+        }
+    }
+}
