@@ -90,7 +90,7 @@ impl DestinationType {
 }
 
 impl DestinationConfig {
-    /// The destination as an operator would type it to find the prefix again: `file://`, `s3://`, `gs://`, `az://<container>/` or `stdout`.
+    /// The destination as an operator would type it to find the prefix again.
     pub fn uri(&self) -> String {
         let in_bucket = |scheme: &str| {
             format!(
@@ -111,7 +111,7 @@ impl DestinationConfig {
         }
     }
 
-    /// Anchor a relative local `path` (or the `prefix` a local destination uses as one) to `config_dir`, so one config names one directory from every working directory; returns the relative spelling it anchored.
+    /// Anchor a relative local `path` (or the `prefix` a local destination uses as one) to `config_dir`, so one config names one directory from every working directory.
     pub(crate) fn anchor(&mut self, config_dir: &Path) -> Option<String> {
         if self.destination_type != DestinationType::Local {
             return None;
@@ -158,7 +158,7 @@ pub(crate) fn anchors(written: &str, anchored: &str) -> bool {
         && Path::new(a).ends_with(&tail)
 }
 
-/// `path` with its `.` and `..` components folded lexically: one spelling of a directory for the files rivet names and compares.
+/// `path` with its `.` and `..` components folded lexically.
 pub(crate) fn normalized(path: &Path) -> PathBuf {
     use std::path::Component;
     let mut out = PathBuf::new();
@@ -176,7 +176,7 @@ pub(crate) fn normalized(path: &Path) -> PathBuf {
     out
 }
 
-/// `path` up to its first `{placeholder}` component, normalised: the directory a templated destination lands under.
+/// `path` up to its first `{placeholder}` component, normalised.
 pub(crate) fn literal_root(path: &Path) -> PathBuf {
     normalized(path)
         .components()
@@ -184,7 +184,7 @@ pub(crate) fn literal_root(path: &Path) -> PathBuf {
         .collect()
 }
 
-/// The transition decision for a relative local path: `old` (under the working directory, where a release before 0.32 wrote) holds `export`'s files while `new` (beside the config) holds none; local stat and reads only, never the same directory.
+/// The transition decision for a relative local path.
 pub(crate) fn relative_path_moved(export: &str, old: &Path, new: &Path) -> bool {
     old != new && holds_export(old, export) && !holds_export(new, export)
 }
@@ -210,7 +210,7 @@ fn holds_export(dir: &Path, export: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// The four cases of the transition decision: the same directory, the old place alone holds the export, both do, neither does; another export's manifest does not count.
+    /// The four cases of the transition decision.
     #[test]
     fn a_relative_path_has_moved_only_when_the_old_place_alone_holds_the_export() {
         let root = tempfile::tempdir().unwrap();
@@ -254,7 +254,7 @@ mod tests {
         );
     }
 
-    /// The one resolver refuses only from ANOTHER working directory whose place holds the export: from the config's own directory the same files are the destination itself.
+    /// The one resolver refuses only from ANOTHER working directory whose place holds the export.
     #[test]
     fn a_config_loaded_from_another_directory_is_refused_while_that_directory_holds_the_export() {
         let root = tempfile::tempdir().unwrap();
@@ -327,7 +327,7 @@ mod tests {
         assert_eq!(cloud.prefix.as_deref(), Some("exports/"));
     }
 
-    /// `Config::load` is where every command anchors: a config in another directory, loaded from this one, names its own directory.
+    /// `Config::load` is where every command anchors.
     #[test]
     fn a_loaded_config_anchors_its_relative_local_paths_once() {
         let elsewhere = tempfile::tempdir().unwrap();

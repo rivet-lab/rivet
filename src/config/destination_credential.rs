@@ -24,7 +24,7 @@ pub(crate) enum DestinationCredential {
 }
 
 impl DestinationCredential {
-    /// The credential `config` names, or the `RIVET_CONFIG_DESTINATION_AUTH_INVALID` refusal of a combination that names two identities; `subject` opens the message.
+    /// The credential `config` names, or the `RIVET_CONFIG_DESTINATION_AUTH_INVALID` refusal of a combination that names two identities.
     pub(crate) fn choose(config: &DestinationConfig, subject: &str) -> Result<Self> {
         let refuse = |why: &str| {
             crate::error::coded(

@@ -1,8 +1,10 @@
+diff --git a/src/config/url.rs b/src/config/url.rs
+index a859fc4..8fff4bf 100644
 --- a/src/config/url.rs
 +++ b/src/config/url.rs
-@@ -109,9 +109,9 @@
+@@ -100,9 +100,9 @@ fn parse_request_url(url: &str) -> Option<reqwest::Url> {
  
- /// The lowercase host a request to `url` dials, IPv6 brackets removed; `None` when the URL does not parse or has no host.
+ /// The lowercase host a request to `url` dials, IPv6 brackets removed.
  pub(crate) fn request_host(url: &str) -> Option<String> {
 -    let parsed = parse_request_url(url)?;
 -    let host = parsed.host_str()?;
@@ -13,7 +15,7 @@
  }
  
  /// Refuse an `http://` URL on a remote host, or a URL that does not parse, before any request carries `carries` through it in cleartext.
-@@ -129,7 +129,11 @@
+@@ -120,7 +120,11 @@ pub(crate) fn require_https_or_loopback(
          );
      };
      let host = parsed.host_str().unwrap_or_default();

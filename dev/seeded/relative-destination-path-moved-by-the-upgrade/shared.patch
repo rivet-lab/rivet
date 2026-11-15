@@ -1,9 +1,10 @@
 diff --git a/src/config/destination.rs b/src/config/destination.rs
+index 1fe391e..2a12c5d 100644
 --- a/src/config/destination.rs
 +++ b/src/config/destination.rs
-@@ -186,7 +186,7 @@
+@@ -186,7 +186,7 @@ pub(crate) fn literal_root(path: &Path) -> PathBuf {
  
- /// The transition decision for a relative local path: `old` (under the working directory, where a release before 0.32 wrote) holds `export`'s files while `new` (beside the config) holds none; local stat and reads only, never the same directory.
+ /// The transition decision for a relative local path.
  pub(crate) fn relative_path_moved(export: &str, old: &Path, new: &Path) -> bool {
 -    old != new && holds_export(old, export) && !holds_export(new, export)
 +    old != new && holds_export(old, export) && holds_export(new, export)

@@ -60,11 +60,6 @@ pub struct Config {
 }
 
 /// Two configured `tables:` entries that can name ONE relation, if any.
-///
-/// The routing rule this mirrors is `sink::table_matches`: a BARE name matches any
-/// schema, a qualified one matches its own. So `orders` and `sales.orders` overlap
-/// — whichever is listed first takes every event — while `sales.orders` and
-/// `audit.orders` never do. Pure, so the decision has one home a mutant can grade.
 pub(crate) fn overlapping_table_pair(ts: &[String]) -> Option<(String, String)> {
     let leaf = |t: &str| {
         t.rsplit_once('.')
@@ -73,7 +68,6 @@ pub(crate) fn overlapping_table_pair(ts: &[String]) -> Option<(String, String)> 
     for (i, a) in ts.iter().enumerate() {
         for b in ts.iter().skip(i + 1) {
             let (qa, qb) = (a.contains('.'), b.contains('.'));
-            // One bare, one qualified, same leaf: the bare one swallows the other.
             if qa != qb && leaf(a) == leaf(b) {
                 return Some((a.clone(), b.clone()));
             }
@@ -104,9 +98,6 @@ impl Config {
         path: &str,
         params: Option<&std::collections::HashMap<String, String>>,
     ) -> crate::error::Result<Self> {
-        // F11 (0.7.5 audit): raw `std::io::Error` lost the path on
-        // not-found.  Wrap with the file path + a hint so the operator
-        // can see *which* config the tool could not open.
         let contents = std::fs::read_to_string(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 crate::error::coded(
@@ -123,19 +114,8 @@ impl Config {
                 )
             }
         })?;
-        // Warn about typo'd `--param` keys once per CLI invocation, using the
-        // un-resolved YAML as the haystack so the placeholders are still there.
-        // We pass the raw `contents` (not `resolved`) on purpose: after
-        // resolution the placeholders are gone, and every key would look unused.
         resolve::warn_unused_params(&contents, params);
         let resolved = resolve_vars(&contents, params)?;
-        // F12 (0.7.5 audit): YAML parse errors did not name the config
-        // file.  When loading from disk we know the path — thread it
-        // into the parse error.
-        // `.context` (not `anyhow!("…{:#}", e)`, which stringifies into a fresh
-        // error) so a typed `CodedError` raised by validation survives the chain —
-        // `error::error_code` downcasts it for the `[CODE]` prefix. `{e:#}` in
-        // `main` still renders the full "config file '…': <message>" chain.
         let mut config =
             Self::from_yaml(&resolved).map_err(|e| e.context(format!("config file '{}'", path)))?;
         config.record_queries_as_written(&contents);
@@ -144,7 +124,7 @@ impl Config {
         Ok(config)
     }
 
-    /// Anchor every relative file a config names (`url_file`, `tls.ca_file`, the load target's key and CA, each export's `credentials_file`) to the config file's directory through the one `Anchor`; a named Google key is read through the one key reader, so one that is missing or unusable stops the load.
+    /// Anchor every relative file a config names (`url_file`, `tls.ca_file`, the load target's key and CA, each export's `credentials_file`) to the config file's directory through the one `Anchor`.
     fn anchor_files(
         &mut self,
         config_path: &str,
@@ -189,7 +169,7 @@ impl Config {
         Ok(())
     }
 
-    /// Anchor every relative local destination path to the config file's directory: the one place a path in the file is resolved, so every command reads and writes one location whatever directory rivet is started from; refuses while the directory under the working directory (where a release before 0.32 wrote) alone holds the export's files.
+    /// Anchor every relative local destination path to the config file's directory.
     fn anchor_paths(
         &mut self,
         config_path: &str,
@@ -231,7 +211,7 @@ impl Config {
         Ok(())
     }
 
-    /// Record each export's inline `query:` as the file spells it, placeholders in place, where the unresolved document parses; `ExportConfig::resolve_query_and_template` uses a spelling only if it resolves to the export's query.
+    /// Record each export's inline `query:` as the file spells it, placeholders in place, where the unresolved document parses.
     fn record_queries_as_written(&mut self, unresolved: &str) {
         let doc = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&resolve::masked(unresolved));
         let written = doc
@@ -244,21 +224,11 @@ impl Config {
     }
 
     pub fn from_yaml(yaml: &str) -> crate::error::Result<Self> {
-        // Intercept the unquoted-`{partition}` footgun before the raw-YAML
-        // pre-scans below (they `from_str::<Value>` too and would re-emit the
-        // same cryptic libyaml message). A document that does not even parse as
-        // a `Value` is malformed; if the failure looks like a flow-mapping
-        // scanner error *and* the source carries an unquoted brace value, point
-        // straight at the quoting fix. On a valid config this `Value` parse
-        // succeeds and the block is skipped, so the success path is unchanged.
         if let Err(e) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(yaml) {
             let m = e.to_string();
             if let Some(hint) = Self::unquoted_template_brace_hint(yaml, &m) {
                 return Err(lints::yaml_invalid(format!("{e}\n  {hint}")));
             }
-            // A TAB in indentation is the most common beginner YAML mistake; it
-            // trips libyaml before serde ever sees a field, so it must be caught
-            // here in the raw scan, not in `enhance_parse_error`.
             if let Some(hint) = Self::tab_indent_hint(yaml, &m) {
                 return Err(lints::yaml_invalid(format!("{e}\n  {hint}")));
             }
@@ -269,11 +239,6 @@ impl Config {
         Self::check_tls_mode_downgrade(yaml)?;
         Self::check_snowflake_connection(yaml)?;
         let config: Config = serde_yaml_ng::from_str(yaml).map_err(|e| {
-            // A well-formed flow map (`prefix: {partition}`) parses as a YAML
-            // value but serde then rejects it with `invalid type: map, expected
-            // a string`. That is the same unquoted-brace footgun, surfacing one
-            // layer later than the scanner errors caught above — so try the same
-            // hint here before falling back to the generic field-typo enhancer.
             if let Some(hint) = Self::unquoted_template_brace_hint(yaml, &e.to_string()) {
                 lints::yaml_invalid(format!("{e}\n  {hint}"))
             } else {
@@ -284,32 +249,11 @@ impl Config {
         Ok(config)
     }
 
-    /// Detect the unquoted-`{partition}` (or `{date}`, …) template footgun and
-    /// return an actionable quoting hint, or `None` when the error is unrelated.
-    ///
-    /// A YAML value that *starts* a flow mapping — `prefix: {partition}` — is
-    /// the common copy-paste mistake: `{partition}` is the required token for
-    /// `partition_by`, but unquoted it parses as a YAML map (or, with trailing
-    /// text, trips the libyaml scanner). serde then emits a cryptic
-    /// `did not find expected ',' or '}'` / `while parsing a flow mapping` /
-    /// `invalid type: map, expected a string` with no hint that a pair of
-    /// quotes is the fix.
-    ///
-    /// Two guards keep this from firing on unrelated parse errors: the error
-    /// message must carry one of the flow-mapping symptoms, AND the raw source
-    /// must actually contain an unquoted `{…}` value. Both must hold, so a
-    /// valid config (every brace value quoted) never sees the hint, and a
-    /// genuine map-typed field error elsewhere is left alone.
-    /// A YAML document indented with a TAB trips libyaml with `found character
-    /// that cannot start any token`. Point straight at the fix (spaces, not
-    /// tabs) — but only when the cited line really begins with a tab, so an
-    /// unrelated scanner error is left with its original message.
+    /// Detect the unquoted-`{partition}` (or `{date}`, …) template footgun and return an actionable quoting hint, or `None` when the error is unrelated.
     fn tab_indent_hint(yaml: &str, err_msg: &str) -> Option<String> {
         if !err_msg.contains("tab character") {
             return None;
         }
-        // serde_yaml_ng reports `found a tab character … at line N column C …`;
-        // the FIRST `line N` is where the offending tab is.
         let line_no: usize = err_msg
             .split_once("line ")
             .and_then(|(_, rest)| rest.split([' ', ',']).next())
@@ -327,10 +271,7 @@ impl Config {
         const FLOW_SYMPTOMS: &[&str] = &[
             "did not find expected ',' or '}'",
             "while parsing a flow mapping",
-            // A bare `key: {token}` parses as a map, then serde rejects the
-            // map where it wanted a scalar — same root cause, later layer.
             "invalid type: map, expected a string",
-            // `key: {token}/more` runs the flow map into block context.
             "did not find expected key",
         ];
         if !FLOW_SYMPTOMS.iter().any(|s| err_msg.contains(s)) {
@@ -346,19 +287,7 @@ impl Config {
         )
     }
 
-    /// Reject `format: csv` paired with an explicitly-requested compression
-    /// codec (Finding #10). The CSV writer has no compression encoder, so the
-    /// codec is silently dropped on write while the run manifest still records
-    /// it — a degraded, dishonest no-op. We reject loudly at config-validate
-    /// time so `rivet check` / `rivet doctor` catch it before any run.
-    ///
-    /// This is a raw-YAML scan (like [`Self::check_misplaced_tuning_fields`])
-    /// rather than a `validate_export` check on purpose: `ExportConfig.
-    /// compression` is `#[serde(default)]` and `CompressionType::default()` is
-    /// `Zstd`, so a parsed export cannot distinguish "user asked for zstd" from
-    /// "user omitted the field". Only a user who *wrote* `compression:`/
-    /// `compression_profile:` is asking for something the CSV writer cannot
-    /// honour; the bare-`format: csv` default writes uncompressed and is fine.
+    /// Reject `format: csv` paired with an explicitly-requested compression codec (Finding #10).
     fn check_csv_compression(yaml: &str) -> crate::error::Result<()> {
         let root: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
         let Some(exports) = root.get("exports").and_then(|e| e.as_sequence()) else {
@@ -373,10 +302,6 @@ impl Config {
                 .and_then(|n| n.as_str())
                 .unwrap_or("<unnamed>");
 
-            // Explicit `compression:` codec that the CSV writer cannot apply.
-            // An unrecognised label is left for serde to reject during the real
-            // parse; we only act on a codec we understand and that CSV cannot
-            // honour (everything but `none`).
             if let Some(codec) = export.get("compression").and_then(|c| c.as_str())
                 && let Some(ct) = CompressionType::from_label(codec)
                 && !format::compression_supported(FormatType::Csv, ct)
@@ -392,8 +317,6 @@ impl Config {
                 );
             }
 
-            // A `compression_profile:` other than `none` resolves to a real
-            // codec too (fast→snappy, balanced/compact→zstd) — same no-op.
             if let Some(profile) = export.get("compression_profile").and_then(|c| c.as_str())
                 && profile != CompressionProfile::None.label()
             {
@@ -410,33 +333,16 @@ impl Config {
         Ok(())
     }
 
-    /// V13: reject a `source.tls` block that pairs an *explicitly chosen*
-    /// enforced `mode:` with a verification-disabling danger knob
-    /// (`accept_invalid_certs` / `accept_invalid_hostnames`). `mode: verify-full`
-    /// promises chain + hostname verification, but the knob silently downgrades
-    /// it to "trust anything" — a MITM exposure that contradicts the stated
-    /// intent.
-    ///
-    /// Like [`Self::check_csv_compression`], this is a raw-YAML scan rather than
-    /// a `validate` check on purpose: `TlsMode` is `#[serde(default)]` and the
-    /// default is `VerifyFull`, so a parsed config cannot distinguish "user
-    /// wrote `mode: verify-full`" (a contradiction to flag) from "user omitted
-    /// `mode:`" (the common dev-container case `tls: { accept_invalid_certs:
-    /// true }` against a loopback self-signed cert — which must keep working).
-    /// Only an *explicit* enforced `mode:` next to a danger knob is the footgun.
+    /// V13: reject a `source.tls` block that pairs an *explicitly chosen* enforced `mode:` with a verification-disabling danger knob (`accept_invalid_certs` / `accept_invalid_hostnames`).
     fn check_tls_mode_downgrade(yaml: &str) -> crate::error::Result<()> {
         let root: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
         let Some(tls) = root.get("source").and_then(|s| s.get("tls")) else {
             return Ok(());
         };
 
-        // Only an explicitly written `mode:` is a deliberate, contradicted
-        // choice; an omitted mode is the dev-container default path.
         let Some(mode) = tls.get("mode").and_then(|m| m.as_str()) else {
             return Ok(());
         };
-        // `disable` carries no verification promise to contradict; the danger
-        // knobs are a no-op there. Flag only the enforced modes.
         if mode == "disable" {
             return Ok(());
         }
@@ -473,9 +379,7 @@ impl Config {
         Ok(())
     }
 
-    /// Refuse a Snowflake `load:` that still names a `snow` CLI `connection:`, with the
-    /// fields that replace it. Read from the raw YAML: the key is no longer a field, and
-    /// the generic unknown-field message does not say what to write instead.
+    /// Refuse a Snowflake `load:` that still names a `snow` CLI `connection:`, with the fields that replace it.
     fn check_snowflake_connection(yaml: &str) -> crate::error::Result<()> {
         if seeded!(
             "snowflake-connection-line-ignored-at-config-load",
@@ -515,15 +419,8 @@ impl Config {
         );
     }
 
-    /// Detect tuning-related fields placed directly under `source:` or an
-    /// `exports[]` entry instead of inside the `tuning:` sub-key. Without this
-    /// check serde silently ignores unknown keys and the user gets unexpected
-    /// defaults (e.g. batch_size=10 000 instead of the intended 1 000).
+    /// Detect tuning-related fields placed directly under `source:` or an `exports[]` entry instead of inside the `tuning:` sub-key.
     fn check_misplaced_tuning_fields(yaml: &str) -> crate::error::Result<()> {
-        // Every TuningConfig field — drift-guarded generatively against the
-        // struct's own JsonSchema (misplaced_tuning_list_covers_every_field):
-        // the old hand list froze at 9 of 14, so the newest five knobs misplaced
-        // at source-level were silently ignored (roast 2026-08-09, #173).
         const TUNING_FIELDS: &[&str] = crate::config::TUNING_FIELD_NAMES;
 
         let root: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml)?;
@@ -574,12 +471,7 @@ impl Config {
         Ok(())
     }
 
-    /// Reject a config before any plan/connect step. The body is split into
-    /// three cohesive validators so each can be read — and unit-tested — on its
-    /// own: the export-list shape, the source connection block, and the
-    /// per-export rules. The end-to-end surface (`Config::from_yaml`) is
-    /// covered by `config/tests/{validation,secops}.rs`; the split additionally
-    /// lets a rule be exercised directly via `validate_export`.
+    /// Reject a config before any plan/connect step.
     fn validate(&self) -> crate::error::Result<()> {
         self.validate_exports_list()?;
         self.validate_source_connection()?;
@@ -625,8 +517,7 @@ impl Config {
         Ok(())
     }
 
-    /// A CDC export whose stream the `load:` target cannot take (Oracle anywhere) is refused when the
-    /// config is read, before a run extracts a stream the load would then refuse.
+    /// A CDC export whose stream the `load:` target cannot take (Oracle anywhere) is refused when the config is read, before a run extracts a stream the load would then refuse.
     fn validate_cdc_has_a_loadable_target(&self) -> crate::error::Result<()> {
         let refusal = self
             .load
@@ -644,8 +535,7 @@ impl Config {
         Ok(())
     }
 
-    /// `layout: base_buffer` promises a `rivet compact`, which ClickHouse has none of: there
-    /// the base would freeze at the backfill while the buffer grew.
+    /// `layout: base_buffer` promises a `rivet compact`, which ClickHouse has none of.
     fn validate_layout_has_a_compacting_warehouse(&self) -> crate::error::Result<()> {
         use crate::config::load::LayoutChoice;
         let Some(load) = &self.load else {
@@ -680,7 +570,7 @@ impl Config {
         Ok(())
     }
 
-    /// Where a base is the default layout, a `mode: cdc` export needs a baseline to build it from: without `cdc.backfill:` or `cdc.initial: snapshot` the base would start empty and miss every row the stream never touched.
+    /// Where a base is the default layout, a `mode.
     fn validate_a_default_base_has_a_baseline(&self) -> crate::error::Result<()> {
         use crate::config::load::{BaseSupport, LayoutChoice};
         let Some(load) = &self.load else {
@@ -723,9 +613,6 @@ impl Config {
 
     /// A per-export `load:` override needs the top-level block it overrides.
     fn validate_load_overrides(&self) -> crate::error::Result<()> {
-        // `load.tables:` names captured tables of a multiplex stream — nothing else
-        // has per-table units, and a name that is not captured would be an override
-        // silently applied to nothing.
         for e in &self.exports {
             let Some(o) = &e.load else { continue };
             if o.tables.is_empty() {
@@ -783,13 +670,7 @@ impl Config {
         Ok(())
     }
 
-    /// Non-SQL sources (MongoDB) support only `mode: full` today. Chunked /
-    /// incremental / keyset / time-window all build SQL predicates over an
-    /// introspectable columnar schema, and CDC (change streams) is a separate,
-    /// not-yet-implemented seam. Rejecting the other modes here is precisely
-    /// what makes the SQL-only builders' `unreachable!` arms
-    /// (`sql::quote_ident`, `query::cursor_rhs`, …) provably unreachable for a
-    /// document-store source.
+    /// Non-SQL sources (MongoDB) support only `mode: full` today.
     fn validate_non_sql_source_modes(&self) -> crate::error::Result<()> {
         if self.source.source_type.is_sql() {
             return Ok(());
@@ -813,10 +694,6 @@ impl Config {
                     self.source.source_type
                 );
             }
-            // An impossible combination must be a config error, not a silent
-            // behavior downgrade: the parallel `_id`-range path keeps NO keyset
-            // checkpoint, so `resume: true` was silently ignored — the whole
-            // collection re-read every run with no warning (bug-hunt find).
             if e.parallel > 1 && self.source.mongo.as_ref().is_some_and(|m| m.resume) {
                 crate::config_bail!(
                     crate::error::codes::CONFIG_SOURCE_MODE_UNSUPPORTED,
@@ -829,11 +706,6 @@ impl Config {
                 );
             }
         }
-        // `resume` is a KEYSET feature: only the paged `_id`-seek path
-        // (`page_size` set) reads and advances a checkpoint. The full-scan path
-        // (no `page_size`) keeps no checkpoint, so `resume: true` is silently
-        // ignored — the whole collection re-reads every run (roast 2026-08-09,
-        // sibling of the parallel+resume reject above).
         if let Some(page) = self.source.mongo.as_ref().and_then(|m| m.page_size) {
             Knob::PAGE_SIZE.validate_source(page)?;
         }
@@ -852,13 +724,7 @@ impl Config {
         Ok(())
     }
 
-    /// `format: csv` × a `load:` block is REFUSED: the load path lists
-    /// `*.parquet` only, so a CSV prefix resolves to zero URIs and the load
-    /// prints "produced no files — nothing to load" and exits 0 — success-shaped,
-    /// forever (the run ids are deliberately not recorded consumed, so every
-    /// later load re-skips the same rows). A pipeline that silently loads
-    /// nothing is worse than one that refuses to start; until the loaders learn
-    /// CSV, the config must not promise what the load cannot do.
+    /// `format: csv` × a `load:` block is REFUSED.
     fn validate_csv_exports_are_not_loaded(&self) -> crate::error::Result<()> {
         if self.load.is_none() && self.exports.iter().all(|e| e.load.is_none()) {
             return Ok(());
@@ -882,10 +748,6 @@ impl Config {
 
     /// Whole-config shape: at least one export, names unique.
     fn validate_exports_list(&self) -> crate::error::Result<()> {
-        // An empty `exports:` list is almost always a typo (wrong config file,
-        // dropped anchor, merged doc with the anchor section missing). Running
-        // with zero exports is a silent no-op that looks like success in CI;
-        // reject fast instead. See QA backlog Task 5.1.
         if self.exports.is_empty() {
             crate::config_bail!(
                 crate::error::codes::CONFIG_NO_EXPORTS,
@@ -893,10 +755,6 @@ impl Config {
             );
         }
 
-        // Duplicate export names break state tracking: `export_state`,
-        // `file_log`, and `chunk_run` are all keyed by `export_name`, so
-        // two configs with the same name silently share cursor/file-log rows.
-        // QA backlog Task 5.1.
         let mut seen: std::collections::HashSet<&str> =
             std::collections::HashSet::with_capacity(self.exports.len());
         for e in &self.exports {
@@ -911,8 +769,7 @@ impl Config {
         Ok(())
     }
 
-    /// Source connection block: exactly one connection method, well-formed,
-    /// and the source-level tuning that is shared by every export.
+    /// Source connection block: exactly one connection method, well-formed, and the source-level tuning that is shared by every export.
     fn validate_source_connection(&self) -> crate::error::Result<()> {
         if let Some(t) = &self.source.tuning
             && t.batch_size.is_some()
@@ -927,10 +784,6 @@ impl Config {
         }
 
         if !self.source.has_url_fields() && !self.source.has_structured_fields() {
-            // First-run footgun: a config that forgot the source block
-            // entirely.  Show the recommended path (`url_env`) up-front;
-            // operators who actually want structured fields know to look
-            // for them.
             crate::config_bail!(
                 crate::error::codes::CONFIG_SOURCE_CONNECTION_INVALID,
                 "source: no connection method configured. Add one of:\n  url_env: DATABASE_URL                          (URL from env var — recommended)\n  url: 'postgresql://user:pass@host:5432/db'      (inline — not recommended for committed configs)\n  url_file: /etc/rivet/source.url                 (URL from file — rotation-friendly)\n  url_secret: projects/<p>/secrets/<s>            (URL from Google Secret Manager)\n  host/user/database/...                          (structured fields under `source:`)"
@@ -985,9 +838,7 @@ impl Config {
         Ok(())
     }
 
-    /// Per-export rules: effective tuning, query source, `query_file` SecOps,
-    /// destination auth, compression, and the mode/chunk matrix. Takes `&self`
-    /// because effective tuning merges the source-level block.
+    /// Per-export rules: effective tuning, query source, `query_file` SecOps, destination auth, compression, and the mode/chunk matrix.
     fn validate_export(&self, export: &ExportConfig) -> crate::error::Result<()> {
         if export.chunk_dense {
             crate::config_bail!(
@@ -1014,12 +865,6 @@ impl Config {
 
     /// Export and table names are safe path segments; a declared row-hash set fits one table.
     fn validate_export_names(&self, export: &ExportConfig) -> crate::error::Result<()> {
-        // V5: `name` is keyed into output paths, file logs, and on-disk state,
-        // yet is otherwise free-form. A traversal (`../../etc/x`), absolute or
-        // slash-bearing (`/abs/x`, `sub/dir`), leading-dot, or NUL-bearing name
-        // escapes the intended output tree and corrupts name-keyed state.
-        // Mirror the `query_file` `..`/absolute guard: reject at config-load,
-        // accepting only a filename-safe charset.
         if !is_filename_safe_name(&export.name) {
             crate::config_bail!(
                 crate::error::codes::CONFIG_PATH_UNSAFE,
@@ -1030,13 +875,6 @@ impl Config {
             );
         }
 
-        // V5 (round-2 audit #5): each `tables:` entry becomes a destination path
-        // SEGMENT in dest_for_table (local `<path>/<table>`, cloud `<prefix>/
-        // <table>/`), so an entry with `..`/`/` escapes the configured tree exactly
-        // like an unsafe export.name — the multi-tenant-wrapper threat model V5/V15
-        // defend. The single `table:` shortcut and export.name are guarded; the
-        // `tables:` list was not. Reject an unsafe segment at config-load, before
-        // dest_for_table (or the pre-write manifest FS probe) ever sees it.
         for t in export.tables.iter().flatten() {
             if !is_filename_safe_name(t) {
                 crate::config_bail!(
@@ -1050,18 +888,8 @@ impl Config {
             }
         }
 
-        // Shape errors in the declared row-hash set — an empty or duplicated
-        // list — fail at config-load, where `rivet check` reports them, rather
-        // than at the first batch.
         export.meta_columns.row_hash.validate(&export.name)?;
 
-        // A DECLARED column list describes ONE table's shape. A `tables:`
-        // stream captures several tables through one config and they do not
-        // share a column set, so the list would name columns a sibling table
-        // does not project — failing per table, mid-stream, after the
-        // replication slot is already open. Refuse at config-load instead.
-        // `row_hash: true` is unaffected: "every column" is meaningful for
-        // whatever table the row came from.
         if export.meta_columns.row_hash.declared().is_some() && export.tables.is_some() {
             crate::config_bail!(
                 crate::error::codes::CONFIG_ROW_HASH_INVALID,
@@ -1076,18 +904,6 @@ impl Config {
 
     /// `partition_by` static rules and prefix shapes.
     fn validate_export_partition(&self, export: &ExportConfig) -> crate::error::Result<()> {
-        // Round-2 audit #15/#16/#6: partition_by has purely-static rules (mode
-        // compatibility, the `{partition}` token, a filename-safe column name) that
-        // only lived in the run-time expansion step, so `rivet check` gave a false
-        // green and `rivet run` failed later — after a live DB probe, or (mode: cdc)
-        // with a misleading "requires table:". Enforce them at config-load so check
-        // and run agree, mirroring the chunk_by_days guards.
-        // Round-6 hostile-input: two prefix shapes that are ALWAYS a mistake and
-        // fail success-shaped (the export writes somewhere the load never
-        // lists, "up to date" forever): a `..` traversal segment (on an
-        // fs-backed store the objects escape the bucket directory entirely)
-        // and an embedded scheme (`gs://bucket/x` PASTED into `prefix:` —
-        // doubled with the config's own bucket into `gs://b/gs://b/x`).
         for field in [
             ("prefix", export.destination.prefix.as_deref()),
             ("path", export.destination.path.as_deref()),
@@ -1122,8 +938,6 @@ impl Config {
                     export.name
                 );
             }
-            // #6: the column name becomes the Hive `col=value` path segment, so a
-            // quoted DB column named `../x` would inject a traversal — filename-gate it.
             if !is_filename_safe_name(col) {
                 crate::config_bail!(
                     crate::error::codes::CONFIG_PATH_UNSAFE,
@@ -1143,17 +957,6 @@ impl Config {
                     export.mode,
                 );
             }
-            // Round-5: partition_by writes N per-partition manifests (one per
-            // col=value/ sub-prefix), but `rivet load` (reconcile.rs select_runs)
-            // picks a SINGLE latest-manifest for the export and would load only ONE
-            // partition, silently dropping the rest. Reject the combo at config-load
-            // until the loader is partition-aware.
-            // The `load:` block may be per-export OR top-level (`self.load`, which
-            // applies to EVERY export) — both route this partitioned export through
-            // the loader, which loads a single partition. Guard both: #101, only the
-            // per-export form was checked, so a top-level `load:` (the primary
-            // documented pattern) bypassed the guard and `cleanup_source` then wiped
-            // the unloaded partitions.
             if export.load.is_some() || self.load.is_some() {
                 crate::config_bail!(
                     crate::error::codes::CONFIG_MODE_SETTING_INVALID,
@@ -1200,9 +1003,6 @@ impl Config {
 
     /// Chunk-size and memory-budget knobs do not contradict each other.
     fn validate_export_sizing(&self, export: &ExportConfig) -> crate::error::Result<()> {
-        // Round-2 audit #17: chunk_size_memory_mb is documented mutually exclusive
-        // with an explicit chunk_size — build.rs takes the memory budget and
-        // silently drops chunk_size when both are set, mirroring the batch_size pair.
         if export.chunk_size_memory_mb.is_some() && export.chunk_size != default_chunk_size() {
             crate::config_bail!(
                 crate::error::codes::CONFIG_VALUE_OUT_OF_RANGE,
@@ -1244,8 +1044,6 @@ impl Config {
 
     /// Exactly one source selector (`table`/`tables`/`query`/`query_file`), each well-formed.
     fn validate_export_source(&self, export: &ExportConfig) -> crate::error::Result<()> {
-        // Before the generic exactly-one counting: the `table:`/`tables:` pair
-        // gets its specific message (the generic one doesn't mention `tables`).
         if export.table.is_some() && export.tables.is_some() {
             crate::config_bail!(
                 crate::error::codes::CONFIG_EXPORT_SOURCE_INVALID,
@@ -1259,8 +1057,6 @@ impl Config {
             export.query.is_some(),
             export.query_file.is_some(),
             export.table.is_some(),
-            // A multi-table CDC stream (`tables:`) is that export's source
-            // specification — the CDC arm below owns its shape rules.
             export.tables.is_some(),
         ]
         .iter()
@@ -1284,11 +1080,6 @@ impl Config {
                 set_count
             );
         }
-        // SecOps: syntactic `query_file` checks must run at config-validate
-        // time so `rivet check` / `rivet doctor` catch them before any
-        // plan step. The same checks repeat (with a canonicalize-based
-        // symlink probe) in `ExportConfig::resolve_query` because the
-        // file may have been swapped between validation and read.
         if let Some(file) = &export.query_file {
             export::check_query_file_path(&export.name, file)?;
         }
@@ -1297,24 +1088,11 @@ impl Config {
 
     /// Destination endpoint, path and credentials are safe and complete.
     fn validate_export_destination(&self, export: &ExportConfig) -> crate::error::Result<()> {
-        // V2/V12: a custom cloud `endpoint` is handed straight to the opendal
-        // S3/GCS/Azure builder with no validation, so a committed config can
-        // silently redirect every upload to an attacker host (exfiltration) or
-        // send credentials + rows over cleartext `http://`. The legitimate use
-        // is a local emulator (Minio / Azurite / fake-gcs on `127.0.0.1`), so
-        // accept a loopback host (any scheme), and otherwise accept a remote
-        // endpoint only when the operator has explicitly opted into anonymous
-        // (emulator) mode. Reject every other custom endpoint at config-load.
         if matches!(
             export.destination.destination_type,
             DestinationType::S3 | DestinationType::Gcs | DestinationType::Azure
         ) && let Some(endpoint) = &export.destination.endpoint
         {
-            // Loopback emulator (Minio/Azurite/fake-gcs) is the legitimate
-            // local-dev path — accept any scheme. A non-loopback (or
-            // unparseable) custom endpoint is only accepted when the operator
-            // has explicitly opted into anonymous (emulator) mode, where no
-            // credentials are sent. Everything else is rejected.
             let loopback = url::request_host(endpoint).is_some_and(|host| is_loopback_host(&host));
             if !loopback && !export.destination.allow_anonymous {
                 crate::config_bail!(
@@ -1364,9 +1142,6 @@ impl Config {
                     }
                 }
                 CompressionType::Gzip => {
-                    // parquet's GzipLevel maxes at 9 (MAXIMUM_LEVEL); level 10 was
-                    // accepted here but panics/errors at write time in
-                    // GzipLevel::try_new (bug hunt 2026-08-09).
                     if level > 9 {
                         crate::config_bail!(
                             crate::error::codes::CONFIG_VALUE_OUT_OF_RANGE,
@@ -1452,16 +1227,6 @@ impl Config {
                 }
             }
             ExportMode::Chunked => {
-                // `chunk_column` is mandatory unless the user used the `table:`
-                // shortcut on a Postgres source — in that case it is auto-resolved
-                // from the table's single-integer PK at plan-build time (see
-                // `crate::plan::build::resolve_chunk_column`).
-                // Only fire the "pick a strategy" guidance when NO strategy is set.
-                // `chunk_by_key` (and chunk_count/chunk_by_days) IS a strategy — with
-                // `query:` it fails later for a different, accurate reason (it needs
-                // the `table:` shortcut so the planner can verify the unique index).
-                // Recommending `chunk_by_key` when it is already set was a dead-end
-                // loop (dogfood MED).
                 let has_strategy = export.chunk_column.is_some()
                     || export.chunk_by_key.is_some()
                     || export.chunk_count.is_some()
@@ -1479,8 +1244,6 @@ impl Config {
                     );
                 }
                 Knob::CHUNK_SIZE.validate_export(&export.name, export.chunk_size)?;
-                // parallel == 0 means "spawn zero workers". Claiming tasks
-                // with no workers stalls the pipeline. QA backlog Task 5.1.
                 if export.parallel == 0 {
                     crate::config_bail!(
                         crate::error::codes::CONFIG_MODE_SETTING_INVALID,
@@ -1535,14 +1298,6 @@ impl Config {
             );
         }
 
-        // Round-2 audit #14: the load-bearing chunk knobs are silently dropped
-        // outside `mode: chunked` — `build_plan` routes Full/Incremental/
-        // TimeWindow to a single-cursor snapshot that never consults them, so a
-        // config that sets them but forgets `mode: chunked` degrades to the
-        // unbounded whole-table snapshot chunking exists to prevent, with no
-        // error or warn. Gate them the same way chunk_by_days is.
-        // (`parallel` is intentionally excluded — the Mongo full/keyset reader
-        // legitimately fans workers with it, so it is not chunked-only.)
         if export.mode != ExportMode::Chunked {
             let offending = if export.chunk_column.is_some() {
                 Some("chunk_column")
@@ -1557,11 +1312,6 @@ impl Config {
             } else if export.chunk_checkpoint {
                 Some("chunk_checkpoint")
             } else if export.keyset_incremental {
-                // keyset_incremental (continue-from-high-water-key on a clean
-                // re-run) is a KEYSET feature — keyset runs under `mode: chunked`
-                // with `chunk_by_key`. Outside chunked it is silently ignored,
-                // the same accept-but-break class as the chunk knobs above
-                // (roast 2026-08-09).
                 Some("keyset_incremental")
             } else if export.chunk_size != default_chunk_size() {
                 Some("chunk_size")
@@ -1583,11 +1333,6 @@ impl Config {
             }
         }
 
-        // keyset_incremental continues from the last exported KEY on a clean
-        // re-run — it is meaningless without a keyset key. Under `mode: chunked`
-        // (the mode gate above already handled other modes) it still requires
-        // `chunk_by_key`; with a range `chunk_column` there is no key to resume
-        // from, so it would be silently ignored (roast 2026-08-09).
         if export.keyset_incremental && export.chunk_by_key.is_none() {
             crate::config_bail!(
                 crate::error::codes::CONFIG_MODE_SETTING_INVALID,
@@ -1604,9 +1349,6 @@ impl Config {
 
     /// Table-qualified `columns:` override keys name a captured table.
     fn validate_export_column_overrides(&self, export: &ExportConfig) -> crate::error::Result<()> {
-        // Table-qualified `columns:` override keys ("table.column"): the named
-        // table must be one this export captures — a typo must fail at load,
-        // never silently miss its target. Bare keys stay export-wide.
         {
             for key in export.columns.keys() {
                 let Some((tbl, _col)) = key.split_once('.') else {
@@ -1664,20 +1406,11 @@ impl Config {
     }
 }
 
-/// True when a single YAML line carries a mapping value (text after `key:`)
-/// that contains a `{` outside of any quotes — the unquoted-template-brace
-/// shape (`prefix: {partition}`, `path: {date}/out`).
-///
-/// Quote-aware so a properly quoted value (`prefix: "exports/{partition}/"`)
-/// does *not* match, and `$`-prefixed braces (`${VAR}` env placeholders) are
-/// ignored — they are resolved before the parse and are not the footgun.
+/// True when a single YAML line carries a mapping value (text after `key:`) that contains a `{` outside of any quotes.
 fn line_has_unquoted_brace_value(line: &str) -> bool {
-    // Whole-line comments never carry a value — skip before splitting.
     if line.trim_start().starts_with('#') {
         return false;
     }
-    // Split key from value at the first `": "` / `":\t"` / trailing `:`.
-    // A YAML plain-key separator is a colon followed by whitespace or EOL.
     let bytes = line.as_bytes();
     let mut sep = None;
     let mut i = 0;
@@ -1692,8 +1425,6 @@ fn line_has_unquoted_brace_value(line: &str) -> bool {
         return false;
     };
     let value = line[value_start..].trim_start();
-    // A trailing `#` after the value starts an inline comment; an empty or
-    // comment-only value carries no brace to flag.
     if value.is_empty() || value.starts_with('#') {
         return false;
     }
@@ -1706,7 +1437,6 @@ fn line_has_unquoted_brace_value(line: &str) -> bool {
             b'\'' if !in_double => in_single = !in_single,
             b'"' if !in_single => in_double = !in_double,
             b'{' if !in_single && !in_double => {
-                // Ignore `${...}` env placeholders (resolved pre-parse).
                 if j > 0 && vbytes[j - 1] == b'$' {
                     continue;
                 }
@@ -1718,20 +1448,11 @@ fn line_has_unquoted_brace_value(line: &str) -> bool {
     false
 }
 
-/// True when `host` names the local machine — the legitimate cloud-emulator
-/// target (Minio / Azurite / fake-gcs on `127.0.0.1`). Anything else is a
-/// remote host and a potential exfiltration redirect.
+/// True when `host` names the local machine.
 fn is_loopback_host(host: &str) -> bool {
-    // `localhost` is the only non-IP host that counts as loopback. Everything
-    // else must PARSE as an IP literal in the loopback range — a lexical
-    // `starts_with("127.")` would accept attacker-controlled DNS like
-    // `127.attacker.com` or `127.0.0.1.evil.com` (both resolve off-box), turning
-    // the credential-exfil gate into a bypass (V2/V12). Parse strictly: only a
-    // real `127.0.0.0/8` / `::1` address is loopback; a hostname is not.
     if host == "localhost" {
         return true;
     }
-    // Tolerate a bracketed IPv6 literal (`[::1]`) in case a caller forwards one.
     let h = host
         .strip_prefix('[')
         .and_then(|s| s.strip_suffix(']'))
@@ -1740,10 +1461,7 @@ fn is_loopback_host(host: &str) -> bool {
         .is_ok_and(|ip| ip.is_loopback())
 }
 
-/// True when `name` is filename-safe: rejects path-traversal (`..`), absolute
-/// or slash-bearing names (`/`, `\`), a leading `.` (hidden / current-dir), and
-/// embedded NULs. `ExportConfig.name` is keyed into output paths and on-disk
-/// state, so a `../../etc/x` or absolute name escapes the output tree (V5).
+/// True when `name` is filename-safe: rejects path-traversal (`..`), absolute or slash-bearing names (`/`, `\`), a leading `.` (hidden / current-dir), and embedded NULs.
 fn is_filename_safe_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('.')
@@ -1767,10 +1485,7 @@ mod tests;
 
 #[cfg(test)]
 mod audit_csv_compression {
-    //! Finding #10: `format: csv` + a compression codec is a silent no-op
-    //! (the file stays uncompressed but the manifest records the codec). The
-    //! combo must be rejected at config-validate time. These tests encode the
-    //! new rule, so reverting the fix turns them red.
+    //! Finding #10: `format: csv` + a compression codec is a silent no-op (the file stays uncompressed but the manifest records the codec).
     use super::*;
 
     fn yaml(format: &str, compression_line: &str) -> String {
@@ -1828,7 +1543,6 @@ mod audit_csv_compression {
 
     #[test]
     fn audit_csv_compression_is_rejected() {
-        // csv + gzip → rejected, with an actionable message.
         let err = Config::from_yaml(&yaml("csv", "    compression: gzip\n")).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
@@ -1840,7 +1554,6 @@ mod audit_csv_compression {
             "message must point to the real options (parquet / none); got: {msg}"
         );
 
-        // Guard the boundaries: parquet+gzip and csv+none still validate.
         Config::from_yaml(&yaml("parquet", "    compression: gzip\n"))
             .expect("parquet+gzip must validate");
         Config::from_yaml(&yaml("csv", "    compression: none\n")).expect("csv+none must validate");
@@ -1848,7 +1561,6 @@ mod audit_csv_compression {
 
     #[test]
     fn audit_csv_every_real_codec_is_rejected() {
-        // Each non-None codec is a silent no-op for CSV — none may slip through.
         for codec in ["zstd", "snappy", "gzip", "lz4"] {
             let err = Config::from_yaml(&yaml("csv", &format!("    compression: {codec}\n")))
                 .unwrap_err();
@@ -1862,8 +1574,6 @@ mod audit_csv_compression {
 
     #[test]
     fn audit_csv_compression_profile_is_rejected() {
-        // A `compression_profile:` other than `none` resolves to a real codec,
-        // so it is the same silent no-op for CSV.
         for profile in ["fast", "balanced", "compact"] {
             let err = Config::from_yaml(&yaml(
                 "csv",
@@ -1877,25 +1587,17 @@ mod audit_csv_compression {
                 "csv+profile {profile} must be rejected; got: {msg}"
             );
         }
-        // profile: none is a no-op request and is fine.
         Config::from_yaml(&yaml("csv", "    compression_profile: none\n"))
             .expect("csv + compression_profile: none must validate");
     }
 
     #[test]
     fn audit_csv_default_compression_still_validates() {
-        // Regression guard: a bare `format: csv` (no explicit codec) must keep
-        // validating. `CompressionType::default()` is `Zstd`, but the user did
-        // not *ask* for it — only an explicit codec is a no-op request. This
-        // pins that the fix scans for explicit intent, not the struct default
-        // (which would break ~60 existing csv configs).
         Config::from_yaml(&yaml("csv", "")).expect("bare format: csv must validate");
     }
 
     #[test]
     fn audit_compression_supported_predicate() {
-        // `compression_supported` is re-exported via `pub use format::*`.
-        // Parquet supports every codec; CSV supports only None.
         for ct in [
             CompressionType::Zstd,
             CompressionType::Snappy,
@@ -1926,10 +1628,7 @@ mod audit_csv_compression {
 
 #[cfg(test)]
 mod row_hash_config {
-    //! A DECLARED `meta_columns.row_hash` names ONE table's columns. The
-    //! failure mode worth guarding is the quiet one: accepting a spec that
-    //! cannot be honoured and discovering it mid-stream, after a replication
-    //! slot is already open.
+    //! A DECLARED `meta_columns.row_hash` names ONE table's columns.
     use super::*;
 
     fn yaml(export_body: &str) -> String {
@@ -1951,8 +1650,7 @@ mod row_hash_config {
         );
     }
 
-    /// Tables differing only by case share one directory on a case-insensitive local
-    /// filesystem, so a local multi-table stream refuses them; a cloud prefix keeps them apart.
+    /// Tables differing only by case share one directory on a case-insensitive local filesystem, so a local multi-table stream refuses them.
     #[test]
     fn a_local_stream_refuses_tables_that_differ_only_by_case() {
         let cfg = |dest: &str| {
@@ -1990,8 +1688,7 @@ mod row_hash_config {
         );
     }
 
-    /// …but `true` is not a per-table claim, so it must still be allowed. This
-    /// is the whole reason the guard tests `declared()` rather than `enabled()`.
+    /// …but `true` is not a per-table claim, so it must still be allowed.
     #[test]
     fn multi_table_stream_still_accepts_row_hash_true() {
         Config::from_yaml(&yaml(
@@ -2014,10 +1711,7 @@ mod row_hash_config {
 
 #[cfg(test)]
 mod reserved_load_extension {
-    //! A downstream first-party loader carries its warehouse target in a
-    //! top-level `load:` block so ONE config drives export + load. OSS must
-    //! accept and ignore it — otherwise `check`/`run`/`apply` would reject the
-    //! single-file config. Reverting the reserved field turns this red.
+    //! A downstream first-party loader carries its warehouse target in a top-level `load:` block so ONE config drives export + load.
     use super::*;
 
     fn loaded_yaml(load: &str) -> String {
@@ -2071,9 +1765,7 @@ mod reserved_load_extension {
         );
     }
 
-    /// `load.tables:` is a per-table layer of a multiplex stream: a name the stream
-    /// does not capture, a single-unit export, or a nested `tables:` is refused at
-    /// load — never an override silently applied to nothing.
+    /// `load.tables:` is a per-table layer of a multiplex stream.
     #[test]
     fn per_table_load_overrides_name_captured_tables_of_a_multiplex_stream() {
         let cfg = |export_body: &str| {
@@ -2112,10 +1804,7 @@ mod reserved_load_extension {
         assert!(err.contains("has one unit"), "{err}");
     }
 
-    /// On MongoDB a dotted collection name is LITERAL — `audit.events` is not
-    /// `events` in a schema — so the SQL bare-name fold must not pair a captured
-    /// `events` with an export reading `audit.events` (that export would silently
-    /// become a recipe and stop running). Exact names still pair.
+    /// On MongoDB a dotted collection name is LITERAL.
     #[test]
     fn a_mongo_backfill_recipe_must_name_the_collection_exactly() {
         let cfg = |recipe_table: &str| {
@@ -2132,9 +1821,6 @@ mod reserved_load_extension {
         let err = Config::from_yaml(&cfg("audit.events"))
             .unwrap_err()
             .to_string();
-        // `audit.events` is not `events` on any engine now (a bare name folds only
-        // onto `public`/`dbo`), so the pairing never forms and the refusal is the
-        // missing-recipe one; the literal-name refusal below covers `public.events`.
         assert!(err.contains("no export reading table 'events'"), "{err}");
         let err = Config::from_yaml(
             &cfg("public.events")
@@ -2152,8 +1838,7 @@ mod reserved_load_extension {
         );
     }
 
-    /// A recipe is skipped by `plan` and `check`, so a bad `columns:` type or table
-    /// shortcut on it used to surface only when the leg ran — after the anchor.
+    /// A recipe is skipped by `plan` and `check`, so a bad `columns:` type or table shortcut on it used to surface only when the leg ran.
     #[test]
     fn a_backfill_recipes_read_is_validated_at_config_load() {
         let cfg = |cols: &str| {
@@ -2173,8 +1858,7 @@ mod reserved_load_extension {
         assert!(err.contains("base") && err.contains("qty"), "{err}");
     }
 
-    /// `backfill:` with no value is a typed key with nothing said — refused, never
-    /// read as "no baseline" (the silent-success shape every message here warns of).
+    /// `backfill:` with no value is a typed key with nothing said.
     #[test]
     fn an_empty_backfill_key_is_refused_not_read_as_absent() {
         let yaml = "source:\n  type: postgres\n  url: \"postgresql://localhost/app\"\nexports:\n\
@@ -2195,10 +1879,7 @@ mod reserved_load_extension {
         );
     }
 
-    /// Two captured tables with one LEAF (`sales.orders`, `archive.orders`) route
-    /// fine, but a `table.column` type key is narrowed by leaf — so a recipe's
-    /// `columns:` on either would type both. Refused only when a recipe declares
-    /// types; two untyped recipes are still one stream.
+    /// Two captured tables with one LEAF (`sales.orders`, `archive.orders`) route fine.
     #[test]
     fn two_captured_tables_with_one_leaf_cannot_carry_recipe_column_types() {
         let cfg = |sales_cols: &str| {
@@ -2224,9 +1905,7 @@ mod reserved_load_extension {
         );
     }
 
-    /// A column typed one way by the recipe and another by the stream is refused
-    /// at CONFIG LOAD — not on the next run, after its anchor. Same spelling in
-    /// two dialects (`decimal` / `numeric`) is one type, not a conflict.
+    /// A column typed one way by the recipe and another by the stream is refused at CONFIG LOAD.
     #[test]
     fn a_recipe_and_its_stream_typing_one_column_apart_is_refused_at_load() {
         let cfg = |stream_cols: &str| {
@@ -2258,17 +1937,10 @@ mod reserved_load_extension {
 
 #[cfg(test)]
 mod audit_unquoted_template_brace {
-    //! yaml-hint: an unquoted `{partition}` (or `{date}`) in a path/prefix
-    //! value trips serde_yaml_ng's flow-mapping parser with a cryptic message
-    //! that gives no clue the brace needs quoting. Since `{partition}` is the
-    //! required token for `partition_by`, this is a common copy-paste footgun.
-    //! `Config::from_yaml` augments the parser error with a quoting hint; these
-    //! tests pin that behavior (and guard that valid configs are untouched).
+    //! yaml-hint: an unquoted `{partition}` (or `{date}`) in a path/prefix value trips serde_yaml_ng's flow-mapping parser with a cryptic message that gives no clue the brace needs quoting.
     use super::*;
 
-    /// A full, otherwise-valid config whose `prefix:` value is whatever the
-    /// caller passes verbatim (quoted or not). Only the `prefix:` line varies,
-    /// so any parse error is attributable to the brace under test.
+    /// A full, otherwise-valid config whose `prefix:` value is whatever the caller passes verbatim (quoted or not).
     fn yaml_with_prefix(prefix_value: &str) -> String {
         format!(
             "source:\n\
@@ -2337,10 +2009,6 @@ mod audit_unquoted_template_brace {
 
     #[test]
     fn top_level_load_with_partition_by_is_rejected() {
-        // #101: partition_by is incompatible with a `load:` block — the loader
-        // loads ONE partition and `cleanup_source` then wipes the rest. The
-        // per-export form was guarded, but a TOP-LEVEL `load:` (the primary
-        // documented pattern) bypassed it. Both must be rejected.
         let yaml = r#"
 source: { type: postgres, url: "postgresql://rivet:rivet@127.0.0.1:5432/rivet" }
 exports:
@@ -2366,8 +2034,6 @@ load: { target: bigquery, project: p, dataset: d }
             "the remedy must name only what works: {err}"
         );
 
-        // Without the top-level load, the same partitioned export is accepted —
-        // the guard must not over-fire on a plain partitioned export.
         let ok_yaml = r#"
 source: { type: postgres, url: "postgresql://rivet:rivet@127.0.0.1:5432/rivet" }
 exports:
@@ -2385,15 +2051,12 @@ exports:
 
     #[test]
     fn bare_partition_token_gets_quoting_hint() {
-        // `prefix: {partition}` parses as a YAML map, so serde rejects it with
-        // `invalid type: map, expected a string` — no clue it's a quoting bug.
         let err = Config::from_yaml(&yaml_with_prefix("{partition}")).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains(HINT_FRAGMENT),
             "bare {{partition}} must carry the quoting hint; got: {msg}"
         );
-        // The original parser detail (type + location) is preserved.
         assert!(
             msg.contains("invalid type: map") || msg.contains("line"),
             "the original parser error must be kept; got: {msg}"
@@ -2402,9 +2065,6 @@ exports:
 
     #[test]
     fn trailing_text_after_brace_gets_quoting_hint() {
-        // `prefix: {date}/{partition}/` runs the flow map into block context:
-        // serde emits `did not find expected key ... while parsing a block
-        // mapping`. Same footgun, different libyaml symptom.
         let err = Config::from_yaml(&yaml_with_prefix("{date}/{partition}/")).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
@@ -2415,9 +2075,6 @@ exports:
 
     #[test]
     fn unclosed_brace_gets_quoting_hint() {
-        // `prefix: {partition` (unclosed) is the canonical flow-mapping scanner
-        // error: `did not find expected ',' or '}' ... while parsing a flow
-        // mapping`. The hint must still fire.
         let err = Config::from_yaml(&yaml_with_prefix("{partition")).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
@@ -2428,9 +2085,6 @@ exports:
 
     #[test]
     fn quoted_brace_value_loads_ok() {
-        // The fix itself, applied: a properly quoted brace value parses and
-        // validates. This is the guard that the hint never reaches a valid
-        // config and the success path is unchanged.
         let cfg = Config::from_yaml(&yaml_with_prefix("\"exports/{partition}/\""))
             .expect("quoted {partition} prefix must load");
         assert_eq!(
@@ -2441,29 +2095,21 @@ exports:
 
     #[test]
     fn config_without_braces_is_untouched() {
-        // No brace anywhere: a plain valid config still loads, and an unrelated
-        // YAML error elsewhere must not pick up a spurious quoting hint. (No
-        // partition_by here — a braceless prefix is invalid WITH partition_by,
-        // which requires a `{partition}` token; this test is about brace
-        // detection, not partitioning.)
         let yaml = "source:\n  type: postgres\n  url: \"postgresql://localhost/test\"\n\
                     exports:\n  - name: t\n    query: \"SELECT 1\"\n    format: parquet\n\
                     \x20   destination:\n      type: local\n      path: ./out\n      prefix: exports/data/\n";
         Config::from_yaml(yaml).expect("a brace-free prefix must load");
     }
 
-    // ── line_has_unquoted_brace_value() unit coverage ──────────────────────
-
     #[test]
     fn unquoted_brace_value_is_detected() {
         assert!(line_has_unquoted_brace_value("    prefix: {partition}"));
         assert!(line_has_unquoted_brace_value("      path: {date}/out"));
-        assert!(line_has_unquoted_brace_value("prefix: {partition")); // unclosed
+        assert!(line_has_unquoted_brace_value("prefix: {partition"));
     }
 
     #[test]
     fn quoted_brace_value_is_not_flagged() {
-        // Quotes around the value hide the brace from the scanner — not a bug.
         assert!(!line_has_unquoted_brace_value(
             "    prefix: \"exports/{partition}/\""
         ));
@@ -2472,27 +2118,19 @@ exports:
 
     #[test]
     fn env_placeholder_and_plain_values_are_not_flagged() {
-        // `${VAR}` placeholders are resolved before the parse and are not the
-        // footgun; plain brace-free values are obviously fine.
         assert!(!line_has_unquoted_brace_value("    url: ${DATABASE_URL}"));
         assert!(!line_has_unquoted_brace_value("    path: ./out"));
-        assert!(!line_has_unquoted_brace_value("  # prefix: {partition}")); // comment
-        assert!(!line_has_unquoted_brace_value("    prefix:")); // no value
+        assert!(!line_has_unquoted_brace_value("  # prefix: {partition}"));
+        assert!(!line_has_unquoted_brace_value("    prefix:"));
     }
 }
 
 #[cfg(test)]
 mod sec_config_validation_regression {
-    //! Regression edge-cases that pin the *compat boundaries* of the
-    //! config-validation security fixes — the cases that distinguish a real
-    //! attack from a legitimate loopback / dev-container / Docker pattern.
-    //! These complement the RED tests in `sec_config_validation`: the RED
-    //! tests assert the attack is rejected; these assert the fix stays narrow
-    //! enough not to break local-dev usage (see CRITICAL COMPAT).
+    //! Regression edge-cases that pin the *compat boundaries* of the config-validation security fixes.
     use super::*;
 
-    /// A full, otherwise-valid config whose single export's `destination:`
-    /// block is whatever the caller passes verbatim.
+    /// A full, otherwise-valid config whose single export's `destination:` block is whatever the caller passes verbatim.
     fn yaml_with_destination(dest_block: &str) -> String {
         format!(
             "source:\n  type: postgres\n  url: \"postgresql://localhost/test\"\n\
@@ -2500,8 +2138,6 @@ mod sec_config_validation_regression {
              {dest_block}"
         )
     }
-
-    // ── endpoint_host / is_loopback_host helpers ─────────────────────────────
 
     #[test]
     fn request_host_parses_forms() {
@@ -2533,13 +2169,8 @@ mod sec_config_validation_regression {
         }
     }
 
-    // ── V2/V12 endpoint: loopback accepted regardless of allow_anonymous ─────
-
     #[test]
     fn loopback_endpoint_without_allow_anonymous_still_accepted() {
-        // A loopback emulator endpoint with credentials (no allow_anonymous) is
-        // the Minio-with-keys local-dev pattern and must stay accepted — the
-        // exfil guard targets *remote* hosts, not localhost.
         let cfg = yaml_with_destination(
             "    destination:\n      type: s3\n      bucket: b\n      region: us-east-1\n\
              \x20     endpoint: http://127.0.0.1:9000\n      access_key_env: AK\n      secret_key_env: SK\n",
@@ -2549,10 +2180,6 @@ mod sec_config_validation_regression {
 
     #[test]
     fn remote_https_endpoint_with_allow_anonymous_is_the_only_remote_escape() {
-        // The documented escape hatch: an explicit anonymous (emulator) opt-in
-        // permits a non-loopback endpoint (no credentials are sent). Without
-        // allow_anonymous the same endpoint is rejected (covered by the RED
-        // test); with it, accepted.
         let cfg = yaml_with_destination(
             "    destination:\n      type: gcs\n      bucket: b\n\
              \x20     endpoint: https://emulator.example.com\n      allow_anonymous: true\n",
@@ -2560,13 +2187,8 @@ mod sec_config_validation_regression {
         Config::from_yaml(&cfg).expect("remote endpoint + allow_anonymous opt-in must be accepted");
     }
 
-    // ── V15 local path: absolute allowed (Docker mount), `..` rejected ───────
-
     #[test]
     fn absolute_local_path_is_allowed() {
-        // `path: /output` is a legitimate Docker volume-mount pattern
-        // (examples/rivet.yaml) and must keep validating — only `..` climbs are
-        // the traversal footgun.
         let cfg =
             yaml_with_destination("    destination:\n      type: local\n      path: /output\n");
         Config::from_yaml(&cfg).expect("absolute local path (Docker mount) must validate");
@@ -2574,7 +2196,6 @@ mod sec_config_validation_regression {
 
     #[test]
     fn dotdot_in_local_prefix_is_rejected() {
-        // `prefix` is guarded the same as `path`.
         let cfg = yaml_with_destination(
             "    destination:\n      type: local\n      path: ./out\n      prefix: a/../b\n",
         );
@@ -2586,14 +2207,8 @@ mod sec_config_validation_regression {
         );
     }
 
-    // ── V13 TLS: explicit enforced mode + knob rejected; default-mode kept ───
-
     #[test]
     fn tls_danger_knob_without_explicit_mode_still_accepted() {
-        // The dev-container pattern `tls: { accept_invalid_certs: true }` against
-        // a loopback self-signed cert (e.g. the MSSQL docker container) omits
-        // `mode:` — there is no *explicit* mode to contradict, so it must keep
-        // validating. The RED test rejects only the explicit-mode contradiction.
         let yaml = "source:\n  type: mssql\n  url: \"sqlserver://sa:pw@127.0.0.1:1433/db\"\n  \
                     tls:\n    accept_invalid_certs: true\n\
                     exports:\n  - name: t\n    query: \"SELECT 1\"\n    format: parquet\n    \
@@ -2604,7 +2219,6 @@ mod sec_config_validation_regression {
 
     #[test]
     fn tls_explicit_verify_ca_plus_invalid_hostnames_rejected() {
-        // The hostname knob is flagged too, against any explicit enforced mode.
         let yaml = "source:\n  type: postgres\n  url: \"postgresql://localhost/test\"\n  \
                     tls:\n    mode: verify-ca\n    accept_invalid_hostnames: true\n\
                     exports:\n  - name: t\n    query: \"SELECT 1\"\n    format: parquet\n    \
@@ -2619,16 +2233,12 @@ mod sec_config_validation_regression {
 
     #[test]
     fn tls_explicit_disable_with_knob_is_not_flagged() {
-        // `mode: disable` carries no verification promise to contradict, so the
-        // danger knob is a no-op there and must not be rejected.
         let yaml = "source:\n  type: postgres\n  url: \"postgresql://localhost/test\"\n  \
                     tls:\n    mode: disable\n    accept_invalid_certs: true\n\
                     exports:\n  - name: t\n    query: \"SELECT 1\"\n    format: parquet\n    \
                     destination:\n      type: local\n      path: ./out\n";
         Config::from_yaml(yaml).expect("mode: disable + knob is a no-op and must validate");
     }
-
-    // ── V5 name: filename-safe predicate boundaries ──────────────────────────
 
     #[test]
     fn filename_safe_name_boundaries() {
@@ -2652,22 +2262,10 @@ mod sec_config_validation_regression {
 
 #[cfg(test)]
 mod sec_config_validation {
-    //! RED security tests for config-load validation gaps (cluster:
-    //! config-validation). Each asserts the SECURE behavior through the
-    //! stable `Config::from_yaml` seam: a malicious config that is accepted
-    //! today must be REJECTED (or, for warn-only knobs, surfaced as an
-    //! error/loud warning) at config-load. These are expected to FAIL until
-    //! the corresponding production fix lands.
-    //!
-    //! The pattern mirrors the existing `query_file` `..`/absolute-path guard
-    //! in `validate_export` (see `config/tests/validation.rs`): a syntactic
-    //! check that runs at config-validate time so `rivet check` / `rivet
-    //! doctor` catch the problem before any connect/plan/upload step.
+    //! RED security tests for config-load validation gaps (cluster: config-validation).
     use super::*;
 
-    /// A full, otherwise-valid config whose single export's `destination:`
-    /// block is whatever the caller passes verbatim. Only the destination
-    /// varies, so any rejection is attributable to the destination under test.
+    /// A full, otherwise-valid config whose single export's `destination:` block is whatever the caller passes verbatim.
     fn yaml_with_destination(dest_block: &str) -> String {
         format!(
             "source:\n  type: postgres\n  url: \"postgresql://localhost/test\"\n\
@@ -2676,25 +2274,8 @@ mod sec_config_validation {
         )
     }
 
-    // ── V2/V12: cloud-endpoint exfiltration + http cleartext ────────────────
-    //
-    // `destination.endpoint` is passed straight to the opendal S3/GCS/Azure
-    // builder with no validation (see `src/destination/{s3,gcs,azure}.rs`),
-    // so a committed config can silently redirect every export to an
-    // attacker-controlled host. Two distinct gaps:
-    //   V2  — a custom *non-loopback* endpoint (data exfiltration target).
-    //   V12 — an `http://` (plaintext) endpoint (credentials + data on the
-    //         wire in cleartext).
-    // The secure behavior is to reject (or require explicit opt-in) at
-    // config-load. Loopback/emulator endpoints (Minio/Azurite/fake-gcs on
-    // 127.0.0.1) MUST stay accepted — that path is exercised by the existing
-    // `gcs_allow_anonymous_parses` test and the guard test below.
-
     #[test]
     fn sec_s3_custom_endpoint_rejected() {
-        // SEC-RED V2: a non-loopback custom S3 endpoint is an exfiltration
-        // target — every part upload goes to attacker.example.com. Must be
-        // rejected (or require explicit opt-in) at config-load. Accepted today.
         let cfg = yaml_with_destination(
             "    destination:\n      type: s3\n      bucket: my-bucket\n      region: us-east-1\n\
              \x20     endpoint: https://attacker.example.com\n",
@@ -2714,11 +2295,6 @@ mod sec_config_validation {
 
     #[test]
     fn sec_http_endpoint_rejected() {
-        // SEC-RED V12: a plaintext http:// endpoint to a *remote* host sends
-        // credentials and exported rows over the wire in cleartext. Must be
-        // rejected (or require explicit opt-in) at config-load. Accepted today.
-        // Use a non-loopback host so this is distinct from the Minio/Azurite
-        // loopback emulator case (guarded below).
         let cfg = yaml_with_destination(
             "    destination:\n      type: s3\n      bucket: my-bucket\n      region: us-east-1\n\
              \x20     endpoint: http://evil.com\n",
@@ -2759,12 +2335,6 @@ mod sec_config_validation {
 
     #[test]
     fn sec_loopback_endpoint_still_accepted_guard() {
-        // SEC-RED V2/V12 (guard): a loopback emulator endpoint
-        // (`http://127.0.0.1:9000` Minio, with allow_anonymous) is the
-        // legitimate local-dev path and MUST stay accepted after the fix.
-        // This pins that the endpoint rejection targets *remote* hosts, not
-        // localhost — otherwise the fix breaks every Minio/Azurite/fake-gcs
-        // integration test (see `gcs_allow_anonymous_parses`).
         let cfg = yaml_with_destination(
             "    destination:\n      type: s3\n      bucket: my-bucket\n      region: us-east-1\n\
              \x20     endpoint: http://127.0.0.1:9000\n      allow_anonymous: true\n",
@@ -2773,22 +2343,9 @@ mod sec_config_validation {
             .expect("a loopback emulator endpoint with allow_anonymous must stay accepted");
     }
 
-    // ── V5: export `name` path traversal ────────────────────────────────────
-    //
-    // `ExportConfig.name` is a free-form `String` keyed into state tracking,
-    // file logs, and (via the destination layout) output paths — yet it is
-    // never validated. A name like `../../../etc/x`, an absolute `/abs/x`, a
-    // bare slash, or an embedded NUL can escape the intended output tree.
-    // Mirror the `query_file` `..`/absolute guard: reject at config-load.
-
     #[test]
     fn sec_export_name_traversal_rejected() {
-        // SEC-RED V5: a traversal / absolute / slash / NUL export name escapes
-        // the output tree (and corrupts name-keyed state). Must be rejected at
-        // config-load. Accepted today.
         for bad in ["../../../etc/x", "/abs/x", "sub/dir", "with\u{0000}nul"] {
-            // `name:` is JSON-encoded so embedded slashes / NULs survive the
-            // YAML parse verbatim and reach validation.
             let name_yaml = serde_json::to_string(bad).expect("encode name");
             let cfg = format!(
                 "source:\n  type: postgres\n  url: \"postgresql://localhost/test\"\n\
@@ -2811,23 +2368,12 @@ mod sec_config_validation {
 
     #[test]
     fn sec_export_name_normal_still_accepted_guard() {
-        // SEC-RED V5 (guard): a plain, well-formed export name must keep
-        // loading after the fix. Pins that the traversal check is narrow.
         let cfg = yaml_with_destination("    destination:\n      type: local\n      path: ./out\n");
         Config::from_yaml(&cfg).expect("a normal export name ('t') must stay accepted");
     }
 
-    // ── V15: local destination `path` traversal ─────────────────────────────
-    //
-    // `destination.path` for a `type: local` export is written verbatim to the
-    // filesystem. A relative `../../../../tmp/x` or absolute path lets a
-    // committed config write outside the intended output directory. Must be
-    // rejected (or at minimum loudly surfaced) at config-load. Accepted today.
-
     #[test]
     fn sec_local_dest_path_traversal_rejected() {
-        // SEC-RED V15: a traversal local-destination path writes outside the
-        // intended output tree. Must be rejected at config-load. Accepted today.
         let cfg = yaml_with_destination(
             "    destination:\n      type: local\n      path: ../../../../tmp/x\n",
         );
@@ -2846,16 +2392,7 @@ mod sec_config_validation {
 
     #[test]
     fn sec_accept_invalid_certs_warns() {
-        // SEC-RED V13: verify-full + accept_invalid_certs: true is a silent
-        // security downgrade that contradicts the chosen mode. It must be
-        // loudly surfaced at config-load. The only stable secure seam is an
-        // `Err` from `Config::from_yaml` (validate returns Ok today, and there
-        // is no captured-warning seam exposed from here — see notes). Asserting
-        // `Err` is the strongest secure assertion and is RED against current
-        // code.
         let cfg = yaml_with_destination("    destination:\n      type: local\n      path: ./out\n");
-        // Splice the TLS block into the source rather than the destination so
-        // the rest of the config stays valid.
         let cfg = cfg.replace(
             "  url: \"postgresql://localhost/test\"\n",
             "  url: \"postgresql://localhost/test\"\n  tls:\n    mode: verify-full\n    accept_invalid_certs: true\n",
@@ -2874,18 +2411,6 @@ mod sec_config_validation {
     }
 
     /// `rollover: 0` and `rollover_memory_mb: 0` are REFUSED at validation.
-    ///
-    /// Zero is not "disable": `buf >= 0` is always true, so a zero budget rolls a
-    /// part on EVERY committed transaction — a silent file explosion the operator
-    /// who typed 0 never asked for. Same guard chunk_size has; `None` (omit the
-    /// field) is the documented way to get the default.
-    /// `format: csv` under a `load:` block is refused — the loaders read parquet
-    /// only, and the alternative was a load that prints "nothing to load", exits
-    /// 0, and never marks the runs consumed: a permanently silent pipeline.
-    /// Round-6: the two success-shaped prefix mistakes are refused at validate —
-    /// a `..` segment (objects escape the configured location) and a pasted URI
-    /// scheme (`gs://` doubling). Both used to export exit-0 and read as
-    /// "up to date" forever on the load side.
     #[test]
     fn a_traversal_or_scheme_prefix_is_refused_at_validate() {
         for (prefix, needle) in [
@@ -2900,7 +2425,6 @@ mod sec_config_validation {
             let err = Config::from_yaml(&yaml).expect_err(prefix).to_string();
             assert!(err.contains(needle), "{prefix}: {err}");
         }
-        // A dotted-but-not-traversal prefix stays legal.
         let ok = "source:\n  type: postgres\n  url: postgres://x/x\nexports:\n  - name: e1\n    \
                   query: SELECT 1\n    destination:\n      type: gcs\n      bucket: b\n      \
                   prefix: exports/v1.2/\n    format: parquet\n";
@@ -2931,8 +2455,6 @@ exports:
             err.contains("cannot feed a `load:` block"),
             "must name the interaction and the fix: {err}"
         );
-        // Parquet under the same load block stays valid — the guard is about the
-        // FORMAT, not the load feature.
         Config::from_yaml(
             &base
                 .replace(
@@ -2942,17 +2464,11 @@ exports:
                 .replace("FORMAT", "parquet"),
         )
         .expect("parquet + load must validate");
-        // …and CSV WITHOUT a load block stays valid — csv is first-class for
-        // exports; only the unload-able promise is refused.
         Config::from_yaml(&base.replace("LOAD_BLOCK", "").replace("FORMAT", "csv"))
             .expect("csv without load must validate");
     }
 
-    /// Two CDC checkpoints that RESOLVE to one path are one conflict, whatever
-    /// their spelling — `./cdc/x.ckpt` (init's own scaffold form) and
-    /// `cdc/x.ckpt` are the same file, and the raw-string comparison called them
-    /// two. Two streams then acked one resume file; the next run resumed from
-    /// whichever wrote last and silently skipped the other's span.
+    /// Two CDC checkpoints that RESOLVE to one path are one conflict, whatever their spelling.
     #[test]
     fn equivalent_checkpoint_spellings_are_one_conflict() {
         let cfg = r#"
@@ -3000,15 +2516,8 @@ exports:
         for (line, needle) in [
             ("rollover: 0", "rollover must be >= 1"),
             ("rollover_memory_mb: 0", "rollover_memory_mb must be >= 1"),
-            // The multiply is checked at VALIDATION, where the error can name the
-            // field — at runtime it wraps in release, and a wrapped budget of 0 is
-            // the same explosion wearing a huge plausible number.
             ("rollover_memory_mb: 999999999999999999", "overflows"),
-            // Round-10 mutants: a value whose MULTIPLY overflows while an ADD
-            // would not — `checked_mul -> checked_add` sailed through the
-            // usize::MAX-ish fixture above (both overflow there).
             ("rollover_memory_mb: 18014398509481984", "overflows"),
-            // 2^44 MiB is 2^64 bytes: the smallest power of two that overflows.
             ("rollover_memory_mb: 17592186044416", "overflows"),
         ] {
             let yaml = base.replace("ROLLOVER_LINE", line);
@@ -3021,10 +2530,7 @@ exports:
     }
 }
 
-/// Every field of [`crate::tuning::TuningConfig`], for the misplaced-field
-/// detector. Kept in ONE place and generatively drift-guarded against the
-/// struct's JsonSchema, so a new tuning knob cannot be silently invisible to
-/// the misplaced-key check (#173).
+/// Every field of [`crate::tuning::TuningConfig`], for the misplaced-field detector.
 pub(crate) const TUNING_FIELD_NAMES: &[&str] = &[
     "profile",
     "batch_size",

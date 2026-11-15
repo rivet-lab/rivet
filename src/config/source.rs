@@ -8,10 +8,7 @@ use super::resolve::resolve_env_vars;
 use crate::secret::Secret;
 use crate::tuning::{TuningConfig, TuningProfile};
 
-/// Chars to percent-encode in a URL userinfo (user / password) component: encode
-/// everything except the RFC 3986 unreserved set (ALPHA / DIGIT / `- . _ ~`), so
-/// no credential byte can be mistaken for a URL delimiter. Over-encoding is
-/// harmless — the driver percent-decodes it back.
+/// Chars to percent-encode in a URL userinfo (user / password) component.
 const USERINFO: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
     .remove(b'.')
@@ -212,8 +209,7 @@ pub enum SourceEnvironment {
 }
 
 impl SourceEnvironment {
-    /// Default tuning profile selected by this environment when the user has
-    /// not set `tuning.profile:` explicitly.
+    /// Default tuning profile selected by this environment when the user has not set `tuning.profile:` explicitly.
     pub fn default_profile(self) -> TuningProfile {
         match self {
             SourceEnvironment::Local => TuningProfile::Fast,
@@ -257,10 +253,6 @@ pub struct TlsConfig {
 }
 
 /// TLS enforcement mode, mirroring libpq's `sslmode` semantics where possible.
-// `clap::ValueEnum` so `rivet init --tls <mode>` accepts exactly this enum — a
-// parallel CLI-only enum would be a second definition of the same four words,
-// and it would drift on the first variant change (#146). A regular comment,
-// not a doc comment: the doc text IS the schema description users see.
 #[derive(
     Debug, Deserialize, Serialize, JsonSchema, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum,
 )]
@@ -280,8 +272,7 @@ pub enum TlsMode {
     VerifyFull,
 }
 
-/// The kebab-case name serde/clap already own — ONE rendering for every
-/// user-facing surface (#162: three hand matches drifted-in-waiting).
+/// The kebab-case name serde/clap already own.
 impl std::fmt::Display for TlsMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
@@ -326,20 +317,7 @@ impl SourceConfig {
         self.columns_from == Some(ColumnsFrom::Grants)
     }
 
-    /// Return a copy of this config with **all plaintext credential material stripped**,
-    /// safe to embed in a persisted [`crate::plan::PlanArtifact`] (ADR-0005 PA9).
-    ///
-    /// Redaction rules:
-    /// - `password` → always `None` (plaintext password never leaves the process).
-    /// - `url` containing `user[:password]@` → userinfo segment replaced with `"REDACTED"`.
-    /// - `url` query secrets (`password=`, `*_token=`, …) → value replaced with `***`.
-    /// - `url` in keyword/value form (`host=… password=…`, `…;PWD=…`) → password value replaced with `***`.
-    /// - `url_env`, `url_file`, `url_secret`, `password_env`, `password_secret` — kept (env var
-    ///   **names**, file paths and secret names are references, not secrets; `apply` needs them to re-resolve credentials).
-    /// - `host`, `port`, `user`, `database` — kept (structured connection metadata).
-    ///
-    /// If a plaintext `password` or `url` is redacted, callers should surface a warning
-    /// to the operator so env/file-based auth is available at apply time.
+    /// Return a copy of this config with **all plaintext credential material stripped**, safe to embed in a persisted [`crate::plan::PlanArtifact`] (ADR-0005 PA9).
     pub fn redact_for_artifact(&self) -> (Self, bool) {
         let mut out = self.clone();
         let mut redacted = false;
@@ -377,10 +355,6 @@ impl SourceConfig {
     }
 
     fn build_url_from_fields(&self) -> crate::error::Result<Secret> {
-        // First-user-friendly errors: name the missing field, suggest a
-        // concrete value, and remind the operator that `url_env` is the
-        // alternative path so they don't bounce.  See
-        // `docs/getting-started.md` for the full onboarding flow.
         let host = self
             .host
             .as_deref()
@@ -435,8 +409,6 @@ impl SourceConfig {
             SourceType::Mongo => "mongodb",
         };
 
-        // Percent-encode the userinfo so a credential containing `/ @ : ? #` can't
-        // make the URL ambiguous (breaking the driver) or defeat redaction.
         let user_enc = utf8_percent_encode(user, USERINFO);
         let host = bracket_ipv6(host);
         if password.is_empty() {
@@ -453,8 +425,7 @@ impl SourceConfig {
         }
     }
 
-    /// The state key of what reads from here (cursor, crash anchor): engine, host, port and
-    /// database — no credentials or parameters — so a changed destination keeps its cursor.
+    /// The state key of what reads from here (cursor, crash anchor).
     pub fn state_key(&self) -> String {
         self.try_state_key().unwrap_or_default()
     }
@@ -467,7 +438,7 @@ impl SourceConfig {
         ))
     }
 
-    /// The `search_path` this source's URL sets, which decides the schema an unqualified name is read from; empty when it sets none.
+    /// The `search_path` this source's URL sets, which decides the schema an unqualified name is read from.
     pub fn search_path(&self) -> String {
         match self.source_type {
             SourceType::Postgres => self
@@ -487,16 +458,6 @@ impl SourceConfig {
             return self.build_url_from_fields();
         }
 
-        // Capture *where* the URL came from so the password warning below
-        // can be specific: scolding an operator who already used
-        // `url_env:` (the recommendation!) for "considering url_env" is
-        // misleading and trains them to tune out our warnings.
-        //
-        // The `EnvVar(&str)` / `File(&str)` payloads are retained for
-        // future use (e.g. mentioning the env-var name in a richer
-        // diagnostic later) — `#[allow(dead_code)]` keeps clippy quiet
-        // while we keep the slot open. Renaming the variants to unit
-        // would lose the documentation that "this came from <name>".
         #[allow(dead_code)]
         enum UrlSource<'a> {
             InlineYaml,
@@ -548,16 +509,6 @@ impl SourceConfig {
             && userinfo.contains(':')
             && !userinfo.ends_with(':')
         {
-            // `resolve_url` is called from many places per run (plan build,
-            // doctor, every export, every chunk worker). Fire each variant
-            // of this warning exactly once per process so operators see
-            // one clean nudge, not 3-4 stacked copies in stderr.
-            //
-            // Only the InlineYaml case is a real misconfiguration to flag:
-            // the password is sitting in a committed file. EnvVar / File
-            // sources are explicitly the recommended forms — scolding an
-            // operator who already uses them for "considering url_env"
-            // would be a false alarm.
             match source {
                 UrlSource::InlineYaml => {
                     static WARNED: std::sync::Once = std::sync::Once::new();
@@ -569,10 +520,7 @@ impl SourceConfig {
                         );
                     });
                 }
-                UrlSource::EnvVar(_) | UrlSource::File(_) | UrlSource::Secret(_) => {
-                    // The recommended forms — no warning. Operator hygiene
-                    // for shell history / file permissions is out of scope.
-                }
+                UrlSource::EnvVar(_) | UrlSource::File(_) | UrlSource::Secret(_) => {}
             }
         }
 
@@ -611,11 +559,7 @@ pub enum SourceType {
 }
 
 impl SourceType {
-    /// Whether this engine speaks SQL (the relational read seam: `SELECT`
-    /// queries, `information_schema` introspection, chunked/keyset/incremental
-    /// SQL builders). `false` for document stores like MongoDB, whose adapter
-    /// reads via the driver's native query API instead. Used at the match sites
-    /// that would otherwise have to special-case every non-SQL engine.
+    /// Whether this engine speaks SQL (the relational read seam.
     pub fn is_sql(self) -> bool {
         !matches!(self, SourceType::Mongo)
     }
@@ -660,7 +604,7 @@ impl SourceType {
     }
 }
 
-/// `engine://host:port/database` of `url`, credentials, query and fragment dropped; a keyword/value string keeps its pairs with the password masked.
+/// `engine://host:port/database` of `url`, credentials, query and fragment dropped.
 pub(crate) fn source_state_key(source_type: SourceType, url: &str) -> String {
     let url = &seeded!(
         "source-key-keyword-password-at",
@@ -684,7 +628,7 @@ fn default_port(source_type: SourceType) -> u16 {
     }
 }
 
-/// A source key in the one spelling it is stored under: every host names its port (the engine's default where the URL left it out) and a keyword/value password is masked.
+/// A source key in the one spelling it is stored under.
 pub(crate) fn canonical_source_key(key: &str) -> String {
     use SourceType::*;
     let key = crate::redact::redact_keyword_passwords(key);
@@ -714,7 +658,7 @@ pub(crate) fn canonical_source_key(key: &str) -> String {
     format!("{engine}://{}{path}", hosts.join(","))
 }
 
-/// The value a URL (or keyword/value string) gives `search_path` through its `options`, lower-cased; empty when it gives none.
+/// The value a URL (or keyword/value string) gives `search_path` through its `options`, lower-cased.
 fn url_search_path(url: &str) -> String {
     let decoded = percent_encoding::percent_decode_str(url).decode_utf8_lossy();
     let Some((_, rest)) = decoded.split_once("search_path") else {
@@ -925,8 +869,6 @@ mod tests {
         assert_eq!(b, "postgres://h2:5432/b");
     }
 
-    // ── TlsMode::is_enforced ────────────────────────────────────────────────
-
     #[test]
     fn tls_mode_disable_not_enforced() {
         assert!(!TlsMode::Disable.is_enforced());
@@ -938,8 +880,6 @@ mod tests {
         assert!(TlsMode::VerifyCa.is_enforced());
         assert!(TlsMode::VerifyFull.is_enforced());
     }
-
-    // ── SourceConfig::redact_for_artifact ───────────────────────────────────
 
     fn make_source(source_type: SourceType) -> SourceConfig {
         SourceConfig {
@@ -963,8 +903,7 @@ mod tests {
         }
     }
 
-    /// Whatever credentials and query options a URL carries, the state key never holds them
-    /// and does not change with them.
+    /// Whatever credentials and query options a URL carries, the state key never holds them and does not change with them.
     #[test]
     fn a_source_state_key_never_carries_credentials_or_options() {
         use proptest::prelude::*;
@@ -1189,8 +1128,6 @@ mod tests {
         assert!(!url.contains("pass"), "{url}");
     }
 
-    // ── SourceConfig::resolve_url (structured fields) ───────────────────────
-
     #[test]
     fn resolve_url_from_structured_fields_postgres() {
         let mut src = make_source(SourceType::Postgres);
@@ -1308,7 +1245,6 @@ mod tests {
         assert!(msg.contains("host"), "{msg}");
     }
 
-    // ── credential_span ──────────────────────────────────────────────────────
     fn any_userinfo(url: &str) -> Option<(usize, usize)> {
         crate::url_text::credential_span(url, crate::url_text::Mask::AnyUserinfo)
     }
@@ -1357,8 +1293,6 @@ mod tests {
         assert!(any_userinfo("postgresql://db.example.com:5432/app").is_none());
     }
 
-    // ── SEC-RED: embedded `@` in password must not leak to plan artifact ──────
-
     #[test]
     fn sec_artifact_redaction_password_with_at() {
         let mut src = make_source(SourceType::Postgres);
@@ -1394,12 +1328,6 @@ mod tests {
 
     #[test]
     fn build_url_percent_encodes_userinfo_so_delimiters_cant_leak() {
-        // A2 (audit root fix): a password with URL delimiters (`/ @ : ? #` — `/` is
-        // a common base64 char) is percent-encoded when Rivet builds the connection
-        // URL from structured fields. Un-encoded, the raw `/`/`@` made the URL
-        // ambiguous: it broke the driver AND stopped the password-redaction scan
-        // early, leaking the tail. Encoding is the unambiguous root fix (redaction
-        // of a well-formed URL is then correct). RED before the encoding.
         let mut src = make_source(SourceType::Postgres);
         src.host = Some("db.example.com".into());
         src.user = Some("rivet".into());
@@ -1422,12 +1350,6 @@ mod tests {
 
     #[test]
     fn mssql_url_from_fields_roundtrips_through_parse_mssql_url() {
-        // Round-2 audit #1: the encoding above is only safe if the consumer
-        // decodes it. PG/MySQL/Mongo delegate to a driver URL parser that
-        // percent-decodes; MSSQL's hand-rolled `parse_mssql_url` is the outlier
-        // that must decode itself. Prove the two halves agree: a password with
-        // every URL delimiter survives encode→parse losslessly. RED before the
-        // decode landed in `parse_mssql_url` (it echoed the literal %-bytes).
         let mut src = make_source(SourceType::Mssql);
         src.host = Some("db.internal".into());
         src.user = Some(r"dom\svc".into());

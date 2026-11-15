@@ -1,7 +1,7 @@
 use super::{credential_file, destination};
 use std::path::{Path, PathBuf};
 
-/// The one place a path a config names resolves: against the config file's directory, never the working directory.
+/// The one place a path a config names resolves.
 pub(crate) struct Anchor {
     dir: PathBuf,
     cwd: Option<PathBuf>,
