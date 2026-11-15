@@ -11,20 +11,6 @@ pub struct SchemaColumn {
 }
 
 /// Compute the canonical schema fingerprint for a set of columns.
-///
-/// The fingerprint is `"xxh3:<16-char-lowercase-hex>"`.  The algorithm prefix
-/// is part of the format so future hashers (sha256, blake3) can coexist —
-/// readers MUST verify the prefix before interpreting the hex body.
-///
-/// Canonicalization: columns are sorted by name (case-sensitive) and
-/// serialized as `<name>\t<data_type>\n` joined with no separator.  Column
-/// **order** in the source schema does not affect the fingerprint, but
-/// column **names** and **types** do; renaming or retyping a column changes
-/// the fingerprint.
-///
-/// This is the value written to the manifest's `schema_fingerprint` field
-/// (ADR-0012 M3) and is what `--validate` compares against to detect
-/// schema drift between the time of write and the time of verify.
 pub fn schema_fingerprint(columns: &[SchemaColumn]) -> String {
     use xxhash_rust::xxh3::Xxh3;
 
@@ -41,23 +27,7 @@ pub fn schema_fingerprint(columns: &[SchemaColumn]) -> String {
     format!("xxh3:{:016x}", h.digest())
 }
 
-/// Convert an Arrow schema (the dest-facing one, after internal columns are
-/// stripped — see `pipeline::sink`) into the `Vec<SchemaColumn>` the rest of
-/// the trust contract uses (`schema_fingerprint`, `store_schema`,
-/// `detect_schema_change`).
-///
-/// This is the canonical bridge between the Arrow type system and Rivet's
-/// schema-evidence representation.  It used to be inlined in three places
-/// (`pipeline/single.rs`, `pipeline/chunked/exec.rs`,
-/// `pipeline/chunked/parallel_checkpoint.rs`); each copy was a regression
-/// risk because changing the data-type representation in one would silently
-/// shift the fingerprint there but not in the others.  Centralising the
-/// conversion keeps the fingerprint stable across executors.
-///
-/// Format note: `data_type` is rendered with `{:?}` (Arrow's `Debug`), e.g.
-/// `Int64`, `Utf8`, `Timestamp(Microsecond, None)`.  This is what every
-/// existing manifest already records; switching to `Display` would shift
-/// every fingerprint in the world and is intentionally avoided.
+/// Convert the dest-facing Arrow schema into the `Vec<SchemaColumn>` the trust contract uses.
 pub fn arrow_schema_to_columns(schema: &arrow::datatypes::Schema) -> Vec<SchemaColumn> {
     schema
         .fields()
@@ -74,7 +44,7 @@ pub fn arrow_schema_to_columns(schema: &arrow::datatypes::Schema) -> Vec<SchemaC
 pub struct SchemaChange {
     pub added: Vec<String>,
     pub removed: Vec<String>,
-    pub type_changed: Vec<(String, String, String)>, // (name, old_type, new_type)
+    pub type_changed: Vec<(String, String, String)>,
 }
 
 impl SchemaChange {
@@ -84,9 +54,6 @@ impl SchemaChange {
 }
 
 /// Schema history store — reads and writes `export_schema`.
-///
-/// Captures a schema snapshot per export on each run and surfaces structural
-/// drift (added/removed/retyped columns) by diffing against the stored snapshot.
 impl StateStore {
     pub fn get_stored_schema(&self, export_name: &str) -> Result<Option<Vec<SchemaColumn>>> {
         let json = self.query_opt(
@@ -114,14 +81,7 @@ impl StateStore {
         Ok(())
     }
 
-    /// Store the schema ONLY when no baseline exists yet. Returns `true` if it
-    /// stored (was absent), `false` if an existing baseline was preserved.
-    ///
-    /// The open-time forensics probe uses this: a stored baseline is the drift
-    /// detector's comparison anchor ([`detect_schema_change`] reads it during the
-    /// export, AFTER open), so overwriting it at OPEN would blind drift detection —
-    /// a changed column would compare equal to the just-stored current schema. A
-    /// first-run failure (no baseline) still captures its schema for the post-mortem.
+    /// Store the schema ONLY when no baseline exists yet.
     pub fn store_schema_if_absent(
         &self,
         export_name: &str,
@@ -135,14 +95,6 @@ impl StateStore {
     }
 
     /// Detect structural drift versus the stored snapshot.
-    ///
-    /// On the first run (no stored snapshot) the current schema is stored and
-    /// `Ok(None)` is returned. On subsequent runs a diff is computed and returned
-    /// as `Ok(Some(change))` when columns differ — but the stored snapshot is
-    /// **not** updated automatically. Callers must call [`store_schema`] explicitly
-    /// after deciding whether to accept the change (policy `warn`/`continue`) or
-    /// reject it (policy `fail`, which intentionally leaves the old snapshot so the
-    /// next run detects the same change again).
     pub fn detect_schema_change(
         &self,
         export_name: &str,
@@ -244,14 +196,6 @@ mod tests {
 
     #[test]
     fn store_schema_if_absent_preserves_the_drift_baseline() {
-        // Regression (v18 open-forensics, job.rs::capture_open_forensics): the
-        // forensics probe stored the schema at run OPEN, clobbering the previous
-        // run's baseline BEFORE the export's `detect_schema_change` read it — so a
-        // genuinely added/removed column compared equal to itself and
-        // `schema_changed` stayed false (6 live schema-drift tests went RED). The
-        // fix routes the open-time store through `store_schema_if_absent`.
-        // MUTANT: swap `store_schema_if_absent` → `store_schema` (unconditional) and
-        // the final `change.is_some()` goes RED (baseline overwritten with v2).
         let s = store();
         let v1 = vec![SchemaColumn {
             name: "id".into(),
@@ -267,17 +211,14 @@ mod tests {
                 data_type: "Utf8".into(),
             },
         ];
-        // Run 1 OPEN: no baseline → stores.
         assert!(
             s.store_schema_if_absent("t", &v1).unwrap(),
             "first open: baseline absent → stored",
         );
-        // Run 2 OPEN: baseline present → must NOT overwrite (the fix).
         assert!(
             !s.store_schema_if_absent("t", &v2).unwrap(),
             "baseline present → open-forensics must preserve it, not overwrite",
         );
-        // Run 2 export: drift detection sees v1 (baseline) vs v2 (current) → change.
         let change = s.detect_schema_change("t", &v2).unwrap();
         assert!(
             change.is_some(),
@@ -418,8 +359,6 @@ mod tests {
         );
     }
 
-    // ── schema_fingerprint ───────────────────────────────────────────────────
-
     fn col(name: &str, ty: &str) -> SchemaColumn {
         SchemaColumn {
             name: name.into(),
@@ -470,9 +409,6 @@ mod tests {
 
     #[test]
     fn fingerprint_is_stable_across_invocations() {
-        // Guards against accidental non-determinism (HashMap iteration order,
-        // process-local randomness in a future xxh3 update, etc).  This is
-        // the value written to manifests — it MUST be reproducible.
         let cols = vec![col("a", "Int64"), col("b", "Utf8"), col("c", "Float64")];
         let fp1 = schema_fingerprint(&cols);
         let fp2 = schema_fingerprint(&cols);
@@ -483,8 +419,6 @@ mod tests {
 
     #[test]
     fn fingerprint_distinguishes_split_columns() {
-        // Defends against a naive concat-without-separator implementation:
-        // "ab" + "c" must hash differently from "a" + "bc".
         let a = vec![col("ab", "Int64"), col("c", "Utf8")];
         let b = vec![col("a", "Int64"), col("bc", "Utf8")];
         assert_ne!(schema_fingerprint(&a), schema_fingerprint(&b));
@@ -492,9 +426,6 @@ mod tests {
 
     #[test]
     fn fingerprint_empty_input_is_well_defined() {
-        // Empty schema (no columns) must produce a deterministic value
-        // rather than panicking; the manifest writer may need to emit a
-        // placeholder fingerprint for degenerate plans.
         let fp = schema_fingerprint(&[]);
         assert!(fp.starts_with("xxh3:"));
     }
