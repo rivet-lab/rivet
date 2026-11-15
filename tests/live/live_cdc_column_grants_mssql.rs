@@ -6,6 +6,11 @@ use crate::common::*;
 
 const SECRET: &str = "SECRET-";
 const PW: &str = "Cg_Passw0rd1";
+const BOUNDARY_TEXT: &str = "columns_from: grants - batch reads are enforced by the server (a column the \
+account may not SELECT is never selected). The SQL Server change stream is enforced by the server too: \
+the capture instance's change function returns nothing to an account that may not SELECT every column \
+the instance captures, so rivet refuses an instance wider than the account's grants and reads one made \
+of exactly the columns it may SELECT (sys.sp_cdc_enable_table @captured_column_list).";
 
 /// A login that may SELECT only `columns` of `dbo.table`; dropped with it.
 struct GrantLogin(String);
@@ -411,4 +416,112 @@ fn a_partial_capture_without_the_policy_is_refused_as_before_mssql() {
         "the refusal of a partial capture is unchanged:\n{}",
         said_by(&out)
     );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql with SQL Server Agent + CDC"]
+fn the_policy_says_what_it_does_not_guarantee_at_check_and_at_the_start_of_a_run_mssql() {
+    let _serial = cross_process_serial("mssql_cdc");
+    let table = seeded_table("cg_say");
+    let ci = format!("dbo_{table}");
+    capture(&table, &ci, Some("id, name"));
+    let _table = MssqlCdcTable {
+        table: table.clone(),
+        ci: ci.clone(),
+    };
+    let user = GrantLogin::new(&table, "id, name");
+    let on = Rig::mssql_cdc(&table, &ci)
+        .source_url(&user.url())
+        .cdc("initial: snapshot")
+        .source_line("columns_from: grants");
+    let check = on.cli(&["check"]);
+    assert!(check.status.success(), "{}", said_by(&check));
+    assert!(
+        String::from_utf8_lossy(&check.stdout).contains(BOUNDARY_TEXT),
+        "`rivet check` states the boundary of the policy:\n{}",
+        said_by(&check)
+    );
+    let run = on.run_args_env(&["--export", &table], &[("RUST_LOG", "info")]);
+    assert!(run.status.success(), "{}", said_by(&run));
+    assert!(
+        said_by(&run).contains(BOUNDARY_TEXT),
+        "a change-stream run says it at its start:\n{}",
+        said_by(&run)
+    );
+    let off = Rig::mssql_cdc(&table, &ci).cdc("initial: snapshot");
+    assert!(
+        !said_by(&off.cli(&["check"])).contains(BOUNDARY_TEXT),
+        "a config without the policy says nothing about it"
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql with SQL Server Agent + CDC"]
+fn a_hidden_cursor_or_chunk_column_is_refused_by_code_before_the_read_mssql() {
+    let _serial = cross_process_serial("mssql_cdc");
+    let table = seeded_table("cg_cur");
+    let ci = format!("dbo_{table}");
+    let _table = MssqlCdcTable {
+        table: table.clone(),
+        ci: ci.clone(),
+    };
+    let user = GrantLogin::new(&table, "id, name");
+    for (what, mode, lines) in [
+        ("cursor_column", "incremental", &["cursor_column: pass"][..]),
+        (
+            "chunk_by_key",
+            "chunked",
+            &["chunk_by_key: pass", "chunk_size: 1"][..],
+        ),
+    ] {
+        let rig = Rig::mssql_cdc(&table, &ci)
+            .source_url(&user.url())
+            .source_line("columns_from: grants")
+            .into_full_batch()
+            .restage(mode, lines);
+        let out = rig.run();
+        let said = said_by(&out);
+        assert_refused(&out, Refused::by_code("RIVET_SOURCE_COLUMNS_UNREADABLE", 1));
+        assert!(
+            said.contains("`pass`") && said.contains(what),
+            "{what}: the refusal names the column and the setting:\n{said}"
+        );
+        assert_refused_before_any_write(&rig.out_dir(), &rig.checkpoint());
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql with SQL Server Agent + CDC"]
+fn a_denied_connect_under_the_policy_carries_the_connect_hint_in_every_batch_mode_mssql() {
+    let _serial = cross_process_serial("mssql_cdc");
+    let table = seeded_table("cg_auth");
+    let ci = format!("dbo_{table}");
+    let _table = MssqlCdcTable {
+        table: table.clone(),
+        ci: ci.clone(),
+    };
+    let user = GrantLogin::new(&table, "id, name");
+    let denied = user.url().replace(&format!(":{PW}@"), ":wrong@");
+    for (mode, lines) in [
+        ("full", &[][..]),
+        ("chunked", &["chunk_by_key: id", "chunk_size: 1"][..]),
+    ] {
+        let rig = Rig::mssql_cdc(&table, &ci)
+            .source_url(&denied)
+            .source_line("columns_from: grants")
+            .into_full_batch()
+            .restage(mode, lines);
+        for cmd in ["run", "check"] {
+            let out = rig.cli(&[cmd]);
+            assert!(
+                !out.status.success(),
+                "{mode} {cmd}: a wrong password fails"
+            );
+            assert!(
+                said_by(&out).contains("Verify the SQL login/password"),
+                "{mode} {cmd}: the denied connect carries its hint:\n{}",
+                said_by(&out)
+            );
+        }
+    }
 }

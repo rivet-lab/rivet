@@ -73,7 +73,11 @@ pub(crate) fn readable_relation(
             continue;
         };
         relation.get_or_insert_with(|| (schema.to_string(), table.to_string()));
-        if row.get::<i32, _>(3) == Some(1) {
+        if seeded!(
+            "column-grants-mssql-every-column-read-as-readable",
+            true,
+            row.get::<i32, _>(3) == Some(1)
+        ) {
             columns.push(name.to_string());
         }
     }
@@ -225,7 +229,9 @@ fn refuse_unreadable_key(
     key: &[String],
     from: &str,
 ) -> Result<()> {
-    if let Some(k) = missing_from(key, readable).first() {
+    if seeded!("column-grants-unreadable-key-accepted", false, true)
+        && let Some(k) = missing_from(key, readable).first()
+    {
         crate::rivet_bail!(
             crate::error::codes::SOURCE_COLUMNS_UNREADABLE,
             "mssql: `{schema}.{table}`: key column `{k}` ({from}) is not readable under \
@@ -264,7 +270,8 @@ pub(crate) fn resolve_grants(
                 &c.schema,
                 &c.table,
             )
-        }) && let Some(why) = capture_refusal(c, &readable.columns)
+        }) && seeded!("cdc-capture-wider-than-grants-accepted", false, true)
+            && let Some(why) = capture_refusal(c, &readable.columns)
         {
             crate::rivet_bail!(crate::error::codes::SOURCE_CDC_PREREQUISITE, "{why}");
         }

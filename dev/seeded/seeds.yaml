@@ -4233,7 +4233,8 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        switch: column-grants-batch-read-unprojected
+        cells: [a_column_grant_login_reads_only_its_columns_in_every_batch_mode_mssql]
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4250,7 +4251,7 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        na: "SQL Server has no INVISIBLE column attribute: sys.columns lists every column and HAS_PERMS_BY_NAME judges each by name"
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4267,7 +4268,8 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        switch: column-grants-connect-hint-lost
+        cells: [a_denied_connect_under_the_policy_carries_the_connect_hint_in_every_batch_mode_mssql]
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4284,7 +4286,7 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); SQL Server's change function is enforced by the server and there is no such stream to read"
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4336,15 +4338,15 @@ seeds:
     switch: columns-from-grants-accepted-off-mysql
     engines:
       postgres:
-        cells: [columns_from_grants_is_refused_by_every_command_postgres, "lib:columns_from_grants_is_refused_on_every_engine_but_mysql_in_every_mode"]
+        cells: [columns_from_grants_is_refused_by_every_command_postgres, "lib:columns_from_grants_is_refused_on_every_engine_but_mysql_and_mssql_in_every_mode"]
       mysql:
         na: "MySQL is the engine the policy is enforced on; the key is accepted there (every_engine_without_columns_from_loads_as_before and the whole live_cdc_column_grants file)"
       mssql:
-        cells: [columns_from_grants_is_refused_by_every_command_mssql, "lib:columns_from_grants_is_refused_on_every_engine_but_mysql_in_every_mode"]
+        na: "SQL Server is an engine the policy is enforced on; the key is accepted there (the whole live_cdc_column_grants_mssql file)"
       oracle:
-        cells: [columns_from_grants_is_refused_by_every_command_oracle, "lib:columns_from_grants_is_refused_on_every_engine_but_mysql_in_every_mode"]
+        cells: [columns_from_grants_is_refused_by_every_command_oracle, "lib:columns_from_grants_is_refused_on_every_engine_but_mysql_and_mssql_in_every_mode"]
       mongo:
-        cells: [columns_from_grants_is_refused_by_every_command_mongo, "lib:columns_from_grants_is_refused_on_every_engine_but_mysql_in_every_mode"]
+        cells: [columns_from_grants_is_refused_by_every_command_mongo, "lib:columns_from_grants_is_refused_on_every_engine_but_mysql_and_mssql_in_every_mode"]
 
   - name: cdc-partial-image-projected
     class: "a MySQL change written with `binlog_row_image` MINIMAL or NOBLOB is projected by full-table positions under `source.columns_from: grants`: a hidden value lands under a visible column name and a key column is overwritten"
@@ -4357,7 +4359,7 @@ seeds:
         switch: cdc-partial-image-projected
         cells: [a_partial_row_image_is_refused_before_it_is_projected_mysql, "lib:an_image_is_partial_when_it_holds_fewer_values_than_the_table_has_columns"]
       mssql:
-        na: "the projection of a binlog row image exists on MySQL only: `columns_from: grants` is refused on SQL Server at config load (columns_from_grants_is_refused_by_every_command_mssql)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); SQL Server's change function is enforced by the server and there is no such stream to read"
       oracle:
         na: "the projection of a binlog row image exists on MySQL only: `columns_from: grants` is refused on Oracle at config load (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4426,7 +4428,7 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); SQL Server's change function is enforced by the server and there is no such stream to read"
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4443,7 +4445,7 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); SQL Server's change function is enforced by the server and there is no such stream to read"
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4460,7 +4462,7 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        na: "SQL Server has no INVISIBLE column attribute: sys.columns lists every column and HAS_PERMS_BY_NAME judges each by name"
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4477,11 +4479,46 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        switch: column-grants-unreadable-key-accepted
+        cells: [a_column_grant_login_is_refused_for_a_capture_wider_than_its_grant_or_a_missing_key_mssql]
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
         na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+
+  - name: cdc-capture-wider-than-grants-accepted
+    class: "a SQL Server capture instance that holds a column the account may not SELECT is accepted under `columns_from: grants`: the server withholds every change of such an instance from the reader, and the run ends at a misleading log gap or delivers nothing instead of refusing with the `@captured_column_list` remedy"
+    history: "issue #713 (2026-11-15); RED from this patch: no RIVET_SOURCE_CDC_PREREQUISITE on an over-wide capture instance"
+    scope: source
+    engines:
+      mssql:
+        switch: cdc-capture-wider-than-grants-accepted
+        cells: [a_column_grant_login_is_refused_for_a_capture_wider_than_its_grant_or_a_missing_key_mssql, a_column_revoked_between_runs_is_refused_by_the_next_run_mssql]
+      postgres:
+        na: "the capture-instance catalog (cdc.captured_columns) and the server's refusal of a reader of an over-wide instance are SQL Server only; PostgreSQL reads a publication, not capture instances"
+      mysql:
+        na: "the capture-instance catalog (cdc.captured_columns) and the server's refusal of a reader of an over-wide instance are SQL Server only; MySQL filters its binlog client-side"
+      oracle:
+        na: "the capture-instance catalog (cdc.captured_columns) and the server's refusal of a reader of an over-wide instance are SQL Server only; Oracle has no capture instance"
+      mongo:
+        na: "the capture-instance catalog (cdc.captured_columns) and the server's refusal of a reader of an over-wide instance are SQL Server only; MongoDB has no capture instance"
+
+  - name: column-grants-mssql-every-column-read-as-readable
+    class: "the readable set of a SQL Server table under `columns_from: grants` is every column of `sys.columns` instead of the columns HAS_PERMS_BY_NAME allows: the explicit column list names a hidden column and the server denies the read (or the change stream compares against the wrong set)"
+    history: "issue #713 (2026-11-15); RED from this patch: SELECT denied on the hidden column on every read of a column-grant login"
+    scope: source
+    engines:
+      mssql:
+        switch: column-grants-mssql-every-column-read-as-readable
+        cells: [a_column_grant_login_delivers_no_hidden_column_by_name_or_value_mssql, a_column_grant_login_reads_only_its_columns_in_every_batch_mode_mssql]
+      postgres:
+        na: "the per-column HAS_PERMS_BY_NAME verdict of SQL Server is read here only; PostgreSQL reads a publication, not capture instances"
+      mysql:
+        na: "the per-column HAS_PERMS_BY_NAME verdict of SQL Server is read here only; MySQL filters its binlog client-side"
+      oracle:
+        na: "the per-column HAS_PERMS_BY_NAME verdict of SQL Server is read here only; Oracle has no capture instance"
+      mongo:
+        na: "the per-column HAS_PERMS_BY_NAME verdict of SQL Server is read here only; MongoDB has no capture instance"
 
   - name: column-grants-hidden-cursor-column-uncoded
     class: "a `cursor_column`, `chunk_column`, `chunk_by_key`, `time_column` or `partition_by` naming a column the account may not SELECT is read anyway: the server answers mid-run with a raw ERROR 1054/1143, no RIVET_* code"
@@ -4494,7 +4531,8 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        switch: column-grants-hidden-cursor-column-uncoded
+        cells: [a_hidden_cursor_or_chunk_column_is_refused_by_code_before_the_read_mssql]
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4511,7 +4549,7 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        na: "a server's denial is coded as a grants-changed refusal for MySQL's 1142/1143 only; SQL Server answers a denied column mid-run as RIVET_SOURCE_QUERY_FAILED, an open point of #713 (no mssql cell grades it)"
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4528,7 +4566,7 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        na: "a server's denial is coded as a grants-changed refusal for MySQL's 1142/1143 only; SQL Server answers a denied column mid-run as RIVET_SOURCE_QUERY_FAILED, an open point of #713 (no mssql cell grades it)"
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4545,7 +4583,7 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); SQL Server's change function is enforced by the server and there is no such stream to read"
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4562,7 +4600,7 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); SQL Server's change function is enforced by the server and there is no such stream to read"
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4579,7 +4617,7 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); SQL Server's change function is enforced by the server and there is no such stream to read"
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4596,7 +4634,7 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); SQL Server's change function is enforced by the server and there is no such stream to read"
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4613,7 +4651,7 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); SQL Server's change function is enforced by the server and there is no such stream to read"
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4630,7 +4668,7 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); SQL Server's change function is enforced by the server and there is no such stream to read"
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4647,7 +4685,7 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); SQL Server's change function is enforced by the server and there is no such stream to read"
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4664,7 +4702,7 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); SQL Server's change function is enforced by the server and there is no such stream to read"
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4681,7 +4719,7 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); SQL Server's change function is enforced by the server and there is no such stream to read"
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4698,7 +4736,7 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); SQL Server's change function is enforced by the server and there is no such stream to read"
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4715,7 +4753,7 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        na: "a server's denial is coded as a grants-changed refusal for MySQL's 1142/1143 only; SQL Server answers a denied column mid-run as RIVET_SOURCE_QUERY_FAILED, an open point of #713 (no mssql cell grades it)"
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4783,7 +4821,7 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); SQL Server's change function is enforced by the server and there is no such stream to read"
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4800,7 +4838,7 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); SQL Server's change function is enforced by the server and there is no such stream to read"
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4817,7 +4855,8 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        switch: column-grants-boundary-unsaid
+        cells: [the_policy_says_what_it_does_not_guarantee_at_check_and_at_the_start_of_a_run_mssql]
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4834,7 +4873,7 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); SQL Server's change function is enforced by the server and there is no such stream to read"
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4851,7 +4890,7 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); SQL Server's change function is enforced by the server and there is no such stream to read"
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:
@@ -4868,7 +4907,7 @@ seeds:
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
       mssql:
-        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); SQL Server's change function is enforced by the server and there is no such stream to read"
       oracle:
         na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
       mongo:

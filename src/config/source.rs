@@ -69,7 +69,7 @@ pub struct SourceConfig {
     #[serde(default)]
     pub mongo: Option<MongoConfig>,
 
-    /// `grants`: every export reads and delivers only the columns the source account may `SELECT` (MySQL only).
+    /// `grants`: every export reads and delivers only the columns the source account may `SELECT` (MySQL and SQL Server only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub columns_from: Option<ColumnsFrom>,
 }
