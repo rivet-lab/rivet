@@ -11,8 +11,6 @@ mod journal_store;
 mod keyset_range;
 mod load_journal_store;
 mod load_lease;
-// Named so a caller can HOLD a lease across a scope it owns — the cleanup delete
-// needs one that outlives the call that took it. Every other holder infers the type.
 pub(crate) use cdc_snapshot_store::joins_capture;
 pub(crate) use cursor::population_of;
 pub use cursor::{Accepted, Landing, ProgressClaim, ProgressKey};
@@ -30,9 +28,6 @@ mod schema;
 mod shape;
 mod write_turn;
 
-// Re-export domain types so callers use `rivet::state::*` unchanged.
-// Items below may not be explicitly named by all internal callers (often used
-// as inferred return types), but are part of the public integration-test API.
 #[allow(unused_imports)]
 pub use checkpoint::{ChunkTaskInfo, StrategySnapshot};
 #[allow(unused_imports)]
@@ -58,10 +53,7 @@ pub use shape::ShapeWarning;
 
 const STATE_DB_NAME: &str = ".rivet_state.db";
 
-// ─── SQL helpers ──────────────────────────────────────────────────────────────
-
 /// Convert SQLite `?N` placeholders to PostgreSQL `$N` style.
-/// `"WHERE x = ?1 AND y = ?2"` → `"WHERE x = $1 AND y = $2"`.
 pub(super) fn pg_sql(sql: &str) -> String {
     let bytes = sql.as_bytes();
     let mut out = String::with_capacity(sql.len());
@@ -78,22 +70,6 @@ pub(super) fn pg_sql(sql: &str) -> String {
 }
 
 /// Open a Postgres client for the state backend, honoring the URL's `sslmode`.
-///
-/// The state backend connects to its store using only a URL (`RIVET_STATE_URL`)
-/// — there is no YAML `tls:` block — so the transport-security policy is derived
-/// from the URL's `sslmode` query parameter ([`crate::config::url::url_tls`]), exactly as `rivet init` does for
-/// source connections. The connection itself goes through the shared
-/// [`crate::connect::postgres::connect_client`] path so the state backend and
-/// source connections apply identical TLS rules.
-///
-/// - `require` / `verify-ca` / `verify-full` → negotiate TLS.
-/// - `disable` → plaintext, the operator's explicit opt-out, on any host.
-/// - anything else → plaintext to a loopback host; a remote host is refused
-///   `RIVET_STATE_URL_TLS_REQUIRED` by [`state_url_tls`].
-///
-/// Used by both [`StateStore::open_postgres`] and the parallel chunk-worker
-/// reconnection paths in `checkpoint.rs`, so every PG state connection is
-/// TLS-aware.
 pub(super) fn connect_pg(url: &str) -> Result<postgres::Client> {
     let tls = state_url_tls(url)?;
     crate::connect::postgres::connect_client(url, tls.as_ref()).map_err(|e| {
@@ -125,9 +101,7 @@ fn opts_out_of_tls(url: &str) -> bool {
         && seeded!("remote-pg-state-plaintext-refused", url.is_empty(), true)
 }
 
-/// The TLS a state URL asks for: its `sslmode`, an explicit plaintext for `sslmode=disable`,
-/// and a coded refusal for a remote host whose URL says neither (the source's `tls:` block,
-/// which the shared dial names, does not exist for the state).
+/// The TLS a state URL asks for: its `sslmode`, an explicit plaintext for `sslmode=disable`, and a coded refusal for a remote host whose URL says neither (the source's `tls:` block, which the shared dial names, does not exist for the state).
 fn state_url_tls(url: &str) -> Result<Option<crate::config::TlsConfig>> {
     if let Some(tls) = crate::config::url::url_tls(url).1 {
         return Ok(Some(tls));
@@ -155,21 +129,14 @@ fn state_url_tls(url: &str) -> Result<Option<crate::config::TlsConfig>> {
     Ok(None)
 }
 
-// ─── Backend connection ────────────────────────────────────────────────────────
-
 /// Internal storage for the active database connection.
 pub(super) enum StateConn {
     Sqlite(rusqlite::Connection),
-    /// postgres::Client requires `&mut self` for queries; RefCell provides
-    /// interior mutability so `StateStore` methods can keep `&self` signatures.
-    /// StateStore is not Sync (neither backend is), so RefCell is safe here.
-    /// Boxed to keep the enum variant sizes balanced (postgres::Client is ~320 B).
+    /// postgres::Client requires `&mut self` for queries.
     Postgres(Box<std::cell::RefCell<postgres::Client>>),
 }
 
-/// Serialisable reference that identifies a state database without holding a
-/// live connection.  Passed to parallel chunk workers so they can open their
-/// own connection for atomic `claim_next_chunk_task` operations.
+/// Serialisable reference that identifies a state database without holding a live connection.
 #[derive(Clone)]
 pub enum StateRef {
     Sqlite(std::path::PathBuf),
@@ -183,8 +150,6 @@ pub(super) fn pg_detail(e: &dyn std::error::Error) -> String {
         None => e.to_string(),
     }
 }
-
-// ─── SQLite connection helper ─────────────────────────────────────────────────
 
 pub(crate) const SQLITE_BUSY_TIMEOUT_MS: i64 = 10_000;
 
@@ -210,9 +175,7 @@ pub(crate) fn open_connection(db_path: &std::path::Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// The SQLite file a `RIVET_STATE_URL` of the form `sqlite:<path>` names: an absolute path as
-/// written, a relative one anchored to the config's directory (where the default file lives, so
-/// the place does not move with the working directory); `None` for any other value.
+/// The SQLite file a `RIVET_STATE_URL` of the form `sqlite:<path>` names.
 fn sqlite_state_path(url: &str, config_path: &str) -> Option<std::path::PathBuf> {
     let path = url.strip_prefix("sqlite:")?;
     let path = path.strip_prefix("//").unwrap_or(path);
@@ -250,9 +213,7 @@ fn state_rows(conn: &Connection) -> rusqlite::Result<i64> {
     )
 }
 
-/// Refuse a `sqlite:` target that holds nothing while the file beside the config holds this
-/// config's state: the cursors, runs and load journal would be left behind and the next run would
-/// start over (a full re-read, a load that finds its own tables foreign).
+/// Refuse a `sqlite:` target that holds nothing while the file beside the config holds this config's state.
 fn refuse_a_state_left_behind(beside: &std::path::Path, target: &std::path::Path) -> Result<()> {
     let resolved =
         |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
@@ -287,7 +248,7 @@ pub(crate) fn state_url_var() -> Option<crate::secret::Secret> {
     std::env::var("RIVET_STATE_URL").ok().map(Into::into)
 }
 
-/// The PostgreSQL URL a `RIVET_STATE_URL` value names, `None` for an empty one (SQLite); any other value is refused, never replaced by SQLite.
+/// The PostgreSQL URL a `RIVET_STATE_URL` value names, `None` for an empty one (SQLite).
 fn postgres_state_url(url: &str) -> Result<Option<&str>> {
     if url.is_empty() || url.starts_with("sqlite:") {
         return Ok(None);
@@ -314,26 +275,7 @@ fn postgres_state_url(url: &str) -> Result<Option<&str>> {
     )
 }
 
-// ─── StateStore ───────────────────────────────────────────────────────────────
-
-/// Entry point for all persistent state.  Supports two backends:
-///
-/// - **SQLite** (default) — a single `.rivet_state.db` file next to the
-///   config.  Good for local / single-node / dev deployments.
-/// - **PostgreSQL** — a shared database addressed by `RIVET_STATE_URL`.
-///   Required for stateless container / Kubernetes deployments where the
-///   rivet pod is ephemeral or replicated.
-///
-/// Set the `RIVET_STATE_URL` environment variable to a PostgreSQL URL to
-/// activate the Postgres backend:
-///
-/// ```text
-/// RIVET_STATE_URL=postgresql://user:pass@host:5432/rivet_state
-/// ```
-///
-/// When the variable is absent or empty, SQLite is used. Any other value that is
-/// not a `postgres://` / `postgresql://` URL is refused
-/// (`RIVET_STATE_URL_SCHEME_UNSUPPORTED`), never replaced by SQLite.
+/// Entry point for all persistent state: a SQLite file beside the config, or PostgreSQL when `RIVET_STATE_URL` is set.
 pub struct StateStore {
     pub(super) conn: StateConn,
     /// Serialisable reference for reconnection (parallel chunk workers).
@@ -344,8 +286,6 @@ pub struct StateStore {
 
 impl StateStore {
     /// Open the appropriate backend.
-    ///
-    /// `RIVET_STATE_URL` when it is set, else SQLite next to `config_path`.
     pub fn open(config_path: &str) -> Result<Self> {
         if let Some(url) = state_url_var() {
             let url = url.expose();
@@ -382,7 +322,7 @@ impl StateStore {
         url.is_some_and(|u| !u.is_empty() && !u.starts_with("sqlite:"))
     }
 
-    /// Which state `config_path` uses and that it answers, without creating or migrating it: `postgres <redacted url>` or `sqlite <path>`.
+    /// Which state `config_path` uses and that it answers, without creating or migrating it.
     pub fn probe(config_path: &str) -> Result<String> {
         if let Some(url) = state_url_var()
             && let text = url.expose()
@@ -446,15 +386,6 @@ impl StateStore {
     }
 
     /// Reopen the store a [`StateRef`] points at.
-    ///
-    /// The reconnection seam for parallel chunk workers, which cannot share one
-    /// `StateStore` across threads. It exists because the alternative — handing a
-    /// worker the CONFIG PATH and re-deriving the location — silently writes to
-    /// the wrong database whenever that string is not a real config path: `rivet
-    /// apply` dispatches its chunk-checkpoint runner with `""`, and
-    /// `Path::new("").parent()` is `None`, so the fallback lands on
-    /// `./.rivet_state.db` in the process CWD. A `StateRef` carries the resolved
-    /// location, so there is nothing left to re-derive.
     pub fn open_at_ref(state_ref: &StateRef) -> Result<Self> {
         match state_ref {
             StateRef::Sqlite(db_path) => {
@@ -471,22 +402,6 @@ impl StateStore {
     }
 
     fn open_sqlite(config_path: &str) -> Result<Self> {
-        // An EMPTY path is never a location — it is a caller that had nothing to
-        // give and passed a placeholder. `Path::new("").parent()` is `None`, so
-        // the fallback below would silently resolve it to `./.rivet_state.db` in
-        // whatever the process CWD happens to be, CREATE that database, migrate
-        // it, and return a perfectly usable store pointed at the wrong file.
-        //
-        // That is not hypothetical: `rivet apply` dispatches its chunk-checkpoint
-        // runner with `""` (a display-only hint there), and the worker used it to
-        // reopen the ledger. Every durable-part row landed in a stray database
-        // while the real state DB got none — invisible on a clean run, and on
-        // recovery the resume found the chunks `completed` with no file_log to
-        // rehydrate, so it declared a manifest with zero parts over parquet
-        // already on the destination. Reopening from a `StateRef`
-        // ([`StateStore::open_at_ref`]) is the fix for that caller; refusing the
-        // empty path is the fix for the CLASS, so the next one fails loudly at
-        // the open instead of quietly at recovery.
         if config_path.is_empty() {
             crate::rivet_bail!(
                 crate::error::codes::INTERNAL_STATE_INVARIANT,
@@ -528,9 +443,7 @@ impl StateStore {
         })
     }
 
-    /// Path to `.rivet_state.db` for SQLite deployments.  Returns the config
-    /// directory path for Postgres (not meaningful for connection, only used
-    /// by legacy callers — prefer `state_ref()` for new code).
+    /// Path to `.rivet_state.db` for SQLite deployments.
     pub fn state_db_path(config_path: &str) -> std::path::PathBuf {
         state_url_var()
             .and_then(|url| sqlite_state_path(url.expose(), config_path))
@@ -580,8 +493,7 @@ impl StateStore {
         }
     }
 
-    /// Open a SQLite store at an explicit file path (tests that need
-    /// a file-backed store another connection can reopen).
+    /// Open a SQLite store at an explicit file path (tests that need a file-backed store another connection can reopen).
     #[allow(dead_code)]
     pub fn open_at_path(db_path: &std::path::Path) -> Result<Self> {
         let conn = open_connection(db_path)?;
@@ -598,8 +510,6 @@ impl StateStore {
 fn is_plaintext_remote(url: &str) -> bool {
     !crate::config::url::host_is_loopback(url) && crate::config::url::url_tls(url).1.is_none()
 }
-
-// ─── Migration tests ──────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod vacuum {
@@ -705,20 +615,6 @@ mod empty_state_path_guard {
     use super::*;
 
     /// An empty config path must FAIL the open, not resolve to the CWD.
-    ///
-    /// `Path::new("").parent()` is `None`, so the fallback in `open_sqlite`
-    /// resolved it to `./.rivet_state.db` — creating, migrating and returning a
-    /// usable store pointed at the process working directory. `rivet apply`
-    /// dispatches its chunk-checkpoint runner with exactly that placeholder, and
-    /// the worker reopened the ledger from it: every durable-part row landed in a
-    /// stray database while the real state DB got none. Nothing failed, because
-    /// nothing looked — the clean-run manifest is built from the in-memory
-    /// summary. It surfaced only on RECOVERY, where the resume found the chunks
-    /// `completed` with no file_log to rehydrate and declared a manifest with
-    /// zero parts over parquet that was already durable.
-    ///
-    /// The sibling half of the fix is `open_at_ref`, so a worker never re-derives
-    /// a location from a string at all.
     #[test]
     fn an_empty_path_and_a_refused_state_connection_carry_their_codes() {
         let err = StateStore::open("")
@@ -751,9 +647,7 @@ mod empty_state_path_guard {
         );
     }
 
-    /// A REAL path with no parent component still works — the guard is about
-    /// emptiness, not about parentlessness, and `:memory:` / a bare filename are
-    /// legitimate callers that must keep opening.
+    /// A REAL path with no parent component still works.
     #[test]
     fn a_bare_filename_still_opens_beside_itself() {
         let d = tempfile::tempdir().unwrap();
@@ -781,10 +675,7 @@ mod tests {
         assert!(StateStore::open_if_present(cfg).unwrap().is_some());
     }
 
-    /// Round-10 mutants: the NOTADB `||` in the migrate-lock error split was
-    /// un-graded — `&&` reverts corrupt-DB reporting to the phantom
-    /// "another process is migrating" message the round-8 fix removed. Both
-    /// SQLite renderings must route to the CORRUPT branch.
+    /// Round-10 mutants: the NOTADB `||` in the migrate-lock error split was un-graded.
     #[test]
     fn a_garbage_state_db_reports_corruption_not_a_phantom_process() {
         let dir = tempfile::tempdir().unwrap();
@@ -816,7 +707,6 @@ mod tests {
             "INSERT INTO t VALUES ($1, $2)"
         );
         assert_eq!(pg_sql("no placeholders"), "no placeholders");
-        // ?N with two digits
         assert_eq!(pg_sql("?10 AND ?11"), "$10 AND $11");
     }
 
@@ -1033,8 +923,7 @@ mod names_a_server_tests {
         assert!(StateStore::names_a_server_in(Some("postgresql://u@db/s")));
     }
 
-    /// The wrapper reads `RIVET_STATE_URL`: checked here against the value this process has, and,
-    /// when it has none, once more in a child of this test binary that has a PostgreSQL URL.
+    /// The wrapper reads `RIVET_STATE_URL`: checked here against the value this process has, and, when it has none, once more in a child of this test binary that has a PostgreSQL URL.
     #[test]
     fn names_a_server_reads_rivet_state_url() {
         let url = std::env::var("RIVET_STATE_URL").ok();
@@ -1122,9 +1011,7 @@ mod sqlite_state_url_tests {
         assert!(holds_state(&db), "one cursor row");
     }
 
-    /// Each condition that lets a `sqlite:` target open, alone: the same file under another
-    /// spelling; nothing beside the config; state already in the target. Only state beside the
-    /// config and none in the target refuses.
+    /// Each condition that lets a `sqlite:` target open, alone.
     #[test]
     fn each_reason_to_open_a_sqlite_target_is_enough_on_its_own() {
         let dir = tempfile::tempdir().unwrap();
@@ -1132,25 +1019,21 @@ mod sqlite_state_url_tests {
         let s = StateStore::open_at_path(&beside).unwrap();
         s.update_legacy("orders", "1").unwrap();
         drop(s);
-        // The same file, spelled through `..`: equal only once resolved.
         let sub = dir.path().join("sub");
         std::fs::create_dir(&sub).unwrap();
         let respelled = sub.join("..").join(".rivet_state.db");
         refuse_a_state_left_behind(&beside, &respelled).unwrap();
-        // Nothing beside the config, nothing in the target.
         let empty_dir = tempfile::tempdir().unwrap();
         refuse_a_state_left_behind(
             &empty_dir.path().join(".rivet_state.db"),
             &empty_dir.path().join("t.db"),
         )
         .unwrap();
-        // State in both.
         let both = dir.path().join("both.db");
         let t = StateStore::open_at_path(&both).unwrap();
         t.update_legacy("orders", "2").unwrap();
         drop(t);
         refuse_a_state_left_behind(&beside, &both).unwrap();
-        // State beside, none in the target.
         let err = refuse_a_state_left_behind(&beside, &dir.path().join("new.db")).unwrap_err();
         assert_eq!(
             crate::error::error_code(&err),

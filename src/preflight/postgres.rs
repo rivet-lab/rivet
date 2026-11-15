@@ -6,9 +6,7 @@ use crate::config::{ExportConfig, ExportMode, SourceType, TlsConfig};
 use crate::connect::postgres::read_pinned;
 use crate::error::Result;
 
-/// Connect once and build one [`ExportDiagnostic`] per export. Rendering
-/// (TEXT table vs `--json`) is the caller's job in [`super::check`], so this
-/// returns the diagnostics rather than printing inline.
+/// Connect once and build one [`ExportDiagnostic`] per export.
 pub(super) fn check_postgres(
     url: &str,
     tls: Option<&TlsConfig>,
@@ -54,15 +52,9 @@ fn diagnose_pg(
     let base_table_owned = preflight_base_table(export, base_query);
     let base_table = base_table_owned.as_deref();
 
-    // The planner auto-resolves an UNSET chunked chunk_column to the single-integer PK
-    // (build_plan), and `auto_pk_probe_target` is that gate — so range_col / the strategy
-    // label / the index probe target the SAME column the run ranges on, instead of reporting
-    // a false UNSAFE + `chunked(?,…)` on an already-PK-indexed table.
     let auto_pk: Option<String> =
         auto_pk_probe_target(export, base_table).and_then(|t| single_int_pk_pg(client, t));
 
-    // chunk_column (range) OR chunk_by_key (keyset) OR cursor_column (incremental) OR the
-    // auto-resolved PK above — the column the run actually reads on.
     let range_col = preflight_range_col_resolved(export, auto_pk.as_deref());
 
     let effective_query = if let Some(order) = incremental_key_expr(export, SourceType::Postgres) {
@@ -78,9 +70,6 @@ fn diagnose_pg(
 
     let (range_min, range_max) = if export.mode == ExportMode::Incremental {
         if let Some(expr) = incremental_key_expr(export, SourceType::Postgres) {
-            // Direct min/max on the relation when the user used the `table:`
-            // shortcut — avoids the subquery wrap that PG would materialise
-            // (3.2 GB of temp_files on a 8.6 GB table in our content_items bench).
             let range_query = match crate::pipeline::chunked::strip_select_star_from(base_query) {
                 Some(tbl) => format!("SELECT min({expr})::text, max({expr})::text FROM {tbl}"),
                 None => format!(
@@ -113,13 +102,6 @@ fn diagnose_pg(
 
     let (scan_type, plan_uses_index) = analyze_plan_pg(client, &effective_query);
 
-    // The EXPLAIN above runs against the *base* query (the whole table,
-    // typically). PostgreSQL picks `Seq Scan` for a full-table read even when
-    // there's a perfect btree on the chunk column — the index path is genuinely
-    // slower for a full read. But the chunked/incremental run does NOT issue the
-    // base query; it issues `WHERE chunk_col >= $lo AND chunk_col < $hi`, which
-    // *will* use the btree. So answer the question from the catalog and let
-    // `assemble_diagnostic` apply the shared override policy.
     let catalog_index = index_probe_target(export, auto_pk.as_deref(), base_table)
         .and_then(|(table, col)| column_has_btree_pg(client, table, col));
 
@@ -139,9 +121,7 @@ fn diagnose_pg(
     ))
 }
 
-/// Returns `(row_estimate, avg_row_bytes)` parsed from one EXPLAIN — the top
-/// node's `rows=` and `width=`, which describe the same projected output. One
-/// plan, both numbers, so no second round-trip for the row-width estimate.
+/// Returns `(row_estimate, avg_row_bytes)` parsed from one EXPLAIN.
 fn estimate_rows_pg(
     client: &mut postgres::Client,
     query: &str,
@@ -151,16 +131,10 @@ fn estimate_rows_pg(
     let rows = match read_pinned(client, |c| c.query(&explain, &[])) {
         Ok(r) => r,
         Err(e) => {
-            // A SQLSTATE *class 42* failure (undefined table/column, no
-            // privilege, syntax) is permanent and author-fixable — let it fail
-            // preflight loudly instead of sailing through to run time.
             let text = e.to_string();
             if let Some(fail) = schema_fail_pg(e, export) {
                 return Err(fail);
             }
-            // Everything else (08 connection, 53 resources, 55 lock, 57 cancel,
-            // …) is operational and stays FAIL-SOFT: preflight is non-fatal, so
-            // surface at debug (visible under `RUST_LOG=debug`) and continue.
             log::debug!("preflight: EXPLAIN for row-estimate failed: {text}");
             return Ok((None, None));
         }
@@ -173,9 +147,7 @@ fn estimate_rows_pg(
     ))
 }
 
-/// A missing relation as the shared `RIVET_SOURCE_TABLE_NOT_FOUND`; any other SQLSTATE
-/// *class 42* (undefined column, no privilege, syntax) as the loud preflight schema error;
-/// `None` for every other class, which stays fail-soft.
+/// A missing relation as the shared `RIVET_SOURCE_TABLE_NOT_FOUND`.
 fn schema_fail_pg(e: postgres::Error, export: &ExportConfig) -> Option<anyhow::Error> {
     let cause = anyhow::Error::new(e);
     if crate::source::names_a_missing_relation(&cause) {
@@ -188,12 +160,7 @@ fn schema_fail_pg(e: postgres::Error, export: &ExportConfig) -> Option<anyhow::E
     }
     let e = cause.downcast_ref::<postgres::Error>()?;
     let code = e.code()?;
-    // Class 42 = undefined_table (42P01), undefined_column (42703),
-    // insufficient_privilege (42501), syntax_error (42601), … — all permanent
-    // and fixable in the config/grants, not by retrying.
     code.code().starts_with("42").then(|| {
-        // `e` (Display) is the bare "db error"; the real reason ("relation … does
-        // not exist") lives on the DbError. Surface it + the SQLSTATE.
         let detail = e
             .as_db_error()
             .map(|db| db.message())
@@ -215,10 +182,7 @@ pub(crate) fn parse_pg_row_estimate(plan: &str) -> Option<i64> {
     None
 }
 
-/// Parse the estimated row `width=` (bytes) from an EXPLAIN plan — the first
-/// (top-node) occurrence, so it pairs with the first `rows=` that
-/// [`parse_pg_row_estimate`] reads. Both describe the same projected output
-/// row, so `rows × width` estimates the bytes a chunk query transfers.
+/// Parse the estimated row `width=` (bytes) from an EXPLAIN plan.
 pub(crate) fn parse_pg_row_width(plan: &str) -> Option<i64> {
     for line in plan.lines() {
         if let Some(idx) = line.find("width=") {
@@ -237,9 +201,6 @@ fn get_cursor_range_pg(
     base_query: &str,
     cursor_col: &str,
 ) -> (Option<String>, Option<String>) {
-    // Quote the config-author-controlled column so a hostile value collapses to
-    // a single (nonexistent) identifier instead of injecting SQL into the
-    // min()/max() aggregates (CWE-89) — same defense the MSSQL sibling applies.
     let expr = crate::sql::quote_ident(SourceType::Postgres, cursor_col);
     let range_query = match crate::pipeline::chunked::strip_select_star_from(base_query) {
         Some(tbl) => format!("SELECT min({expr})::text, max({expr})::text FROM {tbl}"),
@@ -261,16 +222,7 @@ fn get_cursor_range_pg(
     }
 }
 
-/// Extract a `schema.table` (or bare `table`) from a single-relation
-/// `SELECT … FROM <name>` query. Conservative on purpose — anything with
-/// JOIN, a subquery, an alias, a CTE, or a non-identifier table name
-/// returns `None` and callers fall back to the EXPLAIN-based heuristic.
-///
-/// Exists because `rivet init` generates `query: SELECT cols FROM tbl`
-/// (not `table: tbl`) to lock the column list, so the index probe needs
-/// to recover the table name from the rendered query. init QUOTES that name
-/// per engine (`[dbo].[t]`, `"public"."t"`, `` `t` ``), so quoted segments are
-/// read and returned UNQUOTED — the catalog probes compare names as literals.
+/// Extract a `schema.table` (or bare `table`) from a single-relation `SELECT … FROM <name>` query.
 pub(crate) fn table_from_simple_query(query: &str) -> Option<std::borrow::Cow<'_, str>> {
     let parts = crate::sql::first_relation(query)?;
     let dotted = |part: &crate::sql::NamePart| part.quoted && part.name.contains('.');
@@ -279,18 +231,6 @@ pub(crate) fn table_from_simple_query(query: &str) -> Option<std::borrow::Cow<'_
 }
 
 /// True when `column` is the leading key of a `btree` index on `table`.
-///
-/// Range chunking (`WHERE col >= $lo AND col < $hi`) and incremental cursor
-/// reads (`WHERE col > $last ORDER BY col`) only benefit from an index when
-/// the column is the leading key of a btree. `gist`/`gin`/`hash`/`brin`
-/// indexes do not help here. Composite btrees where our column is leading
-/// (`(col, x, y)`) still do — the planner can use the leading prefix.
-///
-/// Returns `Some(true)` when an index is found, `Some(false)` when the
-/// catalog probe ran and found none, `None` when the probe failed (e.g.
-/// the `table:` shortcut wasn't used so we don't have a qualified name to
-/// look up, or the user lacks SELECT on `pg_index`). Callers fall back to
-/// the EXPLAIN-based heuristic in the `None` case.
 pub(crate) fn column_has_btree_pg(
     client: &mut postgres::Client,
     qualified_table: &str,
@@ -300,9 +240,6 @@ pub(crate) fn column_has_btree_pg(
         Some((s, t)) => (s, t),
         None => ("public", qualified_table),
     };
-    // Find every btree index on (schema.table) whose attnum-0 (first key)
-    // is our column. `i.indkey[0]` is the leading key's attnum;
-    // `a.attnum = i.indkey[0]` joins it to the column name.
     let sql = "SELECT 1 \
                FROM pg_index i \
                JOIN pg_class c ON c.oid = i.indrelid \
@@ -326,11 +263,7 @@ pub(crate) fn column_has_btree_pg(
     }
 }
 
-/// The single-integer primary key `build_plan` auto-resolves an unset chunked `chunk_column`
-/// to — so the diagnostic probes the SAME column the run will range on, not a `?` placeholder
-/// (post-0.24.3 review MED, the sibling of the chunk_by_key false-alarm). Mirrors the
-/// `single_int_pk` introspection in `source::postgres::mod`: exactly one PK column, integer
-/// family (`int2`/`int4`/`int8`). `None` on a composite / non-int / absent PK or a probe error.
+/// The single-integer primary key `build_plan` auto-resolves an unset chunked `chunk_column` to.
 pub(crate) fn single_int_pk_pg(
     client: &mut postgres::Client,
     qualified_table: &str,
@@ -347,7 +280,7 @@ pub(crate) fn single_int_pk_pg(
                  AND i.indisprimary";
     let rows = client.query(sql, &[&schema, &table]).ok()?;
     if rows.len() != 1 {
-        return None; // composite or absent PK → the planner does not auto-resolve
+        return None;
     }
     let col: String = rows[0].get(0);
     let pg_type: String = rows[0].get(1);
@@ -387,8 +320,6 @@ pub(crate) fn extract_scan_type(plan: &str) -> String {
 mod tests {
     use super::*;
 
-    // ── parse_pg_row_estimate ────────────────────────────────────────────────
-
     #[test]
     fn parse_pg_row_estimate_typical_seq_scan() {
         let plan = "Seq Scan on orders  (cost=0.00..1250.00 rows=5000 width=120)";
@@ -398,7 +329,6 @@ mod tests {
     #[test]
     fn parse_pg_row_estimate_nested_plan_first_rows_wins() {
         let plan = "Aggregate  (cost=0.00..50.00 rows=1 width=8)\n  ->  Seq Scan on t  (cost=0.00..100.00 rows=10000 width=4)";
-        // First "rows=" is rows=1 from Aggregate
         assert_eq!(parse_pg_row_estimate(plan), Some(1));
     }
 
@@ -419,8 +349,6 @@ mod tests {
         assert!(parse_pg_row_estimate("").is_none());
     }
 
-    // ── parse_pg_row_width ───────────────────────────────────────────────────
-
     #[test]
     fn parse_pg_row_width_typical_seq_scan() {
         let plan = "Seq Scan on orders  (cost=0.00..1250.00 rows=5000 width=120)";
@@ -429,8 +357,6 @@ mod tests {
 
     #[test]
     fn parse_pg_row_width_top_node_wins() {
-        // Top node's width pairs with the top node's rows (parse_pg_row_estimate
-        // takes the first rows=, this takes the first width= — same node).
         let plan = "Sort  (cost=0.00..50.00 rows=1000 width=64)\n  ->  Seq Scan on t  (cost=0.00..100.00 rows=1000 width=200)";
         assert_eq!(parse_pg_row_width(plan), Some(64));
     }
@@ -440,8 +366,6 @@ mod tests {
         assert!(parse_pg_row_width("Result  (cost=0.00..0.01 rows=1)").is_none());
         assert!(parse_pg_row_width("").is_none());
     }
-
-    // ── extract_scan_type ────────────────────────────────────────────────────
 
     #[test]
     fn extract_scan_type_seq_scan() {
@@ -468,7 +392,6 @@ mod tests {
     fn extract_scan_type_no_scan_returns_first_line() {
         let plan = "Aggregate  (cost=10.00..10.01 rows=1 width=8)\n  ->  Sort  (...)";
         let result = extract_scan_type(plan);
-        // No "Scan" in any line → returns first line trimmed
         assert!(result.starts_with("Aggregate"), "got: {result}");
     }
 
@@ -476,15 +399,6 @@ mod tests {
     fn extract_scan_type_empty_plan_returns_unknown() {
         assert_eq!(extract_scan_type(""), "unknown");
     }
-
-    // ── table_from_simple_query ──────────────────────────────────────────────
-    //
-    // Drives the index-probe fallback that recovers the table name from
-    // `query: SELECT … FROM <name>` configs (rivet init emits this shape
-    // instead of `table:` to lock the column list — see preflight P1 #1).
-    // The parser is intentionally conservative: anything that isn't a single
-    // `SELECT cols FROM ident` must return None so we don't catalog-probe
-    // the wrong relation and falsely promote a verdict.
 
     #[test]
     fn table_from_simple_query_bare_select() {
@@ -504,9 +418,6 @@ mod tests {
 
     #[test]
     fn table_from_simple_query_multiline_rivet_init_shape() {
-        // `rivet init` renders YAML with a `query: >` folded block that
-        // becomes a single line with surrounding whitespace + newlines;
-        // make sure the parser tolerates that exact shape.
         let q =
             "\nSELECT id, name, email, age, balance,\n  is_active, bio, created_at\nFROM users\n";
         assert_eq!(table_from_simple_query(q).as_deref(), Some("users"));
@@ -526,8 +437,6 @@ mod tests {
 
     #[test]
     fn table_from_simple_query_rejects_join() {
-        // Multi-relation queries must fall back to the EXPLAIN heuristic —
-        // catalog probing one of the tables would mislead the verdict.
         assert_eq!(
             table_from_simple_query("SELECT * FROM users JOIN orders USING (id)").as_deref(),
             None
@@ -540,9 +449,6 @@ mod tests {
 
     #[test]
     fn table_from_simple_query_accepts_aliased_table() {
-        // `FROM users u` and `FROM users AS u` are single-relation queries
-        // with a local alias — the table is still `users`, which is what
-        // the catalog probe needs to index-check. Aliases are harmless.
         assert_eq!(
             table_from_simple_query("SELECT * FROM users u").as_deref(),
             Some("users")
@@ -555,8 +461,6 @@ mod tests {
 
     #[test]
     fn table_from_simple_query_accepts_trailing_clauses() {
-        // WHERE / ORDER BY / LIMIT don't change the relation; the table
-        // before them is still the one to probe.
         assert_eq!(
             table_from_simple_query("SELECT * FROM users WHERE id > 0").as_deref(),
             Some("users")
@@ -594,9 +498,6 @@ mod tests {
 
     #[test]
     fn table_from_simple_query_skips_subquery_from() {
-        // `SELECT (SELECT max(x) FROM events) FROM users` — the `FROM events`
-        // is inside parens (depth>0), so the parser should reach the outer
-        // `FROM users`.
         assert_eq!(
             table_from_simple_query("SELECT (SELECT max(x) FROM events) FROM users").as_deref(),
             Some("users")
@@ -605,7 +506,6 @@ mod tests {
 
     #[test]
     fn table_from_simple_query_subquery_only_returns_none() {
-        // No top-level FROM at all → None.
         assert_eq!(
             table_from_simple_query("SELECT (SELECT max(x) FROM events)"),
             None
@@ -624,34 +524,20 @@ mod tests {
 
     #[test]
     fn table_from_simple_query_handles_no_from_clause() {
-        // `SELECT 1` — preflight uses this as the fallback when the user
-        // hasn't supplied a query yet. Must not crash, must return None.
         assert_eq!(table_from_simple_query("SELECT 1").as_deref(), None);
         assert_eq!(table_from_simple_query("").as_deref(), None);
     }
-
-    // ── regression: `table:` shortcut must NOT preflight the "SELECT 1" stub ──
-    //
-    // Guards the root cause of audit_preflight_table (findings #3, #15): the
-    // base query `diagnose_pg` probes for a `table:`-shortcut export (no
-    // `query:`) is the canonical `SELECT * FROM <table>`, not the 1-row
-    // placeholder. If this contract regresses, every downstream probe (row
-    // estimate, scan type, cursor range) silently describes a dummy relation.
 
     #[test]
     fn table_shortcut_resolves_to_real_table_not_select_one() {
         let mut export = crate::config::sample_export("orders");
         export.query = None;
         export.table = Some("orders".into());
-        // Same call diagnose_pg makes — config_dir/params are unused on this
-        // branch. The base query the probes see must be the real table.
         let base = export
             .resolve_query(std::path::Path::new(""), None)
             .expect("table shortcut resolves");
         assert_eq!(base, "SELECT * FROM orders");
         assert_ne!(base, "SELECT 1");
-        // …and it must be recognised as a single-table read so the min/max
-        // range probe rewrites in place (recovering the dropped Cursor range).
         assert_eq!(
             crate::pipeline::chunked::strip_select_star_from(&base),
             Some("orders")
@@ -676,8 +562,6 @@ mod tests {
 
     #[test]
     fn inline_query_form_is_left_untouched() {
-        // The fix must not change behavior when `query:` is provided — the
-        // user's SQL flows through verbatim.
         let mut export = crate::config::sample_export("custom");
         export.table = None;
         export.query = Some("SELECT id, total FROM orders WHERE total > 0".into());
@@ -734,8 +618,6 @@ mod tests {
         assert_eq!(t("SELECT * FROM []"), None);
         assert_eq!(t("SELECT * FROM [dbo].[a] JOIN [dbo].[b] ON 1 = 1"), None);
     }
-
-    // ── the probes against a canned server answer ────────────────────────────
 
     use crate::connect::postgres::wire_recorder::{Answer, BEGIN_PINNED, answering_server, sent};
 

@@ -43,7 +43,7 @@ mod tests {
 
     #[test]
     fn incremental_no_cursor_column_returns_none() {
-        let e = cfg("mode: incremental\n"); // cursor_column not set
+        let e = cfg("mode: incremental\n");
         assert!(incremental_key_expr(&e, SourceType::Postgres).is_none());
     }
 
@@ -72,11 +72,9 @@ mod tests {
 
     #[test]
     fn incremental_coalesce_missing_fallback_returns_none() {
-        // Coalesce mode but no fallback column → None (returns None from the let f = ... ?)
         let e = cfg(
             "mode: incremental\ncursor_column: updated_at\nincremental_cursor_mode: coalesce\n",
         );
-        // cursor_fallback_column is None → match arm returns None
         assert!(incremental_key_expr(&e, SourceType::Postgres).is_none());
     }
 }
