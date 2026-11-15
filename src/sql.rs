@@ -607,15 +607,16 @@ enum SelectItem {
 /// The items of the select list `list`, split at the commas outside quotes, comments and parentheses.
 fn split_select_list(list: &str) -> Vec<&str> {
     let b = list.as_bytes();
-    let (mut depth, mut quote, mut start, mut i) = (0usize, None, 0, 0);
+    let (mut depth, mut quote, mut start, mut resume) = (0usize, None, 0, 0);
     let mut items = Vec::new();
-    while i < b.len() {
-        let c = b[i];
+    for (i, &c) in b.iter().enumerate() {
+        if i < resume {
+            continue;
+        }
         if let Some(end) = quote {
             quote = Some(end).filter(|&e| e != c);
-        } else if comment_len(&b[i..]) > 0 {
-            i += comment_len(&b[i..]);
-            continue;
+        } else if let n @ 1.. = comment_len(&b[i..]) {
+            resume = i + n;
         } else {
             quote = quote_closer(c);
             match c {
@@ -628,7 +629,6 @@ fn split_select_list(list: &str) -> Vec<&str> {
                 _ => {}
             }
         }
-        i += 1;
     }
     items.push(&list[start..]);
     items
@@ -663,7 +663,10 @@ fn select_item(item: &str) -> SelectItem {
     }
     let expression = || {
         let (mut from, mut last) = (0, None);
-        while let Some(at) = item.get(from..).and_then(|t| outer_keyword(t, "as")) {
+        for _ in 0..item.len() {
+            let Some(at) = item.get(from..).and_then(|t| outer_keyword(t, "as")) else {
+                break;
+            };
             last = Some(from + at + 2);
             from += at + 2;
         }
@@ -1071,6 +1074,21 @@ mod tests {
         for query in ["DELETE id FROM orders", "UPDATE id FROM orders", "SEL"] {
             assert_eq!(strip_simple_projection_from(query), None, "{query:?}");
         }
+    }
+
+    #[test]
+    fn the_alias_of_an_expression_is_the_one_after_its_last_as_and_a_comment_hides_a_comma() {
+        let query = "SELECT abcdefgh AS x AS y, /* a, b */ name FROM t";
+        assert_eq!(
+            bare_column_source(query, "y"),
+            None,
+            "an expression aliased y is not a bare column"
+        );
+        assert_eq!(
+            bare_column_source(query, "name").map(|p| p.name),
+            Some("name".to_string())
+        );
+        assert_eq!(split_select_list("a, /* x, y */ b"), ["a", " /* x, y */ b"]);
     }
 
     #[test]
