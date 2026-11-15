@@ -283,8 +283,14 @@ pub fn parse_mssql_url(url: &str) -> Result<MssqlUrl> {
         None => (crate::url_text::pct_decode(userinfo), String::new()),
     };
     let hostport = authority.hosts;
-    let database =
-        crate::url_text::pct_decode(authority.rest.strip_prefix('/').unwrap_or_default());
+    let database = {
+        let raw = authority.rest.strip_prefix('/').unwrap_or_default();
+        seeded!(
+            "url-part-read-raw",
+            raw.to_string(),
+            crate::url_text::pct_decode(raw)
+        )
+    };
     let (host, port) = crate::url_text::split_host_port(hostport, 1433).map_err(|p| {
         crate::error::coded(
             crate::error::codes::CONFIG_SOURCE_URL_INVALID,

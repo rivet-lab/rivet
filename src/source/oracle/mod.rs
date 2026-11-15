@@ -151,7 +151,11 @@ pub(crate) fn parse_oracle_url(url: &str) -> Result<OracleUrl> {
             "oracle: URL has no service name — {FORM}"
         )
     }
-    let service = crate::url_text::pct_decode(service);
+    let service = seeded!(
+        "url-part-read-raw",
+        service.to_string(),
+        crate::url_text::pct_decode(service)
+    );
     if service.contains('/') {
         crate::rivet_bail!(
             crate::error::codes::CONFIG_SOURCE_URL_INVALID,

@@ -44,7 +44,11 @@ pub(crate) fn pct_decode(s: &str) -> String {
 
 /// `host[:port]` or `[v6][:port]` split into the host (brackets kept) and its port, `default_port` when none is named; `Err` holds the port text that is no port.
 pub(crate) fn split_host_port(hosts: &str, default_port: u16) -> Result<(&str, u16), &str> {
-    let (host, port) = match hosts.strip_prefix('[').and_then(|r| r.split_once(']')) {
+    let (host, port) = match hosts
+        .strip_prefix('[')
+        .and_then(|r| r.split_once(']'))
+        .filter(|_| seeded!("url-part-read-raw", false, true))
+    {
         Some((v6, tail)) => (&hosts[..v6.len() + 2], tail.strip_prefix(':')),
         None => match hosts.rsplit_once(':') {
             Some((h, p)) => (h, Some(p)),
