@@ -110,6 +110,16 @@ pub fn run_plan_command(
 
     let exports = plannable_exports(&config, export_name)?;
 
+    for (_, verdict) in super::planning::plan_run(
+        &config,
+        config_dir,
+        export_name,
+        params,
+        super::planning::PlanFlags::default(),
+    )? {
+        verdict?;
+    }
+
     let state_path = config_dir.join(".rivet_state.db");
     let state = StateStore::open(state_path.to_str().unwrap_or(".rivet_state.db"))?;
 
@@ -124,6 +134,7 @@ pub fn run_plan_command(
             params,
             &state,
             date,
+            matches!(format, PlanOutputFormat::Json(Some(_))),
         )?);
     }
 
@@ -359,6 +370,7 @@ fn source_unreadable(export: &str, cause: anyhow::Error) -> anyhow::Error {
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_plan_artifact(
     config: &Config,
     export: &crate::config::ExportConfig,
@@ -367,8 +379,12 @@ fn build_plan_artifact(
     params: Option<&HashMap<String, String>>,
     state: &StateStore,
     date: Option<chrono::NaiveDate>,
+    sealing: bool,
 ) -> Result<(PlanArtifact, PrioritizationInputs, ExportRecommendation)> {
     let mut plan = build_plan(config, export, config_dir, false, false, false, params)?;
+    if sealing && export.partition_by.is_some() {
+        super::planning::refuse_to_seal(&plan)?;
+    }
     if let Some(note) = partitioned_preview_note(export) {
         log::warn!("{note}");
     }

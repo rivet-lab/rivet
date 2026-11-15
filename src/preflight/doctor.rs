@@ -272,6 +272,39 @@ pub fn doctor(config_path: &str, json: bool) -> Result<()> {
         }
     }
 
+    let mut run_refusal: Option<anyhow::Error> = None;
+    if source_ok {
+        let planned = crate::pipeline::planning::plan_run(
+            &config,
+            config_dir,
+            None,
+            None,
+            crate::pipeline::planning::PlanFlags::default(),
+        )
+        .unwrap_or_else(|e| vec![("config".to_string(), Err(e))]);
+        for (name, verdict) in planned {
+            let (ok, detail) = match verdict {
+                Ok(_) => (true, None),
+                Err(e) => {
+                    let detail = trim_probe_error(&e);
+                    all_ok = false;
+                    run_refusal.get_or_insert(e);
+                    (false, Some(detail))
+                }
+            };
+            emit_check(
+                &mut checks,
+                json,
+                DoctorCheck {
+                    name: format!("Run plan {name}"),
+                    ok,
+                    detail,
+                    hint: None,
+                },
+            );
+        }
+    }
+
     let mut seen_destinations: Vec<String> = Vec::new();
     let doctored = if seeded!("check-reads-declared-list-not-run-set", true, false) {
         config.exports.clone()
@@ -384,7 +417,7 @@ pub fn doctor(config_path: &str, json: bool) -> Result<()> {
             println!("Some checks failed. Fix the issues above before running exports.");
         }
     }
-    if let Some(refusal) = cursor_refusal {
+    if let Some(refusal) = cursor_refusal.or(run_refusal) {
         return Err(refusal);
     }
     if all_ok {
