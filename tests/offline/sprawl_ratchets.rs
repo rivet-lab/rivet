@@ -57,7 +57,6 @@ const LONG_FUNCTION_LINES: usize = 150;
 /// Product functions over `LONG_FUNCTION_LINES`, as (`file::fn#occurrence`, ceiling). Every row: 2026-11-13, first measurement; closes when the function is split and the row is deleted.
 const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ("src/cli/dispatch.rs::dispatch#1", 195),
-    ("src/cli/dispatch.rs::dispatch_cdc#1", 162),
     ("src/error/retry.rs::classify_error#1", 206),
     ("src/format/csv.rs::write_csv_value#1", 239),
     ("src/init/yaml_scaffold.rs::export_block_lines#1", 339),
