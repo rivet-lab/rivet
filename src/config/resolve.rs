@@ -1,22 +1,4 @@
 /// Replaces `${VAR}` patterns with values from `params` (if provided) or environment variables.
-/// Params take precedence over env vars.
-///
-/// **Strict mode (default, SecOps):** if a `${VAR}` reference resolves to neither a
-/// param nor an env var, an error is returned rather than silently substituting an
-/// empty string. A missing `DB_PASS` turning `postgres://u:${DB_PASS}@h/d` into
-/// `postgres://u:@h/d` is an auth-bypass footgun — we fail fast instead.
-///
-/// A literal empty value is still accepted (`export VAR=""`) — only completely
-/// unset variables fail.
-///
-/// Empty placeholders (`${}`) are left as-is for backwards compatibility.
-///
-/// **Value hardening (V6, CWE-89/94, narrowed):** a substituted value is spliced
-/// into the raw config/query text *before* YAML/SQL parse, so a NUL byte (never
-/// legitimate, enables C-string truncation) is rejected. Substitution is
-/// otherwise a documented verbatim splice — newlines/quotes/braces pass through
-/// (escaping is the caller's responsibility); the structural fix for raw-text
-/// param injection (substitute into parsed values) is tracked separately.
 pub fn resolve_vars(
     input: &str,
     params: Option<&std::collections::HashMap<String, String>>,
@@ -37,17 +19,6 @@ pub fn resolve_vars(
             }
         };
 
-        // V6 (CWE-89/94, narrowed): the value is spliced into the RAW
-        // config/query text before YAML/SQL parse with no escaping. A NUL byte
-        // is never legitimate in a config/SQL value and enables C-string
-        // truncation tricks, so reject it. Newlines/quotes/braces are NOT
-        // rejected: substitution is a documented verbatim text splice (escaping
-        // is the caller's responsibility — see the `passes_through` test), and
-        // legitimate multi-line `-p` values rely on that. The structural fix for
-        // raw-text param injection is to substitute into parsed values, not raw
-        // text — tracked separately; this guard is the no-cost NUL backstop. The
-        // error names the placeholder but never echoes the value (it may itself
-        // be a secret).
         if value.contains('\0') {
             crate::config_bail!(
                 crate::error::codes::CONFIG_VALUE_OUT_OF_RANGE,
@@ -59,7 +30,7 @@ pub fn resolve_vars(
     })
 }
 
-/// `input` with every `${name}` replaced by `value_of(name)`, the one scan of the placeholder grammar: `${}` becomes the empty string, an unclosed `${` ends the scan, and a value is never scanned again.
+/// `input` with every `${name}` replaced by `value_of(name)`, the one scan of the placeholder grammar.
 fn substitute(
     input: &str,
     mut value_of: impl FnMut(&str) -> crate::error::Result<String>,
@@ -87,7 +58,7 @@ fn substitute(
 /// The marks that stand for the `${` and the `}` of a placeholder in [`masked`] text.
 const MASK: (char, char) = ('\u{E000}', '\u{E001}');
 
-/// `input` with every `${name}` held between two private-use marks: a brace ends a plain YAML scalar inside a flow collection, so the unresolved document is parsed masked.
+/// `input` with every `${name}` held between two private-use marks.
 pub(super) fn masked(input: &str) -> String {
     substitute(input, |name| Ok(format!("{}{name}{}", MASK.0, MASK.1))).unwrap_or_default()
 }
@@ -109,11 +80,7 @@ pub fn resolve_env_vars(input: &str) -> crate::error::Result<String> {
     resolve_vars(input, None)
 }
 
-/// Return the names of `--param key=value` entries whose `${key}` placeholder
-/// does not appear in `haystack`. Sorted for deterministic warning order.
-///
-/// Used by [`warn_unused_params`]; exposed separately so tests can assert the
-/// set of unused keys without needing to capture log output.
+/// Return the names of `--param key=value` entries whose `${key}` placeholder does not appear in `haystack`.
 pub fn find_unused_params(
     haystack: &str,
     params: Option<&std::collections::HashMap<String, String>>,
@@ -130,16 +97,7 @@ pub fn find_unused_params(
     unused
 }
 
-/// F10 (0.7.5 audit): warn loudly when `--param key=value` was passed but
-/// `${key}` never appears anywhere the resolver searched.  A common typo
-/// (`--param maxid=…` vs `${max_id}`) is otherwise silently ignored and the
-/// operator gets unexpected results.
-///
-/// Decoupled from `resolve_vars` because the same params object flows through
-/// the YAML body resolve AND each `ExportConfig::resolve_query` call — emitting
-/// the warning inside `resolve_vars` itself fired it N+1 times per `--param`.
-/// Call this exactly once per CLI invocation, passing the original (un-resolved)
-/// YAML text as the haystack so placeholders are still present.
+/// F10 (0.7.5 audit): warn loudly when `--param key=value` was passed but `${key}` never appears anywhere the resolver searched.
 pub fn warn_unused_params(
     haystack: &str,
     params: Option<&std::collections::HashMap<String, String>>,
@@ -155,10 +113,6 @@ pub fn warn_unused_params(
 }
 
 /// Parse a human-readable file size like "512MB", "1GB", "100KB" into bytes.
-///
-/// Accepted units are `B`, `KB`, `MB`, `GB` (case-insensitive); a bare number
-/// is bytes. A fractional value is allowed (`1.5GB`). Units are IEC-style binary
-/// multiples: `KB` = 1024 bytes, `MB` = 1024 KB, `GB` = 1024 MB.
 pub fn parse_file_size(s: &str) -> crate::error::Result<u64> {
     let s = s.trim().to_uppercase();
     let (num, multiplier) = if let Some(n) = s.strip_suffix("GB") {
@@ -183,12 +137,6 @@ pub fn parse_file_size(s: &str) -> crate::error::Result<u64> {
             ),
         )
     })?;
-    // Reject anything that lands on 0 bytes: the float→u64 cast saturates zero,
-    // NEGATIVE, NaN, AND sub-byte fractions ("0.5B", "0.0005KB") all to 0 — a
-    // 0-byte rotation threshold that splits a part after every row. The guard
-    // must run on the RESULT (post-multiplier byte count), not the pre-multiplier
-    // float: `0.5 <= 0.0` is false, so a pre-multiplier check let 0.5B through as
-    // 0 bytes (#19 bughunt). Fail loud like a non-numeric value.
     let bytes = (value * multiplier as f64) as u64;
     if bytes == 0 {
         crate::config_bail!(
@@ -218,8 +166,6 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    // ── resolve_vars — no substitution ──────────────────────────────────────
-
     #[test]
     fn no_placeholders_returned_verbatim() {
         assert_eq!(resolve_vars("SELECT 1", None).unwrap(), "SELECT 1");
@@ -229,8 +175,6 @@ mod tests {
     fn empty_string_returned_verbatim() {
         assert_eq!(resolve_vars("", None).unwrap(), "");
     }
-
-    // ── resolve_vars — param substitution ───────────────────────────────────
 
     #[test]
     fn param_substitutes_placeholder() {
@@ -242,7 +186,6 @@ mod tests {
 
     #[test]
     fn param_takes_precedence_over_env() {
-        // Set an env var with the same name but different value.
         unsafe { std::env::set_var("RIVET_TEST_OVERRIDE_VAR", "from_env") };
         let mut p = HashMap::new();
         p.insert("RIVET_TEST_OVERRIDE_VAR".into(), "from_param".into());
@@ -260,23 +203,11 @@ mod tests {
         assert_eq!(result, "hello world");
     }
 
-    // ── resolve_vars — V6 param-value injection hardening (NUL-only) ─────────
-    //
-    // A param/env value is spliced into the RAW config/query text before
-    // YAML/SQL parse with no escaping. A NUL byte is never legitimate and
-    // enables C-string truncation, so it is rejected. Newlines/quotes/braces
-    // are NOT rejected — substitution is a documented verbatim splice (see
-    // `resolve_vars_value_with_quotes_newlines_braces_passes_through`) and
-    // legitimate multi-line `-p` values rely on it; the structural fix for
-    // raw-text param injection (substitute into parsed values) is tracked
-    // separately.
-
     #[test]
     fn sec_param_value_with_nul_rejected() {
         let mut p = HashMap::new();
         p.insert("x".into(), "1\0injected".into());
         let err = resolve_vars("${x}", Some(&p)).expect_err("a NUL value must be rejected");
-        // Names the placeholder, never echoes the (possibly-secret) value.
         assert!(err.to_string().contains("x"), "must name the param: {err}");
         assert!(
             !err.to_string().contains("injected"),
@@ -284,15 +215,8 @@ mod tests {
         );
     }
 
-    // (No env-var NUL test: the OS forbids a NUL byte in an environment
-    // variable — `set_var` would reject it — so that channel cannot carry the
-    // payload. The HashMap `-p` param path above is the reachable vector.)
-
     #[test]
     fn sec_param_value_newline_passes_through_guard() {
-        // Documented verbatim contract: a multi-line value substitutes as-is.
-        // (Mirrors resolve_vars_value_with_quotes_newlines_braces_passes_through;
-        // the V6 guard rejects only NUL, not structural-looking characters.)
         let mut p = HashMap::new();
         p.insert("frag".into(), "a\nb".into());
         let result = resolve_vars("X=${frag}", Some(&p)).unwrap();
@@ -315,8 +239,6 @@ mod tests {
         assert_eq!(result, "WHERE name = 'o''brien'");
     }
 
-    // ── resolve_vars — env var substitution ─────────────────────────────────
-
     #[test]
     fn env_var_substituted_when_set() {
         unsafe { std::env::set_var("RIVET_TEST_RESOLVE_VAR", "secret123") };
@@ -335,8 +257,6 @@ mod tests {
             "got: {msg}"
         );
     }
-
-    // ── resolve_vars — empty placeholder ────────────────────────────────────
 
     #[test]
     fn empty_placeholder_expands_to_empty_string() {
@@ -371,23 +291,11 @@ mod tests {
         assert_eq!(parts("pre${}post ${UNCLOSED"), None);
     }
 
-    // ── resolve_vars — unclosed placeholder ─────────────────────────────────
-
     #[test]
     fn unclosed_placeholder_left_as_is() {
         let result = resolve_vars("${UNCLOSED", None).unwrap();
         assert_eq!(result, "${UNCLOSED");
     }
-
-    // ── find_unused_params — regression: F-NEW after 0.7.5 audit ────────────
-    //
-    // Before splitting the warning out of `resolve_vars`, the unused-param
-    // warning was emitted N+1 times per `--param` (once at YAML resolve,
-    // once per `ExportConfig::resolve_query` call), AND every `--param` was
-    // wrongly flagged unused at the resolve_query stage because the YAML
-    // pass had already substituted the placeholders out. These tests pin
-    // the new behavior: `find_unused_params` flags only genuinely-unused
-    // keys, against an un-resolved (placeholder-bearing) haystack.
 
     #[test]
     fn find_unused_params_returns_empty_when_no_params() {
@@ -421,15 +329,11 @@ mod tests {
 
     #[test]
     fn find_unused_params_partial_match_does_not_count() {
-        // A param named `max` is NOT used by a `${max_id}` placeholder —
-        // substring overlap must not satisfy the check.
         let mut p = HashMap::new();
         p.insert("max".into(), "20".into());
         let unused = find_unused_params("SELECT * FROM t WHERE id <= ${max_id}", Some(&p));
         assert_eq!(unused, vec!["max".to_string()]);
     }
-
-    // ── resolve_env_vars wrapper ─────────────────────────────────────────────
 
     #[test]
     fn resolve_env_vars_reads_env() {
@@ -438,8 +342,6 @@ mod tests {
         unsafe { std::env::remove_var("RIVET_TEST_ENV_WRAPPER") };
         assert_eq!(result, "v=wrapped");
     }
-
-    // ── parse_file_size ──────────────────────────────────────────────────────
 
     #[test]
     fn parse_1gb() {
@@ -483,8 +385,6 @@ mod tests {
 
     #[test]
     fn parse_invalid_error_names_accepted_units() {
-        // L25: the error must teach the accepted format, not just name the bad
-        // value — units B/KB/MB/GB, fractional allowed, and KB = 1024 (binary).
         let err = parse_file_size("banana").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("B/KB/MB/GB"), "got: {msg}");
@@ -494,9 +394,6 @@ mod tests {
 
     #[test]
     fn parse_zero_and_negative_rejected_not_coerced_to_zero() {
-        // #dogfood LOW: `0` / `0B` / `-5MB` used to float→u64-saturate to a
-        // 0-byte rotation threshold (a part after every row), silently. They must
-        // fail loud like `banana`/`1PB` do.
         for bad in ["0", "0B", "0MB", "-5MB", "-1", "-0.5GB"] {
             let err = parse_file_size(bad).unwrap_err();
             assert!(
@@ -504,16 +401,11 @@ mod tests {
                 "'{bad}' must be rejected as non-positive, got: {err}"
             );
         }
-        // A tiny positive value is still accepted (only a <1-byte result is rejected).
         assert_eq!(parse_file_size("1B").unwrap(), 1);
     }
 
     #[test]
     fn parse_sub_byte_fraction_rejected_not_truncated_to_zero() {
-        // #19 bughunt: the positivity guard ran on the PRE-multiplier float, so a
-        // sub-byte value ("0.5B", "0.0005KB" = 0.512 bytes, bare "0.9") passed the
-        // `<= 0.0` check and then truncated to 0 bytes — the same silent 0-byte
-        // rotation threshold. Must reject: the check now runs on the byte result.
         for bad in ["0.5B", "0.9", "0.0005KB", "0.4"] {
             let err = parse_file_size(bad).unwrap_err();
             assert!(
@@ -521,7 +413,6 @@ mod tests {
                 "'{bad}' truncates to 0 bytes and must be rejected, got: {err}"
             );
         }
-        // Just-at / just-over one byte still parses.
         assert_eq!(parse_file_size("1.9B").unwrap(), 1);
         assert_eq!(parse_file_size("1.5KB").unwrap(), 1536);
     }

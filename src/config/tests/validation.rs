@@ -2,8 +2,6 @@
 
 use super::*;
 
-// ─── misplaced tuning field detection ────────────────────────
-
 #[test]
 fn misplaced_batch_size_in_source_rejected() {
     let yaml = r#"
@@ -31,15 +29,8 @@ exports:
     );
 }
 
-// ─── round-2 audit #14: chunk knobs are chunked-only ─────────────────────
-// A config that sets a chunk knob but omits `mode: chunked` silently degrades
-// to a single unbounded snapshot (the source-pressure footgun chunked mode
-// exists to prevent). Gate it at config-load, like chunk_by_days.
-// RED before the validate_export guard: these all passed validation.
-
 #[test]
 fn chunk_column_without_chunked_mode_rejected() {
-    // `mode` omitted ⇒ defaults to Full; chunk_column is then silently dropped.
     let yaml = r#"
 source:
   type: postgres
@@ -81,9 +72,6 @@ exports:
 
 #[test]
 fn chunk_knobs_accepted_under_chunked_mode() {
-    // The guard must NOT false-positive: the exact same knobs are valid when
-    // mode IS chunked, and the default chunk_size under a non-chunked mode is
-    // fine (it is indistinguishable from unset and harmless).
     let chunked = r#"
 source:
   type: postgres
@@ -124,12 +112,8 @@ exports:
     );
 }
 
-// ─── round-2 audit #5/#6/#15/#16/#17: config-load hoists ─────────────────
-
 #[test]
 fn cdc_tables_entry_with_traversal_rejected_at_load() {
-    // #5: a `tables:` entry becomes a destination path segment — `..` escapes
-    // the configured tree. RED before the is_filename_safe_name gate on tables.
     let yaml = r#"
 source:
   type: postgres
@@ -151,8 +135,6 @@ exports:
 
 #[test]
 fn partition_by_with_cdc_mode_rejected_at_load() {
-    // #15: partition_by + mode:cdc previously passed `check`, then died at run
-    // after a live probe with a misleading "requires table:". Reject statically.
     let yaml = r#"
 source:
   type: postgres
@@ -180,7 +162,6 @@ exports:
 
 #[test]
 fn partition_by_column_name_traversal_rejected_at_load() {
-    // #6: the partition column name becomes the Hive `col=value` segment.
     let yaml = r#"
 source:
   type: postgres
@@ -244,8 +225,6 @@ exports:
 
 #[test]
 fn partition_by_without_token_rejected_at_check_time() {
-    // #16: the {partition}-token rule was enforced only in the run pipeline —
-    // `rivet check` gave a false green. Now caught at config-load.
     let yaml = r#"
 source:
   type: postgres
@@ -269,8 +248,6 @@ exports:
 
 #[test]
 fn chunk_size_and_memory_mb_both_set_rejected() {
-    // #17: documented mutually exclusive, previously unenforced — chunk_size
-    // was silently dropped in favour of the memory budget.
     let yaml = r#"
 source:
   type: postgres
@@ -297,10 +274,6 @@ exports:
 
 #[test]
 fn valid_partition_by_and_tables_configs_are_accepted() {
-    // The false-REJECT guard for the config-validation matrix: the round-2 hoists
-    // (#5/#6/#15/#16/#17) must reject the accept-but-break combos WITHOUT breaking a
-    // legit config. A partition_by full export with a {partition} token, and a
-    // multi-table CDC export with well-formed table names, must both still load.
     let partitioned = r#"
 source:
   type: postgres
@@ -429,10 +402,6 @@ exports:
     Config::from_yaml(yaml).unwrap();
 }
 
-// =============================================================================
-// Invalid config combinations — QA backlog Task 5.1
-// =============================================================================
-
 #[test]
 fn empty_exports_list_is_rejected() {
     let yaml = r#"
@@ -525,18 +494,6 @@ exports:
     );
 }
 
-// ── v0.7.4: first-user-friendly error messages ───────────────────────
-//
-// These tests pin the *content* of the error messages a first-time
-// operator sees when they make the most common config mistakes.  The
-// exact wording is allowed to evolve, but every test asserts at least
-// one Hint phrase the README / getting-started docs reference, so
-// dropping the hint accidentally trips the test.
-//
-// Note: the no-source-block-at-all path is covered by
-// `no_url_at_all_rejected` above (updated in v0.7.4 to also assert
-// the new url_env + DATABASE_URL guidance).
-
 #[test]
 fn structured_source_missing_host_includes_actionable_hint() {
     let yaml = r#"
@@ -567,8 +524,6 @@ exports:
 
 #[test]
 fn url_env_missing_var_lists_export_command_and_alternative() {
-    // The most common first-run failure: env var simply not exported.
-    // The error must show *the exact shell command* to fix it.
     unsafe { std::env::remove_var("RIVET_DOCTEST_DATABASE_URL_X") };
     let yaml = r#"
 source:
@@ -655,14 +610,6 @@ exports:
     );
 }
 
-// ── F-NEW (cfg_matrix Issue 3): query_file syntactic validation at load ──
-//
-// Before this regression, `query_file: ../../../../etc/passwd` (or any
-// absolute path) passed `Config::validate` and `rivet check`, and was only
-// rejected at plan-build time when `ExportConfig::resolve_query` was
-// called.  Operators running `rivet check` saw rc=0 and assumed the YAML
-// was safe.  These tests pin the eager check.
-
 #[test]
 fn query_file_traversal_rejected_at_load() {
     let yaml = r#"
@@ -709,8 +656,6 @@ exports:
 
 #[test]
 fn query_file_relative_path_accepted_at_load() {
-    // Sanity: a sane relative path passes the syntactic check even when
-    // the file doesn't exist on disk (the I/O is deferred to plan time).
     let yaml = r#"
 source:
   type: postgres
@@ -728,7 +673,6 @@ exports:
 
 #[test]
 fn tab_indentation_gets_a_spaces_hint() {
-    // A tab in indentation is the classic beginner YAML mistake.
     let yaml = "source:\n  type: postgres\n\tbad: tab\nexports: []\n";
     let err = Config::from_yaml(yaml).unwrap_err();
     let msg = format!("{err:#}");
@@ -749,16 +693,6 @@ fn missing_source_field_gets_a_remediation_hint() {
         "expected a `rivet init` remediation hint, got: {msg}"
     );
 }
-
-// ── CDC resource conflicts (slot / server_id / checkpoint) ────────────────────
-//
-// RED tests for the sharpest multi-table CDC edge: the per-engine stream
-// resources are per-export, and their DEFAULTS collide. Two PostgreSQL cdc
-// exports without an explicit `slot:` both resolve to `rivet_slot` — each ack
-// advances `confirmed_flush_lsn` past changes the other never read (mutual,
-// silent data loss). Two MySQL exports both default to `server_id: 4271` — the
-// server kills the older replica connection. A shared `checkpoint:` path makes
-// the exports overwrite each other's resume position on any engine.
 
 fn cdc_pair_yaml(source: &str, cdc_a: &str, cdc_b: &str) -> String {
     format!(
@@ -828,11 +762,7 @@ fn two_mysql_cdc_exports_defaulting_to_the_same_server_id_are_rejected() {
     );
 }
 
-/// `Orders.ckpt` and `orders.ckpt` are two strings and ONE file on macOS / Windows —
-/// case twins (legal on PostgreSQL, and on MySQL / SQL Server under a case-sensitive
-/// collation) scaffolded per-table wrote each other's resume position there. Refused
-/// wherever the config is loaded, since a config written on Linux is run elsewhere.
-/// RED against the byte-wise comparison.
+/// `Orders.ckpt` and `orders.ckpt` are two strings and ONE file on macOS / Windows.
 #[test]
 fn two_cdc_exports_whose_checkpoints_differ_only_by_case_are_rejected() {
     let yaml = cdc_pair_yaml(
@@ -882,8 +812,6 @@ fn mysql_cdc_exports_with_distinct_server_ids_validate_fine() {
     );
     Config::from_yaml(&yaml).expect("distinct server_ids must validate");
 }
-
-// ── CDC multi-table `tables:` shape ───────────────────────────────────────────
 
 #[test]
 fn cdc_table_and_tables_are_mutually_exclusive() {
@@ -970,12 +898,6 @@ exports:
     }
 }
 
-// `validate_non_sql_source_modes` (config/mod.rs) is what makes the SQL-only
-// builders' `unreachable!` arms provably unreachable for a Mongo source — but
-// it was itself untested (the behaviour-matrix `mode_incremental`/`time_window`
-// Mongo `na`s rest entirely on it). A mutant relaxing `matches!(mode, Full|Cdc)`
-// would let `mode: incremental` reach a panic; a mutant dropping the parallel+
-// resume guard would silently re-read the whole collection every run.
 /// `partition_by` on a Mongo `mode: full` export reached `quote_ident`'s `unreachable!` at run time.
 #[test]
 fn mongo_partition_by_is_rejected_at_load() {
@@ -1028,9 +950,6 @@ exports:
 
 #[test]
 fn mongo_parallel_plus_resume_is_rejected() {
-    // The parallel `_id`-range fan-out keeps NO keyset checkpoint, so `resume: true`
-    // with `parallel > 1` would be silently ignored (whole collection re-read every
-    // run — a bug-hunt find). The guard must bail loud naming the silent-ignore risk.
     let yaml = r#"
 source:
   type: mongo
@@ -1054,10 +973,6 @@ exports:
 
 #[test]
 fn cdc_until_current_defaults_to_true_not_the_streaming_daemon() {
-    // Omitting `until_current` must default to TRUE (bounded / scheduler), never
-    // the continuous-streaming daemon. A hand-written CDC config that forgot the
-    // field used to silently start a never-terminating stream (`#[serde(default)]`
-    // = false); the default is now `default_true`.
     let yaml = r#"
 source: { type: postgres, url: "postgresql://localhost/test" }
 exports:
@@ -1081,13 +996,6 @@ exports:
 
 #[test]
 fn cdc_export_config_rust_default_is_bounded_not_a_daemon() {
-    // The serde default (test above) is NOT enough: `cdc_job` builds the effective
-    // CDC config with `export.cdc.clone().unwrap_or_default()`, so a `mode: cdc`
-    // export that omits the whole `cdc:` block (valid for PG/MySQL) reaches the
-    // RUST `Default`, not the serde one. A *derived* Default yields
-    // `until_current = false` (bool::default) = `DrainMode::Continuous` — a
-    // never-terminating daemon on a minimal config. RED before the hand-written
-    // `impl Default`; audit finding.
     use crate::config::CdcExportConfig;
     use crate::source::cdc::DrainMode;
     let d = CdcExportConfig::default();
@@ -1118,12 +1026,6 @@ exports:
     let msg = format!("{:#}", Config::from_yaml(yaml).unwrap_err());
     assert!(msg.contains("only valid with `mode: cdc`"), "{msg}");
 }
-
-// ── Table-qualified `columns:` override keys ─────────────────────────────────
-// Bare keys apply to every table of a multi-table export (the blast radius the
-// schema-wide user worries about); `"table.column"` targets one table and wins
-// over the bare key. A qualified key naming a table the export does NOT
-// capture is a config error — a typo must fail at load, never silently miss.
 
 #[test]
 fn qualified_override_for_unknown_table_is_rejected() {
@@ -1180,8 +1082,6 @@ exports:
     Config::from_yaml(yaml).expect("qualified + bare keys must validate");
 }
 
-// `initial: snapshot` reserves the `snapshot/` sub-prefix — a captured table
-// literally named "snapshot" would collide with it (roast finding).
 #[test]
 fn initial_snapshot_rejects_a_table_named_snapshot() {
     let yaml = r#"
@@ -1198,13 +1098,6 @@ exports:
     assert!(msg.contains("snapshot"), "must name the collision: {msg}");
 }
 
-// On an engine with no server-side anchor the checkpoint file IS the anchor, so
-// `initial:` must require it at CONFIG LOAD. The check is written against the
-// mode's PRESENCE, not against `snapshot` by name, because `ensure_anchor`
-// demands a checkpoint on these engines for any `initial:` mode: a mode the
-// config check named individually would have deferred the failure to mid-run,
-// surfacing as an anchor error rather than the missing setting it is.
-// PostgreSQL is exempt — the slot pins the position server-side.
 #[test]
 fn initial_mode_without_a_server_side_anchor_requires_a_checkpoint() {
     let yaml = |engine: &str, url: &str, extra: &str| {
@@ -1228,7 +1121,6 @@ fn initial_mode_without_a_server_side_anchor_requires_a_checkpoint() {
             "{engine} `initial:` without a checkpoint must be refused at config load, \
              naming the setting that is missing; got: {msg}"
         );
-        // …and accepted once the anchor is declared.
         Config::from_yaml(&yaml(
             engine,
             url,
@@ -1236,15 +1128,10 @@ fn initial_mode_without_a_server_side_anchor_requires_a_checkpoint() {
         ))
         .unwrap_or_else(|e| panic!("{engine} `initial:` + checkpoint must load: {e:#}"));
     }
-    // PostgreSQL pins server-side at slot creation — no checkpoint needed.
     Config::from_yaml(&yaml("postgres", "postgresql://localhost/test", ""))
         .expect("postgres anchors in the slot, so no checkpoint file is required");
 }
 
-// Negative family #3 (hostile configs), generative flavour: arbitrary
-// bytes/fragments through the whole config parse+validate pipeline must
-// yield Ok or a graceful Err — never a panic. serde almost certainly holds;
-// the net is for OUR validation layers on top of it.
 proptest::proptest! {
     #![proptest_config(proptest::prelude::ProptestConfig {
         cases: 128, ..Default::default()
@@ -1268,10 +1155,6 @@ proptest::proptest! {
         let _ = Config::from_yaml(&yaml);
     }
 }
-
-// ── keyset_incremental accept-but-break (roast 2026-08-09) ──────────────
-// keyset_incremental was absent from the `mode != chunked` reject-list, so
-// it was silently ignored outside chunked; and it needs a keyset key.
 
 #[test]
 fn keyset_incremental_without_chunked_mode_rejected() {
@@ -1358,7 +1241,6 @@ fn settle_unknown_key_rejected() {
 
 #[test]
 fn keyset_incremental_requires_chunk_by_key() {
-    // Under chunked but with a RANGE chunk_column — no key to resume from.
     let yaml = r#"
 source:
   type: postgres
@@ -1381,7 +1263,6 @@ exports:
 
 #[test]
 fn keyset_incremental_accepted_under_chunked_with_key() {
-    // The false-reject guard: the legit form (chunked + chunk_by_key) LOADS.
     let yaml = r#"
 source:
   type: postgres
@@ -1402,10 +1283,6 @@ exports:
         "keyset_incremental must be accepted under chunked + chunk_by_key"
     );
 }
-
-// ── mongo resume without page_size (roast 2026-08-09) ───────────────────
-// resume is keyset-only; the full-scan path (no page_size) reads no
-// checkpoint, so resume: true was silently ignored.
 
 #[test]
 fn mongo_resume_without_page_size_rejected() {
@@ -1453,12 +1330,8 @@ exports:
     );
 }
 
-// ── gzip level ceiling + CDC typo'd keys (roast 2026-08-09) ─────────────────
-
 #[test]
 fn gzip_compression_level_above_9_rejected() {
-    // parquet's GzipLevel maxes at 9; level 10 was accepted here but errors at
-    // write time. RED against the pre-fix `> 10` guard.
     let yaml = r#"
 source:
   type: postgres
@@ -1499,9 +1372,6 @@ exports:
 
 #[test]
 fn cdc_typoed_key_rejected_not_silently_defaulted() {
-    // `deny_unknown_fields` on CdcExportConfig: a mistyped knob (checkpont) must
-    // fail at load, not silently default checkpoint=None (RED against the struct
-    // without deny_unknown_fields).
     let yaml = r#"
 source:
   type: postgres
@@ -1524,10 +1394,7 @@ exports:
     );
 }
 
-/// #173: the misplaced-tuning-field detector's list must cover EVERY
-/// TuningConfig field — derived generatively from the struct's own JsonSchema,
-/// so a new knob cannot be silently invisible to the check (the hand list froze
-/// at 9 of 14). RED against removing a name from TUNING_FIELD_NAMES.
+/// #173: the misplaced-tuning-field detector's list must cover EVERY TuningConfig field.
 #[test]
 fn misplaced_tuning_list_covers_every_field() {
     let schema = schemars::schema_for!(crate::tuning::TuningConfig);
@@ -1548,13 +1415,7 @@ fn misplaced_tuning_list_covers_every_field() {
     );
 }
 
-// ─── typed `load:` block flags ────────────────────────────────
-
-/// `deleted_flag` decides whether the base carries `__is_deleted` — an extra column on
-/// every row, so it must not appear by accident. Absent it DERIVES from the mode (only a
-/// CDC stream can express a delete), and it is declarable at all three layers the overlay
-/// applies: the shared `load:` block, one export's `load:`, and — on a multiplex stream —
-/// one captured table's `load.tables.<name>`.
+/// `deleted_flag` decides whether the base carries `__is_deleted`.
 #[test]
 fn deleted_flag_derives_from_the_mode_and_is_overridable_at_every_layer() {
     use crate::load::plan::resolved_deleted_flag;
@@ -1580,7 +1441,6 @@ fn deleted_flag_derives_from_the_mode_and_is_overridable_at_every_layer() {
     };
     let flag = |c: &Config, table: Option<&str>| resolved_deleted_flag(c, &c.exports[0], table);
 
-    // The EMPTY case — nothing declared anywhere, so the mode alone answers.
     assert!(
         !flag(&cfg(&full(""), ""), None),
         "a query-based export cannot express a delete, so it must not pay a column for one"
@@ -1590,8 +1450,6 @@ fn deleted_flag_derives_from_the_mode_and_is_overridable_at_every_layer() {
         "a CDC stream expresses deletes, so its base carries the flag by default"
     );
 
-    // Declared on the shared section — an explicit value beats the derivation, in the
-    // direction the derivation would not have chosen on its own.
     assert!(
         !flag(&cfg(&stream(""), "\n  deleted_flag: false"), None),
         "`deleted_flag: false` must suppress the flag the CDC mode would have derived"
@@ -1601,7 +1459,6 @@ fn deleted_flag_derives_from_the_mode_and_is_overridable_at_every_layer() {
         "`deleted_flag: true` must reach a non-CDC export the derivation would have left bare"
     );
 
-    // One export's own block, layered over a section that says the opposite.
     assert!(
         flag(
             &cfg(
@@ -1613,8 +1470,6 @@ fn deleted_flag_derives_from_the_mode_and_is_overridable_at_every_layer() {
         "an export's `load:` must win over the shared section"
     );
 
-    // The per-table layer, which only a multiplex stream has. `orders` inherits the
-    // export's `false`; `customers` overrides it back to `true`.
     let per_table = cfg(
         &stream(
             "    load: { deleted_flag: false, tables: { customers: { deleted_flag: true } } }\n",
@@ -1632,9 +1487,7 @@ fn deleted_flag_derives_from_the_mode_and_is_overridable_at_every_layer() {
     );
 }
 
-/// `allow_source_drift`, `gc_orphans` and `cleanup_source` are the booleans of the typed
-/// `load:` block: read when the config is read, flipped per export by a `load:` override
-/// that inherits the rest, and refused on a typo at either level.
+/// `allow_source_drift`, `gc_orphans` and `cleanup_source` are the booleans of the typed `load:` block.
 #[test]
 fn load_block_flags_are_typed_overridable_and_a_typo_is_refused() {
     let head = r#"
@@ -1691,11 +1544,7 @@ exports:
     assert!(err.contains("allow_source_drfit"), "{err}");
 }
 
-/// `layout: base_buffer` promises `rivet compact`, which BigQuery and Snowflake run: on
-/// ClickHouse the base would freeze at the backfill while the buffer grew, and every load
-/// would prescribe a command that can only fail. Refused where the key is written, at
-/// every layer; BigQuery and Snowflake take it, and ClickHouse without the key makes no
-/// promise.
+/// `layout: base_buffer` promises `rivet compact`, which BigQuery and Snowflake run.
 #[test]
 fn a_base_and_buffer_layout_needs_a_compacting_warehouse() {
     let cfg = |target: &str, export_load: &str| {
@@ -1736,10 +1585,7 @@ fn a_base_and_buffer_layout_needs_a_compacting_warehouse() {
     Config::from_yaml(&cfg(clickhouse, "")).expect("no key written, no promise made");
 }
 
-/// On Snowflake `base_buffer` is the default, so a CDC stream that names nothing to build the
-/// base from would start it empty: refused at config load with its two remedies. Every
-/// neighbour that has a baseline, writes `log_view`, is not CDC or loads into another warehouse
-/// loads as before.
+/// On Snowflake `base_buffer` is the default, so a CDC stream that names nothing to build the base from would start it empty.
 #[test]
 fn a_snowflake_cdc_stream_without_a_baseline_is_refused_at_config_load() {
     let snowflake = "  target: snowflake\n  account: a\n  user: u\n  private_key_path: /k.p8\n  warehouse: w\n  database: d\n  \
@@ -1841,8 +1687,7 @@ fn a_snowflake_cdc_stream_without_a_baseline_is_refused_at_config_load() {
         .expect("an incremental export builds its base from its first pass");
 }
 
-/// A ClickHouse `load:` carries `url`, `database`, `user` and `password_env`; a
-/// missing one, or another warehouse's field, is refused naming it.
+/// A ClickHouse `load:` carries `url`, `database`, `user` and `password_env`.
 #[test]
 fn a_clickhouse_load_names_its_own_fields_and_refuses_foreign_ones() {
     let cfg = |load: &str| {
@@ -1900,7 +1745,7 @@ fn plaintext_cfg(load_url: &str, load_extra: &str, notifications: &str) -> Strin
     )
 }
 
-/// A ClickHouse `load.url` that is `http://` on a remote host is refused by code; https, loopback and the opt-in load.
+/// A ClickHouse `load.url` that is `http://` on a remote host is refused by code.
 #[test]
 fn a_remote_plaintext_clickhouse_url_is_refused_unless_allowed() {
     let refused = |url: &str, extra: &str| {

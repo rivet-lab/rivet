@@ -10,8 +10,7 @@ pub(crate) struct Account {
 }
 
 impl Account {
-    /// Read an account identifier: an organisation-account name (`myorg-myaccount`) or an
-    /// account locator, with its region when it has one (`xy12345.us-east-1`).
+    /// Read an account identifier: an organisation-account name (`myorg-myaccount`) or an account locator, with its region when it has one (`xy12345.us-east-1`).
     pub(crate) fn parse(raw: &str) -> std::result::Result<Self, String> {
         let trimmed = raw.trim();
         let bare = trimmed.strip_prefix("https://").unwrap_or(trimmed);
