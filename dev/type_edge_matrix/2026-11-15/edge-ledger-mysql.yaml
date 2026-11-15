@@ -1,0 +1,60 @@
+# MySQL 5.7 + 8.0 edge ledger (rivet 0.33.0). Shape of docs/type-capability-matrix.yaml engines.mysql.rows plus edges/delivery/new.
+# edges are SQL literals, NULL excluded. Literals summarised from edge-mysql/seed*.sql; full lists live there. Freeze stopped measurement 2026-11-15.
+engines:
+  mysql:
+    rows:
+      - {native_type: TINYINT, sample: "127", delivery: Int16, clickhouse: {type: Nullable(Int16)}, edges: ["0","-128","127","-127","126","-1"], new: true}
+      - {native_type: TINYINT UNSIGNED, sample: "255", delivery: Int16, clickhouse: {type: Nullable(Int16)}, edges: ["0","255","254","1","128","127"], new: true}
+      - {native_type: SMALLINT, sample: "32767", delivery: Int16, clickhouse: {type: Nullable(Int16)}, edges: ["0","-32768","32767","-32767","32766","-1"], new: true}
+      - {native_type: SMALLINT UNSIGNED, sample: "65535", delivery: Int32, clickhouse: {type: Nullable(Int32)}, edges: ["0","65535","65534","1","32768","32767"], new: true}
+      - {native_type: MEDIUMINT, sample: "8388607", delivery: Int32, clickhouse: {type: Nullable(Int32)}, edges: ["0","-8388608","8388607","-1"], new: true}
+      - {native_type: MEDIUMINT UNSIGNED, sample: "16777215", delivery: Int64, clickhouse: {type: Nullable(Int64)}, edges: ["0","16777215","16777214","8388608","8388607"], new: true}
+      - {native_type: INT, sample: "2147483647", delivery: Int32, clickhouse: {type: Nullable(Int32)}, edges: ["0","-2147483648","2147483647","-1"], new: true}
+      - {native_type: INT UNSIGNED, sample: "4294967295", delivery: Int64, clickhouse: {type: Nullable(Int64)}, edges: ["0","4294967295","4294967294","2147483648"], new: true}
+      - {native_type: BIGINT, sample: "9223372036854775807", delivery: Int64, clickhouse: {type: Nullable(Int64)}, edges: ["0","-9223372036854775808","9223372036854775807","-1"], new: true}
+      - {native_type: BIGINT UNSIGNED, sample: "18446744073709551615", delivery: UInt64, clickhouse: {type: Nullable(UInt64)}, edges: ["0","18446744073709551615","18446744073709551614","9223372036854775808","9223372036854775807"], new: true}
+      - {native_type: TINYINT(1), sample: "1", delivery: Boolean, clickhouse: {type: Nullable(Bool)}, edges: ["0","1","2","-1","127","-128"], known_defect: "every value other than 0 and 1 arrives true (arrow_convert.rs:90,307,753)", new: true}
+      - {native_type: TINYINT(1) UNSIGNED, sample: "1", delivery: Boolean, clickhouse: {type: Nullable(Bool)}, edges: ["0","1","2","255","254","128"], known_defect: "values above 1 arrive true", new: true}
+      - {native_type: BIT(1), sample: "b'1'", delivery: Boolean, clickhouse: {type: Nullable(Bool)}, edges: ["b'0'","b'1'"], new: true}
+      - {native_type: BIT(2), sample: "b'11'", delivery: Int64, clickhouse: {type: Nullable(Int64)}, edges: ["b'0'","b'1'","b'10'","b'11'"], new: true}
+      - {native_type: BIT(8), sample: "b'11111111'", delivery: Int64, clickhouse: {type: Nullable(Int64)}, edges: ["b'0'","b'10000000'","b'11111111'","b'10101010'"], new: true}
+      - {native_type: BIT(16), sample: "b'1111111111111111'", delivery: Int64, clickhouse: {type: Nullable(Int64)}, edges: ["0","65535","32768"], new: true}
+      - {native_type: BIT(32), sample: "4294967295", delivery: Int64, clickhouse: {type: Nullable(Int64)}, edges: ["0","4294967295","2147483648"], new: true}
+      - {native_type: BIT(63), sample: "9223372036854775807", delivery: Int64, clickhouse: {type: Nullable(Int64)}, edges: ["0","1","4611686018427387904","9223372036854775806","9223372036854775807"], new: true}
+      - {native_type: BIT(64), sample: "9223372036854775807", delivery: Int64, clickhouse: {type: Nullable(Int64)}, edges: ["0","1","4611686018427387904","9223372036854775807"], new: true}
+      - {native_type: BIT(64) top bit set, sample: "18446744073709551615", delivery: refused, refusal: "RIVET_SOURCE_VALUE_UNREPRESENTABLE extract exit 5 (DEFECT_NATIVE_REFUSED, arrow_convert.rs:158,523)", edges: ["9223372036854775808","18446744073709551614","18446744073709551615"], new: true}
+      - {native_type: DECIMAL(10,2), sample: "99999999.99", delivery: Decimal128(10,2), clickhouse: {type: Nullable(Decimal(10,2))}, edges: ["0","99999999.99","-99999999.99","0.01"]}
+      - {native_type: DECIMAL(38,8), sample: "123456789012345678901234567890.12345678", delivery: Decimal128(38,8), clickhouse: {type: Nullable(Decimal(38,8))}, edges: ["0","1e-8","max","-max"], new: true}
+      - {native_type: DECIMAL(39,30), sample: "123456789.123456789012345678901234567890", delivery: Decimal256(39,30), clickhouse: {type: Nullable(Decimal(39,30))}, note: "Snowflake refused RIVET_LOAD_COLUMN_TYPE_UNSUPPORTED", edges: ["0","123456789.123456789012345678901234567890","0.000000000000000000000000000001"], new: true}
+      - {native_type: DECIMAL(65,0), sample: "99999999999999999999999999999999999999999999999999999999999999999", delivery: Decimal256(65,0), clickhouse: {type: Nullable(Decimal(65,0))}, note: "BigQuery and Snowflake refused RIVET_LOAD_COLUMN_TYPE_UNSUPPORTED", edges: ["0","1","max","-max"], new: true}
+      - {native_type: DECIMAL(65,30), sample: "12345678901234567890123456789012345.123456789012345678901234567890", delivery: Decimal256(65,30), clickhouse: {type: Nullable(Decimal(65,30))}, note: "Snowflake refused", edges: ["0","max","-max","0.000000000000000000000000000001"], new: true}
+      - {native_type: FLOAT, sample: "1.5", delivery: Float32, clickhouse: {type: Nullable(Float32)}, edges: ["0","3.402823466e38","-3.402823466e38","1.175494351e-38","1.4e-45","0.1","16777217"], new: true}
+      - {native_type: FLOAT(10,2), sample: "12345678.12", delivery: Float32, clickhouse: {type: Nullable(Float32)}, edges: ["0","99999999.99","-99999999.99"], new: true}
+      - {native_type: DOUBLE, sample: "1.5", delivery: Float64, clickhouse: {type: Nullable(Float64)}, edges: ["0","1.7976931348623157e308","-1.7976931348623157e308","2.2250738585072014e-308","4.9e-324","9007199254740993"], new: true}
+      - {native_type: DOUBLE(20,5), sample: "1.5", delivery: Float64, clickhouse: {type: Nullable(Float64)}, edges: ["0","123456789012345.12345"], new: true}
+      - {native_type: CHAR(10), sample: "abc", delivery: Utf8, clickhouse: {type: Nullable(String)}, edges: ["''","'0123456789'","'  pad  '","'😀😀😀'"]}
+      - {native_type: VARCHAR(255), sample: "abc", delivery: Utf8, clickhouse: {type: Nullable(String)}, edges: ["''","REPEAT('a',255)","'😀'","CONCAT('a',CHAR(0),'b')"]}
+      - {native_type: TINYTEXT, sample: "abc", delivery: Utf8, clickhouse: {type: Nullable(String)}, edges: ["''","REPEAT('x',255)"], new: true}
+      - {native_type: TEXT, sample: "abc", delivery: Utf8, clickhouse: {type: Nullable(String)}, edges: ["''","REPEAT('x',65535)"], new: true}
+      - {native_type: MEDIUMTEXT, sample: "abc", delivery: Utf8, clickhouse: {type: Nullable(String)}, edges: ["''","REPEAT('x',70000)","1 MB value"], new: true}
+      - {native_type: LONGTEXT, sample: "abc", delivery: Utf8, clickhouse: {type: Nullable(String)}, edges: ["''","REPEAT('x',70000)"], new: true}
+      - {native_type: BINARY(4), sample: "0x00010203", delivery: Binary, clickhouse: {type: Nullable(String)}, edges: ["0x00000000","0xFFFFFFFF"]}
+      - {native_type: VARBINARY(255), sample: "0x00", delivery: Binary, clickhouse: {type: Nullable(String)}, edges: ["0x","0x00","all 256 byte values","REPEAT(0xFF,255)"], new: true}
+      - {native_type: TINYBLOB, sample: "0x00", delivery: Binary, clickhouse: {type: Nullable(String)}, edges: ["0x","REPEAT(0xFF,255)"], new: true}
+      - {native_type: BLOB, sample: "0x00", delivery: Binary, clickhouse: {type: Nullable(String)}, edges: ["0x","REPEAT(0xFF,65535)"], new: true}
+      - {native_type: MEDIUMBLOB, sample: "0x00", delivery: Binary, clickhouse: {type: Nullable(String)}, edges: ["0x","REPEAT(0xFF,100000)"], new: true}
+      - {native_type: LONGBLOB, sample: "0x00", delivery: Binary, clickhouse: {type: Nullable(String)}, edges: ["0x","REPEAT(0xFF,100000)"], new: true}
+      - {native_type: "ENUM('a','b','c')", sample: "a", delivery: Utf8, clickhouse: {type: Nullable(String)}, edges: ["'a'","'c'","'zzz' (stored '' under sql_mode='')"], new: true}
+      - {native_type: "SET(64 members)", sample: "m1,m64", delivery: Utf8, clickhouse: {type: Nullable(String)}, edges: ["''","'m1'","'m64'","'m1,m64'","all 64"], new: true}
+      - {native_type: JSON, sample: '{"a":1}', delivery: Utf8, clickhouse: {type: Nullable(String)}, edges: ["'null'","'{}'","'[]'","99-deep array","18446744073709551615","18446744073709551616","1e-400","'\"\\u0000\"'"], new: true}
+      - {native_type: DATE, sample: "2020-01-01", delivery: Date32, clickhouse: {type: Nullable(Date32)}, note: "ClickHouse refuses outside 1900..2299 (RIVET_LOAD_WAREHOUSE_REJECTED); BigQuery refuses year 0 (RIVET_LOAD_WAREHOUSE_REJECTED)", edges: ["'1000-01-01'","'1970-01-01'","'1969-12-31'","'2000-02-29'","'1900-01-01'","'2299-12-31'","'9999-12-31'","'0000-01-01'","'0000-12-31'","'0000-00-00' (NULL)","'2020-00-15' (NULL)"], new: true}
+      - {native_type: DATETIME(0), sample: "2020-01-01 00:00:00", delivery: "Timestamp(us)", clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}, note: "ClickHouse refuses outside 1900..2299 (RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE)", edges: ["'1000-01-01 00:00:00'","'9999-12-31 23:59:59'","'2000-02-29 12:34:56'","'0000-00-00 00:00:00' (NULL)"], new: true}
+      - {native_type: DATETIME(3), sample: "2020-01-01 00:00:00.123", delivery: "Timestamp(us)", clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}, edges: ["'1000-01-01 00:00:00.001'","'9999-12-31 23:59:59.999'"], new: true}
+      - {native_type: DATETIME(6), sample: "2020-01-01 00:00:00.123456", delivery: "Timestamp(us)", clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}, edges: ["'1000-01-01 00:00:00.000001'","'9999-12-31 23:59:59.999999'","'1969-12-31 23:59:59.999999'","'1900-01-01 00:00:00'","'2299-12-31 23:59:59.999999'"]}
+      - {native_type: TIMESTAMP(0), sample: "2020-01-01 00:00:00", delivery: "Timestamp(us, UTC)", clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}, edges: ["'1970-01-01 00:00:01'","'2038-01-19 03:14:07'","'0000-00-00 00:00:00' (NULL)"], new: true}
+      - {native_type: TIMESTAMP(6) NULL, sample: "2020-01-01 00:00:00.123456", delivery: "Timestamp(us, UTC)", clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}, edges: ["'1970-01-01 00:00:01.000001'","'2038-01-19 03:14:07.999999'","'0000-00-00 00:00:00.000000' (NULL)"]}
+      - {native_type: TIME(0), sample: "12:34:56", delivery: "Time64(us)", clickhouse: {type: "Nullable(Decimal(18,6))"}, edges: ["'00:00:00'","'23:59:59'"], new: true}
+      - {native_type: TIME(6), sample: "12:34:56.123456", delivery: "Time64(us)", clickhouse: {type: "Nullable(Decimal(18,6))"}, edges: ["'00:00:00.000001'","'23:59:59.999999'"], new: true}
+      - {native_type: TIME beyond 24h or negative, sample: "838:59:59", delivery: refused, refusal: "RIVET_SOURCE_VALUE_UNREPRESENTABLE extract exit 5 (arrow_convert.rs:565)", edges: ["'24:00:00'","'25:30:15'","'100:00:00'","'838:59:59'","'-00:00:01'","'-838:59:59'"], new: true}
+      - {native_type: YEAR, sample: "2020", delivery: Int16, clickhouse: {type: Nullable(Int16)}, edges: ["1901","2155","2000","1970","0000 (delivered 0)"], new: true}
+      - {native_type: GEOMETRY, sample: "POINT(1 2)", delivery: refused, refusal: "RIVET_TYPE_UNSAFE_MAPPING extract exit 1 (arrow_convert.rs:160)", edges: ["ST_GeomFromText('POINT(1 2)')"], new: true}

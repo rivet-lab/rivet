@@ -1,0 +1,896 @@
+# generated from edge-mssql measurement run; not a repo edit
+# per entry: native_type, edges (SQL literals as inserted, NULL excluded), delivery (observed Arrow type), clickhouse.type (observed), new (absent from engines.mssql.rows)
+mssql:
+  rows:
+    - native_type: "BIT"
+      table: tc_edge_mssql_int
+      column: c_bit
+      edges:
+        - "0"
+        - "1"
+      delivery: "Boolean"
+      clickhouse: {type: "Nullable(Bool)"}
+    - native_type: "TINYINT"
+      table: tc_edge_mssql_int
+      column: c_tiny
+      edges:
+        - "0"
+        - "1"
+        - "254"
+        - "255"
+      delivery: "Int16"
+      clickhouse: {type: "Nullable(Int16)"}
+      new: true
+    - native_type: "SMALLINT"
+      table: tc_edge_mssql_int
+      column: c_small
+      edges:
+        - "-32768"
+        - "-32767"
+        - "0"
+        - "32766"
+        - "32767"
+      delivery: "Int16"
+      clickhouse: {type: "Nullable(Int16)"}
+      new: true
+    - native_type: "INT"
+      table: tc_edge_mssql_int
+      column: c_int
+      edges:
+        - "-2147483648"
+        - "-2147483647"
+        - "0"
+        - "2147483646"
+        - "2147483647"
+      delivery: "Int32"
+      clickhouse: {type: "Nullable(Int32)"}
+      new: true
+    - native_type: "BIGINT"
+      table: tc_edge_mssql_int
+      column: c_big
+      edges:
+        - "-9223372036854775808"
+        - "-9223372036854775807"
+        - "0"
+        - "9223372036854775806"
+        - "9223372036854775807"
+      delivery: "Int64"
+      clickhouse: {type: "Nullable(Int64)"}
+    - native_type: "DECIMAL(38,0)"
+      table: tc_edge_mssql_dec
+      column: d38_0
+      edges:
+        - "0"
+        - "99999999999999999999999999999999999999"
+        - "-99999999999999999999999999999999999999"
+        - "1"
+        - "-1"
+        - "99999999999999999999999999999999999998"
+      delivery: "Decimal128(38, 0)"
+      clickhouse: {type: "Nullable(Decimal(38, 0))"}
+      new: true
+    - native_type: "DECIMAL(38,38)"
+      table: tc_edge_mssql_dec
+      column: d38_38
+      edges:
+        - "0"
+        - "0.99999999999999999999999999999999999999"
+        - "-0.99999999999999999999999999999999999999"
+        - "0.00000000000000000000000000000000000001"
+        - "-0.00000000000000000000000000000000000001"
+      delivery: "Decimal128(38, 38)"
+      clickhouse: {type: "Nullable(Decimal(38, 38))"}
+      new: true
+    - native_type: "DECIMAL(38,10)"
+      table: tc_edge_mssql_dec
+      column: d38_10
+      edges:
+        - "0"
+        - "9999999999999999999999999999.9999999999"
+        - "-9999999999999999999999999999.9999999999"
+        - "0.0000000001"
+        - "-0.0000000001"
+      delivery: "Decimal128(38, 10)"
+      clickhouse: {type: "Nullable(Decimal(38, 10))"}
+      new: true
+    - native_type: "DECIMAL(1,0)"
+      table: tc_edge_mssql_dec
+      column: d1_0
+      edges:
+        - "0"
+        - "9"
+        - "-9"
+        - "1"
+        - "-1"
+      delivery: "Decimal128(1, 0)"
+      clickhouse: {type: "Nullable(Decimal(1, 0))"}
+      new: true
+    - native_type: "DECIMAL(18,6)"
+      table: tc_edge_mssql_dec
+      column: d18_6
+      edges:
+        - "0"
+        - "999999999999.999999"
+        - "-999999999999.999999"
+        - "0.000001"
+        - "-0.000001"
+      delivery: "Decimal128(18, 6)"
+      clickhouse: {type: "Nullable(Decimal(18, 6))"}
+      new: true
+    - native_type: "NUMERIC(10,2)"
+      table: tc_edge_mssql_dec
+      column: n10_2
+      edges:
+        - "0"
+        - "99999999.99"
+        - "-99999999.99"
+        - "0.01"
+        - "-0.01"
+      delivery: "Decimal128(10, 2)"
+      clickhouse: {type: "Nullable(Decimal(10, 2))"}
+      new: true
+    - native_type: "MONEY"
+      table: tc_edge_mssql_dec
+      column: c_money
+      edges:
+        - "0"
+        - "0.0001"
+        - "-0.0001"
+        - "922337203685476.5807"
+        - "900719925474.0991"
+        - "1000000000000.0001"
+      delivery: "Decimal128(19, 4)"
+      clickhouse: {type: "Nullable(Decimal(19, 4))"}
+    - native_type: "SMALLMONEY"
+      table: tc_edge_mssql_dec
+      column: c_smallmoney
+      edges:
+        - "0"
+        - "214748.3647"
+        - "-214748.3648"
+        - "0.0001"
+        - "-0.0001"
+      delivery: "Decimal128(19, 4)"
+      clickhouse: {type: "Nullable(Decimal(19, 4))"}
+    - native_type: "REAL"
+      table: tc_edge_mssql_flt
+      column: c_real
+      edges:
+        - "0"
+        - "3.40282347E+38"
+        - "-3.40282347E+38"
+        - "1.17549435E-38"
+        - "1"
+        - "-1"
+        - "16777217"
+        - "0.1"
+        - "1.4E-45"
+      delivery: "Float32"
+      clickhouse: {type: "Nullable(Float32)"}
+      new: true
+    - native_type: "FLOAT"
+      table: tc_edge_mssql_flt
+      column: c_float
+      edges:
+        - "0"
+        - "1.7976931348623157E+308"
+        - "-1.7976931348623157E+308"
+        - "2.2250738585072014E-308"
+        - "1"
+        - "-1"
+        - "9007199254740993"
+        - "0.1"
+      delivery: "Float64"
+      clickhouse: {type: "Nullable(Float64)"}
+    - native_type: "CHAR(10)"
+      table: tc_edge_mssql_str
+      column: c_char
+      edges:
+        - "''"
+        - "'abc'"
+        - "' x '"
+        - "'abcdefghij'"
+        - "'a'+CHAR(0)+'b'"
+        - "CHAR(233)"
+      delivery: "Utf8"
+      clickhouse: {type: "Nullable(String)"}
+      new: true
+    - native_type: "VARCHAR(20)"
+      table: tc_edge_mssql_str
+      column: c_varchar
+      edges:
+        - "''"
+        - "'abc'"
+        - "' x '"
+        - "'abcdefghijklmnopqrst'"
+        - "'a'+CHAR(0)+'b'"
+        - "CHAR(233)"
+      delivery: "Utf8"
+      clickhouse: {type: "Nullable(String)"}
+      new: true
+    - native_type: "VARCHAR(MAX)"
+      table: tc_edge_mssql_str
+      column: c_varchar_max
+      edges:
+        - "''"
+        - "'abc'"
+        - "' x '"
+        - "REPLICATE(CAST('x' AS varchar(max)),100000)"
+        - "'a'+CHAR(0)+'b'"
+        - "CHAR(233)"
+      delivery: "Utf8"
+      clickhouse: {type: "Nullable(String)"}
+      new: true
+    - native_type: "NCHAR(10)"
+      table: tc_edge_mssql_str
+      column: c_nchar
+      edges:
+        - "N''"
+        - "N'abc'"
+        - "N' x '"
+        - "N'abcdefghij'"
+        - "N'a'+NCHAR(0)+N'b'"
+        - "NCHAR(0xD83D)+NCHAR(0xDE00)"
+        - "NCHAR(0xD800)"
+      delivery: "Utf8"
+      clickhouse: {type: "Nullable(String)"}
+      new: true
+    - native_type: "NVARCHAR(20)"
+      table: tc_edge_mssql_str
+      column: c_nvarchar
+      edges:
+        - "N''"
+        - "N'abc'"
+        - "N' x '"
+        - "N'abcdefghijklmnopqrst'"
+        - "N'a'+NCHAR(0)+N'b'"
+        - "NCHAR(0xD83D)+NCHAR(0xDE00)+N'é中'"
+        - "NCHAR(0xD800)+N'x'"
+      delivery: "Utf8"
+      clickhouse: {type: "Nullable(String)"}
+      new: true
+    - native_type: "NVARCHAR(MAX)"
+      table: tc_edge_mssql_str
+      column: c_nvarchar_max
+      edges:
+        - "N''"
+        - "N'abc'"
+        - "N' x '"
+        - "REPLICATE(CAST(N'y' AS nvarchar(max)),100000)"
+        - "N'a'+NCHAR(0)+N'b'"
+        - "REPLICATE(CAST(NCHAR(0xD83D)+NCHAR(0xDE00) AS nvarchar(max)),50000)"
+        - "NCHAR(0xDC00)"
+      delivery: "Utf8"
+      clickhouse: {type: "Nullable(String)"}
+      new: true
+    - native_type: "TEXT"
+      table: tc_edge_mssql_str
+      column: c_text
+      edges:
+        - "''"
+        - "'abc'"
+        - "' x '"
+        - "REPLICATE(CAST('t' AS varchar(max)),100000)"
+        - "'a'+CHAR(0)+'b'"
+        - "CHAR(233)"
+      delivery: "Utf8"
+      clickhouse: {type: "Nullable(String)"}
+      new: true
+    - native_type: "NTEXT"
+      table: tc_edge_mssql_str
+      column: c_ntext
+      edges:
+        - "N''"
+        - "N'abc'"
+        - "N' x '"
+        - "REPLICATE(CAST(N'n' AS nvarchar(max)),100000)"
+        - "N'a'+NCHAR(0)+N'b'"
+        - "NCHAR(0xD83D)+NCHAR(0xDE00)"
+        - "NCHAR(0xD800)"
+      delivery: "Utf8"
+      clickhouse: {type: "Nullable(String)"}
+      new: true
+    - native_type: "BINARY(16)"
+      table: tc_edge_mssql_bin
+      column: c_binary
+      edges:
+        - "0x00000000000000000000000000000000"
+        - "0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+        - "0x01"
+      delivery: "Binary"
+      clickhouse: {type: "Nullable(String)"}
+      new: true
+    - native_type: "VARBINARY(16)"
+      table: tc_edge_mssql_bin
+      column: c_varbinary
+      edges:
+        - "0x"
+        - "0x00"
+        - "0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+      delivery: "Binary"
+      clickhouse: {type: "Nullable(String)"}
+    - native_type: "VARBINARY(MAX)"
+      table: tc_edge_mssql_bin
+      column: c_varbinary_max
+      edges:
+        - "0x"
+        - "0x00"
+        - "@b"
+        - "@big"
+      delivery: "Binary"
+      clickhouse: {type: "Nullable(String)"}
+      new: true
+    - native_type: "IMAGE"
+      table: tc_edge_mssql_bin
+      column: c_image
+      edges:
+        - "0x"
+        - "0x00"
+        - "@b"
+        - "@big"
+      delivery: "Binary"
+      clickhouse: {type: "Nullable(String)"}
+      new: true
+    - native_type: "DATE"
+      table: tc_edge_mssql_date
+      column: c_date
+      edges:
+        - "'0001-01-01'"
+        - "'9999-12-31'"
+        - "'1970-01-01'"
+        - "'1969-12-31'"
+        - "'1677-09-21'"
+        - "'2262-04-11'"
+        - "'1900-01-01'"
+        - "'2299-12-31'"
+        - "'2000-02-29'"
+        - "'1899-12-31'"
+        - "'2300-01-01'"
+      delivery: "Date32"
+      clickhouse: {type: "Nullable(Date32)"}
+    - native_type: "DATETIME"
+      table: tc_edge_mssql_date
+      column: c_datetime
+      edges:
+        - "'1753-01-01 00:00:00.000'"
+        - "'9999-12-31 23:59:59.997'"
+        - "'1970-01-01 00:00:00.000'"
+        - "'1969-12-31 23:59:59.997'"
+        - "'1900-01-01 00:00:00.000'"
+        - "'2000-02-29 12:34:56.003'"
+        - "'2299-12-31 23:59:59.997'"
+        - "'2262-04-11 23:47:16'"
+        - "'2000-02-29 12:34:56.007'"
+      delivery: "Timestamp(µs)"
+      clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}
+    - native_type: "SMALLDATETIME"
+      table: tc_edge_mssql_date
+      column: c_smalldatetime
+      edges:
+        - "'1900-01-01 00:00'"
+        - "'2079-06-06 23:59'"
+        - "'1970-01-01 00:00'"
+        - "'1969-12-31 23:59'"
+        - "'2000-02-29 12:34'"
+      delivery: "Timestamp(µs)"
+      clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}
+    - native_type: "TIME(0)"
+      table: tc_edge_mssql_time
+      column: t0
+      edges:
+        - "'00:00:00'"
+        - "'23:59:59'"
+        - "'12:34:56'"
+        - "'01:00:00'"
+        - "'23:59:59.9999999'"
+        - "'12:34:56.1234567'"
+      delivery: "Time64(µs)"
+      clickhouse: {type: "Nullable(Decimal(18, 6))"}
+      new: true
+    - native_type: "TIME(1)"
+      table: tc_edge_mssql_time
+      column: t1
+      edges:
+        - "'00:00:00.0'"
+        - "'23:59:59.9'"
+        - "'12:34:56.1'"
+        - "'00:00:00.1'"
+        - "'01:00:00.5'"
+        - "'23:59:59.9999999'"
+        - "'12:34:56.1234567'"
+      delivery: "Time64(µs)"
+      clickhouse: {type: "Nullable(Decimal(18, 6))"}
+      new: true
+    - native_type: "TIME(2)"
+      table: tc_edge_mssql_time
+      column: t2
+      edges:
+        - "'00:00:00.00'"
+        - "'23:59:59.99'"
+        - "'12:34:56.12'"
+        - "'00:00:00.01'"
+        - "'01:00:00.50'"
+        - "'23:59:59.9999999'"
+        - "'12:34:56.1234567'"
+      delivery: "Time64(µs)"
+      clickhouse: {type: "Nullable(Decimal(18, 6))"}
+      new: true
+    - native_type: "TIME(3)"
+      table: tc_edge_mssql_time
+      column: t3
+      edges:
+        - "'00:00:00.000'"
+        - "'23:59:59.999'"
+        - "'12:34:56.123'"
+        - "'00:00:00.001'"
+        - "'01:00:00.500'"
+        - "'23:59:59.9999999'"
+        - "'12:34:56.1234567'"
+      delivery: "Time64(µs)"
+      clickhouse: {type: "Nullable(Decimal(18, 6))"}
+      new: true
+    - native_type: "TIME(4)"
+      table: tc_edge_mssql_time
+      column: t4
+      edges:
+        - "'00:00:00.0000'"
+        - "'23:59:59.9999'"
+        - "'12:34:56.1234'"
+        - "'00:00:00.0001'"
+        - "'01:00:00.5000'"
+        - "'23:59:59.9999999'"
+        - "'12:34:56.1234567'"
+      delivery: "Time64(µs)"
+      clickhouse: {type: "Nullable(Decimal(18, 6))"}
+      new: true
+    - native_type: "TIME(5)"
+      table: tc_edge_mssql_time
+      column: t5
+      edges:
+        - "'00:00:00.00000'"
+        - "'23:59:59.99999'"
+        - "'12:34:56.12345'"
+        - "'00:00:00.00001'"
+        - "'01:00:00.50000'"
+        - "'23:59:59.9999999'"
+        - "'12:34:56.1234567'"
+      delivery: "Time64(µs)"
+      clickhouse: {type: "Nullable(Decimal(18, 6))"}
+      new: true
+    - native_type: "TIME(6)"
+      table: tc_edge_mssql_time
+      column: t6
+      edges:
+        - "'00:00:00.000000'"
+        - "'23:59:59.999999'"
+        - "'12:34:56.123456'"
+        - "'00:00:00.000001'"
+        - "'01:00:00.500000'"
+        - "'23:59:59.9999999'"
+        - "'12:34:56.1234567'"
+      delivery: "Time64(µs)"
+      clickhouse: {type: "Nullable(Decimal(18, 6))"}
+      new: true
+    - native_type: "TIME(7)"
+      table: tc_edge_mssql_time
+      column: t7
+      edges:
+        - "'00:00:00.0000000'"
+        - "'23:59:59.9999999'"
+        - "'12:34:56.1234567'"
+        - "'00:00:00.0000001'"
+        - "'01:00:00.5000000'"
+      delivery: "Time64(µs)"
+      clickhouse: {type: "Nullable(Decimal(18, 6))"}
+      new: true
+    - native_type: "DATETIME2(0)"
+      table: tc_edge_mssql_dt2
+      column: d0
+      edges:
+        - "'0001-01-01 00:00:00'"
+        - "'9999-12-31 23:59:59'"
+        - "'1970-01-01 00:00:00'"
+        - "'1969-12-31 23:59:59'"
+        - "'1677-09-21 00:00:00'"
+        - "'2262-04-11 23:47:16'"
+        - "'1900-01-01 00:00:00'"
+        - "'2299-12-31 23:59:59'"
+        - "'2000-02-29 12:34:56'"
+        - "'1899-12-31 23:59:59'"
+        - "'2300-01-01 00:00:00'"
+        - "'2000-01-01 00:00:00.0000005'"
+      delivery: "Timestamp(µs)"
+      clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}
+      new: true
+    - native_type: "DATETIME2(1)"
+      table: tc_edge_mssql_dt2
+      column: d1
+      edges:
+        - "'0001-01-01 00:00:00.0'"
+        - "'9999-12-31 23:59:59.9'"
+        - "'1970-01-01 00:00:00.0'"
+        - "'1969-12-31 23:59:59.9'"
+        - "'1677-09-21 00:00:00.0'"
+        - "'2262-04-11 23:47:16.0'"
+        - "'1900-01-01 00:00:00.0'"
+        - "'2299-12-31 23:59:59.9'"
+        - "'2000-02-29 12:34:56.1'"
+        - "'1970-01-01 00:00:00.1'"
+        - "'1899-12-31 23:59:59.9'"
+        - "'2300-01-01 00:00:00.0'"
+        - "'2000-01-01 00:00:00.0000005'"
+      delivery: "Timestamp(µs)"
+      clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}
+      new: true
+    - native_type: "DATETIME2(2)"
+      table: tc_edge_mssql_dt2
+      column: d2
+      edges:
+        - "'0001-01-01 00:00:00.00'"
+        - "'9999-12-31 23:59:59.99'"
+        - "'1970-01-01 00:00:00.00'"
+        - "'1969-12-31 23:59:59.99'"
+        - "'1677-09-21 00:00:00.00'"
+        - "'2262-04-11 23:47:16.00'"
+        - "'1900-01-01 00:00:00.00'"
+        - "'2299-12-31 23:59:59.99'"
+        - "'2000-02-29 12:34:56.12'"
+        - "'1970-01-01 00:00:00.01'"
+        - "'1899-12-31 23:59:59.99'"
+        - "'2300-01-01 00:00:00.00'"
+        - "'2000-01-01 00:00:00.0000005'"
+      delivery: "Timestamp(µs)"
+      clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}
+      new: true
+    - native_type: "DATETIME2(3)"
+      table: tc_edge_mssql_dt2
+      column: d3
+      edges:
+        - "'0001-01-01 00:00:00.000'"
+        - "'9999-12-31 23:59:59.999'"
+        - "'1970-01-01 00:00:00.000'"
+        - "'1969-12-31 23:59:59.999'"
+        - "'1677-09-21 00:00:00.000'"
+        - "'2262-04-11 23:47:16.000'"
+        - "'1900-01-01 00:00:00.000'"
+        - "'2299-12-31 23:59:59.999'"
+        - "'2000-02-29 12:34:56.123'"
+        - "'1970-01-01 00:00:00.001'"
+        - "'1899-12-31 23:59:59.999'"
+        - "'2300-01-01 00:00:00.000'"
+        - "'2000-01-01 00:00:00.0000005'"
+      delivery: "Timestamp(µs)"
+      clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}
+      new: true
+    - native_type: "DATETIME2(4)"
+      table: tc_edge_mssql_dt2
+      column: d4
+      edges:
+        - "'0001-01-01 00:00:00.0000'"
+        - "'9999-12-31 23:59:59.9999'"
+        - "'1970-01-01 00:00:00.0000'"
+        - "'1969-12-31 23:59:59.9999'"
+        - "'1677-09-21 00:00:00.0000'"
+        - "'2262-04-11 23:47:16.0000'"
+        - "'1900-01-01 00:00:00.0000'"
+        - "'2299-12-31 23:59:59.9999'"
+        - "'2000-02-29 12:34:56.1234'"
+        - "'1970-01-01 00:00:00.0001'"
+        - "'1899-12-31 23:59:59.9999'"
+        - "'2300-01-01 00:00:00.0000'"
+        - "'2000-01-01 00:00:00.0000005'"
+      delivery: "Timestamp(µs)"
+      clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}
+      new: true
+    - native_type: "DATETIME2(5)"
+      table: tc_edge_mssql_dt2
+      column: d5
+      edges:
+        - "'0001-01-01 00:00:00.00000'"
+        - "'9999-12-31 23:59:59.99999'"
+        - "'1970-01-01 00:00:00.00000'"
+        - "'1969-12-31 23:59:59.99999'"
+        - "'1677-09-21 00:00:00.00000'"
+        - "'2262-04-11 23:47:16.00000'"
+        - "'1900-01-01 00:00:00.00000'"
+        - "'2299-12-31 23:59:59.99999'"
+        - "'2000-02-29 12:34:56.12345'"
+        - "'1970-01-01 00:00:00.00001'"
+        - "'1899-12-31 23:59:59.99999'"
+        - "'2300-01-01 00:00:00.00000'"
+        - "'2000-01-01 00:00:00.0000005'"
+      delivery: "Timestamp(µs)"
+      clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}
+      new: true
+    - native_type: "DATETIME2(6)"
+      table: tc_edge_mssql_dt2
+      column: d6
+      edges:
+        - "'0001-01-01 00:00:00.000000'"
+        - "'9999-12-31 23:59:59.999999'"
+        - "'1970-01-01 00:00:00.000000'"
+        - "'1969-12-31 23:59:59.999999'"
+        - "'1677-09-21 00:00:00.000000'"
+        - "'2262-04-11 23:47:16.000000'"
+        - "'1900-01-01 00:00:00.000000'"
+        - "'2299-12-31 23:59:59.999999'"
+        - "'2000-02-29 12:34:56.123456'"
+        - "'1970-01-01 00:00:00.000001'"
+        - "'1899-12-31 23:59:59.999999'"
+        - "'2300-01-01 00:00:00.000000'"
+        - "'2000-01-01 00:00:00.0000005'"
+      delivery: "Timestamp(µs)"
+      clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}
+      new: true
+    - native_type: "DATETIME2(7)"
+      table: tc_edge_mssql_dt2
+      column: d7
+      edges:
+        - "'0001-01-01 00:00:00.0000000'"
+        - "'9999-12-31 23:59:59.9999999'"
+        - "'1970-01-01 00:00:00.0000000'"
+        - "'1969-12-31 23:59:59.9999999'"
+        - "'1677-09-21 00:00:00.0000000'"
+        - "'2262-04-11 23:47:16.0000000'"
+        - "'1900-01-01 00:00:00.0000000'"
+        - "'2299-12-31 23:59:59.9999999'"
+        - "'2000-02-29 12:34:56.1234567'"
+        - "'1970-01-01 00:00:00.0000001'"
+        - "'1899-12-31 23:59:59.9999999'"
+        - "'2300-01-01 00:00:00.0000000'"
+        - "'2000-01-01 00:00:00.0000005'"
+      delivery: "Timestamp(µs)"
+      clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}
+      new: true
+    - native_type: "DATETIMEOFFSET(0)"
+      table: tc_edge_mssql_dto
+      column: o0
+      edges:
+        - "'0001-01-01 00:00:00 +00:00'"
+        - "'9999-12-31 23:59:59 +00:00'"
+        - "'9999-12-31 09:59:59 -14:00'"
+        - "'0001-01-01 14:00:00 +14:00'"
+        - "'1970-01-01 00:00:00 +05:30'"
+        - "'1969-12-31 23:59:59 +00:00'"
+        - "'2000-02-29 12:34:56 -08:00'"
+        - "'2000-01-01 00:00:00 +14:00'"
+        - "'1677-09-21 00:00:00 +00:00'"
+        - "'2262-04-11 23:47:16 +00:00'"
+        - "'2300-01-01 00:00:00 +00:00'"
+      delivery: "Timestamp(µs, \"UTC\")"
+      clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}
+      new: true
+    - native_type: "DATETIMEOFFSET(1)"
+      table: tc_edge_mssql_dto
+      column: o1
+      edges:
+        - "'0001-01-01 00:00:00.0 +00:00'"
+        - "'9999-12-31 23:59:59.9 +00:00'"
+        - "'9999-12-31 09:59:59.9 -14:00'"
+        - "'0001-01-01 14:00:00.0 +14:00'"
+        - "'1970-01-01 00:00:00.0 +05:30'"
+        - "'1969-12-31 23:59:59.9 +00:00'"
+        - "'2000-02-29 12:34:56.1 -08:00'"
+        - "'2000-01-01 00:00:00.0 +14:00'"
+        - "'1970-01-01 00:00:00.1 +00:00'"
+        - "'1677-09-21 00:00:00.0 +00:00'"
+        - "'2262-04-11 23:47:16.0 +00:00'"
+        - "'2300-01-01 00:00:00.0 +00:00'"
+      delivery: "Timestamp(µs, \"UTC\")"
+      clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}
+      new: true
+    - native_type: "DATETIMEOFFSET(2)"
+      table: tc_edge_mssql_dto
+      column: o2
+      edges:
+        - "'0001-01-01 00:00:00.00 +00:00'"
+        - "'9999-12-31 23:59:59.99 +00:00'"
+        - "'9999-12-31 09:59:59.99 -14:00'"
+        - "'0001-01-01 14:00:00.00 +14:00'"
+        - "'1970-01-01 00:00:00.00 +05:30'"
+        - "'1969-12-31 23:59:59.99 +00:00'"
+        - "'2000-02-29 12:34:56.12 -08:00'"
+        - "'2000-01-01 00:00:00.00 +14:00'"
+        - "'1970-01-01 00:00:00.01 +00:00'"
+        - "'1677-09-21 00:00:00.00 +00:00'"
+        - "'2262-04-11 23:47:16.00 +00:00'"
+        - "'2300-01-01 00:00:00.00 +00:00'"
+      delivery: "Timestamp(µs, \"UTC\")"
+      clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}
+      new: true
+    - native_type: "DATETIMEOFFSET(3)"
+      table: tc_edge_mssql_dto
+      column: o3
+      edges:
+        - "'0001-01-01 00:00:00.000 +00:00'"
+        - "'9999-12-31 23:59:59.999 +00:00'"
+        - "'9999-12-31 09:59:59.999 -14:00'"
+        - "'0001-01-01 14:00:00.000 +14:00'"
+        - "'1970-01-01 00:00:00.000 +05:30'"
+        - "'1969-12-31 23:59:59.999 +00:00'"
+        - "'2000-02-29 12:34:56.123 -08:00'"
+        - "'2000-01-01 00:00:00.000 +14:00'"
+        - "'1970-01-01 00:00:00.001 +00:00'"
+        - "'1677-09-21 00:00:00.000 +00:00'"
+        - "'2262-04-11 23:47:16.000 +00:00'"
+        - "'2300-01-01 00:00:00.000 +00:00'"
+      delivery: "Timestamp(µs, \"UTC\")"
+      clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}
+      new: true
+    - native_type: "DATETIMEOFFSET(4)"
+      table: tc_edge_mssql_dto
+      column: o4
+      edges:
+        - "'0001-01-01 00:00:00.0000 +00:00'"
+        - "'9999-12-31 23:59:59.9999 +00:00'"
+        - "'9999-12-31 09:59:59.9999 -14:00'"
+        - "'0001-01-01 14:00:00.0000 +14:00'"
+        - "'1970-01-01 00:00:00.0000 +05:30'"
+        - "'1969-12-31 23:59:59.9999 +00:00'"
+        - "'2000-02-29 12:34:56.1234 -08:00'"
+        - "'2000-01-01 00:00:00.0000 +14:00'"
+        - "'1970-01-01 00:00:00.0001 +00:00'"
+        - "'1677-09-21 00:00:00.0000 +00:00'"
+        - "'2262-04-11 23:47:16.0000 +00:00'"
+        - "'2300-01-01 00:00:00.0000 +00:00'"
+      delivery: "Timestamp(µs, \"UTC\")"
+      clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}
+      new: true
+    - native_type: "DATETIMEOFFSET(5)"
+      table: tc_edge_mssql_dto
+      column: o5
+      edges:
+        - "'0001-01-01 00:00:00.00000 +00:00'"
+        - "'9999-12-31 23:59:59.99999 +00:00'"
+        - "'9999-12-31 09:59:59.99999 -14:00'"
+        - "'0001-01-01 14:00:00.00000 +14:00'"
+        - "'1970-01-01 00:00:00.00000 +05:30'"
+        - "'1969-12-31 23:59:59.99999 +00:00'"
+        - "'2000-02-29 12:34:56.12345 -08:00'"
+        - "'2000-01-01 00:00:00.00000 +14:00'"
+        - "'1970-01-01 00:00:00.00001 +00:00'"
+        - "'1677-09-21 00:00:00.00000 +00:00'"
+        - "'2262-04-11 23:47:16.00000 +00:00'"
+        - "'2300-01-01 00:00:00.00000 +00:00'"
+      delivery: "Timestamp(µs, \"UTC\")"
+      clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}
+      new: true
+    - native_type: "DATETIMEOFFSET(6)"
+      table: tc_edge_mssql_dto
+      column: o6
+      edges:
+        - "'0001-01-01 00:00:00.000000 +00:00'"
+        - "'9999-12-31 23:59:59.999999 +00:00'"
+        - "'9999-12-31 09:59:59.999999 -14:00'"
+        - "'0001-01-01 14:00:00.000000 +14:00'"
+        - "'1970-01-01 00:00:00.000000 +05:30'"
+        - "'1969-12-31 23:59:59.999999 +00:00'"
+        - "'2000-02-29 12:34:56.123456 -08:00'"
+        - "'2000-01-01 00:00:00.000000 +14:00'"
+        - "'1970-01-01 00:00:00.000001 +00:00'"
+        - "'1677-09-21 00:00:00.000000 +00:00'"
+        - "'2262-04-11 23:47:16.000000 +00:00'"
+        - "'2300-01-01 00:00:00.000000 +00:00'"
+      delivery: "Timestamp(µs, \"UTC\")"
+      clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}
+      new: true
+    - native_type: "DATETIMEOFFSET(7)"
+      table: tc_edge_mssql_dto
+      column: o7
+      edges:
+        - "'0001-01-01 00:00:00.0000000 +00:00'"
+        - "'9999-12-31 23:59:59.9999999 +00:00'"
+        - "'9999-12-31 09:59:59.9999999 -14:00'"
+        - "'0001-01-01 14:00:00.0000000 +14:00'"
+        - "'1970-01-01 00:00:00.0000000 +05:30'"
+        - "'1969-12-31 23:59:59.9999999 +00:00'"
+        - "'2000-02-29 12:34:56.1234567 -08:00'"
+        - "'2000-01-01 00:00:00.0000000 +14:00'"
+        - "'1970-01-01 00:00:00.0000001 +00:00'"
+        - "'1677-09-21 00:00:00.0000000 +00:00'"
+        - "'2262-04-11 23:47:16.0000000 +00:00'"
+        - "'2300-01-01 00:00:00.0000000 +00:00'"
+      delivery: "Timestamp(µs, \"UTC\")"
+      clickhouse: {type: "Nullable(DateTime64(6, 'UTC'))"}
+      new: true
+    - native_type: "UNIQUEIDENTIFIER"
+      table: tc_edge_mssql_uid
+      column: u
+      edges:
+        - "'00000000-0000-0000-0000-000000000000'"
+        - "'FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF'"
+        - "'6BA7B810-9DAD-11D1-80B4-00C04FD430C8'"
+        - "'01020304-0506-0708-090A-0B0C0D0E0F10'"
+      delivery: "arrow.uuid"
+      clickhouse: {type: "Nullable(FixedString(16))"}
+    - native_type: "XML"
+      table: tc_edge_mssql_xml
+      column: x
+      edges:
+        - "'<a/>'"
+        - "'<a>x</a>'"
+        - "N'<a>'+NCHAR(0xD83D)+NCHAR(0xDE00)+N'é</a>'"
+        - "CAST(N'<a b=\"1\"><c>'+REPLICATE(CAST(N'z' AS nvarchar(max)),100000)+N'</c></a>' AS xml)"
+        - "N'<?xml version=\"1.0\" encoding=\"utf-16\"?><a>x</a>'"
+      delivery: "none (refused: no Rivet mapping yet, exit 1)"
+      new: true
+    - native_type: "SQL_VARIANT"
+      table: tc_edge_mssql_var
+      column: v
+      edges:
+        - "CAST(2147483647 AS int)"
+        - "CAST(-9223372036854775808 AS bigint)"
+        - "CAST(255 AS tinyint)"
+        - "CAST(1 AS bit)"
+        - "CAST(99999999999999999999999999999999999999 AS decimal(38,0))"
+        - "CAST(-0.0000000001 AS decimal(38,10))"
+        - "CAST(12345.6789 AS money)"
+        - "CAST(1.7976931348623157E+308 AS float)"
+        - "CAST(3.4E+38 AS real)"
+        - "CAST(0.1 AS float)"
+        - "N'ü'+NCHAR(0xD83D)+NCHAR(0xDE00)"
+        - "CAST('abc' AS varchar(10))"
+        - "CAST('' AS varchar(10))"
+        - "CAST(0x00FF AS varbinary(10))"
+        - "CAST(0x AS varbinary(10))"
+        - "CAST('6BA7B810-9DAD-11D1-80B4-00C04FD430C8' AS uniqueidentifier)"
+        - "CAST('0001-01-01' AS date)"
+        - "CAST('9999-12-31' AS date)"
+        - "CAST('2000-02-29 12:34:56.1234567' AS datetime2(7))"
+        - "CAST('9999-12-31 09:59:59.9999999 -14:00' AS datetimeoffset(7))"
+        - "CAST('2000-02-29 12:34:56.1234567 +05:30' AS datetimeoffset(7))"
+        - "CAST('23:59:59.9999999' AS time(7))"
+        - "CAST('2000-01-01 12:34:56.003' AS datetime)"
+        - "CAST('2000-01-01 12:34' AS smalldatetime)"
+      delivery: "Utf8"
+      clickhouse: {type: "Nullable(String)"}
+      new: true
+    - native_type: "HIERARCHYID"
+      table: tc_edge_mssql_clr
+      column: h
+      edges:
+        - "hierarchyid::GetRoot()"
+        - "hierarchyid::Parse('/1/')"
+        - "hierarchyid::Parse('/1.2/3/')"
+        - "hierarchyid::Parse('/-5/')"
+      delivery: "Utf8"
+      clickhouse: {type: "Nullable(String)"}
+      new: true
+    - native_type: "GEOMETRY"
+      table: tc_edge_mssql_clr
+      column: gm
+      edges:
+        - "geometry::STGeomFromText('POINT(1 2)',0)"
+        - "geometry::STGeomFromText('GEOMETRYCOLLECTION EMPTY',0)"
+        - "geometry::STGeomFromText('POLYGON((0 0,10 0,10 10,0 10,0 0))',4326)"
+        - "geometry::Parse('POINT(1 2 3 4)')"
+      delivery: "Utf8"
+      clickhouse: {type: "Nullable(String)"}
+      new: true
+    - native_type: "GEOGRAPHY"
+      table: tc_edge_mssql_clr
+      column: gg
+      edges:
+        - "geography::STGeomFromText('POINT(-122.3 47.6)',4326)"
+        - "geography::STGeomFromText('GEOMETRYCOLLECTION EMPTY',4326)"
+        - "geography::STGeomFromText('POLYGON((0 0,1 0,1 1,0 1,0 0))',4326)"
+        - "geography::STGeomFromText('LINESTRING(0 0,1 1)',4326)"
+      delivery: "Utf8"
+      clickhouse: {type: "Nullable(String)"}
+      new: true
+    - native_type: "ROWVERSION"
+      table: tc_edge_mssql_rv
+      column: rv
+      edges:
+        - "(auto-generated by INSERT)"
+      delivery: "Binary"
+      clickhouse: {type: "Nullable(String)"}
+      new: true
+    - native_type: "MONEY (refused band)"
+      table: tc_edge_mssql_mnyA
+      column: c_money
+      edges:
+        - "922337203685477.5807"
+        - "-922337203685477.5808"
+      delivery: "none (refused: RIVET_SOURCE_VALUE_UNREPRESENTABLE, exit 5)"
+      new: true

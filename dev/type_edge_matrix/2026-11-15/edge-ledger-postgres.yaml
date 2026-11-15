@@ -1,0 +1,1098 @@
+# generated from edge-pg measurement run; not a repo edit
+# new: true = absent from engines.postgres.rows
+postgres:
+  rows:
+    - native_type: "?"
+      table: tc_edge_pg_ad_d
+      delivery: "list<item: date32[day]>"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ad_t
+      delivery: "list<item: time64[us]>"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ad_ts
+      delivery: "list<item: timestamp[us]>"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ad_tz
+      delivery: "list<item: timestamp[us, tz=UTC]>"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ai_a2
+      delivery: "list<item: int16>"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ai_a4
+      delivery: "list<item: int32>"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ai_a8
+      delivery: "list<item: int64>"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ai_b
+      delivery: "list<item: bool>"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ai_f4
+      delivery: "list<item: float>"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ai_f8
+      delivery: "list<item: double>"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_am_a1
+      delivery: "list<item: int32>"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_am_b1
+      delivery: "list<item: string>"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_as_by
+      delivery: "list<item: binary>"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_as_c
+      delivery: "list<item: string>"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_as_t
+      delivery: "list<item: string>"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_as_u
+      delivery: "list<item: extension<arrow.uuid>>"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_as_vc
+      delivery: "list<item: string>"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "boolean"
+      table: tc_edge_pg_bool
+      delivery: "bool"
+      edges:
+        - "(2,true)"
+        - "(3,false)"
+      clickhouse: {type: "UNMEASURED(freeze)"}
+    - native_type: "bpchar"
+      table: tc_edge_pg_bpchar
+      delivery: "string"
+      edges:
+        - "(2,'x')"
+        - "(3,' ')"
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "bytea"
+      table: tc_edge_pg_bytea
+      delivery: "binary"
+      edges:
+        - "(2,'')"
+        - "(3,'\\x00')"
+        - "(4,'\\xff')"
+      clickhouse: {type: "UNMEASURED(freeze)"}
+    - native_type: "char(10)"
+      table: tc_edge_pg_char
+      delivery: "string"
+      edges:
+        - "(2,'')"
+        - "(3,'a')"
+        - "(4,'abcdefghij')"
+        - "(5,'  ab')"
+        - "(6,E'\\U0001F600')"
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_date_ok
+      delivery: "date32[day]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_date_r02
+      delivery: "date32[day]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_date_r03
+      delivery: "date32[day]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_date_r04
+      delivery: "date32[day]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_date_r05
+      delivery: "date32[day]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_date_r06
+      delivery: "date32[day]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_date_r07
+      delivery: "date32[day]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_date_r08
+      delivery: "date32[day]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_date_r09
+      delivery: "date32[day]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_date_r10
+      delivery: "date32[day]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_date_r11
+      delivery: "date32[day]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_date_r15
+      delivery: "date32[day]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_date_r16
+      delivery: "date32[day]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_date_r17
+      delivery: "date32[day]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "tc_edge_pg_dom"
+      table: tc_edge_pg_domain
+      delivery: "int32"
+      edges:
+        - "(2,5)"
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "tc_edge_pg_mood"
+      table: tc_edge_pg_enum
+      delivery: "string"
+      edges:
+        - "(2,'sad')"
+        - "(3,'happy')"
+        - "(4,'')"
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "real"
+      table: tc_edge_pg_float4
+      delivery: "float"
+      edges:
+        - "(2,0)"
+        - "(3,'NaN')"
+        - "(4,'Infinity')"
+        - "(5,'-Infinity')"
+        - "(6,'-0')"
+        - "(7,'1.4e-45')"
+        - "(8,'1.17549435e-38')"
+        - "(9,'3.4028235e38')"
+        - "(10,'-3.4028235e38')"
+      clickhouse: {type: "UNMEASURED(freeze)"}
+    - native_type: "double precision"
+      table: tc_edge_pg_float8
+      delivery: "double"
+      edges:
+        - "(2,0)"
+        - "(3,'NaN')"
+        - "(4,'Infinity')"
+        - "(5,'-Infinity')"
+        - "(6,'-0')"
+        - "(7,'4.9e-324')"
+        - "(8,'2.2250738585072014e-308')"
+        - "(9,'1.7976931348623157e308')"
+        - "(10,'-1.7976931348623157e308')"
+      clickhouse: {type: "UNMEASURED(freeze)"}
+    - native_type: "smallint"
+      table: tc_edge_pg_int2
+      delivery: "int16"
+      edges:
+        - "(2,0)"
+        - "(3,-32768)"
+        - "(4,32767)"
+        - "(5,-32767)"
+        - "(6,32766)"
+      clickhouse: {type: "UNMEASURED(freeze)"}
+    - native_type: "int"
+      table: tc_edge_pg_int4
+      delivery: "int32"
+      edges:
+        - "(2,0)"
+        - "(3,-2147483648)"
+        - "(4,2147483647)"
+        - "(5,-2147483647)"
+        - "(6,2147483646)"
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "bigint"
+      table: tc_edge_pg_int8
+      delivery: "int64"
+      edges:
+        - "(2,0)"
+        - "(3,-9223372036854775808)"
+        - "(4,9223372036854775807)"
+        - "(5,-9223372036854775807)"
+        - "(6,9223372036854775806)"
+      clickhouse: {type: "UNMEASURED(freeze)"}
+    - native_type: "interval"
+      table: tc_edge_pg_interval
+      delivery: "string"
+      edges:
+        - "(2,'0')"
+        - "(3,'178000000 years')"
+        - "(4,'-178000000 years')"
+        - "(5,'2147483647 months')"
+        - "(6,'-2147483648 months')"
+        - "(7,'2147483647 days')"
+        - "(8,'-2147483648 days')"
+        - "(9,'2562047788:00:00')"
+        - "(10,'-2562047788:00:00')"
+        - "(11,'1 month -1 day +1 microsecond')"
+        - "(12,'1 year 2 mons 3 days 04:05:06.789012')"
+        - "(13,'-1 month 1 day -00:00:00.000001')"
+        - "(14,'infinity')"
+        - "(15,'-infinity')"
+        - "(2,'0')"
+        - "(3,'178000000 years')"
+        - "(4,'-178000000 years')"
+        - "(5,'2147483647 months')"
+        - "(6,'-2147483648 months')"
+        - "(7,'2147483647 days')"
+        - "(8,'-2147483648 days')"
+        - "(11,'1 month -1 day +1 microsecond')"
+        - "(12,'1 year 2 mons 3 days 04:05:06.789012')"
+        - "(13,'-1 month 1 day -00:00:00.000001')"
+        - "(16,'2147483647 hours')"
+        - "(17,'-2147483648 hours')"
+        - "(18,'0.000001 seconds')"
+        - "(19,'-0.000001 seconds')"
+        - "(9,'2562047788:00:00')"
+        - "(10,'-2562047788:00:00')"
+        - "(14,'infinity')"
+        - "(15,'-infinity')"
+        - "(20,'2147483647 days 2562047787:59:59.999999')"
+      clickhouse: {type: "UNMEASURED(freeze)"}
+    - native_type: "json"
+      table: tc_edge_pg_json
+      delivery: "extension<arrow.json>"
+      edges:
+        - "(2,'null')"
+        - "(3,'{}')"
+        - "(4,'[]')"
+        - "(5,'{\"a\":18446744073709551616,\"b\":1e400,\"c\":1.0000000000000000001}')"
+        - "(6,'\"\"')"
+        - "(7,'\"\\u0000\"')"
+        - "(8,'{\"k\":\"\u65e5\u672c\u8a9e \\ud83d\\ude00\"}')"
+        - "(9,'  {\"a\" :   1 }  ')"
+        - "(10,'{\"a\":1,\"a\":2}')"
+        - "(11,(repeat('[',500)||repeat(']',500))::json)"
+      clickhouse: {type: "UNMEASURED(freeze)"}
+    - native_type: "jsonb"
+      table: tc_edge_pg_jsonb
+      delivery: "extension<arrow.json>"
+      edges:
+        - "(2,'null')"
+        - "(3,'{}')"
+        - "(4,'[]')"
+        - "(5,'{\"a\":18446744073709551616,\"b\":1e400,\"c\":1.0000000000000000001}')"
+        - "(6,'\"\"')"
+        - "(7,'{\"k\":\"\u65e5\u672c\u8a9e \\ud83d\\ude00\"}')"
+        - "(8,'{\"a\":1,\"a\":2}')"
+        - "(9,'  {\"b\" :   1, \"a\":2 }  ')"
+        - "(10,(repeat('[',500)||repeat(']',500))::jsonb)"
+      clickhouse: {type: "UNMEASURED(freeze)"}
+    - native_type: "name"
+      table: tc_edge_pg_name
+      delivery: "string"
+      edges:
+        - "(2,'abc')"
+        - "(3,repeat('n',63))"
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "numeric(38,0)"
+      table: tc_edge_pg_num_38_0
+      delivery: "decimal128(38, 0)"
+      edges:
+        - "(2,0)"
+        - "(3,99999999999999999999999999999999999999)"
+        - "(4,-99999999999999999999999999999999999999)"
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "numeric(38,10)"
+      table: tc_edge_pg_num_38_10
+      delivery: "decimal128(38, 10)"
+      edges:
+        - "(2,0)"
+        - "(3,9999999999999999999999999999.9999999999)"
+        - "(4,-9999999999999999999999999999.9999999999)"
+        - "(5,0.0000000001)"
+        - "(6,-0.0000000001)"
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "numeric(38,38)"
+      table: tc_edge_pg_num_38_38
+      delivery: "decimal128(38, 38)"
+      edges:
+        - "(2,0)"
+        - "(3,0.99999999999999999999999999999999999999)"
+        - "(4,0.00000000000000000000000000000000000001)"
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "numeric(76,0)"
+      table: tc_edge_pg_num_76_0
+      delivery: "decimal256(76, 0)"
+      edges:
+        - "(2,0)"
+        - "(3,repeat('9',76)::numeric)"
+        - "(4,-repeat('9',76)::numeric)"
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "numeric(5,2)"
+      table: tc_edge_pg_num_p5
+      delivery: "decimal128(5, 2)"
+      edges:
+        - "(2,0)"
+        - "(3,999.99)"
+        - "(4,-999.99)"
+        - "(5,0.01)"
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_oid_v
+      delivery: "int64"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "text"
+      table: tc_edge_pg_text
+      delivery: "string"
+      edges:
+        - "(2,'')"
+        - "(3,repeat('x',1000000))"
+        - "(4,E'a\\U0001F600b')"
+        - "(5,'  lead and trail  ')"
+        - "(6,E'tab\\there\\nnl \"q\" ''s'' \\\\ b')"
+      clickhouse: {type: "UNMEASURED(freeze)"}
+    - native_type: "?"
+      table: tc_edge_pg_time_fin
+      delivery: "time64[us]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ts_ok
+      delivery: "timestamp[us]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "timestamp(0), timestamp(1), timestamp(2), timestamp(3), timestamp(4), timestamp(5), timestamp(6), timestamptz(0), timestamptz(3), timestamptz(6), time(0), time(3), time(6)"
+      table: tc_edge_pg_ts_p
+      delivery: "timestamp[us]"
+      edges:
+        - "(2,'2000-01-01 00:00:00.123456','2000-01-01 00:00:00.123456','2000-01-01 00:00:00.123456','2000-01-01 00:00:00.123456','2000-01-01 00:00:00.123456','2000-01-01 00:00:00.123456','2000-01-01 00:00:00.123456','2000-01-01 00:00:00.123456+00','2000-01-01 00:00:00.123456+00','2000-01-01 00:00:00.123456+00','12:00:00.123456','12:00:00.123456','12:00:00.123456')"
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ts_r02
+      delivery: "timestamp[us]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ts_r03
+      delivery: "timestamp[us]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ts_r04
+      delivery: "timestamp[us]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ts_r05
+      delivery: "timestamp[us]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ts_r06
+      delivery: "timestamp[us]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ts_r07
+      delivery: "timestamp[us]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ts_r08
+      delivery: "timestamp[us]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ts_r09
+      delivery: "timestamp[us]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ts_r10
+      delivery: "timestamp[us]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ts_r11
+      delivery: "timestamp[us]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ts_r15
+      delivery: "timestamp[us]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ts_r16
+      delivery: "timestamp[us]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ts_r17
+      delivery: "timestamp[us]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tsp_p0
+      delivery: "timestamp[us]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tsp_p1
+      delivery: "timestamp[us]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tsp_p2
+      delivery: "timestamp[us]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tsp_p3
+      delivery: "timestamp[us]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tsp_p4
+      delivery: "timestamp[us]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tsp_p5
+      delivery: "timestamp[us]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tsp_p6
+      delivery: "timestamp[us]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tsp_t0
+      delivery: "time64[us]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tsp_t3
+      delivery: "time64[us]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tsp_t6
+      delivery: "time64[us]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tsp_z0
+      delivery: "timestamp[us, tz=UTC]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tsp_z3
+      delivery: "timestamp[us, tz=UTC]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tsp_z6
+      delivery: "timestamp[us, tz=UTC]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tstz_ok
+      delivery: "timestamp[us, tz=UTC]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tstz_r02
+      delivery: "timestamp[us, tz=UTC]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tstz_r03
+      delivery: "timestamp[us, tz=UTC]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tstz_r04
+      delivery: "timestamp[us, tz=UTC]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tstz_r05
+      delivery: "timestamp[us, tz=UTC]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tstz_r06
+      delivery: "timestamp[us, tz=UTC]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tstz_r07
+      delivery: "timestamp[us, tz=UTC]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tstz_r08
+      delivery: "timestamp[us, tz=UTC]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tstz_r09
+      delivery: "timestamp[us, tz=UTC]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tstz_r10
+      delivery: "timestamp[us, tz=UTC]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tstz_r11
+      delivery: "timestamp[us, tz=UTC]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tstz_r15
+      delivery: "timestamp[us, tz=UTC]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tstz_r16
+      delivery: "timestamp[us, tz=UTC]"
+      edges:
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "uuid"
+      table: tc_edge_pg_uuid
+      delivery: "extension<arrow.uuid>"
+      edges:
+        - "(2,'00000000-0000-0000-0000-000000000000')"
+        - "(3,'ffffffff-ffff-ffff-ffff-ffffffffffff')"
+        - "(4,'6ba7b810-9dad-11d1-80b4-00c04fd430c8')"
+      clickhouse: {type: "UNMEASURED(freeze)"}
+    - native_type: "varchar(10)"
+      table: tc_edge_pg_varchar
+      delivery: "string"
+      edges:
+        - "(2,'')"
+        - "(3,'abcdefghij')"
+        - "(4,'  ab  ')"
+        - "(5,E'\\U0001F600\\U0001F600')"
+        - "(6,'\u65e5\u672c\u8a9e')"
+      clickhouse: {type: "UNMEASURED(freeze)"}
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ad_iv
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ai_n
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ai_n102
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_am_a2
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_am_b3
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ao_bi
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ao_cp
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ao_i
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ao_iv
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ao_m
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ao_mo
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ao_o
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ao_pt
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ao_x
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "date[], time[], timestamp[], timestamptz[], interval[]"
+      table: tc_edge_pg_arr_dt
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "date[]"
+      table: tc_edge_pg_arr_dt_inf
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "smallint[], int[], bigint[], real[], double precision[], boolean[], numeric[], numeric(10,2)[]"
+      table: tc_edge_pg_arr_int
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "int[][], text[][][]"
+      table: tc_edge_pg_arr_multi
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "inet[], macaddr[], bit(3)[], money[], int4range[], tc_edge_pg_ctype[], xml[], point[], oid[]"
+      table: tc_edge_pg_arr_other
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "text[], varchar(5)[], char(3)[], bytea[], json[], jsonb[], uuid[], tc_edge_pg_mood[]"
+      table: tc_edge_pg_arr_str
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "timestamptz[]"
+      table: tc_edge_pg_arr_ts_inf
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_as_e
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_as_j
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_as_jb
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "bit(8), bit(1), bit(64), bit(65)"
+      table: tc_edge_pg_bit
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_bit_v
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_bit_w
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_bit_x
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_bit_y
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "cidr"
+      table: tc_edge_pg_cidr
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "tc_edge_pg_ctype"
+      table: tc_edge_pg_comp
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "date"
+      table: tc_edge_pg_date
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_date_fin
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_date_ninf
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_date_pinf
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_date_r12
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_date_r13
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_date_r14
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_geo_b
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_geo_c
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_geo_l
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_geo_ls
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_geo_p
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_geo_pa
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_geo_po
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "inet"
+      table: tc_edge_pg_inet
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "macaddr"
+      table: tc_edge_pg_macaddr
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "macaddr8"
+      table: tc_edge_pg_macaddr8
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "money"
+      table: tc_edge_pg_money
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_money_arr_note
+      delivery: "REFUSED at extract: exit 0 "
+      new: true
+    - native_type: "int4multirange"
+      table: tc_edge_pg_multirange
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "numeric(1000,0)"
+      table: tc_edge_pg_num_1000
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "numeric"
+      table: tc_edge_pg_num_inf
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "numeric"
+      table: tc_edge_pg_num_nan
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "numeric"
+      table: tc_edge_pg_num_ninf
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "numeric"
+      table: tc_edge_pg_num_unb
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "oid, regclass, regtype, xid, cid, xid8, pg_lsn, tid"
+      table: tc_edge_pg_oid
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_oid_c
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_oid_l
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_oid_r
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_oid_t
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_oid_tid_
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_oid_x
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_oid_xx
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "point, line, lseg, box, path, polygon, circle"
+      table: tc_edge_pg_point
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: ""char""
+      table: tc_edge_pg_qchar
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "int4range, int8range, numrange, daterange, tsrange, tstzrange"
+      table: tc_edge_pg_range
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_rng_d
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_rng_i4
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_rng_i8
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_rng_nr
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_rng_t
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_rng_tz
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "time"
+      table: tc_edge_pg_time
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_time_24
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "timetz"
+      table: tc_edge_pg_timetz
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "timestamp"
+      table: tc_edge_pg_ts
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ts_fin
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ts_ninf
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ts_pinf
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ts_r12
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ts_r13
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_ts_r14
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "timestamptz"
+      table: tc_edge_pg_tstz
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tstz_fin
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tstz_ninf
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tstz_pinf
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tstz_r12
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tstz_r13
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tstz_r14
+      delivery: "REFUSED at extract: exit 5 RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tsv_q
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_tsv_v
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "tsvector, tsquery"
+      table: tc_edge_pg_tsvector
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "varbit(70), varbit"
+      table: tc_edge_pg_varbit
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_varbit_v
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "?"
+      table: tc_edge_pg_varbit_w
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true
+    - native_type: "xml"
+      table: tc_edge_pg_xml
+      delivery: "REFUSED at extract: exit 1 RIVET_TYPE_UNSAFE_MAPPING"
+      new: true

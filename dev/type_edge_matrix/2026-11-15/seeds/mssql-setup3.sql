@@ -1,0 +1,14 @@
+USE rivet;
+SET NOCOUNT ON;
+DROP TABLE IF EXISTS tc_edge_mssql_mnyA,tc_edge_mssql_mnyB,tc_edge_mssql_mnyC,tc_edge_mssql_mnyD,tc_edge_mssql_mnyE,tc_edge_mssql_sur1,tc_edge_mssql_sur2,tc_edge_mssql_sur3,tc_edge_mssql_sur4;
+UPDATE tc_edge_mssql_dec SET c_money=NULL WHERE id IN (3,4);
+DELETE FROM tc_edge_mssql_str WHERE id=8;
+CREATE TABLE tc_edge_mssql_mnyA(id int PRIMARY KEY, c_money money); INSERT tc_edge_mssql_mnyA VALUES (1,922337203685477.5807);
+CREATE TABLE tc_edge_mssql_mnyB(id int PRIMARY KEY, c_money money); INSERT tc_edge_mssql_mnyB VALUES (1,-922337203685477.5808);
+CREATE TABLE tc_edge_mssql_mnyC(id int PRIMARY KEY, c_money money); INSERT tc_edge_mssql_mnyC VALUES (1,922337203685476.5807);
+CREATE TABLE tc_edge_mssql_mnyD(id int PRIMARY KEY, c_money money); INSERT tc_edge_mssql_mnyD VALUES (1,900719925474.0991);
+CREATE TABLE tc_edge_mssql_mnyE(id int PRIMARY KEY, c_money money); INSERT tc_edge_mssql_mnyE VALUES (1,1000000000000.0001);
+CREATE TABLE tc_edge_mssql_sur1(id int PRIMARY KEY, c nchar(10)); INSERT tc_edge_mssql_sur1 VALUES (1,NCHAR(0xD800));
+CREATE TABLE tc_edge_mssql_sur2(id int PRIMARY KEY, c nvarchar(20)); INSERT tc_edge_mssql_sur2 VALUES (1,NCHAR(0xD800)+N'x');
+CREATE TABLE tc_edge_mssql_sur3(id int PRIMARY KEY, c nvarchar(max)); INSERT tc_edge_mssql_sur3 VALUES (1,NCHAR(0xDC00));
+CREATE TABLE tc_edge_mssql_sur4(id int PRIMARY KEY, c ntext); INSERT tc_edge_mssql_sur4 VALUES (1,NCHAR(0xD800));

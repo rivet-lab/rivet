@@ -1,0 +1,12 @@
+select * into tc_edge_mssql_dateB from tc_edge_mssql_date where (c_date is null or (c_date>='1900-01-01' and c_date<'2299-12-31')) and (c_datetime is null or (c_datetime>='1900-01-01' and c_datetime<'2299-12-31')) and (c_smalldatetime is null or (c_smalldatetime>='1900-01-01' and c_smalldatetime<'2299-12-31'));
+alter table tc_edge_mssql_dateB alter column id int not null;
+alter table tc_edge_mssql_dateB add primary key(id);
+select 'dateB', count(*) from tc_edge_mssql_dateB;
+select * into tc_edge_mssql_dt2B from tc_edge_mssql_dt2 where (d0 is null or (d0>='1900-01-01' and d0<'2299-12-31')) and (d1 is null or (d1>='1900-01-01' and d1<'2299-12-31')) and (d2 is null or (d2>='1900-01-01' and d2<'2299-12-31')) and (d3 is null or (d3>='1900-01-01' and d3<'2299-12-31')) and (d4 is null or (d4>='1900-01-01' and d4<'2299-12-31')) and (d5 is null or (d5>='1900-01-01' and d5<'2299-12-31')) and (d6 is null or (d6>='1900-01-01' and d6<'2299-12-31')) and (d7 is null or (d7>='1900-01-01' and d7<'2299-12-31'));
+alter table tc_edge_mssql_dt2B alter column id int not null;
+alter table tc_edge_mssql_dt2B add primary key(id);
+select 'dt2B', count(*) from tc_edge_mssql_dt2B;
+select * into tc_edge_mssql_dtoB from tc_edge_mssql_dto where (o0 is null or (switchoffset(o0,'+00:00')>='1900-01-01' and switchoffset(o0,'+00:00')<'2299-12-31')) and (o1 is null or (switchoffset(o1,'+00:00')>='1900-01-01' and switchoffset(o1,'+00:00')<'2299-12-31')) and (o2 is null or (switchoffset(o2,'+00:00')>='1900-01-01' and switchoffset(o2,'+00:00')<'2299-12-31')) and (o3 is null or (switchoffset(o3,'+00:00')>='1900-01-01' and switchoffset(o3,'+00:00')<'2299-12-31')) and (o4 is null or (switchoffset(o4,'+00:00')>='1900-01-01' and switchoffset(o4,'+00:00')<'2299-12-31')) and (o5 is null or (switchoffset(o5,'+00:00')>='1900-01-01' and switchoffset(o5,'+00:00')<'2299-12-31')) and (o6 is null or (switchoffset(o6,'+00:00')>='1900-01-01' and switchoffset(o6,'+00:00')<'2299-12-31')) and (o7 is null or (switchoffset(o7,'+00:00')>='1900-01-01' and switchoffset(o7,'+00:00')<'2299-12-31'));
+alter table tc_edge_mssql_dtoB alter column id int not null;
+alter table tc_edge_mssql_dtoB add primary key(id);
+select 'dtoB', count(*) from tc_edge_mssql_dtoB;
