@@ -1,28 +1,8 @@
 //! Shared adaptive-batch state machine for the per-engine export loops.
-//!
-//! All three source engines run the **same batch-sizing policy** around their
-//! engine-specific row source (PostgreSQL `FETCH N` from a server cursor, MySQL
-//! row-iterator accumulation, SQL Server `tiberius` stream accumulation):
-//!
-//! 1. start small — a `PROBE_BATCH_SIZE` first batch to measure real per-row
-//!    Arrow bytes before any memory cap can be computed;
-//! 2. once that width is known, cap the batch to a memory budget (clamped to the
-//!    user's `batch_size`) and re-baseline;
-//! 3. every `ADAPTIVE_SAMPLE_INTERVAL` batches, shrink/grow under DB
-//!    back-pressure via [`next_adaptive_batch_size`];
-//! 4. sleep `throttle_ms` between batches.
-//!
-//! The *fetch* and the *memory-cap formula* genuinely differ per engine (PG caps
-//! on `work_mem`; MySQL/MSSQL on a target-MB), and so do the *timeouts* (PG/MySQL
-//! set a server-side statement timeout; MSSQL has no such `SET` and enforces a
-//! client deadline). Those stay in the engines. Everything else — the delicate,
-//! previously-triplicated probe → cap → adaptive bookkeeping — lives here, in one
-//! unit-tested place.
 
 use crate::tuning::{ADAPTIVE_SAMPLE_INTERVAL, SourceTuning, next_adaptive_batch_size};
 
-/// Initial probe size: small enough to measure per-row Arrow bytes before a
-/// memory cap exists, without a wide-row first batch blowing the budget.
+/// Initial probe size: small enough to measure per-row Arrow bytes before a memory cap exists, without a wide-row first batch blowing the budget.
 pub(crate) const PROBE_BATCH_SIZE: usize = 500;
 
 pub(crate) use crate::tuning::memory::DEFAULT_BATCH_TARGET_MB;
@@ -40,8 +20,7 @@ pub(crate) struct AdaptiveBatchController {
 }
 
 impl AdaptiveBatchController {
-    /// `configured_batch_size` is the user's resolved `batch_size` — the size is
-    /// never grown past it. The controller starts at the probe size.
+    /// `configured_batch_size` is the user's resolved `batch_size` — the size is never grown past it.
     pub(crate) fn new(tuning: &SourceTuning, configured_batch_size: usize) -> Self {
         let configured = configured_batch_size.max(1);
         let effective = configured.min(PROBE_BATCH_SIZE);
@@ -57,27 +36,14 @@ impl AdaptiveBatchController {
         }
     }
 
-    /// Adopt the true configured ceiling once an engine that discovers its row
-    /// width *mid-stream* can finally compute its memory-driven batch size.
-    /// SQL Server learns the column shape from the first `tiberius` metadata
-    /// token — *after* the controller is already built — so it can't seed
-    /// `configured` from `effective_batch_size` up-front the way PG and MySQL
-    /// do. Calling this when the metadata arrives raises the ceiling so the
-    /// post-probe memory cap can grow the batch past the static `batch_size`.
-    ///
-    /// Only ever *raises* the ceiling (a wide table whose memory-driven size is
-    /// below the static `batch_size` is left to shrink via the cap as before),
-    /// and only before the one-shot memory cap has fired — afterwards the cap
-    /// already used the ceiling and re-targeting would be a silent no-op anyway.
+    /// Adopt the true configured ceiling once an engine that discovers its row width *mid-stream* can finally compute its memory-driven batch size.
     pub(crate) fn raise_configured_ceiling(&mut self, new_configured: usize) {
         if !self.cap_applied {
             self.configured = self.configured.max(new_configured.max(1));
         }
     }
 
-    /// Seed the adaptive baseline with a pre-loop pressure sample so the first
-    /// adaptive decision compares against a real prior reading (matches the
-    /// pre-extraction PG/MySQL behaviour). No-op when not adaptive.
+    /// Seed the adaptive baseline with a pre-loop pressure sample so the first adaptive decision compares against a real prior reading (matches the pre-extraction PG/MySQL behaviour).
     pub(crate) fn seed_pressure(&mut self, initial: Option<u64>) {
         if self.adaptive {
             self.last_pressure = initial;
@@ -89,11 +55,7 @@ impl AdaptiveBatchController {
         self.effective
     }
 
-    /// One-shot, applied after the first (probe) batch: `memory_target` is the
-    /// engine's memory-budget row count (PG: `work_mem`-derived; MySQL/MSSQL:
-    /// `batch_size_memory_mb`-derived). Clamped to the configured `batch_size`
-    /// and used as the new adaptive baseline. Returns the new size if it
-    /// changed (so the engine can log it), else `None`.
+    /// One-shot, applied after the first (probe) batch.
     pub(crate) fn apply_memory_cap(&mut self, memory_target: usize) -> Option<usize> {
         if self.cap_applied {
             return None;
@@ -109,10 +71,7 @@ impl AdaptiveBatchController {
         }
     }
 
-    /// Call after emitting each batch. Every `ADAPTIVE_SAMPLE_INTERVAL` batches
-    /// (and only when `adaptive`), takes a fresh pressure reading via `sample`
-    /// and resizes. Returns `Some((new_size, under_pressure))` when the size
-    /// changed, for the engine's log line.
+    /// Call after emitting each batch.
     pub(crate) fn after_batch(
         &mut self,
         sample: impl FnOnce() -> Option<u64>,
@@ -134,23 +93,6 @@ impl AdaptiveBatchController {
     }
 
     /// Pace the source after emitting a batch of `rows_in_batch` rows.
-    ///
-    /// Sleeps proportionally to the rows actually pulled — a full
-    /// `configured`-size batch pauses the whole `throttle_ms`; a smaller FETCH
-    /// (e.g. a wide table whose batch `work_mem` capped well below `batch_size`)
-    /// pauses proportionally less. Total throttle over a run is therefore
-    /// `throttle_ms × total_rows / configured`, **independent of how many
-    /// batches the row source was split into**.
-    ///
-    /// The old per-batch fixed sleep made the throttle cost scale with the batch
-    /// *count*, which `work_mem` blows up on wide tables: `content_items`
-    /// (~420-row FETCHes) spent ~75% of wall-clock in `thread::sleep` for ~0
-    /// extra source-gentleness (same `pg_tup_returned`/`pg_blks_read`; the long
-    /// snapshot hold was strictly worse). See
-    /// `docs/bench/reports/REPORT_throttle_vs_harm.md`.
-    ///
-    /// A full-size batch (narrow tables, where the FETCH returns `configured`
-    /// rows) still pauses exactly `throttle_ms` — that path is unchanged.
     pub(crate) fn throttle(&self, rows_in_batch: usize) {
         let us = throttle_sleep_us(self.throttle_ms, rows_in_batch, self.configured);
         if us > 0 {
@@ -159,17 +101,7 @@ impl AdaptiveBatchController {
     }
 }
 
-/// Row-proportional throttle, in **microseconds**: `throttle_ms` scaled by the
-/// fraction of a full `configured`-size batch this `rows` batch represents. Pure
-/// (no sleep) so the pacing arithmetic is unit-tested without timing.
-///
-/// Microseconds, not milliseconds, so a small work_mem-capped batch still pauses
-/// a real (sub-ms) amount instead of truncating to `0` — a 420/10000 fraction of
-/// 50 ms is 2100 µs, not `floor(2.1 ms) = 2 ms`, and a 100-row batch is 500 µs,
-/// not `0`. The OS may round a sub-ms sleep up to its timer granularity, which
-/// only ever errs toward *more* throttle (conservative). `rows ≤ configured`
-/// always holds (the memory cap clamps the batch), so the result never exceeds
-/// `throttle_ms`.
+/// Row-proportional throttle, in **microseconds**.
 fn throttle_sleep_us(throttle_ms: u64, rows: usize, configured: usize) -> u64 {
     if throttle_ms == 0 || rows == 0 {
         return 0;
@@ -194,7 +126,6 @@ mod tests {
     fn starts_at_probe_size_capped_by_configured() {
         let c = AdaptiveBatchController::new(&tuning(false, 0), 50_000);
         assert_eq!(c.target(), PROBE_BATCH_SIZE);
-        // A tiny configured size wins over the probe.
         let c2 = AdaptiveBatchController::new(&tuning(false, 100), 100);
         assert_eq!(c2.target(), 100);
     }
@@ -202,10 +133,8 @@ mod tests {
     #[test]
     fn memory_cap_is_one_shot_and_clamped_to_configured() {
         let mut c = AdaptiveBatchController::new(&tuning(false, 0), 20_000);
-        // Engine asks for 9_000 rows of budget → within configured → applied.
         assert_eq!(c.apply_memory_cap(9_000), Some(9_000));
         assert_eq!(c.target(), 9_000);
-        // Second call is a no-op (one-shot).
         assert_eq!(c.apply_memory_cap(1_000), None);
         assert_eq!(c.target(), 9_000);
     }
@@ -213,16 +142,12 @@ mod tests {
     #[test]
     fn memory_cap_never_exceeds_configured() {
         let mut c = AdaptiveBatchController::new(&tuning(false, 0), 5_000);
-        // Engine budget would allow 1M rows; configured caps it.
         assert_eq!(c.apply_memory_cap(1_000_000), Some(5_000));
         assert_eq!(c.target(), 5_000);
     }
 
     #[test]
     fn raise_ceiling_lets_cap_grow_past_static_batch_size() {
-        // SQL Server case: built with the static batch_size (10k) before the
-        // schema is known; the metadata token then raises the ceiling so the
-        // post-probe memory cap can size a narrow table's batch well past 10k.
         let mut c = AdaptiveBatchController::new(&tuning(false, 0), 10_000);
         c.raise_configured_ceiling(500_000);
         assert_eq!(c.apply_memory_cap(480_000), Some(480_000));
@@ -231,8 +156,6 @@ mod tests {
 
     #[test]
     fn raise_ceiling_only_raises_never_lowers() {
-        // A wide table whose memory-driven size is below the static batch_size
-        // must NOT lower the ceiling — the cap still shrinks it as before.
         let mut c = AdaptiveBatchController::new(&tuning(false, 0), 10_000);
         c.raise_configured_ceiling(5_000);
         assert_eq!(c.apply_memory_cap(1_000_000), Some(10_000));
@@ -241,8 +164,6 @@ mod tests {
 
     #[test]
     fn raise_ceiling_after_cap_is_a_no_op() {
-        // Once the one-shot cap has fired the ceiling is spent; a late raise
-        // can't retroactively grow the (already one-shot) cap.
         let mut c = AdaptiveBatchController::new(&tuning(false, 0), 10_000);
         c.apply_memory_cap(8_000);
         c.raise_configured_ceiling(500_000);
@@ -255,11 +176,9 @@ mod tests {
         let mut c = AdaptiveBatchController::new(&tuning(true, 0), 50_000);
         c.apply_memory_cap(10_000);
         c.seed_pressure(Some(0));
-        // Batches 1..9 → no resize even though sample reports rising pressure.
         for _ in 0..(ADAPTIVE_SAMPLE_INTERVAL - 1) {
             assert_eq!(c.after_batch(|| Some(100)), None);
         }
-        // Batch 10 → rising pressure (100 > seeded 0) → shrink.
         let r = c.after_batch(|| Some(100));
         assert!(
             matches!(r, Some((_, true))),
@@ -270,27 +189,19 @@ mod tests {
 
     #[test]
     fn throttle_full_batch_pauses_the_whole_budget() {
-        // Narrow-table path (FETCH returns the configured size) is unchanged:
-        // a full configured-size batch still pauses exactly `throttle_ms` (µs).
         assert_eq!(throttle_sleep_us(50, 10_000, 10_000), 50_000);
         assert_eq!(throttle_sleep_us(500, 10_000, 10_000), 500_000);
     }
 
     #[test]
     fn throttle_scales_with_rows_pulled() {
-        // Half a configured batch → half the pause; a work_mem-capped tiny FETCH
-        // → a tiny pause (the wide-table fix: 420/10000 of 50 ms = 2100 µs, not
-        // 50 ms — and not truncated to 0 the way integer-ms would do for <200 rows).
         assert_eq!(throttle_sleep_us(50, 5_000, 10_000), 25_000);
         assert_eq!(throttle_sleep_us(50, 420, 10_000), 2_100);
-        assert_eq!(throttle_sleep_us(50, 100, 10_000), 500); // ms math → 0; µs preserves it
+        assert_eq!(throttle_sleep_us(50, 100, 10_000), 500);
     }
 
     #[test]
     fn throttle_total_is_independent_of_batch_count() {
-        // THE fix: splitting the same total rows into more (smaller) batches must
-        // not change the total throttle. 1 batch of 10k vs 10 batches of 1k vs
-        // ~24 batches of 420 → same cumulative budget (exact in µs).
         let one = throttle_sleep_us(50, 10_000, 10_000);
         let ten: u64 = (0..10).map(|_| throttle_sleep_us(50, 1_000, 10_000)).sum();
         assert_eq!(one, ten, "10×1k must equal 1×10k");
@@ -309,8 +220,8 @@ mod tests {
 
     #[test]
     fn throttle_zero_or_empty_never_sleeps() {
-        assert_eq!(throttle_sleep_us(0, 10_000, 10_000), 0); // fast profile
-        assert_eq!(throttle_sleep_us(50, 0, 10_000), 0); // empty batch
+        assert_eq!(throttle_sleep_us(0, 10_000, 10_000), 0);
+        assert_eq!(throttle_sleep_us(50, 0, 10_000), 0);
     }
 
     #[test]

@@ -1,22 +1,4 @@
 //! PostgreSQL `Source` implementation.
-//!
-//! Module layout:
-//!
-//! - `mod.rs` (this file) — `PostgresSource` struct + connect/TLS path, sampling helpers
-//!   (`pg_sample_checkpoints_req`, `pg_fetch_work_mem_bytes`),
-//!   `introspect_pg_on` (chunk-planner catalog probe), the cursor + FETCH export loop
-//!   (`pg_run_export`), the `Source` trait impl, and the catalog-hint
-//!   resolver that bridges parsed FROM clauses to `pg_catalog`.
-//! - [`arrow_convert`] — the entire row → Arrow `RecordBatch` pipeline: type
-//!   mapping (`pg_columns_to_schema`, `rivet_type_for_pg_column`), per-cell
-//!   decoders (INTERVAL, UUID, enum, NUMERIC), and the array builders. Kept
-//!   in a sibling because it is the largest single-purpose cluster in this
-//!   driver (~620 LoC) and has zero reverse dependency back into the
-//!   connection / cursor layer.
-//! - [`from_parse`] — pure `&str`/`&[u8]` parser that extracts the simple
-//!   `<schema>.<table>` literal from a user query so the catalog-hint path
-//!   can cast it to `regclass`.  Zero postgres-crate dependency, fully
-//!   unit-tested in isolation.
 
 mod arrow_convert;
 #[cfg(feature = "oracle")]
@@ -47,14 +29,12 @@ use from_parse::try_parse_pg_simple_from_regclass_literal;
 
 pub struct PostgresSource {
     client: Client,
-    /// True when two consecutive pg_backend_pid() calls returned different values,
-    /// indicating a transaction-mode connection pooler (pgBouncer, Odyssey, etc.).
+    /// True when two consecutive pg_backend_pid() calls returned different values, indicating a transaction-mode connection pooler (pgBouncer, Odyssey, etc.).
     transaction_pooler: bool,
 }
 
 impl PostgresSource {
-    /// Connect with no transport security (legacy path). Prefer [`Self::connect_with_tls`]
-    /// for production workloads so credentials and result sets are not visible on the wire.
+    /// Connect with no transport security (legacy path).
     pub fn connect(url: &str) -> Result<Self> {
         Self::connect_with_tls(url, None)
     }
@@ -77,7 +57,7 @@ impl PostgresSource {
     }
 }
 
-/// Prepare `sql` under a text no earlier call sent, so the description is the one this parse fixes: a pooler keeps named statements by their text, and one kept from another read would describe these rows.
+/// Prepare `sql` under a text no earlier call sent, so the description is the one this parse fixes.
 pub(crate) fn prepare_fresh(
     client: &mut Client,
     sql: &str,
@@ -98,7 +78,7 @@ fn fresh_text(sql: &str, nonce: u64) -> String {
     format!("{sql} /* rivet {nonce:016x} */")
 }
 
-/// The read's prepared `FETCH n FROM _rivet`: prepared fresh the first time this read asks for `n` rows, then reused for its later pages.
+/// The read's prepared `FETCH n FROM _rivet`.
 fn fetch_statement<'a>(
     client: &mut Client,
     prepared: &'a mut Vec<(usize, postgres::Statement)>,
@@ -116,15 +96,6 @@ fn fetch_statement<'a>(
 }
 
 /// Probe `SHOW work_mem` and return the value in bytes.
-///
-/// PostgreSQL spills FETCH-cursor output to `pgsql_tmp/` once the in-flight
-/// row set exceeds `work_mem` — on wide rows with the default 4 MB the spill
-/// fires on every chunk and dominates `pg_stat_database.temp_bytes`. Knowing
-/// the value lets the cursor loop cap FETCH N below `work_mem × 0.7`, keeping
-/// the result set in memory.
-///
-/// Returns None on any parse / query failure — the cursor loop falls back to
-/// the configured static batch_size in that case.
 fn pg_fetch_work_mem_bytes(client: &mut Client) -> Option<i64> {
     let raw: Option<String> = client
         .query_one("SHOW work_mem", &[])
@@ -133,12 +104,9 @@ fn pg_fetch_work_mem_bytes(client: &mut Client) -> Option<i64> {
     raw.as_deref().and_then(parse_work_mem)
 }
 
-/// Parse a `SHOW work_mem` value like `"4MB"`, `"16384kB"`, `"1GB"`, or a bare
-/// number-of-kB string (the older PG default unit) into a byte count. Returns
-/// `None` for anything else so callers can decide whether to fall back.
+/// Parse a `SHOW work_mem` value like `"4MB"`, `"16384kB"`, `"1GB"`, or a bare number-of-kB string (the older PG default unit) into a byte count.
 fn parse_work_mem(raw: &str) -> Option<i64> {
     let s = raw.trim();
-    // Split numeric prefix from optional unit.
     let mut split = 0;
     for (i, ch) in s.char_indices() {
         if !ch.is_ascii_digit() && ch != '.' && ch != '-' {
@@ -154,8 +122,6 @@ fn parse_work_mem(raw: &str) -> Option<i64> {
     let num: f64 = num_str.parse().ok()?;
     let unit = unit.trim().to_ascii_lowercase();
     let multiplier: f64 = match unit.as_str() {
-        // Postgres always uses 1024-based units, matching the syntax it
-        // accepts in postgresql.conf.
         "" | "kb" => 1024.0,
         "mb" => 1024.0 * 1024.0,
         "gb" => 1024.0 * 1024.0 * 1024.0,
@@ -167,30 +133,6 @@ fn parse_work_mem(raw: &str) -> Option<i64> {
 }
 
 /// Sample requested-checkpoint pressure, version-portably.
-///
-/// PostgreSQL caches the statistics snapshot at the start of each transaction.
-/// We call `pg_stat_clear_snapshot()` first to discard that cache so every
-/// adaptive sample sees fresh counters rather than the frozen value from BEGIN.
-///
-/// PG 17 moved the counter: `pg_stat_bgwriter.checkpoints_req` was removed and
-/// lives on as `pg_stat_checkpointer.num_requested` (bughunt 2026-08-13,
-/// proven on postgres:18). The old query on PG17+ is not merely a `None` —
-/// the batch loop samples INSIDE the export's cursor transaction, and any
-/// ERROR aborts that transaction, killing the next FETCH: every
-/// `adaptive: true` PG17+ export hard-failed. A probe-then-query pair avoids
-/// ever ERRORing on either vintage (a one-statement CASE still plans the dead
-/// branch and errors — proven on postgres:18).
-/// The requested-checkpoint query for this server vintage.
-///
-/// Split out as a pure fn so the BRANCH is unit-testable: the live suite runs
-/// on postgres:16, where both spellings resolve, so nothing offline could see a
-/// swapped arm — and a swapped arm is not a `None`, it is an ERROR inside the
-/// export's cursor transaction, which kills the next FETCH (verified on
-/// postgres:18, 2026-08-14: `SELECT checkpoints_req FROM pg_stat_bgwriter`
-/// there answers `column "checkpoints_req" does not exist`, and the following
-/// FETCH gets `current transaction is aborted`).
-///
-/// `true` ⇒ the server has `pg_stat_checkpointer` (PG 17+).
 fn checkpoints_req_sql(has_checkpointer: bool) -> &'static str {
     if has_checkpointer {
         "SELECT num_requested FROM pg_stat_checkpointer"
@@ -200,41 +142,8 @@ fn checkpoints_req_sql(has_checkpointer: bool) -> &'static str {
 }
 
 /// Read the requested-checkpoint counter off a LIVE server connection.
-///
-/// LIVE-ONLY BY CONSTRUCTION: it takes a `postgres::Client`, which no offline
-/// test can build, so every constant-return mutant of it (`None`, `Some(-1)`,
-/// `Some(0)`, `Some(1)` — all four survived the 2026-08-16 mutation run, which
-/// exercised the OFFLINE suite only) is unkillable here. Writing a unit test
-/// against a fake client would grade the fake, not the one thing that matters:
-/// WHICH catalog this connection is asked for, and that the answer really moves.
-///
-/// Its oracles are live, and each of the four dies on them:
-/// * `governor_backs_off_under_concurrent_write_pressure`
-///   (`tests/live/live_governor.rs`) drives real foreign write pressure and
-///   requires a `backed off` line. `GovernorState::observe` reads pressure ONLY
-///   as `cur > prev`, so a constant `Some(-1)`/`Some(0)`/`Some(1)` never rises
-///   and never sheds; `None` fails open by design and also never sheds. (The
-///   same argument, verified by hand against the `Some(0)` mutant on
-///   2026-08-14, is recorded on `impl PressureSource for Box<dyn Source>`, the
-///   bridge one layer up.)
-/// * `pg_adaptive_never_loses_to_its_own_baseline_on_an_idle_source` asserts
-///   `assert_governor_awake`, whose "provides no pressure signal" check is RED
-///   specifically against the `None` mutant — the deaf-governor state a rename
-///   of this counter produces.
-/// * `pg18_governor_samples_the_modern_checkpointer_catalog` covers the ARM the
-///   pure [`checkpoints_req_sql`] picks: on a real PG 17+ server a swapped arm
-///   is not a `None` but an ERROR that aborts the export's cursor transaction,
-///   so that test requires the run to SUCCEED and the governor to be awake.
-///
-/// The pure half — which SQL each vintage gets — is [`checkpoints_req_sql`],
-/// unit-tested offline by `checkpoints_req_sql_matches_the_servers_catalog`.
 fn pg_sample_checkpoints_req(client: &mut Client) -> Option<i64> {
     let _ = client.execute("SELECT pg_stat_clear_snapshot()", &[]);
-    // Two steps, because PG plans a whole statement up front: a CASE whose
-    // dead branch references the missing column still ERRORs (proven on
-    // postgres:18), and an ERROR inside the export's cursor transaction
-    // aborts it. The existence probe can never error; only the matching
-    // query is then sent.
     let has_checkpointer = client
         .query_one(
             "SELECT to_regclass('pg_catalog.pg_stat_checkpointer') IS NOT NULL",
@@ -250,17 +159,6 @@ fn pg_sample_checkpoints_req(client: &mut Client) -> Option<i64> {
 }
 
 /// Probe `pg_class` and `pg_index` for the stats chunked-mode planning needs.
-///
-/// Returns a [`crate::source::TableIntrospection`] populated from one connection
-/// (two round-trips total: one stats query, one PK query). Failure to connect
-/// or to query bubbles up as `Err`; missing rows or unanalyzed tables are
-/// represented as zero/None in the result so callers can decide policy.
-///
-/// The `qualified_table` argument is `<schema>.<table>` (e.g. `public.users`)
-/// or bare `<table>` (resolved under `public`). It is split internally with
-/// the same strict rules as the `table:` YAML shortcut — anything more
-/// elaborate must use the explicit-column path.
-/// The heap bytes one row takes, from the planner's row estimate; none while the table has no estimate.
 fn avg_row_bytes(row_estimate: i64, rel_size_bytes: i64) -> Option<i64> {
     (row_estimate > 0).then(|| rel_size_bytes / row_estimate)
 }
@@ -284,7 +182,7 @@ pub(crate) fn type_mappings_on(
         .collect()
 }
 
-/// Whether `column` of `query` may hold NULL: the catalog `NOT NULL` of the base table column the server traces it to; `None` for an expression or a view column.
+/// Whether `column` of `query` may hold NULL.
 pub(crate) fn column_nullable_on(
     client: &mut Client,
     query: &str,
@@ -318,7 +216,6 @@ fn introspect_pg_on(
         None => ("public".to_string(), qualified_table.to_string()),
     };
 
-    // ── reltuples + heap size, in one shot ──────────────────────────────
     let (row_estimate, rel_size_bytes) = match client.query_opt(
         "SELECT c.reltuples::bigint, pg_relation_size(c.oid)::bigint \
          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
@@ -334,7 +231,6 @@ fn introspect_pg_on(
     };
     let avg_row_bytes = avg_row_bytes(row_estimate, rel_size_bytes);
 
-    // ── single int PK probe ─────────────────────────────────────────────
     let pk_rows = client.query(
         "SELECT a.attname::text, t.typname::text \
          FROM pg_index i \
@@ -347,9 +243,6 @@ fn introspect_pg_on(
     let single_int_pk = if pk_rows.len() == 1 {
         let col: String = pk_rows[0].get(0);
         let pg_type: String = pk_rows[0].get(1);
-        // Only integer-family types are safe for range chunking via min/max →
-        // BETWEEN slicing. Text/UUID/decimal would need different splitting
-        // logic and are excluded from auto-resolution.
         if matches!(pg_type.as_str(), "int2" | "int4" | "int8") {
             Some(col)
         } else {
@@ -362,22 +255,6 @@ fn introspect_pg_on(
         None
     };
 
-    // ── keyset keys (OPT-4): single-column, NOT NULL, UNIQUE indexes ────
-    // `indnkeyatts = 1` keeps single-column indexes; `indkey[0] = a.attnum`
-    // binds to a real column (not an expression index); `attnotnull` removes
-    // NULL-ordering ambiguity. Index-backed + unique ⇒ keyset's `ORDER BY key
-    // LIMIT n` is a range scan and `WHERE key > last` never skips dup keys.
-    // `indpred IS NULL` excludes a PARTIAL index and `indisvalid` an INVALID one.
-    // Keyset's whole correctness argument is that the key is GLOBALLY unique, so
-    // `WHERE k > <last> ORDER BY k LIMIT n` cannot skip a row sharing the
-    // boundary key. A partial unique index guarantees uniqueness only over the
-    // rows it covers — and the standard soft-delete shape,
-    // `CREATE UNIQUE INDEX ON users (email) WHERE deleted_at IS NULL`, permits
-    // duplicates among everything else. Measured: 50 duplicate + 50 distinct
-    // keys at page size 10 exported 60 of 100 rows with `status: success`, the
-    // duplicate contributing exactly ONE page. All 51 distinct values were
-    // present, so a `count(DISTINCT)` check against the source matched perfectly
-    // while 40 rows were gone.
     let keyset_rows = client.query(
         "SELECT a.attname::text, i.indisprimary \
          FROM pg_index i \
@@ -393,9 +270,6 @@ fn introspect_pg_on(
         .collect();
     let keyset_keys = super::keyset_keys_primary_first(&keyset_columns);
 
-    // Integer-family columns — the safety set for an explicit `chunk_column`
-    // (range chunking slices with integer `BETWEEN`; a non-integer key silently
-    // loses fractional rows). Cheap catalog read on the already-open connection.
     let int_columns: Vec<String> = client
         .query(
             "SELECT a.attname::text FROM pg_attribute a \
@@ -420,13 +294,6 @@ fn introspect_pg_on(
 }
 
 /// Run the full export transaction against an open Postgres client.
-///
-/// All session-mutating SET commands use SET LOCAL so they are scoped to
-/// the transaction and reset automatically on COMMIT or ROLLBACK; the guard
-/// rolls back when this function returns Err.
-///
-/// Returns (total_rows, had_schema). had_schema is false only when the query
-/// returned zero rows; the caller must emit an empty schema in that case.
 fn pg_run_export(
     client: &mut Client,
     built_sql: &str,
@@ -435,8 +302,6 @@ fn pg_run_export(
     sink: &mut dyn super::BatchSink,
     numeric_hints: Option<&HashMap<String, (u8, i8)>>,
 ) -> Result<(usize, bool)> {
-    // The read runs under UTC: a naive cursor bound re-injected into `WHERE col > '<literal>'` is
-    // coerced in the transaction's zone, and text the query casts prints in its formats.
     let mut guard = PgTxnGuard::begin(client)?;
     if tuning.statement_timeout_s > 0 {
         guard.client_mut().batch_execute(&format!(
@@ -450,25 +315,13 @@ fn pg_run_export(
             tuning.lock_timeout_s
         ))?;
     }
-    // Cap FETCH N under `work_mem × 0.7` so the cursor never spills to
-    // `pgsql_tmp/`. Without this, a wide-row chunk with the default
-    // `batch_size: 50000` × ~4 KB/row = ~200 MB easily exceeds the typical
-    // `work_mem: 4 MB` and writes the entire chunk to disk before the first
-    // FETCH returns. Measured cost on the content_items bench: ~3.2 GB of
-    // temp_bytes per export, dominating the DB-side signal report.
     let work_mem_bytes = pg_fetch_work_mem_bytes(guard.client_mut());
 
     guard
         .client_mut()
         .batch_execute(&format!("DECLARE _rivet NO SCROLL CURSOR FOR {built_sql}"))?;
 
-    // The first FETCH is intentionally a small `PROBE_BATCH_SIZE` row-width
-    // probe (the controller starts there): without it we can't know
-    // `arrow_bytes/row` before the cursor runs, and a single FETCH of
-    // `tuning.batch_size` × wide rows already triggers a `pgsql_tmp/` spill.
     let configured_batch_size = tuning.batch_size;
-    // Shared batch-size state machine; PG provides the FETCH N row source, the
-    // work_mem (or schema-derived) cap target, and the checkpoint pressure proxy.
     let mut ctl = AdaptiveBatchController::new(tuning, configured_batch_size);
     ctl.seed_pressure(if tuning.adaptive {
         pg_sample_checkpoints_req(guard.client_mut()).map(|v| v as u64)
@@ -479,9 +332,6 @@ fn pg_run_export(
     let mut columns_cache: Option<Vec<(String, Type)>> = None;
     let mut total_rows: usize = 0;
     let mut cap_applied = false;
-    // Per-value ceiling (MB→bytes; `0`/None disables), enforced pre-allocation
-    // inside the batch builder so an oversized cell bails before Arrow reserves
-    // the buffer. Same source of truth as the sink's backstop guard.
     let max_value_bytes = tuning.max_value_bytes();
 
     let mut first_fetch_done = false;
@@ -492,12 +342,6 @@ fn pg_run_export(
         let rows = guard.client_mut().query(fetch, &[])?;
         if !first_fetch_done {
             first_fetch_done = true;
-            // The cursor's snapshot is pinned as of the FIRST FETCH, not the
-            // DECLARE — measured, not assumed: with the pause placed after
-            // DECLARE, a row committed during it was VISIBLE to the export
-            // (250 of 200). A paused window here is the race-free way for a
-            // test to commit writes strictly invisible to this read but
-            // visible to anything after it (the reconcile recount).
             crate::test_hook::maybe_pause_at("pg_after_snapshot_open");
         }
         if rows.is_empty() {
@@ -516,8 +360,6 @@ fn pg_run_export(
                 numeric_hints,
             )?);
             sink.on_schema(s.clone())?;
-            // When work_mem can't be read, fall back to the schema-derived
-            // effective batch size as the cap target (controller clamps it).
             if work_mem_bytes.is_none() {
                 let effective = tuning.effective_batch_size(Some(&s));
                 ctl.apply_memory_cap(effective.max(requested));
@@ -537,10 +379,6 @@ fn pg_run_export(
         let batch = rows_to_record_batch_typed(s, cols, &rows, max_value_bytes)?;
         drop(rows);
 
-        // After the first (probe) batch we know the actual row width. Cap the
-        // FETCH N below `work_mem × 0.7` so the cursor never spills:
-        //   pg_row_bytes ≈ arrow_per_row × 1.2 ; safe = work_mem×0.7 / pg_row_bytes
-        // The controller clamps it to the configured `batch_size`.
         if wants_fetch_cap(cap_applied, row_count)
             && let Some(wm) = work_mem_bytes
         {
@@ -587,8 +425,6 @@ fn pg_run_export(
         ctl.throttle(row_count);
     }
 
-    // Explicit CLOSE is technically redundant — COMMIT releases the cursor —
-    // but it documents intent and surfaces any close errors before COMMIT.
     drop(fetches);
     guard.client_mut().batch_execute("CLOSE _rivet")?;
     guard.commit()?;
@@ -623,14 +459,9 @@ impl super::Source for PostgresSource {
             built.sql
         );
 
-        // Resolve NUMERIC precision from the *unwrapped* base query when the
-        // caller wrapped `query` in a chunk/keyset subquery (which hides the
-        // source table from the catalog parser). Falls back to `query`.
         let hint_query = request.catalog_hint_query.unwrap_or(request.query);
         let numeric_hints = pg_numeric_catalog_hints_opt(&mut self.client, hint_query);
 
-        // The transaction guard inside pg_run_export rolls back on any error
-        // or panic, so no explicit ROLLBACK is needed here.
         let (total_rows, had_schema) = pg_run_export(
             &mut self.client,
             &built.sql,
@@ -693,28 +524,21 @@ impl super::Source for PostgresSource {
         if let Ok(Some(v)) = row.try_get::<_, Option<u32>>(0) {
             return Ok(Some(v.to_string()));
         }
-        // TIMESTAMP / DATE / TIMESTAMPTZ — required for MIN/MAX on time columns (e.g. chunk_by_days)
         if let Ok(Some(v)) = row.try_get::<_, Option<chrono::NaiveDateTime>>(0) {
             return Ok(Some(v.format("%Y-%m-%d %H:%M:%S%.f").to_string()));
         }
         if let Ok(Some(v)) = row.try_get::<_, Option<chrono::NaiveDate>>(0) {
             return Ok(Some(v.format("%Y-%m-%d").to_string()));
         }
-        // Full fraction and an explicit `+00`: a bound re-injected as a literal names the same instant in any session zone.
         if let Ok(Some(v)) = row.try_get::<_, Option<chrono::DateTime<chrono::Utc>>>(0) {
             return Ok(Some(v.format("%Y-%m-%d %H:%M:%S%.f+00").to_string()));
         }
-        // UUID — the canonical PG keyset key (`id UUID PRIMARY KEY`). Without this
-        // arm the String arm rejects the uuid OID → Ok(None), so parallel keyset
-        // samples ZERO boundaries and silently collapses to a single worker (M2).
-        // Rendered canonical (hyphenated), usable as an inline `'…'` literal.
         if let Ok(Some(v)) = row.try_get::<_, Option<uuid::Uuid>>(0) {
             return Ok(Some(v.to_string()));
         }
         if let Ok(Some(v)) = row.try_get::<_, Option<String>>(0) {
             return Ok(Some(v));
         }
-        // Only SQL NULL is "no value": a value no arm above reads must not pass for an empty table.
         if matches!(
             row.try_get::<_, Option<arrow_convert::AnyAsString>>(0),
             Ok(None)
@@ -743,23 +567,9 @@ impl super::Source for PostgresSource {
         column_nullable_on(&mut self.client, query, column)
     }
 
-    /// Snapshot the source-harm counters from `pg_stat_database` for the current
-    /// database. Returns `(metric, cumulative_value)` pairs; the pipeline captures
-    /// these before and after the export and stores the per-metric delta in
-    /// `export_harm`.
-    ///
-    /// Every counter here is readable by **any** role — no `pg_monitor` membership
-    /// or superuser needed (unlike `pg_stat_activity`'s view of other sessions).
-    /// They are CLUSTER-level cumulative counters, so concurrent activity inflates
-    /// the delta; on a single-tenant box it is the run's own footprint. `None` on
-    /// connect/query failure — observability, never a gate.
+    /// Snapshot the source-harm counters from `pg_stat_database` for the current database.
     fn harm_counters(&mut self) -> Option<Vec<(String, i64)>> {
         let client = &mut self.client;
-        // `tup_returned` (rows the engine had to scan) is the read-amplification
-        // signal; `blks_read`/`blks_hit` the I/O vs cache split; `temp_files` the
-        // spill count; `deadlocks` contention. temp_bytes rides the same row so the
-        // run's temp-spill delta needs no connection of its own; the harm bracket
-        // lifts it out into export_metrics.pg_temp_bytes_delta.
         let row = client
             .query_one(
                 "SELECT blks_read::bigint, blks_hit::bigint, tup_returned::bigint, \
@@ -783,9 +593,6 @@ impl super::Source for PostgresSource {
                 out.push(((*name).to_string(), v));
             }
         }
-        // Logical decoding's own cost (PostgreSQL 14+): transactions and bytes spilled to
-        // disk past logical_decoding_work_mem, and bytes decoded — what a CDC drain costs
-        // the server. Summed over every slot; absent on older servers.
         if let Ok(slots) = client.query_one(
             "SELECT COALESCE(SUM(spill_txns), 0)::bigint, COALESCE(SUM(spill_bytes), 0)::bigint, \
              COALESCE(SUM(total_bytes), 0)::bigint FROM pg_stat_replication_slots",
@@ -807,23 +614,12 @@ impl super::Source for PostgresSource {
         Some(out)
     }
 
-    /// Governor pressure proxy: `checkpoints_req` — WAL volume forcing
-    /// checkpoints. Rising between samples means the source is checkpointing
-    /// harder under WRITE pressure, which a read-only export cannot cause; that
-    /// is why the governor may share this counter with the batch loop while the
-    /// other engines need a separate one.
+    /// Governor pressure proxy: `checkpoints_req` — WAL volume forcing checkpoints.
     fn sample_governor_pressure(&mut self) -> Option<u64> {
-        // `checkpoints_req` is WRITE-driven (WAL volume forcing checkpoints):
-        // a read-only export cannot move it, so the governor may share it
-        // with PG's batch loop (which samples it engine-internally) — unlike
-        // MySQL/MSSQL, whose batch loops listen to spill counters the
-        // export's own reads inflate.
         pg_sample_checkpoints_req(&mut self.client).map(|v| v.max(0) as u64)
     }
 
     fn server_context(&mut self) -> Option<String> {
-        // `current_setting()` returns a text scalar (clean for query_scalar);
-        // `statement_timeout` is the limit behind a cancelled long-running query.
         let version = self.query_scalar("SELECT version()").ok().flatten();
         let stmt_timeout = self
             .query_scalar("SELECT current_setting('statement_timeout')")
@@ -855,11 +651,7 @@ impl super::Source for PostgresSource {
     }
 }
 
-/// When the query is a single-table `SELECT … FROM rel` (no joins, no subquery
-/// in `FROM`), PostgreSQL result metadata does not carry `NUMERIC` typmod, but
-/// `information_schema` / the table DDL does. We resolve the base relation with
-/// a small parser and fetch declared precision/scale so `rivet init`-style
-/// exports work without hand-written `columns:` overrides.
+/// When the query is a single-table `SELECT … FROM rel` (no joins, no subquery in `FROM`), PostgreSQL result metadata does not carry `NUMERIC` typmod.
 fn pg_numeric_catalog_hints_opt(
     client: &mut Client,
     query: &str,
@@ -867,11 +659,6 @@ fn pg_numeric_catalog_hints_opt(
     match pg_fetch_numeric_catalog_hints(client, query) {
         Ok(m) => m,
         Err(e) => {
-            // Reaching this arm means the parser identified a single-table query
-            // and we tried catalog lookup, but the lookup itself failed. That is
-            // unexpected (not "this query has a JOIN"), so surface it — otherwise
-            // a downstream NUMERIC mapping failure looks like a config problem
-            // when the real cause is here.
             log::warn!(
                 "PG numeric catalog lookup failed — NUMERIC columns will require explicit `columns:` overrides: {e}"
             );
@@ -966,9 +753,7 @@ fn wants_fetch_cap(cap_applied: bool, row_count: usize) -> bool {
     !cap_applied && row_count > 0
 }
 
-/// FETCH size that keeps the cursor under `work_mem × 0.7`, from the first
-/// batch's observed width (pg row ≈ arrow row × 1.2, floored at 64 B), clamped
-/// to the arrow memory budget when set. Returns `(target, arrow_per_row, pg_per_row)`.
+/// FETCH size that keeps the cursor under `work_mem × 0.7`, from the first batch's observed width (pg row ≈ arrow row × 1.2, floored at 64 B), clamped to the arrow memory budget when set.
 fn work_mem_fetch_cap(
     arrow_bytes: usize,
     row_count: usize,
@@ -1012,7 +797,7 @@ mod tests {
         assert_eq!(avg_row_bytes(0, 8_192), None);
     }
 
-    /// `information_schema` spells a decimal column `numeric`; a parameterised or padded spelling is one too, and no other type is.
+    /// `information_schema` spells a decimal column `numeric`.
     #[test]
     fn only_numeric_and_decimal_are_numeric_information_types() {
         use super::is_pg_numeric_information_type;
@@ -1063,17 +848,14 @@ mod tests {
     #[test]
     fn the_fetch_cap_keeps_the_cursor_under_work_mem() {
         use super::work_mem_fetch_cap;
-        // 1000 rows of 1000 arrow bytes: pg row 1200 B; 4 MiB × 0.7 / 1200 = 2446.
         assert_eq!(
             work_mem_fetch_cap(1_000_000, 1_000, 4 << 20, None),
             (2446, 1000, 1200)
         );
-        // A 2 MiB arrow budget clamps it to 2097 rows (2 so `*` and `+` differ).
         assert_eq!(
             work_mem_fetch_cap(1_000_000, 1_000, 4 << 20, Some(2)).0,
             2097
         );
-        // Tiny rows floor the pg width at 64 B; a tiny work_mem floors the target at 100.
         assert_eq!(work_mem_fetch_cap(10, 10, 4 << 20, None).1, 1);
         assert_eq!(work_mem_fetch_cap(10, 10, 4 << 20, None).2, 64);
         assert_eq!(work_mem_fetch_cap(1_000_000, 1_000, 1024, None).0, 100);
@@ -1090,24 +872,9 @@ mod tests {
     }
 
     /// The version branch of the checkpoint sampler, pinned offline.
-    ///
-    /// The live stack runs postgres:16, where `pg_stat_bgwriter.checkpoints_req`
-    /// still resolves — so every governor test takes the LEGACY arm and no live
-    /// test can see the modern one. Verified by hand against the postgres:18
-    /// stand (2026-08-14): `pg_stat_checkpointer` exists there, the bgwriter
-    /// column does NOT, and sending the legacy query inside a cursor
-    /// transaction answers `column "checkpoints_req" does not exist` and then
-    /// `current transaction is aborted, commands ignored` on the next FETCH —
-    /// i.e. a swapped arm does not degrade to `None`, it kills the export.
-    ///
-    /// Scope honesty: this pins the SQL each vintage gets, not that the probe
-    /// classifies a real server correctly — that half needs a live PG 17+ and
-    /// is covered by `pg18_governor_samples_the_modern_checkpointer_catalog`
-    /// in the live suite (skipped unless the stand is up).
     #[test]
     fn checkpoints_req_sql_matches_the_servers_catalog() {
         use super::checkpoints_req_sql;
-        // PG 17+: the counter lives on pg_stat_checkpointer.
         let modern = checkpoints_req_sql(true);
         assert!(
             modern.contains("pg_stat_checkpointer") && modern.contains("num_requested"),
@@ -1117,7 +884,6 @@ mod tests {
             !modern.contains("pg_stat_bgwriter"),
             "the removed relation must never be named on PG17+: {modern}"
         );
-        // PG 16 and older: the column is still on pg_stat_bgwriter.
         let legacy = checkpoints_req_sql(false);
         assert!(
             legacy.contains("pg_stat_bgwriter") && legacy.contains("checkpoints_req"),
@@ -1130,35 +896,25 @@ mod tests {
     }
     use super::catalog_numeric_to_decimal_params;
 
-    // FROM-clause parser tests live in `from_parse.rs` alongside the parser.
-
     #[test]
     fn catalog_decimal_bounds() {
         assert_eq!(catalog_numeric_to_decimal_params(18, 2), Some((18, 2)));
         assert!(catalog_numeric_to_decimal_params(0, 2).is_none());
         assert!(catalog_numeric_to_decimal_params(77, 0).is_none());
         assert!(catalog_numeric_to_decimal_params(18, 19).is_none());
-        // W4 boundary rows — the mutants lived exactly ON the bounds:
-        // precision 76 is the LAST valid (a `> 76` -> `>= 76` mutant rejects it);
         assert_eq!(catalog_numeric_to_decimal_params(76, 0), Some((76, 0)));
-        // scale == precision is valid (`>` not `>=` on the third check);
         assert_eq!(catalog_numeric_to_decimal_params(18, 18), Some((18, 18)));
-        // scale == i8::MIN is the last valid negative;
         assert_eq!(
             catalog_numeric_to_decimal_params(10, -128),
             Some((10, -128))
         );
         assert!(catalog_numeric_to_decimal_params(10, -129).is_none());
-        // an `|| -> &&` mutant on the range check lets scale=200 reach the
-        // `as i8` cast, wrapping to -56 and CORRUPTING the params silently.
         assert!(catalog_numeric_to_decimal_params(76, 200).is_none());
     }
 
     #[test]
     fn parse_work_mem_handles_pg_units() {
         use super::parse_work_mem;
-        // Postgres SHOW work_mem normally returns "<N>kB", "<N>MB", "<N>GB".
-        // A bare integer is interpreted as kB (matches postgresql.conf parsing).
         assert_eq!(parse_work_mem("4MB"), Some(4 * 1024 * 1024));
         assert_eq!(parse_work_mem("16384kB"), Some(16384 * 1024));
         assert_eq!(parse_work_mem("1GB"), Some(1024 * 1024 * 1024));
@@ -1167,18 +923,13 @@ mod tests {
         assert_eq!(parse_work_mem("65536"), Some(65536 * 1024));
         assert_eq!(parse_work_mem(""), None);
         assert_eq!(parse_work_mem("garbage"), None);
-        // We don't accept seconds / units PG would never emit for work_mem.
         assert_eq!(parse_work_mem("4s"), None);
-        // W4: the TB arm and the zero guard had no rows — deleting the "tb"
-        // arm and every `*` in its multiplier survived.
         assert_eq!(
             parse_work_mem("2TB"),
             Some(2 * 1024 * 1024 * 1024 * 1024),
             "terabytes are 1024^4"
         );
-        // Fractional values exercise the float multiply exactly.
         assert_eq!(parse_work_mem("0.5MB"), Some(512 * 1024));
-        // Zero is rejected (`> 0`, not `>= 0`) — callers fall back.
         assert_eq!(parse_work_mem("0"), None);
         assert_eq!(parse_work_mem("0MB"), None);
     }

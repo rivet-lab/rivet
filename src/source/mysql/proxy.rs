@@ -1,65 +1,29 @@
-//! MySQL connection-proxy classifier — distinguishes direct connections from
-//! ProxySQL / MaxScale / generic multiplexers.
-//!
-//! Runs once at connect time so the operator gets a one-line warning when a
-//! proxy is in front of the database (session vars and temporary state may
-//! not survive multiplexing).  See [`classify_mysql_proxy`] for the
-//! detection precedence; it is a pure function and exhaustively
-//! unit-tested in this file.  The I/O wrapper [`detect_mysql_proxy_kind`]
-//! collects the live signals and delegates.
+//! MySQL connection-proxy classifier — distinguishes direct connections from ProxySQL / MaxScale / generic multiplexers.
 
 use mysql::Pool;
 use mysql::prelude::*;
 
 /// What the MySQL connection is actually talking to.
-///
-/// Used to:
-/// - decide which warning (if any) to print at connect time,
-/// - tag the `executing query (connection=...)` debug log so operators can
-///   distinguish direct vs proxied traffic when reading logs after the fact.
-///
-/// Detection happens once at connect time via [`detect_mysql_proxy_kind`].
-///
-/// `pub` for integration-test reachability via `MysqlSource::proxy_kind()`;
-/// same "no external API contract" disclaimer applies as for the rest of
-/// `rivet::source::mysql::*`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MysqlProxyKind {
     /// Direct connection to a MySQL server — no proxy detected.
     Direct,
-    /// ProxySQL: detected via either the `@@version_comment` signature or
-    /// `@@proxy_version` (a ProxySQL-only system variable).
+    /// ProxySQL: detected via either the `@@version_comment` signature or `@@proxy_version` (a ProxySQL-only system variable).
     ProxySql,
-    /// MariaDB MaxScale: detected via `@@version_comment` containing
-    /// "maxscale".  MaxScale's `readwritesplit` and `readconnroute` routers
-    /// do *not* multiplex by default but they can still rewrite or block
-    /// queries — worth surfacing to the operator.
+    /// MariaDB MaxScale: detected via `@@version_comment` containing "maxscale".
     MaxScale,
-    /// An unknown transaction-mode multiplexer: detected because
-    /// `CONNECTION_ID()` returned different values across two consecutive
-    /// queries on the same `mysql::Conn`.  This catches in-house balancers,
-    /// HAProxy-with-MySQL-mode setups, and ProxySQL/MaxScale instances that
-    /// hide their banner.
-    ///
-    /// False negatives are possible when the proxy's backend pool_size is 1
-    /// (the same physical backend is always reused).
+    /// An unknown transaction-mode multiplexer: detected.
     Multiplexed,
 }
 
 impl MysqlProxyKind {
-    /// True for any non-direct connection (`is_proxy() == false` only for
-    /// [`MysqlProxyKind::Direct`]).
-    ///
-    /// `#[allow(dead_code)]` because the binary compilation unit (which
-    /// re-declares `mod source`) does not reference this; the lib + tests do.
-    /// Same pattern as `MysqlSource::from_pool`.
+    /// True for any non-direct connection (`is_proxy() == false` only for [`MysqlProxyKind::Direct`]).
     #[allow(dead_code)]
     pub fn is_proxy(self) -> bool {
         !matches!(self, MysqlProxyKind::Direct)
     }
 
     /// Stable label for the `executing query (connection=...)` debug log.
-    /// Keep this terse and stable: external log parsers grep on these strings.
     pub fn log_label(self) -> &'static str {
         match self {
             MysqlProxyKind::Direct => "direct",
@@ -69,8 +33,7 @@ impl MysqlProxyKind {
         }
     }
 
-    /// One-time warning emitted at connect time.  Returns `None` for
-    /// [`MysqlProxyKind::Direct`] (the common case, no warning needed).
+    /// One-time warning emitted at connect time.
     fn warn_message(self) -> Option<&'static str> {
         match self {
             MysqlProxyKind::Direct => None,
@@ -93,30 +56,7 @@ impl MysqlProxyKind {
     }
 }
 
-/// Pure classifier for proxy detection signals.  Kept separate from
-/// [`detect_mysql_proxy_kind`] so it can be exhaustively unit-tested without a
-/// live MySQL.  See [`MysqlProxyKind`] for the meaning of each variant.
-///
-/// Precedence is intentional:
-///
-/// 1. `PROXYSQL INTERNAL SESSION` accepted as a query (ProxySQL intercepts
-///    this command on its client port; vanilla MySQL returns a syntax
-///    error). This is the strongest signal because ProxySQL by default
-///    forwards `@@version_comment`, `VERSION()`, and `@@version` straight
-///    through to the backend, so a configured-as-default ProxySQL is
-///    invisible to banner checks.
-/// 2. Explicit banner match in `@@version_comment` (ProxySQL > MaxScale).
-///    Catches ProxySQL builds with `server_version` overridden to advertise
-///    "ProxySQL" in `VERSION()`, and MaxScale which puts "MaxScale" in the
-///    banner.
-/// 3. `@@proxy_version` presence (ProxySQL-only system variable when
-///    `mysql_query_rules` is configured to expose it).
-/// 4. `CONNECTION_ID()` differing across two queries (generic multiplexing
-///    fallback — catches HAProxy MySQL mode, custom balancers, etc.).
-///
-/// Banner-before-CONNECTION_ID order matters: a ProxySQL behind a
-/// `transaction_persistent` user (which keeps the same backend conn) would
-/// fool the CONNECTION_ID check, so the specific signal wins.
+/// Pure classifier for proxy detection signals.
 fn classify_mysql_proxy(
     proxysql_internal_accepted: bool,
     version_comment: Option<&str>,
@@ -146,10 +86,7 @@ fn classify_mysql_proxy(
     MysqlProxyKind::Direct
 }
 
-/// I/O wrapper around [`classify_mysql_proxy`]: collects the detection
-/// signals from a live connection and returns the classification.  On any
-/// connection failure returns [`MysqlProxyKind::Direct`] — detection is
-/// best-effort and must never break a real export.
+/// I/O wrapper around [`classify_mysql_proxy`].
 pub(super) fn detect_mysql_proxy_kind(pool: &Pool) -> MysqlProxyKind {
     let mut conn = match pool.get_conn() {
         Ok(c) => c,
@@ -158,25 +95,10 @@ pub(super) fn detect_mysql_proxy_kind(pool: &Pool) -> MysqlProxyKind {
     detect_proxy_on_conn(&mut conn)
 }
 
-/// The probe + classify on an already-open connection — shared by the batch pool
-/// path and the CDC path (which holds a bare `Conn`, not a `Pool`). A proxy that
-/// shows up here cannot carry the binlog/replication protocol CDC needs.
+/// The probe + classify on an already-open connection.
 pub(super) fn detect_proxy_on_conn<C: Queryable>(conn: &mut C) -> MysqlProxyKind {
-    // `PROXYSQL INTERNAL SESSION` is intercepted by ProxySQL on its client
-    // port (6033) and returns a single-column JSON row describing the
-    // proxy session; vanilla MySQL and MariaDB return SQL syntax error
-    // 1064.  We use `query_drop` so we don't have to model the response
-    // shape — any `Ok` indicates ProxySQL accepted the command.
-    //
-    // (`PROXYSQL VERSION` exists too but is only accepted on the admin
-    // port 6032, not on the client port we connect through.)
     let proxysql_internal_accepted: bool = conn.query_drop("PROXYSQL INTERNAL SESSION").is_ok();
-    // `SHOW GLOBAL VARIABLES`, never `SELECT @@…`: ProxySQL stops multiplexing a session that
-    // reads a `@@` variable, and this probe runs on the pool's own first connection.
     let (version_comment, proxy_version) = proxy_globals(conn);
-    // CONNECTION_ID() is server-side: comparing two consecutive calls on the
-    // same `Conn` detects transaction-mode multiplexers that hand each
-    // statement to a different backend connection.
     let cid1: Option<u64> = conn.query_first("SELECT CONNECTION_ID()").unwrap_or(None);
     let cid2: Option<u64> = conn.query_first("SELECT CONNECTION_ID()").unwrap_or(None);
     let pair = match (cid1, cid2) {
@@ -222,8 +144,6 @@ pub(super) fn proxy_kind_of(url: &str, pool: &Pool) -> MysqlProxyKind {
 }
 
 /// Emit the one-time connect-time warning for a non-direct proxy kind.
-/// Centralized so the wording stays consistent across the three connect entry
-/// points (`from_pool`, `connect`, `connect_with_tls`).
 pub(super) fn warn_proxy_kind(kind: MysqlProxyKind) {
     if let Some(msg) = kind.warn_message() {
         log::warn!("{msg}");
@@ -367,8 +287,6 @@ mod tests {
             "default-config ProxySQL must be detectable via PROXYSQL INTERNAL signal alone"
         );
     }
-
-    // ── Warning / label contract ────────────────────────────────────────
 
     #[test]
     fn proxy_kind_is_proxy_helper_matches_variants() {
