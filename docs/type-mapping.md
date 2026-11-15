@@ -19,9 +19,39 @@ out?" — the short answer is no:
   keeps the zone; CSV emits the instant normalised to UTC with a trailing `Z`,
   while naive timestamps render bare).
 - **Rivet fails loud, not silent** — a lossy or unmapped type is named by
-  `rivet check` and aborts the run, never quietly truncated.
+  `rivet check` and aborts the run, never quietly truncated. The one value-level
+  exception is a source value that is not a value of the target type at all
+  (a MySQL `0000-00-00`): it is written as NULL and counted, see
+  [Values with no Arrow representation](#values-with-no-arrow-representation).
 
 The per-engine tables below are the precise contract; this is just the gist.
+
+## Values with no Arrow representation
+
+Each source type maps to the closest Arrow type, and Parquet stores that type as the
+[Parquet logical types](https://github.com/apache/parquet-format/blob/master/LogicalTypes.md)
+specification defines it. Arrow `Date32` is a count of days since 1970-01-01 and
+`Timestamp` a count of time units since the epoch
+([Arrow columnar format](https://arrow.apache.org/docs/format/Columnar.html),
+[`Schema.fbs`](https://github.com/apache/arrow/blob/main/format/Schema.fbs)), so a
+date with month 0 or day 0 has no value in either type, and no warehouse `DATE` holds
+one either.
+
+| Source value | What rivet writes | Signal |
+|--------------|-------------------|--------|
+| MySQL zero, partial or invalid date (`0000-00-00`, `2026-00-15`, `2024-02-31` under `ALLOW_INVALID_DATES`) in `DATE`, `DATETIME`, `TIMESTAMP` | NULL, exit 0, batch and CDC | a WARN per column with the count; the batch summary has a `fidelity` row |
+| A date or instant the target type cannot hold (PostgreSQL `infinity` or an out-of-range date, a `timestamp_ns` value outside 1677..2262) | nothing: the run is refused | `RIVET_SOURCE_VALUE_UNREPRESENTABLE`, exit 5 |
+
+`validate` and `reconcile` do not count these NULLs: they compare rows and part
+checksums, not values against the source.
+
+To deliver the exact source text instead, select the column as text in the export
+query; the column then lands as a string and loses its date type downstream. This is
+the operator's choice per column:
+
+```yaml
+query: "SELECT id, CAST(d AS CHAR) AS d FROM t"
+```
 
 ## Guarantees (v0.18.0)
 
@@ -269,7 +299,7 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `bigint unsigned` | `u_int64` → `UInt64` | `UInt64` | integer text | values &gt; i64::MAX | type_roundtrip |
 | `decimal(p,s)` | `decimal(p,s)` | `DECIMAL(p,s)` | exact decimal text | p/s auto-resolved from the wire column definition (override only as fallback) | live matrix |
 | `float` / `double` | `float32` / `float64` | `Float32` / `Float64` | float text | | golden |
-| `date` | `date` | `Date32` | ISO date | a zero or partial date (`0000-00-00`, `2026-00-00`) is written as NULL, the run WARNs per column with the count and the summary has a `fidelity` row | golden |
+| `date` | `date` | `Date32` | ISO date | a zero or partial date (`0000-00-00`, `2026-00-00`) is written as NULL, the run WARNs per column with the count and the summary has a `fidelity` row; see [Values with no Arrow representation](#values-with-no-arrow-representation) | golden |
 | `datetime` | `timestamp(µs, none)` | `Timestamp(µs, None)` | datetime text | naive; same zero-date rule as `date` | live matrix |
 | `timestamp` | `timestamp_tz(µs, UTC)` | `Timestamp(µs, UTC)` | datetime text | `SET time_zone = '+00:00'`; same zero-date rule as `date` | live matrix |
 | `time` | `time(µs)` | `Time64(µs)` | time text | | partial |
