@@ -6128,6 +6128,26 @@ seeds:
           - "lib:a_per_table_pk_decides_for_its_table_only"
           - "lib:a_mongo_cdc_load_is_keyed_exactly_where_the_id_type_guards_see_a_key"
 
+  - name: mongo-flat-id-label-fixed-objectid
+    class: "the flat `_id` column of a MongoDB export is labelled `rivet.native_type = objectid` with `rivet.fidelity = exact` whatever BSON type the collection's `_id` values hold, so an int, string or mixed `_id` is declared an exact ObjectId in the Parquet field metadata of every batch part and CDC part"
+    history: "issue #996, found 2026-11-14; RED on main 5240ede7 (a collection of int `_id` values delivered `_id` as objectid/exact; expected number/logical_string)"
+    scope: source
+    switch: mongo-flat-id-label-fixed-objectid
+    engines:
+      postgres:
+        na: "a SQL column has one declared type that the catalog names; only the flat MongoDB `_id` column holds a value of any BSON type per document under one fixed label"
+      mysql:
+        na: "a SQL column has one declared type that the catalog names; only the flat MongoDB `_id` column holds a value of any BSON type per document under one fixed label"
+      mssql:
+        na: "a SQL column has one declared type that the catalog names; only the flat MongoDB `_id` column holds a value of any BSON type per document under one fixed label"
+      oracle:
+        na: "a SQL column has one declared type that the catalog names; only the flat MongoDB `_id` column holds a value of any BSON type per document under one fixed label"
+      mongo:
+        cells:
+          - mongo_batch_flat_id_is_labelled_by_the_bson_types_the_collection_holds
+          - mongo_cdc_flat_id_is_labelled_by_the_bson_types_the_collection_holds
+          - "lib:the_flat_id_label_follows_the_types_the_collection_holds"
+
   - name: url-part-read-raw
     class: "a hand-parsed connection URL part used as written: the Oracle service name and the SQL Server database kept their %XX bytes (`ORCL%2Edomain`, `Sales%20DB`) and a bracketed IPv6 host with no port was split at its last `:` into host `[:` and port `1]`, so the driver got a name that does not exist or the run was refused"
     history: "issues #705 and #706, found 2026-11-06 by the airflow-provider hostile-input hunt; RED on pre-0.34.0 2026-11-13 (`mssql url port not a number: 1]`, service `ORCL%2Edomain`); closed by url_text::pct_decode and url_text::split_host_port used by both parsers"
