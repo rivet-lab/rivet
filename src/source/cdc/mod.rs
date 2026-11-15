@@ -1,15 +1,4 @@
 //! Canonical change-data-capture types + driver, shared across engines.
-//!
-//! Each engine's reader (`source::<engine>::cdc`) is an **adapter** that yields
-//! these canonical types; the driver [`run`] — and the future Parquet/CSV sink —
-//! is written once against the [`ChangeStream`] seam, not per engine. Three
-//! adapters (MySQL binlog, PG logical slot, SQL Server change-table poll) make
-//! the seam real.
-//!
-//! `#![allow(dead_code)]`: the consumer is `cli::dispatch` (the `rivet cdc`
-//! command), which lives only in the binary crate; the library crate also
-//! compiles `source` for the integration tests but has no CDC consumer of its
-//! own. Same pattern as `source::mysql::cdc`.
 
 #![allow(dead_code)]
 
@@ -33,19 +22,7 @@ use serde_json::Value as Json;
 use crate::error::Result;
 use value::RivetValue;
 
-/// The cap a `RIVET_CDC_MAX_TX_*` override resolves to — the pure half of
-/// [`max_tx_rows`] and [`max_tx_bytes`].
-///
-/// Extracted because the callers cache in a `OnceLock`: the body runs at most once
-/// per process, so no unit test can exercise both the default and an override, and
-/// TWELVE mutants survived in those two functions — `-> 0`, `-> 1`, `> -> <`,
-/// `> -> >=`, `* -> +`, `* -> /`. `-> 0` is the worst of them: a zero cap makes
-/// `tx.len() > cap` true on the FIRST row, so every transaction is refused as
-/// oversized and CDC stops entirely.
-///
-/// A non-positive or unparseable override falls back to the default rather than
-/// being taken literally — `RIVET_CDC_MAX_TX_ROWS=0` must not mean "refuse
-/// everything", and `=abc` must not mean "cap at nothing".
+/// The cap a `RIVET_CDC_MAX_TX_*` override resolves to — the pure half of [`max_tx_rows`] and [`max_tx_bytes`].
 pub(crate) fn tx_cap_from_env(raw: Option<&str>, default: usize) -> usize {
     raw.and_then(|s| s.parse::<usize>().ok())
         .filter(|&n| n > 0)
@@ -119,9 +96,7 @@ pub(crate) const DEFAULT_MAX_TX_ROWS: usize = 5_000_000;
 /// Default byte cap — 2 GiB, likewise.
 pub(crate) const DEFAULT_MAX_TX_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
-/// Canonical DML kind. Engine framing — PostgreSQL `BEGIN`/`COMMIT` markers, the
-/// SQL Server update before/after split — is normalised away by each adapter; a
-/// row change is exactly one of these.
+/// Canonical DML kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChangeOp {
     Insert,
@@ -141,14 +116,6 @@ impl ChangeOp {
 
 impl ChangeOp {
     /// Does this op carry its values in the BEFORE image?
-    ///
-    /// A DELETE does; everything else carries them after. One fact, previously
-    /// restated as a `match` in at least three places — `image_cell`, and twice in
-    /// Mongo's `to_change_event`, where BOTH restatements were ungraded (`delete
-    /// match arm ChangeOp::Delete` survived each). With the arm gone a delete reads
-    /// the post-image, which does not exist on a delete, and is then framed as an
-    /// AFTER image: the change is delivered as an insert of NULLs, and the row it
-    /// was meant to retract stays in the destination forever.
     pub(crate) fn values_live_in_before(self) -> bool {
         match self {
             ChangeOp::Delete => true,
@@ -173,9 +140,7 @@ impl PriorRun {
     }
 }
 
-/// An engine-shaped resume position — MySQL `{file, pos}`, a PostgreSQL LSN, a SQL Server
-/// LSN, a Mongo resume token, Oracle SCNs. Persisted verbatim as the checkpoint; each engine
-/// interprets its own shape when resuming. Its order is defined in [`order`], not here.
+/// An engine-shaped resume position — MySQL `{file, pos}`, a PostgreSQL LSN, a SQL Server LSN, a Mongo resume token, Oracle SCNs.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Position(pub(crate) std::sync::Arc<Json>);
 
@@ -216,12 +181,7 @@ impl Position {
         }
     }
 
-    /// Persist atomically (temp file + rename) so a crash never leaves a torn
-    /// checkpoint that would resume from a corrupt position. Creates the
-    /// parent directory: `rivet init --mode cdc` scaffolds
-    /// `checkpoint: ./cdc/<table>.ckpt`, and the first client-flow rehearsal
-    /// (finding #43) died on the missing `./cdc/` with an ENOENT dressed in
-    /// the grants hint — a quickstart-blocking wall for every fresh user.
+    /// Persist atomically (temp file + rename) so a crash never leaves a torn checkpoint that would resume from a corrupt position.
     pub(crate) fn save(&self, path: &Path) -> Result<()> {
         use anyhow::Context as _;
         if let Some(parent) = path.parent()
@@ -230,14 +190,6 @@ impl Position {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating checkpoint directory '{}'", parent.display()))?;
         }
-        // A WRITER-UNIQUE tmp, never the fixed `.tmp` sibling: two processes
-        // saving one checkpoint (an overlapping scheduler cycle, or two exports
-        // misconfigured onto one path) interleaved their writes into the SAME
-        // tmp file — create-truncate and write are two syscalls — and the rename
-        // then promoted a file holding one saver's JSON with the other's tail:
-        // invalid at load, and the load error's own remedy (delete to re-anchor)
-        // skips the window if followed. pid+nanos, so namespaces (two pid-1
-        // containers on one volume) cannot collide either.
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.subsec_nanos())
@@ -263,34 +215,13 @@ pub(crate) struct ChangeEvent {
     pub(crate) after: Option<Vec<RivetValue>>,
     /// Resume position after this change.
     pub(crate) position: Position,
-    /// `true` if this is the last change in its source transaction — the only
-    /// point it is safe to advance the checkpoint (transaction-atomic resume) and
-    /// to roll an output file (never split a transaction across files). MySQL sets
-    /// it at the XID/commit marker; the poll-based PG / SQL Server adapters only
-    /// ever read already-committed data, so every change is a commit boundary.
+    /// `true` if this is the last change in its source transaction.
     pub(crate) committed: bool,
-    /// Column NAMES of this event's image, when the engine carries them
-    /// (PostgreSQL wire text names every column; SQL Server change-table rows
-    /// are name-addressable). With names present the sink maps the image BY
-    /// NAME into the resolved schema — the positional-mapping corruption
-    /// class (findings #37/#41/#42: mid-window DDL shifts, non-first PK
-    /// deletes) is unrepresentable. `None` is refused by the sink, never mapped by position.
+    /// Column NAMES of this event's image, when the engine carries them (PostgreSQL wire text names every column.
     pub(crate) image_names: Option<std::sync::Arc<[String]>>,
-    /// Ordinal of this change **within its source transaction** (0-based),
-    /// stamped by [`TxnSeq`] as the stream is consumed. `position` alone is the
-    /// commit position — every change in one transaction shares it — so ordering
-    /// a current-state dedup by `position` picks an arbitrary row when a PK is
-    /// touched more than once per transaction. `(position, seq)` is the total
-    /// order; being log-derived it is identical on an at-least-once re-emit.
+    /// Ordinal of this change **within its source transaction** (0-based), stamped by [`TxnSeq`] as the stream is consumed.
     pub(crate) seq: u64,
-    /// A DEFERRED per-event decode error, surfaced by the sink **only when this
-    /// event routes to a captured table**. A single logical stream (one PG
-    /// `test_decoding` slot) decodes EVERY table in the database, so an
-    /// unrecoverable decode on an UN-captured table (e.g. an unchanged-TOAST datum
-    /// with no pre-image) must not bail the whole run — it would poison capture of
-    /// unrelated tables sharing the slot. The source records the error here instead
-    /// of bailing; the sink raises it iff the event matches a captured table (the
-    /// single routing authority), and drops it silently otherwise. `None` = clean.
+    /// A DEFERRED per-event decode error, surfaced by the sink **only when this event routes to a captured table**.
     pub(crate) poison: Option<String>,
     /// The changed row's identity within its transaction (Oracle's ROWID where stable); `None` elsewhere.
     pub(crate) row_id: Option<String>,
@@ -301,13 +232,6 @@ pub(crate) struct ChangeEvent {
 }
 
 /// Stamps each change with its intra-transaction ordinal ([`ChangeEvent::seq`]).
-/// The ordinal resets whenever the change's `position` (the commit position)
-/// changes — every change in one transaction shares that position, so this is
-/// the reliable transaction boundary on ALL engines. (`committed` cannot serve:
-/// the poll-based PostgreSQL / SQL Server adapters read already-committed data
-/// and mark EVERY change `committed`, which would reset the ordinal every row.)
-/// Being derived from `position` + log order, the ordinal is reproduced exactly
-/// on an at-least-once replay.
 #[derive(Default)]
 pub(crate) struct TxnSeq {
     counter: u64,
@@ -315,8 +239,7 @@ pub(crate) struct TxnSeq {
 }
 
 impl TxnSeq {
-    /// Ordinal for a change at commit `position`: 0 when `position` differs from
-    /// the previous change (a new transaction), else one more than the last.
+    /// Ordinal for a change at commit `position`.
     pub(crate) fn next(&mut self, position: &Position) -> u64 {
         if self.prev.as_ref() == Some(position) {
             self.counter += 1;
@@ -332,41 +255,16 @@ impl TxnSeq {
     }
 }
 
-/// Closes a buffered source transaction (#158): the at-least-once contract's
-/// load-bearing rule, previously four inline copies inside live-server `fill`
-/// loops (mysql/pg/mssql), each re-deriving the same loss argument in prose —
-/// the exact shape that shipped the PG/MSSQL `committed:true`-on-every-event
-/// bugs (see the process rules's committed-flag section).
-///
-/// The rule: stamp the group's commit `position` on EVERY event, and mark ONLY
-/// its LAST event `committed`. The sink rolls (flush → checkpoint → ack) on a
-/// `committed` event, so marking every event committed would roll + checkpoint
-/// MID-transaction and a crash before the tail's flush would advance the resume
-/// position past the commit — resume reads strictly after it and skips the tail
-/// (an at-least-once break). Each engine's group DETECTION stays engine-side
-/// (XID / BEGIN…COMMIT / __$start_lsn run); only the CLOSE is shared here.
+/// Closes a buffered source transaction (#158).
 pub(crate) struct TxnFramer;
 
 impl TxnFramer {
-    /// Frame one committed source transaction: `position = commit` on all,
-    /// `committed = true` on the last event only. Empty group is a no-op.
+    /// Frame one committed source transaction: `position = commit` on all, `committed = true` on the last event only.
     pub(crate) fn close_group(events: &mut [ChangeEvent], commit: &Position) {
         Self::close_head_of_group(events, commit, 0);
     }
 
     /// Close the IN-MEMORY head of a transaction whose tail is still on disk.
-    ///
-    /// A transaction past the memory cap keeps its head in `events` and spills the
-    /// rest as raw wire rows, so the LAST event of the transaction is in the tail
-    /// whenever the tail is non-empty. `committed` must follow the transaction, not
-    /// the segment: marking the head's last event committed would let the sink roll,
-    /// checkpoint and ack MID-transaction, and a crash before the tail's flush would
-    /// advance the slot past the commit — the resume reads strictly after it and the
-    /// tail is gone. That is the `committed`-on-every-event break arriving through a
-    /// second door.
-    ///
-    /// [`Self::close_group`] is this with an empty tail, so the unspilled path and
-    /// the spilled one cannot drift into two rules.
     pub(crate) fn close_head_of_group(
         events: &mut [ChangeEvent],
         commit: &Position,
@@ -379,9 +277,7 @@ impl TxnFramer {
         }
     }
 
-    /// Close ONE event of a spilled tail: `at` is its index within the tail,
-    /// `tail_len` the tail's length. Only the tail's last event closes the
-    /// transaction.
+    /// Close ONE event of a spilled tail: `at` is its index within the tail, `tail_len` the tail's length.
     pub(crate) fn close_tail_event(
         event: &mut ChangeEvent,
         commit: &Position,
@@ -392,40 +288,16 @@ impl TxnFramer {
         event.committed = at + 1 == tail_len;
     }
 
-    /// Mark a stand-alone event as its own commit boundary (#158 — a NAMED decision, not a
-    /// divergence). Correct where each event's write is a distinct commit (Mongo single-document
-    /// writes). A Mongo MULTI-document transaction shares one commit across N events; each is still
-    /// marked committed here (so a large one can roll the sink mid-transaction) — safe ONLY because
-    /// Mongo's per-event, consume-free resume token re-reads a mid-transaction tail rather than
-    /// skipping it (see `mongo/cdc.rs`). Engines whose resume position skips (PG slot / MSSQL
-    /// from-LSN) must frame the TRUE boundary instead. `position` is already per-event, so this
-    /// only sets the flag.
+    /// Mark a stand-alone event as its own commit boundary (#158 — a NAMED decision, not a divergence).
     pub(crate) fn single_event_commit(event: &mut ChangeEvent) {
         event.committed = true;
     }
 }
 
 /// Resident cost of a `serde_json::Value`, for the CDC memory budgets.
-///
-/// The load-bearing arm is `Object`. `serde_json`'s map is a `BTreeMap`, and a
-/// B-tree node is allocated at FULL capacity — so a one-key object like a commit
-/// position costs a whole node, measured at 475 B, not the ~20 bytes its text
-/// suggests. That single fact is 62% of what a buffered CDC change costs, because
-/// the framer clones the position onto every event of a transaction.
-///
-/// Scalars are charged 0: they live INLINE in the parent's slot, which is already
-/// counted by the parent's capacity.
 fn json_resident_bytes(v: &serde_json::Value) -> usize {
     use serde_json::Value;
-    /// MEASURED, not derived. `serde_json`'s map is a `BTreeMap` whose node is
-    /// allocated at full capacity, so a one-key object costs a whole node — but the
-    /// obvious derivation (`11 * (size_of::<String>() + size_of::<Value>())` = 616)
-    /// over-counts: the real figure is 475 B for `{"lsn":"…"}`, of which ~448 is the
-    /// node itself. Modelling it structurally and trusting the model was wrong in
-    /// BOTH directions here, an hour apart — first 12.7x under, then 1.8x over — so
-    /// the constant is the measurement and
-    /// the budget assertion inside
-    /// `what_does_one_buffered_change_actually_cost` is what keeps it one.
+    /// MEASURED, not derived.
     const JSON_OBJECT_NODE_BYTES: usize = 448;
     match v {
         Value::Null | Value::Bool(_) | Value::Number(_) => 0,
@@ -434,8 +306,6 @@ fn json_resident_bytes(v: &serde_json::Value) -> usize {
             a.capacity() * std::mem::size_of::<Value>()
                 + a.iter().map(json_resident_bytes).sum::<usize>()
         }
-        // An EMPTY map allocates NOTHING — `BTreeMap::new()` has no node until the
-        // first insert — so the node is charged only when there is one.
         Value::Object(m) if m.is_empty() => 0,
         Value::Object(m) => {
             JSON_OBJECT_NODE_BYTES
@@ -447,18 +317,7 @@ fn json_resident_bytes(v: &serde_json::Value) -> usize {
 }
 
 impl ChangeEvent {
-    /// Rough in-memory footprint of this buffered change — drives the sink's
-    /// memory-budget rollover (`rollover_memory_mb`). The before/after value
-    /// images dominate; schema/table names + a small fixed overhead are added.
-    /// DECODED payload size — what "bytes read from the source" means.
-    ///
-    /// A separate method from [`Self::estimated_bytes`] because the two units
-    /// serve different masters and conflating them was a measured regression:
-    /// when `estimated_bytes` was re-based to RESIDENT cost (struct + cloned
-    /// position + Vec slots), the `bytes_read` metric silently inflated ~4-13x
-    /// and stopped being comparable with the batch path's Arrow-columnar figure
-    /// — the exact comparability #196 introduced it for. The BUDGETS want
-    /// resident cost; the METRIC wants this.
+    /// Rough in-memory footprint of this buffered change.
     pub(crate) fn payload_bytes(&self) -> usize {
         let img = |v: &Option<Vec<RivetValue>>| {
             v.as_ref()
@@ -468,38 +327,6 @@ impl ChangeEvent {
     }
 
     pub(crate) fn estimated_bytes(&self) -> usize {
-        // RESIDENT cost, not payload size. The old model charged
-        // `schema + table + values + 32` and under-counted a narrow event 12.7x
-        // (measured: 61 B charged, 772 B real — see
-        // `spill::event_cost::what_does_one_buffered_change_actually_cost`). Every
-        // budget built on it therefore meant something ~12x larger than it said:
-        // `RIVET_CDC_MAX_TX_BYTES: 2 GiB` was ~25 GiB of real memory, which is not
-        // a guard, and `rollover_memory_mb` rolled far later than an operator
-        // asking for N megabytes would expect.
-        //
-        // Three things the payload view misses, in the order they cost:
-        //
-        // 1. the COMMIT POSITION, which the framer clones onto EVERY event of a
-        //    transaction — 475 B of the 772, because `serde_json`'s object is a
-        //    `BTreeMap` whose node allocates at FULL capacity even for one key;
-        // 2. the struct itself, which sits in the queue's backing array whatever it
-        //    points at;
-        // 3. the per-allocation overhead of the images' `Vec`s.
-        //
-        // `image_names` is charged AMORTISED, because whether it is shared depends
-        // on the ENGINE and the first version of this comment got that wrong: it
-        // asserted the `Arc` is "shared by every event of a relation", which holds
-        // for MySQL (cached per TABLE_MAP) and Mongo (a static) and is FALSE for
-        // PostgreSQL (`postgres/cdc.rs`: a fresh `Arc` and a fresh `String` per
-        // column, per row) and SQL Server (`mssql/cdc.rs`: a fresh `Vec<String>`
-        // inside the per-row loop). On those two the names are real, retained,
-        // per-event memory — measured at ~434 B/event for 10 columns — and skipping
-        // them put the estimate back under the tolerance it was just fixed to meet.
-        //
-        // `strong_count` answers it exactly and cheaply: one Arc held by N buffered
-        // events reads N and each pays 1/N; a fresh Arc per event reads 1 and pays
-        // in full. No engine-specific branch, and it stays right if a producer
-        // starts or stops sharing.
         let img = |v: &Option<Vec<RivetValue>>| {
             v.as_ref().map_or(0, |vs| {
                 vs.capacity() * std::mem::size_of::<RivetValue>()
@@ -529,13 +356,7 @@ impl ChangeEvent {
             + img(&self.after)
     }
 
-    /// Surface this event's DEFERRED decode error ([`poison`](Self::poison)) if it
-    /// carries one. EVERY consumer that turns a captured event into output MUST
-    /// call this right after confirming the event is captured — the deferral only
-    /// holds because an uncaptured table's poison is dropped, so a driver that
-    /// forgets to raise it on a CAPTURED event would emit corrupt data (the class
-    /// the round-1 hunt caught on the NDJSON driver). A discoverable method the
-    /// next sink calls, not a rule two drivers must each remember to inline.
+    /// Surface this event's DEFERRED decode error ([`poison`](Self::poison)) if it carries one.
     pub(crate) fn raise_poison(&self) -> Result<()> {
         raise_deferred(&self.poison)
     }
@@ -555,15 +376,10 @@ fn raise_deferred(poison: &Option<String>) -> Result<()> {
 }
 
 /// The seam every engine reader satisfies: a blocking pull of canonical changes.
-///
-/// `None` ⇒ no more changes available now. MySQL blocks until one arrives, so it
-/// only ends when the connection closes; the poll-based PostgreSQL / SQL Server
-/// adapters return `None` once their current backlog drains (a continuous daemon
-/// wraps the driver in an outer poll loop).
 pub(crate) trait ChangeStream {
     fn next_change(&mut self) -> Option<Result<ChangeEvent>>;
 
-    /// What the capture can supply for `tables`, asked on this stream's own connection; best-effort, `Whole` when unreadable (Mongo's UpdateLookup is always whole).
+    /// What the capture can supply for `tables`, asked on this stream's own connection.
     fn row_image(&mut self, _tables: &[String]) -> RowImage {
         RowImage::Whole
     }
@@ -573,29 +389,12 @@ pub(crate) trait ChangeStream {
         Vec::new()
     }
 
-    /// Acknowledge that every change up to and including `position` is **durably
-    /// persisted** at the destination. Engines that consume-on-read (PostgreSQL:
-    /// reading a logical slot advances it) defer the actual consume to here — so a
-    /// crash between reading and a durable write re-reads the un-acked changes
-    /// (at-least-once). MySQL (binlog) and SQL Server (change tables) retain on the
-    /// server independently of reads, so this is a no-op for them — the resume
-    /// checkpoint alone makes them at-least-once.
+    /// Acknowledge that every change up to and including `position` is **durably persisted** at the destination.
     fn ack(&mut self, _position: &Position) -> Result<()> {
         Ok(())
     }
 
-    /// The relation this stream's events will actually name, when the engine knows
-    /// it from a CATALOG rather than from the configured string.
-    ///
-    /// The schema probe (`SELECT * FROM <name>`) resolves the CONFIGURED string in
-    /// the connection's default schema, which is a second, independent reading of
-    /// one config. On SQL Server the two disagreed in silence: `open` resolves the
-    /// capture instance through `cdc.change_tables` and tags events
-    /// `<schema>.<table>`, while the probe read a same-named table in `dbo` — so an
-    /// export was written with one relation's column names over another's events,
-    /// `status: success`, no warning, the captured table's only data column absent
-    /// from the output. Engines that cannot know better return `None` and keep the
-    /// configured string.
+    /// The relation this stream's events will actually name, when the engine knows it from a CATALOG rather than from the configured string.
     fn resolved_identity(&self, _configured: &str) -> Option<(String, String)> {
         None
     }
@@ -616,16 +415,10 @@ pub(crate) trait ChangeStream {
     }
 
     /// Which engine this stream speaks — required, never defaulted.
-    ///
-    /// Routing semantics differ by engine (a document store has no schema to
-    /// qualify with, so `a.b` has ONE reading there and two on SQL), and a
-    /// default would hand a new adapter the wrong one in silence. Making it a
-    /// required method means the compiler asks.
     fn engine(&self) -> CdcEngine;
 }
 
 /// The first declared key column the table does not have, matched as images match names.
-/// The resident bytes of buffered events: each event's own cost, and each position once however many consecutive events share it.
 #[derive(Debug, Default)]
 pub(crate) struct ResidentBytes {
     bytes: usize,
@@ -693,22 +486,13 @@ pub(crate) fn ndjson_line(ev: &ChangeEvent) -> serde_json::Value {
     line
 }
 
-/// `rivet cdc` driver. Streams canonical changes from any engine adapter,
-/// emitting one NDJSON object per change to stdout and persisting the resume
-/// position after each (when `checkpoint` is set). Stops at end of stream,
-/// `max_events`, or interruption.
-///
-/// (The typed Parquet/CSV sink is the separate [`crate::pipeline::cdc::sink::run_to_files`] driver —
-/// ADR-0023 keeps the two loops apart on purpose.)
+/// `rivet cdc` driver.
 pub(crate) fn run(
     stream: &mut dyn ChangeStream,
     checkpoint: Option<PathBuf>,
     tables: Vec<String>,
     max_events: Option<usize>,
 ) -> Result<()> {
-    // A cap of 0 means emit nothing — check BEFORE consuming the stream. The
-    // post-emit `emitted >= m` check let exactly one event escape at m=0 (it
-    // printed, incremented to 1, then 1 >= 0 broke), an off-by-one.
     if max_events == Some(0) {
         return Ok(());
     }
@@ -721,7 +505,6 @@ pub(crate) fn run(
     }
     let mut last_commit: Option<Position> = None;
     let drained = emit_ndjson(stream, &checkpoint, &tables, max_events, &mut last_commit);
-    // Every line up to `last_commit` is on stdout: release it at the source (PostgreSQL advances the slot).
     let acked = last_commit.map_or(Ok(()), |p| {
         seeded!("stdout-drain-never-acks", Ok(()), stream.ack(&p))
     });
@@ -743,11 +526,6 @@ fn emit_ndjson(
         let mut ev = ev?;
         txn_seq.stamp(&mut ev);
         let committed = ev.committed;
-        // A commit boundary on an UNLISTED table produces no output line — advance
-        // the checkpoint past it NOW (before the filter `continue`): the resume
-        // position is a stream property, so a transaction whose last event lands on
-        // an unlisted table must still move it (mirrors the file sink). There is no
-        // data to lose here because nothing is emitted.
         let filtered = !tables.is_empty()
             && !tables
                 .iter()
@@ -761,11 +539,6 @@ fn emit_ndjson(
             }
             continue;
         }
-        // Surface a deferred decode error (e.g. PG unchanged-TOAST with no
-        // pre-image) only now that the event is confirmed captured — mirrors the
-        // file sink. Without this the NDJSON path would print the raw
-        // `unchanged-toast-datum` sentinel verbatim as the column value (silent
-        // corruption). An uncaptured table's poison was already dropped above.
         ev.raise_poison()?;
         ev.raise_before_poison()?;
         if let Some((n, names)) = seeded!(
@@ -777,26 +550,12 @@ fn emit_ndjson(
         }
         println!("{}", ndjson_line(&ev));
         emitted += 1;
-        // Checkpoint AFTER emitting the captured event — never before. A crash in
-        // the window between the checkpoint save and the emit would advance the
-        // resume position past a line that was never printed, so the next run reads
-        // strictly after it and SKIPS the transaction tail (#9 bughunt: an
-        // at-least-once break, the save ran before the println). Emit→checkpoint
-        // means a crash there re-emits on resume (a duplicate, never a loss).
         if committed {
             if let Some(p) = checkpoint {
                 stream.checkpoint_of(&ev.position).save(p)?;
             }
             *last_commit = Some(ev.position.clone());
         }
-        // A SOFT cap, landing on the commit boundary — the same semantics the file
-        // sink already had (`max_events_stops_at_a_commit_boundary_never_inside_a_
-        // transaction`). Breaking on the count alone lost nothing (the save above is
-        // gated on `committed`, so a cut transaction re-emits on resume), but a
-        // transaction LONGER than the cap then held no boundary to save: every run
-        // re-read the same position, re-printed the same prefix, and stopped in the
-        // same place. `--checkpoint ck --max-events 100` against a bulk load made no
-        // progress, ever. Overshooting to the boundary is the price of progressing.
         if committed && max_events.is_some_and(|m| emitted >= m) {
             if seeded!("capped-run-skips-remainder", true, false) {
                 while let Some(Ok(rest)) = stream.next_change() {
@@ -822,62 +581,34 @@ pub struct ReadableColumns {
     pub select: String,
 }
 
-/// The per-engine CDC knobs — each variant carries ONLY the parameters its
-/// engine reads, so the live set is obvious at a glance (a MySQL run has no
-/// `slot`, a Mongo run has no `server_id`) and a new engine adds a self-contained
-/// variant instead of a field every other engine ignores. The engine identity is
-/// the variant itself — [`create_change_stream`] matches it directly, no
-/// re-resolution from the URL.
+/// The per-engine CDC knobs — each variant carries ONLY the parameters its engine reads, so the live set is obvious at a glance (a MySQL run has no `slot`, a Mongo run has no `server_id`) and a new engine adds a self-contained variant instead of a field every other engine ignores.
 #[derive(Debug, Clone)]
 pub(crate) enum CdcEngineOpts {
     /// MySQL replica id (the binlog `server_id`).
     Mysql {
         server_id: u32,
         /// The `table:` values the CONFIG asked for.
-        ///
-        /// The binlog is ONE stream per server, so it carries every table's
-        /// changes. An UNDECODABLE rows event is checked against this set before
-        /// it is allowed to fail the run — otherwise one PARTIAL_JSON table is a
-        /// server-wide outage for exports that never read it.
         configured_tables: Vec<String>,
-        /// The grants the run resolved before its anchor; the stream delivers only those columns and refuses when it opens under others.
+        /// The grants the run resolved before its anchor.
         resolved_grants: Option<std::sync::Arc<std::collections::HashMap<String, ReadableColumns>>>,
     },
     /// PostgreSQL logical slot name.
     Postgres {
         slot: String,
-        /// The `table:` values the CONFIG asked for — the same cross-check the
-        /// SQL Server arm carries, for a different reason.
-        ///
-        /// `test_decoding` names the relation a row PHYSICALLY landed in. A
-        /// PARTITIONED parent stores none, so every change carries a PARTITION's
-        /// name and byte-exact routing drops all of it — while the slot advances,
-        /// which on PostgreSQL makes the loss terminal rather than a delay.
+        /// The `table:` values the CONFIG asked for.
         configured_tables: Vec<String>,
     },
     /// SQL Server capture instance (required for `sqlserver://`).
     Mssql {
         capture_instance: Option<String>,
         /// The `table:` values the CONFIG asked for.
-        ///
-        /// SQL Server resolves an event's identity from `cdc.change_tables`, but
-        /// the sink routes by byte-exact comparison against these strings. The
-        /// two were never compared, and SQL Server's default collation is
-        /// case-INSENSITIVE — so `table: dbo.orders` against a catalog
-        /// `dbo.Orders` resolved its schema perfectly and then matched no event.
         configured_tables: Vec<String>,
     },
-    /// Render the `document` blob as canonical (type-tagged) extended JSON — the
-    /// `source.mongo.json: canonical` mode, so a CDC stream and a full export
-    /// produce identical text. Config-driven only; the CLI defaults to relaxed.
-    /// Oracle LogMiner (ADR-0037): the configured tables are what the mining query selects.
+    /// Render the `document` blob as canonical (type-tagged) extended JSON.
     Oracle { configured_tables: Vec<String> },
     Mongo {
         canonical: bool,
-        /// The export's configured `table:` names. Every other engine's variant
-        /// carried these and Mongo's did not, which is why it was the one engine
-        /// with no routing cross-check of any kind: a typo'd collection ran to
-        /// `status: success, rows: 0` in silence.
+        /// The export's configured `table:` names.
         configured_tables: Vec<String>,
         /// The collections a keyed `load:` merges by `_id`.
         keyed_tables: Vec<String>,
@@ -897,36 +628,7 @@ impl CdcEngineOpts {
     }
 }
 
-/// How a capture run ends — ONE name for the concept that used to cross the
-/// adapter seam as three differently-aliased bools (`bound_at_open`,
-/// `non_block`, `until_current`), and the canonical home of the bounded run's
-/// termination contract.
-///
-/// `BoundedAtOpen` (`until_current: true` — the scheduler model): capture up to
-/// the source's position AS OF STREAM OPEN, then exit. Every adapter pins the
-/// ceiling at open (PostgreSQL `pg_current_wal_lsn()`; MySQL the binlog
-/// coordinates; SQL Server `fn_cdc_get_max_lsn()`; MongoDB the cluster
-/// `operationTime`), so a hot table whose writers outpace the drain cannot keep
-/// the run alive — the run's work is O(backlog at open). Termination is
-/// LOAD-BEARING on this bound for the two engines with a re-reading / tailable
-/// reader: PostgreSQL (the non-consuming slot peek re-reads from the un-acked
-/// position, otherwise chasing a moving log end) and MongoDB (a tailable change
-/// stream whose `next_if_any` keeps returning events under sustained writes, so
-/// the empty-poll target check never fires — the cluster-time bound is what
-/// stops it, verified by disabling the pin: the sustained-writes test then
-/// hangs). MySQL (`BINLOG_DUMP_NON_BLOCK` EOF) and SQL Server (the capture
-/// Agent's scan-gap empty poll) terminate NATIVELY, so their bound is a
-/// precise-stop refinement (verified fix-invariant for termination by a
-/// disable-bound probe). The excluded tail is deferred, never lost: the
-/// checkpoint stops at the last in-bound commit and the next run resumes there —
-/// the defer-not-drop contract every engine's two-run test proves
-/// (`roast_*_until_current_open_bound_two_runs_lose_nothing`; the PG variant, at
-/// rollover 5, is the one whose TERMINATION genuinely goes RED without the
-/// bound).
-///
-/// `Continuous` (the daemon model): no open-time ceiling. MySQL blocks on the
-/// binlog; the poll adapters still exit on catch-up and an outer loop re-wraps
-/// them.
+/// How a capture run ends — ONE name for the concept that used to cross the adapter seam as three differently-aliased bools (`bound_at_open`, `non_block`, `until_current`), and the canonical home of the bounded run's termination contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DrainMode {
     BoundedAtOpen,
@@ -934,9 +636,7 @@ pub(crate) enum DrainMode {
 }
 
 impl DrainMode {
-    /// The user-facing surface stays a bool (`cdc.until_current`, default true;
-    /// the `rivet cdc` CLI opts OUT with `--stream`); internally the mode
-    /// travels under one name.
+    /// The user-facing surface stays a bool (`cdc.until_current`, default true.
     pub(crate) fn from_until_current(until_current: bool) -> Self {
         if until_current {
             DrainMode::BoundedAtOpen
@@ -950,15 +650,7 @@ impl DrainMode {
     }
 }
 
-/// Memory backstop shared by every log/poll adapter: a transaction is buffered
-/// WHOLE (never split across parts), so an oversized one would grow the tx buffer
-/// unbounded. Each adapter caps its per-transaction buffer at this and bails
-/// loudly rather than OOM. Default 5M rows (a real OLTP transaction is far
-/// below). `RIVET_CDC_MAX_TX_ROWS` overrides it — an OPERATOR override (the
-/// refusal messages prescribe raising it when a transaction this large is
-/// genuinely expected; an earlier doc said "test-only" while the product's own
-/// errors said otherwise), and the way tests make the cap
-/// reachable without seeding a 5-million-row transaction. Read once.
+/// Memory backstop shared by every log/poll adapter.
 pub(crate) fn max_tx_rows() -> usize {
     use std::sync::OnceLock;
     static CELL: OnceLock<usize> = OnceLock::new();
@@ -970,14 +662,7 @@ pub(crate) fn max_tx_rows() -> usize {
     })
 }
 
-/// Byte sibling of [`max_tx_rows`] (round-2 audit #9): the row cap is a poor bound
-/// on the buffered-transaction FOOTPRINT when cells are large — a few thousand
-/// rows of multi-hundred-MB TEXT/BLOB stay far under 5M rows yet exhaust memory.
-/// Each adapter also caps the transaction's running `estimated_bytes` at this and
-/// bails loudly. Default 2 GiB (a real OLTP transaction is far below).
-/// `RIVET_CDC_MAX_TX_BYTES` overrides it — an operator override, like its row
-/// sibling, and the way tests make the cap reachable
-/// without seeding a multi-GB transaction. Read once.
+/// Byte sibling of [`max_tx_rows`] (round-2 audit #9).
 pub(crate) fn max_tx_bytes() -> usize {
     use std::sync::OnceLock;
     static CELL: OnceLock<usize> = OnceLock::new();
@@ -989,40 +674,22 @@ pub(crate) fn max_tx_bytes() -> usize {
     })
 }
 
-/// Connection + resume parameters for `rivet cdc`, across engines — the CDC
-/// sibling of [`crate::source::create_source`]'s `SourceConfig`. The fields here
-/// are engine-agnostic; per-engine knobs live in [`CdcEngineOpts`].
+/// Connection + resume parameters for `rivet cdc`, across engines.
 pub(crate) struct CdcConfig {
     pub url: crate::secret::Secret,
-    /// MySQL checkpoint file (PG resumes via the slot; SQL Server via its LSN;
-    /// MongoDB via the resume token).
+    /// MySQL checkpoint file (PG resumes via the slot; SQL Server via its LSN; MongoDB via the resume token).
     pub checkpoint: Option<PathBuf>,
-    /// The CONFIG's directory — the anchor for every relative path this run
-    /// resolves (checkpoint already arrives resolved; the spill dir resolves
-    /// against this). Never the process cwd: the shipped image runs at `/`.
+    /// The CONFIG's directory — the anchor for every relative path this run resolves (checkpoint already arrives resolved.
     pub config_dir: PathBuf,
-    /// How this capture run ends — see [`DrainMode`], the canonical home of the
-    /// termination contract.
+    /// How this capture run ends — see [`DrainMode`], the canonical home of the termination contract.
     pub drain: DrainMode,
-    /// Transport security, applied by every adapter through the same
-    /// `require_tls_or_loopback` gate the batch path uses (refuse remote
-    /// plaintext / unauthenticated TLS). `None` ⇒ loopback-only (the CLI default).
+    /// Transport security, applied by every adapter through the same `require_tls_or_loopback` gate the batch path uses (refuse remote plaintext / unauthenticated TLS).
     pub tls: Option<crate::config::TlsConfig>,
     /// The engine + its knobs — the CDC engine identity for dispatch.
     pub engine: CdcEngineOpts,
 }
 
-/// The sink's ACK CADENCE, handed to a poll adapter to size one peek — the
-/// drain's memory bound (O(rollover), never O(total backlog)). On PostgreSQL the
-/// peek is non-consuming: it re-reads from the slot's un-acked position every
-/// time, so a peek NEVER slides forward on its own — only an ack (slot advance)
-/// moves it. Reaching the open bound past a foreign/empty span larger than one
-/// window is therefore NOT this budget's job (no budget covers an uncaptured or
-/// empty span, whose wire:capture ratio is unbounded): the sink's re-drain loop
-/// acks the consumed span and re-peeks the fresh WAL beyond it
-/// ([`crate::pipeline::cdc::sink::run_to_files`]). `Sized` just carries the rollover — one ack's worth
-/// per peek; the non-acking NDJSON driver is `Unbounded` (one peek drains
-/// everything, the frontier check ends the stream, no re-drain).
+/// The sink's ACK CADENCE, handed to a poll adapter to size one peek.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum PeekBound {
     /// The sink's part `rollover` — one ack cadence per peek.
@@ -1032,8 +699,7 @@ pub(crate) enum PeekBound {
 }
 
 impl PeekBound {
-    /// Resolve to a positive `upto_nchanges`-style row cap the adapters clamp to
-    /// their SQL arg width. `Unbounded` ⇒ the i32 ceiling (effectively "all").
+    /// Resolve to a positive `upto_nchanges`-style row cap the adapters clamp to their SQL arg width.
     pub(crate) fn rows_capped(self) -> usize {
         match self {
             PeekBound::Sized(n) => n.clamp(1, i32::MAX as usize),
@@ -1042,10 +708,7 @@ impl PeekBound {
     }
 }
 
-/// The CDC engine, resolved ONCE — from `source.type` on a config run, from the
-/// URL scheme only for `rivet cdc`. Every downstream dispatch matches on this
-/// enum — never on the URL string — so adding an engine is one variant plus
-/// compiler-led match arms.
+/// The CDC engine, resolved ONCE — from `source.type` on a config run, from the URL scheme only for `rivet cdc`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CdcEngine {
     Mysql,
@@ -1069,43 +732,16 @@ impl From<crate::config::SourceType> for CdcEngine {
 }
 
 /// What image of a row this source can actually supply per change event.
-///
-/// rivet's change stream is a WHOLE-ROW image per event, and whether the source
-/// can produce one is a SERVER setting, not a rivet setting. Each engine has its
-/// own knob, so the question was being asked in two different layers with a third
-/// engine not asked at all:
-///
-///   mysql    `binlog_row_image`         inside the stream's `open`
-///   postgres `REPLICA IDENTITY`         a layer up, in `run_capture`
-///   mongo    —                          whole by construction (UpdateLookup)
-///   mssql    `@captured_column_list`    nowhere
-///
-/// One enum makes the answers comparable and moves the POLICY — refuse, warn, or
-/// proceed — out of each engine's prose into one place. A new engine then cannot
-/// forget: the method is a hole the compiler makes it fill.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RowImage {
-    /// Every column, on every event. Nothing to say.
+    /// Every column, on every event.
     Whole,
     /// Inserts and updates carry the whole new row; DELETE carries only the key.
-    /// Not corruption — a delete's job is to name the key that is gone — but it
-    /// moves any per-row hash computed over deletes, so it is worth one line.
     KeyOnlyDeletes { why: String },
-    /// The event cannot represent the row. Capturing would record events that are
-    /// wrong rather than merely thin, so this is refused.
+    /// The event cannot represent the row.
     Partial { why: String },
 }
 /// The native column TYPE a catalog listing gives for `column`.
-///
-/// Extracted from `CdcSchemaResolver::resolve`, which is live-only glue — it opens
-/// a connection and reads `information_schema` — so its `*n == m.column_name`
-/// survived a mutation run. `!=` takes the first column that is NOT the one asked
-/// for, so every mapping is enriched with a NEIGHBOUR's native type: a `varchar`
-/// column reported as `int`, silently, in the schema every consumer reads.
-///
-/// The third comparison of this exact shape found this session — `image_cell`'s
-/// name lookup and `image_name_memo`'s were the others — and all three were a
-/// lookup-by-name sitting in a body no offline test could reach.
 pub(crate) fn native_type_for<'a>(
     catalog: &'a [(String, String)],
     column: &str,
@@ -1118,15 +754,6 @@ pub(crate) fn native_type_for<'a>(
 
 impl CdcEngine {
     /// Does this engine make the SERVER retain log on the reader's behalf?
-    ///
-    /// PostgreSQL only, and structurally: a replication slot is the one CDC anchor
-    /// that pins WAL until the reader acks. MySQL's binlog and SQL Server's change
-    /// tables expire on their own schedule whatever rivet does — which is why they
-    /// can LOSE data to retention and PostgreSQL instead fills a disk — and Mongo's
-    /// oplog is capped. There is nothing to pin, so nothing to warn about.
-    ///
-    /// The inverse of this predicate is the reason those three engines need the
-    /// retention checks in `doctor` that PostgreSQL does not.
     pub(crate) fn pins_log_for_reader(self) -> bool {
         match self {
             Self::Postgres => true,
@@ -1193,21 +820,11 @@ impl CdcEngine {
             }
             #[cfg(not(feature = "oracle"))]
             Self::Oracle => Err(crate::source::oracle_feature_missing()),
-            // Their refusals already run in the anchor step (`ensure_anchor`) or in
-            // `initial_snapshot_pending`'s capture-instance check, both before a snapshot.
             Self::Mssql | Self::Mongo => Ok(()),
         }
     }
 
-    /// Ensure the resume anchor EXISTS — `initial: snapshot` step ① and the
-    /// single entry point for anchor creation (idempotent: a present anchor is
-    /// never moved). The per-engine anchor models (see the process rules):
-    /// PG pins server-side at slot creation; MySQL has NO server-side anchor —
-    /// the checkpoint is pinned at first open, and so are Mongo's resume token
-    /// and Oracle's SCN; MSSQL floors at `fn_cdc_get_min_lsn` without one
-    /// (over-reads, never skips).
-    /// `prior` = the prior-run evidence found — any of it makes a missing server-side
-    /// anchor fail LOUDLY instead of silently re-anchoring at "current".
+    /// Ensure the resume anchor EXISTS — `initial.
     pub(crate) fn ensure_anchor(
         self,
         url: &str,
@@ -1219,22 +836,15 @@ impl CdcEngine {
     ) -> Result<()> {
         match self {
             Self::Postgres => {
-                // Slot creation IS the anchor; open() creates it only on a
-                // genuine FIRST run (no prior-run evidence).
-                // Anchor-only open: it creates the slot and is dropped without
-                // reading, so the peek bound is irrelevant.
                 drop(crate::source::postgres::cdc::PgChangeStream::open(
                     url,
                     slot,
                     prior,
                     tls,
                     PeekBound::Unbounded,
-                    DrainMode::Continuous, // anchor-only open — never read, no bound to pin
-                    // The capture open that follows carries the tables.
+                    DrainMode::Continuous,
                     &[],
-                    // Nothing is read here, so there is nothing to spill.
                     None,
-                    // Nor anything to compare: the capture open that follows checks the slot.
                     None,
                 )?);
                 Ok(())
@@ -1250,20 +860,10 @@ impl CdcEngine {
                     )
                 })?;
                 if Position::load(ckpt)?.is_some() {
-                    return Ok(()); // anchored already — never move it
+                    return Ok(());
                 }
                 if prior.any() {
-                    // Prior-run evidence (a completed snapshot marker) with a
-                    // MISSING checkpoint: pinning "current" would silently skip
-                    // everything since the loss — and on MSSQL would actively
-                    // destroy the min-LSN over-read floor. Fail loudly.
                     return Err(checkpoint_identity::checkpoint_invalid(format!(
-                        // BOTH signals, because they are OR-ed: `snapshot_done` reads
-                        // the state DB's `cdc_snapshot` row (authoritative) OR the
-                        // destination's `snapshot/_SUCCESS` marker (legacy co-signal).
-                        // An earlier hint named only the marker — an operator who
-                        // deleted it still had `done == true` from the row, and the
-                        // identical bail fired again on the next run, forever.
                         "{} cdc: checkpoint '{}' is missing but prior-run evidence exists — \
                          restore the checkpoint file, or: {}",
                         self.label(),
@@ -1309,11 +909,6 @@ pub(crate) fn pg_retention_warnings_on(client: &mut postgres::Client, slot: &str
     {
         out.push(w);
     }
-    // ONE export's slot is all this seam knows: `CdcCapture` carries a single
-    // `cdc_cfg`, so a sibling export's slot — drained by the same `rivet run` a
-    // moment later — is indistinguishable from an abandoned one here. Hence
-    // `may_be_owned_elsewhere = true`: report the WAL, never the verdict, and
-    // never the drop command. `doctor` sees the whole config and does both.
     let ours = vec![slot];
     if let Ok(rows) = client.query(
         "SELECT slot_name, COALESCE(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn), 0)::bigint, \
@@ -1332,7 +927,7 @@ pub(crate) fn pg_retention_warnings_on(client: &mut postgres::Client, slot: &str
     out
 }
 
-/// Add an engine's setup hint only to errors rivet did not raise itself: chosen by code, then by type, then by an engine `cdc` segment of the message.
+/// Add an engine's setup hint only to errors rivet did not raise itself.
 fn with_setup_hint(e: anyhow::Error, hint: &'static str) -> anyhow::Error {
     let rendered = format!("{e:#}");
     if let Some(coded) = e.downcast_ref::<crate::error::CodedError>()
@@ -1364,9 +959,7 @@ fn with_setup_hint(e: anyhow::Error, hint: &'static str) -> anyhow::Error {
     e.context(hint)
 }
 
-/// Setup/permission hints appended to a CDC start-up error — so a missing grant
-/// surfaces the fix, not just a raw driver error. Phrased "if this is a
-/// permissions/setup error" because the same call can fail for other reasons.
+/// Setup/permission hints appended to a CDC start-up error.
 pub(crate) const MYSQL_CDC_HINT: &str = "if this is a permissions/setup error: MySQL CDC needs binlog_format=ROW plus a REPLICATION SLAVE + REPLICATION CLIENT grant (and SELECT on the table) — see the 'MySQL — the binlog grants' section of docs/reference/cdc.md";
 pub(crate) const PG_CDC_HINT: &str = "if this is a permissions/setup error: PostgreSQL CDC needs wal_level=logical and a role with the REPLICATION attribute — see the 'PostgreSQL — the logical slot' section of docs/reference/cdc.md";
 pub(crate) const MSSQL_CDC_HINT: &str = "if this is a permissions/setup error: SQL Server CDC must be enabled on the table (sys.sp_cdc_enable_table) with SQL Server Agent running, and the reader needs SELECT on the cdc schema — see the 'SQL Server — CDC change tables' section of docs/reference/cdc.md";
@@ -1375,70 +968,25 @@ pub(crate) const MONGO_CDC_HINT: &str = "if this is a setup error: MongoDB chang
 
 #[cfg(feature = "oracle")]
 pub(crate) use crate::config::ORACLE_CONTINUOUS_REFUSAL;
-/// Where an oversized transaction spills — `None` unless the operator named a
-/// directory in `RIVET_CDC_SPILL_DIR`.
-///
-/// OPT-IN, and the reason is a measurement rather than caution. Spilling was built
-/// to replace the cap's refusal ("a transaction past the cap fails the run") with
-/// something better. It is not better yet: the sink cannot roll a part
-/// mid-transaction (`RolloverPolicy::should_roll` requires `committed`, the
-/// invariant that makes crash resume transaction-atomic), so it holds the whole
-/// transaction whatever the adapter does. Measured on a 100k-row transaction: 202 MB
-/// with spilling, 226 MB without — ~11%, not a ceiling.
-///
-/// So spilling ON BY DEFAULT would trade a guard that works for a mitigation that
-/// mostly does not: the run stops failing loudly and proceeds toward the same OOM,
-/// now with a false sense of protection. Four live tests
-/// (`roast_*_oversized_transaction_bails_loud_not_oom`,
-/// `cdc_oversized_transaction_by_bytes_bails_loudly`) pin that guard on three
-/// engines and are the only reason this was caught.
-///
-/// Naming the directory is also the honest way to ask: a CDC spill can be gigabytes,
-/// and writing them into `.rivet/spill` because rivet felt like it is not a decision
-/// rivet gets to make. When the SINK learns to spill too, this becomes a default
-/// worth arguing for — and the soak stand's 202-vs-226 gap is where that argument
-/// will be settled.
+/// Where an oversized transaction spills — `None` unless the operator named a directory in `RIVET_CDC_SPILL_DIR`.
 pub(crate) fn spill_dir_for(
     checkpoint: Option<&std::path::Path>,
     config_dir: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
     let raw = std::env::var("RIVET_CDC_SPILL_DIR").ok()?;
-    // TRIMMED: a `.env` line or a YAML `environment:` entry trivially carries a
-    // trailing space, and `"1 "` would otherwise become a directory literally named
-    // `1 ` — spilling ON, into junk, for a value the operator meant as the switch.
     let named = raw.trim();
     if named.is_empty() {
         return None;
     }
-    // FALSY values mean OFF. Recognising truthiness in one direction only was the
-    // trap: `RIVET_CDC_SPILL_DIR=0`, written to DISABLE spilling, fell through to
-    // the path arm and enabled it into a directory named `0` — while disabling the
-    // oversized-transaction refusal, which is the guard this switch exists to keep.
     if ["0", "false", "off", "no"].contains(&named.to_ascii_lowercase().as_str()) {
         return None;
     }
-    // …and the truthy list carries `on` because the falsy one carries `off`: an
-    // operator mirroring an accepted spelling must not get a directory named `on`.
-    // These four are also exactly the strings YAML-1.1 tooling treats as booleans.
     if ["1", "true", "yes", "on"].contains(&named.to_ascii_lowercase().as_str()) {
-        // A truthy value means "spill, you pick where": beside the CHECKPOINT when
-        // there is one — a directory the operator already chose and sized for
-        // rivet's state — and beside the CONFIG otherwise. Never the system temp (a
-        // CDC spill can be gigabytes and a tmpfs takes down more than rivet), and
-        // never the process CWD: the shipped image runs with cwd=`/` and a non-root
-        // user, so a cwd-relative `.rivet/spill` worked for weeks and then failed
-        // with a path-less EACCES at the exact moment the cap was crossed — and on
-        // a host, spills landed per-INVOCATION-cwd where no later sweep could find
-        // them. `resolve_checkpoint`'s doc records the same cwd-anchor causing loss
-        // for checkpoints; this is the same rule applied to the spill.
         return Some(match checkpoint.and_then(std::path::Path::parent) {
             Some(dir) if !dir.as_os_str().is_empty() => dir.join(".rivet-spill"),
             _ => config_dir.join(".rivet").join("spill"),
         });
     }
-    // An explicit path: relative forms anchor to the CONFIG's directory, exactly
-    // like `cdc.checkpoint:` — one config must not read two locations depending on
-    // where the process happened to start.
     let p = std::path::Path::new(named);
     Some(if p.is_absolute() {
         p.to_path_buf()
@@ -1447,41 +995,23 @@ pub(crate) fn spill_dir_for(
     })
 }
 
-/// Construct the right [`ChangeStream`] adapter for the source URL's scheme —
-/// dispatching by engine exactly as [`crate::source::create_source`] does for the
-/// batch path. `cfg.drain` reaches every adapter as-is — the open-time-ceiling
-/// contract lives on [`DrainMode`].
+/// Construct the right [`ChangeStream`] adapter for the source URL's scheme.
 pub(crate) fn create_change_stream(
     cfg: &CdcConfig,
     peek: PeekBound,
 ) -> Result<Box<dyn ChangeStream>> {
     let url = cfg.url.expose();
-    // A host-less URL is a config/parse error, not a per-engine setup problem —
-    // validate BEFORE the engine match so it never gets blanketed by the binlog/
-    // slot/CDC grants hint below (dogfood LOW).
     crate::source::require_url_has_host(url)?;
     let tls = cfg.tls.as_ref();
-    // Sweep crashed runs' spill orphans ONCE per open — not only when a NEW
-    // spill is born in the same dir (round-5 lifecycle: a one-off giant
-    // transaction that also crashed the run leaked its multi-GB spill until
-    // another transaction crossed the cap there, possibly never). flock decides
-    // liveness, so a concurrent run's held spill is spared.
     if let Some(dir) = spill_dir_for(cfg.checkpoint.as_deref(), &cfg.config_dir) {
         spill::sweep_dead_spills_now(&dir);
     }
-    // The engine identity IS the opts variant — no re-resolution from the URL.
     match &cfg.engine {
         CdcEngineOpts::Mysql {
             server_id,
             configured_tables,
             resolved_grants,
         } => {
-            // Validate the checkpoint BEFORE open_or_resume so a corrupt/truncated
-            // checkpoint (or a directory path) surfaces cleanly, not blanketed by
-            // the MYSQL_CDC_HINT binlog-grants message — the same hoist PG/MSSQL
-            // already do below (dogfood MED: MySQL reported a checkpoint-file
-            // error as a permissions/setup problem). open_or_resume re-reads it;
-            // the double read of a tiny file is cheap.
             if let Some(p) = cfg.checkpoint.as_deref() {
                 let pos = Position::load(std::path::Path::new(p))?;
                 crate::source::mysql::cdc::MysqlChangeStream::resume_from_checkpoint(
@@ -1489,9 +1019,6 @@ pub(crate) fn create_change_stream(
                     &p.display().to_string(),
                 )?;
             }
-            // The routing check runs inside `open`, on the connection that then dumps:
-            // its refusals carry rivet's `mysql cdc:` prefix, which `with_setup_hint`
-            // passes through without the binlog-grants hint.
             Ok(Box::new(
                 crate::source::mysql::cdc::MysqlChangeStream::open_or_resume(
                     url,
@@ -1510,14 +1037,6 @@ pub(crate) fn create_change_stream(
             slot,
             configured_tables,
         } => {
-            // A persisted checkpoint proves a prior run happened — if the slot is
-            // then MISSING, it was dropped/invalidated and silently recreating it
-            // at the current position would skip everything since (a silent gap).
-            // Propagate a corrupt/truncated checkpoint (#99): `.ok()` swallowed it
-            // into "no checkpoint", so a dropped slot got silently recreated
-            // at 'current' and skipped every change since — the anti-gap guard
-            // (missing slot + prior-run evidence) never fired. The drain reads the
-            // checkpoint only; the snapshot done-signals are the anchor step's.
             let prior = PriorRun {
                 checkpoint: match cfg.checkpoint.as_deref() {
                     Some(p) => Position::load(p)?.is_some(),
@@ -1525,10 +1044,6 @@ pub(crate) fn create_change_stream(
                 },
                 snapshot: false,
             };
-            // The routing check runs inside `open`, on the stream's own connection: its
-            // refusals are rivet's own `pg cdc:` / `cdc:` verdicts, which
-            // `with_setup_hint` passes through without the wal_level hint, so a
-            // separate precheck connection bought nothing but a second session.
             Ok(Box::new(
                 crate::source::postgres::cdc::PgChangeStream::open(
                     url,
@@ -1555,11 +1070,6 @@ pub(crate) fn create_change_stream(
                      export (or `--capture-instance` with `rivet cdc`), e.g. dbo_orders",
                 )
             })?;
-            // Resume from the checkpoint's position if one was persisted (SQL Server
-            // has no server-side cursor — the from-LSN is what makes it at-least-once
-            // instead of re-reading the whole change table each run). One load, and
-            // the DECISION — including what an `lsn`-less file means — lives in
-            // `resume_from_checkpoint` where a unit test can grade it.
             let resume = match cfg.checkpoint.as_deref() {
                 Some(p) => crate::source::mssql::cdc::resume_from_checkpoint(
                     Position::load(p)?.as_ref(),
@@ -1589,7 +1099,6 @@ pub(crate) fn create_change_stream(
                     "{ORACLE_CONTINUOUS_REFUSAL}"
                 );
             }
-            // A corrupt checkpoint is its own error, not a setup problem: load it outside the hint.
             if let Some(p) = cfg.checkpoint.as_deref() {
                 Position::load(p)?;
             }
@@ -1610,18 +1119,10 @@ pub(crate) fn create_change_stream(
             configured_tables,
             keyed_tables,
         } => {
-            // Validate the checkpoint BEFORE open so a corrupt/truncated one
-            // surfaces cleanly, not blanketed by MONGO_CDC_HINT — the same hoist
-            // MySQL/PG/MSSQL do (bughunt MED: MongoChangeStream::open loaded it
-            // INSIDE the hint wrap). open re-reads it; a tiny double read is cheap.
             if let Some(p) = cfg.checkpoint.as_deref() {
                 Position::load(std::path::Path::new(p))?;
             }
             Ok(Box::new(
-                // Whole-database change stream; resumes from the persisted token
-                // when one exists. `document` JSON fidelity follows
-                // `source.mongo.json` (canonical vs relaxed), so CDC and batch
-                // render it identically.
                 crate::source::mongo::cdc::MongoChangeStream::open(
                     url,
                     tls,
@@ -1631,13 +1132,6 @@ pub(crate) fn create_change_stream(
                     configured_tables,
                     keyed_tables,
                 )
-                // The setup hint is a GUESS about the cause, so it must not be
-                // pasted onto an error that already names one. An oversized change
-                // event (`BSONObjectTooLarge`) surfaced here wearing "change streams
-                // require a replica set" — on a stand that IS one — which sends the
-                // operator to inspect a healthy topology and, finding nothing,
-                // eventually delete the checkpoint: the one action that turns a
-                // stalled run into lost data. Round 9, measured.
                 .map_err(|e| {
                     if crate::source::mongo::cdc::error_names_its_own_cause(&e) {
                         e
@@ -1650,13 +1144,7 @@ pub(crate) fn create_change_stream(
     }
 }
 
-/// Resolve CDC tables' column type mappings from the source — the **same**
-/// `RivetType` → Arrow pipeline the batch export uses — so the typed file sink
-/// writes identical columns (logical types `json`/`uuid`/…, real int widths, …)
-/// via [`crate::types::build_arrow_field`]. Session-based: ONE source
-/// connection (plus, for MySQL, one enrichment connection) serves every table
-/// of a multi-table export — the per-table constructor cost was 2 connections
-/// per table per run.
+/// Resolve CDC tables' column type mappings from the source.
 pub(crate) struct CdcSchemaResolver<'s> {
     src: ResolverSource<'s>,
 }
@@ -1700,9 +1188,7 @@ impl<'s> CdcSchemaResolver<'s> {
         }
     }
 
-    /// One table's mappings. `overrides` are the export's `columns:`
-    /// declarations for THIS table (already narrowed by
-    /// `types::overrides_for_table`) — the same override surface batch honours.
+    /// One table's mappings.
     pub(crate) fn resolve(
         &mut self,
         table: &str,
@@ -1716,24 +1202,6 @@ impl<'s> CdcSchemaResolver<'s> {
             Ok(m) => m,
             Err(e) => return Err(schema_read_error(readable.is_some(), table, e)),
         };
-        // A source column in the CDC meta namespace collides with the columns the
-        // sink prepends, and the collision is silent in the direction that matters.
-        // The sink puts `__op`/`__pos`/`__seq` at batch indices 0-2, and
-        // `row_hash_array` resolves each covered name with `index_of`, which returns
-        // the FIRST match — so `_rivet_row_hash` over a table with a column called
-        // `__op` folds the sink's operation string instead of the source cell, and
-        // the drain and the snapshot leg then produce DIFFERENT hashes for the same
-        // row. That breaks precisely the cross-leg comparison the column exists for.
-        // The part would also carry two fields of one name, which no reader resolves
-        // the same way twice.
-        //
-        // Round-10 bughunt, read-only there; refused here rather than papered over,
-        // because there is no rendering of this table that is both faithful and
-        // unambiguous.
-        // `__is_deleted` is reserved too: the base-and-buffer layout adds it to the
-        // baseline as data and the compaction DECIDES it — a source column of that
-        // name was silently overwritten by the merge's own flag, and flipped the
-        // tombstone arm on regardless of `deleted_flag:`.
         if let Some(m) = mappings.iter().find(|m| {
             matches!(
                 m.column_name.as_str(),
@@ -1752,10 +1220,6 @@ impl<'s> CdcSchemaResolver<'s> {
                 m.column_name
             );
         }
-        // Enrich `source_native_type` with the engine's full column type where the wire
-        // metadata lacks it (MySQL `COLUMN_TYPE`: "bit(8)", "binary(4)", "enum('a','b')")
-        // — the binlog cell fixes need widths and labels. CDC-only; batch's
-        // contract-pinned native names stay untouched.
         let full = self.source().native_column_types(table)?;
         for m in &mut mappings {
             if let Some(ct) = native_type_for(&full, &m.column_name) {
@@ -1772,7 +1236,7 @@ impl<'s> CdcSchemaResolver<'s> {
     }
 }
 
-/// The CDC plan for one column: kept when the builder builds it, else the server's own text; an unbuildable override is refused.
+/// The CDC plan for one column: kept when the builder builds it, else the server's own text.
 pub(crate) fn plan_cdc_delivery(
     m: crate::types::TypeMapping,
     overridden: bool,
@@ -1790,15 +1254,7 @@ pub(crate) fn plan_cdc_delivery(
     }
 }
 
-/// Split a possibly-qualified `db.table` into the `(schema, bare_table)` the
-/// MySQL `information_schema.COLUMNS` enrichment query needs. A qualified name
-/// carries its OWN schema — which may differ from the connection's default DB (a
-/// cross-database capture) — so its qualifier wins; an unqualified name falls
-/// back to `default_db` (the connection's `DATABASE()`, `""` when the URL has no
-/// default database). Mirrors the batch introspection split (mysql::mod), so CDC
-/// and batch resolve the same schema for the same table. `default_db` is only
-/// consulted for an unqualified name (the caller passes `None` for a qualified
-/// one to skip the extra `SELECT DATABASE()` round-trip).
+/// Split a possibly-qualified `db.table` into the `(schema, bare_table)` the MySQL `information_schema.COLUMNS` enrichment query needs.
 pub(crate) fn enrich_schema_and_table(table: &str, default_db: Option<&str>) -> (String, String) {
     match table.split_once('.') {
         Some((s, t)) => (s.to_string(), t.to_string()),
@@ -1816,19 +1272,11 @@ pub(crate) fn resolve_cdc_columns(
     tls: Option<&crate::config::TlsConfig>,
     overrides: &crate::types::ColumnOverrides,
 ) -> Result<Vec<crate::types::TypeMapping>> {
-    // Validate BEFORE connecting, so a hostile table name needs no database.
     validate_table_ident(table)?;
     CdcSchemaResolver::connect(url, tls)?.resolve(table, overrides, None)
 }
 
-/// The table name is interpolated into `SELECT * FROM {table}` for the schema
-/// probe — refuse anything but a plain `[schema.]table` identifier (no quote,
-/// paren, semicolon, or space can break out).
-///
-/// `pub(crate)` because the type-report resolver builds the SAME probe query for
-/// each table of a `tables:` stream: config-load only gates those names for
-/// FILENAME safety (they become destination path segments), which is a weaker
-/// alphabet than SQL interpolation needs.
+/// The table name is interpolated into `SELECT * FROM {table}` for the schema probe.
 pub(crate) fn validate_table_ident(table: &str) -> Result<()> {
     if table.is_empty()
         || !table
@@ -1859,7 +1307,7 @@ fn schema_read_error(projecting: bool, table: &str, err: anyhow::Error) -> anyho
     )
 }
 
-/// A schema read refused by the server's privilege check while the run projects: the grants moved since the readable set was read.
+/// A schema read refused by the server's privilege check while the run projects.
 fn grants_moved_mid_resolve(projecting: bool, err: &anyhow::Error) -> bool {
     seeded!(
         "column-grants-revoke-between-two-reads-uncoded",
@@ -1877,41 +1325,11 @@ pub(crate) fn table_unreadable(tag: &str, table: &str, said: &str) -> anyhow::Er
 }
 
 /// Resolve a configured `cdc.checkpoint:` path.
-///
-/// An ABSOLUTE path is used as written. A RELATIVE one is resolved against the
-/// CONFIG FILE's directory — the way rivet already resolves the state DB and every
-/// other relative path — rather than against the process working directory, which
-/// is what it did until round 9 measured the cost: `rivet init` scaffolds
-/// `checkpoint: ./cdc/<table>.ckpt`, so the same config invoked from a cron entry, a
-/// systemd unit with its own `WorkingDirectory`, a container entrypoint or by hand
-/// looked somewhere else, found nothing, and re-anchored at the CURRENT log
-/// position. Measured: three green runs delivered `[3]` of a source holding
-/// `[1,2,3]`.
-///
-/// COMPATIBILITY, and it is the reason this is a function rather than a `join`: a
-/// deployment whose working directory happens to be where its checkpoint already
-/// lives must not be moved out from under it by this fix — that would cause exactly
-/// the loss the fix exists to prevent, once, on upgrade. So if the config-relative
-/// location has no file and the CWD-relative one does, the existing file wins and
-/// the run says where it will live from now on.
-///
-/// It lives HERE, beside `Position`, rather than in the runner, because `rivet
-/// doctor` must answer about the SAME file the run will open. It did not: the
-/// preflight read the raw string against the process working directory, so a
-/// config invoked from anywhere else graded a checkpoint that was not there —
-/// and "not there" is this check's GREEN answer ("no checkpoint yet — the first
-/// run pins the open position"). The one check whose job is to catch a position
-/// about to fall off binlog retention was reporting on an absent file.
 pub(crate) fn resolve_checkpoint(raw: &str, config_dir: &std::path::Path) -> PathBuf {
     let p = std::path::Path::new(raw);
     if p.is_absolute() {
         return p.to_path_buf();
     }
-    // `components()` drops the `.` that `rivet init` scaffolds into every path it
-    // writes (`./cdc/<table>.ckpt`), so the location rivet REPORTS is one an
-    // operator can compare against `ls` — `/etc/rivet/./cdc/t.ckpt` is the same
-    // file and reads like a bug in the message that names it. Rendering only: the
-    // components are unchanged, so this cannot move where the file lives.
     let by_config: PathBuf = config_dir.join(p).components().collect();
     if !by_config.exists() && p.exists() {
         log::warn!(
@@ -1934,16 +1352,10 @@ pub(crate) fn resolve_checkpoint(raw: &str, config_dir: &std::path::Path) -> Pat
 mod mod_decisions {
     use super::*;
 
-    /// The two buffer caps, the sequence stamp and the byte estimate — the clusters
-    /// a mutation run over this file found ungraded (45+ survivors, 12 of them in
-    /// the caps alone).
+    /// The two buffer caps, the sequence stamp and the byte estimate.
     #[test]
     fn a_tx_cap_falls_back_to_its_default_on_anything_that_is_not_a_positive_number() {
-        // The override, when it is one.
         assert_eq!(tx_cap_from_env(Some("7"), 100), 7);
-        // ABSENT, unparseable, negative, and ZERO all mean "use the default".
-        // `-> 0` is the mutant that matters: a zero cap makes `len() > cap` true on
-        // the FIRST row, so every transaction is refused as oversized and CDC stops.
         assert_eq!(tx_cap_from_env(None, 100), 100);
         assert_eq!(tx_cap_from_env(Some("abc"), 100), 100);
         assert_eq!(tx_cap_from_env(Some("-1"), 100), 100);
@@ -1953,7 +1365,6 @@ mod mod_decisions {
             "`RIVET_CDC_MAX_TX_ROWS=0` must not mean `refuse every transaction` — \
              taking it literally turns a tuning knob into a kill switch"
         );
-        // The defaults are named so `*` -> `+` / `/` in the constant is graded.
         assert_eq!(DEFAULT_MAX_TX_ROWS, 5_000_000);
         assert_eq!(
             DEFAULT_MAX_TX_BYTES,
@@ -1964,16 +1375,6 @@ mod mod_decisions {
     }
 
     /// Every op answers where its values live, and only DELETE says "before".
-    ///
-    /// One fact that was restated as a `match` in three places, ungraded in each.
-    /// With the delete arm gone in Mongo's `to_change_event`, a delete reads the
-    /// post-image — which does not exist on a delete — and is then framed as an
-    /// AFTER image: the change arrives as an insert of NULLs, and the row it was
-    /// meant to retract stays in the destination forever, with every count
-    /// agreeing.
-    ///
-    /// Enumerated, not spot-checked: `matches!(self, Delete)` and `true` differ
-    /// only on the ops a one-variant fixture would not exercise.
     #[test]
     fn only_a_delete_carries_its_values_in_the_before_image() {
         assert!(
@@ -1990,11 +1391,6 @@ mod mod_decisions {
     }
 
     /// A column's native type comes from ITS row in the catalog, not a neighbour's.
-    ///
-    /// TWO columns minimum: with one, `==` and `!=` are indistinguishable because
-    /// there is no neighbour to pick up — the same reason the row-hash injectivity
-    /// guard needed two fields.
-    /// A buildable column is kept, an unbuildable one becomes server text, an unbuildable override is refused.
     #[test]
     fn cdc_delivery_keeps_buildable_types_texts_the_rest_and_refuses_an_unbuildable_override() {
         use crate::types::{
@@ -2095,21 +1491,10 @@ mod mod_decisions {
     }
 
     /// A checkpoint that cannot be READ is not a checkpoint that is ABSENT.
-    ///
-    /// `Position::load` returns `Ok(None)` on `NotFound` — "first run, anchor here"
-    /// — and propagates every other io error. `replace match guard e.kind() ==
-    /// ErrorKind::NotFound with true` survived, and it collapses the distinction:
-    /// a permissions error, a directory where a file belongs, a dead mount all
-    /// become "no checkpoint", which re-anchors the stream at the CURRENT position
-    /// and permanently skips everything written since. `status: success, rows: 0`.
-    ///
-    /// This is the same class the corrupt-JSON arm above it already refuses in
-    /// prose, one line apart — it just had no test on the io side.
     #[test]
     fn an_unreadable_checkpoint_is_an_error_not_an_absent_one() {
         let dir = tempfile::tempdir().expect("temp dir");
 
-        // ABSENT — the only case that may read as "first run".
         assert!(
             Position::load(&dir.path().join("nope.ckpt"))
                 .expect("a missing checkpoint is not an error")
@@ -2117,15 +1502,10 @@ mod mod_decisions {
             "a file that is not there IS the first run"
         );
 
-        // PRESENT and valid — the control, so "always error" cannot satisfy this.
         let ok = dir.path().join("ok.ckpt");
         std::fs::write(&ok, br#"{"lsn":"0/10"}"#).expect("write a checkpoint");
         assert!(Position::load(&ok).expect("valid").is_some());
 
-        // UNREADABLE: a DIRECTORY where a file is expected. `read_to_string` fails
-        // with `IsADirectory`/`InvalidInput`, never `NotFound` — so the guard is
-        // what decides, and with it always true this returns `Ok(None)` and the
-        // run re-anchors at NOW.
         let as_dir = dir.path().join("a_directory.ckpt");
         std::fs::create_dir(&as_dir).expect("create the impostor");
         let err = Position::load(&as_dir)
@@ -2157,12 +1537,6 @@ mod mod_decisions {
     }
 
     /// A stream that resolves no catalog identity must say NOTHING, not a name.
-    ///
-    /// `ChangeStream::resolved_identity` defaults to `None` — "this adapter cannot
-    /// resolve the configured string against a catalog". Four mutants replaced that
-    /// with `Some((...))`, and each hands the router a fabricated schema/table pair
-    /// for every adapter that does not override it. Names are labels; catalogs are
-    /// truth, and a fabricated label routes events to a relation nobody asked for.
     #[test]
     fn an_adapter_that_resolves_no_identity_returns_none_not_a_fabricated_pair() {
         struct Unresolving;
@@ -2186,11 +1560,7 @@ mod mod_decisions {
         assert_eq!(Unresolving.resolved_identity(""), None);
     }
 
-    /// `__seq` is the intra-transaction ordinal the load's dedup sorts by, together
-    /// with `__pos`. `stamp` is the one line that WRITES it, and `-> ()` survived:
-    /// every event then keeps `seq = 0`, so `(__pos, __seq)` no longer orders the
-    /// changes within a transaction and the warehouse can pick the wrong row as the
-    /// winner for a key. Silent, and correct-looking at every count.
+    /// `__seq` is the intra-transaction ordinal the load's dedup sorts by, together with `__pos`.
     #[test]
     fn the_sequence_stamp_writes_the_ordinal_onto_the_event() {
         let at = |lsn: &str| Position::new(serde_json::json!({ "lsn": lsn }));
@@ -2203,7 +1573,7 @@ mod mod_decisions {
             position: at(lsn),
             committed: false,
             image_names: None,
-            seq: 999, // a value the stamp must OVERWRITE, so `-> ()` cannot pass
+            seq: 999,
             poison: None,
             row_id: None,
             before_names: None,
@@ -2211,8 +1581,6 @@ mod mod_decisions {
         };
         let mut seq = TxnSeq::default();
 
-        // Three changes in ONE transaction: 0, 1, 2. Two would not distinguish
-        // `counter += 1` from `counter = 1`.
         let mut a = ev("0/10");
         let mut b = ev("0/10");
         let mut c = ev("0/10");
@@ -2226,7 +1594,6 @@ mod mod_decisions {
              value there is what `stamp -> ()` does, and every row then sorts equal"
         );
 
-        // A new commit position restarts the ordinal.
         let mut d = ev("0/20");
         seq.stamp(&mut d);
         assert_eq!(d.seq, 0, "a new transaction restarts the ordinal");
@@ -2235,16 +1602,13 @@ mod mod_decisions {
         assert_eq!(e.seq, 1);
     }
 
-    /// `estimated_bytes` is the SUPPLIER of the sink's byte-cap accounting, whose
-    /// consumer (`should_roll`) has a full unit matrix. Five mutants survived here
-    /// — `+` -> `*`, `+` -> `-`, and the whole body — because nothing observed the
-    /// value the consumer was handed. Same seam as the retry decider fed a `0`.
+    /// `estimated_bytes` is the SUPPLIER of the sink's byte-cap accounting, whose consumer (`should_roll`) has a full unit matrix.
     #[test]
     fn the_byte_estimate_counts_both_images_the_names_and_the_overhead() {
         let mk = |before: Option<Vec<RivetValue>>, after: Option<Vec<RivetValue>>| ChangeEvent {
             op: ChangeOp::Update,
-            schema: "sch".into(), // 3
-            table: "tab".into(),  // 3
+            schema: "sch".into(),
+            table: "tab".into(),
             before,
             after,
             position: Position::new(serde_json::json!({})),
@@ -2257,9 +1621,6 @@ mod mod_decisions {
             before_poison: None,
         };
         let empty = mk(None, None).estimated_bytes();
-        // The FIXED cost of a buffered change: the struct in the queue's backing
-        // array, plus the names. No hardcoded total — `size_of` is what makes it
-        // track the type instead of a number someone has to remember to update.
         assert_eq!(
             empty,
             std::mem::size_of::<ChangeEvent>() + 3 + 3,
@@ -2276,10 +1637,6 @@ mod mod_decisions {
         poisoned.row_id = Some("z".repeat(13));
         assert_eq!(poisoned.estimated_bytes(), empty + 7 + 11 + 13);
 
-        // The COMMIT POSITION is charged once per distinct position, not per event: the
-        // framer stamps one shared position on every event of a transaction. A one-key
-        // JSON object costs a whole BTreeMap node (measured 475 B), which a transaction
-        // of single-event commits still pays per event.
         let mut positioned = mk(None, None);
         positioned.position = Position::new(serde_json::json!({ "lsn": "0/16B2E00" }));
         let mut resident = super::ResidentBytes::default();
@@ -2312,24 +1669,17 @@ mod mod_decisions {
             "after a reset the next position is charged again"
         );
 
-        // IMAGE NAMES are charged, amortised by how many events share the Arc.
-        // PostgreSQL and SQL Server build a FRESH one per row, so on those engines
-        // the names are real per-event memory; the first version of this estimate
-        // skipped them on a comment asserting the Arc is always shared, which is
-        // true of MySQL and Mongo only.
         let names: std::sync::Arc<[String]> =
             std::sync::Arc::from(["alpha", "beta"].map(String::from).to_vec());
         let mut exclusive = mk(None, None);
         exclusive.image_names = Some(names.clone());
-        drop(names); // the event now holds the only reference — it pays in full
+        drop(names);
         let solo = exclusive.estimated_bytes();
         assert!(
             solo > empty + 2 * std::mem::size_of::<String>(),
             "an Arc held by ONE event is that event's memory and must be charged"
         );
 
-        // Shared by many events, each pays a share — otherwise a transaction's
-        // worth of events would each be charged the whole relation's names.
         let shared: std::sync::Arc<[String]> =
             std::sync::Arc::from(["alpha", "beta"].map(String::from).to_vec());
         let many: Vec<ChangeEvent> = (0..8)
@@ -2346,13 +1696,8 @@ mod mod_decisions {
              transaction's length, which is the opposite error and just as wrong"
         );
 
-        // A Bytes value carrying ALLOCATOR SLACK is charged its capacity — the
-        // Mongo shape: `serde_json::to_string`'s doubling growth leaves
-        // capacity/len in (1, 2], and Mongo's whole event is one such cell, so
-        // charging len under-counted a large-document stream up to 2x. The
-        // exact-capacity engines are unaffected (capacity == len there).
         let mut slack = Vec::with_capacity(1024);
-        slack.extend_from_slice(&[b'x'; 600]); // len 600, capacity 1024
+        slack.extend_from_slice(&[b'x'; 600]);
         assert!(
             slack.capacity() > slack.len(),
             "the fixture must carry slack"
@@ -2365,8 +1710,6 @@ mod mod_decisions {
              len-charging is how a 256 MiB budget held ~512 MiB of documents"
         );
 
-        // A nested ARRAY is charged its Vec's slots, like the top-level image —
-        // a flat constant under-counted a 1000-element `integer[]` ~4x.
         let flat = mk(None, Some(vec![RivetValue::Int(1)])).estimated_bytes();
         let arr = mk(
             None,
@@ -2379,9 +1722,6 @@ mod mod_decisions {
              engine that produces them and the one whose budget was blind to them"
         );
 
-        // BOTH images count, and independently: a before-only event and an
-        // after-only event of the same width must weigh the same, and an event
-        // carrying both must weigh more than either.
         let one = vec![RivetValue::Int(1)];
         let b_only = mk(Some(one.clone()), None).estimated_bytes();
         let a_only = mk(None, Some(one.clone())).estimated_bytes();
@@ -2395,7 +1735,6 @@ mod mod_decisions {
              makes the sink's memory ceiling describe a different event"
         );
 
-        // More cells weigh more — a one-cell fixture cannot tell a sum from a max.
         let two = mk(None, Some(vec![RivetValue::Int(1), RivetValue::Int(2)])).estimated_bytes();
         assert!(two > a_only, "the per-cell estimates are summed, not maxed");
     }
@@ -2473,17 +1812,11 @@ mod setup_hint_doc_pointers {
 
 #[cfg(test)]
 mod setup_hint {
-    /// Both directions, because only the pair says anything: a hint on everything
-    /// is the bug, and a hint on nothing is the bug it would be replaced by.
-    ///
-    /// MEASURED live on the pg-cdc stand, both ways — a dropped slot with a
-    /// checkpoint present now leads with `pg cdc: slot '…' is missing …`, and a
-    /// `wal_level = replica` server still leads with the wal_level hint.
+    /// Both directions, because only the pair says anything.
     #[test]
     fn a_setup_hint_is_added_to_driver_errors_and_withheld_from_rivets_own_verdicts() {
         let hint = super::PG_CDC_HINT;
 
-        // A driver error says nothing actionable on its own — the hint IS the answer.
         let driver = anyhow::anyhow!("db error: ERROR: logical decoding requires wal_level >= lo");
         let wrapped = format!("{:#}", super::with_setup_hint(driver, hint));
         assert!(
@@ -2493,7 +1826,6 @@ mod setup_hint {
              for. Got: {wrapped}"
         );
 
-        // rivet's own verdict is already the whole answer, and it is about DATA LOSS.
         let ours = anyhow::anyhow!(
             "pg cdc: slot 'x' is missing but a resume checkpoint exists — the changes \
              since then are no longer in the log. Re-snapshot the table (mode: full)"
@@ -2506,8 +1838,6 @@ mod setup_hint {
              colon at the end. Got: {kept}"
         );
 
-        // The sink's engine-agnostic prefix counts too — it raises the partial-image
-        // and arity refusals, which are not setup problems either.
         let sink =
             anyhow::anyhow!("cdc: rivet.t: a row image carries 1 value(s) under 3 column name(s)");
         assert!(
@@ -2730,24 +2060,7 @@ mod engine_identity {
 #[cfg(test)]
 mod tests {
 
-    /// `--max-events` must not be able to WEDGE a checkpointed NDJSON run, and
-    /// must still CAP.
-    ///
-    /// The two drivers of the same flag disagreed. The file sink defers the cap
-    /// to a commit boundary (`max_events_stops_at_a_commit_boundary_never_inside_
-    /// a_transaction`); this NDJSON loop broke on the event count alone. That
-    /// loses nothing — the checkpoint save is gated on `committed`, so a cut
-    /// transaction re-emits — but a transaction LONGER than the cap held no
-    /// boundary to save, so every run re-read the same position, re-printed the
-    /// same prefix, and stopped in the same place. `rivet cdc --checkpoint ck
-    /// --max-events 100` against a 10k-row bulk load made no progress, ever.
-    ///
-    /// TWO transactions, deliberately. A single-transaction fixture cannot tell
-    /// "stopped at the boundary" from "ran to the end of the stream", because its
-    /// only commit IS the end — the `>=`→`<` mutant survived exactly that shape
-    /// (CI mutation gate, PR #238). With a second transaction the saved position
-    /// distinguishes them: stopping at tx1's boundary saves tx1's commit, running
-    /// on saves tx2's.
+    /// `--max-events` must not be able to WEDGE a checkpointed NDJSON run, and must still CAP.
     #[test]
     fn max_events_stops_at_the_first_boundary_past_the_cap_and_checkpoints_there() {
         use super::*;
@@ -2778,8 +2091,6 @@ mod tests {
             before_names: None,
             before_poison: None,
         };
-        // tx1 = 1,2,3 (boundary at 3) and tx2 = 4,5,6 (boundary at 6). The cap is
-        // 2, so it lands INSIDE tx1 — the shape with no boundary to stop at.
         let mut stream = Fake(
             [
                 ev(1, false),
@@ -2818,32 +2129,17 @@ mod tests {
         );
     }
 
-    // The offline mutation guard for the DrainMode glue: both helpers are
-    // otherwise exercised only through I/O paths (dispatch, cdc_job, adapter
-    // opens), so an inverted mapping would survive the CI mutants gate's
-    // `--lib` run.
-    // Finding #3: MySQL CDC enriched ENUM/SET labels from
-    // information_schema.COLUMNS pinned to `TABLE_SCHEMA = DATABASE()` while
-    // dropping any `db.` qualifier — so a cross-database (or db-less-URL) capture
-    // enriched nothing and every ENUM/SET column kept its raw wire index/bitmask.
-    // enrich_schema_and_table must resolve a qualified name's OWN schema, not the
-    // connection default. RED against the old `rsplit('.').next()` + DATABASE()
-    // pinning (which yielded schema == default_db even for `otherdb.orders`).
     #[test]
     fn enrich_uses_the_qualified_schema_not_the_connection_default() {
         use super::enrich_schema_and_table;
-        // Cross-database capture: the qualifier wins over the connection default.
         assert_eq!(
             enrich_schema_and_table("otherdb.orders", Some("conndb")),
             ("otherdb".to_string(), "orders".to_string())
         );
-        // Unqualified: falls back to the connection's DATABASE().
         assert_eq!(
             enrich_schema_and_table("orders", Some("conndb")),
             ("conndb".to_string(), "orders".to_string())
         );
-        // Db-less URL (DATABASE() is NULL) unqualified → empty schema (query
-        // matches nothing, but never the WRONG database's same-named table).
         assert_eq!(
             enrich_schema_and_table("orders", None),
             (String::new(), "orders".to_string())
@@ -2862,17 +2158,9 @@ mod tests {
         assert!(!DrainMode::Continuous.is_bounded());
     }
 
-    /// Finding #43: `rivet init --mode cdc` scaffolds
-    /// `checkpoint: ./cdc/<table>.ckpt`; the first save must create the
-    /// parent, or every fresh quickstart dies on ENOENT dressed in the
-    /// grants hint.
+    /// Finding #43: `rivet init --mode cdc` scaffolds `checkpoint.
     #[test]
     fn corrupt_checkpoint_fails_loud_not_silently_absent() {
-        // #99: a corrupt/truncated checkpoint must ERROR, never silently read as
-        // absent — which let PG CDC treat a dropped slot as a fresh first run,
-        // recreate it at 'current', and permanently skip changes. `.ok().flatten()`
-        // at three sites (cdc_job resume_expected, PG + MSSQL create_change_stream)
-        // swallowed it; Position::load now carries a clear corrupt-checkpoint error.
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("ck.json");
         std::fs::write(&path, b"{not valid json").unwrap();
@@ -2898,7 +2186,6 @@ mod tests {
             )
         );
 
-        // An absent checkpoint stays a clean first run (None).
         assert!(
             Position::load(&d.path().join("absent.json"))
                 .unwrap()
@@ -2908,13 +2195,6 @@ mod tests {
 
     #[test]
     fn mysql_corrupt_checkpoint_error_is_not_masked_by_the_grants_hint() {
-        // #dogfood MED: MySQL's `Position::load` lived INSIDE open_or_resume,
-        // wrapped by MYSQL_CDC_HINT — so a corrupt/truncated checkpoint was
-        // reported as a binlog permissions/setup problem. The load is now hoisted
-        // ABOVE the wrap (like PG/MSSQL), so the corrupt-checkpoint error surfaces
-        // cleanly and NO network connect is attempted (the `?` returns first —
-        // hence the unreachable port is never dialed). RED against the old code:
-        // without the hoist the error carries the REPLICATION-SLAVE grants hint.
         let d = tempfile::tempdir().unwrap();
         let ckpt = d.path().join("ck.json");
         std::fs::write(&ckpt, b"{not valid json").unwrap();
@@ -3043,8 +2323,6 @@ mod tests {
         pos.save(&path).expect("save must create parents");
         let loaded = Position::load(&path).unwrap().expect("roundtrip");
         assert_eq!(loaded.0["pos"], 4);
-        // And the error context names the path, not the grants, when the
-        // parent CANNOT be created (a file where the dir should be).
         let blocker = d.path().join("blocked");
         std::fs::write(&blocker, b"file").unwrap();
         let bad = blocker.join("x.ckpt");
@@ -3057,11 +2335,6 @@ mod tests {
 
     use super::*;
 
-    // Ultrareview bug_001: the loud-fail-on-missing-anchor promise held only
-    // for PostgreSQL. On MySQL/MSSQL (and later Mongo/Oracle) a deleted checkpoint with prior-run
-    // evidence behind it silently re-pinned at "current" (and on MSSQL that
-    // pin actively destroys the min-LSN over-read floor). The bail must fire
-    // BEFORE any connection — so this needs no live database.
     #[test]
     fn ensure_anchor_missing_checkpoint_with_evidence_fails_loudly() {
         let d = tempfile::tempdir().unwrap();
@@ -3102,9 +2375,6 @@ mod tests {
 
     #[test]
     fn resolve_cdc_columns_rejects_a_non_identifier_table() {
-        // The table is interpolated into `SELECT * FROM {table}` for the schema
-        // probe — a name carrying a quote / paren / semicolon / space must be
-        // refused *before* any connection, so this needs no live database.
         for bad in ["orders; DROP TABLE x", "orders WHERE 1=1", "a b", "o'r", ""] {
             let err = resolve_cdc_columns(
                 "mysql://u:p@127.0.0.1:3306/db",
@@ -3138,15 +2408,11 @@ mod tests {
         }
     }
 
-    /// #158: the shared transaction close — commit position on ALL, committed on
-    /// the LAST only. RED against a `committed:true`-on-every-event mutant (the
-    /// exact shape that shipped the PG/MSSQL bugs).
+    /// #158: the shared transaction close — commit position on ALL, committed on the LAST only.
     #[test]
     fn txn_framer_close_group_marks_only_the_last_committed() {
         let commit = Position::new(serde_json::json!({ "lsn": "COMMIT" }));
 
-        // N-event group: every event gets the commit position; only the last
-        // is committed.
         let mut g: Vec<super::ChangeEvent> = (0..4).map(framer_ev).collect();
         super::TxnFramer::close_group(&mut g, &commit);
         assert!(g.iter().all(|e| e.position == commit), "commit on all");
@@ -3156,12 +2422,10 @@ mod tests {
             "only the last event of a transaction is committed"
         );
 
-        // 1-event group: that single event IS the boundary.
         let mut one = vec![framer_ev(9)];
         super::TxnFramer::close_group(&mut one, &commit);
         assert!(one[0].committed && one[0].position == commit);
 
-        // Two groups back-to-back: each ends with exactly one committed.
         let c1 = Position::new(serde_json::json!({ "lsn": "C1" }));
         let c2 = Position::new(serde_json::json!({ "lsn": "C2" }));
         let mut a: Vec<super::ChangeEvent> = (0..2).map(framer_ev).collect();
@@ -3173,7 +2437,6 @@ mod tests {
         assert!(a.iter().all(|e| e.position == c1));
         assert!(b.iter().all(|e| e.position == c2));
 
-        // Empty group: no-op, no panic.
         let mut empty: Vec<super::ChangeEvent> = Vec::new();
         super::TxnFramer::close_group(&mut empty, &commit);
         assert!(empty.is_empty());
@@ -3190,30 +2453,22 @@ mod tests {
 
     #[test]
     fn txn_seq_ordinals_reset_when_commit_position_changes() {
-        // `position` (commit-scoped) alone ties every change in a transaction;
-        // `__seq` restores intra-transaction order and RESETS when the commit
-        // position changes — the reliable txn boundary on every engine (PG/MSSQL
-        // mark every change `committed`, so `committed` can't be it).
         let mut ts = TxnSeq::default();
-        let pa = Position::new(serde_json::json!({ "lsn": "A" })); // transaction A
-        let pb = Position::new(serde_json::json!({ "lsn": "B" })); // transaction B
-        // A = 3 changes, B = 2 changes.
+        let pa = Position::new(serde_json::json!({ "lsn": "A" }));
+        let pb = Position::new(serde_json::json!({ "lsn": "B" }));
         let seqs: Vec<u64> = [&pa, &pa, &pa, &pb, &pb]
             .iter()
             .map(|p| ts.next(p))
             .collect();
         assert_eq!(seqs, vec![0, 1, 2, 0, 1]);
 
-        // Same position again after B still counts up within B.
         assert_eq!(ts.next(&pb), 2);
-        // A new position resets.
         assert_eq!(
             ts.next(&Position::new(serde_json::json!({ "lsn": "C" }))),
             0
         );
     }
 
-    // ── NDJSON driver honours ChangeEvent.poison (silent-corruption guard) ──
     struct OneShot(Option<super::ChangeEvent>);
     impl super::ChangeStream for OneShot {
         fn engine(&self) -> super::CdcEngine {
@@ -3246,9 +2501,6 @@ mod tests {
         }
     }
 
-    // The NDJSON path (`rivet cdc` without --output) must surface a deferred poison
-    // for a CAPTURED table — never print the raw `unchanged-toast-datum` sentinel as
-    // data. RED against the pre-fix loop, which had no poison check and emitted it.
     #[test]
     fn ndjson_run_raises_poison_for_a_captured_table() {
         let mut s = OneShot(Some(poison_event("orders")));
@@ -3286,7 +2538,7 @@ mod tests {
         }
     }
 
-    /// The stdout driver acks once, at the last commit boundary it passed: a printed one, or one on an unlisted table.
+    /// The stdout driver acks once, at the last commit boundary it passed.
     #[test]
     fn the_ndjson_driver_acks_the_last_commit_it_emitted_or_passed() {
         let drain = |events: Vec<super::ChangeEvent>, max: Option<usize>| {
@@ -3383,7 +2635,7 @@ mod tests {
         }
     }
 
-    /// A before image short of its names is refused by code with no line and no checkpoint; a key-only one named by `before_names` and a whole one print.
+    /// A before image short of its names is refused by code with no line and no checkpoint.
     #[test]
     fn the_ndjson_driver_refuses_a_partial_before_image_and_prints_a_named_or_whole_one() {
         let drive = |ev: super::ChangeEvent| {
@@ -3620,8 +2872,6 @@ mod tests {
         );
     }
 
-    // An UNCAPTURED table's poison must be dropped (parallel-slot contamination
-    // fix): the run succeeds, never bailing on a table we do not capture.
     #[test]
     fn ndjson_run_drops_poison_for_an_uncaptured_table() {
         let mut s = OneShot(Some(poison_event("audit_log")));
@@ -3629,7 +2879,6 @@ mod tests {
             .expect("uncaptured poison must not bail the NDJSON run");
     }
 
-    // A stream that MUST NOT be consumed — `next_change` panics if polled.
     struct Forbidden;
     impl super::ChangeStream for Forbidden {
         fn engine(&self) -> super::CdcEngine {
@@ -3641,10 +2890,6 @@ mod tests {
         }
     }
 
-    // #dogfood LOW: `--max-events 0` emitted exactly ONE event — the cap was
-    // checked AFTER the emit (`emitted += 1; if emitted >= 0 break`), an
-    // off-by-one. It is now a true no-op: the early return means the stream is
-    // never even polled. RED against the old loop, which would poll (→ panic).
     #[test]
     fn max_events_zero_is_a_true_no_op_never_polls_the_stream() {
         let mut s = Forbidden;
@@ -3653,13 +2898,6 @@ mod tests {
     }
 
     /// The metric's unit and the budget's unit are DIFFERENT, on purpose.
-    ///
-    /// One `estimated_bytes` feeding both was a measured regression: re-basing the
-    /// estimate to resident cost silently inflated `bytes_read` ~13x on narrow
-    /// rows and broke comparability with the batch path — the exact thing the
-    /// metric exists for. This pins the split: payload counts the VALUES, resident
-    /// counts the allocation, and the gap between them is the position clone +
-    /// struct overhead that must never leak into "bytes read from the source".
     #[test]
     fn payload_bytes_counts_values_and_estimated_bytes_counts_memory() {
         let mut ev = ChangeEvent {
@@ -3694,8 +2932,6 @@ mod tests {
             "buffered, the event costs its position too — if resident and payload \
              converge, one of them changed meaning and a metric or a budget is now lying"
         );
-        // The position is RESIDENT cost, never payload: re-stamping it must not
-        // move the metric's number.
         let before = ev.payload_bytes();
         ev.position = Position::new(serde_json::json!({ "lsn": "0/FFFFFFFF", "extra": "x" }));
         assert_eq!(
@@ -3706,13 +2942,6 @@ mod tests {
     }
 
     /// Spilling is OPT-IN, and every resolved location is CONFIG-anchored.
-    ///
-    /// The default is `None`: with no directory named the cap keeps its original
-    /// meaning and REFUSES an oversized transaction. And nothing here is ever
-    /// cwd-relative — the shipped image runs at `/` with a non-root user, where a
-    /// cwd-anchored `.rivet/spill` worked for weeks and then failed with a
-    /// path-less EACCES at the exact moment the cap was crossed; on a host it
-    /// scattered per-invocation orphans no later sweep could find.
     #[test]
     fn spilling_is_off_until_a_directory_is_named() {
         use std::path::Path;
@@ -3725,10 +2954,6 @@ mod tests {
              silent spill would remove the OOM guard and say nothing"
         );
 
-        // FALSY values mean OFF, and `on` must be truthy because `off` is falsy:
-        // an operator mirroring an accepted spelling must not get a directory
-        // literally named `on`. These pairs are exactly what YAML-1.1 tooling
-        // treats as booleans.
         for off in ["0", "false", "FALSE", "off", "no", "  "] {
             guard.set(off);
             assert_eq!(
@@ -3747,18 +2972,12 @@ mod tests {
             );
         }
 
-        // Truthy with NO checkpoint: beside the CONFIG, never the cwd. This is
-        // the common PostgreSQL shape (slot-anchored, no checkpoint) — the engine
-        // whose transactions are largest must get an ABSOLUTE directory.
         guard.set("1");
         assert_eq!(
             spill_dir_for(None, cfg),
             Some(Path::new("/etc/rivet/.rivet/spill").to_path_buf()),
         );
 
-        // An explicit ABSOLUTE path is used verbatim; a RELATIVE one anchors to
-        // the config dir, exactly like `cdc.checkpoint:` — one config must not
-        // read two locations depending on where the process started.
         guard.set("/mnt/big/spill");
         assert_eq!(
             spill_dir_for(Some(Path::new("/var/lib/rivet/cdc.json")), cfg),
@@ -3803,8 +3022,7 @@ mod tests {
 mod error_code_tests {
     use crate::error::assert_coded;
 
-    /// The shared CDC seams: an unknown URL scheme, an unsafe table identifier, an unreadable
-    /// table (the server's words kept), the undecodable seam, and a deferred cell poison.
+    /// The shared CDC seams: an unknown URL scheme, an unsafe table identifier, an unreadable table (the server's words kept), the undecodable seam, and a deferred cell poison.
     #[test]
     fn the_shared_cdc_refusals_carry_their_codes() {
         let err = super::CdcEngine::from_url("foo://x").unwrap_err();

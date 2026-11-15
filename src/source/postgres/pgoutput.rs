@@ -1,49 +1,18 @@
 //! The `pgoutput` logical-decoding message format — PURE bytes-in, message-out.
-//!
-//! Why this exists at all: `test_decoding`, which this replaces, is documented by
-//! PostgreSQL as an EXAMPLE output plugin whose format is explicitly not an API.
-//! Building on it meant owning a 278-line text parser AND inheriting a defect class
-//! that cannot exist here — measured on the stand, all three found this session:
-//!
-//! | | test_decoding | pgoutput |
-//! | --- | --- | --- |
-//! | NULL | the string `NULL`, indistinguishable from data | its own tag `n` |
-//! | unchanged TOAST | the string `unchanged-toast-datum`, likewise | its own tag `u` |
-//! | column types | guessed from `[integer]` in the text | an OID per column, from `Relation` |
-//! | key columns | not reported | a flag per column |
-//! | session state | `datestyle`/`bytea_output`/TimeZone shape the text | none in binary mode |
-//!
-//! The module is deliberately I/O-free: it takes the bytes a caller already has and
-//! returns a typed message. That makes every decision in it offline-gradeable,
-//! which is the whole reason the old parser's siblings kept shipping ungraded.
-//!
-//! Layouts are PostgreSQL's "Logical Streaming Replication Protocol" chapter. Every
-//! integer is big-endian; strings are NUL-terminated.
 
 #![allow(dead_code)]
-// ^ Nothing in the non-test build calls this YET: the commit that adds a decoder
-// and the commit that swaps the reader are deliberately separate, because a pure
-// decoder is fully gradeable offline and a reader swap is not. The unit tests do
-// exercise every line of it against real wire bytes; `--all-targets` clippy counts
-// only the lib target, hence the allow. It comes OUT with the reader swap — if it
-// is still here after that, this module is dead and should be deleted, not kept.
 
 use crate::error::Result;
 
-/// One cell of a row image. The tag is the protocol's, not ours — which is the
-/// point: `Null` and `ToastUnchanged` are values the wire distinguishes, where
-/// `test_decoding` rendered both as text a real column could also hold.
+/// One cell of a row image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Cell {
     Null,
     /// The column was not transmitted because its TOASTed value did not change.
-    /// NOT a value — a caller that treats it as one writes the marker into data.
     ToastUnchanged,
-    /// `t` — the type's TEXT output. Present when the slot was read without
-    /// `binary`, and session-state-shaped, so prefer binary.
+    /// `t` — the type's TEXT output.
     Text(Vec<u8>),
-    /// `b` — the type's BINARY output, decodable with `postgres_types::FromSql`
-    /// against the OID `Relation` gave for this column.
+    /// `b` — the type's BINARY output, decodable with `postgres_types::FromSql` against the OID `Relation` gave for this column.
     Binary(Vec<u8>),
 }
 
@@ -52,8 +21,7 @@ pub(crate) struct Column {
     pub name: String,
     pub type_oid: u32,
     pub type_modifier: i32,
-    /// Part of the replica identity — the wire says so, so rivet never has to ask
-    /// the catalog which columns identify a row.
+    /// Part of the replica identity — the wire says so, so rivet never has to ask the catalog which columns identify a row.
     pub is_key: bool,
 }
 
@@ -79,9 +47,7 @@ pub(crate) enum Message {
     },
     Update {
         relation_id: u32,
-        /// Present only when the table's replica identity supplies one (`FULL`, or
-        /// `DEFAULT` when a key column changed). `None` is not "no change" — it is
-        /// "the server sent no pre-image", which is a different fact.
+        /// Present only when the table's replica identity supplies one (`FULL`, or `DEFAULT` when a key column changed).
         before: Option<Vec<Cell>>,
         after: Vec<Cell>,
     },
@@ -93,25 +59,13 @@ pub(crate) enum Message {
     Truncate {
         relation_ids: Vec<u32>,
     },
-    /// A logical message — `pg_logical_emit_message()`. rivet uses one as a
-    /// BARRIER: emit a nonce, drain until it comes back, and everything before it
-    /// provably committed before rivet asked. That is an exact boundary where
-    /// `pg_current_wal_lsn()` gives an approximate one.
-    ///
-    /// It arrives ONLY when the slot is read with `messages=true` AND
-    /// `binary=true` — MEASURED twice, on the fixture and on an isolated probe:
-    /// with `messages=true, binary=false` the tag is simply absent. (`test_decoding`
-    /// renders it either way, so this is specific to pgoutput's text mode.) A reader
-    /// that emits a barrier and omits either option waits for something that will
-    /// never come, so all three belong together or none of them does.
+    /// A logical message — `pg_logical_emit_message()`.
     Logical {
         transactional: bool,
         prefix: String,
         content: Vec<u8>,
     },
-    /// `O`rigin, `Y` type, and the streaming variants. Named rather than dropped so
-    /// a caller can decide; silently skipping an unknown message is how a protocol
-    /// bump becomes a silent gap.
+    /// `O`rigin, `Y` type, and the streaming variants.
     Other(char),
 }
 
@@ -152,8 +106,7 @@ impl<'a> Reader<'a> {
     fn u64(&mut self) -> Result<u64> {
         Ok(u64::from_be_bytes(self.take(8)?.try_into().expect("8")))
     }
-    /// A NUL-terminated string. Refuses an unterminated one rather than reading to
-    /// the end of the message — a missing NUL means the layout is not what we think.
+    /// A NUL-terminated string.
     fn cstr(&mut self) -> Result<String> {
         let start = self.i;
         while self.i < self.b.len() && self.b[self.i] != 0 {
@@ -257,11 +210,6 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Message> {
         }
         b'U' => {
             let relation_id = r.u32()?;
-            // `K` (key only) or `O` (whole old tuple) is OPTIONAL and comes first;
-            // `N` always follows. Treating an absent pre-image as an empty one
-            // would make "the server sent no before-image" look like "the row had
-            // no values", which is the distinction the old text format could not
-            // make at all.
             let mut before = None;
             let mut tag = r.u8()?;
             if tag == b'K' || tag == b'O' {
@@ -333,18 +281,7 @@ fn expect_tag(r: &mut Reader<'_>, want: u8) -> Result<()> {
     Ok(())
 }
 
-/// Turn one BINARY `pgoutput` cell into a [`RivetValue`], dispatching on the type
-/// OID the `Relation` message carried.
-///
-/// This is where the format's real payoff lands. `test_decoding` hands over the
-/// type's TEXT rendering, so every one of these becomes a parse — and each parse is
-/// shaped by session state the reader does not control. Here the server sends the
-/// type's own binary form and `postgres_types::FromSql` decodes it, the SAME
-/// implementations the batch export already trusts for the identical wire format.
-///
-/// An OID with no arm is a REFUSAL, not a guess. Falling back to "keep the bytes as
-/// text" is how a type nobody mapped becomes a column of hex in the destination,
-/// which every count and sum agrees with.
+/// Turn one BINARY `pgoutput` cell into a [`RivetValue`], dispatching on the type OID the `Relation` message carried.
 pub(crate) fn value_from_binary(
     oid: u32,
     raw: &[u8],
@@ -373,14 +310,6 @@ pub(crate) fn value_from_binary(
         23 => V::Int(de::<i32>(&ty, raw, "int4")? as i64),
         700 => V::Float(de::<f32>(&ty, raw, "float4")? as f64),
         701 => V::Float(de::<f64>(&ty, raw, "float8")?),
-        // timestamptz is an INSTANT on the wire: microseconds from 2000-01-01 UTC,
-        // with no rendering and so no `TimeZone`/`datestyle` to get wrong. That is
-        // the whole of the class this repo measured three defects in.
-        // `.naive_utc()` and `.naive_local()` are the SAME call on a `DateTime<Utc>`
-        // — the type parameter makes them identical, so that mutant is equivalent by
-        // construction rather than ungraded. What is NOT equivalent is the type
-        // parameter itself: decode as `Local` and the instant shifts by the host's
-        // offset, which is the +9h corruption class in a new place.
         1184 => {
             V::DateTime(de::<chrono::DateTime<chrono::Utc>>(&ty, raw, "timestamptz")?.naive_utc())
         }
@@ -390,12 +319,8 @@ pub(crate) fn value_from_binary(
                 .and_hms_opt(0, 0, 0)
                 .expect("midnight is a valid time"),
         ),
-        // uuid: 16 raw bytes, so no hyphen-strip and no length guard — the shape
-        // that turned an entire column NULL when the text rendering was 36 chars.
         2950 => V::Bytes(de::<uuid::Uuid>(&ty, raw, "uuid")?.as_bytes().to_vec()),
         17 => V::Bytes(de::<Vec<u8>>(&ty, raw, "bytea")?),
-        // json/jsonb go through the batch reader's raw-text adapter: the stored
-        // bytes verbatim (jsonb's version byte stripped), never a serde re-encode.
         114 | 3802 => V::Bytes(
             de::<super::arrow_convert::PgJsonRawText>(&ty, raw, "json")?
                 .0
@@ -404,7 +329,6 @@ pub(crate) fn value_from_binary(
         ),
         19 | 25 | 1042 | 1043 => V::Bytes(de::<String>(&ty, raw, "text")?.into_bytes()),
         26 => V::Int(de::<u32>(&ty, raw, "oid")? as i64),
-        // numeric: the batch reader's decoder, so both emit the same normalized text.
         1700 => V::Bytes(numeric_text(raw)?.into_bytes()),
         1083 => V::TimeMicros(time_micros(de::<i64>(&Type::INT8, raw, "time")?)?),
         1186 => {
@@ -414,7 +338,6 @@ pub(crate) fn value_from_binary(
                     .into_bytes(),
             )
         }
-        // One-dimensional arrays of the element types the batch list builder makes.
         1005 => array_of(de::<Vec<Option<i16>>>(&ty, raw, "int2[]")?, |v| {
             V::Int(v as i64)
         }),
@@ -479,19 +402,10 @@ fn numeric_text(raw: &[u8]) -> Result<String> {
         })
 }
 
-/// The prefix rivet stamps on its own logical messages, so a barrier emitted by
-/// something else on the same database is never mistaken for ours.
+/// The prefix rivet stamps on its own logical messages, so a barrier emitted by something else on the same database is never mistaken for ours.
 pub(crate) const BARRIER_PREFIX: &str = "rivet";
 
 /// Is this message OUR barrier, carrying `nonce`?
-///
-/// Both halves matter and each has been a real bug shape elsewhere in this tree.
-/// The PREFIX stops another tool's logical message ending a rivet drain early — a
-/// slot decodes the whole database, so someone else's marker really can arrive.
-/// The NONCE stops a PREVIOUS run's barrier ending this one: the same config run on
-/// an interval emits a barrier per cycle, and they all share the prefix, so
-/// matching on the prefix alone would let cycle N+1 stop at cycle N's leftover and
-/// report a clean drain over an unread backlog.
 pub(crate) fn is_our_barrier(msg: &Message, nonce: &str) -> bool {
     matches!(
         msg,
@@ -501,11 +415,6 @@ pub(crate) fn is_our_barrier(msg: &Message, nonce: &str) -> bool {
 }
 
 /// Fill an UPDATE's unchanged-TOAST cells from the pre-image, where it has them.
-///
-/// A pre-image cell that is ITSELF a marker is not a source — that recovers the
-/// marker, reports success, and ships it as data. The text reader had the same
-/// guard and it was ungraded until this session; here the two are different bytes
-/// so the check is exact rather than a string comparison.
 fn merge_unchanged_toast(after: &[Cell], before: Option<&[Cell]>) -> Vec<Cell> {
     let Some(before) = before else {
         return after.to_vec();
@@ -514,45 +423,19 @@ fn merge_unchanged_toast(after: &[Cell], before: Option<&[Cell]>) -> Vec<Cell> {
         .iter()
         .enumerate()
         .map(|(i, cell)| match (cell, before.get(i)) {
-            // NO `pre != ToastUnchanged` guard, and the difference from the text
-            // reader is the point. There, the marker is a STRING, so copying it
-            // across "recovers" a value and clears the unchanged flag — the guard
-            // is load-bearing and its absence ships the placeholder as data (found
-            // and fixed earlier this session). Here cloning a marker yields a
-            // marker, which `decode_tuple` refuses on the next line, so the guard
-            // is provably redundant: witness-searched, the two forms agree on every
-            // input. An unkillable mutant means redundant code, not an exclusion.
             (Cell::ToastUnchanged, Some(pre)) => pre.clone(),
             _ => cell.clone(),
         })
         .collect()
 }
 
-/// Assembles [`Message`]s into [`ChangeEvent`]s, holding the relation cache the
-/// protocol requires.
-///
-/// `pgoutput` sends a `Relation` ONCE per table per connection and then references
-/// it by OID, so a stateless decode cannot name the table a row belongs to. That
-/// cache is the only state here — everything else is a function of the message.
-///
-/// The transaction framing is the load-bearing part, and it is the rule the process rules
-/// already states for every adapter: `committed` marks the LAST event of a source
-/// transaction, never every event. `pgoutput` gives that boundary explicitly
-/// (`Begin` … `Commit`), which is exactly what the text reader had to infer — and
-/// what PostgreSQL and SQL Server both got wrong once, marking every event
-/// committed and breaking at-least-once on a crash mid-transaction.
+/// Assembles [`Message`]s into [`ChangeEvent`]s, holding the relation cache the protocol requires.
 #[derive(Default)]
 pub(crate) struct Assembler {
     relations: std::collections::HashMap<u32, RelationInfo>,
     /// Rows of the transaction currently open, held until its `Commit`.
     open: Vec<PendingRow>,
     /// A refusal inside the CURRENT transaction poisons the rest of it.
-    ///
-    /// Without this, a caller that logs an error and keeps feeding gets a PARTIAL
-    /// transaction: measured on the fixture, a refused UPDATE followed by its
-    /// sibling DELETE yielded a one-row "transaction" that never existed. The
-    /// at-least-once contract is transaction-atomic, so half of one is worse than
-    /// none — and the caller is not the place to remember that.
     poisoned: Option<(crate::error::Code, String)>,
 }
 
@@ -560,8 +443,7 @@ struct RelationInfo {
     schema: String,
     table: String,
     columns: Vec<Column>,
-    /// Built once per relation, shared by every event that references it — the
-    /// sink compares these by `Arc::ptr_eq` to memoise its column lookup.
+    /// Built once per relation, shared by every event that references it.
     names: std::sync::Arc<[String]>,
 }
 
@@ -573,16 +455,8 @@ struct PendingRow {
 }
 
 impl Assembler {
-    /// Feed one message. Returns the transaction's events when it COMMITS, and
-    /// nothing before then.
-    ///
-    /// Buffering to the commit is not an optimisation — it is what lets the last
-    /// event carry `committed`, which is the only point the sink may roll a part
-    /// and advance the checkpoint.
+    /// Feed one message.
     pub(crate) fn push(&mut self, msg: Message) -> Result<Vec<crate::source::cdc::ChangeEvent>> {
-        // A `Begin` clears the poison; everything else inside a poisoned
-        // transaction is refused with the ORIGINAL cause, so the caller sees why
-        // rather than a cascade of consequences.
         if let Some((code, why)) = self.poisoned.clone()
             && !matches!(msg, Message::Begin { .. })
         {
@@ -606,9 +480,6 @@ impl Assembler {
         use crate::source::cdc::ChangeOp;
         match msg {
             Message::Begin { .. } => {
-                // A `Begin` while rows are open means the previous transaction never
-                // committed — the stream is not what we think it is. Dropping them
-                // silently is how a partial transaction reaches the destination.
                 self.poisoned = None;
                 if !self.open.is_empty() {
                     crate::rivet_bail!(
@@ -654,14 +525,6 @@ impl Assembler {
                 before,
                 after,
             } => {
-                // RECOVER an unchanged-TOAST cell from the pre-image before
-                // decoding. `REPLICA IDENTITY FULL` does not stop the server
-                // omitting an unchanged TOASTed value from the NEW tuple — identity
-                // shapes the OLD one — so refusing here would refuse every UPDATE
-                // that leaves a large column alone, which is most of them. The text
-                // reader already recovers exactly this; the difference is that here
-                // the marker is a TAG, so "the pre-image is itself a marker" is a
-                // distinguishable case rather than a string collision.
                 let after = merge_unchanged_toast(&after, before.as_deref());
                 let before = before
                     .as_deref()
@@ -690,9 +553,6 @@ impl Assembler {
                 Ok(Vec::new())
             }
             Message::Commit { commit_lsn, .. } => Ok(self.close(commit_lsn)),
-            // A TRUNCATE removes rows with no per-row events, so nothing downstream
-            // can retract them — the same refusal the text reader already makes,
-            // and here it arrives as a typed message instead of a parsed statement.
             Message::Truncate { relation_ids } => {
                 let named: Vec<String> = relation_ids
                     .iter()
@@ -711,15 +571,11 @@ impl Assembler {
                     crate::source::cdc::checkpoint_identity::RECOVER
                 )))
             }
-            // A barrier is not a change. It is also not something to swallow: the
-            // caller decides whether this is ITS nonce, and a reader that dropped
-            // it here would drain past its own boundary.
             Message::Logical { .. } | Message::Other(_) => Ok(Vec::new()),
         }
     }
 
-    /// Close the open transaction, stamping the commit position on every row and
-    /// `committed` on the LAST one only.
+    /// Close the open transaction, stamping the commit position on every row and `committed` on the LAST one only.
     fn close(&mut self, commit_lsn: u64) -> Vec<crate::source::cdc::ChangeEvent> {
         let position = crate::source::cdc::Position::new(serde_json::json!({
             "lsn": format!("{:X}/{:X}", commit_lsn >> 32, commit_lsn & 0xFFFF_FFFF)
@@ -739,7 +595,7 @@ impl Assembler {
                     position: position.clone(),
                     committed: i == last,
                     image_names: rel.map(|x| x.names.clone()),
-                    seq: 0, // stamped by TxnSeq as the stream is consumed
+                    seq: 0,
                     poison: None,
                     row_id: None,
                     before_names: None,
@@ -779,14 +635,6 @@ impl Assembler {
             .map(|(cell, col)| match cell {
                 Cell::Null => Ok(V::Null),
                 Cell::Binary(raw) => value_from_binary(col.type_oid, raw),
-                // An unchanged-TOAST cell is NOT a value. The text reader had to
-                // defer this as a `poison` because the marker was indistinguishable
-                // from data; here it is its own tag, so the refusal can be exact.
-                // Still a marker AFTER the pre-image merge means there was no
-                // pre-image to recover from — the table's replica identity does not
-                // carry one. Refusing is the only honest answer: writing the marker
-                // would put the words `unchanged-toast-datum` where data belongs,
-                // and writing NULL would erase a value that still exists.
                 Cell::ToastUnchanged => crate::rivet_bail!(
                     crate::error::codes::SOURCE_CDC_CELL_UNSUPPORTED,
                     "pgoutput: {}.{}: column `{}` is an unchanged TOAST value this \
@@ -817,15 +665,6 @@ mod tests {
     use super::*;
 
     /// Real bytes from a real server, not a hand-built fixture.
-    ///
-    /// `tests/fixtures/pgoutput/messages.hex` was captured from the pg-cdc stand
-    /// (PostgreSQL 16.14) by exercising INSERT / UPDATE under both replica
-    /// identities / DELETE / TRUNCATE against a table carrying the types that broke
-    /// the text parser: quoted text, an array with a NULL element, a `timestamptz`
-    /// in a non-UTC literal, uuid, bytea, jsonb, and an INCOMPRESSIBLE 12 KB column
-    /// so the unchanged-TOAST case is really out of line (a compressible one stays
-    /// inline and never produces the marker — measured, and the reason an earlier
-    /// probe saw no `u` at all).
     fn fixture() -> Vec<Vec<u8>> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/pgoutput/messages.hex");
@@ -872,8 +711,7 @@ mod tests {
         );
     }
 
-    /// `Relation` carries the column TYPES and the replica-identity flags — the two
-    /// facts the text format made rivet infer or ask the catalog for.
+    /// `Relation` carries the column TYPES and the replica-identity flags.
     #[test]
     fn relation_names_the_columns_their_type_oids_and_which_ones_are_the_key() {
         let rel = fixture()
@@ -900,14 +738,11 @@ mod tests {
                 "id", "txt", "arr", "ts", "u", "b", "n", "f", "ok", "d", "j", "big"
             ]
         );
-        // Type OIDs, so a value decoder never has to guess: int8, text, _int4,
-        // timestamptz, uuid, bytea, jsonb, text.
         let oids: Vec<u32> = rel.2.iter().map(|c| c.type_oid).collect();
         assert_eq!(
             oids,
             [20, 25, 1007, 1184, 2950, 17, 1700, 701, 16, 1082, 3802, 25]
         );
-        // The KEY is `id` alone under the identity in force at capture time.
         let keys: Vec<&str> = rel
             .2
             .iter()
@@ -922,16 +757,11 @@ mod tests {
         );
     }
 
-    /// The two cases `test_decoding` renders as ordinary text, and so cannot tell
-    /// from a column that genuinely holds that text.
+    /// The two cases `test_decoding` renders as ordinary text, and so cannot tell from a column that genuinely holds that text.
     #[test]
     fn a_null_and_an_unchanged_toast_are_their_own_tags_not_strings() {
         let msgs: Vec<Message> = fixture().iter().filter_map(|b| decode(b).ok()).collect();
 
-        // A COLUMN-level NULL, which is a different thing from the NULL inside the
-        // array value the other INSERT carries. The first capture had only the
-        // latter, and the `Cell::Null` -> `Cell::Text` mutant SURVIVED it — a
-        // fixture that never produces the tag cannot grade it.
         let nulls = msgs.iter().any(|m| match m {
             Message::Insert { after, .. } => {
                 after.iter().filter(|c| **c == Cell::Null).count() >= 7
@@ -945,7 +775,6 @@ mod tests {
              text column whose value is `null`"
         );
 
-        // The UPDATE under DEFAULT identity is where the TOAST marker appears.
         let toast = msgs.iter().any(|m| match m {
             Message::Update { after, .. } => after.contains(&Cell::ToastUnchanged),
             _ => false,
@@ -958,8 +787,6 @@ mod tests {
              this format removes"
         );
 
-        // And the marker is never confused with a value: no Text/Binary cell in the
-        // whole capture holds the old format's marker text.
         for m in &msgs {
             let cells: Vec<&Cell> = match m {
                 Message::Insert { after, .. } => after.iter().collect(),
@@ -992,7 +819,6 @@ mod tests {
             })
             .collect();
         assert_eq!(updates.len(), 2, "the capture has one UPDATE per identity");
-        // DEFAULT identity on an unchanged key sends no pre-image; FULL sends one.
         assert!(
             updates.iter().any(|b| b.is_none()),
             "the DEFAULT-identity UPDATE must report NO pre-image"
@@ -1021,12 +847,6 @@ mod tests {
                 _ => None,
             })
             .expect("the capture contains a DELETE");
-        // TWELVE cells, not one — and that is the wire's shape, measured. A tuple
-        // ALWAYS has as many cells as the relation has columns; the replica
-        // identity decides which of them carry a VALUE, and a key-only image pads
-        // the rest with the NULL tag. (I assumed a key-only image was narrower and
-        // the fixture corrected me — which is also why the arity guard in
-        // `decode_tuple` can be an equality and not a bound.)
         assert_eq!(del.len(), 12, "a tuple is always as wide as its relation");
         assert!(
             del.iter().filter(|c| **c == Cell::Null).count() >= 10,
@@ -1036,10 +856,6 @@ mod tests {
     }
 
     /// Truncation is its OWN message, not a DDL statement to be string-matched.
-    ///
-    /// MySQL's adapter parses `TRUNCATE <name>` out of a QueryEvent, and that
-    /// parser panicked on a non-ASCII table name (round 13). Here it is a typed
-    /// message carrying relation OIDs.
     #[test]
     fn truncate_is_a_typed_message_carrying_relation_ids() {
         let ids = fixture()
@@ -1055,16 +871,6 @@ mod tests {
     }
 
     /// Every value type, decoded from the type's OWN BINARY FORM.
-    ///
-    /// A second capture, taken with `binary=true`, because the first was text-mode
-    /// and text cells cannot grade a binary decoder — the fixture must produce the
-    /// tag the code under test consumes.
-    ///
-    /// This is the payoff measured end to end: `timestamptz` arrives as an INSTANT
-    /// (no `TimeZone` to strip, no `datestyle` to parse), `bytea` as raw bytes (no
-    /// `\x` and no `bytea_output`), `uuid` as its 16 bytes (no hyphen strip and no
-    /// length guard), and an array as elements (no `{1,NULL,3}` to parse, and its
-    /// inner NULL is a real one rather than the four letters).
     #[test]
     fn every_binary_value_decodes_through_its_type_oid() {
         use crate::source::cdc::value::RivetValue as V;
@@ -1156,8 +962,6 @@ mod tests {
             &V::Bytes(br#"{"k": [1, 2]}"#.to_vec()),
             "jsonb is the server's own text, as the batch reader emits it"
         );
-        // `2026-03-01 12:00:00+05` is `07:00:00Z` — an INSTANT, with no session
-        // rendering in between. The +9h corruption class cannot arise here.
         assert_eq!(
             by("ts"),
             &V::DateTime(
@@ -1177,13 +981,11 @@ mod tests {
             )
         );
 
-        // The all-NULL row: every cell is the NULL TAG, never a decoded value.
         assert!(
             inserts[1].iter().skip(1).all(|c| *c == Cell::Null),
             "every nullable column of the all-NULL row must be `Cell::Null`"
         );
 
-        // An unmapped OID REFUSES rather than passing bytes through.
         let err = value_from_binary(3220, b"\x00\x00\x00\x01").expect_err("pg_lsn has no arm");
         assert!(
             format!("{err:#}").contains("no binary decoder"),
@@ -1282,13 +1084,6 @@ mod tests {
     }
 
     /// The transaction framing, from the same real capture.
-    ///
-    /// `committed` must mark the LAST event of a source transaction and no other.
-    /// Both PostgreSQL and SQL Server once set it on EVERY event, and the cost was
-    /// measured: a transaction larger than `rollover` rolled and checkpointed
-    /// mid-transaction, and a crash before the tail flushed advanced the resume
-    /// position past the commit — 7 of 12 rows gone. Here the boundary is explicit
-    /// on the wire, so the rule is enforced rather than inferred.
     #[test]
     fn a_transaction_yields_nothing_until_its_commit_and_marks_only_its_last_event() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1321,13 +1116,6 @@ mod tests {
             }
         }
 
-        // The capture holds four transactions and TWO of them are REFUSALS, which
-        // is the correct outcome and worth asserting rather than filtering out:
-        // the DEFAULT-identity UPDATE cannot be represented (its TOASTed column did
-        // not travel) and a TRUNCATE cannot be represented at all.
-        // DISTINCT causes, not occurrences: a poisoned transaction refuses every
-        // later message with the ORIGINAL cause, which is the point — the caller
-        // sees why rather than a cascade of consequences.
         let causes: std::collections::BTreeSet<&str> = refused.iter().map(String::as_str).collect();
         assert_eq!(
             causes.len(),
@@ -1343,9 +1131,6 @@ mod tests {
             "a TRUNCATE has no per-row representation: {refused:?}"
         );
 
-        // What DID assemble: the three-row insert transaction, and the
-        // FULL-identity UPDATE. The refused transaction contributes an empty yield
-        // at its COMMIT, which is correct — its rows never entered `open`.
         let real: Vec<&Vec<crate::source::cdc::ChangeEvent>> =
             yielded.iter().filter(|t| !t.is_empty()).collect();
         assert_eq!(
@@ -1435,20 +1220,6 @@ mod tests {
     }
 
     /// The BARRIER: rivet's own logical message, and only rivet's.
-    ///
-    /// `until_current` bounds a drain. Today that bound is a snapshot of
-    /// `pg_current_wal_lsn()` — "everything whose commit LSN is at or below a number
-    /// we read", which is approximate at the edges. A nonce barrier makes it exact:
-    /// emit a message, drain until it comes back, and everything before it provably
-    /// committed before rivet asked.
-    ///
-    /// Both halves of the match are load-bearing, and each is a bug shape this tree
-    /// has seen elsewhere. The PREFIX stops another tool's logical message ending a
-    /// rivet drain early — a slot decodes the whole database, so a foreign marker
-    /// really does arrive. The NONCE stops a PREVIOUS run's barrier ending this one:
-    /// a scheduler emits one per cycle and they all share the prefix, so matching on
-    /// the prefix alone lets cycle N+1 stop at cycle N's leftover and report a clean
-    /// drain over an unread backlog.
     #[test]
     fn a_barrier_is_recognised_by_prefix_and_nonce_and_by_nothing_else() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1495,7 +1266,6 @@ mod tests {
             "a PREVIOUS cycle's barrier must not end THIS drain — every cycle shares \
              the prefix, so the nonce is the only thing separating them"
         );
-        // A foreign tool's message on the same database.
         assert!(
             !is_our_barrier(
                 &Message::Logical {
@@ -1508,7 +1278,6 @@ mod tests {
             "the slot decodes the WHOLE database; another tool's marker carrying the \
              same bytes must not end a rivet drain"
         );
-        // And no ordinary change is ever a barrier.
         assert!(
             msgs.iter()
                 .filter(|m| !matches!(m, Message::Logical { .. }))
@@ -1518,12 +1287,6 @@ mod tests {
     }
 
     /// A tuple whose width disagrees with the relation is refused.
-    ///
-    /// The capture cannot produce this — the server always sends as many cells as
-    /// the relation has columns — so it is constructed. That is the honest shape
-    /// here: a guard against a message the wire should never send still has to be
-    /// graded, or it is a comment. MySQL's arity guard was ungraded offline for the
-    /// same reason and cost a round to find.
     #[test]
     fn a_tuple_wider_or_narrower_than_its_relation_is_refused() {
         let rel = || Message::Relation {
@@ -1572,13 +1335,6 @@ mod tests {
     }
 
     /// A pre-image cell that is ITSELF a marker is not a recovery source.
-    ///
-    /// Constructed, because the capture does not produce it — and that is the point.
-    /// The text reader had exactly this guard, ungraded, until this session: taking
-    /// the marker from a marker "recovers" it, clears the unchanged flag, and ships
-    /// the placeholder as data while reporting success. Here the marker is a TAG, so
-    /// the check is exact instead of a string comparison, but the mistake is the
-    /// same one and it survives a fixture that never puts a marker on both sides.
     #[test]
     fn a_pre_image_cell_that_is_also_a_marker_cannot_recover_anything() {
         let mut a = Assembler::default();
@@ -1612,7 +1368,6 @@ mod tests {
         let err = a
             .push(Message::Update {
                 relation_id: 1,
-                // BOTH images carry the marker for `big`.
                 before: Some(vec![id.clone(), Cell::ToastUnchanged]),
                 after: vec![id, Cell::ToastUnchanged],
             })
@@ -1625,7 +1380,6 @@ mod tests {
              placeholder where data belongs: {text}"
         );
 
-        // …and the SAME shape recovers when the pre-image holds a real value.
         let mut b = Assembler::default();
         b.push(Message::Relation {
             relation_id: 1,
@@ -1728,7 +1482,6 @@ mod tests {
             }
         }
         assert!(decode(&[]).is_err(), "an empty message must error");
-        // A tuple whose declared length runs past the buffer.
         assert!(
             decode(&[b'I', 0, 0, 0, 1, b'N', 0, 1, b't', 0x7f, 0xff, 0xff, 0xff]).is_err(),
             "a length that exceeds the buffer must error, never read out of bounds"
@@ -1740,8 +1493,7 @@ mod tests {
 mod error_code_tests {
     use super::*;
 
-    /// A truncated message and a row before its Relation are reader invariants (exit 6), and a
-    /// poisoned transaction re-raises the ORIGINAL cause with its code.
+    /// A truncated message and a row before its Relation are reader invariants (exit 6), and a poisoned transaction re-raises the ORIGINAL cause with its code.
     #[test]
     fn protocol_invariants_and_a_poisoned_transaction_carry_their_codes() {
         let err = decode(&[b'B', 0, 0]).unwrap_err();

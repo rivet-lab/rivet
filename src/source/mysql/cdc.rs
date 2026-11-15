@@ -1,18 +1,4 @@
 //! MySQL CDC adapter — binlog ROW stream → canonical [`cdc::ChangeEvent`].
-//!
-//! The sync `mysql` crate (already a rivet dependency) performs the replica
-//! handshake + event decoding under the `binlog` feature; this adapts its
-//! `Event` stream to the shared [`ChangeStream`] seam (no async runtime, unlike
-//! `mysql_async`). The driver, checkpoint, and output live in
-//! [`crate::source::cdc`]; this file is only the MySQL adapter.
-//!
-//! Source prerequisites: `log_bin = ON`, `binlog_format = ROW` (ideally
-//! `binlog_row_image = FULL` for complete UPDATE pre-images), a `REPLICATION
-//! SLAVE` grant, and a `server_id` distinct from the source's.
-//!
-//! `#![allow(dead_code)]`: the consumer is `cli::dispatch` (the `rivet cdc`
-//! command) in the binary crate; the lib crate compiles `source` for tests but
-//! has no CDC consumer of its own.
 #![allow(dead_code)]
 
 use std::collections::{HashMap, VecDeque};
@@ -36,14 +22,6 @@ use crate::source::mysql::column_grants::NAMES_MATCH;
 use crate::source::mysql::statement::{SqlMode, Tok, tokens};
 
 /// A blocking iterator of canonical [`ChangeEvent`]s over a MySQL binlog stream.
-///
-/// A single binlog ROWS event carries many rows, so decoded changes are buffered
-/// in `pending` and drained one at a time. A `TableMapEvent` (which always
-/// precedes its ROWS event and carries the table identity + column metadata) is
-/// cached by `table_id` and applied to the following rows. `file` tracks the
-/// current binlog file across `ROTATE` events — it plus the event header's
-/// position form the [`Position`] checkpoint.
-/// One TABLE_MAP's decode context: the owned event + its parsed column names.
 type CachedTableMap = (
     std::sync::Arc<TableMapEvent<'static>>,
     Option<std::sync::Arc<[String]>>,
@@ -57,52 +35,27 @@ static GRANTS_SESSION: std::sync::Mutex<Option<Conn>> = std::sync::Mutex::new(No
 
 pub(crate) struct MysqlChangeStream {
     stream: BinlogStream,
-    /// TABLE_MAP cache: the event (Arc — rows-event decode borrows it) plus
-    /// the column names parsed from its optional metadata ONCE. The first cut
-    /// re-parsed the metadata and re-allocated every name on EVERY rows-event
-    /// — thousands of identical parses inside a single large transaction.
+    /// TABLE_MAP cache: the event (Arc — rows-event decode borrows it) plus the column names parsed from its optional metadata ONCE.
     tables: HashMap<u64, CachedTableMap>,
     pending: VecDeque<ChangeEvent>,
-    /// The current transaction, held until its commit marker so it is released
-    /// atomically with the commit position; past the memory cap its tail spills
-    /// through the general tagged frame (the crate hands over PARSED events, so there
-    /// is no wire to keep). A FIELD, not a local: a MySQL transaction spans many
-    /// `fill` calls, one per binlog event.
+    /// The current transaction, held until its commit marker so it is released atomically with the commit position.
     tx: crate::source::cdc::tx_buffer::TxBuffer,
     /// A committed transaction whose tail is still being handed out from disk.
     spooled: Option<crate::source::cdc::tx_buffer::SpooledTail>,
     /// A failure while SEALING a spill, raised on the next `next()`.
-    ///
-    /// `close_transaction_at` returns a bool (it means "keep reading"), so it has
-    /// nowhere to put an error. Dropping one would deliver the head of a
-    /// transaction without its tail — a half-transaction the sink would flush and
-    /// checkpoint past, which is the loss this whole path exists to avoid.
     spill_error: Option<anyhow::Error>,
     file: String,
-    /// Open-time `(binlog_file, pos)` ceiling for a bounded run — the first
-    /// commit past it ends the stream (`BINLOG_DUMP_NON_BLOCK`'s EOF stays as
-    /// the catch-up backstop, which backpressure alone can push out
-    /// indefinitely); `None` (daemon) streams forever. The contract lives on
-    /// [`DrainMode`].
+    /// Open-time `(binlog_file, pos)` ceiling for a bounded run.
     bound: Option<(String, u64)>,
-    /// The `table:` values this run captures — the set an UNDECODABLE rows event is
-    /// checked against before it is allowed to fail the run. Empty means "capture
-    /// whatever the stream emits" (`rivet cdc` with no `--table`), which makes every
-    /// event ours. See [`undecodable_event_is_ours`].
+    /// The `table:` values this run captures — the set an UNDECODABLE rows event is checked against before it is allowed to fail the run.
     configured_tables: Vec<String>,
-    /// Bound tripped — the stream ended at the open-time ceiling. Sticky, so the
-    /// sink's re-drain pass (which re-calls `next_change` after acking) returns
-    /// `None` at once instead of consuming — and re-deferring — the past-bound
-    /// events the next run will re-read from the checkpoint.
+    /// Bound tripped — the stream ended at the open-time ceiling.
     past_bound: bool,
-    /// The connection's own database — what a BARE configured name means. Compared
-    /// against each event's schema on the wire; see `bare_name_spans_databases`.
+    /// The connection's own database — what a BARE configured name means.
     own_db: String,
     /// The database each bare configured name means ([`Self::bare_name_database`]), read at open.
     bare_db: HashMap<String, String>,
-    /// The server's `(server_uuid, gtid_executed)` at open, written into EVERY
-    /// position this stream persists — the anchor wrote it and the commit save
-    /// dropped it, so one captured transaction disarmed the foreign-server refusal.
+    /// The server's `(server_uuid, gtid_executed)` at open, written into EVERY position this stream persists.
     identity: (String, String),
     /// `binlog_row_image`'s verdict, read at open on the connection that dumps.
     row_image: crate::source::cdc::RowImage,
@@ -110,7 +63,7 @@ pub(crate) struct MysqlChangeStream {
     readable: Option<HashMap<String, crate::source::cdc::ReadableColumns>>,
     /// `columns_from: grants`: the source the readable columns are re-read from at a grant change.
     grants_source: Option<(String, Option<TlsConfig>)>,
-    /// `(file, position)` of the first privilege statement not yet answered by a re-read: consecutive statements share one.
+    /// `(file, position)` of the first privilege statement not yet answered by a re-read.
     grants_pending: Option<(String, u64)>,
     /// Whether the binlog is between a `BEGIN` and the commit that closes it: no privilege statement can sit inside.
     in_transaction: bool,
@@ -142,45 +95,7 @@ impl MysqlChangeStream {
         }))
     }
 
-    /// Open a stream from an explicit `(binlog_file, pos)` coordinate.
-    ///
-    /// A [`DrainMode::BoundedAtOpen`] run sets `BINLOG_DUMP_NON_BLOCK` (the
-    /// server streams to the current end and sends EOF instead of blocking —
-    /// the catch-up backstop) AND pins the open-time coordinates as the stop
-    /// ceiling (see [`Self::bound`]).
-    /// Refuse to capture from a binlog that cannot carry a whole row.
-    ///
-    /// `binlog_row_image` decides what MySQL writes per row event. At `FULL` (the
-    /// server default) every column is present in both images. At `MINIMAL` — and at
-    /// `NOBLOB` for the blob columns — MySQL writes only the key and the columns
-    /// that CHANGED, because that is all a replica needs to apply the statement.
-    ///
-    /// rivet's change stream is a FULL-ROW image per event: the parquet has every
-    /// column, and a consumer builds current state by taking the latest row per key.
-    /// A partial image cannot be turned into that, so the setting is not a
-    /// performance knob here — it decides whether the output means anything.
-    ///
-    /// Measured against a real server at `MINIMAL`, three changes to a three-column
-    /// table:
-    ///
-    /// ```text
-    /// insert | 1 | 10.5000 | alpha        <- fine
-    /// update |   |         |              <- NO KEY, no value: 99.9 is gone
-    /// delete | 2 |         |              <- key only
-    /// ```
-    ///
-    /// and the run printed `status: success`, `rows: 4`, with no warning of any
-    /// kind. An UPDATE row with a NULL key cannot even be applied to the right row,
-    /// so this is not degradation, it is a corrupt event that counts as captured.
-    ///
-    /// Hence a refusal rather than a warning: there is no partially-correct outcome
-    /// to let the operator choose. The check is one query at open, on the connection
-    /// that is about to dump.
-    /// Pure verdict half of [`Self::row_image`] (#161, the compression_refusal
-    /// split): `@@global.binlog_row_image` → keep or refuse. `None` (older
-    /// MySQL / MariaDB without the variable) is NOT evidence of a bad setting —
-    /// refusing on absence would lock out binlogs that are fine. Unit-tested in
-    /// both directions; the connect+query half stays live-guarded.
+    /// `binlog_row_image` decides the image: `FULL` keeps a whole row, `MINIMAL` and `NOBLOB` do not; rivet's change stream refuses those.
     pub(crate) fn row_image_verdict(image: Option<&str>) -> super::super::cdc::RowImage {
         use super::super::cdc::RowImage;
         let Some(image) = image else {
@@ -201,44 +116,6 @@ impl MysqlChangeStream {
     }
 
     /// Read a resume position out of a checkpoint that has already PARSED.
-    ///
-    /// The MSSQL peer of this (`mssql::cdc::resume_from_checkpoint`) exists because
-    /// the runner and `doctor` had drifted into two readings of one file. MySQL had
-    /// the same split and the doctor side was the LOOSER one: it read `file` with
-    /// `.unwrap_or_default()` and `pos` with `.unwrap_or(0)`, so a malformed
-    /// checkpoint rendered as `Loaded { file: "", pos: 0 }` and was then graded
-    /// "below binlog retention (file purged) — the next run fails with ERROR 1236",
-    /// hinting RE-SNAPSHOT. Wrong cause, and a destructive remedy for a file that is
-    /// merely malformed — the run's actual error is `checkpoint missing 'file'`.
-    ///
-    /// One decoder, so the two cannot disagree again.
-    /// Does this checkpoint belong to the server we are about to resume against?
-    ///
-    /// A MySQL checkpoint is `{file, pos}` — binlog COORDINATES, which mean nothing
-    /// outside the server that wrote them. Point rivet at a different host with the
-    /// same config (a failover, a restored dump, a copied `url:`, a stand rebuilt
-    /// under the same name) and `binlog.000042:12345` still parses, still looks
-    /// plausible, and lands at an arbitrary point in a DIFFERENT binlog. Whatever
-    /// is there gets captured; whatever was between gets skipped. Silent both ways.
-    ///
-    /// PostgreSQL cannot have this problem: its resume anchor is a slot, which is
-    /// server-side, so a foreign one simply does not exist. MySQL's anchor is a
-    /// client-side file, so the check has to be explicit — the same asymmetry
-    /// the process rules's anchor-model rule already records for the idle-first-run case.
-    ///
-    /// TWO tiers, because one of them is not enough on a default install:
-    ///
-    /// * `server_uuid` is unique per server and stable across restarts, and it is
-    ///   present on EVERY MySQL. This is the floor.
-    /// * a GTID set catches what the uuid cannot: the SAME server after a
-    ///   `RESET MASTER`, where the coordinates are stale but the identity matches.
-    ///   Only when `gtid_mode` is ON — which is OFF by default, measured on the
-    ///   stand, so it can never be the only check.
-    ///
-    /// A checkpoint with NO identity is accepted with a warning rather than
-    /// refused: it was written before this existed, and refusing it would strand a
-    /// stream that is probably fine. Saying nothing would be the silent half of the
-    /// bug this closes.
     pub(crate) fn checkpoint_identity_verdict(
         ckpt_uuid: Option<&str>,
         ckpt_gtid: Option<&str>,
@@ -255,9 +132,6 @@ impl MysqlChangeStream {
                 server: server_uuid.to_string(),
             };
         }
-        // Same server. If the checkpoint recorded a GTID set and the server can
-        // answer, the set must still be CONTAINED in what the server has executed —
-        // a `RESET MASTER` empties it while leaving the uuid untouched.
         match (ckpt_gtid, gtid_contained) {
             (Some(g), Some(false)) if !g.is_empty() => CheckpointIdentity::GtidNotContained {
                 checkpoint: g.to_string(),
@@ -299,29 +173,7 @@ impl MysqlChangeStream {
         Ok(Some((file, p)))
     }
 
-    /// A BARE configured name has matched an event from a schema that is NOT the
-    /// connection's own database.
-    ///
-    /// DETERMINISTIC, and the first cut was not. It compared against the FIRST schema
-    /// seen in the current run and kept that memory in a per-run `HashMap`, so a run
-    /// in which only the foreign database wrote recorded IT as "first" and captured
-    /// its rows in silence. MEASURED: `table: hunt_ord` with `rivet.hunt_ord` and
-    /// `hunt_other.hunt_ord` present, one insert into the foreign one, `status:
-    /// success, rows: 1` and an independent read showing `insert | 99 |
-    /// FOREIGN-ROW` — a row from a database the config never named and the
-    /// connection cannot see. Under `until_current` on a schedule, "only one of the
-    /// two wrote this cycle" is the ORDINARY case, not the rare one.
-    ///
-    /// The rule now matches what the rest of the product already means by a bare
-    /// name: rivet's own routability check reads it as `TABLE_SCHEMA = DATABASE()`,
-    /// so an event from any other schema is not what the operator asked for. No
-    /// memory, no run boundary, no ordering.
-    ///
-    /// The catalog cannot answer this on MySQL, which is why it is checked on the
-    /// WIRE: `information_schema` is filtered by PRIVILEGE while `REPLICATION SLAVE`
-    /// hands over the whole server's binlog — as root the catalog listed
-    /// `other_db, rivet`, as the `rivet` user it listed `rivet` alone, and the export
-    /// received other_db's row regardless.
+    /// A BARE configured name has matched an event from a schema that is NOT the connection's own database.
     pub(crate) fn bare_name_spans_databases(
         configured: &str,
         own_db: &str,
@@ -342,10 +194,7 @@ impl MysqlChangeStream {
         ))
     }
 
-    /// The database a BARE configured name means, from the catalog's relations of that name: the
-    /// connection's own database when it holds one, else the only database holding a base table of
-    /// it; `None` when none or several do. The one rule the catalog check, the binlog routing and
-    /// the baseline read all take.
+    /// The database a BARE configured name means, from the catalog's relations of that name.
     pub(crate) fn bare_name_database(
         own_db: &str,
         matches: &[crate::source::cdc::identity::CatalogMatch],
@@ -376,7 +225,6 @@ impl MysqlChangeStream {
     ) -> Vec<crate::source::cdc::identity::CatalogMatch> {
         use mysql::prelude::Queryable as _;
         conn.exec_map(
-            // NO kind filter: a VIEW sharing the name is a CANDIDATE, not something to hide.
             "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE \
              FROM information_schema.TABLES \
              WHERE TABLE_NAME = ? \
@@ -384,7 +232,6 @@ impl MysqlChangeStream {
                    ('mysql','information_schema','performance_schema','sys')",
             (table,),
             |(schema, table, kind): (String, String, String)| {
-                // Only a BASE TABLE reaches a binlog TABLE_MAP; a VIEW never emits under its own name.
                 let capturable = kind == "BASE TABLE";
                 crate::source::cdc::identity::CatalogMatch {
                     schema,
@@ -413,8 +260,7 @@ impl MysqlChangeStream {
             .collect()
     }
 
-    /// The relation each configured name reads for its baseline: `<db>.<table>` for a bare name
-    /// the rule resolves, the name itself otherwise; the stream routes by the same answer.
+    /// The relation each configured name reads for its baseline.
     pub(crate) fn baseline_reads(
         url: &str,
         tls: Option<&TlsConfig>,
@@ -504,7 +350,7 @@ impl MysqlChangeStream {
         Self::check_configured_tables_are_routable(conn, configured_tables)
     }
 
-    /// Refuse a table the schema probe could not read, by preparing the probe's own statement: asked before a first run's anchor, never on a resume (a table dropped under a stream is the stream's own refusal).
+    /// Refuse a table the schema probe could not read, by preparing the probe's own statement.
     fn refuse_absent_tables_on(conn: &mut mysql::Conn, configured_tables: &[String]) -> Result<()> {
         use mysql::prelude::Queryable as _;
         let own_db: String = conn
@@ -516,7 +362,6 @@ impl MysqlChangeStream {
         let bare_db = Self::bare_name_databases(conn, &own_db, configured_tables);
         for table in configured_tables {
             crate::source::cdc::validate_table_ident(table)?;
-            // The relation the stream routes the name to, by the one rule.
             let read = bare_db
                 .get(table)
                 .map_or_else(|| table.clone(), |db| format!("{db}.{table}"));
@@ -535,20 +380,12 @@ impl MysqlChangeStream {
         Self::row_image_verdict(image.as_deref())
     }
 
-    /// Live half: ask `information_schema` what each configured name IS, before
-    /// the stream is read and long before any checkpoint advance. Decisions live
-    /// in [`classify_mysql_routing`]; this is glue.
-    ///
-    /// Best-effort on the QUERY itself — a catalog permission error must not fail
-    /// a capture that is otherwise fine, the same posture `row_image` takes. What
-    /// is NOT best-effort is the verdict: once the catalog answers, a non-base
-    /// relation bails.
+    /// Live half: ask `information_schema` what each configured name IS, before the stream is read and long before any checkpoint advance.
     pub(crate) fn check_configured_tables_are_routable(
         conn: &mut mysql::Conn,
         configured: &[String],
     ) -> Result<()> {
         use mysql::prelude::Queryable as _;
-        // The connection's own database — what a BARE configured name means.
         let own_db_for_resolution: String = conn
             .query_first::<Option<String>, _>("SELECT DATABASE()")
             .ok()
@@ -560,20 +397,7 @@ impl MysqlChangeStream {
                 Some((s, t)) => (Some(s.to_string()), t.to_string()),
                 None => (None, cfg.clone()),
             };
-            // RESOLUTION-FIRST, through the SAME decision PostgreSQL uses. An
-            // operator meeting this class on two engines should not have to learn it
-            // twice, and one refusal is one place a mutant can grade.
-            //
-            // The engine difference that stays, because it is real: MySQL's
-            // `information_schema` is filtered by PRIVILEGE while `REPLICATION SLAVE`
-            // hands over the whole server's binlog — MEASURED, as root the catalog
-            // listed `other_db, rivet` and as the `rivet` user it listed `rivet`
-            // alone, while the export captured other_db's row anyway. So resolution
-            // closes what the catalog CAN see, and `bare_name_spans_databases` stays
-            // as the wire-side backstop for what it cannot. Two guards, two different
-            // sources of truth, deliberately.
             let matches: Vec<crate::source::cdc::identity::CatalogMatch> = match &schema {
-                // A qualified name names one database; ambiguity cannot apply.
                 Some(sch) => conn
                     .exec_map(
                         "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE \
@@ -581,8 +405,6 @@ impl MysqlChangeStream {
                          WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
                         (sch, &table),
                         |(schema, table, kind): (String, String, String)| {
-                            // Only a BASE TABLE reaches a binlog TABLE_MAP; a VIEW
-                            // never emits under its own name.
                             let capturable = kind == "BASE TABLE";
                             crate::source::cdc::identity::CatalogMatch {
                                 schema,
@@ -595,40 +417,13 @@ impl MysqlChangeStream {
                     .unwrap_or_default(),
                 None => Self::catalog_matches_of(conn, &table),
             };
-            // The resolved relation, and classification asks about THAT — not about a
-            // second lookup of the configured string. The two queries used different
-            // predicates (this one scans every non-system schema; the TABLE_TYPE one
-            // pinned `TABLE_SCHEMA = DATABASE()`), so they could name DIFFERENT
-            // relations. MEASURED: with a VIEW `rivet.vv` and a base table
-            // `other_db.vv`, resolution names `other_db.vv` — unambiguously, since
-            // the identity query filters BASE TABLE — and classification then refused
-            // with "vv is a VIEW", sending the operator to fix a relation resolution
-            // had already ruled out.
             let resolved = if matches.is_empty() {
                 None
             } else {
-                // A BARE name means the CONNECTION'S OWN database — the same rule
-                // `bare_name_spans_databases` enforces on the wire, and the one
-                // rivet's routability check has always used. So a candidate outside
-                // it may never be ELECTED as the identity, only reported.
-                //
-                // MEASURED when it could be: with a VIEW `rivet.hunt_v2` and a base
-                // table `hunt_other.hunt_v2`, resolution elected the foreign table —
-                // the only capturable candidate — classification asked IT for a type,
-                // got BASE TABLE, and the run went `status: success, rows: 0` while
-                // the view the operator meant was skipped in silence. Before this it
-                // was a hard refusal naming that exact harm.
-                //
-                // A LIVE foreign twin is still a refusal, because routing would
-                // genuinely capture it — that is the catalog-visible half of the
-                // ambiguity, and the wire guard covers the half the catalog cannot
-                // see (privilege-filtered `information_schema`).
                 let chosen = match schema {
                     Some(_) => None,
                     None => Self::bare_name_database(&own_db_for_resolution, &matches),
                 };
-                // A qualified twin in the SAME stream names the other database's table, while the
-                // bare name routes by its own: one event would reach both.
                 if let Some(db) = &chosen
                     && let Some(twin) = configured.iter().find(|c| {
                         c.split_once('.')
@@ -642,7 +437,6 @@ impl MysqlChangeStream {
                          name. Qualify `{cfg}` (`{db}.{cfg}`) so each table is named once."
                     );
                 }
-                // Resolve within the database the bare name means; with no such database, among all.
                 let for_resolution: Vec<_> = match &chosen {
                     Some(db) => matches
                         .iter()
@@ -658,7 +452,6 @@ impl MysqlChangeStream {
                 Some(r)
             };
             let row: Option<String> = match (&resolved, &schema) {
-                // The relation resolution named. One catalog fact, one relation.
                 (Some(r), _) => conn
                     .exec_first(
                         "SELECT TABLE_TYPE FROM information_schema.TABLES \
@@ -666,8 +459,6 @@ impl MysqlChangeStream {
                         (&r.schema, &r.table),
                     )
                     .unwrap_or(None),
-                // Resolution found nothing — the catalog is privilege-filtered here,
-                // so absence is normal and the old scoped lookups still answer.
                 (None, Some(s)) => conn
                     .exec_first(
                         "SELECT TABLE_TYPE FROM information_schema.TABLES \
@@ -790,7 +581,7 @@ impl MysqlChangeStream {
         self.refuse_changed_grants()
     }
 
-    /// Re-read the grants for the privilege statements met since the last re-read; refuse when a table's readable columns differ.
+    /// Re-read the grants for the privilege statements met since the last re-read.
     fn refuse_changed_grants(&mut self) -> Result<()> {
         let Some((file, log_pos)) = self.grants_pending.take() else {
             return Ok(());
@@ -843,7 +634,7 @@ impl MysqlChangeStream {
         );
     }
 
-    /// Refuse when the grants the stream opens under are not the ones this run resolved before its anchor: one policy value per run.
+    /// Refuse when the grants the stream opens under are not the ones this run resolved before its anchor.
     fn refuse_grants_moved_since_resolved(
         configured: &[String],
         resolved: &HashMap<String, crate::source::cdc::ReadableColumns>,
@@ -894,8 +685,7 @@ impl MysqlChangeStream {
             .unwrap_or_default()
     }
 
-    /// Open the stream on `conn`: every question asked before the dump rides the
-    /// connection that then dumps, so a bounded run costs the server ONE session.
+    /// Open the stream on `conn`: every question asked before the dump rides the connection that then dumps, so a bounded run costs the server ONE session.
     fn open_on(
         mut conn: mysql::Conn,
         server_id: u32,
@@ -905,24 +695,12 @@ impl MysqlChangeStream {
         identity: (String, String),
         configured_tables: Vec<String>,
     ) -> Result<Self> {
-        // Snapshot the ceiling BEFORE the dump starts: every commit already in
-        // the log is ≤ it, and anything racing in after is the next run's work.
         let bound = if mode.is_bounded() {
             Some(Self::current_coordinates(&mut conn)?)
         } else {
             None
         };
         let row_image = Self::row_image_on(&mut conn);
-        // Read the connection's own database BEFORE the binlog stream consumes the
-        // connection — it is the meaning of a bare configured name.
-        // `Option<String>`, like the two sibling call sites (`mysql/mod.rs`,
-        // `preflight/mysql.rs`). A db-less URL is a DELIBERATELY supported shape —
-        // `cdc/mod.rs` says so in prose and skips its own query for a qualified name
-        // — and `SELECT DATABASE()` then returns NULL. Deserialising that into
-        // `String` PANICS inside `FromRow`, which `.ok().flatten()` cannot catch:
-        // MEASURED `exit 101`, no run summary, no error path, no ledger finalize.
-        // The value is not even consulted for a qualified name, so the crash was
-        // pure collateral.
         let own_db: String = conn
             .query_first::<Option<String>, _>("SELECT DATABASE()")
             .ok()
@@ -958,7 +736,6 @@ impl MysqlChangeStream {
             pending: VecDeque::new(),
             spooled: None,
             spill_error: None,
-            // Given its spill directory by `open_or_resume`, the one production constructor.
             tx: crate::source::cdc::tx_buffer::TxBuffer::new(
                 crate::source::cdc::CdcEngine::Mysql,
                 None,
@@ -966,8 +743,6 @@ impl MysqlChangeStream {
             file,
             bound,
             past_bound: false,
-            // The connection's own database — the meaning of a bare configured
-            // name, and the wire-side comparison's fixed reference.
             own_db,
             bare_db,
             identity,
@@ -1002,20 +777,8 @@ impl MysqlChangeStream {
     }
 
     /// The source's current `(binlog_file, position)` coordinate.
-    /// MySQL 8.4 REMOVED `SHOW MASTER STATUS` (finding #36, caught by the
-    /// version scout); its replacement `SHOW BINARY LOG STATUS` does not exist
-    /// before 8.2 — try the new form first, fall back to the old.
-    /// The server's own identity, recorded into every checkpoint rivet writes.
-    ///
-    /// `server_uuid` is present on every MySQL and stable across restarts;
-    /// `gtid_executed` is empty unless `gtid_mode` is ON (which is OFF by default —
-    /// measured, and the reason the uuid is the floor and GTID only ever an extra).
     fn server_identity(c: &mut mysql::Conn) -> Result<(String, String)> {
         use mysql::prelude::Queryable;
-        // Fault hook: the identity query's transient failure is the state the
-        // no-swallowing contract exists for, and a healthy stand can never
-        // produce it — without this, the mutant restoring `unwrap_or_default`
-        // is equivalent on every test environment.
         crate::test_hook::maybe_fail_at("mysql_identity_query")?;
         let uuid: String = c.query_first("SELECT @@server_uuid")?.ok_or_else(|| {
             crate::error::coded(
@@ -1027,9 +790,7 @@ impl MysqlChangeStream {
         Ok((uuid, gtid))
     }
 
-    /// Ask the SERVER whether the checkpoint's GTID set is still contained in what
-    /// it has executed. `GTID_SUBSET` is the server's own comparison — reimplementing
-    /// set containment over GTID ranges here would be a second definition to drift.
+    /// Ask the SERVER whether the checkpoint's GTID set is still contained in what it has executed.
     fn gtid_is_contained(
         c: &mut mysql::Conn,
         subset: &str,
@@ -1073,11 +834,7 @@ impl MysqlChangeStream {
     fn current_coordinates(c: &mut mysql::Conn) -> Result<(String, u64)> {
         let row: mysql::Row = match c.query_first("SHOW BINARY LOG STATUS") {
             Ok(Some(row)) => row,
-            // The 8.2+ statement EXISTS and returned nothing ⇒ binlog is
-            // definitively disabled — falling back would surface 8.4's
-            // "SHOW MASTER STATUS" syntax error instead of the real cause.
             Ok(None) => return Err(binlog_disabled("binlog status empty")),
-            // Err ⇒ pre-8.2 server without the new statement — legacy form.
             Err(_) => c
                 .query_first("SHOW MASTER STATUS")?
                 .ok_or_else(|| binlog_disabled("SHOW MASTER STATUS empty"))?,
@@ -1087,10 +844,7 @@ impl MysqlChangeStream {
         Ok((file, pos))
     }
 
-    /// Persist the source's CURRENT position to `ckpt` — the anchor for
-    /// `cdc.initial: snapshot` (taken BEFORE the snapshot read, so everything
-    /// changed during the snapshot also appears in the stream). Idempotent-by-
-    /// caller: only invoked when no checkpoint exists yet.
+    /// Persist the source's CURRENT position to `ckpt`.
     pub(crate) fn pin_checkpoint_at_current(
         url: &str,
         ckpt: &Path,
@@ -1108,10 +862,6 @@ impl MysqlChangeStream {
         pos: u64,
         identity: &Result<(String, String)>,
     ) -> Result<()> {
-        // `?`, never `unwrap_or_default`: a transient blip of the identity query
-        // wrote a checkpoint with an EMPTY uuid, silently disabling the
-        // foreign-server refusal (measured on a loaded CI runner). Refusing is
-        // retryable and loud; a half-anchor is forever.
         let (uuid, gtid) = identity.as_ref().map_err(|e| {
             crate::error::recoded(
                 e,
@@ -1131,8 +881,6 @@ impl MysqlChangeStream {
     }
 
     /// Open a stream from the source's *current* position (`SHOW MASTER STATUS`).
-    /// Test-only convenience: every production path goes through
-    /// [`Self::open_or_resume`].
     #[cfg(test)]
     pub(crate) fn open_from_current(
         url: &str,
@@ -1142,16 +890,11 @@ impl MysqlChangeStream {
         tables: &[&str],
     ) -> Result<Self> {
         let (file, pos) = Self::current_coordinates(&mut connect_conn(url, tls)?)?;
-        // Each test captures only its OWN table: tests run concurrently, and a stream
-        // over every table would take a sibling test's DROP as a captured table's.
         let tables = tables.iter().map(|t| t.to_string()).collect();
         Self::open(url, server_id, file, pos, mode, tls, tables)
     }
 
-    /// Resume from a persisted [`Position`] checkpoint, or start from the current
-    /// position on the first run (no checkpoint yet). The MySQL position shape is
-    /// `{"file": String, "pos": u64}`. Bounded/continuous per `mode` (see
-    /// [`Self::open`]).
+    /// Resume from a persisted [`Position`] checkpoint, or start from the current position on the first run (no checkpoint yet).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn open_or_resume(
         url: &str,
@@ -1165,11 +908,6 @@ impl MysqlChangeStream {
         >,
         spill_dir: Option<std::path::PathBuf>,
     ) -> Result<Self> {
-        // PASSED IN, not derived: resolving the directory needs the CONFIG's dir
-        // (the anchor for every relative path this run resolves), which only the
-        // caller holds. An earlier version derived it here from the checkpoint
-        // alone and fell back to a cwd-relative path — the shipped image runs at
-        // `/`, where that is an EACCES at the exact moment the cap is crossed.
         let mut conn = connect_conn(url, tls)?;
         Self::refuse_unmet_prerequisites_on(&mut conn, &configured_tables)?;
         let readable = Self::readable_on(&mut conn, &configured_tables, resolved_grants.is_some())?;
@@ -1192,11 +930,6 @@ impl MysqlChangeStream {
             && let Some((file, p)) =
                 Self::resume_from_checkpoint(Some(&pos), &path.display().to_string())?
         {
-            // The checkpoint's coordinates address a SPECIFIC server's binlog. Verify
-            // it is this one before resuming: `binlog.000042:12345` parses on every
-            // host and means something different on each, so a foreign checkpoint
-            // starts the stream at an arbitrary point — capturing whatever is there
-            // and skipping whatever was between, silently in both directions.
             let ckpt_uuid = pos.0.get("server_uuid").and_then(Json::as_str);
             let ckpt_gtid = pos.0.get("gtid_executed").and_then(Json::as_str);
             let (server_uuid, server_gtid) = Self::server_identity(&mut conn)?;
@@ -1221,30 +954,12 @@ impl MysqlChangeStream {
             return Self::open_on(conn, server_id, file, p, mode, identity, configured_tables)
                 .map(with_dir);
         }
-        // First run (no checkpoint yet): anchor at the current position and persist
-        // it IMMEDIATELY. PostgreSQL pins its anchor server-side at open (slot
-        // creation); MySQL's only anchor is this file, and the sink writes it only
-        // at a part commit — so an idle bounded run (zero changes drained) would
-        // otherwise leave no checkpoint, the next run would re-anchor to a newer
-        // "current" position, and every change in between would be silently skipped.
         if !projecting && seeded!("cdc-anchor-written-before-the-refusal", false, true) {
             Self::refuse_absent_tables_on(&mut conn, &configured_tables)?;
         }
         let (file, pos) = Self::current_coordinates(&mut conn)?;
         let identity = Self::server_identity(&mut conn);
         if let Some(path) = ckpt {
-            // LOUD, and at `warn` — this branch is reached both on a genuine first
-            // run and when a previously-written checkpoint is simply NOT THERE, and
-            // rivet cannot tell those apart. Round 9 measured the second case end to
-            // end: a relative `checkpoint:` (what `rivet init` scaffolds) is resolved
-            // against the process CWD, so running the same config from a different
-            // working directory found no file, re-anchored HERE at the current
-            // binlog coordinates, and reported `status: success, rows: 0` — three
-            // green runs delivering ids [3] of a source holding [1,2,3], with no line
-            // at any log level. PostgreSQL has said this for its own re-anchor
-            // (`slot_created_warning`) since the equivalent bug there; MySQL's peer
-            // was missing, and MySQL is the engine with NO server-side anchor to fall
-            // back on.
             log::warn!(
                 "mysql cdc: no checkpoint at `{}` — anchoring at the CURRENT binlog \
                  position ({file}:{pos}), so anything written before now is NOT \
@@ -1276,8 +991,7 @@ impl MysqlChangeStream {
         .map(with_dir)
     }
 
-    /// One row of a spilled tail: decode it through the general frame, stamp it,
-    /// and drop the reader once the last row is out.
+    /// One row of a spilled tail: decode it through the general frame, stamp it, and drop the reader once the last row is out.
     fn next_spooled(&mut self) -> Result<Option<ChangeEvent>> {
         crate::source::cdc::tx_buffer::replay(
             &mut self.spooled,
@@ -1285,17 +999,7 @@ impl MysqlChangeStream {
         )
     }
 
-    /// Release the buffered transaction at `log_pos`, or end the stream when the
-    /// commit sits past the open-time ceiling.
-    ///
-    /// Returns `false` when the caller must stop: a commit past the bound belongs to
-    /// the NEXT run, so the transaction is dropped un-released and the checkpoint
-    /// never advances past it — the resume re-reads it in full. `past_bound` is
-    /// sticky so the sink's re-drain pass returns `None` at once rather than
-    /// consuming (and re-deferring) more past-bound events.
-    ///
-    /// Shared by the `Xid` and `Query('COMMIT')` arms: two commit markers, one
-    /// framing. Duplicating it is how the second one drifts.
+    /// Release the buffered transaction at `log_pos`, or end the stream when the commit sits past the open-time ceiling.
     fn close_transaction_at(&mut self, log_pos: u64, commit: Json) -> bool {
         self.in_transaction = false;
         if commit_past_bound(&self.file, log_pos, self.bound.as_ref()) {
@@ -1304,8 +1008,6 @@ impl MysqlChangeStream {
             return false;
         }
         let commit = self.commit_position_at(log_pos, commit);
-        // #158: commit position on all, committed on the transaction's LAST event —
-        // on disk when it spilled (`TxBuffer::close_transaction`).
         match self
             .tx
             .close_transaction(&commit, &format_args!("{}:{log_pos}", self.file))
@@ -1323,18 +1025,15 @@ impl MysqlChangeStream {
                 ));
                 self.spooled = tail;
             }
-            // Sealing the spill can fail, and a silent drop would deliver the head
-            // without its tail — a half-transaction the sink would checkpoint past.
             Err(e) => self.spill_error = Some(e),
         }
         true
     }
 
-    /// Pull one binlog event and expand it into `pending`. `Ok(false)` ⇒ stream
-    /// ended; `Ok(true)` ⇒ consumed an event.
+    /// Pull one binlog event and expand it into `pending`.
     fn fill(&mut self) -> Result<bool> {
         if self.past_bound {
-            return Ok(false); // ended at the open-time ceiling — stay ended
+            return Ok(false);
         }
         let ev = match self.stream.next() {
             Some(ev) => ev.map_err(|e| binlog_read_error(e, &self.file))?,
@@ -1366,7 +1065,6 @@ impl MysqlChangeStream {
             }
         }
         match data {
-            // ROTATE → the next binlog file; subsequent positions are in it.
             Some(EventData::RotateEvent(re)) => {
                 self.file = re.name().to_string();
             }
@@ -1393,32 +1091,7 @@ impl MysqlChangeStream {
                     RowsEventData::WriteRowsEvent(_) => ChangeOp::Insert,
                     RowsEventData::UpdateRowsEvent(_) => ChangeOp::Update,
                     RowsEventData::DeleteRowsEvent(_) => ChangeOp::Delete,
-                    // Anything else is a rows event this reader cannot decode, and the
-                    // old `return Ok(true)` DISCARDED it silently — the surrounding
-                    // transaction still committed, so the checkpoint advanced past
-                    // changes that never reached the destination. Unrecoverable, and
-                    // reported as success.
-                    //
-                    // Two real sources, neither exotic: MariaDB emits only the v1
-                    // rows events, so on MariaDB EVERY insert, update and delete was
-                    // dropped while the pipeline stayed green at zero rows; and MySQL
-                    // 8 with `binlog_row_value_options=PARTIAL_JSON` emits
-                    // `PartialUpdateRowsEvent` for JSON column updates, where the
-                    // surrounding transactions ARE captured — so the loss is a subset,
-                    // which is the shape no count check can see.
-                    //
-                    // Refuse loudly instead, exactly as the compressed-payload arm
-                    // below does: the un-acked span is re-read once the source is
-                    // configured for a reader that can decode it.
                     other => {
-                        // WHOSE event is it? The binlog carries every table on the
-                        // server, so refusing without asking turns one PARTIAL_JSON
-                        // table into a server-wide outage — measured: this refusal
-                        // failed a concurrent export on a table it does not capture.
-                        // The resolve is the same TABLE_MAP lookup the decode path
-                        // does below; `None` (no TABLE_MAP yet) deliberately counts
-                        // as OURS, because a silent skip is the one outcome this
-                        // path exists to prevent.
                         let resolved = self.tables.get(&other.table_id());
                         let named =
                             resolved.map(|(tme, _)| (tme.database_name(), tme.table_name()));
@@ -1426,11 +1099,11 @@ impl MysqlChangeStream {
                         if undecodable_event_is_ours(named, &self.configured_tables) {
                             return Err(undecodable_rows_event_refusal(other));
                         }
-                        return Ok(true); // another table's — the routing filter would drop it anyway
+                        return Ok(true);
                     }
                 };
                 let Some((tme, image_names)) = self.tables.get(&re.table_id()).cloned() else {
-                    return Ok(true); // started mid-stream, no TABLE_MAP yet — skip
+                    return Ok(true);
                 };
                 let schema = tme.database_name().to_string();
                 let table = tme.table_name().to_string();
@@ -1438,13 +1111,8 @@ impl MysqlChangeStream {
                     if undecodable_event_is_ours(Some((&schema, &table)), &self.configured_tables) {
                         return Err(nameless_rows_refusal(&schema, &table, &self.file, log_pos));
                     }
-                    return Ok(true); // another table's — the routing filter would drop it anyway
+                    return Ok(true);
                 };
-                // WIRE-side ambiguity check: a bare configured name that has now
-                // matched events from two databases. The catalog cannot see this —
-                // information_schema is privilege-filtered while the binlog dump is
-                // server-wide — so the first event from a second schema is the first
-                // evidence that exists.
                 for cfg in &self.configured_tables {
                     if cfg.contains('.')
                         || !crate::source::cdc::sink::table_matches(
@@ -1458,7 +1126,6 @@ impl MysqlChangeStream {
                     }
                     match bare_event_route(self.bare_db.get(cfg).map(String::as_str), &schema) {
                         BareRoute::Captured => {}
-                        // Another database's table of that name: the bare name means another's.
                         BareRoute::Elsewhere => return Ok(true),
                         BareRoute::Unresolved => {
                             if let Some(why) =
@@ -1501,7 +1168,6 @@ impl MysqlChangeStream {
                     Some(k) => grants::project_row(r, k),
                     None => r,
                 };
-                // Provisional position; rewritten to the commit position at XID.
                 let position = self.position_at(log_pos);
                 for row in re.rows(&tme) {
                     let (before, after) = row?;
@@ -1533,11 +1199,6 @@ impl MysqlChangeStream {
                         }
                         continue;
                     }
-                    // A cell with no faithful representation is a DEFERRED refusal,
-                    // exactly like PostgreSQL's unrecoverable unchanged-TOAST datum:
-                    // the binlog dump is server-wide, so bailing here would poison
-                    // capture of unrelated tables that merely share the stream. The
-                    // sink raises it only when the event routes to a captured table.
                     let undecodable: Vec<usize> = before
                         .iter()
                         .chain(after.iter())
@@ -1578,19 +1239,12 @@ impl MysqlChangeStream {
                         position: position.clone(),
                         committed: false,
                         image_names: Some(image_names.clone()),
-                        seq: 0, // stamped by TxnSeq as the stream is consumed
+                        seq: 0,
                         poison,
                         row_id: None,
                         before_names: None,
                         before_poison: None,
                     };
-                    // PER ROW, not per binlog event. One `WriteRows` event carries
-                    // MANY rows, so a check after the loop lets the whole event land
-                    // in memory first — with a transaction written as a single large
-                    // event that is the entire transaction, and the cap bounds
-                    // nothing. (Only rows in LATER events would have spilled, which
-                    // depends on `binlog_row_event_max_size` rather than on the cap
-                    // the operator set.)
                     self.tx.push(
                         ev,
                         crate::source::cdc::spill::encode_event,
@@ -1598,40 +1252,11 @@ impl MysqlChangeStream {
                     )?;
                 }
             }
-            // XID = transaction commit. Stamp the commit position on every change
-            // in the transaction and mark the last one committed, then release the
-            // whole transaction atomically.
             Some(EventData::XidEvent(x)) => {
                 if !self.close_transaction_at(log_pos, json!({"at": event_start, "xid": x.xid})) {
                     return Ok(false);
                 }
             }
-            // A commit that is NOT an Xid. `Xid` is written only by a
-            // transactional storage engine's own commit; a MyISAM/MEMORY write, and
-            // every `XA COMMIT`, close the transaction with a QUERY event instead.
-            // With no arm for it those rows fell to `_ => {}` and stayed buffered
-            // FOREVER: the run captured zero, exited 0, and the checkpoint never
-            // moved — silent, total, and indistinguishable from an idle source.
-            //
-            // `XA PREPARE` deliberately does NOT release: the transaction is not
-            // committed yet, and releasing there would publish rows a later
-            // `XA ROLLBACK` erases.
-            // `XA PREPARE` arrives as a BINARY `XaPrepareLogEvent` on 5.7.7+, never
-            // as a QueryEvent — so `is_commit_statement`'s "deliberately not XA
-            // PREPARE" arm grades a string this reader cannot receive, and the
-            // prepared rows fell through `_ => {}` and stayed in `self.tx`. The next
-            // UNRELATED transaction's Xid then drained them: `close_transaction_at`
-            // empties the whole buffer, one buffer per stream.
-            //
-            // MEASURED on mysql 8.0.46 — `XA START/INSERT(1)/XA END/XA PREPARE`, then
-            // an ordinary `INSERT(2)` committing, then `XA ROLLBACK`. The source held
-            // {2}; rivet delivered {1, 2}, both stamped `binlog.000011:55090448` (the
-            // SECOND transaction's Xid) at `__seq` 0 and 1 — the rolled-back row
-            // published as committed, and two transactions fused into one group.
-            //
-            // Table-addressed for the reason #281 measured: the dump is server-wide,
-            // so an XA branch on a table nobody captures must not be an outage for
-            // exports that never read it.
             Some(EventData::XaPrepareLogEvent(_)) => {
                 if let Some(ev) = self.tx.head().iter().find(|ev| {
                     undecodable_event_is_ours(
@@ -1643,15 +1268,6 @@ impl MysqlChangeStream {
                         xa_prepare_refusal_message(&ev.schema, &ev.table),
                     ));
                 }
-                // A SPILLED tail makes the "nothing of ours" verdict below
-                // unreachable honestly: the scan above covers only the in-memory
-                // head, and past the cap every later row went to disk without
-                // entering `tx` — so a branch whose captured rows sit only in the
-                // tail would pass the scan and `self.tx.clear()` would DELETE
-                // them, permanently and silently. Refuse instead: nothing has been
-                // handed to the sink, so the bail loses nothing (at-least-once
-                // re-reads from the checkpoint), and the message names both facts
-                // the operator needs.
                 if let Some(rows) = self.tx.spilled_rows() {
                     crate::rivet_bail!(
                         crate::error::codes::SOURCE_CDC_TRANSACTION_TOO_LARGE,
@@ -1659,9 +1275,6 @@ impl MysqlChangeStream {
                         xa_prepare_spilled_tail_refusal_message(rows)
                     );
                 }
-                // Nothing of ours in the branch: drop it rather than leave it for the
-                // next commit to stamp and fuse. The sink would route these rows away,
-                // but only after they had already corrupted that transaction's framing.
                 self.tx.clear();
             }
             Some(EventData::QueryEvent(qe)) if is_commit_statement(&qe.query()) => {
@@ -1670,18 +1283,6 @@ impl MysqlChangeStream {
                     return Ok(false);
                 }
             }
-            // #200-2: a compressed transaction. `binlog_transaction_compression`
-            // can be turned on AFTER this run opened (the open-time
-            // `refuse_compressed_binlog` guard saw it OFF and passed), or a
-            // compressed span can already sit in the binlog before the checkpoint
-            // (written while it was ON, then turned OFF). Either way a
-            // `Transaction_payload_event` reaches here, and this reader cannot
-            // expand it. The `_ => {}` arm below would SILENTLY skip it —
-            // capturing NOTHING for that transaction while the checkpoint advances
-            // past it (an at-least-once break, and the open-time refusal's
-            // remediation replays over the already-skipped span). Refuse loudly
-            // instead; the un-acked span is re-read from the checkpoint once
-            // compression is off.
             Some(EventData::TransactionPayloadEvent(_)) => {
                 return Err(compressed_payload_refusal());
             }
@@ -1691,25 +1292,17 @@ impl MysqlChangeStream {
     }
 }
 
-/// The stream-time sibling of [`compression_refusal`]: a `Transaction_payload_event`
-/// reached the reader even though the OPEN-time check passed. Pure so both the
-/// message and the fact that it IS an error are testable offline — deleting the
-/// match arm that calls it (falling through to `_ => {}`) is exactly the silent-skip
-/// bug, which only a live compressed server would otherwise flip.
-/// Which undecodable shape a rows event is. Separated from the message so the
-/// message — the ONLY thing an operator sees, since the alternative was a green run
-/// with missing rows — is testable without constructing binlog events the crate does
-/// not let a test build.
+/// The stream-time sibling of [`compression_refusal`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UndecodableRows {
-    /// Pre-5.6 row format. MariaDB emits only these.
+    /// Pre-5.6 row format.
     V1,
     /// `binlog_row_value_options=PARTIAL_JSON` logs a JSON diff, not a row image.
     PartialJson,
     Other,
 }
 
-/// What differs between the columns of `table` a run delivers and the ones its account may `SELECT` now: the columns gained and lost, and the two ways it happens.
+/// What differs between the columns of `table` a run delivers and the ones its account may `SELECT` now.
 pub(crate) fn grants_difference(table: &str, before: &[String], now: &[String]) -> String {
     let missing = |from: &[String], of: &[String]| -> Vec<String> {
         from.iter()
@@ -1739,7 +1332,7 @@ pub(crate) fn grants_difference(table: &str, before: &[String], now: &[String]) 
     )
 }
 
-/// An event that routes to no table and carries no row: it holds the commit boundary of a transaction whose rows the policy did not deliver.
+/// An event that routes to no table and carries no row.
 fn boundary_marker(op: ChangeOp, position: &Position) -> ChangeEvent {
     ChangeEvent {
         op,
@@ -1759,27 +1352,6 @@ fn boundary_marker(op: ChangeOp, position: &Position) -> ChangeEvent {
 }
 
 /// Does an UNDECODABLE rows event belong to a table this run captures?
-///
-/// The binlog is ONE stream per server, so it carries every table's changes,
-/// including tables nobody configured. Refusing on an undecodable event without
-/// asking whose it is turns one PARTIAL_JSON table into a server-wide outage:
-/// every other export refuses too, on data it was never going to read. Measured
-/// 2026-08-24 — the live PARTIAL_JSON fixture failed a concurrent, unrelated
-/// MySQL CDC test with this exact error, on a table it does not capture.
-///
-/// The asymmetry is deliberate and it is the whole safety argument:
-/// - a **captured** table: REFUSE. Skipping loses the change while the surrounding
-///   transaction commits and the checkpoint advances past it.
-/// - **another** table: skip. The run would have dropped it at the routing filter
-///   anyway, so skipping loses nothing.
-/// - table **unknown**: REFUSE. No TABLE_MAP means the stream started
-///   mid-transaction; guessing "not mine" there would be a silent drop of exactly
-///   the kind this path exists to prevent. Over-refusing is recoverable; a skip is
-///   not.
-/// - **nothing configured**: REFUSE. `rivet cdc` with no `--table` captures
-///   whatever the stream emits, so every event is "mine".
-///
-/// Pure so every branch is graded offline; the caller resolves the name.
 pub(crate) fn undecodable_event_is_ours(
     resolved: Option<(&str, &str)>,
     configured: &[String],
@@ -1805,7 +1377,7 @@ fn folds_case(lower_case_table_names: i64) -> bool {
     lower_case_table_names != 0
 }
 
-/// Whether the statement-reading arms may refuse: always without the grants policy, under it only for a statement that names a captured table.
+/// Whether the statement-reading arms may refuse.
 fn lexer_may_refuse(policy: bool, mentioned: bool) -> bool {
     !policy || mentioned
 }
@@ -1821,10 +1393,6 @@ fn classify_rows_event(ev: &RowsEventData<'_>) -> UndecodableRows {
 }
 
 /// Refuse a rows event this reader cannot decode, naming WHICH one and what to do.
-///
-/// Silence here is worse than on most refusal paths: the transaction around the
-/// dropped rows still commits, so the checkpoint advances and the changes are gone
-/// from both the binlog window and the destination while the run reports success.
 pub(crate) fn undecodable_rows_refusal_message(kind: UndecodableRows) -> String {
     let (what, cause) = match kind {
         UndecodableRows::V1 => (
@@ -1890,25 +1458,7 @@ fn compressed_payload_refusal() -> anyhow::Error {
     ))
 }
 
-/// Refuse to stream when the source packs transactions into
-/// `Transaction_payload_event` (MySQL 8.0.20+ `binlog_transaction_compression`).
-///
-/// This reader matches `Rotate`/`TableMap`/`Rows`/`Xid` and ignores anything
-/// else, so with compression ON every row event — they are all inside the
-/// payload — is skipped WITHOUT A WORD: the run reports success having
-/// captured nothing, and a bounded pipeline then reports "no changes" forever
-/// while the destination never receives a row. Measured on MySQL 8.0.46:
-/// anchor, insert two rows, resume ⇒ 0 of 2 events captured, empty stderr.
-///
-/// Compression is a natural thing for a DBA to enable (it shrinks the binlog
-/// 50-75% and the replication traffic with it), which is exactly why this
-/// must fail loudly instead of degrading. Expanding the payload is a
-/// supportable feature — `mysql_common` already ships
-/// `TransactionPayloadEvent::decompressed()` and
-/// `EventStreamReader::read_decompressed()`, and the inner events carry the
-/// OUTER payload's `end_log_pos`, so the commit-position semantics carry over
-/// unchanged — but until that lands, refusing is the only honest option.
-/// Ask the server whether it replicates and whether it re-logs what it applies.
+/// Refuse to stream when the source packs transactions into `Transaction_payload_event` (MySQL 8.0.20+ `binlog_transaction_compression`).
 fn refuse_replica_without_relog(conn: &mut Conn) -> Result<()> {
     let replicating = conn
         .query_first::<mysql::Row, _>("SHOW REPLICA STATUS")
@@ -1932,7 +1482,7 @@ fn server_error_code(e: &mysql::Error) -> Option<u16> {
     }
 }
 
-/// Why a configured table the schema probe cannot prepare is refused: absent (ER_NO_SUCH_TABLE 1146, ER_BAD_DB_ERROR 1049) by code, anything else in the server's words.
+/// Why a configured table the schema probe cannot prepare is refused.
 pub(crate) fn table_probe_refusal(table: &str, code: Option<u16>, said: &str) -> anyhow::Error {
     if matches!(code, Some(1146 | 1049)) {
         return crate::error::CodedError::new(
@@ -1964,9 +1514,6 @@ fn replica_relog_refusal(replicating: bool, relog: Option<&str>) -> Result<()> {
 }
 
 fn refuse_compressed_binlog(conn: &mut Conn) -> Result<()> {
-    // Pre-8.0.20 servers (and MariaDB) have no such variable: the query errors
-    // or returns nothing, and both mean "not compressed". Never let the ABSENCE
-    // of the setting block a source that cannot have the problem.
     let raw: Option<String> = conn
         .query_first("SELECT @@global.binlog_transaction_compression")
         .ok()
@@ -1974,11 +1521,7 @@ fn refuse_compressed_binlog(conn: &mut Conn) -> Result<()> {
     compression_refusal(raw.as_deref())
 }
 
-/// The verdict on the server's reply, split from the connection so both
-/// DIRECTIONS are testable offline. Folded into `refuse_compressed_binlog` this
-/// was a `!` that only a live server could flip: deleting it (refuse when the
-/// binlog is PLAIN, stream when it is compressed — the exact inversion of the
-/// guard) survived the whole offline suite while breaking every MySQL CDC run.
+/// The verdict on the server's reply, split from the connection so both DIRECTIONS are testable offline.
 fn compression_refusal(raw: Option<&str>) -> Result<()> {
     if !binlog_compression_is_on(raw) {
         return Ok(());
@@ -1995,11 +1538,7 @@ fn compression_refusal(raw: Option<&str>) -> Result<()> {
     )
 }
 
-/// Whether the server's reply to `@@global.binlog_transaction_compression`
-/// means ON. MySQL renders a boolean system variable as `1`/`0` over the text
-/// protocol, but `ON`/`OFF` is what a human sees and what some proxies pass
-/// through — accept both, and treat anything unrecognized as OFF so a reply
-/// shape we did not anticipate cannot block a healthy source.
+/// Whether the server's reply to `@@global.binlog_transaction_compression` means ON.
 fn binlog_compression_is_on(raw: Option<&str>) -> bool {
     matches!(
         raw.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
@@ -2018,9 +1557,6 @@ fn binlog_disabled(detail: &str) -> anyhow::Error {
 /// Dial through the batch path's [`super::dial_conn`], then refuse a proxy that cannot carry the binlog.
 fn connect_conn(url: &str, tls: Option<&TlsConfig>) -> Result<Conn> {
     let mut conn = super::dial_conn(url, tls)?;
-    // CDC streams the binlog (COM_BINLOG_DUMP) — a replication protocol that
-    // ProxySQL / MaxScale / transaction-mode multiplexers do not carry. Detect the
-    // proxy here and fail with the fix, not a cryptic dump-protocol error or a hang.
     let kind = super::proxy::detect_proxy_on_conn(&mut conn);
     if kind.is_proxy() {
         crate::rivet_bail!(
@@ -2034,34 +1570,14 @@ fn connect_conn(url: &str, tls: Option<&TlsConfig>) -> Result<Conn> {
     Ok(conn)
 }
 
-/// What a configured MySQL `table:` actually IS, and whether the binlog can ever
-/// name it — the MySQL half of the PostgreSQL routing guard (#283).
-///
-/// A binlog `Table_map` names the relation the rows PHYSICALLY landed in. For a
-/// RANGE-partitioned table that is the logical table (measured — partitioning is
-/// fine here, unlike PostgreSQL). For an updatable VIEW it is the BASE table, and
-/// the sink routes byte-exact, so every change is dropped.
-///
-/// MEASURED 2026-08-24 by an adversarial re-check of a matrix cell that claimed
-/// MySQL had no such relation: 3 rows committed through a view gave
-/// `rows: 0, files: 0, status: success, exit 0` with the checkpoint advanced past
-/// the commit (54945184 -> 54945514), and fixing the config recovered NOTHING
-/// from that checkpoint.
-///
-/// Severity differs from PostgreSQL and the message says so: MySQL binlog
-/// retention is reader-independent, so the events are still in the log and
-/// deleting the checkpoint re-reads them. On PostgreSQL the slot had already
-/// freed the WAL, which is why that one is unrecoverable.
+/// What a configured MySQL `table:` actually IS, and whether the binlog can ever name it.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum MysqlRoutingVerdict {
     Routable,
     Never(String),
 }
 
-/// Pure half of the guard. `table_type` is `information_schema.TABLES.TABLE_TYPE`
-/// for the configured name, or `None` when the catalog has no row for it — which
-/// the schema probe reports on its own, loudly, so this stays quiet about it
-/// rather than producing a second, competing error for one cause.
+/// Pure half of the guard.
 pub(crate) fn classify_mysql_routing(
     configured: &str,
     table_type: Option<&str>,
@@ -2134,7 +1650,7 @@ fn qualified(schema: Option<String>, table: String, event_db: &str) -> (String, 
     (schema.unwrap_or_else(|| event_db.to_string()), table)
 }
 
-/// The table a `TRUNCATE` QUERY event names, as `(schema, table)`; `None` for any other statement or a shape this reader does not claim.
+/// The table a `TRUNCATE` QUERY event names, as `(schema, table)`.
 pub(crate) fn truncate_target(
     sql: &str,
     event_db: &str,
@@ -2188,7 +1704,7 @@ fn alter_name(tokens: &[AlterToken], i: usize) -> Option<String> {
     }
 }
 
-/// The table name read at `at` as `((schema, table), index past it)`; the event's database stands in for a missing qualifier.
+/// The table name read at `at` as `((schema, table), index past it)`.
 fn alter_table_name(
     tokens: &[AlterToken],
     at: usize,
@@ -2265,7 +1781,7 @@ pub(crate) fn column_rename_target(
         .then_some(table)
 }
 
-/// Every table a `RENAME TABLE` or an `ALTER TABLE ... RENAME [TO|AS] new` QUERY event touches, source and target (`None` for a name that cannot be read); `None` when the event renames no table.
+/// Every table a `RENAME TABLE` or an `ALTER TABLE ...
 pub(crate) fn renamed_tables(
     sql: &str,
     event_db: &str,
@@ -2316,7 +1832,7 @@ pub(crate) fn renamed_tables(
     (out.len() > 1).then_some(out)
 }
 
-/// The `(schema, table)` of a column rename a run that projects (`columns_from: grants`) refuses: one met on a table the run captures.
+/// The `(schema, table)` of a column rename a run that projects (`columns_from.
 fn refused_column_rename(
     projecting: bool,
     sql: &str,
@@ -2335,7 +1851,7 @@ fn refused_column_rename(
         .filter(|(sc, tb)| undecodable_event_is_ours(Some((sc, tb)), configured))
 }
 
-/// The table a rename a run that projects refuses touches: `Some(None)` when a name could not be read, `None` when the run does not refuse the event.
+/// The table a rename a run that projects refuses touches.
 fn refused_table_rename(
     projecting: bool,
     sql: &str,
@@ -2390,7 +1906,7 @@ impl QueryRefusal {
     }
 }
 
-/// A QUERY event's text as the binlog carries it: the statement, the database it ran in, and the collation id of the client character set it is spelled in.
+/// A QUERY event's text as the binlog carries it.
 pub(crate) struct QueryText<'a> {
     pub(crate) raw: &'a [u8],
     pub(crate) db: &'a [u8],
@@ -2440,7 +1956,7 @@ pub(crate) fn captured_databases(
     out
 }
 
-/// The table to report when a statement's target is a captured one: `Some` when it is, and then the statement's table as the server compares it on a server that folds; `None` when the statement is about another table.
+/// The table to report when a statement's target is a captured one.
 fn captured_table(
     target: Option<&(String, String)>,
     configured: &[String],
@@ -2470,7 +1986,7 @@ fn captured_table(
         .then_some(Some((schema, table)))
 }
 
-/// Whether a database a statement drops holds a captured table: an unreadable name does, so does any when nothing is configured.
+/// Whether a database a statement drops holds a captured table.
 fn captured_database(
     name: Option<&str>,
     configured: &[String],
@@ -2598,7 +2114,7 @@ pub(crate) fn column_rename_refusal_message(schema: &str, table: &str) -> String
     )
 }
 
-/// The tables a `DROP TABLE` QUERY event removes (`None` for an unreadable name); `None` when the event is not one.
+/// The tables a `DROP TABLE` QUERY event removes (`None` for an unreadable name).
 pub(crate) fn drop_table_targets(
     sql: &str,
     event_db: &str,
@@ -2630,7 +2146,7 @@ pub(crate) fn drop_table_targets(
     )
 }
 
-/// The database a `DROP DATABASE` or `DROP SCHEMA` QUERY event removes (`None` for an unreadable name); `None` when the event is not one.
+/// The database a `DROP DATABASE` or `DROP SCHEMA` QUERY event removes (`None` for an unreadable name).
 pub(crate) fn drop_database_target(sql: &str, mode: SqlMode) -> Option<Option<String>> {
     let toks = significant(sql, mode);
     if !(word_is(&toks, 0, "drop")
@@ -2645,7 +2161,7 @@ pub(crate) fn drop_database_target(sql: &str, mode: SqlMode) -> Option<Option<St
     })
 }
 
-/// The tables an `ALTER TABLE` QUERY event takes rows from or gives rows to without a row event (`TRUNCATE`, `DROP` and `EXCHANGE PARTITION`; `None` for an unreadable name); `None` when the event does none of these.
+/// The tables an `ALTER TABLE` QUERY event takes rows from or gives rows to without a row event (`TRUNCATE`, `DROP` and `EXCHANGE PARTITION`.
 pub(crate) fn partition_rows_targets(
     sql: &str,
     event_db: &str,
@@ -2672,7 +2188,7 @@ pub(crate) fn partition_rows_targets(
     (!out.is_empty()).then_some(out)
 }
 
-/// Refuse a captured table whose partitions are emptied or swapped out: the rows leave (or arrive) in the source without a row event.
+/// Refuse a captured table whose partitions are emptied or swapped out.
 pub(crate) fn partition_rows_refusal_message(target: Option<&(String, String)>) -> String {
     let what = match target {
         Some((schema, table)) if !schema.is_empty() => format!("`{schema}.{table}`"),
@@ -2689,7 +2205,7 @@ pub(crate) fn partition_rows_refusal_message(target: Option<&(String, String)>) 
     )
 }
 
-/// Refuse a database dropped with a captured table in it: its rows leave the source without events, and a table created again under the name is another table's history.
+/// Refuse a database dropped with a captured table in it.
 pub(crate) fn drop_database_refusal_message(database: Option<&str>) -> String {
     let what = match database {
         Some(db) => format!("database `{db}`, which holds a captured table,"),
@@ -2704,7 +2220,7 @@ pub(crate) fn drop_database_refusal_message(database: Option<&str>) -> String {
     )
 }
 
-/// Whether a binlog dump error says the server purged the log the resume position needs (ER_MASTER_FATAL_ERROR_READING_BINLOG with either wording: by file, by GTID).
+/// Whether a binlog dump error says the server purged the log the resume position needs (ER_MASTER_FATAL_ERROR_READING_BINLOG with either wording.
 pub(crate) fn names_purged_binlog(code: u16, message: &str) -> bool {
     code == 1236
         && (message.contains("Could not find first log file name")
@@ -2749,7 +2265,7 @@ pub(crate) fn drop_refusal_message(target: Option<&(String, String)>) -> String 
     )
 }
 
-/// The table a statement-logged DML event writes: `None` when the event is not DML, `Some(None)` when it is but its target cannot be read.
+/// The table a statement-logged DML event writes.
 pub(crate) fn statement_dml_target(
     sql: &str,
     event_db: &str,
@@ -2801,11 +2317,7 @@ pub(crate) fn statement_dml_refusal_message(target: Option<&(String, String)>) -
     )
 }
 
-/// Refuse a TRUNCATE on a captured table. Same contract as the PostgreSQL arm —
-/// see `postgres::cdc::truncate_refusal_message` for why this bails rather than
-/// warns: the rows leave the source with no DELETE events to carry them, so the
-/// destination disagrees with its source permanently and no later capture can
-/// reconcile it.
+/// Refuse a TRUNCATE on a captured table.
 pub(crate) fn truncate_refusal_message(schema: &str, table: &str) -> String {
     let qualified = if schema.is_empty() {
         table.to_string()
@@ -2822,35 +2334,7 @@ pub(crate) fn truncate_refusal_message(schema: &str, table: &str) -> String {
     )
 }
 
-/// A prepared XA branch this reader cannot frame — and must not let another
-/// transaction publish.
-///
-/// This is a HARD STOP, not a deferral, and the message says so. The TRUNCATE
-/// refusal beside it can promise recovery because re-running re-reads the same
-/// rows; this one cannot. The `XA_prepare_log_event` stays in the binlog forever,
-/// so every re-run from the same checkpoint hits it again — MEASURED: run, refuse,
-/// re-run, refuse. The only way past is a checkpoint on the far side of the branch,
-/// which skips whatever else happened in between, which is why the remedy is the
-/// same re-snapshot TRUNCATE asks for.
-///
-/// It also refuses a branch that goes on to COMMIT, because at `XA PREPARE` there is
-/// nothing to distinguish the two — the outcome is a Query event that has not been
-/// read yet. Over-refusing is the safe direction: the alternative shipped a
-/// The XA+spill refusal — a HARD STOP, and the message says so.
-///
-/// The first version prescribed "commit the XA branch promptly so it frames
-/// normally", which clears the condition in NO world: the refusal fires at the
-/// `XA_prepare_log_event`, the checkpoint has not advanced, and an `XA COMMIT` is
-/// appended AFTER the PREPARE — so every re-run replays the same rows from the
-/// checkpoint, re-crosses the same cap, re-spills, and bails at the SAME immutable
-/// PREPARE before ever reaching the commit. The sibling plain-XA refusal had
-/// already measured exactly this loop ("run, refuse, re-run, refuse") and its
-/// message says "does NOT clear by re-running"; this one said neither. A refusal
-/// that can persist for hours (XA's whole point) must tell the operator the
-/// stream is STOPPED, and name the ladder honestly: raising the caps un-wedges
-/// only a branch that turns out NOT to touch a captured table — if it is ours,
-/// the next rung is the plain refusal, whose escape (re-anchor FIRST, then
-/// re-snapshot) is the one that always works.
+/// A prepared XA branch this reader cannot frame — and must not let another transaction publish.
 pub(crate) fn xa_prepare_spilled_tail_refusal_message(tail_rows: usize) -> String {
     format!(
         "mysql cdc: an XA PREPARE arrived while this transaction's tail \
@@ -2912,7 +2396,7 @@ fn defers_the_grants_re_read(data: &Option<EventData<'_>>) -> bool {
     }
 }
 
-/// Whether a transaction is open after this statement, and whether the statement marks a grants re-read: any statement outside a transaction that is not a frame.
+/// Whether a transaction is open after this statement, and whether the statement marks a grants re-read.
 pub(crate) fn statement_frame(in_transaction: bool, raw: &[u8]) -> (bool, bool) {
     match raw {
         b"BEGIN" => (true, false),
@@ -2982,7 +2466,7 @@ pub(crate) fn statement_mentions<'a>(
     })
 }
 
-/// Refuse a statement that names a captured table under `columns_from: grants`: its effect on the columns the account may read is not read from its text.
+/// Refuse a statement that names a captured table under `columns_from.
 pub(crate) fn statement_mention_refusal_message(table: &str) -> String {
     format!(
         "mysql cdc: a statement in the log being read names the captured table `{table}`, \
@@ -2997,26 +2481,6 @@ pub(crate) fn statement_mention_refusal_message(table: &str) -> String {
 }
 
 /// Does this QUERY event close a transaction?
-///
-/// `COMMIT` on its own (the non-transactional-engine and binlog-format path) and
-/// `XA COMMIT <xid>`. Deliberately NOT `XA PREPARE` — prepared is not committed, and
-/// releasing there would publish rows a later `XA ROLLBACK` erases. Not `BEGIN`,
-/// `SAVEPOINT` or `ROLLBACK` either.
-///
-/// That last exclusion is MEASURED, so nobody re-derives it: a `ROLLBACK` arm here would be dead code, and
-/// a dangerous one. It was written and then removed after two `SHOW BINLOG EVENTS`
-/// probes on the stand (MySQL 8.0.46, `binlog_format=ROW`):
-///
-/// * a mixed InnoDB+MyISAM transaction rolled back logs ONLY the MyISAM rows — the
-///   InnoDB ones are rolled back UNWRITTEN, so a captured InnoDB table has nothing
-///   buffered when the rollback arrives;
-/// * a pure MyISAM transaction rolled back logs `BEGIN … Write_rows … `**`COMMIT`** —
-///   the rows are permanent, so the server frames them as their own transaction.
-///
-/// So no shape reaches this file with rows buffered AND a `ROLLBACK` marker, and
-/// treating one as "discard the buffer" would DELETE rows that are still in the
-/// source. `roast_mysql_cdc_a_rolled_back_myisam_statement_is_framed_as_its_own_
-/// transaction` pins the real contract instead.
 fn is_commit_statement(sql: &str) -> bool {
     let t = sql.trim().trim_end_matches(';').trim();
     if t.eq_ignore_ascii_case("commit") {
@@ -3029,7 +2493,7 @@ fn is_commit_statement(sql: &str) -> bool {
     )
 }
 
-/// Is the commit at `(file, pos)` past the open-time bound? Binlog files order by their numeric suffix; an unparseable name is never past.
+/// Is the commit at `(file, pos)` past the open-time bound?
 fn commit_past_bound(file: &str, pos: u64, bound: Option<&(String, u64)>) -> bool {
     let Some((bound_file, bound_pos)) = bound else {
         return false;
@@ -3043,11 +2507,7 @@ fn commit_past_bound(file: &str, pos: u64, bound: Option<&(String, u64)>) -> boo
     cur > bnd || (cur == bnd && pos > *bound_pos)
 }
 
-/// Decode a binlog row's cells to typed [`RivetValue`]s (structural — no string
-/// reparse of temporals).
-/// Returns the row's values plus the INDICES of cells that could not be decoded —
-/// a cell that has no faithful representation, never one that is genuinely absent.
-/// The caller turns those indices into a deferred poison naming the columns.
+/// Decode a binlog row's cells to typed [`RivetValue`]s (structural — no string reparse of temporals).
 fn render_row(r: mysql::binlog::row::BinlogRow) -> (Vec<RivetValue>, Vec<usize>) {
     let mut undecodable = Vec::new();
     let vals = r
@@ -3065,43 +2525,19 @@ fn render_row(r: mysql::binlog::row::BinlogRow) -> (Vec<RivetValue>, Vec<usize>)
     (vals, undecodable)
 }
 
-/// `None` ⇒ this cell has no faithful representation — the caller must refuse, not
-/// write the placeholder NULL this returns alongside it.
+/// `None` ⇒ this cell has no faithful representation.
 fn binlog_value_to_rivet(bv: &BinlogValue) -> Option<RivetValue> {
     match bv {
         BinlogValue::Value(v) => Some(RivetValue::from_mysql(v)),
-        // A JSON column arrives as MySQL's internal JSONB binary — convert it to
-        // JSON text in the SAME rendering the server itself produces (", " and
-        // ": " separators), so CDC and batch outputs of one value are
-        // byte-identical; compact serde output would differ only in whitespace.
-        // A JSONB tree MySQL materialised server-side carries OPAQUE leaves — a
-        // DECIMAL, DATE, TIME or DATETIME stored with a type tag and raw bytes rather
-        // than as JSON text. `serde_json::Value::try_from` errors on the first one and
-        // the object/array arms propagate it, so ONE opaque leaf discarded the WHOLE
-        // document. Measured: `JSON_OBJECT('amt', CAST(1.50 AS DECIMAL(10,2)), 'sku',
-        // 'A1')` and `JSON_OBJECT('created', CAST('2024-01-02' AS DATE))` both came
-        // back `doc: null` under `status: success`, while the plain text literal
-        // beside them was fine — and a `mode: full` export of the SAME table wrote all
-        // three correctly. So a snapshot-plus-CDC pipeline shows the column populated
-        // by the snapshot leg and NULL for every change row that touches it.
-        //
-        // Nulling is not an option and neither is the crate's own fallback, which
-        // renders an opaque leaf as `base64:type<N>:<bytes>` — writing a marker where
-        // a number belongs is the same class as the `unchanged-toast-datum` refusal on
-        // PostgreSQL. rivet cannot render these bytes the way MySQL does, so it says
-        // so and refuses this cell; the caller defers the refusal to routing.
         BinlogValue::Jsonb(j) => match serde_json::Value::try_from(j.clone()) {
             Ok(json) => Some(RivetValue::Bytes(mysql_style_json(&json).into_bytes())),
             Err(_) => None,
         },
-        // JSONB partial-update diffs (rare) — carry the debug bytes as text.
         other => Some(RivetValue::Bytes(format!("{other:?}").into_bytes())),
     }
 }
 
-/// Serialise with MySQL's own JSON text spacing: `", "` between elements and
-/// `": "` after keys (`{"n": 1, "tier": "gold"}`), which is what the batch
-/// export reads from the server as text.
+/// Serialise with MySQL's own JSON text spacing.
 fn mysql_style_json(v: &serde_json::Value) -> String {
     struct MySqlFmt;
     impl serde_json::ser::Formatter for MySqlFmt {
@@ -3152,9 +2588,6 @@ impl Iterator for MysqlChangeStream {
             if let Some(ev) = self.pending.pop_front() {
                 return Some(Ok(ev));
             }
-            // A spilled tail outranks another `fill`: its rows belong to a
-            // transaction already framed, and reading more binlog before finishing
-            // it would interleave a later transaction into it.
             if self.spooled.is_some() {
                 match self.next_spooled() {
                     Ok(Some(ev)) => return Some(Ok(ev)),
@@ -3218,19 +2651,6 @@ impl ChangeStream for MysqlChangeStream {
 #[cfg(test)]
 mod tests {
     /// Every arm of the checkpoint-identity verdict.
-    ///
-    /// This closes a hole rather than tightening one: a MySQL checkpoint is binlog
-    /// COORDINATES, and nothing stopped a checkpoint written by one server from
-    /// being used against another. `binlog.000042:12345` parses on any host and
-    /// addresses a different binlog on each.
-    /// The XA+spill refusal tells the operator the truth: hard stop, re-running
-    /// refuses again, committing does not clear it, and the ladder out.
-    ///
-    /// The first version said "commit the XA branch promptly so it frames
-    /// normally" — impossible in every world (the commit lands AFTER the PREPARE
-    /// the re-read stops at), on a refusal that can legitimately persist for
-    /// hours. Each pinned phrase below is a CLAIM the code makes true; drift the
-    /// message and this names which promise broke.
     #[test]
     fn the_xa_spill_refusal_names_the_stop_the_loop_and_the_ladder() {
         let msg = xa_prepare_spilled_tail_refusal_message(7);
@@ -3264,14 +2684,12 @@ mod tests {
         let a = "feada5c8-8818-11f1-a5e3-0242c0a8e406";
         let b = "00000000-1111-2222-3333-444444444444";
 
-        // SAME server, no GTID in play — the ordinary resume.
         assert_eq!(
             MysqlChangeStream::checkpoint_identity_verdict(Some(a), None, a, None, None),
             C::Ok
         );
         assert!(C::Ok.refusal().is_none() && C::Ok.warning().is_none());
 
-        // A DIFFERENT server. The whole point.
         let v = MysqlChangeStream::checkpoint_identity_verdict(Some(a), None, b, None, None);
         assert_eq!(
             v,
@@ -3294,8 +2712,6 @@ mod tests {
              cannot be carried to a new server at all"
         );
 
-        // NO identity: accepted, but SAID. Refusing would strand a checkpoint
-        // written before this existed; saying nothing is the silent half of the bug.
         let v = MysqlChangeStream::checkpoint_identity_verdict(None, None, a, None, None);
         assert_eq!(v, C::Unverifiable);
         assert!(v.refusal().is_none(), "an old checkpoint must still resume");
@@ -3309,8 +2725,6 @@ mod tests {
             "the warning has to name the hazard, not just admit ignorance"
         );
 
-        // SAME server, GTID set NO LONGER contained — a `RESET MASTER` keeps the
-        // uuid and empties the history, which the uuid check alone cannot see.
         let g = "feada5c8-8818-11f1-a5e3-0242c0a8e406:1-100";
         let v = MysqlChangeStream::checkpoint_identity_verdict(
             Some(a),
@@ -3328,7 +2742,6 @@ mod tests {
         );
         assert!(v.refusal().expect("must refuse").contains("RESET MASTER"));
 
-        // …and contained is fine.
         assert_eq!(
             MysqlChangeStream::checkpoint_identity_verdict(
                 Some(a),
@@ -3339,8 +2752,6 @@ mod tests {
             ),
             C::Ok
         );
-        // An EMPTY recorded set is not a claim about anything — gtid_mode was off
-        // when it was written, so containment says nothing and must not refuse.
         assert_eq!(
             MysqlChangeStream::checkpoint_identity_verdict(
                 Some(a),
@@ -3354,7 +2765,6 @@ mod tests {
              refusing on it would break every non-GTID deployment, which is the \
              DEFAULT one"
         );
-        // No containment answer for a non-empty set: resume on the uuid, but SAY so.
         assert_eq!(
             MysqlChangeStream::checkpoint_identity_verdict(Some(a), Some(g), a, None, None),
             C::GtidUnanswered
@@ -3365,21 +2775,7 @@ mod tests {
         ));
     }
 
-    /// The rule is DETERMINISTIC — a bare name means the connection's own database,
-    /// and any other schema is the ambiguity.
-    ///
-    /// The first cut compared against the FIRST schema seen in the current run and
-    /// kept that in a per-run map, so a run in which only the foreign database wrote
-    /// recorded IT as "first" and captured its rows in silence. MEASURED: `status:
-    /// success, rows: 1` with an independent read showing `insert | 99 |
-    /// FOREIGN-ROW`. Under `until_current` on a schedule, "only one of the two wrote
-    /// this cycle" is the ORDINARY case.
-    ///
-    /// Checked on the WIRE because no catalog can answer it here: MySQL's
-    /// `information_schema` is filtered by PRIVILEGE while `REPLICATION SLAVE` hands
-    /// over the whole server's binlog.
-    /// A bare name means the connection's database when that holds the name, else the one other
-    /// database holding a base table of it, else nothing: one answer for check, wire and baseline.
+    /// The rule is DETERMINISTIC — a bare name means the connection's own database, and any other schema is the ambiguity.
     #[test]
     fn a_bare_name_resolves_to_its_own_database_then_to_the_only_other() {
         let m = |schema: &str, kind: &str| crate::source::cdc::identity::CatalogMatch {
@@ -3415,23 +2811,17 @@ mod tests {
 
     #[test]
     fn a_bare_name_means_the_connections_own_database_and_any_other_is_refused() {
-        // The ordinary case: the event is from our own database. Silent — this runs
-        // on EVERY event, so a false positive here is an outage.
         assert_eq!(
             MysqlChangeStream::bare_name_spans_databases("orders", "shop", "shop"),
             None
         );
 
-        // A QUALIFIED name is never ambiguous: routing compares the whole string.
         assert_eq!(
             MysqlChangeStream::bare_name_spans_databases("shop.orders", "shop", "archive"),
             None,
             "`database.table` names exactly one relation, whatever else exists"
         );
 
-        // The defect. Note what makes this stronger than the version it replaces:
-        // there is no "first seen" state, so the verdict does not depend on which
-        // database happened to write first, or on the run boundary.
         let why = MysqlChangeStream::bare_name_spans_databases("orders", "shop", "archive")
             .expect("an event from another database is not what a bare name asked for");
         assert!(
@@ -4335,22 +3725,11 @@ mod tests {
         assert_eq!(t("TRUNCATE orders"), None, "TRUNCATE has its own refusal");
     }
 
-    /// MySQL's TRUNCATE parser had ZERO offline coverage while the evidence matrix
-    /// claimed it was graded by `a_mysql_truncate_statement_resolves_the_table_it_names`
-    /// — a test that exists nowhere in the tree. PROVEN by stubbing this function to
-    /// `return None` (the exact pre-fix silent divergence) and watching the whole lib
-    /// suite stay green at 2616 passed. A cited grader nobody resolved against the
-    /// source is a `sound` cell resting on a name.
-    ///
-    /// The shapes that matter are the ones a real server emits: a bare name resolved
-    /// against the EVENT's database, a db-qualified one, backticks, and the comment
-    /// forms every ORM appends.
+    /// MySQL's TRUNCATE parser had ZERO offline coverage while the evidence matrix claimed it was graded by `a_mysql_truncate_statement_resolves_the_table_it_names`.
     #[test]
     fn a_mysql_truncate_statement_resolves_the_table_it_names() {
         let t = |sql: &str| truncate_target(sql, "shop", SqlMode::default());
 
-        // Bare name ⇒ the event's own database, which is the only place it can come
-        // from: a binlog QUERY event carries the schema separately from the SQL.
         assert_eq!(t("TRUNCATE orders"), Some(("shop".into(), "orders".into())));
         assert_eq!(
             t("TRUNCATE TABLE orders"),
@@ -4365,8 +3744,6 @@ mod tests {
              case-sensitive depending on lower_case_table_names"
         );
 
-        // Qualified and quoted — a db-qualified truncate names another schema, and
-        // routing must see that schema, not the event's.
         assert_eq!(
             t("TRUNCATE archive.orders"),
             Some(("archive".into(), "orders".into())),
@@ -4379,8 +3756,6 @@ mod tests {
             "backticks are quoting, not part of the identifier"
         );
 
-        // Comments: measured NOT to reach this reader on 8.0, handled anyway because
-        // the failure mode is a silent divergence rather than an error.
         assert_eq!(
             t("TRUNCATE TABLE orders /* xid=42 */"),
             Some(("shop".into(), "orders".into()))
@@ -4390,8 +3765,6 @@ mod tests {
             Some(("shop".into(), "orders".into()))
         );
 
-        // NOT a truncate, and the boundary matters: claiming one of these would fail
-        // an export over a statement that removes nothing.
         for not_one in [
             "DELETE FROM orders",
             "DROP TABLE orders",
@@ -4403,8 +3776,6 @@ mod tests {
             assert_eq!(t(not_one), None, "{not_one} is not a truncate of a table");
         }
 
-        // A shape this reader does not claim to understand must be None rather than a
-        // guess — a wrong guess refuses the wrong table.
         assert_eq!(
             t("TRUNCATE TABLE a, b"),
             None,
@@ -4412,10 +3783,6 @@ mod tests {
              unrecognised shape is how a reader refuses an export it should not"
         );
 
-        // A DOT inside backticks is part of the name, not a qualifier. The old
-        // `split_once('.')` over the raw text cut this into a database and a table
-        // that do not exist, so routing found neither and the truncate was not
-        // refused for the table it actually names.
         assert_eq!(
             t("TRUNCATE TABLE `odd.name`"),
             Some(("shop".into(), "odd.name".into())),
@@ -4426,12 +3793,10 @@ mod tests {
             Some(("db.x".into(), "t.y".into())),
             "...and the qualifier splits on the dot BETWEEN the quoted parts"
         );
-        // A doubled backtick is an escaped one inside the name.
         assert_eq!(
             t("TRUNCATE TABLE `we``ird`"),
             Some(("shop".into(), "we`ird".into()))
         );
-        // An unterminated quote is not a name.
         assert_eq!(t("TRUNCATE TABLE `unclosed"), None);
     }
 
@@ -4499,10 +3864,6 @@ mod tests {
     }
 
     /// The MySQL routing guard's decision surface.
-    ///
-    /// `None` (the catalog has no row) must stay ROUTABLE, deliberately: the schema
-    /// probe reports a missing table with a message that already names it, and a
-    /// second competing error for one cause is worse than none.
     #[test]
     fn a_non_base_relation_is_refused_and_a_base_table_is_not() {
         assert_eq!(
@@ -4541,21 +3902,13 @@ mod tests {
              deleting the checkpoint — saying so is the difference between a config \
              fix and a re-snapshot the operator does not need: {why}"
         );
-        // SYSTEM VIEW is the other type information_schema reports; it must refuse
-        // for the same reason rather than fall through to Routable.
         assert!(matches!(
             classify_mysql_routing("x", Some("SYSTEM VIEW")),
             MysqlRoutingVerdict::Never(_)
         ));
     }
 
-    /// The refusal message IS the remediation — an operator has nothing else to go
-    /// on, because the alternative to this error was a green run with missing rows.
-    /// The refusal must be TABLE-ADDRESSED. Every arm here was a live failure
-    /// first: the un-filtered refusal failed a concurrent, unrelated MySQL CDC
-    /// export on a table it does not capture (measured 2026-08-24 on #281 — the
-    /// PARTIAL_JSON fixture and `mysql_cdc_cli_stream_with_a_cap…` in one run,
-    /// which is how the over-refusal was found at all).
+    /// The refusal message IS the remediation — an operator has nothing else to go on.
     #[test]
     fn an_undecodable_event_fails_only_the_runs_that_capture_that_table() {
         let cfg = vec!["rivet.orders".to_string()];
@@ -4581,9 +3934,6 @@ mod tests {
             "`rivet cdc` with no --table captures whatever the stream emits, so \
              every event is ours"
         );
-        // A bare (schema-less) config entry matches any schema, exactly as the sink
-        // routes it — the guard must ask the SAME question the router does, or it
-        // protects a set the run does not actually capture.
         assert!(
             undecodable_event_is_ours(Some(("otherdb", "orders")), &["orders".to_string()]),
             "a bare config name matches any schema, like sink::table_matches"
@@ -4616,16 +3966,7 @@ mod tests {
         }
     }
 
-    /// `Xid` is written only by a transactional engine's own commit. A MyISAM or
-    /// MEMORY write, and every `XA COMMIT`, close the transaction with a QUERY event
-    /// instead — and with no arm for those the rows stayed buffered FOREVER: the run
-    /// captured zero, exited 0, and the checkpoint never moved. Silent, total, and
-    /// indistinguishable from an idle source.
-    ///
-    /// The negative half is the load-bearing one. `XA PREPARE` must NOT release:
-    /// prepared is not committed, and publishing there hands downstream rows that a
-    /// later `XA ROLLBACK` erases — a fabrication, which is worse than the loss this
-    /// fixes.
+    /// `Xid` is written only by a transactional engine's own commit.
     #[test]
     fn a_commit_query_closes_a_transaction_but_a_prepare_does_not() {
         for yes in [
@@ -4643,11 +3984,6 @@ mod tests {
         for no in [
             "BEGIN",
             "XA START 'x1'",
-            // KEEP, but it grades a string this reader does not receive: on 5.7.7+
-            // the prepare is a BINARY `XaPrepareLogEvent`, so the arm that actually
-            // stops it is in `fill`, proven live by
-            // `a_prepared_xa_branch_is_never_published_by_another_transactions_commit`.
-            // Left here for the 5.7.0-5.7.6 spelling and as a second lock.
             "XA PREPARE 'x1'",
             "XA ROLLBACK 'x1'",
             "ROLLBACK",
@@ -4666,11 +4002,7 @@ mod tests {
     use super::*;
     use mysql::Opts;
 
-    /// The compression guard's decision, offline. Anything unrecognized — an
-    /// absent variable (pre-8.0.20, MariaDB), an empty reply, a shape we did
-    /// not anticipate — must read as OFF: the guard exists to stop a silent
-    /// LOSS, and blocking a healthy source because a reply looked unfamiliar
-    /// would be its own outage.
+    /// The compression guard's decision, offline.
     #[test]
     fn binlog_compression_is_recognized_in_both_renderings_and_fails_open() {
         for on in ["1", "ON", "on", " on ", "TRUE"] {
@@ -4688,11 +4020,7 @@ mod tests {
         );
     }
 
-    /// The predicate above says what the reply MEANS; this says what the guard
-    /// DOES with it, which is the half a live server used to hold hostage. Both
-    /// directions, because a guard that refuses everything and a guard that
-    /// refuses nothing are the same bug from opposite sides — deleting the `!`
-    /// turns one into the other and this is what notices.
+    /// The predicate above says what the reply MEANS.
     #[test]
     fn compression_refusal_blocks_a_compressed_binlog_and_only_that() {
         let err = compression_refusal(Some("ON")).expect_err("ON must refuse");
@@ -4709,13 +4037,7 @@ mod tests {
         }
     }
 
-    /// #200-2: the open-time guard is not the whole story — compression turned on
-    /// AFTER open (or a compressed span already in the binlog) reaches `fill()` as
-    /// a `Transaction_payload_event`, which the reader cannot expand. Its arm must
-    /// REFUSE (naming the setting + the harm), never fall through to `_ => {}` and
-    /// silently skip the transaction while the checkpoint advances past it. Pure
-    /// message check here; the routing (arm calls this, not `_ => {}`) is proven
-    /// live by `mysql_cdc_compressed_payload_in_stream_refuses_not_skips`.
+    /// #200-2: the open-time guard is not the whole story.
     #[test]
     fn compressed_payload_refusal_names_the_setting_and_the_harm() {
         let msg = compressed_payload_refusal().to_string();
@@ -4727,31 +4049,20 @@ mod tests {
         );
     }
 
-    // The `mysql-cdc` instance (cdc profile, :3307) — binlog + a REPLICATION grant.
     const URL: &str = "mysql://rivet:rivet@127.0.0.1:3307/rivet";
 
-    // The until_current termination contract, as a pure matrix: at the bound is
-    // in scope, past it (by pos or by a later file) is not, the file compare is
-    // ordinal (survives the 999999 → 1000000 suffix-width rollover where a
-    // lexicographic compare inverts), and unparseable names fail open.
     #[test]
     fn commit_past_bound_matrix() {
         let bound = ("binlog.000042".to_string(), 1000u64);
-        // Daemon (no bound): never past.
         assert!(!commit_past_bound("binlog.000099", u64::MAX, None));
-        // Same file: at the bound is in scope, one byte past is not.
         assert!(!commit_past_bound("binlog.000042", 999, Some(&bound)));
         assert!(!commit_past_bound("binlog.000042", 1000, Some(&bound)));
         assert!(commit_past_bound("binlog.000042", 1001, Some(&bound)));
-        // Earlier / later file: pos is irrelevant.
         assert!(!commit_past_bound("binlog.000041", u64::MAX, Some(&bound)));
         assert!(commit_past_bound("binlog.000043", 4, Some(&bound)));
-        // Suffix-width rollover: 1000000 > 999999 ordinally, though it is
-        // lexicographically SMALLER ("1…" < "9…").
         let wide = ("mysql-bin.999999".to_string(), 1000u64);
         assert!(commit_past_bound("mysql-bin.1000000", 4, Some(&wide)));
         assert!(!commit_past_bound("mysql-bin.999999", 500, Some(&wide)));
-        // Unparseable names fail open (never end the run early).
         assert!(!commit_past_bound("garbage", 99, Some(&bound)));
         assert!(!commit_past_bound(
             "binlog.000042",
@@ -4760,16 +4071,13 @@ mod tests {
         ));
     }
 
-    /// The dump thread must outlive a long store flush: its session `net_write_timeout` is
-    /// rivet's, not the server's 60 s default that dropped a real run mid-flush.
+    /// The dump thread must outlive a long store flush.
     #[test]
     #[ignore = "live: requires docker compose mysql (binlog_format=ROW)"]
     fn the_binlog_dump_session_outlives_a_long_flush() {
-        // Its own server_id: a second dump with the same id makes MySQL drop the first (1236).
         let _stream =
             MysqlChangeStream::open_from_current(URL, 4250, DrainMode::Continuous, None, &[])
                 .unwrap();
-        // performance_schema is root-only on the stand; the stream itself runs as `rivet`.
         let mut c =
             Conn::new(Opts::from_url("mysql://root:rivet@127.0.0.1:3307/rivet").unwrap()).unwrap();
         let seen: Option<u32> = c
@@ -4826,14 +4134,12 @@ mod tests {
             ops,
             vec![ChangeOp::Insert, ChangeOp::Update, ChangeOp::Delete]
         );
-        // Typed values: the INSERT after-image is [1, 10] as JSON numbers.
         assert_eq!(
             events[0].after.as_deref(),
             Some([RivetValue::Int(1), RivetValue::Int(10)].as_slice())
         );
         assert_eq!(events[1].before.as_ref().unwrap()[1], RivetValue::Int(10));
         assert_eq!(events[1].after.as_ref().unwrap()[1], RivetValue::Int(20));
-        // Every event carries a canonical position for checkpointing.
         assert!(
             events[2]
                 .position
@@ -4845,13 +4151,6 @@ mod tests {
         );
     }
 
-    // RED test for the idle-first-run hole: PostgreSQL pins its resume anchor
-    // server-side at open (slot creation); MySQL has no server-side anchor — the
-    // checkpoint file is the ONLY resume position, and it was written only at a
-    // part commit. So a bounded first run that drains ZERO changes left no
-    // checkpoint, the next run re-anchored to a newer "current" position, and
-    // every change in between was silently skipped. Enable-CDC-during-a-quiet-
-    // period is exactly the realistic ops sequence that hits this.
     #[test]
     #[ignore = "live: requires docker compose mysql (binlog_format=ROW)"]
     fn first_run_with_zero_changes_pins_the_checkpoint_at_open() {
@@ -4863,15 +4162,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ckpt = dir.path().join("mysql.ckpt.json");
 
-        // Run 1: checkpoint path configured, no file yet, nothing to drain
-        // (BoundedAtOpen ⇒ bounded drain-and-exit, the scheduler model).
         let mut s = MysqlChangeStream::open_or_resume(
             URL,
             4245,
             Some(&ckpt),
             DrainMode::BoundedAtOpen,
             None,
-            vec!["cdc_idle_first".to_string()], // only its own table: a sibling test's DROP must not reach it
+            vec!["cdc_idle_first".to_string()],
             None,
             None,
         )
@@ -4889,18 +4186,16 @@ mod tests {
              even when it captures nothing"
         );
 
-        // A change made BETWEEN the idle run 1 and run 2.
         c.query_drop("INSERT INTO cdc_idle_first VALUES (1, 100)")
             .unwrap();
 
-        // Run 2 must resume from the pinned position and capture it.
         let mut s2 = MysqlChangeStream::open_or_resume(
             URL,
             4245,
             Some(&ckpt),
             DrainMode::BoundedAtOpen,
             None,
-            vec!["cdc_idle_first".to_string()], // only its own table: a sibling test's DROP must not reach it
+            vec!["cdc_idle_first".to_string()],
             None,
             None,
         )
@@ -4918,14 +4213,11 @@ mod tests {
     #[test]
     #[ignore = "live: requires docker compose mysql (binlog_format=ROW)"]
     fn resumes_from_checkpoint() {
-        // Distinct table + server_id so this runs safely in parallel with the
-        // other live test (cargo runs tests concurrently).
         let mut c = Conn::new(Opts::from_url(URL).unwrap()).unwrap();
         c.query_drop("DROP TABLE IF EXISTS cdc_resume").unwrap();
         c.query_drop("CREATE TABLE cdc_resume (id INT PRIMARY KEY, v INT)")
             .unwrap();
 
-        // Read change A and checkpoint at its position.
         let mut s = MysqlChangeStream::open_from_current(
             URL,
             4244,
@@ -4949,11 +4241,9 @@ mod tests {
         assert_eq!(Position::load(&ckpt).unwrap().as_ref(), Some(&a.position));
         drop(s);
 
-        // A change made AFTER the checkpoint.
         c.query_drop("INSERT INTO cdc_resume VALUES (2, 200)")
             .unwrap();
 
-        // Resuming from the checkpoint must yield B (id=2), never re-read A.
         let mut s2 = MysqlChangeStream::open_or_resume(
             URL,
             4244,
@@ -4978,12 +4268,10 @@ mod tests {
         );
     }
 
-    /// #161: both directions of the pure row-image verdict, RED against an
-    /// inverted/`Ok(())`-style mutant (the compression_refusal precedent).
+    /// #161: both directions of the pure row-image verdict, RED against an inverted/`Ok(())`-style mutant (the compression_refusal precedent).
     #[test]
     fn row_image_verdict_both_directions() {
         use crate::source::cdc::RowImage;
-        // keep: FULL (any case) and ABSENT (older MySQL / MariaDB).
         assert!(matches!(
             MysqlChangeStream::row_image_verdict(Some("FULL")),
             RowImage::Whole
@@ -4996,7 +4284,6 @@ mod tests {
             MysqlChangeStream::row_image_verdict(None),
             RowImage::Whole
         ));
-        // refuse: MINIMAL / NOBLOB write partial rows.
         for bad in ["MINIMAL", "noblob"] {
             match MysqlChangeStream::row_image_verdict(Some(bad)) {
                 RowImage::Partial { why } => assert!(
@@ -5835,7 +5122,7 @@ pub(crate) struct BinlogEventAt {
     pub(crate) info: String,
 }
 
-/// Whether the commit the checkpoint recorded still ends at `pos` in `file`: a binlog renumbered by `RESET MASTER` reuses the name, not the events.
+/// Whether the commit the checkpoint recorded still ends at `pos` in `file`.
 pub(crate) fn commit_verdict(
     file: &str,
     pos: u64,
@@ -5887,13 +5174,11 @@ pub(crate) fn commit_verdict(
 pub(crate) enum CheckpointIdentity {
     /// Same server, and any recorded GTID set is still present.
     Ok,
-    /// The checkpoint predates identity recording. Accepted, but SAID — an
-    /// unverifiable resume that says nothing is the silent half of the defect.
+    /// The checkpoint predates identity recording.
     Unverifiable,
-    /// Written by a DIFFERENT server. Its coordinates address another binlog.
+    /// Written by a DIFFERENT server.
     ForeignServer { checkpoint: String, server: String },
-    /// Same server, but the transactions the checkpoint names are gone —
-    /// `RESET MASTER`, or a rebuild that kept the uuid.
+    /// Same server, but the transactions the checkpoint names are gone.
     GtidNotContained { checkpoint: String, server: String },
     /// Same server, but the server gave no containment answer for a non-empty GTID set.
     GtidUnanswered,
@@ -5986,7 +5271,7 @@ mod refusal_text_tests {
     use super::*;
     use crate::source::cdc::checkpoint_identity::RECOVER;
 
-    /// An unknown table or database is the coded absent-table refusal; any other probe failure keeps the server's words.
+    /// An unknown table or database is the coded absent-table refusal.
     #[test]
     fn a_table_the_probe_cannot_prepare_is_absent_only_by_its_error_number() {
         for code in [1146, 1049] {
@@ -6054,7 +5339,7 @@ mod refusal_text_tests {
         assert!(unknown.ends_with(RECOVER), "{unknown}");
     }
 
-    /// ERROR 1236 is a log gap only under the two purge wordings; the same code for another cause stays the driver's error.
+    /// ERROR 1236 is a log gap only under the two purge wordings.
     #[test]
     fn a_purged_binlog_is_a_log_gap_and_another_1236_is_not() {
         const BY_FILE: &str = "Could not find first log file name in binary log index file";
@@ -6167,8 +5452,7 @@ mod refusal_text_tests {
 mod error_code_tests {
     use super::*;
 
-    /// An anchor refused because the identity query failed keeps the query's own code when it
-    /// has one, else the query-failed code; a server with no binlog is a prerequisite.
+    /// An anchor refused because the identity query failed keeps the query's own code when it has one, else the query-failed code.
     #[test]
     fn an_unverifiable_anchor_and_a_disabled_binlog_are_refused_by_code() {
         let dir = tempfile::tempdir().unwrap();
@@ -6270,7 +5554,7 @@ mod commit_fingerprint {
         );
     }
 
-    /// An anchor records no commit and passes; a checkpoint from before fingerprints warns; a moved commit is the coded refusal.
+    /// An anchor records no commit and passes; a checkpoint from before fingerprints warns.
     #[test]
     fn an_old_checkpoint_warns_and_a_moved_commit_refuses_with_exit_5() {
         assert_eq!(

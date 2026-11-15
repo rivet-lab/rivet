@@ -1,5 +1,4 @@
-//! One classification of an Oracle column's driver type; every type decision in the
-//! adapter matches on it instead of on the driver's `DB_TYPE_*` names.
+//! One classification of an Oracle column's driver type.
 
 use oracledb::Metadata;
 
@@ -65,9 +64,7 @@ impl OraKind {
         }
     }
 
-    /// The server-side expression a column of this kind is fetched through, or `None`
-    /// to fetch it as is. The driver panics decoding a region-named zone, and cannot
-    /// decode ROWID, JSON, object types or VECTOR at all.
+    /// The server-side expression a column of this kind is fetched through, or `None` to fetch it as is.
     pub(super) fn projection(self, quoted: &str) -> Option<String> {
         Some(match self {
             Self::TimestampTz | Self::TimestampLtz => format!("SYS_EXTRACT_UTC({quoted})"),

@@ -25,6 +25,7 @@ const AWS_ENV: &[&str] = &[
     "AWS_STS_REGIONAL_ENDPOINTS",
     "RIVET_TEST_S3_NAMED_AK",
     "RIVET_TEST_S3_NAMED_SK",
+    "RIVET_TEST_S3_NAMED_TOK",
 ];
 
 struct Stand {
@@ -120,6 +121,14 @@ impl Mock {
             .unwrap()
             .first()
             .is_some_and(|r| r.to_ascii_lowercase().contains("x-amz-security-token"))
+    }
+
+    fn sent_an_authorization(&self) -> bool {
+        self.requests
+            .lock()
+            .unwrap()
+            .first()
+            .is_some_and(|r| r.to_ascii_lowercase().contains("authorization:"))
     }
 
     fn request_count(&self) -> usize {
@@ -305,4 +314,113 @@ fn named_key_env_vars_keep_signing_with_their_values() {
     cfg.secret_key_env = Some("RIVET_TEST_S3_NAMED_SK".into());
     let key = signed_with(&mock, &cfg).unwrap();
     assert_eq!(key.as_deref(), Some("AKIANAMEDENV"));
+}
+
+const AMBIENT_KEYS: [(&str, &str); 3] = [
+    ("AWS_ACCESS_KEY_ID", "AKIAENVAMBIENT"),
+    ("AWS_SECRET_ACCESS_KEY", "env-secret"),
+    ("AWS_SESSION_TOKEN", "ambient-session-token"),
+];
+
+fn with_named_keys(mut cfg: DestinationConfig) -> DestinationConfig {
+    cfg.access_key_env = Some("RIVET_TEST_S3_NAMED_AK".into());
+    cfg.secret_key_env = Some("RIVET_TEST_S3_NAMED_SK".into());
+    cfg
+}
+
+const NAMED_KEYS: [(&str, &str); 2] = [
+    ("RIVET_TEST_S3_NAMED_AK", "AKIANAMEDENV"),
+    ("RIVET_TEST_S3_NAMED_SK", "named-env-secret"),
+];
+
+#[test]
+fn configured_keys_never_carry_the_ambient_session_token() {
+    let mut env = NAMED_KEYS.to_vec();
+    env.extend(AMBIENT_KEYS);
+    let _s = Stand::new(NAMED_AND_AMBIENT, "", &env);
+    let mock = Mock::start();
+    let key = signed_with(&mock, &with_named_keys(s3(&mock.endpoint, None))).unwrap();
+    assert_eq!(key.as_deref(), Some("AKIANAMEDENV"));
+    assert!(!mock.sent_a_session_token());
+}
+
+#[test]
+fn configured_keys_carry_the_configured_session_token() {
+    let mut env = NAMED_KEYS.to_vec();
+    env.extend(AMBIENT_KEYS);
+    env.push(("RIVET_TEST_S3_NAMED_TOK", "configured-token"));
+    let _s = Stand::new(NAMED_AND_AMBIENT, "", &env);
+    let mock = Mock::start();
+    let mut cfg = with_named_keys(s3(&mock.endpoint, None));
+    cfg.session_token_env = Some("RIVET_TEST_S3_NAMED_TOK".into());
+    let key = signed_with(&mock, &cfg).unwrap();
+    assert_eq!(key.as_deref(), Some("AKIANAMEDENV"));
+    assert!(mock.sent_a_session_token());
+    let head = mock.requests.lock().unwrap()[0].to_ascii_lowercase();
+    assert!(head.contains("configured-token") && !head.contains("ambient-session-token"));
+}
+
+#[test]
+fn allow_anonymous_signs_nothing_even_with_an_ambient_identity() {
+    let _s = Stand::new(NAMED_AND_AMBIENT, "", &AMBIENT_KEYS);
+    let mock = Mock::start();
+    let mut cfg = s3(&mock.endpoint, None);
+    cfg.allow_anonymous = true;
+    let key = signed_with(&mock, &cfg).unwrap();
+    assert!(mock.request_count() >= 1);
+    assert_eq!(key, None);
+    assert!(!mock.sent_an_authorization() && !mock.sent_a_session_token());
+}
+
+#[test]
+fn allow_anonymous_beside_any_credential_field_is_refused_by_code() {
+    let _s = Stand::new(NAMED_AND_AMBIENT, "", &NAMED_KEYS);
+    let mock = Mock::start();
+    let mut with_keys = with_named_keys(s3(&mock.endpoint, None));
+    with_keys.allow_anonymous = true;
+    let mut with_profile = s3(&mock.endpoint, Some("named-prod"));
+    with_profile.allow_anonymous = true;
+    let mut with_token = s3(&mock.endpoint, None);
+    with_token.session_token_env = Some("RIVET_TEST_S3_NAMED_TOK".into());
+    with_token.allow_anonymous = true;
+    for cfg in [with_keys, with_profile, with_token] {
+        let err = match create_destination(&cfg) {
+            Err(e) => e,
+            Ok(_) => panic!("{cfg:?} was built"),
+        };
+        assert_eq!(
+            rivet::error::error_code(&err),
+            Some("RIVET_CONFIG_DESTINATION_AUTH_INVALID"),
+            "{err:#}"
+        );
+        assert!(format!("{err:#}").contains("allow_anonymous"), "{err:#}");
+    }
+    assert_eq!(mock.request_count(), 0);
+}
+
+#[test]
+fn a_session_token_without_its_keys_is_refused_by_code() {
+    let _s = Stand::new(NAMED_AND_AMBIENT, "", &AMBIENT_KEYS);
+    let mock = Mock::start();
+    let mut cfg = s3(&mock.endpoint, None);
+    cfg.session_token_env = Some("RIVET_TEST_S3_NAMED_TOK".into());
+    let err = match create_destination(&cfg) {
+        Err(e) => e,
+        Ok(_) => panic!("built"),
+    };
+    assert_eq!(
+        rivet::error::error_code(&err),
+        Some("RIVET_CONFIG_DESTINATION_AUTH_INVALID"),
+        "{err:#}"
+    );
+    assert_eq!(mock.request_count(), 0);
+}
+
+#[test]
+fn the_ambient_chain_keeps_its_session_token() {
+    let _s = Stand::new(NAMED_AND_AMBIENT, "", &AMBIENT_KEYS);
+    let mock = Mock::start();
+    let key = signed_with(&mock, &s3(&mock.endpoint, None)).unwrap();
+    assert_eq!(key.as_deref(), Some("AKIAENVAMBIENT"));
+    assert!(mock.sent_a_session_token());
 }

@@ -1,7 +1,4 @@
 //! Per-export configuration: query/table/mode, chunking, format, destination link.
-//!
-//! `SchemaDriftPolicy` lives here because it is only ever read via
-//! [`ExportConfig::on_schema_drift`].
 
 use std::path::Path;
 
@@ -149,13 +146,7 @@ pub enum SchemaDriftPolicy {
     /// next run will detect the same change again.
     Fail,
 }
-/// The synthesis marker a range sub-export carries under `apply --pool --split`
-/// (#167). Never deserialized from YAML — set only by the pool's synthesizer, so
-/// it needs no `JsonSchema`/`Deserialize`. The key window is HALF-OPEN `(lo, hi]`
-/// so N adjacent windows partition the key gap-free with no overlap (the same
-/// convention `keyset::partition_ranges` uses): `lo = None` is the run's floor
-/// (first window), `hi = None` is the ceil (last window).
-/// One `partition_by` child's bucket over the parent's base query, applied by the planner.
+/// The synthesis marker a range sub-export carries under `apply --pool --split` (#167).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionSynth {
     /// The declared export this bucket was expanded from.
@@ -168,11 +159,9 @@ pub struct PartitionSynth {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SplitSynth {
-    /// The parent export's FAMILY — every sub-export folds to it so the load view
-    /// recombines them as one table.
+    /// The parent export's FAMILY — every sub-export folds to it so the load view recombines them as one table.
     pub parent: String,
-    /// The key column the window is expressed over (the export's `chunk_by_key` /
-    /// `chunk_column`).
+    /// The key column the window is expressed over (the export's `chunk_by_key` / `chunk_column`).
     pub key_column: String,
     /// Exclusive lower bound (`key > lo`); `None` for the first window (no floor).
     pub lo: Option<String>,
@@ -184,62 +173,23 @@ pub struct SplitSynth {
 #[serde(deny_unknown_fields)]
 pub struct ExportConfig {
     pub name: String,
-    /// Set ONLY on the CDC snapshot leg `cdc_job` synthesizes: the parent
-    /// export's name, recorded by the code that builds the leg rather than
-    /// re-derived from the `{parent}__snapshot_{table}` name downstream.
-    ///
-    /// Deriving it was wrong in both directions. Folding the name at the writer
-    /// makes a USER export literally named `daily__snapshot_v2` record family
-    /// `daily` — silently merging it with a real sibling export `daily` under a
-    /// shared prefix, which is exactly the cross-contamination the load guard
-    /// exists to refuse. And a CDC export whose own name contains the infix
-    /// folds at the FIRST one, so its leg and drain land in different families
-    /// and the documented `initial: snapshot` flow self-refuses again.
-    ///
-    /// `skip` (not `skip_serializing_if`): this is an internal synthesis marker,
-    /// never a user-writable key, so it must not appear in the schema or the
-    /// config reference.
+    /// Set ONLY on the CDC snapshot leg `cdc_job` synthesizes.
     #[serde(skip)]
     pub snapshot_parent: Option<String>,
 
-    /// The CONFIGURED table string this snapshot leg stands for, when it differs
-    /// from the relation the leg READS.
-    ///
-    /// They diverge on SQL Server, where the capture instance names the source
-    /// object in the catalog and the configured `table:` may be a bare name that
-    /// resolves elsewhere. Everything an operator or a later run keys on — the
-    /// destination sub-prefix, the leg's name, the snapshot-done row in the state
-    /// DB — must stay on the LABEL, while only the read follows the catalog.
-    ///
-    /// Round-4 found the fifth consumer of that string the split had missed:
-    /// `mark_snapshot_done` wrote the READ while `snapshot_done` asked for the
-    /// LABEL, so the durable "this table is backfilled" signal could never match
-    /// itself and every scheduled cycle re-snapshotted the whole table (silently,
-    /// `status: success`, one duplicated baseline per cycle appended into
-    /// `<table>__changes`). Carrying the label explicitly is why this field exists
-    /// rather than recovering it by splitting the synthesized name.
+    /// The CONFIGURED table string this snapshot leg stands for, when it differs from the relation the leg READS.
     #[serde(skip)]
     pub snapshot_label: Option<String>,
     /// The `SELECT` a `table:` read runs instead of `SELECT *`: a `columns_from: grants` snapshot leg.
     #[serde(skip)]
     pub table_select: Option<String>,
-    /// Set ONLY on a range sub-export the pool synthesizes under `apply --pool
-    /// --split` (#167): a single dominating export is emitted as N units over its
-    /// key span, each a first-class scheduler unit the pool places concurrently,
-    /// so the giant stops being the makespan floor. Carries the parent FAMILY and
-    /// this unit's half-open key window `(lo, hi]`. `None` on every ordinary
-    /// export.
-    ///
-    /// `skip` (not `skip_serializing_if`): an internal synthesis marker like
-    /// [`snapshot_parent`](Self::snapshot_parent), never a user-writable key — it
-    /// must not appear in the schema or the config reference.
+    /// Set ONLY on a range sub-export the pool synthesizes under `apply --pool --split` (#167).
     #[serde(skip)]
     pub split: Option<SplitSynth>,
-    /// Set ONLY on a `partition_by` child `run` synthesizes: the bucket the
-    /// planner wraps around the base query, so `table:` survives. Never user-writable.
+    /// Set ONLY on a `partition_by` child `run` synthesizes.
     #[serde(skip)]
     pub partition_window: Option<PartitionSynth>,
-    /// The inline `query:` as the config file spells it, `${...}` placeholders in place; set by `Config::load_with_params`. Never user-writable.
+    /// The inline `query:` as the config file spells it, `${...}` placeholders in place.
     #[serde(skip)]
     pub query_as_written: Option<String>,
     #[serde(default)]
@@ -527,21 +477,7 @@ impl ExportConfig {
         self.chunk_by_key.as_ref().map(ChunkKey::lead)
     }
 
-    /// The export FAMILY this export's runs belong to: the RECORDED
-    /// `snapshot_parent` for the CDC snapshot leg `cdc_job` synthesizes, the
-    /// parent family for a range sub-export the pool `--split` synthesizes, the
-    /// export's own name for everything else.
-    ///
-    /// The single place this is decided. It used to be re-derived at each
-    /// writer by folding the name on `__snapshot_`, which merged a user export
-    /// literally named `daily__snapshot_v2` into family `daily` — silently
-    /// disarming the load's shared-prefix guard against its sibling `daily`.
-    ///
-    /// A `--split` sub-export named `daily#0` MUST fold to family `daily` so the
-    /// load view recombines the N range units as ONE logical table (the
-    /// shared-prefix merge-back, #167) — the same fold `snapshot_parent` gives the
-    /// CDC snapshot leg, via a dedicated field so neither path triggers the
-    /// other's behaviour.
+    /// The export FAMILY this export's runs belong to.
     pub fn family(&self) -> String {
         if let Some(s) = &self.split {
             return s.parent.clone();
@@ -551,17 +487,7 @@ impl ExportConfig {
             .unwrap_or_else(|| self.name.clone())
     }
 
-    /// The tables of a MULTIPLEX capture — a `mode: cdc` export whose `tables:`
-    /// list drives several tables through one change stream — or `None` when this
-    /// export is a single unit (one `table:`/`query:`, or any batch mode).
-    ///
-    /// Every consumer of the multiplex layout answers the same question first
-    /// ("is this export one table or N?"), and they must answer it identically:
-    /// `rivet validate` descends one sub-prefix per table, the type resolver
-    /// produces one document per table, and `rivet load` builds one plan per
-    /// table. A `tables:` list on a non-CDC export is already refused at
-    /// config-load, and an empty one is refused too — the filter here is
-    /// belt-and-suspenders so a caller can never fan out over nothing.
+    /// The tables of a MULTIPLEX capture — a `mode.
     pub fn multiplex_tables(&self) -> Option<&[String]> {
         if self.mode != ExportMode::Cdc {
             return None;
@@ -570,13 +496,6 @@ impl ExportConfig {
     }
 
     /// Resolve the effective `(CompressionType, level)` for this export.
-    /// `compression_profile` takes precedence over `compression` + `compression_level`.
-    ///
-    /// L24: when a profile is set *and* a conflicting explicit codec/level was
-    /// written, warn once that the profile wins rather than silently dropping the
-    /// explicit choice. An explicit codec is only detectable when it differs from
-    /// the `#[serde(default)]` (Zstd) — a literal `compression: zstd` alongside a
-    /// profile is indistinguishable from an omitted field and stays silent.
     pub fn effective_compression(&self) -> (CompressionType, Option<u32>) {
         if self.format == FormatType::Csv {
             return (CompressionType::None, None);
@@ -617,8 +536,6 @@ impl ExportConfig {
         config_dir: &Path,
         params: Option<&std::collections::HashMap<String, String>>,
     ) -> crate::error::Result<(String, Option<String>)> {
-        // table: shortcut takes precedence — already validated by
-        // `validate_business_rules` to be mutually exclusive with query/query_file.
         if let Some(tbl) = &self.table {
             validate_table_shortcut_ident(&self.name, tbl)?;
             let select = self.table_select.clone();
@@ -638,11 +555,8 @@ impl ExportConfig {
                 }
             }
             (None, Some(file)) => {
-                // SecOps: block absolute paths and `..` traversal components.
                 check_query_file_path(&self.name, file)?;
                 let joined = config_dir.join(file);
-                // Canonicalize-based check catches symlink-based evasion for files
-                // that already exist on disk.
                 if let Ok(canonical) = joined.canonicalize() {
                     let base = config_dir
                         .canonicalize()
@@ -698,15 +612,6 @@ pub(crate) fn check_query_file_path(export_name: &str, file: &str) -> crate::err
 }
 
 /// Validate the value of the `table:` YAML shortcut.
-///
-/// Accepts ASCII identifiers in the form `<table>` or `<schema>.<table>`. Each
-/// segment must match `[A-Za-z_][A-Za-z0-9_]*`. Anything else (quoted
-/// identifiers, exotic chars, three-part names, SQL injection attempts) is
-/// rejected — the user should fall back to `query:` for those cases.
-///
-/// The bound on identifier shape keeps generated SQL safe to interpolate
-/// without quoting and ensures the generated `SELECT * FROM <ident>` form is
-/// recognised by the PG catalog-hint parser ([src/source/postgres.rs]).
 pub(crate) fn validate_table_shortcut_ident(
     export_name: &str,
     raw: &str,
@@ -802,9 +707,6 @@ impl RowHash {
     pub fn enabled(&self) -> bool {
         match self {
             RowHash::All(b) => *b,
-            // An empty list is a config error, not "off" — `enabled()` says
-            // yes so validation can reject it with a message, rather than
-            // silently producing an export with no hash the operator asked for.
             RowHash::Columns(_) => true,
         }
     }
@@ -912,34 +814,15 @@ pub struct MetaColumns {
     pub exported_at: bool,
     #[serde(default)]
     pub row_hash: RowHash,
-    /// INTERNAL (never user-config, serde-skipped): the CDC anchor position the
-    /// snapshot leg stamps into every row as a constant `__pos` (+ `__seq=-1`).
-    /// Round-10 STRUCT fix for the re-baseline class: a NULL-`__pos` baseline
-    /// loses the warehouse dedup to EVERY already-loaded change row, so a
-    /// post-gap re-snapshot silently served pre-gap values. Stamped with the
-    /// anchor — rendered by the SAME `Position.0.to_string()` the drain uses —
-    /// a re-baseline row outranks every pre-gap change (anchor > their pos) and
-    /// loses to every post-anchor change (pos > anchor, and `__seq=-1` loses
-    /// the exact-anchor tie deterministically on both warehouses). Old NULL
-    /// baselines keep ranking below everything (`__pos IS NOT NULL DESC`).
+    /// INTERNAL (never user-config, serde-skipped).
     #[serde(skip)]
     #[schemars(skip)]
     pub cdc_snapshot_pos: Option<String>,
-    /// INTERNAL (never user-config): the baseline leg of a base-and-buffer CDC
-    /// stream writes a constant `__is_deleted = false` into every row, so the base
-    /// table's delete flag is populated by the Parquet itself — `LOAD DATA` fills a
-    /// column the file lacks with NULL, never with the column's DEFAULT (measured).
+    /// INTERNAL (never user-config): the baseline leg of a base-and-buffer CDC stream writes a constant `__is_deleted = false` into every row, so the base table's delete flag is populated by the Parquet itself.
     #[serde(skip)]
     #[schemars(skip)]
     pub deleted_flag: bool,
 }
-
-// `any_enabled()` lived here to answer "does the CDC path need to warn that
-// meta columns were dropped". It has no callers since §5h: the two fields no
-// longer share an answer — `exported_at` is still dropped on the CDC leg,
-// `row_hash` is emitted there — so every caller now asks about one of them
-// specifically. Reintroducing a combined predicate would just invite the
-// blanket warning back.
 
 fn default_mode() -> ExportMode {
     ExportMode::Full
@@ -1006,8 +889,7 @@ pub enum PartitionGranularity {
     Year,
 }
 
-/// A user query made safe to wrap as `FROM (<query>)`: trailing whitespace and `;`
-/// trimmed, and a newline appended when the last line holds a `--` comment.
+/// A user query made safe to wrap as `FROM (<query>)`.
 pub(crate) fn wrappable_query(query: &str) -> String {
     let q = query.trim_end_matches(|c: char| c.is_whitespace() || c == ';');
     match q.lines().last() {
@@ -1017,11 +899,6 @@ pub(crate) fn wrappable_query(query: &str) -> String {
 }
 
 /// Canonical fully-populated [`ExportConfig`] for tests across the crate.
-///
-/// One place lists every field, so adding a field is a single-site edit (the
-/// compiler still flags this literal if a field is missing). Test call sites
-/// take this baseline and override only the fields they exercise, rather than
-/// hand-writing the full struct — see `plan::build` and `preflight` tests.
 #[cfg(test)]
 pub(crate) fn sample_export(name: &str) -> ExportConfig {
     ExportConfig {
@@ -1154,10 +1031,7 @@ mod tests {
         assert!(!VerifyMode::Size.requires_content());
     }
 
-    /// #167: a `--split` sub-export named `daily#0` must fold to family `daily`
-    /// so the load view recombines the N range units as one logical table. RED
-    /// against a `family()` that ignores `split` (returns the unit name `daily#0`,
-    /// which would give each range its own family and defeat the merge-back).
+    /// #167: a `--split` sub-export named `daily#0` must fold to family `daily` so the load view recombines the N range units as one logical table.
     #[test]
     fn split_subexport_folds_to_parent_family() {
         let mut e = sample_export("daily#0");
@@ -1179,17 +1053,7 @@ mod tests {
         );
     }
 
-    // ── ExportConfig::multiplex_tables ──────────────────────────────────────
-
-    /// The one decision "is this export ONE unit or N?" — read by `rivet
-    /// validate` (descend a sub-prefix per table), the type resolver (one
-    /// resolver document per table) and `rivet load` (one plan per table). All
-    /// three must answer the same, which is why they all call THIS.
-    ///
-    /// Both negative arms matter: a `tables:` list on a non-CDC export is not a
-    /// multiplex (config-load refuses it outright), and an empty list must never
-    /// present as one — a fan-out over zero tables produces zero plans and loads
-    /// nothing, silently.
+    /// The one decision "is this export ONE unit or N?".
     #[test]
     fn multiplex_tables_is_some_only_for_a_cdc_export_with_a_non_empty_list() {
         let mut e = sample_export("cdc");
@@ -1217,8 +1081,6 @@ mod tests {
              tables plans zero loads and moves no data, silently"
         );
     }
-
-    // ── ExportConfig::max_file_size_bytes ───────────────────────────────────
 
     fn make_export_yaml(name: &str, extra: &str) -> ExportConfig {
         let yaml = format!(
@@ -1251,12 +1113,6 @@ mod tests {
         assert!(exp.max_file_size_bytes().is_none());
     }
 
-    // ── ExportConfig::resolve_query ─────────────────────────────────────────
-
-    // Build a minimal ExportConfig directly, bypassing Config::from_yaml validation.
-    // This lets us test the four branches inside resolve_query itself, including
-    // the (both-set / neither-set) error paths that are normally prevented by the
-    // top-level validator.
     fn make_export_direct(query: Option<&str>, query_file: Option<&str>) -> ExportConfig {
         ExportConfig {
             query: query.map(|s| s.to_string()),
@@ -1361,8 +1217,6 @@ mod tests {
         assert_eq!(q, "SELECT name FROM users");
     }
 
-    // ── `table:` shortcut ───────────────────────────────────────────────────
-
     #[test]
     fn resolve_query_table_shortcut_qualified() {
         let mut exp = make_export_direct(None, None);
@@ -1456,8 +1310,6 @@ mod tests {
             "got: {msg}"
         );
     }
-
-    // ── SecOps: query_file path traversal prevention ──────────────────────────
 
     #[test]
     fn resolve_query_file_dotdot_is_rejected() {

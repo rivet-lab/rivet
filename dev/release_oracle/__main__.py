@@ -1702,6 +1702,7 @@ def _self_test() -> int:
     fix_cells._self_test()
     scenarios.matrix_reader_self_test()
     scenarios.store_probe_self_test()
+    scenarios.manifest_scoped_ids_self_test()
     field_state._self_test()
     print("\nregression stage (child harness, stand, banner):")
     return regression._self_test()

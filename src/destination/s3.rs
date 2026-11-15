@@ -62,6 +62,36 @@ fn profile_only(profile: &str) -> reqsign::AwsConfig {
     }
 }
 
+/// `config` with the instance metadata switched off.
+fn without_instance_metadata(config: reqsign::AwsConfig) -> reqsign::AwsConfig {
+    reqsign::AwsConfig {
+        ec2_metadata_disabled: true,
+        ..config
+    }
+}
+
+/// The reqsign config that carries exactly the three env-read credential parts.
+fn env_credential_config(
+    access_key_id: Option<String>,
+    secret_access_key: Option<String>,
+    session_token: Option<String>,
+) -> reqsign::AwsConfig {
+    reqsign::AwsConfig {
+        access_key_id,
+        secret_access_key,
+        session_token,
+        ..Default::default()
+    }
+}
+
+/// A signer that reads exactly `config` and never the ambient environment, the shared files or the instance metadata.
+fn only_loader(config: reqsign::AwsConfig) -> Box<reqsign::AwsDefaultLoader> {
+    Box::new(reqsign::AwsDefaultLoader::new(
+        reqwest::Client::new(),
+        without_instance_metadata(config),
+    ))
+}
+
 impl CloudBackend for S3Backend {
     // opendal's S3 lister puts the ETag in `content_md5`; its writer does not. On an
     // SSE-KMS / SSE-C object the ETag is not the MD5, so trusting it turns every
@@ -106,21 +136,26 @@ impl CloudBackend for S3Backend {
                 secret_key_env,
                 session_token_env,
             } => {
-                if let Some(env_name) = &access_key_env {
-                    let key = read_credential_env(env_name, "access key")?;
-                    builder = builder.access_key_id(key.expose());
-                }
-                if let Some(env_name) = &secret_key_env {
-                    let secret = read_credential_env(env_name, "secret key")?;
-                    builder = builder.secret_access_key(secret.expose());
-                }
-                if let Some(env_name) = &session_token_env {
-                    let token = read_credential_env(env_name, "session token")?;
-                    builder = builder.session_token(token.expose());
-                }
+                let read = |name: &Option<String>, label: &str| {
+                    name.as_deref()
+                        .map(|n| read_credential_env(n, label))
+                        .transpose()
+                };
+                let key = read(&access_key_env, "access key")?;
+                let secret = read(&secret_key_env, "secret key")?;
+                let token = read(&session_token_env, "session token")?;
+                builder = builder.customized_credential_load(only_loader(env_credential_config(
+                    key.map(|k| k.expose().to_string()),
+                    secret.map(|k| k.expose().to_string()),
+                    token.map(|k| k.expose().to_string()),
+                )));
+            }
+            DestinationCredential::Anonymous => {
+                builder = builder
+                    .allow_anonymous()
+                    .customized_credential_load(only_loader(reqsign::AwsConfig::default()));
             }
             DestinationCredential::Ambient
-            | DestinationCredential::Anonymous
             | DestinationCredential::GcsKeyFile(_)
             | DestinationCredential::AzureKey { .. }
             | DestinationCredential::AzureSas { .. } => {}
@@ -138,6 +173,29 @@ mod tests {
         let cfg = super::profile_only("prod");
         assert_eq!(cfg.profile, "prod");
         assert!(cfg.ec2_metadata_disabled);
+    }
+
+    /// The signer config switches the instance metadata off and keeps every other field it was given.
+    #[test]
+    fn the_signer_config_disables_the_instance_metadata_and_keeps_its_fields() {
+        let cfg = super::without_instance_metadata(super::env_credential_config(
+            Some("k".into()),
+            Some("s".into()),
+            Some("t".into()),
+        ));
+        assert!(cfg.ec2_metadata_disabled);
+        assert_eq!(cfg.access_key_id.as_deref(), Some("k"));
+    }
+
+    /// The env-credential config carries the access key, the secret key and the session token.
+    #[test]
+    fn the_env_credential_config_carries_all_three_parts() {
+        let cfg =
+            super::env_credential_config(Some("k".into()), Some("s".into()), Some("t".into()));
+        assert_eq!(cfg.access_key_id.as_deref(), Some("k"));
+        assert_eq!(cfg.secret_access_key.as_deref(), Some("s"));
+        assert_eq!(cfg.session_token.as_deref(), Some("t"));
+        assert!(!cfg.ec2_metadata_disabled);
     }
 
     // ── aws_profile thread-safety ─────────────────────────────────────────────

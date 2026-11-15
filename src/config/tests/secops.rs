@@ -2,8 +2,6 @@
 
 use super::*;
 
-// ─── ADR-0005 PA9 — artifact credential redaction ─────────────────────────
-
 fn src_with_password(password: Option<&str>, url: Option<&str>) -> SourceConfig {
     SourceConfig {
         source_type: SourceType::Postgres,
@@ -35,7 +33,6 @@ fn redact_plaintext_password_stripped() {
         "redaction must be reported for plaintext password"
     );
     assert_eq!(safe.password, None);
-    // Non-secret references are preserved so apply can re-resolve at runtime.
     assert_eq!(safe.password_env.as_deref(), Some("DB_PASSWORD"));
     assert_eq!(safe.user.as_deref(), Some("rivet"));
     assert_eq!(safe.host.as_deref(), Some("db.example.com"));
@@ -113,7 +110,6 @@ fn redact_env_references_are_preserved() {
 
 #[test]
 fn redact_does_not_confuse_at_in_path() {
-    // `@` in the path (after the first `/`) must not be treated as userinfo boundary.
     let src = src_with_password(None, Some("postgresql://db.example.com/prod?filter=a@b"));
     let (safe, redacted) = src.redact_for_artifact();
     assert!(!redacted);
@@ -122,8 +118,6 @@ fn redact_does_not_confuse_at_in_path() {
         Some("postgresql://db.example.com/prod?filter=a@b")
     );
 }
-
-// ─── TLS block (SecOps) ─────────────────────────────────────────────────────
 
 #[test]
 fn tls_absent_deserializes_as_none() {
@@ -247,17 +241,8 @@ exports:
     );
 }
 
-// ─── V2/V12 — cloud-endpoint credential-exfil gate: loopback classification ───
-// A custom `destination.endpoint` is treated as a trusted local emulator (so
-// credentials may flow even without `allow_anonymous`) ONLY when its host is
-// genuine loopback. A lexical `starts_with("127.")` misclassifies
-// attacker-controlled DNS (`127.attacker.com`, `127.0.0.1.evil.com`) as
-// loopback, re-opening the very exfil hole the gate is meant to close — rivet
-// would sign and send real credentials to an attacker-resolved host.
-
 #[test]
 fn loopback_host_rejects_dns_lookalikes() {
-    // Genuine loopback — must be accepted.
     assert!(is_loopback_host("127.0.0.1"), "127.0.0.1 is loopback");
     assert!(
         is_loopback_host("127.5.6.7"),
@@ -265,8 +250,6 @@ fn loopback_host_rejects_dns_lookalikes() {
     );
     assert!(is_loopback_host("localhost"), "localhost is loopback");
     assert!(is_loopback_host("::1"), "::1 is loopback");
-    // Attacker-controlled hostnames that merely look loopback — must be rejected
-    // (they DNS-resolve to whatever the attacker wants).
     assert!(
         !is_loopback_host("127.attacker.com"),
         "a hostname starting with `127.` is NOT loopback — it resolves via DNS"
@@ -284,8 +267,6 @@ fn loopback_host_rejects_dns_lookalikes() {
 
 #[test]
 fn custom_endpoint_127_dns_lookalike_is_rejected_without_anonymous() {
-    // The exfil gate must fire: `127.attacker.com` is a remote host, so a
-    // destination pointing at it without `allow_anonymous` must be REJECTED.
     let err = Config::from_yaml(
         r#"
 source:

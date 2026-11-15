@@ -1,6 +1,4 @@
-//! The `load:` block — the warehouse target and the per-table load settings — typed
-//! and validated when the config is read, so `rivet check` and `rivet run` refuse a
-//! malformed block before an extract runs, and the JSON schema documents it.
+//! The `load:` block — the warehouse target and the per-table load settings.
 
 use std::borrow::Cow;
 
@@ -13,8 +11,7 @@ pub(crate) const MAX_TABLE_PARTITIONS: i64 = 10_000;
 /// Days before an hourly-partitioned table reaches [`MAX_TABLE_PARTITIONS`].
 pub(crate) const HOURLY_LIFETIME_DAYS: u32 = (MAX_TABLE_PARTITIONS / 24) as u32;
 
-/// The top-level `load:` block: one warehouse for every export, plus the per-table
-/// defaults an export's own `load:` overrides.
+/// The top-level `load:` block: one warehouse for every export, plus the per-table defaults an export's own `load:` overrides.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(try_from = "RawLoadSection")]
 pub struct LoadSection {
@@ -33,8 +30,7 @@ pub struct LoadSection {
     pub partition: Option<PartitionSpec>,
     /// Where the current state lives; `None` = derive it from the export's mode.
     pub layout: Option<LayoutChoice>,
-    /// Whether a base-and-buffer table carries `__is_deleted`; `None` = derive it
-    /// from the export's mode.
+    /// Whether a base-and-buffer table carries `__is_deleted`; `None` = derive it from the export's mode.
     pub deleted_flag: Option<bool>,
 }
 
@@ -315,8 +311,7 @@ impl LoadSection {
         eff
     }
 
-    /// This section with one export's [`LoadOverride`] applied: each `Some` replaces,
-    /// each `None` inherits. The target is never overridden.
+    /// This section with one export's [`LoadOverride`] applied: each `Some` replaces, each `None` inherits.
     pub fn with_override(&self, o: &LoadOverride) -> LoadSection {
         let mut eff = self.clone();
         if let Some(pk) = &o.pk {
@@ -380,7 +375,7 @@ pub enum LoadTarget {
 pub(crate) enum BaseSupport {
     /// No compaction: the changelog and its view are the only layout.
     Never,
-    /// A base for every incremental and CDC export unless `load.layout: log_view` is written; a stream's `backfill:` is not what makes it.
+    /// A base for every incremental and CDC export unless `load.layout.
     Default,
     /// A written `base_buffer`, or a stream's `backfill:`, makes the base.
     Derived,
@@ -410,8 +405,7 @@ impl LoadTarget {
         self.base_support() != BaseSupport::Never
     }
 
-    /// Whether this warehouse names each job or statement rivet runs (a BigQuery job id, a
-    /// ClickHouse query id); the Snowflake loader does not record its statement handles.
+    /// Whether this warehouse names each job or statement rivet runs (a BigQuery job id, a ClickHouse query id).
     pub(crate) fn names_jobs(&self) -> bool {
         matches!(
             self,
@@ -516,8 +510,7 @@ pub enum LayoutChoice {
     BaseBuffer,
 }
 
-/// A column list in a `load:` block: `auto` (from the recorded source primary key),
-/// `none`, or explicit columns.
+/// A column list in a `load:` block: `auto` (from the recorded source primary key), `none`, or explicit columns.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum KeyColumns {
     #[default]
@@ -1251,9 +1244,7 @@ mod partition_form_tests {
 
     use super::*;
 
-    /// The column each `partition:` form keys on. Both the compaction plan and
-    /// `rivet check` resolve the partition column through here, so a wrong name
-    /// prunes the wrong thing — or nothing.
+    /// The column each `partition:` form keys on.
     #[test]
     fn a_partition_form_names_the_column_it_keys_on() {
         let column = PartitionForm::Column {
