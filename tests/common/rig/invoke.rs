@@ -69,7 +69,7 @@ impl Rig {
         )
     }
 
-    /// The same handle on the pinned lease-era release (`RIVET_LEASE_CARRIER_BIN`): it holds the leases this tree's migration waits for, writes an older state schema, and still advances a slot past its checkpoint (#649).
+    /// The same handle on the pinned lease-era release (`RIVET_LEASE_CARRIER_BIN`): it holds the leases this tree's migration waits for, writes an older state schema, still advances a slot past its checkpoint (#649), and stages Mongo change positions as `_data` only (before #736).
     pub fn as_lease_carrier(&self) -> Option<Rig> {
         self.as_release(
             "RIVET_LEASE_CARRIER_BIN",
