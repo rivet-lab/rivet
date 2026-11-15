@@ -2,7 +2,7 @@
 
     python3 -m dev.pytools.release_halves --self-test
 
-The devbox half is a `release-oracle-full-devbox` line of the gate record. The hosted half is the `hosted-verdict` artifact of one
+The devbox half is a `release-oracle-full-devbox` line of the gate record. The hosted half is the `hosted-verdict-<ref>` artifact of one
 run of `.github/workflows/gate-hosted.yml` on main, plus that run's own record (`run.json`) and job list (`jobs.json`) as GitHub
 reports them. Each half builds its own binary from the sha, so the binaries' hashes are not compared; the sha, the clean tree, the
 stamp, the run's origin, every slice and the stage coverage are. Every refusal starts with a stable `HALVES_*` code.
@@ -27,7 +27,6 @@ from dev.release_oracle.core import DEVBOX, HOSTED, HOSTED_SHARD_GATE, half_gate
 WORKFLOW = ".github/workflows/gate-hosted.yml"
 VERDICT_SCRIPT = ROOT / ".github" / "scripts" / "hosted_gate_verdict.py"
 BRANCH = "main"
-ARTIFACT = "hosted-verdict"
 RUN_LIMIT = 30
 #: The (system, machine) each half's gate must have run on (platform.system(), platform.machine()); owner 2026-11-14: the hosted half on a GitHub x86_64 Linux runner, the devbox half on the arm64 macOS devbox. Moving a half to another host changes this line.
 HALF_HOST: dict[str, tuple[str, str]] = {HOSTED: ("Linux", "x86_64"), DEVBOX: ("Darwin", "arm64")}
@@ -57,18 +56,27 @@ def repo_slug(cargo_toml: Path | None = None) -> str:
 
 
 def workflow_plan(path: Path | None = None) -> dict:
-    """What the hosted workflow declares: its triggers and the name of its plan job, slice job and verdict job."""
+    """What the hosted workflow declares: its triggers, the name of its plan, slice and verdict jobs, and the name of the verdict artifact."""
     import yaml
 
     doc = yaml.safe_load((path or ROOT / WORKFLOW).read_text())
     jobs = doc["jobs"]
+    uploads = [s["with"]["name"] for s in jobs["verdict"]["steps"] if str(s.get("uses", "")).startswith("actions/upload-artifact@")]
+    if len(uploads) != 1:
+        raise SystemExit(f"{WORKFLOW}: the verdict job must upload exactly one artifact, it uploads {uploads}")
     return {"events": sorted((doc.get("on") or doc.get(True)).keys()), "plan": jobs["plan"]["name"],
-            "slice": jobs["slice"]["name"], "verdict": jobs["verdict"]["name"]}
+            "slice": jobs["slice"]["name"], "verdict": jobs["verdict"]["name"], "artifact": uploads[0]}
+
+
+def fill(template: str, slice_: int | None = None) -> str:
+    """A workflow name as GitHub renders it for a run on `BRANCH`: the slice, the ref name and the ref tag filled; any other expression stays, so no job matches it."""
+    known = {"github.ref_name": BRANCH, "needs.plan.outputs.tag": BRANCH, **({"matrix.slice": str(slice_)} if slice_ is not None else {})}
+    return re.sub(r"\$\{\{\s*([^}]*?)\s*\}\}", lambda m: known.get(m[1], m[0]), template)
 
 
 def job_names(plan: dict, slices: int) -> list[str]:
     """The jobs one run with `slices` live slices must have: plan, slices 0..`slices`, verdict."""
-    return [plan["plan"], *(plan["slice"].replace("${{ matrix.slice }}", str(i)) for i in range(slices + 1)), plan["verdict"]]
+    return [fill(plan["plan"]), *(fill(plan["slice"], i) for i in range(slices + 1)), fill(plan["verdict"])]
 
 
 def stage_cuts(slices: int, stage_names: Callable[[Sequence[str]], list[str]]) -> tuple[list[str], dict[int, list[str]], list[str]]:
@@ -236,6 +244,7 @@ def tag_refusal(sha: str, gate: Path, hosted: Path | None, gh: Gh = run_gh) -> s
 
 def fetch_hosted(sha: str, out: Path, repo: str, gh: Gh = run_gh) -> str | None:
     """Download into `out` the newest hosted-workflow run on main whose verdict artifact is of `sha`, with its run.json and jobs.json; the refusal when there is none."""
+    artifact = fill(workflow_plan()["artifact"])
     try:
         runs = json.loads(gh(["run", "list", "--repo", repo, "--workflow", Path(WORKFLOW).name, "--branch", BRANCH, "--limit", str(RUN_LIMIT),
                               "--json", "databaseId,status"]))
@@ -246,7 +255,7 @@ def fetch_hosted(sha: str, out: Path, repo: str, gh: Gh = run_gh) -> str | None:
             continue
         got = out / str(run["databaseId"])
         try:
-            gh(["run", "download", str(run["databaseId"]), "--repo", repo, "--name", ARTIFACT, "--dir", str(got)])
+            gh(["run", "download", str(run["databaseId"]), "--repo", repo, "--name", artifact, "--dir", str(got)])
         except (subprocess.CalledProcessError, OSError):
             continue
         verdict = load_json(got / "hosted-verdict.json")
@@ -271,7 +280,7 @@ def green(slices: int = 3, sha: str = SHA) -> dict:
     whole, hosted_cut, devbox_cut = stage_cuts(slices, default_stage_names)
     base = {"at": "2026-11-14T10:00:00Z", "sha": sha, "binary": sha[:9], "config": release.CANONICAL_CONFIG, "dirty": False,
             "verdict": "RELEASE-READY", "skipped_env": []}
-    plan = {"events": ["workflow_dispatch"], "plan": "Resolve the commit and the slices", "slice": "slice ${{ matrix.slice }}", "verdict": "Hosted half verdict"}
+    plan = workflow_plan()
     records = [{"slice": i, "exit_code": 0, "record": {**base, "gate": HOSTED_SHARD_GATE, "shard": f"{i}/{slices}", "binary_sha256": f"{i:x}" * 64,
                                                       "stages": hosted_cut[i], "host": {"system": "Linux", "machine": "x86_64"}}} for i in range(slices + 1)]
     flow = {"run_id": str(RUN_ID), "run_attempt": "1", "repository": REPO, "ref": "refs/heads/main", "event": "workflow_dispatch",
@@ -379,6 +388,7 @@ def fetch_self_test(good: dict) -> None:
                 assert "--branch" in args and args[args.index("--branch") + 1] == BRANCH and "--workflow" in args, args
                 return json.dumps([{"databaseId": i, "status": status[i]} for i in artifacts])
             if args[:2] == ["run", "download"]:
+                assert args[args.index("--name") + 1] == "hosted-verdict-main", args
                 body = artifacts[int(args[2])]
                 if body is None:
                     raise subprocess.CalledProcessError(1, args)
@@ -427,7 +437,9 @@ def self_test() -> int:
         assert (halves_refusal(SHA, Path(tmp) / "absent.jsonl", hosted, plan=d["plan"], repo=REPO) or "").startswith("HALVES_SHA: ")
     fetch_self_test(good)
     plan = workflow_plan()
-    assert "workflow_dispatch" in plan["events"] and set(plan["events"]) <= {"workflow_dispatch", "schedule"} and job_names(plan, 2) == [plan["plan"], "slice 0", "slice 1", "slice 2", plan["verdict"]], plan
+    assert "workflow_dispatch" in plan["events"] and set(plan["events"]) <= {"workflow_dispatch", "schedule"}, plan
+    assert job_names(plan, 2) == [f"Resolve the commit and the slices ({BRANCH})", f"slice 0 ({BRANCH})", f"slice 1 ({BRANCH})", f"slice 2 ({BRANCH})", f"Hosted half verdict ({BRANCH})"], job_names(plan, 2)
+    assert fill(plan["artifact"]) == f"hosted-verdict-{BRANCH}", "the verdict artifact and every check run of the hosted half carry the ref"
     assert repo_slug() == REPO, repo_slug()
     print(f"self-test ok: two halves of one commit — green control, {len(mutants())} mutants each refused under its own HALVES_ code, run selection")
     return 0

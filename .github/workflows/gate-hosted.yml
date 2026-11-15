@@ -1,5 +1,7 @@
 name: Gate hosted half
 
+run-name: Gate hosted half ${{ github.ref_name }} (${{ github.event_name }})
+
 on:
   schedule:
     - cron: "30 0 * * *"
@@ -20,13 +22,14 @@ env:
 
 jobs:
   plan:
-    name: Resolve the commit and the slices
+    name: Resolve the commit and the slices (${{ github.ref_name }})
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
       matrix: ${{ steps.resolve.outputs.matrix }}
       seen: ${{ steps.seen.outputs.seen }}
+      tag: ${{ steps.resolve.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -36,14 +39,18 @@ jobs:
         env:
           INPUT_SHA: ${{ inputs.sha }}
           REF_SHA: ${{ github.sha }}
+          REF_NAME: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
           sha=$(gh api "repos/$REPO/commits/${INPUT_SHA:-$REF_SHA}" --jq .sha)
           [ "${#sha}" -eq 40 ]
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "matrix=$(python3 -c 'import json, os; print(json.dumps({"slice": list(range(int(os.environ["LIVE_SLICES"]) + 1))}))')" >> "$GITHUB_OUTPUT"
+          {
+            echo "sha=$sha"
+            echo "tag=$(printf %s "$REF_NAME" | tr -c 'A-Za-z0-9._-' '-')"
+            echo "matrix=$(python3 -c 'import json, os; print(json.dumps({"slice": list(range(int(os.environ["LIVE_SLICES"]) + 1))}))')"
+          } >> "$GITHUB_OUTPUT"
 
       - id: seen
         env:
@@ -53,7 +60,7 @@ jobs:
         run: python3 .github/scripts/gate_history.py seen --sha "$SHA" --event "$EVENT"
 
   slice:
-    name: slice ${{ matrix.slice }}
+    name: slice ${{ matrix.slice }} (${{ github.ref_name }})
     needs: plan
     if: ${{ needs.plan.outputs.seen != 'true' }}
     runs-on: ubuntu-latest
@@ -112,7 +119,7 @@ jobs:
         run: docker compose down -v
 
   verdict:
-    name: Hosted half verdict
+    name: Hosted half verdict (${{ github.ref_name }})
     needs: [plan, slice]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.seen != 'true' }}
     runs-on: ubuntu-latest
@@ -139,13 +146,13 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: hosted-verdict
+          name: hosted-verdict-${{ needs.plan.outputs.tag }}
           path: hosted-verdict.json
           overwrite: true
           if-no-files-found: warn
 
   history:
-    name: Gate history line
+    name: Gate history line (${{ github.ref_name }})
     needs: [plan, verdict]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.seen != 'true' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
