@@ -477,6 +477,23 @@ pub struct CapturedUnit {
     pub finer_than_microsecond: Vec<String>,
 }
 
+/// The columns the source types finer than a microsecond: from the catalog of `relation`, or from the result of `query` when the export names no relation.
+pub(crate) fn finer_than_microsecond_of(
+    src: &mut dyn source::Source,
+    relation: Option<&str>,
+    query: &str,
+    export: &str,
+) -> Vec<String> {
+    let read = match relation {
+        Some(r) => src.finer_than_microsecond_columns(r),
+        None => src.finer_than_microsecond_in_query(query),
+    };
+    read.unwrap_or_else(|e| {
+        log::warn!("export '{export}': could not read the sub-microsecond columns: {e:#}");
+        Vec::new()
+    })
+}
+
 /// Capture from the source, at run time, everything `rivet load` later plans from without it.
 pub fn capture_load_units(
     config: &Config,
@@ -513,20 +530,12 @@ pub fn capture_load_units(
                 }),
                 None => None,
             };
-            let finer_than_microsecond = match unit.relation.as_deref() {
-                Some(relation) => {
-                    src.finer_than_microsecond_columns(relation)
-                        .unwrap_or_else(|e| {
-                            log::warn!(
-                                "export '{}': could not read the sub-microsecond columns of \
-                             `{relation}`: {e:#}",
-                                export.name
-                            );
-                            Vec::new()
-                        })
-                }
-                None => Vec::new(),
-            };
+            let finer_than_microsecond = finer_than_microsecond_of(
+                src.as_mut(),
+                unit.relation.as_deref(),
+                &unit.query,
+                &export.name,
+            );
             Ok(CapturedUnit {
                 table: unit.table,
                 mappings,
@@ -556,11 +565,14 @@ pub(crate) fn refuse_inexact_load_keys(
     }
 }
 
-/// Whether the export loads incrementally, the only mode whose keys are admitted by their landing at check.
+/// Whether the export loads in a mode whose keys `rivet load` admits by their landing, the modes `check` must refuse the same.
 fn admits_load_keys(config: &Config, export: &ExportConfig) -> bool {
+    use crate::plan::load_settings::LoadMode;
     config.load.is_some()
-        && crate::plan::load_settings::load_mode_of(config, export)
-            == crate::plan::load_settings::LoadMode::Incremental
+        && matches!(
+            crate::plan::load_settings::load_mode_of(config, export),
+            LoadMode::Incremental | LoadMode::Cdc
+        )
 }
 
 /// Refuses the captured units whose cursor or primary key lands inexactly.

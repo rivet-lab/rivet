@@ -129,7 +129,7 @@ fn oracle_neighbour_cursor_is_admitted(
 }
 
 /// An MSSQL `datetime2(7)` primary-key column lands at microseconds: the load is refused twice and by `check`, the warehouse is unchanged, and `timestamp_ns` then keeps both rows that differ below a microsecond, read back by the second client (the rig oracle reads the source at microseconds).
-fn mssql_sub_microsecond_key_is_refused(kind: WarehouseKind) {
+fn mssql_sub_microsecond_key_is_refused(kind: WarehouseKind, via_query: bool) {
     let e = SqlEngine::Mssql;
     e.alive();
     let Some(mut w) = Warehouse::of(kind, "kadmk") else {
@@ -143,7 +143,15 @@ fn mssql_sub_microsecond_key_is_refused(kind: WarehouseKind) {
     e.exec(&format!(
         "INSERT INTO {table} (dev, ts, seq) VALUES (1, '2024-01-01 00:00:00.1234561', 1)"
     ));
-    let mut rig = incremental(e, &w, &table, "seq", "dev, ts").no_oracle(
+    let source = if via_query {
+        e.rig(&table)
+            .query(&format!("SELECT dev, ts, seq FROM {table}"))
+    } else {
+        e.rig(&table)
+    };
+    let mut rig = w
+        .shape(e.staged(source, "incremental", &["cursor_column: seq"]), "dev, ts")
+        .no_oracle(
         "the datetime2(7) rows differ below a microsecond, which the oracle reads the source at; the view is read back by the second client",
     );
     rig.run_ok();
@@ -184,6 +192,27 @@ fn mssql_sub_microsecond_key_is_refused(kind: WarehouseKind) {
         vec![(1, 1), (2, 1)],
         "both rows that differ below a microsecond are in the view"
     );
+}
+
+/// An MSSQL CDC export keyed on a `datetime2(7)` column: `check` refuses it by the code `load` refuses it by, and the load refuses twice.
+fn mssql_cdc_sub_microsecond_key_check_agrees_with_load(kind: WarehouseKind) {
+    let Some(mut w) = Warehouse::of(kind, "kadmc") else {
+        return;
+    };
+    let mut scn = CdcScenario::mssql_with(
+        "kadmc",
+        "dev INT NOT NULL, ts DATETIME2(7) NOT NULL, seq INT NOT NULL, PRIMARY KEY (dev, ts)",
+        |rig, _| w.shape(rig.cdc("initial: snapshot"), "dev, ts"),
+    );
+    let table = scn.table.clone();
+    w.adopt(&table);
+    scn.sql(&format!(
+        "INSERT INTO dbo.{table} (dev, ts, seq) VALUES (1, '2024-01-01 00:00:00.1234561', 1)"
+    ));
+    scn.settle();
+    scn.rig.run_ok();
+    assert_refused(&scn.rig.cli_env(&["load"], w.load_envs()), INEXACT);
+    assert_refused(&scn.rig.cli(&["check"]), INEXACT);
 }
 
 /// An Oracle `TIMESTAMP(9)` primary-key column declared as microsecond `timestamp`: the load is refused twice and by `check`, the warehouse is unchanged, and `timestamp_ns` then keeps both rows that differ below a microsecond.
@@ -329,7 +358,19 @@ fn an_oracle_sub_microsecond_key_is_refused_into_clickhouse() {
 #[test]
 #[ignore = "live: requires docker compose mssql + clickhouse + fake-gcs"]
 fn an_mssql_sub_microsecond_key_is_refused_into_clickhouse() {
-    mssql_sub_microsecond_key_is_refused(WarehouseKind::ClickHouse);
+    mssql_sub_microsecond_key_is_refused(WarehouseKind::ClickHouse, false);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql + clickhouse + fake-gcs"]
+fn an_mssql_sub_microsecond_query_key_is_refused_into_clickhouse() {
+    mssql_sub_microsecond_key_is_refused(WarehouseKind::ClickHouse, true);
+}
+
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mssql-cdc with SQL Server Agent"]
+fn an_mssql_cdc_sub_microsecond_key_check_agrees_with_load_into_clickhouse() {
+    mssql_cdc_sub_microsecond_key_check_agrees_with_load(WarehouseKind::ClickHouse);
 }
 
 #[test]

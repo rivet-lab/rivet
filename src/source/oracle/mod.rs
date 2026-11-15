@@ -691,6 +691,20 @@ impl Source for OracleSource {
             .collect())
     }
 
+    fn finer_than_microsecond_in_query(&mut self, query: &str) -> Result<Vec<String>> {
+        let projection = self.projected(query)?;
+        let metas = self.describe(&projection.sql)?;
+        Ok(metas
+            .iter()
+            .take(projection.native.len())
+            .filter(|m| {
+                let label = kind::native_label(m);
+                label.starts_with("timestamp") && arrow_convert::sub_microsecond(&label, m.scale())
+            })
+            .map(|m| m.name().to_string())
+            .collect())
+    }
+
     fn export(&mut self, request: &ExportRequest<'_>, sink: &mut dyn BatchSink) -> Result<()> {
         let result = self.export_within_budget(request, sink);
         let reset = self.conn.set_call_timeout(None).ora();

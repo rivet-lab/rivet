@@ -117,24 +117,23 @@ fn capture_open_forensics(
         &plan.column_overrides,
     ) {
         Ok(mappings) => {
-            if want_key && let Some(relation) = plan.source_table.as_deref() {
-                summary.open_primary_key = src.primary_key(relation).unwrap_or_else(|e| {
-                    log::warn!(
-                        "export '{}': could not read the primary key of `{relation}`: {e:#}",
-                        plan.export_name
-                    );
-                    None
-                });
-                summary.open_finer_than_microsecond = src
-                    .finer_than_microsecond_columns(relation)
-                    .unwrap_or_else(|e| {
+            if want_key {
+                if let Some(relation) = plan.source_table.as_deref() {
+                    summary.open_primary_key = src.primary_key(relation).unwrap_or_else(|e| {
                         log::warn!(
-                            "export '{}': could not read the sub-microsecond columns of \
-                             `{relation}`: {e:#}",
+                            "export '{}': could not read the primary key of `{relation}`: {e:#}",
                             plan.export_name
                         );
-                        Vec::new()
+                        None
                     });
+                }
+                summary.open_finer_than_microsecond =
+                    crate::preflight::type_report::finer_than_microsecond_of(
+                        src,
+                        plan.source_table.as_deref(),
+                        &plan.base_query,
+                        &plan.export_name,
+                    );
             }
             let cols: Vec<crate::state::SchemaColumn> = mappings
                 .iter()
