@@ -68,12 +68,41 @@ pub fn redact_url_passwords(s: &str) -> String {
     out
 }
 
+/// Shortest value registered for masking: a shorter one would blank ordinary text.
+const MIN_MASKED_LEN: usize = 8;
+
+/// Every value registered by [`mask_value_in_output`], raw and percent-encoded.
+static MASKED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// `text` with every registered value replaced by the mask.
+fn mask_registered(text: &str) -> String {
+    let known = MASKED.lock().unwrap_or_else(|e| e.into_inner());
+    known
+        .iter()
+        .fold(text.to_string(), |acc, v| acc.replace(v.as_str(), MASK))
+}
+
+/// Register a credential value so [`redact_secrets`] masks it wherever it appears, raw or percent-encoded.
+pub fn mask_value_in_output(value: &str) {
+    if value.len() < MIN_MASKED_LEN {
+        return;
+    }
+    let encoded = percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC)
+        .to_string();
+    let mut known = MASKED.lock().unwrap_or_else(|e| e.into_inner());
+    for v in [value.to_string(), encoded] {
+        if !known.contains(&v) {
+            known.push(v);
+        }
+    }
+}
+
 /// Compose every redactor.  Use this at every boundary that turns a
 /// driver/library error (or any operator-untrusted string) into a
 /// persisted or emitted artifact.
 pub fn redact_secrets(s: &str) -> String {
     redact_query_secrets(&redact_url_passwords(&redact_keyword_passwords(
-        &crate::secret::mask_registered(s),
+        &mask_registered(s),
     )))
 }
 
