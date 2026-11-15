@@ -13,8 +13,6 @@ const MATRIX: &str = "refusal_names_true_cause";
 
 const R_PREFIX: &str = "2026-11-08: the oversized-value message opens with an unregistered RIVET_VALUE_TOO_LARGE prefix; closes when the prefix is dropped from both raise sites";
 const R_VERIFY: &str = "2026-11-08: validate prints a second code vocabulary absent from errors.md; closes when it joins codes::ALL or the docs list it";
-const R_STATE: &str = "2026-11-08: an unopenable SQLite state path stops uncoded; closes when the open error is raised as STATE_NOT_WRITABLE";
-const R_CONNECT: &str = "2026-11-08: an unreachable source stops uncoded; closes when the connect error is raised as SOURCE_CONNECT_FAILED";
 
 const R_CMD_ORDER: &str = "2026-11-10: plan, load, compact, reconcile and repair stop at their own precheck before the config error names the true cause; closes when the config error is raised first";
 const R_CMD_ACCEPT: &str = "2026-11-10: validate, metrics and journal exit 0 on a config that run refuses; closes when they refuse with the same code";
@@ -27,18 +25,6 @@ const R_READER_CODE: &str = "2026-11-10: metrics and journal repeat a stopped ru
 const R_WORD_CLASSIFY: &str = "2026-11-10: a missing MySQL table named after a classifier word is refused as that word's cause (STATEMENT_TIMEOUT for `max_execution_time`); closes when the classifier reads the server's error number, not words that echo the relation name";
 /// Accepted RED cells on main, each with the date and what closes it; a new RED or a stale entry fails.
 const ACCEPTED_RED: &[(&str, &str)] = &[
-    ("cause/RIVET_SOURCE_CONNECT_FAILED/mongo", R_CONNECT),
-    ("cause/RIVET_SOURCE_CONNECT_FAILED/mssql", R_CONNECT),
-    ("cause/RIVET_SOURCE_CONNECT_FAILED/mysql", R_CONNECT),
-    ("cause/RIVET_SOURCE_CONNECT_FAILED/oracle", R_CONNECT),
-    ("cause/RIVET_SOURCE_CONNECT_FAILED/postgres", R_CONNECT),
-    ("cause/RIVET_STATE_NOT_WRITABLE/mongo", R_STATE),
-    ("cause/RIVET_STATE_NOT_WRITABLE/mssql", R_STATE),
-    ("cause/RIVET_STATE_NOT_WRITABLE/mysql", R_STATE),
-    ("cause/RIVET_STATE_NOT_WRITABLE/oracle", R_STATE),
-    ("cause/RIVET_STATE_NOT_WRITABLE/postgres", R_STATE),
-    ("decoy/RIVET_STATE_NOT_WRITABLE/*", R_STATE),
-    ("decoy/RIVET_SOURCE_CONNECT_FAILED/*", R_CONNECT),
     (
         "cmd/plan/RIVET_CONFIG_SOURCE_URL_SCHEME_MISMATCH/*",
         R_CMD_ORDER,
@@ -145,6 +131,7 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
         "reader/live/RIVET_SOURCE_TABLE_NOT_FOUND/oracle/journal",
         R_READER_CODE,
     ),
+    ("reader/RIVET_SOURCE_CONNECT_FAILED/*", R_READER_CODE),
     (
         "reader/live/RIVET_SOURCE_COLLECTION_NOT_FOUND/mongo/metrics",
         R_READER_CODE,
@@ -1291,9 +1278,15 @@ fn execute_in(dir: &Path, p: &Probe) -> Out {
     }
 }
 
-/// The text from the final `Error: ` line on, which is where rivet prints the refusal.
+/// The text from the final line that opens with `Error: ` on, which is where rivet prints the refusal.
 fn error_section(stderr: &str) -> Option<&str> {
-    stderr.rfind("Error: ").map(|i| &stderr[i..])
+    let at_line_start = |i: &usize| *i == 0 || stderr.as_bytes()[*i - 1] == b'\n';
+    stderr
+        .match_indices("Error: ")
+        .map(|(i, _)| i)
+        .filter(at_line_start)
+        .last()
+        .map(|i| &stderr[i..])
 }
 
 /// The `[RIVET_...]` code the error section opens with.
