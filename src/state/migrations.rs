@@ -1199,7 +1199,7 @@ fn copy_state_before_migration(conn: &Connection, old: i64) -> Result<Option<std
 
 /// Refuse to migrate a v`old` state while `held`, a lease on it, is another live process's `(lease, holder)`: the new schema would land under that run.
 fn refuse_beside_a_live_lease(old: i64, held: Option<(String, String)>) -> Result<()> {
-    let Some((lease, holder)) = held else {
+    let Some((lease, holder)) = seeded!("migration-beside-a-live-lease", None, held) else {
         return Ok(());
     };
     crate::rivet_bail!(
@@ -1276,6 +1276,21 @@ fn created_table_names(sql: &str) -> std::collections::BTreeSet<String> {
             (!name.is_empty()).then_some(name)
         })
         .collect()
+}
+
+/// The ladder step with its `DO $$ ... IF EXISTS ... THEN` guard removed, so a replay runs the body again.
+#[cfg(feature = "seeded")]
+fn unguarded(sql: &str) -> String {
+    let (Some(start), Some(then), Some(end_if), Some(end)) = (
+        sql.find("DO $$ BEGIN"),
+        sql.find("THEN\n"),
+        sql.find("END IF;"),
+        sql.find("END $$;"),
+    ) else {
+        return sql.to_string();
+    };
+    let body = &sql[then + "THEN\n".len()..end_if];
+    format!("{}{}{}", &sql[..start], body, &sql[end + "END $$;".len()..])
 }
 
 /// Every table the PostgreSQL ladder creates or renames to, plus the version table: what a pre-migration copy holds when present.
@@ -1473,7 +1488,9 @@ fn write_lock_not_taken(db: Option<&str>, e: &rusqlite::Error) -> anyhow::Error 
         );
     }
     // READONLY is a third disease: no process holds the database and no wait ends it.
-    if e.sqlite_error_code() == Some(rusqlite::ErrorCode::ReadOnly) {
+    if seeded!("readonly-state-read-as-migration-lock", false, true)
+        && e.sqlite_error_code() == Some(rusqlite::ErrorCode::ReadOnly)
+    {
         let at = db.map_or(String::new(), |path| format!(" `{path}`"));
         return anyhow::Error::new(crate::error::CodedError::new(
             crate::error::codes::STATE_NOT_WRITABLE,
@@ -1607,6 +1624,7 @@ fn migrate_locked(conn: &Connection) -> Result<()> {
         refuse_beside_a_live_lease(current, sqlite_lease_held(conn)?)?;
     }
     if needs_copy(current)
+        && seeded!("migration-without-a-way-back", false, true)
         && let Some(copy) = copy_state_before_migration(conn, current)?
     {
         log::warn!(
@@ -1753,7 +1771,11 @@ fn migrate_pg_locked(client: &mut postgres::Transaction<'_>) -> Result<()> {
         let held = super::load_lease::pg_lease_held(client)
             .map_err(|e| leases_unreadable("the PostgreSQL state", &super::pg_detail(&e)))?;
         refuse_beside_a_live_lease(current, held)?;
-        copy_pg_state_before_migration(client, current)?;
+        seeded!(
+            "migration-without-a-way-back",
+            Ok(()),
+            copy_pg_state_before_migration(client, current)
+        )?;
     }
 
     for &(ver, sql) in PG_MIGRATIONS {
@@ -1761,7 +1783,12 @@ fn migrate_pg_locked(client: &mut postgres::Transaction<'_>) -> Result<()> {
             log::debug!("state(pg): applying migration v{}", ver);
             let batch = format!(
                 "{} INSERT INTO rivet_schema_version (version) VALUES ({});",
-                sql, ver
+                seeded!(
+                    "pg-migration-not-idempotent",
+                    unguarded(sql),
+                    sql.to_string()
+                ),
+                ver
             );
             client.batch_execute(&batch).map_err(|e| {
                 crate::error::coded(

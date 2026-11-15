@@ -241,7 +241,7 @@ fn a_live_test_that_skips_says_so_through_the_one_marker() {
                     if !win.to_lowercase().contains("skip") {
                         continue;
                     }
-                    if win.contains("skip_live") || win.contains("RIVET-SKIP {who}") {
+                    if records_skip(win) || win.contains("RIVET-SKIP {who}") {
                         continue;
                     }
                     let line_no = src[..at].matches('\n').count() + 1;
@@ -317,7 +317,7 @@ fn a_missing_env_var_returns_through_skip_live() {
                     continue;
                 }
                 seen += 1;
-                if !body.contains("skip_live(") {
+                if !records_skip(body) {
                     let line_no = src[..at].matches('\n').count() + 1;
                     offenders.push(format!(
                         "{}:{line_no}",
@@ -339,6 +339,14 @@ fn a_missing_env_var_returns_through_skip_live() {
          credential reads as a pass:\n  {}",
         offenders.join("\n  ")
     );
+}
+
+/// The helpers that write the skip record: `skip_live` and its need-tagged wrapper `skip_needs`.
+const SKIP_RECORDERS: [&str; 2] = ["skip_live", "skip_needs"];
+
+/// True when `text` calls a helper that records the skip.
+fn records_skip(text: &str) -> bool {
+    SKIP_RECORDERS.iter().any(|f| text.contains(f))
 }
 
 /// Every `.rs` file under `dir`, recursively.
@@ -394,7 +402,9 @@ fn is_silent_exit(code: &str) -> bool {
     t == "return"
         || t == "None"
         || t == "return None"
-        || t.starts_with("return skip_live(")
+        || SKIP_RECORDERS
+            .iter()
+            .any(|f| t.starts_with(&format!("return {f}(")))
         || t.contains("=> return")
         || t.contains("=> None")
         || t.contains("{ return }")
@@ -428,7 +438,7 @@ fn silent_env_exits(path: &Path, src: &str) -> Vec<(String, &'static str)> {
             .map(|(_, l)| without_strings(l))
             .collect();
         let exits = window.iter().filter(|l| is_silent_exit(l)).count();
-        let skips = window.iter().filter(|l| l.contains("skip_live")).count();
+        let skips = window.iter().filter(|l| records_skip(l)).count();
         if exits > skips {
             out.push((
                 site,
@@ -503,6 +513,11 @@ fn the_guard_sees_the_silent_shapes_and_not_the_recorded_ones() {
         "fn c() {",
         "    let Ok(u) = std::env::var(\"X\") else {",
         "        return skip_live(\"X unset?\");",
+        "    };",
+        "}",
+        "fn g() {",
+        "    let Ok(u) = std::env::var(\"V\") else {",
+        "        return skip_needs(Need::Credential, \"V unset\");",
         "    };",
         "}",
         "fn d(&self) -> Result<PathBuf, String> {",

@@ -401,3 +401,11 @@ scenarios:
     mssql:    { na: "change-table rows are typed driver columns addressed by name; no text line is cut" }
     mongo:    { na: "change events are BSON documents; no text line is cut" }
     oracle:   { na: "LogMiner rows are decoded through typed column lists, not one text line cut by separators" }
+
+  - id: cdc_steady_state_source_connections
+    what: "a steady-state CDC run opens no more source connections than the release before it: the run's own and the stream's (MongoDB six), the first-run proof riding the run's connection"
+    postgres: { test: pg_cdc_steady_state_run_opens_at_most_two_source_connections }
+    mysql:    { test: mysql_cdc_steady_state_run_opens_at_most_two_source_connections }
+    mssql:    { test: mssql_cdc_steady_state_run_opens_at_most_two_source_connections }
+    mongo:    { test: mongo_cdc_steady_state_run_opens_at_most_six_source_connections }
+    oracle:   { test: oracle_cdc_steady_state_run_opens_at_most_two_source_connections }

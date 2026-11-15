@@ -362,12 +362,6 @@ exclude_re = [
     "replace == with != in run_pool",
     "impl Drop for HeavyGuard",
     "delete ! in run_pool",
-    # `check` (preflight/mod.rs) connects to the source and diagnoses every
-    # export — no offline caller, so its body stub / the `==` in the overlay
-    # export-match loop are unkillable HERE (live-only). It is live-guarded by
-    # audit_preflight_table + the check scenarios (cli/blessed-flow). The overlay
-    # DECISIONS are unit-tested in overlay_measured_rows.
-    "replace check -> Result<bool> with Ok",
     # MongoSession::require_collection lists the database's collections: it needs
     # a live MongoDB, so its whole-fn `Ok(())` stub is unkillable under `--lib
     # --bins`. Its DECISION is unit-tested (missing_collection_refusal). Stub
@@ -454,26 +448,6 @@ exclude_re = [
     # one (`GcsStore::open_fs`) plus an in-memory ledger, so their body stubs die
     # offline. A guard on a recursive delete should not be gradable only against
     # a real bucket.
-    #
-    # HONEST ORACLE NOTE — this is a recorded COVERAGE GAP, not a triage. There
-    # is no live test in this repo that these stubs fail. `rivet load`'s only
-    # end-to-end coverage is the warehouse matrix (tests/oracle_fixture_matrix.rs
-    # → tests/harness, which runs `rivet load -c …` into BigQuery/Snowflake and
-    # re-queries the warehouse), and it needs BIGQUERY_TEST_PROJECT /
-    # RIVET_SF_* / RIVET_TEST_GCS_BUCKET — credentials the docker stand does not
-    # have. MEASURED rather than assumed: with `run_loads` stubbed to `Ok(())`,
-    # all 12 live tests matching `load` stay GREEN — they match on NAME
-    # (live_oltp_load, live_content_load, pg_load_ledger_round_trip, …) and not
-    # one of them invokes the `load` subcommand. So these entries buy silence on
-    # the in-diff gate for bodies whose only oracle is credential-gated. The fix
-    # is a live `rivet load` cell against a local warehouse (DuckDB is already
-    # the CDC suite's independent reader); until that exists this says so out
-    # loud rather than naming an oracle that does not grade it.
-    "replace run_loads ->",
-    # prepare_load: exclusion lifted 2026-08-29 to MEASURE (70% of the body runs
-    # offline). Restored below if its stub survives.
-
-    "replace load_one ->",
     "replace load_one_cdc ->",
     "replace load_one_incremental ->",
     # `dispatch` (cli/dispatch.rs) is the CLI ROUTER — one match over every
@@ -565,7 +539,7 @@ exclude_re = [
     # 2026-10-31 #728: `note_statement` only sets `in_transaction` and `grants_pending`, both live-only; the live_cdc_column_grants:: cells kill its stub.
     "replace MysqlChangeStream::note_statement with \\(\\)",
     # 2026-10-31 #728: pre-existing arm, killed only by live cell a_prepared_xa_branch_is_never_published_by_another_transactions_commit (proven RED 2026-10-31).
-    "^src/source/mysql/cdc\\.rs:1584:13: delete match arm Some\\(EventData::XaPrepareLogEvent\\(_\\)\\) in MysqlChangeStream::fill$",
+    "^src/source/mysql/cdc\\.rs:\\d+:\\d+: delete match arm Some\\(EventData::XaPrepareLogEvent\\(_\\)\\) in MysqlChangeStream::fill$",
 
     # `split_top_level_commas` (src/source/postgres/cdc.rs): dropping the
     # `in_quotes && next == '"'` guard on the escaped-quote arm cannot change what
@@ -613,9 +587,8 @@ exclude_re = [
     # the_recipe_column_types_reach_the_stream_and_the_recorded_spec (Decimal(12,4)
     # from the recipe must land in the spec).
     "replace capture_and_record -> Result<\\(\\)>",
-    # 2026-11-11: `capture_load_units` and `refuse_inexact_load_keys` open the source at `rivet check`. Live: an_oracle_number_cursor_is_refused_into_clickhouse (the check refusal), each stub applied by hand.
+    # 2026-11-11: `capture_load_units` opens the source at `rivet check`. Live: an_oracle_number_cursor_is_refused_into_clickhouse, stub applied by hand.
     "replace capture_load_units -> Result<Vec<CapturedUnit>> with Ok\\(vec!\\[\\]\\)",
-    "replace refuse_inexact_load_keys -> Result<\\(\\)> with Ok\\(\\(\\)\\)",
     # 2026-11-11: the default `Source::finer_than_microsecond_columns` already returns an empty list, so `Ok(vec![])` is the same value; the other stubs are killed offline.
     "replace Source::finer_than_microsecond_columns -> Result<Vec<String>> with Ok\\(vec!\\[\\]\\)",
     # information_schema query; the empty/non-empty decision is `split_key_list`.
@@ -941,9 +914,12 @@ exclude_re = [
     # - new_request_id (snowflake_rest.rs): the version and variant bits are set with `(n & !mask) | bits`,
     #   so the OR operands never share a bit and `^` yields the same UUID; no input distinguishes them.
     "replace \\| with \\^ in new_request_id$",
-    # 2026-11-11: id_span_on and MongoSource::id_span are two sorted find_one calls on a live collection and a zip, no decision; live cell a_keyed_mongo_cdc_snapshot_of_mixed_id_types_is_refused_before_any_write fails both stubs of id_span_on, and MongoSource::id_span only delegates to it; closes with an offline MongoDB fake.
-    "replace id_span_on -> Result<Option<\\(Document, Document\\)>> with Ok\\(",
+    # 2026-11-11: MongoSource::id_span only delegates to id_span_on, which is graded offline; closes with an offline MongoDB fake.
     "replace MongoSource::id_span -> Result<Option<\\(Document, Document\\)>> with Ok\\(",
     # 2026-11-11: MongoChangeStream::next_change is the live change-stream pump over a server cursor, its keyed-_id decision lives in id_types::admit_change (unit-tested); live cell a_mongo_cdc_stream_loads_into_clickhouse_and_the_view_matches_the_source fails the None stub (the stream ends with no event, the view stays at the snapshot); closes with an offline MongoDB fake.
     "replace <impl ChangeStream for MongoChangeStream>::next_change -> Option<Result<ChangeEvent>> with None$",
+    # 2026-11-14: a `seeded!` match guard whose good arm is `false` is that constant in the shipped build (stop_class, load_block, keyset_key_refusal); the stub to it is the code as shipped, and dev/seeded/recall.py grades the switch; closes never.
+    "replace match guard seeded!\\(.*, false ?\\) with false in stop_class$",
+    "replace match guard seeded!\\(.*, false ?\\) with false in load_block$",
+    "replace match guard seeded!\\(.*, false ?\\) with false in keyset_key_refusal$",
 ]

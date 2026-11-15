@@ -326,7 +326,7 @@ fn holder_is_dead_here(holder: &str, host: &str) -> bool {
     ) else {
         return false;
     };
-    h == host
+    seeded!("foreign-lease-taken-before-expiry", true, h == host)
         && pid > 0
         && unsafe { libc::kill(pid, 0) } != 0
         && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
@@ -338,6 +338,9 @@ const LEASE_TOKEN_CHARS: usize = 64;
 /// A file-name token of the lease `key`: a readable part (lossy: `orders#1` and `orders-1` read
 /// alike) and a hash of the raw key, so two keys never share one lease file.
 fn lease_file_token(key: &str) -> String {
+    if seeded!("lease-file-named-by-a-lossy-token", true, false) {
+        return crate::manifest::file_token(key);
+    }
     let readable: String = crate::manifest::file_token(key)
         .chars()
         .take(LEASE_TOKEN_CHARS)
@@ -363,7 +366,11 @@ fn lease_path(db: &std::path::Path, key: &str) -> std::path::PathBuf {
 /// descriptor holds a lock that excludes it.
 fn flocked(path: &std::path::Path, how: libc::c_int) -> Result<Option<std::fs::File>> {
     use std::os::unix::io::AsRawFd;
-    let file = std::fs::File::create(path)?;
+    let file = if seeded!("unwritable-state-run-exports", true, false) {
+        std::fs::File::create(path).or_else(|_| std::fs::File::open(path))?
+    } else {
+        std::fs::File::create(path)?
+    };
     if unsafe { libc::flock(file.as_raw_fd(), how | libc::LOCK_NB) } == 0 {
         return Ok(Some(file));
     }
@@ -561,8 +568,12 @@ impl StateStore {
             StateRef::Postgres(url) => {
                 let ttl = lease_ttl_s();
                 let host = host_name();
-                let keeper =
-                    keeper_for(url.expose(), ttl).map_err(|e| keeper_unavailable(key, &e))?;
+                let made = keeper_for(url.expose(), ttl);
+                let keeper = seeded!(
+                    "lease-granted-without-a-keeper",
+                    made.as_ref().ok().cloned(),
+                    Some(made.map_err(|e| keeper_unavailable(key, &e))?)
+                );
                 let granted = Instant::now();
                 let holder = format!(
                     "{host}:{}:{}",
@@ -608,14 +619,17 @@ impl StateStore {
                 if got.is_none() {
                     return Ok(None);
                 }
-                let id = keeper.shared.keep(key, &holder, granted);
+                let kept = keeper.map(|k| {
+                    let id = k.shared.keep(key, &holder, granted);
+                    (k, id)
+                });
                 Ok(Some(LoadLease {
                     store: self,
                     key: key.to_string(),
                     holder,
                     _file: None,
                     _legacy: None,
-                    kept: Some((keeper, id)),
+                    kept,
                 }))
             }
             StateRef::Sqlite(db) => {

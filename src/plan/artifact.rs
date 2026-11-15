@@ -324,7 +324,11 @@ impl PlanArtifact {
 
     /// Whether this plan is a reusable description whose every apply continues the stored cursor (incremental, `keyset_incremental`), not a point-in-time snapshot (full, chunked, keyset, time window).
     pub fn is_reusable(&self) -> bool {
-        self.resolved_plan.strategy.continues_stored_cursor()
+        seeded!(
+            "incremental-plan-replay-answered",
+            false,
+            self.resolved_plan.strategy.continues_stored_cursor()
+        )
     }
 
     /// One compact row for the multi-export plan table — `wave  rec  export

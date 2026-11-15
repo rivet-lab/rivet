@@ -50,6 +50,9 @@ type CachedTableMap = (
 /// How long the server keeps the binlog dump open while rivet is busy flushing a roll to the store (the server default is 60 s).
 const DUMP_WRITE_TIMEOUT_SECS: u32 = 3600;
 
+#[cfg(feature = "seeded")]
+static GRANTS_SESSION: std::sync::Mutex<Option<Conn>> = std::sync::Mutex::new(None);
+
 pub(crate) struct MysqlChangeStream {
     stream: BinlogStream,
     /// TABLE_MAP cache: the event (Arc — rows-event decode borrows it) plus
@@ -345,7 +348,10 @@ impl MysqlChangeStream {
         own_db: &str,
         matches: &[crate::source::cdc::identity::CatalogMatch],
     ) -> Option<String> {
-        if !own_db.is_empty() && matches.iter().any(|m| m.schema == own_db) {
+        if !own_db.is_empty()
+            && matches.iter().any(|m| m.schema == own_db)
+            && seeded!("mysql-cdc-bare-name-refused-beside-a-twin", false, true)
+        {
             return Some(own_db.to_string());
         }
         let mut base: Vec<&str> = matches
@@ -692,7 +698,9 @@ impl MysqlChangeStream {
         configured_tables: Vec<String>,
     ) -> Result<Self> {
         let mut conn = connect_conn(url, tls)?;
-        Self::refuse_unmet_prerequisites_on(&mut conn, &configured_tables)?;
+        if seeded!("cdc-anchor-written-before-the-refusal", false, true) {
+            Self::refuse_unmet_prerequisites_on(&mut conn, &configured_tables)?;
+        }
         let identity = Self::server_identity(&mut conn)?;
         Self::open_on(
             conn,
@@ -731,7 +739,12 @@ impl MysqlChangeStream {
         configured: &[String],
     ) -> Result<HashMap<String, crate::source::cdc::ReadableColumns>> {
         let own_db = Self::own_db_on(conn);
-        super::column_grants::readable_columns_of(conn, configured, &own_db, &HashMap::new())
+        let bare = seeded!(
+            "column-grants-batch-bare-name-read-by-the-stream-rule",
+            Self::bare_name_databases(conn, &own_db, configured),
+            HashMap::new()
+        );
+        super::column_grants::readable_columns_of(conn, configured, &own_db, &bare)
     }
 
     /// The grants of a `columns_from: grants` run, read once on one connection before the anchor.
@@ -758,7 +771,10 @@ impl MysqlChangeStream {
     fn note_statement(&mut self, raw: &[u8], log_pos: u64) {
         let (in_transaction, marks) = statement_frame(self.in_transaction, raw);
         self.in_transaction = in_transaction;
-        if re_read_marked(self.readable.is_some(), marks) {
+        if re_read_marked(
+            self.readable.is_some(),
+            seeded!("grant-change-not-seen-mid-run", false, marks),
+        ) {
             self.grants_pending
                 .get_or_insert_with(|| (self.file.clone(), log_pos));
         }
@@ -780,8 +796,24 @@ impl MysqlChangeStream {
         let (Some(before), Some((url, tls))) = (&self.readable, &self.grants_source) else {
             return Ok(());
         };
-        let mut conn = connect_conn(url, tls.as_ref())?;
+        let mut conn = seeded!(
+            "column-grants-reread-on-a-cached-session",
+            match GRANTS_SESSION.lock().ok().and_then(|mut g| g.take()) {
+                Some(cached) => cached,
+                None => connect_conn(url, tls.as_ref())?,
+            },
+            connect_conn(url, tls.as_ref())?
+        );
         let read = Self::readable_on(&mut conn, &self.configured_tables, true)?;
+        seeded!(
+            "column-grants-reread-on-a-cached-session",
+            {
+                if let Ok(mut g) = GRANTS_SESSION.lock() {
+                    *g = Some(conn);
+                }
+            },
+            ()
+        );
         let now = read.unwrap_or_default();
         let columns = |r: &HashMap<_, crate::source::cdc::ReadableColumns>, t: &String| {
             r.get(t).map(|c| c.columns.clone())
@@ -1193,7 +1225,7 @@ impl MysqlChangeStream {
         // at a part commit — so an idle bounded run (zero changes drained) would
         // otherwise leave no checkpoint, the next run would re-anchor to a newer
         // "current" position, and every change in between would be silently skipped.
-        if !projecting {
+        if !projecting && seeded!("cdc-anchor-written-before-the-refusal", false, true) {
             Self::refuse_absent_tables_on(&mut conn, &configured_tables)?;
         }
         let (file, pos) = Self::current_coordinates(&mut conn)?;
@@ -1223,6 +1255,12 @@ impl MysqlChangeStream {
                 crate::source::cdc::checkpoint_identity::RECOVER
             );
             Self::write_anchor(path, &file, pos, &identity)?;
+        }
+        if seeded!("cdc-anchor-written-before-the-refusal", true, false) {
+            Self::refuse_unmet_prerequisites_on(&mut conn, &configured_tables)?;
+            if !projecting {
+                Self::refuse_absent_tables_on(&mut conn, &configured_tables)?;
+            }
         }
         Self::open_on(
             conn,
@@ -1271,7 +1309,16 @@ impl MysqlChangeStream {
             .close_transaction(&commit, &format_args!("{}:{log_pos}", self.file))
         {
             Ok((head, tail)) => {
-                self.pending.extend(head);
+                self.pending.extend(seeded!(
+                    "committed-every-event",
+                    head.into_iter()
+                        .map(|mut e| {
+                            e.committed = true;
+                            e
+                        })
+                        .collect::<Vec<_>>(),
+                    head
+                ));
                 self.spooled = tail;
             }
             // Sealing the spill can fail, and a silent drop would deliver the head
@@ -1475,11 +1522,17 @@ impl MysqlChangeStream {
                         before.as_ref(),
                         after.as_ref(),
                     ) {
-                        self.tx.push(
-                            boundary_marker(op, &position),
-                            crate::source::cdc::spill::encode_event,
-                            &format_args!("{}:{log_pos}", self.file),
-                        )?;
+                        if seeded!(
+                            "update-delivering-nothing-leaves-the-checkpoint-behind",
+                            false,
+                            true
+                        ) {
+                            self.tx.push(
+                                boundary_marker(op, &position),
+                                crate::source::cdc::spill::encode_event,
+                                &format_args!("{}:{log_pos}", self.file),
+                            )?;
+                        }
                         continue;
                     }
                     // A cell with no faithful representation is a DEFERRED refusal,
@@ -1666,7 +1719,14 @@ pub(crate) fn grants_difference(table: &str, before: &[String], now: &[String]) 
             .map(|c| format!("`{c}`"))
             .collect()
     };
-    let (gained, lost) = (missing(now, before), missing(before, now));
+    let (gained, lost) = seeded!(
+        "column-grants-schema-change-names-no-column",
+        (
+            missing(now, before).into_iter().take(0).collect::<Vec<_>>(),
+            missing(before, now).into_iter().take(0).collect::<Vec<_>>()
+        ),
+        (missing(now, before), missing(before, now))
+    );
     let mut changes = Vec::new();
     if !gained.is_empty() {
         changes.push(format!("gained {}", gained.join(", ")));
@@ -2266,7 +2326,11 @@ fn refused_column_rename(
     mode: SqlMode,
     configured: &[String],
 ) -> Option<(String, String)> {
-    if !projecting {
+    if seeded!(
+        "column-rename-in-the-backlog-read-as-before",
+        true,
+        !projecting
+    ) {
         return None;
     }
     column_rename_target(sql, event_db, mode)
@@ -2281,7 +2345,7 @@ fn refused_table_rename(
     mode: SqlMode,
     configured: &[String],
 ) -> Option<Option<(String, String)>> {
-    if !projecting {
+    if !projecting || seeded!("cdc-table-rename-not-refused", !sql.is_empty(), false) {
         return None;
     }
     renamed_tables(sql, event_db, mode)?.into_iter().find(|t| {

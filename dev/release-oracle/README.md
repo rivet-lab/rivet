@@ -349,8 +349,10 @@ run reports the other's rows as "never ran this gate". Perf and flat RSS record 
 
 ## The two halves — one sha, two machines
 
-`dev/release_oracle/halves.py` places every per-run stage (`STAGE_HALF`) and every seeded-recall shard
-(`SEED_SHARD_HALF`, one entry per shard of the nightly dealer) in exactly one of two halves; the island keeps its own record.
+`dev/release_oracle/halves.py` places every per-run stage (`STAGE_HALF`) in exactly one of two halves, and derives the half of every
+seeded-recall seed from the ledger (`dev/seeded/shards.py`: a patch-form row, a macOS row or a cell only the devbox stand holds puts
+a seed on the devbox, every other seed is hosted); the island keeps its own record. The hosted seeds run in the Nightly Recall
+workflow (below), not in the gate's hosted half, which reports its seeded-recall row as a design skip.
 
 ```
 make release-oracle-full ARGS="--half hosted"     # python -m dev.release_oracle --with-seeded-recall --half hosted
@@ -360,9 +362,29 @@ python3 -m dev.release_oracle --half hosted --list-stages   # the stages and see
 
 Each half appends its own line (`release-oracle-full-hosted`, `release-oracle-full-devbox`: sha, binary stamp, verdict,
 canonical config) and is graded like a tag gate (an unexcused env skip is NOT GRADED). A half does not close known reds or
-matrix rows: it cannot see the other half's cells. `dev/pytools/release.py` reads only `release-oracle-full` and
+matrix rows: it cannot see the other half's cells. Without `--halves`, `dev/pytools/release.py` reads only `release-oracle-full` and
 `release-oracle-island` lines, so a half alone never supports a tag. `python3 -m dev.release_oracle --self-test` fails a stage in
 no half or in a non-half, a stage added without a row, a row naming no stage, and a seed run in no half or in two.
+
+### Tagging on the two halves
+
+`release.py --halves` replaces the one `release-oracle-full` check (and only it: the seeded recall, the island and the satellites are
+still required) with the two halves of the gate, defined in `dev/pytools/release_halves.py`. Each half builds its own binary from
+the sha (the devbox arm64 macOS, the runner x86_64 Linux), so the binaries' hashes are not compared. Required, each refusal coded `HALVES_*`:
+
+- the devbox half: the latest `release-oracle-full-devbox` line of the full 40-hex sha in `--gate-record`, clean, `RELEASE-READY`,
+  stamped with the sha, canonical, no unexcused env skip, run on `Darwin/arm64`;
+- the hosted half: the `hosted-verdict` artifact of one finished, wholly green run of `.github/workflows/gate-hosted.yml` on `main` of this
+  repository (not a fork, a pull request, another branch or another event), whose every slice record is of the sha, clean, green, exit 0,
+  stamped, canonical, run on `Linux/x86_64`, and whose run and job list GitHub itself reports success for. It is fetched with `gh`
+  (the newest completed run of that sha), or read from `--hosted-record DIR` holding `verdict.json`, `run.json` (`gh api repos/R/actions/runs/ID`)
+  and `jobs.json` (`gh api repos/R/actions/runs/ID/jobs`);
+- coverage: every stage record names the stages it ran; the stages of the devbox half and of the hosted slices together are the whole gate
+  (`stage_names([])` in `dev/release_oracle/__main__.py`, the very selector a run uses), each in exactly one half. A stage in neither half, in
+  both, outside the gate, or run by the wrong half refuses. Per-stage verdicts are not recorded, so "both halves, different verdicts" is
+  refused as "both halves ran it".
+
+`--halves` cannot be combined with `--graded-sha`. The halves do not close known reds or matrix rows (see above); the whole-gate run still does.
 
 ## Final stage — BigQuery
 
@@ -430,3 +452,14 @@ Re-bless the local goldens (verdicts + DuckDB type/fidelity) on purpose with
 Requires: docker, the `rivet` release binary, `duckdb`, `python3` (stdlib only),
 and — for the final stage — `bq` + ADC + a real GCS staging bucket
 (`BQ_ORACLE_BUCKET`, default: dev/stand/registry.yaml's `gcs.bucket`).
+
+### The hosted seeds: Nightly Recall
+
+`.github/workflows/nightly-recall.yml` (nightly, or `workflow_dispatch` with `sha` and an optional `seeds` list) resolves one full
+sha, builds the `seeded` test binaries once into a nextest archive (`make seeded-recall SEEDED_ARGS="--build-archive FILE"`), deals
+the hosted seeds into shards by estimated cost (`python -m dev.seeded.shards`; lib-only seeds get a shard with no docker stack) and
+grades each shard on the unpacked build (`--seeds ... --archive FILE`). `python -m dev.seeded.verdict` then reads every shard's
+record: each shard green, clean and on that sha, every expected seed in exactly one shard, NOT-GRADED-HERE rows under the matrix
+ceiling. It appends one line to `recall-runs.jsonl` (artifact `recall-verdict`). `release.py` accepts a tag when the devbox half's
+lines and that verdict line together cover every ledger seed with a green clean run of the sha: concatenate both files and pass
+`--recall-record FILE`.

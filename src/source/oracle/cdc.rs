@@ -325,7 +325,13 @@ pub(crate) fn plan_logs(
             threads.entry(thread).or_default().push(f);
         }
     }
-    let log_gap = crate::source::cdc::checkpoint_identity::log_gap;
+    let log_gap = |why: String| {
+        if seeded!("oracle-cdc-log-gap-uncoded", true, false) {
+            anyhow::Error::msg(why)
+        } else {
+            crate::source::cdc::checkpoint_identity::log_gap(why)
+        }
+    };
     if threads.is_empty() {
         return Err(log_gap(format!(
             "oracle cdc: no redo log covers SCN {start}..{end} — the archived logs the checkpoint \
@@ -1080,7 +1086,11 @@ impl OracleChangeStream {
             conn.execute(sql, &[]).ora()?;
         }
         let (_, con_name, con_dbid) = container(&conn)?;
-        let captured = vetted_tables(&conn, tables)?;
+        let captured_early = if seeded!("cdc-anchor-written-before-the-refusal", true, false) {
+            None
+        } else {
+            Some(vetted_tables(&conn, tables)?)
+        };
         let low_water = low_water_here(&conn)?;
         let identity = root_identity(&conn, con_name, con_dbid)?;
         let frontier = pin_frontier(&conn, low_water)?;
@@ -1095,6 +1105,10 @@ impl OracleChangeStream {
                 with_identity(&frontier.position(), &identity).save(checkpoint)?;
                 frontier
             }
+        };
+        let captured = match captured_early {
+            Some(captured) => captured,
+            None => vetted_tables(&conn, tables)?,
         };
         let mut stream = Self {
             conn,
@@ -1261,7 +1275,7 @@ impl OracleChangeStream {
                 image_names: Some(Arc::clone(&t.names)),
                 seq: 0,
                 poison: None,
-                row_id,
+                row_id: seeded!("renumber-equal-images", row_id.filter(|_| false), row_id),
                 before_names: None,
                 before_poison: None,
             },
@@ -1329,6 +1343,11 @@ impl OracleChangeStream {
         let mut events: Vec<ChangeEvent> =
             order.into_iter().filter_map(|i| slots[i].take()).collect();
         TxnFramer::close_group(&mut events, &pos);
+        seeded!(
+            "committed-every-event",
+            events.iter_mut().for_each(|e| e.committed = true),
+            ()
+        );
         self.prove_online_read(self.carry.is_some().then_some(commit))?;
         self.queue.extend(events);
         self.mined_through = commit;

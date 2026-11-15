@@ -135,11 +135,20 @@ impl StateStore {
 
     /// Whether a load into `target_table` ever succeeded with runs consumed, the only record that makes the table rivet's own.
     pub fn has_landed_load(&self, target_table: &str) -> Result<bool> {
-        let sql = format!(
-            "SELECT COUNT(*) FROM (SELECT 1 AS x FROM load_run WHERE target_table = ?1 \
+        let sql = seeded!(
+            "failed-first-load-owns-target",
+            format!(
+                "SELECT COUNT(*) FROM (SELECT 1 AS x FROM load_run WHERE target_table = ?1 \
+             AND (status IN ('failed','writing') OR (status = '{}' AND source_run_ids <> '[]')) \
+             UNION ALL SELECT 1 AS x FROM loaded_source_run WHERE target_table = ?1) owned",
+                LoadStatus::Success.as_str(),
+            ),
+            format!(
+                "SELECT COUNT(*) FROM (SELECT 1 AS x FROM load_run WHERE target_table = ?1 \
              AND status = '{}' AND source_run_ids <> '[]' \
              UNION ALL SELECT 1 AS x FROM loaded_source_run WHERE target_table = ?1) owned",
-            LoadStatus::Success.as_str(),
+                LoadStatus::Success.as_str(),
+            )
         );
         Ok(self
             .query_opt(&sql, &[target_table.into()], |r| r.i64(0))?

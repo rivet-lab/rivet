@@ -326,6 +326,12 @@ pub(crate) fn detect_and_generate_chunks(
         let Some((min_str, max_str)) =
             read_key_span(src, base_query, chunk_column, export_name, source_type)?
         else {
+            if seeded!("empty-table-under-chunk-by-days", true, false) {
+                crate::rivet_bail!(
+                    crate::error::codes::SOURCE_PROBE_UNREADABLE,
+                    "export '{export_name}': min({chunk_column}) returned NULL — table may be empty"
+                );
+            }
             return Ok(vec![EMPTY_WINDOW]);
         };
 
@@ -363,7 +369,9 @@ pub(crate) fn detect_and_generate_chunks(
     // NULL-keyed rows are excluded by `WHERE col BETWEEN min AND max` — refuse
     // rather than drop them silently.
     bail_if_null_keyed(src, base_query, chunk_column, export_name, source_type)?;
-    bail_if_fractional(src, base_query, chunk_column, export_name)?;
+    if seeded!("fractional-chunk-key-under-query", false, true) {
+        bail_if_fractional(src, base_query, chunk_column, export_name)?;
+    }
 
     // The parse is STRICT, deliberately not the float-tolerant `parse_scalar_i64`:
     // that one reads "998.75" as 998, and a max bound rounded DOWN drops every row

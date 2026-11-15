@@ -206,10 +206,11 @@ def verify_seeded_recall(led: Ledger, enabled: bool, half: str = "") -> None:
         seeded.recall(led, rows)
         return
     names = sorted({r.seed for r in rows})
-    mine = half_seeds(half, names)
-    if not mine:
+    mine = half_seeds(half)
+    if half == HOSTED or not mine:
         led.skipped("-", "harness", "seeded_recall", "-",
-                    f"seeded-defect recall: no shard of halves.py is placed in the {half} half", cause=SkipCause.DESIGN)
+                    f"seeded-defect recall: the {half} half runs none of its seeds here; the hosted ones run in the Nightly Recall workflow (one verdict per sha)",
+                    cause=SkipCause.DESIGN)
         return
     seeded.recall(led, seeded.select(rows, ",".join(mine), ""), complete=mine == names)
 
@@ -380,7 +381,7 @@ def _raising_stage_self_test() -> None:
         try:
             m.verify_boom(led, "postgres")
             m.verify_after(led)
-            rc = led.report(full=True)
+            rc = led.report(full=True, stages=["boom", "after"])
             wrote = core.TIMINGS_HISTORY.read_text()
         finally:
             core.TIMINGS_HISTORY = saved
@@ -389,6 +390,7 @@ def _raising_stage_self_test() -> None:
     assert fails[0].detail == "verify_boom raised SystemExit: uv sync in /x/tree failed:", fails[0].detail
     assert [c.scenario for c in led.cells] == ["verify_boom", "after"], led.cells
     assert rc == 1 and "NOT RELEASABLE" in out.getvalue() and '"verdict": "NOT RELEASABLE"' in wrote, (rc, wrote)
+    assert '"stages": ["boom", "after"]' in wrote, f"Ledger.report hands the stages it was given to the record: {wrote}"
     print("self-test ok: a stage that raises is one FAIL row naming it; the gate still reports and exits 1")
 
 
@@ -581,6 +583,8 @@ def _skip_cause_self_test() -> None:
     rc, said, line, refusal = run_gate(stage_down(), core.FULL_GATE)
     assert rc == 1 and line["verdict"] == "NOT GRADED" and "NOT GRADED" in said and "RELEASE-READY" not in said, (rc, said)
     assert "INFRA" in said and "ENV 3" in said and line["skipped"] == 3, (said, line)
+    assert "    postgres/verify_failed_run_tail/-: " in said and said.count("    mongo/verify_failed_run_tail/-: ") == 2, \
+        "the NOT GRADED line names every cell it counts, whatever made it INFRA"
     assert line["skipped_env"] == [["verify_failed_run_tail", "mongo", "-"], ["verify_failed_run_tail", "postgres", "-"]], line
     assert refusal is not None and "NOT GRADED" in refusal, refusal
 
@@ -608,6 +612,7 @@ def _skip_cause_self_test() -> None:
     rc, said, line, refusal = run_gate(stage_down(), ISLAND_GATE)
     assert rc == 1 and line["verdict"] == "NOT GRADED" and "INFRA" in said and line["skipped_env"], (rc, said, line)
     assert refusal is not None and "NOT GRADED" in refusal, "an island run that env-skipped a cell is not green"
+    assert "postgres/verify_failed_run_tail/-: stand down" in said and "an env skip no skip_allow entry excuses" in said, said
     rc, said, line, refusal = run_gate(design, ISLAND_GATE)
     assert rc == 0 and line["verdict"] == "RELEASE-READY" and refusal is None, "an island run with design skips only is green"
 
@@ -635,6 +640,9 @@ def _skip_cause_self_test() -> None:
     assert skip_allow.excused("fix_cells", "all", "a_fifth_fix_cell_that_self_skips_mysql", date(2026, 11, 3)) is None
     assert all(skip_allow.excused("fix_cells", "all", c, date(2026, 11, 3)) for c in skip_allow.FOLD_CELLS) and len(skip_allow.FOLD_CELLS) == 4
     assert all(skip_allow.excused("fix_cells", "all", c, date(2026, 11, 18)) is None for c in skip_allow.FOLD_CELLS), "an excuse ends on its day"
+    scale = [skip_allow.excused(regression._S_SCENARIO, e, regression._S_STORE, date(2026, 11, 14)) for e in ("postgres", "mysql", "mssql", "mongo")]
+    assert all(scale), "the scale-memory env skip the island records on every engine is excused today"
+    assert skip_allow.excused(regression._S_SCENARIO, "oracle", regression._S_STORE, date(2026, 11, 14)) is None, "the excuse names the four engines the stage loops"
 
     parent, child = Ledger(colour=False), Ledger(colour=False)
     child._buf = []
@@ -842,8 +850,12 @@ def _stage_table_self_test() -> None:
         assert {s.name for s in per_run} | {s.name for s in island} == {s.name for s in table}, "every stage runs in the gate or the island"
         assert not {s.name for s in per_run} & {s.name for s in island} and {s.name for s in island} == measuring, \
             "the island is exactly the measured stages and the per-run gate runs none of them"
-        assert island_functions(table) == {s.run.__name__ for s in island} and all(
+        assert island_functions(table) >= {s.run.__name__ for s in island} and all(
             f.startswith("verify_") for f in island_functions(table)), island_functions(table)
+        full_gate = Ledger(colour=False)
+        full_gate.close_matrix_rows({"preflights": [{"id": "seeded_platform_rows", "status": "test"}]},
+                                    owned=lambda fn: fn not in island_functions(table))
+        assert not full_gate.cells, "the island runs the seeded platform rows inline, so the full gate does not owe them"
         assert table[-1].name == "live modules" and [s.name for s in cut[-1]] == ["live modules"], \
             "live modules runs last and alone: it runs what no stage before it ran"
         assert "release hygiene" in {s.name for s in table}, "cargo deny check and docgen --check are gate stages"
@@ -861,7 +873,7 @@ def _halves_self_test() -> None:
 
     from dev.seeded import recall as seeded
 
-    from .halves import SEED_SHARD_HALF, STAGE_HALF, problems
+    from .halves import STAGE_HALF, problems, seed_homes
 
     seeds = sorted({r.seed for r in seeded.parse_manifest(yaml.safe_load(seeded.MANIFEST.read_text()))})
     assert seeds, "the seeded-recall manifest names no seed"
@@ -879,6 +891,10 @@ def _halves_self_test() -> None:
         assert sorted(slices[0] + slices[1]) == sorted(cuts[HOSTED]), "slice 0 and a live slice do not re-form the hosted half"
         assert slices[0] == [n for n in cuts[HOSTED] if n != LIVE_HOSTED_STAGE] and all(sl == [LIVE_HOSTED_STAGE] for sl in slices[1:]), \
             "slice 0 is every hosted stage but the live modules and each other slice is the live modules alone"
+        if not argv:
+            assert stage_names() == per_run and stage_names(["--half", HOSTED]) == cuts[HOSTED] and stage_names(["--half", DEVBOX]) == cuts[DEVBOX], \
+                "stage_names, which the two-halves tag reads, is not the cut a run makes"
+            assert [stage_names(["--half", HOSTED, "--live-shard", f"{i}/3"]) for i in range(4)] == slices, "stage_names does not cut a slice as a run does"
         island = [st.name for st in selected_stages(parse_args([*argv, "--island"]), table)]
         assert sorted(cuts[HOSTED] + cuts[DEVBOX] + island) == sorted(st.name for st in table), "the halves and the island are not the whole table"
     names = [st.name for st in selected_stages(parse_args([]), gate_stages(parse_args([])))]
@@ -895,12 +911,12 @@ def _halves_self_test() -> None:
     assert any("neither half" in p for p in problems(names, seeds, dropped)), "a stage dropped from the table goes unnoticed"
     assert any("no gate stage" in p for p in problems(names, seeds, {**STAGE_HALF, "ghost": HOSTED})), "a row naming no stage goes unnoticed"
     assert any("no half" in p for p in problems(names, seeds, {**STAGE_HALF, names[0]: "both"})), "a stage placed in a non-half goes unnoticed"
-    assert any("no half" in p for p in problems(names, seeds, shard_half=(*SEED_SHARD_HALF, "both"))), "a shard placed in a non-half goes unnoticed"
-    assert problems(names, seeds, shard_half=()), "an empty shard table goes unnoticed"
-    assert not problems(names, seeds, shard_half=(HOSTED, DEVBOX, HOSTED, DEVBOX)), "a split shard table must be a partition"
-    assert not problems(names, seeds, shard_half=(HOSTED,) * 4), "every seed on one half must be a partition"
-    for h in HALVES:
-        assert half_seeds(h, seeds, (h,) * 4) == seeds and half_seeds(h, seeds, ("x",) * 4) == [], "a shard belongs to the half it names"
+    homes = seed_homes()
+    assert set(homes.values()) == set(HALVES), "the ledger places seeds in both halves"
+    assert any("no half" in p for p in problems(names, seeds, homes={**homes, seeds[0]: "both"})), "a seed placed in a non-half goes unnoticed"
+    assert any("in no half" in p for p in problems(names, seeds, homes={k: v for k, v in homes.items() if k != seeds[0]})), "a seed placed nowhere goes unnoticed"
+    assert any("does not have" in p for p in problems(names, seeds, homes={**homes, "ghost-seed": HOSTED})), "a placement naming no seed goes unnoticed"
+    assert sorted(half_seeds(HOSTED, homes) + half_seeds(DEVBOX, homes)) == seeds, "the halves do not re-form the ledger"
     print(f"self-test ok: {len(names)} per-run stages and {len(seeds)} seeds each run in exactly one half; the halves and the island re-form the table")
 
 
@@ -1036,6 +1052,7 @@ def _imports_shadowed_by_a_local() -> list[str]:
 
 def _oracle_restart_self_test() -> None:
     """`_oracle_restarted` on scripted answers: a slow restart is waited out, a dead one is named by its ORA- line and its log."""
+    import subprocess
     from unittest import mock
 
     from .core import Proc
@@ -1052,6 +1069,14 @@ def _oracle_restart_self_test() -> None:
             mock.patch(f"{__name__}.docker", fake(f"line one\n{log}")):
         why = _oracle_restarted("c", lambda: False, tries=3, delay=0)
     assert "no answer in 3 polls" in why and "ORA-27102" in why and "SP2-0640" in why and "rc=1" in why and log in why, why
+    with tempfile.TemporaryDirectory() as d:
+        for name, body in (("healthcheck.sh", "exit $HC_RC"), ("sqlplus", "echo rivet-ready")):
+            (Path(d) / name).write_text(f"#!/bin/sh\n{body}\n")
+            (Path(d) / name).chmod(0o755)
+        for hc_rc, answers in (("4", False), ("0", True)):
+            env = {**os.environ, "PATH": f"{d}:{os.environ['PATH']}", "HC_RC": hc_rc}
+            got = subprocess.run(["bash", "-c", ORACLE_READY_PROBE], env=env, capture_output=True).returncode == 0
+            assert got is answers, f"healthcheck.sh exit {hc_rc} with the app user answering: the ready probe says {got}, want {answers}"
 
 
 def _stand_down_self_test() -> None:
@@ -1372,7 +1397,8 @@ def _self_test() -> int:
     from . import state_lib as _sl
     assert set(_sl.filters()) >= {"state::row::", "load::orchestrate::"}, _sl.filters()
     assert _sl.selected("load::orchestrate::load_ledger_tests::pg_a_mixed_split_generation_is_journaled_refused_and_refuses_again")
-    assert not _sl.selected("pipeline::cli::tests::x"), "the selection is the modules that read the state URL, not the lib"
+    assert _sl.selected("pipeline::cli::tests::a_reset_on_a_postgres_state"), "a module reading the URL through postgres_for_test is selected"
+    assert not _sl.selected("pipeline::chunked::tests::x"), "the selection is the modules that read the state URL, not the lib"
     assert _sl.vacuous("running 0 tests\ntest result: ok. 0 passed; 0 failed", {}), "a zero-match filter graded nothing"
     assert _sl.vacuous("test result: ok. 9 passed; 0 failed", {"state::x::t": "RIVET_TEST_STATE_URL unset"})
     assert _sl.vacuous("test result: ok. 9 passed; 0 failed", {}) == []
@@ -1638,6 +1664,10 @@ def _self_test() -> int:
             core.rivet_bin = kept_bin
         assert stamped["binary"] == "abcdef123" and stamped["binary_sha256"] == core.file_sha256(stand_in) != "", "the record carries the SHA-256 of the binary it graded"
         assert core.file_sha256(Path(d) / "absent") == "", "an absent binary has no hash"
+        import platform as _platform
+        with_stages = record_timings(Path(d) / "stages.jsonl", [("A", 60.0)], [], "RELEASE-READY", 1, 0, stages=["x", "y"])
+        assert with_stages["stages"] == ["x", "y"] and with_stages["host"] == {"system": _platform.system(), "machine": _platform.machine()}, "the record names the stages it ran and the host it ran on"
+        assert stamped["stages"] == [], "a run that names no stages records an empty list, never a missing key"
         timed = Ledger(colour=False)
         timed._buf = []
         timed.phase("one")
@@ -1926,6 +1956,12 @@ def selected_stages(ns: argparse.Namespace, table: Sequence[Stage]) -> list[Stag
             and (shard is None or (st.name == LIVE_HOSTED_STAGE) is (shard[0] > 0))]
 
 
+def stage_names(argv: Sequence[str] = ()) -> list[str]:
+    """The names of the stages a run started with `argv` executes, in table order: `[]` is the whole per-run gate, `--half H` and `--live-shard i/n` cut it exactly as the run does."""
+    ns = parse_args(list(argv))
+    return [st.name for st in selected_stages(ns, gate_stages(ns))]
+
+
 #: The stage that reads the replica topologies: the stand's replica check is a start condition only where it runs.
 REPLICA_STAGE = "replica read"
 
@@ -1937,13 +1973,13 @@ def stage_listing(ns: argparse.Namespace) -> list[str]:
     from dev.seeded import recall as seeded
 
     names = sorted({r.seed for r in seeded.parse_manifest(yaml.safe_load(seeded.MANIFEST.read_text()))})
-    seeds = len(half_seeds(ns.half, names)) if ns.half else len(names)
+    seeds = (0 if ns.half == HOSTED else len(half_seeds(ns.half))) if ns.half else len(names)
     return [*(f"stage {st.name}" for st in selected_stages(ns, gate_stages(ns))), *([] if ns.island else [f"seeds {seeds}"])]
 
 
 def island_functions(table: Sequence[Stage]) -> frozenset[str]:
-    """The stage functions the island runs, by name: the rows the per-run gate does not owe and the island run does."""
-    return frozenset(st.run.__name__ for st in island_stages(table))
+    """The functions the island runs, by name: the measured stages and the inline seeded platform rows; the per-run gate does not owe them."""
+    return frozenset(st.run.__name__ for st in island_stages(table)) | {verify_seeded_platform_rows.__name__}
 
 
 def build_stages(ns: argparse.Namespace, built: dict) -> list[Stage]:
@@ -2060,6 +2096,9 @@ def _usable_port(port: int) -> int:
 
 #: Polls, two seconds apart, that Oracle gets to answer: after its first start and again after the processes restart.
 ORACLE_READY_TRIES = 150
+#: The image's own init-finished marker (healthcheck.sh exits non-zero while its user scripts run), then the app user's session.
+ORACLE_READY_PROBE = ("healthcheck.sh && echo \"select 'rivet-ready' from dual;\" | sqlplus -s -L "
+                      "rivet/rivet@localhost/FREEPDB1 | grep -q rivet-ready")
 #: processes=200 lets the listener's lagging handler count refuse a 16-cell connect burst (ORA-12516); measured 189/300 refused at 200, 0/300 at 1000.
 ORACLE_RESTART_SQL = "alter system set processes=1000 scope=spfile;\nshutdown immediate\nstartup\nexit\n"
 
@@ -2214,9 +2253,7 @@ def bring_up(led: Ledger, engine: str, tag: str, image: str, port: int) -> str:
                    "-P", "Rivet_Passw0rd!", "-Q", "SELECT 1"]],
         "mongo": [["mongosh", "--quiet", "--eval", "db.runCommand({ping:1})"],
                   ["mongo", "--quiet", "--eval", "db.runCommand({ping:1})"]],
-        # The APP_USER exists only once the entrypoint has created it, after the DB opens.
-        "oracle": [["bash", "-c", "echo \"select 'rivet-ready' from dual;\" | sqlplus -s -L "
-                    "rivet/rivet@localhost/FREEPDB1 | grep -q rivet-ready"]],
+        "oracle": [["bash", "-c", ORACLE_READY_PROBE]],
     }[engine]
     if engine == "mssql":
         probes = [[x for a in p for x in (sqlcmd(name) if a == "__SQLCMD__" else (a,))]
@@ -2655,7 +2692,8 @@ def main(argv: list[str] | None = None) -> int:
                        f"not the tree's commit {tree[0][:9]} — the gate would grade another binary")
             return 1
         table = gate_stages(ns)
-        run_stages(led, selected_stages(ns, table))
+        ran = selected_stages(ns, table)
+        run_stages(led, ran)
         kept = GATE_FAILURES / f"rivet-oracle-{os.getpid()}.log"
         if (work / "rivet-oracle.log").is_file():
             keep_failure_log(work / "rivet-oracle.log", kept.name)
@@ -2680,7 +2718,7 @@ def main(argv: list[str] | None = None) -> int:
                 led.close_matrix_rows(owned=(lambda fn: fn in island) if ns.island else (lambda fn: fn not in island))
         led.stand_invalid = dog.stop()
         gate = gate_kind(ns, config)
-        rc = led.report(full=full and not (ns.bless_local or ns.bless_cdc), gate=gate, tree=tree, config=config, shard=ns.live_shard)
+        rc = led.report(full=full and not (ns.bless_local or ns.bless_cdc), gate=gate, tree=tree, config=config, shard=ns.live_shard, stages=[st.name for st in ran])
         if gate == ISLAND_GATE:
             print("  island record only: a tag also needs a green `make release-oracle-full` of this commit.")
         elif not ns.island:

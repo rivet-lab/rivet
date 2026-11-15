@@ -5,7 +5,7 @@ seeds:
     class: "a column added to a captured table while a CDC run is open is not in the run's schema: its values are dropped and acked, exit 0 (SQL Server: the run ends clean over a column its capture instance never carried)"
     history: "issue #644, a DBA's question on 2026-10-19; RED on main 2026-10-21 (the rig oracle: source column `c` is absent from the delivered parquet, PostgreSQL, MySQL and SQL Server)"
     scope: source
-    patch: cdc-hot-added-column-dropped/shared.patch
+    switch: cdc-hot-added-column-dropped
     engines:
       postgres:
         cells: [pg_cdc_a_column_added_while_a_run_is_open_lands_every_value, pg_cdc_a_drop_and_add_at_one_arity_while_a_run_is_open_lands_under_the_new_name, "lib:a_column_added_while_the_run_is_open_continues_in_a_new_part_with_its_values"]
@@ -22,7 +22,7 @@ seeds:
     class: "the roll a column added while a CDC run is open forces checkpoints and acknowledges the position of the change that carried the column before that change is written: a stop right after the roll resumes past it and the row is never delivered, exit 0 (PostgreSQL also advances the slot past it)"
     history: "found 2026-10-29 by a rivet-verifier probe (a MySQL continuous run, INSERT 3, ALTER TABLE ADD COLUMN, INSERT 4, run stopped after the roll: ck.json at the position of row 4, row 4 in no declared part); RED on main 2026-10-29 (the rig oracle: source row 4 not delivered, PostgreSQL and MySQL)"
     scope: source
-    patch: cdc-roll-checkpoints-its-trigger/shared.patch
+    switch: cdc-roll-checkpoints-its-trigger
     engines:
       postgres:
         cells: [pg_cdc_a_stop_after_the_column_added_roll_resumes_at_the_row_that_carried_it, "lib:a_roll_for_an_added_column_never_checkpoints_the_event_that_caused_it"]
@@ -39,7 +39,7 @@ seeds:
     class: "`rivet apply` treats an incremental plan (`mode: incremental`, `keyset_incremental`) as a point-in-time snapshot: a replay after its first exit-0 apply answers \"already applied\", so every row that arrived since is never delivered with exit 0, and the plan is refused past 24 h"
     history: "found 2026-10-16 on PR #616 CI (run 38911927276): the first F3 replay answer keyed on plan_id alone; `incremental_keyset_apply_rotates_run_id_across_repeated_applies` read COUNT(*) source 150, delivered 100; owner decision (PR #616 comment 6219074059): an incremental plan is a reusable description"
     scope: source
-    patch: incremental-plan-replay-answered/shared.patch
+    switch: incremental-plan-replay-answered
     engines:
       postgres:
         cells:
@@ -65,7 +65,7 @@ seeds:
     class: "`rivet apply` of an incremental plan made after a cursor was stored is refused RIVET_PLAN_ARTIFACT_STALE (exit 5, \"cursor has drifted\") on every apply after its first, because PA4 reads the cursor the plan's own earlier apply moved as drift"
     history: "retry matrix F3, 2026-10-16: measured on main 04c4a712 (PostgreSQL, GCS): the second apply of one incremental plan exit 5 \"cursor has drifted\"; owner decision (PR #616 comment 6219074059): a cursor moved by an earlier apply of the same plan is not drift"
     scope: source
-    patch: own-apply-cursor-read-as-drift/shared.patch
+    switch: own-apply-cursor-read-as-drift
     engines:
       postgres:
         cells: [a_replayed_incremental_plan_delivers_what_arrived_since_postgres, "lib:a_reusable_plan_extracts_on_every_replay_from_the_stored_cursor"]
@@ -82,7 +82,7 @@ seeds:
     class: "`rivet apply` of a full, chunked or keyset plan whose apply already exited 0 runs it again: a scheduler retry extracts the whole table a second time"
     history: "retry matrix F3, 2026-10-16: a scheduler retry after the task process died right after a successful apply replayed the same artifact; measured on main 04c4a712 (PostgreSQL, GCS): the retry rc 0 with a second run"
     scope: source
-    patch: applied-plan-replayed/shared.patch
+    switch: applied-plan-replayed
     engines:
       postgres:
         cells: [a_replayed_applied_full_plan_answers_with_its_run_postgres, a_replayed_applied_keyset_plan_answers_with_its_run_postgres, "lib:a_plan_that_applied_answers_every_replay_with_its_run_and_extracts_nothing"]
@@ -99,7 +99,7 @@ seeds:
     class: "`rivet apply` of a full, chunked or keyset plan that already applied answers only in prose on stderr: `--summary-output` writes no file and `--json` prints no document, so a scheduler reads the replay as a success with no result"
     history: "found by the Airflow provider after #616, 2026-10-17, verified on main 74cb6daa: the replay path returned before any summary (`eprintln!` of the report, exit 0), and `rivet apply` had no `--summary-output` / `--json` at all; fixed by one builder (`apply_document`) writing the same document for a run and for the answering run, with `status: already_applied` and `answered_by_run`"
     scope: source
-    patch: already-applied-answer-text-only/shared.patch
+    switch: already-applied-answer-text-only
     engines:
       postgres:
         cells: [a_replayed_applied_plan_answers_in_its_summary_document_postgres, "lib:a_plan_that_applied_answers_every_replay_with_its_run_and_extracts_nothing"]
@@ -116,7 +116,7 @@ seeds:
     class: a coded failure met by one chunk of a checkpointed export (chunk_checkpoint true, one worker or several) ends the run as the incomplete run RIVET_RUN_UNITS_FAILED with exit 1 and a --resume hint instead of the chunk's own code and class, and the --resume meets it again and ends the same way
     history: the second half of worker-error-loses-its-class, found 2026-10-15 fixing it; both checkpoint runners recorded a failed chunk's cause as text in chunk_task and stopped on the not-completed count; a PostgreSQL `infinity` met by a checkpointed chunk exited [RIVET_RUN_UNITS_FAILED] 1 where the same export without chunk_checkpoint exits [RIVET_SOURCE_VALUE_UNREPRESENTABLE] 5, on main through 0.31.0
     scope: source
-    patch: checkpointed-chunk-loses-its-class/shared.patch
+    switch: checkpointed-chunk-loses-its-class
     engines:
       postgres:
         cells: [a_refusal_in_a_checkpointed_chunk_exits_by_code_and_so_does_its_resume_postgres]
@@ -136,7 +136,7 @@ seeds:
     class: a coded failure in one parallel worker reaches the run as text only (FanIn kept strings), so the run prints RIVET_RUN_UNITS_FAILED and exits 1 or 2 instead of the worker's own code and class
     history: found 2026-10-15 reading FanIn::fail against the owner's "exit follows code class" rule; a PostgreSQL `infinity` met by a parallel keyset worker exited [RIVET_RUN_UNITS_FAILED] 1 where one worker exits [RIVET_SOURCE_VALUE_UNREPRESENTABLE] 5, on main through 0.31.0
     scope: source
-    patch: worker-error-loses-its-class/shared.patch
+    switch: worker-error-loses-its-class
     engines:
       postgres:
         cells: [a_refusal_in_one_worker_exits_as_with_one_worker_postgres]
@@ -157,7 +157,7 @@ seeds:
     class: a keyset run that stops before its first part keeps its resume anchor, so the run of another mode the refusal names as the remedy is refused as continuing an interrupted run
     history: "Sweep 14, 2026-10-12: a resumed MongoDB keyset run refused for a mixed-type `_id` left its claim on the cursor row; removing `page_size` (the remedy it names) was refused RIVET_STATE_INTERRUPTED_RUN_OWNER_MISMATCH, exit 5 (v0.31.0)"
     scope: source
-    patch: keyset-anchor-kept-without-a-part/shared.patch
+    switch: keyset-anchor-kept-without-a-part
     engines:
       mongo:
         cells:
@@ -178,7 +178,7 @@ seeds:
     scope: source
     engines:
       oracle:
-        patch: oracle-cdc-log-gap-uncoded/lib.patch
+        switch: oracle-cdc-log-gap-uncoded
         cells: ["lib:a_start_before_the_oldest_log_or_a_sequence_hole_is_a_data_loss_refusal", "a_checkpoint_past_the_retained_redo_is_refused_by_code_oracle"]
       postgres:
         na: "its log-gap refusal (a dropped slot) goes through checkpoint_identity::log_gap already (a_dropped_slot_after_a_changes_run_is_refused_by_code_postgres)"
@@ -194,10 +194,10 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: keyset-key-by-catalog-order/lib.patch
+        switch: keyset-key-by-catalog-order
         cells: ["lib:the_primary_key_comes_first_and_a_column_is_listed_once"]
       postgres:
-        patch: keyset-key-by-catalog-order/lib.patch
+        switch: keyset-key-by-catalog-order
         cells: ["lib:the_primary_key_comes_first_and_a_column_is_listed_once"]
       mssql:
         na: "its key query orders by is_pk DESC, name in SQL (src/source/mssql/mod.rs); the shared seam is covered under mysql/postgres"
@@ -211,16 +211,16 @@ seeds:
     scope: source
     engines:
       postgres:
-        patch: committed-every-event/postgres.patch
+        switch: committed-every-event
         cells: [roast_pg_cdc_large_transaction_is_atomic_across_a_mid_flush_crash]
       mysql:
-        patch: committed-every-event/mysql.patch
+        switch: committed-every-event
         cells: [roast_mysql_cdc_large_transaction_is_atomic_across_a_mid_flush_crash]
       mssql:
-        patch: committed-every-event/mssql.patch
+        switch: committed-every-event
         cells: [roast_mssql_cdc_large_transaction_is_atomic_across_a_mid_flush_crash]
       oracle:
-        patch: committed-every-event/oracle.patch
+        switch: committed-every-event
         cells: [roast_oracle_cdc_large_transaction_is_atomic_across_a_mid_flush_crash]
       mongo:
         na: "committed on every event IS the MongoDB contract (TxnFramer::single_event_commit, #158) - its consume-free resume token re-reads a mid-transaction tail, so there is no defect to seed"
@@ -229,7 +229,7 @@ seeds:
     class: the shared batch writer drops the first row written into each part it rotates to (max_file_size)
     history: the rotated-part loss class (roast_part_loss); counters agree with the loss, so only an independent re-read sees it
     scope: source
-    patch: row-lost-at-rotation/shared.patch
+    switch: row-lost-at-rotation
     engines:
       postgres:
         cells:
@@ -252,7 +252,7 @@ seeds:
     class: a run that continues past its last key (SQL keyset_incremental, Mongo source.mongo.resume) plans its warehouse load as a whole-table overwrite instead of an append
     history: "#399 - BigQuery and ClickHouse held 100, then 20, then 20 rows; 2026-10-03 - a Mongo resume export loaded 500 of 2500 documents into ClickHouse"
     scope: source
-    patch: delta-run-loaded-as-overwrite/shared.patch
+    switch: delta-run-loaded-as-overwrite
     engines:
       postgres:
         cells: [a_keyset_incremental_export_into_clickhouse_accumulates_every_run]
@@ -263,7 +263,7 @@ seeds:
       oracle:
         cells: [a_keyset_incremental_export_from_oracle_accumulates_in_clickhouse]
       mongo:
-        patch: delta-run-loaded-as-overwrite/mongo.patch
+        switch: delta-run-loaded-as-overwrite
         cells: [a_mongo_resume_export_into_clickhouse_accumulates_every_run]
       lib:
         cells:
@@ -276,24 +276,24 @@ seeds:
     scope: source
     engines:
       postgres:
-        patch: pk-move-without-delete/postgres.patch
+        switch: pk-move-without-delete-postgres
         cells:
           - pg_cdc_pk_changing_update_captures_and_does_not_brick
           - a_postgres_cdc_stream_loads_into_clickhouse_and_the_view_matches_the_source
           - a_key_move_leaves_one_live_row_per_key_in_a_partitioned_base_postgres
       mysql:
-        patch: pk-move-without-delete/mysql.patch
+        switch: pk-move-without-delete-mysql
         cells:
           - mysql_cdc_a_composite_key_move_is_a_delete_then_an_insert
           - a_mysql_cdc_stream_loads_into_clickhouse_and_the_view_matches_the_source
           - a_key_move_leaves_one_live_row_per_key_in_a_partitioned_base_mysql
       mssql:
-        patch: pk-move-without-delete/mssql.patch
+        switch: pk-move-without-delete-mssql
         cells:
           - a_sql_server_primary_key_move_flags_the_old_key_deleted_in_clickhouse
           - a_sql_server_cdc_stream_loads_into_clickhouse_and_the_view_matches_the_source
       oracle:
-        patch: pk-move-without-delete/oracle.patch
+        switch: pk-move-without-delete-oracle
         cells: [oracle_cdc_a_primary_key_update_is_a_delete_then_an_insert]
       mongo:
         na: _id is immutable, so a key move cannot be expressed
@@ -304,7 +304,7 @@ seeds:
     scope: source
     engines:
       oracle:
-        patch: renumber-equal-images/oracle.patch
+        switch: renumber-equal-images
         cells: [oracle_cdc_a_renumber_over_rows_with_equal_images_keeps_every_row]
       postgres:
         na: no row identity reaches the stream (test_decoding carries no ctid), so there is nothing to drop; an immediate key never logs a delete after a row moved into its key, and the DEFERRABLE-key case is the documented limitation
@@ -321,7 +321,7 @@ seeds:
     scope: source
     engines:
       postgres:
-        patch: absent-old-cell-read-as-moved-key/postgres.patch
+        switch: absent-old-cell-read-as-moved-key
         cells:
           - pg_cdc_an_update_of_a_replica_identity_index_that_is_not_the_key_stays_one_update
           - pg_cdc_a_declared_key_absent_from_the_old_key_does_not_split
@@ -340,7 +340,7 @@ seeds:
     class: an empty keyset page / chunk arrives as Schema::empty() and the quality gate reads it as a missing rule column
     history: "#419 - every keyset run under unique_columns whose range ended on an empty page failed"
     scope: source
-    patch: empty-page-fails-quality/shared.patch
+    switch: empty-page-fails-quality
     engines:
       postgres:
         cells:
@@ -366,7 +366,7 @@ seeds:
     class: a keyset run a post-data gate refused keeps its resume anchor, so the next run adopts its pages, reads nothing and passes the gate over nothing
     history: "night 2026-10-06 P-05 - parallel keyset + chunk_checkpoint and keyset_incremental: run 1 exit 3, run 2 exit 0 with _SUCCESS, on main and on v0.31.0"
     scope: source
-    patch: refused-run-adopted/shared.patch
+    switch: refused-run-adopted
     engines:
       postgres:
         cells:
@@ -401,7 +401,7 @@ seeds:
     class: a state schema migration that runs with no copy of the state as the previous release left it, so an upgrade cannot be rolled back
     history: "0.32.0 release blocker: the first run of a newer rivet migrated the state in place and 0.31.0 then refused it (RIVET_STATE_SCHEMA_NEWER, exit 5) with no copy and no restore path"
     scope: state
-    patch: migration-without-a-way-back/shared.patch
+    switch: migration-without-a-way-back
     engines:
       postgres-state:
         cells: ["lib:pg_a_migration_copies_every_state_table_into_a_backup_schema_before_the_first_ddl"]
@@ -412,7 +412,7 @@ seeds:
     class: "a rivet with a newer state schema migrates a state that a live run of the older release holds a lease on, even when it is then refused as busy, so the older release is refused RIVET_STATE_SCHEMA_NEWER on its next run"
     history: "0.32.2 pre-release gate on main 7fba31c4 after v38 (#650): the two previous-release cells of live_load_lease_keeper red at the rig oracle (`resume-point: export_load_spec` gained `source`) after this tree was refused `is writing` beside a 0.32.1 load holding the lease"
     scope: state
-    patch: migration-beside-a-live-lease/shared.patch
+    switch: migration-beside-a-live-lease
     engines:
       postgres-state:
         cells:
@@ -431,10 +431,10 @@ seeds:
     scope: state
     engines:
       postgres-state:
-        patch: setup-green-over-dead-state/postgres-state.patch
+        switch: setup-green-over-dead-state-postgres
         cells: [check_doctor_and_init_refuse_a_state_that_does_not_answer]
       sqlite-state:
-        patch: setup-green-over-dead-state/sqlite-state.patch
+        switch: setup-green-over-dead-state-sqlite
         cells: ["lib:a_sqlite_probe_names_the_file_and_refuses_what_it_cannot_read"]
   - name: remote-pg-state-plaintext-refused
     class: "a PostgreSQL state on a non-loopback host without TLS cannot be used: `?sslmode=disable` in RIVET_STATE_URL is ignored and every command is refused through the source TLS gate (`source.tls`, RIVET_STATE_BACKEND_FAILED, exit 1)"
@@ -442,7 +442,7 @@ seeds:
     scope: state
     engines:
       postgres-state:
-        patch: remote-pg-state-plaintext-refused/postgres-state.patch
+        switch: remote-pg-state-plaintext-refused
         cells:
           - a_remote_pg_state_without_tls_is_refused_by_code_and_sslmode_disable_opts_out
           - "lib:sslmode_disable_is_the_operators_opt_out_on_any_host"
@@ -455,7 +455,7 @@ seeds:
     scope: state
     engines:
       sqlite-state:
-        patch: sqlite-state-url-ignored-or-moved-blind/sqlite-state.patch
+        switch: sqlite-state-url-ignored-or-moved-blind
         cells:
           - a_sqlite_state_url_keeps_init_and_run_in_one_file_and_refuses_to_leave_state_behind
           - a_sqlite_state_url_that_leaves_the_state_behind_is_refused_and_walked_out
@@ -479,7 +479,7 @@ seeds:
     scope: state
     engines:
       sqlite-state:
-        patch: lease-file-named-by-a-lossy-token/sqlite-state.patch
+        switch: lease-file-named-by-a-lossy-token
         cells:
           - "lib:keys_that_read_alike_get_their_own_lease_file"
           - a_run_beside_a_live_export_whose_name_reads_alike_delivers
@@ -503,7 +503,7 @@ seeds:
     scope: state
     engines:
       sqlite-state:
-        patch: sqlite-overdue-writer-loses-its-place/sqlite-state.patch
+        switch: sqlite-overdue-writer-loses-its-place
         cells:
           - "lib:a_replan_beside_a_writer_slower_than_the_turn_patience_gets_its_turn"
           - "lib:turns_are_served_in_the_order_they_were_asked_and_a_late_one_gives_up"
@@ -515,7 +515,7 @@ seeds:
     scope: state
     engines:
       sqlite-state:
-        patch: sqlite-second-overdue-writer-has-no-place/sqlite-state.patch
+        switch: sqlite-second-overdue-writer-has-no-place
         cells:
           - "lib:a_replan_that_runs_out_of_patience_behind_an_overdue_writer_gets_its_turn"
           - "lib:turns_are_served_in_the_order_they_were_asked_and_a_late_one_gives_up"
@@ -536,7 +536,7 @@ seeds:
     class: "`rivet load` / `rivet compact` on a config without a `load:` block exit 1 with no RIVET_* code, so a scheduler cannot tell the config mistake from another failure"
     history: "0.32.2 hand sweep block 0 (D2), 2026-10-21: the stop said config has no top-level load block, exit 1, uncoded; through 0.32.1"
     scope: source
-    patch: load-block-missing-uncoded/shared.patch
+    switch: load-block-missing-uncoded
     engines:
       lib:
         cells: ["lib:plan_loads_gates_the_load_block_before_any_source_io"]
@@ -557,7 +557,7 @@ seeds:
     scope: source
     engines:
       postgres:
-        patch: pg-upgrade-false-log-gap/postgres.patch
+        switch: pg-upgrade-false-log-gap
         cells:
           - an_upgraded_stream_whose_old_release_advanced_its_slot_past_the_checkpoint_continues
           - "lib:an_older_releases_checkpoint_behind_its_slot_is_adopted_once_then_the_guard_is_strict"
@@ -575,7 +575,7 @@ seeds:
     scope: source
     engines:
       postgres:
-        patch: pg-foreign-advance-adopted/postgres.patch
+        switch: pg-foreign-advance-adopted
         cells:
           - a_slot_another_config_advanced_is_refused_instead_of_losing_its_changes
           - an_upgraded_stream_whose_old_release_advanced_its_slot_past_the_checkpoint_continues
@@ -595,12 +595,12 @@ seeds:
     scope: state
     engines:
       postgres-state:
-        patch: load-spec-last-writer-of-one-name/postgres-state.patch
+        switch: load-spec-last-writer-of-one-name
         cells:
           - five_configs_with_one_table_name_on_one_state_each_load_by_their_own_key
           - "lib:two_sources_of_one_export_name_keep_a_spec_each"
       sqlite-state:
-        patch: load-spec-last-writer-of-one-name/postgres-state.patch
+        switch: load-spec-last-writer-of-one-name
         cells: ["lib:two_sources_of_one_export_name_keep_a_spec_each", "lib:two_inits_of_one_export_name_keep_a_key_each"]
 
   - name: pg-migration-not-idempotent
@@ -609,7 +609,7 @@ seeds:
     scope: state
     engines:
       postgres-state:
-        patch: pg-migration-not-idempotent/postgres-state.patch
+        switch: pg-migration-not-idempotent
         cells: ["lib:pg_v32_replays_over_a_load_spec_table_already_in_its_v32_shape"]
       sqlite-state:
         na: the SQLite ladder never replays over leftovers - its version row lives in the same file and the ladder runs under BEGIN IMMEDIATE, so a migration there is not required to be idempotent
@@ -620,19 +620,19 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: capped-run-skips-remainder/ndjson.patch
+        switch: capped-run-skips-remainder
         cells: [mysql_cdc_cli_a_capped_run_leaves_its_remainder_to_the_next_run]
       mongo:
-        patch: capped-run-skips-remainder/ndjson.patch
+        switch: capped-run-skips-remainder
         cells: [mongo_cdc_cli_a_capped_run_leaves_its_remainder_to_the_next_run]
       postgres:
-        patch: capped-run-skips-remainder/sink.patch
+        switch: capped-run-skips-remainder
         cells: [pg_cdc_cli_a_capped_run_leaves_its_remainder_to_the_next_run]
       mssql:
-        patch: capped-run-skips-remainder/sink.patch
+        switch: capped-run-skips-remainder
         cells: [mssql_cdc_cli_a_capped_run_leaves_its_remainder_to_the_next_run]
       oracle:
-        patch: capped-run-skips-remainder/sink.patch
+        switch: capped-run-skips-remainder
         cells: [oracle_cdc_cli_writes_csv_parts_and_stops_at_the_cap_on_a_commit]
 
   - name: remedy-does-not-recover
@@ -669,7 +669,7 @@ seeds:
     class: an unfinished checkpoint run's stored progress (page cursor, anchor) is continued by a run of another mode as if it were a committed high-water
     history: "2026-10-06 - a keyset run crashed after page 0, the export was switched to mode: incremental without a reset: exit 0 with _SUCCESS and a manifest of 1900 of 2000 rows (v0.31.0)"
     scope: source
-    patch: interrupted-run-continued-by-another-mode/shared.patch
+    switch: interrupted-run-continued-by-another-mode
     engines:
       postgres:
         cells:
@@ -697,7 +697,7 @@ seeds:
     class: a run of the same mode whose plan keeps no checkpoint finishes beside an unfinished checkpoint run, and a later checkpointed run resumes that older run over data read before the finished one
     history: "2026-10-07 - a range-chunk run with chunk_checkpoint was killed after 6 of 20 chunks, the export ran once without chunk_checkpoint (exit 0), 20 rows changed, and with the checkpoint back the next run resumed the killed one: exit 0, manifest success, 14 of the 20 changed rows (main and v0.31.0; PostgreSQL, MySQL, SQL Server)"
     scope: source
-    patch: unfinished-run-beside-an-uncheckpointed-run/shared.patch
+    switch: unfinished-run-beside-an-uncheckpointed-run
     engines:
       postgres:
         cells:
@@ -735,7 +735,7 @@ seeds:
     class: "a chunked-mode export that runs as one pass because its table fits in one chunk names `full` as the mode that owns its progress, so beside an unfinished checkpoint run of its own mode it is refused as another mode and told to restore settings it still has"
     history: "2026-10-09 - main CI run 37862517574 - MySQL's row estimate of a 10-row table read at most chunk_size 4 once, and the run without `chunk_checkpoint` was told `this export now runs as full ... restore the chunked settings`; 12 of 12 with a 3-row table (PostgreSQL, MySQL, SQL Server)"
     scope: source
-    patch: single-pass-of-a-chunked-export-owned-by-full/shared.patch
+    switch: single-pass-of-a-chunked-export-owned-by-full
     engines:
       postgres:
         cells:
@@ -763,7 +763,7 @@ seeds:
     class: "a check of the config's shape placed after a shortcut that depends on the table's size: the planner's small-table escape returned one pass before the `chunk_column` type and the key were validated, so a `mode: chunked` config refused on a large table ran with exit 0 on a small one"
     history: "2026-10-09 - found by the checkpoint-removed cells following the row estimate (#511) - a DECIMAL `chunk_column` and a keyless table refused over 10 rows ran over 3 on PostgreSQL, MySQL, SQL Server and Oracle"
     scope: source
-    patch: chunked-shape-validated-only-past-one-chunk/shared.patch
+    switch: chunked-shape-validated-only-past-one-chunk
     engines:
       postgres:
         cells:
@@ -790,7 +790,7 @@ seeds:
     class: "a verifier that reads the absence of its evidence as an older format: `rivet validate` took a prefix with no manifest for a pre-manifest export and exited 0, although `_SUCCESS`, which is written only after the manifest, was there"
     history: "2026-10-09 - sabotage matrix, part 1 (#486) - manifest.json removed from a complete export: `validate` printed `status: legacy_run`, exit 0, on PostgreSQL, MySQL, SQL Server and MongoDB"
     scope: source
-    patch: marker-without-manifest-read-as-legacy/shared.patch
+    switch: marker-without-manifest-read-as-legacy
     engines:
       postgres:
         cells:
@@ -815,7 +815,7 @@ seeds:
     class: "a mutual exclusion taken by one kind of run only: the export's run lease was held by checkpointed runs, so two concurrent runs of any other mode both exited 0 and the destination held every key twice"
     history: "2026-10-07 - operator-contract Sweep 4 - two concurrent `full` runs of one export, 200 source rows, 400 delivered, exit 0 twice; the same on the range and keyset runners (sabotage matrix, 2026-10-09)"
     scope: source
-    patch: run-lease-held-only-by-checkpointed-runs/shared.patch
+    switch: run-lease-held-only-by-checkpointed-runs
     engines:
       postgres:
         cells:
@@ -846,7 +846,7 @@ seeds:
     class: "a stop whose holder is a live rivet process (another run, load or compact holds the export's or table's lease) exits 5, \"a human decides\", while its remedy is to wait and run again, so a scheduler never retries an overlap the next attempt completes"
     history: "2026-10-16 - retry-matrix F2 - RIVET_STATE_RUN_IN_PROGRESS and RIVET_LOAD_TABLE_BUSY exited 5 on main 04c4a712f; a concurrent `rivet run`, a retry beside orphaned children and a concurrent `rivet load` each failed an Airflow task for good"
     scope: source
-    patch: busy-stop-not-retryable/shared.patch
+    switch: busy-stop-not-retryable
     engines:
       postgres:
         cells:
@@ -877,7 +877,7 @@ seeds:
     class: "a refusal that one command gives by code and another gives as plain text: a second run beside a live checkpointed run exited 1 with no `RIVET_*` code, while `state reset` in the same situation gave RIVET_STATE_RUN_IN_PROGRESS (5)"
     history: "2026-10-07 - operator-contract Sweep 11 - exit 1, no code, on PostgreSQL, MySQL, SQL Server, Oracle and MongoDB"
     scope: source
-    patch: live-run-refusal-without-a-code/shared.patch
+    switch: live-run-refusal-without-a-code
     engines:
       postgres:
         cells:
@@ -905,7 +905,7 @@ seeds:
     class: "a command that rewrites what a run is writing without taking the run's lease: `rivet repair --execute` beside a live checkpointed run read its pending chunks as mismatched and exported them again while the run exported them too"
     history: "2026-10-09 - sabotage matrix - both processes exit 0 and the destination declares keys twice"
     scope: source
-    patch: repair-rewrites-chunks-beside-a-live-run/shared.patch
+    switch: repair-rewrites-chunks-beside-a-live-run
     engines:
       postgres:
         cells:
@@ -948,7 +948,7 @@ seeds:
     class: a whole-table Snowflake load replaces the target before its COPY succeeds, so a failed or lost COPY leaves the table empty until a retry succeeds
     history: "2026-10-16 retry matrix F6: `CREATE OR REPLACE TABLE` then `COPY` in one script; a COPY of an unreadable part left the target with 0 rows (read through DuckDB's snowflake extension), exit 1, on main through 0.31.0"
     scope: target
-    patch: snowflake-full-load-empties-before-copy/shared.patch
+    switch: snowflake-full-load-empties-before-copy
     engines:
       bigquery:
         na: "the seed edits src/load/snowflake.rs, which only a Snowflake load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
@@ -964,7 +964,7 @@ seeds:
     class: a load writes a warehouse name before asking whether the ledger has a record of it, or journals a stop before the write in a way the next load reads as ownership
     history: "2026-10-06 triage P-03, P-08, P-10 - an incremental or CDC load replaced a foreign view and appended to a foreign `__changes`, exit 0; the stale-buffer stop was journaled `failed` and the `writing` row preceded the ownership check, so the next load overwrote a table it had refused"
     scope: source
-    patch: load-append-writes-before-asking/shared.patch
+    switch: load-append-writes-before-asking
     engines:
       postgres:
         cells: [bigquery_incremental_onto_a_view_or_a_log_it_did_not_load_is_refused_every_time]
@@ -989,7 +989,7 @@ seeds:
     class: a base-and-buffer load consumes an empty baseline leg as "nothing to load" and creates no base, so the table's first change can never be compacted
     history: "field 2026-10-06 - tables empty at their CDC baseline had no BigQuery table; from their first change on `rivet compact` failed on each of them every cycle and the command exited non-zero (0.27 to 0.31)"
     scope: source
-    patch: empty-baseline-builds-no-base/shared.patch
+    switch: empty-baseline-builds-no-base
     engines:
       postgres:
         cells: [a_table_empty_at_baseline_takes_its_first_changes_postgres]
@@ -1029,7 +1029,7 @@ seeds:
     class: stored progress (incremental cursor, keyset high-water, resume anchor) is continued by an export that reads another table or collection
     history: "2026-10-06 - two same-named exports on one state database, or one export repointed without a reset: exit 0 with _SUCCESS and 0 of 1000 rows (v0.30.0, v0.31.0)"
     scope: source
-    patch: progress-inherited-by-another-stream/shared.patch
+    switch: progress-inherited-by-another-stream
     engines:
       postgres:
         cells:
@@ -1087,7 +1087,7 @@ seeds:
     scope: source
     engines:
       postgres:
-        patch: unreadable-probe-read-as-no-rows/postgres.patch
+        switch: unreadable-probe-read-as-no-rows
         cells:
           - parallel_keyset_incremental_on_a_smallint_key_delivers_the_source_rows_postgres
           - parallel_keyset_incremental_on_a_real_key_is_refused_by_name_postgres
@@ -1104,7 +1104,7 @@ seeds:
     class: a command that rewrites an export's stored progress does not take the export's run lease, so it is accepted while a checkpointed run of that export is alive
     history: "P-17, 2026-10-06 - `rivet state reset-chunks` during a checkpointed chunked run was accepted; the run exited 0 with `_SUCCESS` and a manifest of 0 parts for a 5000-row table, on main 9f6e0cbd and on v0.31.0"
     scope: state
-    patch: reset-under-a-live-run/shared.patch
+    switch: reset-under-a-live-run
     engines:
       sqlite-state:
         cells:
@@ -1127,7 +1127,7 @@ seeds:
     class: a checkpointed run completes a chunk run whose row is no longer in the state, and publishes a success over the parts it can no longer list
     history: "P-17, 2026-10-06 - the run whose `chunk_run` and `chunk_task` rows were removed under it finished exit 0 with `_SUCCESS` and 0 rows, 16 parts left in no manifest; since 2026-11-02 the patch removes both places that notice it (the run-end check and the completion)"
     scope: state
-    patch: checkpoint-gone-at-completion/shared.patch
+    switch: checkpoint-gone-at-completion
     engines:
       sqlite-state:
         cells: [pg_a_range_run_whose_checkpoint_rows_vanish_fails_loudly]
@@ -1140,7 +1140,7 @@ seeds:
     class: "a checkpointed run's end check counts the tasks it can still read without asking whether the run's rows were removed, and without waiting for a writer removing them, so a run that lost its checkpoint rows ends as the incomplete run RIVET_RUN_UNITS_FAILED with exit 1 (or exit 0 with a partial delivery when only the tasks went) instead of RIVET_STATE_CHUNK_CHECKPOINT_GONE with exit 5"
     history: "2026-11-02 - gate 2026-11-02, 1 run in 12 under load: pg_state_a_range_run_whose_checkpoint_rows_vanish_fails_loudly ended exit 1 with 24 chunk tasks not completed; a transaction deleting the rows was still open, the claim skipped the locked rows and the count read them; fixed by StateStore::settle_chunk_run"
     scope: state
-    patch: chunk-run-end-check-blind-to-removed-rows/shared.patch
+    switch: chunk-run-end-check-blind-to-removed-rows
     engines:
       sqlite-state:
         cells: [pg_a_range_run_whose_chunk_run_row_alone_vanishes_ends_gone, pg_a_range_run_whose_tasks_alone_vanish_ends_gone, pg_a_parallel_range_run_whose_chunk_run_row_alone_vanishes_ends_gone, pg_a_parallel_range_run_whose_tasks_alone_vanish_ends_gone]
@@ -1153,7 +1153,7 @@ seeds:
     class: "`state reset -e <parent>` of a `partition_by` export clears the declared name only: the partition children `<parent>__<value>` keep their cursors, the command prints \"State reset\" and exits 0, and the next run writes 0 rows"
     history: "found by a rivet-verifier probe on fe9eb559 (PostgreSQL, incremental + partition_by: reset printed, children cursors kept, next run `_SUCCESS` and no parquet); RED on main 2026-11-07 (the rig oracle: source 6 rows, delivered 0)"
     scope: source
-    patch: state-reset-skips-partition-children/shared.patch
+    switch: state-reset-skips-partition-children
     engines:
       postgres:
         cells: [partition_reset_parent_postgres, "lib:reset_of_a_partitioned_export_clears_every_child_and_nothing_else"]
@@ -1170,7 +1170,7 @@ seeds:
     class: "`state reset -e <parent>` takes the run lease of every partition child before it clears any, so a family larger than the open-file limit of the process on an SQLite state (two files per lease) fails with `Too many open files` and clears nothing"
     history: "verifier review of PR 881, 2026-11-07: 204 children under `ulimit -n 256` ended exit 1 `Too many open files (os error 24)`"
     scope: state
-    patch: state-reset-holds-every-lease-at-once/shared.patch
+    switch: state-reset-holds-every-lease-at-once
     engines:
       sqlite-state:
         cells:
@@ -1182,7 +1182,7 @@ seeds:
     class: "`state reset -e <parent>` lists the partitions to clear by a bare match of the stored source key and every boundary row, so a partition stored under another spelling of the source with no boundary is skipped and a partition that exists only for another source is cleared with its boundary"
     history: "verifier review of PR 881, 2026-11-07: children under the port-less spelling were left with their cursors, and a reset from source A deleted the boundary of `ev__2026-02-01` that only source B holds"
     scope: source
-    patch: state-reset-misreads-stored-partitions/shared.patch
+    switch: state-reset-misreads-stored-partitions
     engines:
       postgres:
         cells: [partition_reset_respelled_postgres, partition_reset_cross_source_postgres, "lib:reset_of_a_partitioned_export_takes_a_child_stored_under_a_respelled_source", "lib:reset_of_a_partitioned_export_leaves_the_partitions_of_another_source"]
@@ -1199,7 +1199,7 @@ seeds:
     class: "`state reset -e <parent>` of a `partition_by` export takes every stored name that starts with `<parent>__`, so an export of another config whose name carries that prefix (`events__archive`) loses its cursor with the partitions"
     history: "second-round review of PR 881, 2026-11-07 (F1): `events__archive`, an export of another config sharing the state, was deleted by a reset of `events`; a partition child is only `<parent>__<label>` with a day, month, year or null label"
     scope: source
-    patch: state-reset-takes-undeclared-name-with-parent-prefix/shared.patch
+    switch: state-reset-takes-undeclared-name-with-parent-prefix
     engines:
       postgres:
         cells: [partition_reset_labels_postgres, state_reset_family_a_reset_takes_the_partitions_of_its_labels_and_never_another_exports_name, "lib:owner_of_names_the_declared_export_or_the_parent_whose_label_the_name_carries"]
@@ -1215,7 +1215,7 @@ seeds:
     class: "a name `<parent>__<label>` is a partition of a `partition_by` export only when its label is of the export's current `partition_granularity`, so after the granularity is changed a reset of the export leaves the partitions stored under the old labels, and the next run at the old granularity resumes from their cursors and delivers a fraction of the rows"
     history: "verifier of PR 884, 2026-11-07 (A): events at day granularity then month, `state reset --export events` left the three day cursors with rc 0; back at day the run delivered 1 of 7 rows with exit 0, main reset all 5 and delivered 7"
     scope: source
-    patch: state-reset-takes-only-the-current-granularity/shared.patch
+    switch: state-reset-takes-only-the-current-granularity
     engines:
       postgres:
         cells: [partition_reset_granularity_postgres, partition_reset_granularity_pg_state_postgres, state_reset_family_a_partition_stored_under_another_granularity_is_shown_and_reset_with_the_export, "lib:child_labels_are_the_labels_generate_ranges_yields_at_any_granularity_and_the_null_bucket"]
@@ -1231,7 +1231,7 @@ seeds:
     class: "a `state reset -e <parent>` that loses a partition's run lease after the probe and after it has cleared earlier batches refuses with the \"nothing was done\" text, so the operator believes every partition kept its cursor"
     history: "second-round review of PR 881, 2026-11-07 (F2): a run taking a partition lease between two batches of 16 left cleared partitions and a kept parent, under a refusal that said nothing was done"
     scope: state
-    patch: state-reset-half-done-says-nothing-was-done/shared.patch
+    switch: state-reset-half-done-says-nothing-was-done
     engines:
       sqlite-state:
         cells:
@@ -1243,7 +1243,7 @@ seeds:
     class: "`state progression|files|chunks|metrics|journal --export <parent>__<label>` filters by the declared name only, so a held partition prints \"No progression boundaries recorded yet.\" while the state holds its row"
     history: "second-round review of PR 881, 2026-11-07 (F3): `state progression --export events__2026-01-01` printed no boundaries for a stored partition"
     scope: source
-    patch: state-inspect-of-a-partition-shows-nothing/shared.patch
+    switch: state-inspect-of-a-partition-shows-nothing
     engines:
       postgres:
         cells: [partition_reset_inspect_postgres, state_reset_family_an_inspect_command_refuses_a_name_no_partition_could_carry_and_shows_a_held_one, "lib:progression_of_a_child_shows_that_child_and_of_the_parent_shows_the_family"]
@@ -1259,7 +1259,7 @@ seeds:
     class: "an export-scoped command accepts `<parent>__<anything>` whatever the state holds, so a typo (`events__typo`) exits 0 with an empty answer instead of the unknown-export refusal"
     history: "second-round review of PR 881, 2026-11-07 (F4): the typo guard of `require_known_export` was lifted for every name carrying a declared export's prefix"
     scope: source
-    patch: state-inspect-accepts-a-label-the-state-does-not-hold/shared.patch
+    switch: state-inspect-accepts-a-label-the-state-does-not-hold
     engines:
       postgres:
         cells: [partition_reset_inspect_postgres, state_reset_family_an_inspect_command_refuses_a_name_no_partition_could_carry_and_shows_a_held_one, "lib:an_export_scoped_command_refuses_a_name_that_is_no_declared_export_or_held_child"]
@@ -1275,7 +1275,7 @@ seeds:
     class: "`state reset -e <parent>` of a chunked `partition_by` export clears a partition that has only a progression row when its chunk runs belong to another source"
     history: "second-round review of PR 881, 2026-11-07 (F5): a progression-only partition of another source (progression is keyed by name only) lost its boundary to a reset from this source"
     scope: source
-    patch: state-reset-takes-a-partition-of-another-sources-chunk-runs/shared.patch
+    switch: state-reset-takes-a-partition-of-another-sources-chunk-runs
     engines:
       postgres:
         cells: [partition_reset_chunked_postgres, "lib:a_boundary_with_no_cursor_belongs_to_the_source_of_its_chunk_runs", "lib:reset_of_a_partitioned_export_leaves_a_progression_only_partition_of_another_source"]
@@ -1291,7 +1291,7 @@ seeds:
     class: "the refusal of `state reset -e <parent>__<unknown label>` lists the parent among \"Partitions held\", naming the export being reset as one of its own partitions"
     history: "second-round review of PR 881, 2026-11-07 (F6): `Partitions held: events, events__2026-01-01` for a reset of `events__2026-03-03`"
     scope: source
-    patch: state-reset-lists-the-parent-as-a-partition/shared.patch
+    switch: state-reset-lists-the-parent-as-a-partition
     engines:
       postgres:
         cells: [partition_reset_unknown_child_postgres, "lib:reset_of_a_child_the_state_does_not_hold_is_refused_naming_the_partitions_held"]
@@ -1308,7 +1308,7 @@ seeds:
     class: an entry point builds its own export list instead of taking the run set, and runs a `partition_by` export unexpanded
     history: "`rivet apply <config>`, `--pool` and a sealed plan wrote the whole table under a directory literally named `{partition}`, exit 0 (v0.31.0)"
     scope: source
-    patch: apply-skips-partition-expansion/shared.patch
+    switch: apply-skips-partition-expansion
     engines:
       postgres:
         cells:
@@ -1331,7 +1331,7 @@ seeds:
     class: "a command that verifies a delivered tree takes the declared export list instead of the run set, so a `partition_by` export is read at the literal `{partition}` prefix, finds no manifest, and exits 0 as a legacy run with a partition deleted"
     history: "found 2026-10-31 by the roast duplication lens and confirmed on the binary: `rivet validate` of a `partition_by` export exited 0 (legacy_run) with a partition directory removed; closed 2026-11-01 by routing validate through RunSet::in_process and failing a partition with no manifest"
     scope: source
-    patch: validate-reads-literal-partition-prefix/shared.patch
+    switch: validate-reads-literal-partition-prefix
     engines:
       postgres:
         cells: [validate_reads_every_partition_postgres, validate_passes_a_partition_day_without_rows_postgres]
@@ -1348,7 +1348,7 @@ seeds:
     class: "a whole-config `check` or `doctor` reads the declared export list instead of the run set, so a CDC backfill recipe is described as an export, planned, counted in the `--target` tally and its unused destination probed"
     history: "found 2026-11-01 while closing #755: a whole-config `rivet check` printed `Export: <recipe>`, counted a refused column twice, and rejected a config over a recipe's `destination: stdout` that `plan` and `run` never use; closed 2026-11-01 by routing check, its planner and doctor through declared_exports"
     scope: source
-    patch: check-reads-declared-list-not-run-set/shared.patch
+    switch: check-reads-declared-list-not-run-set
     engines:
       postgres:
         cells:
@@ -1396,7 +1396,7 @@ seeds:
       mysql:
         na: "the seed is SQL Server's poll statement; this engine has no change-table low watermark to move a position up to"
       mssql:
-        patch: position-below-log-start-moved-up/mssql.patch
+        switch: position-below-log-start-moved-up
         cells:
           - mssql_cleanup_past_unread_changes_before_the_first_changes_run_is_refused
           - mssql_capture_instance_recreated_before_the_first_changes_run_is_refused
@@ -1406,14 +1406,14 @@ seeds:
       oracle:
         na: "the seed is SQL Server's poll statement; this engine has no change-table low watermark to move a position up to"
       lib:
-        patch: position-below-log-start-moved-up/mssql.patch
+        switch: position-below-log-start-moved-up
         cells: ["lib:a_position_below_the_low_watermark_always_reaches_the_refusal"]
 
   - name: baseline-mark-outlives-capture
     class: a CDC table's baseline mark outlives the capture it describes, so a table put back into the stream (or another table pointed at its destination) is continued with no baseline
     history: "2026-10-07 - a table removed from `tables:`, changed, and put back: exit 0, 2 source rows not delivered and 2 delivered rows not in the source, on PostgreSQL, MySQL, MongoDB and Oracle (v0.31.0)"
     scope: source
-    patch: baseline-mark-outlives-capture/shared.patch
+    switch: baseline-mark-outlives-capture
     engines:
       postgres:
         cells:
@@ -1438,7 +1438,7 @@ seeds:
     class: "`run --validate` computes a failed verdict, prints `validated: FAIL` and drops it from the run's exit"
     history: "2026-10-07 CLI sweep, RESULTS 2 - `run --validate` with `verify: content` on a local destination: `validated: FAIL`, exit 0, on main and on v0.31.0; `rivet validate` on the same prefix exits 3"
     scope: source
-    patch: failed-validation-exits-zero/shared.patch
+    switch: failed-validation-exits-zero
     engines:
       postgres:
         cells:
@@ -1457,7 +1457,7 @@ seeds:
     class: a run that fails before its first write still rewrites `manifest.json` to failed and deletes `_SUCCESS` over a complete export
     history: "2026-10-07 CLI sweep, RESULTS 8 - a complete export, then a run that cannot reach the source (exit 2): `_SUCCESS` gone and manifest.json `failed`, 0 rows, so `rivet validate` exits 1 after a network failure; on main and on v0.31.0"
     scope: source
-    patch: failed-run-remarks-the-prefix-before-a-write/shared.patch
+    switch: failed-run-remarks-the-prefix-before-a-write
     engines:
       lib:
         cells: ["lib:a_run_that_failed_before_its_first_write_leaves_the_complete_export_as_it_was"]
@@ -1481,7 +1481,7 @@ seeds:
     class: "`--resume --force` over a complete prefix of a checkpointed chunked export is refused as `nothing to continue`, against the refusal that named `--force`"
     history: "2026-10-07 CLI sweep, RESULTS 12 - `run --resume` over a complete prefix says `Pass --force to override`; `run --resume --force` then exits 1 `nothing to continue` and re-marks the complete prefix as failed; on main and on v0.31.0"
     scope: source
-    patch: forced-resume-refused-as-nothing-to-continue/shared.patch
+    switch: forced-resume-refused-as-nothing-to-continue
     engines:
       lib:
         cells: ["lib:a_forced_resume_with_nothing_to_continue_exports_again"]
@@ -1500,7 +1500,7 @@ seeds:
     class: a run whose state store does not take its first write (the run-status row) exports anyway
     history: "2026-10-07 CLI sweep, RESULTS 3 - an incremental run over a read-only `.rivet_state.db`: exit 0 with no metrics row, and every later run delivers the same delta again (16, then 19 rows for 13 source ids), on main and on v0.31.0"
     scope: source
-    patch: unwritable-state-run-exports/shared.patch
+    switch: unwritable-state-run-exports
     engines:
       postgres:
         cells: [a_run_over_a_read_only_state_is_refused_and_runs_once_it_is_writable_postgres]
@@ -1520,7 +1520,7 @@ seeds:
     class: an incremental cursor write that fails after the manifest is written is logged and the run exits 0
     history: "2026-10-07 CLI sweep, RESULTS 3 - `cursor advance failed AFTER the manifest was written` at ERROR level and exit 0, on main and on v0.31.0"
     scope: source
-    patch: unstored-cursor-exits-zero/shared.patch
+    switch: unstored-cursor-exits-zero
     engines:
       postgres:
         cells: [a_run_whose_cursor_write_fails_delivers_and_does_not_exit_0_postgres]
@@ -1537,7 +1537,7 @@ seeds:
     class: a `RIVET_STATE_URL` that is not a PostgreSQL URL is ignored and the state is kept in a SQLite file beside the config
     history: "2026-10-07 CLI sweep, RESULTS 9 - `RIVET_STATE_URL=postgre://...`: exit 0 on a SQLite state beside the config, with no message, on main and on v0.31.0"
     scope: source
-    patch: state-url-typo-falls-back-to-sqlite/shared.patch
+    switch: state-url-typo-falls-back-to-sqlite
     engines:
       postgres:
         cells: [an_unusable_state_url_is_refused_and_each_remedy_runs_postgres]
@@ -1554,7 +1554,7 @@ seeds:
     class: a read-only SQLite state (its directory, or the file under a pending migration) is reported as another rivet process holding the migration lock
     history: "2026-10-08 hand probe of #485 - a writable `.rivet_state.db` in a read-only directory: exit 2, no code, `could not acquire the migration lock ... Another rivet process is migrating this state database; wait for it to finish and retry`, on PostgreSQL, MySQL and SQL Server sources"
     scope: source
-    patch: readonly-state-read-as-migration-lock/shared.patch
+    switch: readonly-state-read-as-migration-lock
     engines:
       postgres:
         cells: [a_run_over_a_read_only_state_is_refused_and_runs_once_it_is_writable_postgres]
@@ -1574,7 +1574,7 @@ seeds:
     class: a CDC stream that cannot continue (unreadable checkpoint, truncated table, log gone past the checkpoint) is refused with exit 1 and no RIVET_* code
     history: "the 2026-10-07 CLI sweep: 18 known-red cells; a scheduler keyed on the exit class retried a refusal no retry can clear, and MongoDB's error 286 wore the replica-set setup hint"
     scope: source
-    patch: cdc-refusal-without-a-code/shared.patch
+    switch: cdc-refusal-without-a-code
     engines:
       postgres:
         cells: [pg_cdc_corrupt_checkpoint_fails_loud_not_silently_absent]
@@ -1595,7 +1595,7 @@ seeds:
     class: the corrupt-checkpoint refusal prescribes deleting the file, which is refused again under a baseline and skips every change since the checkpoint without one
     history: "RESULTS 13 of the 2026-10-07 CLI sweep: `delete it to accept a new anchor from a fresh snapshot` on four engines"
     scope: source
-    patch: corrupt-checkpoint-remedy-reanchors/shared.patch
+    switch: corrupt-checkpoint-remedy-reanchors
     engines:
       postgres:
         cells: [pg_cdc_corrupt_checkpoint_fails_loud_not_silently_absent]
@@ -1614,7 +1614,7 @@ seeds:
     class: a preflight command exits 0 and seals its artifact over a source it could not read
     history: "`rivet plan` over a missing table or a rejected login printed a WARN, exited 0 and wrote a plan `apply` then failed on (CLI sweep 10, 2026-10-07); on MongoDB the preflight did not ask whether the collection exists"
     scope: source
-    patch: plan-sealed-over-unreadable-source/shared.patch
+    switch: plan-sealed-over-unreadable-source
     engines:
       postgres:
         cells:
@@ -1629,7 +1629,7 @@ seeds:
           - plan_refuses_a_table_that_does_not_exist_mssql
           - plan_refuses_a_password_the_source_rejects_mssql
       mongo:
-        patch: plan-sealed-over-unreadable-source/mongo.patch
+        switch: plan-sealed-over-unreadable-source
         cells:
           - plan_refuses_a_collection_that_does_not_exist_mongo
           - check_refuses_a_collection_that_does_not_exist_as_run_does_mongo
@@ -1665,7 +1665,7 @@ seeds:
     class: a credential the config names that cannot be used is dropped and an ambient identity is built instead
     history: "a GCS `credentials_file` that was a directory, an empty or malformed file passed config and fell back to the VM metadata identity; a relative path was read under the working directory (hunt 2026-11-01)"
     scope: destination
-    patch: named-credential-falls-back/shared.patch
+    switch: named-credential-falls-back
     engines:
       local:
         na: "the seed edits the GCS store and the config key reader; a local directory names no credential to fall back from"
@@ -1704,7 +1704,7 @@ seeds:
     class: the source part of a progress key is the URL as spelled, so the same server with its default port left out is another source and its stored progress is not found
     history: "P-18, 2026-10-06 - an incremental export whose URL dropped `:5432` delivered ids 1..13 again instead of the delta 11..13, on main 52f26e45 and on v0.31.0"
     scope: source
-    patch: source-key-as-spelled/shared.patch
+    switch: source-key-as-spelled
     engines:
       postgres:
         cells: [source_url_without_its_default_port_continues_postgres]
@@ -1725,7 +1725,7 @@ seeds:
     class: a parallel keyset run resumed after a crash stores the highest key of the ranges it re-ran, not of the run
     history: "P-22, 2026-10-06 - after a crash and a resume, incremental on the key delivered 75 to 301 of 301 rows again, on main 52f26e45 and on v0.31.0"
     scope: source
-    patch: resumed-run-cursor-below-its-maximum/shared.patch
+    switch: resumed-run-cursor-below-its-maximum
     engines:
       postgres:
         cells: [resumed_parallel_keyset_then_incremental_postgres]
@@ -1744,7 +1744,7 @@ seeds:
     class: stored progress is continued by an export whose `query:` keeps its FROM relation and selects other rows of it
     history: "2026-10-06, found verifying #456 - an incremental export whose filter changed from `time_spent = 1` to `time_spent = 0` exited 0 with none of the five rows the new filter admits, on main 52f26e45 and on v0.31.0"
     scope: source
-    patch: progress-inherited-by-an-edited-filter/shared.patch
+    switch: progress-inherited-by-an-edited-filter
     engines:
       postgres:
         cells: [incremental_query_filter_edited_postgres, incremental_query_filter_edited_is_refused_twice_postgres]
@@ -1763,7 +1763,7 @@ seeds:
     class: stored progress is continued by an export that reads the same unqualified table through another `search_path`
     history: "2026-10-06, found verifying #456 - a source URL with `options=-csearch_path%3D<schema>` moved an incremental export to another schema's table under the stored cursor: exit 0 and none of its seven rows, on main 52f26e45 and on v0.31.0"
     scope: source
-    patch: progress-inherited-by-another-schema/shared.patch
+    switch: progress-inherited-by-another-schema
     engines:
       postgres:
         cells: [same_table_in_another_schema_is_another_stream_postgres, same_table_in_another_schema_is_refused_twice_postgres]
@@ -1782,7 +1782,7 @@ seeds:
     class: "`rivet state reset --export X` deletes the progress of every export named X in the state database, whatever source it reads"
     history: "P-19, 2026-10-06 - a reset under one config deleted the cursor of a same-named export of another source, whose next run delivered its table again (14 rows on disk for 7 source ids), on main 52f26e45 and on v0.31.0"
     scope: state
-    patch: reset-clears-another-source/shared.patch
+    switch: reset-clears-another-source
     engines:
       sqlite-state:
         cells: [state_reset_keeps_the_cursor_of_another_source]
@@ -1797,7 +1797,7 @@ seeds:
     class: the rows part of a progress key is read from the query after `${param}` substitution, so another value of a placeholder between two runs is refused as an edited filter
     history: "2026-10-08, owner decision on #493 - an incremental export whose `WHERE time_spent = ${spent}` ran with `--param spent=1` and then `--param spent=0` was refused with exit 5 RIVET_STATE_CURSOR_STREAM_MISMATCH on the PR's head 3dd6ade4; a value is the operator's to change"
     scope: source
-    patch: param-value-read-as-a-filter-edit/shared.patch
+    switch: param-value-read-as-a-filter-edit
     engines:
       postgres:
         cells: [incremental_query_param_value_changes_between_runs_postgres]
@@ -1816,7 +1816,7 @@ seeds:
     class: "a batch `rivet load` (full or incremental) takes the runs of a CDC export of the same name nested inside its prefix (`exports/<t>/cdc/`, the `rivet init` layout): the batch table receives the stream's change rows and keeps a deleted key, exit 0"
     history: "0.32.1 item 1, 2026-10-18: measured on main 8afde974 into ClickHouse: full load 7 rows for 5 source rows, incremental keeps deleted id 2 (SQL Server, MySQL), PostgreSQL lands unparseable change rows"
     scope: source
-    patch: nested-cdc-runs-loaded-by-batch/shared.patch
+    switch: nested-cdc-runs-loaded-by-batch
     engines:
       postgres:
         cells: [an_incremental_load_under_a_nested_cdc_prefix_takes_only_its_own_manifests_postgres]
@@ -1837,7 +1837,7 @@ seeds:
     class: "a MySQL read whose session is still at the server's time zone after rivet's `SET time_zone = '+00:00'` (a proxy dropped or rerouted the SET) writes every TIMESTAMP shifted by the offset, exit 0"
     history: "0.32.1 D5, 2026-10-18: a pilot's ProxySQL in front of a Europe/Moscow MySQL; measured on main 51a1b69c through proxysql-tz (a rule answering `SET time_zone` with OK): `2026-01-01T12:00:00Z` exported for `09:00:00Z`, exit 0. ProxySQL 2.5.5 with no rule forwards the SET and logs `Unable to parse unknown SET query ... Setting lock_hostgroup` for rivet's reset `SET time_zone = @@global.time_zone`"
     scope: source
-    patch: mysql-session-off-utc-read/mysql.patch
+    switch: mysql-session-off-utc-read
     engines:
       mysql:
         cells:
@@ -1855,7 +1855,7 @@ seeds:
     class: "a MySQL `columns:` override whose declared type has no arm for the value the server sent (an integer under float4/float8, a double under int8) writes NULL for every row instead of the value or a coded refusal, exit 0"
     history: "hunt-3 F1, 2026-11-08: RED on main 2026-11-08 (the rig, delivered parquet read back: `INT` as float8 gave [None, None, None, None] against the inserted 1..4, MySQL only; PostgreSQL refused at check, Oracle delivered 7.0)"
     scope: source
-    patch: mysql-override-unread-value-nulled/mysql.patch
+    switch: mysql-override-unread-value-nulled
     engines:
       mysql:
         cells:
@@ -1878,7 +1878,7 @@ seeds:
     class: "the run summary's `per_export[]` entry of a `skip_empty` run says `skipped` without the reason the metrics row and the console card carry"
     history: "0.32.1 item 6, 2026-10-18: measured on main 935064e8: `--summary-output` entry `\"status\":\"skipped\"`, `skip_reason` absent (read as null) on the sequential and the process runner"
     scope: source
-    patch: summary-skip-reason-dropped/shared.patch
+    switch: summary-skip-reason-dropped
     engines:
       postgres:
         cells: [a_skipped_entry_of_the_run_summary_says_why, "lib:a_skipped_entry_carries_the_reason_the_run_skipped"]
@@ -1894,7 +1894,7 @@ seeds:
     class: "`rivet init` names a table's CDC export like its batch export and nests the CDC prefix (`exports/<t>/cdc/`) inside the batch one, so the two share a load spec and a batch load lists the stream's runs"
     history: "0.32.1 item 2, 2026-10-18: measured on main 935064e8 with SQL Server init (batch, then --mode cdc): `name: ab2_mssql_cdc_new` twice, `exports/ab2_mssql_cdc_new/` and `exports/ab2_mssql_cdc_new/cdc/`"
     scope: source
-    patch: init-cdc-shares-batch-name/shared.patch
+    switch: init-cdc-shares-batch-name
     engines:
       postgres:
         cells: ["lib:a_batch_and_a_cdc_scaffold_of_one_table_share_no_name_and_nest_no_prefix"]
@@ -1911,7 +1911,7 @@ seeds:
     class: "a schema-wide SQL Server `rivet init` scaffolds the system tables SQL Server ships (`dbo.systranschemas` of a CDC database) as exports"
     history: "0.32.1 item 2, 2026-10-18: measured on main 935064e8 against the mssql-cdc stand: `- name: systranschemas` in the scaffold"
     scope: source
-    patch: mssql-shipped-tables-scaffolded/mssql.patch
+    switch: mssql-shipped-tables-scaffolded
     engines:
       mssql:
         cells: [init_mssql_schema_wide_leaves_out_the_tables_sql_server_ships]
@@ -1928,7 +1928,7 @@ seeds:
     class: "a SQL Server run as a login without `VIEW SERVER PERFORMANCE STATE` / `VIEW SERVER STATE` queries the server counters anyway, and the driver logs the denial at ERROR on every sample"
     history: "0.32.1 item 2, 2026-10-18: measured on main 935064e8 with a db_datareader login on the mssql-cdc stand: two `VIEW SERVER PERFORMANCE STATE permission was denied` ERROR lines per `rivet run`"
     scope: source
-    patch: mssql-denied-counters-queried/mssql.patch
+    switch: mssql-denied-counters-queried
     engines:
       mssql:
         cells: [a_sql_server_reader_without_server_grants_runs_without_permission_errors]
@@ -1945,7 +1945,7 @@ seeds:
     class: "two CDC configs `rivet init -o` writes for one cluster name the same PostgreSQL slot and MySQL `server_id`, so the second reads the first one's stream"
     history: "0.32.2 item 3, 2026-10-18: measured on main: `-o staging.yaml` and `-o prod.yaml` both wrote `slot: rivet_<table>` (and `server_id: 4271`)"
     scope: source
-    patch: init-cdc-stream-names-shared/shared.patch
+    switch: init-cdc-stream-names-shared
     engines:
       postgres:
         cells: [two_cdc_configs_of_one_cluster_name_their_own_stream_objects]
@@ -1961,7 +1961,7 @@ seeds:
     class: "two CDC configs `rivet init -o` writes for one table into one directory name one checkpoint, so each stream resumes where the other stopped and skips what it read, exit 0"
     history: "0.32.2, owner decision 2026-10-21: `-o a.yaml` and `-o b.yaml` both wrote `checkpoint: ./cdc/<table>.ckpt` and `./output/<table>_cdc/`; fixed by stem-derived names and RIVET_INIT_CDC_NAME_TAKEN"
     scope: source
-    patch: init-cdc-checkpoint-shared-by-name/shared.patch
+    switch: init-cdc-checkpoint-shared-by-name
     engines:
       postgres:
         cells: [two_init_configs_in_one_dir_keep_their_streams_apart_postgres]
@@ -1993,7 +1993,7 @@ seeds:
     class: "`rivet cdc --checkpoint` reads a checkpoint a `mode: cdc` export owns without claiming it, and acks the stream's position, so the export skips the changes the command read, exit 0"
     history: "found 2026-11-01 by the entry-parity hunt (AXIS GAP 1): `dispatch_cdc` never routed through `claim_checkpoint`; RED on main 266a7de5 (`rivet cdc` over an export's checkpoint exit 0 on PostgreSQL, MySQL and SQL Server)"
     scope: source
-    patch: rivet-cdc-skips-the-checkpoint-claim/shared.patch
+    switch: rivet-cdc-skips-the-checkpoint-claim
     engines:
       postgres:
         cells: [rivet_cdc_is_refused_the_checkpoint_an_export_owns_postgres]
@@ -2025,7 +2025,7 @@ seeds:
     class: "a PostgreSQL CDC export continues from a slot another config consumed past its checkpoint, so the changes in between are missing from its output with exit 0"
     history: "0.32.2 item 4, 2026-10-20: measured on main c1cf6a92: config A, config B on one slot in turn; A's third run exit 0 without B's row"
     scope: source
-    patch: pg-slot-advanced-by-another-reader/postgres.patch
+    switch: pg-slot-advanced-by-another-reader
     engines:
       postgres:
         cells:
@@ -2044,7 +2044,7 @@ seeds:
     class: "`rivet state accept` reports an edited query as accepted and leaves the stored progress bound to the query it was written reading, so the next run is refused as before"
     history: "2026-10-08, owner decision on #493 - a refused edit that is meant had no way out that kept the cursor (`state accept` did not exist on the PR's head 3dd6ade4); seeded so the command cannot answer `Accepted` without re-binding the row"
     scope: source
-    patch: accepted-edit-not-recorded/shared.patch
+    switch: accepted-edit-not-recorded
     engines:
       postgres:
         cells: [incremental_query_cosmetic_edit_is_refused_until_accepted_postgres]
@@ -2063,7 +2063,7 @@ seeds:
     class: a run that resumes a crashed range-chunk checkpoint executes the task list the crashed run stored and never looks at the source's key span again
     history: "2026-10-08, sabotage rows kill_then_source_grows_range_checkpoint and kill_then_source_fills_empty_range_checkpoint - three rows inserted after the crash were in no part (200 of 203), and an empty table killed mid-run and then filled was delivered as 0 of 40, exit 0 on main 95bef44a and on v0.31.0"
     scope: source
-    patch: resumed-chunk-run-keeps-its-stale-plan/shared.patch
+    switch: resumed-chunk-run-keeps-its-stale-plan
     engines:
       postgres:
         cells: [a_range_checkpoint_run_killed_before_the_source_grows_delivers_the_source_postgres, a_range_checkpoint_parallel_run_killed_before_the_source_grows_delivers_the_source_postgres, a_run_killed_over_an_empty_table_before_it_fills_delivers_the_source_postgres, a_range_checkpoint_run_killed_before_the_source_grows_is_resumed_to_the_source_postgres, stand_pool_split_resume_grows_postgres]
@@ -2082,7 +2082,7 @@ seeds:
     class: a resumed parallel keyset run skips its committed, open-ended last range and reads no key above the highest one that range delivered
     history: "2026-10-08, sabotage row kill_then_source_grows_keyset_checkpoint_parallel - killed when its last key range committed, the resume left three rows inserted after the crash in no part (200 of 203), exit 0 on main 95bef44a and on v0.31.0"
     scope: source
-    patch: resumed-parallel-keyset-stops-at-its-last-range/shared.patch
+    switch: resumed-parallel-keyset-stops-at-its-last-range
     engines:
       postgres:
         cells: [a_keyset_checkpoint_parallel_run_killed_before_the_source_grows_delivers_the_source_postgres, a_keyset_checkpoint_parallel_run_with_no_recorded_top_killed_before_the_source_grows_delivers_the_source_postgres]
@@ -2120,7 +2120,7 @@ seeds:
     class: an unfinished checkpointed run is continued in another format than the parts it already wrote, and its success manifest names parts of both
     history: "2026-10-08, sabotage row edit_format_unfinished_checkpoint - a range-checkpoint run killed after three parquet parts and resumed under `format: csv` finished with a manifest naming parquet and csv parts, exit 0 on main 95bef44a and on v0.31.0"
     scope: source
-    patch: unfinished-run-finished-in-another-format/shared.patch
+    switch: unfinished-run-finished-in-another-format
     engines:
       postgres:
         cells: [an_unfinished_run_whose_format_is_edited_is_refused_and_walked_out_postgres, an_unfinished_run_whose_format_is_edited_is_refused_twice_postgres]
@@ -2141,16 +2141,16 @@ seeds:
     scope: source
     engines:
       postgres:
-        patch: cdc-anchor-written-before-the-refusal/postgres.patch
+        switch: cdc-anchor-written-before-the-refusal
         cells: [a_refused_changes_only_cdc_run_on_a_missing_table_leaves_no_slot_postgres]
       mysql:
-        patch: cdc-anchor-written-before-the-refusal/mysql.patch
+        switch: cdc-anchor-written-before-the-refusal
         cells:
           - roast_mysql_cdc_refuses_a_view_whose_binlog_identity_is_the_base_table
           - cdc_from_a_replica_that_does_not_relog_refuses_instead_of_capturing_nothing
           - a_refused_cdc_run_on_a_missing_table_leaves_no_checkpoint_mysql
       oracle:
-        patch: cdc-anchor-written-before-the-refusal/oracle.patch
+        switch: cdc-anchor-written-before-the-refusal
         cells: [a_refused_cdc_run_on_a_table_without_all_column_logging_leaves_no_checkpoint_oracle]
       mssql:
         na: "the SQL Server open writes no anchor: the stream floors at fn_cdc_get_min_lsn and the checkpoint is the sink's, written at the first ack"
@@ -2161,7 +2161,7 @@ seeds:
     class: a first CDC run that ends in an error keeps the anchor it created (a replication slot, a checkpoint file, the captured-tables record) instead of releasing it
     history: "umbrella #852 (2026-11-06): PostgreSQL run 1 exit 1 RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH left the slot, MySQL run 1 exit 6 RIVET_INTERNAL_TYPE_BUILDER left the checkpoint, both before any baseline leg delivered; on main and on v0.32.2"
     scope: source
-    patch: cdc-first-run-refusal-keeps-anchor/shared.patch
+    switch: cdc-first-run-refusal-keeps-anchor
     engines:
       postgres:
         cells: [a_first_cdc_run_refused_after_its_anchor_releases_it_postgres, "lib:a_stop_on_a_first_run_releases_what_the_run_created_and_a_success_keeps_it"]
@@ -2174,11 +2174,28 @@ seeds:
       mongo:
         na: "no first-run refusal after the anchor is reachable on MongoDB: the baseline leg reads each document into one column and a `columns:` override names no column of it, so the file-anchor release is graded by the MySQL, SQL Server and Oracle cells (2026-11-06)"
 
+  - name: cdc-first-run-probe-opens-its-own-connection
+    class: a PostgreSQL CDC run asks the server whether its slot exists on a connection of its own instead of the one the run already holds, so a steady-state run opens three source connections where the release before it opened two
+    history: "2026-11-14 island leg perf[postgres/cdc-conns] 3/2 on 0.33.0 (3 of 3 runs); the extra connection is the first-run proof added by #877, which repeats on every run until the first delivery; RED on main 2026-11-14 (a counting proxy: 3 accepted connections in the counted run, 2 on v0.32.2)"
+    scope: source
+    switch: cdc-first-run-probe-opens-its-own-connection
+    engines:
+      postgres:
+        cells: [pg_cdc_steady_state_run_opens_at_most_two_source_connections, "lib:the_slot_is_asked_on_the_connection_the_run_holds"]
+      mysql:
+        na: "the seeded probe is the PostgreSQL slot proof and no replication slot exists on mysql; the engine count stays graded by mysql_cdc_steady_state_run_opens_at_most_two_source_connections, green with the seed (2026-11-14)"
+      mssql:
+        na: "the seeded probe is the PostgreSQL slot proof and no replication slot exists on mssql; the engine count stays graded by mssql_cdc_steady_state_run_opens_at_most_two_source_connections, green with the seed (2026-11-14)"
+      mongo:
+        na: "the seeded probe is the PostgreSQL slot proof and no replication slot exists on mongo; the engine count stays graded by mongo_cdc_steady_state_run_opens_at_most_six_source_connections, green with the seed (2026-11-14)"
+      oracle:
+        na: "the seeded probe is the PostgreSQL slot proof and no replication slot exists on oracle; the engine count stays graded by oracle_cdc_steady_state_run_opens_at_most_two_source_connections, green with the seed (2026-11-14)"
+
   - name: cdc-lost-file-anchor-reanchors
     class: a file-anchored CDC stream whose checkpoint file is gone anchors at the current position with a warning and exit 0, skipping every change committed since the lost position
     history: "2026-10-30 client report: MySQL binlog CDC with a Postgres state DB under Airflow, the checkpoint file lost when a task landed on another worker; `initial: none` re-anchored and the rows between the old and the new position were never delivered (rig oracle: source 2, delivered 1); on main and on v0.32.2"
     scope: source
-    patch: cdc-lost-file-anchor-reanchors/shared.patch
+    switch: cdc-lost-file-anchor-reanchors
     engines:
       postgres:
         na: "the slot is the anchor on the server; a missing slot is refused by the PriorRun guard"
@@ -2215,7 +2232,7 @@ seeds:
     class: the `rivet cdc` stdout driver prints and checkpoints but never acks the source, so a consuming anchor never moves
     history: "CLI sweep 16: three `rivet cdc` runs to stdout over three changes emitted [3, 3, 3] on PostgreSQL, with or without `--checkpoint`; on main and on v0.31.0"
     scope: source
-    patch: stdout-drain-never-acks/shared.patch
+    switch: stdout-drain-never-acks
     engines:
       postgres:
         cells: [cdc_to_stdout_emits_each_change_once_postgres]
@@ -2236,7 +2253,7 @@ seeds:
     scope: source
     engines:
       postgres:
-        patch: message-only-window-ends-the-drain/postgres.patch
+        switch: message-only-window-ends-the-drain
         cells:
           - pg_cdc_cli_rollover_1_delivers_the_pending_changes
           - pg_cdc_rollover_1_delivers_the_commits_behind_an_idle_runs_barrier
@@ -2272,7 +2289,7 @@ seeds:
     scope: source
     engines:
       postgres:
-        patch: init-bounds-a-drain-on-a-standby/postgres.patch
+        switch: init-bounds-a-drain-on-a-standby
         cells: [the_config_init_writes_runs_cdc_on_a_standby_postgres]
       mysql:
         na: "the standby twin is PostgreSQL's (logical decoding on a hot standby); the scaffold's bounded drain runs on a MySQL replica"
@@ -2287,7 +2304,7 @@ seeds:
     class: a runner stamps its part name from the wall clock instead of from its run id, so two runs of one export in one millisecond write one file name
     history: "v0.31.0 - two `rivet run` of one incremental export ended their read in one millisecond: one part, two Success manifests, and file_log and export_metrics counting 400 rows over a 200-row file (#507; the MongoDB parallel reader stamped its worker parts the same way)"
     scope: source
-    patch: part-named-by-the-clock/single.patch
+    switch: part-named-by-the-clock
     engines:
       postgres:
         cells: [incremental_runs_started_together_each_declare_their_own_part_postgres]
@@ -2296,7 +2313,7 @@ seeds:
       mssql:
         cells: [incremental_runs_started_together_each_declare_their_own_part_mssql]
       mongo:
-        patch: part-named-by-the-clock/mongo.patch
+        switch: part-named-by-the-clock
         cells: [parallel_parts_are_named_after_their_run_mongo]
       oracle:
         cells: [incremental_runs_started_together_each_declare_their_own_part_oracle]
@@ -2318,7 +2335,7 @@ seeds:
     scope: source
     engines:
       postgres:
-        patch: statement-described-by-another-read/postgres.patch
+        switch: statement-described-by-another-read
         cells:
           - a_second_table_through_one_transaction_pooler_arrives_as_itself_full_postgres
           - a_second_table_through_one_transaction_pooler_arrives_as_itself_keyset_postgres
@@ -2342,7 +2359,7 @@ seeds:
     scope: state
     engines:
       postgres-state:
-        patch: lease-granted-without-a-keeper/postgres-state.patch
+        switch: lease-granted-without-a-keeper
         cells: [a_load_that_cannot_open_its_lease_keeper_refuses_twice_then_loads]
       sqlite-state:
         na: the SQLite lease is an flock on a sidecar file, held by its descriptor until the holder ends - nothing renews it and no connection can fail to open
@@ -2350,7 +2367,7 @@ seeds:
     class: a query recogniser slices the query text at a keyword's byte length, inside a multi-byte character, and the run ends in a panic instead of reading the query
     history: "2026-10-11: `/* <Cyrillic> */ SELECT 1 AS id` and `WITH <e-acute> AS (...) SELECT ...` in `mode: full` ended with exit 101 and 0 files on main and v0.31.0 (`byte index 6 is not a char boundary`); every request tries the query for `SELECT * FROM t`"
     scope: source
-    patch: query-prefix-cut-mid-character/shared.patch
+    switch: query-prefix-cut-mid-character
     engines:
       postgres:
         cells: [a_query_opening_with_non_ascii_text_delivers_its_rows_postgres]
@@ -2369,7 +2386,7 @@ seeds:
     class: the chunked planner scans a query's projection for `FROM` by slicing four bytes at every offset, inside a multi-byte character, and the run ends in a panic instead of planning
     history: "2026-10-11: `SELECT g AS id, 'caf<e-acute>' AS label FROM generate_series(1, 100) AS g` with `chunk_column: id` ended with exit 101 and 0 files on main and v0.31.0 (`byte index 14 is not a char boundary`); the ASCII spelling delivered 100 rows"
     scope: source
-    patch: projection-scan-cut-mid-character/shared.patch
+    switch: projection-scan-cut-mid-character
     engines:
       postgres:
         cells: [a_chunked_query_holding_non_ascii_text_delivers_its_rows_postgres]
@@ -2389,7 +2406,7 @@ seeds:
     class: "a PostgreSQL batch connection sends a session-level `SET`, which stays on the server connection a transaction-mode pooler hands to its other clients"
     history: "v0.30.0 and v0.31.0 - behind an idle pgBouncer in transaction mode (pool sizes 1 and 5) the pid-flip detection saw a direct connection, so every run left TimeZone, DateStyle, IntervalStyle and bytea_output set on the pooled session; on a database whose default is `escape` another client then read `bytea::text` in hex"
     scope: source
-    patch: session-set-on-a-pooled-connection/postgres.patch
+    switch: session-set-on-a-pooled-connection
     engines:
       postgres:
         cells: [every_batch_shape_through_a_transaction_pooler_leaves_its_session_as_it_was_postgres]
@@ -2408,7 +2425,7 @@ seeds:
     class: "the PostgreSQL CDC reader sends a session-level `SET` when it opens, which stays on the server connection a transaction-mode pooler hands to its other clients"
     history: "v0.19.1 through v0.31.0 - the test_decoding reader set DateStyle, bytea_output, IntervalStyle, extra_float_digits and TimeZone with session SETs at every open (no pooler detection); through pgBouncer in transaction mode a refused run and a run that read changes alike left all five with pg_settings.source = session on the pooled backend"
     scope: source
-    patch: session-set-on-a-pooled-cdc-connection/postgres.patch
+    switch: session-set-on-a-pooled-cdc-connection
     engines:
       postgres:
         cells: [a_cdc_run_refused_through_a_transaction_pooler_leaves_its_session_as_it_was_postgres]
@@ -2427,7 +2444,7 @@ seeds:
     class: "a compaction picks each key's winner with an ORDER BY that sorts NULL first, so on Snowflake a re-loaded baseline row (NULL position) outranks every change and the base keeps the old value"
     history: "2026-10-28 - Snowflake gained `rivet compact` (`load.layout: base_buffer`); Snowflake sorts NULL first in DESC where BigQuery sorts it last, so the winner order needs the explicit `__pos IS NOT NULL` rank the current-state view already carries"
     scope: source
-    patch: snowflake-compact-ranks-baseline-first/shared.patch
+    switch: snowflake-compact-ranks-baseline-first
     engines:
       postgres:
         cells: [snowflake_compact_cycle_postgres, "lib:the_winner_ranks_a_missing_position_last_on_snowflake_only"]
@@ -2446,7 +2463,7 @@ seeds:
     class: "a warehouse whose base table is the default layout resolves an unwritten `load.layout` to log+view, so the base is never built and `rivet compact` has nothing to merge into"
     history: "2026-10-28 - Snowflake's base-and-buffer layout became the default for every incremental and cdc export; written `layout: log_view` keeps the log and the view"
     scope: source
-    patch: snowflake-base-buffer-not-the-default/shared.patch
+    switch: snowflake-base-buffer-not-the-default
     engines:
       postgres:
         cells: [snowflake_compact_cycle_postgres, snowflake_incremental_buffer_compacts_into_its_base_postgres, "lib:snowflake_takes_a_base_unless_log_view_is_written"]
@@ -2465,7 +2482,7 @@ seeds:
     class: "a baseline Parquet staged without the delete flag is loaded into a Snowflake base as it is: the COPY transform reads the absent column as NULL, and every row falls out of `WHERE NOT __is_deleted`"
     history: "2026-10-28 - the warehouse cell that loads one extract into BigQuery and Snowflake read 0 live rows of 2000 on the Snowflake base; the baseline had been staged under the log+view layout"
     scope: source
-    patch: snowflake-baseline-flag-left-null/shared.patch
+    switch: snowflake-baseline-flag-left-null
     engines:
       postgres:
         cells: [snowflake_baseline_without_the_flag_lands_live_postgres, "lib:the_delete_flag_is_false_for_a_row_the_file_does_not_flag"]
@@ -2484,7 +2501,7 @@ seeds:
     class: "a base-and-buffer load meets a VIEW under the base name and goes on, appending to the buffer or failing in the warehouse instead of stopping with the coded conflict"
     history: "2026-10-28 - with base-and-buffer the default on Snowflake, a table left as a log+view view must stop every load leg and compact; BigQuery shared the silent append"
     scope: source
-    patch: load-view-as-base-guard-removed/shared.patch
+    switch: load-view-as-base-guard-removed
     engines:
       postgres:
         cells: [snowflake_view_under_the_base_name_stops_load_and_compact_postgres, "lib:a_view_under_the_base_name_stops_every_load_leg_with_the_coded_conflict"]
@@ -2517,7 +2534,7 @@ seeds:
     class: "a catalog probe sums COUNT_IF terms, which are NULL over zero rows, so a free table name has no kind and the load stops before any write"
     history: "2026-10-13 - found by the first live Snowflake run from devbox and by the rig cells graded through DuckDB's snowflake extension; every load onto a free name failed in 0.26.0 through 0.31.0"
     scope: target
-    patch: snowflake-probe-counts-by-count-if/shared.patch
+    switch: snowflake-probe-counts-by-count-if
     engines:
       bigquery:
         na: "the seed edits src/load/snowflake.rs, which only a Snowflake load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
@@ -2574,7 +2591,7 @@ seeds:
     class: "the ALTER that reconciles a change log repeats ADD COLUMN per column, a syntax error on Snowflake"
     history: "2026-10-13 - found by the first live Snowflake run from devbox and by the rig cells graded through DuckDB's snowflake extension; the adopt test and the CDC snapshot cell failed at `unexpected COLUMN`"
     scope: target
-    patch: snowflake-add-column-per-column-keyword/shared.patch
+    switch: snowflake-add-column-per-column-keyword
     engines:
       bigquery:
         na: "the seed edits src/load/snowflake.rs, which only a Snowflake load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
@@ -2588,7 +2605,7 @@ seeds:
     class: "a part is read without Parquet logical types, so a timestamp without a zone is stored as its microsecond integer taken for seconds and a TIME cannot be cast"
     history: "2026-10-13 - found by the first live Snowflake run from devbox and by the rig cells graded through DuckDB's snowflake extension; 0.24.2 stored `2026-10-13 21:25:02.145628` as year 56785866 with LOAD OK"
     scope: target
-    patch: snowflake-parquet-read-without-logical-types/shared.patch
+    switch: snowflake-parquet-read-without-logical-types
     engines:
       bigquery:
         na: "the seed edits src/load/snowflake.rs, which only a Snowflake load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
@@ -2630,7 +2647,7 @@ seeds:
     class: "a resume trusts a chunk task marked completed that names no part and no row count of zero, so the chunk's keys are never read"
     history: "2026-10-13 - an open defect of the sabotage matrix (class 4: a resume trusts what it continues), fixed on fix/resume-checks-what-it-continues; present through 0.31.0"
     scope: source
-    patch: resume-trusts-a-completion-without-a-part/shared.patch
+    switch: resume-trusts-a-completion-without-a-part
     engines:
       postgres:
         cells:
@@ -2658,7 +2675,7 @@ seeds:
     class: "a resume over this run's own manifest trusts a completed chunk the manifest declares although its file_log row is absent or short, so the finished run records fewer parts than it declares"
     history: "2026-11-08 - gate d6581394: a_run_whose_state_volume_fills_up_delivers_or_fails_loudly (file_log records 9 of 10 declared parts); present since the manifest-present resume branch rehydrated file_log"
     scope: source
-    patch: resume-trusts-a-declared-part-without-a-file-log-row/shared.patch
+    switch: resume-trusts-a-declared-part-without-a-file-log-row
     engines:
       postgres:
         cells:
@@ -2682,7 +2699,7 @@ seeds:
     class: "a resume that reads a declared chunk again leaves the superseded part in the prefix beside its re-export, so a reader that globs the prefix counts the chunk's rows twice"
     history: "2026-11-08 - rivet-verifier review of the declared-chunk-unlogged fix: the pruned part left the manifest but stayed in the prefix, against ADR-0012 M9"
     scope: source
-    patch: resume-leaves-a-re-read-chunks-part-in-the-prefix/shared.patch
+    switch: resume-leaves-a-re-read-chunks-part-in-the-prefix
     engines:
       postgres:
         cells:
@@ -2707,7 +2724,7 @@ seeds:
     class: "a resume declares a committed part that is present at the destination at another size than the state logged, so a cut or replaced part is delivered as the chunk's rows"
     history: "2026-10-13 - an open defect of the sabotage matrix (class 4: a resume trusts what it continues), fixed on fix/resume-checks-what-it-continues; present through 0.31.0"
     scope: source
-    patch: resume-trusts-a-part-of-another-size/shared.patch
+    switch: resume-trusts-a-part-of-another-size
     engines:
       postgres:
         cells:
@@ -2743,7 +2760,7 @@ seeds:
     class: "a resume continues the stored chunk windows as they are, so keys between two windows are never read"
     history: "2026-10-13 - an open defect of the sabotage matrix (class 4: a resume trusts what it continues), fixed on fix/resume-checks-what-it-continues; present through 0.31.0"
     scope: source
-    patch: resume-plans-no-hole-in-stored-windows/shared.patch
+    switch: resume-plans-no-hole-in-stored-windows
     engines:
       postgres:
         cells:
@@ -2772,7 +2789,7 @@ seeds:
     class: "a resume accepts stored chunk windows that share keys, so those keys are read twice"
     history: "2026-10-13 - an open defect of the sabotage matrix (class 4: a resume trusts what it continues), fixed on fix/resume-checks-what-it-continues; present through 0.31.0"
     scope: source
-    patch: resume-accepts-overlapping-windows/shared.patch
+    switch: resume-accepts-overlapping-windows
     engines:
       postgres:
         cells:
@@ -2796,7 +2813,7 @@ seeds:
     class: "under `verify: content` a resume declares a committed part replaced at its own size without reading it back, so another chunk's rows are delivered in its place"
     history: "2026-10-13 - an open defect of the sabotage matrix (class 4: a resume trusts what it continues), fixed on fix/resume-checks-what-it-continues; present through 0.31.0"
     scope: source
-    patch: resume-trusts-a-same-size-part-under-verify-content/shared.patch
+    switch: resume-trusts-a-same-size-part-under-verify-content
     engines:
       postgres:
         cells:
@@ -2817,7 +2834,7 @@ seeds:
     class: an incremental run never stores its cursor after the manifest is durable, so every run re-reads and re-delivers the whole table
     history: 2026-10-14 - survived `cargo mutants -- --lib --bins --tests` (no live cell ran) on 74e71a31
     scope: source
-    patch: incremental-cursor-never-committed/shared.patch
+    switch: incremental-cursor-never-committed
     engines:
       postgres:
         cells:
@@ -2841,7 +2858,7 @@ seeds:
     class: "a store's \"not found\" on a write is passed up raw, so a bucket that does not exist reads as a failed upload with no code"
     history: "2026-10-14 - found by the by-hand CLI sweep (P6, row 582): `rivet run` into a missing fake-gcs bucket exited 1 with opendal's `NotFound (persistent) at write` dump, while `head` already refused RIVET_DEST_CONTAINER_NOT_FOUND, through 0.31.0; fixed by `absent_container_or` on every write"
     scope: destination
-    patch: missing-bucket-uncoded-on-write/shared.patch
+    switch: missing-bucket-uncoded-on-write
     engines:
       local:
         na: "the seed edits src/destination/cloud.rs, which only the s3, gcs and azure stores run; a local directory has no bucket to be missing"
@@ -2861,7 +2878,7 @@ seeds:
     class: "one refusal is raised by two paths (the preflight and the export), and only one of them carries the code"
     history: "2026-10-14 - found by the by-hand CLI sweep (P6): `check` refused a missing MongoDB collection RIVET_SOURCE_COLLECTION_NOT_FOUND, `run` printed the same sentence with no code, through 0.31.0; fixed by one `refuse_a_missing_collection` for both"
     scope: source
-    patch: collection-refusal-uncoded-on-run/shared.patch
+    switch: collection-refusal-uncoded-on-run
     engines:
       postgres:
         na: "a missing SQL table fails the query, read by the engine; the absent-collection guard is MongoDB's"
@@ -2877,7 +2894,7 @@ seeds:
     class: "a read of a source that was dropped, or dropped and created again, after the existence check returns no rows and no error (or the new collection's rows), and the run ends exit 0 with a marker over what it had"
     history: "found 2026-11-03 by gate cell collection_dropped_under_it going red under load (a MongoDB `find` on a collection dropped after `listCollections` returns 0 documents); RED on main 904b8f21 3/3; reworked 2026-11-04: the collection is confirmed by its listing and UUID after every read, not only an empty one (RED on main f0f5207c, 7 of 7 cells); this seed removes the check after the read"
     scope: source
-    patch: mongo-empty-read-after-drop/shared.patch
+    switch: mongo-empty-read-after-drop
     engines:
       postgres:
         na: "a SQL page query of a dropped table fails with the engine's missing-relation error, never an empty page; the collection identity check is MongoDB's"
@@ -2893,7 +2910,7 @@ seeds:
     class: "a collection dropped and created again under a run is listed under a new identity, and the check compares only presence, so the run reads the new collection's documents as the old one's and ends exit 0"
     history: "2026-11-04 - the first fix of mongo-empty-read-after-drop re-read the listing only on an empty read and kept the UUID only for that read; reworked so every read is confirmed against the UUID the run pinned; this seed passes no pinned UUID to the comparison"
     scope: source
-    patch: mongo-collection-uuid-not-compared/shared.patch
+    switch: mongo-collection-uuid-not-compared
     engines:
       postgres:
         na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so the class is unguarded on SQL (reported as its own defect); the collection incarnation check is MongoDB's"
@@ -2909,7 +2926,7 @@ seeds:
     class: "a parallel worker pins the collection it finds when it starts instead of the one its run planned the ranges on, so a collection created again between the plan and a worker's first read is read as the planned one"
     history: "2026-11-04 - a worker opened its own source and pinned the UUID at its first listing, after the run's range sample; the run now hands its pin to every worker; this seed drops the hand-over"
     scope: source
-    patch: mongo-parallel-worker-pins-its-own-uuid/shared.patch
+    switch: mongo-parallel-worker-pins-its-own-uuid
     engines:
       postgres:
         na: "a SQL table dropped and created again is read as the new table by its name: the engine records no incarnation the run pins, so the class is unguarded on SQL (reported as its own defect); the collection incarnation check is MongoDB's"
@@ -2941,7 +2958,7 @@ seeds:
     class: "the resume anchor or incremental cursor of a MongoDB export is not bound to the collection incarnation it was written against, so after the collection is dropped and created again with other ids the next run reads 0 rows and ends exit 0 with a marker over the old data"
     history: "2026-11-05 - found by verify-808: a refused run left the keyset anchor, and the next run over the collection created again with other ids exited 0 with 0 rows; the incarnation (UUID) is now part of the stored population and a different one is a different stream; this seed binds nothing"
     scope: source
-    patch: mongo-progress-not-bound-to-incarnation/shared.patch
+    switch: mongo-progress-not-bound-to-incarnation
     engines:
       postgres:
         na: "a SQL table dropped and created again is read as the new table by its name and no stored progress records an incarnation for it (reported as its own defect); the collection incarnation bound to progress is MongoDB's"
@@ -2957,7 +2974,7 @@ seeds:
     class: "a verdict every engine types (the relation the export reads does not exist) is recognised by no path, so each path ends with the raw driver error or a generic query-failed code instead of the one refusal"
     history: "2026-10-16 - found by hand on the pilot client's shape (MySQL -> GCS -> BigQuery, cron): an export whose source table was dropped failed as `MySqlError { ERROR 1146 (42S02): Table 'rivet.drop_probe_b' doesn't exist }` with no RIVET_* code (PostgreSQL too), RIVET_SOURCE_QUERY_FAILED on SQL Server and Oracle, through 0.31.0; fixed by one `names_a_missing_relation` / `code_a_missing_relation` on every path that reads the table"
     scope: source
-    patch: dropped-source-table-uncoded/shared.patch
+    switch: dropped-source-table-uncoded
     engines:
       postgres:
         cells: [a_dropped_source_table_is_refused_by_code_and_its_sibling_delivers_postgres]
@@ -2973,7 +2990,7 @@ seeds:
     class: "a refusal the product raises from the result set is never reached on an engine where the same config fails the query first, so that engine exits with the raw database error instead of the code"
     history: "2026-10-14 - found by the by-hand CLI sweep (P6): `cursor_column` in another case was RIVET_CONFIG_CURSOR_COLUMN_CASE on MySQL and SQL Server but a raw 42703 / ORA-00904 on PostgreSQL and Oracle, through 0.31.0; fixed by `refuse_a_cursor_case_miss`"
     scope: source
-    patch: cursor-case-uncoded/shared.patch
+    switch: cursor-case-uncoded
     engines:
       postgres:
         cells: [a_cursor_column_in_another_case_is_refused_by_code_postgres]
@@ -2989,7 +3006,7 @@ seeds:
     class: "a `mode: cdc` run takes no run lease, so a second run beside a live stream reads and delivers the same changes again"
     history: "2026-10-14 - found by the by-hand CLI sweep (P2): duplicates on MySQL, SQL Server, Oracle, MongoDB CDC, an uncoded slot error on PostgreSQL, through 0.31.0; fixed by `cdc_run_lease`"
     scope: source
-    patch: cdc-run-without-lease/shared.patch
+    switch: cdc-run-without-lease
     engines:
       postgres:
         cells: [a_second_cdc_run_beside_a_live_one_is_refused_by_code_postgres]
@@ -3005,7 +3022,7 @@ seeds:
     class: "an integer-family test drawn one step narrower than the type the engine uses for a 64-bit key, so the common key type is refused for range chunking"
     history: "2026-10-06 - open defect (range chunking refused an Oracle NUMBER(19) primary key as not integer-family) through 0.31.0; fixed by one shared bound ORACLE_RANGE_INT_MAX_PRECISION = 19 for introspection, preflight and init"
     scope: source
-    patch: oracle-number19-not-integer/shared.patch
+    switch: oracle-number19-not-integer
     engines:
       postgres:
         na: "NUMBER(p, 0) is Oracle's; the integer-family test of the other engines reads their own integer types"
@@ -3021,7 +3038,7 @@ seeds:
     class: "a type guard the planner applies only when it can read a catalog, so the same key under `query:` is range-sliced and its fractional values are skipped with exit 0"
     history: "2026-10-09 - open defect (a `double precision` chunk_column under `query:` delivered 40 of 43 rows, exit 0) through 0.31.0; fixed by `bail_if_fractional`, which reads the query's result type before the bounds"
     scope: source
-    patch: fractional-chunk-key-under-query/shared.patch
+    switch: fractional-chunk-key-under-query
     engines:
       postgres:
         cells: [a_float_chunk_column_under_query_is_refused_by_code_postgres]
@@ -3037,7 +3054,7 @@ seeds:
     class: "a generated config derives the name of a server object by convention instead of reading the catalog that holds it, so the config names an object that does not exist"
     history: "2026-10-07 - open defect (`rivet init --mode cdc` on SQL Server wrote `capture_instance: dbo_<table>` whatever cdc.change_tables held) through 0.31.0; fixed by reading cdc.change_tables in mssql::introspect"
     scope: source
-    patch: init-capture-instance-derived/shared.patch
+    switch: init-capture-instance-derived
     engines:
       postgres:
         na: "the capture instance is SQL Server's CDC object; the other engines' init writes a slot, a server id or nothing it reads from a catalog"
@@ -3086,7 +3103,7 @@ seeds:
     class: "a credential scrubber that keeps a second, narrower rule for the same key: the URL query path masked `password` only as a bare key or after `_`/`-`, while the keyword path masks every key ending in password/passwd/pwd, so `?sslpassword=…`, `&SSLPassword=…`, `&db.password=…` and `&MYSQL_PWD=…` reached logs, summaries and the journal in clear"
     history: "issue #781, hand-reproduced on main 2026-11-06: redact_secrets on a URL with `sslpassword=TOPSECRET` left TOPSECRET; closed by routing the query path through is_password_keyword"
     scope: source
-    patch: query-password-key-by-suffix-family/shared.patch
+    switch: query-password-key-by-suffix-family
     engines:
       postgres:
         cells: [lib:a_query_pair_whose_key_names_a_password_is_masked_in_any_case, lib:the_keyword_path_and_the_query_path_agree_on_which_keys_are_passwords]
@@ -3103,7 +3120,7 @@ seeds:
     class: "a server error that names a missing deployment prerequisite is passed up as the driver's raw dump instead of the coded prerequisite refusal"
     history: "2026-10-14 - found by the by-hand CLI sweep (P6, row 808): `mode: cdc` on a standalone MongoDB exited 1 with `Error code 40573 … RawDocumentBuf { data: … }`, while `doctor` named it plainly, through 0.31.0; fixed by `names_standalone` in diagnose_stream_error"
     scope: source
-    patch: mongo-standalone-uncoded/shared.patch
+    switch: mongo-standalone-uncoded
     engines:
       postgres:
         na: "change streams on a standalone are MongoDB's; the SQL engines' CDC prerequisites have their own seeds"
@@ -3119,7 +3136,7 @@ seeds:
     class: "a mutual-exclusion key coarser than the progress it protects, so exports that share a name but not a source refuse each other"
     history: "2026-10-15 - gate class B on 93d8a5db: since #538 every run took `chunk-run:<export>`, and the shared-state deployment (configs of one export name on different sources, one PostgreSQL state) ran one export at a time; fixed by keying the lease by export and source (v36 records the source on run_status)"
     scope: source
-    patch: run-lease-by-name-only/shared.patch
+    switch: run-lease-by-name-only
     engines:
       postgres:
         cells: [one_export_name_runs_beside_itself_on_another_source_and_is_refused_on_the_same]
@@ -3135,7 +3152,7 @@ seeds:
     class: "a runner prints its own schedule or summary lines with `println!`, into the bytes of a `destination: stdout` export"
     history: "2026-10-14 - open defect (`rivet apply --pool` wrote its `Pool:` lines into a stdout export) through 0.31.0; fixed by printing them on stderr"
     scope: source
-    patch: pool-lines-on-stdout/shared.patch
+    switch: pool-lines-on-stdout
     engines:
       postgres:
         cells: [apply_pool_writes_only_the_export_on_stdout]
@@ -3167,7 +3184,7 @@ seeds:
     class: a `partition_by` child resolves catalog type hints from the bucket wrapper, which hides the source table, so a PostgreSQL NUMERIC(p,s) column refuses the export
     history: 2026-10-14 - open defect (partition_by over a NUMERIC column refused with `precision/scale unavailable`) through 0.31.0; fixed by the plan's catalog_query
     scope: source
-    patch: partition-child-loses-catalog-hints/shared.patch
+    switch: partition-child-loses-catalog-hints
     engines:
       postgres:
         cells: [partition_by_exports_a_declared_numeric_column]
@@ -3205,7 +3222,7 @@ seeds:
     class: the run's observed cursor floor is a constant instead of the first non-null cursor value, so the recorded cursor_min of a keyset run is wrong
     history: 2026-10-14 - survived `cargo mutants -- --lib --bins --tests` (no live cell ran) on 74e71a31
     scope: source
-    patch: first-cursor-value-is-a-constant/shared.patch
+    switch: first-cursor-value-is-a-constant
     engines:
       postgres:
         cells:
@@ -3226,7 +3243,7 @@ seeds:
     class: the keyset page reports no high-water key, so the runner takes the first page for the last and stops
     history: 2026-10-14 - survived `cargo mutants -- --lib --bins --tests` (no live cell ran) on 74e71a31
     scope: source
-    patch: keyset-high-water-forgotten/shared.patch
+    switch: keyset-high-water-forgotten
     engines:
       postgres:
         cells:
@@ -3247,7 +3264,7 @@ seeds:
     class: the sink never asks whether the open part reached max_file_size, so one part holds the whole export
     history: 2026-10-14 - survived `cargo mutants -- --lib --bins --tests` (no live cell ran) on 74e71a31
     scope: source
-    patch: max-file-size-never-checked/shared.patch
+    switch: max-file-size-never-checked
     engines:
       postgres:
         cells:
@@ -3268,7 +3285,7 @@ seeds:
     class: the Parquet writer reports 0 bytes written, so the byte cap never rotates a part
     history: 2026-10-14 - survived `cargo mutants -- --lib --bins --tests` (no live cell ran) on 74e71a31
     scope: source
-    patch: parquet-writer-reports-no-bytes/shared.patch
+    switch: parquet-writer-reports-no-bytes
     engines:
       postgres:
         cells:
@@ -3289,7 +3306,7 @@ seeds:
     class: 'the chunked runner''s pre-chunk schema probe is skipped, so on_schema_drift: fail never aborts a chunked export'
     history: 2026-10-14 - survived `cargo mutants -- --lib --bins --tests` (no live cell ran) on 74e71a31
     scope: source
-    patch: chunked-drift-gate-skipped/shared.patch
+    switch: chunked-drift-gate-skipped
     engines:
       postgres:
         cells:
@@ -3309,7 +3326,7 @@ seeds:
     class: the partition_by expansion reads no value span, so a partitioned export expands to nothing and delivers zero rows
     history: 2026-10-14 - survived `cargo mutants -- --lib --bins --tests` (no live cell ran) on 74e71a31
     scope: source
-    patch: partition-by-sees-no-rows/shared.patch
+    switch: partition-by-sees-no-rows
     engines:
       postgres:
         cells:
@@ -3329,7 +3346,7 @@ seeds:
     class: the partition_by expansion reads the value span as the default date for both ends, so every row outside the epoch bucket is not exported
     history: 2026-10-14 - survived `cargo mutants -- --lib --bins --tests` (no live cell ran) on 74e71a31
     scope: source
-    patch: partition-by-span-is-the-epoch/shared.patch
+    switch: partition-by-span-is-the-epoch
     engines:
       postgres:
         cells:
@@ -3349,7 +3366,7 @@ seeds:
     class: a run records no load spec from the columns it resolved, so `rivet load` plans from nothing
     history: 2026-10-14 - survived `cargo mutants -- --lib --bins --tests` (no live cell ran) on 74e71a31
     scope: source
-    patch: load-spec-not-recorded-from-the-run/shared.patch
+    switch: load-spec-not-recorded-from-the-run
     engines:
       postgres:
         cells:
@@ -3370,7 +3387,7 @@ seeds:
     class: the parent never records its export child processes, so a targeted SIGTERM leaves them running
     history: 2026-10-14 - survived `cargo mutants -- --lib --bins --tests` (no live cell ran) on 74e71a31
     scope: source
-    patch: children-orphaned-on-sigterm/shared.patch
+    switch: children-orphaned-on-sigterm
     engines:
       postgres:
         cells:
@@ -3391,7 +3408,7 @@ seeds:
     class: '`apply --pool --split` finds the giant unsplittable and leaves it whole, so the makespan floor the operator asked to break stays'
     history: 2026-10-14 - survived `cargo mutants -- --lib --bins --tests` (no live cell ran) on 74e71a31
     scope: source
-    patch: pool-split-never-realized/shared.patch
+    switch: pool-split-never-realized
     engines:
       postgres:
         cells:
@@ -3419,7 +3436,7 @@ seeds:
     class: the split realizes into zero units, so the giant is replaced by nothing and no row is exported
     history: 2026-10-14 - survived `cargo mutants -- --lib --bins --tests` (no live cell ran) on 74e71a31
     scope: source
-    patch: pool-split-into-no-units/shared.patch
+    switch: pool-split-into-no-units
     engines:
       postgres:
         cells:
@@ -3447,7 +3464,7 @@ seeds:
     class: the split realizes into one unit that is the giant itself, so no range window is ever set
     history: 2026-10-14 - survived `cargo mutants -- --lib --bins --tests` (no live cell ran) on 74e71a31
     scope: source
-    patch: pool-split-into-one-unit/shared.patch
+    switch: pool-split-into-one-unit
     engines:
       postgres:
         cells:
@@ -3475,7 +3492,7 @@ seeds:
     class: no export is splittable, so `--split` leaves every giant whole
     history: 2026-10-14 - survived `cargo mutants -- --lib --bins --tests` (no live cell ran) on 74e71a31
     scope: source
-    patch: split-key-never-found/shared.patch
+    switch: split-key-never-found
     engines:
       postgres:
         cells:
@@ -3506,7 +3523,7 @@ seeds:
     class: every export is splittable on a column named xyzzy, including incremental and CDC ones
     history: 2026-10-14 - survived `cargo mutants -- --lib --bins --tests` (no live cell ran) on 74e71a31
     scope: source
-    patch: split-key-is-a-constant/shared.patch
+    switch: split-key-is-a-constant
     engines:
       postgres:
         cells:
@@ -3595,7 +3612,7 @@ seeds:
     class: the CDC drain loop counts the events a pass yielded with a multiplication, so every pass reads as empty and the run stops after one pass
     history: 2026-10-14 - survived `cargo mutants -- --lib --bins --tests` (no live cell ran) on 74e71a31; the comment at src/pipeline/cdc/sink.rs run_to_files records the six PostgreSQL re-drain cells it turned red on 2026-08-27
     scope: source
-    patch: cdc-drain-pass-count-pinned-at-zero/shared.patch
+    switch: cdc-drain-pass-count-pinned-at-zero
     engines:
       postgres:
         cells:
@@ -3613,7 +3630,7 @@ seeds:
     class: "a refusal on the CDC path prints the batch path's remedy (a cast in the export's query), which a stream has no seam for, and the check runs by the column's native type, so the override remedy the stream does have is blocked"
     history: "2026-10-15 - found by the first walk of the MySQL TIME-past-a-day cell on a stream: `RIVET_SOURCE_VALUE_UNREPRESENTABLE` named `Cast it in a query, e.g. TIME_TO_SEC(col)` and a `columns: { t: string }` override was still refused, through 0.31.0; fixed by the CDC wording of the TimeOfDay fix and `MysqlCellFix::applies_to`"
     scope: source
-    patch: mysql-cdc-time-remedy-names-the-batch-cast/shared.patch
+    switch: mysql-cdc-time-remedy-names-the-batch-cast
     engines:
       postgres:
         na: "a PostgreSQL `time` is a time of day, never a duration past it, and the MySQL cell fix does not run"
@@ -3669,7 +3686,7 @@ seeds:
     class: "a planner probe reads an empty result (no row, so min and max are NULL) as an unreadable bound, so an empty table under `chunk_by_days` stops the run instead of exporting zero rows"
     history: "2026-10-15 - found while coding the src/pipeline error sites: the date planner stopped on `min(...) returned NULL — table may be empty` since date-native chunking (0.2.0-beta.3) through 0.31.0 (by source), exit 5 `RIVET_SOURCE_PROBE_UNREADABLE` once coded, while the same empty table range-chunked on its id exported zero rows with exit 0; fixed by `read_key_span`, the one span reader both chunk planners call"
     scope: source
-    patch: empty-table-under-chunk-by-days/shared.patch
+    switch: empty-table-under-chunk-by-days
     engines:
       postgres:
         cells: [stand_empty_table_under_chunk_by_days_postgres]
@@ -3704,7 +3721,7 @@ seeds:
     class: a `rivet load` stop raised before any warehouse write but outside the typed refusal seam reaches the ledger as something other than `refused` (no row, or `failed`), and a state-DB fault wears the missing-spec refusal code
     history: "found 2026-10-15 while coding the last error sites (#594): a split prefix holding two generations stopped with RIVET_LOAD_SPLIT_GENERATIONS_MIXED and left no load_run row; load_type_reports folded a failed state read into RIVET_LOAD_SPEC_MISSING"
     scope: state
-    patch: load-refusal-not-journaled/shared.patch
+    switch: load-refusal-not-journaled
     engines:
       sqlite-state:
         cells: ["lib:a_mixed_split_generation_is_journaled_refused_and_refuses_again", "lib:a_missing_spec_and_an_unreadable_spec_store_are_two_codes"]
@@ -3714,7 +3731,7 @@ seeds:
     class: "a driver builds its own async runtime inside its connect call and unwraps the build, so a process out of file descriptors aborts with a panic instead of the environment stop the other drivers raise"
     history: "2026-10-08 - the gate's PostgreSQL out-of-descriptors cell (live_sabotage): `rivet run` capped at 8 open files panicked at postgres-0.19 src/config.rs:463 (`Too many open files`), exit 101 with no `Error:` line, while MySQL, SQL Server, Oracle and MongoDB failed loudly through `driver_runtime`, through 0.31.0; fixed by proving a runtime build at the shared PostgreSQL dial (`connect_client`) before the driver builds its own"
     scope: source
-    patch: postgres-dial-runtime-unwrapped/shared.patch
+    switch: postgres-dial-runtime-unwrapped
     engines:
       postgres:
         cells: [a_run_out_of_file_descriptors_fails_loudly_and_the_next_delivers_postgres]
@@ -3730,7 +3747,7 @@ seeds:
     class: "a store's final answer is classified by the words in its text, so a header such as `keep-alive: timeout=5` on a 404 reads as a timeout and the chunk is retried for minutes"
     history: "2026-10-08 - the gate's Azure removed-container cell (live_sabotage) ran past its 180 s ceiling: each chunk's upload into the removed container was retried 16 times, 9 min 21 s to exit 1 by hand (Azurite answers its 404 with `keep-alive: timeout=5`, and the classifier's text scan matched `timeout`), through 0.31.0; fixed by classifying an opendal error by its own verdict before any text scan"
     scope: source
-    patch: missing-container-retried-as-timeout/shared.patch
+    switch: missing-container-retried-as-timeout
     engines:
       postgres:
         cells:
@@ -3748,7 +3765,7 @@ seeds:
     class: "the parent of `--parallel-export-processes` takes a child's run-aggregate entry as the newest `export_metrics` row of the export's name, so on a state shared by two holders of the name a failed child is reported as the other holder's success"
     history: "2026-10-16 - found by the verifier of #604: two holders of one export name on one PostgreSQL state, the PostgreSQL one failed its snapshot leg and exited 1 while its entry read `status: success` with the MySQL holder's run id, on main through 0.31.0; fixed by matching the run id each child reports in its `Finished` event (`collect_child_entries`, `StateStore::get_metric_by_run_id`)"
     scope: state
-    patch: child-entry-by-name-on-shared-state/shared.patch
+    switch: child-entry-by-name-on-shared-state
     engines:
       postgres-state:
         cells: [a_failed_holder_of_a_shared_name_is_reported_under_its_own_run_id]
@@ -3758,7 +3775,7 @@ seeds:
     class: "a relative local `destination.path` is resolved against the directory rivet is started from while the cursor and state live beside the config, so one config run from two directories delivers each run's rows under a different directory, every run green"
     history: "2026-10-16 - P-27 (live_destination_parity): one config with `path: ./out` run from two working directories delivered ids 1..10 under the first and 11..13 under the second, exit 0 both times, on main through 0.31.0; fixed by anchoring every relative local path to the config file's directory once at config load (`Config::anchor_paths`)"
     scope: source
-    patch: relative-destination-path-follows-the-cwd/shared.patch
+    switch: relative-destination-path-follows-the-cwd
     engines:
       postgres:
         cells:
@@ -3776,7 +3793,7 @@ seeds:
     class: "the transition guard for a relative local `destination.path` does not fire, so the upgrade to the config-anchored path silently moves an export's output: old rows under the working directory, new rows beside the config, exit 0"
     history: "2026-10-16 - the first #617 head: a run of 0.31.0 from directory A with `path: ./out` wrote under A, and this build from A delivered the next rows beside the config, exit 0 (`refusal contract: the invocation ended with success (exit 0), expected [RIVET_DEST_RELATIVE_PATH_MOVED] (exit 5)`); fixed by `destination::relative_path_moved`, the one decision `Config::anchor_paths` makes before any command reads or writes the directory"
     scope: source
-    patch: relative-destination-path-moved-by-the-upgrade/shared.patch
+    switch: relative-destination-path-moved-by-the-upgrade
     engines:
       postgres:
         cells:
@@ -3794,7 +3811,7 @@ seeds:
     class: "a relative path the config names (`url_file`, `tls.ca_file`, `load.private_key_path`, `load.ca_file`) is read against the directory rivet is started from while state and destination resolve beside the config, so a run from another directory delivers a different database into the config's destination, exit 0"
     history: "2026-11-08 - audit H6-F1: `rivet run -c ../proj/rivet.yaml` from a directory holding its own `db.url` delivered 3 rows of the other database into `proj/out`, exit 0, and `run_status` held two successes of one export from two source URLs; fixed by anchoring every relative file field to the config file's directory once at config load (`Config::anchor_files` through `Anchor::file`)"
     scope: source
-    patch: url-file-follows-the-cwd/shared.patch
+    switch: url-file-follows-the-cwd
     engines:
       postgres:
         cells:
@@ -3819,7 +3836,7 @@ seeds:
     class: "the transition guard for a relative config file does not fire, so the upgrade to the config-anchored path silently stops reading the file under the working directory: a run that used to read it now reads another file or none, exit 0 or a message naming the wrong cause"
     history: "2026-11-08 - audit H6-F1 (precedent #617 and #773): the run from the parent directory exited 1 `RIVET_CONFIG_SECRET_UNSET` with a hint naming the wrong cause while the file existed beside the config; fixed by `Anchor::file`, the one decision every relative file field of `Config::anchor_files` makes before any command opens it"
     scope: source
-    patch: url-file-moved-by-the-upgrade/shared.patch
+    switch: url-file-moved-by-the-upgrade
     engines:
       postgres:
         cells:
@@ -3844,7 +3861,7 @@ seeds:
     class: "a run lease whose holder names another host is judged by a local pid probe, so a run on a live host loses its lease to a run here before the lease expires"
     history: "2026-10-16 - harness: the dead-owner cells damaged `chunk-run:<export>` after the run lease became `chunk-run:<export>@<source hash>`, so on a PostgreSQL state they failed on `changed 0 row(s)` and on SQLite they were skipped; no cell could catch a takeover rule that ignored the host (fixed by deriving the key through `run_lease_key` and keeping a Postgres state in the cell)"
     scope: state
-    patch: foreign-lease-taken-before-expiry/shared.patch
+    switch: foreign-lease-taken-before-expiry
     engines:
       postgres-state:
         cells:
@@ -3856,7 +3873,7 @@ seeds:
     class: "`reconcile` and `repair` read the stored chunk run without comparing the chunk plan it was planned under with the config, so after a `chunk_column` edit they re-read the stored windows on the new column and a repair supersedes parts: the manifest lists fewer rows than the source has"
     history: "2026-10-16 - P-21 (live_reconcile_repair): a repair --execute after chunk_column was edited from id to other_id left the manifest listing 39 rows over 39 distinct ids for 40 source ids, exit 0, on main through 0.31.0; fixed by routing reconcile and repair through the check `run --resume` already runs (`chunked::refuse_changed_chunk_plan`, via `reconcile_cmd::latest_chunk_run_under_this_plan`)"
     scope: source
-    patch: repair-under-a-changed-chunk-plan/shared.patch
+    switch: repair-under-a-changed-chunk-plan
     engines:
       postgres:
         cells:
@@ -3879,7 +3896,7 @@ seeds:
     class: "a crashed checkpointed run is resumed under any edit of `compression`, `columns` or `meta_columns`: the resume check pins only the query and the chunk settings, so one manifest and one `_SUCCESS` cover parts of two shapes, exit 0"
     history: "found 2026-11-10 by the axis-8 upgrade/resume hunt, RED on 0.32.2 and on main (a PostgreSQL range-chunk run crashed after its first chunk, `compression` edited, `--resume` exit 0 with `_SUCCESS`); fixed by recording the byte-shaping projection of the plan with the run (state v39 `run_shape`) and comparing it on every continuation (`StateStore::refuse_changed_run_shape`)"
     scope: source
-    patch: resume-pins-only-the-chunk-plan/shared.patch
+    switch: resume-pins-only-the-chunk-plan
     engines:
       postgres:
         cells:
@@ -3900,7 +3917,7 @@ seeds:
     class: "`rivet plan` resolves `{date}` in the destination into the sealed plan, so an apply after UTC midnight writes under the planning day while the data and the part names are of the apply"
     history: "P-26, found 2026-10-16 (TRIAGE PR-M), on main through 0.31.0: the planner sealed the destination through the today's-date context `rivet run` resolves with; fixed 2026-10-17 by the context that keeps `{date}` for the apply to resolve (ADR-0005 PA1 amendment), with `rivet plan --date` freezing a day on request"
     scope: source
-    patch: sealed-plan-freezes-the-date/shared.patch
+    switch: sealed-plan-freezes-the-date
     engines:
       postgres:
         cells: [a_sealed_plan_keeps_the_date_placeholder, "lib:keeping_date_resolves_the_names_and_leaves_date_for_the_apply"]
@@ -3919,7 +3936,7 @@ seeds:
     scope: state
     engines:
       sqlite-state:
-        patch: state-copy-reads-the-path-as-a-uri/sqlite-state.patch
+        switch: state-copy-reads-the-path-as-a-uri
         cells: ["lib:a_source_path_with_a_uri_character_is_read_as_the_file_it_names", "lib:a_missing_source_is_refused_and_not_created", "lib:an_attached_source_with_no_state_is_refused_by_code"]
       postgres-state:
         na: "`rivet state copy` reads a SQLite file and writes a PostgreSQL state; the path is the SQLite source's, a PostgreSQL state URL is never a `file:` URI"
@@ -3930,7 +3947,7 @@ seeds:
     scope: state
     engines:
       postgres-state:
-        patch: state-copy-leaves-sequences-behind/postgres-state.patch
+        switch: state-copy-leaves-sequences-behind
         cells: [a_0_30_cdc_state_copied_to_postgres_continues_its_stream_and_owns_its_tables]
       sqlite-state:
         na: "`rivet state copy` writes into a PostgreSQL state only; a SQLite file is its source, which it only reads"
@@ -3939,7 +3956,7 @@ seeds:
     class: "a whole-table pass (an incremental run with no cursor, a CDC re-baseline) lands over an existing base-and-buffer base instead of joining its buffer, so every row only the base held (rows the source deleted, tombstones, copied history) is lost with exit 0"
     history: "2026-10-20 - D1/D2 of the client cut-over simulation (Airflow + BigQuery, 0.32.1): `rivet state reset` then a cycle took a base from 3334 to 2178 rows, the printed CDC re-baseline from 16681 (5801 flagged) to 10772 (0 flagged); fixed by routing both through `whole_table_run_joins_the_log(base_and_buffer, ..)` and buffering the rows a re-baseline no longer holds as deletes"
     scope: source
-    patch: whole-pass-replaces-the-base/shared.patch
+    switch: whole-pass-replaces-the-base
     engines:
       lib:
         cells: ["lib:a_whole_table_pass_over_an_existing_base_is_buffered_and_never_replaces_it"]
@@ -3964,7 +3981,7 @@ seeds:
     class: "`rivet load` reads the source-keyed load spec under the key the config resolves on the load host, so a host without the source variable finds no spec and refuses every table"
     history: "2026-10-20, a regression of #650 (state v38) caught on main f5ba44a3 by the generated CDC chains: `rivet load` without DATABASE_URL refused with RIVET_LOAD_SPEC_MISSING; fixed by `StateStore::spec_source`"
     scope: source
-    patch: load-spec-read-under-an-unresolved-source/shared.patch
+    switch: load-spec-read-under-an-unresolved-source
     engines:
       lib:
         cells: ["lib:a_load_without_the_source_variable_reads_the_only_spec_and_refuses_two"]
@@ -3985,7 +4002,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: mysql-session-set-per-chunk/mysql.patch
+        switch: mysql-session-set-per-chunk
         cells: [through_a_multiplexing_proxysql_the_session_is_set_once_per_connection_by_literals]
       postgres:
         na: "the session SETs are MySQL's: PostgreSQL sets nothing per session for a read"
@@ -4000,7 +4017,7 @@ seeds:
     class: "a CDC base-and-buffer load reports only its stream leg in `per_table[]`: a first load that landed the baseline in the base says `rows: 0`, `target: <table>__changes` and `no changes buffered`"
     history: "2026-10-21 - found by the Airflow provider on MySQL CDC -> BigQuery base_buffer: a 6000-row baseline landed in the base and the load's document said rows 0, target the change log"
     scope: source
-    patch: cdc-load-reports-the-stream-leg-only/shared.patch
+    switch: cdc-load-reports-the-stream-leg-only
     engines:
       postgres:
         na: "engine-agnostic: the per_table entry is built from the load's own report (src/load/orchestrate.rs cdc_work), after the manifests are read; no source or engine type reaches it, so every CDC engine runs the same code; graded once by the lib cells. The live BigQuery cell a_bigquery_load_and_compact_digest_is_what_bq_reads_back asserts it where BigQuery credentials exist"
@@ -4021,7 +4038,7 @@ seeds:
     class: "a bare MySQL CDC table name is refused (or resolved to another database) when the connection's database holds it and another database holds a table of the same name, so a config `rivet init --mode cdc` generated stops on every run"
     history: "2026-10-21 #675 - found by the Airflow provider's live gate (MySQL CDC beside a second database with same-named tables): RIVET_SOURCE_CDC_TABLE_UNRESOLVED on every run of the init config"
     scope: source
-    patch: mysql-cdc-bare-name-refused-beside-a-twin/mysql.patch
+    switch: mysql-cdc-bare-name-refused-beside-a-twin
     engines:
       mysql:
         cells:
@@ -4043,7 +4060,7 @@ seeds:
     class: "every MySQL run dials a connection of its own to detect a proxy, so a batch run opens 4 source connections instead of 2 and a CDC run 3 instead of 2"
     history: "2026-10-22 - found by the 0.32.2 gate (perf[mysql/cdc-conns], perf[mysql/batch-conns-*]) after #661 moved the probe off the pool"
     scope: source
-    patch: mysql-proxy-probe-dials-its-own-connection/mysql.patch
+    switch: mysql-proxy-probe-dials-its-own-connection
     engines:
       mysql:
         cells:
@@ -4062,7 +4079,7 @@ seeds:
     class: "a bare PostgreSQL CDC table name is matched against every schema, so a same-named table in another schema refuses the config `rivet init` writes for a `public` table, or routes its rows into the export"
     history: "2026-10-22 #675 (PostgreSQL half) - a bare `public` table beside a same-named table in a second schema was refused RIVET_SOURCE_CDC_TABLE_UNRESOLVED ('could mean 2 different relations') on every run"
     scope: source
-    patch: pg-cdc-bare-name-routes-every-schema/postgres.patch
+    switch: pg-cdc-bare-name-routes-every-schema
     engines:
       postgres:
         cells:
@@ -4080,7 +4097,7 @@ seeds:
     class: "a writer property or an arrow/parquet version moves the bytes of the Parquet file written for the same rows, so a re-export differs from the release users run"
     history: "2026-11-01 - parquet 60 (#702) moved the page grid of nullable columns without NULLs; owner decision option A: pin 59.0.0 and hold the v0.32.2 digests"
     scope: source
-    patch: parquet-writer-bytes-move-from-release/shared.patch
+    switch: parquet-writer-bytes-move-from-release
     engines:
       postgres:
         cells: ["parquet_bytes_match_the_v0_32_2_digests"]
@@ -4188,7 +4205,7 @@ seeds:
     class: "RIVET_LOAD_WAREHOUSE_UNAVAILABLE is an environment code, so its exit is decided by the words of its message: a BigQuery HTTP 429/5xx that outlasts the retries, and a job failed with a retryable reason, exit 1 instead of 2"
     history: "2026-10-28 - found while fixing #707: the code existed for the REST layer's transient replies but its exit followed the text, which names no transient word, so a scheduler never retried it"
     scope: source
-    patch: transient-warehouse-code-exits-by-text/shared.patch
+    switch: transient-warehouse-code-exits-by-text
     engines:
       postgres:
         na: "engine-agnostic: the failure is a BigQuery job's errorResult read by the warehouse client (src/load/bq_rest.rs job_failed) after the load has the files; no source or engine type reaches it, so every engine runs the same code; graded once by the lib cells (the offline BigQuery stand, which BigQuery CI does not run)"
@@ -4228,7 +4245,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: column-grants-invisible-columns-read/mysql.patch
+        switch: column-grants-invisible-columns-read
         cells: [a_full_grant_account_delivers_the_columns_select_star_does_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4262,7 +4279,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: grant-change-not-seen-mid-run/mysql.patch
+        switch: grant-change-not-seen-mid-run
         cells: [a_database_level_revoke_after_an_earlier_re_read_stops_an_open_run_mysql, a_default_role_taken_away_after_an_earlier_re_read_stops_an_open_run_mysql, a_database_level_grant_that_adds_a_column_is_refused_naming_the_column_that_appeared_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4277,7 +4294,7 @@ seeds:
     class: an incremental export finds no cursor under the source key its config names now because the same server is reached under another host spelling, and reads the whole table again beside what the old key delivered, exit 0
     history: "issue #690, 2026-10-28: 127.0.0.1 vs localhost (or IP vs DNS, cron vs a container) changes source_state_key; RED on main (PostgreSQL live cell: the second spelling delivered all 43 rows with exit 0)"
     scope: source
-    patch: cursor-continued-under-another-source/shared.patch
+    switch: cursor-continued-under-another-source
     engines:
       postgres:
         cells: [an_incremental_export_reached_under_another_host_spelling_is_refused_and_walked_out_postgres, "lib:a_host_respelled_with_the_same_destination_is_refused_every_time_until_the_progress_is_accepted"]
@@ -4296,7 +4313,7 @@ seeds:
     class: the refusal of a source column named like one rivet owns in a delta load's tables is raised only on the path that has no recorded run to type the plan from, so the normal load after a run loads the colliding column
     history: "2026-10-29 Snowflake bughunt F1 - `__op` and `__is_deleted` source columns passed a pinned load on Snowflake and BigQuery, exit 0, and a compact deleted live rows"
     scope: source
-    patch: reserved-column-checked-on-the-unpinned-plan-only/shared.patch
+    switch: reserved-column-checked-on-the-unpinned-plan-only
     engines:
       postgres:
         cells: [reserved_column_is_refused_into_clickhouse_postgres]
@@ -4316,7 +4333,7 @@ seeds:
     class: "`source.columns_from: grants` is accepted on a PostgreSQL, SQL Server, Oracle or MongoDB source, which then reads and delivers every column of a row: the operator who wrote the key believes hidden columns are not delivered"
     history: "found reviewing PR #719 (2026-10-28): the refusal was only reached for MongoDB-shaped validation and never on PostgreSQL, SQL Server or Oracle; RED from this patch: `rivet run` exits 0 on a PostgreSQL config with `columns_from: grants`"
     scope: source
-    patch: columns-from-grants-accepted-off-mysql/shared.patch
+    switch: columns-from-grants-accepted-off-mysql
     engines:
       postgres:
         cells: [columns_from_grants_is_refused_by_every_command_postgres, "lib:columns_from_grants_is_refused_on_every_engine_but_mysql_in_every_mode"]
@@ -4354,10 +4371,10 @@ seeds:
       postgres:
         na: "a PostgreSQL image is whole or key-only on deletes, never partial: the stdout loop prints key-only deletes as before (the_ndjson_driver_still_prints_whole_unlisted_and_key_only_images)"
       mysql:
-        patch: cdc-stdout-partial-image/shared.patch
+        switch: cdc-stdout-partial-image
         cells: [cdc_to_stdout_refuses_a_partial_image_mysql, "lib:the_ndjson_driver_refuses_a_partial_image_by_code_and_keeps_the_checkpoint", "lib:the_ndjson_driver_refuses_a_partial_open_time_image_before_reading"]
       mssql:
-        patch: cdc-stdout-partial-image/mssql.patch
+        switch: cdc-stdout-partial-image
         cells: [cdc_to_stdout_refuses_a_partial_image_mssql]
       mongo:
         na: "every MongoDB image is the fixed pair [_id, document] under the two IMAGE_NAMES (mongo/cdc.rs), so its values and its names cannot differ in length"
@@ -4368,7 +4385,7 @@ seeds:
     class: "a change whose BEFORE image is partial under a whole after image (MySQL `binlog_row_image` NOBLOB with only a TEXT column changed, MINIMAL with every column set) is printed by `rivet cdc` without `--output` as positional values, or written by `rivet cdc --output` and `mode: cdc` under its after image, exits 0 and advances the checkpoint"
     history: "found 2026-11-07 reviewing PR #880: the shared arity check read `after.or(before)` only, so a short before image under a whole after image printed `before:[1,10,'c1'] after:[1,'B1x',10,'c1']` and the file sink wrote the row; one patch drops the before check from the one function every sink calls; RED from this patch"
     scope: source
-    patch: cdc-stdout-partial-before-image/shared.patch
+    switch: cdc-stdout-partial-before-image
     engines:
       postgres:
         na: "a PostgreSQL before image is named by before_names (the replica identity's columns) or is as wide as its relation (pgoutput), so a key-only pre-image is whole under its own names (the_ndjson_driver_refuses_a_partial_before_image_and_prints_a_named_or_whole_one)"
@@ -4385,7 +4402,7 @@ seeds:
     class: "a qualified `table: schema.table` also captures a table literally named `schema.table` in another schema or database: its rows are delivered into the export"
     history: "found reviewing PR #719 (2026-10-28), pre-existing in the routing authority; RED from this patch: the export holds `FOREIGN-ROW` from another database"
     scope: source
-    patch: qualified-table-matches-a-literal-dotted-name/shared.patch
+    switch: qualified-table-matches-a-literal-dotted-name
     engines:
       postgres:
         cells: ["lib:a_qualified_sql_config_never_matches_a_table_literally_named_by_it"]
@@ -4404,7 +4421,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: column-rename-in-the-backlog-read-as-before/mysql.patch
+        switch: column-rename-in-the-backlog-read-as-before
         cells: [a_column_renamed_in_the_backlog_is_refused_not_silently_dropped_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4421,7 +4438,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: update-delivering-nothing-leaves-the-checkpoint-behind/mysql.patch
+        switch: update-delivering-nothing-leaves-the-checkpoint-behind
         cells: [an_update_of_hidden_columns_only_advances_the_checkpoint_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4438,7 +4455,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: column-grants-invisible-key-judged-by-name/mysql.patch
+        switch: column-grants-invisible-key-judged-by-name
         cells: [a_table_with_a_generated_invisible_key_is_read_as_without_the_policy_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4455,7 +4472,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: column-grants-unreadable-key-accepted/mysql.patch
+        switch: column-grants-unreadable-key-accepted
         cells: [a_primary_key_the_account_cannot_read_is_refused_by_code_with_the_remedy_mysql, a_declared_key_the_account_cannot_read_is_refused_by_code_before_anything_is_written_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4557,7 +4574,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: column-grants-reread-on-a-cached-session/mysql.patch
+        switch: column-grants-reread-on-a-cached-session
         cells: [a_database_level_revoke_after_an_earlier_re_read_stops_an_open_run_mysql, a_default_role_taken_away_after_an_earlier_re_read_stops_an_open_run_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4574,7 +4591,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: column-grants-statement-name-match-dropped/mysql.patch
+        switch: column-grants-statement-name-match-dropped
         cells: [an_add_index_on_a_captured_table_is_refused_naming_the_table_and_the_remedy_mysql, an_add_column_on_a_captured_table_is_refused_naming_the_table_and_the_remedy_mysql, "lib:a_statement_mentions_a_captured_table_by_its_bare_name_in_any_case_and_any_place"]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4591,7 +4608,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: column-grants-statement-name-match-case-sensitive/mysql.patch
+        switch: column-grants-statement-name-match-case-sensitive
         cells: [a_statement_spelling_the_table_name_in_another_case_is_refused_mysql, "lib:a_statement_mentions_a_captured_table_by_its_bare_name_in_any_case_and_any_place"]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4642,7 +4659,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: statement-line-comment-read-as-text/mysql.patch
+        switch: statement-line-comment-read-as-text
         cells: [a_column_renamed_after_a_dash_comment_is_refused_not_silently_dropped_mysql, a_column_renamed_after_a_hash_comment_is_refused_not_silently_dropped_mysql, "lib:every_comment_kind_is_a_blank_and_quoted_text_is_kept_as_written"]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4659,7 +4676,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: statement-ansi-quoted-name-read-as-text/mysql.patch
+        switch: statement-ansi-quoted-name-read-as-text
         cells: [a_column_renamed_with_ansi_quoted_names_is_refused_mysql, a_column_changed_with_ansi_quoted_names_is_refused_mysql, "lib:a_quoted_name_is_an_identifier_only_when_closed_and_has_its_doubled_quotes_undone"]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4710,7 +4727,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: partial-image-refusal-names-a-remedy-that-loops/mysql.patch
+        switch: partial-image-refusal-names-a-remedy-that-loops
         cells: [a_partial_row_image_is_refused_before_it_is_projected_mysql]
       postgres:
         na: "a binlog row image is MySQL's: `columns_from: grants` is refused on this engine at config load, so the partial-image refusal is never reached (columns_from_grants_is_refused_by_every_command_<engine>)"
@@ -4727,7 +4744,7 @@ seeds:
     scope: source
     engines:
       postgres:
-        patch: pg-dotted-relname-routing-refusal-names-a-spelling-that-cannot-match/postgres.patch
+        switch: pg-dotted-relname-routing-refusal-names-a-spelling-that-cannot-match
         cells: [pg_cdc_a_relation_named_with_a_dot_is_refused_by_a_remedy_that_can_be_followed]
       mysql:
         na: "the catalog match and the routing refusal for a relation named with a dot are PostgreSQL's (test_decoding spells `schema.table`): MySQL, SQL Server, Oracle and MongoDB resolve a table by their own catalog and never hit this code"
@@ -4744,7 +4761,7 @@ seeds:
     scope: source
     engines:
       postgres:
-        patch: pg-dotted-relname-catalog-error-uncoded/postgres.patch
+        switch: pg-dotted-relname-catalog-error-uncoded
         cells: [pg_cdc_a_relation_named_with_a_dot_is_refused_by_a_remedy_that_can_be_followed]
       mysql:
         na: "the catalog match and the routing refusal for a relation named with a dot are PostgreSQL's (test_decoding spells `schema.table`): MySQL, SQL Server, Oracle and MongoDB resolve a table by their own catalog and never hit this code"
@@ -4761,7 +4778,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: column-grants-batch-bare-name-read-by-the-stream-rule/mysql.patch
+        switch: column-grants-batch-bare-name-read-by-the-stream-rule
         cells: [a_bare_table_name_is_read_from_the_same_relation_with_and_without_the_policy_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4795,7 +4812,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: column-grants-boundary-unsaid/mysql.patch
+        switch: column-grants-boundary-unsaid
         cells: [the_policy_says_what_it_does_not_guarantee_at_check_and_at_the_start_of_a_run_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4812,7 +4829,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: column-grants-schema-change-names-no-column/mysql.patch
+        switch: column-grants-schema-change-names-no-column
         cells: [a_database_level_grant_that_adds_a_column_is_refused_naming_the_column_that_appeared_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4829,7 +4846,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: cdc-table-rename-not-refused/mysql.patch
+        switch: cdc-table-rename-not-refused
         cells: [a_table_swap_of_a_captured_table_is_refused_under_the_policy_mysql, a_rename_of_a_captured_table_is_refused_in_every_form_under_the_policy_mysql]
       postgres:
         na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
@@ -4861,7 +4878,7 @@ seeds:
     class: "a run whose terminal manifest.json write failed is recorded `success` in the run journal and on the run card, because the journal row and the card are finished before the manifest is written and the failed status is set only afterwards"
     history: "found 2026-10-30 by a rivet-verifier probe (manifest.json a directory: exit non-zero, ledger and metrics failed, `rivet journal` success with no error, a multi-export card still the success glyph); RED on main 2026-10-30 (journal read back through `rivet journal`, PostgreSQL)"
     scope: source
-    patch: journal-manifest-gap/shared.patch
+    switch: journal-manifest-gap
     engines:
       postgres:
         cells:
@@ -4908,7 +4925,7 @@ seeds:
       oracle:
         na: "the position is an SCN with a row sequence the log supplies; there is no ordinal to restore"
       mongo:
-        patch: mongo-cdc-ordinal-restarts-on-resume/mongo.patch
+        switch: mongo-cdc-ordinal-restarts-on-resume
         cells: [a_mongo_transaction_cut_mid_tie_loads_in_source_order, a_mongo_run_killed_mid_tie_resumes_in_source_order]
 
   - name: mongo-cdc-stops-before-the-open-time-bound
@@ -4983,7 +5000,7 @@ seeds:
     class: a BigQuery or Snowflake view or compaction ranks a MongoDB change by its resume token alone instead of by clusterTime then ordinal, so a log whose token order runs against its stamps keeps the older image of a key and a deleted key comes back
     history: 2026-10-31 - the Mongo order moved from the resume token (an internal MongoDB format) to the numeric clusterTime and ordinal ClickHouse already used; a token-only order is the one the view and the compaction had before
     scope: source
-    patch: mongo-warehouse-order-by-token/shared.patch
+    switch: mongo-warehouse-order-by-token
     engines:
       postgres:
         na: "the Mongo row of the order table is the only one patched; a Postgres position keeps its own row, pinned by each_row_renders_its_order_for_both_dialects"
@@ -5002,7 +5019,7 @@ seeds:
     class: "a ledger row of a load that never succeeded (`failed`, `writing`) is read as ownership of the target, so a table someone created after a failed first load is overwritten or adopted without RIVET_LOAD_TARGET_NOT_RIVETS"
     history: "issue #613, found 2026-10-08 verifying #611; owner decision 2026-10-28 (own only after the first successful load); RED on main 2026-10-31 (lib: the retry after a failed first full load reached the write over a table that appeared since)"
     scope: source
-    patch: failed-first-load-owns-target/shared.patch
+    switch: failed-first-load-owns-target
     engines:
       postgres:
         na: "ownership is read from the load ledger before any warehouse or source code runs: one code path, graded by the lib cells"
@@ -5023,7 +5040,7 @@ seeds:
     class: "an existing ClickHouse change log's key is read from `system.tables.sorting_key` text without its tuple parentheses taken off, so ClickHouse 26's `(id)` reads as another key than `load.pk` and every CDC load into an existing log is refused RIVET_LOAD_TARGET_OBJECT_CONFLICT"
     history: "found 2026-10-31 by the ClickHouse version matrix (dev/clickhouse/version_matrix.py): every change-log cell red on 26.8 and 26.10, green on 24.8-26.3"
     scope: target
-    patch: clickhouse-paren-sorting-key/shared.patch
+    switch: clickhouse-paren-sorting-key
     engines:
       bigquery:
         na: "the seed edits src/load/clickhouse.rs, which only a ClickHouse load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
@@ -5113,7 +5130,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: mysql-enum-label-escapes-unread/mysql.patch
+        switch: mysql-enum-label-escapes-unread
         cells: [mysql_cdc_enum_set_labels_match_the_snapshot, "lib:every_append_unescaped_escape_is_reversed_in_an_enum_label", "lib:every_append_unescaped_escape_is_reversed_in_a_set_member"]
       postgres:
         na: "an enum label arrives in the logical stream as stored text, with no catalog escaping to reverse: this path is never reached"
@@ -5128,7 +5145,7 @@ seeds:
     class: "a reader of the run manifests under one prefix counts a Failed attempt or a foreign export's unit, so validate --depth full fails a healthy prefix on parts gc collected, and a foreign unit tiles a gap a split export still has"
     history: "found 2026-10-31 by the roast duplication lens and confirmed on the binary: a Failed unit manifest whose parts gc had collected made validate --depth full exit 1 (could not verify), and completed_units_tile counted a foreign family's unit; closed 2026-11-01 by routing the readers through ManifestCensus::succeeded / completed / completed_split_units"
     scope: source
-    patch: manifest-census-reads-unfiltered/shared.patch
+    switch: manifest-census-reads-unfiltered
     engines:
       postgres:
         cells: [stand_pool_split_resume_grows_postgres, "lib:a_foreign_family_unit_does_not_fill_a_gap_in_the_tiling", "lib:split_unit_manifests_skips_a_failed_sibling_attempt"]
@@ -5145,7 +5162,7 @@ seeds:
     class: a named AWS profile is resolved with the ambient environment layered over it, so an ambient AWS_PROFILE or AWS keys select another identity and a missing profile falls through to environment keys or instance metadata
     history: "found 2026-11-02 while probing #773: `aws_profile: named-prod` signed with the keys of `AWS_PROFILE=ambient-dev`, with `AWS_ACCESS_KEY_ID` from the environment, and a missing profile signed with environment keys or asked the EC2 metadata service"
     scope: destination
-    patch: named-profile-falls-back/shared.patch
+    switch: named-profile-falls-back
     engines:
       local:
         na: "the seed edits the S3 store's profile resolver; a local directory names no AWS profile"
@@ -5166,7 +5183,7 @@ seeds:
     class: "the run-status ledger matches a destination prefix with LIKE, so path text is read as a pattern: on Postgres a backslash escapes the next character and a live run under `a\\b/` is not found by its own child prefix (cleanup_source and gc_orphans then delete its unmanifested parts), and on both backends `_`, `%` and (SQLite) letter case make a look-alike prefix count as live"
     history: "found 2026-11-01 by the text x state-backend hunt (text #9): PG `prefix_overlaps` false where SQLite said true for a run on `gs://b/vN/a\\b/` and its child `.../orders/`; RED on main 2026-11-02 on both backends"
     scope: state
-    patch: state-prefix-match-reads-text-as-pattern/shared.patch
+    switch: state-prefix-match-reads-text-as-pattern
     engines:
       postgres-state:
         cells: ["lib:postgres_state_decides_liveness_by_literal_path_containment", "lib:postgres_state_cleanup_and_gc_follow_the_literal_prefix"]
@@ -5177,7 +5194,7 @@ seeds:
     class: "a CDC run whose run-status row the state does not take reads its stream and writes anyway, so a load that trusts the ledger cannot tell the run from a finished one"
     history: "found 2026-11-03 by the seam packaging pass (HDW-1): cdc_job begin_run_under_lease was warn-only while batch ledger_begin_run refused; RED on main 2026-11-03 (a CDC run over a state that refuses run_status ended exit 0 with the change written)"
     scope: source
-    patch: cdc-run-without-ledger-row/shared.patch
+    switch: cdc-run-without-ledger-row
     engines:
       postgres:
         cells: [a_cdc_run_over_a_state_that_refuses_its_ledger_row_is_refused_postgres]
@@ -5194,7 +5211,7 @@ seeds:
     class: "a load records a CDC run consumed when the ledger holds no row for it, so the parts the run writes in later rolls are never loaded and the next load prints up to date, exit 0"
     history: "found 2026-11-03 by the seam packaging pass (HDW-1): the second load of a grown CDC run selected [] and recorded it consumed; RED on main 2026-11-03 (the warehouse held ids 1..8 of the source's 1..14)"
     scope: source
-    patch: load-consumes-cdc-run-without-ledger-row/shared.patch
+    switch: load-consumes-cdc-run-without-ledger-row
     engines:
       postgres:
         cells: ["lib:a_load_overlapping_a_cdc_run_with_no_row_delivers_every_part", "lib:a_cdc_run_without_a_row_is_writing_until_a_newer_run_of_its_family_exists"]
@@ -5215,7 +5232,7 @@ seeds:
     class: "a load's orphan sweep and its source-cleanup gate read only running markers, so a CDC run no ledger row accounts for loses a part it uploaded and has not manifested yet"
     history: "found 2026-11-03 by the verifier of PR 801 (HDW-1 rework): maybe_gc_orphans and prefix_has_active_run read has_active_running_manifest while the load's own guards read bucket_writers; RED 2026-11-03 (the foreign-state load with gc_orphans removed the part and the warehouse lacked the run's rows)"
     scope: source
-    patch: gc-and-cleanup-spare-unlisted-cdc-run/shared.patch
+    switch: gc-and-cleanup-spare-unlisted-cdc-run
     engines:
       postgres:
         cells: [a_gc_orphans_load_from_another_state_db_spares_a_rolling_cdc_runs_part_postgres, "lib:gc_and_the_prefix_gate_spare_a_cdc_run_no_ledger_row_accounts_for"]
@@ -5266,7 +5283,7 @@ seeds:
     class: "a count or ratio knob is read without its range: a `chunk_size` of 2^63 or more wraps to a zero window and the run ends exit 0 with 0 rows, `--rollover 0`, Mongo `page_size: 0` and a `quality.null_ratio_max` of NaN, infinity or outside 0 to 1 are accepted"
     history: "2026-11-03 - found by the seam packaging (HCF-1, HCF-3, HCF-4): chunk_size 2^63 planned 0 windows and exited 0 with 0 rows on every SQL engine; fixed by src/config/quantity.rs::Knob"
     scope: source
-    patch: config-knob-range-unchecked/shared.patch
+    switch: config-knob-range-unchecked
     engines:
       postgres:
         cells: [chunk_size_past_i64_is_refused_postgres, cdc_rollover_zero_is_refused_on_the_flag_postgres, null_ratio_max_outside_the_unit_interval_is_refused_postgres, "lib:zero_and_past_i64_are_refused_by_the_knobs_own_code", "lib:a_ratio_is_a_number_from_zero_to_one"]
@@ -5283,7 +5300,7 @@ seeds:
     class: "the span of a key range and the window over it are computed in 64-bit signed arithmetic, so a `chunk_count` (or a `chunk_size` near i64::MAX) over a key range as wide as bigint overflows: a panic in debug, a refusal that blames a knob already set in release"
     history: "2026-11-03 - found by the seam packaging (HCF-8): rivet plan and run panicked at detect.rs and preflight/analysis.rs on a table holding i64::MIN and i64::MAX; fixed by Knob::key_span and the 128-bit windows"
     scope: source
-    patch: key-span-read-in-i64/shared.patch
+    switch: key-span-read-in-i64
     engines:
       postgres:
         cells: [wide_key_windows_plan_and_deliver_postgres, "lib:a_full_i64_range_has_a_span_and_a_window_no_i64_holds"]
@@ -5300,7 +5317,7 @@ seeds:
     class: "`rivet cdc --rollover` is passed to the stream as typed while `cdc.rollover` is refused at zero: `--rollover 0` runs and rolls a part on every committed transaction"
     history: "2026-11-03 - found by the seam packaging (HCF-4): `rivet cdc --rollover 0` was accepted on every CDC engine where the config key is refused RIVET_CONFIG_CDC_ROLLOVER_INVALID; fixed by routing the flag through Knob::ROLLOVER"
     scope: source
-    patch: cdc-rollover-flag-unrouted/shared.patch
+    switch: cdc-rollover-flag-unrouted
     engines:
       postgres:
         cells: [cdc_rollover_zero_is_refused_on_the_flag_postgres]
@@ -5334,7 +5351,7 @@ seeds:
     class: "an environment stop (a code of kind Environment, or a wrapper over a driver error) exits by the word its message holds, not by its declaration and the typed verdict of its cause: a relation named login_timeouts or deadlock_log exits 2 retryable for good, a blocked read past its lock timeout exits 1, and a retryable stop recoded by an outer layer loses its verdict"
     history: "2026-11-03 seam stop-class - VP-8, MT-F-A, MT-F-B, MT-F-F, RC-C5, RER-2, RER-3; RED on main 2026-11-04 (a missing MSSQL, Oracle or MongoDB relation named for a failure exited 2 where its code says 1, an MSSQL read past lock_timeout_s exited 1 where the lock clears and the remedy is to run again)"
     scope: source
-    patch: stop-class/shared.patch
+    switch: stop-class
     engines:
       postgres:
         cells: ["lib:a_fixed_environment_code_exits_by_its_declaration_whatever_its_message_holds", "lib:a_wrapper_code_exits_by_the_typed_verdict_of_its_cause_not_by_its_message", "lib:recoded_keeps_the_typed_verdict_of_the_error_it_wraps"]
@@ -5351,7 +5368,7 @@ seeds:
     class: "a driver error number that names a missing or forbidden object, column or statement is not typed permanent, so a column or table called login_timeout, dns_cache or deadlock_flag falls to the words of the message and exits 2 retryable on SQL Server (207, 229), MySQL (1054, 1142) and Oracle (ORA-00904)"
     history: "2026-11-05 finding D1 of the stop-class verification (VP-8 class); RED on main 2026-11-05 (a missing column named login_timeout exited 2 where its number says 1)"
     scope: source
-    patch: stop-class-number/shared.patch
+    switch: stop-class-number
     engines:
       postgres:
         na: "classify_pg_sqlstate decides every PostgreSQL error by its SQLSTATE and leaves no word-matching for an undefined column; a_missing_column_exits_by_its_code_whatever_its_name_holds_postgres is its unchanged neighbour"
@@ -5368,7 +5385,7 @@ seeds:
     class: "the planner accepts a keyset key by a type list kept apart from what the cursor reader can advance: a MySQL BINARY(16), TIME or TINYINT(1) unique key is auto-picked and stops the run with exit 5 after page 0 (exit 0 as a snapshot on one chunk), a PostgreSQL bytea or time and a SQL Server varbinary or time chunk_by_key are accepted, and an MSSQL datetime2(7) chunk_by_key reads microseconds from 100 ns ticks and delivers duplicates with exit 0"
     history: "2026-11-03 - found by the seam packaging (ER-1, ER-3, ER-6, RHS-3): the MSSQL datetime2(7) key re-read the row at the end of every page; fixed by src/source/keyset_key.rs::keyset_key_refusal; owner decision Q11: a one-chunk table is refused too"
     scope: source
-    patch: keyset-key-type-unchecked/shared.patch
+    switch: keyset-key-type-unchecked
     engines:
       postgres:
         cells: [keyset_key_is_refused_postgres_bytea_unique_key, keyset_key_is_refused_postgres_time_unique_key, keyset_key_is_refused_on_a_one_chunk_table_postgres_bytea_unique_key, "lib:a_key_the_seam_admits_is_a_key_the_cursor_renders", "lib:a_keyset_key_the_cursor_cannot_advance_is_refused_whatever_the_table_size"]
@@ -5385,7 +5402,7 @@ seeds:
     class: "rivet init decides which key it scaffolds as a keyset key by a type list of its own instead of the seam the planner calls, so init scaffolds a key the planner refuses (a run that stops at plan) or withholds one the planner admits"
     history: "2026-11-04 - found verifying the keyset-key-type seam PR: init kept is_keysettable_type and per-engine catalog flags that mirrored the planner by hand; init now probes the delivered types and marks not_keyset through keyset_key::column_refusal"
     scope: source
-    patch: keyset-key-init-mirror/shared.patch
+    switch: keyset-key-init-mirror
     engines:
       postgres:
         cells: ["lib:init_and_the_planner_refuse_the_same_keyset_keys"]
@@ -5401,7 +5418,7 @@ seeds:
     class: "the sub-microsecond fact about a SQL Server keyset key is read by the column's user type name, so a key declared through an alias type over datetime2(7) is not found finer than a microsecond and the cursor delivers duplicate rows with exit 0"
     history: "2026-11-05 - found verifying the keyset-key-type seam PR (D1): CREATE TYPE ts7 FROM datetime2(7) has sys.types.name ts7, so the name match in finer_than_microsecond_sql missed it; the probe now reads TYPE_NAME(c.system_type_id)"
     scope: source
-    patch: keyset-key-alias-type-by-name/shared.patch
+    switch: keyset-key-alias-type-by-name
     engines:
       postgres:
         na: "a PostgreSQL domain reports its base type on the wire, which is what the seam reads; there is no catalog name match to seed"
@@ -5417,7 +5434,7 @@ seeds:
     class: a destination's named credential signs one leg of the run and another leg signs as the ambient identity, or two named identities are accepted and one is ignored
     history: "2026-11-03 seam packaging HFF-1 and HFF-2: with `credentials_file:` naming a service-account key every BigQuery request of `rivet load` carried the ambient ADC token; an S3 `aws_profile` beside `access_key_env` and `secret_key_env` signed with the profile alone and `rivet check` exited 0"
     scope: destination
-    patch: destination-credential-read-by-one-leg/shared.patch
+    switch: destination-credential-read-by-one-leg
     engines:
       local:
         na: "the seed edits the BigQuery token source and the credential chooser; a local directory names no credential"
@@ -5445,10 +5462,10 @@ seeds:
     scope: source
     engines:
       mssql:
-        patch: mssql-ns-override-out-of-range-null/mssql.patch
+        switch: mssql-ns-override-out-of-range-null
         cells: [a_value_past_the_nanosecond_range_is_refused_and_never_written_as_null]
       oracle:
-        patch: mssql-ns-override-out-of-range-null/oracle.patch
+        switch: mssql-ns-override-out-of-range-null
         cells: [a_value_past_the_nanosecond_range_under_the_override_is_refused_by_code]
       postgres:
         na: "PostgreSQL refuses a nanosecond override with RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH (live check_override_wire cells a_nanosecond_timestamp_override_is_refused_by_the_wire_check_postgres), so no value reaches a nanosecond builder"
@@ -5462,21 +5479,21 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: override-without-builder-internal-stop/mysql.patch
+        switch: override-without-builder-internal-stop
         cells:
           - a_nanosecond_timestamp_override_is_refused_by_the_wire_check_mysql
           - a_nanosecond_timestamp_override_is_refused_on_an_empty_source_mysql
           - a_first_cdc_run_refused_after_its_anchor_releases_it_mysql
           - "lib:the_mysql_schema_stage_refuses_a_nanosecond_override"
       mssql:
-        patch: override-without-builder-internal-stop/mssql.patch
+        switch: override-without-builder-internal-stop
         cells:
           - a_value_the_declared_type_cannot_read_is_refused_not_an_internal_stop_mssql
           - "lib:no_override_over_any_wire_value_ends_as_an_internal_stop"
           - "lib:a_foreign_cell_in_a_native_column_is_an_internal_stop"
           - "lib:the_mssql_schema_stage_refuses_a_wide_decimal_override"
       oracle:
-        patch: override-without-builder-internal-stop/oracle.patch
+        switch: override-without-builder-internal-stop
         cells:
           - a_decimal_override_past_precision_38_is_refused_by_the_wire_check_oracle
           - "lib:the_oracle_schema_stage_refuses_a_wide_decimal_override"
@@ -5490,7 +5507,7 @@ seeds:
     scope: source
     engines:
       oracle:
-        patch: oracle-timestamp-ns-undeclared-truncated/oracle.patch
+        switch: oracle-timestamp-ns-undeclared-truncated
         cells:
           - an_undeclared_nanosecond_timestamp_is_refused_and_the_declared_ns_type_delivers_every_digit
           - oracle_batch_timestamp9_is_refused_until_declared_under_every_policy
@@ -5510,7 +5527,7 @@ seeds:
     scope: source
     engines:
       postgres:
-        patch: pg-temporal-uuid-bytea-array-refused/postgres.patch
+        switch: pg-temporal-uuid-bytea-array-refused
         cells: [postgres_batch_and_cdc_deliver_every_ledger_row_alike]
       mysql:
         na: "the seed edits the PostgreSQL list builder; MySQL has no array column type"
@@ -5525,7 +5542,7 @@ seeds:
     class: a batch run onto a prefix that holds another shape's manifest stores its plan, anchor or cursor before the refusal, so a refused run leaves that resume point behind
     history: "known defect in tests/offline/rig_oracle_ratchet.rs since the cross-shape guard landed: a parallel chunk-checkpoint run refused for a CDC manifest left an in_progress chunk run with pending tasks; the keyset runners (every engine, MongoDB included) opened their guarded frame after their resume run id, ranges or anchor were written, and a skip_empty run with no rows never opened it; on main and on v0.32.2"
     scope: source
-    patch: batch-runner-stores-state-before-the-cross-shape-refusal/shared.patch
+    switch: batch-runner-stores-state-before-the-cross-shape-refusal
     engines:
       postgres:
         cells: [a_batch_export_over_a_cdc_prefix_is_refused_before_a_plan_anchor_or_cursor_is_stored_postgres]
@@ -5552,14 +5569,14 @@ seeds:
       mongo:
         na: "the seed edits the Oracle NUMBER mapping, which no MongoDB value reaches; Decimal128 is delivered natively"
       oracle:
-        patch: number-text-without-its-label/oracle.patch
+        switch: number-text-without-its-label
         cells: [oracle_batch_and_cdc_deliver_every_ledger_row_alike, "lib:a_number_held_as_text_is_labelled_plain_decimal_and_every_other_column_is_not"]
 
   - name: reset-chunks-by-export-name
     class: "`state reset-chunks` (and `--stuck-checkpoints`) takes the run lease on the config's source, empty when the source does not resolve, and deletes every chunk checkpoint of the export name whatever source wrote it: from a config on another source or with `url_env` unset it removes a live run's checkpoint past the lease, and that run ends exit 5 RIVET_STATE_CHUNK_CHECKPOINT_GONE"
     history: "confirmed 2026-11-06 (two PostgreSQL databases, one state, a live checkpointed run of B, `reset-chunks` from A, then from B with its url_env unset); RED on main 2026-11-06 (the rig oracle: the chunk_run and chunk_task counts of the live run drop to 0)"
     scope: source
-    patch: reset-chunks-by-export-name/shared.patch
+    switch: reset-chunks-by-export-name
     engines:
       postgres:
         cells: [pg_state_a_reset_from_another_source_leaves_the_live_runs_checkpoint, pg_state_a_reset_with_an_unresolved_source_leaves_the_live_runs_checkpoint, "lib:reset_chunks_removes_only_the_checkpoint_of_its_own_source", "lib:stuck_checkpoints_removes_only_the_checkpoint_of_its_own_source", "lib:reset_chunks_refuses_a_source_that_does_not_resolve_and_removes_nothing"]
@@ -5588,7 +5605,7 @@ seeds:
     class: "an INTERVAL column (PostgreSQL, Oracle) is written as ISO 8601 duration text in a Utf8 column without the rivet.text_form = iso8601_duration label (PostgreSQL in batch and in CDC alike, Oracle in batch), so a reader cannot tell the canonical duration from a free string"
     history: "type-known-defects INTERVAL of docs/type-capability-matrix.yaml (ADR-0038 CP2/CP5, issue #851 class C); RED on main 2026-11-05 (the ledger row without its marker fails postgres_batch_and_cdc_deliver_every_ledger_row_alike: the ledger delivers text form iso8601_duration, the part labels it nothing)"
     scope: source
-    patch: interval-text-without-its-label/shared.patch
+    switch: interval-text-without-its-label
     engines:
       postgres:
         cells: [postgres_batch_and_cdc_deliver_every_ledger_row_alike, "lib:an_interval_is_delivered_as_labelled_iso8601_text_and_nothing_next_to_it_is"]
@@ -5614,7 +5631,7 @@ seeds:
       mongo:
         na: "the seed removes an exemption that only an Oracle NUMBER held as exact text uses; MongoDB pages by _id and has no chunk_by_key"
       oracle:
-        patch: keyset-key-oracle-exact-number-refused/oracle.patch
+        switch: keyset-key-oracle-exact-number-refused
         cells: [a_bare_number_keyset_key_delivers_the_seeded_ids_once_oracle, keyset_over_a_bare_number_pk_reads_every_row_once, "lib:a_number_held_as_exact_text_keys_a_seek_on_oracle_alone"]
 
   - name: keyset-key-oracle-inexact-number-admitted
@@ -5631,7 +5648,7 @@ seeds:
       mongo:
         na: "the seed drops the Oracle catalog fact about a NUMBER's scale; MongoDB pages by _id and has no chunk_by_key"
       oracle:
-        patch: keyset-key-oracle-inexact-number-admitted/oracle.patch
+        switch: keyset-key-oracle-inexact-number-admitted
         cells: [a_binary_double_a_float_a_scaled_number_and_a_local_time_zone_keyset_key_stay_refused_oracle, "lib:an_oracle_number_keys_a_seek_exactly_when_the_catalog_filter_it_replaced_admitted_it", "lib:a_catalog_number_with_a_scale_or_a_float_is_inexact_and_nothing_else"]
 
   - name: keyset-key-oracle-override-lifts-the-catalog-fact
@@ -5648,7 +5665,7 @@ seeds:
       mongo:
         na: "the seed edits an Oracle-only early return; MongoDB pages by _id and has no chunk_by_key"
       oracle:
-        patch: keyset-key-oracle-override-lifts-the-catalog-fact/oracle.patch
+        switch: keyset-key-oracle-override-lifts-the-catalog-fact
         cells: [a_timestamp_9_keyset_key_under_the_timestamp_ns_override_stays_refused_oracle, a_scaled_number_a_float_and_a_negative_scale_keyset_key_stay_refused_under_a_columns_override_oracle, "lib:an_oracle_key_the_catalog_declares_wider_is_refused_whatever_it_is_delivered_as", "lib:an_oracle_column_the_catalog_declares_wider_is_refused_whatever_it_is_delivered_as"]
 
   - name: keyset-key-refuses-what-main-paged-correctly
@@ -5657,7 +5674,7 @@ seeds:
     scope: source
     engines:
       postgres:
-        patch: keyset-key-refuses-what-main-paged-correctly/postgres.patch
+        switch: keyset-key-refuses-what-main-paged-correctly
         cells: [a_jsonb_keyset_key_delivers_the_seeded_ids_once_postgres, "lib:json_keys_a_seek_on_postgres_alone", "lib:a_key_the_seam_admits_is_a_key_the_cursor_renders"]
       mysql:
         na: "the seed re-refuses a PostgreSQL jsonb or an Oracle composite FLOAT; a MySQL JSON key is refused on main and on this branch"
@@ -5666,14 +5683,14 @@ seeds:
       mongo:
         na: "the seed re-refuses a PostgreSQL jsonb or an Oracle composite FLOAT; MongoDB pages by _id and has no chunk_by_key"
       oracle:
-        patch: keyset-key-refuses-what-main-paged-correctly/oracle.patch
+        switch: keyset-key-refuses-what-main-paged-correctly
         cells: [a_float_and_a_scaled_number_composite_keyset_key_deliver_the_seeded_ids_once_oracle, "lib:a_composite_oracle_key_refuses_a_finer_timestamp_and_keeps_an_inexact_number", "lib:an_inexact_oracle_number_is_refused_as_a_single_key_alone"]
 
   - name: keyset-key-composite-ignores-the-catalog-fact
     class: "the composite keyset key check does not read the catalog fact the single-key check reads, so a composite key whose second column is a TIMESTAMP(7..9) (Oracle) or a datetime2(7) (SQL Server) passes check and pages on microseconds: duplicate rows with exit 0 (53 rows for 40 distinct ids on Oracle)"
     history: "2026-11-06 - found re-verifying the keyset-key-type seam PR: main delivered 53 rows for 40 ids on an Oracle composite TIMESTAMP(9) key; the composite check now passes the catalog fact into the same function"
     scope: source
-    patch: keyset-key-composite-ignores-the-catalog-fact/shared.patch
+    switch: keyset-key-composite-ignores-the-catalog-fact
     engines:
       postgres:
         na: "no PostgreSQL catalog fact says a column holds more than it delivers; the composite check has nothing to omit"
@@ -5691,9 +5708,9 @@ seeds:
     history: "issue #789; RED on main 2026-11-06 on Linux (a certificate from a CA installed through SSL_CERT_FILE was accepted with ca_file naming another CA, PostgreSQL, MySQL and SQL Server); the cell reads the system store through SSL_CERT_FILE, so it runs on Linux stands only; the mysql and mssql seeds restore the registry driver in place of the rivet-lab fork"
     scope: source
     platform: linux
-    patch: ca-file-second-trust-anchor/postgres.patch
     engines:
       postgres:
+        switch: ca-file-second-trust-anchor
         cells: [postgres_system_store_is_not_a_second_anchor]
       mysql:
         patch: ca-file-second-trust-anchor/mysql.patch
@@ -5741,14 +5758,14 @@ seeds:
       oracle:
         na: "an Oracle LogMiner stream has no pre-image request whose acceptance depends on the server version"
       mongo:
-        patch: mongo-sharded-cdc-requests-pre-images-below-6-0/mongo.patch
+        switch: mongo-sharded-cdc-requests-pre-images-below-6-0
         cells: [a_sharded_mongo_run_delivers_every_write_committed_before_it_started, "lib:the_pre_image_request_follows_the_server_version"]
 
   - name: state-url-query-password-unmasked
     class: "a PostgreSQL state URL is named with only its `user:password@` part masked, so a password written as a query pair (`?password=`, `?sslpassword=`, any case) is printed by `rivet doctor` and by `rivet state copy --to`"
     history: "hunt-2 F3, 2026-11-08: RED on main 10bcf9bf (doctor `[OK]  State (postgres postgresql://u@h:5433/postgres?password=Qp7ZkStateSecretX9&options=...)`; the `state copy` done note held the same URL twice)"
     scope: state
-    patch: state-url-query-password-unmasked/shared.patch
+    switch: state-url-query-password-unmasked
     engines:
       postgres-state:
         cells:
@@ -5761,7 +5778,7 @@ seeds:
     class: "a URL query pair whose key is spelled with percent escapes (`?pass%77ord=`) is not read as the password it names, so the general redactor prints its value in every message and plan artifact that names the URL"
     history: "hunt-2 F3 class sweep, 2026-11-08: RED on main 10bcf9bf (state URL `?pass%77ord=` printed by check, doctor, init and state copy; a source URL printed in `rivet plan` output)"
     scope: source
-    patch: query-secret-percent-key-unmasked/shared.patch
+    switch: query-secret-percent-key-unmasked
     engines:
       postgres:
         cells:
@@ -5783,7 +5800,7 @@ seeds:
     scope: source
     engines:
       mssql:
-        patch: seek-literal-typed-by-value/mssql.patch
+        switch: seek-literal-typed-by-value
         cells: [keyset_over_an_mssql_varchar_key_reads_every_key_under_the_default_sql_collation, parallel_keyset_over_an_mssql_varchar_key_reads_every_non_ascii_key_once, incremental_over_an_mssql_varchar_cursor_takes_every_later_non_ascii_key_once, keyset_incremental_over_an_mssql_varchar_key_takes_every_later_non_ascii_key_once, order_equals_seek_mssql, "lib:a_non_ascii_mssql_boundary_takes_the_keys_own_type"]
       postgres:
         na: "a PostgreSQL boundary is one E-string literal for every value, untyped, so the server resolves it to the key column type; order_equals_seek_postgres grades it"
@@ -5800,7 +5817,7 @@ seeds:
     scope: source
     engines:
       postgres:
-        patch: pg-test-decoding-header-cut-at-first-separator/postgres.patch
+        switch: pg-test-decoding-header-cut-at-first-separator
         cells: [pg_cdc_a_relation_name_holding_colon_space_is_delivered_not_dropped, "lib:a_relation_holding_colon_space_is_cut_at_the_operation", "lib:a_rendered_test_decoding_line_parses_back_to_exactly_what_was_rendered"]
       mysql:
         na: "MySQL row events carry typed cells by ordinal; there is no text line to cut"
@@ -5817,7 +5834,7 @@ seeds:
     scope: source
     engines:
       postgres:
-        patch: pg-test-decoding-column-name-cut-at-bracket/postgres.patch
+        switch: pg-test-decoding-column-name-cut-at-bracket
         cells: [pg_cdc_column_names_holding_brackets_are_delivered_under_their_own_names, "lib:hostile_column_names_come_back_whole", "lib:a_rendered_test_decoding_line_parses_back_to_exactly_what_was_rendered"]
       mysql:
         na: "MySQL row events carry typed cells by ordinal; there is no text line to cut"
@@ -5834,7 +5851,7 @@ seeds:
     scope: source
     engines:
       postgres:
-        patch: pg-bit-literal-delivered-as-server-text/postgres.patch
+        switch: pg-bit-literal-delivered-as-server-text
         cells: [pg_cdc_a_bit_column_is_refused_not_delivered_as_the_decoders_literal, pg_cdc_a_bit_column_refusal_precedes_the_snapshot_and_leaves_only_a_failure_record, pg_cdc_a_bit_column_refusal_remedy_delivers_the_rows_the_refused_run_held, "lib:the_catalog_check_names_exactly_the_bit_typed_columns"]
       mysql:
         na: "MySQL BIT(n) is decoded from a typed binlog cell as an integer (mysql type_bit cell), never read from a decoder's text literal"
@@ -5849,7 +5866,7 @@ seeds:
     class: "the keyed load admits its order and key columns by name alone, so an incremental cursor that lands as text (an Oracle bare NUMBER) is ranked as a string by the current-state view (99 stays after 100), and a primary-key column the source declares finer than a microsecond (an MSSQL datetime2(7)) lands at microseconds and collapses rows into one, both with exit 0"
     history: "hunt axis 1 claims 1 and 2, RED on main 2026-11-10: Oracle (2,99) to (2,100) left 99 in the view with exit 0; MSSQL rows at .1234561 and .1234569 gave one view row"
     scope: source
-    patch: load-key-landed-type-not-admitted/shared.patch
+    switch: load-key-landed-type-not-admitted
     engines:
       postgres:
         na: "a PostgreSQL numeric lands as a decimal and a timestamp is at most a microsecond, so no key column lands as text or finer-collapsed"
@@ -5868,7 +5885,7 @@ seeds:
     class: "`rivet init` writes a table or column name holding a line break inside the folded `query: >` block, and a folded block turns the break plus the next line's indent into one space: the scaffold exports a different table (a twin named with a space) with every check green"
     history: "audit 2026-11-08 finding H5-F1 (hunt 5, `rivet init` on a PostgreSQL and a MySQL table named with a line break); RED on main 2026-11-10 (`a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names`: the scaffold of table \"nl<LF>      tab\" does not parse back to that relation)"
     scope: source
-    patch: init-name-folded-into-query/shared.patch
+    switch: init-name-folded-into-query
     engines:
       postgres:
         cells: ["lib:a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names"]
@@ -5902,7 +5919,7 @@ seeds:
     class: "a verifier that reads the absence of its evidence as never delivered: `rivet validate` took a prefix with no manifest and no `_SUCCESS` for a legacy run and exited 0 although the state recorded a successful run of the export at exactly that destination"
     history: "owner decision Q1 2026-11-01; RED on main 2026-11-11 (`a_prefix_of_a_recorded_delivery_that_holds_nothing_exits_3_by_code`: exit 0 over a recorded delivery whose prefix holds nothing)"
     scope: source
-    patch: validate-reads-a-lost-delivery-as-never-delivered/shared.patch
+    switch: validate-reads-a-lost-delivery-as-never-delivered
     engines:
       postgres:
         cells:
@@ -5930,7 +5947,7 @@ seeds:
     scope: source
     engines:
       mysql:
-        patch: mysql-zero-date-count-misses-a-class/mysql.patch
+        switch: mysql-zero-date-count-misses-a-class
         cells:
           - "lib:nulled_dates_counts_zero_and_partial_dates_per_column"
           - "lib:unparsable_text_and_a_zero_date_stay_null"
@@ -5965,7 +5982,7 @@ seeds:
     class: "`rivet doctor` passes (exit 0) an incremental export whose cursor_column can hold NULL or has a type the cursor cannot render, while `run`, `check` and `plan` end RIVET_PLAN_CURSOR_NULLABLE or RIVET_PLAN_CURSOR_TYPE_UNSUPPORTED, so the pre-run check does not name what run will do"
     history: "2026-11-12 - owner decision on the 0.33 gate (check_equals_run, doctor-run RED): doctor asks the source through cursor_admission::admission, the admission run uses, and ends with its coded refusal; fixed in src/preflight/doctor.rs"
     scope: source
-    patch: doctor-skips-cursor-admission/shared.patch
+    switch: doctor-skips-cursor-admission
     engines:
       postgres:
         cells: [nullable_cursor_is_refused_postgres, unrenderable_cursor_is_refused_postgres]
@@ -5984,15 +6001,15 @@ seeds:
     scope: source
     engines:
       postgres:
-        patch: cursor-nullability-claimed-without-the-table-catalog/postgres.patch
+        switch: cursor-nullability-claimed-without-the-table-catalog
         cells: [a_view_over_a_not_null_cursor_delivers_once_postgres]
       mysql:
         na: "the MySQL NOT NULL column flag is exact for an expression over NOT NULL columns and for a view, so the claim needs no catalog confirmation"
       mssql:
-        patch: cursor-nullability-claimed-without-the-table-catalog/mssql.patch
+        switch: cursor-nullability-claimed-without-the-table-catalog
         cells: [an_expression_over_a_not_null_cursor_delivers_once_mssql]
       oracle:
-        patch: cursor-nullability-claimed-without-the-table-catalog/oracle.patch
+        switch: cursor-nullability-claimed-without-the-table-catalog
         cells: [an_expression_over_a_not_null_cursor_delivers_once_oracle]
       mongo:
         na: "a MongoDB export has no incremental cursor_column: mode full only"
@@ -6001,7 +6018,7 @@ seeds:
     class: "the remote-plaintext gate lets an http:// URL on a remote host through, so a ClickHouse load.url, a Slack webhook_url or a BigQuery RIVET_BQ_API_ENDPOINT sends the loader password and every row, the webhook secret or the OAuth bearer token across the network unencrypted"
     history: "bughunt axis 4 (security defaults), 2026-11-10: require_tls_or_loopback guarded the source and state dials only; RED on main 2026-11-11 (rivet check accepted a remote http:// ClickHouse load.url and Slack webhook_url on every source engine)"
     scope: source
-    patch: remote-plaintext-every-sink/shared.patch
+    switch: remote-plaintext-every-sink
     engines:
       postgres:
         cells: [every_refusal_is_coded_and_names_the_true_cause]
@@ -6026,7 +6043,7 @@ seeds:
     class: "the remote-plaintext gate and the cloud-endpoint loopback gate decide by the text of the URL, not by the parser the HTTP client uses: `http:/host`, `http:host`, `ht<TAB>tp://host` and `http://host\\@127.0.0.1` pass as non-http or loopback while the client sends the loader password, the webhook secret, the bearer token or the uploaded rows to `host` in cleartext"
     history: "rivet-verifier on Linux, 2026-11-11: the four spellings passed require_https_or_loopback on main (#953); RED on main 2026-11-11 (lib cells for each spelling)"
     scope: source
-    patch: plaintext-gate-decides-by-text/shared.patch
+    switch: plaintext-gate-decides-by-text
     engines:
       postgres:
         na: "the gate reads an outbound URL (ClickHouse load.url, webhook, BigQuery endpoint, cloud destination.endpoint), never a source row, so it is the same code on this engine; graded by the lib cells"
@@ -6052,7 +6069,7 @@ seeds:
     class: a MongoDB CDC export whose keyed `load:` block merges on the flat `_id` column is accepted over `_id` values of more than one BSON type, so the current-state view merges distinct documents and a delete of one removes the other
     history: "H5-F7 (2026-11-10): RED on main c13bc29c on Mongo 4.4, 5.0 and 8.0 into ClickHouse (8 source documents, 4 view rows; a delete of string `1` tombstoned key `1` and removed the live int 1; exit 0 with only a WARN)"
     scope: source
-    patch: mongo-id-types-mixed-under-a-keyed-view/mongo.patch
+    switch: mongo-id-types-mixed-under-a-keyed-view
     engines:
       postgres:
         na: "a SQL key column has one declared type; only a MongoDB `_id` can hold any BSON type per document"
@@ -6091,7 +6108,7 @@ seeds:
     class: the `_id` type guard of a MongoDB CDC export runs only for a `load:` that spells its key columns, while a `load:` that leaves `pk` at its default `auto` resolves to the source key `_id` at load, so a collection holding int 1 and string "1" collapses to one view row at exit 0
     history: "found 2026-11-11 by a verifier reading #939: `keyed_tables` kept a table only when `pk.declared()` was non-empty and `auto` declares nothing; every live cell wrote an explicit `pk: [_id]`; RED on main 2c4ae204 (the guard never ran, the idt record was never written)"
     scope: source
-    patch: mongo-id-types-guard-skips-the-default-pk/mongo.patch
+    switch: mongo-id-types-guard-skips-the-default-pk
     engines:
       postgres:
         na: "a SQL key column has one declared type; only a MongoDB `_id` can hold any BSON type per document"

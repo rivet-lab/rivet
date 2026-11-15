@@ -64,7 +64,11 @@ pub(crate) fn run_mongo_parallel(
         kp.chunk_size
     );
 
-    let stamp = super::summary::run_scoped_stamp(&summary.run_id, &plan.export_name);
+    let stamp = seeded!(
+        "part-named-by-the-clock",
+        chrono::Utc::now().format("%Y%m%d_%H%M%S_%3f").to_string(),
+        super::summary::run_scoped_stamp(&summary.run_id, &plan.export_name)
+    );
 
     let key_plan = IncrementalCursorPlan {
         primary_column: kp.key_column.clone(),
@@ -161,9 +165,13 @@ fn range_worker_pages(
     fan: &super::fan_in::FanIn,
 ) -> Result<()> {
     let unit = commit::UnitId::Chunk(worker as i64);
-    let mut src = MongoSource::connect(url, plan.source.tls.as_ref(), plan.source.mongo.as_ref())?
-        .with_id_range(lo, hi)
-        .with_pinned(pinned);
+    let src = MongoSource::connect(url, plan.source.tls.as_ref(), plan.source.mongo.as_ref())?
+        .with_id_range(lo, hi);
+    let mut src = seeded!(
+        "mongo-parallel-worker-pins-its-own-uuid",
+        src,
+        src.with_pinned(pinned)
+    );
 
     let mut last: Option<String> = None;
     let mut page = 0usize;

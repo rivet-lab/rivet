@@ -123,7 +123,20 @@ impl TableIntrospection {
         shape: keyset_key::KeyShape,
         column: &str,
     ) -> Option<&'static str> {
-        keyset_key::column_refusal(source, mappings, &self.declared_wider, shape, column)
+        keyset_key::column_refusal(
+            source,
+            mappings,
+            seeded!(
+                "keyset-key-composite-ignores-the-catalog-fact",
+                match shape {
+                    keyset_key::KeyShape::Single => &self.declared_wider[..],
+                    keyset_key::KeyShape::Composite => &[],
+                },
+                &self.declared_wider[..]
+            ),
+            shape,
+            column,
+        )
     }
 
     /// The refusal cause recorded for `column`, if `admit_keyset_keys` dropped it.
@@ -404,6 +417,14 @@ pub trait Source: Send {
 
     fn query_scalar(&mut self, sql: &str) -> Result<Option<String>>;
 
+    /// Whether the logical replication slot `slot` exists on the server this connection reads; only PostgreSQL has slots.
+    fn replication_slot_exists(&mut self, _slot: &str) -> Result<bool> {
+        crate::rivet_bail!(
+            crate::error::codes::CONFIG_SOURCE_MODE_UNSUPPORTED,
+            "replication slots are not supported for this source"
+        )
+    }
+
     /// The chunk planner's catalog probe of `qualified_table`, on this connection.
     fn introspect_for_chunking(&mut self, _qualified_table: &str) -> Result<TableIntrospection> {
         crate::rivet_bail!(
@@ -529,6 +550,9 @@ pub(crate) fn unsafe_mapping_refusal(message: String) -> anyhow::Error {
 
 /// Whether `err` is an engine's typed verdict that a relation the export reads does not exist: PostgreSQL SQLSTATE 42P01, MySQL 1146, SQL Server 208, Oracle ORA-00942.
 pub(crate) fn names_a_missing_relation(err: &anyhow::Error) -> bool {
+    if seeded!("dropped-source-table-uncoded", true, false) {
+        return false;
+    }
     if let Some(db) = err
         .chain()
         .find_map(|e| e.downcast_ref::<::postgres::Error>())
@@ -821,8 +845,10 @@ pub(crate) fn keyset_keys_primary_first(columns: &[(String, bool)]) -> Vec<Strin
             .filter(|(col, is_primary)| *is_primary == primary && !keys.contains(col))
             .map(|(col, _)| col)
             .collect();
-        class.sort();
-        class.dedup();
+        if seeded!("keyset-key-by-catalog-order", false, true) {
+            class.sort();
+            class.dedup();
+        }
         keys.extend(class.into_iter().cloned());
     }
     keys

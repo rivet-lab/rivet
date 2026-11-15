@@ -73,10 +73,11 @@ Every recall appends one line to `recall-runs.jsonl` in the seeded state dir
 NOT-GRADED-HERE ceiling held) and whether the repo tree was `dirty`.
 
 `python3 dev/pytools/release.py` refuses to tag a sha unless the latest line of that file for
-the sha is a complete, green, clean-tree recall of exactly that sha: a later red, narrowed or
-dirty run revokes an earlier green. When the recall ran on another machine,
-copy the file and pass `--recall-record FILE`. A recall of another commit, a narrowed
-one, a red one, one from a dirty tree and a missing record are each refused.
+every ledger seed has a green clean-tree run of exactly that sha: a line names the `seeds` it covered,
+and the latest line covering a seed decides it, so a later red or dirty run revokes an earlier green.
+The devbox half's run and the Nightly Recall's hosted verdict (`recall-verdict` artifact) are two files of
+lines: concatenate them and pass `--recall-record FILE`. A recall of another commit, a seed no run covers,
+a red one, one from a dirty tree and a missing record are each refused.
 
 ## What a row means
 

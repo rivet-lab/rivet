@@ -149,7 +149,11 @@ pub(crate) fn unit_failures(
     on_err: impl FnOnce(&[String]) -> anyhow::Error,
 ) -> anyhow::Error {
     let (labels, mut causes): (Vec<String>, Vec<anyhow::Error>) = errors.into_iter().unzip();
-    let worst = crate::error::worst_typed_failure_idx(&causes);
+    let worst = seeded!(
+        "worker-error-loses-its-class",
+        None,
+        crate::error::worst_typed_failure_idx(&causes)
+    );
     let mut lines: Vec<String> = labels
         .iter()
         .zip(&causes)

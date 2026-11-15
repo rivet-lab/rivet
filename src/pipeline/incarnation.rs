@@ -6,7 +6,10 @@ use crate::plan::ResolvedRunPlan;
 /// The collection a MongoDB plan that continues stored progress reads; `None` when the plan has nothing to bind.
 fn collection_to_bind(plan: &ResolvedRunPlan) -> Option<&str> {
     let holds_progress = plan.strategy.continues_stored_cursor() || plan.strategy.is_resumable();
-    if plan.source.source_type != crate::config::SourceType::Mongo || !holds_progress {
+    if plan.source.source_type != crate::config::SourceType::Mongo
+        || !holds_progress
+        || seeded!("mongo-progress-not-bound-to-incarnation", true, false)
+    {
         return None;
     }
     crate::sql::strip_select_star_from(&plan.base_query)

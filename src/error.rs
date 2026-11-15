@@ -616,9 +616,22 @@ pub(crate) fn stop_class(err: &anyhow::Error) -> Option<ExitClass> {
     let coded = coded_error(err)?;
     match coded.kind() {
         ErrorKind::Refusal => Some(ExitClass::Refusal),
+        ErrorKind::Busy if seeded!("busy-stop-not-retryable", true, false) => {
+            Some(ExitClass::Refusal)
+        }
+        ErrorKind::Transient
+            if seeded!(
+                "transient-warehouse-code-exits-by-text",
+                coded.code() == codes::LOAD_WAREHOUSE_UNAVAILABLE.id,
+                false
+            ) =>
+        {
+            Some(ExitClass::Generic)
+        }
         ErrorKind::Busy | ErrorKind::Transient => Some(ExitClass::Retryable),
         ErrorKind::Internal => Some(ExitClass::Internal),
         ErrorKind::Integrity => Some(ExitClass::DataIntegrity),
+        ErrorKind::Environment(_) if seeded!("stop-class", true, false) => None,
         ErrorKind::Usage | ErrorKind::Environment(Retry::Never) => Some(ExitClass::Generic),
         ErrorKind::Environment(Retry::Always) => Some(ExitClass::Retryable),
         ErrorKind::Environment(Retry::ByCause) => coded.cause().map(|c| {

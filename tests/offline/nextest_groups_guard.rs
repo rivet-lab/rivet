@@ -247,3 +247,112 @@ fn no_nextest_profile_retries_a_failed_test() {
         "a numeric or table retries is named"
     );
 }
+
+/// `(header, body)` of every table of the file, in order.
+fn tables(toml: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for line in toml.lines() {
+        if line.starts_with('[') {
+            out.push((line.trim().to_string(), String::new()));
+        } else if let Some((_, body)) = out.last_mut() {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    out
+}
+
+/// Headers of the overrides outside the default profile that set a `slow-timeout`.
+fn shadowing_budgets(toml: &str) -> Vec<String> {
+    tables(toml)
+        .into_iter()
+        .filter(|(h, b)| {
+            h.starts_with("[[profile.")
+                && h.ends_with(".overrides]]")
+                && h != "[[profile.default.overrides]]"
+                && b.contains("slow-timeout")
+        })
+        .map(|(h, _)| h)
+        .collect()
+}
+
+/// `period * terminate-after` in seconds of a `slow-timeout = { period = "<n>s", terminate-after = <k> }` line.
+fn budget_secs(body: &str) -> Option<u64> {
+    let line = body.lines().find(|l| l.starts_with("slow-timeout"))?;
+    let num = |key: &str| -> Option<u64> {
+        let rest = line.split(key).nth(1)?;
+        rest.trim_start_matches([' ', '=', '"'])
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .ok()
+    };
+    Some(num("period")? * num("terminate-after")?)
+}
+
+#[test]
+fn a_per_test_budget_is_declared_once_in_the_default_profile() {
+    let root = super::nonvacuity::repo_root();
+    let toml = std::fs::read_to_string(root.join(".config/nextest.toml")).expect("nextest.toml");
+    assert_eq!(
+        shadowing_budgets(&toml),
+        Vec::<String>::new(),
+        "an override outside the default profile that sets slow-timeout wins over every budget the default profile declares \
+         (the pr profile's `all()` capped the Oracle no-debris matrix at 1200 s); set the profile's own slow-timeout instead"
+    );
+    let pr = tables(&toml)
+        .into_iter()
+        .find(|(h, _)| h == "[profile.pr]")
+        .expect("the pr profile")
+        .1;
+    assert!(
+        budget_secs(&pr).is_some_and(|s| s >= 1200),
+        "the pr profile declares its own slow-timeout, at least the 1200 s every live test had"
+    );
+    assert_eq!(
+        shadowing_budgets(
+            "[[profile.pr.overrides]]\nfilter = 'all()'\nslow-timeout = { period = \"300s\", terminate-after = 4 }\n"
+        ),
+        vec!["[[profile.pr.overrides]]".to_string()],
+        "a pr override that sets slow-timeout is named"
+    );
+}
+
+/// Slowest measured run of one engine's no-debris matrix test, seconds (nightly gate 2026-11-13: Oracle 1178 s).
+const NO_DEBRIS_MATRIX_MEASURED_SECS: u64 = 1178;
+
+#[test]
+fn every_no_debris_matrix_engine_has_a_budget_over_its_measured_run() {
+    let root = super::nonvacuity::repo_root();
+    let toml = std::fs::read_to_string(root.join(".config/nextest.toml")).expect("nextest.toml");
+    let (_, block) = tables(&toml)
+        .into_iter()
+        .find(|(h, b)| {
+            h == "[[profile.default.overrides]]"
+                && b.contains(
+                    "property_no_debris_after_stop::no_debris_and_an_equal_rerun_after_every_stop_",
+                )
+        })
+        .expect("an override declares the no-debris matrix budget");
+    let pattern = block
+        .split("test(/")
+        .nth(1)
+        .and_then(|s| s.split("/)").next())
+        .expect("the override filters the matrix by a regex");
+    let re = regex::Regex::new(pattern).expect("the filter regex");
+    let engines: Vec<String> = live_tests(&root)
+        .into_iter()
+        .map(|(n, _)| n)
+        .filter(|n| re.is_match(n))
+        .collect();
+    assert!(
+        engines.len() >= 5,
+        "the no-debris budget filter matches {engines:?}: one test per engine"
+    );
+    let secs = budget_secs(&block).expect("the no-debris override sets slow-timeout");
+    assert!(
+        secs >= 3 * NO_DEBRIS_MATRIX_MEASURED_SECS,
+        "the no-debris matrix budget {secs} s is under 3x its slowest measured run {NO_DEBRIS_MATRIX_MEASURED_SECS} s"
+    );
+}

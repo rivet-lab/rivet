@@ -64,6 +64,10 @@ pub(super) fn check_from_type_mappings(
     plan: &ResolvedRunPlan,
     summary: &mut RunSummary,
 ) -> Result<()> {
+    if seeded!("chunked-drift-gate-skipped", true, false) {
+        summary.schema_changed.get_or_insert(false);
+        return Ok(());
+    }
     let mappings = match src.type_mappings(&plan.base_query, &plan.column_overrides) {
         Ok(m) => m,
         Err(e) => {

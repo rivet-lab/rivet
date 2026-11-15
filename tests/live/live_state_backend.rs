@@ -368,8 +368,9 @@ fn a_run_on_a_hundred_thousand_run_ledger_is_not_slowed_by_the_history() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(
-        loaded <= empty * 3 + std::time::Duration::from_secs(2),
-        "a run on a 100k-run ledger took {loaded:?} against {empty:?} on an empty one"
+    assert_wall_clock(
+        loaded,
+        empty * 3 + std::time::Duration::from_secs(2),
+        &format!("a run on a 100k-run ledger against {empty:?} on an empty one"),
     );
 }

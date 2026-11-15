@@ -396,7 +396,11 @@ fn holds_whole_table_pass(
     match plan.mode {
         load::plan::LoadMode::Full => true,
         load::plan::LoadMode::Cdc => {
-            plan.layout.compacts() && runs.iter().any(|(_, m)| is_baseline_leg(m))
+            seeded!(
+                "empty-baseline-builds-no-base",
+                false,
+                plan.layout.compacts()
+            ) && runs.iter().any(|(_, m)| is_baseline_leg(m))
         }
         load::plan::LoadMode::Incremental => false,
     }
@@ -1269,15 +1273,24 @@ fn execute_load<R>(
     // Everything the selection can stop on happens before any warehouse write, so every
     // stop is typed and journaled as `refused` here: untyped and unrecorded, the load read
     // as never attempted, and a `failed` row would have counted as rivet's own attempt.
-    let inputs = match load::before_write(prepare_load(
+    let prepared = prepare_load(
         store,
         job.plan,
         job.state,
         &target_fqtn,
         job.allow_source_drift,
-    )) {
+    );
+    let inputs = match seeded!(
+        "load-refusal-not-journaled",
+        prepared,
+        load::before_write(prepared)
+    ) {
         Err(e) => {
-            ctx.record(&[], 0, load::ledger::ledger_status(&e));
+            seeded!(
+                "load-refusal-not-journaled",
+                (),
+                ctx.record(&[], 0, load::ledger::ledger_status(&e))
+            );
             return Err(e);
         }
         Ok(Some(i))
@@ -1317,12 +1330,16 @@ fn execute_load<R>(
         job.plan.layout.log_is_disposable(),
     )
     .and_then(|()| {
-        load::before_write(load::ensure_target_own(
-            &**loader,
-            &job.plan.table,
-            appends,
-            inputs.ownership,
-        ))
+        seeded!(
+            "load-append-writes-before-asking",
+            Ok(()),
+            load::before_write(load::ensure_target_own(
+                &**loader,
+                &job.plan.table,
+                appends,
+                inputs.ownership,
+            ))
+        )
     })
     .and_then(|()| load::before_write(partition_budget_ok(store, job.plan, &budgeted)))
     .and_then(|()| {
@@ -1522,7 +1539,11 @@ fn load_one_cdc_base(
 /// target when a baseline landed there, with the change log as its buffer when the stream also
 /// appended to it; the change log alone otherwise.
 fn cdc_work(report: &load::CdcLoadReport) -> Work {
-    match &report.baseline {
+    match seeded!(
+        "cdc-load-reports-the-stream-leg-only",
+        &None,
+        &report.baseline
+    ) {
         Some(base) => Work {
             buffer: (report.rows_appended > 0).then(|| report.changes_table.clone()),
             ..Work::loaded(base.rows_loaded + report.rows_appended, &base.target_table)
@@ -2103,7 +2124,9 @@ fn whole_table_run_joins_the_log(
     changes: load::ObjectKind,
 ) -> bool {
     match kind {
-        load::ObjectKind::Table | load::ObjectKind::View => true,
+        load::ObjectKind::Table | load::ObjectKind::View => {
+            seeded!("whole-pass-replaces-the-base", !base_and_buffer, true)
+        }
         load::ObjectKind::Absent => !base_and_buffer && changes == load::ObjectKind::Table,
         load::ObjectKind::Other => false,
     }

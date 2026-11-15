@@ -57,6 +57,13 @@ impl RunnerFrame {
 
     /// Refuse a prefix that holds another export shape's manifest, before any runner stores a plan, anchor or cursor.
     pub(crate) fn refuse_cross_shape_prefix(plan: &ResolvedRunPlan) -> Result<()> {
+        if seeded!(
+            "batch-runner-stores-state-before-the-cross-shape-refusal",
+            true,
+            false
+        ) {
+            return Ok(());
+        }
         let frame = Self::open_unguarded(plan)?;
         crate::manifest::guard_manifest_mode(frame.dest.as_ref(), "batch")
     }

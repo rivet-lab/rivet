@@ -308,7 +308,11 @@ fn refuse_a_cursor_case_miss(
         return err;
     };
     let names: Vec<&str> = columns.iter().map(|c| c.column_name.as_str()).collect();
-    match crate::types::refuse_cursor_case_miss(cursor, &names) {
+    match seeded!(
+        "cursor-case-uncoded",
+        Ok(()),
+        crate::types::refuse_cursor_case_miss(cursor, &names)
+    ) {
         Err(refusal) => refusal,
         Ok(()) => err,
     }
@@ -424,7 +428,11 @@ pub(super) fn run_single_export(
         &plan.tuning,
         &plan.column_overrides,
     )
-    .with_catalog_hint_query(plan.catalog_query.as_deref())
+    .with_catalog_hint_query(seeded!(
+        "partition-child-loses-catalog-hints",
+        None,
+        plan.catalog_query.as_deref()
+    ))
     .with_incremental(plan.strategy.incremental_plan())
     .with_cursor(cursor);
 
@@ -480,7 +488,11 @@ pub(super) fn run_single_export(
     let (dest, ext) = (frame.dest, frame.ext);
     let ext = ext.as_str();
 
-    let stamp = super::summary::run_scoped_stamp(&summary.run_id, &plan.export_name);
+    let stamp = seeded!(
+        "part-named-by-the-clock",
+        chrono::Utc::now().format("%Y%m%d_%H%M%S_%3f").to_string(),
+        super::summary::run_scoped_stamp(&summary.run_id, &plan.export_name)
+    );
 
     let (parts, wrote) = super::commit::write_sink_parts(
         dest.as_ref(),
@@ -549,7 +561,11 @@ pub(super) fn commit_incremental_cursor(
     plan: &ResolvedRunPlan,
     summary: &RunSummary,
 ) -> Result<()> {
-    if let Some(cursor) = summary.cursor_high.clone() {
+    if let Some(cursor) = summary
+        .cursor_high
+        .clone()
+        .filter(|_| seeded!("incremental-cursor-never-committed", false, true))
+    {
         super::run_store::RunStore::finalize(state, plan, summary)
             .with_cursor(cursor.clone())
             .with_progression(super::run_store::Progression::Incremental { last_value: cursor })

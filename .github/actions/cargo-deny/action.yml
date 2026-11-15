@@ -1,0 +1,8 @@
+name: cargo-deny
+description: The one pinned cargo-deny every job that runs `cargo deny` installs.
+runs:
+  using: composite
+  steps:
+    - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+      with:
+        tool: cargo-deny@0.20.2

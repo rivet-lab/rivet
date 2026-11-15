@@ -47,9 +47,15 @@ pub(crate) fn readable_columns(
     table: &str,
 ) -> Result<Vec<String>> {
     let names: Vec<String> = conn.exec(
-        "SELECT COLUMN_NAME FROM information_schema.COLUMNS \
-         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND EXTRA NOT LIKE '%INVISIBLE%' \
+        seeded!(
+            "column-grants-invisible-columns-read",
+            "SELECT COLUMN_NAME FROM information_schema.COLUMNS \
+         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
          ORDER BY ORDINAL_POSITION",
+            "SELECT COLUMN_NAME FROM information_schema.COLUMNS \
+         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND EXTRA NOT LIKE '%INVISIBLE%' \
+         ORDER BY ORDINAL_POSITION"
+        ),
         (db, table),
     )?;
     let mut readable = Vec::with_capacity(names.len());
@@ -141,9 +147,22 @@ pub(crate) fn resolve_grants(
             .filter(|k| !shown.iter().any(|c| c.eq_ignore_ascii_case(k)))
         {
             let sql = projection_sql(Some(&db), &table, std::slice::from_ref(k));
-            match conn.prep(&sql) {
+            match seeded!(
+                "column-grants-invisible-key-judged-by-name",
+                Err::<mysql::Statement, mysql::Error>(mysql::Error::MySqlError(
+                    mysql::MySqlError {
+                        state: "42000".into(),
+                        message: "x".into(),
+                        code: 1143
+                    }
+                )),
+                conn.prep(&sql)
+            ) {
                 Ok(stmt) => conn.close(stmt)?,
-                Err(mysql::Error::MySqlError(e)) if DENIED.contains(&e.code) => {
+                Err(mysql::Error::MySqlError(e))
+                    if seeded!("column-grants-unreadable-key-accepted", false, true)
+                        && DENIED.contains(&e.code) =>
+                {
                     crate::rivet_bail!(
                         crate::error::codes::SOURCE_COLUMNS_UNREADABLE,
                         "mysql: `{db}.{table}`: key column `{k}` ({from}) is not readable under \

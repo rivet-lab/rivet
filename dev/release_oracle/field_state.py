@@ -58,7 +58,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import stand_health
-from .core import Ledger, SkipCause, Proc, checked_exports, isolate_state_db, rivet_bin, run, run_lanes, server_of, strategy_lines
+from .core import ROOT, Ledger, SkipCause, Proc, checked_exports, isolate_state_db, rivet_bin, run, run_lanes, server_of, strategy_lines
 
 __all__ = ["verify_upgrade_from_field_state", "COMPATIBILITY_FLOOR", "ACCEPTED_DIFFERENCES"]
 
@@ -1350,6 +1350,23 @@ def verify_upgrade_from_field_state(led: Ledger, only: list[str] | None = None) 
     led.ok(f"upgrade from a field state: {len(todo)} cells in {time.monotonic() - t0:.0f}s")
 
 
+def pinned_fetch_problems(makefile: str) -> list[str]:
+    """The pinned releases (`<NAME>_TAG` beside `<NAME>_BIN` in the Makefile) that `release-oracle-prev-bin` does not fetch through FETCH_PINNED."""
+    pinned = sorted(set(re.findall(r"^(\w+)_TAG\s*\?=", makefile, re.M)) & set(re.findall(r"^(\w+)_BIN\s*\?=", makefile, re.M)))
+    return [f"{n}: {n}_TAG and {n}_BIN are pinned but no $(call FETCH_PINNED,$({n}_TAG),$({n}_BIN),...) fetches them" for n in pinned
+            if f"$(call FETCH_PINNED,$({n}_TAG),$({n}_BIN)," not in makefile]
+
+
+def _pinned_self_test() -> None:
+    """The Makefile fetches every pinned carrier; a pin whose fetch is dropped is named."""
+    text = (ROOT / "Makefile").read_text()
+    assert pinned_fetch_problems(text) == [], pinned_fetch_problems(text)
+    assert len(re.findall(r"\$\(call FETCH_PINNED,", text)) >= 4, "the four pinned carriers are not all fetched through FETCH_PINNED"
+    dropped = text.replace("$(call FETCH_PINNED,$(LEASE_CARRIER_TAG)", "$(call OTHER,$(LEASE_CARRIER_TAG)")
+    assert [p.split(":")[0] for p in pinned_fetch_problems(dropped)] == ["LEASE_CARRIER"], "a dropped lease-carrier fetch is not named"
+    assert [p.split(":")[0] for p in pinned_fetch_problems(text + "NEW_CARRIER_TAG ?= v1\nNEW_CARRIER_BIN ?= x\n")] == ["NEW_CARRIER"], "a new pin with no fetch is not named"
+
+
 def _fetch_self_test() -> None:
     """`fetch_tags` against a stubbed release host: a whole asset lands, a tampered or absent one fails, `latest` resolves, Linux prefers the glibc 2.28 build."""
     import hashlib
@@ -1588,6 +1605,7 @@ def _self_test() -> None:
     names = [n for _, n, _ in cells([("0.1.0", Path("a")), ("0.2.0", Path("b"))], Path(tempfile.gettempdir()), [""])]
     assert len(names) == len([n for n in names if n.startswith("field[")]) > 0
     _fetch_self_test()
+    _pinned_self_test()
     print("self-test ok: a re-baseline, a restart, a duplicate, a loss and a config that no longer loads each fail their row")
 
 

@@ -102,10 +102,15 @@ pub(super) fn take(db: &Path, patience: Duration) -> Option<Turn> {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             q.waiting.retain(|t| *t != me);
-            q.overdue += 1;
+            let place = seeded!(
+                "sqlite-second-overdue-writer-has-no-place",
+                q.overdue == 0,
+                true
+            ) && seeded!("sqlite-overdue-writer-loses-its-place", false, true);
+            q.overdue += usize::from(place);
             drop(q);
             turns.freed.notify_all();
-            return Some(Turn {
+            return place.then_some(Turn {
                 turns,
                 overdue: true,
             });

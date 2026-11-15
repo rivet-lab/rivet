@@ -819,7 +819,11 @@ fn refused_by_a_gate(o: &RunOutcome<'_>) -> bool {
 /// Whether the keyset resume anchor outlives the run.
 pub(super) fn keyset_anchor_survives(o: &RunOutcome<'_>, cursor_ran_ahead: bool) -> bool {
     if refused_by_a_gate(o) {
-        return cursor_ran_ahead;
+        return seeded!(
+            "refused-run-adopted",
+            cursor_ran_ahead || o.failed,
+            cursor_ran_ahead
+        );
     }
     o.failed || o.manifest_gap.is_some()
 }
@@ -873,9 +877,13 @@ fn finalize_keyset_anchor(
 /// Whether the stored keyset anchor names a run that recorded a part.
 fn anchor_holds_a_part(state: &StateStore, progress: &ProgressClaim<'_>) -> bool {
     match progress.resume_run_id() {
-        Ok(Some(anchor)) => !state
-            .list_files_for_run(&anchor)
-            .is_ok_and(|parts| parts.is_empty()),
+        Ok(Some(anchor)) => seeded!(
+            "keyset-anchor-kept-without-a-part",
+            state.list_files_for_run(&anchor).is_ok(),
+            !state
+                .list_files_for_run(&anchor)
+                .is_ok_and(|parts| parts.is_empty())
+        ),
         Ok(None) => false,
         Err(_) => true,
     }
@@ -891,9 +899,15 @@ pub(super) fn ledger_begin_run(
 ) -> Result<String> {
     let prefix = super::finalize::destination_uri_for_manifest(destination);
     let started_at = chrono::Utc::now().to_rfc3339();
-    state
-        .begin_run_under_lease(run_id, export_name, source_key, &prefix, &started_at)
-        .map_err(|e| state_not_writable(export_name, &e))?;
+    if let Err(e) =
+        state.begin_run_under_lease(run_id, export_name, source_key, &prefix, &started_at)
+    {
+        let stop = state_not_writable(export_name, &e);
+        if seeded!("unwritable-state-run-exports", false, true) {
+            return Err(stop);
+        }
+        log::warn!("{stop:#}");
+    }
     Ok(started_at)
 }
 
@@ -1055,6 +1069,12 @@ fn promotes_to_success(current_status: &str) -> bool {
     current_status == "running"
 }
 
+/// Fail `summary` for the manifest gap `why`.
+fn fail_for_manifest_gap(summary: &mut RunSummary, why: &str) {
+    summary.status = "failed".into();
+    summary.error_message = Some(crate::redact::redact_secrets(why));
+}
+
 /// Does the `running` marker written under `opened` survive this run with nothing replacing it?
 fn marker_outlived_its_run(prefix_left_alone: bool, opened: &str, finished: &str) -> bool {
     prefix_left_alone || opened != finished
@@ -1109,7 +1129,9 @@ fn execute_resolved_plan(
     tail: TailPolicy<'_>,
     mut meta: MetaConn<'_>,
 ) -> (Result<()>, RunSummary) {
-    if let Some(e) = unexpanded_partition_error(plan) {
+    if let Some(e) = unexpanded_partition_error(plan)
+        .filter(|_| seeded!("apply-skips-partition-expansion", false, true))
+    {
         let summary = synthetic_failed_summary(&plan.export_name, &e);
         return (Err(e), summary);
     }
@@ -1285,9 +1307,9 @@ fn execute_resolved_plan(
 
     let finalized = finalize_manifest(plan, tail.family, state, &summary, tail.kind);
     let manifest_gap = finalized.gap;
-    if let Some(why) = &manifest_gap {
-        summary.status = "failed".into();
-        summary.error_message = Some(crate::redact::redact_secrets(why));
+    let early_gap: &Option<String> = seeded!("journal-manifest-gap", &None, &manifest_gap);
+    if let Some(why) = early_gap {
+        fail_for_manifest_gap(&mut summary, why);
     }
 
     summary.journal.record(RunEvent::RunCompleted {
@@ -1307,6 +1329,10 @@ fn execute_resolved_plan(
 
     summary.print();
     ledger_finish_owned_runs(state, &plan.export_name, &ledger_run_id, &summary);
+    let late_gap: &Option<String> = seeded!("journal-manifest-gap", &manifest_gap, &None);
+    if let Some(why) = late_gap {
+        fail_for_manifest_gap(&mut summary, why);
+    }
     if marker_outlived_its_run(finalized.left_alone, &ledger_run_id, &summary.run_id) {
         super::finalize::retire_running_marker(plan, &ledger_run_id);
     }
@@ -1321,7 +1347,12 @@ fn execute_resolved_plan(
             );
         }
     } else if let Err(e) = commit_incremental_cursor(state, plan, &summary) {
-        cursor_gate = Err(cursor_not_stored(tail.kind, &summary.export_name, &e));
+        let stop = cursor_not_stored(tail.kind, &summary.export_name, &e);
+        if seeded!("unstored-cursor-exits-zero", false, true) {
+            cursor_gate = Err(stop);
+        } else {
+            log::error!("{stop:#}");
+        }
     }
     let outcome = RunOutcome {
         failed,
@@ -1346,7 +1377,18 @@ fn execute_resolved_plan(
     finalize_run_report(tail.config_path, &summary, tail.kind);
     crate::notify::maybe_send(tail.notifications, &summary);
 
-    let gates = [validate_run_gate(&summary), reconcile_gate, cursor_gate];
+    let gates = [
+        seeded!(
+            "failed-validation-exits-zero",
+            {
+                let _ = validate_run_gate(&summary);
+                Ok(())
+            },
+            validate_run_gate(&summary)
+        ),
+        reconcile_gate,
+        cursor_gate,
+    ];
     let final_result = resolve_final_result(failed, result, manifest_gap, gates);
     (final_result, summary)
 }
@@ -1446,12 +1488,18 @@ fn run_export_job_inner(
         ) {
             log::warn!("{msg}");
         }
-        let _run_lease = match cdc_run_lease(state, &export.name, &config.source.state_key()) {
-            Ok(lease) => lease,
-            Err(e) => {
-                let summary = synthetic_failed_summary(&export.name, &e);
-                return (Err(e), summary);
-            }
+        let _run_lease = if seeded!("cdc-run-without-lease", true, false) {
+            None
+        } else {
+            Some(
+                match cdc_run_lease(state, &export.name, &config.source.state_key()) {
+                    Ok(lease) => lease,
+                    Err(e) => {
+                        let summary = synthetic_failed_summary(&export.name, &e);
+                        return (Err(e), summary);
+                    }
+                },
+            )
         };
         if let Err(e) = super::cdc_job::claim_checkpoint(config_path, export) {
             let summary = synthetic_failed_summary(&export.name, &e);
@@ -1468,7 +1516,14 @@ fn run_export_job_inner(
                 return (Err(e), summary);
             }
         };
-        let first_run = super::cdc_release::FirstRun::of(config, export, state, config_path);
+        let mut meta = crate::source::create_source(&config.source).ok();
+        let first_run = super::cdc_release::FirstRun::of(
+            config,
+            export,
+            state,
+            config_path,
+            meta.as_deref_mut(),
+        );
         let pending = match super::cdc_job::initial_snapshot_pending(
             config,
             export,
@@ -1504,6 +1559,7 @@ fn run_export_job_inner(
             crate::notify::maybe_send(config.notifications.as_ref(), &summary);
             return (stopped, summary);
         }
+        let meta = if pending.is_empty() { meta } else { None };
         let outcomes = if snapshot_legs_fan_out(opts.parallel_snapshots, pending.len()) {
             let _flags = super::run::RenderFlags::set(super::run::multi_export_mode(), Some(true));
             let (harm, _) = super::run::RunHarmBracket::open(&config.source);
@@ -1541,6 +1597,7 @@ fn run_export_job_inner(
                 state,
                 opts.strict,
                 grants,
+                meta,
             );
             super::cdc_job::record_file_anchor(config, export, state, config_path, &outcome.0);
             outcome
@@ -4004,5 +4061,17 @@ mod tests {
         };
         let err = reconcile_run_gate(&summary, Some("source count query failed")).unwrap_err();
         crate::error::assert_coded(&err, "RIVET_RUN_RECONCILE_UNVERIFIED", 1);
+    }
+
+    /// A manifest gap fails the run and carries its reason.
+    #[test]
+    fn a_manifest_gap_fails_the_run_with_its_reason() {
+        let mut summary = RunSummary::default();
+        fail_for_manifest_gap(&mut summary, "manifest gap: part 3 missing");
+        assert_eq!(summary.status, "failed");
+        assert_eq!(
+            summary.error_message.as_deref(),
+            Some("manifest gap: part 3 missing")
+        );
     }
 }

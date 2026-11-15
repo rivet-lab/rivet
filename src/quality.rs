@@ -143,7 +143,11 @@ impl QualityTracker {
         };
         crate::config::quantity::Knob::ratios("the quality gate", &qc.null_ratio_max)?;
         // A zero-row result arrives as `Schema::empty()`: no columns to bind, no cells to measure.
-        if dest_schema.fields().is_empty() {
+        if seeded!(
+            "empty-page-fails-quality",
+            false,
+            dest_schema.fields().is_empty()
+        ) {
             return Ok(());
         }
         let available: Vec<String> = dest_schema

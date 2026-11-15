@@ -77,7 +77,11 @@ pub fn load_mode_of(
         ExportMode::Incremental => LoadMode::Incremental,
         // only the keys past the last run's: a delta, never the whole table
         ExportMode::Full | ExportMode::Chunked
-            if crate::plan::build::continued_key(config, export).is_some() =>
+            if seeded!(
+                "delta-run-loaded-as-overwrite",
+                false,
+                crate::plan::build::continued_key(config, export).is_some()
+            ) =>
         {
             LoadMode::Incremental
         }
@@ -166,7 +170,12 @@ pub(crate) fn cdc_layout(
         (_, Some(LayoutChoice::BaseBuffer)) if support != BaseSupport::Never => {
             CdcLayout::BaseAndBuffer
         }
-        (_, None) if support == BaseSupport::Default => CdcLayout::BaseAndBuffer,
+        (_, None)
+            if seeded!("snowflake-base-buffer-not-the-default", false, true)
+                && support == BaseSupport::Default =>
+        {
+            CdcLayout::BaseAndBuffer
+        }
         (LoadMode::Cdc, None) if support == BaseSupport::Derived => {
             match export.cdc.as_ref().and_then(|c| c.backfill.as_ref()) {
                 Some(_) => CdcLayout::BaseAndBuffer,

@@ -29,7 +29,11 @@ pub(crate) struct Line<'a> {
 /// The relation list and the rest of a `table <relations>: <rest>` line, cut at the first `: ` outside quotes.
 fn table_head(data: &str) -> Option<(&str, &str)> {
     let rest = data.strip_prefix("table ")?;
-    let sep = find_outside_quotes(rest, ": ")?;
+    let sep = seeded!(
+        "pg-test-decoding-header-cut-at-first-separator",
+        rest.find(": ")?,
+        find_outside_quotes(rest, ": ")?
+    );
     Some((&rest[..sep], &rest[sep + 2..]))
 }
 
@@ -99,6 +103,10 @@ fn column(s: &str) -> Option<(RawColumn, &str)> {
 
 /// A column name at the start of `s`: a quoted identifier to its closing quote, or a bare `[A-Za-z0-9_]` run; followed by the `[` of its type.
 fn read_name(s: &str) -> Option<(String, &str)> {
+    if seeded!("pg-test-decoding-column-name-cut-at-bracket", true, false) {
+        let end = s.find('[')?;
+        return Some((s[..end].trim_matches('"').to_string(), &s[end..]));
+    }
     if let Some(quoted) = s.strip_prefix('"') {
         let end = closing_quote(quoted)?;
         let after = &quoted[end + 1..];

@@ -11,13 +11,15 @@ It runs last so the registry is complete.
 from __future__ import annotations
 
 import ast
+import functools
 import os
 import re
+import sys
 from dataclasses import dataclass
 
-from . import live_owners
+from . import live_needs, live_owners
 from .core import DEVBOX, HOSTED, RAN_LIVE_MODULES, RAN_LIVE_TESTS, ROOT, Ledger, SkipCause
-from .halves import devbox_only, slice_modules
+from .halves import NEED_HALF, devbox_only, needs_problems, slice_modules
 from .scenarios import _run_live_modules, cfg
 
 __all__ = ["verify_live_modules", "live_suite_modules", "exclusive_tests", "EXCLUDED", "select_modules", "engines_arg"]
@@ -107,15 +109,25 @@ IGNORE_ATTR = re.compile(r'^\s*#\[ignore = "', re.M)
 REGISTRARS = frozenset({"_drive_live_tests", "run_rig_tests", "_run_live_modules"})
 
 
-def live_test_table() -> list[tuple[str, str, str]]:
-    """Every ignored live test as (module, fn name, ignore reason), read from tests/live/*.rs."""
-    return [(f.stem, name, reason) for f in sorted((ROOT / "tests" / "live").glob("*.rs"))
-            for reason, name in IGNORED_TEST.findall(f.read_text())]
+@functools.cache
+def _need_map() -> dict[tuple[str, str], frozenset[str]]:
+    """The needs each live test carries, scanned once per process."""
+    return live_needs.test_needs()
 
 
-def part_tests(part: str, table: list[tuple[str, str, str]] | None = None) -> set[str]:
-    """Bare names of the live tests the `part` ("hosted" or "devbox") half runs: the devbox half takes every test whose reason needs what only it holds."""
-    return {name for _, name, reason in (live_test_table() if table is None else table) if devbox_only(reason) is (part == DEVBOX)}
+def live_test_table() -> list[tuple[str, str, bool]]:
+    """Every ignored live test as (module, fn name, runs in the devbox half), read from tests/live/*.rs: a test goes to the devbox when its reason names a topology only it holds or its call graph carries a need only it meets."""
+    problems = needs_problems(live_needs.need_variants())
+    if problems:
+        raise ValueError("; ".join(problems))
+    needs = _need_map()
+    return [(f.stem, name, devbox_only(reason, needs.get((f.stem, name), ())))
+            for f in sorted((ROOT / "tests" / "live").glob("*.rs")) for reason, name in IGNORED_TEST.findall(f.read_text())]
+
+
+def part_tests(part: str, table: list[tuple[str, str, bool]] | None = None) -> set[str]:
+    """Bare names of the live tests the `part` ("hosted" or "devbox") half runs."""
+    return {name for _, name, devbox in (live_test_table() if table is None else table) if devbox is (part == DEVBOX)}
 
 
 def _strings(node: ast.AST, consts: dict[str, set[str]]) -> set[str]:
@@ -154,6 +166,29 @@ def dedicated_live(sources: dict[str, str] | None = None) -> tuple[set[str], set
     return modules, tests
 
 
+def dedicated_expr(modules: list[str]) -> str:
+    """The nextest filter of a dedicated stage over whole `modules`: their hosted tests only, the devbox ones being the devbox part's."""
+    return part_filter(" | ".join(f"test(/^{m}::/)" for m in modules), HOSTED, live_test_table())
+
+
+def dedicated_stage_problems(sources: dict[str, str] | None = None) -> list[str]:
+    """A stage that runs whole live modules (a `_run_live_modules` call with no `expr`) and is not placed in the hosted half: it filters its modules to the hosted tests, so another half would leave them to no one."""
+    if sources is None:
+        sources = {f.name: f.read_text() for f in sorted(ROOT.joinpath("dev", "release_oracle").glob("*.py")) if f.name != "live_modules.py"}
+    from .halves import STAGE_HALF
+    mods = set(live_suite_modules())
+    out = []
+    for name, text in sources.items():
+        for n in ast.walk(ast.parse(text)):
+            if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_run_live_modules") or any(k.arg == "expr" for k in n.keywords):
+                continue
+            label = n.args[2].value if len(n.args) > 2 and isinstance(n.args[2], ast.Constant) else None
+            named = sorted(mods & _strings(n.args[4], {})) if len(n.args) > 4 else []
+            if named and STAGE_HALF.get(label) != HOSTED:
+                out.append(f"{name}: stage {label!r} runs {named} whole and is not placed in the hosted half")
+    return out
+
+
 def verify_registry_covered(led: Ledger) -> None:
     """A test or module a stage registered at run time that `dedicated_live` did not read from source is a FAIL: the static set is what the other half and the live slices subtract."""
     modules, tests = dedicated_live()
@@ -161,6 +196,8 @@ def verify_registry_covered(led: Ledger) -> None:
     if missed:
         led.failed("-", "-", "live_registry", "-", f"live registry: {len(missed)} registration(s) the static dedicated set does not hold: {', '.join(missed[:8])}",
                    "static dedicated set incomplete")
+        return
+    led.passed("-", "-", "live_registry", "-", f"live registry: {len(RAN_LIVE_TESTS)} test(s) and {len(RAN_LIVE_MODULES)} module(s) registered, all held by the static dedicated set")
 
 
 def derived_filter(modules: list[str], ran_modules: set[str], ran_tests: set[str],
@@ -185,17 +222,18 @@ def live_modules_env(state: str) -> tuple[dict[str, str], tuple[str, dict[str, s
     return env, again
 
 
-def part_filter(expr: str, part: str, table: list[tuple[str, str, str]]) -> str:
+def part_filter(expr: str, part: str, table: list[tuple[str, str, bool]]) -> str:
     """`expr` narrowed to the tests `part` runs: the devbox part keeps the devbox-only tests, the hosted part drops them."""
     names = "|".join(re.escape(n) for n in sorted(part_tests(DEVBOX, table)))
     return f"({expr}) & test(/::({names})$/)" if part == DEVBOX else f"({expr}) - test(/::({names})$/)"
 
 
-def part_plan(table: list[tuple[str, str, str]], modules: list[str], part: str, gone: set[str], dedicated_modules: set[str],
+def part_plan(table: list[tuple[str, str, bool]], modules: list[str], part: str, gone: set[str], dedicated_modules: set[str],
               shard: tuple[int, int] | None = None) -> dict[str, list[str]]:
-    """The tests each of `modules` runs in `part`, minus the dedicated modules and the tests in `gone`; under `shard` (i, n) the i-th slice of those modules only."""
+    """The tests each of `modules` runs in `part`, minus the tests in `gone` and, in the hosted part, the dedicated modules (their hosted tests run in their own stage; their devbox tests stay here); under `shard` (i, n) the i-th slice of those modules only."""
     own = part_tests(part, table)
-    plan = {m: sorted(name for mod, name, _ in table if mod == m and name in own and name not in gone) for m in modules if m not in dedicated_modules}
+    skipped_modules = dedicated_modules if part == HOSTED else set()
+    plan = {m: sorted(name for mod, name, _ in table if mod == m and name in own and name not in gone) for m in modules if m not in skipped_modules}
     plan = {m: names for m, names in plan.items() if names}
     if shard is not None:
         keep = slice_modules({m: len(names) for m, names in plan.items()}, shard[1])[shard[0] - 1]
@@ -203,8 +241,8 @@ def part_plan(table: list[tuple[str, str, str]], modules: list[str], part: str, 
     return plan
 
 
-def coverage_problems(table: list[tuple[str, str, str]], modules: list[str], dedicated_modules: set[str], dedicated_tests: set[str], slices: int) -> list[str]:
-    """Live tests that run in no place or in two: a dedicated test must run in no live part, every other one in exactly one of the devbox part and the hosted slices."""
+def coverage_problems(table: list[tuple[str, str, bool]], modules: list[str], dedicated_modules: set[str], dedicated_tests: set[str], slices: int) -> list[str]:
+    """Live tests that run in no place or in two: a dedicated test or a hosted test of a dedicated module must run in no live part, every other one in exactly one of the devbox part and the hosted slices."""
     runs: dict[tuple[str, str], int] = {}
     plans = [part_plan(table, modules, DEVBOX, set(dedicated_tests), dedicated_modules)] + [
         part_plan(table, modules, HOSTED, set(dedicated_tests), dedicated_modules, (i, slices)) for i in range(1, slices + 1)]
@@ -213,13 +251,57 @@ def coverage_problems(table: list[tuple[str, str, str]], modules: list[str], ded
             for n in names:
                 runs[(m, n)] = runs.get((m, n), 0) + 1
     out = []
-    for mod, name, _ in table:
+    for mod, name, devbox in table:
         if mod not in modules:
             continue
-        want = 0 if mod in dedicated_modules or name in dedicated_tests else 1
+        want = 0 if name in dedicated_tests or (mod in dedicated_modules and not devbox) else 1
         if runs.get((mod, name), 0) != want:
             out.append(f"{mod}::{name} runs {runs.get((mod, name), 0)} time(s) in the live parts, wants {want}")
     return out
+
+
+#: 2026-11-14: a hosted slice over this many minutes lost its runner twice (run 43633356678, slice 2 of 3, 902 tests); closes when a slice is cut by measured minutes instead of test count.
+SLICE_CEILING_MIN = 50
+#: 2026-11-14: every slice builds the release binary from nothing; measured 16.4-16.8 min on slices 1 and 3 of run 43633356678.
+SLICE_BUILD_MIN = 17.0
+#: 2026-11-14: the slowest measured hosted rate, slice 3 of run 43633356678: 45.6 min over 902 tests; closes with a per-module cost read from the slices' nextest logs.
+SLICE_SEC_PER_TEST = 3.1
+
+
+def slice_minutes(tests: int) -> float:
+    """The minutes a hosted slice of `tests` live tests takes: the build, then each test at the slowest measured rate."""
+    return SLICE_BUILD_MIN + tests * SLICE_SEC_PER_TEST / 60
+
+
+def hosted_slice_plans(slices: int) -> list[dict[str, list[str]]]:
+    """The tests each live slice 1..`slices` runs, planned exactly as `verify_live_modules` plans a slice of an unnarrowed run."""
+    modules = [m for m in live_suite_modules() if m not in EXCLUDED]
+    run = select_modules([], modules, live_owners.module_owners(), []).run
+    dedicated_modules, dedicated_tests = dedicated_live()
+    return [part_plan(live_test_table(), list(run), HOSTED, set(dedicated_tests), set(dedicated_modules), (i, slices)) for i in range(1, slices + 1)]
+
+
+def slice_budget_problems(plans: list[dict[str, list[str]]], ceiling: float = SLICE_CEILING_MIN) -> list[str]:
+    """One line per slice whose estimated minutes exceed `ceiling`: the planner refuses to start a slice a runner is not known to survive."""
+    out = []
+    for i, plan in enumerate(plans, 1):
+        tests = sum(len(v) for v in plan.values())
+        if (m := slice_minutes(tests)) > ceiling:
+            out.append(f"live slice {i}/{len(plans)}: {tests} tests in {len(plan)} modules estimate {m:.0f} min, over the {ceiling:.0f} min ceiling; raise LIVE_SLICES in gate-hosted.yml")
+    return out
+
+
+def plan_matrix(slices: int) -> str:
+    """The gate-hosted matrix JSON for `slices` live slices plus slice 0, or a SystemExit naming every slice over the ceiling."""
+    import json
+
+    plans = hosted_slice_plans(slices)
+    for i, plan in enumerate(plans, 1):
+        tests = sum(len(v) for v in plan.values())
+        print(f"live slice {i}/{slices}: {tests} tests, {len(plan)} modules, ~{slice_minutes(tests):.0f} min", file=sys.stderr)
+    if bad := slice_budget_problems(plans):
+        raise SystemExit("\n".join(bad))
+    return json.dumps({"slice": list(range(slices + 1))})
 
 
 def verify_live_modules(led: Ledger, engines: list[str] | None = None, part: str = HOSTED, shard: tuple[int, int] | None = None) -> None:
@@ -231,7 +313,8 @@ def verify_live_modules(led: Ledger, engines: list[str] | None = None, part: str
     table = live_test_table()
     dedicated_modules, dedicated_tests = dedicated_live()
     gone = set(RAN_LIVE_TESTS) | dedicated_tests
-    plan = part_plan(table, list(sel.run), part, gone, dedicated_modules | set(RAN_LIVE_MODULES), shard)
+    ran_modules = dedicated_modules | set(RAN_LIVE_MODULES) if part == HOSTED else set()
+    plan = part_plan(table, list(sel.run), part, gone, ran_modules, shard)
     run_modules = list(plan)
     if sel.narrowed:
         led.skip(sel.line())
@@ -242,7 +325,7 @@ def verify_live_modules(led: Ledger, engines: list[str] | None = None, part: str
     if not run_modules:
         led.skipped("-", "-", label, "-", f"{label}: no live test left for this part and slice", cause=SkipCause.DESIGN)
         return
-    left, expr = derived_filter(run_modules, set(RAN_LIVE_MODULES) | dedicated_modules, gone, owners)
+    left, expr = derived_filter(run_modules, ran_modules, gone, owners)
     expr = part_filter(expr, part, table)
     excl = [n for n in exclusive_tests(set(run_modules)) if n in {t for names in plan.values() for t in names}]
     env, again = live_modules_env(os.environ.get("RIVET_CDC_STATE_URL") or os.environ.get("RIVET_GATE_STATE_URL") or "")
@@ -283,7 +366,7 @@ def self_test() -> None:
     gate_engines = cfg("engines").split()
     assert set(gate_engines) <= set(live_owners.SOURCE_ENGINES), f"a gate engine no live module can be tied to: {gate_engines}"
 
-    table = [(m, f"{m}_t{i}", "live: requires docker compose postgres") for m in mods for i in (1, 2)] + [("cloud", "cloud_bq", "live: requires BigQuery creds")]
+    table = [(m, f"{m}_t{i}", False) for m in mods for i in (1, 2)] + [("cloud", "cloud_bq", True)]
 
     def stage(engines: list[str] | None, part: str = HOSTED, shard: tuple[int, int] | None = None) -> tuple[list[str], str, list]:
         """Run verify_live_modules over the fake owners; return the modules handed to nextest, the report line and the ledger rows."""
@@ -325,6 +408,22 @@ def self_test() -> None:
     assert len(real) == marked, f"{marked - len(real)} ignored live test(s) the reason scan does not read: the hosted/devbox split would lose them"
     assert part_tests(HOSTED, real) | part_tests(DEVBOX, real) == {n for _, n, _ in real} and not part_tests(HOSTED, real) & part_tests(DEVBOX, real), "a live test runs in neither part or in both"
     assert part_tests(DEVBOX, real), "no live test needs the devbox half"
+    derived = _need_map()
+    carried = set().union(*derived.values())
+    strays = sorted(n for m, n, devbox in real if not devbox and any(NEED_HALF[v] == DEVBOX for v in derived.get((m, n), ())))
+    assert not strays, f"{len(strays)} live test(s) carry a need only the devbox half meets and run hosted: {strays[:5]}"
+    assert carried == set(NEED_HALF), f"a Need variant no live test carries, or one the scanner does not read: {sorted(carried ^ set(NEED_HALF))}"
+    assert needs_problems(live_needs.need_variants()) == [] and len(needs_problems([*live_needs.need_variants(), "Ghost"])) == 1 and len(needs_problems([])) == len(NEED_HALF), "the Need placement guard does not name an unplaced or a stale variant"
+    live_needs.self_test()
+    assert dedicated_stage_problems() == [], dedicated_stage_problems()
+    audit = 'x = 1\n_run_live_modules(led, "a", "{}", "p", ["live_audit_suspects"]%s)\n'
+    assert dedicated_stage_problems({"a.py": audit.replace("{}", "audit suspects") % ""}) == [], "a hosted stage over whole modules is refused"
+    assert len(dedicated_stage_problems({"a.py": audit.replace("{}", "cdc e2e") % ""})) == 1, "a devbox stage over whole modules goes unnoticed"
+    assert dedicated_stage_problems({"a.py": audit.replace("{}", "cdc e2e") % ", expr=E"}) == [], "a stage with its own filter is not a whole-module run"
+    audit_devbox = sorted(n for m, n, devbox in real if m == "live_audit_suspects" and devbox)
+    assert audit_devbox, f"the audit stage's credential tests are not placed in the devbox half: {audit_devbox}"
+    audit_expr = dedicated_expr(["live_audit_suspects"])
+    assert all(n in audit_expr for n in audit_devbox) and audit_expr.count(" - test(") == 1, f"the audit stage's filter must drop its devbox tests: {audit_expr[:200]}"
     real_mods = [m for m in live_suite_modules() if m not in EXCLUDED]
     real_dedicated = dedicated_live()
     for n in (1, 3, 5):
@@ -344,9 +443,22 @@ def self_test() -> None:
             led = Ledger(colour=False)
             verify_registry_covered(led)
             assert led.red is red, f"registered {sorted(ran)}: the static dedicated set reads as {'complete' if not red else 'incomplete'} wrongly"
+            assert len(led.cells) == 1, f"registered {sorted(ran)}: the stage recorded {len(led.cells)} ledger row(s), want exactly one whichever way it grades"
     finally:
         RAN_LIVE_TESTS.clear()
         RAN_LIVE_TESTS.update(saved_tests)
         RAN_LIVE_MODULES.clear()
         RAN_LIVE_MODULES.update(saved_modules)
+    even = [{"m": ["t"] * 100}] * 2
+    assert slice_budget_problems(even) == [] and len(slice_budget_problems([{"m": ["t"] * 1000}, *even])) == 1, "a slice over the ceiling is not refused alone"
+    assert slice_budget_problems(even, 1.0) and slice_minutes(0) == SLICE_BUILD_MIN, "the ceiling or the build floor is not read"
+    declared = int(re.search(r'^  LIVE_SLICES: "(\d+)"', (ROOT / ".github" / "workflows" / "gate-hosted.yml").read_text(), re.M)[1])
+    assert declared >= 1 and not slice_budget_problems(hosted_slice_plans(declared)), f"gate-hosted.yml runs {declared} live slices and the planner refuses them: {slice_budget_problems(hosted_slice_plans(declared))}"
     print("self-test ok: --engines runs the named engines' live modules and the engine-less ones, prints the rest as excluded, and no selector runs all")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "plan":
+        print(plan_matrix(int(sys.argv[2])))
+    else:
+        raise SystemExit("usage: python3 -m dev.release_oracle.live_modules plan N")

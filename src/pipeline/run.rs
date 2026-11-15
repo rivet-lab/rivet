@@ -890,7 +890,11 @@ pub(crate) fn run_waves(
     });
     let runnable: Vec<ExportConfig> = match &children {
         Some((_, declared)) => declared.iter().map(|e| (*e).clone()).collect(),
-        None => run_set.in_process(&config.source, &config_dir, None)?,
+        None => seeded!(
+            "apply-skips-partition-expansion",
+            config.exports.clone(),
+            run_set.in_process(&config.source, &config_dir, None)?
+        ),
     };
     let children_ok = children.map(|(ok, _)| ok);
     let parallel = children_ok.is_some();
@@ -1770,16 +1774,19 @@ pub(crate) fn run_pool(
     // prefix-level skip applies here unchanged.
     // Same recipe rule as `run`/`run_waves`, and checked BEFORE the `--split`
     // escape: a recipe must not run here whether or not the pool splits it.
-    let mut effective: Vec<ExportConfig> = RunSet::select(&config, None)?
-        .in_process(&config.source, &config_dir, None)?
-        .into_iter()
-        .filter(|e| {
-            if split {
-                return true; // per-unit skip happens after the split
-            }
-            finalize::needs_run(e, resume, "apply --pool", &state)
-        })
-        .collect();
+    let mut effective: Vec<ExportConfig> = seeded!(
+        "apply-skips-partition-expansion",
+        config.exports.clone(),
+        RunSet::select(&config, None)?.in_process(&config.source, &config_dir, None)?
+    )
+    .into_iter()
+    .filter(|e| {
+        if split {
+            return true; // per-unit skip happens after the split
+        }
+        finalize::needs_run(e, resume, "apply --pool", &state)
+    })
+    .collect();
     if effective.is_empty() {
         log::warn!("apply --pool: nothing to run (no exports, or all complete)");
         return Ok(());
@@ -1925,7 +1932,7 @@ pub(crate) fn run_pool(
     let predicted_secs = super::pool::predicted_makespan_secs(&items, m);
     let floor_secs = super::pool::makespan_floor_secs(&items, m);
     let (measured_n, attempt_n, placeholder_n) = super::pool::classification_counts(&classified);
-    eprintln!(
+    let pool_line = format!(
         "  Pool: {} export(s) × {} slot(s) — predicted makespan ~{:.1} min (floor {:.1}; {} measured, {} estimated)",
         effective.len(),
         m,
@@ -1934,6 +1941,11 @@ pub(crate) fn run_pool(
         measured_n,
         attempt_n + placeholder_n,
     );
+    if seeded!("pool-lines-on-stdout", true, false) {
+        println!("{pool_line}");
+    } else {
+        eprintln!("{pool_line}");
+    }
     // The ONE honesty claim about the wall, from the RECONCILED classification.
     if let Some(hedge) = super::pool::lower_bound_hedge(attempt_n, placeholder_n) {
         eprintln!("        {hedge}");
