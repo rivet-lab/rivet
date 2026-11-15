@@ -275,6 +275,14 @@ exports:
     return cfg
 
 
+def _fresh_work(path: str) -> str:
+    """An empty, world-writable work dir the Debezium container (a different uid) can write its offsets and schema history into."""
+    shutil.rmtree(path, ignore_errors=True)
+    os.makedirs(path, exist_ok=True)
+    os.chmod(path, 0o777)
+    return path
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--engine", default="postgres",
@@ -287,33 +295,8 @@ def main() -> int:
     ap.add_argument("--keep", action="store_true", help="leave the stand fixtures in place")
     a = ap.parse_args()
 
-    # Work dir is PER ENGINE. Sharing one made the MySQL connector read the
-    # offsets.dat a PostgreSQL run had left behind and die with
-    # `Source offset 'file' parameter is missing` — a message that names neither
-    # the stale file nor the other engine. Found by running the two in sequence.
     t = a.table
-    # Per ENGINE **and** per TABLE. Sharing across engines made MySQL read a
-    # PostgreSQL offsets.dat; sharing across scenarios let one run's
-    # debezium.jsonl accumulate into the next, which surfaced as a `delete` in a
-    # scenario that has no delete. Both were harness artefacts wearing the costume
-    # of a finding, and the second was only obvious because the phantom row named
-    # an operation the scenario never performed.
-    # engine / table / SCENARIO. The scenario was missing until 2026-08-25 and the
-    # table name is the same for all of them, so consecutive scenarios on one engine
-    # shared a dir and Debezium's `debezium.jsonl` ACCUMULATED: running crud then
-    # wide-txn reported wide-txn DISAGREE, listing crud's four events as
-    # debezium-only. The README already recorded this artefact as fixed — the fix
-    # covered the cross-ENGINE leak (MySQL reading a PostgreSQL offsets.dat) and not
-    # the cross-SCENARIO one, which reads identically at the call site.
-    work = os.path.join(a.work, a.engine, a.table, a.scenario)
-    # CLEARED, not reused: the sink APPENDS to debezium.jsonl, so re-running one
-    # scenario accumulated its own previous capture and reported a disagreement
-    # against events it had already compared. Third instance of this class in the
-    # harness (cross-engine, then cross-scenario, now cross-RUN) — each one wore the
-    # costume of an engine defect. The dir is derived and owned here; anything worth
-    # keeping is behind --work.
-    shutil.rmtree(work, ignore_errors=True)
-    os.makedirs(work, exist_ok=True)
+    work = _fresh_work(os.path.join(a.work, a.engine, a.table, a.scenario))
     dbz_slot, riv_slot, pub = f"dbz_{t}", f"riv_{t}", f"pub_{t}"
     # Hyphens, NOT underscores: an underscore is illegal in a hostname per RFC 952,
     # and Debezium's http sink rejects the URL with `unsupported URI` — a message
