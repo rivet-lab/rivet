@@ -45,7 +45,7 @@ pub(super) fn open_for_attempt(
     }
 }
 
-/// Run one chunk with up to `max_retries` retries: `open` a source per attempt, `export` on it, hand the winning source to `keep`.
+/// Run one chunk with up to `max_retries` retries.
 pub(super) fn run_with_retries<S, T>(
     plan: &ResolvedRunPlan,
     chunk_index: i64,
@@ -130,7 +130,7 @@ mod tests {
         p
     }
 
-    /// Drives `run_with_retries` with an export that fails `fails` times with `err`; returns (result, opened attempts, kept source, tally).
+    /// Drives `run_with_retries` with an export that fails `fails` times with `err`.
     fn drive(
         max_retries: u32,
         fails: usize,

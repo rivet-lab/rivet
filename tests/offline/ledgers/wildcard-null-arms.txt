@@ -3,7 +3,6 @@ src/source/mongo/mod.rs::nested_i64: _ => None	2026-11-10 goes when the I2 compa
 src/source/mssql/arrow_convert.rs::binary: _ => None	2026-11-10 goes when the I2 compatibility table decides the pair before the read (ADR 0040)
 src/source/mssql/arrow_convert.rs::binary_cell: _ => Ok(None)	2026-11-10 goes when the I2 compatibility table decides the pair before the read (ADR 0040)
 src/source/mssql/arrow_convert.rs::boolean: _ => None	2026-11-10 goes when the I2 compatibility table decides the pair before the read (ADR 0040)
-src/source/mssql/arrow_convert.rs::build_array: _ => b.append_null()	2026-11-10 goes when the I2 compatibility table decides the pair before the read (ADR 0040)
 src/source/mssql/arrow_convert.rs::decimal128: _ => None	2026-11-10 goes when the I2 compatibility table decides the pair before the read (ADR 0040)
 src/source/mssql/arrow_convert.rs::decimal_cell: _ => Ok(None)	2026-11-10 goes when the I2 compatibility table decides the pair before the read (ADR 0040)
 src/source/mssql/arrow_convert.rs::decimal_scale_from_rows: _ => None	2026-11-10 goes when the I2 compatibility table decides the pair before the read (ADR 0040)
