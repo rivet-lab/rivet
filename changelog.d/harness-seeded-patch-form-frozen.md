@@ -1,1 +1,0 @@
-- **Harness**: seeded recall now refuses a new seed in patch form. The 282 existing patch files are listed once in `dev/seeded/patch_seeds.py` (a ratchet pin that may only shrink); a new defect is a `seeded!` switch, and a converted seed must delete its ledger line.

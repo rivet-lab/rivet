@@ -50,17 +50,6 @@ ADJUDICATED: dict[str, tuple[str, int]] = {  # ratchet-pin: live-only-adjudicate
     # oracle is live (roast_mysql_cdc_warns_on_a_minimal_backlog...). 100% of
     # the body runs offline and that is the POINT, hence the ceiling of 100.
     "warn_positional_once": ("log-only fn, excluded as output-identical; live-oracled", 100),
-    # `check` (preflight/mod.rs) — measured 8% of its body offline: the cli
-    # tests spawn the binary and stop at the arg/config arms. The only entry
-    # left from the original eight; the other six were MEASURED on 2026-08-29
-    # by lifting their exclusions and running their mutants, and every one of
-    # their stubs was CAUGHT, so the exclusions were dead and are gone. That is
-    # the standard this list is held to: an adjudication survives only until
-    # someone runs the mutant it stands in for.
-    # Re-measured 2026-10-07 at 40%: the keyword/value credential tests drive `rivet check`
-    # through the binary past the config arms. Its four mutants were run with the exclusion
-    # lifted and are still MISSED under `--lib --bins`, which spawns no binary.
-    "check": ("cli tests spawn the binary; measured 40% of body (preflight/mod.rs)", 50),
     # `print_up_to_date` (load/orchestrate.rs) — log-only like warn_positional_once: its
     # `()` stub survives the whole offline battery (4198 tests, measured 2026-10-02), and
     # its text is graded through `up_to_date_line`.
@@ -72,7 +61,6 @@ ADJUDICATED: dict[str, tuple[str, int]] = {  # ratchet-pin: live-only-adjudicate
     # not answer counts as the whole body. With the exclusion lifted under `--lib --bins` the
     # `true` mutant is CAUGHT and the `false` one MISSED: only a standby answers `true`.
     "pg_in_recovery": ("a one-expression fn; offline reaches the unanswered probe, the answer needs a standby", 100),
-    "run_loads": ("2026-11-04: Ok(()) stub MISSED under --lib --bins; offline reaches plan_loads' refusal only, the load is graded by the live warehouse matrix", 4),
     "run_compacts": ("2026-11-04: Ok(()) stub MISSED under --lib --bins; offline reaches plan_loads' refusal only, the merge is graded by live_cdc_compact", 5),
     "run_capture": ("2026-11-04: its viable stub is MISSED under --lib --bins; offline reaches the unreachable-source open error only, the capture is graded by the live CDC cells", 10),
     "run_cdc_inner": ("2026-11-04: its viable stub is MISSED under --lib --bins; the offline executions are binary-spawning CLI tests against an unreachable source, outside the mutation scope", 85),

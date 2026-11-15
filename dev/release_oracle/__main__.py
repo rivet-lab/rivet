@@ -1052,6 +1052,7 @@ def _imports_shadowed_by_a_local() -> list[str]:
 
 def _oracle_restart_self_test() -> None:
     """`_oracle_restarted` on scripted answers: a slow restart is waited out, a dead one is named by its ORA- line and its log."""
+    import subprocess
     from unittest import mock
 
     from .core import Proc
@@ -1068,6 +1069,14 @@ def _oracle_restart_self_test() -> None:
             mock.patch(f"{__name__}.docker", fake(f"line one\n{log}")):
         why = _oracle_restarted("c", lambda: False, tries=3, delay=0)
     assert "no answer in 3 polls" in why and "ORA-27102" in why and "SP2-0640" in why and "rc=1" in why and log in why, why
+    with tempfile.TemporaryDirectory() as d:
+        for name, body in (("healthcheck.sh", "exit $HC_RC"), ("sqlplus", "echo rivet-ready")):
+            (Path(d) / name).write_text(f"#!/bin/sh\n{body}\n")
+            (Path(d) / name).chmod(0o755)
+        for hc_rc, answers in (("4", False), ("0", True)):
+            env = {**os.environ, "PATH": f"{d}:{os.environ['PATH']}", "HC_RC": hc_rc}
+            got = subprocess.run(["bash", "-c", ORACLE_READY_PROBE], env=env, capture_output=True).returncode == 0
+            assert got is answers, f"healthcheck.sh exit {hc_rc} with the app user answering: the ready probe says {got}, want {answers}"
 
 
 def _stand_down_self_test() -> None:
@@ -2087,6 +2096,9 @@ def _usable_port(port: int) -> int:
 
 #: Polls, two seconds apart, that Oracle gets to answer: after its first start and again after the processes restart.
 ORACLE_READY_TRIES = 150
+#: The image's own init-finished marker (healthcheck.sh exits non-zero while its user scripts run), then the app user's session.
+ORACLE_READY_PROBE = ("healthcheck.sh && echo \"select 'rivet-ready' from dual;\" | sqlplus -s -L "
+                      "rivet/rivet@localhost/FREEPDB1 | grep -q rivet-ready")
 #: processes=200 lets the listener's lagging handler count refuse a 16-cell connect burst (ORA-12516); measured 189/300 refused at 200, 0/300 at 1000.
 ORACLE_RESTART_SQL = "alter system set processes=1000 scope=spfile;\nshutdown immediate\nstartup\nexit\n"
 
@@ -2241,9 +2253,7 @@ def bring_up(led: Ledger, engine: str, tag: str, image: str, port: int) -> str:
                    "-P", "Rivet_Passw0rd!", "-Q", "SELECT 1"]],
         "mongo": [["mongosh", "--quiet", "--eval", "db.runCommand({ping:1})"],
                   ["mongo", "--quiet", "--eval", "db.runCommand({ping:1})"]],
-        # The APP_USER exists only once the entrypoint has created it, after the DB opens.
-        "oracle": [["bash", "-c", "echo \"select 'rivet-ready' from dual;\" | sqlplus -s -L "
-                    "rivet/rivet@localhost/FREEPDB1 | grep -q rivet-ready"]],
+        "oracle": [["bash", "-c", ORACLE_READY_PROBE]],
     }[engine]
     if engine == "mssql":
         probes = [[x for a in p for x in (sqlcmd(name) if a == "__SQLCMD__" else (a,))]
