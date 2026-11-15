@@ -29,6 +29,14 @@ fn one_named_credential_is_chosen_as_written() {
     );
     assert_eq!(chosen("{type: s3, bucket: b}"), "Ambient");
     assert_eq!(
+        chosen("{type: s3, bucket: b, allow_anonymous: true}"),
+        "Anonymous"
+    );
+    assert_eq!(
+        chosen("{type: s3, bucket: b, access_key_env: A, secret_key_env: S}"),
+        "S3Env { access_key_env: Some(\"A\"), secret_key_env: Some(\"S\"), session_token_env: None }"
+    );
+    assert_eq!(
         chosen("{type: s3, bucket: b, aws_profile: p}"),
         "S3Profile(\"p\")"
     );
@@ -65,6 +73,22 @@ fn two_named_identities_are_refused_by_code() {
         (
             "{type: s3, bucket: b, access_key_env: A}",
             "export 'e': S3 requires both access_key_env and secret_key_env, or neither (use default AWS credential chain)",
+        ),
+        (
+            "{type: s3, bucket: b, allow_anonymous: true, aws_profile: p}",
+            "export 'e': S3 allow_anonymous cannot be combined with aws_profile, access_key_env, secret_key_env or session_token_env",
+        ),
+        (
+            "{type: s3, bucket: b, allow_anonymous: true, access_key_env: A, secret_key_env: S}",
+            "export 'e': S3 allow_anonymous cannot be combined with aws_profile, access_key_env, secret_key_env or session_token_env",
+        ),
+        (
+            "{type: s3, bucket: b, allow_anonymous: true, session_token_env: T}",
+            "export 'e': S3 allow_anonymous cannot be combined with aws_profile, access_key_env, secret_key_env or session_token_env",
+        ),
+        (
+            "{type: s3, bucket: b, session_token_env: T}",
+            "export 'e': S3 session_token_env requires access_key_env and secret_key_env: a session token alone would pair with an ambient key.\n  Fix: add access_key_env and secret_key_env, or remove session_token_env.",
         ),
         (
             "{type: gcs, bucket: b, allow_anonymous: true, credentials_file: /k.json}",
