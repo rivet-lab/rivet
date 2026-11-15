@@ -210,3 +210,32 @@ fn rivet_binary_reachable_via_env_constant() {
         "rivet --version produced unexpected output: {stdout}"
     );
 }
+
+#[test]
+#[ignore = "live: requires docker compose duckdb"]
+fn a_dir_restaged_under_one_label_is_read_whole_by_the_container() {
+    require_alive(LiveService::DuckDb);
+    let src = tempfile::tempdir().unwrap();
+    let names = ["part#0_chunk0.csv", "part#1_chunk0.csv"];
+    for round in 1..=5usize {
+        let rows = round * 40;
+        for name in names {
+            let body: String = std::iter::once("id\n".to_string())
+                .chain((0..rows).map(|i| format!("{i}\n")))
+                .collect();
+            std::fs::write(src.path().join(name), body).unwrap();
+        }
+        let container = stage_for_duckdb(src.path());
+        let list = names
+            .iter()
+            .map(|n| format!("'{container}/{n}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let v = duckdb_run_sql_json(&format!("SELECT count(*) FROM read_csv([{list}])"));
+        assert_eq!(
+            v["rows"][0][0].as_str(),
+            Some((2 * rows).to_string().as_str()),
+            "round {round}: files restaged under the same names must be read whole, not at their previous size"
+        );
+    }
+}
