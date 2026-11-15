@@ -154,16 +154,6 @@ pub struct MssqlUrl {
     pub database: String,
 }
 
-/// Percent-decode a URL userinfo component (lossy on invalid UTF-8, which a
-/// well-formed URL never produces). Mirrors the driver-side decode PG/MySQL/
-/// Mongo get for free, so the round-trip with `build_url_from_fields`' encoding
-/// is lossless.
-fn pct_decode(s: &str) -> String {
-    percent_encoding::percent_decode_str(s)
-        .decode_utf8_lossy()
-        .into_owned()
-}
-
 /// The tiberius `Config` for a login, with the shared TLS policy mapped onto its cert-trust knobs.
 pub(crate) fn tiberius_config(
     host: &str,
@@ -286,17 +276,17 @@ pub fn parse_mssql_url(url: &str) -> Result<MssqlUrl> {
         )
     })?;
     let (user, password) = match userinfo.split_once(':') {
-        Some((u, p)) => (pct_decode(u), pct_decode(p)),
-        None => (pct_decode(userinfo), String::new()),
+        Some((u, p)) => (
+            crate::url_text::pct_decode(u),
+            crate::url_text::pct_decode(p),
+        ),
+        None => (crate::url_text::pct_decode(userinfo), String::new()),
     };
     let hostport = authority.hosts;
-    let database = authority
-        .rest
-        .strip_prefix('/')
-        .unwrap_or_default()
-        .to_string();
-    let (host, port) = match hostport.rsplit_once(':') {
-        Some((h, p)) => (
+    let database =
+        crate::url_text::pct_decode(authority.rest.strip_prefix('/').unwrap_or_default());
+    let (host, port) = match crate::url_text::split_host_port(hostport) {
+        (h, Some(p)) => (
             h.to_string(),
             p.parse::<u16>().map_err(|_| {
                 crate::error::coded(
@@ -305,7 +295,7 @@ pub fn parse_mssql_url(url: &str) -> Result<MssqlUrl> {
                 )
             })?,
         ),
-        None => (hostport.to_string(), 1433),
+        (h, None) => (h.to_string(), 1433),
     };
     if database.is_empty() {
         crate::rivet_bail!(
@@ -1527,6 +1517,29 @@ mod tests {
     }
 
     #[test]
+    fn a_bracketed_ipv6_host_without_a_port_defaults_to_1433() {
+        let parsed = parse_mssql_url("sqlserver://u:p@[::1]/db").expect("v6 without port parses");
+        assert_eq!((parsed.host.as_str(), parsed.port), ("[::1]", 1433));
+        let parsed = parse_mssql_url("sqlserver://u:p@[::1]:1444/db").expect("v6 with port");
+        assert_eq!((parsed.host.as_str(), parsed.port), ("[::1]", 1444));
+        let err = parse_mssql_url("sqlserver://u:p@[::1]:x/db")
+            .err()
+            .expect("bad port refused");
+        assert!(
+            err.to_string().contains("mssql url port not a number: x"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn the_database_is_percent_decoded_like_the_userinfo() {
+        let parsed = parse_mssql_url("sqlserver://u:p@h/Sales%20DB").expect("encoded db parses");
+        assert_eq!(parsed.database, "Sales DB");
+        let parsed = parse_mssql_url("sqlserver://u:p@h/plain").expect("plain db parses");
+        assert_eq!(parsed.database, "plain");
+    }
+
+    #[test]
     fn an_at_sign_after_the_authority_stays_out_of_the_host() {
         for tail in ["/rivet?application_name=svc@corp", "/rivet#f@corp"] {
             let parsed = parse_mssql_url(&format!("sqlserver://sa:pw@h1:1433{tail}"))
@@ -1551,8 +1564,11 @@ mod tests {
             .or_else(|| url.strip_prefix("mssql://"))?;
         let (userinfo, hostpart) = rest.rsplit_once('@')?;
         let (user, password) = match userinfo.split_once(':') {
-            Some((u, p)) => (super::pct_decode(u), super::pct_decode(p)),
-            None => (super::pct_decode(userinfo), String::new()),
+            Some((u, p)) => (
+                crate::url_text::pct_decode(u),
+                crate::url_text::pct_decode(p),
+            ),
+            None => (crate::url_text::pct_decode(userinfo), String::new()),
         };
         let (hostport, database) = hostpart
             .split_once('/')

@@ -35,6 +35,24 @@ pub(crate) fn host_port_span(url: &str) -> &str {
     authority(url).unwrap_or_else(|| split_authority(url)).hosts
 }
 
+/// One `host[:port]` entry split at its port; a bracketed IPv6 host keeps its brackets and its colons stay in the host.
+pub(crate) fn split_host_port(hostport: &str) -> (&str, Option<&str>) {
+    match hostport.strip_prefix('[').and_then(|r| r.split_once(']')) {
+        Some((v6, tail)) => (&hostport[..v6.len() + 2], tail.strip_prefix(':')),
+        None => match hostport.rsplit_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (hostport, None),
+        },
+    }
+}
+
+/// Percent-decode one URL component (lossy on invalid UTF-8).
+pub(crate) fn pct_decode(s: &str) -> String {
+    percent_encoding::percent_decode_str(s)
+        .decode_utf8_lossy()
+        .into_owned()
+}
+
 /// Whether `hosts` reads as a host list: every entry is a name or a bracketed address with an optional numeric port.
 fn is_host_list(hosts: &str) -> bool {
     hosts.split(',').all(|entry| {

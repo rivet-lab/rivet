@@ -118,7 +118,7 @@ pub(crate) struct OracleUrl {
     pub service: String,
 }
 
-/// Parse `oracle://user:pass@host[:port]/service`; userinfo is percent-decoded.
+/// Parse `oracle://user:pass@host[:port]/service`; userinfo and service are percent-decoded.
 pub(crate) fn parse_oracle_url(url: &str) -> Result<OracleUrl> {
     const FORM: &str = "oracle://USER@HOST:PORT/SERVICE, with :PASSWORD after USER \
                         (percent-encode @ : / ? # in the password)";
@@ -141,10 +141,11 @@ pub(crate) fn parse_oracle_url(url: &str) -> Result<OracleUrl> {
         )
     })?;
     let (user, password) = userinfo.split_once(':').unwrap_or((userinfo, ""));
-    let service = path
-        .strip_prefix('/')
-        .map(|p| p.split(['?', '#']).next().unwrap_or_default())
-        .unwrap_or_default();
+    let service = crate::url_text::pct_decode(
+        path.strip_prefix('/')
+            .map(|p| p.split(['?', '#']).next().unwrap_or_default())
+            .unwrap_or_default(),
+    );
     if service.is_empty() {
         crate::rivet_bail!(
             crate::error::codes::CONFIG_SOURCE_URL_INVALID,
@@ -164,29 +165,19 @@ pub(crate) fn parse_oracle_url(url: &str) -> Result<OracleUrl> {
             "oracle: URL has an empty host — {FORM}"
         )
     }
-    let decode = |s: &str| {
-        percent_encoding::percent_decode_str(s)
-            .decode_utf8_lossy()
-            .into_owned()
-    };
+    let decode = crate::url_text::pct_decode;
     Ok(OracleUrl {
         user: decode(user),
         password: decode(password).into(),
         host: host.to_string(),
         port,
-        service: service.to_string(),
+        service,
     })
 }
 
-/// `host[:port]` or `[v6]:port`; the port defaults to 1521. A bracketed IPv6 host keeps its brackets.
+/// `host[:port]` or `[v6][:port]`; the port defaults to 1521.
 fn split_host_port(hostport: &str) -> Result<(&str, u16)> {
-    let (host, port) = match hostport.strip_prefix('[').and_then(|r| r.split_once(']')) {
-        Some((v6, tail)) => (&hostport[..v6.len() + 2], tail.strip_prefix(':')),
-        None => match hostport.rsplit_once(':') {
-            Some((h, p)) => (h, Some(p)),
-            None => (hostport, None),
-        },
-    };
+    let (host, port) = crate::url_text::split_host_port(hostport);
     let port = match port {
         Some(p) => p.parse::<u16>().map_err(|_| {
             crate::error::coded(
@@ -1214,6 +1205,22 @@ mod tests {
             (ok.password.expose(), ok.host.as_str()),
             ("Qm4/Tz8", "127.0.0.1")
         );
+    }
+
+    #[test]
+    fn the_service_name_is_percent_decoded_like_the_userinfo() {
+        let u = parse_oracle_url("oracle://u:p@h/ORCL%2Edomain").unwrap();
+        assert_eq!(u.service, "ORCL.domain");
+        let u = parse_oracle_url("oracle://u:p@h/SVC%C3%A9").unwrap();
+        assert_eq!(u.service, "SVCé");
+        assert_eq!(
+            parse_oracle_url("oracle://u:p@h/PLAIN").unwrap().service,
+            "PLAIN"
+        );
+        let err = parse_oracle_url("oracle://u:p@h/a%2Fb")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("contains '/'"), "{err}");
     }
 
     #[test]
