@@ -1,10 +1,4 @@
-//! Subcommand dispatch: route parsed [`Cli`] commands into pipeline / init /
-//! preflight entry points.
-//!
-//! Every arm here is intentionally a thin adapter — convert clap field types
-//! (`Vec<String>`, `Option<String>`, etc.) into the shapes pipeline modules
-//! actually want, then call exactly one function. Validation lives in
-//! `validate`, parameter parsing in `params`, and the clap grammar in `args`.
+//! Subcommand dispatch: route parsed [`Cli`] commands into pipeline / init / preflight entry points.
 
 use clap::CommandFactory;
 
@@ -19,30 +13,11 @@ use crate::state::StateStore;
 use crate::{init, load, pipeline, preflight};
 
 /// Does a `rivet cdc` run stop at the OPEN-TIME snapshot, or tail forever?
-///
-/// `--stream` is the daemon flag, and `until_current` is its exact inverse — the
-/// one polarity inversion in this router that no error message would reveal: a
-/// bounded run that never terminates looks like a slow source, and a daemon that
-/// clips at the open bound looks like a healthy cycle that quietly stopped
-/// following the log. Pure, because `dispatch` is a live-only body excluded
-/// wholesale in `.cargo/mutants.toml` — every operator left inline there is a
-/// mutant nothing is asked about (`tests/offline/live_only_purity_gate.rs`).
 fn cdc_until_current(stream: bool) -> bool {
     !stream
 }
 
-/// Validate a `--export <name>` selection against the loaded config and, on a
-/// miss, bail with the sorted list of declared export names — so a typo
-/// (`--export oders` for `orders`) names the choices instead of the bare
-/// "export 'oders' not found in config" the pipeline/preflight resolvers emit
-/// downstream. Mirrors the enumerated-names hint `rivet state reset` already
-/// gives (`pipeline/cli.rs`) and the "Did you mean" field-typo lint
-/// (`config/lints.rs`). A `None` selection (all exports) is always Ok.
-///
-/// This runs *before* the subcommand's own config load; the extra read of a
-/// small YAML is the same cost `reset_state`/`reset_chunk_checkpoint` already
-/// pay to validate an export name up front, and it keeps the good error in one
-/// place for every `--export`-taking subcommand.
+/// Validate a `--export <name>` selection against the loaded config and, on a miss, bail with the sorted list of declared export names.
 fn check_export_selection(config: &Config, export: Option<&str>) -> Result<()> {
     let Some(name) = export else { return Ok(()) };
     if config.exports.iter().any(|e| e.name == name) {
@@ -83,9 +58,7 @@ fn load_report(json: bool, summary_output: Option<String>) -> load::result::Repo
     }
 }
 
-/// Validate and execute the parsed CLI. Returns `Err` with a formatted message
-/// on validation failure or any subcommand error; `main.rs` decides whether to
-/// render it as plain text or JSON via the `--json-errors` global flag.
+/// Validate and execute the parsed CLI.
 pub fn dispatch(cli: Cli) -> Result<()> {
     validate_cli(&cli.command)?;
     log::debug!("rivet {}", cli.command.leaf().path());
@@ -286,9 +259,6 @@ fn dispatch_schema(what: SchemaKind) -> Result<()> {
     match what {
         SchemaKind::Config => {
             let schema = crate::config::generate_config_schema_pretty()?;
-            // `print!` (not `println!`) — the schema string already
-            // terminates with a newline; doubling it would diff
-            // against the in-tree artifact.
             print!("{schema}");
             Ok(())
         }
@@ -320,10 +290,7 @@ struct CdcArgs {
     until_current: bool,
 }
 
-/// `rivet cdc`: build the engine's change stream via `create_change_stream`
-/// (dispatch by URL scheme), then either emit NDJSON (default) or, with
-/// `--output`, write typed Parquet/CSV files through the commit seam. `--output`
-/// resolves the table's column schema from the source via `type_mappings`.
+/// `rivet cdc`: build the engine's change stream via `create_change_stream` (dispatch by URL scheme), then either emit NDJSON (default) or, with `--output`, write typed Parquet/CSV files through the commit seam.
 fn dispatch_cdc(a: CdcArgs) -> Result<()> {
     let rollover = seeded!(
         "cdc-rollover-flag-unrouted",
@@ -343,64 +310,34 @@ fn dispatch_cdc(a: CdcArgs) -> Result<()> {
     let cdc_cfg = crate::source::cdc::CdcConfig {
         url: url.clone(),
         checkpoint: ckpt.clone(),
-        // The CLI has no config file, so the CWD is the honest anchor here: the
-        // operator typed the command in a shell whose directory they chose. The
-        // config-driven path anchors to the config's directory instead.
         config_dir: std::path::PathBuf::from("."),
         drain: DrainMode::from_until_current(a.until_current),
-        // The CLI carries no TlsConfig; `None` ⇒ the require_tls_or_loopback gate
-        // refuses a remote host (config-driven `rivet run` supplies source.tls).
         tls: None,
-        // The engine's knobs come from the CLI flags for the URL's engine; the CLI
-        // has no source config block, so Mongo defaults to relaxed JSON (canonical
-        // rides the config-driven `rivet run` path via `source.mongo.json`).
         engine: match CdcEngine::from_url(url.expose())? {
             CdcEngine::Mysql => CdcEngineOpts::Mysql {
                 server_id: a.server_id,
-                // `--table` IS the routing filter on this path; empty means capture
-                // whatever the stream emits, which makes every event ours.
                 configured_tables: a.table.clone(),
                 resolved_grants: None,
             },
             CdcEngine::Postgres => CdcEngineOpts::Postgres {
                 slot: a.slot,
-                // `--table` IS the routing filter on this path too, so it is
-                // exactly the set the guard must classify. Empty (`rivet cdc`
-                // with no `--table`) keeps it off: nothing named ⇒ nothing to
-                // cross-check — the same rule the SQL Server arm below states.
                 configured_tables: a.table.clone(),
             },
             CdcEngine::Mssql => CdcEngineOpts::Mssql {
-                // `--table` IS the routing filter on this path too (the NDJSON leg
-                // passes it to `run(...)`, the `--output` leg requires exactly
-                // one), so it is exactly the set the catalog-identity guard must
-                // cross-check against — a capture instance whose NAME splits to a
-                // different `schema.table` than the catalog spells would otherwise
-                // route/drop every event silently. Empty (`rivet cdc` with no
-                // `--table`) keeps the guard off: nothing named ⇒ nothing to
-                // cross-check, capture whatever the instance emits.
                 configured_tables: a.table.clone(),
                 capture_instance: a.capture_instance,
             },
-            // Same contract as the SQL arms above: a bare `rivet cdc` with no
-            // `--table` names nothing, so there is nothing to cross-check.
             CdcEngine::Mongo => CdcEngineOpts::Mongo {
                 canonical: false,
                 configured_tables: a.table.clone(),
                 keyed_tables: Vec::new(),
             },
-            // LogMiner selects only the named tables, so `--table` is required in practice.
             CdcEngine::Oracle => CdcEngineOpts::Oracle {
                 configured_tables: a.table.clone(),
             },
         },
     };
     let Some(dir) = a.output else {
-        // NDJSON to stdout: no durable sink, so the slot is deliberately not
-        // advanced (correct at-least-once — the consumer owns durability). Resume
-        // for MySQL is the checkpoint file; PostgreSQL re-reads from the slot.
-        // No ack ⇒ it cannot page, so `Unbounded`: one peek drains the whole
-        // backlog and the LSN-frontier check ends the stream.
         let mut stream = crate::source::cdc::create_change_stream(
             &cdc_cfg,
             crate::source::cdc::PeekBound::Unbounded,
@@ -408,10 +345,6 @@ fn dispatch_cdc(a: CdcArgs) -> Result<()> {
         return crate::source::cdc::run(stream.as_mut(), ckpt, a.table, a.max_events);
     };
 
-    // --output: the typed file sink, via the same `run_capture` assembler the
-    // `mode: cdc` run uses. The CLI is the ad-hoc path — `manifest.json` + `_SUCCESS`
-    // at the destination are its run record; `rivet run` is the path that also
-    // writes the state-DB metric + journal.
     let tbl = match a.table.as_slice() {
         [t] => t.clone(),
         _ => crate::rivet_bail!(
@@ -432,47 +365,28 @@ fn dispatch_cdc(a: CdcArgs) -> Result<()> {
         path: Some(dir.clone()),
         ..Default::default()
     })?;
-    // `run_capture` derives the peek bound from this export's `rollover` (below),
-    // so the sink and the stream share one source of truth for the part size.
     let now = chrono::Utc::now().to_rfc3339();
     let __cdc_read_bytes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     crate::pipeline::cdc::run_capture(
         crate::pipeline::cdc::CdcCapture {
-            // The CLI subcommand has no exports[] block; the table IS the export
-            // identity here, which keeps family == export_name == table — exactly
-            // the shape the load guard folds to one family.
             export_name: a.table.join("+"),
             cdc_cfg,
             outputs: vec![crate::pipeline::cdc::CaptureOutput {
                 table: tbl,
                 dest: dest.as_ref(),
                 dest_uri: dir,
-                // The ad-hoc CLI has no `columns:` surface; config-driven runs do.
                 overrides: crate::types::ColumnOverrides::new(),
-                // Likewise no `row_hash:` surface — a hash's covered column set is
                 partition: None,
                 partition_guard: None,
                 key: None,
-                // a contract the warehouse table carries, which needs a config file
-                // to declare.
                 row_hash: crate::config::RowHash::All(false),
             }],
             format: fmt,
             max_events: a.max_events,
             rollover,
-            // The SAME protective default the config path applies — absence must not
-            // mean "no byte budget" on the ad-hoc CLI either: `--rollover` bounds ROWS,
-            // and a wide-row table would buffer unbounded to the row cap. The named
-            // runner-bypass shape, at an entry point instead of a runner.
-            // Through the NAMED supplier, so this entry point and the config path
-            // cannot drift into two defaults.
             rollover_memory_bytes: crate::pipeline::cdc_job::cdc_rollover_memory_bytes(None),
             run_id: now.clone(),
             started_at: now,
-            // The ad-hoc `rivet cdc` subcommand runs without a config, and so
-            // without a state store to record into. A `mode: cdc` export — the
-            // supported path, and the one the sweep and the load read — passes its
-            // store, so every part reaches the database as it becomes durable.
             state: None,
             schema_gate: None,
             policy: crate::types::policy::TypePolicy::warn_only(),
@@ -480,10 +394,6 @@ fn dispatch_cdc(a: CdcArgs) -> Result<()> {
         },
         &__cdc_read_bytes,
     )
-    // `.1` is the outcome; `.0` is what the drain made durable. The ad-hoc
-    // subcommand has no state store and no summary to attribute parts to, so
-    // there is nothing here to record them into — unlike `mode: cdc`, where
-    // discarding them was the defect this tuple exists to fix.
     .1
 }
 
@@ -536,9 +446,6 @@ fn dispatch_check(
 ) -> Result<()> {
     let p = parse_params(&params)?;
     let p = if p.is_empty() { None } else { Some(p) };
-    // A declared `--target` that doesn't parse is a loud error — never silently
-    // dropped to `None` (which would give false target-compat assurance). This
-    // mirrors the config-level `target:` validation in `preflight/mod.rs`.
     let tgt = target.as_deref().map(parse_cli_target).transpose()?;
     if let Some(name) = export.as_deref() {
         check_export_selection(&Config::load_with_params(&config, p.as_ref())?, Some(name))?;
@@ -554,13 +461,6 @@ fn dispatch_check(
         tgt,
         &planned_strategies(&plans),
     )?;
-    // Surface plan-validation diagnostics so `check` agrees with `run`/`plan`:
-    // a stdout+chunked config is Rejected by all three, not silently passed by
-    // `check` alone. `preflight::check` probes source/destination/types; this
-    // adds the mode×destination compatibility gate (`validate_plan`). Skipped
-    // under `--json` so NDJSON type-report output stays one object per line.
-    // This BAILS on a rejection, so the "Looks good" epilogue below only prints
-    // when BOTH gates pass — never alongside a "Rejected: …" line (dogfood MED).
     report_plan_compatibility(plans, json)?;
     if let Err(e) = StateStore::probe(&config) {
         log::error!("check: the state this config uses does not answer: {e:#}");
@@ -675,8 +575,7 @@ fn planned_strategies(plans: &[BatchPlan]) -> preflight::PlannedStrategies {
         .collect()
 }
 
-/// Surface each plan's [`validate_plan`](crate::plan::validate_plan) diagnostics as `rivet plan`
-/// does, and fail on a plan that did not build or on the first `Rejected` (skipped under `--json`).
+/// Surface each plan's [`validate_plan`](crate::plan::validate_plan) diagnostics as `rivet plan` does, and fail on a plan that did not build or on the first `Rejected` (skipped under `--json`).
 fn report_plan_compatibility(plans: Vec<BatchPlan>, json_output: bool) -> Result<()> {
     if json_output {
         return Ok(());
@@ -727,9 +626,7 @@ struct InitSnowflakeFlags {
 }
 
 impl InitSnowflakeFlags {
-    /// The Snowflake target to scaffold: every required value, or none. Clap already
-    /// ties the flags together; a blank value is refused here, since the loader
-    /// needs every one of them to name a real object. The role stays optional.
+    /// The Snowflake target to scaffold: every required value, or none.
     fn target(self) -> Result<Option<init::InitSnowflakeTarget>> {
         let role = self.role;
         let flags = [
@@ -862,10 +759,6 @@ fn dispatch_init(
         tls_config.as_ref(),
     )
     .map_err(|e| {
-        // The shared TLS gate prescribes a `source.tls:` config block — a
-        // remedy that does not EXIST at init time, because init is the command
-        // that creates the config. Recognized by TYPE (never by matching the
-        // message text) and re-prescribed as the flag (#146).
         if e.chain().any(|c| {
             c.downcast_ref::<crate::source::TlsRequiredError>()
                 .is_some()
@@ -883,18 +776,12 @@ fn dispatch_init(
 }
 
 /// `--tls` / `--tls-ca` → the [`TlsConfig`] init connects with and scaffolds.
-///
-/// PURE so both directions are offline-testable: a CA with a mode that cannot
-/// use one (`disable` / `require`) is refused loudly — silently ignoring it
-/// would let an operator believe their private CA is being verified while the
-/// connection skips verification entirely (#146).
 fn resolve_init_tls(
     mode: Option<crate::config::TlsMode>,
     ca: Option<String>,
 ) -> Result<Option<crate::config::TlsConfig>> {
     use crate::config::TlsMode;
     let Some(mode) = mode else {
-        // clap enforces `--tls-ca requires --tls`, so ca is None here too.
         return Ok(None);
     };
     if ca.is_some() && matches!(mode, TlsMode::Disable | TlsMode::Require) {
@@ -972,12 +859,7 @@ fn dispatch_validate(args: crate::cli::args::ValidateArgs) -> Result<()> {
         ValidateFormat::Pretty => pipeline::ValidateOutputFormat::Pretty,
         ValidateFormat::Json => pipeline::ValidateOutputFormat::Json(output),
     };
-    // Parse --date once here so a malformed value fails before we open a
-    // destination — the pipeline layer never sees a half-validated date.
     let parsed_date = date.map(|s| parse_iso_date("--date", &s)).transpose()?;
-    // `--depth` is already the pipeline `ValidateDepth` (re-exported through
-    // `args`), so it threads straight onto the target with no CLI→pipeline
-    // mapping.
     let target = pipeline::ValidateTarget {
         date: parsed_date,
         run_id,
@@ -1063,7 +945,6 @@ fn dispatch_state(action: StateAction) -> Result<()> {
             } else if let Some(name) = export {
                 pipeline::reset_chunk_checkpoint(&config, &name)
             } else {
-                // Unreachable: clap enforces one of the two via `required_unless_present`.
                 Ok(())
             }
         }
@@ -1092,13 +973,7 @@ fn dispatch_state(action: StateAction) -> Result<()> {
     }
 }
 
-/// `rivet state runs`: the run-status ledger, newest first — the rows
-/// gc_orphans / cleanup_source / the consumed-exclusion actually read.
-/// The two run-status commands REFUSE a missing config file: `StateStore::open`
-/// derives the DB path from the config's DIRECTORY and would silently create a
-/// fresh empty DB — and these commands' empty output is a VERDICT ("no row is
-/// freezing any prefix"), so a typo'd `-c` mid-incident reads as a false
-/// all-clear (round-5 hostile-input probe, live-verified).
+/// `rivet state runs`: the run-status ledger, newest first.
 fn require_config_file(config: &str) -> Result<()> {
     if std::path::Path::new(config).is_file() {
         return Ok(());
@@ -1115,8 +990,6 @@ fn show_runs(config: &str, running_only: bool, last: usize, json: bool) -> Resul
     let store = StateStore::open(config)?;
     let rows = store.recent_run_status(last, running_only)?;
     if json {
-        // Machine leg (hostile reviewer: the footer drives a scripted flow) —
-        // same shape discipline as the sibling `--json` listings.
         let arr: Vec<serde_json::Value> = rows
             .iter()
             .map(|r| {
@@ -1138,9 +1011,6 @@ fn show_runs(config: &str, running_only: bool, last: usize, json: bool) -> Resul
         return Ok(());
     }
     if rows.is_empty() {
-        // `--last 0` clips everything: an empty listing then says NOTHING about
-        // the DB, and "no running rows" would be an actively false all-clear
-        // (round-5 hostile-input probe).
         let msg = if last == 0 {
             "--last 0 shows no rows by construction — raise it to inspect the ledger"
         } else if running_only {
@@ -1176,10 +1046,7 @@ fn show_runs(config: &str, running_only: bool, last: usize, json: bool) -> Resul
     Ok(())
 }
 
-/// `rivet state finish-run`: stamp a dead run's row `interrupted`. Refuses
-/// loudly on a typo'd id and no-ops honestly on an already-terminal row —
-/// only a `running` row is ever touched.
-/// `rivet state vacuum`: compact a SQLite state DB and print the size change.
+/// `rivet state finish-run`: stamp a dead run's row `interrupted`.
 fn copy_state_cmd(config: &str, to: Option<crate::secret::Secret>) -> Result<()> {
     require_config_file(config)?;
     let (source, target) = crate::state::copy::endpoints(config, to)?;
@@ -1256,13 +1123,7 @@ fn finish_run_cmd(config: &str, run_id: &str) -> Result<()> {
     }
 }
 
-/// `rivet state loads`: print the load ledger — one row per recorded `rivet
-/// load`, newest first.
-/// The empty-`state loads` message, or `None` when nothing should print. A
-/// zero-row request (`--last 0`) prints nothing (matching `--json []`); an
-/// unmatched `--target` filter says so rather than claiming the ledger is empty;
-/// an unfiltered empty result keeps the "no loads recorded" line (dogfood LOW —
-/// the old code printed "empty state DB" even for a filter miss on a full ledger).
+/// `rivet state loads`: print the load ledger — one row per recorded `rivet load`, newest first.
 fn empty_loads_message(target: Option<&str>, last: usize) -> Option<String> {
     if last == 0 {
         return None;
@@ -1305,7 +1166,7 @@ fn show_loads(config: &str, target: Option<&str>, last: usize) -> Result<()> {
 mod state_accept_dispatch_tests {
     use super::{StateAction, dispatch_state};
 
-    /// `rivet state accept` reaches its command with its params: a config that is not there and a malformed `--param` are both errors.
+    /// `rivet state accept` reaches its command with its params.
     #[test]
     fn state_accept_is_dispatched_with_its_params() {
         let accept = |params: &[&str]| {
@@ -1327,9 +1188,7 @@ mod loads_listing_tests {
 
     #[test]
     fn empty_loads_message_distinguishes_zero_request_and_filter_miss() {
-        // #dogfood LOW: `--last 0` and an unmatched `--target` were both reported
-        // as "no loads recorded in the state DB yet" on a NON-empty ledger.
-        assert_eq!(empty_loads_message(None, 0), None); // --last 0 → print nothing
+        assert_eq!(empty_loads_message(None, 0), None);
         assert_eq!(empty_loads_message(Some("x"), 0), None);
         assert_eq!(
             empty_loads_message(Some("x"), 5).unwrap(),
@@ -1374,8 +1233,7 @@ mod init_tls_tests {
     use super::resolve_init_tls;
     use crate::config::TlsMode;
 
-    /// Both directions of the pure resolver — an over-strict and an
-    /// under-strict `--tls-ca` handling are the same bug from opposite sides.
+    /// Both directions of the pure resolver — an over-strict and an under-strict `--tls-ca` handling are the same bug from opposite sides.
     #[test]
     fn tls_ca_pairs_only_with_verifying_modes() {
         for mode in [TlsMode::VerifyCa, TlsMode::VerifyFull] {
@@ -1390,7 +1248,6 @@ mod init_tls_tests {
             assert!(err.to_string().contains("--tls-ca"), "{err}");
         }
         assert!(resolve_init_tls(None, None).unwrap().is_none());
-        // A bare mode carries no CA and no other TlsConfig noise.
         let t = resolve_init_tls(Some(TlsMode::Disable), None)
             .unwrap()
             .unwrap();
@@ -1398,11 +1255,7 @@ mod init_tls_tests {
         assert!(t.ca_file.is_none() && !t.accept_invalid_certs);
     }
 
-    /// The TLS gate's remedy, as `rivet init` sees it: a config-block
-    /// prescription is unreachable from the command that CREATES the config,
-    /// so init's dispatch must re-prescribe the FLAG. Recognized by TYPE via
-    /// the gate's marker error — this test goes through the real dispatch and
-    /// the real gate (TEST-NET address: the refusal fires before any socket).
+    /// The TLS gate's remedy, as `rivet init` sees it.
     #[test]
     fn init_against_a_remote_host_names_the_flag_not_the_config_block() {
         let err = super::dispatch_init(
@@ -1455,10 +1308,7 @@ mod init_tls_tests {
 mod cdc_stream_polarity_tests {
     use super::cdc_until_current;
 
-    /// `--stream` and `until_current` are exact opposites. Both directions,
-    /// because an inverted polarity is the same bug from either side: a bounded
-    /// run that tails forever, or a daemon that clips at the open bound and
-    /// silently stops following the log.
+    /// `--stream` and `until_current` are exact opposites.
     #[test]
     fn stream_is_the_exact_inverse_of_the_open_time_bound() {
         assert!(
@@ -1524,7 +1374,7 @@ mod subcommand_error_tests {
         assert_eq!(one[0].0, "whole");
     }
 
-    /// A whole-config `check` plans the exports a run runs: a `cdc.backfill` recipe has no plan of its own, and named with `-e` it keeps one.
+    /// A whole-config `check` plans the exports a run runs.
     #[test]
     fn check_leaves_a_backfill_recipe_out_of_a_whole_config_and_keeps_it_when_named() {
         let dir = tempfile::tempdir().unwrap();
@@ -1628,8 +1478,7 @@ mod init_snowflake_flags_tests {
         }
     }
 
-    /// No flag, no target; every required one, the target with those values; a blank or a
-    /// missing value is a coded usage refusal naming the flag; the role is optional.
+    /// No flag, no target; every required one, the target with those values.
     #[test]
     fn the_snowflake_flags_become_a_target_only_when_every_value_is_given() {
         assert_eq!(flags([None; 8]).target().unwrap(), None);
