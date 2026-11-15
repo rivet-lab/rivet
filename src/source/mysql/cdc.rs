@@ -31,6 +31,8 @@ use crate::error::Result;
 use crate::source::cdc::checkpoint_identity::IdentityVerdict;
 use crate::source::cdc::value::RivetValue;
 use crate::source::cdc::{ChangeEvent, ChangeOp, ChangeStream, DrainMode, Position};
+use crate::source::column_grants as grants;
+use crate::source::mysql::column_grants::NAMES_MATCH;
 use crate::source::mysql::statement::{SqlMode, Tok, tokens};
 
 /// A blocking iterator of canonical [`ChangeEvent`]s over a MySQL binlog stream.
@@ -1482,7 +1484,7 @@ impl MysqlChangeStream {
                             )
                         })
                         .and_then(|cfg| readable.get(cfg))
-                        .map(|r| super::column_grants::kept_positions(&image_names, &r.columns))
+                        .map(|r| grants::kept_positions(&image_names, &r.columns, NAMES_MATCH))
                 });
                 let captured = seeded!(
                     "cdc-partial-image-projected",
@@ -1496,7 +1498,7 @@ impl MysqlChangeStream {
                     None => image_names,
                 };
                 let project = |r| match &keep {
-                    Some(k) => super::column_grants::project_row(r, k),
+                    Some(k) => grants::project_row(r, k),
                     None => r,
                 };
                 // Provisional position; rewritten to the commit position at XID.
@@ -1507,7 +1509,7 @@ impl MysqlChangeStream {
                     let after = after.map(render_row);
                     if captured {
                         for img in [before.as_ref(), after.as_ref()] {
-                            if super::column_grants::is_partial(full_arity, img) {
+                            if grants::is_partial(full_arity, img) {
                                 let n = img.map_or(0, |(v, _)| v.len());
                                 return Err(crate::source::cdc::partial_image_refusal(
                                     &schema, &table, n, full_arity,
@@ -1517,11 +1519,7 @@ impl MysqlChangeStream {
                     }
                     let before = before.map(project);
                     let after = after.map(project);
-                    if super::column_grants::changes_only_hidden(
-                        captured,
-                        before.as_ref(),
-                        after.as_ref(),
-                    ) {
+                    if grants::changes_only_hidden(captured, before.as_ref(), after.as_ref()) {
                         if seeded!(
                             "update-delivering-nothing-leaves-the-checkpoint-behind",
                             false,

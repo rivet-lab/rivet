@@ -1865,7 +1865,7 @@ fn grants_moved_mid_resolve(projecting: bool, err: &anyhow::Error) -> bool {
         "column-grants-revoke-between-two-reads-uncoded",
         false,
         projecting
-    ) && crate::source::mysql::column_grants::denied_by_server(err).is_some()
+    ) && crate::source::column_grants::denied_by_server(err).is_some()
 }
 
 /// The CDC probe could not read a captured table for a reason the server named; nothing was read or written.

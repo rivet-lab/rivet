@@ -1229,7 +1229,7 @@ fn execute_resolved_plan(
         Ok(()) => super::finalize::finalize_export(plan, Some(state), &mut summary),
         Err(e) => {
             super::finalize::finalize_export_records(&mut summary);
-            let e = crate::source::code_a_revoked_column(
+            let e = crate::source::column_grants::code_a_revoked_column(
                 e,
                 &plan.export_name,
                 plan.source.columns_from_grants(),

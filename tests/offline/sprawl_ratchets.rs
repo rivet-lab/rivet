@@ -119,7 +119,7 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ("src/source/mssql/cdc.rs::open#1", 161),
     ("src/source/mssql/mod.rs::export#1", 192),
     ("src/source/mysql/arrow_convert.rs::build_array#1", 347),
-    ("src/source/mysql/cdc.rs::fill#1", 361),
+    ("src/source/mysql/cdc.rs::fill#1", 357),
     ("src/source/oracle/arrow_convert.rs::build_column#1", 178),
     ("src/source/postgres/arrow_convert.rs::build_array#1", 158),
     (
