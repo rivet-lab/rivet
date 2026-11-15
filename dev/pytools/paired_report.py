@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / ".github" / "scripts"))
 import gate_history  # noqa: E402
-import nightly_delta as nd  # noqa: E402
+import nightly_delta as ndelta  # noqa: E402
 
 from dev.pytools import release, release_halves as rh  # noqa: E402
 from dev.release_oracle import known_red  # noqa: E402
@@ -296,17 +296,17 @@ def red_items(text: str, baseline: dict, today: dt.date) -> list[dict]:
         if m := KNOWN_LINE.search(raw):
             entry, _ = known_red.match(m[3])
             cell = MATRIX_OF.match(m[3])
-            items.append({"cls": nd.KNOWN, "stage": f"matrix {cell[1]}" if cell else stage, "key": m[3][:100], "expires": m[1], "issue": issue_of(entry.reason if entry else m[2]), "line": m[2][:CUT]})
-        keys, crashes = nd.red_keys(raw)
+            items.append({"cls": ndelta.KNOWN, "stage": f"matrix {cell[1]}" if cell else stage, "key": m[3][:100], "expires": m[1], "issue": issue_of(entry.reason if entry else m[2]), "line": m[2][:CUT]})
+        keys, crashes = ndelta.red_keys(raw)
         for key in sorted(keys - seen):
             seen.add(key)
-            graded = nd.grade_part(1, raw, baseline, today)
+            graded = ndelta.grade_part(1, raw, baseline, today)
             ok = key in graded["known"]
-            items.append({"cls": nd.KNOWN if ok else nd.NEW, "stage": stage, "key": key, "expires": baseline[key].expires if ok else "-",
+            items.append({"cls": ndelta.KNOWN if ok else ndelta.NEW, "stage": stage, "key": key, "expires": baseline[key].expires if ok else "-",
                           "issue": issue_of(baseline[key].reason) if ok else "-", "line": raw.strip()[:CUT]})
         for key in sorted(crashes - seen):
             seen.add(key)
-            items.append({"cls": INFRA if "runner shutdown" in key else nd.NEW, "stage": stage, "key": key, "expires": "-", "issue": "-", "line": raw.strip()[:CUT]})
+            items.append({"cls": INFRA if "runner shutdown" in key else ndelta.NEW, "stage": stage, "key": key, "expires": "-", "issue": "-", "line": raw.strip()[:CUT]})
         if (c := hosted.CELL.match(raw)) and c[5] == INFRA and (key := f"gate|{c[1]}/{c[3]}") not in seen:
             seen.add(key)
             items.append({"cls": INFRA, "stage": stage, "key": key, "expires": "-", "issue": "-", "line": raw.strip()[:CUT]})
@@ -317,15 +317,15 @@ def grade_log(code: int | None, text: str, lost: bool, baseline: dict, today: dt
     """(slice class, its red items): INFRA with no artifact at all, else `nightly_delta.grade_part` plus an item for an exit nothing explains."""
     if lost:
         return INFRA, [{"cls": INFRA, "stage": "(slice)", "key": "runner lost: no record, no log, no exit code", "expires": "-", "issue": "-", "line": "-"}]
-    graded = nd.grade_part(code, text, baseline, today)
+    graded = ndelta.grade_part(code, text, baseline, today)
     items = red_items(text, baseline, today)
-    if graded["verdict"] == nd.LOST:
-        items.append({"cls": nd.LOST, "stage": "(slice)", "key": graded["new"][0], "expires": "-", "issue": "-", "line": first_failing(text)})
+    if graded["verdict"] == ndelta.LOST:
+        items.append({"cls": ndelta.LOST, "stage": "(slice)", "key": graded["new"][0], "expires": "-", "issue": "-", "line": first_failing(text)})
     for why in graded["new"] if not any(x["cls"] == INFRA for x in items) else []:
         if why.startswith("exit ") and "explains" in why or why == "red cells under exit 0":
-            items.append({"cls": nd.NEW, "stage": "(slice exit)", "key": why, "expires": "-", "issue": "-", "line": first_failing(text)})
+            items.append({"cls": ndelta.NEW, "stage": "(slice exit)", "key": why, "expires": "-", "issue": "-", "line": first_failing(text)})
     seen = {x["cls"] for x in items}
-    return next((c for c in (nd.LOST, nd.NEW, INFRA, nd.KNOWN) if c in seen), graded["verdict"]), items
+    return next((c for c in (ndelta.LOST, ndelta.NEW, INFRA, ndelta.KNOWN) if c in seen), graded["verdict"]), items
 
 
 def slice_grade(s: Slice, baseline: dict, today: dt.date) -> tuple[str, list[dict]]:
@@ -749,24 +749,24 @@ def classes(code: int | None, text: str, lost: bool = False, today: dt.date = TO
 
 def check_classes() -> None:
     """Every class of a red cell is told apart: GREEN, KNOWN with expiry and issue, NEW, LOST and INFRA, an expired entry is NEW, and a lost slice never reads green."""
-    assert classes(0, CLEAN_LOG) == (nd.GREEN, [])
+    assert classes(0, CLEAN_LOG) == (ndelta.GREEN, [])
     cls, items = classes(1, "▸ matrices\nm postgres/x RED WRONG_VALUE over 2 pairs\n")
-    assert cls == nd.KNOWN and (items[0]["expires"], items[0]["issue"], items[0]["stage"]) == ("2026-11-22", "#913", "matrices"), (cls, items)
+    assert cls == ndelta.KNOWN and (items[0]["expires"], items[0]["issue"], items[0]["stage"]) == ("2026-11-22", "#913", "matrices"), (cls, items)
     cls, items = classes(1, "▸ matrices\nm postgres/x RED WRONG_VALUE over 2 pairs\n", today=dt.date(2026, 11, 23))
-    assert cls == nd.NEW and "expired" not in items[0]["key"] and items[0]["expires"] == "-", "an entry past its expiry acknowledges nothing"
-    assert classes(1, "▸ s\n  mysql 8 live s3 FAIL boom\n")[0] == nd.NEW
-    assert classes(1, "▸ s\n  postgres 16 live s3 FAIL boom\n", today=TODAY)[0] == nd.NEW, "an expired ledger entry is not KNOWN"
+    assert cls == ndelta.NEW and "expired" not in items[0]["key"] and items[0]["expires"] == "-", "an entry past its expiry acknowledges nothing"
+    assert classes(1, "▸ s\n  mysql 8 live s3 FAIL boom\n")[0] == ndelta.NEW
+    assert classes(1, "▸ s\n  postgres 16 live s3 FAIL boom\n", today=TODAY)[0] == ndelta.NEW, "an expired ledger entry is not KNOWN"
     cls, items = classes(0, "▸ s\n  ⊘ KNOWN RED (until 2026-11-22: 2026-11-12: a reason, see #982) — no_silent_null[mysql] smoke: SILENT_NULL over 3 pairs #abc\n")
-    assert (cls, items[0]["cls"], items[0]["expires"], items[0]["issue"], items[0]["stage"]) == (nd.KNOWN, nd.KNOWN, "2026-11-22", "#982", "matrix no_silent_null"), (cls, items)
-    assert classes(137, "▸ s\n")[0] == nd.LOST and classes(143, "x")[0] == nd.LOST and classes(None, "x")[0] == nd.LOST
+    assert (cls, items[0]["cls"], items[0]["expires"], items[0]["issue"], items[0]["stage"]) == (ndelta.KNOWN, ndelta.KNOWN, "2026-11-22", "#982", "matrix no_silent_null"), (cls, items)
+    assert classes(137, "▸ s\n")[0] == ndelta.LOST and classes(143, "x")[0] == ndelta.LOST and classes(None, "x")[0] == ndelta.LOST
     assert classes(None, "", lost=True)[0] == INFRA and classes(None, "", lost=True)[1][0]["key"].startswith("runner lost")
     assert classes(1, "  postgres 16 live s3 INFRA no host\n")[0] == INFRA
     assert classes(1, "The runner has received a shutdown signal\n")[0] == INFRA
     cls, items = classes(1, "▸ s\n✗ it broke\n")
-    assert cls == nd.NEW and items[0]["line"] == "✗ it broke", (cls, items)
-    assert classes(0, "▸ s\n  mysql 8 live s3 FAIL boom\n")[0] == nd.NEW, "a red cell under exit 0 is not green"
+    assert cls == ndelta.NEW and items[0]["line"] == "✗ it broke", (cls, items)
+    assert classes(0, "▸ s\n  mysql 8 live s3 FAIL boom\n")[0] == ndelta.NEW, "a red cell under exit 0 is not green"
     s = Slice(1)
-    assert slice_grade(s, {}, TODAY)[0] == INFRA and slice_grade(Slice(1, exit_code=0), {}, TODAY)[0] == nd.GREEN, "no record, no log and no exit code is INFRA, never GREEN"
+    assert slice_grade(s, {}, TODAY)[0] == INFRA and slice_grade(Slice(1, exit_code=0), {}, TODAY)[0] == ndelta.GREEN, "no record, no log and no exit code is INFRA, never GREEN"
 
 
 def check_ssh() -> None:
