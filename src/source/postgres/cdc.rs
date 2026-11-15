@@ -156,6 +156,54 @@ pub(crate) fn slot_exists_on(client: &mut Client, slot: &str) -> Result<bool> {
         .get(0))
 }
 
+/// The output plugin a logical slot was created with; fixed for the slot's life.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SlotPlugin {
+    TestDecoding,
+    Pgoutput,
+    Other(String),
+}
+
+impl SlotPlugin {
+    /// The plugin named by `pg_replication_slots.plugin`.
+    pub(crate) fn from_name(name: &str) -> Self {
+        match name {
+            "test_decoding" => Self::TestDecoding,
+            "pgoutput" => Self::Pgoutput,
+            other => Self::Other(other.to_string()),
+        }
+    }
+
+    /// The `plugin` text the server holds for this plugin.
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            Self::TestDecoding => "test_decoding",
+            Self::Pgoutput => "pgoutput",
+            Self::Other(n) => n,
+        }
+    }
+}
+
+/// The plugin of the logical slot `slot` on `client`, or `None` when the slot does not exist.
+pub(crate) fn slot_plugin_on(client: &mut Client, slot: &str) -> Result<Option<SlotPlugin>> {
+    let rows = client.query(
+        "SELECT plugin::text FROM pg_replication_slots WHERE slot_name = $1",
+        &[&slot],
+    )?;
+    Ok(rows
+        .first()
+        .map(|r| SlotPlugin::from_name(&r.get::<_, Option<String>>(0).unwrap_or_default())))
+}
+
+/// The refusal for an existing slot whose plugin the `test_decoding` stream cannot read.
+pub(crate) fn slot_plugin_refusal(slot: &str, plugin: &SlotPlugin) -> String {
+    format!(
+        "pg cdc: slot '{slot}' uses the '{}' output plugin, but this stream reads 'test_decoding' slots only. \
+         Drop the slot (`SELECT pg_drop_replication_slot('{slot}')`) and re-baseline the stream, or point `cdc.slot` at a different name.",
+        plugin.name()
+    )
+}
+
 /// Drop the replication slot `slot`, waiting for the server to release a slot the closed stream still holds.
 pub(crate) fn drop_slot(url: &str, slot: &str, tls: Option<&TlsConfig>) -> Result<()> {
     let mut client = super::connect_client(url, tls)?;
@@ -709,9 +757,16 @@ impl PgChangeStream {
             }
         }
         let domains = load_domains(&mut client)?;
-        let exists = slot_exists_on(&mut client, slot)?;
-        match slot_action(slot, exists, prior) {
+        let existing = slot_plugin_on(&mut client, slot)?;
+        match slot_action(slot, existing.is_some(), prior) {
             SlotAction::Reuse => {
+                if let Some(plugin) = existing.filter(|p| *p != SlotPlugin::TestDecoding) {
+                    crate::rivet_bail!(
+                        crate::error::codes::SOURCE_CDC_PREREQUISITE,
+                        "{}",
+                        slot_plugin_refusal(slot, &plugin)
+                    );
+                }
                 refuse_a_slot_another_reader_advanced(&mut client, slot, checkpoint)?
             }
             SlotAction::Refuse(why) => {
@@ -1640,6 +1695,22 @@ fn search_path_schema(client: &mut Client, cfg: &str) -> Result<Option<String>> 
         )
         .with_context(|| format!("pg cdc: resolving `{cfg}` through the search_path"))?
         .map(|r| r.get(0)))
+}
+
+/// The catalog's `(schema, table)` for a configured name through `to_regclass`, for a base or partitioned table; `None` when it resolves nowhere.
+pub(crate) fn search_path_relation(
+    client: &mut Client,
+    cfg: &str,
+) -> Result<Option<(String, String)>> {
+    use anyhow::Context as _;
+    Ok(client
+        .query_opt(
+            "SELECT n.nspname::text, c.relname::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.oid = to_regclass($1) AND c.relkind IN ('r','p') AND c.relpersistence = 'p'",
+            &[&cfg],
+        )
+        .with_context(|| format!("pg cdc: resolving `{cfg}` through the catalog"))?
+        .map(|r| (r.get(0), r.get(1))))
 }
 
 /// Whether a change of `schema.table` is captured: some configured name routes it, a bare name
@@ -4169,6 +4240,143 @@ mod tests {
             after[1],
             RivetValue::Bytes(b"unchanged-toast-datum".to_vec())
         );
+    }
+
+    /// A plugin name from `pg_replication_slots` maps to its reader; an unknown one keeps its name.
+    #[test]
+    fn a_slot_plugin_is_read_from_its_catalog_name() {
+        assert_eq!(
+            SlotPlugin::from_name("test_decoding"),
+            SlotPlugin::TestDecoding
+        );
+        assert_eq!(SlotPlugin::from_name("pgoutput"), SlotPlugin::Pgoutput);
+        assert_eq!(
+            SlotPlugin::from_name("wal2json"),
+            SlotPlugin::Other("wal2json".into())
+        );
+        for name in ["test_decoding", "pgoutput", "wal2json"] {
+            assert_eq!(SlotPlugin::from_name(name).name(), name);
+        }
+    }
+
+    /// The refusal for a foreign plugin names the slot, the plugin and the way out.
+    #[test]
+    fn the_foreign_plugin_refusal_names_the_slot_the_plugin_and_the_remedy() {
+        let text = slot_plugin_refusal("s1", &SlotPlugin::Pgoutput);
+        assert_eq!(
+            text,
+            "pg cdc: slot 's1' uses the 'pgoutput' output plugin, but this stream reads 'test_decoding' slots only. \
+             Drop the slot (`SELECT pg_drop_replication_slot('s1')`) and re-baseline the stream, or point `cdc.slot` at a different name."
+        );
+    }
+
+    /// Live: an existing `pgoutput` slot is refused by name before any read; a `test_decoding` slot is reused.
+    #[test]
+    #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
+    fn live_open_refuses_a_pgoutput_slot_and_reuses_a_test_decoding_one() {
+        let mut admin = Client::connect(CONN, NoTls).unwrap();
+        let slot = format!("rivet_plugin_{}", std::process::id());
+        let drop = |c: &mut Client| {
+            c.execute(
+                "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1",
+                &[&slot],
+            )
+            .unwrap();
+        };
+        drop(&mut admin);
+        admin
+            .execute(
+                "SELECT pg_create_logical_replication_slot($1, 'pgoutput')",
+                &[&slot],
+            )
+            .unwrap();
+        assert_eq!(
+            slot_plugin_on(&mut admin, &slot).unwrap(),
+            Some(SlotPlugin::Pgoutput)
+        );
+        let open = || {
+            PgChangeStream::open(
+                CONN,
+                &slot,
+                PriorRun::default(),
+                None,
+                crate::source::cdc::PeekBound::Sized(10),
+                DrainMode::Continuous,
+                &[],
+                None,
+                None,
+            )
+        };
+        let err = open().err().expect("a pgoutput slot is refused");
+        let text = format!("{err:#}");
+        assert_eq!(
+            crate::error::code_of(&err).map(|c| c.id),
+            Some("RIVET_SOURCE_CDC_PREREQUISITE"),
+            "{text}"
+        );
+        assert!(
+            text.contains(&slot_plugin_refusal(&slot, &SlotPlugin::Pgoutput)),
+            "{text}"
+        );
+        drop(&mut admin);
+        assert_eq!(slot_plugin_on(&mut admin, &slot).unwrap(), None);
+        admin
+            .execute(
+                "SELECT pg_create_logical_replication_slot($1, 'test_decoding')",
+                &[&slot],
+            )
+            .unwrap();
+        assert!(open().is_ok(), "a test_decoding slot is reused as before");
+        drop(&mut admin);
+    }
+
+    /// Live: the label resolver agrees with the reader's own domain map for every domain on the server.
+    #[test]
+    #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
+    fn live_type_labels_resolve_every_domain_as_the_domain_map_does() {
+        let mut c = Client::connect(CONN, NoTls).unwrap();
+        c.batch_execute(
+            "DROP DOMAIN IF EXISTS pgo_label_d2; DROP DOMAIN IF EXISTS pgo_label_d1; DROP DOMAIN IF EXISTS pgo_label_v; \
+             CREATE DOMAIN pgo_label_d1 AS integer; CREATE DOMAIN pgo_label_d2 AS pgo_label_d1; \
+             CREATE DOMAIN pgo_label_v AS varchar(10)",
+        )
+        .unwrap();
+        let domains = load_domains(&mut c).unwrap();
+        let labels = crate::source::postgres::type_labels::TypeLabels::load(&mut c).unwrap();
+        let rows = c
+            .query(
+                "SELECT oid, format_type(oid, NULL) FROM pg_type WHERE typtype = 'd'",
+                &[],
+            )
+            .unwrap();
+        let mut seen = 0;
+        for r in &rows {
+            let (oid, label): (u32, String) = (r.get(0), r.get(1));
+            assert_eq!(
+                labels.label(oid),
+                Some(domain_base(&domains, &label)),
+                "domain {label}"
+            );
+            seen += 1;
+        }
+        let d2: u32 = c
+            .query_one("SELECT 'pgo_label_d2'::regtype::oid", &[])
+            .unwrap()
+            .get(0);
+        let int4: u32 = c
+            .query_one("SELECT 'integer'::regtype::oid", &[])
+            .unwrap()
+            .get(0);
+        assert_eq!(labels.label(d2), Some("integer"));
+        assert_eq!(labels.label(int4), Some("integer"));
+        assert!(
+            seen >= 3,
+            "the fixture domains must be among the {seen} read"
+        );
+        c.batch_execute(
+            "DROP DOMAIN pgo_label_d2; DROP DOMAIN pgo_label_d1; DROP DOMAIN pgo_label_v",
+        )
+        .unwrap();
     }
 
     #[test]

@@ -969,6 +969,13 @@
             "null"
           ]
         },
+        "publication": {
+          "description": "PostgreSQL publication for the pgoutput stream (default: the slot name); validated now, read once the stream reads pgoutput.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "capture_instance": {
           "description": "SQL Server CDC capture instance, e.g. `dbo_orders` — required for\n`sqlserver://` sources.",
           "type": [

@@ -1015,6 +1015,7 @@ impl Config {
         self.validate_export_mode_knobs(export)?;
         self.validate_export_column_overrides(export)?;
         self.validate_export_cdc(export)?;
+        self.validate_cdc_publication(export)?;
         self.validate_export_chunk_by_days(export)?;
         Ok(())
     }
