@@ -382,6 +382,14 @@ pub(crate) fn split_key_list(joined: Option<String>) -> Option<Vec<String>> {
     )
 }
 
+/// What `columns_from: grants` guarantees on `source_type`, said at `rivet check` and at the start of a CDC run.
+pub(crate) fn columns_from_grants_boundary(source_type: crate::config::SourceType) -> &'static str {
+    match source_type {
+        crate::config::SourceType::Mongo => mongo::column_grants::BOUNDARY,
+        _ => mysql::column_grants::BOUNDARY,
+    }
+}
+
 /// The refusal for `source.type: oracle` in a build without the `oracle` feature.
 #[cfg_attr(feature = "oracle", allow(dead_code))]
 pub(crate) fn oracle_feature_missing() -> anyhow::Error {

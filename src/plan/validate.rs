@@ -257,12 +257,12 @@ mod tests {
     }
 
     #[test]
-    fn a_plan_with_columns_from_grants_is_rejected_off_mysql() {
+    fn a_plan_with_columns_from_grants_is_rejected_off_mysql_and_mongo() {
         for (engine, rejected) in [
             (SourceType::Postgres, true),
             (SourceType::Mssql, true),
             (SourceType::Oracle, true),
-            (SourceType::Mongo, true),
+            (SourceType::Mongo, false),
             (SourceType::Mysql, false),
         ] {
             let mut plan = base_plan();

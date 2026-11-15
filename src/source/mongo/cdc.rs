@@ -11,7 +11,10 @@ use super::{MongoSession, document_to_json, id_to_string};
 use crate::config::TlsConfig;
 use crate::error::Result;
 use crate::source::cdc::value::RivetValue;
-use crate::source::cdc::{ChangeEvent, ChangeOp, ChangeStream, DrainMode, Position};
+use crate::source::cdc::{
+    ChangeEvent, ChangeOp, ChangeStream, DrainMode, Position, ReadableColumns,
+};
+use std::collections::HashMap;
 
 /// The two fixed image columns, matching the batch JSON-blob schema.
 static IMAGE_NAMES: std::sync::LazyLock<std::sync::Arc<[String]>> =
@@ -45,6 +48,8 @@ pub(crate) struct MongoChangeStream {
     id_types: super::id_types::IdTypes,
     /// Orders events that share a clusterTime.
     clock: OrdinalClock,
+    /// The collections whose events the server filters to a view's fields (`columns_from: grants`).
+    projected: Vec<String>,
 }
 
 /// Counts events sharing one clusterTime from 0; a resume restores it from the checkpoint's `ct` and `ord`.
@@ -387,6 +392,7 @@ pub(crate) fn decode_resume_token(
 
 impl MongoChangeStream {
     /// Open a database-wide change stream, resuming from `checkpoint` when one exists (else starting at the current oplog position).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn open(
         url: &str,
         tls: Option<&TlsConfig>,
@@ -395,6 +401,7 @@ impl MongoChangeStream {
         mode: DrainMode,
         configured_tables: &[String],
         keyed_tables: &[String],
+        grants: Option<&HashMap<String, ReadableColumns>>,
     ) -> Result<Self> {
         let until_current = mode.is_bounded();
         let session = MongoSession::connect(url, tls)?;
@@ -480,6 +487,9 @@ impl MongoChangeStream {
                     .optional(cap.before_image_request(), |w, v| {
                         w.full_document_before_change(v)
                     })
+                    .optional(super::column_grants::stream_pipeline(grants), |w, p| {
+                        w.pipeline(p)
+                    })
                     .max_await_time(std::time::Duration::from_millis(500))
                     .resume_after(resume)
                     .await
@@ -521,6 +531,7 @@ impl MongoChangeStream {
             keyed_tables: keyed_tables.to_vec(),
             id_types,
             clock,
+            projected: super::column_grants::projected_collections(grants),
         };
         if is_fresh
             && let Some(ckpt) = checkpoint
@@ -564,6 +575,7 @@ pub(crate) fn pin_checkpoint_at_current(
         DrainMode::Continuous,
         &[],
         &[],
+        None,
     )
     .map(|_| ())
 }
@@ -783,6 +795,27 @@ fn hetero_should_warn(first: &mut Option<Option<u8>>, warned: bool, bracket: Opt
     }
 }
 
+/// An event that routes to no table and carries no row, whose position moves the checkpoint past `cse`.
+fn boundary_marker(cse: &ChangeStreamEvent<Document>, stamp: (u64, u64)) -> Result<ChangeEvent> {
+    let mut ev = ChangeEvent {
+        op: ChangeOp::Update,
+        schema: String::new(),
+        table: String::new(),
+        before: None,
+        after: None,
+        position: encode_resume_token(&cse.id, stamp)?,
+        committed: false,
+        image_names: None,
+        seq: 0,
+        poison: None,
+        row_id: None,
+        before_names: None,
+        before_poison: None,
+    };
+    crate::source::cdc::TxnFramer::single_event_commit(&mut ev);
+    Ok(ev)
+}
+
 impl ChangeStream for MongoChangeStream {
     fn engine(&self) -> crate::source::cdc::CdcEngine {
         crate::source::cdc::CdcEngine::Mongo
@@ -803,6 +836,7 @@ impl ChangeStream for MongoChangeStream {
         let keyed_tables = &self.keyed_tables;
         let id_types = &mut self.id_types;
         let clock = &mut self.clock;
+        let projected = &self.projected;
         let mut bound_wait: Option<std::time::Instant> = None;
         loop {
             let cse = if until_current {
@@ -871,10 +905,23 @@ impl ChangeStream for MongoChangeStream {
                         );
                         *hetero_warned = true;
                     }
-                    return Some(
-                        stamp_event(clock, cse.cluster_time)
-                            .and_then(|stamp| to_change_event(cse, canonical, db_name, stamp)),
+                    let hidden_only = seeded!(
+                        "mongo-cdc-hidden-only-update-delivered",
+                        false,
+                        super::column_grants::is_hidden_only_update(
+                            projected,
+                            cse.ns.as_ref().and_then(|n| n.coll.as_deref()),
+                            &cse.operation_type,
+                            cse.update_description.as_ref(),
+                        )
                     );
+                    return Some(stamp_event(clock, cse.cluster_time).and_then(|stamp| {
+                        if hidden_only {
+                            boundary_marker(&cse, stamp)
+                        } else {
+                            to_change_event(cse, canonical, db_name, stamp)
+                        }
+                    }));
                 }
                 OpClass::Skip => {
                     let coll = cse.ns.as_ref().and_then(|n| n.coll.as_deref());

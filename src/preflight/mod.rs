@@ -393,7 +393,7 @@ pub fn check(
                 seeded!(
                     "column-grants-boundary-unsaid",
                     "",
-                    crate::source::mysql::column_grants::BOUNDARY
+                    crate::source::columns_from_grants_boundary(config.source.source_type)
                 )
             );
         }

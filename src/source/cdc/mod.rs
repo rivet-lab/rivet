@@ -612,6 +612,8 @@ pub(crate) enum CdcEngineOpts {
         configured_tables: Vec<String>,
         /// The collections a keyed `load:` merges by `_id`.
         keyed_tables: Vec<String>,
+        /// The views the run resolved before its anchor.
+        resolved_grants: Option<std::sync::Arc<std::collections::HashMap<String, ReadableColumns>>>,
     },
 }
 
@@ -820,6 +822,10 @@ impl CdcEngine {
             }
             #[cfg(not(feature = "oracle"))]
             Self::Oracle => Err(crate::source::oracle_feature_missing()),
+            Self::Mongo if columns_from_grants => {
+                crate::source::mongo::column_grants::resolve_for_tables(url, tls, tables)
+                    .map(|_| ())
+            }
             Self::Mssql | Self::Mongo => Ok(()),
         }
     }
@@ -1118,6 +1124,7 @@ pub(crate) fn create_change_stream(
             canonical,
             configured_tables,
             keyed_tables,
+            resolved_grants,
         } => {
             if let Some(p) = cfg.checkpoint.as_deref() {
                 Position::load(std::path::Path::new(p))?;
@@ -1131,6 +1138,7 @@ pub(crate) fn create_change_stream(
                     cfg.drain,
                     configured_tables,
                     keyed_tables,
+                    resolved_grants.as_deref(),
                 )
                 .map_err(|e| {
                     if crate::source::mongo::cdc::error_names_its_own_cause(&e) {
@@ -2042,6 +2050,7 @@ mod engine_identity {
                     canonical: false,
                     configured_tables: t(&["a"]),
                     keyed_tables: Vec::new(),
+                    resolved_grants: None,
                 },
                 SourceType::Mongo,
                 "mongodb+srv://h/d",

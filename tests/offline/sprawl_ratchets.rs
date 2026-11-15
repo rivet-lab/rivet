@@ -57,7 +57,7 @@ const LONG_FUNCTION_LINES: usize = 150;
 /// Product functions over `LONG_FUNCTION_LINES`, as (`file::fn#occurrence`, ceiling). Every row: 2026-11-13, first measurement; closes when the function is split and the row is deleted.
 const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ("src/cli/dispatch.rs::dispatch#1", 195),
-    ("src/cli/dispatch.rs::dispatch_cdc#1", 162),
+    ("src/cli/dispatch.rs::dispatch_cdc#1", 161),
     ("src/error/retry.rs::classify_error#1", 206),
     ("src/format/csv.rs::write_csv_value#1", 239),
     ("src/init/yaml_scaffold.rs::export_block_lines#1", 339),
@@ -68,7 +68,7 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ("src/pipeline/apply_cmd.rs::run_apply_command#1", 255),
     ("src/pipeline/cdc/sink.rs::run_to_files#1", 225),
     ("src/pipeline/cdc_job.rs::initial_snapshot_pending#1", 184),
-    ("src/pipeline/cdc_job.rs::run_cdc_inner#1", 162),
+    ("src/pipeline/cdc_job.rs::run_cdc_inner#1", 161),
     (
         "src/pipeline/chunked/detect.rs::detect_and_generate_chunks#1",
         159,

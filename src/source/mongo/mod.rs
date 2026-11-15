@@ -18,6 +18,7 @@ use crate::source::{BatchSink, ExportRequest, Source};
 use crate::types::{ColumnOverrides, RivetType, SourceColumn, TypeMapping};
 
 pub(crate) mod cdc;
+pub(crate) mod column_grants;
 pub(crate) mod id_types;
 
 /// The byte budget at which a document batch flushes.
@@ -595,6 +596,13 @@ impl Source for MongoSource {
         MongoSource::pin_incarnation(self, collection, incarnation);
     }
 
+    fn readable_columns(
+        &mut self,
+        table: &str,
+    ) -> Result<Option<crate::source::cdc::ReadableColumns>> {
+        column_grants::readable_columns_for_batch(&self.session, table).map(Some)
+    }
+
     fn harm_counters(&mut self) -> Option<Vec<(String, i64)>> {
         let session = &self.session;
         session.block_on(async {
@@ -636,7 +644,12 @@ impl Source for MongoSource {
             db.collection::<Document>(coll_name)
         };
         let canonical = self.canonical_json;
-        let no_cursor_timeout = self.no_cursor_timeout;
+        let no_cursor_timeout = self.no_cursor_timeout
+            && seeded!(
+                "mongo-view-read-sets-no-cursor-timeout",
+                true,
+                !self.started_as.get(coll_name).is_some_and(Vec::is_empty)
+            );
         let id_range = self.id_range.clone();
         let batch_rows = request.tuning.effective_batch_size(Some(&schema)).max(1);
         let batch_byte_cap = mongo_batch_byte_cap(request.tuning.max_batch_memory_mb);

@@ -988,7 +988,7 @@ fn a_qualified_table_does_not_capture_a_table_named_by_its_qualified_string_in_a
     assert_eq!(changes(&parts), vec![("insert".into(), 2, "bob".into())]);
 }
 
-/// Every command that loads the config refuses `columns_from: grants` off MySQL, by code, before it connects or writes.
+/// Every command that loads the config refuses `columns_from: grants` off MySQL and MongoDB, by code, before it connects or writes.
 fn columns_from_grants_is_refused_by_every_command(rigs: Vec<Rig>) {
     for rig in rigs {
         let rig = rig.source_line("columns_from: grants");
@@ -1012,8 +1012,9 @@ fn columns_from_grants_is_refused_by_every_command(rigs: Vec<Rig>) {
                 String::from_utf8_lossy(&out.stderr)
             );
             assert!(
-                said.contains("`source.columns_from: grants` is supported on MySQL sources only")
-                    && said.contains("would read and deliver every column")
+                said.contains(
+                    "`source.columns_from: grants` is supported on MySQL and MongoDB sources only"
+                ) && said.contains("would read and deliver every column")
                     && said.contains("Remove `columns_from:` from `source:`"),
                 "{cmd:?}: the refusal names the cause and the remedy:\n{said}"
             );
@@ -1049,15 +1050,6 @@ fn columns_from_grants_is_refused_by_every_command_oracle() {
     columns_from_grants_is_refused_by_every_command(vec![
         Rig::oracle_batch("orders"),
         Rig::oracle_cdc("orders"),
-    ]);
-}
-
-#[test]
-#[ignore = "live: needs only the rig harness env; the refusal comes before any connection"]
-fn columns_from_grants_is_refused_by_every_command_mongo() {
-    columns_from_grants_is_refused_by_every_command(vec![
-        Rig::mongo_batch("orders").source_url(&MongoTest::url(mongo_rs_port(), "cg_refused")),
-        Rig::mongo_cdc("orders").source_url(&MongoTest::url(mongo_rs_port(), "cg_refused")),
     ]);
 }
 

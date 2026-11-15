@@ -382,12 +382,11 @@ fn dispatch_cdc(a: CdcArgs) -> Result<()> {
                 configured_tables: a.table.clone(),
                 capture_instance: a.capture_instance,
             },
-            // Same contract as the SQL arms above: a bare `rivet cdc` with no
-            // `--table` names nothing, so there is nothing to cross-check.
             CdcEngine::Mongo => CdcEngineOpts::Mongo {
                 canonical: false,
                 configured_tables: a.table.clone(),
                 keyed_tables: Vec::new(),
+                resolved_grants: None,
             },
             // LogMiner selects only the named tables, so `--table` is required in practice.
             CdcEngine::Oracle => CdcEngineOpts::Oracle {

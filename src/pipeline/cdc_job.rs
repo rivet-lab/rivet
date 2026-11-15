@@ -365,7 +365,7 @@ pub(super) fn record_file_anchor(
 pub(super) type RunGrants =
     std::sync::Arc<std::collections::HashMap<String, crate::source::cdc::ReadableColumns>>;
 
-/// Read the account's grants once for a `columns_from: grants` MySQL CDC run.
+/// Read the account's grants once for a `columns_from: grants` CDC run.
 pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<Option<RunGrants>> {
     if !config.source.columns_from_grants() {
         return Ok(None);
@@ -376,7 +376,20 @@ pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<O
         (None, None) => return Ok(None),
     };
     if seeded!("column-grants-boundary-unsaid", false, true) {
-        log::info!("{}", crate::source::mysql::column_grants::BOUNDARY);
+        log::info!(
+            "{}",
+            crate::source::columns_from_grants_boundary(config.source.source_type)
+        );
+    }
+    let url = config.source.resolve_url()?;
+    let url = url.expose();
+    if config.source.source_type == crate::config::SourceType::Mongo {
+        return crate::source::mongo::column_grants::resolve_for_tables(
+            url,
+            config.source.tls.as_ref(),
+            &tables,
+        )
+        .map(|r| Some(std::sync::Arc::new(r)));
     }
     let declared = tables
         .iter()
@@ -387,7 +400,7 @@ pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<O
         })
         .collect();
     crate::source::mysql::cdc::MysqlChangeStream::resolve_grants(
-        config.source.resolve_url()?.expose(),
+        url,
         config.source.tls.as_ref(),
         &tables,
         &declared,
@@ -687,6 +700,25 @@ fn cdc_drift_key(export: &str, table: &str, multi: bool) -> String {
     }
 }
 
+/// The MongoDB engine options of a CDC run.
+fn mongo_engine_opts(
+    config: &Config,
+    export: &ExportConfig,
+    configured_tables: Vec<String>,
+    resolved_grants: Option<RunGrants>,
+) -> CdcEngineOpts {
+    CdcEngineOpts::Mongo {
+        canonical: config
+            .source
+            .mongo
+            .as_ref()
+            .is_some_and(|m| matches!(m.json, crate::config::MongoJsonMode::Canonical)),
+        configured_tables,
+        keyed_tables: crate::source::mongo::id_types::keyed_tables(config, export),
+        resolved_grants,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_cdc_inner(
     config: &Config,
@@ -834,13 +866,12 @@ fn run_cdc_inner(
                     crate::config::SourceType::Oracle => CdcEngineOpts::Oracle {
                         configured_tables: wired.iter().map(|(t, _, _)| t.clone()).collect(),
                     },
-                    crate::config::SourceType::Mongo => CdcEngineOpts::Mongo {
-                        canonical: config.source.mongo.as_ref().is_some_and(|m| {
-                            matches!(m.json, crate::config::MongoJsonMode::Canonical)
-                        }),
-                        configured_tables: wired.iter().map(|(t, _, _)| t.clone()).collect(),
-                        keyed_tables: crate::source::mongo::id_types::keyed_tables(config, export),
-                    },
+                    crate::config::SourceType::Mongo => mongo_engine_opts(
+                        config,
+                        export,
+                        wired.iter().map(|(t, _, _)| t.clone()).collect(),
+                        grants,
+                    ),
                 },
             },
             outputs,

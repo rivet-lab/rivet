@@ -152,6 +152,14 @@ pub fn mongo_rs_url() -> String {
         mongo_rs_port()
     )
 }
+/// Host port of the `mongo-auth-rs` stand, whose root account is `root:rootpass`.
+pub const MONGO_AUTH_RS_PORT: u16 = 27021;
+/// The `mongo-auth-rs` stand's URL for `user` on `db`.
+pub fn mongo_auth_rs_url(user: &str, password: &str, db: &str) -> String {
+    format!(
+        "mongodb://{user}:{password}@127.0.0.1:{MONGO_AUTH_RS_PORT}/{db}?authSource=admin&directConnection=true"
+    )
+}
 pub const MONGO_SHARD_PORT: u16 = 27991;
 pub const MONGO_SHARD_URL: &str = "mongodb://127.0.0.1:27991/?directConnection=true";
 /// Host port of the `mongos` stand; `RIVET_TEST_MONGO_SHARD_PORT` names the one a non-default `MONGO_VERSION` cluster is published on.
@@ -459,6 +467,8 @@ pub enum LiveService {
     MongoShard,
     /// Auth-enabled MongoDB with a least-privilege read-only user. TCP :27020.
     MongoAuth,
+    /// Auth-enabled MongoDB replica set (change streams) with a view-only role. TCP :27021.
+    MongoAuthRs,
     Minio,
     FakeGcs,
     /// Azure Blob emulator (Azurite). Blob endpoint :10000.
@@ -527,6 +537,11 @@ impl LiveService {
                 "127.0.0.1",
                 27020,
                 "service `mongo-auth` (auth-enabled) in docker-compose.yaml",
+            ),
+            LiveService::MongoAuthRs => (
+                "127.0.0.1",
+                MONGO_AUTH_RS_PORT,
+                "service `mongo-auth-rs` (auth-enabled replica set) in docker-compose.yaml",
             ),
             LiveService::MysqlToxi => (
                 "127.0.0.1",
