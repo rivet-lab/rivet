@@ -359,7 +359,7 @@ def mutants() -> list[tuple[str, str, Callable[[dict], None]]]:
         ("a slice job failed", "SLICE_FAILED", lambda d: d["jobs"]["jobs"][2].update(conclusion="failure")),
         ("a slice job cancelled", "SLICE_FAILED", lambda d: d["jobs"]["jobs"][1].update(conclusion="cancelled")),
         ("stage missing from the hosted half", "STAGE_MISSING", lambda d: drop(d, 0, "cdc harm")),
-        ("stage missing from the devbox half", "STAGE_MISSING", lambda d: d["devbox"][0]["stages"].remove("cdc e2e")),
+        ("stage missing from the devbox half", "STAGE_MISSING", lambda d: d["devbox"][0]["stages"].pop(0)),
         ("the live stage missing from every slice", "STAGE_MISSING", lambda d: [rec(d, i)["stages"].remove("live modules") for i in (1, 2, 3)] and None),
         ("stage run by both halves", "STAGE_IN_BOTH", lambda d: d["devbox"][0]["stages"].append("cdc harm")),
         ("hosted stage run by the devbox only", "STAGES", lambda d: (drop(d, 0, "cdc harm"), d["devbox"][0]["stages"].append("cdc harm"))),

@@ -16,15 +16,13 @@ it has finished starting; applying changes before that is safe (the slot retains
 them) while applying them before the SLOT exists is not.
 """
 import argparse, json, os, re, shutil, subprocess, sys, time
+from urllib.parse import urlsplit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 from dev.pytools.shell import loopback_publish  # noqa: E402
-# The stands do not all share one docker network: the SQL engines sit in
-# `rivet_default`, the Mongo stands in `stand_default`. The sink must join the
-# SAME network as the source, or Debezium cannot resolve either of them.
-NETS = {"postgres": "rivet_default", "mysql": "rivet_default",
-        "mssql": "rivet_default", "mongo": "stand_default"}
+# The sink must join the SAME network as the source, or Debezium cannot resolve it.
+NETS = {"postgres": "rivet_default", "mysql": "rivet_default", "mssql": "rivet_default"}
 PG_HOST_IN_NET = os.environ.get("CDC_ORACLE_PG_HOST", "postgres-cdc")
 PG_URL = os.environ.get("POSTGRES_CDC_URL", "postgresql://rivet:rivet@127.0.0.1:5434/rivet")
 PG_EXEC = ["docker", "exec", os.environ.get("CDC_ORACLE_PG_CONTAINER", "rivet-postgres-cdc-1"),
@@ -107,10 +105,17 @@ def _container(env_var: str, port: int, fallback: str) -> str:
 MSSQL_EXEC = ["docker", "exec", _container("CDC_ORACLE_MSSQL_CONTAINER", 1434, "rivet-mssql-cdc-1"),
               "/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa",
               "-P", "Rivet_Passw0rd!", "-C", "-d", "rivet", "-h", "-1", "-W", "-b", "-Q"]
-MONGO_HOST_IN_NET = os.environ.get("CDC_ORACLE_MONGO_HOST", "mongo80-cdc")
-MONGO_URL = os.environ.get("MONGO_CDC_URL", "mongodb://127.0.0.1:27208/rivet?replicaSet=rs0&directConnection=true")
-MONGO_EXEC = ["docker", "exec", _container("CDC_ORACLE_MONGO_CONTAINER", 27208, "stand-mongo80-cdc-1"),
-              "mongosh", "--quiet", "rivet", "--eval"]
+MONGO_URL = os.environ.get("MONGO_CDC_URL") or os.environ.get("RIVET_CDC_MONGO_URL") or "mongodb://127.0.0.1:27018/rivet?directConnection=true"
+MONGO_CONTAINER = _container("CDC_ORACLE_MONGO_CONTAINER", urlsplit(MONGO_URL).port or 27017, "rivet-mongo-rs-1")
+MONGO_HOST_IN_NET = os.environ.get("CDC_ORACLE_MONGO_HOST", MONGO_CONTAINER)
+MONGO_EXEC = ["docker", "exec", MONGO_CONTAINER, "mongosh", "--quiet", "rivet", "--eval"]
+
+
+def _network_of(container: str, fallback: str) -> str:
+    """The first docker network `container` sits in, else `fallback`."""
+    out = subprocess.run(["docker", "inspect", "-f", "{{range $n, $_ := .NetworkSettings.Networks}}{{$n}} {{end}}", container],
+                         capture_output=True, text=True).stdout.split()
+    return out[0] if out else fallback
 
 
 def mongo(js: str) -> str:
@@ -326,7 +331,7 @@ def main() -> int:
     for c in (sink, srv):
         subprocess.run(["docker", "rm", "-f", c], capture_output=True)
 
-    net = os.environ.get("CDC_ORACLE_NET") or NETS[a.engine]
+    net = os.environ.get("CDC_ORACLE_NET") or (_network_of(MONGO_CONTAINER, "rivet_default") if a.engine == "mongo" else NETS[a.engine])
     ckpt = os.path.join(work, "rivet.ckpt")
 
     def cleanup():
