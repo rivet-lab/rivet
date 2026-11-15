@@ -5,13 +5,9 @@ use crate::error::Result;
 use crate::secret::Secret;
 use crate::url_text::host_port_span;
 
-/// Whether every host of a `scheme://[user[:pass]@]host[:port][/db][?…]` URL is loopback; fails closed on any URL it cannot confidently read.
+/// Whether every host of a `scheme://[user[:pass]@]host[:port][/db][?…]` URL is loopback.
 pub(crate) fn host_is_loopback(url: &str) -> bool {
     let host_port = host_port_span(url);
-    // A comma seedlist (`host1:p1,host2:p2` — valid for MongoDB AND multi-host
-    // PostgreSQL) is loopback ONLY if EVERY host is: reading just the first host
-    // let `127.0.0.1:5432,evil.com:5432` dial evil.com in plaintext under the
-    // gate (bug-hunt find). Empty authority ⇒ not loopback (fail closed).
     !host_port.is_empty()
         && host_port.split(',').all(one_host_is_loopback)
         && query_hosts(url).all(query_host_is_local)
@@ -39,28 +35,23 @@ fn query_host_is_local(v: &str) -> bool {
 
 /// Loopback test for a single `host[:port]` (or bracketed `[ipv6][:port]`).
 fn one_host_is_loopback(host_port: &str) -> bool {
-    // IPv6 literals are bracketed (`[::1]:5432`); the host is the bracketed span,
-    // and any `:` inside is part of the address.
     let host = if let Some(rest) = host_port.strip_prefix('[') {
         match rest.split_once(']') {
             Some((h, _)) => h,
-            None => return false, // unterminated bracket — fail closed
+            None => return false,
         }
     } else {
-        // Bare host or IPv4: the host ends at the (single) port `:`.
         host_port.split(':').next().unwrap_or(host_port)
     };
 
     if host.eq_ignore_ascii_case("localhost") {
         return true;
     }
-    // `IpAddr::is_loopback` covers the whole 127.0.0.0/8 block and `::1`.
     host.parse::<std::net::IpAddr>()
         .is_ok_and(|ip| ip.is_loopback())
 }
 
-/// The URL without its `sslmode`, and the [`TlsConfig`] that `sslmode` asks for:
-/// `require` / `verify-ca` / `verify-full` enforce, anything else is `None`; last occurrence wins, like libpq.
+/// The URL without its `sslmode`, and the [`TlsConfig`] that `sslmode` asks for.
 pub(crate) fn url_tls(url: &str) -> (String, Option<TlsConfig>) {
     let query = url.split_once('?').map_or("", |(_, q)| q);
     let mut mode = None;
@@ -107,7 +98,7 @@ fn parse_request_url(url: &str) -> Option<reqwest::Url> {
     reqwest::Url::parse(url).ok()
 }
 
-/// The lowercase host a request to `url` dials, IPv6 brackets removed; `None` when the URL does not parse or has no host.
+/// The lowercase host a request to `url` dials, IPv6 brackets removed.
 pub(crate) fn request_host(url: &str) -> Option<String> {
     if seeded!("plaintext-gate-decides-by-text", true, false) {
         url.split_once("://")?;
@@ -308,32 +299,21 @@ mod loopback_tests {
             "postgresql://rivet:rivet@localhost:5432/rivet"
         ));
         assert!(host_is_loopback("mysql://root@127.0.0.1:3306/db"));
-        // Whole 127.0.0.0/8 block is loopback.
         assert!(host_is_loopback("postgresql://u:p@127.255.0.9/db"));
-        // IPv6 loopback, bracketed with and without a port.
         assert!(host_is_loopback("postgresql://u:p@[::1]:5432/db"));
         assert!(host_is_loopback("sqlserver://sa:pw@[::1]/master"));
-        // Case-insensitive host, no port, no db.
         assert!(host_is_loopback("mysql://root@LOCALHOST"));
-        // An `@` inside the password must not be mistaken for the host boundary.
         assert!(host_is_loopback("postgresql://u:p@ss@127.0.0.1:5432/db"));
     }
 
     #[test]
     fn roast_seedlist_with_any_remote_host_is_not_loopback() {
-        // Multi-host / seedlist authority (`host1:p1,host2:p2`): the TLS gate must
-        // treat it as loopback ONLY if EVERY host is loopback. Reading just the
-        // first host let `127.0.0.1:5432,evil.com:5432` (a valid PostgreSQL and
-        // MongoDB seedlist) pass the gate and dial evil.com in plaintext
-        // (bug-hunt find; the shared gate reaches every engine, PG supports
-        // multi-host URLs).
         assert!(!host_is_loopback(
             "postgresql://u:p@127.0.0.1:5432,evil.com:5432/db"
         ));
         assert!(!host_is_loopback(
             "mongodb://u:p@127.0.0.1:27017,evil.com:27017/db"
         ));
-        // All-loopback seedlist stays loopback.
         assert!(host_is_loopback(
             "mongodb://u:p@127.0.0.1:27017,[::1]:27018/db"
         ));
@@ -349,8 +329,6 @@ mod loopback_tests {
         ));
         assert!(!host_is_loopback("mysql://root@192.168.1.10:3306/db"));
         assert!(!host_is_loopback("sqlserver://sa:pw@10.0.0.5:1433/master"));
-        // Not loopback: an unbracketed IPv6-looking address won't parse here, so
-        // it fails closed (treated as remote).
         assert!(!host_is_loopback("postgresql://u:p@::1:5432/db"));
     }
 
@@ -361,7 +339,6 @@ mod loopback_tests {
             host_port_span("postgres://127.0.0.1:5432/db"),
             "127.0.0.1:5432"
         );
-        // No authority at all.
         assert_eq!(host_port_span("mysql://"), "");
         assert_eq!(host_port_span("postgres:///db"), "");
     }
