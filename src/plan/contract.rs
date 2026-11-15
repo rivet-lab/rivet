@@ -42,7 +42,6 @@ pub struct ChunkedPlan {
     pub column: String,
     pub chunk_size: usize,
     /// Divide the column range into exactly this many equal chunks.
-    /// When Some, `chunk_size` is recomputed at detect time from min/max.
     pub chunk_count: Option<usize>,
     pub parallel: usize,
     pub by_days: Option<u32>,
@@ -51,37 +50,18 @@ pub struct ChunkedPlan {
     pub max_attempts: u32,
 }
 
-/// Parameters for keyset (seek) pagination — the source-safe shape for tables
-/// without a single-integer PK (OPT-4). Pages the table by one index-backed,
-/// NOT NULL unique key with `WHERE key > last ORDER BY key LIMIT chunk_size`,
-/// bounding both peak RSS and longest-query time. The key is index-backed by
-/// construction (see `plan::build`), so the `ORDER BY` is an index range scan,
-/// never a filesort.
+/// Parameters for keyset (seek) pagination — the source-safe shape for tables without a single-integer PK (OPT-4).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeysetPlan {
     pub key_column: String,
     pub chunk_size: usize,
-    /// Persist the page's max key after each commit so a **crashed** run resumes
-    /// from it (crash-recovery). Detected via the in-progress run_id: a run that
-    /// finished clears it, so a *clean* re-run does NOT continue from the key —
-    /// it re-reads the whole range (full semantics), never silently skipping
-    /// already-exported rows. The clean-re-run "continue from key" behaviour is
-    /// the separate opt-in [`incremental`](Self::incremental). Set for a MongoDB
-    /// source via `source.mongo.resume`. `#[serde(default)]` so a pre-existing
-    /// plan artifact (no field) deserializes as non-resumable.
+    /// Persist the page's max key after each commit so a **crashed** run resumes from it (crash-recovery).
     #[serde(default)]
     pub checkpoint: bool,
-    /// Append-only opt-in (SQL `keyset_incremental`, or Mongo `source.mongo.resume`):
-    /// on a CLEAN re-run, continue from the last exported key — pull only keys past
-    /// the high-water mark. Distinct from [`checkpoint`](Self::checkpoint) (which is
-    /// crash-recovery only): incremental is correct ONLY for append-only tables, so
-    /// it is off unless explicitly requested. `#[serde(default)]` for old artifacts.
+    /// Append-only opt-in (SQL `keyset_incremental`, or Mongo `source.mongo.resume`).
     #[serde(default)]
     pub incremental: bool,
     /// Concurrent `_id`-range workers for a MongoDB parallel read (`export.
-    /// parallel`): each worker keyset-pages a disjoint `$sample`-bounded slice.
-    /// Only the Mongo reader acts on it; SQL keyset stays sequential and ignores
-    /// it. `#[serde(default)]` ⇒ absent/0 reads with a single cursor (`.max(1)`).
     #[serde(default)]
     pub parallel: usize,
     /// The key columns after `key_column` for a composite key, empty for a single-column key.
@@ -106,90 +86,44 @@ impl KeysetPlan {
 }
 
 /// Fully resolved execution plan for a single export.
-///
-/// All execution decisions are derived before the pipeline starts.
-/// Pipeline modules must not read raw config structures or CLI flags
-/// once `build_plan` completes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedRunPlan {
     pub export_name: String,
-    /// Run-wide counter of decoded bytes READ from the source (in-memory Arrow
-    /// batch size, summed by every `ExportSink::on_batch` this run creates).
-    ///
-    /// Lives on the PLAN — the one value every runner, worker thread, and
-    /// per-chunk sink already receives — so accumulation is runner-agnostic BY
-    /// CONSTRUCTION (`Clone` shares the `Arc`, so a worker's plan clone feeds the
-    /// same counter): no per-runner harvest to forget, the exact runner-bypass
-    /// trap a per-sink field had (#175). Harvested ONCE into
-    /// `summary.bytes_read` by `run_export_job` after the runner returns.
-    /// `serde(skip)`: a runtime counter, not part of the serialized plan; a
-    /// deserialized plan starts a fresh one.
+    /// Run-wide counter of decoded bytes READ from the source (in-memory Arrow batch size, summed by every `ExportSink::on_batch` this run creates).
     #[serde(skip, default)]
     pub bytes_read: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    /// Run-wide count of parts this run put at the destination, bumped at the one write seam (`commit::write_part_file`); runtime only, like `bytes_read`.
+    /// Run-wide count of parts this run put at the destination, bumped at the one write seam (`commit::write_part_file`).
     #[serde(skip, default)]
     pub parts_landed: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    /// Run-wide per-column count of source cells written as NULL because the target type cannot hold them; runtime only.
+    /// Run-wide per-column count of source cells written as NULL.
     #[serde(skip, default)]
     pub nulled_cells: std::sync::Arc<NulledCells>,
     /// The export's declared source table (`table:`), carried VERBATIM.
-    ///
-    /// The manifest's source identity is built from this. It used to be derived
-    /// by splitting the EXPORT NAME on '.', which is a label, not the catalog —
-    /// so the two legs of one `initial: snapshot` CDC export disagreed about who
-    /// they were: the drain recorded `table: "orders"` (from the capture output)
-    /// while the snapshot leg, whose synthesized name is `orders__snapshot_orders`
-    /// and contains no dot, recorded `table: null`. `identity_source` then read
-    /// `postgres:orders` and `postgres` — two sources under one prefix — and
-    /// `ensure_single_source` refused the documented flow.
-    ///
-    /// `None` for a free-form `query:` export, which genuinely has no one table.
     pub source_table: Option<String>,
     /// Final query string (params substituted, query_file loaded).
     pub base_query: String,
-    /// `base_query` before `${...}` substitution, when the two differ: the rows part of the progress identity is read from it, so a value that changes between runs is not an edit. Absent from a plan with no placeholder and from one sealed before this field.
+    /// `base_query` before `${...}` substitution, when the two differ.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_template: Option<String>,
-    /// `base_query` before a `--split` key window or a `partition_by` bucket wraps it: catalog type hints (PostgreSQL `NUMERIC` precision) resolve from it, since the wrapper hides the source table. Absent when nothing wraps the base, and from a plan sealed before this field.
+    /// `base_query` before a `--split` key window or a `partition_by` bucket wraps it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_query: Option<String>,
-    /// The URI of `destination` before `{date}`-style substitution, when the two differ: the destination part of the progress identity is read from it, so a new day's prefix is not a moved destination. Absent from a plan with no placeholder and from one sealed before this field.
+    /// The URI of `destination` before `{date}`-style substitution, when the two differ.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination_written: Option<String>,
-    /// This plan is one range sub-export UNIT of a `--pool --split` (#167). Such
-    /// a unit shares its destination prefix with its N-1 siblings, so it must NOT
-    /// write the prefix-level `_SUCCESS` itself (that would falsely mark the whole
-    /// giant done the moment ONE unit finishes) and must NOT be blocked by the M8
-    /// resume guard on a sibling's `_SUCCESS`. The pool writes `_SUCCESS` once,
-    /// after ALL units complete. `#[serde(default)]` so old plan artifacts (no
-    /// field) deserialize as non-split.
+    /// This plan is one range sub-export UNIT of a `--pool --split` (#167).
     #[serde(default)]
     pub is_split_unit: bool,
-    /// For a `--pool --split` unit: the `(lo, hi]` key window it covers, threaded from the
-    /// export's `SplitSynth` so `finalize` records it in the manifest — the durable anchor
-    /// that lets `--split --resume` reconstruct the EXACT partition instead of re-sampling.
-    /// `#[serde(default)]` so old plan artifacts deserialize as `None`; `skip_serializing_if`
-    /// so a NON-split plan serializes BYTE-IDENTICALLY to before this field existed — the
-    /// plan.json integrity hash is unchanged, avoiding the cross-version plan-artifact break
-    /// the `finalize_manifest` docstring warns of (a split-unit plan is internal/ephemeral,
-    /// synthesized by the pool, never a released artifact).
+    /// For a `--pool --split` unit: the `(lo, hi]` key window it covers, threaded from the export's `SplitSynth` so `finalize` records it in the manifest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split_window: Option<crate::manifest::SplitWindow>,
-    /// The warehouse partition this export's rows will land in, when the load declares
-    /// one on a column. The sink counts the distinct partitions the current part would
-    /// touch and starts a new part before a load job's budget is spent — nothing splits
-    /// one Parquet file at load time, so a part written past the budget cannot be loaded
-    /// at all. `None` leaves part sizing to `max_file_size_bytes` alone.
-    ///
-    /// `serde(default)` + `skip_serializing_if`: an unpartitioned plan serializes
-    /// byte-identically to before this field existed, so `plan.json` artifacts written by
-    /// older versions still load and their integrity hash is unchanged.
+    /// The warehouse partition this export's rows will land in, when the load declares one on a column.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partition_rollover: Option<crate::plan::rollover::PartitionRollover>,
-    /// The paging mode a `mode: chunked` export stands for while its table fits in one chunk and `strategy` is one pass; kept out of the artifact seal, so a rivet without the field applies the plan.
+    /// The paging mode a `mode: chunked` export stands for while its table fits in one chunk and `strategy` is one pass.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub single_pass_of: Option<PagedMode>,
-    /// The incarnation of the source collection the run reads, found before the progress claim; never part of a sealed plan.
+    /// The incarnation of the source collection the run reads, found before the progress claim.
     #[serde(skip)]
     pub collection_incarnation: Option<String>,
     pub strategy: ExtractionStrategy,
@@ -206,33 +140,18 @@ pub struct ResolvedRunPlan {
     pub validate: bool,
     pub reconcile: bool,
     pub resume: bool,
-    /// Integrity depth `--validate` must reach for this export's parts
-    /// (`exports[].verify`).  `Content` makes size-only parts a verification
-    /// failure.
-    ///
-    /// `#[serde(default)]` for old artifacts, like its siblings above: this
-    /// struct is SERIALIZED into a plan artifact, and `rivet apply` must keep
-    /// accepting one written by an older rivet. Added as a required field, it
-    /// made every pre-existing plan unparseable — `missing field `verify`` —
-    /// which is exactly what the frozen v0.7.5 fixture exists to catch.
-    /// `VerifyMode::Size` is the pre-field behaviour (size-only accepted), so
-    /// defaulting reproduces what those artifacts meant.
+    /// Integrity depth `--validate` must reach for this export's parts (`exports[].verify`).
     #[serde(default)]
     pub verify: crate::config::VerifyMode,
-    /// Source connection parameters — resolved from config at plan time so pipeline
-    /// functions receive the complete execution contract in a single struct.
+    /// Source connection parameters — resolved from config at plan time so pipeline functions receive the complete execution contract in a single struct.
     pub source: SourceConfig,
-    /// Per-column type overrides parsed from `exports[].columns:` in `rivet.yaml`
-    /// (roadmap §8). Passed to the source driver so it can use declared
-    /// precision/scale instead of autodetected (often unavailable) metadata.
+    /// Per-column type overrides parsed from `exports[].columns:` in `rivet.yaml` (roadmap §8).
     pub column_overrides: crate::types::ColumnOverrides,
     /// What to do when structural schema drift is detected (Epic 7).
     pub schema_drift_policy: SchemaDriftPolicy,
     /// Growth-factor threshold for data shape drift warnings (Epic 8).
-    /// Warn when a column's current-run max byte length exceeds `stored × factor`.
-    /// 0.0 disables shape tracking.
     pub shape_drift_warn_factor: f64,
-    /// Parquet row group tuning (resolved from export config). `None` = library default.
+    /// Parquet row group tuning (resolved from export config).
     pub parquet: Option<ParquetConfig>,
 }
 
@@ -326,13 +245,12 @@ pub enum ExtractionStrategy {
 }
 
 impl ResolvedRunPlan {
-    /// The stream stored progress belongs to: the relation the query's outermost `FROM` names; empty when it names none.
+    /// The stream stored progress belongs to: the relation the query's outermost `FROM` names.
     fn stream(&self) -> String {
         crate::sql::outer_from_relation(&self.base_query).unwrap_or_default()
     }
 
     /// Whose stored progress this plan reads and writes: the one place the identity is computed.
-    /// Resolve the placeholders `destination` still holds as of `ctx` (the sealed plan's `{date}`, at apply), keeping the destination as written as the progress identity; a plan with none left to resolve is unchanged.
     pub(crate) fn resolve_destination(
         &mut self,
         ctx: &crate::destination::placeholder::PlaceholderContext,
@@ -393,34 +311,22 @@ impl ExtractionStrategy {
     }
 
     /// True for strategies that must load the cursor store before execution.
-    ///
-    /// Only `Incremental` reads the last cursor value to build the WHERE clause
-    /// inside the source driver.  All other strategies are stateless at query time.
     pub fn needs_cursor_state(&self) -> bool {
         matches!(self, ExtractionStrategy::Incremental(_))
     }
 
     /// True for strategies that spawn parallel worker threads during execution.
-    ///
-    /// Only `Chunked` plans with `parallel > 1` use a thread pool.  All other
-    /// strategies (including sequential chunked) run on the calling thread.
     pub fn requires_parallel_execution(&self) -> bool {
         matches!(self, ExtractionStrategy::Chunked(cp) if cp.parallel > 1)
     }
 
     /// True for strategies that support crash-resume via a persisted checkpoint.
-    ///
-    /// Only `Chunked` with `checkpoint: true` can resume mid-run.  All other
-    /// strategies restart from scratch on retry.
     pub fn is_resumable(&self) -> bool {
         matches!(self, ExtractionStrategy::Chunked(cp) if cp.checkpoint)
             || matches!(self, ExtractionStrategy::Keyset(kp) if kp.checkpoint)
     }
 
-    /// The key column that drives chunking: the range/dense `chunk_column`, or the
-    /// keyset `chunk_by_key`. `None` for snapshot/incremental/time-window. Recorded
-    /// per run so a post-mortem knows WHICH column was chunked (the state DB
-    /// otherwise keeps only the chunk *values*, never the column name).
+    /// The key column that drives chunking: the range/dense `chunk_column`, or the keyset `chunk_by_key`.
     pub fn chunk_key(&self) -> Option<&str> {
         match self {
             ExtractionStrategy::Chunked(cp) => Some(cp.column.as_str()),
@@ -452,16 +358,7 @@ impl ExtractionStrategy {
         }
     }
 
-    /// Why `--reconcile` must SKIP the full-source `COUNT(*)` check for this
-    /// strategy, or `None` when the strategy is a complete snapshot the count
-    /// should match. Reconcile means "did the export capture everything the source
-    /// has", which is only meaningful for a full pass (full / chunked / plain
-    /// keyset). Every SUBSET/DELTA strategy — incremental cursor, keyset_incremental
-    /// (append-only, pulls keys past the high-water mark), time_window (a bounded
-    /// window) — legitimately exports fewer rows than the table holds, so the count
-    /// mismatch is STRUCTURAL, not data loss. The exit gate must not fail-loud on
-    /// it (else every healthy scheduled delta `run --reconcile` exits 3 and stops
-    /// the chain).
+    /// Why `--reconcile` must SKIP the full-source `COUNT(*)` check for this strategy, or `None` when the strategy is a complete snapshot the count should match.
     pub fn reconcile_subset_skip(&self) -> Option<&'static str> {
         match self {
             ExtractionStrategy::Incremental(_) => {
@@ -489,24 +386,12 @@ impl ExtractionStrategy {
     pub fn cursor_extract_column(&self) -> Option<&str> {
         match self {
             ExtractionStrategy::Incremental(p) => Some(p.column_for_storage_extract()),
-            // Keyset pages by this key; the sink tracks its per-page max so the
-            // runner can advance to the next page (OPT-4).
             ExtractionStrategy::Keyset(k) => Some(k.key_column.as_str()),
             _ => None,
         }
     }
 
     /// Resolve the concrete SQL query for non-chunked strategies.
-    ///
-    /// Returns `None` for `Chunked` — chunked execution builds per-chunk queries
-    /// inside the chunked pipeline and does not use a single resolved query string.
-    ///
-    /// | Strategy    | Query returned                                               |
-    /// |-------------|--------------------------------------------------------------|
-    /// | Snapshot    | `base_query` unchanged                                       |
-    /// | Incremental | `base_query` unchanged (cursor WHERE added by source driver) |
-    /// | TimeWindow  | `base_query` wrapped with a time-range predicate             |
-    /// | Chunked     | `None`                                                       |
     pub fn resolve_query(
         &self,
         base_query: &str,
@@ -533,15 +418,6 @@ impl ExtractionStrategy {
 }
 
 /// Wrap `base_query` with a trailing time-range predicate for `TimeWindow` exports.
-///
-/// The predicate anchors to midnight at the start of the window so the boundary is
-/// stable for the entire run regardless of when within the day it executes.
-///
-/// - `Timestamp` columns compare against an ISO-8601 datetime literal.
-/// - `Unix` columns compare against a Unix epoch integer.
-///
-/// The column name is quoted via `crate::sql::quote_ident` to prevent injection
-/// when the name comes from user configuration.
 pub fn build_time_window_query(
     base_query: &str,
     time_column: &str,
@@ -552,11 +428,6 @@ pub fn build_time_window_query(
     let quoted_col = crate::sql::quote_ident(source_type, time_column);
 
     let now = chrono::Utc::now();
-    // `days_window` is a u32 — at the upper end (~4.3 billion days, i.e. ~12
-    // million years) naive `now - Duration::days(n)` falls outside chrono's
-    // representable range and panics. Use checked arithmetic and saturate
-    // at chrono's MIN_UTC; the resulting SQL literal will be rejected by
-    // the source if it is nonsensical, but the planner never panics.
     let window_start = chrono::Duration::try_days(days_window as i64)
         .and_then(|d| now.checked_sub_signed(d))
         .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
@@ -567,14 +438,6 @@ pub fn build_time_window_query(
 
     let condition = match time_type {
         TimeColumnType::Timestamp => {
-            // SQL Server parses a space-separated `'YYYY-MM-DD hh:mm:ss'` literal
-            // per the login's DATEFORMAT (which follows LANGUAGE) — on a non-
-            // us_english login '2026-03-03 …' can be read as 3 May, silently
-            // shifting the window or erroring when the swapped month exceeds 12.
-            // ISO-8601 with a 'T' is DATEFORMAT/LANGUAGE-immune on MSSQL (mirrors
-            // partition.rs's date-literal rule); PG/MySQL keep the space form,
-            // which they parse ISO-unambiguously (bug hunt 2026-08-09).
-            // Oracle's ANSI `TIMESTAMP '…'` ignores the session's pinned NLS format.
             let lit = match source_type {
                 crate::config::SourceType::Mssql => {
                     format!("'{}'", truncated.format("%Y-%m-%dT%H:%M:%S"))
@@ -653,10 +516,6 @@ mod tests {
 
     #[test]
     fn reconcile_subset_skip_covers_every_delta_strategy() {
-        // #bughunt HIGH: the #102 reconcile exit gate turned a STRUCTURAL count
-        // mismatch into a false exit-3 for keyset_incremental + time_window (only
-        // the Incremental cursor was skipped). Every subset/delta strategy must
-        // skip the full-source COUNT(*); a full pass must NOT.
         let keyset = |incremental| {
             ExtractionStrategy::Keyset(KeysetPlan {
                 key_column: "id".into(),
@@ -783,9 +642,6 @@ mod tests {
 
     #[test]
     fn build_time_window_query_timestamp_mssql_is_dateformat_immune() {
-        // MSSQL must get an ISO-8601 'T' literal — a space-separated literal is
-        // parsed per the login's DATEFORMAT/LANGUAGE and shifts the window on a
-        // non-us_english login (bug hunt 2026-08-09). RED against the space form.
         let q = build_time_window_query(
             "SELECT * FROM events",
             "created_at",

@@ -1,29 +1,16 @@
-//! Pure date-bucket math for value-based output partitioning
-//! ([`crate::config::ExportConfig::partition_by`]).
-//!
-//! Given the `[min, max]` day span of a partition column and a granularity,
-//! this produces the ordered, gap-free list of `col=value` buckets and their
-//! half-open `[lo, hi)` date bounds. The bounds become a
-//! `WHERE col >= lo AND col < hi` predicate; the label becomes the
-//! Hive-style `col=value` path segment.
-//!
-//! This module is deliberately I/O-free and total so it can be exhaustively
-//! unit-tested. The source round-trip (min/max query, NULL probe) and the
-//! `ExportConfig` synthesis live in `crate::pipeline::partition_expand`.
+//! Pure date-bucket math for value-based output partitioning ([`crate::config::ExportConfig::partition_by`]).
 
 use chrono::{Datelike, Months, NaiveDate};
 
 use crate::config::{PartitionGranularity, SourceType};
 
 /// Hive's conventional partition label for rows whose partition key is NULL.
-/// Spark, Hive, and duckdb's `hive_partitioning` all recognise this token, so
-/// a NULL bucket stays queryable instead of silently dropping rows.
 pub(crate) const HIVE_NULL_PARTITION: &str = "__HIVE_DEFAULT_PARTITION__";
 
 /// The child-name suffix of the NULL bucket (`<parent>__null`).
 pub(crate) const NULL_BUCKET_LABEL: &str = "null";
 
-/// Whether `value` is a bucket label of `granularity`: the text `generate_ranges` writes, round-tripped through the date.
+/// Whether `value` is a bucket label of `granularity`.
 fn is_label_at(value: &str, granularity: PartitionGranularity) -> bool {
     let (tail, format) = match granularity {
         PartitionGranularity::Day => ("", "%Y-%m-%d"),
@@ -34,7 +21,7 @@ fn is_label_at(value: &str, granularity: PartitionGranularity) -> bool {
         .is_ok_and(|day| day.format(format).to_string() == value)
 }
 
-/// Whether `value` is a name suffix `partition_by` gave a child at any granularity: a day, month or year label, or the NULL bucket.
+/// Whether `value` is a name suffix `partition_by` gave a child at any granularity.
 pub(crate) fn is_child_label(value: &str) -> bool {
     value == NULL_BUCKET_LABEL
         || [
@@ -53,12 +40,10 @@ pub(crate) fn is_child_label(value: &str) -> bool {
         .any(|g| is_label_at(value, g))
 }
 
-/// One partition bucket: a Hive `col=value` value label and its half-open
-/// `[lo, hi)` date bounds (inclusive `lo`, exclusive `hi`).
+/// One partition bucket: a Hive `col=value` value label and its half-open `[lo, hi)` date bounds (inclusive `lo`, exclusive `hi`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PartitionRange {
-    /// The value side of the `col=value` path segment, formatted per
-    /// granularity (`2023-01-01` / `2023-01` / `2023`).
+    /// The value side of the `col=value` path segment, formatted per granularity (`2023-01-01` / `2023-01` / `2023`).
     pub(crate) label_value: String,
     /// Inclusive lower bound (`col >= lo`).
     pub(crate) lo: NaiveDate,
@@ -73,13 +58,7 @@ impl PartitionRange {
     }
 }
 
-/// Generate the ordered, gap-free list of partition buckets covering
-/// `[min_day, max_day]` at `granularity`.
-///
-/// Buckets are contiguous: a day/month/year with no rows still yields a
-/// bucket. The expansion layer decides whether to skip empties. Returns an
-/// empty vec when `max_day < min_day` (e.g. the source has zero non-NULL
-/// partition values).
+/// Generate the ordered, gap-free list of partition buckets covering `[min_day, max_day]` at `granularity`.
 pub(crate) fn generate_ranges(
     min_day: NaiveDate,
     max_day: NaiveDate,
@@ -95,28 +74,7 @@ pub(crate) fn generate_ranges(
     }
 }
 
-/// Wrap `base_query` so it yields only rows in the half-open `[lo, hi)` date
-/// range of the partition column — the per-bucket extraction query.
-///
-/// Bounds are emitted as `YYYY-MM-DD` date literals; both PostgreSQL and MySQL
-/// coerce them against a `DATE` / `TIMESTAMP` / `TIMESTAMPTZ` column. For a
-/// timestamptz column the literal is interpreted at the session time zone —
-/// callers that need a fixed zone must pin it (`SET time_zone='+00:00'`).
-///
-/// SQL Server is the exception and gets `YYYYMMDD`. Against a `datetime` /
-/// `smalldatetime` column T-SQL parses the SEPARATED form per the session's
-/// `DATEFORMAT` (which follows the login's `LANGUAGE`), so on any server whose
-/// default is not `us_english` — British English, German, most European
-/// installs — `'2024-03-05'` is read as 5 March or rejected outright, and every
-/// partition window silently covers the wrong range. The unseparated form is
-/// defined as ISO and is immune to `DATEFORMAT` and `LANGUAGE` in all of them.
-///
-/// Deliberately fixed HERE rather than by pinning `SET DATEFORMAT ymd` on the
-/// connection, the way the PostgreSQL and MySQL readers pin their session
-/// (`postgres/mod.rs`, `mysql/mod.rs`). A literal that cannot be misread needs no
-/// session to be correct, so it also survives a pooled or user-supplied
-/// connection rivet does not own. Pinning the session is still worth doing as
-/// defence in depth for any OTHER literal.
+/// Wrap `base_query` so it yields only rows in the half-open `[lo, hi)` date range of the partition column.
 pub(crate) fn build_range_query(
     base_query: &str,
     col: &str,
@@ -145,8 +103,7 @@ pub(crate) fn apply_bucket(
     }
 }
 
-/// A date bound as a SQL literal this engine parses regardless of session settings;
-/// Oracle's ANSI `DATE '…'` ignores the pinned NLS_DATE_FORMAT.
+/// A date bound as a SQL literal this engine parses regardless of session settings.
 pub(crate) fn date_literal(source_type: SourceType, date: NaiveDate) -> String {
     let text = date.format(date_literal_format(source_type));
     match source_type {
@@ -155,8 +112,7 @@ pub(crate) fn date_literal(source_type: SourceType, date: NaiveDate) -> String {
     }
 }
 
-/// The date-literal spelling that this engine parses unambiguously regardless of
-/// session `DATEFORMAT` / `LANGUAGE` settings. See [`build_range_query`].
+/// The date-literal spelling that this engine parses unambiguously regardless of session `DATEFORMAT` / `LANGUAGE` settings.
 pub(crate) fn date_literal_format(source_type: SourceType) -> &'static str {
     match source_type {
         SourceType::Mssql => "%Y%m%d",
@@ -164,9 +120,7 @@ pub(crate) fn date_literal_format(source_type: SourceType) -> &'static str {
     }
 }
 
-/// Wrap `base_query` for the NULL bucket — rows whose partition column is NULL,
-/// which a range predicate can never match. These land in the Hive default
-/// partition so they are never silently dropped.
+/// Wrap `base_query` for the NULL bucket — rows whose partition column is NULL, which a range predicate can never match.
 pub(crate) fn build_null_query(base_query: &str, col: &str, source_type: SourceType) -> String {
     let q = crate::sql::quote_ident(source_type, col);
     let d = crate::sql::derived(source_type, "_rivet_part");
@@ -188,8 +142,6 @@ fn day_ranges(min_day: NaiveDate, max_day: NaiveDate) -> Vec<PartitionRange> {
     let mut out = Vec::new();
     let mut cur = min_day;
     while cur <= max_day {
-        // succ_opt() returns None only at NaiveDate::MAX — fall back to `cur`
-        // and break below to avoid an infinite loop on a pathological bound.
         let hi = cur.succ_opt().unwrap_or(cur);
         out.push(PartitionRange {
             label_value: cur.format("%Y-%m-%d").to_string(),
@@ -205,7 +157,6 @@ fn day_ranges(min_day: NaiveDate, max_day: NaiveDate) -> Vec<PartitionRange> {
 }
 
 fn month_start(d: NaiveDate) -> NaiveDate {
-    // day-1 of the month always exists for any in-range year/month.
     NaiveDate::from_ymd_opt(d.year(), d.month(), 1).expect("month-start is always valid")
 }
 
@@ -303,15 +254,12 @@ mod tests {
         assert!(is_label_at("2026", Year) && !is_label_at("2026-01", Year));
     }
 
-    // ── day granularity ────────────────────────────────────────────────────
-
     #[test]
     fn day_three_day_span() {
         let r = generate_ranges(d("2023-01-01"), d("2023-01-03"), PartitionGranularity::Day);
         assert_eq!(labels(&r), ["2023-01-01", "2023-01-02", "2023-01-03"]);
         assert_eq!(r[0].lo, d("2023-01-01"));
         assert_eq!(r[0].hi, d("2023-01-02"));
-        // half-open: last bucket's hi is the day AFTER max.
         assert_eq!(r[2].hi, d("2023-01-04"));
     }
 
@@ -334,8 +282,6 @@ mod tests {
         assert_eq!(labels(&r), ["2024-02-28", "2024-02-29", "2024-03-01"]);
     }
 
-    // ── month granularity ──────────────────────────────────────────────────
-
     #[test]
     fn month_spans_three_months_snaps_to_month_edges() {
         let r = generate_ranges(
@@ -344,7 +290,6 @@ mod tests {
             PartitionGranularity::Month,
         );
         assert_eq!(labels(&r), ["2023-01", "2023-02", "2023-03"]);
-        // first lo snaps back to the 1st; last hi is the 1st of the next month.
         assert_eq!(r[0].lo, d("2023-01-01"));
         assert_eq!(r[2].hi, d("2023-04-01"));
     }
@@ -372,8 +317,6 @@ mod tests {
         assert_eq!(r[1].hi, d("2024-02-01"));
     }
 
-    // ── year granularity ───────────────────────────────────────────────────
-
     #[test]
     fn year_spans_three_years() {
         let r = generate_ranges(d("2022-05-01"), d("2024-02-01"), PartitionGranularity::Year);
@@ -388,8 +331,6 @@ mod tests {
         assert_eq!(labels(&r), ["2023"]);
     }
 
-    // ── edge cases ─────────────────────────────────────────────────────────
-
     #[test]
     fn empty_when_max_before_min() {
         let r = generate_ranges(d("2023-02-01"), d("2023-01-01"), PartitionGranularity::Day);
@@ -400,12 +341,9 @@ mod tests {
     fn ranges_are_contiguous_and_gap_free_day() {
         let r = generate_ranges(d("2023-01-01"), d("2023-01-10"), PartitionGranularity::Day);
         for w in r.windows(2) {
-            // each bucket's hi is exactly the next bucket's lo — no gaps, no overlap.
             assert_eq!(w[0].hi, w[1].lo);
         }
     }
-
-    // ── SQL builders ───────────────────────────────────────────────────────
 
     fn one_day(day: &str) -> PartitionRange {
         generate_ranges(d(day), d(day), PartitionGranularity::Day)
@@ -451,8 +389,6 @@ mod tests {
 
     #[test]
     fn null_count_query_filters_is_null() {
-        // min/max aggregate SQL is shared (`crate::sql::aggregate_sql`) and
-        // tested there; the NULL-count probe is partition-specific.
         assert!(
             build_null_count_query("SELECT * FROM events", "created_at", SourceType::Postgres)
                 .contains("WHERE \"created_at\" IS NULL")
@@ -471,17 +407,6 @@ mod date_literal_dialect_tests {
     }
 
     /// SQL Server must receive the UNSEPARATED date literal.
-    ///
-    /// Against a `datetime` / `smalldatetime` column T-SQL parses `'2024-03-05'`
-    /// according to the session `DATEFORMAT`, which follows the login's
-    /// `LANGUAGE`. On a British-English or German server — the default on a large
-    /// share of real installs — that is 5 March, or a hard parse failure. Either
-    /// way every partition window silently covers a different range than the plan
-    /// says, and no count or checksum can notice: each window is internally
-    /// consistent.
-    ///
-    /// `'20240305'` is defined as ISO in every language, so it needs no session
-    /// to be right. Expected strings are literal, not derived from the formatter.
     #[test]
     fn sql_server_gets_an_unseparated_date_literal_the_others_keep_iso() {
         let range = PartitionRange {
@@ -514,8 +439,7 @@ mod date_literal_dialect_tests {
         }
     }
 
-    /// The helper the date-CHUNK emitter shares — `pipeline::chunked::math` builds
-    /// its own WHERE bounds and had the identical defect at three more sites.
+    /// The helper the date-CHUNK emitter shares.
     #[test]
     fn the_dialect_helper_is_engine_specific() {
         assert_eq!(date_literal_format(SourceType::Mssql), "%Y%m%d");

@@ -39,16 +39,6 @@ fn keyset_key_remedy(source: crate::config::SourceType) -> &'static str {
 }
 
 /// Build a [`ResolvedRunPlan`] from config and CLI flags.
-///
-/// This is the only place where raw `ExportConfig` fields and CLI flags
-/// are read for execution decisions. After this call the pipeline operates
-/// only on `ResolvedRunPlan`.
-/// The partition budget the writer keeps one part inside — nothing splits a Parquet
-/// file at load time. Only a COLUMN partition can be counted while writing: ingestion
-/// time is one partition by construction, a range key buckets integers this path does
-/// not resolve. Resolved for the table the export STANDS FOR: a multiplex stream's
-/// baseline leg carries its table as `snapshot_label`, and that table's
-/// `load.tables.<name>` block is what the load will hold the files to.
 pub(crate) fn partition_rollover_of(
     config: &Config,
     export: &ExportConfig,
@@ -57,8 +47,7 @@ pub(crate) fn partition_rollover_of(
         .and_then(rollover_of)
 }
 
-/// The budget a CDC table's change parts must keep: its column partition, when the change
-/// log is itself partitioned (the changelog layout; a base-and-buffer buffer takes none).
+/// The budget a CDC table's change parts must keep.
 pub(crate) fn cdc_partition_rollover(
     config: &Config,
     export: &ExportConfig,
@@ -102,7 +91,7 @@ pub fn build_plan(
     )
 }
 
-/// Refuse a setting of `export` that reads a column the account may not `SELECT`: the server would answer it with a raw error, mid-run.
+/// Refuse a setting of `export` that reads a column the account may not `SELECT`.
 fn refuse_hidden_read_columns(
     table: &str,
     export: &ExportConfig,
@@ -189,10 +178,6 @@ pub(crate) fn build_plan_on(
     resume: bool,
     params: Option<&HashMap<String, String>>,
 ) -> Result<ResolvedRunPlan> {
-    // CDC has no batch plan — bail BEFORE resolve_query. A `tables:`-style CDC
-    // export carries no `query`, so resolve_query would fail first and hide this
-    // friendly message behind a confusing "no query" error (bughunt MED: the
-    // dogfood MED-5 message was unreachable for the tables: shape).
     if export.mode == ExportMode::Cdc {
         crate::rivet_bail!(
             crate::error::codes::PLAN_NOTHING_TO_PLAN,
@@ -207,11 +192,6 @@ pub(crate) fn build_plan_on(
     let export = projected.as_ref().unwrap_or(export);
     let (resolved, written) = export.resolve_query_and_template(config_dir, params)?;
     let bounded = |q: String| {
-        // #167: a `--split` range sub-export restricts the whole export to its key
-        // window `(lo, hi]`. Injected HERE (on the base query every runner wraps)
-        // so the bound is runner-agnostic by construction — full/chunked/keyset
-        // all page over the already-bounded set, the exact runner-bypass trap a
-        // per-runner filter would reintroduce.
         let q = match &export.split {
             Some(s) => crate::source::query::wrap_key_range(
                 &q,
@@ -222,8 +202,6 @@ pub(crate) fn build_plan_on(
             ),
             None => q,
         };
-        // A `partition_by` child's bucket, applied at the same seam as the split
-        // window — the child keeps `table:`, so introspection and identity survive.
         match &export.partition_window {
             Some(w) => crate::plan::partition::apply_bucket(&q, w, config.source.source_type),
             None => q,
@@ -235,8 +213,6 @@ pub(crate) fn build_plan_on(
     let base_query = bounded(resolved);
 
     let merged = merge_tuning_config(config.source.tuning.as_ref(), export.tuning.as_ref());
-    // When no `tuning.profile:` is set, fall back to the env-derived default —
-    // `Local` shaves the throttle, `Production` keeps the safety contract.
     let fallback_profile = config
         .source
         .environment
@@ -331,16 +307,10 @@ pub(crate) fn build_plan_on(
                 days_window,
             }
         }
-        // Unreachable: cdc bails at build_plan entry, before resolve_query.
         ExportMode::Cdc => unreachable!("cdc mode is refused at build_plan entry"),
     };
 
     let (compression, compression_level) = export.effective_compression();
-    // #167: a `--split` sub-export named `daily#0` must resolve `{export}` /
-    // `{table}` to its FAMILY (`daily`), not the unit name — so all N range
-    // units write into ONE shared prefix and the load view recombines them as
-    // one logical table (the merge-back). An ordinary export's family IS its
-    // name, so this is a no-op off the split path.
     let (destination, destination_written) = crate::destination::placeholder::resolve_destination(
         export.destination.clone(),
         &crate::destination::placeholder::PlaceholderContext::for_today(export.family()),
@@ -353,17 +323,6 @@ pub(crate) fn build_plan_on(
         single_pass_of,
         collection_incarnation: None,
         partition_rollover: partition_rollover_of(config, export),
-        // The LABEL, where the two differ. `plan.source_table` has exactly one
-        // consumer — the manifest's recorded identity in `finalize` — and the two
-        // legs of one `initial: snapshot` export must record the SAME source or
-        // `ensure_single_export` refuses the whole prefix at load time. Round-5
-        // measured that refusal on SQL Server with a bare `table:`: the drain wrote
-        // `mssql:orders` (the configured string) while the leg, whose `table` is now
-        // the catalog read, wrote `mssql:dbo.orders`. Both identities contain a
-        // colon, so the coarsening fold that rescues the batch leg deliberately does
-        // not apply — and the break surfaces only at `rivet load`, on artifacts that
-        // are already durable, blaming the operator's prefix layout for a naming
-        // split inside rivet.
         source_table: export
             .snapshot_label
             .clone()
@@ -373,8 +332,6 @@ pub(crate) fn build_plan_on(
         catalog_query,
         destination_written,
         is_split_unit: export.split.is_some(),
-        // Thread the split window into the plan so finalize records it in the manifest —
-        // the durable anchor for exact-partition resume (SplitSynth → manifest::SplitWindow).
         split_window: export.split.as_ref().map(|s| crate::manifest::SplitWindow {
             key_column: s.key_column.clone(),
             lo: s.lo.clone(),
@@ -391,20 +348,11 @@ pub(crate) fn build_plan_on(
         quality: export.quality.clone(),
         tuning,
         tuning_profile_label,
-        // ADR-0013: `--reconcile` *implies* `--validate` — it must produce a
-        // verdict that subsumes everything `--validate` does (per-file row check
-        // + manifest M5/M6) and adds the source comparison. The two flags are
-        // gated independently downstream (`if plan.validate { … }` /
-        // `if plan.reconcile { … }`), so the implication lives here at plan
-        // build: a reconcile run is also a validate run.
         validate: validate || reconcile,
         reconcile,
         resume,
         verify: export.verify,
         source: config.source.clone(),
-        // Batch exports have at most one table; narrow qualified override keys
-        // ("table.column") to it — bare keys pass through unchanged. Query
-        // exports carry no table (validation already rejects qualified keys).
         column_overrides: crate::types::overrides_for_unit(
             &parse_column_overrides(&export.columns, &export.name)?,
             export.table.as_deref(),
@@ -471,11 +419,7 @@ fn keyset_continued_key(export: &ExportConfig) -> Option<&str> {
         .filter(|_| export.keyset_incremental)
 }
 
-/// The strategy for `mode: full`. Source-aware: a MongoDB source with
-/// `source.mongo.page_size` reads by `_id`-keyset pages (bounded query time,
-/// per-page parts, the base for parallel `_id`-range reads) instead of one
-/// long-held cursor. Every SQL engine — and MongoDB without `page_size` — uses
-/// the single-cursor snapshot.
+/// The strategy for `mode: full`.
 fn full_strategy(config: &Config, export: &ExportConfig) -> ExtractionStrategy {
     if config.source.source_type == crate::config::SourceType::Mongo
         && let Some(mongo) = config.source.mongo.as_ref()
@@ -484,18 +428,12 @@ fn full_strategy(config: &Config, export: &ExportConfig) -> ExtractionStrategy {
         return ExtractionStrategy::Keyset(KeysetPlan {
             key_column: "_id".to_string(),
             chunk_size: page,
-            // Resume is opt-in: default keeps `mode: full` re-reading each run.
             checkpoint: mongo.resume,
             incremental: continued_key(config, export).is_some(),
-            // `parallel: N` fans N `_id`-range workers (Mongo reader only).
             parallel: export.parallel,
             key_rest: Vec::new(),
         });
     }
-    // #dogfood LOW: `parallel: N` fans out ONLY the Mongo `_id`-range reader, which
-    // needs `source.mongo.page_size` to page by `_id`. Reaching here on Mongo means
-    // page_size is unset, so a mongo full export stays a single cursor and
-    // `parallel: N` is silently dropped — warn instead of a silent no-op.
     if config.source.source_type == crate::config::SourceType::Mongo && export.parallel > 1 {
         log::warn!(
             "export '{}': parallel: {} has no effect on a Mongo full export without \
@@ -509,46 +447,10 @@ fn full_strategy(config: &Config, export: &ExportConfig) -> ExtractionStrategy {
 }
 
 /// Resolve the strategy for `mode: chunked`.
-///
-/// Encapsulates three plan-time decisions that all share the same Postgres
-/// introspection round-trip:
-///
-/// 1. **chunk_column** — explicit `chunk_column:` wins; otherwise the `table:`
-///    shortcut on a Postgres source triggers auto-detection of a single
-///    integer-family PK via [`crate::source::Source::introspect_for_chunking`].
-/// 2. **chunk_size** — explicit `chunk_size:` wins; if `chunk_size_memory_mb:`
-///    is set, derive the row count from `<budget_mb> / avg_row_bytes`,
-///    clamped to `[10_000, 5_000_000]`. Falls back to the YAML-default
-///    `chunk_size` (100k) when neither is helpful.
-/// 3. **small-table escape** — if the planner's `reltuples` estimate is
-///    below the resolved `chunk_size`, downgrade `Chunked → Snapshot` since
-///    a single chunk would offer no benefit and adds ~10 ms of plumbing
-///    overhead per export. The downgrade is informational (log::info!) and
-///    safe (a `Snapshot` writes one file like `mode: full`). Skipped when an
-///    explicit chunk-shape knob (`chunk_count`, `chunk_by_days`,
-///    `chunk_checkpoint`, `chunk_by_key`) is set — explicit user intent wins
-///    over the heuristic.
-///
-/// Steps 1–3 each only fire on PG with `table:` shortcut; everything else
-/// falls back to the original "explicit column required" path.
-/// Why a `mode: chunked` export with no `table:` cannot be planned — `None`
-/// when it can.
-///
-/// PURE, and deliberately reachable from outside the planner. `rivet check`
-/// resolved its own view of the config and printed `Verdict: ACCEPTABLE` for
-/// two shapes `plan` refuses outright (`query:` + `chunk_size_memory_mb`,
-/// `query:` + `chunk_by_key`) — a preflight blessing a config that cannot run
-/// is the diagnostic-bypass class at its sharpest, because the operator reads
-/// the verdict and stops looking. One function, both callers: the planner
-/// bails on it, the preflight reports it (`src/preflight/mod.rs`).
-///
-/// Mirrors the fast path above: an explicit `chunk_column:` with no memory
-/// budget plans fine without a relation, so that shape is `None` here too.
 pub(crate) fn chunked_without_table_error(export: &ExportConfig) -> Option<String> {
     if export.table.is_some() {
         return None;
     }
-    // The no-probe fast path: explicit column, no budget to divide.
     if export.chunk_column.is_some() && export.chunk_size_memory_mb.is_none() {
         return None;
     }
@@ -622,8 +524,6 @@ fn resolve_chunked_strategy(
     export: &ExportConfig,
     tuning: &SourceTuning,
 ) -> Result<(ExtractionStrategy, Option<PagedMode>)> {
-    // chunk_count / chunk_by_days mutual-exclusion is shared
-    // between the introspected and non-introspected paths.
     if let Some(count) = export.chunk_count {
         crate::config::quantity::Knob::CHUNK_COUNT.validate_export(&export.name, count)?;
         if export.chunk_by_days.is_some() {
@@ -635,9 +535,6 @@ fn resolve_chunked_strategy(
         }
     }
 
-    // Keyset (OPT-4) is its own shape — incompatible with the range /
-    // date / count knobs. Validated up front so the conflict is reported
-    // regardless of which downstream path runs.
     if let Some(key) = &export.chunk_by_key {
         let composite = key.is_composite();
         for (conflict, name) in [
@@ -664,15 +561,6 @@ fn resolve_chunked_strategy(
         .chunk_max_attempts
         .unwrap_or_else(|| tuning.max_retries.saturating_add(1).max(1));
 
-    // Fast path: explicit column AND no memory-budget knob → no DB probe.
-    // Preserves the no-network plan-build invariant for hand-tuned configs.
-    //
-    // Exception (#103): when the column is integer-`BETWEEN`-sliced (the default
-    // range mode — NOT `chunk_by_days`/date half-open, which is type-safe) AND a `table:` is present to probe, fall through
-    // to introspection so a NON-integer column is refused rather than silently
-    // dropping every fractional row that falls between two window boundaries.
-    // `query:`-only can't be probed (no relation), so it stays on the fast path
-    // with a loud can't-verify warning.
     let range_sliced = export.chunk_by_days.is_none();
     let can_probe_type = range_sliced && export.table.is_some();
     if export.chunk_column.is_some() && export.chunk_size_memory_mb.is_none() && !can_probe_type {
@@ -698,10 +586,6 @@ fn resolve_chunked_strategy(
         ));
     }
 
-    // Anything beyond the fast path requires the `table:` shortcut so we have
-    // a known relation to probe in either Postgres or MySQL. The rule lives in
-    // `chunked_without_table_error` so the PREFLIGHT can ask the same question
-    // — `rivet check` used to bless configs this bails on (see that function).
     let Some(tbl) = export.table.as_ref() else {
         crate::rivet_bail!(
             crate::error::codes::CONFIG_MODE_SETTING_INVALID,
@@ -740,15 +624,6 @@ fn resolve_chunked_strategy(
     };
     let introspection = match introspection_result {
         Ok(i) => i,
-        // #103-regression fix: the probe here exists only to TYPE-CHECK an explicit
-        // `chunk_column` (and to size memory / auto-resolve the column). When the
-        // column is explicit and no memory-sizing is requested, a probe FAILURE
-        // (table in a non-default schema so `schema.table::regclass` throws, a
-        // transient blip) must NOT newly break a config that worked before #103
-        // routed it through introspection. Can't-verify → warn loudly and emit the
-        // Chunked plan on the explicit column, exactly like the `query:`-only path.
-        // Genuinely need the probe (auto-resolve column / `chunk_size_memory_mb:` /
-        // `chunk_by_key:` index check) → the error stays fatal.
         Err(e)
             if export.chunk_column.is_some()
                 && export.chunk_size_memory_mb.is_none()
@@ -773,8 +648,6 @@ fn resolve_chunked_strategy(
             ));
         }
         Err(e) => {
-            // The cause stays in the chain (its typed verdict is what the pipeline recodes a
-            // dropped table by); its own code, when it has one, stays the code.
             let code =
                 crate::error::code_of(&e).unwrap_or(crate::error::codes::PLAN_SOURCE_UNREADABLE);
             return Err(e.context(crate::error::CodedError::new(
@@ -797,17 +670,7 @@ fn resolve_chunked_strategy(
     )
 }
 
-/// Decision half of [`resolve_chunked_strategy`], split at the introspection
-/// seam so strategy selection is unit-testable with a synthetic
-/// [`crate::source::TableIntrospection`]. The W5 mutation run found its guards
-/// unguarded offline: the keyset-key refusal `!`, the ADR-0020 MySQL-only
-/// auto-keyset gate, the small-table escape, and the memory->rows arithmetic.
-/// Plan-time WIDTH warning: a fixed `chunk_size` on a wide table (`chunk_size ×
-/// avg_row_bytes` ≥ 512 MB per chunk) risks a statement timeout (MySQL ERROR 3024)
-/// or a memory spike — the field's wide `*_version` tables failed this way. Returns
-/// the actionable warning line, or `None` when it does not apply: a memory budget
-/// is set (already width-aware), no row-width estimate, or the chunk is not heavy.
-/// Pure so the threshold + message are unit-tested without a live DB.
+/// Decision half of [`resolve_chunked_strategy`], split at the introspection seam so strategy selection is unit-testable with a synthetic [`crate::source::TableIntrospection`].
 fn heavy_chunk_warning(
     name: &str,
     chunk_size: usize,
@@ -834,25 +697,12 @@ fn heavy_chunk_warning(
 }
 
 /// Resolve a keyset plan's `(checkpoint, incremental)` recovery flags.
-///
-/// `chunk_checkpoint` = crash-recovery (a crashed run resumes from its last
-/// committed key; a CLEAN re-run re-reads the whole range, never skipping).
-/// `keyset_incremental` = append-only "continue from key on a clean re-run",
-/// which needs the high-water key persisted — that IS the checkpoint machinery,
-/// so it implies checkpoint (else it is a silent no-op: the cursor is never
-/// stored and every clean re-run re-reads the whole table).
-///
-/// Parallel keyset (`parallel > 1`) supports BOTH since iteration 2/3: crash-
-/// recovery (`chunk_checkpoint`, per-range from the persisted boundaries) and
-/// incremental-by-key (`keyset_incremental` — a fresh run seeks past the persisted
-/// anchor and advances it at success). Same formula as sequential — the runner
-/// applies the incremental floor/ceiling across its N ranges.
 fn keyset_recovery(export: &ExportConfig) -> (bool, bool) {
     let incremental = keyset_continued_key(export).is_some();
     (export.chunk_checkpoint || incremental, incremental)
 }
 
-/// Refuse a MySQL keyset key under a `uuid` override: the seek binds hex text, which is not the key's stored order.
+/// Refuse a MySQL keyset key under a `uuid` override.
 fn refuse_mysql_uuid_keyset_key(
     source_type: crate::config::SourceType,
     export: &ExportConfig,
@@ -922,26 +772,13 @@ fn implicit_key<'a>(
     if let Some(pk) = introspection.single_int_pk.as_deref() {
         return Some(ImplicitKey::IntPk(pk));
     }
-    // MySQL has no server-side cursor, so a non-int-PK table has no
-    // safe range-chunk shape. If a single-column unique key exists,
-    // page it with keyset instead of refusing (OPT-4). PG keeps
-    // refusing — its `DECLARE CURSOR` snapshot is already bounded, so
-    // `mode: full` is the safe answer there.
-    //
-    // ADR-0020 (Layer 1, deferred) deliberately keeps this
-    // MySQL-only: flipping the guard is a behaviour-changing default
-    // for every existing PG/MSSQL UUID-PK config, and is to be
-    // promoted "after a real operator request, not on the strength
-    // of 'we technically can'." The escape hatch is explicit
-    // `chunk_by_key:` (which works since Layer 2). Do not flip
-    // without re-opening ADR-0020.
     (source_type == crate::config::SourceType::Mysql)
         .then(|| introspection.auto_keyset_key())
         .flatten()
         .map(ImplicitKey::UniqueKey)
 }
 
-/// The refusal of a range-sliced `chunk_column` that is not integer-family; `where_found` names where its type was read.
+/// The refusal of a range-sliced `chunk_column` that is not integer-family.
 pub(crate) fn chunk_column_not_integer(
     export: &str,
     column: &str,
@@ -959,7 +796,7 @@ pub(crate) fn chunk_column_not_integer(
     ))
 }
 
-/// [`implicit_key`], or the refusal of a shape chunked mode cannot page: a `chunk_column` range chunking cannot slice, a MySQL unique key under a `uuid` override, or no key at all.
+/// [`implicit_key`], or the refusal of a shape chunked mode cannot page.
 fn validated_implicit_key<'a>(
     source_type: crate::config::SourceType,
     export: &'a ExportConfig,
@@ -968,9 +805,6 @@ fn validated_implicit_key<'a>(
 ) -> Result<ImplicitKey<'a>> {
     match implicit_key(source_type, export, introspection) {
         Some(ImplicitKey::Column(c)) => {
-            // #103 (variant 1): an explicit chunk_column that is integer-`BETWEEN`-
-            // sliced must be integer-family, or range chunking silently drops rows
-            // between windows. `chunk_by_days` (date half-open) is type-safe.
             let range_sliced = export.chunk_by_days.is_none();
             if range_sliced && !introspection.is_integer_column(c) {
                 return Err(chunk_column_not_integer(
@@ -1012,14 +846,8 @@ fn chunked_strategy_from_introspection(
     max_attempts: u32,
     introspection: &crate::source::TableIntrospection,
 ) -> Result<(ExtractionStrategy, Option<PagedMode>)> {
-    // (1) Resolve chunk_size — explicit overrides the budget; otherwise compute
-    // from the memory budget and the planner's row-width estimate. Shared by the
-    // range-chunked and keyset paths.
     let chunk_size = if let Some(mb) = export.chunk_size_memory_mb {
         let row_bytes = introspection.avg_row_bytes.filter(|b| *b > 0).unwrap_or_else(|| {
-            // Empty / un-analyzed table — fall back to a defensive 512 B so the
-            // computed chunk_size lands near the YAML default of 100k for a
-            // typical narrow table. The user can still override.
             log::warn!(
                 "export '{}': chunk_size_memory_mb set but {} has no pg_class stats yet (run ANALYZE?) — \
                  defaulting to 512 B/row for sizing",
@@ -1043,12 +871,6 @@ fn chunked_strategy_from_introspection(
         export.chunk_size
     };
 
-    // (1b) Width warning: a FIXED `chunk_size` on a WIDE table makes each chunk
-    // read `chunk_size × avg_row_bytes` of data — a heavy chunk that can exceed the
-    // statement timeout (MySQL ERROR 3024 / PG statement_timeout) or spike memory.
-    // The field's wide `*_version` tables failed exactly this way. Emit BEFORE the
-    // run so the operator switches to `chunk_size_memory_mb:` rather than eating a
-    // multi-minute timeout.
     if let Some(w) = heavy_chunk_warning(
         &export.name,
         chunk_size,
@@ -1058,9 +880,6 @@ fn chunked_strategy_from_introspection(
         log::warn!("{w}");
     }
 
-    // (2) Explicit keyset key (OPT-4): page by a single index-backed unique key.
-    // Validate it is a usable keyset key (single-column, NOT NULL, UNIQUE/PK);
-    // refuse otherwise rather than emit a full-scan + filesort `ORDER BY` query.
     if let Some(chunk_key) = export.chunk_by_key.as_ref() {
         let key = chunk_key.lead();
         if chunk_key.is_composite() {
@@ -1113,10 +932,6 @@ fn chunked_strategy_from_introspection(
                 chunk_size,
                 checkpoint,
                 incremental,
-                // `parallel: N` fans N ROW-percentile-range keyset workers (feat/
-                // parallel-keyset). The runner samples the boundaries at run open and
-                // seeks each disjoint `(lo, hi]` range concurrently; recovery flags come
-                // from `keyset_recovery`, the same as sequential.
                 parallel: export.parallel,
                 key_rest: chunk_key.rest().to_vec(),
             }),
@@ -1124,8 +939,6 @@ fn chunked_strategy_from_introspection(
         ));
     }
 
-    // (3) The key the export pages by, validated before the small-table escape:
-    // a config refused on a large table is refused on one that fits in a chunk.
     if seeded!("chunked-shape-validated-only-past-one-chunk", true, false)
         && export.chunk_count.is_none()
         && export.chunk_by_days.is_none()
@@ -1138,17 +951,6 @@ fn chunked_strategy_from_introspection(
     }
     let key = validated_implicit_key(source_type, export, tbl, introspection)?;
 
-    // (4) Small-table escape: a single chunk/page has no benefit and adds
-    // plumbing latency. Downgrade to Snapshot (bounded + simplest). Only fires
-    // when reltuples is a meaningful positive number — un-analyzed tables
-    // (reltuples=0) keep the chunked/keyset plan to preserve existing semantics.
-    //
-    // Explicit chunk knobs win over the heuristic: `chunk_count` recomputes
-    // chunk_size at detect time from min/max (so comparing the estimate
-    // against the static default chunk_size is meaningless), `chunk_by_days`
-    // asks for date-ranged chunks, `chunk_checkpoint` asks for resumability a
-    // Snapshot cannot provide (`chunk_by_key` returned its keyset plan above).
-    // None of these may be silently collapsed to one snapshot file.
     let explicit_chunk_shape =
         export.chunk_count.is_some() || export.chunk_by_days.is_some() || export.chunk_checkpoint;
     if !explicit_chunk_shape
@@ -1165,16 +967,9 @@ fn chunked_strategy_from_introspection(
         return Ok((ExtractionStrategy::Snapshot, Some(key.mode())));
     }
 
-    // (5) Range chunks on the resolved column, or MySQL's keyset pages on a unique key.
     let column = match key {
         ImplicitKey::Column(c) => c.to_string(),
         ImplicitKey::IntPk(col) => {
-            // `info!` was below the default `warn` log level — operators
-            // never saw which column the planner had picked, so a config
-            // that intended `mode: chunked` + `chunk_column: created_at`
-            // but typo'd the column name silently fell back to PK with
-            // no signal. Elevate to `warn!` so the implicit choice is
-            // visible in every run; tell the operator how to silence it.
             log::warn!(
                 "export '{}': chunk_column not set — auto-resolved to '{}' \
                  from the single-integer primary key on {}. \
@@ -1231,13 +1026,6 @@ fn chunked_plan(
 }
 
 /// Substitute placeholders in `destination.path` and `destination.prefix`.
-///
-/// Thin wrapper around [`crate::destination::placeholder::expand_destination`]
-/// anchored at today's UTC date.  Kept here so existing call sites
-/// (`run`, the in-process plan builder) keep their stable signature; callers
-/// that need to re-target an earlier run's prefix (e.g. `validate --date`,
-/// `validate --run-id`) should construct a `PlaceholderContext` directly
-/// and call [`crate::destination::placeholder::expand_destination`].
 pub(crate) fn expand_destination_templates(
     dest: crate::config::DestinationConfig,
     export_name: &str,
@@ -1288,8 +1076,6 @@ mod tests {
     }
 
     fn minimal_export() -> ExportConfig {
-        // Baseline from the canonical test fixture; override only what these
-        // plan-build tests care about (zstd compression, ./out destination).
         ExportConfig {
             compression: CompressionType::Zstd,
             destination: DestinationConfig {
@@ -1329,7 +1115,7 @@ mod tests {
         .expect("plan")
     }
 
-    /// The destination part of the progress identity is the destination as written (a relative local path as `Config::load` anchors it): a `{date}` prefix is one place on every day, and a plan with no placeholder seals as before.
+    /// The destination part of the progress identity is the destination as written (a relative local path as `Config::load` anchors it).
     #[test]
     fn a_dated_destination_enters_the_progress_identity_as_written() {
         let dir = tempfile::tempdir().unwrap();
@@ -1384,7 +1170,7 @@ mod tests {
         );
     }
 
-    /// A destination spelled through `${VAR}` enters the progress identity by its value: another value is another destination.
+    /// A destination spelled through `${VAR}` enters the progress identity by its value.
     #[test]
     fn a_destination_from_a_variable_enters_the_progress_identity_by_its_value() {
         let dir = tempfile::tempdir().unwrap();
@@ -1404,7 +1190,7 @@ mod tests {
         assert_eq!(delivered_to("/b"), "file:///b/orders");
     }
 
-    /// The rows part of the progress identity is the query as written: a placeholder's value is not part of it, the text around it is.
+    /// The rows part of the progress identity is the query as written.
     #[test]
     fn a_placeholder_value_is_not_part_of_the_progress_identity_and_the_query_text_is() {
         let dir = tempfile::tempdir().unwrap();
@@ -1534,8 +1320,7 @@ mod tests {
         );
     }
 
-    /// A CDC table's change parts are budgeted only when its change log is itself
-    /// partitioned (`log_view`), per table, and only for a column partition.
+    /// A CDC table's change parts are budgeted only when its change log is itself partitioned (`log_view`), per table, and only for a column partition.
     #[test]
     fn cdc_parts_are_budgeted_only_under_a_partitioned_change_log() {
         let cfg = |layout: &str| {
@@ -1562,12 +1347,7 @@ mod tests {
         );
     }
 
-    /// A multiplex stream's per-table `load.tables.<name>.partition` must reach the
-    /// WRITER of that table's baseline leg, not only the load: the leg is the stream
-    /// cloned with `snapshot_label = <table>`, and resolving its partition at the
-    /// export level wrote the `orders` baseline — the largest files in the system —
-    /// with no budget while the load held them to DAY partitions. RED against
-    /// resolving with `None`.
+    /// A multiplex stream's per-table `load.tables.<name>.partition` must reach the WRITER of that table's baseline leg, not only the load.
     #[test]
     fn a_per_table_partition_reaches_the_writer_of_that_tables_baseline_leg() {
         let cfg = Config::from_yaml(
@@ -1594,12 +1374,6 @@ mod tests {
     }
 
     /// The rule `rivet check` and `rivet plan` now share, in every direction.
-    ///
-    /// RED-proven the expensive way: the live audit
-    /// (`check_must_not_accept_a_config_the_planner_refuses`) failed in CI on
-    /// two of these shapes while `check` still had its own opinion. The unit
-    /// test exists so the next regression is caught before a live stack is
-    /// needed — and so a mutant that flips one arm has something to bite.
     #[test]
     fn chunked_without_table_names_the_reason_and_spares_the_fast_path() {
         let base = || ExportConfig {
@@ -1609,21 +1383,16 @@ mod tests {
             ..minimal_export()
         };
 
-        // The fast path: an explicit column with no budget plans without a
-        // relation, so the preflight must NOT refuse it.
         let mut ok = base();
         ok.chunk_column = Some("id".into());
         assert_eq!(chunked_without_table_error(&ok), None);
 
-        // …and a `table:` is always fine, whatever else is set.
         let mut with_table = base();
         with_table.table = Some("public.t".into());
         with_table.query = None;
         with_table.chunk_by_key = Some("id".into());
         assert_eq!(chunked_without_table_error(&with_table), None);
 
-        // The three refusals, each naming its own knob rather than a generic
-        // "bad config" — the operator has to know WHICH line to change.
         let mut by_key = base();
         by_key.chunk_by_key = Some("id".into());
         let m = chunked_without_table_error(&by_key).expect("chunk_by_key needs a relation");
@@ -2277,14 +2046,9 @@ mod tests {
         assert_eq!(parquet.compression.label(), "zstd");
     }
 
-    /// #167 Slice C: a `--split` sub-export's plan restricts `base_query` to its
-    /// key window `(lo, hi]`, injection-safe, on the base every runner wraps. RED
-    /// against a build_plan that ignores `export.split` (base_query stays the raw
-    /// query, so every range unit scans the WHOLE table — N× duplication, the
-    /// split's whole point defeated).
+    /// #167 Slice C: a `--split` sub-export's plan restricts `base_query` to its key window `(lo, hi]`, injection-safe, on the base every runner wraps.
     #[test]
     fn split_subexport_plan_bounds_the_base_query_to_its_key_window() {
-        // Interior window (both bounds): WHERE id > 1000 AND id <= 2000.
         let mut mid = minimal_export();
         mid.name = "daily#1".into();
         mid.query = Some("SELECT * FROM t".into());
@@ -2312,7 +2076,6 @@ mod tests {
             plan.base_query
         );
 
-        // First window (no floor): only the upper bound.
         let mut first = mid.clone();
         first.name = "daily#0".into();
         first.split = Some(crate::config::SplitSynth {
@@ -2417,8 +2180,6 @@ mod tests {
         }
     }
 
-    // ── keyset (OPT-4) planner gates (no DB) ──────────────────────────────
-
     #[test]
     fn chunk_by_key_conflicts_with_chunk_column() {
         let mut export = minimal_export();
@@ -2465,9 +2226,6 @@ mod tests {
 
     #[test]
     fn cdc_export_plan_gives_a_friendly_message_not_an_internal_invariant() {
-        // #dogfood MED: `rivet plan` on a cdc-mode export leaked "internal routing
-        // error — dispatch should branch on mode first". The bail is now
-        // user-facing (points at `rivet run`), reached before any DB probe.
         let mut export = minimal_export();
         export.mode = ExportMode::Cdc;
         let err = build_plan(
@@ -2491,14 +2249,12 @@ mod tests {
         );
     }
 
-    // ── auto-resolve chunk_column friendly errors (no DB) ─────────────────
-
     #[test]
     fn chunked_without_column_or_table_returns_explicit_error() {
         let mut export = minimal_export();
         export.mode = ExportMode::Chunked;
         export.chunk_column = None;
-        export.table = None; // query: form, no auto-resolve possible
+        export.table = None;
         let err = build_plan(
             &minimal_config(),
             &export,
@@ -2519,10 +2275,6 @@ mod tests {
 
     #[test]
     fn chunked_explicit_column_skips_auto_resolve_and_no_db_call() {
-        // Sanity: an explicit chunk_column with `query:` (no `table:`) short-
-        // circuits without opening a connection. (#103: `table:` + a range-sliced
-        // column now DOES probe the type, so the no-network fast path is
-        // query-only / by_days from here on.)
         let mut export = minimal_export();
         export.mode = ExportMode::Chunked;
         export.chunk_column = Some("explicit_pk".into());
@@ -2546,12 +2298,7 @@ mod tests {
 
     #[test]
     fn explicit_non_integer_chunk_column_is_refused_not_silently_range_sliced() {
-        // #103 (variant 1): an explicit chunk_column that is range-BETWEEN-sliced
-        // must be integer-family — a numeric/decimal/float key silently drops
-        // rows between integer windows. The planner refuses it and points at
-        // chunk_by_key (keyset works on any orderable indexed key).
         use crate::config::SourceType;
-        // introspection: `id` is integer-family, `amount` is not.
         let i = intro(Some("id"), &["id"], 1_000_000, Some(100), &["id"]);
 
         let mut bad = chunked_export();
@@ -2564,7 +2311,6 @@ mod tests {
             "a non-integer chunk_column must be refused, not silently range-sliced: {err}"
         );
 
-        // An integer explicit chunk_column resolves to Chunked as before.
         let mut good = chunked_export();
         good.chunk_column = Some("id".into());
         assert!(
@@ -2600,14 +2346,10 @@ mod tests {
 
     #[test]
     fn chunked_size_memory_mb_without_table_errors_with_hint() {
-        // `chunk_size_memory_mb:` needs `table:` for the row-size probe.
-        // Without it we should bail with a message that tells the user how
-        // to fix the config, instead of silently falling back to chunk_size.
         let mut export = minimal_export();
         export.mode = ExportMode::Chunked;
         export.chunk_column = Some("id".into());
         export.chunk_size_memory_mb = Some(256);
-        // No table: shortcut.
         export.table = None;
         let err = build_plan(
             &minimal_config(),
@@ -2712,8 +2454,6 @@ mod tests {
         );
     }
 
-    // ── chunk_count validation ────────────────────────────────────────────────
-
     fn chunked_export() -> ExportConfig {
         let mut e = minimal_export();
         e.mode = ExportMode::Chunked;
@@ -2750,10 +2490,6 @@ mod tests {
         );
     }
 
-    // ── mutation-W5 gap closure ──────────────────────────────────────────────
-    // The strategy-selection guards had no offline test (the probe needed a
-    // live DB until the introspection seam split). Each case pins a decision
-    // whose mutant survived W5.
     fn intro(
         single_int_pk: Option<&str>,
         keyset_keys: &[&str],
@@ -2781,19 +2517,16 @@ mod tests {
             };
         let base = || {
             let mut e = chunked_export();
-            e.chunk_column = None; // let the resolver decide
+            e.chunk_column = None;
             e
         };
 
-        // Small-table escape: rows <= chunk_size downgrades to Snapshot —
-        // INCLUSIVE boundary (row_estimate == chunk_size still snapshots).
         let e = base();
         let i = intro(Some("id"), &["id"], e.chunk_size as i64, Some(100), &["id"]);
         assert!(matches!(
             resolve(SourceType::Postgres, &e, &i).unwrap(),
             ExtractionStrategy::Snapshot
         ));
-        // …but any explicit chunk-shape knob must NOT be collapsed silently.
         let mut e = base();
         e.chunk_checkpoint = true;
         assert!(
@@ -2804,8 +2537,6 @@ mod tests {
             "chunk_checkpoint asks for resumability a snapshot cannot provide"
         );
 
-        // Explicit chunk_by_key: a usable key keysets; an unknown key REFUSES
-        // (deleting the `!` accepts a full-scan+filesort key).
         let mut e = base();
         e.chunk_by_key = Some("uid".into());
         let i = intro(None, &["uid"], 1_000_000, Some(100), &[]);
@@ -2820,9 +2551,6 @@ mod tests {
         assert!(err.to_string().contains("not a usable keyset key"));
         crate::error::assert_coded(&err, "RIVET_PLAN_CHUNK_KEY_UNUSABLE", 1);
 
-        // Memory-budget chunk_size: 100 MB at 1024 B/row = 102_400 rows — the
-        // exact value pins the *,/ arithmetic; a 0-byte estimate must fall back
-        // to the defensive 512 B (100 MB / 512 = 204_800), never divide by 0.
         let mut e = base();
         e.chunk_size_memory_mb = Some(100);
         let i = intro(Some("id"), &["id"], 10_000_000, Some(1024), &["id"]);
@@ -2836,9 +2564,6 @@ mod tests {
             other => panic!("expected chunked, got {other:?}"),
         }
 
-        // ADR-0020: auto-keyset on a no-int-PK table is MYSQL-ONLY. The same
-        // introspection on Postgres must refuse with the no-safe-shape error —
-        // an `==` -> `!=` mutant flips the gate for every engine.
         let e = base();
         let i = intro(None, &["uuid_col"], 1_000_000, Some(100), &[]);
         match resolve(SourceType::Mysql, &e, &i).unwrap() {
@@ -3072,7 +2797,7 @@ mod tests {
         assert!(said.contains("this export now runs as `keyset`"), "{said}");
     }
 
-    /// The escape is for a table with a real estimate and no explicit chunk knob: an estimate of zero, `chunk_count`, `chunk_by_days` or `chunk_checkpoint` each keep the chunked plan on a table that fits in one chunk.
+    /// The escape is for a table with a real estimate and no explicit chunk knob.
     #[test]
     fn the_small_table_escape_leaves_an_unknown_estimate_and_explicit_knobs_chunked() {
         use crate::config::SourceType;
@@ -3164,11 +2889,6 @@ mod tests {
 
     #[test]
     fn keyset_checkpoint_and_incremental_are_independent_plan_flags() {
-        // The crash-recovery ⇄ incremental split: `chunk_checkpoint` sets ONLY
-        // KeysetPlan.checkpoint (safe crash-recovery); the append-only
-        // continue-on-clean-re-run is the separate `keyset_incremental` →
-        // KeysetPlan.incremental. Before the split, checkpoint implied incremental
-        // and this test could not distinguish them.
         use crate::config::SourceType;
         let resolve = |export: &ExportConfig, i: &crate::source::TableIntrospection| {
             chunked_strategy_from_introspection(SourceType::Postgres, export, "public.t", 3, i)
@@ -3176,7 +2896,6 @@ mod tests {
         };
         let i = intro(Some("id"), &["uid"], 1_000_000, Some(100), &["id"]);
 
-        // checkpoint on, incremental unset → crash-recovery only, NOT incremental.
         let mut e = chunked_export();
         e.chunk_column = None;
         e.chunk_by_key = Some("uid".into());
@@ -3193,7 +2912,6 @@ mod tests {
             other => panic!("expected keyset, got {other:?}"),
         }
 
-        // incremental opt-in → both flags set.
         e.keyset_incremental = true;
         match resolve(&e, &i).unwrap() {
             ExtractionStrategy::Keyset(k) => {
@@ -3202,10 +2920,6 @@ mod tests {
             other => panic!("expected keyset, got {other:?}"),
         }
 
-        // keyset_incremental WITHOUT chunk_checkpoint must still set checkpoint —
-        // incremental needs the persisted cursor, so it implies checkpoint. Before
-        // the fix this was KeysetPlan{checkpoint:false, incremental:true}, a silent
-        // no-op that re-read the whole table every run.
         e.chunk_checkpoint = false;
         e.keyset_incremental = true;
         match resolve(&e, &i).unwrap() {
@@ -3282,9 +2996,7 @@ mod tests {
 
     #[test]
     fn heavy_chunk_warning_fires_only_on_a_wide_fixed_size_chunk() {
-        // Narrow table (512 B/row × 100k = ~49 MB/chunk) → no warning.
         assert!(heavy_chunk_warning("t", 100_000, Some(512), false).is_none());
-        // Wide table (8 KB/row × 100k = ~763 MB/chunk ≥ 512 MB) → warn, actionably.
         let w = heavy_chunk_warning("t", 100_000, Some(8192), false)
             .expect("a wide fixed-size chunk must warn");
         assert!(w.contains("chunk_size_memory_mb"), "must name the fix: {w}");
@@ -3292,22 +3004,14 @@ mod tests {
             w.contains("ERROR 3024"),
             "must name the field failure mode: {w}"
         );
-        // A memory budget is already width-aware → never warn, even if wide.
         assert!(heavy_chunk_warning("t", 100_000, Some(8192), true).is_none());
-        // No catalog width estimate → can't judge → no warning.
         assert!(heavy_chunk_warning("t", 100_000, None, false).is_none());
         assert!(heavy_chunk_warning("t", 100_000, Some(0), false).is_none());
-        // A large chunk_size makes even a moderate row width heavy.
         assert!(heavy_chunk_warning("t", 2_000_000, Some(300), false).is_some());
     }
 
     #[test]
     fn full_strategy_mongo_parallel_without_page_size_is_snapshot_and_warns() {
-        // #dogfood: `parallel: N` on a Mongo full export fans out the `_id`-range
-        // reader, which needs `source.mongo.page_size`. WITHOUT it the strategy is
-        // Snapshot (a single cursor) — parallel is a no-op — and rivet WARNS rather
-        // than silently dropping the flag. WITH page_size it engages the Keyset
-        // (`_id`-range parallel) runner instead.
         let base = "source: { type: mongo, url: \"mongodb://127.0.0.1:27017/db\"MONGO }\n\
                     exports:\n  - name: m\n    table: coll\n    mode: full\n    parallel: 4\n    \
                     format: parquet\n    destination: { type: local, path: ./o }\n";
@@ -3346,10 +3050,6 @@ mod tests {
 
     #[test]
     fn expand_destination_templates_is_idempotent_on_already_expanded_strings() {
-        // Regression guard for the validate/doctor wiring (2026-05-21):
-        // both commands now call `expand_destination_templates` on the same
-        // config `run` already expanded for.  Calling twice must NOT mangle
-        // a string that has no remaining placeholders.
         let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
         let once = expand_destination_templates(
             DestinationConfig {
@@ -3408,8 +3108,7 @@ mod tests {
         assert_eq!(planned.chunk_size, 100_000);
     }
 
-    /// Past the fast path the introspection probe needs the URL; the error it rebuilds keeps
-    /// the code `resolve_url` gave (the unset variable), not a code of its own.
+    /// Past the fast path the introspection probe needs the URL.
     #[test]
     fn the_rebuilt_probe_url_error_keeps_the_resolve_url_code() {
         let mut config = minimal_config();

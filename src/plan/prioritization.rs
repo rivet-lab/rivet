@@ -1,14 +1,7 @@
 //! Source-aware extraction prioritization — planning-time advisory models (ADR-0006).
-//!
-//! These types are **advisory only**: they classify and rank exports for human review
-//! and external orchestration; they do not control runtime execution.
-//!
 use serde::{Deserialize, Serialize};
 
 /// High-level extraction mode used as a prioritization signal.
-///
-/// Mirrors [`crate::plan::ExtractionStrategy`] without nested parameters so inputs
-/// stay easy to serialize and score.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PrioritizationStrategyKind {
@@ -24,8 +17,6 @@ impl PrioritizationStrategyKind {
         match strategy {
             super::ExtractionStrategy::Snapshot => Self::Snapshot,
             super::ExtractionStrategy::Incremental(_) => Self::Incremental,
-            // Keyset is a bounded multi-part extraction like chunked — same
-            // prioritization/cost class.
             super::ExtractionStrategy::Chunked(_) | super::ExtractionStrategy::Keyset(_) => {
                 Self::Chunked
             }
