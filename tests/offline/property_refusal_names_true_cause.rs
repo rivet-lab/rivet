@@ -14,65 +14,14 @@ const MATRIX: &str = "refusal_names_true_cause";
 const R_PREFIX: &str = "2026-11-08: the oversized-value message opens with an unregistered RIVET_VALUE_TOO_LARGE prefix; closes when the prefix is dropped from both raise sites";
 const R_VERIFY: &str = "2026-11-08: validate prints a second code vocabulary absent from errors.md; closes when it joins codes::ALL or the docs list it";
 
-const R_CMD_ORDER: &str = "2026-11-10: plan, load, compact, reconcile and repair stop at their own precheck before the config error names the true cause; closes when the config error is raised first";
-const R_CMD_ACCEPT: &str = "2026-11-10: validate, metrics and journal exit 0 on a config that run refuses; closes when they refuse with the same code";
 const R_REMEDY_REPORT: &str = "2026-11-10: the remedy names `rivet reconcile --report`, which reconcile does not accept; closes when the remedy names repair's --report or reconcile's --output";
 const R_REMEDY_FORCE: &str = "2026-11-10: the stale-plan remedy names --force without naming `rivet apply`; closes when the message names the apply command";
 const R_COPY_EMPTY: &str = "2026-11-10: state copy reads a corrupt SQLite state as empty and stops RIVET_STATE_COPY_SOURCE_EMPTY; closes when the copy opens the file through the corrupt-state check";
 const R_WORDING_GONE: &str = "2026-11-10: the lost-checkpoint remedy leads with a bare `run the export again` while exit 5 tells a scheduler not to retry; closes when the remedy names the operator's decision first or the exit becomes retryable";
-const R_FIELD_MONGO: &str = "2026-11-10: mongo accepts batch_size 0, an empty or NUL destination path and a 300-char export name with exit 0; closes when each is refused at config load";
 const R_READER_CODE: &str = "2026-11-10: metrics and journal repeat a stopped run's words without the code the run printed; closes when the run history records the refusal code beside its text";
 const R_WORD_CLASSIFY: &str = "2026-11-10: a missing MySQL table named after a classifier word is refused as that word's cause (STATEMENT_TIMEOUT for `max_execution_time`); closes when the classifier reads the server's error number, not words that echo the relation name";
 /// Accepted RED cells on main, each with the date and what closes it; a new RED or a stale entry fails.
 const ACCEPTED_RED: &[(&str, &str)] = &[
-    (
-        "cmd/plan/RIVET_CONFIG_SOURCE_URL_SCHEME_MISMATCH/*",
-        R_CMD_ORDER,
-    ),
-    (
-        "cmd/load/RIVET_CONFIG_SOURCE_URL_SCHEME_MISMATCH/*",
-        R_CMD_ORDER,
-    ),
-    (
-        "cmd/compact/RIVET_CONFIG_SOURCE_URL_SCHEME_MISMATCH/*",
-        R_CMD_ORDER,
-    ),
-    (
-        "cmd/reconcile/RIVET_CONFIG_SOURCE_URL_SCHEME_MISMATCH/*",
-        R_CMD_ORDER,
-    ),
-    (
-        "cmd/repair/RIVET_CONFIG_SOURCE_URL_SCHEME_MISMATCH/*",
-        R_CMD_ORDER,
-    ),
-    (
-        "cmd/validate/RIVET_CONFIG_SOURCE_URL_SCHEME_MISMATCH/*",
-        R_CMD_ACCEPT,
-    ),
-    (
-        "cmd/metrics/RIVET_CONFIG_SOURCE_URL_SCHEME_MISMATCH/*",
-        R_CMD_ACCEPT,
-    ),
-    (
-        "cmd/journal/RIVET_CONFIG_SOURCE_URL_SCHEME_MISMATCH/*",
-        R_CMD_ACCEPT,
-    ),
-    (
-        "field/RIVET_CONFIG_VALUE_OUT_OF_RANGE/batch_size_0/mongo",
-        R_FIELD_MONGO,
-    ),
-    (
-        "field/RIVET_CONFIG_PATH_UNSAFE/destination_path_empty/mongo",
-        R_FIELD_MONGO,
-    ),
-    (
-        "field/RIVET_CONFIG_PATH_UNSAFE/destination_path_nul/mongo",
-        R_FIELD_MONGO,
-    ),
-    (
-        "field/RIVET_CONFIG_PATH_UNSAFE/export_name_300/mongo",
-        R_FIELD_MONGO,
-    ),
     ("remedy/RIVET_CLI_REPORT_INVALID", R_REMEDY_REPORT),
     (
         "site/src/error.rs/rivet_reconcile_--report",

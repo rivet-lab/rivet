@@ -449,6 +449,39 @@ impl SourceConfig {
         }
     }
 
+    /// Refuse a URL whose scheme names another engine than `source.type`.
+    fn require_url_scheme_matches_type(&self, url: &str) -> crate::error::Result<()> {
+        if let Some(named) = SourceType::from_url_scheme(url)
+            && named != self.source_type
+        {
+            crate::config_bail!(
+                crate::error::codes::CONFIG_SOURCE_URL_SCHEME_MISMATCH,
+                "source.type: {} but the url scheme names {} — the two must agree, or the run \
+                 would anchor and read one engine while typing the stream as another",
+                self.source_type.label(),
+                named.label()
+            );
+        }
+        Ok(())
+    }
+
+    /// The scheme check of every URL the config holds without I/O: an inline `url:`, a set `url_env` and a readable `url_file`.
+    pub fn check_url_scheme_offline(&self) -> crate::error::Result<()> {
+        if self.has_structured_fields() {
+            return Ok(());
+        }
+        let raw = match (&self.url, &self.url_env, &self.url_file) {
+            (Some(u), None, None) => Some(u.expose().to_string()),
+            (None, Some(env), None) => std::env::var(env).ok(),
+            (None, None, Some(file)) => std::fs::read_to_string(file).ok(),
+            _ => None,
+        };
+        match raw {
+            Some(raw) => self.require_url_scheme_matches_type(raw.trim()),
+            None => Ok(()),
+        }
+    }
+
     pub fn resolve_url(&self) -> crate::error::Result<Secret> {
         if self.has_url_fields() && self.has_structured_fields() {
             return Err(mixed_connection_methods());
@@ -524,17 +557,7 @@ impl SourceConfig {
             }
         }
 
-        if let Some(named) = SourceType::from_url_scheme(&resolved)
-            && named != self.source_type
-        {
-            crate::config_bail!(
-                crate::error::codes::CONFIG_SOURCE_URL_SCHEME_MISMATCH,
-                "source.type: {} but the url scheme names {} — the two must agree, or the run \
-                 would anchor and read one engine while typing the stream as another",
-                self.source_type.label(),
-                named.label()
-            );
-        }
+        self.require_url_scheme_matches_type(&resolved)?;
 
         Ok(Secret::new(resolved))
     }
