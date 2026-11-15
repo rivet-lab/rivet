@@ -86,11 +86,12 @@ Rivet quotes `cursor_column` and `cursor_fallback_column` using the source diale
 
 ## Trying it locally
 
-The dev seed (`cargo run --bin seed`) populates a fixture table `orders_coalesce` in both Postgres and MySQL with a configurable NULL ratio for `updated_at`:
+The native fixture seed (`seeds/fixture/{postgres,mysql}.sql`) populates a fixture table `orders_coalesce` in both Postgres and MySQL with a fixed NULL ratio (7 of every 20 rows) for `updated_at`:
 
 ```bash
-# Uses dev/{postgres,mysql}/init.sql + seed defaults (~35% NULL updated_at).
-cargo run --bin seed -- --target both --coalesce-rows 2000 --coalesce-null-ratio 0.35
+# ~35% NULL updated_at.
+python3 -m dev.pytools.seed_fixture --source postgres --coalesce-rows 2000 --yes
+python3 -m dev.pytools.seed_fixture --source mysql --coalesce-rows 2000 --yes
 
 # Then:
 rivet plan --config dev/workbench/pg_incremental.yaml --export pg_orders_coalesce

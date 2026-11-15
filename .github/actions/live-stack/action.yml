@@ -1,5 +1,5 @@
 name: Live stack
-description: Rust toolchain, the seed tool, the docker stand of nightly-live started, waited for and seeded.
+description: Rust toolchain, the docker stand of nightly-live started, waited for and seeded.
 inputs:
   stack:
     description: full, lean (no MySQL replica trio), core (the engines, loaders and object stores only) or none (the toolchain and the Python environment, no service).
@@ -17,11 +17,6 @@ runs:
       with:
         tool: cargo-nextest,uv
     - uses: ./.github/actions/cargo-deny
-
-    - name: Build the seed tool before the stack starts
-      if: ${{ inputs.stack != 'none' }}
-      shell: bash
-      run: cargo build --release --bin seed --features dev-seed
 
     - name: Start services
       if: ${{ inputs.stack != 'none' }}
@@ -106,13 +101,7 @@ runs:
       if: ${{ inputs.stack != 'none' }}
       shell: bash
       run: |
-        RIVET_SEED_I_KNOW=1 ./target/release/seed \
-          --target postgres \
-          --users 1000 \
-          --orders-per-user 5 \
-          --events-per-user 5 \
-          --page-views 5000 \
-          --content-items 60000
+        uv run --frozen python -m dev.pytools.seed_fixture --source postgres --tier standard --yes
         PGPASSWORD=rivet psql -h localhost -U rivet -d rivet -c ANALYZE
 
     - name: Independent row-hash oracle deps

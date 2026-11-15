@@ -42,7 +42,7 @@ GO
 -- Larger table for chunked-mode / keyset planning probes.
 --
 -- NOT named `dbo.orders`. That name belongs to the canonical cross-engine seed
--- (`src/bin/seed/mssql.rs`), which creates `orders` with the same shape and row
+-- (`seeds/fixture/mssql.sql`), which creates `orders` with the same shape and row
 -- count as PostgreSQL and MySQL — the fixture every cross-engine comparison
 -- rests on. This file used to create `dbo.orders` too, with an incompatible
 -- schema (`id, name, amount`) and only 500 rows, and the seed DROP+CREATEs, so

@@ -32,11 +32,7 @@ A scripted, reproducible end-to-end demo that exercises every post-Epic feature 
 
   ```bash
   cargo build --release --bin rivet
-  cargo build --release --features dev-seed --bin seed
   ```
-
-  (The seeder is gated behind the off-by-default `dev-seed` cargo feature —
-  a bare `--bin seed` build errors.)
 
 - `python3` (used for parsing/pretty-printing JSON artifacts below). The §5
   Parquet-schema peek also needs `pyarrow` (`pip install pyarrow`).
@@ -63,22 +59,16 @@ mysql -h 127.0.0.1 -P 3306 -u rivet -privet rivet \
     < demo/setup_demo_tables_mysql.sql
 
 # Bundled dev tables + orders_coalesce (composite-cursor fixture) come from the
-# Rust seeder — tunable scale.
-cargo run --release --features dev-seed --bin seed -- --target postgres \
+# native seed file — tunable scale.
+python3 -m dev.pytools.seed_fixture --source postgres --yes \
     --users 2000 --orders-per-user 5 --events-per-user 20 \
     --page-views 200000 --content-items 20000 \
-    --sparse-chunk-demo --sparse-chunk-rows 500 --sparse-chunk-id-gap 5000 \
-    --coalesce-rows 5000 --coalesce-null-ratio 0.35
+    --sparse-rows 500 --sparse-gap 5000 --coalesce-rows 5000
 ```
 
-> **Base schema first.** The seeder *fills* the bundled dev tables (`users`,
-> `orders`, `events`, `page_views`, `content_items`) — it does not create them.
-> They are created by `dev/postgres/init.sql` (and `dev/mysql/init.sql`), which
-> the bundled `docker compose` runs automatically the first time each container
-> initializes. So this works against the bundled `rivet` database out of the box.
-> If you point `--pg-url` / `--mysql-url` at a **fresh** database instead, apply
-> that `init.sql` there first, or the seeder's `TRUNCATE` fails with
-> `relation "content_items" does not exist`.
+> The seed file creates any missing fixture table (`users`, `orders`, `events`,
+> `page_views`, `content_items`, `orders_sparse`, `orders_coalesce`) and truncates
+> all of them before it fills, so it works on a fresh database too.
 
 Verify the landscape (PostgreSQL):
 

@@ -102,8 +102,6 @@ struct Lane {
     container: &'static str,
     /// `docker exec` SQL-shell prefix; empty for a non-SQL source (Mongo).
     client: &'static [&'static str],
-    seed_target: Option<&'static str>,
-    seed_url_flag: &'static str,
     /// Extra export-YAML line(s) a CDC run needs (`slot:` / `server_id:`); `{soak_slot}` is [`soak_slot`].
     cdc_field: &'static str,
     /// `information_schema` WHERE prefix that qualifies the schema.
@@ -124,8 +122,6 @@ impl Lane {
                 host_port: stand_host_port("postgres"),
                 container: stand_container("postgres"),
                 client: &*PG_CLIENT,
-                seed_target: Some("postgres"),
-                seed_url_flag: "--pg-url",
                 cdc_field: "",
                 schema_qual: "",
                 sep: '|',
@@ -135,8 +131,6 @@ impl Lane {
                 host_port: stand_host_port("postgres_cdc"),
                 container: stand_container("postgres_cdc"),
                 client: &*PG_CLIENT,
-                seed_target: Some("postgres"),
-                seed_url_flag: "--pg-url",
                 cdc_field: "      slot: {soak_slot}\n",
                 schema_qual: "",
                 sep: '|',
@@ -146,8 +140,6 @@ impl Lane {
                 host_port: stand_host_port("mysql"),
                 container: stand_container("mysql"),
                 client: &*MY_CLIENT,
-                seed_target: Some("mysql"),
-                seed_url_flag: "--mysql-url",
                 cdc_field: "",
                 schema_qual: MY_SCHEMA_QUAL.as_str(),
                 sep: '\t',
@@ -157,8 +149,6 @@ impl Lane {
                 host_port: stand_host_port("mysql_cdc"),
                 container: stand_container("mysql_cdc"),
                 client: &*MY_CLIENT,
-                seed_target: Some("mysql"),
-                seed_url_flag: "--mysql-url",
                 cdc_field: "      server_id: 47010\n",
                 schema_qual: MY_SCHEMA_QUAL.as_str(),
                 sep: '\t',
@@ -169,8 +159,6 @@ impl Lane {
                 host_port: stand_host_port(if m == Cdc { "mssql_cdc" } else { "mssql" }),
                 container: stand_container(if m == Cdc { "mssql_cdc" } else { "mssql" }),
                 client: &[],
-                seed_target: Some("sqlserver"),
-                seed_url_flag: "--mssql-url",
                 cdc_field: "",
                 schema_qual: "",
                 sep: '|',
@@ -180,8 +168,6 @@ impl Lane {
                 host_port: stand_host_port(if m == Cdc { "mongo_rs" } else { "mongo" }),
                 container: stand_container(if m == Cdc { "mongo_rs" } else { "mongo" }),
                 client: &[],
-                seed_target: None,
-                seed_url_flag: "",
                 cdc_field: "",
                 schema_qual: "",
                 sep: '\t',
@@ -348,7 +334,7 @@ fn no_live_warehouse_env() -> bool {
 
 impl HarnessEnv {
     fn load() -> Result<Self> {
-        // The matrix now lives in the OSS crate, so the seed binary + init SQL are
+        // The matrix now lives in the OSS crate, so the seed files + init SQL are
         // in this crate's own tree.
         let oss_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let sf = match std::env::var("RIVET_SF_CONNECTION") {
@@ -1246,7 +1232,7 @@ impl Verification {
         }
     }
 
-    // ── stage 1: seed the fixture (OSS `seed` binary, as a process) ──────────
+    // ── stage 1: seed the fixture (native seeds/fixture file, applied by dev.pytools.seed_fixture) ──────────
     /// Forget the CDC position a prior cell left for `prefix` (the checkpoint file,
     /// and on Postgres the replication slot that is its server-side twin), so a
     /// re-seeded fixture anchors fresh instead of resuming into the seed's TRUNCATE.
@@ -1264,31 +1250,24 @@ impl Verification {
     }
 
     fn seed(&self, env: &HarnessEnv) -> Result<()> {
-        let lane = self.lane();
-        let Some(target) = lane.seed_target else {
+        if self.engine == Engine::Mongo {
             bail!(
-                "engine {:?} has no OSS CLI seed yet — encode as a `gap`",
+                "engine {:?} has no native fixture seed yet — encode as a `gap`",
                 self.engine
             );
-        };
-        let db = stand_bench_db();
+        }
+        let lane = self.lane();
         run(
-            Command::new("cargo")
+            Command::new("uv")
                 .current_dir(&env.oss_dir)
+                .args(["run", "python", "-m", "dev.pytools.seed_fixture", "--yes"])
                 .args([
-                    "run",
-                    "--release",
-                    "--features",
-                    "dev-seed",
-                    "--bin",
-                    "seed",
-                    "--",
+                    "--url",
+                    &lane.url(stand_bench_db()),
+                    "--container",
+                    lane.container,
                 ])
-                .args(["--target", target, lane.seed_url_flag, &lane.url(db)])
                 .args(["--content-items", &self.fixture.rows.to_string()])
-                // The matrix reads only `content_items` (no FK to the other tables),
-                // so seed nothing else — skips ~8M unrelated rows the default profile
-                // would generate, keeping every cell fast.
                 .args([
                     "--users",
                     "0",
@@ -1296,10 +1275,15 @@ impl Verification {
                     "0",
                     "--events-per-user",
                     "0",
+                ])
+                .args([
                     "--page-views",
                     "0",
-                ])
-                .env("RIVET_SEED_I_KNOW", "1"),
+                    "--coalesce-rows",
+                    "0",
+                    "--sparse-rows",
+                    "0",
+                ]),
             "seed",
         )
     }

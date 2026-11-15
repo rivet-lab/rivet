@@ -62,7 +62,7 @@ Summaries go to `/tmp/rivet_uat_smoke.txt`. **Actual** below matches **`bash dev
 | --- | ----------------------------------------------------------------------------------- | ------ | ---- |
 | P1  | Rust toolchain installed (`cargo --version`)                                        | `cargo` present on agent host | [x]  |
 | P2  | `docker compose up -d` brings up Postgres + MySQL                                   | 2026-03-30 smoke: **Postgres** Up; **MySQL** service not in compose / not running | [x]  |
-| P3  | Databases seeded (`cargo run --release --bin seed -- --target both --users 100000`) | inferred OK (PG exports succeeded); seed not re-run in smoke | [x]  |
+| P3  | Databases seeded (`make seed-postgres seed-mysql`) | inferred OK (PG exports succeeded); seed not re-run in smoke | [x]  |
 | P4  | `dev/output/` directory exists                                                      | exists | [x]  |
 
 
@@ -295,7 +295,7 @@ sleep 5
 python3 -m dev.pytools.dev_scripts setup-toxiproxy
 
 # 4. Make sure the DB is seeded
-cargo run --release --bin seed -- --target pg --users 10000
+make seed-postgres
 ```
 
 Verify the proxy API is up: `curl -s http://localhost:8474/proxies | head` should list `pg` and `mysql`.
@@ -430,7 +430,7 @@ Requires an **in_progress** chunk run for export `bench_content_p4` (same as aft
 
 | ID  | Scenario        | Command / Steps                                                                                                                      | Expected                                                | Actual | Pass |
 | --- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------- | ------ | ---- |
-| U1  | Seed sparse ids | `cargo run --release --bin seed -- --target postgres --only-sparse-chunk-demo --sparse-chunk-rows 5000 --sparse-chunk-id-gap 100000` | `orders_sparse` has few rows vs wide `MIN/MAX(id)` band |        | [ ]  |
+| U1  | Seed sparse ids | `python3 -m dev.pytools.seed_fixture --source postgres --sparse-rows 5000 --sparse-gap 100000 --yes` | `orders_sparse` has few rows vs wide `MIN/MAX(id)` band |        | [ ]  |
 | U2  | Preflight warns | `rivet check --config dev/workbench/sparse_chunk_demo.yaml --export orders_sparse_on_id`                                                       | Sparse / inefficient range warning (wording may vary)   |        | [ ]  |
 | U3  | Chunked export  | `rivet run --config dev/workbench/sparse_chunk_demo.yaml --export orders_sparse_keyset`                                                        | Completes; output under `dev/output/sparse_chunk/`      |        | [ ]  |
 

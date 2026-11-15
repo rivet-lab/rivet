@@ -117,7 +117,7 @@ All **user-facing documentation** must be in **English**, including:
 
 - Markdown in the repository (`README.md`, `CHANGELOG.md`, this file, and any future docs)
 - Comments in `dev/*.sh` and other scripts meant for operators or contributors
-- `clap` help strings and `about` text in `src/main.rs`, `src/bin/seed/` (the seed binary), and related binaries
+- `clap` help strings and `about` text in `src/main.rs` and related binaries
 - Inline comments in example YAML configs when they explain behavior to humans
 
 Rust API docs (`///` on public items) should also be English when added.

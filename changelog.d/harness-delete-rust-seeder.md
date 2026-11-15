@@ -1,0 +1,1 @@
+- **Harness**: the Rust test-data seeder (`src/bin/seed`, the `dev-seed` feature and `RIVET_SEED_I_KNOW`) is deleted. Fixtures are native files per engine (`seeds/fixture/{postgres,mysql,mssql}.sql`), deterministic formulas over the row number, applied and verified by `python3 -m dev.pytools.seed_fixture`; `make seed-postgres|seed-mysql|seed-mssql|seed-release` call it.

@@ -1,15 +1,7 @@
-# Requires: orders_sparse filled, e.g.
-#   cargo run --bin seed -- --target postgres --only-sparse-chunk-demo
-# or full seed with:
-#   cargo run --bin seed -- --target postgres --sparse-chunk-demo --users 1000 ...
-#
-# Large sparse table (e.g. 500k rows, wide id band — good for chunked benchmarks):
-#   cargo run --release --bin seed -- --target postgres --only-sparse-chunk-demo \
-#     --sparse-chunk-rows 500000 --sparse-chunk-id-gap 2000000 --sparse-chunk-batch-size 5000
-#
-# Large dense ids in same table (min..max ≈ row count; chunk on `id` is reasonable):
-#   cargo run --release --bin seed -- --target postgres --only-sparse-chunk-demo \
-#     --sparse-chunk-rows 500000 --sparse-chunk-id-gap 1 --sparse-chunk-batch-size 8000
+# Requires: orders_sparse filled (note: the seed truncates every fixture table):
+#   python3 -m dev.pytools.seed_fixture --source postgres --tier standard --sparse-rows 500000 --sparse-gap 2000000 --yes
+# Dense ids in the same table (min..max ~ row count; chunk on `id` is reasonable):
+#   python3 -m dev.pytools.seed_fixture --source postgres --tier standard --sparse-rows 500000 --sparse-gap 1 --yes
 #
 # `orders_sparse_on_id` — chunk on physical id → wide min..max, many windows (heavy plan).
 # `orders_sparse_keyset` — keyset (`chunk_by_key: id`) pages by rows, so the id gaps cost nothing.

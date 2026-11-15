@@ -110,6 +110,8 @@ mod oneshot_budget;
 mod secret_expose_ratchet;
 // Not a test module: the shared non-vacuity rule the grep-shaped guards call so
 // a moved subject fails LOUDLY instead of grading the empty set.
+#[path = "offline/no_rust_seeder_guard.rs"]
+mod no_rust_seeder_guard;
 #[path = "offline/nonvacuity.rs"]
 mod nonvacuity;
 #[path = "offline/open_defects_guard.rs"]

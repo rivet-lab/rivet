@@ -2,7 +2,7 @@
 //!
 //! `content_items` is the heaviest fixture in the test DB: 2 M rows, ~6.5 GB
 //! on disk, wide schema (text, jsonb, timestamptz). It is pre-seeded by
-//! `src/bin/seed.rs` — this test does NOT seed or drop the table.
+//! `seeds/fixture/postgres.sql` — this test does NOT seed or drop the table.
 //!
 //! ## What this tests (and why it differs from live_oltp_load.rs)
 //!
@@ -100,7 +100,7 @@ fn pg_checkpoints_req() -> Option<i64> {
 ///     (MVCC isolation — concurrent INSERTs during export are NOT visible)
 ///   - adaptive batch sizing was active (batch sizes vary)
 #[test]
-#[ignore = "live: requires docker compose up -d postgres (content_items pre-seeded by seed.rs)"]
+#[ignore = "live: requires docker compose up -d postgres (content_items pre-seeded by seeds/fixture)"]
 fn pg_content_export_under_update_pressure() {
     require_alive(LiveService::Postgres);
 
@@ -114,7 +114,7 @@ fn pg_content_export_under_update_pressure() {
     };
     assert!(
         count >= 50_000,
-        "content_items needs at least 50 000 rows (has {count}). Run: cargo run --bin seed"
+        "content_items needs at least 50 000 rows (has {count}). Run: make seed-postgres"
     );
 
     let export_limit = 200_000i64.min(count);
@@ -284,9 +284,7 @@ fn pg_full_content_export_max_pressure() {
         count >= 1_000_000,
         "content_items has {count} rows; this pressure test needs >= 1M.\n\
          Seed the release-size fixture first: `make seed-release`.\n\
-         The standard `make seed-db` uses 60k (fast for everyday work); the 1M \
-         fixture is the pre-release size and comes from the SAME canonical, \
-         deterministic seed."
+         The standard `make seed-db` uses 60k (fast for everyday work)."
     );
 
     let ckpt_before = pg_checkpoints_req();

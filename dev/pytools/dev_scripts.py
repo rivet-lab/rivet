@@ -681,7 +681,7 @@ def retry_toxiproxy(argv: Sequence[str] = ()) -> int:
     Prerequisites:
         docker compose up -d postgres toxiproxy
         python dev/pytools/dev_scripts.py setup-toxiproxy
-        cargo run --release --bin seed -- --target pg --users 10000
+        make seed-postgres
     """
     if argv:
         raise Fail(f"retry-toxiproxy takes no arguments (got: {' '.join(argv)})", code=2)
