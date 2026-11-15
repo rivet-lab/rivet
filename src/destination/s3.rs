@@ -5,9 +5,7 @@ use super::cloud::{CloudBackend, CloudDestination};
 use crate::config::{DestinationConfig, DestinationCredential};
 use crate::error::Result;
 
-/// S3 object-store destination. The retry policy, blocking wrap, and ADR-0013
-/// read surface live in [`CloudDestination`]; this type only knows how to
-/// authenticate against S3 (and S3-compatible endpoints).
+/// S3 object-store destination.
 pub type S3Destination = CloudDestination<S3Backend>;
 
 /// Zero-sized backend marker carrying S3's operator construction.
@@ -26,7 +24,7 @@ fn read_credential_env(env_name: &str, label: &str) -> Result<crate::secret::Sec
     Ok(secret)
 }
 
-/// Resolve the shared-file profile `profile` and nothing else: refuses by `RIVET_DEST_CREDENTIALS_INVALID` when an ambient `AWS_PROFILE` selects another profile or the profile holds no static keys or web-identity role, and disables the instance-metadata fallback.
+/// Resolve the shared-file profile `profile` and nothing else.
 fn named_profile_config(profile: &str) -> Result<reqsign::AwsConfig> {
     if seeded!("named-profile-falls-back", true, false) {
         return Ok(reqsign::AwsConfig {
@@ -95,13 +93,10 @@ fn only_loader(config: reqsign::AwsConfig) -> Box<reqsign::AwsDefaultLoader> {
 }
 
 impl CloudBackend for S3Backend {
-    // opendal's S3 lister puts the ETag in `content_md5`; its writer does not. On an
-    // SSE-KMS / SSE-C object the ETag is not the MD5, so trusting it turns every
-    // part into a ChecksumMismatch on correct data. See `LIST_MD5_IS_TRUSTWORTHY`.
     const LIST_MD5_IS_TRUSTWORTHY: bool = false;
     const SCHEME: &'static str = "s3";
 
-    /// OpenDAL reports S3's `NoSuchBucket` 404 as `ConfigInvalid`; an S3-compatible store without that code answers `NotFound`.
+    /// OpenDAL reports S3's `NoSuchBucket` 404 as `ConfigInvalid`.
     const ABSENT_CONTAINER: &'static [opendal::ErrorKind] = &[
         opendal::ErrorKind::NotFound,
         opendal::ErrorKind::ConfigInvalid,
@@ -200,23 +195,10 @@ mod tests {
         assert!(!cfg.ec2_metadata_disabled);
     }
 
-    // ── aws_profile thread-safety ─────────────────────────────────────────────
-    //
-    // The key invariant: when `aws_profile` is set in DestinationConfig, the
-    // code must NOT call `std::env::set_var("AWS_PROFILE", ...)` — that would
-    // be a data race under --parallel-exports. Instead it uses a per-export
-    // `reqsign::AwsConfig { profile, .. }` instance.
-    //
-    // These tests verify the no-env-mutation contract by exercising the exact
-    // same code path S3Destination::new() uses for the aws_profile branch,
-    // without requiring S3 credentials or network access.
-
     #[test]
     fn aws_profile_does_not_mutate_aws_profile_env_var() {
         let before = std::env::var("AWS_PROFILE").ok();
 
-        // Mirror S3Destination::new(): build AwsConfig with a profile name.
-        // Critically: no env::set_var call anywhere in this path.
         let profile = "unit-test-profile-rivet";
         let cred_config = reqsign::AwsConfig {
             profile: profile.to_string(),
@@ -224,7 +206,6 @@ mod tests {
         }
         .from_profile()
         .from_env();
-        // Drop without making network calls — we're only testing env isolation.
         drop(cred_config);
 
         let after = std::env::var("AWS_PROFILE").ok();
@@ -236,9 +217,6 @@ mod tests {
 
     #[test]
     fn aws_profile_independent_configs_are_independent() {
-        // Two AwsConfig instances with different profiles must be independent
-        // (no shared global state). This verifies that parallel exports each
-        // get their own credential loader, not a shared one.
         let cfg_a = reqsign::AwsConfig {
             profile: "profile-a".to_string(),
             ..Default::default()
@@ -247,7 +225,6 @@ mod tests {
             profile: "profile-b".to_string(),
             ..Default::default()
         };
-        // The profile field should reflect what was set — no cross-contamination.
         assert_eq!(cfg_a.profile, "profile-a");
         assert_eq!(cfg_b.profile, "profile-b");
     }
@@ -263,8 +240,6 @@ aws_profile: staging
         let config: DestinationConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(config.aws_profile.as_deref(), Some("staging"));
     }
-
-    // ── session_token_env (STS / SSO / AssumeRole credentials) ────────────────
 
     #[test]
     fn session_token_env_field_parsed_from_destination_config() {
@@ -285,14 +260,11 @@ session_token_env: AWS_SESSION_TOKEN
 
     #[test]
     fn read_credential_env_missing_var_errors_with_label() {
-        // Reach a unique env-var name that is guaranteed unset across runners.
         let name = "RIVET_TEST_S3_TOKEN_DEFINITELY_UNSET_XYZ";
         // SAFETY: test-only; binary is single-threaded in this test context.
         unsafe { std::env::remove_var(name) };
         let err = super::read_credential_env(name, "session token").unwrap_err();
         let msg = format!("{err:#}");
-        // The error must surface both the env-var name (operator can grep)
-        // and the credential label (operator knows which slot is empty).
         assert!(msg.contains(name), "missing env var name in error: {msg}");
         assert!(
             msg.contains("session token"),

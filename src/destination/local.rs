@@ -17,13 +17,7 @@ impl LocalDestination {
         Ok(Self { base_path })
     }
 
-    /// Join an attacker-influenceable `key` under `base_path` without letting
-    /// it escape the destination root (CWE-22). Rejects — rather than clamps —
-    /// any key that is absolute, contains a `..` (parent-dir) component, or
-    /// embeds a NUL byte, so a hostile key fails loudly instead of silently
-    /// resolving to a host path outside the prefix. A component scan (vs.
-    /// canonicalize-then-contain) is used so containment holds even for keys
-    /// whose path does not yet exist on disk, which is the common write case.
+    /// Join an attacker-influenceable `key` under `base_path` without letting it escape the destination root (CWE-22).
     fn safe_join(&self, key: &str) -> Result<PathBuf> {
         if key.contains('\0') {
             crate::rivet_bail!(
@@ -41,9 +35,6 @@ impl LocalDestination {
         for component in rel.components() {
             match component {
                 Component::Normal(_) | Component::CurDir => {}
-                // ParentDir escapes the root; Prefix/RootDir are absolute
-                // anchors (already rejected above on POSIX, caught here on
-                // Windows-shaped keys).
                 Component::ParentDir | Component::Prefix(_) | Component::RootDir => {
                     crate::rivet_bail!(
                         crate::error::codes::CONFIG_PATH_UNSAFE,
@@ -56,20 +47,7 @@ impl LocalDestination {
     }
 }
 
-/// Copy `src` into the staging path `tmp`, creating it with `O_EXCL` so a
-/// pre-planted file or symlink at the temp name causes `EEXIST` rather than a
-/// silent follow that writes through the link (CWE-367 / symlink race).
-///
-/// The name must be UNIQUE PER WRITER — see [`staging_name`]. It used to be
-/// derived from the final key alone, with an EEXIST recovery that unlinked the
-/// existing temp and retried once, for the case of a stale temp left by a
-/// crashed run. That recovery cannot tell a stale temp from a LIVE one, and
-/// concurrent writers into one prefix all stage `manifest.json` and `_SUCCESS`
-/// under the same name: each deleted the others' staged file, and the writer
-/// whose file was unlinked then failed its `rename` with ENOENT. Unique names
-/// make the recovery unnecessary — a stale temp from a crashed run can no longer
-/// be in anyone's way, it is just a dot-file to be swept — so EEXIST goes back to
-/// meaning what it should, an adversary planting something at our path.
+/// Copy `src` into the staging path `tmp`, creating it with `O_EXCL` so a pre-planted file or symlink at the temp name causes `EEXIST` rather than a silent follow that writes through the link (CWE-367 / symlink race).
 fn stage_copy(src: &Path, tmp: &Path) -> Result<()> {
     let mut out = std::fs::OpenOptions::new()
         .write(true)
@@ -81,20 +59,9 @@ fn stage_copy(src: &Path, tmp: &Path) -> Result<()> {
 }
 
 /// The staging file name for one write of `file_name`.
-///
-/// Unique per process AND per call: two exports in one process can write the
-/// same key concurrently (the parallel runners), and two processes sharing a
-/// prefix certainly do. Still dot-prefixed and still a sibling of the target, so
-/// the rename stays same-filesystem and atomic.
 fn staging_name(file_name: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    // pid + STARTUP NANOS, not pid alone: in the shipped container every
-    // generation is pid 1, so a SIGKILL mid-stage left `.name.1.K.tmp` and the
-    // next generation's `create_new` at the same ordinal K hit EEXIST — a
-    // deterministic wedge blaming "an adversary" on every retry until manual
-    // cleanup. The startup stamp makes the name unique per process INSTANCE, so
-    // a predecessor's debris can never occupy this run's slot.
     static STARTUP: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     let stamp = STARTUP.get_or_init(|| {
         std::time::SystemTime::now()
@@ -123,11 +90,6 @@ impl super::Destination for LocalDestination {
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        // Stage into a dot-prefixed sibling in the target directory (same
-        // filesystem, so the rename is atomic POSIX): a crash mid-copy can
-        // never leave a truncated file at the final key. The temp name is UNIQUE
-        // per writer — a deterministic one is shared by every process writing the
-        // same key into one prefix, and they deleted each other's staged file.
         let file_name = target
             .file_name()
             .ok_or_else(|| {
@@ -143,35 +105,23 @@ impl super::Destination for LocalDestination {
             let _ = std::fs::remove_file(&tmp);
             return Err(e);
         }
-        // OPT-6: a deterministic window where the staged `.tmp` is fully written
-        // but the atomic rename has not run. A SIGKILL here must leave NO file at
-        // the final key — proving temp+rename (not `Drop`) carries guarantee #3
-        // under a real, non-unwinding signal.
         crate::test_hook::maybe_block_at("before_commit_rename");
         if let Err(e) = std::fs::rename(&tmp, &target) {
             let _ = std::fs::remove_file(&tmp);
             return Err(e.into());
         }
         log::info!("wrote {}", target.display());
-        Ok(super::WriteOutcome::opaque()) // local FS reports no content checksum
+        Ok(super::WriteOutcome::opaque())
     }
 
     fn capabilities(&self) -> super::DestinationCapabilities {
         super::DestinationCapabilities {
             commit_protocol: super::WriteCommitProtocol::Atomic,
             idempotent_overwrite: true,
-            retry_safe: true, // temp-then-rename: a failure leaves nothing at the final key
+            retry_safe: true,
             partial_write_risk: false,
         }
     }
-
-    // ── ADR-0013 read surface ────────────────────────────────────────────
-    //
-    // Local FS is the simplest backend: walk recursively under `base_path`
-    // joined with `prefix`, return every regular file's relative path and
-    // size.  The walk is depth-first via a small stack; opendal would also
-    // work but introduces a tokio dependency for what is a five-line
-    // POSIX walk.
 
     fn list_prefix(&self, prefix: &str) -> Result<Vec<super::ObjectMeta>> {
         let root = self.safe_join(prefix)?;
@@ -182,8 +132,6 @@ impl super::Destination for LocalDestination {
         let mut out = Vec::new();
         let mut stack = vec![root];
         while let Some(dir) = stack.pop() {
-            // A non-directory `prefix` (e.g. a single file) is a degenerate
-            // call but should still report that file rather than 404.
             let meta = std::fs::metadata(&dir)?;
             if meta.is_file() {
                 let rel = dir
@@ -193,7 +141,7 @@ impl super::Destination for LocalDestination {
                 out.push(super::ObjectMeta {
                     key: rel,
                     size_bytes: meta.len(),
-                    content_md5: None, // local FS exposes no checksum in metadata
+                    content_md5: None,
                 });
                 continue;
             }
@@ -215,10 +163,6 @@ impl super::Destination for LocalDestination {
                         content_md5: None,
                     });
                 }
-                // Other file types (symlinks loops, sockets) — silently
-                // skipped.  Symlinks pointing at regular files would be
-                // reported via their followed metadata above; cyclic
-                // symlinks are intentionally not handled here.
             }
         }
         Ok(out)
@@ -237,8 +181,6 @@ impl super::Destination for LocalDestination {
                 size_bytes: m.len(),
                 content_md5: None,
             })),
-            // Treat "is a directory" the same as absent for our purposes —
-            // M5 only cares about file-shaped objects.
             Ok(_) => Ok(None),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
@@ -252,9 +194,6 @@ impl super::Destination for LocalDestination {
     }
 
     fn r#move(&self, from: &str, to: &str) -> Result<()> {
-        // POSIX `rename` is atomic on the same filesystem; fall back to
-        // copy + delete when the rename crosses devices (rare on a
-        // single destination prefix but cheap to handle).
         let src = self.safe_join(from)?;
         let dst = self.safe_join(to)?;
         if let Some(parent) = dst.parent() {
@@ -263,7 +202,6 @@ impl super::Destination for LocalDestination {
         match std::fs::rename(&src, &dst) {
             Ok(()) => Ok(()),
             Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-                // cross-device fallback
                 std::fs::copy(&src, &dst)?;
                 std::fs::remove_file(&src)?;
                 Ok(())
@@ -273,7 +211,6 @@ impl super::Destination for LocalDestination {
     }
 }
 
-// ─── ADR-0004 capability contract tests ──────────────────────────────────────
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,8 +224,7 @@ mod tests {
         }
     }
 
-    /// ADR-0004: local temp-then-rename is Atomic — `write()` returning Ok(()) means
-    /// the full file is present at the destination path.
+    /// ADR-0004: local temp-then-rename is Atomic.
     #[test]
     fn local_commit_protocol_is_atomic() {
         let caps = dest().capabilities();
@@ -301,8 +237,7 @@ mod tests {
         assert!(dest().capabilities().idempotent_overwrite);
     }
 
-    /// Temp-then-rename means a killed write leaves nothing at the final key,
-    /// so the local destination is retry-safe with no partial-write risk.
+    /// Temp-then-rename means a killed write leaves nothing at the final key, so the local destination is retry-safe with no partial-write risk.
     #[test]
     fn local_retry_safe_no_partial_write_risk() {
         let caps = dest().capabilities();
@@ -315,8 +250,6 @@ mod tests {
             "rename is atomic on the same filesystem; no partial file at the final key"
         );
     }
-
-    // ─── Local destination edge cases (QA backlog Task 6.1) ────────────────
 
     fn dest_at(base_path: &std::path::Path) -> LocalDestination {
         LocalDestination::new(&DestinationConfig {
@@ -334,9 +267,7 @@ mod tests {
         f
     }
 
-    /// Writing into a nested key must auto-create every missing parent
-    /// directory — operators rely on this when `prefix` contains date/hour
-    /// partitions that do not yet exist.
+    /// Writing into a nested key must auto-create every missing parent directory.
     #[test]
     fn write_auto_creates_nested_parent_directories() {
         let dir = tempfile::tempdir().unwrap();
@@ -350,9 +281,7 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"hello\n");
     }
 
-    /// Writing twice to the same key must produce a deterministic final
-    /// state (second payload wins) — this is the documented
-    /// `idempotent_overwrite: true` capability.
+    /// Writing twice to the same key must produce a deterministic final state (second payload wins).
     #[test]
     fn writing_same_key_twice_replaces_content_deterministically() {
         let dir = tempfile::tempdir().unwrap();
@@ -372,9 +301,7 @@ mod tests {
         );
     }
 
-    /// Writing into a read-only directory must fail fast with an Err, not
-    /// panic and not silently succeed.  The test skips on platforms where
-    /// changing file permissions is not supported (covered elsewhere by CI).
+    /// Writing into a read-only directory must fail fast with an Err, not panic and not silently succeed.
     #[cfg(unix)]
     #[test]
     fn write_to_readonly_directory_returns_error_not_panic() {
@@ -384,7 +311,7 @@ mod tests {
         let readonly = dir.path().join("readonly");
         std::fs::create_dir(&readonly).unwrap();
         let mut perms = std::fs::metadata(&readonly).unwrap().permissions();
-        perms.set_mode(0o500); // r-x for owner, no write
+        perms.set_mode(0o500);
         std::fs::set_permissions(&readonly, perms).unwrap();
 
         let dest = dest_at(&readonly);
@@ -392,7 +319,6 @@ mod tests {
 
         let result = dest.write(src.path(), "out.csv");
 
-        // Restore perms so tempdir cleanup can proceed.
         let mut restore = std::fs::metadata(&readonly).unwrap().permissions();
         restore.set_mode(0o700);
         let _ = std::fs::set_permissions(&readonly, restore);
@@ -403,13 +329,9 @@ mod tests {
         );
     }
 
-    /// When the resolved destination path refers to an existing *file* (not a
-    /// directory), `create_dir_all` on its parent succeeds but `fs::copy`
-    /// then fails because the target inside it cannot be created. The
-    /// operation must surface as Err and must not panic.
+    /// When the resolved destination path refers to an existing *file* (not a directory), `create_dir_all` on its parent succeeds but `fs::copy` then fails.
     #[test]
     fn write_when_base_path_points_at_a_file_returns_error() {
-        // Create a regular file, then try to treat it as the destination root.
         let f = tempfile::NamedTempFile::new().unwrap();
         let dest = dest_at(f.path());
         let src = source_file_with(b"data");
@@ -421,8 +343,7 @@ mod tests {
         );
     }
 
-    /// A missing source file is an Err, not a panic.  This path is exercised
-    /// if the pipeline hands a path whose temp file was cleaned up too early.
+    /// A missing source file is an Err, not a panic.
     #[test]
     fn write_with_nonexistent_source_returns_error() {
         let dir = tempfile::tempdir().unwrap();
@@ -433,9 +354,7 @@ mod tests {
         assert!(result.is_err(), "missing source must surface as Err");
     }
 
-    /// The `remote_key` may contain characters that are legal on POSIX file
-    /// systems but unusual (spaces, unicode).  Writing must round-trip their
-    /// bytes verbatim.
+    /// The `remote_key` may contain characters that are legal on POSIX file systems but unusual (spaces, unicode).
     #[test]
     fn write_preserves_unusual_but_legal_key_characters() {
         let dir = tempfile::tempdir().unwrap();
@@ -451,10 +370,7 @@ mod tests {
         );
     }
 
-    // ── Atomic write mechanics (temp-then-rename regression tests) ─────────
-
-    /// A successful write must leave exactly the final file — the staging
-    /// temp is renamed away, never left as a sibling.
+    /// A successful write must leave exactly the final file.
     #[test]
     fn write_leaves_no_temp_file_behind_on_success() {
         let dir = tempfile::tempdir().unwrap();
@@ -480,8 +396,7 @@ mod tests {
         );
     }
 
-    /// A failed write must leave nothing at the final key — neither a
-    /// truncated final file nor a stranded temp sibling.
+    /// A failed write must leave nothing at the final key.
     #[test]
     fn failed_write_leaves_no_file_at_final_key() {
         let dir = tempfile::tempdir().unwrap();
@@ -506,24 +421,7 @@ mod tests {
         );
     }
 
-    /// A stale temp left by a crashed previous run must not poison the next
-    /// attempt.
-    ///
-    /// It no longer CAN. The staging name used to be a function of the final key
-    /// alone, so a stale temp sat exactly where the next write wanted to be, and
-    /// the recovery was to unlink it and retry. That recovery could not tell a
-    /// stale temp from a LIVE one — concurrent writers into one prefix all stage
-    /// `manifest.json` under the same name, deleted each other's staged file, and
-    /// the loser's `rename` failed with ENOENT. Names are unique per writer now,
-    /// so a stale temp is merely litter: this test pins that it does not affect
-    /// the write, and that the debris is still recognisable as ours to sweep.
-    ///
-    /// MESSAGE TRUTH (round-4): no sweeper EXISTS today — nothing in the tree
-    /// deletes `.{name}.*.tmp` debris (gc_orphans lists only `.parquet`; the
-    /// spill sweep matches only `rivet-spill-*.bin`). The pin above guards the
-    /// debris staying RECOGNISABLE so a future sweep stays possible; it does
-    /// not promise one runs. A crash leaks exactly one dot-file per in-flight
-    /// write — disk lint, cleaned by hand or by a future sweeper.
+    /// A stale temp left by a crashed previous run must not poison the next attempt.
     #[test]
     fn stale_temp_from_crashed_run_does_not_affect_the_next_write() {
         let dir = tempfile::tempdir().unwrap();
@@ -553,14 +451,7 @@ mod tests {
         );
     }
 
-    /// The staging name is unique per write, which is what makes concurrent
-    /// writers into one prefix safe.
-    ///
-    /// RED-proven against the old scheme: with `.{key}.tmp` both calls below
-    /// produce the same name, and two writers racing on it delete each other's
-    /// staged file. Asserting the NAMES rather than running threads keeps the
-    /// test deterministic — the race itself is exercised end-to-end by the
-    /// release gate's `concurrent-writers` cell.
+    /// The staging name is unique per write, which is what makes concurrent writers into one prefix safe.
     #[test]
     fn two_writes_of_one_key_never_share_a_staging_name() {
         let a = staging_name("manifest.json");
@@ -579,8 +470,6 @@ mod tests {
             assert!(n.ends_with(".tmp"), "still sweepable: {n}");
         }
     }
-
-    // ── ADR-0013 Phase A: read surface ───────────────────────────────────
 
     #[test]
     fn list_prefix_returns_files_with_relative_keys_and_sizes() {
@@ -628,8 +517,6 @@ mod tests {
 
     #[test]
     fn list_prefix_missing_returns_empty_not_error() {
-        // Resume / validate must distinguish "no manifest yet" from "I/O
-        // failure".  Local FS surfaces the former as Ok(empty).
         let dir = tempfile::tempdir().unwrap();
         let dest = dest_at(dir.path());
         let listed = dest.list_prefix("does_not_exist").unwrap();
@@ -677,8 +564,6 @@ mod tests {
 
     #[test]
     fn head_returns_none_for_directory_not_file() {
-        // M5 only checks file-shaped keys; a directory at the same path
-        // is treated as absent so the "missing part" branch is taken.
         let dir = tempfile::tempdir().unwrap();
         let dest = dest_at(dir.path());
         std::fs::create_dir_all(dir.path().join("subdir")).unwrap();
@@ -687,15 +572,10 @@ mod tests {
 
     #[test]
     fn read_returns_err_on_missing_key() {
-        // Symmetric with head's None: read of a missing key surfaces an
-        // I/O error rather than empty bytes.  The validation layer relies
-        // on this to fail loudly.
         let dir = tempfile::tempdir().unwrap();
         let dest = dest_at(dir.path());
         assert!(dest.read("nope.json").is_err());
     }
-
-    // ── ADR-0012 M9 quarantine: move primitive ─────────────────────────
 
     #[test]
     fn move_relocates_file_and_creates_parent_directories() {
@@ -709,7 +589,6 @@ mod tests {
         )
         .unwrap();
 
-        // Source gone; destination present at new key with same body.
         assert!(!dir.path().join("part-000001.parquet").exists());
         let body = std::fs::read(
             dir.path()
@@ -734,9 +613,6 @@ mod tests {
 
     #[test]
     fn move_overwrites_existing_destination_object() {
-        // POSIX rename overwrites the target if it exists; mirror that
-        // contract so a second resume cleaning the same prefix doesn't
-        // bail out on "destination already exists in quarantine".
         let dir = tempfile::tempdir().unwrap();
         let dest = dest_at(dir.path());
         std::fs::write(dir.path().join("a"), b"new").unwrap();
@@ -749,32 +625,14 @@ mod tests {
         assert_eq!(body, b"new", "rename overwrites target");
     }
 
-    // ── Path-traversal containment (security) ─────────────────────────────
-
-    /// SEC-RED V14: `remote_key` is joined onto `base_path` via `Path::join`
-    /// with no traversal containment, so a key containing `../` (or an
-    /// absolute path) escapes the destination directory and lets an
-    /// attacker-influenced key write/move/read arbitrary files on the host.
-    ///
-    /// SECURE behaviour: every escaping key must be REFUSED with an Err and
-    /// must NOT touch any path outside `base_path`. This is RED today — the
-    /// current code happily writes to the escaped path and returns Ok.
+    /// SEC-RED V14: `remote_key` is joined onto `base_path` via `Path::join` with no traversal containment, so a key containing `../` (or an absolute path) escapes the destination directory and lets an attacker-influenced key write/move/read arbitrary files on the host.
     #[test]
     fn sec_local_write_rejects_traversal_key() {
-        // Lay out a tempdir with a contained base directory so any escape
-        // lands inside the tempdir (provably outside `base`, yet cleaned up
-        // by the tempdir on drop):
-        //
-        //   <tempdir>/                <- escape targets land here
-        //   └── base/                 <- the destination root
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path().join("base");
         std::fs::create_dir_all(&base).unwrap();
         let dest = dest_at(&base);
 
-        // ── 1. Relative `../` traversal via write ────────────────────────
-        // `base.join("../escape.parquet")` resolves to <tempdir>/escape.parquet,
-        // i.e. a sibling of `base` — outside the destination root.
         let escaped_rel = dir.path().join("escape.parquet");
         let src = source_file_with(b"pwned-relative");
         let result = dest.write(src.path(), "../escape.parquet");
@@ -788,10 +646,6 @@ mod tests {
             escaped_rel.display()
         );
 
-        // ── 2. Absolute-path key via write ───────────────────────────────
-        // Rust's `Path::join` discards the base entirely when the argument is
-        // absolute, so an absolute key writes wherever it points. Aim it at a
-        // file inside the tempdir but outside `base`.
         let escaped_abs = dir.path().join("abs-escape.parquet");
         let abs_key = escaped_abs.to_string_lossy().into_owned();
         let src_abs = source_file_with(b"pwned-absolute");
@@ -806,8 +660,6 @@ mod tests {
             escaped_abs.display()
         );
 
-        // ── 3. `read` must not read outside base via traversal ───────────
-        // Plant a secret outside `base` and prove a `../` key cannot read it.
         let secret = dir.path().join("secret.txt");
         std::fs::write(&secret, b"top-secret").unwrap();
         let read_res = dest.read("../secret.txt");
@@ -816,8 +668,6 @@ mod tests {
             "read must REFUSE a `../` traversal key (V14); leaking host files"
         );
 
-        // ── 4. `r#move` must not relocate a file outside base ────────────
-        // Seed a real source inside base, then try to move it out via `../`.
         std::fs::write(base.join("inside.parquet"), b"payload").unwrap();
         let move_escaped = dir.path().join("moved-out.parquet");
         let move_res = dest.r#move("inside.parquet", "../moved-out.parquet");
@@ -832,9 +682,7 @@ mod tests {
         );
     }
 
-    /// V14: a `..` buried mid-path (not just a leading one) and a NUL byte are
-    /// equally refused — the containment is a component scan, not a prefix
-    /// check, so `a/../../escape` and embedded NUL cannot slip through.
+    /// V14: a `..` buried mid-path (not just a leading one) and a NUL byte are equally refused.
     #[test]
     fn sec_local_rejects_buried_traversal_and_nul_keys() {
         let dir = tempfile::tempdir().unwrap();
@@ -851,32 +699,20 @@ mod tests {
             dest.write(src.path(), "bad\0name.parquet").is_err(),
             "a NUL byte in the key must be refused"
         );
-        // A legal name that merely *contains* `..` as text (not a component)
-        // must still be allowed — the scan keys on path components, not bytes.
         dest.write(src.path(), "ver..1/data.parquet").unwrap();
         assert!(base.join("ver..1/data.parquet").exists());
     }
 
     /// V16 (CWE-367): the deterministic staging temp is created with `O_EXCL`.
-    /// A symlink pre-planted at the temp name (a classic TOCTOU attack to
-    /// redirect the staged bytes at a victim file) must NOT be followed — the
-    /// link target is left untouched and the real key still receives the
-    /// payload.
     #[cfg(unix)]
     #[test]
     fn sec_write_does_not_follow_symlink_at_staging_temp() {
         let dir = tempfile::tempdir().unwrap();
         let dest = dest_at(dir.path());
 
-        // Victim outside the staged write that the symlink points at.
         let victim = dir.path().join("victim.txt");
         std::fs::write(&victim, b"original").unwrap();
 
-        // Plant a symlink at the OLD deterministic temp name, and at the final
-        // key's own name. The staging name is now unpredictable, so an attacker
-        // cannot pre-plant at it at all — which is a stronger position than the
-        // one this test used to check. What is still worth pinning is that
-        // neither planted link is followed and the victim is untouched.
         let planted = dir.path().join(".data.csv.tmp");
         std::os::unix::fs::symlink(&victim, &planted).unwrap();
 
@@ -904,11 +740,7 @@ mod tests {
         );
     }
 
-    /// Pins the shipped OPT-6 temp-then-rename contract that ADR-0004 +
-    /// semantics.md document: local is retry-safe with no partial-write risk. The
-    /// docs had drifted to the OLD `fs::copy` values (retry_safe=false /
-    /// partial_write_risk=true) — audit finding. If the write path ever regresses
-    /// to a non-atomic copy, flip these AND both docs together.
+    /// Pins the shipped OPT-6 temp-then-rename contract that ADR-0004 + semantics.md document.
     #[test]
     fn local_is_retry_safe_with_no_partial_write() {
         let caps = dest().capabilities();

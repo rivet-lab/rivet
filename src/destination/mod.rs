@@ -1,8 +1,4 @@
 //! **Layer: Execution**
-//!
-//! Destination backends — local filesystem, S3, GCS, stdout.
-//! Each backend declares its `DestinationCapabilities` so the pipeline can reason
-//! about commit boundaries and recovery semantics without inspecting backend internals.
 
 pub mod azure;
 mod cloud;
@@ -21,38 +17,18 @@ use crate::config::DestinationConfig;
 use crate::error::Result;
 
 /// The point at which a write is considered durably committed and visible to readers.
-///
-/// See ADR-0004 for the per-backend contract table and alignment with state invariants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteCommitProtocol {
-    /// The write is atomic from the caller's perspective: `write()` returning `Ok(())`
-    /// means the full file is present at the destination.  A failure leaves no partial
-    /// artifact (or leaves one that must be cleaned up — see `partial_write_risk`).
+    /// The write is atomic from the caller's perspective.
     Atomic,
     /// The object is not committed until the internal writer handle is closed.
-    /// The object is never partially visible to readers; a mid-upload failure means
-    /// nothing was written.  S3 PutObject and GCS resumable uploads use this protocol.
     FinalizeOnClose,
     /// Data is streamed to an unbuffered output with no atomic commit boundary.
-    /// Partial output may be observable before `write()` returns.
-    /// Retrying after failure produces duplicate or corrupt output.
     Streaming,
 }
 
 impl WriteCommitProtocol {
-    /// Does this destination leave NAMED OBJECTS behind that a later process can
-    /// list, stat, or overwrite?
-    ///
-    /// Seven places in the pipeline asked this question — the rerun guard, the
-    /// manifest writer, the running marker, manifest-aware `--validate`, the M8
-    /// resume scan, `rivet validate` — each by re-comparing against `Streaming`,
-    /// each independently mutable, and none of them tested. That is the shape
-    /// this repo already knows: a rule every site must re-apply drifts one site
-    /// at a time. It lives here so there is ONE answer, and the match is
-    /// exhaustive so a new protocol has to decide rather than inherit.
-    ///
-    /// `false` means "there is nothing at rest to look at": stdout has no prefix
-    /// to collide on, no manifest to read back, no prior run to warn about.
+    /// Does this destination leave NAMED OBJECTS behind that a later process can list, stat, or overwrite?
     pub fn leaves_objects_at_rest(self) -> bool {
         match self {
             Self::Atomic | Self::FinalizeOnClose => true,
@@ -62,62 +38,29 @@ impl WriteCommitProtocol {
 }
 
 /// Operational guarantees provided by a destination backend.
-///
-/// Returned by `Destination::capabilities()`.  Inspected at runtime in the execution
-/// path to log backend semantics and warn when a non-retry-safe destination is used
-/// with retries.  See ADR-0004 for the per-backend contract table.
 #[derive(Debug, Clone)]
 pub struct DestinationCapabilities {
     /// When the written output is considered durably committed.
     pub commit_protocol: WriteCommitProtocol,
-    /// Whether writing the same key twice produces a clean replacement with no leftover
-    /// artifacts from the previous attempt.  `false` for stdout and streaming sinks.
+    /// Whether writing the same key twice produces a clean replacement with no leftover artifacts from the previous attempt.
     pub idempotent_overwrite: bool,
     /// Whether a failed `write()` can be retried without manual cleanup.
-    /// `false` when a partial artifact may be left at the destination on failure.
     pub retry_safe: bool,
     /// Whether a failed `write()` can leave a partial file or object at the destination.
-    /// When `true`, the caller must remove the artifact before retrying.
     pub partial_write_risk: bool,
 }
 
 /// Read-side metadata for a single object at the destination.
-///
-/// Returned by [`Destination::list_prefix`] and [`Destination::head`].  The
-/// minimal field set is what ADR-0012 M5 verification needs: the relative
-/// `key` (so the caller can correlate with `manifest.parts[].path`) and the
-/// `size_bytes` (so M5's "size matches recorded value" check is one
-/// comparison).  More fields (etag, last_modified, content_type) can be
-/// added later without breaking the trait.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectMeta {
-    /// Object key relative to the destination's configured prefix —
-    /// the same shape `Destination::write`'s `remote_key` argument uses.
+    /// Object key relative to the destination's configured prefix.
     pub key: String,
     pub size_bytes: u64,
-    /// The object's content MD5 from listing / stat metadata, when the backend
-    /// exposes one — `None` otherwise.  Lets verification compare content
-    /// against `manifest.parts[].content_md5` with no download.  Coverage:
-    /// - **GCS** — always (`md5Hash`, base64).
-    /// - **S3** — never: the listed ETag is not an MD5 under SSE-KMS / SSE-C, so it
-    ///   is dropped (`LIST_MD5_IS_TRUSTWORTHY = false`) and S3 verifies size-only.
-    /// - **Azure** — when the blob carries a `Content-MD5`. Azure auto-computes
-    ///   one *only* for a single-shot `Put Blob`, so rivet one-shots parts that
-    ///   fit in memory (verified live: `Content-MD5` present → md5-checked);
-    ///   parts large enough to stream upload as `Put Block List`, which carries
-    ///   no `Content-MD5` → those verify size-only.
-    /// - **Local FS** — never.
+    /// The object's content MD5 from listing / stat metadata, when the backend exposes one — `None` otherwise.
     pub content_md5: Option<String>,
 }
 
 /// What a [`Destination::write`] reports about the object it just stored.
-///
-/// Surfaces the store's *own* content checksum from the upload response when
-/// one is available — GCS / Azure single `Put Blob` compute an MD5 from the
-/// received bytes (S3 reports none: its ETag is not trusted as an MD5).  The
-/// commit path compares it to the locally computed MD5 for a fail-fast,
-/// no-download transit-integrity check.  `None` when the backend / upload path
-/// doesn't report one (local FS, streamed multipart / block-list).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WriteOutcome {
     /// The store-reported content checksum (base64 MD5 or hex ETag), or `None`.
@@ -131,46 +74,15 @@ impl WriteOutcome {
     }
 }
 
-/// Object-safe surface for upload backends. `Send + Sync` so a single `Arc` can be shared
-/// across parallel chunk workers (one OpenDAL/HTTP stack per export, not one Tokio runtime per chunk).
+/// Object-safe surface for upload backends.
 pub trait Destination: Send + Sync {
-    /// Write `local_path` to `remote_key`, returning what the store reported
-    /// about the stored object (see [`WriteOutcome`]).
+    /// Write `local_path` to `remote_key`, returning what the store reported about the stored object (see [`WriteOutcome`]).
     fn write(&self, local_path: &Path, remote_key: &str) -> Result<WriteOutcome>;
 
     /// Describe the operational guarantees of this destination backend.
-    ///
-    /// Called at runtime via `log_capabilities` in all pipeline entry points (single,
-    /// chunked/exec, chunked/mod) to log backend semantics and warn when a non-retry-safe
-    /// destination is configured with retries.
-    ///
-    /// State and manifest writes (ADR-0001 invariants I2–I4) must happen only after
-    /// `write()` succeeds AND the backend's `commit_protocol` confirms the output is
-    /// durably committed.  For `Atomic` and `FinalizeOnClose` backends this means after
-    /// `write()` returns `Ok(())`; for `Streaming` there is no safe moment.
     fn capabilities(&self) -> DestinationCapabilities;
 
-    // ── Read-side surface (ADR-0013 / Phase A for ADR-0012 M5/M8) ──────────
-    //
-    // Every cloud-or-local-file destination needs to be readable so that
-    // post-run `--validate` (M5), `--reconcile` (M5 + source compare), and
-    // `--resume` (M8 decision matrix) can inspect the prefix without keeping
-    // a parallel local cache.  Streaming destinations (stdout) have no
-    // coherent prefix and must surface a clear "unsupported" error from
-    // every read method — the manifest writer already short-circuits the
-    // streaming case (`SkippedStreaming`), so callers should never reach
-    // these methods on stdout in practice.
-    //
-    // Default implementations return "unsupported" so adding a new backend
-    // doesn't have to opt in immediately; the readers will surface the
-    // gap explicitly the first time they need it.
-
     /// List every object at or below `prefix`, in **unspecified** order.
-    ///
-    /// `prefix` is relative to the destination root, mirrors the `remote_key`
-    /// shape of [`write`].  Empty `prefix` lists everything under the root.
-    /// Implementations may walk recursively (local FS) or use a single
-    /// listing call (S3/GCS object stores).
     fn list_prefix(&self, prefix: &str) -> Result<Vec<ObjectMeta>> {
         let _ = prefix;
         crate::rivet_bail!(
@@ -179,9 +91,7 @@ pub trait Destination: Send + Sync {
         )
     }
 
-    /// Read the full body of `key` into memory.  Used for small artifacts
-    /// only (`manifest.json`, `_SUCCESS`).  Per-part reads should go through
-    /// a future streaming reader if and when `--validate --deep` lands.
+    /// Read the full body of `key` into memory.
     fn read(&self, key: &str) -> Result<Vec<u8>> {
         let _ = key;
         crate::rivet_bail!(
@@ -190,10 +100,7 @@ pub trait Destination: Send + Sync {
         )
     }
 
-    /// Stat `key`, returning `None` if the object does not exist and the
-    /// underlying backend can disambiguate "absent" from a hard error.
-    /// Implementations that cannot disambiguate must surface the underlying
-    /// error rather than swallow it as `None`.
+    /// Stat `key`, returning `None` if the object does not exist and the underlying backend can disambiguate "absent" from a hard error.
     fn head(&self, key: &str) -> Result<Option<ObjectMeta>> {
         let _ = key;
         crate::rivet_bail!(
@@ -212,19 +119,6 @@ pub trait Destination: Send + Sync {
     }
 
     /// Move `from` to `to` at the destination prefix.
-    ///
-    /// ADR-0012 M9 quarantine: a part the resume preamble can't reuse
-    /// (size drift, fingerprint mismatch, untracked surplus) gets
-    /// moved out of the way to `_quarantine/<run_id>/<original-name>`
-    /// so the next write doesn't have to share the prefix with stale
-    /// data, and so a future operator can investigate.
-    ///
-    /// Best-effort semantics: the caller treats every failure as
-    /// non-fatal (M9: "never bail on a quarantine failure").  The
-    /// operation is allowed to be non-atomic on object stores
-    /// (copy + delete inside opendal's `rename`); a partial failure
-    /// leaves the object reachable at both paths and is a
-    /// "clutter problem, not a correctness problem" per the ADR.
     fn r#move(&self, from: &str, to: &str) -> Result<()> {
         let _ = (from, to);
         crate::rivet_bail!(
@@ -234,13 +128,7 @@ pub trait Destination: Send + Sync {
     }
 }
 
-/// Log destination capabilities at DEBUG level and emit a WARN when the backend is not
-/// retry-safe but retries are configured.  Call once per export after `create_destination`.
-///
-/// `dest_kind` names the backend in the WARN so the operator knows which
-/// destination needs cleanup.  Local writes are temp-then-rename and report
-/// `retry_safe: true`, so the WARN can fire only for genuinely unsafe
-/// backends (stdout's stream cannot be reverted).
+/// Log destination capabilities at DEBUG level and emit a WARN when the backend is not retry-safe but retries are configured.
 pub fn log_capabilities(
     export_name: &str,
     dest: &dyn Destination,
@@ -279,19 +167,8 @@ pub fn create_destination(config: &DestinationConfig) -> Result<Box<dyn Destinat
 }
 
 /// Build a destination for a preflight connectivity probe (`rivet doctor`).
-///
-/// Identical to [`create_destination`] except cloud backends (S3/GCS/Azure)
-/// are constructed with the OpenDAL retry budget disabled (`max_times = 0`,
-/// single attempt). A probe against an unreachable endpoint must FAIL FAST
-/// — inheriting the export's 5-attempt escalating backoff would block doctor
-/// for ~10s and spew transient-retry WARN noise before the `[FAIL]` line.
-///
-/// Local and stdout backends have no retry layer, so they fall through to the
-/// same construction `create_destination` uses; the probe distinction is
-/// meaningful only for the OpenDAL-backed stores.
 pub fn create_destination_for_probe(config: &DestinationConfig) -> Result<Box<dyn Destination>> {
     use crate::config::DestinationType;
-    // No retries on the probe path: a single attempt, then surface the error.
     const PROBE_MAX_RETRIES: usize = 0;
     match config.destination_type {
         DestinationType::S3 => Ok(Box::new(s3::S3Destination::new_with_retries(
@@ -306,15 +183,11 @@ pub fn create_destination_for_probe(config: &DestinationConfig) -> Result<Box<dy
             config,
             PROBE_MAX_RETRIES,
         )?)),
-        // No OpenDAL retry layer to disable — same path as a real export.
         DestinationType::Local | DestinationType::Stdout => create_destination(config),
     }
 }
 
-/// A multi-table stream lands each table under its own sub-prefix of the
-/// export's destination (`<base>/<table>/`), so every table's prefix is
-/// self-describing (its own parts + `manifest.json` + `_SUCCESS`), exactly like
-/// N single-table exports — minus the N−1 extra slots/connections.
+/// A multi-table stream lands each table under its own sub-prefix of the export's destination (`<base>/<table>/`), so every table's prefix is self-describing (its own parts + `manifest.json` + `_SUCCESS`), exactly like N single-table exports.
 pub(crate) fn dest_for_table(
     base: &crate::config::DestinationConfig,
     table: &str,
@@ -326,11 +199,6 @@ pub(crate) fn dest_for_table(
             d.path = Some(format!("{}/{}", p.trim_end_matches('/'), table));
         }
         crate::config::DestinationType::Stdout => {}
-        // Cloud destinations: extend the key prefix. Cloud prefixes are
-        // LITERAL key prefixes — the destination concatenates `prefix + key`
-        // with no separator (the docs' `prefix: exports/` convention) — so the
-        // sub-prefix must supply both its slashes itself, or every object
-        // lands as a mangled flat key (`<prefix>/<table>cdc-….parquet`).
         _ => {
             let pfx = d.prefix.take().unwrap_or_default();
             let base = pfx.trim_end_matches('/');
@@ -347,13 +215,7 @@ pub(crate) fn dest_for_table(
 #[cfg(test)]
 mod tests {
 
-    /// One answer for "is there anything at rest here", asserted against the
-    /// protocol every REAL destination reports — not against the enum in the
-    /// abstract, because the thing that would break is a destination whose
-    /// protocol stops matching what the pipeline assumes about it.
-    ///
-    /// Seven call sites depend on this; before it existed each compared against
-    /// `Streaming` itself and every one of those comparisons survived the suite.
+    /// One answer for "is there anything at rest here", asserted against the protocol every REAL destination reports.
     #[test]
     fn only_a_streaming_destination_leaves_nothing_at_rest() {
         use super::WriteCommitProtocol as P;
@@ -372,9 +234,6 @@ mod tests {
              about — every guard that probes a destination must skip it"
         );
 
-        // The real destinations, so the enum arms above are not graded in the
-        // abstract: a destination whose protocol changed would break the seven
-        // call sites while the arms above stayed green.
         let tmp = tempfile::tempdir().expect("tempdir");
         let of = |t: crate::config::DestinationType, path: Option<String>| {
             let cfg = crate::config::DestinationConfig {
@@ -403,18 +262,7 @@ mod tests {
 
     use super::*;
 
-    /// The not-retry-safe WARN must not fire for a LOCAL destination — and the
-    /// mechanism is not a demotion inside `log_capabilities`, which has no
-    /// per-kind branch at all. It is that `LocalDestination` genuinely reports
-    /// `retry_safe: true`, because temp-then-rename leaves nothing at the final
-    /// key on failure. That claim is the thing worth pinning.
-    ///
-    /// The previous test called `log_capabilities` with a HAND-BUILT
-    /// `streaming_unsafe()` stub and asserted NOTHING — no `should_panic`, no log
-    /// capture. It proved the function does not panic, while its name promised a
-    /// demotion that does not exist. Flipping `local.rs`'s `retry_safe` to false
-    /// left it green, and every local run would then nag about partial artifacts
-    /// that temp-then-rename makes impossible.
+    /// The not-retry-safe WARN must not fire for a LOCAL destination.
     #[test]
     fn a_local_destination_is_retry_safe_so_the_partial_artifact_warning_cannot_fire() {
         let cfg = crate::config::DestinationConfig {
@@ -435,12 +283,7 @@ mod tests {
             !caps.partial_write_risk,
             "…and for the same reason there is no partial-write window"
         );
-        // The warn branch is `!retry_safe && max_retries > 0`, so the assertion
-        // above IS the condition that keeps it silent — restating it as
-        // `!(!retry_safe && 3 > 0)` would add a line and no coverage.
     }
-
-    // ── create_destination — local roundtrip ─────────────────────────────────
 
     #[test]
     fn create_destination_local_succeeds() {
@@ -456,8 +299,6 @@ mod tests {
         assert_eq!(caps.commit_protocol, WriteCommitProtocol::Atomic);
         assert!(caps.idempotent_overwrite);
     }
-
-    // ── create_destination — stdout succeeds ─────────────────────────────────
 
     #[test]
     fn create_destination_stdout_succeeds() {
@@ -487,12 +328,6 @@ mod dest_for_table_tests {
         assert_eq!((d.path, d.prefix), (None, None));
     }
 
-    // RED test for the finding: cloud prefixes are LITERAL key prefixes —
-    // `cloud.rs` concatenates `prefix + key` with NO separator (hence the
-    // docs' `prefix: exports/` convention). The multi-table sub-prefix must
-    // therefore supply both slashes itself; without the trailing one, every
-    // object of a `tables:` export lands as `<prefix>/<table>cdc-….parquet`
-    // (mangled flat keys) — observed live on a real GCS bucket.
     #[test]
     fn cloud_table_sub_prefix_carries_its_own_trailing_slash() {
         let gcs = DestinationConfig {
@@ -503,14 +338,12 @@ mod dest_for_table_tests {
         };
         let d = dest_for_table(&gcs, "orders");
         let prefix = d.prefix.unwrap();
-        // The exact join the cloud destination performs:
         let key = format!("{prefix}{}", "cdc-r-000000.parquet");
         assert_eq!(
             key, "exports/orders/cdc-r-000000.parquet",
             "cloud keys are prefix ++ name — the sub-prefix must end with '/'"
         );
 
-        // A trailing slash on the configured prefix must not double up.
         let gcs2 = DestinationConfig {
             prefix: Some("exports/".into()),
             ..gcs.clone()
@@ -520,7 +353,6 @@ mod dest_for_table_tests {
             "exports/orders/"
         );
 
-        // No configured prefix: the table becomes the whole prefix.
         let gcs3 = DestinationConfig {
             prefix: None,
             ..gcs
