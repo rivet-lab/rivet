@@ -85,7 +85,7 @@ The cursor column must be:
 - NOT NULL: a `cursor_column` that can hold NULL is refused at plan, `check`, `validate`, `doctor` and `run` with `RIVET_PLAN_CURSOR_NULLABLE` (exit 5), because the cursor delivers the NULL rows once and never again
 - Of a type the cursor can render (integer, decimal, text, date, timestamp, uuid): a boolean, time of day, binary, array or sub-microsecond-unit column is refused, by `doctor` too, with `RIVET_PLAN_CURSOR_TYPE_UNSUPPORTED` (exit 5)
 
-Nullability and type are read from the server's description of the export query. A column the server cannot trace to a table column (an expression, a view column on PostgreSQL, a SQL Server or Oracle query over a join or a subquery) is not claimed NOT NULL or nullable; on SQL Server and Oracle a column is claimed nullable only when the catalog of the one table the query reads says so, and a source that cannot be asked is warned about, not refused.
+Nullability and type are read from the server's description of the export query. A column the server cannot trace to a table column (an expression, a SQL Server or Oracle query over a join or a subquery) is not claimed NOT NULL or nullable; a PostgreSQL view column is followed through the view's definition to its base column. On SQL Server and Oracle a column is claimed nullable only when the query selects a table column as it is (`c`, `t.c`, `c AS x`, `*`) and the catalog of the one table the query reads says that column is nullable; an expression aliased to a nullable column's name (`COALESCE(c, d) AS c`) is not claimed, and a source that cannot be asked is warned about, not refused.
 
 ## Batch size and tuning
 
