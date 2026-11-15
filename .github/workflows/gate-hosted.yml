@@ -14,7 +14,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: never
   NO_COLOR: "1"
-  LIVE_SLICES: "3"
+  LIVE_SLICES: "5"
 
 jobs:
   plan:
@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
-      matrix: ${{ steps.resolve.outputs.matrix }}
+      matrix: ${{ steps.plan.outputs.matrix }}
     steps:
       - id: resolve
         env:
@@ -36,13 +36,25 @@ jobs:
           sha=$(gh api "repos/$REPO/commits/${INPUT_SHA:-$REF_SHA}" --jq .sha)
           [ "${#sha}" -eq 40 ]
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "matrix=$(python3 -c 'import json, os; print(json.dumps({"slice": list(range(int(os.environ["LIVE_SLICES"]) + 1))}))')" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.resolve.outputs.sha }}
+          persist-credentials: false
+
+      - id: plan
+        run: |
+          matrix=$(python3 -m dev.release_oracle.live_modules plan "$LIVE_SLICES")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   slice:
     name: slice ${{ matrix.slice }}
     needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 330
+    permissions:
+      contents: read
+      checks: write
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
@@ -61,6 +73,14 @@ jobs:
         with:
           stack: lean
 
+      - name: Sample the runner off the runner
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SAMPLER_SHA: ${{ needs.plan.outputs.sha }}
+          SLICE: ${{ matrix.slice }}
+          RUN_ID: ${{ github.run_id }}.${{ github.run_attempt }}
+        run: python3 .github/scripts/runner_sampler.py start "slice $SLICE run $RUN_ID" out
+
       - name: Grade the slice
         env:
           SLICE: ${{ matrix.slice }}
@@ -69,16 +89,16 @@ jobs:
           CARGO_BUILD_JOBS: "2"
           CARGO_PROFILE_DEV_DEBUG: line-tables-only
         run: |
-          mkdir -p out
           set +e
-          (while sleep 120; do date -u +%T; free -m | sed -n 2p; docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' | sort -k2 -h | tail -4; done) &
-          sampler=$!
           make release-oracle-hosted-half ARGS="--live-shard $SLICE/$LIVE_SLICES" 2>&1 | tee out/gate.log
           rc=${PIPESTATUS[0]}
-          kill "$sampler"
           [ -s dev/release-oracle/timings.jsonl ] && tail -n 1 dev/release-oracle/timings.jsonl > out/record.json
           echo "$rc" > out/exit-code.txt
           exit "$rc"
+
+      - name: Stop the sampler
+        if: always()
+        run: python3 .github/scripts/runner_sampler.py stop out target/gate-failures
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
