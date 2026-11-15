@@ -1,14 +1,4 @@
-//! Config-driven load planning — derive a BigQuery load (native schema, table,
-//! partition, source URIs) from a rivet export config, so a client never
-//! hand-types column types. The schema comes from the load spec `rivet run`
-//! recorded in the state DB (`preflight::load_type_reports`), so the load never
-//! reads the source; the table/partition/destination come from the parsed config.
-//!
-//! Until 0.24.x this shelled out to `rivet check --json` and parsed its stdout.
-//! A subprocess resolves types with whatever binary it names, so version skew
-//! was a live failure mode — `--rivet-bin` existed only to mitigate it, and one
-//! config was parsed TWICE (once here, once in the child) with different
-//! `${VAR}` resolution. Both are gone: one parse, one resolver, no argv.
+//! Config-driven load planning — derive a BigQuery load (native schema, table, partition, source URIs) from a rivet export config, so a client never hand-types column types.
 
 use crate::types::target::{TargetColumnSpec, TargetType};
 use anyhow::{Context, Result};
@@ -24,8 +14,7 @@ pub use crate::plan::load_settings::{
 };
 pub(crate) use crate::plan::load_settings::{cdc_layout, overlay};
 
-/// A resolved `partition:`: what the table is partitioned on, the expression that
-/// creates it, and its options.
+/// A resolved `partition:`: what the table is partitioned on, the expression that creates it, and its options.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TablePartition {
     pub key: PartitionKey,
@@ -60,8 +49,7 @@ impl PartitionKey {
         }
     }
 
-    /// Whether the key is a load date: the load time, or rivet's extraction stamp
-    /// `_rivet_exported_at`, which every row of a run shares.
+    /// Whether the key is a load date: the load time, or rivet's extraction stamp `_rivet_exported_at`, which every row of a run shares.
     pub fn is_load_date(&self) -> bool {
         match self {
             PartitionKey::Time { column: None, .. } => true,
@@ -177,7 +165,7 @@ fn source_table_of(export: &crate::config::ExportConfig, unit: Option<&str>) -> 
         .unwrap_or_else(|| export.name.clone())
 }
 
-/// Which of a config's tables `rivet load` / `rivet compact` takes: every one, or those `--export` / `--table` name.
+/// Which of a config's tables `rivet load` / `rivet compact` takes.
 #[derive(Debug, Clone, Default)]
 pub struct Selection {
     pub export: Option<String>,
@@ -255,13 +243,9 @@ fn units_of(export: &crate::config::ExportConfig) -> Vec<Option<String>> {
 /// What a rivet config resolves to for a BigQuery load.
 #[derive(Debug, Clone)]
 pub struct LoadPlan {
-    /// The declared export NAME (config `name:`), distinct from the warehouse
-    /// `table` — error messages address the export the operator wrote, not the
-    /// table it resolves to (dogfood LOW: require_pk labelled the table as the
-    /// export).
+    /// The declared export NAME (config `name:`), distinct from the warehouse `table`.
     pub export_name: String,
-    /// The captured source table for a multiplex `tables:` export, `None` for a
-    /// single-relation one — the `unit` the state DB keys its load specs by.
+    /// The captured source table for a multiplex `tables:` export, `None` for a single-relation one.
     pub unit: Option<String>,
     /// The source the export reads (`SourceConfig::state_key`), the third part of a load spec's key.
     pub source_key: String,
@@ -269,18 +253,15 @@ pub struct LoadPlan {
     /// The resolved `load.partition` of the table the load writes.
     pub partition: Option<TablePartition>,
     pub specs: Vec<TargetColumnSpec>,
-    /// `gs://bucket/base/` — the destination prefix up to the `{partition}`
-    /// token, i.e. the root to list source Parquet under.
+    /// `gs://bucket/base/` — the destination prefix up to the `{partition}` token, i.e.
     pub gcs_prefix: String,
-    /// The export's GCS destination (bucket + auth) — the native opendal client
-    /// the load layer lists / reads / deletes through.
+    /// The export's GCS destination (bucket + auth).
     pub destination: crate::config::DestinationConfig,
     /// The `load:` target from the same config.
     pub load: LoadSection,
     /// The export's mode → the load strategy (see [`LoadMode`]).
     pub mode: LoadMode,
-    /// The incremental cursor column (from `cursor_column:`) — the dedup view's
-    /// latest-per-PK ordering key. `Some` only for [`LoadMode::Incremental`].
+    /// The incremental cursor column (from `cursor_column:`) — the dedup view's latest-per-PK ordering key.
     pub cursor_column: Option<String>,
     /// Whether each run continues past the last key (`plan::build::continued_key`), so carries only new keys.
     pub continued_key: bool,
@@ -288,15 +269,11 @@ pub struct LoadPlan {
     pub pk: Vec<String>,
     /// The clustering of the table the load writes.
     pub clustering: Clustering,
-    /// The run this plan was typed from and the newest `finished_at` the pin listed —
-    /// `(run_id, finished_at)`; a run that finishes after it is refused for this cycle.
+    /// The run this plan was typed from and the newest `finished_at` the pin listed.
     pub pinned_run: Option<(String, String)>,
-    /// Where a CDC table's baseline lives (see [`CdcLayout`]); `LogAndView` for
-    /// every non-CDC mode.
+    /// Where a CDC table's baseline lives (see [`CdcLayout`]); `LogAndView` for every non-CDC mode.
     pub layout: CdcLayout,
-    /// Whether the base carries `__is_deleted`. A stream expresses deletes, so it
-    /// defaults ON there and OFF for a query-based export; `load.deleted_flag`
-    /// decides when written.
+    /// Whether the base carries `__is_deleted`.
     pub deleted_flag: bool,
     /// Columns whose Parquet name has Cyrillic look-alikes, as (file name, warehouse name).
     pub renames: Vec<Rename>,
@@ -330,7 +307,7 @@ impl LoadPlan {
         )
     }
 
-    /// Refuses a source column named like one rivet owns in a delta load's changelog and base tables; `full` builds none.
+    /// Refuses a source column named like one rivet owns in a delta load's changelog and base tables.
     fn reserved_column_refusal(&self) -> Result<()> {
         if matches!(self.mode, LoadMode::Full) {
             return Ok(());
@@ -364,8 +341,7 @@ impl LoadPlan {
     }
 }
 
-/// The clustering columns of the table a load writes, and where they came from: a
-/// change log follows a `Written` clustering and keeps its own under `Auto`.
+/// The clustering columns of the table a load writes, and where they came from.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Clustering {
     /// Resolved from `cluster_by: auto` — the recorded source key, or nothing.
@@ -387,34 +363,12 @@ impl Clustering {
     }
 }
 
-/// Resolve a rivet config into **one [`LoadPlan`] per export** — the shared
-/// top-level `load:` target plus each export's own table / partition / GCS
-/// destination / native schema. The type resolver returns one report per
-/// export, so a multi-table config produces a plan per table, all pointed
-/// at the same warehouse target.
-/// Resolve a load's staging prefix from an export destination.
-///
-/// Expands the same `{date}`/`{export}`/`{table}` placeholders the export wrote
-/// with (`PlaceholderContext::for_today`) so the load lists the ACTUAL prefix
-/// (`exports/orders/`) rather than the literal config token (`exports/{export}/`)
-/// — without this the load found no manifests under the unexpanded path and
-/// reported "up to date" having loaded nothing (#100). `{partition}` is stripped
-/// (its per-partition sub-prefixes live below).
-///
-/// A `{date}` in the load-listed BASE is refused up front: it expands to the
-/// LOAD day, so a nightly export + an after-midnight load list DIFFERENT prefixes
-/// and the load silently reports "up to date" (bughunt HIGH — the same #100
-/// silent-no-load class the expansion above closes for the static tokens, left
-/// open for the day-specific one). `{run_id}` (and any token still unresolved
-/// after expansion) fails loud the same way.
+/// Resolve a rivet config into **one [`LoadPlan`] per export**.
 fn resolve_load_prefix(
     dest: &crate::config::DestinationConfig,
     export_name: &str,
     bucket: &str,
 ) -> Result<String> {
-    // Refuse a day-specific `{date}` in the load base BEFORE expansion — once
-    // expanded to the load day, the `contains('{')` guard below can never see it,
-    // so an export written on a different UTC day is silently missed.
     let raw_prefix = dest.prefix.as_deref().unwrap_or("");
     let raw_base = raw_prefix.split("{partition}").next().unwrap_or(raw_prefix);
     if raw_base.contains("{date}") {
@@ -450,22 +404,7 @@ fn resolve_load_prefix(
     ))
 }
 
-/// The load prefix of ONE table of a multiplex `tables:` CDC stream, given the
-/// export's resolved base prefix.
-///
-/// The extract fans each captured table out under `<base>/<table>/` — one
-/// `manifest.json` + `_SUCCESS` per table, with the initial snapshot nested a
-/// level below as `<base>/<table>/snapshot/` — and `rivet validate` descends
-/// exactly that. So the load must list exactly that too, and the sub-prefix is
-/// produced by the WRITER's own function ([`crate::pipeline::cdc_job::dest_for_table`])
-/// rather than a second concatenation rule here: a cloud prefix is a LITERAL key
-/// prefix (the destination concatenates `prefix + key` with no separator), so a
-/// sub-prefix that forgets to supply its own slashes lists a mangled flat key and
-/// finds nothing — the silent "up to date, loaded nothing" shape.
-///
-/// Applied AFTER [`resolve_load_prefix`] rather than to the raw destination, so
-/// the placeholder expansion and the `{partition}` strip both see the base the
-/// export wrote, and the table segment can never land below a stripped token.
+/// The load prefix of ONE table of a multiplex `tables:` CDC stream, given the export's resolved base prefix.
 fn table_load_prefix(base_uri: &str, table: &str) -> Result<String> {
     let (bucket, base) = crate::load::split_object_uri(base_uri)?;
     let sub = crate::destination::dest_for_table(
@@ -500,11 +439,6 @@ fn load_block(cfg: &crate::config::Config) -> Result<crate::config::load::LoadSe
 }
 
 pub fn plan_loads(config_path: &str, selection: &Selection) -> Result<Vec<LoadPlan>> {
-    // `Config::load`, not a raw `from_yaml`: it resolves `${VAR}`/`--param`
-    // placeholders exactly as the `rivet check` child did. The old code parsed
-    // the file TWICE with two different resolutions — an unexpanded `${BUCKET}`
-    // in the parent's copy pointed the load at a literal-token prefix while the
-    // child (which resolved it) reported types for the real one.
     let cfg = crate::config::Config::load(config_path).context("parsing rivet config")?;
     if cfg.exports.is_empty() {
         crate::rivet_bail!(
@@ -514,7 +448,6 @@ pub fn plan_loads(config_path: &str, selection: &Selection) -> Result<Vec<LoadPl
     }
     selection.check(&cfg)?;
 
-    // The `load:` target from the same config, shared by every export.
     let load = load_block(&cfg)?;
 
     let target = crate::types::target::ExportTarget::parse(load.target.name())
@@ -526,13 +459,7 @@ pub fn plan_loads(config_path: &str, selection: &Selection) -> Result<Vec<LoadPl
     };
     let (reports, keys) = crate::preflight::load_type_reports(&cfg, &state, target, &keep)?;
 
-    // Deferred: this plan is typed from the BY-NAME spec, which the load then pins
-    // to the run it consumes (`pin::pin_plan_to_its_run`) — a same-named
-    // export of another config may have written that row, and its columns are not
-    // this table's. The fit is checked strictly after the pin, or by
-    // `check_spec_fit` when no pin is possible.
     let mut plans = build_plans_keyed(&cfg, &load, reports, &keys, SpecFit::Deferred)?;
-    // The source the specs were read under, so the load pins its runs' specs under the same one.
     for plan in &mut plans {
         plan.source_key = state.spec_source(
             cfg.source.try_state_key().ok(),
@@ -552,19 +479,11 @@ fn load_cursor_column<'a>(
 }
 
 /// Whether the BASE table this export lands carries `__is_deleted` as data.
-///
-/// Only a base-and-buffer layout has a base to carry it: under the log-and-view layout the
-/// flag lives in the changelog, and a base that is really a view cannot hold a column at
-/// all. Named and offline-graded because every caller — the CDC baseline leg, the
-/// incremental whole pass and the compaction — is a live-only body, where an inline
-/// `&&` is a decision the mutation corpus excludes with nothing asked in return. Two
-/// of the three know the layout statically and pass `true`; the third computes it.
 pub fn base_carries_delete_flag(base_and_buffer: bool, deleted_flag: bool) -> bool {
     base_and_buffer && deleted_flag
 }
 
-/// Whether a plan's `pk` / `cluster_by` / `partition` must name columns of the
-/// spec it is built from now, or may be checked later against the pinned run's.
+/// Whether a plan's `pk` / `cluster_by` / `partition` must name columns of the spec it is built from now, or may be checked later against the pinned run's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpecFit {
     Strict,
@@ -573,8 +492,7 @@ pub enum SpecFit {
 
 const NOT_A_COLUMN: &str = "is not a column of the export";
 
-/// The strict fit check a deferred plan still owes: every key, clustering and
-/// partition column is a column of the spec it is typed from.
+/// The strict fit check a deferred plan still owes.
 pub fn check_spec_fit(plan: &LoadPlan) -> Result<()> {
     if seeded!(
         "reserved-column-checked-on-the-unpinned-plan-only",
@@ -609,20 +527,7 @@ pub fn check_spec_fit(plan: &LoadPlan) -> Result<()> {
     Ok(())
 }
 
-/// The **pure core** of [`plan_loads`]: map the resolver's type reports onto
-/// one [`LoadPlan`] per export, given the config and the shared `load:` section.
-///
-/// No I/O — the source connection and filesystem work is done by [`plan_loads`],
-/// and everything they produced arrives in the args. That makes the per-export
-/// resolution unit-testable without a source: the export→report name match, the
-/// report-row→[`TargetColumnSpec`] rebuild, [`ExportMode`]→[`LoadMode`] mapping,
-/// the `gs://` prefix, the per-export `load:` override, and the duplicate-target
-/// guard.
-///
-/// The reports arrive as the resolver's OWN struct — it used to be a narrower
-/// `Deserialize` mirror of `rivet check --json`, and a mirror can only carry the
-/// keys someone remembered to declare, which is how `note` / `cast_sql` /
-/// `autoload_type` came to be dropped on the floor.
+/// The **pure core** of [`plan_loads`]: map the resolver's type reports onto one [`LoadPlan`] per export, given the config and the shared `load:` section.
 fn build_plans_keyed(
     cfg: &crate::config::Config,
     load: &LoadSection,
@@ -643,24 +548,10 @@ fn build_plans_keyed(
                     report.export
                 )
             })?;
-        // A multiplex `tables:` CDC export is N tables through ONE export, and the
-        // resolver hands us one report per table (`report.table`). Each is its own
-        // warehouse table under its own `<base>/<table>/` sub-prefix — which is why
-        // the fan-out has to happen HERE and not be left to the export name: a
-        // single plan per export would point every table at one warehouse table and
-        // one BASE prefix, whose recursive manifest listing sweeps in every sibling
-        // table's parts. That merges N source tables into one warehouse table with
-        // every count agreeing (#252).
         let source_table = source_table_of(export, report.table.as_deref());
         let table = warehouse_table_name(&source_table, &export.name);
 
         let dest = &export.destination;
-        // Round-6 HIGH: the load layer builds a GCS client UNCONDITIONALLY, so a
-        // `type: s3` destination with a `load:` block silently listed a
-        // SAME-NAMED GCS bucket (stranger-claimable) — empty → permanently
-        // "up to date", exit 0; cleanup/gc would target that foreign prefix.
-        // Both warehouse loaders are GCS-only (Snowflake rewrites gs://→gcs://),
-        // so refuse anything else loudly at plan time.
         if !load.target.reads_from(dest.destination_type) {
             crate::rivet_bail!(
                 crate::error::codes::LOAD_DESTINATION_TYPE_UNSUPPORTED,
@@ -686,20 +577,11 @@ fn build_plans_keyed(
             None => base_prefix,
         };
 
-        // The report row IS the resolver's `TargetColumnSpec`, split across the
-        // report's optional fields — so rebuild the whole spec, not the two
-        // fields the old JSON mirror happened to declare. `autoload_type` is
-        // carried only when it DIVERGES (`collect_report`'s rule), so an absent
-        // one means "same as native".
         let landings = crate::preflight::key_admission::landings(&report.columns);
         let mut specs: Vec<TargetColumnSpec> = report
             .columns
             .into_iter()
             .map(|c| {
-                // Both are `Some` together for every column resolved against a
-                // target, and the load always resolves WITH one. Named loudly
-                // rather than defaulted: a defaulted `Ok` would walk an
-                // unmappable column straight past `validate_specs`.
                 let (Some(target_type), Some(status)) = (c.target_type, c.target_status) else {
                     crate::rivet_bail!(
                         crate::error::codes::INTERNAL_LOAD_INVARIANT,
@@ -729,21 +611,6 @@ fn build_plans_keyed(
         let mut refusal = fold.as_ref().err().map(|e| format!("{e:#}"));
         let (renames, rename_warnings) = fold.unwrap_or_default();
 
-        // The meta columns rivet writes at EXTRACTION are in every Parquet part
-        // but absent from the column report, which the type resolver builds from
-        // the SOURCE catalog. Without a spec the created table simply lacks the
-        // column and the very first load fails on a schema mismatch — after the
-        // extract has already run. So EVERY enabled meta column needs one; they
-        // are resolved together because a spec for one and not the other is the
-        // same bug twice (`_rivet_row_hash` had it fixed while
-        // `_rivet_exported_at`, written by the identical seam, did not).
-        //
-        // Types go through the same per-target resolver every other column does
-        // rather than a hardcoded literal, so they cannot drift from the
-        // warehouse's own types (the hash: BigQuery INT64, Snowflake
-        // NUMBER(38,0), ClickHouse Int64).
-        // Order mirrors `enrich_schema`'s (exported_at, then row_hash) so the spec
-        // list matches the Parquet's column order.
         let mut meta_specs: Vec<(&str, crate::types::RivetType)> = Vec::new();
         if export.meta_columns.exported_at {
             meta_specs.push((
@@ -770,17 +637,8 @@ fn build_plans_keyed(
             }
         }
 
-        // Complete-snapshot modes → overwrite the latest run; delta modes → their
-        // own append path. Exhaustive (no `_`) on purpose: a future delta-style
-        // ExportMode then fails to COMPILE here until someone picks its load
-        // semantics, instead of silently defaulting to OVERWRITE (the
-        // incremental-overwrite data-loss class).
         let mode = load_mode_of(cfg, export);
         if matches!(export.mode, crate::config::ExportMode::TimeWindow) {
-            // Full OVERWRITE by design — and said out loud (round-6): each
-            // load replaces the warehouse table with the CURRENT window, so
-            // history past `days_window` is capped, not accumulated. An
-            // accumulation-minded operator loses history silently otherwise.
             eprintln!(
                 "  note: export `{}` is mode: time_window — each load OVERWRITES the \
                  warehouse table with the current window; rows older than the window \
@@ -789,9 +647,6 @@ fn build_plans_keyed(
                 export.name
             );
         }
-        // The shared `load:`, this export's block, and — for a captured table of a
-        // multiplex stream — that table's block. One overlay, shared with the readers the
-        // extract calls, so both sides answer the same question the same way.
         let eff_load = overlay(load, export, unit.as_deref());
         let recorded_pk: Option<Vec<String>> = keys
             .get(&(export.name.clone(), unit))
@@ -833,8 +688,6 @@ fn build_plans_keyed(
                 eff_load.layout,
                 eff_load.target.base_support(),
             ),
-            // A CDC stream can express a delete, a query cannot — so the flag is a
-            // column a batch base does not pay for unless its operator asks.
             deleted_flag: eff_load
                 .deleted_flag
                 .unwrap_or(matches!(mode, LoadMode::Cdc)),
@@ -1025,7 +878,7 @@ fn unclustered_renames(cluster_by: &mut Vec<String>, renames: &[Rename]) -> Vec<
     dropped
 }
 
-/// Refuses a partition or cluster column that is itself renamed: the staging table the rename needs cannot be shaped on it.
+/// Refuses a partition or cluster column that is itself renamed.
 fn refuse_renamed_shape_column(
     export: &str,
     renames: &[(String, String)],
@@ -1048,14 +901,7 @@ fn refuse_renamed_shape_column(
     Ok(())
 }
 
-/// `plan` rebuilt from `spec` — the columns and key ONE run recorded — instead of
-/// the by-name spec [`plan_loads`] typed it from.
-///
-/// The by-name row (`export_load_spec`) is last-writer-wins: on a state DB shared
-/// by two configs whose exports share a NAME, the other config's run can retype
-/// this table between the run and its load — a `_id` key on a PostgreSQL table,
-/// another engine's column types in the DDL. The load therefore pins each plan to
-/// the spec of the run it is about to consume, which only that run wrote.
+/// `plan` rebuilt from `spec` — the columns and key ONE run recorded.
 pub fn retype_plan(
     cfg: &crate::config::Config,
     plan: &LoadPlan,
@@ -1087,7 +933,6 @@ pub fn retype_plan(
 }
 
 /// [`build_plans_keyed`] with no recorded keys.
-/// A resolved BigQuery plan for tests, so each can vary the one field it is about.
 #[cfg(test)]
 pub(crate) fn test_plan(mode: LoadMode, gcs_prefix: &str) -> LoadPlan {
     LoadPlan {
@@ -1137,8 +982,7 @@ fn build_plans(
     build_plans_keyed(cfg, load, reports, &RecordedKeys::new(), SpecFit::Strict)
 }
 
-/// Resolve `pk` and `cluster_by` for one export from its `load:` block, the key
-/// `rivet run` recorded, and the warehouse column types.
+/// Resolve `pk` and `cluster_by` for one export from its `load:` block, the key `rivet run` recorded, and the warehouse column types.
 fn resolve_keys(
     export: &str,
     load: &LoadSection,
@@ -1239,8 +1083,6 @@ fn resolve_partition(
     let Some(spec) = &load.partition else {
         return Ok(None);
     };
-    // Deferred: a partition column the BY-NAME spec lacks is not yet a refusal —
-    // the pinned run's spec decides, or `check_spec_fit` refuses.
     if fit == SpecFit::Deferred
         && let Some(col) = spec.form.column()
         && !specs.iter().any(|s| s.column_name == col)
@@ -1309,7 +1151,6 @@ fn resolve_partition(
 }
 
 /// Whether an hourly key with this expiry can outgrow BigQuery's per-table partition cap.
-/// The ClickHouse CDC warning for a partition column that is not a creation stamp (ADR-0035 CH8).
 fn moving_partition_warning(
     export: &str,
     target: &LoadTarget,
@@ -1368,35 +1209,10 @@ pub(crate) fn base_type(target_type: &TargetType) -> String {
         .to_ascii_uppercase()
 }
 
-/// Reject two exports that touch the SAME warehouse object. The `target:` is
-/// shared, so two exports whose `table:` (or `name:`) resolves alike land on one
-/// object — a full OVERWRITE would clobber what a cdc/incremental export appends
-/// a `<table>__changes` view over, and they'd share one ledger skip-set.
-///
-/// An append mode occupies TWO objects: `<table>` (the view) and
-/// `<table>__changes` (the log). Comparing plan tables alone missed a full
-/// export of a source table literally named `orders__changes` next to a CDC
-/// export of `orders` — different strings, one warehouse object, and the full
-/// load's OVERWRITE landed on the live change log. Pure + unit-testable.
+/// Reject two exports that touch the SAME warehouse object.
 fn reject_duplicate_target_tables(plans: &[(&str, LoadMode)]) -> Result<()> {
     let mut seen: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
     for (t, mode) in plans {
-        // Every warehouse name a load can CREATE belongs here, not just the target.
-        // `__staging` is the third: a whole-table pass whose Parquet exceeds one
-        // job's partition budget lands through `<t>__staging` — `DROP TABLE IF
-        // EXISTS`, refill, CLONE onto the target, `DROP TABLE` — and none of it is
-        // behind `ensure_own`, which gates the TARGET fqtn only. So a source table
-        // literally named `orders__staging` beside `orders` was destroyed by
-        // `orders`' own load, silently, both exports exiting 0. `__staging` is an
-        // ordinary schema name (dbt's package prefixes produce it), so this is a
-        // naming collision, not an exotic identifier.
-        //
-        // Reserved under EVERY mode, deliberately: `materialize` is reached from
-        // `load_one` (full), `load_one_incremental` (the first pass) AND
-        // `load_one_cdc_base` (the baseline leg), so the staging name is not
-        // full-only. A config holding both names is already broken today — the
-        // destruction happens whenever the sibling's load splits into batches — so
-        // refusing it loudly costs nothing that was working.
         let mut objects = vec![t.to_string(), format!("{t}__staging")];
         if !matches!(mode, LoadMode::Full) {
             objects.push(format!("{t}__changes"));
@@ -1418,12 +1234,7 @@ fn reject_duplicate_target_tables(plans: &[(&str, LoadMode)]) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the config's source engine into the CDC [`SourceEngine`] the dedup
-/// view's `__pos` parse is keyed on. One config has one source, so this is a
-/// job-wide property. MongoDB is supported too: its change stream carries a
-/// document `_id` (the dedup partition key) and an order-preserving `_data`
-/// resume token in `__pos`, so the current-state view applies just as it does to
-/// the relational engines.
+/// Resolve the config's source engine into the CDC [`SourceEngine`] the dedup view's `__pos` parse is keyed on.
 pub fn source_engine(config_path: &str) -> Result<crate::load::cdc::SourceEngine> {
     use crate::config::SourceType;
     use crate::load::cdc::SourceEngine;
@@ -1448,17 +1259,7 @@ pub fn source_engine(config_path: &str) -> Result<crate::load::cdc::SourceEngine
 mod tests {
     use crate::types::target::TargetStatus;
 
-    /// A schema-qualified source table must not leak its dot into the warehouse
-    /// address, and two schemas that share a table name must stay apart.
-    ///
-    /// The loaders build `{project}.{dataset}.{table}`, so `public.orders` made
-    /// four segments and BigQuery read the extra one as part of the dataset:
-    /// `Not found: Dataset rivet-data-tool:rivet_e2e.public` — a hard failure
-    /// naming a dataset the operator never wrote.
-    ///
-    /// The second assertion is the one that matters more: folding to `orders`
-    /// would have fixed the error and collapsed two schemas onto one warehouse
-    /// table, trading a loud failure for a silent overwrite.
+    /// A schema-qualified source table must not leak its dot into the warehouse address, and two schemas that share a table name must stay apart.
     #[test]
     fn a_schema_qualified_table_folds_instead_of_splitting_the_dataset() {
         assert_eq!(warehouse_table_name("public.orders", "e"), "public_orders");
@@ -1477,12 +1278,7 @@ mod tests {
 
     use super::*;
 
-    /// The delete flag is DATA on a base table, so only a layout that HAS a physical base
-    /// can carry it. Under log-and-view the name is a view, which holds no column of its
-    /// own — declaring the flag there must not put one in the file.
-    ///
-    /// Extracted from two live-only bodies (`load_one_incremental`, the CDC job's snapshot
-    /// synthesis) where the same `&&` sat inline and the mutation corpus excluded it.
+    /// The delete flag is DATA on a base table, so only a layout that HAS a physical base can carry it.
     #[test]
     fn a_base_carries_the_delete_flag_only_when_there_is_a_base_and_it_was_declared() {
         assert!(
@@ -1502,13 +1298,7 @@ mod tests {
         assert!(!base_carries_delete_flag(false, false));
     }
 
-    /// Folding a whole-table pass into the changelog is the log-and-view answer, where the
-    /// target name is a view and cannot be overwritten. Under base-and-buffer that same
-    /// pass IS the base and must land as a table, so it may never join the log.
-    ///
-    /// Only the layout is graded here. Whether a first pass EXISTS is carried by the
-    /// `Option` the caller filters, so it is the caller's `if let` — not this predicate —
-    /// and duplicating it as a parameter would put one decision in two places.
+    /// Folding a whole-table pass into the changelog is the log-and-view answer, where the target name is a view and cannot be overwritten.
     #[test]
     fn resolve_load_prefix_expands_deterministic_tokens_and_refuses_run_specific() {
         use crate::config::{DestinationConfig, DestinationType};
@@ -1519,25 +1309,16 @@ mod tests {
             ..Default::default()
         };
 
-        // {export}/{table} are deterministic → the load must list the ACTUAL
-        // prefix, not the literal token. (#100: the load listed `exports/{export}/`
-        // verbatim, found no manifests, and reported "up to date" — loaded nothing.)
         assert_eq!(
             resolve_load_prefix(&dest("exports/{export}/"), "orders", "BKT").unwrap(),
             "gs://BKT/exports/orders/"
         );
-        // {partition} is stripped; {table} is an alias for {export}.
         assert_eq!(
             resolve_load_prefix(&dest("e/{table}/{partition}/"), "orders", "BKT").unwrap(),
             "gs://BKT/e/orders/"
         );
-        // {date} in the load base is DAY-specific → refused (bughunt HIGH: it
-        // expanded to the LOAD day, so a cross-midnight load silently listed an
-        // empty prefix). See resolve_load_prefix_refuses_day_specific_date_in_the_base.
         assert!(resolve_load_prefix(&dest("d/{date}/{export}/"), "orders", "BKT").is_err());
 
-        // {run_id} is run-specific and unknowable here → refuse LOUD, never a
-        // literal-token listing that silently loads nothing.
         let err = resolve_load_prefix(&dest("e/{run_id}/"), "orders", "BKT").unwrap_err();
         assert!(
             err.to_string().contains("unresolved placeholder"),
@@ -1549,12 +1330,7 @@ mod tests {
     use crate::types::TypeFidelity;
     use crate::types::target::{BqType, ChType, ExportTarget, SfType, TargetInput};
 
-    /// A report row as `type_report::collect_report` builds one — from the
-    /// resolver's OWN [`TargetColumnSpec`], split across the row's optional
-    /// fields by that function's rule (`autoload_type` carried ONLY when it
-    /// diverges from the native type). This is the shape `plan_loads` now
-    /// receives in process, so the test feeds `build_plans` what the real
-    /// producer produces rather than a hand-typed subset of it.
+    /// A report row as `type_report::collect_report` builds one.
     fn row_from_spec(spec: &TargetColumnSpec) -> TypeReportRow {
         TypeReportRow {
             key_landing: Default::default(),
@@ -1609,9 +1385,7 @@ mod tests {
         }
     }
 
-    /// One TABLE'S report of a multiplex `tables:` export, as the resolver
-    /// returns one per captured table (`table: Some(..)`, `export` still the
-    /// export's own name).
+    /// One TABLE'S report of a multiplex `tables:` export, as the resolver returns one per captured table (`table.
     fn table_report(export: &str, table: &str, columns: Vec<TypeReportRow>) -> ExportTypeReport {
         ExportTypeReport {
             table: Some(table.into()),
@@ -1619,17 +1393,7 @@ mod tests {
         }
     }
 
-    /// Drive the PURE `build_plans` (no `rivet` subprocess) — the deepened core
-    /// of `plan_loads`. Kills the mutation survivors that live in the per-export
-    /// resolution: the export→report name match (`==`→`!=`) and the `fail`/`warn`
-    /// `target_status` arms. Also pins mode mapping, the `gs://` prefix, table
-    /// resolution, and the cursor column.
-    /// Round-6 HIGH: a non-GCS destination with a `load:` block used to build a
-    /// GCS client anyway — a same-named FOREIGN GCS bucket got listed (empty →
-    /// "up to date" forever, exit 0; cleanup/gc would target it). RED against
-    /// removing the destination_type gate in build_plans.
-    /// ClickHouse reads its parts from GCS, S3 or Azure, so each plans, with the part
-    /// URIs in that store's scheme; BigQuery and Snowflake stay GCS-only.
+    /// Drive the PURE `build_plans` (no `rivet` subprocess) — the deepened core of `plan_loads`.
     #[test]
     fn a_clickhouse_load_plans_over_gcs_s3_and_azure_exports() {
         for (dest, scheme) in [
@@ -1701,11 +1465,7 @@ load:
         );
     }
 
-    /// The by-name spec may belong to ANOTHER config's same-named export (a shared
-    /// state DB, last writer wins): `pk: [id]` against a spec holding `_id` is not
-    /// a refusal at plan time — the pin retypes from the run's own spec — but the
-    /// strict check still refuses the plan if no pin happens. Measured live: four
-    /// `users` exports on one Postgres state, MySQL's load refused on Mongo's `_id`.
+    /// The by-name spec may belong to ANOTHER config's same-named export (a shared state DB, last writer wins).
     #[test]
     fn a_by_name_plan_defers_its_key_fit_to_the_pin_and_still_owes_it() {
         let cfg = crate::config::Config::from_yaml(
@@ -1729,7 +1489,6 @@ load:
         )
         .unwrap();
         let load = cfg.load.clone().unwrap();
-        // The by-name row another config wrote: `_id` and `v`, none of ours.
         let foreign = || {
             vec![report(
                 "users",
@@ -1763,7 +1522,6 @@ load:
         );
         let owed = check_spec_fit(&deferred).unwrap_err().to_string();
         assert!(owed.contains("primary-key column `id`"), "{owed}");
-        // The run's own spec fits: the strict rebuild (what `retype_plan` does) passes.
         let own = vec![report(
             "users",
             vec![col("id", TargetStatus::Ok), ts_col("created_at")],
@@ -1804,17 +1562,6 @@ load:
     }
 
     /// The reserved `__` vocabulary is one predicate, and it holds all four names.
-    ///
-    /// It used to live in two places — `is_meta_column`'s three and
-    /// `DELETE_FLAG_COLUMN` — and neither was ever compared against the SOURCE's
-    /// columns, while `DELETE_FLAG_COLUMN`'s own doc claimed a collision "can never"
-    /// happen. A comment beside a thing is not a guard.
-    ///
-    /// The two harms differ, which is why all four are refused rather than just the
-    /// flag: `__op`/`__pos`/`__seq` are filtered out of a MERGE's carried set by
-    /// `is_meta_column`, so a source column of that name loses its VALUES silently;
-    /// `__is_deleted` instead makes `merge_inputs` infer soft-delete SEMANTICS for a
-    /// column the source controls.
     #[test]
     fn a_source_column_in_rivets_reserved_namespace_is_refused() {
         use crate::load::cdc::is_reserved_column;
@@ -1838,7 +1585,7 @@ load:
         }
     }
 
-    /// A plan rebuilt from the spec of the run it consumes refuses a reserved source column on a delta mode; `full` and ordinary names stay loadable.
+    /// A plan rebuilt from the spec of the run it consumes refuses a reserved source column on a delta mode.
     #[test]
     fn a_plan_pinned_to_its_run_refuses_a_reserved_source_column() {
         use crate::state::{LoadSpec, LoadSpecColumn};
@@ -1955,8 +1702,6 @@ load:
         .unwrap();
         let load = cfg.load.clone().unwrap();
 
-        // Reports arrive in the OPPOSITE order to the exports, so a plan only
-        // lands on the right table if its export is found by NAME, not position.
         let reports = vec![
             report(
                 "beta",
@@ -1972,10 +1717,6 @@ load:
         let plans = build_plans(&cfg, &load, reports).unwrap();
         assert_eq!(plans.len(), 2);
 
-        // A plan retyped from ONE run's recorded spec carries that run's columns
-        // and key — not the by-name spec it was planned from. This is the seam the
-        // shared-state race crosses: another config's same-named export can retype
-        // the by-name row between the run and its load; the per-run spec cannot.
         {
             use crate::state::{LoadSpec, LoadSpecColumn};
             use crate::types::{RivetType, TypeFidelity};
@@ -2019,8 +1760,6 @@ load:
             assert_eq!(retyped.pk, vec!["tenant".to_string(), "id".to_string()]);
         }
 
-        // reports[0] = beta → matched by name to the 2nd export (kills `==`→`!=`,
-        // which would resolve the first NON-matching export instead).
         assert_eq!(
             plans[0].table, "beta_tbl",
             "found beta by name, not position"
@@ -2028,24 +1767,18 @@ load:
         assert_eq!(plans[0].mode, LoadMode::Incremental);
         assert_eq!(plans[0].cursor_column.as_deref(), Some("updated_at"));
         assert_eq!(plans[0].gcs_prefix, "gs://b2/exports/beta/");
-        // target_status → spec.status (kills the `fail`/`warn` arm deletions,
-        // which would collapse those columns to Ok and load an unmappable column).
         let statuses: Vec<_> = plans[0].specs.iter().map(|s| s.status).collect();
         assert_eq!(
             statuses,
             vec![TargetStatus::Ok, TargetStatus::Fail, TargetStatus::Warn]
         );
 
-        // reports[1] = alpha → the full-snapshot export.
         assert_eq!(plans[1].table, "alpha_tbl");
         assert_eq!(plans[1].mode, LoadMode::Full);
         assert_eq!(plans[1].gcs_prefix, "gs://b1/exports/alpha/");
     }
 
-    /// `_rivet_row_hash` is written by rivet at extraction, so it never appears
-    /// in the source column report. Without a spec the warehouse table is
-    /// created without the column and the FIRST load fails on a schema mismatch
-    /// — after the extract has already been paid for.
+    /// `_rivet_row_hash` is written by rivet at extraction, so it never appears in the source column report.
     #[test]
     fn build_plans_appends_a_spec_for_the_extraction_hash() {
         let yaml = |hash_block: &str| {
@@ -2084,19 +1817,9 @@ load:
         let plans = build_plans(&with, &load, reports()).unwrap();
         let last = plans[0].specs.last().unwrap();
         assert_eq!(last.column_name, crate::enrich::COL_ROW_HASH);
-        // Resolved through the per-target resolver, not hardcoded — BigQuery's
-        // 64-bit integer. A Snowflake target would resolve NUMBER(38,0) here.
         assert_eq!(last.target_type, "INT64");
         assert_eq!(last.status, TargetStatus::Ok);
 
-        // …and the SIBLING meta column, written by the identical seam, needs a
-        // spec for the identical reason. `_rivet_row_hash` got one and
-        // `_rivet_exported_at` did not, which is the same bug twice: both are
-        // produced at extraction, so neither can ever appear in the SOURCE column
-        // report, and a missing spec fails the first load on a schema mismatch
-        // after the extract was paid for. Asserted as the ORDERED tail so it also
-        // pins the order against `enrich_schema`'s (exported_at, then row_hash) —
-        // a spec list in the other order describes a different Parquet.
         let both = crate::config::Config::from_yaml(&yaml(
             "    meta_columns:\n      exported_at: true\n      row_hash: true\n",
         ))
@@ -2131,8 +1854,7 @@ load:
         );
     }
 
-    /// A multiplex `tables:` CDC config — the shape `rivet init --mode cdc`
-    /// emits for a whole schema (#252).
+    /// A multiplex `tables:` CDC config — the shape `rivet init --mode cdc` emits for a whole schema (#252).
     fn multiplex_cfg() -> crate::config::Config {
         crate::config::Config::from_yaml(
             r#"
@@ -2161,26 +1883,7 @@ load:
         .unwrap()
     }
 
-    /// A multiplex `tables:` CDC export is N source tables through ONE export,
-    /// and `rivet load` must build ONE PLAN PER TABLE (#252).
-    ///
-    /// The two halves this pins are the two ways the fan-out can be dropped, and
-    /// each fails differently:
-    ///
-    /// - drop `report.table` from the warehouse-table resolution and all N
-    ///   collapse onto the EXPORT's name — three source tables merged into one
-    ///   BigQuery table (here caught by `reject_duplicate_target_tables`, but
-    ///   only because the collision is exact);
-    /// - drop the per-table sub-prefix and all N point at the export BASE, whose
-    ///   manifest listing is RECURSIVE — so every plan sweeps in every sibling
-    ///   table's parts and loads them all into its own table, with every count
-    ///   agreeing on the way through. That one is silent, which is why the prefix
-    ///   assertion is per-table and exact, not a `contains`.
-    ///
-    /// The `Some(table)` values are NOT hand-typed: they come from
-    /// `ExportConfig::multiplex_tables()`, the one function that decides whether
-    /// an export is one unit or N — so a mutant there (returning `None`, dropping
-    /// the CDC-mode gate) turns this red at the producer, not just the consumer.
+    /// A multiplex `tables:` CDC export is N source tables through ONE export, and `rivet load` must build ONE PLAN PER TABLE (#252).
     #[test]
     fn build_plans_fans_a_multiplex_tables_export_out_to_one_plan_per_table() {
         let cfg = multiplex_cfg();
@@ -2207,9 +1910,6 @@ load:
             vec!["orders", "customers", "line_items"],
             "the warehouse table is the SOURCE table, not the export name"
         );
-        // Each table's own sub-prefix — the layout the extract wrote
-        // (`cdc_job::dest_for_table`) and `rivet validate` descends. The `{export}`
-        // token still expands first, so the base is the export's, not the literal.
         assert_eq!(
             plans
                 .iter()
@@ -2233,11 +1933,7 @@ load:
         }
     }
 
-    /// One `load:` on a six-table stream is one partition column, one key, for six
-    /// tables that do not share a schema. The stream's `load:` therefore takes a
-    /// `tables:` map — a per-TABLE override layered over the export's, layered
-    /// over the top level — so `created_at` partitions the tables that have it
-    /// and `none` clears it where they do not, without splitting the stream.
+    /// One `load:` on a six-table stream is one partition column, one key, for six tables that do not share a schema.
     #[test]
     fn a_multiplex_export_takes_per_table_load_overrides() {
         let cfg = crate::config::Config::from_yaml(
@@ -2322,24 +2018,17 @@ load:
         );
     }
 
-    /// The multiplex sub-prefix rule itself: the table becomes ONE path segment
-    /// under the resolved base, with both slashes supplied — a cloud prefix is a
-    /// literal key prefix, so a missing separator lists a mangled flat key
-    /// (`…/cdccdc-0.parquet`) and the load silently reports "up to date".
+    /// The multiplex sub-prefix rule itself: the table becomes ONE path segment under the resolved base, with both slashes supplied.
     #[test]
     fn table_load_prefix_appends_one_slash_delimited_segment() {
         assert_eq!(
             table_load_prefix("gs://b/exports/cdc/", "orders").unwrap(),
             "gs://b/exports/cdc/orders/"
         );
-        // A base written without its trailing slash must not fuse the segment on.
         assert_eq!(
             table_load_prefix("gs://b/exports/cdc", "orders").unwrap(),
             "gs://b/exports/cdc/orders/"
         );
-        // A schema-qualified table stays VERBATIM in the path — the dot is folded
-        // only in the warehouse NAME (`warehouse_table_name`); the extract wrote
-        // the raw name as its directory.
         assert_eq!(
             table_load_prefix("gs://b/e/", "public.orders").unwrap(),
             "gs://b/e/public.orders/"
@@ -2363,8 +2052,6 @@ load:
 
     #[test]
     fn reject_duplicate_target_tables_catches_a_collision() {
-        // Two exports resolving to the same warehouse table would clobber each
-        // other — caught at plan time, not silently at load time.
         use LoadMode::{Cdc, Full, Incremental};
         assert!(
             reject_duplicate_target_tables(&[("orders", Full), ("events", Full), ("orders", Full)])
@@ -2373,9 +2060,6 @@ load:
         assert!(reject_duplicate_target_tables(&[("orders", Full), ("events", Full)]).is_ok());
         assert!(reject_duplicate_target_tables(&[]).is_ok());
 
-        // An append mode also occupies `<table>__changes`: a full export of a
-        // source table NAMED `orders__changes` would OVERWRITE the CDC export's
-        // live change log — two different plan tables, one warehouse object.
         let err = reject_duplicate_target_tables(&[("orders", Cdc), ("orders__changes", Full)])
             .unwrap_err()
             .to_string();
@@ -2385,29 +2069,12 @@ load:
                 .is_err(),
             "order-independent"
         );
-        // Two append exports on different tables occupy four distinct objects.
         assert!(
             reject_duplicate_target_tables(&[("orders", Cdc), ("events", Incremental)]).is_ok()
         );
     }
 
     /// `<table>__staging` is a warehouse name a load CREATES, so it is reserved too.
-    ///
-    /// A whole-table pass whose Parquet exceeds one job's partition budget lands
-    /// through `<t>__staging`: `DROP TABLE IF EXISTS`, refill, CLONE onto the target,
-    /// `DROP TABLE`. None of that is behind `ensure_own` — that gates the TARGET fqtn
-    /// — so a source table literally named `orders__staging` beside `orders` was
-    /// destroyed by `orders`' own load, with both exports exiting 0. It is an ordinary
-    /// schema name (dbt's package prefixes produce exactly this), not an exotic
-    /// identifier.
-    ///
-    /// EVERY mode, deliberately. The hunt scoped this to `full`; reading the callers
-    /// says otherwise — `materialize` is reached from `load_one` (full),
-    /// `load_one_incremental` (the first pass) and `load_one_cdc_base` (the baseline
-    /// leg) alike, so a full-only reservation would leave two of the three paths able
-    /// to destroy the sibling.
-    ///
-    /// RED against dropping `format!("{t}__staging")` from the object list.
     #[test]
     fn reject_duplicate_target_tables_reserves_the_staging_name_in_every_mode() {
         use LoadMode::{Cdc, Full, Incremental};
@@ -2421,14 +2088,12 @@ load:
                 "{mode:?}: the staging name a load creates must collide with an export \
                  that targets it: {err}"
             );
-            // Order-independent, like its `__changes` sibling.
             assert!(
                 reject_duplicate_target_tables(&[("orders__staging", Full), ("orders", mode)])
                     .is_err(),
                 "{mode:?}: order-independent"
             );
         }
-        // And it does not invent collisions between unrelated tables.
         assert!(
             reject_duplicate_target_tables(&[("orders", Full), ("events__staging", Full)]).is_ok()
         );
@@ -2436,9 +2101,6 @@ load:
 
     #[test]
     fn resolve_load_prefix_refuses_day_specific_date_in_the_base() {
-        // #bughunt HIGH: {date} expands to the LOAD day, so a nightly export + an
-        // after-midnight load list DIFFERENT prefixes → silent "up to date". Refuse
-        // {date} in the load base; a static base (or {date} below {partition}) is ok.
         let dest = |p: &str| crate::config::DestinationConfig {
             prefix: Some(p.to_string()),
             ..Default::default()
@@ -2451,7 +2113,6 @@ load:
             "must refuse a day-specific date base: {err}"
         );
         assert!(resolve_load_prefix(&dest("exports/{export}/"), "orders", "bkt").is_ok());
-        // {date} BELOW {partition} is not in the listed base — allowed.
         assert!(
             resolve_load_prefix(
                 &dest("exports/{export}/{partition}/{date}/"),
@@ -2462,25 +2123,7 @@ load:
         );
     }
 
-    /// The report row IS the resolver's spec, split across optional fields — so
-    /// the plan must rebuild the WHOLE spec, not the two fields the old JSON
-    /// mirror declared.
-    ///
-    /// `plan_loads` used to obtain this data by parsing `rivet check --json`
-    /// through a four-field `ColReport`; everything the mirror did not name was
-    /// dropped on the floor (`note: None`, `cast_sql: None`, `autoload_type:
-    /// String::new()`) — an empty autoload type claims the warehouse autoloads
-    /// the column as `""`, and the L5 recovery hint the resolver computed never
-    /// reached the plan. In process there is no mirror to forget a field.
-    ///
-    /// The oracle is the RESOLVER's own output, not a hand-typed string: build
-    /// the spec with `ExportTarget::resolve_column`, split it the way
-    /// `collect_report` does, and assert the plan's spec is field-for-field the
-    /// one we started from. The JSON column is chosen because BigQuery's
-    /// autoload DIVERGES for it (JSON → BYTES, with a cast + note), so the
-    /// fixture crosses the threshold where the dropped fields are observable —
-    /// a column whose autoload matches its native type could not tell the two
-    /// implementations apart.
+    /// The report row IS the resolver's spec, split across optional fields.
     #[test]
     fn build_plans_carries_the_resolvers_whole_spec_not_a_two_field_subset() {
         let cfg = crate::config::Config::from_yaml(
@@ -2498,8 +2141,6 @@ load:
             arrow_type: None,
             fidelity: TypeFidelity::Exact,
         });
-        // Fixture non-vacuity: if BigQuery ever autoloaded JSON faithfully this
-        // test would pass against BOTH implementations and prove nothing.
         assert_ne!(
             resolved.autoload_type, resolved.target_type,
             "fixture must be a column whose autoload DIVERGES"
@@ -2532,9 +2173,6 @@ load:
             "the L5 recovery hint must reach the plan (it was `None`)"
         );
 
-        // A column whose autoload does NOT diverge: the report omits
-        // `autoload_type` entirely, and "absent" must mean "same as native",
-        // never the empty string.
         let plain = ExportTarget::BigQuery.resolve_column(TargetInput {
             column_name: "id",
             rivet_type: &crate::types::RivetType::Int64,
@@ -2548,12 +2186,6 @@ load:
     }
 
     /// A column the resolver could not type must be NAMED, never defaulted.
-    ///
-    /// `target_type`/`target_status` are `Some` together for every column
-    /// resolved against a target, and a load always resolves with one — but a
-    /// `None` defaulted to `TargetStatus::Ok` would walk an unmappable column
-    /// straight past `validate_specs` (whose whole job is to refuse a `Fail`),
-    /// which is the silent-loss shape, not a tidier default.
     #[test]
     fn build_plans_refuses_a_column_the_resolver_did_not_type() {
         let cfg = crate::config::Config::from_yaml(
@@ -2589,16 +2221,6 @@ load:
     const CLOSED_SOURCE: &str = "postgresql://u:p@127.0.0.1:1/db";
 
     /// The config-level `load:` gates run BEFORE the state DB is read.
-    ///
-    /// Nothing is recorded for the export, so if `plan_loads` reached the type
-    /// lookup first the error would name the missing load spec; that it names
-    /// the `load:` problem instead is the ordering proof.
-    ///
-    /// Honest about which half a mutant can move: the missing-block arm is
-    /// ordered by construction (the target comes FROM the block, so nothing can
-    /// resolve types before it parses), and only pins the message. The typo arm
-    /// is the graded one — parsing the block permissively in `Config::from_yaml` takes
-    /// the run past the gate and into the empty state DB.
     #[test]
     fn plan_loads_gates_the_load_block_before_any_source_io() {
         let (_dir, path) = cfg_file(&format!(
@@ -2614,7 +2236,6 @@ load:
             "the config gate must answer first, before the source is dialled: {err}"
         );
 
-        // …and a typo'd key in the block is refused the same way.
         let (_dir, path) = cfg_file(&format!(
             "source:\n  type: postgres\n  url: \"{CLOSED_SOURCE}\"\n\
              exports:\n  - name: a\n    table: t\n    mode: full\n    format: parquet\n    \
@@ -2736,8 +2357,7 @@ load:
         );
     }
 
-    /// A load host without the source's variable reads the one spec a run recorded on this state
-    /// (state v38 keys it by source); with two sources' specs it refuses by code instead of guessing.
+    /// A load host without the source's variable reads the one spec a run recorded on this state (state v38 keys it by source).
     #[test]
     fn a_load_without_the_source_variable_reads_the_only_spec_and_refuses_two() {
         use crate::types::{RivetType, TypeFidelity};
@@ -2929,7 +2549,7 @@ load:
         );
     }
 
-    /// An incremental table whose cursor lands as text, or whose primary key collapses below a microsecond, is refused alone on every load target; the same columns under `full`, and an exact landing, load.
+    /// An incremental table whose cursor lands as text, or whose primary key collapses below a microsecond, is refused alone on every load target.
     #[test]
     fn a_key_column_landing_inexactly_refuses_its_own_table_on_every_target() {
         use crate::preflight::key_admission::KeyLanding;
@@ -3299,8 +2919,7 @@ load: { target: bigquery, project: p, dataset: d, cluster_by: none }
         assert!(e.contains("at most 4"), "{e}");
     }
 
-    /// A key column the export does not project cannot partition the dedup view; the
-    /// refusal comes at plan time, not after the append (which would then be retried).
+    /// A key column the export does not project cannot partition the dedup view.
     #[test]
     fn resolve_keys_refuses_a_pk_column_the_export_does_not_have() {
         let specs = [typed("id", BqType::Int64), typed("v", BqType::String)];
@@ -3318,7 +2937,6 @@ load: { target: bigquery, project: p, dataset: d, cluster_by: none }
             "{e}"
         );
         assert!(e.contains("fix `pk`"), "{e}");
-        // The recorded source key of a relation the export no longer projects.
         let e = resolve_keys(
             "e",
             &load_with("bigquery", serde_json::json!({})),
@@ -3475,8 +3093,7 @@ load: { target: bigquery, project: p, dataset: d, cluster_by: none }
         assert!(e.contains("not a plain SQL identifier"), "{e}");
     }
 
-    /// Every granularity maps to an expression exact over Date32/DateTime64's whole range
-    /// (`toDate` and `toStartOfHour` wrap outside 1970-2106, measured on 24.8.14).
+    /// Every granularity maps to an expression exact over Date32/DateTime64's whole range (`toDate` and `toStartOfHour` wrap outside 1970-2106, measured on 24.8.14).
     #[test]
     fn clickhouse_partitions_a_date_column_in_every_mode_and_refuses_bigquery_only_forms() {
         let specs = [
@@ -3552,8 +3169,7 @@ load: { target: bigquery, project: p, dataset: d, cluster_by: none }
         }
     }
 
-    /// Only a ClickHouse CDC log partitioned by something other than a creation stamp warns:
-    /// there a changed value leaves the old version in its old partition.
+    /// Only a ClickHouse CDC log partitioned by something other than a creation stamp warns.
     #[test]
     fn a_clickhouse_change_log_warns_when_its_partition_column_can_move() {
         let ch = load_with("clickhouse", serde_json::json!({})).target;
@@ -3709,8 +3325,7 @@ load: { target: bigquery, project: p, dataset: d, cluster_by: none }
         assert_eq!(Granularity::parse_sql("WEEK"), None);
     }
 
-    /// A `keyset_incremental` export plans as an incremental load ordered by its key, so
-    /// each run's delta is appended instead of replacing the rows earlier runs loaded.
+    /// A `keyset_incremental` export plans as an incremental load ordered by its key, so each run's delta is appended instead of replacing the rows earlier runs loaded.
     #[test]
     fn a_keyset_incremental_export_plans_an_append_ordered_by_its_key() {
         let plan = |extra: &str| {
@@ -3734,8 +3349,7 @@ load: { target: bigquery, project: p, dataset: d, cluster_by: none }
         assert_eq!(snapshot.cursor_column.as_deref(), Some("ts"));
     }
 
-    /// A Mongo `source.mongo.resume` export continues past its last `_id` exactly as
-    /// `keyset_incremental` does, so it plans the same append ordered by `_id`.
+    /// A Mongo `source.mongo.resume` export continues past its last `_id` exactly as `keyset_incremental` does, so it plans the same append ordered by `_id`.
     #[test]
     fn a_mongo_resume_export_plans_an_append_ordered_by_its_id() {
         let plan = |resume: bool| {
@@ -3764,8 +3378,7 @@ load: { target: bigquery, project: p, dataset: d, cluster_by: none }
         crate::error::error_code(&r.unwrap_err())
     }
 
-    /// Every plan-time refusal names its code: keys, reserved and look-alike names,
-    /// colliding targets, the staging prefix and the destination type.
+    /// Every plan-time refusal names its code: keys, reserved and look-alike names, colliding targets, the staging prefix and the destination type.
     #[test]
     fn each_plan_time_refusal_carries_its_code() {
         let specs = [typed("id", BqType::Int64), typed("v", BqType::String)];
@@ -3882,8 +3495,7 @@ load: { target: bigquery, project: p, dataset: d }
         );
     }
 
-    /// `--export` / `--table` take what they name and refuse a name the config does not load,
-    /// listing what it does load; a backfill recipe is not a loaded export.
+    /// `--export` / `--table` take what they name and refuse a name the config does not load, listing what it does load.
     #[test]
     fn a_selection_takes_what_it_names_and_refuses_what_the_config_does_not_load() {
         let cfg = crate::config::Config::from_yaml(

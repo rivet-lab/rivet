@@ -11,7 +11,7 @@ pub(crate) fn anchor(config_dir: &Path, written: &str) -> String {
         .into_owned()
 }
 
-/// Read the Google key file a config names: missing is `CONFIG_SECRET_UNSET`; a directory, an unreadable, empty or malformed file, or JSON that is no service-account, impersonated or external-account key is `DEST_CREDENTIALS_INVALID`; every refusal names `field` and the path, and none contacts a network.
+/// Read the Google key file a config names: missing is `CONFIG_SECRET_UNSET`.
 pub(crate) fn google_key(field: &str, path: &str) -> crate::error::Result<Zeroizing<Vec<u8>>> {
     let invalid = |why: String| {
         crate::error::coded(

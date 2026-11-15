@@ -32,8 +32,6 @@ fn compression_profile_compact_maps_to_zstd_level_9() {
 
 #[test]
 fn compression_profile_takes_precedence_over_legacy_compression_field() {
-    // When compression_profile is set, effective_compression must return the profile codec,
-    // ignoring the legacy `compression` + `compression_level` fields.
     let cfg = Config::from_yaml(
         r#"
 source:
@@ -112,15 +110,12 @@ exports:
 
 #[test]
 fn no_compression_profile_falls_through_to_default_compression_type() {
-    // Default CompressionType is Zstd (derive(Default) on the enum).
-    // When no profile is set, effective_compression returns the raw compression field.
     let cfg = Config::from_yaml(MINIMAL_YAML).unwrap();
     let (ct, level) = cfg.exports[0].effective_compression();
     assert!(
         cfg.exports[0].compression_profile.is_none(),
         "minimal YAML must not set a compression_profile"
     );
-    // The field defaults to Zstd, but MINIMAL_YAML is CSV, which the writer never compresses.
     assert_eq!(cfg.exports[0].compression, CompressionType::Zstd);
     assert_eq!(ct, CompressionType::None);
     assert!(level.is_none());

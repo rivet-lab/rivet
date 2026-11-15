@@ -124,12 +124,12 @@ def _modes(engine: str) -> tuple[str, ...]:
     return ("full",) if engine == "mongo" else ("full", "chunked", "incremental")
 
 
-def _seed_any(engine: str, url: str, table: str, rows: int) -> bool:
-    """(Re)create `table` holding ids 1..rows on any engine."""
+def _seed_any(engine: str, url: str, table: str, rows: int, decimal: bool = False) -> bool:
+    """(Re)create `table` holding ids 1..rows on any engine, with a Decimal128 column `d` on the SQL ones when asked (MongoDB renders a document as JSON, which has no such column)."""
     from .upgrade import _seed
 
     if engine != "mongo":
-        return _seed(engine, url, table, rows, with_cursor=True)
+        return _seed(engine, url, table, rows, with_cursor=True, decimal=decimal)
     from .cdc import _mongosh
 
     return _mongosh(url, (
@@ -150,12 +150,12 @@ def _drop(engine: str, url: str, table: str) -> None:
 
 
 def _resized(engine: str, url: str, table: str, rows: int, had: int) -> bool:
-    """`table` holding ids 1..rows: seeded afresh, or a 1-million-row SQL table copied up in 1-million steps."""
+    """`table` holding ids 1..rows and a decimal column: seeded afresh, or a 1-million-row SQL table copied up in 1-million steps."""
     if engine == "mongo" or had != 1_000_000:
-        return _seed_any(engine, url, table, rows)
+        return _seed_any(engine, url, table, rows, decimal=True)
     from .engines import sql
 
-    return all(sql(engine, url, f"INSERT INTO {table} SELECT id + {lo}, v, updated_at FROM {table} "
+    return all(sql(engine, url, f"INSERT INTO {table} SELECT id + {lo}, v, updated_at, d FROM {table} "
                                 f"WHERE id <= 1000000;").ok for lo in range(had, rows, had))
 
 
@@ -554,6 +554,22 @@ def _rss_lanes_self_test() -> None:
     assert len(side_by_side.cells) == 3 and wall < 0.6, f"three 0.3 s engines took {wall:.2f} s: they did not run side by side"
 
 
+def _seed_decimal_self_test() -> None:
+    """Every SQL engine's flat_rss table holds a decimal column, whether seeded afresh or copied up from a million rows."""
+    from unittest import mock
+
+    from . import engines, upgrade
+
+    for engine in upgrade.DECIMAL_TYPE:
+        seen: list[str] = []
+        with mock.patch.object(upgrade, "_sql", lambda e, u, q, seen=seen: seen.append(q) or mock.Mock(ok=True)):
+            assert _resized(engine, "url", "t", SIZES[1], 0) and len(seen) == 1
+        assert f"d {upgrade.DECIMAL_TYPE[engine]} NOT NULL" in seen[0] and "/ 4" in seen[0], f"{engine}: {seen[0]}"
+        with mock.patch.object(engines, "sql", lambda e, u, q, seen=seen: seen.append(q) or mock.Mock(ok=True)):
+            assert _resized(engine, "url", "t", SIZES[2], SIZES[1])
+        assert all("updated_at, d FROM" in q for q in seen[1:]) and len(seen) == 5, seen[1:]
+
+
 def self_test() -> None:
     """The verdicts on hand-made inputs."""
     assert over_ceiling({"full/10000": 40 * MIB, "full/1000000": 41 * MIB}, 41) == []
@@ -579,6 +595,7 @@ def self_test() -> None:
     assert parts_differ(["a"], ["a", "b"]) == "2 parts against the previous release's 1"
     assert parts_differ([], []) == "no declared part (previous 0, this 0)"
     _stamped_self_test()
+    _seed_decimal_self_test()
     _settled_self_test()
     _rss_lanes_self_test()
     for path, per_engine in RSS_CEILING_MIB.items():

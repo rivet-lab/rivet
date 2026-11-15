@@ -16,7 +16,8 @@ source:
 
 - The URL path is the **service name** (Oracle Free's pluggable database is
   `FREEPDB1`), not a SID. Port defaults to 1521. Percent-encode `@`, `:` and `/` in
-  the password.
+  the password. The service name is percent-decoded too (`Sales%20PDB` is `Sales PDB`);
+  a `/` in it, raw or encoded, is refused.
 - `rivet init --source-env ORACLE_URL` scaffolds a config from the catalog of the
   connecting user's schema (`--schema OWNER` for another one).
 - Unquoted names are upper-case in Oracle. `table: orders` reads `ORDERS`; a

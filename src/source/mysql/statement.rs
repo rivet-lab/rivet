@@ -45,7 +45,7 @@ impl<'a> Tok<'a> {
     }
 }
 
-/// The `sql_mode` flags that change how a statement is lexed; the default is the lexing used when an event carries no `sql_mode`.
+/// The `sql_mode` flags that change how a statement is lexed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct SqlMode {
     pub(crate) no_backslash_escapes: bool,
@@ -117,7 +117,7 @@ fn line_comment_starts(rest: &str) -> bool {
         })
 }
 
-/// The statement cut into pieces the way the server lexes it: `/*! */` bodies are SQL (nested ones too), other comments, `#` and `-- ` lines become a blank, quoted text is one piece.
+/// The statement cut into pieces the way the server lexes it: `/*!
 pub(crate) fn tokens(sql: &str, mode: SqlMode) -> Vec<Tok<'_>> {
     let b = sql.as_bytes();
     let (mut out, mut i, mut executable) = (Vec::new(), 0usize, 0usize);
@@ -169,7 +169,7 @@ pub(crate) fn tokens(sql: &str, mode: SqlMode) -> Vec<Tok<'_>> {
     out
 }
 
-/// A statement text as the server executes it: `/*! */` bodies are SQL, other comments become a space, quoted text is kept as written.
+/// A statement text as the server executes it: `/*!
 #[cfg(test)]
 pub(crate) fn executable_text(sql: &str, mode: SqlMode) -> String {
     let mut out = String::with_capacity(sql.len());

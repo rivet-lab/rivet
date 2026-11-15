@@ -1,25 +1,4 @@
 //! **Layer: Coordinator**
-//!
-//! Manifest finalization for cloud-or-local-file destinations.
-//!
-//! This module owns the *coordination* — building up the `RunManifest` over
-//! the course of a run, computing per-part content fingerprints, and writing
-//! the final artifact pair (`manifest.json` then `_SUCCESS`) to the destination
-//! in the order required by ADR-0012 M1 (Parts Before Manifest) and M2
-//! (Manifest Before SUCCESS).
-//!
-//! Atomicity is delegated to the `Destination` trait: backends declaring
-//! `WriteCommitProtocol::Atomic` (single PUT on S3/GCS, `fs::copy` on local FS)
-//! are trusted to produce a complete-or-absent visible artifact per call.
-//! Partial-write detection on the read side (JSON parse failure for the
-//! manifest, length/format check for `_SUCCESS`) provides defence in depth
-//! against backends whose atomicity guarantee is weaker than declared.
-//!
-//! Stdout destinations (`WriteCommitProtocol::Streaming`) skip the manifest
-//! entirely — there is no coherent "prefix" to write it to.
-//!
-//! Resume-aware part skipping (M8 decision matrix) and `_SUCCESS` overwrite
-//! refusal (M8) live elsewhere; this module is purely a writer.
 
 use std::io::Read;
 use std::path::Path;
@@ -35,15 +14,6 @@ use crate::manifest::{
 use crate::pipeline::summary::RunSummary;
 
 /// Per-run accumulator for manifest parts.
-///
-/// One `ManifestBuilder` is created at run start (from the resolved plan)
-/// and `record_part` is called after each `dest.write` succeeds — i.e.
-/// inside the same I2/I3 window where `file_log::record_file` is called.
-/// The build is finalized once, at end of run, into a `RunManifest`.
-///
-/// `ManifestBuilder` is not `Send + Sync` and is held by the single
-/// orchestrator thread; per-part fingerprints are computed before the part
-/// is handed off so parallel workers do not need shared access.
 pub struct ManifestBuilder {
     run_id: String,
     export_name: String,
@@ -55,39 +25,23 @@ pub struct ManifestBuilder {
     compression: String,
     schema_fingerprint: String,
     parts: Vec<ManifestPart>,
-    /// Per-column value checksums (Form B), name-keyed, set by
-    /// [`set_column_checksums`](Self::set_column_checksums) from the sink
-    /// accumulator. `None` → omitted from the manifest.
+    /// Per-column value checksums (Form B), name-keyed, set by [`set_column_checksums`](Self::set_column_checksums) from the sink accumulator.
     column_checksums: Option<Vec<ColumnChecksum>>,
     /// Which fold produced them — see `manifest::RunManifest::checksum_render`.
     checksum_render: Option<String>,
-    /// The column the Form B checksum is keyed to (cursor/key column); `None` =
-    /// un-keyed. Recorded so `validate` re-keys identically.
+    /// The column the Form B checksum is keyed to (cursor/key column); `None` = un-keyed.
     checksum_key_column: Option<String>,
-    /// What this run's `_rivet_row_hash` covers. Taken from the plan snapshot so
-    /// the manifest cannot claim a contract the run did not actually apply.
+    /// What this run's `_rivet_row_hash` covers.
     row_hash: Option<crate::enrich::RowHashContract>,
-    /// For an `apply --pool --split` range sub-export: the `(lo, hi]` key window this unit
-    /// covered, set from the plan's split marker so `--split --resume` reconstructs the exact
-    /// partition. `None` for a non-split export.
+    /// For an `apply --pool --split` range sub-export.
     split_window: Option<crate::manifest::SplitWindow>,
 }
 
 impl ManifestBuilder {
     /// Construct a builder for a run.
-    ///
-    /// `schema_fingerprint` is the value returned by
-    /// [`crate::state::schema_fingerprint`] over the dest-facing column list.
-    /// `source_engine` is the resolved engine label (`"postgres"` / `"mysql"`).
-    /// `source_schema` / `source_table` are the logical names extracted from
-    /// the plan; pass `None` for queries that do not resolve to a single table.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         plan: &PlanSnapshot,
-        // The export FAMILY (parent for a synthesized CDC snapshot leg, the
-        // export's own name otherwise) — passed rather than folded from the
-        // name, and rather than widened into `PlanSnapshot`, a persisted
-        // journal wire type.
         export_family: &str,
         run_id: &str,
         started_at: chrono::DateTime<chrono::Utc>,
@@ -99,7 +53,7 @@ impl ManifestBuilder {
     ) -> Self {
         Self {
             checksum_render: None,
-            split_window: None, // set later via set_split_window from the plan's SplitSynth
+            split_window: None,
             run_id: run_id.to_string(),
             export_name: plan.export_name.clone(),
             export_family: export_family.to_string(),
@@ -131,9 +85,7 @@ impl ManifestBuilder {
         }
     }
 
-    /// Record the run-level per-column value checksums (Form B), name-keyed,
-    /// surfaced into the manifest by [`finalize`](Self::finalize). `key_column` is
-    /// the column the hashes are keyed to (`xxh3(key ‖ value)`), `None` if un-keyed.
+    /// Record the run-level per-column value checksums (Form B), name-keyed, surfaced into the manifest by [`finalize`](Self::finalize).
     pub fn set_column_checksums(
         &mut self,
         checksums: Vec<ColumnChecksum>,
@@ -141,18 +93,10 @@ impl ManifestBuilder {
     ) {
         self.column_checksums = Some(checksums);
         self.checksum_key_column = key_column;
-        // Stamp the fold that produced them. Without this a reader cannot tell
-        // v1's annihilating XOR from v2's sum and would compare incomparable
-        // numbers — reporting either false corruption or none at all.
         self.checksum_render = Some(crate::source::value_checksum::CHECKSUM_RENDER_ID.to_string());
     }
 
-    /// Record a committed part.  Must be called only after `dest.write()`
-    /// returned `Ok(())` for this part — ADR-0012 M1.
-    ///
-    /// `part_id` is the 1-based ordinal of the part within this run.
-    /// `relative_path` is the destination-prefix-relative path (the same
-    /// `remote_key` passed to `dest.write`).
+    /// Record a committed part.
     pub fn record_part(
         &mut self,
         part_id: u32,
@@ -173,38 +117,14 @@ impl ManifestBuilder {
         });
     }
 
-    /// Finalize into a `RunManifest`.  Consumes the builder.
-    ///
-    /// `status` reflects the overall run outcome — `Success` is the only
-    /// status that licenses the `_SUCCESS` marker (M2).
-    /// Record the source-side `COUNT(*)` this run probed, so the load side can
-    /// check the **source→file** leg (`load::reconcile` bails when
-    /// `source_row_count != row_count` — the extract silently dropped rows).
-    ///
-    /// Separate from [`set_cursor_range`] on purpose. The field used to be one
-    /// of that method's parameters, and that method is only called when the run
-    /// has a CURSOR — so on a `full` or `chunked` export the count could not
-    /// reach the manifest even if a caller had one to give. Combined with all
-    /// three production writers passing `None` there, the effect was that
-    /// `load::reconcile`'s source→file bail, its `LoadIntegrity.source_rows`
-    /// field and the whole `allow_source_drift` config key were unreachable code:
-    /// the chain of custody always ended at "rivet says it wrote N" (audit
-    /// 2026-08-17).
-    ///
-    /// Still `None` unless the run actually probed the source — the field's
-    /// contract is "when cheaply known", and a blanket `COUNT(*)` on every
-    /// export is a scan nobody asked for. Today the probe is `--reconcile`,
-    /// which already runs the count and, before this, threw it away.
+    /// Finalize into a `RunManifest`.
     pub fn set_source_row_count(&mut self, source_row_count: Option<i64>) {
         if let Some(ex) = self.source.extraction.as_mut() {
             ex.source_row_count = source_row_count;
         }
     }
 
-    /// Record the cursor range this run covered (incremental strategies) so
-    /// the warehouse can prove continuity across runs. `low` is the prior
-    /// run's high (or the min seen this run); `high` is the value the next run
-    /// resumes from. No-op if there is no extraction section.
+    /// Record the cursor range this run covered (incremental strategies) so the warehouse can prove continuity across runs.
     pub fn set_cursor_range(
         &mut self,
         column: Option<String>,
@@ -240,11 +160,6 @@ impl ManifestBuilder {
             manifest_version: crate::manifest::MANIFEST_VERSION,
             mode: "batch".to_string(),
             run_id: self.run_id,
-            // The family the PLAN carries — the parent for a synthesized CDC
-            // snapshot leg, the export's own name otherwise. Folding the name
-            // here instead recorded family `daily` for a user export named
-            // `daily__snapshot_v2`, silently merging it with a real sibling
-            // export `daily` and disarming the shared-prefix guard.
             export_family: self.export_family,
             export_name: self.export_name,
             started_at: self.started_at.to_rfc3339(),
@@ -265,23 +180,13 @@ impl ManifestBuilder {
         }
     }
 
-    /// Record the split window this unit covered (from the plan's `SplitSynth`), so
-    /// `--split --resume` reconstructs the exact original partition. No-op (`None`) for a
-    /// non-split export.
+    /// Record the split window this unit covered (from the plan's `SplitSynth`), so `--split --resume` reconstructs the exact original partition.
     pub fn set_split_window(&mut self, window: Option<crate::manifest::SplitWindow>) {
         self.split_window = window;
     }
 }
 
-/// Compute both part-body hashes in a **single pass** over the file: the xxh3
-/// `content_fingerprint` (`"xxh3:<16-hex>"`, ADR-0012 M3) and the base64 MD5
-/// (GCS `md5Hash` encoding) used for no-download destination verification.
-/// Returns `(fingerprint, md5_base64)`.
-///
-/// Streams in 64 KiB chunks so multi-GB parts don't require a matching
-/// allocation, and reads the file **once** for both digests.  Called right
-/// after `dest.write` succeeds while the local temp file still exists; the
-/// re-read is disk-cache cheap relative to the upload it follows.
+/// Compute both part-body hashes in a **single pass** over the file.
 pub fn compute_part_checksums(path: &Path) -> Result<(String, String)> {
     use base64::Engine as _;
     use md5::{Digest, Md5};
@@ -305,21 +210,6 @@ pub fn compute_part_checksums(path: &Path) -> Result<(String, String)> {
 }
 
 /// Capture the run's schema fingerprint on the summary.
-///
-/// Computed from the dest-facing Arrow schema (the one downstream consumers
-/// see — internal columns already stripped) using
-/// [`crate::state::schema_fingerprint`].  Idempotent: the schema is identical
-/// across chunks of a single run, so callers safely invoke this on every
-/// chunk and only the first call has effect.
-///
-/// Why this exists: `finalize_manifest` previously derived the manifest's
-/// `schema_fingerprint` from `state.get_stored_schema()`, which is only
-/// populated by `single.rs::run_with_reconnect`'s schema-drift block.  The
-/// chunked path never wrote a stored schema, so `manifest.schema_fingerprint`
-/// landed as the placeholder `xxh3:0000000000000000` — defeating the trust
-/// contract's drift-detection goal (ADR-0012 M3).  Capturing the fingerprint
-/// here, at the point the schema is first seen by the sink, decouples the
-/// manifest writer from the state's incidental schema cache.
 pub fn record_run_schema_fingerprint(
     summary: &mut crate::pipeline::summary::RunSummary,
     dest_schema: &arrow::datatypes::Schema,
@@ -332,10 +222,6 @@ pub fn record_run_schema_fingerprint(
 }
 
 /// What [`record_committed_part_with_fingerprint`] did to the manifest.
-///
-/// `part_id` is returned (not just the dedup verdict) because ADR-0029 keys the
-/// part → commit-unit map on it: it is stable across a dedup, unique within the
-/// manifest by M4, and 4 bytes rather than a second copy of every part path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecordedPart {
     /// True iff an existing entry with the same path was refreshed in place.
@@ -345,14 +231,6 @@ pub struct RecordedPart {
 }
 
 /// Same as [`record_committed_part`] but with a precomputed fingerprint.
-///
-/// Used by parallel-chunked aggregation, where workers compute fingerprints
-/// inside their thread (the local tmp file is dropped at thread exit) and
-/// the parent iterates over the shared `file_records` collection.
-/// Returns the entry's [`RecordedPart`]: `deduped` is true iff the part was DEDUPED in place (a
-/// re-read overwrote a rehydrated part of the same path) — the caller must then NOT double-count
-/// the run aggregates for it — and `part_id` is the manifest id of the entry either way, which
-/// ADR-0029 uses to key the part → commit-unit map the Form-B coverage is computed on.
 #[must_use]
 pub fn record_committed_part_with_fingerprint(
     summary: &mut RunSummary,
@@ -362,21 +240,6 @@ pub fn record_committed_part_with_fingerprint(
     content_fingerprint: String,
     content_md5: String,
 ) -> RecordedPart {
-    // ADR-0012 M4: part_id must be unique within the manifest.  Before the
-    // M8 resume-hydration work, `summary.manifest_parts.len() + 1` was a
-    // safe ordinal because the list was always built from scratch this run.
-    // After M8 hydrates parts inherited from the prior manifest, simple
-    // length-based numbering can collide (hydrated has [1,2,4,5]; the next
-    // write at len()=4 would get part_id=5 — duplicate).  Take max+1 of
-    // existing part_ids instead.  Empty list → 1, matching the historical
-    // first-part value.
-    // Dedup by PATH: a resume that re-reads a page whose REHYDRATED part shares this run's stable
-    // part name (keyset seek_tag / a chunked stable name) OVERWRITES the file on disk — the
-    // manifest must then carry ONE entry, not both, or finalize double-counts the page's rows (the
-    // after_manifest_update dup — measured 300/1000 on a live keyset resume, convergence round-1
-    // HIGH). Two parts sharing a path is never valid (each is a distinct file), so the re-read is
-    // authoritative: keep the existing part_id, refresh the payload in place. A first-time write
-    // (the common case) never collides and falls through to the push below unchanged.
     if let Some(existing) = summary
         .manifest_parts
         .iter_mut()
@@ -387,7 +250,6 @@ pub fn record_committed_part_with_fingerprint(
         existing.content_fingerprint = content_fingerprint;
         existing.content_md5 = content_md5;
         existing.status = PartStatus::Committed;
-        // deduped in place — the caller must NOT double-count the aggregates
         return RecordedPart {
             deduped: true,
             part_id: existing.part_id,
@@ -418,63 +280,27 @@ pub fn record_committed_part_with_fingerprint(
 /// Outcome of a manifest-write attempt.
 #[derive(Debug)]
 pub enum WriteOutcome {
-    /// `manifest.json` written.  `_SUCCESS` written iff `status == Success`.
+    /// `manifest.json` written.
     Written { success_marker: bool },
-    /// Destination kind does not support a manifest (e.g. stdout).  Caller
-    /// should log and continue — this is not an error.
+    /// Destination kind does not support a manifest (e.g.
     SkippedStreaming,
 }
 
 /// Write `manifest.json`, then (for `Success` runs only) `_SUCCESS`.
-///
-/// Enforces M1 (caller has already committed all parts before calling),
-/// M2 (manifest before success marker), and M7 (relies on the destination's
-/// declared `WriteCommitProtocol` for atomicity).
-///
-/// Streaming destinations skip the manifest entirely — no coherent prefix
-/// exists to write it to, and a polled orchestrator would have nothing to
-/// observe.  The function returns `Ok(WriteOutcome::SkippedStreaming)` in
-/// that case so the caller can surface a clear "no manifest produced" note
-/// in the run report.
 pub fn write_manifest(dest: &dyn Destination, manifest: &RunManifest) -> Result<WriteOutcome> {
     let emit_success_marker = matches!(manifest.status, ManifestStatus::Success);
-    // Canonical manifest.json + `_SUCCESS` move together (a consistent pair).
     write_manifest_inner(dest, manifest, emit_success_marker, true)
 }
 
-/// Like [`write_manifest`] but never writes the prefix-level `_SUCCESS` marker,
-/// even for a `Success` manifest. The CDC sink calls this before each slot/
-/// checkpoint ack (round-2 audit #11): the ack advances a consume-on-read slot
-/// PAST the just-flushed parts, so those parts must already be covered by a
-/// durable, loader-acceptable (`Success`) run-unique manifest — otherwise a crash
-/// in the ack→terminal-manifest window orphans them from the manifest-
-/// authoritative `rivet load` (silent, count-gate-invisible row loss). But the
-/// prefix is NOT complete yet, so `_SUCCESS` must not appear until the clean end
-/// (the terminal [`write_manifest`] emits it), or resume/guard would treat a
-/// mid-stream cycle as finished.
+/// Like [`write_manifest`] but never writes the prefix-level `_SUCCESS` marker, even for a `Success` manifest.
 pub fn write_manifest_without_success_marker(
     dest: &dyn Destination,
     manifest: &RunManifest,
 ) -> Result<WriteOutcome> {
-    // Round-3 regression fix: write ONLY the immutable run-unique copy, NOT the
-    // canonical manifest.json. The CDC sink calls this per-roll (before each ack)
-    // purely for durability, and the manifest-authoritative loader finds the parts
-    // via the run-unique copies (list_manifest_keys prefers them). Overwriting the
-    // canonical manifest.json here left the prefix's `_SUCCESS` (which fingerprints
-    // the LAST completed run's manifest) stale against it, so `rivet validate` fired
-    // a fatal SuccessMarkerStale on fully-intact data during/after a shared-prefix
-    // `until_current` run. The canonical + `_SUCCESS` must stay a consistent pair,
-    // updated together only by the terminal `write_manifest` at clean end.
     write_manifest_inner(dest, manifest, false, false)
 }
 
-/// Like [`write_manifest`] but WITHOUT the prefix-level `_SUCCESS` — keeps the
-/// canonical `manifest.json` + the run-unique copy. For a `--pool --split` UNIT
-/// (#167): the unit's canonical/copy are its record (validate reads the canonical,
-/// the load sums the copies), but the prefix `_SUCCESS` — which marks the WHOLE
-/// giant done — is written ONCE by the pool after every unit finishes, never by a
-/// single unit. Distinct from [`write_manifest_without_success_marker`], which
-/// also skips the canonical (the CDC per-roll case).
+/// Like [`write_manifest`] but WITHOUT the prefix-level `_SUCCESS`.
 pub fn write_manifest_keep_canonical_no_success(
     dest: &dyn Destination,
     manifest: &RunManifest,
@@ -495,10 +321,6 @@ fn write_manifest_inner(
         return Ok(WriteOutcome::SkippedStreaming);
     }
 
-    // Finding #44: a batch and a CDC export sharing one prefix silently
-    // destroyed each other's manifest (last writer wins, prior parts orphaned
-    // from validate). Refuse cross-shape overwrites at the ONE seam both
-    // pipelines write through.
     crate::manifest::guard_manifest_mode(dest, &manifest.mode)?;
 
     let bytes = serde_json::to_vec_pretty(manifest)?;
@@ -506,23 +328,11 @@ fn write_manifest_inner(
     let manifest_tmp = tempfile::NamedTempFile::new()?;
     std::fs::write(manifest_tmp.path(), &bytes)?;
     if write_canonical && !matches!(manifest.status, ManifestStatus::Success) {
-        // A prior run's `_SUCCESS` goes BEFORE a non-success canonical lands, so no
-        // reader ever finds the marker beside it; a crash between the two leaves an
-        // incomplete-looking prefix, the safe direction.
         dest.remove(SUCCESS_FILENAME)?;
     }
     if write_canonical {
-        // The canonical (last-writer-wins) pointer. Updated with `_SUCCESS` only at
-        // a run's clean end so the pair never disagrees (round-3 regression fix).
         dest.write(manifest_tmp.path(), MANIFEST_FILENAME)?;
     }
-    // Immutable per-run copy. Consecutive runs into one prefix — a CDC soak,
-    // incremental batch, the scheduler's `until_current` model — each clobber
-    // `manifest.json`, orphaning every prior run's manifest from a consumer that
-    // sums row counts ACROSS runs (the Pro loader's reconcile). The parts already
-    // carry the run id in their names (`<export>_<stamp>.parquet`,
-    // `cdc-<run_token>-NNNN`); the manifest sidecar must too. This is the durable
-    // record the loader reads, so it is ALWAYS written.
     dest.write(
         manifest_tmp.path(),
         &run_unique_manifest_name(&manifest.run_id),
@@ -574,8 +384,6 @@ mod tests {
         })
         .expect("build LocalDestination")
     }
-
-    // ── ManifestBuilder ─────────────────────────────────────────────────────
 
     #[test]
     fn builder_starts_empty() {
@@ -647,7 +455,6 @@ mod tests {
             None,
             "file:///x".into(),
         );
-        // Sleep a fraction of a ms to make finished_at > started_at observable.
         std::thread::sleep(std::time::Duration::from_millis(2));
         let m = b.finalize(ManifestStatus::Success);
         let started = chrono::DateTime::parse_from_rfc3339(&m.started_at).unwrap();
@@ -672,8 +479,6 @@ mod tests {
         assert_eq!(m.status, ManifestStatus::Failed);
     }
 
-    // ── compute_part_checksums ──────────────────────────────────────────────
-
     #[test]
     fn single_pass_checksums_equal_independent_recompute() {
         use base64::Engine as _;
@@ -683,7 +488,6 @@ mod tests {
         let data = b"the quick brown fox jumps over the lazy dog";
         std::fs::write(&p, data).unwrap();
         let (fp, md5) = compute_part_checksums(&p).unwrap();
-        // The single-read path must equal hashing the bytes independently.
         assert_eq!(
             fp,
             format!("xxh3:{:016x}", xxhash_rust::xxh3::xxh3_64(data))
@@ -736,8 +540,6 @@ mod tests {
 
     #[test]
     fn fingerprint_streams_files_larger_than_buffer() {
-        // Defends against a buffer-truncation bug: a file larger than the
-        // 64 KiB streaming buffer must hash the same as a single-shot xxh3.
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("big.bin");
         let payload: Vec<u8> = (0..(128 * 1024)).map(|i| (i % 251) as u8).collect();
@@ -749,8 +551,6 @@ mod tests {
         let one_shot = format!("xxh3:{:016x}", xxhash_rust::xxh3::xxh3_64(&payload));
         assert_eq!(fp, one_shot);
     }
-
-    // ── write_manifest ──────────────────────────────────────────────────────
 
     fn build_manifest(status: ManifestStatus) -> RunManifest {
         build_manifest_with_run(status, "run_001")
@@ -787,15 +587,8 @@ mod tests {
         b.finalize(status)
     }
 
-    // ── mutation-pilot gap closures ──────────────────────────────────────────
-    // The cargo-mutants pilot found these three silent-loss paths unguarded:
-    // a mutant emptying set_column_checksums / set_cursor_range, or corrupting
-    // the max+1 part-id arithmetic, survived the whole lib suite.
-
     #[test]
     fn builder_carries_column_checksums_and_key_into_the_manifest() {
-        // Mutant killed: `set_column_checksums with ()` — Form B checksums
-        // silently absent from the manifest strips validate of its value leg.
         let mut b = ManifestBuilder::new(
             &plan_snapshot(),
             "e",
@@ -828,8 +621,6 @@ mod tests {
 
     #[test]
     fn builder_carries_cursor_range_into_the_extraction_section() {
-        // Mutant killed: `set_cursor_range with ()` — a silently absent cursor
-        // range breaks the incremental continuity audit trail.
         let mut b = ManifestBuilder::new(
             &plan_snapshot(),
             "e",
@@ -858,19 +649,6 @@ mod tests {
     }
 
     /// The source count must reach the extraction section WITHOUT a cursor.
-    ///
-    /// It used to be a parameter of `set_cursor_range`, which `finalize` calls
-    /// only when the run has one — so on a `full` or `chunked` export the count
-    /// could not have reached the manifest even with a caller willing to supply
-    /// it. That is half of why `load::reconcile`'s source→file bail had never
-    /// executed; the other half was all three writers passing `None`.
-    ///
-    /// Written because the mutation gate caught `set_source_row_count with ()`
-    /// surviving: the setter's only coverage was a LIVE test
-    /// (`run_reconcile_flag_exits_zero_when_counts_match`), which the `--lib`
-    /// run cannot see. The live test stays — it observes the value at the
-    /// boundary, out of the artifact the real producer wrote — and this pins the
-    /// cursor-independence the live fixture happens not to exercise.
     #[test]
     fn builder_carries_the_source_row_count_without_a_cursor() {
         let mut b = ManifestBuilder::new(
@@ -884,7 +662,6 @@ mod tests {
             None,
             "file:///tmp/out/".into(),
         );
-        // No `set_cursor_range` call at all — the `full`/`chunked` shape.
         b.set_source_row_count(Some(4242));
         let m = b.finalize(ManifestStatus::Success);
         let ex = m.source.extraction.expect("extraction section present");
@@ -902,10 +679,6 @@ mod tests {
     }
 
     /// `None` must survive as absent, not become 0.
-    ///
-    /// `load::reconcile` branches on `if let Some(src)`, so a `Some(0)` where no
-    /// probe ran would compare a real `row_count` against zero and bail on every
-    /// export that did not use `--reconcile`.
     #[test]
     fn an_unprobed_run_records_no_source_row_count() {
         let mut b = ManifestBuilder::new(
@@ -927,9 +700,6 @@ mod tests {
 
     #[test]
     fn record_committed_part_assigns_max_plus_one_over_id_gaps() {
-        // Mutants killed: `m + 1` → `m - 1` / `m * 1` in the part-id
-        // computation. The doc comment describes the exact hazard (hydrated
-        // ids [1,2,4] must yield 5, never a duplicate) — this pins it.
         let mut s = crate::pipeline::summary::RunSummary::stub_for_testing(
             "run_pid",
             String::from("orders"),
@@ -988,10 +758,6 @@ mod tests {
 
     #[test]
     fn write_manifest_leaves_a_run_unique_copy_beside_the_canonical() {
-        // The shared seam every pipeline shape writes through must leave an
-        // immutable per-run copy next to the last-writer-wins `manifest.json`,
-        // so a prefix accumulating several runs keeps EACH run's manifest for a
-        // cross-run consumer that sums row counts (the Pro loader's reconcile).
         let dir = tempfile::tempdir().unwrap();
         let dest = local_dest(dir.path());
         let m = build_manifest(ManifestStatus::Success);
@@ -1010,25 +776,17 @@ mod tests {
 
     #[test]
     fn mid_roll_manifest_write_does_not_touch_canonical_or_success() {
-        // Round-3 regression: write_manifest_without_success_marker (the CDC per-roll
-        // durability write) must NOT overwrite the canonical manifest.json, or the
-        // prefix's _SUCCESS (fingerprint of the LAST completed run) goes stale against
-        // it and `rivet validate` raises a fatal SuccessMarkerStale on intact data.
-        // RED before the fix (it overwrote manifest.json every roll).
         let dir = tempfile::tempdir().unwrap();
         let dest = local_dest(dir.path());
 
-        // Run A completes: canonical + _SUCCESS + run-unique, all consistent.
         let a = build_manifest_with_run(ManifestStatus::Success, "run_A");
         write_manifest(&dest, &a).unwrap();
         let canonical_after_a = std::fs::read(dir.path().join(MANIFEST_FILENAME)).unwrap();
         let success_after_a = std::fs::read(dir.path().join(SUCCESS_FILENAME)).unwrap();
 
-        // Run B does a mid-roll durability write into the SAME prefix.
         let b = build_manifest_with_run(ManifestStatus::Success, "run_B");
         write_manifest_without_success_marker(&dest, &b).unwrap();
 
-        // The canonical pointer and _SUCCESS must still be run A's (consistent pair).
         assert_eq!(
             std::fs::read(dir.path().join(MANIFEST_FILENAME)).unwrap(),
             canonical_after_a,
@@ -1039,7 +797,6 @@ mod tests {
             success_after_a,
             "_SUCCESS must stay paired with the canonical it fingerprints"
         );
-        // But run B's durable run-unique copy IS written (the loader reads it).
         assert!(
             dir.path().join(run_unique_manifest_name("run_B")).exists(),
             "run B's run-unique manifest must be durable for the loader"
@@ -1048,11 +805,6 @@ mod tests {
 
     #[test]
     fn two_runs_into_one_prefix_leave_two_run_unique_manifests() {
-        // The canonical `manifest.json` is clobbered by the second run (fine —
-        // it is the latest-run pointer); the run-unique copies must BOTH survive
-        // so reconcile sums across runs. Mode-agnostic regression for the
-        // manifest-clobber the Pro oracle-fixture harness caught: a live soak
-        // loaded 30 parts (3599 rows) but the one surviving manifest declared 55.
         let dir = tempfile::tempdir().unwrap();
         let dest = local_dest(dir.path());
         write_manifest(
@@ -1133,7 +885,6 @@ mod tests {
 
     #[test]
     fn failed_status_writes_manifest_but_not_success_marker() {
-        // ADR-0012 M2: _SUCCESS exists iff the run completed successfully.
         let dir = tempfile::tempdir().unwrap();
         let dest = local_dest(dir.path());
         let m = build_manifest(ManifestStatus::Failed);
@@ -1175,8 +926,6 @@ mod tests {
         assert!(matches!(outcome, WriteOutcome::SkippedStreaming));
     }
 
-    // ── record_run_schema_fingerprint ──────────────────────────────────────
-
     fn dummy_summary() -> crate::pipeline::summary::RunSummary {
         crate::pipeline::summary::RunSummary::stub_for_testing("r", "orders")
     }
@@ -1202,17 +951,12 @@ mod tests {
 
     #[test]
     fn record_run_schema_fingerprint_is_idempotent() {
-        // Across chunks of one run the schema is identical; later calls
-        // must not overwrite.  Pin this so a future "always overwrite"
-        // refactor can't silently make the fingerprint depend on which
-        // chunk happened to land last.
         use arrow::datatypes::DataType;
         let mut s = dummy_summary();
         let schema_a = schema_with(&[("id", DataType::Int64)]);
         record_run_schema_fingerprint(&mut s, &schema_a);
         let first = s.schema_fingerprint.clone();
 
-        // Record-call with a *different* schema — should be a no-op.
         let schema_b = schema_with(&[("id", DataType::Int64), ("extra", DataType::Utf8)]);
         record_run_schema_fingerprint(&mut s, &schema_b);
         assert_eq!(s.schema_fingerprint, first, "later call must not overwrite");
@@ -1220,9 +964,6 @@ mod tests {
 
     #[test]
     fn record_run_schema_fingerprint_matches_state_helper_output() {
-        // The helper must produce the same value as `state::schema_fingerprint`
-        // applied to the same column list — finalize_manifest depends on this
-        // equivalence to validate manifests against stored schemas.
         use arrow::datatypes::DataType;
         let mut s = dummy_summary();
         let schema = schema_with(&[("id", DataType::Int64), ("email", DataType::Utf8)]);
@@ -1246,8 +987,6 @@ mod tests {
 
     #[test]
     fn record_run_schema_fingerprint_is_order_insensitive() {
-        // The helper hashes a sorted-by-name column list (state::schema_fingerprint
-        // contract).  Two schemas with reordered fields must produce the same fp.
         use arrow::datatypes::DataType;
         let mut s1 = dummy_summary();
         let mut s2 = dummy_summary();

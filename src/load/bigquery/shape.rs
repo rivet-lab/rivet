@@ -1,5 +1,4 @@
-//! The shape of a BigQuery table — partitioning, clustering, options and the properties a
-//! rebuild carries — as `tables.get` reports it and as the load declares it.
+//! The shape of a BigQuery table — partitioning, clustering, options and the properties a rebuild carries.
 
 use super::*;
 
@@ -17,8 +16,7 @@ pub(super) struct TableShape {
     pub(super) bytes: Option<u64>,
 }
 
-/// Whether an adopted log keeps the clustering its table had: `cluster_by` differs but was
-/// not written in the config.
+/// Whether an adopted log keeps the clustering its table had.
 pub(super) fn keeps_own_clustering(
     shape: &TableShape,
     cluster_by: &[String],
@@ -27,9 +25,7 @@ pub(super) fn keeps_own_clustering(
     !declared && !same_columns(&shape.cluster, cluster_by)
 }
 
-/// The clustering a whole-table load writes: what the config wrote, else — for a table
-/// that already exists — the clustering it has (an unwritten `cluster_by` follows the
-/// table; `LOAD DATA OVERWRITE` must repeat an existing table's clustering exactly).
+/// The clustering a whole-table load writes.
 pub(super) fn table_clustering<'a>(
     clustering: &'a Clustering,
     existing: Option<&'a TableShape>,
@@ -40,9 +36,7 @@ pub(super) fn table_clustering<'a>(
     }
 }
 
-/// Refuse a clustering list BigQuery would reject or that is not a plain identifier: each
-/// column splices raw into `CLUSTER BY <cols>`, the same gate the table, column and pk
-/// names get.
+/// Refuse a clustering list BigQuery would reject or that is not a plain identifier.
 pub(super) fn check_cluster_columns(cluster_by: &[String]) -> Result<()> {
     if cluster_by.len() > MAX_CLUSTER_COLUMNS {
         crate::rivet_bail!(
@@ -64,9 +58,7 @@ pub(super) fn check_cluster_columns(cluster_by: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Drift of an existing change log from what the load DECLARES: a declared partition that
-/// differs comes first (only a rebuild fixes it), then a declared clustering that differs
-/// (patched in place). Nothing declared → no drift; the log keeps its own shape.
+/// Drift of an existing change log from what the load DECLARES.
 pub(super) fn classify_drift(
     shape: &TableShape,
     partition: Option<&PartitionKey>,
@@ -104,8 +96,7 @@ pub(super) fn clustering_patch(cluster_by: &[String]) -> serde_json::Value {
     }
 }
 
-/// The properties of a table a rebuild must carry over — `CREATE TABLE … AS SELECT`
-/// copies rows and nothing else — and the ones it cannot.
+/// The properties of a table a rebuild must carry over.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(super) struct TableProps {
     pub(super) description: Option<String>,
@@ -187,8 +178,7 @@ pub(super) fn table_props_options(props: &TableProps) -> Vec<String> {
     out
 }
 
-/// Why the log cannot be rebuilt by a copy: column policy tags and row access policies
-/// do not survive `CREATE TABLE … AS SELECT`, and a log without them is a data exposure.
+/// Why the log cannot be rebuilt by a copy: column policy tags and row access policies do not survive `CREATE TABLE … AS SELECT`, and a log without them is a data exposure.
 pub(super) fn rebuild_policy_refusal(
     changes: &str,
     props: &TableProps,
@@ -214,8 +204,7 @@ pub(super) fn rebuild_policy_refusal(
     ))
 }
 
-/// The partition as the change log takes it: never a filter requirement, and an expiry
-/// only on a key that is not a load date (expiring load dates would drop unchanged rows).
+/// The partition as the change log takes it.
 pub(super) fn changelog_partition(p: &TablePartition) -> TablePartition {
     TablePartition {
         expiration_days: changelog_expiry(p),
@@ -224,8 +213,7 @@ pub(super) fn changelog_partition(p: &TablePartition) -> TablePartition {
     }
 }
 
-/// The expiry a change log keeps from a declared partition: none for a load-date key
-/// (the load time or `_rivet_exported_at`) or a key that takes none.
+/// The expiry a change log keeps from a declared partition.
 pub(super) fn changelog_expiry(p: &TablePartition) -> Option<u32> {
     if p.key.is_load_date() || !p.key.takes_expiry() {
         return None;
@@ -244,8 +232,7 @@ impl TableShape {
     }
 }
 
-/// The shape a `tables.get` resource describes (`timePartitioning`, `rangePartitioning`,
-/// `clustering`, `requirePartitionFilter`).
+/// The shape a `tables.get` resource describes (`timePartitioning`, `rangePartitioning`, `clustering`, `requirePartitionFilter`).
 pub(super) fn parse_table_shape(meta: &serde_json::Value) -> TableShape {
     use serde_json::Value;
     let text = |v: &Value, key: &str| v.get(key).and_then(Value::as_str).map(String::from);
@@ -313,9 +300,7 @@ pub(super) fn same_partition(existing: Option<&PartitionKey>, want: Option<&Part
     }
 }
 
-/// How an existing table's partitioning or clustering differs from what this load declares,
-/// or `None`. `cluster_by` is the clustering the config WROTE; `None` (`auto`) follows the
-/// table's own.
+/// How an existing table's partitioning or clustering differs from what this load declares, or `None`.
 pub(super) fn shape_conflict(
     shape: &TableShape,
     partition: Option<&PartitionKey>,
@@ -343,10 +328,7 @@ pub(super) fn shape_conflict(
     (!diffs.is_empty()).then(|| diffs.join("; "))
 }
 
-/// The `OPTIONS(...)` a load creating the full table declares, or `None` when there is
-/// no partition or nothing to set. `creating` is false when the table already exists —
-/// BigQuery refuses an overwrite that declares different options, so they go through
-/// [`options_drift`] instead.
+/// The `OPTIONS(...)` a load creating the full table declares, or `None` when there is no partition or nothing to set.
 pub(super) fn creation_options(
     creating: bool,
     partition: Option<&TablePartition>,
@@ -365,15 +347,12 @@ pub(super) fn creation_options(
     (!opts.is_empty()).then(|| opts.join(", "))
 }
 
-/// The `OPTIONS(...)` of a change log rivet creates: the expiry of a partition that is
-/// not a load date. Load-date partitions never expire (expiring them would drop rows that
-/// never changed from the view), and the log never requires a partition filter.
+/// The `OPTIONS(...)` of a change log rivet creates: the expiry of a partition that is not a load date.
 pub(super) fn changelog_options_sql(partition: &TablePartition) -> Option<String> {
     changelog_expiry(partition).map(|days| format!("partition_expiration_days = {days}"))
 }
 
-/// `ALTER TABLE … SET OPTIONS(...)` bringing an existing table's partition options to
-/// what the load declares, or `None` when they already match (or the table is new).
+/// `ALTER TABLE … SET OPTIONS(...)` bringing an existing table's partition options to what the load declares, or `None` when they already match (or the table is new).
 pub(super) fn options_drift(
     fqtn: &str,
     existing: Option<&TableShape>,

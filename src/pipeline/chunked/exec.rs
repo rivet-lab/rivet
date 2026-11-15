@@ -1,8 +1,4 @@
 //! **Layer: Execution** — stateless chunked execution paths.
-//!
-//! `run_chunked_sequential` and `run_chunked_parallel` execute chunks without
-//! owning checkpoint state. They accept an optional `StateStore` reference
-//! solely for manifest (file-record) writes.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -26,11 +22,8 @@ pub(crate) fn run_chunked_sequential(
     let cp = super::chunked_plan(plan);
 
     let chunks = match chunk_source {
-        // Detect: compute ranges + run the pre-chunk drift check once (ADR-0021).
         super::ChunkSource::Detect => super::prepare_chunk_plan(src, plan, state, summary)?,
         super::ChunkSource::Precomputed(ranges) => {
-            // Ranges come from the artifact; the DRIFT GATE still runs. It does
-            // not depend on them.
             summary.chunks_precomputed = true;
             super::check_drift_only(src, plan, state, summary)?;
             ranges
@@ -46,17 +39,8 @@ pub(crate) fn run_chunked_sequential(
     );
 
     let pb = ChunkProgress::new(&plan.export_name, chunks.len());
-    // Per-batch progress feed (single-threaded here, but the sink API is shared).
     let streamed_rows = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
-    // Form B: XOR-combine each chunk's per-column checksums run-wide, harvest once
-    // after the loop — so the finalize manifest records Form B for chunked exports.
 
-    // Run the cross-shape manifest guard ONCE, at run start — the answer cannot
-    // change mid-run, and re-running it per chunk cost one remote GET per chunk
-    // (a 3000-chunk GCS export paid 3000 serialized GETs). The per-chunk writer
-    // below now opens UNGUARDED, safe because this probe already guarded the
-    // prefix (roast 2026-08-09; the sequential-CHECKPOINT sibling already did
-    // this — run_chunked_sequential was the last per-chunk-guarded runner).
     let _ = crate::pipeline::frame::RunnerFrame::open(plan)?;
 
     for (i, (start, end)) in chunks.iter().enumerate() {
@@ -91,8 +75,6 @@ pub(crate) fn run_chunked_sequential(
         let mut sink = ExportSink::new(plan)?
             .with_row_progress(pb.handle(), std::sync::Arc::clone(&streamed_rows));
         src.export(
-            // `chunk_query` wraps the base in a subquery → resolve NUMERIC
-            // catalog hints from the unwrapped base (`wrapped`).
             &source::ExportRequest::wrapped(
                 &chunk_query,
                 &plan.base_query,
@@ -103,9 +85,6 @@ pub(crate) fn run_chunked_sequential(
             &mut sink,
         )?;
         sink.finish_writer()?;
-        // ADR-0012 M3: capture the dest schema fingerprint as soon as the
-        // sink resolves a schema (first non-empty chunk).  Idempotent across
-        // subsequent chunks since the schema is identical run-wide.
         if let Some(s) = sink.dest_schema.as_deref() {
             super::super::manifest_writer::record_run_schema_fingerprint(summary, s);
         }
@@ -119,15 +98,9 @@ pub(crate) fn run_chunked_sequential(
         );
 
         let (parts, wrote) = if sink.total_rows > 0 {
-            // Guarded once at run start (above); per-chunk writers open UNGUARDED
-            // so a large chunked export pays ONE manifest GET, not one per chunk
-            // (roast 2026-08-09). Satisfies the unguarded_callers_also_guard lint
-            // because this file now opens a guarded frame at run start.
             crate::test_hook::maybe_transient_once("chunk_write")?;
             let frame = crate::pipeline::frame::RunnerFrame::open_unguarded(plan)?;
             let base = super::chunk_part_filename(&plan.export_name, i, &frame.ext);
-            // write_sink_parts drains every part the sink produced — the final temp
-            // file plus anything maybe_split rotated at max_file_size.
             super::super::commit::write_sink_parts(
                 frame.dest.as_ref(),
                 &mut sink,
@@ -137,8 +110,6 @@ pub(crate) fn run_chunked_sequential(
         } else {
             (Vec::new(), Ok(()))
         };
-        // Shape only, no schema: chunked runs its drift gate PRE-chunk from
-        // type_mappings (ADR-0021), and a fed schema would re-run it post-run.
         let shape = sink.take_shape();
         let checksums = wrote.map(|()| sink.take_checksums());
         let chunk_index = i as i64;
@@ -167,23 +138,15 @@ pub(in crate::pipeline) fn run_chunked_parallel(
     chunk_source: super::ChunkSource,
     meta: &mut crate::pipeline::job::MetaConn<'_>,
 ) -> Result<()> {
-    // Subject to the per-runner facade contract (ADR-0018) — this runner is
-    // dispatched directly from job.rs, bypassing run_export, so it sets the flag
-    // itself (else check_post_run_invariants is a no-op on the large-table path).
     summary.state_backed = true;
     let cp = super::chunked_plan(plan);
 
     let chunks = match chunk_source {
-        // Detect: the run's metadata connection computes ranges + runs the
-        // pre-chunk drift check (ADR-0021).
         super::ChunkSource::Detect => {
             super::prepare_chunk_plan(meta.require()?, plan, Some(state), summary)?
         }
         super::ChunkSource::Precomputed(ranges) => {
-            // Ranges come from the artifact; the DRIFT GATE still runs.
             summary.chunks_precomputed = true;
-            // No ranges ⇒ no rows will be read, so there is nothing for the gate
-            // to protect and no reason to open a connection to say so.
             if super::precomputed_ranges_need_the_drift_gate(&ranges) {
                 super::check_drift_only(meta.require()?, plan, Some(state), summary)?;
             }
@@ -202,42 +165,20 @@ pub(in crate::pipeline) fn run_chunked_parallel(
         parallel
     );
 
-    // `completed` counts only successes (progress); the governor's exit count is
-    // FanIn's `finished`, bumped on every exit — a success-only count would strand
-    // it whenever a chunk fails.
     let completed = AtomicUsize::new(0);
     let idle_sources = super::IdleSources::default();
-    // Rows streamed across ALL chunks (completed + in-flight) — drives the
-    // per-batch progress feed so the bar ticks during a chunk's read.
     let streamed_rows = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
-    // Parts, shapes, checksums and failures, drained post-join in FanIn's fixed order.
     let fan = crate::pipeline::fan_in::FanIn::default();
-    // Schema fingerprint captured by whichever worker resolves the dest
-    // schema first.  ADR-0012 M3 — stays None for empty runs (no chunk
-    // produced rows so no schema was seen).  Drained into `summary` after
-    // the parallel scope joins.
     let shared_fingerprint: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    // Condvar-backed semaphore: blocked spawners park in the kernel until a
-    // worker calls `release()`, instead of polling an atomic every 50 ms. Its
-    // permit ceiling is mutable so the OPT-2 governor can back parallelism off
-    // and recover it under source pressure.
     let semaphore = resource::Semaphore::new(parallel);
     let pb = ChunkProgress::new(&plan.export_name, total_chunks);
     let pb_handle = pb.handle();
 
-    // OPT-2 adaptive concurrency governor — armed, spawned, and drained through the shared
-    // GovernorHarness (identical wiring in the keyset runner; #152).
     let governor = crate::pipeline::governor::GovernorHarness::arm(plan, parallel);
 
-    // One destination (GCS/S3) instance for the whole export: `create_destination` wires a
-    // dedicated Tokio runtime; creating one per chunk caused runtime shutdown races under load
-    // (`dispatch task is gone: runtime dropped` from the HTTP client).
     let (shared_destination, _frame_ext) = crate::pipeline::frame::RunnerFrame::open_shared(plan)?;
 
     std::thread::scope(|s| {
-        // Governor thread (shared seam): samples source pressure on its own monitoring connection
-        // and resizes the semaphore within [floor, ceiling], self-terminating once every chunk
-        // worker has FINISHED (success OR failure) so a failing chunk can't strand it.
         governor.spawn_into(
             s,
             &semaphore,
@@ -247,11 +188,8 @@ pub(in crate::pipeline) fn run_chunked_parallel(
         );
 
         for (i, (start, end)) in chunks.iter().enumerate() {
-            // Block (kernel-park) until a worker slot frees up.
             semaphore.acquire();
 
-            // Memory throttle stays a poll loop — RSS rising/falling is not
-            // signaled by semaphore release, only observable via the syscall.
             if !resource::check_memory(plan.tuning.memory_threshold_mb) {
                 log::warn!("memory threshold exceeded, waiting before chunk {}", i);
                 while !resource::check_memory(plan.tuning.memory_threshold_mb) {
@@ -275,18 +213,8 @@ pub(in crate::pipeline) fn run_chunked_parallel(
             let shared_destination = std::sync::Arc::clone(&shared_destination);
 
             fan.spawn(s, format!("chunk {i}"), move || {
-                // The parent took this permit; release it on every exit, panic included,
-                // or the spawner stalls at `parallel = 1` (FanIn::spawn counts the exit).
                 let _permit = crate::pipeline::governor::TaskPermit::adopt(semaphore);
                 {
-                    // Test-only, mirroring both checkpoint runners
-                    // (sequential_checkpoint.rs / parallel_checkpoint.rs): make ONE
-                    // chunk fail without killing the process, so the collected-worker-
-                    // error guard AFTER the scope join can be exercised. A panic hook
-                    // cannot reach that guard — it only runs once every worker has
-                    // joined, which a crashed process never does. Same point name and
-                    // 0-based chunk index as the checkpoint runners
-                    // (`RIVET_TEST_ERROR_AT=chunk_export:1`).
                     crate::test_hook::maybe_error_at_index("chunk_export", i as i64)?;
 
                     let chunk_query = build_chunk_query_sql(
@@ -298,11 +226,6 @@ pub(in crate::pipeline) fn run_chunked_parallel(
                         plan_for_worker.source.source_type,
                     );
 
-                    // Round-2 audit #3/#4: attach the doctor/auth-TLS connect hint
-                    // to a worker's create_source failure — the `rivet apply`
-                    // (Precomputed) path has NO earlier hinted connect, and a mid-run
-                    // credential rotation / pooler drop otherwise dead-ends in a raw
-                    // driver error here. Matches single.rs:93.
                     let mut thread_src =
                         idle_sources.take(&plan_for_worker.source).map_err(|e| {
                             crate::pipeline::single::attach_connect_hint(e, &plan_for_worker.source)
@@ -323,9 +246,6 @@ pub(in crate::pipeline) fn run_chunked_parallel(
                     )?;
                     idle_sources.give(thread_src);
                     sink.finish_writer()?;
-                    // ADR-0012 M3: capture the dest schema fingerprint once
-                    // per run.  `OnceLock::set` is a no-op after the first
-                    // successful set, so all later workers race-free.
                     if let Some(s) = sink.dest_schema.as_deref() {
                         let columns = crate::state::arrow_schema_to_columns(s);
                         let _ = shared_fingerprint.set(crate::state::schema_fingerprint(&columns));
@@ -339,10 +259,6 @@ pub(in crate::pipeline) fn run_chunked_parallel(
                             None,
                         );
                         let base = super::chunk_part_filename(export_name, i, fmt.file_extension());
-                        // Worker-safe half of commit (I1 + dest.write + fingerprint),
-                        // draining every part the sink produced (max_file_size
-                        // rotation included). Touches no shared run state;
-                        // record_part runs in the drain.
                         let (recs, wrote) = super::super::commit::write_sink_parts(
                             &**shared_destination,
                             &mut sink,
@@ -354,14 +270,10 @@ pub(in crate::pipeline) fn run_chunked_parallel(
                             fan_r.part(unit, rec);
                         }
                         wrote?;
-                        // ADR-0029: the chunk is the commit unit its parts are recorded under.
                         fan_r.observe(sink.take_shape());
                         fan_r.contribute(unit, sink.take_checksums());
                     }
                     let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                    // Advance the chunk count; show the streamed-rows total (≥
-                    // agg_rows, monotonic) so the bar never jumps backward from
-                    // the in-flight per-batch updates.
                     pb_thread.inc(streamed_rows.load(Ordering::Relaxed));
                     log::info!(
                         "export '{}': chunk {}/{} done ({} rows)",
@@ -376,15 +288,10 @@ pub(in crate::pipeline) fn run_chunked_parallel(
         }
     });
 
-    // Drain the worker-shared fingerprint into summary.  Stays None for
-    // empty runs (no worker saw a schema) — finalize_manifest then falls
-    // through to the state lookup / placeholder path for those.
     if let Some(fp) = shared_fingerprint.into_inner() {
         summary.schema_fingerprint = Some(fp);
     }
 
-    // Every durable part (file_log written here, in the drain — ADR-0017), then the
-    // shapes and committed checksums, then the bail.
     let drained = fan.finish(
         plan,
         summary,
@@ -408,7 +315,6 @@ pub(in crate::pipeline) fn run_chunked_parallel(
             )
         },
     );
-    // After the drain: record_part is what counts the rows.
     pb.finish(summary.total_rows);
     drained?;
 
@@ -428,10 +334,7 @@ mod tests {
     use crate::source::BatchSink;
     use crate::state::StateStore;
 
-    // ChunkSource is defined in the parent (chunked) module.
     use super::super::ChunkSource;
-
-    // ── EmptySource: never calls on_schema / on_batch ────────────────────────
 
     struct EmptySource;
 
@@ -444,7 +347,7 @@ mod tests {
             _request: &crate::source::ExportRequest<'_>,
             _sink: &mut dyn BatchSink,
         ) -> crate::error::Result<()> {
-            Ok(()) // emits no schema, no batches → total_rows stays 0
+            Ok(())
         }
         fn type_mappings(
             &mut self,
@@ -471,22 +374,7 @@ mod tests {
         }
     }
 
-    /// `rivet apply` must REPLAY the artifact's chunk boundaries on the
-    /// SEQUENTIAL path, not re-derive them.
-    ///
-    /// `apply_cmd.rs:8-9` states the contract ("Execute using
-    /// `ChunkSource::Precomputed` so chunk boundaries from the artifact are
-    /// replayed without re-running `SELECT min/max` queries"), and the two
-    /// PARALLEL branches honoured it — but `job.rs` handed the sequential branch
-    /// to `run_with_reconnect`, whose signature carried no chunk source, so
-    /// `run_export` hardcoded `ChunkSource::Detect` and a sequential chunked
-    /// apply silently re-detected boundaries from live data.
-    ///
-    /// RED-proof, no mocking framework needed: `EmptySource::query_scalar` is
-    /// `unimplemented!()`, and the Detect path is the only one that calls it for
-    /// min/max. Restore the hardcoded `Detect` in `run_export` and this test
-    /// panics with "not needed in chunked exec tests"; with the source threaded
-    /// through, the precomputed range is used and nothing probes the source.
+    /// `rivet apply` must REPLAY the artifact's chunk boundaries on the SEQUENTIAL path, not re-derive them.
     #[test]
     fn apply_replays_precomputed_chunks_on_the_sequential_path() {
         let plan = chunked_plan_struct();
@@ -506,14 +394,8 @@ mod tests {
         )
         .expect("precomputed apply must not touch the source for boundaries");
 
-        // EmptySource emits no batches, so the run is empty — reaching this line at
-        // all is the first assertion (Detect would have panicked on the probe).
         assert_eq!(summary.total_rows, 0);
 
-        // And the runner must RECORD why the drift gate was skipped. Without this
-        // the flag's assignment has no offline coverage: the live replay tests are
-        // `#[ignore]`d, so a mutant that drops it survives every gate that runs on
-        // a PR — and the guard would then read a correct apply as a runner-bypass.
         assert!(
             summary.chunks_precomputed,
             "a precomputed chunk source must be recorded on the summary, or              `check_post_run_invariants` cannot tell a by-contract skip from a bypass"
@@ -592,8 +474,6 @@ mod tests {
         assert!(empty_done, "the empty chunk journals its completion");
     }
 
-    // ── sequential ───────────────────────────────────────────────────────────
-
     #[test]
     fn sequential_empty_precomputed_returns_ok_with_zero_rows() {
         let plan = chunked_plan_struct();
@@ -613,7 +493,6 @@ mod tests {
 
     #[test]
     fn sequential_one_chunk_zero_rows_skips_destination_write() {
-        // EmptySource returns no rows → sink.total_rows = 0 → no file written
         let plan = chunked_plan_struct();
         let mut summary = empty_summary(&plan);
         let mut src = EmptySource;
@@ -634,7 +513,6 @@ mod tests {
         let plan = chunked_plan_struct();
         let mut summary = empty_summary(&plan);
         let mut src = EmptySource;
-        // 5 chunks, all empty → no files, no rows, no errors
         run_chunked_sequential(
             &mut src,
             &plan,
@@ -653,11 +531,8 @@ mod tests {
         assert_eq!(summary.files_produced, 0);
     }
 
-    // ── parallel ─────────────────────────────────────────────────────────────
-
     #[test]
     fn parallel_empty_precomputed_returns_ok() {
-        // With empty Precomputed, creates destination then runs no threads.
         let plan = chunked_plan_struct();
         let mut summary = empty_summary(&plan);
         let state = StateStore::open_in_memory().unwrap();
