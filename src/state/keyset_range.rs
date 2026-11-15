@@ -1,16 +1,4 @@
-//! Parallel-keyset crash-recovery ranges (`keyset_range`), feat/parallel-keyset
-//! iteration 2.
-//!
-//! A parallel keyset run partitions the key into N stable ROW-percentile ranges
-//! sampled once at open. Recovery is **per-range** (coarse): the boundaries are
-//! persisted here at open (keyed by run_id) so a resume reloads the SAME ranges
-//! rather than re-sampling a possibly-changed table (which would move the
-//! boundaries and leave a gap). Each worker flips only its OWN `(export_name,
-//! range_index)` row to `done=1` at completion — in the SAME transaction that
-//! records its parts to `file_log` — so the checkpoint is atomic: a crash before
-//! that commit leaves the range `done=0` (re-read from `lo` on resume, its parts
-//! overwritten by stable run_id-based names), a crash after it leaves the range
-//! `done=1` (skipped on resume, its parts rehydrated from `file_log`).
+//! Parallel-keyset crash-recovery ranges (`keyset_range`), feat/parallel-keyset iteration 2.
 
 use crate::error::Result;
 
@@ -29,8 +17,7 @@ pub struct KeysetRangeRow {
     pub max_key: Option<String>,
 }
 
-/// A part a worker committed for its range — the `file_log` payload written
-/// atomically with the range's `done` flip.
+/// A part a worker committed for its range — the `file_log` payload written atomically with the range's `done` flip.
 pub struct KeysetRangePart {
     pub file_name: String,
     pub rows: i64,
@@ -38,9 +25,7 @@ pub struct KeysetRangePart {
 }
 
 impl StateStore {
-    /// Persist the sampled ranges of a FRESH parallel keyset run (all `done=0`),
-    /// replacing any prior set for this export. Called once at open, before the
-    /// workers spawn; the boundaries are then immutable for the run's lifetime.
+    /// Persist the sampled ranges of a FRESH parallel keyset run (all `done=0`), replacing any prior set for this export.
     pub fn persist_keyset_ranges(
         &self,
         export_name: &str,
@@ -116,9 +101,6 @@ impl StateStore {
     }
 
     /// Load the persisted ranges for a resuming run, ordered by `range_index`.
-    /// Filtered by `run_id` so a stale set from a superseded run is ignored, and by
-    /// `key_column`: ranges sampled on another key bound nothing on this one, so a
-    /// `done` range would be skipped rows. A pre-v29 set (no key recorded) loads.
     pub fn load_keyset_ranges(
         &self,
         export_name: &str,
@@ -142,7 +124,7 @@ impl StateStore {
         )
     }
 
-    /// Whether ranges are persisted for `run_id` (on `key_column`, or on any key when `None`) — the mark of a parallel keyset run.
+    /// Whether ranges are persisted for `run_id` (on `key_column`, or on any key when `None`).
     pub fn has_keyset_ranges(
         &self,
         export_name: &str,
@@ -162,9 +144,7 @@ impl StateStore {
         Ok(rows > 0)
     }
 
-    /// Clear the persisted ranges of an export's stream under `source`. Called post-finalize (via
-    /// `finalize_keyset_anchor`) once the complete manifest is written — a no-op
-    /// for any export that never ran parallel keyset.
+    /// Clear the persisted ranges of an export's stream under `source`.
     pub fn clear_keyset_ranges(&self, export_name: &str, source: &str) -> Result<()> {
         self.execute(
             "DELETE FROM keyset_range WHERE export_name = ?1 AND source = ?2",
@@ -173,14 +153,7 @@ impl StateStore {
         Ok(())
     }
 
-    /// Atomically COMMIT a completed range from a worker thread: record every part
-    /// to `file_log` AND flip the range's `done=1`, in ONE transaction, over a
-    /// worker-held store (the live `StateStore` is not `Sync`, so each worker opens
-    /// its own via `open_at_ref`). The transaction is the checkpoint
-    /// boundary — a crash before it commits leaves the range `done=0` with no
-    /// `file_log` rows (re-read on resume), after it leaves both durable (skipped +
-    /// rehydrated on resume). Only the range's OWN row is touched, so concurrent
-    /// workers never contend. The range is named by its index with the highest key it delivered.
+    /// Atomically COMMIT a completed range from a worker thread.
     pub fn commit_keyset_range(
         &self,
         run_id: &str,
@@ -194,9 +167,6 @@ impl StateStore {
         let file_sql = "INSERT INTO file_log \
              (run_id, export_name, file_name, row_count, bytes, format, compression, created_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
-        // Scope the `done` flip by run_id (the table's PK is (export_name,
-        // range_index) — run_id is NOT in it), so a run can never flip a row
-        // belonging to ANOTHER run's recovery set left behind by a crash (H1).
         let done_sql = "UPDATE keyset_range SET done = 1, updated_at = ?1, max_key = ?5 \
              WHERE export_name = ?2 AND range_index = ?3 AND run_id = ?4";
         self.transaction(|| {
@@ -351,8 +321,7 @@ mod tests {
         );
     }
 
-    /// The recipe's `chunk_by_key` changed between the crash and the resume: the
-    /// persisted ranges bound the OLD key, so a `done` range means nothing now.
+    /// The recipe's `chunk_by_key` changed between the crash and the resume.
     #[test]
     fn persisted_ranges_are_not_reloaded_for_a_different_key_column() {
         let s = store();
@@ -370,7 +339,6 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(s.load_keyset_ranges("exp", "run-1", "id").unwrap().len(), 2);
-        // A pre-v29 set recorded no key: it loads for whatever key asks.
         s.execute("UPDATE keyset_range SET key_column = NULL", &[])
             .unwrap();
         assert_eq!(
@@ -383,7 +351,6 @@ mod tests {
 
     #[test]
     fn load_with_a_different_run_id_returns_nothing() {
-        // A stale set from a superseded run must not leak into a fresh run's load.
         let s = store();
         s.persist_keyset_ranges("exp", "src", "run-1", "id", &[(None, None)])
             .unwrap();
@@ -435,7 +402,6 @@ mod tests {
             Some("k9"),
             "the committed range keeps the highest key it delivered"
         );
-        // The part landed in file_log under the run_id (rehydration source).
         let files = s.list_files_for_run("run-1").unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].file_name, "exp_run-1_pk_w1_0.parquet");
