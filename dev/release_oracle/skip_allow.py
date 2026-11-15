@@ -61,10 +61,6 @@ STAND_SKIPS = (
 )
 
 EXCUSES: tuple[Excuse, ...] = (
-    Excuse("coverage", "infra", "-",
-           "2026-11-03: cargo-llvm-cov is not installed on the gate host (b0446717 gate log: `no llvm-cov`), so the live-only coverage adjudication does not run. "
-           "Closes when `cargo install cargo-llvm-cov --locked` is run on the host",
-           "2026-11-17"),
     *(Excuse("fix_cells", "all", cell,
              "2026-11-03: the cell self-skips on v0.32.2 (the stand's lower_case_table_names=0, b0446717 gate log), so it is not proven to fail there. "
              "Closes when the stand runs a folding MySQL or the next release leaves it out of the fix window",

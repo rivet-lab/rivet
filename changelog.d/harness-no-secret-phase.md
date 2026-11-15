@@ -1,1 +1,0 @@
-- **Harness**: the gate's `no_secret_in_output` stage prints its own phase header; its ~19 minutes were timed under "TLS downgrade refused", whose own six cases take about 6 seconds.
