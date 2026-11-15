@@ -58,7 +58,7 @@ impl ChunkReader for Chunk {
     }
 }
 
-/// The non-null `__pos` values at the head of the part at `key`, whose footer is `meta`; empty when the part has no such column or no rows.
+/// The non-null `__pos` values at the head of the part at `key`, whose footer is `meta`.
 pub(crate) fn head_positions(
     store: &GcsStore,
     key: &str,

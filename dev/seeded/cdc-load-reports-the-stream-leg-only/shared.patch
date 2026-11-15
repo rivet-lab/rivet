@@ -1,10 +1,10 @@
 diff --git a/src/load/orchestrate.rs b/src/load/orchestrate.rs
-index 02240973..96724ea6 100644
+index b07a2fe..672d0d7 100644
 --- a/src/load/orchestrate.rs
 +++ b/src/load/orchestrate.rs
-@@ -1577,13 +1577,8 @@ fn load_one_cdc_base(
- /// target when a baseline landed there, with the change log as its buffer when the stream also
- /// appended to it; the change log alone otherwise.
+@@ -1215,13 +1215,8 @@ fn load_one_cdc_base(
+ 
+ /// What a CDC load reports for its table (ADR-0039 D3).
  fn cdc_work(report: &load::CdcLoadReport) -> Work {
 -    match &report.baseline {
 -        Some(base) => Work {

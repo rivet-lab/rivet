@@ -1,5 +1,4 @@
-//! The staged-prefix lifecycle: which runs are writing into an export prefix, and the
-//! two deletes gated on that answer — `cleanup_source` and orphan GC.
+//! The staged-prefix lifecycle: which runs are writing into an export prefix, and the two deletes gated on that answer.
 
 use crate::destination::gcs::GcsStore;
 use crate::error::Result;
@@ -9,12 +8,12 @@ use crate::state::StateStore;
 type RunIds = std::collections::HashSet<String>;
 type Keyed = [(String, crate::manifest::RunManifest)];
 
-/// The runs the run-status ledger says are writing into `prefix`: `None` when stateless, `Some(Err)` when the query failed.
+/// The runs the run-status ledger says are writing into `prefix`.
 fn ledger_writers(state: Option<&StateStore>, prefix: &str) -> Option<Result<RunIds>> {
     state.map(|s| s.active_run_ids_on_prefix(prefix))
 }
 
-/// The ledger's writers sampled before the manifests are read; `None` when stateless or unanswered, so the cycle records nothing consumed.
+/// The ledger's writers sampled before the manifests are read.
 pub(super) fn writers_before_fetch(state: Option<&StateStore>, prefix: &str) -> Option<RunIds> {
     ledger_writers(state, prefix).and_then(|r| match r {
         Ok(a) => Some(a),
@@ -110,19 +109,7 @@ fn ledger_says_writing(state: Option<&StateStore>, prefix: &str) -> bool {
     ledger_says_active(state.map(|s| s.has_active_run_on_prefix(prefix)))
 }
 
-/// What the run-status LEDGER says about a prefix, folded from the three answers
-/// it can give. Pure, because the fold IS the decision and both its callers are
-/// live-only bodies (a real bucket, a real state DB) that the in-diff mutation
-/// gate reports MISSED whatever the assertions say.
-///
-/// * `None` — there is no state store to ask (a stateless or foreign-host load).
-///   NOT active: the manifest signal decides alone, exactly as the orphan path
-///   does.
-/// * `Some(Err(_))` — the query failed. ACTIVE, conservatively: a delete that
-///   spares too much costs disk, while one that removes a live run's committed
-///   parts costs data — and on a CDC/incremental export the source position has
-///   already advanced past them.
-/// * `Some(Ok(b))` — the ledger's own answer, used as given.
+/// What the run-status LEDGER says about a prefix, folded from the three answers it can give.
 pub(super) fn ledger_says_active(answer: Option<Result<bool>>) -> bool {
     match answer {
         None => false,
@@ -131,43 +118,12 @@ pub(super) fn ledger_says_active(answer: Option<Result<bool>>) -> bool {
     }
 }
 
-/// Fold the two INDEPENDENT activity signals into one verdict: the run-status
-/// ledger (precise when this load shares the extract's state — co-located /
-/// shared Postgres) and a `running` MARKER manifest projected into the bucket
-/// (the cross-boundary signal a stateless / foreign-host load reads when it
-/// cannot see the extract's state DB).
-///
-/// Either one alone must be enough to spare the prefix: they answer for
-/// DIFFERENT deployments, so each is structurally silent where the other speaks.
-/// An `&&` here would demand agreement from a signal that cannot give it and
-/// delete a live run's committed parts — and that is precisely the mutant the
-/// in-diff gate reported alive (`replace || with && in maybe_gc_orphans`), in a
-/// body no offline test can reach.
+/// Fold the two INDEPENDENT activity signals into one verdict.
 pub(super) fn prefix_is_active(ledger_active: bool, manifest_active: bool) -> bool {
     ledger_active || manifest_active
 }
 
 /// Is a run writing into this prefix right now?
-///
-/// The verdict `maybe_gc_orphans` already computes, extracted so the DESTRUCTIVE
-/// delete can ask the same question. `cleanup_source` recursively removes the
-/// whole prefix — every part, every manifest, `_SUCCESS` — while `gc_orphans`
-/// removes only parts no `Success` manifest references. The gentler of the two
-/// consulted the ledger and the total one did not, which is the guard placed in
-/// inverse proportion to what it protects. `src/load/plan.rs` states the
-/// relationship in its own words: gc_orphans is "strictly gentler than
-/// `cleanup_source`, which wipes the whole prefix".
-///
-/// Conservative in both directions, deliberately — see [`ledger_says_active`]
-/// for what each ledger answer means and [`prefix_is_active`] for why the two
-/// signals fold with `||`.
-///
-/// Takes the store the CALLER already opened instead of re-opening one from
-/// `plan.destination` (the two were always the same object). That makes this
-/// guard reachable from an offline test over a filesystem-backed store, which is
-/// the whole reason its `-> true` / `-> false` body stubs no longer need a
-/// mutation-config exclusion: a guard on a recursive delete should not be
-/// gradable only against a real bucket.
 pub(super) fn prefix_has_active_run(
     store: &crate::destination::gcs::GcsStore,
     prefix: &str,
@@ -175,28 +131,16 @@ pub(super) fn prefix_has_active_run(
 ) -> bool {
     let ledger_active = ledger_says_writing(state, prefix);
     if ledger_active {
-        // Short-circuit: the manifest signal costs a bucket LISTING and cannot
-        // change a `true` — `prefix_is_active(true, _)` is `true` either way.
         return true;
     }
     let manifest_active = match load::reconcile::fetch_manifests_keyed(store, prefix) {
         Ok(keyed) => !bucket_writers(state, &keyed).is_empty(),
-        // Cannot read the manifests → cannot rule a live run out. Spare.
         Err(_) => true,
     };
     prefix_is_active(ledger_active, manifest_active)
 }
 
-/// Whether `cleanup_source` actually deletes a prefix — the THREE outcomes the
-/// caller's `Option` collapses into one `None`.
-///
-/// Separated from the `Option` because "nobody asked" and "asked, and REFUSED
-/// because a run is writing here" are the same value to the caller and very
-/// different things to an operator, and because the `!` in front of the request
-/// flag is a decision the in-diff gate reported alive (`delete ! in
-/// cleanup_target`) inside a live-only body. Inverted, it deletes the whole
-/// prefix for every config that did NOT ask for cleanup and spares every config
-/// that did.
+/// Whether `cleanup_source` actually deletes a prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CleanupVerdict {
     /// `cleanup_source` is off — no delete, and nothing to announce.
@@ -207,9 +151,7 @@ pub(super) enum CleanupVerdict {
     Delete,
 }
 
-/// The verdict, pure. `active` is a CLOSURE so the activity probe — a state-DB
-/// query plus a bucket listing — still runs ONLY when cleanup was requested,
-/// exactly as the `if` chain it replaced did.
+/// The verdict, pure.
 pub(super) fn cleanup_verdict(requested: bool, active: impl FnOnce() -> bool) -> CleanupVerdict {
     if !requested {
         return CleanupVerdict::NotRequested;
@@ -221,9 +163,6 @@ pub(super) fn cleanup_verdict(requested: bool, active: impl FnOnce() -> bool) ->
 }
 
 /// The delete target for `cleanup_source`, or `None` when a run is writing here.
-///
-/// Refusing is announced, not silent: an operator who asked for cleanup and did
-/// not get it must know the prefix still holds the staged Parquet.
 pub(super) fn cleanup_target<'a>(
     plan: &'a load::plan::LoadPlan,
     store: &'a crate::destination::gcs::GcsStore,
@@ -251,21 +190,6 @@ pub(super) fn cleanup_target<'a>(
 }
 
 /// [`cleanup_target`], plus the PREFIX lease the delete has to hold while it runs.
-///
-/// The table lease dies with `execute_load`'s frame, and the cleanup runs AFTER
-/// that — so load A could finish, release the table, and only then wipe the prefix,
-/// while load B of the SAME table had already taken the freed lease and begun
-/// reading the manifests A was about to delete. A scheduler whose cycles overlap is
-/// all it takes; `prefix_has_active_run` cannot see it, because it reads
-/// `run_status`, which only EXTRACT runs write.
-///
-/// A separate PREFIX lease rather than a longer table lease, deliberately: widening
-/// the table lease would hold it across network deletes and lengthen the window in
-/// which `rivet compact` is refused, for a resource compact never touches.
-///
-/// Every answer but "held" cancels the delete. Stateless is the exception and stays
-/// as it was — there is no lease to take and no second rivet to coordinate with, so
-/// refusing there would break the documented stateless path for nothing.
 pub(super) fn cleanup_target_leased<'a>(
     plan: &'a load::plan::LoadPlan,
     store: &'a crate::destination::gcs::GcsStore,
@@ -365,7 +289,7 @@ pub(super) fn cleanup_keys(
     }
 }
 
-/// [`cleanup_target`] under the prefix lease: the prefix to clean, or `None` when cleanup is off, refused, or the lease is held elsewhere.
+/// [`cleanup_target`] under the prefix lease.
 fn prefix_target_leased<'a>(
     plan: &'a load::plan::LoadPlan,
     store: &'a crate::destination::gcs::GcsStore,
@@ -416,15 +340,7 @@ fn lease_skip_message(table: &str, prefix: &str, lease_error: Option<&str>) -> S
     }
 }
 
-/// Best-effort orphan-Parquet GC for one table's prefix (config `gc_orphans`):
-/// delete staged `.parquet` no `Success` manifest references — an interrupted
-/// extract's leftovers. A GC failure only warns; it NEVER fails the load, which
-/// already succeeded before this runs.
-///
-/// Gated on whether a run is ACTIVE on the prefix ([`prefix_is_active`]), so it
-/// never deletes a CONCURRENT extract's committed-but-not-yet-manifested parts.
-/// Only when NEITHER signal says active does a no-manifest part count as dead
-/// crash debris.
+/// Best-effort orphan-Parquet GC for one table's prefix (config `gc_orphans`).
 pub(super) fn maybe_gc_orphans(
     store: &crate::destination::gcs::GcsStore,
     plan: &load::plan::LoadPlan,
@@ -440,14 +356,8 @@ pub(super) fn maybe_gc_orphans(
             return;
         }
     };
-    // A query ERROR stays conservative (assume active → spare); a clean `false`
-    // (no running row) lets the manifest signal decide.
     let ledger_active = ledger_says_writing(state, &plan.gcs_prefix);
     let active = prefix_is_active(ledger_active, !bucket_writers(state, &keyed).is_empty());
-    // Which `running` MARKERS the ledger already knows are dead (`state
-    // finish-run`, the split ceased-ordinal stamp): their run_id has a
-    // TERMINAL row, so the sweep may retire the marker even though no Success
-    // ever superseded it. Stateless → empty → conservative sweep only.
     let dead_marker_run_ids: std::collections::HashSet<String> = match state {
         Some(s) => keyed
             .iter()
@@ -483,10 +393,7 @@ pub(super) fn maybe_gc_orphans(
     }
 }
 
-/// Clean up iff `cleanup` is `Some`, downgrading a failure to a warning — the
-/// data is loaded and gated, so a stuck delete must not fail the load. Cleanup
-/// deletes exactly the listed keys through an injected [`GcsStore`], so no
-/// adapter owns a delete path. Returns whether the source was actually cleaned.
+/// Clean up iff `cleanup` is `Some`, downgrading a failure to a warning.
 pub(super) fn maybe_cleanup(cleanup: Option<(&GcsStore, &Cleanup)>) -> bool {
     match cleanup {
         Some((store, cleanup)) => match remove_cleanup(store, cleanup) {

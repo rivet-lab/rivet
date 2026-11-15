@@ -1,4 +1,4 @@
-//! The machine document of `rivet load` and `rivet compact` (ADR-0039 D3): one entry per table, printed by `--json` and written by `--summary-output`.
+//! The machine document of `rivet load` and `rivet compact` (ADR-0039 D3).
 
 use std::path::{Path, PathBuf};
 
@@ -23,7 +23,7 @@ pub(crate) struct Work {
     pub rows: u64,
     /// The object a load wrote, as its loader named it; `None` keeps the table's [`Address`].
     pub wrote: Option<String>,
-    /// The change log a load appended to besides its target (a CDC baseline and its changes); `None` keeps the table's [`Address`].
+    /// The change log a load appended to besides its target (a CDC baseline and its changes).
     pub buffer: Option<String>,
     pub rows_inserted: Option<u64>,
     pub rows_updated: Option<u64>,
@@ -33,8 +33,7 @@ pub(crate) struct Work {
 }
 
 impl Work {
-    /// A load whose `rows` are what it landed in the table consumers read, or appended to its
-    /// log; what it inserted in all, a baseline leg included, is the journal's.
+    /// A load whose `rows` are what it landed in the table consumers read, or appended to its log.
     pub(crate) fn loaded(rows: u64, wrote: &str) -> Self {
         Work {
             rows,
@@ -43,8 +42,7 @@ impl Work {
         }
     }
 
-    /// A compact that merged `rows` buffer rows: `dml` is what its MERGE jobs reported, and a
-    /// delete `flagged` instead of removed is an update there, so its deletes are unknown.
+    /// A compact that merged `rows` buffer rows.
     pub(crate) fn compacted(
         rows: u64,
         dml: Option<DmlCounts>,
@@ -189,8 +187,7 @@ pub(crate) struct CommandResult {
     pub per_table: Vec<TableResult>,
 }
 
-/// The entry of table `table` of export `export`; `done` is the command's word for work done, and
-/// `journal` the jobs the command ran for the table, whatever its outcome.
+/// The entry of table `table` of export `export`.
 pub(crate) fn table_result(
     export: &str,
     table: &str,

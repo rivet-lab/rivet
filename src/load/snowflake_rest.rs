@@ -1,29 +1,4 @@
 //! The Snowflake **SQL API v2 transport**, in process.
-//!
-//! Everything the loader does is a SQL script, so one verb serves all of it:
-//!
-//! 1. `POST /api/v2/statements?requestId=<uuid>` — the script as one multi-statement request
-//!    (`MULTI_STATEMENT_COUNT=0`); the session settings a script opens with (`ALTER SESSION`,
-//!    `USE`) hold for the statements after them, within the request.
-//! 2. `GET /api/v2/statements/<handle>` — poll a `202` until it is a `200` or an error.
-//! 3. One `GET` per child handle of a multi-statement answer, and one per extra result partition.
-//!
-//! The answer is handed back as an array with one block per statement, because the loader
-//! reads its counts BY NAME out of it: each block is an array of row objects keyed by column
-//! name, a whole number as a JSON number.
-//!
-//! ## Auth
-//!
-//! Key-pair JWT (RS256). `iss` is `<ACCOUNT>.<USER>.SHA256:<base64 of the SHA-256 of the public
-//! key's DER>`, `sub` is `<ACCOUNT>.<USER>`, both upper-cased; the token lives under an hour and
-//! is minted again before it ends. The key file is read once, into memory that is zeroed on drop.
-//!
-//! ## Retries
-//!
-//! What is retried is decided by the HTTP status (429 and 5xx) or a failed transport — never by
-//! the words of an answer. The `POST` is retried under the SAME `requestId` with `retry=true`, so
-//! a statement that did land is not run twice: a duplicate `COPY INTO` is silent row inflation.
-//! A `401` mints a fresh token and repeats the request once.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -63,13 +38,11 @@ const MAX_TRANSIENT_RETRIES: u32 = 5;
 /// How long the poll loop waits for ONE statement before giving up on it.
 const STATEMENT_POLL_DEADLINE: Duration = Duration::from_secs(4 * 60 * 60);
 
-/// How long a token lives. Snowflake refuses a JWT valid for more than an hour.
+/// How long a token lives.
 const JWT_LIFETIME_SECS: u64 = 55 * 60;
 
 /// A token this close to its end is minted again before the next request.
 const JWT_REFRESH_MARGIN_SECS: u64 = 5 * 60;
-
-// ── the signer ───────────────────────────────────────────────────────────────
 
 #[derive(serde::Serialize)]
 struct Claims {
@@ -209,8 +182,6 @@ pub(crate) fn read_key_file(path: &str) -> Result<Secret> {
     })
 }
 
-// ── the client ───────────────────────────────────────────────────────────────
-
 /// Where a statement runs, sent with every request.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Context {
@@ -230,7 +201,6 @@ pub(crate) struct SnowflakeApi {
 
 impl std::fmt::Debug for SnowflakeApi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // SecOps: never render `signer` — it holds the private key and the live token.
         f.debug_struct("SnowflakeApi")
             .field("endpoint", &self.endpoint)
             .field("context", &self.context)
@@ -444,8 +414,6 @@ impl SnowflakeApi {
     }
 }
 
-// ── pure helpers ─────────────────────────────────────────────────────────────
-
 /// The request body for `sql` run in `context`.
 pub(crate) fn statement_body(sql: &str, context: &Context) -> Value {
     let mut body = json!({
@@ -622,8 +590,6 @@ fn typed_cell(kind: &CellKind, cell: &Value) -> Value {
     };
     typed.unwrap_or_else(|| Value::String(text.to_string()))
 }
-
-// ── the offline stand ────────────────────────────────────────────────────────
 
 /// A loopback Snowflake that answers from a script, for the tests of every layer above it.
 #[cfg(test)]
@@ -1199,7 +1165,6 @@ mod tests {
 
     #[test]
     fn the_verdict_to_retry_is_the_status_never_the_words_of_the_answer() {
-        // A 503 whose body reads like a permanent error is still a 503: retried, under one request id.
         let stand = Stand::start(|_, nth| match nth {
             0 => (
                 503,
@@ -1216,7 +1181,6 @@ mod tests {
         assert!(!seen[0].query.contains("retry=true"), "{:?}", seen[0]);
         assert!(seen[1].query.contains("retry=true") && seen[2].query.contains("retry=true"));
 
-        // A 422 whose body says "try again" is the warehouse's answer: refused once, not retried.
         let stand = Stand::start(|_, _| {
             (
                 422,

@@ -1,5 +1,4 @@
-//! Pinning a load's plan to the spec of the run it consumes (ADR-0034 D1), and the
-//! refusals that keep one load from reading two specs.
+//! Pinning a load's plan to the spec of the run it consumes (ADR-0034 D1), and the refusals that keep one load from reading two specs.
 
 use crate::error::Result;
 use crate::load;
@@ -7,19 +6,6 @@ use crate::state::StateStore;
 use anyhow::Context as _;
 
 /// `plan` retyped from the spec of the NEWEST loadable run under its own prefix.
-///
-/// `plan_loads` types every table from `export_load_spec`, one row per export
-/// NAME — last writer wins. On a state DB shared by two configs whose exports
-/// share a name, the other config's run retypes this table between the run and
-/// its load (the release gate's engine matrix does exactly this with `users`:
-/// a `_id` key on a PostgreSQL table, another engine's DDL). The per-run table
-/// (`export_load_spec_run`) is written only by the run that produced the parts,
-/// so pinning the plan to that run's spec removes the race by construction.
-///
-/// Glue: one extra manifest listing per table, then `retype_plan`. Every path
-/// that cannot pin — no state, no store, no manifest, a run older than the
-/// per-run table — keeps the plan as typed and says so; it fails the load only on the
-/// strict fit check a deferred plan still owes (`check_spec_fit`), or a refused plan.
 pub(super) fn pin_plan_to_its_run(
     plan: &load::plan::LoadPlan,
     state: Option<&StateStore>,
@@ -27,8 +13,6 @@ pub(super) fn pin_plan_to_its_run(
     op: &str,
 ) -> Result<load::plan::LoadPlan> {
     plan.refused()?;
-    // The by-name plan was built with its fit DEFERRED (`SpecFit::Deferred`), so
-    // a path that keeps it owes the strict check the pin would have done.
     let unpinned = |why: &str| {
         eprintln!(
             "  {op} [{}]: typed from the by-name load spec — {why}",
@@ -40,9 +24,6 @@ pub(super) fn pin_plan_to_its_run(
     let Some(s) = state else {
         return unpinned("no state DB, so no per-run spec to pin to");
     };
-    // Newest first. The listing under `<table>/` also holds the baseline LEGS'
-    // manifests (`snapshot/`, their own run ids, no spec of their own — a leg is a
-    // read recipe), so "the newest run" is "the newest run that RECORDED a spec".
     let runs = match load::open_store(&plan.destination)
         .and_then(|store| load::reconcile::fetch_manifests_keyed(&store, &plan.gcs_prefix))
         .and_then(|keyed| {
@@ -62,8 +43,6 @@ pub(super) fn pin_plan_to_its_run(
     if newest_first.is_empty() {
         return unpinned("no run left to load under its prefix");
     }
-    // ONE definition of "newer" — the census's instant compare, not a byte compare
-    // that mis-orders mixed RFC3339 precision; ties fall to the run id.
     newest_first.sort_by(|a, b| {
         use std::cmp::Ordering;
         if crate::manifest::census::finished_after(&a.0, &b.0) {
@@ -75,14 +54,8 @@ pub(super) fn pin_plan_to_its_run(
         }
     });
     let mut pinned: Option<(String, crate::state::LoadSpec)> = None;
-    // Newer Success runs that recorded no spec (a crash after the manifest and
-    // before the spec write; a drain that acked parts then failed) are typed from
-    // the older pinned run — said so, since a column added between them is
-    // exactly what the pin exists to type.
     let mut skipped: Vec<&str> = Vec::new();
     for (_, run_id) in &newest_first {
-        // With the init-recorded key when the run recorded none (a `query:` export
-        // has no key to read) — never with a key another run wrote by name.
         match s.load_spec_of_run_with_init_key(
             &plan.export_name,
             plan.unit.as_deref(),
@@ -115,8 +88,6 @@ pub(super) fn pin_plan_to_its_run(
         eprintln!("{note}");
     }
     let pinned_names: Vec<&str> = spec.columns.iter().map(|c| c.name.as_str()).collect();
-    // Without the ledger's answer the respelling check below cannot run: unpin, like every
-    // other unreadable input here, rather than pin with the check silently off.
     let loaded = match s
         .loaded_source_run_ids(&load::build_loader(plan, op, &Default::default()).fqtn(&plan.table))
     {
@@ -146,8 +117,6 @@ pub(super) fn pin_plan_to_its_run(
     let Some(target) = crate::types::target::ExportTarget::parse(plan.load.target.name()) else {
         return unpinned("unknown load target");
     };
-    // A readable spec the config does not fit is a REFUSAL, not a fallback: the
-    // by-name spec is exactly what this pin exists to distrust.
     let mut retyped = load::plan::retype_plan(cfg, plan, &spec, target).with_context(|| {
         format!(
             "{op} [{}]: the config does not fit the columns run {run_id} recorded — if the \
@@ -196,9 +165,7 @@ pub(super) fn listing_pin(newest_first: &[(String, String)], run_id: &str) -> (S
     (run_id.to_string(), newest)
 }
 
-/// Runs in this listing that finished AFTER the newest run the pin listed: a
-/// run landing between the pin's listing and the load's would be loaded with an
-/// older spec's columns. Refused for this cycle; the next load pins it.
+/// Runs in this listing that finished AFTER the newest run the pin listed.
 pub(super) fn late_runs_refusal(
     table: &str,
     runs: &[(String, crate::manifest::RunManifest)],
@@ -232,7 +199,7 @@ pub(super) fn runs_older_than<'a>(
     &newest_first[start..]
 }
 
-/// The older runs this load will read alongside the pinned one: none for a compact (it reads only the landed buffer) or a full load (only the newest run), and never one already loaded.
+/// The older runs this load will read alongside the pinned one.
 pub(super) fn runs_loaded_with_the_pin<'a>(
     op: &str,
     mode: load::plan::LoadMode,
@@ -250,7 +217,7 @@ pub(super) fn runs_loaded_with_the_pin<'a>(
         .collect()
 }
 
-/// The refusal for pending runs that spell a column differently from the run the load is typed from; `None` when none do.
+/// The refusal for pending runs that spell a column differently from the run the load is typed from.
 pub(super) fn respelled_refusal(
     table: &str,
     pinned: &str,
@@ -275,8 +242,7 @@ pub(super) fn respelled_refusal(
     ))
 }
 
-/// The stderr line naming the newer runs the pin passed over, or `None` when the
-/// pinned run is the newest. Pure: the live-only pin decides through it.
+/// The stderr line naming the newer runs the pin passed over, or `None` when the pinned run is the newest.
 pub(super) fn skipped_runs_note(table: &str, pinned: &str, skipped: &[&str]) -> Option<String> {
     (!skipped.is_empty()).then(|| {
         format!(

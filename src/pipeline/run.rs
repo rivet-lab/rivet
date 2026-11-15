@@ -1079,61 +1079,32 @@ fn next_eligible(safe_flags: &[bool], heavy_running: bool) -> Option<usize> {
     safe_flags.iter().position(|&safe| safe || !heavy_running)
 }
 
-/// `rivet apply <config.yaml> --pool N` (#166).
-pub(crate) fn run_pool(
-    config_path: &str,
-    force: bool,
-    resume: bool,
+struct PoolSplitCtx<'a> {
     m: usize,
     split: bool,
-    summary_output: Option<&Path>,
-    json_output: bool,
-) -> Result<()> {
-    let m = m.max(1);
-    let config = Config::load_with_params(config_path, None)?;
-    let config_dir = Path::new(config_path)
-        .parent()
-        .unwrap_or(Path::new("."))
-        .to_path_buf();
-    let opts = RunOptions {
-        validate: false,
-        reconcile: false,
+    resume: bool,
+    config: &'a Config,
+    config_dir: &'a Path,
+    state: &'a StateStore,
+}
+
+/// Advise on, or under `--split` realize, the split of the export that dominates the pool floor.
+fn advise_or_realize_split(
+    items: &[super::pool::PoolItem],
+    predicted_pre: &[(super::pool::PoolItem, super::pool::PredictedFrom)],
+    effective: &mut Vec<ExportConfig>,
+    ctx: PoolSplitCtx<'_>,
+) -> Result<Option<super::split::Realized>> {
+    let PoolSplitCtx {
+        m,
+        split,
         resume,
-        force,
-        params: None,
-        parallel_snapshots: false,
-        strict: false,
-    };
-    let state = StateStore::open(config_path)?;
-
-    let mut effective: Vec<ExportConfig> = RunSet::select(&config, None)?
-        .in_process(&config.source, &config_dir, None)?
-        .into_iter()
-        .filter(|e| {
-            if split {
-                return true;
-            }
-            finalize::needs_run(e, resume, "apply --pool", &state)
-        })
-        .collect();
-    if effective.is_empty() {
-        log::warn!("apply --pool: nothing to run (no exports, or all complete)");
-        return Ok(());
-    }
-
-    let predicted_pre: Vec<(super::pool::PoolItem, super::pool::PredictedFrom)> =
-        super::pool::predict_items(
-            &state,
-            effective
-                .iter()
-                .map(|e| (e.name.as_str(), is_parallel_safe(e))),
-            &std::collections::HashMap::new(),
-        );
-    let mut items: Vec<super::pool::PoolItem> =
-        predicted_pre.iter().map(|(i, _)| i.clone()).collect();
-
+        config,
+        config_dir,
+        state,
+    } = ctx;
     let mut realized: Option<super::split::Realized> = None;
-    let advise = super::pool::advise_split(&items, m, 3.0, m.max(2));
+    let advise = super::pool::advise_split(items, m, 3.0, m.max(2));
     if split {
         match &advise {
             Some((giant, n, broken)) => {
@@ -1142,11 +1113,11 @@ pub(crate) fn run_pool(
                     *n,
                     *broken,
                     resume,
-                    &predicted_pre,
-                    &mut effective,
-                    &config,
-                    &config_dir,
-                    &state,
+                    predicted_pre,
+                    effective,
+                    config,
+                    config_dir,
+                    state,
                 )?;
             }
             None => {
@@ -1186,29 +1157,142 @@ pub(crate) fn run_pool(
             broken / 60.0,
         );
     }
+    Ok(realized)
+}
 
-    if per_unit_skip_applies(split, resume) {
-        super::split::skip_completed(realized.as_ref(), &mut effective, &state);
-        if effective.is_empty() {
-            if let Some(r) = &realized {
-                finalize::repair_missing_split_marker(&r.dest, &r.family);
+struct PoolWorker<'a> {
+    config_path: &'a str,
+    config: &'a Config,
+    config_dir: &'a Path,
+    opts: RunOptions<'a>,
+    resume: bool,
+    started_at: chrono::DateTime<chrono::Utc>,
+    queue: &'a std::sync::Mutex<std::collections::VecDeque<&'a ExportConfig>>,
+    heavy_running: &'a std::sync::atomic::AtomicBool,
+    collected: &'a std::sync::Mutex<Vec<PoolOutcome>>,
+}
+
+/// One pool slot: claim the next eligible export, run it, and record its outcome and window until the queue is empty.
+fn pool_worker(w: &PoolWorker<'_>) {
+    let PoolWorker {
+        config_path,
+        config,
+        config_dir,
+        opts,
+        resume,
+        started_at,
+        queue,
+        heavy_running,
+        collected,
+    } = *w;
+    loop {
+        let export = {
+            let mut q = queue.lock().unwrap();
+            if q.is_empty() {
+                break;
             }
-            log::warn!("{}", nothing_to_run_message(realized.is_some()));
-            return Ok(());
+            let flags: Vec<bool> = q.iter().map(|e| is_parallel_safe(e)).collect();
+            match next_eligible(&flags, heavy_running.load(AtomicOrdering::SeqCst)) {
+                Some(i) => {
+                    let e = q.remove(i).unwrap();
+                    if !is_parallel_safe(e) {
+                        heavy_running.store(true, AtomicOrdering::SeqCst);
+                    }
+                    e
+                }
+                None => {
+                    drop(q);
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    continue;
+                }
+            }
+        };
+        struct HeavyGuard<'a>(&'a std::sync::atomic::AtomicBool, bool);
+        impl Drop for HeavyGuard<'_> {
+            fn drop(&mut self) {
+                if self.1 {
+                    self.0.store(false, AtomicOrdering::SeqCst);
+                }
+            }
         }
+        let _heavy = HeavyGuard(heavy_running, !is_parallel_safe(export));
+        let claimed_at = chrono::Utc::now();
+        let pair = match StateStore::open(config_path) {
+            Ok(st) => {
+                let mut unit_opts = opts;
+                unit_opts.resume = super::split::unit_resume(export, resume, &st);
+                job::run_export_job(config_path, config, export, &st, config_dir, &unit_opts)
+            }
+            Err(e) => {
+                let err = crate::error::recoded(
+                    &e,
+                    crate::error::codes::STATE_NOT_WRITABLE,
+                    format!(
+                        "export '{}': failed to open state database: {:#}",
+                        export.name, e
+                    ),
+                );
+                let summary = job::synthetic_failed_summary(&export.name, &err);
+                (Err(err), summary)
+            }
+        };
+        let window = (
+            (claimed_at - started_at).num_milliseconds(),
+            (chrono::Utc::now() - started_at).num_milliseconds(),
+        );
+        let (res, summary) = pair;
+        collected.lock().unwrap().push((res, summary, window));
     }
+}
 
+struct PoolTally {
+    summaries: Vec<RunSummary>,
+    failures: Vec<anyhow::Error>,
+    pool_windows: Vec<(String, i64, i64)>,
+    oks: Vec<bool>,
+}
+
+impl PoolTally {
+    /// Split the pool's collected outcomes into summaries, failures, per-export windows and ok flags, in arrival order.
+    fn from_outcomes(outcomes: Vec<PoolOutcome>) -> Self {
+        let mut tally = PoolTally {
+            summaries: Vec::new(),
+            failures: Vec::new(),
+            pool_windows: Vec::new(),
+            oks: Vec::new(),
+        };
+        for (res, summary, (start_ms, end_ms)) in outcomes {
+            tally.oks.push(res.is_ok());
+            if let Err(e) = res {
+                tally.failures.push(e);
+            }
+            tally
+                .pool_windows
+                .push((summary.export_name.clone(), start_ms, end_ms));
+            tally.summaries.push(summary);
+        }
+        tally
+    }
+}
+
+/// Predict the pool's per-export cost, print the makespan line, and return the dispatch order and predicted makespan.
+fn predict_and_announce_pool(
+    state: &StateStore,
+    effective: &[ExportConfig],
+    realized: Option<&super::split::Realized>,
+    m: usize,
+) -> (Vec<String>, f64) {
     let no_seeds = std::collections::HashMap::new();
     let predicted = super::pool::predict_items(
-        &state,
+        state,
         effective
             .iter()
             .map(|e| (e.name.as_str(), is_parallel_safe(e))),
-        realized.as_ref().map_or(&no_seeds, |r| &r.seeds),
+        realized.map_or(&no_seeds, |r| &r.seeds),
     );
     let classified: Vec<super::pool::PredictedFrom> =
         predicted.iter().map(|(_, f)| f.clone()).collect();
-    items = predicted.into_iter().map(|(i, _)| i).collect();
+    let items: Vec<super::pool::PoolItem> = predicted.into_iter().map(|(i, _)| i).collect();
     let order = super::pool::pool_order(&items);
     let predicted_secs = super::pool::predicted_makespan_secs(&items, m);
     let floor_secs = super::pool::makespan_floor_secs(&items, m);
@@ -1225,6 +1309,118 @@ pub(crate) fn run_pool(
     if let Some(hedge) = super::pool::lower_bound_hedge(attempt_n, placeholder_n) {
         eprintln!("        {hedge}");
     }
+    (order, predicted_secs)
+}
+
+/// The exports a pool run executes: every selected export under `--split`, otherwise only those not already complete; `None` when nothing is left.
+fn select_pool_exports(
+    config: &Config,
+    config_dir: &Path,
+    split: bool,
+    resume: bool,
+    state: &StateStore,
+) -> Result<Option<Vec<ExportConfig>>> {
+    let effective: Vec<ExportConfig> = RunSet::select(config, None)?
+        .in_process(&config.source, config_dir, None)?
+        .into_iter()
+        .filter(|e| {
+            if split {
+                return true;
+            }
+            finalize::needs_run(e, resume, "apply --pool", state)
+        })
+        .collect();
+    if effective.is_empty() {
+        log::warn!("apply --pool: nothing to run (no exports, or all complete)");
+        return Ok(None);
+    }
+    Ok(Some(effective))
+}
+
+/// The pool's work queue: the pending exports in dispatch order.
+fn pool_queue<'a>(
+    pending: &[&'a ExportConfig],
+    order: &[String],
+) -> std::sync::Mutex<std::collections::VecDeque<&'a ExportConfig>> {
+    let by_name: std::collections::HashMap<&str, &ExportConfig> =
+        pending.iter().map(|e| (e.name.as_str(), *e)).collect();
+    std::sync::Mutex::new(
+        order
+            .iter()
+            .filter_map(|n| by_name.get(n.as_str()).copied())
+            .collect(),
+    )
+}
+
+/// `rivet apply <config.yaml> --pool N` (#166).
+pub(crate) fn run_pool(
+    config_path: &str,
+    force: bool,
+    resume: bool,
+    m: usize,
+    split: bool,
+    summary_output: Option<&Path>,
+    json_output: bool,
+) -> Result<()> {
+    let m = m.max(1);
+    let config = Config::load_with_params(config_path, None)?;
+    let config_dir = Path::new(config_path)
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
+    let opts = RunOptions {
+        validate: false,
+        reconcile: false,
+        resume,
+        force,
+        params: None,
+        parallel_snapshots: false,
+        strict: false,
+    };
+    let state = StateStore::open(config_path)?;
+
+    let Some(mut effective) = select_pool_exports(&config, &config_dir, split, resume, &state)?
+    else {
+        return Ok(());
+    };
+
+    let predicted_pre: Vec<(super::pool::PoolItem, super::pool::PredictedFrom)> =
+        super::pool::predict_items(
+            &state,
+            effective
+                .iter()
+                .map(|e| (e.name.as_str(), is_parallel_safe(e))),
+            &std::collections::HashMap::new(),
+        );
+    let items: Vec<super::pool::PoolItem> = predicted_pre.iter().map(|(i, _)| i.clone()).collect();
+
+    let realized = advise_or_realize_split(
+        &items,
+        &predicted_pre,
+        &mut effective,
+        PoolSplitCtx {
+            m,
+            split,
+            resume,
+            config: &config,
+            config_dir: &config_dir,
+            state: &state,
+        },
+    )?;
+
+    if per_unit_skip_applies(split, resume) {
+        super::split::skip_completed(realized.as_ref(), &mut effective, &state);
+        if effective.is_empty() {
+            if let Some(r) = &realized {
+                finalize::repair_missing_split_marker(&r.dest, &r.family);
+            }
+            log::warn!("{}", nothing_to_run_message(realized.is_some()));
+            return Ok(());
+        }
+    }
+
+    let (order, predicted_secs) =
+        predict_and_announce_pool(&state, &effective, realized.as_ref(), m);
 
     let pending: Vec<&ExportConfig> = effective.iter().collect();
     {
@@ -1233,14 +1429,7 @@ pub(crate) fn run_pool(
             log::warn!("{line}");
         }
     }
-    let by_name: std::collections::HashMap<&str, &ExportConfig> =
-        pending.iter().map(|e| (e.name.as_str(), *e)).collect();
-    let queue: std::sync::Mutex<std::collections::VecDeque<&ExportConfig>> = std::sync::Mutex::new(
-        order
-            .iter()
-            .filter_map(|n| by_name.get(n.as_str()).copied())
-            .collect(),
-    );
+    let queue = pool_queue(&pending, &order);
     let heavy_running = std::sync::atomic::AtomicBool::new(false);
 
     let name_floor = pending
@@ -1256,75 +1445,20 @@ pub(crate) fn run_pool(
     let (run_harm, started_at) = RunHarmBracket::open(&config.source);
     let collected: std::sync::Mutex<Vec<PoolOutcome>> =
         std::sync::Mutex::new(Vec::with_capacity(pending.len()));
+    let worker = PoolWorker {
+        config_path,
+        config: &config,
+        config_dir: &config_dir,
+        opts,
+        resume,
+        started_at,
+        queue: &queue,
+        heavy_running: &heavy_running,
+        collected: &collected,
+    };
     std::thread::scope(|s| {
         for _ in 0..m.min(pending.len()) {
-            s.spawn(|| {
-                loop {
-                    let export = {
-                        let mut q = queue.lock().unwrap();
-                        if q.is_empty() {
-                            break;
-                        }
-                        let flags: Vec<bool> = q.iter().map(|e| is_parallel_safe(e)).collect();
-                        match next_eligible(&flags, heavy_running.load(AtomicOrdering::SeqCst)) {
-                            Some(i) => {
-                                let e = q.remove(i).unwrap();
-                                if !is_parallel_safe(e) {
-                                    heavy_running.store(true, AtomicOrdering::SeqCst);
-                                }
-                                e
-                            }
-                            None => {
-                                drop(q);
-                                std::thread::sleep(std::time::Duration::from_millis(200));
-                                continue;
-                            }
-                        }
-                    };
-                    struct HeavyGuard<'a>(&'a std::sync::atomic::AtomicBool, bool);
-                    impl Drop for HeavyGuard<'_> {
-                        fn drop(&mut self) {
-                            if self.1 {
-                                self.0.store(false, AtomicOrdering::SeqCst);
-                            }
-                        }
-                    }
-                    let _heavy = HeavyGuard(&heavy_running, !is_parallel_safe(export));
-                    let claimed_at = chrono::Utc::now();
-                    let pair = match StateStore::open(config_path) {
-                        Ok(st) => {
-                            let mut unit_opts = opts;
-                            unit_opts.resume = super::split::unit_resume(export, resume, &st);
-                            job::run_export_job(
-                                config_path,
-                                &config,
-                                export,
-                                &st,
-                                &config_dir,
-                                &unit_opts,
-                            )
-                        }
-                        Err(e) => {
-                            let err = crate::error::recoded(
-                                &e,
-                                crate::error::codes::STATE_NOT_WRITABLE,
-                                format!(
-                                    "export '{}': failed to open state database: {:#}",
-                                    export.name, e
-                                ),
-                            );
-                            let summary = job::synthetic_failed_summary(&export.name, &err);
-                            (Err(err), summary)
-                        }
-                    };
-                    let window = (
-                        (claimed_at - started_at).num_milliseconds(),
-                        (chrono::Utc::now() - started_at).num_milliseconds(),
-                    );
-                    let (res, summary) = pair;
-                    collected.lock().unwrap().push((res, summary, window));
-                }
-            });
+            s.spawn(|| pool_worker(&worker));
         }
     });
     let finished_at = chrono::Utc::now();
@@ -1341,18 +1475,12 @@ pub(crate) fn run_pool(
         )
     );
 
-    let mut summaries: Vec<RunSummary> = Vec::new();
-    let mut failures: Vec<anyhow::Error> = Vec::new();
-    let mut pool_windows: Vec<(String, i64, i64)> = Vec::with_capacity(summaries.capacity());
-    let mut oks: Vec<bool> = Vec::new();
-    for (res, summary, (start_ms, end_ms)) in collected.into_inner().unwrap() {
-        oks.push(res.is_ok());
-        if let Err(e) = res {
-            failures.push(e);
-        }
-        pool_windows.push((summary.export_name.clone(), start_ms, end_ms));
-        summaries.push(summary);
-    }
+    let PoolTally {
+        summaries,
+        failures,
+        pool_windows,
+        oks,
+    } = PoolTally::from_outcomes(collected.into_inner().unwrap());
     if let Some(r) = &realized {
         super::split::seal(r, summaries.iter().zip(oks.iter().copied()));
     }
@@ -2919,6 +3047,13 @@ pub(crate) mod run_tail_tests {
                  from one entry after `run_apply_command`'s tail has already run the \
                  self-check on that entry (or from the answering run of a replay, \
                  which ran nothing); a second check here would report it twice.",
+            ),
+            (
+                "run.rs",
+                "pool_worker",
+                "a per-export worker loop of `run_pool`: `run_pool`'s own \
+                 `finish_run_tail` owns the self-check once the workers join, so \
+                 one here would report every export twice.",
             ),
         ];
 

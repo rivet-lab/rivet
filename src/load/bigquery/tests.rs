@@ -16,8 +16,7 @@ fn uris() -> Vec<String> {
     vec!["gs://b/a.parquet".into(), "gs://b/b.parquet".into()]
 }
 
-/// The batched whole-table load ends with the target REPLACED by a clone of the
-/// staging table — one statement, the table names in the right roles.
+/// The batched whole-table load ends with the target REPLACED by a clone of the staging table.
 #[test]
 fn the_clone_replaces_the_target_with_the_staging_table() {
     assert_eq!(
@@ -146,10 +145,7 @@ fn a_rebuild_copies_the_log_in_the_declared_shape_then_swaps_it_in() {
     assert_eq!(flat, "CREATE TABLE `r`\nAS SELECT * FROM `c`;");
 }
 
-/// `CREATE TABLE … AS SELECT` carries rows only: the description, labels, friendly
-/// name, table expiry and KMS key of the log ride on the copy's OPTIONS, and a log
-/// whose columns carry policy tags (or that has row access policies) is refused, since
-/// no copy carries those. RED against the bare copy.
+/// `CREATE TABLE … AS SELECT` carries rows only.
 #[test]
 fn a_rebuild_carries_the_logs_properties_and_refuses_the_policies_it_cannot() {
     let meta = serde_json::json!({
@@ -246,9 +242,7 @@ fn the_log_takes_a_partition_without_a_filter_or_a_load_date_expiry() {
     assert_eq!(changelog_options_sql(&ingestion), None);
 }
 
-/// Every row of a run shares one `_rivet_exported_at`, so a log partitioned on it is
-/// partitioned by load date: an expiry would drop the never-changed baseline rows from
-/// the current-state view. The stamp gets the load-time treatment.
+/// Every row of a run shares one `_rivet_exported_at`, so a log partitioned on it is partitioned by load date.
 #[test]
 fn the_log_never_expires_partitions_on_the_export_stamp() {
     let stamp = partition_at(
@@ -274,8 +268,6 @@ fn the_log_never_expires_partitions_on_the_export_stamp() {
             .any(|s| s.contains("partition_expiration_days = NULL")),
         "{adoption:?}"
     );
-    // A range never expires anywhere: the config refuses the pair, and the SQL
-    // builders emit no expiry for one either.
     let range = TablePartition {
         key: PartitionKey::Range {
             column: "n".into(),
@@ -541,8 +533,6 @@ fn load_data_declares_native_schema_and_is_a_free_batch_load() {
     let schema = build_schema(&[typed("id", BqType::Int64), typed("json_col", BqType::Json)]);
     let sql = build_load_data_sql("p.d.orders", true, &schema, None, &[], None, &uris());
     assert!(sql.starts_with("LOAD DATA OVERWRITE `p.d.orders` ("));
-    // Native types declared inline → BigQuery coerces on load, for free.
-    // Backticked (round-6): a reserved-word column must survive the DDL.
     assert!(sql.contains("`json_col` JSON"));
     assert!(sql.contains("format = 'PARQUET'"));
     assert!(sql.contains("'gs://b/a.parquet'"));
@@ -624,11 +614,7 @@ fn an_existing_tables_shape_conflicts_when_partitioning_or_clustering_differ() {
     assert!(!diff.contains("partitioned"), "{diff}");
 }
 
-/// A table a 0.23 load created unclustered meets a 0.26 config whose `cluster_by`
-/// defaults to `auto` (= the key): nothing was written, so the load follows the
-/// table — no conflict, and the overwrite repeats the table's own clustering (which
-/// BigQuery insists on). A WRITTEN `cluster_by` still conflicts. RED against the
-/// pre-fix check, which compared the resolved `auto` columns like written ones.
+/// A table a 0.23 load created unclustered meets a 0.26 config whose `cluster_by` defaults to `auto` (= the key).
 #[test]
 fn an_unwritten_cluster_by_follows_the_table_it_overwrites() {
     let unclustered = TableShape::default();
@@ -672,7 +658,6 @@ fn create_changes_clusters_on_pk_capped_at_four_columns() {
     let sql = build_create_changes_sql("p.d.orders__changes", &schema, None, &["id".into()]);
     assert!(sql.starts_with("CREATE TABLE IF NOT EXISTS `p.d.orders__changes` ("));
     assert!(sql.contains("CLUSTER BY `id`"));
-    // A >4-column PK is capped to BigQuery's clustering limit.
     let wide: Vec<String> = ["a", "b", "c", "d", "e"]
         .iter()
         .map(|s| s.to_string())
@@ -698,11 +683,9 @@ fn is_meta_column_matches_only_the_three_cdc_columns() {
 #[test]
 fn augment_partition_limit_fires_only_on_partition_plus_signal() {
     let aug = |m: &str| augment_partition_limit(anyhow::anyhow!("{m}")).to_string();
-    // partition + exactly one of {4000, quota, exceed} → augmented (pins each `||`).
     assert!(aug("too many partitions, allowed 4000").contains("split the"));
     assert!(aug("partition quota reached").contains("split the"));
     assert!(aug("partition count will exceed the limit").contains("split the"));
-    // partition alone, or a signal alone → NOT augmented (pins the outer `&&`).
     assert!(!aug("partition pruning is disabled").contains("split the"));
     assert!(!aug("row quota 4000 reached").contains("split the"));
 }
@@ -717,18 +700,12 @@ fn partition_limit_error_is_augmented() {
     );
 }
 
-/// The label SET is the cost-attribution contract; the transport that
-/// carries it is not. This asserted `--label k:v` CLI pairs before the REST
-/// rewrite — same keys, same (sanitized) values, now read as a map.
+/// The label SET is the cost-attribution contract; the transport that carries it is not.
 #[test]
 fn job_labels_tag_managed_by_op_and_table() {
     let labels = build_labels("recover", "Orders", Some("Run-7"));
     assert_eq!(labels["managed_by"], "rivet");
     assert_eq!(labels["rivet_op"], "recover");
-    // Case-folding is LOSSY, and case is the live-proven collision shape
-    // (`CaseTwin` beside `casetwin`), so a folded value carries a digest of the
-    // original — see `sanitize_label_does_not_collapse_two_distinct_tables_into_one`.
-    // The folded form stays the PREFIX, so the label still reads as the table.
     assert!(labels["rivet_table"].starts_with("orders"), "{labels:?}");
     assert!(labels["rivet_run"].starts_with("run-7"), "{labels:?}");
     assert_ne!(
@@ -750,11 +727,7 @@ fn no_run_id_omits_the_rivet_run_label() {
     assert!(!labels.contains_key("rivet_run"), "{labels:?}");
 }
 
-/// The labels the loader actually SENDS, taken from the loader (not
-/// hand-built), and placed in the body BigQuery reads them from. The
-/// producer-side half of the label contract: a run id that never reached
-/// `configuration.labels` is a silent loss of cost attribution — every job
-/// still runs, and the billing query returns nothing for the run.
+/// The labels the loader actually SENDS, taken from the loader (not hand-built), and placed in the body BigQuery reads them from.
 #[test]
 fn the_loader_sends_its_labels_in_the_job_configuration() {
     let l = BigQueryLoader::new("p", "d").run_id("Run-9");
@@ -767,9 +740,6 @@ fn the_loader_sends_its_labels_in_the_job_configuration() {
     );
     assert_eq!(body["configuration"]["labels"]["managed_by"], "rivet");
     assert_eq!(body["configuration"]["labels"]["rivet_op"], "load");
-    // Folded values carry a disambiguating digest (see `sanitize_label`), so the
-    // transport assertion pins the PREFIX — what it exists to check is that the
-    // label set reaches the job configuration, not how a value is spelled.
     for (key, want) in [("rivet_table", "orders"), ("rivet_run", "run-9")] {
         let got = body["configuration"]["labels"][key]
             .as_str()
@@ -786,11 +756,9 @@ fn fqtn_qualifies_project_dataset_table() {
 
 #[test]
 fn sanitize_label_coerces_to_bq_charset() {
-    // Unchanged by the mapping → the exact string, so ordinary labels stay readable.
     assert_eq!(sanitize_label("ok-name_1"), "ok-name_1");
     assert_eq!(sanitize_label(""), "unnamed");
 
-    // Altered by the mapping → the folded form PLUS a digest of the original.
     let folded = sanitize_label("My.Table!");
     assert!(folded.starts_with("my_table_"), "{folded}");
     assert!(
@@ -798,36 +766,16 @@ fn sanitize_label_coerces_to_bq_charset() {
         "a lossy fold must carry a disambiguator: {folded}"
     );
 
-    // Within BigQuery's cap, always.
     assert!(sanitize_label(&"x".repeat(80)).len() <= 63);
     assert!(folded.len() <= 63);
 }
 
 /// Two distinct tables never share a `rivet_table` label.
-///
-/// The value is the per-table IDENTITY the cost query in this module's header
-/// GROUPs by, and the mapping is lossy three ways: case-folding, `[^a-z0-9_-] → _`,
-/// and the 63-char cap. Two tables folding to one label reported their jobs, bytes
-/// and spend as ONE line with nothing indicating the merge — a confidently wrong
-/// answer, which is worse than a missing one.
-///
-/// None of these inputs is exotic. `"CaseTwin"` beside `casetwin` is a shape
-/// `yaml_scaffold` records as live-proven on PostgreSQL; MSSQL's `sysname` is 128
-/// chars and a Mongo collection name ~235, so two names agreeing on their first 63
-/// sanitized characters are ordinary.
-///
-/// Scope, kept from the hunt's refuters: nothing in rivet READS these labels back,
-/// so the harm was bounded to cost attribution — no data or control flow moved.
-///
-/// RED against returning the folded form alone.
 #[test]
 fn sanitize_label_does_not_collapse_two_distinct_tables_into_one() {
     let pairs = [
-        // case twins — the live-proven shape
         ("CaseTwin", "casetwin"),
-        // differ only in a character the charset forbids
         ("orders.eu", "orders-eu"),
-        // agree on the first 63 characters, differ past the cap
         (
             &format!("{}_2024_01", "history_archive".repeat(4)),
             &format!("{}_2024_02", "history_archive".repeat(4)),
@@ -841,15 +789,10 @@ fn sanitize_label_does_not_collapse_two_distinct_tables_into_one() {
         );
         assert!(sanitize_label(a).len() <= 63 && sanitize_label(b).len() <= 63);
     }
-    // Stable: the same input always yields the same label, or cost queries would
-    // scatter one table across several lines instead of merging two into one.
     assert_eq!(sanitize_label("My.Table!"), sanitize_label("My.Table!"));
 }
 
-/// THE foreign-table safety test. A table rivet did not create keeps its
-/// previous owner's shape — `CREATE TABLE IF NOT EXISTS` is a no-op on it —
-/// so the only way to add a column is ALTER. A replace would impose our
-/// schema on the customer's history and destroy it.
+/// THE foreign-table safety test.
 #[test]
 fn schema_reconciliation_adds_columns_and_never_replaces() {
     let specs = [
@@ -858,8 +801,6 @@ fn schema_reconciliation_adds_columns_and_never_replaces() {
     ];
     let sql = build_alter_add_columns_sql("p.d.t__changes", &specs).unwrap();
     assert!(sql.starts_with("ALTER TABLE `p.d.t__changes`"), "{sql}");
-    // IF NOT EXISTS on every column: the statement runs on every load, and
-    // a load must not fail because a column it declares is already there.
     assert_eq!(sql.matches("ADD COLUMN IF NOT EXISTS").count(), 2, "{sql}");
     assert!(sql.contains("`_rivet_row_hash` INT64"), "{sql}");
     for forbidden in ["REPLACE", "DROP", "CREATE", "TRUNCATE", "OVERWRITE"] {
@@ -870,16 +811,13 @@ fn schema_reconciliation_adds_columns_and_never_replaces() {
     }
 }
 
-/// Nothing to add ⇒ no statement, so the loader skips the round trip
-/// instead of sending `ALTER TABLE t ;`.
+/// Nothing to add ⇒ no statement, so the loader skips the round trip instead of sending `ALTER TABLE t ;`.
 #[test]
 fn schema_reconciliation_emits_nothing_for_an_empty_spec_list() {
     assert!(build_alter_add_columns_sql("p.d.t", &[]).is_none());
 }
 
-/// The changelog is only ever CREATEd IF NOT EXISTS and LOADed INTO —
-/// never OVERWRITE. This pins the pairing: a pre-existing `__changes` table
-/// must survive a load with its rows intact.
+/// The changelog is only ever CREATEd IF NOT EXISTS and LOADed INTO — never OVERWRITE.
 #[test]
 fn changelog_sql_is_create_if_not_exists_plus_append_only() {
     let create = build_create_changes_sql("p.d.t__changes", "  `id` INT64", None, &["id".into()]);
@@ -899,9 +837,6 @@ fn changelog_sql_is_create_if_not_exists_plus_append_only() {
 
 #[test]
 fn materialize_refuses_too_many_cluster_columns() {
-    // A >4-column CLUSTER BY is a below-the-seam adapter limit (BigQuery's),
-    // caught in `materialize` before any BigQuery job is enqueued. (Empty-URI and Fail-spec
-    // refusals are the driver's — see `load::tests`.)
     let l = BigQueryLoader::new("p", "d").clustered_on(vec![
         "a".into(),
         "b".into(),
@@ -918,10 +853,6 @@ fn materialize_refuses_too_many_cluster_columns() {
 
 #[test]
 fn materialize_refuses_a_non_identifier_cluster_column() {
-    // A clustering column splices raw into `CLUSTER BY <cols>`; a
-    // non-identifier name is an injection vector and must be refused in
-    // `materialize` before any BigQuery job is enqueued — the sibling of the table/column/pk
-    // gate for the BigQuery shape clause.
     let l = BigQueryLoader::new("p", "d").clustered_on(vec!["id) FROM secrets; --".into()]);
     let err = l
         .materialize("t", &[spec("id", None, TargetStatus::Ok)], &uris(), None)
@@ -965,14 +896,10 @@ fn export_fixture(loader: &BigQueryLoader, bucket: &str, name: &str, select: &st
     format!("gs://{bucket}/rivet-live/bq-unit/{name}/000000000000.parquet")
 }
 
-/// Live BigQuery load of a Parquet fixture the test writes itself. Needs ADC and
-/// `BIGQUERY_TEST_PROJECT`; the transport is the REST API, so no `bq` CLI on PATH.
+/// Live BigQuery load of a Parquet fixture the test writes itself.
 #[test]
 #[ignore = "live: needs a BigQuery project + ADC"]
 fn bigquery_live_load_round_trips() {
-    // Soft-skip when the live BigQuery project isn't configured: CI sweeps
-    // `--ignored` (ci.yml) without warehouse creds, so a hard `.expect` here
-    // would fail the run. With the project set (a live/nightly box) it runs.
     let Ok(project) = std::env::var("BIGQUERY_TEST_PROJECT") else {
         return crate::test_hook::skip_live("BIGQUERY_TEST_PROJECT unset");
     };
@@ -986,11 +913,8 @@ fn bigquery_live_load_round_trips() {
         "SELECT id FROM UNNEST([1, 2, 3]) AS id",
     );
 
-    // A plain column (no cast) exercises the FREE LOAD DATA path.
     let specs = vec![typed("id", BqType::Int64)];
 
-    // Drive it through the real driver (no gate, no cleanup) — same path prod
-    // takes, exercising validate → materialize.
     let report = crate::load::run_load(
         &loader,
         &table,
@@ -1010,22 +934,10 @@ fn bigquery_live_load_round_trips() {
     assert_eq!(read_back.expect("count the loaded table"), 3);
 }
 
-/// THE live proof of the REST transport, needing no GCS fixture: a real
-/// query job through `jobs.insert` → poll → `getQueryResults`, then the
-/// cost-attribution labels read back from BigQuery's OWN catalog
-/// (`INFORMATION_SCHEMA.JOBS_BY_PROJECT`) rather than from the request body
-/// this crate built — an independent oracle for the one contract the CLI
-/// rewrite could silently drop. Also drives the failure path, so the error
-/// mapping is exercised against a real `status.errorResult` and not only a
-/// fixture. Drive it with:
-///
-///   BIGQUERY_TEST_PROJECT=rivet-data-tool RIVET_BQ_TEST_DATASET=rivet_type_lab \
-///   BIGQUERY_TEST_LOCATION=EU \
-///   cargo test --lib -- --ignored bigquery_rest_transport_live
+/// THE live proof of the REST transport, needing no GCS fixture.
 #[test]
 #[ignore = "live: needs a BigQuery project + ADC (no GCS fixture required)"]
 fn bigquery_rest_transport_live_round_trips_a_query_job() {
-    // Soft-skip when unconfigured — see bigquery_live_load_round_trips.
     let Ok(project) = std::env::var("BIGQUERY_TEST_PROJECT") else {
         return crate::test_hook::skip_live("BIGQUERY_TEST_PROJECT unset");
     };
@@ -1034,8 +946,6 @@ fn bigquery_rest_transport_live_round_trips_a_query_job() {
         .unwrap_or_else(|_| "US".to_string())
         .to_lowercase();
 
-    // A run id unique to this invocation, so the label read-back below is
-    // scoped to THIS run's jobs and cannot be satisfied by history.
     let run_id = format!(
         "rest-live-{}",
         std::time::SystemTime::now()
@@ -1047,7 +957,6 @@ fn bigquery_rest_transport_live_round_trips_a_query_job() {
     let loader = BigQueryLoader::new(&project, &dataset).run_id(&run_id);
     let fqtn = loader.fqtn(table);
 
-    // 1. A statement job: insert → poll → terminal verdict.
     loader
         .run_sql(
             &format!("CREATE OR REPLACE TABLE `{fqtn}` AS SELECT 1 AS id UNION ALL SELECT 2"),
@@ -1056,8 +965,6 @@ fn bigquery_rest_transport_live_round_trips_a_query_job() {
         )
         .expect("CREATE OR REPLACE through the REST transport");
 
-    // 2. A scalar job: the getQueryResults leg, against a count this test
-    //    seeded itself (not one rivet reported).
     assert_eq!(
         loader
             .api()
@@ -1076,9 +983,6 @@ fn bigquery_rest_transport_live_round_trips_a_query_job() {
         "…and the same count from tables.get metadata"
     );
 
-    // 3. The labels, read back from BigQuery's catalog. `run_id` is unique
-    //    per invocation, so a nonzero count can only come from the jobs
-    //    THIS test just ran.
     let labelled = loader
         .api()
         .unwrap()
@@ -1098,8 +1002,6 @@ fn bigquery_rest_transport_live_round_trips_a_query_job() {
          configuration.labels — INFORMATION_SCHEMA saw {labelled}"
     );
 
-    // 4. The failure path: a real `status.errorResult` must reach the caller
-    //    with BigQuery's own reason text, not a bare "failed".
     let err = loader
         .run_sql(
             &format!("SELECT * FROM `{project}.{dataset}.no_such_table_ever`"),
@@ -1113,24 +1015,15 @@ fn bigquery_rest_transport_live_round_trips_a_query_job() {
         "the REST error detail must name the reason: {rendered}"
     );
 
-    // 5. Clean up after ourselves.
     loader
         .run_sql(&format!("DROP TABLE IF EXISTS `{fqtn}`"), "drop", table)
         .expect("dropping the live fixture table");
 }
 
-/// Live BigQuery CDC round-trip: append a change-log Parquet into
-/// `<table>__changes` and build the dedup view. Loading the **same** file
-/// twice exercises the at-least-once path — `<table>__changes` doubles, but
-/// the current-state view must be unchanged (duplicates lose the
-/// `(__pos,__seq)` tiebreak). Soft delete: the view keeps one row per PK
-/// including tombstones (`__is_deleted = true`). The fixture is a change log the
-/// test writes itself: id 1 inserted then updated, id 2 inserted then deleted,
-/// id 3 inserted, so the view holds 3 keys (incl. the tombstone).
+/// Live BigQuery CDC round-trip: append a change-log Parquet into `<table>__changes` and build the dedup view.
 #[test]
 #[ignore = "live: needs a BigQuery project + ADC"]
 fn bigquery_live_cdc_view_dedups_at_least_once() {
-    // Soft-skip when unconfigured — see bigquery_live_load_round_trips.
     let Ok(project) = std::env::var("BIGQUERY_TEST_PROJECT") else {
         return crate::test_hook::skip_live("BIGQUERY_TEST_PROJECT unset");
     };
@@ -1164,7 +1057,6 @@ fn bigquery_live_cdc_view_dedups_at_least_once() {
          ('delete', '4', 4, 2, 'c'), ('insert', '5', 5, 3, 'd')])",
     );
 
-    // Load the same change log twice (at-least-once).
     crate::load::run_load_cdc(
         &loader,
         table,
@@ -1193,8 +1085,6 @@ fn bigquery_live_cdc_view_dedups_at_least_once() {
     .expect("second CDC append (at-least-once) should succeed");
     assert!(second.rows_appended > 0, "second append added rows");
 
-    // The dedup VIEW must report the current state, independent of how many
-    // times the log was appended.
     let state_rows = loader
         .api()
         .unwrap()
@@ -1307,11 +1197,7 @@ fn bigquery_live_adopts_a_full_load_table_as_the_changelog_baseline() {
     assert_eq!(viewed.unwrap(), 3);
 }
 
-/// The partition cap is the TARGET table's: a disposable buffer is never
-/// partitioned, so its append packs into one job without opening the footer
-/// store — whatever the base declares. The `Some` arm proves the fixture is not
-/// inert: the same loader, asked to pack under the base's partition, does reach
-/// for the footers (and fails on the bogus store).
+/// The partition cap is the TARGET table's: a disposable buffer is never partitioned, so its append packs into one job without opening the footer store.
 #[test]
 fn an_unpartitioned_target_packs_into_one_job_without_reading_footers() {
     let dest: crate::config::DestinationConfig =
@@ -1325,9 +1211,7 @@ fn an_unpartitioned_target_packs_into_one_job_without_reading_footers() {
     assert!(loader.batches(&uris, Some(&partition)).is_err());
 }
 
-/// The compaction script ends with `(changes_rows, merge_jobs)`; a row that does
-/// not read as that pair is an error, never a report identical to an empty
-/// buffer's.
+/// The compaction script ends with `(changes_rows, merge_jobs)`.
 #[test]
 fn an_unreadable_compaction_summary_is_an_error_not_an_empty_report() {
     let ok = compact_summary(&[Some("12".into()), Some("2".into())]).unwrap();
@@ -1424,8 +1308,6 @@ fn a_compaction_with_neither_buffer_nor_leftover_has_nothing_to_merge() {
     );
 }
 
-// ── the loader against a scripted BigQuery (bq_rest::stand) ─────────────────
-
 use crate::load::ShapeControl;
 use crate::load::bq_rest::stand::{Stand, json};
 
@@ -1503,7 +1385,7 @@ fn statements(stand: &Stand) -> Vec<String> {
     stand.seen().iter().filter_map(sql).collect()
 }
 
-/// A change log holds prior changes when its probe counts one; a log that is not there is the first cycle, and any other failure is a failure.
+/// A change log holds prior changes when its probe counts one.
 #[test]
 fn a_change_log_has_prior_changes_only_when_its_probe_counts_one() {
     let stand = world(&[], |sql| match sql {
@@ -1564,7 +1446,7 @@ fn a_statement_is_sent_under_its_operation_and_table() {
     assert!(loader.run_sql("BROKEN", "load", "orders").is_err());
 }
 
-/// A MERGE, a load statement and a count that BigQuery fails with a documented retryable reason are unavailable and exit 2 with the job's words; a syntax error stays a rejection that exits 1.
+/// A MERGE, a load statement and a count that BigQuery fails with a documented retryable reason are unavailable and exit 2 with the job's words.
 #[test]
 fn a_statement_failed_with_a_transient_reason_is_retryable_and_a_bad_one_is_not() {
     let stand = world(&[], |sql| match sql {
@@ -1717,8 +1599,7 @@ fn a_bad_clustering_list_is_refused_and_the_partition_expression_is_the_plans() 
     assert_eq!(loader.partition(part).partition_expr(), Some("DATE(ts)"));
 }
 
-/// A re-baseline buffers one tombstone per live base row its buffer does not hold, over the
-/// source columns only, and reports the rows the buffer gained.
+/// A re-baseline buffers one tombstone per live base row its buffer does not hold, over the source columns only, and reports the rows the buffer gained.
 #[test]
 fn a_rebaseline_buffers_a_tombstone_for_each_base_row_the_buffer_does_not_hold() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1783,8 +1664,6 @@ fn a_rebaseline_buffers_a_tombstone_for_each_base_row_the_buffer_does_not_hold()
     );
     assert!(inserted.load(std::sync::atomic::Ordering::SeqCst));
 }
-
-// ── the identity a BigQuery load signs with, against a stand that also mints tokens ─
 
 static IDENTITY_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -1877,7 +1756,7 @@ fn a_bigquery_load_signs_with_the_destinations_named_key() {
     );
 }
 
-/// A destination's named key beside a static `RIVET_BQ_ACCESS_TOKEN` is two named identities: refused by code before any BigQuery request.
+/// A destination's named key beside a static `RIVET_BQ_ACCESS_TOKEN` is two named identities.
 #[test]
 fn a_named_key_beside_a_static_bigquery_token_is_refused_by_code() {
     let stand = minting_stand();
@@ -1963,7 +1842,7 @@ fn token_status_stand(token_status: impl Fn(usize) -> u16 + Send + 'static) -> S
     })
 }
 
-/// `row_count_as` the destination's named key `who`, against `stand`; each test names its own principal so no token source is shared.
+/// `row_count_as` the destination's named key `who`, against `stand`.
 fn row_count_as_named_key(stand: &Stand, who: &str) -> Result<u64> {
     let dir = tempfile::tempdir().unwrap();
     let (named, ambient) = (key_file(&dir, stand, who), key_file(&dir, stand, "ambient"));
