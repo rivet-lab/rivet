@@ -72,7 +72,9 @@ pub fn redact_url_passwords(s: &str) -> String {
 /// driver/library error (or any operator-untrusted string) into a
 /// persisted or emitted artifact.
 pub fn redact_secrets(s: &str) -> String {
-    redact_query_secrets(&redact_url_passwords(&redact_keyword_passwords(s)))
+    redact_query_secrets(&redact_url_passwords(&redact_keyword_passwords(
+        &crate::secret::mask_registered(s),
+    )))
 }
 
 /// `raw` with its keyword/value passwords, its whole userinfo (user included) and its query secrets masked, and whether any was found: the form a persisted plan holds.
@@ -214,7 +216,7 @@ fn unescaped_whitespace(text: &str) -> usize {
     text.len()
 }
 
-/// Mask a bare URL query (`https://h/p?<token>`, a SAS token spelled without a key) and the value of every secret-bearing URL query pair (`?token=`, `&client_secret=`, `sig=`, `sas=`, and any key [`is_password_keyword`] accepts), keeping the key's spelling; a percent-encoded key is read decoded.
+/// Mask the value of every secret-bearing URL query pair (`?token=`, `&client_secret=`, `sig=`, `sas=`, and any key [`is_password_keyword`] accepts), keeping the key's spelling; a percent-encoded key is read decoded.
 pub(crate) fn redact_query_secrets(s: &str) -> String {
     const FAMILIES: [&str; 7] = [
         "token",
@@ -240,28 +242,9 @@ pub(crate) fn redact_query_secrets(s: &str) -> String {
     }
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
-    let mut in_url = false;
     while let Some(q) = rest.find(['?', '&']) {
-        let span = &rest[..q];
-        match span.rfind(|c: char| c.is_whitespace() || matches!(c, '(' | '\'' | '"' | ',')) {
-            Some(i) => in_url = span[i..].contains("://"),
-            None => in_url |= span.contains("://"),
-        }
-        let bare_url_query = in_url && rest.as_bytes()[q] == b'?';
         out.push_str(&rest[..=q]);
         rest = &rest[q + 1..];
-        if bare_url_query {
-            let end = rest
-                .find(|c: char| {
-                    matches!(c, '&' | '\'' | '"' | ')' | ';' | '=' | ',') || c.is_whitespace()
-                })
-                .unwrap_or(rest.len());
-            if end > 0 && rest.as_bytes().get(end) != Some(&b'=') {
-                out.push_str("***");
-                rest = &rest[end..];
-                continue;
-            }
-        }
         let key_end = rest
             .find(|c: char| {
                 seeded!(
@@ -436,6 +419,30 @@ impl log::Log for UiRoutedLogger {
 #[cfg(test)]
 mod logger_tests {
     use super::*;
+
+    /// A registered secret is masked wherever it sits in text, raw or percent-encoded; short values, unregistered text and keyed query pairs are untouched.
+    #[test]
+    fn a_registered_secret_is_masked_by_value_and_neighbours_are_unchanged() {
+        let sas = crate::secret::Secret::new("QxRegisteredCanary0123Vm/+");
+        sas.mask_in_output();
+        crate::secret::Secret::new("short").mask_in_output();
+        let text =
+            "url: http://h/p?QxRegisteredCanary0123Vm/+ and ?QxRegisteredCanary0123Vm%2F%2B end";
+        assert_eq!(redact_secrets(text), "url: http://h/p?*** and ?*** end");
+        for same in [
+            "short stays short",
+            "INSERT INTO t VALUES (?,?) failed",
+            "https://h/x?page=2&limit=10",
+            "https://acc.blob/x?sv=2020&sig=abc%2F==",
+        ] {
+            let want = if same.contains("sig=") {
+                "https://acc.blob/x?sv=2020&sig=***"
+            } else {
+                same
+            };
+            assert_eq!(redact_secrets(same), want, "{same}");
+        }
+    }
     use log::Log as _;
     use std::sync::{Arc, Mutex};
 
@@ -630,25 +637,6 @@ mod tests {
             ),
             // Azure's service VERSION is diagnostic, not a secret.
             ("?sv=2020-08-04&sig=abc", "?sv=2020-08-04&sig=***"),
-        ] {
-            assert_eq!(redact_secrets(input), want, "{input}");
-        }
-        for (input, want) in [
-            (
-                "url: http://h:1/a/b?QxBare0123Vm, called: x",
-                "url: http://h:1/a/b?***, called: x",
-            ),
-            (
-                "for url (http://h/p?QxBare0123Vm)",
-                "for url (http://h/p?***)",
-            ),
-            ("http://h/p?QxBare&page=2", "http://h/p?***&page=2"),
-            (
-                "INSERT INTO t VALUES (?,?) failed",
-                "INSERT INTO t VALUES (?,?) failed",
-            ),
-            ("is it ok?", "is it ok?"),
-            ("see http://h/p? then", "see http://h/p? then"),
         ] {
             assert_eq!(redact_secrets(input), want, "{input}");
         }
@@ -1132,17 +1120,6 @@ mod tests {
         let same = |unit: &str| same(unit, mb);
         vec![
             ("`?` alone", same("?")),
-            (
-                "`a://?` repeated",
-                ("a://?".repeat(mb / 5), "a://?***".to_string()),
-            ),
-            (
-                "a megabyte bare query",
-                (
-                    format!("a://h/p?{}", "x".repeat(mb)),
-                    "a://h/p?***".to_string(),
-                ),
-            ),
             ("`&a` repeated, no `=`", same("&a")),
             ("`&a=1` repeated, no secret", same("&a=1")),
             (

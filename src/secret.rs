@@ -13,7 +13,37 @@ pub const REDACTED: &str = "REDACTED";
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Secret(Zeroizing<String>);
 
+/// Shortest secret registered for masking: a shorter one would blank ordinary text.
+const MIN_MASKED_LEN: usize = 8;
+
+/// The text of every secret registered by [`Secret::mask_in_output`], raw and percent-encoded.
+static MASKED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// `text` with every registered secret value replaced by `***`.
+pub(crate) fn mask_registered(text: &str) -> String {
+    let known = MASKED.lock().unwrap_or_else(|e| e.into_inner());
+    known
+        .iter()
+        .fold(text.to_string(), |acc, v| acc.replace(v.as_str(), "***"))
+}
+
 impl Secret {
+    /// Register this value so the shared redactor masks it wherever it appears in output text.
+    pub fn mask_in_output(&self) {
+        if self.0.len() < MIN_MASKED_LEN {
+            return;
+        }
+        let encoded =
+            percent_encoding::utf8_percent_encode(&self.0, percent_encoding::NON_ALPHANUMERIC)
+                .to_string();
+        let mut known = MASKED.lock().unwrap_or_else(|e| e.into_inner());
+        for v in [self.0.to_string(), encoded] {
+            if !known.contains(&v) {
+                known.push(v);
+            }
+        }
+    }
+
     /// A secret holding `value`.
     pub fn new(value: impl Into<String>) -> Self {
         Self(Zeroizing::new(value.into()))

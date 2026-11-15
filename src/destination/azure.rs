@@ -162,7 +162,9 @@ fn read_credential_env(env_name: &str, label: &str) -> Result<crate::secret::Sec
             format!("env var '{}' not set for Azure {}", env_name, label),
         )
     })?;
-    Ok(crate::secret::Secret::new(value))
+    let secret = crate::secret::Secret::new(value);
+    secret.mask_in_output();
+    Ok(secret)
 }
 
 impl CloudBackend for AzureBackend {
