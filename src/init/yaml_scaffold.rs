@@ -88,10 +88,10 @@ pub(super) fn generate_schema_config(
 const BOUNDED_DRAIN_LINE: &str =
     "      until_current: true  # drain to the current log end and exit (good for a scheduler)";
 
-/// The line a CDC export scaffolded against a PostgreSQL standby carries instead: a bounded drain is refused there.
+/// The line a CDC export scaffolded against a PostgreSQL standby carries instead.
 const STANDBY_DRAIN_LINE: &str = "      until_current: false  # the source is a standby (in recovery), where a bounded drain is refused; this reads to the end of the replayed log and exits (good for a scheduler)";
 
-/// The scaffold as its source runs it: against a PostgreSQL standby every bounded CDC drain becomes unbounded; `in_recovery` is asked only for such a scaffold.
+/// The scaffold as its source runs it: against a PostgreSQL standby every bounded CDC drain becomes unbounded.
 pub(super) fn for_source(
     text: String,
     source_type: &str,
@@ -184,22 +184,8 @@ pub(super) fn scaffold_schema(
         ..Default::default()
     };
     let mut lines = config_header_lines(st, &header, unbounded, provenance, tls);
-    // Whole-database CDC on MySQL / public-schema PostgreSQL rides ONE stream,
-    // not one export per table: N per-table CDC exports collide on the MySQL
-    // `server_id` (config error) and cost N slots on PostgreSQL (the WAL is
-    // decoded once PER slot). One `tables:` export uses one stream resource and
-    // routes each table to `<prefix>/<table>/`. SQL Server keeps per-table
-    // (capture instances are per-table; `tables:` is unsupported there), and so
-    // does non-`public` PostgreSQL (its table names are schema-qualified, which
-    // would make the `table.column` override keys ambiguous).
     let consolidate_cdc =
         mode_override == Some("cdc") && infos.len() > 1 && recipe_baseline_engine(infos, st);
-    // A table that cannot be read by `table:` cannot be a recipe, and a stream
-    // whose `backfill: auto` finds no recipe for a captured table is refused at
-    // config load — so such a table is left OUT of the stream, said so, rather
-    // than scaffolding a config `rivet check` rejects. Decided BEFORE the headers:
-    // a schema with no readable table (all CamelCase on PostgreSQL) falls through
-    // to the per-table scaffold instead of a stream over nothing.
     let (readable, skipped): (Vec<&TableInfo>, Vec<&TableInfo>) = if consolidate_cdc {
         infos.iter().partition(|i| recipe_readable(i, st))
     } else {
@@ -335,14 +321,7 @@ fn one_line_comment(text: &str) -> String {
         .collect()
 }
 
-/// Word-wrap every comment in the scaffolded YAML so no line exceeds
-/// [`COMMENT_WRAP_WIDTH`]. A standalone comment (`<indent># text`) wraps onto
-/// continuation comment lines at the same indent; an inline comment
-/// (`key: value  # text`) keeps as much as fits after the value and wraps the
-/// rest onto standalone comment lines at the line's indent. Lines with no
-/// comment — or whose `#` sits inside a quoted scalar (a generated SQL `query:`
-/// or any quoted value) — are left byte-for-byte untouched, so values are never
-/// split.
+/// Word-wrap every comment in the scaffolded YAML so no line exceeds [`COMMENT_WRAP_WIDTH`].
 fn wrap_comments(yaml: &str) -> String {
     let mut out = String::with_capacity(yaml.len());
     let mut in_query = false;
@@ -374,18 +353,13 @@ fn wrap_comments(yaml: &str) -> String {
     out
 }
 
-/// Split a line at the start of a YAML comment that is NOT inside a quoted
-/// scalar → `(prefix, comment_text)`, where `prefix` is everything up to (not
-/// including) the `#` and `comment_text` is the comment with its `#` and one
-/// leading space stripped. `None` if the line carries no such comment.
+/// Split a line at the start of a YAML comment that is NOT inside a quoted scalar → `(prefix, comment_text)`, where `prefix` is everything up to (not including) the `#` and `comment_text` is the comment with its `#` and one leading space stripped.
 fn comment_split(line: &str) -> Option<(&str, &str)> {
     let trimmed = line.trim_start();
     if let Some(rest) = trimmed.strip_prefix('#') {
         let prefix = &line[..line.len() - trimmed.len()];
         return Some((prefix, rest.trim_start()));
     }
-    // Single, double AND the engines' identifier quotes: a MySQL `` `qty # ea` `` or a
-    // SQL Server `[qty # ea]` inside a generated `query:` is not a comment either.
     let (mut in_s, mut in_d, mut in_bt, mut brackets) = (false, false, false, 0usize);
     let bytes = line.as_bytes();
     for i in 0..bytes.len() {
@@ -405,9 +379,7 @@ fn comment_split(line: &str) -> Option<(&str, &str)> {
     None
 }
 
-/// Greedily word-wrap `comment` so the first line is `prefix# …` and each
-/// continuation line is `indent# …`, none exceeding [`COMMENT_WRAP_WIDTH`]
-/// (except a single word longer than the budget, which takes its own line).
+/// Greedily word-wrap `comment` so the first line is `prefix# …` and each continuation line is `indent# …`, none exceeding [`COMMENT_WRAP_WIDTH`] (except a single word longer than the budget, which takes its own line).
 fn wrap_comment(prefix: &str, indent: &str, comment: &str) -> String {
     let mut lines: Vec<String> = Vec::new();
     let mut cur = format!("{prefix}# ");
@@ -438,9 +410,6 @@ fn config_header_lines(
 ) -> Vec<String> {
     let mut lines = vec![
         title_line.to_string(),
-        // Do NOT name a file here: `-o` decides the path, and this header is
-        // built without it, so a literal `rivet.yaml` sends anyone who used
-        // `-o cdc.yaml` at a config that does not exist.
         "# Review and adjust before running: rivet check -c <this file>".to_string(),
     ];
     if unbounded_decimal_note {
@@ -455,9 +424,6 @@ fn config_header_lines(
         format!("  type: {source_type}"),
         source_url_line(provenance),
     ]);
-    // `--tls` (#146): the scaffold records the SAME posture init just
-    // connected with, so the generated config works against the same host
-    // without a hand edit — the whole point of the flag.
     if let Some(t) = tls {
         lines.push(tls_line(t));
     }
@@ -480,11 +446,7 @@ fn tls_line(t: &crate::config::TlsConfig) -> String {
     }
 }
 
-/// The `source:` connection line for the scaffold, matching how the user
-/// supplied the URL so the prescribed next steps inherit a working connection.
-/// Credentials are NEVER written to the file: an inline `--source` URL still
-/// resolves through `url_env: DATABASE_URL` (the next-steps block reminds the
-/// user to export it).
+/// The `source:` connection line for the scaffold, matching how the user supplied the URL so the prescribed next steps inherit a working connection.
 fn source_url_line(provenance: &super::SourceProvenance) -> String {
     match provenance {
         super::SourceProvenance::Inline => {
@@ -505,10 +467,7 @@ fn source_url_line(provenance: &super::SourceProvenance) -> String {
     }
 }
 
-/// The per-export path segment: the table name, or `<schema>__<table>` for a
-/// non-`public` PostgreSQL table. Shared by every destination so each export
-/// lands under its own subdirectory/prefix (no manifest.json / _SUCCESS
-/// collisions, and a re-run doesn't read a sibling export's parts).
+/// The per-export path segment: the table name, or `<schema>__<table>` for a non-`public` PostgreSQL table.
 fn export_segment(info: &TableInfo, source_type: &str) -> String {
     if source_type == "postgres" && info.schema != "public" {
         format!("{}__{}", info.schema, info.table)
@@ -517,11 +476,7 @@ fn export_segment(info: &TableInfo, source_type: &str) -> String {
     }
 }
 
-/// `exports/<table>/` in the bucket, or `exports/<schema>__<table>/` for
-/// non-`public` PostgreSQL. CDC scaffolds get the sibling `exports/<table>_cdc/`:
-/// sharing the batch prefix clobbers its `manifest.json`/`_SUCCESS` (finding
-/// #44), and nesting inside it (`exports/<table>/cdc/`, through 0.32.0) put the
-/// stream's runs under every recursive read of the batch prefix.
+/// `exports/<table>/` in the bucket, or `exports/<schema>__<table>/` for non-`public` PostgreSQL.
 fn table_export_prefix(
     info: &TableInfo,
     source_type: &str,
@@ -531,8 +486,7 @@ fn table_export_prefix(
     format!("exports/{}", export_dir(info, source_type, mode, stem))
 }
 
-/// `<segment>/` of `mode`, under `<stem>/` for a CDC export of an `-o` config: two configs of one
-/// table name their own stream's directory, as they name their own checkpoint.
+/// `<segment>/` of `mode`, under `<stem>/` for a CDC export of an `-o` config.
 fn export_dir(info: &TableInfo, source_type: &str, mode: &str, stem: Option<&str>) -> String {
     let seg = format!("{}/", mode_segment(info, source_type, mode));
     match mode {
@@ -570,17 +524,10 @@ fn mode_segment(info: &TableInfo, source_type: &str, mode: &str) -> String {
     }
 }
 
-/// What a CDC scaffold appends to the table's export name and path segment, so a batch and a
-/// CDC export of one table never share a name (the state keys a load spec by export name) or
-/// nest one prefix inside the other.
+/// What a CDC scaffold appends to the table's export name and path segment, so a batch and a CDC export of one table never share a name (the state keys a load spec by export name) or nest one prefix inside the other.
 const CDC_NAME_SUFFIX: &str = "_cdc";
 
-/// Emit a YAML scalar that is unambiguous for any plain-text value the user
-/// could pass via `--gcs-bucket` / `--s3-region` / `--gcs-credentials-file`.
-///
-/// Returns the input unchanged when it is safe as a YAML 1.2 plain scalar;
-/// otherwise wraps it as a double-quoted scalar with escapes (handles names
-/// like `1` / `true` / values with `:`, `#`, leading `-`, trailing space, etc.).
+/// Emit a YAML scalar that is unambiguous for any plain-text value the user could pass via `--gcs-bucket` / `--s3-region` / `--gcs-credentials-file`.
 pub(super) fn yaml_quote_if_needed(v: &str) -> String {
     if needs_yaml_quoting(v) {
         yaml_double_quote(v)
@@ -593,11 +540,9 @@ fn needs_yaml_quoting(v: &str) -> bool {
     if v.is_empty() {
         return true;
     }
-    // Leading or trailing whitespace would be stripped or break parsing.
     if v.trim() != v {
         return true;
     }
-    // YAML 1.1/1.2 reserved scalars that must not look like a bare string.
     let lower = v.to_ascii_lowercase();
     if matches!(
         lower.as_str(),
@@ -605,11 +550,9 @@ fn needs_yaml_quoting(v: &str) -> bool {
     ) {
         return true;
     }
-    // Anything that parses as a number would be loaded as int/float, not string.
     if v.parse::<i64>().is_ok() || v.parse::<f64>().is_ok() {
         return true;
     }
-    // YAML indicators that are unsafe at the start of a plain scalar.
     if let Some(first) = v.chars().next()
         && matches!(
             first,
@@ -635,8 +578,6 @@ fn needs_yaml_quoting(v: &str) -> bool {
     {
         return true;
     }
-    // Anywhere in the string: control chars, ` #` comment starter, `: ` mapping
-    // separator, or flow-context indicators all need quoting to be safe.
     let bytes: Vec<char> = v.chars().collect();
     for (i, c) in bytes.iter().enumerate() {
         if is_yaml_special(*c) {
@@ -649,7 +590,6 @@ fn needs_yaml_quoting(v: &str) -> bool {
             return true;
         }
         if *c == ':' {
-            // ": " or ":" at end-of-value both terminate the scalar in plain style.
             let next = bytes.get(i + 1);
             if next.is_none() || next.is_some_and(|n| n.is_whitespace()) {
                 return true;
@@ -680,21 +620,13 @@ fn yaml_double_quote(v: &str) -> String {
     s
 }
 
-/// Return true for column data types that Rivet cannot safely auto-map without
-/// explicit precision/scale (NUMERIC / DECIMAL family).
+/// Return true for column data types that Rivet cannot safely auto-map without explicit precision/scale (NUMERIC / DECIMAL family).
 fn is_decimal_type(data_type: &str) -> bool {
     let t = data_type.to_ascii_lowercase();
     t == "numeric" || t == "decimal"
 }
 
-/// Mirror of the validation in [`crate::config::models::validate_table_shortcut_ident`]:
-/// accepts `<name>` or `<schema>.<name>` with ASCII-only identifier characters.
-/// Quote a `schema.table` (or bare table) with the ENGINE's identifier quotes,
-/// so the generated SQL addresses the catalog-exact relation — never its
-/// lowercase fold (round-7: `FROM CaseTwin` read `casetwin`'s rows with every
-/// check green). Embedded quote characters are doubled per each dialect.
-/// Quote ONE identifier with the engine's quotes (the single-part twin of
-/// [`quote_relation`] — columns never carry a qualifying dot).
+/// Mirror of the validation in [`crate::config::models::validate_table_shortcut_ident`].
 fn quote_ident(part: &str, source_type: &str) -> String {
     match source_type {
         "mysql" => format!("`{}`", part.replace('`', "``")),
@@ -703,7 +635,7 @@ fn quote_ident(part: &str, source_type: &str) -> String {
     }
 }
 
-/// The `query:` lines reading `col_list` from `relation`: a folded block, or one double-quoted scalar when a name holds a character the fold would rewrite.
+/// The `query:` lines reading `col_list` from `relation`.
 fn export_query_lines(col_list: &str, relation: &str) -> Vec<String> {
     if seeded!(
         "init-name-folded-into-query",
@@ -743,12 +675,6 @@ fn is_simple_pg_ident(s: &str) -> bool {
     parts.iter().all(|p| {
         let mut chars = p.chars();
         match chars.next() {
-            // LOWERCASE-only (round-7 HIGH): the catalog name is case-EXACT,
-            // but an unquoted identifier FOLDS to lowercase — so `table:
-            // CaseTwin` silently read the OTHER table `casetwin` when both
-            // existed (every check green, the wrong rows exported). A name
-            // that is not already its own fold must go through the quoted
-            // `query:` form instead.
             Some(c) if c.is_ascii_lowercase() || c == '_' => {
                 chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
             }
@@ -757,8 +683,7 @@ fn is_simple_pg_ident(s: &str) -> bool {
     })
 }
 
-/// `true` when the table exports at least one `DECIMAL`/`NUMERIC` column whose
-/// precision/scale are missing from introspection (`numeric` without `(p,s)` in DDL).
+/// `true` when the table exports at least one `DECIMAL`/`NUMERIC` column whose precision/scale are missing from introspection (`numeric` without `(p,s)` in DDL).
 pub(super) fn table_has_unbounded_decimal_columns(info: &TableInfo) -> bool {
     info.columns.iter().any(|c| {
         is_decimal_type(&c.data_type)
@@ -770,7 +695,6 @@ pub(super) fn table_has_unbounded_decimal_columns(info: &TableInfo) -> bool {
 }
 
 /// Default `decimal(p,s)` when DDL has no `(precision, scale)` for `numeric`/`decimal`.
-/// Fits Arrow Decimal128 (precision ≤ 38). Replace in YAML (or constrain the DDL) when domain rules differ.
 const INIT_UNBOUNDED_DECIMAL_DEFAULT_PRECISION: u32 = 38;
 const INIT_UNBOUNDED_DECIMAL_DEFAULT_SCALE: u32 = 18;
 
@@ -795,9 +719,7 @@ fn init_default_decimal_yaml_line(col_name: &str) -> String {
     )
 }
 
-/// Whether `qualified` can be a `table:` shortcut at all — the same shape the
-/// config gate (`validate_table_shortcut_ident`) admits: at most two segments of
-/// `[A-Za-z_][A-Za-z0-9_]*`.
+/// Whether `qualified` can be a `table:` shortcut at all.
 fn table_shortcut_shape_ok(qualified: &str) -> bool {
     let parts: Vec<&str> = qualified.split('.').collect();
     parts.len() <= 2
@@ -811,9 +733,6 @@ fn table_shortcut_shape_ok(qualified: &str) -> bool {
 }
 
 /// Can this table be a backfill RECIPE — read by `table:` on `source_type`?
-/// A name the shortcut gate refuses (a hyphen, a leading digit) cannot, and a
-/// PostgreSQL name that is not its own case-fold would address a DIFFERENT
-/// relation when a lowercase twin exists.
 fn recipe_readable(info: &TableInfo, source_type: &str) -> bool {
     let name = &info.table;
     table_shortcut_shape_ok(name) && unquoted_addresses_itself(name, source_type)
@@ -842,9 +761,7 @@ fn recipe_mode(info: &TableInfo) -> &'static str {
     }
 }
 
-/// The `layout:` lines of a warehouse that compacts: `base_buffer` only for a mode that
-/// carries DELTAS — a `full` / `chunked` export overwrites its table every pass, so the key
-/// there would promise what `rivet compact` openly skips.
+/// The `layout:` lines of a warehouse that compacts.
 fn base_buffer_lines(compactable: bool, d: &mut ScaffoldDecisions) -> Vec<String> {
     if compactable {
         d.compacts = true;
@@ -892,16 +809,7 @@ fn snowflake_layout_lines(compactable: bool, d: &mut ScaffoldDecisions) -> Vec<S
 /// The comment that stands in for a `load:` block the config loader would refuse.
 const NO_LOAD_BLOCK: &str = "# No `load:` block: ";
 
-/// `recipe` (a stream's baseline recipe) emits the `table:` shortcut whatever the
-/// engine's default form, and no `load:` block — the load never reads a recipe —
-/// a backfill recipe must name the relation it reads (`query:` cannot be paired).
-/// The `load:` block `rivet init` writes when a warehouse was named — the
-/// defaults an operator is expected to READ and adjust, not a contract.
-///
-/// The partition column is guessed per TABLE (each export carries its own), so a
-/// schema whose tables name their business date differently needs no hand-merge.
-/// `day` is right until the history passes ~4,000 days, which no catalog field
-/// here can tell us — so it is said in a comment rather than silently coarsened.
+/// `recipe` (a stream's baseline recipe) emits the `table:` shortcut whatever the engine's default form, and no `load:` block.
 fn load_block_lines(
     dest: &InitYamlDestination,
     compactable: bool,
@@ -1018,9 +926,6 @@ fn load_block_lines(
 
 /// The relation name an export of `info` addresses on `source_type`.
 fn qualified_table_of(info: &TableInfo, source_type: &str) -> String {
-    // Mongo: `info.schema` is the database and the export targets the bare
-    // collection name (the URL already selects the database), so it is never
-    // qualified — same as a MySQL table or a PG `public` table.
     if info.schema == "public" || source_type == "mysql" || source_type == "mongo" {
         info.table.clone()
     } else {
@@ -1030,11 +935,6 @@ fn qualified_table_of(info: &TableInfo, source_type: &str) -> String {
 
 /// Whether `info` can be exported through the `table:` shortcut on `source_type`, which keyset requires.
 pub(crate) fn table_form_ok(info: &TableInfo, source_type: &str) -> bool {
-    // Which names may become an UNQUOTED `table:` per engine (round-8): PG
-    // case-folds unquoted idents, so only a name that IS its own fold is safe
-    // there; MySQL/MSSQL do not fold; Mongo's `table:` is a ROUTING string and
-    // the ONLY form Mongo accepts. MIRRORS `validate_table_shortcut_ident`
-    // (round-9): diverging from the config gate produced DOA scaffolds twice.
     let qualified = qualified_table_of(info, source_type);
     let shape_ok = table_shortcut_shape_ok(&qualified);
     shape_ok && unquoted_addresses_itself(&qualified, source_type)
@@ -1068,11 +968,6 @@ fn export_block_lines(
 ) -> Vec<String> {
     let mode = mode_override.unwrap_or_else(|| info.suggest_mode());
     let columns: Vec<&str> = info.columns.iter().map(|c| c.name.as_str()).collect();
-    // Columns QUOTED per engine, same rule as the relation (round-9,
-    // live-proven): a table with the twin columns `Val` and `val` had its
-    // unquoted `SELECT id, Val` silently resolve to the OTHER column `val` —
-    // wrong data, every check green. The earlier justification ("a camel-case
-    // column fails loudly as unknown") is false exactly in the twin shape.
     let col_list = columns
         .iter()
         .map(|c| quote_ident(c, source_type))
@@ -1080,11 +975,7 @@ fn export_block_lines(
         .join(", ");
     let qualified_table = qualified_table_of(info, source_type);
 
-    // CDC reads the transaction log, not a query — a wholly different block
-    // (no cursor/chunk/meta_columns; engine-specific stream knobs instead).
     if mode == "cdc" {
-        // The capture refuses this table by the same predicate (`oracle::cdc::unmineable`): a
-        // CDC export of it would be a config whose first run stops, so it is left out, said so.
         if let Some(why) = info.cdc_unmineable.as_deref() {
             return vec![skip_line(d, "", &info.table, &one_line_comment(why))];
         }
@@ -1121,39 +1012,12 @@ fn export_block_lines(
         return lines;
     }
 
-    // For `mode: full` on a plain table, emit the `table:` shortcut: it produces
-    // `SELECT * FROM <schema>.<table>` internally, which is the only form the PG
-    // numeric-catalog-hint resolver recognises — so `numeric(p,s)` columns get
-    // typed correctly even if the user later strips the `columns:` overrides.
-    //
-    // For `chunked` / `incremental` we keep the explicit `SELECT col1, ... FROM`
-    // form: those modes usually start from a curated column set and benefit from
-    // a self-documenting YAML.
     let mut lines = vec![format!("  - name: {}", yaml_quote_if_needed(&info.table))];
-    // Keyset (`chunk_by_key`, chosen below for a single-column PK) REQUIRES the
-    // `table:` shortcut — the planner introspects the unique index behind the key
-    // from the relation, which a curated `query:` hides (`plan::build` bails
-    // "needs the table: shortcut"). So a keyset export must emit `table:`, not
-    // `SELECT … FROM`, on every engine.
-    // Which names may become an UNQUOTED `table:` per engine (round-8): PG
-    // case-folds unquoted idents, so only a name that IS its own fold is safe
-    // there; MySQL/MSSQL do not fold (case-sensitive FS / case-insensitive
-    // collation — either way the name addresses the right relation); Mongo's
-    // `table:` is a ROUTING string, not SQL — always exact, and the ONLY form
-    // Mongo accepts (round-7's lowercase-strict gate wrongly routed camelCase
-    // collections into a `query:` Mongo refuses: a DOA scaffold, live-proven).
-    // MIRRORS `validate_table_shortcut_ident` (round-9): the scaffold's rule
-    // diverging from the config gate's produced DOA scaffolds twice — a
-    // >2-segment name the scaffold accepted and the validator refused, and a
-    // hyphenated Mongo collection whose two refusals pointed at each other.
     let table_form_safe = table_form_ok(info, source_type) || recipe;
     let is_keyset = mode == "chunked" && info.single_pk_column().is_some() && table_form_safe;
     let no_chunk_key = mode == "chunked" && chunk_key_missing(info, table_form_safe);
     let mode = if no_chunk_key { "full" } else { mode };
     if source_type == "mongo" && !table_form_safe {
-        // Unexportable in ANY form today: `table:` is Mongo's only export form
-        // and the config gate refuses this name (while its "use query:" remedy
-        // is a form Mongo refuses — the circular pair round-9 live-proved).
         return vec![skip_ungated_name(d, info, source_type)];
     }
     let table_form = recipe
@@ -1162,26 +1026,16 @@ fn export_block_lines(
                 || (mode == "full" && (source_type == "postgres" || source_type == "mongo")))
         || source_type == "mongo";
     if table_form {
-        // MongoDB has no SQL: the `table:` shortcut (→ collection scan) is the
-        // ONLY export form it accepts, and it is schemaless so there is no
-        // column list to spell out. Always emit `table:` for a Mongo source.
         lines.push(format!(
             "    table: {}",
             yaml_quote_if_needed(&qualified_table)
         ));
     } else {
-        // QUOTED relation (round-7) AND quoted columns (round-9): the catalog
-        // names are case-exact; interpolating either raw case-folds to a
-        // DIFFERENT relation/column when a lowercase twin exists — silent
-        // wrong rows with every check green (both live-proven on the stand).
         lines.extend(export_query_lines(
             &col_list,
             &quote_relation(info, source_type),
         ));
     }
-    // Inline rationale above `mode:` so the operator can see *why* this
-    // mode got picked, not just *what*. Easy to delete; the suggestion
-    // is documentation, not a contract.
     if no_chunk_key {
         d.no_chunk_key.push(info.table.clone());
         lines.push(format!(
@@ -1203,15 +1057,6 @@ fn export_block_lines(
         "chunked" => {
             let chunk_size = info.suggest_chunk_size();
             if let Some(pk) = info.keysettable_pk_column().filter(|_| is_keyset) {
-                // Single-column PK of a KEYSET-usable type (integer / uuid / string
-                // / timestamp / date — NOT decimal, which the planner refuses) →
-                // keyset (seek) pagination: `WHERE pk > last ORDER BY pk LIMIT n`
-                // pages by ROWS, immune to sparse/huge/gappy keys — no BETWEEN over
-                // the key SPAN, which blows up into thousands of near-empty windows
-                // on a distributed/uuid id. This is the ADR-0020 explicit
-                // `chunk_by_key` path (the planner does not auto-select it on PG,
-                // but honours it when asked). A decimal PK is not keysettable, so it
-                // falls through to range chunking (on an integer column) or full.
                 lines.push(format!(
                     "    chunk_by_key: {}  # keyset (seek) — pages by ROWS, immune to sparse/huge/gappy keys",
                     yaml_quote_if_needed(pk)
@@ -1230,7 +1075,6 @@ fn export_block_lines(
                         .to_string(),
                 );
             } else {
-                // No single-column PK → range chunk on the best integer column.
                 let chunk_col = info
                     .best_chunk_column()
                     .expect("no_chunk_key downgrades a keyless table to full");
@@ -1240,21 +1084,12 @@ fn export_block_lines(
                     "    chunk_column: {}",
                     yaml_quote_if_needed(chunk_col)
                 ));
-                // Scale chunk_size by row estimate so the per-table file count
-                // stays in a humane range. See `TableInfo::suggest_chunk_size`
-                // for the bands. A 10 M-row export used to produce 100 files;
-                // it now lands at ~10. Operators who want different geometry
-                // override this line directly.
                 lines.push(format!("    chunk_size: {chunk_size}"));
                 lines.push(
                     "    chunk_checkpoint: true  # record per-chunk progress so `rivet run --resume` can finish a crashed run"
                         .to_string(),
                 );
                 if parallel.workers > 1 {
-                    // Correction #5: show the predicted peak so the operator can
-                    // trade memory for speed without guessing. RSS scales with
-                    // worker count × row width (not chunk_size). See the sweep in
-                    // docs/bench/reports/REPORT_full_vs_parallel.md.
                     if let Some(b) = info.avg_row_bytes() {
                         lines.push(format!(
                             "    # est. peak RSS ≈ {} MB ({} workers × ~{} MB/worker @ ~{} B/row); lower `parallel` to spend less memory",
@@ -1266,10 +1101,6 @@ fn export_block_lines(
                     }
                     lines.push(format!("    parallel: {}", parallel.workers));
                 } else if parallel.wide_mysql_single {
-                    // Wide MySQL: a single sequential scan beats parallel chunks
-                    // (the range-chunk contention regresses throughput). Left at
-                    // parallel: 1 on purpose — raise it only if you've measured a
-                    // gain on your hardware.
                     lines.push(
                         "    # parallel: 1 (wide rows on MySQL: single scan is faster than chunks)"
                             .to_string(),
@@ -1291,10 +1122,6 @@ fn export_block_lines(
                         one_line_comment(&cursor)
                     ));
                 }
-                // If the chosen cursor is NULLABLE and a not-null sibling exists,
-                // scaffold coalesce mode — otherwise `WHERE cursor > $last` skips
-                // every NULL-cursor row (roast 2026-08-09, #173).
-                // suggest_cursor_fallback returns Some ONLY in exactly that case.
                 if let Some(fb) = crate::init::candidates::suggest_cursor_fallback(info) {
                     lines.push("    incremental_cursor_mode: coalesce".to_string());
                     lines.push(format!(
@@ -1303,13 +1130,6 @@ fn export_block_lines(
                     ));
                 }
             }
-            // No timestamp candidate: DO NOT emit a phantom `updated_at` (a
-            // column that may not exist — the run would fail at read time on a
-            // silent guess). Leave it for the operator; `rivet check` then fails
-            // loudly with "incremental mode requires cursor_column", which is
-            // the honest signal. The snapshot records None here too — they agree
-            // (bug hunt 2026-08-08: the old literal fallback diverged from the
-            // snapshot's None and named a phantom column).
             None => {
                 d.needs_cursor.push(info.table.clone());
                 lines.push(format!(
@@ -1318,13 +1138,6 @@ fn export_block_lines(
             }
         },
         "time_window" => {
-            // time_window REQUIRES time_column (+ days_window) — omitting them
-            // scaffolds a config that immediately fails `rivet check`
-            // ("time_window mode requires time_column"). Seed from a TIMESTAMP
-            // column (chosen_time_column, NOT chosen_cursor_column): the latter
-            // scores an integer surrogate PK as an incremental cursor, so on a
-            // timestamp-less table it would name `time_column: id` — a bigint
-            // compared to a timestamp window at run time (bug hunt 2026-08-09).
             match info.chosen_time_column() {
                 Some(ts) => lines.push(format!("    time_column: {}", yaml_quote_if_needed(&ts))),
                 None => {
@@ -1344,8 +1157,6 @@ fn export_block_lines(
 
     lines.push("    format: parquet".to_string());
 
-    // Row-group auto-tuning: emit for chunked (always large) and full-mode
-    // exports big enough for tuning to have measurable effect.
     if mode == "chunked" || info.row_estimate > 100_000 {
         lines.push("    parquet:".to_string());
         lines.push("      row_group_strategy: auto".to_string());
@@ -1355,8 +1166,6 @@ fn export_block_lines(
         ));
     }
 
-    // meta_columns inject two extra columns into every output file; name them
-    // here so the operator isn't surprised by `_rivet_*` columns downstream.
     lines.push(
         "    meta_columns:  # adds 2 columns to the output (drop this block to omit them)"
             .to_string(),
@@ -1371,11 +1180,6 @@ fn export_block_lines(
 
     lines.extend(decimal_override_lines(info));
 
-    // The warehouse partition, guessed from THIS table's own columns so a schema
-    // whose tables name their business date differently needs no hand-merge. A
-    // guess, said as one: the operator reviews it before the first load. Not on a
-    // recipe — the load never reads one; its table's guess rides the stream's
-    // `load.tables.<name>` instead.
     let key: Vec<String> = info
         .source_key()
         .into_iter()
@@ -1405,9 +1209,7 @@ fn export_block_lines(
     lines
 }
 
-/// The `mode: cdc` export block: `table:` + the `cdc:` knobs (engine-specific
-/// stream params, with the source prerequisite as an inline comment) +
-/// destination. CDC reads the log, so there is no cursor / chunk / meta_columns.
+/// The `mode: cdc` export block: `table:` + the `cdc:` knobs (engine-specific stream params, with the source prerequisite as an inline comment) + destination.
 fn cdc_export_lines(
     info: &TableInfo,
     source_type: &str,
@@ -1434,10 +1236,6 @@ fn cdc_export_lines(
         "    format: parquet".to_string(),
         "    cdc:".to_string(),
         format!(
-            // Engine-honest (round-7): "omit to tail from now" was true for
-            // MySQL/Mongo only — PG anchors server-side at the slot (omitting
-            // merely disarms the slot-loss hard error), and MSSQL with no
-            // checkpoint re-reads the ENTIRE retained change table every run.
             "      checkpoint: ./cdc/{}.ckpt  # resume position; keep it (semantics of \
 omitting differ per engine — see cdc.md)",
             stemmed(dest.cdc_name_stem.as_deref(), ident)
@@ -1458,15 +1256,11 @@ omitting differ per engine — see cdc.md)",
         .to_string(),
     );
     match source_type {
-        // One id per export: two exports sharing a replica id evict each other's
-        // binlog connection, so the per-table scaffold counts up from the first.
         "mysql" => lines.push(format!(
             "      server_id: {}  # unique replica id{}; source needs binlog_format=ROW + REPLICATION SLAVE and REPLICATION CLIENT grants",
             server_id(dest.cdc_name_stem.as_deref(), ordinal),
             per_cluster_note(dest)
         )),
-        // PostgreSQL accepts only lowercase letters, digits and `_` in a slot name:
-        // `rivet_Orders` is refused by the server the moment the stream opens.
         "postgres" => lines.push(format!(
             "      slot: {}  # logical slot (auto-created){}; source needs wal_level=logical + a REPLICATION role",
             slot_name(dest.cdc_name_stem.as_deref(), ident),
@@ -1497,9 +1291,7 @@ omitting differ per engine — see cdc.md)",
     lines
 }
 
-/// `columns:` overrides for NUMERIC/DECIMAL columns so the export doesn't fail
-/// with "precision/scale unavailable" — shared by the batch and CDC blocks (both
-/// resolve types through the same pipeline).
+/// `columns:` overrides for NUMERIC/DECIMAL columns so the export doesn't fail with "precision/scale unavailable".
 fn decimal_override_lines(info: &TableInfo) -> Vec<String> {
     let decimal_cols: Vec<&super::ColumnInfo> = info
         .columns
@@ -1530,10 +1322,7 @@ fn decimal_override_lines(info: &TableInfo) -> Vec<String> {
     lines
 }
 
-/// One consolidated `mode: cdc` export over MANY tables through a single stream —
-/// see the `consolidate_cdc` gate in [`generate_schema_config`]. One slot /
-/// server_id, one checkpoint; each table routes to `<prefix>/<table>/`, and
-/// per-table decimal overrides become qualified `table.column` keys.
+/// One consolidated `mode: cdc` export over MANY tables through a single stream.
 fn cdc_multiplex_export_lines(
     infos: &[TableInfo],
     source_type: &str,
@@ -1565,9 +1354,6 @@ fn cdc_multiplex_export_lines(
         BOUNDED_DRAIN_LINE.to_string(),
     ];
     match source_type {
-        // MySQL has no server-side anchor — the checkpoint IS the resume anchor
-        // (required with a baseline), and ONE `server_id` serves the whole
-        // stream (the same id on two exports is the collision this avoids).
         "mysql" => {
             lines.push(format!(
                 "      checkpoint: ./cdc/{}.ckpt  # one resume position for the whole stream",
@@ -1584,7 +1370,6 @@ fn cdc_multiplex_export_lines(
             slot_name(dest.cdc_name_stem.as_deref(), &name),
             per_cluster_note(dest)
         )),
-        // Like MySQL, the anchor is client-side: the checkpoint is the resume position.
         "oracle" => lines.push(format!(
             "      checkpoint: ./cdc/{}.ckpt  # one resume position for the whole stream; every table needs ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS",
             stemmed(dest.cdc_name_stem.as_deref(), &name)
@@ -1597,10 +1382,7 @@ fn cdc_multiplex_export_lines(
     lines
 }
 
-/// The per-table partition guesses, where the LOAD reads them for a stream: its
-/// `load.tables.<name>` blocks. On the recipes they were dead text — a recipe is
-/// never loaded — and the bases were created unpartitioned under a config that
-/// visibly said otherwise.
+/// The per-table partition guesses, where the LOAD reads them for a stream: its `load.tables.<name>` blocks.
 fn cdc_multiplex_load_lines(infos: &[TableInfo], dest: &InitYamlDestination) -> Vec<String> {
     let Some((granularity, why)) = dest.partition_guess() else {
         return Vec::new();
@@ -1629,9 +1411,7 @@ fn cdc_multiplex_load_lines(infos: &[TableInfo], dest: &InitYamlDestination) -> 
     lines
 }
 
-/// Destination for the multiplex: a BASE prefix (no per-table segment) — the
-/// stream itself appends `<table>/`, so `cdc/` becomes `cdc/orders/`,
-/// `cdc/users/`, … each with its own `manifest.json` + `_SUCCESS`.
+/// Destination for the multiplex: a BASE prefix (no per-table segment).
 fn cdc_multiplex_destination(dest: &InitYamlDestination) -> Vec<String> {
     if let Some(v) = bucket_destination(dest, &stem_dir(dest.cdc_name_stem.as_deref(), "cdc/")) {
         v
@@ -1654,9 +1434,7 @@ fn cdc_multiplex_destination(dest: &InitYamlDestination) -> Vec<String> {
     }
 }
 
-/// `columns:` overrides for the multiplex — decimal columns across ALL tables,
-/// keyed by qualified `"<table>.<column>"` so a same-named column in two tables
-/// never collides (a bare key would apply to every table that has it).
+/// `columns:` overrides for the multiplex — decimal columns across ALL tables, keyed by qualified `"<table>.<column>"` so a same-named column in two tables never collides (a bare key would apply to every table that has it).
 fn cdc_multiplex_column_lines(infos: &[TableInfo]) -> Vec<String> {
     let mut body = Vec::new();
     for info in infos {
@@ -1705,9 +1483,7 @@ fn unique_cdc_idents(names: &[&str]) -> Vec<String> {
 /// The longest name PostgreSQL keeps for a replication slot.
 const SLOT_NAME_MAX: usize = 63;
 
-/// The first `server_id` a scaffold named from an `-o` stem can take; ids run from here
-/// across [`SERVER_ID_SPAN`] values, the stem's hash choosing one and each further table
-/// export of the config the next.
+/// The first `server_id` a scaffold named from an `-o` stem can take.
 const SERVER_ID_BASE: u32 = 1_000_000;
 
 /// How many `server_id` values a stem can hash to.
@@ -1728,8 +1504,7 @@ pub(super) fn output_stem(path: &str) -> Option<String> {
     (!stem.is_empty()).then_some(stem)
 }
 
-/// The PostgreSQL slot for `ident`: `rivet_<stem>_<ident>`, or `rivet_<ident>` without a stem,
-/// lowercase and cut to [`SLOT_NAME_MAX`] bytes (every byte is ASCII after sanitising).
+/// The PostgreSQL slot for `ident`: `rivet_<stem>_<ident>`, or `rivet_<ident>` without a stem, lowercase and cut to [`SLOT_NAME_MAX`] bytes (every byte is ASCII after sanitising).
 fn slot_name(stem: Option<&str>, ident: &str) -> String {
     let ident = cdc_ident(ident).to_lowercase();
     let name = match stem {
@@ -1739,8 +1514,7 @@ fn slot_name(stem: Option<&str>, ident: &str) -> String {
     name.chars().take(SLOT_NAME_MAX).collect()
 }
 
-/// The MySQL `server_id` of the `ordinal`-th CDC export: [`SERVER_ID_DEFAULT`] + ordinal without
-/// a stem, else [`SERVER_ID_BASE`] + a stable hash of the stem into [`SERVER_ID_SPAN`] + ordinal.
+/// The MySQL `server_id` of the `ordinal`-th CDC export.
 fn server_id(stem: Option<&str>, ordinal: usize) -> u32 {
     let first = match stem {
         Some(s) => {
@@ -1764,8 +1538,7 @@ fn per_cluster_note(dest: &InitYamlDestination) -> String {
 /// The comment beside a slot or `server_id` the scaffold wrote without an `-o` stem.
 const ONE_PER_CLUSTER: &str = "one per cluster: a second config on this server needs its own";
 
-/// Sanitise a table name into a plain identifier for a checkpoint filename /
-/// PostgreSQL slot name (`[A-Za-z0-9_]`).
+/// Sanitise a table name into a plain identifier for a checkpoint filename / PostgreSQL slot name (`[A-Za-z0-9_]`).
 fn cdc_ident(s: &str) -> String {
     s.chars()
         .map(|c| {
@@ -1788,10 +1561,6 @@ fn destination_scaffold(
     if let Some(v) = bucket_destination(dest, &table_export_prefix(info, source_type, mode, stem)) {
         v
     } else {
-        // Per-export subdirectory (symmetric with the bucket prefixes above) so
-        // a schema-wide init's exports don't all share ./output — that collides
-        // their manifest.json / _SUCCESS and makes a second run read a sibling's
-        // parts (the scary double-count WARN).
         let path = yaml_quote_if_needed(&format!(
             "./output/{}",
             export_dir(info, source_type, mode, stem)
@@ -1799,18 +1568,13 @@ fn destination_scaffold(
         vec![
             "    destination:".to_string(),
             "      type: local".to_string(),
-            // Name the rivet-metadata sidecars so `ls` here later isn't a
-            // surprise. A standalone line (not an inline comment) so it fits
-            // 80 cols regardless of how long the table/segment name is.
             "      # rivet also writes manifest.json + _SUCCESS here (its metadata)".to_string(),
             format!("      path: {path}"),
         ]
     }
 }
 
-/// The `destination:` block of a bucket scaffold (`--gcs-bucket`, `--s3-bucket`, `--azure-container`)
-/// under `prefix`, or `None` for a local one. No credential is written: GCS and S3 take their
-/// ambient credentials, Azure the name of the env var that holds the account key.
+/// The `destination:` block of a bucket scaffold (`--gcs-bucket`, `--s3-bucket`, `--azure-container`) under `prefix`, or `None` for a local one.
 fn bucket_destination(dest: &InitYamlDestination, prefix: &str) -> Option<Vec<String>> {
     let head = |kind: &str, bucket: &str| {
         vec![
@@ -1856,8 +1620,6 @@ fn bucket_destination(dest: &InitYamlDestination, prefix: &str) -> Option<Vec<St
 pub(crate) const AZURE_KEY_ENV: &str = "AZURE_STORAGE_KEY";
 
 /// Suggest `target_row_group_mb` based on column shape.
-/// Wide tables with many text/JSON columns get smaller groups so downstream
-/// readers can push predicates without decoding the full group.
 fn suggest_row_group_mb(info: &TableInfo) -> u64 {
     let wide_cols = info.columns.iter().filter(|c| {
         matches!(
@@ -1868,22 +1630,7 @@ fn suggest_row_group_mb(info: &TableInfo) -> u64 {
     if wide_cols.count() >= 5 { 64 } else { 128 }
 }
 
-/// Suggested worker count — cost- *and* engine-aware (see
-/// `docs/bench/reports/REPORT_full_vs_parallel.md`).
-///
-/// Parallelism pays off only when the single thread leaves throughput headroom,
-/// which is governed by per-row cost (≈ avg row bytes) and the engine's
-/// single-scan speed:
-///   - **Narrow rows** (cheap per-row) are CPU-bound on row *count* — parallel
-///     scales ~3.3× on every engine, so scale workers with the row estimate.
-///   - **Wide rows on MySQL** already saturate an efficient sequential scan;
-///     splitting them adds buffer-pool/connection contention and *regresses*
-///     (measured 1.3× slower + 3× RAM) — keep it single-threaded.
-///   - **Wide rows on Postgres / SQL Server** have a slow single scan (and on
-///     MSSQL a full statement times out), so chunked-parallel still wins / is
-///     required — scale workers with the row estimate.
-///
-/// `avg_row_bytes == None` (unknown size) falls back to the row-count tiers.
+/// Suggested worker count — cost- *and* engine-aware (see `docs/bench/reports/REPORT_full_vs_parallel.md`).
 pub(crate) fn suggest_parallel(
     rows: i64,
     avg_row_bytes: Option<i64>,
@@ -1891,24 +1638,17 @@ pub(crate) fn suggest_parallel(
 ) -> ParallelChoice {
     /// At/above this width a row is "wide" for the contention trade-off.
     const WIDE_BYTES: i64 = 1024;
-    // The one measured case where parallel is a net loss: wide rows on MySQL,
-    // whose single sequential scan is already fast. Prefer one full scan.
     if source_type == "mysql" && avg_row_bytes.is_some_and(|b| b >= WIDE_BYTES) {
         return ParallelChoice {
             workers: 1,
             wide_mysql_single: true,
         };
     }
-    // Everywhere else there is single-thread headroom — scale with row count.
     let by_rows = match rows {
         r if r < 500_000 => 1,
         r if r < 5_000_000 => 2,
         _ => 4,
     };
-    // Correction #5: never suggest a worker count whose predicted peak RSS
-    // breaches the memory budget. At the ≤4 ceiling this is rarely binding
-    // (peak ≤ ~550 MB even at extreme width) but keeps the suggestion honest
-    // for very wide rows or a raised ceiling.
     let workers = match avg_row_bytes {
         Some(b) => memory_capped_parallel(by_rows, b, DEFAULT_MEM_BUDGET_MB),
         None => by_rows,
@@ -1919,17 +1659,14 @@ pub(crate) fn suggest_parallel(
     }
 }
 
-/// The worker count `suggest_parallel` picked, *and why* — so the YAML emitter
-/// can explain a held-at-1 choice without re-deriving the wide-MySQL test the
-/// planner already made (one home for the decision, no duplicated threshold).
+/// The worker count `suggest_parallel` picked, *and why*.
 pub(crate) struct ParallelChoice {
     pub(crate) workers: usize,
     /// Held at 1 because wide MySQL rows make a single scan beat chunked.
     wide_mysql_single: bool,
 }
 
-/// Largest worker count whose predicted peak RSS stays within `budget_mb`
-/// (never below 1).
+/// Largest worker count whose predicted peak RSS stays within `budget_mb` (never below 1).
 fn memory_capped_parallel(suggested: usize, avg_row_bytes: i64, budget_mb: u64) -> usize {
     const PROCESS_BASE_MB: u64 = 16;
     let per_worker = per_worker_rss_mb(avg_row_bytes).max(1);
@@ -1939,10 +1676,7 @@ fn memory_capped_parallel(suggested: usize, avg_row_bytes: i64, budget_mb: u64) 
 
 #[cfg(test)]
 mod tests {
-    /// Round-7 HIGH: a catalog name that is not its own lowercase fold must
-    /// NEVER become an unquoted `table:`/`FROM` (PG folds it to the OTHER
-    /// table, silently exporting wrong rows with every check green). RED
-    /// against re-widening the gate to case-blind.
+    /// Round-7 HIGH: a catalog name that is not its own lowercase fold must NEVER become an unquoted `table:`/`FROM` (PG folds it to the OTHER table, silently exporting wrong rows with every check green).
     #[test]
     fn a_mixed_case_name_is_not_a_simple_ident_and_quotes_per_engine() {
         assert!(is_simple_pg_ident("public.orders"));
@@ -2068,33 +1802,23 @@ mod tests {
     }
     use crate::init::{ColumnInfo, TableInfo};
 
-    /// Cost+engine-aware parallelism (REPORT_full_vs_parallel.md): the wide
-    /// MySQL case is the only one forced single-threaded; narrow scales on
-    /// every engine, and wide PG/MSSQL still scale.
+    /// Cost+engine-aware parallelism (REPORT_full_vs_parallel.md).
     #[test]
     fn suggest_parallel_is_cost_and_engine_aware() {
         let big = 10_000_000;
         let wide = Some(4096);
         let narrow = Some(40);
-        // Wide MySQL → single scan beats chunks, regardless of row count.
         assert_eq!(suggest_parallel(big, wide, "mysql").workers, 1);
         assert_eq!(suggest_parallel(500_000, wide, "mysql").workers, 1);
-        // Narrow rows → headroom on every engine → scale with rows.
         assert_eq!(suggest_parallel(big, narrow, "mysql").workers, 4);
         assert_eq!(suggest_parallel(big, narrow, "postgres").workers, 4);
-        // Wide PG / MSSQL → slow single scan (MSSQL full even times out) →
-        // still parallelise.
         assert_eq!(suggest_parallel(big, wide, "postgres").workers, 4);
         assert_eq!(suggest_parallel(big, wide, "mssql").workers, 4);
-        // Unknown size → row-count tiers (no width signal to act on).
         assert_eq!(suggest_parallel(big, None, "mysql").workers, 4);
         assert_eq!(suggest_parallel(100_000, None, "postgres").workers, 1);
     }
 
-    /// Correction #5: the peak-RSS estimate tracks the measured sweep
-    /// (REPORT_full_vs_parallel.md) within ~10%, and over-estimates past 4
-    /// workers (the safe direction). Anchors: par4 wide ≈444 MB, par8 narrow
-    /// ≈169 MB, par1 narrow ≈34 MB.
+    /// Correction #5: the peak-RSS estimate tracks the measured sweep (REPORT_full_vs_parallel.md) within ~10%, and over-estimates past 4 workers (the safe direction).
     #[test]
     fn peak_rss_estimate_matches_sweep() {
         let wide = 4096;
@@ -2110,24 +1834,19 @@ mod tests {
         near(estimate_peak_rss_mb(1, narrow), 34);
         near(estimate_peak_rss_mb(4, narrow), 92);
         near(estimate_peak_rss_mb(8, narrow), 169);
-        // Per-worker is width-driven and clamps to the adaptive-batch ceiling.
         assert_eq!(per_worker_rss_mb(40), 18);
         assert!(per_worker_rss_mb(65_536) <= 130, "must clamp to ceiling");
     }
 
-    /// The memory cap reduces workers only when the predicted peak would breach
-    /// the budget; it is inert at a generous budget and never returns 0.
+    /// The memory cap reduces workers only when the predicted peak would breach the budget.
     #[test]
     fn memory_cap_binds_only_under_budget() {
-        // Wide rows, tiny 256 MB budget → (256-16)/105 ≈ 2 workers.
         assert_eq!(memory_capped_parallel(4, 4096, 256), 2);
-        // Same suggestion, generous budget → untouched.
         assert_eq!(memory_capped_parallel(4, 4096, 2048), 4);
-        // Never below 1 even with an absurd budget.
         assert_eq!(memory_capped_parallel(4, 65_536, 1), 1);
     }
 
-    /// The relation `rivet check` recovers from init's OWN `query:` block, per engine — the shape its catalog probes key on.
+    /// The relation `rivet check` recovers from init's OWN `query:` block, per engine.
     #[test]
     fn check_recovers_the_relation_from_the_query_init_writes() {
         let dest = InitYamlDestination::default();
@@ -2176,9 +1895,7 @@ mod tests {
         }
     }
 
-    /// Every CDC scaffold, per engine and warehouse, loads through the config loader, carries a
-    /// first-run baseline, and writes a `load:` block (and promises load + compact) only where
-    /// the loader accepts one.
+    /// Every CDC scaffold, per engine and warehouse, loads through the config loader, carries a first-run baseline, and writes a `load:` block (and promises load + compact) only where the loader accepts one.
     #[test]
     fn every_cdc_scaffold_has_a_baseline_and_a_load_block_only_where_the_loader_takes_it() {
         let readme = std::fs::read_to_string(
@@ -2453,7 +2170,7 @@ mod tests {
         }
     }
 
-    /// Per-table CDC scaffolds whose names sanitise to one identifier still load: slots and checkpoints stay distinct.
+    /// Per-table CDC scaffolds whose names sanitise to one identifier still load.
     #[test]
     fn per_table_cdc_scaffold_gives_colliding_names_distinct_slots_and_checkpoints() {
         let names = ["Orders", "orders", "ORDERS", "order_items", "plain"];
@@ -2566,16 +2283,6 @@ mod tests {
         }
     }
 
-    // ── the second run must be a DELTA, and the file init writes decides it ──
-    //
-    // The guarantee an operator is promised (init's own next-steps text: "each
-    // later run captures only the changes since") is a property of the RUN, but
-    // every mechanism it needs is a decision INIT MAKES: a cursor for
-    // incremental, a resume position for CDC, a base+buffer layout for the load.
-    // Nothing graded those, and the config is generated — so the generator is
-    // the only honest subject. Asserted through the real loader, never a grep of
-    // init's own rendering (same rule as the TLS scaffold test above).
-
     pub(super) fn pk(name: &str, ty: &str) -> ColumnInfo {
         ColumnInfo {
             is_primary_key: true,
@@ -2602,10 +2309,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("the generated config must load: {e:#}\n{yaml}"))
     }
 
-    /// Without a `cursor_column` an incremental export has no delta mechanism at
-    /// all — every run re-reads the whole table. Init picks the column, so init
-    /// is what must be graded (the scorer already shipped choosing a create-only
-    /// stamp over a mutation stamp once).
+    /// Without a `cursor_column` an incremental export has no delta mechanism at all.
     #[test]
     fn a_scaffolded_incremental_export_carries_the_cursor_its_second_run_needs() {
         let cfg = scaffold(
@@ -2622,10 +2326,7 @@ mod tests {
         );
     }
 
-    /// A CDC stream needs both halves to be repeatable: a `checkpoint:` (the
-    /// resume position — omitting it re-anchors, and on SQL Server re-reads the
-    /// whole change table) and `until_current` (run #1 must END, or there is no
-    /// run #2).
+    /// A CDC stream needs both halves to be repeatable.
     #[test]
     fn a_scaffolded_cdc_export_carries_a_resume_position_and_a_bounded_run() {
         let cfg = scaffold(
@@ -2652,7 +2353,7 @@ mod tests {
         );
     }
 
-    /// Against a PostgreSQL standby the scaffold's CDC drain is unbounded (a bounded one is refused there); nothing else is asked or changed.
+    /// Against a PostgreSQL standby the scaffold's CDC drain is unbounded (a bounded one is refused there).
     #[test]
     fn a_cdc_scaffold_for_a_postgres_standby_drains_unbounded_and_still_loads() {
         let yaml = |mode: &str| {
@@ -2694,11 +2395,7 @@ mod tests {
         assert!(!stream.cdc.as_ref().unwrap().until_current);
     }
 
-    /// `--bigquery-project/--dataset` is what scaffolds the `load:` block, and a
-    /// DELTA mode must get the base+buffer layout — that is the half that makes
-    /// the second LOAD an append into the buffer rather than an overwrite. A
-    /// whole-table mode must NOT carry it: `rivet compact` openly skips a full
-    /// load, so the key would promise a cycle that never runs.
+    /// `--bigquery-project/--dataset` is what scaffolds the `load:` block, and a DELTA mode must get the base+buffer layout.
     #[test]
     fn only_a_delta_mode_scaffolds_the_base_and_buffer_load_layout() {
         let dest = InitYamlDestination {
@@ -2730,11 +2427,6 @@ mod tests {
     }
 
     /// Bug hunt 2026-08-09: `time_window`'s `time_column` MUST be a timestamp.
-    /// `chosen_cursor_column` scores an integer surrogate PK as an incremental
-    /// cursor, so on a timestamp-less table it returns the PK — reusing it here
-    /// scaffolded `time_column: id` (a bigint compared to a timestamp window at
-    /// run time). The timestamp-only `chosen_time_column` must yield None → the
-    /// honest REVIEW marker. RED against the `chosen_cursor_column` version.
     #[test]
     fn time_window_never_scaffolds_an_integer_pk_as_time_column() {
         let id_pk = ColumnInfo {
@@ -2761,9 +2453,7 @@ mod tests {
                 col("amount", "numeric"),
             ],
         };
-        // the fixture actually exercises the surrogate-PK trap...
         assert_eq!(info.chosen_cursor_column().as_deref(), Some("id"));
-        // ...and the timestamp-only picker refuses it.
         assert_eq!(info.chosen_time_column(), None);
         let yaml = generate_config(
             &info,
@@ -2784,15 +2474,7 @@ mod tests {
         );
     }
 
-    /// #159 (correctness): the cursor the YAML renders and the cursor the
-    /// strategy_snapshot records must be the SAME picker. They diverged — the
-    /// YAML used a name-preference pick with a phantom `updated_at` fallback,
-    /// the snapshot the scored pick with a None fallback — so the audit trail
-    /// could name a column the config did not contain.
-    /// Coalesce scaffold (#173): a NULLABLE chosen cursor with a not-null sibling
-    /// must scaffold `incremental_cursor_mode: coalesce` + `cursor_fallback_column`,
-    /// else `WHERE cursor > $last` skips every NULL-cursor row. RED against a bare
-    /// cursor_column.
+    /// #159 (correctness): the cursor the YAML renders and the cursor the strategy_snapshot records must be the SAME picker.
     #[test]
     fn incremental_scaffolds_coalesce_for_a_nullable_cursor_with_a_fallback() {
         let c = |name: &str, ty: &str, pk: bool, nullable: bool| ColumnInfo {
@@ -2841,7 +2523,6 @@ mod tests {
 
     #[test]
     fn incremental_cursor_matches_between_yaml_and_snapshot() {
-        // A table whose scored top (updated_at) is unambiguous — both agree.
         let info = make_table(vec![
             col("id", "bigint"),
             col("created_at", "timestamp"),
@@ -2857,7 +2538,6 @@ mod tests {
         )
         .expect("scaffold");
         let snap_col = decided_strategy(&info, Some("incremental"), true).key_column;
-        // Extract the cursor_column the YAML rendered.
         let rendered = yaml
             .lines()
             .find_map(|l| l.trim().strip_prefix("cursor_column:"))
@@ -2868,8 +2548,6 @@ mod tests {
         );
         assert_eq!(rendered.as_deref(), Some("updated_at"));
 
-        // No timestamp at all: the YAML must NOT emit a phantom cursor_column,
-        // and the snapshot records None — they still agree.
         let bare = make_table(vec![col("id", "bigint"), col("name", "text")]);
         let yaml2 = generate_config(
             &bare,
@@ -2892,8 +2570,7 @@ mod tests {
         );
     }
 
-    /// #146: the scaffold records the SAME posture init connected with, so the
-    /// generated config works against the same host with no hand edit.
+    /// #146: the scaffold records the SAME posture init connected with, so the generated config works against the same host with no hand edit.
     #[test]
     fn scaffold_records_the_tls_posture_it_connected_with() {
         use crate::config::{TlsConfig, TlsMode};
@@ -2934,13 +2611,10 @@ mod tests {
             yaml.contains("tls: { mode: verify-full, ca_file: /etc/rivet/ca.pem }"),
             "verify-full + private CA must round-trip into the block:\n{yaml}"
         );
-        // …and the config PARSES back with the block intact — the assertion is
-        // through the real loader, not a grep of our own rendering.
         let cfg = crate::config::Config::from_yaml(&yaml).expect("generated yaml must load");
         let tls = cfg.source.tls.expect("tls block present");
         assert_eq!(tls.ca_file.as_deref(), Some("/etc/rivet/ca.pem"));
 
-        // No flag — no block: unset stays unset, the gate's posture unchanged.
         let yaml = generate_config(
             &info,
             "mysql://h.example:3306/db",
@@ -2985,10 +2659,7 @@ mod tests {
             .collect()
     }
 
-    /// A batch and a CDC scaffold of one table, on every engine and destination, never share an
-    /// export name (the state keys a load spec by it) and never put one prefix inside the other
-    /// (a load lists its prefix recursively): `rivet init` wrote `name: t` twice and
-    /// `exports/t/` around `exports/t/cdc/` through 0.32.0.
+    /// A batch and a CDC scaffold of one table, on every engine and destination, never share an export name (the state keys a load spec by it) and never put one prefix inside the other (a load lists its prefix recursively).
     #[test]
     fn a_batch_and_a_cdc_scaffold_of_one_table_share_no_name_and_nest_no_prefix() {
         let info = make_table(vec![col("id", "bigint")]);
@@ -3048,8 +2719,7 @@ mod tests {
         }
     }
 
-    /// A table the Oracle capture would refuse is left out of a CDC scaffold with the capture's own
-    /// reason, and a schema-wide CDC scaffold keeps the tables it can capture; a batch scaffold keeps it.
+    /// A table the Oracle capture would refuse is left out of a CDC scaffold with the capture's own reason, and a schema-wide CDC scaffold keeps the tables it can capture.
     #[test]
     fn an_oracle_table_logminer_cannot_mine_is_left_out_of_a_cdc_scaffold() {
         let url = "oracle://u@localhost:1521/FREEPDB1";
@@ -3099,8 +2769,7 @@ mod tests {
         assert!(!batch.text.contains("SKIPPED"), "{}", batch.text);
     }
 
-    /// A CDC scaffold that leaves out every table it was given, one table or a schema, is refused by
-    /// code naming each table and its reason; one table it can capture lets the scaffold through.
+    /// A CDC scaffold that leaves out every table it was given, one table or a schema, is refused by code naming each table and its reason.
     #[test]
     fn a_cdc_scaffold_that_leaves_out_every_table_is_refused_by_code() {
         let url = "oracle://u@localhost:1521/FREEPDB1";
@@ -3179,8 +2848,7 @@ mod tests {
         );
     }
 
-    /// A CDC scaffold leaves out a table whose name fails the `table:` gate on every engine, names the gate, and is refused
-    /// when that leaves nothing; the same names in a batch mode and the names that pass are scaffolded as before.
+    /// A CDC scaffold leaves out a table whose name fails the `table:` gate on every engine, names the gate, and is refused when that leaves nothing.
     #[test]
     fn a_cdc_scaffold_leaves_out_a_name_the_table_gate_refuses_on_every_engine() {
         let engines = [
@@ -3403,8 +3071,7 @@ mod tests {
         );
     }
 
-    /// `-o staging.yaml` names the stream objects after the file; stdout keeps the default names
-    /// and says each is one per cluster.
+    /// `-o staging.yaml` names the stream objects after the file.
     #[test]
     fn a_cdc_scaffold_names_its_slot_and_server_id_from_the_output_file() {
         let info = make_table(vec![col("id", "bigint")]);
@@ -3464,9 +3131,7 @@ mod tests {
         assert!(yaml.contains("mode: cdc"), "got:\n{yaml}");
         assert!(yaml.contains("    cdc:"), "cdc block missing:\n{yaml}");
         assert!(yaml.contains("checkpoint:"), "got:\n{yaml}");
-        // MySQL-specific stream knob, with the source prerequisite inline.
         assert!(yaml.contains("server_id:"), "got:\n{yaml}");
-        // CDC reads the log: no batch-mode artifacts.
         assert!(
             !yaml.contains("meta_columns"),
             "cdc must not emit meta_columns:\n{yaml}"
@@ -3475,15 +3140,11 @@ mod tests {
             !yaml.contains("cursor_column"),
             "cdc must not emit cursor_column:\n{yaml}"
         );
-        // The decimal override still rides (same type pipeline as batch).
         assert!(yaml.contains("amount: decimal(18,2)"), "got:\n{yaml}");
     }
 
     #[test]
     fn time_window_mode_scaffolds_time_column_and_days_window() {
-        // #dogfood MED: `init --mode time_window` used to omit time_column /
-        // days_window (the match had no time_window arm), so the scaffold
-        // immediately failed `rivet check` ("time_window mode requires time_column").
         let info = make_table(vec![col("id", "bigint"), col("updated_at", "timestamp")]);
         let dest = InitYamlDestination::default();
         let yaml = generate_config(
@@ -3513,9 +3174,7 @@ mod tests {
         );
     }
 
-    /// A CDC scaffold written to `-o <stem>.yaml` names its checkpoint and its destination after
-    /// the stem, per table and for a whole schema, so two configs of one source never share either;
-    /// without a stem (stdout) the names stay as they were.
+    /// A CDC scaffold written to `-o <stem>.yaml` names its checkpoint and its destination after the stem, per table and for a whole schema, so two configs of one source never share either.
     #[test]
     fn a_cdc_scaffold_names_its_checkpoint_and_destination_after_the_output_file() {
         let t = |name: &str| TableInfo {
@@ -3588,8 +3247,6 @@ mod tests {
         let plain = schema(&InitYamlDestination::default());
         assert!(plain.contains("checkpoint: ./cdc/app_cdc.ckpt "), "{plain}");
         assert!(plain.contains("path: ./output/cdc/"), "{plain}");
-        // An Oracle stream over several tables (one LogMiner window) names its one checkpoint after
-        // the stem too, and keeps the plain name without one.
         let oracle = |dest: &InitYamlDestination| {
             cdc_multiplex_export_lines(
                 &[t("orders"), t("invoices")],
@@ -3608,8 +3265,7 @@ mod tests {
         assert!(plain.contains("checkpoint: ./cdc/app_cdc.ckpt "), "{plain}");
     }
 
-    /// The whole-schema PostgreSQL stream names its one slot after the `-o` stem, and keeps the
-    /// default `rivet_public_cdc` (marked one per cluster) without one.
+    /// The whole-schema PostgreSQL stream names its one slot after the `-o` stem, and keeps the default `rivet_public_cdc` (marked one per cluster) without one.
     #[test]
     fn a_whole_schema_postgres_stream_names_its_slot_from_the_output_file() {
         let t = |name: &str| TableInfo {
@@ -3647,10 +3303,6 @@ mod tests {
 
     #[test]
     fn whole_db_cdc_consolidates_into_one_tables_stream() {
-        // Multiple tables + `--mode cdc` + MySQL ⇒ ONE `tables:` export (one
-        // server_id, so no CONFIG_CDC_RESOURCE_CONFLICT), with each table's
-        // decimal overrides as QUALIFIED `table.column` keys (never a bare key
-        // that would apply to every table).
         let orders = TableInfo {
             cdc_capture_instance: None,
             cdc_unmineable: None,
@@ -3682,7 +3334,6 @@ mod tests {
             None,
         )
         .unwrap();
-        // ONE stream, not one export per table.
         assert_eq!(
             yaml.matches("mode: cdc").count(),
             1,
@@ -3692,13 +3343,11 @@ mod tests {
             yaml.contains("tables: [orders, invoices]"),
             "both tables in one stream:\n{yaml}"
         );
-        // ONE server_id ⇒ passes validate_cdc_resource_conflicts.
         assert_eq!(
             yaml.matches("server_id:").count(),
             1,
             "one server_id for the whole stream:\n{yaml}"
         );
-        // Overrides are QUALIFIED, disambiguated by table.
         assert!(
             yaml.contains("\"orders.amount\": decimal(18,2)"),
             "qualified override for orders:\n{yaml}"
@@ -3709,14 +3358,7 @@ mod tests {
         );
     }
 
-    /// The consolidated stream's baseline is `backfill: auto` over one batch
-    /// RECIPE per table — not `initial: snapshot`, whose leg is a single-stream
-    /// full scan with no `parallel:` (the partner's 313M-row tables made that the
-    /// reason to hand-roll a three-step runbook). The oracle is the config the
-    /// product PARSES: every captured table must resolve to a recipe that reads
-    /// it by `table:` with the strategy init would pick for a batch export.
-    /// A table named `null` (or `yes`, `on`, `1e3`) written bare into `table:` /
-    /// `tables:` is a YAML scalar of another type — the scaffold was dead on load.
+    /// The consolidated stream's baseline is `backfill.
     #[test]
     fn whole_db_cdc_scaffold_quotes_a_table_named_like_a_yaml_scalar() {
         let pk = |name: &str, ty: &str| ColumnInfo {
@@ -3780,8 +3422,6 @@ mod tests {
             total_bytes: None,
             columns: vec![pk("id", "bigint"), decimal_col("amount", 18, 2)],
         };
-        // No primary key at all: the recipe must still read by `table:` (a
-        // `query:` export can never be a baseline) and fall back to `full`.
         let audit = TableInfo {
             cdc_capture_instance: None,
             cdc_unmineable: None,
@@ -3835,12 +3475,7 @@ mod tests {
         );
     }
 
-    /// A table whose name cannot be a `table:` shortcut (a hyphen here) cannot be
-    /// a backfill recipe — and a stream whose `backfill: auto` finds no recipe for
-    /// a captured table is refused at config load. So the scaffold leaves it OUT
-    /// of the stream and says so, instead of writing a config `rivet check`
-    /// rejects (the batch scaffold used to fall back to a quoted `query:`, which a
-    /// recipe cannot be).
+    /// A table whose name cannot be a `table:` shortcut (a hyphen here) cannot be a backfill recipe.
     #[test]
     fn whole_db_cdc_leaves_an_unshortcuttable_table_out_of_the_stream_and_says_so() {
         let pk = |name: &str, ty: &str| ColumnInfo {
@@ -3899,11 +3534,7 @@ mod tests {
         assert!(!mysql.contains("collection"), "{mysql}");
     }
 
-    /// With BigQuery (day), ClickHouse (month) or Snowflake (day), the whole-DB scaffold's partition guesses sit where
-    /// the LOAD reads them for a stream — `load.tables.<name>` on the stream — not on
-    /// the recipes, which the load never reads (the bases came out unpartitioned under
-    /// a config that visibly said `partition:`). The oracle is the resolver the load
-    /// itself uses on the parsed config. RED against the recipe-side `load:` block.
+    /// With BigQuery (day), ClickHouse (month) or Snowflake (day), the whole-DB scaffold's partition guesses sit where the LOAD reads them for a stream.
     #[test]
     fn whole_db_cdc_puts_each_tables_partition_where_the_load_reads_it() {
         let mk = |table: &str| TableInfo {
@@ -4001,7 +3632,7 @@ mod tests {
         }
     }
 
-    /// A MySQL schema whose every table fails the `table:` gate has no per-table fallback left: each is left out and the run refuses by code.
+    /// A MySQL schema whose every table fails the `table:` gate has no per-table fallback left.
     #[test]
     fn whole_db_cdc_on_mysql_of_only_ungated_tables_leaves_every_one_out_and_is_refused() {
         let mk = |table: &str| TableInfo {
@@ -4034,10 +3665,7 @@ mod tests {
         crate::error::assert_coded(&err, "RIVET_INIT_NOTHING_EXPORTABLE", 5);
     }
 
-    /// PostgreSQL accepts only lowercase letters, digits and `_` in a slot name: a
-    /// mixed-case table must not scaffold `slot: rivet_Orders`, which the server
-    /// refuses the moment the stream opens (and `rivet check` never sees — it compares
-    /// slot names for equality only). The checkpoint file keeps the table's spelling.
+    /// PostgreSQL accepts only lowercase letters, digits and `_` in a slot name.
     #[test]
     fn a_mixed_case_table_scaffolds_a_lowercase_slot() {
         let info = TableInfo {
@@ -4068,10 +3696,7 @@ mod tests {
         );
     }
 
-    /// The comment wrapper must not read a ` #` inside an engine's identifier quotes as
-    /// a YAML comment: a MySQL `` `qty # ea` `` or SQL Server `[qty # ea]` column in a
-    /// generated `query:` longer than the wrap width was split, and the columns after
-    /// it became comment lines — a scaffolded query silently missing columns.
+    /// The comment wrapper must not read a ` #` inside an engine's identifier quotes as a YAML comment.
     #[test]
     fn a_hash_inside_backticks_or_brackets_is_not_a_comment() {
         let long = " ".repeat(40);
@@ -4089,11 +3714,7 @@ mod tests {
         assert!(wrap_comments(&format!("{mysql}\n")).contains("`qty # ea`, `b`"));
     }
 
-    /// A recipe reads by `table:` when its name passes the shortcut gate — on MySQL a
-    /// CamelCase name does (case is the server's business), on PostgreSQL only a name
-    /// that is its own case-fold — and pages by the PK when it can: a uuid PK is
-    /// keysettable though no integer column exists. RED against `&&` in
-    /// `recipe_readable` and in `recipe_mode` (mutation survivors).
+    /// A recipe reads by `table:` when its name passes the shortcut gate.
     #[test]
     fn recipe_readability_and_mode_follow_the_engine_and_the_key() {
         let mk = |table: &str, cols: Vec<ColumnInfo>| TableInfo {
@@ -4128,11 +3749,7 @@ mod tests {
         assert_eq!(recipe_mode(&mk("audit", vec![col("note", "text")])), "full");
     }
 
-    /// The one-stream form is for `--mode cdc` over TWO OR MORE tables on MySQL or an
-    /// all-`public` PostgreSQL schema; every other shape is one export per table. RED
-    /// against each operator of that gate: a batch multi-table scaffold is never a
-    /// stream, nor a non-`public` PostgreSQL schema, nor SQL Server, nor one table.
-    /// Oracle folds an unquoted name upper-case, so only an all-upper name may be an unquoted `table:`.
+    /// The one-stream form is for `--mode cdc` over TWO OR MORE tables on MySQL or an all-`public` PostgreSQL schema.
     #[test]
     fn an_oracle_mixed_case_name_is_never_an_unquoted_table() {
         let mk = |schema: &str, table: &str| TableInfo {
@@ -4212,10 +3829,7 @@ mod tests {
         );
     }
 
-    /// A `public` schema with NO recipe-readable table (every name CamelCase on
-    /// PostgreSQL — Prisma / EF Core shapes) must not become a stream over nothing
-    /// under a header that promises recipes: it falls through to the per-table
-    /// scaffold, whose epilogue says the baseline is the operator's.
+    /// A `public` schema with NO recipe-readable table (every name CamelCase on PostgreSQL.
     #[test]
     fn whole_db_cdc_with_no_readable_table_falls_back_to_the_per_table_scaffold() {
         let mk = |table: &str| TableInfo {
@@ -4401,7 +4015,6 @@ mod tests {
     #[test]
     fn small_full_mode_table_has_no_parquet_block() {
         let info = make_table(vec![col("id", "bigint"), col("label", "text")]);
-        // row_estimate = 100 (from make_table), mode = full
         let dest = InitYamlDestination::default();
         let yaml = generate_config(
             &info,
@@ -4417,8 +4030,6 @@ mod tests {
             "small full-mode table must not emit parquet block:\n{yaml}"
         );
     }
-
-    // ── `table:` shortcut emission ───────────────────────────────────────────
 
     #[test]
     fn full_mode_pg_emits_table_shortcut_not_select_query() {
@@ -4477,8 +4088,6 @@ mod tests {
 
     #[test]
     fn full_mode_mysql_keeps_select_query_form() {
-        // MySQL does not benefit from the PG catalog-hint trick and the
-        // `table:` shortcut is documented as PG-first; emit explicit SELECT.
         let info = make_table(vec![col("id", "bigint"), col("name", "text")]);
         let dest = InitYamlDestination::default();
         let yaml = generate_config(
@@ -4502,7 +4111,6 @@ mod tests {
 
     #[test]
     fn chunked_mode_keeps_select_query_form() {
-        // chunked is curated; explicit SELECT remains.
         let id = ColumnInfo {
             is_indexed: true,
             ..col("id", "bigint")
@@ -4920,16 +4528,6 @@ mod tests {
 }
 
 /// What the scaffold DECIDED for a table, as data rather than as YAML text.
-///
-/// Exists so the strategy snapshot written to the state store and the config
-/// written to disk come from ONE rule. Re-deriving the decision for the snapshot
-/// would be the self-oracle shape this repo has paid for: two copies of a rule
-/// agree until one is edited, and then the audit trail describes a choice that
-/// was never made.
-///
-/// `agrees_with_the_generated_yaml` keeps them honest — it parses what
-/// `generate_config` actually emitted and compares, so the check's oracle is the
-/// artifact rather than a second implementation.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DecidedStrategy {
     pub mode: String,
@@ -4990,8 +4588,7 @@ pub(crate) fn decided_strategy(
 mod load_block_tests {
     use super::*;
 
-    /// The `load:` block appears only when a warehouse was NAMED, and it carries
-    /// the values an operator is expected to review rather than a silent default.
+    /// The `load:` block appears only when a warehouse was NAMED, and it carries the values an operator is expected to review rather than a silent default.
     #[test]
     fn the_load_block_is_written_only_when_a_warehouse_is_named() {
         let bare = InitYamlDestination {
@@ -5035,8 +4632,6 @@ mod load_block_tests {
             "the block says it is a guess: {block}"
         );
 
-        // A scaffold whose exports OVERWRITE their tables must not promise a
-        // layout `rivet compact` openly skips — it names the way to get one.
         let overwriting =
             load_block_lines(&named, false, None, &mut ScaffoldDecisions::default()).join("\n");
         assert!(
@@ -5049,8 +4644,7 @@ mod load_block_tests {
         );
     }
 
-    /// A ClickHouse scaffold names its endpoint, database and user, and promises no
-    /// compaction; the partition is guessed per table, never in the shared block (ADR-0035).
+    /// A ClickHouse scaffold names its endpoint, database and user, and promises no compaction.
     #[test]
     fn a_clickhouse_load_block_carries_its_connection_and_no_layout() {
         let dest = InitYamlDestination {
@@ -5078,11 +4672,7 @@ mod load_block_tests {
         );
     }
 
-    /// A Snowflake scaffold carries the five values the loader requires, writes no `layout:`
-    /// (a base and a buffer are the default for a mode that takes deltas), and the
-    /// generated file parses into a Snowflake target with exactly
-    /// those values; its per-table partition guess is a date column the loader turns
-    /// into a leading `DATE_TRUNC` clustering key.
+    /// A Snowflake scaffold carries the five values the loader requires, writes no `layout:` (a base and a buffer are the default for a mode that takes deltas), and the generated file parses into a Snowflake target with exactly those values.
     #[test]
     fn a_snowflake_load_block_carries_its_key_pair_login_and_parses_into_the_target() {
         let dest = InitYamlDestination {
@@ -5159,7 +4749,6 @@ mod load_block_tests {
                 .iter()
                 .find(|e| e.mode == crate::config::ExportMode::Cdc)
                 .unwrap_or(&cfg.exports[0]);
-            // No key is written: the default gives a delta mode its base and buffer.
             assert_eq!(
                 crate::plan::load_settings::resolved_layout(&cfg, export, None)
                     == crate::load::plan::CdcLayout::BaseAndBuffer,
@@ -5172,7 +4761,6 @@ mod load_block_tests {
                 "{mode}"
             );
             assert!(load.target.reads_from(export.destination.destination_type));
-            // A single-table CDC export carries no partition guess on any warehouse.
             if mode == "cdc" {
                 continue;
             }
@@ -5190,8 +4778,7 @@ mod load_block_tests {
         }
     }
 
-    /// A CDC stream with no baseline (a table named `snapshot`) cannot start a base on Snowflake,
-    /// so the scaffold writes `layout: log_view` and the file still loads.
+    /// A CDC stream with no baseline (a table named `snapshot`) cannot start a base on Snowflake, so the scaffold writes `layout.
     #[test]
     fn a_snowflake_cdc_scaffold_without_a_baseline_writes_log_view_and_loads() {
         let dest = InitYamlDestination {
@@ -5236,8 +4823,7 @@ mod load_block_tests {
         );
     }
 
-    /// An Oracle CDC stream cannot load into any warehouse: the Snowflake scaffold
-    /// leaves the block out and says why, like the others.
+    /// An Oracle CDC stream cannot load into any warehouse.
     #[test]
     fn a_snowflake_scaffold_of_an_oracle_cdc_stream_has_no_load_block() {
         let dest = InitYamlDestination {
@@ -5431,7 +5017,7 @@ mod init_baseline_tests {
         assert!(!one.text.contains("initial: snapshot"), "{}", one.text);
     }
 
-    /// A one-table CDC scaffold that cannot be paged, or sits on another engine, keeps its single `initial: snapshot` export.
+    /// A one-table CDC scaffold that cannot be paged, or sits on another engine, keeps its single `initial.
     #[test]
     fn a_one_table_cdc_scaffold_keeps_its_snapshot_where_no_recipe_applies() {
         let unpageable = TableInfo {
