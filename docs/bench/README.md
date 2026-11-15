@@ -49,9 +49,8 @@ pythons ship a broken pyexpat):
 ```
 
 **Fixtures** are seeded into a dedicated `rivet_bench` database **per engine** so
-the live-test `rivet` fixtures are never touched. Seed via the Rust tool
-(`cargo run --release --bin seed --features dev-seed -- --target <engine> \
---mssql-url/--mysql-url ...`); sizes live in `matrix.yaml`'s `seed:` block. MongoDB
+the live-test `rivet` fixtures are never touched. Seed via the native fixture files
+(`python3 -m dev.pytools.seed_fixture --url <engine url> --yes ...`); sizes live in `matrix.yaml`'s `seed:` block. MongoDB
 is seeded via the mongo driver.
 
 **Per-tool drivers** (documented in each tool's `matrix.yaml` note): odbc2parquet

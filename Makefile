@@ -43,7 +43,7 @@ live:  ## Any live command inside a slot: make live CMD="cargo nextest run --run
 property-refusal-names-true-cause-live:  ## Property P4 with the stand: offline verdicts plus each refusal sabotage cell through live_slot (grades the stand NOT_GRADED rows).
 	$(LIVE) python3 dev/pytools/property_refusal_names_true_cause.py live
 
-.PHONY: test-types test-types-live test-types-property test-types-validators test-types-bigquery test-types-snowflake sweep-test-db sweep-test-cloud test-live seed-build seed-db seed-postgres seed-mysql seed-mssql seed-mongo seed-oracle seed-garbage seed-garbage-postgres seed-garbage-mysql seed-garbage-mssql
+.PHONY: test-types test-types-live test-types-property test-types-validators test-types-bigquery test-types-snowflake sweep-test-db sweep-test-cloud test-live seed-release seed-db seed-postgres seed-mysql seed-mssql seed-mongo seed-oracle seed-garbage seed-garbage-postgres seed-garbage-mysql seed-garbage-mssql
 
 # PR-fast: offline type-mapping contracts (no docker).
 test-types:
@@ -94,7 +94,7 @@ test-types-snowflake:
 # Drop test-fixture tables left behind by INTERRUPTED live runs (a killed test
 # process skips the RAII Drop guard, so the slow cloud suites can leak
 # `<prefix>_<pid>_<counter>` tables into the shared `rivet` fixture DB). Safe
-# anytime — only touches those fixtures, never the init.sql / seed.rs tables.
+# anytime — only touches those fixtures, never the init.sql / seeds/fixture tables.
 # Best-effort per engine: a down service is skipped. See dev/pytools/sweep.py.
 sweep-test-db:
 	$(PY) -m dev.pytools.sweep test-cruft
@@ -123,87 +123,29 @@ test-live: sweep-test-db sweep-test-cloud
 	@$(MAKE) --no-print-directory sweep-test-db sweep-test-cloud
 
 # ── Fixture seed ────────────────────────────────────────────────────────────
-# Regenerate the shared live-test dataset (orders/users/events/page_views/
-# content_items). The SQL seed tool is gated behind the off-by-default
-# `dev-seed` feature (so `cargo install` never ships the destructive TRUNCATE
-# tool); RIVET_SEED_I_KNOW=1 confirms the TRUNCATE…CASCADE. Standard size mirrors
-# nightly-live.yml — 60k content_items (~1 min) is enough to trigger WAL pressure;
-# the 1M-row `max_pressure` test stays manual (override SEED_ARGS to change).
-SEED_ARGS ?= --users 1000 --orders-per-user 5 --events-per-user 5 --page-views 5000 --content-items 60000
+SEED := $(PY) -m dev.pytools.seed_fixture --yes
 
-# ── Release-size fixture ────────────────────────────────────────────────────
-# The PRE-RELEASE size. `live_content_load::pg_full_content_export_max_pressure`
-# asserts `content_items >= 1_000_000` and FAILS — it does not skip — below that,
-# so `cargo test --release -- --ignored` (release-checklist §2) cannot pass on a
-# standard-seeded stand. That is a gate that reports red for a fixture reason,
-# which is exactly the noise a go/no-go check must not produce.
-#
-# Fixed in the SEED rather than in the test, because the seed is the canonical
-# generator and the DEFAULT profile is deterministic by construction: `fast`
-# generates every row SQL-side from a series (`generate_series` / a chunked
-# range), and `fast.rs` + `mssql.rs` contain ZERO `rand::rng()` calls. The same
-# command therefore yields byte-identical fixtures on PostgreSQL, MySQL and SQL
-# Server, which is what makes a cross-engine comparison meaningful.
-#
-# The claim is now TRUE and measured; it was not before, in two layers. The
-# comment said "no RNG anywhere in `src/bin/seed/`" — false, `copy_pg.rs` and
-# `insert.rs` call `rand::rng()` in ten places (those are the `realistic` /
-# `insert` profiles, which remain non-deterministic BY DESIGN and must never be
-# used for a cross-engine comparison). Correcting only that would still have
-# left the sentence wrong, because `fast.rs` called SQL-side `random()` five
-# times: postgres drew `balance` / `is_active` / `bio` and two page_views
-# columns at random, so the DEFAULT profile was not reproducible even run to
-# run. Worse, the two engines that WERE deterministic disagreed: MySQL wrote
-# `bio` when `i %% 3 = 0` and SQL Server when `i %% 3 <> 0` — inverted, and the
-# same inversion on `page_views.user_id`.
-#
-# All five sites now use SQL Server's index-derived formulas, which had no
-# randomness to begin with. Verified engine-neutrally: exporting `users` from
-# each engine and hashing the parquet through DuckDB yields one digest,
-# 4b7ee9027565608f23ca39aae2d10f23, on all three. A hash computed with each
-# engine's OWN string concatenation does NOT agree — that is type rendering,
-# not data, and it is why the check has to go through a neutral reader.
-#
-# NOT the default: 1M content_items is ~17x the standard 60k (~1 min), and the
-# everyday `make seed-db` should stay fast. Run this before the release matrix.
-RELEASE_SEED_ARGS ?= --users 1000 --orders-per-user 5 --events-per-user 5 --page-views 5000 --content-items 1000000
-
-# `--target all` covers postgres + mysql + sqlserver in ONE invocation. It used
-# to be two calls naming postgres and mysql, which silently left SQL Server on
-# whatever an earlier run had put there — and a stand where the engines hold
-# DIFFERENT row counts makes every cross-engine comparison meaningless, which is
-# the one thing this fixture exists to enable. Measured 2026-08-04, before the
-# fix: postgres 1000/5000/1000521, mysql 1000/5000/1000000, mssql 150000/500/150000.
-seed-release: seed-build
-	RIVET_SEED_I_KNOW=1 target/debug/seed --target all $(RELEASE_SEED_ARGS)
-
-seed-build:
-	cargo build --bin seed --features dev-seed
+seed-release:  ## Release-size fixture (1M content_items) on postgres, mysql and sqlserver.
+	$(SEED) --source postgres --tier release
+	$(SEED) --source mysql --tier release
+	$(SEED) --source mssql --tier release --coalesce-rows 0
 
 # Seed EVERY live database. A per-DB target below runs one engine at a time.
 seed-db: seed-postgres seed-mysql seed-mssql seed-mongo seed-oracle
 
-seed-postgres: seed-build
-	RIVET_SEED_I_KNOW=1 target/debug/seed --target postgres $(SEED_ARGS)
+seed-postgres:
+	$(SEED) --source postgres --tier standard
 
 # Oracle 23ai Free: the classic + garbage schema, ported table-for-table from MySQL
 # (deviations are listed in the script header). Runs as the stand's `rivet` user.
 seed-oracle:
 	docker compose exec -T oracle sqlplus -s rivet/rivet@localhost/FREEPDB1 < seeds/common/oracle.sql
 
-seed-mysql: seed-build
-	RIVET_SEED_I_KNOW=1 target/debug/seed --target mysql $(SEED_ARGS)
+seed-mysql:
+	$(SEED) --source mysql --tier standard
 
-# NOTE: the seed tool's SQL Server `dbo.orders` (rich benchmark shape: user_id /
-# product / price DECIMAL(10,2) / …) DIVERGES from dev/mssql/init.sql's `dbo.orders`
-# (simple id / name / amount DECIMAL(12,2) — a decimal-precision test fixture that
-# `audit_init_deferred::init_mssql_*` asserts on). CI seeds only Postgres, so its
-# MSSQL fixture stays init.sql. Running `seed-mssql` locally therefore overwrites
-# that test fixture; re-apply dev/mssql/init.sql (the `dbo.orders` section) if you
-# then run the MSSQL init tests. PG/MySQL init.sql agree with the seed tool's rich
-# shape, so this only bites MSSQL.
-seed-mssql: seed-build
-	RIVET_SEED_I_KNOW=1 target/debug/seed --target sqlserver $(SEED_ARGS)
+seed-mssql:
+	$(SEED) --source mssql --tier standard --coalesce-rows 0
 
 # Mongo has no shared bench fixture (the live suite self-seeds each collection
 # via the Rig), so this seeds a standard `rivet.orders`/`rivet.users` collection

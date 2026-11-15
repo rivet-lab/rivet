@@ -265,7 +265,7 @@ fn exclude_patterns_are_not_over_broad() {
         // Delete-expression and delete-match-arm shapes.
         "src/manifest.rs:114:8: delete ! in identity_family",
         "src/plan/waves.rs:109:20: delete ! in pack",
-        "src/bin/seed/insert.rs:693:9: delete match arm \"page_view\" in gen_event_payload",
+        "src/bin/tool/insert.rs:693:9: delete match arm \"page_view\" in gen_event_payload",
         // Function-stub shapes.
         "src/pipeline/run.rs:100:1: replace next_eligible -> Option<usize> with None",
         "src/pipeline/pool.rs:100:1: replace predict_secs -> PredictedFrom with Default::default()",

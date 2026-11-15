@@ -258,7 +258,7 @@ def s3(sub: str = "run", extra: Sequence[str] = (), *, config: str | Path | None
     """S3 export against local MinIO (`dev/cloud/run_s3_export.sh`).
 
     Prerequisites, unchanged: `docker compose up -d minio postgres` and a seeded
-    database (`cargo run --bin seed -- --target postgres --users 1000`).
+    database (`make seed-postgres`).
     """
     cfg = _config_path(config, S3_CONFIG)
     env = {

@@ -6,11 +6,6 @@ use std::path::Path;
 // ratchet-pin: secret-expose-sites (review 2027-02-01) count src/ \.expose\(\)
 const CEILINGS: &[(&str, usize)] = &[
     ("src/bin/rivet-mcp.rs", 2),
-    ("src/bin/seed/copy_pg.rs", 4),
-    ("src/bin/seed/fast.rs", 2),
-    ("src/bin/seed/insert.rs", 4),
-    ("src/bin/seed/main.rs", 1),
-    ("src/bin/seed/mssql.rs", 2),
     ("src/cli/dispatch.rs", 1),
     ("src/config/gcp_secret.rs", 1),
     ("src/config/source.rs", 9),

@@ -210,3 +210,41 @@ fn rivet_binary_reachable_via_env_constant() {
         "rivet --version produced unexpected output: {stdout}"
     );
 }
+
+#[test]
+#[ignore = "live: requires docker compose duckdb"]
+fn a_dir_restaged_under_one_label_never_reuses_a_container_path() {
+    require_alive(LiveService::DuckDb);
+    let src = tempfile::tempdir().unwrap();
+    let names = ["part#0_chunk0.csv", "part#1_chunk0.csv"];
+    let mut seen: Vec<String> = Vec::new();
+    for round in 1..=5usize {
+        for name in names {
+            let body = format!("id\n{}", "0123456789\n".repeat(round * 40));
+            std::fs::write(src.path().join(name), body).unwrap();
+        }
+        let container = stage_for_duckdb(src.path());
+        assert!(
+            !seen.contains(&container),
+            "round {round}: container path {container} was handed out before; its names are cached by the container"
+        );
+        for name in names {
+            let read = std::process::Command::new("docker")
+                .args([
+                    "exec",
+                    DUCKDB_CONTAINER,
+                    "cat",
+                    &format!("{container}/{name}"),
+                ])
+                .output()
+                .expect("spawn docker exec cat");
+            assert_eq!(
+                read.stdout,
+                std::fs::read(src.path().join(name)).unwrap(),
+                "round {round}: {name} must read whole inside the container: {}",
+                String::from_utf8_lossy(&read.stderr)
+            );
+        }
+        seen.push(container);
+    }
+}

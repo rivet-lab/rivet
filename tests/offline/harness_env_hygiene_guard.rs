@@ -313,7 +313,6 @@ fn product_env_surface() -> BTreeMap<String, String> {
 const PRODUCT_ENV_SURFACE: &[&str] = &[
     // ratchet-pin: product-env-surface (review 2027-02-01) strings
     "src/bin/rivet-mcp.rs clap env DATABASE_URL",
-    "src/bin/seed/main.rs env::var CONFIRM_ENV",
     "src/cli/args.rs clap env RIVET_LOCK_WAIT",
     "src/cli/args.rs clap env RIVET_RUN_ID",
     "src/cli/params.rs env::var &var",

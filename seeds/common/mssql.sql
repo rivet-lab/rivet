@@ -1,6 +1,5 @@
 -- seeds/common/mssql.sql — SELF-CONTAINED canonical seed (DDL + data + garbage).
--- Requires SQL Server 2022+ (GENERATE_SERIES). DDL from src/bin/seed/mssql.rs
--- SCHEMA_DDL; fill = the seeder's GENERATE_SERIES fast path; garbage appended.
+-- Requires SQL Server 2022+ (GENERATE_SERIES); garbage appended.
 DROP TABLE IF EXISTS events;
 DROP TABLE IF EXISTS orders;
 DROP TABLE IF EXISTS page_views;

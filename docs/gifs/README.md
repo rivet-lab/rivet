@@ -63,8 +63,8 @@ Prereqs (one-off):
 brew install vhs          # pulls ttyd + ffmpeg as dependencies
 
 docker compose up -d postgres mysql
-cargo build --release --bin rivet --bin seed
-cargo run --release --bin seed -- --target postgres      # ~500 rows in public.orders
+cargo build --release --bin rivet
+make seed-postgres                                       # fixture tables in public
 ```
 
 Render all three:

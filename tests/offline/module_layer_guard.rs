@@ -1151,10 +1151,10 @@ fn a_binary_references_the_library_by_its_crate_name() {
         ("cli.rs", "\n"),
         ("main.rs", "fn main() { rivet::cli::run(); }\n"),
         (
-            "bin/seed/main.rs",
+            "bin/tool/main.rs",
             "mod args;\nuse rivet::cli;\nfn main() { cli::go(); crate::args::x(); }\n",
         ),
-        ("bin/seed/args.rs", "use crate::cli::NotTheLibrary;\n"),
+        ("bin/tool/args.rs", "use crate::cli::NotTheLibrary;\n"),
     ]);
     assert_eq!(
         found,

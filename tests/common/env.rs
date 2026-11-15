@@ -326,29 +326,25 @@ pub fn live_container_path(host: &std::path::Path) -> String {
     format!("{}/{}", LIVE_SHARED_TMP_CONTAINER, rel.display())
 }
 
-/// Create a fresh sub-directory under the shared bind mount and return its
-/// `(host_path, container_path)` pair. Tests use the host path to write
-/// Parquet / CSV, and pass the container path to the validator helpers.
+/// A fresh empty generation directory under the stable `label` directory, as `(host_path, container_path)`.
 pub fn live_shared_workdir(label: &str) -> (std::path::PathBuf, String) {
-    let host = live_shared_tmp_host().join(label);
-    std::fs::create_dir_all(&host).expect("create live-tmp workdir");
-    // Clear CONTENTS only — never remove_dir_all + recreate. On macOS Docker
-    // (gRPC-FUSE bind mounts) a container that has already resolved this path
-    // keeps the OLD directory inode after a recreate and sees an empty dir
-    // forever — the parquet the test then writes is invisible to the reader
-    // container and the oracle fails with "no files" only in parallel suites
-    // (reproduced with a bare mkdir/rm/exec probe). Keeping the inode stable
-    // keeps the container's view live.
-    if let Ok(entries) = std::fs::read_dir(&host) {
-        for e in entries.flatten() {
-            let p = e.path();
-            let _ = if p.is_dir() {
-                std::fs::remove_dir_all(&p)
-            } else {
-                std::fs::remove_file(&p)
-            };
-        }
+    static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let parent = live_shared_tmp_host().join(label);
+    std::fs::create_dir_all(&parent).expect("create live-tmp workdir");
+    for e in std::fs::read_dir(&parent).into_iter().flatten().flatten() {
+        let p = e.path();
+        let _ = if p.is_dir() {
+            std::fs::remove_dir_all(&p)
+        } else {
+            std::fs::remove_file(&p)
+        };
     }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let n = GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let host = parent.join(format!("g{nanos}_{}_{n}", std::process::id()));
+    std::fs::create_dir(&host).expect("create live-tmp generation");
     let container = live_container_path(&host);
     (host, container)
 }
