@@ -1,8 +1,9 @@
 diff --git a/src/plan/partition.rs b/src/plan/partition.rs
+index 9718296..618e4ed 100644
 --- a/src/plan/partition.rs
 +++ b/src/plan/partition.rs
-@@ -37,11 +37,7 @@
- /// Whether `value` is a name suffix `partition_by` gave a child at any granularity: a day, month or year label, or the NULL bucket.
+@@ -24,13 +24,9 @@ fn is_label_at(value: &str, granularity: PartitionGranularity) -> bool {
+ /// Whether `value` is a name suffix `partition_by` gave a child at any granularity.
  pub(crate) fn is_child_label(value: &str) -> bool {
      value == NULL_BUCKET_LABEL
 -        || [
@@ -10,7 +11,11 @@ diff --git a/src/plan/partition.rs b/src/plan/partition.rs
 -            PartitionGranularity::Month,
 -            PartitionGranularity::Year,
 -        ]
+-        .into_iter()
+-        .any(|g| is_label_at(value, g))
 +        || [PartitionGranularity::Day]
-         .into_iter()
-         .any(|g| is_label_at(value, g))
++            .into_iter()
++            .any(|g| is_label_at(value, g))
  }
+ 
+ /// One partition bucket: a Hive `col=value` value label and its half-open `[lo, hi)` date bounds (inclusive `lo`, exclusive `hi`).

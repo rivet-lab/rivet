@@ -1,13 +1,15 @@
 diff --git a/src/plan/load_settings.rs b/src/plan/load_settings.rs
-index 2026379a..021573c5 100644
+index 8f5a3b2..2abdfa5 100644
 --- a/src/plan/load_settings.rs
 +++ b/src/plan/load_settings.rs
-@@ -75,7 +75,7 @@ pub fn load_mode_of(
+@@ -55,9 +55,7 @@ pub fn load_mode_of(
+     match export.mode {
          ExportMode::Cdc => LoadMode::Cdc,
          ExportMode::Incremental => LoadMode::Incremental,
-         // only the keys past the last run's: a delta, never the whole table
 -        ExportMode::Full | ExportMode::Chunked
-+        ExportMode::Chunked
-             if crate::plan::build::continued_key(config, export).is_some() =>
-         {
+-            if crate::plan::build::continued_key(config, export).is_some() =>
+-        {
++        ExportMode::Chunked if crate::plan::build::continued_key(config, export).is_some() => {
              LoadMode::Incremental
+         }
+         ExportMode::Full => LoadMode::Full,

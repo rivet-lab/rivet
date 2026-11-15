@@ -5,13 +5,7 @@ use crate::config::load::{BaseSupport, LoadSection, PartitionSpec};
 /// Source primary keys `rivet run` recorded, by `(export, unit)`.
 pub type RecordedKeys = std::collections::HashMap<(String, Option<String>), Vec<String>>;
 
-/// Which load strategy an export's `mode` maps to. Drives BOTH the ledger's
-/// file selection and the warehouse write path:
-/// - `Full` — the export is a complete snapshot; load the LATEST run only and
-///   OVERWRITE (chunked is a parallel full snapshot, same handling).
-/// - `Incremental` — the export is a delta since a cursor; APPEND it to
-///   `<table>__changes` and dedup to current state ordered by the cursor.
-/// - `Cdc` — a change stream; APPEND + dedup by `(__pos, __seq)` with tombstones.
+/// Which load strategy an export's `mode` maps to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadMode {
     Full,
@@ -22,36 +16,27 @@ pub enum LoadMode {
 /// How a CDC export's tables are laid out in the warehouse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CdcLayout {
-    /// Baseline and changes in one `<table>__changes` log; `<table>` is the dedup
-    /// view over it (`initial: snapshot`, and every stream without a baseline).
+    /// Baseline and changes in one `<table>__changes` log.
     #[default]
     LogAndView,
-    /// `<table>` is a physical base (source schema + `__is_deleted`) the baseline
-    /// legs overwrite; `<table>__changes` is a per-cycle buffer `rivet compact`
-    /// merges into the base and drops (`backfill:` streams).
+    /// `<table>` is a physical base (source schema + `__is_deleted`) the baseline legs overwrite.
     BaseAndBuffer,
 }
 
 impl CdcLayout {
-    /// The `<table>__changes` log is a disposable per-cycle buffer: no partition
-    /// declaration, no option settling, no `__rebuild` leftovers to look for —
-    /// `compact` drops it whole.
+    /// The `<table>__changes` log is a disposable per-cycle buffer.
     pub fn log_is_disposable(self) -> bool {
         matches!(self, CdcLayout::BaseAndBuffer)
     }
 
-    /// `rivet compact` has something to merge for this layout: the base is a
-    /// physical table the legs overwrote, the log a buffer of changes since the
-    /// last merge. The changelog + view layout keeps its state in the log itself.
+    /// `rivet compact` has something to merge for this layout.
     pub fn compacts(self) -> bool {
         matches!(self, CdcLayout::BaseAndBuffer)
     }
 }
 
 impl LoadMode {
-    /// The ledger's `mode` discriminator (the `load_run.mode` column) — the single
-    /// source of truth for the string that names each strategy in the state DB, so
-    /// no call site hand-writes a stringly-typed `"full"`/`"cdc"` that can drift.
+    /// The ledger's `mode` discriminator (the `load_run.mode` column).
     pub fn ledger_str(self) -> &'static str {
         match self {
             LoadMode::Full => "full",
@@ -61,12 +46,7 @@ impl LoadMode {
     }
 }
 
-/// The warehouse layout of one export: a `backfill:` stream keeps a physical base
-/// and a disposable change buffer; everything else is the changelog + view.
-/// An export mode's load strategy. Exhaustive (no `_`) on purpose: a future
-/// delta-style mode fails to COMPILE here until someone picks its load
-/// semantics, instead of silently defaulting to OVERWRITE (the
-/// incremental-overwrite data-loss class).
+/// The warehouse layout of one export: a `backfill:` stream keeps a physical base and a disposable change buffer.
 pub fn load_mode_of(
     config: &crate::config::Config,
     export: &crate::config::ExportConfig,
@@ -75,19 +55,18 @@ pub fn load_mode_of(
     match export.mode {
         ExportMode::Cdc => LoadMode::Cdc,
         ExportMode::Incremental => LoadMode::Incremental,
-        // only the keys past the last run's: a delta, never the whole table
         ExportMode::Full | ExportMode::Chunked
             if crate::plan::build::continued_key(config, export).is_some() =>
         {
             LoadMode::Incremental
         }
-        ExportMode::Full => LoadMode::Full,    // whole result set
-        ExportMode::Chunked => LoadMode::Full, // parallel full snapshot
-        ExportMode::TimeWindow => LoadMode::Full, // the current window, whole
+        ExportMode::Full => LoadMode::Full,
+        ExportMode::Chunked => LoadMode::Full,
+        ExportMode::TimeWindow => LoadMode::Full,
     }
 }
 
-/// One export's effective load settings (see [`LoadSection::overlay`]): the shared section, the export's own `load:` block, then a captured table's block.
+/// One export's effective load settings (see [`LoadSection::overlay`]).
 pub(crate) fn overlay(
     section: &LoadSection,
     export: &crate::config::ExportConfig,
@@ -105,11 +84,7 @@ pub fn effective_load(
     config.load.as_ref().map(|s| overlay(s, export, table))
 }
 
-/// Whether THIS export's base carries the delete flag, from the config alone — the extract
-/// asks, because only the writer can put a constant column in the file.
-///
-/// `table` names the captured table when the caller has one (a multiplex stream stamps per
-/// table); `None` answers for the export as a whole.
+/// Whether THIS export's base carries the delete flag, from the config alone.
 pub fn resolved_deleted_flag(
     config: &crate::config::Config,
     export: &crate::config::ExportConfig,
@@ -120,9 +95,7 @@ pub fn resolved_deleted_flag(
         .unwrap_or(matches!(load_mode_of(config, export), LoadMode::Cdc))
 }
 
-/// This export's effective warehouse partition. The EXTRACT asks, because nothing splits
-/// one Parquet file at load time: only the writer can keep a part inside a load job's
-/// partition budget. `table` names the captured table when the caller has one.
+/// This export's effective warehouse partition.
 pub fn resolved_partition(
     config: &crate::config::Config,
     export: &crate::config::ExportConfig,
@@ -131,10 +104,7 @@ pub fn resolved_partition(
     effective_load(config, export, table).and_then(|eff| eff.partition)
 }
 
-/// Where THIS export's current state will live — the section's `layout:` with the export's
-/// block, and a captured table's block, layered over it. The EXTRACT asks too: a
-/// base-and-buffer table's rows carry the delete flag as data, and only the writer can put
-/// it in the file.
+/// Where THIS export's current state will live.
 pub fn resolved_layout(
     config: &crate::config::Config,
     export: &crate::config::ExportConfig,
@@ -156,13 +126,7 @@ pub(crate) fn cdc_layout(
 ) -> CdcLayout {
     use crate::config::load::LayoutChoice;
     match (mode, choice) {
-        // A `full` load overwrites the whole table on every pass: there is no
-        // accumulated current state to lay out, so the key means nothing here.
         (LoadMode::Full, _) => CdcLayout::LogAndView,
-        // A base without a compaction is a snapshot frozen at the backfill and a buffer
-        // that grows for ever: only a compacting warehouse gets one — written, on Snowflake
-        // the default of every incremental and CDC export, on BigQuery derived from a
-        // stream's `backfill:`.
         (_, Some(LayoutChoice::BaseBuffer)) if support != BaseSupport::Never => {
             CdcLayout::BaseAndBuffer
         }
@@ -173,8 +137,6 @@ pub(crate) fn cdc_layout(
                 None => CdcLayout::LogAndView,
             }
         }
-        // A written `log_view`, an unwritten incremental, or a warehouse that cannot
-        // compact: the changelog and its view.
         _ => CdcLayout::LogAndView,
     }
 }
@@ -185,18 +147,12 @@ mod tests {
 
     #[test]
     fn ledger_str_names_each_mode_stably() {
-        // The state DB's `load_run.mode` discriminator: rows written by every earlier
-        // release are read back by `overwritten_delta_warning` (a drifted "full" would
-        // silence the upgrade warning) and by `rivet state loads`.
         assert_eq!(LoadMode::Full.ledger_str(), "full");
         assert_eq!(LoadMode::Incremental.ledger_str(), "incremental");
         assert_eq!(LoadMode::Cdc.ledger_str(), "cdc");
     }
 
-    /// Where the current state will live, resolved from the CONFIG alone: the
-    /// section's key with the export's own block layered over it. The EXTRACT asks
-    /// this too — a base-and-buffer table's rows carry the delete flag as data, and
-    /// a wrong answer here lands a base whose flag is NULL on every row.
+    /// Where the current state will live, resolved from the CONFIG alone.
     #[test]
     fn the_resolved_layout_composes_the_section_and_the_export_override() {
         let cfg = |load: &str, export_extra: &str, mode: &str| {
@@ -242,10 +198,7 @@ mod tests {
         );
     }
 
-    /// A stream with a `backfill:` on a warehouse without `rivet compact` (ClickHouse)
-    /// keeps the changelog and its view: a base there would freeze at the backfill
-    /// while its buffer grew for ever, with every load prescribing a command that can
-    /// only fail. RED against deriving the layout from the export alone.
+    /// A stream with a `backfill:` on a warehouse without `rivet compact` (ClickHouse) keeps the changelog and its view.
     #[test]
     fn a_warehouse_without_compact_keeps_the_changelog_and_its_view() {
         let cfg = serde_yaml_ng::from_str::<crate::config::Config>(
@@ -263,9 +216,7 @@ mod tests {
         );
     }
 
-    /// Whether the base carries `__is_deleted`. A stream expresses deletes, so it
-    /// defaults ON there; a query-based export cannot, so it defaults OFF and does
-    /// not pay for the column. Written, the key decides either way.
+    /// Whether the base carries `__is_deleted`.
     #[test]
     fn the_delete_flag_defaults_on_for_a_stream_and_off_for_a_query() {
         let cfg = |load: &str, mode: &str| {
@@ -299,17 +250,7 @@ mod tests {
         );
     }
 
-    /// A multiplex stream's `load.tables.<name>` block must reach the EXTRACT, not only
-    /// the load plan.
-    ///
-    /// The plan builder applied all three layers while the extract-side readers stopped at
-    /// the export block, so the warehouse expected a per-table answer and the snapshot leg
-    /// stamped one export-level value into every captured table's files. The leg has the
-    /// table name in hand (`cdc_job.rs`, the `pending_idx` loop), so the fix is the
-    /// argument, not a new mechanism.
-    ///
-    /// RED against passing the export level: `customers` reads `true` with the override
-    /// ignored.
+    /// A multiplex stream's `load.tables.<name>` block must reach the EXTRACT, not only the load plan.
     #[test]
     fn a_per_table_override_reaches_the_extract_not_only_the_load_plan() {
         let cfg = crate::config::Config::from_yaml(
@@ -367,7 +308,6 @@ load:
     }
 
     /// The partition the WRITER budgets each part against, resolved from the config alone.
-    /// Shipped on this branch with no test of its own while both its siblings had one.
     #[test]
     fn the_resolved_partition_composes_the_section_and_the_export_override() {
         let cfg = |load: &str, export_extra: &str| {
@@ -412,8 +352,7 @@ load:
         );
     }
 
-    /// On Snowflake every incremental and CDC export is base+buffer unless `log_view` is written;
-    /// a full load keeps its overwrite. RED against the changelog+view default.
+    /// On Snowflake every incremental and CDC export is base+buffer unless `log_view` is written.
     #[test]
     fn snowflake_takes_a_base_unless_log_view_is_written() {
         use crate::config::load::LayoutChoice;
@@ -453,9 +392,7 @@ load:
         );
     }
 
-    /// Only a CDC load of a stream WITH `backfill:` takes the base-and-buffer
-    /// layout; the same stream without a baseline, and any batch load, keep the
-    /// changelog + view.
+    /// Only a CDC load of a stream WITH `backfill:` takes the base-and-buffer layout.
     #[test]
     fn a_cdc_export_with_a_backfill_lands_as_base_and_buffer_only() {
         let parse = |yaml: &str| {
@@ -483,16 +420,11 @@ load:
             CdcLayout::LogAndView,
             "a batch load of the same export is no CDC layout"
         );
-        // A warehouse that cannot compact (Snowflake) never gets a base and a buffer:
-        // the base would freeze at the backfill and the buffer grow for ever, with no
-        // view either. RED against deriving the layout from the export alone.
         assert_eq!(
             cdc_layout(&with, LoadMode::Cdc, None, BaseSupport::Never),
             CdcLayout::LogAndView,
             "no compaction, no base: the changelog and its view"
         );
-        // WRITTEN, the key decides — which is how an ordinary query-based
-        // incremental export gets a physical base to compact into.
         use crate::config::load::LayoutChoice;
         assert_eq!(
             cdc_layout(
@@ -529,15 +461,13 @@ load:
             CdcLayout::LogAndView,
             "unwritten keeps what shipped"
         );
-        // The two properties every site depends on, as a truth table.
         assert!(CdcLayout::BaseAndBuffer.log_is_disposable());
         assert!(CdcLayout::BaseAndBuffer.compacts());
         assert!(!CdcLayout::LogAndView.log_is_disposable());
         assert!(!CdcLayout::LogAndView.compacts());
     }
 
-    /// Every export mode, each with and without `keyset_incremental`: only a run that
-    /// continues past its last key is a delta, and a delta never loads as an overwrite.
+    /// Every export mode, each with and without `keyset_incremental`.
     #[test]
     fn load_mode_of_every_mode_with_and_without_keyset_incremental() {
         use crate::config::ExportMode;
@@ -548,7 +478,6 @@ load:
             ExportMode::TimeWindow,
             ExportMode::Cdc,
         ];
-        // Exhaustive on purpose: a new mode stops compiling here until it joins the table.
         let expected = |mode: ExportMode, keyset_incremental: bool| match (mode, keyset_incremental)
         {
             (ExportMode::Cdc, _) => LoadMode::Cdc,

@@ -16,11 +16,9 @@ pub fn recommend_export(
 
     let verdict = diagnostics.verdict.to_ascii_lowercase();
 
-    // --- Row / size classes (metadata is signal, not truth) ---
     let cost_class = classify_cost(inputs, &mut reasons, &mut score);
     let risk_class = classify_risk(inputs, diagnostics, verdict.as_str(), &mut score);
 
-    // --- Strategy & cursor ---
     match inputs.strategy {
         PrioritizationStrategyKind::Snapshot => {
             score += 5;
@@ -116,7 +114,6 @@ pub fn recommend_export(
         });
     }
 
-    // Verdict adjustment (preflight)
     if verdict.contains("unsafe") {
         score -= 25;
     } else if verdict.contains("degraded") {
@@ -125,7 +122,6 @@ pub fn recommend_export(
         score += 8;
     }
 
-    // Epic I: historical refinement (bounded ±15 total to avoid overriding preflight).
     apply_history_signals(inputs, &mut score, &mut reasons);
 
     score = score.clamp(0, 100);
@@ -370,7 +366,6 @@ mod tests {
                 .any(|x| x.kind == RecommendationReasonKind::WeakCursor),
             "expected weak_cursor reason"
         );
-        // Weak cursor must not earn a strong-cursor score bump.
         let mut strong = i.clone();
         strong.cursor_quality = CursorQuality::StrongMonotonic;
         let r_strong = recommend_export(&strong, &diag_efficient());

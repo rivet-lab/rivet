@@ -1,12 +1,4 @@
 //! Partition/window reconciliation report types (Epic F).
-//!
-//! Produced by `rivet reconcile`; serializable so external tooling can pipe the
-//! output into repair scripts or dashboards. Consistent with ADR-0006's advisory
-//! policy: reports surface mismatches and candidate partitions — they do not
-//! trigger re-exports on their own.
-//!
-//! Consumer lives in the `rivet` binary (`pipeline::reconcile_cmd`); silence
-//! library-only dead_code analysis here.
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
@@ -29,8 +21,7 @@ pub enum PartitionStatus {
     Match,
     /// Counts differ — partition is a repair candidate.
     Mismatch,
-    /// Either `source_count` or `exported_count` is not available (e.g. a
-    /// `chunk_task` that never completed); partition is a repair candidate.
+    /// Either `source_count` or `exported_count` is not available (e.g.
     Unknown,
 }
 
@@ -38,7 +29,7 @@ pub enum PartitionStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartitionResult {
     pub kind: PartitionKind,
-    /// Stable human-readable identifier (e.g. `"chunk 3 [1000..2000]"`).
+    /// Stable human-readable identifier (e.g.
     pub identifier: String,
     pub source_count: Option<i64>,
     pub exported_count: Option<i64>,
