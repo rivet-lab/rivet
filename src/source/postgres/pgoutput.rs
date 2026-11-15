@@ -1642,6 +1642,57 @@ mod tests {
         );
     }
 
+    /// A BEGIN over a spilled open transaction counts the rows on disk too, and a closed one prints its shape.
+    #[test]
+    fn a_begin_over_a_spilled_transaction_counts_every_open_row() {
+        let d = tempfile::tempdir().expect("dir");
+        let mut a = assembler_capped_at(Some(d.path().to_path_buf()), (2, usize::MAX));
+        a.push(rel_msg(&["id", "name"])).expect("relation");
+        a.push(Message::Begin {
+            final_lsn: 1,
+            xid: 1,
+        })
+        .expect("begin");
+        for i in 0..5 {
+            a.push(row_msg(i, "x")).expect("row");
+        }
+        let err = a
+            .push(Message::Begin {
+                final_lsn: 2,
+                xid: 2,
+            })
+            .expect_err("a second BEGIN with rows open must fail");
+        assert!(
+            format!("{err:#}").contains("BEGIN with 5 row(s) still open"),
+            "{err:#}"
+        );
+        let mut b = assembler_capped_at(Some(d.path().to_path_buf()), (2, usize::MAX));
+        b.push(rel_msg(&["id", "name"])).expect("relation");
+        b.push(Message::Begin {
+            final_lsn: 1,
+            xid: 1,
+        })
+        .expect("begin");
+        for i in 0..5 {
+            b.push(row_msg(i, "x")).expect("row");
+        }
+        let closed = b
+            .push(Message::Commit {
+                commit_lsn: 0x1_0000_0001,
+                end_lsn: 0x1_0000_0002,
+            })
+            .expect("commit")
+            .expect("closed");
+        assert_eq!(
+            format!("{closed:?}"),
+            format!(
+                "Closed {{ head: {} event(s), spilled: true }}",
+                closed.head.len()
+            )
+        );
+        assert!(!closed.head.is_empty());
+    }
+
     /// Truncated input FAILS rather than returning a half-read message.
     #[test]
     fn a_truncated_message_is_an_error_not_a_partial_decode() {

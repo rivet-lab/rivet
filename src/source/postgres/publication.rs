@@ -349,6 +349,22 @@ mod tests {
         assert_eq!(publication_verdict(&want, &have), PublicationVerdict::Match);
     }
 
+    /// A column list that differs in membership is drift, and one that differs only in order is not.
+    #[test]
+    fn a_column_list_differing_in_membership_is_drift() {
+        let want = [t("public", "a", Some(&["x", "y"]))];
+        let have = seen(vec![t("public", "a", Some(&["x", "z"]))]);
+        assert!(matches!(
+            publication_verdict(&want, &have),
+            PublicationVerdict::Drift(_)
+        ));
+        let fewer = seen(vec![t("public", "a", Some(&["x"]))]);
+        assert!(matches!(
+            publication_verdict(&want, &fewer),
+            PublicationVerdict::Drift(_)
+        ));
+    }
+
     /// Each kind of difference is named: a missing table, an extra one, a column list, a flag, FOR ALL TABLES, schema members.
     #[test]
     fn every_kind_of_drift_is_named() {
