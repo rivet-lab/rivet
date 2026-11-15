@@ -17,44 +17,9 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use super::files_with_extension;
 
-/// Stage a host directory of Parquet under the shared bind mount and hand back
-/// its in-container path, so a value claim can be read by DuckDB instead of by
-/// the same `parquet` crate rivet wrote it with.
-///
-/// The bridge exists because of a NAMESPACE boundary, not a data one. Tests
-/// write to their own `tempfile::tempdir()` — a real directory the host reads
-/// fine — but the validator containers have exactly ONE path mounted
-/// (`tests/.live-tmp` → `/work`), so from inside them that tempdir does not
-/// exist. The failure then surfaces as `0 rows` or "no files match", which
-/// reads as data loss and costs an hour before anyone suspects the mount. (It
-/// cost exactly that on 2026-08-05, when three tests run from a secondary git
-/// worktree failed and a merge was suspected first.)
-///
-/// Copying rather than moving: the caller still owns its directory and may
-/// assert on it afterwards. Test outputs here are kilobytes, and one DuckDB
-/// round trip is ~38 ms, so the copy is not the cost that matters.
+/// Copy `dir`'s parquet and csv into a fresh generation under the shared bind mount; the in-container path.
 pub fn stage_for_duckdb(dir: &Path) -> String {
-    // ONE stable directory per THREAD, contents cleared — never a fresh
-    // directory per call.
-    //
-    // The first version minted `stage_<pid>_<seq>` on every call: 193 new
-    // directories in a single parallel run, on a gRPC-FUSE bind mount whose
-    // documented failure mode (see `live_shared_workdir`) is that a container
-    // which has resolved a path keeps the OLD inode after a recreate and sees
-    // an empty directory forever. It showed up exactly as that comment
-    // predicts — green alone, one failure in the parallel suite, reading zero
-    // rows from a directory that was full.
-    //
-    // A per-thread name is stable across the thousands of calls one test binary
-    // makes, so the container resolves each path once and keeps seeing it.
     let tid = format!("{:?}", std::thread::current().id());
-    // PID + thread id: ThreadId is a PER-PROCESS counter, and the canonical
-    // runner (`make test-live` = nextest) runs every test in its OWN process
-    // with an identical startup sequence — so every concurrent test got the
-    // SAME small N and they cleared/graded each other's staged files (r3
-    // bughunt; the identical class rig::unique_name already fixed for oracle
-    // labels). The per-thread inode-stability property the comment above
-    // demands is preserved: within one process the label is still stable.
     let label = format!(
         "stage_p{}_t{}",
         std::process::id(),
@@ -63,10 +28,6 @@ pub fn stage_for_duckdb(dir: &Path) -> String {
             .collect::<String>()
     );
     let (host, container) = super::live_shared_workdir(&label);
-    // Both output formats rivet ships. Staging only parquet made every TEXT
-    // output unreadable through this seam — a CSV destination staged to an empty
-    // directory and DuckDB failed with "no files match", which reads as a broken
-    // test rather than a helper that cannot see the format under test.
     for ext in ["parquet", "csv"] {
         for f in files_with_extension(dir, ext) {
             let name = f.file_name().expect("output file has a name");
@@ -91,9 +52,6 @@ fn stage_declared_for_duckdb(dir: &Path) -> String {
         std::thread::current().id()
     );
     let (host, container) = super::live_shared_workdir(&label);
-    for f in std::fs::read_dir(&host).into_iter().flatten().flatten() {
-        let _ = std::fs::remove_file(f.path());
-    }
     for f in declared_parquet_parts(dir) {
         let name = f.file_name().expect("part has a name");
         std::fs::copy(&f, host.join(name))
