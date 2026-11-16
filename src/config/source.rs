@@ -1235,6 +1235,32 @@ mod tests {
     }
 
     #[test]
+    fn offline_scheme_check_reads_url_env_and_url_file() {
+        let wrong = "postgresql://carol@pg.example.com:5432/db";
+        let mut env_src = make_source(SourceType::Mysql);
+        env_src.url_env = Some("RIVET_TEST_I4_SCHEME_ENV".into());
+        // SAFETY: a name unique to this test, set before the read and removed after.
+        unsafe { std::env::set_var("RIVET_TEST_I4_SCHEME_ENV", wrong) };
+        let env_err = env_src.check_url_scheme_offline();
+        unsafe { std::env::remove_var("RIVET_TEST_I4_SCHEME_ENV") };
+        assert_eq!(
+            crate::error::error_code(&env_err.expect_err("url_env scheme")),
+            Some("RIVET_CONFIG_SOURCE_URL_SCHEME_MISMATCH")
+        );
+
+        let path = std::env::temp_dir().join(format!("rivet-i4-scheme-{}.url", std::process::id()));
+        std::fs::write(&path, format!("{wrong}\n")).unwrap();
+        let mut file_src = make_source(SourceType::Mysql);
+        file_src.url_file = Some(path.to_string_lossy().into_owned());
+        let file_err = file_src.check_url_scheme_offline();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(
+            crate::error::error_code(&file_err.expect_err("url_file scheme")),
+            Some("RIVET_CONFIG_SOURCE_URL_SCHEME_MISMATCH")
+        );
+    }
+
+    #[test]
     fn resolve_url_admits_a_matching_or_unknown_scheme() {
         let mut src = make_source(SourceType::Mssql);
         src.url = Some("mssql://sa@db:1433/d".into());
