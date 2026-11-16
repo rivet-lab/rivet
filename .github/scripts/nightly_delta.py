@@ -63,6 +63,8 @@ def red_keys(text: str) -> tuple[set[str], set[str]]:
             keys.add(known_red.nightly_key("test", m["test"], m["what"]))
         elif m := LIBTEST.match(line):
             keys.add(known_red.nightly_key("test", m["test"], "FAIL"))
+        elif cell := known_red.cell_of(line):
+            keys.add(cell)
         elif m := GATE_FAIL.match(line):
             keys.add(known_red.nightly_key("gate", f"{m['engine']}/{m['scenario']}", "FAIL"))
         for label, rx in CRASH:
@@ -155,6 +157,12 @@ def self_test() -> int:
     assert g(2, "  oracle     -      no_silent_null   -        FAIL oracle/NUMBER->float4\n")["new"] == ["nightly[gate|oracle/no_silent_null] FAIL"]
     assert g(2, "  oracle     -      no_silent_null   -        PASS ok\n⊘ KNOWN RED (until 2026-11-22: x)\n")["new"] == ["exit 2: no red class explains it"], \
         "KNOWN rows of the gate's own table are not red classes"
+    live = lambda cell: f"  live       batch  -                -        FAIL live modules FAILED · {cell} — [2026-11-16T00:13:32Z WARN rivet::config::source] inline url: plaintext password (see log)\n"  # noqa: E731
+    assert red_keys(live("m::a") + live("m::b"))[0] == {"m::a", "m::b"}, "two live cells are two red classes, whatever warning heads their first line"
+    assert red_keys("  ✗ audit suspects FAILED · m::a — boom (see log)\n" + live("m::a"))[0] == {"m::a"}, "one cell on its two lines is one class"
+    held = {"m::a": known_red.KnownRed("m::a — boom", "2026-11-16: why", "2026-11-22")}
+    assert grade_part(1, live("m::a"), held, today)["verdict"] == KNOWN, "a live cell the ledger holds is KNOWN"
+    assert grade_part(1, live("m::a") + live("m::b"), held, today)["new"] == ["m::b"], "a live cell the ledger does not hold is NEW by its own name"
     names = parts_of(ROOT / ".github" / "workflows" / "nightly-gate.yml", "part")
     assert "no-silent-null" in names and len(names) == len(set(names)), names
     with tempfile.TemporaryDirectory() as t:
