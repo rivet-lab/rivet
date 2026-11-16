@@ -245,34 +245,77 @@ pub(crate) fn sample_key_boundaries(
         .map(drop)?,
         ()
     );
-    let mut first = |preds: &[String], dir: &str| -> Result<Option<String>> {
-        let where_clause = if preds.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", preds.join(" AND "))
-        };
-        src.query_scalar(&format!(
-            "SELECT {k} FROM ({base}) {} {where_clause} ORDER BY {k}{dir} {}",
-            crate::sql::derived(st, "_rivet_pk"),
-            first_row_clause(st)
-        ))
-    };
-    let present = [fence.clone(), vec![format!("{k} IS NOT NULL")]].concat();
-    let (Some(lo), Some(hi)) = (first(&present, "")?, first(&present, " DESC")?) else {
-        return Ok(vec![]);
-    };
     let mut bounds: Vec<String> = Vec::with_capacity(parts.saturating_sub(1));
+    if let Err(e) = seek_bounds(src, plan, &k, &fence, parts, &mut bounds) {
+        log::warn!(
+            "export '{}': parallel keyset cannot seek the key to a split point ({e:#}); \
+             the keys above {} stay in one range: data is complete, with fewer workers.",
+            plan.export_name,
+            bounds
+                .last()
+                .map_or("its first value".to_string(), |b| format!("{b:?}"))
+        );
+    }
+    Ok(bounds)
+}
+
+/// Push onto `bounds` the key-space split points of the fenced MIN..MAX, each snapped to the next existing key; an error leaves the bounds found so far.
+fn seek_bounds(
+    src: &mut dyn Source,
+    plan: &ResolvedRunPlan,
+    k: &str,
+    fence: &[String],
+    parts: usize,
+    bounds: &mut Vec<String>,
+) -> Result<()> {
+    let st = plan.source.source_type;
+    let of = crate::source::query::KeyOf {
+        base: &plan.base_query,
+        expr: k,
+    };
+    let (Some(lo), Some(hi)) = (
+        seek_key(src, plan, k, fence, false)?,
+        seek_key(src, plan, k, fence, true)?,
+    ) else {
+        return Ok(());
+    };
     for cut in super::key_space::split(&lo, &hi, parts) {
         let after = bounds.last().unwrap_or(&lo);
-        let mut preds = fence.clone();
-        preds.push(format!("{k} >= {}", lit(&cut)));
-        preds.push(format!("{k} > {}", lit(after)));
-        match first(&preds, "")? {
+        let mut preds = fence.to_vec();
+        preds.push(format!(
+            "{k} >= {}",
+            crate::source::query::inline_literal(st, &cut, of)
+        ));
+        preds.push(format!(
+            "{k} > {}",
+            crate::source::query::inline_literal(st, after, of)
+        ));
+        match seek_key(src, plan, k, &preds, false)? {
             Some(b) if b != hi => bounds.push(b),
             _ => break,
         }
     }
-    Ok(bounds)
+    Ok(())
+}
+
+/// The first non-NULL key of the base query under `preds` in key order (the last with `desc`), by one index seek.
+fn seek_key(
+    src: &mut dyn Source,
+    plan: &ResolvedRunPlan,
+    k: &str,
+    preds: &[String],
+    desc: bool,
+) -> Result<Option<String>> {
+    let st = plan.source.source_type;
+    let preds = [preds, &[format!("{k} IS NOT NULL")]].concat();
+    src.query_scalar(&format!(
+        "SELECT {k} FROM ({}) {} WHERE {} ORDER BY {k}{} {}",
+        plan.base_query,
+        crate::sql::derived(st, "_rivet_pk"),
+        preds.join(" AND "),
+        if desc { " DESC" } else { "" },
+        first_row_clause(st)
+    ))
 }
 
 /// Sample the N key ranges for a FRESH parallel keyset run.
@@ -468,20 +511,17 @@ fn run_keyset_parallel(
             base: &plan.base_query,
             expr: &key_q,
         };
-        let past_anchor = anchor
+        let past_anchor: Vec<String> = anchor
             .as_deref()
             .map(|a| {
                 format!(
-                    " WHERE {key_q} > {}",
+                    "{key_q} > {}",
                     crate::source::query::inline_literal(st, a, of)
                 )
             })
-            .unwrap_or_default();
-        let cur_max = src.query_scalar(&format!(
-            "SELECT MAX({key_q}) FROM ({}) {}{past_anchor}",
-            plan.base_query,
-            crate::sql::derived(plan.source.source_type, "_rivet_pk_max")
-        ))?;
+            .into_iter()
+            .collect();
+        let cur_max = seek_key(src, plan, &key_q, &past_anchor, true)?;
         if cur_max.is_none() {
             log::info!(
                 "export '{}': parallel keyset incremental — no new rows past the anchor, nothing to export",
@@ -1705,6 +1745,7 @@ mod tests {
         numeric: bool,
         st: SourceType,
         sql: Vec<String>,
+        refuse: Option<&'static str>,
     }
     impl Indexed {
         /// A PostgreSQL table holding `keys` (sorted here), compared as numbers or as text.
@@ -1716,6 +1757,7 @@ mod tests {
                 numeric,
                 st: SourceType::Postgres,
                 sql: Vec::new(),
+                refuse: None,
             }
         }
         /// The key order the fake index keeps.
@@ -1778,6 +1820,9 @@ mod tests {
         }
         fn query_scalar(&mut self, sql: &str) -> Result<Option<String>> {
             self.sql.push(sql.to_string());
+            if self.refuse.is_some_and(|r| sql.contains(r)) {
+                anyhow::bail!("invalid input value for the key's type");
+            }
             let head = sql
                 .strip_suffix(&format!(" {}", first_row_clause(self.st)))
                 .unwrap_or_else(|| panic!("not a first-row seek: {sql}"));
@@ -1863,6 +1908,23 @@ mod tests {
                 .is_empty()
         );
         assert!(!none.sql[0].contains("> E"), "{}", none.sql[0]);
+    }
+
+    /// A seek the server refuses (a split point it cannot cast, an end value it cannot read) ends the sampling with the bounds found so far, not the run.
+    #[test]
+    fn a_seek_the_server_refuses_costs_ranges_not_the_run() {
+        let plan = crate::plan::test_support::test_plan();
+        for (refuse, want, reads) in [
+            ("E'750'", keys([250, 500]), 5),
+            (">=", vec![], 3),
+            (" DESC", vec![], 2),
+        ] {
+            let mut src = Indexed::new(keys(1..=1000), true);
+            src.refuse = Some(refuse);
+            let got = sample_key_boundaries(&mut src, &plan, "k", 4, None, None).unwrap();
+            assert_eq!(got, want, "refusing {refuse}");
+            assert_eq!(src.sql.len(), reads, "refusing {refuse}: {:?}", src.sql);
+        }
     }
 
     /// Whatever the keys and the fence, the sampled ranges hold every fenced row exactly once, each key value in one range, in at most N+1 seeks.

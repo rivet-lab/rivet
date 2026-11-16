@@ -1441,3 +1441,72 @@ fn a_skewed_parallel_keyset_key_reads_every_row_once_postgres() {
     );
     let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
 }
+
+/// A uuid key, which PostgreSQL has no MAX for, takes the incremental ceiling by a seek and re-reads only the keys past the anchor.
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn parallel_keyset_incremental_uuid_key_postgres() {
+    require_alive(LiveService::Postgres);
+    let table = unique_name("pk_inc_uuid");
+    let mut c = pg_connect();
+    let seed = |lo: i64, hi: i64| {
+        format!(
+            "INSERT INTO {table} SELECT lpad(to_hex(g), 32, '0')::uuid, g \
+             FROM generate_series({lo}, {hi}) g"
+        )
+    };
+    c.batch_execute(&format!(
+        "DROP TABLE IF EXISTS {table};
+         CREATE TABLE {table} (k UUID PRIMARY KEY, id BIGINT NOT NULL);
+         {};",
+        seed(1, 1000)
+    ))
+    .unwrap();
+    let rig = Rig::pg_batch(&format!("public.{table}"))
+        .mode("chunked")
+        .export_line("chunk_by_key: k")
+        .export_line("parallel: 4")
+        .export_line("chunk_checkpoint: true")
+        .export_line("keyset_incremental: true")
+        .export_line("chunk_size: 200");
+    let more = seed(1001, 1500);
+    assert_parallel_incremental(rig, || {
+        pg_connect().batch_execute(&more).unwrap();
+    });
+    let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
+}
+
+/// A datetimeoffset key, whose probe value is not a literal SQL Server can convert, keeps the run: every row once, the lost split named.
+#[test]
+#[ignore = "live: requires docker compose up -d mssql"]
+fn a_parallel_keyset_key_the_server_cannot_cast_a_split_point_to_keeps_the_run_mssql() {
+    require_alive(LiveService::Mssql);
+    let table = unique_name("pk_dto_ms");
+    mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));
+    mssql_exec(&format!(
+        "CREATE TABLE {table} (k DATETIMEOFFSET NOT NULL PRIMARY KEY, id BIGINT NOT NULL)"
+    ));
+    mssql_exec(&format!(
+        "WITH nums AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM nums WHERE n < 1000) \
+         INSERT INTO {table} (k, id) \
+         SELECT DATEADD(minute, n, CAST('2024-01-01 00:00:00 +00:00' AS DATETIMEOFFSET)), n FROM nums \
+         OPTION (MAXRECURSION 0)"
+    ));
+    let rig = Rig::mssql_batch(&table)
+        .mode("chunked")
+        .export_line("chunk_by_key: k")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 200");
+    let said = rig.run_ok_capture();
+    assert!(
+        said.contains("cannot seek the key to a split point"),
+        "the lost split is named: {said}"
+    );
+    let (count, keys, _) = id_set_and_fanout(&rig.out_dir());
+    assert_eq!(
+        (count, keys),
+        (1000, (1..=1000i64).collect::<BTreeSet<i64>>()),
+        "every source id delivered once"
+    );
+    mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));
+}
