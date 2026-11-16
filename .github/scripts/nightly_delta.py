@@ -33,7 +33,7 @@ LIBTEST = re.compile(r"^test (?P<test>\S+) \.\.\. FAILED$")
 GATE_FAIL = re.compile(r"^  (?P<engine>\S+)\s+\S+\s+(?P<scenario>\S+)\s+\S+\s+FAIL\b")
 CRASH = (
     ("python traceback", re.compile(r"^Traceback \(most recent call last\)")),
-    ("compile error", re.compile(r"^error(\[E\d+\])?: ")),
+    ("compile error", re.compile(r"^error(\[E\d+\]: |: (could not compile|aborting due to|failed to run custom build command|linking with))")),
     ("runner shutdown", re.compile(r"The runner has received a shutdown signal")),
 )
 LOST_EXITS = (137, 143)
@@ -147,6 +147,9 @@ def self_test() -> int:
     assert g(2, "")["verdict"] == NEW, "an exit no class explains is NEW, never green"
     assert g(1, known_line + "Traceback (most recent call last)\n")["verdict"] == NEW, "a crash beside acknowledged reds is NEW"
     assert g(1, known_line + "error[E0432]: unresolved import\n")["verdict"] == NEW, "a compile error beside acknowledged reds is NEW"
+    assert g(1, known_line + "error: could not compile `rivet` (lib) due to 1 previous error\n")["verdict"] == NEW, "cargo's own failure line is a compile error"
+    clap = "── init --table t --clickhouse-url u -o c.yaml (exit 2) ──\nerror: unexpected argument '--clickhouse-url' found\n"
+    assert g(1, known_line + clap)["verdict"] == KNOWN, "a child's refusal the harness echoes into the log is no compile error"
     assert g(0, known_line)["verdict"] == NEW, "red cells under exit 0 are an inconsistent part, NEW"
     assert g(143, known_line)["verdict"] == LOST and g(None, "")["verdict"] == LOST, "a killed or absent part is LOST"
     assert g(1, known_line, dt.date(2027, 1, 1))["verdict"] == NEW, "an expired acknowledgement blocks again"
