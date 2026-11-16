@@ -1264,3 +1264,20 @@ mod override_probe_tests {
             .unwrap();
     }
 }
+
+#[cfg(test)]
+mod grants_boundary_tests {
+    use crate::config::SourceType;
+
+    /// The boundary a MongoDB source states is its own, and each engine states one.
+    #[test]
+    fn each_engine_that_enforces_grants_states_its_own_boundary() {
+        let mongo = super::columns_from_grants_boundary(SourceType::Mongo);
+        let mysql = super::columns_from_grants_boundary(SourceType::Mysql);
+        assert!(
+            mongo.contains("view") && !mysql.contains("view"),
+            "{mongo}\n{mysql}"
+        );
+        assert!(!mysql.is_empty() && mongo != mysql && !mongo.contains("xyzzy"));
+    }
+}

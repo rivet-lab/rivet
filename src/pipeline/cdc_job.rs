@@ -1843,3 +1843,37 @@ mod tests {
         refuse_mixed_id_types(&config, &export, dir.path()).unwrap();
     }
 }
+
+#[cfg(test)]
+mod grants_tests {
+    use super::resolve_grants;
+
+    /// A `columns_from` CDC config of `source_type` against a server that cannot be reached, and its export.
+    fn dead(
+        source_type: &str,
+        url: &str,
+        columns_from: &str,
+    ) -> (crate::config::Config, crate::config::ExportConfig) {
+        let yaml = format!(
+            "source:\n  type: {source_type}\n  url: \"{url}\"\n{columns_from}exports:\n  - name: o\n    \
+             table: orders\n    mode: cdc\n    format: parquet\n    cdc:\n      checkpoint: ./o.ckpt\n    \
+             destination: {{ type: local, path: ./out }}\n"
+        );
+        let mut config = crate::config::Config::from_yaml(&yaml).unwrap();
+        let export = config.exports.remove(0);
+        (config, export)
+    }
+
+    const DEAD_MONGO: &str = "mongodb://u:p@127.0.0.1:1/app?serverSelectionTimeoutMS=300";
+
+    /// A MongoDB run with the policy reads the grants from its own server and fails there, a run without it reads none.
+    #[test]
+    fn a_mongo_run_resolves_its_grants_through_the_mongo_reader_only_with_the_policy() {
+        let (config, export) = dead("mongo", DEAD_MONGO, "  columns_from: grants\n");
+        let err = resolve_grants(&config, &export).unwrap_err();
+        let said = format!("{err:#}").to_lowercase();
+        assert!(said.contains("server selection"), "{said}");
+        let (config, export) = dead("mongo", DEAD_MONGO, "");
+        assert!(resolve_grants(&config, &export).unwrap().is_none());
+    }
+}

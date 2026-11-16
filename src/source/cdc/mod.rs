@@ -3051,3 +3051,27 @@ mod error_code_tests {
         assert!(super::raise_deferred(&None).is_ok());
     }
 }
+
+#[cfg(test)]
+mod grants_prerequisite_tests {
+    use super::{CdcEngine, DrainMode};
+
+    /// A MongoDB capture with the policy reads its grants before the anchor and refuses at an unreachable server; without it nothing is read.
+    #[test]
+    fn a_mongo_capture_reads_the_grants_only_with_the_policy() {
+        let url = "mongodb://u:p@127.0.0.1:1/app?serverSelectionTimeoutMS=300";
+        let tables = vec!["orders".to_string()];
+        let said = CdcEngine::Mongo
+            .refuse_unmet_prerequisites(url, None, &tables, DrainMode::BoundedAtOpen, true)
+            .unwrap_err();
+        assert!(
+            format!("{said:#}")
+                .to_lowercase()
+                .contains("server selection"),
+            "{said:#}"
+        );
+        CdcEngine::Mongo
+            .refuse_unmet_prerequisites(url, None, &tables, DrainMode::BoundedAtOpen, false)
+            .unwrap();
+    }
+}
