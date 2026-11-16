@@ -367,8 +367,8 @@ whose key already passed is silently never re-read. For a mutable table use
 ### Parallel keyset (`parallel: N`)
 
 By default keyset pages sequentially — each page seeks past the previous page's
-last key. Set `parallel: N` and Rivet instead splits the key into **N ROW-based
-percentile ranges** and seeks each range concurrently on its own connection:
+last key. Set `parallel: N` and Rivet instead splits the key into **N key
+ranges** and seeks each range concurrently on its own connection:
 
 ```yaml
     chunk_by_key: event_uuid
@@ -384,11 +384,17 @@ Per-range crash-recovery is tracked in the state DB (`chunk_checkpoint`): a run
 that dies resumes only the unfinished ranges.
 
 > **Sweet spot.** Extraction is I/O-bound, so the speedup plateaus early —
-> **~3.1× at `parallel: 4`** on an indexed table, little beyond 4. It is
-> tuned for **indexed tables up to ~10 M rows**. Past that, the range-boundary
-> sampler (an index `OFFSET` skip to find each percentile cut) grows costly at
-> **setup** — for very large tables prefer a range `chunk_column` (integer-PK),
-> which slices `MIN..MAX` arithmetically with no sampling pass.
+> **~3.1× at `parallel: 4`** on an indexed table, little beyond 4.
+>
+> **How the ranges are cut.** Rivet reads the key's `MIN` and `MAX`, splits that
+> span into N even steps of the key's own **value** (integer, float, uuid, date,
+> timestamp, or text), and snaps each cut to the next existing key — `N + 1`
+> index seeks, whatever the table size. The ranges are balanced when the key
+> values are spread evenly (a sequence, a random or time-ordered uuid). A
+> **skewed** key — most rows packed in one corner of its span, or a few far
+> outliers — gets uneven ranges, down to a single worker with a warning; the
+> run still reads every row once. For such a key, run it sequentially or pick
+> a range `chunk_column`.
 >
 > **Canary first.** Parallel keyset is new in 0.23.0. Run it on a canary table
 > and diff row counts against a sequential (`parallel: 1`) pass before rolling

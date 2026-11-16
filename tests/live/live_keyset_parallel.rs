@@ -1378,3 +1378,63 @@ fn parallel_keyset_sampler_reads_a_bounded_number_of_rows_postgres() {
     );
     let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
 }
+
+/// Rows each `pk_w{range}` range delivered, by range index, read from the parts themselves.
+fn rows_per_range(dir: &std::path::Path) -> std::collections::BTreeMap<usize, usize> {
+    let mut spread = std::collections::BTreeMap::new();
+    for part in declared_parquet_parts(dir) {
+        let name = part
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let range = name
+            .split("_pk_w")
+            .nth(1)
+            .and_then(|s| s.split('_').next())
+            .and_then(|r| r.parse().ok())
+            .unwrap_or_else(|| panic!("not a keyset range part: {name}"));
+        *spread.entry(range).or_insert(0) += parquet_rows(&part);
+    }
+    spread
+}
+
+/// A key with 90% of its rows in 5% of its span: every row once, in non-empty ranges that follow the key's value, not its row count.
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn a_skewed_parallel_keyset_key_reads_every_row_once_postgres() {
+    require_alive(LiveService::Postgres);
+    let table = unique_name("pk_skew");
+    let mut c = pg_connect();
+    c.batch_execute(&format!(
+        "DROP TABLE IF EXISTS {table};
+         CREATE TABLE {table} (id BIGINT PRIMARY KEY, payload INT NOT NULL);
+         INSERT INTO {table} SELECT g, g FROM generate_series(1, 18000) g;
+         INSERT INTO {table} SELECT 18000 + g * 171, g FROM generate_series(1, 2000) g;"
+    ))
+    .unwrap();
+    let rig = Rig::pg_batch(&format!("public.{table}"))
+        .mode("chunked")
+        .export_line("chunk_by_key: id")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000");
+    rig.run_ok();
+    let declared = |sql: &str| duckdb_declared_dir_scalar(&rig.out_dir(), sql);
+    assert_eq!(
+        (
+            declared("count(*)"),
+            declared("count(DISTINCT id)"),
+            declared("min(id)"),
+            declared("max(id)"),
+        ),
+        (20_000, 20_000, 1, 18_000 + 2_000 * 171),
+        "declared rows, distinct ids, id range"
+    );
+    let spread = rows_per_range(&rig.out_dir());
+    eprintln!("SPREAD {table}: {spread:?}");
+    assert_eq!(
+        spread.values().copied().collect::<Vec<_>>(),
+        vec![18_422, 526, 526, 526],
+        "rows per range"
+    );
+    let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
+}

@@ -275,7 +275,7 @@ pub(crate) fn sample_key_boundaries(
     Ok(bounds)
 }
 
-/// Sample the N ROW-percentile ranges for a FRESH parallel keyset run.
+/// Sample the N key ranges for a FRESH parallel keyset run.
 #[allow(clippy::type_complexity)]
 fn sample_parallel_ranges(
     src: &mut dyn Source,
@@ -538,8 +538,9 @@ fn run_keyset_parallel(
     if fan_out_collapsed(parallel, total_ranges) {
         log::warn!(
             "export '{}': parallel keyset requested {} workers but sampled 0 boundaries — \
-             running as a SINGLE worker. The key may be a type the boundary probe cannot \
-             read; data is complete but the parallel speed-up is absent.",
+             running as a SINGLE worker. The key may hold one value, be skewed (the ranges \
+             split its MIN..MAX by value), or be a type the boundary probe cannot read; \
+             data is complete but the parallel speed-up is absent.",
             plan.export_name,
             parallel
         );
@@ -1703,16 +1704,18 @@ mod tests {
     struct Indexed {
         keys: Vec<String>,
         numeric: bool,
+        st: SourceType,
         sql: Vec<String>,
     }
     impl Indexed {
-        /// A table holding `keys` (sorted here), compared as numbers or as text.
+        /// A PostgreSQL table holding `keys` (sorted here), compared as numbers or as text.
         fn new(mut keys: Vec<String>, numeric: bool) -> Self {
             let order = |a: &String, b: &String| Indexed::order(numeric, a, b);
             keys.sort_by(order);
             Indexed {
                 keys,
                 numeric,
+                st: SourceType::Postgres,
                 sql: Vec::new(),
             }
         }
@@ -1724,31 +1727,44 @@ mod tests {
                 a.cmp(b)
             }
         }
-        /// The `(operator, value)` predicates of a WHERE clause made of `"k" <op> E'<v>'` and `"k" IS NOT NULL` joined by AND.
-        fn predicates(mut w: &str) -> Vec<(String, String)> {
+        /// One quoted literal at the head of `w` in this dialect, and the text after it.
+        fn literal<'w>(&self, w: &'w str) -> (String, &'w str) {
+            let pg = self.st == SourceType::Postgres;
+            let backslash = pg || self.st == SourceType::Mysql;
+            let body = w.strip_prefix(if pg { "E'" } else { "'" }).unwrap();
+            let mut v = String::new();
+            let mut chars = body.char_indices().peekable();
+            while let Some((i, c)) = chars.next() {
+                match c {
+                    '\\' if backslash => v.push(chars.next().unwrap().1),
+                    '\'' if !backslash && chars.peek().is_some_and(|(_, n)| *n == '\'') => {
+                        chars.next();
+                        v.push('\'');
+                    }
+                    '\'' => return (v, &body[i + 1..]),
+                    c => v.push(c),
+                }
+            }
+            panic!("unterminated literal: {w}")
+        }
+        /// The `(operator, value)` predicates of a WHERE clause made of `k <op> '<v>'` and `k IS NOT NULL` joined by AND.
+        fn predicates(&self, mut w: &str) -> Vec<(String, String)> {
+            let k = format!("{} ", crate::sql::quote_ident(self.st, "k"));
             let mut out = Vec::new();
             while !w.is_empty() {
                 w = w
                     .strip_prefix(" AND ")
                     .unwrap_or(w)
-                    .strip_prefix("\"k\" ")
+                    .strip_prefix(&k)
                     .unwrap();
                 if let Some(rest) = w.strip_prefix("IS NOT NULL") {
                     w = rest;
                     continue;
                 }
-                let (op, rest) = w.split_once(" E'").unwrap();
-                let mut v = String::new();
-                let mut chars = rest.char_indices();
-                let end = loop {
-                    match chars.next().unwrap() {
-                        (_, '\\') => v.push(chars.next().unwrap().1),
-                        (i, '\'') => break i + 1,
-                        (_, c) => v.push(c),
-                    }
-                };
+                let (op, rest) = w.split_once(' ').unwrap();
+                let (v, rest) = self.literal(rest);
                 out.push((op.to_string(), v));
-                w = &rest[end..];
+                w = rest;
             }
             out
         }
@@ -1763,20 +1779,21 @@ mod tests {
         }
         fn query_scalar(&mut self, sql: &str) -> Result<Option<String>> {
             self.sql.push(sql.to_string());
+            let head = sql
+                .strip_suffix(&format!(" {}", first_row_clause(self.st)))
+                .unwrap_or_else(|| panic!("not a first-row seek: {sql}"));
             assert!(
-                !sql.contains("COUNT") && !sql.contains("OFFSET"),
+                !head.contains("COUNT") && !head.contains("OFFSET"),
                 "a scan: {sql}"
             );
-            let head = sql
-                .strip_suffix(" LIMIT 1")
-                .unwrap_or_else(|| panic!("not a first-row seek: {sql}"));
-            let (head, desc) = match head.strip_suffix(" ORDER BY \"k\" DESC") {
-                Some(h) => (h, true),
-                None => (head.strip_suffix(" ORDER BY \"k\"").unwrap(), false),
+            let order = format!(" ORDER BY {}", crate::sql::quote_ident(self.st, "k"));
+            let (head, desc) = match head.strip_suffix(" DESC") {
+                Some(h) => (h.strip_suffix(&order).unwrap(), true),
+                None => (head.strip_suffix(&order).unwrap(), false),
             };
             let preds = head
                 .split_once(" WHERE ")
-                .map_or(vec![], |(_, w)| Indexed::predicates(w));
+                .map_or(vec![], |(_, w)| self.predicates(w));
             let numeric = self.numeric;
             let hit = |k: &&String| {
                 preds.iter().all(|(op, v)| {
@@ -1878,6 +1895,57 @@ mod tests {
                 prop_assert_eq!(held, usize::from(fenced), "key {:?} in {:?}", k, ranges);
             }
         });
+    }
+
+    /// A key with 90% of its rows in 5% of its span keeps every row once in non-empty ranges, which follow the key's value, not its row count.
+    #[test]
+    fn a_skewed_key_keeps_every_row_once_in_value_balanced_ranges() {
+        let plan = crate::plan::test_support::test_plan();
+        let dense = 1..=9_000i64;
+        let sparse = (1..=1_000i64).map(|i| 9_000 + i * 191);
+        let mut src = Indexed::new(keys(dense.chain(sparse)), true);
+        let all = src.keys.clone();
+        let bounds = sample_key_boundaries(&mut src, &plan, "k", 4, None, None).unwrap();
+        let ranges = partition_ranges(&bounds, None, None);
+        let held = |lo: &Option<String>, hi: &Option<String>| {
+            all.iter()
+                .filter(|k| {
+                    lo.as_deref()
+                        .is_none_or(|l| Indexed::order(true, k, l).is_gt())
+                        && hi
+                            .as_deref()
+                            .is_none_or(|h| Indexed::order(true, k, h).is_le())
+                })
+                .count()
+        };
+        let spread: Vec<usize> = ranges.iter().map(|(_, lo, hi, _)| held(lo, hi)).collect();
+        assert_eq!(spread.iter().sum::<usize>(), all.len(), "{spread:?}");
+        assert_eq!(spread, vec![9_215, 262, 262, 261], "{bounds:?}");
+    }
+
+    /// Every SQL dialect samples by first-row seeks alone and lands on the same boundaries, for number and text keys.
+    #[test]
+    fn every_dialect_samples_by_seeks_to_the_same_boundaries() {
+        let mut plan = crate::plan::test_support::test_plan();
+        let text = || keys(["a'0", "a'5", "b\\1", "c", "d", "e'x", "f", "g", "h"]);
+        for st in [
+            SourceType::Postgres,
+            SourceType::Mysql,
+            SourceType::Mssql,
+            SourceType::Oracle,
+        ] {
+            plan.source.source_type = st;
+            for (keys, numeric, want) in [
+                (keys(1..=1000), true, keys([250, 500, 750])),
+                (text(), false, keys(["c", "e'x", "g"])),
+            ] {
+                let mut src = Indexed::new(keys, numeric);
+                src.st = st;
+                let got = sample_key_boundaries(&mut src, &plan, "k", 4, None, None).unwrap();
+                assert_eq!(got, want, "{st:?}: {:?}", src.sql);
+                assert_eq!(src.sql.len(), 5, "{st:?}");
+            }
+        }
     }
 
     /// Evenly spread keys split into even ranges, whatever the table size.
