@@ -119,13 +119,6 @@ fn parquet_dirs(dir: &Path) -> Vec<std::path::PathBuf> {
     dirs
 }
 
-fn delivered_parts(rig: &Rig) -> Vec<arrow::record_batch::RecordBatch> {
-    parquet_dirs(&rig.out_dir())
-        .iter()
-        .flat_map(|d| read_all_parts(d))
-        .collect()
-}
-
 fn names_and_cells(parts: &[arrow::record_batch::RecordBatch]) -> (Vec<String>, Vec<String>) {
     let (mut names, mut cells) = (Vec::new(), Vec::new());
     for b in parts {
@@ -211,7 +204,12 @@ fn a_view_account_delivers_no_hidden_field_by_name_or_value_in_batch_mongo() {
     );
     rig.run_ok();
 
-    let (names, cells) = names_and_cells(&delivered_parts(&rig));
+    let (names, cells) = names_and_cells(
+        &parquet_dirs(&rig.out_dir())
+            .iter()
+            .flat_map(|d| read_all_parts(d))
+            .collect::<Vec<_>>(),
+    );
     assert!(
         !cells
             .iter()
@@ -395,7 +393,12 @@ fn a_batch_without_the_policy_reads_every_field_as_before_mongo() {
     seed_people(&account);
     let rig = Rig::mongo_batch(&account.base).source_url(&ViewAccount::admin_url(&account.db));
     rig.run_ok();
-    let (_, cells) = names_and_cells(&delivered_parts(&rig));
+    let (_, cells) = names_and_cells(
+        &parquet_dirs(&rig.out_dir())
+            .iter()
+            .flat_map(|d| read_all_parts(d))
+            .collect::<Vec<_>>(),
+    );
     assert!(
         cells.iter().any(|c| c.contains(&format!("{SECRET}one")))
             && cells.iter().any(|c| c.contains(&format!("{SECRET}two"))),
@@ -437,7 +440,10 @@ fn a_view_account_delivers_no_hidden_field_in_cdc_mongo() {
     account.admin.delete_one("people", 2);
     rig.run_ok();
 
-    let parts = delivered_parts(&rig);
+    let parts = parquet_dirs(&rig.out_dir())
+        .iter()
+        .flat_map(|d| read_all_parts(d))
+        .collect::<Vec<_>>();
     let (names, cells) = names_and_cells(&parts);
     assert!(
         !cells
@@ -480,7 +486,11 @@ fn an_update_of_hidden_fields_only_advances_the_checkpoint_mongo() {
     let rig = cdc_rig(&account);
     rig.run_ok();
     let pinned = std::fs::read(rig.checkpoint()).unwrap();
-    let before = delivered_parts(&rig).len();
+    let before = parquet_dirs(&rig.out_dir())
+        .iter()
+        .flat_map(|d| read_all_parts(d))
+        .collect::<Vec<_>>()
+        .len();
 
     account
         .admin
@@ -492,7 +502,10 @@ fn an_update_of_hidden_fields_only_advances_the_checkpoint_mongo() {
         std::fs::read(rig.checkpoint()).unwrap(),
         "the checkpoint must move past an event that shows nothing"
     );
-    let parts = delivered_parts(&rig);
+    let parts = parquet_dirs(&rig.out_dir())
+        .iter()
+        .flat_map(|d| read_all_parts(d))
+        .collect::<Vec<_>>();
     assert_eq!(
         parts.len(),
         before,
@@ -546,7 +559,12 @@ fn a_cdc_stream_without_the_policy_delivers_every_field_as_before_mongo() {
         .admin
         .upsert_fields("people", 1, doc! { "pass": format!("{SECRET}x") });
     rig.run_ok();
-    let got = changes(&delivered_parts(&rig));
+    let got = changes(
+        &parquet_dirs(&rig.out_dir())
+            .iter()
+            .flat_map(|d| read_all_parts(d))
+            .collect::<Vec<_>>(),
+    );
     assert_eq!(got.len(), 1, "{got:?}");
     assert!(
         got[0].2.contains(&format!("{SECRET}x")),

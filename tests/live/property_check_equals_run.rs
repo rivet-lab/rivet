@@ -1157,7 +1157,7 @@ fn assert_ledger(rows: &[String], whole: bool) {
 fn stand_free(engine: SourceType, shape: Shape) -> bool {
     match shape {
         Shape::SecretMalformed => true,
-        Shape::GrantGap => !matches!(engine, SourceType::Mysql),
+        Shape::GrantGap => !matches!(engine, SourceType::Mysql | SourceType::Mongo),
         Shape::Clean
         | Shape::OverrideRefused
         | Shape::CursorMissing
@@ -1211,7 +1211,7 @@ fn run_raw_cells(
                 );
                 continue;
             }
-            if s == Shape::GrantGap && e == SourceType::Mysql {
+            if s == Shape::GrantGap && matches!(e, SourceType::Mysql | SourceType::Mongo) {
                 continue;
             }
             let h = raw_cell(e, s, &url_of(e));
