@@ -461,6 +461,20 @@ mod tests {
     }
 
     #[test]
+    fn a_projection_value_keeps_a_field_when_it_is_true_or_a_non_zero_number() {
+        for (on, off) in [
+            (Bson::Boolean(true), Bson::Boolean(false)),
+            (Bson::Int32(1), Bson::Int32(0)),
+            (Bson::Int64(2), Bson::Int64(0)),
+            (Bson::Double(0.5), Bson::Double(0.0)),
+        ] {
+            assert_eq!(includes(&on), Some(true), "{on:?}");
+            assert_eq!(includes(&off), Some(false), "{off:?}");
+        }
+        assert_eq!(includes(&Bson::String("$b".into())), None);
+    }
+
+    #[test]
     fn a_view_that_names_no_fixed_list_of_fields_is_refused_with_the_cause() {
         for (pipeline, said) in [
             (Vec::new(), "has 0 pipeline stages"),
