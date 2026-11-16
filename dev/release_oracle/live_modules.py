@@ -261,7 +261,7 @@ def coverage_problems(table: list[tuple[str, str, bool]], modules: list[str], de
     return out
 
 
-#: 2026-11-16: a hosted slice over this many minutes lost its runner (run 43633356678); raised 50 to 70 when the model was re-based on measured total_min (run 43775080610: slices of 67 and 72 min survived).
+#: 2026-11-16: wall-time budget of a hosted slice, 70 min of total_min; the old count-based cut predicts 77 and 74; raised 50 to 70 on the re-measured basis (run 43775080610: slices of 67 and 72 min ran). Not a runner-survival bound: the build starves the runner of memory (runs 43633356678, 43820913848).
 SLICE_CEILING_MIN = 70
 
 
