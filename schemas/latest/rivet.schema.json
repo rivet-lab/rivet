@@ -178,7 +178,7 @@
           "default": null
         },
         "columns_from": {
-          "description": "`grants`: every export reads and delivers only the columns the source account may `SELECT` (MySQL only).",
+          "description": "`grants`: every export reads and delivers only the columns the source account may `SELECT` (MySQL and Oracle only).",
           "anyOf": [
             {
               "$ref": "#/$defs/ColumnsFrom"

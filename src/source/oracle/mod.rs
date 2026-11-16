@@ -2,6 +2,7 @@
 
 mod arrow_convert;
 pub(crate) mod cdc;
+pub(crate) mod column_grants;
 mod kind;
 
 use kind::OraKind;
@@ -802,6 +803,13 @@ impl Source for OracleSource {
             })
             .to_string(),
         )
+    }
+
+    fn readable_columns(
+        &mut self,
+        table: &str,
+    ) -> Result<Option<crate::source::cdc::ReadableColumns>> {
+        column_grants::readable_relation(self, table).map(|(_, _, r)| Some(r))
     }
 
     fn primary_key(&mut self, table: &str) -> Result<Option<Vec<String>>> {

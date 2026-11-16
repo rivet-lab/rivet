@@ -365,7 +365,7 @@ pub(super) fn record_file_anchor(
 pub(super) type RunGrants =
     std::sync::Arc<std::collections::HashMap<String, crate::source::cdc::ReadableColumns>>;
 
-/// Read the account's grants once for a `columns_from: grants` MySQL CDC run.
+/// Read the account's grants once for a `columns_from: grants` MySQL or Oracle CDC run.
 pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<Option<RunGrants>> {
     if !config.source.columns_from_grants() {
         return Ok(None);
@@ -376,7 +376,10 @@ pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<O
         (None, None) => return Ok(None),
     };
     if seeded!("column-grants-boundary-unsaid", false, true) {
-        log::info!("{}", crate::source::mysql::column_grants::BOUNDARY);
+        log::info!(
+            "{}",
+            crate::source::columns_from_grants_boundary(config.source.source_type)
+        );
     }
     let declared = tables
         .iter()
@@ -386,12 +389,20 @@ pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<O
                 .map(|k| (t.clone(), k))
         })
         .collect();
-    crate::source::mysql::cdc::MysqlChangeStream::resolve_grants(
-        config.source.resolve_url()?.expose(),
-        config.source.tls.as_ref(),
-        &tables,
-        &declared,
-    )
+    let secret = config.source.resolve_url()?;
+    let url = secret.expose();
+    let tls = config.source.tls.as_ref();
+    match config.source.source_type {
+        #[cfg(feature = "oracle")]
+        crate::config::SourceType::Oracle => {
+            crate::source::oracle::column_grants::resolve_grants(url, tls, &tables, &declared)
+        }
+        #[cfg(not(feature = "oracle"))]
+        crate::config::SourceType::Oracle => Err(crate::source::oracle_feature_missing()),
+        _ => crate::source::mysql::cdc::MysqlChangeStream::resolve_grants(
+            url, tls, &tables, &declared,
+        ),
+    }
     .map(Some)
 }
 
@@ -777,13 +788,11 @@ fn run_cdc_inner(
                 "blocks on the change stream awaiting events and stays up until stopped \
                  (it ends only if the stream is invalidated or closed)"
             }
-            _ => {
-                concat!(
-                    "removes the open-time ceiling but STILL EXITS ON CATCH-UP — on ",
-                    "this engine it is one unbounded pass, not a daemon; run it under ",
-                    "a supervisor that restarts it, or use the scheduler model instead",
-                )
-            }
+            _ => concat!(
+                "removes the open-time ceiling but STILL EXITS ON CATCH-UP — on ",
+                "this engine it is one unbounded pass, not a daemon; run it under ",
+                "a supervisor that restarts it, or use the scheduler model instead",
+            ),
         };
         log::warn!(
             concat!(
@@ -833,6 +842,7 @@ fn run_cdc_inner(
                     },
                     crate::config::SourceType::Oracle => CdcEngineOpts::Oracle {
                         configured_tables: wired.iter().map(|(t, _, _)| t.clone()).collect(),
+                        resolved_grants: grants,
                     },
                     crate::config::SourceType::Mongo => CdcEngineOpts::Mongo {
                         canonical: config.source.mongo.as_ref().is_some_and(|m| {

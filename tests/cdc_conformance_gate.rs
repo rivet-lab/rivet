@@ -943,7 +943,8 @@ const PIN_INDEPENDENT: usize = 119; // ratchet-pin: cdc-census-independent (revi
 // 133 -> 134 (2026-11-03, TF-2): the MySQL ENUM/SET label cell reads the stream and snapshot parts with arrow against the labels the test created; the rig oracle grades both legs against the source.
 // 134 -> 138 (2026-11-11): the PG relation-name, column-name and server-text cells and the bit-column remedy cell read the delivered parts with arrow against the rows the test wrote; the rig oracle grades each run.
 // 138 -> 139 (2026-11-11): the MySQL zero and partial date cell counts the NULL cells of the batch and the CDC part with arrow; the WARN text is its subject.
-const PIN_SHARED_CODEC: usize = 139; // ratchet-pin: cdc-census-shared-codec (review 2027-02-01)
+// 139 -> 140 (2026-11-16, #714): the Oracle whole-table cell reads the delivered parts with arrow against the rows the test wrote; the rig oracle grades each run.
+const PIN_SHARED_CODEC: usize = 140; // ratchet-pin: cdc-census-shared-codec (review 2027-02-01)
 const PIN_SELF_COUNTER: usize = 6; // ratchet-pin: cdc-census-self-counter (review 2027-02-01)
 // 2026-09-28: +1 presence — the SQL Server undecodable-cell refusal, whose oracle is the refusal.
 // 2026-09-29: +2 presence — the PG CDC LMT-timezone and DOMAIN parity cells compare CDC to batch output.
@@ -968,8 +969,9 @@ const PIN_SELF_COUNTER: usize = 6; // ratchet-pin: cdc-census-self-counter (revi
 // 89 -> 93 (2026-10-21, #675): four MySQL bare-name cells read every part's ids and compare them with the rows written to each database.
 // 93 -> 102 (2026-10-29, #719): column-grants cells whose oracle is a coded refusal, an unmoved checkpoint or the part set a refused run left.
 // 102 -> 105 (2026-10-30): MySQL RESET MASTER resume cells whose oracle is a coded refusal and an unmoved checkpoint, or a warning; the rig oracle grades every run.
+// 107 -> 113 (2026-11-16, #714): six Oracle columns_from: grants cells, whose oracle is the coded refusal or the delivered column set read back from the parts.
 // 105 -> 107 (2026-11-11): the two PG bit-column refusal cells, whose oracle is the coded refusal, no snapshot and only a failure record left.
-const PIN_PRESENCE: usize = 107; // ratchet-pin: cdc-census-presence (review 2027-02-01)
+const PIN_PRESENCE: usize = 113; // ratchet-pin: cdc-census-presence (review 2027-02-01)
 
 /// TIER 2 (harness audit, 2026-08-29): a test whose NAME makes a
 /// COMPLETENESS claim must carry a class-(a) INDEPENDENT oracle — not merely

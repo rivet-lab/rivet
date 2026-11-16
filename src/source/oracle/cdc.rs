@@ -1,6 +1,6 @@
 //! Oracle change capture through LogMiner (ADR-0037).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -12,7 +12,9 @@ use crate::config::TlsConfig;
 use crate::error::Result;
 use crate::source::cdc::checkpoint_identity::IdentityVerdict;
 use crate::source::cdc::value::RivetValue;
-use crate::source::cdc::{CdcEngine, ChangeEvent, ChangeOp, ChangeStream, Position, TxnFramer};
+use crate::source::cdc::{
+    CdcEngine, ChangeEvent, ChangeOp, ChangeStream, Position, ReadableColumns, TxnFramer,
+};
 
 /// LogMiner returns names over 30 bytes as `UNSUPPORTED`.
 const MAX_MINED_NAME: usize = 30;
@@ -669,7 +671,47 @@ pub(crate) fn catalog_column(r: &[Option<String>]) -> CatalogColumn {
     }
 }
 
-fn resolve_tables(conn: &Connection, configured: &[String]) -> Result<Vec<Captured>> {
+/// The grants a `columns_from: grants` run resolved before its anchor, by configured table.
+pub(crate) type Grants = Arc<HashMap<String, ReadableColumns>>;
+
+/// The columns of `configured` the run may deliver: the catalog's, narrowed to the resolved grants when there are any.
+pub(crate) fn under_grants(
+    columns: Vec<(String, ColKind)>,
+    configured: &str,
+    grants: Option<&HashMap<String, ReadableColumns>>,
+) -> Result<Vec<(String, ColKind)>> {
+    let Some(grants) = grants else {
+        return Ok(columns);
+    };
+    let Some(readable) = grants.get(configured) else {
+        crate::rivet_bail!(
+            crate::error::codes::SOURCE_CDC_GRANTS_CHANGED,
+            "oracle cdc: `{configured}` was not part of the grants this run resolved under \
+             `columns_from: grants`; nothing was read or written"
+        );
+    };
+    if let Some(gone) = readable
+        .columns
+        .iter()
+        .find(|c| !columns.iter().any(|(n, _)| n == *c))
+    {
+        crate::rivet_bail!(
+            crate::error::codes::SOURCE_CDC_GRANTS_CHANGED,
+            "oracle cdc: `{configured}` no longer has the column `{gone}` the run resolved under \
+             `columns_from: grants`; nothing was read or written"
+        );
+    }
+    Ok(columns
+        .into_iter()
+        .filter(|(n, _)| readable.columns.contains(n))
+        .collect())
+}
+
+fn resolve_tables(
+    conn: &Connection,
+    configured: &[String],
+    grants: Option<&HashMap<String, ReadableColumns>>,
+) -> Result<Vec<Captured>> {
     let major: u32 = scalar(conn, MAJOR_VERSION_SQL)?
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
@@ -688,10 +730,14 @@ fn resolve_tables(conn: &Connection, configured: &[String]) -> Result<Vec<Captur
         let (o, t) = (cell(&cols[0], 0), cell(&cols[0], 1));
         let catalog: Vec<CatalogColumn> = cols.iter().map(|r| catalog_column(r)).collect();
         refuse_unmineable(&o, &t, &catalog, major)?;
-        let columns: Vec<(String, ColKind)> = catalog
-            .iter()
-            .filter_map(|c| ColKind::of(&c.data_type).map(|k| (c.name.clone(), k)))
-            .collect();
+        let columns: Vec<(String, ColKind)> = under_grants(
+            catalog
+                .iter()
+                .filter_map(|c| ColKind::of(&c.data_type).map(|k| (c.name.clone(), k)))
+                .collect(),
+            cfg,
+            grants,
+        )?;
         let (ev_schema, ev_table) = event_spelling(cfg);
         let names: Arc<[String]> = columns.iter().map(|(n, _)| n.clone()).collect();
         let rowid_stable = scalar(
@@ -1010,6 +1056,8 @@ pub(crate) struct OracleChangeStream {
     remines: u32,
     /// Online files of the current session not yet proven read whole.
     unverified: Vec<LogFile>,
+    /// The grants the run resolved before its anchor.
+    grants: Option<Grants>,
 }
 
 /// One mined row that matters to the stream.
@@ -1049,6 +1097,7 @@ impl OracleChangeStream {
         tls: Option<&TlsConfig>,
         checkpoint: Option<&Path>,
         tables: &[String],
+        grants: Option<Grants>,
     ) -> Result<Self> {
         let checkpoint = checkpoint.ok_or_else(|| {
             crate::error::coded(
@@ -1071,7 +1120,7 @@ impl OracleChangeStream {
         let captured_early = if seeded!("cdc-anchor-written-before-the-refusal", true, false) {
             None
         } else {
-            Some(vetted_tables(&conn, tables)?)
+            Some(vetted_tables(&conn, tables, grants.as_deref())?)
         };
         let low_water = low_water_here(&conn)?;
         let identity = root_identity(&conn, con_name, con_dbid)?;
@@ -1089,7 +1138,7 @@ impl OracleChangeStream {
         };
         let captured = match captured_early {
             Some(captured) => captured,
-            None => vetted_tables(&conn, tables)?,
+            None => vetted_tables(&conn, tables, grants.as_deref())?,
         };
         let mut stream = Self {
             conn,
@@ -1108,6 +1157,7 @@ impl OracleChangeStream {
             mined_through: from.commit_scn,
             remines: 0,
             unverified: Vec::new(),
+            grants,
         };
         if !stream.exhausted {
             stream.mine()?;
@@ -1549,6 +1599,10 @@ impl ChangeStream for OracleChangeStream {
     fn engine(&self) -> CdcEngine {
         CdcEngine::Oracle
     }
+
+    fn readable_columns(&self, configured: &str) -> Option<ReadableColumns> {
+        self.grants.as_ref()?.get(configured).cloned()
+    }
 }
 
 /// Doctor's view of the prerequisites: `(check, Ok(detail) | Err(problem))` per item.
@@ -1560,7 +1614,7 @@ pub(crate) fn prerequisites(
     let conn = connect(url, tls)?;
     let (_, con_name, con_dbid) = container(&conn)?;
     let mut out = Vec::new();
-    match resolve_tables(&conn, tables) {
+    match resolve_tables(&conn, tables, None) {
         Ok(t) => {
             out.push(("CDC tables", Ok(format!("{} table(s) capturable", t.len()))));
             out.push((
@@ -1593,8 +1647,12 @@ pub(crate) fn checkpoint_problem(pos: &Position, path: &str) -> Option<String> {
 }
 
 /// Anchor a first run: persist the open-time frontier so an idle first run still has a start.
-fn vetted_tables(conn: &Connection, tables: &[String]) -> Result<Vec<Captured>> {
-    let captured = resolve_tables(conn, tables)?;
+fn vetted_tables(
+    conn: &Connection,
+    tables: &[String],
+    grants: Option<&HashMap<String, ReadableColumns>>,
+) -> Result<Vec<Captured>> {
+    let captured = resolve_tables(conn, tables, grants)?;
     if let Some(why) = logging_check(conn, &captured)? {
         crate::rivet_bail!(
             crate::error::codes::SOURCE_CDC_PREREQUISITE,
@@ -1612,7 +1670,7 @@ pub(crate) fn refuse_unmet_prerequisites(
 ) -> Result<()> {
     let conn = connect(url, tls)?;
     container(&conn)?;
-    vetted_tables(&conn, tables).map(|_| ())
+    vetted_tables(&conn, tables, None).map(|_| ())
 }
 
 pub(crate) fn pin_checkpoint_at_current(
@@ -1644,6 +1702,64 @@ mod tests {
             names: Arc::from(cols.iter().map(|c| c.to_string()).collect::<Vec<_>>()),
             rowid_stable: true,
         }
+    }
+
+    fn catalog_of(names: &[&str]) -> Vec<(String, ColKind)> {
+        names
+            .iter()
+            .map(|n| (n.to_string(), ColKind::Text))
+            .collect()
+    }
+
+    fn grants_of(names: &[&str]) -> HashMap<String, ReadableColumns> {
+        let columns: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+        HashMap::from([(
+            "RIVET.T".to_string(),
+            ReadableColumns {
+                select: String::new(),
+                columns,
+            },
+        )])
+    }
+
+    #[test]
+    fn without_grants_every_catalog_column_is_kept_as_it_was() {
+        let all = catalog_of(&["ID", "NAME", "PASS"]);
+        assert_eq!(under_grants(all.clone(), "RIVET.T", None).unwrap(), all);
+    }
+
+    #[test]
+    fn under_grants_only_the_readable_columns_are_kept_in_table_order() {
+        let kept = under_grants(
+            catalog_of(&["ID", "NAME", "PASS"]),
+            "RIVET.T",
+            Some(&grants_of(&["ID", "NAME"])),
+        )
+        .unwrap();
+        assert_eq!(kept, catalog_of(&["ID", "NAME"]));
+    }
+
+    #[test]
+    fn a_table_outside_the_resolved_grants_or_a_vanished_column_stops_by_code() {
+        let code =
+            |r: Result<Vec<(String, ColKind)>>| crate::error::code_of(&r.expect_err("refused"));
+        let want = Some(crate::error::codes::SOURCE_CDC_GRANTS_CHANGED);
+        assert_eq!(
+            code(under_grants(
+                catalog_of(&["ID"]),
+                "RIVET.OTHER",
+                Some(&grants_of(&["ID"]))
+            )),
+            want
+        );
+        assert_eq!(
+            code(under_grants(
+                catalog_of(&["ID"]),
+                "RIVET.T",
+                Some(&grants_of(&["ID", "NAME"]))
+            )),
+            want
+        );
     }
 
     #[test]

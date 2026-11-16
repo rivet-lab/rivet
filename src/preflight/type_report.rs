@@ -215,6 +215,32 @@ struct ReportUnit {
     relation: Option<String>,
 }
 
+/// The readable columns of each named table for a `columns_from: grants` source.
+fn readable_by_table(
+    source_type: SourceType,
+    url: &str,
+    tls: Option<&crate::config::TlsConfig>,
+    tables: &[String],
+) -> Result<std::collections::HashMap<String, crate::source::cdc::ReadableColumns>> {
+    match source_type {
+        SourceType::Mysql => {
+            crate::source::mysql::cdc::MysqlChangeStream::readable_columns_at(url, tls, tables)
+        }
+        #[cfg(feature = "oracle")]
+        SourceType::Oracle => {
+            let mut src = crate::source::oracle::OracleSource::connect_with_tls(url, tls)?;
+            let mut by_table = std::collections::HashMap::new();
+            for t in tables {
+                if let Some(r) = crate::source::Source::readable_columns(&mut src, t)? {
+                    by_table.insert(t.clone(), r);
+                }
+            }
+            Ok(by_table)
+        }
+        _ => Ok(std::collections::HashMap::new()),
+    }
+}
+
 /// The export's resolver units, a SQL Server capture instance resolved to the relation it captures.
 fn resolved_units(
     config: &Config,
@@ -304,10 +330,9 @@ fn resolved_units(
             (Err(_), None) | (Ok(None), None) => unreachable!("every non-resolution has a reason"),
         }
     }
-    if config.source.source_type == SourceType::Mysql && config.source.columns_from_grants() {
+    if config.source.columns_from_grants() {
         let tables: Vec<String> = units.iter().filter_map(|u| u.relation.clone()).collect();
-        let readable =
-            crate::source::mysql::cdc::MysqlChangeStream::readable_columns_at(url, tls, &tables)?;
+        let readable = readable_by_table(config.source.source_type, url, tls, &tables)?;
         for unit in &mut units {
             if let Some(r) = unit.relation.as_ref().and_then(|t| readable.get(t)) {
                 unit.query = r.select.clone();
