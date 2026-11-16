@@ -1,0 +1,15 @@
+--- a/src/pipeline/validate_manifest.rs
++++ b/src/pipeline/validate_manifest.rs
+@@ -496,11 +496,7 @@
+     manifest_dir: &str,
+     depth: ValidateDepth,
+ ) -> Result<ManifestVerification> {
+-    let mut verdict = verify_unredacted(dest, manifest_dir, depth)?;
+-    for failure in &mut verdict.failures {
+-        failure.redact_store_text();
+-    }
+-    Ok(verdict)
++    verify_unredacted(dest, manifest_dir, depth)
+ }
+ 
+ /// The verdict at `manifest_dir` with the destination's error text as the store returned it.
