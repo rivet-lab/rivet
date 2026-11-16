@@ -26,9 +26,9 @@ commit is the fix for. A cell that fails on the previous release only because it
 stand was down (the `live test requires ... reachable on` panic, or the stand watchdog's
 verdict over its run) is NOT PROVEN: INFRA, so the gate is NOT GRADED; bring the stand up and run it again.
 
-When the baseline moves to the next release, the tag moves with it: the set
-starts again from the fixes made after that release, and every GREEN_ON_PREV or
-FIX_SCOPE entry it no longer contains is reported STALE until it is removed.
+Each ledger entry is keyed by its fix commit. When the baseline moves to the next release the tag moves with it:
+the set starts again from the fixes made after that release, and an entry whose commit is in the new tag's history
+is inert (its fix shipped), never red. An entry whose commit is after the tag but touches nothing is STALE.
 
     RIVET_PREV_RELEASE_BIN=<old rivet> python3 -m dev.release_oracle.fix_cells [cell ...]
     python3 -m dev.release_oracle.fix_cells --self-test
@@ -39,7 +39,9 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
 
 from . import stand_health
 from .core import ROOT, Ledger, SkipCause, run
@@ -47,138 +49,45 @@ from .core import ROOT, Ledger, SkipCause, run
 __all__ = ["verify_fix_cells", "GREEN_ON_PREV", "FIX_SCOPE", "NO_LIVE_CELL"]
 
 SCEN = "fix_cells"
+V = TypeVar("V")
 GIT = "/usr/bin/git" if Path("/usr/bin/git").exists() else "git"
 FIX = re.compile(r"fix[(:!]")
 TEST = re.compile(r"^#\[test\]\n(?:#\[[^\n]*\n)*(?:pub )?fn (\w+)\(\) \{\n(.*?)^\}", re.M | re.S)
-#: Fix cells allowed to pass on the previous release, each with its reason. Shrink-only.
-GREEN_ON_PREV: dict[str, str] = {  # ratchet-pin: fix-cells-green-on-previous-release (review 2027-02-01) strings
-    "a_mongo_re_snapshot_over_a_log_holding_the_stream_is_refused_until_truncated_bigquery":
-        "2026-11-01: #737 second commit pins a refusal the BigQuery loader already made on 0.32.2; no product change in it, a regression guard for the new Mongo order",
-    "a_table_swap_without_the_policy_is_met_as_before_mysql":
-        "2026-11-01: #727 control: with columns_from off the table swap is met as before, so 0.32.2 delivers both rows too",
-    "a_truncate_drop_or_statement_write_is_met_as_before_without_double_quoted_names_mysql":
-        "2026-11-01: #727 control: statements the reader met before the sql_mode fix are met the same way, so 0.32.2 passes",
-    "a_load_that_dies_after_appending_is_re_run_without_duplicating_the_view":
-        "2026-11-02: #743 moved this cell's crash behind a first successful load; re-appending after a crash held on 0.32.2 too, and the cell that fails there is a_first_load_that_dies_after_appending_is_refused_until_the_leftovers_are_dropped; closes when the baseline moves past 0.32.2",
-    "a_sharded_mongo_stream_with_chunks_moving_and_runs_killed_loads_as_the_source_bigquery":
-        "2026-11-02: #738 rewrote the shard env of the cells; the BigQuery warehouse variant converges on 0.32.2 too (3 of 3 runs green there), and the a_sharded_ mongo cells and the Snowflake and ClickHouse variants of this body are the ones that fail there; closes when the baseline moves past 0.32.2",
-    "a_drop_spelled_in_another_case_stops_the_stream_on_a_folding_server_mysql":
-        "2026-11-02: #757 folding-server control: 0.32.2 lower-cases the statement before it matches, so a drop spelled in another case was refused there as well; the cells that fail there are the folding-server cells of the table spelled in another case; closes when the baseline moves past 0.32.2",
-    "the_same_statements_on_tables_the_export_does_not_capture_leave_the_stream_running_mysql":
-        "2026-11-02: #757 no-refusal control: statements on tables the export does not capture were met as before on 0.32.2, so it passes there; it guards the name compare from refusing what it must not; closes when the baseline moves past 0.32.2",
-    "apply_forms_partition_like_run_mssql":
-        "2026-11-02: #755 only moved the fixture into a helper; the apply forms partition like run on 0.32.2 too, and the cell that fails there is validate_reads_every_partition_mssql; closes when the baseline moves past 0.32.2",
-    "apply_forms_partition_like_run_mysql":
-        "2026-11-02: #755 only moved the fixture into a helper; the apply forms partition like run on 0.32.2 too, and the cell that fails there is validate_reads_every_partition_mysql; closes when the baseline moves past 0.32.2",
-    "apply_forms_partition_like_run_oracle":
-        "2026-11-02: #755 only moved the fixture into a helper; the apply forms partition like run on 0.32.2 too, and the cell that fails there is validate_reads_every_partition_oracle; closes when the baseline moves past 0.32.2",
-    "apply_must_not_advance_the_cursor_when_the_manifest_did_not_land":
-        "2026-11-01: #731 reorders the journal and card only; the cursor guard was already right on 0.32.2 and this cell grades the cursor",
-    "mysql_cdc_a_statement_logged_insert_is_captured_or_refused_never_dropped":
-        "2026-11-01: #729 re-cut the COMMIT arm this cell crosses; 0.32.2 already captured or refused a statement-logged insert, so it is a regression guard",
-    "mysql_lost_checkpoint_under_a_baseline_stream_is_refused_not_reanchored":
-        "2026-11-01: #730 sibling: a finished initial snapshot was already refused by ensure_anchor on 0.32.2; the changes-only cell is the one that fails there",
-    "validate_prefix_of_a_partitioned_export_verifies_that_directory_postgres":
-        "2026-11-02: #755 control: a pinned --prefix verified that one directory on 0.32.2 as well; it guards the run-set validate from widening it; closes when the baseline moves past 0.32.2",
-    "check_still_accepts_overrides_the_run_accepts_postgres":
-        "2026-11-04: #805 control: an override the run accepts passes check on 0.32.2 as well; it guards the new wire-mismatch refusal from widening onto it; the check_refuses_ cells are the ones that fail there; closes when the baseline moves past 0.32.2",
-    "an_oracle_integer_cursor_is_admitted_into_clickhouse":
-        "2026-11-12: #938 control: an Oracle integer cursor the load admits was admitted on 0.32.2 as well; it guards the admission from refusing the neighbours of the refused NUMBER cursor, whose an_oracle_number_cursor_is_refused_ cell fails there; closes when the baseline moves past 0.32.2",
-    "an_oracle_text_cursor_is_admitted_into_clickhouse":
-        "2026-11-12: #938 control: an Oracle text cursor the load admits was admitted on 0.32.2 as well; it guards the admission from refusing the neighbours of the refused NUMBER cursor, whose an_oracle_number_cursor_is_refused_ cell fails there; closes when the baseline moves past 0.32.2",
+#: Fix cell allowed to pass on the previous release → (its fix commit, reason). Shrink-only.
+GREEN_ON_PREV: dict[str, tuple[str, str]] = {  # ratchet-pin: fix-cells-green-on-previous-release (review 2027-02-01) strings
 }  # ratchet-pin: end
 #: Fix commit (short sha) → pattern of the only cells it is the fix for, with its reason. Shrink-only.
 FIX_SCOPE: dict[str, tuple[str, str]] = {
-    "ff0a4f2c": (
-        r"a_sharded_",
-        "2026-11-01: #738 rewrote the port env of 47 mongo cells; only the four a_sharded_ cells need the shard stand and fail on 0.32.2",
-    ),
-    "fcc9f1d8": (
-        r"^(?!partition_reset_(full|plain|unknown_child)_)",
-        "2026-11-07: #881 new file; the full, plain and unknown_child cells are controls 0.32.2 passes (full keeps no cursor, a plain export has no children, a ghost child was refused there too); the parent, child, family, respelled, cross_source and child_lease cells fail there",
-    ),
-    "32df35d8": (
-        r"^(?!a_missing_column_named_plainly_|a_missing_column_exits_by_its_code_whatever_its_name_holds_postgres$)",
-        "2026-11-07: #827 plain-name cells are controls and PostgreSQL already exits 1 for a missing column whatever its name holds on 0.32.2; the mysql, mssql and oracle whatever_its_name_holds cells fail there",
-    ),
-    "34ab117d": (
-        r"^(?!a_binary_double_a_float_|a_domain_over_text_keyset_key_|an_alias_type_over_datetime2_6_|init_scaffolds_no_keyset_key_for_a_(binary16|bytea)_|keyset_key_types_the_cursor_reads_deliver_the_seeded_ids_oracle$|parallel_keyset_incremental_on_an_mssql_datetime_key_)",
-        "2026-11-07: #814 admitted-key and stays-refused cells are controls 0.32.2 passes (domain over text, datetime2(6) alias and datetime, oracle integer and text keys, init without a keyset key for binary16 and bytea, the refusals Oracle made before); the refused-key, bare-NUMBER and datetime2(7) cells fail there",
-    ),
-    "2c52067f": (
-        r"^(?!an_incremental_cursor_on_a_nanosecond_timestamp_is_refused_before_it_re_exports$|an_init_generated_config_runs_on_a_key_the_oracle_planner_cannot_seek$)",
-        "2026-11-07: #854 these two now declare the TIMESTAMP(9) column and 0.32.2 delivers or refuses them the same; the oracle_batch_timestamp9 and oracle_cdc_timestamp9 undeclared-refusal cells fail there",
-    ),
-    "a0cc571f": (
-        r"^(?!in_range_values_under_the_override_keep_every_digit_and_null_stays_null$)",
-        "2026-11-07: #875 in-range values and NULL were delivered right on 0.32.2; the past-range cells fail there",
-    ),
-    "c20c6403": (
-        r"^(?!cdc_to_files_still_refuses_a_partial_after_image_mysql$)",
-        "2026-11-08: #882 the partial after image was refused by the file sink on 0.32.2 as well (the control of the new before-image check); the before-image and stdout cells fail there",
-    ),
-    "43099914": (
-        r"^(?!a_columns_override_on_a_numeric_field_never_nulls_it_mongo$|a_declared_override_delivers_the_source_or_refuses_by_code_(mssql|oracle|postgres)$|an_integer_column_declared_float_is_delivered_with_its_values_oracle$|text_and_decimal_under_a_float_or_int_override_read_as_before_mysql$)",
-        "2026-11-14: #904 the fix is the MySQL reader; the mssql, oracle, postgres and mongo override cells and the mysql text and decimal read-as-before cell are controls 0.32.2 passes; the mysql int-under-float and unread-value cells fail there",
-    ),
-    "0ff06b83": (
-        r"^(?!a_lease_is_refused_while_held_and_free_the_moment_it_is_dropped$)",
-        "2026-11-14: #937 the lease cell was only re-typed for Secret and 0.32.2 refuses a held lease too; the fast-clock supersede cell fails there",
-    ),
-    "2c4ae204": (
-        r"^(?!(a_view_over_a_not_null_cursor|an_expression_over_a_not_null_cursor|not_null_cursor)_delivers_once_|coalesce_over_a_nullable_cursor_delivers_)",
-        "2026-11-14: #947 the admitted-cursor cells (not-null, view, expression, coalesce) are controls 0.32.2 delivers; the nullable, unrenderable and null-cell refusal cells fail there",
-    ),
-    "4f379a5d": (
-        r"^(?!an_unkeyed_mongo_cdc_export_of_mixed_id_types_still_runs_with_a_warning$)",
-        "2026-11-14: #939 an unkeyed export of mixed _id types ran with a warning on 0.32.2 as well; the keyed refusal, stream and checkpoint cells fail there",
-    ),
-    "06bef3fe": (
-        r"^(?!crashed_\w+_then_(an_unrelated_setting_edited_resumes_|nothing_edited_resumes_|format_edited_is_refused_by_the_owner_check_))",
-        "2026-11-14: #954 unrelated-setting, nothing-edited and format-owner-check cells are controls 0.32.2 passes (resume or refusal as before); the columns, compression and meta_columns edited cells fail there",
-    ),
-    "c5628137": (
-        r"^(?!order_equals_seek_(mysql|oracle|postgres)$)",
-        "2026-11-14: #948 the mssql text-key fix; the mysql, oracle and postgres order_equals_seek cells are controls 0.32.2 passes; the mssql cells fail there",
-    ),
-    "c955341c": (
-        r"^(?!pg_cdc_server_text_types_and_separator_values_are_delivered_unchanged$)",
-        "2026-11-14: #950 server text and separator values were delivered unchanged on 0.32.2 (the control of the one tokenizer); the bit-column, colon-space and bracket cells fail there",
-    ),
-    "1ef708e2": (
-        r"^(?!url_file_resolved_as_before_)",
-        "2026-11-14: #932 url_file_resolved_as_before is the control (a path resolved as before) 0.32.2 passes; the follows-the-config, working-directory and upgrade-moved cells fail there",
-    ),
 }
 #: Fix commit (short sha) → (a test that sees its defect, reason) for a fix that credits no live cell. Shrink-only.
 NO_LIVE_CELL: dict[str, tuple[str, str]] = {
-    "0130d0db": ("parquet_bytes_match_the_v0_32_2_digests", "2026-11-10: superseded by d7867ec8 (#754), which dropped the write-call splitting; the byte golden grades the shipped writer; closes when the baseline moves past 0.32.2"),
-    "6993e9fb": ("a_job_failed_with_a_transient_reason_is_unavailable_and_retryable", "2026-11-10: lib test, seed bigquery-transient-job-error-final; not run on the previous binary; closes when the baseline moves past 0.32.2"),
-    "c62b2f09": ("an_existing_change_log_that_this_load_would_corrupt_is_refused", "2026-11-10: lib test, seed clickhouse-paren-sorting-key; not run on the previous binary; closes when the baseline moves past 0.32.2"),
-    "d7867ec8": ("parquet_bytes_match_the_v0_32_2_digests", "2026-11-10: the byte golden holds the 0.32.2 digests itself, seed parquet-writer-bytes-move-from-release; closes when the baseline moves past 0.32.2"),
-    "3f610778": ("stand_pool_split_resume_grows_postgres", "2026-11-10: the live cell changed through the run_pool_split_rerun_with helper, so its body is unedited; RED on main at #756, not run on 0.32.2; closes when the baseline moves past 0.32.2"),
-    "2377caa1": ("sqlite_state_decides_liveness_by_literal_path_containment", "2026-11-10: lib test, seed state-prefix-match-reads-text-as-pattern; not run on the previous binary; closes when the baseline moves past 0.32.2"),
-    "123acb80": ("a_named_credentials_file_that_is_no_key_stops_the_load", "2026-11-10: lib test, seed named-credential-falls-back; not run on the previous binary; closes when the baseline moves past 0.32.2"),
-    "9c962422": ("ambient_access_keys_never_replace_a_named_profile", "2026-11-10: offline test, seed named-profile-falls-back; not run on the previous binary; closes when the baseline moves past 0.32.2"),
-    "ed13affb": ("a_number_held_as_text_is_labelled_plain_decimal_and_every_other_column_is_not", "2026-11-10: lib test, seed number-text-without-its-label; not run on the previous binary; closes when the baseline moves past 0.32.2"),
-    "b1d452a2": ("a_baseline_loaded_alone_is_cleaned_under_cleanup_source", "2026-11-10: lib test only, no seed; not run on the previous binary; closes when the baseline moves past 0.32.2"),
-    "3154de1c": ("the_probe_reads_its_globals_without_a_full_variables_scan", "2026-11-10: lib test only, no seed; not run on the previous binary; closes when the baseline moves past 0.32.2"),
-    "e523454a": ("a_query_pair_whose_key_names_a_password_is_masked_in_any_case", "2026-11-10: lib test, seed query-password-key-by-suffix-family; not run on the previous binary; closes when the baseline moves past 0.32.2"),
-    "1aeea54f": ("postgres_system_store_is_not_a_second_anchor", "2026-11-10: offline test, seed ca-file-second-trust-anchor; not run on the previous binary; closes when the baseline moves past 0.32.2"),
-    "208823de": ("mysql_system_store_is_not_a_second_anchor", "2026-11-10: offline test, seed ca-file-second-trust-anchor; not run on the previous binary; closes when the baseline moves past 0.32.2"),
-    "3bd8620c": ("a_transient_reply_from_the_token_endpoint_is_retried_and_the_next_answer_mints", "2026-11-10: lib test, seed token-endpoint-transient-final; not run on the previous binary; closes when the baseline moves past 0.32.2"),
-    "8679e73f": ("a_chunk_claim_beside_a_writer_that_never_lets_go_gets_its_turn", "2026-11-10: lib test, seed sqlite-chunk-claim-takes-no-turn; not run on the previous binary; closes when the baseline moves past 0.32.2"),
-    "7d9b3e91": ("a_source_path_with_a_uri_character_is_read_as_the_file_it_names", "2026-11-12: lib test; the live state-copy cells use plain scratch paths, none holds `#`, `?` or `%`, so no live cell tells 0.32.2 from the fix; closes when a live copy cell reads a path with a URI character or the baseline moves past 0.32.2"),
-    "69327ffc": ("a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names", "2026-11-12: lib test over the engine x hostile-name x mode matrix; no live cell creates a table or column named with a line break or a YAML indicator; closes when a live init cell scaffolds such a catalog name or the baseline moves past 0.32.2"),
-    "a434e250": ("a_remote_plaintext_clickhouse_url_is_refused_unless_allowed", "2026-11-12: lib test and the refusal_names_true_cause injector; 0.32.2 has no RIVET_CONFIG_REMOTE_PLAINTEXT gate and the stand ClickHouse is loopback, so no live cell sends a secret to a remote http:// sink; closes when a live cell reaches a non-loopback plaintext sink or the baseline moves past 0.32.2"),
-    "f9988462": ("a_remote_plaintext_url_in_a_spelling_the_client_normalises_is_refused", "2026-11-12: lib test; the gate it hardens is absent from 0.32.2 and no live cell uses a remote plaintext URL in any spelling; closes when a live cell reaches a non-loopback plaintext sink or the baseline moves past 0.32.2"),
-    "4ef290bb": ("a_query_key_decoding_to_a_multibyte_character_is_read_without_a_panic", "2026-11-12: lib test; 0.32.2 does not percent-decode query keys, so the panic is absent there and the no_secret_in_output matrix has no multibyte key; closes when the baseline moves past 0.32.2"),
+    "29e487eb": (
+        "allow_anonymous_signs_nothing_even_with_an_ambient_identity",
+        "2026-11-16: #1034 offline test through the in-process S3 signer (tests/s3_named_profile.rs: 4 of 16 red before the fix, per the PR body), no rig cell; closes when a live MinIO cell runs allow_anonymous beside static keys or the baseline moves past 0.33.0",
+    ),
 }
 
 
 def git(*args: str) -> str:
     """git's stdout; a failing git is an error, never an empty answer."""
     return subprocess.run([GIT, *args], cwd=ROOT, capture_output=True, text=True, check=True).stdout
+
+
+def is_ancestor(sha: str, tag: str) -> bool:
+    """True when commit `sha` is in the history of `tag`; an unknown commit is not."""
+    return subprocess.run([GIT, "merge-base", "--is-ancestor", sha, tag], cwd=ROOT, capture_output=True).returncode == 0
+
+
+def unshipped(ledger: dict[str, V], sha_of: Callable[[str, V], str], tag: str, ancestor: Callable[[str, str], bool] = is_ancestor) -> dict[str, V]:
+    """`ledger` without the entries whose fix commit is in `tag`: that fix shipped, so the entry has done its job."""
+    return {k: v for k, v in ledger.items() if not ancestor(sha_of(k, v), tag)}
+
+
+def active_ledgers(tag: str, ancestor: Callable[[str, str], bool] = is_ancestor, ledgers: tuple[dict, dict, dict] | None = None) -> tuple[dict[str, str], dict[str, tuple[str, str]], dict[str, tuple[str, str]]]:
+    """GREEN_ON_PREV (cell → reason), FIX_SCOPE and NO_LIVE_CELL cut to the fixes made after `tag`."""
+    green, scope, nolive = ledgers or (GREEN_ON_PREV, FIX_SCOPE, NO_LIVE_CELL)
+    kept = unshipped(green, lambda _, v: v[0], tag, ancestor)
+    return {cell: why for cell, (_, why) in kept.items()}, unshipped(scope, lambda k, _: k, tag, ancestor), unshipped(nolive, lambda k, _: k, tag, ancestor)
 
 
 def prev_tag(prev: Path) -> str:
@@ -328,11 +237,12 @@ def verify_fix_cells(led: Ledger, only: list[str] | None = None) -> None:
         tag = prev_tag(prev)
         fixed = fixes(tag)
         seen = credited(fixed)
-        cells = fix_cells(seen)
+        green, scope, nolive = active_ledgers(tag)
+        cells = fix_cells(seen, scope)
     except (ValueError, subprocess.CalledProcessError) as e:
         led.failed("all", "-", SCEN, "-", f"fix cells: the set could not be derived: {e}", getattr(e, "stderr", "") or "")
         return
-    cells, allowed, unmatched = select(cells, GREEN_ON_PREV, only)
+    cells, allowed, unmatched = select(cells, green, only)
     if unmatched:
         led.failed("all", "-", SCEN, "-", f"fix cells: the selection names no fix cell since {tag}: {', '.join(unmatched)}")
     if not cells:
@@ -357,10 +267,10 @@ def verify_fix_cells(led: Ledger, only: list[str] | None = None) -> None:
             led.skipped("all", "-", SCEN, cell, f"fix cell · {cell} — {line}", cause=SkipCause.ENV)
         else:
             record[status]("all", "-", SCEN, "-", f"fix cell · {cell} — {line}")
-    for known in [] if only else stale_scope(seen, FIX_SCOPE):
+    for known in [] if only else stale_scope(seen, scope):
         led.failed("all", "-", SCEN, "-", f"fix scope · {known} — STALE: its commit is not among the fixes since {tag}, "
                    "or its pattern no longer separates the cells it credits; remove it from FIX_SCOPE")
-    for status, sha, line in [] if only else grade_uncelled(uncelled(fixed, live_cells(seen)), NO_LIVE_CELL, test_fns(), tag):
+    for status, sha, line in [] if only else grade_uncelled(uncelled(fixed, live_cells(seen, scope)), nolive, test_fns(), tag):
         if status == "SKIP":
             led.skipped("all", "-", SCEN, sha, f"fix commit · {sha} — {line}", cause=SkipCause.DESIGN)
         else:
@@ -401,11 +311,18 @@ def _self_test() -> None:
     seen = [("ab12cd34", "fix: x", "sharded_a"), ("ab12cd34", "fix: x", "port_env")]
     assert stale_scope(seen, scope) == [] and stale_scope(seen[:1], scope) == ["ab12"] and stale_scope(seen[1:], scope) == ["ab12"]
     assert stale_scope([("ff00", "fix: y", "port_env")], scope) == ["ab12"]
+    shipped = {"aa11", "bb22"}
+    ledger = {"cell_a": ("aa11", "r"), "cell_b": ("cc33", "r")}
+    assert unshipped(ledger, lambda _, v: v[0], "v1", lambda sha, tag: sha in shipped) == {"cell_b": ("cc33", "r")}, "a shipped fix leaves the ledger"
+    mixed = ({"c1": ("aa11aa11", "r1"), "c2": ("cc33cc33", "r2")}, {"aa11aa11": ("p", "r"), "cc33cc33": ("q", "r")}, {"aa11aa11": ("f", "r"), "cc33cc33": ("g", "r")})
+    kept = active_ledgers("v1", lambda sha, tag: sha.startswith("aa11"), mixed)
+    assert kept == ({"c2": "r2"}, {"cc33cc33": ("q", "r")}, {"cc33cc33": ("g", "r")}), "every ledger drops the entries of a shipped fix and no other"
+    assert is_ancestor("HEAD", "HEAD") and not is_ancestor("0" * 40, "HEAD"), "an unknown commit is never shipped"
+    assert all(len(sha) == 8 and why.strip() for sha, why in GREEN_ON_PREV.values()), "a GREEN_ON_PREV entry has no commit or reason"
     assert all(pat and why.strip() for pat, why in FIX_SCOPE.values()), "a FIX_SCOPE entry has no pattern or reason"
     assert all(re.compile(pat) for pat, _ in FIX_SCOPE.values()), "a FIX_SCOPE pattern does not compile"
     here = {n for f in (ROOT / "tests" / "live").glob("*.rs") for n in tests_in(f.read_text())}
     assert len(here) > 1000, f"the test pattern reads {len(here)} live cells: it stopped matching"
-    assert all(why.strip() for why in GREEN_ON_PREV.values()), "a GREEN_ON_PREV entry has no reason"
     fixed = [("aa11aa11", "fix: a", ["src/a.rs"]), ("bb22bb22", "fix: b", ["src/b.rs"]), ("cc33cc33", "fix: c", ["src/c.rs"])]
     assert uncelled(fixed, [("aa11aa11", "fix: a", "cell_a")]) == [("bb22bb22", "fix: b"), ("cc33cc33", "fix: c")], "a fix with a cell is celled"
     assert uncelled(fixed, []) == [(sha, subject) for sha, subject, _ in fixed], "no cell at all leaves every fix uncelled"
