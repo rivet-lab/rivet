@@ -23,7 +23,7 @@ index) → no ties → no empty/duplicate ranges. This decouples "how to sample"
 | # | Decision | Choice |
 |---|---|---|
 | D1 | Where boundaries live | **plan-time** — sampled in `build_plan`, stored in the plan; `rivet plan` shows the ranges (reviewable, deterministic). Staleness is benign (completeness holds). |
-| D2 | Boundary sampler | A **per-engine seam** (`sample_key_quantiles(key, n)`), OFFSET for ≤~10M rows, a sampled scan (`TABLESAMPLE` PG/MSSQL, sampled MySQL) beyond. Crossover is a bench-informed tuning constant. |
+| D2 | Boundary sampler | A **per-engine seam** (`sample_key_boundaries`): exact row percentiles (COUNT + OFFSET) under 10M rows by the catalog's estimate; at 10M or more, or with no estimate, MIN/MAX seeks and key-space cuts snapped to existing keys (16 ranges per worker for an integer key, at most N at a time), never a count (#1059). |
 | D3 | Row-count parity | **structural** (interval partition); a live test asserts union == whole table. |
 | D4 | Worker count N | **user/tuning-controlled** via `parallel:`. Bench plateaued at ~4 on a saturated local mysqld; a real server scales further. Don't guess a fixed N. |
 | D5 | Activation | **explicit opt-in**: `chunk_by_key: <key>` + `parallel: N`. `rivet init`/`check` RECOMMEND it for large keyset tables but never silently enable (N concurrent scans = N× source load). |

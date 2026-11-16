@@ -2874,7 +2874,7 @@ fn stand_pool_split_gappy_key_mssql() {
 // assuming the persisted last `hi = b'`; it is `None`, and the widened base_query covers the top
 // — verified by reading `partition_ranges` + the `(None, None)` floor/ceil for split units.)
 
-/// `apply --pool --split` on a skewed keyset key cuts its units at the key's value midpoint, snapped to an existing key: every row once.
+/// `apply --pool --split` on a skewed keyset key the catalog puts above the row-percentile limit cuts its units at the key's value midpoint, snapped to an existing key: every row once.
 #[test]
 #[ignore = "live: requires docker compose up -d postgres"]
 fn stand_pool_split_skewed_keyset_key_cuts_units_by_key_value_postgres() {
@@ -2883,10 +2883,10 @@ fn stand_pool_split_skewed_keyset_key_cuts_units_by_key_value_postgres() {
     pg_connect()
         .batch_execute(&format!(
             "INSERT INTO {table} (id, payload, pad) \
-             SELECT 270000 + g * 171, g, repeat('x', {SPLIT_PAD_BYTES}) FROM generate_series(1, 30000) g; \
-             ANALYZE {table};"
+             SELECT 270000 + g * 171, g, repeat('x', {SPLIT_PAD_BYTES}) FROM generate_series(1, 30000) g;"
         ))
         .unwrap();
+    pg_catalog_says_rows(&mut pg_connect(), &table, 20_000_000);
     let sibling = unique_name("split_sibling");
     let rig = Eng::Pg
         .rig(&table)

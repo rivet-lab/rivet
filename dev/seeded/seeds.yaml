@@ -6165,13 +6165,13 @@ seeds:
         cells: [lib:an_oracle_service_name_is_percent_decoded]
 
   - name: keyset-sampler-scans-the-table
-    class: "the parallel keyset range sampler reads rows in proportion to the source (a COUNT(*) over the fenced key, or an ORDER BY key OFFSET n skip per boundary) before the first worker starts, so setup cost grows with the table and every run pays a full scan"
+    class: "the parallel keyset range sampler reads rows in proportion to the source (a COUNT(*) over the fenced key, or an ORDER BY key OFFSET n skip per boundary) before the first worker starts on a table the catalog puts at 10M rows or more, or has no estimate for, so setup cost grows with the table and every run pays a full scan"
     history: "issue #1059; RED on main 2026-11-16: PostgreSQL ks_big_4m (4M rows, uuid + varchar primary key, parallel: 4) read 4,000,000 sequential and 10,000,022 index tuples for 4,000,000 exported (pg_stat_user_tables / pg_stat_user_indexes deltas); 1M rows read 1,000,000 + 2,500,007"
     scope: source
     switch: keyset-sampler-scans-the-table
     engines:
       postgres:
-        cells: [parallel_keyset_sampler_reads_a_bounded_number_of_rows_postgres, "lib:sampled_boundaries_are_seeks_to_even_cuts_inside_the_fence", "lib:every_dialect_samples_by_seeks_to_the_same_boundaries"]
+        cells: [parallel_keyset_sampler_reads_a_bounded_number_of_rows_postgres, "lib:sampled_boundaries_are_seeks_to_even_cuts_inside_the_fence", "lib:every_dialect_samples_by_seeks_to_the_same_boundaries", "lib:the_catalog_estimate_picks_row_percentiles_or_seeks"]
       mysql:
         cells: ["lib:every_dialect_samples_by_seeks_to_the_same_boundaries"]
       mssql:

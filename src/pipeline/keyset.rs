@@ -215,8 +215,23 @@ fn first_row_clause(st: crate::config::SourceType) -> &'static str {
     }
 }
 
-/// Up to N−1 range boundaries of the keyset key: key-space split points of its MIN..MAX, each snapped to the next existing key by one index seek.
-pub(crate) fn sample_key_boundaries(
+/// The 0-indexed ROW offset of the i-th of `parts` percentile boundaries over `total` rows (i in 1..parts).
+fn percentile_offset(total: i64, i: usize, parts: usize) -> i64 {
+    total * i as i64 / parts as i64
+}
+
+/// "The single row at offset `off`" clause (after the `ORDER BY`), per dialect.
+fn nth_row_clause(st: crate::config::SourceType, off: i64) -> String {
+    use crate::config::SourceType::*;
+    match st {
+        Postgres | Mysql => format!("LIMIT 1 OFFSET {off}"),
+        Mssql | Oracle => format!("OFFSET {off} ROWS FETCH NEXT 1 ROWS ONLY"),
+        Mongo => unreachable!("parallel keyset sampling is a SQL path; Mongo uses $sample"),
+    }
+}
+
+/// N−1 ROW-percentile boundaries of the keyset key: the key values at row offsets `total*i/N`, by one count and N−1 offset reads.
+fn percentile_boundaries(
     src: &mut dyn Source,
     plan: &ResolvedRunPlan,
     key: &str,
@@ -224,6 +239,105 @@ pub(crate) fn sample_key_boundaries(
     floor: Option<&str>,
     ceil: Option<&str>,
 ) -> Result<Vec<String>> {
+    let st = plan.source.source_type;
+    let base = &plan.base_query;
+    let k = crate::sql::quote_ident(st, key);
+    let mut preds: Vec<String> = Vec::new();
+    let of = crate::source::query::KeyOf { base, expr: &k };
+    if let Some(lo) = floor {
+        preds.push(format!(
+            "{k} > {}",
+            crate::source::query::inline_literal(st, lo, of)
+        ));
+    }
+    if let Some(hi) = ceil {
+        preds.push(format!(
+            "{k} <= {}",
+            crate::source::query::inline_literal(st, hi, of)
+        ));
+    }
+    let where_clause = if preds.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", preds.join(" AND "))
+    };
+    let total: i64 = src
+        .query_scalar(&format!(
+            "SELECT COUNT(*) FROM ({base}) {} {where_clause}",
+            crate::sql::derived(st, "_rivet_pk_cnt")
+        ))?
+        .as_deref()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(0);
+    if total <= 1 {
+        return Ok(vec![]);
+    }
+    let mut bounds: Vec<String> = Vec::with_capacity(parts.saturating_sub(1));
+    for i in 1..parts {
+        let off = percentile_offset(total, i, parts);
+        let nth = nth_row_clause(st, off);
+        let sql = format!(
+            "SELECT {k} FROM ({base}) {} {where_clause} ORDER BY {k} {nth}",
+            crate::sql::derived(st, "_rivet_pk")
+        );
+        if let Some(v) = src.query_scalar(&sql)?
+            && bounds.last().map(String::as_str) != Some(v.as_str())
+        {
+            bounds.push(v);
+        }
+    }
+    Ok(bounds)
+}
+
+/// Below this many rows by the catalog's estimate a parallel keyset run samples exact row percentiles; above it, or with no estimate, it seeks key-space cuts.
+const ROW_PERCENTILE_ROWS: i64 = 10_000_000;
+
+/// Key-space ranges per worker for an integer key, so a dense stretch of keys is spread over more than one range.
+const RANGES_PER_WORKER: usize = 16;
+
+/// The most key-space ranges one parallel keyset run cuts.
+const MAX_RANGES: usize = 256;
+
+/// The catalog's scan-free row estimate of a `table:` export's table; `None` for a query, an unanalyzed table or a failed read.
+fn catalog_rows(src: &mut dyn Source, plan: &ResolvedRunPlan) -> Option<i64> {
+    let st = plan.source.source_type;
+    let table = crate::sql::strip_simple_projection_from(&plan.base_query)?;
+    let sql = match st {
+        crate::config::SourceType::Mysql => {
+            let (schema, name) = table
+                .split_once('.')
+                .map_or(("DATABASE()".to_string(), table), |(s, t)| {
+                    (format!("'{s}'"), t)
+                });
+            format!(
+                "SELECT TABLE_ROWS FROM information_schema.TABLES \
+                 WHERE TABLE_SCHEMA = {schema} AND TABLE_NAME = '{name}'"
+            )
+        }
+        _ => crate::sql::row_estimate_sql(st, table)?,
+    };
+    src.query_scalar(&sql)
+        .ok()
+        .flatten()?
+        .trim()
+        .parse::<i64>()
+        .ok()
+        .filter(|n| *n > 0)
+}
+
+/// Up to N−1 range boundaries of the keyset key: row percentiles under [`ROW_PERCENTILE_ROWS`] catalog rows, else key-space cuts (`int_parts` for an integer key) snapped to existing keys by index seeks.
+pub(crate) fn sample_key_boundaries(
+    src: &mut dyn Source,
+    plan: &ResolvedRunPlan,
+    key: &str,
+    parts: usize,
+    int_parts: usize,
+    floor: Option<&str>,
+    ceil: Option<&str>,
+) -> Result<Vec<String>> {
+    if catalog_rows(src, plan).is_some_and(|n| n < ROW_PERCENTILE_ROWS) {
+        return percentile_boundaries(src, plan, key, parts, floor, ceil);
+    }
     let st = plan.source.source_type;
     let base = &plan.base_query;
     let k = crate::sql::quote_ident(st, key);
@@ -246,7 +360,7 @@ pub(crate) fn sample_key_boundaries(
         ()
     );
     let mut bounds: Vec<String> = Vec::with_capacity(parts.saturating_sub(1));
-    if let Err(e) = seek_bounds(src, plan, &k, &fence, parts, &mut bounds) {
+    if let Err(e) = seek_bounds(src, plan, &k, &fence, (parts, int_parts), &mut bounds) {
         log::warn!(
             "export '{}': parallel keyset cannot seek the key to a split point ({e:#}); \
              the keys above {} stay in one range: data is complete, with fewer workers.",
@@ -265,7 +379,7 @@ fn seek_bounds(
     plan: &ResolvedRunPlan,
     k: &str,
     fence: &[String],
-    parts: usize,
+    (parts, int_parts): (usize, usize),
     bounds: &mut Vec<String>,
 ) -> Result<()> {
     let st = plan.source.source_type;
@@ -279,6 +393,8 @@ fn seek_bounds(
     ) else {
         return Ok(());
     };
+    let integer = lo.parse::<i128>().is_ok() && hi.parse::<i128>().is_ok();
+    let parts = if integer { int_parts } else { parts };
     for cut in super::key_space::split(&lo, &hi, parts) {
         let after = bounds.last().unwrap_or(&lo);
         let mut preds = fence.to_vec();
@@ -328,7 +444,8 @@ fn sample_parallel_ranges(
     floor: Option<&str>,
     ceil: Option<&str>,
 ) -> Result<Vec<(usize, Option<String>, Option<String>, bool)>> {
-    let bounds = sample_key_boundaries(src, plan, key, parallel, floor, ceil)?;
+    let ranges = (parallel * RANGES_PER_WORKER).clamp(parallel, MAX_RANGES.max(parallel));
+    let bounds = sample_key_boundaries(src, plan, key, parallel, ranges, floor, ceil)?;
     Ok(partition_ranges(&bounds, floor, ceil))
 }
 
@@ -615,6 +732,7 @@ fn run_keyset_parallel(
     let range_first: Mutex<Option<String>> = Mutex::new(None);
 
     let semaphore = crate::resource::Semaphore::new(parallel.max(1));
+    let slots = crate::resource::Semaphore::new(parallel.max(1));
     let governor = crate::pipeline::governor::GovernorHarness::arm(plan, parallel);
 
     std::thread::scope(|scope| {
@@ -632,9 +750,10 @@ fn run_keyset_parallel(
                 (plan, &key_plan, &ext, run_tag.as_str(), key.as_str());
             let (fan_r, rfirst_r, rmax_r) = (&fan, &range_first, &range_max);
             let (sref_r, rid_r, fmt_r, cmp_r) = (&state_ref, run_id.as_str(), fmt_label, cmp_label);
-            let sem_r = &semaphore;
+            let (sem_r, slots_r) = (&semaphore, &slots);
             let unit = super::commit::UnitId::Range(ridx as i64);
             fan.spawn(scope, format!("range {ridx}"), move || {
+                let _slot = crate::pipeline::governor::TaskPermit::acquire(slots_r);
                 let mut wsrc = source::create_source(&plan_r.source)
                     .map_err(|e| super::single::attach_connect_hint(e, &plan_r.source))?;
                 let mut cursor = lo;
@@ -1866,6 +1985,127 @@ mod tests {
         }
     }
 
+    #[test]
+    fn percentile_offset_partitions_evenly() {
+        assert_eq!(percentile_offset(1000, 1, 4), 250);
+        assert_eq!(percentile_offset(1000, 2, 4), 500);
+        assert_eq!(percentile_offset(1000, 3, 4), 750);
+        assert_eq!(percentile_offset(999, 1, 3), 333);
+        assert_eq!(percentile_offset(999, 2, 3), 666);
+    }
+
+    #[test]
+    fn nth_row_clause_is_per_dialect() {
+        assert_eq!(
+            nth_row_clause(SourceType::Postgres, 250),
+            "LIMIT 1 OFFSET 250"
+        );
+        assert_eq!(nth_row_clause(SourceType::Mysql, 250), "LIMIT 1 OFFSET 250");
+        assert_eq!(
+            nth_row_clause(SourceType::Mssql, 250),
+            "OFFSET 250 ROWS FETCH NEXT 1 ROWS ONLY"
+        );
+    }
+
+    /// A table of 1000 rows whose catalog estimate is `estimate`: counts, offset reads and seeks answered by row number.
+    struct Cataloged {
+        estimate: &'static str,
+        sql: Vec<String>,
+    }
+    impl Source for Cataloged {
+        fn export(
+            &mut self,
+            _request: &source::ExportRequest<'_>,
+            _sink: &mut dyn source::BatchSink,
+        ) -> Result<()> {
+            unreachable!("sampling reads scalars only")
+        }
+        fn query_scalar(&mut self, sql: &str) -> Result<Option<String>> {
+            self.sql.push(sql.to_string());
+            if sql.contains("reltuples") {
+                return Ok(Some(self.estimate.to_string()));
+            }
+            if sql.contains("COUNT(*)") {
+                return Ok(Some("1000".into()));
+            }
+            Ok(sql
+                .split_once("OFFSET ")
+                .map(|(_, off)| (off.trim().parse::<i64>().unwrap() + 1).to_string()))
+        }
+        fn type_mappings(
+            &mut self,
+            _query: &str,
+            _overrides: &crate::types::ColumnOverrides,
+        ) -> Result<Vec<crate::types::TypeMapping>> {
+            Ok(vec![])
+        }
+    }
+
+    /// A table the catalog puts under the row-percentile limit keeps the exact percentile sampler; a larger, unanalyzed or query export never counts.
+    #[test]
+    fn the_catalog_estimate_picks_row_percentiles_or_seeks() {
+        let mut plan = crate::plan::test_support::test_plan();
+        plan.base_query = "SELECT * FROM public.t".into();
+        let mut small = Cataloged {
+            estimate: "9999999",
+            sql: vec![],
+        };
+        let got = sample_key_boundaries(&mut small, &plan, "k", 4, 64, None, None).unwrap();
+        assert_eq!(got, keys([251, 501, 751]));
+        assert_eq!(
+            small.sql.len(),
+            5,
+            "estimate, COUNT, three offsets: {:?}",
+            small.sql
+        );
+        assert!(small.sql[1].contains("COUNT(*)"), "{:?}", small.sql);
+        for estimate in ["10000000", "0"] {
+            let mut large = Cataloged {
+                estimate,
+                sql: vec![],
+            };
+            assert!(
+                sample_key_boundaries(&mut large, &plan, "k", 4, 64, None, None)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(large.sql.len(), 3, "estimate, MIN, MAX: {:?}", large.sql);
+            assert!(
+                large
+                    .sql
+                    .iter()
+                    .all(|q| !q.contains("COUNT") && !q.contains("OFFSET ")),
+                "{:?}",
+                large.sql
+            );
+        }
+        plan.base_query = "SELECT * FROM public.t WHERE k > 0".into();
+        let mut query = Cataloged {
+            estimate: "5",
+            sql: vec![],
+        };
+        sample_key_boundaries(&mut query, &plan, "k", 4, 64, None, None).unwrap();
+        assert_eq!(
+            query.sql.len(),
+            2,
+            "a query has no catalog estimate: {:?}",
+            query.sql
+        );
+    }
+
+    /// An integer key is cut into `int_parts` key-space ranges; any other key into `parts`.
+    #[test]
+    fn an_integer_key_is_cut_into_more_ranges_than_workers() {
+        let plan = crate::plan::test_support::test_plan();
+        let mut ints = Indexed::new(keys(1..=1000), true);
+        let got = sample_key_boundaries(&mut ints, &plan, "k", 4, 16, None, None).unwrap();
+        assert_eq!(got.len(), 15, "{got:?}");
+        assert_eq!(ints.sql.len(), 17, "MIN, MAX and one seek per cut");
+        let mut text = Indexed::new(keys(["a", "c", "e", "g", "i", "k", "m", "o"]), false);
+        let got = sample_key_boundaries(&mut text, &plan, "k", 4, 16, None, None).unwrap();
+        assert_eq!(got.len(), 3, "{got:?}");
+    }
+
     /// Owned key strings.
     fn keys(xs: impl IntoIterator<Item = impl ToString>) -> Vec<String> {
         xs.into_iter().map(|x| x.to_string()).collect()
@@ -1876,14 +2116,15 @@ mod tests {
     fn sampled_boundaries_are_seeks_to_even_cuts_inside_the_fence() {
         let plan = crate::plan::test_support::test_plan();
         let mut src = Indexed::new(keys(1..=1000), true);
-        let got = sample_key_boundaries(&mut src, &plan, "k", 4, Some("100"), Some("900")).unwrap();
+        let got =
+            sample_key_boundaries(&mut src, &plan, "k", 4, 4, Some("100"), Some("900")).unwrap();
         assert_eq!(got, keys([300, 500, 700]));
         assert_eq!(src.sql.len(), 5, "MIN, MAX and one seek per cut");
         for sql in &src.sql {
             assert!(sql.contains("\"k\" > E'100' AND \"k\" <= E'900'"), "{sql}");
         }
         let mut sparse = Indexed::new(keys([1, 2, 3, 1_000_000]), true);
-        let got = sample_key_boundaries(&mut sparse, &plan, "k", 4, None, None).unwrap();
+        let got = sample_key_boundaries(&mut sparse, &plan, "k", 4, 4, None, None).unwrap();
         assert!(got.is_empty(), "every cut snaps to the MAX: {got:?}");
         assert_eq!(
             sparse.sql.len(),
@@ -1892,7 +2133,7 @@ mod tests {
         );
         let mut one = Indexed::new(keys([7, 7, 7]), true);
         assert!(
-            sample_key_boundaries(&mut one, &plan, "k", 4, None, None)
+            sample_key_boundaries(&mut one, &plan, "k", 4, 4, None, None)
                 .unwrap()
                 .is_empty()
         );
@@ -1903,7 +2144,7 @@ mod tests {
         );
         let mut none = Indexed::new(vec![], true);
         assert!(
-            sample_key_boundaries(&mut none, &plan, "k", 4, None, None)
+            sample_key_boundaries(&mut none, &plan, "k", 4, 4, None, None)
                 .unwrap()
                 .is_empty()
         );
@@ -1921,7 +2162,7 @@ mod tests {
         ] {
             let mut src = Indexed::new(keys(1..=1000), true);
             src.refuse = Some(refuse);
-            let got = sample_key_boundaries(&mut src, &plan, "k", 4, None, None).unwrap();
+            let got = sample_key_boundaries(&mut src, &plan, "k", 4, 4, None, None).unwrap();
             assert_eq!(got, want, "refusing {refuse}");
             assert_eq!(src.sql.len(), reads, "refusing {refuse}: {:?}", src.sql);
         }
@@ -1941,7 +2182,7 @@ mod tests {
                 .filter(|_| !all.is_empty())
                 .map(|(a, b)| (all.get(a % all.len()).cloned(), all.get(b % all.len()).cloned()))
                 .unwrap_or((None, None));
-            let bounds = sample_key_boundaries(&mut src, &plan, "k", parts, floor.as_deref(), ceil.as_deref()).unwrap();
+            let bounds = sample_key_boundaries(&mut src, &plan, "k", parts, parts, floor.as_deref(), ceil.as_deref()).unwrap();
             prop_assert!(src.sql.len() <= parts + 1, "{} statements for {parts} parts", src.sql.len());
             let ranges = partition_ranges(&bounds, floor.as_deref(), ceil.as_deref());
             prop_assert!(ranges.len() <= parts);
@@ -1966,7 +2207,7 @@ mod tests {
         let sparse = (1..=1_000i64).map(|i| 9_000 + i * 191);
         let mut src = Indexed::new(keys(dense.chain(sparse)), true);
         let all = src.keys.clone();
-        let bounds = sample_key_boundaries(&mut src, &plan, "k", 4, None, None).unwrap();
+        let bounds = sample_key_boundaries(&mut src, &plan, "k", 4, 4, None, None).unwrap();
         let ranges = partition_ranges(&bounds, None, None);
         let held = |lo: &Option<String>, hi: &Option<String>| {
             all.iter()
@@ -2002,7 +2243,7 @@ mod tests {
             ] {
                 let mut src = Indexed::new(keys, numeric);
                 src.st = st;
-                let got = sample_key_boundaries(&mut src, &plan, "k", 4, None, None).unwrap();
+                let got = sample_key_boundaries(&mut src, &plan, "k", 4, 4, None, None).unwrap();
                 assert_eq!(got, want, "{st:?}: {:?}", src.sql);
                 assert_eq!(src.sql.len(), 5, "{st:?}");
             }
@@ -2015,7 +2256,7 @@ mod tests {
         let plan = crate::plan::test_support::test_plan();
         for n in [1_000i64, 100_000] {
             let mut src = Indexed::new(keys((0..n).map(|i| i * 7)), true);
-            let got = sample_key_boundaries(&mut src, &plan, "k", 4, None, None).unwrap();
+            let got = sample_key_boundaries(&mut src, &plan, "k", 4, 4, None, None).unwrap();
             let rows: Vec<i64> = got.iter().map(|b| b.parse::<i64>().unwrap() / 7).collect();
             assert_eq!(rows, vec![n / 4, n / 2, 3 * n / 4], "{got:?}");
             assert_eq!(src.sql.len(), 5);

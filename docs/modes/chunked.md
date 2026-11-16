@@ -386,15 +386,32 @@ that dies resumes only the unfinished ranges.
 > **Sweet spot.** Extraction is I/O-bound, so the speedup plateaus early —
 > **~3.1× at `parallel: 4`** on an indexed table, little beyond 4.
 >
-> **How the ranges are cut.** Rivet reads the key's `MIN` and `MAX`, splits that
-> span into N even steps of the key's own **value** (integer, float, uuid, date,
-> timestamp, or text), and snaps each cut to the next existing key — `N + 1`
-> index seeks, whatever the table size. The ranges are balanced when the key
-> values are spread evenly (a sequence, a random or time-ordered uuid). A
-> **skewed** key — most rows packed in one corner of its span, or a few far
-> outliers — gets uneven ranges, down to a single worker with a warning; the
-> run still reads every row once. For such a key, run it sequentially or pick
-> a range `chunk_column`.
+> **How the ranges are cut.** Rivet first reads the table's row estimate from
+> the catalog, never by counting: `pg_class.reltuples` on PostgreSQL,
+> `information_schema.TABLES.TABLE_ROWS` on MySQL, `sys.partitions` on SQL
+> Server, `ALL_TABLES.NUM_ROWS` on Oracle.
+>
+> - **Under 10 M rows by that estimate**, the ranges are exact row percentiles:
+>   one `COUNT(*)` and `N − 1` ordered offset reads, so every worker gets the
+>   same number of rows however the key is spread.
+> - **At 10 M rows or more, or with no estimate** (a `query:` export, a table
+>   never analyzed, MySQL's `TABLE_ROWS` of 0 on a fresh table), rivet reads the
+>   key's `MIN` and `MAX`, splits that span into even steps of the key's own
+>   **value** (integer, float, uuid, date, timestamp, or text), and snaps each
+>   cut to the next existing key by an index seek, whatever the table size. An
+>   integer key is cut into 16 ranges per worker (at most 256), run at most `N`
+>   at a time, so a dense stretch of keys spreads over several ranges; any other
+>   key is cut into `N`. The ranges follow the key's value, not its row count: a
+>   **skewed** key (most rows packed in one corner of its span, or a few far
+>   outliers) still gets uneven ranges, and a key whose dense stretch is
+>   narrower than one range keeps it in one range. A table mixing random and
+>   time-ordered uuids can put about half its rows in one range. Every row is
+>   still read once. For such a key above 10 M rows, run it sequentially or pick
+>   a range `chunk_column`.
+>
+> If the server refuses a cut (a key type whose split point it cannot read
+> back), the keys above the last good cut stay in one range with a warning;
+> the data is complete, with fewer workers.
 >
 > **Canary first.** Parallel keyset is new in 0.23.0. Run it on a canary table
 > and diff row counts against a sequential (`parallel: 1`) pass before rolling
