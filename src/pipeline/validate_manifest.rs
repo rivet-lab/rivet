@@ -498,7 +498,9 @@ pub fn verify_at_destination(
 ) -> Result<ManifestVerification> {
     let mut verdict = verify_unredacted(dest, manifest_dir, depth)?;
     for failure in &mut verdict.failures {
-        failure.redact_store_text();
+        if seeded!("store-error-detail-unmasked", false, true) {
+            failure.redact_store_text();
+        }
     }
     Ok(verdict)
 }
