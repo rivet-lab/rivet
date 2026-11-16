@@ -99,7 +99,7 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ("src/pipeline/run.rs::run#1", 224),
     ("src/pipeline/run.rs::run_waves#1", 171),
     (
-        "src/pipeline/validate_manifest.rs::verify_at_destination#1",
+        "src/pipeline/validate_manifest.rs::verify_unredacted#1",
         227,
     ),
     ("src/plan/build.rs::build_plan_on#1", 226),
