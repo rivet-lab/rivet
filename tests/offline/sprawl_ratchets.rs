@@ -59,7 +59,7 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ("src/cli/dispatch.rs::dispatch#1", 195),
     ("src/error/retry.rs::classify_error#1", 206),
     ("src/format/csv.rs::write_csv_value#1", 239),
-    ("src/init/yaml_scaffold.rs::export_block_lines#1", 339),
+    ("src/init/yaml_scaffold.rs::export_block_lines#1", 243),
     ("src/load/orchestrate.rs::load_incremental_job#1", 163),
     ("src/load/orchestrate.rs::load_one_cdc_base#1", 155),
     ("src/load/orchestrate.rs::run_loads#1", 159),
