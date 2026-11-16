@@ -180,11 +180,6 @@ fn fill_keyset_page(
     Ok(Some(sink))
 }
 
-/// The 0-indexed ROW offset of the i-th of `parts` percentile boundaries over `total` rows (i in 1..parts).
-fn percentile_offset(total: i64, i: usize, parts: usize) -> i64 {
-    total * i as i64 / parts as i64
-}
-
 /// The run's `cursor_high` (forensics v18): the max key of the HIGHEST-index range that produced data.
 fn highest_range_max(range_maxes: Vec<Option<String>>) -> Option<String> {
     range_maxes.into_iter().rev().flatten().next()
@@ -210,17 +205,17 @@ fn page_part_cursor(pi: usize, n_parts: usize, high_water: &Option<String>) -> O
     (pi + 1 == n_parts).then(|| high_water.clone()).flatten()
 }
 
-/// "The single row at offset `off`" clause (after the `ORDER BY`), per dialect.
-fn nth_row_clause(st: crate::config::SourceType, off: i64) -> String {
+/// "Only the first row" clause (after the `ORDER BY`), per dialect.
+fn first_row_clause(st: crate::config::SourceType) -> &'static str {
     use crate::config::SourceType::*;
     match st {
-        Postgres | Mysql => format!("LIMIT 1 OFFSET {off}"),
-        Mssql | Oracle => format!("OFFSET {off} ROWS FETCH NEXT 1 ROWS ONLY"),
+        Postgres | Mysql => "LIMIT 1",
+        Mssql | Oracle => "OFFSET 0 ROWS FETCH NEXT 1 ROWS ONLY",
         Mongo => unreachable!("parallel keyset sampling is a SQL path; Mongo uses $sample"),
     }
 }
 
-/// Sample N−1 ROW-percentile boundaries of the keyset key: the key values at row offsets `total*i/N`.
+/// Up to N−1 range boundaries of the keyset key: key-space split points of its MIN..MAX, each snapped to the next existing key by one index seek.
 pub(crate) fn sample_key_boundaries(
     src: &mut dyn Source,
     plan: &ResolvedRunPlan,
@@ -232,48 +227,49 @@ pub(crate) fn sample_key_boundaries(
     let st = plan.source.source_type;
     let base = &plan.base_query;
     let k = crate::sql::quote_ident(st, key);
-    let mut preds: Vec<String> = Vec::new();
     let of = crate::source::query::KeyOf { base, expr: &k };
-    if let Some(lo) = floor {
-        preds.push(format!(
-            "{k} > {}",
-            crate::source::query::inline_literal(st, lo, of)
-        ));
-    }
-    if let Some(hi) = ceil {
-        preds.push(format!(
-            "{k} <= {}",
-            crate::source::query::inline_literal(st, hi, of)
-        ));
-    }
-    let where_clause = if preds.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {}", preds.join(" AND "))
-    };
-    let total: i64 = src
-        .query_scalar(&format!(
-            "SELECT COUNT(*) FROM ({base}) {} {where_clause}",
+    let lit = |v: &str| crate::source::query::inline_literal(st, v, of);
+    let fence: Vec<String> = [
+        floor.map(|v| format!("{k} > {}", lit(v))),
+        ceil.map(|v| format!("{k} <= {}", lit(v))),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    seeded!(
+        "keyset-sampler-scans-the-table",
+        src.query_scalar(&format!(
+            "SELECT COUNT(*) FROM ({base}) {}",
             crate::sql::derived(st, "_rivet_pk_cnt")
-        ))?
-        .as_deref()
-        .and_then(|s| s.trim().parse::<i64>().ok())
-        .unwrap_or(0);
-    if total <= 1 {
+        ))
+        .map(drop)?,
+        ()
+    );
+    let mut first = |preds: &[String], dir: &str| -> Result<Option<String>> {
+        let where_clause = if preds.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", preds.join(" AND "))
+        };
+        src.query_scalar(&format!(
+            "SELECT {k} FROM ({base}) {} {where_clause} ORDER BY {k}{dir} {}",
+            crate::sql::derived(st, "_rivet_pk"),
+            first_row_clause(st)
+        ))
+    };
+    let present = [fence.clone(), vec![format!("{k} IS NOT NULL")]].concat();
+    let (Some(lo), Some(hi)) = (first(&present, "")?, first(&present, " DESC")?) else {
         return Ok(vec![]);
-    }
+    };
     let mut bounds: Vec<String> = Vec::with_capacity(parts.saturating_sub(1));
-    for i in 1..parts {
-        let off = percentile_offset(total, i, parts);
-        let nth = nth_row_clause(st, off);
-        let sql = format!(
-            "SELECT {k} FROM ({base}) {} {where_clause} ORDER BY {k} {nth}",
-            crate::sql::derived(st, "_rivet_pk")
-        );
-        if let Some(v) = src.query_scalar(&sql)?
-            && bounds.last().map(String::as_str) != Some(v.as_str())
-        {
-            bounds.push(v);
+    for cut in super::key_space::split(&lo, &hi, parts) {
+        let after = bounds.last().unwrap_or(&lo);
+        let mut preds = fence.clone();
+        preds.push(format!("{k} >= {}", lit(&cut)));
+        preds.push(format!("{k} > {}", lit(after)));
+        match first(&preds, "")? {
+            Some(b) if b != hi => bounds.push(b),
+            _ => break,
         }
     }
     Ok(bounds)
@@ -1485,24 +1481,16 @@ mod tests {
     }
 
     #[test]
-    fn percentile_offset_partitions_evenly() {
-        assert_eq!(percentile_offset(1000, 1, 4), 250);
-        assert_eq!(percentile_offset(1000, 2, 4), 500);
-        assert_eq!(percentile_offset(1000, 3, 4), 750);
-        assert_eq!(percentile_offset(999, 1, 3), 333);
-        assert_eq!(percentile_offset(999, 2, 3), 666);
-    }
-
-    #[test]
-    fn nth_row_clause_is_per_dialect() {
+    fn first_row_clause_is_per_dialect() {
+        assert_eq!(first_row_clause(SourceType::Postgres), "LIMIT 1");
+        assert_eq!(first_row_clause(SourceType::Mysql), "LIMIT 1");
         assert_eq!(
-            nth_row_clause(SourceType::Postgres, 250),
-            "LIMIT 1 OFFSET 250"
+            first_row_clause(SourceType::Mssql),
+            "OFFSET 0 ROWS FETCH NEXT 1 ROWS ONLY"
         );
-        assert_eq!(nth_row_clause(SourceType::Mysql, 250), "LIMIT 1 OFFSET 250");
         assert_eq!(
-            nth_row_clause(SourceType::Mssql, 250),
-            "OFFSET 250 ROWS FETCH NEXT 1 ROWS ONLY"
+            first_row_clause(SourceType::Oracle),
+            "OFFSET 0 ROWS FETCH NEXT 1 ROWS ONLY"
         );
     }
 
@@ -1711,12 +1699,61 @@ mod tests {
         assert!(src.1, "a parallel worker's page reads a lead-bounded range");
     }
 
-    struct Scripted {
-        total: &'static str,
-        bounds: Vec<&'static str>,
+    /// An indexed key column that answers only first-row seeks, refusing a count or an offset skip.
+    struct Indexed {
+        keys: Vec<String>,
+        numeric: bool,
         sql: Vec<String>,
     }
-    impl Source for Scripted {
+    impl Indexed {
+        /// A table holding `keys` (sorted here), compared as numbers or as text.
+        fn new(mut keys: Vec<String>, numeric: bool) -> Self {
+            let order = |a: &String, b: &String| Indexed::order(numeric, a, b);
+            keys.sort_by(order);
+            Indexed {
+                keys,
+                numeric,
+                sql: Vec::new(),
+            }
+        }
+        /// The key order the fake index keeps.
+        fn order(numeric: bool, a: &str, b: &str) -> std::cmp::Ordering {
+            if numeric {
+                a.parse::<i128>().unwrap().cmp(&b.parse::<i128>().unwrap())
+            } else {
+                a.cmp(b)
+            }
+        }
+        /// The `(operator, value)` predicates of a WHERE clause made of `"k" <op> E'<v>'` and `"k" IS NOT NULL` joined by AND.
+        fn predicates(mut w: &str) -> Vec<(String, String)> {
+            let mut out = Vec::new();
+            while !w.is_empty() {
+                w = w
+                    .strip_prefix(" AND ")
+                    .unwrap_or(w)
+                    .strip_prefix("\"k\" ")
+                    .unwrap();
+                if let Some(rest) = w.strip_prefix("IS NOT NULL") {
+                    w = rest;
+                    continue;
+                }
+                let (op, rest) = w.split_once(" E'").unwrap();
+                let mut v = String::new();
+                let mut chars = rest.char_indices();
+                let end = loop {
+                    match chars.next().unwrap() {
+                        (_, '\\') => v.push(chars.next().unwrap().1),
+                        (i, '\'') => break i + 1,
+                        (_, c) => v.push(c),
+                    }
+                };
+                out.push((op.to_string(), v));
+                w = &rest[end..];
+            }
+            out
+        }
+    }
+    impl Source for Indexed {
         fn export(
             &mut self,
             _request: &source::ExportRequest<'_>,
@@ -1726,10 +1763,38 @@ mod tests {
         }
         fn query_scalar(&mut self, sql: &str) -> Result<Option<String>> {
             self.sql.push(sql.to_string());
-            if sql.starts_with("SELECT COUNT(*)") {
-                return Ok(Some(self.total.to_string()));
-            }
-            Ok(Some(self.bounds.remove(0).to_string()))
+            assert!(
+                !sql.contains("COUNT") && !sql.contains("OFFSET"),
+                "a scan: {sql}"
+            );
+            let head = sql
+                .strip_suffix(" LIMIT 1")
+                .unwrap_or_else(|| panic!("not a first-row seek: {sql}"));
+            let (head, desc) = match head.strip_suffix(" ORDER BY \"k\" DESC") {
+                Some(h) => (h, true),
+                None => (head.strip_suffix(" ORDER BY \"k\"").unwrap(), false),
+            };
+            let preds = head
+                .split_once(" WHERE ")
+                .map_or(vec![], |(_, w)| Indexed::predicates(w));
+            let numeric = self.numeric;
+            let hit = |k: &&String| {
+                preds.iter().all(|(op, v)| {
+                    let o = Indexed::order(numeric, k, v);
+                    match op.as_str() {
+                        ">" => o.is_gt(),
+                        ">=" => o.is_ge(),
+                        "<=" => o.is_le(),
+                        other => panic!("unexpected operator {other}"),
+                    }
+                })
+            };
+            let found = if desc {
+                self.keys.iter().rev().find(hit)
+            } else {
+                self.keys.iter().find(hit)
+            };
+            Ok(found.cloned())
         }
         fn type_mappings(
             &mut self,
@@ -1740,33 +1805,92 @@ mod tests {
         }
     }
 
-    /// Sampling returns the distinct row-percentile keys in order, fences them by the floor and ceiling, and reads nothing from fewer than two rows.
+    /// Owned key strings.
+    fn keys(xs: impl IntoIterator<Item = impl ToString>) -> Vec<String> {
+        xs.into_iter().map(|x| x.to_string()).collect()
+    }
+
+    /// Sampling reads the fenced MIN and MAX and one seek per cut, never a count or an offset skip, and nothing past an empty or one-key fence.
     #[test]
-    fn sampled_boundaries_are_the_distinct_percentile_keys_inside_the_fence() {
+    fn sampled_boundaries_are_seeks_to_even_cuts_inside_the_fence() {
         let plan = crate::plan::test_support::test_plan();
-        let mut src = Scripted {
-            total: "40",
-            bounds: vec!["b10", "b20", "b20"],
-            sql: Vec::new(),
-        };
-        let got = sample_key_boundaries(&mut src, &plan, "k", 4, Some("a"), Some("z")).unwrap();
-        assert_eq!(got, vec!["b10".to_string(), "b20".to_string()]);
-        assert_eq!(src.sql.len(), 4, "one count and one read per percentile");
+        let mut src = Indexed::new(keys(1..=1000), true);
+        let got = sample_key_boundaries(&mut src, &plan, "k", 4, Some("100"), Some("900")).unwrap();
+        assert_eq!(got, keys([300, 500, 700]));
+        assert_eq!(src.sql.len(), 5, "MIN, MAX and one seek per cut");
         for sql in &src.sql {
-            assert!(sql.contains("\"k\" > E'a' AND \"k\" <= E'z'"), "{sql}");
+            assert!(sql.contains("\"k\" > E'100' AND \"k\" <= E'900'"), "{sql}");
         }
-        let mut one = Scripted {
-            total: "1",
-            bounds: vec![],
-            sql: Vec::new(),
-        };
+        let mut sparse = Indexed::new(keys([1, 2, 3, 1_000_000]), true);
+        let got = sample_key_boundaries(&mut sparse, &plan, "k", 4, None, None).unwrap();
+        assert!(got.is_empty(), "every cut snaps to the MAX: {got:?}");
+        assert_eq!(
+            sparse.sql.len(),
+            3,
+            "a cut that reaches the MAX ends the sampling"
+        );
+        let mut one = Indexed::new(keys([7, 7, 7]), true);
         assert!(
             sample_key_boundaries(&mut one, &plan, "k", 4, None, None)
                 .unwrap()
                 .is_empty()
         );
-        assert_eq!(one.sql.len(), 1, "a single row is counted, never sampled");
-        assert!(!one.sql[0].contains("WHERE"), "{}", one.sql[0]);
+        assert_eq!(
+            one.sql.len(),
+            2,
+            "a single key value is read twice, never sampled"
+        );
+        let mut none = Indexed::new(vec![], true);
+        assert!(
+            sample_key_boundaries(&mut none, &plan, "k", 4, None, None)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!none.sql[0].contains("> E"), "{}", none.sql[0]);
+    }
+
+    /// Whatever the keys and the fence, the sampled ranges hold every fenced row exactly once, each key value in one range, in at most N+1 seeks.
+    #[test]
+    fn sampled_ranges_hold_every_fenced_row_once_for_any_keys() {
+        use proptest::prelude::*;
+        let plan = crate::plan::test_support::test_plan();
+        let text = proptest::collection::vec("\\PC{0,6}", 0..60);
+        let ints = proptest::collection::vec(-1_000_000i64..1_000_000, 0..60);
+        proptest!(|(ts in text, is in ints, numeric: bool, parts in 2usize..9, fence in proptest::option::of((0usize..60, 0usize..60)))| {
+            let mut src = if numeric { Indexed::new(keys(is), true) } else { Indexed::new(ts, false) };
+            let all = src.keys.clone();
+            let (floor, ceil) = fence
+                .filter(|_| !all.is_empty())
+                .map(|(a, b)| (all.get(a % all.len()).cloned(), all.get(b % all.len()).cloned()))
+                .unwrap_or((None, None));
+            let bounds = sample_key_boundaries(&mut src, &plan, "k", parts, floor.as_deref(), ceil.as_deref()).unwrap();
+            prop_assert!(src.sql.len() <= parts + 1, "{} statements for {parts} parts", src.sql.len());
+            let ranges = partition_ranges(&bounds, floor.as_deref(), ceil.as_deref());
+            prop_assert!(ranges.len() <= parts);
+            let numeric = src.numeric;
+            let inside = |k: &str, lo: &Option<String>, hi: &Option<String>| {
+                lo.as_deref().is_none_or(|l| Indexed::order(numeric, k, l).is_gt())
+                    && hi.as_deref().is_none_or(|h| Indexed::order(numeric, k, h).is_le())
+            };
+            for k in &all {
+                let held = ranges.iter().filter(|(_, lo, hi, _)| inside(k, lo, hi)).count();
+                let fenced = inside(k, &floor, &ceil);
+                prop_assert_eq!(held, usize::from(fenced), "key {:?} in {:?}", k, ranges);
+            }
+        });
+    }
+
+    /// Evenly spread keys split into even ranges, whatever the table size.
+    #[test]
+    fn evenly_spread_keys_split_into_even_ranges() {
+        let plan = crate::plan::test_support::test_plan();
+        for n in [1_000i64, 100_000] {
+            let mut src = Indexed::new(keys((0..n).map(|i| i * 7)), true);
+            let got = sample_key_boundaries(&mut src, &plan, "k", 4, None, None).unwrap();
+            let rows: Vec<i64> = got.iter().map(|b| b.parse::<i64>().unwrap() / 7).collect();
+            assert_eq!(rows, vec![n / 4, n / 2, 3 * n / 4], "{got:?}");
+            assert_eq!(src.sql.len(), 5);
+        }
     }
 
     /// A composite key's sampled lead bounds become one-value tuples; a single key's stay bare values.

@@ -1314,3 +1314,67 @@ fn a_sequential_keyset_crash_resumed_in_parallel_exports_every_row_once() {
     assert_every_row_once(&rig, 2000);
     let _ = pg_connect().execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
 }
+
+/// Tuples PostgreSQL read from `table` and its indexes, once the shared counts settle.
+fn pg_tuples_read(c: &mut postgres::Client, table: &str) -> i64 {
+    let read = |c: &mut postgres::Client| -> i64 {
+        c.query_one(
+            "SELECT (COALESCE(t.seq_tup_read, 0) + COALESCE((SELECT sum(i.idx_tup_read) \
+             FROM pg_stat_user_indexes i WHERE i.relid = t.relid), 0))::bigint \
+             FROM pg_stat_user_tables t WHERE t.relname = $1",
+            &[&table],
+        )
+        .map(|r| r.get(0))
+        .unwrap()
+    };
+    let mut last = read(c);
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let now = read(c);
+        if now == last {
+            return now;
+        }
+        last = now;
+    }
+    last
+}
+
+/// Parallel keyset over a composite uuid + text key reads each row about once: the range sampler seeks, it never counts or skips through the table.
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn parallel_keyset_sampler_reads_a_bounded_number_of_rows_postgres() {
+    require_alive(LiveService::Postgres);
+    const ROWS: i64 = 100_000;
+    let table = unique_name("pk_bounded");
+    let mut c = pg_connect();
+    c.batch_execute(&format!(
+        "DROP TABLE IF EXISTS {table};
+         CREATE TABLE {table} (id UUID NOT NULL, kind VARCHAR(16) NOT NULL, payload TEXT NOT NULL, PRIMARY KEY (id, kind));
+         INSERT INTO {table} SELECT md5(g::text)::uuid, 'k' || (g % 3), repeat('x', 40) FROM generate_series(1, {ROWS}) g;
+         ANALYZE {table};"
+    ))
+    .unwrap();
+    let rig = Rig::pg_batch(&format!("public.{table}"))
+        .mode("chunked")
+        .export_line("chunk_by_key: [id, kind]")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 10000");
+    let before = pg_tuples_read(&mut c, &table);
+    rig.run_ok();
+    let read = pg_tuples_read(&mut c, &table) - before;
+    let declared = |sql: &str| duckdb_declared_dir_scalar(&rig.out_dir(), sql);
+    assert_eq!(
+        (
+            declared("count(*)"),
+            declared("count(DISTINCT (CAST(id AS VARCHAR) || '|' || kind))"),
+            worker_fanout(&rig.out_dir()),
+        ),
+        (ROWS, ROWS, 4),
+        "declared rows, distinct keys, workers"
+    );
+    assert!(
+        read <= ROWS + ROWS / 20,
+        "the run read {read} tuples for {ROWS} rows: the range sampler scans the table"
+    );
+    let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
+}
