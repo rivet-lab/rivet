@@ -105,7 +105,7 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ("src/plan/build.rs::build_plan_on#1", 226),
     (
         "src/plan/build.rs::chunked_strategy_from_introspection#1",
-        200,
+        196,
     ),
     ("src/plan/build.rs::resolve_chunked_strategy#1", 175),
     ("src/preflight/doctor.rs::doctor#1", 257),

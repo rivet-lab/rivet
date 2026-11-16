@@ -538,9 +538,8 @@ fn run_keyset_parallel(
     if fan_out_collapsed(parallel, total_ranges) {
         log::warn!(
             "export '{}': parallel keyset requested {} workers but sampled 0 boundaries — \
-             running as a SINGLE worker. The key may hold one value, be skewed (the ranges \
-             split its MIN..MAX by value), or be a type the boundary probe cannot read; \
-             data is complete but the parallel speed-up is absent.",
+             running as a SINGLE worker. The key may hold one value, be skewed, or be a type the \
+             boundary probe cannot read; data is complete but the parallel speed-up is absent.",
             plan.export_name,
             parallel
         );

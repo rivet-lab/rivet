@@ -1358,18 +1358,23 @@ fn parallel_keyset_sampler_reads_a_bounded_number_of_rows_postgres() {
         .mode("chunked")
         .export_line("chunk_by_key: [id, kind]")
         .export_line("parallel: 4")
-        .export_line("chunk_size: 10000");
+        .export_line("chunk_size: 10000")
+        .no_oracle("the test counts reads of the source table; the oracle's own read-back would be counted");
     let before = pg_tuples_read(&mut c, &table);
     rig.run_ok();
     let read = pg_tuples_read(&mut c, &table) - before;
-    let declared = |sql: &str| duckdb_declared_dir_scalar(&rig.out_dir(), sql);
+    let out = rig.out_dir();
+    let keys: std::collections::HashSet<_> = dir_parquet_display(&out, "id")
+        .into_iter()
+        .zip(dir_parquet_display(&out, "kind"))
+        .collect();
     assert_eq!(
         (
-            declared("count(*)"),
-            declared("count(DISTINCT (CAST(id AS VARCHAR) || '|' || kind))"),
-            worker_fanout(&rig.out_dir()),
+            rows_per_range(&out).values().sum::<usize>(),
+            keys.len(),
+            worker_fanout(&out),
         ),
-        (ROWS, ROWS, 4),
+        (ROWS as usize, ROWS as usize, 4),
         "declared rows, distinct keys, workers"
     );
     assert!(
@@ -1418,16 +1423,14 @@ fn a_skewed_parallel_keyset_key_reads_every_row_once_postgres() {
         .export_line("parallel: 4")
         .export_line("chunk_size: 1000");
     rig.run_ok();
-    let declared = |sql: &str| duckdb_declared_dir_scalar(&rig.out_dir(), sql);
+    let ids = dir_parquet_ids(&rig.out_dir());
+    let expected: Vec<i64> = (1..=18_000)
+        .chain((1..=2_000).map(|g| 18_000 + g * 171))
+        .collect();
     assert_eq!(
-        (
-            declared("count(*)"),
-            declared("count(DISTINCT id)"),
-            declared("min(id)"),
-            declared("max(id)"),
-        ),
-        (20_000, 20_000, 1, 18_000 + 2_000 * 171),
-        "declared rows, distinct ids, id range"
+        (ids.len(), dir_parquet_id_set(&rig.out_dir())),
+        (expected.len(), expected.into_iter().collect()),
+        "every source id delivered once"
     );
     let spread = rows_per_range(&rig.out_dir());
     eprintln!("SPREAD {table}: {spread:?}");
