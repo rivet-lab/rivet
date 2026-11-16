@@ -260,8 +260,9 @@ FIELD_REPLAY_CARRIER_BIN  ?= $(PREV_RELEASE_DIR)/carrier/rivet-$(FIELD_REPLAY_CA
 MIGRATION_CARRIER_TAG     ?= v0.31.0
 MIGRATION_CARRIER_BIN     ?= $(PREV_RELEASE_DIR)/field/rivet-$(MIGRATION_CARRIER_TAG)-$(TRIPLE)/rivet
 # The LEASE carrier: a release that holds the run and load leases this tree's migration waits for
-# (0.32.0+), writes an older state schema (v37), and still advances a Postgres slot past its checkpoint
-# (#649, fixed in 0.32.2). PINNED like the carriers above.
+# (0.32.0+), writes an older state schema (v37), still advances a Postgres slot past its checkpoint
+# (#649, fixed in 0.32.2), and stages Mongo change positions as `_data` only (before #736, 0.33.0).
+# PINNED like the carriers above.
 LEASE_CARRIER_TAG         ?= v0.32.1
 LEASE_CARRIER_BIN         ?= $(PREV_RELEASE_DIR)/field/rivet-$(LEASE_CARRIER_TAG)-$(TRIPLE)/rivet
 # The release whose state `rivet state copy` must carry to PostgreSQL: 0.30.0 (state v31), the one a

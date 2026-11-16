@@ -35,6 +35,7 @@ _ISLAND_TIER = re.compile(r"\] full: ")
 _OFFLINE_TIER = re.compile(r"\[offline\]: ")
 _NIGHTLY_KEY = re.compile(r"^nightly\[")
 _GATE_CLASS = re.compile(r"^(?P<matrix>[a-z_]+)\[(?P<kind>[a-z_]+)\] (?:smoke|full): (?P<cause>[A-Z_]+) over ")
+_CELL = re.compile(r"^(?P<cell>[A-Za-z_]\w*::\w[\w:]*) — ")
 _DATED = re.compile(r"\b20\d\d-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b")
 _ORACLE_CDC_LOAD = (
     "Oracle CDC does not load yet (ADR-0037; the Oracle GA work). The previous release's `rivet init --mode cdc` writes no `load:` block, and this cell still drives the previous release through `load`, which refuses. `upgrade[oracle/cdc-load/init=this]` grades what the scaffold does promise (the baseline Parquet equals the source). The cycle stays unsupported until Oracle CDC loads. Pinned 2026-11-01 to the whole refusal line; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it"
@@ -217,10 +218,16 @@ KNOWN_RED: tuple[KnownRed, ...] = (
 )
 
 
-def nightly_classes() -> dict[str, KnownRed]:
-    """Every nightly red class the ledger acknowledges: its own `nightly[...]` entries and the per-cell-set entries of the gate, cut to (matrix, engine, cause)."""
-    out: dict[str, KnownRed] = {}
-    for k in KNOWN_RED:
+def cells(entries: tuple[KnownRed, ...] | None = None) -> dict[str, KnownRed]:
+    """The live-cell entries of the ledger (or of `entries`) by cell (`module::test`)."""
+    return {c: k for k in (KNOWN_RED if entries is None else entries) if (c := cell_of(k.match))}
+
+
+def nightly_classes(entries: tuple[KnownRed, ...] | None = None) -> dict[str, KnownRed]:
+    """Every red class the ledger (or `entries`) acknowledges: its live cells by name, its own `nightly[...]` entries and the per-cell-set entries of the gate, cut to (matrix, engine, cause)."""
+    entries = KNOWN_RED if entries is None else entries
+    out: dict[str, KnownRed] = dict(cells(entries))
+    for k in entries:
         for key in k.keys():
             if _NIGHTLY_KEY.match(key):
                 out[key] = k
@@ -247,6 +254,17 @@ def unframed(msg: str) -> str:
     """The failure text of a live-cell message `<label> FAILED · <cell> — <why> (see <log>)`, else `msg`."""
     head, sep, rest = msg.partition(" FAILED · ")
     return rest.rpartition(" (see ")[0] or rest if sep else msg
+
+
+def cell_of(line: str) -> str | None:
+    """The `module::test` of a live-cell failure line or ledger message (`<label> FAILED · <cell> — <why>`), else None; the head of `<why>` is never read."""
+    m = _CELL.match(unframed(line).strip())
+    return m["cell"] if m else None
+
+
+def cell_key(msg: str) -> str:
+    """The identity of a red message across runs and slices: its live cell, else the message cut before ` over ` (its count and digest change per run)."""
+    return cell_of(msg) or msg.partition(" over ")[0]
 
 
 def match(msg: str, today: _dt.date | None = None) -> tuple[KnownRed | None, bool]:
@@ -289,6 +307,13 @@ def self_test() -> int:
     cut = nightly_classes()
     assert nightly_key("no_silent_null", "mysql", "CHECK_RUN_SPLIT") in cut and nightly_key("no_silent_null", "mongo", "OVERRIDE_IGNORED") in cut, \
         "a gate entry is cut to its (matrix, engine, cause) class"
+    held = KnownRed("m::open_defect_x — boom", "2026-11-16: why", "2026-11-22")
+    assert cells((held,)) == {"m::open_defect_x": held} == nightly_classes((held,)), "a live-cell entry is held under its cell"
+    framed = "audit suspects FAILED · m::t — [2026-11-16T00:13:32Z WARN rivet::config::source] inline `url:` plaintext password (see log)"
+    assert cell_of(framed) == "m::t" == cell_of("m::t — boom") == cell_key(framed), "the cell is read before the head, whatever warning heads it"
+    assert cell_of("no_silent_null[mysql] smoke: SILENT_NULL over 3 pairs #ab") is None and cell_of("x FAILED · no cell here") is None
+    assert cell_key("no_silent_null[mysql] smoke: SILENT_NULL over 3 pairs #ab") == cell_key("no_silent_null[mysql] smoke: SILENT_NULL over 9 pairs #cd"), \
+        "a gate class keeps its key when its count and digest change"
     print("known_red self-test: ok")
     return 0
 

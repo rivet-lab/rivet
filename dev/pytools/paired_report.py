@@ -1,12 +1,13 @@
 """One markdown report of a paired release gate on one sha: the hosted half (a gate-hosted run on main) beside the devbox half (its record line).
 
-    python3 -m dev.pytools.paired_report --sha SHA [--devbox-record FILE | --ssh HOST] [--devbox-log FILE] [--run-id N] [--out FILE]
+    python3 -m dev.pytools.paired_report --sha SHA [--devbox-record FILE | --ssh HOST] [--devbox-log FILE] [--run-id N] [--prev-run-id N] [--out FILE]
     python3 -m dev.pytools.paired_report --self-test
 
 The verdicts are `release_halves`' own (its readers and HALVES_* codes, never a second contract). The hosted half is read with `gh`: the
 `hosted-verdict-<ref>` artifact, run.json and jobs.json for the contract, the `slice-N` artifacts and the sampler check runs for the detail.
 The devbox half is the latest `release-oracle-full-devbox` line of SHA in the gate record, read over `ssh HOST 'cat RECORD; echo RC=$?'` and nothing else.
-Red cells are classified with `nightly_delta`: GREEN, KNOWN (ledger entry in date, with expiry and issue), NEW, LOST, INFRA. Every line names the ref and sha it came from.
+Red cells are classified with `nightly_delta`: GREEN, KNOWN (ledger entry in date, with expiry and issue), NEW, MOVED (not in the ledger, but red in another slice of the previous run), LOST, INFRA.
+A red is keyed by its cell, never by its slice. Every line names the ref and sha it came from.
 Exit 0 when both halves are green and cover the gate, 1 when the report was written and is not green (a missing half included), 2 on usage.
 """
 
@@ -41,6 +42,8 @@ SSH_TIMEOUT_S = 90
 TOP = 15
 CUT = 160
 INFRA = "INFRA"
+MOVED = "MOVED"
+CLASS_ORDER = (ndelta.LOST, ndelta.NEW, MOVED, INFRA, ndelta.KNOWN)
 BANNER = re.compile(r"^▸ (.+)$")
 KNOWN_LINE = re.compile(r"KNOWN RED \(until (\d{4}-\d\d-\d\d): (.*?)\) — (.*)$")
 PROGRESS = re.compile(r"^(?:[\w.-]+: (?:round \d+/\d+, )?\d+ cells|(?:odd|even): \d+ of \d+ columns)")
@@ -120,6 +123,8 @@ class Report:
     head: str
     now: dt.datetime
     repo: str
+    prev: dict[str, set[int]] | None = None
+    prev_note: str = ""
 
     @property
     def tag(self) -> str:
@@ -229,6 +234,31 @@ def newest_run_of(sha: str, repo: str, gh: Gh) -> str | None:
     return next((str(r["databaseId"]) for r in runs if r.get("headSha") == sha and r.get("status") == "completed"), None)
 
 
+def prev_run_of(run_id: str, repo: str, gh: Gh) -> str | None:
+    """The completed hosted run on main just before run `run_id`, None when the list does not hold both."""
+    try:
+        ids = [(str(r["databaseId"]), r.get("status")) for r in rh.hosted_runs(repo, gh)]
+    except (subprocess.CalledProcessError, OSError, ValueError):
+        return None
+    at = next((i for i, (rid, _) in enumerate(ids) if rid == str(run_id)), None)
+    return next((rid for rid, status in ids[at + 1:] if status == "completed"), None) if at is not None else None
+
+
+def load_prev(run_id: str, repo: str, work: Path, gh: Gh) -> tuple[dict[str, set[int]] | None, str]:
+    """(the slices holding each red key of run `run_id`, ""), or (None, why the run could not be read)."""
+    root = work / f"prev-{run_id}"
+    try:
+        gh(["run", "download", run_id, "--repo", repo, "--pattern", "slice-*", "--dir", str(root)])
+    except (subprocess.CalledProcessError, OSError) as e:
+        return None, f"run {run_id}: no slice artifact could be downloaded ({type(e).__name__})"
+    found = sorted(int(m[1]) for p in root.glob("slice-*") if (m := re.fullmatch(r"slice-(\d+)", p.name)))
+    out: dict[str, set[int]] = {}
+    for i in found:
+        for x in slice_grade(read_slice(root, i, []), {}, dt.date.today())[1]:
+            out.setdefault(x["key"], set()).add(i)
+    return (out, "") if found else (None, f"run {run_id}: its artifacts hold no slice")
+
+
 def load_hosted(sha: str, run_id: str | None, repo: str, work: Path, gh: Gh = rh.run_gh) -> Hosted:
     """The hosted half of `sha`: the contract inputs `release_halves` reads, then the slice artifacts and sampler check runs of the same run."""
     h = Hosted(sha=sha, contract=work / "contract", root=work / "slices")
@@ -296,7 +326,7 @@ def red_items(text: str, baseline: dict, today: dt.date) -> list[dict]:
         if m := KNOWN_LINE.search(raw):
             entry, _ = known_red.match(m[3])
             cell = MATRIX_OF.match(m[3])
-            items.append({"cls": ndelta.KNOWN, "stage": f"matrix {cell[1]}" if cell else stage, "key": m[3][:100], "expires": m[1], "issue": issue_of(entry.reason if entry else m[2]), "line": m[2][:CUT]})
+            items.append({"cls": ndelta.KNOWN, "stage": f"matrix {cell[1]}" if cell else stage, "key": known_red.cell_key(m[3])[:100], "expires": m[1], "issue": issue_of(entry.reason if entry else m[2]), "line": m[2][:CUT]})
         keys, crashes = ndelta.red_keys(raw)
         for key in sorted(keys - seen):
             seen.add(key)
@@ -325,7 +355,22 @@ def grade_log(code: int | None, text: str, lost: bool, baseline: dict, today: dt
         if why.startswith("exit ") and "explains" in why or why == "red cells under exit 0":
             items.append({"cls": ndelta.NEW, "stage": "(slice exit)", "key": why, "expires": "-", "issue": "-", "line": first_failing(text)})
     seen = {x["cls"] for x in items}
-    return next((c for c in (ndelta.LOST, ndelta.NEW, INFRA, ndelta.KNOWN) if c in seen), graded["verdict"]), items
+    return next((c for c in CLASS_ORDER if c in seen), graded["verdict"]), items
+
+
+def mark_moved(items: list[dict], index: int, prev: dict[str, set[int]] | None) -> None:
+    """Set each item's `moved` against the previous run's slices of its key; a NEW red held there by another slice becomes MOVED."""
+    for x in items:
+        before = (prev or {}).get(x["key"])
+        if prev is None:
+            x["moved"] = "n/a"
+        elif not before:
+            x["moved"] = "not in previous run"
+        elif index in before:
+            x["moved"] = "same slice"
+        else:
+            x["moved"] = "slice " + "/".join(map(str, sorted(before))) + f" -> {index}"
+            x["cls"] = MOVED if x["cls"] == ndelta.NEW else x["cls"]
 
 
 def slice_grade(s: Slice, baseline: dict, today: dt.date) -> tuple[str, list[dict]]:
@@ -495,6 +540,8 @@ def red_section(r: Report, today: dt.date) -> list[str]:
     per_slice = []
     for s in h.slices:
         cls, found = slice_grade(s, base, today)
+        mark_moved(found, s.index, r.prev)
+        cls = next((c for c in CLASS_ORDER if any(x["cls"] == c for x in found)), cls)
         per_slice.append([h.tag, f"slice {s.index}", s.exit_code if s.exit_code is not None else "none", cls, len(found)])
         items += [(h.tag, f"slice {s.index}", x) for x in found]
     note = []
@@ -502,14 +549,16 @@ def red_section(r: Report, today: dt.date) -> list[str]:
         code = 0 if d.rec.get("verdict") == hosted.GREEN else 1
         cls, found = grade_log(code, d.log, False, base, today)
         per_slice.append([d.tag, "gate log", code, cls, len(found)])
+        mark_moved(found, -1, None)
         items += [(d.tag, "gate", x) for x in found]
     elif d.rec:
         note.append(f"- {d.tag} the record holds counts only (failed {d.rec.get('failed')}, verdict {d.rec.get('verdict')}), so its red cells are not known: pass --devbox-log FILE with the gate's output")
-    out = ["## 4. Red cells", "", f"{r.tag} classes: GREEN no red line; KNOWN a ledger entry in date (expiry, issue); NEW a class no entry acknowledges or an expired one; LOST exit 137/143; INFRA runner lost or an INFRA cell.", "",
-           *table(["source", "part", "exit", "class", "red items"], per_slice, r.tag), *note]
+    out = ["## 4. Red cells", "", f"{r.tag} classes: GREEN no red line; KNOWN a ledger entry in date (expiry, issue); NEW a cell no entry acknowledges or an expired one; MOVED a NEW red that the previous run had in another slice; LOST exit 137/143; INFRA runner lost or an INFRA cell.", "",
+           *table(["source", "part", "exit", "class", "red items"], per_slice, r.tag), *note,
+           f"- {r.tag} previous run compared: {'no, ' + r.prev_note if r.prev is None else f'{len(r.prev)} red keys'}"]
     for stage in sorted({x["stage"] for _, _, x in items}):
-        out += ["", f"### stage: {stage}", "", *table(["source", "part", "class", "key", "expires", "issue", "first line"],
-                [[t, p, x["cls"], x["key"], x["expires"], x["issue"], x["line"]] for t, p, x in items if x["stage"] == stage], r.tag)]
+        out += ["", f"### stage: {stage}", "", *table(["source", "part", "class", "key", "expires", "issue", "vs previous run", "first line"],
+                [[t, p, x["cls"], x["key"], x["expires"], x["issue"], x["moved"], x["line"]] for t, p, x in items if x["stage"] == stage], r.tag)]
     read = f"{len(h.slices)} hosted slice logs, devbox log {'read' if d.log else 'not read'}"
     return out + ([] if items else ["", f"- {r.tag} no red cell in the logs read ({read})"])
 
@@ -622,7 +671,7 @@ def head_sha() -> str:
 
 
 def gather(sha: str, work: Path, *, run_id: str | None, record: Path | None, host: str, devbox_log: Path | None, gh: Gh = rh.run_gh, run: Run = subprocess.run,
-           history: Callable[[str], tuple[list[dict] | None, str | None]] = history_lines, now: dt.datetime | None = None) -> Report:
+           prev_run_id: str | None = None, history: Callable[[str], tuple[list[dict] | None, str | None]] = history_lines, now: dt.datetime | None = None) -> Report:
     """Read both halves of `sha` and the history into one `Report`."""
     repo = rh.repo_slug()
     text, err = (record.read_text(), None) if record and record.is_file() else ("", f"{record} is not a file") if record else ssh_record(host, run)
@@ -630,7 +679,9 @@ def gather(sha: str, work: Path, *, run_id: str | None, record: Path | None, hos
     devbox = load_devbox(sha, text, err, str(record) if record else f"ssh {host}:{DEVBOX_RECORD}", work, log)
     half = load_hosted(sha, run_id, repo, work, gh)
     lines, why = history(repo)
-    return Report(sha, half, devbox, lines, why, head_sha(), now or dt.datetime.now(dt.timezone.utc), repo)
+    pid = prev_run_id or (prev_run_of(half.run_id, repo, gh) if half.run_id else None)
+    prev, note = load_prev(pid, repo, work, gh) if pid else (None, "no earlier completed hosted run to read")
+    return Report(sha, half, devbox, lines, why, head_sha(), now or dt.datetime.now(dt.timezone.utc), repo, prev, note)
 
 
 def main(argv: Sequence[str]) -> int:
@@ -641,6 +692,7 @@ def main(argv: Sequence[str]) -> int:
     ap.add_argument("--ssh", default="devbox")
     ap.add_argument("--devbox-log", type=Path)
     ap.add_argument("--run-id")
+    ap.add_argument("--prev-run-id")
     ap.add_argument("--out", type=Path)
     ap.add_argument("--self-test", action="store_true")
     ns = ap.parse_args(argv)
@@ -649,7 +701,7 @@ def main(argv: Sequence[str]) -> int:
     if not (ns.sha and re.fullmatch(r"[0-9a-f]{40}", ns.sha)):
         ap.error("--sha is required and must be a full 40-hex commit sha")
     with tempfile.TemporaryDirectory() as tmp:
-        r = gather(ns.sha, Path(tmp), run_id=ns.run_id, record=ns.devbox_record, host=ns.ssh, devbox_log=ns.devbox_log)
+        r = gather(ns.sha, Path(tmp), run_id=ns.run_id, record=ns.devbox_record, host=ns.ssh, devbox_log=ns.devbox_log, prev_run_id=ns.prev_run_id)
         text = render(r)
         green = verdicts(r)["pair"] is None
     if ns.out:
@@ -725,12 +777,13 @@ def ssh_with(text: str, code: int = 0, tail: str | None = None) -> Run:
     return run
 
 
-def pair(root: Path, d: dict, gh: Gh, *, devbox: str | None = None, history: list[dict] | None = None, run_id: str | None = None) -> Report:
+def pair(root: Path, d: dict, gh: Gh, *, devbox: str | None = None, history: list[dict] | None = None, run_id: str | None = None,
+         prev_run_id: str | None = None) -> Report:
     """The report of the fixture `d`: its own devbox line (or `devbox` text) over a fake ssh and `gh`, with `history` as the gate-history lines."""
     text = devbox if devbox is not None else "".join(json.dumps(x) + "\n" for x in d["devbox"])
     work = root / f"work{len(list(root.glob('work*')))}"
     work.mkdir()
-    return gather(d["verdict"]["sha"] if d["verdict"] else SHA, work, run_id=run_id, record=None, host="devbox", devbox_log=None, gh=gh, run=ssh_with(text),
+    return gather(d["verdict"]["sha"] if d["verdict"] else SHA, work, run_id=run_id, record=None, host="devbox", devbox_log=None, gh=gh, run=ssh_with(text), prev_run_id=prev_run_id,
                   history=lambda repo: (history, None if history is not None else "no history"), now=NOW)
 
 
@@ -767,6 +820,40 @@ def check_classes() -> None:
     assert classes(0, "▸ s\n  mysql 8 live s3 FAIL boom\n")[0] == ndelta.NEW, "a red cell under exit 0 is not green"
     s = Slice(1)
     assert slice_grade(s, {}, TODAY)[0] == INFRA and slice_grade(Slice(1, exit_code=0), {}, TODAY)[0] == ndelta.GREEN, "no record, no log and no exit code is INFRA, never GREEN"
+
+
+def check_cells(root: Path) -> None:
+    """A live cell is one key in any slice, KNOWN when the ledger holds it, and MOVED (not NEW) when the previous run had it in another slice."""
+    row = lambda cell: f"▸ live modules\n  live       batch  -                -        FAIL live modules FAILED · {cell} — [2026-11-16T00:13:32Z WARN rivet::config::source] inline url: plaintext password (see log)\n"  # noqa: E731
+    held = {"m::a": known_red.KnownRed("m::a — boom", "2026-11-12: boom, see #913", "2026-11-22")}
+    in_one, in_two = classes(1, row("m::a")), classes(1, row("m::z") + row("m::a"))
+    assert [x["key"] for x in in_one[1]] == ["m::a"] and "m::a" in [x["key"] for x in in_two[1]], "the same cell in two slices is one key"
+    assert grade_log(1, row("m::a"), False, held, TODAY)[1][0]["cls"] == ndelta.KNOWN, "a cell the ledger holds is KNOWN"
+    assert [x["key"] for x in grade_log(1, row("m::a") + row("m::b"), False, held, TODAY)[1] if x["cls"] == ndelta.NEW] == ["m::b"]
+    known = "▸ s\n  ⊘ KNOWN RED (until 2026-11-22: 2026-11-12: a reason, see #982) — no_silent_null[mysql] smoke: SILENT_NULL over {} pairs #{}\n"
+    assert classes(0, known.format(3, "abc"))[1][0]["key"] == classes(0, known.format(9, "def"))[1][0]["key"], "a KNOWN class keeps its key when its count and digest change"
+    d, gh = fixture(root, logs={1: row("m::b"), 2: row("m::c")}, codes={1: 1, 2: 1})
+    r = pair(root, d, gh)
+    r.prev = {"m::b": {2}, "m::c": {2}}
+    out = render(r, TODAY)
+    assert "slice 2 -> 1" in out and "| MOVED |" in out, "a red that was in another slice last run is MOVED"
+    assert re.search(r"slice 2 \| NEW \| m::c", out) and "same slice" in out, "a red in the same slice as last run keeps its class"
+    r.prev = None
+    assert "| MOVED |" not in render(r, TODAY), "with no previous run nothing is MOVED"
+    before, before_gh = fixture(root / "before", logs={1: row("m::c"), 2: row("m::b")}, codes={1: 1, 2: 1})
+
+    def both(args: Sequence[str]) -> str:
+        """The current fixture's `gh`, and the earlier run 7 served from its own artifacts."""
+        a = list(args)
+        if a[:3] == ["run", "download", "7"]:
+            shutil.copytree(root / "before" / "art", Path(a[a.index("--dir") + 1]))
+            return ""
+        return gh(args)
+    moved = render(pair(root, d, both, prev_run_id="7"), TODAY)
+    assert moved.count("| MOVED | m::") == 2 and "slice 2 -> 1" in moved and "slice 1 -> 2" in moved, moved
+    ids = [{"databaseId": 9, "status": "completed"}, {"databaseId": 8, "status": "in_progress"}, {"databaseId": 7, "status": "completed"}]
+    listing: Gh = lambda a: json.dumps(ids)  # noqa: E731
+    assert (prev_run_of("9", "o/r", listing), prev_run_of("7", "o/r", listing), prev_run_of("5", "o/r", listing)) == ("7", None, None), "the previous run is the next completed one"
 
 
 def check_ssh() -> None:
@@ -855,6 +942,8 @@ def self_test() -> int:
         check_pair(Path(tmp))
     with tempfile.TemporaryDirectory() as tmp:
         check_report(Path(tmp))
+    with tempfile.TemporaryDirectory() as tmp:
+        check_cells(Path(tmp))
     print("paired_report self-test ok: green pair, missing and unreadable halves, 5 red classes, overlap, ssh RC and ref tagging")
     return 0
 
