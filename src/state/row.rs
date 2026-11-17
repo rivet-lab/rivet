@@ -1,32 +1,10 @@
 //! The SQLite-vs-Postgres dispatch seam for the state layer.
-//!
-//! Every store method used to hand-write `match &self.conn { Sqlite(..) => …,
-//! Postgres(..) => … }` — 66 sites across 14 files — duplicating the `pg_sql()`
-//! placeholder translation, the `borrow_mut()`, the `as usize` cast, AND (worst)
-//! the per-column row extraction, which was written once per backend so adding a
-//! column meant editing both arms.
-//!
-//! This module concentrates that: [`StateRow`] abstracts column access over both
-//! `rusqlite::Row` and `postgres::Row`, [`StateParam`] carries a bound value to
-//! either backend (working around the foreign `ToSql` traits), and
-//! [`StateStore::query`] / [`query_opt`] / [`execute`] run a statement on the
-//! right backend so a caller writes its SQL + params + ONE extraction closure.
-//!
-//! [`StateStore::transaction`] is the seam's unit of work: seam statements run
-//! inside its closure commit together or not at all, on either backend.
-//!
-//! Methods whose two arms have genuinely DIVERGENT SQL (not just placeholder
-//! style) — `claim_next_chunk_task`'s `FOR UPDATE SKIP LOCKED` vs SQLite's rowid +
-//! IMMEDIATE transaction — keep their explicit two-arm match; this seam is for
-//! every site that differs only in dialect ceremony.
 
 use crate::error::Result;
 
 use super::{StateConn, StateStore, pg_sql};
 
-/// A bound parameter, dispatched to whichever backend runs the statement. Works
-/// around `rusqlite::ToSql` and `postgres::ToSql` being foreign traits we cannot
-/// blanket-unify: the inner value's own `ToSql` impl is what actually binds.
+/// A bound parameter, dispatched to whichever backend runs the statement.
 #[derive(Debug)]
 pub(super) enum StateParam {
     I64(i64),
@@ -98,8 +76,7 @@ impl rusqlite::types::ToSql for StateParam {
     }
 }
 
-/// Borrow a `StateParam` slice as Postgres bind parameters. Each inner value is
-/// itself `ToSql + Sync`, so no impl on `StateParam` is needed on this side.
+/// Borrow a `StateParam` slice as Postgres bind parameters.
 fn pg_params(params: &[StateParam]) -> Vec<&(dyn postgres::types::ToSql + Sync)> {
     params
         .iter()
@@ -117,9 +94,7 @@ fn pg_params(params: &[StateParam]) -> Vec<&(dyn postgres::types::ToSql + Sync)>
         .collect()
 }
 
-/// Column access over either backend's row. Accessors panic on a type mismatch —
-/// the state schema is fixed, so a mismatch is a programmer error, matching
-/// `postgres::Row::get`'s own contract (and rusqlite's `.unwrap()` here).
+/// Column access over either backend's row.
 pub(super) trait StateRow {
     fn text(&self, i: usize) -> String;
     fn opt_text(&self, i: usize) -> Option<String>;
@@ -165,7 +140,7 @@ impl StateRow for postgres::Row {
     }
 }
 
-/// Read Postgres column `i` of any integer width (INT2/INT4/INT8) as i64; any other type panics naming the column and its type.
+/// Read Postgres column `i` of any integer width (INT2/INT4/INT8) as i64.
 fn pg_int(row: &postgres::Row, i: usize) -> Option<i64> {
     use postgres::types::Type;
     let col = &row.columns()[i];
@@ -181,9 +156,7 @@ fn pg_int(row: &postgres::Row, i: usize) -> Option<i64> {
 }
 
 impl StateStore {
-    /// Run a SELECT on the active backend and map every row through `map` — the
-    /// projection is written ONCE regardless of backend. `sql` uses `?N`
-    /// placeholders (translated to `$N` for Postgres).
+    /// Run a SELECT on the active backend and map every row through `map`.
     pub(super) fn query<T>(
         &self,
         sql: &str,
@@ -231,7 +204,7 @@ impl StateStore {
         }
     }
 
-    /// Run `work` as one unit of work: its statements commit together on `Ok` and roll back on `Err` or panic; a nested call joins the open one. On SQLite it takes the write lock first, so a unit that reads before it writes waits for another writer.
+    /// Run `work` as one unit of work: its statements commit together on `Ok` and roll back on `Err` or panic.
     pub(super) fn transaction<T>(&self, work: impl FnOnce() -> Result<T>) -> Result<T> {
         if self.in_tx.get() {
             return work();
@@ -252,8 +225,7 @@ impl StateStore {
         Ok(out)
     }
 
-    /// This process's turn at the SQLite file's write lock (see [`super::write_turn`]); none on
-    /// PostgreSQL, inside an open transaction (which holds it), or for an in-memory store.
+    /// This process's turn at the SQLite file's write lock (see [`super::write_turn`]).
     pub(super) fn write_turn(&self) -> Option<super::write_turn::Turn> {
         let super::StateRef::Sqlite(db) = &self.state_ref else {
             return None;
@@ -289,7 +261,7 @@ impl Drop for OpenTx<'_> {
 mod tests {
     use super::*;
 
-    /// A unit of work that reads before it writes holds the write lock from its start: another writer of the state file waits, and its own write lands.
+    /// A unit of work that reads before it writes holds the write lock from its start.
     #[test]
     fn a_unit_of_work_that_reads_first_writes_beside_another_writer() {
         let dir = tempfile::tempdir().unwrap();
@@ -314,7 +286,6 @@ mod tests {
     #[test]
     fn query_execute_round_trip_over_the_seam() {
         let s = StateStore::open_in_memory().unwrap();
-        // Reuse an existing table (export_state) to exercise the seam end to end.
         let n = s
             .execute(
                 "INSERT INTO export_state (export_name, last_cursor_value, last_run_at) \
@@ -337,7 +308,6 @@ mod tests {
             .unwrap();
         assert_eq!(got, Some(("orders".to_string(), Some("100".to_string()))));
 
-        // A missing row yields None, an empty list from query.
         let none: Option<i64> = s
             .query_opt(
                 "SELECT 1 FROM export_state WHERE export_name = ?1",

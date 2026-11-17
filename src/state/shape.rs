@@ -1,10 +1,4 @@
 //! Data shape drift tracking (Epic 8).
-//!
-//! Tracks the maximum observed byte length per string/binary column across runs.
-//! On each run the current-run maxima are compared against the stored maxima;
-//! columns that grew beyond `warn_factor × stored_max` are returned as warnings.
-//! Stored maxima are always updated to `max(stored, current)` — shape drift
-//! tracking is advisory and never blocks a run.
 
 use std::collections::HashMap;
 
@@ -37,22 +31,6 @@ impl StateStore {
     /// Upsert per-column max byte lengths, keeping the running maximum.
     pub fn store_shape_stats(&self, export_name: &str, stats: &HashMap<String, u64>) -> Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
-        // Portable across BOTH state backends, and it has to be said explicitly
-        // because the previous form was not: `MAX(a, b)` is a scalar function in
-        // SQLite and an AGGREGATE in PostgreSQL, and a bare `max_byte_len` inside
-        // `DO UPDATE SET` is ambiguous to PostgreSQL between the existing row and
-        // `excluded`. The state layer translates only placeholders (`?N` -> `$N`),
-        // so the SQLite spelling reached PostgreSQL verbatim and every upsert
-        // failed with `column reference "max_byte_len" is ambiguous`.
-        //
-        // It failed at WARN level, so runs kept reporting success while
-        // `export_shape` stayed EMPTY on the Postgres backend — shape tracking,
-        // and the value-growth warning built on it, had never once worked there.
-        // Found by tracing what a single run writes to the meta-DB.
-        //
-        // CASE + an explicit table qualifier is accepted identically by both
-        // (verified against a live PostgreSQL and an in-memory SQLite: 10 -> stays
-        // 10 on 5 -> 99 on 99), so this needs no dialect branch.
         let sql = "INSERT INTO export_shape (export_name, column_name, max_byte_len, updated_at)
                  VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(export_name, column_name) DO UPDATE SET
@@ -76,12 +54,6 @@ impl StateStore {
     }
 
     /// Compare `current` run's per-column maxima against stored history.
-    ///
-    /// Returns a warning for every column whose `current_max > stored_max * warn_factor`.
-    /// The stored maxima are updated to `max(stored, current)` unconditionally so that
-    /// the running high-water mark is always current.
-    ///
-    /// First-run columns (no stored record) are silently accepted.
     pub fn detect_shape_drift(
         &self,
         export_name: &str,

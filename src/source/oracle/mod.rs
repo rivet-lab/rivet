@@ -750,10 +750,23 @@ impl Source for OracleSource {
             .collect::<Vec<_>>()
             .join(".");
         let (owner, table) = crate::sql::oracle_catalog_preds(&qualified);
+        let base = match crate::sql::bare_column_source(query, column) {
+            _ if seeded!(
+                "cursor-nullability-not-traced-to-its-source-column",
+                true,
+                false
+            ) =>
+            {
+                column.to_string()
+            }
+            Some(part) if part.quoted => part.name,
+            Some(part) => part.name.to_ascii_uppercase(),
+            None => return Ok(None),
+        };
         let rows = self.query_rows(&format!(
             "SELECT nullable FROM all_tab_columns \
              WHERE owner = {owner} AND table_name = {table} AND column_name = '{}'",
-            column.replace('\'', "''")
+            base.replace('\'', "''")
         ))?;
         Ok(rows
             .first()

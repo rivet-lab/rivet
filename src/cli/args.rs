@@ -1,19 +1,8 @@
 //! Pure clap surface: every subcommand and shared format enum lives here.
-//!
-//! This module is intentionally free of business logic and `crate::*` calls
-//! beyond the bare minimum needed by clap derive. Behavior — validation,
-//! dispatch, parameter parsing — lives in sibling modules so the public CLI
-//! grammar can evolve independently of the runtime wiring.
 
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
 
-// The graded verify depth (`--depth`) is the *same* enum that gates the checks
-// in the pipeline's `verify_at_destination`, re-exported through `pipeline` so
-// the flag parses straight into it.  Defining it in `cli` instead would invert
-// the layering (the pipeline would depend on the CLI), so this one shared type
-// is the deliberate exception to the "no crate:: types" guideline above — it
-// keeps a single source of truth for the three depth levels.
 pub use crate::pipeline::ValidateDepth;
 
 #[derive(Parser)]
@@ -48,13 +37,7 @@ pub struct Cli {
     pub lock_wait: u64,
 }
 
-/// Parse argv into [`Cli`]. When a config-taking subcommand (the documented
-/// `doctor` Step 1, `check`, `run`, …) is invoked with NO `-c/--config`, append
-/// a `rivet init` recovery hint after clap's own usage error. Every other clap
-/// outcome — `--help` / `--version` (which exit 0) and all other parse errors —
-/// is left byte-for-byte unchanged. We deliberately do NOT default `-c` to
-/// `./rivet.yaml`: that would silently run against an unintended config from the
-/// wrong directory, breaking rivet's no-accidental-action contract.
+/// Parse argv into [`Cli`].
 pub fn parse_cli() -> Cli {
     use clap::Parser;
     match Cli::try_parse() {
@@ -69,14 +52,13 @@ pub fn parse_cli() -> Cli {
                 );
                 std::process::exit(2);
             }
-            // Help/version (exit 0) and every other parse error: clap's default.
             e.exit();
         }
     }
 }
 
 #[derive(Subcommand)]
-#[allow(clippy::large_enum_variant)] // parsed once per process; its size never matters
+#[allow(clippy::large_enum_variant)]
 pub enum Commands {
     /// Run export jobs defined in config
     Run(RunArgs),
@@ -745,12 +727,6 @@ pub enum StateAction {
         json: bool,
     },
     /// Clear persisted chunk checkpoint rows (`chunk_run` / `chunk_task`).
-    // A required, single-choice ArgGroup renders the usage as
-    // `<--export <EXPORT>|--stuck-checkpoints>` (pick exactly one). The old
-    // paired `conflicts_with` + `required_unless_present` idiom made clap render
-    // BOTH flags as required in the synopsis, then rejected supplying both — a
-    // self-contradictory help line (dogfood LOW). The group keeps the same
-    // runtime contract: neither → MissingRequiredArgument, both → ArgumentConflict.
     #[command(group = clap::ArgGroup::new("reset_chunks_target").required(true).multiple(false))]
     ResetChunks {
         #[arg(short, long)]
@@ -898,10 +874,7 @@ mod tests {
         );
     }
 
-    /// Helper: try to parse a `rivet init …` invocation through clap. The leading
-    /// `["rivet", "init"]` is added so we exercise the real subcommand router.
-    /// Returns the `clap::error::ErrorKind` so callers can assert without needing
-    /// a `Debug` impl on `Cli`.
+    /// Helper: try to parse a `rivet init …` invocation through clap.
     fn init_parse_kind(extra_args: &[&str]) -> std::result::Result<(), clap::error::ErrorKind> {
         let mut argv = vec!["rivet", "init"];
         argv.extend(extra_args);
@@ -926,9 +899,6 @@ mod tests {
 
     #[test]
     fn init_source_help_lists_mongodb() {
-        // #dogfood LOW: `init --help` --source text omitted mongodb:// though init
-        // fully supports it (init routes mongodb to a dedicated path, and the
-        // scheme-validation error itself lists it).
         use clap::CommandFactory;
         let cmd = Cli::command();
         let init = cmd.find_subcommand("init").expect("init subcommand exists");
@@ -998,9 +968,7 @@ mod tests {
         );
     }
 
-    /// `rivet load` reads GCS only, so a `load:` scaffold over a local or S3
-    /// destination is a config whose own next-steps command refuses it. Refused at
-    /// the flag, where the operator can still change it.
+    /// `rivet load` reads GCS only, so a `load:` scaffold over a local or S3 destination is a config whose own next-steps command refuses it.
     #[test]
     fn init_clap_requires_a_gcs_bucket_for_a_bigquery_load_scaffold() {
         let bq = ["--bigquery-project", "p", "--bigquery-dataset", "d"];
@@ -1010,8 +978,6 @@ mod tests {
             clap::error::ErrorKind::MissingRequiredArgument,
             "--bigquery-* without --gcs-bucket",
         );
-        // A conflict, not a missing requirement: clap drops a requirement that conflicts
-        // with a present flag, so `requires` alone let `--s3-bucket` satisfy it.
         assert_init_err(
             &[src.as_slice(), bq.as_slice(), &["--s3-bucket", "s"]].concat(),
             clap::error::ErrorKind::ArgumentConflict,
@@ -1023,9 +989,7 @@ mod tests {
         );
     }
 
-    /// The Snowflake loader needs every one of these values and reads GCS only (a GCS external
-    /// stage), and one config loads into one warehouse: every combination that
-    /// cannot become a loadable config is refused at the flag.
+    /// The Snowflake loader needs every one of these values and reads GCS only (a GCS external stage), and one config loads into one warehouse.
     #[test]
     fn init_clap_ties_the_snowflake_flags_together_and_to_a_gcs_bucket() {
         let src = ["--source", "postgresql://localhost/db"];
@@ -1060,7 +1024,6 @@ mod tests {
             clap::error::ErrorKind::ArgumentConflict,
             "--snowflake-* with --s3-bucket only",
         );
-        // Each companion flag missing in turn, and each companion without the account.
         for i in (0..sf.len()).step_by(2) {
             let mut partial: Vec<&str> = [src.as_slice(), gcs.as_slice()].concat();
             partial.extend(
@@ -1200,9 +1163,6 @@ mod tests {
 
     #[test]
     fn init_clap_rejects_discover_with_credentials_or_region() {
-        // `--gcs-credentials-file` requires `--gcs-bucket`, and the bucket conflicts
-        // with `--discover`. Provide the bucket so we cleanly hit the discover×cloud
-        // conflict (not the missing-required-arg path).
         assert_init_err(
             &[
                 "--source",
@@ -1291,7 +1251,6 @@ mod tests {
 
     #[test]
     fn init_clap_accepts_repeatable_include_and_exclude_globs() {
-        // Both flags are repeatable and parse alongside a source spec.
         let cli = Cli::try_parse_from([
             "rivet",
             "init",
@@ -1391,7 +1350,6 @@ mod tests {
             .filter(|a| a.is_global_set())
             .filter_map(|a| a.get_long().map(|l| format!("--{l}")))
             .collect();
-        // The parent's alone: `--json-errors` (a child reports over its event channel).
         let parent_only = ["--json-errors"];
         let declared: std::collections::BTreeSet<String> =
             crate::pipeline::parallel_children::FORWARDED_GLOBALS
@@ -1409,8 +1367,6 @@ mod tests {
         assert!(!cli.json_errors);
     }
 
-    // ── validate --depth grammar ─────────────────────────────────────────
-
     /// Pull the parsed `--depth` out of a `rivet validate …` invocation.
     fn validate_depth(extra: &[&str]) -> ValidateDepth {
         let mut argv = vec!["rivet", "validate", "--config", "c.yaml"];
@@ -1427,8 +1383,6 @@ mod tests {
 
     #[test]
     fn validate_depth_defaults_to_full() {
-        // No `--depth` → Full, i.e. the pre-graded behaviour, so existing
-        // invocations are unchanged.
         assert_eq!(validate_depth(&[]), ValidateDepth::Full);
     }
 
@@ -1456,9 +1410,7 @@ mod tests {
     }
 }
 
-/// Arguments of `rivet validate` — one struct instead of an N-arg
-/// tunnel (#162 item 3): the variant flattens it, dispatch takes it whole, and a
-/// new flag is a field, not another positional parameter at every layer.
+/// Arguments of `rivet validate`.
 #[derive(clap::Args)]
 pub struct ValidateArgs {
     /// Path to YAML config file
@@ -1507,9 +1459,7 @@ pub struct ValidateArgs {
     pub prefix: Option<String>,
 }
 
-/// Arguments of `rivet repair` — one struct instead of an N-arg
-/// tunnel (#162 item 3): the variant flattens it, dispatch takes it whole, and a
-/// new flag is a field, not another positional parameter at every layer.
+/// Arguments of `rivet repair`.
 #[derive(clap::Args)]
 pub struct RepairArgs {
     /// Path to YAML config file
@@ -1536,9 +1486,7 @@ pub struct RepairArgs {
     pub params: Vec<String>,
 }
 
-/// Arguments of `rivet plan` — one struct instead of an N-arg
-/// tunnel (#162 item 3): the variant flattens it, dispatch takes it whole, and a
-/// new flag is a field, not another positional parameter at every layer.
+/// Arguments of `rivet plan`.
 #[derive(clap::Args)]
 pub struct PlanArgs {
     /// Path to YAML config file
@@ -1572,9 +1520,7 @@ pub struct PlanArgs {
     pub date: Option<String>,
 }
 
-/// Arguments of `rivet run` — one struct instead of an 11-arg
-/// tunnel (#162 item 3): the variant flattens it, dispatch takes it whole, and a
-/// new flag is a field, not another positional parameter at every layer.
+/// Arguments of `rivet run`.
 #[derive(clap::Args)]
 pub struct RunArgs {
     /// Path to YAML config file

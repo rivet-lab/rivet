@@ -7,17 +7,8 @@ pub(crate) fn derive_strategy(export: &ExportConfig) -> String {
     derive_strategy_resolved(export, None)
 }
 
-/// As [`derive_strategy`] but told the engine-introspected single-int PK the planner would
-/// auto-resolve an unset chunked `chunk_column` to (`build_plan`) — so the label reads
-/// `chunked(id, …)`, not `chunked(?, …)`, on a table whose PK the run actually ranges on.
-/// Post-0.24.3 review MED: the `?` placeholder + a false UNSAFE were the diagnostic-bypass
-/// tell (the sibling of the chunk_by_key false-alarm).
+/// As [`derive_strategy`] but told the engine-introspected single-int PK the planner would auto-resolve an unset chunked `chunk_column` to (`build_plan`).
 pub(crate) fn derive_strategy_resolved(export: &ExportConfig, auto_pk: Option<&str>) -> String {
-    // `chunk_by_key` pins keyset (seek) pagination regardless of the nominal
-    // mode: page by ROWS on a unique index, not by key-span windows. The planner
-    // (plan::build) turns it into ExtractionStrategy::Keyset, so the diagnostic
-    // must label it keyset — not `chunked(?, …)`, whose `?` is the absent
-    // chunk_column that keyset does not use.
     if let Some(key) = export.chunk_by_key.as_ref() {
         if export.parallel > 1 {
             return format!(
@@ -72,14 +63,7 @@ pub(crate) fn derive_strategy_resolved(export: &ExportConfig, auto_pk: Option<&s
     }
 }
 
-/// The column the run actually SEEKS / RANGES / WINDOWS on — the index-probe
-/// subject shared by all three engine diagnostics. It MUST enumerate every
-/// strategy the runner can pick: `chunk_column` (range), `chunk_by_key` (keyset),
-/// `cursor_column` (incremental), `time_column` (time_window). A `.or()` chain
-/// shorter than the strategy set is the diagnostic-bypass class — roast
-/// 2026-08-09 caught `time_column` missing across all three engines, so every
-/// `time_window` export probed the wrong/absent column and reported a false
-/// "no index". Cross-check the arms against `derive_strategy` above.
+/// The column the run actually SEEKS / RANGES / WINDOWS on.
 pub(crate) fn preflight_range_col(export: &ExportConfig) -> Option<&str> {
     export
         .chunk_column
@@ -89,12 +73,7 @@ pub(crate) fn preflight_range_col(export: &ExportConfig) -> Option<&str> {
         .or(export.time_column.as_deref())
 }
 
-/// [`preflight_range_col`] plus the planner's AUTO-RESOLUTION: when a chunked export leaves
-/// both `chunk_column` and `chunk_by_key` unset, `build_plan` range-chunks on the single-integer
-/// PK (`introspection.single_int_pk`). A diagnostic that omits it probes the wrong/absent column
-/// and reports a false UNSAFE + "create an index on chunk_column" on an already-PK-indexed table
-/// (post-0.24.3 review MED, the sibling of the chunk_by_key false-alarm). `auto_pk` is the engine-
-/// introspected single-int PK, threaded from each engine's diagnose (where the connection lives).
+/// [`preflight_range_col`] plus the planner's AUTO-RESOLUTION.
 pub(crate) fn preflight_range_col_resolved<'a>(
     export: &'a ExportConfig,
     auto_pk: Option<&'a str>,
@@ -102,9 +81,7 @@ pub(crate) fn preflight_range_col_resolved<'a>(
     preflight_range_col(export).or(auto_resolved_chunk_pk(export, auto_pk))
 }
 
-/// The single-int PK a chunked export auto-resolves to — `Some(auto_pk)` ONLY when the planner
-/// would actually use it. Shared by the range-col resolution AND the strategy label so both tell
-/// the same truth.
+/// The single-int PK a chunked export auto-resolves to.
 fn auto_resolved_chunk_pk<'a>(
     export: &'a ExportConfig,
     auto_pk: Option<&'a str>,
@@ -116,11 +93,7 @@ fn auto_resolved_chunk_pk<'a>(
     }
 }
 
-/// Does `build_plan` auto-resolve this export's chunk column to the single-integer PK? True iff
-/// mode is Chunked with NEITHER an explicit `chunk_column` NOR `chunk_by_key`. The ONE predicate
-/// every diagnose site (pg/mysql/mssql) and the analysis resolution share, so a future change to
-/// the planner's auto-resolution trigger (build_plan) is mirrored in ONE place — four inlined
-/// copies would silently diverge and reintroduce the false-UNSAFE this fixes.
+/// Does `build_plan` auto-resolve this export's chunk column to the single-integer PK?
 pub(crate) fn should_auto_resolve_chunk_pk(export: &ExportConfig) -> bool {
     export.mode == ExportMode::Chunked
         && export.chunk_column.is_none()
@@ -128,10 +101,6 @@ pub(crate) fn should_auto_resolve_chunk_pk(export: &ExportConfig) -> bool {
 }
 
 /// Does this strategy read on an indexed key the catalog probe should confirm?
-/// Every seek/range/window/incremental strategy does; only a plain full scan
-/// does not. Enumerated from the mode + `chunk_by_key`, never a subset — the
-/// gate that guards the `preflight_range_col` probe (a strategy omitted here is
-/// silently degraded to the base-query plan hint / a hard `false`).
 pub(crate) fn strategy_probes_index(export: &ExportConfig) -> bool {
     matches!(
         export.mode,
@@ -139,26 +108,7 @@ pub(crate) fn strategy_probes_index(export: &ExportConfig) -> bool {
     ) || export.chunk_by_key.is_some()
 }
 
-// ── The probe seam: one diagnostic skeleton, three engines' catalog SQL ──────
-//
-// ADR-0015 (source introspection is a data-shape seam, not a trait) applies
-// here verbatim: the PROBES share nothing extractable — `pg_index` vs
-// `information_schema.STATISTICS` vs `sys.indexes`, three client crates, three
-// dialects — so they stay per-engine free functions. What they share is the
-// WIRING: which column to probe, when to probe it, and how the answer becomes a
-// verdict. That policy was hand-copied into all three `diagnose_*` (down to the
-// verbatim auto-pk comment), which is the mechanism by which `chunk_by_key` was
-// missed three ways. The three targets below plus [`assemble_diagnostic`] hold
-// it ONCE, so the next strategy or check lands once.
-
-/// The base relation the catalog probes key on, for the PG/MySQL diagnostics:
-/// the configured `table:` when there is one, else the single relation parsed
-/// out of a simple `SELECT … FROM <table>`. `None` for anything that is not one
-/// base table (joins, subqueries, hand-written inline SQL) — the probes then
-/// degrade to an honest "unknown" rather than describing the wrong relation.
-/// MSSQL resolves its own base relation (`strip_select_star_from` first, then
-/// the same simple-FROM parser) because its probes key on the RENDERED query;
-/// it feeds the result into the same two targets below.
+/// The base relation the catalog probes key on, for the PG/MySQL diagnostics.
 pub(crate) fn preflight_base_table<'a>(
     export: &'a ExportConfig,
     base_query: &'a str,
@@ -220,12 +170,7 @@ pub(crate) fn whole_table_relation<'a>(
     base_table.filter(|_| reads_every_row(base_query))
 }
 
-/// The table an engine runs its single-int-PK probe against — `Some` ONLY when
-/// the planner would actually auto-resolve this export's chunk column
-/// ([`should_auto_resolve_chunk_pk`]) and the base relation is known. The gate
-/// `build_plan` mirrors: without it `range_col` / the strategy label / the index
-/// probe target a different column than the run reads, and a PK-indexed table
-/// reports a false UNSAFE + `chunked(?, …)` (post-0.24.3 MED).
+/// The table an engine runs its single-int-PK probe against.
 pub(crate) fn auto_pk_probe_target<'a>(
     export: &ExportConfig,
     base_table: Option<&'a str>,
@@ -237,12 +182,7 @@ pub(crate) fn auto_pk_probe_target<'a>(
     }
 }
 
-/// The `(table, column)` an engine runs its leading-key index probe against —
-/// `Some` ONLY when the strategy reads on an indexed key
-/// ([`strategy_probes_index`]), the read column resolves
-/// ([`preflight_range_col_resolved`]) and the base relation is known. A `None`
-/// here means "no catalog answer", which [`assemble_diagnostic`] reads as "keep
-/// the engine's plan hint" — never as "no index".
+/// The `(table, column)` an engine runs its leading-key index probe against.
 pub(crate) fn index_probe_target<'a>(
     export: &'a ExportConfig,
     auto_pk: Option<&'a str>,
@@ -256,13 +196,6 @@ pub(crate) fn index_probe_target<'a>(
 }
 
 /// #149: measured beats declared — and the report SAYS which it stands on.
-///
-/// After one successful run, `export_metrics.total_rows` is EXACT; the catalog
-/// (`TABLE_ROWS`/`reltuples`) lied 2.5× in the field on a versioned table. The
-/// rule: the freshest measured figure wins UNLESS it is stale (older than
-/// [`ACTUALS_STALE_DAYS`]) AND the catalog diverges >2× from it — then the
-/// catalog wins and the fallback is SAID. A report that silently mixes sources
-/// is the diagnostic-bypass class; the label is the load-bearing half.
 pub(crate) const ACTUALS_STALE_DAYS: i64 = 14;
 
 pub(crate) fn choose_row_estimate(
@@ -295,11 +228,7 @@ pub(crate) fn choose_row_estimate(
     }
 }
 
-/// Overlay the state store's freshest successful actual onto a diagnostic —
-/// the one place `check`/`plan` swap catalog for measured, so the two surfaces
-/// cannot drift (#149). Best-effort: an unreadable store keeps the catalog.
-/// Whether a measured run read THIS export's source: same engine, and — when the ledger knows the run's
-/// destination — the same destination. An export NAME is not an identity on a shared state store.
+/// Overlay the state store's freshest successful actual onto a diagnostic.
 fn measured_this_source(
     m: &crate::state::ExportMetric,
     export: &ExportConfig,
@@ -322,13 +251,6 @@ pub(crate) fn overlay_measured_rows(
     source: crate::config::SourceType,
     state: &crate::state::StateStore,
 ) {
-    // A measured `total_rows` is the TABLE SIZE only when the run read the whole
-    // table — `mode: full` or a range-`chunked` pass. For incremental / keyset
-    // (which may continue from a cursor) a run's `total_rows` is the per-run
-    // DELTA, so overlaying it would report a 300M table as "~0 (measured)" after
-    // a quiet night (roast 2026-08-09, #149 mode-blindness). Gate conservatively:
-    // measure only the unambiguous whole-table modes; everything else keeps the
-    // catalog with its honest label.
     if !is_whole_table_mode(&diag.mode) {
         diag.row_source = Some("catalog estimate".to_string());
         return;
@@ -350,31 +272,13 @@ pub(crate) fn overlay_measured_rows(
     diag.row_estimate = est;
     diag.row_source = Some(label);
 
-    // A2 (roast 2026-08-09): the engine diagnostics already computed verdict /
-    // profile / parallelism / suggestion from the CATALOG estimate, so before
-    // this the report printed a MEASURED number above decisions made for the
-    // catalog one (a 2.5× field lie ⇒ wrong profile/parallelism). When the
-    // overlay actually MOVED the estimate, recompute the row-estimate-scaled
-    // decisions from the truth. These depend only on fields the diagnostic
-    // already carries (uses_index, avg_row_bytes) + the export.
     if est != before && est.is_some() {
         diag.verdict = export_verdict(export, est, diag.uses_index, diag.avg_row_bytes);
         diag.recommended_profile = recommend_profile(est, diag.uses_index, export);
         diag.recommended_parallel = recommend_parallelism(export, est, diag.uses_index);
-        // Only recompute the suggestion for engines that HAD one. diagnose_mongo
-        // deliberately emits `suggestion: None` (Mongo is full-only — the
-        // cursor/incremental advice build_suggestion produces is for a mode it
-        // cannot do), and it is the sole engine that never calls build_suggestion.
-        // Recomputing unconditionally re-introduced that SQL-only advice for Mongo
-        // (roast 2026-08-10). Keep None as None.
         if diag.suggestion.is_some() {
             diag.suggestion = build_suggestion(&diag.verdict, est, diag.uses_index, export);
         }
-        // #202: the warnings are row-estimate-scaled too (parallel-memory-risk,
-        // sparse-range, oversized-chunk) — re-run collect_warnings from the
-        // MEASURED figure so they don't keep quoting the catalog while the
-        // verdict/row line is measured. Inputs the diagnostic carries for exactly
-        // this recompute.
         diag.warnings = collect_warnings(
             export,
             est,
@@ -386,22 +290,13 @@ pub(crate) fn overlay_measured_rows(
     }
 }
 
-/// Does this diagnostic's mode read the WHOLE table every run (so a measured
-/// `total_rows` IS the table size)? `full` and range-`chunked (column: …)` do;
-/// `incremental` and `keyset` may continue from a cursor and record a delta.
-/// The mode string is [`diagnose_mode_str`]'s output.
+/// Does this diagnostic's mode read the WHOLE table every run (so a measured `total_rows` IS the table size)?
 pub(crate) fn is_whole_table_mode(mode: &str) -> bool {
     mode == "full" || mode.starts_with("chunked (column")
 }
 
-/// The operator-facing mode line shown in the `rivet check` diagnostic —
-/// `"chunked (column: id, size: 100000)"`, `"incremental (cursor: updated_at)"`,
-/// etc. Shared verbatim by all three engine `diagnose_*` paths, which differ
-/// only in their probes, not in this label.
+/// The operator-facing mode line shown in the `rivet check` diagnostic.
 pub(crate) fn diagnose_mode_str(export: &ExportConfig) -> String {
-    // Keyset (chunk_by_key) is its own read strategy — surface the actual seek
-    // key + page size, not `chunked (column: ?, …)` (the `?` = the unused
-    // chunk_column). Mirrors the derive_strategy keyset branch above.
     if let Some(key) = export.chunk_by_key.as_ref() {
         if export.parallel > 1 {
             return format!(
@@ -432,15 +327,6 @@ pub(crate) fn diagnose_mode_str(export: &ExportConfig) -> String {
 }
 
 /// Resolve the base query the runner will issue, for the preflight probes.
-///
-/// For the `table:` shortcut (no `query:`) this is the canonical
-/// `SELECT * FROM <table>` (`ExportConfig::resolve_query`, which validates and
-/// quotes the ident) — NOT a `SELECT 1` placeholder, or every probe (row
-/// estimate, scan type, cursor range) would describe a 1-row dummy relation
-/// instead of the real table. `config_dir`/`params` are unused on the
-/// `table:`/inline branches; preflight is non-fatal, so a resolution failure
-/// falls back to the inline/placeholder text and surfaces the cause at debug
-/// rather than aborting the diagnostic. Shared verbatim by all three engines.
 pub(crate) fn resolve_preflight_base_query(export: &ExportConfig) -> String {
     match export.resolve_query(std::path::Path::new(""), None) {
         Ok(q) => q,
@@ -519,22 +405,13 @@ pub(crate) fn check_sparse_range(
     if export.mode != ExportMode::Chunked {
         return None;
     }
-    // Keyset pages by ROWS on a unique index — immune to a sparse/gappy key by
-    // construction (there are no BETWEEN windows to leave empty). The
-    // sparse-range warning is a range-chunk (chunk_column) concept only.
     if export.chunk_by_key.is_some() {
         return None;
     }
     if export.chunk_by_days.is_some() {
-        // Date chunks iterate by calendar interval; sparsity concept does not apply.
         return None;
     }
     if export.chunk_count.is_some() {
-        // The RUNTIME sparse warning names `chunk_count: N` as its escape —
-        // and check kept alarming on the config that took it (round-10,
-        // closing the round-7 find): the exemption chain never learned the
-        // knob. With a fixed count the operator CHOSE the window count;
-        // "mostly-empty windows" is no longer a surprise to warn about.
         return None;
     }
     let rows = row_estimate.unwrap_or(0);
@@ -563,22 +440,10 @@ pub(crate) fn check_sparse_range(
     ))
 }
 
-/// A single chunk query scanning more than this holds one statement — and its
-/// MVCC snapshot / locks — open long enough to be the source-harm lever the
-/// 0.12 harm A/B measured (MSSQL longest request 1839 ms → 276 ms once chunks
-/// shrank). Advisory only: it flags multi-second chunk statements on wide
-/// tables, never blocks them.
+/// A single chunk query scanning more than this holds one statement.
 const MAX_CHUNK_SCAN_BYTES: i64 = 256 * 1024 * 1024;
 
-/// B3b (dual of [`check_sparse_range`]): warn when `chunk_size` makes a single
-/// chunk query scan *too many* bytes — `rows_per_chunk × avg_row_bytes`.
-///
-/// `rows_per_chunk` is `chunk_size` exactly for a keyset page, and
-/// `density × chunk_size` for a range chunk (`density = rows / key-span`, via
-/// [`chunk_sparsity_from_counts`]). Date chunks (`chunk_by_days`) iterate by
-/// calendar interval, so rows-per-chunk is data-shaped and not derivable here —
-/// skipped. Needs both a row estimate and a row-width estimate; a `None` for
-/// either (e.g. MySQL, which has no trustworthy scan-free estimate) skips it.
+/// B3b (dual of [`check_sparse_range`]): warn when `chunk_size` makes a single chunk query scan *too many* bytes.
 pub(crate) fn check_oversized_chunk(
     export: &ExportConfig,
     row_estimate: Option<i64>,
@@ -596,8 +461,6 @@ pub(crate) fn check_oversized_chunk(
     }
 
     let rows_per_chunk: i64 = if export.chunk_by_key.is_some() {
-        // Keyset (seek) pages hold exactly chunk_size rows (bar the last),
-        // independent of key density — no cursor_min/max span math applies.
         Knob::saturating_i64(export.chunk_size)
     } else {
         let min_i: i64 = cursor_min?.parse().ok()?;
@@ -605,13 +468,6 @@ pub(crate) fn check_oversized_chunk(
         let info = chunk_sparsity_from_counts(rows, min_i, max_i, export.chunk_size);
         (info.density * export.chunk_size as f64).round() as i64
     };
-    // A single chunk can never scan more rows than the table HOLDS — clamp to
-    // the row estimate. Two ways to exceed it without this: (1) a LOW-cardinality
-    // range key (few distinct values, many rows each) makes `density × chunk_size`
-    // extrapolate the density past the actual key span — e.g. 150K rows over 100
-    // distinct values reports 151M rows/chunk, a 1000× phantom "heavy chunk"; and
-    // (2) a keyset `chunk_size` larger than the whole table. When chunk_size
-    // ≥ span, one chunk IS the table, so `min(…, rows)` is the exact row count.
     let rows_per_chunk = rows_per_chunk.clamp(1, rows);
 
     let bytes_per_chunk = rows_per_chunk.saturating_mul(bytes_per_row);
@@ -619,9 +475,6 @@ pub(crate) fn check_oversized_chunk(
         return None;
     }
 
-    // Bytes scale linearly with chunk_size (keyset: chunk_size×B; range:
-    // density×chunk_size×B), so scaling chunk_size by budget/actual lands one
-    // chunk under the budget regardless of mode.
     let suggested = Knob::saturating_i64(export.chunk_size)
         .saturating_mul(MAX_CHUNK_SCAN_BYTES)
         .saturating_div(bytes_per_chunk)
@@ -712,12 +565,6 @@ pub(crate) fn recommend_parallelism(
     row_estimate: Option<i64>,
     uses_index: bool,
 ) -> (u32, &'static str) {
-    // Keyset (seek) pagination is sequential WITHIN a range, but `parallel: N`
-    // fans N ROW-percentile ranges, each seeking a disjoint `(lo, hi]` slice
-    // concurrently (feat/parallel-keyset). Keyset is immune to the sparse-key
-    // blow-up that gates range chunking, so parallelism is always safe here —
-    // honour the configured value and, when unset, point at the escape. Answer
-    // before the mode-based ladder (keyset carries mode: chunked).
     if export.chunk_by_key.is_some() {
         return match export.parallel {
             n if n > 1 => (
@@ -762,11 +609,6 @@ pub(crate) fn recommend_parallelism(
 }
 
 /// Collect all warnings (B3-B6) for an export.
-/// Severity of a preflight `check` warning, low → high. A scheduler / CI can gate
-/// on `high` and treat `low`/`medium` as advisory. Serializes lowercase so
-/// `check --json`'s `warnings[].severity` is a stable token. (A genuine "do not
-/// run" is the `UNSAFE` health verdict, not a warning — so there is no `blocking`
-/// warning level; add one only when a blocking *warning* actually exists.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Severity {
@@ -786,8 +628,7 @@ impl Severity {
     }
 }
 
-/// A preflight `check` warning with its severity. `check --json` emits
-/// `{ "severity": "…", "message": "…" }`; the text path prefixes `[SEVERITY]`.
+/// A preflight `check` warning with its severity.
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct Warning {
     pub severity: Severity,
@@ -800,26 +641,12 @@ impl Warning {
     }
 }
 
-/// A chunked/keyset export with no `chunk_checkpoint: true` cannot resume a
-/// crashed or interrupted run — the next attempt re-reads the whole table from
-/// the start. On the live GCS run this was the concrete cost of a flaky SSH
-/// tunnel: 738K durably-exported rows were only recoverable via a checkpoint the
-/// config had left commented out, so a re-run would have re-pulled everything.
-///
-/// Advisory (a checkpoint is not always wanted — enabling it gives re-runs
-/// incremental-by-key semantics rather than a fresh snapshot), and scoped to
-/// tables large enough for the re-read to hurt: skipped only when the estimate
-/// is KNOWN-small (`Some` below the threshold). An unknown estimate (MySQL) still
-/// nudges — the engine with the weakest stats is where the re-download is least
-/// visible.
+/// A chunked/keyset export with no `chunk_checkpoint.
 pub(crate) fn check_missing_checkpoint(
     export: &ExportConfig,
     row_estimate: Option<i64>,
 ) -> Option<String> {
     let chunked_or_keyset = export.mode == ExportMode::Chunked || export.chunk_by_key.is_some();
-    // `keyset_incremental` implies checkpoint at plan build (it needs the persisted
-    // cursor), so a config that sets it already HAS crash-recovery — do not warn
-    // "no chunk_checkpoint" for it, or the nudge contradicts the plan.
     if !chunked_or_keyset || export.chunk_checkpoint || export.keyset_incremental {
         return None;
     }
@@ -845,11 +672,6 @@ pub(super) fn collect_warnings(
     chunk_max: Option<&str>,
     db_max_connections: Option<u32>,
 ) -> Vec<Warning> {
-    // A flat manifest of the preflight checks, in display order: each returns
-    // `Some(message)` when it applies, `None` otherwise, and the assembly tags it
-    // with that check's severity. Adding the next check is a one-line array insert;
-    // the checks keep their own (individually unit-tested) `Option<String>`
-    // signatures — only the severity classification is centralised here.
     [
         check_connection_limit(export.parallel, db_max_connections)
             .map(|m| Warning::new(Severity::High, m)),
@@ -868,8 +690,7 @@ pub(super) fn collect_warnings(
 
 pub(crate) use crate::plan::explain::SMALL_TABLE_ROW_THRESHOLD;
 
-/// The verdict for `export`: the table-scan rules of [`compute_verdict`], except a
-/// `mode: cdc` export, which reads the transaction log and scans nothing.
+/// The verdict for `export`: the table-scan rules of [`compute_verdict`], except a `mode.
 pub(crate) fn export_verdict(
     export: &ExportConfig,
     row_estimate: Option<i64>,
@@ -900,32 +721,12 @@ pub(crate) fn compute_verdict(
     match (uses_index, has_cursor, rows) {
         (true, true, r) if r <= 10_000_000 => HealthVerdict::Efficient,
         (true, true, _) => HealthVerdict::Acceptable,
-        // Indexed + no cursor of any size stays Acceptable. The cursor
-        // requirement is for incremental mode; chunked mode (the
-        // canonical large-table path) *is* the cursor and doesn't need
-        // one declared. Without this arm a 10_000_001-row indexed
-        // chunked export falls through to `_ => Degraded`, which the
-        // operator reads as "your config is wrong" — but it's fine.
         (true, false, _) => HealthVerdict::Acceptable,
-        // A KNOWN-small table (real estimate below the threshold) full-scanning
-        // is exactly what `rivet init` recommends — not a problem. Keyed on a
-        // real estimate (`Some`), so an UNKNOWN size still falls through to
-        // Degraded and gets the index/incremental nudge.
         (false, _, r) if row_estimate.is_some() && r < SMALL_TABLE_ROW_THRESHOLD => {
             HealthVerdict::Acceptable
         }
         (false, _, r) if r <= 1_000_000 => HealthVerdict::Degraded,
         (false, true, r) if r <= 50_000_000 => HealthVerdict::Degraded,
-        // No index + large. The old rule cried UNSAFE on row count alone — but
-        // rivet streams bounded batches (peak RSS ≈ row-width × in-flight batch
-        // × workers, NOT the whole table), so an unindexed scan of a narrow or
-        // modestly-parallel table peaks at ~100 MB, not OOM. When we can predict
-        // the peak (have a row-width estimate) and it fits the default memory
-        // budget, downgrade to DEGRADED — the unindexed scan is still a DB-load
-        // concern worth flagging, just not "don't run this". Keep UNSAFE when
-        // the width is unknown (can't predict — e.g. MySQL) or the predicted
-        // peak breaches the budget. The RSS model is single-sourced from the
-        // `tuning::memory` (shared with the scaffold) so the two never drift.
         (false, _, _) => match avg_row_bytes {
             Some(b)
                 if crate::tuning::memory::estimate_peak_rss_mb(parallel.max(1), b)
@@ -978,16 +779,7 @@ pub(crate) fn build_suggestion(
                         "Add an indexed cursor column and switch to incremental mode.".to_string(),
                     );
                 }
-                // Only suggest creating an index when we believe there isn't
-                // one — `uses_index` already accounts for both the EXPLAIN
-                // hint and the catalog-side probe (preflight::{postgres,
-                // mysql}::column_has_*_*), so saying "create an index" when
-                // a btree already exists would be a false alarm.
                 ExportMode::Chunked if !uses_index => {
-                    // Name the real read column: chunk_column for range chunking,
-                    // else the keyset key (chunk_by_key). A keyset key that is not
-                    // a unique index is exactly what the planner refuses at run
-                    // time — the check should name it, not the literal placeholder.
                     let col = export
                         .chunk_column
                         .as_deref()
@@ -1032,8 +824,6 @@ pub(crate) fn build_suggestion(
                         .as_deref()
                         .or(export.chunk_key_lead())
                         .unwrap_or("chunk_column");
-                    // Keyset is sequential; only range chunking benefits from
-                    // "add parallel workers", so tailor the fix to the strategy.
                     let fix = if export.chunk_by_key.is_some() {
                         "Create an index on '{col}' (keyset needs a unique index), or use mode: full for one snapshot scan."
                     } else {
@@ -1052,8 +842,6 @@ pub(crate) fn build_suggestion(
                     let col = export.cursor_column.as_deref().unwrap_or("cursor_column");
                     parts.push(format!("Create an index on '{}'.", col));
                 }
-                // CDC reads the transaction log, not the table — the
-                // full-scan-safety advice below does not apply.
                 ExportMode::Cdc => {}
             }
             parts.push("Use 'safe' tuning profile. Extract during off-peak hours.".to_string());
@@ -1062,58 +850,28 @@ pub(crate) fn build_suggestion(
     }
 }
 
-/// What one engine's catalog/plan probes ANSWERED about an export — the data
-/// shape the three SQL diagnostics hand to [`assemble_diagnostic`].
-///
-/// Every field is an observation, never a decision: the engine says what it
-/// found (or `None` where the probe was skipped / failed / has no analogue on
-/// that engine), and the policy above turns the set into a verdict. Fill it with
-/// the shared targets — [`auto_pk_probe_target`] for `auto_pk`,
-/// [`index_probe_target`] for `catalog_index` — so a probe never runs on a
-/// column the run does not read.
+/// What one engine's catalog/plan probes ANSWERED about an export.
 pub(crate) struct ProbeFacts {
-    /// The single-integer PK the planner would auto-resolve an unset chunked
-    /// `chunk_column` to (`build_plan`). `None` when the export does not
-    /// auto-resolve, the base relation is unknown, or the PK is composite /
-    /// non-integer / absent — exactly when the planner would not use one either.
+    /// The single-integer PK the planner would auto-resolve an unset chunked `chunk_column` to (`build_plan`).
     pub auto_pk: Option<String>,
-    /// Scan-free row estimate (PG EXPLAIN `rows=`, MySQL EXPLAIN `rows`, MSSQL
-    /// `sys.partitions`). `None` = unknown, which the checks read as
-    /// "unknown", never as zero.
+    /// Scan-free row estimate (PG EXPLAIN `rows=`, MySQL EXPLAIN `rows`, MSSQL `sys.partitions`).
     pub row_estimate: Option<i64>,
     /// Average bytes per row, where the engine has a figure worth trusting.
-    /// `None` on MySQL by choice (`AVG_ROW_LENGTH` rides the same InnoDB random
-    /// dives as `TABLE_ROWS`), which skips the oversized-chunk check.
     pub avg_row_bytes: Option<i64>,
     /// MIN/MAX of the incremental key expression or the range column, as text.
     pub range_min: Option<String>,
     pub range_max: Option<String>,
-    /// Human-readable access-path description from the query plan (`Seq Scan`,
-    /// `range using PRIMARY`). `None` where the engine exposes no parseable plan
-    /// over the diagnostic's seam (MSSQL) — the printer then omits the line
-    /// rather than fabricating one.
+    /// Human-readable access-path description from the query plan (`Seq Scan`, `range using PRIMARY`).
     pub scan_type: Option<String>,
-    /// Did the plan for the BASE query use an index? A weak hint: the base query
-    /// has no WHERE, so PG/MySQL legitimately pick a seq scan on a perfectly
-    /// indexed chunk column. `false` where there is no plan to read (MSSQL).
+    /// Did the plan for the BASE query use an index?
     pub plan_uses_index: bool,
-    /// Is the read column the leading key of an index on the base table, per the
-    /// CATALOG? `Some(true)`/`Some(false)` from a clean probe, `None` when the
-    /// probe was not run ([`index_probe_target`] said no) or failed.
+    /// Is the read column the leading key of an index on the base table, per the CATALOG?
     pub catalog_index: Option<bool>,
     /// The server's configured connection cap, for the parallelism check.
     pub db_max_connections: Option<u32>,
 }
 
-/// Turn one engine's [`ProbeFacts`] into the export's [`ExportDiagnostic`] —
-/// the policy half of every `diagnose_*`, written once.
-///
-/// Owns the decisions the three engines used to each hand-copy: the
-/// catalog-overrides-the-plan-hint rule, the auto-resolved strategy label, and
-/// the verdict / profile / parallelism / warnings / suggestion assembly. The
-/// engines keep only their dialect-specific SQL, so a new check (or a new
-/// strategy) is wired HERE and every engine gets it — the diagnostic-bypass fix
-/// stated once instead of three times.
+/// Turn one engine's [`ProbeFacts`] into the export's [`ExportDiagnostic`].
 pub(crate) fn assemble_diagnostic(
     export: &ExportConfig,
     facts: ProbeFacts,
@@ -1130,12 +888,6 @@ pub(crate) fn assemble_diagnostic(
         db_max_connections,
     } = facts;
 
-    // The plan hint describes the BASE query (no WHERE), where a seq scan is
-    // often the right plan even on a perfectly indexed chunk column. The run
-    // does not issue that query — it issues `WHERE range_col >= $lo AND < $hi`
-    // (or `> $last`), which uses the btree. So a catalog YES outranks the plan
-    // hint; a catalog NO or an unavailable/skipped probe leaves the hint
-    // standing, since the catalog answer is about the range column only.
     let uses_index = match catalog_index {
         Some(true) => true,
         Some(false) | None => plan_uses_index,
@@ -1220,16 +972,13 @@ mod tests {
         }
     }
 
-    /// Round-10: the runtime sparse warning names `chunk_count: N` as its
-    /// escape — check must stop alarming on the config that took it. RED
-    /// against removing the chunk_count arm from the exemption chain.
+    /// Round-10: the runtime sparse warning names `chunk_count.
     #[test]
     fn a_chunk_count_config_is_exempt_from_the_sparse_alarm() {
         let mut e = crate::config::sample_export("sparse");
         e.mode = crate::config::ExportMode::Chunked;
         e.chunk_column = Some("id".into());
         e.chunk_size = 100_000;
-        // 1000 rows over a 1e9 span: wildly sparse by the window math.
         assert!(
             check_sparse_range(&e, Some(1000), Some("1"), Some("1000000000")).is_some(),
             "fixture must be sparse without the knob, or this test grades nothing"
@@ -1252,42 +1001,30 @@ mod tests {
         serde_yaml_ng::from_str(&yaml).expect("parse ExportConfig")
     }
 
-    // ── auto-resolved chunk PK: preflight must model the planner's fallback ───
     #[test]
     fn resolved_range_col_and_strategy_model_the_auto_chunk_pk() {
-        // build_plan auto-resolves an UNSET chunked chunk_column to the single-integer PK; the
-        // preflight resolution + strategy label must model that SAME choice, else a perfectly
-        // PK-indexed chunked export gets a `?` label + false UNSAFE + "create an index on
-        // chunk_column" (post-0.24.3 review MED). RED against the pre-fix helpers that ignored it.
-        let e = cfg("mode: chunked\ntable: orders\n"); // no chunk_column / chunk_by_key
-        // Offline (engine gave no PK) there is nothing to resolve to — same as before.
+        let e = cfg("mode: chunked\ntable: orders\n");
         assert_eq!(preflight_range_col(&e), None);
         assert_eq!(
             derive_strategy(&e),
             format!("chunked(?, size={})", e.chunk_size)
         );
-        // WITH the engine-introspected single-int PK threaded in, both resolve to it:
         assert_eq!(preflight_range_col_resolved(&e, Some("id")), Some("id"));
         assert_eq!(
             derive_strategy_resolved(&e, Some("id")),
             format!("chunked(id, size={})", e.chunk_size)
         );
-        // An EXPLICIT chunk_column is never overridden by the auto_pk hint.
         let e2 = cfg("mode: chunked\ntable: orders\nchunk_column: created_at\n");
         assert_eq!(
             preflight_range_col_resolved(&e2, Some("id")),
             Some("created_at")
         );
-        // The auto-resolve fires ONLY for chunked-with-no-explicit-key: an incremental export
-        // must NOT absorb the PK hint (its cursor_column is the real read key).
         let e3 = cfg("mode: incremental\ncursor_column: updated_at\n");
         assert_eq!(
             preflight_range_col_resolved(&e3, Some("id")),
             Some("updated_at")
         );
     }
-
-    // ── derive_strategy ─────────────────────────────────────────────────────
 
     #[test]
     fn derive_strategy_full_scan() {
@@ -1318,27 +1055,21 @@ mod tests {
         assert_eq!(derive_strategy(&e), "date-chunked(created_at, 7d)");
     }
 
-    // ── #149: measured beats declared, and the label is load-bearing ─────────
-
     #[test]
     fn choose_row_estimate_rule_both_directions() {
         use chrono::{Duration, Utc};
         let now = Utc::now();
         let fresh = Some((835_000_000i64, now - Duration::days(2)));
         let stale = Some((835_000_000i64, now - Duration::days(30)));
-        // fresh actual beats the catalog, label says measured
         let (est, src) = choose_row_estimate(Some(332_000_000), fresh, now);
         assert_eq!(est, Some(835_000_000));
         assert!(src.starts_with("measured "), "{src}");
-        // stale + >2x divergent falls back — and the fallback is SAID
         let (est, src) = choose_row_estimate(Some(332_000_000), stale, now);
         assert_eq!(est, Some(332_000_000));
         assert!(src.contains("set aside as stale"), "{src}");
-        // stale but NOT divergent: the actual still wins (age alone is fine)
         let (est, src) = choose_row_estimate(Some(800_000_000), stale, now);
         assert_eq!(est, Some(835_000_000));
         assert!(src.starts_with("measured "), "{src}");
-        // no actual: catalog, labelled as such
         let (est, src) = choose_row_estimate(Some(100), None, now);
         assert_eq!(est, Some(100));
         assert_eq!(src, "catalog estimate");
@@ -1436,9 +1167,7 @@ mod tests {
         assert_eq!(diag.row_estimate, Some(4));
     }
 
-    /// The overlay through a REAL state store (RED against a catalog-only
-    /// path): a recorded success replaces the diagnostic's catalog figure and
-    /// the label names the source — the field 2.5x lie, ended.
+    /// The overlay through a REAL state store (RED against a catalog-only path).
     #[test]
     fn overlay_swaps_catalog_for_the_recorded_actual_and_says_so() {
         let state = crate::state::StateStore::open_in_memory().unwrap();
@@ -1474,7 +1203,6 @@ mod tests {
             db_max_connections: None,
         };
         let export = cfg("table: t\nmode: chunked\nchunk_column: id\nchunk_size: 100000\n");
-        // Seed a profile as if computed from the CATALOG (small) estimate.
         diag.recommended_profile = "fast";
         overlay_measured_rows(
             &mut diag,
@@ -1483,8 +1211,6 @@ mod tests {
             &state,
         );
         assert_eq!(diag.row_estimate, Some(835_700_000), "measured must win");
-        // A2: the profile must be RECOMPUTED from the measured 835M (a huge table
-        // is not "fast") — before the fix it kept the catalog-derived value.
         assert_ne!(
             diag.recommended_profile, "fast",
             "verdict/profile must be recomputed from the measured estimate, not the catalog one"
@@ -1499,11 +1225,7 @@ mod tests {
         );
     }
 
-    /// #202 (roast 2026-08-10): the overlay recomputes verdict/profile but left
-    /// diag.warnings on the CATALOG estimate — so a measured figure that crosses
-    /// a warning threshold (parallel-memory-risk at >5M rows) never surfaced. The
-    /// warnings must be re-run from the measured figure. RED against not
-    /// recomputing warnings.
+    /// #202 (roast 2026-08-10): the overlay recomputes verdict/profile but left diag.warnings on the CATALOG estimate.
     #[test]
     fn overlay_recomputes_row_scaled_warnings_from_the_measure() {
         let state = crate::state::StateStore::open_in_memory().unwrap();
@@ -1512,7 +1234,7 @@ mod tests {
                 source_type: Some("postgres".into()),
                 export_name: "big_chunked".into(),
                 run_id: "r1".into(),
-                total_rows: 10_000_000, // > 5M → parallel-memory-risk fires
+                total_rows: 10_000_000,
                 status: "success".into(),
                 ..Default::default()
             })
@@ -1524,7 +1246,7 @@ mod tests {
             strategy: "chunked(id, size=100000)".into(),
             mode: "chunked (column: id, size: 100000)".into(),
             cursor_column: None,
-            row_estimate: Some(1000), // catalog: small → no memory-risk warning
+            row_estimate: Some(1000),
             row_source: None,
             avg_row_bytes: None,
             cursor_min: None,
@@ -1532,7 +1254,7 @@ mod tests {
             scan_type: None,
             uses_index: true,
             verdict: super::super::HealthVerdict::Efficient,
-            warnings: Vec::new(), // as collect_warnings(1000, parallel=4) produced
+            warnings: Vec::new(),
             recommended_profile: "fast",
             recommended_parallel: (4, "test"),
             suggestion: None,
@@ -1556,9 +1278,7 @@ mod tests {
         );
     }
 
-    /// #1 (roast 2026-08-10): Mongo emits suggestion: None (full-only — the
-    /// cursor/incremental advice does not apply). The overlay recompute must NOT
-    /// re-introduce it. RED against the unconditional build_suggestion recompute.
+    /// #1 (roast 2026-08-10): Mongo emits suggestion.
     #[test]
     fn overlay_keeps_a_none_suggestion_none_for_mongo() {
         let state = crate::state::StateStore::open_in_memory().unwrap();
@@ -1611,10 +1331,7 @@ mod tests {
         );
     }
 
-    /// #149 mode-blindness (roast 2026-08-09): an INCREMENTAL run's total_rows is
-    /// the per-run DELTA, not the table — overlaying it reports a 300M table as
-    /// "~0 (measured)" after a quiet night. The overlay must keep the catalog for
-    /// non-whole-table modes. RED against the un-gated overlay.
+    /// #149 mode-blindness (roast 2026-08-09): an INCREMENTAL run's total_rows is the per-run DELTA, not the table.
     #[test]
     fn overlay_does_not_measure_an_incremental_delta_as_the_table() {
         assert!(is_whole_table_mode("full"));
@@ -1623,7 +1340,6 @@ mod tests {
         assert!(!is_whole_table_mode("keyset (key: id, size: 50000)"));
 
         let state = crate::state::StateStore::open_in_memory().unwrap();
-        // A quiet incremental night: a successful run that captured ZERO rows.
         state
             .record_metric_full(&crate::state::MetricRow {
                 source_type: Some("postgres".into()),
@@ -1670,13 +1386,6 @@ mod tests {
         assert_eq!(diag.row_source.as_deref(), Some("catalog estimate"));
     }
 
-    // ── preflight_range_col / strategy_probes_index cover EVERY strategy ──────
-    // Diagnostic-bypass class (roast 2026-08-09): a strategy the runner reads on
-    // but the index-probe subject omits → a false "no index". Both engine
-    // diagnostics now route through these shared seams, so one offline test
-    // guards all three (and any future engine). RED against dropping the
-    // time_column arm / the TimeWindow match.
-
     #[test]
     fn preflight_range_col_resolves_every_read_strategy() {
         assert_eq!(
@@ -1721,12 +1430,6 @@ mod tests {
             "a plain full scan reads no indexed key — must NOT probe"
         );
     }
-
-    // ── the shared skeleton: probe targets + assemble_diagnostic ─────────────
-    // The wiring the three engines used to hand-copy. Fabricating ProbeFacts is
-    // legitimate here because the POLICY is the subject; per-engine probe
-    // correctness (does this catalog SQL answer truthfully?) stays with the live
-    // suites, where a real catalog is the oracle.
 
     fn facts() -> ProbeFacts {
         ProbeFacts {
@@ -1800,9 +1503,6 @@ mod tests {
     #[test]
     fn assemble_diagnostic_lets_a_catalog_yes_outrank_the_base_plan_hint() {
         let e = cfg("mode: chunked\nchunk_column: id\n");
-        // The false-DEGRADED case the override exists for: EXPLAIN of the
-        // no-WHERE base query says Seq Scan, the catalog says the chunk column
-        // leads a btree, and the run issues the BETWEEN that uses it.
         let d = assemble_diagnostic(
             &e,
             ProbeFacts {
@@ -1813,8 +1513,6 @@ mod tests {
         );
         assert!(d.uses_index, "a catalog YES must beat the base-query plan");
 
-        // A clean catalog NO is about the range column only, so the plan hint
-        // (which described the whole query) still stands.
         let d = assemble_diagnostic(
             &e,
             ProbeFacts {
@@ -1825,7 +1523,6 @@ mod tests {
         );
         assert!(d.uses_index);
 
-        // No catalog answer (probe skipped or failed) => the plan hint, verbatim.
         for hint in [true, false] {
             let d = assemble_diagnostic(
                 &e,
@@ -1855,11 +1552,7 @@ mod tests {
         );
     }
 
-    /// A `mode: cdc` export reads the transaction LOG, not the table: no scan, no
-    /// index probe, no cursor. Grading it with the table-scan verdict called a
-    /// perfectly configured stream DEGRADED (or UNSAFE, past 50M rows) and told
-    /// the operator to add a cursor column — the diagnostic-bypass class, on the
-    /// one mode the scan rules cannot describe.
+    /// A `mode: cdc` export reads the transaction LOG, not the table: no scan, no index probe, no cursor.
     #[test]
     fn assemble_diagnostic_does_not_grade_a_cdc_stream_as_a_table_scan() {
         for rows in [Some(500_000), Some(5_000_000), Some(500_000_000), None] {
@@ -1892,17 +1585,11 @@ mod tests {
     }
 
     /// The skeleton is only de-triplicated while every engine ROUTES through it.
-    /// A second `ExportDiagnostic { … }` literal in an engine file is the old
-    /// wiring growing back — and with it the next check that lands in one engine
-    /// and silently skips the other two (the diagnostic-bypass class). Mongo is
-    /// deliberately NOT in this list: it runs no catalog probe and no policy
-    /// (full-scan only, mode-advice suppressed), so it keeps its own literal.
     #[test]
     fn every_sql_engine_diagnostic_routes_through_the_assembler() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/preflight");
         for engine in ["postgres.rs", "mysql.rs", "mssql.rs"] {
             let src = std::fs::read_to_string(dir.join(engine)).expect("read engine diagnostic");
-            // Comment-stripped, so a mention in prose cannot satisfy the gate.
             let code = src
                 .lines()
                 .filter(|l| !l.trim_start().starts_with("//"))
@@ -1921,14 +1608,6 @@ mod tests {
         }
     }
 
-    // ── keyset (chunk_by_key) must be labelled keyset, never `chunked(?, …)` ──
-    //
-    // Regression for the preflight keyset-blindness class: a `mode: chunked` +
-    // `chunk_by_key: id` export (the production `table:`-shortcut shape) is
-    // ExtractionStrategy::Keyset. Before the fix, derive_strategy fell through to
-    // the Chunked arm, read the absent chunk_column, and rendered
-    // `chunked(?, size=…)` — the `?` that made 66 production keyset tables read as
-    // misconfigured. The strategy label must name the seek key.
     #[test]
     fn derive_strategy_keyset_names_the_seek_key_not_a_question_mark() {
         let e = cfg("mode: chunked\nchunk_by_key: id\nchunk_size: 250000\n");
@@ -1949,9 +1628,6 @@ mod tests {
         );
     }
 
-    // ── diagnose_mode_str / resolve_preflight_base_query (hoisted from the
-    //    three engine diagnose_* paths; pin the shared shape once) ────────────
-
     #[test]
     fn diagnose_mode_str_renders_each_mode() {
         assert_eq!(diagnose_mode_str(&cfg("mode: full\n")), "full");
@@ -1969,19 +1645,15 @@ mod tests {
 
     #[test]
     fn resolve_preflight_base_query_table_shortcut_and_inline() {
-        // `table:` shortcut → canonical SELECT * FROM <table>, never a SELECT 1 stub.
         assert_eq!(
             resolve_preflight_base_query(&cfg("mode: full\ntable: orders\n")),
             "SELECT * FROM orders"
         );
-        // Inline `query:` passes through verbatim.
         assert_eq!(
             resolve_preflight_base_query(&cfg("mode: full\nquery: \"SELECT id FROM t WHERE x\"\n")),
             "SELECT id FROM t WHERE x"
         );
     }
-
-    // ── recommend_profile ───────────────────────────────────────────────────
 
     #[test]
     fn recommend_profile_indexed_small_is_fast() {
@@ -2003,7 +1675,7 @@ mod tests {
 
     #[test]
     fn recommend_profile_no_index_small_is_balanced() {
-        let e = cfg(""); // parallel=1 by default
+        let e = cfg("");
         assert_eq!(recommend_profile(Some(50_000), false, &e), "balanced");
     }
 
@@ -2013,7 +1685,6 @@ mod tests {
         assert_eq!(recommend_profile(Some(5_000_000), false, &e), "safe");
     }
 
-    // ── chunk_sparsity_from_counts ──────────────────────────────────────────
     #[test]
     fn sparsity_over_the_full_i64_range_saturates_instead_of_overflowing() {
         let info = chunk_sparsity_from_counts(10, i64::MIN, i64::MAX, 100_000);
@@ -2025,7 +1696,6 @@ mod tests {
 
     #[test]
     fn chunk_sparsity_dense_range_not_sparse() {
-        // 10_000 rows in a 10_001 span (density ≈ 1.0) → not sparse
         let info = chunk_sparsity_from_counts(10_000, 0, 10_000, 100);
         assert!(!info.is_sparse);
         assert!(info.density > 0.9);
@@ -2033,7 +1703,6 @@ mod tests {
 
     #[test]
     fn chunk_sparsity_very_sparse_range_is_sparse() {
-        // 100 rows in a 1_000_000 span with 100_000 chunk_size → >10 windows, density < 0.1
         let info = chunk_sparsity_from_counts(100, 0, 1_000_000, 50_000);
         assert!(
             info.is_sparse,
@@ -2050,8 +1719,6 @@ mod tests {
         assert!(!info.is_sparse);
     }
 
-    // ── check_sparse_range ──────────────────────────────────────────────────
-
     #[test]
     fn check_sparse_range_non_chunked_mode_returns_none() {
         let e = cfg("mode: full\n");
@@ -2066,7 +1733,6 @@ mod tests {
 
     #[test]
     fn check_sparse_range_sparse_returns_warning() {
-        // 100 rows in a 5_000_000 span with chunk_size=100_000 → 50 windows > 10, density≈2e-5 < 0.1
         let e = cfg("mode: chunked\nchunk_column: id\nchunk_size: 100000\n");
         let w = check_sparse_range(&e, Some(100), Some("1"), Some("5000000"));
         assert!(w.is_some(), "expected sparse warning");
@@ -2076,16 +1742,12 @@ mod tests {
 
     #[test]
     fn check_sparse_range_dense_range_returns_none() {
-        // 10_000 rows in 10_001 span → not sparse
         let e = cfg("mode: chunked\nchunk_column: id\nchunk_size: 100\n");
         assert!(check_sparse_range(&e, Some(10_000), Some("0"), Some("10000")).is_none());
     }
 
     #[test]
     fn check_sparse_range_keyset_is_immune_even_on_a_sparse_span() {
-        // Same 100-rows-in-5M-span shape that fires for chunk_column, but under
-        // chunk_by_key: keyset pages by ROWS, so a gappy key can never leave an
-        // empty window. The sparse warning must NOT fire (it is range-only).
         let e = cfg("mode: chunked\nchunk_by_key: id\nchunk_size: 100000\n");
         assert!(
             check_sparse_range(&e, Some(100), Some("1"), Some("5000000")).is_none(),
@@ -2093,12 +1755,8 @@ mod tests {
         );
     }
 
-    // ── recommend_parallelism: keyset honours its own parallel, never the ladder ─
     #[test]
     fn recommend_parallelism_keyset_default_is_sequential_with_the_escape_hint() {
-        // A ~1M-row keyset export with parallel unset: the old code fell through the
-        // chunked ladder and advised parallel: 2 ("no index"), which was wrong —
-        // keyset must answer from its OWN arm, defaulting to 1 but naming the escape.
         let e = cfg("mode: chunked\nchunk_by_key: id\nchunk_size: 250000\n");
         let (level, reason) = recommend_parallelism(&e, Some(1_000_000), true);
         assert_eq!(level, 1, "keyset default must be a single worker: {reason}");
@@ -2110,8 +1768,6 @@ mod tests {
 
     #[test]
     fn recommend_parallelism_keyset_honours_configured_parallel() {
-        // feat/parallel-keyset: an explicit `parallel: 4` on a keyset export is now
-        // real — the recommendation must echo it, NOT fall to the range ladder.
         let e = cfg("mode: chunked\nchunk_by_key: id\nchunk_size: 250000\nparallel: 4\n");
         let (level, reason) = recommend_parallelism(&e, Some(1_000_000), true);
         assert_eq!(
@@ -2120,8 +1776,6 @@ mod tests {
         );
         assert!(reason.contains("row-percentile"), "got: {reason}");
     }
-
-    // ── check_oversized_chunk ───────────────────────────────────────────────
 
     #[test]
     fn check_oversized_chunk_non_chunked_returns_none() {
@@ -2134,7 +1788,6 @@ mod tests {
 
     #[test]
     fn check_oversized_chunk_by_days_returns_none() {
-        // Date chunks iterate by calendar interval — rows/chunk not derivable.
         let e = cfg("mode: chunked\nchunk_column: created_at\nchunk_by_days: 7\n");
         assert!(
             check_oversized_chunk(&e, Some(10_000_000), Some(500), Some("0"), Some("9999999"))
@@ -2144,7 +1797,6 @@ mod tests {
 
     #[test]
     fn check_oversized_chunk_no_row_estimate_returns_none() {
-        // MySQL: no trustworthy scan-free estimate → row_estimate None → skip.
         let e = cfg("mode: chunked\nchunk_column: id\nchunk_size: 1000000\n");
         assert!(check_oversized_chunk(&e, None, Some(500), Some("0"), Some("9999999")).is_none());
     }
@@ -2159,7 +1811,6 @@ mod tests {
 
     #[test]
     fn check_oversized_chunk_small_chunk_returns_none() {
-        // 100k rows/chunk × 500 B = ~48 MB < 256 MB budget.
         let e = cfg("mode: chunked\nchunk_column: id\nchunk_size: 100000\n");
         let w = check_oversized_chunk(&e, Some(10_000_000), Some(500), Some("0"), Some("10000000"));
         assert!(w.is_none(), "48 MB/chunk is under budget: {w:?}");
@@ -2167,7 +1818,6 @@ mod tests {
 
     #[test]
     fn check_oversized_chunk_heavy_range_chunk_warns_and_suggests_smaller() {
-        // density 1.0 → 1M rows/chunk × 500 B = ~476 MB > 256 MB.
         let e = cfg("mode: chunked\nchunk_column: id\nchunk_size: 1000000\n");
         let w = check_oversized_chunk(&e, Some(10_000_000), Some(500), Some("0"), Some("10000000"))
             .expect("heavy chunk must warn");
@@ -2184,12 +1834,6 @@ mod tests {
 
     #[test]
     fn check_oversized_chunk_low_cardinality_range_key_does_not_phantom_warn() {
-        // A low-cardinality range key: 150K rows over 100 distinct values (span
-        // 0..99), chunk_size 100000 ≥ span → ONE chunk == the whole table (150K
-        // rows × 15 B ≈ 2 MB, well under budget). The bug: `density × chunk_size`
-        // = 150000/99 × 100000 ≈ 151M rows/chunk → ~2167 MB → a phantom "heavy
-        // chunk" warning that told the user to shrink chunk_size 8×. The clamp to
-        // the row estimate kills it. RED before the clamp (warns), green after.
         let e = cfg("mode: chunked\nchunk_column: amount\nchunk_size: 100000\n");
         let w = check_oversized_chunk(&e, Some(150_000), Some(15), Some("0"), Some("99"));
         assert!(
@@ -2200,15 +1844,6 @@ mod tests {
 
     #[test]
     fn check_oversized_chunk_keyset_chunk_larger_than_table_does_not_phantom_warn() {
-        // Keyset branch, same class: chunk_size 100000 on a 50K-row table.
-        // A chunk holds only 50K rows (the whole table), 50K × 500 B ≈ 24 MB <
-        // budget. Unclamped `rows_per_chunk = chunk_size = 100000` → 48 MB, still
-        // under here — so push chunk_size past the point the phantom crosses the
-        // budget: 600K chunk_size on a 300K-row table, 300K × 1000 B = 286 MB
-        // (real, over budget IS a legit warn) vs the clamp keeping it honest at
-        // the true row count. Use a case where the phantom warns but the truth
-        // does not: 50K rows × 500 B, chunk_size 700000 → phantom 700K×500=334 MB
-        // warns; clamped 50K×500=24 MB does not.
         let e = cfg("mode: chunked\nchunk_by_key: id\nchunk_size: 700000\n");
         let w = check_oversized_chunk(&e, Some(50_000), Some(500), None, None);
         assert!(
@@ -2219,15 +1854,11 @@ mod tests {
 
     #[test]
     fn check_oversized_chunk_keyset_uses_chunk_size_directly() {
-        // Keyset pages hold exactly chunk_size rows — no min/max needed.
-        // 2M rows/chunk × 200 B = ~381 MB > 256 MB.
         let e = cfg("mode: chunked\nchunk_by_key: id\nchunk_size: 2000000\n");
         let w = check_oversized_chunk(&e, Some(50_000_000), Some(200), None, None)
             .expect("keyset heavy chunk must warn even without a key range");
         assert!(w.contains("Heavy chunk"), "got: {w}");
     }
-
-    // ── check_dense_surrogate_cost ──────────────────────────────────────────
 
     #[test]
     fn check_dense_surrogate_row_number_in_query_returns_warning() {
@@ -2243,20 +1874,13 @@ mod tests {
         assert!(check_dense_surrogate_cost(&e).is_none());
     }
 
-    // ── check_missing_checkpoint (resumability nudge) ───────────────────────
     #[test]
     fn check_missing_checkpoint_keyset_without_checkpoint_warns() {
-        // The production shape: a large keyset export with chunk_checkpoint left
-        // off — a crash re-reads the whole table (the 738K-row re-download pain).
         let e = cfg("mode: chunked\nchunk_by_key: id\nchunk_size: 250000\n");
         let w = check_missing_checkpoint(&e, Some(1_000_000));
         assert!(w.is_some(), "expected a checkpoint nudge");
         let msg = w.unwrap();
         assert!(msg.contains("chunk_checkpoint"), "names the fix");
-        // The message must NOT advise the removed conflated semantics — post-split
-        // chunk_checkpoint is crash-recovery ONLY and does not change clean-re-run
-        // behaviour, so it must never tell operators to OMIT it for a fresh snapshot
-        // (that would disable crash-recovery for the exact case it protects).
         assert!(
             !msg.contains("incremental-by-key") && !msg.to_lowercase().contains("omit"),
             "must not advise the removed incremental semantics: {msg}"
@@ -2269,8 +1893,6 @@ mod tests {
 
     #[test]
     fn check_missing_checkpoint_range_chunk_unknown_size_warns() {
-        // MySQL has no trustworthy estimate (None) — still nudge, since that is
-        // exactly the engine where the re-download is least visible.
         let e = cfg("mode: chunked\nchunk_column: ref_id\nchunk_size: 250000\n");
         assert!(check_missing_checkpoint(&e, None).is_some());
     }
@@ -2283,27 +1905,21 @@ mod tests {
 
     #[test]
     fn check_missing_checkpoint_keyset_incremental_implies_checkpoint_is_silent() {
-        // keyset_incremental implies checkpoint at plan build, so the "no
-        // chunk_checkpoint" nudge must NOT fire — it would contradict the plan.
         let e = cfg("mode: chunked\nchunk_by_key: id\nkeyset_incremental: true\n");
         assert!(check_missing_checkpoint(&e, Some(5_000_000)).is_none());
     }
 
     #[test]
     fn check_missing_checkpoint_known_small_table_is_silent() {
-        // A known-small chunked table re-reads cheaply — no nudge.
         let e = cfg("mode: chunked\nchunk_column: id\nchunk_size: 1000\n");
         assert!(check_missing_checkpoint(&e, Some(5_000)).is_none());
     }
 
     #[test]
     fn check_missing_checkpoint_non_chunked_is_silent() {
-        // Full/incremental have no per-chunk progress to checkpoint.
         let e = cfg("mode: full\n");
         assert!(check_missing_checkpoint(&e, Some(10_000_000)).is_none());
     }
-
-    // ── check_connection_limit ──────────────────────────────────────────────
 
     #[test]
     fn check_connection_limit_parallel_one_returns_none() {
@@ -2330,8 +1946,6 @@ mod tests {
         assert!(check_connection_limit(4, Some(100)).is_none());
     }
 
-    // ── check_parallel_memory_risk ──────────────────────────────────────────
-
     #[test]
     fn check_parallel_memory_risk_parallel_one_returns_none() {
         let e = cfg("parallel: 1\n");
@@ -2354,24 +1968,16 @@ mod tests {
         );
     }
 
-    // ── collect_warnings (the manifest) ─────────────────────────────────────
-
     #[test]
     fn collect_warnings_assembles_applicable_checks_in_registry_order() {
-        // The manifest rewrite must keep display order AND aggregate every
-        // applicable check. This config trips four at once: connection-limit
-        // (parallel >= max_connections), sparse-range (density < 0.1),
-        // parallel-memory (> 5M rows), and missing-checkpoint (chunked, large, no
-        // chunk_checkpoint). oversized-chunk and dense-surrogate stay None, so the
-        // survivors must be those four, in array order.
         let e = cfg("mode: chunked\nchunk_column: id\nchunk_size: 100000\nparallel: 20\n");
         let warnings = collect_warnings(
             &e,
-            Some(10_000_000), // row_estimate
-            None,             // avg_row_bytes → oversized-chunk check is skipped
+            Some(10_000_000),
+            None,
             Some("1"),
-            Some("1000000000"), // wide span → sparse range
-            Some(20),           // db max_connections → connection-limit trips
+            Some("1000000000"),
+            Some(20),
         );
         assert_eq!(warnings.len(), 4, "four checks apply: {warnings:?}");
         assert!(
@@ -2393,8 +1999,6 @@ mod tests {
             "missing-checkpoint is last, Medium: {warnings:?}"
         );
     }
-
-    // ── compute_verdict ─────────────────────────────────────────────────────
 
     #[test]
     fn compute_verdict_indexed_cursor_small_is_efficient() {
@@ -2422,8 +2026,6 @@ mod tests {
 
     #[test]
     fn compute_verdict_no_index_very_large_no_width_is_unsafe() {
-        // > 1_000_000 rows, no index, no cursor, no row-width estimate → can't
-        // prove memory stays in budget, so stay Unsafe.
         assert!(matches!(
             compute_verdict(Some(5_000_000), false, false, None, 1),
             HealthVerdict::Unsafe
@@ -2432,10 +2034,6 @@ mod tests {
 
     #[test]
     fn compute_verdict_no_index_large_narrow_within_budget_is_degraded() {
-        // 10M rows, no index, no cursor — but a narrow row (~100 B) at modest
-        // parallelism peaks at ~96 MB, well under the 2 GB budget. The old
-        // row-count-only rule cried UNSAFE; the memory-aware rule downgrades to
-        // DEGRADED (the unindexed scan is still worth flagging, not blocking).
         assert!(matches!(
             compute_verdict(Some(10_000_000), false, false, Some(100), 4),
             HealthVerdict::Degraded
@@ -2444,8 +2042,6 @@ mod tests {
 
     #[test]
     fn compute_verdict_no_index_wide_high_parallel_over_budget_is_unsafe() {
-        // Wide rows (~20 KB) × 24 workers → predicted peak ~3 GB, over the 2 GB
-        // budget → genuinely Unsafe even with a width estimate.
         assert!(matches!(
             compute_verdict(Some(10_000_000), false, false, Some(20_000), 24),
             HealthVerdict::Unsafe

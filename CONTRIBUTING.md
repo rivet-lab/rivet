@@ -29,6 +29,8 @@ agreement.
 make pr-ready                  # what a PR must pass; paste the summary block it prints into the PR body
 make pr-ready ARGS=--fast      # the same without mutation testing (reported NOT RUN, never omitted)
 make live CMD="cargo nextest run --run-ignored only -E 'test(name)'"   # a live run, in a machine-wide slot
+make hunt-dry ARGS=--auto      # plan a bug hunt (dev/pytools/hunt.py; ARGS=--list-lenses, LENS=cdc); make hunt runs it
+make fix-dry ARGS="--hunt target/hunt/<dir> --classes C1"   # plan a fix round (dev/pytools/fix.py); make fix ARGS="--go ..." runs it, never merges
 ```
 
 `make pr-ready` runs the offline suite, clippy with default features and with

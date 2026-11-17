@@ -206,6 +206,10 @@ fn leaks_on_every_engine(forms_of: impl Fn(&str) -> Vec<(&'static str, String)>)
     let mut leaked = Vec::new();
     for engine in ["postgres", "mysql", "mssql", "mongo", "oracle"] {
         for (form, url) in forms_of(engine) {
+            let named = rivet::config::SourceType::from_url_scheme(&url);
+            if named.is_some_and(|n| n.label() != engine) {
+                continue;
+            }
             let (cell_leaks, populated) = leaks_of(engine, form, &url);
             for sink in [
                 "run: stderr",

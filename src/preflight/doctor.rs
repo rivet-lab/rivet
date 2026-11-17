@@ -1,9 +1,7 @@
 use crate::config::{Config, DestinationType, SourceType};
 use crate::error::Result;
 
-/// One `rivet doctor` probe result. `doctor --json` emits these as an array; the
-/// text path prints the same data as `[OK]/[FAIL] <name>` lines (byte-identical
-/// to before — the `println!`s are unchanged, just gated on `!json`).
+/// One `rivet doctor` probe result.
 #[derive(Debug, Clone, serde::Serialize)]
 pub(super) struct DoctorCheck {
     pub(super) name: String,
@@ -33,20 +31,11 @@ fn print_doctor_json(config_path: &str, all_ok: bool, checks: &[DoctorCheck]) {
     );
 }
 
-/// Record a check and, in text mode, render its `[OK]/[FAIL]` line **from the
-/// same struct**. One call per check — there is no second hand-written line to
-/// drift out of sync with the `--json` report (the dual-emit this replaced had
-/// a `println!` and a `push` maintained in parallel at every site). A `FAIL`
-/// always carries `detail` at its call sites; `unwrap_or("")` is a belt-and-
-/// braces fallback, not an expected path.
+/// Record a check and, in text mode, render its `[OK]/[FAIL]` line **from the same struct**.
 fn emit_check(checks: &mut Vec<DoctorCheck>, json: bool, mut check: DoctorCheck) {
     check.detail = check.detail.map(|d| crate::redact::redact_secrets(&d));
     if !json {
         if check.ok {
-            // Every pre-existing OK check carries `detail: None`, so this line is
-            // byte-identical for them; the CDC health checks put their value in
-            // the detail (retained WAL, backlog, abandoned-slot names) and print
-            // it inline.
             match &check.detail {
                 Some(d) => println!("[OK]  {} — {}", check.name, d),
                 None => println!("[OK]  {}", check.name),
@@ -151,7 +140,6 @@ pub fn doctor(config_path: &str, json: bool, run_plan: RunPlanProbe<'_>) -> Resu
             c
         }
         Err(e) => {
-            // L4: surface the config error exactly once; exit stays non-zero.
             emit_check(
                 &mut checks,
                 json,
@@ -180,8 +168,6 @@ pub fn doctor(config_path: &str, json: bool, run_plan: RunPlanProbe<'_>) -> Resu
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
 
-    // The state every run of this config opens: a run that cannot open it fails before
-    // reading a row, so a doctor that skipped it was green over a config no run could use.
     match crate::state::StateStore::probe(config_path) {
         Ok(at) => emit_check(
             &mut checks,
@@ -222,8 +208,6 @@ pub fn doctor(config_path: &str, json: bool, run_plan: RunPlanProbe<'_>) -> Resu
                     hint: None,
                 },
             );
-            // Text-only advisory (live probe, no JSON counterpart) — stays inline
-            // after the source line, so its position is unchanged.
             if !json {
                 note_mssql_harm_permission(&config);
                 note_oracle_harm_permission(&config);
@@ -334,8 +318,6 @@ pub fn doctor(config_path: &str, json: bool, run_plan: RunPlanProbe<'_>) -> Resu
                 export.destination.bucket.as_deref().unwrap_or("?")
             ),
             DestinationType::Stdout => {
-                // L23: stdout streams to the terminal — nothing to auth-probe —
-                // but say so explicitly so the operator sees it was considered.
                 emit_check(
                     &mut checks,
                     json,
@@ -350,8 +332,6 @@ pub fn doctor(config_path: &str, json: bool, run_plan: RunPlanProbe<'_>) -> Resu
             }
         };
 
-        // Apply `{date}`/`{export}`/`{table}` substitution so the probe write
-        // lands at the same prefix `run` would use.
         let expanded_dest = crate::plan::build::expand_destination_templates(
             export.destination.clone(),
             &export.name,
@@ -410,8 +390,6 @@ pub fn doctor(config_path: &str, json: bool, run_plan: RunPlanProbe<'_>) -> Resu
             println!("All checks passed.");
             println!("Next: rivet check -c {config_path}   # column-type & schema report");
         } else {
-            // F-NEW-A (0.7.5 audit): the exit code now matches the fail-line so
-            // CI / cron can tell a healthy environment from a broken one.
             println!("Some checks failed. Fix the issues above before running exports.");
         }
     }
@@ -448,13 +426,6 @@ fn check_source_auth(config: &Config) -> Result<()> {
     let url = config.source.resolve_url()?;
     let url = url.expose();
     let tls = config.source.tls.as_ref();
-    // `doctor` is meant to surface security misconfigurations *before*
-    // the operator runs a real export. Plaintext-source connections are
-    // a security misconfiguration; the warn was previously only
-    // emitted from `create_source` (the `run` path), so an operator
-    // could pass `doctor` clean and only learn about the TLS gap on
-    // first `rivet run`. The helper is `Once`-gated so duplicate calls
-    // from later phases don't restack the line.
     crate::source::warn_if_tls_disabled(&config.source);
     match config.source.source_type {
         SourceType::Postgres => {
@@ -470,34 +441,21 @@ fn check_source_auth(config: &Config) -> Result<()> {
             Ok(())
         }
         SourceType::Mssql => {
-            // `connect_with_tls` runs a connect + `SELECT 1` round-trip itself,
-            // so a successful construction is a green health-check.
             crate::source::mssql::MssqlSource::connect_with_tls(url, tls)?;
             Ok(())
         }
         SourceType::Oracle => {
-            // `create_source` connects, pins the session and fails on a bad login.
             crate::source::create_source(&config.source)?;
             Ok(())
         }
         SourceType::Mongo => {
-            // `connect_with_tls` runs a connect + `ping` round-trip itself, so a
-            // successful construction is a green health-check.
             crate::source::mongo::MongoSource::connect(url, tls, config.source.mongo.as_ref())?;
             Ok(())
         }
     }
 }
 
-/// Advisory (never a `[FAIL]`): a SQL Server login that can extract data fine
-/// but lacks `VIEW SERVER STATE` will have its source-harm metrics (lock waits,
-/// via `sys.dm_os_wait_stats`) silently skipped. Surface that at health-check
-/// time so the operator can grant it if they want the metrics — but it must
-/// never gate extraction, so this only prints a `[note]` and leaves `all_ok`
-/// untouched.
-///
-/// No-op for non-MSSQL sources, and when the permission is present or
-/// undeterminable (a probe failure stays silent rather than guess).
+/// Advisory (never a `[FAIL]`): a SQL Server login that can extract data fine but lacks `VIEW SERVER STATE` will have its source-harm metrics (lock waits, via `sys.dm_os_wait_stats`) silently skipped.
 fn note_mssql_harm_permission(config: &Config) {
     if config.source.source_type != SourceType::Mssql {
         return;
@@ -516,13 +474,11 @@ fn note_mssql_harm_permission(config: &Config) {
     }
 }
 
-/// Advisory (never a `[FAIL]`): an Oracle user that cannot read V$SYSSTAT / V$SYSTEM_EVENT
-/// gets no harm metrics and no governor pressure, silently.
+/// Advisory (never a `[FAIL]`): an Oracle user that cannot read V$SYSSTAT / V$SYSTEM_EVENT gets no harm metrics and no governor pressure, silently.
 #[cfg(not(feature = "oracle"))]
 fn note_oracle_harm_permission(_config: &Config) {}
 
-/// Advisory (never a `[FAIL]`): an Oracle user that cannot read V$SYSSTAT / V$SYSTEM_EVENT
-/// gets no harm metrics and no governor pressure, silently.
+/// Advisory (never a `[FAIL]`): an Oracle user that cannot read V$SYSSTAT / V$SYSTEM_EVENT gets no harm metrics and no governor pressure, silently.
 #[cfg(feature = "oracle")]
 fn note_oracle_harm_permission(config: &Config) {
     if config.source.source_type != SourceType::Oracle {
@@ -546,11 +502,6 @@ fn note_oracle_harm_permission(config: &Config) {
 
 fn check_destination_auth(dest: &crate::config::DestinationConfig) -> Result<()> {
     use crate::destination::create_destination_for_probe;
-    // L20: a preflight connectivity probe must FAIL FAST against an
-    // unreachable cloud endpoint. The export-path `create_destination`
-    // inherits a 5-attempt escalating-backoff RetryLayer (~10s of WARN-noisy
-    // retries before the `[FAIL]`); the probe factory builds the destination
-    // with retries disabled so a closed port surfaces immediately.
     let d = create_destination_for_probe(dest)?;
     let probe_key = crate::manifest::DOCTOR_PROBE_FILENAME;
     let tmp = std::env::temp_dir().join(probe_key);
@@ -565,21 +516,11 @@ fn check_destination_auth(dest: &crate::config::DestinationConfig) -> Result<()>
         }
     }
     let _ = std::fs::remove_file(&tmp);
-    // FINDING #26: the write-probe drops a `.rivet_doctor_probe` object at the
-    // destination prefix to verify write access; we must remove it so `doctor`
-    // leaves the prefix exactly as it found it (the local temp above is a
-    // *separate* file in `temp_dir`, not the destination object). The probe
-    // landed at the same key `write` resolved: `probe_key` joined to the
-    // destination root.
     remove_destination_probe(dest, probe_key);
     Ok(())
 }
 
 /// Resolve the local destination root the way `LocalDestination::new` does.
-///
-/// Kept inline rather than reaching into the backend so `doctor` depends only
-/// on the config, not on `LocalDestination`'s private field. MUST stay in sync
-/// with `destination/local.rs`: `path` wins, then `prefix`, then `.`.
 fn local_base_path(dest: &crate::config::DestinationConfig) -> String {
     dest.path
         .clone()
@@ -588,20 +529,6 @@ fn local_base_path(dest: &crate::config::DestinationConfig) -> String {
 }
 
 /// Best-effort removal of the destination-side write-probe (FINDING #26).
-///
-/// Local destinations are removed directly: `write` lands the probe at
-/// `<base>/<probe_key>` (an atomic temp-then-rename), so a plain
-/// `remove_file` restores the prefix to empty. A missing probe is benign
-/// (`NotFound` swallowed) — `doctor` already passed the write check, this is
-/// pure tidy-up and must never turn a healthy run into a failure.
-///
-/// Cloud backends (S3/GCS/Azure) expose no delete on the `Destination` trait,
-/// so the probe object persists; `manifest_reconcile` already filters
-/// `DOCTOR_PROBE_FILENAME` out of listings, so the residue never confuses
-/// verification. It is logged (not silently ignored) but at DEBUG, not WARN:
-/// on the happy path the leftover is benign and a WARN on every successful
-/// cloud `doctor` run would be alarming noise — a fully clean removal needs a
-/// `delete` on the `Destination` trait, tracked separately.
 fn remove_destination_probe(dest: &crate::config::DestinationConfig, probe_key: &str) {
     match dest.destination_type {
         DestinationType::Local => {
@@ -615,7 +542,7 @@ fn remove_destination_probe(dest: &crate::config::DestinationConfig, probe_key: 
                 ),
             }
         }
-        DestinationType::Stdout => {} // streaming sink writes nothing to clean up
+        DestinationType::Stdout => {}
         DestinationType::S3 | DestinationType::Gcs | DestinationType::Azure => {
             log::debug!(
                 "doctor: destination probe '{probe_key}' left at the {:?} prefix \
@@ -627,23 +554,8 @@ fn remove_destination_probe(dest: &crate::config::DestinationConfig, probe_key: 
 }
 
 /// L21: trim a raw probe error to its root cause for the `[FAIL]` line.
-///
-/// opendal/reqwest errors dump the entire HTTP response — `... response: Parts
-/// { status: 403, version: HTTP/1.1, headers: {"x-amz-request-id": ...,
-/// "content-type": ..., ...} } ...` — into their `Display`. That multi-line
-/// header blob buries the one line the operator needs (the category is already
-/// shown separately). We keep the meaningful prefix and cut at the first noisy
-/// marker, collapse any embedded newlines, and cap the length as a backstop.
-/// Categorisation still runs on the full `{:#}` chain elsewhere — this only
-/// shapes what is *printed*, never what is matched.
 pub(super) fn trim_probe_error(err: &anyhow::Error) -> String {
-    // Use the full `{:#}` cause chain, not the top-level Display: Postgres
-    // surfaces a wrong password as the bare wrapper `db error` and buries
-    // `password authentication failed for user …` in `.source()`. The alternate
-    // form joins the chain so the [FAIL] line shows the real reason.
     let raw = format!("{err:#}");
-    // Detect an opendal/reqwest HTTP-response dump on a flattened copy (markers
-    // are ASCII, single-line fragments). `to_ascii_lowercase` keeps byte layout.
     let flat = raw.replace(['\n', '\r'], " ");
     let lower = flat.to_ascii_lowercase();
     let cut = [
@@ -658,17 +570,9 @@ pub(super) fn trim_probe_error(err: &anyhow::Error) -> String {
     .filter_map(|m| lower.find(m))
     .min();
     let mut out = match cut {
-        // A structural HTTP dump IS present: flatten to ONE line and cut at the
-        // marker so the header blob doesn't bury the root cause.
         Some(i) => flat[..i].trim_end_matches([' ', ',']).to_string(),
-        // No dump: a hand-authored message (a config-validation menu like the
-        // chunk_column/chunk_by_key options, or the auth detail). Preserve it
-        // VERBATIM, newlines included — flattening would mash a multi-line hint
-        // into a run-on line.
         None => raw.trim().to_string(),
     };
-    // Backstop against a runaway message: generous enough to keep a multi-line
-    // config hint intact, small enough to bound a 5000-char library dump.
     const MAX: usize = 1200;
     if out.chars().count() > MAX {
         out = out.chars().take(MAX).collect::<String>();
@@ -678,47 +582,19 @@ pub(super) fn trim_probe_error(err: &anyhow::Error) -> String {
 }
 
 pub(crate) fn categorize_source_error(err: &anyhow::Error) -> &'static str {
-    // A config refusal is raised before any connection and carries its own hint;
-    // no needle below may relabel it from its text.
     if crate::error::error_code(err).is_some_and(|c| c.starts_with("RIVET_CONFIG_")) {
         return "error";
     }
-    // `{:#}` (alternate) walks the anyhow cause chain, not just the top
-    // Display. Postgres surfaces a wrong password as the bare top-level
-    // `"db error"` and buries `"password authentication failed for user …"`
-    // in `.source()`; `{}` would never see the real reason and the operator
-    // would get the useless generic "error" bucket. The alternate form joins
-    // the chain so the auth/connectivity needles below match the true cause.
     let msg = format!("{err:#}").to_lowercase();
-    // Connect-time server errors that are NOT auth, peeled off before the
-    // `db error` catch-all below claims them (each verified against the server's
-    // actual rendering: 3D000 / 53300 / 57P03).
     if (msg.contains("does not exist") && msg.contains("database"))
-        // SQL Server's 4060 says "Cannot open database … requested by the login.
-        // The login failed." — the trailing sentence matched the `login failed`
-        // needle and answered a wrong DATABASE NAME with a credentials hint. The
-        // opening phrase is the discriminating one, so it is checked first.
-        // lowercase: the haystack is lowercased at the top of this fn — the first
-        // version of this needle carried capitals and was dead on arrival
-        // (round-4 fuzz sweep), un-fixing the very case its comment describes.
         || msg.contains("cannot open database")
-        // MySQL 1049 renders "Unknown database 'x'" — neither arm above
-        // matched it, so a typo'd MySQL database fell to the generic catch-all
-        // (round-10: the per-arm fixture exposed the missing engine).
         || msg.contains("unknown database")
     {
         return "unknown database";
     }
-    // Oracle ORA-12514: the listener, before any login, does not know the URL's service.
     if msg.contains("ora-12514") || msg.contains("not registered with the listener") {
         return "unknown service";
     }
-    // ALL of 53300's renderings, measured against the stand's own PostgreSQL:
-    // the max_connections cap says "sorry, too many clients already" or
-    // "remaining connection slots are reserved" — NEITHER contains "too many
-    // connections", which only the per-role/per-DB CONNECTION LIMIT arm renders.
-    // The first cut matched the one phrasing and sent the other two to the auth
-    // catch-all: "verify the user/password" for a full server.
     if msg.contains("too many connections")
         || msg.contains("too many clients")
         || msg.contains("connection slots are reserved")
@@ -729,19 +605,9 @@ pub(crate) fn categorize_source_error(err: &anyhow::Error) -> &'static str {
     if msg.contains("password")
         || msg.contains("authentication")
         || msg.contains("access denied")
-        // MSSQL bad credentials: `"Login failed for user 'sa'"`.
         || msg.contains("login failed")
-        // Oracle bad credentials: "ORA-01017: invalid credential or not authorized; logon denied".
         || msg.contains("ora-01017")
         || msg.contains("logon denied")
-        // Postgres top-level Display when the real cause (auth) is nested and
-        // `{:#}` still collapses to the bare wrapper — a server-side `DbError`
-        // is never a connectivity failure (those say "connect"/"refused"). But
-        // "never connectivity" is not "always auth": three ordinary connect-time
-        // DbErrors are neither, and the three arms ABOVE this catch-all peel
-        // them off so a wrong-database-name typo stops being answered with
-        // "verify the user/password" — a hint that sends the operator to fix
-        // credentials they never had a problem with.
         || msg.contains("db error")
     {
         "auth error"
@@ -761,25 +627,10 @@ pub(super) fn categorize_dest_error(
     err: &anyhow::Error,
     dest: &crate::config::DestinationConfig,
 ) -> &'static str {
-    // `{:#}` walks the cause chain: opendal wraps the underlying
-    // reqwest/HTTP reason as a `.source()`, so the alternate form is what
-    // surfaces "error sending request" / "InvalidAccessKeyId" / "status: 403"
-    // when those are nested rather than on the top Display.
     let msg = format!("{err:#}").to_lowercase();
-    // CONTRACT: the pattern below must match the error text emitted by
-    // `enforce_sas_expiry` in destination/azure.rs:
-    //   "Azure SAS token already expired (se=…)"
-    // If that message ever changes, update both places together.
     if msg.contains("already expired") && msg.contains("sas") {
         return "sas expired";
     }
-    // L6: a local filesystem permission denial (`Permission denied (os error
-    // 13)`) is NOT an auth failure — there are no credentials involved, just
-    // directory mode bits. Route Local/Stdout permission denials to their own
-    // "permission error" category (the same FS-permissions hint applies) so the
-    // label stops misattributing an `os error 13` to credentials. Cloud
-    // backends keep falling through to "auth error" below, where a denied write
-    // genuinely is a credential/IAM problem.
     if matches!(
         dest.destination_type,
         DestinationType::Local | DestinationType::Stdout
@@ -791,14 +642,12 @@ pub(super) fn categorize_dest_error(
     }
     if msg.contains("credential")
         || msg.contains("permission denied")
-        // opendal lowercases its `ErrorKind` with no space: `PermissionDenied`.
         || msg.contains("permissiondenied")
         || msg.contains("access denied")
         || msg.contains("unauthorized")
         || msg.contains("forbidden")
         || msg.contains("invalid_grant")
         || msg.contains("token")
-        // S3 rejects a bad/expired key with `InvalidAccessKeyId` + HTTP 403.
         || msg.contains("invalidaccesskeyid")
         || msg.contains("403")
     {
@@ -815,9 +664,6 @@ pub(super) fn categorize_dest_error(
         || msg.contains("timed out")
         || msg.contains("dns")
         || msg.contains("endpoint")
-        // reqwest/opendal phrasing for a transport-level failure reaching the
-        // endpoint at all (bad host, unreachable network, TLS reset) — none of
-        // the needles above match the bare "error sending request for url …".
         || msg.contains("error sending request")
         || msg.contains("send http request")
     {
@@ -831,13 +677,6 @@ pub(super) fn categorize_dest_error(
 const SQL_TLS_HINT: &str = "TLS handshake failed. Set `tls.ca_file: /path/to/ca-bundle.pem` if your DB uses a private CA, or `tls.mode: require` to encrypt without verifying the certificate; if the server has no TLS at all, `tls.mode: disable` (trusted networks only).";
 
 /// Map a categorised source error (+ raw text) to an actionable hint.
-///
-/// Returns `None` when nothing more useful than the underlying error
-/// itself can be said.  The output is intentionally short — `doctor`
-/// already prints the full driver message; the hint should add the
-/// *next action*, not re-explain the failure.
-///
-/// Categories come from [`categorize_source_error`].
 pub(crate) fn source_error_hint(
     category: &'static str,
     err: &anyhow::Error,
@@ -846,9 +685,6 @@ pub(crate) fn source_error_hint(
     use crate::config::SourceType;
     let msg = err.to_string().to_lowercase();
 
-    // TLS misconfig leaks through every category — check first so a
-    // generic "error" with a TLS root cause still gets the right hint.
-    // The TLS-required policy refusal names its own fix; it is not a handshake failure.
     if (msg.contains("tls") && !msg.contains("tls required"))
         || msg.contains("ssl")
         || msg.contains("certificate")
@@ -869,10 +705,6 @@ pub(crate) fn source_error_hint(
     }
 
     match category {
-        // The two connect-time DbError shapes peeled off before the auth
-        // catch-all — each hint names the actual fix, where "verify the
-        // user/password" sent the operator to credentials they never had a
-        // problem with.
         "unknown service" => Some(
             "The listener does not know the service named in the URL path \
              (oracle://USER@HOST:PORT/SERVICE) — the login was never attempted. \
@@ -914,11 +746,6 @@ pub(crate) fn source_error_hint(
 }
 
 /// Map a categorised destination error (+ raw text) to an actionable hint.
-///
-/// Mirrors [`source_error_hint`] but with backend-specific guidance
-/// (S3 region / IAM / endpoint, GCS service account / ADC, Azure key /
-/// SAS / RBAC).  Returns `None` when nothing better than the raw error
-/// applies.
 pub(super) fn destination_error_hint(
     category: &'static str,
     dest: &crate::config::DestinationConfig,
@@ -927,8 +754,6 @@ pub(super) fn destination_error_hint(
         "sas expired" => Some(
             "Azure SAS token is expired or near-expiry. Generate a new SAS via `az storage container generate-sas --permissions rwdlc --expiry <future-date>` and re-export AZURE_STORAGE_SAS_TOKEN.",
         ),
-        // L6: local FS permission denial — same actionable hint as the
-        // Local/Stdout auth branch below, just under the correct category.
         "permission error" => Some("Verify filesystem permissions on the destination directory."),
         "auth error" => Some(match dest.destination_type {
             DestinationType::S3 => {
@@ -1062,7 +887,6 @@ mod tests {
             crate::error::retry::classify_error(&transient).is_transient(),
             "a transient probe failure must classify Retryable (exit 2): {transient:#}"
         );
-        // A non-transient failure stays Generic (exit 1).
         let generic = doctor_failure_error(None);
         assert!(
             !crate::error::retry::classify_error(&generic).is_transient(),
@@ -1070,34 +894,12 @@ mod tests {
         );
     }
 
-    // doctor-dedup-path (regression): doctor's destination dedup key must
-    // include `path`, so two local destinations with different `path:` values
-    // are each probed independently — a buggy key of type+bucket+endpoint
-    // (omitting `path`) collapses both to "Local:-:-" and only probes the
-    // first, letting an unwritable second directory pass doctor and fail at
-    // run time. The dedup key now flows through `super::destination_identity`
-    // (preflight/mod.rs), which includes `path`; this drives the whole
-    // `doctor()` to prove the inline copy did not drift.
-    //
-    // The destination-side `.rivet_doctor_probe` is now cleaned up
-    // (FINDING #26), so a leftover probe FILE can no longer serve as the
-    // "was this path probed?" signal. Instead each destination uses a
-    // *nested* path that does not exist yet: probing it forces
-    // `LocalDestination::write` to `create_dir_all` the leaf directory, and
-    // cleanup removes only the probe file — so the created (now empty) leaf
-    // directory is a durable witness that the path was probed AND that #26
-    // cleanup ran. A buggy dedup that skipped the second path would leave its
-    // leaf directory absent.
-    //
-    // The source check fails fast and offline via `resolve_url` on an unset
-    // `url_env`, and `doctor` continues to the destination loop regardless.
     #[test]
     fn roast_doctor_write_probes_each_distinct_local_destination_path() {
         let dir_a = tempfile::tempdir().unwrap();
         let dir_b = tempfile::tempdir().unwrap();
         let config_dir = tempfile::tempdir().unwrap();
 
-        // Nested leaves that doctor must create when it probes each path.
         let leaf_a = dir_a.path().join("probe_here");
         let leaf_b = dir_b.path().join("probe_here");
 
@@ -1136,9 +938,6 @@ exports:
 
         let probe = crate::manifest::DOCTOR_PROBE_FILENAME;
 
-        // Each distinct path was probed → its leaf directory now exists; and
-        // FINDING #26 cleanup ran → the probe file inside it is gone, leaving
-        // the leaf empty.
         for (label, leaf) in [("first", &leaf_a), ("second", &leaf_b)] {
             assert!(
                 leaf.exists(),
@@ -1162,7 +961,6 @@ exports:
         }
     }
 
-    // Build a bare DestinationConfig of the given type for hint dispatch.
     fn dest_of(t: DestinationType) -> crate::config::DestinationConfig {
         crate::config::DestinationConfig {
             destination_type: t,
@@ -1170,9 +968,6 @@ exports:
         }
     }
 
-    // AUDIT-RED doctor-categorizer: Postgres wrong-password Display is just "db error"
-    // (real cause nested in .source()); current auth needles miss it so it falls to
-    // generic "error" with no hint. Asserts CORRECT behavior; expected to FAIL until fixed.
     #[test]
     fn audit_pg_db_error_is_auth_with_hint() {
         let err = anyhow::anyhow!("db error");
@@ -1235,10 +1030,6 @@ exports:
         assert!(source_error_hint("unknown service", &service, &SourceType::Oracle).is_some());
     }
 
-    // AUDIT-RED doctor-categorizer (#1): MSSQL wrong-login Display is
-    // "Login failed for user 'sa'" — current auth needles (password/authentication/
-    // access denied) miss it, so it falls to generic "error" with no hint.
-    // Asserts CORRECT behavior; expected to FAIL until fixed.
     #[test]
     fn audit_mssql_login_failed_is_auth_with_hint() {
         let err = anyhow::anyhow!("login failed for user 'sa'");
@@ -1256,9 +1047,6 @@ exports:
         );
     }
 
-    // AUDIT-RED doctor-categorizer: MySQL 'Access denied for user' already
-    // categorizes as auth — guard so a fix for pg/mssql does not regress it.
-    // Asserts CORRECT behavior; expected to PASS today.
     #[test]
     fn audit_mysql_access_denied_is_auth_with_hint() {
         let err = anyhow::anyhow!("access denied for user");
@@ -1276,18 +1064,9 @@ exports:
         );
     }
 
-    // AUDIT-RED doctor-categorizer (#2): opendal S3 auth failure surfaces as
-    // "PermissionDenied ... InvalidAccessKeyId ... status: 403" — lowercased
-    // 'permissiondenied' has no space (never matches "permission denied"),
-    // '403'/'invalidaccesskeyid' are absent from the needles, so it falls to
-    // generic "error" with no hint. Asserts CORRECT behavior; expected to FAIL.
     #[test]
     fn audit_s3_permission_denied_403_is_auth_with_hint() {
         let dest = dest_of(DestinationType::S3);
-        // NB: deliberately omits the words forbidden/unauthorized/credential/token
-        // and the spaced "permission denied"/"access denied" — those would match the
-        // existing needles and mask the real #2 gap (no-space PermissionDenied,
-        // InvalidAccessKeyId, 403). This is exactly opendal's S3 auth wording.
         let err = anyhow::anyhow!(
             "PermissionDenied at write => InvalidAccessKeyId, status: 403, https://bucket.s3.amazonaws.com/probe"
         );
@@ -1305,11 +1084,6 @@ exports:
         );
     }
 
-    // AUDIT-RED doctor-categorizer (#13 Azure): opendal connectivity failure to
-    // a bad/unreachable Azure endpoint surfaces as "error sending request for url
-    // (https://x.blob.core.windows.net/...)" — none of connect/refused/timed out/
-    // dns/endpoint match, so it falls to generic "error" with no hint.
-    // Asserts CORRECT behavior; expected to FAIL until fixed.
     #[test]
     fn audit_azure_send_request_error_is_connectivity_with_hint() {
         let dest = dest_of(DestinationType::Azure);
@@ -1330,10 +1104,6 @@ exports:
         );
     }
 
-    // AUDIT-RED doctor-categorizer (#27 guard): a literal "connection refused"
-    // already categorizes as connectivity — guard so a fix for the opendal
-    // send-request wording does not regress it. Asserts CORRECT behavior;
-    // expected to PASS today.
     #[test]
     fn audit_dest_connection_refused_is_connectivity_with_hint() {
         let dest = dest_of(DestinationType::S3);
@@ -1352,12 +1122,7 @@ exports:
         );
     }
 
-    // ── regression coverage for the broadened needles (fixes #1/#2) ──────────
-
-    /// One input per OR-ARM (round-10 mutants: each `||` in the needle chains
-    /// was un-graded — `&&` mutants survived because only one arm per category
-    /// ever had a fixture). And the hint ARMS exist: `delete match arm` on
-    /// "unknown database"/"transient" survived with no assertion on the text.
+    /// One input per OR-ARM (round-10 mutants: each `||` in the needle chains was un-graded.
     #[test]
     fn every_needle_arm_has_its_own_fixture_and_a_hint() {
         for msg in [
@@ -1371,8 +1136,6 @@ exports:
                 "{msg}"
             );
         }
-        // NEGATIVE arm for the `&&`: "does not exist" WITHOUT "database" (a
-        // missing ROLE) must never claim the unknown-database hint.
         assert_ne!(
             categorize_source_error(&anyhow::anyhow!("FATAL: role \"rivet\" does not exist")),
             "unknown database"
@@ -1396,11 +1159,7 @@ exports:
         }
     }
 
-    /// MSSQL 4060 routes to "unknown database", NOT auth — through the REAL fn,
-    /// whose haystack is LOWERCASED: the first needle carried capitals and was
-    /// dead on arrival, so this exact input fell through to the trailing
-    /// "login failed" sentence and got the credentials hint its own comment
-    /// claimed to have fixed. RED against re-capitalizing the needle.
+    /// MSSQL 4060 routes to "unknown database", NOT auth.
     #[test]
     fn mssql_wrong_database_is_not_an_auth_error() {
         let err = anyhow::anyhow!(
@@ -1410,35 +1169,23 @@ exports:
         assert_eq!(categorize_source_error(&err), "unknown database");
     }
 
-    // The pg auth reason is nested in `.source()`; only `{:#}` surfaces it.
-    // This proves the categorizer reads the alternate form, not just the bare
-    // top-level "db error" Display — so a real run shows the true cause.
     #[test]
     fn source_pg_nested_password_cause_via_alternate_is_auth() {
         let root = anyhow::anyhow!("password authentication failed for user \"rivet\"");
         let wrapped = root.context("db error");
         assert_eq!(categorize_source_error(&wrapped), "auth error");
-        // And the bare form (no nested cause) still maps via the "db error"
-        // needle — this is the exact shape the audit test pins.
         assert_eq!(
             categorize_source_error(&anyhow::anyhow!("db error")),
             "auth error"
         );
     }
 
-    // Guard: a genuine connectivity failure (Display says "connect"/"refused",
-    // never "db error") must NOT be swallowed by the new "db error" auth
-    // needle. Postgres surfaces a refused connection as "error connecting to
-    // server", which carries no auth needle.
     #[test]
     fn source_connection_refused_stays_connectivity_not_auth() {
         let err = anyhow::anyhow!("error connecting to server: Connection refused (os error 61)");
         assert_eq!(categorize_source_error(&err), "connectivity error");
     }
 
-    // opendal lowercases its `PermissionDenied` ErrorKind with no space — the
-    // pre-fix "permission denied" needle never matched it. Standalone case so
-    // coverage can't shrink back to the spaced-only needle.
     #[test]
     fn dest_no_space_permissiondenied_is_auth() {
         let dest = dest_of(DestinationType::Gcs);
@@ -1447,20 +1194,13 @@ exports:
         assert!(destination_error_hint("auth error", &dest).is_some());
     }
 
-    // reqwest's other transport phrasing — "failed to send http request" —
-    // must also categorize as connectivity (the audit test pins the sibling
-    // "error sending request for url" wording).
     #[test]
     fn dest_send_http_request_is_connectivity() {
         let dest = dest_of(DestinationType::S3);
-        // No connect/refused/timed out/dns/endpoint substring — only the new
-        // "send http request" needle can route this to connectivity.
         let err = anyhow::anyhow!("failed to send http request to the store");
         assert_eq!(categorize_dest_error(&err, &dest), "connectivity error");
     }
 
-    // Guard: an HTTP 404 (object/bucket missing) must stay "bucket not found",
-    // not get pulled into auth by the new 403 needle.
     #[test]
     fn dest_404_stays_bucket_not_found_after_403_needle_added() {
         let dest = dest_of(DestinationType::S3);
@@ -1468,15 +1208,10 @@ exports:
         assert_eq!(categorize_dest_error(&err, &dest), "bucket not found");
     }
 
-    // FINDING #26 (unit-level mirror of the live test): the destination-side
-    // probe must be removed, leaving the prefix exactly as doctor found it.
-    // Exercises the cleanup directly (no shared system-temp path) so it is
-    // immune to parallel-test contention on `std::env::temp_dir()`.
     #[test]
     fn remove_destination_probe_local_deletes_the_probe_object() {
         let dir = tempfile::tempdir().unwrap();
         let probe_key = crate::manifest::DOCTOR_PROBE_FILENAME;
-        // Stand in for what `LocalDestination::write` lands at the prefix.
         std::fs::write(dir.path().join(probe_key), b"ok").unwrap();
         let dest = crate::config::DestinationConfig {
             destination_type: DestinationType::Local,
@@ -1490,8 +1225,6 @@ exports:
         );
     }
 
-    // `remove_destination_probe` resolves the prefix from `prefix` when `path`
-    // is unset (mirrors `LocalDestination::new`'s `path → prefix → "."` order).
     #[test]
     fn remove_destination_probe_local_uses_prefix_when_path_unset() {
         let dir = tempfile::tempdir().unwrap();
@@ -1509,8 +1242,6 @@ exports:
         );
     }
 
-    // Benign no-op when the probe is already absent — cleanup runs after the
-    // write check passed, so it must never turn a healthy run into a failure.
     #[test]
     fn remove_destination_probe_missing_is_noop() {
         let dir = tempfile::tempdir().unwrap();
@@ -1519,18 +1250,10 @@ exports:
             path: Some(dir.path().to_string_lossy().into_owned()),
             ..Default::default()
         };
-        // No probe present; must not panic and must leave the dir untouched.
         remove_destination_probe(&dest, crate::manifest::DOCTOR_PROBE_FILENAME);
         assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
     }
 
-    // ── L6: local FS permission denial is "permission error", not "auth" ─────
-
-    // A local destination that fails with `Permission denied (os error 13)` is
-    // a directory-mode problem, not a credential/auth one. It must categorize
-    // as "permission error" (RED before the fix: the spaced "permission denied"
-    // needle routed it to "auth error"), and still carry the FS-permissions
-    // hint so the operator gets a next step.
     #[test]
     fn local_permission_denied_is_permission_error_not_auth() {
         let dest = dest_of(DestinationType::Local);
@@ -1546,9 +1269,6 @@ exports:
         );
     }
 
-    // Guard: a CLOUD permission denial (S3/GCS/Azure) is a genuine
-    // credential/IAM failure and must stay "auth error" — the L6 nuance is
-    // scoped to Local/Stdout only.
     #[test]
     fn cloud_permission_denied_stays_auth_error() {
         for t in [
@@ -1566,11 +1286,6 @@ exports:
         }
     }
 
-    // ── L21: trim_probe_error strips the verbose HTTP response dump ───────────
-
-    // An opendal/reqwest error whose Display embeds the full `Parts { ... headers:
-    // { ... } }` response must be trimmed to the actionable prefix: no headers,
-    // no `Parts {`, single line.
     #[test]
     fn trim_probe_error_strips_http_response_parts_and_headers() {
         let raw = "PermissionDenied (persistent) at write, context: { uri: https://b.s3.amazonaws.com/probe, response: Parts { status: 403, version: HTTP/1.1, headers: {\"x-amz-request-id\": \"ABC123\", \"content-type\": \"application/xml\"} }, service: s3 } => InvalidAccessKeyId";
@@ -1590,7 +1305,6 @@ exports:
         );
     }
 
-    // A clean, short error passes through essentially unchanged (no false cut).
     #[test]
     fn trim_probe_error_leaves_clean_message_intact() {
         let err = anyhow::anyhow!("error connecting to server: Connection refused (os error 61)");
@@ -1600,7 +1314,6 @@ exports:
         );
     }
 
-    // Backstop: a pathologically long single line is capped (char-boundary safe).
     #[test]
     fn trim_probe_error_caps_unbounded_line() {
         let err = anyhow::anyhow!("x".repeat(5000));
@@ -1618,8 +1331,6 @@ exports:
 
     #[test]
     fn trim_probe_error_preserves_multiline_hint_verbatim() {
-        // A hand-authored config hint (no HTTP-dump marker) must keep its lines
-        // — flattening or a tight cap used to drop options from the menu.
         let err = anyhow::anyhow!(
             "chunked mode needs one of:\n  - chunk_column: <int col>\n  - chunk_by_key: <col>\n  - chunk_count: <n>"
         );
@@ -1633,18 +1344,10 @@ exports:
         assert!(out.contains('\n'), "newlines preserved: {out:?}");
     }
 
-    // ── L4: config-load failure is surfaced exactly once ─────────────────────
-
-    // doctor must not return the raw config-error message (which `main` would
-    // reprint as `Error: <msg>`, doubling it). It prints the `[FAIL]` line and
-    // returns a distinct one-line pointer instead. RED before the fix: the
-    // returned Err carried the same "missing field" text printed in `[FAIL]`.
     #[test]
     fn config_load_failure_returns_pointer_not_duplicate_message() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("rivet.yaml");
-        // Invalid YAML structure → Config::load fails with a parse/missing-field
-        // message; doctor must convert that to a pointer error.
         std::fs::write(&cfg, "source: not-a-mapping\n").unwrap();
         let err = doctor(cfg.to_str().unwrap(), false, &|_, _| Ok(vec![]))
             .expect_err("doctor must return Err when the config fails to load");

@@ -14,6 +14,11 @@ pub const REDACTED: &str = "REDACTED";
 pub struct Secret(Zeroizing<String>);
 
 impl Secret {
+    /// Register this value so the shared redactor masks it wherever it appears in output text.
+    pub fn mask_in_output(&self) {
+        crate::redact::mask_value_in_output(&self.0);
+    }
+
     /// A secret holding `value`.
     pub fn new(value: impl Into<String>) -> Self {
         Self(Zeroizing::new(value.into()))

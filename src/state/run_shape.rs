@@ -80,7 +80,7 @@ impl StateStore {
         Ok(())
     }
 
-    /// The fields of `now` that differ from what `run_id` was opened with; a run with no recorded shape adopts `now` once, with a warning.
+    /// The fields of `now` that differ from what `run_id` was opened with.
     pub(crate) fn run_shape_changes(
         &self,
         export_name: &str,

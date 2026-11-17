@@ -406,7 +406,7 @@ fn value_ceiling_rejects_oversized_cell() {
     let batch = utf8_batch(vec!["small", &big]);
     let err = sink.check_value_ceiling(&batch).unwrap_err();
     let msg = format!("{err:#}");
-    assert!(msg.contains("RIVET_VALUE_TOO_LARGE"), "got: {msg}");
+    assert!(msg.contains("per-value ceiling"), "got: {msg}");
     assert!(msg.contains("body"), "should name the column: {msg}");
     crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_TOO_LARGE", 1);
 }
@@ -479,7 +479,7 @@ fn value_ceiling_holds_at_the_limit_for_every_sized_type() {
         let over = sized_batch(ty.clone(), &["1", "123456789"]);
         let err = format!("{:#}", sink.check_value_ceiling(&over).unwrap_err());
         assert!(
-            err.contains("RIVET_VALUE_TOO_LARGE") && err.contains("'body'"),
+            err.contains("per-value ceiling") && err.contains("'body'"),
             "{ty:?}: {err}"
         );
     }

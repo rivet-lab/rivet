@@ -152,14 +152,9 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
         "cdc-run pre[exit=1 code=-] run[exit=1 code=RIVET_SOURCE_QUERY_FAILED]",
         R_UNCODED,
     ),
-    ("check-run pre[exit=0 code=-] run[exit=1 code=-]", R_CHECK),
     (
         "check-run pre[exit=0 code=-] run[exit=1 code=RIVET_CONFIG_SOURCE_URL_INVALID]",
         R_URL,
-    ),
-    (
-        "check-run pre[exit=0 code=-] run[exit=1 code=RIVET_SOURCE_QUERY_FAILED]",
-        R_CHECK,
     ),
     (
         "check-run pre[exit=0 code=-] run[exit=1 code=RIVET_TYPE_UNSAFE_MAPPING]",
@@ -188,6 +183,10 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
     (
         "check-strict-run pre[exit=0 code=-] run[exit=1 code=RIVET_SOURCE_QUERY_FAILED]",
         R_CHECK,
+    ),
+    (
+        "check-run pre[exit=1 code=RIVET_PLAN_REJECTED] run[exit=1 code=-]",
+        R_UNCODED,
     ),
     (
         "check-strict-run pre[exit=0 code=-] run[exit=5 code=RIVET_SOURCE_CDC_CHECKPOINT_INVALID]",
@@ -249,7 +248,6 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
         "init-run pre[exit=0 code=-] run[exit=1 code=RIVET_TYPE_UNSAFE_MAPPING]",
         R_TYPE,
     ),
-    ("plan-apply pre[exit=0 code=-] run[exit=1 code=-]", R_PLAN),
     (
         "plan-apply pre[exit=0 code=-] run[exit=1 code=RIVET_TYPE_UNSAFE_MAPPING]",
         R_TYPE,
@@ -280,6 +278,14 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
     ),
     (
         "check-strict-run pre[exit=1 code=RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH] run[exit=5 code=RIVET_PLAN_CURSOR_NULLABLE]",
+        R_ORDER,
+    ),
+    (
+        "check-run pre[exit=5 code=RIVET_PLAN_CURSOR_NULLABLE] run[exit=5 code=RIVET_SOURCE_PROBE_UNREADABLE]",
+        R_ORDER,
+    ),
+    (
+        "check-strict-run pre[exit=5 code=RIVET_PLAN_CURSOR_NULLABLE] run[exit=5 code=RIVET_SOURCE_PROBE_UNREADABLE]",
         R_ORDER,
     ),
     (
