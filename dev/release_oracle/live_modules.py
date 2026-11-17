@@ -17,7 +17,7 @@ import re
 import sys
 from dataclasses import dataclass
 
-from . import live_needs, live_owners
+from . import live_needs, live_owners, module_minutes
 from .core import DEVBOX, HOSTED, RAN_LIVE_MODULES, RAN_LIVE_TESTS, ROOT, Ledger, SkipCause
 from .halves import NEED_HALF, STAGE_HALF, devbox_only, needs_problems, slice_modules
 from .scenarios import _run_live_modules, cfg
@@ -228,14 +228,16 @@ def part_filter(expr: str, part: str, table: list[tuple[str, str, bool]]) -> str
 
 
 def part_plan(table: list[tuple[str, str, bool]], modules: list[str], part: str, gone: set[str], dedicated_modules: set[str],
-              shard: tuple[int, int] | None = None) -> dict[str, list[str]]:
-    """The tests each of `modules` runs in `part`, minus the tests in `gone` and, in the hosted part, the dedicated modules (their hosted tests run in their own stage; their devbox tests stay here); under `shard` (i, n) the i-th slice of those modules only."""
+              shard: tuple[int, int] | None = None, costs: module_minutes.Table | None = None) -> dict[str, list[str]]:
+    """The tests each of `modules` runs in `part`, minus the tests in `gone` and, in the hosted part, the dedicated modules (their hosted tests run in their own stage; their devbox tests stay here); under `shard` (i, n) the i-th slice of those modules only, cut by measured minutes."""
     own = part_tests(part, table)
     skipped_modules = dedicated_modules if part == HOSTED else set()
     plan = {m: sorted(name for mod, name, _ in table if mod == m and name in own and name not in gone) for m in modules if m not in skipped_modules}
     plan = {m: names for m, names in plan.items() if names}
     if shard is not None:
-        keep = slice_modules({m: len(names) for m, names in plan.items()}, shard[1])[shard[0] - 1]
+        costs = costs or module_minutes.load()
+        weights = {m: module_minutes.module_cost(costs, m, len(names)) for m, names in plan.items()}
+        keep = slice_modules(weights, shard[1], {m for m in plan if module_minutes.measured(costs, m)})[shard[0] - 1]
         plan = {m: plan[m] for m in keep}
     return plan
 
@@ -259,34 +261,30 @@ def coverage_problems(table: list[tuple[str, str, bool]], modules: list[str], de
     return out
 
 
-#: 2026-11-14: a hosted slice over this many minutes lost its runner twice (run 43633356678, slice 2 of 3, 902 tests); closes when a slice is cut by measured minutes instead of test count.
-SLICE_CEILING_MIN = 50
-#: 2026-11-14: every slice builds the release binary from nothing; measured 16.4-16.8 min on slices 1 and 3 of run 43633356678.
-SLICE_BUILD_MIN = 17.0
-#: 2026-11-14: the slowest measured hosted rate, slice 3 of run 43633356678: 45.6 min over 902 tests; closes with a per-module cost read from the slices' nextest logs.
-SLICE_SEC_PER_TEST = 3.1
+#: 2026-11-16: wall-time budget of a hosted slice, 70 min of total_min; the old count-based cut predicts 77 and 74; raised 50 to 70 on the re-measured basis (run 43775080610: slices of 67 and 72 min ran). Not a runner-survival bound: the build starves the runner of memory (runs 43633356678, 43820913848).
+SLICE_CEILING_MIN = 70
 
 
-def slice_minutes(tests: int) -> float:
-    """The minutes a hosted slice of `tests` live tests takes: the build, then each test at the slowest measured rate."""
-    return SLICE_BUILD_MIN + tests * SLICE_SEC_PER_TEST / 60
+def plan_cost(plan: dict[str, list[str]], costs: module_minutes.Table) -> float:
+    """The test-minutes of the modules of one slice plan."""
+    return sum(module_minutes.module_cost(costs, m, len(names)) for m, names in plan.items())
 
 
-def hosted_slice_plans(slices: int) -> list[dict[str, list[str]]]:
+def hosted_slice_plans(slices: int, costs: module_minutes.Table | None = None) -> list[dict[str, list[str]]]:
     """The tests each live slice 1..`slices` runs, planned exactly as `verify_live_modules` plans a slice of an unnarrowed run."""
     modules = [m for m in live_suite_modules() if m not in EXCLUDED]
     run = select_modules([], modules, live_owners.module_owners(), []).run
     dedicated_modules, dedicated_tests = dedicated_live()
-    return [part_plan(live_test_table(), list(run), HOSTED, set(dedicated_tests), set(dedicated_modules), (i, slices)) for i in range(1, slices + 1)]
+    return [part_plan(live_test_table(), list(run), HOSTED, set(dedicated_tests), set(dedicated_modules), (i, slices), costs) for i in range(1, slices + 1)]
 
 
-def slice_budget_problems(plans: list[dict[str, list[str]]], ceiling: float = SLICE_CEILING_MIN) -> list[str]:
+def slice_budget_problems(plans: list[dict[str, list[str]]], ceiling: float = SLICE_CEILING_MIN, costs: module_minutes.Table | None = None) -> list[str]:
     """One line per slice whose estimated minutes exceed `ceiling`: the planner refuses to start a slice a runner is not known to survive."""
+    costs = costs or module_minutes.load()
     out = []
     for i, plan in enumerate(plans, 1):
-        tests = sum(len(v) for v in plan.values())
-        if (m := slice_minutes(tests)) > ceiling:
-            out.append(f"live slice {i}/{len(plans)}: {tests} tests in {len(plan)} modules estimate {m:.0f} min, over the {ceiling:.0f} min ceiling; raise LIVE_SLICES in gate-hosted.yml")
+        if (m := module_minutes.slice_minutes(costs, plan_cost(plan, costs))) > ceiling:
+            out.append(f"live slice {i}/{len(plans)}: {sum(len(v) for v in plan.values())} tests in {len(plan)} modules estimate {m:.0f} min, over the {ceiling:.0f} min ceiling; raise LIVE_SLICES in gate-hosted.yml")
     return out
 
 
@@ -295,9 +293,11 @@ def plan_matrix(slices: int) -> str:
     import json
 
     plans = hosted_slice_plans(slices)
+    costs = module_minutes.load()
     for i, plan in enumerate(plans, 1):
         tests = sum(len(v) for v in plan.values())
-        print(f"live slice {i}/{slices}: {tests} tests, {len(plan)} modules, ~{slice_minutes(tests):.0f} min", file=sys.stderr)
+        unmeasured = sum(not module_minutes.measured(costs, m) for m in plan)
+        print(f"live slice {i}/{slices}: {tests} tests, {len(plan)} modules ({unmeasured} unmeasured), ~{module_minutes.slice_minutes(costs, plan_cost(plan, costs)):.0f} min", file=sys.stderr)
     if bad := slice_budget_problems(plans):
         raise SystemExit("\n".join(bad))
     return json.dumps({"slice": list(range(slices + 1))})
@@ -337,6 +337,36 @@ def verify_live_modules(led: Ledger, engines: list[str] | None = None, part: str
                           f"tests that need the stand to themselves ({len(excl)}), one at a time",
                           left, env={**env, **EXCLUSIVE_ENV}, threads=1, again=again, keep=True, register=False,
                           expr=live_owners.narrow_foreign("(" + " | ".join(f"test(/::{n}$/)" for n in excl) + ")", left, set(owners)))
+
+
+def _slices_by_minutes_self_test() -> None:
+    """Slices are cut by measured minutes: two heavy modules with few tests part, a test added elsewhere or an unmeasured module moves no measured module, and a slice over the ceiling is refused."""
+    shape = {"light_a": 30, "light_b": 20, "slow_1": 2, "slow_2": 2}
+    table = [(m, f"{m}_t{i}", False) for m, n in shape.items() for i in range(n)]
+    costs = module_minutes.Table({"light_a": (30, 3.0), "light_b": (20, 2.0), "slow_1": (2, 60.0), "slow_2": (2, 60.0)}, 30.0, 0.3, 15.0)
+
+    def cut(tab: list[tuple[str, str, bool]], c: module_minutes.Table, n: int) -> list[dict[str, list[str]]]:
+        """Every slice of `tab` under `c`."""
+        mods = sorted({m for m, _, _ in tab})
+        return [part_plan(tab, mods, HOSTED, set(), set(), (i, n), c) for i in range(1, n + 1)]
+
+    base = cut(table, costs, 2)
+    assert not any({"slow_1", "slow_2"} <= set(p) for p in base), f"two modules of 60 minutes each share a slice: {[sorted(p) for p in base]}"
+    assert base == cut(table, costs, 2), "the slices are not deterministic"
+    ten = module_minutes.Table({f"m{i}": (10, 5.0 + i * 0.1) for i in range(12)}, 30.0, 0.3, 15.0)
+    ten_table = [(m, f"{m}_t{i}", False) for m in ten.modules for i in range(10)]
+    before = cut(ten_table, ten, 3)
+    for m in ten.modules:
+        grown = [*ten_table, (m, f"{m}_extra", False)]
+        assert [sorted(p) for p in cut(grown, ten, 3)] == [sorted(p) for p in before], f"a test added to {m} moved modules between slices"
+    unseen = [*ten_table, *[("zz_new", f"z{i}", False) for i in range(40)]]
+    placed = cut(unseen, ten, 3)
+    assert [sorted(set(p) - {"zz_new"}) for p in placed] == [sorted(p) for p in before], "an unmeasured module moved a measured one"
+    assert any("zz_new" in p for p in placed), "an unmeasured module is in no slice"
+    heavy = [{"m": ["t"] * 100}]
+    assert slice_budget_problems(heavy, 1000.0, ten) == [] and len(slice_budget_problems(heavy, 1.0, ten)) == 1, "the ceiling is not read"
+    over = module_minutes.Table({"m": (100, 200.0)}, 30.0, 0.3, 15.0)
+    assert len(slice_budget_problems([{"m": ["t"] * 100}, {"x": ["t"]}], 70.0, over)) == 1, "a slice over the ceiling is not refused alone"
 
 
 def self_test() -> None:
@@ -449,10 +479,9 @@ def self_test() -> None:
         RAN_LIVE_TESTS.update(saved_tests)
         RAN_LIVE_MODULES.clear()
         RAN_LIVE_MODULES.update(saved_modules)
-    even = [{"m": ["t"] * 100}] * 2
-    assert slice_budget_problems(even) == [] and len(slice_budget_problems([{"m": ["t"] * 1000}, *even])) == 1, "a slice over the ceiling is not refused alone"
-    assert slice_budget_problems(even, 1.0) and slice_minutes(0) == SLICE_BUILD_MIN, "the ceiling or the build floor is not read"
+    _slices_by_minutes_self_test()
     declared = int(re.search(r'^  LIVE_SLICES: "(\d+)"', (ROOT / ".github" / "workflows" / "gate-hosted.yml").read_text(), re.M)[1])
+    module_minutes.self_test()
     assert declared >= 1 and not slice_budget_problems(hosted_slice_plans(declared)), f"gate-hosted.yml runs {declared} live slices and the planner refuses them: {slice_budget_problems(hosted_slice_plans(declared))}"
     print("self-test ok: --engines runs the named engines' live modules and the engine-less ones, prints the rest as excluded, and no selector runs all")
 
