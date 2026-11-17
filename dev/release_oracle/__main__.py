@@ -935,7 +935,7 @@ def _matrix_exit_code_self_test() -> None:
     table = {
         "property_no_silent_null": (nsn, "run_engine", lambda r: ([r], []), lambda m: m.main()),
         "property_no_silent_null_cdc": (property_no_silent_null_cdc, "run_engine", lambda r: [r], lambda m: m.main()),
-        "property_no_silent_null_load": (property_no_silent_null_load, "run_all", lambda r: [r], lambda m: m.main()),
+        "property_no_silent_null_load": (property_no_silent_null_load, "run_engine", lambda r: ([r], []), lambda m: m.main()),
         "property_no_silent_null_grants": (property_no_silent_null_grants, "run_grants", lambda r: [r], lambda m: m.main()),
         "property_refusal_names_true_cause": (
             refusal, "run_offline",
@@ -2068,6 +2068,7 @@ def gate_stages(ns: argparse.Namespace) -> list[Stage]:
         Stage("engine matrix", lambda led: engine_loop(led, ns), frozenset({"the gate's engine containers"}), SERIAL),
     ]
     table.append(warehouse("cloud legs", lambda led: cloud_legs.verify_cloud_legs(led)))
+    table.append(warehouse("no silent null load cloud", lambda led: property_no_silent_null_load.verify_no_silent_null_load_cloud(led)))
     if not ns.no_cloud:
         # Its own `bq`-tagged containers; handed this module's bring_up/seed_engine so readiness has one definition.
         table.append(Stage("bigquery golden", lambda led: bigquery.run_bigquery_golden(

@@ -385,9 +385,13 @@ preflights:
     backends: [postgres, mysql, mssql, oracle, mongo]
     status: test        # verify_no_silent_null_cdc (dev/release_oracle/property_no_silent_null_cdc.py) — needs the cdc profile (postgres-cdc :5434, mysql-cdc :3307, mssql-cdc :1434) and oracle; an engine that is down is an ENV SKIP naming it
   - id: no_silent_null_load
-    what: "no silent NULL through `rivet load` (coverage-F2 axis 1): targets from `LoadTarget`. Every source column of every engine is exported as Parquet to the GCS emulator, loaded into ClickHouse and read back by the harness over ClickHouse HTTP, never by rivet; a non-NULL value read back NULL or changed under fidelity `exact` is red, as is an uncoded refusal or a `check`/`run` split. BigQuery and Snowflake are REDUCED skips naming why: no project or connection is granted to this matrix. MongoDB is a REDUCED skip: its one `document` blob is graded by the batch grid."
+    what: "the edge-value type matrix (docs/type-capability-matrix.yaml `edges:`): every native type of every engine, each edge value exported to Parquet (read back by DuckDB) and loaded into ClickHouse (read back over HTTP), and graded against the ledger's verdict for that cell (exact, NULL, a named form, a coded refusal or a dated `NAME!` known defect); a changed behaviour is red either way. The seed, the expected value and the grade all come from the ledger rows. The read-back is the harness's, never rivet's. On the ClickHouse leg every column that ends in a coded refusal is also checked with `rivet check --type-report` on the same config: a check that exits 0 where the run refuses is `CHECK_RUN_SPLIT`, one accepted red per engine."
     backends: [postgres, mysql, mssql, oracle, mongo]
     status: test        # verify_no_silent_null_load (dev/release_oracle/property_no_silent_null_load.py) — needs clickhouse :8123 and fake-gcs :4443 plus the batch engines; a stand that is down is an ENV SKIP naming it
+  - id: no_silent_null_load_cloud
+    what: "the same ledger cells loaded into BigQuery and Snowflake and read back by a second client (bq, snow); without credentials every cell is NOT_GRADED and the stage names why."
+    backends: [postgres, mysql, mssql, oracle, mongo]
+    status: test        # verify_no_silent_null_load_cloud (dev/release_oracle/property_no_silent_null_load.py) — needs the BigQuery test project and the Snowflake connection
   - id: no_silent_null_full
     what: "the full cross of `no_silent_null`: every source column x override x mode x format on every engine; the weekly island tier of the same driver and the same oracle."
     backends: [postgres, mysql, mssql, oracle, mongo]
