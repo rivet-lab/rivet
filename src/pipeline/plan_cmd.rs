@@ -1872,4 +1872,25 @@ mod tests {
             1
         );
     }
+
+    /// `plan` stops before writing on the refusal `run` would raise (a stdout export with `max_file_size`) and passes a plain config.
+    #[test]
+    fn plan_refuses_what_run_refuses_and_passes_a_plain_config() {
+        let config = |destination: &str| {
+            crate::config::Config::from_yaml(&format!(
+                "source: {{ type: postgres, url: \"postgresql://u:p@127.0.0.1:1/db\" }}\n\
+                 exports:\n\
+                 \x20 - name: e\n    table: t\n    mode: full\n    format: parquet\n\
+                 \x20   destination: {destination}\n"
+            ))
+            .expect("the fixture config loads")
+        };
+        let refuse = |cfg: &crate::config::Config| {
+            super::refuse_what_run_refuses(cfg, Path::new("."), None, None)
+        };
+        assert!(refuse(&config("{ type: local, path: ./out }")).is_ok());
+        let err = refuse(&config("{ type: stdout }\n    max_file_size: 1MB"))
+            .expect_err("a stdout export cannot split files");
+        assert!(format!("{err:#}").contains("max_file_size"), "{err:#}");
+    }
 }

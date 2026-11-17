@@ -108,6 +108,7 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
         200,
     ),
     ("src/plan/build.rs::resolve_chunked_strategy#1", 175),
+    // 2026-11-17: 257 -> 238, the run-plan and named-check emitters left doctor (see #1041).
     ("src/preflight/doctor.rs::doctor#1", 238),
     ("src/preflight/mod.rs::check#1", 227),
     ("src/source/mssql/arrow_convert.rs::build_array#1", 253),

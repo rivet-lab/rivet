@@ -823,6 +823,68 @@ mod tests {
         );
     }
 
+    /// `run_plan_checks` records one `Run plan <export>` check per verdict, returns the first refusal, and turns a failed probe into a `config` check.
+    #[test]
+    fn run_plan_checks_records_each_verdict_and_returns_the_first_refusal() {
+        let config = Config::from_yaml(
+            "source: { type: postgres, url: \"postgresql://u:p@127.0.0.1:1/db\" }\n\
+             exports:\n\
+             \x20 - name: a\n    table: t\n    mode: full\n    format: parquet\n\
+             \x20   destination: { type: local, path: ./out }\n",
+        )
+        .expect("the fixture config loads");
+        let dir = std::path::Path::new(".");
+        let mixed = |_: &Config, _: &std::path::Path| -> Result<Vec<(String, Result<()>)>> {
+            Ok(vec![
+                ("a".to_string(), Ok(())),
+                ("b".to_string(), Err(anyhow::anyhow!("first refusal"))),
+                ("c".to_string(), Err(anyhow::anyhow!("second refusal"))),
+            ])
+        };
+        let mut checks = Vec::new();
+        let refusal = run_plan_checks(&config, dir, &mixed, true, &mut checks)
+            .expect("the first refusal is returned");
+        assert_eq!(format!("{refusal:#}"), "first refusal");
+        let seen: Vec<_> = checks
+            .iter()
+            .map(|c| {
+                (
+                    c.name.as_str(),
+                    c.ok,
+                    c.detail.as_deref(),
+                    c.hint.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("Run plan a", true, None, None),
+                ("Run plan b", false, Some("first refusal"), None),
+                ("Run plan c", false, Some("second refusal"), None),
+            ]
+        );
+
+        let clean = |_: &Config, _: &std::path::Path| -> Result<Vec<(String, Result<()>)>> {
+            Ok(vec![("a".to_string(), Ok(()))])
+        };
+        let mut checks = Vec::new();
+        assert!(run_plan_checks(&config, dir, &clean, true, &mut checks).is_none());
+        assert_eq!(checks.len(), 1);
+        assert!(checks[0].ok);
+
+        let broken = |_: &Config, _: &std::path::Path| -> Result<Vec<(String, Result<()>)>> {
+            Err(anyhow::anyhow!("probe failed"))
+        };
+        let mut checks = Vec::new();
+        let refusal = run_plan_checks(&config, dir, &broken, true, &mut checks)
+            .expect("a failed probe is a refusal");
+        assert_eq!(format!("{refusal:#}"), "probe failed");
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].name, "Run plan config");
+        assert!(!checks[0].ok);
+    }
+
     #[test]
     fn every_tls_mode_a_tls_hint_names_is_one_the_loader_accepts() {
         let err = anyhow::anyhow!("TLS handshake failed: certificate verify failed");
