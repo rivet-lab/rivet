@@ -35,6 +35,7 @@ _ISLAND_TIER = re.compile(r"\] full: ")
 _OFFLINE_TIER = re.compile(r"\[offline\]: ")
 _NIGHTLY_KEY = re.compile(r"^nightly\[")
 _GATE_CLASS = re.compile(r"^(?P<matrix>[a-z_]+)\[(?P<kind>[a-z_]+)\] (?:smoke|full): (?P<cause>[A-Z_]+) over ")
+_CELL = re.compile(r"^(?P<cell>[A-Za-z_]\w*::\w[\w:]*) — ")
 _DATED = re.compile(r"\b20\d\d-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b")
 _ORACLE_CDC_LOAD = (
     "Oracle CDC does not load yet (ADR-0037; the Oracle GA work). The previous release's `rivet init --mode cdc` writes no `load:` block, and this cell still drives the previous release through `load`, which refuses. `upgrade[oracle/cdc-load/init=this]` grades what the scaffold does promise (the baseline Parquet equals the source). The cycle stays unsupported until Oracle CDC loads. Pinned 2026-11-01 to the whole refusal line; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it"
@@ -58,9 +59,6 @@ KNOWN_RED: tuple[KnownRed, ...] = (
              _EXPIRES),
     KnownRed("upgrade[oracle/cdc-load/tz=Asia/Tokyo]: cycle1/load: prev exit 1 [RIVET_LOAD_BLOCK_MISSING]: Error: [RIVET_LOAD_BLOCK_MISSING] config has no top-level `load:` block — add `load: { target, ... }` to load into a warehouse",
              _ORACLE_CDC_LOAD,
-             _EXPIRES),
-    KnownRed("no_silent_null[mongo] smoke: OVERRIDE_IGNORED over 38 source->override pairs #dbdffe5c",
-             "2026-11-10: batch leg, NEW-OVERRIDE-IGNORED: a type override on a Mongo `_id` or `document` column is accepted and the column is delivered as VARCHAR at exit 0; open, closes when the override is delivered or refused by code; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
              _EXPIRES),
     KnownRed("no_silent_null[mssql] smoke: WRONG_VALUE over 3 source->override pairs #5e462b16",
              "2026-11-10: batch leg, PR-NULL: exit 0 with fidelity exact while the value changed (integer to a narrower decimal wraps, text or integer to bool, NUMBER 1E125 to float4 as inf, a negative-scale decimal scaled the wrong way); open, closes when the override refuses a value it cannot hold; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
@@ -104,9 +102,6 @@ KNOWN_RED: tuple[KnownRed, ...] = (
              _EXPIRES),
     KnownRed("no_silent_null[postgres] smoke: UNCODED_STOP over 35 source->override pairs #a0cca18b",
              "2026-11-10: batch leg, PR-CAUSE: run stops on a wrong-type override with exit 1 and no code, nothing silent; open, closes when the pair is refused by a coded cause at check; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
-             _EXPIRES),
-    KnownRed("no_silent_null[mongo] full: OVERRIDE_IGNORED over 38 source->override pairs #dbdffe5c",
-             "2026-11-11: full tier, NEW-OVERRIDE-IGNORED: a type override on a Mongo `_id` or `document` column is accepted and the column is delivered as VARCHAR or JSON at exit 0; open, closes when the override is delivered or refused by code; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
              _EXPIRES),
     KnownRed("no_silent_null[mssql] full: WRONG_VALUE over 3 source->override pairs #5e462b16",
              "2026-11-11: full tier, PR-NULL: exit 0 with fidelity exact while the value changed (integer to a narrower decimal wraps, text or integer to bool, NUMBER 1E125 to float4 as inf, a negative-scale decimal scaled the wrong way, DATETIME to date truncated, Oracle TIMESTAMP WITH TIME ZONE shifted); open, closes when the override refuses a value it cannot hold; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
@@ -217,10 +212,16 @@ KNOWN_RED: tuple[KnownRed, ...] = (
 )
 
 
-def nightly_classes() -> dict[str, KnownRed]:
-    """Every nightly red class the ledger acknowledges: its own `nightly[...]` entries and the per-cell-set entries of the gate, cut to (matrix, engine, cause)."""
-    out: dict[str, KnownRed] = {}
-    for k in KNOWN_RED:
+def cells(entries: tuple[KnownRed, ...] | None = None) -> dict[str, KnownRed]:
+    """The live-cell entries of the ledger (or of `entries`) by cell (`module::test`)."""
+    return {c: k for k in (KNOWN_RED if entries is None else entries) if (c := cell_of(k.match))}
+
+
+def nightly_classes(entries: tuple[KnownRed, ...] | None = None) -> dict[str, KnownRed]:
+    """Every red class the ledger (or `entries`) acknowledges: its live cells by name, its own `nightly[...]` entries and the per-cell-set entries of the gate, cut to (matrix, engine, cause)."""
+    entries = KNOWN_RED if entries is None else entries
+    out: dict[str, KnownRed] = dict(cells(entries))
+    for k in entries:
         for key in k.keys():
             if _NIGHTLY_KEY.match(key):
                 out[key] = k
@@ -247,6 +248,17 @@ def unframed(msg: str) -> str:
     """The failure text of a live-cell message `<label> FAILED · <cell> — <why> (see <log>)`, else `msg`."""
     head, sep, rest = msg.partition(" FAILED · ")
     return rest.rpartition(" (see ")[0] or rest if sep else msg
+
+
+def cell_of(line: str) -> str | None:
+    """The `module::test` of a live-cell failure line or ledger message (`<label> FAILED · <cell> — <why>`), else None; the head of `<why>` is never read."""
+    m = _CELL.match(unframed(line).strip())
+    return m["cell"] if m else None
+
+
+def cell_key(msg: str) -> str:
+    """The identity of a red message across runs and slices: its live cell, else the message cut before ` over ` (its count and digest change per run)."""
+    return cell_of(msg) or msg.partition(" over ")[0]
 
 
 def match(msg: str, today: _dt.date | None = None) -> tuple[KnownRed | None, bool]:
@@ -287,8 +299,15 @@ def self_test() -> int:
     assert lane_of(own) == NIGHTLY and not any(owed_by(k, lane) for k in KNOWN_RED if own in k.keys() for lane in (GATE, ISLAND, OFFLINE)), \
         "a nightly class is owed by no gate run: a full gate would block on it"
     cut = nightly_classes()
-    assert nightly_key("no_silent_null", "mysql", "CHECK_RUN_SPLIT") in cut and nightly_key("no_silent_null", "mongo", "OVERRIDE_IGNORED") in cut, \
+    assert nightly_key("no_silent_null", "mysql", "CHECK_RUN_SPLIT") in cut and nightly_key("no_silent_null", "mssql", "WRONG_VALUE") in cut, \
         "a gate entry is cut to its (matrix, engine, cause) class"
+    held = KnownRed("m::open_defect_x — boom", "2026-11-16: why", "2026-11-22")
+    assert cells((held,)) == {"m::open_defect_x": held} == nightly_classes((held,)), "a live-cell entry is held under its cell"
+    framed = "audit suspects FAILED · m::t — [2026-11-16T00:13:32Z WARN rivet::config::source] inline `url:` plaintext password (see log)"
+    assert cell_of(framed) == "m::t" == cell_of("m::t — boom") == cell_key(framed), "the cell is read before the head, whatever warning heads it"
+    assert cell_of("no_silent_null[mysql] smoke: SILENT_NULL over 3 pairs #ab") is None and cell_of("x FAILED · no cell here") is None
+    assert cell_key("no_silent_null[mysql] smoke: SILENT_NULL over 3 pairs #ab") == cell_key("no_silent_null[mysql] smoke: SILENT_NULL over 9 pairs #cd"), \
+        "a gate class keeps its key when its count and digest change"
     print("known_red self-test: ok")
     return 0
 

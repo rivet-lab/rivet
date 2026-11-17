@@ -6163,3 +6163,20 @@ seeds:
         na: "the driver parses the URL: it reads a portless bracketed host and percent-decodes the database itself (lib:the_driver_parsed_engines_read_a_portless_bracketed_host_and_an_encoded_database)"
       oracle:
         cells: [lib:an_oracle_service_name_is_percent_decoded]
+
+  - name: store-error-detail-unmasked
+    class: "a destination error carried into a validate failure's detail (manifest, `_SUCCESS` or listing read) is printed as the store returned it, so a credential the store put in the error's request URI (an Azure SAS token in `?<token>`) reaches the validate output file and stderr"
+    history: "hosted gate run 43775080610 at 75b6ac21, no_secret_in_output cell postgres/validate/dest:azure:sas_token_env (16 hits in the plain and trace-json output files); RED on main 2026-11-16 (the matrix cell, and lib:a_store_error_in_a_failure_detail_never_carries_a_registered_credential)"
+    scope: destination
+    switch: store-error-detail-unmasked
+    engines:
+      local:
+        na: "a local directory's error text names a path and holds no credential, so no store text carries a secret to mask (the seed edits the verdict every destination shares)"
+      s3:
+        cells: ["lib:a_store_error_in_a_failure_detail_never_carries_a_registered_credential"]
+      gcs:
+        cells: ["lib:a_store_error_in_a_failure_detail_never_carries_a_registered_credential"]
+      azure:
+        cells: ["lib:a_store_error_in_a_failure_detail_never_carries_a_registered_credential"]
+      stdout:
+        na: "stdout writes nothing a validate reads back, so no verification verdict exists for it"
