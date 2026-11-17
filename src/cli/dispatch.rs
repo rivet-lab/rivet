@@ -58,6 +58,23 @@ fn load_report(json: bool, summary_output: Option<String>) -> load::result::Repo
     }
 }
 
+/// What `run` would plan for each batch export of `config`, as the verdicts `doctor` reports.
+fn doctor_run_plan(
+    config: &crate::config::Config,
+    dir: &std::path::Path,
+) -> Result<Vec<(String, Result<()>)>> {
+    Ok(crate::pipeline::planning::plan_run(
+        config,
+        dir,
+        None,
+        None,
+        crate::pipeline::planning::PlanFlags::default(),
+    )?
+    .into_iter()
+    .map(|(name, verdict)| (name, verdict.map(|_| ())))
+    .collect())
+}
+
 /// Validate and execute the parsed CLI.
 pub fn dispatch(cli: Cli) -> Result<()> {
     validate_cli(&cli.command)?;
@@ -76,7 +93,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             json,
             target,
         } => dispatch_check(config, export, params, type_report, strict, json, target),
-        Commands::Doctor { config, json } => preflight::doctor(&config, json),
+        Commands::Doctor { config, json } => preflight::doctor(&config, json, &doctor_run_plan),
         Commands::Cdc {
             source,
             source_env,
@@ -450,7 +467,7 @@ fn dispatch_check(
     if let Some(name) = export.as_deref() {
         check_export_selection(&Config::load_with_params(&config, p.as_ref())?, Some(name))?;
     }
-    let plans = batch_plans(&config, export.as_deref(), p.as_ref())?;
+    let plans = batch_plans(&config, export.as_deref(), p.as_ref(), strict)?;
     let type_clean = preflight::check(
         &config,
         export.as_deref(),
@@ -504,57 +521,35 @@ mod check_error_tests {
     }
 }
 
-/// One selected batch export's plan as `rivet run` builds it, or why it did not build.
-type BatchPlan = (String, Result<crate::plan::ResolvedRunPlan>);
+/// One selected batch export as `rivet run` plans it, or the refusal `run` would raise.
+type BatchPlan = (String, Result<crate::pipeline::planning::PlannedExport>);
 
-/// The plan of every selected export that has a batch plan (a `mode: cdc` export has none), built with the run-only flags off.
+/// Every selected batch export planned by the function `run` executes, `--strict` as given.
 fn batch_plans(
     config_path: &str,
     export_name: Option<&str>,
     params: Option<&std::collections::HashMap<String, String>>,
+    strict: bool,
 ) -> Result<Vec<BatchPlan>> {
     let config = Config::load_with_params(config_path, params)?;
     let config_dir = std::path::Path::new(config_path)
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
-    let run_set = crate::pipeline::run_set::RunSet::select(&config, export_name)?;
-    let selected = if seeded!(
-        "check-reads-declared-list-not-run-set",
-        export_name.is_none(),
-        false
-    ) {
-        config.exports.as_slice()
-    } else {
-        run_set.declared()
-    };
-    let mut probe = if config.source.columns_from_grants() {
-        Some(
-            crate::source::create_source(&config.source)
-                .map_err(|e| crate::pipeline::attach_connect_hint(e, &config.source))?,
-        )
-    } else {
-        None
-    };
-    let mut plans = Vec::new();
-    for e in selected
-        .iter()
-        .filter(|e| e.mode != crate::config::ExportMode::Cdc)
-    {
-        let plan = crate::plan::build::build_plan_on(
-            probe
-                .as_deref_mut()
-                .map(|s| s as &mut dyn crate::source::Source),
-            &config,
-            e,
-            config_dir,
-            false,
-            false,
-            false,
-            params,
-        );
-        plans.push((e.name.clone(), plan));
+    crate::pipeline::planning::plan_run(
+        &config,
+        config_dir,
+        export_name,
+        params,
+        check_plan_flags(strict),
+    )
+}
+
+/// The run-only switches `check` plans with: `--strict` as given, the rest off.
+fn check_plan_flags(strict: bool) -> crate::pipeline::planning::PlanFlags {
+    crate::pipeline::planning::PlanFlags {
+        strict,
+        ..Default::default()
     }
-    Ok(plans)
 }
 
 /// The `--target` of `rivet check`, refused by code when it names no warehouse rivet types for.
@@ -571,46 +566,47 @@ fn parse_cli_target(s: &str) -> Result<crate::types::target::ExportTarget> {
 fn planned_strategies(plans: &[BatchPlan]) -> preflight::PlannedStrategies {
     plans
         .iter()
-        .filter_map(|(name, plan)| Some((name.clone(), plan.as_ref().ok()?.strategy.clone())))
+        .filter_map(|(name, plan)| Some((name.clone(), plan.as_ref().ok()?.plan.strategy.clone())))
         .collect()
 }
 
-/// Surface each plan's [`validate_plan`](crate::plan::validate_plan) diagnostics as `rivet plan` does, and fail on a plan that did not build or on the first `Rejected` (skipped under `--json`).
-fn report_plan_compatibility(plans: Vec<BatchPlan>, json_output: bool) -> Result<()> {
-    if json_output {
-        return Ok(());
-    }
-    let mut rejected: Option<anyhow::Error> = None;
+/// The text-mode lines for each plan's refusal or diagnostics (none under `--json`), and the first refusal `run` would raise.
+fn plan_report(plans: Vec<BatchPlan>, json_output: bool) -> (Vec<String>, Option<anyhow::Error>) {
+    let mut lines = Vec::new();
+    let mut refused: Option<anyhow::Error> = None;
     for (name, plan) in plans {
-        let plan = match plan {
-            Ok(plan) => plan,
+        let planned = match plan {
+            Ok(planned) => planned,
             Err(e) => {
-                let line = format!("[plan-build] export '{name}': the plan did not build: {e:#}");
-                println!("Rejected: {line}");
-                rejected.get_or_insert_with(|| {
-                    crate::error::recoded(&e, crate::error::codes::PLAN_REJECTED, line)
-                });
+                if !json_output {
+                    lines.push(format!("Rejected: export '{name}': {e:#}"));
+                }
+                refused.get_or_insert(e);
                 continue;
             }
         };
-        for d in crate::plan::validate_plan(&plan) {
+        if json_output {
+            continue;
+        }
+        for d in planned.diags {
             let line = format!("[{}] {}", d.rule, d.message);
-            match d.level {
-                crate::plan::DiagnosticLevel::Rejected => {
-                    println!("Rejected: {line}");
-                    rejected.get_or_insert_with(|| {
-                        crate::error::coded(crate::error::codes::PLAN_REJECTED, line)
-                    });
-                }
-                crate::plan::DiagnosticLevel::Warning => println!("Warning: {line}"),
-                crate::plan::DiagnosticLevel::Degraded => println!("Degraded: {line}"),
-            }
+            lines.push(match d.level {
+                crate::plan::DiagnosticLevel::Rejected => format!("Rejected: {line}"),
+                crate::plan::DiagnosticLevel::Warning => format!("Warning: {line}"),
+                crate::plan::DiagnosticLevel::Degraded => format!("Degraded: {line}"),
+            });
         }
     }
-    if let Some(rejected) = rejected {
-        return Err(rejected);
+    (lines, refused)
+}
+
+/// Print each plan's diagnostics (text mode) and refuse with the first refusal `run` would raise, under `--json` too.
+fn report_plan_compatibility(plans: Vec<BatchPlan>, json_output: bool) -> Result<()> {
+    let (lines, refused) = plan_report(plans, json_output);
+    for line in lines {
+        println!("{line}");
     }
-    Ok(())
+    refused.map_or(Ok(()), Err)
 }
 
 /// The `rivet init --snowflake-*` flags as clap parsed them.
@@ -1203,6 +1199,75 @@ mod loads_listing_tests {
 }
 
 #[cfg(test)]
+mod check_plan_report_tests {
+    use crate::pipeline::planning::PlannedExport;
+    use crate::plan::DiagnosticLevel;
+    use crate::plan::validate::Diagnostic;
+
+    /// `check --strict` plans strict and a bare `check` does not.
+    #[test]
+    fn check_plans_strict_only_under_the_strict_flag() {
+        assert!(super::check_plan_flags(true).strict);
+        assert!(!super::check_plan_flags(false).strict);
+    }
+
+    fn planned(diags: Vec<Diagnostic>) -> PlannedExport {
+        PlannedExport {
+            plan: crate::plan::test_support::test_plan(),
+            diags,
+        }
+    }
+
+    fn diag(level: DiagnosticLevel, rule: &'static str) -> Diagnostic {
+        Diagnostic {
+            level,
+            rule,
+            message: format!("{rule} said"),
+        }
+    }
+
+    /// A refused plan prints its `Rejected: export` line in text mode, nothing under `--json`, and refuses in both.
+    #[test]
+    fn a_refused_plan_is_printed_in_text_mode_only_and_refuses_in_both() {
+        for json in [false, true] {
+            let plans = vec![("orders".to_string(), Err(anyhow::anyhow!("no table")))];
+            let (lines, refused) = super::plan_report(plans, json);
+            let want: &[&str] = if json {
+                &[]
+            } else {
+                &["Rejected: export 'orders': no table"]
+            };
+            assert_eq!(lines, want, "json={json}");
+            assert_eq!(format!("{:#}", refused.unwrap()), "no table");
+        }
+    }
+
+    /// Each diagnostic level keeps its own label in text mode and prints nothing under `--json`.
+    #[test]
+    fn diagnostics_are_labelled_by_level_in_text_mode_and_silent_under_json() {
+        let diags = || {
+            vec![
+                diag(DiagnosticLevel::Rejected, "r1"),
+                diag(DiagnosticLevel::Warning, "w1"),
+                diag(DiagnosticLevel::Degraded, "d1"),
+            ]
+        };
+        let (lines, refused) = super::plan_report(vec![("a".into(), Ok(planned(diags())))], false);
+        assert_eq!(
+            lines,
+            [
+                "Rejected: [r1] r1 said",
+                "Warning: [w1] w1 said",
+                "Degraded: [d1] d1 said"
+            ]
+        );
+        assert!(refused.is_none());
+        let (lines, refused) = super::plan_report(vec![("a".into(), Ok(planned(diags())))], true);
+        assert!(lines.is_empty() && refused.is_none());
+    }
+}
+
+#[cfg(test)]
 mod check_plan_compatibility_tests {
     /// A plan that fails to build is a blocking `check` finding, never a skip.
     #[test]
@@ -1216,15 +1281,12 @@ mod check_plan_compatibility_tests {
              \x20   format: parquet\n    destination:\n      type: local\n      path: ./out\n",
         )
         .unwrap();
-        let plans = super::batch_plans(cfg.to_str().unwrap(), None, None).unwrap();
+        let plans = super::batch_plans(cfg.to_str().unwrap(), None, None, false).unwrap();
         assert!(super::planned_strategies(&plans).is_empty());
         let err = super::report_plan_compatibility(plans, false)
             .expect_err("an unbuildable plan must fail `check`");
         let text = format!("{err:#}");
-        assert!(
-            text.contains("[plan-build] export 'orders': the plan did not build"),
-            "{text}"
-        );
+        assert!(text.contains("No such file"), "{text}");
     }
 }
 
@@ -1356,7 +1418,7 @@ mod subcommand_error_tests {
         )
         .unwrap();
         let path = cfg.to_str().unwrap();
-        let plans = super::batch_plans(path, None, None).unwrap();
+        let plans = super::batch_plans(path, None, None, false).unwrap();
         let names: Vec<&str> = plans.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, ["ranged", "whole"]);
         let strategies = super::planned_strategies(&plans);
@@ -1369,7 +1431,7 @@ mod subcommand_error_tests {
             Some(crate::plan::ExtractionStrategy::Snapshot)
         ));
         assert!(super::report_plan_compatibility(plans, false).is_ok());
-        let one = super::batch_plans(path, Some("whole"), None).unwrap();
+        let one = super::batch_plans(path, Some("whole"), None, false).unwrap();
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].0, "whole");
     }
@@ -1396,10 +1458,10 @@ mod subcommand_error_tests {
         let names = |plans: &[super::BatchPlan]| -> Vec<String> {
             plans.iter().map(|(n, _)| n.clone()).collect()
         };
-        let whole = super::batch_plans(path, None, None).unwrap();
+        let whole = super::batch_plans(path, None, None, false).unwrap();
         assert_eq!(names(&whole), ["whole"]);
         assert!(super::report_plan_compatibility(whole, false).is_ok());
-        let named = super::batch_plans(path, Some("base"), None).unwrap();
+        let named = super::batch_plans(path, Some("base"), None, false).unwrap();
         assert_eq!(names(&named), ["base"]);
     }
 

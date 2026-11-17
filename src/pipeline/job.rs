@@ -170,7 +170,7 @@ fn capture_open_forensics(
 }
 
 /// The run's column plan.
-fn plan_open_columns(
+pub(super) fn plan_open_columns(
     export_name: &str,
     open: &mut Option<Vec<crate::types::TypeMapping>>,
     strict: bool,
@@ -196,7 +196,7 @@ fn plan_open_columns(
 }
 
 /// A settle column must be a date/timestamp: the window compares it with the source clock.
-fn settle_columns_are_temporal(
+pub(super) fn settle_columns_are_temporal(
     plan: &ResolvedRunPlan,
     mappings: Option<&[crate::types::TypeMapping]>,
 ) -> Result<()> {
@@ -1019,7 +1019,7 @@ fn should_reconcile(allow_reconcile: bool, plan_reconcile: bool, failed: bool) -
 }
 
 /// The plan-validation verdict, pure.
-fn log_plan_diagnostics(
+pub(super) fn log_plan_diagnostics(
     export_name: &str,
     diags: &[crate::plan::validate::Diagnostic],
 ) -> Option<anyhow::Error> {
@@ -1636,34 +1636,26 @@ fn run_export_job_inner(
     } else {
         meta.get()
     };
-    let plan = match crate::plan::build::build_plan_on(
+    let planned = match super::planning::plan_batch_export(
         probe.map(|s| s as &mut dyn crate::source::Source),
         config,
         export,
         config_dir,
-        opts.validate,
-        opts.reconcile,
-        opts.resume,
+        super::planning::PlanFlags {
+            validate: opts.validate,
+            reconcile: opts.reconcile,
+            resume: opts.resume,
+            strict: opts.strict,
+        },
         opts.params,
     ) {
         Ok(p) => p,
         Err(e) => {
-            let e = crate::source::code_a_missing_relation(
-                e,
-                &export.name,
-                export.table.as_deref(),
-                export.query.as_deref(),
-            );
             let summary = synthetic_failed_summary(&export.name, &e);
             return (Err(e), summary);
         }
     };
-
-    let diags = validate_plan(&plan);
-    if let Some(err) = log_plan_diagnostics(&plan.export_name, &diags) {
-        let summary = synthetic_failed_summary(&export.name, &err);
-        return (Err(err), summary);
-    }
+    let (plan, diags) = (planned.plan, planned.diags);
 
     if resume_success_gate_applies(opts.resume, opts.force)
         && let Err(e) = check_success_gate_for_resume(&plan, state)
@@ -1767,7 +1759,7 @@ pub(crate) fn run_export_job_with_chunk_source(
 }
 
 /// Why `plan` cannot be executed when its destination still holds the `{partition}` token.
-fn unexpanded_partition_error(plan: &ResolvedRunPlan) -> Option<anyhow::Error> {
+pub(super) fn unexpanded_partition_error(plan: &ResolvedRunPlan) -> Option<anyhow::Error> {
     let dest = &plan.destination;
     [dest.path.as_deref(), dest.prefix.as_deref()]
         .into_iter()
