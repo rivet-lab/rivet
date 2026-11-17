@@ -108,15 +108,42 @@ impl SlotPlugin {
     }
 }
 
+/// Text rows of a catalog query: one `Vec<Option<String>>` per row, cells in select order.
+pub(crate) trait CatalogRows {
+    /// The rows of `sql` run with the one text parameter `arg`.
+    fn text_rows(&mut self, sql: &str, arg: &str) -> Result<Vec<Vec<Option<String>>>>;
+}
+
+impl CatalogRows for Client {
+    fn text_rows(&mut self, sql: &str, arg: &str) -> Result<Vec<Vec<Option<String>>>> {
+        let rows = self.query(sql, &[&arg])?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                (0..r.len())
+                    .map(|i| r.get::<_, Option<String>>(i))
+                    .collect()
+            })
+            .collect())
+    }
+}
+
 /// The plugin of the logical slot `slot` on `client`, or `None` when the slot does not exist.
-pub(crate) fn slot_plugin_on(client: &mut Client, slot: &str) -> Result<Option<SlotPlugin>> {
-    let rows = client.query(
+pub(crate) fn slot_plugin_on<C: CatalogRows>(
+    client: &mut C,
+    slot: &str,
+) -> Result<Option<SlotPlugin>> {
+    let rows = client.text_rows(
         "SELECT plugin::text FROM pg_replication_slots WHERE slot_name = $1",
-        &[&slot],
+        slot,
     )?;
-    Ok(rows
-        .first()
-        .map(|r| SlotPlugin::from_name(&r.get::<_, Option<String>>(0).unwrap_or_default())))
+    Ok(slot_plugin_from_rows(&rows))
+}
+
+/// The plugin the first `pg_replication_slots` row names; a NULL plugin reads as the empty name.
+pub(crate) fn slot_plugin_from_rows(rows: &[Vec<Option<String>>]) -> Option<SlotPlugin> {
+    rows.first()
+        .map(|r| SlotPlugin::from_name(r.first().cloned().flatten().unwrap_or_default().as_str()))
 }
 
 /// The refusal for an existing slot whose plugin the `test_decoding` stream cannot read.
@@ -1217,19 +1244,27 @@ fn search_path_schema(client: &mut Client, cfg: &str) -> Result<Option<String>> 
 }
 
 /// The catalog's `(schema, table)` for a configured name through `to_regclass`, for a base or partitioned table; `None` when it resolves nowhere.
-pub(crate) fn search_path_relation(
-    client: &mut Client,
+pub(crate) fn search_path_relation<C: CatalogRows>(
+    client: &mut C,
     cfg: &str,
 ) -> Result<Option<(String, String)>> {
     use anyhow::Context as _;
-    Ok(client
-        .query_opt(
+    let rows = client
+        .text_rows(
             "SELECT n.nspname::text, c.relname::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
              WHERE c.oid = to_regclass($1) AND c.relkind IN ('r','p') AND c.relpersistence = 'p'",
-            &[&cfg],
+            cfg,
         )
-        .with_context(|| format!("pg cdc: resolving `{cfg}` through the catalog"))?
-        .map(|r| (r.get(0), r.get(1))))
+        .with_context(|| format!("pg cdc: resolving `{cfg}` through the catalog"))?;
+    Ok(relation_from_rows(&rows))
+}
+
+/// The `(schema, table)` the first catalog row names; a row short of either cell resolves nowhere.
+pub(crate) fn relation_from_rows(rows: &[Vec<Option<String>>]) -> Option<(String, String)> {
+    match rows.first()?.as_slice() {
+        [Some(schema), Some(table), ..] => Some((schema.clone(), table.clone())),
+        _ => None,
+    }
 }
 
 /// Whether a change of `schema.table` is captured.
@@ -3424,6 +3459,127 @@ mod tests {
             crate::error::assert_coded(&err, "RIVET_SOURCE_CDC_PREREQUISITE", 1);
             assert!(format!("{err:#}").contains(&slot_plugin_refusal("s1", &plugin)));
         }
+    }
+
+    struct FakeCatalog {
+        rows: Vec<Vec<Option<String>>>,
+        fail: bool,
+        seen: Vec<(String, String)>,
+    }
+
+    impl CatalogRows for FakeCatalog {
+        fn text_rows(&mut self, sql: &str, arg: &str) -> Result<Vec<Vec<Option<String>>>> {
+            self.seen.push((sql.to_string(), arg.to_string()));
+            if self.fail {
+                anyhow::bail!("catalog down");
+            }
+            Ok(self.rows.clone())
+        }
+    }
+
+    fn fake(rows: Vec<Vec<Option<String>>>) -> FakeCatalog {
+        FakeCatalog {
+            rows,
+            fail: false,
+            seen: Vec::new(),
+        }
+    }
+
+    fn row(cells: &[Option<&str>]) -> Vec<Option<String>> {
+        cells.iter().map(|c| c.map(str::to_string)).collect()
+    }
+
+    /// The first `pg_replication_slots` row names the plugin; no row is no slot, a NULL plugin is the empty name.
+    #[test]
+    fn a_slot_plugin_is_read_from_the_first_catalog_row() {
+        assert_eq!(slot_plugin_from_rows(&[]), None);
+        assert_eq!(
+            slot_plugin_from_rows(&[row(&[Some("pgoutput")])]),
+            Some(SlotPlugin::Pgoutput)
+        );
+        assert_eq!(
+            slot_plugin_from_rows(&[row(&[Some("test_decoding")])]),
+            Some(SlotPlugin::TestDecoding)
+        );
+        assert_eq!(
+            slot_plugin_from_rows(&[row(&[Some("wal2json")])]),
+            Some(SlotPlugin::Other("wal2json".into()))
+        );
+        assert_eq!(
+            slot_plugin_from_rows(&[row(&[None])]),
+            Some(SlotPlugin::Other(String::new()))
+        );
+        assert_eq!(
+            slot_plugin_from_rows(&[row(&[Some("pgoutput")]), row(&[Some("wal2json")])]),
+            Some(SlotPlugin::Pgoutput)
+        );
+    }
+
+    /// `slot_plugin_on` asks the catalog for the slot by name and returns what the rows say, or the catalog's error.
+    #[test]
+    fn the_slot_plugin_lookup_queries_the_slot_and_maps_its_rows() {
+        let mut c = fake(vec![row(&[Some("pgoutput")])]);
+        assert_eq!(
+            slot_plugin_on(&mut c, "s_orders").unwrap(),
+            Some(SlotPlugin::Pgoutput)
+        );
+        assert_eq!(c.seen.len(), 1);
+        assert!(c.seen[0].0.contains("pg_replication_slots"));
+        assert_eq!(c.seen[0].1, "s_orders");
+        assert_eq!(slot_plugin_on(&mut fake(vec![]), "s_orders").unwrap(), None);
+        let mut down = fake(vec![row(&[Some("pgoutput")])]);
+        down.fail = true;
+        let err = slot_plugin_on(&mut down, "s_orders").unwrap_err();
+        assert!(format!("{err:#}").contains("catalog down"));
+    }
+
+    /// The first catalog row names the relation as `(schema, table)`; no row, a short row or a NULL cell resolves nowhere.
+    #[test]
+    fn a_relation_is_read_from_the_first_catalog_row() {
+        assert_eq!(relation_from_rows(&[]), None);
+        assert_eq!(
+            relation_from_rows(&[row(&[Some("app"), Some("orders")])]),
+            Some(("app".to_string(), "orders".to_string()))
+        );
+        assert_eq!(
+            relation_from_rows(&[row(&[Some("app"), Some("orders"), Some("extra")])]),
+            Some(("app".to_string(), "orders".to_string()))
+        );
+        assert_eq!(
+            relation_from_rows(&[
+                row(&[Some("tenant_b"), Some("orders")]),
+                row(&[Some("public"), Some("orders")]),
+                row(&[Some("archive"), Some("orders")]),
+            ]),
+            Some(("tenant_b".to_string(), "orders".to_string()))
+        );
+        assert_eq!(relation_from_rows(&[row(&[Some("app")])]), None);
+        assert_eq!(relation_from_rows(&[row(&[])]), None);
+        assert_eq!(relation_from_rows(&[row(&[None, Some("orders")])]), None);
+        assert_eq!(relation_from_rows(&[row(&[Some("app"), None])]), None);
+    }
+
+    /// `search_path_relation` resolves the configured name through the catalog, returns the row's spelling, and names the name on a catalog error.
+    #[test]
+    fn the_search_path_lookup_queries_the_name_and_maps_its_row() {
+        let mut c = fake(vec![row(&[Some("tenant_b"), Some("Orders")])]);
+        assert_eq!(
+            search_path_relation(&mut c, "orders").unwrap(),
+            Some(("tenant_b".to_string(), "Orders".to_string()))
+        );
+        assert_eq!(c.seen.len(), 1);
+        assert!(c.seen[0].0.contains("to_regclass($1)"));
+        assert_eq!(c.seen[0].1, "orders");
+        assert_eq!(
+            search_path_relation(&mut fake(vec![]), "orders").unwrap(),
+            None
+        );
+        let mut down = fake(vec![]);
+        down.fail = true;
+        let err = search_path_relation(&mut down, "orders").unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("pg cdc: resolving `orders` through the catalog"));
+        assert!(text.contains("catalog down"));
     }
 
     /// Live: an existing `pgoutput` slot is refused by name before any read; a `test_decoding` slot is reused.
