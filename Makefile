@@ -197,6 +197,10 @@ property-no-silent-null:  ## Property matrix: every non-NULL source value is del
 	 $(LIVE) $(PY) -m dev.release_oracle.property_no_silent_null_load || rc=$$?; \
 	 exit $$rc
 
+.PHONY: property-no-silent-null-load-cloud
+property-no-silent-null-load-cloud:  ## The ledger's edge cells loaded into BigQuery and Snowflake and read back by a second client; NOT_GRADED without credentials. Takes one live slot.
+	$(LIVE) env RIVET_WAREHOUSE_LIVE=all $(PY) -m dev.pytools.warehouse_env -- $(PY) -m dev.release_oracle.property_no_silent_null_load --targets duck,bigquery,snowflake $(ARGS)
+
 release-oracle:  ## Release gate, BARE: only what is already in your shell. With no RIVET_PREV_RELEASE_BIN in your environment the prev-release comparison is GIVEN UP by name (cannot support a tag); with one exported, those three stages run and grade. The replica/standby topology rows are GIVEN UP by name too (a down stand is SKIP here, FAIL in release-oracle-full). Read the SKIP count — with nothing set it is ~95 PASS / 60 SKIP and still prints RELEASE-READY.
 	$(LIVE_ALL) $(PY) -m dev.release_oracle --without-prev-release-comparison --without-replica-topologies $(ARGS)
 

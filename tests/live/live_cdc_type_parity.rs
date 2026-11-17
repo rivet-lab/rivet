@@ -43,8 +43,8 @@ struct Row {
     clickhouse_defect: Option<String>,
     /// Like `defect_samples`, for the ClickHouse stage alone.
     clickhouse_defect_samples: Vec<String>,
-    /// Today's behaviour of a known_defect row: the batch run refuses the column by name.
-    batch_refuses: bool,
+    /// Today's behaviour of the row: the batch run refuses the column by name.
+    refuses: bool,
 }
 
 struct Ledger {
@@ -78,6 +78,7 @@ fn ledger(engine: &str) -> Ledger {
         .as_sequence()
         .unwrap_or_else(|| panic!("engines.{engine}.rows is not a list"))
         .iter()
+        .filter(|r| !r["delivery"].is_null())
         .map(|r| {
             let ch = &r["clickhouse"];
             Row {
@@ -105,7 +106,7 @@ fn ledger(engine: &str) -> Ledger {
                 today_clickhouse: s(&ch["today"]),
                 clickhouse_defect: s(&ch["defect"]),
                 clickhouse_defect_samples: list(&ch["defect_samples"]),
-                batch_refuses: r["batch_refuses"].as_bool().unwrap_or(false),
+                refuses: r["refuses"].is_string(),
             }
         })
         .collect();
@@ -123,7 +124,7 @@ const ARROW: &str = "arrow";
 
 /// The ledger without the rows batch refuses today, and those rows.
 fn split_refused(lg: Ledger) -> (Ledger, Vec<Row>) {
-    let (refused, rows) = lg.rows.into_iter().partition(|r| r.batch_refuses);
+    let (refused, rows) = lg.rows.into_iter().partition(|r| r.refuses);
     (
         Ledger {
             setup: lg.setup,
@@ -668,7 +669,7 @@ fn values(rows: &[Row], i: usize) -> Vec<String> {
 /// Rows 1..=n hold the samples, rows n+1..=2n start NULL; returns n.
 fn seed(lg: &Ledger, st: &Stand) -> i64 {
     assert!(
-        lg.rows.iter().all(|r| !r.batch_refuses),
+        lg.rows.iter().all(|r| !r.refuses),
         "{}: split the batch-refused rows off first",
         st.engine
     );
@@ -927,7 +928,7 @@ fn graded_row(delivery: &str) -> Row {
         clickhouse: None,
         clickhouse_defect: None,
         clickhouse_defect_samples: Vec::new(),
-        batch_refuses: false,
+        refuses: false,
     }
 }
 
@@ -1936,7 +1937,12 @@ fn mssql_batch_and_cdc_deliver_every_ledger_row_alike() {
 #[ignore = "live: requires the oracle service with LogMiner prerequisites + duckdb"]
 fn oracle_batch_and_cdc_deliver_every_ledger_row_alike() {
     let _serial = cross_process_serial("oracle_cdc");
-    let lg = ledger("oracle");
+    const DECLARED: &str = "TIMESTAMP(9)";
+    let mut lg = ledger("oracle");
+    lg.rows
+        .iter_mut()
+        .filter(|r| r.native == DECLARED)
+        .for_each(|r| r.refuses = false);
     let t = crate::live_cdc_oracledb::cdc_table(
         "ledger_ora",
         &columns_ddl(&lg.rows, "id NUMBER(10) PRIMARY KEY"),
@@ -1946,7 +1952,7 @@ fn oracle_batch_and_cdc_deliver_every_ledger_row_alike() {
         lg.rows
             .iter()
             .enumerate()
-            .filter(|(_, r)| r.native == "TIMESTAMP(9)")
+            .filter(|(_, r)| r.native == DECLARED)
             .map(|(i, _)| format!("C{i}: timestamp"))
             .collect::<Vec<_>>()
             .join(", ")

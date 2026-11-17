@@ -40,6 +40,19 @@ def rows(engine: str, url: str, table: str) -> int | None:
     return int(nums[-1]) if nums else None
 
 
+def split_statements(text: str) -> list[str]:
+    """`text` cut at every `;` outside a single-quoted literal, each part stripped, empty parts dropped."""
+    out, cur, quote = [], "", False
+    for c in text:
+        quote ^= c == "'"
+        if c == ";" and not quote:
+            out.append(cur)
+            cur = ""
+        else:
+            cur += c
+    return [s for s in (x.strip() for x in [*out, cur]) if s]
+
+
 def _oracle(url: str, statement: str) -> Proc:
     """`;`-separated plain SQL statements through python-oracledb (no PL/SQL blocks), committed together."""
     from urllib.parse import unquote, urlparse
@@ -51,9 +64,8 @@ def _oracle(url: str, statement: str) -> Proc:
         with oracledb.connect(user=unquote(u.username or ""), password=unquote(u.password or ""),
                               dsn=f"{u.hostname}:{u.port or 1521}/{u.path.lstrip('/')}") as con:
             cur = con.cursor()
-            for s in (x.strip() for x in statement.split(";")):
-                if s:
-                    cur.execute(s)
+            for s in split_statements(statement):
+                cur.execute(s)
             con.commit()
         return Proc(("oracledb",), 0, "", "")
     except oracledb.DatabaseError as e:

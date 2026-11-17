@@ -53,6 +53,7 @@ STAGE_HALF: dict[str, str] = {
     "concurrent writers": DEVBOX,
     "engine matrix": DEVBOX,
     "cloud legs": DEVBOX,
+    "no silent null load cloud": DEVBOX,
     "bigquery golden": DEVBOX,
     "fix cells": DEVBOX,
     "live modules devbox": DEVBOX,
