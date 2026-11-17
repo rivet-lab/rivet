@@ -68,11 +68,42 @@ pub fn redact_url_passwords(s: &str) -> String {
     out
 }
 
+/// Shortest value registered for masking: a shorter one would blank ordinary text.
+const MIN_MASKED_LEN: usize = 8;
+
+/// Every value registered by [`mask_value_in_output`], raw and percent-encoded.
+static MASKED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// `text` with every registered value replaced by the mask.
+fn mask_registered(text: &str) -> String {
+    let known = MASKED.lock().unwrap_or_else(|e| e.into_inner());
+    known
+        .iter()
+        .fold(text.to_string(), |acc, v| acc.replace(v.as_str(), MASK))
+}
+
+/// Register a credential value so [`redact_secrets`] masks it wherever it appears, raw or percent-encoded.
+pub fn mask_value_in_output(value: &str) {
+    if value.len() < MIN_MASKED_LEN {
+        return;
+    }
+    let encoded = percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC)
+        .to_string();
+    let mut known = MASKED.lock().unwrap_or_else(|e| e.into_inner());
+    for v in [value.to_string(), encoded] {
+        if !known.contains(&v) {
+            known.push(v);
+        }
+    }
+}
+
 /// Compose every redactor.  Use this at every boundary that turns a
 /// driver/library error (or any operator-untrusted string) into a
 /// persisted or emitted artifact.
 pub fn redact_secrets(s: &str) -> String {
-    redact_query_secrets(&redact_url_passwords(&redact_keyword_passwords(s)))
+    redact_query_secrets(&redact_url_passwords(&redact_keyword_passwords(
+        &mask_registered(s),
+    )))
 }
 
 /// `raw` with its keyword/value passwords, its whole userinfo (user included) and its query secrets masked, and whether any was found: the form a persisted plan holds.
@@ -417,6 +448,30 @@ impl log::Log for UiRoutedLogger {
 #[cfg(test)]
 mod logger_tests {
     use super::*;
+
+    /// A registered secret is masked wherever it sits in text, raw or percent-encoded; short values, unregistered text and keyed query pairs are untouched.
+    #[test]
+    fn a_registered_secret_is_masked_by_value_and_neighbours_are_unchanged() {
+        let sas = crate::secret::Secret::new("QxRegisteredCanary0123Vm/+");
+        sas.mask_in_output();
+        crate::secret::Secret::new("short").mask_in_output();
+        let text =
+            "url: http://h/p?QxRegisteredCanary0123Vm/+ and ?QxRegisteredCanary0123Vm%2F%2B end";
+        assert_eq!(redact_secrets(text), "url: http://h/p?*** and ?*** end");
+        for same in [
+            "short stays short",
+            "INSERT INTO t VALUES (?,?) failed",
+            "https://h/x?page=2&limit=10",
+            "https://acc.blob/x?sv=2020&sig=abc%2F==",
+        ] {
+            let want = if same.contains("sig=") {
+                "https://acc.blob/x?sv=2020&sig=***"
+            } else {
+                same
+            };
+            assert_eq!(redact_secrets(same), want, "{same}");
+        }
+    }
     use log::Log as _;
     use std::sync::{Arc, Mutex};
 
@@ -1518,5 +1573,17 @@ mod tests {
             normal_out.contains("postgresql://REDACTED@db.example.com:5432/orders"),
             "normal password redaction unchanged: {normal_out}"
         );
+    }
+
+    /// A value of exactly the minimum length is masked, raw and percent-encoded; one byte shorter is not.
+    #[test]
+    fn a_value_at_the_minimum_length_is_masked_and_a_shorter_one_is_not() {
+        super::mask_value_in_output("Qz8#mW2v");
+        super::mask_value_in_output("Kp4!xR7");
+        assert_eq!(
+            redact_secrets("a Qz8#mW2v b Qz8%23mW2v c"),
+            format!("a {MASK} b {MASK} c")
+        );
+        assert_eq!(redact_secrets("a Kp4!xR7 b"), "a Kp4!xR7 b");
     }
 }

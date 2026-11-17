@@ -131,14 +131,27 @@ fn insert_rows(
     ));
 }
 
-/// The export name init chose — the warehouse table and the bucket prefix both
-/// follow it, so the test reads it back rather than re-deriving init's rule.
+/// The export a single-table scaffold delivers through: its CDC stream when it has one, else its only export.
+fn scaffolded_stream(generated: &str) -> serde_yaml_ng::Value {
+    let doc: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(generated).expect("the scaffold is YAML");
+    let exports = doc["exports"]
+        .as_sequence()
+        .expect("the scaffold lists exports");
+    exports
+        .iter()
+        .find(|e| e["mode"].as_str() == Some("cdc"))
+        .or_else(|| exports.first())
+        .cloned()
+        .expect("a single-table scaffold names an export")
+}
+
+/// The export name init chose, read back from the scaffold rather than re-derived.
 fn scaffolded_export(generated: &str) -> String {
-    generated
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("- name:"))
-        .map(|s| s.trim().trim_matches('"').to_string())
-        .expect("a single-table scaffold names one export")
+    scaffolded_stream(generated)["name"]
+        .as_str()
+        .expect("the export has a name")
+        .to_string()
 }
 
 /// The cycle init's own next-steps prescribes, driven end to end on the config it
@@ -1259,19 +1272,24 @@ fn a_generated_oracle_cdc_config_has_no_load_block_and_runs_to_parquet() {
     assert_eq!(ids_in(&snap), (1..=10).collect::<Vec<i64>>());
 }
 
-/// The local `path:` a single-table scaffold writes to, resolved against its directory.
+/// The local `path:` a single-table scaffold's stream writes to, resolved against its directory.
 fn scaffolded_path(dir: &std::path::Path, generated: &str) -> std::path::PathBuf {
-    let raw = generated
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("path:"))
-        .expect("a local scaffold names its path");
     dir.join(
-        raw.split('#')
-            .next()
-            .unwrap_or(raw)
-            .trim()
-            .trim_matches('"'),
+        scaffolded_stream(generated)["destination"]["path"]
+            .as_str()
+            .expect("a local scaffold names its path"),
     )
+}
+
+#[test]
+fn a_one_table_cdc_scaffold_is_read_at_its_stream_not_its_backfill_recipe() {
+    let generated = "exports:\n  - name: orders\n    table: public.orders\n    mode: chunked\n    destination:\n      type: local\n      path: ./output/orders/\n  - name: orders_cdc\n    table: public.orders\n    mode: cdc\n    cdc:\n      backfill: auto\n    destination:\n      type: local\n      path: \"./output/orders_cdc/\"  # the stream\n";
+    let dir = std::path::Path::new("/cfg");
+    assert_eq!(scaffolded_export(generated), "orders_cdc");
+    assert_eq!(
+        scaffolded_path(dir, generated),
+        dir.join("./output/orders_cdc/")
+    );
 }
 
 /// Two configs `rivet init -o` writes for one table into one directory, the second pointed at

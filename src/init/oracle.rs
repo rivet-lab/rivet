@@ -1,8 +1,4 @@
-//! `rivet init` catalog reader for Oracle: tables/views of one owner, their
-//! columns, primary key and leading-index columns, and the optimizer row count.
-//! Oracle's catalog types are renamed onto the vocabulary init's classifiers
-//! speak (see [`catalog_type`]), the way the SQL Server reader renames
-//! `timestamp` to `rowversion`.
+//! `rivet init` catalog reader for Oracle: tables/views of one owner, their columns, primary key and leading-index columns, and the optimizer row count.
 
 use crate::config::SourceType;
 use crate::error::Result;
@@ -57,7 +53,7 @@ pub(super) fn list_tables(conn: &mut OracleSource, schema: &str) -> Result<Vec<S
     ))
 }
 
-/// Introspect `schema.table` (catalog-exact names), asking LogMiner's catalog only for a CDC scaffold; a private or PUBLIC synonym is followed to its local base table.
+/// Introspect `schema.table` (catalog-exact names), asking LogMiner's catalog only for a CDC scaffold.
 pub(super) fn introspect(
     conn: &mut OracleSource,
     schema: &str,
@@ -147,8 +143,7 @@ fn asked_for_cdc(
     if cdc { probe() } else { Ok(None) }
 }
 
-/// Why LogMiner cannot capture `schema.table`, asked through the predicate the capture itself
-/// refuses by, over the catalog rows it reads ([`crate::source::oracle::cdc::unmineable`]).
+/// Why LogMiner cannot capture `schema.table`, asked through the predicate the capture itself refuses by, over the catalog rows it reads ([`crate::source::oracle::cdc::unmineable`]).
 fn cdc_unmineable(
     schema: &str,
     table: &str,
@@ -190,7 +185,7 @@ fn capped_count_sql(schema: &str, table: &str) -> String {
     )
 }
 
-/// The estimate for a table with no optimizer stats: an exact count below the cap, a floor marked unverified at it.
+/// The estimate for a table with no optimizer stats.
 fn unanalyzed_estimate(counted: i64) -> crate::init::density::DensityProbe {
     use crate::init::density::{DensityProbe, EstimateMethod};
     DensityProbe {
@@ -307,10 +302,7 @@ fn column_info(f: &[Option<String>]) -> Option<ColumnInfo> {
     })
 }
 
-/// An Oracle catalog type in the vocabulary init's classifiers read: an integer
-/// NUMBER(p<=18,0) is `bigint` (range-chunkable), a bare, INTEGER (precision NULL, scale 0) or wider integer NUMBER is
-/// `number` (keysettable, never range-chunked), a scaled NUMBER is `numeric`, and DATE — which carries
-/// the time to the second — is `datetime`, not the day-coarse `date`.
+/// An Oracle catalog type in the vocabulary init's classifiers read.
 fn catalog_type(data_type: &str, precision: Option<u32>, scale: Option<i32>) -> String {
     match (data_type, precision, scale) {
         ("NUMBER", Some(p), Some(0)) if p <= 18 => "bigint".into(),
@@ -379,8 +371,6 @@ mod tests {
         assert_eq!(none.unwrap(), None);
     }
     /// Init leaves out exactly what the capture refuses, with the refusal's own text: one predicate.
-    /// The catalog rows the capture reads decide init's verdict: the reason the capture gives for
-    /// each unmineable cause, word for word, and none for a table LogMiner mines.
     #[test]
     fn init_names_each_unmineable_cause_as_the_capture_does() {
         let row = |name: &str, ty: &str, identity: &str, virt: &str| {

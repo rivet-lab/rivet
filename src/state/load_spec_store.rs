@@ -80,10 +80,7 @@ impl LoadSpec {
 }
 
 impl StateStore {
-    /// Upsert the columns and primary key a successful run captured for one unit. A
-    /// capture that found no key clears one a run recorded before it — the export no
-    /// longer reads the relation that key belonged to — and keeps one `rivet init`
-    /// recorded (`key_origin = 'init'`), the scaffold's declaration for a `query:` export.
+    /// Upsert the columns and primary key a successful run captured for one unit.
     pub fn record_load_spec(
         &self,
         export_name: &str,
@@ -95,7 +92,6 @@ impl StateStore {
     ) -> Result<()> {
         let columns_json = serde_json::to_string(columns)?;
         let primary_key_json = primary_key.map(serde_json::to_string).transpose()?;
-        // Bound, not `CASE WHEN ?4 IS NULL`: Postgres cannot type a parameter from `IS NULL`.
         let key_origin = primary_key_json.as_ref().map(|_| "run".to_string());
         let now = chrono::Utc::now().to_rfc3339();
         self.transaction(|| {
@@ -128,9 +124,6 @@ impl StateStore {
                     source.into(),
                 ],
             )?;
-            // The same spec under ITS run: what `rivet load` pins a plan to, so a
-            // same-named export of another config sharing this state DB cannot type it.
-            // The run row references a deduplicated version instead of copying the spec.
             let spec_match = "export_name = ?1 AND unit = ?2 AND columns_json = ?3
                      AND COALESCE(primary_key_json, '') = COALESCE(?4, '')";
             self.execute(
@@ -169,10 +162,7 @@ impl StateStore {
         })
     }
 
-    /// The spec `run_id` recorded for one unit — `None` for a run that predates the
-    /// per-run table or recorded nothing. Private: the one reader is
-    /// [`Self::load_spec_of_run_with_init_key`], which also borrows the init-origin
-    /// key — a caller reaching for this one would skip that (ADR-0034 D1).
+    /// The spec `run_id` recorded for one unit — `None` for a run that predates the per-run table or recorded nothing.
     fn load_spec_of_run(
         &self,
         export_name: &str,
@@ -209,13 +199,7 @@ impl StateStore {
         }))
     }
 
-    /// [`Self::load_spec_of_run`], with the ONE key that may legitimately come from
-    /// outside the run: the key `rivet init` recorded (`key_origin = 'init'`) — a
-    /// `query:` export cannot read a key at run time, so its runs record none and
-    /// the scaffold's declaration is the only one there is. A key another RUN wrote
-    /// into the by-name row is never borrowed: that is the last-writer race the
-    /// per-run spec exists to escape. The init key itself is per NAME: on a state DB
-    /// shared by two configs, the last `rivet init` of that export name wins.
+    /// [`Self::load_spec_of_run`], with the ONE key that may legitimately come from outside the run.
     pub fn load_spec_of_run_with_init_key(
         &self,
         export_name: &str,
@@ -232,8 +216,7 @@ impl StateStore {
         Ok(Some(spec))
     }
 
-    /// The key `rivet init` recorded for `export_name` reading `source`: its own row, else the
-    /// one a state written before v38 holds under no source (`''`).
+    /// The key `rivet init` recorded for `export_name` reading `source`.
     fn init_key(
         &self,
         export_name: &str,
@@ -257,8 +240,7 @@ impl StateStore {
             .transpose()
     }
 
-    /// Record the source primary key `rivet init` read for an export it scaffolded,
-    /// leaving any columns a run recorded in place.
+    /// Record the source primary key `rivet init` read for an export it scaffolded, leaving any columns a run recorded in place.
     pub fn record_primary_key(
         &self,
         export_name: &str,
@@ -291,9 +273,7 @@ impl StateStore {
         Ok(())
     }
 
-    /// The source a load reads `export_name`'s spec under: the config's own when it resolves on
-    /// this host, else the one source that recorded a spec of the unit (none: the legacy row),
-    /// refused when several did and nothing here says which config this is.
+    /// The source a load reads `export_name`'s spec under.
     pub fn spec_source(
         &self,
         configured: Option<String>,
@@ -394,8 +374,7 @@ mod tests {
         }
     }
 
-    /// The source a load reads a spec under: the configured one, else the only one recorded (or
-    /// the legacy row), and a coded usage stop when two configs of the name recorded one.
+    /// The source a load reads a spec under: the configured one, else the only one recorded (or the legacy row), and a coded usage stop when two configs of the name recorded one.
     #[test]
     fn the_spec_source_is_the_configured_one_else_the_only_one_recorded() {
         let s = StateStore::open_in_memory().unwrap();
@@ -487,10 +466,7 @@ mod tests {
         assert_eq!(spec.origin, "run");
     }
 
-    /// Two runs of one export name — in practice two CONFIGS sharing a state DB,
-    /// each with an export called `users` over a different source — must each keep
-    /// the spec THEIR run recorded: the by-name row is last-writer-wins, the
-    /// by-run row is what the load pins to.
+    /// Two runs of one export name — in practice two CONFIGS sharing a state DB, each with an export called `users` over a different source.
     #[test]
     fn runs_with_an_unchanged_spec_share_one_stored_version() {
         let s = StateStore::open_in_memory().unwrap();
@@ -562,7 +538,6 @@ mod tests {
                 .is_none(),
             "a run that recorded nothing pins nothing"
         );
-        // A keyless re-record of the SAME run replaces that run's row only.
         s.record_load_spec("users", None, "", &mine, None, "run_pg")
             .unwrap();
         assert_eq!(
@@ -581,11 +556,7 @@ mod tests {
         );
     }
 
-    /// A `query:` export records NO key at run time; the key `rivet init` recorded
-    /// is the only one there is, and the by-name upsert keeps it (`key_origin =
-    /// 'init'`). The per-run row is written verbatim (NULL key), so a load pinned to
-    /// the run must borrow the INIT key — and only that: a key another RUN wrote by
-    /// name is the race the pin escapes, so it is never borrowed.
+    /// A `query:` export records NO key at run time.
     #[test]
     fn the_run_spec_borrows_an_init_recorded_key_but_never_another_runs() {
         let s = StateStore::open_in_memory().unwrap();
@@ -613,7 +584,6 @@ mod tests {
         );
         assert_eq!(pinned.columns, cols, "the run's columns stay the run's");
 
-        // A keyless run of `t` after another RUN wrote a key by name: NOT borrowed.
         s.record_load_spec(
             "t",
             None,
@@ -633,9 +603,6 @@ mod tests {
             None,
             "a run-recorded by-name key is the last-writer race, never borrowed"
         );
-        // The race in the order it happens: MY keyless run first, then a same-named
-        // export of another config writes `_id` by name. Without the `key_origin =
-        // 'init'` filter the by-name key is borrowed — the exact pin escape.
         s.record_load_spec("u", None, "", &cols, None, "mine")
             .unwrap();
         s.record_load_spec("u", None, "", &cols, Some(&["_id".to_string()]), "theirs")
@@ -650,10 +617,7 @@ mod tests {
         );
     }
 
-    /// `pk: auto` reads the recorded key, so a key a RUN captured from `table: orders`
-    /// must not outlive the export's move to a `query:` (or another relation) that
-    /// records none: the dedup view would partition by a key the export no longer
-    /// reads. RED against the pre-fix `COALESCE(excluded, old)` upsert.
+    /// `pk: auto` reads the recorded key, so a key a RUN captured from `table: orders` must not outlive the export's move to a `query:` that records none.
     #[test]
     fn a_capture_without_a_key_clears_the_key_a_run_recorded_before_it() {
         let s = StateStore::open_in_memory().unwrap();
@@ -714,8 +678,6 @@ mod tests {
             1
         );
 
-        // Once a run records a key of its own, that key is a run's: the next keyless
-        // capture clears it.
         let seen = vec!["a".to_string()];
         s.record_load_spec(
             "q",
@@ -781,8 +743,7 @@ mod tests {
             col("id", RivetType::Int64)
         );
     }
-    /// One export name read from two sources keeps a spec and a key each; a third source with no
-    /// row of its own reads the key a state written before v38 holds under no source.
+    /// One export name read from two sources keeps a spec and a key each.
     #[test]
     fn two_sources_of_one_export_name_keep_a_spec_each() {
         let s = StateStore::open_in_memory().unwrap();
