@@ -135,6 +135,11 @@ jobs:
           name: seeded-build
           path: out/build
 
+      - name: Fetch the pinned releases the recall cells run beside
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: make release-oracle-prev-bin
+
       - name: Seeded recall for this shard
         env:
           SEEDS: ${{ matrix.shard.seeds }}
