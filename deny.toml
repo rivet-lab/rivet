@@ -25,6 +25,8 @@ ignore = [
     { id = "RUSTSEC-2026-0405", reason = "zstd-safe InBuffer::pos out of range; the decoder uses InBuffer::around (review 2027-02-04)" },
     { id = "RUSTSEC-2026-0406", reason = "zstd-safe multithreaded CCtx with an unfinished frame; zstdmt off, encoder only (review 2027-02-04)" },
     { id = "RUSTSEC-2026-0442", reason = "RUSTSEC-2026-0442 accepted 2026-11-05: rivet never builds RunEndEncoded arrays, so unreachable; arrow stays at =59.0.0 until the upstream parquet writer memory regression (59.2.0+) is fixed, then the pin moves to the fixed release. Review 2026-11-19." },
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, no vulnerability; pulled non-optionally by arrow-arith, arrow-array, arrow-cast, arrow-json, arrow-csv and parquet 59 (pinned =59.0.0), plus rivet direct, tiberius and postgres-types; removal means replacing arrow and parquet (review 2027-02-04)" },
+    { id = "RUSTSEC-2026-0555", reason = "chrono-tz unmaintained, no vulnerability; enabled only by rivet arrow feature chrono-tz, which named-timezone timestamps in row_hash and enrich need, so removal changes the timezone mapping (review 2027-02-04)" },
 ]
 
 [licenses]
