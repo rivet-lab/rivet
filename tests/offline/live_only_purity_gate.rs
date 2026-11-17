@@ -285,7 +285,7 @@ fn split_path(rest: &str) -> (&str, &str) {
     (rest, "")
 }
 
-/// The type a qualified path names (`<impl Tr for T<'_>>::f` → `T`, `T<'_>::f` → `T`), or None.
+/// The type a qualified path names (`<impl Tr for T<'_>>::f` → `T`, `<impl Tr for a::T>::f` → `T`), or None.
 fn self_type(path: &str) -> Option<String> {
     let (head, _) = path.rsplit_once("::")?;
     let head = head
@@ -293,8 +293,12 @@ fn self_type(path: &str) -> Option<String> {
         .and_then(|h| h.strip_suffix('>'))
         .unwrap_or(head);
     let ty = head.rsplit(" for ").next().unwrap_or(head);
+    let ty = ty.trim_start_matches("impl ");
+    let ty = ty.split('<').next().unwrap_or(ty);
     let ty: String = ty
-        .trim_start_matches("impl ")
+        .rsplit("::")
+        .next()
+        .unwrap_or(ty)
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
         .collect();

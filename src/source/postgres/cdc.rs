@@ -3642,6 +3642,67 @@ mod tests {
         drop(&mut admin);
     }
 
+    /// Live: `text_rows` on a real client returns the server's rows, text cells and NULLs; the slot and relation lookups read them.
+    #[test]
+    #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
+    fn live_pg_catalog_rows_are_the_servers_text_cells() {
+        let mut c = Client::connect(CONN, NoTls).unwrap();
+        let id = std::process::id();
+        let slot = format!("rivet_catrows_slot_{id}");
+        let schema = format!("rivet_catrows_s_{id}");
+        let table = format!("Rivet_Catrows_T_{id}");
+        let cleanup = |c: &mut Client| {
+            c.execute(
+                "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1",
+                &[&slot],
+            )
+            .unwrap();
+            c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+                .unwrap();
+        };
+        cleanup(&mut c);
+        c.execute(
+            "SELECT pg_create_logical_replication_slot($1, 'test_decoding')",
+            &[&slot],
+        )
+        .unwrap();
+        c.batch_execute(&format!(
+            "CREATE SCHEMA {schema}; CREATE TABLE {schema}.\"{table}\" (id int)"
+        ))
+        .unwrap();
+        assert_eq!(
+            c.text_rows("SELECT $1::text, NULL::text, 'b'::text", "abc")
+                .unwrap(),
+            vec![vec![Some("abc".to_string()), None, Some("b".to_string())]]
+        );
+        assert_eq!(
+            c.text_rows("SELECT $1::text WHERE false", "abc").unwrap(),
+            Vec::<Vec<Option<String>>>::new()
+        );
+        assert_eq!(
+            c.text_rows(
+                "SELECT x::text FROM generate_series(1, 3) x WHERE $1 = 'go'",
+                "go"
+            )
+            .unwrap(),
+            vec![
+                vec![Some("1".to_string())],
+                vec![Some("2".to_string())],
+                vec![Some("3".to_string())]
+            ]
+        );
+        assert_eq!(
+            slot_plugin_on(&mut c, &slot).unwrap(),
+            Some(SlotPlugin::TestDecoding)
+        );
+        assert_eq!(
+            search_path_relation(&mut c, &format!("{schema}.\"{table}\"")).unwrap(),
+            Some((schema.clone(), table.clone()))
+        );
+        cleanup(&mut c);
+        assert_eq!(slot_plugin_on(&mut c, &slot).unwrap(), None);
+    }
+
     /// Live: the label resolver agrees with the reader's own domain map for every domain on the server.
     #[test]
     #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
