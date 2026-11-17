@@ -156,17 +156,20 @@ fn row_violations(doc: &Value) -> Vec<String> {
             if !seen.insert(native.clone()) {
                 bad.push(format!("{at}: listed twice"));
             }
-            if r["sample"].as_sequence().is_none_or(|s| s.is_empty()) {
+            let matrix_only =
+                r["delivery"].is_null() && r["edges"].as_sequence().is_some_and(|e| !e.is_empty());
+            if !matrix_only && r["sample"].as_sequence().is_none_or(|s| s.is_empty()) {
                 bad.push(format!("{at}: no sample"));
             }
             let d = r["delivery"].as_str().unwrap_or("");
-            if !valid_delivery(d) {
+            if !matrix_only && !valid_delivery(d) {
                 bad.push(format!(
                     "{at}: delivery `{d}` is no Arrow type, canonical extension or TextForm \
                      label (a refused type declares its ADR target with known_defect and \
-                     batch_refuses)"
+                     refuses; a row with `edges` and no delivery is matrix-only)"
                 ));
             }
+            bad.extend(edge_violations(&at, r));
             for key in r.as_mapping().into_iter().flat_map(|m| m.keys()) {
                 let key = key.as_str().unwrap_or("");
                 if !ROW_KEYS.contains(&key) {
@@ -250,10 +253,10 @@ fn row_violations(doc: &Value) -> Vec<String> {
                     }
                 }
             }
-            if r["batch_refuses"].as_bool() == Some(true) && kd.is_null() {
+            if r["refuses"].is_string() && !r["delivery"].is_null() && kd.is_null() {
                 bad.push(format!(
-                    "{at}: `batch_refuses` is today's behaviour of a known_defect row; refusal is \
-                     not an ADR target"
+                    "{at}: `refuses` on a row with a `delivery` is a known_defect row's batch \
+                     behaviour; refusal is not an ADR target"
                 ));
             }
             for key in ["render", "today_render"] {
@@ -300,12 +303,13 @@ fn render_violations(engine: &str, at: &str, render: &Value) -> Vec<String> {
 }
 
 /// Rows per engine; a ledger may grow past these, never fall below them.
-const ROW_FLOOR: [(&str, usize); 4] = [
+const ROW_FLOOR: [(&str, usize); 5] = [
     // ratchet-pin: type-ledger-rows (review 2027-02-01) sum min
-    ("postgres", 36),
-    ("mysql", 31),
-    ("mssql", 21),
-    ("oracle", 15),
+    ("postgres", 101),
+    ("mysql", 80),
+    ("mssql", 55),
+    ("oracle", 57),
+    ("mongo", 20),
 ]; // ratchet-pin: end
 
 #[test]
@@ -352,7 +356,7 @@ const KNOWN_DEFECTS: &[&str] = &[
 ]; // ratchet-pin: end
 
 /// The fields a ledger row may carry.
-const ROW_KEYS: [&str; 10] = [
+const ROW_KEYS: [&str; 11] = [
     "native_type",
     "sample",
     "delivery",
@@ -362,8 +366,57 @@ const ROW_KEYS: [&str; 10] = [
     "today_delivery",
     "defect_samples",
     "clickhouse",
-    "batch_refuses",
+    "edges",
+    "refuses",
 ];
+
+/// The fields of an edge written as a mapping: its literal and a verdict per stage or target.
+const EDGE_KEYS: [&str; 5] = ["v", "x", "bigquery", "snowflake", "clickhouse"];
+
+/// Every error in a row's `edges:` and `refuses:`: the shape only, the verdict grammar is `dev/release_oracle/type_edges.py`'s.
+fn edge_violations(at: &str, r: &Value) -> Vec<String> {
+    let mut bad = Vec::new();
+    let text = |v: &Value| v.as_str().is_some_and(|s| !s.trim().is_empty());
+    if !r["refuses"].is_null() && !text(&r["refuses"]) {
+        bad.push(format!("{at}: `refuses:` is a verdict string"));
+    }
+    let edges = &r["edges"];
+    if edges.is_null() {
+        return bad;
+    }
+    let Some(list) = edges.as_sequence() else {
+        return vec![format!("{at}: `edges:` is a list")];
+    };
+    let mut seen = BTreeSet::new();
+    for (i, e) in list.iter().enumerate() {
+        let lit = match e {
+            Value::String(s) => Some(s.as_str()),
+            Value::Mapping(m) => {
+                for (k, v) in m {
+                    let k = k.as_str().unwrap_or("");
+                    if !EDGE_KEYS.contains(&k) {
+                        bad.push(format!("{at}: edges[{i}] `{k}:` is not an edge field"));
+                    } else if !text(v) {
+                        bad.push(format!("{at}: edges[{i}] `{k}:` is a non-empty string"));
+                    }
+                }
+                e["v"].as_str()
+            }
+            _ => None,
+        };
+        match lit {
+            Some(l) if !l.trim().is_empty() => {
+                if !seen.insert(l) {
+                    bad.push(format!("{at}: edges[{i}] `{l}` is listed twice"));
+                }
+            }
+            _ => bad.push(format!(
+                "{at}: edges[{i}] is a literal or a mapping with `v:`"
+            )),
+        }
+    }
+    bad
+}
 
 /// The fields of a row's `clickhouse:` map.
 const CLICKHOUSE_KEYS: [&str; 4] = ["type", "today", "defect", "defect_samples"];
@@ -463,6 +516,38 @@ fn a_known_defect_without_today_delivery_is_refused() {
 }
 
 /// A list of a canonical extension is a delivery label; a list of anything else is not.
+#[test]
+fn a_matrix_only_row_without_edges_is_refused() {
+    let mut doc = ledger();
+    row_mut(&mut doc, "mongo", "int").remove("edges").unwrap();
+    let bad = row_violations(&doc);
+    assert!(
+        bad.iter()
+            .any(|b| b.contains("engines.mongo.rows[int]") && b.contains("no sample")),
+        "{bad:?}"
+    );
+}
+
+#[test]
+fn an_edge_listed_twice_or_with_an_unknown_key_is_refused() {
+    let mut doc = ledger();
+    let row = row_mut(&mut doc, "postgres", "TEXT");
+    let edges = row
+        .get_mut("edges")
+        .and_then(Value::as_sequence_mut)
+        .unwrap();
+    let first = edges[0].clone();
+    edges.push(first);
+    let mut typo = serde_yaml_ng::Mapping::new();
+    typo.insert("v".into(), "'x'".into());
+    typo.insert("bigquerry".into(), "null".into());
+    edges.push(Value::Mapping(typo));
+    let bad = row_violations(&doc);
+    for want in ["is listed twice", "`bigquerry:` is not an edge field"] {
+        assert!(bad.iter().any(|b| b.contains(want)), "{want}: {bad:?}");
+    }
+}
+
 #[test]
 fn a_list_delivery_label_names_a_canonical_extension_only() {
     for (label, ok) in [

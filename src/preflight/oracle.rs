@@ -1,6 +1,4 @@
-//! Oracle preflight diagnostics for `rivet check` / `rivet plan` (the MSSQL
-//! module's shape: catalog probes over the `query_scalar` seam feed the shared
-//! [`assemble_diagnostic`]; no query plan is parsed, so `scan_type` stays `None`).
+//! Oracle preflight diagnostics for `rivet check` / `rivet plan` (the MSSQL module's shape.
 
 use super::ExportDiagnostic;
 use super::analysis::*;
@@ -60,7 +58,6 @@ fn diagnose_oracle(conn: &mut OracleSource, export: &ExportConfig) -> Result<Exp
         .map(std::borrow::Cow::Borrowed)
         .or_else(|| table_from_simple_query(base_query));
     let base_table = base_table_owned.as_deref();
-    // Values describe the relation only when the export reads it whole; counts need only no row filter.
     let whole_table = strip_select_star_from(base_query);
     let unfiltered_table = whole_table_relation(base_table, base_query);
     for col in key_columns(export) {
@@ -136,7 +133,7 @@ fn diagnose_oracle(conn: &mut OracleSource, export: &ExportConfig) -> Result<Exp
     ))
 }
 
-/// The preflight's verdict on a failed parse: a missing relation (ORA-00942) as the shared refusal, a missing column (ORA-00904) as the loud schema error, `None` for anything else.
+/// The preflight's verdict on a failed parse.
 fn oracle_schema_verdict(e: anyhow::Error, export: &ExportConfig) -> Option<anyhow::Error> {
     if crate::source::names_a_missing_relation(&e) {
         return Some(crate::source::code_a_missing_relation(
@@ -240,7 +237,6 @@ fn unknown_key_column_detail(col: &str, catalog: Option<&(String, bool)>) -> Str
 }
 
 /// `MIN`/`MAX` of `expr` over the export's rows, as display text.
-/// One boundary probe: MIN and MAX in one statement make Oracle scan the whole index, alone each is a seek.
 fn range_bound_sql(agg: &str, expr: &str, from: &str) -> String {
     format!("SELECT TO_CHAR({agg}({expr})) AS rivet_agg FROM {from}")
 }
@@ -266,8 +262,7 @@ fn range_min_max_oracle(
     (lo, bound("MAX"))
 }
 
-/// `Some(true)` when `column` leads some index on `table`, `Some(false)` when the
-/// probe ran and found none, `None` when it could not run.
+/// `Some(true)` when `column` leads some index on `table`, `Some(false)` when the probe ran and found none, `None` when it could not run.
 fn column_has_index_oracle(conn: &mut OracleSource, qualified: &str, column: &str) -> Option<bool> {
     scalar_i64(conn, &index_probe_sql(qualified, column), "index").map(|n| n > 0)
 }

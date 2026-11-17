@@ -16,13 +16,6 @@ fn placeholders(from: usize, count: usize) -> String {
 }
 
 /// Incremental cursor store — reads and writes `export_state`.
-///
-/// The cursor records the last extracted value so incremental runs can pick up
-/// where the previous run left off.  Invariant I3 (Write Before Cursor) governs
-/// the ordering of cursor updates relative to destination writes.
-/// Whether a stored cursor's owner is the identity a run progresses on. A legacy owner
-/// (attributed from a run's key descriptor, which names the primary column only) also
-/// matches a coalesce identity led by that column.
 fn identity_matches(owner: &str, expected: &str, legacy: bool) -> bool {
     if owner == expected {
         return true;
@@ -34,7 +27,7 @@ fn identity_matches(owner: &str, expected: &str, legacy: bool) -> bool {
             .is_some_and(|rest| rest.starts_with(','))
 }
 
-/// Whether two recorded streams provably name different objects: an empty one names none, and a bare name may be the qualified one.
+/// Whether two recorded streams provably name different objects.
 pub(super) fn streams_differ(stored: &str, now: &str) -> bool {
     let qualifies = |long: &str, short: &str| {
         long.strip_suffix(short)
@@ -70,7 +63,7 @@ fn rows_and_incarnation(population: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// Whether two recorded row sets are one: the same text, or a query as written and a substituted query that fills its `${...}` placeholders (what a plan sealed before templates were recorded carries); a population with no incarnation is one with any, and two incarnations are one only when equal.
+/// Whether two recorded row sets are one: the same text, or a query as written and a substituted query that fills its `${...}` placeholders (what a plan sealed before templates were recorded carries).
 fn same_rows(a: &str, b: &str) -> bool {
     let ((a_rows, a_incarnation), (b_rows, b_incarnation)) =
         (rows_and_incarnation(a), rows_and_incarnation(b));
@@ -99,7 +92,7 @@ fn joins(parts: &[String], text: &str) -> bool {
         .is_some()
 }
 
-/// Whether two recorded destinations are one: the same text, one as written and one that fills its `{date}`-style placeholders (what a plan sealed before destinations were recorded carries), or a local path as a run before 0.32 recorded it (relative to the working directory) and as it is anchored to the config's directory now.
+/// Whether two recorded destinations are one.
 fn same_place(a: &str, b: &str) -> bool {
     let around = crate::destination::placeholder::literal_parts;
     let fills = |template: &str, text: &str| matches!((around(template), around(text)), (Some(parts), None) if joins(&parts, text));
@@ -107,10 +100,10 @@ fn same_place(a: &str, b: &str) -> bool {
     a == b || fills(a, b) || fills(b, a) || anchors(a, b) || anchors(b, a)
 }
 
-/// Where the parts of an export land and in what format: the parts of a stored cursor's identity that are not what it reads.
+/// Where the parts of an export land and in what format.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Deserialize)]
 pub struct Landing {
-    /// The destination URI as the config writes it, `{date}`-style placeholders in place; empty when the key names none.
+    /// The destination URI as the config writes it, `{date}`-style placeholders in place.
     pub(crate) destination: String,
     /// The output format (`FormatType::label`); empty when the key names none.
     pub(crate) format: String,
@@ -228,7 +221,7 @@ pub enum Accepted {
     Rekeyed { held: String, from: String },
 }
 
-/// The progress a run would continue from, worded for a message: an interrupted run's anchor, else the cursor a clean run seeks from.
+/// The progress a run would continue from, worded for a message.
 fn held_progress(
     cursor: Option<&str>,
     anchor: Option<&str>,
@@ -266,9 +259,7 @@ fn checkpoint_settings(owner: &str) -> &'static str {
     }
 }
 
-/// The cursor column an incremental run's `key_descriptor_json` names, or `None` for
-/// any other strategy's descriptor.
-/// Whose stored progress a run reads and writes: the row it selects and the parts compared before use.
+/// The cursor column an incremental run's `key_descriptor_json` names, or `None` for any other strategy's descriptor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgressKey {
     /// Row part: the export's name.
@@ -277,7 +268,7 @@ pub struct ProgressKey {
     pub(crate) source: String,
     /// Compared part: the relation the query's outermost `FROM` names; empty when it names none.
     pub(crate) stream: String,
-    /// Compared part: the `search_path` an unqualified `stream` is resolved in; empty when the source sets none or the name is qualified.
+    /// Compared part: the `search_path` an unqualified `stream` is resolved in.
     pub(crate) schema: String,
     /// Compared part: the rows the query selects (`sql::row_set`); empty when the key names none.
     pub(crate) population: String,
@@ -291,7 +282,7 @@ pub struct ProgressKey {
     pub(crate) continues_high_water: bool,
     /// Whether this plan continues an interrupted run of its own mode (`ExtractionStrategy::is_resumable`).
     pub(crate) resumable: bool,
-    /// What shapes the bytes this plan writes; recorded with the run it opens and compared with the run it continues. Empty names nothing.
+    /// What shapes the bytes this plan writes; recorded with the run it opens and compared with the run it continues.
     pub(crate) shape: RunShape,
 }
 
@@ -370,7 +361,7 @@ impl ProgressClaim<'_> {
             .get_resume_run_id(&self.key.export_name, &self.key.source)
     }
 
-    /// The interrupted range-chunk run of this stream and its plan hash; a run left by a rivet that recorded no source is adopted or refused first.
+    /// The interrupted range-chunk run of this stream and its plan hash.
     pub fn chunk_run(&self) -> Result<Option<(String, String)>> {
         let (name, source) = (&self.key.export_name, &self.key.source);
         if let Some(own) = self.state.in_progress_chunk_run(name, Some(source))? {
@@ -422,8 +413,7 @@ fn descriptor_cursor_column(descriptor: &str) -> Option<String> {
 }
 
 impl StateStore {
-    /// The cursor of `export_name` writing to `scope` (its destination), or the legacy
-    /// pre-v30 row no scoped run has claimed yet.
+    /// The cursor of `export_name` writing to `scope` (its destination), or the legacy pre-v30 row no scoped run has claimed yet.
     pub fn get(&self, export_name: &str, scope: &str) -> Result<CursorState> {
         self.adopt_respelled_source(export_name, scope)?;
         Ok(self
@@ -447,8 +437,7 @@ impl StateStore {
             }))
     }
 
-    /// Move the legacy (unscoped) row to `scope` if this scope has none yet: the first
-    /// scoped writer continues it, and no other config sharing the name can read it after.
+    /// Move the legacy (unscoped) row to `scope` if this scope has none yet.
     fn claim_legacy_row(&self, export_name: &str, scope: &str) -> Result<()> {
         self.adopt_respelled_source(export_name, scope)?;
         if scope.is_empty() {
@@ -462,7 +451,7 @@ impl StateStore {
         Ok(())
     }
 
-    /// Move progress stored under another spelling of `scope` (its default port left out, its password unmasked) onto `scope`: the newest such cursor row unless `scope` holds one, and its checkpoint rows; the cursor rows left are deleted.
+    /// Move progress stored under another spelling of `scope` (its default port left out, its password unmasked) onto `scope`.
     pub(super) fn adopt_respelled_source(&self, export_name: &str, scope: &str) -> Result<()> {
         self.adopt_respelled_sources(&[export_name.to_string()], scope)
     }
@@ -494,7 +483,7 @@ impl StateStore {
         Ok(())
     }
 
-    /// Move the progress `export_name` holds under the source `from` onto `to`, except what `to` already holds; the cursor row of `from` is deleted.
+    /// Move the progress `export_name` holds under the source `from` onto `to`, except what `to` already holds.
     fn rekey_source(&self, export_name: &str, from: &str, to: &str) -> Result<()> {
         for sql in [
             "UPDATE export_state SET prefix = ?2 WHERE export_name = ?1 AND prefix = ?3 \
@@ -515,7 +504,7 @@ impl StateStore {
         Ok(())
     }
 
-    /// The cursors `key`'s export holds under other sources that deliver to the destination `key` delivers to, newest first, while it holds no progress under its own source: the signature of one server reached under another address.
+    /// The cursors `key`'s export holds under other sources that deliver to the destination `key` delivers to, newest first, while it holds no progress under its own source.
     fn progress_elsewhere(&self, key: &ProgressKey) -> Result<Vec<(String, String)>> {
         let (export_name, scope) = (key.export_name.as_str(), key.source.as_str());
         let here = key.landing.destination.as_str();
@@ -550,7 +539,7 @@ impl StateStore {
             .collect())
     }
 
-    /// Refuse a first run of `key`'s source when the export holds a cursor under another source that delivers to the same destination: it would read the whole table again and deliver it there beside what that cursor delivered.
+    /// Refuse a first run of `key`'s source when the export holds a cursor under another source that delivers to the same destination.
     pub fn refuse_respelled_source(&self, key: &ProgressKey) -> Result<()> {
         let Some((other, cursor)) = self
             .progress_elsewhere(key)?
@@ -647,7 +636,7 @@ impl StateStore {
         })
     }
 
-    /// Refuse a cursor stored for another destination or format than `key` delivers to; record the landing on a row written before landings were.
+    /// Refuse a cursor stored for another destination or format than `key` delivers to.
     fn claim_landing(
         &self,
         key: &ProgressKey,
@@ -697,7 +686,7 @@ impl StateStore {
         )
     }
 
-    /// Claim the stored progress of `key`: refuse progress stored for another stream (relation, schema or rows); adopt a row written before a part was recorded, or under another spelling of the source.
+    /// Claim the stored progress of `key`: refuse progress stored for another stream (relation, schema or rows).
     pub fn claim(&self, key: ProgressKey) -> Result<ProgressClaim<'_>> {
         let (export_name, scope, stream) = (&key.export_name, &key.source, &key.stream);
         self.adopt_respelled_source(export_name, scope)?;
@@ -774,7 +763,7 @@ impl StateStore {
         Ok(ProgressClaim { state: self, key })
     }
 
-    /// Refuse `key` while its stream holds an unfinished run this plan does not continue: one of another mode, or of its own mode when the plan keeps no checkpoint.
+    /// Refuse `key` while its stream holds an unfinished run this plan does not continue.
     fn refuse_unfinished_run(&self, key: &ProgressKey, anchor: Option<(&str, &str)>) -> Result<()> {
         let export_name = &key.export_name;
         let chunk_run = self.unfinished_chunk_run(export_name, &key.source)?;
@@ -915,9 +904,7 @@ impl StateStore {
         )
     }
 
-    /// Owner of a pre-v26 row: the key of the latest successful run that wrote this
-    /// value — a keyset run's `chunk_key`, or the cursor column an incremental run
-    /// named in its key descriptor.
+    /// Owner of a pre-v26 row: the key of the latest successful run that wrote this value.
     fn legacy_cursor_owner(&self, export_name: &str, value: &str) -> Result<Option<String>> {
         let latest = self.query_opt(
             "SELECT mode, chunk_key, cursor_max, key_descriptor_json FROM export_metrics \
@@ -975,9 +962,8 @@ impl StateStore {
         Ok(())
     }
 
-    /// Advance the cursor value without an identity: a pre-v26 row, as a fixture writes
-    /// it. Every runner records which column the value belongs to (`update_with_column`).
-    #[allow(dead_code)] // fixtures only: unit, offline and live tests stage pre-v26 rows
+    /// Advance the cursor value without an identity: a pre-v26 row, as a fixture writes it.
+    #[allow(dead_code)]
     pub fn update_legacy(&self, export_name: &str, cursor_value: &str) -> Result<()> {
         let now = chrono::Utc::now().to_rfc3339();
         let sql = "INSERT INTO export_state (export_name, last_cursor_value, last_run_at)
@@ -989,10 +975,7 @@ impl StateStore {
         Ok(())
     }
 
-    /// Round-5 (keyset checkpoint-resume manifest completeness): persist the
-    /// in-progress keyset run_id beside the resume cursor, so a crash+resume reuses
-    /// it and reconstructs every committed page's manifest part from file_log. Set on
-    /// the first checkpointed run, read on resume, cleared when the run finalizes.
+    /// Round-5 (keyset checkpoint-resume manifest completeness).
     pub fn set_resume_run_id(&self, key: &ProgressKey, run_id: &str) -> Result<()> {
         let (export_name, scope) = (key.export_name.as_str(), key.source.as_str());
         self.claim_legacy_row(export_name, scope)?;
@@ -1065,18 +1048,7 @@ impl StateStore {
             > 0)
     }
 
-    /// Null ONLY the persisted keyset high-water mark (`last_cursor_value`),
-    /// leaving `resume_run_id` and the progression boundary intact.
-    ///
-    /// Crash-recovery-only (non-incremental) keyset needs this at the start of a
-    /// FRESH run: `last_cursor_value` is a run-independent persistent field, so a
-    /// prior COMPLETED run leaves its final high-water mark behind. If this fresh
-    /// run then crashes BEFORE its first page commits, the recovery run would load
-    /// that stale mark as this run's "resume point" and skip the whole table
-    /// (`WHERE key > <prior-max>` → 0 rows → a successful empty manifest). Clearing
-    /// it here ties crash-recovery to THIS run's committed progress only.
-    /// Incremental keyset deliberately does NOT clear it — continuing from the
-    /// prior high-water mark is the whole point of `keyset_incremental`.
+    /// Null ONLY the persisted keyset high-water mark (`last_cursor_value`), leaving `resume_run_id` and the progression boundary intact.
     pub fn clear_cursor_value(&self, export_name: &str, scope: &str) -> Result<()> {
         self.claim_legacy_row(export_name, scope)?;
         self.execute(
@@ -1088,18 +1060,11 @@ impl StateStore {
     }
 
     /// Return an export to a "never ran" state.
-    ///
-    /// Clears the incremental cursor (`export_state`) **and** the committed /
-    /// verified boundary (`export_progression`). Both must go: a surviving
-    /// progression row would make `rivet state progression` report a stale
-    /// committed boundary after `state show` is already empty.
-    ///
-    /// Only the row of `source` (and the row written before sources were recorded) goes: an export of the same name reading another source keeps its cursor.
     pub fn reset(&self, export_name: &str, source: &str) -> Result<()> {
         self.reset_all(&[export_name.to_string()], source)
     }
 
-    /// The export names `source` holds progress under, in byte order: those with a cursor on `source` (under any spelling of it, or written before sources were recorded) and the boundaries no cursor owns and no chunk run of another source recorded.
+    /// The export names `source` holds progress under, in byte order.
     pub fn stored_export_names(&self, source: &str) -> Result<Vec<String>> {
         if seeded!("state-reset-misreads-stored-partitions", true, false) {
             return self.query(
@@ -1146,7 +1111,7 @@ impl StateStore {
         Ok(names.into_iter().collect())
     }
 
-    /// Whether the state holds anything under `export_name`: a cursor, a boundary, a chunk run, a run, a file or a journal.
+    /// Whether the state holds anything under `export_name`.
     pub fn holds_export(&self, export_name: &str) -> Result<bool> {
         let sql = [
             "export_state",
@@ -1198,7 +1163,7 @@ impl StateStore {
         })
     }
 
-    /// Re-bind the stored progress of `key` to the stream, schema and rows it reads now, on the operator's word: the cursor value, its column and any anchor stay. Refused for a cursor written for another column; changes a row only where a run of `key` is refused for its stream.
+    /// Re-bind the stored progress of `key` to the stream, schema and rows it reads now, on the operator's word.
     pub fn accept(&self, key: &ProgressKey) -> Result<Accepted> {
         let (export_name, scope) = (key.export_name.as_str(), key.source.as_str());
         self.claim_legacy_row(export_name, scope)?;
@@ -2399,7 +2364,7 @@ mod tests {
         );
     }
 
-    /// The remedy for two servers works from the refused state: accept, reset, then a full pass is allowed; the progress it writes makes the old address the refused one.
+    /// The remedy for two servers works from the refused state.
     #[test]
     fn two_servers_sharing_a_destination_start_over_by_accept_then_reset() {
         let s = store();
@@ -2509,7 +2474,7 @@ mod tests {
         }
     }
 
-    /// An edited filter or another schema under the same name is another stream: refused twice by code, continued once restored, started over after a reset.
+    /// An edited filter or another schema under the same name is another stream.
     #[test]
     fn an_edited_filter_or_another_schema_is_refused_until_it_is_restored_or_reset() {
         let s = store();
@@ -2575,7 +2540,7 @@ mod tests {
         assert_eq!(fresh.cursor().unwrap().last_cursor_value, None);
     }
 
-    /// A query as written and a substituted query that fills its placeholders are one row set; two templates, or two substituted queries, are one only when equal.
+    /// A query as written and a substituted query that fills its placeholders are one row set.
     #[test]
     fn a_substituted_query_is_the_rows_of_the_template_it_fills() {
         let written = "from ? where region = '${region}' and day >= ${from} order by id";
@@ -2620,7 +2585,7 @@ mod tests {
         }
     }
 
-    /// A plan sealed before templates were recorded carries the substituted query: it continues progress stored under the template, and the template continues progress it stored.
+    /// A plan sealed before templates were recorded carries the substituted query.
     #[test]
     fn a_plan_sealed_with_its_values_substituted_and_a_template_continue_each_other() {
         let written = "from ? where spent = ${spent}";
@@ -2652,7 +2617,7 @@ mod tests {
         }
     }
 
-    /// A MongoDB collection dropped and created again is another stream: refused by code with both incarnations worded, then accepted on the operator's word.
+    /// A MongoDB collection dropped and created again is another stream.
     #[test]
     fn a_collection_created_again_is_refused_until_it_is_accepted_or_reset() {
         let rows = "select * from ?";
@@ -2720,7 +2685,7 @@ mod tests {
         column(s, &format!("SELECT {parts} FROM export_state"))
     }
 
-    /// `state accept` keeps the cursor under the edited stream: refused twice before, continued twice after, and the row it left is refused for the stream it had.
+    /// `state accept` keeps the cursor under the edited stream.
     #[test]
     fn an_accepted_edit_keeps_the_cursor_under_what_the_export_reads_now() {
         for (edited, now) in [
@@ -2857,7 +2822,7 @@ mod tests {
         assert_eq!(claim.resume_run_id().unwrap().as_deref(), Some("run_7"));
     }
 
-    /// A name read through a one-schema search_path is that schema's table: qualifying it by hand continues, another schema's is refused.
+    /// A name read through a one-schema search_path is that schema's table.
     #[test]
     fn a_search_path_resolves_the_unqualified_name_it_is_compared_by() {
         let s = store();
@@ -3014,7 +2979,7 @@ mod tests {
         );
     }
 
-    /// After a password rotation two unmasked rows exist: the newest is adopted, and a row already under the masked scope outranks both.
+    /// After a password rotation two unmasked rows exist.
     #[test]
     fn the_newest_unmasked_row_is_adopted_and_the_masked_row_outranks_it() {
         let rotated = "postgres://host=h user=u password=rotated dbname=d";
@@ -3100,10 +3065,6 @@ mod tests {
 
     #[test]
     fn clear_cursor_value_nulls_the_cursor_but_keeps_the_resume_run_id() {
-        // The keyset stale-cursor fix: a fresh non-incremental run must null the
-        // prior COMPLETED run's high-water mark so a pre-first-commit crash cannot
-        // resume from it (skipping the whole table) — WITHOUT dropping the fresh
-        // resume_run_id it is about to set (crash-recovery needs that).
         let s = store();
         s.update_legacy("orders", "9000000").unwrap();
         anchor(&s, "orders", "", "run_2", "").unwrap();
@@ -3152,16 +3113,7 @@ mod tests {
         assert_eq!(all[2].export_name, "gamma");
     }
 
-    // ─── Cursor round-trip / monotonicity (QA backlog Task 3.1) ─────────────
-    //
-    // ADR-0001 I3 makes monotonicity a pipeline responsibility, not a storage
-    // one.  These tests pin the *value-preservation* contract on the state
-    // side — the subset the pipeline relies on when reading the stored cursor
-    // back on resume.
-
-    /// Duplicate cursor values across runs are common when the cursor column
-    /// is a low-precision timestamp with ties.  The store must return each
-    /// written value verbatim.
+    /// Duplicate cursor values across runs are common when the cursor column is a low-precision timestamp with ties.
     #[test]
     fn duplicate_cursor_values_are_stored_as_written() {
         let s = store();
@@ -3173,9 +3125,7 @@ mod tests {
         );
     }
 
-    /// Microsecond/nanosecond precision must not be rounded or truncated on
-    /// round-trip — otherwise the pipeline's strict-greater-than boundary
-    /// check would re-export rows on the microsecond edge.
+    /// Microsecond/nanosecond precision must not be rounded or truncated on round-trip.
     #[test]
     fn high_precision_timestamp_is_preserved_byte_for_byte() {
         let s = store();
@@ -3187,14 +3137,13 @@ mod tests {
         );
     }
 
-    /// Cursor values can be arbitrary UTF-8: UUID v7, version tokens,
-    /// Cyrillic names, multiline strings, the empty string.
+    /// Cursor values can be arbitrary UTF-8: UUID v7, version tokens, Cyrillic names, multiline strings, the empty string.
     #[test]
     fn unicode_and_binary_like_cursor_values_round_trip() {
         let s = store();
         let values = [
             "2024-06-01",
-            "018f1c0b-7a34-7b54-8e16-1c5a9b3f1c2d", // UUID v7
+            "018f1c0b-7a34-7b54-8e16-1c5a9b3f1c2d",
             "ελληνικά 🚀 cursor",
             "v\n\t with whitespace",
             "",
@@ -3209,8 +3158,7 @@ mod tests {
         }
     }
 
-    /// Resume-from-zero tooling depends on `reset` producing a state
-    /// indistinguishable from "never ran": both cursor and last_run_at gone.
+    /// Resume-from-zero tooling depends on `reset` producing a state indistinguishable from "never ran".
     #[test]
     fn reset_clears_cursor_state_completely() {
         let s = store();
@@ -3224,16 +3172,13 @@ mod tests {
         );
     }
 
-    /// #22 (0.9.x audit): `reset` left `export_progression` behind, so
-    /// `rivet state progression` reported a stale committed boundary after
-    /// `state show` was already empty. Reset must clear progression too.
+    /// #22 (0.9.x audit): `reset` left `export_progression` behind, so `rivet state progression` reported a stale committed boundary after `state show` was already empty.
     #[test]
     fn reset_clears_committed_progression() {
         let s = store();
         s.update_legacy("orders", "100").unwrap();
         s.record_committed_incremental("orders", "100", "run-1")
             .unwrap();
-        // Other exports' progression must survive — reset is per-export.
         s.record_committed_incremental("users", "9", "run-u")
             .unwrap();
 
@@ -3342,12 +3287,7 @@ mod tests {
         assert!(s.get_owned("orders", "", "visit_last_action_time").is_err());
     }
 
-    /// A 0.25.0 incremental run left no `cursor_column`, but its `export_metrics` row
-    /// carries `key_descriptor_json = {"strategy":"incremental","key":<column>}` and the
-    /// value it wrote: the cursor is attributed to that column, and a switched
-    /// `cursor_column` is refused instead of comparing the new column against the old
-    /// column's value (MT6 — the field bug on every 0.25.0 upgrade). RED against the
-    /// keyset-only attribution.
+    /// A 0.25.0 incremental run left no `cursor_column`.
     #[test]
     fn legacy_row_is_owned_by_the_incremental_run_that_wrote_it() {
         let s = store();
@@ -3366,8 +3306,6 @@ mod tests {
             .to_string();
         assert!(err.contains("written for `idvisit`"), "{err}");
         assert!(err.contains("state reset"), "{err}");
-        // The descriptor names the primary column; a coalesce identity led by it is the
-        // same cursor continuing, not a switch.
         assert!(
             s.get_owned("orders", "", "coalesce(idvisit,updated_at)")
                 .is_ok()
@@ -3376,7 +3314,6 @@ mod tests {
             s.get_owned("orders", "", "coalesce(updated_at,idvisit)")
                 .is_err()
         );
-        // Another value than the one the run wrote: not that run's cursor.
         let t = store();
         t.update_legacy("orders", "500").unwrap();
         metric_with_descriptor(
@@ -3433,7 +3370,7 @@ mod tests {
         }
     }
 
-    /// A cursor stored by a run before 0.32 names the local path relative to the working directory; the same export anchored to the config's directory continues it, and another directory under that anchor is still refused.
+    /// A cursor stored by a run before 0.32 names the local path relative to the working directory.
     #[test]
     fn a_cursor_stored_under_the_relative_local_spelling_continues_under_its_anchored_form() {
         let s = store();

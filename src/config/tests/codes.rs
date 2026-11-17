@@ -333,3 +333,63 @@ fn a_qualified_override_naming_an_uncaptured_table_is_coded_column_override_tabl
         "names table 'ghost'",
     );
 }
+
+#[test]
+fn a_zero_batch_an_empty_or_nul_path_and_a_long_name_are_refused_at_load() {
+    assert_refused(
+        &yaml("", &format!("{QUERY}    tuning:\n      batch_size: 0\n")),
+        crate::error::codes::CONFIG_VALUE_OUT_OF_RANGE,
+        "tuning.batch_size must be >= 1",
+    );
+    assert_refused(
+        &yaml("  tuning:\n    batch_size: 0\n", QUERY),
+        crate::error::codes::CONFIG_VALUE_OUT_OF_RANGE,
+        "tuning.batch_size must be >= 1",
+    );
+    let path = crate::error::codes::CONFIG_PATH_UNSAFE;
+    assert_refused(
+        &yaml("", QUERY).replace("path: ./out", "path: \"\""),
+        path,
+        "is empty or holds a NUL",
+    );
+    assert_refused(
+        &yaml("", QUERY).replace("path: ./out", "path: \"a\\0b\""),
+        path,
+        "is empty or holds a NUL",
+    );
+    assert_refused(
+        &yaml("", QUERY).replace("name: users", &format!("name: {}", "a".repeat(201))),
+        path,
+        "longer than 200 bytes",
+    );
+}
+
+#[test]
+fn the_neighbours_of_the_load_refusals_still_load() {
+    for text in [
+        yaml("", &format!("{QUERY}    tuning:\n      batch_size: 1\n")),
+        yaml("", QUERY).replace("name: users", &format!("name: {}", "a".repeat(200))),
+        yaml("", QUERY),
+    ] {
+        let cfg = Config::from_yaml(&text).expect("a valid neighbour loads");
+        assert_eq!(cfg.exports.len(), 1);
+    }
+}
+
+#[test]
+fn a_url_scheme_of_another_engine_is_refused_at_load_and_a_matching_one_loads() {
+    let mismatch = yaml("", QUERY).replace("postgresql://", "mysql://");
+    assert_refused(
+        &mismatch,
+        crate::error::codes::CONFIG_SOURCE_URL_SCHEME_MISMATCH,
+        "the url scheme names mysql",
+    );
+    let matching = Config::from_yaml(&yaml("", QUERY)).expect("a matching scheme loads");
+    assert_eq!(matching.source.source_type, SourceType::Postgres);
+    let unset = yaml("", QUERY).replace(
+        "url: \"postgresql://localhost/test\"",
+        "url_env: RIVET_I4_UNSET_URL",
+    );
+    let cfg = Config::from_yaml(&unset).expect("an unset url_env is left to the connect");
+    assert_eq!(cfg.exports[0].name, "users");
+}

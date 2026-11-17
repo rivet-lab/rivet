@@ -1,8 +1,4 @@
 //! `rivet check --type-report` — tabular and JSON output.
-//!
-//! Roadmap §9 ("Type Fidelity Report") and §16 ("BigQuery Compatibility Layer").
-//! Renders a `Vec<TypeMapping>` plus any `PolicyViolation`s as either a
-//! fixed-width terminal table or newline-delimited JSON.
 
 use serde::Serialize;
 
@@ -32,9 +28,7 @@ pub struct TypeReportRow {
     pub target_status: Option<TargetStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_note: Option<String>,
-    /// Type a generic Parquet reader infers without a declared schema, surfaced
-    /// only when it diverges from `target_type` (e.g. BigQuery autoloads JSON
-    /// as BYTES). Present when `--target` is set and autoload ≠ native.
+    /// Type a generic Parquet reader infers without a declared schema, surfaced only when it diverges from `target_type` (e.g.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub autoload_type: Option<TargetType>,
     /// Materialization / load-schema hint (L5) to recover the native type.
@@ -45,14 +39,11 @@ pub struct TypeReportRow {
     pub key_landing: crate::preflight::key_admission::KeyLanding,
 }
 
-/// One export's type-report data — or, for a multiplex `tables:` CDC export, ONE
-/// TABLE'S (see [`collect_reports`]).
+/// One export's type-report data — or, for a multiplex `tables:` CDC export, ONE TABLE'S (see [`collect_reports`]).
 #[derive(Serialize)]
 pub struct ExportTypeReport {
     pub export: String,
-    /// The source table this report describes. `Some` only for one table of a
-    /// multiplex `tables:` stream, where the export is N tables and each gets its
-    /// own document; `None` when the export IS the unit (`table:` / `query:`).
+    /// The source table this report describes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub table: Option<String>,
     pub columns: Vec<TypeReportRow>,
@@ -60,10 +51,7 @@ pub struct ExportTypeReport {
     /// True when any column failed target-compatibility.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub target_failures: bool,
-    /// Target-native recovery SQL (ADR-0014 L5): a post-load transform that
-    /// recovers types bare autoload degrades.
-    /// `None` for targets that autoload faithfully (DuckDB) or when no target
-    /// is set.
+    /// Target-native recovery SQL (ADR-0014 L5): a post-load transform that recovers types bare autoload degrades.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recovery_sql: Option<String>,
 }
@@ -81,10 +69,7 @@ impl ExportTypeReport {
         self.target_failures
     }
 
-    /// How this report addresses itself in operator-facing output: the export
-    /// name, or `<export>/<table>` for one table of a multiplex stream — the same
-    /// addressing `rivet validate` prints for the same layout, so an operator
-    /// reading `check` and `validate` side by side sees one naming scheme.
+    /// How this report addresses itself in operator-facing output.
     pub fn display_name(&self) -> String {
         match &self.table {
             Some(t) => format!("{}/{}", self.export, t),
@@ -94,18 +79,6 @@ impl ExportTypeReport {
 }
 
 /// The `(table, query)` units one export resolves to for type resolution.
-///
-/// A multiplex `tables:` CDC export drives N tables through ONE change stream,
-/// and each lands in its own destination sub-prefix and its own warehouse table
-/// — so it needs one resolver document PER TABLE. It also has no `query:` /
-/// `table:` at all, so asking it for one is not merely coarse: `resolve_query`
-/// bails ("must specify exactly one of 'query', 'query_file', or 'table'"),
-/// which is how a multiplex export got NO type report at all (#252).
-///
-/// The probe query is the same `SELECT * FROM {table}` the CDC capture itself
-/// uses for each table's schema (`source::cdc::CdcSchemaResolver::resolve`),
-/// through the same identifier guard — config-load gates a `tables:` entry only
-/// for FILENAME safety, which is weaker than SQL interpolation needs.
 fn report_units(
     export: &ExportConfig,
     config_dir: &std::path::Path,
@@ -119,9 +92,6 @@ fn report_units(
                 Ok((Some(t.clone()), format!("SELECT * FROM {t}")))
             })
             .collect(),
-        // Resolve the effective query the same way the export pipeline does, so
-        // the `table:` shortcut (and `query_file:` / `${var}` params) produce a
-        // real query instead of an empty string.
         None => Ok(vec![(None, export.resolve_query(config_dir, params)?)]),
     }
 }
@@ -153,19 +123,6 @@ pub(crate) fn refuse_override_wire_mismatch(
 }
 
 /// The `columns:` overrides that apply to ONE resolver unit.
-///
-/// Extracted from [`collect_reports`] so the rule is observable WITHOUT a live
-/// database — the resolver itself opens a connection, so a test of the inline
-/// expression could only re-implement it, which is the self-oracle class. This
-/// is the real producer of the value the report (and therefore `rivet load`'s
-/// warehouse DDL) is built from.
-///
-/// `table` is the multiplex `tables:` entry when there is one; otherwise the
-/// unit IS the export, so its own `table:` supplies the name. That fallback is
-/// the half that was missing: the multiplex arm narrowed and the single-table
-/// arm passed the whole map through, so a qualified key on a `table:` export
-/// (`orders.amount` with `table: public.orders`) matched no column here while
-/// `plan::build` applied it to the run.
 fn unit_overrides(
     export: &ExportConfig,
     table: Option<&str>,
@@ -175,15 +132,6 @@ fn unit_overrides(
 }
 
 /// What to do when a CDC capture instance cannot be resolved to its relation.
-///
-/// The two callers have different stakes, and one shared decision was wrong for one
-/// of them. `rivet check --type-report` is run BEFORE `sp_cdc_enable_table`, so an
-/// unreadable cdc catalog is its NORMAL state and a report describing the configured
-/// relation is useful. `rivet load` PLANS the warehouse DDL from the same reports —
-/// and `collect_type_reports`' own docstring says a report that cannot be collected
-/// is an ERROR there, because a missing report is a table that silently does not
-/// load. Round-5 made the lookup advisory for both, which turned the load's failure
-/// from missing into WRONG: DDL from one relation, parquet from another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OnUnresolvedCapture {
     /// Type the configured relation and warn — the preflight's stance.
@@ -193,11 +141,6 @@ pub enum OnUnresolvedCapture {
 }
 
 /// Where a report is being collected FROM, and on whose behalf.
-///
-/// Grouped rather than passed loose because the last field is a stance, not a
-/// datum: two callers with different stakes must each state it (see
-/// [`OnUnresolvedCapture`]), and a bare trailing bool at a 7-argument call site is
-/// exactly the kind of thing that gets copied wrong.
 pub struct ReportContext<'a> {
     pub target: Option<ExportTarget>,
     pub config_dir: &'a std::path::Path,
@@ -216,21 +159,11 @@ enum Unresolved {
 }
 
 /// Can the configured `table:` name its relation WITHOUT the catalog?
-///
-/// A schema-qualified name can: it means one relation on any connection, whatever
-/// the session's default schema. A bare name cannot — that is the whole reason the
-/// capture-instance resolution exists.
 pub(crate) fn degrade_is_unambiguous(configured: Option<&str>) -> bool {
     configured.is_some_and(|t| t.contains('.'))
 }
 
 /// Must an unresolvable capture instance REFUSE, rather than degrade?
-///
-/// Only when both are true: this caller plans something from the answer
-/// ([`OnUnresolvedCapture::Fail`]), AND the configured name cannot stand in for the
-/// catalog's. Round 6 keyed this off the error variant instead, which left the
-/// `Ok(None)` branch degrading under `Fail` — and refused schema-qualified configs
-/// the catalog was not needed for, killing loads of artifacts already on disk.
 pub(crate) fn unresolved_capture_is_fatal(
     on_unresolved: OnUnresolvedCapture,
     configured: Option<&str>,
@@ -238,16 +171,7 @@ pub(crate) fn unresolved_capture_is_fatal(
     on_unresolved == OnUnresolvedCapture::Fail && !degrade_is_unambiguous(configured)
 }
 
-/// Collect type mappings for one export from a live connection — **one report
-/// per unit**: one for an ordinary export, one PER TABLE for a multiplex
-/// `tables:` CDC stream (see [`report_units`]).
-///
-/// The fan-out lives here rather than at each caller because both callers need
-/// it and neither can be trusted to re-derive it: `rivet check --target` renders
-/// these documents and `rivet load` PLANS from them, so a caller that saw one
-/// document per export would load N tables into one warehouse table (or, before
-/// #252, fail outright). One connection serves every table — a 154-table
-/// multiplex must not open 154 of them.
+/// Collect type mappings for one export from a live connection.
 pub fn collect_reports(
     config: &Config,
     export: &ExportConfig,
@@ -270,19 +194,6 @@ pub fn collect_reports(
     units
         .into_iter()
         .map(|unit| {
-            // A `columns:` override on a multiplex export can be qualified
-            // (`orders.amount`) or bare — narrow it to THIS table exactly the way
-            // the capture does, so `check`/`load` type a table the same way `run`
-            // writes it.
-            // The unit's table: a `tables:` entry for a multiplex export, else
-            // the export's OWN `table:`. `None` only for a `query:` export.
-            //
-            // The `.or(export.table)` fallback is the half that was missing: the
-            // multiplex arm narrowed and the single-table arm passed the map
-            // through whole, so on `table: public.orders` a qualified key
-            // (`orders.amount`) matched NOTHING here while `plan::build` applied
-            // it to the run. `overrides_for_unit` is the ONE rule all three
-            // sites now share, so they cannot drift apart again.
             let overrides = unit_overrides(export, unit.table.as_deref(), column_overrides);
             collect_one(
                 src.as_mut(),
@@ -348,41 +259,11 @@ fn resolved_units(
         })
         .collect();
 
-    // The THIRD reading of one config, and it must agree with the other two.
-    //
-    // On SQL Server a CDC export's `capture_instance:` names its source object in
-    // the catalog, and the configured `table:` may be a bare name that resolves
-    // elsewhere. The extract follows the catalog (`resolved_identity`, and the
-    // snapshot leg's plan-time lookup); this probe was still doing `SELECT * FROM
-    // <configured>` in the connection's default schema. Round-4 MEASURED the split:
-    // `rivet check` reported a decoy's columns and row count with verdict
-    // ACCEPTABLE while the run wrote the captured relation's — and `rivet load`
-    // PLANS the warehouse schema from these very reports, so it would create
-    // `<table>__changes` with one relation's columns and feed it the other's
-    // parquet. Before the resolution landed all three were wrong TOGETHER, which is
-    // consistent and survivable; disagreeing is not.
     if config.source.source_type == SourceType::Mssql
         && let Some(cdc) = &export.cdc
         && let Some(ci) = &cdc.capture_instance
     {
-        // Which stance applies is decided by ONE question, and round 6 asked the
-        // wrong one: not "did the catalog read fail?" but "can the configured string
-        // name the relation on its own?" Gating on the error VARIANT left the
-        // `Ok(None)` branch — a disabled instance, a typo, CDC not yet enabled —
-        // degrading under `Fail` too, which is exactly the branch where degrading is
-        // wrong. MEASURED: a load then planned `amount` as BIGNUMERIC from a decoy's
-        // DECIMAL(18,4) while the parquet held the captured table's INT; every column
-        // NAME matched, so every row loaded and every count agreed.
-        //
-        // A SCHEMA-QUALIFIED `table:` is unambiguous without the catalog — it names
-        // one relation on any connection, whatever the default schema — so degrading
-        // to it is safe for either caller. A BARE name is not, and that is the only
-        // case where the two callers must part.
         let resolved = crate::source::mssql::cdc::source_object_of_capture_instance(url, ci, tls);
-        // WHY it is unresolved decides which repair to name. Round 8: the single
-        // remedy "restore access to the cdc schema" was inert on the no-row branch,
-        // which is reached with cdc access working — the same shape (a remedy correct
-        // on one cause, wrong on the other) that round 6 had just removed.
         let resolved_kind = match &resolved {
             Ok(Some(_)) => Unresolved::Resolved,
             Ok(None) => Unresolved::NoRow,
@@ -408,17 +289,6 @@ fn resolved_units(
             (_, Some(why)) => {
                 let configured = export.table.as_deref();
                 if unresolved_capture_is_fatal(on_unresolved, configured) {
-                    // The remedy is branched off the CAUSE, and it leads with the one
-                    // that does not change the export's identity. Round 8 caught both
-                    // halves of the first version: it offered "restore access to the
-                    // cdc schema" on a branch reached WITH cdc access working, and
-                    // prescribed qualifying the name without saying what that does —
-                    // `warehouse_table_name` folds the dot, so `orders` becomes
-                    // `dbo_orders` and the load silently starts filling a NEW, empty
-                    // warehouse table while the old one is left behind, stale and
-                    // still read downstream. The `log::info!` announcing the fold is
-                    // invisible at the default level. A hint that repoints the
-                    // destination is not a fix, it is a second incident.
                     let remedy = if matches!(resolved_kind, Unresolved::NoRow) {
                         "Enable capture on the table (`sys.sp_cdc_enable_table`) or \
                          correct `capture_instance:`"
@@ -444,13 +314,6 @@ fn resolved_units(
                     "mssql: {why} — typing `{}` as the connection resolves it. {}",
                     configured.unwrap_or("the export"),
                     if degrade_is_unambiguous(configured) {
-                        // Claims unambiguity of the NAME only. The first version said
-                        // "the same relation the catalog would have named", which rivet
-                        // has not established and which round 8 measured FALSE: a
-                        // qualified `table:` pointing at a decoy while
-                        // `capture_instance:` names another relation made `check` print
-                        // ACCEPTABLE / "Looks good." over the decoy's types for a config
-                        // `run` refuses outright.
                         "The name is schema-qualified, so it means one relation on any \
                          connection — but rivet could not confirm it is the one the \
                          capture instance emits; `rivet run` checks that against the \
@@ -492,8 +355,7 @@ pub(crate) fn connect_source(
     )
 }
 
-/// What a successful run records for the load about one unit: its resolved
-/// column types and the source primary key, in key order.
+/// What a successful run records for the load about one unit.
 pub struct CapturedUnit {
     pub table: Option<String>,
     pub mappings: Vec<crate::types::TypeMapping>,
@@ -619,25 +481,7 @@ fn refuse_captured_units(
     Ok(())
 }
 
-/// #32 (column-applicability): downgrade every overridden column whose override
-/// *narrows* the autodetected source type to [`TypeFidelity::Lossy`].
-///
-/// A `columns:` override like `price numeric(10,2)` → `decimal(20,0)` drops the
-/// two fractional digits at `run`, but `derive_fidelity` only ever sees the
-/// RESOLVED (overridden) type and labels it `exact` — so `check` disagrees with
-/// what `run` actually does. Re-probing the source WITHOUT overrides is what
-/// makes the narrowing visible; we downgrade only when autodetect resolved the
-/// source type confidently, never on a guess, so we don't fabricate a loss we
-/// can't prove.
-///
-/// `reprobe` is a closure rather than the `&mut dyn Source` itself so the
-/// EARLY-RETURN guard is testable without a database. That guard is not a
-/// micro-optimisation: it is one saved round-trip per report, and since a
-/// multiplex `tables:` export produces one report per captured table, a
-/// 154-table schema pays it 154 times. Losing it the other way is worse —
-/// skipping the block when overrides ARE present turns a lossy override back
-/// into a confident `exact`, which is the #32 bug returning. Both directions are
-/// pinned by `narrowing_downgrade_reprobes_only_when_overrides_exist`.
+/// #32 (column-applicability): downgrade every overridden column whose override *narrows* the autodetected source type to [`TypeFidelity::Lossy`].
 fn downgrade_narrowing_overrides(
     mappings: &mut [crate::types::TypeMapping],
     column_overrides: &ColumnOverrides,
@@ -711,12 +555,6 @@ pub fn report_from_mappings(
 ) -> ExportTypeReport {
     let mut violations = policy.validate(&mappings);
 
-    // Format-awareness: type resolution above is for the Parquet representation,
-    // but a CSV export rejects columns CSV can't serialize (lists, etc.) up front
-    // at writer creation. Surface those here so `check`/`--strict` agree with the
-    // run — otherwise a list column reports "safe" only for the CSV run to fail
-    // loud ("CSV cannot serialize column …"). Fatality follows the unsupported
-    // policy action (Fail under `--strict`, Warn otherwise).
     if export.format == FormatType::Csv {
         let fatal = policy.on_unsupported_type == PolicyAction::Fail;
         for m in &mappings {
@@ -748,8 +586,6 @@ pub fn report_from_mappings(
                     if spec.status == TargetStatus::Fail {
                         target_failures = true;
                     }
-                    // Surface the autoloaded type only when it diverges from the
-                    // native type — that divergence is the operator-facing point.
                     let autoload =
                         (spec.autoload_type != spec.target_type).then_some(spec.autoload_type);
                     (
@@ -786,12 +622,6 @@ pub fn report_from_mappings(
         })
         .collect();
 
-    // L5 recovery SQL (ADR-0014): a post-load transform for operators whose
-    // bare autoload would degrade types. `None` for DuckDB (faithful autoload)
-    // or when no target is set.
-    // The recovery SQL names the table it recovers — for a multiplex unit that is
-    // THIS table, not the export (154 tables all pointed at a `cdc` table would be
-    // a hint the operator cannot run).
     let sql_table = table.as_deref().unwrap_or(&export.name);
     let recovery_sql = target.and_then(|t| t.recovery_sql(&t.resolve_table(&mappings), sql_table));
 
@@ -973,18 +803,7 @@ fn fidelity_marker(f: TypeFidelity) -> &'static str {
     }
 }
 
-/// Detect whether a `columns:` override *narrows* the autodetected source type
-/// in a value-losing way. Returns `Some(reason)` to flag the column `Lossy`,
-/// `None` when the override preserves or widens the type (or when the comparison
-/// is not applicable).
-///
-/// Today this covers the decimal case the audit exercises (#32): a scale or
-/// integer-digit reduction on `numeric`/`decimal`. A scale reduction
-/// (`numeric(10,2)` → `decimal(20,0)`) silently truncates the fractional digits
-/// at `run`; an integer-digit reduction (`(20,0)` → `(10,0)`) overflows the
-/// declared precision. Either is genuinely lossy and must not be reported
-/// `exact`. Widening or an equal scale/precision is fine. Non-decimal overrides
-/// are left to `derive_fidelity` (not narrowing-classified here).
+/// Detect whether a `columns:` override *narrows* the autodetected source type in a value-losing way.
 fn override_narrows(
     source: &crate::types::RivetType,
     overridden: &crate::types::RivetType,
@@ -1001,8 +820,6 @@ fn override_narrows(
         },
     ) = (source, overridden)
     {
-        // Fractional-digit loss: the override keeps fewer digits to the right
-        // of the point than the source declared.
         if os < ss {
             return Some(format!(
                 "override decimal({op},{os}) reduces scale from source numeric({sp},{ss}) — \
@@ -1010,8 +827,6 @@ fn override_narrows(
                 (*ss as i16) - (*os as i16)
             ));
         }
-        // Integer-digit loss: the override leaves fewer digits to the left of
-        // the point than the source could hold, so large values overflow.
         let src_int_digits = *sp as i16 - *ss as i16;
         let ov_int_digits = *op as i16 - *os as i16;
         if ov_int_digits < src_int_digits {
@@ -1056,44 +871,21 @@ fn rivet_type_label(t: &crate::types::RivetType) -> String {
 #[cfg(test)]
 mod tests {
     /// The two callers must DIVERGE, and only where divergence is warranted.
-    ///
-    /// Round 7 found the whole `OnUnresolvedCapture` split ungraded: flipping the
-    /// load's stance to `Degrade` — literally reopening the harm it was added to
-    /// prevent — left lib and offline suites entirely green, because nothing
-    /// anywhere referenced the enum outside the two product files. The split is the
-    /// commit's central behavioural change and had no oracle.
-    ///
-    /// It also found the axis wrong. Keying the refusal off the error VARIANT left
-    /// `Ok(None)` degrading under `Fail` (the branch where degrading is exactly the
-    /// documented harm) while refusing schema-qualified configs that never needed
-    /// the catalog — killing loads of artifacts already complete on disk.
     #[test]
     fn only_a_bare_name_makes_an_unresolvable_capture_fatal_and_only_for_the_load() {
         use super::{
             OnUnresolvedCapture as On, degrade_is_unambiguous, unresolved_capture_is_fatal,
         };
 
-        // The load refuses a BARE name: which relation it means depends on the
-        // connection, so planning a warehouse schema from it is a guess whose column
-        // NAMES all match — every row loads, every count agrees, the types are
-        // another relation's.
         assert!(unresolved_capture_is_fatal(On::Fail, Some("orders")));
-        // ...and accepts a QUALIFIED one, because the catalog was never needed to
-        // read it. This arm is the one that killed a load of finished artifacts
-        // after `sp_cdc_disable_db`.
         assert!(!unresolved_capture_is_fatal(On::Fail, Some("dbo.orders")));
 
-        // `check` never refuses: it is run BEFORE `sp_cdc_enable_table`, so an
-        // unreadable cdc catalog is its normal state, and a report over the
-        // configured relation is what the operator came for.
         assert!(!unresolved_capture_is_fatal(On::Degrade, Some("orders")));
         assert!(!unresolved_capture_is_fatal(
             On::Degrade,
             Some("dbo.orders")
         ));
 
-        // A `query:`-only export has no `table:` at all; there is nothing to stand in
-        // for the catalog, so the load must not plan from a guess either.
         assert!(unresolved_capture_is_fatal(On::Fail, None));
         assert!(!degrade_is_unambiguous(None));
     }
@@ -1101,16 +893,12 @@ mod tests {
     use super::*;
     use crate::types::{RivetType, TypeFidelity};
 
-    // ── downgrade_narrowing_overrides (#32) ──────────────────────────────────
-
     fn mapping(column: &str, native: &str, t: RivetType) -> crate::types::TypeMapping {
         crate::types::TypeMapping {
             column_name: column.into(),
             source_native_type: native.into(),
             rivet_type: t,
             arrow_type: None,
-            // `Exact` on purpose: that is exactly what `derive_fidelity` labels a
-            // resolved override, and what makes the #32 gap silent.
             fidelity: TypeFidelity::Exact,
             nullable: true,
             warnings: vec![],
@@ -1120,19 +908,6 @@ mod tests {
     }
 
     /// Both directions of the re-probe guard, and the downgrade itself.
-    ///
-    /// The guard was untestable while it lived inline in `collect_one`, which
-    /// needs a live database — the in-diff mutation gate graded `delete !` on it
-    /// as MISSED. Deleting the negation is a two-sided bug and both sides are
-    /// pinned here: with overrides present the block must RUN (or a lossy
-    /// override reports `exact`, the #32 bug back), and with none it must NOT
-    /// (or every report pays a second full type probe — 154 of them for a
-    /// 154-table multiplex).
-    ///
-    /// The re-probe is observed through a flag rather than inferred from the
-    /// result, because "no overrides" is precisely the case where running the
-    /// block changes NOTHING about the output: every column `continue`s. A test
-    /// that only compared mappings would be green against the mutant.
     #[test]
     fn narrowing_downgrade_reprobes_only_when_overrides_exist() {
         let source = || {
@@ -1142,7 +917,6 @@ mod tests {
             ]
         };
 
-        // No overrides → the source is never re-probed, and nothing is touched.
         let mut untouched = source();
         let probed = std::cell::Cell::new(false);
         downgrade_narrowing_overrides(&mut untouched, &ColumnOverrides::new(), || {
@@ -1160,9 +934,6 @@ mod tests {
             "nothing to downgrade without an override"
         );
 
-        // A narrowing override → re-probed, and the narrowed column is Lossy with
-        // a reason. `id` is overridden too but WIDENS, so it must stay exact —
-        // otherwise the test passes against a mutant that downgrades everything.
         let mut overrides = ColumnOverrides::new();
         overrides.insert("price".into(), dec(20, 0));
         overrides.insert("id".into(), RivetType::Int64);
@@ -1198,8 +969,6 @@ mod tests {
              not overridden-at-all"
         );
     }
-
-    // ── report_units (#252: the multiplex `tables:` fan-out) ─────────────────
 
     fn cfg_from(yaml: &str) -> Config {
         Config::from_yaml(yaml).unwrap()
@@ -1257,32 +1026,6 @@ exports:
     }
 
     /// A multiplex `tables:` CDC export must resolve ONE unit per captured table.
-    ///
-    /// Before #252 it resolved none at all: the export carries no `table:` and no
-    /// `query:`, so `resolve_query` bailed ("must specify exactly one of 'query',
-    /// 'query_file', or 'table'") and `rivet check --target` fell through to a
-    /// diagnostic-only line while `rivet load` failed outright — for a config
-    /// shape `rivet init --mode cdc` emits by default.
-    ///
-    /// The probe query must be the SAME `SELECT * FROM {table}` the capture uses
-    /// for that table's schema; a per-table query that differs would type the
-    /// table differently from the way `run` writes it.
-    /// The THREE narrowing call sites must key on the SAME thing, or `check`/`load`
-    /// type a table differently from the way `run` wrote it.
-    ///
-    /// `overrides_for_table`'s contract says "`table` is the bare table name (no
-    /// schema part)", and the two CAPTURE sites honour it by rsplitting the schema
-    /// off (`pipeline/cdc_job.rs`, `plan/build.rs`). The resolver added with the
-    /// multiplex fan-out passed the raw `tables:` entry instead — so on a
-    /// schema-qualified entry a qualified key matched NOTHING: the capture applied
-    /// the override, the resolver dropped it. Since the load stopped shelling out
-    /// to `rivet check`, that report is now the warehouse DDL, so the created
-    /// column took the raw catalog type while the Parquet already held the
-    /// overridden one.
-    ///
-    /// This test pins the SHARED key rather than one site's behaviour: it asserts
-    /// the bare and qualified spellings of the same table narrow identically, which
-    /// is exactly the property that failed. RED against passing `t` whole.
     #[test]
     fn every_narrowing_site_keys_on_the_bare_table_name() {
         let overrides: crate::types::ColumnOverrides = [
@@ -1292,13 +1035,6 @@ exports:
         .into_iter()
         .collect();
 
-        // Call the PRODUCT's rule on both sides, not a closure re-implementing
-        // it: an earlier version of this test rsplit the schema off ITSELF and
-        // compared two `overrides_for_table` calls, so it stayed green against a
-        // product that had stopped narrowing at all (the self-oracle class in
-        // the process rules). `overrides_for_unit` is the single function every call
-        // site — capture and resolver — now routes through, so mutating it goes
-        // RED here.
         let unit = "public.orders";
         let from_capture = crate::types::overrides_for_unit(&overrides, Some(unit));
         let from_resolver = crate::types::overrides_for_unit(&overrides, Some(unit));
@@ -1318,7 +1054,6 @@ exports:
             from_resolver.contains_key("note"),
             "a bare key still applies to every table: {from_resolver:?}"
         );
-        // …and the un-narrowed spelling is exactly the bug: nothing matches.
         assert!(
             !crate::types::overrides_for_table(&overrides, unit).contains_key("amount"),
             "guard the guard: passing the QUALIFIED name really does drop the override, \
@@ -1326,21 +1061,7 @@ exports:
         );
     }
 
-    /// The SINGLE-table arm of the same rule. `every_narrowing_site_keys_on_the_
-    /// bare_table_name` above pins the multiplex unit; this pins the one the
-    /// multiplex fix (#268) left behind — a plain `table: public.orders` export.
-    ///
-    /// It calls `unit_overrides`, the function `collect_reports` itself uses, on
-    /// a real `ExportConfig` parsed from YAML — so the `expected` comes from the
-    /// config the operator wrote and the `actual` from the product's own
-    /// resolution, not from a closure restating the rule.
-    ///
-    /// RED against `unit_overrides` returning `all.clone()` for a unit with no
-    /// multiplex table (the shipped behaviour): the lookup downstream is by BARE
-    /// column name (`types::resolve_or(overrides, col.name(), …)`), so the
-    /// qualified key never matched, `rivet check` printed the raw catalog type,
-    /// and `rivet load` created the warehouse column from it — while the run had
-    /// already written the OVERRIDDEN type into the Parquet.
+    /// The SINGLE-table arm of the same rule.
     #[test]
     fn a_qualified_override_reaches_a_single_table_export_the_way_the_run_applies_it() {
         let config = cfg_from(
@@ -1369,8 +1090,6 @@ exports:
             "fixture is inert: the qualified key must survive parsing, else this              test cannot distinguish narrowing from an empty map — got {all:?}"
         );
 
-        // `table: None` — a single-table export is ONE unnamed unit, exactly what
-        // `report_units` yields for it.
         let narrowed = unit_overrides(export, None, &all);
 
         assert!(
@@ -1381,8 +1100,6 @@ exports:
             narrowed.contains_key("note"),
             "a bare key still applies: {narrowed:?}"
         );
-        // Guard the guard: the un-narrowed map really cannot answer a bare lookup,
-        // so the assertion above is not satisfied by doing nothing.
         assert!(
             !all.contains_key("amount"),
             "the raw map is keyed `orders.amount`, so a BARE `amount` lookup — the              only lookup the drivers make — misses it: {all:?}"
@@ -1421,9 +1138,7 @@ exports:
         );
     }
 
-    /// The other side of the same branch: a single-table export is ONE unit whose
-    /// `table` is `None` — the export IS the unit, so nothing downstream starts
-    /// fanning out an ordinary export into per-table plans.
+    /// The other side of the same branch: a single-table export is ONE unit whose `table` is `None`.
     #[test]
     fn report_units_leaves_a_single_table_export_as_one_unnamed_unit() {
         let config = cfg_from(
@@ -1449,10 +1164,7 @@ exports:
         );
     }
 
-    /// `display_name` is what an operator reads in the type-report header, and it
-    /// must distinguish the N documents a multiplex export now emits — otherwise
-    /// 154 tables print 154 blocks all headed `Export: cdc`. Matches the
-    /// `<export>/<table>` addressing `rivet validate` already prints.
+    /// `display_name` is what an operator reads in the type-report header, and it must distinguish the N documents a multiplex export now emits.
     #[test]
     fn display_name_addresses_a_multiplex_unit_by_export_and_table() {
         let base = ExportTypeReport {
@@ -1471,16 +1183,12 @@ exports:
         assert_eq!(unit.display_name(), "cdc/orders");
     }
 
-    // ── override_narrows (#32: lossy scale/precision narrowing) ──────────────
-
     fn dec(precision: u8, scale: i8) -> RivetType {
         RivetType::Decimal { precision, scale }
     }
 
     #[test]
     fn narrows_flags_scale_reduction_as_lossy() {
-        // The audit case: numeric(10,2) overridden to decimal(20,0) drops the
-        // two fractional digits — must be flagged, never 'exact'.
         let reason = override_narrows(&dec(10, 2), &dec(20, 0)).expect("scale drop is lossy");
         assert!(
             reason.contains("scale"),
@@ -1494,22 +1202,17 @@ exports:
 
     #[test]
     fn narrows_none_when_scale_preserved() {
-        // Same scale, wider precision: no fractional loss → not narrowing.
         assert!(override_narrows(&dec(10, 2), &dec(20, 2)).is_none());
-        // Identical type: not narrowing.
         assert!(override_narrows(&dec(10, 2), &dec(10, 2)).is_none());
     }
 
     #[test]
     fn narrows_none_when_scale_widened() {
-        // More fractional digits than the source declared preserves every value.
         assert!(override_narrows(&dec(10, 2), &dec(12, 4)).is_none());
     }
 
     #[test]
     fn narrows_flags_integer_digit_reduction_as_lossy() {
-        // Same scale but fewer integer digits: (20,0) → (10,0) overflows large
-        // values, so it is lossy even though the scale is unchanged.
         let reason =
             override_narrows(&dec(20, 0), &dec(10, 0)).expect("integer-digit drop is lossy");
         assert!(
@@ -1520,12 +1223,9 @@ exports:
 
     #[test]
     fn narrows_none_for_non_decimal_overrides() {
-        // Non-decimal overrides are classified by derive_fidelity, not here.
         assert!(override_narrows(&RivetType::Int32, &RivetType::Int64).is_none());
         assert!(override_narrows(&RivetType::Int64, &RivetType::String).is_none());
     }
-
-    // ── fidelity_marker ──────────────────────────────────────────────────────
 
     #[test]
     fn fidelity_marker_lossy_is_cross() {
@@ -1551,8 +1251,6 @@ exports:
     fn fidelity_marker_compatible_is_empty() {
         assert_eq!(fidelity_marker(TypeFidelity::Compatible), "");
     }
-
-    // ── rivet_type_label ─────────────────────────────────────────────────────
 
     #[test]
     fn label_bool() {
@@ -1606,8 +1304,6 @@ exports:
         };
         assert_eq!(rivet_type_label(&t), "unsupported(tsvector)");
     }
-
-    // ── col_width ────────────────────────────────────────────────────────────
 
     #[test]
     fn col_width_empty_returns_minimum_8() {
@@ -1797,7 +1493,7 @@ exports:
         refuse_captured_units(&c, &c.exports[0], &[]).unwrap();
     }
 
-    /// A key declared finer than a microsecond is refused whether `pk:` names it, leaves it to the recorded key, or the unit has none; `pk: none` names no key.
+    /// A key declared finer than a microsecond is refused whether `pk:` names it, leaves it to the recorded key, or the unit has none.
     #[test]
     fn a_captured_key_finer_than_a_microsecond_is_refused_by_the_key_the_load_uses() {
         let micros = crate::types::RivetType::Timestamp {
