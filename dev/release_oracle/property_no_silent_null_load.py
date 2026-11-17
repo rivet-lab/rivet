@@ -239,6 +239,7 @@ class Target:
     """How one warehouse is staged, loaded, read and cleaned."""
 
     name = ""
+    split = False
 
     def start(self, run: str) -> None:
         """Create what the loads need."""
@@ -265,6 +266,7 @@ class Target:
 
 class ClickHouse(Target):
     name = "clickhouse"
+    split = True
 
     def start(self, run: str) -> None:
         """Create the database and the staging bucket on the emulator."""
@@ -405,6 +407,8 @@ class Matrix:
         self.obs: dict[tuple[str, str, int, str], Got] = {}
         self.unheld: dict[tuple[str, str, int], tuple[str, str]] = {}
         self.unmade: list[tuple[Column, str]] = []
+        self.checked: dict[tuple[str, str, str], int] = {}
+        self.splits: dict[tuple[str, str, str], set[str]] = {}
         self.lock = threading.Lock()
 
     def config(self, chunk: Chunk, col: Column, ids: tuple[int, ...], name: str, dest: dict, load: dict | None = None) -> str:
@@ -561,6 +565,27 @@ class Matrix:
         half = len(ids) // 2
         return {**self.load(t, u, ids[:half], budget), **self.load(t, u, ids[half:], budget)}
 
+    def split(self, t: Target, u: Unit, have: dict[int, Got]) -> None:
+        """Note the coded refusals of a unit at `t` that `rivet check` of the same config let through (it reads neither the values nor the format); asked once per column."""
+        codes = {g.refused.code for g in have.values() if g.refused is not None and g.refused.code not in (te.UNCODED, "CRASH")}
+        key = (u.chunk.table, u.col.name, t.name)
+        if not codes:
+            return
+        with self.lock:
+            rc = self.checked.get(key)
+        if rc is None:
+            d = self.cwd("k")
+            (d / "c.yaml").write_text(self.config(u.chunk, u.col, u.ids, "chk", t.stage(f"{self.run}/chk"), t.load_block()))
+            p = nsn.rivet(["check", "-c", str(d / "c.yaml"), "--type-report", "--json"], {"RIVET_NSN_URL": self.url, **t.env()}, d)
+            if nsn.stand_refused(p):
+                raise Unreachable(f"the stand refused `rivet check` {nsn.STAND_TRIES} times: exit {p.returncode}")
+            rc = p.returncode
+            with self.lock:
+                self.checked[key] = rc
+        if rc == 0:
+            with self.lock:
+                self.splits.setdefault(key, set()).update(codes)
+
     def unit(self, u: Unit) -> None:
         """Observe one unit at the extract and at every target."""
         got = self.extract(u, u.ids, [BISECT_RUNS])
@@ -575,6 +600,8 @@ class Matrix:
             with self.lock:
                 for i, g in have.items():
                     self.obs[(u.chunk.table, u.col.name, i, t.name)] = g
+            if t.split:
+                self.split(t, u, have)
 
     def results(self, chunks: list[Chunk]) -> tuple[list[Result], list[dict]]:
         """Every observed cell graded against the ledger: Result rows for the ledger and the observed verdicts as JSON-able dicts."""
@@ -582,6 +609,8 @@ class Matrix:
         names = ("duck", *(t.name for t in self.targets))
         for c in chunks:
             for col in c.cols:
+                out += [Result(f"{self.engine}/{col.native}->none/load-{t}", REFUSED, nsn.SPLIT, f"check exit 0, run refused {sorted(codes)}")
+                        for t in names if (codes := self.splits.get((c.table, col.name, t)))]
                 ids = range(1, len(col.lits) + 1) if col.whole else (*range(1, len(col.lits) + 1), c.null_id)
                 for i, target in ((i, t) for i in ids for t in names):
                     g = self.obs.get((c.table, col.name, i, target))
@@ -743,6 +772,29 @@ def self_test() -> None:
     assert [r.klass for r in mk.results(left)[0]] == [NOT_GRADED], "a type the server will not create is a recorded skip, never green"
     ms.obs = {("pm_tm0", "c001", 1, "duck"): Got(MISSING)}
     assert [r.klass for r in ms.results([ch_])[0]] == [nsn.WRONG], "a row the reader lacks is not exact"
+    coded = {1: Got(refused=te.Verdict(te.REFUSE, code="RIVET_X", stage=te.LOAD))}
+    uncoded = {1: Got(refused=te.Verdict(te.REFUSE, code=te.UNCODED, stage=te.LOAD))}
+    key = ("pm_tm0", "c001", "clickhouse")
+    real_rivet = nsn.rivet
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            for rc, have, want in ((0, coded, {key: {"RIVET_X"}}), (2, coded, {}), (0, uncoded, {}), (0, {1: Got(1)}, {})):
+                mc = Matrix("mssql", "u", Path(tempfile.mkdtemp(dir=td)), ("clickhouse",))
+                mc.targets[0].db = "x"
+                nsn.rivet = lambda a, e, c: nsn._proc(rc)
+                mc.split(mc.targets[0], Unit(ch_, col, (1,), True), have)
+                assert mc.splits == want, (rc, have, mc.splits)
+            nsn.rivet = lambda a, e, c: nsn._proc(1, "error: [RIVET_SOURCE_CONNECT_FAILED] x")
+            try:
+                mc.split(mc.targets[0], Unit(ch_, col, (1,), True), coded)
+                raise SystemExit("a stand that refused `rivet check` was read as a clean check")
+            except Unreachable:
+                pass
+    finally:
+        nsn.rivet = real_rivet
+    ms.targets = [ClickHouse()]
+    ms.splits, ms.obs = {key: {"RIVET_X"}}, {}
+    assert [(r.cell, r.klass) for r in ms.results([ch_])[0]] == [("mssql/NUMBER(5)->none/load-clickhouse", nsn.SPLIT)], "a refusal `rivet check` let through is a split"
     print(f"no_silent_null_load self-test ok: targets {load_targets()}")
 
 
