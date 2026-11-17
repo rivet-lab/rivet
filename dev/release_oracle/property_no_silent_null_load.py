@@ -295,6 +295,13 @@ class ClickHouse(Target):
             pass
 
 
+def stage_root() -> str:
+    """The bucket prefix every staged object of this property lives under."""
+    from ..pytools.registry import bq_tmp
+
+    return bq_tmp("nsn")
+
+
 class BigQuery(Target):
     name = "bigquery"
 
@@ -310,7 +317,7 @@ class BigQuery(Target):
 
     def stage(self, prefix: str) -> dict:
         """A prefix of the test bucket."""
-        return {"type": "gcs", "bucket": self.bucket, "prefix": f"rivet_tmp_nsn/{prefix}/"}
+        return {"type": "gcs", "bucket": self.bucket, "prefix": f"{stage_root()}/{prefix}/"}
 
     def load_block(self) -> dict:
         """The test project's dataset."""
@@ -328,7 +335,7 @@ class BigQuery(Target):
         """Drop the dataset and the staged objects."""
         gcp.bq_delete_dataset(self.project, self.dataset)
         for p in prefixes:
-            gcp.gcs_delete_prefix(self.bucket, f"rivet_tmp_nsn/{p}/")
+            gcp.gcs_delete_prefix(self.bucket, f"{stage_root()}/{p}/")
 
 
 def sf_drops(schema: str, tables: list[str]) -> list[str]:
@@ -352,7 +359,7 @@ class Snowflake(Target):
 
     def stage(self, prefix: str) -> dict:
         """A prefix of the test bucket the storage integration reads."""
-        return {"type": "gcs", "bucket": self.e["RIVET_TEST_GCS_BUCKET"], "prefix": f"rivet_tmp_nsn/{prefix}/"}
+        return {"type": "gcs", "bucket": self.e["RIVET_TEST_GCS_BUCKET"], "prefix": f"{stage_root()}/{prefix}/"}
 
     def load_block(self) -> dict:
         """The stand's Snowflake."""
@@ -376,7 +383,7 @@ class Snowflake(Target):
         for i in range(0, len(drops), 50):
             subprocess.run([SNOW, "sql", "-c", self.e["RIVET_SF_CONNECTION"], "-q", "; ".join(drops[i:i + 50])], capture_output=True, timeout=600)
         for p in prefixes:
-            gcp.gcs_delete_prefix(self.e["RIVET_TEST_GCS_BUCKET"], f"rivet_tmp_nsn/{p}/")
+            gcp.gcs_delete_prefix(self.e["RIVET_TEST_GCS_BUCKET"], f"{stage_root()}/{p}/")
 
 
 TARGETS = {"clickhouse": ClickHouse, "bigquery": BigQuery, "snowflake": Snowflake}
