@@ -128,6 +128,18 @@ pub(crate) fn slot_plugin_refusal(slot: &str, plugin: &SlotPlugin) -> String {
     )
 }
 
+/// An existing slot is reused only when its plugin is `test_decoding`; any other plugin is refused by code.
+pub(crate) fn refuse_a_foreign_slot_plugin(slot: &str, existing: Option<SlotPlugin>) -> Result<()> {
+    match existing.filter(|p| *p != SlotPlugin::TestDecoding) {
+        Some(plugin) => crate::rivet_bail!(
+            crate::error::codes::SOURCE_CDC_PREREQUISITE,
+            "{}",
+            slot_plugin_refusal(slot, &plugin)
+        ),
+        None => Ok(()),
+    }
+}
+
 /// Drop the replication slot `slot`, waiting for the server to release a slot the closed stream still holds.
 pub(crate) fn drop_slot(url: &str, slot: &str, tls: Option<&TlsConfig>) -> Result<()> {
     let mut client = super::connect_client(url, tls)?;
@@ -535,13 +547,7 @@ impl PgChangeStream {
         let existing = slot_plugin_on(&mut client, slot)?;
         match slot_action(slot, existing.is_some(), prior) {
             SlotAction::Reuse => {
-                if let Some(plugin) = existing.filter(|p| *p != SlotPlugin::TestDecoding) {
-                    crate::rivet_bail!(
-                        crate::error::codes::SOURCE_CDC_PREREQUISITE,
-                        "{}",
-                        slot_plugin_refusal(slot, &plugin)
-                    );
-                }
+                refuse_a_foreign_slot_plugin(slot, existing)?;
                 refuse_a_slot_another_reader_advanced(&mut client, slot, checkpoint)?
             }
             SlotAction::Refuse(why) => {
@@ -3406,6 +3412,18 @@ mod tests {
             "pg cdc: slot 's1' uses the 'pgoutput' output plugin, but this stream reads 'test_decoding' slots only. \
              Drop the slot (`SELECT pg_drop_replication_slot('s1')`) and re-baseline the stream, or point `cdc.slot` at a different name."
         );
+    }
+
+    /// A reused slot passes only for no slot or `test_decoding`; any other plugin is refused by code with the slot's name.
+    #[test]
+    fn a_reused_slot_is_refused_unless_it_is_test_decoding_or_absent() {
+        assert!(refuse_a_foreign_slot_plugin("s1", None).is_ok());
+        assert!(refuse_a_foreign_slot_plugin("s1", Some(SlotPlugin::TestDecoding)).is_ok());
+        for plugin in [SlotPlugin::Pgoutput, SlotPlugin::Other("wal2json".into())] {
+            let err = refuse_a_foreign_slot_plugin("s1", Some(plugin.clone())).unwrap_err();
+            crate::error::assert_coded(&err, "RIVET_SOURCE_CDC_PREREQUISITE", 1);
+            assert!(format!("{err:#}").contains(&slot_plugin_refusal("s1", &plugin)));
+        }
     }
 
     /// Live: an existing `pgoutput` slot is refused by name before any read; a `test_decoding` slot is reused.

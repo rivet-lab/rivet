@@ -198,7 +198,7 @@ fn observe(client: &mut Client, name: &str, version: i32) -> Result<Option<Obser
         (
             "CASE WHEN r.prattrs IS NULL THEN NULL ELSE ARRAY(SELECT a.attname::text FROM pg_attribute a \
               WHERE a.attrelid = c.oid AND a.attnum = ANY(r.prattrs::int2[]) ORDER BY a.attnum) END",
-            "(SELECT count(*) FROM pg_publication_namespace pn JOIN pg_publication p ON p.oid = pn.pnpubid WHERE p.pubname = $1)::int4",
+            "(SELECT count(*) FROM pg_publication_namespace pubns JOIN pg_publication p ON p.oid = pubns.pnpubid WHERE p.pubname = $1)::int4",
         )
     } else {
         ("NULL::text[]", "0::int4")
