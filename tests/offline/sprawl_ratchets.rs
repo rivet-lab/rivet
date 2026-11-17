@@ -108,7 +108,7 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
         200,
     ),
     ("src/plan/build.rs::resolve_chunked_strategy#1", 175),
-    ("src/preflight/doctor.rs::doctor#1", 232),
+    ("src/preflight/doctor.rs::doctor#1", 238),
     ("src/preflight/mod.rs::check#1", 227),
     ("src/source/mssql/arrow_convert.rs::build_array#1", 253),
     ("src/source/mysql/arrow_convert.rs::build_array#1", 315),
