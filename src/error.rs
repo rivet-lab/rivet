@@ -264,6 +264,23 @@ impl TlsHandshakeFailed {
     }
 }
 
+/// A connect that never reached the server, named by host:port; rivet's own verdict, so no setup hint goes in front.
+#[derive(Debug)]
+pub struct UnreachableTarget(String);
+
+impl UnreachableTarget {
+    /// The marker over the words that name the endpoint.
+    pub(crate) fn new(text: String) -> Self {
+        Self(text)
+    }
+}
+
+impl std::fmt::Display for UnreachableTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// A warehouse job rivet stopped WAITING for, having waited out its budget.
 ///
 /// Deliberately NOT a [`Refused`]: that one means "stopped before touching the
@@ -511,6 +528,15 @@ pub fn coded_driver<E: std::error::Error + Send + Sync + 'static>(
     coded_over(code, message, &anyhow::Error::new(cause))
 }
 
+/// `err` under `code` with its words unchanged and its retry verdict kept; an error that already carries a code passes through.
+pub fn coded_flat(code: Code, err: anyhow::Error) -> anyhow::Error {
+    if error_code(&err).is_some() {
+        return err;
+    }
+    let message = format!("{err:#}");
+    coded_over(code, message, &err)
+}
+
 /// `message` built around `inner`, carrying `inner`'s code when it has one, else `fallback`; the exit follows `inner`'s verdict.
 pub fn recoded(inner: &anyhow::Error, fallback: Code, message: impl Into<String>) -> anyhow::Error {
     coded_over(code_of(inner).unwrap_or(fallback), message, inner)
@@ -529,6 +555,11 @@ pub fn error_code(err: &anyhow::Error) -> Option<&'static str> {
     // for is greppable without re-tagging its construction site.
     if err.downcast_ref::<StatementDurationTimeout>().is_some() {
         return Some(codes::SOURCE_STATEMENT_TIMEOUT.id);
+    }
+    if err.downcast_ref::<TlsHandshakeFailed>().is_some()
+        || err.downcast_ref::<UnreachableTarget>().is_some()
+    {
+        return Some(codes::SOURCE_CONNECT_FAILED.id);
     }
     None
 }
@@ -1424,7 +1455,7 @@ pub mod codes {
     /// The reconcile report passed to `rivet repair` does not parse or belongs to another export.
     pub const CLI_REPORT_INVALID: Code = usage(
         "RIVET_CLI_REPORT_INVALID",
-        "pass the report `rivet reconcile --report` wrote for this export",
+        "pass the report `rivet reconcile --format json --output <file>` wrote for this export",
     );
     /// A plan, report or run artifact file the command writes beside the config could not be written.
     pub const CLI_OUTPUT_UNWRITABLE: Code = environment(
@@ -1458,7 +1489,7 @@ pub mod codes {
     /// A plan artifact older than 24 h, or whose cursor snapshot the state no longer matches.
     pub const PLAN_ARTIFACT_STALE: Code = refusal(
         "RIVET_PLAN_ARTIFACT_STALE",
-        "regenerate the plan with `rivet plan`, or pass `--force` to apply it as it is",
+        "regenerate the plan with `rivet plan`, or apply it as it is with `rivet apply --force`",
     );
     /// A plan artifact made from an inline `url:` config, whose password was never persisted.
     pub const PLAN_ARTIFACT_NO_CREDENTIALS: Code = usage(

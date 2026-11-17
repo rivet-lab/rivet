@@ -7,9 +7,7 @@ use crate::types::ColumnOverrides;
 
 use super::{ColumnInfo, TableInfo};
 
-/// Introspection SQL, parameterized with `?` binds (prepared statements) so
-/// identifiers never enter the SQL text — no interpolation, no hand-rolled
-/// quote escaping.
+/// Introspection SQL, parameterized with `?` binds (prepared statements) so identifiers never enter the SQL text.
 const LIST_TABLES_SQL: &str = "SELECT TABLE_NAME FROM information_schema.TABLES \
      WHERE TABLE_SCHEMA = ? AND TABLE_TYPE IN ('BASE TABLE', 'VIEW') \
      ORDER BY TABLE_NAME";
@@ -40,13 +38,7 @@ pub(super) fn resolve_database_for_listing(url: &str, schema_cli: Option<&str>) 
         })
 }
 
-/// Open the one connection shared across the whole init run (`list_tables`
-/// plus every per-table `introspect` — no per-table reconnect).
-///
-/// Goes through the shared [`crate::source::mysql::connect_pool`] path so the
-/// pool gets the lean constraints (no eager pre-connections). `init` runs
-/// before any YAML `tls:` block exists (it *generates* the config), so the
-/// connection stays plaintext, relying on the driver's own URL parsing.
+/// Open the one connection shared across the whole init run (`list_tables` plus every per-table `introspect`.
 pub(super) fn connect(
     url: &str,
     tls: Option<&crate::config::TlsConfig>,
@@ -55,10 +47,7 @@ pub(super) fn connect(
     Ok(pool.get_conn()?)
 }
 
-/// Switch the session's default database so the introspection queries (scoped
-/// to `DATABASE()`) read `--schema` instead of the URL's database. A nonexistent
-/// db surfaces MySQL's own "Unknown database" — the loud failure we want, versus
-/// silently ignoring `--schema`. Escapes backticks in the identifier.
+/// Switch the session's default database so the introspection queries (scoped to `DATABASE()`) read `--schema` instead of the URL's database.
 pub(super) fn use_database(conn: &mut mysql::PooledConn, database: &str) -> Result<()> {
     let escaped = database.replace('`', "``");
     conn.query_drop(format!("USE `{escaped}`"))?;
@@ -72,7 +61,6 @@ pub(super) fn list_tables(conn: &mut mysql::PooledConn, database: &str) -> Resul
 }
 
 pub(super) fn introspect(conn: &mut mysql::PooledConn, table: &str) -> Result<super::Introspected> {
-    // Row estimate + on-disk size from information_schema (fast, no COUNT(*)).
     let row_and_size: Option<(Option<u64>, Option<u64>, Option<u64>)> =
         conn.exec_first(TABLE_STATS_SQL, (table,))?;
     let (row_estimate, total_bytes) = match row_and_size {
@@ -89,7 +77,6 @@ pub(super) fn introspect(conn: &mut mysql::PooledConn, table: &str) -> Result<su
         None => (0, None),
     };
 
-    // Column metadata (includes KEY + IS_NULLABLE + numeric precision/scale for decimal columns).
     #[allow(clippy::type_complexity)]
     let rows: Vec<(String, String, String, String, Option<u32>, Option<u32>)> =
         conn.exec(COLUMNS_SQL, (table,))?;
@@ -139,20 +126,13 @@ pub(super) fn introspect(conn: &mut mysql::PooledConn, table: &str) -> Result<su
     Ok((info, unreadable))
 }
 
-/// First-run density probe (#148) — MySQL is the primary target: `TABLE_ROWS`
-/// is the least trustworthy of the four engines (field: a versioned table
-/// under-counted ~2.5×, flipping every threshold decision). Refines
-/// `info.row_estimate` IN PLACE (the catalog figure moves to
-/// `probe.catalog_rows`) so every downstream decision stands on the sample.
-/// Best-effort: any probe error keeps the catalog figure, marked `unverified`.
+/// First-run density probe (#148) — MySQL is the primary target.
 pub(super) fn density_probe(conn: &mut mysql::PooledConn, info: &mut super::TableInfo) {
     use super::density::*;
     use mysql::prelude::Queryable;
 
     let catalog = info.row_estimate;
     let Some(key) = info.best_chunk_column().map(str::to_string) else {
-        // No integer key to stratify on: small → honest COUNT(*); large → keep
-        // the estimate but SAY so (never silently trust it).
         let method = if catalog < 1_000_000 {
             let tbl = info.table.replace('`', "``");
             match conn.query_first::<i64, _>(format!("SELECT COUNT(*) FROM `{tbl}`")) {
@@ -185,13 +165,6 @@ pub(super) fn density_probe(conn: &mut mysql::PooledConn, info: &mut super::Tabl
     };
     let tbl = info.table.replace('`', "``");
     let k_q = key.replace('`', "``");
-    // Read MIN/MAX as TEXT and parse — never as (Option<i64>, Option<i64>): a
-    // BIGINT UNSIGNED key past i64::MAX (18446744073709551615) makes the mysql
-    // crate's FromRow PANIC on the i64 conversion (not a catchable Err), crashing
-    // `rivet init` (roast 2026-08-10, gate exit 101). Text always converts; a
-    // value that does not fit i64 (unsigned overflow), a non-integer key, or NULL
-    // (empty table) → skip the probe, keep the catalog, mark unverified — the
-    // stratified offsets are i64 arithmetic and cannot span such a key anyway.
     let min_max = conn
         .query_first::<(Option<String>, Option<String>), _>(format!(
             "SELECT MIN(`{k_q}`), MAX(`{k_q}`) FROM `{tbl}`"
@@ -210,9 +183,6 @@ pub(super) fn density_probe(conn: &mut mysql::PooledConn, info: &mut super::Tabl
         });
         return;
     };
-    // Tier 0 AFTER the two boundary seeks: a small claim is trusted only when
-    // the span agrees (TABLE_ROWS and DATA_LENGTH freeze TOGETHER — the span
-    // is the one cheap signal that is not statistics; live-proven here).
     if super::density::catalog_claim_trusted(catalog, max.saturating_sub(min).saturating_add(1)) {
         info.density = Some(DensityProbe {
             rows: catalog,
@@ -248,9 +218,6 @@ pub(super) fn density_probe(conn: &mut mysql::PooledConn, info: &mut super::Tabl
             }
         }
     }
-    // #148 sparse-key guard: if the windows barely sampled any rows the key is
-    // too sparse for a windowed estimate — keep the catalog, flag unverified,
-    // rather than replace a sane figure with ~0 garbage.
     let sampled: i64 = counts.iter().sum();
     if !super::density::probe_trustworthy(sampled, offsets.len()) {
         info.density = Some(DensityProbe {
@@ -287,8 +254,6 @@ mod tests {
                 1,
                 "exactly one identifier bind expected in: {sql}"
             );
-            // Regression: identifiers used to be format!-interpolated into the
-            // SQL with a hand-rolled quote escape; the text must stay constant.
             assert!(
                 !sql.contains('{') && !sql.contains('}'),
                 "no format placeholder allowed in: {sql}"

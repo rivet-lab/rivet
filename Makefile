@@ -18,6 +18,24 @@ LIVE_ALL = python3 dev/pytools/live_slot.py --slots $(LIVE_SLOTS) --all --
 pr-ready:  ## Everything a PR must pass before it is opened; paste the summary block into the PR body. ARGS=--fast skips mutants (reported NOT RUN); ARGS='--body FILE' grades the PR body's declarations.
 	. ./.githooks/repo-venv && python3 dev/pytools/pr_ready.py run $(ARGS)
 
+HUNT = python3 -m dev.pytools.hunt $(if $(LENS),--lens "$(LENS)",) $(if $(RULES),--rules "$(RULES)",) $(ARGS)
+
+.PHONY: hunt hunt-dry
+hunt:  ## Bug hunt (dev/pytools/hunt.py): architect lenses, a sweeper per rule and KEY CLAIM, a merge, one verifier pass. LENS=preset|"text" (ARGS=--list-lenses), ARGS=--auto (next lenses in rotation + changed seams), ARGS="--lenses a,b", RULES="title;title", ARGS="--close C3 --pr 812". Paid and long: run it detached.
+	$(HUNT)
+
+hunt-dry:  ## The runs `make hunt` would start (agent, predicate, cwd, budget, output), without calling claude or making the worktree.
+	$(HUNT) --dry-run
+
+FIX = python3 -m dev.pytools.fix $(ARGS)
+
+.PHONY: fix fix-dry
+fix:  ## Fix round (dev/pytools/fix.py): accepted hunt classes to verified PRs, never merged. ARGS="--go --hunt target/hunt/<dir> --classes C1,C3" (--parallel 2, --budget-usd per class, --resume, --only STEP, --force-class ID, --record-closed). Paid and long: run it detached.
+	$(FIX)
+
+fix-dry:  ## The plan of a fix round (roles, lanes, branches, budgets) without calling claude. ARGS="--hunt target/hunt/<dir> --classes C1,C3"; a --go in ARGS is dropped.
+	python3 -m dev.pytools.fix $(filter-out --go,$(ARGS))
+
 .PHONY: error-sites
 error-sites:  ## Regenerate docs/error-sites.md: the offline battery and the live suite under cargo llvm-cov (needs the stand; about an hour).
 	python3 dev/pytools/error_sites.py measure
@@ -260,8 +278,9 @@ FIELD_REPLAY_CARRIER_BIN  ?= $(PREV_RELEASE_DIR)/carrier/rivet-$(FIELD_REPLAY_CA
 MIGRATION_CARRIER_TAG     ?= v0.31.0
 MIGRATION_CARRIER_BIN     ?= $(PREV_RELEASE_DIR)/field/rivet-$(MIGRATION_CARRIER_TAG)-$(TRIPLE)/rivet
 # The LEASE carrier: a release that holds the run and load leases this tree's migration waits for
-# (0.32.0+), writes an older state schema (v37), and still advances a Postgres slot past its checkpoint
-# (#649, fixed in 0.32.2). PINNED like the carriers above.
+# (0.32.0+), writes an older state schema (v37), still advances a Postgres slot past its checkpoint
+# (#649, fixed in 0.32.2), and stages Mongo change positions as `_data` only (before #736, 0.33.0).
+# PINNED like the carriers above.
 LEASE_CARRIER_TAG         ?= v0.32.1
 LEASE_CARRIER_BIN         ?= $(PREV_RELEASE_DIR)/field/rivet-$(LEASE_CARRIER_TAG)-$(TRIPLE)/rivet
 # The release whose state `rivet state copy` must carry to PostgreSQL: 0.30.0 (state v31), the one a

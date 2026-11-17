@@ -1,16 +1,9 @@
 //! Cross-flag validation that clap cannot express declaratively.
-//!
-//! Each rule here exists because the constraint depends on the *combination*
-//! of two or more parsed values rather than the presence/absence of a single
-//! flag. Anything expressible via clap attributes (mutual exclusion,
-//! `requires`, argument groups) should stay on the type in `args.rs`.
 
 use super::args::{Commands, PlanFormat, ReconcileFormat, ValidateFormat};
 use crate::error::Result;
 
-/// Validate cross-flag invariants on the parsed [`Commands`]. Returns `Err`
-/// with a human-readable message that `main.rs` can render as plain text or
-/// JSON depending on `--json-errors`.
+/// Validate cross-flag invariants on the parsed [`Commands`].
 pub(super) fn validate_cli(cmd: &Commands) -> Result<()> {
     match cmd {
         Commands::Run(a) => {

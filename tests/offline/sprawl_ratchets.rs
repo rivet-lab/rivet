@@ -57,10 +57,9 @@ const LONG_FUNCTION_LINES: usize = 150;
 /// Product functions over `LONG_FUNCTION_LINES`, as (`file::fn#occurrence`, ceiling). Every row: 2026-11-13, first measurement; closes when the function is split and the row is deleted.
 const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ("src/cli/dispatch.rs::dispatch#1", 195),
-    ("src/cli/dispatch.rs::dispatch_cdc#1", 162),
     ("src/error/retry.rs::classify_error#1", 206),
     ("src/format/csv.rs::write_csv_value#1", 239),
-    ("src/init/yaml_scaffold.rs::export_block_lines#1", 339),
+    ("src/init/yaml_scaffold.rs::export_block_lines#1", 243),
     ("src/load/orchestrate.rs::load_incremental_job#1", 163),
     ("src/load/orchestrate.rs::load_one_cdc_base#1", 155),
     ("src/load/orchestrate.rs::run_loads#1", 159),
@@ -100,7 +99,7 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ("src/pipeline/run.rs::run#1", 224),
     ("src/pipeline/run.rs::run_waves#1", 171),
     (
-        "src/pipeline/validate_manifest.rs::verify_at_destination#1",
+        "src/pipeline/validate_manifest.rs::verify_unredacted#1",
         227,
     ),
     ("src/plan/build.rs::build_plan_on#1", 185),
@@ -108,8 +107,9 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
         "src/plan/build.rs::chunked_strategy_from_introspection#1",
         161,
     ),
-    ("src/preflight/doctor.rs::doctor#1", 268),
-    ("src/preflight/mod.rs::check#1", 315),
+    ("src/plan/build.rs::resolve_chunked_strategy#1", 175),
+    ("src/preflight/doctor.rs::doctor#1", 257),
+    ("src/preflight/mod.rs::check#1", 227),
     ("src/source/mssql/arrow_convert.rs::build_array#1", 253),
     ("src/source/mysql/arrow_convert.rs::build_array#1", 315),
     ("src/source/mysql/cdc.rs::fill#1", 263),

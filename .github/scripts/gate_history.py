@@ -25,7 +25,10 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import hosted_gate_verdict as hosted  # noqa: E402
+
+from dev.release_oracle import known_red  # noqa: E402
 
 BRANCH = "gate-history"
 FILE = "history.jsonl"
@@ -67,12 +70,12 @@ def line_key(line: dict) -> tuple:
 
 
 def red_keys(log: str) -> list[str]:
-    """`engine/scenario STATUS` for every red cell of a slice's result table."""
+    """The live cell (`module::test`), else `engine/scenario STATUS`, of every red row of a slice's result table."""
     keys = set()
     for line in log.splitlines():
         m = hosted.CELL.match(line)
         if m and m.group(5) in RED_STATUS:
-            keys.add(f"{m.group(1)}/{m.group(3)} {m.group(5)}")
+            keys.add(known_red.cell_of(line) or f"{m.group(1)}/{m.group(3)} {m.group(5)}")
     return sorted(keys)
 
 
@@ -88,9 +91,10 @@ def history_line(root: Path, sha: str, slices: int, ident: dict[str, str], previ
             continue
         per.append({"slice": i, "exit": code, "verdict": rec.get("verdict"), "passed": rec.get("passed"), "failed": rec.get("failed"),
                     "skipped": rec.get("skipped"), "minutes": rec.get("total_min"), "binary": str(rec.get("binary_sha256"))[:12], "at": rec.get("at")})
-        reds.update(red_keys(log))
-        if code != 0:
-            reds.add(f"slice-{i} exit {code}")
+        keys = red_keys(log)
+        reds.update(keys)
+        if code != 0 and not keys:
+            reds.add(f"exit {code} with no red cell")
         skips.update("/".join(map(str, s)) for s in rec.get("skipped_env") or [])
     ok = hosted.render(root, sha, slices)[1]
     before = set((previous or {}).get("red_keys", []))
@@ -237,8 +241,13 @@ def self_test() -> int:
         assert (lines[2]["ref_name"], lines[2]["ref_type"], lines[2]["event"]) == ("v0.33.0", "tag", "workflow_dispatch"), lines[2]
         assert "workflow_sha" not in lines[0] and lines[3]["workflow_sha"] == sha1, "the workflow sha is kept only when it is not the graded sha"
         assert lines[0]["tests"] == {"passed": 40, "failed": 0, "skipped": 0} and lines[0]["slices"][0]["minutes"] == 1.0, lines[0]
-        assert "slice-3 lost" in lines[3]["red_keys"] and "slice-1 exit 2" in lines[3]["red_keys"] and "mysql/live FAIL" in lines[3]["red_keys"], lines[3]["red_keys"]
-        assert lines[3]["delta"] == {"against": sha1, "new": ["slice-1 exit 2", "slice-3 lost"], "fixed": []}, lines[3]["delta"]
+        assert "slice-3 lost" in lines[3]["red_keys"] and "mysql/live FAIL" in lines[3]["red_keys"], lines[3]["red_keys"]
+        assert not any(k.startswith("slice-1") for k in lines[3]["red_keys"]), "a red cell, not its slice, is the key"
+        assert lines[3]["delta"] == {"against": sha1, "new": ["slice-3 lost"], "fixed": []}, lines[3]["delta"]
+        quiet = slices_dir("quiet", {1: {"exit_code": 2}})
+        for i in range(4):
+            (quiet / f"slice-{i}" / "gate.log").write_text("  postgres   16     live             s3       PASS ok\n")
+        assert history_line(quiet, sha1, 3, ident(), None)["red_keys"] == ["exit 2 with no red cell"], "an exit no red cell explains is a key without its slice"
         assert lines[2]["delta"]["against"] is None, "the first line of a ref has no line to differ from"
         assert [x["run_id"] for x in show(lines, "refs/heads/main", None)] == ["7", "8", "10"] and [x["run_id"] for x in show(lines, "v0.33.0", None)] == ["9"]
         assert [x["run_id"] for x in show(lines, None, "bbbb")] == ["10"] and [x["run_id"] for x in show(lines, "main", sha1)] == ["7", "8"], "show reads by ref or by sha"
@@ -274,6 +283,8 @@ def self_test() -> int:
     wide["jobs"]["plan"]["permissions"] = {"contents": "write"}
     assert writers(wide)[1] != writers(wide)[0], "contents: write on a job that does not record is seen"
     assert red_keys("  oracle     -      no_silent_null   -        FAIL x\n  mysql 8 live s3 KNOWN y\n") == ["oracle/no_silent_null FAIL"]
+    cell = "  live       batch  -                -        FAIL live modules FAILED · {} — boom (see log)\n"
+    assert red_keys(cell.format("m::a") + cell.format("m::b")) == ["m::a", "m::b"], "a live cell is its own key, not `live/-`"
     assert not on_main(sha1, {"GITHUB_REF": "refs/heads/feature"}), "a run off main never records"
     print("gate_history self-test ok")
     return 0

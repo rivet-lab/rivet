@@ -1,7 +1,4 @@
 //! Cursor and chunk candidate ranking (Epic B).
-//!
-//! Deterministic rule-based scoring so the discovery artifact is reproducible
-//! and reviewable without a live database connection.
 
 use super::{
     ChunkCandidate, CursorCandidate, CursorCandidateReason, TableInfo, is_integer_type,
@@ -9,9 +6,6 @@ use super::{
 };
 
 /// Rank every plausible cursor candidate.
-///
-/// The list is sorted by descending score and tie-broken by column order in the
-/// table definition (so output is stable across platforms).
 pub(super) fn cursor_candidates(info: &TableInfo) -> Vec<CursorCandidate> {
     let mut out: Vec<CursorCandidate> = Vec::new();
 
@@ -26,7 +20,6 @@ pub(super) fn cursor_candidates(info: &TableInfo) -> Vec<CursorCandidate> {
             reasons.push(CursorCandidateReason::TimestampType);
             score += 40;
         } else if is_integer_type(&col.data_type) && info.single_pk_column() == Some(&col.name) {
-            // Integer PK is a usable surrogate cursor (monotonic ids).
             reasons.push(CursorCandidateReason::IntegerMonotonic);
             reasons.push(CursorCandidateReason::PrimaryKey);
             score += 25;
@@ -47,7 +40,6 @@ pub(super) fn cursor_candidates(info: &TableInfo) -> Vec<CursorCandidate> {
             score -= 10;
         }
 
-        // Small boost to earlier columns so suggestions stay stable across wide tables.
         let position_bonus = (info.columns.len() as i32 - idx as i32).clamp(0, 5);
         score += position_bonus;
 
@@ -66,10 +58,6 @@ pub(super) fn cursor_candidates(info: &TableInfo) -> Vec<CursorCandidate> {
 }
 
 /// Pick a NULL-safe fallback timestamp to suggest for coalesce mode.
-///
-/// Returns `Some(column_name)` only when:
-/// - the best cursor candidate is nullable (so coalesce actually helps), AND
-/// - a *different* NOT-NULL timestamp column exists.
 pub(super) fn suggest_cursor_fallback(info: &TableInfo) -> Option<String> {
     let primary = info
         .cursor_candidates()
@@ -214,12 +202,7 @@ mod tests {
         }));
     }
 
-    /// A mutation stamp that is not spelled `updated_at` must still outrank the
-    /// create-only column. Measured on a dogfood stand 2026-09-18: the scorer knew
-    /// exactly two literals, so `created_at` (+20 name) beat `changed_at` (+0) and
-    /// init wrote the create-only column as `cursor_column` — on a table where all
-    /// 1000 rows had `changed_at > created_at`, an incremental export that misses
-    /// 100% of updates. RED against the old `"updated_at" | "modified_at"` arm.
+    /// A mutation stamp that is not spelled `updated_at` must still outrank the create-only column.
     #[test]
     fn a_mutation_stamp_spelled_otherwise_still_outranks_created_at() {
         for stamp in ["changed_at", "last_modified", "update_date"] {
@@ -236,9 +219,7 @@ mod tests {
         }
     }
 
-    /// PascalCase (SQL Server's convention): `ModifiedDate` is the mutation stamp and
-    /// must lead `CreatedDate`, whatever their order. RED against snake_case-only
-    /// name lists, under which both scored +0 and the earlier column won.
+    /// PascalCase (SQL Server's convention): `ModifiedDate` is the mutation stamp and must lead `CreatedDate`, whatever their order.
     #[test]
     fn pascal_case_mutation_stamp_leads_the_creation_stamp() {
         let t = table(vec![
@@ -255,10 +236,7 @@ mod tests {
         }));
     }
 
-    /// The scores are a SUM of the documented weights — +40 for a timestamp type, +40
-    /// for a mutation stamp, +20 for a creation stamp, the position bonus — so the
-    /// discovery artifact stays reproducible. RED against `*=` / `-=` in place of `+=`
-    /// (a product of the weights still sorts first, and a subtraction still trails).
+    /// The scores are a SUM of the documented weights.
     #[test]
     fn scores_add_the_documented_weights() {
         let t = table(vec![
