@@ -87,6 +87,8 @@ pub fn run_plan_command(
 
     let exports = plannable_exports(&config, export_name)?;
 
+    refuse_what_run_refuses(&config, config_dir, export_name, params)?;
+
     let state_path = config_dir.join(".rivet_state.db");
     let state = StateStore::open(state_path.to_str().unwrap_or(".rivet_state.db"))?;
 
@@ -101,6 +103,7 @@ pub fn run_plan_command(
             params,
             &state,
             date,
+            matches!(format, PlanOutputFormat::Json(Some(_))),
         )?);
     }
 
@@ -270,6 +273,26 @@ fn source_unreadable(export: &str, cause: anyhow::Error) -> anyhow::Error {
     ))
 }
 
+/// Stop with the first refusal `rivet run` would raise for the selected exports.
+fn refuse_what_run_refuses(
+    config: &Config,
+    config_dir: &Path,
+    export_name: Option<&str>,
+    params: Option<&HashMap<String, String>>,
+) -> Result<()> {
+    for (_, verdict) in super::planning::plan_run(
+        config,
+        config_dir,
+        export_name,
+        params,
+        super::planning::PlanFlags::default(),
+    )? {
+        verdict?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_plan_artifact(
     config: &Config,
     export: &crate::config::ExportConfig,
@@ -278,8 +301,12 @@ fn build_plan_artifact(
     params: Option<&HashMap<String, String>>,
     state: &StateStore,
     date: Option<chrono::NaiveDate>,
+    sealing: bool,
 ) -> Result<(PlanArtifact, PrioritizationInputs, ExportRecommendation)> {
     let mut plan = build_plan(config, export, config_dir, false, false, false, params)?;
+    if sealing && export.partition_by.is_some() {
+        super::planning::refuse_to_seal(&plan)?;
+    }
     if let Some(note) = partitioned_preview_note(export) {
         log::warn!("{note}");
     }
@@ -956,6 +983,43 @@ mod tests {
             )
         );
         assert_eq!(super::partitioned_preview_note(&cfg.exports[1]), None);
+    }
+
+    /// A sealed artifact refuses the `{partition}` token of a `partition_by` export by code; an unsealed preview and an export without `partition_by` build.
+    #[test]
+    fn only_a_sealed_partitioned_export_is_refused_for_its_partition_token() {
+        let cfg = crate::config::Config::from_yaml(
+            "source: { type: postgres, url: \"postgresql://u:p@127.0.0.1:1/db\" }\n\
+             exports:\n\
+             \x20 - name: events\n    table: events\n    mode: full\n    format: parquet\n\
+             \x20   partition_by: created_at\n\
+             \x20   destination: { type: local, path: \"./out/{partition}\" }\n\
+             \x20 - name: plain\n    table: plain\n    mode: full\n    format: parquet\n\
+             \x20   destination: { type: local, path: ./out/plain }\n",
+        )
+        .expect("the fixture config loads");
+        let state = crate::state::StateStore::open_in_memory().expect("state");
+        let build = |i: usize, sealing: bool| {
+            super::build_plan_artifact(
+                &cfg,
+                &cfg.exports[i],
+                "rivet.yaml",
+                Path::new("."),
+                None,
+                &state,
+                None,
+                sealing,
+            )
+        };
+        let err = build(0, true).expect_err("a sealed partitioned export is refused");
+        crate::error::assert_coded(&err, "RIVET_PLAN_PARTITION_TOKEN_UNEXPANDED", 1);
+        let token = Some("RIVET_PLAN_PARTITION_TOKEN_UNEXPANDED");
+        for (i, sealing) in [(0, false), (1, true), (1, false)] {
+            let code = build(i, sealing)
+                .err()
+                .and_then(|e| crate::error::error_code(&e));
+            assert_ne!(code, token, "export {i} sealing {sealing}");
+        }
     }
 
     /// The write-report the operator sees, per outcome.
@@ -1807,5 +1871,26 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    /// `plan` stops before writing on the refusal `run` would raise (a stdout export with `max_file_size`) and passes a plain config.
+    #[test]
+    fn plan_refuses_what_run_refuses_and_passes_a_plain_config() {
+        let config = |destination: &str| {
+            crate::config::Config::from_yaml(&format!(
+                "source: {{ type: postgres, url: \"postgresql://u:p@127.0.0.1:1/db\" }}\n\
+                 exports:\n\
+                 \x20 - name: e\n    table: t\n    mode: full\n    format: parquet\n\
+                 \x20   destination: {destination}\n"
+            ))
+            .expect("the fixture config loads")
+        };
+        let refuse = |cfg: &crate::config::Config| {
+            super::refuse_what_run_refuses(cfg, Path::new("."), None, None)
+        };
+        assert!(refuse(&config("{ type: local, path: ./out }")).is_ok());
+        let err = refuse(&config("{ type: stdout }\n    max_file_size: 1MB"))
+            .expect_err("a stdout export cannot split files");
+        assert!(format!("{err:#}").contains("max_file_size"), "{err:#}");
     }
 }
