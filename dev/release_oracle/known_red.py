@@ -60,9 +60,6 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     KnownRed("upgrade[oracle/cdc-load/tz=Asia/Tokyo]: cycle1/load: prev exit 1 [RIVET_LOAD_BLOCK_MISSING]: Error: [RIVET_LOAD_BLOCK_MISSING] config has no top-level `load:` block — add `load: { target, ... }` to load into a warehouse",
              _ORACLE_CDC_LOAD,
              _EXPIRES),
-    KnownRed("no_silent_null[mongo] smoke: OVERRIDE_IGNORED over 38 source->override pairs #dbdffe5c",
-             "2026-11-10: batch leg, NEW-OVERRIDE-IGNORED: a type override on a Mongo `_id` or `document` column is accepted and the column is delivered as VARCHAR at exit 0; open, closes when the override is delivered or refused by code; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
-             _EXPIRES),
     KnownRed("no_silent_null[mssql] smoke: WRONG_VALUE over 3 source->override pairs #5e462b16",
              "2026-11-10: batch leg, PR-NULL: exit 0 with fidelity exact while the value changed (integer to a narrower decimal wraps, text or integer to bool, NUMBER 1E125 to float4 as inf, a negative-scale decimal scaled the wrong way); open, closes when the override refuses a value it cannot hold; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
              _EXPIRES),
@@ -105,9 +102,6 @@ KNOWN_RED: tuple[KnownRed, ...] = (
              _EXPIRES),
     KnownRed("no_silent_null[postgres] smoke: UNCODED_STOP over 35 source->override pairs #a0cca18b",
              "2026-11-10: batch leg, PR-CAUSE: run stops on a wrong-type override with exit 1 and no code, nothing silent; open, closes when the pair is refused by a coded cause at check; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
-             _EXPIRES),
-    KnownRed("no_silent_null[mongo] full: OVERRIDE_IGNORED over 38 source->override pairs #dbdffe5c",
-             "2026-11-11: full tier, NEW-OVERRIDE-IGNORED: a type override on a Mongo `_id` or `document` column is accepted and the column is delivered as VARCHAR or JSON at exit 0; open, closes when the override is delivered or refused by code; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
              _EXPIRES),
     KnownRed("no_silent_null[mssql] full: WRONG_VALUE over 3 source->override pairs #5e462b16",
              "2026-11-11: full tier, PR-NULL: exit 0 with fidelity exact while the value changed (integer to a narrower decimal wraps, text or integer to bool, NUMBER 1E125 to float4 as inf, a negative-scale decimal scaled the wrong way, DATETIME to date truncated, Oracle TIMESTAMP WITH TIME ZONE shifted); open, closes when the override refuses a value it cannot hold; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it",
@@ -305,7 +299,7 @@ def self_test() -> int:
     assert lane_of(own) == NIGHTLY and not any(owed_by(k, lane) for k in KNOWN_RED if own in k.keys() for lane in (GATE, ISLAND, OFFLINE)), \
         "a nightly class is owed by no gate run: a full gate would block on it"
     cut = nightly_classes()
-    assert nightly_key("no_silent_null", "mysql", "CHECK_RUN_SPLIT") in cut and nightly_key("no_silent_null", "mongo", "OVERRIDE_IGNORED") in cut, \
+    assert nightly_key("no_silent_null", "mysql", "CHECK_RUN_SPLIT") in cut and nightly_key("no_silent_null", "mssql", "WRONG_VALUE") in cut, \
         "a gate entry is cut to its (matrix, engine, cause) class"
     held = KnownRed("m::open_defect_x — boom", "2026-11-16: why", "2026-11-22")
     assert cells((held,)) == {"m::open_defect_x": held} == nightly_classes((held,)), "a live-cell entry is held under its cell"
