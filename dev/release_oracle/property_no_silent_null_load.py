@@ -20,6 +20,7 @@ import time
 import urllib.error
 import urllib.request
 from base64 import b64decode, b64encode
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from itertools import count
@@ -159,7 +160,8 @@ class SnowflakeReader:
         from .duck import Oracle
 
         self.spec = {"connection": connection, "database": database, "warehouse": warehouse}
-        self.ora = Oracle(snowflake=self.spec)
+        self.stack = ExitStack()
+        self.ora = self.stack.enter_context(Oracle(snowflake=self.spec))
         self.lock = threading.Lock()
 
     def query(self, sql: str) -> list[tuple]:
@@ -169,7 +171,7 @@ class SnowflakeReader:
 
     def close(self) -> None:
         """Release the session."""
-        self.ora.close()
+        self.stack.close()
 
 
 def _sf_value(kind: str, text: str | None):
@@ -479,36 +481,38 @@ class Matrix:
         """The run-unique Mongo collection of a chunk; a load names its warehouse table after it."""
         return f"{chunk.table}_{self.run}"
 
+    @contextmanager
     def mongo(self):
-        """The stand's database through pymongo, a second client of the source."""
+        """The stand's database through pymongo, a second client of the source, closed on exit."""
         try:
             from pymongo import MongoClient
         except ImportError as e:
             raise Unreachable("pymongo is not importable: the Mongo matrix cannot seed") from e
-        return MongoClient(self.url, serverSelectionTimeoutMS=5000).get_default_database()
+        with MongoClient(self.url, serverSelectionTimeoutMS=5000) as client:
+            yield client.get_default_database()
 
     def seed_mongo(self, chunks: list[Chunk]) -> None:
         """One collection per chunk: a document per value with `_id` its id, then the NULL document."""
-        db = self.mongo()
-        try:
-            db.client.admin.command("ping")
-        except Exception as e:
-            raise Unreachable(f"the mongo stand did not answer: {type(e).__name__}: {e}"[:200]) from e
-        for c in chunks:
-            db.drop_collection(self.collection(c))
-            col = c.cols[0]
-            docs = [{"_id": i, col.name: te.mongo_value(tm.lit_at(col, i, c))} for i in (*range(1, len(col.lits) + 1), c.null_id)]
+        with self.mongo() as db:
             try:
-                db[self.collection(c)].insert_many(docs)
+                db.client.admin.command("ping")
             except Exception as e:
-                raise HarnessError(f"mongo seed of {c.table} refused: {type(e).__name__}: {e}"[:300]) from e
+                raise Unreachable(f"the mongo stand did not answer: {type(e).__name__}: {e}"[:200]) from e
+            for c in chunks:
+                db.drop_collection(self.collection(c))
+                col = c.cols[0]
+                docs = [{"_id": i, col.name: te.mongo_value(tm.lit_at(col, i, c))} for i in (*range(1, len(col.lits) + 1), c.null_id)]
+                try:
+                    db[self.collection(c)].insert_many(docs)
+                except Exception as e:
+                    raise HarnessError(f"mongo seed of {c.table} refused: {type(e).__name__}: {e}"[:300]) from e
 
     def drop(self, chunks: list[Chunk]) -> None:
         """Drop the seed tables."""
         if self.engine == "mongo":
-            db = self.mongo()
-            for c in chunks:
-                db.drop_collection(self.collection(c))
+            with self.mongo() as db:
+                for c in chunks:
+                    db.drop_collection(self.collection(c))
             return
         for c in chunks:
             nsn.sql(self.engine, self.url, f"DROP TABLE IF EXISTS {c.table};")

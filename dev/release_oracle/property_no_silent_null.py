@@ -835,11 +835,12 @@ def mongo_seed(url: str) -> int:
     from . import type_matrix as tm
 
     docs = tm.mongo_grid()[0]
-    coll = MongoClient(url, serverSelectionTimeoutMS=5000).get_default_database()[TABLE]
-    coll.drop()
-    coll.insert_many(docs)
-    if coll.count_documents({}) != len(docs):
-        raise RuntimeError(f"mongo seed refused: {coll.count_documents({})} of {len(docs)} documents")
+    with MongoClient(url, serverSelectionTimeoutMS=5000) as client:
+        coll = client.get_default_database()[TABLE]
+        coll.drop()
+        coll.insert_many(docs)
+        if coll.count_documents({}) != len(docs):
+            raise RuntimeError(f"mongo seed refused: {coll.count_documents({})} of {len(docs)} documents")
     return len(docs)
 
 
