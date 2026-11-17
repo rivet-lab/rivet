@@ -18,6 +18,24 @@ LIVE_ALL = python3 dev/pytools/live_slot.py --slots $(LIVE_SLOTS) --all --
 pr-ready:  ## Everything a PR must pass before it is opened; paste the summary block into the PR body. ARGS=--fast skips mutants (reported NOT RUN); ARGS='--body FILE' grades the PR body's declarations.
 	. ./.githooks/repo-venv && python3 dev/pytools/pr_ready.py run $(ARGS)
 
+HUNT = python3 -m dev.pytools.hunt $(if $(LENS),--lens "$(LENS)",) $(if $(RULES),--rules "$(RULES)",) $(ARGS)
+
+.PHONY: hunt hunt-dry
+hunt:  ## Bug hunt (dev/pytools/hunt.py): architect lenses, a sweeper per rule and KEY CLAIM, a merge, one verifier pass. LENS=preset|"text" (ARGS=--list-lenses), ARGS=--auto (next lenses in rotation + changed seams), ARGS="--lenses a,b", RULES="title;title", ARGS="--close C3 --pr 812". Paid and long: run it detached.
+	$(HUNT)
+
+hunt-dry:  ## The runs `make hunt` would start (agent, predicate, cwd, budget, output), without calling claude or making the worktree.
+	$(HUNT) --dry-run
+
+FIX = python3 -m dev.pytools.fix $(ARGS)
+
+.PHONY: fix fix-dry
+fix:  ## Fix round (dev/pytools/fix.py): accepted hunt classes to verified PRs, never merged. ARGS="--go --hunt target/hunt/<dir> --classes C1,C3" (--parallel 2, --budget-usd per class, --resume, --only STEP, --force-class ID, --record-closed). Paid and long: run it detached.
+	$(FIX)
+
+fix-dry:  ## The plan of a fix round (roles, lanes, branches, budgets) without calling claude. ARGS="--hunt target/hunt/<dir> --classes C1,C3"; a --go in ARGS is dropped.
+	python3 -m dev.pytools.fix $(filter-out --go,$(ARGS))
+
 .PHONY: error-sites
 error-sites:  ## Regenerate docs/error-sites.md: the offline battery and the live suite under cargo llvm-cov (needs the stand; about an hour).
 	python3 dev/pytools/error_sites.py measure
