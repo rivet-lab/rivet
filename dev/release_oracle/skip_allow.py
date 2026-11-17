@@ -73,6 +73,8 @@ EXCUSES: tuple[Excuse, ...] = (
       for name, why, closes in BY_DESIGN_SKIPS),
     *(Excuse(scenario, engine, "-", f"2026-11-13: {why}. Closes when {closes}; 0.33 ships it ungraded, 0.34 closes it", "2026-11-22")
       for scenario, engine, why, closes in STAND_SKIPS),
+    *(Excuse("no_silent_null_load_cloud", e, "-", "2026-11-16: the gate host has no BigQuery project or Snowflake connection, so the ledger cells are not loaded into either warehouse. Closes when the gate host is given both", "2026-11-22")
+      for e in ("postgres", "mysql", "mssql", "oracle", "mongo")),
 )
 
 

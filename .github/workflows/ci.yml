@@ -1270,6 +1270,13 @@ jobs:
         run: |
           uv run --frozen python -m dev.release_oracle.value_diff
           uv run --frozen python -m dev.release_oracle.rig_oracle
+      - name: The type matrix graders self-test with pymongo, none skipped
+        run: |
+          set -o pipefail
+          uv run --frozen python -m dev.release_oracle.type_edges --self-test
+          uv run --frozen python -m dev.release_oracle.type_matrix --self-test
+          uv run --frozen python -m dev.release_oracle.property_no_silent_null --self-test | tee nsn.out
+          grep -q 'mongo grader ran' nsn.out
 
   lint-tools:
     name: Pinned lint tools
