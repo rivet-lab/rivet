@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 
 from .core import DEVBOX, HALVES, HOSTED
 
@@ -95,11 +95,12 @@ def parse_live_shard(spec: str) -> tuple[int, int]:
     return int(m[1]), int(m[2])
 
 
-def slice_modules(weights: Mapping[str, int], n: int) -> list[list[str]]:
-    """The modules dealt into `n` slices, heaviest first into the lightest slice; deterministic, each module in exactly one slice."""
+def slice_modules(weights: Mapping[str, float], n: int, anchored: Collection[str] | None = None) -> list[list[str]]:
+    """The modules dealt into `n` slices, heaviest first into the lightest slice, the `anchored` ones (all when None) before the rest; deterministic, each module in exactly one slice."""
+    first = set(weights) if anchored is None else set(anchored)
     slices: list[list[str]] = [[] for _ in range(n)]
-    load = [0] * n
-    for m in sorted(weights, key=lambda k: (-weights[k], k)):
+    load = [0.0] * n
+    for m in sorted(weights, key=lambda k: (k not in first, -weights[k], k)):
         i = load.index(min(load))
         slices[i].append(m)
         load[i] += weights[m]

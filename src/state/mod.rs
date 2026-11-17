@@ -154,7 +154,13 @@ pub(super) fn pg_detail(e: &dyn std::error::Error) -> String {
 pub(crate) const SQLITE_BUSY_TIMEOUT_MS: i64 = 10_000;
 
 pub(crate) fn open_connection(db_path: &std::path::Path) -> Result<Connection> {
-    let conn = Connection::open(db_path)?;
+    let conn = Connection::open(db_path).map_err(|e| {
+        crate::error::coded_driver(
+            crate::error::codes::STATE_NOT_WRITABLE,
+            &format!("state: cannot open {}", db_path.display()),
+            e,
+        )
+    })?;
     if let Err(e) = conn.execute_batch("PRAGMA journal_mode=WAL;") {
         log::warn!(
             "state: WAL journal mode unavailable ({}); \
@@ -1039,5 +1045,23 @@ mod sqlite_state_url_tests {
             crate::error::error_code(&err),
             Some("RIVET_STATE_URL_LEAVES_STATE_BEHIND")
         );
+    }
+}
+
+#[cfg(test)]
+mod open_refusal {
+    use super::StateStore;
+
+    #[test]
+    fn an_unopenable_sqlite_file_stops_with_state_not_writable() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = StateStore::open_at_path(&dir.path().join("missing-dir/x.db"))
+            .err()
+            .expect("the open must be refused");
+        assert_eq!(
+            crate::error::error_code(&err),
+            Some("RIVET_STATE_NOT_WRITABLE")
+        );
+        assert!(err.to_string().contains("missing-dir"), "{err:#}");
     }
 }

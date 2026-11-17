@@ -797,6 +797,8 @@ impl Config {
             );
         }
 
+        self.source.check_url_scheme_offline()?;
+
         if self.source.has_url_fields() {
             let url_count = [
                 self.source.url.is_some(),
@@ -876,7 +878,7 @@ impl Config {
             crate::config_bail!(
                 crate::error::codes::CONFIG_PATH_UNSAFE,
                 "export name '{}' is not filename-safe: it must not be absolute, contain \
-                 '/', '\\', '..', a NUL, or start with '.' (the name is used in output paths \
+                 '/', '\\', '..', a NUL, be longer than 200 bytes, or start with '.' (the name is used in output paths \
                  and state keys). Use a plain identifier like `orders` or `daily_events`.",
                 export.name.escape_default(),
             );
@@ -916,6 +918,15 @@ impl Config {
             ("path", export.destination.path.as_deref()),
         ] {
             let (name, Some(v)) = field else { continue };
+            if v.contains('\0') || (name == "path" && v.trim().is_empty()) {
+                crate::config_bail!(
+                    crate::error::codes::CONFIG_PATH_UNSAFE,
+                    "export '{}': destination {name} '{}' is empty or holds a NUL byte — name a \
+                     directory, for example `path: ./out`.",
+                    export.name,
+                    v.escape_default()
+                );
+            }
             if v.split(['/', '\\']).any(|seg| seg == "..") {
                 crate::config_bail!(
                     crate::error::codes::CONFIG_PATH_UNSAFE,
@@ -1018,6 +1029,15 @@ impl Config {
                  chunk_size would be silently ignored. Set one or the other.",
                 export.name
             );
+        }
+
+        for t in [self.source.tuning.as_ref(), export.tuning.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(n) = t.batch_size {
+                Knob::BATCH_SIZE.validate_export(&export.name, n)?;
+            }
         }
 
         if let Some(q) = &export.quality {
@@ -1468,9 +1488,13 @@ fn is_loopback_host(host: &str) -> bool {
         .is_ok_and(|ip| ip.is_loopback())
 }
 
+/// The longest export or table name: a part file name adds a timestamp and extension and stays under the 255-byte file name limit.
+const MAX_NAME_BYTES: usize = 200;
+
 /// True when `name` is filename-safe: rejects path-traversal (`..`), absolute or slash-bearing names (`/`, `\`), a leading `.` (hidden / current-dir), and embedded NULs.
 fn is_filename_safe_name(name: &str) -> bool {
     !name.is_empty()
+        && name.len() <= MAX_NAME_BYTES
         && !name.starts_with('.')
         && !name.contains('/')
         && !name.contains('\\')

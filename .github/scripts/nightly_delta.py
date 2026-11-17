@@ -33,7 +33,7 @@ LIBTEST = re.compile(r"^test (?P<test>\S+) \.\.\. FAILED$")
 GATE_FAIL = re.compile(r"^  (?P<engine>\S+)\s+\S+\s+(?P<scenario>\S+)\s+\S+\s+FAIL\b")
 CRASH = (
     ("python traceback", re.compile(r"^Traceback \(most recent call last\)")),
-    ("compile error", re.compile(r"^error(\[E\d+\])?: ")),
+    ("compile error", re.compile(r"^error(\[E\d+\]: |: (could not compile|aborting due to|failed to run custom build command|linking with))")),
     ("runner shutdown", re.compile(r"The runner has received a shutdown signal")),
 )
 LOST_EXITS = (137, 143)
@@ -63,6 +63,8 @@ def red_keys(text: str) -> tuple[set[str], set[str]]:
             keys.add(known_red.nightly_key("test", m["test"], m["what"]))
         elif m := LIBTEST.match(line):
             keys.add(known_red.nightly_key("test", m["test"], "FAIL"))
+        elif cell := known_red.cell_of(line):
+            keys.add(cell)
         elif m := GATE_FAIL.match(line):
             keys.add(known_red.nightly_key("gate", f"{m['engine']}/{m['scenario']}", "FAIL"))
         for label, rx in CRASH:
@@ -145,6 +147,9 @@ def self_test() -> int:
     assert g(2, "")["verdict"] == NEW, "an exit no class explains is NEW, never green"
     assert g(1, known_line + "Traceback (most recent call last)\n")["verdict"] == NEW, "a crash beside acknowledged reds is NEW"
     assert g(1, known_line + "error[E0432]: unresolved import\n")["verdict"] == NEW, "a compile error beside acknowledged reds is NEW"
+    assert g(1, known_line + "error: could not compile `rivet` (lib) due to 1 previous error\n")["verdict"] == NEW, "cargo's own failure line is a compile error"
+    clap = "── init --table t --clickhouse-url u -o c.yaml (exit 2) ──\nerror: unexpected argument '--clickhouse-url' found\n"
+    assert g(1, known_line + clap)["verdict"] == KNOWN, "a child's refusal the harness echoes into the log is no compile error"
     assert g(0, known_line)["verdict"] == NEW, "red cells under exit 0 are an inconsistent part, NEW"
     assert g(143, known_line)["verdict"] == LOST and g(None, "")["verdict"] == LOST, "a killed or absent part is LOST"
     assert g(1, known_line, dt.date(2027, 1, 1))["verdict"] == NEW, "an expired acknowledgement blocks again"
@@ -155,6 +160,12 @@ def self_test() -> int:
     assert g(2, "  oracle     -      no_silent_null   -        FAIL oracle/NUMBER->float4\n")["new"] == ["nightly[gate|oracle/no_silent_null] FAIL"]
     assert g(2, "  oracle     -      no_silent_null   -        PASS ok\n⊘ KNOWN RED (until 2026-11-22: x)\n")["new"] == ["exit 2: no red class explains it"], \
         "KNOWN rows of the gate's own table are not red classes"
+    live = lambda cell: f"  live       batch  -                -        FAIL live modules FAILED · {cell} — [2026-11-16T00:13:32Z WARN rivet::config::source] inline url: plaintext password (see log)\n"  # noqa: E731
+    assert red_keys(live("m::a") + live("m::b"))[0] == {"m::a", "m::b"}, "two live cells are two red classes, whatever warning heads their first line"
+    assert red_keys("  ✗ audit suspects FAILED · m::a — boom (see log)\n" + live("m::a"))[0] == {"m::a"}, "one cell on its two lines is one class"
+    held = {"m::a": known_red.KnownRed("m::a — boom", "2026-11-16: why", "2026-11-22")}
+    assert grade_part(1, live("m::a"), held, today)["verdict"] == KNOWN, "a live cell the ledger holds is KNOWN"
+    assert grade_part(1, live("m::a") + live("m::b"), held, today)["new"] == ["m::b"], "a live cell the ledger does not hold is NEW by its own name"
     names = parts_of(ROOT / ".github" / "workflows" / "nightly-gate.yml", "part")
     assert "no-silent-null" in names and len(names) == len(set(names)), names
     with tempfile.TemporaryDirectory() as t:

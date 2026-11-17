@@ -449,6 +449,47 @@ impl SourceConfig {
         }
     }
 
+    /// Refuse a URL whose scheme names another engine than `source.type`.
+    fn require_url_scheme_matches_type(&self, url: &str) -> crate::error::Result<()> {
+        if let Some(named) = SourceType::from_url_scheme(url)
+            && named != self.source_type
+        {
+            crate::config_bail!(
+                crate::error::codes::CONFIG_SOURCE_URL_SCHEME_MISMATCH,
+                "source.type: {} but the url scheme names {} — the two must agree, or the run \
+                 would anchor and read one engine while typing the stream as another",
+                self.source_type.label(),
+                named.label()
+            );
+        }
+        Ok(())
+    }
+
+    /// The inline `url:` as text, empty when none is set.
+    fn inline_url_text(&self) -> String {
+        self.url
+            .as_ref()
+            .map(|u| u.expose().to_string())
+            .unwrap_or_default()
+    }
+
+    /// The scheme check of every URL the config holds without I/O: an inline `url:`, a set `url_env` and a readable `url_file`.
+    pub fn check_url_scheme_offline(&self) -> crate::error::Result<()> {
+        if self.has_structured_fields() {
+            return Ok(());
+        }
+        let raw = match (&self.url, &self.url_env, &self.url_file) {
+            (Some(_), None, None) => Some(self.inline_url_text()),
+            (None, Some(env), None) => std::env::var(env).ok(),
+            (None, None, Some(file)) => std::fs::read_to_string(file).ok(),
+            _ => None,
+        };
+        match raw {
+            Some(raw) => self.require_url_scheme_matches_type(raw.trim()),
+            None => Ok(()),
+        }
+    }
+
     pub fn resolve_url(&self) -> crate::error::Result<Secret> {
         if self.has_url_fields() && self.has_structured_fields() {
             return Err(mixed_connection_methods());
@@ -466,7 +507,7 @@ impl SourceConfig {
             Secret(&'a str),
         }
         let (raw, source) = match (&self.url, &self.url_env, &self.url_file, &self.url_secret) {
-            (Some(u), None, None, None) => (u.expose().to_string(), UrlSource::InlineYaml),
+            (Some(_), None, None, None) => (self.inline_url_text(), UrlSource::InlineYaml),
             (None, Some(env), None, None) => (
                 std::env::var(env).map_err(|_| {
                     crate::error::coded(
@@ -524,17 +565,7 @@ impl SourceConfig {
             }
         }
 
-        if let Some(named) = SourceType::from_url_scheme(&resolved)
-            && named != self.source_type
-        {
-            crate::config_bail!(
-                crate::error::codes::CONFIG_SOURCE_URL_SCHEME_MISMATCH,
-                "source.type: {} but the url scheme names {} — the two must agree, or the run \
-                 would anchor and read one engine while typing the stream as another",
-                self.source_type.label(),
-                named.label()
-            );
-        }
+        self.require_url_scheme_matches_type(&resolved)?;
 
         Ok(Secret::new(resolved))
     }
@@ -1199,6 +1230,32 @@ mod tests {
         );
         assert_eq!(
             crate::error::error_code(&err),
+            Some("RIVET_CONFIG_SOURCE_URL_SCHEME_MISMATCH")
+        );
+    }
+
+    #[test]
+    fn offline_scheme_check_reads_url_env_and_url_file() {
+        let wrong = "postgresql://carol@pg.example.com:5432/db";
+        let mut env_src = make_source(SourceType::Mysql);
+        env_src.url_env = Some("RIVET_TEST_I4_SCHEME_ENV".into());
+        // SAFETY: a name unique to this test, set before the read and removed after.
+        unsafe { std::env::set_var("RIVET_TEST_I4_SCHEME_ENV", wrong) };
+        let env_err = env_src.check_url_scheme_offline();
+        unsafe { std::env::remove_var("RIVET_TEST_I4_SCHEME_ENV") };
+        assert_eq!(
+            crate::error::error_code(&env_err.expect_err("url_env scheme")),
+            Some("RIVET_CONFIG_SOURCE_URL_SCHEME_MISMATCH")
+        );
+
+        let path = std::env::temp_dir().join(format!("rivet-i4-scheme-{}.url", std::process::id()));
+        std::fs::write(&path, format!("{wrong}\n")).unwrap();
+        let mut file_src = make_source(SourceType::Mysql);
+        file_src.url_file = Some(path.to_string_lossy().into_owned());
+        let file_err = file_src.check_url_scheme_offline();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(
+            crate::error::error_code(&file_err.expect_err("url_file scheme")),
             Some("RIVET_CONFIG_SOURCE_URL_SCHEME_MISMATCH")
         );
     }

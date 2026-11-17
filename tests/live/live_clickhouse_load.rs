@@ -3840,7 +3840,7 @@ fn a_mongo_checkpoint_from_before_the_ordinal_is_adopted_and_loads_in_source_ord
 
 /// Parts an older rivet stamped with `_data` only are refused before any write, and the printed re-baseline loads the stream equal to the source.
 #[test]
-#[ignore = "live: requires clickhouse + fake-gcs + mongo-rs + RIVET_PREV_RELEASE_BIN"]
+#[ignore = "live: requires clickhouse + fake-gcs + mongo-rs + RIVET_LEASE_CARRIER_BIN"]
 fn a_mongo_stream_staged_by_an_older_rivet_is_refused_before_any_write_and_the_remedy_loads_it() {
     require_mongo_cdc_into_clickhouse();
     let mdb = unique_name("chmcdc_legacy");
@@ -3855,7 +3855,7 @@ fn a_mongo_stream_staged_by_an_older_rivet_is_refused_before_any_write_and_the_r
     let mut rig = mongo_cdc_into_clickhouse_at(&mdb, &db, &prefix).cdc("initial: snapshot");
     rig.rebuilt(Rig::clear_top_lines);
     rig.config_path();
-    let Some(old) = rig.as_previous_release() else {
+    let Some(old) = rig.as_lease_carrier() else {
         return;
     };
     old.run_ok();
