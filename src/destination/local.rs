@@ -76,6 +76,22 @@ fn staging_name(file_name: &str) -> String {
     )
 }
 
+/// Renames `src` to `dst`; a cross-device rename falls back to copy then remove, any other error is returned.
+fn rename_or_copy(
+    src: &Path,
+    dst: &Path,
+    rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    match rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+            std::fs::copy(src, dst)?;
+            std::fs::remove_file(src)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// An idempotent delete: a key that is already gone counts as removed.
 fn absent_is_removed(r: std::io::Result<()>) -> std::io::Result<()> {
     match r {
@@ -199,15 +215,7 @@ impl super::Destination for LocalDestination {
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        match std::fs::rename(&src, &dst) {
-            Ok(()) => Ok(()),
-            Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-                std::fs::copy(&src, &dst)?;
-                std::fs::remove_file(&src)?;
-                Ok(())
-            }
-            Err(e) => Err(e.into()),
-        }
+        Ok(rename_or_copy(&src, &dst, |a, b| std::fs::rename(a, b))?)
     }
 }
 
@@ -623,6 +631,42 @@ mod tests {
         assert!(!dir.path().join("a").exists());
         let body = std::fs::read(dir.path().join("_quarantine/r/a")).unwrap();
         assert_eq!(body, b"new", "rename overwrites target");
+    }
+
+    /// A cross-device rename error falls back to copy then remove, leaving the bytes at the destination only.
+    #[test]
+    fn cross_device_rename_falls_back_to_copy_then_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, dst) = (dir.path().join("src"), dir.path().join("dst"));
+        std::fs::write(&src, b"payload").unwrap();
+
+        rename_or_copy(&src, &dst, |_, _| {
+            Err(std::io::Error::from_raw_os_error(libc::EXDEV))
+        })
+        .unwrap();
+
+        assert_eq!(std::fs::read(&dst).unwrap(), b"payload");
+        assert!(!src.exists(), "the source is removed after the copy");
+    }
+
+    /// A rename error other than a cross-device one is returned as it came, with no copy made.
+    #[test]
+    fn non_cross_device_rename_error_is_returned_without_a_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, dst) = (dir.path().join("src"), dir.path().join("dst"));
+        std::fs::write(&src, b"payload").unwrap();
+
+        let err = rename_or_copy(&src, &dst, |_, _| {
+            Err(std::io::Error::from_raw_os_error(libc::EACCES))
+        })
+        .unwrap_err();
+
+        assert_eq!(err.raw_os_error(), Some(libc::EACCES));
+        assert!(src.exists(), "the source is untouched");
+        assert!(
+            !dst.exists(),
+            "no copy is made for a non cross-device error"
+        );
     }
 
     /// SEC-RED V14: `remote_key` is joined onto `base_path` via `Path::join` with no traversal containment, so a key containing `../` (or an absolute path) escapes the destination directory and lets an attacker-influenced key write/move/read arbitrary files on the host.
