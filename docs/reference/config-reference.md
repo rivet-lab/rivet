@@ -141,7 +141,7 @@ Rendered from the JSON Schema `rivet schema config` emits (schemars ← the Rust
 | `on_batch_memory_exceeded` | `warn` \| `fail` \| `auto_shrink` |  | Policy applied when a batch exceeds `max_batch_memory_mb`. Default: `warn`. |
 | `adaptive` | `boolean` |  | Enable real-time batch size adaptation based on DB pressure metrics. The batch loop samples the export's OWN extraction pressure: Postgres `pg_stat_bgwriter` checkpoint pressure; MySQL the read-spill pair `Created_tmp_disk_tables` and `Innodb_buffer_pool_wait_free`. SQL Server takes no batch sample — its batch size comes from the memory cap alone.  It also arms the OPT-2 concurrency governor when `parallel > 1`. The governor samples a DIFFERENT, write-driven signal on its own monitoring connection — one a read-only export cannot inflate, so it can never shed its own workers over its own reads: Postgres `checkpoints_req`, MySQL `Innodb_log_waits`, SQL Server `Log Flush Waits/sec` (`_Total`). |
 | `min_parallel` | `integer` |  | Floor for the concurrency governor (lowest parallelism under pressure). Default 1. Ceiling is the export's `parallel`. |
-| `max_value_mb` | `integer` |  | Hard per-value size ceiling in MB. A single text/JSON/blob cell larger than this aborts the run with `RIVET_VALUE_TOO_LARGE`. `0` disables the guard. Default: 256. |
+| `max_value_mb` | `integer` |  | Hard per-value size ceiling in MB. A single text/JSON/blob cell larger than this aborts the run with `RIVET_SOURCE_VALUE_TOO_LARGE`. `0` disables the guard. Default: 256. |
 
 ### `exports[].destination`
 

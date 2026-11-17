@@ -1,18 +1,4 @@
-//! SQL Server introspection for `rivet init` (parity with [`super::postgres`] /
-//! [`super::mysql`]).
-//!
-//! The shape mirrors the PG module — `connect()` opens one connection shared
-//! across the whole init run, `list_tables()` enumerates a schema, and
-//! `introspect()` builds a [`TableInfo`] — but the seam is narrower: the
-//! [`MssqlSource`] the export path already owns exposes only
-//! [`query_scalar`](crate::source::Source::query_scalar) publicly (one scalar
-//! cell). So, exactly like
-//! the MSSQL `Source::introspect_for_chunking`, every
-//! multi-row / multi-column read is folded server-side into a single delimited
-//! scalar with `STRING_AGG`: `CHAR(31)` (unit separator) between fields and
-//! `CHAR(30)` (record separator) between rows. Both bytes are illegal in a SQL
-//! Server identifier and never appear in `information_schema` type names, so the
-//! split back apart is unambiguous.
+//! SQL Server introspection for `rivet init` (parity with [`super::postgres`] / [`super::mysql`]).
 
 use crate::config::SourceType;
 use crate::error::Result;
@@ -28,26 +14,12 @@ const RS: char = '\u{1e}';
 /// Field separator within one aggregated record — ASCII 31 (US).
 const US: char = '\u{1f}';
 
-/// Open the one connection shared across the whole init run (`list_tables`
-/// plus every per-table `introspect` — no per-table reconnect), through the
-/// same [`MssqlSource::connect_with_tls`] path doctor/check/run use.
-///
-/// `init` runs before any YAML `tls:` block exists (it *generates* the config),
-/// so no [`crate::config::TlsConfig`] is threaded here: SQL Server forces TLS on
-/// the login handshake regardless, and with no `tls:` block the connector
-/// trust-certs the server certificate (encrypted, unverified) — the documented
-/// default for dev / self-signed setups. Add a `source.tls:` block to the
-/// generated config to enable strict validation for production runs.
+/// Open the one connection shared across the whole init run (`list_tables` plus every per-table `introspect`.
 pub(super) fn connect(url: &str, tls: Option<&crate::config::TlsConfig>) -> Result<MssqlSource> {
     MssqlSource::connect_with_tls(url, tls)
 }
 
-/// Base tables and views in a SQL Server schema (`information_schema.TABLES`), without the system objects SQL Server ships (`IsMSShipped`, e.g. `dbo.systranschemas` of a CDC database).
-///
-/// `TABLE_CATALOG` is the connection's database (from the URL), so no catalog
-/// filter is needed; `schema` filters `TABLE_SCHEMA` (default `dbo`). Names are
-/// aggregated into one `RS`-delimited scalar because the source seam only hands
-/// back a single cell.
+/// Base tables and views in a SQL Server schema (`information_schema.TABLES`), without the system objects SQL Server ships (`IsMSShipped`, e.g.
 pub(super) fn list_tables(
     conn: &mut dyn crate::source::Source,
     schema: &str,
@@ -80,9 +52,6 @@ pub(super) fn introspect(
     let schema_lit = schema.replace('\'', "''");
     let table_lit = table.replace('\'', "''");
 
-    // Row estimate from the `sys.partitions` catalog (rows in the heap/clustered
-    // index, index_id 0/1) — fast, no `COUNT(*)`. `0` for a view or when stats
-    // are unavailable; never fails the scaffold.
     let count_sql = format!(
         "SELECT SUM(p.rows) FROM sys.partitions p \
          JOIN sys.objects o ON o.object_id = p.object_id \
@@ -95,12 +64,6 @@ pub(super) fn introspect(
         .unwrap_or(0)
         .max(0);
 
-    // Column metadata: one `RS`-delimited record per column, each holding six
-    // `US`-delimited fields (name, data_type, is_pk, is_nullable, precision,
-    // scale, leads-an-index). `COLUMNPROPERTY(..., 'IsXmlIndexable')` is not needed; PK-ness
-    // comes from the primary-key constraint join, NULL-ability and numeric
-    // precision/scale from `information_schema.COLUMNS`. `ISNULL(...,'')` keeps
-    // absent precision/scale as empty fields so the `US` split stays aligned.
     let columns_sql = format!(
         "SELECT STRING_AGG(CONVERT(nvarchar(max), \
              CONCAT( \
@@ -133,7 +96,6 @@ pub(super) fn introspect(
          WHERE c.TABLE_SCHEMA = N'{schema_lit}' AND c.TABLE_NAME = N'{table_lit}'",
     );
 
-    // The capture instance CDC already reads, newest first; none when CDC is off or the `cdc` schema is absent.
     let cdc_capture_instance = conn
         .query_scalar(&format!(
             "SELECT TOP 1 capture_instance FROM cdc.change_tables \
@@ -171,9 +133,6 @@ pub(super) fn introspect(
 }
 
 /// Split the `RS`/`US`-delimited column aggregate back into [`ColumnInfo`]s.
-/// A malformed record (wrong field count) is skipped rather than panicking —
-/// the worst case is a missing column in the scaffold, which `rivet check`
-/// would then flag, never a crash.
 fn parse_columns_agg(agg: &str) -> Vec<ColumnInfo> {
     agg.split(RS)
         .filter(|rec| !rec.is_empty())
@@ -196,11 +155,7 @@ fn parse_columns_agg(agg: &str) -> Vec<ColumnInfo> {
         .collect()
 }
 
-/// SQL Server's catalog spells its 8-byte row-version counter `timestamp` — a name
-/// that is a time on every other engine and a `binary(8)` here. Read back under its
-/// real name, so no type predicate takes it for a date: init scored it as a cursor
-/// (+40, above the integer PK) and chose it as the partition column, a `BYTES`
-/// column the warehouse cannot partition by and a cursor that never advances.
+/// SQL Server's catalog spells its 8-byte row-version counter `timestamp`.
 fn catalog_type(data_type: &str) -> String {
     if data_type.eq_ignore_ascii_case("timestamp") {
         "rowversion".to_string()
@@ -213,9 +168,7 @@ fn catalog_type(data_type: &str) -> String {
 mod tests {
     use super::*;
 
-    /// `DATA_TYPE = 'timestamp'` on SQL Server is `rowversion`, never a time: the
-    /// parsed column must not pass the temporal predicate. RED against reading the
-    /// catalog spelling verbatim.
+    /// `DATA_TYPE = 'timestamp'` on SQL Server is `rowversion`, never a time.
     #[test]
     fn a_rowversion_column_is_never_read_as_a_timestamp() {
         let agg = format!(
@@ -229,17 +182,9 @@ mod tests {
         assert!(super::super::is_timestamp_type(&ty("seen_at")));
     }
 
-    /// Guard the whole init-introspection SQL against Msg 9829: STRING_AGG caps its
-    /// result at 8000 bytes UNLESS its input is `CONVERT(nvarchar(max), ..)`. A wide
-    /// table (160+ columns) overflows the per-column CONCAT aggregate, so `rivet
-    /// init` FAILED on it — the init-path sibling of the #21 preflight fix in
-    /// source/mssql/mod.rs (which this dogfooding run surfaced was NOT applied here).
-    /// Every STRING_AGG in the PRODUCTION half must wrap its input in
-    /// CONVERT(nvarchar(max)).
+    /// Guard the whole init-introspection SQL against Msg 9829.
     #[test]
     fn every_string_agg_uses_nvarchar_max_to_survive_wide_tables() {
-        // Scan only the production half — the test module below mentions
-        // `STRING_AGG(` as a literal in this very check, which must not self-trip.
         let src = include_str!("mssql.rs");
         let production = src.split("#[cfg(test)]").next().unwrap();
         for (i, line) in production.lines().enumerate() {
@@ -267,7 +212,6 @@ mod tests {
 
     #[test]
     fn parse_columns_agg_round_trips_fields() {
-        // id BIGINT PK NOT NULL, amount DECIMAL(12,2) NOT NULL, note NVARCHAR NULL.
         let s = agg(&[
             rec(&["id", "bigint", "1", "NO", "", "", "1"]),
             rec(&["amount", "decimal", "0", "NO", "12", "2", "1"]),
@@ -299,7 +243,6 @@ mod tests {
 
     #[test]
     fn parse_columns_agg_skips_malformed_record() {
-        // Second record has only 2 fields — dropped, the well-formed one survives.
         let s = agg(&[
             rec(&["id", "bigint", "1", "NO", "", "", "1"]),
             rec(&["broken", "rec"]),

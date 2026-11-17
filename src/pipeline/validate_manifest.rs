@@ -180,6 +180,16 @@ impl Failure {
         )
     }
 
+    /// Mask the credentials in the variants that carry the destination's own error text.
+    fn redact_store_text(&mut self) {
+        if let Failure::ManifestReadError { detail }
+        | Failure::SuccessMarkerReadError { detail }
+        | Failure::ListPrefixError { detail } = self
+        {
+            *detail = crate::redact::redact_secrets(detail);
+        }
+    }
+
     /// Stable `RIVET_VERIFY_*` error code for this failure variant.
     pub fn error_code(&self) -> &'static str {
         match self {
@@ -480,7 +490,23 @@ fn merge_split_unit_parts(
     merged
 }
 
+/// The verdict at `manifest_dir`, every failure's store text masked by the shared redactor.
 pub fn verify_at_destination(
+    dest: &dyn Destination,
+    manifest_dir: &str,
+    depth: ValidateDepth,
+) -> Result<ManifestVerification> {
+    let mut verdict = verify_unredacted(dest, manifest_dir, depth)?;
+    for failure in &mut verdict.failures {
+        if seeded!("store-error-detail-unmasked", false, true) {
+            failure.redact_store_text();
+        }
+    }
+    Ok(verdict)
+}
+
+/// The verdict at `manifest_dir` with the destination's error text as the store returned it.
+fn verify_unredacted(
     dest: &dyn Destination,
     manifest_dir: &str,
     depth: ValidateDepth,
@@ -1612,6 +1638,93 @@ mod tests {
             "expected one ManifestReadError naming the head step, got: {:?}",
             v.failures
         );
+    }
+
+    /// Wraps a real `LocalDestination` and fails one named operation with a store error that carries `SAS_IN_STORE_ERROR`.
+    struct StoreErrorAt(LocalDestination, &'static str);
+    const SAS_IN_STORE_ERROR: &str = "QxSasCanaryForValidate0123Vm";
+    impl StoreErrorAt {
+        fn fails(&self, op: &str, k: &str) -> Result<()> {
+            let hit = match op {
+                "head-manifest" | "read-manifest" => k.ends_with(MANIFEST_FILENAME),
+                "head-success" | "read-success" => k.ends_with(SUCCESS_FILENAME),
+                _ => true,
+            };
+            if hit && self.1 == op {
+                anyhow::bail!(
+                    "Unexpected (persistent) at {op}, context: {{ uri: http://h/c/{k}?{SAS_IN_STORE_ERROR}, status: 500 }}"
+                )
+            }
+            Ok(())
+        }
+    }
+    impl crate::destination::Destination for StoreErrorAt {
+        fn write(&self, p: &Path, k: &str) -> Result<crate::destination::WriteOutcome> {
+            self.0.write(p, k)
+        }
+        fn capabilities(&self) -> crate::destination::DestinationCapabilities {
+            self.0.capabilities()
+        }
+        fn head(&self, k: &str) -> Result<Option<crate::destination::ObjectMeta>> {
+            self.fails("head-manifest", k)?;
+            self.fails("head-success", k)?;
+            self.0.head(k)
+        }
+        fn read(&self, k: &str) -> Result<Vec<u8>> {
+            self.fails("read-manifest", k)?;
+            self.fails("read-success", k)?;
+            self.0.read(k)
+        }
+        fn list_prefix(&self, p: &str) -> Result<Vec<crate::destination::ObjectMeta>> {
+            self.fails("list", p)?;
+            self.0.list_prefix(p)
+        }
+    }
+
+    #[test]
+    fn a_store_error_in_a_failure_detail_never_carries_a_registered_credential() {
+        crate::redact::mask_value_in_output(SAS_IN_STORE_ERROR);
+        let mut plain = Failure::ListPrefixError {
+            detail: "permission denied (simulated) ?page=2&limit=10".into(),
+        };
+        plain.redact_store_text();
+        assert!(
+            matches!(&plain, Failure::ListPrefixError { detail } if detail == "permission denied (simulated) ?page=2&limit=10"),
+            "a store error without a credential is unchanged: {plain:?}"
+        );
+        for (op, with_dataset) in [
+            ("head-manifest", true),
+            ("read-manifest", true),
+            ("head-success", true),
+            ("read-success", true),
+            ("list", true),
+            ("head-success", false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            if with_dataset {
+                let m = build_manifest(vec![part(0, 3, 3, "xxh3:0")], ManifestStatus::Success);
+                write_dataset(dir.path(), &m, &[("part-000000.parquet", b"abc")]);
+            }
+            let dest = StoreErrorAt(local_dest(dir.path()), op);
+            let v = verify_at_destination(&dest, "", ValidateDepth::Full).unwrap();
+            let shown = format!(
+                "{}\n{}",
+                v.failures
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                serde_json::to_string(&v).unwrap()
+            );
+            assert!(
+                shown.contains("Unexpected (persistent) at") && shown.contains("uri: http://h/c/"),
+                "{op}: the store's own words are kept: {shown}"
+            );
+            assert!(
+                !shown.contains(SAS_IN_STORE_ERROR),
+                "{op}: credential in the verification output: {shown}"
+            );
+        }
     }
 
     struct SuccessMarkerOversized(LocalDestination);

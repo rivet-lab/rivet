@@ -98,7 +98,7 @@ worst case held by any single query.
 | `memory_threshold_mb` | integer | profile default | RSS threshold in MB; pauses fetching if exceeded (0 = disabled). `balanced` defaults to 4096, `safe` to 2048, `fast` to 0 (no limit). |
 | `max_batch_memory_mb` | integer | — | Hard cap on a single Arrow batch in MB. When exceeded, `on_batch_memory_exceeded` determines the response. |
 | `on_batch_memory_exceeded` | `warn` \| `fail` \| `auto_shrink` | `warn` | Policy applied when a batch exceeds `max_batch_memory_mb`. |
-| `max_value_mb` | integer | `256` | Hard ceiling on a **single cell** (text/JSON/blob) in MB. A value larger than this aborts the run with `RIVET_VALUE_TOO_LARGE`. Guards against one giant cell OOM-ing the process — the batch cap is average-based and can't bound a lone outlier. Set `0` to disable. See [Per-value ceiling](#per-value-ceiling-max_value_mb). |
+| `max_value_mb` | integer | `256` | Hard ceiling on a **single cell** (text/JSON/blob) in MB. A value larger than this aborts the run with `RIVET_SOURCE_VALUE_TOO_LARGE`. Guards against one giant cell OOM-ing the process — the batch cap is average-based and can't bound a lone outlier. Set `0` to disable. See [Per-value ceiling](#per-value-ceiling-max_value_mb). |
 | `adaptive` | boolean | `false` | Sample source write-pressure at runtime and react: shrink/restore the fetch batch size, and — on a `parallel > 1` chunked or keyset export — drive the [concurrency governor](#adaptive-concurrency-governor) (see that section for the exact per-runner coverage). |
 | `min_parallel` | integer | `1` | Floor for the concurrency governor: the fewest workers it will back down to under pressure. Ceiling is the export's `parallel`. Only consulted when `adaptive` is on and `parallel > 1`. |
 
@@ -134,7 +134,7 @@ Use `auto_shrink` when you want protection against accidental wide-table OOM wit
 `max_value_mb` is a hard per-value ceiling. Before a batch is split or encoded, Rivet checks every variable-length cell (text / JSON / binary — fixed-width types can't be individually huge); a value over the limit aborts the run:
 
 ```
-RIVET_VALUE_TOO_LARGE: column 'body' has a single value of 301.2 MB, exceeding the
+column 'body' has a single value of 301.2 MB, exceeding the
 per-value ceiling of 256 MB. ...Raise `tuning.max_value_mb` (or set it to 0 to
 disable the guard) if this value is expected.
 ```
