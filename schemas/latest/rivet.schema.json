@@ -351,7 +351,7 @@
           "minimum": 0
         },
         "max_value_mb": {
-          "description": "Hard per-value size ceiling in MB. A single text/JSON/blob cell larger\nthan this aborts the run with `RIVET_VALUE_TOO_LARGE`. `0` disables the\nguard. Default: 256.",
+          "description": "Hard per-value size ceiling in MB. A single text/JSON/blob cell larger\nthan this aborts the run with `RIVET_SOURCE_VALUE_TOO_LARGE`. `0` disables the\nguard. Default: 256.",
           "type": [
             "integer",
             "null"

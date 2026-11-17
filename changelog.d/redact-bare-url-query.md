@@ -1,0 +1,1 @@
+- **Security**: an Azure SAS token (and the other credentials rivet reads from an environment variable for Azure and S3 destinations) is registered when it is read and masked by value as `***` in every log line and error text, so a SAS spelled without `sig=` no longer reaches the retry WARN on stderr or the validate output file through the OpenDAL error's `url:` field.

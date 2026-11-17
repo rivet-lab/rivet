@@ -1,22 +1,10 @@
 //! Helpers that translate CLI strings into the shapes pipeline code wants.
-//!
-//! [`parse_params`] turns repeated `--param KEY=VALUE` flags into a
-//! `HashMap<String, String>` used for `${var}` substitution in YAML queries.
-//! [`resolve_init_source`] picks the one of three source-spec inputs that
-//! `rivet init` was invoked with, reading env or file when needed so the DB
-//! URL never has to appear on the command line.
 
 use std::collections::HashMap;
 
 use crate::error::Result;
 
 /// Collect repeated `--param KEY=VALUE` strings into a map.
-///
-/// The first `=` wins so values may themselves contain `=` (e.g. SQL fragments);
-/// duplicate keys follow last-wins ordering, matching shell expectations. An item
-/// WITHOUT `=` is a loud error — clap validates only that `--param` takes a value,
-/// NOT that it contains `=` (the old code silently dropped `-p foo`, which then
-/// surfaced downstream as a misleading "environment variable foo is not set").
 pub(super) fn parse_params(raw: &[String]) -> Result<HashMap<String, String>> {
     let mut map = HashMap::with_capacity(raw.len());
     for s in raw {
@@ -35,13 +23,7 @@ pub(super) fn parse_params(raw: &[String]) -> Result<HashMap<String, String>> {
     Ok(map)
 }
 
-/// Resolve the DB URL for `rivet init` from exactly one of `--source`,
-/// `--source-env`, or `--source-file`.
-///
-/// Clap's argument group already enforces mutual exclusion and
-/// at-least-one-required. This function only performs the side-effect of
-/// reading env / file so that credentials never have to appear on the command
-/// line (which would leak into shell history, `ps`, and `/proc/<pid>/cmdline`).
+/// Resolve the DB URL for `rivet init` from exactly one of `--source`, `--source-env`, or `--source-file`.
 pub(super) fn resolve_init_source(
     source: Option<crate::secret::Secret>,
     source_env: Option<String>,
@@ -69,7 +51,6 @@ pub(super) fn resolve_init_source(
         })?;
         return Ok((raw.trim().into(), SourceProvenance::File(path)));
     }
-    // Unreachable: clap ArgGroup enforces `required = true`.
     crate::rivet_bail!(
         crate::error::codes::CLI_OPTION_UNSUPPORTED,
         "--source, --source-env, or --source-file is required"
@@ -111,9 +92,6 @@ mod tests {
 
     #[test]
     fn parse_params_no_equals_is_a_loud_error() {
-        // #dogfood LOW: a malformed `-p foo` (no `=`) used to be SILENTLY dropped
-        // (this test PINNED that), then surfaced downstream as a misleading
-        // "environment variable foo is not set". It is now a clear parse error.
         let input = vec!["NO_EQUALS_HERE".to_string()];
         let err = parse_params(&input).unwrap_err();
         assert!(

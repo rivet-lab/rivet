@@ -192,6 +192,19 @@ pub(crate) fn column_nullable_on(
     query: &str,
     column: &str,
 ) -> Result<Option<bool>> {
+    nullable_through_views(client, query, column, 0)
+}
+
+/// Views a column is followed through before it is left unclaimed.
+const VIEW_DEPTH: usize = 8;
+
+/// [`column_nullable_on`] after `depth` views: a view column is asked again of the view's own definition.
+fn nullable_through_views(
+    client: &mut Client,
+    query: &str,
+    column: &str,
+    depth: usize,
+) -> Result<Option<bool>> {
     let wrapped = format!("SELECT * FROM ({}) AS _rivet_type_probe LIMIT 0", query);
     let stmt = prepare_fresh(client, &wrapped)?;
     let Some(col) = stmt.columns().iter().find(|c| c.name() == column) else {
@@ -200,15 +213,40 @@ pub(crate) fn column_nullable_on(
     let (Some(table), Some(attnum)) = (col.table_oid(), col.column_id()) else {
         return Ok(None);
     };
-    let sql = seeded!(
-        "cursor-nullability-claimed-without-the-table-catalog",
-        "SELECT a.attnotnull FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid \
+    let Some(row) = client.query_opt(
+        "SELECT a.attnotnull, c.relkind::text, a.attname::text, \
+         CASE WHEN c.relkind = 'v' THEN pg_get_viewdef(c.oid) END \
+         FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid \
          WHERE a.attrelid = $1 AND a.attnum = $2",
-        "SELECT a.attnotnull FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid \
-         WHERE a.attrelid = $1 AND a.attnum = $2 AND c.relkind IN ('r', 'p')"
+        &[&table, &attnum],
+    )?
+    else {
+        return Ok(None);
+    };
+    let kind: String = row.get(1);
+    if seeded!(
+        "cursor-nullability-claimed-without-the-table-catalog",
+        true,
+        matches!(kind.as_str(), "r" | "p")
+    ) {
+        return Ok(Some(!row.get::<_, bool>(0)));
+    }
+    let traced = !seeded!(
+        "cursor-nullability-not-traced-to-its-source-column",
+        true,
+        false
     );
-    let row = client.query_opt(sql, &[&table, &attnum])?;
-    Ok(row.map(|r| !r.get::<_, bool>(0)))
+    let definition: Option<String> = row.get(3);
+    let Some(sql) = definition.filter(|_| traced && depth < VIEW_DEPTH) else {
+        return Ok(None);
+    };
+    let name: String = row.get(2);
+    nullable_through_views(
+        client,
+        sql.trim_end().trim_end_matches(';'),
+        &name,
+        depth + 1,
+    )
 }
 
 fn introspect_pg_on(
