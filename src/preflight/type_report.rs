@@ -112,7 +112,7 @@ pub(crate) fn refuse_override_wire_mismatch(
     let mut src = connect_source(config, url, config.source.tls.as_ref())?;
     for (table, query) in report_units(export, config_dir, params)? {
         let overrides = unit_overrides(export, table.as_deref(), column_overrides);
-        if export.mode == crate::config::ExportMode::Cdc {
+        if is_stream(export) {
             source::cdc::stream_override_refusal(src.as_mut(), &query, &overrides)?;
             continue;
         }
@@ -124,6 +124,11 @@ pub(crate) fn refuse_override_wire_mismatch(
         )?;
     }
     Ok(())
+}
+
+/// Whether the export's types are the CDC change-event builder's, not the batch reader's.
+pub(crate) fn is_stream(export: &ExportConfig) -> bool {
+    export.mode == crate::config::ExportMode::Cdc
 }
 
 /// The `columns:` overrides that apply to ONE resolver unit.
@@ -368,8 +373,8 @@ pub fn capture_load_units(
         .into_iter()
         .map(|unit| {
             let overrides = unit_overrides(export, unit.table.as_deref(), column_overrides);
-            let stream = export.mode == crate::config::ExportMode::Cdc;
-            let mappings = probe_mappings(src.as_mut(), stream, &unit.query, &overrides)?;
+            let mappings =
+                probe_mappings(src.as_mut(), is_stream(export), &unit.query, &overrides)?;
             let primary_key = match unit.relation.as_deref() {
                 Some(relation) => src.primary_key(relation).unwrap_or_else(|e| {
                     log::warn!(
@@ -500,8 +505,7 @@ fn collect_one(
     policy: &TypePolicy,
     target: Option<ExportTarget>,
 ) -> Result<ExportTypeReport> {
-    let stream = export.mode == crate::config::ExportMode::Cdc;
-    let mappings = probe_mappings(src, stream, query, column_overrides)?;
+    let mappings = probe_mappings(src, is_stream(export), query, column_overrides)?;
     Ok(report_from_mappings(
         export,
         table,
@@ -993,6 +997,13 @@ exports:
 
     fn probe(config: &Config, export: &ExportConfig, overrides: &ColumnOverrides) -> Result<()> {
         refuse_override_wire_mismatch(config, export, overrides, std::path::Path::new("."), None)
+    }
+
+    #[test]
+    fn only_a_cdc_export_is_typed_by_the_stream_builder() {
+        let config = cfg_from(OVERRIDE_PROBE_CFG);
+        assert!(!super::is_stream(&config.exports[0]));
+        assert!(super::is_stream(&config.exports[1]));
     }
 
     #[test]

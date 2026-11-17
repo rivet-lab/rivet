@@ -375,6 +375,13 @@ mod tests {
                 RivetType::Uuid,
             ),
             (Engine::Mssql, "int", RivetType::Int32, dec(10, 2)),
+            (Engine::Mssql, "bigint", RivetType::Int64, dec(19, 0)),
+            (
+                Engine::Oracle,
+                "BINARY_DOUBLE",
+                RivetType::Float64,
+                RivetType::Text,
+            ),
             (Engine::Mssql, "smallint", RivetType::Int16, dec(10, 2)),
             (
                 Engine::Oracle,
@@ -415,6 +422,22 @@ mod tests {
                 tgt.label()
             );
         }
+    }
+
+    #[test]
+    fn a_pair_an_engine_does_not_convert_is_refused() {
+        assert!(!override_is_read(
+            Engine::Mssql,
+            "int",
+            &RivetType::Int32,
+            &RivetType::Text
+        ));
+        assert!(!override_is_read(
+            Engine::Oracle,
+            "RAW",
+            &RivetType::Binary,
+            &RivetType::Bool
+        ));
     }
 
     #[test]
