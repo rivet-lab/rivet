@@ -6,16 +6,8 @@ use crate::types::ColumnOverrides;
 
 use super::{ColumnInfo, TableInfo};
 
-/// Open the one client shared across the whole init run (`list_tables` plus
-/// every per-table `introspect` — no per-table reconnect).
-///
-/// `init` runs before any YAML `tls:` block exists (it *generates* the
-/// config), so the transport-security policy comes from the URL's `sslmode`
-/// parameter; the connection itself goes through the same
-/// [`crate::source::postgres::connect_client`] path as doctor/check/run.
+/// Open the one client shared across the whole init run (`list_tables` plus every per-table `introspect`.
 pub(super) fn connect(url: &str, tls: Option<&TlsConfig>) -> Result<Client> {
-    // An explicit `--tls` flag WINS over the URL's `sslmode` — the flag is the
-    // operator's direct statement, the URL parameter an inherited convention.
     let from_url;
     let tls = match tls {
         Some(t) => Some(t),
@@ -56,7 +48,6 @@ pub(super) fn introspect(
     schema: &str,
     table: &str,
 ) -> Result<super::Introspected> {
-    // Row estimate from pg_class (fast, no COUNT(*))
     let row_estimate: i64 = client
         .query_opt(
             "SELECT reltuples::bigint FROM pg_class
@@ -69,7 +60,6 @@ pub(super) fn introspect(
         .unwrap_or(0)
         .max(0);
 
-    // Physical size (heap + indexes); None for views and when privileges are missing.
     let total_bytes: Option<i64> = client
         .query_opt(
             "SELECT pg_total_relation_size(c.oid)::bigint
@@ -82,9 +72,6 @@ pub(super) fn introspect(
         .and_then(|row| row.get::<_, Option<i64>>(0))
         .filter(|v| *v > 0);
 
-    // Primary key columns
-    // to_regclass() returns NULL (no error) when the table disappears between
-    // list_tables and introspect — possible under concurrent test table drops.
     let pk_rows = client.query(
         "SELECT a.attname
          FROM pg_index i
@@ -102,7 +89,6 @@ pub(super) fn introspect(
     let indexed_cols: std::collections::HashSet<String> =
         indexed_rows.iter().map(|r| r.get::<_, String>(0)).collect();
 
-    // Column metadata — including NULL-ability and numeric precision/scale for decimal columns.
     let col_rows = client.query(
         "SELECT column_name, data_type, is_nullable, numeric_precision, numeric_scale
          FROM information_schema.columns
@@ -161,35 +147,18 @@ pub(super) fn introspect(
     Ok((info, unreadable))
 }
 
-/// First-run density probe (#148), PostgreSQL leg: `reltuples` after
-/// autovacuum is usually within a few %, so the probe runs only on LARGE
-/// tables (> 5M estimated), where a % error still moves absolute decisions
-/// (parallel scaling, duration prediction). Same stratified method as MySQL;
-/// best-effort (any error keeps the catalog figure, marked unverified only
-/// when we attempted and failed — an un-probed small table keeps density=None,
-/// i.e. "the catalog is trusted here by policy").
+/// First-run density probe (#148), PostgreSQL leg.
 pub(super) fn density_probe(client: &mut Client, info: &mut super::TableInfo) {
     use super::density::*;
 
     const PG_PROBE_LINE: i64 = 5_000_000;
     let catalog = info.row_estimate;
-    // #148 (roast 2026-08-09): a never-analyzed table has reltuples -1, clamped
-    // to 0 at introspect — `0 < 5M` would skip the probe and trust 0 on a table
-    // that may hold 100M rows (the just-restored/just-migrated moment users run
-    // init). Probe when the figure is 0/unknown OR large; trust only a REAL
-    // small figure (1..5M) where reltuples is a fresh ANALYZE.
     if (1..PG_PROBE_LINE).contains(&catalog) {
         return;
     }
     let q_ident = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
     let rel = format!("{}.{}", q_ident(&info.schema), q_ident(&info.table));
     let Some(key) = info.best_chunk_column().map(str::to_string) else {
-        // No integer-indexed chunk key to probe density with — a uuid/text PK is keysettable but
-        // not density-probeable here. If the catalog figure is the clamped/unknown 0 (the
-        // just-restored/just-migrated moment we probe FOR), trusting it scaffolds `mode: full` on
-        // a possibly-huge table. Match MySQL's leg: an honest COUNT(*) when the catalog is
-        // small/unknown (< 1M) — correct-but-slow beats fast-but-wrong; a genuinely large catalog
-        // (>= 5M, the only other way to reach here) is trusted as-is (no scan of a huge table).
         let counted = (catalog < 1_000_000)
             .then(|| {
                 client
@@ -248,7 +217,6 @@ pub(super) fn density_probe(client: &mut Client, info: &mut super::TableInfo) {
     }
     let sampled: i64 = counts.iter().sum();
     if !super::density::probe_trustworthy(sampled, offsets.len()) {
-        // #148 sparse-key guard: too few sampled rows to trust the extrapolation.
         info.density = Some(DensityProbe {
             rows: catalog,
             density: 0.0,
@@ -275,8 +243,7 @@ pub(super) fn density_probe(client: &mut Client, info: &mut super::TableInfo) {
 mod tests {
     use super::LEADING_BTREE_KEY_SQL;
 
-    /// H26: a non-leading, INCLUDE, hash/gin/brin, partial or invalid index position does not make a
-    /// column range-seekable, so init must not call it indexed (preflight's leading-btree rule).
+    /// H26: a non-leading, INCLUDE, hash/gin/brin, partial or invalid index position does not make a column range-seekable, so init must not call it indexed (preflight's leading-btree rule).
     #[test]
     fn indexed_means_leading_key_of_a_valid_full_btree() {
         let sql = LEADING_BTREE_KEY_SQL;

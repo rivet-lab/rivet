@@ -1241,6 +1241,27 @@ mod tests {
     }
 
     #[test]
+    fn a_columns_override_on_the_blob_columns_is_refused_or_read_never_ignored() {
+        let one = |c: &str, t: RivetType| ColumnOverrides::from([(c.to_string(), t)]);
+        for (c, t) in [("_id", RivetType::Int64), ("document", RivetType::Int64)] {
+            let err = blob_mappings(&one(c, t)).unwrap_err();
+            assert_eq!(
+                crate::error::code_of(&err).map(|c| c.id),
+                Some(crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH.id),
+                "{c}"
+            );
+        }
+        let doc = blob_schema(&blob_mappings(&one("document", RivetType::String)).unwrap());
+        assert!(
+            doc.field_with_name("document")
+                .unwrap()
+                .metadata()
+                .get("ARROW:extension:name")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn harm_counters_extracted_from_server_status() {
         let status = doc! {
             "metrics": {

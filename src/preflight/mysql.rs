@@ -5,9 +5,7 @@ use super::schema_error::PreflightSchemaError;
 use crate::config::{ExportConfig, ExportMode, SourceType, TlsConfig};
 use crate::error::Result;
 
-/// Connect once and build one [`ExportDiagnostic`] per export. Rendering
-/// (TEXT table vs `--json`) is the caller's job in [`super::check`], so this
-/// returns the diagnostics rather than printing inline.
+/// Connect once and build one [`ExportDiagnostic`] per export.
 pub(super) fn check_mysql(
     url: &str,
     tls: Option<&TlsConfig>,
@@ -42,10 +40,7 @@ fn fetch_max_connections_mysql(conn: &mut mysql::PooledConn) -> Option<u32> {
     val.try_into().ok()
 }
 
-/// A missing table (ER_NO_SUCH_TABLE, 1146) as the shared `RIVET_SOURCE_TABLE_NOT_FOUND`; the
-/// other author-fixable schema errors, ER_BAD_FIELD_ERROR (1054), ER_TABLEACCESS_DENIED_ERROR
-/// (1142) and a parse error (1064), as the loud preflight schema error. Every other
-/// code/variant is operational → `None` (fail-soft).
+/// A missing table (ER_NO_SUCH_TABLE, 1146) as the shared `RIVET_SOURCE_TABLE_NOT_FOUND`.
 fn mysql_schema_error(e: mysql::Error, export: &ExportConfig) -> Option<anyhow::Error> {
     let cause = anyhow::Error::new(e);
     if crate::source::names_a_missing_relation(&cause) {
@@ -97,13 +92,8 @@ fn diagnose_mysql(
     let base_query = base_query.as_str();
     let base_table_owned = preflight_base_table(export, base_query);
     let base_table = base_table_owned.as_deref();
-    // build_plan auto-resolves an UNSET chunked chunk_column to the single-integer PK, and
-    // `auto_pk_probe_target` is that gate — so range_col / the strategy label / the index
-    // probe target the SAME column, not a `?` placeholder on a PK-indexed table.
     let auto_pk: Option<String> =
         auto_pk_probe_target(export, base_table).and_then(|t| single_int_pk_mysql(conn, t));
-    // The column the run actually reads on: chunk_column for range chunking, chunk_by_key for
-    // keyset (seek), cursor_column for incremental, or the auto-resolved PK above.
     let range_col = preflight_range_col_resolved(export, auto_pk.as_deref());
     let effective_query = if let Some(order) = incremental_key_expr(export, SourceType::Mysql) {
         format!(
@@ -114,7 +104,6 @@ fn diagnose_mysql(
         base_query.to_string()
     };
 
-    // `EXPLAIN` the query purely to validate its schema; operational errors stay fail-soft.
     if let Some(fail) = conn
         .query_drop(format!("EXPLAIN {effective_query}"))
         .err()
@@ -154,9 +143,6 @@ fn diagnose_mysql(
             (None, None)
         }
     } else if let Some(col) = range_col {
-        // Quote the config-author-controlled column so a hostile value collapses
-        // to a single (nonexistent) identifier instead of injecting SQL into the
-        // min()/max() aggregates (CWE-89) — same defense the MSSQL sibling applies.
         let expr = crate::sql::quote_ident(SourceType::Mysql, col);
         let range_query = format!(
             "SELECT CAST(min({expr}) AS CHAR), CAST(max({expr}) AS CHAR) FROM ({base}) AS _rivet",
@@ -192,12 +178,6 @@ fn diagnose_mysql(
         }
     };
 
-    // Same logic as the PG side: EXPLAIN of the base query reports `ALL` (full
-    // table scan) for a no-WHERE read, even on tables where the chunk_column is
-    // a perfect PK with a btree. The chunk runner actually issues
-    // `WHERE chunk_col >= $lo AND chunk_col < $hi`, which would use the index —
-    // so answer from the catalog and let `assemble_diagnostic` apply the shared
-    // override policy.
     let catalog_index = index_probe_target(export, auto_pk.as_deref(), base_table)
         .and_then(|(table, col)| column_has_index_mysql(conn, table, col));
 
@@ -206,11 +186,6 @@ fn diagnose_mysql(
         ProbeFacts {
             auto_pk,
             row_estimate,
-            // MySQL has no trustworthy scan-free row-width estimate
-            // (information_schema AVG_ROW_LENGTH shares the same InnoDB random-dive
-            // statistics as TABLE_ROWS, which #1 already declined to trust), so the
-            // oversized-chunk check and the RSS prediction are skipped here by
-            // passing `None` — same stance as the row-estimate density diagnostic.
             avg_row_bytes: None,
             range_min,
             range_max,
@@ -233,27 +208,6 @@ fn mysql_row_get_string(row: &mysql::Row, col: &str) -> Option<String> {
 }
 
 /// True when `column` is the leading key of *any* index on `table`.
-///
-/// MySQL exposes index metadata via `information_schema.statistics`. We
-/// match rows where `COLUMN_NAME = $col` and `SEQ_IN_INDEX = 1` — the
-/// leading-column condition for range and prefix scans. Index type
-/// (`BTREE` / `HASH` / `FULLTEXT`) is filtered to BTREE only because
-/// range chunking (`WHERE col >= $lo AND col < $hi`) and incremental
-/// cursors (`WHERE col > $last`) only benefit from B-tree access paths.
-///
-/// `table` is either bare (`orders`) or schema-qualified (`rivet.orders`).
-/// Unqualified names resolve against the connection's current database.
-///
-/// Returns `Some(true)` when an index is found, `Some(false)` when the
-/// catalog probe ran cleanly and found none, `None` when the probe
-/// itself failed. Callers fall back to the EXPLAIN-based heuristic on
-/// `None`.
-/// The single-integer PK `build_plan` auto-resolves an UNSET chunked `chunk_column` to — so
-/// the diagnostic ranges/probes on the SAME column the run will, not a `?` placeholder
-/// (post-0.24.3 review MED). FAITHFUL mirror of the `single_int_pk` probe in
-/// `source::mysql::introspect_mysql_on` — keep the int-type set in sync
-/// (tinyint/smallint/mediumint/int/bigint). `None` on composite / non-int / absent PK or a
-/// probe error (the planner then does NOT auto-resolve either).
 fn single_int_pk_mysql(conn: &mut mysql::PooledConn, qualified_table: &str) -> Option<String> {
     use mysql::prelude::Queryable;
     let (schema, table) = match qualified_table.split_once('.') {
@@ -282,7 +236,7 @@ fn single_int_pk_mysql(conn: &mut mysql::PooledConn, qualified_table: &str) -> O
         .ok()
         .flatten();
     if composite.is_some() {
-        return None; // composite PK → the planner does not auto-resolve
+        return None;
     }
     let ty: Option<(String,)> = conn
         .exec_first(
@@ -385,13 +339,6 @@ mod tests {
             "an operational error stays fail-soft"
         );
     }
-
-    // ── regression: `table:` shortcut must NOT preflight the "SELECT 1" stub ──
-    //
-    // Mirrors the Postgres-side guard for audit_preflight_table: a
-    // `table:`-shortcut export (no `query:`) on MySQL must EXPLAIN the real
-    // `SELECT * FROM <table>`, not the 1-row placeholder, so the row estimate
-    // and access type describe the actual relation.
 
     #[test]
     fn table_shortcut_resolves_to_real_table_not_select_one() {

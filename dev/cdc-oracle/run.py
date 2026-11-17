@@ -16,15 +16,13 @@ it has finished starting; applying changes before that is safe (the slot retains
 them) while applying them before the SLOT exists is not.
 """
 import argparse, json, os, re, shutil, subprocess, sys, time
+from urllib.parse import urlsplit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 from dev.pytools.shell import loopback_publish  # noqa: E402
-# The stands do not all share one docker network: the SQL engines sit in
-# `rivet_default`, the Mongo stands in `stand_default`. The sink must join the
-# SAME network as the source, or Debezium cannot resolve either of them.
-NETS = {"postgres": "rivet_default", "mysql": "rivet_default",
-        "mssql": "rivet_default", "mongo": "stand_default"}
+# The sink must join the SAME network as the source, or Debezium cannot resolve it.
+NETS = {"postgres": "rivet_default", "mysql": "rivet_default", "mssql": "rivet_default"}
 PG_HOST_IN_NET = os.environ.get("CDC_ORACLE_PG_HOST", "postgres-cdc")
 PG_URL = os.environ.get("POSTGRES_CDC_URL", "postgresql://rivet:rivet@127.0.0.1:5434/rivet")
 PG_EXEC = ["docker", "exec", os.environ.get("CDC_ORACLE_PG_CONTAINER", "rivet-postgres-cdc-1"),
@@ -107,10 +105,17 @@ def _container(env_var: str, port: int, fallback: str) -> str:
 MSSQL_EXEC = ["docker", "exec", _container("CDC_ORACLE_MSSQL_CONTAINER", 1434, "rivet-mssql-cdc-1"),
               "/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa",
               "-P", "Rivet_Passw0rd!", "-C", "-d", "rivet", "-h", "-1", "-W", "-b", "-Q"]
-MONGO_HOST_IN_NET = os.environ.get("CDC_ORACLE_MONGO_HOST", "mongo80-cdc")
-MONGO_URL = os.environ.get("MONGO_CDC_URL", "mongodb://127.0.0.1:27208/rivet?replicaSet=rs0&directConnection=true")
-MONGO_EXEC = ["docker", "exec", _container("CDC_ORACLE_MONGO_CONTAINER", 27208, "stand-mongo80-cdc-1"),
-              "mongosh", "--quiet", "rivet", "--eval"]
+MONGO_URL = os.environ.get("MONGO_CDC_URL") or os.environ.get("RIVET_CDC_MONGO_URL") or "mongodb://127.0.0.1:27018/rivet?directConnection=true"
+MONGO_CONTAINER = _container("CDC_ORACLE_MONGO_CONTAINER", urlsplit(MONGO_URL).port or 27017, "rivet-mongo-rs-1")
+MONGO_HOST_IN_NET = os.environ.get("CDC_ORACLE_MONGO_HOST", MONGO_CONTAINER)
+MONGO_EXEC = ["docker", "exec", MONGO_CONTAINER, "mongosh", "--quiet", "rivet", "--eval"]
+
+
+def _network_of(container: str, fallback: str) -> str:
+    """The first docker network `container` sits in, else `fallback`."""
+    out = subprocess.run(["docker", "inspect", "-f", "{{range $n, $_ := .NetworkSettings.Networks}}{{$n}} {{end}}", container],
+                         capture_output=True, text=True).stdout.split()
+    return out[0] if out else fallback
 
 
 def mongo(js: str) -> str:
@@ -270,6 +275,14 @@ exports:
     return cfg
 
 
+def _fresh_work(path: str) -> str:
+    """An empty, world-writable work dir the Debezium container (a different uid) can write its offsets and schema history into."""
+    shutil.rmtree(path, ignore_errors=True)
+    os.makedirs(path, exist_ok=True)
+    os.chmod(path, 0o777)
+    return path
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--engine", default="postgres",
@@ -282,33 +295,8 @@ def main() -> int:
     ap.add_argument("--keep", action="store_true", help="leave the stand fixtures in place")
     a = ap.parse_args()
 
-    # Work dir is PER ENGINE. Sharing one made the MySQL connector read the
-    # offsets.dat a PostgreSQL run had left behind and die with
-    # `Source offset 'file' parameter is missing` — a message that names neither
-    # the stale file nor the other engine. Found by running the two in sequence.
     t = a.table
-    # Per ENGINE **and** per TABLE. Sharing across engines made MySQL read a
-    # PostgreSQL offsets.dat; sharing across scenarios let one run's
-    # debezium.jsonl accumulate into the next, which surfaced as a `delete` in a
-    # scenario that has no delete. Both were harness artefacts wearing the costume
-    # of a finding, and the second was only obvious because the phantom row named
-    # an operation the scenario never performed.
-    # engine / table / SCENARIO. The scenario was missing until 2026-08-25 and the
-    # table name is the same for all of them, so consecutive scenarios on one engine
-    # shared a dir and Debezium's `debezium.jsonl` ACCUMULATED: running crud then
-    # wide-txn reported wide-txn DISAGREE, listing crud's four events as
-    # debezium-only. The README already recorded this artefact as fixed — the fix
-    # covered the cross-ENGINE leak (MySQL reading a PostgreSQL offsets.dat) and not
-    # the cross-SCENARIO one, which reads identically at the call site.
-    work = os.path.join(a.work, a.engine, a.table, a.scenario)
-    # CLEARED, not reused: the sink APPENDS to debezium.jsonl, so re-running one
-    # scenario accumulated its own previous capture and reported a disagreement
-    # against events it had already compared. Third instance of this class in the
-    # harness (cross-engine, then cross-scenario, now cross-RUN) — each one wore the
-    # costume of an engine defect. The dir is derived and owned here; anything worth
-    # keeping is behind --work.
-    shutil.rmtree(work, ignore_errors=True)
-    os.makedirs(work, exist_ok=True)
+    work = _fresh_work(os.path.join(a.work, a.engine, a.table, a.scenario))
     dbz_slot, riv_slot, pub = f"dbz_{t}", f"riv_{t}", f"pub_{t}"
     # Hyphens, NOT underscores: an underscore is illegal in a hostname per RFC 952,
     # and Debezium's http sink rejects the URL with `unsupported URI` — a message
@@ -326,7 +314,7 @@ def main() -> int:
     for c in (sink, srv):
         subprocess.run(["docker", "rm", "-f", c], capture_output=True)
 
-    net = os.environ.get("CDC_ORACLE_NET") or NETS[a.engine]
+    net = os.environ.get("CDC_ORACLE_NET") or (_network_of(MONGO_CONTAINER, "rivet_default") if a.engine == "mongo" else NETS[a.engine])
     ckpt = os.path.join(work, "rivet.ckpt")
 
     def cleanup():

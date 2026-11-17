@@ -1,13 +1,4 @@
 //! Aggregate run summary store — one row per `rivet run` invocation.
-//!
-//! Per-export rows stay in `export_metrics`.  This table answers:
-//! - "what happened in the last N scheduled runs as a whole?"
-//! - "which run produced the most data / the most failures?"
-//!
-//! `details_json` carries the per-export breakdown so callers do not have to
-//! join on `run_at` ranges to reconstruct the run.  This is intentional: the
-//! aggregate row is observational, not a source of truth — `export_metrics`
-//! remains the canonical per-export record.
 use crate::error::Result;
 
 use super::StateStore;
@@ -30,8 +21,7 @@ pub struct RunAggregate {
     pub total_rows: i64,
     pub total_files: i64,
     pub total_bytes: u64,
-    /// Decoded bytes READ (v23) — display/JSON only; recomputed from
-    /// `per_export` on load (no DB column, entries carry it in details_json).
+    /// Decoded bytes READ (v23) — display/JSON only.
     #[serde(default)]
     pub total_bytes_read: u64,
     pub per_export: Vec<RunAggregateEntry>,
@@ -56,17 +46,16 @@ pub struct RunAggregateEntry {
     pub duration_ms: i64,
     pub mode: String,
     pub error_message: Option<String>,
-    /// Why a `skipped` entry wrote nothing (`skip_empty`: "no new rows since cursor 'c'", "source returned 0 rows"); `null` on every other entry and in entries older binaries wrote.
+    /// Why a `skipped` entry wrote nothing; `null` on every other entry and in entries older binaries wrote.
     #[serde(default)]
     pub skip_reason: Option<String>,
-    /// Rows of the `initial: snapshot` legs folded into `rows`; never serialized, kept out of the throughput self-check.
+    /// Rows of the `initial: snapshot` legs folded into `rows`.
     #[serde(skip)]
     pub snapshot_rows: i64,
 }
 
 impl StateStore {
-    /// Persist an aggregate.  `per_export` is serialized as a JSON array into
-    /// `details_json`.
+    /// Persist an aggregate.
     pub fn record_run_aggregate(&self, agg: &RunAggregate) -> Result<()> {
         let details = serde_json::to_string(&agg.per_export).map_err(|e| {
             crate::error::coded(
@@ -115,8 +104,6 @@ impl StateStore {
         self.query(sql, &[(limit as i64).into()], |r| {
             let per_export: Vec<RunAggregateEntry> =
                 serde_json::from_str(&r.text(13)).unwrap_or_default();
-            // total_bytes_read has no DB column: recompute from the entries so
-            // a read-back never shows a false 0 beside real per-export figures.
             let total_bytes_read = per_export.iter().map(|e| e.bytes_read).sum();
             RunAggregate {
                 run_aggregate_id: r.text(0),

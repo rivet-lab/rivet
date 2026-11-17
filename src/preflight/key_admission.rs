@@ -196,7 +196,7 @@ mod tests {
 
     const CODE: &str = "RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT";
 
-    /// A numeric source type that lands as text is `NumberAsText`; a native text type, an exact number and every other type stay `Exact`.
+    /// A numeric source type that lands as text is `NumberAsText`.
     #[test]
     fn a_numeric_source_type_landing_as_text_is_told_from_native_text() {
         for native in [
@@ -264,7 +264,7 @@ mod tests {
         }
     }
 
-    /// A microsecond landing is `FinerThanMicrosecond` only when the source declares the column finer; a nanosecond landing, another unit and an unflagged column stay `Exact`.
+    /// A microsecond landing is `FinerThanMicrosecond` only when the source declares the column finer.
     #[test]
     fn a_microsecond_landing_is_finer_only_where_the_source_says_so() {
         let ts = mapping("datetime2", micros());
@@ -296,7 +296,7 @@ mod tests {
         assert_eq!(KeyLanding::of(&m, false), KeyLanding::NumberAsText);
     }
 
-    /// The incremental load refuses a cursor that lands as text, by code, naming the column, its source type and the remedy; every other mode, cursor and landing is admitted.
+    /// The incremental load refuses a cursor that lands as text, by code, naming the column, its source type and the remedy.
     #[test]
     fn an_incremental_cursor_landing_as_text_is_refused_with_its_remedy() {
         let cols = [
@@ -335,7 +335,7 @@ mod tests {
         admit_load_keys("e", LoadMode::Incremental, Some("VER"), &pk, &native_text).unwrap();
     }
 
-    /// A primary-key column landed finer-collapsed is refused for the incremental and CDC loads, naming the column and the `timestamp_ns` remedy; `full`, another key and an exact column are admitted.
+    /// A primary-key column landed finer-collapsed is refused for the incremental and CDC loads, naming the column and the `timestamp_ns` remedy.
     #[test]
     fn a_primary_key_column_collapsing_below_a_microsecond_is_refused_with_its_remedy() {
         let cols = [

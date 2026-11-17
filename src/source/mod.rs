@@ -649,7 +649,7 @@ pub(crate) fn value_within_ceiling(
     {
         crate::rivet_bail!(
             crate::error::codes::SOURCE_VALUE_TOO_LARGE,
-            "RIVET_VALUE_TOO_LARGE: column '{}' has a single value of {:.1} MB, exceeding the \
+            "column '{}' has a single value of {:.1} MB, exceeding the \
              per-value ceiling of {} MB. One oversized cell can OOM the process regardless of \
              batch size. Raise `tuning.max_value_mb` (or set it to 0 to disable the guard) if \
              this value is expected.",
@@ -793,7 +793,7 @@ mod value_ceiling_tests {
     fn sec_value_ceiling_pre_alloc_over_limit_errors() {
         let err = value_within_ceiling("payload", 2 * 1024 * 1024, Some(1024 * 1024)).unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("RIVET_VALUE_TOO_LARGE"), "got: {msg}");
+        assert!(msg.contains("per-value ceiling"), "got: {msg}");
         assert!(msg.contains("payload"), "names the column: {msg}");
     }
 

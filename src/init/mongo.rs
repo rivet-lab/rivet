@@ -1,14 +1,4 @@
 //! `rivet init` introspection for MongoDB.
-//!
-//! MongoDB is schemaless and `mode: full` only, so — unlike the SQL engines —
-//! there are no columns, PKs, or cursor/chunk candidates to introspect. Each
-//! collection becomes a [`TableInfo`] with an empty column list (which makes
-//! [`TableInfo::suggest_mode`] resolve to `full`) and a scan-free document-count
-//! estimate. The scaffold then emits a `type: mongo` source + one
-//! `table: <collection>` / `mode: full` export per collection.
-//!
-//! The async→sync bridge is the shared [`MongoSession`]; init connects GATED
-//! (refuses remote plaintext), matching the PG/MySQL init helpers.
 
 use mongodb::bson::Document;
 
@@ -16,19 +6,12 @@ use super::TableInfo;
 use crate::error::Result;
 use crate::source::mongo::MongoSession;
 
-/// Connect once (GATED — refuses remote plaintext) so one session serves the
-/// whole `list_tables` + per-collection `introspect` scan.
+/// Connect once (GATED — refuses remote plaintext) so one session serves the whole `list_tables` + per-collection `introspect` scan.
 pub(super) fn connect(url: &str, tls: Option<&crate::config::TlsConfig>) -> Result<MongoSession> {
-    // gate=true, matching PG init (connect_client) and MySQL init (connect_pool),
-    // both of which refuse remote plaintext. The old `false` + "like the SQL
-    // init helpers" comment was doubly wrong: the SQL helpers DO gate, and
-    // skipping it let `rivet init` dial a remote Mongo in cleartext with no
-    // refusal (bug hunt 2026-08-08).
     MongoSession::connect(url, tls)
 }
 
-/// List the user collections in the URL's database, skipping the internal
-/// `system.*` namespaces so the scaffold never emits an export for them.
+/// List the user collections in the URL's database, skipping the internal `system.*` namespaces so the scaffold never emits an export for them.
 pub(super) fn list_tables(session: &MongoSession) -> Result<Vec<String>> {
     let db = session.client().database(session.db());
     let all = session.block_on(db.list_collection_names().into_future())?;
@@ -59,8 +42,7 @@ pub(super) fn list_tables(session: &MongoSession) -> Result<Vec<String>> {
         .collect())
 }
 
-/// One collection → a [`TableInfo`] with a scan-free row estimate and no
-/// columns (schemaless). Empty columns make `suggest_mode` resolve to `full`.
+/// One collection → a [`TableInfo`] with a scan-free row estimate and no columns (schemaless).
 pub(super) fn introspect(session: &MongoSession, collection: &str) -> Result<TableInfo> {
     let count = session
         .block_on(async {

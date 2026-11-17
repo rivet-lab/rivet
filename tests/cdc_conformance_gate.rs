@@ -1259,6 +1259,8 @@ fn every_live_cdc_test_asserts_an_outcome() {
                 // canonical reader; oracle diversity is the defense.
                 || chunk.contains("distinct_ids(")
                 || chunk.contains("distinct_int_ids(")
+                || chunk.contains("ids_in(")
+                || chunk.contains("recorded_primary_key(")
                 || chunk.contains("read_mongo_cdc_changes(") // Mongo blob-CDC oracle
                 || chunk.contains("duckdb_dir_parquet_distinct_strings(")
                 // DuckDB read-backs. The strongest oracle in the suite for a
