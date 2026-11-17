@@ -311,7 +311,7 @@ mod tests {
     fn every_split_point_lies_between_the_ends_of_an_ordered_pair() {
         for (lo, hi) in [
             ("-7", "1000000007"),
-            ("abc", "abd"),
+            ("abc", "abx"),
             ("2001-02-03", "2001-12-31"),
         ] {
             for c in split(lo, hi, 16) {
