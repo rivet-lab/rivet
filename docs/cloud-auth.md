@@ -141,6 +141,8 @@ destination:
   (exit 1) when the config loads, because the profile alone would sign and the
   env keys would be ignored. Pick one path: remove `aws_profile` to sign with
   the env keys, or remove the env key fields to sign with the profile.
+- **`allow_anonymous: true` beside `aws_profile`, `access_key_env`, `secret_key_env` or `session_token_env`**: refused with `RIVET_CONFIG_DESTINATION_AUTH_INVALID` (exit 1); an anonymous S3 request carries no signature and ignores every ambient `AWS_*` identity.
+- **`session_token_env` without `access_key_env` and `secret_key_env`**: refused with `RIVET_CONFIG_DESTINATION_AUTH_INVALID`; static keys sign with the configured session token only, never an ambient `AWS_SESSION_TOKEN`.
 - **`AWS_PROFILE` env var alone**: rivet doesn't read it.  Either
   set `aws_profile:` in the config or use the env-var path.  An `AWS_PROFILE`
   that differs from `aws_profile:` is refused (see Path C).

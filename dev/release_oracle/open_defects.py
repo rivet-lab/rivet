@@ -31,7 +31,7 @@ RUN = ["cargo", "nextest", "run", "--test", "live_suite", "--run-ignored", "only
 
 def recorded() -> dict[str, known_red.KnownRed]:
     """The ledger's open-defect entries by cell (`module::fn`)."""
-    return {k.match.split(" — ", 1)[0]: k for k in known_red.KNOWN_RED if f"::{OPEN}" in k.match}
+    return {c: k for c, k in known_red.cells().items() if f"::{OPEN}" in c}
 
 
 def grade(log: str, ledger: dict[str, known_red.KnownRed]) -> dict[str, list[str]]:

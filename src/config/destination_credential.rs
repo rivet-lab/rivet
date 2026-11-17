@@ -24,7 +24,7 @@ pub(crate) enum DestinationCredential {
 }
 
 impl DestinationCredential {
-    /// The credential `config` names, or the `RIVET_CONFIG_DESTINATION_AUTH_INVALID` refusal of a combination that names two identities; `subject` opens the message.
+    /// The credential `config` names, or the `RIVET_CONFIG_DESTINATION_AUTH_INVALID` refusal of a combination that names two identities.
     pub(crate) fn choose(config: &DestinationConfig, subject: &str) -> Result<Self> {
         let refuse = |why: &str| {
             crate::error::coded(
@@ -58,6 +58,15 @@ impl DestinationCredential {
                 "S3 requires both access_key_env and secret_key_env, or neither (use default AWS credential chain)",
             ));
         }
+        if config.allow_anonymous {
+            return if config.aws_profile.is_some() || ak.is_some() || st.is_some() {
+                Err(refuse(
+                    "S3 allow_anonymous cannot be combined with aws_profile, access_key_env, secret_key_env or session_token_env: an anonymous request signs with no identity.\n  Fix: remove allow_anonymous to sign with the configured credential, or remove the credential fields to send anonymous requests.",
+                ))
+            } else {
+                Ok(Self::Anonymous)
+            };
+        }
         match &config.aws_profile {
             Some(_)
                 if seeded!(
@@ -71,6 +80,9 @@ impl DestinationCredential {
                 ))
             }
             Some(profile) => Ok(Self::S3Profile(profile.clone())),
+            None if ak.is_none() && st.is_some() => Err(refuse(
+                "S3 session_token_env requires access_key_env and secret_key_env: a session token alone would pair with an ambient key.\n  Fix: add access_key_env and secret_key_env, or remove session_token_env.",
+            )),
             None if ak.is_some() || st.is_some() => Ok(Self::S3Env {
                 access_key_env: ak.clone(),
                 secret_key_env: sk.clone(),

@@ -51,6 +51,71 @@ const COMMON_BLANKET_ALLOW_CEILING: usize = 17; // ratchet-pin: tests-common-bla
 // 0 -> 1 (2026-10-31): first measurement on main ff0a4f2c; pipeline/mod.rs::clamp_line and pipeline/summary.rs::clamp_chars, closes when one calls the other.
 const DUPLICATE_BODY_CEILING: usize = 1; // ratchet-pin: duplicate-fn-bodies (review 2027-02-01)
 
+/// Lines a product function may span before it is ledgered in `LONG_FUNCTIONS`.
+const LONG_FUNCTION_LINES: usize = 150;
+
+/// Product functions over `LONG_FUNCTION_LINES`, as (`file::fn#occurrence`, ceiling). Every row: 2026-11-13, first measurement; closes when the function is split and the row is deleted.
+const LONG_FUNCTIONS: &[(&str, usize)] = &[
+    ("src/cli/dispatch.rs::dispatch#1", 195),
+    ("src/error/retry.rs::classify_error#1", 206),
+    ("src/format/csv.rs::write_csv_value#1", 239),
+    ("src/init/yaml_scaffold.rs::export_block_lines#1", 243),
+    ("src/load/orchestrate.rs::load_incremental_job#1", 163),
+    ("src/load/orchestrate.rs::load_one_cdc_base#1", 155),
+    ("src/load/orchestrate.rs::run_loads#1", 159),
+    ("src/load/plan.rs::build_plans_keyed#1", 178),
+    ("src/pipeline/apply_cmd.rs::run_apply_command#1", 255),
+    ("src/pipeline/cdc/sink.rs::run_to_files#1", 225),
+    ("src/pipeline/cdc_job.rs::initial_snapshot_pending#1", 184),
+    ("src/pipeline/cdc_job.rs::run_cdc_inner#1", 162),
+    (
+        "src/pipeline/chunked/detect.rs::detect_and_generate_chunks#1",
+        159,
+    ),
+    ("src/pipeline/chunked/exec.rs::run_chunked_parallel#1", 188),
+    (
+        "src/pipeline/chunked/parallel_checkpoint.rs::run_chunked_parallel_checkpoint#1",
+        337,
+    ),
+    (
+        "src/pipeline/chunked/resume_m8.rs::apply_m8_resume_decisions#1",
+        228,
+    ),
+    (
+        "src/pipeline/chunked/sequential_checkpoint.rs::run_chunked_sequential_checkpoint#1",
+        199,
+    ),
+    ("src/pipeline/cli.rs::show_journal#1", 156),
+    ("src/pipeline/finalize.rs::write_run_manifest#1", 187),
+    ("src/pipeline/job.rs::execute_resolved_plan#1", 264),
+    ("src/pipeline/job.rs::run_export_job_inner#1", 238),
+    ("src/pipeline/keyset.rs::run_keyset#1", 200),
+    ("src/pipeline/keyset.rs::run_keyset_parallel#1", 331),
+    (
+        "src/pipeline/parallel_children.rs::run_exports_as_child_processes#1",
+        310,
+    ),
+    ("src/pipeline/report.rs::render_markdown#1", 172),
+    ("src/pipeline/run.rs::run#1", 224),
+    ("src/pipeline/run.rs::run_waves#1", 171),
+    (
+        "src/pipeline/validate_manifest.rs::verify_unredacted#1",
+        227,
+    ),
+    ("src/plan/build.rs::build_plan_on#1", 226),
+    (
+        "src/plan/build.rs::chunked_strategy_from_introspection#1",
+        200,
+    ),
+    ("src/plan/build.rs::resolve_chunked_strategy#1", 175),
+    ("src/preflight/doctor.rs::doctor#1", 257),
+    ("src/preflight/mod.rs::check#1", 227),
+    ("src/source/mssql/arrow_convert.rs::build_array#1", 253),
+    ("src/source/mysql/arrow_convert.rs::build_array#1", 315),
+    ("src/source/mysql/cdc.rs::fill#1", 263),
+    ("src/source/oracle/arrow_convert.rs::build_column#1", 178),
+];
+
 /// Every text file under `dir` that may hold a reference, as (repo-relative path, text).
 fn corpus(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
     let Ok(read) = std::fs::read_dir(dir) else {
@@ -214,6 +279,27 @@ fn duplicate_bodies(files: &[Product], min_lines: usize) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// (`file::fn#occurrence`, lines) of every product function longer than `min`, sorted.
+fn long_functions(files: &[Product], min: usize) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    for f in files {
+        let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+        for (name, open, close) in fn_spans(&f.toks) {
+            let n = seen.entry(name.clone()).or_default();
+            *n += 1;
+            let (Some((_, first)), Some((_, last))) = (f.toks.get(open), f.toks.get(close)) else {
+                continue;
+            };
+            let lines = last - first + 1;
+            if lines > min {
+                out.push((format!("{}::{name}#{n}", f.rel), lines));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 /// The product files of src/.
 fn src_products() -> Vec<Product> {
     let raw: Vec<(String, String)> = src_files()
@@ -300,12 +386,67 @@ fn duplicate_function_bodies_in_src_never_grow() {
     );
 }
 
+#[test]
+fn long_functions_in_src_never_grow_and_new_ones_stay_short() {
+    let files = src_products();
+    super::nonvacuity::require_enumerated(files.len(), 100, "src product files", "src/ moved");
+    let found = long_functions(&files, LONG_FUNCTION_LINES);
+    if std::env::var_os("RIVET_PRINT_LONG_FUNCTIONS").is_some() {
+        for (k, n) in &found {
+            println!("    (\"{k}\", {n}),");
+        }
+    }
+    let ledger: BTreeMap<&str, usize> = LONG_FUNCTIONS.iter().copied().collect();
+    let mut problems = Vec::new();
+    for (key, lines) in &found {
+        match ledger.get(key.as_str()) {
+            None => problems.push(format!(
+                "{key}: {lines} lines, over {LONG_FUNCTION_LINES} and not ledgered: split it"
+            )),
+            Some(cap) if lines > cap => problems.push(format!(
+                "{key}: {lines} lines, ledger ceiling {cap}: split it, do not grow it"
+            )),
+            Some(cap) if lines < cap => problems.push(format!(
+                "{key}: {lines} lines, ledger ceiling {cap}: lower the row to {lines}"
+            )),
+            Some(_) => {}
+        }
+    }
+    for key in ledger.keys() {
+        if !found.iter().any(|(k, _)| k == key) {
+            problems.push(format!(
+                "{key}: no longer over {LONG_FUNCTION_LINES} lines or gone: delete the row"
+            ));
+        }
+    }
+    assert_eq!(
+        problems,
+        Vec::<String>::new(),
+        "long-function ledger: split, lower or delete the rows"
+    );
+}
+
 /// An in-memory text tree.
 fn tree(files: &[(&str, &str)]) -> Vec<(String, String)> {
     files
         .iter()
         .map(|(r, t)| (r.to_string(), t.to_string()))
         .collect()
+}
+
+#[test]
+fn a_function_over_the_limit_is_found_with_its_line_count_and_occurrence() {
+    let long = format!("fn big() {{\n{}}}\n", "let a = 1;\n".repeat(10));
+    let src = format!("{long}fn small() {{\nlet a = 1;\n}}\n{long}");
+    let files = product_files(&tree(&[("src/a.rs", &src)]));
+    assert_eq!(
+        long_functions(&files, 5),
+        vec![
+            ("src/a.rs::big#1".to_string(), 12),
+            ("src/a.rs::big#2".to_string(), 12)
+        ]
+    );
+    assert!(long_functions(&files, 12).is_empty());
 }
 
 #[test]

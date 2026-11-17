@@ -1,35 +1,4 @@
 //! **Layer: Execution** — MongoDB source engine (document store).
-//!
-//! Unlike the three SQL engines (PostgreSQL / MySQL / SQL Server), MongoDB has
-//! no SQL, no fixed per-collection schema, and no `information_schema`. So the
-//! SQL-shaped read seam — chunked/keyset planning, incremental predicate
-//! building, catalog introspection — does **not** apply. This adapter is the
-//! **OSS JSON-blob model**: every document exports as exactly two columns —
-//! `_id` (`Utf8`, the document key stringified: ObjectId → hex, etc.) and
-//! `document` (`Utf8` + the `arrow.json` extension type, the whole BSON
-//! document rendered as relaxed extended JSON).
-//!
-//! Per-field typing is punted downstream (`PARSE_JSON` in the warehouse). Schema
-//! inference / auto-discovery is deliberately **out of scope for OSS** (it is the
-//! paid-tier `discover` mechanism); the user gets a lossless blob, not a guessed
-//! columnar schema. A future `columns:` projection can carve typed columns out of
-//! the blob without changing this default.
-//!
-//! ## Sync bridge (ADR-0011)
-//!
-//! The `mongodb` driver is async (tokio); the [`Source`] trait is sync
-//! `&mut self`. Like the MSSQL/tiberius engine, each [`MongoSource`] owns a tokio
-//! runtime and `block_on`s every driver call — no async leaks into the runner.
-//!
-//! ## Scope
-//!
-//! `mode: full` only (incremental / chunked / time-window are SQL-runner concepts
-//! and are refused with an actionable error). Within full mode, `source.mongo.
-//! page_size` opts into **keyset (seek) paging** on `_id` — bounded query time,
-//! per-page parts, optional cross-run **resume** (`resume: true`, typed BSON
-//! checkpoint), and `parallel: N` **`_id`-range fan-out** (any BSON `_id`). CDC
-//! (change streams) rides the canonical `ChangeStream` seam and is added
-//! separately.
 
 use std::sync::Arc;
 
@@ -51,22 +20,9 @@ use crate::types::{ColumnOverrides, RivetType, SourceColumn, TypeMapping};
 pub(crate) mod cdc;
 pub(crate) mod id_types;
 
-/// The byte budget at which a document batch flushes. The `document` column is an
-/// Arrow `Utf8` (i32 offsets): a batch accumulating > 2 GiB panics ("byte array
-/// offset overflow"). Large documents (up to 16 MB each) hit that far before the
-/// row cap (~65 K rows), so a row-only limit is unsafe for a document store —
-/// `None` (the default in every tuning profile) MUST NOT mean "unbounded".
-/// Default 256 MiB: bounds RSS (the correct blob knob) and keeps every batch well
-/// under the i32 ceiling (bug-hunt: 2300×1 MB docs panicked on the default).
+/// The byte budget at which a document batch flushes.
 fn mongo_batch_byte_cap(max_batch_memory_mb: Option<usize>) -> usize {
     const DEFAULT: usize = 256 * 1024 * 1024;
-    // Keep the cap STRICTLY below the i32 offset ceiling. `document` is an Arrow
-    // Utf8 (i32 offsets), so a flush threshold >= 2 GiB lets a batch's cumulative
-    // value buffer overflow i32::MAX on `append_value` and panic ("byte array
-    // offset overflow") BEFORE the byte-cap flush check fires — the exact crash
-    // the cap exists to prevent. The default is already sub-2 GiB, but a user
-    // override (`max_batch_memory_mb: 2048`, a plausible "give it 2 GB") had no
-    // upper clamp. Clamp to 1 GiB so a full batch + one more 16 MB doc still fits.
     const MAX: usize = 1024 * 1024 * 1024;
     max_batch_memory_mb
         .map(|mb| mb.saturating_mul(1024 * 1024).min(MAX))
@@ -74,21 +30,13 @@ fn mongo_batch_byte_cap(max_batch_memory_mb: Option<usize>) -> usize {
         .unwrap_or(DEFAULT)
 }
 
-/// Map rivet's [`TlsConfig`] onto the mongodb driver's `Tls`, mirroring the SQL
-/// engines' posture: `Disable` = plaintext; `Require` = TLS but accept any cert
-/// (sniff-proof, not MITM-proof); `VerifyCa` = verify chain, skip hostname;
-/// `VerifyFull` = verify both. The per-field `accept_invalid_*` flags widen (but
-/// never narrow) the mode. Without this the driver ignored the block entirely.
+/// Map rivet's [`TlsConfig`] onto the mongodb driver's `Tls`, mirroring the SQL engines' posture.
 fn tls_to_mongo(cfg: &TlsConfig) -> mongodb::options::Tls {
     use crate::config::TlsMode;
     use mongodb::options::{Tls, TlsOptions};
     if matches!(cfg.mode, TlsMode::Disable) {
         return Tls::Disabled;
     }
-    // Only `Require` waives certificate verification; `VerifyCa`/`VerifyFull`
-    // both verify the chain. (This driver exposes no hostname-only toggle, so
-    // `VerifyCa` verifies the hostname too — stricter than the SQL engines, never
-    // weaker.) The per-field `accept_invalid_certs` flag widens, never narrows.
     let mode_invalid_cert = matches!(cfg.mode, TlsMode::Require);
     let mut o = TlsOptions::default();
     o.ca_file_path = cfg.ca_file.as_ref().map(std::path::PathBuf::from);
@@ -96,12 +44,7 @@ fn tls_to_mongo(cfg: &TlsConfig) -> mongodb::options::Tls {
     Tls::Enabled(o)
 }
 
-/// A connected MongoDB session: the async client plus the tokio runtime that
-/// drives it, so the sync `Source` trait can `block_on` every driver call
-/// (ADR-0011, mirrors MSSQL/tiberius). This is the **one** place that owns the
-/// async→sync bridge — the SDAM-needs-a-worker-thread runtime, the connect +
-/// ping handshake, the borrow dance — reused by the source, the harm / count
-/// probes, and `rivet init`.
+/// A connected MongoDB session: the async client plus the tokio runtime that drives it, so the sync `Source` trait can `block_on` every driver call (ADR-0011, mirrors MSSQL/tiberius).
 pub struct MongoSession {
     rt: Runtime,
     client: Client,
@@ -110,16 +53,9 @@ pub struct MongoSession {
 }
 
 impl MongoSession {
-    /// Connect + `ping`. `gate` applies the shared remote-plaintext TLS refusal
-    /// (`require_tls_or_loopback`, CWE-319); every caller passes `true` — the SQL init helpers gate too, so init
-    /// is not an exception (bug hunt 2026-08-08 corrected the old `false`).
+    /// Connect + `ping`.
     pub fn connect(url: &str, tls: Option<&TlsConfig>) -> Result<Self> {
-        // Always refuse remote plaintext (CWE-319) — the old `gate: bool` let
-        // init opt out, which was the bug hunt 2026-08-08 find. No opt-out now.
         crate::source::require_tls_or_loopback(url, tls)?;
-        // Small multi-thread runtime (not current-thread): the driver spawns
-        // background SDAM/heartbeat tasks that must make progress independently
-        // of our `block_on` calls, or connection monitoring starves.
         let rt = crate::source::driver_runtime(
             "mongodb",
             tokio::runtime::Builder::new_multi_thread()
@@ -131,10 +67,6 @@ impl MongoSession {
             .block_on(async {
                 let mut opts = ClientOptions::parse(url).await?;
                 default_server_selection_timeout(&mut opts);
-                // Honor the `tls:` block. Without this the driver used only the URL's
-                // `?tls=` — so `tls: { mode: verify-full }` on a URL that didn't opt
-                // in connected in PLAINTEXT, the exact posture the operator asked to
-                // forbid (bug-hunt find). `None` ⇒ leave the URL's own tls setting.
                 if let Some(cfg) = tls {
                     opts.tls = Some(tls_to_mongo(cfg));
                 }
@@ -146,7 +78,6 @@ impl MongoSession {
                     )
                 })?;
                 let client = Client::with_options(opts)?;
-                // Round-trip so a bad host/auth fails at connect, not first read.
                 client.database(&db).run_command(doc! { "ping": 1 }).await?;
                 Ok::<_, anyhow::Error>((client, db))
             })
@@ -177,7 +108,7 @@ fn not_allowed(e: &mongodb::error::Error) -> bool {
     matches!(&*e.kind, mongodb::error::ErrorKind::Command(c) if c.code == 13)
 }
 
-/// The UUIDs (empty for a view) the database lists under `collection`; `None` when the role may not list collections, an error for any other listing failure.
+/// The UUIDs (empty for a view) the database lists under `collection`.
 fn list_collection_uuids(session: &MongoSession, collection: &str) -> Result<Option<Vec<Vec<u8>>>> {
     let listed = session.block_on(async {
         let mut cursor = session
@@ -223,7 +154,7 @@ fn bytes_of_hex(text: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// Refuse a collection the database does not list, or lists under another UUID than the run `started` on; a listing that was not allowed refuses nothing.
+/// Refuse a collection the database does not list, or lists under another UUID than the run `started` on.
 fn refuse_a_missing_collection(
     db: &str,
     collection: &str,
@@ -263,7 +194,7 @@ impl MongoSession {
         refuse_a_missing_collection(self.db(), collection, listed.as_deref(), None)
     }
 
-    /// The incarnation of `collection` as the database lists it now: its UUID in hex; `None` for a collection that is not listed, a view, or a listing the role may not read.
+    /// The incarnation of `collection` as the database lists it now.
     pub(crate) fn collection_incarnation(&self, collection: &str) -> Result<Option<String>> {
         let listed = list_collection_uuids(self, collection)?;
         Ok(listed
@@ -274,8 +205,7 @@ impl MongoSession {
     }
 }
 
-/// MongoDB source over a [`MongoSession`], carrying the resolved `source.mongo:`
-/// read options `export` applies.
+/// MongoDB source over a [`MongoSession`], carrying the resolved `source.mongo:` read options `export` applies.
 pub struct MongoSource {
     session: MongoSession,
     /// Render the `document` column as canonical (type-tagged) extended JSON.
@@ -284,20 +214,9 @@ pub struct MongoSource {
     snapshot: bool,
     /// Set `noCursorTimeout` on the scan cursor.
     no_cursor_timeout: bool,
-    /// A disjoint `_id` slice `[lo, hi)` for ONE parallel worker. When `Some`,
-    /// every scan (keyset page or full) is bounded to `{_id: {$gte: lo, $lt:
-    /// hi}}` (composed with the keyset `$gt` cursor). Bounds are `Bson` — a slice
-    /// works for ANY `_id` type (ObjectId, integer, string), with `MinKey`/
-    /// `MaxKey` as the outer sentinels. Set per-worker by the parallel runner;
-    /// ranges tile the whole BSON key space so their union is the full collection
-    /// with no overlap. `_id` is immutable ⇒ no doc migrates between ranges.
-    /// `None` ⇒ the whole collection (the normal single reader).
+    /// A disjoint `_id` slice `[lo, hi)` for ONE parallel worker.
     id_range: Option<(Bson, Bson)>,
-    /// Collections already vetted by [`Self::ensure_uniform_id_type`] this run —
-    /// the guard runs on the FIRST keyset page of every run, including a
-    /// checkpointed resume (`after_id` present). Gating it on `after_id.is_none()`
-    /// let `resume: true` bypass it forever: an `_id` of a new BSON band inserted
-    /// after run 1 was silently unreachable on every later run (bug-hunt find).
+    /// Collections already vetted by [`Self::ensure_uniform_id_type`] this run.
     id_guard_checked: std::collections::HashSet<String>,
     /// The UUID each collection was listed under when this source first read it.
     started_as: std::collections::HashMap<String, Vec<u8>>,
@@ -306,10 +225,7 @@ pub struct MongoSource {
 }
 
 impl MongoSource {
-    /// Connect, resolving the optional `source.mongo:` read options (absent ⇒
-    /// relaxed JSON, server read concern, cursor kept alive). Used by
-    /// `create_source` (with the config block) and the `doctor` / type-report
-    /// probes (with `None`).
+    /// Connect, resolving the optional `source.mongo:` read options (absent ⇒ relaxed JSON, server read concern, cursor kept alive).
     pub fn connect(url: &str, tls: Option<&TlsConfig>, cfg: Option<&MongoConfig>) -> Result<Self> {
         let session = MongoSession::connect(url, tls)?;
         let (canonical_json, snapshot, no_cursor_timeout) = match cfg {
@@ -332,7 +248,7 @@ impl MongoSource {
         })
     }
 
-    /// Refuse `collection` when it is gone or listed under another UUID than this source first saw; the first listing pins the UUID.
+    /// Refuse `collection` when it is gone or listed under another UUID than this source first saw.
     pub(crate) fn confirm_collection(&mut self, collection: &str) -> Result<()> {
         let listed = list_collection_uuids(&self.session, collection)?;
         let refusal = refuse_a_missing_collection(
@@ -367,7 +283,7 @@ impl MongoSource {
         self.confirm_collection(collection)
     }
 
-    /// Read `collection` only as the incarnation (UUID in hex) a stored cursor was written against; a text that is no hex pins nothing.
+    /// Read `collection` only as the incarnation (UUID in hex) a stored cursor was written against.
     pub(crate) fn pin_incarnation(&mut self, collection: &str, incarnation: &str) {
         if let Some(uuid) = bytes_of_hex(incarnation) {
             self.started_as
@@ -390,8 +306,7 @@ impl MongoSource {
         self
     }
 
-    /// Bind this reader to one disjoint `_id` slice `[lo, hi)` (a parallel
-    /// worker). Consuming builder — each worker owns its own `MongoSource`.
+    /// Bind this reader to one disjoint `_id` slice `[lo, hi)` (a parallel worker).
     pub fn with_id_range(mut self, lo: Bson, hi: Bson) -> Self {
         self.id_range = Some((lo, hi));
         self
@@ -402,16 +317,7 @@ impl MongoSource {
         id_types::id_span_on(&self.session, collection)
     }
 
-    /// Guard against silent loss on a heterogeneous-`_id` collection. Keyset
-    /// paging seeks with `$gt`/`$lt`, which MongoDB **type-brackets**: a numeric
-    /// cursor never matches a string `_id` even though strings sort after numbers,
-    /// so a collection mixing `_id` types would page only the first bracket and
-    /// silently drop the rest (verified: an int+string collection reads 50%). We
-    /// compare the BSON bracket of the min and max `_id` (a single bracket is a
-    /// contiguous band, so differing endpoints ⟺ a bracket jump exists) and refuse
-    /// keyset/parallel, pointing at the full scan — a single ordered cursor, which
-    /// DOES cross brackets. Numeric types share bracket 0, so a mixed
-    /// Int32/Int64/Double `_id` still keysets fine.
+    /// Guard against silent loss on a heterogeneous-`_id` collection.
     pub(crate) fn ensure_uniform_id_type(&self, collection: &str) -> Result<()> {
         if let Some((lo, hi)) = self.id_span(collection)?
             && let (Some(lo_id), Some(hi_id)) = (lo.get("_id"), hi.get("_id"))
@@ -421,14 +327,7 @@ impl MongoSource {
         Ok(())
     }
 
-    /// Advisory sibling of [`Self::ensure_uniform_id_type`] for the **full-scan**
-    /// path (no `page_size`, no `parallel`): a full ordered cursor DOES cross BSON
-    /// brackets, so a heterogeneous-`_id` collection is read completely — no loss.
-    /// But the flat `_id` **display column** stringifies distinct BSON types to
-    /// possibly-colliding text (int `1001` and string `"1001"` both → `"1001"`), so
-    /// a warehouse merge keyed on `_id` would conflate them. Warn once, up front,
-    /// and point at the typed `document._id` (see docs). Best-effort: a probe
-    /// failure is silent (advisory, never a gate).
+    /// Advisory sibling of [`Self::ensure_uniform_id_type`] for the **full-scan** path (no `page_size`, no `parallel`).
     pub(crate) fn warn_if_heterogeneous_id(&self, collection: &str) {
         let Ok(Some((lo, hi))) = self.id_span(collection) else {
             return;
@@ -445,14 +344,7 @@ impl MongoSource {
         }
     }
 
-    /// Split the collection's `_id` space into `n` disjoint, size-balanced
-    /// ranges `[lo, hi)` whose union tiles the whole BSON key space (so the union
-    /// read is the complete collection, no overlap) — for ANY `_id` type, not
-    /// just ObjectId. Boundaries come from a `$sample` of the `_id`s (a
-    /// WiredTiger random cursor — O(sample), NOT a collection scan, unlike
-    /// `$bucketAuto` which examines every doc), then the N−1 quantiles of the
-    /// sorted sample. Outer bounds are `MinKey`/`MaxKey`, which sort before/after
-    /// every value, so the first/last range cannot miss the true extremes.
+    /// Split the collection's `_id` space into `n` disjoint, size-balanced ranges `[lo, hi)` whose union tiles the whole BSON key space (so the union read is the complete collection, no overlap).
     pub fn sample_id_ranges(&self, collection: &str, n: usize) -> Result<Vec<(Bson, Bson)>> {
         self.ensure_uniform_id_type(collection)?;
         let n = n.max(1);
@@ -460,8 +352,6 @@ impl MongoSource {
         if n == 1 {
             return Ok(full_range());
         }
-        // ~250 samples per target range (min 2000), capped so a huge N stays well
-        // under the 5%-of-collection threshold that flips $sample to a full sort.
         let sample_size = (n * 250).clamp(2000, 50_000);
         let coll = self
             .session
@@ -478,8 +368,6 @@ impl MongoSource {
                 .await?;
             let mut ids = Vec::new();
             while let Some(d) = cursor.try_next().await? {
-                // `$sort` yields the sampled `_id`s in BSON order; any type is fine
-                // (the range filter compares by the same order the server sorts by).
                 if let Some(id) = d.get("_id") {
                     ids.push(id.clone());
                 }
@@ -487,20 +375,13 @@ impl MongoSource {
             Ok::<_, anyhow::Error>(ids)
         })?;
         if ids.len() < 2 {
-            // Too few docs to split meaningfully — one range over everything.
             return Ok(full_range());
         }
-        // N−1 interior quantile boundaries → N ranges; MinKey/MaxKey at the ends
-        // sort before/after every value, so the outer slices cover the extremes
-        // for ANY `_id` type.
         let mut bounds = vec![Bson::MinKey];
         for i in 1..n {
             bounds.push(ids[i * ids.len() / n].clone());
         }
         bounds.push(Bson::MaxKey);
-        // Adjacent quantiles can land on the same value in a skewed sample; drop
-        // the resulting empty `[x, x)` so a worker never gets a no-op range (the
-        // dropped value is still covered by the next range's `$gte`).
         Ok(bounds
             .windows(2)
             .filter(|w| w[0] != w[1])
@@ -509,84 +390,53 @@ impl MongoSource {
     }
 }
 
-/// The two fixed columns of the JSON-blob model. Used by both the export schema
-/// and `type_mappings`, so `check --type-report` and the export agree.
-fn blob_mappings() -> Vec<TypeMapping> {
-    vec![
-        TypeMapping::from_source(
-            &SourceColumn::simple("_id", "objectid", false),
-            RivetType::String,
-        ),
-        TypeMapping::from_source(
-            // Nullable: a CDC DELETE with no pre-image (pre/post-images not
-            // enabled, or < 6.0) carries only `_id`, so `document` is NULL. A
-            // batch export never writes a null here — nullable is a safe superset.
-            &SourceColumn::simple("document", "document", true),
-            RivetType::Json,
-        ),
+/// The two fixed columns of the JSON-blob model, each retyped by its `columns:` override where the override table reads that pair.
+fn blob_mappings(overrides: &ColumnOverrides) -> Result<Vec<TypeMapping>> {
+    [
+        ("_id", "objectid", false, RivetType::String),
+        ("document", "document", true, RivetType::Json),
     ]
+    .into_iter()
+    .map(|(name, native, nullable, detected)| {
+        let t = crate::types::override_table::resolve_column(
+            crate::types::override_table::Engine::Mongo,
+            overrides,
+            name,
+            native,
+            || detected,
+        )?;
+        Ok(TypeMapping::from_source(
+            &SourceColumn::simple(name, native, nullable),
+            t,
+        ))
+    })
+    .collect()
 }
 
-/// Arrow schema for the JSON-blob model (`_id: Utf8`, `document: Utf8 + json`).
-fn blob_schema() -> SchemaRef {
-    let fields = blob_mappings()
+/// Arrow schema for the JSON-blob model (`_id: Utf8`, `document: Utf8 + json`) under `overrides`.
+fn blob_schema(overrides: &ColumnOverrides) -> Result<SchemaRef> {
+    let fields = blob_mappings(overrides)?
         .iter()
         .map(|m| {
             crate::types::build_arrow_field(m)
                 .expect("blob columns (String/Json) always have an Arrow mapping")
         })
         .collect::<Vec<_>>();
-    Arc::new(Schema::new(fields))
+    Ok(Arc::new(Schema::new(fields)))
 }
 
-/// Stringify a document `_id` for the `_id` column. ObjectId → 24-char hex;
-/// string/number keys → their natural text; anything exotic (binary, compound)
-/// → its relaxed extended JSON, so the column is always populated and never
-/// silently null.
+/// Stringify a document `_id` for the `_id` column.
 fn id_to_string(id: Option<&Bson>) -> String {
     match id {
         Some(Bson::ObjectId(oid)) => oid.to_hex(),
         Some(Bson::String(s)) => s.clone(),
-        // Ints, bools, etc. render as their bare relaxed-extjson value (`42`,
-        // `true`); ObjectId/String are special-cased above only to drop the
-        // `{"$oid":…}` wrapper / surrounding quotes.
         Some(other) => other.clone().into_relaxed_extjson().to_string(),
-        // A document with no `_id` is not possible in MongoDB (the server
-        // always assigns one), but never panic on malformed input.
         None => String::new(),
     }
 }
 
-/// Encode a BSON `_id` as a lossless, engine-decodable keyset token: the raw
-/// BSON bytes of `{_id: <value>}`, hex-encoded. Unlike the display `_id` column
-/// (hex/text — type-ambiguous, e.g. integer `1001` vs string `"1001"`), this
-/// preserves the exact BSON type across the string-typed cursor seam, so keyset
-/// paging + resume work for ANY `_id`, not just ObjectId.
-/// The BSON comparison *band* an `_id` falls in for a `$gt`/`$lt` keyset seek.
-/// MongoDB only compares within a band; the server's sort order is
-/// `MinKey < Null < Numbers < String/Symbol < Object < Array < BinData <
-/// ObjectId < Boolean < Date < Timestamp < Regex < MaxKey`. The four numeric
-/// types share one band (a mixed Int32/Int64/Double `_id` keysets fine); every
-/// other band is its own bracket — a former catch-all arm lumped Null, Object,
-/// Array and Regex together, so a `null` + `{…}` collection slipped past the
-/// guard and silently lost a band (bug-hunt find). `None` = a type we cannot
-/// place (MinKey/MaxKey/JS/DbPointer/…) — the caller refuses keyset rather than
-/// guessing. Two `_id`s in different brackets ⟹ un-keyset-able.
-/// A numeric `_id` that is NaN. MongoDB range operators (`$gt`/`$gte`/`$lt`)
-/// never match NaN against any operand, so a keyset page boundary landing on it
-/// drops the rest of the collection and every parallel range excludes it. BOTH
-/// forms must be caught: a 64-bit-float NaN (`Bson::Double`) AND a Decimal128 NaN
-/// (`NumberDecimal("NaN")`) — the latter lands in the numeric band via
-/// [`id_bracket`] but slipped past a Double-only check and was silently dropped.
-/// A finite decimal renders as digits/sign/`.`/`E`, so a lowercased `"nan"`
-/// substring is an unambiguous NaN test (covers `NaN`, `-NaN`, signaling `sNaN`).
-/// Refuse an `_id` span a `$gt` seek cannot page over: a NaN at either end, or two BSON type brackets.
+/// Encode a BSON `_id` as a lossless, engine-decodable keyset token.
 fn seekable_id_span(collection: &str, lo_id: &Bson, hi_id: &Bson) -> Result<()> {
-    // NaN never matches $gt/$gte/$lt against a non-NaN operand: a keyset
-    // page boundary landing ON the NaN row drops the whole remaining
-    // collection, and every parallel range excludes it. NaN sorts FIRST
-    // in the numeric band, so the min probe always sees it (the max
-    // probe covers the all-NaN corner).
     for id in [lo_id, hi_id] {
         if is_id_nan(id) {
             crate::rivet_bail!(
@@ -599,9 +449,6 @@ fn seekable_id_span(collection: &str, lo_id: &Bson, hi_id: &Bson) -> Result<()> 
             );
         }
     }
-    // Unknown band is refused too (see `id_types_collide`): if we cannot
-    // place the type we cannot promise the seek crosses it — loud beats a
-    // silent gap.
     if id_types_collide(lo_id, hi_id) {
         crate::rivet_bail!(
             crate::error::codes::SOURCE_KEYSET_KEY_UNORDERED,
@@ -642,11 +489,7 @@ fn id_bracket(v: &Bson) -> Option<u8> {
     })
 }
 
-/// Whether two `_id` values fall in DIFFERENT keyset brackets — i.e. the
-/// collection mixes BSON `_id` types. An unplaceable type (`id_bracket` = `None`)
-/// counts as colliding: we can neither seek across it (keyset) nor vouch its
-/// display text won't collide (full scan). Pure, so the keyset refusal and the
-/// full-scan warning share one notion of "heterogeneous `_id`".
+/// Whether two `_id` values fall in DIFFERENT keyset brackets — i.e.
 fn id_types_collide(lo: &Bson, hi: &Bson) -> bool {
     match (id_bracket(lo), id_bracket(hi)) {
         (Some(a), Some(b)) => a != b,
@@ -654,23 +497,7 @@ fn id_types_collide(lo: &Bson, hi: &Bson) -> bool {
     }
 }
 
-/// The shared tail of the heterogeneous-`_id` warning (batch full scan and CDC
-/// both emit it): what to do about a collection whose `_id` mixes BSON type
-/// brackets.
-///
-/// TWO audiences, and they were conflated until now. A reader writing their OWN
-/// SQL over the change log really can key on the typed, lossless `document._id`
-/// — that is what this said, and for them it is still true.
-///
-/// But `rivet compact` took ownership of the MERGE, and rivet's own `load.pk`
-/// CANNOT accept that name: `check_spec_fit` refuses a pk column the export does
-/// not have, and the load-time identifier gate refuses anything that is not
-/// `[A-Za-z_][A-Za-z0-9_]*` — a dot fails both. So the one remediation this
-/// printed was, for rivet itself, impossible to follow, and the shape it warns
-/// about is exactly the shape a `layout: base_buffer` load produces.
-///
-/// `mode: full` is the escape that works: a whole-table pass runs no MERGE, so
-/// nothing keys on the flat `_id` at all.
+/// The shared tail of the heterogeneous-`_id` warning (batch full scan and CDC both emit it).
 pub(super) fn hetero_id_guidance() -> &'static str {
     "the flat `_id` column renders different BSON types to possibly-colliding text \
      (int 1001 and string \"1001\" both become \"1001\"), so a merge keyed on `_id` \
@@ -692,16 +519,12 @@ fn encode_id_cursor(id: &Bson) -> String {
     bytes_to_hex(&buf)
 }
 
-/// Lower-case hex of raw bytes — the string half of the BSON-token round-trip
-/// (paired with [`hex_to_bytes`]), used to carry a lossless BSON value across a
-/// string-typed seam (the keyset cursor and the CDC resume token).
+/// Lower-case hex of raw bytes — the string half of the BSON-token round-trip (paired with [`hex_to_bytes`]), used to carry a lossless BSON value across a string-typed seam (the keyset cursor and the CDC resume token).
 pub(super) fn bytes_to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Inverse of [`encode_id_cursor`]. Falls back to a bare 24-char ObjectId hex so
-/// a cursor written before the typed token (or a value read from the display
-/// column) still resolves.
+/// Inverse of [`encode_id_cursor`].
 fn decode_id_cursor(token: &str) -> Result<Bson> {
     if let Ok(bytes) = hex_to_bytes(token)
         && let Ok(doc) = Document::from_reader(&bytes[..])
@@ -718,8 +541,6 @@ fn decode_id_cursor(token: &str) -> Result<Bson> {
 }
 
 fn hex_to_bytes(s: &str) -> Result<Vec<u8>> {
-    // The 2-byte slices below index by BYTE; a multi-byte char boundary would
-    // panic. A corrupted / foreign token is an error, never a panic.
     if !s.is_ascii() {
         crate::rivet_bail!(
             crate::error::codes::STATE_CURSOR_INCOMPARABLE,
@@ -745,13 +566,7 @@ fn hex_to_bytes(s: &str) -> Result<Vec<u8>> {
         .collect()
 }
 
-/// Render a whole BSON document as an extended-JSON string. `canonical=false`
-/// (relaxed) keeps common scalars native (`42`, `"x"`, `true`, nested
-/// objects/arrays) while still wrapping exotic BSON types losslessly
-/// (`{"$oid":…}`, `{"$date":…}`, `{"$numberDecimal":…}`) — friendliest for a
-/// downstream `PARSE_JSON`. `canonical=true` type-tags every value
-/// (`{"$numberLong":…}`) so Int64/Double survive a double-based JSON-number
-/// parser that would otherwise clamp values beyond 2^53.
+/// Render a whole BSON document as an extended-JSON string.
 fn document_to_json(doc: &Document, canonical: bool) -> Result<String> {
     let bson = Bson::Document(doc.clone());
     let value = if canonical {
@@ -794,9 +609,6 @@ impl Source for MongoSource {
     }
 
     fn export(&mut self, request: &ExportRequest<'_>, sink: &mut dyn BatchSink) -> Result<()> {
-        // The structured read-intent: the bare collection behind the `table:`
-        // shortcut (ADR-0027). `None` ⇒ a hand-written `query:` or a
-        // filtered/wrapped form, which has no MongoDB equivalent.
         let coll_name = request.base_relation.ok_or_else(|| {
             crate::error::coded(
                 crate::error::codes::CONFIG_SOURCE_OPTION_UNSUPPORTED,
@@ -810,12 +622,9 @@ impl Source for MongoSource {
         })?;
         let db = self.session.client().database(self.session.db());
         self.confirm_before_read(coll_name)?;
-        let schema = blob_schema();
+        let schema = blob_schema(request.column_overrides)?;
         sink.on_schema(schema.clone())?;
 
-        // `readConcern: snapshot` must ride the collection handle; a plain scan
-        // uses the default handle. The scalar opts are copied into locals so the
-        // async scan closure doesn't borrow `self`.
         let coll = if self.snapshot {
             db.collection_with_options::<Document>(
                 coll_name,
@@ -829,24 +638,9 @@ impl Source for MongoSource {
         let canonical = self.canonical_json;
         let no_cursor_timeout = self.no_cursor_timeout;
         let id_range = self.id_range.clone();
-        // Source-side batch = the RSS lever. Two caps, whichever trips first:
-        //   • `tuning.batch_size` — a row count (schema-based memory budget for a
-        //     document store is unreliable: the `document` column is variable
-        //     length, so a row estimate off the Arrow schema misfires);
-        //   • `tuning.max_batch_memory_mb` — a hard byte budget on the batch,
-        //     the *correct* RSS knob for a JSON blob (flush by accumulated bytes,
-        //     independent of how big each document is).
         let batch_rows = request.tuning.effective_batch_size(Some(&schema)).max(1);
         let batch_byte_cap = mongo_batch_byte_cap(request.tuning.max_batch_memory_mb);
 
-        // Keyset (seek) pagination: the keyset runner drives the outer loop and
-        // hands us one page's `page_limit` plus the previous page's max `_id`
-        // as a lossless typed token (`set_source_cursor` → `decode_id_cursor`).
-        // We page `find({_id:{$gt:after}}).sort({_id:1}).limit(n)` — a bounded,
-        // index-driven range scan. `page_limit` unset ⇒ one full scan. Because
-        // the token carries the exact BSON type (not a type-ambiguous hex/text
-        // rendering), keyset works for ANY `_id` — ObjectId, integer, string —
-        // and MongoDB's own `$gt`/`sort` provide the ordering.
         let page_limit = request.page_limit;
         let after_id: Option<Bson> =
             match request.cursor.and_then(|c| c.last_cursor_value.as_deref()) {
@@ -854,33 +648,17 @@ impl Source for MongoSource {
                 None => None,
             };
 
-        // Single-worker keyset, first page of THIS run — including a checkpointed
-        // resume: refuse a heterogeneous-`_id` collection up front. `$gt` is
-        // type-bracketed and would silently drop every `_id` band but the
-        // cursor's; a resume whose cursor predates newly-inserted documents of a
-        // different band would otherwise skip them forever while reporting
-        // success (the guard must NOT be gated on `after_id.is_none()`).
-        // (Parallel checks this in `sample_id_ranges`; a full scan — `page_limit`
-        // unset — is exempt because its single cursor crosses brackets.)
         if page_limit.is_some() && id_range.is_none() && !self.id_guard_checked.contains(coll_name)
         {
             self.ensure_uniform_id_type(coll_name)?;
             self.id_guard_checked.insert(coll_name.to_string());
         }
 
-        // Full scan (no page_size, not a parallel worker) is the ONE path that
-        // permits a heterogeneous-`_id` collection — its single cursor crosses BSON
-        // brackets, so the read is complete (keyset/parallel refuse it above). But
-        // the flat `_id` display column can collide across types downstream, so warn
-        // once, up front. Advisory only — never gates the run.
         if page_limit.is_none() && id_range.is_none() {
             self.warn_if_heterogeneous_id(coll_name);
         }
 
         let total = self.session.block_on(async {
-            // Lower bound: the keyset cursor (`$gt: after`) when resuming a page,
-            // else this worker's range floor (`$gte: lo`). Upper bound: the range
-            // ceiling (`$lt: hi`). A worker with no range and no cursor scans all.
             let filter = {
                 let mut cond = Document::new();
                 match &after_id {
@@ -915,9 +693,6 @@ impl Source for MongoSource {
             let mut in_batch = 0usize;
             let mut batch_bytes = 0usize;
             let mut total = 0usize;
-            // The page's max `_id` (the last row, since keyset sorts `_id` asc).
-            // Reported to the sink as a typed token so the runner advances by the
-            // exact BSON value, not the type-ambiguous display string.
             let mut max_id: Option<Bson> = None;
             while let Some(d) = cursor.try_next().await? {
                 let id = id_to_string(d.get("_id"));
@@ -939,7 +714,6 @@ impl Source for MongoSource {
             if in_batch > 0 {
                 flush(&schema, &mut ids, &mut docs, sink)?;
             }
-            // Keyset only: hand the runner the exact BSON high-water mark.
             if let Some(id) = &max_id {
                 sink.set_source_cursor(encode_id_cursor(id));
             }
@@ -956,26 +730,20 @@ impl Source for MongoSource {
         Ok(())
     }
 
-    /// The JSON-blob model has a fixed two-column schema regardless of the
-    /// query, so `check --type-report` shows it without touching the server.
+    /// The JSON-blob model has a fixed two-column schema regardless of the query, so `check --type-report` shows it without touching the server.
     fn type_mappings(
         &mut self,
         _query: &str,
-        _column_overrides: &ColumnOverrides,
+        column_overrides: &ColumnOverrides,
     ) -> Result<Vec<TypeMapping>> {
-        Ok(blob_mappings())
+        blob_mappings(column_overrides)
     }
 
     fn primary_key(&mut self, _table: &str) -> Result<Option<Vec<String>>> {
         Ok(Some(vec!["_id".to_string()]))
     }
 
-    /// The only scalar rivet asks a `mode: full` source is the reconcile row
-    /// count — `SELECT COUNT(*) FROM (SELECT * FROM <coll>) AS _rivet_reconcile`.
-    /// Recognize that shape and answer it with `countDocuments` so
-    /// `rivet run --reconcile` verifies Mongo exports like the SQL engines. Any
-    /// other SQL scalar (cursor MIN/MAX, etc.) has no Mongo meaning → `None`,
-    /// which callers treat as "unavailable" and skip.
+    /// The only scalar rivet asks a `mode: full` source is the reconcile row count.
     fn query_scalar(&mut self, sql: &str) -> Result<Option<String>> {
         if !sql.to_ascii_lowercase().contains("count(") {
             return Ok(None);
@@ -995,10 +763,6 @@ impl Source for MongoSource {
     }
 
     fn server_context(&mut self) -> Option<String> {
-        // buildInfo (version) + serverStatus (connections/uptime), block_on'd on the
-        // session runtime like every other Mongo driver call. serverStatus needs the
-        // clusterMonitor role on an authed deployment — best-effort, so a missing
-        // grant just drops those fields (version from buildInfo needs none).
         let session = &self.session;
         let (version, current, available, uptime) = session.block_on(async {
             let db = session.client().database(session.db());
@@ -1029,16 +793,7 @@ impl Source for MongoSource {
     }
 }
 
-/// Pull the collection name out of the innermost `… FROM <ident>` of a SQL
-/// string — the reconcile count wraps the base as
-/// `SELECT COUNT(*) FROM (SELECT * FROM <coll>) AS _rivet_reconcile`, so the
-/// *last* `FROM` names the collection. `None` if no bare identifier follows.
-///
-/// The batch export path no longer un-parses SQL — it reads the structured
-/// `ExportRequest::base_relation` (ADR-0027). This un-parser survives only
-/// because `query_scalar` receives a bare SQL string with no structured
-/// counterpart yet; giving the reconcile count a typed request would delete it
-/// too (the remaining tail of ADR-0027).
+/// Pull the collection name out of the innermost `… FROM <ident>` of a SQL string.
 fn last_from_identifier(sql: &str) -> Option<&str> {
     const MARKER: &str = "from ";
     let start = sql.to_ascii_lowercase().rfind(MARKER)? + MARKER.len();
@@ -1049,10 +804,7 @@ fn last_from_identifier(sql: &str) -> Option<&str> {
     (!ident.is_empty()).then_some(ident)
 }
 
-/// Read a possibly-nested numeric field out of a `serverStatus` document,
-/// coercing Int32 / Int64 / Double to `i64`. `None` if any path segment is
-/// missing or the leaf is not numeric — so a storage engine that omits a
-/// section (e.g. in-memory has no `wiredTiger`) just drops that one metric.
+/// Read a possibly-nested numeric field out of a `serverStatus` document, coercing Int32 / Int64 / Double to `i64`.
 fn nested_i64(doc: &Document, path: &[&str]) -> Option<i64> {
     let (leaf, parents) = path.split_last()?;
     let mut cur = doc;
@@ -1067,16 +819,8 @@ fn nested_i64(doc: &Document, path: &[&str]) -> Option<i64> {
     }
 }
 
-/// Pull the source-harm counters out of a `serverStatus` response. Only
-/// **cumulative monotonic** counters are emitted (never gauges), because the
-/// pipeline stores the before→after *delta* — the same contract as the SQL
-/// engines' `Source::harm_counters` impls.
+/// Pull the source-harm counters out of a `serverStatus` response.
 fn harm_from_server_status(status: &Document) -> Vec<(String, i64)> {
-    // (metric label, serverStatus path). Chosen as the Mongo analogues of the
-    // PG harm set: docs/keys *scanned* are the read-amplification signal
-    // (≈ `pg_tup_returned`), docs *returned* ≈ `pg_tup_fetched`, `getmore` is
-    // rivet's own streaming footprint (every cursor batch), and WiredTiger
-    // cache bytes-read is the I/O-vs-cache split (≈ `pg_blks_read`).
     let probes: [(&str, &[&str]); 6] = [
         (
             "mongo_docs_scanned",
@@ -1100,31 +844,7 @@ fn harm_from_server_status(status: &Document) -> Vec<(String, i64)> {
         .collect()
 }
 
-/// Snapshot MongoDB's source-harm counters via `serverStatus` — the document-
-/// store analogue of the SQL engines' `harm_counters`. Returns
-/// `(metric, cumulative_value)` pairs; the pipeline captures these before and
-/// after the export and stores the per-metric delta in `export_harm`.
-///
-/// These are **server-wide** cumulative counters, so concurrent activity
-/// inflates the delta; on a single-tenant pilot box it is the run's own read
-/// footprint. `serverStatus` needs the `clusterMonitor` role (or the
-/// `serverStatus` privilege) on authenticated deployments — `None` on any
-/// connect / permission / query failure, exactly like the SQL engines:
-/// harm metrics are observability, never a gate.
-///
-/// (Documents [`MongoSource::harm_counters`]; the estimate below is a
-/// separate probe.)
-/// Scan-free document-count estimate for one collection — the preflight
-/// `row_estimate` (the Mongo analogue of PG `reltuples` / MySQL `TABLE_ROWS`).
-/// `estimatedDocumentCount` reads collection metadata, never scans the
-/// collection. `None` on any failure — the diagnostic then shows an unknown
-/// row count, exactly as MySQL does when its estimate is untrustworthy.
-/// The server's connection headroom for the preflight connection-limit check —
-/// `serverStatus().connections.available` (free slots), the Mongo analogue of PG
-/// `max_connections` / MySQL `@@max_connections`. Defaults high (the pool cap is
-/// usually 65536 / ulimit-derived), so the warning is inert unless the server is
-/// tightly capped and `parallel` (the mongo_parallel worker count) would exhaust
-/// it. `None` on any probe failure (fail-soft, like `estimated_count`).
+/// Snapshot MongoDB's source-harm counters via `serverStatus`.
 pub(crate) fn max_connections(url: &str, tls: Option<&TlsConfig>) -> Option<u32> {
     let session = MongoSession::connect(url, tls).ok()?;
     session.block_on(async {
@@ -1135,8 +855,6 @@ pub(crate) fn max_connections(url: &str, tls: Option<&TlsConfig>) -> Option<u32>
             .await
             .ok()?;
         let conns = status.get_document("connections").ok()?;
-        // `available` is the free headroom; current + available ≈ the cap. The
-        // check compares `parallel` against what is actually usable now.
         let avail = conns
             .get_i32("available")
             .ok()
@@ -1277,23 +995,15 @@ mod tests {
     }
     use mongodb::bson::oid::ObjectId;
 
-    // W4: the byte-cap multiplications had no exact-value test — `mb * 1024 *
-    // 1024` mutating to `+` or `/` silently shrinks (or explodes) the flush
-    // budget that keeps document batches under the i32 offset ceiling.
     #[test]
     fn batch_byte_cap_is_exact_mib() {
         assert_eq!(super::mongo_batch_byte_cap(Some(10)), 10 * 1024 * 1024);
         assert_eq!(super::mongo_batch_byte_cap(None), 256 * 1024 * 1024);
-        // Zero is not a valid budget — falls back to the default.
         assert_eq!(super::mongo_batch_byte_cap(Some(0)), 256 * 1024 * 1024);
     }
 
     #[test]
     fn batch_byte_cap_is_clamped_below_the_i32_offset_ceiling() {
-        // RED before the clamp: `document` is an Arrow Utf8 (i32 offsets), so a cap
-        // >= 2 GiB let a batch overflow i32::MAX on append and PANIC before the
-        // flush check — the exact crash the cap prevents. A user "give it 2 GB"
-        // (max_batch_memory_mb: 2048) must be clamped, not passed through.
         let ceiling = i32::MAX as usize;
         for mb in [2048usize, 4096, 65_536, usize::MAX / (1024 * 1024)] {
             let cap = super::mongo_batch_byte_cap(Some(mb));
@@ -1302,47 +1012,30 @@ mod tests {
                 "max_batch_memory_mb={mb} yields cap {cap} >= i32::MAX ({ceiling}) — would overflow the Utf8 offset builder"
             );
         }
-        // The clamp doesn't shrink a safe sub-ceiling value.
         assert_eq!(super::mongo_batch_byte_cap(Some(256)), 256 * 1024 * 1024);
     }
 
-    // Finding #1: the NaN `_id` guard caught only a Bson::Double NaN, so a
-    // Decimal128 NaN (`NumberDecimal("NaN")`) — which id_bracket places in the
-    // numeric band — slipped past and was silently dropped from every keyset /
-    // parallel range (its $gt/$lt never matches). is_id_nan must catch BOTH.
     #[test]
     fn nan_id_detected_for_double_and_decimal128() {
         use mongodb::bson::Decimal128;
-        // 64-bit-float NaN.
         assert!(is_id_nan(&Bson::Double(f64::NAN)));
-        // Decimal128 NaN (the form that used to slip past).
         let dec_nan: Decimal128 = "NaN".parse().expect("bson parses NumberDecimal NaN");
         assert!(
             is_id_nan(&Bson::Decimal128(dec_nan)),
             "a Decimal128 NaN _id must be caught, not silently keyset-dropped"
         );
-        // Finite numeric _ids are NOT NaN (no false positive).
         assert!(!is_id_nan(&Bson::Double(1.5)));
         assert!(!is_id_nan(&Bson::Int64(1001)));
         let dec_finite: Decimal128 = "1234.5".parse().unwrap();
         assert!(!is_id_nan(&Bson::Decimal128(dec_finite)));
     }
 
-    // ── mutation-W4 gap closure ──────────────────────────────────────────────
-    // Deleting any `id_bracket` arm survived the suite: the type falls to the
-    // `None` catch-all and keyset is (conservatively) refused — a false refusal
-    // no test noticed. The same blindness would pass the DANGEROUS neighbour: a
-    // MERGE regression (two types sharing a band number) makes collide=false
-    // and keysets across a real server band — the silent bracket-loss class the
-    // heterogeneous-`_id` guard exists to prevent. Pin the WHOLE map.
     #[test]
     fn id_bracket_map_matches_the_server_sort_bands() {
         use mongodb::bson::spec::BinarySubtype;
         use mongodb::bson::{Binary, DateTime, Decimal128, Regex, Timestamp, doc};
         let b = |v: &Bson| id_bracket(v);
 
-        // The four numeric types share band 0 — a mixed Int32/Int64/Double
-        // `_id` keysets fine by design.
         assert_eq!(b(&Bson::Int32(1)), Some(0));
         assert_eq!(b(&Bson::Int64(1)), Some(0));
         assert_eq!(b(&Bson::Double(1.0)), Some(0));
@@ -1350,7 +1043,6 @@ mod tests {
             b(&Bson::Decimal128("1".parse::<Decimal128>().unwrap())),
             Some(0)
         );
-        // Every other placeable type is its OWN band, in server sort order.
         assert_eq!(b(&Bson::Null), Some(1));
         assert_eq!(b(&Bson::String("s".into())), Some(2));
         assert_eq!(b(&Bson::Document(doc! {"k": 1})), Some(3));
@@ -1379,11 +1071,8 @@ mod tests {
             })),
             Some(10)
         );
-        // Unplaceable types refuse keyset rather than guess.
         assert_eq!(b(&Bson::MaxKey), None);
 
-        // The collide relation derives from the map: same band never collides,
-        // different bands always do, unplaceable collides with everything.
         assert!(!id_types_collide(&Bson::Int32(1), &Bson::Double(2.0)));
         assert!(id_types_collide(
             &Bson::Int64(2000),
@@ -1403,7 +1092,6 @@ mod tests {
         assert_eq!(id_to_string(Some(&Bson::String("abc".to_string()))), "abc");
         assert_eq!(id_to_string(Some(&Bson::Int64(42))), "42");
         assert_eq!(id_to_string(Some(&Bson::Int32(7))), "7");
-        // Never panic / never silently vanish on a missing id.
         assert_eq!(id_to_string(None), "");
     }
 
@@ -1412,13 +1100,8 @@ mod tests {
         let int1001 = Bson::Int32(1001);
         let str1001 = Bson::String("1001".to_string());
         let oid = Bson::ObjectId(ObjectId::parse_str("64b8f0000000000000000000").unwrap());
-        // The exact collision the warehouse MERGE guards against: int and string
-        // that stringify to the SAME `_id` text but are distinct documents.
         assert!(id_types_collide(&int1001, &str1001));
-        // ObjectId vs a string (e.g. its own hex stored as a string _id): cross-bracket.
         assert!(id_types_collide(&oid, &str1001));
-        // Uniform is NOT flagged — same type, and the four numeric types share
-        // bracket 0 (a mixed Int32/Int64 `_id` is not a display collision).
         assert!(!id_types_collide(&int1001, &Bson::Int32(2002)));
         assert!(!id_types_collide(&int1001, &Bson::Int64(9_000_000_000)));
         assert!(!id_types_collide(&oid, &oid));
@@ -1438,7 +1121,6 @@ mod tests {
             accept_invalid_certs: false,
             accept_invalid_hostnames: false,
         };
-        // verify-full: TLS on, verify chain AND hostname, ca wired.
         match tls_to_mongo(&cfg(TlsMode::VerifyFull, Some("/ca.pem"))) {
             Tls::Enabled(o) => {
                 assert_eq!(
@@ -1449,12 +1131,10 @@ mod tests {
             }
             Tls::Disabled => panic!("verify-full must ENABLE tls, not ignore it"),
         }
-        // require: TLS on but cert unverified.
         match tls_to_mongo(&cfg(TlsMode::Require, None)) {
             Tls::Enabled(o) => assert_eq!(o.allow_invalid_certificates, Some(true)),
             Tls::Disabled => panic!("require must enable tls"),
         }
-        // disable: explicit plaintext opt-in.
         assert!(matches!(
             tls_to_mongo(&cfg(TlsMode::Disable, None)),
             Tls::Disabled
@@ -1463,42 +1143,28 @@ mod tests {
 
     #[test]
     fn roast_default_batch_byte_cap_is_bounded_not_unlimited() {
-        // The whole point of the fix: with no user budget the cap must be a
-        // finite byte value (≤ the Arrow i32 ceiling), never "unbounded" — an
-        // unbounded batch of large documents panics ("byte array offset
-        // overflow"). Verified live at 2300×1 MB before this guard.
         let cap = mongo_batch_byte_cap(None);
         assert!(
             cap > 0 && cap < (i32::MAX as usize),
             "cap must be finite + sub-2GiB"
         );
-        // A user budget is honored (MiB → bytes); 0 falls back to the default.
         assert_eq!(mongo_batch_byte_cap(Some(64)), 64 * 1024 * 1024);
         assert_eq!(mongo_batch_byte_cap(Some(0)), mongo_batch_byte_cap(None));
     }
 
     #[test]
     fn roast_non_ascii_cursor_token_is_a_clean_error_not_a_panic() {
-        // A corrupted / foreign checkpoint token must surface as Err — never a
-        // byte-boundary panic. '€' is 3 bytes: "€€" is 6 bytes (even, so it
-        // passes the odd-length check) and the 2-byte hex slice at [0..2] cuts
-        // the char in half — which panicked before hex_to_bytes rejected
-        // non-ASCII input up front.
         assert!(decode_id_cursor("€€").is_err());
     }
 
     #[test]
     fn id_cursor_token_roundtrips_every_bson_type_losslessly() {
-        // The whole point of the typed token (A′): the display column can't tell
-        // integer `1001` from string `"1001"`, but the cursor MUST — otherwise a
-        // keyset `$gt` on the wrong BSON type mis-pages. Prove the round-trip
-        // preserves the exact type for each `_id` shape keyset supports.
         let oid = Bson::ObjectId(ObjectId::parse_str("64b8f0000000000000000000").unwrap());
         for id in [
             oid.clone(),
             Bson::Int32(1001),
             Bson::Int64(9_000_000_000),
-            Bson::String("1001".to_string()), // same text as Int32(1001) — must NOT collide
+            Bson::String("1001".to_string()),
             Bson::String("sku-00042".to_string()),
         ] {
             let token = encode_id_cursor(&id);
@@ -1508,12 +1174,10 @@ mod tests {
                 "typed cursor round-trip lost the type for {id:?}"
             );
         }
-        // Int32(1001) and String("1001") encode to DIFFERENT tokens (no ambiguity).
         assert_ne!(
             encode_id_cursor(&Bson::Int32(1001)),
             encode_id_cursor(&Bson::String("1001".to_string()))
         );
-        // Legacy / display fallback: a bare 24-char ObjectId hex still decodes.
         assert_eq!(decode_id_cursor("64b8f0000000000000000000").unwrap(), oid);
     }
 
@@ -1525,7 +1189,6 @@ mod tests {
             "big": 9_223_372_036_854_775_807i64,
             "nested": doc! { "d": true },
         };
-        // Relaxed: common scalars native, Int64 as a bare JSON number.
         let relaxed = document_to_json(&d, false).unwrap();
         assert!(relaxed.contains("\"a\":1"), "got: {relaxed}");
         assert!(relaxed.contains("\"b\":\"x\""), "got: {relaxed}");
@@ -1537,8 +1200,6 @@ mod tests {
             relaxed.contains("\"big\":9223372036854775807"),
             "int64 is a bare number in relaxed: {relaxed}"
         );
-        // Canonical: every number type-tagged so a double-based JSON parser can't
-        // clamp an Int64 beyond 2^53.
         let canonical = document_to_json(&d, true).unwrap();
         assert!(
             canonical.contains("\"$numberLong\":\"9223372036854775807\""),
@@ -1548,16 +1209,35 @@ mod tests {
 
     #[test]
     fn blob_schema_is_two_columns_id_and_document_json() {
-        let schema = blob_schema();
+        let schema = blob_schema(&ColumnOverrides::default()).unwrap();
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert_eq!(names, vec!["_id", "document"]);
-        // The document column carries the Arrow JSON canonical extension type so
-        // parquet emits a native JSON column downstream, not a bare string.
         let doc_field = schema.field_with_name("document").unwrap();
         assert_eq!(
             doc_field.metadata().get("ARROW:extension:name"),
             Some(&"arrow.json".to_string()),
             "document column must carry the arrow.json extension type"
+        );
+    }
+
+    #[test]
+    fn a_columns_override_on_the_blob_columns_is_refused_or_read_never_ignored() {
+        let one = |c: &str, t: RivetType| ColumnOverrides::from([(c.to_string(), t)]);
+        for (c, t) in [("_id", RivetType::Int64), ("document", RivetType::Int64)] {
+            let err = blob_schema(&one(c, t)).unwrap_err();
+            assert_eq!(
+                crate::error::code_of(&err).map(|c| c.id),
+                Some(crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH.id),
+                "{c}"
+            );
+        }
+        let doc = blob_schema(&one("document", RivetType::String)).unwrap();
+        assert!(
+            doc.field_with_name("document")
+                .unwrap()
+                .metadata()
+                .get("ARROW:extension:name")
+                .is_none()
         );
     }
 
@@ -1576,15 +1256,13 @@ mod tests {
         assert_eq!(harm.get("mongo_docs_scanned"), Some(&500));
         assert_eq!(harm.get("mongo_keys_scanned"), Some(&10));
         assert_eq!(harm.get("mongo_docs_returned"), Some(&480));
-        assert_eq!(harm.get("mongo_op_query"), Some(&7)); // Int32 coerced to i64
+        assert_eq!(harm.get("mongo_op_query"), Some(&7));
         assert_eq!(harm.get("mongo_op_getmore"), Some(&12));
         assert_eq!(harm.get("mongo_wt_cache_bytes_read"), Some(&1_048_576));
     }
 
     #[test]
     fn reconcile_count_query_names_the_collection() {
-        // The reconcile count wraps the base query; the LAST `FROM` names the
-        // collection countDocuments runs against.
         assert_eq!(
             last_from_identifier("SELECT COUNT(*) FROM (SELECT * FROM orders) AS _rivet_reconcile"),
             Some("orders")
@@ -1593,14 +1271,11 @@ mod tests {
             last_from_identifier("select count(*) from (select * from shop_events) as _r"),
             Some("shop_events")
         );
-        // No bare identifier after a FROM → no count.
         assert_eq!(last_from_identifier("SELECT 1"), None);
     }
 
     #[test]
     fn harm_skips_missing_sections_gracefully() {
-        // e.g. the in-memory storage engine has no `wiredTiger` section — a
-        // missing section drops only its own metric, never errors.
         let status = doc! { "opcounters": { "query": 3i64 } };
         let harm: std::collections::HashMap<String, i64> =
             harm_from_server_status(&status).into_iter().collect();
@@ -1614,8 +1289,7 @@ mod tests {
 mod error_code_tests {
     use super::*;
 
-    /// A NaN or two-bracket `_id` span is a refusal (exit 5); a cursor token the state holds
-    /// that no longer decodes is the stored-cursor refusal.
+    /// A NaN or two-bracket `_id` span is a refusal (exit 5).
     #[test]
     fn an_unseekable_id_span_and_an_undecodable_cursor_token_are_refused_by_code() {
         let (nan, one, text) = (

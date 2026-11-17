@@ -1,8 +1,4 @@
 //! Incremental cursor configuration (Epic D — cursor policy).
-//!
-//! `cursor_column` remains the primary progression column. Optional `cursor_fallback_column`
-//! plus [`IncrementalCursorMode::Coalesce`] uses `COALESCE(primary, fallback)` for the
-//! incremental predicate and stored cursor value (single scalar string in state).
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

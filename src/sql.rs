@@ -597,8 +597,169 @@ fn outer_relation(query: &str) -> Option<(String, std::ops::Range<usize>)> {
     }
 }
 
+/// How one item of an outermost select list names its column.
+enum SelectItem {
+    Star,
+    Bare { base: NamePart, out: NamePart },
+    Expression { alias: Option<NamePart> },
+}
+
+/// The items of the select list `list`, split at the commas outside quotes, comments and parentheses.
+fn split_select_list(list: &str) -> Vec<&str> {
+    let b = list.as_bytes();
+    let (mut depth, mut quote, mut start, mut resume) = (0usize, None, 0, 0);
+    let mut items = Vec::new();
+    for (i, &c) in b.iter().enumerate() {
+        if i < resume {
+            continue;
+        }
+        if let Some(end) = quote {
+            quote = Some(end).filter(|&e| e != c);
+        } else if let n @ 1.. = comment_len(&b[i..]) {
+            resume = i + n;
+        } else {
+            quote = quote_closer(c);
+            match c {
+                b'(' => depth += 1,
+                b')' => depth = depth.saturating_sub(1),
+                b',' if depth == 0 => {
+                    items.push(&list[start..i]);
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    items.push(&list[start..]);
+    items
+}
+
+/// The name part `text` is, after an optional `AS`, with nothing following it.
+fn alias_only(text: &str) -> Option<NamePart> {
+    let text = skip_blank(text);
+    let text = match keyword_at(text.as_bytes(), b"as") {
+        true => skip_blank(text.get(2..)?),
+        false => text,
+    };
+    let (alias, tail) = name_part(text)?;
+    skip_blank(tail).is_empty().then_some(alias)
+}
+
+/// What one select-list item is: `*`, a bare column reference with an optional `AS` alias, or an expression with the alias after its last `AS`.
+fn select_item(item: &str) -> SelectItem {
+    let item = skip_blank(item).trim_end();
+    if item.ends_with('*') && !item.contains('(') {
+        return SelectItem::Star;
+    }
+    let mut rest = item;
+    let mut parts = Vec::new();
+    while let Some((part, tail)) = name_part(rest) {
+        parts.push(part);
+        rest = skip_blank(tail);
+        match rest.strip_prefix('.') {
+            Some(after) => rest = skip_blank(after),
+            None => break,
+        }
+    }
+    let expression = || {
+        let (mut from, mut last) = (0, None);
+        for _ in 0..item.len() {
+            let Some(at) = item.get(from..).and_then(|t| outer_keyword(t, "as")) else {
+                break;
+            };
+            last = Some(from + at + 2);
+            from += at + 2;
+        }
+        SelectItem::Expression {
+            alias: last.and_then(|at| alias_only(item.get(at..)?)),
+        }
+    };
+    let Some(base) = parts.pop() else {
+        return expression();
+    };
+    if rest.is_empty() {
+        return SelectItem::Bare {
+            out: base.clone(),
+            base,
+        };
+    }
+    match keyword_at(rest.as_bytes(), b"as")
+        .then(|| alias_only(rest))
+        .flatten()
+    {
+        Some(out) => SelectItem::Bare { base, out },
+        None => expression(),
+    }
+}
+
+/// Whether the select-list name `part` spells `column`: an unquoted one in any letter case, a quoted one exactly.
+fn names_column(part: &NamePart, column: &str) -> bool {
+    match part.quoted {
+        true => part.name == column,
+        false => part.name.eq_ignore_ascii_case(column),
+    }
+}
+
+/// The base column the output column `column` of the outermost `SELECT` of `query` is a bare reference to (`c`, `t.c`, `c AS x`, `*`); `None` for an expression, a `DISTINCT`/`TOP` list, a duplicate name or no select list.
+pub(crate) fn bare_column_source(query: &str, column: &str) -> Option<NamePart> {
+    let query = query.trim_matches(|c: char| c.is_whitespace() || c == ';');
+    let select = outer_keyword(query, "select")?;
+    let from = outer_keyword(query, "from").filter(|&f| f > select)?;
+    let list = skip_blank(query.get(select + 6..from)?);
+    if ["distinct", "all", "unique", "top"]
+        .iter()
+        .any(|kw| keyword_at(list.as_bytes(), kw.as_bytes()))
+    {
+        return None;
+    }
+    let mut found = None;
+    for item in split_select_list(list) {
+        let source = match select_item(item) {
+            SelectItem::Star => NamePart {
+                name: column.to_string(),
+                quoted: true,
+            },
+            SelectItem::Bare { base, out } if names_column(&out, column) => base,
+            SelectItem::Bare { .. } => continue,
+            SelectItem::Expression { alias }
+                if alias.as_ref().is_some_and(|a| names_column(a, column)) =>
+            {
+                return None;
+            }
+            SelectItem::Expression { .. } => continue,
+        };
+        if found.replace(source).is_some() {
+            return None;
+        }
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// `bare_column_source` names the base column of a bare reference and nothing for an expression.
+    #[test]
+    fn a_bare_reference_names_its_base_column_and_an_expression_none() {
+        let src = |q: &str, c: &str| bare_column_source(q, c).map(|p| p.name);
+        let some = |s: &str| Some(s.to_string());
+        assert_eq!(src("SELECT * FROM t", "c"), some("c"));
+        assert_eq!(src("SELECT id, c FROM t", "C"), some("c"));
+        assert_eq!(src("SELECT t.c AS x FROM t", "x"), some("c"));
+        assert_eq!(src("SELECT t.c AS x FROM t", "c"), None);
+        assert_eq!(src("SELECT \"Mixed\" FROM t", "Mixed"), some("Mixed"));
+        assert_eq!(src("SELECT COALESCE(c, d) AS c FROM t", "c"), None);
+        assert_eq!(
+            src("SELECT id, CAST(id AS BIGINT) AS id FROM t", "id"),
+            None
+        );
+        assert_eq!(src("SELECT c + 1 AS c FROM t", "c"), None);
+        assert_eq!(src("SELECT c, c FROM t", "c"), None);
+        assert_eq!(src("SELECT DISTINCT c FROM t", "c"), None);
+        assert_eq!(src("SELECT TOP 5 c FROM t", "c"), None);
+        assert_eq!(src("SELECT f(a, b) AS k, c FROM t", "c"), some("c"));
+        assert_eq!(src("SELECT 1", "c"), None);
+    }
 
     #[test]
     fn a_row_set_changes_with_the_filter_and_the_source_and_not_with_the_projection_or_layout() {
@@ -913,6 +1074,21 @@ mod tests {
         for query in ["DELETE id FROM orders", "UPDATE id FROM orders", "SEL"] {
             assert_eq!(strip_simple_projection_from(query), None, "{query:?}");
         }
+    }
+
+    #[test]
+    fn the_alias_of_an_expression_is_the_one_after_its_last_as_and_a_comment_hides_a_comma() {
+        let query = "SELECT abcdefgh AS x AS y, /* a, b */ name FROM t";
+        assert_eq!(
+            bare_column_source(query, "y"),
+            None,
+            "an expression aliased y is not a bare column"
+        );
+        assert_eq!(
+            bare_column_source(query, "name").map(|p| p.name),
+            Some("name".to_string())
+        );
+        assert_eq!(split_select_list("a, /* x, y */ b"), ["a", " /* x, y */ b"]);
     }
 
     #[test]
@@ -1246,6 +1422,16 @@ mod tests {
                 true,
             ),
             (
+                "`AS` repeated in one select item",
+                format!("SELECT {}c FROM t", "x AS ".repeat(mb / 5)),
+                true,
+            ),
+            (
+                "a select list of a megabyte of items",
+                format!("SELECT {}c FROM t", "a,".repeat(mb / 2)),
+                true,
+            ),
+            (
                 "comments after FROM",
                 format!("SELECT a FROM {}t", "--\n".repeat(mb / 3)),
                 true,
@@ -1263,7 +1449,11 @@ mod tests {
         {
             let (got_small, got_large) = linear_cost(label, small, large, |input: &String| {
                 let read = single_relation(input, true).is_some();
-                let _ = (outer_from_relation(input), row_set(input).len());
+                let _ = (
+                    outer_from_relation(input),
+                    row_set(input).len(),
+                    bare_column_source(input, "c"),
+                );
                 read
             });
             assert_eq!((got_small, got_large), (named, named), "{label}");
@@ -1286,6 +1476,7 @@ mod tests {
         let _ = single_relation(query, true);
         let _ = single_relation(query, false);
         let _ = first_relation(query);
+        let _ = bare_column_source(query, "c");
         for engine in SQL_ENGINES {
             let _ = aggregate_sql(engine, "min", "id", query);
             let _ = null_key_probe_sql(engine, "id", query);

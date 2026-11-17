@@ -11,6 +11,7 @@ from __future__ import annotations
 import concurrent.futures as cf
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -28,6 +29,7 @@ from pathlib import Path
 import yaml
 
 from . import cdc, core, engines
+from . import type_edges as te
 from .core import Ledger, SkipCause
 from .sentinels import warned_counts
 
@@ -101,7 +103,7 @@ def negative_scale_targets(text: str) -> list[str]:
 def rivet_types() -> list[str]:
     """The `RivetType` variants of the product; each needs a value family in RIVET_TYPE_FAMILY or the grid refuses to build."""
     found = _enum_variants("src/types/rivet_type.rs", "RivetType")
-    if set(found) != set(RIVET_TYPE_FAMILY) or not set(RIVET_TYPE_FAMILY.values()) <= set(FAMILY_EDGES):
+    if set(found) != set(RIVET_TYPE_FAMILY):
         raise AssertionError(f"RivetType variants {sorted(set(found) ^ set(RIVET_TYPE_FAMILY))} have no sample family: add them to RIVET_TYPE_FAMILY")
     return found
 
@@ -129,9 +131,15 @@ class Col:
     delivery: str
     family: str
     lits: tuple[str, ...]
+    edges: tuple = ()
+    refuses: object = None
 
 
-def family(native: str, delivery: str) -> str:
+FLOAT4_NATIVE = {"mysql": r"FLOAT(\(\d+,\d+\))?( UNSIGNED)?", "mssql": "REAL", "postgres": "REAL|FLOAT4", "oracle": "BINARY_FLOAT"}
+FLOAT8_NATIVE = {"mysql": r"DOUBLE(\(\d+,\d+\))?( UNSIGNED)?", "mssql": r"FLOAT(\(\d+\))?", "postgres": "DOUBLE PRECISION|FLOAT8", "oracle": "BINARY_DOUBLE"}
+
+
+def family(native: str, delivery: str, engine: str = "") -> str:
     """The value family a source column belongs to: what its values can be compared as."""
     n = native.upper()
     if re.fullmatch(r"(TINY|SMALL|MEDIUM|BIG)?INT(EGER)?( UNSIGNED)?|YEAR|NUMBER\(\d+\)", n):
@@ -140,40 +148,13 @@ def family(native: str, delivery: str) -> str:
         return "text"
     if re.fullmatch(r"(DECIMAL|NUMERIC|NUMBER)\(\d+,\s*\d+\)|MONEY|SMALLMONEY|NUMBER|NUMERIC|DECIMAL", n):
         return "decimal"
-    if delivery == "Float32":
+    if delivery == "Float32" or re.fullmatch(FLOAT4_NATIVE.get(engine, "(?!)"), n):
         return "float4"
-    if delivery == "Float64":
+    if delivery == "Float64" or re.fullmatch(FLOAT8_NATIVE.get(engine, "(?!)"), n):
         return "float8"
     if n in ("BOOLEAN", "BIT") or delivery == "Boolean":
         return "bool"
     return "other"
-
-
-def _int_range(native: str) -> tuple[int, int]:
-    """The inclusive range of an integer native type."""
-    n = native.upper()
-    if n == "YEAR":
-        return 1901, 2155
-    m = re.fullmatch(r"NUMBER\((\d+)\)", n)
-    if m:
-        return -(10 ** int(m.group(1)) - 1), 10 ** int(m.group(1)) - 1
-    bits = {"TINY": 8, "SMALL": 16, "MEDIUM": 24, "BIG": 64}.get(re.match(r"[A-Z]*?(?=INT)", n).group(0), 32) if "INT" in n else 16
-    if "UNSIGNED" in n:
-        return 0, 2 ** bits - 1
-    return -(2 ** (bits - 1)), 2 ** (bits - 1) - 1
-
-
-def _temporal(engine: str, native: str) -> tuple[str, str]:
-    """The earliest and latest instant a temporal native type stores on this engine."""
-    n = native.upper()
-    if engine == "mysql":
-        return ("1970-01-01 00:00:01", "2038-01-19 03:14:07") if n.startswith("TIMESTAMP") else ("1000-01-01 00:00:00", "9999-12-31 23:59:59")
-    if engine == "mssql":
-        if n == "SMALLDATETIME":
-            return "1900-01-01 00:00:00", "2079-06-06 00:00:00"
-        if n == "DATETIME":
-            return "1753-01-01 00:00:00", "9999-12-31 23:59:59"
-    return "0001-01-01 00:00:00", "9999-12-31 23:59:59"
 
 
 TEMPORAL = re.compile(r"(DATE|TIMESTAMPTZ|TIMESTAMP|DATETIME2|DATETIME|SMALLDATETIME|DATETIMEOFFSET)(\(\d\))?( WITH (LOCAL )?TIME ZONE)?( NULL)?")
@@ -182,95 +163,10 @@ TEMPORAL = re.compile(r"(DATE|TIMESTAMPTZ|TIMESTAMP|DATETIME2|DATETIME|SMALLDATE
 ZERO_DATE_LIT = re.compile(r"'(0000-00-00|\d{4}-00-\d\d|\d{4}-\d\d-00)( [0-9:.]+)?'")
 ALTER_TABLE = re.compile(r"\bALTER\s+TABLE\b", re.I)
 MYSQL_LAX = "SET SESSION sql_mode = ''; "
-ORACLE_ZONE = "ALTER SESSION SET TIME_ZONE = 'Europe/Brussels'; "
+ORACLE_SESSION_ZONE = "Europe/Brussels"
+ORACLE_ZONE = f"ALTER SESSION SET TIME_ZONE = '{ORACLE_SESSION_ZONE}'; "
 
 
-def _zero_dates(engine: str, native: str) -> list[str]:
-    """The zero and partial date literals a MySQL temporal column can hold under an empty sql_mode."""
-    if engine != "mysql":
-        return []
-    if native == "DATE":
-        return ["'0000-00-00'", "'2026-00-00'"]
-    return ["'0000-00-00 00:00:00'", "'2026-00-00 00:00:00'"] if native.startswith("DATETIME") else ["'0000-00-00 00:00:00'"]
-
-
-def _edges_int(engine: str, native: str, delivery: str) -> list[str]:
-    """Integer edges inside the column's own range."""
-    lo, hi = _int_range(native)
-    marks = {0, 1, 127, 128, 255, 32767, 32768, 2 ** 24, 2 ** 24 + 1, 2 ** 31 - 1, 2 ** 31, 2 ** 53, 2 ** 53 + 1}
-    return [str(v) for v in sorted({lo, hi, *marks, *(-m for m in marks)}) if lo <= v <= hi]
-
-
-def _edges_decimal(engine: str, native: str, delivery: str) -> list[str]:
-    """The widest, the narrowest and the zero value of a fixed-point column."""
-    n = native.upper()
-    m = re.search(r"\((\d+),\s*(\d+)\)", n)
-    p, s = (int(m.group(1)), int(m.group(2))) if m else {"MONEY": (19, 4), "SMALLMONEY": (10, 4)}.get(n, (18, 4))
-    digits = str(10 ** p - 1).rjust(s + 1, "0")
-    top = f"{digits[:-s]}.{digits[-s:]}" if s else digits
-    top = {"MONEY": "922337203685477.5807", "SMALLMONEY": "214748.3647"}.get(n, top)
-    return [top, f"-{top}", "0", f"0.{'0' * (s - 1)}1" if s else "1"]
-
-
-def _edges_float(engine: str, native: str, delivery: str) -> list[str]:
-    """Float edges: exact binary fractions, the 2^24 and 2^53 steps and the wide exponents."""
-    wide = delivery == "Float64"
-    out = ["0", "1.5", "-2.25", "0.1", "16777216", "16777217", "1e30"] + (["9007199254740993", "1e300"] if wide else [])
-    return [f"{v}{'d' if wide else 'f'}" for v in out] if engine == "oracle" else out
-
-
-def _edges_bool(engine: str, native: str, delivery: str) -> list[str]:
-    """Both truth values in the engine's spelling."""
-    return ["TRUE", "FALSE"] if engine == "postgres" else ["1", "0"]
-
-
-def _edges_text(engine: str, native: str, delivery: str) -> list[str]:
-    """Empty, blank, numeric-looking and NULL-looking strings."""
-    empty = [] if engine == "oracle" else ["''"]
-    return [*empty, "'a'", "' '", "'12'", "'-5'", "'1.5'", "'NULL'", "'0'", "'12abc'", "' 42'"]
-
-
-def _edges_other(engine: str, native: str, delivery: str) -> list[str]:
-    """Temporal and JSON edges; every other native type keeps the ledger samples alone."""
-    n = native.upper()
-    if TEMPORAL.fullmatch(n):
-        lo, hi = _temporal(engine, native)
-        cut = 10 if n == "DATE" else None
-        kw = "DATE " if engine == "oracle" and n == "DATE" else "TIMESTAMP " if engine == "oracle" else ""
-        return [f"{kw}'{v[:cut]}'" for v in (lo, hi, "1970-01-02 03:04:05")] + _zero_dates(engine, n)
-    if n in ("JSON", "JSONB"):
-        cast = "::" + n.lower() if engine == "postgres" else ""
-        return [f"'{{}}'{cast}", f"'null'{cast}"]
-    if re.fullmatch(r"(ENUM|SET)\(.*\)", native, re.S):
-        return [f"'{v}'" for v in re.findall(r"'((?:[^'\\]|\\.|'')*)'", native)]
-    if engine == "mysql" and re.fullmatch(r"TIME(\(\d\))?", n):
-        fsp = int((re.search(r"\d", n) or ["0"])[0])
-        frac = lambda d: f".{d * fsp}" if fsp else ""
-        if fsp < 6:
-            return [f"'-00:00:00{frac('5')}'", f"'-838:59:59{frac('0')}'", f"'838:59:59'", f"'-01:02:03{frac('1')}'", "'00:00:00'"]
-        return ["'00:00:00'", "'23:59:59.999999'"]
-    return []
-
-
-HOSTILE_LABELS = ("a\\\\b", "l\\nf", "c\\rr", "n\\0l", "\U0001F600", "x\\\\y")
-TIME_WIDTHS = (1, 3, 5)
-
-
-def siblings(engine: str, rows: list[dict]) -> list[dict]:
-    """Ledger-shaped rows derived from the engine's own native types: an ENUM with hostile labels, and one TIME per binlog fraction width."""
-    out = []
-    for r in rows:
-        n = r["native_type"].upper()
-        if engine == "mysql" and n.startswith("ENUM("):
-            labels = ",".join(f"'{v}'" for v in HOSTILE_LABELS)
-            out.append({"native_type": f"ENUM({labels})", "sample": [], "delivery": r["delivery"]})
-        if engine == "mysql" and re.fullmatch(r"TIME(\(\d\))?", n):
-            out += [{"native_type": f"TIME({w})", "sample": [], "delivery": r["delivery"]} for w in TIME_WIDTHS]
-    return list({r["native_type"]: r for r in out}.values())
-
-
-FAMILY_EDGES = {"int": _edges_int, "decimal": _edges_decimal, "float4": _edges_float, "float8": _edges_float, "bool": _edges_bool,
-                "text": _edges_text, "other": _edges_other}
 RIVET_TYPE_FAMILY = {
     "bool": "bool", "int16": "int", "int32": "int", "int64": "int", "u_int64": "int", "float32": "float4", "float64": "float8",
     "decimal": "decimal", "date": "other", "time": "other", "timestamp": "other", "string": "text", "text": "text",
@@ -278,19 +174,18 @@ RIVET_TYPE_FAMILY = {
 }
 
 
-def edge_literals(engine: str, native: str, delivery: str) -> list[str]:
-    """Non-NULL edge values of a source column, as SQL literals of the engine; a family without an edge function is an error."""
-    return FAMILY_EDGES[family(native, delivery)](engine, native, delivery)
+def row_cols(engine: str, i: int, r: dict) -> Col:
+    """The seed column of ledger row `i`: its samples and the edges every stage delivers (a column that refuses holds every edge)."""
+    fam, delivery, whole = family(r["native_type"], r.get("delivery", ""), engine), r.get("delivery", ""), te.row_verdict(r)
+    edges = te.edges_of(r)
+    lits = list(dict.fromkeys([*r["sample"], *(e.lit for e in edges if whole or (not e.solo and e.x.kind in (te.EXACT, te.NULL)))]))
+    by_lit = {e.lit: e for e in edges}
+    return Col(f"c{i:02d}", r["native_type"], delivery, fam, tuple(lits), tuple(by_lit.get(x, te.Edge(x)) for x in lits), whole)
 
 
 def columns(engine: str) -> list[Col]:
-    """The seed columns of one SQL engine: every ledger row, its samples and the family edges."""
-    cols = []
-    rows = ledger_rows(engine)
-    for i, r in enumerate([*rows, *siblings(engine, rows)]):
-        lits = list(dict.fromkeys([*r["sample"], *edge_literals(engine, r["native_type"], r["delivery"])]))
-        cols.append(Col(f"c{i:02d}", r["native_type"], r["delivery"], family(r["native_type"], r["delivery"]), tuple(lits)))
-    return cols
+    """The seed columns of the override grid: the column of every ledger row that names a delivery."""
+    return [row_cols(engine, i, r) for i, r in enumerate(ledger_rows(engine)) if r.get("delivery")]
 
 
 def row_inserts(engine: str, cols: list[Col], table: str = TABLE, offset: int = 0) -> tuple[list[str], int]:
@@ -348,7 +243,7 @@ _STR = re.compile(r"N?'((?:[^']|'')*)'")
 _STR_MYSQL = re.compile(r"'((?:[^'\\]|\\.|'')*)'", re.S)
 _MYSQL_ESC = {"0": "\0", "n": "\n", "r": "\r", "t": "\t", "b": "\b", "Z": "\x1a"}
 _TS_FUNC = re.compile(r"(?:TO_DATE|TO_TIMESTAMP_TZ|TO_TIMESTAMP)\('([^']*)'\s*,\s*'[^']*'\)|(?:DATE|TIMESTAMP) '([^']*)'", re.I)
-_HEX = re.compile(r"0x([0-9A-Fa-f]*)|(?:UNHEX|HEXTORAW)\('([0-9A-Fa-f]*)'\)", re.I)
+_HEX = re.compile(r"0x([0-9A-Fa-f]*)|(?:UNHEX|HEXTORAW)\('([0-9A-Fa-f]*)'\)|x'([0-9A-Fa-f]*)'", re.I)
 _PG_HEX = re.compile(r"'\\x([0-9A-Fa-f]*)'(?:::bytea)?")
 _BITS = re.compile(r"b'([01]+)'")
 _CAST = re.compile(r"('(?:[^']|'')*')::[a-z_]+")
@@ -356,7 +251,9 @@ _CAST = re.compile(r"('(?:[^']|'')*')::[a-z_]+")
 
 def parse_lit(engine: str, lit: str):
     """The Python value of a simple SQL literal: None for NULL, Decimal, bool, str; `...` when it cannot be read."""
-    s = lit.strip()
+    s = te.reduce(engine, lit).strip()
+    if (n := te.numeric_of(s)) is not None:
+        return n
     if s.upper() == "NULL" or (engine == "oracle" and s == "''"):
         return None
     if _NUM.fullmatch(s):
@@ -366,7 +263,9 @@ def parse_lit(engine: str, lit: str):
     if m := _BITS.fullmatch(s):
         return Decimal(int(m.group(1), 2))
     if m := _HEX.fullmatch(s):
-        return bytes.fromhex(m.group(1) or m.group(2) or "")
+        if engine == "oracle" and s.upper() == "HEXTORAW('')":
+            return None
+        return bytes.fromhex(m.group(1) or m.group(2) or m.group(3) or "")
     if engine == "postgres" and (m := _PG_HEX.fullmatch(s)):
         return bytes.fromhex(m.group(1))
     if m := _TS_FUNC.fullmatch(s):
@@ -420,6 +319,7 @@ def _target_family(target: str) -> str:
 
 
 _ZONE = re.compile(r"\s+([A-Za-z]+/[A-Za-z_]+)$")
+_ZONED = re.compile(r"\d:\d{2}(?::\d{2}(?:\.\d+)?)?\s*(?:[+-]\d{2}:?\d{2}|UTC|Z|[A-Za-z]+/[A-Za-z_]+)$")
 _OFFSET = re.compile(r"\s*(?:(UTC|Z)|([+-]\d{2})(?::?(\d{2}))?)$")
 TEMPORAL_SLACK = {("mssql", "DATETIME"): timedelta(milliseconds=4), ("mssql", "SMALLDATETIME"): timedelta(seconds=30)}
 
@@ -452,9 +352,25 @@ def instant(v):
     return d.replace(tzinfo=zone).astimezone(timezone.utc).replace(tzinfo=None) if zone else d
 
 
+def _sub_us(v) -> int:
+    """The nanoseconds past the microsecond that a temporal text spells; 0 for a value that holds none."""
+    if isinstance(v, str) and (m := re.search(r":\d{2}\.(\d+)", v)):
+        return int(m[1][6:9].ljust(3, "0")) if len(m[1]) > 6 else 0
+    return getattr(v, "nanosecond", 0)
+
+
 def _same_instant(engine: str, native: str, exp: str, got) -> str:
     """OK, WRONG or PRESENCE for a temporal source value against a delivered instant or its text."""
+    if isinstance(got, str) and exp.startswith("0000-") and got.startswith("0001-") and got.endswith(" (BC)"):
+        return "OK" if got[4:10] == exp[4:10] else WRONG
     e, g = instant(exp), instant(got)
+    if engine == "oracle" and "TIME ZONE" in native.upper() and isinstance(e, datetime) and not _ZONED.search(exp):
+        try:
+            e = e.replace(tzinfo=ZoneInfo(ORACLE_SESSION_ZONE)).astimezone(timezone.utc).replace(tzinfo=None)
+        except OverflowError:
+            return "PRESENCE"
+    if isinstance(e, timedelta) and isinstance(got, (int, float, Decimal)) and not isinstance(got, bool):
+        return "OK" if Decimal(e.days * 86400 + e.seconds) + Decimal(e.microseconds) / 10**6 == Decimal(str(got)) else WRONG
     if e is None or g is None:
         return WRONG if e is None and isinstance(got, (date, dtime, timedelta)) else "PRESENCE"
     if type(e) is date and type(g) is datetime:
@@ -463,7 +379,9 @@ def _same_instant(engine: str, native: str, exp: str, got) -> str:
         g = datetime.combine(g, dtime())
     if type(e) is not type(g):
         return "PRESENCE"
-    slack = TEMPORAL_SLACK.get((engine, native.upper()), timedelta(microseconds=1))
+    slack = TEMPORAL_SLACK.get((engine, native.upper()))
+    if slack is None:
+        return "OK" if abs(e - g) < timedelta(microseconds=1) and _sub_us(exp) == _sub_us(got) else WRONG
     return "OK" if abs(e - g) < slack else WRONG
 
 
@@ -486,6 +404,8 @@ def compare_other(engine: str, native: str, exp, target: str, got) -> str:
     n = native.upper()
     if TEMPORAL.fullmatch(n) or n.startswith("TIME") or isinstance(got, (date, dtime, timedelta)):
         return _same_instant(engine, native, exp, got)
+    if n in ("UUID", "UNIQUEIDENTIFIER") and isinstance(got, bytes) and len(got) == 16:
+        return "OK" if str(UUID(bytes=got)) == exp.lower() else WRONG
     if isinstance(got, UUID) or n in ("UUID", "UNIQUEIDENTIFIER"):
         return "OK" if str(got).lower() == exp.lower() else WRONG if isinstance(got, (str, UUID)) else "PRESENCE"
     if n in ("JSON", "JSONB") and isinstance(got, str):
@@ -506,13 +426,108 @@ def _unhex_text(hexed: str) -> str | None:
         return None
 
 
+def _same_special(exp: float, got) -> str:
+    """OK, WRONG or PRESENCE for a NaN, an infinity or a signed zero against a delivered float or its text."""
+    if isinstance(got, str):
+        t = got.strip().lower().replace("infinity", "inf")
+        got = float("nan") if t in ("nan", "+nan", "-nan") else float(t) if t in ("inf", "+inf", "-inf", "-0", "-0.0", "0", "0.0") else got
+    if isinstance(got, (int, Decimal)) and not isinstance(got, bool):
+        got = float(got)
+    if not isinstance(got, float):
+        return "PRESENCE"
+    if exp != exp:
+        return "OK" if got != got else WRONG
+    return "OK" if got == exp and math.copysign(1, got) == math.copysign(1, exp) else WRONG
+
+
+_ARRAY_FN = re.compile(r"ARRAY\[(.*?)\](?:::[A-Za-z_ ]+\[\])?", re.S | re.I)
+_ARRAY_TEXT = re.compile(r"'(\{.*\})'(?:::[A-Za-z_ ]+(?:\(\d+(?:,\s*\d+)?\))?\[\])?", re.S)
+_ELEM_DELIVERY = {"REAL": "Float32", "FLOAT4": "Float32", "DOUBLE PRECISION": "Float64", "FLOAT8": "Float64", "BOOLEAN": "Boolean"}
+
+
+def pg_array_elements(lit: str, base: str):
+    """The element source literals of a one-dimensional PostgreSQL array literal (`ARRAY[..]` or `'{..}'`); None when it is not one or is multi-dimensional."""
+    s = lit.strip()
+    if m := _ARRAY_FN.fullmatch(s):
+        inner = m.group(1).strip()
+        return [] if not inner else te._args(inner)
+    if not (m := _ARRAY_TEXT.fullmatch(s)):
+        return None
+    body, out, i = m.group(1)[1:-1].replace("''", "'"), [], 0
+    if not body.strip():
+        return []
+    bytea = base.upper() == "BYTEA"
+    while i <= len(body):
+        while i < len(body) and body[i] == " ":
+            i += 1
+        if i < len(body) and body[i] == "{":
+            return None
+        if i < len(body) and body[i] == '"':
+            j, text = i + 1, ""
+            while j < len(body) and body[j] != '"':
+                if body[j] == "\\":
+                    j += 1
+                text += body[j]
+                j += 1
+            i, null = j + 1, False
+        else:
+            j = body.find(",", i) if "," in body[i:] else len(body)
+            text = body[i:j].strip()
+            i, null = j, text.upper() == "NULL"
+        out.append("NULL" if null else "'" + text.replace("'", "''") + "'" + ("::bytea" if bytea else ""))
+        if i >= len(body):
+            break
+        i += 1
+    return out
+
+
+def element_got(exp, got, base: str):
+    """A delivered element in the type its source literal is read as: bytes of a text value decode, text of a binary value encodes."""
+    if isinstance(got, str) and isinstance(exp, bytes):
+        return got.encode("utf-8", "surrogateescape")
+    if isinstance(got, bytes) and not isinstance(exp, bytes) and base.upper() not in ("UUID", "UNIQUEIDENTIFIER"):
+        return got.decode("utf-8", "surrogateescape")
+    return got
+
+
+def same_array(engine: str, lit: str, native: str, target: str, got) -> str:
+    """OK, WRONG, NULLED or PRESENCE for a one-dimensional array: each element against its source literal, never as a whole."""
+    base = native[:-2]
+    elems = pg_array_elements(lit, base)
+    if elems is None or not isinstance(got, (list, tuple)):
+        return "PRESENCE"
+    if len(elems) != len(got):
+        return WRONG
+    fam = family(base, _ELEM_DELIVERY.get(base.upper(), ""), engine)
+    seen = set()
+    for e, g in zip(elems, got):
+        if fam == "bool" and e.lower() in ("'t'", "'f'"):
+            e = "TRUE" if e.lower() == "'t'" else "FALSE"
+        elif fam in ("int", "decimal", "float4", "float8") and _NUM.fullmatch(e.strip("'")):
+            e = e.strip("'")
+        exp = parse_lit(engine, e)
+        if exp is None:
+            seen.add("OK" if g is None else WRONG)
+        elif g is None:
+            seen.add(NULLED)
+        elif exp is ... and fam not in ("float4", "float8"):
+            seen.add("PRESENCE")
+        else:
+            seen.add(compare(engine, e, fam, target, element_got(exp, g, base), False, base))
+    return next((v for v in (WRONG, NULLED, "PRESENCE") if v in seen), "OK")
+
+
 def compare(engine: str, src_lit: str, src_family: str, target: str, got, csv: bool = False, native: str = "") -> str:
     """OK, PRESENCE (not comparable), NULLED or WRONG for one delivered cell against its source literal."""
+    if src_family in ("float4", "float8") and (sp := te.special_float(src_lit)) is not None:
+        return NULLED if got is None else _same_special(sp, got)
     exp = parse_lit(engine, src_lit)
     if exp is None:
         return "OK"
     if got is None or (csv and got == "" and exp != ""):
         return NULLED
+    if engine == "postgres" and native.endswith("[]"):
+        return same_array(engine, src_lit, native, target, got)
     if target == "binary" and csv and isinstance(got, str) and not isinstance(exp, bytes):
         got = _unhex_text(got)
         if got is None:
@@ -620,7 +635,7 @@ def read_files(parts: list[str], fmt: str, key: str = "id"):
         else:
             src = f"read_csv({parts!r}, header=true, all_varchar=true, union_by_name=true, nullstr='\\x00nsn')"
         desc = {r[0].lower(): wide.get(r[0].lower(), r[1]) for r in con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
-        sel = ", ".join(f'CAST("{k}" AS VARCHAR) AS "{k}"' if "TIME ZONE" in t else f'"{k}"' for k, t in desc.items())
+        sel = ", ".join(f'CAST("{k}" AS VARCHAR{"[]" if t.endswith("[]") else ""}) AS "{k}"' if "TIME ZONE" in t else f'"{k}"' for k, t in desc.items())
         cur = con.execute(f"SELECT {sel} FROM {src}")
         names = [d[0].lower() for d in cur.description]
         rows = [dict(zip(names, r)) for r in cur.fetchall()]
@@ -813,73 +828,20 @@ def grid(engine: str, cols: list[Col], tier: str) -> list[tuple[Col, str, str, t
     return units
 
 
-MONGO_FIELDS = {
-    "i32_min": ("NumberInt(-2147483648)", Decimal(-2147483648)),
-    "i32_max": ("NumberInt(2147483647)", Decimal(2147483647)),
-    "i64_max": ('NumberLong("9223372036854775807")', Decimal(9223372036854775807)),
-    "i64_2p53": ('NumberLong("9007199254740993")', Decimal(9007199254740993)),
-    "dbl_big": ("1e300", Decimal("1e300")),
-    "dbl_frac": ("0.1", Decimal("0.1")),
-    "dec128": ('NumberDecimal("9999999999999999999999999999999.999")', Decimal("9999999999999999999999999999999.999")),
-    "str_empty": ('""', ""),
-    "str_uni": ('"\u00fc\u00f1\u00ed\u00e7\u00f8d\u00e9"', "\u00fc\u00f1\u00ed\u00e7\u00f8d\u00e9"),
-    "date_min": ('ISODate("0001-01-01T00:00:00Z")', Decimal(-62135596800000)),
-    "date_max": ('ISODate("9999-12-31T23:59:59Z")', Decimal(253402300799000)),
-    "oid": ('ObjectId("507f1f77bcf86cd799439011")', "507f1f77bcf86cd799439011"),
-    "bin": ('BinData(0, "AAEC")', "AAEC"),
-    "nested": ("{a: {b: [1, 2, 3]}}", "[1, 2, 3]"),
-}
-MONGO_IDS = (("NumberInt(1)", "1"), ('NumberLong("9007199254740993")', "9007199254740993"), ('"doc-3"', "doc-3"),
-             ('ObjectId("507f1f77bcf86cd799439012")', "507f1f77bcf86cd799439012"))
-
-
 def mongo_seed(url: str) -> int:
-    """Create the seed collection: one full document per id kind plus a sparse one; returns the document count."""
-    docs = [", ".join([f"_id: {i}", f"n: NumberInt({k})", *(f"{f}: {e}" for f, (e, _) in MONGO_FIELDS.items()), "nul: null"])
-            for k, (i, _) in enumerate(MONGO_IDS, 1)]
-    docs.append(f"_id: NumberInt(5), n: NumberInt({len(MONGO_IDS) + 1}), nul: null")
-    p = cdc._mongosh(url, f"db.{TABLE}.drop(); db.{TABLE}.insertMany([" + ", ".join("{" + d + "}" for d in docs) + f"]); print('docs=' + db.{TABLE}.countDocuments({{}}))")
-    if not p.ok or f"docs={len(docs)}" not in p.out:
-        raise RuntimeError(f"mongo seed refused: exit {p.returncode}: {p.out.strip()[:300]}")
+    """Create the seed collection from the ledger's Mongo rows: one document per literal index plus a sparse one; returns the document count."""
+    from pymongo import MongoClient
+
+    from . import type_matrix as tm
+
+    docs = tm.mongo_grid()[0]
+    with MongoClient(url, serverSelectionTimeoutMS=5000) as client:
+        coll = client.get_default_database()[TABLE]
+        coll.drop()
+        coll.insert_many(docs)
+        if coll.count_documents({}) != len(docs):
+            raise RuntimeError(f"mongo seed refused: {coll.count_documents({})} of {len(docs)} documents")
     return len(docs)
-
-
-def _unwrap(v):
-    """The plain value of an extended-JSON scalar: numbers become Decimal, dates and ids their text, others their JSON text."""
-    if isinstance(v, dict) and len(v) == 1:
-        k, x = next(iter(v.items()))
-        if k in ("$numberInt", "$numberLong", "$numberDouble", "$numberDecimal"):
-            return Decimal(str(x))
-        if k == "$date" and isinstance(x, dict):
-            return _unwrap(x)
-        if k == "$date" and isinstance(x, str):
-            return Decimal(int((datetime.fromisoformat(x.replace("Z", "+00:00")) - datetime(1970, 1, 1, tzinfo=timezone.utc)).total_seconds() * 1000))
-        if k in ("$date", "$oid", "$binary"):
-            return json.dumps(x)
-    if isinstance(v, (int, float)) and not isinstance(v, bool):
-        return Decimal(repr(v))
-    return json.dumps(v) if isinstance(v, (dict, list)) else v
-
-
-def mongo_doc_verdict(doc: dict, n: int) -> list[tuple[str, str]]:
-    """(class, detail) for every field of document n that the delivered JSON dropped or changed."""
-    bad = []
-    full = n <= len(MONGO_IDS)
-    for f, (_, exp) in MONGO_FIELDS.items():
-        if not full:
-            break
-        if f not in doc or doc[f] is None:
-            bad.append((NULLED, f"{f} missing or null"))
-            continue
-        got = _unwrap(doc[f])
-        if isinstance(exp, Decimal):
-            e, g = exp, _num(got)
-            tol = abs(e) * Decimal(2) ** -51 if f.startswith("dbl") else Decimal(0)
-            if g is None or abs(g - e) > tol:
-                bad.append((WRONG, f"{f}: {exp} -> {got!r}"))
-        elif exp not in (got if isinstance(got, str) else str(got)):
-            bad.append((WRONG, f"{f}: {exp!r} -> {got!r}"))
-    return bad
 
 
 MONGO_COLUMNS = frozenset(["_id", "document"])
@@ -887,6 +849,8 @@ MONGO_COLUMNS = frozenset(["_id", "document"])
 
 def grade_mongo(cell: str, p: core.Proc, check: core.Proc, out: Path, fmt: str, column: str, target: str, n_docs: int, reader=None) -> Result:
     """Grade one Mongo cell: coded refusal, or every document delivered whole in exactly the `_id` and `document` columns and the override honoured."""
+    from . import type_matrix as tm
+
     stop = grade_stop(cell, p, check)
     if stop:
         return stop
@@ -915,7 +879,7 @@ def grade_mongo(cell: str, p: core.Proc, check: core.Proc, out: Path, fmt: str, 
         if doc is None:
             bad.append((NULLED, "document delivered NULL or unreadable"))
             continue
-        bad += mongo_doc_verdict(doc, int(_unwrap(doc.get("n"))))
+        bad += tm.mongo_grid_verdict(r["document"], int(doc["n"])) if "n" in doc else [(NULLED, "document lost its n")]
     if bad:
         klass = NULLED if any(k == NULLED for k, _ in bad) else WRONG
         return Result(cell, DELIVERED, klass, f"{len(bad)} fields: {[d for _, d in bad][:3]}")
@@ -1011,7 +975,7 @@ def summary(engine: str, results: list[Result]) -> dict[str, list[Result]]:
     """The results grouped by failure class; the empty key holds the cells that passed."""
     out: dict[str, list[Result]] = {k: [] for k in ("", NOT_GRADED, *FAIL_CLASSES)}
     for r in results:
-        out[r.klass].append(r)
+        out.setdefault(r.klass, []).append(r)
     return out
 
 
@@ -1105,9 +1069,7 @@ def self_test() -> None:
     assert {"decimal(18,-2)", "decimal(60,-2)"} <= set(ax["targets"]) and negative_scale_targets("fn parse_decimal_params let scale: u8 =") == []
     assert compare("mysql", "-2147483648", "int", "decimal(18,-2)", Decimal("-2147483600")) == WRONG, "a negative scale rounds away digits"
     assert compare("mysql", "-2147483600", "int", "decimal(18,-2)", Decimal("-2147483600")) == "OK"
-    assert _zero_dates("mysql", "DATE") == ["'0000-00-00'", "'2026-00-00'"] and _zero_dates("postgres", "DATE") == []
-    assert _zero_dates("mysql", "TIMESTAMP(6)") == ["'0000-00-00 00:00:00'"] and len(_zero_dates("mysql", "DATETIME(3)")) == 2
-    assert all(ZERO_DATE_LIT.fullmatch(v) for v in _zero_dates("mysql", "DATETIME")) and not ZERO_DATE_LIT.fullmatch("'2026-11-01 00:00:00'")
+    assert ZERO_DATE_LIT.fullmatch("'0000-00-00'") and ZERO_DATE_LIT.fullmatch("'2026-00-15 00:00:00'") and not ZERO_DATE_LIT.fullmatch("'2026-11-01 00:00:00'")
     assert parse_lit("mysql", "NULL") is None and parse_lit("oracle", "''") is None and parse_lit("mysql", "''") == ""
     assert parse_lit("mysql", "-5") == Decimal(-5) and parse_lit("mysql", "'a''b'") == "a'b" and parse_lit("postgres", "TRUE") is True
     assert parse_lit("mysql", "UNHEX('00')") == b"\0" and parse_lit("mysql", "JSON_OBJECT('a',1)") is ...
@@ -1117,10 +1079,10 @@ def self_test() -> None:
     harmed = Result("c", DELIVERED, NULLED, "1 non-NULL value delivered as NULL")
     assert integrity("c", _proc(0), harmed).klass == BLIND and integrity("c", _proc(3, "[RIVET_VALIDATE_CHECKSUM]"), harmed).klass == ""
     sib = {c.native: c for c in columns("mysql")}
-    assert {"TIME(1)", "TIME(3)", "TIME(5)"} <= set(sib) and "'-00:00:00.5'" in sib["TIME(1)"].lits and "'-00:00:00.555'" in sib["TIME(3)"].lits
+    assert {"TIME(1)", "TIME(3)", "TIME(5)"} <= set(sib) and "'12:34:56.5'" in sib["TIME(1)"].lits and "'-00:00:00.5'" not in sib["TIME(1)"].lits, "a refused edge is not seeded into the override grid"
     hostile = next(c for n, c in sib.items() if "\U0001F600" in n)
     assert {parse_lit("mysql", v) for v in hostile.lits} >= {"a\\b", "l\nf", "c\rr", "n\0l", "\U0001F600"}, hostile.lits
-    assert "'12abc'" in edge_literals("mysql", "TEXT", "Utf8") and "' 42'" in edge_literals("mysql", "TEXT", "Utf8")
+    assert "'12abc'" in next(c for c in columns("mysql") if c.native == "TEXT").lits
     assert compare("mysql", "NULL", "int", "float4", None) == "OK"
     assert compare("mysql", "7", "int", "float4", None) == NULLED, "a non-NULL value delivered as NULL is the harm of the MySQL int->float override"
     assert compare("mysql", "7", "int", "float4", "", csv=True) == NULLED and compare("mysql", "''", "text", "none", "", csv=True) == "OK"
@@ -1140,6 +1102,9 @@ def self_test() -> None:
     assert compare("postgres", "'2019-02-03 08:07:06.554433+05'", "other", "none", "2019-02-03 08:07:06.554433", native="TIMESTAMPTZ") == WRONG, "an offset dropped on the way"
     assert compare("mssql", "'2026-06-23 10:00:00 +05:30'", "other", "none", "2026-06-23 04:30:00+00", native="DATETIMEOFFSET") == "OK"
     assert compare("mysql", "'14:30:00.123456'", "other", "none", dtime(14, 30, 0, 123456), native="TIME(6)") == "OK"
+    assert compare("mssql", "'23:59:59.9999999'", "other", "none", dtime(23, 59, 59, 999999), native="TIME(7)") == WRONG, "the 100 ns digit dropped"
+    assert compare("mssql", "'2000-01-01 00:00:00.1234567'", "other", "none", "2000-01-01 00:00:00.123456700", native="DATETIME2") == "OK"
+    assert compare("mssql", "'2000-01-01 00:00:00.1234567'", "other", "none", "2000-01-01 00:00:00.123456", native="DATETIME2") == WRONG
     assert compare("mysql", "'-00:00:00.5'", "other", "none", dtime(0, 0, 0, 500000), native="TIME(1)") == WRONG, "a negative time delivered positive"
     assert compare("mysql", "'-00:00:00.5'", "other", "text", "-00:00:00.5", native="TIME(1)") == "OK"
     assert compare("oracle", "TO_DATE('0001-01-01','YYYY-MM-DD')", "other", "none", datetime(1, 1, 1), native="DATE") == "OK"
@@ -1151,7 +1116,15 @@ def self_test() -> None:
     assert compare("postgres", "'{\"n\":1}'::jsonb", "other", "none", '{"n":2}', native="JSONB") == WRONG
     assert compare("mssql", "'12345678-1234-1234-1234-123456789012'", "other", "none", UUID("12345678-1234-1234-1234-123456789012"), native="UNIQUEIDENTIFIER") == "OK"
     assert compare("mssql", "0xAB", "other", "none", b"\xab\0\0", native="BINARY(8)") == "OK" and compare("mysql", "0xDEADBEEF", "other", "none", b"\xde\xad", native="VARBINARY(4)") == WRONG
-    assert compare("postgres", "ARRAY[1, NULL, 3]", "other", "none", [1, None, 3], native="INTEGER[]") == "PRESENCE"
+    assert pg_array_elements("'{a,\"b,c\",NULL}'", "text") == ["'a'", "'b,c'", "NULL"] and pg_array_elements("ARRAY[1, NULL]::int[]", "int") == ["1", "NULL"]
+    assert pg_array_elements("'{{1,2},{3}}'", "int") is None and pg_array_elements("'{}'", "int") == []
+    arr = lambda lit, got, nat="INTEGER[]": compare("postgres", lit, "other", "none", got, native=nat)
+    assert compare("postgres", "'12345678-1234-1234-1234-123456789012'", "other", "none", bytes.fromhex("12345678123412341234123456789012"), native="UUID") == "OK"
+    assert compare("postgres", "'12345678-1234-1234-1234-123456789012'", "other", "none", bytes.fromhex("78563412123412341234123456789012"), native="UUID") == WRONG
+    assert arr("'{1,NULL,3}'", [1, None, 3]) == "OK" and arr("'{1,NULL,3}'", [1, 0, 3]) == WRONG and arr("'{1,NULL,3}'", [1, None]) == WRONG
+    assert arr("'{1,2}'", [1, None]) == NULLED and arr("'{1}'", None) == NULLED and arr("'{}'", []) == "OK"
+    assert arr("'{a,b}'", [b"a", b"b"], "TEXT[]") == "OK" and arr("'{2020-01-01}'", ["2020-01-01"], "DATE[]") == "OK"
+    assert arr("'{1.5,NaN,-Infinity}'", [1.5, "nan", "-inf"], "REAL[]") == "OK" and arr("'{1.5,NaN}'", [1.5, 0.0], "REAL[]") == WRONG
     assert compare("oracle", "-0.000000000000000000000000000000000000001", "decimal", "float4", -1.0000002153053333e-39) == "OK", "a float4 subnormal rounds at its own step"
     assert compare("mysql", "12345.6789", "decimal", "none", "31323334352e36373839") == WRONG, "text read as a number with a 36-million exponent"
     assert compare("mysql", "12345.6789", "decimal", "binary", "31323334352e36373839", csv=True, native="DECIMAL(18,4)") == "OK", "a binary override writes the hex of the value text to CSV"
@@ -1160,12 +1133,18 @@ def self_test() -> None:
     assert compare("mysql", "1e2000000", "decimal", "none", "2e2000000") == WRONG and compare("mysql", "1e2000000", "decimal", "none", "1e2000000") == "OK"
     assert compare("mysql", "1.5", "float", "float8", "NaN") == WRONG and compare("mysql", "1.5", "float", "float8", "Infinity") == WRONG
     assert tolerance("int", "float4", Decimal(2 ** 24)) == Decimal(2) and tolerance("int", "int8", Decimal(5)) == 0
-    assert _int_range("TINYINT") == (-128, 127) and _int_range("INT UNSIGNED") == (0, 2 ** 32 - 1) and _int_range("NUMBER(9)") == (-999999999, 999999999)
-    assert "-128" in edge_literals("mysql", "TINYINT", "Int8") and "128" not in edge_literals("mysql", "TINYINT", "Int8")
-    assert "99999999.99" in edge_literals("mysql", "DECIMAL(10,2)", "Decimal128(10, 2)")
-    assert "214748.3647" in edge_literals("mssql", "SMALLMONEY", "Decimal128(19, 4)") and "1e300d" in edge_literals("oracle", "BINARY_DOUBLE", "Float64")
-    assert "''" in edge_literals("mysql", "VARCHAR(10)", "Utf8") and "''" not in edge_literals("oracle", "VARCHAR2(10)", "Utf8")
-    assert edge_literals("postgres", "TIMESTAMP[]", "List") == [] and edge_literals("postgres", "DATE", "Date32")[0] == "'0001-01-01'"
+    syn = {"native_type": "INT", "delivery": "Int32", "sample": ["1"], "edges": ["2", {"v": "3", "x": "refuse:RIVET_X@extract"}, {"v": "4", "bigquery": "BOOL_COLLAPSE!form:true"}]}
+    grp = row_cols("mysql", 0, syn)
+    assert grp.lits == ("1", "2", "4") and grp.edges[2].defect == "BOOL_COLLAPSE", grp
+    grp = row_cols("mysql", 1, {**syn, "refuses": "refuse:RIVET_Y@extract"})
+    assert grp.lits == ("1", "2", "3", "4") and grp.refuses.code == "RIVET_Y", "a refused row keeps every edge in its one column"
+    assert te.parse_verdict("TRUNC!form:1.5").defect == "TRUNC" and te.parse_verdict("refuse:C", te.LOAD).stage == te.LOAD
+    for bad_verdict in ("", "exactly", "refuse:", "refuse:c@extract", "refuse:C@plan", "X1!exact"):
+        try:
+            te.parse_verdict(bad_verdict)
+            raise SystemExit(f"verdict {bad_verdict!r} parsed")
+        except ValueError:
+            pass
     ok, no_check = _proc(0), _proc(0)
     assert grade_stop("c", ok, no_check) is None
     assert grade_stop("c", _proc(101, "thread panicked"), no_check).klass == CRASH
@@ -1210,13 +1189,7 @@ def self_test() -> None:
     assert "C00" in config("oracle", "U", "incremental", "parquet", "c00", "int8", "o") and "cursor_column: ID" in config("oracle", "U", "incremental", "parquet", "c00", "none", "o")
     refused = grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] x"), _proc(2))
     assert refused.klass == "" and refused.verdict == REFUSED and refused.code == "RIVET_SOURCE_VALUE_UNREPRESENTABLE"
-    doc = {f"f{i}": 1 for i in range(1)}
-    assert not mongo_doc_verdict({**{f: _wire(e) for f, (_, e) in MONGO_FIELDS.items()}, "nul": None, "n": 1}, 1)
-    dropped = {**{f: _wire(e) for f, (_, e) in MONGO_FIELDS.items()}, "nul": None}
-    dropped["i64_max"] = None
-    assert [k for k, _ in mongo_doc_verdict(dropped, 1)] == [NULLED]
-    dropped["i64_max"] = {"$numberLong": "9223372036854775806"}
-    assert [k for k, _ in mongo_doc_verdict(dropped, 1)] == [WRONG] and not mongo_doc_verdict({"nul": None}, 5) and doc
+    mongo_ran = _mongo_grader_self_test()
     cols = [Col("c00", "INT", "Int32", "int", ("1", "2")), Col("c01", "TEXT", "Utf8", "text", ("'a'",)), Col("c02", "BIGINT", "Int64", "int", ("3",))]
     smoke, full = grid("mysql", cols, "smoke"), grid("mysql", cols, "full")
     pair = lambda units: {(c.name, t) for c, t, _, _ in units}
@@ -1287,14 +1260,27 @@ def self_test() -> None:
         assert grade_run("mysql", "x", _proc(0), _proc(0), "exact", Path(t), "csv", col1, 1, "none", ["7"], reader=crasher).klass == NOT_GRADED
         assert grade_run("mysql", "x", _proc(0), _proc(0), "exact", Path(t), "csv", col1, 1, "none", ["7"], reader=liar).klass == "", "a liar reader is caught by the canary, not by one cell"
     ran = _reader_self_test()
-    print(f"self-test ok: {len(ax['targets'])} override targets, {len(ax['modes'])} modes, grader classes fire on their harm; second reader {'ran' if ran else 'NOT RUN (no pyarrow or duckdb)'}")
+    print(f"self-test ok: {len(ax['targets'])} override targets, {len(ax['modes'])} modes, grader classes fire on their harm; second reader {'ran' if ran else 'NOT RUN (no pyarrow or duckdb)'}; mongo grader {'ran' if mongo_ran else 'NOT RUN (no pymongo)'}")
 
 
-def _wire(exp) -> object:
-    """The extended-JSON shape of one expected seed value."""
-    if isinstance(exp, Decimal):
-        return {"$numberLong": str(exp)} if exp == exp.to_integral_value() and abs(exp) < 2 ** 63 else {"$numberDecimal": str(exp)}
-    return exp
+def _mongo_grader_self_test() -> bool:
+    """Grade dropped and changed fields of the Mongo grid through BSON relaxed JSON; False when pymongo is not installed."""
+    try:
+        from bson import json_util
+    except ImportError:
+        return False
+    from . import type_matrix as tm
+
+    docs, want = tm.mongo_grid()
+    wired = lambda d: json_util.dumps(d, json_options=json_util.RELAXED_JSON_OPTIONS)
+    first = next(k for k in want if "double" in {c.native for c, _, _ in want[k].values()})
+    name, (col, _, _) = next((x, y) for x, y in want[first].items() if y[0].native == "double")
+    assert tm.mongo_grid_verdict(wired({"n": len(docs)}), len(docs)) == [], "the sparse document owes nothing"
+    lost = {k: v for k, v in docs[first - 1].items() if k != name}
+    assert (NULLED, True) in {(c, d.startswith("double[")) for c, d in tm.mongo_grid_verdict(wired(lost), first)}, "a field the delivered document dropped"
+    changed = tm.mongo_grid_verdict(wired({**lost, name: "changed"}), first)
+    assert (WRONG, True) in {(c, d.startswith("double[")) for c, d in changed}, "a field delivered as another value"
+    return True
 
 
 def _reader_self_test() -> bool:

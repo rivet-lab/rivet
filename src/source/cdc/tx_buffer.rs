@@ -1,14 +1,4 @@
 //! A buffered source transaction and its overflow, in one place for every engine that buffers.
-//!
-//! An adapter frames its transactions (PostgreSQL BEGIN…COMMIT, a MySQL XID, a SQL
-//! Server `__$start_lsn` run) and hands each row to a [`TxBuffer`]. The buffer owns
-//! the rest: the memory cap, spill to `RIVET_CDC_SPILL_DIR` or refuse naming the
-//! cap, closing the in-memory head so only the transaction's LAST row is
-//! `committed`, and replaying the spilled tail in order ([`replay`]).
-//!
-//! Oracle does not use the buffer: a commit SCN's rows are re-ordered by
-//! `(transaction, SEQUENCE#)` only once the whole group is read, so no prefix of
-//! it can be released as a head. It shares the cap and keeps the refusal.
 
 use std::fmt::Display;
 use std::path::PathBuf;
@@ -33,8 +23,6 @@ struct Terms {
 
 /// The operator's words for `engine`'s buffer.
 fn terms(engine: CdcEngine) -> Terms {
-    // A claim in a product message is a testable claim: SQL Server's buffer is a
-    // poll BATCH and Oracle's a commit SCN, never "a single transaction".
     let (tag, subject, unit, label) = match engine {
         CdcEngine::Postgres => ("pg", "a single transaction", "transaction", "pg-tx"),
         CdcEngine::Mysql => ("mysql", "a single transaction", "transaction", "mysql-tx"),
@@ -52,7 +40,6 @@ fn terms(engine: CdcEngine) -> Terms {
         ),
         CdcEngine::Mongo => ("mongo", "a single transaction", "transaction", "mongo-tx"),
     };
-    // A slot peek does not consume, so PostgreSQL re-reads an un-acked transaction.
     let repeats = match engine {
         CdcEngine::Postgres => {
             " Expect this line once per peek until the sink acks past the commit: a \
@@ -70,7 +57,7 @@ fn terms(engine: CdcEngine) -> Terms {
     }
 }
 
-/// The buffered-transaction memory backstop at `(row, byte)` caps; the refusal names the cap, why, and the way out.
+/// The buffered-transaction memory backstop at `(row, byte)` caps.
 pub(crate) fn check_tx_buffer_caps(
     engine: CdcEngine,
     rows: usize,
@@ -92,8 +79,6 @@ pub(crate) fn check_tx_buffer_caps(
     if bytes > byte_cap {
         crate::rivet_bail!(
             crate::error::codes::SOURCE_CDC_TRANSACTION_TOO_LARGE,
-            // Resident cost, not payload: ~2.8M narrow rows cross 2 GiB with no large
-            // value anywhere, so the message must not send anyone hunting big cells.
             "{tag} cdc: {subject} needs more than {byte_cap} bytes of buffer \
              memory — it must be buffered whole (a transaction is never split \
              across parts), so this would exhaust memory. The estimate is resident \
@@ -105,7 +90,7 @@ pub(crate) fn check_tx_buffer_caps(
     Ok(())
 }
 
-/// One engine's in-flight transaction (or SQL Server poll batch): an in-memory head and, past the cap, a tail on disk.
+/// One engine's in-flight transaction (or SQL Server poll batch).
 pub(crate) struct TxBuffer {
     engine: CdcEngine,
     spill_dir: Option<PathBuf>,
@@ -145,7 +130,7 @@ impl TxBuffer {
         }
     }
 
-    /// Buffer `ev`, or append `record(&ev)` to the spill once a cap was crossed; `at` names the source position for the log.
+    /// Buffer `ev`, or append `record(&ev)` to the spill once a cap was crossed.
     pub(crate) fn push(
         &mut self,
         ev: ChangeEvent,
@@ -162,9 +147,6 @@ impl TxBuffer {
         else {
             return Ok(());
         };
-        // No directory named ⇒ the cap keeps its meaning and REFUSES: spilling does not
-        // bound memory end to end (the sink still holds the transaction), so it must not
-        // silently replace a guard that does.
         let Some(dir) = self.spill_dir.as_deref() else {
             return Err(cap);
         };
@@ -205,10 +187,7 @@ impl TxBuffer {
             TxnFramer::close_group(&mut head, commit);
             return Ok((head, None));
         };
-        // The transaction's last row is on DISK, so the head must not close it.
         TxnFramer::close_head_of_group(&mut head, commit, sp.len());
-        // `warn`: the default level hides `info`, and the split is the only externally
-        // visible proof that memory was bounded (the delivered rows are identical).
         log::warn!(
             "{}",
             split_line(self.engine, at, head.len(), sp.len(), sp.bytes())
@@ -225,7 +204,6 @@ impl TxBuffer {
     ) -> Result<(Vec<ChangeEvent>, Option<SpooledTail>)> {
         let mut head = std::mem::take(&mut self.head);
         self.bytes.reset();
-        // Seal the tail FIRST: its first row says whether the head's last group continues on disk.
         let tail = match self.spill.take() {
             None => None,
             Some(sp) => {
@@ -275,7 +253,7 @@ fn split_line(engine: CdcEngine, at: &dyn Display, head: usize, tail: usize, byt
     )
 }
 
-/// Does the head's group continue onto the tail? Only the last can: spilled rows follow every buffered one.
+/// Does the head's group continue onto the tail?
 fn head_group_continues_on_disk(
     group: &Position,
     is_last_head_group: bool,
@@ -348,7 +326,6 @@ mod tests {
             before: None,
             after: Some(vec![RivetValue::Int(id)]),
             position: Position::new(json!({ "lsn": lsn })),
-            // Poisoned: the close has to CLEAR it, not merely leave it.
             committed: true,
             image_names: None,
             seq: 0,
@@ -545,7 +522,6 @@ mod tests {
                 (1, "a".into(), false),
                 (2, "a".into(), true),
                 (3, "b".into(), true),
-                // `c` continues on disk: closing it in memory would ack mid-transaction.
                 (4, "c".into(), false),
                 (5, "c".into(), true),
                 (6, "d".into(), true),

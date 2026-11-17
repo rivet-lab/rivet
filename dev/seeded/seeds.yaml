@@ -5950,7 +5950,7 @@ seeds:
         switch: mysql-zero-date-count-misses-a-class
         cells:
           - "lib:nulled_dates_counts_zero_and_partial_dates_per_column"
-          - "lib:unparsable_text_and_a_zero_date_stay_null"
+          - "lib:unparsable_text_is_refused_by_code_and_a_zero_date_stays_null"
           - "lib:mysql_cell_fixes_convert_the_wire_shapes_the_binlog_delivers"
       postgres:
         na: "a MySQL zero date has no counterpart on PostgreSQL: its date types refuse the value or hold no such sentinel (property_no_silent_null grades it on MySQL only)"
@@ -6011,6 +6011,25 @@ seeds:
       oracle:
         switch: cursor-nullability-claimed-without-the-table-catalog
         cells: [an_expression_over_a_not_null_cursor_delivers_once_oracle]
+      mongo:
+        na: "a MongoDB export has no incremental cursor_column: mode full only"
+
+  - name: cursor-nullability-not-traced-to-its-source-column
+    class: "a cursor column's nullability is read by its output name instead of the base column it is a bare reference to, so COALESCE(c, d) AS c over a nullable c is refused as a nullable cursor on SQL Server and Oracle, and a PostgreSQL view over a nullable c is admitted"
+    history: "2026-11-15 - issue 966 residuals of the cursor admission: RED on main (SQL Server and Oracle refused an aliased COALESCE with exit 5; PostgreSQL admitted a view over a nullable column with exit 0)"
+    scope: source
+    engines:
+      postgres:
+        switch: cursor-nullability-not-traced-to-its-source-column
+        cells: [a_view_over_a_nullable_cursor_is_refused_postgres]
+      mysql:
+        na: "the MySQL NOT NULL column flag is exact for an expression and for a view, so no catalog trace is read"
+      mssql:
+        switch: cursor-nullability-not-traced-to-its-source-column
+        cells: [an_aliased_expression_over_a_nullable_column_delivers_mssql]
+      oracle:
+        switch: cursor-nullability-not-traced-to-its-source-column
+        cells: [an_aliased_expression_over_a_nullable_column_delivers_oracle]
       mongo:
         na: "a MongoDB export has no incremental cursor_column: mode full only"
 
@@ -6127,3 +6146,37 @@ seeds:
           - "lib:a_load_keys_a_table_by_default_by_columns_and_not_under_none"
           - "lib:a_per_table_pk_decides_for_its_table_only"
           - "lib:a_mongo_cdc_load_is_keyed_exactly_where_the_id_type_guards_see_a_key"
+
+  - name: url-part-read-raw
+    class: "a hand-parsed connection URL part used as written: the Oracle service name and the SQL Server database kept their %XX bytes (`ORCL%2Edomain`, `Sales%20DB`) and a bracketed IPv6 host with no port was split at its last `:` into host `[:` and port `1]`, so the driver got a name that does not exist or the run was refused"
+    history: "issues #705 and #706, found 2026-11-06 by the airflow-provider hostile-input hunt; RED on pre-0.34.0 2026-11-13 (`mssql url port not a number: 1]`, service `ORCL%2Edomain`); closed by url_text::pct_decode and url_text::split_host_port used by both parsers"
+    scope: source
+    switch: url-part-read-raw
+    engines:
+      postgres:
+        na: "the driver parses the URL: it reads a portless bracketed host and percent-decodes the database itself (lib:the_driver_parsed_engines_read_a_portless_bracketed_host_and_an_encoded_database)"
+      mysql:
+        na: "the driver parses the URL: it reads a portless bracketed host and percent-decodes the database itself (lib:the_driver_parsed_engines_read_a_portless_bracketed_host_and_an_encoded_database)"
+      mssql:
+        cells: [lib:mssql_url_reads_a_portless_bracketed_host_and_decodes_the_database]
+      mongo:
+        na: "the driver parses the URL: it reads a portless bracketed host and percent-decodes the database itself (lib:the_driver_parsed_engines_read_a_portless_bracketed_host_and_an_encoded_database)"
+      oracle:
+        cells: [lib:an_oracle_service_name_is_percent_decoded]
+
+  - name: store-error-detail-unmasked
+    class: "a destination error carried into a validate failure's detail (manifest, `_SUCCESS` or listing read) is printed as the store returned it, so a credential the store put in the error's request URI (an Azure SAS token in `?<token>`) reaches the validate output file and stderr"
+    history: "hosted gate run 43775080610 at 75b6ac21, no_secret_in_output cell postgres/validate/dest:azure:sas_token_env (16 hits in the plain and trace-json output files); RED on main 2026-11-16 (the matrix cell, and lib:a_store_error_in_a_failure_detail_never_carries_a_registered_credential)"
+    scope: destination
+    switch: store-error-detail-unmasked
+    engines:
+      local:
+        na: "a local directory's error text names a path and holds no credential, so no store text carries a secret to mask (the seed edits the verdict every destination shares)"
+      s3:
+        cells: ["lib:a_store_error_in_a_failure_detail_never_carries_a_registered_credential"]
+      gcs:
+        cells: ["lib:a_store_error_in_a_failure_detail_never_carries_a_registered_credential"]
+      azure:
+        cells: ["lib:a_store_error_in_a_failure_detail_never_carries_a_registered_credential"]
+      stdout:
+        na: "stdout writes nothing a validate reads back, so no verification verdict exists for it"

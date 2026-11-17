@@ -19,44 +19,31 @@ pub(crate) use artifact::{
 use crate::error::Result;
 
 /// Column metadata fetched from information_schema.
-///
-/// `Serialize`/`Deserialize` so a real hostile DB's SCHEMA (types + PK shape, no
-/// row data) can be distilled into a checked-in catalog fixture and replayed
-/// offline against the strategy-decision logic (`catalog_replay`) — the messy DB
-/// becomes a regression oracle with zero customer-data exposure.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ColumnInfo {
     pub name: String,
     pub data_type: String,
     pub is_primary_key: bool,
-    /// `true` when the column can be NULL. Epic B / ADR-0007: used for coalesce cursor hints.
+    /// `true` when the column can be NULL.
     pub is_nullable: bool,
     /// Filled for NUMERIC / DECIMAL columns from `information_schema.columns`.
-    /// `None` when not applicable or when precision is unbounded.
     pub numeric_precision: Option<u32>,
     pub numeric_scale: Option<u32>,
     /// `true` when the column is backed by an index (PK, unique, or secondary).
-    /// The density probe (#148/#199) only samples an INDEXED key — MIN/MAX + K
-    /// windowed COUNTs on an UNINDEXED fallback column is up to 51 sequential
-    /// scans of a large table inside `rivet init`. `#[serde(default)]` (false)
-    /// so pre-existing catalog-replay fixtures still parse.
     #[serde(default)]
     pub is_indexed: bool,
-    /// Set when the keyset seam refuses the type the engine delivers this column as; filled from the server at introspection.
+    /// Set when the keyset seam refuses the type the engine delivers this column as.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub not_keyset: bool,
     /// Set by an engine whose run refuses this column as an incremental cursor although its type name reads as one.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub not_cursor: bool,
+    /// 1-based place in the source primary key, read from the source the way `rivet run` records it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_position: Option<u32>,
 }
 
 /// Table metadata used to generate the config scaffold and discovery artifact.
-///
-/// This is the ENTIRE input to the strategy decision (init `suggest_mode` +
-/// keyset/chunk resolution) — schema, catalog stats (`row_estimate`,
-/// `total_bytes`), and column shapes. No row data. So a `Vec<TableInfo>`
-/// serialized from a real DB (anonymized) replays every decision the field hit
-/// (see `catalog_replay`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TableInfo {
     pub schema: String,
@@ -65,11 +52,7 @@ pub(crate) struct TableInfo {
     /// Approximate physical size in bytes (heap + indexes), if available.
     pub total_bytes: Option<i64>,
     pub columns: Vec<ColumnInfo>,
-    /// First-run density probe (#148): when present, `row_estimate` above HAS
-    /// BEEN REPLACED by the sampled figure (the catalog's original lives in
-    /// `probe.catalog_rows`), so every downstream decision stands on the
-    /// measured number automatically. `serde(skip)`: a runtime measurement,
-    /// not part of the replayable catalog shape.
+    /// First-run density probe (#148): when present, `row_estimate` above HAS BEEN REPLACED by the sampled figure (the catalog's original lives in `probe.catalog_rows`), so every downstream decision stands on the measured number automatically.
     #[serde(skip, default)]
     pub density: Option<crate::init::density::DensityProbe>,
     /// The SQL Server CDC capture instance `cdc.change_tables` holds for this table (the newest when two), read at init time.
@@ -81,6 +64,17 @@ pub(crate) struct TableInfo {
 }
 
 impl TableInfo {
+    /// The primary key columns in key order; empty when the source key was not read.
+    pub(crate) fn source_key(&self) -> Vec<&str> {
+        let mut key: Vec<(u32, &str)> = self
+            .columns
+            .iter()
+            .filter_map(|c| c.key_position.map(|p| (p, c.name.as_str())))
+            .collect();
+        key.sort_unstable();
+        key.into_iter().map(|(_, n)| n).collect()
+    }
+
     /// The range-chunk key: the integer PK, else the first INDEXED integer column (an unindexed one makes every window a full scan).
     pub(crate) fn best_chunk_column(&self) -> Option<&str> {
         self.columns
@@ -95,17 +89,9 @@ impl TableInfo {
     }
 
     /// The single-column primary key, if the table has exactly one PK column.
-    ///
-    /// Keyset (`chunk_by_key`) pages by one index-backed unique key of ANY
-    /// orderable type — int, uuid, string, timestamp — so, unlike
-    /// [`best_chunk_column`](Self::best_chunk_column) (integer-only, for range
-    /// chunking), this returns the PK regardless of type. `None` for a composite
-    /// PK (keyset is single-column only) or a table with no PK — those fall back
-    /// to range chunking on an integer column.
     pub(crate) fn single_pk_column(&self) -> Option<&str> {
         let mut pks = self.columns.iter().filter(|c| c.is_primary_key);
         let first = pks.next()?;
-        // A composite PK has no single keyset key — fall back to range.
         if pks.next().is_some() {
             return None;
         }
@@ -113,12 +99,6 @@ impl TableInfo {
     }
 
     /// Best candidate for `cursor_column`: prefer updated_at, then created_at, then any timestamp.
-    /// The cursor column init actually RECORDS and RENDERS — the scored top
-    /// candidate. `best_cursor_column` (name-preference) is kept for MODE
-    /// SELECTION ("is any cursor viable"), where only existence matters; but the
-    /// value written into the YAML and the strategy_snapshot must be ONE picker,
-    /// or the snapshot records a cursor the config does not contain (bug hunt
-    /// 2026-08-08). This is that one picker.
     pub(crate) fn chosen_cursor_column(&self) -> Option<String> {
         crate::init::candidates::cursor_candidates(self)
             .into_iter()
@@ -126,16 +106,7 @@ impl TableInfo {
             .map(|c| c.column)
     }
 
-    /// [`chosen_cursor_column`] RESTRICTED to a timestamp column — for
-    /// `time_window`, whose `time_column` MUST be a timestamp. An integer
-    /// surrogate PK is a valid INCREMENTAL cursor (monotonic ids) and
-    /// `cursor_candidates` scores it as one, so `chosen_cursor_column` can return
-    /// `id` on a timestamp-less table; scaffolding that as a `time_column`
-    /// compares a bigint against a timestamp window at run time — an error on
-    /// PostgreSQL, a silently-empty export on MySQL (bug hunt 2026-08-09). Same
-    /// scoring/order as `chosen_cursor_column` among the timestamp candidates, so
-    /// a table WITH a timestamp gets the same column both modes would; `None`
-    /// (no timestamp) drives the honest REVIEW marker instead of a wrong column.
+    /// [`chosen_cursor_column`] RESTRICTED to a timestamp column.
     pub(crate) fn chosen_time_column(&self) -> Option<String> {
         crate::init::candidates::cursor_candidates(self)
             .into_iter()
@@ -143,10 +114,7 @@ impl TableInfo {
             .map(|c| c.column)
     }
 
-    /// Best candidate for the warehouse PARTITION column: the business date the
-    /// rows are ABOUT, not the stamp that moves when a row changes. The mirror of
-    /// [`best_cursor_column`], which wants the opposite — partitioning by a
-    /// mutation stamp would move a row between partitions on every update.
+    /// Best candidate for the warehouse PARTITION column.
     pub(crate) fn best_partition_column(&self) -> Option<&str> {
         let ts: Vec<&ColumnInfo> = self
             .columns
@@ -179,7 +147,7 @@ impl TableInfo {
             .map(|c| c.name.as_str())
     }
 
-    /// The single-column PK when the keyset seam admits its delivered type; `None` for a composite, absent or refused PK.
+    /// The single-column PK when the keyset seam admits its delivered type.
     pub(crate) fn keysettable_pk_column(&self) -> Option<&str> {
         let pk = self.single_pk_column()?;
         let col = self.columns.iter().find(|c| c.name == pk)?;
@@ -204,18 +172,10 @@ impl TableInfo {
         "full"
     }
 
-    /// One-line rationale for [`suggest_mode`]'s choice — emitted as an
-    /// inline comment in the generated YAML so the operator can see *why*
-    /// chunked / incremental / full was picked, not just *what*. Wording
-    /// stays short because it lives in the YAML directly above `mode:`.
+    /// One-line rationale for [`suggest_mode`]'s choice.
     pub(crate) fn mode_rationale(&self, mode: &str) -> String {
         match mode {
             "chunked" => {
-                // The 100K threshold is `suggest_mode`'s reason, not the only road
-                // to `chunked`: a backfill recipe takes `recipe_mode`, which pages
-                // whenever a usable key exists and never reads the row count. So
-                // "~200 rows ≥ 100K threshold" explained a decision that was not
-                // the one taken (measured on a generated CDC partner shape).
                 let why = if self.row_estimate > 100_000 {
                     "≥ 100K threshold and"
                 } else {
@@ -224,24 +184,10 @@ impl TableInfo {
                 let base = format!(
                     "auto: ~{} rows {why} chunk column '{}' is available",
                     fmt_row_estimate(self.row_estimate),
-                    // Name the REAL chunk key: a keyset table has no chunk_column
-                    // but a keysettable PK — falling back to a phantom 'id' named
-                    // a column that may not exist (roast 2026-08-09, #173).
                     self.best_chunk_column()
                         .or_else(|| self.keysettable_pk_column())
                         .unwrap_or("id"),
                 );
-                // A chunked re-run re-reads the whole table. If a cursor column
-                // exists, point operators at incremental for scheduled re-runs —
-                // the pilot showed a 655k-row table re-dumped 4× in 2 days under
-                // chunked, re-reading ~570k unchanged rows each time.
-                // Gate the incremental SUGGESTION on best_cursor_column
-                // (timestamp-only): incremental on an integer surrogate PK
-                // catches inserts but MISSES updates, so "pulls only changed
-                // rows" would be false advice — only suggest it when a real
-                // timestamp cursor exists (roast 2026-08-09: the incremental
-                // ARM below names chosen_, but this SUGGESTION must stay
-                // timestamp-gated, unlike an actual incremental export).
                 match self.best_cursor_column().filter(|c| is_mutation_stamp(c)) {
                     Some(cursor) => format!(
                         "{base}. NOTE: chunked re-reads the whole table each run — for scheduled \
@@ -253,9 +199,6 @@ impl TableInfo {
             "incremental" => {
                 let on = match self.chosen_cursor_column() {
                     Some(cursor) => format!("incremental on '{cursor}'"),
-                    // No timestamp candidate: do NOT name a phantom `updated_at` —
-                    // the scaffold emits a REVIEW marker here, so the rationale must
-                    // agree (roast 2026-08-09).
                     None => "incremental — set cursor_column manually (no timestamp column \
                              detected)"
                         .to_string(),
@@ -273,11 +216,6 @@ impl TableInfo {
                 }
             }
             "full" => {
-                // full is reached TWO ways: below the 100K threshold, OR above it
-                // with no usable chunk key / cursor column (e.g. a keyless table, or
-                // a Mongo collection whose `_id` isn't surfaced as a chunk key). The
-                // message must say WHICH — claiming "below 100K" on a 150K table is a
-                // false diagnostic that hides the real reason (no key to page by).
                 if let Some(auto) = self.overridden_from(mode) {
                     format!(
                         "~{} rows {}; auto would pick `{auto}`, written as a full scan",
@@ -306,38 +244,18 @@ impl TableInfo {
         (auto != mode).then_some(auto)
     }
 
-    /// Default chunk_size scaled by the row estimate. Goal: keep the
-    /// per-table file count in a humane range (~10–50 files) regardless
-    /// of how large the table is. The previous hard-coded `100_000`
-    /// produced 100 files for a 10 M-row table and 1000+ for 100 M;
-    /// operators read that as noise rather than progress.
+    /// Default chunk_size scaled by the row estimate.
     pub(crate) fn suggest_chunk_size(&self) -> u64 {
         match self.row_estimate {
-            r if r < 1_000_000 => 100_000,     // < 1 M  → up to 10 files
-            r if r < 10_000_000 => 250_000,    // 1–10 M → 4–40 files
-            r if r < 100_000_000 => 1_000_000, // 10–100 M → 10–100 files
-            _ => 2_500_000,                    // ≥ 100 M → 40+ files
+            r if r < 1_000_000 => 100_000,
+            r if r < 10_000_000 => 250_000,
+            r if r < 100_000_000 => 1_000_000,
+            _ => 2_500_000,
         }
     }
 
-    /// Average bytes per row, when the catalog gave us `total_bytes`. The cost
-    /// signal behind parallelism: narrow rows (small value) are CPU-bound on
-    /// row *count* and parallelise on every engine; wide rows already saturate
-    /// a fast engine's sequential scan. `None` when the size is unknown —
-    /// callers then fall back to a row-count-only heuristic.
+    /// Average bytes per row, when the catalog gave us `total_bytes`.
     pub(crate) fn avg_row_bytes(&self) -> Option<i64> {
-        // #148 (roast 2026-08-09): when the density probe CORRECTED row_estimate
-        // (frozen stats), total_bytes is still the FROZEN figure — the ratio
-        // mixes a corrected numerator with a stale denominator and defeats the
-        // wide-row parallelism guard. A probe re-samples rows, not bytes, so the
-        // per-row size is unknown after a correction; report None.
-        // Any method that REPLACED row_estimate from a live re-count (Probed or
-        // Counted) leaves total_bytes on the FROZEN catalog figure — the ratio
-        // mixes a corrected numerator with a stale denominator either way (roast
-        // 2026-08-10: the Probed-only guard left the keyless Counted path exposed,
-        // and frozen TABLE_ROWS/DATA_LENGTH freeze together, the guard's own
-        // premise). CatalogTriaged/CatalogExact/Unverified keep row_estimate, so
-        // the ratio is honest there.
         let probe_corrected = matches!(
             &self.density,
             Some(p) if matches!(
@@ -372,9 +290,7 @@ fn threshold_phrase(rows: i64) -> &'static str {
     }
 }
 
-/// Render a row estimate as a short human-readable string for inline
-/// YAML comments (`"1.0M"`, `"10K"`, `"950"`). Stays compact because the
-/// rationale comment must fit on one line above `mode:`.
+/// Render a row estimate as a short human-readable string for inline YAML comments (`"1.0M"`, `"10K"`, `"950"`).
 fn fmt_row_estimate(rows: i64) -> String {
     if rows >= 1_000_000 {
         format!("{:.1}M", rows as f64 / 1_000_000.0)
@@ -404,7 +320,7 @@ fn is_integer_type(t: &str) -> bool {
     )
 }
 
-/// Whether the type holds only a day or a minute: a strict `>` cursor on it skips every row later inserted in the watermark's day or minute.
+/// Whether the type holds only a day or a minute.
 pub(crate) fn is_coarse_stamp_type(t: &str) -> bool {
     let t = t.to_lowercase();
     t == "date" || t.contains("smalldatetime")
@@ -412,16 +328,10 @@ pub(crate) fn is_coarse_stamp_type(t: &str) -> bool {
 
 fn is_timestamp_type(t: &str) -> bool {
     let t = t.to_lowercase();
-    // `contains("datetime")`, not `== "datetime"`: SQL Server reports `datetime2`,
-    // `datetimeoffset` and `smalldatetime`, none of which the equality admitted —
-    // so the mutation stamp scored zero and the integer PK became the cursor.
     t.contains("timestamp") || t.contains("datetime") || t == "date"
 }
 
-/// A column name folded for the stamp predicates — lowercase, separators dropped — so
-/// `ModifiedDate`, `modified_date` and `MODIFIED_DATE` are one spelling. SQL Server
-/// schemas are PascalCase by convention, and snake_case-only lists took `ModifiedDate`
-/// for a business date: the create-only column became the cursor there.
+/// A column name folded for the stamp predicates.
 fn stamp_key(name: &str) -> String {
     name.chars()
         .filter(|c| *c != '_')
@@ -429,8 +339,7 @@ fn stamp_key(name: &str) -> String {
         .collect()
 }
 
-/// Whether the column name means "when the row came to BE" — the partition key's
-/// first choice, ahead of any other business date.
+/// Whether the column name means "when the row came to BE".
 pub(crate) fn is_creation_stamp(name: &str) -> bool {
     matches!(
         stamp_key(name).as_str(),
@@ -445,11 +354,7 @@ pub(crate) fn is_creation_stamp(name: &str) -> bool {
     )
 }
 
-/// Whether the column name means "this stamp moves when the row CHANGES". The
-/// cursor picker wants one (only a mutation stamp catches updates); the warehouse
-/// partition key must avoid one (a row would hop partitions on every update). One
-/// predicate, because the same two literals were repeated at three sites and the
-/// partition mirror had already drifted from the cursor one.
+/// Whether the column name means "this stamp moves when the row CHANGES".
 fn is_mutation_stamp(name: &str) -> bool {
     matches!(
         stamp_key(name).as_str(),
@@ -614,10 +519,6 @@ pub(super) fn source_type_of(source_url: &str) -> Result<crate::config::SourceTy
 }
 
 /// Default SQL Server schema when the user passes a bare table name.
-/// [`yaml_scaffold::parse_table`] defaults an unqualified table to `public`
-/// (the PostgreSQL default); SQL Server's is `dbo`, so the mssql arm rewrites a
-/// `public` placeholder to `dbo` while honouring any schema the user *did*
-/// qualify (`sales.orders`).
 fn mssql_table_schema(parsed_schema: &str) -> String {
     if parsed_schema == "public" {
         "dbo".to_string()
@@ -627,12 +528,6 @@ fn mssql_table_schema(parsed_schema: &str) -> String {
 }
 
 /// Whole-schema include/exclude filtering for `rivet init` (L1).
-///
-/// Both lists hold simple globs (`*` = any run, `?` = one char); a discovered
-/// table is kept when it matches at least one `include` (or `include` is empty)
-/// **and** matches no `exclude`. `--exclude` therefore wins over `--include`.
-/// No flags ⇒ both empty ⇒ every table kept (the prior behaviour). Applied only
-/// to the whole-schema path; `--table` names one relation explicitly.
 #[derive(Debug, Clone, Default)]
 pub struct TableFilter {
     pub include: Vec<String>,
@@ -660,16 +555,10 @@ impl TableFilter {
     }
 }
 
-/// Minimal shell-style glob over the whole `name` (anchored at both ends):
-/// `*` matches any run (including empty), `?` matches exactly one char, every
-/// other char is literal. Backtracking on `*` is linear-enough for the short
-/// identifiers init deals with — no regex / glob crate dependency (L1 keeps the
-/// matcher in-tree on purpose). Comparison is byte-exact (case-sensitive),
-/// matching how SQL identifiers are returned by the catalog.
+/// Minimal shell-style glob over the whole `name` (anchored at both ends).
 fn glob_match(pattern: &str, name: &str) -> bool {
     let pat: Vec<char> = pattern.chars().collect();
     let txt: Vec<char> = name.chars().collect();
-    // Classic two-pointer wildcard match with a single backtrack anchor for `*`.
     let (mut p, mut t) = (0usize, 0usize);
     let (mut star, mut star_t) = (None, 0usize);
     while t < txt.len() {
@@ -681,7 +570,6 @@ fn glob_match(pattern: &str, name: &str) -> bool {
             star_t = t;
             p += 1;
         } else if let Some(sp) = star {
-            // Backtrack: let the last `*` swallow one more char.
             p = sp + 1;
             star_t += 1;
             t = star_t;
@@ -689,7 +577,6 @@ fn glob_match(pattern: &str, name: &str) -> bool {
             return false;
         }
     }
-    // Consume trailing `*`s (they match the empty remainder).
     while p < pat.len() && pat[p] == '*' {
         p += 1;
     }
@@ -713,9 +600,7 @@ pub struct InitYamlDestination {
     pub gcs_credentials_file: Option<String>,
     pub s3_bucket: Option<String>,
     pub s3_region: Option<String>,
-    /// `--bigquery-project` / `--bigquery-dataset`: when both are given the
-    /// scaffold carries a `load:` block, so the generated config drives the
-    /// warehouse half of the cycle too.
+    /// `--bigquery-project` / `--bigquery-dataset`.
     pub bigquery_project: Option<String>,
     pub bigquery_dataset: Option<String>,
     /// `--clickhouse-url` / `--clickhouse-database`: the same, for a ClickHouse load.
@@ -724,15 +609,13 @@ pub struct InitYamlDestination {
     pub clickhouse_user: Option<String>,
     /// `--snowflake-*`: the same, for a Snowflake load (all five, or none).
     pub snowflake: Option<InitSnowflakeTarget>,
-    /// The `[a-z0-9_]` stem of the `-o` file a CDC scaffold names its slot and `server_id` from, so
-    /// two configs on one cluster never share them; `None` writes the default names (stdout).
+    /// The `[a-z0-9_]` stem of the `-o` file a CDC scaffold names its slot and `server_id` from, so two configs on one cluster never share them.
     pub cdc_name_stem: Option<String>,
     /// `--azure-container` / `--azure-account` / `--azure-endpoint`: an Azure Blob destination.
     pub azure: Option<InitAzureTarget>,
 }
 
-/// The Azure Blob container a scaffold stages in, its storage account, and an explicit endpoint
-/// (Azurite's `http://127.0.0.1:10000/devstoreaccount1`); `None` derives it from the account.
+/// The Azure Blob container a scaffold stages in, its storage account, and an explicit endpoint (Azurite's `http://127.0.0.1:10000/devstoreaccount1`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InitAzureTarget {
     pub container: String,
@@ -803,31 +686,16 @@ impl InitYamlDestination {
 }
 
 /// Entry point for `rivet init`.
-///
-/// With `--table`: introspect one table (optional `schema.table`) and emit one export.
-/// Without `--table`: introspect every table/view in a PostgreSQL schema (default `public`),
-/// a MySQL database (from `--schema` or from the URL path), or a SQL Server schema
-/// (default `dbo`), optionally narrowed by the `--include` / `--exclude` globs in `filter`.
-/// How the DB URL reached `rivet init` — determines which connection form the
-/// scaffold writes so the prescribed next steps (`doctor` / `check` / `run`)
-/// inherit a WORKING connection, instead of always emitting `url_env:
-/// DATABASE_URL` and failing on a variable the user never set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceProvenance {
-    /// `--source <url>`: typed inline. The scaffold keeps the secure
-    /// `url_env: DATABASE_URL` default (it never writes the literal URL into a
-    /// likely-committed file) and the next-steps block reminds the user to
-    /// export it.
+    /// `--source <url>`: typed inline.
     Inline,
-    /// `--source-env <NAME>`: write `url_env: NAME` — the variable the user has
-    /// already exported, so the scaffold connects out of the box.
+    /// `--source-env <NAME>`: write `url_env: NAME`.
     Env(String),
     /// `--source-file <PATH>`: write `url_file: PATH`.
     File(String),
 }
 
-// Thin CLI dispatch shim: each argument maps 1:1 to a `rivet init` flag, so
-// bundling them into a struct would only add indirection for the single caller.
 #[allow(clippy::too_many_arguments)]
 pub fn init(
     source_url: &str,
@@ -839,10 +707,6 @@ pub fn init(
     yaml_destination: InitYamlDestination,
     filter: &TableFilter,
     mode_override: Option<&str>,
-    // `--tls` / `--tls-ca` (#146): the posture for the introspection
-    // connection init itself opens AND the `source.tls:` block the scaffold
-    // records — one value, both uses, so the generated config connects the
-    // same way init just did.
     tls: Option<&crate::config::TlsConfig>,
 ) -> Result<()> {
     yaml_destination.validate()?;
@@ -867,26 +731,17 @@ pub fn init(
             mode_override,
         )?,
         InitFormat::DiscoveryJson => {
-            // Defensive backstop for non-CLI callers; the `rivet init` CLI
-            // already rejects `--discover` together with any cloud flag via
-            // `conflicts_with_all` in main.rs.
             if yaml_destination != InitYamlDestination::default() {
                 eprintln!(
                     "rivet: note: --gcs-bucket / --s3-bucket are ignored for --discover (JSON has no destination)"
                 );
             }
             if mode_override.is_some() {
-                // The discovery artifact reports the DB's shape + a *suggested*
-                // mode; it has no per-export `mode:` to override. Silently
-                // ignoring --mode made `--discover --mode cdc` byte-identical to
-                // `--discover` with no signal.
                 eprintln!(
                     "rivet: note: --mode is ignored for --discover (the artifact reports a suggested_mode, not a chosen one); run without --discover to scaffold a YAML with that mode"
                 );
             }
             (
-                // `--discover` writes a SURVEY, not a config — there is no
-                // strategy decision to record the evidence for.
                 yaml_scaffold::Scaffold {
                     text: init_discovery_json(tls, source_url, table, schema, filter)?,
                     decisions: Default::default(),
@@ -924,9 +779,6 @@ pub fn init(
             if let Some(notice) = decimal_notice(&decisions) {
                 eprintln!("{notice}");
             }
-            // Don't leave the user holding a cold artifact — show the path from
-            // "I have a config" to "I have parquet files". Only for the YAML
-            // scaffold (the discovery JSON isn't runnable).
             if matches!(format, InitFormat::Yaml) && runnable {
                 eprint!(
                     "{}{}",
@@ -936,8 +788,6 @@ pub fn init(
             }
         }
         None => {
-            // stdout stays pure (pipeable); the guidance still reaches the user
-            // on stderr so `rivet init | tee rivet.yaml` isn't a dead end.
             print!("{text}");
             if matches!(format, InitFormat::Yaml) && runnable {
                 eprint!(
@@ -976,10 +826,7 @@ fn no_load_note(d: &yaml_scaffold::ScaffoldDecisions) -> &'static str {
     }
 }
 
-/// The friendly "do this next" ladder printed after a YAML scaffold. For an
-/// inline `--source` URL it leads with a step-0 export reminder, because the
-/// scaffold deliberately writes `url_env: DATABASE_URL` (it never persists the
-/// literal URL) and would otherwise fail on an unset variable.
+/// The friendly "do this next" ladder printed after a YAML scaffold.
 fn next_steps_block(
     path: &str,
     provenance: &SourceProvenance,
@@ -1004,8 +851,6 @@ fn next_steps_block(
          2. rivet check  -c {path}            # column-type & schema report\n  \
          3. rivet run    -c {path} --validate # export, then verify row counts\n"
     ));
-    // A CDC scaffold has no batch plan: `rivet plan` skips every export in it and
-    // stops with "nothing to plan". Its schedule is the run itself.
     if mode == Some("cdc") && has_baseline {
         s.push_str(&format!(
             "\nThe first run anchors the stream and reads every table's baseline (through its \
@@ -1028,10 +873,6 @@ fn next_steps_block(
              rivet apply {path}                       # runs wave-by-wave (parallel where safe)\n"
         ));
     }
-    // A scaffold that names a warehouse has more steps: the extract alone leaves
-    // Parquet in a bucket. The cycle is run -> load -> compact only where the file
-    // gives the tables a base and a buffer; a `full` scaffold's load
-    // OVERWRITES its table every pass and `rivet compact` would only say "skipped".
     if has_load && has_compact {
         s.push_str(&format!(
             "\nThen the warehouse half of the cycle (review `load:` first — its values are guesses):\n  \
@@ -1064,10 +905,7 @@ pub(super) fn table_not_found(qualified: &str) -> anyhow::Error {
     )
 }
 
-/// The "nothing to scaffold" error, filter-aware. When an `--include`/`--exclude`
-/// glob is active, an empty result usually means the globs filtered everything
-/// out (the schema has tables) — blaming `--schema`/privileges then sends the
-/// operator down the wrong path. Point at the filter first.
+/// The "nothing to scaffold" error, filter-aware.
 fn no_tables_error(filter: &TableFilter) -> anyhow::Error {
     if !filter.include.is_empty() || !filter.exclude.is_empty() {
         crate::error::coded(
@@ -1115,9 +953,7 @@ fn cdc_places(
         .collect()
 }
 
-/// Refuse a scaffold whose CDC checkpoint already exists, or whose checkpoint or destination
-/// another config in the same directory names: two streams on one checkpoint each skip what the
-/// other read, and on one destination they mix their runs. Nothing is written.
+/// Refuse a scaffold whose CDC checkpoint already exists, or whose checkpoint or destination another config in the same directory names.
 fn refuse_cdc_names_taken(path: &str, text: &str) -> Result<()> {
     let Ok(mine) = crate::config::Config::from_yaml(text) else {
         return Ok(());
@@ -1188,13 +1024,8 @@ fn refuse_cdc_names_taken(path: &str, text: &str) -> Result<()> {
     Ok(())
 }
 
-/// Write the scaffold to `-o <path>`, naming the path + cause on failure. The
-/// bare `std::fs::write` error ("No such file or directory (os error 2)") named
-/// neither the path nor the operation (dogfood LOW).
+/// Write the scaffold to `-o <path>`, naming the path + cause on failure.
 fn write_config_output(path: &str, text: &str) -> Result<()> {
-    // REFUSE to clobber (round-7): a re-run of init after the operator tuned
-    // the config silently destroyed their work — a bare fs::write with no
-    // exists-check. Scaffolding is regenerable; hand edits are not.
     if std::path::Path::new(path).exists() {
         crate::rivet_bail!(
             crate::error::codes::INIT_CONFIG_EXISTS,
@@ -1211,12 +1042,6 @@ fn write_config_output(path: &str, text: &str) -> Result<()> {
 }
 
 /// Resolve the effective schema for a single `--table`, honoring `--schema`.
-/// `--table schema.name` embeds the schema; `--schema` supplies it when the
-/// table is bare. Returns `(Some(schema), name)` when a schema is known, or
-/// `(None, name)` to let the engine default apply (PG `public`, MSSQL `dbo`).
-/// Both an embedded schema AND a differing `--schema` is a conflict — silently
-/// dropping one let a nonexistent schema look valid (the config for `x.users`
-/// and `--schema x --table users` came out identical to no-schema).
 fn resolve_single_table_schema<'a>(
     table: &'a str,
     schema_flag: Option<&str>,
@@ -1229,17 +1054,12 @@ fn resolve_single_table_schema<'a>(
             "init: --table '{table}' already names schema '{parsed_schema}', but --schema is \
              '{s}' — remove one so they agree"
         ),
-        // Bare `--table` + `--schema`: the flag supplies the schema.
         Some(s) if !has_embedded => Ok((Some(s.to_string()), name)),
-        // Embedded schema (matching or no flag), or no flag at all.
         _ => Ok((has_embedded.then_some(parsed_schema), name)),
     }
 }
 
-/// Introspect one `--table` (single-table init), honoring `--schema`. Shared by
-/// the YAML and discovery-JSON paths so the schema wiring can't drift between
-/// them. For MySQL, `--schema` selects the database via `USE`; for PG/MSSQL it
-/// is the introspection schema (defaulting to `public`/`dbo`).
+/// Introspect one `--table` (single-table init), honoring `--schema`.
 fn introspect_single_table(
     tls: Option<&crate::config::TlsConfig>,
     source_url: &str,
@@ -1262,19 +1082,6 @@ fn introspect_single_table(
         "mysql" => {
             let mut conn = mysql::connect(source_url, tls)?;
             if let Some(db) = eff_schema.as_deref() {
-                // Guard (bughunt HIGH): `--schema` selecting a DIFFERENT database
-                // than the URL would introspect THAT db (via USE), but the
-                // scaffold connects through the URL and emits an UNQUALIFIED
-                // `table:` — so `rivet run` reads the URL's database instead, a
-                // silent wrong-database export (dbA has a `users` too → wrong
-                // data with dbB-derived columns; else run fails right after init
-                // "verified" it). The config can't carry a cross-db table today,
-                // so refuse: the database belongs in the URL.
-                // Only a genuine CROSS-db mismatch is refused: the URL carries a
-                // db AND it differs from --schema. A db-LESS URL (url_db None) is
-                // the documented "database name if missing from the URL" use —
-                // --schema legitimately provides the db there, so it must NOT bail
-                // (#20 bughunt: `None != Some(db)` wrongly refused it).
                 if let Some(url_db) = mysql::resolve_database_for_listing(source_url, None).ok()
                     && url_db != db
                 {
@@ -1314,23 +1121,15 @@ fn introspect_single_table(
             )?)?
         }
         "mongo" => {
-            // #12 bughunt: --schema was silently ignored for Mongo (the cross-db
-            // guard the SQL engines got was absent), so an operator scoping to a
-            // schema got the URL's database instead. Mongo has no schema namespace
-            // — refuse rather than mislead; the database lives in the URL.
             reject_mongo_schema(schema_flag)?;
             let conn = mongo::connect(source_url, tls)?;
-            // The whole `--table`: a dot is part of a collection name, not a schema.
             mongo::introspect(&conn, table)?
         }
         _ => unreachable!(),
     })
 }
 
-/// MongoDB has no schema namespace (collections live directly in a database), so
-/// an explicit `--schema` cannot be honoured — it was silently ignored, exporting
-/// the URL's database instead of what the operator asked for (#12 bughunt). Refuse
-/// it loudly; the database belongs in the connection URL.
+/// MongoDB has no schema namespace (collections live directly in a database), so an explicit `--schema` cannot be honoured.
 fn reject_mongo_schema(schema_flag: Option<&str>) -> Result<()> {
     if schema_flag.map(str::trim).is_some_and(|s| !s.is_empty()) {
         crate::rivet_bail!(
@@ -1342,7 +1141,7 @@ fn reject_mongo_schema(schema_flag: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Whether the PostgreSQL server at `source_url` answers that it is in recovery (a standby); an unanswered probe is not one.
+/// Whether the PostgreSQL server at `source_url` answers that it is in recovery (a standby).
 fn pg_in_recovery(source_url: &str, tls: Option<&crate::config::TlsConfig>) -> bool {
     let probe = crate::source::postgres::connect_client(source_url, tls).and_then(|mut c| {
         Ok(c.query_one("SELECT pg_is_in_recovery()", &[])?
@@ -1355,8 +1154,7 @@ fn pg_in_recovery(source_url: &str, tls: Option<&crate::config::TlsConfig>) -> b
     )
 }
 
-#[allow(clippy::too_many_arguments)] // mirrors `init`'s own surface; a params
-// struct here would be a second InitYamlDestination
+#[allow(clippy::too_many_arguments)]
 fn init_yaml(
     tls: Option<&crate::config::TlsConfig>,
     source_url: &str,
@@ -1375,12 +1173,17 @@ fn init_yaml(
             schema,
             probes_mineability(mode_override),
         )?;
-        let snaps = vec![snapshot_of(&info, mode_override, source_url)];
+        let mut infos = vec![info];
+        read_source_keys(&mut infos, source_url, dest, mode_override, |kind| {
+            crate::source::connect(kind, source_url, tls, None)
+        });
+        let info = &infos[0];
+        let snaps = vec![snapshot_of(info, mode_override, source_url)];
         let scaffold =
-            yaml_scaffold::scaffold_table(&info, source_url, provenance, dest, mode_override, tls)?;
+            yaml_scaffold::scaffold_table(info, source_url, provenance, dest, mode_override, tls)?;
         return Ok((scaffold, snaps));
     }
-    let infos = introspect_all(
+    let mut infos = introspect_all(
         tls,
         source_url,
         schema,
@@ -1390,6 +1193,9 @@ fn init_yaml(
     if infos.is_empty() {
         return Err(no_tables_error(filter));
     }
+    read_source_keys(&mut infos, source_url, dest, mode_override, |kind| {
+        crate::source::connect(kind, source_url, tls, None)
+    });
     let label = schema_scope_label(source_url, schema, infos.len())?;
     let scaffold = yaml_scaffold::scaffold_schema(
         &infos,
@@ -1408,16 +1214,7 @@ fn init_yaml(
 }
 
 /// The decision plus the EVIDENCE it was made from, for the state store.
-///
-/// Every field here is something `init` already read from the catalog to make
-/// the choice; before this they were discarded the moment the YAML was written.
-/// MSSQL's `sys.partitions` row counts are near-exact by construction —
-/// no probe needed; the snapshot still SAYS where the number came from (#148).
 fn mark_mssql_catalog_exact(info: &mut TableInfo) {
-    // #148 (roast 2026-08-09): sys.partitions yields 0 for a VIEW or when
-    // stats are unavailable — a documented UNKNOWN, not an exact count. Stamping
-    // `catalog-exact` on a 0 turns "unknown" into an audited "exactly 0 rows".
-    // Only a positive figure is genuinely catalog-exact; 0 is unverified.
     let method = if info.row_estimate > 0 {
         crate::init::density::EstimateMethod::CatalogExact
     } else {
@@ -1673,8 +1470,6 @@ fn scan_tables(
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .unwrap_or("public");
-            // One connection for the whole scan — a fresh client per table
-            // would mean N+1 TCP+auth(+TLS) handshakes on large schemas.
             let mut client = postgres::connect(source_url, tls)?;
             let names = retain_filtered(
                 catalog_order(postgres::list_tables(&mut client, sch)?),
@@ -1693,15 +1488,6 @@ fn scan_tables(
         }
         "mysql" => {
             let db = mysql::resolve_database_for_listing(source_url, schema)?;
-            // Guard (bughunt MED, sibling of the single-table HIGH): whole-schema
-            // MySQL lists tables from `db` (which honors --schema) but introspects
-            // via DATABASE() (the URL's db) — and the generated config connects
-            // through the URL, so a --schema pointing at a DIFFERENT database
-            // lists/describes one db and exports another. Refuse: the database
-            // belongs in the URL, which the config actually uses.
-            // Refuse only a genuine CROSS-db mismatch (URL carries a db AND it
-            // differs). A db-LESS URL + --schema is the documented "database name
-            // if missing from the URL" use and must be allowed (#20 bughunt).
             if schema.map(str::trim).is_some_and(|s| !s.is_empty())
                 && let Some(url_db) = mysql::resolve_database_for_listing(source_url, None).ok()
                 && url_db != db
@@ -1713,8 +1499,6 @@ fn scan_tables(
                      the URL's database, not '{db}'. Put the database in the URL instead (mysql://…/{db})."
                 );
             }
-            // One pooled connection for the whole scan — a fresh Pool per
-            // table would mean N+1 TCP+auth(+TLS) handshakes on large schemas.
             let mut conn = mysql::connect(source_url, tls)?;
             let names = retain_filtered(catalog_order(mysql::list_tables(&mut conn, &db)?), filter);
             let mut out = Vec::with_capacity(names.len());
@@ -1731,8 +1515,6 @@ fn scan_tables(
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .unwrap_or("dbo");
-            // One connection for the whole scan — `MssqlSource` owns its runtime
-            // and block_on's each query, so reusing it avoids N+1 TLS logins.
             let mut conn = mssql::connect(source_url, tls)?;
             let names = retain_filtered(catalog_order(mssql::list_tables(&mut conn, sch)?), filter);
             let mut out = Vec::with_capacity(names.len());
@@ -1776,17 +1558,13 @@ fn scan_tables(
     }
 }
 
-/// The tables a catalog listed, in rivet's own order (byte order of the name): a catalog's order
-/// is its collation's (SQL Server's is case-insensitive) or none at all (MongoDB's
-/// `listCollections`), and the scaffold must not differ between two inits of one database.
+/// The tables a catalog listed, in rivet's own order (byte order of the name).
 fn catalog_order(mut names: Vec<String>) -> Vec<String> {
     names.sort_unstable();
     names
 }
 
-/// Keep only the discovered table names the `--include` / `--exclude` globs
-/// admit (L1). A no-op when both lists are empty (the default), so the
-/// whole-schema scan is unchanged unless the operator asked to narrow it.
+/// Keep only the discovered table names the `--include` / `--exclude` globs admit (L1).
 fn retain_filtered(mut names: Vec<String>, filter: &TableFilter) -> Vec<String> {
     names.retain(|n| filter.matches(n));
     names
@@ -1822,7 +1600,6 @@ fn schema_scope_label(source_url: &str, schema: Option<&str>, n: usize) -> Resul
             format!("Oracle schema \"{owner}\" ({n} {obj})")
         }
         "mongo" => {
-            // Database name from the URL path: mongodb://[user@]host[:port]/<db>[?opts]
             let db = source_url
                 .split_once("://")
                 .and_then(|(_, rest)| rest.split('/').nth(1))
@@ -1835,10 +1612,7 @@ fn schema_scope_label(source_url: &str, schema: Option<&str>, n: usize) -> Resul
     })
 }
 
-/// A `RIVET_STATE_URL` the operator set must answer before `init` writes a config for it:
-/// every run of that config opens that state, and the primary keys `init` records there
-/// are what `rivet load` keys a `query:` export by. The SQLite default beside the config
-/// needs no such check, since writing the config proves the directory takes files.
+/// A `RIVET_STATE_URL` the operator set must answer before `init` writes a config for it.
 fn require_explicit_state(config_path: &str, server_named: bool) -> Result<()> {
     if server_named {
         crate::state::StateStore::probe(config_path).map_err(|e| {
@@ -1850,17 +1624,7 @@ fn require_explicit_state(config_path: &str, server_named: bool) -> Result<()> {
     Ok(())
 }
 
-/// Persist the shape each strategy was chosen from, into the state store the
-/// runs will use — the one beside the config just written.
-///
-/// Best-effort and NEVER fatal: `init`'s product is the config, and a scaffold
-/// that fails because an audit row could not be written would be trading the
-/// thing the user asked for against a convenience. A failure is logged at
-/// `debug`, matching how the run path treats its own harm-metric write.
-///
-/// Only on the `-o <path>` route, deliberately: without an output path there is
-/// no config, so there is no `.rivet_state.db` beside one and nowhere the run
-/// would later look. Printing a scaffold to stdout leaves no trace by design.
+/// Persist the shape each strategy was chosen from, into the state store the runs will use.
 fn record_strategy_snapshots(config_path: &str, snapshots: &[crate::state::StrategySnapshot]) {
     if snapshots.is_empty() {
         return;
@@ -1882,9 +1646,7 @@ fn record_strategy_snapshots(config_path: &str, snapshots: &[crate::state::Strat
     }
 }
 
-/// Record each scaffolded export's source primary key in key order, so `rivet load`
-/// has one for a `query:` export, which `rivet run` cannot read a key from. Connects
-/// with init's own URL: the scaffold's `url_env` is usually unset in this process.
+/// Record each scaffolded export's source primary key in key order, so `rivet load` has one for a `query:` export, which `rivet run` cannot read a key from.
 fn record_primary_keys(
     config_path: &str,
     source_url: &str,
@@ -1951,6 +1713,91 @@ fn record_primary_keys(
     }
 }
 
+/// Does any table of this scaffold become an incremental `query:` export loaded into a warehouse, so its key is worth reading?
+fn source_keys_wanted(
+    infos: &[TableInfo],
+    dest: &InitYamlDestination,
+    mode_override: Option<&str>,
+) -> bool {
+    dest.partition_guess().is_some() && infos.iter().any(|i| key_wanted(i, mode_override))
+}
+
+/// Is this table's export an incremental one?
+fn key_wanted(info: &TableInfo, mode_override: Option<&str>) -> bool {
+    mode_override.unwrap_or_else(|| info.suggest_mode()) == "incremental"
+}
+
+/// Stamp each wanted table's columns with their key position from `fetch`.
+fn record_source_keys(
+    infos: &mut [TableInfo],
+    mode_override: Option<&str>,
+    mut fetch: impl FnMut(&TableInfo) -> Result<Option<Vec<String>>>,
+) -> Vec<String> {
+    let mut unread = Vec::new();
+    for info in infos.iter_mut().filter(|i| key_wanted(i, mode_override)) {
+        match fetch(info) {
+            Ok(Some(key)) => {
+                for (place, name) in key.iter().enumerate() {
+                    if let Some(c) = info.columns.iter_mut().find(|c| &c.name == name) {
+                        c.key_position = u32::try_from(place + 1).ok();
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                log::debug!("init: primary key for '{}' unreadable: {e:#}", info.table);
+                unread.push(info.table.clone());
+            }
+        }
+    }
+    unread
+}
+
+/// The warning that names the tables whose key could not be read, `None` when every read worked.
+fn unread_keys_notice(unread: &[String]) -> Option<String> {
+    (!unread.is_empty()).then(|| {
+        format!(
+            "init: source primary key not read for {} table(s) — their incremental exports carry no `load: pk:`; declare `pk: [..]` in the export's `load:` block before `rivet load`: {}",
+            unread.len(),
+            unread.join(", ")
+        )
+    })
+}
+
+/// Read the source primary key, in key order, of every table whose export will be an incremental `query:` loaded into a warehouse.
+fn read_source_keys(
+    infos: &mut [TableInfo],
+    source_url: &str,
+    dest: &InitYamlDestination,
+    mode_override: Option<&str>,
+    connect: impl FnOnce(crate::config::SourceType) -> Result<Box<dyn crate::source::Source>>,
+) {
+    if !source_keys_wanted(infos, dest, mode_override) {
+        return;
+    }
+    let kind = match source_type_of(source_url) {
+        Ok(k) => k,
+        Err(e) => {
+            log::debug!("init: primary keys not read (unreadable source url): {e:#}");
+            return;
+        }
+    };
+    let mut src = match connect(kind) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("init: source primary keys not read (source unreachable): {e:#}");
+            return;
+        }
+    };
+    let unread = record_source_keys(infos, mode_override, |info| {
+        let schema = (!info.schema.is_empty()).then_some(info.schema.as_str());
+        src.primary_key(&relation_for_key(&kind, schema, &info.table))
+    });
+    if let Some(notice) = unread_keys_notice(&unread) {
+        log::warn!("{notice}");
+    }
+}
+
 /// `schema.table` quoted the way the engine's catalog lookup reads it.
 fn relation_for_key(
     source_type: &crate::config::SourceType,
@@ -1970,6 +1817,150 @@ fn relation_for_key(
 
 #[cfg(test)]
 mod tests {
+    /// A source that answers `primary_key` from a fixed map and records the relations it was asked about.
+    struct KeySource {
+        asked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl crate::source::Source for KeySource {
+        fn export(
+            &mut self,
+            _request: &crate::source::ExportRequest<'_>,
+            _sink: &mut dyn crate::source::BatchSink,
+        ) -> Result<()> {
+            unreachable!()
+        }
+
+        fn query_scalar(&mut self, _sql: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+
+        fn type_mappings(
+            &mut self,
+            _query: &str,
+            _column_overrides: &crate::types::ColumnOverrides,
+        ) -> Result<Vec<crate::types::TypeMapping>> {
+            unreachable!()
+        }
+
+        fn primary_key(&mut self, table: &str) -> Result<Option<Vec<String>>> {
+            self.asked.lock().unwrap().push(table.to_string());
+            Ok(Some(vec!["b".into()]))
+        }
+    }
+
+    #[test]
+    fn the_key_read_goes_through_the_engines_quoted_relation_and_stamps_the_table() {
+        let wh = InitYamlDestination {
+            bigquery_project: Some("p".into()),
+            bigquery_dataset: Some("d".into()),
+            ..Default::default()
+        };
+        let table = |schema: &str| TableInfo {
+            schema: schema.into(),
+            table: "t".into(),
+            ..make_table(1, vec![col("a", "int", false), col("b", "int", false)])
+        };
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut infos = vec![table("s"), table("")];
+        let log = asked.clone();
+        read_source_keys(
+            &mut infos,
+            "mysql://u:p@h/db",
+            &wh,
+            Some("incremental"),
+            move |_| Ok(Box::new(KeySource { asked: log })),
+        );
+        assert_eq!(*asked.lock().unwrap(), vec!["`s`.`t`", "`t`"]);
+        assert_eq!(infos[0].columns[1].key_position, Some(1));
+        assert_eq!(infos[1].columns[1].key_position, Some(1));
+    }
+
+    #[test]
+    fn nothing_is_connected_when_no_key_is_wanted_and_a_dead_source_stamps_nothing() {
+        let wh = InitYamlDestination {
+            bigquery_project: Some("p".into()),
+            bigquery_dataset: Some("d".into()),
+            ..Default::default()
+        };
+        let mut infos = vec![make_table(1, vec![col("b", "int", false)])];
+        read_source_keys(&mut infos, "mysql://u:p@h/db", &wh, Some("full"), |_| {
+            panic!("no connection for a table that is not incremental")
+        });
+        read_source_keys(
+            &mut infos,
+            "mysql://u:p@h/db",
+            &wh,
+            Some("incremental"),
+            |_| Err(anyhow::anyhow!("unreachable")),
+        );
+        read_source_keys(&mut infos, "not a url", &wh, Some("incremental"), |_| {
+            panic!("an unreadable url never connects")
+        });
+        assert_eq!(infos[0].columns[0].key_position, None);
+    }
+
+    #[test]
+    fn the_unread_key_notice_names_the_tables_and_is_silent_when_all_were_read() {
+        assert_eq!(unread_keys_notice(&[]), None);
+        let n = unread_keys_notice(&["a".into(), "b".into()]).unwrap();
+        assert!(n.contains("2 table(s)") && n.ends_with(": a, b"), "{n}");
+    }
+
+    #[test]
+    fn source_keys_are_read_for_incremental_tables_into_a_warehouse_only() {
+        let wh = InitYamlDestination {
+            bigquery_project: Some("p".into()),
+            bigquery_dataset: Some("d".into()),
+            ..Default::default()
+        };
+        let t = make_table(1, vec![]);
+        assert!(source_keys_wanted(
+            std::slice::from_ref(&t),
+            &wh,
+            Some("incremental")
+        ));
+        assert!(!source_keys_wanted(
+            std::slice::from_ref(&t),
+            &wh,
+            Some("full")
+        ));
+        assert!(!source_keys_wanted(
+            std::slice::from_ref(&t),
+            &InitYamlDestination::default(),
+            Some("incremental")
+        ));
+        assert!(!source_keys_wanted(&[], &wh, Some("incremental")));
+    }
+
+    #[test]
+    fn a_read_key_stamps_its_columns_in_key_order_and_a_failed_read_is_named() {
+        let table = |n: &str| TableInfo {
+            table: n.into(),
+            ..make_table(
+                1,
+                vec![
+                    col("a", "int", false),
+                    col("b", "int", false),
+                    col("c", "int", false),
+                ],
+            )
+        };
+        let mut infos = vec![table("ok"), table("none"), table("bad"), table("denied")];
+        let unread = record_source_keys(&mut infos, Some("incremental"), |i| {
+            match i.table.as_str() {
+                "ok" => Ok(Some(vec!["c".into(), "a".into()])),
+                "none" => Ok(None),
+                _ => Err(anyhow::anyhow!("denied")),
+            }
+        });
+        assert_eq!(unread, vec!["bad".to_string(), "denied".to_string()]);
+        let pos = |i: &TableInfo| i.columns.iter().map(|c| c.key_position).collect::<Vec<_>>();
+        assert_eq!(pos(&infos[0]), vec![Some(2), None, Some(1)]);
+        assert_eq!(pos(&infos[1]), vec![None, None, None]);
+        let mut full = vec![table("x")];
+        record_source_keys(&mut full, Some("full"), |_| panic!("not asked"));
+    }
 
     #[test]
     fn only_a_cdc_scaffold_probes_mineability() {
@@ -2261,11 +2252,7 @@ mod tests {
         );
     }
 
-    /// SQL Server's temporal types are `datetime2`, `datetimeoffset` and
-    /// `smalldatetime` — none EQUAL to `datetime`, which is all the predicate
-    /// admitted. A `changed_at DATETIME2(6)` therefore scored zero as a cursor
-    /// candidate and the integer PK won: an incremental scaffold blind to every
-    /// UPDATE. Caught live by the generated-config chain on MSSQL (2026-09-20).
+    /// SQL Server's temporal types are `datetime2`, `datetimeoffset` and `smalldatetime`.
     #[test]
     fn every_sql_server_temporal_type_is_a_timestamp_type() {
         for t in [
@@ -2283,23 +2270,13 @@ mod tests {
                 "{t} must be a cursor candidate"
             );
         }
-        // SQL Server's `timestamp` is a row-version counter, not a time: the catalog
-        // reader renames it (`init::mssql::catalog_type`), so it never reaches here
-        // under the temporal spelling.
         assert!(!super::is_timestamp_type("rowversion"));
         for t in ["bigint", "int", "varchar", "uniqueidentifier", "time"] {
             assert!(!super::is_timestamp_type(t), "{t} must not be");
         }
     }
 
-    /// `next_steps_block` is a pure string builder reached only via the init
-    /// command's `eprint!` (live/CLI-only), so its `-> String::new()` /
-    /// `"xyzzy"` stubs survive `cargo mutants -- --lib --bins`. This pins the
-    /// content directly — including the read-only-vs-annotate distinction the
-    /// 2026-08-20 plan change added — so the stubs die at the lib gate and the
-    /// help text can't silently drift back to "plan writes waves".
-    /// A CDC scaffold's next steps end in `rivet run`, never `rivet plan`: plan
-    /// skips every export in such a config and stops with "nothing to plan".
+    /// `next_steps_block` is a pure string builder reached only via the init command's `eprint!` (live/CLI-only), so its `-> String::new()` / `"xyzzy"` stubs survive `cargo mutants -- --lib --bins`.
     #[test]
     fn next_steps_block_for_cdc_schedules_the_run_not_a_plan() {
         let s = super::next_steps_block(
@@ -2320,9 +2297,6 @@ mod tests {
             s.contains("rivet run   -c rivet.yaml") && s.contains("through its recipe"),
             "block:\n{s}"
         );
-        // The per-table scaffold (SQL Server, Mongo, a single table) has NO baseline:
-        // promising one "through its recipe" would send the operator to capture
-        // changes over history nobody loaded.
         let s = super::next_steps_block(
             "rivet.yaml",
             &super::SourceProvenance::Env("X".into()),
@@ -2336,10 +2310,7 @@ mod tests {
         assert!(s.contains("cdc.backfill: auto") && s.contains("cdc.initial: snapshot"));
     }
 
-    /// The terminal block must agree with the file it describes: `rivet compact` is a
-    /// step only where the scaffold declares a base and a buffer. A `full` scaffold
-    /// with a warehouse printed both lines while its own `load:` comment said every
-    /// load OVERWRITES the table and compact would only say "skipped".
+    /// The terminal block must agree with the file it describes.
     #[test]
     fn next_steps_block_prescribes_compact_only_for_a_base_and_buffer_scaffold() {
         let block = |has_compact: bool| {
@@ -2367,8 +2338,6 @@ mod tests {
                 && !overwriting.contains("rivet compact"),
             "block:\n{overwriting}"
         );
-        // A warehouse that never compacts (ClickHouse) with delta exports: the load
-        // appends behind a view — "each load OVERWRITES" would be false for them.
         let appending = super::next_steps_block(
             "rivet.yaml",
             &super::SourceProvenance::Env("X".into()),
@@ -2407,14 +2376,11 @@ mod tests {
             None,
             &ScaffoldDecisions::default(),
         );
-        // The core three-step path is always present.
         assert!(s.contains("rivet doctor -c rivet.yaml"), "block:\n{s}");
         assert!(
             s.contains("rivet run    -c rivet.yaml --validate"),
             "block:\n{s}"
         );
-        // Plain plan is advertised as READ-ONLY, and --annotate-waves as the
-        // thing that writes — the exact contract the code now enforces.
         assert!(
             s.contains("rivet plan  -c rivet.yaml") && s.contains("read-only"),
             "next-steps must present plain `rivet plan` as read-only; block:\n{s}"
@@ -2423,7 +2389,6 @@ mod tests {
             s.contains("--annotate-waves") && s.contains("write wave:/parallel_safe:"),
             "next-steps must show --annotate-waves as the config-writing step; block:\n{s}"
         );
-        // Env provenance does not print the inline DATABASE_URL export line.
         assert!(
             !s.contains("export DATABASE_URL"),
             "Env provenance must not print the Inline-only export line; block:\n{s}"
@@ -2482,10 +2447,7 @@ mod tests {
         }
     }
 
-    /// #199: the density probe's key must be INDEXED. PK (always indexed) →
-    /// returned; an unindexed integer fallback → None (probe skips, no 51-scan);
-    /// an indexed non-PK integer → returned (the versioned KEY(ref_id) case #148
-    /// targets).
+    /// #199: the density probe's key must be INDEXED.
     #[test]
     fn best_chunk_column_requires_an_index() {
         let c = |n: &str, ty: &str, pk: bool, idx: bool| ColumnInfo {
@@ -2498,10 +2460,8 @@ mod tests {
             is_indexed: idx,
             ..Default::default()
         };
-        // integer PK → indexed → returned.
         let t = make_table(1, vec![c("id", "bigint", true, true)]);
         assert_eq!(t.best_chunk_column(), Some("id"));
-        // uuid PK + UNINDEXED integer fallback → None (no scan).
         let t = make_table(
             1,
             vec![c("uid", "uuid", true, true), c("qty", "int", false, false)],
@@ -2511,7 +2471,6 @@ mod tests {
             None,
             "an unindexed integer is never the chunk key"
         );
-        // indexed non-PK integer → returned (versioned KEY(ref_id)).
         let t = make_table(
             1,
             vec![
@@ -2598,14 +2557,10 @@ mod tests {
         )
     }
 
-    /// #148 (roast 2026-08-09): avg_row_bytes must return None once the density
-    /// probe CORRECTED row_estimate — total_bytes is still frozen, so the ratio
-    /// would mix a corrected numerator with a stale denominator. Kills the
-    /// mod.rs:278 guard mutants (guard->true, &&->||, >->>=).
+    /// #148 (roast 2026-08-09): avg_row_bytes must return None once the density probe CORRECTED row_estimate.
     #[test]
     fn avg_row_bytes_none_when_a_probe_corrected_the_rows() {
         use crate::init::density::{DensityProbe, EstimateMethod};
-        // Frozen catalog 1000, probe corrected to 148_000; bytes still frozen.
         let mut t = make_table(148_000, vec![]);
         t.total_bytes = Some(4_000_000);
         t.density = Some(DensityProbe {
@@ -2622,19 +2577,15 @@ mod tests {
             "corrected rows + frozen bytes = unknown per-row"
         );
 
-        // No probe correction (catalog trusted): the ratio is honest.
         let mut t2 = make_table(1000, vec![]);
         t2.total_bytes = Some(4_000_000);
         assert_eq!(t2.avg_row_bytes(), Some(4000));
-        // Zero rows: None (no division).
         let mut t3 = make_table(0, vec![]);
         t3.total_bytes = Some(4_000_000);
         assert_eq!(t3.avg_row_bytes(), None);
     }
 
-    /// #148 (roast 2026-08-09): mark_mssql_catalog_exact must NOT stamp
-    /// catalog-exact on a 0 (a VIEW or stats-unavailable table yields 0 — a
-    /// documented UNKNOWN). Kills the mod.rs:822 mutants (stub, >->==, >-><, >->>=).
+    /// #148 (roast 2026-08-09): mark_mssql_catalog_exact must NOT stamp catalog-exact on a 0 (a VIEW or stats-unavailable table yields 0.
     #[test]
     fn mssql_catalog_exact_only_for_a_positive_count() {
         use crate::init::density::EstimateMethod;
@@ -2654,12 +2605,7 @@ mod tests {
         );
     }
 
-    /// A3/A2 (roast 2026-08-09): where best_cursor_column (name-preference) and
-    /// chosen_cursor_column (scored) DIVERGE, every user-facing surface that
-    /// names the cursor must name the CHOSEN one — the column actually written as
-    /// cursor_column — not the name-preferred phantom. Fixture: `updated_at` is
-    /// nullable (name-preferred but -10) and `modified_at` is not-null (scores
-    /// higher). RED against `mode_rationale` reading `best_cursor_column`.
+    /// A3/A2 (roast 2026-08-09): where best_cursor_column (name-preference) and chosen_cursor_column (scored) DIVERGE, every user-facing surface that names the cursor must name the CHOSEN one.
     #[test]
     fn mode_rationale_names_the_chosen_cursor_not_the_name_preferred_one() {
         let nullable_ts = |name: &str| ColumnInfo {
@@ -2680,10 +2626,8 @@ mod tests {
                 col("modified_at", "timestamp", false),
             ],
         );
-        // the divergence this test rests on (fixture is not inert)
         assert_eq!(info.best_cursor_column(), Some("updated_at"));
         assert_eq!(info.chosen_cursor_column().as_deref(), Some("modified_at"));
-        // the incremental rationale is printed next to `cursor_column: modified_at`
         let r = info.mode_rationale("incremental");
         assert!(
             r.contains("modified_at"),
@@ -2710,9 +2654,6 @@ mod tests {
 
     #[test]
     fn chunked_rationale_hints_incremental_when_cursor_column_exists() {
-        // warranty-shaped: large table with BOTH an int PK and a cursor column.
-        // suggest_mode picks chunked, but the rationale must point at incremental
-        // for scheduled re-runs — chunked re-reads the whole table every run.
         let info = make_table(
             655_000,
             vec![
@@ -2734,7 +2675,6 @@ mod tests {
 
     #[test]
     fn chunked_rationale_no_incremental_hint_without_cursor_column() {
-        // No timestamp/cursor column → no incremental hint (would be misleading).
         let info = make_table(5_000_000, vec![col("id", "bigint", true)]);
         assert_eq!(info.suggest_mode(), "chunked");
         let r = info.mode_rationale("chunked");
@@ -2746,12 +2686,6 @@ mod tests {
 
     #[test]
     fn chunked_rationale_does_not_claim_a_threshold_it_did_not_cross() {
-        // `chunked` is reachable far below 100K: a backfill recipe's mode comes from
-        // `recipe_mode`, which pages whenever a usable key exists and never reads the
-        // row count. The rationale used to print `suggest_mode`'s reason regardless,
-        // so a 200-row recipe read "~200 rows ≥ 100K threshold" — explaining a
-        // decision that was not the one taken (measured on a generated CDC partner
-        // shape, 2026-09-21).
         let small = make_table(200, vec![col("id", "bigint", true)]);
         assert_eq!(
             small.suggest_mode(),
@@ -2771,17 +2705,12 @@ mod tests {
 
     #[test]
     fn full_rationale_distinguishes_below_threshold_from_no_key_at_scale() {
-        // Below 100K → the honest "below threshold" message.
         let small = make_table(500, vec![col("id", "bigint", true)]);
         assert_eq!(small.suggest_mode(), "full");
         assert!(
             small.mode_rationale("full").contains("below 100K"),
             "small table keeps the below-threshold message"
         );
-        // ABOVE 100K but NO chunk key and NO cursor (a keyless table, or a Mongo
-        // collection whose _id isn't surfaced as a key) → full, but the message must
-        // NOT claim "below 100K" — the dogfooding bug read "~150K rows below 100K
-        // chunked threshold" on a 150K Mongo collection. It must name the real cause.
         let big_keyless = make_table(150_000, vec![col("label", "text", false)]);
         assert_eq!(big_keyless.suggest_mode(), "full");
         let r = big_keyless.mode_rationale("full");
@@ -2850,10 +2779,7 @@ mod tests {
         assert_eq!(info.best_cursor_column(), Some("updated_at"));
     }
 
-    /// The partition key is the date the rows are ABOUT, so it must skip EVERY
-    /// mutation stamp, not just the two spelled `updated_at`/`modified_at` — a row
-    /// partitioned by `changed_at` hops partitions on every update. RED against the
-    /// old two-literal exclusion, which took `changed_at` because it came first.
+    /// The partition key is the date the rows are ABOUT, so it must skip EVERY mutation stamp, not just the two spelled `updated_at`/`modified_at`.
     #[test]
     fn partition_column_skips_a_mutation_stamp_spelled_otherwise() {
         let info = make_table(
@@ -2867,10 +2793,6 @@ mod tests {
     }
 
     /// SQL Server's house convention is PascalCase: `CreatedDate` / `ModifiedDate`.
-    /// Folded to one spelling, the mutation stamp is the cursor and the creation
-    /// stamp the partition — snake_case-only lists saw neither, and the tie went to
-    /// the earlier column (create-only cursor, mutable partition). RED against the
-    /// unfolded lists.
     #[test]
     fn pascal_case_stamps_are_recognised() {
         let info = make_table(
@@ -2888,10 +2810,7 @@ mod tests {
         );
     }
 
-    /// Among several business dates the creation stamp wins, whatever its position:
-    /// `shipped_at` is a business date too, and it comes first. RED against the
-    /// creation-stamp match never firing (`||` → `&&` in the old inline literals),
-    /// which fell through to "the first non-mutation stamp".
+    /// Among several business dates the creation stamp wins, whatever its position.
     #[test]
     fn partition_prefers_the_creation_stamp_over_an_earlier_business_date() {
         let info = make_table(
@@ -3146,7 +3065,6 @@ mod tests {
         assert_eq!(str_pk.suggest_mode(), "chunked");
         assert_eq!(str_pk.keysettable_pk_column(), Some("code"));
 
-        // Decimal PK: keyset refused at plan time → init must NOT keyset it.
         let dec_pk = make_table(
             150_000,
             vec![
@@ -3175,7 +3093,6 @@ mod tests {
             "decimal PK (no int col) stays full"
         );
 
-        // Below the row threshold, even a keysettable PK stays full (no chunking overhead).
         let small_uuid = make_table(
             50_000,
             vec![col("id", "uuid", true), col("n", "int", false)],
@@ -3184,15 +3101,6 @@ mod tests {
     }
 
     /// The snapshot's decision must be the one the YAML actually carries.
-    ///
-    /// `decided_strategy` feeds the strategy snapshot; `generate_config` writes
-    /// the config. They share the same underlying rules, and this asserts they
-    /// still AGREE — by parsing what the scaffold emitted, not by re-deriving
-    /// the rule a second time. A snapshot that describes a choice the config did
-    /// not make is worse than no snapshot: it is an audit trail that lies.
-    ///
-    /// The matrix crosses the three shapes the scaffold can pick, so a change to
-    /// any one arm is caught rather than only the one an author remembered.
     #[test]
     fn decided_strategy_agrees_with_the_generated_yaml() {
         let cases: Vec<(&str, TableInfo)> = vec![
@@ -3226,11 +3134,6 @@ mod tests {
                 None,
             )
             .expect("scaffold");
-            // COMMENTS STRIPPED. The keyset scaffold's hint line mentions
-            // `chunk_column:` as the alternative to consider, and matching raw
-            // text read that as the config choosing range — the first run of
-            // this test failed on exactly that. Compare against what the config
-            // SAYS, not what it discusses.
             let yaml: String = yaml
                 .lines()
                 .filter(|l| !l.trim_start().starts_with('#'))
@@ -3242,8 +3145,6 @@ mod tests {
                 "{label}: snapshot says mode {:?}, YAML says otherwise:\n{yaml}",
                 d.mode
             );
-            // The KIND is not written as a field — it is implied by which key
-            // line the scaffold emitted, so that is what gets compared.
             let (expect, forbid) = match d.kind {
                 "keyset" => ("chunk_by_key:", Some("chunk_column:")),
                 "range" => ("chunk_column:", Some("chunk_by_key:")),
@@ -3272,10 +3173,6 @@ mod tests {
 
     #[test]
     fn generate_config_chunked_single_pk_uses_keyset() {
-        // A single-column PK → keyset (`chunk_by_key`), immune to sparse keys —
-        // NOT range `chunk_column` (which blows up on a huge/gappy id). Sequential,
-        // so no `parallel:`; chunk_checkpoint is ON by default (safe crash-recovery),
-        // and the append-only incremental behaviour is a commented `keyset_incremental`.
         let info = make_table(
             2_000_000,
             vec![col("id", "bigint", true), col("name", "text", false)],
@@ -3291,19 +3188,14 @@ mod tests {
         .unwrap();
         assert!(yaml.contains("mode: chunked"), "got:\n{yaml}");
         assert!(yaml.contains("chunk_by_key: id"), "got:\n{yaml}");
-        // No ACTIVE `chunk_column:` line (the keyset hint comment mentions it).
         assert!(
             !yaml.contains("\n    chunk_column:"),
             "PK must keyset, not range-chunk:\n{yaml}"
         );
-        // keyset is sequential — no parallel workers emitted.
         assert!(
             !yaml.contains("\n    parallel:"),
             "keyset must not emit parallel:\n{yaml}"
         );
-        // chunk_checkpoint is ON by default now (crash-recovery is safe: a clean
-        // re-run still does a full pass). The append-only incremental behaviour —
-        // the part that CAN skip rows — stays a commented `keyset_incremental` opt-in.
         assert!(
             yaml.contains("\n    chunk_checkpoint: true"),
             "keyset must default chunk_checkpoint on (safe crash-recovery):\n{yaml}"
@@ -3312,8 +3204,6 @@ mod tests {
             yaml.contains("# keyset_incremental: true"),
             "append-only incremental must be a commented opt-in:\n{yaml}"
         );
-        // Keyset needs the `table:` shortcut (planner introspects the unique index),
-        // so the export emits `table:`, not a `SELECT … FROM` query.
         assert!(yaml.contains("table: orders"), "got:\n{yaml}");
         assert!(
             !yaml.contains("query:"),
@@ -3324,8 +3214,6 @@ mod tests {
 
     #[test]
     fn generate_config_chunked_no_single_pk_uses_range_column() {
-        // No single-column PK (here: no PK at all) → range chunk on the best
-        // integer column, with `chunk_checkpoint: true` and parallel as before.
         let info = make_table(
             2_000_000,
             vec![
@@ -3356,16 +3244,12 @@ mod tests {
 
     #[test]
     fn single_pk_column_detects_single_composite_and_none() {
-        // Exactly one PK column → that column.
         let one = make_table(1, vec![col("id", "bigint", true), col("n", "text", false)]);
         assert_eq!(one.single_pk_column(), Some("id"));
-        // Composite PK → None (keyset is single-column only).
         let composite = make_table(1, vec![col("a", "bigint", true), col("b", "bigint", true)]);
         assert_eq!(composite.single_pk_column(), None);
-        // No PK → None.
         let none = make_table(1, vec![col("x", "int", false)]);
         assert_eq!(none.single_pk_column(), None);
-        // Non-integer single PK still keysets (unlike best_chunk_column).
         let uuid = make_table(1, vec![col("id", "uuid", true)]);
         assert_eq!(uuid.single_pk_column(), Some("id"));
         assert_eq!(uuid.best_chunk_column(), None);
@@ -3422,9 +3306,6 @@ mod tests {
         .unwrap();
         assert!(yaml.contains("  - name: users"), "got:\n{yaml}");
         assert!(yaml.contains("  - name: orders"), "got:\n{yaml}");
-        // Each export references its base relation. PG full-mode now uses the
-        // `table:` shortcut (so catalog hints can resolve NUMERIC types); other
-        // modes/dialects keep the `FROM <name>` form.
         assert!(
             yaml.contains("    table: users") || yaml.contains("FROM users"),
             "expected users reference; got:\n{yaml}"
@@ -3726,8 +3607,7 @@ mod tests {
         );
     }
 
-    /// `--azure-container` writes an Azure destination that names the container, the account and
-    /// the env var of the key, never a key, and the endpoint only when one was given.
+    /// `--azure-container` writes an Azure destination that names the container, the account and the env var of the key, never a key, and the endpoint only when one was given.
     #[test]
     fn an_azure_scaffold_names_its_container_account_and_key_env_and_no_secret() {
         let info = make_table(
@@ -3889,14 +3769,11 @@ mod tests {
 
     #[test]
     fn yaml_quoting_handles_risky_values() {
-        // Reserved-looking
         assert_eq!(yaml_scaffold::yaml_quote_if_needed("true"), "\"true\"");
         assert_eq!(yaml_scaffold::yaml_quote_if_needed("NO"), "\"NO\"");
         assert_eq!(yaml_scaffold::yaml_quote_if_needed("null"), "\"null\"");
-        // Numeric-looking
         assert_eq!(yaml_scaffold::yaml_quote_if_needed("123"), "\"123\"");
         assert_eq!(yaml_scaffold::yaml_quote_if_needed("1.5"), "\"1.5\"");
-        // Indicators / separators
         assert_eq!(
             yaml_scaffold::yaml_quote_if_needed("-leading-dash"),
             "\"-leading-dash\""
@@ -3909,20 +3786,17 @@ mod tests {
             yaml_scaffold::yaml_quote_if_needed("foo #bar"),
             "\"foo #bar\""
         );
-        // Whitespace
         assert_eq!(
             yaml_scaffold::yaml_quote_if_needed(" leading"),
             "\" leading\""
         );
         assert_eq!(yaml_scaffold::yaml_quote_if_needed(""), "\"\"");
-        // Embedded quote / backslash → escaped
         assert_eq!(yaml_scaffold::yaml_quote_if_needed("a\"b"), "\"a\\\"b\"");
         assert_eq!(yaml_scaffold::yaml_quote_if_needed("c\\d"), "\"c\\\\d\"");
     }
 
     #[test]
     fn generate_config_quotes_risky_bucket_name() {
-        // A bucket literally named "true" must round-trip as a string.
         let info = make_table(100, vec![col("id", "bigint", true)]);
         let dest = InitYamlDestination {
             gcs_bucket: Some("true".to_string()),
@@ -3937,7 +3811,6 @@ mod tests {
             None,
         )
         .unwrap();
-        // Plain `bucket: true` would deserialize to the boolean `true`.
         assert!(
             yaml.contains("bucket: \"true\""),
             "risky bucket name must be quoted, got:\n{yaml}"
@@ -4002,9 +3875,6 @@ mod tests {
         let exp = &parsed["exports"][0];
         assert_eq!(exp["name"].as_str(), Some("orders"));
         assert_eq!(exp["mode"].as_str(), Some("chunked"));
-        // Single-column PK → keyset via the `table:` shortcut; chunk_checkpoint is
-        // ON by default (safe crash-recovery), while keyset_incremental stays a
-        // commented opt-in (absent from the parsed active config).
         assert_eq!(exp["chunk_by_key"].as_str(), Some("id"));
         assert_eq!(exp["table"].as_str(), Some("orders"));
         assert!(exp["chunk_column"].is_null());
@@ -4054,9 +3924,7 @@ mod tests {
 
     #[test]
     fn mssql_table_schema_defaults_public_placeholder_to_dbo() {
-        // `parse_table("orders")` yields schema "public"; mssql rewrites to dbo.
         assert_eq!(mssql_table_schema("public"), "dbo");
-        // An explicitly-qualified schema is honoured verbatim.
         assert_eq!(mssql_table_schema("sales"), "sales");
     }
 
@@ -4107,8 +3975,6 @@ mod tests {
 
     #[test]
     fn reject_mongo_schema_refuses_explicit_schema_but_allows_absent() {
-        // #12 bughunt: --schema was silently ignored for Mongo. It must be refused
-        // (a collection has no schema namespace), while absent/blank is fine.
         assert!(super::reject_mongo_schema(Some("mydb")).is_err());
         assert!(super::reject_mongo_schema(Some("  ")).is_ok());
         assert!(super::reject_mongo_schema(None).is_ok());
@@ -4120,19 +3986,14 @@ mod tests {
 
     #[test]
     fn resolve_single_table_schema_honors_schema_flag_and_detects_conflict() {
-        // #dogfood MED: `--schema` was silently dropped when `--table` was given,
-        // so a nonexistent schema looked valid (identical output). Bare table +
-        // --schema now folds the schema in.
         assert_eq!(
             resolve_single_table_schema("users", Some("myschema")).unwrap(),
             (Some("myschema".to_string()), "users")
         );
-        // No --schema on a bare table → None (engine default applies downstream).
         assert_eq!(
             resolve_single_table_schema("users", None).unwrap(),
             (None, "users")
         );
-        // Embedded schema wins; a matching --schema is fine.
         assert_eq!(
             resolve_single_table_schema("sales.orders", Some("sales")).unwrap(),
             (Some("sales".to_string()), "orders")
@@ -4141,8 +4002,6 @@ mod tests {
             resolve_single_table_schema("sales.orders", None).unwrap(),
             (Some("sales".to_string()), "orders")
         );
-        // Embedded schema AND a DIFFERING --schema is a loud conflict, not a
-        // silent drop.
         let err = resolve_single_table_schema("sales.orders", Some("other"))
             .expect_err("conflicting schema must error");
         let msg = format!("{err}");
@@ -4150,7 +4009,6 @@ mod tests {
             msg.contains("already names schema 'sales'") && msg.contains("--schema is 'other'"),
             "conflict must name both schemas: {msg}"
         );
-        // A blank/whitespace --schema is treated as absent, not a conflict.
         assert_eq!(
             resolve_single_table_schema("sales.orders", Some("  ")).unwrap(),
             (Some("sales".to_string()), "orders")
@@ -4159,9 +4017,6 @@ mod tests {
 
     #[test]
     fn no_tables_error_points_at_the_filter_when_globs_are_active() {
-        // #dogfood LOW: an --include/--exclude that filters everything out used
-        // to emit the schema/privileges message, sending the operator down the
-        // wrong path. With a filter active the error names the globs first.
         let filtered = no_tables_error(&TableFilter {
             include: vec!["zzz_nomatch_*".into()],
             exclude: vec![],
@@ -4175,7 +4030,6 @@ mod tests {
             exclude: vec!["*".into()],
         });
         assert!(format!("{exclude_all}").contains("--include/--exclude"));
-        // No filter → the original schema/privileges message.
         let unfiltered = no_tables_error(&TableFilter::default());
         assert!(
             format!("{unfiltered}").contains("check --schema and privileges"),
@@ -4200,8 +4054,6 @@ mod tests {
 
     #[test]
     fn write_config_output_names_the_path_and_op_on_failure() {
-        // #dogfood LOW: a bad `-o` path emitted a bare "No such file or directory
-        // (os error 2)" naming neither the path nor the failed operation.
         let err = write_config_output("no_such_dir_xyz/sub/cfg.yaml", "source: {}\n")
             .expect_err("a missing parent dir must fail");
         let msg = format!("{err:#}");
@@ -4219,7 +4071,6 @@ mod tests {
     fn glob_match_literal_star_and_question() {
         assert!(glob_match("orders", "orders"));
         assert!(!glob_match("orders", "orders2"));
-        // `*` matches any run including empty.
         assert!(glob_match("bench_*", "bench_users"));
         assert!(glob_match("bench_*", "bench_"));
         assert!(!glob_match("bench_*", "orders"));
@@ -4227,13 +4078,10 @@ mod tests {
         assert!(glob_match("a*c", "abc"));
         assert!(glob_match("a*c", "ac"));
         assert!(!glob_match("a*c", "ab"));
-        // `?` matches exactly one char.
         assert!(glob_match("order?", "orders"));
         assert!(!glob_match("order?", "order"));
-        // Bare `*` matches everything.
         assert!(glob_match("*", "anything"));
         assert!(glob_match("*", ""));
-        // Multiple stars.
         assert!(glob_match("*bench*", "x_bench_y"));
         assert!(!glob_match("*bench*", "orders"));
     }
@@ -4268,7 +4116,6 @@ mod tests {
 
     #[test]
     fn table_filter_exclude_wins_over_include() {
-        // A name that matches both include and exclude is excluded.
         let f = TableFilter {
             include: vec!["*".into()],
             exclude: vec!["bench_*".into()],
@@ -4279,9 +4126,6 @@ mod tests {
 
     #[test]
     fn table_discovery_surfaces_cursor_and_coalesce_hint() {
-        // No usable single PK (a non-PK uuid) so `suggest_mode` falls back to
-        // incremental on the timestamp cursor. (A uuid PRIMARY KEY would now keyset
-        // — see `suggest_mode` / `keysettable_pk_column`.)
         let info = make_table(
             300_000,
             vec![
@@ -4338,8 +4182,7 @@ mod cdc_names_taken_tests {
         )
     }
 
-    /// A scaffold is refused, writing nothing, when its checkpoint exists or a sibling config
-    /// names its checkpoint or its destination; one that shares neither is written.
+    /// A scaffold is refused, writing nothing, when its checkpoint exists or a sibling config names its checkpoint or its destination.
     #[test]
     fn a_scaffold_naming_another_streams_checkpoint_or_destination_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -4352,7 +4195,6 @@ mod cdc_names_taken_tests {
         let shared_dest = super::refuse_cdc_names_taken(&at("b.yaml"), &mine).unwrap_err();
         std::fs::write(at("a.yaml"), cdc_yaml("./cdc/a.ckpt", "./output/a/")).unwrap();
         assert!(super::refuse_cdc_names_taken(&at("b.yaml"), &mine).is_ok());
-        // A `.yml` sibling is a config too; a file of another kind, or this one itself, is not.
         std::fs::write(at("c.yml"), cdc_yaml("./cdc/b.ckpt", "./output/c/")).unwrap();
         let yml = super::refuse_cdc_names_taken(&at("b.yaml"), &mine).unwrap_err();
         assert!(format!("{yml:#}").contains("c.yml"), "{yml:#}");

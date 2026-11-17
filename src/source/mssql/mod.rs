@@ -1,19 +1,4 @@
 //! **Layer: Execution** — MSSQL / SQL Server source engine.
-//!
-//! Third SQL engine after PostgreSQL and MySQL. The `tiberius` driver is
-//! async (tokio); the `Source` trait is sync `&mut self` (ADR-0011), so each
-//! `MssqlSource` owns a current-thread `tokio` runtime and `block_on`s every
-//! driver call — no async leaks into the runner.
-//!
-//! Dialect deltas vs PG/MySQL (routed through the shared seams):
-//! - identifier quoting `[col]` (`sql::quote_ident`)
-//! - cursor literal `'…'` with `''` escaping, typed by the key itself when non-ASCII (`query::cursor_rhs`)
-//! - introspection via `sys.*` catalog views
-//!
-//! Supported today: snapshot / incremental / chunked (range) and keyset
-//! (seek) export, `check --type-report`, `doctor`, chunked-mode planning. The
-//! keyset page builder emits a dialect-correct
-//! `OFFSET 0 ROWS FETCH NEXT n ROWS ONLY` clause (T-SQL has no `LIMIT`).
 
 mod arrow_convert;
 pub(crate) mod cdc;
@@ -43,12 +28,7 @@ use crate::types::{ColumnOverrides, TypeMapping};
 
 type MssqlClient = Client<Compat<TcpStream>>;
 
-/// SQL Server source. Owns the async driver + the runtime that drives it.
-///
-/// `pub` (not `pub(crate)`) so integration tests can reach `proxy_kind()` the
-/// same way they reach `MysqlSource::proxy_kind()`; the rest of the type
-/// carries the same "no external API contract" disclaimer as `MysqlSource`.
-/// `1` when the login holds a permission that reads the server DMVs; an unknown permission name (2019 has no `VIEW SERVER PERFORMANCE STATE`) answers NULL, not an error.
+/// SQL Server source.
 const SERVER_COUNTERS_GRANTED: &str = "SELECT CAST(CASE WHEN HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER PERFORMANCE STATE') = 1 \
      OR HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER STATE') = 1 THEN 1 ELSE 0 END AS NVARCHAR(1))";
 
@@ -57,8 +37,7 @@ pub struct MssqlSource {
     client: MssqlClient,
     /// Pooler/gateway classification, sampled once at connect time.
     proxy_kind: MssqlProxyKind,
-    /// Whether the export issued `SET LOCK_TIMEOUT` on this connection, so the
-    /// `Drop` teardown knows to reset it (Epic 18 B2 — pooler-safe session).
+    /// Whether the export issued `SET LOCK_TIMEOUT` on this connection, so the `Drop` teardown knows to reset it (Epic 18 B2.
     lock_timeout_applied: bool,
     /// Whether an incremental read switched this session to `SNAPSHOT`, so `Drop` resets it.
     snapshot_applied: bool,
@@ -115,19 +94,7 @@ fn locking_incremental_read_warning(db: &str) -> String {
 }
 
 impl Drop for MssqlSource {
-    /// Pooler-safe session teardown (Epic 18 B2). rivet never opens a
-    /// transaction on this connection — every read is an autocommit `SELECT`,
-    /// so there is no transaction to leave dangling across the `block_on`
-    /// bridge (ADR-0011). The session state the export mutates is
-    /// `SET LOCK_TIMEOUT` and, on an incremental read, the isolation level;
-    /// reset both to the SQL Server defaults before the connection closes so a
-    /// *multiplexed* pooler that keeps the backend connection alive cannot hand
-    /// our non-default settings to the next session that reuses it.
-    ///
-    /// Best-effort and time-boxed: after a failed read the stream is
-    /// half-drained and the connection is dying anyway, so the reset (and the
-    /// physical connection) just goes away; the 2 s cap guarantees `Drop`
-    /// can never hang on a wedged connection.
+    /// Pooler-safe session teardown (Epic 18 B2).
     fn drop(&mut self) {
         let reset = match (self.lock_timeout_applied, self.snapshot_applied) {
             (false, false) => return,
@@ -154,16 +121,6 @@ pub struct MssqlUrl {
     pub database: String,
 }
 
-/// Percent-decode a URL userinfo component (lossy on invalid UTF-8, which a
-/// well-formed URL never produces). Mirrors the driver-side decode PG/MySQL/
-/// Mongo get for free, so the round-trip with `build_url_from_fields`' encoding
-/// is lossless.
-fn pct_decode(s: &str) -> String {
-    percent_encoding::percent_decode_str(s)
-        .decode_utf8_lossy()
-        .into_owned()
-}
-
 /// The tiberius `Config` for a login, with the shared TLS policy mapped onto its cert-trust knobs.
 pub(crate) fn tiberius_config(
     host: &str,
@@ -178,44 +135,17 @@ pub(crate) fn tiberius_config(
     config.port(port);
     config.database(database);
     config.authentication(AuthMethod::sql_server(user, password.expose()));
-    // No per-round-trip bound (0.13 defaults to 30 s): `statement_timeout_s` is the budget.
     config.command_timeout(None);
 
-    // SQL Server forces TLS on the login handshake regardless; map the
-    // shared TlsConfig onto tiberius' cert-trust knobs. A private CA goes
-    // through `trust_cert_ca`; otherwise dev self-signed certs need
-    // `trust_cert` (accept-invalid). Default keeps full verification.
     config.encryption(EncryptionLevel::Required);
     match tls {
-        // `mode: disable` is the operator's explicit opt-in to an
-        // unauthenticated (trust-any-cert) connection — the SQL Server
-        // analogue of PG/MySQL remote plaintext. It is the documented way
-        // to keep trust-cert against a remote host the plaintext gate would
-        // otherwise have refused.
         Some(cfg) if mssql_trusts_cert_without_verify(cfg) => config.trust_cert(),
         Some(cfg) => {
-            // Strict cert validation is ON here (mode verify-ca/verify-full,
-            // no accept_invalid_certs). The TLS backend is OpenSSL
-            // (vendored-openssl via tiberius — see Cargo.toml), NOT
-            // rustls-webpki, so there is no CA name-constraint advisory to
-            // warn about: OpenSSL validates the chain against the trusted CA
-            // (and, for verify-full, the hostname) and rejects a certificate
-            // that does not chain to it (verified against a private-CA-
-            // configured SQL Server: the correct CA connects; a wrong CA is
-            // refused with OpenSSL `certificate verify failed`).
             if let Some(ca) = cfg.ca_file.as_deref() {
                 config.trust_cert_ca(ca);
             }
         }
         None => {
-            // Reached only for a LOOPBACK host (the require_tls_or_loopback gate refuses a
-            // remote host with no `tls:` block). On loopback, tiberius
-            // trusts the server certificate without verifying issuer or
-            // hostname: the handshake is encrypted but unauthenticated. That
-            // is safe here because the bytes never leave the box, and it
-            // keeps dev / self-signed docker setups working without opt-in.
-            // Warn once, naming the config key that turns on strict
-            // validation.
             static WARNED: std::sync::Once = std::sync::Once::new();
             WARNED.call_once(|| {
                 log::warn!(
@@ -255,15 +185,6 @@ pub(crate) async fn dial(config: Config, at: &str) -> Result<MssqlClient> {
 }
 
 /// Does this TLS posture mean "encrypt, but do NOT verify the certificate"?
-///
-/// `Disable`, `Require`, and `accept_invalid_certs` all do — SQL Server always
-/// encrypts the login packet, so "disable" is really trust-any, and `Require`'s
-/// documented contract (config/source.rs) is "TLS, accept any cert", the SAME
-/// as PG/MySQL/Mongo implement it. Treating `Require` as strict verify (bug
-/// hunt 2026-08-08) made `--tls require` fail against SQL Server's default
-/// self-signed cert while the identical flag connected on the other three
-/// engines. Only `verify-ca`/`verify-full` (without accept_invalid_certs) fall
-/// through to real chain validation.
 pub(crate) fn mssql_trusts_cert_without_verify(cfg: &TlsConfig) -> bool {
     cfg.mode == TlsMode::Disable || cfg.mode == TlsMode::Require || cfg.accept_invalid_certs
 }
@@ -286,27 +207,27 @@ pub fn parse_mssql_url(url: &str) -> Result<MssqlUrl> {
         )
     })?;
     let (user, password) = match userinfo.split_once(':') {
-        Some((u, p)) => (pct_decode(u), pct_decode(p)),
-        None => (pct_decode(userinfo), String::new()),
+        Some((u, p)) => (
+            crate::url_text::pct_decode(u),
+            crate::url_text::pct_decode(p),
+        ),
+        None => (crate::url_text::pct_decode(userinfo), String::new()),
     };
     let hostport = authority.hosts;
-    let database = authority
-        .rest
-        .strip_prefix('/')
-        .unwrap_or_default()
-        .to_string();
-    let (host, port) = match hostport.rsplit_once(':') {
-        Some((h, p)) => (
-            h.to_string(),
-            p.parse::<u16>().map_err(|_| {
-                crate::error::coded(
-                    crate::error::codes::CONFIG_SOURCE_URL_INVALID,
-                    format!("mssql url port not a number: {p}"),
-                )
-            })?,
-        ),
-        None => (hostport.to_string(), 1433),
+    let database = {
+        let raw = authority.rest.strip_prefix('/').unwrap_or_default();
+        seeded!(
+            "url-part-read-raw",
+            raw.to_string(),
+            crate::url_text::pct_decode(raw)
+        )
     };
+    let (host, port) = crate::url_text::split_host_port(hostport, 1433).map_err(|p| {
+        crate::error::coded(
+            crate::error::codes::CONFIG_SOURCE_URL_INVALID,
+            format!("mssql url port not a number: {p}"),
+        )
+    })?;
     if database.is_empty() {
         crate::rivet_bail!(
             crate::error::codes::CONFIG_SOURCE_URL_INVALID,
@@ -314,7 +235,7 @@ pub fn parse_mssql_url(url: &str) -> Result<MssqlUrl> {
         );
     }
     Ok(MssqlUrl {
-        host,
+        host: host.to_string(),
         port,
         user,
         password: password.into(),
@@ -323,15 +244,8 @@ pub fn parse_mssql_url(url: &str) -> Result<MssqlUrl> {
 }
 
 impl MssqlSource {
-    /// Connect to SQL Server, honouring the shared `TlsConfig`. `url` is the
-    /// resolved `sqlserver://user:pass@host:port/db` form. A successful return
-    /// has completed a TLS login handshake and a `SELECT 1` round-trip.
+    /// Connect to SQL Server, honouring the shared `TlsConfig`.
     pub fn connect_with_tls(url: &str, tls: Option<&TlsConfig>) -> Result<Self> {
-        // Refuse trust-any-cert to a remote host with no `tls:` block before any
-        // dial (CWE-295): SQL Server always encrypts the login handshake, but
-        // with `trust_cert` that handshake is unauthenticated, so a MITM is not
-        // detected. Loopback keeps trust-cert (dev); a remote host must opt in
-        // explicitly via `tls: { mode: ... }`.
         crate::source::require_tls_or_loopback(url, tls)?;
         let parts = parse_mssql_url(url)?;
         let config = tiberius_config(
@@ -361,22 +275,14 @@ impl MssqlSource {
             locking_read_warned: false,
             server_counters: None,
         };
-        // Health round-trip — surfaces auth/permission errors at connect time
-        // (doctor relies on this).
         src.query_scalar("SELECT 1")?;
-        // Best-effort pooler/gateway detection (mirrors PG `pg_backend_pid`
-        // drift and MySQL `CONNECTION_ID()` drift): one warning at connect
-        // time, never breaks the export. Disjoint borrows of `rt` (&) and
-        // `client` (&mut).
         let kind = detect_mssql_proxy_kind(&src.rt, &mut src.client);
         warn_proxy_kind(kind);
         src.proxy_kind = kind;
         Ok(src)
     }
 
-    /// Expose the proxy classification for diagnostics (preflight, integration
-    /// tests). Not part of the `Source` trait — same internal-may-change
-    /// contract as the rest of `rivet::source::mssql::*`.
+    /// Expose the proxy classification for diagnostics (preflight, integration tests).
     #[allow(dead_code)]
     pub fn proxy_kind(&self) -> MssqlProxyKind {
         self.proxy_kind
@@ -437,13 +343,7 @@ impl MssqlSource {
         }
     }
 
-    /// Declared `(precision, scale)` per decimal/numeric column, read from
-    /// `sys.columns`, for a simple single-table `SELECT … FROM [schema.]table`.
-    /// `None` for any query the FROM parser does not handle (joins, comma lists,
-    /// subqueries) or when the lookup fails — the schema builder then falls back
-    /// to data-inference, today's behaviour. Never fails the export: a lookup
-    /// error is logged (mirrors `pg_numeric_catalog_hints_opt`) and downgraded
-    /// to `None`.
+    /// Declared `(precision, scale)` per decimal/numeric column, read from `sys.columns`, for a simple single-table `SELECT … FROM [schema.]table`.
     fn mssql_decimal_catalog_hints_opt(
         &mut self,
         query: &str,
@@ -452,11 +352,6 @@ impl MssqlSource {
         match self.fetch_mssql_decimal_catalog_hints(&schema, &table) {
             Ok(m) => m,
             Err(e) => {
-                // The parser identified a single-table query but the catalog
-                // lookup itself failed (permissions, gateway). Surface it —
-                // otherwise a downstream decimal scale-0 freeze on an all-NULL
-                // first batch looks like a config problem when the real cause is
-                // a missing `sys.columns` read here.
                 log::warn!(
                     "mssql decimal catalog lookup failed for {schema}.{table} — decimal scale \
                      will fall back to first-batch inference (declare it with a `columns:` \
@@ -467,17 +362,12 @@ impl MssqlSource {
         }
     }
 
-    /// Probe `sys.columns` for each `decimal`/`numeric` column's declared
-    /// `(precision, scale)`. Joined through `sys.schemas`/`sys.objects` so the
-    /// `(schema, table)` pair resolves the exact base table the export reads.
+    /// Probe `sys.columns` for each `decimal`/`numeric` column's declared `(precision, scale)`.
     fn fetch_mssql_decimal_catalog_hints(
         &mut self,
         schema: &str,
         table: &str,
     ) -> Result<Option<HashMap<String, (u8, i8)>>> {
-        // `decimal` and `numeric` are synonyms in SQL Server and share one
-        // `sys.types` entry per scale; filter on the base type name so only
-        // fixed-point columns (not money / int / float) carry a hint.
         let sql = format!(
             "SELECT c.name, c.precision, c.scale \
              FROM sys.columns c \
@@ -514,9 +404,6 @@ impl MssqlSource {
 
         let mut map = HashMap::new();
         for row in &rows {
-            // sys.columns: name = sysname (nvarchar), precision/scale = tinyint.
-            // `try_get` (not `get`) so an unexpected cell type downgrades to a
-            // skipped hint rather than panicking the export.
             let name: Option<&str> = row.try_get(0).ok().flatten();
             let precision: Option<u8> = row.try_get(1).ok().flatten();
             let scale: Option<u8> = row.try_get(2).ok().flatten();
@@ -539,10 +426,7 @@ impl MssqlSource {
     }
 }
 
-/// Convert `sys.columns` `(precision, scale)` into Rivet `decimal(p, s)`
-/// parameters, rejecting anything outside the bounds the YAML overrides accept.
-/// SQL Server caps precision at 38 and scale ≤ precision, so a well-formed
-/// catalog row always passes; the guard defends against a degenerate row.
+/// Convert `sys.columns` `(precision, scale)` into Rivet `decimal(p, s)` parameters, rejecting anything outside the bounds the YAML overrides accept.
 fn catalog_decimal_to_params(precision: u8, scale: u8) -> Option<(u8, i8)> {
     if precision == 0 || precision > 38 {
         return None;
@@ -553,12 +437,7 @@ fn catalog_decimal_to_params(precision: u8, scale: u8) -> Option<(u8, i8)> {
     Some((precision, scale as i8))
 }
 
-/// Extract the `(schema, table)` of a simple single-table T-SQL
-/// `SELECT … FROM [schema.]table` (no joins, no comma list, no subquery in
-/// `FROM`). Returns `None` for anything more complex — the caller falls back to
-/// data-inference rather than guessing. Schema defaults to `dbo` when the table
-/// is unqualified. Handles `[bracketed]` and bare identifiers; pure `&str`
-/// work, so it is unit-testable without a live server.
+/// Extract the `(schema, table)` of a simple single-table T-SQL `SELECT … FROM [schema.]table` (no joins, no comma list, no subquery in `FROM`).
 fn parse_mssql_simple_from_table(query: &str) -> Option<(String, String)> {
     let mut names: Vec<String> = crate::sql::single_relation(query, false)?
         .into_iter()
@@ -567,7 +446,6 @@ fn parse_mssql_simple_from_table(query: &str) -> Option<(String, String)> {
     let table = names.pop()?;
     match names.len() {
         0 => Some(("dbo".to_string(), table)),
-        // `schema.table`, or `db.schema.table` with the database dropped.
         1 | 2 => Some((names.pop()?, table)),
         _ => None,
     }
@@ -587,45 +465,19 @@ impl Source for MssqlSource {
     }
 
     fn export(&mut self, request: &ExportRequest<'_>, sink: &mut dyn BatchSink) -> Result<()> {
-        // Keyset (seek) pages build a dialect-correct
-        // `OFFSET 0 ROWS FETCH NEXT n ROWS ONLY` clause (T-SQL has no `LIMIT`).
         let built = build_export_query(request, crate::config::SourceType::Mssql)?;
         let sql = built.sql.clone();
         let overrides = request.column_overrides.clone();
-        // Stream the result one Arrow batch at a time (peak RSS ≈ one batch,
-        // independent of `chunk_size`) through the shared `AdaptiveBatchController`
-        // — it starts at a probe size and caps the batch to a memory target once
-        // the real row width is known (the cap is computed in the loop). The SQL
-        // Server analogue of the PostgreSQL cursor's `FETCH N`. (`adaptive` resize
-        // is a no-op here: a single streaming connection can't sample DB pressure
-        // mid-stream; the OPT-2 concurrency governor handles that at the chunk
-        // layer instead.)
         let mut ctl =
             AdaptiveBatchController::new(request.tuning, request.tuning.batch_size.max(1));
         let mut cap_applied = false;
-        // Source-safety knobs (parity with the PG/MySQL export loops):
-        //  - lock_timeout → server-side `SET LOCK_TIMEOUT` so a blocked read
-        //    fails fast instead of waiting on a writer's lock indefinitely.
-        //  - statement_timeout → enforced client-side: SQL Server has no
-        //    statement-duration `SET` (unlike PG's `statement_timeout` / MySQL's
-        //    `max_execution_time`), so we stop pulling and error out once the
-        //    wall-clock budget is spent. The half-drained stream is dropped with
-        //    the (errored) source, so nothing leaks.
-        //  - throttle_ms → applied by the controller between batches.
         let lock_timeout_ms = request.tuning.lock_timeout_s.saturating_mul(1000);
         let stmt_timeout = (request.tuning.statement_timeout_s > 0)
             .then(|| std::time::Duration::from_secs(request.tuning.statement_timeout_s));
 
-        // Resolve declared decimal precision/scale from `sys.columns` for the
-        // *unwrapped* base query (the chunk/keyset wrapper hides the source
-        // table from the FROM parser, so resolve from the base — same restriction
-        // as PG's catalog hints). `None` ⇒ not a simple single-table SELECT, so
-        // the schema builder falls back to data-inference, today's behaviour.
         let hint_query = request.catalog_hint_query.unwrap_or(request.query);
         let decimal_hints = self.mssql_decimal_catalog_hints_opt(hint_query);
 
-        // Record that we are about to mutate session state so `Drop` resets it
-        // (Epic 18 B2). Set before the disjoint-borrow destructure below.
         if lock_timeout_ms > 0 {
             self.lock_timeout_applied = true;
         }
@@ -657,9 +509,6 @@ impl Source for MssqlSource {
             let mut columns: Vec<tiberius::Column> = Vec::new();
             let mut buf: Vec<tiberius::Row> = Vec::with_capacity(ctl.target());
             let mut schema: Option<SchemaRef> = None;
-            // Per-value ceiling (MB→bytes; `0`/None disables), enforced
-            // pre-allocation inside the batch builder so an oversized cell bails
-            // before Arrow reserves the buffer. Same source of truth as the sink.
             let max_value_bytes = request.tuning.max_value_bytes();
 
             while let Some(item) = stream
@@ -670,30 +519,14 @@ impl Source for MssqlSource {
                 if let Some(budget) = stmt_timeout
                     && started.elapsed() > budget
                 {
-                    // Typed marker (not a bare string): the retry classifier
-                    // downcasts the TYPE → permanent, so a reworded message can
-                    // never silently make this deterministic timeout retryable.
-                    // Its Display carries the same actionable hint for the user.
                     return Err(crate::source::StatementDurationTimeout::mssql(
                         budget.as_secs(),
                     )
                     .into());
                 }
                 match item {
-                    // A single SELECT yields one metadata token (the column
-                    // shape) ahead of its rows.
                     QueryItem::Metadata(meta) if columns.is_empty() => {
                         columns = meta.columns().to_vec();
-                        // First moment the column shape is known. SQL Server
-                        // can't seed the controller from `effective_batch_size`
-                        // up-front (the schema isn't known until now), so raise
-                        // the ceiling here — otherwise it stays pinned at the
-                        // static `batch_size` and the post-probe memory cap
-                        // (shrink-only) can never grow a narrow table's batch
-                        // past it, the way the PG/MySQL loops do. A provisional
-                        // schema (no rows) is enough for the row-byte estimate;
-                        // the real, decimal-scale-correct schema is still built
-                        // per batch in `emit_mssql_batch`.
                         if let Ok((provisional, _)) = arrow_convert::mssql_columns_to_schema(
                             &columns,
                             &overrides,
@@ -721,10 +554,6 @@ impl Source for MssqlSource {
                             )?;
                             let n = buf.len();
                             buf.clear();
-                            // First batch: cap to a memory target now that the
-                            // real Arrow width is known (same probe→cap the
-                            // PG/MySQL loops do, clamped to the configured
-                            // batch_size by the controller).
                             if !cap_applied && n > 0 {
                                 let arrow_per_row = (arrow_bytes / n).max(64);
                                 let target_mb = request
@@ -744,18 +573,12 @@ impl Source for MssqlSource {
                                 }
                                 cap_applied = true;
                             }
-                            // adaptive no-op mid-stream (sample → None); throttle.
                             ctl.after_batch(|| None);
                             ctl.throttle(n);
                         }
                     }
                 }
             }
-            // Final partial batch — or, for an empty result set, a single call
-            // that still emits the (empty) schema so the sink writes a
-            // correctly-typed empty output. Rows arrive in the query's
-            // `ORDER BY` order, so the last batch's last row carries the max
-            // cursor the sink extracts.
             if !buf.is_empty() || schema.is_none() {
                 emit_mssql_batch(
                     &columns,
@@ -822,11 +645,7 @@ impl Source for MssqlSource {
         query: &str,
         column_overrides: &ColumnOverrides,
     ) -> Result<Vec<TypeMapping>> {
-        // Recover declared decimal precision/scale from `sys.columns` — the same
-        // catalog hint the full-export path applies — so a scan-free probe (CDC
-        // resolve, `rivet check`) resolves decimals identically to a batch export.
         let decimal_hints = self.mssql_decimal_catalog_hints_opt(query);
-        // Zero-row wrapper so the server returns column metadata without a scan.
         let wrapped = format!("SELECT * FROM ({query}) AS _rivet_q WHERE 1 = 0");
         let overrides = column_overrides.clone();
         let Self { rt, client, .. } = self;
@@ -850,13 +669,8 @@ impl Source for MssqlSource {
                 })?
                 .map(<[_]>::to_vec)
                 .unwrap_or_default();
-            // Drain so the connection is reusable.
             let _ = stream.into_first_result().await;
-            Ok(arrow_convert::mssql_type_mappings(
-                &columns,
-                &overrides,
-                decimal_hints.as_ref(),
-            ))
+            arrow_convert::mssql_type_mappings(&columns, &overrides, decimal_hints.as_ref())
         })
     }
 
@@ -896,11 +710,23 @@ impl Source for MssqlSource {
             let Some((schema, table)) = parse_mssql_simple_from_table(query) else {
                 return Ok(None);
             };
+            let base = match crate::sql::bare_column_source(query, column) {
+                _ if seeded!(
+                    "cursor-nullability-not-traced-to-its-source-column",
+                    true,
+                    false
+                ) =>
+                {
+                    column.to_string()
+                }
+                Some(part) => part.name,
+                None => return Ok(None),
+            };
             let catalog = format!(
                 "SELECT c.is_nullable FROM sys.columns c WHERE c.object_id = OBJECT_ID(N'[{}].[{}]') AND c.name = N'{}'",
                 schema.replace(']', "]]").replace('\'', "''"),
                 table.replace(']', "]]").replace('\'', "''"),
-                column.replace('\'', "''")
+                base.replace('\'', "''")
             );
             let row = client
                 .query(catalog.as_str(), &[])
@@ -926,8 +752,6 @@ impl Source for MssqlSource {
     }
 
     fn harm_counters(&mut self) -> Option<Vec<(String, i64)>> {
-        // Delegates to the inherent method (same name; inherent wins in
-        // method-call resolution, so this is a delegation, not recursion).
         MssqlSource::harm_counters(self)
     }
 
@@ -936,15 +760,6 @@ impl Source for MssqlSource {
             return None;
         }
         let Self { rt, client, .. } = self;
-        // FOREIGN-pressure proxy for the governor: cumulative `Log Flush
-        // Waits/sec` (redo-WRITE pressure). A read-only export barely moves it
-        // — which is exactly what the governor needs: the export's own
-        // tempdb worktable spills cannot talk it into shedding its own workers
-        // (field find, 2026-08-13 — see `Source::sample_governor_pressure`).
-        // The Databases object exposes one row PER DATABASE plus a `_Total`
-        // row (verified live: _Total == the sum of the others), so a SUM over
-        // all rows double-counts — and a dropped database SHRINKS it, reading
-        // as "pressure eased". Read the `_Total` row directly.
         let sql = "SELECT cntr_value FROM sys.dm_os_performance_counters \
                    WHERE counter_name LIKE 'Log Flush Waits%' AND instance_name = '_Total'";
         rt.block_on(async {
@@ -954,10 +769,6 @@ impl Source for MssqlSource {
     }
 
     fn server_context(&mut self) -> Option<String> {
-        // SERVERPROPERTY + @@ globals — cheap, no elevated permission. SQL Server's
-        // query timeout is CLIENT-side (there is no server "ERROR 3024"), so the
-        // load-bearing forensics here are version/edition plus the lock timeout and
-        // connection cap. Best-effort per field.
         let version = self
             .query_scalar("SELECT CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(128))")
             .ok()
@@ -993,21 +804,12 @@ impl Source for MssqlSource {
 }
 
 impl MssqlSource {
-    /// Snapshot lock-wait counters from `sys.dm_os_wait_stats` (LCK_* waits) —
-    /// the SQL Server contention signal the 0.12 harm A/B tracked. This is a
-    /// server-scoped DMV: it needs `VIEW SERVER STATE`; a missing grant (or any
-    /// query error) yields `None`, so the metric is simply skipped, never failing
-    /// the export. Cumulative since server start; the pipeline deltas it around
-    /// the run.
+    /// Snapshot lock-wait counters from `sys.dm_os_wait_stats` (LCK_* waits).
     pub(crate) fn harm_counters(&mut self) -> Option<Vec<(String, i64)>> {
         if !self.server_counters_readable() {
             return None;
         }
         let Self { rt, client, .. } = self;
-        // Lock waits; logical reads of every completed query (dm_exec_query_stats, updated
-        // as each query finishes); the buffer pool's page lookups/reads and the work
-        // tables/files a sort or hash spills to tempdb — performance counters SQL Server
-        // refreshes about once a second, so a sub-second run records 0 for those.
         let sql = "SELECT (SELECT SUM(waiting_tasks_count) FROM sys.dm_os_wait_stats \
                            WHERE wait_type LIKE 'LCK%'), \
                           (SELECT SUM(wait_time_ms) FROM sys.dm_os_wait_stats \
@@ -1043,10 +845,7 @@ impl MssqlSource {
         })
     }
 
-    /// Whether this login may read `sys.dm_os_performance_counters` and the other server DMVs,
-    /// asked once per connection. The server answers a denied DMV read with an error the driver
-    /// logs at ERROR, once per sample, so a login without `VIEW SERVER PERFORMANCE STATE` (SQL
-    /// Server 2022) or `VIEW SERVER STATE` never sends one: the counters are skipped, quietly.
+    /// Whether this login may read `sys.dm_os_performance_counters` and the other server DMVs, asked once per connection.
     fn server_counters_readable(&mut self) -> bool {
         if let Some(known) = self.server_counters {
             return known;
@@ -1066,10 +865,7 @@ impl MssqlSource {
         readable
     }
 
-    /// Does the current login hold `VIEW SERVER STATE` — the permission
-    /// [`harm_counters`] needs? `Some(true/false)` via `HAS_PERMS_BY_NAME`
-    /// (callable by any login for its own permissions, so this probe itself
-    /// never needs a grant); `None` only if even that round-trip fails.
+    /// Does the current login hold `VIEW SERVER STATE` — the permission [`harm_counters`] needs?
     pub(crate) fn has_view_server_state(&mut self) -> Option<bool> {
         let Self { rt, client, .. } = self;
         rt.block_on(async {
@@ -1087,15 +883,10 @@ impl MssqlSource {
         })
     }
 
-    /// One-shot CDC health probe for `rivet doctor` (see
-    /// `preflight::cdc_health`): is CDC enabled on the database, does the
-    /// capture instance exist (its min LSN), and is the Agent service running.
-    /// The Agent query needs `VIEW SERVER STATE` — a permission failure yields
-    /// `agent_running: None` (report "could not verify"), never an error.
+    /// One-shot CDC health probe for `rivet doctor` (see `preflight::cdc_health`).
     pub(crate) fn cdc_health(&mut self, capture_instance: Option<&str>) -> Result<MssqlCdcProbe> {
         let Self { rt, client, .. } = self;
         rt.block_on(async {
-            // max LSN: NULL ⇒ sp_cdc_enable_db has not run.
             let max: Option<String> = client
                 .query(
                     "SELECT CONVERT(varchar(24), sys.fn_cdc_get_max_lsn(), 1)",
@@ -1106,7 +897,6 @@ impl MssqlSource {
                 .await?
                 .and_then(|r| r.get::<&str, _>(0).map(|s| s.to_string()));
 
-            // min LSN of the capture instance: NULL ⇒ the instance is unknown.
             let min: Option<String> = match capture_instance {
                 None => None,
                 Some(ci) => client
@@ -1118,11 +908,9 @@ impl MssqlSource {
                     .into_row()
                     .await?
                     .and_then(|r| r.get::<&str, _>(0).map(|s| s.to_string()))
-                    // an all-zero min LSN is the same "no such instance" signal.
                     .filter(|s| s.trim_start_matches("0x").chars().any(|c| c != '0')),
             };
 
-            // Agent service state — permission-gated, so failures are `None`.
             let agent: Option<bool> = async {
                 let row = client
                     .query(
@@ -1153,34 +941,21 @@ impl MssqlSource {
 /// Result of [`MssqlSource::cdc_health`].
 pub(crate) struct MssqlCdcProbe {
     pub cdc_enabled: bool,
-    /// The database's current max LSN (`0x…` hex) — the `initial: snapshot`
-    /// anchor position. `None` ⇔ CDC not enabled.
+    /// The database's current max LSN (`0x…` hex) — the `initial: snapshot` anchor position.
     pub max_lsn_hex: Option<String>,
-    /// Hex LSN (`0x…`) of the capture instance's retained minimum; `None` ⇒
-    /// the instance does not exist (or none was configured).
+    /// Hex LSN (`0x…`) of the capture instance's retained minimum.
     pub instance_min_lsn: Option<String>,
     /// `None` ⇒ could not verify (no `VIEW SERVER STATE`).
     pub agent_running: Option<bool>,
 }
 
-/// Connect and check whether the login has `VIEW SERVER STATE` — used by
-/// `rivet doctor` to *advise* (never block) that source-harm metrics will be
-/// skipped without it. `None` on connect failure, in which case doctor stays
-/// silent rather than guess.
+/// Connect and check whether the login has `VIEW SERVER STATE`.
 pub(crate) fn sample_view_server_state(url: &str, tls: Option<&TlsConfig>) -> Option<bool> {
     let mut src = MssqlSource::connect_with_tls(url, tls).ok()?;
     src.has_view_server_state()
 }
 
-/// Emit one Arrow batch from `rows`, building (and emitting) the schema on the
-/// first call and reusing it thereafter. tiberius drops a decimal column's
-/// declared precision/scale, so the scale is recovered from the `decimal_hints`
-/// catalog lookup (the upstream, lossless source that survives an all-NULL
-/// first batch); only an expression/computed column with no catalog entry falls
-/// back to inferring the scale from the first batch's data.
-///
-/// Returns the emitted batch's Arrow memory footprint (bytes), so the export
-/// loop can size the memory cap from the real row width; `0` for an empty batch.
+/// Emit one Arrow batch from `rows`, building (and emitting) the schema on the first call and reusing it thereafter.
 fn emit_mssql_batch(
     columns: &[tiberius::Column],
     overrides: &ColumnOverrides,
@@ -1215,12 +990,7 @@ fn emit_mssql_batch(
     Ok(0)
 }
 
-/// Render a T-SQL `NUMERIC` as exact decimal text: the unscaled value with a
-/// decimal point inserted at `scale` (zero-padded so `(5, scale 3)` is
-/// `"0.005"`, not `".5"`). Extracted from the `ColumnData::Numeric` arm so the
-/// digit arithmetic is unit-testable — `tiberius::Row` cannot be constructed
-/// outside the driver, and the W4 mutation run showed the split/pad arithmetic
-/// unguarded.
+/// Render a T-SQL `NUMERIC` as exact decimal text.
 fn numeric_to_display(raw: i128, scale: usize) -> String {
     if scale == 0 {
         raw.to_string()
@@ -1233,9 +1003,7 @@ fn numeric_to_display(raw: i128, scale: usize) -> String {
     }
 }
 
-/// Render a row's first column as a display string for `query_scalar`
-/// (min/max bounds, COUNT(*), SELECT 1). Covers the scalar shapes the planner
-/// asks for; richer typing flows through the export path, not here.
+/// Render a row's first column as a display string for `query_scalar` (min/max bounds, COUNT(*), SELECT 1).
 fn scalar_to_string(row: &tiberius::Row) -> Option<String> {
     use tiberius::ColumnData;
     let cell = row.cells().next().map(|(_, d)| d)?;
@@ -1250,12 +1018,6 @@ fn scalar_to_string(row: &tiberius::Row) -> Option<String> {
         ColumnData::String(v) => v.as_ref().map(|s| s.to_string()),
         ColumnData::Numeric(v) => v.map(|n| numeric_to_display(n.value(), n.scale() as usize)),
         ColumnData::Guid(v) => v.map(|g| g.to_string()),
-        // Date/time: the Debug fallback rendered these as `Date(Some(Date(738520)))`,
-        // which `scalar::parse_date_flexible` (chunk_by_days / date-keyset min/max)
-        // cannot read — so date-window chunking on an MSSQL DATE key failed the run.
-        // Decode via tiberius' chrono `FromSql` (`try_get`, the same path
-        // arrow_convert uses) and render ISO: `YYYY-MM-DD` / `YYYY-MM-DD HH:MM:SS[.f]` (the
-        // fraction kept, or a sampled keyset ceiling excludes the newest row).
         ColumnData::Date(_) => row
             .try_get::<chrono::NaiveDate, _>(0)
             .ok()
@@ -1362,8 +1124,6 @@ fn introspect_mssql_on(src: &mut MssqlSource, qualified_table: &str) -> Result<T
         None => ("dbo".to_string(), qualified_table.to_string()),
     };
 
-    // Row estimate from the `sys.partitions` catalog (heap/clustered index, index_id 0/1):
-    // a read-only login sees it, unlike the `dm_db_partition_stats` DMV.
     let count_sql = format!(
         "SELECT SUM(p.rows) FROM sys.partitions p \
          JOIN sys.objects o ON o.object_id = p.object_id \
@@ -1385,14 +1145,8 @@ fn introspect_mssql_on(src: &mut MssqlSource, qualified_table: &str) -> Result<T
 
     let finer_than_microsecond = finer_than_microsecond_columns(src, &schema, &table)?;
 
-    // Single-column integer PK → range chunking.
     let single_int_pk = src.query_scalar(&single_int_pk_sql(&schema, &table))?;
 
-    // Integer-family columns — the safety set for an explicit `chunk_column`.
-    // Same CHAR(31)-delimited STRING_AGG pattern as the keyset probe above.
-    // CONVERT(nvarchar(max), ..) because STRING_AGG over a non-max input caps its
-    // result at 8000 bytes and raises Msg 9829 past it — a wide table (~160 int
-    // columns of 30-char names) then failed EVERY chunked plan (#21 bughunt).
     let int_sql = format!(
         "SELECT STRING_AGG(CONVERT(nvarchar(max), c.name), CHAR(31)) FROM sys.columns c \
          JOIN sys.types t ON t.user_type_id = c.user_type_id \
@@ -1469,9 +1223,7 @@ mod tls_posture_tests {
         assert!(w.contains("database 'a]b'"), "{w}");
     }
 
-    /// Require must trust-without-verify, matching its documented contract and
-    /// the three sibling engines — the bug hunt find was mssql treating it as
-    /// strict verify. verify-ca/full must NOT trust (real validation).
+    /// Require must trust-without-verify, matching its documented contract and the three sibling engines.
     #[test]
     fn require_trusts_like_its_siblings_verify_modes_do_not() {
         assert!(
@@ -1501,17 +1253,8 @@ mod tls_posture_tests {
 mod tests {
     use super::{catalog_decimal_to_params, parse_mssql_simple_from_table, parse_mssql_url};
 
-    // Regression (round-2 audit #1): the shared `build_url_from_fields` percent-
-    // ENCODES userinfo for every engine, but this hand-rolled parser must
-    // percent-DECODE it back (PG/MySQL/Mongo get that from their driver's URL
-    // parser). Without the decode, tiberius receives the literal `%40`/`%2F`
-    // bytes and auth FAILS for any password outside the RFC-3986 unreserved set —
-    // exactly the special chars SQL Server's complexity policy encourages. RED
-    // against the pre-fix `.to_string()` (no decode).
     #[test]
     fn mssql_url_percent_decodes_userinfo() {
-        // `P@ss/w0rd!` → encoded `P%40ss%2Fw0rd%21`, and the user `dom\svc` →
-        // `dom%5Csvc` (backslash is a legit SQL Server login char).
         let parsed =
             parse_mssql_url("sqlserver://dom%5Csvc:P%40ss%2Fw0rd%21@db.internal:1433/rivet")
                 .expect("well-formed encoded url must parse");
@@ -1524,6 +1267,61 @@ mod tests {
         assert_eq!(parsed.host, "db.internal");
         assert_eq!(parsed.port, 1433);
         assert_eq!(parsed.database, "rivet");
+    }
+
+    /// A bracketed IPv6 host with no port defaults to 1433, and the database is percent-decoded like the userinfo.
+    #[test]
+    fn mssql_url_reads_a_portless_bracketed_host_and_decodes_the_database() {
+        for (url, host, port, database) in [
+            ("sqlserver://u:p@[::1]/db", "[::1]", 1433, "db"),
+            (
+                "sqlserver://u:p@[2001:db8::1]/db",
+                "[2001:db8::1]",
+                1433,
+                "db",
+            ),
+            ("sqlserver://u:p@[::1]:1444/db", "[::1]", 1444, "db"),
+            ("sqlserver://u:p@h/Sales%20DB", "h", 1433, "Sales DB"),
+            (
+                "sqlserver://u:p@[::1]/Sales%20DB",
+                "[::1]",
+                1433,
+                "Sales DB",
+            ),
+            ("mssql://u:p@h:1444/caf%C3%A9", "h", 1444, "caf\u{e9}"),
+        ] {
+            let p = parse_mssql_url(url).unwrap_or_else(|e| panic!("{url}: {e}"));
+            assert_eq!(
+                (p.host.as_str(), p.port, p.database.as_str()),
+                (host, port, database),
+                "{url}"
+            );
+        }
+    }
+
+    /// A host form other than the portless bracket reads as the legacy parser read it.
+    #[test]
+    fn mssql_url_host_forms_the_split_does_not_change_read_as_before() {
+        for host in [
+            "h",
+            "h:1444",
+            "10.0.0.5",
+            "10.0.0.5:1444",
+            "[::1]:1444",
+            "[::1",
+            "h:",
+            "h:zz",
+            "[::1]:zz",
+            "h1:1,h2:2",
+            ":1444",
+        ] {
+            let url = format!("sqlserver://u:p@{host}/db");
+            let old = legacy_parse(&url).map(|o| (o.0, o.1, o.4));
+            let new = parse_mssql_url(&url)
+                .ok()
+                .map(|n| (n.host, n.port, n.database));
+            assert_eq!(old, new, "{url}");
+        }
     }
 
     #[test]
@@ -1551,8 +1349,11 @@ mod tests {
             .or_else(|| url.strip_prefix("mssql://"))?;
         let (userinfo, hostpart) = rest.rsplit_once('@')?;
         let (user, password) = match userinfo.split_once(':') {
-            Some((u, p)) => (super::pct_decode(u), super::pct_decode(p)),
-            None => (super::pct_decode(userinfo), String::new()),
+            Some((u, p)) => (
+                crate::url_text::pct_decode(u),
+                crate::url_text::pct_decode(p),
+            ),
+            None => (crate::url_text::pct_decode(userinfo), String::new()),
         };
         let (hostport, database) = hostpart
             .split_once('/')
@@ -1622,7 +1423,7 @@ mod tests {
         assert!(parse_mssql_url("sqlserver://127.0.0.1:1/x@evil.com/db").is_err());
     }
 
-    /// The JDBC-property and ADO forms are refused as before, and the refusal — which quotes the string — carries no password once redacted.
+    /// The JDBC-property and ADO forms are refused as before, and the refusal.
     #[test]
     fn a_keyword_value_string_is_refused_and_its_error_redacts_the_password() {
         for (conn, said) in [
@@ -1652,9 +1453,6 @@ mod tests {
 
     #[test]
     fn numeric_display_inserts_the_point_exactly() {
-        // W4: the split/pad arithmetic (digits.len() - scale, width scale+1)
-        // had no direct test. Goldens over the tricky shapes: sub-1 values
-        // needing zero-pad, negatives, scale 0.
         use super::numeric_to_display as n;
         assert_eq!(n(12345, 2), "123.45");
         assert_eq!(n(5, 3), "0.005", "zero-pad below 1");
@@ -1754,7 +1552,6 @@ mod tests {
 
     #[test]
     fn parse_ignores_from_inside_string_literal() {
-        // The first top-level FROM is the real one, not the literal's bytes.
         assert_eq!(
             parse("SELECT 'from x', amount FROM ledger WHERE note = 'paid from cash'"),
             Some(("dbo".into(), "ledger".into()))
@@ -1763,14 +1560,9 @@ mod tests {
 
     #[test]
     fn catalog_bounds_accept_well_formed_and_reject_degenerate() {
-        // DECIMAL(10,2) — the bug's column — rides through losslessly.
         assert_eq!(catalog_decimal_to_params(10, 2), Some((10, 2)));
-        // SQL Server max precision.
         assert_eq!(catalog_decimal_to_params(38, 0), Some((38, 0)));
         assert_eq!(catalog_decimal_to_params(38, 38), Some((38, 38)));
-        // Degenerate rows are rejected (defends against a corrupt catalog row),
-        // so the builder falls back to data-inference rather than emitting a
-        // nonsensical decimal type.
         assert_eq!(catalog_decimal_to_params(0, 0), None);
         assert_eq!(catalog_decimal_to_params(39, 0), None);
         assert_eq!(catalog_decimal_to_params(10, 11), None);
@@ -1795,8 +1587,7 @@ mod key_probe_sql_tests {
         &sql[w..g]
     }
 
-    /// H24: a composite UNIQUE(a NOT NULL, b NULL) must not surface `a` as a keyset key, so the
-    /// per-column filters live in HAVING where COUNT(*) still counts every key column.
+    /// H24: a composite UNIQUE(a NOT NULL, b NULL) must not surface `a` as a keyset key, so the per-column filters live in HAVING where COUNT(*) still counts every key column.
     #[test]
     fn keyset_probe_counts_every_key_column_of_the_index() {
         let sql = keyset_keys_sql("dbo", "orders");
@@ -1820,8 +1611,7 @@ mod key_probe_sql_tests {
         assert!(!sql.contains("sys.types"), "{sql}");
     }
 
-    /// H25: a composite PK is one index with COUNT(*) = 2 — grouping per column made each part a
-    /// "single-column" PK and TOP 1 picked one arbitrarily.
+    /// H25: a composite PK is one index with COUNT(*) = 2.
     #[test]
     fn single_int_pk_probe_groups_per_index_not_per_column() {
         let sql = single_int_pk_sql("dbo", "orders");

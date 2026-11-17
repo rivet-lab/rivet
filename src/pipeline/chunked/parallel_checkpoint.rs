@@ -1,20 +1,4 @@
 //! Multi-worker chunk-checkpoint runner — twin of `sequential_checkpoint.rs`.
-//!
-//! `run_chunked_parallel_checkpoint` spawns `cp.parallel` worker threads
-//! inside a `std::thread::scope` and lets them race to claim chunk tasks
-//! from the state DB. Each worker opens its own source connection (ADR-0011
-//! `Source: Send` not `Sync`), runs the chunk with per-attempt retry, and
-//! commits per-chunk state directly via the `StateStore::*_at_ref`
-//! ref-based helpers so all workers share a single SQLite connection.
-//!
-//! Same fault-injection hooks (`after_chunk_file:N`,
-//! `after_chunk_complete:N`) as the sequential path — see the doc-comment
-//! inside the worker closure. Live coverage: `live_chunked_recovery.rs` C3
-//! and C4 (`mysql_chunked_recovery` mirrors).
-//!
-//! Shared chunked-orchestration helpers (`chunked_plan`, `config_hint`,
-//! `ensure_chunk_checkpoint_plan`, `record_chunked_commit`) live in
-//! [`super`]. The sequential runner lives in [`super::sequential_checkpoint`].
 
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -43,36 +27,18 @@ pub(in crate::pipeline) fn run_chunked_parallel_checkpoint(
     meta: &mut crate::pipeline::job::MetaConn<'_>,
     progress: &crate::state::ProgressClaim<'_>,
 ) -> Result<()> {
-    // Subject to the per-runner facade contract (ADR-0018) — dispatched directly
-    // from job.rs (bypassing run_export), so it sets the flag itself.
     summary.state_backed = true;
     let cp = chunked_plan(plan);
 
     let chunks = if plan.resume {
-        // A resume re-executes the STORED plan, and one thing must still be true
-        // for that to be sound — and it was not checked, because this arm
-        // skipped the whole match below (round-11 bughunt).
-        //
-        // The SCHEMA must not have drifted, checked on the run's metadata
-        //    connection. `on_schema_drift: fail` was inert
-        //    here: DEMONSTRATED — a `DROP COLUMN` between the crash and the resume
-        //    produced exit 0, `rows: 300`, and three parts under ONE
-        //    `schema_fingerprint` whose schemas disagree. The identical drop without
-        //    `--resume` fails loudly. The gap between a crash and its resume is
-        //    exactly where a schema change is most likely.
         super::resumed_chunk_plan(meta.require()?, plan, state, summary, &chunk_source)?
     } else {
         match chunk_source {
-            // Detect: the run's metadata connection computes ranges + runs the
-            // pre-chunk drift check (ADR-0021).
             ChunkSource::Detect => {
                 super::prepare_chunk_plan(meta.require()?, plan, Some(state), summary)?
             }
             ChunkSource::Precomputed(ranges) => {
-                // Ranges come from the artifact; the DRIFT GATE still runs.
                 summary.chunks_precomputed = true;
-                // No ranges ⇒ no rows will be read, so there is nothing for the
-                // gate to protect and no reason to open a connection to say so.
                 if super::precomputed_ranges_need_the_drift_gate(&ranges) {
                     super::check_drift_only(meta.require()?, plan, Some(state), summary)?;
                 }
@@ -84,15 +50,8 @@ pub(in crate::pipeline) fn run_chunked_parallel_checkpoint(
     let run_id =
         ensure_chunk_checkpoint_plan(state, plan, cp, summary, &chunks, config_path, progress)?;
 
-    // ADR-0012 M8: when resuming a chunked run, reconcile the destination's
-    // prior-run manifest with the local chunk_task state.  Parts whose
-    // manifest entry diverges from what's actually on the destination
-    // (missing object, size drift) get their chunk_task reset to `pending`
-    // so the worker loop below re-exports them.  No-op for fresh prefixes
-    // and pre-0.7.0 destinations.  See `pipeline/chunked/resume_m8.rs`.
     if plan.resume {
         let stats = super::apply_m8_resume_decisions(state, &run_id, plan, summary)?;
-        // #3: crash-recovery resume signal, same as the sequential runner.
         summary.resumed = stats.adopted_prior_work();
     }
 
@@ -110,59 +69,24 @@ pub(in crate::pipeline) fn run_chunked_parallel_checkpoint(
 
     let state_ref = state.state_ref().clone();
     let run_id_arc = std::sync::Arc::new(run_id.clone());
-    // Rows streamed across ALL tasks (completed + in-flight) — drives the
-    // per-batch progress feed so the bar ticks during a chunk's read.
     let streamed_rows = std::sync::Arc::new(std::sync::atomic::AtomicI64::new(0));
-    // Retries/reconnects across workers, folded into the summary after the scope joins.
     let tally = super::attempt::RetryTally::default();
     let idle_sources = super::IdleSources::default();
-    // Parts, shapes, checksums and failures, drained post-join in FanIn's fixed order.
-    // The workers are spawned here, not through FanIn::spawn: this runner's crash
-    // hooks (`maybe_panic_at_chunk`) must still take the process down.
     let fan = crate::pipeline::fan_in::FanIn::default();
-    // ADR-0012 M3: schema fingerprint captured once across workers.  None
-    // until any worker exports a non-empty chunk and resolves the dest schema.
     let shared_fingerprint: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
     let plan_for_workers = plan.clone();
     let cp_for_workers = cp.clone();
-    // Per-chunk file_log writes need a state path + label strings the workers
-    // capture into their thread closure. Each worker opens its own StateStore
-    // per chunk against the same on-disk SQLite (the connection is not Sync).
-    // The post-scope drain uses the main-thread `state` reference + state=None
-    // to commit::record_part so file_log is not double-written.
     let fmt_label = plan.format.label();
     let comp_label = plan.compression.label();
     let mode_label = plan.strategy.mode_label();
 
-    // The frame IS the fix for the history this file used to narrate here: the
-    // two checkpoint runners once bypassed the cross-shape guard entirely
-    // (runner-bypass class). Now the guard rides in the only door to a
-    // destination.
     let (shared_destination, _frame_ext) = crate::pipeline::frame::RunnerFrame::open_shared(plan)?;
 
-    // OPT-2 adaptive concurrency governor, through the SHARED seam (identical wiring in
-    // `chunked/exec.rs` and `keyset.rs`; #152). This runner shipped WITHOUT it, so
-    // `tuning.adaptive: true` was a silent no-op on exactly the shape `rivet init` scaffolds
-    // (`chunk_checkpoint: true` + `parallel: N`): job.rs dispatches a RESUMABLE chunked plan
-    // here, so dropping `chunk_checkpoint` from an otherwise identical config was the
-    // difference between a governed run and an ungoverned one — with nothing in the log to
-    // tell them apart (bughunt 2026-08-14, finding 0).
-    //
-    // Pool shape, not spawner shape: `parallel` long-lived workers claim tasks in a loop, so
-    // the permit is taken PER CLAIMED TASK (`TaskPermit`, acquired before the claim) and the
-    // governor's stop predicate counts WORKERS that exited (`WorkerFinished`), i.e. `total`
-    // is the pool size, not the task count. Disarmed (the default) the semaphore starts with
-    // one permit per worker and never resizes, so no worker ever parks — the run behaves
-    // exactly as it did before.
     let semaphore = resource::Semaphore::new(parallel.max(1));
     let governor = crate::pipeline::governor::GovernorHarness::arm(plan, parallel);
 
     std::thread::scope(|s| {
-        // Governor thread (shared seam): samples source pressure on its own monitoring
-        // connection and resizes the permit ceiling within [floor, ceiling], self-terminating
-        // once every pool worker has FINISHED (drained, errored, or panicked) so a failing
-        // worker can't strand it and deadlock the scope.
         governor.spawn_into(s, &semaphore, fan.finished(), parallel, &plan.export_name);
 
         for _ in 0..parallel {
@@ -183,13 +107,8 @@ pub(in crate::pipeline) fn run_chunked_parallel_checkpoint(
             let semaphore = &semaphore;
 
             s.spawn(move || {
-                // Count this worker as FINISHED on every exit path (drained queue, claim
-                // error, unwinding panic) — the governor thread's only exit is
-                // `finished >= total`, so a missed bump hangs `thread::scope` forever.
                 let _finish = crate::pipeline::governor::WorkerFinished::new(fan_r.finished());
                 let shared_destination = shared_destination;
-                // One state store per worker, held for its lifetime: every claim and
-                // chunk-state write below runs on it, not on a fresh connection each.
                 let st = match StateStore::open_at_ref(&state_ref) {
                     Ok(st) => st,
                     Err(e) => {
@@ -198,10 +117,6 @@ pub(in crate::pipeline) fn run_chunked_parallel_checkpoint(
                     }
                 };
                 loop {
-                    // One permit per claimed task, taken BEFORE the claim: a shed then
-                    // parks this worker without leaving a chunk_task pinned `running`
-                    // while it waits. The guard releases at the end of THIS iteration on
-                    // every path (`break`, `continue`, panic).
                     let _permit = crate::pipeline::governor::TaskPermit::acquire(semaphore);
                     let claimed = match st.claim_next_chunk_task(run_id_arc.as_str()) {
                         Ok(c) => c,
@@ -232,7 +147,7 @@ pub(in crate::pipeline) fn run_chunked_parallel_checkpoint(
                                     run_id_arc.as_str(),
                                     chunk_index,
                                     &format!("{e:#}"),
-                                    false, // a malformed key parses the same way every time
+                                    false,
                                 ),
                             );
                             fan_r.fail(&format!("chunk {chunk_index}"), e);
@@ -249,7 +164,6 @@ pub(in crate::pipeline) fn run_chunked_parallel_checkpoint(
                         plan_w.source.source_type,
                     );
 
-                    // Parts a FAILED chunk left durable: counted and logged below, never lost.
                     let mut debris: Vec<super::super::commit::PartRecord> = Vec::new();
                     let result = super::attempt::run_with_retries(
                         &plan_w,
@@ -272,8 +186,6 @@ pub(in crate::pipeline) fn run_chunked_parallel_checkpoint(
                                 &mut sink,
                             )?;
                             sink.finish_writer()?;
-                            // ADR-0012 M3: fingerprint the schema as soon as the sink
-                            // resolves it. Race-free across workers (OnceLock::set).
                             if let Some(s) = sink.dest_schema.as_deref() {
                                 let columns = crate::state::arrow_schema_to_columns(s);
                                 let _ = shared_fingerprint
@@ -293,9 +205,6 @@ pub(in crate::pipeline) fn run_chunked_parallel_checkpoint(
                                 chunk_index,
                                 fmt.file_extension(),
                             );
-                            // Worker-safe half of commit (I1 + dest.write + fingerprint),
-                            // draining every part the sink produced (max_file_size rotation
-                            // included). The parent drains each PartRecord post-scope.
                             let (mut recs, wrote) = super::super::commit::write_sink_parts(
                                 &**shared_destination,
                                 &mut sink,
@@ -318,11 +227,6 @@ pub(in crate::pipeline) fn run_chunked_parallel_checkpoint(
                         |src| idle_sources.give(src),
                     );
 
-                    // Test-only, mirroring the sequential runner: make ONE chunk
-                    // fail without killing the process, so the worker-error and
-                    // chunk-completion guards below can be exercised. A panic hook
-                    // cannot reach them — they only run once the workers join,
-                    // which a crashed process never does.
                     let result = match (
                         result,
                         crate::test_hook::maybe_error_at_index("chunk_export", chunk_index),
@@ -335,22 +239,9 @@ pub(in crate::pipeline) fn run_chunked_parallel_checkpoint(
                     };
                     match result {
                         Ok((rows, parts, chunk_checksums, chunk_shape)) => {
-                            // Non-empty chunk: write file_log NOW (per-chunk
-                            // durable manifest — the recovery flows in
-                            // live_chunked_recovery.rs C3 read it after a
-                            // mid-run crash to reconstruct the manifest) AND
-                            // push each PartRecord for the parent drain. The
-                            // drain calls commit::record_part(state=None) so
-                            // file_log is not double-written; manifest_parts +
-                            // counters + journal still get populated for the
-                            // cloud manifest M1 contract.
                             let fname_for_state: Option<String> = if parts.is_empty() {
                                 None
                             } else {
-                                // The worker's store was opened from the REF, not
-                                // from `config_path`: `rivet apply` passes an empty
-                                // one, and `StateStore::open("")` would land every
-                                // durable-part row in a stray `./.rivet_state.db`.
                                 record_durable_parts(
                                     &st,
                                     crate::state::DurablePart {
@@ -362,19 +253,11 @@ pub(in crate::pipeline) fn run_chunked_parallel_checkpoint(
                                         format: fmt_label_w,
                                         compression: Some(comp_label_w),
                                         mode: mode_label_w,
-                                        cursor_high: None, // chunked runner, not keyset pages
+                                        cursor_high: None,
                                     },
                                     &parts,
                                 );
-                                // chunk_task carries one file name; for a
-                                // rotation-split chunk store the first sibling.
-                                // The manifest records all siblings, so a
-                                // missing one fails destination verification
-                                // loudly instead of being silently skipped on
-                                // resume.
                                 let first = parts[0].file_name.clone();
-                                // ADR-0029: the chunk is the commit unit its parts are
-                                // recorded under and its checksums enter with.
                                 let unit = super::super::commit::UnitId::Chunk(chunk_index);
                                 for rec in parts {
                                     fan_r.part(unit, rec);
@@ -383,13 +266,6 @@ pub(in crate::pipeline) fn run_chunked_parallel_checkpoint(
                                 fan_r.contribute(unit, chunk_checksums);
                                 Some(first)
                             };
-                            // Mirror of the sequential checkpoint hooks (search for
-                            // `maybe_panic_at_chunk` in sequential_checkpoint.rs): same
-                            // fault-point names so `RIVET_TEST_PANIC_AT=after_chunk_file:N`
-                            // and `…=after_chunk_complete:N` exercise both code paths.
-                            // The panic propagates through `std::thread::scope`'s join,
-                            // crashing the process and leaving any in-flight workers'
-                            // chunk_task rows as 'running' for the resume path to reset.
                             crate::test_hook::maybe_panic_at_chunk("after_chunk_file", chunk_index);
                             fan_r.fail_on_err(
                                 &format!("chunk {chunk_index} state"),
@@ -438,7 +314,6 @@ pub(in crate::pipeline) fn run_chunked_parallel_checkpoint(
                                     crate::pipeline::retry::is_transient(&e),
                                 ),
                             );
-                            // The typed failure stays with the run: its code and class decide the exit.
                             fan_r.fail(&format!("chunk {chunk_index}"), e);
                         }
                     }
@@ -452,9 +327,6 @@ pub(in crate::pipeline) fn run_chunked_parallel_checkpoint(
         summary.schema_fingerprint = Some(fp);
     }
 
-    // `file_log: None`: the workers already wrote each chunk's file_log row
-    // synchronously (ADR-0017 — the per-chunk durable record the recovery tests
-    // depend on), so the drain must not double-insert it.
     let drained = fan.finish(
         plan,
         summary,
@@ -468,7 +340,6 @@ pub(in crate::pipeline) fn run_chunked_parallel_checkpoint(
         },
         |errs| super::chunk_failures(&plan.export_name, RUNNER, errs),
     );
-    // After the drain: record_part is what counts the rows.
     pb_cp.finish(summary.total_rows);
 
     let (pending, tasks) = state.settle_chunk_run(&run_id, planned)?;
@@ -483,7 +354,6 @@ pub(in crate::pipeline) fn run_chunked_parallel_checkpoint(
 
     super::prune_superseded_attempts(summary, &tasks);
     state.finalize_chunk_run_completed(&run_id)?;
-    // ADR-0008 PG2 committed boundary via the shared finalize seam.
     super::super::run_store::RunStore::finalize(state, plan, summary)
         .with_progression(super::super::run_store::Progression::Chunked)
         .commit()?;

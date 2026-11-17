@@ -1,16 +1,4 @@
-//! Writers of one SQLite state file in this process take turns at its write lock, first come
-//! first served.
-//!
-//! SQLite's busy wait has no queue: a waiter sleeps and asks again, and a writer that commits back
-//! to back takes the lock in the gap every time. Measured on devbox: a `BEGIN IMMEDIATE` beside a
-//! sibling store committing in a loop was refused `database is locked` after 15.4 s, past the
-//! 10 s busy timeout, with 530 000 writes in between (the `replan` cell, 1 in 1000 on CI). Chunk
-//! workers, the run lease keeper and a run's own store are such siblings in one process. A turn
-//! is held from `BEGIN IMMEDIATE` to `COMMIT` (or around one autocommit write); another process
-//! still meets the file lock and SQLite's busy wait. A writer that ran out of patience while a turn
-//! was held keeps its place, as many as there are such writers: no later writer of this process
-//! gets a turn before every one of them has written, so their busy wait meets only the slow
-//! holder, never a sibling that commits back to back.
+//! Writers of one SQLite state file in this process take turns at its write lock, first come first served.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -20,13 +8,11 @@ use std::time::{Duration, Instant};
 /// How long a writer waits for its turn before it goes on to SQLite's busy wait: the busy timeout.
 #[cfg(not(test))]
 pub(super) const PATIENCE: Duration = Duration::from_millis(super::SQLITE_BUSY_TIMEOUT_MS as u64);
-/// Fifty milliseconds in the unit tests, so a turn that is never handed back costs each write a
-/// moment there instead of the busy timeout.
+/// Fifty milliseconds in the unit tests, so a turn that is never handed back costs each write a moment there instead of the busy timeout.
 #[cfg(test)]
 pub(super) const PATIENCE: Duration = Duration::from_millis(50);
 
-/// One file's queue: the waiting tickets in order, whether a turn is taken, and how many writers
-/// that ran out of patience are in SQLite's busy wait ahead of every other.
+/// One file's queue: the waiting tickets in order, whether a turn is taken, and how many writers that ran out of patience are in SQLite's busy wait ahead of every other.
 #[derive(Default)]
 struct Queue {
     waiting: VecDeque<u64>,
@@ -41,8 +27,7 @@ struct Turns {
     freed: Condvar,
 }
 
-/// A turn at one file's write lock, or the place of a writer that ran out of patience (`overdue`);
-/// dropping it hands the lock to the next ticket.
+/// A turn at one file's write lock, or the place of a writer that ran out of patience (`overdue`).
 pub(super) struct Turn {
     turns: Arc<Turns>,
     overdue: bool,
@@ -72,9 +57,7 @@ fn turns_of(db: &Path) -> Arc<Turns> {
         .clone()
 }
 
-/// Wait for this process's turn at `db`'s write lock, at most `patience`. Past it the caller goes
-/// on to SQLite's own busy wait and its verdict, holding its place (no later writer of this
-/// process is served before it); `None` only for an in-memory store.
+/// Wait for this process's turn at `db`'s write lock, at most `patience`.
 pub(super) fn take(db: &Path, patience: Duration) -> Option<Turn> {
     if seeded!(
         "sqlite-writer-starved-by-a-sibling",

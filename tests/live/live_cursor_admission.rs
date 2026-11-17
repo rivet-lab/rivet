@@ -317,6 +317,37 @@ fn an_expression_over_a_not_null_cursor_delivers_once(engine: SqlEngine) {
     );
 }
 
+/// An expression that coalesces a nullable column away, aliased to that column's name, is admitted and delivers every row once.
+fn an_aliased_expression_over_a_nullable_column_delivers(engine: SqlEngine) {
+    let (table, _guard) = seeded(engine, timestamp(engine), "NULL", true);
+    let (c, d) = names(engine);
+    let id = if engine.folds_upper() { "ID" } else { "id" };
+    let rig = engine
+        .rig(&table)
+        .query(&format!(
+            "SELECT {id}, COALESCE({c}, {d}) AS {c} FROM {table}"
+        ))
+        .mode("incremental")
+        .export_line(&format!("cursor_column: {c}"));
+    rig.run_ok();
+    assert_eq!(delivered_ids(&rig.out_dir()), vec![1, 2, 3]);
+}
+
+/// A view over a nullable column is refused by code on every command, as the table itself is.
+fn a_view_over_a_nullable_cursor_is_refused(engine: SqlEngine) {
+    let (table, _guard) = seeded(engine, timestamp(engine), "NULL", true);
+    let view = format!("{table}_v");
+    engine.exec(&format!("CREATE VIEW {view} AS SELECT * FROM {table}"));
+    let _view = DropView(engine, view.clone());
+    let (c, _) = names(engine);
+    let rig = incremental(engine, &view, &[&format!("cursor_column: {c}")]);
+    refused_on_every_command(
+        &rig,
+        NULLABLE,
+        &format!("nullable cursor {c} on view {view}"),
+    );
+}
+
 #[test]
 #[ignore = "live: requires docker compose postgres"]
 fn nullable_cursor_is_refused_postgres() {
@@ -465,4 +496,54 @@ fn an_expression_over_a_not_null_cursor_delivers_once_mssql() {
 #[ignore = "live: requires docker compose oracle"]
 fn an_expression_over_a_not_null_cursor_delivers_once_oracle() {
     an_expression_over_a_not_null_cursor_delivers_once(SqlEngine::Oracle);
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn an_aliased_expression_over_a_nullable_column_delivers_postgres() {
+    an_aliased_expression_over_a_nullable_column_delivers(SqlEngine::Pg);
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn a_view_over_a_nullable_cursor_is_refused_postgres() {
+    a_view_over_a_nullable_cursor_is_refused(SqlEngine::Pg);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn an_aliased_expression_over_a_nullable_column_delivers_mysql() {
+    an_aliased_expression_over_a_nullable_column_delivers(SqlEngine::Mysql);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn a_view_over_a_nullable_cursor_is_refused_mysql() {
+    a_view_over_a_nullable_cursor_is_refused(SqlEngine::Mysql);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn an_aliased_expression_over_a_nullable_column_delivers_mssql() {
+    an_aliased_expression_over_a_nullable_column_delivers(SqlEngine::Mssql);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn a_view_over_a_nullable_cursor_is_refused_mssql() {
+    a_view_over_a_nullable_cursor_is_refused(SqlEngine::Mssql);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn an_aliased_expression_over_a_nullable_column_delivers_oracle() {
+    an_aliased_expression_over_a_nullable_column_delivers(SqlEngine::Oracle);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_view_over_a_nullable_cursor_is_refused_oracle() {
+    a_view_over_a_nullable_cursor_is_refused(SqlEngine::Oracle);
 }

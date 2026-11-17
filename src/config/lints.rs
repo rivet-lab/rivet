@@ -1,42 +1,12 @@
-//! Lint passes layered on top of serde's parse errors (v0.7.3 P1.2).
-//!
-//! `#[serde(deny_unknown_fields)]` on the `Config` type tree turns
-//! every typo into an error like:
-//!
-//! ```text
-//! unknown field `acccess_key_env`, expected one of `type`, `bucket`, ... at line 12 column 5
-//! ```
-//!
-//! That's actionable but verbose.  This module re-shapes the error so
-//! the operator gets a one-line, single-suggestion hint:
-//!
-//! ```text
-//! unknown field `acccess_key_env` at line 12 column 5
-//!   Did you mean `access_key_env`?
-//! ```
-//!
-//! The full expected-fields list is preserved in a follow-up line so
-//! editor copy/paste still works.
+//! Lint passes that turn serde's unknown-field errors into a one-line "Did you mean" hint.
 
-/// Wrap a serde_yaml_ng parse error with a "Did you mean ...?" hint
-/// when the unknown field has a close-enough lexical match in the
-/// expected-fields list embedded in the error message.
-///
-/// The function inspects the *string form* of the error (serde does
-/// not expose the unknown field name through a structured API).  If
-/// the message doesn't match the `unknown field …` shape, the
-/// original error is returned unchanged.
+/// Wrap a serde_yaml_ng parse error with a "Did you mean ...?" hint when the unknown field has a close-enough lexical match in the expected-fields list embedded in the error message.
 pub fn enhance_parse_error(err: serde_yaml_ng::Error) -> anyhow::Error {
     let raw = err.to_string();
     if let Some(hint) = did_you_mean_from_message(&raw) {
-        // Keep the original error's `Display` shape — VS Code, CI,
-        // and humans all parse the leading `unknown field` token —
-        // and just append the suggestion as a new line.
         return yaml_invalid(format!("{raw}\n  Did you mean `{hint}`?"));
     }
     if let Some(hint) = missing_field_hint(&raw) {
-        // serde's bare `missing field \`x\`` says WHAT is missing but not how to
-        // fix it. Append a remediation line, preserving the verbatim leading text.
         return yaml_invalid(format!("{raw}\n  Hint: {hint}"));
     }
     yaml_invalid(raw)
@@ -47,9 +17,7 @@ pub(crate) fn yaml_invalid(message: impl Into<String>) -> anyhow::Error {
     crate::error::coded(crate::error::codes::CONFIG_YAML_INVALID, message)
 }
 
-/// A remediation line for serde's `missing field \`x\`` errors on the few
-/// top-level fields a newcomer is most likely to omit. `None` for any other
-/// field, so it never over-fires on a missing nested/optional field.
+/// A remediation line for serde's `missing field \`x\`` errors on the few top-level fields a newcomer is most likely to omit.
 fn missing_field_hint(msg: &str) -> Option<&'static str> {
     let i = msg.find("missing field `")? + "missing field `".len();
     let field = msg[i..].split('`').next()?;
@@ -68,36 +36,26 @@ fn missing_field_hint(msg: &str) -> Option<&'static str> {
     }
 }
 
-/// Parse `"unknown field `xxx`, expected one of `a`, `b`, ..."` and
-/// return the best lexical match for `xxx` from the expected list, or
-/// `None` if the message doesn't fit the shape or nothing is close
-/// enough.
+/// Parse `"unknown field `xxx`, expected one of `a`, `b`, ..."` and return the best lexical match for `xxx` from the expected list, or `None` if the message doesn't fit the shape or nothing is close enough.
 fn did_you_mean_from_message(msg: &str) -> Option<String> {
     let (unknown, expected) = parse_unknown_field_message(msg)?;
     closest_match(&unknown, &expected)
 }
 
-/// Extract `(unknown_field, expected_fields)` from a serde unknown-
-/// field error string.  Returns `None` if the message shape doesn't
-/// match — the caller should pass the original error through.
+/// Extract `(unknown_field, expected_fields)` from a serde unknown- field error string.
 fn parse_unknown_field_message(msg: &str) -> Option<(String, Vec<String>)> {
-    // Format: "unknown field `xxx`, expected one of `a`, `b`, `c`, ..."
-    // Also (single expected): "unknown field `xxx`, expected `a`"
     let start = msg.find("unknown field `")? + "unknown field `".len();
     let rest = &msg[start..];
     let unknown_end = rest.find('`')?;
     let unknown = rest[..unknown_end].to_string();
 
     let after_unknown = &rest[unknown_end + 1..];
-    // Look for "expected one of " or "expected ".
     let expect_idx = after_unknown.find("expected ")?;
     let after_expected = &after_unknown[expect_idx + "expected ".len()..];
     let after_expected = after_expected
         .strip_prefix("one of ")
         .unwrap_or(after_expected);
 
-    // Collect every backtick-wrapped token until we hit the trailing
-    // `at line ...` / end-of-string.
     let mut expected: Vec<String> = Vec::new();
     let mut cursor = after_expected;
     while let Some(open) = cursor.find('`') {
@@ -112,25 +70,10 @@ fn parse_unknown_field_message(msg: &str) -> Option<(String, Vec<String>)> {
     Some((unknown, expected))
 }
 
-/// Find the closest match for `needle` in `candidates` by
-/// case-insensitive Levenshtein distance, with one shortcut: when a
-/// candidate appears as a substring of the needle (or vice versa), it
-/// wins regardless of strict distance.  That handles the common
-/// "append a noun" mistake (`database_name` → `database`,
-/// `bucket_name` → `bucket`) without loosening the threshold for
-/// genuinely unrelated typos.
-///
-/// Distance threshold: `≤ 2` for short keys, scaling to `longer/3`
-/// for longer ones.  Tightness over a longer distance avoids
-/// embarrassing suggestions like "did you mean `tls`?" for a typo of
-/// `xxxxxxxxxxxx`.
+/// Find the closest match for `needle` in `candidates` by case-insensitive Levenshtein distance, with one shortcut.
 fn closest_match(needle: &str, candidates: &[String]) -> Option<String> {
     let needle_lower = needle.to_ascii_lowercase();
 
-    // Edit-distance FIRST: a near-exact typo must win over a substring match to
-    // a longer, unrelated field. `export` is one edit from `exports`, but it is
-    // ALSO a substring of `parallel_export_processes` — running substring first
-    // (longest wins) suggested the advanced flag instead of the obvious field.
     let mut best: Option<(usize, &String)> = None;
     for c in candidates {
         let d = levenshtein(&needle_lower, &c.to_ascii_lowercase());
@@ -147,10 +90,6 @@ fn closest_match(needle: &str, candidates: &[String]) -> Option<String> {
         }
     }
 
-    // Substring fallback: `bucket_name` → `bucket` is meaningful even though the
-    // edit distance (5) is too far. Pick the longest qualifying candidate.
-    // Floor at 3 chars: single-letter candidates produce nonsense suggestions
-    // and no real Config field is that short.
     const SUBSTR_MIN_LEN: usize = 3;
     let mut substring_hit: Option<&String> = None;
     for c in candidates {
@@ -168,10 +107,7 @@ fn closest_match(needle: &str, candidates: &[String]) -> Option<String> {
     substring_hit.cloned()
 }
 
-/// Classic Wagner–Fischer Levenshtein distance over ASCII / byte-
-/// aligned strings.  The Config-grammar field names are all ASCII so
-/// a byte-level comparison is correct and avoids the unicode
-/// segmentation overhead.
+/// Classic Wagner–Fischer Levenshtein distance over ASCII / byte- aligned strings.
 fn levenshtein(a: &str, b: &str) -> usize {
     let a = a.as_bytes();
     let b = b.as_bytes();
@@ -198,8 +134,6 @@ fn levenshtein(a: &str, b: &str) -> usize {
 mod tests {
     use super::*;
 
-    // ── levenshtein() ──────────────────────────────────────────────────────
-
     #[test]
     fn levenshtein_identical_is_zero() {
         assert_eq!(levenshtein("password", "password"), 0);
@@ -214,8 +148,6 @@ mod tests {
     fn levenshtein_insert_is_one() {
         assert_eq!(levenshtein("acccess_key_env", "access_key_env"), 1);
     }
-
-    // ── closest_match() ────────────────────────────────────────────────────
 
     #[test]
     fn closest_match_picks_obvious_typo() {
@@ -233,8 +165,6 @@ mod tests {
     #[test]
     fn closest_match_returns_none_when_too_far() {
         let candidates = vec!["a".into(), "b".into(), "c".into()];
-        // 15-char input, 1-char candidates — distance is far past the
-        // threshold; no suggestion better than silence.
         assert!(closest_match("totally_unrelated", &candidates).is_none());
     }
 
@@ -249,9 +179,6 @@ mod tests {
 
     #[test]
     fn closest_match_prefers_near_typo_over_longer_substring() {
-        // `export` is one edit from `exports`, but ALSO a substring of
-        // `parallel_export_processes`. The near typo must win — the old
-        // substring-first rule suggested the advanced flag.
         let candidates = vec![
             "source".into(),
             "exports".into(),
@@ -266,15 +193,12 @@ mod tests {
 
     #[test]
     fn closest_match_substring_fallback_still_works() {
-        // No near typo, but `bucket_name` meaningfully contains `bucket`.
         let candidates = vec!["bucket".into(), "prefix".into()];
         assert_eq!(
             closest_match("bucket_name", &candidates).as_deref(),
             Some("bucket"),
         );
     }
-
-    // ── parse_unknown_field_message() ──────────────────────────────────────
 
     #[test]
     fn parses_serde_unknown_field_shape() {
@@ -297,8 +221,6 @@ mod tests {
         let msg = "invalid type: integer `42`, expected a string at line 3 column 5";
         assert!(parse_unknown_field_message(msg).is_none());
     }
-
-    // ── did_you_mean_from_message() ────────────────────────────────────────
 
     #[test]
     fn end_to_end_typo_suggestion() {

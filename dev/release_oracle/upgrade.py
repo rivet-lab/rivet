@@ -91,24 +91,32 @@ CRASH_ROWS = 250_000
 ENGINES = ("postgres", "mysql", "mssql", "oracle")
 
 
-def _seed(engine: str, url: str, table: str, rows: int, with_cursor: bool, int_key: bool = False) -> bool:
-    """(Re)create `table` holding ids 1..rows (and a cursor column when asked); `int_key` keeps Oracle's id in the NUMBER(18) range chunking accepts."""
+#: The `decimal` column of `_seed`, per engine: an exact numeric that rivet reads as Arrow Decimal128(18, 4).
+DECIMAL_TYPE = {"postgres": "NUMERIC(18,4)", "mysql": "DECIMAL(18,4)", "mssql": "DECIMAL(18,4)", "oracle": "NUMBER(18,4)"}
+
+
+def _seed(engine: str, url: str, table: str, rows: int, with_cursor: bool, int_key: bool = False, decimal: bool = False) -> bool:
+    """(Re)create `table` holding ids 1..rows (a cursor column and a Decimal128 column `d` when asked); `int_key` keeps Oracle's id in the NUMBER(18) range chunking accepts."""
     ts = {"postgres": "TIMESTAMPTZ", "mysql": "DATETIME(6)", "mssql": "DATETIME2", "oracle": "TIMESTAMP"}[engine]
-    cols = f"id BIGINT PRIMARY KEY, v BIGINT NOT NULL{f', updated_at {ts} NOT NULL' if with_cursor else ''}"
+    cols = f"id BIGINT PRIMARY KEY, v BIGINT NOT NULL{f', updated_at {ts} NOT NULL' if with_cursor else ''}{f', d {DECIMAL_TYPE[engine]} NOT NULL' if decimal else ''}"
     if engine == "oracle":
         cols = cols.replace("id BIGINT", "id NUMBER(18)" if int_key else "id BIGINT").replace("BIGINT", "NUMBER(19)")
         val = ", TIMESTAMP '2026-01-01 00:00:00' + NUMTODSINTERVAL(level, 'SECOND')" if with_cursor else ""
+        val += ", level / 4" if decimal else ""
         body = f"INSERT INTO {table} SELECT level, level{val} FROM dual CONNECT BY level <= {rows};"
     elif engine == "postgres":
         val = ", TIMESTAMPTZ '2026-01-01' + g * INTERVAL '1 second'" if with_cursor else ""
+        val += ", g::numeric / 4" if decimal else ""
         body = f"INSERT INTO {table} SELECT g, g{val} FROM generate_series(1, {rows}) g;"
     elif engine == "mysql":
         val = ", TIMESTAMP('2026-01-01') + INTERVAL n SECOND" if with_cursor else ""
+        val += ", n / 4" if decimal else ""
         body = ("SET SESSION cte_max_recursion_depth = 1000000; "
                 f"INSERT INTO {table} WITH RECURSIVE g(n) AS (SELECT 1 UNION ALL SELECT n + 1 "
                 f"FROM g WHERE n < {rows}) SELECT n, n{val} FROM g;")
     else:
         val = ", DATEADD(SECOND, n, CAST('2026-01-01' AS DATETIME2))" if with_cursor else ""
+        val += ", CAST(n AS DECIMAL(18,4)) / 4" if decimal else ""
         body = (f"INSERT INTO {table} SELECT TOP ({rows}) n, n{val} FROM (SELECT "
                 "ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n FROM sys.all_objects a "
                 "CROSS JOIN sys.all_objects b) q;")
