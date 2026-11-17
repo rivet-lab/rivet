@@ -37,7 +37,7 @@ pub struct SourceTuning {
     pub min_parallel: Option<usize>,
     /// Hard ceiling on a single cell/value in MB (OPT-1 memory hardening): a
     /// variable-length value (text/JSON/blob) larger than this aborts the run
-    /// with `RIVET_VALUE_TOO_LARGE` instead of risking OOM, since the
+    /// with `RIVET_SOURCE_VALUE_TOO_LARGE` instead of risking OOM, since the
     /// average-based batch cap can't bound one giant cell. `Some(0)` / `None`
     /// disable the guard. Default: 256 MiB.
     pub max_value_mb: Option<usize>,
@@ -100,7 +100,7 @@ pub struct TuningConfig {
     /// Default 1. Ceiling is the export's `parallel`.
     pub min_parallel: Option<usize>,
     /// Hard per-value size ceiling in MB. A single text/JSON/blob cell larger
-    /// than this aborts the run with `RIVET_VALUE_TOO_LARGE`. `0` disables the
+    /// than this aborts the run with `RIVET_SOURCE_VALUE_TOO_LARGE`. `0` disables the
     /// guard. Default: 256.
     pub max_value_mb: Option<usize>,
 }
