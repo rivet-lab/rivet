@@ -126,7 +126,7 @@ fn mssql_reads(native: &str, src: Kind, tgt: Kind) -> bool {
         Dec => &[Dec],
         I16 | I32 => &[Dec],
         I64 => &[I64, Dec],
-        Text => TEXTS,
+        Text => &[Text, Json, Uuid],
         Naive => STAMPS_NS,
         Utc => STAMPS,
         _ => &[],
@@ -368,6 +368,12 @@ mod tests {
                 RivetType::Int64,
             ),
             (Engine::Oracle, "NUMBER(18)", RivetType::Int64, dec(38, 10)),
+            (
+                Engine::Mssql,
+                "nvarchar",
+                RivetType::String,
+                RivetType::Uuid,
+            ),
             (Engine::Mssql, "int", RivetType::Int32, dec(10, 2)),
             (Engine::Mssql, "smallint", RivetType::Int16, dec(10, 2)),
             (

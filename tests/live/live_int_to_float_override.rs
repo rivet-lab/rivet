@@ -153,7 +153,7 @@ fn a_value_the_declared_type_does_not_read_is_refused_never_nulled_mysql() {
     }
 }
 
-/// Text under an override that parses, and text that does not, are read as on every release: the value, and NULL for the unparsable one.
+/// Text under an override that parses, and decimal and float under a float override, are read as on every release: the value.
 #[test]
 #[ignore = "live: requires docker compose mysql"]
 fn text_and_decimal_under_a_float_or_int_override_read_as_before_mysql() {
@@ -167,7 +167,7 @@ fn text_and_decimal_under_a_float_or_int_override_read_as_before_mysql() {
     .unwrap();
     let _guard = MysqlTable::adopt(table.clone());
     c.query_drop(format!(
-        "INSERT INTO {table} VALUES (1, '1.5', 2.50, 3.25, 0.5), (2, 'abc', -7.00, -0.125, -2.0), (3, NULL, NULL, NULL, NULL)"
+        "INSERT INTO {table} VALUES (1, '1.5', 2.50, 3.25, 0.5), (2, '-4.25', -7.00, -0.125, -2.0), (3, NULL, NULL, NULL, NULL)"
     ))
     .unwrap();
     let rig = mysql_rig(&table, "t: float8, d: float8, f: float8, r: float8");
@@ -175,7 +175,7 @@ fn text_and_decimal_under_a_float_or_int_override_read_as_before_mysql() {
     let out = rig.out_dir();
     assert_eq!(
         dir_parquet_floats(&out, "t"),
-        vec![Some(1.5), None, None],
+        vec![Some(1.5), Some(-4.25), None],
         "text as float8"
     );
     assert_eq!(
@@ -193,6 +193,26 @@ fn text_and_decimal_under_a_float_or_int_override_read_as_before_mysql() {
         vec![Some(0.5), Some(-2.0), None],
         "float as float8"
     );
+}
+
+/// A text value that does not parse under a float override is refused by code and nothing is written, never NULL.
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn an_unparsable_text_under_a_float_override_is_refused_never_nulled_mysql() {
+    require_alive(LiveService::Mysql);
+    use mysql::prelude::Queryable;
+    let table = unique_name("ovf_my_abc");
+    let mut c = mysql_connect();
+    c.query_drop(format!(
+        "CREATE TABLE {table} (id INT PRIMARY KEY, t VARCHAR(20) NULL)"
+    ))
+    .unwrap();
+    let _guard = MysqlTable::adopt(table.clone());
+    c.query_drop(format!("INSERT INTO {table} VALUES (1, '1.5'), (2, 'abc')"))
+        .unwrap();
+    let rig = mysql_rig(&table, "t: float8");
+    assert_refused(&rig.run(), Refused::by_code(NOT_EXACT, 5));
+    assert_eq!(files_with_extension(&rig.out_dir(), "parquet").len(), 0);
 }
 
 /// PostgreSQL refuses an int4 column declared float8 at `check` and at `run` with the wire code.

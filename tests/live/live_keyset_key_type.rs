@@ -1067,14 +1067,14 @@ fn a_timestamp_9_composite_keyset_key_is_refused_oracle() {
 #[ignore = "live: requires docker compose oracle"]
 fn a_scaled_number_a_float_and_a_negative_scale_keyset_key_stay_refused_under_a_columns_override_oracle()
  {
-    for base in [
-        ORACLE_SCALED_NUMBER,
-        ORACLE_NUMBER_STAR_SCALE,
-        ORACLE_FLOAT,
-        ORACLE_NEGATIVE_SCALE_NUMBER,
+    for (base, int64_want) in [
+        (ORACLE_SCALED_NUMBER, WIRE_MISMATCH),
+        (ORACLE_NUMBER_STAR_SCALE, WIRE_MISMATCH),
+        (ORACLE_FLOAT, UNUSABLE),
+        (ORACLE_NEGATIVE_SCALE_NUMBER, UNUSABLE),
     ] {
         for (line, want) in [
-            ("columns: {K: int64}", WIRE_MISMATCH),
+            ("columns: {K: int64}", int64_want),
             ("columns: {K: string}", UNUSABLE),
         ] {
             let case = Case {

@@ -139,9 +139,17 @@ fn check_still_accepts_overrides_the_run_accepts_postgres() {
 #[ignore = "live: mysql"]
 fn a_nanosecond_timestamp_override_is_refused_by_the_wire_check_mysql() {
     require_alive(LiveService::Mysql);
-    for (declared, remedy) in [
-        ("timestamp_ns", "declare `timestamp` (microseconds)"),
-        ("timestamp_tz_ns", "declare `timestamp_tz` (microseconds)"),
+    for (declared, remedy, label) in [
+        (
+            "timestamp_ns",
+            "declare `timestamp` (microseconds)",
+            "timestamp(nanosecond)",
+        ),
+        (
+            "timestamp_tz_ns",
+            "declare `timestamp_tz` (microseconds)",
+            "timestamp_tz(nanosecond,UTC)",
+        ),
     ] {
         let name = unique_name("ovw_ns_my");
         let out = tempfile::tempdir().unwrap();
@@ -154,10 +162,11 @@ fn a_nanosecond_timestamp_override_is_refused_by_the_wire_check_mysql() {
         let stderr = check_and_run_refuse_alike(rig, &name);
         assert!(stderr.contains(remedy), "{declared}: {stderr}");
         assert!(
-            stderr.contains("column `ts` is datetime (read as timestamp(microsecond)) and `columns:` declares it timestamp"),
+            stderr.contains(&format!(
+                "column `ts` is datetime (read as timestamp(microsecond)) and `columns:` declares it {label}"
+            )),
             "{declared}: {stderr}"
         );
-        assert!(stderr.contains("(nanosecond)"), "{declared}: {stderr}");
     }
 }
 
