@@ -25,14 +25,7 @@ use postgres::NoTls;
 
 use crate::common::*;
 
-/// Bring up a temporary PG table from inline DDL, then run a Rivet export
-/// (parquet, zstd) into a shared duckdb workdir. Returns the container-side
-/// glob path and the raw `Output` of the rivet child process — callers
-/// decide whether the export was supposed to succeed (`out.status.success()`)
-/// or to fail with a particular diagnostic (negative-scale decimal, etc.).
-///
-/// We do not assert success here so the "currently-fails" pins can reuse
-/// the same setup/cleanup scaffolding instead of inlining a duplicate YAML.
+/// Creates a PG table from inline DDL and runs a parquet export of it; returns the container-side glob and the raw `Output`, success not asserted.
 fn pg_edge_export(
     setup_sql: &str,
     query: &str,
@@ -158,19 +151,10 @@ print(str(t.column('d50_10').to_pylist()[0]))
     );
 }
 
-/// Known Parquet limitation: the `DECIMAL` logical type's scale must be
-/// non-negative (Apache Parquet spec, `LogicalTypes.md`). PostgreSQL
-/// `numeric(5, -2)` is otherwise representable in Rivet (`RivetType::Decimal
-/// { precision: 5, scale: -2 }` maps to Arrow `Decimal128(5, -2)`) but the
-/// Parquet writer rejects it at flush time.
-///
-/// This test pins the *current* behaviour — an export fails — so that any
-/// future commit that adds a graceful fallback (auto-rescaling to
-/// `decimal(p+|s|, 0)`, or fronting an explicit policy decision) must
-/// update the test and write a doc entry.
+/// A `numeric(5,-2)` column declared `decimal(5,-2)` is refused by the override table, by code, naming the column and the declared type.
 #[test]
 #[ignore = "live: requires docker compose postgres"]
-fn pg_edge_decimal_negative_scale_currently_fails_at_parquet_write() {
+fn pg_edge_decimal_negative_scale_override_is_refused_by_the_override_table() {
     require_alive(LiveService::Postgres);
 
     let (_glob, out) = pg_edge_export(
@@ -181,22 +165,36 @@ fn pg_edge_decimal_negative_scale_currently_fails_at_parquet_write() {
         "    columns:\n      d: decimal(5,-2)\n",
     );
 
-    assert!(
-        !out.status.success(),
-        "negative-scale decimal export should fail (Parquet spec disallows it); \
-         if it now succeeds, update this test and document the new policy"
+    assert_refused(
+        &out,
+        Refused::by_code("RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1),
     );
     let err = String::from_utf8_lossy(&out.stderr);
-    // rivet now refuses this early at create_writer with an ACTIONABLE message
-    // (naming the column + the Parquet scale>=0 rule + the cast/csv remediation),
-    // instead of the raw arrow-parquet "Invalid DECIMAL scale" deeper in the write.
     assert!(
-        err.contains("NEGATIVE decimal scale") && err.contains("scale must be >= 0"),
-        "expected the actionable negative-scale refusal in stderr, got:\n{err}"
+        err.contains("column `d`") && err.contains("decimal(5,-2)"),
+        "the refusal must name the column and the declared type:\n{err}"
     );
+}
+
+/// A `numeric(5,-2)` column with no override is refused as an unsafe mapping, naming the column: the PostgreSQL catalog does not report a negative scale.
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn pg_edge_decimal_negative_scale_without_override_is_refused_as_unsafe_mapping() {
+    require_alive(LiveService::Postgres);
+
+    let (_glob, out) = pg_edge_export(
+        "CREATE TABLE {table_name} (id INT, d NUMERIC(5, -2));
+         INSERT INTO {table_name} VALUES (1, 12345);",
+        "SELECT id, d FROM {table_name} ORDER BY id",
+        "pg_edge_negsc_bare",
+        "",
+    );
+
+    assert_refused(&out, Refused::by_code("RIVET_TYPE_UNSAFE_MAPPING", 1));
+    let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("format: csv") || err.contains("numeric(p,0)"),
-        "the refusal must name a remediation (cast to non-negative scale, or CSV):\n{err}"
+        err.contains("`d`") || err.contains("\"d\"") || err.contains(" d "),
+        "the refusal must name the column:\n{err}"
     );
 }
 

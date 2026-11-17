@@ -268,6 +268,8 @@ RIVET_CONC_SRC_CONTAINER  ?= rivet-postgres-1
 # single full run while the download step reported success. A baseline the
 # gate needs must live where the gate's own hygiene cannot eat it.
 PREV_RELEASE_DIR          ?= .gate-baseline
+PREV_RELEASE_BIN          = $(shell ls -t -d $(PREV_RELEASE_DIR)/rivet-v*/rivet 2>/dev/null | head -1)
+PREV_RELEASE_ENV          = $(if $(PREV_RELEASE_BIN),RIVET_PREV_RELEASE_BIN=$(PREV_RELEASE_BIN))
 TRIPLE                    = $(or $(TRIPLE_MEMO),$(eval TRIPLE_MEMO := $(shell $(PY) -m dev.release_oracle.field_state --triple))$(TRIPLE_MEMO))
 # The field-symptom replay's baseline is NOT the latest release: criterion 1
 # needs the release that CARRIES the governor regression (0.24.4 — see
@@ -343,11 +345,11 @@ release-oracle-nightly:  ## The per-run gate with the whole GATE_ENV and no prev
 	$(LIVE_ALL) env $(GATE_ENV) $(PY) -m dev.release_oracle --without-prev-release-comparison --without-replica-topologies --no-cloud --hosted $(ARGS)
 
 release-oracle-compat: release-oracle-prev-bin  ## The measured stages (previous-release differential, field replay, regression) against the downloaded previous release.
-	@prev=$$(ls -t -d $(PREV_RELEASE_DIR)/rivet-v*/rivet 2>/dev/null | head -1); \
+	@prev='$(PREV_RELEASE_BIN)'; \
 	 $(LIVE_ALL) env $(GATE_ENV) RIVET_PREV_RELEASE_BIN="$$prev" $(PY) -m dev.release_oracle --island --no-cloud --hosted $(ARGS)
 
 release-oracle-hosted-half: release-oracle-prev-bin sweep-test-db  ## The hosted half of the release gate (dev/release_oracle/halves.py) on a hosted runner: seeded recall on, no cloud sweep; ARGS picks the slice with --live-shard i/n.
-	@prev=$$(ls -t -d $(PREV_RELEASE_DIR)/rivet-v*/rivet 2>/dev/null | head -1); \
+	@prev='$(PREV_RELEASE_BIN)'; \
 	 echo "  previous release: $${prev:-<none>}"; \
 	 $(LIVE_ALL) env $(GATE_ENV) RIVET_PREV_RELEASE_BIN="$$prev" $(PY) -m dev.release_oracle --with-seeded-recall --half hosted --hosted $(ARGS)
 
@@ -363,7 +365,7 @@ release-oracle-full: release-oracle-prev-bin sweep-test-db sweep-test-cloud  ## 
 	@# stages (release regression / previous-release differential / field symptom
 	@# replay) — so the echo says FAIL and names the escape. A gate run that
 	@# reaches here with an empty $$prev is telling you the download failed.
-	@prev=$$(ls -t -d $(PREV_RELEASE_DIR)/rivet-v*/rivet 2>/dev/null | head -1); \
+	@prev='$(PREV_RELEASE_BIN)'; \
 	 echo "  previous release: $${prev:-<none — the scale legs will SKIP and the regression / differential / field-replay legs will FAIL; re-run release-oracle-prev-bin, or give the comparison up by name with ARGS=--without-prev-release-comparison>}"; \
 	 $(LIVE_ALL) env $(GATE_ENV) RIVET_PREV_RELEASE_BIN="$$prev" $(PY) -m dev.release_oracle --with-seeded-recall $(ARGS)
 	@# A gate that passed leaves the stand and the cloud swept too: no orphaned slot pins WAL into
@@ -372,7 +374,7 @@ release-oracle-full: release-oracle-prev-bin sweep-test-db sweep-test-cloud  ## 
 
 release-oracle-island: release-oracle-prev-bin sweep-test-db  ## The measuring island alone (release regression, perf, source harm, previous-release differential, field symptom replay, scale memory, flat RSS) on the whole machine. Its green record for the tag's sha is what dev/pytools/release.py requires beside release-oracle-full; run it nightly on main.
 	@rm -rf target/package
-	@prev=$$(ls -t -d $(PREV_RELEASE_DIR)/rivet-v*/rivet 2>/dev/null | head -1); \
+	@prev='$(PREV_RELEASE_BIN)'; \
 	 echo "  previous release: $${prev:-<none: the regression / differential / field-replay legs will FAIL; re-run release-oracle-prev-bin>}"; \
 	 $(LIVE_ALL) env $(GATE_ENV) RIVET_PREV_RELEASE_BIN="$$prev" $(PY) -m dev.release_oracle --island $(ARGS)
 	@$(MAKE) --no-print-directory sweep-test-db
@@ -383,7 +385,7 @@ release-oracle-bless: release-oracle-prev-bin  ## Re-capture the verdict + duckd
 	@# It DEPENDS on release-oracle-prev-bin, so it downloads a baseline — and
 	@# used to then not pass it, failing three stages over the absence of a
 	@# binary it had just fetched. Same threading as release-oracle-full.
-	@prev=$$(ls -t -d $(PREV_RELEASE_DIR)/rivet-v*/rivet 2>/dev/null | head -1); \
+	@prev='$(PREV_RELEASE_BIN)'; \
 	 echo "  previous release: $${prev:-<none — the scale legs will SKIP and the regression / differential / field-replay legs will FAIL; re-run release-oracle-prev-bin, or give the comparison up by name with ARGS=--without-prev-release-comparison>}"; \
 	 $(LIVE_ALL) env $(GATE_ENV) RIVET_PREV_RELEASE_BIN="$$prev" $(PY) -m dev.release_oracle --bless-local $(ARGS)
 
@@ -429,5 +431,5 @@ evidence-report:  ## The live cells of every coverage ledger with no green run i
 	$(PY) dev/pytools/evidence.py report $(if $(EVIDENCE_DAYS),--days $(EVIDENCE_DAYS),)
 
 .PHONY: seeded-recall
-seeded-recall:  ## Seeded-defect recall: re-introduce every known bug class and require the harness to catch it.
-	$(LIVE) env $(GATE_ENV) $(PY) -m dev.seeded $(SEEDED_ARGS)
+seeded-recall:  ## Seeded-defect recall: re-introduce every known bug class and require the harness to catch it; a baseline fetched by release-oracle-prev-bin is the previous release its cells run beside.
+	$(LIVE) env $(GATE_ENV) $(PREV_RELEASE_ENV) $(PY) -m dev.seeded $(SEEDED_ARGS)
