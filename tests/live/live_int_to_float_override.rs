@@ -170,7 +170,7 @@ fn text_and_decimal_under_a_float_or_int_override_read_as_before_mysql() {
         "INSERT INTO {table} VALUES (1, '1.5', 2.50, 3.25, 0.5), (2, 'abc', -7.00, -0.125, -2.0), (3, NULL, NULL, NULL, NULL)"
     ))
     .unwrap();
-    let rig = mysql_rig(&table, "t: float8, d: float8, f: float4, r: float8");
+    let rig = mysql_rig(&table, "t: float8, d: float8, f: float8, r: float8");
     rig.run_ok();
     let out = rig.out_dir();
     assert_eq!(
@@ -186,7 +186,7 @@ fn text_and_decimal_under_a_float_or_int_override_read_as_before_mysql() {
     assert_eq!(
         dir_parquet_floats(&out, "f"),
         vec![Some(3.25), Some(-0.125), None],
-        "double as float4"
+        "double as float8"
     );
     assert_eq!(
         dir_parquet_floats(&out, "r"),
@@ -213,7 +213,7 @@ fn an_int_column_declared_float8_is_refused_by_check_and_run_postgres() {
     assert_refused(&rig.cli(&["check", "--export", &name]), want);
 }
 
-/// Oracle converts an INTEGER column under float4/float8 and delivers the numbers.
+/// Oracle converts an INTEGER column under float8 and delivers the numbers.
 #[cfg(feature = "oracle")]
 #[test]
 #[ignore = "live: requires docker compose oracle"]
@@ -222,11 +222,11 @@ fn an_integer_column_declared_float_is_delivered_with_its_values_oracle() {
     let t = OracleTable::create("ovf_or", "id INTEGER PRIMARY KEY, i INTEGER, j INTEGER");
     ora_exec(&insert_rows(t.name(), &VALUES));
     let rig =
-        readback_only(Rig::oracle_batch(t.name())).export_line("columns: {I: float8, J: float4}");
+        readback_only(Rig::oracle_batch(t.name())).export_line("columns: {I: float8, J: float8}");
     rig.run_ok();
     let out = rig.out_dir();
     assert_eq!(dir_parquet_floats(&out, "i"), floats(&VALUES), "i float8");
-    assert_eq!(dir_parquet_floats(&out, "j"), floats(&VALUES), "j float4");
+    assert_eq!(dir_parquet_floats(&out, "j"), floats(&VALUES), "j float8");
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -500,25 +500,25 @@ fn outcome(eng: Eng, case: &Case) -> String {
 
 const D: &str = "delivered";
 const W: &str = "refused RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH (exit 1)";
-const Q: &str = "refused RIVET_SOURCE_QUERY_FAILED (exit 1)";
+const U: &str = "refused RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5)";
 const R: &str = "refused";
 
 /// Pinned outcome per case in `CASES` order: MySQL, PostgreSQL, SQL Server, Oracle.
 const EXPECTED: [[&str; 4]; 14] = [
     [D, W, R, D],
-    [D, W, R, D],
+    [D, W, R, W],
     [D, W, R, D],
     [D, W, R, D],
     [D, W, R, D],
     [D, D, R, D],
     [D, D, R, D],
     [D, D, R, D],
-    [D, W, R, Q],
+    [U, W, R, W],
     [D, W, W, D],
-    [W, W, R, Q],
-    [W, W, R, Q],
-    [D, W, R, Q],
-    [W, W, R, Q],
+    [W, W, R, W],
+    [W, W, R, W],
+    [W, W, R, W],
+    [W, W, R, W],
 ];
 
 /// A pin is exact, except `refused` which accepts any coded refusal that left no part behind.

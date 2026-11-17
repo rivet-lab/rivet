@@ -10,6 +10,8 @@ use arrow::array::{Array, AsArray};
 use arrow::datatypes::{DataType, Decimal128Type, Int32Type, Int64Type};
 
 const UNUSABLE: Refused = Refused::by_code("RIVET_PLAN_CHUNK_KEY_UNUSABLE", 1);
+#[cfg(feature = "oracle")]
+const WIRE_MISMATCH: Refused = Refused::by_code("RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
 const COMMANDS: [&str; 3] = ["check", "plan", "run"];
 const SMALL_PAGE: i64 = 4;
 const ONE_CHUNK: i64 = 100_000;
@@ -438,8 +440,19 @@ fn delivered_note(rig: &Rig) -> String {
     )
 }
 
-/// Every command refuses the key by code, and the run writes nothing.
+/// Every command refuses the key by `UNUSABLE`, and the run writes nothing.
 fn the_key_is_refused(engine: SqlEngine, case: &Case, chunk_size: i64, what: &str) {
+    the_key_is_refused_by(engine, case, chunk_size, what, UNUSABLE);
+}
+
+/// Every command refuses the key by `want`, and the run writes nothing.
+fn the_key_is_refused_by(
+    engine: SqlEngine,
+    case: &Case,
+    chunk_size: i64,
+    what: &str,
+    want: Refused<'_>,
+) {
     let (table, _guard) = seeded(engine, case, "ks_kt");
     let rig = keyset_rig(engine, &table, case, chunk_size);
     let mut gaps = Vec::new();
@@ -449,7 +462,7 @@ fn the_key_is_refused(engine: SqlEngine, case: &Case, chunk_size: i64, what: &st
                 "run" => rig.run(),
                 other => rig.cli(&[other]),
             };
-            assert_refused(&out, UNUSABLE);
+            assert_refused(&out, want);
         });
     }
     let parts = files_with_extension(&rig.out_dir(), "parquet").len();
@@ -461,8 +474,9 @@ fn the_key_is_refused(engine: SqlEngine, case: &Case, chunk_size: i64, what: &st
     }
     assert!(
         gaps.is_empty(),
-        "keyset key {} {what}: not refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE on every command\n{}",
+        "keyset key {} {what}: not refused by {:?} on every command\n{}",
         case.label,
+        want,
         gaps.join("\n")
     );
 }
@@ -1059,12 +1073,15 @@ fn a_scaled_number_a_float_and_a_negative_scale_keyset_key_stay_refused_under_a_
         ORACLE_FLOAT,
         ORACLE_NEGATIVE_SCALE_NUMBER,
     ] {
-        for line in ["columns: {K: int64}", "columns: {K: string}"] {
+        for (line, want) in [
+            ("columns: {K: int64}", WIRE_MISMATCH),
+            ("columns: {K: string}", UNUSABLE),
+        ] {
             let case = Case {
                 overrides: Some(line),
                 ..base
             };
-            the_key_is_refused(SqlEngine::Oracle, &case, SMALL_PAGE, line);
+            the_key_is_refused_by(SqlEngine::Oracle, &case, SMALL_PAGE, line, want);
         }
     }
 }
@@ -1073,9 +1090,15 @@ fn a_scaled_number_a_float_and_a_negative_scale_keyset_key_stay_refused_under_a_
 #[test]
 #[ignore = "live: requires docker compose oracle"]
 fn a_float_and_a_scaled_number_composite_keyset_key_deliver_the_seeded_ids_once_oracle() {
+    the_key_is_refused_by(
+        SqlEngine::Oracle,
+        &ORACLE_SCALED_NUMBER_INT64_COMPOSITE,
+        SMALL_PAGE,
+        "as a composite key under an int64 override",
+        WIRE_MISMATCH,
+    );
     for case in [
         ORACLE_FLOAT_COMPOSITE,
-        ORACLE_SCALED_NUMBER_INT64_COMPOSITE,
         ORACLE_SCALED_NUMBER_STRING_COMPOSITE,
     ] {
         let (table, _guard) = seeded(SqlEngine::Oracle, &case, "ks_cmp");

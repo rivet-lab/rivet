@@ -74,7 +74,6 @@ fn kind_of(t: &RivetType) -> Kind {
 const TEXTS: &[Kind] = &[Text, Json];
 const STAMPS: &[Kind] = &[Naive, Utc];
 const STAMPS_NS: &[Kind] = &[Naive, Utc, NaiveNs, UtcNs];
-const STAMPS_NS_TEXT: &[Kind] = &[Naive, Utc, NaiveNs, UtcNs, Text, Json];
 
 fn is_bit(native: &str) -> bool {
     native.to_ascii_lowercase().starts_with("bit")
@@ -125,6 +124,7 @@ fn mssql_reads(native: &str, src: Kind, tgt: Kind) -> bool {
     let allowed: &[Kind] = match src {
         Dec if is_money(native) => &[Dec, F64],
         Dec => &[Dec],
+        I16 | I32 => &[Dec],
         I64 => &[I64, Dec],
         Text => TEXTS,
         Naive => STAMPS_NS,
@@ -141,8 +141,8 @@ fn oracle_reads(native: &str, src: Kind, tgt: Kind) -> bool {
         }
         F32 => &[F32, F64, Text, Json],
         F64 => &[F64, Text, Json],
-        Text => TEXTS,
-        Naive | Utc => STAMPS_NS_TEXT,
+        Text | Bool | Interval => TEXTS,
+        Naive | Utc => &[Naive, Utc, NaiveNs, UtcNs, Date, Text, Json],
         Binary => &[Binary, Uuid, Text, Json],
         _ => &[],
     };
@@ -368,6 +368,24 @@ mod tests {
                 RivetType::Int64,
             ),
             (Engine::Oracle, "NUMBER(18)", RivetType::Int64, dec(38, 10)),
+            (Engine::Mssql, "int", RivetType::Int32, dec(10, 2)),
+            (Engine::Mssql, "smallint", RivetType::Int16, dec(10, 2)),
+            (
+                Engine::Oracle,
+                "DATE",
+                RivetType::Timestamp {
+                    unit: TimeUnit::Microsecond,
+                    timezone: None,
+                },
+                RivetType::Date,
+            ),
+            (Engine::Oracle, "BOOLEAN", RivetType::Bool, RivetType::Text),
+            (
+                Engine::Oracle,
+                "INTERVAL DAY TO SECOND",
+                RivetType::Interval,
+                RivetType::String,
+            ),
             (
                 Engine::Oracle,
                 "NUMBER(38,10)",

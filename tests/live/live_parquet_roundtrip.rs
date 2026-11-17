@@ -367,8 +367,8 @@ fn a_bool_override_on_an_integer_column_is_refused_by_name() {
     assert_ne!(code, Some(101), "rivet panicked:\n{said}");
     assert_ne!(code, Some(0), "a bool override on int must fail:\n{said}");
     assert!(
-        said.contains("is declared bool by a `columns:` override but PostgreSQL sends it as int4"),
-        "the refusal must name the override and the wire type:\n{said}"
+        said.contains("column `v` is int4 (read as int32) and `columns:` declares it bool"),
+        "the refusal must name the column, the wire type and the override:\n{said}"
     );
 }
 
