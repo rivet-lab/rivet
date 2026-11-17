@@ -1541,4 +1541,17 @@ mod collection_identity_tests {
             Some("RIVET_SOURCE_COLLECTION_NOT_FOUND")
         );
     }
+
+    #[test]
+    fn a_detected_flat_id_is_labelled_by_the_collection_ids() {
+        let fake = FakeMongo::serving(&FIRST, vec![doc! { "_id": "a", "v": 1 }]);
+        let mappings = source(&fake)
+            .flat_mappings(Some("t"), &ColumnOverrides::default())
+            .expect("mappings");
+        assert_eq!(mappings[0].source_native_type, "string");
+        assert_eq!(
+            mappings[0].fidelity,
+            crate::types::TypeFidelity::LogicalString
+        );
+    }
 }
