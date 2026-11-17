@@ -298,6 +298,43 @@ const RANGES_PER_WORKER: usize = 16;
 /// The most key-space ranges one parallel keyset run cuts.
 const MAX_RANGES: usize = 256;
 
+/// Rows one density probe skips, so one probe examines at most this many index entries.
+const PROBE_ROWS: i64 = 200;
+
+/// Density probes taken across the key-space ranges to decide whether they are skewed.
+const PROBE_POINTS: usize = 32;
+
+/// A sampled density ratio above this means the key-space ranges are skewed.
+const DENSITY_RATIO: f64 = 8.0;
+
+/// A recut is balanced when its heaviest range holds at most this multiple of the mean.
+const BALANCE_FACTOR: f64 = 2.0;
+
+/// Most recut rounds one parallel run spends before it keeps the cuts it has.
+const RECUT_ROUNDS: usize = 4;
+
+/// One integer key range (start, end] and its probed density in rows per key.
+#[derive(Clone, Copy)]
+struct Span {
+    start: i128,
+    end: i128,
+    density: f64,
+}
+
+impl Span {
+    /// Estimated rows in the range: its density times its key width.
+    fn rows(&self) -> f64 {
+        self.density * (self.end - self.start).max(1) as f64
+    }
+}
+
+/// How the density check left the parallel key-space cuts.
+enum Recut {
+    Even,
+    Rounds(usize),
+    Unbalanced { rounds: usize, ratio: f64 },
+}
+
 /// The catalog's scan-free row estimate of a `table:` export's table; `None` for a query, an unanalyzed table or a failed read.
 fn catalog_rows(src: &mut dyn Source, plan: &ResolvedRunPlan) -> Option<i64> {
     let st = plan.source.source_type;
@@ -336,6 +373,10 @@ pub(crate) fn sample_key_boundaries(
     ceil: Option<&str>,
 ) -> Result<Vec<String>> {
     if catalog_rows(src, plan).is_some_and(|n| n < ROW_PERCENTILE_ROWS) {
+        log::info!(
+            "export '{}': parallel keyset path: percentile (catalog estimate under {ROW_PERCENTILE_ROWS} rows)",
+            plan.export_name
+        );
         return percentile_boundaries(src, plan, key, parts, floor, ceil);
     }
     let st = plan.source.source_type;
@@ -360,20 +401,234 @@ pub(crate) fn sample_key_boundaries(
         ()
     );
     let mut bounds: Vec<String> = Vec::with_capacity(parts.saturating_sub(1));
-    if let Err(e) = seek_bounds(src, plan, &k, &fence, (parts, int_parts), &mut bounds) {
-        log::warn!(
-            "export '{}': parallel keyset cannot seek the key to a split point ({e:#}); \
-             the keys above {} stay in one range: data is complete, with fewer workers.",
-            plan.export_name,
-            bounds
-                .last()
-                .map_or("its first value".to_string(), |b| format!("{b:?}"))
+    let ends = match seek_bounds(src, plan, &k, &fence, (parts, int_parts), &mut bounds) {
+        Ok(ends) => ends,
+        Err(e) => {
+            log::warn!(
+                "export '{}': parallel keyset cannot seek the key to a split point ({e:#}); \
+                 the keys above {} stay in one range: data is complete, with fewer workers.",
+                plan.export_name,
+                bounds
+                    .last()
+                    .map_or("its first value".to_string(), |b| format!("{b:?}"))
+            );
+            return Ok(bounds);
+        }
+    };
+    let Some((lo, hi)) =
+        ends.and_then(|(a, b)| Some((a.parse::<i128>().ok()?, b.parse::<i128>().ok()?)))
+    else {
+        log::info!(
+            "export '{}': parallel keyset path: seek (no integer key range to balance)",
+            plan.export_name
         );
+        return Ok(bounds);
+    };
+    let seek_cut = bounds.clone();
+    match balance_by_density(src, plan, &k, &fence, (lo, hi), bounds) {
+        Ok((bounds, Recut::Even)) => {
+            log::info!(
+                "export '{}': parallel keyset path: seek (key-space cuts, densities within {DENSITY_RATIO}x)",
+                plan.export_name
+            );
+            Ok(bounds)
+        }
+        Ok((bounds, Recut::Rounds(rounds))) => {
+            log::info!(
+                "export '{}': parallel keyset path: seek+recut ({rounds} round(s), {} range(s))",
+                plan.export_name,
+                bounds.len() + 1
+            );
+            Ok(bounds)
+        }
+        Ok((bounds, Recut::Unbalanced { rounds, ratio })) => {
+            log::warn!(
+                "export '{}': parallel keyset path: seek+recut ({rounds} round(s), not balanced: heaviest range {ratio:.1}x the mean); data is complete, with uneven workers.",
+                plan.export_name
+            );
+            Ok(bounds)
+        }
+        Err(e) => {
+            log::warn!(
+                "export '{}': parallel keyset path: seek (density probe failed: {e:#}); the key-space cuts stand.",
+                plan.export_name
+            );
+            Ok(seek_cut)
+        }
     }
-    Ok(bounds)
 }
 
-/// Push onto `bounds` the key-space split points of the fenced MIN..MAX, each snapped to the next existing key; an error leaves the bounds found so far.
+/// Rows per key just above `start` up to `end`, from the key one seek lands on after skipping [`PROBE_ROWS`] rows.
+fn probe_density(
+    src: &mut dyn Source,
+    plan: &ResolvedRunPlan,
+    k: &str,
+    fence: &[String],
+    start: i128,
+    end: i128,
+) -> Result<f64> {
+    let st = plan.source.source_type;
+    let of = crate::source::query::KeyOf {
+        base: &plan.base_query,
+        expr: k,
+    };
+    let mut preds = fence.to_vec();
+    preds.push(format!(
+        "{k} > {}",
+        crate::source::query::inline_literal(st, &start.to_string(), of)
+    ));
+    preds.push(format!(
+        "{k} <= {}",
+        crate::source::query::inline_literal(st, &end.to_string(), of)
+    ));
+    preds.push(format!("{k} IS NOT NULL"));
+    let landed = src.query_scalar(&format!(
+        "SELECT {k} FROM ({}) {} WHERE {} ORDER BY {k} {}",
+        plan.base_query,
+        crate::sql::derived(st, "_rivet_pk"),
+        preds.join(" AND "),
+        nth_row_clause(st, PROBE_ROWS)
+    ))?;
+    Ok(match landed.and_then(|v| v.parse::<i128>().ok()) {
+        Some(at) => PROBE_ROWS as f64 / (at - start).max(1) as f64,
+        None => PROBE_ROWS as f64 / (end - start).max(1) as f64,
+    })
+}
+
+/// The integer key ranges (start, end] that the cuts make, the first starting just below `lo`, densities unset.
+fn spans_from(lo: i128, hi: i128, cuts: &[i128]) -> Vec<Span> {
+    std::iter::once(lo - 1)
+        .chain(cuts.iter().copied())
+        .zip(cuts.iter().copied().chain(std::iter::once(hi)))
+        .map(|(start, end)| Span {
+            start,
+            end,
+            density: 0.0,
+        })
+        .collect()
+}
+
+/// The integer cuts that split the spans' estimated rows into `parts` equal shares, interpolated inside each span.
+fn equal_row_cuts(spans: &[Span], parts: usize) -> Vec<i128> {
+    let share = spans.iter().map(Span::rows).sum::<f64>() / parts as f64;
+    let mut cuts: Vec<i128> = Vec::with_capacity(parts.saturating_sub(1));
+    let (mut seen, mut next) = (0.0, share);
+    for s in spans {
+        while cuts.len() + 1 < parts && next <= seen + s.rows() {
+            let at = s.start + ((next - seen) / s.density).round() as i128;
+            if at > s.start && at < s.end && cuts.last().is_none_or(|c| *c < at) {
+                cuts.push(at);
+            }
+            next += share;
+        }
+        seen += s.rows();
+    }
+    cuts
+}
+
+/// The first existing key above `start` at or past `mid`, by one index seek.
+fn snap_key(
+    src: &mut dyn Source,
+    plan: &ResolvedRunPlan,
+    k: &str,
+    fence: &[String],
+    start: i128,
+    mid: i128,
+) -> Result<Option<i128>> {
+    let st = plan.source.source_type;
+    let of = crate::source::query::KeyOf {
+        base: &plan.base_query,
+        expr: k,
+    };
+    let mut preds = fence.to_vec();
+    preds.push(format!(
+        "{k} > {}",
+        crate::source::query::inline_literal(st, &start.to_string(), of)
+    ));
+    preds.push(format!(
+        "{k} >= {}",
+        crate::source::query::inline_literal(st, &mid.to_string(), of)
+    ));
+    Ok(seek_key(src, plan, k, &preds, false)?.and_then(|v| v.parse().ok()))
+}
+
+/// Each cut snapped to the next existing key past the previous one, stopping at the first that has none below `hi`.
+fn snap_cuts(
+    src: &mut dyn Source,
+    plan: &ResolvedRunPlan,
+    k: &str,
+    fence: &[String],
+    first: i128,
+    hi: i128,
+    cuts: &[i128],
+) -> Result<Vec<i128>> {
+    let mut out = Vec::with_capacity(cuts.len());
+    let mut prev = first;
+    for &c in cuts {
+        match snap_key(src, plan, k, fence, prev, c)? {
+            Some(b) if b > prev && b < hi => {
+                out.push(b);
+                prev = b;
+            }
+            _ => break,
+        }
+    }
+    Ok(out)
+}
+
+/// Recut the integer key-space cuts into equal-row ranges when the sampled densities are skewed; the cuts stand otherwise.
+fn balance_by_density(
+    src: &mut dyn Source,
+    plan: &ResolvedRunPlan,
+    k: &str,
+    fence: &[String],
+    (lo, hi): (i128, i128),
+    bounds: Vec<String>,
+) -> Result<(Vec<String>, Recut)> {
+    let mut cuts: Vec<i128> = bounds.iter().filter_map(|b| b.parse().ok()).collect();
+    if cuts.len() != bounds.len() || cuts.is_empty() {
+        return Ok((bounds, Recut::Even));
+    }
+    let m = cuts.len() + 1;
+    let render = |cuts: &[i128]| -> Vec<String> { cuts.iter().map(|c| c.to_string()).collect() };
+    let initial = spans_from(lo, hi, &cuts);
+    let points = m.min(PROBE_POINTS);
+    let mut sampled = Vec::with_capacity(points);
+    for j in 0..points {
+        let s = initial[j * m / points];
+        sampled.push(probe_density(src, plan, k, fence, s.start, s.end)?);
+    }
+    let (min, max) = sampled
+        .iter()
+        .fold((f64::MAX, 0f64), |(a, b), d| (a.min(*d), b.max(*d)));
+    if max / min <= DENSITY_RATIO {
+        return Ok((bounds, Recut::Even));
+    }
+    let mut rounds = 0;
+    loop {
+        let mut spans = spans_from(lo, hi, &cuts);
+        for s in spans.iter_mut() {
+            s.density = probe_density(src, plan, k, fence, s.start, s.end)?;
+        }
+        let mean = spans.iter().map(Span::rows).sum::<f64>() / spans.len() as f64;
+        let ratio = spans.iter().map(Span::rows).fold(0f64, f64::max) / mean;
+        if ratio <= BALANCE_FACTOR {
+            let recut = if rounds == 0 {
+                Recut::Even
+            } else {
+                Recut::Rounds(rounds)
+            };
+            return Ok((render(&cuts), recut));
+        }
+        if rounds == RECUT_ROUNDS {
+            return Ok((render(&cuts), Recut::Unbalanced { rounds, ratio }));
+        }
+        cuts = snap_cuts(src, plan, k, fence, lo - 1, hi, &equal_row_cuts(&spans, m))?;
+        rounds += 1;
+    }
+}
+
+/// Push onto `bounds` the key-space split points of the fenced MIN..MAX, each snapped to the next existing key, and return the fenced MIN and MAX; an error leaves the bounds found so far.
 fn seek_bounds(
     src: &mut dyn Source,
     plan: &ResolvedRunPlan,
@@ -381,7 +636,7 @@ fn seek_bounds(
     fence: &[String],
     (parts, int_parts): (usize, usize),
     bounds: &mut Vec<String>,
-) -> Result<()> {
+) -> Result<Option<(String, String)>> {
     let st = plan.source.source_type;
     let of = crate::source::query::KeyOf {
         base: &plan.base_query,
@@ -391,7 +646,7 @@ fn seek_bounds(
         seek_key(src, plan, k, fence, false)?,
         seek_key(src, plan, k, fence, true)?,
     ) else {
-        return Ok(());
+        return Ok(None);
     };
     let integer = lo.parse::<i128>().is_ok() && hi.parse::<i128>().is_ok();
     let parts = if integer { int_parts } else { parts };
@@ -411,7 +666,7 @@ fn seek_bounds(
             _ => break,
         }
     }
-    Ok(())
+    Ok(Some((lo, hi)))
 }
 
 /// The first non-NULL key of the base query under `preds` in key order (the last with `desc`), by one index seek.
@@ -1942,13 +2197,26 @@ mod tests {
             if self.refuse.is_some_and(|r| sql.contains(r)) {
                 anyhow::bail!("invalid input value for the key's type");
             }
-            let head = sql
-                .strip_suffix(&format!(" {}", first_row_clause(self.st)))
-                .unwrap_or_else(|| panic!("not a first-row seek: {sql}"));
+            let (head, skip) = match sql.rsplit_once(" OFFSET ") {
+                Some((h, rest)) => {
+                    let n = rest
+                        .split(' ')
+                        .next()
+                        .and_then(|d| d.parse::<usize>().ok())
+                        .unwrap_or_else(|| panic!("{sql}"));
+                    (h.strip_suffix(" LIMIT 1").unwrap_or(h), n)
+                }
+                None => (
+                    sql.strip_suffix(&format!(" {}", first_row_clause(self.st)))
+                        .unwrap_or_else(|| panic!("not a first-row seek: {sql}")),
+                    0,
+                ),
+            };
             assert!(
                 !head.contains("COUNT") && !head.contains("OFFSET"),
                 "a scan: {sql}"
             );
+            assert!(skip <= PROBE_ROWS as usize, "a deep probe: {sql}");
             let order = format!(" ORDER BY {}", crate::sql::quote_ident(self.st, "k"));
             let (head, desc) = match head.strip_suffix(" DESC") {
                 Some(h) => (h.strip_suffix(&order).unwrap(), true),
@@ -1970,9 +2238,9 @@ mod tests {
                 })
             };
             let found = if desc {
-                self.keys.iter().rev().find(hit)
+                self.keys.iter().rev().filter(hit).nth(skip)
             } else {
-                self.keys.iter().find(hit)
+                self.keys.iter().filter(hit).nth(skip)
             };
             Ok(found.cloned())
         }
@@ -2100,7 +2368,11 @@ mod tests {
         let mut ints = Indexed::new(keys(1..=1000), true);
         let got = sample_key_boundaries(&mut ints, &plan, "k", 4, 16, None, None).unwrap();
         assert_eq!(got.len(), 15, "{got:?}");
-        assert_eq!(ints.sql.len(), 17, "MIN, MAX and one seek per cut");
+        assert_eq!(
+            ints.sql.len(),
+            33,
+            "MIN, MAX, one seek per cut and one probe per range"
+        );
         let mut text = Indexed::new(keys(["a", "c", "e", "g", "i", "k", "m", "o"]), false);
         let got = sample_key_boundaries(&mut text, &plan, "k", 4, 16, None, None).unwrap();
         assert_eq!(got.len(), 3, "{got:?}");
@@ -2119,7 +2391,11 @@ mod tests {
         let got =
             sample_key_boundaries(&mut src, &plan, "k", 4, 4, Some("100"), Some("900")).unwrap();
         assert_eq!(got, keys([300, 500, 700]));
-        assert_eq!(src.sql.len(), 5, "MIN, MAX and one seek per cut");
+        assert_eq!(
+            src.sql.len(),
+            9,
+            "MIN, MAX, one seek per cut and one probe per range"
+        );
         for sql in &src.sql {
             assert!(sql.contains("\"k\" > E'100' AND \"k\" <= E'900'"), "{sql}");
         }
@@ -2183,7 +2459,7 @@ mod tests {
                 .map(|(a, b)| (all.get(a % all.len()).cloned(), all.get(b % all.len()).cloned()))
                 .unwrap_or((None, None));
             let bounds = sample_key_boundaries(&mut src, &plan, "k", parts, parts, floor.as_deref(), ceil.as_deref()).unwrap();
-            prop_assert!(src.sql.len() <= parts + 1, "{} statements for {parts} parts", src.sql.len());
+            prop_assert!(src.sql.len() <= 2 + parts * (2 * RECUT_ROUNDS + 4), "{} statements for {parts} parts", src.sql.len());
             let ranges = partition_ranges(&bounds, floor.as_deref(), ceil.as_deref());
             prop_assert!(ranges.len() <= parts);
             let numeric = src.numeric;
@@ -2199,9 +2475,9 @@ mod tests {
         });
     }
 
-    /// A key with 90% of its rows in 5% of its span keeps every row once in non-empty ranges, which follow the key's value, not its row count.
+    /// A key with 90% of its rows in 5% of its span keeps every row once, in ranges recut to near-equal row counts.
     #[test]
-    fn a_skewed_key_keeps_every_row_once_in_value_balanced_ranges() {
+    fn a_skewed_key_keeps_every_row_once_in_balanced_ranges() {
         let plan = crate::plan::test_support::test_plan();
         let dense = 1..=9_000i64;
         let sparse = (1..=1_000i64).map(|i| 9_000 + i * 191);
@@ -2222,7 +2498,64 @@ mod tests {
         };
         let spread: Vec<usize> = ranges.iter().map(|(_, lo, hi, _)| held(lo, hi)).collect();
         assert_eq!(spread.iter().sum::<usize>(), all.len(), "{spread:?}");
-        assert_eq!(spread, vec![9_215, 262, 262, 261], "{bounds:?}");
+        assert_eq!(spread, vec![3_517, 3_518, 1_974, 991], "{bounds:?}");
+    }
+
+    /// A seeded sparse integer key, 95% dense and the rest spread wide, keeps every row once in ranges no heavier than twice the mean.
+    #[test]
+    fn a_seeded_sparse_key_is_recut_into_balanced_ranges() {
+        let plan = crate::plan::test_support::test_plan();
+        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut keys: Vec<i64> = (1..=9_500).collect();
+        let mut at = 9_500i64;
+        for _ in 0..500 {
+            at += 1 + (next() % 10_000) as i64;
+            keys.push(at);
+        }
+        let mut src = Indexed::new(keys.iter().map(|k| k.to_string()).collect(), true);
+        let all = src.keys.clone();
+        let bounds = sample_key_boundaries(&mut src, &plan, "k", 4, 16, None, None).unwrap();
+        let ranges = partition_ranges(&bounds, None, None);
+        let held = |lo: &Option<String>, hi: &Option<String>| {
+            all.iter()
+                .filter(|k| {
+                    lo.as_deref()
+                        .is_none_or(|l| Indexed::order(true, k, l).is_gt())
+                        && hi
+                            .as_deref()
+                            .is_none_or(|h| Indexed::order(true, k, h).is_le())
+                })
+                .count()
+        };
+        let spread: Vec<usize> = ranges.iter().map(|(_, lo, hi, _)| held(lo, hi)).collect();
+        assert_eq!(spread.iter().sum::<usize>(), all.len(), "{spread:?}");
+        let mean = all.len() as f64 / spread.len() as f64;
+        let heaviest = *spread.iter().max().unwrap() as f64;
+        assert!(heaviest <= 2.0 * mean, "{spread:?}");
+    }
+
+    /// Equal-row cuts split a dense span and a sparse span into shares of their estimated rows.
+    #[test]
+    fn equal_row_cuts_split_estimated_rows_evenly() {
+        let spans = [
+            Span {
+                start: 0,
+                end: 1000,
+                density: 1.0,
+            },
+            Span {
+                start: 1000,
+                end: 2000,
+                density: 0.01,
+            },
+        ];
+        assert_eq!(equal_row_cuts(&spans, 2), vec![505]);
     }
 
     /// Every SQL dialect samples by first-row seeks alone and lands on the same boundaries, for number and text keys.
@@ -2245,7 +2578,7 @@ mod tests {
                 src.st = st;
                 let got = sample_key_boundaries(&mut src, &plan, "k", 4, 4, None, None).unwrap();
                 assert_eq!(got, want, "{st:?}: {:?}", src.sql);
-                assert_eq!(src.sql.len(), 5, "{st:?}");
+                assert_eq!(src.sql.len(), if numeric { 9 } else { 5 }, "{st:?}");
             }
         }
     }
@@ -2259,7 +2592,7 @@ mod tests {
             let got = sample_key_boundaries(&mut src, &plan, "k", 4, 4, None, None).unwrap();
             let rows: Vec<i64> = got.iter().map(|b| b.parse::<i64>().unwrap() / 7).collect();
             assert_eq!(rows, vec![n / 4, n / 2, 3 * n / 4], "{got:?}");
-            assert_eq!(src.sql.len(), 5);
+            assert_eq!(src.sql.len(), 9);
         }
     }
 
