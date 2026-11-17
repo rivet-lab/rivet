@@ -402,6 +402,31 @@ pub fn parquet_column_type(dir: &Path, col: &str) -> arrow::datatypes::DataType 
         .clone()
 }
 
+/// The `rivet.native_type` and `rivet.fidelity` labels of `col` in every `.parquet` under `dir`, at any depth.
+pub fn parquet_field_labels(dir: &Path, col: &str) -> Vec<(String, String)> {
+    let mut parts: Vec<_> = super::files_under(dir)
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "parquet"))
+        .collect();
+    parts.sort();
+    assert!(!parts.is_empty(), "no parquet part under {}", dir.display());
+    parts
+        .iter()
+        .map(|part| {
+            let f = std::fs::File::open(part).expect("open part");
+            let b = ParquetRecordBatchReaderBuilder::try_new(f).expect("parquet part");
+            let md = b
+                .schema()
+                .field_with_name(col)
+                .unwrap_or_else(|e| panic!("column {col} in {}: {e}", part.display()))
+                .metadata()
+                .clone();
+            let get = |k: &str| md.get(k).cloned().unwrap_or_default();
+            (get("rivet.native_type"), get("rivet.fidelity"))
+        })
+        .collect()
+}
+
 /// All `id` values across every `.parquet` under `dir`, WITH multiplicity.
 pub fn dir_parquet_ids(dir: &Path) -> Vec<i64> {
     files_with_extension(dir, "parquet")

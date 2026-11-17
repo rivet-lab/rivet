@@ -27,6 +27,7 @@ pub(crate) mod parallel_children;
 pub(crate) mod parent_ui;
 mod partition_expand;
 mod plan_cmd;
+pub(crate) mod planning;
 pub(crate) mod pool;
 pub(crate) mod progress;
 mod reconcile_cmd;

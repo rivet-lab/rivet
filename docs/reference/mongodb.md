@@ -5,7 +5,7 @@ exactly two columns —
 
 | column | type | contents |
 | ------ | ---- | -------- |
-| `_id` | `Utf8` | the document key, stringified (ObjectId → hex, int → decimal string, …) |
+| `_id` | `Utf8` | the document key, stringified (ObjectId → hex, int → decimal string, …); its field metadata names the BSON type the collection holds: `rivet.native_type = objectid` with `rivet.fidelity = exact` for ObjectId keys, the type's name with `logical_string` for one other type, `mixed` with `logical_string` for more than one |
 | `document` | `Utf8` + `arrow.json` extension | the **whole** BSON document as [extended JSON](https://www.mongodb.com/docs/manual/reference/mongodb-extended-json/) |
 
 Rivet does **not** flatten fields into typed columns. Documents in one collection
