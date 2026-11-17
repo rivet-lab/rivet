@@ -1261,9 +1261,9 @@ pub(crate) fn search_path_relation<C: CatalogRows>(
 
 /// The `(schema, table)` the first catalog row names; a row short of either cell resolves nowhere.
 pub(crate) fn relation_from_rows(rows: &[Vec<Option<String>>]) -> Option<(String, String)> {
-    match rows.first()?.as_slice() {
-        [Some(schema), Some(table), ..] => Some((schema.clone(), table.clone())),
-        _ => None,
+    match rows.first().map(Vec::as_slice) {
+        Some([Some(schema), Some(table), ..]) => Some((schema.clone(), table.clone())),
+        None | Some([] | [_] | [None, ..] | [Some(_), None, ..]) => None,
     }
 }
 
