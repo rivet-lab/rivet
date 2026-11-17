@@ -1189,18 +1189,7 @@ def self_test() -> None:
     assert "C00" in config("oracle", "U", "incremental", "parquet", "c00", "int8", "o") and "cursor_column: ID" in config("oracle", "U", "incremental", "parquet", "c00", "none", "o")
     refused = grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] x"), _proc(2))
     assert refused.klass == "" and refused.verdict == REFUSED and refused.code == "RIVET_SOURCE_VALUE_UNREPRESENTABLE"
-    from bson import json_util
-    from . import type_matrix as tm
-
-    docs, want = tm.mongo_grid()
-    wired = lambda d: json_util.dumps(d, json_options=json_util.RELAXED_JSON_OPTIONS)
-    first = next(k for k in want if "double" in {c.native for c, _, _ in want[k].values()})
-    name, (col, _, _) = next((x, y) for x, y in want[first].items() if y[0].native == "double")
-    assert tm.mongo_grid_verdict(wired({"n": len(docs)}), len(docs)) == [], "the sparse document owes nothing"
-    lost = {k: v for k, v in docs[first - 1].items() if k != name}
-    assert (NULLED, True) in {(c, d.startswith("double[")) for c, d in tm.mongo_grid_verdict(wired(lost), first)}, "a field the delivered document dropped"
-    changed = tm.mongo_grid_verdict(wired({**lost, name: "changed"}), first)
-    assert (WRONG, True) in {(c, d.startswith("double[")) for c, d in changed}, "a field delivered as another value"
+    mongo_ran = _mongo_grader_self_test()
     cols = [Col("c00", "INT", "Int32", "int", ("1", "2")), Col("c01", "TEXT", "Utf8", "text", ("'a'",)), Col("c02", "BIGINT", "Int64", "int", ("3",))]
     smoke, full = grid("mysql", cols, "smoke"), grid("mysql", cols, "full")
     pair = lambda units: {(c.name, t) for c, t, _, _ in units}
@@ -1271,7 +1260,27 @@ def self_test() -> None:
         assert grade_run("mysql", "x", _proc(0), _proc(0), "exact", Path(t), "csv", col1, 1, "none", ["7"], reader=crasher).klass == NOT_GRADED
         assert grade_run("mysql", "x", _proc(0), _proc(0), "exact", Path(t), "csv", col1, 1, "none", ["7"], reader=liar).klass == "", "a liar reader is caught by the canary, not by one cell"
     ran = _reader_self_test()
-    print(f"self-test ok: {len(ax['targets'])} override targets, {len(ax['modes'])} modes, grader classes fire on their harm; second reader {'ran' if ran else 'NOT RUN (no pyarrow or duckdb)'}")
+    print(f"self-test ok: {len(ax['targets'])} override targets, {len(ax['modes'])} modes, grader classes fire on their harm; second reader {'ran' if ran else 'NOT RUN (no pyarrow or duckdb)'}; mongo grader {'ran' if mongo_ran else 'NOT RUN (no pymongo)'}")
+
+
+def _mongo_grader_self_test() -> bool:
+    """Grade dropped and changed fields of the Mongo grid through BSON relaxed JSON; False when pymongo is not installed."""
+    try:
+        from bson import json_util
+    except ImportError:
+        return False
+    from . import type_matrix as tm
+
+    docs, want = tm.mongo_grid()
+    wired = lambda d: json_util.dumps(d, json_options=json_util.RELAXED_JSON_OPTIONS)
+    first = next(k for k in want if "double" in {c.native for c, _, _ in want[k].values()})
+    name, (col, _, _) = next((x, y) for x, y in want[first].items() if y[0].native == "double")
+    assert tm.mongo_grid_verdict(wired({"n": len(docs)}), len(docs)) == [], "the sparse document owes nothing"
+    lost = {k: v for k, v in docs[first - 1].items() if k != name}
+    assert (NULLED, True) in {(c, d.startswith("double[")) for c, d in tm.mongo_grid_verdict(wired(lost), first)}, "a field the delivered document dropped"
+    changed = tm.mongo_grid_verdict(wired({**lost, name: "changed"}), first)
+    assert (WRONG, True) in {(c, d.startswith("double[")) for c, d in changed}, "a field delivered as another value"
+    return True
 
 
 def _reader_self_test() -> bool:
