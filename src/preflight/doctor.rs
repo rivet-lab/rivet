@@ -118,6 +118,48 @@ mod transient_tests {
 pub type RunPlanProbe<'a> =
     &'a dyn Fn(&Config, &std::path::Path) -> Result<Vec<(String, Result<()>)>>;
 
+/// Emit one check that carries no hint.
+fn emit_named(
+    checks: &mut Vec<DoctorCheck>,
+    json: bool,
+    name: impl Into<String>,
+    ok: bool,
+    detail: Option<String>,
+) {
+    let check = DoctorCheck {
+        name: name.into(),
+        ok,
+        detail,
+        hint: None,
+    };
+    emit_check(checks, json, check);
+}
+
+/// One `Run plan <export>` check per verdict the probe returns, and the first refusal among them.
+fn run_plan_checks(
+    config: &Config,
+    config_dir: &std::path::Path,
+    run_plan: RunPlanProbe<'_>,
+    json: bool,
+    checks: &mut Vec<DoctorCheck>,
+) -> Option<anyhow::Error> {
+    let mut refusal: Option<anyhow::Error> = None;
+    let planned =
+        run_plan(config, config_dir).unwrap_or_else(|e| vec![("config".to_string(), Err(e))]);
+    for (name, verdict) in planned {
+        let (ok, detail) = match verdict {
+            Ok(()) => (true, None),
+            Err(e) => {
+                let detail = trim_probe_error(&e);
+                refusal.get_or_insert(e);
+                (false, Some(detail))
+            }
+        };
+        emit_named(checks, json, format!("Run plan {name}"), ok, detail);
+    }
+    refusal
+}
+
 pub fn doctor(config_path: &str, json: bool, run_plan: RunPlanProbe<'_>) -> Result<()> {
     if !json {
         println!("rivet doctor: verifying auth for config '{}'", config_path);
@@ -127,28 +169,16 @@ pub fn doctor(config_path: &str, json: bool, run_plan: RunPlanProbe<'_>) -> Resu
 
     let config = match Config::load(config_path) {
         Ok(c) => {
-            emit_check(
-                &mut checks,
-                json,
-                DoctorCheck {
-                    name: "Config parsed successfully".into(),
-                    ok: true,
-                    detail: None,
-                    hint: None,
-                },
-            );
+            emit_named(&mut checks, json, "Config parsed successfully", true, None);
             c
         }
         Err(e) => {
-            emit_check(
+            emit_named(
                 &mut checks,
                 json,
-                DoctorCheck {
-                    name: "Config error".into(),
-                    ok: false,
-                    detail: Some(trim_probe_error(&e)),
-                    hint: None,
-                },
+                "Config error",
+                false,
+                Some(trim_probe_error(&e)),
             );
             if json {
                 print_doctor_json(config_path, false, &checks);
@@ -169,28 +199,16 @@ pub fn doctor(config_path: &str, json: bool, run_plan: RunPlanProbe<'_>) -> Resu
         .unwrap_or_else(|| std::path::Path::new("."));
 
     match crate::state::StateStore::probe(config_path) {
-        Ok(at) => emit_check(
-            &mut checks,
-            json,
-            DoctorCheck {
-                name: format!("State ({at})"),
-                ok: true,
-                detail: None,
-                hint: None,
-            },
-        ),
+        Ok(at) => emit_named(&mut checks, json, format!("State ({at})"), true, None),
         Err(e) => {
             all_ok = false;
             keep_first_transient(&mut transient, &e);
-            emit_check(
+            emit_named(
                 &mut checks,
                 json,
-                DoctorCheck {
-                    name: "State".into(),
-                    ok: false,
-                    detail: Some(trim_probe_error(&e)),
-                    hint: None,
-                },
+                "State",
+                false,
+                Some(trim_probe_error(&e)),
             );
         }
     }
@@ -260,32 +278,10 @@ pub fn doctor(config_path: &str, json: bool, run_plan: RunPlanProbe<'_>) -> Resu
         }
     }
 
-    let mut run_refusal: Option<anyhow::Error> = None;
-    if source_ok {
-        let planned =
-            run_plan(&config, config_dir).unwrap_or_else(|e| vec![("config".to_string(), Err(e))]);
-        for (name, verdict) in planned {
-            let (ok, detail) = match verdict {
-                Ok(()) => (true, None),
-                Err(e) => {
-                    let detail = trim_probe_error(&e);
-                    all_ok = false;
-                    run_refusal.get_or_insert(e);
-                    (false, Some(detail))
-                }
-            };
-            emit_check(
-                &mut checks,
-                json,
-                DoctorCheck {
-                    name: format!("Run plan {name}"),
-                    ok,
-                    detail,
-                    hint: None,
-                },
-            );
-        }
-    }
+    let run_refusal = source_ok
+        .then(|| run_plan_checks(&config, config_dir, run_plan, json, &mut checks))
+        .flatten();
+    all_ok &= run_refusal.is_none();
 
     let mut seen_destinations: Vec<String> = Vec::new();
     let doctored = if seeded!("check-reads-declared-list-not-run-set", true, false) {

@@ -58,6 +58,23 @@ fn load_report(json: bool, summary_output: Option<String>) -> load::result::Repo
     }
 }
 
+/// What `run` would plan for each batch export of `config`, as the verdicts `doctor` reports.
+fn doctor_run_plan(
+    config: &crate::config::Config,
+    dir: &std::path::Path,
+) -> Result<Vec<(String, Result<()>)>> {
+    Ok(crate::pipeline::planning::plan_run(
+        config,
+        dir,
+        None,
+        None,
+        crate::pipeline::planning::PlanFlags::default(),
+    )?
+    .into_iter()
+    .map(|(name, verdict)| (name, verdict.map(|_| ())))
+    .collect())
+}
+
 /// Validate and execute the parsed CLI.
 pub fn dispatch(cli: Cli) -> Result<()> {
     validate_cli(&cli.command)?;
@@ -76,18 +93,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             json,
             target,
         } => dispatch_check(config, export, params, type_report, strict, json, target),
-        Commands::Doctor { config, json } => preflight::doctor(&config, json, &|config, dir| {
-            Ok(crate::pipeline::planning::plan_run(
-                config,
-                dir,
-                None,
-                None,
-                crate::pipeline::planning::PlanFlags::default(),
-            )?
-            .into_iter()
-            .map(|(name, verdict)| (name, verdict.map(|_| ())))
-            .collect())
-        }),
+        Commands::Doctor { config, json } => preflight::doctor(&config, json, &doctor_run_plan),
         Commands::Cdc {
             source,
             source_env,
@@ -534,11 +540,16 @@ fn batch_plans(
         config_dir,
         export_name,
         params,
-        crate::pipeline::planning::PlanFlags {
-            strict,
-            ..Default::default()
-        },
+        check_plan_flags(strict),
     )
+}
+
+/// The run-only switches `check` plans with: `--strict` as given, the rest off.
+fn check_plan_flags(strict: bool) -> crate::pipeline::planning::PlanFlags {
+    crate::pipeline::planning::PlanFlags {
+        strict,
+        ..Default::default()
+    }
 }
 
 /// The `--target` of `rivet check`, refused by code when it names no warehouse rivet types for.
@@ -559,15 +570,16 @@ fn planned_strategies(plans: &[BatchPlan]) -> preflight::PlannedStrategies {
         .collect()
 }
 
-/// Print each plan's diagnostics (text mode) and refuse with the first refusal `run` would raise, under `--json` too.
-fn report_plan_compatibility(plans: Vec<BatchPlan>, json_output: bool) -> Result<()> {
+/// The text-mode lines for each plan's refusal or diagnostics (none under `--json`), and the first refusal `run` would raise.
+fn plan_report(plans: Vec<BatchPlan>, json_output: bool) -> (Vec<String>, Option<anyhow::Error>) {
+    let mut lines = Vec::new();
     let mut refused: Option<anyhow::Error> = None;
     for (name, plan) in plans {
         let planned = match plan {
             Ok(planned) => planned,
             Err(e) => {
                 if !json_output {
-                    println!("Rejected: export '{name}': {e:#}");
+                    lines.push(format!("Rejected: export '{name}': {e:#}"));
                 }
                 refused.get_or_insert(e);
                 continue;
@@ -578,12 +590,21 @@ fn report_plan_compatibility(plans: Vec<BatchPlan>, json_output: bool) -> Result
         }
         for d in planned.diags {
             let line = format!("[{}] {}", d.rule, d.message);
-            match d.level {
-                crate::plan::DiagnosticLevel::Rejected => println!("Rejected: {line}"),
-                crate::plan::DiagnosticLevel::Warning => println!("Warning: {line}"),
-                crate::plan::DiagnosticLevel::Degraded => println!("Degraded: {line}"),
-            }
+            lines.push(match d.level {
+                crate::plan::DiagnosticLevel::Rejected => format!("Rejected: {line}"),
+                crate::plan::DiagnosticLevel::Warning => format!("Warning: {line}"),
+                crate::plan::DiagnosticLevel::Degraded => format!("Degraded: {line}"),
+            });
         }
+    }
+    (lines, refused)
+}
+
+/// Print each plan's diagnostics (text mode) and refuse with the first refusal `run` would raise, under `--json` too.
+fn report_plan_compatibility(plans: Vec<BatchPlan>, json_output: bool) -> Result<()> {
+    let (lines, refused) = plan_report(plans, json_output);
+    for line in lines {
+        println!("{line}");
     }
     refused.map_or(Ok(()), Err)
 }
@@ -1174,6 +1195,75 @@ mod loads_listing_tests {
                 .unwrap()
                 .contains("no loads recorded")
         );
+    }
+}
+
+#[cfg(test)]
+mod check_plan_report_tests {
+    use crate::pipeline::planning::PlannedExport;
+    use crate::plan::DiagnosticLevel;
+    use crate::plan::validate::Diagnostic;
+
+    /// `check --strict` plans strict and a bare `check` does not.
+    #[test]
+    fn check_plans_strict_only_under_the_strict_flag() {
+        assert!(super::check_plan_flags(true).strict);
+        assert!(!super::check_plan_flags(false).strict);
+    }
+
+    fn planned(diags: Vec<Diagnostic>) -> PlannedExport {
+        PlannedExport {
+            plan: crate::plan::test_support::test_plan(),
+            diags,
+        }
+    }
+
+    fn diag(level: DiagnosticLevel, rule: &'static str) -> Diagnostic {
+        Diagnostic {
+            level,
+            rule,
+            message: format!("{rule} said"),
+        }
+    }
+
+    /// A refused plan prints its `Rejected: export` line in text mode, nothing under `--json`, and refuses in both.
+    #[test]
+    fn a_refused_plan_is_printed_in_text_mode_only_and_refuses_in_both() {
+        for json in [false, true] {
+            let plans = vec![("orders".to_string(), Err(anyhow::anyhow!("no table")))];
+            let (lines, refused) = super::plan_report(plans, json);
+            let want: &[&str] = if json {
+                &[]
+            } else {
+                &["Rejected: export 'orders': no table"]
+            };
+            assert_eq!(lines, want, "json={json}");
+            assert_eq!(format!("{:#}", refused.unwrap()), "no table");
+        }
+    }
+
+    /// Each diagnostic level keeps its own label in text mode and prints nothing under `--json`.
+    #[test]
+    fn diagnostics_are_labelled_by_level_in_text_mode_and_silent_under_json() {
+        let diags = || {
+            vec![
+                diag(DiagnosticLevel::Rejected, "r1"),
+                diag(DiagnosticLevel::Warning, "w1"),
+                diag(DiagnosticLevel::Degraded, "d1"),
+            ]
+        };
+        let (lines, refused) = super::plan_report(vec![("a".into(), Ok(planned(diags())))], false);
+        assert_eq!(
+            lines,
+            [
+                "Rejected: [r1] r1 said",
+                "Warning: [w1] w1 said",
+                "Degraded: [d1] d1 said"
+            ]
+        );
+        assert!(refused.is_none());
+        let (lines, refused) = super::plan_report(vec![("a".into(), Ok(planned(diags())))], true);
+        assert!(lines.is_empty() && refused.is_none());
     }
 }
 

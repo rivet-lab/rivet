@@ -159,6 +159,81 @@ pub(crate) fn refuse_to_seal(plan: &ResolvedRunPlan) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// A source that answers the column probe with one Lossy column.
+    struct LossySource;
+
+    impl Source for LossySource {
+        fn export(
+            &mut self,
+            _request: &crate::source::ExportRequest<'_>,
+            _sink: &mut dyn crate::source::BatchSink,
+        ) -> Result<()> {
+            Ok(())
+        }
+        fn query_scalar(&mut self, _sql: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+        fn type_mappings(
+            &mut self,
+            _query: &str,
+            _overrides: &crate::types::ColumnOverrides,
+        ) -> Result<Vec<crate::types::TypeMapping>> {
+            use crate::types::{RivetType, SourceColumn, TypeFidelity, TypeMapping};
+            let mut m = TypeMapping::from_source(
+                &SourceColumn::simple("ts", "timestamp(9)", true),
+                RivetType::String,
+            );
+            m.fidelity = TypeFidelity::Lossy;
+            Ok(vec![m])
+        }
+    }
+
+    fn one_export_config(source_type: &str, extra: &str) -> Config {
+        Config::from_yaml(&format!(
+            "source: {{ type: {source_type}, url: \"{source_type}://u:p@127.0.0.1:1/db\"{extra} }}\n\
+             exports:\n\
+             \x20 - name: e\n    table: t\n    mode: full\n    format: parquet\n\
+             \x20   destination: {{ type: local, path: ./out }}\n"
+        ))
+        .expect("the fixture config loads")
+    }
+
+    /// The catalog admission refuses a Lossy column under `--strict` and admits it otherwise.
+    #[test]
+    fn admit_columns_refuses_a_lossy_column_only_under_strict() {
+        let config = one_export_config("postgres", "");
+        let plan = crate::plan::test_support::test_plan();
+        let admit = |strict: bool| {
+            admit_columns(
+                &mut LossySource,
+                &config,
+                &plan,
+                &config.exports[0],
+                Path::new("."),
+                None,
+                strict,
+            )
+        };
+        assert!(admit(false).is_ok());
+        let err = admit(true).unwrap_err();
+        assert!(format!("{err:#}").contains("ts"), "{err:#}");
+    }
+
+    /// A source that cannot connect stops a `columns_from: grants` plan with the connect refusal and lets any other plan go on without a catalog.
+    #[test]
+    fn an_unreachable_source_stops_a_grants_plan_and_not_a_plain_one() {
+        let dir = Path::new(".");
+        let grants = one_export_config("mysql", ", columns_from: grants");
+        let err = plan_run(&grants, dir, None, None, PlanFlags::default())
+            .err()
+            .expect("a grants plan needs its catalog");
+        assert!(format!("{err:#}").contains("127.0.0.1"), "{err:#}");
+        let plain = one_export_config("mysql", "");
+        let planned = plan_run(&plain, dir, None, None, PlanFlags::default()).unwrap();
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].0, "e");
+    }
+
     /// Sealing refuses a destination holding `{partition}` by code and passes an expanded one.
     #[test]
     fn refuse_to_seal_refuses_the_partition_token_and_passes_an_expanded_plan() {

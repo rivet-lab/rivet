@@ -87,15 +87,7 @@ pub fn run_plan_command(
 
     let exports = plannable_exports(&config, export_name)?;
 
-    for (_, verdict) in super::planning::plan_run(
-        &config,
-        config_dir,
-        export_name,
-        params,
-        super::planning::PlanFlags::default(),
-    )? {
-        verdict?;
-    }
+    refuse_what_run_refuses(&config, config_dir, export_name, params)?;
 
     let state_path = config_dir.join(".rivet_state.db");
     let state = StateStore::open(state_path.to_str().unwrap_or(".rivet_state.db"))?;
@@ -279,6 +271,25 @@ fn source_unreadable(export: &str, cause: anyhow::Error) -> anyhow::Error {
              would fail on it)"
         ),
     ))
+}
+
+/// Stop with the first refusal `rivet run` would raise for the selected exports.
+fn refuse_what_run_refuses(
+    config: &Config,
+    config_dir: &Path,
+    export_name: Option<&str>,
+    params: Option<&HashMap<String, String>>,
+) -> Result<()> {
+    for (_, verdict) in super::planning::plan_run(
+        config,
+        config_dir,
+        export_name,
+        params,
+        super::planning::PlanFlags::default(),
+    )? {
+        verdict?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -972,6 +983,43 @@ mod tests {
             )
         );
         assert_eq!(super::partitioned_preview_note(&cfg.exports[1]), None);
+    }
+
+    /// A sealed artifact refuses the `{partition}` token of a `partition_by` export by code; an unsealed preview and an export without `partition_by` build.
+    #[test]
+    fn only_a_sealed_partitioned_export_is_refused_for_its_partition_token() {
+        let cfg = crate::config::Config::from_yaml(
+            "source: { type: postgres, url: \"postgresql://u:p@127.0.0.1:1/db\" }\n\
+             exports:\n\
+             \x20 - name: events\n    table: events\n    mode: full\n    format: parquet\n\
+             \x20   partition_by: created_at\n\
+             \x20   destination: { type: local, path: \"./out/{partition}\" }\n\
+             \x20 - name: plain\n    table: plain\n    mode: full\n    format: parquet\n\
+             \x20   destination: { type: local, path: ./out/plain }\n",
+        )
+        .expect("the fixture config loads");
+        let state = crate::state::StateStore::open_in_memory().expect("state");
+        let build = |i: usize, sealing: bool| {
+            super::build_plan_artifact(
+                &cfg,
+                &cfg.exports[i],
+                "rivet.yaml",
+                Path::new("."),
+                None,
+                &state,
+                None,
+                sealing,
+            )
+        };
+        let err = build(0, true).expect_err("a sealed partitioned export is refused");
+        crate::error::assert_coded(&err, "RIVET_PLAN_PARTITION_TOKEN_UNEXPANDED", 1);
+        let token = Some("RIVET_PLAN_PARTITION_TOKEN_UNEXPANDED");
+        for (i, sealing) in [(0, false), (1, true), (1, false)] {
+            let code = build(i, sealing)
+                .err()
+                .and_then(|e| crate::error::error_code(&e));
+            assert_ne!(code, token, "export {i} sealing {sealing}");
+        }
     }
 
     /// The write-report the operator sees, per outcome.
