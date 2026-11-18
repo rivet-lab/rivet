@@ -205,6 +205,19 @@ fn page_part_cursor(pi: usize, n_parts: usize, high_water: &Option<String>) -> O
     (pi + 1 == n_parts).then(|| high_water.clone()).flatten()
 }
 
+/// One sampler read, cancelled by the run's `tuning.statement_timeout_s` (0 = no limit).
+fn sampler_scalar(
+    src: &mut dyn Source,
+    plan: &ResolvedRunPlan,
+    sql: &str,
+) -> Result<Option<String>> {
+    seeded!(
+        "keyset-sampler-unbounded",
+        src.query_scalar(sql),
+        src.query_scalar_within(sql, plan.tuning.statement_timeout_s)
+    )
+}
+
 /// "Only the first row" clause (after the `ORDER BY`), per dialect.
 fn first_row_clause(st: crate::config::SourceType) -> &'static str {
     use crate::config::SourceType::*;
@@ -261,14 +274,17 @@ fn percentile_boundaries(
     } else {
         format!("WHERE {}", preds.join(" AND "))
     };
-    let total: i64 = src
-        .query_scalar(&format!(
+    let total: i64 = sampler_scalar(
+        src,
+        plan,
+        &format!(
             "SELECT COUNT(*) FROM ({base}) {} {where_clause}",
             crate::sql::derived(st, "_rivet_pk_cnt")
-        ))?
-        .as_deref()
-        .and_then(|s| s.trim().parse::<i64>().ok())
-        .unwrap_or(0);
+        ),
+    )?
+    .as_deref()
+    .and_then(|s| s.trim().parse::<i64>().ok())
+    .unwrap_or(0);
     if total <= 1 {
         return Ok(vec![]);
     }
@@ -280,7 +296,7 @@ fn percentile_boundaries(
             "SELECT {k} FROM ({base}) {} {where_clause} ORDER BY {k} {nth}",
             crate::sql::derived(st, "_rivet_pk")
         );
-        if let Some(v) = src.query_scalar(&sql)?
+        if let Some(v) = sampler_scalar(src, plan, &sql)?
             && bounds.last().map(String::as_str) != Some(v.as_str())
         {
             bounds.push(v);
@@ -353,7 +369,7 @@ fn catalog_rows(src: &mut dyn Source, plan: &ResolvedRunPlan) -> Option<i64> {
         }
         _ => crate::sql::row_estimate_sql(st, table)?,
     };
-    src.query_scalar(&sql)
+    sampler_scalar(src, plan, &sql)
         .ok()
         .flatten()?
         .trim()
@@ -393,10 +409,14 @@ pub(crate) fn sample_key_boundaries(
     .collect();
     seeded!(
         "keyset-sampler-scans-the-table",
-        src.query_scalar(&format!(
-            "SELECT COUNT(*) FROM ({base}) {}",
-            crate::sql::derived(st, "_rivet_pk_cnt")
-        ))
+        sampler_scalar(
+            src,
+            plan,
+            &format!(
+                "SELECT COUNT(*) FROM ({base}) {}",
+                crate::sql::derived(st, "_rivet_pk_cnt")
+            )
+        )
         .map(drop)?,
         ()
     );
@@ -482,13 +502,17 @@ fn probe_density(
         crate::source::query::inline_literal(st, &end.to_string(), of)
     ));
     preds.push(format!("{k} IS NOT NULL"));
-    let landed = src.query_scalar(&format!(
-        "SELECT {k} FROM ({}) {} WHERE {} ORDER BY {k} {}",
-        plan.base_query,
-        crate::sql::derived(st, "_rivet_pk"),
-        preds.join(" AND "),
-        nth_row_clause(st, PROBE_ROWS)
-    ))?;
+    let landed = sampler_scalar(
+        src,
+        plan,
+        &format!(
+            "SELECT {k} FROM ({}) {} WHERE {} ORDER BY {k} {}",
+            plan.base_query,
+            crate::sql::derived(st, "_rivet_pk"),
+            preds.join(" AND "),
+            nth_row_clause(st, PROBE_ROWS)
+        ),
+    )?;
     Ok(match landed.and_then(|v| v.parse::<i128>().ok()) {
         Some(at) => PROBE_ROWS as f64 / (at - start).max(1) as f64,
         None => PROBE_ROWS as f64 / (end - start).max(1) as f64,
@@ -679,14 +703,18 @@ fn seek_key(
 ) -> Result<Option<String>> {
     let st = plan.source.source_type;
     let preds = [preds, &[format!("{k} IS NOT NULL")]].concat();
-    src.query_scalar(&format!(
-        "SELECT {k} FROM ({}) {} WHERE {} ORDER BY {k}{} {}",
-        plan.base_query,
-        crate::sql::derived(st, "_rivet_pk"),
-        preds.join(" AND "),
-        if desc { " DESC" } else { "" },
-        first_row_clause(st)
-    ))
+    sampler_scalar(
+        src,
+        plan,
+        &format!(
+            "SELECT {k} FROM ({}) {} WHERE {} ORDER BY {k}{} {}",
+            plan.base_query,
+            crate::sql::derived(st, "_rivet_pk"),
+            preds.join(" AND "),
+            if desc { " DESC" } else { "" },
+            first_row_clause(st)
+        ),
+    )
 }
 
 /// Sample the N key ranges for a FRESH parallel keyset run.
@@ -2376,6 +2404,143 @@ mod tests {
         let mut text = Indexed::new(keys(["a", "c", "e", "g", "i", "k", "m", "o"]), false);
         let got = sample_key_boundaries(&mut text, &plan, "k", 4, 16, None, None).unwrap();
         assert_eq!(got.len(), 3, "{got:?}");
+    }
+
+    /// A source that records the timeout of every scalar read and cancels the `expire_at`-th timed read.
+    struct Timed<S> {
+        inner: S,
+        seen: Vec<Option<u64>>,
+        expire_at: Option<usize>,
+    }
+    impl<S> Timed<S> {
+        fn new(inner: S, expire_at: Option<usize>) -> Self {
+            Timed {
+                inner,
+                seen: Vec::new(),
+                expire_at,
+            }
+        }
+    }
+    impl<S: Source> Source for Timed<S> {
+        fn export(
+            &mut self,
+            _request: &source::ExportRequest<'_>,
+            _sink: &mut dyn source::BatchSink,
+        ) -> Result<()> {
+            unreachable!("sampling reads scalars only")
+        }
+        fn query_scalar(&mut self, sql: &str) -> Result<Option<String>> {
+            self.seen.push(None);
+            self.inner.query_scalar(sql)
+        }
+        fn query_scalar_within(&mut self, sql: &str, seconds: u64) -> Result<Option<String>> {
+            let nth = self.seen.len();
+            self.seen.push(Some(seconds));
+            if self.expire_at == Some(nth) {
+                return Err(source::StatementDurationTimeout::mssql(seconds).into());
+            }
+            self.inner.query_scalar(sql)
+        }
+        fn type_mappings(
+            &mut self,
+            _query: &str,
+            _overrides: &crate::types::ColumnOverrides,
+        ) -> Result<Vec<crate::types::TypeMapping>> {
+            Ok(vec![])
+        }
+    }
+
+    /// The percentile, the seek and the recut paths all read through the run's statement timeout, and a timeout of 0 leaves the boundaries as they were.
+    #[test]
+    fn every_sampler_read_runs_under_the_statement_timeout() {
+        let mut plan = crate::plan::test_support::test_plan();
+        let mut table = plan.clone();
+        table.base_query = "SELECT * FROM public.t".into();
+        let skewed = || keys((1..=9_000i64).chain((1..=1_000i64).map(|i| 9_000 + i * 191)));
+        for seconds in [0u64, 10] {
+            plan.tuning.statement_timeout_s = seconds;
+            table.tuning.statement_timeout_s = seconds;
+            for (name, estimate, int_parts) in [("percentile", "9999999", 64), ("seek", "0", 4)] {
+                let mut src = Timed::new(
+                    Cataloged {
+                        estimate,
+                        sql: vec![],
+                    },
+                    None,
+                );
+                sample_key_boundaries(&mut src, &table, "k", 4, int_parts, None, None).unwrap();
+                assert!(src.seen.len() >= 3, "{name}: {:?}", src.seen);
+                assert!(
+                    src.seen.iter().all(|s| *s == Some(seconds)),
+                    "{name} at {seconds}s: {:?}",
+                    src.seen
+                );
+            }
+            let mut src = Timed::new(Indexed::new(skewed(), true), None);
+            let got = sample_key_boundaries(&mut src, &plan, "k", 4, 4, None, None).unwrap();
+            assert_eq!(got.len(), 3, "{got:?}");
+            assert!(
+                src.seen.len() > 9,
+                "the recut probes and snaps: {:?}",
+                src.seen
+            );
+            assert!(
+                src.seen.iter().all(|s| *s == Some(seconds)),
+                "recut at {seconds}s: {:?}",
+                src.seen
+            );
+        }
+        plan.tuning.statement_timeout_s = 0;
+        let mut zero = Indexed::new(skewed(), true);
+        let want = sample_key_boundaries(&mut zero, &plan, "k", 4, 4, None, None).unwrap();
+        plan.tuning.statement_timeout_s = 10;
+        let mut ten = Timed::new(Indexed::new(skewed(), true), None);
+        let got = sample_key_boundaries(&mut ten, &plan, "k", 4, 4, None, None).unwrap();
+        assert_eq!(got, want);
+    }
+
+    /// A seek or a density probe that times out keeps the cuts found so far; the data stays complete, with fewer ranges.
+    #[test]
+    fn a_seek_that_times_out_degrades_to_the_cuts_found_so_far() {
+        let mut plan = crate::plan::test_support::test_plan();
+        plan.tuning.statement_timeout_s = 10;
+        let table = || Indexed::new(keys(1..=1000), true);
+        let whole = sample_key_boundaries(&mut table(), &plan, "k", 4, 4, None, None).unwrap();
+        assert_eq!(whole, keys([250, 500, 750]));
+        for (expire_at, want) in [
+            (0, Vec::<String>::new()),
+            (1, Vec::<String>::new()),
+            (3, keys([250])),
+            (4, keys([250, 500])),
+            (5, whole.clone()),
+        ] {
+            let mut src = Timed::new(table(), Some(expire_at));
+            let got = sample_key_boundaries(&mut src, &plan, "k", 4, 4, None, None).unwrap();
+            assert_eq!(got, want, "read {expire_at} timed out: {:?}", src.seen);
+        }
+    }
+
+    /// A row-percentile count or offset read that times out fails the run with the coded statement-timeout error.
+    #[test]
+    fn a_percentile_read_that_times_out_fails_with_the_statement_timeout_code() {
+        let mut plan = crate::plan::test_support::test_plan();
+        plan.base_query = "SELECT * FROM public.t".into();
+        plan.tuning.statement_timeout_s = 10;
+        for expire_at in [1, 2, 4] {
+            let mut src = Timed::new(
+                Cataloged {
+                    estimate: "9999999",
+                    sql: vec![],
+                },
+                Some(expire_at),
+            );
+            let err = sample_key_boundaries(&mut src, &plan, "k", 4, 64, None, None).unwrap_err();
+            crate::error::assert_coded(&err, "RIVET_SOURCE_STATEMENT_TIMEOUT", 1);
+            assert!(
+                format!("{err:#}").contains("tuning.statement_timeout_s"),
+                "{err:#}"
+            );
+        }
     }
 
     /// Owned key strings.
