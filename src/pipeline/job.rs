@@ -1123,6 +1123,15 @@ fn dispatches_to_cdc_runner(mode: crate::config::ExportMode) -> bool {
     mode == crate::config::ExportMode::Cdc
 }
 
+/// One counted WARN per column whose zero or partial dates were written as NULL.
+fn warn_nulled_cells(cells: &[(String, u64)]) {
+    for (column, n) in cells {
+        if seeded!("mysql-zero-date-null-without-warn", false, true) {
+            log::warn!("{}", crate::source::mysql::zero_date_warning(column, *n));
+        }
+    }
+}
+
 /// THE post-plan execution script, written once.
 fn execute_resolved_plan(
     plan: &ResolvedRunPlan,
@@ -1249,9 +1258,7 @@ fn execute_resolved_plan(
     let rss_after = crate::resource::get_rss_mb();
     summary.bytes_read = plan.bytes_read.load(std::sync::atomic::Ordering::Relaxed);
     summary.nulled_cells = plan.nulled_cells.snapshot();
-    for (column, n) in &summary.nulled_cells {
-        log::warn!("{}", crate::source::mysql::zero_date_warning(column, *n));
-    }
+    warn_nulled_cells(&summary.nulled_cells);
     summary.duration_ms = start.elapsed().as_millis() as i64;
     summary.peak_rss_mb = rss_peak.max(rss_after).max(rss_before) as i64;
 
@@ -4065,6 +4072,24 @@ mod tests {
         assert_eq!(
             summary.error_message.as_deref(),
             Some("manifest gap: part 3 missing")
+        );
+    }
+
+    /// One WARN per nulled column, each naming the column and its count.
+    #[test]
+    fn a_run_that_nulled_cells_warns_once_per_column_with_its_count() {
+        use crate::pipeline::run::run_tail_tests::{
+            captured_warnings_mentioning, install_warn_capture,
+        };
+        install_warn_capture();
+        warn_nulled_cells(&[("nulled_cells_a".into(), 3), ("nulled_cells_b".into(), 1)]);
+        assert_eq!(
+            captured_warnings_mentioning("nulled_cells_a"),
+            [crate::source::mysql::zero_date_warning("nulled_cells_a", 3)]
+        );
+        assert_eq!(
+            captured_warnings_mentioning("nulled_cells_b"),
+            [crate::source::mysql::zero_date_warning("nulled_cells_b", 1)]
         );
     }
 }

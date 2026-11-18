@@ -125,6 +125,11 @@ fn write_lower_hex(writer: &mut dyn Write, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// The bytes of an empty string or an empty binary cell: a quoted empty field, never the bare field that spells NULL.
+fn empty_value() -> &'static [u8] {
+    seeded!("csv-empty-value-written-bare", &b""[..], &b"\"\""[..])
+}
+
 fn write_csv_value(writer: &mut dyn Write, array: &dyn Array, idx: usize) -> Result<()> {
     if array.is_null(idx) {
         return Ok(());
@@ -192,7 +197,7 @@ fn write_csv_value(writer: &mut dyn Write, array: &dyn Array, idx: usize) -> Res
                 .expect("DataType/Array mismatch");
             let val = arr.value(idx);
             if val.is_empty() {
-                writer.write_all(b"\"\"")?;
+                writer.write_all(empty_value())?;
                 return Ok(());
             }
             if val
@@ -219,7 +224,7 @@ fn write_csv_value(writer: &mut dyn Write, array: &dyn Array, idx: usize) -> Res
                 .expect("DataType/Array mismatch");
             let val = arr.value(idx);
             if val.is_empty() {
-                writer.write_all(b"\"\"")?;
+                writer.write_all(empty_value())?;
                 return Ok(());
             }
             write_lower_hex(writer, val)?;

@@ -224,7 +224,7 @@ PG_CASES = [
     PgCase("c_ckpt_par", ["mode: chunked", "chunk_column: id", "chunk_size: 250",
                           "chunk_checkpoint: true", "parallel: 4"], "chunk_export:1",
            rerun=("--resume",)),
-    PgCase("d_keyset_incr", ["mode: chunked", "chunk_by_key: id", "chunk_size: 100", "parallel: 4",
+    PgCase("d_keyset_incr", ["mode: chunked", "chunk_by_key: id", "chunk_size: 10", "parallel: 4",
                              "keyset_incremental: true"], "keyset_parallel_worker_midrange:1"),
 ]
 

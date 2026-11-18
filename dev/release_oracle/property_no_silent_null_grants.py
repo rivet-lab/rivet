@@ -95,8 +95,13 @@ def literal(col: nsn.Col, row_id: int, n_rows: int) -> str:
     return col.lits[i] if i < len(col.lits) and row_id < n_rows else "NULL"
 
 
-def grade_columns(cols: list[nsn.Col], granted: set[str], got: dict, n_rows: int) -> list[nsn.Result]:
-    """One Result per (column, role, leg): a granted column keeps every non-NULL value, a hidden one is absent by name."""
+def warned_of(p: core.Proc) -> dict[str, int]:
+    """The per-column zero-date counts a run's WARN lines state, keyed by lower-cased column."""
+    return {k.lower(): v for k, v in nsn.warned_counts(p.out).items()}
+
+
+def grade_columns(cols: list[nsn.Col], granted: set[str], got: dict, n_rows: int, warned: dict[str, dict[str, int]]) -> list[nsn.Result]:
+    """One Result per (column, role, leg): a granted column keeps every non-NULL value, a hidden one is absent by name; a zero date is NULL only under its run's WARN."""
     out = []
     for leg, (names, rows) in got.items():
         base = 0 if leg == "snapshot" else STREAM_OFFSET
@@ -109,18 +114,22 @@ def grade_columns(cols: list[nsn.Col], granted: set[str], got: dict, n_rows: int
             if c.name not in names:
                 out.append(nsn.Result(cell, nsn.DELIVERED, nsn.EMPTY, f"granted column `{c.name}` is absent from the {leg} parts"))
                 continue
-            nulled, wrong, missing = [], [], 0
+            nulled, wrong, missing, zeros = [], [], 0, 0
             for i in range(1, n_rows + 1):
                 row = rows.get(base + i)
                 if row is None:
                     missing += 1
                     continue
                 lit = literal(c, i, n_rows)
-                v = nsn.compare("mysql", lit, c.family, "none", row[c.name])
-                if v == nsn.NULLED:
+                v = nsn.compare("mysql", lit, c.family, "none", row[c.name], False, c.native)
+                if nsn.is_zero_date_null("mysql", lit, v):
+                    zeros += 1
+                elif v == nsn.NULLED:
                     nulled.append(lit)
                 elif v == nsn.WRONG:
                     wrong.append(f"{lit}->{row[c.name]!r}")
+            if unwarned := nsn.zero_date_unwarned(zeros, warned.get(leg, {}).get(c.name.lower(), 0)):
+                nulled.append(unwarned)
             if missing:
                 out.append(nsn.Result(cell, nsn.DELIVERED, nsn.EMPTY, f"{missing} of {n_rows} rows missing from the {leg} parts"))
             elif nulled:
@@ -157,6 +166,7 @@ def run_account(work: Path, label: str, cols: list[nsn.Col], granted: list[nsn.C
         check = nsn.rivet(["check", "-c", str(cfg)], env, d)
         steps = [("snapshot", None)]
         steps.append(("stream", [*nsn.row_inserts("mysql", cols, TABLE, STREAM_OFFSET)[0]]))
+        warned: dict[str, dict[str, int]] = {}
         for step, inserts in steps:
             if inserts:
                 p = root_sql(";\n".join(inserts) + ";")
@@ -166,10 +176,11 @@ def run_account(work: Path, label: str, cols: list[nsn.Col], granted: list[nsn.C
             stop = nsn.grade_stop(f"{ENGINE}/*->{label}/{step}", p, check)
             if stop:
                 return [*results, stop]
+            warned[step] = warned_of(p)
         got = delivered(part_files(d / "out"))
         if "snapshot" not in got or "stream" not in got:
             return [*results, nsn.Result(f"{ENGINE}/*->{label}/delivery", nsn.DELIVERED, nsn.EMPTY, f"exit 0, legs delivered: {sorted(got)}")]
-        results += grade_columns(cols, {c.name for c in granted}, got, n_rows)
+        results += grade_columns(cols, {c.name for c in granted}, got, n_rows, warned)
         results += grant_change(d, cfg, env, user, cols, granted, n_rows, check, label)
     finally:
         root_sql(f"DROP USER IF EXISTS '{user}'@'%';")
@@ -211,7 +222,8 @@ def grant_change(d: Path, cfg: Path, env: dict, user: str, cols: list[nsn.Col], 
         present = col.name in got[0]
         if kind == "revoke" and present:
             out.append(nsn.Result(cell, nsn.DELIVERED, HIDDEN, f"revoked column `{col.name}` is delivered after the {kind} ({row[col.name]!r})"))
-        elif kind == "grant" and present and nsn.compare("mysql", lit, col.family, "none", row[col.name]) == nsn.NULLED:
+        elif kind == "grant" and present and (v := nsn.compare("mysql", lit, col.family, "none", row[col.name])) == nsn.NULLED and not (
+                nsn.is_zero_date_null("mysql", lit, v) and not nsn.zero_date_unwarned(1, warned_of(p).get(col.name.lower(), 0))):
             out.append(nsn.Result(cell, nsn.DELIVERED, nsn.NULLED, f"newly granted column `{col.name}` is present as NULL for the non-NULL {lit}"))
         else:
             out.append(nsn.Result(cell, nsn.DELIVERED))
@@ -263,13 +275,22 @@ def self_test() -> None:
     rows = {1: {"c00": 1, "c01": None}, 2: {"c00": 2, "c01": None}, 3: {"c00": None, "c01": None}}
     ok = {"snapshot": ({"c00"}, rows), "stream": ({"c00"}, {STREAM_OFFSET + k: v for k, v in rows.items()})}
     two = cols[:2]
-    assert [r.klass for r in grade_columns(two, granted, ok, 3)] == [""] * 4
+    assert [r.klass for r in grade_columns(two, granted, ok, 3, {})] == [""] * 4
     nulled = {"snapshot": ({"c00"}, {**rows, 1: {"c00": None}}), "stream": ok["stream"]}
-    assert [r.klass for r in grade_columns(two, granted, nulled, 3) if r.klass] == [nsn.NULLED], "a non-NULL value delivered as NULL"
+    assert [r.klass for r in grade_columns(two, granted, nulled, 3, {}) if r.klass] == [nsn.NULLED], "a non-NULL value delivered as NULL"
     leaked = {"snapshot": ({"c00", "c01"}, rows), "stream": ok["stream"]}
-    assert HIDDEN in [r.klass for r in grade_columns(two, granted, leaked, 3)], "a hidden column present as NULL is a leak of its name"
-    assert SHAPE in [r.klass for r in grade_columns(two, granted, leaked, 3)], "the legs must carry the same columns"
-    assert nsn.EMPTY in [r.klass for r in grade_columns(two, granted, {"snapshot": ({"c00"}, {1: rows[1]}), "stream": ok["stream"]}, 3)]
+    assert HIDDEN in [r.klass for r in grade_columns(two, granted, leaked, 3, {})], "a hidden column present as NULL is a leak of its name"
+    assert SHAPE in [r.klass for r in grade_columns(two, granted, leaked, 3, {})], "the legs must carry the same columns"
+    assert nsn.EMPTY in [r.klass for r in grade_columns(two, granted, {"snapshot": ({"c00"}, {1: rows[1]}), "stream": ok["stream"]}, 3, {})]
+    day = nsn.Col("d", "DATE", "Date32", "date", ("'0000-00-00'",))
+    zero = {leg: ({"d"}, {base + k: {"d": None} for k in (1, 2)}) for leg, base in (("snapshot", 0), ("stream", STREAM_OFFSET))}
+    assert [r.klass for r in grade_columns([day], {"d"}, zero, 2, {"snapshot": {"d": 1}, "stream": {"d": 1}})] == ["", ""], "a zero date under its WARN is by design"
+    assert [r.klass for r in grade_columns([day], {"d"}, zero, 2, {"snapshot": {"d": 1}, "stream": {}}) if r.klass] == [nsn.NULLED], "a zero date without its WARN is SILENT_NULL"
+    assert [r.klass for r in grade_columns([day], {"d"}, zero, 2, {"snapshot": {"d": 2}, "stream": {"d": 1}})] == [nsn.NULLED, ""], "a WARN that counts another number is SILENT_NULL"
+    stamp = nsn.Col("t", "TIMESTAMP NULL", "Timestamp", "other", ("'2035-08-07 09:08:07'",))
+    at = lambda v: {leg: ({"t"}, {base + 1: {"t": v}, base + 2: {"t": None}}) for leg, base in (("snapshot", 0), ("stream", STREAM_OFFSET))}
+    assert [r.klass for r in grade_columns([stamp], {"t"}, at("2035-08-07 09:08:07+00"), 2, {})] == ["", ""], "a UTC instant is the same instant as its source timestamp"
+    assert [r.klass for r in grade_columns([stamp], {"t"}, at("2035-08-07 09:08:08+00"), 2, {}) if r.klass] == [nsn.WRONG] * 2, "another instant is WRONG_VALUE"
     split = nsn.Result("c", nsn.REFUSED, nsn.SPLIT, "check exit 0, run exit 5 [RIVET_SOURCE_CDC_UNDECODABLE]", "RIVET_SOURCE_CDC_UNDECODABLE")
     assert log_refusal(split).klass == "" and log_refusal(split).verdict == nsn.REFUSED
     assert log_refusal(nsn.Result("c", nsn.REFUSED, nsn.UNCODED, "x")).klass == nsn.UNCODED, "an uncoded stop after a grant change stays red"
