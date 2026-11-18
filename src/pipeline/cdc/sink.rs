@@ -780,12 +780,14 @@ fn flush(
     let schema_names: Vec<&str> = columns.iter().map(|m| m.column_name.as_str()).collect();
     for (i, m) in columns.iter().enumerate() {
         let dt = schema.field(arrays.len()).data_type();
-        let fix = value::mysql_cell_fix(engine, &m.source_native_type).filter(|f| {
-            seeded!(
-                "mysql-cdc-time-remedy-names-the-batch-cast",
-                true,
-                f.applies_to(dt)
-            )
+        let fix = value::mysql_flag_fix(engine, &m.source_native_type, dt).or_else(|| {
+            value::mysql_cell_fix(engine, &m.source_native_type).filter(|f| {
+                seeded!(
+                    "mysql-cdc-time-remedy-names-the-batch-cast",
+                    true,
+                    f.applies_to(dt)
+                )
+            })
         });
         let memo = image_name_memo(events, &m.column_name);
         let refuse = |r: value::CellRefusal| {

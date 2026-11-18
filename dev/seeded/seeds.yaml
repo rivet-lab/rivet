@@ -5981,6 +5981,25 @@ seeds:
       mongo:
         na: "a MySQL zero date has no counterpart on MongoDB: its date types refuse the value or hold no such sentinel (property_no_silent_null grades it on MySQL only)"
 
+  - name: mysql-cdc-int-bool-override-any-nonzero-true
+    class: "a MySQL integer column (SMALLINT, INT, BIGINT, BIGINT UNSIGNED) declared `bool` in `columns:` is delivered by a stream as true for every value but 0, where the batch export refuses any value outside 0 and 1: 2, 300 or 18446744073709551615 become true with exit 0"
+    history: "2026-11-18 - issue #995 remainder: the batch path (build_bool_strict) already refused; RED on main in the MySQL CDC cell (a SMALLINT or TINYINT holding 2 or 300 under `columns: {i: bool}` delivered, exit 0); fixed by MysqlCellFix::FlagInt chosen by mysql_flag_fix"
+    scope: source
+    engines:
+      mysql:
+        switch: mysql-cdc-int-bool-override-any-nonzero-true
+        cells:
+          - an_integer_that_is_not_a_flag_is_refused_in_cdc_never_turned_into_true_mysql
+          - "lib:an_integer_under_a_bool_override_is_a_flag_or_refused"
+      postgres:
+        na: "an integer is not read as a flag on PostgreSQL: the override is refused at plan time (lib:an_integer_is_read_as_a_flag_only_where_the_engine_checks_each_value)"
+      mssql:
+        na: "an integer is not read as a flag on SQL Server: the override is refused at plan time (lib:an_integer_is_read_as_a_flag_only_where_the_engine_checks_each_value)"
+      oracle:
+        na: "an integer is not read as a flag on Oracle: the override is refused at plan time (lib:an_integer_is_read_as_a_flag_only_where_the_engine_checks_each_value)"
+      mongo:
+        na: "a MongoDB change row is two text cells, and the MySQL cell fix does not run"
+
   - name: cursor-column-admitted-at-plan
     class: "the incremental plan accepts any cursor_column: a nullable one exports its NULL-cursor rows on run 1 and never again (later NULL-cursor inserts are lost with exit 0), and a type the cursor cannot render (boolean, time, binary, array, a timestamp unit other than microsecond or nanosecond) is a WARN plus a full re-export every run"
     history: "2026-11-11 - owner decision 2026-11-10 (axis-6 hunt, P2 and P3): the plan now reads the server's nullability and the delivered type once and refuses with RIVET_PLAN_CURSOR_NULLABLE or RIVET_PLAN_CURSOR_TYPE_UNSUPPORTED from check, validate, plan, run and apply; fixed in src/plan/cursor_admission.rs::admit_incremental_cursor"
