@@ -1763,6 +1763,25 @@ mod tests {
     }
 
     #[test]
+    fn a_vanished_column_is_named_among_catalog_columns_that_are_all_still_there() {
+        let err = under_grants(
+            catalog_of(&["ID", "NAME"]),
+            "RIVET.T",
+            Some(&grants_of(&["ID", "NAME", "PASS"])),
+        )
+        .expect_err("a readable column left the catalog");
+        let text = format!("{err:#}");
+        assert!(text.contains("the column `PASS`"), "{text}");
+        let kept = under_grants(
+            catalog_of(&["ID", "NAME"]),
+            "RIVET.T",
+            Some(&grants_of(&["ID", "NAME"])),
+        )
+        .unwrap();
+        assert_eq!(kept, catalog_of(&["ID", "NAME"]));
+    }
+
+    #[test]
     fn the_slot_layout_is_three_per_column_after_the_fixed_columns() {
         assert_eq!(FIXED_COLUMNS.len(), 10);
         assert_eq!(
