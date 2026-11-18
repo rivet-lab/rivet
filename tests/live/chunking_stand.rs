@@ -2874,6 +2874,77 @@ fn stand_pool_split_gappy_key_mssql() {
 // assuming the persisted last `hi = b'`; it is `None`, and the widened base_query covers the top
 // — verified by reading `partition_ranges` + the `(None, None)` floor/ceil for split units.)
 
+/// `apply --pool --split` on a skewed keyset key the catalog puts above the row-percentile limit cuts its units at the key's value midpoint, snapped to an existing key: every row once.
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn stand_pool_split_skewed_keyset_key_cuts_units_by_key_value_postgres() {
+    Eng::Pg.require();
+    let (table, _g) = seed_dense_wide_for_split(Eng::Pg, 270_000);
+    pg_connect()
+        .batch_execute(&format!(
+            "INSERT INTO {table} (id, payload, pad) \
+             SELECT 270000 + g * 171, g, repeat('x', {SPLIT_PAD_BYTES}) FROM generate_series(1, 30000) g;"
+        ))
+        .unwrap();
+    pg_catalog_says_rows(&mut pg_connect(), &table, 20_000_000);
+    let sibling = unique_name("split_sibling");
+    let rig = Eng::Pg
+        .rig(&table)
+        .mode("chunked")
+        .export_line("chunk_by_key: id")
+        .export_line("chunk_size: 75000")
+        .export_line("parallel_safe: true")
+        .also_export(
+            &sibling,
+            &format!(
+                "SELECT id FROM {} WHERE id <= 100",
+                Eng::Pg.qualified(&table)
+            ),
+        )
+        .also_export_line("parallel_safe: true");
+    let cfg = rig.config_path();
+    let apply = |extra: &[&str]| {
+        let out = run_rivet_env(
+            &[&["apply", cfg.to_str().unwrap(), "--pool", "2"], extra].concat(),
+            &[],
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    apply(&[]);
+    for d in [rig.out_dir(), rig.out_dir_for(&sibling)] {
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+    }
+    apply(&["--split"]);
+    let mut units: Vec<(String, i64)> = recorded_export_runs(&cfg, &[rig.export_name()])
+        .into_iter()
+        .filter(|(n, st, ..)| n.contains('#') && st == "success")
+        .map(|(n, _, _, rows)| (n, rows))
+        .collect();
+    units.sort();
+    assert!(
+        units.len() >= 2,
+        "FIXTURE INERT, not a product failure: `--split` produced {units:?}"
+    );
+    assert_eq!(
+        units.iter().map(|(_, r)| *r).collect::<Vec<_>>(),
+        vec![284_211, 15_789],
+        "rows per unit: {units:?}"
+    );
+    let expected: std::collections::BTreeSet<i64> = (1..=270_000)
+        .chain((1..=30_000).map(|g| 270_000 + g * 171))
+        .collect();
+    assert_eq!(
+        dir_manifest_copy_id_set(&rig.out_dir()),
+        expected,
+        "every source id once"
+    );
+}
+
 #[test]
 #[ignore = "live: requires docker compose up -d postgres"]
 fn stand_pool_split_keyset_recovers_a_crash_postgres() {

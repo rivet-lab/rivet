@@ -83,6 +83,7 @@ pub(crate) fn admit_columns(
     )?;
     let mappings = match crate::preflight::type_report::probe_mappings(
         src,
+        crate::preflight::type_report::is_stream(export),
         &plan.base_query,
         &plan.column_overrides,
     ) {
