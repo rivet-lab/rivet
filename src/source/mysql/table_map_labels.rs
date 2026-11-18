@@ -55,7 +55,7 @@ pub(crate) fn of(tme: &TableMapEvent<'_>, names: &[String]) -> Option<Arc<[WireL
     let kinds: Vec<(usize, bool)> = (0..names.len())
         .filter_map(|i| match tme.get_column_type(i) {
             Ok(Some(t)) if t.is_enum_or_set_type() => Some((i, t.is_set_type())),
-            _ => None,
+            Ok(_) | Err(_) => None,
         })
         .collect();
     if kinds.is_empty() {
