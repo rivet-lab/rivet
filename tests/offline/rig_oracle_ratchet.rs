@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 // 34 -> 35 (2026-11-11): the Oracle TIMESTAMP(9) key-admission cell holds rows that differ below a microsecond and reads the view through the second client; closes when the oracle reads a timestamp_ns column at full scale.
 // 35 -> 36 (2026-11-11): the unkeyed Mongo CDC cell of mixed `_id` types delivers the flat `_id` text the warning documents, so int 1 and string "1" collapse in the oracle's grade; closes when a keyed load of mixed `_id` is typed (#926).
 // 36 -> 37 (2026-11-12): a_missing_base_refuses_the_compaction_and_keeps_the_buffer drops its base table on purpose and the warehouse grade fails an absent table under source rows; closes when the grade reads a declared drop.
+// 37 -> 38 (2026-11-16, #715): the MongoDB view-account batch cell reads the base collection through an account the server refuses; closes when the oracle reads a collection through the view the account is granted.
 // ratchet-pin: no-oracle-opt-outs (review 2027-02-01) count tests/live/ \.no_oracle\(|run_rivet_ok_no_oracle\(|"RIVET_TEST_NO_ORACLE"|NO_ORACLE_ENV
 
 // Typed declarations in tests/live of what a run that does not exit 0 may leave. History frozen at 2026-11-04.

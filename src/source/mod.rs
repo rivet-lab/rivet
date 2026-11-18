@@ -459,6 +459,7 @@ pub(crate) fn code_a_missing_relation(
 /// What `columns_from: grants` guarantees on `engine`, said to the operator at `rivet check` and at the start of a change-stream run.
 pub(crate) fn columns_from_grants_boundary(engine: crate::config::SourceType) -> &'static str {
     match engine {
+        crate::config::SourceType::Mongo => mongo::column_grants::BOUNDARY,
         #[cfg(feature = "oracle")]
         crate::config::SourceType::Oracle => oracle::column_grants::BOUNDARY,
         _ => mysql::column_grants::BOUNDARY,
@@ -475,6 +476,9 @@ pub(crate) fn resolve_column_grants(
 ) -> crate::error::Result<std::sync::Arc<std::collections::HashMap<String, cdc::ReadableColumns>>> {
     match engine {
         crate::config::SourceType::Oracle => oracle_column_grants(url, tls, tables, declared),
+        crate::config::SourceType::Mongo => {
+            mongo::column_grants::resolve_for_tables(url, tls, tables).map(std::sync::Arc::new)
+        }
         _ => mysql::cdc::MysqlChangeStream::resolve_grants(url, tls, tables, declared),
     }
 }
@@ -1289,5 +1293,22 @@ mod override_probe_tests {
         refuse_unbuildable_override::<()>("mysql", "n", &rivet, Err(other)).unwrap();
         refuse_unbuildable_override::<()>("mysql", "n", &rivet, Err(anyhow::anyhow!("plain")))
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod grants_boundary_tests {
+    use crate::config::SourceType;
+
+    /// The boundary a MongoDB source states is its own, and each engine states one.
+    #[test]
+    fn each_engine_that_enforces_grants_states_its_own_boundary() {
+        let mongo = super::columns_from_grants_boundary(SourceType::Mongo);
+        let mysql = super::columns_from_grants_boundary(SourceType::Mysql);
+        assert!(
+            mongo.contains("view") && !mysql.contains("view"),
+            "{mongo}\n{mysql}"
+        );
+        assert!(!mysql.is_empty() && mongo != mysql && !mongo.contains("xyzzy"));
     }
 }

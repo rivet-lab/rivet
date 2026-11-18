@@ -69,7 +69,7 @@ pub struct SourceConfig {
     #[serde(default)]
     pub mongo: Option<MongoConfig>,
 
-    /// `grants`: every export reads and delivers only the columns the source account may `SELECT` (MySQL and Oracle only).
+    /// `grants`: every export reads and delivers only the columns the source account may read: `SELECT` on MySQL and Oracle, the fields of a `$project` view on MongoDB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub columns_from: Option<ColumnsFrom>,
 }
@@ -304,9 +304,9 @@ pub(crate) fn columns_from_refusal(source: &SourceConfig) -> Option<String> {
     (source.columns_from_grants() && !source.source_type.enforces_columns_from_grants()).then(
         || {
             format!(
-                "`source.columns_from: grants` is supported on MySQL and Oracle sources only: a {} \
+                "`source.columns_from: grants` is supported on MySQL, Oracle and MongoDB sources only: a {} \
              source would read and deliver every column of a row, hidden ones included. Remove \
-             `columns_from:` from `source:` or point `source:` at a MySQL or Oracle server \
+             `columns_from:` from `source:` or point `source:` at a MySQL, Oracle or MongoDB server \
              (other engines: rivet-lab/rivet#711)",
                 source.source_type.label()
             )
@@ -601,8 +601,8 @@ impl SourceType {
     /// Whether this engine reads and delivers only the columns the account may `SELECT` under `columns_from: grants`.
     pub fn enforces_columns_from_grants(self) -> bool {
         match self {
-            SourceType::Mysql | SourceType::Oracle => true,
-            SourceType::Postgres | SourceType::Mssql | SourceType::Mongo => {
+            SourceType::Mysql | SourceType::Oracle | SourceType::Mongo => true,
+            SourceType::Postgres | SourceType::Mssql => {
                 seeded!("columns-from-grants-accepted-off-mysql", true, false)
             }
         }

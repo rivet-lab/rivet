@@ -1673,7 +1673,7 @@ pub mod codes {
     /// A `columns_from: grants` table whose account may read no column, or not its key.
     pub const SOURCE_COLUMNS_UNREADABLE: Code = usage(
         "RIVET_SOURCE_COLUMNS_UNREADABLE",
-        "grant the account `SELECT` on the columns the message names (at least the key), or drop the table from the export",
+        "grant the account `SELECT` on the columns the message names (at least the key), or on MongoDB create the `$project` view the message describes, or drop the table from the export",
     );
     /// A `columns_from: grants` stream met a grant change that alters what it may deliver.
     pub const SOURCE_CDC_GRANTS_CHANGED: Code = transient(

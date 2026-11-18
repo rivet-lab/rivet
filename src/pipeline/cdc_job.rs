@@ -381,7 +381,7 @@ fn continuous_shape(engine: crate::config::SourceType) -> &'static str {
     }
 }
 
-/// Read the account's grants once for a `columns_from: grants` MySQL or Oracle CDC run.
+/// Read the account's grants once for a `columns_from: grants` MySQL, Oracle or MongoDB CDC run.
 pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<Option<RunGrants>> {
     if !config.source.columns_from_grants() {
         return Ok(None);
@@ -708,6 +708,25 @@ fn cdc_drift_key(export: &str, table: &str, multi: bool) -> String {
     }
 }
 
+/// The MongoDB engine options of a CDC run.
+fn mongo_engine_opts(
+    config: &Config,
+    export: &ExportConfig,
+    configured_tables: Vec<String>,
+    resolved_grants: Option<RunGrants>,
+) -> CdcEngineOpts {
+    CdcEngineOpts::Mongo {
+        canonical: config
+            .source
+            .mongo
+            .as_ref()
+            .is_some_and(|m| matches!(m.json, crate::config::MongoJsonMode::Canonical)),
+        configured_tables,
+        keyed_tables: crate::source::mongo::id_types::keyed_tables(config, export),
+        resolved_grants,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_cdc_inner(
     config: &Config,
@@ -843,13 +862,12 @@ fn run_cdc_inner(
                         configured_tables: wired.iter().map(|(t, _, _)| t.clone()).collect(),
                         resolved_grants: grants,
                     },
-                    crate::config::SourceType::Mongo => CdcEngineOpts::Mongo {
-                        canonical: config.source.mongo.as_ref().is_some_and(|m| {
-                            matches!(m.json, crate::config::MongoJsonMode::Canonical)
-                        }),
-                        configured_tables: wired.iter().map(|(t, _, _)| t.clone()).collect(),
-                        keyed_tables: crate::source::mongo::id_types::keyed_tables(config, export),
-                    },
+                    crate::config::SourceType::Mongo => mongo_engine_opts(
+                        config,
+                        export,
+                        wired.iter().map(|(t, _, _)| t.clone()).collect(),
+                        grants,
+                    ),
                 },
             },
             outputs,
@@ -1884,5 +1902,39 @@ mod tests {
                 .unwrap_or_else(|| panic!("{engine}: grants resolved without a source"));
             assert!(!format!("{err:#}").is_empty(), "{engine}");
         }
+    }
+}
+
+#[cfg(test)]
+mod grants_tests {
+    use super::resolve_grants;
+
+    /// A `columns_from` CDC config of `source_type` against a server that cannot be reached, and its export.
+    fn dead(
+        source_type: &str,
+        url: &str,
+        columns_from: &str,
+    ) -> (crate::config::Config, crate::config::ExportConfig) {
+        let yaml = format!(
+            "source:\n  type: {source_type}\n  url: \"{url}\"\n{columns_from}exports:\n  - name: o\n    \
+             table: orders\n    mode: cdc\n    format: parquet\n    cdc:\n      checkpoint: ./o.ckpt\n    \
+             destination: {{ type: local, path: ./out }}\n"
+        );
+        let mut config = crate::config::Config::from_yaml(&yaml).unwrap();
+        let export = config.exports.remove(0);
+        (config, export)
+    }
+
+    const DEAD_MONGO: &str = "mongodb://u:p@127.0.0.1:1/app?serverSelectionTimeoutMS=300";
+
+    /// A MongoDB run with the policy reads the grants from its own server and fails there, a run without it reads none.
+    #[test]
+    fn a_mongo_run_resolves_its_grants_through_the_mongo_reader_only_with_the_policy() {
+        let (config, export) = dead("mongo", DEAD_MONGO, "  columns_from: grants\n");
+        let err = resolve_grants(&config, &export).unwrap_err();
+        let said = format!("{err:#}").to_lowercase();
+        assert!(said.contains("server selection"), "{said}");
+        let (config, export) = dead("mongo", DEAD_MONGO, "");
+        assert!(resolve_grants(&config, &export).unwrap().is_none());
     }
 }
