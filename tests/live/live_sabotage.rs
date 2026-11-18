@@ -934,6 +934,9 @@ fn shaped(engine: SqlEngine, tag: &str, shape: Shape) -> (String, Rig, Box<dyn s
     engine.alive();
     let (table, guard) = engine.range_table(tag);
     engine.insert(&table, 1..=LIVE_ROWS, 180, Some(10));
+    if matches!(shape, Shape::KeysetCheckpointParallel) {
+        engine.refresh_row_estimate(&table);
+    }
     let rig = shape.staged(engine, engine.rig(&table));
     (table, rig, guard)
 }

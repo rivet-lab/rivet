@@ -2888,6 +2888,7 @@ fn every_keyset_runner_hook_loses_nothing_on_oracle() {
 fn every_parallel_keyset_runner_hook_loses_nothing_on_oracle() {
     require_alive(LiveService::Oracle);
     let t = crash_table(1_500);
+    SqlEngine::Oracle.refresh_row_estimate(t.name());
     let base = ["chunk_by_key: ID", "chunk_size: 200", "parallel: 3"];
     for fault in [
         (ERROR, "keyset_parallel_worker:1"),
