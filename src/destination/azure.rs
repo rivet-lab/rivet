@@ -6,26 +6,10 @@ use super::cloud::{CloudBackend, CloudDestination};
 use crate::config::{DestinationConfig, DestinationCredential};
 use crate::error::Result;
 
-/// Threshold under which a SAS token is considered "near expiry" and a
-/// warning is logged.  A long export that finishes in < `WARN_THRESHOLD`
-/// will *probably* succeed, but the operator should know.  60 minutes is
-/// a deliberate compromise:
-///
-/// - Long enough to cover a typical large chunked export.
-/// - Short enough that drive-by token paste (e.g. a portal-generated SAS
-///   with default 1-hour validity) is flagged before it expires
-///   mid-flight.
-///
-/// The 0.7.4 release-gate matrix in `docs/cloud-smoke-tests.md` records
-/// "near-expiry warn at 60 min" as the verified contract.
+/// Threshold under which a SAS token is considered "near expiry" and a warning is logged.
 const SAS_NEAR_EXPIRY_THRESHOLD: chrono::Duration = chrono::Duration::minutes(60);
 
 /// Result of parsing `se=` (signed-expiry) out of an Azure SAS token.
-///
-/// This is the input to the preflight in `AzureDestination::new`: the
-/// destination either rejects the token (expired), warns and continues
-/// (near-expiry / unparseable), or stays silent (healthy / token has no
-/// `se=` at all).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SasExpiryStatus {
     /// `se=` parsed and is in the future by more than `SAS_NEAR_EXPIRY_THRESHOLD`.
@@ -37,25 +21,14 @@ pub(crate) enum SasExpiryStatus {
     },
     /// `se=` parsed and is in the past — the destination cannot be opened.
     Expired { expires_at: DateTime<Utc> },
-    /// `se=` is missing (legacy SAS signed by a stored access policy, or
-    /// a non-standard token shape).  Cannot warn meaningfully.
+    /// `se=` is missing (legacy SAS signed by a stored access policy, or a non-standard token shape).
     NoExpiry,
     /// `se=` is present but the value did not parse as RFC3339.
     Unparseable { raw: String },
 }
 
 /// Parse `se=` (signed-expiry) out of a SAS token and classify it.
-///
-/// SAS tokens are URL-encoded query strings: `sv=…&se=2026-06-01T00:00:00Z&sig=…`.
-/// The `se=` value is RFC3339 with `Z` suffix (UTC).  A leading `?` is
-/// tolerated — `AzureDestination::new` strips it before delegating to
-/// opendal, but we want this preflight to be safe to call on raw input.
-///
-/// Returns `NoExpiry` rather than an error when `se=` is missing — Azure
-/// permits SAS tokens whose lifetime is governed by a server-side stored
-/// access policy and Rivet has no opinion about those.
 pub(crate) fn parse_sas_expiry_status(token: &str, now: DateTime<Utc>) -> SasExpiryStatus {
-    // Trim the leading `?` operators sometimes copy from the portal URL.
     let body = token.trim_start_matches('?');
 
     for pair in body.split('&') {
@@ -68,9 +41,6 @@ pub(crate) fn parse_sas_expiry_status(token: &str, now: DateTime<Utc>) -> SasExp
             return SasExpiryStatus::Unparseable { raw: String::new() };
         };
 
-        // The portal-generated form is `2026-06-01T00:00:00Z` — already
-        // RFC3339.  Some CLIs URL-encode colons (`%3A`) or the `+` sign in
-        // timezone offsets (`%2B`); decode both before parsing.
         let decoded = raw
             .replace("%3A", ":")
             .replace("%3a", ":")
@@ -103,11 +73,7 @@ pub(crate) fn parse_sas_expiry_status(token: &str, now: DateTime<Utc>) -> SasExp
     SasExpiryStatus::NoExpiry
 }
 
-/// Inspect a SAS token's `se=` and act on it: fail-fast on expired,
-/// log::warn on near-expiry / unparseable, stay silent otherwise.
-///
-/// Centralised so `AzureDestination::new` and any future direct caller
-/// (e.g. a JSON-format `rivet doctor`) share one decision.
+/// Inspect a SAS token's `se=` and act on it.
 fn enforce_sas_expiry(token: &str) -> Result<()> {
     match parse_sas_expiry_status(token, Utc::now()) {
         SasExpiryStatus::Healthy { .. } | SasExpiryStatus::NoExpiry => Ok(()),
@@ -115,8 +81,6 @@ fn enforce_sas_expiry(token: &str) -> Result<()> {
             expires_at,
             remaining,
         } => {
-            // Total minutes is the operator-friendly unit; sub-minute
-            // precision is noise (clock skew dominates anyway).
             let mins = remaining.num_minutes().max(0);
             log::warn!(
                 "Azure SAS token expires in {} minute{} ({}). Long exports may fail mid-run; rotate the token before extraction.",
@@ -127,9 +91,6 @@ fn enforce_sas_expiry(token: &str) -> Result<()> {
             Ok(())
         }
         SasExpiryStatus::Expired { expires_at } => {
-            // CONTRACT: preflight/doctor.rs::categorize_dest_error matches on
-            // "already expired" + "sas" to assign the "sas expired" category.
-            // Keep those words present if this message is ever rephrased.
             crate::rivet_bail!(
                 crate::error::codes::DEST_CREDENTIALS_INVALID,
                 "Azure SAS token already expired (se={}). Generate a new SAS and re-export.",
@@ -146,9 +107,7 @@ fn enforce_sas_expiry(token: &str) -> Result<()> {
     }
 }
 
-/// Azure Blob Storage destination. The retry policy, blocking wrap, and
-/// ADR-0013 read surface live in [`CloudDestination`]; this type only knows
-/// how to authenticate against Azure (account key, SAS token, or anonymous).
+/// Azure Blob Storage destination.
 pub type AzureDestination = CloudDestination<AzureBackend>;
 
 /// Zero-sized backend marker carrying Azure's operator construction.
@@ -171,9 +130,6 @@ impl CloudBackend for AzureBackend {
     const SCHEME: &'static str = "az";
 
     fn build_operator(config: &DestinationConfig) -> Result<Operator> {
-        // Azure's "container" is the equivalent of S3's bucket — reuse the
-        // existing `bucket` config field rather than introducing a second
-        // synonym at the YAML layer.
         let container = config.bucket.as_deref().ok_or_else(|| {
             crate::error::coded(
                 crate::error::codes::CONFIG_DESTINATION_SETTING_MISSING,
@@ -183,11 +139,6 @@ impl CloudBackend for AzureBackend {
 
         let mut builder = Azblob::default().container(container);
 
-        // opendal's Azblob builder does NOT auto-derive an endpoint from
-        // account_name the way AWS does from region.  We do it ourselves so
-        // operators only have to set `account_name`; explicit `endpoint:` in
-        // config still wins (needed for Azurite, sovereign clouds, custom
-        // domains).
         match (&config.endpoint, &config.account_name) {
             (Some(endpoint), _) => {
                 builder = builder.endpoint(endpoint);
@@ -196,12 +147,7 @@ impl CloudBackend for AzureBackend {
                 let derived = format!("https://{account_name}.blob.core.windows.net");
                 builder = builder.endpoint(&derived);
             }
-            (None, None) => {
-                // Both unset.  We bail in the auth check below with a clearer
-                // message that names the missing field (account_name), since
-                // an "endpoint is empty" error from opendal hides the root
-                // cause from the operator.
-            }
+            (None, None) => {}
         }
 
         match DestinationCredential::choose(config, "destination")? {
@@ -241,12 +187,7 @@ mod tests {
     use super::*;
     use crate::config::{DestinationConfig, DestinationType};
 
-    // ── config validation (no network, no real credentials) ───────────────────
-
     /// Helper: run `AzureDestination::new` expecting an error.
-    ///
-    /// `AzureDestination` doesn't impl `Debug` (opendal `blocking::Operator`
-    /// doesn't), so the usual `.unwrap_err()` shortcut won't type-check.
     fn expect_err(cfg: &DestinationConfig) -> String {
         match AzureDestination::new(cfg) {
             Err(e) => format!("{e:#}"),
@@ -357,7 +298,6 @@ mod tests {
 
     #[test]
     fn azure_destination_allow_anonymous_skips_credential_requirements() {
-        // Azurite-mode build should succeed without account_name / account_key.
         let cfg = DestinationConfig {
             destination_type: DestinationType::Azure,
             bucket: Some("data".into()),
@@ -365,9 +305,6 @@ mod tests {
             allow_anonymous: true,
             ..Default::default()
         };
-        // The Operator construction may still fail (no live emulator), but it
-        // must NOT fail with "account_name required" / "account_key_env required".
-        // We only assert the negative — that we got past the pre-flight check.
         let err = AzureDestination::new(&cfg).err().map(|e| format!("{e:#}"));
         if let Some(msg) = err {
             assert!(
@@ -379,18 +316,6 @@ mod tests {
 
     #[test]
     fn azure_destination_auto_derives_endpoint_from_account_name() {
-        // Regression test for the live-prod bug caught on 2026-05-21:
-        // opendal's `Azblob` builder does NOT auto-derive an endpoint from
-        // `account_name` the way AWS S3 does from `region`.  Without our
-        // own derive step, `doctor` fails immediately with
-        // `ConfigInvalid: endpoint is empty` and never reaches the
-        // credential check.
-        //
-        // This test asserts: when `endpoint` is unset but `account_name` is
-        // set, builder construction reaches *past* the endpoint validation.
-        // We can't easily assert "endpoint was set to X" without poking at
-        // opendal internals, so we assert the NEGATIVE — the error message,
-        // if any, must NOT be the "endpoint is empty" failure mode.
         let cfg = DestinationConfig {
             destination_type: DestinationType::Azure,
             bucket: Some("data".into()),
@@ -401,9 +326,6 @@ mod tests {
         // SAFETY: test-only; binary is single-threaded in this test context.
         unsafe { std::env::set_var("RIVET_TEST_AZURE_ENDPOINT_FAKE", "fake-key-value") };
         let result = AzureDestination::new(&cfg);
-        // The build may succeed (opendal doesn't validate the fake key
-        // until first call) or fail for some other reason — but NEVER
-        // for an empty endpoint, because we derive it from account_name.
         if let Err(e) = result {
             let msg = format!("{e:#}").to_lowercase();
             assert!(
@@ -416,16 +338,6 @@ mod tests {
 
     #[test]
     fn azure_destination_explicit_endpoint_wins_over_derived() {
-        // Explicit `endpoint:` in config must take precedence over the
-        // auto-derived `https://<account>.blob.core.windows.net` URL.
-        // Critical for Azurite, sovereign clouds, and custom storage
-        // accounts behind a corporate proxy.
-        //
-        // We can't read back the endpoint from opendal's builder, so we
-        // verify the *path* taken: with both set, no failure is raised
-        // before the credential check (i.e., we got past the endpoint
-        // selection logic without panic).  The actual endpoint string
-        // is exercised by the live smoke against Azurite.
         let cfg = DestinationConfig {
             destination_type: DestinationType::Azure,
             bucket: Some("data".into()),
@@ -461,13 +373,8 @@ account_key_env: AZURE_STORAGE_KEY
         assert_eq!(cfg.account_key_env.as_deref(), Some("AZURE_STORAGE_KEY"));
     }
 
-    // ── v0.7.2 P0.4: SAS-token auth ───────────────────────────────────────
-
     #[test]
     fn azure_destination_sas_token_env_satisfies_auth() {
-        // With `sas_token_env` set (and `account_key_env` unset), the
-        // build path must reach *past* the credential validation — i.e.
-        // no "account_key_env required" error.
         let cfg = DestinationConfig {
             destination_type: DestinationType::Azure,
             bucket: Some("data".into()),
@@ -490,8 +397,6 @@ account_key_env: AZURE_STORAGE_KEY
 
     #[test]
     fn azure_destination_rejects_account_key_and_sas_token_together() {
-        // Both auth modes set → can't safely pick one.  Fail with an
-        // actionable message that names both fields.
         let cfg = DestinationConfig {
             destination_type: DestinationType::Azure,
             bucket: Some("data".into()),
@@ -517,8 +422,6 @@ account_key_env: AZURE_STORAGE_KEY
 
     #[test]
     fn azure_destination_missing_both_account_key_and_sas_token_errors() {
-        // Updated error message must name BOTH auth modes so the
-        // operator knows the alternatives.
         let cfg = DestinationConfig {
             destination_type: DestinationType::Azure,
             bucket: Some("data".into()),
@@ -572,8 +475,6 @@ sas_token_env: AZURE_STORAGE_SAS_TOKEN
         assert!(cfg.account_key_env.is_none());
     }
 
-    // ── v0.7.4 P1: SAS-token expiry preflight ─────────────────────────────
-
     use chrono::TimeZone;
 
     fn ts(s: &str) -> DateTime<Utc> {
@@ -594,7 +495,6 @@ sas_token_env: AZURE_STORAGE_SAS_TOKEN
 
     #[test]
     fn sas_expiry_parses_within_threshold_as_near_expiry() {
-        // 30 minutes < 60-minute threshold → NearExpiry.
         let token = "sv=2021-08-06&se=2026-05-23T12:30:00Z&sig=fake";
         let now = Utc.with_ymd_and_hms(2026, 5, 23, 12, 0, 0).unwrap();
         match parse_sas_expiry_status(token, now) {
@@ -645,8 +545,6 @@ sas_token_env: AZURE_STORAGE_SAS_TOKEN
 
     #[test]
     fn sas_expiry_treats_now_equals_se_as_expired() {
-        // Boundary: a token whose `se=` exactly equals `now` cannot be
-        // used for any subsequent request, so it must be Expired.
         let token = "sv=2021-08-06&se=2026-05-23T12:00:00Z&sig=fake";
         let now = Utc.with_ymd_and_hms(2026, 5, 23, 12, 0, 0).unwrap();
         match parse_sas_expiry_status(token, now) {
@@ -657,8 +555,6 @@ sas_token_env: AZURE_STORAGE_SAS_TOKEN
 
     #[test]
     fn sas_expiry_handles_url_encoded_colons() {
-        // `az` CLI sometimes emits `%3A` for `:`.  Both forms must
-        // produce the same status.
         let token = "sv=2021-08-06&se=2099-01-01T00%3A00%3A00Z&sig=fake";
         let now = Utc.with_ymd_and_hms(2026, 5, 23, 12, 0, 0).unwrap();
         assert!(matches!(
@@ -669,8 +565,6 @@ sas_token_env: AZURE_STORAGE_SAS_TOKEN
 
     #[test]
     fn sas_expiry_handles_url_encoded_plus_in_timezone_offset() {
-        // Some tooling emits `+00:00` as `%2B00:00` in the se= value.
-        // An expired token with this encoding must still be caught.
         let token = "sv=2021-08-06&se=2024-01-01T00%3A00%3A00%2B00%3A00&sig=fake";
         let now = Utc.with_ymd_and_hms(2026, 5, 23, 12, 0, 0).unwrap();
         assert!(matches!(
@@ -681,8 +575,6 @@ sas_token_env: AZURE_STORAGE_SAS_TOKEN
 
     #[test]
     fn sas_expiry_returns_no_expiry_when_se_missing() {
-        // Tokens signed by a stored access policy have no `se=` of
-        // their own — the policy on the server enforces lifetime.
         let token = "sv=2021-08-06&si=mypolicy&sig=fake";
         let now = Utc.with_ymd_and_hms(2026, 5, 23, 12, 0, 0).unwrap();
         assert_eq!(
@@ -703,7 +595,6 @@ sas_token_env: AZURE_STORAGE_SAS_TOKEN
 
     #[test]
     fn sas_expiry_tolerates_leading_question_mark() {
-        // Operators paste `?sv=…&se=…&sig=…` straight from the portal.
         let token = "?sv=2021-08-06&se=2099-01-01T00:00:00Z&sig=fake";
         let now = Utc.with_ymd_and_hms(2026, 5, 23, 12, 0, 0).unwrap();
         assert!(matches!(
@@ -714,8 +605,6 @@ sas_token_env: AZURE_STORAGE_SAS_TOKEN
 
     #[test]
     fn sas_expiry_at_threshold_is_near_expiry() {
-        // Boundary: a token expiring exactly at the threshold (60 min)
-        // must trigger NearExpiry — NearExpiry uses `<=`.
         let now = Utc.with_ymd_and_hms(2026, 5, 23, 12, 0, 0).unwrap();
         let exactly_at_threshold = now + SAS_NEAR_EXPIRY_THRESHOLD;
         let token = format!(
@@ -730,7 +619,6 @@ sas_token_env: AZURE_STORAGE_SAS_TOKEN
 
     #[test]
     fn sas_expiry_one_second_above_threshold_is_healthy() {
-        // One second above the 60-minute threshold must be Healthy.
         let now = Utc.with_ymd_and_hms(2026, 5, 23, 12, 0, 0).unwrap();
         let above_threshold = now + SAS_NEAR_EXPIRY_THRESHOLD + chrono::Duration::seconds(1);
         let token = format!("sv=2021-08-06&se={}&sig=fake", above_threshold.to_rfc3339());
@@ -742,10 +630,6 @@ sas_token_env: AZURE_STORAGE_SAS_TOKEN
 
     #[test]
     fn azure_destination_rejects_expired_sas_token() {
-        // Wire test: a token whose `se=` is in the past must fail fast
-        // in `AzureDestination::new`, *before* opendal touches the wire.
-        // The error message must name the field so the operator knows
-        // what to rotate.
         let cfg = DestinationConfig {
             destination_type: DestinationType::Azure,
             bucket: Some("data".into()),
@@ -769,10 +653,6 @@ sas_token_env: AZURE_STORAGE_SAS_TOKEN
 
     #[test]
     fn azure_destination_accepts_far_future_sas_token() {
-        // Healthy path: a token whose `se=` is far in the future must
-        // *not* fail at the expiry preflight.  We can't assert the
-        // build succeeds (no live Azure), but we can assert the error
-        // — if any — is *not* the expiry one.
         let cfg = DestinationConfig {
             destination_type: DestinationType::Azure,
             bucket: Some("data".into()),
