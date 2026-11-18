@@ -1,14 +1,9 @@
 //! An integer column under a `bool` override is delivered as the same 0/1 flags, or refused by code; any other value is never turned into `true`.
 
 use crate::common::*;
+use crate::live_int_to_float_override::readback_only;
 
 const NOT_EXACT: &str = "RIVET_SOURCE_VALUE_UNREPRESENTABLE";
-
-fn readback_only(rig: Rig) -> Rig {
-    rig.no_oracle(
-        "the subject is the value a declared override delivers, graded against the inserted rows",
-    )
-}
 
 fn mysql_table(ty: &str, values: &[&str]) -> (String, MysqlTable) {
     use mysql::prelude::Queryable;
