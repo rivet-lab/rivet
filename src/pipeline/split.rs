@@ -127,7 +127,7 @@ pub(crate) fn probe_and_synthesize(
             );
         }
     }
-    let bounds = super::keyset::sample_key_boundaries(src.as_mut(), &plan, &key, n, None, None)?;
+    let bounds = super::keyset::sample_key_boundaries(src.as_mut(), &plan, &key, n, n, None, None)?;
     if bounds.is_empty() {
         return Ok(None);
     }

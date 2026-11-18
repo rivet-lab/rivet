@@ -256,3 +256,16 @@ pub fn mysql_seed_rolled_back_transaction(
     }
     c.query_drop("ROLLBACK").expect("rollback");
 }
+
+/// Make MySQL's catalog estimate `rows` rows for `table` in the `rivet` schema; create the table `STATS_PERSISTENT=1 STATS_AUTO_RECALC=0` so no recalculation races the write.
+pub fn mysql_catalog_says_rows(table: &str, rows: u64) {
+    use mysql::prelude::Queryable;
+    let mut root = mysql_root_connect();
+    root.query_drop(format!(
+        "UPDATE mysql.innodb_table_stats SET n_rows = {rows} \
+         WHERE database_name = 'rivet' AND table_name = '{table}'"
+    ))
+    .expect("set the catalog row estimate");
+    root.query_drop(format!("FLUSH TABLE rivet.{table}"))
+        .expect("reload the statistics");
+}

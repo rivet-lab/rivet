@@ -165,6 +165,13 @@ config_fields:
       is also what makes the PostgreSQL cases independent of each other — a
       shared slot would carry one case's un-acked WAL into the next.
 
+  - id: publication
+    coverage: test
+    detail: >-
+      The pgoutput stream's publication name, validated at load (non-PostgreSQL source, length,
+      a name two exports share) by the config::cdc unit tests; ensure_publication's create and
+      drift refusal by the lib live cell publication::tests::live_a_publication_is_created_verified_and_a_drift_is_repaired_by_the_message on PG16 and PG18.
+
   - id: capture_instance
     coverage: swept
     case: every mssql case
