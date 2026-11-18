@@ -532,7 +532,7 @@ impl ExportSink {
         self.quality.track(batch)
     }
 
-    /// Hard per-value guard (OPT-1): abort with `RIVET_VALUE_TOO_LARGE` when a single variable-length cell exceeds `max_value_bytes`.
+    /// Hard per-value guard (OPT-1): abort with `RIVET_SOURCE_VALUE_TOO_LARGE` when a single variable-length cell exceeds `max_value_bytes`.
     fn check_value_ceiling(&self, batch: &RecordBatch) -> Result<()> {
         use arrow::array::{BinaryArray, LargeBinaryArray, LargeStringArray, StringArray};
         use arrow::datatypes::DataType;
@@ -565,7 +565,7 @@ impl ExportSink {
             if let Some(value_bytes) = over {
                 crate::rivet_bail!(
                     crate::error::codes::SOURCE_VALUE_TOO_LARGE,
-                    "RIVET_VALUE_TOO_LARGE: column '{}' has a single value of {:.1} MB, exceeding the \
+                    "column '{}' has a single value of {:.1} MB, exceeding the \
                      per-value ceiling of {} MB. One oversized cell can OOM the process regardless of \
                      batch size. Raise `tuning.max_value_mb` (or set it to 0 to disable the guard) if \
                      this value is expected.",

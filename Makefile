@@ -18,6 +18,24 @@ LIVE_ALL = python3 dev/pytools/live_slot.py --slots $(LIVE_SLOTS) --all --
 pr-ready:  ## Everything a PR must pass before it is opened; paste the summary block into the PR body. ARGS=--fast skips mutants (reported NOT RUN); ARGS='--body FILE' grades the PR body's declarations.
 	. ./.githooks/repo-venv && python3 dev/pytools/pr_ready.py run $(ARGS)
 
+HUNT = python3 -m dev.pytools.hunt $(if $(LENS),--lens "$(LENS)",) $(if $(RULES),--rules "$(RULES)",) $(ARGS)
+
+.PHONY: hunt hunt-dry
+hunt:  ## Bug hunt (dev/pytools/hunt.py): architect lenses, a sweeper per rule and KEY CLAIM, a merge, one verifier pass. LENS=preset|"text" (ARGS=--list-lenses), ARGS=--auto (next lenses in rotation + changed seams), ARGS="--lenses a,b", RULES="title;title", ARGS="--close C3 --pr 812". Paid and long: run it detached.
+	$(HUNT)
+
+hunt-dry:  ## The runs `make hunt` would start (agent, predicate, cwd, budget, output), without calling claude or making the worktree.
+	$(HUNT) --dry-run
+
+FIX = python3 -m dev.pytools.fix $(ARGS)
+
+.PHONY: fix fix-dry
+fix:  ## Fix round (dev/pytools/fix.py): accepted hunt classes to verified PRs, never merged. ARGS="--go --hunt target/hunt/<dir> --classes C1,C3" (--parallel 2, --budget-usd per class, --resume, --only STEP, --force-class ID, --record-closed). Paid and long: run it detached.
+	$(FIX)
+
+fix-dry:  ## The plan of a fix round (roles, lanes, branches, budgets) without calling claude. ARGS="--hunt target/hunt/<dir> --classes C1,C3"; a --go in ARGS is dropped.
+	python3 -m dev.pytools.fix $(filter-out --go,$(ARGS))
+
 .PHONY: error-sites
 error-sites:  ## Regenerate docs/error-sites.md: the offline battery and the live suite under cargo llvm-cov (needs the stand; about an hour).
 	python3 dev/pytools/error_sites.py measure
@@ -197,6 +215,10 @@ property-no-silent-null:  ## Property matrix: every non-NULL source value is del
 	 $(LIVE) $(PY) -m dev.release_oracle.property_no_silent_null_load || rc=$$?; \
 	 exit $$rc
 
+.PHONY: property-no-silent-null-load-cloud
+property-no-silent-null-load-cloud:  ## The ledger's edge cells loaded into BigQuery and Snowflake and read back by a second client; NOT_GRADED without credentials. Takes one live slot.
+	$(LIVE) env RIVET_WAREHOUSE_LIVE=all $(PY) -m dev.pytools.warehouse_env -- $(PY) -m dev.release_oracle.property_no_silent_null_load --targets duck,bigquery,snowflake $(ARGS)
+
 release-oracle:  ## Release gate, BARE: only what is already in your shell. With no RIVET_PREV_RELEASE_BIN in your environment the prev-release comparison is GIVEN UP by name (cannot support a tag); with one exported, those three stages run and grade. The replica/standby topology rows are GIVEN UP by name too (a down stand is SKIP here, FAIL in release-oracle-full). Read the SKIP count — with nothing set it is ~95 PASS / 60 SKIP and still prints RELEASE-READY.
 	$(LIVE_ALL) $(PY) -m dev.release_oracle --without-prev-release-comparison --without-replica-topologies $(ARGS)
 
@@ -246,6 +268,8 @@ RIVET_CONC_SRC_CONTAINER  ?= rivet-postgres-1
 # single full run while the download step reported success. A baseline the
 # gate needs must live where the gate's own hygiene cannot eat it.
 PREV_RELEASE_DIR          ?= .gate-baseline
+PREV_RELEASE_BIN          = $(shell ls -t -d $(PREV_RELEASE_DIR)/rivet-v*/rivet 2>/dev/null | head -1)
+PREV_RELEASE_ENV          = $(if $(PREV_RELEASE_BIN),RIVET_PREV_RELEASE_BIN=$(PREV_RELEASE_BIN))
 TRIPLE                    = $(or $(TRIPLE_MEMO),$(eval TRIPLE_MEMO := $(shell $(PY) -m dev.release_oracle.field_state --triple))$(TRIPLE_MEMO))
 # The field-symptom replay's baseline is NOT the latest release: criterion 1
 # needs the release that CARRIES the governor regression (0.24.4 — see
@@ -321,11 +345,11 @@ release-oracle-nightly:  ## The per-run gate with the whole GATE_ENV and no prev
 	$(LIVE_ALL) env $(GATE_ENV) $(PY) -m dev.release_oracle --without-prev-release-comparison --without-replica-topologies --no-cloud --hosted $(ARGS)
 
 release-oracle-compat: release-oracle-prev-bin  ## The measured stages (previous-release differential, field replay, regression) against the downloaded previous release.
-	@prev=$$(ls -t -d $(PREV_RELEASE_DIR)/rivet-v*/rivet 2>/dev/null | head -1); \
+	@prev='$(PREV_RELEASE_BIN)'; \
 	 $(LIVE_ALL) env $(GATE_ENV) RIVET_PREV_RELEASE_BIN="$$prev" $(PY) -m dev.release_oracle --island --no-cloud --hosted $(ARGS)
 
 release-oracle-hosted-half: release-oracle-prev-bin sweep-test-db  ## The hosted half of the release gate (dev/release_oracle/halves.py) on a hosted runner: seeded recall on, no cloud sweep; ARGS picks the slice with --live-shard i/n.
-	@prev=$$(ls -t -d $(PREV_RELEASE_DIR)/rivet-v*/rivet 2>/dev/null | head -1); \
+	@prev='$(PREV_RELEASE_BIN)'; \
 	 echo "  previous release: $${prev:-<none>}"; \
 	 $(LIVE_ALL) env $(GATE_ENV) RIVET_PREV_RELEASE_BIN="$$prev" $(PY) -m dev.release_oracle --with-seeded-recall --half hosted --hosted $(ARGS)
 
@@ -341,7 +365,7 @@ release-oracle-full: release-oracle-prev-bin sweep-test-db sweep-test-cloud  ## 
 	@# stages (release regression / previous-release differential / field symptom
 	@# replay) — so the echo says FAIL and names the escape. A gate run that
 	@# reaches here with an empty $$prev is telling you the download failed.
-	@prev=$$(ls -t -d $(PREV_RELEASE_DIR)/rivet-v*/rivet 2>/dev/null | head -1); \
+	@prev='$(PREV_RELEASE_BIN)'; \
 	 echo "  previous release: $${prev:-<none — the scale legs will SKIP and the regression / differential / field-replay legs will FAIL; re-run release-oracle-prev-bin, or give the comparison up by name with ARGS=--without-prev-release-comparison>}"; \
 	 $(LIVE_ALL) env $(GATE_ENV) RIVET_PREV_RELEASE_BIN="$$prev" $(PY) -m dev.release_oracle --with-seeded-recall $(ARGS)
 	@# A gate that passed leaves the stand and the cloud swept too: no orphaned slot pins WAL into
@@ -350,7 +374,7 @@ release-oracle-full: release-oracle-prev-bin sweep-test-db sweep-test-cloud  ## 
 
 release-oracle-island: release-oracle-prev-bin sweep-test-db  ## The measuring island alone (release regression, perf, source harm, previous-release differential, field symptom replay, scale memory, flat RSS) on the whole machine. Its green record for the tag's sha is what dev/pytools/release.py requires beside release-oracle-full; run it nightly on main.
 	@rm -rf target/package
-	@prev=$$(ls -t -d $(PREV_RELEASE_DIR)/rivet-v*/rivet 2>/dev/null | head -1); \
+	@prev='$(PREV_RELEASE_BIN)'; \
 	 echo "  previous release: $${prev:-<none: the regression / differential / field-replay legs will FAIL; re-run release-oracle-prev-bin>}"; \
 	 $(LIVE_ALL) env $(GATE_ENV) RIVET_PREV_RELEASE_BIN="$$prev" $(PY) -m dev.release_oracle --island $(ARGS)
 	@$(MAKE) --no-print-directory sweep-test-db
@@ -361,7 +385,7 @@ release-oracle-bless: release-oracle-prev-bin  ## Re-capture the verdict + duckd
 	@# It DEPENDS on release-oracle-prev-bin, so it downloads a baseline — and
 	@# used to then not pass it, failing three stages over the absence of a
 	@# binary it had just fetched. Same threading as release-oracle-full.
-	@prev=$$(ls -t -d $(PREV_RELEASE_DIR)/rivet-v*/rivet 2>/dev/null | head -1); \
+	@prev='$(PREV_RELEASE_BIN)'; \
 	 echo "  previous release: $${prev:-<none — the scale legs will SKIP and the regression / differential / field-replay legs will FAIL; re-run release-oracle-prev-bin, or give the comparison up by name with ARGS=--without-prev-release-comparison>}"; \
 	 $(LIVE_ALL) env $(GATE_ENV) RIVET_PREV_RELEASE_BIN="$$prev" $(PY) -m dev.release_oracle --bless-local $(ARGS)
 
@@ -407,5 +431,5 @@ evidence-report:  ## The live cells of every coverage ledger with no green run i
 	$(PY) dev/pytools/evidence.py report $(if $(EVIDENCE_DAYS),--days $(EVIDENCE_DAYS),)
 
 .PHONY: seeded-recall
-seeded-recall:  ## Seeded-defect recall: re-introduce every known bug class and require the harness to catch it.
-	$(LIVE) env $(GATE_ENV) $(PY) -m dev.seeded $(SEEDED_ARGS)
+seeded-recall:  ## Seeded-defect recall: re-introduce every known bug class and require the harness to catch it; a baseline fetched by release-oracle-prev-bin is the previous release its cells run beside.
+	$(LIVE) env $(GATE_ENV) $(PREV_RELEASE_ENV) $(PY) -m dev.seeded $(SEEDED_ARGS)

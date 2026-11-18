@@ -26,6 +26,14 @@ pub(crate) fn is_tls_handshake_failure(text: &str) -> bool {
 /// an unresolvable name, a refused port, a timeout — since the driver's text alone
 /// does not say which part of the URL is wrong. Other errors pass through unchanged.
 pub(crate) fn describe_connect_error(url: &str, err: anyhow::Error) -> anyhow::Error {
+    crate::error::coded_flat(
+        crate::error::codes::SOURCE_CONNECT_FAILED,
+        describe_unreachable(url, err),
+    )
+}
+
+/// The error with its unreachable-host hint, before the connect code is put on it.
+fn describe_unreachable(url: &str, err: anyhow::Error) -> anyhow::Error {
     let text = format!("{err:#}").to_ascii_lowercase();
     let (host, port) = url_host_port(url);
     let at = if port.is_empty() {
@@ -55,18 +63,10 @@ pub(crate) fn describe_connect_error(url: &str, err: anyhow::Error) -> anyhow::E
     } else {
         return err;
     };
-    anyhow::Error::msg(UnreachableTarget(format!("{hint} (driver: {err:#})")))
+    anyhow::Error::msg(UnreachableTarget::new(format!("{hint} (driver: {err:#})")))
 }
 
-/// A connect that never reached the server, named by host:port — rivet's own verdict, so no setup hint goes in front.
-#[derive(Debug)]
-pub(crate) struct UnreachableTarget(String);
-
-impl std::fmt::Display for UnreachableTarget {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
+pub(crate) use crate::error::UnreachableTarget;
 
 /// The `(host, port)` of a connection URL; the port is empty when the URL has none.
 fn url_host_port(url: &str) -> (String, String) {
@@ -161,11 +161,12 @@ pub(crate) fn require_tls_or_loopback(url: &str, tls: Option<&TlsConfig>) -> Res
 mod connect_error_tests {
     use super::{describe_connect_error, url_host_port};
 
+    fn said(e: &anyhow::Error) -> String {
+        format!("{e:#}")
+    }
+
     fn described(url: &str, driver: &str) -> String {
-        format!(
-            "{:#}",
-            describe_connect_error(url, anyhow::anyhow!("{driver}"))
-        )
+        said(&describe_connect_error(url, anyhow::anyhow!("{driver}")))
     }
 
     #[test]
@@ -218,7 +219,7 @@ mod connect_error_tests {
             crate::pipeline::retry::RetryClass::Permanent
         );
         assert!(
-            format!("{e:#}").starts_with("TLS handshake with 127.0.0.1:27017 failed"),
+            said(&e).starts_with("TLS handshake with 127.0.0.1:27017 failed"),
             "{e:#}"
         );
     }
@@ -230,7 +231,7 @@ mod connect_error_tests {
             anyhow::anyhow!("{MONGO_UNREACHABLE}"),
         );
         assert!(crate::pipeline::retry::classify_error(&e).is_transient());
-        assert!(format!("{e:#}").starts_with("no answer from 10.0.0.9:27017"));
+        assert!(said(&e).starts_with("no answer from 10.0.0.9:27017"));
     }
 
     #[test]
@@ -254,9 +255,45 @@ mod connect_error_tests {
     }
 
     #[test]
-    fn other_errors_pass_through_unchanged() {
+    fn other_errors_keep_their_words_under_the_connect_code() {
         let auth = "MySqlError { ERROR 1045 (28000): Access denied for user 'u'@'%' }";
         assert_eq!(described("mysql://u:p@db.example:3306/db", auth), auth);
+        let e = describe_connect_error("mysql://u:p@db.example:3306/db", anyhow::anyhow!("{auth}"));
+        assert_eq!(
+            crate::error::error_code(&e),
+            Some("RIVET_SOURCE_CONNECT_FAILED")
+        );
+    }
+
+    #[test]
+    fn an_error_that_already_has_a_code_keeps_it() {
+        let inner = crate::error::coded(crate::error::codes::SOURCE_QUERY_FAILED, "boom");
+        let e = describe_connect_error("mysql://u:p@db.example:3306/db", inner);
+        assert_eq!(
+            crate::error::error_code(&e),
+            Some("RIVET_SOURCE_QUERY_FAILED")
+        );
+    }
+
+    #[test]
+    fn the_connect_code_keeps_the_retry_class_and_the_typed_marker() {
+        let refused = describe_connect_error(
+            "postgresql://u:p@127.0.0.1:1/db",
+            anyhow::anyhow!("error connecting to server: Connection refused (os error 61)"),
+        );
+        assert_eq!(
+            crate::error::error_code(&refused),
+            Some("RIVET_SOURCE_CONNECT_FAILED")
+        );
+        assert!(refused.downcast_ref::<super::UnreachableTarget>().is_some());
+        let before = crate::pipeline::retry::classify_error(&anyhow::Error::msg(
+            "error connecting to server: Connection refused (os error 61)",
+        ));
+        assert_eq!(crate::pipeline::retry::classify_error(&refused), before);
+        assert_eq!(
+            crate::error::classify_exit(&refused),
+            if before.is_transient() { 2 } else { 1 }
+        );
     }
 
     #[test]

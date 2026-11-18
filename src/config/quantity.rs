@@ -35,6 +35,12 @@ impl Knob {
         zero_text: "{scope}: {name} must be >= 1 (got 0). A zero page reads nothing; omit the {field} to read with a single cursor.",
     };
 
+    pub const BATCH_SIZE: Knob = Knob {
+        name: "tuning.batch_size",
+        zero: codes::CONFIG_VALUE_OUT_OF_RANGE,
+        zero_text: "{scope}: {name} must be >= 1 (got 0). A zero batch reads nothing; omit the {field} for the default or use batch_size_memory_mb.",
+    };
+
     /// The largest value a count knob takes: a window or a page past it is not countable in a signed 64-bit key.
     pub const MAX: u64 = i64::MAX as u64;
 

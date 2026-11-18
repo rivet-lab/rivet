@@ -133,7 +133,14 @@ def bq_rows(project: str, sql: str) -> list[dict]:
     """Every row of a standard-SQL query as {column: value as BigQuery's REST text, or None for NULL}."""
     b = _bq_query(project, sql)
     names = [f["name"] for f in b.get("schema", {}).get("fields", [])]
-    return [dict(zip(names, (c["v"] for c in r["f"]))) for r in b.get("rows", [])]
+    rows, job = list(b.get("rows", [])), b.get("jobReference", {})
+    while token := b.get("pageToken"):
+        st, b = _bq("GET", f"/projects/{project}/queries/{job.get('jobId')}?location={urllib.parse.quote(job.get('location', ''))}"
+                           f"&pageToken={urllib.parse.quote(token)}&timeoutMs=120000")
+        if st != 200:
+            raise RuntimeError(f"bigquery: query page → {st} {b}\n{sql}")
+        rows += b.get("rows", [])
+    return [dict(zip(names, (c["v"] for c in r["f"]))) for r in rows]
 
 
 def bq_tables(project: str, dataset: str) -> list[str]:
