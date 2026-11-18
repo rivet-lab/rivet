@@ -824,7 +824,7 @@ fn flush(
                     }
                 })
                 .count();
-            if nulled > 0 {
+            if nulled > 0 && seeded!("mysql-zero-date-null-without-warn", false, true) {
                 log::warn!(
                     "{}",
                     crate::source::mysql::zero_date_warning(&m.column_name, nulled as u64)

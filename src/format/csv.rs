@@ -192,7 +192,11 @@ fn write_csv_value(writer: &mut dyn Write, array: &dyn Array, idx: usize) -> Res
                 .expect("DataType/Array mismatch");
             let val = arr.value(idx);
             if val.is_empty() {
-                writer.write_all(b"\"\"")?;
+                writer.write_all(seeded!(
+                    "csv-empty-value-written-bare",
+                    &b""[..],
+                    &b"\"\""[..]
+                ))?;
                 return Ok(());
             }
             if val
@@ -219,7 +223,11 @@ fn write_csv_value(writer: &mut dyn Write, array: &dyn Array, idx: usize) -> Res
                 .expect("DataType/Array mismatch");
             let val = arr.value(idx);
             if val.is_empty() {
-                writer.write_all(b"\"\"")?;
+                writer.write_all(seeded!(
+                    "csv-empty-value-written-bare",
+                    &b""[..],
+                    &b"\"\""[..]
+                ))?;
                 return Ok(());
             }
             write_lower_hex(writer, val)?;

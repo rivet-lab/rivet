@@ -6217,3 +6217,45 @@ seeds:
         cells: ["lib:a_store_error_in_a_failure_detail_never_carries_a_registered_credential"]
       stdout:
         na: "stdout writes nothing a validate reads back, so no verification verdict exists for it"
+
+  - name: csv-empty-value-written-bare
+    class: "the CSV writer writes an empty string or an empty binary as a bare empty field, the same bytes as NULL, so a reader that follows the convention (NULL bare, empty value quoted) reads NULL for a present empty value"
+    history: "2026-11-18, hosted gate run 44261857361: the no_silent_null matrix graded a csv blank as NULL for an empty value and could not tell the two apart; the grader now reads NULL bare and an empty value quoted, and this seed holds the writer side"
+    scope: source
+    switch: csv-empty-value-written-bare
+    engines:
+      postgres:
+        na: "the CSV writer is one engine-independent module (src/format/csv.rs); its lib cells and the no_silent_null matrix csv cells are the catch for every engine"
+      mysql:
+        na: "the CSV writer is one engine-independent module (src/format/csv.rs); its lib cells and the no_silent_null matrix csv cells are the catch for every engine"
+      mssql:
+        na: "the CSV writer is one engine-independent module (src/format/csv.rs); its lib cells and the no_silent_null matrix csv cells are the catch for every engine"
+      oracle:
+        na: "the CSV writer is one engine-independent module (src/format/csv.rs); its lib cells and the no_silent_null matrix csv cells are the catch for every engine"
+      mongo:
+        na: "a MongoDB export has no CSV format: the document lands whole in its one column"
+      lib:
+        cells:
+          - "lib:an_empty_string_is_quoted_and_distinct_from_null"
+          - "lib:an_empty_binary_is_quoted_and_distinct_from_null"
+
+  - name: mysql-zero-date-null-without-warn
+    class: "a MySQL zero or partial date is written as NULL with no counted WARN, so the NULL is silent: the WARN is the only record that the cell was not delivered"
+    history: "2026-11-18, hosted gate run 44261857361: the no_silent_null matrix exempts a zero-date NULL only when the run's WARN count equals the zero-date NULLs delivered; this seed drops the WARN on the batch and the CDC sink and the matrix must grade the NULLs SILENT_NULL"
+    scope: source
+    switch: mysql-zero-date-null-without-warn
+    engines:
+      postgres:
+        na: "PostgreSQL has no zero date: a date it holds is a calendar date"
+      mysql:
+        cells:
+          - a_zero_date_is_null_and_the_run_warns_with_the_count_batch_and_cdc_mysql
+      mssql:
+        na: "SQL Server has no zero date: datetime and date hold a calendar date"
+      oracle:
+        na: "Oracle has no zero date: DATE and TIMESTAMP hold a calendar date"
+      mongo:
+        na: "MongoDB has no zero date: a BSON date is an int64 of milliseconds"
+      lib:
+        cells:
+          - "lib:flush_warns_with_the_count_of_zero_dates_it_nulled_and_is_silent_otherwise"

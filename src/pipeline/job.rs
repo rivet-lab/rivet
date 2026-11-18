@@ -1249,7 +1249,11 @@ fn execute_resolved_plan(
     let rss_after = crate::resource::get_rss_mb();
     summary.bytes_read = plan.bytes_read.load(std::sync::atomic::Ordering::Relaxed);
     summary.nulled_cells = plan.nulled_cells.snapshot();
-    for (column, n) in &summary.nulled_cells {
+    for (column, n) in summary
+        .nulled_cells
+        .iter()
+        .filter(|_| seeded!("mysql-zero-date-null-without-warn", false, true))
+    {
         log::warn!("{}", crate::source::mysql::zero_date_warning(column, *n));
     }
     summary.duration_ms = start.elapsed().as_millis() as i64;
