@@ -80,6 +80,93 @@ pub(crate) fn slot_exists_on(client: &mut Client, slot: &str) -> Result<bool> {
         .get(0))
 }
 
+/// The output plugin a logical slot was created with; fixed for the slot's life.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SlotPlugin {
+    TestDecoding,
+    Pgoutput,
+    Other(String),
+}
+
+impl SlotPlugin {
+    /// The plugin named by `pg_replication_slots.plugin`.
+    pub(crate) fn from_name(name: &str) -> Self {
+        match name {
+            "test_decoding" => Self::TestDecoding,
+            "pgoutput" => Self::Pgoutput,
+            other => Self::Other(other.to_string()),
+        }
+    }
+
+    /// The `plugin` text the server holds for this plugin.
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            Self::TestDecoding => "test_decoding",
+            Self::Pgoutput => "pgoutput",
+            Self::Other(n) => n,
+        }
+    }
+}
+
+/// Text rows of a catalog query: one `Vec<Option<String>>` per row, cells in select order.
+pub(crate) trait CatalogRows {
+    /// The rows of `sql` run with the one text parameter `arg`.
+    fn text_rows(&mut self, sql: &str, arg: &str) -> Result<Vec<Vec<Option<String>>>>;
+}
+
+impl CatalogRows for Client {
+    fn text_rows(&mut self, sql: &str, arg: &str) -> Result<Vec<Vec<Option<String>>>> {
+        let rows = self.query(sql, &[&arg])?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                (0..r.len())
+                    .map(|i| r.get::<_, Option<String>>(i))
+                    .collect()
+            })
+            .collect())
+    }
+}
+
+/// The plugin of the logical slot `slot` on `client`, or `None` when the slot does not exist.
+pub(crate) fn slot_plugin_on<C: CatalogRows>(
+    client: &mut C,
+    slot: &str,
+) -> Result<Option<SlotPlugin>> {
+    let rows = client.text_rows(
+        "SELECT plugin::text FROM pg_replication_slots WHERE slot_name = $1",
+        slot,
+    )?;
+    Ok(slot_plugin_from_rows(&rows))
+}
+
+/// The plugin the first `pg_replication_slots` row names; a NULL plugin reads as the empty name.
+pub(crate) fn slot_plugin_from_rows(rows: &[Vec<Option<String>>]) -> Option<SlotPlugin> {
+    rows.first()
+        .map(|r| SlotPlugin::from_name(r.first().cloned().flatten().unwrap_or_default().as_str()))
+}
+
+/// The refusal for an existing slot whose plugin the `test_decoding` stream cannot read.
+pub(crate) fn slot_plugin_refusal(slot: &str, plugin: &SlotPlugin) -> String {
+    format!(
+        "pg cdc: slot '{slot}' uses the '{}' output plugin, but this stream reads 'test_decoding' slots only. \
+         Drop the slot (`SELECT pg_drop_replication_slot('{slot}')`) and re-baseline the stream, or point `cdc.slot` at a different name.",
+        plugin.name()
+    )
+}
+
+/// An existing slot is reused only when its plugin is `test_decoding`; any other plugin is refused by code.
+pub(crate) fn refuse_a_foreign_slot_plugin(slot: &str, existing: Option<SlotPlugin>) -> Result<()> {
+    match existing.filter(|p| *p != SlotPlugin::TestDecoding) {
+        Some(plugin) => crate::rivet_bail!(
+            crate::error::codes::SOURCE_CDC_PREREQUISITE,
+            "{}",
+            slot_plugin_refusal(slot, &plugin)
+        ),
+        None => Ok(()),
+    }
+}
+
 /// Drop the replication slot `slot`, waiting for the server to release a slot the closed stream still holds.
 pub(crate) fn drop_slot(url: &str, slot: &str, tls: Option<&TlsConfig>) -> Result<()> {
     let mut client = super::connect_client(url, tls)?;
@@ -484,9 +571,10 @@ impl PgChangeStream {
             }
         }
         let domains = load_domains(&mut client)?;
-        let exists = slot_exists_on(&mut client, slot)?;
-        match slot_action(slot, exists, prior) {
+        let existing = slot_plugin_on(&mut client, slot)?;
+        match slot_action(slot, existing.is_some(), prior) {
             SlotAction::Reuse => {
+                refuse_a_foreign_slot_plugin(slot, existing)?;
                 refuse_a_slot_another_reader_advanced(&mut client, slot, checkpoint)?
             }
             SlotAction::Refuse(why) => {
@@ -1153,6 +1241,30 @@ fn search_path_schema(client: &mut Client, cfg: &str) -> Result<Option<String>> 
         )
         .with_context(|| format!("pg cdc: resolving `{cfg}` through the search_path"))?
         .map(|r| r.get(0)))
+}
+
+/// The catalog's `(schema, table)` for a configured name through `to_regclass`, for a base or partitioned table; `None` when it resolves nowhere.
+pub(crate) fn search_path_relation<C: CatalogRows>(
+    client: &mut C,
+    cfg: &str,
+) -> Result<Option<(String, String)>> {
+    use anyhow::Context as _;
+    let rows = client
+        .text_rows(
+            "SELECT n.nspname::text, c.relname::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.oid = to_regclass($1) AND c.relkind IN ('r','p') AND c.relpersistence = 'p'",
+            cfg,
+        )
+        .with_context(|| format!("pg cdc: resolving `{cfg}` through the catalog"))?;
+    Ok(relation_from_rows(&rows))
+}
+
+/// The `(schema, table)` the first catalog row names; a row short of either cell resolves nowhere.
+pub(crate) fn relation_from_rows(rows: &[Vec<Option<String>>]) -> Option<(String, String)> {
+    match rows.first().map(Vec::as_slice) {
+        Some([Some(schema), Some(table), ..]) => Some((schema.clone(), table.clone())),
+        None | Some([] | [_] | [None, ..] | [Some(_), None, ..]) => None,
+    }
 }
 
 /// Whether a change of `schema.table` is captured.
@@ -3307,6 +3419,337 @@ mod tests {
             after[1],
             RivetValue::Bytes(b"unchanged-toast-datum".to_vec())
         );
+    }
+
+    /// A plugin name from `pg_replication_slots` maps to its reader; an unknown one keeps its name.
+    #[test]
+    fn a_slot_plugin_is_read_from_its_catalog_name() {
+        assert_eq!(
+            SlotPlugin::from_name("test_decoding"),
+            SlotPlugin::TestDecoding
+        );
+        assert_eq!(SlotPlugin::from_name("pgoutput"), SlotPlugin::Pgoutput);
+        assert_eq!(
+            SlotPlugin::from_name("wal2json"),
+            SlotPlugin::Other("wal2json".into())
+        );
+        for name in ["test_decoding", "pgoutput", "wal2json"] {
+            assert_eq!(SlotPlugin::from_name(name).name(), name);
+        }
+    }
+
+    /// The refusal for a foreign plugin names the slot, the plugin and the way out.
+    #[test]
+    fn the_foreign_plugin_refusal_names_the_slot_the_plugin_and_the_remedy() {
+        let text = slot_plugin_refusal("s1", &SlotPlugin::Pgoutput);
+        assert_eq!(
+            text,
+            "pg cdc: slot 's1' uses the 'pgoutput' output plugin, but this stream reads 'test_decoding' slots only. \
+             Drop the slot (`SELECT pg_drop_replication_slot('s1')`) and re-baseline the stream, or point `cdc.slot` at a different name."
+        );
+    }
+
+    /// A reused slot passes only for no slot or `test_decoding`; any other plugin is refused by code with the slot's name.
+    #[test]
+    fn a_reused_slot_is_refused_unless_it_is_test_decoding_or_absent() {
+        assert!(refuse_a_foreign_slot_plugin("s1", None).is_ok());
+        assert!(refuse_a_foreign_slot_plugin("s1", Some(SlotPlugin::TestDecoding)).is_ok());
+        for plugin in [SlotPlugin::Pgoutput, SlotPlugin::Other("wal2json".into())] {
+            let err = refuse_a_foreign_slot_plugin("s1", Some(plugin.clone())).unwrap_err();
+            crate::error::assert_coded(&err, "RIVET_SOURCE_CDC_PREREQUISITE", 1);
+            assert!(format!("{err:#}").contains(&slot_plugin_refusal("s1", &plugin)));
+        }
+    }
+
+    struct FakeCatalog {
+        rows: Vec<Vec<Option<String>>>,
+        fail: bool,
+        seen: Vec<(String, String)>,
+    }
+
+    impl CatalogRows for FakeCatalog {
+        fn text_rows(&mut self, sql: &str, arg: &str) -> Result<Vec<Vec<Option<String>>>> {
+            self.seen.push((sql.to_string(), arg.to_string()));
+            if self.fail {
+                anyhow::bail!("catalog down");
+            }
+            Ok(self.rows.clone())
+        }
+    }
+
+    fn fake(rows: Vec<Vec<Option<String>>>) -> FakeCatalog {
+        FakeCatalog {
+            rows,
+            fail: false,
+            seen: Vec::new(),
+        }
+    }
+
+    fn row(cells: &[Option<&str>]) -> Vec<Option<String>> {
+        cells.iter().map(|c| c.map(str::to_string)).collect()
+    }
+
+    /// The first `pg_replication_slots` row names the plugin; no row is no slot, a NULL plugin is the empty name.
+    #[test]
+    fn a_slot_plugin_is_read_from_the_first_catalog_row() {
+        assert_eq!(slot_plugin_from_rows(&[]), None);
+        assert_eq!(
+            slot_plugin_from_rows(&[row(&[Some("pgoutput")])]),
+            Some(SlotPlugin::Pgoutput)
+        );
+        assert_eq!(
+            slot_plugin_from_rows(&[row(&[Some("test_decoding")])]),
+            Some(SlotPlugin::TestDecoding)
+        );
+        assert_eq!(
+            slot_plugin_from_rows(&[row(&[Some("wal2json")])]),
+            Some(SlotPlugin::Other("wal2json".into()))
+        );
+        assert_eq!(
+            slot_plugin_from_rows(&[row(&[None])]),
+            Some(SlotPlugin::Other(String::new()))
+        );
+        assert_eq!(
+            slot_plugin_from_rows(&[row(&[Some("pgoutput")]), row(&[Some("wal2json")])]),
+            Some(SlotPlugin::Pgoutput)
+        );
+    }
+
+    /// `slot_plugin_on` asks the catalog for the slot by name and returns what the rows say, or the catalog's error.
+    #[test]
+    fn the_slot_plugin_lookup_queries_the_slot_and_maps_its_rows() {
+        let mut c = fake(vec![row(&[Some("pgoutput")])]);
+        assert_eq!(
+            slot_plugin_on(&mut c, "s_orders").unwrap(),
+            Some(SlotPlugin::Pgoutput)
+        );
+        assert_eq!(c.seen.len(), 1);
+        assert!(c.seen[0].0.contains("pg_replication_slots"));
+        assert_eq!(c.seen[0].1, "s_orders");
+        assert_eq!(slot_plugin_on(&mut fake(vec![]), "s_orders").unwrap(), None);
+        let mut down = fake(vec![row(&[Some("pgoutput")])]);
+        down.fail = true;
+        let err = slot_plugin_on(&mut down, "s_orders").unwrap_err();
+        assert!(format!("{err:#}").contains("catalog down"));
+    }
+
+    /// The first catalog row names the relation as `(schema, table)`; no row, a short row or a NULL cell resolves nowhere.
+    #[test]
+    fn a_relation_is_read_from_the_first_catalog_row() {
+        assert_eq!(relation_from_rows(&[]), None);
+        assert_eq!(
+            relation_from_rows(&[row(&[Some("app"), Some("orders")])]),
+            Some(("app".to_string(), "orders".to_string()))
+        );
+        assert_eq!(
+            relation_from_rows(&[row(&[Some("app"), Some("orders"), Some("extra")])]),
+            Some(("app".to_string(), "orders".to_string()))
+        );
+        assert_eq!(
+            relation_from_rows(&[
+                row(&[Some("tenant_b"), Some("orders")]),
+                row(&[Some("public"), Some("orders")]),
+                row(&[Some("archive"), Some("orders")]),
+            ]),
+            Some(("tenant_b".to_string(), "orders".to_string()))
+        );
+        assert_eq!(relation_from_rows(&[row(&[Some("app")])]), None);
+        assert_eq!(relation_from_rows(&[row(&[])]), None);
+        assert_eq!(relation_from_rows(&[row(&[None, Some("orders")])]), None);
+        assert_eq!(relation_from_rows(&[row(&[Some("app"), None])]), None);
+    }
+
+    /// `search_path_relation` resolves the configured name through the catalog, returns the row's spelling, and names the name on a catalog error.
+    #[test]
+    fn the_search_path_lookup_queries_the_name_and_maps_its_row() {
+        let mut c = fake(vec![row(&[Some("tenant_b"), Some("Orders")])]);
+        assert_eq!(
+            search_path_relation(&mut c, "orders").unwrap(),
+            Some(("tenant_b".to_string(), "Orders".to_string()))
+        );
+        assert_eq!(c.seen.len(), 1);
+        assert!(c.seen[0].0.contains("to_regclass($1)"));
+        assert_eq!(c.seen[0].1, "orders");
+        assert_eq!(
+            search_path_relation(&mut fake(vec![]), "orders").unwrap(),
+            None
+        );
+        let mut down = fake(vec![]);
+        down.fail = true;
+        let err = search_path_relation(&mut down, "orders").unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("pg cdc: resolving `orders` through the catalog"));
+        assert!(text.contains("catalog down"));
+    }
+
+    /// Live: an existing `pgoutput` slot is refused by name before any read; a `test_decoding` slot is reused.
+    #[test]
+    #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
+    fn live_open_refuses_a_pgoutput_slot_and_reuses_a_test_decoding_one() {
+        let mut admin = Client::connect(CONN, NoTls).unwrap();
+        let slot = format!("rivet_plugin_{}", std::process::id());
+        let drop = |c: &mut Client| {
+            c.execute(
+                "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1",
+                &[&slot],
+            )
+            .unwrap();
+        };
+        drop(&mut admin);
+        admin
+            .execute(
+                "SELECT pg_create_logical_replication_slot($1, 'pgoutput')",
+                &[&slot],
+            )
+            .unwrap();
+        assert_eq!(
+            slot_plugin_on(&mut admin, &slot).unwrap(),
+            Some(SlotPlugin::Pgoutput)
+        );
+        let open = || {
+            PgChangeStream::open(
+                CONN,
+                &slot,
+                PriorRun::default(),
+                None,
+                crate::source::cdc::PeekBound::Sized(10),
+                DrainMode::Continuous,
+                &[],
+                None,
+                None,
+            )
+        };
+        let err = open().err().expect("a pgoutput slot is refused");
+        let text = format!("{err:#}");
+        assert_eq!(
+            crate::error::code_of(&err).map(|c| c.id),
+            Some("RIVET_SOURCE_CDC_PREREQUISITE"),
+            "{text}"
+        );
+        assert!(
+            text.contains(&slot_plugin_refusal(&slot, &SlotPlugin::Pgoutput)),
+            "{text}"
+        );
+        drop(&mut admin);
+        assert_eq!(slot_plugin_on(&mut admin, &slot).unwrap(), None);
+        admin
+            .execute(
+                "SELECT pg_create_logical_replication_slot($1, 'test_decoding')",
+                &[&slot],
+            )
+            .unwrap();
+        assert!(open().is_ok(), "a test_decoding slot is reused as before");
+        drop(&mut admin);
+    }
+
+    /// Live: `text_rows` on a real client returns the server's rows, text cells and NULLs; the slot and relation lookups read them.
+    #[test]
+    #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
+    fn live_pg_catalog_rows_are_the_servers_text_cells() {
+        let mut c = Client::connect(CONN, NoTls).unwrap();
+        let id = std::process::id();
+        let slot = format!("rivet_catrows_slot_{id}");
+        let schema = format!("rivet_catrows_s_{id}");
+        let table = format!("Rivet_Catrows_T_{id}");
+        let cleanup = |c: &mut Client| {
+            c.execute(
+                "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1",
+                &[&slot],
+            )
+            .unwrap();
+            c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+                .unwrap();
+        };
+        cleanup(&mut c);
+        c.execute(
+            "SELECT pg_create_logical_replication_slot($1, 'test_decoding')",
+            &[&slot],
+        )
+        .unwrap();
+        c.batch_execute(&format!(
+            "CREATE SCHEMA {schema}; CREATE TABLE {schema}.\"{table}\" (id int)"
+        ))
+        .unwrap();
+        assert_eq!(
+            c.text_rows("SELECT $1::text, NULL::text, 'b'::text", "abc")
+                .unwrap(),
+            vec![vec![Some("abc".to_string()), None, Some("b".to_string())]]
+        );
+        assert_eq!(
+            c.text_rows("SELECT $1::text WHERE false", "abc").unwrap(),
+            Vec::<Vec<Option<String>>>::new()
+        );
+        assert_eq!(
+            c.text_rows(
+                "SELECT x::text FROM generate_series(1, 3) x WHERE $1 = 'go'",
+                "go"
+            )
+            .unwrap(),
+            vec![
+                vec![Some("1".to_string())],
+                vec![Some("2".to_string())],
+                vec![Some("3".to_string())]
+            ]
+        );
+        assert_eq!(
+            slot_plugin_on(&mut c, &slot).unwrap(),
+            Some(SlotPlugin::TestDecoding)
+        );
+        assert_eq!(
+            search_path_relation(&mut c, &format!("{schema}.\"{table}\"")).unwrap(),
+            Some((schema.clone(), table.clone()))
+        );
+        cleanup(&mut c);
+        assert_eq!(slot_plugin_on(&mut c, &slot).unwrap(), None);
+    }
+
+    /// Live: the label resolver agrees with the reader's own domain map for every domain on the server.
+    #[test]
+    #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
+    fn live_type_labels_resolve_every_domain_as_the_domain_map_does() {
+        let mut c = Client::connect(CONN, NoTls).unwrap();
+        c.batch_execute(
+            "DROP DOMAIN IF EXISTS pgo_label_d2; DROP DOMAIN IF EXISTS pgo_label_d1; DROP DOMAIN IF EXISTS pgo_label_v; \
+             CREATE DOMAIN pgo_label_d1 AS integer; CREATE DOMAIN pgo_label_d2 AS pgo_label_d1; \
+             CREATE DOMAIN pgo_label_v AS varchar(10)",
+        )
+        .unwrap();
+        let domains = load_domains(&mut c).unwrap();
+        let labels = crate::source::postgres::type_labels::TypeLabels::load(&mut c).unwrap();
+        let rows = c
+            .query(
+                "SELECT oid, format_type(oid, NULL) FROM pg_type WHERE typtype = 'd'",
+                &[],
+            )
+            .unwrap();
+        let mut seen = 0;
+        for r in &rows {
+            let (oid, label): (u32, String) = (r.get(0), r.get(1));
+            assert_eq!(
+                labels.label(oid),
+                Some(domain_base(&domains, &label)),
+                "domain {label}"
+            );
+            seen += 1;
+        }
+        let d2: u32 = c
+            .query_one("SELECT 'pgo_label_d2'::regtype::oid", &[])
+            .unwrap()
+            .get(0);
+        let int4: u32 = c
+            .query_one("SELECT 'integer'::regtype::oid", &[])
+            .unwrap()
+            .get(0);
+        assert_eq!(labels.label(d2), Some("integer"));
+        assert_eq!(labels.label(int4), Some("integer"));
+        assert!(
+            seen >= 3,
+            "the fixture domains must be among the {seen} read"
+        );
+        c.batch_execute(
+            "DROP DOMAIN pgo_label_d2; DROP DOMAIN pgo_label_d1; DROP DOMAIN pgo_label_v",
+        )
+        .unwrap();
     }
 
     #[test]

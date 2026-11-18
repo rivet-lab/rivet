@@ -265,14 +265,15 @@ pub struct ExportConfig {
     pub chunk_by_key: Option<ChunkKey>,
     /// Concurrent chunk/page workers (default 1). On a RANGE chunk (`chunk_column`)
     /// or KEYSET (`chunk_by_key`) export, `parallel: N` fans the table into N
-    /// ROW-percentile ranges that seek concurrently over separate connections — the
+    /// key ranges that seek concurrently over separate connections — the
     /// half-open intervals partition the key, so the union reads every row exactly
     /// once (structural parity, all engines). Extraction is I/O-bound, so the win
-    /// plateaus early (~3x at N=4, little beyond). SWEET SPOT: indexed tables up to
-    /// ~10M rows at `parallel: 4`. `rivet init` scaffolds a row-scaled value
-    /// (<=500K -> 1, <5M -> 2, >=5M -> 4); a preflight warns past ~5M rows (peak RSS
-    /// ~= N x chunk_size). Beyond ~10M the KEYSET boundary sampler (an index OFFSET
-    /// skip) grows costly at setup — prefer a range `chunk_column` there.
+    /// plateaus early (~3x at N=4, little beyond). `rivet init` scaffolds a row-scaled
+    /// value (<=500K -> 1, <5M -> 2, >=5M -> 4); a preflight warns past ~5M rows (peak
+    /// RSS ~= N x chunk_size). The KEYSET range sampler costs N+1 index seeks at any
+    /// table size: it splits the key's MIN..MAX evenly by VALUE, so a skewed key (dense
+    /// in one corner, or a few far outliers) gets uneven ranges, down to one worker
+    /// with a warning.
     #[serde(default = "default_parallel")]
     pub parallel: usize,
 

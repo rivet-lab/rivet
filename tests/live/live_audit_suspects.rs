@@ -1006,7 +1006,12 @@ fn pg_batch_decimal_override_on_an_integer_column_keeps_its_values() {
         .export_line("columns:")
         .export_line("  f: \"decimal(10,2)\"")
         .run_expect_fail();
-    assert!(said.contains("column `f` is declared decimal"), "{said}");
+    assert!(
+        said.contains(
+            "column `f` is float8 (read as float64) and `columns:` declares it decimal(10,2)"
+        ),
+        "{said}"
+    );
 }
 
 #[test]
@@ -1039,7 +1044,10 @@ fn mssql_a_string_override_on_an_int_column_is_refused_by_name() {
         .export_line("columns:")
         .export_line("  n: string")
         .run_expect_fail();
-    assert!(said.contains("column `n` is declared text"), "{said}");
+    assert!(
+        said.contains("column `n` is int4 (read as int32) and `columns:` declares it string"),
+        "{said}"
+    );
 }
 
 /// A PostgreSQL value rivet cannot hold faithfully fails the run with the coded

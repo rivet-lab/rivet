@@ -539,6 +539,8 @@ exclude_re = [
     # ack -> Ok(())               ⇒ roast_pg_cdc_crash_between_checkpoint_and_ack_re_reads_and_releases_the_slot FAILS
     "replace PgChangeStream::release_empty_frontier with \\(\\)$",
     "replace <impl ChangeStream for PgChangeStream>::ack -> Result<\\(\\)> with Ok\\(\\(\\)\\)$",
+    # 2026-11-17 text_rows runs a catalog query on a live Client; witness: live_pg_catalog_rows_are_the_servers_text_cells.
+    "replace <impl CatalogRows for Client>::text_rows -> Result<Vec<Vec<Option<String>>>> with Ok\\(vec!\\[",
     # 2026-10-31 #728: `note_statement` only sets `in_transaction` and `grants_pending`, both live-only; the live_cdc_column_grants:: cells kill its stub.
     "replace MysqlChangeStream::note_statement with \\(\\)",
     # 2026-11-18 readable_columns: live catalog read; witness live_cdc_column_grants::a_column_grant_account_delivers_no_hidden_column_by_name_or_value_mysql (RED in the 2026-11-15 stub run).

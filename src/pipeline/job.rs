@@ -113,6 +113,7 @@ fn capture_open_forensics(
     summary.server_context_json = src.server_context();
     match crate::preflight::type_report::probe_mappings(
         src,
+        false,
         &plan.base_query,
         &plan.column_overrides,
     ) {
