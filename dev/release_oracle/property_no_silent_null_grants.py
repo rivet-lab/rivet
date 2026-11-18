@@ -121,7 +121,7 @@ def grade_columns(cols: list[nsn.Col], granted: set[str], got: dict, n_rows: int
                     missing += 1
                     continue
                 lit = literal(c, i, n_rows)
-                v = nsn.compare("mysql", lit, c.family, "none", row[c.name])
+                v = nsn.compare("mysql", lit, c.family, "none", row[c.name], False, c.native)
                 if nsn.is_zero_date_null("mysql", lit, v):
                     zeros += 1
                 elif v == nsn.NULLED:
@@ -287,6 +287,10 @@ def self_test() -> None:
     assert [r.klass for r in grade_columns([day], {"d"}, zero, 2, {"snapshot": {"d": 1}, "stream": {"d": 1}})] == ["", ""], "a zero date under its WARN is by design"
     assert [r.klass for r in grade_columns([day], {"d"}, zero, 2, {"snapshot": {"d": 1}, "stream": {}}) if r.klass] == [nsn.NULLED], "a zero date without its WARN is SILENT_NULL"
     assert [r.klass for r in grade_columns([day], {"d"}, zero, 2, {"snapshot": {"d": 2}, "stream": {"d": 1}})] == [nsn.NULLED, ""], "a WARN that counts another number is SILENT_NULL"
+    stamp = nsn.Col("t", "TIMESTAMP NULL", "Timestamp", "other", ("'2035-08-07 09:08:07'",))
+    at = lambda v: {leg: ({"t"}, {base + 1: {"t": v}, base + 2: {"t": None}}) for leg, base in (("snapshot", 0), ("stream", STREAM_OFFSET))}
+    assert [r.klass for r in grade_columns([stamp], {"t"}, at("2035-08-07 09:08:07+00"), 2, {})] == ["", ""], "a UTC instant is the same instant as its source timestamp"
+    assert [r.klass for r in grade_columns([stamp], {"t"}, at("2035-08-07 09:08:08+00"), 2, {}) if r.klass] == [nsn.WRONG] * 2, "another instant is WRONG_VALUE"
     split = nsn.Result("c", nsn.REFUSED, nsn.SPLIT, "check exit 0, run exit 5 [RIVET_SOURCE_CDC_UNDECODABLE]", "RIVET_SOURCE_CDC_UNDECODABLE")
     assert log_refusal(split).klass == "" and log_refusal(split).verdict == nsn.REFUSED
     assert log_refusal(nsn.Result("c", nsn.REFUSED, nsn.UNCODED, "x")).klass == nsn.UNCODED, "an uncoded stop after a grant change stays red"
