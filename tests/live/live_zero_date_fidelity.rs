@@ -12,10 +12,6 @@ const ROWS: &str = "(1, '0000-00-00', '0000-00-00 00:00:00', '0000-00-00 00:00:0
 
 const COUNTED: &str = "d=2, dt=2, ts=1";
 
-fn readback_only(rig: Rig) -> Rig {
-    rig.no_oracle("the subject is the metadata and the counts a MySQL zero-date run reports")
-}
-
 fn seeded_table() -> (String, MysqlTable) {
     use mysql::prelude::Queryable;
     let table = unique_name("zdf_my");
@@ -73,7 +69,7 @@ fn text(o: &std::process::Output) -> String {
 fn zero_dates_are_labelled_compatible_batch_mysql() {
     require_alive(LiveService::Mysql);
     let (table, _guard) = seeded_table();
-    let rig = readback_only(Rig::mysql_batch(&table));
+    let rig = Rig::mysql_batch(&table);
     rig.run_ok();
     assert_fidelity(&rig.out_dir());
     let delivered = dir_parquet_display(&rig.out_dir(), "d");
@@ -90,7 +86,7 @@ fn zero_dates_are_labelled_compatible_batch_mysql() {
 fn zero_dates_are_counted_by_validate_and_reconcile_batch_mysql() {
     require_alive(LiveService::Mysql);
     let (table, _guard) = seeded_table();
-    let rig = readback_only(Rig::mysql_batch(&table));
+    let rig = Rig::mysql_batch(&table);
     let run = rig.run_args(&["--reconcile"]);
     assert!(run.status.success(), "{}", text(&run));
     let reconcile_row = text(&run)
@@ -123,7 +119,7 @@ fn zero_dates_are_counted_by_validate_cdc_mysql() {
 }
 
 fn cdc_zero_dates() -> CdcScenario {
-    let mut sc = CdcScenario::mysql_with("zdf_cdc", DDL, |r, _| readback_only(r));
+    let mut sc = CdcScenario::mysql_with("zdf_cdc", DDL, |r, _| r);
     sc.rig.run_ok();
     let t = sc.table.clone();
     sc.sql("SET SESSION sql_mode=''");
@@ -147,7 +143,7 @@ fn a_clean_temporal_column_is_delivered_and_validated_without_a_count_mysql() {
         "INSERT INTO {table} VALUES (1, '2024-03-15', '2024-03-15 12:00:00', '2024-03-15 12:00:00', '10:00:00', 1)"
     ))
     .unwrap();
-    let rig = readback_only(Rig::mysql_batch(&table));
+    let rig = Rig::mysql_batch(&table);
     let run = rig.run_args(&["--reconcile"]);
     assert!(run.status.success(), "{}", text(&run));
     assert!(
