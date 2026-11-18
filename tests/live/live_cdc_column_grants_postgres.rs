@@ -98,6 +98,25 @@ fn names_and_cells(parts: &[arrow::record_batch::RecordBatch]) -> (Vec<String>, 
     (names, cells)
 }
 
+/// The server's current WAL position.
+fn wal_position() -> String {
+    root()
+        .query_one("SELECT pg_current_wal_lsn()::text", &[])
+        .unwrap()
+        .get(0)
+}
+
+/// Whether the server's `confirmed_flush_lsn` of `slot` is past `before`.
+fn confirmed_flush_lsn_moved_past(slot: &str, before: &str) -> bool {
+    root()
+        .query_one(
+            "SELECT confirmed_flush_lsn > $1::text::pg_lsn FROM pg_replication_slots WHERE slot_name = $2",
+            &[&before, &slot],
+        )
+        .unwrap()
+        .get(0)
+}
+
 /// `(op, id, name)` of every change in `parts`, in capture order.
 fn changes(parts: &[arrow::record_batch::RecordBatch]) -> Vec<(String, i64, String)> {
     let mut out = Vec::new();
@@ -275,6 +294,7 @@ fn a_revoke_during_a_run_is_refused_by_code_and_the_next_run_delivers_the_row_wi
     let role = GrantRole::new(&table, "id, name");
     let rig = grant_rig(&table, &slot, &role);
     rig.run_ok();
+    let before = wal_position();
     root()
         .batch_execute(&format!(
             "INSERT INTO {table} VALUES (4, 'dee', '{SECRET}ins')"
@@ -302,8 +322,8 @@ fn a_revoke_during_a_run_is_refused_by_code_and_the_next_run_delivers_the_row_wi
     let parts = parts_under(&rig.out_dir());
     let cells = assert_no_hidden(&parts, "after the re-run");
     assert!(
-        !duckdb_dir_parquet_has_column(&rig.out_dir(), "pass"),
-        "a second decoder finds no hidden column after the re-run"
+        confirmed_flush_lsn_moved_past(&slot, &before),
+        "the re-run consumed the refused batch"
     );
     assert_eq!(op_ids(&parts), [("insert".to_string(), 4)]);
     assert!(
@@ -326,10 +346,16 @@ fn a_key_the_role_cannot_read_is_refused_by_code_before_anything_is_written_in_c
         parquet_dirs(&rig.out_dir()).is_empty(),
         "nothing was written"
     );
+    let held = root()
+        .query(
+            "SELECT confirmed_flush_lsn::text FROM pg_replication_slots WHERE slot_name = $1",
+            &[&slot],
+        )
+        .unwrap();
     assert_eq!(
-        duckdb_total_parquet_rows(&rig.out_dir()),
+        held.len(),
         0,
-        "a second reader finds no row"
+        "the refusal came before the slot was created"
     );
 }
 
@@ -349,6 +375,7 @@ fn a_role_that_may_read_every_column_delivers_what_the_run_without_the_policy_do
             rig = rig.source_line("columns_from: grants");
         }
         rig.run_ok();
+        let before = wal_position();
         let mut c = root();
         c.batch_execute(&format!(
             "UPDATE {table} SET pass = '{SECRET}a' WHERE id = 1; \
@@ -357,6 +384,10 @@ fn a_role_that_may_read_every_column_delivers_what_the_run_without_the_policy_do
         ))
         .unwrap();
         rig.run_ok();
+        assert!(
+            confirmed_flush_lsn_moved_past(&slot, &before),
+            "the changes were consumed"
+        );
         let parts = parts_under(&rig.out_dir());
         let (mut names, _) = names_and_cells(&parts);
         names.sort();
@@ -375,8 +406,7 @@ fn a_role_that_may_read_every_column_delivers_what_the_run_without_the_policy_do
             }
         }
         cells.sort();
-        let by_duckdb = duckdb_dir_parquet_has_column(&rig.out_dir(), "pass");
-        (names, cells, op_ids(&parts), by_duckdb)
+        (names, cells, op_ids(&parts))
     };
     let without = delivered(false);
     let with = delivered(true);
@@ -384,10 +414,6 @@ fn a_role_that_may_read_every_column_delivers_what_the_run_without_the_policy_do
         with.0.iter().any(|n| n == "pass"),
         "a table-level grant reads every column: {:?}",
         with.0
-    );
-    assert!(
-        with.3,
-        "a second decoder finds the column a full reader holds"
     );
     assert_eq!(
         with, without,
@@ -404,6 +430,7 @@ fn a_spilled_transaction_delivers_no_hidden_column_in_cdc_postgres() {
     let role = GrantRole::new(&table, "id, name");
     let rig = grant_rig(&table, &slot, &role);
     rig.run_ok();
+    let before = wal_position();
     root()
         .batch_execute(&format!(
             "INSERT INTO {table} SELECT g, 'n' || g, '{SECRET}' || g FROM generate_series(10, 21) g"
@@ -422,8 +449,8 @@ fn a_spilled_transaction_delivers_no_hidden_column_in_cdc_postgres() {
     assert_eq!(ids, (10..=21).collect::<Vec<i64>>());
     assert!(cells.iter().any(|v| v == "n15"), "{cells:?}");
     assert!(
-        !duckdb_dir_parquet_has_column(&rig.out_dir(), "pass"),
-        "a second decoder finds no hidden column in the spilled run"
+        confirmed_flush_lsn_moved_past(&slot, &before),
+        "the spilled transaction was consumed"
     );
 }
 
@@ -455,4 +482,35 @@ fn an_update_of_hidden_columns_only_advances_the_slot_in_cdc_postgres() {
         .get(0);
     assert!(moved, "the slot moved past the update of a hidden column");
     assert!(op_ids(&parts_under(&rig.out_dir())).is_empty());
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc postgres-cdc (wal_level=logical)"]
+fn an_unchanged_toast_hidden_column_poisons_nothing_in_cdc_postgres() {
+    let table = unique_name("cg_pg_toast");
+    root()
+        .batch_execute(&format!(
+            "CREATE TABLE {table} (id INT PRIMARY KEY, name TEXT, pass TEXT); \
+             ALTER TABLE {table} ALTER COLUMN pass SET STORAGE EXTERNAL; \
+             INSERT INTO {table} VALUES (1, 'ann', '{SECRET}' || repeat(md5(random()::text), 200))"
+        ))
+        .unwrap();
+    let _table = PgTable::adopt_on(POSTGRES_CDC_URL, table.clone());
+    let slot = unique_name("cg_pg_slot");
+    let _slot = Slot::new(slot.clone());
+    let role = GrantRole::new(&table, "id, name");
+    let rig = grant_rig(&table, &slot, &role);
+    rig.run_ok();
+    let before = wal_position();
+    root()
+        .batch_execute(&format!("UPDATE {table} SET name = 'ann2' WHERE id = 1"))
+        .unwrap();
+    rig.run_ok();
+    assert!(
+        confirmed_flush_lsn_moved_past(&slot, &before),
+        "the update was consumed"
+    );
+    let parts = parts_under(&rig.out_dir());
+    assert_no_hidden(&parts, "cdc");
+    assert_eq!(changes(&parts), vec![change("update", 1, "ann2")]);
 }

@@ -4466,13 +4466,13 @@ seeds:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
   - name: column-grants-pg-stream-unprojected
-    class: "the PostgreSQL change stream under `columns_from: grants` keeps every column of a decoded row of a captured table: the hidden column is delivered by name and by value"
-    history: "issue #712 (2026-11-18); RED from this patch: the hidden column and its values are in the delivered parts"
+    class: "the PostgreSQL change stream under `columns_from: grants` keeps every column of a decoded row of a captured table: a hidden unchanged-TOAST column poisons a run that never reads it"
+    history: "issue #712 (2026-11-18); RED from this patch: an unchanged-TOAST hidden column poisons the run"
     scope: source
     engines:
       postgres:
         switch: column-grants-pg-stream-unprojected
-        cells: [a_column_grant_role_delivers_no_hidden_column_by_name_or_value_in_cdc_postgres, a_spilled_transaction_delivers_no_hidden_column_in_cdc_postgres]
+        cells: [a_column_grant_role_delivers_no_hidden_column_by_name_or_value_in_cdc_postgres, a_spilled_transaction_delivers_no_hidden_column_in_cdc_postgres, an_unchanged_toast_hidden_column_poisons_nothing_in_cdc_postgres]
       mysql:
         na: "a PostgreSQL mechanic (the test_decoding line parser and the slot batch read): MySQL projects binlog row images, graded by live_cdc_column_grants.rs"
       mssql:
