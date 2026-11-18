@@ -1821,4 +1821,46 @@ mod tests {
         write_ckpt(dir.path(), serde_json::json!({"idt": {"orders": [0, 2]}}));
         refuse_mixed_id_types(&config, &export, dir.path()).unwrap();
     }
+
+    /// A `mode: cdc` config of `source_type` at an unreachable `url`, with or without `columns_from: grants`.
+    fn grants_config(
+        source_type: &str,
+        grants: bool,
+    ) -> (crate::config::Config, crate::config::ExportConfig) {
+        let policy = if grants {
+            "  columns_from: grants\n"
+        } else {
+            ""
+        };
+        let yaml = format!(
+            "source:\n  type: {source_type}\n  url: \"{source_type}://u:p@127.0.0.1:1/app\"\n{policy}exports:\n  - name: o\n    \
+             table: orders\n    mode: cdc\n    format: parquet\n    cdc: {{ slot: s1, server_id: 5000, checkpoint: /tmp/o.ckpt }}\n    \
+             destination: {{ type: local, path: ./out }}\n"
+        );
+        let mut config = crate::config::Config::from_yaml(&yaml).unwrap();
+        let export = config.exports.remove(0);
+        (config, export)
+    }
+
+    /// Without `columns_from: grants` no grants are read and none are returned.
+    #[test]
+    fn no_grants_are_resolved_unless_the_source_asks_for_them() {
+        for engine in ["mysql", "oracle"] {
+            let (config, export) = grants_config(engine, false);
+            let grants = super::resolve_grants(&config, &export).unwrap();
+            assert!(grants.is_none(), "{engine}");
+        }
+    }
+
+    /// Under `columns_from: grants` the run reads the account's grants from the source and a source it cannot reach stops the run.
+    #[test]
+    fn grants_are_read_from_the_source_and_an_unreachable_one_stops_the_run() {
+        for engine in ["mysql", "oracle"] {
+            let (config, export) = grants_config(engine, true);
+            let err = super::resolve_grants(&config, &export)
+                .err()
+                .unwrap_or_else(|| panic!("{engine}: grants resolved without a source"));
+            assert!(!format!("{err:#}").is_empty(), "{engine}");
+        }
+    }
 }
