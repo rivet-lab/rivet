@@ -1011,6 +1011,18 @@ pub(crate) fn spill_dir_for(
     })
 }
 
+/// What a PostgreSQL stream finds already recorded for this run: a checkpoint or not.
+fn pg_prior_run(cfg: &CdcConfig) -> Result<PriorRun> {
+    let checkpoint = match cfg.checkpoint.as_deref() {
+        Some(p) => Position::load(p)?.is_some(),
+        None => false,
+    };
+    Ok(PriorRun {
+        checkpoint,
+        snapshot: false,
+    })
+}
+
 /// Construct the right [`ChangeStream`] adapter for the source URL's scheme.
 pub(crate) fn create_change_stream(
     cfg: &CdcConfig,
@@ -1054,13 +1066,7 @@ pub(crate) fn create_change_stream(
             configured_tables,
             resolved_grants,
         } => {
-            let prior = PriorRun {
-                checkpoint: match cfg.checkpoint.as_deref() {
-                    Some(p) => Position::load(p)?.is_some(),
-                    None => false,
-                },
-                snapshot: false,
-            };
+            let prior = pg_prior_run(cfg)?;
             Ok(Box::new(
                 crate::source::postgres::cdc::PgChangeStream::open(
                     url,

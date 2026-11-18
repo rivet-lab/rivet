@@ -301,6 +301,10 @@ fn a_revoke_during_a_run_is_refused_by_code_and_the_next_run_delivers_the_row_wi
     rig.run_ok();
     let parts = parts_under(&rig.out_dir());
     let cells = assert_no_hidden(&parts, "after the re-run");
+    assert!(
+        !duckdb_dir_parquet_has_column(&rig.out_dir(), "pass"),
+        "a second decoder finds no hidden column after the re-run"
+    );
     assert_eq!(op_ids(&parts), [("insert".to_string(), 4)]);
     assert!(
         !cells.iter().any(|v| v == "dee"),
@@ -321,6 +325,11 @@ fn a_key_the_role_cannot_read_is_refused_by_code_before_anything_is_written_in_c
     assert!(
         parquet_dirs(&rig.out_dir()).is_empty(),
         "nothing was written"
+    );
+    assert_eq!(
+        duckdb_total_parquet_rows(&rig.out_dir()),
+        0,
+        "a second reader finds no row"
     );
 }
 
@@ -366,7 +375,8 @@ fn a_role_that_may_read_every_column_delivers_what_the_run_without_the_policy_do
             }
         }
         cells.sort();
-        (names, cells, op_ids(&parts))
+        let by_duckdb = duckdb_dir_parquet_has_column(&rig.out_dir(), "pass");
+        (names, cells, op_ids(&parts), by_duckdb)
     };
     let without = delivered(false);
     let with = delivered(true);
@@ -374,6 +384,10 @@ fn a_role_that_may_read_every_column_delivers_what_the_run_without_the_policy_do
         with.0.iter().any(|n| n == "pass"),
         "a table-level grant reads every column: {:?}",
         with.0
+    );
+    assert!(
+        with.3,
+        "a second decoder finds the column a full reader holds"
     );
     assert_eq!(
         with, without,
@@ -407,6 +421,10 @@ fn a_spilled_transaction_delivers_no_hidden_column_in_cdc_postgres() {
     let ids: Vec<i64> = op_ids(&parts).into_iter().map(|(_, id)| id).collect();
     assert_eq!(ids, (10..=21).collect::<Vec<i64>>());
     assert!(cells.iter().any(|v| v == "n15"), "{cells:?}");
+    assert!(
+        !duckdb_dir_parquet_has_column(&rig.out_dir(), "pass"),
+        "a second decoder finds no hidden column in the spilled run"
+    );
 }
 
 #[test]
