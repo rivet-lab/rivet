@@ -569,7 +569,7 @@ pub(crate) fn recommend_parallelism(
         return match export.parallel {
             n if n > 1 => (
                 n as u32,
-                "keyset fans row-percentile-range workers — each seeks a disjoint slice",
+                "keyset fans key-range workers — each seeks a disjoint slice",
             ),
             _ => (
                 1,
@@ -1774,7 +1774,7 @@ mod tests {
             level, 4,
             "keyset must honour the configured parallel: {reason}"
         );
-        assert!(reason.contains("row-percentile"), "got: {reason}");
+        assert!(reason.contains("key-range workers"), "got: {reason}");
     }
 
     #[test]

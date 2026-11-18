@@ -3,6 +3,12 @@
 #![allow(dead_code)]
 
 use crate::error::Result;
+use crate::source::cdc::tx_buffer::{SpooledTail, TxBuffer, replay};
+
+/// An LSN as PostgreSQL prints it (`X/X`, hex halves).
+fn lsn_text(lsn: u64) -> String {
+    format!("{:X}/{:X}", lsn >> 32, lsn & 0xFFFF_FFFF)
+}
 
 /// One cell of a row image.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,7 +65,7 @@ pub(crate) enum Message {
     Truncate {
         relation_ids: Vec<u32>,
     },
-    /// A logical message — `pg_logical_emit_message()`.
+    /// A logical message — `pg_logical_emit_message()`; read with `messages=true`, a non-transactional one only once flushed.
     Logical {
         transactional: bool,
         prefix: String,
@@ -430,13 +436,14 @@ fn merge_unchanged_toast(after: &[Cell], before: Option<&[Cell]>) -> Vec<Cell> {
 }
 
 /// Assembles [`Message`]s into [`ChangeEvent`]s, holding the relation cache the protocol requires.
-#[derive(Default)]
 pub(crate) struct Assembler {
     relations: std::collections::HashMap<u32, RelationInfo>,
-    /// Rows of the transaction currently open, held until its `Commit`.
-    open: Vec<PendingRow>,
+    /// The open transaction's events: in memory to the cap, then on disk, until its `Commit`.
+    tx: TxBuffer,
     /// A refusal inside the CURRENT transaction poisons the rest of it.
     poisoned: Option<(crate::error::Code, String)>,
+    /// The open transaction's commit LSN as text, for the spill log lines.
+    at: String,
 }
 
 struct RelationInfo {
@@ -447,21 +454,56 @@ struct RelationInfo {
     names: std::sync::Arc<[String]>,
 }
 
-struct PendingRow {
-    op: crate::source::cdc::ChangeOp,
-    relation_id: u32,
-    before: Option<Vec<crate::source::cdc::value::RivetValue>>,
-    after: Option<Vec<crate::source::cdc::value::RivetValue>>,
+/// A committed transaction: its in-memory head, then a tail on disk when it crossed the cap.
+pub(crate) struct Closed {
+    pub head: Vec<crate::source::cdc::ChangeEvent>,
+    pub tail: Option<SpooledTail>,
+}
+
+impl std::fmt::Debug for Closed {
+    /// The head's length and whether a spilled tail follows, never the rows.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Closed {{ head: {} event(s), spilled: {} }}",
+            self.head.len(),
+            self.tail.is_some()
+        )
+    }
+}
+
+impl Default for Assembler {
+    /// An assembler with no spill directory: a transaction past the cap is refused.
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+/// The next event of a spilled tail, decoded; `None` once the tail is done.
+pub(crate) fn next_spooled(
+    tail: &mut Option<SpooledTail>,
+) -> Result<Option<crate::source::cdc::ChangeEvent>> {
+    replay(tail, crate::source::cdc::spill::decode_event)
 }
 
 impl Assembler {
-    /// Feed one message.
-    pub(crate) fn push(&mut self, msg: Message) -> Result<Vec<crate::source::cdc::ChangeEvent>> {
+    /// An assembler whose oversized transactions spill under `spill_dir` (`None` refuses them).
+    pub(crate) fn new(spill_dir: Option<std::path::PathBuf>) -> Self {
+        Self {
+            relations: std::collections::HashMap::new(),
+            tx: TxBuffer::new(crate::source::cdc::CdcEngine::Postgres, spill_dir),
+            poisoned: None,
+            at: String::new(),
+        }
+    }
+
+    /// Feed one message. Returns the transaction when it COMMITS, and `None` before then.
+    pub(crate) fn push(&mut self, msg: Message) -> Result<Option<Closed>> {
         if let Some((code, why)) = self.poisoned.clone()
             && !matches!(msg, Message::Begin { .. })
         {
             if matches!(msg, Message::Commit { .. }) {
-                self.open.clear();
+                self.tx.clear();
             }
             crate::rivet_bail!(code, "{why}");
         }
@@ -471,25 +513,26 @@ impl Assembler {
                 crate::error::code_of(e).unwrap_or(crate::error::codes::INTERNAL_SOURCE_INVARIANT),
                 format!("{e:#}"),
             ));
-            self.open.clear();
+            self.tx.clear();
         }
         out
     }
 
-    fn push_inner(&mut self, msg: Message) -> Result<Vec<crate::source::cdc::ChangeEvent>> {
+    fn push_inner(&mut self, msg: Message) -> Result<Option<Closed>> {
         use crate::source::cdc::ChangeOp;
         match msg {
-            Message::Begin { .. } => {
+            Message::Begin { final_lsn, .. } => {
                 self.poisoned = None;
-                if !self.open.is_empty() {
+                let open = self.tx.head().len() + self.tx.spilled_rows().unwrap_or(0);
+                if open != 0 {
                     crate::rivet_bail!(
                         crate::error::codes::INTERNAL_SOURCE_INVARIANT,
-                        "pgoutput: BEGIN with {} row(s) still open from an uncommitted \
-                         transaction — refusing rather than shipping a partial one",
-                        self.open.len()
+                        "pgoutput: BEGIN with {open} row(s) still open from an uncommitted \
+                         transaction — refusing rather than shipping a partial one"
                     );
                 }
-                Ok(Vec::new())
+                self.at = lsn_text(final_lsn);
+                Ok(None)
             }
             Message::Relation {
                 relation_id,
@@ -508,17 +551,11 @@ impl Assembler {
                         names,
                     },
                 );
-                Ok(Vec::new())
+                Ok(None)
             }
             Message::Insert { relation_id, after } => {
                 let after = self.decode_tuple(relation_id, &after)?;
-                self.open.push(PendingRow {
-                    op: ChangeOp::Insert,
-                    relation_id,
-                    before: None,
-                    after: Some(after),
-                });
-                Ok(Vec::new())
+                self.buffer(ChangeOp::Insert, relation_id, None, Some(after))
             }
             Message::Update {
                 relation_id,
@@ -531,28 +568,16 @@ impl Assembler {
                     .map(|t| self.decode_tuple(relation_id, t))
                     .transpose()?;
                 let after = self.decode_tuple(relation_id, &after)?;
-                self.open.push(PendingRow {
-                    op: ChangeOp::Update,
-                    relation_id,
-                    before,
-                    after: Some(after),
-                });
-                Ok(Vec::new())
+                self.buffer(ChangeOp::Update, relation_id, before, Some(after))
             }
             Message::Delete {
                 relation_id,
                 before,
             } => {
                 let before = self.decode_tuple(relation_id, &before)?;
-                self.open.push(PendingRow {
-                    op: ChangeOp::Delete,
-                    relation_id,
-                    before: Some(before),
-                    after: None,
-                });
-                Ok(Vec::new())
+                self.buffer(ChangeOp::Delete, relation_id, Some(before), None)
             }
-            Message::Commit { commit_lsn, .. } => Ok(self.close(commit_lsn)),
+            Message::Commit { commit_lsn, .. } => self.close(commit_lsn).map(Some),
             Message::Truncate { relation_ids } => {
                 let named: Vec<String> = relation_ids
                     .iter()
@@ -571,38 +596,50 @@ impl Assembler {
                     crate::source::cdc::checkpoint_identity::RECOVER
                 )))
             }
-            Message::Logical { .. } | Message::Other(_) => Ok(Vec::new()),
+            Message::Logical { .. } | Message::Other(_) => Ok(None),
         }
     }
 
-    /// Close the open transaction, stamping the commit position on every row and `committed` on the LAST one only.
-    fn close(&mut self, commit_lsn: u64) -> Vec<crate::source::cdc::ChangeEvent> {
-        let position = crate::source::cdc::Position::new(serde_json::json!({
-            "lsn": format!("{:X}/{:X}", commit_lsn >> 32, commit_lsn & 0xFFFF_FFFF)
-        }));
-        let rows: Vec<PendingRow> = std::mem::take(&mut self.open);
-        let last = rows.len().saturating_sub(1);
-        rows.into_iter()
-            .enumerate()
-            .map(|(i, r)| {
-                let rel = self.relations.get(&r.relation_id);
-                crate::source::cdc::ChangeEvent {
-                    op: r.op,
-                    schema: rel.map_or_else(String::new, |x| x.schema.clone()),
-                    table: rel.map_or_else(String::new, |x| x.table.clone()),
-                    before: r.before,
-                    after: r.after,
-                    position: position.clone(),
-                    committed: i == last,
-                    image_names: rel.map(|x| x.names.clone()),
-                    seq: 0,
-                    poison: None,
-                    row_id: None,
-                    before_names: None,
-                    before_poison: None,
-                }
-            })
-            .collect()
+    /// Decode-time event of the open transaction: the relation in force NOW names it, so a relation re-sent mid-transaction cannot rename a spilled row.
+    fn buffer(
+        &mut self,
+        op: crate::source::cdc::ChangeOp,
+        relation_id: u32,
+        before: Option<Vec<crate::source::cdc::value::RivetValue>>,
+        after: Option<Vec<crate::source::cdc::value::RivetValue>>,
+    ) -> Result<Option<Closed>> {
+        let rel = self.relations.get(&relation_id).ok_or_else(|| {
+            crate::error::coded(
+                crate::error::codes::INTERNAL_SOURCE_INVARIANT,
+                format!("pgoutput: relation {relation_id} vanished between decode and buffer"),
+            )
+        })?;
+        let ev = crate::source::cdc::ChangeEvent {
+            op,
+            schema: rel.schema.clone(),
+            table: rel.table.clone(),
+            before,
+            after,
+            position: crate::source::cdc::Position::new(serde_json::Value::Null),
+            committed: false,
+            image_names: Some(rel.names.clone()),
+            seq: 0,
+            poison: None,
+            row_id: None,
+            before_names: None,
+            before_poison: None,
+        };
+        self.tx
+            .push(ev, crate::source::cdc::spill::encode_event, &self.at)?;
+        Ok(None)
+    }
+
+    /// Close the open transaction at `commit_lsn`: the position on every row, `committed` on the LAST only (on disk when it spilled).
+    fn close(&mut self, commit_lsn: u64) -> Result<Closed> {
+        let text = lsn_text(commit_lsn);
+        let position = crate::source::cdc::Position::new(serde_json::json!({ "lsn": text }));
+        let (head, tail) = self.tx.close_transaction(&position, &text)?;
+        Ok(Closed { head, tail })
     }
 
     fn decode_tuple(
@@ -662,6 +699,18 @@ impl Assembler {
 
 #[cfg(test)]
 mod tests {
+    /// Every event of a closed transaction in order, the spilled tail replayed after the head.
+    fn events(closed: Option<Closed>) -> Vec<crate::source::cdc::ChangeEvent> {
+        let Some(Closed { head, mut tail }) = closed else {
+            return Vec::new();
+        };
+        let mut out = head;
+        while let Some(ev) = next_spooled(&mut tail).expect("replay") {
+            out.push(ev);
+        }
+        out
+    }
+
     use super::*;
 
     /// Real bytes from a real server, not a hand-built fixture.
@@ -1083,7 +1132,7 @@ mod tests {
         );
     }
 
-    /// The transaction framing, from the same real capture.
+    /// A transaction yields nothing until its commit, and `committed` marks only its last event.
     #[test]
     fn a_transaction_yields_nothing_until_its_commit_and_marks_only_its_last_event() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1106,9 +1155,9 @@ mod tests {
         for m in msgs {
             let is_commit = matches!(m, Message::Commit { .. });
             match a.push(m) {
-                Ok(out) if is_commit => yielded.push(out),
+                Ok(out) if is_commit => yielded.push(events(out)),
                 Ok(out) => assert!(
-                    out.is_empty(),
+                    out.is_none(),
                     "nothing may be yielded before the COMMIT — an event released \
                      early cannot carry the transaction's own commit position"
                 ),
@@ -1172,6 +1221,135 @@ mod tests {
         );
     }
 
+    fn assembler_capped_at(
+        spill_dir: Option<std::path::PathBuf>,
+        caps: (usize, usize),
+    ) -> Assembler {
+        Assembler {
+            tx: TxBuffer::with_caps(crate::source::cdc::CdcEngine::Postgres, spill_dir, caps),
+            ..Assembler::new(None)
+        }
+    }
+
+    fn rel_msg(names: &[&str]) -> Message {
+        Message::Relation {
+            relation_id: 1,
+            namespace: "public".into(),
+            name: "t".into(),
+            columns: names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| Column {
+                    name: n.to_string(),
+                    type_oid: if i == 0 { 20 } else { 25 },
+                    type_modifier: -1,
+                    is_key: i == 0,
+                })
+                .collect(),
+        }
+    }
+
+    fn row_msg(id: i64, text: &str) -> Message {
+        Message::Insert {
+            relation_id: 1,
+            after: vec![
+                Cell::Binary(id.to_be_bytes().to_vec()),
+                Cell::Binary(text.as_bytes().to_vec()),
+            ],
+        }
+    }
+
+    /// A transaction past the cap spills, replays in order, and keeps each row's own relation across a mid-transaction re-send.
+    #[test]
+    fn a_spilled_transaction_replays_in_order_under_the_relation_each_row_arrived_with() {
+        let d = tempfile::tempdir().expect("dir");
+        let mut a = assembler_capped_at(Some(d.path().to_path_buf()), (2, usize::MAX));
+        a.push(rel_msg(&["id", "name"])).expect("relation");
+        a.push(Message::Begin {
+            final_lsn: 0x1_0000_00A0,
+            xid: 7,
+        })
+        .expect("begin");
+        a.push(row_msg(1, "a")).expect("row 1");
+        a.push(row_msg(2, "b")).expect("row 2");
+        a.push(rel_msg(&["id", "renamed"]))
+            .expect("relation re-sent");
+        a.push(row_msg(3, "c")).expect("row 3");
+        a.push(row_msg(4, "d")).expect("row 4");
+        let closed = a
+            .push(Message::Commit {
+                commit_lsn: 0x1_0000_00A0,
+                end_lsn: 0x1_0000_00B0,
+            })
+            .expect("commit");
+        assert!(
+            closed.as_ref().is_some_and(|c| c.tail.is_some()),
+            "four rows at a cap of two must spill: {closed:?}"
+        );
+        let got = events(closed);
+        let seen: Vec<(i64, String, bool, String)> = got
+            .iter()
+            .map(|e| {
+                let id = match e.after.as_ref().and_then(|v| v.first()) {
+                    Some(crate::source::cdc::value::RivetValue::Int(i)) => *i,
+                    other => panic!("id cell: {other:?}"),
+                };
+                (
+                    id,
+                    e.image_names.as_ref().expect("names")[1].clone(),
+                    e.committed,
+                    format!("{:?}", e.position),
+                )
+            })
+            .collect();
+        let pos = format!("{:?}", got[0].position);
+        assert!(pos.contains("1/A0"), "{pos}");
+        assert_eq!(
+            seen,
+            vec![
+                (1, "name".to_string(), false, pos.clone()),
+                (2, "name".to_string(), false, pos.clone()),
+                (3, "renamed".to_string(), false, pos.clone()),
+                (4, "renamed".to_string(), true, pos),
+            ]
+        );
+    }
+
+    /// Past the cap with no spill directory the transaction is refused naming the cap, and the next one assembles.
+    #[test]
+    fn a_transaction_past_the_cap_without_a_spill_dir_is_refused_then_the_next_assembles() {
+        let mut a = assembler_capped_at(None, (1, usize::MAX));
+        a.push(rel_msg(&["id", "name"])).expect("relation");
+        a.push(Message::Begin {
+            final_lsn: 1,
+            xid: 1,
+        })
+        .expect("begin");
+        a.push(row_msg(1, "a")).expect("row 1");
+        let err = a.push(row_msg(2, "b")).expect_err("past the cap");
+        assert!(format!("{err:#}").contains("more than 1 rows"), "{err:#}");
+        a.push(Message::Commit {
+            commit_lsn: 1,
+            end_lsn: 1,
+        })
+        .expect_err("a poisoned transaction refuses its commit");
+        a.push(Message::Begin {
+            final_lsn: 2,
+            xid: 2,
+        })
+        .expect("begin");
+        a.push(row_msg(3, "c")).expect("row");
+        let got = events(
+            a.push(Message::Commit {
+                commit_lsn: 2,
+                end_lsn: 2,
+            })
+            .expect("commit"),
+        );
+        assert_eq!(got.len(), 1);
+        assert!(got[0].committed);
+    }
+
     /// The relation cache is REQUIRED by the protocol, and its absence is an error.
     #[test]
     fn a_row_before_its_relation_message_is_refused_not_guessed() {
@@ -1219,7 +1397,7 @@ mod tests {
         );
     }
 
-    /// The BARRIER: rivet's own logical message, and only rivet's.
+    /// A barrier is recognised by rivet's prefix and the run's nonce, and by nothing else.
     #[test]
     fn a_barrier_is_recognised_by_prefix_and_nonce_and_by_nothing_else() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1239,11 +1417,7 @@ mod tests {
         let barrier = msgs
             .iter()
             .find(|m| matches!(m, Message::Logical { .. }))
-            .expect(
-                "the capture must carry a barrier — it is emitted with \
-                 `messages=true` and `binary=true`, and MEASURED, either option \
-                 missing makes the tag vanish silently",
-            );
+            .expect("the capture must carry a barrier — it is emitted with `messages=true`");
         let Message::Logical {
             transactional,
             prefix,
@@ -1413,12 +1587,13 @@ mod tests {
             after: vec![id, Cell::ToastUnchanged],
         })
         .expect("a real pre-image value IS a recovery source");
-        let out = b
-            .push(Message::Commit {
+        let out = events(
+            b.push(Message::Commit {
                 commit_lsn: 16,
                 end_lsn: 16,
             })
-            .expect("commit");
+            .expect("commit"),
+        );
         assert_eq!(out.len(), 1);
         assert_eq!(
             out[0].after.as_ref().and_then(|v| v.get(1)),
@@ -1465,6 +1640,57 @@ mod tests {
             format!("{err:#}").contains("still open"),
             "dropping the open rows silently ships a partial transaction: {err:#}"
         );
+    }
+
+    /// A BEGIN over a spilled open transaction counts the rows on disk too, and a closed one prints its shape.
+    #[test]
+    fn a_begin_over_a_spilled_transaction_counts_every_open_row() {
+        let d = tempfile::tempdir().expect("dir");
+        let mut a = assembler_capped_at(Some(d.path().to_path_buf()), (2, usize::MAX));
+        a.push(rel_msg(&["id", "name"])).expect("relation");
+        a.push(Message::Begin {
+            final_lsn: 1,
+            xid: 1,
+        })
+        .expect("begin");
+        for i in 0..5 {
+            a.push(row_msg(i, "x")).expect("row");
+        }
+        let err = a
+            .push(Message::Begin {
+                final_lsn: 2,
+                xid: 2,
+            })
+            .expect_err("a second BEGIN with rows open must fail");
+        assert!(
+            format!("{err:#}").contains("BEGIN with 5 row(s) still open"),
+            "{err:#}"
+        );
+        let mut b = assembler_capped_at(Some(d.path().to_path_buf()), (2, usize::MAX));
+        b.push(rel_msg(&["id", "name"])).expect("relation");
+        b.push(Message::Begin {
+            final_lsn: 1,
+            xid: 1,
+        })
+        .expect("begin");
+        for i in 0..5 {
+            b.push(row_msg(i, "x")).expect("row");
+        }
+        let closed = b
+            .push(Message::Commit {
+                commit_lsn: 0x1_0000_0001,
+                end_lsn: 0x1_0000_0002,
+            })
+            .expect("commit")
+            .expect("closed");
+        assert_eq!(
+            format!("{closed:?}"),
+            format!(
+                "Closed {{ head: {} event(s), spilled: true }}",
+                closed.head.len()
+            )
+        );
+        assert!(!closed.head.is_empty());
     }
 
     /// Truncated input FAILS rather than returning a half-read message.
