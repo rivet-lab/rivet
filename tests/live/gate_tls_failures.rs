@@ -72,11 +72,11 @@ fn pg_cdc_tls_failure_is_not_buried_behind_the_setup_hint() {
     );
 }
 
-/// The TLS refusal naming the address dialled — batch and CDC share one dial, so both name it.
+/// The coded TLS refusal naming the address dialled — batch and CDC share one dial, so both name it.
 fn tls_verdict(at: &str) -> String {
     format!(
-        "TLS handshake with {at} failed — the server does not speak TLS or its certificate is \
-         not trusted: set `tls.ca_file` for a private CA, or `tls.mode: disable` if the server \
+        "[RIVET_SOURCE_CONNECT_FAILED] TLS handshake with {at} failed — the server does not speak \
+         TLS or its certificate is not trusted: set `tls.ca_file` for a private CA, or `tls.mode: disable` if the server \
          has no TLS (trusted networks only); retrying will not help"
     )
 }

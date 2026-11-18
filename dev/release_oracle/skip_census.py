@@ -36,6 +36,12 @@ def unexplained(skips: dict[str, str], lacking: list[str]) -> dict[str, str]:
 #: A CDC stream's first run is SKIP when it delivered nothing and PARTIAL when it delivered some (timing decides), so one ceiling counts both.
 FIRST_RUN = {"SKIP": "the stream's first run delivered nothing", "PARTIAL": "the stream's first graded run"}
 
+#: A `cdc.backfill` recipe's run is SKIP by design (tests/common/verify.rs): the recipe feeds the CDC export's stream, which the same test grades.
+BACKFILL = "a `cdc.backfill` recipe feeds its CDC export's stream"
+
+#: The verdicts that grade a run against the source or the stream.
+GRADED = ("PASS", "FAIL", "XFAIL", "PARTIAL")
+
 #: Per lane, per counter: (ceiling, noise). Noise is what rivet's clock moves between runs of one commit (the
 #: `cdc.backfill` SKIPs, `settle:` PARTIALs). The gate runs every live module (CI skips the warehouse, Mongo and
 #: exclusive ones), so only the first-run counter transfers to it. Measured on #433 (CI run 37108478817):
@@ -51,11 +57,12 @@ FIRST_RUN = {"SKIP": "the stream's first run delivered nothing", "PARTIAL": "the
 #: 12 of the new crash-then-grow cells, 4 `run_resume_over_deleted_tasks_*` off `open_defect_`. The 24 left are `settle:` runs:
 #: 20 counted on main and the 4 `incremental_adding_settle_*`, opted out (OFF) on main and graded now.
 #: 2026-10-29 (#719): skip 53 -> 59 (CI measured 56 on main): 3 column-grants cells grade nothing by design (2 backfill recipes whose stream carries the rows, 1 `time_window`); closes when the oracle reads a relative window.
+#: 2026-11-18 (nightly run 44227262825, 4 legs, skip 84): 42 of the 84 are `cdc.backfill` recipe runs, out of the counter and paired per test (`unpaired_backfills`); #1035 made every one-table MySQL/PostgreSQL CDC init scaffold a backfill recipe, so 20 tests carry them. 59 -> 42 is the rest: 14 skipped-export reruns, 12 empty-source runs, 10 `time_window`, 5 keyless CDC, 1 unset url_env.
 VERDICT_CEILINGS: dict[str, dict[str, tuple[int, int]]] = {
     "ci": {
         "first-run": (0,  # ratchet-pin: rig-oracle-first-run (review 2027-02-01)
                       0),
-        "skip": (59,  # ratchet-pin: rig-oracle-skip (review 2027-02-01)
+        "skip": (42,  # ratchet-pin: rig-oracle-skip (review 2027-02-01)
                  3),
         "partial": (24,  # ratchet-pin: rig-oracle-partial (review 2027-02-01)
                     3),
@@ -73,16 +80,14 @@ def verdict_counts(text: str) -> Counter:
     n: Counter = Counter(re.match(r"RIVET-ORACLE-([A-Z]+) ", l).group(1) for l in lines if re.match(r"RIVET-ORACLE-[A-Z]+ ", l))
     first = {v: sum(1 for l in lines if l.startswith(f"RIVET-ORACLE-{v} ") and why in l) for v, why in FIRST_RUN.items()}
     n["first-run"] = sum(first.values())
-    n["skip"], n["partial"] = n["SKIP"] - first["SKIP"], n["PARTIAL"] - first["PARTIAL"]
+    n["backfill"] = sum(1 for l in lines if l.startswith("RIVET-ORACLE-SKIP ") and BACKFILL in l)
+    n["skip"], n["partial"] = n["SKIP"] - first["SKIP"] - n["backfill"], n["PARTIAL"] - first["PARTIAL"]
     n["deferred"] = n["DEFERRED"]
     return n
 
 
 #: Reads repeated in one lane after the reader crashed in native code (tests/common/verify.rs); more means the reader is broken, not unlucky.
 RERUN_CEILING = 3  # ratchet-pin: rig-oracle-rerun (review 2027-02-01)
-
-#: The verdicts that grade a deferred run's remainder: the stream's next run compared with the source.
-GRADED = ("PASS", "FAIL", "XFAIL", "PARTIAL")
 
 #: What a known defect of a run that did not exit 0 says (tests/common/refusal.rs): it compares no source, so it pays no deferral.
 REFUSAL_XFAIL = " — [a failed run left: "
@@ -105,6 +110,20 @@ def unpaid_deferrals(text: str) -> list[str]:
     return out
 
 
+def unpaired_backfills(text: str) -> list[str]:
+    """Every `cdc.backfill` SKIP whose test graded no other export: a recipe that feeds a stream nothing read back."""
+    graded: dict[str, set[str]] = {}
+    out = []
+    rows = [re.match(r"RIVET-ORACLE-([A-Z]+) (\S+) \[(.*?)\] — (.*)", l) for l in text.splitlines()]
+    for m in filter(None, rows):
+        if m.group(1) in GRADED:
+            graded.setdefault(m.group(2), set()).add(m.group(3))
+    for m in filter(None, rows):
+        if m.group(1) == "SKIP" and BACKFILL in m.group(4) and not graded.get(m.group(2), set()) - {m.group(3)}:
+            out.append(f"{m.group(2)} [{m.group(3)}]: a backfill recipe fed a stream and no other export of the test was graded")
+    return out
+
+
 def verdict_reasons(text: str) -> Counter:
     """SKIP/PARTIAL/OFF lines per reason, numbers folded to N."""
     out: Counter = Counter()
@@ -124,7 +143,7 @@ def verdict_errors(text: str, lane: str) -> list[str]:
     n = verdict_counts(text)
     if not n["PASS"]:
         return ["the rig oracle logged no PASS verdict"]
-    errs = unpaid_deferrals(text)
+    errs = unpaid_deferrals(text) + unpaired_backfills(text)
     if n["RERUN"] > RERUN_CEILING:
         errs.append(f"{n['RERUN']} RERUN verdicts, ceiling {RERUN_CEILING}: the oracle's reader crashes too often to call it chance")
     for what, (ceiling, noise) in VERDICT_CEILINGS[lane].items():
@@ -140,6 +159,7 @@ def verdict_report(text: str, lane: str) -> list[str]:
     """The counts a lane's census prints: per class, per reason, and each banded counter against its ceiling."""
     n = verdict_counts(text)
     out = [f"{v} {n[v]}" for v in ("PASS", "PARTIAL", "DEFERRED", "XFAIL", "SKIP", "OFF", "REFUSED", "UNGRADED", "RERUN", "FAIL")]
+    out += [f"backfill SKIPs paired with a graded stream: {n['backfill']}"]
     out += ["per reason (numbers folded to N):"] + [f"{c:7d} {r}" for r, c in verdict_reasons(text).most_common()]
     out += [f"{what}: {n[what]} (ceiling {c} +-{z})" for what, (c, z) in VERDICT_CEILINGS[lane].items()]
     return out
@@ -217,6 +237,13 @@ def _verdict_self_test() -> None:
         errs = verdict_errors(log + extra * (noise + 1), lane)
         assert len(errs) == 1 and "first-run" in errs[0] and "no longer graded" in errs[0], (lane, errs)
         assert verdict_errors("", lane) and verdict_errors(log.replace("PASS", "OFF"), lane)
+    fed = f"RIVET-ORACLE-SKIP live_x::bf [recipe] — grade 2 ms: {BACKFILL}, not its own destination\n"
+    stream = "RIVET-ORACLE-PASS live_x::bf [recipe_cdc] — grade 9 ms: ok\n"
+    assert verdict_errors(at_ceiling("ci") + fed * 50 + stream, "ci") == [], "a paired backfill SKIP is not a counted skip"
+    assert verdict_counts(at_ceiling("ci") + fed + stream)["backfill"] == 1
+    lone = verdict_errors(at_ceiling("ci") + fed + fed.replace("live_x::bf", "live_x::other") + stream, "ci")
+    assert len(lone) == 1 and "live_x::other [recipe]" in lone[0], lone
+    assert unpaired_backfills(fed + "RIVET-ORACLE-PASS live_x::bf [recipe] — ok\n"), "the recipe's own verdict does not pair it"
     rerun = "RIVET-ORACLE-RERUN live_x::a [e] — oracle reader crashed (grade): signal: 11 (SIGSEGV) after 1.0s; read once more\n"
     assert verdict_errors(at_ceiling("ci") + rerun * RERUN_CEILING, "ci") == [], "a rare reader crash is counted, not failed"
     assert any("RERUN" in e for e in verdict_errors(at_ceiling("ci") + rerun * (RERUN_CEILING + 1), "ci")), "a crashing reader fails the lane"

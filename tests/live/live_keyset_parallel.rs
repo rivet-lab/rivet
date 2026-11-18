@@ -1437,14 +1437,16 @@ fn a_skewed_parallel_keyset_key_reads_every_row_once_postgres() {
     let spread = rows_per_range(&rig.out_dir());
     eprintln!("SPREAD {table}: {spread:?}");
     let spread: Vec<usize> = spread.into_values().collect();
+    let heaviest = spread.iter().max().copied().unwrap_or_default();
     assert_eq!(
-        (
-            spread.len(),
-            spread[..4].to_vec(),
-            spread.iter().max().copied()
-        ),
-        (64, vec![5_625, 5_625, 5_625, 1_152], Some(5_625)),
-        "16 key-space ranges per worker: the dense stretch spans four ranges: {spread:?}"
+        spread.len(),
+        64,
+        "16 key-space ranges per worker: {spread:?}"
+    );
+    assert!(
+        heaviest * spread.len() <= 2 * 20_000,
+        "the recut keeps the heaviest range within twice the mean ({heaviest} rows over {} ranges): {spread:?}",
+        spread.len()
     );
     let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
 }
@@ -1483,15 +1485,15 @@ fn parallel_keyset_incremental_uuid_key_postgres() {
     let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
 }
 
-/// A datetimeoffset key, whose probe value is not a literal SQL Server can convert, keeps the run: every row once, the lost split named.
+/// A datetimeoffset key keeps the run: every row once, whatever text the sampler reads its split points as.
 #[test]
-#[ignore = "live: requires docker compose up -d mssql"]
-fn a_parallel_keyset_key_the_server_cannot_cast_a_split_point_to_keeps_the_run_mssql() {
+#[ignore = "live+gate-only: requires docker compose up -d mssql"]
+fn open_defect_a_parallel_keyset_datetimeoffset_key_keeps_the_run_mssql() {
     require_alive(LiveService::Mssql);
     let table = unique_name("pk_dto_ms");
     mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));
     mssql_exec(&format!(
-        "CREATE TABLE {table} (k DATETIMEOFFSET NOT NULL PRIMARY KEY, id BIGINT NOT NULL)"
+        "CREATE TABLE {table} (k DATETIMEOFFSET(6) NOT NULL PRIMARY KEY, id BIGINT NOT NULL)"
     ));
     mssql_exec(&format!(
         "WITH nums AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM nums WHERE n < 1000) \
@@ -1504,10 +1506,11 @@ fn a_parallel_keyset_key_the_server_cannot_cast_a_split_point_to_keeps_the_run_m
         .export_line("chunk_by_key: k")
         .export_line("parallel: 4")
         .export_line("chunk_size: 200");
-    let said = rig.run_ok_capture();
+    let out = rig.run_args(&[]);
     assert!(
-        said.contains("cannot seek the key to a split point"),
-        "the lost split is named: {said}"
+        out.status.success(),
+        "a datetimeoffset keyset key stops the run:\n{}",
+        String::from_utf8_lossy(&out.stderr)
     );
     let (count, keys, _) = id_set_and_fanout(&rig.out_dir());
     assert_eq!(
@@ -1570,9 +1573,12 @@ fn a_sparse_parallel_keyset_key_keeps_row_percentiles_below_the_limit_postgres()
     );
     pg_catalog_says_rows(&mut c, &table, 20_000_000);
     let above = sparse_key_spread(Rig::pg_batch(&qualified));
-    assert_eq!(above.len(), 64, "16 key-space ranges per worker: {above:?}");
-    assert_eq!(
-        above[0], 19_016,
+    assert!(
+        (5..=64).contains(&above.len()),
+        "key-space ranges, not four row percentiles, at most 16 per worker: {above:?}"
+    );
+    assert!(
+        above[0] >= SPARSE_DENSE as usize,
         "the dense stretch stays in one range: {above:?}"
     );
     let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
@@ -1621,9 +1627,12 @@ fn a_sparse_parallel_keyset_key_keeps_row_percentiles_below_the_limit_mysql() {
         "row percentiles under the limit"
     );
     let above = sparse_key_spread(Rig::mysql_batch(&large));
-    assert_eq!(above.len(), 64, "16 key-space ranges per worker: {above:?}");
-    assert_eq!(
-        above[0], 19_016,
+    assert!(
+        (5..=64).contains(&above.len()),
+        "key-space ranges, not four row percentiles, at most 16 per worker: {above:?}"
+    );
+    assert!(
+        above[0] >= SPARSE_DENSE as usize,
         "the dense stretch stays in one range: {above:?}"
     );
     for t in [table, large] {

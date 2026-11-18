@@ -1460,19 +1460,20 @@ impl Drop for PgCdcTable {
 
 // (e) advice parity
 
-const PLAN_UNREADABLE: &str = "RIVET_PLAN_SOURCE_UNREADABLE";
+const PLAN_UNREADABLE: Refused = Refused::by_code("RIVET_PLAN_SOURCE_UNREADABLE", 1);
+const TABLE_NOT_FOUND: Refused = Refused::by_code("RIVET_SOURCE_TABLE_NOT_FOUND", 1);
 
-/// RESULTS 10: `plan` over a table that does not exist fails by code and seals no artifact.
+/// RESULTS 10: `plan` over a table that does not exist is refused as `RIVET_SOURCE_TABLE_NOT_FOUND` by the planning `run` executes, and seals no artifact.
 fn plan_on_a_missing_table(engine: SqlEngine) {
     engine.alive();
-    plan_on_an_unreadable_source(engine.rig(&unique_name("oc_absent")), 1);
+    plan_refused_and_unsealed(engine.rig(&unique_name("oc_absent")), TABLE_NOT_FOUND);
 }
 
 /// RESULTS 10 (hand sweep): `plan` with a password the source refuses fails by code and seals no artifact.
 fn plan_with_a_wrong_password(engine: SqlEngine) {
     let (table, _guard) = id_v_table(engine, "oc_planpw", 3);
     let url = with_password(engine.url(), "not_the_password");
-    plan_on_an_unreadable_source(engine.rig(&table).source_url(&url), 1);
+    plan_refused_and_unsealed(engine.rig(&table).source_url(&url), PLAN_UNREADABLE);
 }
 
 /// `url` with its password replaced.
@@ -1483,14 +1484,14 @@ fn with_password(url: &str, password: &str) -> String {
     format!("{scheme}://{user}:{password}@{host}")
 }
 
-/// `plan` over a source it cannot read ends as `RIVET_PLAN_SOURCE_UNREADABLE` with exit `exit`, and writes no plan file.
-fn plan_on_an_unreadable_source(rig: Rig, exit: i32) {
+/// `plan` over a source it cannot read ends as the refusal `want` and writes no plan file.
+fn plan_refused_and_unsealed(rig: Rig, want: Refused) {
     let dir = tempfile::tempdir().unwrap();
     let plan = dir.path().join("plan.json");
     let out = rig.plan_json_env(&plan, &[], &[]);
     assert!(
         !out.status.success() && !plan.exists(),
-        "`plan` over a table that does not exist exited {} and {} the artifact\n{}",
+        "`plan` over a source it cannot read exited {} and {} the artifact\n{}",
         out.status
             .code()
             .map_or("on a signal".to_string(), |c| c.to_string()),
@@ -1501,7 +1502,7 @@ fn plan_on_an_unreadable_source(rig: Rig, exit: i32) {
         },
         text(&out)
     );
-    assert_refused(&out, Refused::by_code(PLAN_UNREADABLE, exit));
+    assert_refused(&out, want);
 }
 
 /// Mac report E: `doctor` is not green for a CDC export on a server whose `wal_level` the run refuses.
@@ -3230,7 +3231,7 @@ fn a_second_run_beside_a_live_resumable_run_is_refused_by_code_mongo() {
 #[ignore = "live: requires docker compose up -d mongo"]
 fn plan_refuses_a_collection_that_does_not_exist_mongo() {
     let (url, _m, _guard) = mongo_db("oc_plan", 1);
-    plan_on_an_unreadable_source(Rig::mongo_batch("absent").source_url(&url), 1);
+    plan_refused_and_unsealed(Rig::mongo_batch("absent").source_url(&url), PLAN_UNREADABLE);
 }
 
 /// 2026-10-14 sweep P6: a `mode: cdc` export over a standalone MongoDB is refused by code, twice, before any checkpoint.
