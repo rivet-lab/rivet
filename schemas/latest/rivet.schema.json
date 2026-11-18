@@ -661,7 +661,7 @@
           ]
         },
         "parallel": {
-          "description": "Concurrent chunk/page workers (default 1). On a RANGE chunk (`chunk_column`)\nor KEYSET (`chunk_by_key`) export, `parallel: N` fans the table into N\nROW-percentile ranges that seek concurrently over separate connections — the\nhalf-open intervals partition the key, so the union reads every row exactly\nonce (structural parity, all engines). Extraction is I/O-bound, so the win\nplateaus early (~3x at N=4, little beyond). SWEET SPOT: indexed tables up to\n~10M rows at `parallel: 4`. `rivet init` scaffolds a row-scaled value\n(<=500K -> 1, <5M -> 2, >=5M -> 4); a preflight warns past ~5M rows (peak RSS\n~= N x chunk_size). Beyond ~10M the KEYSET boundary sampler (an index OFFSET\nskip) grows costly at setup — prefer a range `chunk_column` there.",
+          "description": "Concurrent chunk/page workers (default 1). On a RANGE chunk (`chunk_column`)\nor KEYSET (`chunk_by_key`) export, `parallel: N` fans the table into N\nkey ranges that seek concurrently over separate connections — the\nhalf-open intervals partition the key, so the union reads every row exactly\nonce (structural parity, all engines). Extraction is I/O-bound, so the win\nplateaus early (~3x at N=4, little beyond). `rivet init` scaffolds a row-scaled\nvalue (<=500K -> 1, <5M -> 2, >=5M -> 4); a preflight warns past ~5M rows (peak\nRSS ~= N x chunk_size). The KEYSET range sampler costs N+1 index seeks at any\ntable size: it splits the key's MIN..MAX evenly by VALUE, so a skewed key (dense\nin one corner, or a few far outliers) gets uneven ranges, down to one worker\nwith a warning.",
           "type": "integer",
           "format": "uint",
           "minimum": 0,
