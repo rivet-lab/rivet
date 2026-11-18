@@ -272,7 +272,7 @@ def _pg_case(led: Ledger, case: PgCase, tok: str) -> None:
     work = work_dir() / f"failed_run_tail_{case.key}_{tok}"
     work.mkdir(parents=True, exist_ok=True)
     try:
-        if not (_create_pg(table) and _seed_pg(table, 1, case.rows)):
+        if not (_create_pg(table) and _seed_pg(table, 1, case.rows) and _psql(f"ANALYZE {table}")):
             led.skipped("postgres", VER, "failed_run_tail", case.key,
                         f"failed_run_tail[{case.key}]: could not seed {table}", "no seed", cause=SkipCause.ENV)
             return
