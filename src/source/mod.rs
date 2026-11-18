@@ -308,6 +308,15 @@ pub trait Source: Send {
 
     fn query_scalar(&mut self, sql: &str) -> Result<Option<String>>;
 
+    /// [`Source::query_scalar`] cancelled after `statement_timeout_s` seconds (0 = no limit) with the engine's typed statement-timeout error.
+    fn query_scalar_within(
+        &mut self,
+        sql: &str,
+        _statement_timeout_s: u64,
+    ) -> Result<Option<String>> {
+        self.query_scalar(sql)
+    }
+
     /// Whether the logical replication slot `slot` exists on the server this connection reads; only PostgreSQL has slots.
     fn replication_slot_exists(&mut self, _slot: &str) -> Result<bool> {
         crate::rivet_bail!(

@@ -21,7 +21,7 @@ use postgres::types::Type;
 
 use crate::config::{SourceType, TlsConfig};
 pub(crate) use crate::connect::postgres::connect_client;
-use crate::connect::postgres::{PgTxnGuard, detect_pg_transaction_pooler, read_pinned};
+use crate::connect::postgres::{PgTxnGuard, detect_pg_transaction_pooler, read_pinned_within};
 use crate::error::Result;
 use crate::source::batch_controller::AdaptiveBatchController;
 use crate::source::query::build_export_query;
@@ -58,6 +58,76 @@ impl PostgresSource {
             client,
             transaction_pooler,
         })
+    }
+
+    /// The first cell of `sql`'s first row, read in a transaction of its own under `statement_timeout_s` (0 = no limit).
+    fn scalar_within(&mut self, sql: &str, statement_timeout_s: u64) -> Result<Option<String>> {
+        let rows = read_pinned_within(&mut self.client, statement_timeout_s, |client| {
+            let probe = prepare_fresh(client, sql)?;
+            client.query(&probe, &[])
+        })
+        .map_err(|e| {
+            if e.code() == Some(&postgres::error::SqlState::QUERY_CANCELED)
+                && statement_timeout_s > 0
+            {
+                super::StatementDurationTimeout::postgres(statement_timeout_s).into()
+            } else {
+                anyhow::Error::new(e)
+            }
+        })?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        let row = &rows[0];
+        if let Ok(Some(v)) = row.try_get::<_, Option<i64>>(0) {
+            return Ok(Some(v.to_string()));
+        }
+        if let Ok(Some(v)) = row.try_get::<_, Option<i32>>(0) {
+            return Ok(Some(v.to_string()));
+        }
+        if let Ok(Some(v)) = row.try_get::<_, Option<f64>>(0) {
+            return Ok(Some(v.to_string()));
+        }
+        let small = if seeded!("unreadable-probe-read-as-no-rows", false, true) {
+            row.try_get::<_, Option<i16>>(0)
+        } else {
+            Ok(None)
+        };
+        if let Ok(Some(v)) = small {
+            return Ok(Some(v.to_string()));
+        }
+        if let Ok(Some(v)) = row.try_get::<_, Option<u32>>(0) {
+            return Ok(Some(v.to_string()));
+        }
+        if let Ok(Some(v)) = row.try_get::<_, Option<chrono::NaiveDateTime>>(0) {
+            return Ok(Some(v.format("%Y-%m-%d %H:%M:%S%.f").to_string()));
+        }
+        if let Ok(Some(v)) = row.try_get::<_, Option<chrono::NaiveDate>>(0) {
+            return Ok(Some(v.format("%Y-%m-%d").to_string()));
+        }
+        if let Ok(Some(v)) = row.try_get::<_, Option<chrono::DateTime<chrono::Utc>>>(0) {
+            return Ok(Some(v.format("%Y-%m-%d %H:%M:%S%.f+00").to_string()));
+        }
+        if let Ok(Some(v)) = row.try_get::<_, Option<uuid::Uuid>>(0) {
+            return Ok(Some(v.to_string()));
+        }
+        if let Ok(Some(v)) = row.try_get::<_, Option<String>>(0) {
+            return Ok(Some(v));
+        }
+        if matches!(
+            row.try_get::<_, Option<arrow_convert::AnyAsString>>(0),
+            Ok(None)
+        ) {
+            return Ok(None);
+        }
+        if seeded!("unreadable-probe-read-as-no-rows", true, false) {
+            return Ok(None);
+        }
+        crate::rivet_bail!(
+            crate::error::codes::SOURCE_PROBE_UNREADABLE,
+            "{}",
+            unreadable_probe(row.columns()[0].type_().name(), sql)
+        )
     }
 }
 
@@ -538,63 +608,15 @@ impl super::Source for PostgresSource {
     }
 
     fn query_scalar(&mut self, sql: &str) -> Result<Option<String>> {
-        let rows = read_pinned(&mut self.client, |client| {
-            let probe = prepare_fresh(client, sql)?;
-            client.query(&probe, &[])
-        })?;
-        if rows.is_empty() {
-            return Ok(None);
-        }
-        let row = &rows[0];
-        if let Ok(Some(v)) = row.try_get::<_, Option<i64>>(0) {
-            return Ok(Some(v.to_string()));
-        }
-        if let Ok(Some(v)) = row.try_get::<_, Option<i32>>(0) {
-            return Ok(Some(v.to_string()));
-        }
-        if let Ok(Some(v)) = row.try_get::<_, Option<f64>>(0) {
-            return Ok(Some(v.to_string()));
-        }
-        let small = if seeded!("unreadable-probe-read-as-no-rows", false, true) {
-            row.try_get::<_, Option<i16>>(0)
-        } else {
-            Ok(None)
-        };
-        if let Ok(Some(v)) = small {
-            return Ok(Some(v.to_string()));
-        }
-        if let Ok(Some(v)) = row.try_get::<_, Option<u32>>(0) {
-            return Ok(Some(v.to_string()));
-        }
-        if let Ok(Some(v)) = row.try_get::<_, Option<chrono::NaiveDateTime>>(0) {
-            return Ok(Some(v.format("%Y-%m-%d %H:%M:%S%.f").to_string()));
-        }
-        if let Ok(Some(v)) = row.try_get::<_, Option<chrono::NaiveDate>>(0) {
-            return Ok(Some(v.format("%Y-%m-%d").to_string()));
-        }
-        if let Ok(Some(v)) = row.try_get::<_, Option<chrono::DateTime<chrono::Utc>>>(0) {
-            return Ok(Some(v.format("%Y-%m-%d %H:%M:%S%.f+00").to_string()));
-        }
-        if let Ok(Some(v)) = row.try_get::<_, Option<uuid::Uuid>>(0) {
-            return Ok(Some(v.to_string()));
-        }
-        if let Ok(Some(v)) = row.try_get::<_, Option<String>>(0) {
-            return Ok(Some(v));
-        }
-        if matches!(
-            row.try_get::<_, Option<arrow_convert::AnyAsString>>(0),
-            Ok(None)
-        ) {
-            return Ok(None);
-        }
-        if seeded!("unreadable-probe-read-as-no-rows", true, false) {
-            return Ok(None);
-        }
-        crate::rivet_bail!(
-            crate::error::codes::SOURCE_PROBE_UNREADABLE,
-            "{}",
-            unreadable_probe(row.columns()[0].type_().name(), sql)
-        )
+        self.scalar_within(sql, 0)
+    }
+
+    fn query_scalar_within(
+        &mut self,
+        sql: &str,
+        statement_timeout_s: u64,
+    ) -> Result<Option<String>> {
+        self.scalar_within(sql, statement_timeout_s)
     }
 
     fn type_mappings(
