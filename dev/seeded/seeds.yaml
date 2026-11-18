@@ -6259,3 +6259,4 @@ seeds:
       lib:
         cells:
           - "lib:flush_warns_with_the_count_of_zero_dates_it_nulled_and_is_silent_otherwise"
+          - "lib:a_run_that_nulled_cells_warns_once_per_column_with_its_count"

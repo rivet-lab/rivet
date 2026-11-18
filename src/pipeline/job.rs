@@ -4074,4 +4074,22 @@ mod tests {
             Some("manifest gap: part 3 missing")
         );
     }
+
+    /// One WARN per nulled column, each naming the column and its count.
+    #[test]
+    fn a_run_that_nulled_cells_warns_once_per_column_with_its_count() {
+        use crate::pipeline::run::run_tail_tests::{
+            captured_warnings_mentioning, install_warn_capture,
+        };
+        install_warn_capture();
+        warn_nulled_cells(&[("nulled_cells_a".into(), 3), ("nulled_cells_b".into(), 1)]);
+        assert_eq!(
+            captured_warnings_mentioning("nulled_cells_a"),
+            [crate::source::mysql::zero_date_warning("nulled_cells_a", 3)]
+        );
+        assert_eq!(
+            captured_warnings_mentioning("nulled_cells_b"),
+            [crate::source::mysql::zero_date_warning("nulled_cells_b", 1)]
+        );
+    }
 }
