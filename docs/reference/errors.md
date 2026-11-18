@@ -152,13 +152,13 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_CLI_TABLE_UNKNOWN` | usage | 1 | pass `--table` a warehouse table this config loads, as the message lists |
 | `RIVET_CLI_RUN_ID_EXPORT_MISMATCH` | usage | 1 | pass the `--export` the run id belongs to, or omit `--run-id` |
 | `RIVET_CLI_OPTION_UNSUPPORTED` | usage | 1 | drop the option, or give the command the config, export or mode it takes, as the message names |
-| `RIVET_CLI_REPORT_INVALID` | usage | 1 | pass the report `rivet reconcile --report` wrote for this export |
+| `RIVET_CLI_REPORT_INVALID` | usage | 1 | pass the report `rivet reconcile --format json --output <file>` wrote for this export |
 | `RIVET_CLI_OUTPUT_UNWRITABLE` | environment | 2 if its cause is transient, else 1 | check the output path and its directory's write permission |
 | `RIVET_CLI_INPUT_UNREADABLE` | environment | 2 if its cause is transient, else 1 | check the path passed to the command and its read permission |
 | `RIVET_CLI_EXECUTABLE_UNRESOLVED` | environment | 1 | run rivet from a binary the OS can resolve: not deleted, unmounted or replaced while it runs |
 | `RIVET_CLI_TEST_FAULT_INJECTED` | environment | 2 if its cause is transient, else 1 | unset `RIVET_TEST_ERROR_AT` and `RIVET_TEST_TRANSIENT_ONCE`; the fault is rivet's own test hook, not the source |
 | `RIVET_PLAN_NOTHING_TO_PLAN` | usage | 1 | run the CDC streams and backfill recipes with `rivet run`; `rivet plan` plans batch exports only |
-| `RIVET_PLAN_ARTIFACT_STALE` | refusal | 5 | regenerate the plan with `rivet plan`, or pass `--force` to apply it as it is |
+| `RIVET_PLAN_ARTIFACT_STALE` | refusal | 5 | regenerate the plan with `rivet plan`, or apply it as it is with `rivet apply --force` |
 | `RIVET_PLAN_ARTIFACT_NO_CREDENTIALS` | usage | 1 | re-plan from a config that gives the source `url_env:` or `url_file:` |
 | `RIVET_PLAN_PARTITION_TOKEN_UNEXPANDED` | usage | 1 | run the config (`rivet apply <config.yaml>` or `rivet run`), or drop `{partition}` from the destination |
 | `RIVET_PLAN_REJECTED` | usage | 1 | fix the config so the rule the message names passes; `rivet check` reports the same rules |

@@ -1,8 +1,4 @@
 //! Discovery artifact — serializable output of `rivet init --discover` (Epic B).
-//!
-//! Machine-readable counterpart to the YAML scaffold. External orchestrators and
-//! reviewers can consume this JSON to decide modes, cursors, and priorities without
-//! re-running introspection queries.
 
 use serde::{Deserialize, Serialize};
 
@@ -31,7 +27,7 @@ pub(crate) struct CursorCandidate {
     pub data_type: String,
     pub is_nullable: bool,
     pub is_primary_key: bool,
-    /// Rough score: higher is stronger. Deterministic; not a probability.
+    /// Rough score: higher is stronger.
     pub score: i32,
     pub reasons: Vec<CursorCandidateReason>,
 }
@@ -56,8 +52,7 @@ pub(crate) struct TableDiscovery {
     pub suggested_mode: String,
     /// Ordered; the first entry is the best candidate.
     pub cursor_candidates: Vec<CursorCandidate>,
-    /// Suggested `cursor_fallback_column` when the best cursor is NULL-able and a
-    /// better-than-nothing timestamp exists (triggers `incremental_cursor_mode: coalesce`).
+    /// Suggested `cursor_fallback_column` when the best cursor is NULL-able and a better-than-nothing timestamp exists (triggers `incremental_cursor_mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggested_cursor_fallback_column: Option<String>,
     pub chunk_candidates: Vec<ChunkCandidate>,
@@ -72,11 +67,9 @@ pub(crate) struct DiscoveryArtifact {
     pub rivet_version: String,
     /// `"postgres"` or `"mysql"` — the source dialect.
     pub source_type: String,
-    /// Human-readable scope (e.g. `"PostgreSQL schema \"public\" (5 objects)"`).
+    /// Human-readable scope (e.g.
     pub scope: String,
-    /// TLS posture the discovery connection used (`--tls`, #146) — recorded so
-    /// the artifact says HOW it looked at the database, not just what it saw.
-    /// `None` = no flag (loopback or URL-parameter-driven).
+    /// TLS posture the discovery connection used (`--tls`, #146).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tls_mode: Option<String>,
     pub tables: Vec<TableDiscovery>,

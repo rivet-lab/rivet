@@ -12,7 +12,7 @@ use crate::error::Result;
 pub struct ParquetFormat {
     compression: CompressionType,
     compression_level: Option<u32>,
-    /// Rows per Parquet row group. `None` = use library default (1,048,576).
+    /// Rows per Parquet row group.
     row_group_rows: Option<usize>,
 }
 
@@ -40,10 +40,6 @@ impl ParquetFormat {
                 let level = self.compression_level.unwrap_or(6);
                 Compression::GZIP(GzipLevel::try_new(level).unwrap_or_default())
             }
-            // LZ4_RAW, the standard ecosystem-supported codec — NOT the deprecated
-            // Hadoop-framed `Compression::LZ4`, which DuckDB/Spark/pyarrow readers
-            // may reject or mis-frame. rivet is pre-1.0, so the on-disk-bytes change
-            // is acceptable; `lz4` means the interoperable codec.
             CompressionType::Lz4 => Compression::LZ4_RAW,
             CompressionType::None => Compression::UNCOMPRESSED,
         }
@@ -60,12 +56,6 @@ impl super::Format for ParquetFormat {
         schema: &SchemaRef,
         writer: Box<dyn Write + Send>,
     ) -> Result<Box<dyn super::FormatWriter + Send>> {
-        // Parquet's decimal logical type requires scale >= 0. Arrow (and PostgreSQL
-        // `numeric(p,-s)`) allow a NEGATIVE scale, so a negative-scale column resolves
-        // to a valid Arrow type and `rivet check` passes — but the parquet writer then
-        // crashes mid-export on the first batch. Refuse it LOUDLY here (at writer
-        // creation, before any row is written) with an actionable message, so check
-        // and run agree. CSV renders it fine, so this is parquet-specific.
         if let Some(field) = schema.fields().iter().find(|f| {
             matches!(
                 f.data_type(),
@@ -163,8 +153,6 @@ mod tests {
             .expect("create_writer should succeed")
     }
 
-    // ── file_extension ───────────────────────────────────────────────────────
-
     #[test]
     fn file_extension_is_parquet() {
         assert_eq!(
@@ -172,8 +160,6 @@ mod tests {
             "parquet"
         );
     }
-
-    // ── create_writer succeeds for every compression codec ───────────────────
 
     #[test]
     fn create_writer_zstd_default_level_succeeds() {
@@ -205,22 +191,18 @@ mod tests {
         let _ = make_writer(CompressionType::None, None);
     }
 
-    // ── write_batch + finish ─────────────────────────────────────────────────
-
     #[test]
     fn write_batch_and_finish_returns_ok() {
         let schema = int64_schema();
         let fmt = ParquetFormat::new(CompressionType::Zstd, None, None);
-        // Pass Vec by value — avoids &mut T 'static lifetime requirement.
         let mut writer = fmt
             .create_writer(&schema, Box::new(Vec::<u8>::new()))
             .unwrap();
         writer.write_batch(&one_batch(&schema)).unwrap();
-        writer.finish().unwrap(); // finalizes the parquet file footer
+        writer.finish().unwrap();
     }
 
-    /// A note lands in the file footer's key/value metadata, where a loader reads it
-    /// back — the sink records the partitions a part holds this way.
+    /// A note lands in the file footer's key/value metadata, where a loader reads it back.
     #[test]
     fn a_note_is_written_into_the_footer() {
         use parquet::file::reader::FileReader as _;
@@ -254,14 +236,11 @@ mod tests {
     fn finish_without_write_produces_valid_empty_parquet() {
         let schema = int64_schema();
         let fmt = ParquetFormat::new(CompressionType::None, None, None);
-        // finish() on a writer with no batches should not panic or error
         let writer = fmt
             .create_writer(&schema, Box::new(Vec::<u8>::new()))
             .unwrap();
         writer.finish().unwrap();
     }
-
-    // ── row group size ───────────────────────────────────────────────────────
 
     #[test]
     fn row_group_rows_none_uses_library_default() {
@@ -287,9 +266,6 @@ mod tests {
 
     #[test]
     fn lz4_maps_to_the_standard_raw_codec_not_hadoop_framed() {
-        // RED before the fix: `lz4` mapped to the DEPRECATED Hadoop-framed
-        // Compression::LZ4, which DuckDB/Spark/pyarrow readers may reject. It must
-        // be the standard, interoperable LZ4_RAW.
         assert_eq!(
             ParquetFormat::new(CompressionType::Lz4, None, None).build_compression(),
             Compression::LZ4_RAW
@@ -298,9 +274,6 @@ mod tests {
 
     #[test]
     fn negative_scale_decimal_is_refused_loudly_at_writer_creation() {
-        // RED before the guard: a negative-scale decimal is a valid Arrow type (so
-        // `check` passes) but Parquet's decimal type requires scale >= 0, so the
-        // writer crashed mid-export. It must bail LOUDLY at creation, before any row.
         use arrow::datatypes::{DataType, Field, Schema};
         let schema = std::sync::Arc::new(Schema::new(vec![Field::new(
             "amount",
@@ -325,8 +298,6 @@ mod tests {
         );
     }
 
-    // ── OPT-5: byte-determinism for the manifest content_fingerprint ──────────
-
     fn write_batch_to_bytes(compression: CompressionType) -> Vec<u8> {
         let schema = int64_schema();
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -341,8 +312,6 @@ mod tests {
 
     #[test]
     fn output_is_byte_deterministic_for_identical_rows() {
-        // Identical rows must produce byte-identical Parquet so the manifest
-        // `content_fingerprint` (xxh3 of the file bytes) is a stable dedup key.
         let a = write_batch_to_bytes(CompressionType::Zstd);
         let b = write_batch_to_bytes(CompressionType::Zstd);
         assert_eq!(a, b, "identical rows must yield byte-identical parquet");
@@ -359,8 +328,6 @@ mod tests {
             Some("rivet"),
             "created_by must be the pinned constant"
         );
-        // Must not leak the parquet-rs version — that's the cross-release drift
-        // that would break the fingerprint as a dedup key.
         let cb = created_by.unwrap();
         assert!(
             !cb.contains("version") && !cb.contains("parquet"),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import io
 import json
@@ -24,6 +25,7 @@ import yaml
 from . import cloud_replay as cr
 from . import core, engines
 from . import property_no_silent_null as nsn
+from . import type_edges as te
 from .core import Ledger, SkipCause
 from .property_no_silent_null import NOT_GRADED, Result
 
@@ -36,16 +38,40 @@ PROPS = ("no_silent_null_cloud", "no_secret_in_output_cloud", "check_equals_run_
 TIERS = ("offline", "cloud")
 COLUMN_DROPPED, COLUMN_TYPE, PART_NOT_LOADED, SECRET_LEAK, SPLIT, DEBRIS, UNREACHED = (
     "COLUMN_DROPPED", "COLUMN_TYPE", "PART_NOT_LOADED", "SECRET_LEAK", "CHECK_RUN_SPLIT", "DEBRIS", "PATH_NOT_REACHED")
-SEED = (
-    "CREATE TABLE {t}(id int primary key, n bigint, f double precision, d numeric(20,6), s text, b boolean, ts timestamp, dt date)",
-    "INSERT INTO {t} VALUES (1,9007199254740993,1.5,12345.678901,'héllo',true,'2026-11-01 10:20:30.123456','2026-11-01'),"
-    "(2,NULL,NULL,NULL,NULL,NULL,NULL,NULL),(3,-5,-0.25,-0.000001,'x',false,'1999-12-31 23:59:59','1999-12-31')",
-)
-EXPECTED = [
-    {"id": 1, "n": 9007199254740993, "f": 1.5, "d": Decimal("12345.678901"), "s": "héllo", "b": True, "ts": "2026-11-01T10:20:30.123456", "dt": "2026-11-01"},
-    {"id": 2, "n": None, "f": None, "d": None, "s": None, "b": None, "ts": None, "dt": None},
-    {"id": 3, "n": -5, "f": -0.25, "d": Decimal("-0.000001"), "s": "x", "b": False, "ts": "1999-12-31T23:59:59", "dt": "1999-12-31"},
-]
+SEED_COLS = (("n", "BIGINT"), ("f", "DOUBLE PRECISION"), ("d", "NUMERIC(18,4)"), ("s", "TEXT"), ("b", "BOOLEAN"), ("ts", "TIMESTAMP"), ("dt", "DATE"))
+DATETIME_TEXT = re.compile(r"\d{4}-\d\d-\d\d \d\d:")
+
+
+@functools.cache
+def seed_picks() -> tuple[tuple[str, ...], ...]:
+    """The two ledger edges per seeded column that BigQuery delivers exact (rows 1 and 3); row 2 is all NULL."""
+    from . import type_matrix as tm
+
+    cols = {c.native: c for c in tm.columns("postgres")}
+    out = []
+    for _, native in SEED_COLS:
+        lits = tuple(e.lit for e in cols[native].edges if e.verdict("bigquery").kind == te.EXACT and e.lit.strip().upper() != "NULL")[:2]
+        if len(lits) < 2:
+            raise AssertionError(f"the ledger row {native} has fewer than two edges BigQuery delivers exact")
+        out.append(lits)
+    return tuple(out)
+
+
+def seed() -> tuple[str, str]:
+    """The PostgreSQL seed table and its three rows, built from the ledger's edges."""
+    cols = ", ".join(f"{n} {t}" for n, t in SEED_COLS)
+    row = lambda i, k: f"({i}," + ",".join("NULL" if k is None else p[k] for p in seed_picks()) + ")"
+    return f"CREATE TABLE {{t}}(id int primary key, {cols})", f"INSERT INTO {{t}} VALUES {row(1, 0)},{row(2, None)},{row(3, 1)}"
+
+
+def expected() -> list[dict]:
+    """What the read-back must hold: the seed's literals as the source engine reads them."""
+    rows = []
+    for i, k in ((1, 0), (2, None), (3, 1)):
+        rows.append({"id": i, **{n: None if k is None else nsn.parse_lit("postgres", p[k]) for (n, _), p in zip(SEED_COLS, seed_picks())}})
+    return rows
+
+
 BQ_TYPE = {"int64": "INT64", "int32": "INT64", "double": "FLOAT64", "float": "FLOAT64", "string": "STRING", "large_string": "STRING",
            "bool": "BOOL", "date32[day]": "DATE", "binary": "BYTES"}
 
@@ -62,7 +88,8 @@ class Leg:
 
 R_SF_ENDPOINT = ("the Snowflake endpoint is derived from the account and has no override, so a recorded answer cannot be replayed into rivet "
                   "without a src/ hook (RIVET_SF_API_ENDPOINT mirroring RIVET_BQ_API_ENDPOINT)")
-R_SF_CLOUD = "no Snowflake test account is granted to this matrix's environment (no `snow` connection or key found)"
+R_SF_CLOUD = ("no secret, check-versus-load or debris cell drives a Snowflake load; its typed values are graded cell by cell from the ledger rows "
+              "by no_silent_null_load_cloud, read back by DuckDB's Snowflake client")
 R_NO_RECORDING = "no recording: one real run against the store has never been made because no test bucket and credential exist"
 R_NO_CREDS = "no cloud credentials: the store has no test bucket or credential in the registry"
 R_SECRET_MANAGER = "the Secret Manager success path has no endpoint override (const ENDPOINT in src/config/gcp_secret.rs) and no test secret exists in the project"
@@ -221,15 +248,17 @@ def same(exp, got) -> bool:
         return float(str(got)) == exp
     if isinstance(exp, Decimal):
         return Decimal(str(got)) == exp
+    if isinstance(exp, str) and DATETIME_TEXT.match(exp):
+        return (text_of(got) or "").replace("T", " ") == exp
     return text_of(got) == exp
 
 
 def grade_rows(cell: str, rows: list[dict], what: str) -> Result:
     """Rows read from a second client against the source literals: a NULL where the source had a value is SILENT_NULL."""
     by_id = {int(r["id"]): r for r in rows}
-    if sorted(by_id) != [e["id"] for e in EXPECTED]:
-        return red(cell, nsn.EMPTY, f"{what}: ids {sorted(by_id)}, expected {[e['id'] for e in EXPECTED]}")
-    for e in EXPECTED:
+    if sorted(by_id) != [e["id"] for e in expected()]:
+        return red(cell, nsn.EMPTY, f"{what}: ids {sorted(by_id)}, expected {[e['id'] for e in expected()]}")
+    for e in expected():
         got = by_id[e["id"]]
         for col, exp in e.items():
             if exp is None:
@@ -481,7 +510,7 @@ def live_flow(work: Path, rec: dict | None = None) -> Flow:
 
     try:
         clean()
-        for st in SEED:
+        for st in seed():
             p = engines.sql("postgres", PG_URL, st.format(t=tag) + ";")
             if not p.ok:
                 raise RuntimeError(f"seed refused: {p.out.strip()[:300]}")
@@ -622,7 +651,7 @@ def not_graded_table(by_prop: dict[str, list[Result]]) -> list[str]:
 
 GRADES_IT = {
     R_SF_ENDPOINT: "an owner-approved src/ endpoint override for Snowflake, then one recording against a real account",
-    R_SF_CLOUD: "a `snow` connection and key on the machine that runs the nightly gate lane",
+    R_SF_CLOUD: "the secret, check and debris flows of the BigQuery leg are driven against the stand's Snowflake schema",
     R_NO_RECORDING: "one cloud_record.py run against a real S3 bucket or Azure account",
     R_NO_CREDS: "a test bucket or storage account and its credential in dev/stand/registry.yaml",
     R_SECRET_MANAGER: "an owner-approved src/ endpoint override for gcp_secret and a test secret in the project",
@@ -678,7 +707,7 @@ def self_test() -> None:
     with tempfile.TemporaryDirectory() as t:
         (Path(t) / "r.json").write_text('{"h": "Bearer ya29.' + "a" * 40 + '"}')
         assert recordings_leak(Path(t)) == ["r.json"]
-    rows = [dict(e) for e in EXPECTED]
+    rows = [dict(e) for e in expected()]
     assert grade_rows("c", rows, "x").klass == ""
     nulled = [dict(r) for r in rows]
     nulled[0]["n"] = None
@@ -687,6 +716,13 @@ def self_test() -> None:
     wrong[2]["d"] = Decimal("-0.000002")
     assert grade_rows("c", wrong, "x").klass == nsn.WRONG
     assert grade_rows("c", rows[:2], "x").klass == nsn.EMPTY
+    ts = str(rows[0]["ts"])
+    iso = [dict(r) for r in rows]
+    iso[0]["ts"] = ts.replace(" ", "T")
+    assert grade_rows("c", iso, "x").klass == "", "a timestamp read back with a T separator is the source value"
+    drift = [dict(r) for r in rows]
+    drift[0]["ts"] = ts[:-1] + ("8" if ts[-1] == "9" else "9")
+    assert grade_rows("c", drift, "x").klass == nsn.WRONG, "a timestamp that differs in its last digit is not the source value"
     proc = lambda rc, out="", err="": core.Proc(["rivet"], rc, out, err, gated=False)
     assert grade_secret("c", Leg_run(proc(1, "", f"BigQuery said {CANARY}")), (CANARY,), "refused").klass == SECRET_LEAK
     assert grade_secret("c", Leg_run(proc(1), summary="token ya29." + "a" * 30), (), "refused").klass == SECRET_LEAK

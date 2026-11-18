@@ -114,7 +114,53 @@ mod transient_tests {
     }
 }
 
-pub fn doctor(config_path: &str, json: bool) -> Result<()> {
+/// What `run` would plan for every batch export of a config, one verdict per export; supplied by the caller above the preflight layer.
+pub type RunPlanProbe<'a> =
+    &'a dyn Fn(&Config, &std::path::Path) -> Result<Vec<(String, Result<()>)>>;
+
+/// Emit one check that carries no hint.
+fn emit_named(
+    checks: &mut Vec<DoctorCheck>,
+    json: bool,
+    name: impl Into<String>,
+    ok: bool,
+    detail: Option<String>,
+) {
+    let check = DoctorCheck {
+        name: name.into(),
+        ok,
+        detail,
+        hint: None,
+    };
+    emit_check(checks, json, check);
+}
+
+/// One `Run plan <export>` check per verdict the probe returns, and the first refusal among them.
+fn run_plan_checks(
+    config: &Config,
+    config_dir: &std::path::Path,
+    run_plan: RunPlanProbe<'_>,
+    json: bool,
+    checks: &mut Vec<DoctorCheck>,
+) -> Option<anyhow::Error> {
+    let mut refusal: Option<anyhow::Error> = None;
+    let planned =
+        run_plan(config, config_dir).unwrap_or_else(|e| vec![("config".to_string(), Err(e))]);
+    for (name, verdict) in planned {
+        let (ok, detail) = match verdict {
+            Ok(()) => (true, None),
+            Err(e) => {
+                let detail = trim_probe_error(&e);
+                refusal.get_or_insert(e);
+                (false, Some(detail))
+            }
+        };
+        emit_named(checks, json, format!("Run plan {name}"), ok, detail);
+    }
+    refusal
+}
+
+pub fn doctor(config_path: &str, json: bool, run_plan: RunPlanProbe<'_>) -> Result<()> {
     if !json {
         println!("rivet doctor: verifying auth for config '{}'", config_path);
         println!();
@@ -123,28 +169,16 @@ pub fn doctor(config_path: &str, json: bool) -> Result<()> {
 
     let config = match Config::load(config_path) {
         Ok(c) => {
-            emit_check(
-                &mut checks,
-                json,
-                DoctorCheck {
-                    name: "Config parsed successfully".into(),
-                    ok: true,
-                    detail: None,
-                    hint: None,
-                },
-            );
+            emit_named(&mut checks, json, "Config parsed successfully", true, None);
             c
         }
         Err(e) => {
-            emit_check(
+            emit_named(
                 &mut checks,
                 json,
-                DoctorCheck {
-                    name: "Config error".into(),
-                    ok: false,
-                    detail: Some(trim_probe_error(&e)),
-                    hint: None,
-                },
+                "Config error",
+                false,
+                Some(trim_probe_error(&e)),
             );
             if json {
                 print_doctor_json(config_path, false, &checks);
@@ -165,28 +199,16 @@ pub fn doctor(config_path: &str, json: bool) -> Result<()> {
         .unwrap_or_else(|| std::path::Path::new("."));
 
     match crate::state::StateStore::probe(config_path) {
-        Ok(at) => emit_check(
-            &mut checks,
-            json,
-            DoctorCheck {
-                name: format!("State ({at})"),
-                ok: true,
-                detail: None,
-                hint: None,
-            },
-        ),
+        Ok(at) => emit_named(&mut checks, json, format!("State ({at})"), true, None),
         Err(e) => {
             all_ok = false;
             keep_first_transient(&mut transient, &e);
-            emit_check(
+            emit_named(
                 &mut checks,
                 json,
-                DoctorCheck {
-                    name: "State".into(),
-                    ok: false,
-                    detail: Some(trim_probe_error(&e)),
-                    hint: None,
-                },
+                "State",
+                false,
+                Some(trim_probe_error(&e)),
             );
         }
     }
@@ -255,6 +277,11 @@ pub fn doctor(config_path: &str, json: bool) -> Result<()> {
             );
         }
     }
+
+    let run_refusal = source_ok
+        .then(|| run_plan_checks(&config, config_dir, run_plan, json, &mut checks))
+        .flatten();
+    all_ok &= run_refusal.is_none();
 
     let mut seen_destinations: Vec<String> = Vec::new();
     let doctored = if seeded!("check-reads-declared-list-not-run-set", true, false) {
@@ -362,7 +389,7 @@ pub fn doctor(config_path: &str, json: bool) -> Result<()> {
             println!("Some checks failed. Fix the issues above before running exports.");
         }
     }
-    if let Some(refusal) = cursor_refusal {
+    if let Some(refusal) = cursor_refusal.or(run_refusal) {
         return Err(refusal);
     }
     if all_ok {
@@ -796,6 +823,68 @@ mod tests {
         );
     }
 
+    /// `run_plan_checks` records one `Run plan <export>` check per verdict, returns the first refusal, and turns a failed probe into a `config` check.
+    #[test]
+    fn run_plan_checks_records_each_verdict_and_returns_the_first_refusal() {
+        let config = Config::from_yaml(
+            "source: { type: postgres, url: \"postgresql://u:p@127.0.0.1:1/db\" }\n\
+             exports:\n\
+             \x20 - name: a\n    table: t\n    mode: full\n    format: parquet\n\
+             \x20   destination: { type: local, path: ./out }\n",
+        )
+        .expect("the fixture config loads");
+        let dir = std::path::Path::new(".");
+        let mixed = |_: &Config, _: &std::path::Path| -> Result<Vec<(String, Result<()>)>> {
+            Ok(vec![
+                ("a".to_string(), Ok(())),
+                ("b".to_string(), Err(anyhow::anyhow!("first refusal"))),
+                ("c".to_string(), Err(anyhow::anyhow!("second refusal"))),
+            ])
+        };
+        let mut checks = Vec::new();
+        let refusal = run_plan_checks(&config, dir, &mixed, true, &mut checks)
+            .expect("the first refusal is returned");
+        assert_eq!(format!("{refusal:#}"), "first refusal");
+        let seen: Vec<_> = checks
+            .iter()
+            .map(|c| {
+                (
+                    c.name.as_str(),
+                    c.ok,
+                    c.detail.as_deref(),
+                    c.hint.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("Run plan a", true, None, None),
+                ("Run plan b", false, Some("first refusal"), None),
+                ("Run plan c", false, Some("second refusal"), None),
+            ]
+        );
+
+        let clean = |_: &Config, _: &std::path::Path| -> Result<Vec<(String, Result<()>)>> {
+            Ok(vec![("a".to_string(), Ok(()))])
+        };
+        let mut checks = Vec::new();
+        assert!(run_plan_checks(&config, dir, &clean, true, &mut checks).is_none());
+        assert_eq!(checks.len(), 1);
+        assert!(checks[0].ok);
+
+        let broken = |_: &Config, _: &std::path::Path| -> Result<Vec<(String, Result<()>)>> {
+            Err(anyhow::anyhow!("probe failed"))
+        };
+        let mut checks = Vec::new();
+        let refusal = run_plan_checks(&config, dir, &broken, true, &mut checks)
+            .expect("a failed probe is a refusal");
+        assert_eq!(format!("{refusal:#}"), "probe failed");
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].name, "Run plan config");
+        assert!(!checks[0].ok);
+    }
+
     #[test]
     fn every_tls_mode_a_tls_hint_names_is_one_the_loader_accepts() {
         let err = anyhow::anyhow!("TLS handshake failed: certificate verify failed");
@@ -840,7 +929,11 @@ mod tests {
         crate::error::assert_coded(&err, "RIVET_CLI_PREFLIGHT_FAILED", 1);
         let err = doctor_failure_error(Some(transient_probe("connection refused (os error 61)")));
         crate::error::assert_coded(&err, "RIVET_CLI_PREFLIGHT_UNVERIFIED", 2);
-        let err = doctor("/nonexistent/rivet-doctor-test.yaml", false).unwrap_err();
+        // A config that does not load keeps the config error's own code.
+        let err = doctor("/nonexistent/rivet-doctor-test.yaml", false, &|_, _| {
+            Ok(vec![])
+        })
+        .unwrap_err();
         crate::error::assert_coded(&err, "RIVET_CONFIG_FILE_UNREADABLE", 1);
     }
 
@@ -893,7 +986,8 @@ exports:
         let config_path = config_dir.path().join("rivet.yaml");
         std::fs::write(&config_path, yaml).unwrap();
 
-        let err = doctor(config_path.to_str().unwrap(), false)
+        // Source auth fails on the unset env var, and doctor must say so — then still probe both paths.
+        let err = doctor(config_path.to_str().unwrap(), false, &|_, _| Ok(vec![]))
             .expect_err("an unresolvable source must fail doctor, not pass it");
         assert!(
             format!("{err:#}").contains("one or more preflight checks failed"),
@@ -1313,7 +1407,7 @@ exports:
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("rivet.yaml");
         std::fs::write(&cfg, "source: not-a-mapping\n").unwrap();
-        let err = doctor(cfg.to_str().unwrap(), false)
+        let err = doctor(cfg.to_str().unwrap(), false, &|_, _| Ok(vec![]))
             .expect_err("doctor must return Err when the config fails to load");
         let msg = err.to_string();
         assert!(
@@ -1346,7 +1440,7 @@ exports:
         let config_path = dir.path().join("rivet.yaml");
         std::fs::write(&config_path, yaml).unwrap();
 
-        let err = doctor(config_path.to_str().unwrap(), true)
+        let err = doctor(config_path.to_str().unwrap(), true, &|_, _| Ok(vec![]))
             .expect_err("a directory under a regular file cannot be written");
         assert_eq!(
             format!("{err:#}"),
@@ -1384,8 +1478,8 @@ exports:
             "fixture: a failed CDC health check with a detail: {cdc:?}"
         );
 
-        let err =
-            doctor(config_path.to_str().unwrap(), true).expect_err("the source URL is not set");
+        let err = doctor(config_path.to_str().unwrap(), true, &|_, _| Ok(vec![]))
+            .expect_err("the source URL is not set");
         assert_eq!(
             format!("{err:#}"),
             "doctor: one or more preflight checks failed (see output above)"

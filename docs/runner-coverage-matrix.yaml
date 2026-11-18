@@ -567,3 +567,12 @@ scenarios:
     keyset:         { na: "shared seam (execute_resolved_plan, before the dispatch)" }
     mongo_parallel: { na: "shared seam (execute_resolved_plan, before the dispatch); a Mongo export's schema is the fixed {_id, document, meta} shape, so it has no lossy column to refuse" }
     cdc:            { test: oracle_cdc_timestamp9_is_refused_until_declared_and_a_declared_timestamp_delivers_the_row }
+
+  - id: mongo_flat_id_label
+    what: "the flat Mongo `_id` column's `rivet.native_type` / `rivet.fidelity` names the BSON type the collection holds (one seam: MongoSource::flat_mappings, read by export() and type_mappings)"
+    single:         { test: mongo_batch_flat_id_is_labelled_by_the_bson_types_the_collection_holds }
+    chunked:        { na: "a Mongo export never runs the chunked strategy" }
+    chunked_checkpoint: { na: "a Mongo export never runs the chunked strategy" }
+    keyset:         { test: mongo_batch_flat_id_is_labelled_by_the_bson_types_the_collection_holds }
+    mongo_parallel: { test: mongo_batch_flat_id_is_labelled_by_the_bson_types_the_collection_holds }
+    cdc:            { test: mongo_cdc_flat_id_is_labelled_by_the_bson_types_the_collection_holds }
