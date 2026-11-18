@@ -105,7 +105,7 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ("src/plan/build.rs::build_plan_on#1", 185),
     (
         "src/plan/build.rs::chunked_strategy_from_introspection#1",
-        196,
+        161,
     ),
     // 2026-11-17: 257 -> 238, the run-plan and named-check emitters left doctor (see #1041).
     ("src/preflight/doctor.rs::doctor#1", 238),
