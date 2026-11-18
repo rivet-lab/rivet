@@ -33,8 +33,24 @@ fn row_image_sql(capture_instance: &str) -> String {
     )
 }
 
-/// Pure verdict half of [`row_image`] (#161, the compression_refusal split).
-pub(crate) fn row_image_verdict(rows: &[String]) -> crate::source::cdc::RowImage {
+/// The query for captured char/varchar/text columns whose codepage differs from the database's, as `schema.table.column`.
+fn lossy_columns_sql(capture_instance: &str) -> String {
+    format!(
+        "SELECT s.name + '.' + t.name + '.' + sc.name \
+         FROM cdc.change_tables ct \
+         JOIN sys.tables t ON t.object_id = ct.source_object_id \
+         JOIN sys.schemas s ON s.schema_id = t.schema_id \
+         JOIN cdc.captured_columns cc ON cc.object_id = ct.object_id \
+         JOIN sys.columns sc ON sc.object_id = t.object_id AND sc.name = cc.column_name \
+         WHERE ct.capture_instance = '{ci}' AND sc.system_type_id IN (35, 167, 175) \
+           AND COLLATIONPROPERTY(sc.collation_name, 'CodePage') <> \
+               COLLATIONPROPERTY(CONVERT(sysname, DATABASEPROPERTYEX(DB_NAME(), 'Collation')), 'CodePage')",
+        ci = capture_instance.replace('\'', "''"),
+    )
+}
+
+/// Pure verdict half of [`row_image`]: `rows` are `name:got/all` column counts, `lossy` the columns the capture job stores in the database codepage.
+pub(crate) fn row_image_verdict(rows: &[String], lossy: &[String]) -> crate::source::cdc::RowImage {
     use crate::source::cdc::RowImage;
     let short: Vec<String> = rows
         .iter()
@@ -45,6 +61,17 @@ pub(crate) fn row_image_verdict(rows: &[String]) -> crate::source::cdc::RowImage
                 .then(|| format!("{name} ({got} of {all} columns)"))
         })
         .collect();
+    if !lossy.is_empty() {
+        return RowImage::Partial {
+            why: format!(
+                "the capture job stores every char/varchar/text column in the DATABASE codepage, \
+                 so a character outside it is written to the change table as '?'. These columns \
+                 use another codepage: {}. Change them to nvarchar (or give them the database \
+                 collation), re-enable the capture instance and re-run",
+                lossy.join(", ")
+            ),
+        };
+    }
     if short.is_empty() {
         return RowImage::Whole;
     }
@@ -680,7 +707,23 @@ impl ChangeStream for MssqlChangeStream {
             .iter()
             .filter_map(|r| r.get::<&str, _>(0).map(str::to_string))
             .collect();
-        row_image_verdict(&named)
+        let lossy_sql = lossy_columns_sql(&self.capture_instance);
+        let Self { rt, client, .. } = self;
+        let lossy = rt
+            .block_on(async {
+                client
+                    .simple_query(lossy_sql)
+                    .await?
+                    .into_first_result()
+                    .await
+            })
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|r| r.get::<&str, _>(0).map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        row_image_verdict(&named, &lossy)
     }
 
     fn engine(&self) -> crate::source::cdc::CdcEngine {
@@ -1382,11 +1425,15 @@ mod tests {
     fn row_image_verdict_both_directions() {
         use crate::source::cdc::RowImage;
         assert!(matches!(
-            row_image_verdict(&["orders_ci:5/5".into(), "garbage".into()]),
+            row_image_verdict(&["orders_ci:5/5".into(), "garbage".into()], &[]),
             RowImage::Whole
         ));
-        assert!(matches!(row_image_verdict(&[]), RowImage::Whole));
-        match row_image_verdict(&["orders_ci:3/5".into(), "items_ci:4/4".into()]) {
+        assert!(matches!(row_image_verdict(&[], &[]), RowImage::Whole));
+        match row_image_verdict(&["t:2/2".into()], &["dbo.t.v".into()]) {
+            RowImage::Partial { why } => assert!(why.contains("dbo.t.v") && why.contains('?')),
+            other => panic!("a column in another codepage must refuse, got {other:?}"),
+        }
+        match row_image_verdict(&["orders_ci:3/5".into(), "items_ci:4/4".into()], &[]) {
             RowImage::Partial { why } => {
                 assert!(why.contains("orders_ci (3 of 5 columns)"), "{why}");
                 assert!(

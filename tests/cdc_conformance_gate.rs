@@ -944,7 +944,7 @@ const PIN_INDEPENDENT: usize = 120; // ratchet-pin: cdc-census-independent (revi
 // 133 -> 134 (2026-11-03, TF-2): the MySQL ENUM/SET label cell reads the stream and snapshot parts with arrow against the labels the test created; the rig oracle grades both legs against the source.
 // 134 -> 138 (2026-11-11): the PG relation-name, column-name and server-text cells and the bit-column remedy cell read the delivered parts with arrow against the rows the test wrote; the rig oracle grades each run.
 // 138 -> 139 (2026-11-11): the MySQL zero and partial date cell counts the NULL cells of the batch and the CDC part with arrow; the WARN text is its subject.
-const PIN_SHARED_CODEC: usize = 139; // ratchet-pin: cdc-census-shared-codec (review 2027-02-01)
+const PIN_SHARED_CODEC: usize = 141; // ratchet-pin: cdc-census-shared-codec (review 2027-02-01)
 const PIN_SELF_COUNTER: usize = 6; // ratchet-pin: cdc-census-self-counter (review 2027-02-01)
 // 2026-09-28: +1 presence — the SQL Server undecodable-cell refusal, whose oracle is the refusal.
 // 2026-09-29: +2 presence — the PG CDC LMT-timezone and DOMAIN parity cells compare CDC to batch output.
