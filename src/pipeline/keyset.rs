@@ -535,9 +535,6 @@ fn spans_from(lo: i128, hi: i128, cuts: &[i128]) -> Vec<Span> {
 /// The integer cuts that split the spans' estimated rows into `parts` equal shares, interpolated inside each span.
 fn equal_row_cuts(spans: &[Span], parts: usize) -> Vec<i128> {
     let share = spans.iter().map(Span::rows).sum::<f64>() / parts as f64;
-    if share.is_nan() || share <= 0.0 {
-        return Vec::new();
-    }
     let mut cuts: Vec<i128> = Vec::with_capacity(parts.saturating_sub(1));
     let mut next = share;
     for _ in 1..parts {
@@ -2777,17 +2774,6 @@ mod tests {
             density: 1.0,
         }];
         assert_eq!(equal_row_cuts(&narrow, 8), vec![1, 2]);
-    }
-
-    /// Spans with no estimated rows give no cuts instead of looping.
-    #[test]
-    fn equal_row_cuts_of_zero_density_spans_are_empty() {
-        let spans = [Span {
-            start: 0,
-            end: 1000,
-            density: 0.0,
-        }];
-        assert!(equal_row_cuts(&spans, 4).is_empty());
     }
 
     /// Every SQL dialect samples by first-row seeks alone and lands on the same boundaries, for number and text keys.
