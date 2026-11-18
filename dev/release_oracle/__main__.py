@@ -287,6 +287,37 @@ def _narrowed_run_has_no_tag_self_test(full_argv: list[str]) -> None:
     assert all(refusal([*full_argv, "--half", h]) is not None for h in HALVES), "release.py accepts one half as the whole gate"
 
 
+def make_gate_argv(target: str) -> list[str] | None:
+    """The arguments the Makefile target `target` hands the gate, or None when its recipe does not run `dev.release_oracle`."""
+    import re
+
+    recipe = re.search(rf"^{re.escape(target)}:.*?(?=^\S)", (ROOT / "Makefile").read_text(), re.M | re.S)
+    assert recipe, f"the Makefile has no {target} target"
+    call = re.search(r"-m dev\.release_oracle (.*?)\$\(ARGS\)", recipe.group(0))
+    return call.group(1).split() if call else None
+
+
+def _nightly_gate_stages_self_test() -> None:
+    """No part of the Nightly Gate that runs the per-run gate selects a stage the table places in the devbox half."""
+    import yaml
+
+    from .halves import STAGE_HALF
+
+    wf = yaml.safe_load((ROOT / ".github" / "workflows" / "nightly-gate.yml").read_text())
+    ran = 0
+    for part in wf["jobs"]["part"]["strategy"]["matrix"]["part"]:
+        argv = make_gate_argv(part["target"])
+        if argv is None or "--island" in argv:
+            continue
+        ran += 1
+        names = stage_names(argv)
+        assert names, f"Nightly Gate part {part['name']} (make {part['target']}) selects no stage"
+        devbox = [n for n in names if STAGE_HALF[n] == DEVBOX]
+        assert not devbox, f"Nightly Gate part {part['name']} (make {part['target']}) runs devbox-half stages on a hosted runner: {devbox}"
+    assert ran, "no part of the Nightly Gate runs the per-run gate"
+    print(f"self-test ok: {ran} Nightly Gate part(s) run the per-run gate and select no devbox-half stage")
+
+
 def _gate_kind_self_test() -> None:
     """Only `make release-oracle-full`'s and `make release-oracle-island`'s arguments make their record kind; each escape, a missing recall or a narrowed scope makes a run reduced."""
     import re
@@ -295,11 +326,9 @@ def _gate_kind_self_test() -> None:
     makefile = (ROOT / "Makefile").read_text()
 
     def argv_of(target: str) -> list[str]:
-        recipe = re.search(rf"^{target}:.*?(?=^\S)", makefile, re.M | re.S)
-        assert recipe, f"the Makefile has no {target} target"
-        call = re.search(r"-m dev\.release_oracle (.*?)\$\(ARGS\)", recipe.group(0))
-        assert call, f"{target} does not run the gate"
-        return call.group(1).split()
+        argv = make_gate_argv(target)
+        assert argv is not None, f"{target} does not run the gate"
+        return argv
 
     watched = ("RIVET_ORACLE_SEEDED_RECALL", "RIVET_ORACLE_LATEST_ONLY", regression._ESCAPE_ENV, scenarios._REPLICA_ESCAPE_ENV,
                "RIVET_GATE_STATE_URL", *GRADING_KNOBS)
@@ -998,6 +1027,7 @@ def _stages_self_test() -> None:
     _tree_identity_self_test()
     _gate_kind_self_test()
     _halves_self_test()
+    _nightly_gate_stages_self_test()
     release_path.hygiene_self_test()
     property_no_silent_null.self_test()
     property_no_silent_null_grants.self_test()
