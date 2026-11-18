@@ -333,7 +333,7 @@ pub struct RunManifest {
     /// For an `apply --pool --split` range sub-export: the `(lo, hi]` key window THIS unit
     /// covered. Persisted so `--split --resume` RECONSTRUCTS the exact original partition
     /// from the prior run's manifests instead of RE-SAMPLING — the boundary sampler
-    /// (`keyset::sample_key_boundaries`) is offset/percentile-based, so it is unstable under
+    /// (`keyset::sample_key_boundaries`) reads the source's MIN/MAX and existing keys, so it is unstable under
     /// inserts/deletes: a source that grew between crash and resume shifts the boundaries,
     /// and skipping completed units by ordinal name then covers a DIFFERENT key range than
     /// was exported, silently dropping rows. `None` for a non-split export. Serde-default so

@@ -211,13 +211,15 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
   single label. The mapper now distinguishes them via `column_type()` +
   `flags()` + `character_set`.
 
-### Known limitations (pinned by `*currently_fails*` tests)
+### Known limitations
 
 * PG `numeric(p, -s)` (negative scale) cannot be written to Parquet — the
-  spec requires non-negative DECIMAL scale. Test
-  `pg_edge_decimal_negative_scale_currently_fails_at_parquet_write`
-  pins the failure with a friendly error message so any future workaround
-  must update the test deliberately.
+  spec requires non-negative DECIMAL scale. The catalog does not report a
+  negative scale, so a bare column is refused as `RIVET_TYPE_UNSAFE_MAPPING`
+  (`pg_edge_decimal_negative_scale_without_override_is_refused_as_unsafe_mapping`)
+  and a `decimal(p,-s)` override as `RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH`
+  (`pg_edge_decimal_negative_scale_override_is_refused_by_the_override_table`).
+  Declare the column `string` to keep its digits.
 * DuckDB's `DECIMAL` is capped at precision 38 (HUGEINT-backed). For
   Parquet files with `precision > 38` DuckDB silently returns DOUBLE.
   Our file still carries `LogicalType::Decimal(p, s)` correctly — pyarrow

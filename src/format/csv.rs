@@ -23,10 +23,6 @@ impl super::Format for CsvFormat {
         schema: &SchemaRef,
         mut writer: Box<dyn Write + Send>,
     ) -> Result<Box<dyn super::FormatWriter + Send>> {
-        // Fail loud: arrays and other nested/wide Arrow types have no CSV cell
-        // representation. Reject them up front, naming the column, instead of
-        // silently writing empty values for every row — `format: parquet` or
-        // excluding the column from the query is the fix.
         if let Some(field) = schema
             .fields()
             .iter()
@@ -40,12 +36,6 @@ impl super::Format for CsvFormat {
                 field.data_type()
             );
         }
-        // RFC-4180 quote each column NAME with the SAME rule the Utf8 data arm
-        // applies to cells (quote on , " CR LF, double embedded quotes). Data
-        // cells were quoted but the header was a raw `join(",")`, so a curated-
-        // query alias with a comma (`... AS "Amount, USD"`) or quote split the
-        // header across columns and silently mis-aligned EVERY downstream reader
-        // from the data. Built once (not the per-cell hot path), so plain String.
         let header = schema
             .fields()
             .iter()
@@ -59,7 +49,7 @@ impl super::Format for CsvFormat {
             })
             .collect::<Vec<String>>()
             .join(",");
-        let header_bytes = header.len() as u64 + 1; // +1 for newline
+        let header_bytes = header.len() as u64 + 1;
         writeln!(writer, "{}", header)?;
         Ok(Box::new(CsvFormatWriter {
             writer,
@@ -98,10 +88,7 @@ impl super::FormatWriter for CsvFormatWriter {
     }
 }
 
-/// Arrow types `write_csv_value` can serialize. Everything else — lists,
-/// structs, maps, `Decimal256`, non-UUID fixed binary, … — has no CSV cell
-/// representation and is rejected at writer creation rather than silently
-/// emitted as an empty value.
+/// Arrow types `write_csv_value` can serialize.
 pub(crate) fn csv_serializable(dt: &DataType) -> bool {
     matches!(
         dt,
@@ -122,11 +109,7 @@ pub(crate) fn csv_serializable(dt: &DataType) -> bool {
     )
 }
 
-/// Lowercase hex-encode `bytes` into `writer`. Replaces a per-byte
-/// `write!("{:02x}")` (which drove `core::fmt` through the `dyn Write` vtable
-/// once per byte) with a table lookup batched through a stack buffer — zero
-/// allocation, byte-identical output. On a binary/blob column this is the
-/// difference between N format-machinery calls and a handful of `write_all`s.
+/// Lowercase hex-encode `bytes` into `writer`.
 fn write_lower_hex(writer: &mut dyn Write, bytes: &[u8]) -> Result<()> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut chunk = [0u8; 1024];
@@ -208,20 +191,10 @@ fn write_csv_value(writer: &mut dyn Write, array: &dyn Array, idx: usize) -> Res
                 .downcast_ref::<StringArray>()
                 .expect("DataType/Array mismatch");
             let val = arr.value(idx);
-            // A PRESENT empty string renders as `""` (round-7): bare-nothing is
-            // this writer's NULL rendering, so an unquoted empty cell collided
-            // NULL with `""` byte-identically — a distinction rivet's own
-            // row_hash treats as load-bearing. PostgreSQL's COPY CSV convention
-            // is the same (`""` = empty, bare = NULL). Consumers note: DuckDB's
-            // read_csv default `allow_quoted_nulls=true` still folds `""` to
-            // NULL — set it false to recover the distinction.
             if val.is_empty() {
                 writer.write_all(b"\"\"")?;
                 return Ok(());
             }
-            // RFC 4180: quote on delimiter, quote, LF — and CR, which readers
-            // in universal-newline mode treat as a record terminator. One pass
-            // instead of four `contains` scans per cell.
             if val
                 .bytes()
                 .any(|b| matches!(b, b',' | b'"' | b'\n' | b'\r'))
@@ -245,20 +218,12 @@ fn write_csv_value(writer: &mut dyn Write, array: &dyn Array, idx: usize) -> Res
                 .downcast_ref::<BinaryArray>()
                 .expect("DataType/Array mismatch");
             let val = arr.value(idx);
-            // Same rule as Utf8: a present empty value is `""`, bare nothing is NULL.
             if val.is_empty() {
                 writer.write_all(b"\"\"")?;
                 return Ok(());
             }
             write_lower_hex(writer, val)?;
         }
-        // FixedSizeBinary today only carries 16-byte UUIDs (see
-        // `RivetType::Uuid` → `DataType::FixedSizeBinary(16)` in
-        // `src/types/mapping.rs`). CSV has no native binary cell; emit the
-        // canonical hyphenated lowercase form so downstream readers can
-        // recognise it as a UUID rather than 16 bytes of mojibake. Any
-        // future FixedSizeBinary use that is not a UUID should branch on
-        // the size argument before reaching this arm.
         DataType::FixedSizeBinary(16) => {
             let arr = array
                 .as_any()
@@ -275,11 +240,6 @@ fn write_csv_value(writer: &mut dyn Write, array: &dyn Array, idx: usize) -> Res
                 .downcast_ref::<Date32Array>()
                 .expect("DataType/Array mismatch");
             let days = arr.value(idx);
-            // `Date32` is "days since 1970-01-01"; a pathological value near
-            // i32::MAX overflows `NaiveDate + Duration` and panics in chrono.
-            // Fall back to checked arithmetic and emit an empty cell on
-            // overflow — matches the null-cell convention for unserialisable
-            // values elsewhere in this writer.
             let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is valid");
             let date =
                 chrono::Duration::try_days(days as i64).and_then(|d| epoch.checked_add_signed(d));
@@ -293,12 +253,6 @@ fn write_csv_value(writer: &mut dyn Write, array: &dyn Array, idx: usize) -> Res
                 .downcast_ref::<Time64MicrosecondArray>()
                 .expect("DataType/Array mismatch");
             let micros = arr.value(idx);
-            // MySQL TIME is a SIGNED duration (-838:59:59 .. 838:59:59), so micros
-            // can be negative. Extract the sign ONCE and format the magnitude: the
-            // old truncating `/`+`%` on a negative value emitted a minus PER FIELD
-            // ("-1:-30:00", "00:00:00.-00001", "00:00:-1.-500000"), corrupt in every
-            // CSV/time reader. Hours are `{:02}` MINIMUM-width, so a >24h duration
-            // (up to 838h) still prints in full.
             let neg = micros < 0;
             let abs = micros.unsigned_abs();
             let secs = abs / 1_000_000;
@@ -318,36 +272,13 @@ fn write_csv_value(writer: &mut dyn Write, array: &dyn Array, idx: usize) -> Res
                 .as_any()
                 .downcast_ref::<TimestampMicrosecondArray>()
                 .expect("DataType/Array mismatch");
-            // rivet's type model keeps the naive-vs-instant distinction that
-            // every other output (Parquet `isAdjustedToUTC`, the warehouse
-            // target types) preserves: a source TIMESTAMPTZ maps to
-            // `Timestamp(_, Some("UTC"))`, a naive TIMESTAMP to `None`. Without
-            // a marker on the instant, CSV renders BOTH identically — a consumer
-            // loading the instant into a tz-aware column on a NON-UTC session
-            // then reads the UTC wall-clock as local and shifts every value (the
-            // session-state class, on the CSV encode leg). Emit a trailing `Z`
-            // for the instant (rivet normalises to UTC) so it is unambiguous;
-            // the naive value stays bare (its wall-clock IS the value).
             let is_instant = tz.is_some();
             let micros = arr.value(idx);
-            // FLOOR division (div_euclid/rem_euclid), NOT truncating `/`+`%`: for
-            // a pre-1970 (negative) micros with a sub-second fraction, `micros %
-            // 1_000_000` is NEGATIVE, so `* 1_000 as u32` wraps to a huge value,
-            // `from_timestamp` returns None, and the cell was emitted EMPTY —
-            // silent data loss for every sub-second timestamp before the epoch
-            // (Parquet keeps them). Euclidean rem is always in [0, 1_000_000), so
-            // nsecs stays in range: micros=-1 → secs=-1, nsecs=999_999_000 →
-            // 1969-12-31T23:59:59.999999.
             let secs = micros.div_euclid(1_000_000);
             let nsecs = (micros.rem_euclid(1_000_000) * 1_000) as u32;
             if let Some(dt) = chrono::DateTime::from_timestamp(secs, nsecs) {
                 use chrono::{Datelike as _, Timelike as _};
                 let y = dt.year();
-                // Fast path: emit the `%Y-%m-%dT%H:%M:%S%.6f` form by hand to
-                // skip chrono's per-value strftime-string re-parse. `{:04}`
-                // matches `%Y`'s zero-pad-to-4 exactly for years 0..=9999;
-                // outside that range (pre-CE / 5-digit years from pathological
-                // micros) fall back to chrono so the output stays identical.
                 if (0..=9999).contains(&y) {
                     write!(
                         writer,
@@ -369,9 +300,6 @@ fn write_csv_value(writer: &mut dyn Write, array: &dyn Array, idx: usize) -> Res
             }
         }
         other => {
-            // Defensive: `create_writer` rejects unsupported types up front, so
-            // this should be unreachable. Bail rather than silently skip if a
-            // new type slips through.
             crate::rivet_bail!(
                 crate::error::codes::INTERNAL_DEST_INVARIANT,
                 "CSV: no serializer for Arrow type {other:?} (column should have been rejected at writer creation)"
@@ -382,12 +310,7 @@ fn write_csv_value(writer: &mut dyn Write, array: &dyn Array, idx: usize) -> Res
     Ok(())
 }
 
-/// Counts RFC-4180 records by streaming the file: a `\n` terminates a record
-/// only outside double quotes, so quoted embedded newlines (which our own CSV
-/// writer emits) stay inside one record. Doubled quotes within a quoted field
-/// self-cancel, so toggling on every `"` tracks quoted state without parsing
-/// fields. CRLF terminators work because the `\n` is the trigger; a final
-/// record without a trailing newline is counted at EOF.
+/// Counts RFC-4180 records by streaming the file.
 pub(crate) fn count_csv_records(path: &Path) -> Result<usize> {
     let file = std::fs::File::open(path)?;
     let mut reader = std::io::BufReader::new(file);
@@ -427,14 +350,12 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use std::sync::Arc;
 
-    // Helper: render one cell to a String using write_csv_value.
     fn cell<A: Array + 'static>(array: A, idx: usize) -> String {
         let mut buf = Vec::new();
         write_csv_value(&mut buf, &array, idx).unwrap();
         String::from_utf8(buf).unwrap()
     }
 
-    // Helper: render a null cell from any typed array.
     fn null_cell(dt: DataType) -> String {
         use arrow::array::new_null_array;
         let arr = new_null_array(&dt, 1);
@@ -443,12 +364,8 @@ mod tests {
         String::from_utf8(buf).unwrap()
     }
 
-    // ── mutation-W5 gap closures ─────────────────────────────────────────────
-
     #[test]
     fn time64_renders_exact_wall_clock() {
-        // W5: the µs → hh:mm:ss.ffffff arithmetic (/, %) had no golden — a
-        // mutated divisor silently corrupts every TIME cell in CSV output.
         use arrow::array::Time64MicrosecondArray;
         assert_eq!(
             cell(Time64MicrosecondArray::from(vec![86_399_999_999_i64]), 0),
@@ -464,19 +381,15 @@ mod tests {
         );
     }
 
-    // MySQL TIME is a SIGNED duration; the batch decoder emits negative micros.
-    // The old truncating `/`+`%` put a minus on EVERY field ("-1:-30:00",
-    // "00:00:00.-00001") — corrupt in any reader. One leading sign, magnitude
-    // formatted; a >24h duration still prints in full.
     #[test]
     fn negative_time_renders_one_leading_sign_not_a_minus_per_field() {
         use arrow::array::Time64MicrosecondArray;
         for (micros, want) in [
-            (-5_400_000_000_i64, "-01:30:00.000000"),      // -1h30m
-            (-1_i64, "-00:00:00.000001"),                  // -1 microsecond
-            (-1_500_000_i64, "-00:00:01.500000"),          // -1.5s
-            (-3_020_399_000_000_i64, "-838:59:59.000000"), // MySQL TIME min (>24h)
-            (5_400_000_000_i64, "01:30:00.000000"),        // positive unaffected
+            (-5_400_000_000_i64, "-01:30:00.000000"),
+            (-1_i64, "-00:00:00.000001"),
+            (-1_500_000_i64, "-00:00:01.500000"),
+            (-3_020_399_000_000_i64, "-838:59:59.000000"),
+            (5_400_000_000_i64, "01:30:00.000000"),
         ] {
             assert_eq!(
                 cell(Time64MicrosecondArray::from(vec![micros]), 0),
@@ -488,9 +401,6 @@ mod tests {
 
     #[test]
     fn write_batch_layout_and_byte_accounting_are_exact() {
-        // W5: `col_idx > 0` mutating to `>=` puts a LEADING comma on every row
-        // (corrupt CSV); the header `len + 1` and `bytes_written +=` mutants
-        // desync the rotation accounting. Pin the exact output AND the count.
         use arrow::array::Int64Array;
         use std::sync::{Arc as SArc, Mutex};
 
@@ -537,8 +447,6 @@ mod tests {
         );
     }
 
-    // ── null handling ────────────────────────────────────────────────────────
-
     #[test]
     fn null_value_writes_empty_string() {
         assert_eq!(null_cell(DataType::Int64), "");
@@ -546,11 +454,7 @@ mod tests {
         assert_eq!(null_cell(DataType::Boolean), "");
     }
 
-    /// The OTHER side of null_vs_empty (round-7: for months both rendered as
-    /// bare nothing, byte-identical — the collision the matrix row claimed to
-    /// pin). A PRESENT empty string is `""`; NULL stays bare. PostgreSQL's
-    /// COPY CSV convention, and the distinction rivet's own row_hash keeps.
-    /// RED against removing the is_empty() branch.
+    /// A present empty string is `""` while NULL stays bare.
     #[test]
     fn an_empty_string_is_quoted_and_distinct_from_null() {
         assert_eq!(cell(StringArray::from(vec![Some("")]), 0), "\"\"");
@@ -561,8 +465,6 @@ mod tests {
             "NULL and empty string must not collide byte-identically"
         );
     }
-
-    // ── scalars ─────────────────────────────────────────────────────────────
 
     #[test]
     fn bool_true_writes_true() {
@@ -618,16 +520,6 @@ mod tests {
         assert!(result.starts_with("3.14"), "got: {result}");
     }
 
-    // Characterization: float NaN/±Infinity are IEEE-754 values a float column
-    // can legitimately hold (unlike `decimal`, whose Arrow `Decimal128` has no
-    // NaN bit pattern — see the NUMERIC NaN/infinity reject in
-    // `postgres::arrow_convert::build_array`). They are preserved natively in
-    // Parquet; in CSV we emit the Rust float literal (`NaN` / `inf` / `-inf`)
-    // rather than an empty cell, because writing empty would silently conflate
-    // a real NaN/Inf with NULL — corruption — whereas a recognizable literal
-    // round-trips into every major loader's float parser. This pins that
-    // contract so a future arrow/std change can't silently alter it. The CSV
-    // literal is documented in docs/type-mapping.md.
     #[test]
     fn float_special_values_emit_literals_not_empty() {
         assert_eq!(cell(Float64Array::from(vec![f64::NAN]), 0), "NaN");
@@ -635,11 +527,8 @@ mod tests {
         assert_eq!(cell(Float64Array::from(vec![f64::NEG_INFINITY]), 0), "-inf");
         assert_eq!(cell(Float32Array::from(vec![f32::NAN]), 0), "NaN");
         assert_eq!(cell(Float32Array::from(vec![f32::INFINITY]), 0), "inf");
-        // -0.0 keeps its sign (a real IEEE-754 distinction), never becomes "0".
         assert_eq!(cell(Float64Array::from(vec![-0.0f64]), 0), "-0");
     }
-
-    // ── string escaping ──────────────────────────────────────────────────────
 
     #[test]
     fn plain_string_no_quoting() {
@@ -653,7 +542,6 @@ mod tests {
 
     #[test]
     fn string_with_double_quote_is_escaped() {
-        // say "hi" → opening " + say  + "" + hi + "" + closing " = "say ""hi"""
         let result = cell(StringArray::from(vec![r#"say "hi""#]), 0);
         assert_eq!(result, r#""say ""hi""""#);
     }
@@ -668,11 +556,6 @@ mod tests {
         assert!(result.contains("line1\nline2"), "got: {result}");
     }
 
-    // ROAST-RED csv-cr-quote: the quote predicate checks ',', '"' and '\n' but
-    // not '\r', so a value containing a lone CR is emitted unquoted — RFC 4180
-    // requires quoting CR, and Excel/Python universal-newline readers split the
-    // row on the bare CR.
-    // Asserts CORRECT behavior; expected to FAIL until the fix lands.
     #[test]
     fn roast_string_with_carriage_return_is_quoted() {
         let result = cell(StringArray::from(vec!["a\rb"]), 0);
@@ -681,8 +564,6 @@ mod tests {
             "lone CR must force quoting per RFC 4180, but got unquoted cell {result:?}"
         );
     }
-
-    // ── binary ───────────────────────────────────────────────────────────────
 
     #[test]
     fn binary_is_written_as_hex() {
@@ -696,8 +577,6 @@ mod tests {
         assert_eq!(null_cell(DataType::Binary), "");
     }
 
-    // ── Date32 ───────────────────────────────────────────────────────────────
-
     #[test]
     fn date32_epoch_is_1970_01_01() {
         assert_eq!(cell(Date32Array::from(vec![0i32]), 0), "1970-01-01");
@@ -705,15 +584,11 @@ mod tests {
 
     #[test]
     fn date32_positive_offset() {
-        // 365 days after epoch = 1971-01-01
         assert_eq!(cell(Date32Array::from(vec![365i32]), 0), "1971-01-01");
     }
 
-    // ── Timestamp(Microsecond) ───────────────────────────────────────────────
-
     #[test]
     fn timestamp_micros_formats_as_iso() {
-        // 2023-01-01T00:00:00.000000 = 1672531200_000000 micros since epoch
         let micros: i64 = 1_672_531_200 * 1_000_000;
         let _schema = Arc::new(Schema::new(vec![Field::new(
             "ts",
@@ -726,15 +601,8 @@ mod tests {
         assert!(result.contains("00:00:00"), "got: {result}");
     }
 
-    // rivet keeps the naive-vs-instant distinction in every other output
-    // (Parquet isAdjustedToUTC, the warehouse target types). CSV must too: a
-    // naive TIMESTAMP renders bare (its wall-clock IS the value), an instant
-    // TIMESTAMPTZ (Timestamp(_, Some("UTC"))) gets a trailing `Z` — else a
-    // consumer loading the instant on a NON-UTC session reads the UTC wall-clock
-    // as local and shifts every value.
     #[test]
     fn timestamp_marks_instant_utc_but_leaves_naive_bare() {
-        // 2024-06-15T03:00:00.000000 UTC.
         let micros: i64 = 1_718_420_400 * 1_000_000;
         let naive = TimestampMicrosecondArray::from(vec![micros]);
         assert_eq!(
@@ -749,8 +617,6 @@ mod tests {
             "an instant TIMESTAMPTZ renders an explicit UTC `Z`"
         );
     }
-
-    // ── write_batch via CsvFormat ────────────────────────────────────────────
 
     #[test]
     fn csv_format_write_batch_tracks_bytes_and_succeeds() {
@@ -769,13 +635,11 @@ mod tests {
         )
         .unwrap();
 
-        // Pass Vec by value — avoids the &mut T 'static lifetime requirement.
         let fmt = CsvFormat;
         let mut writer = fmt
             .create_writer(&schema, Box::new(Vec::<u8>::new()))
             .unwrap();
         writer.write_batch(&batch).unwrap();
-        // Header "id,name\n" + rows "1,alice\n" + "2,\n" = at least 18 bytes
         assert!(
             writer.bytes_written() > 10,
             "expected >10 bytes, got {}",
@@ -784,17 +648,13 @@ mod tests {
         writer.finish().unwrap();
     }
 
-    // Regression: a column NAME containing a comma/quote must be RFC-4180 quoted
-    // in the header, exactly as data cells are — else a curated-query alias like
-    // `... AS "Amount, USD"` split the header and silently mis-aligned every
-    // downstream reader from the data columns. RED before the header quoter.
     #[test]
     fn csv_header_quotes_a_column_name_with_a_comma_or_quote() {
         use crate::format::Format;
         let schema = Arc::new(Schema::new(vec![
-            Field::new("Amount, USD", DataType::Int64, false), // comma in the name
-            Field::new("a\"b", DataType::Utf8, true),          // quote in the name
-            Field::new("plain", DataType::Utf8, true),         // untouched
+            Field::new("Amount, USD", DataType::Int64, false),
+            Field::new("a\"b", DataType::Utf8, true),
+            Field::new("plain", DataType::Utf8, true),
         ]));
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("out.csv");
@@ -804,12 +664,8 @@ mod tests {
         w.finish().unwrap();
         let out = std::fs::read_to_string(&path).unwrap();
         let header = out.lines().next().unwrap();
-        // comma-name quoted; quote-name quoted with the `"` doubled; plain bare —
-        // and crucially still exactly THREE header columns, the comma not a split.
         assert_eq!(header, r#""Amount, USD","a""b",plain"#);
     }
-
-    // ── fail loud on types CSV can't represent ───────────────────────────────
 
     #[test]
     fn csv_rejects_array_columns_loudly() {
@@ -830,9 +686,7 @@ mod tests {
         assert!(msg.to_lowercase().contains("csv"), "{msg}");
     }
 
-    /// Consistency guard: every type `csv_serializable` admits must actually be
-    /// handled by `write_csv_value` (not hit its `other => bail` fallthrough).
-    /// Keeps the whitelist and the writer in lock-step so one can't drift.
+    /// Consistency guard: every type `csv_serializable` admits must actually be handled by `write_csv_value` (not hit its `other => bail` fallthrough).
     #[test]
     fn every_serializable_type_is_actually_written() {
         use crate::format::Format;
@@ -868,7 +722,6 @@ mod tests {
             .iter()
             .map(|(n, a)| Field::new(*n, a.data_type().clone(), true))
             .collect();
-        // Sanity: each column's type is on the whitelist.
         for f in &fields {
             assert!(
                 csv_serializable(f.data_type()),
@@ -886,14 +739,8 @@ mod tests {
             .expect("every serializable type must write without hitting the fallthrough");
     }
 
-    // ── perf-wave byte-identity guards ───────────────────────────────────────
-    // The hex + timestamp fast paths must stay byte-for-byte identical to the
-    // `{:02x}`-per-byte / `dt.format(...)` forms they replaced.
-
     #[test]
     fn binary_hex_matches_per_byte_format_for_all_byte_values() {
-        // Every byte 0..=255 — the table+chunk encoder must equal the old
-        // per-byte `{:02x}` (the empty value is `""`, pinned separately).
         let all: Vec<u8> = (0..=255u8).collect();
         for case in [&all[..], &[0x00, 0xff, 0x10, 0x0a]] {
             let expected: String = case.iter().map(|b| format!("{b:02x}")).collect();
@@ -904,7 +751,6 @@ mod tests {
 
     #[test]
     fn binary_hex_spans_chunk_boundary() {
-        // Larger than the 512-byte slab so the chunked write_all path is hit.
         let big: Vec<u8> = (0..2000u32).map(|i| (i % 256) as u8).collect();
         let expected: String = big.iter().map(|b| format!("{b:02x}")).collect();
         let got = cell(BinaryArray::from_vec(vec![&big[..]]), 0);
@@ -913,19 +759,13 @@ mod tests {
 
     #[test]
     fn timestamp_fast_path_matches_chrono_format() {
-        // Representative micros: epoch, sub-second, end-of-day, a far-future
-        // in-range year, and a value whose year leaves the 0..=9999 fast path
-        // (must hit the chrono fallback and still match). The recompute uses the
-        // SAME euclidean split the product now uses, so it is a self-consistency
-        // check of the fast-path-vs-chrono rendering — the pre-1970 correctness
-        // is pinned separately below with a HARD-CODED oracle.
         let cases: [i64; 6] = [
             0,
-            1_700_000_000_123_456,        // 2023-… with micros
-            1_000_000 * 86_399 + 999_999, // 1970-01-01T23:59:59.999999
-            -62_135_596_800_000_000,      // 0001-01-01T00:00:00 (negative, fast path)
-            253_402_300_799_000_000,      // 9999-12-31T23:59:59 (still fast path)
-            300_000_000_000_000_000,      // year > 9999 → chrono fallback
+            1_700_000_000_123_456,
+            1_000_000 * 86_399 + 999_999,
+            -62_135_596_800_000_000,
+            253_402_300_799_000_000,
+            300_000_000_000_000_000,
         ];
         for micros in cases {
             let got = cell(TimestampMicrosecondArray::from(vec![micros]), 0);
@@ -939,19 +779,13 @@ mod tests {
         }
     }
 
-    // Regression (true oracle, NOT the recomputed self-oracle above): a pre-1970
-    // sub-second timestamp must render its real value, never an empty cell. With
-    // the old truncating `/`+`%` split the negative remainder wrapped `nsecs`,
-    // `from_timestamp` returned None, and the cell was emitted EMPTY — 100%
-    // silent loss for this whole class while Parquet kept the value. Hard-coded
-    // expected strings so the test can never re-derive the bug.
     #[test]
     fn pre_1970_subsecond_timestamp_is_not_dropped_to_an_empty_cell() {
         let expect: [(i64, &str); 4] = [
-            (-1, "1969-12-31T23:59:59.999999"), // one micro before the epoch
-            (-500_000, "1969-12-31T23:59:59.500000"), // half a second before
-            (-86_400_000_000, "1969-12-31T00:00:00.000000"), // whole day before (whole second)
-            (-125_125_000, "1969-12-31T23:57:54.875000"), // multi-second, sub-second frac
+            (-1, "1969-12-31T23:59:59.999999"),
+            (-500_000, "1969-12-31T23:59:59.500000"),
+            (-86_400_000_000, "1969-12-31T00:00:00.000000"),
+            (-125_125_000, "1969-12-31T23:57:54.875000"),
         ];
         for (micros, want) in expect {
             let got = cell(TimestampMicrosecondArray::from(vec![micros]), 0);

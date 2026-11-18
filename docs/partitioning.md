@@ -127,9 +127,9 @@ GROUP BY 1;
   export as one un-partitioned job (its `{partition}` token stays literal in the
   shown path, the row estimate is the whole span, strategy is the base mode).
   Treat their output as the per-partition shape, not the campaign.
-- **A sealed plan cannot be applied.** `rivet plan` warns that a `partition_by`
-  export's artifact is a preview, and `rivet apply <plan.json>` refuses it before
-  writing anything. Apply the config instead: `rivet apply <config.yaml>`.
+- **A `partition_by` export cannot be sealed.** `rivet plan --output <file>` refuses it with
+  `RIVET_PLAN_PARTITION_TOKEN_UNEXPANDED` before writing the artifact. Apply the config instead:
+  `rivet apply <config.yaml>` or `rivet run`.
 - **Validating a single partition today:** point `validate` at the concrete
   prefix —
   `rivet validate --config c.yaml --export events --prefix events/created_at=2023-01-01`.
