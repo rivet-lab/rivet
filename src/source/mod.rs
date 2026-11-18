@@ -1,5 +1,6 @@
 pub(crate) mod batch_controller;
 pub(crate) mod cdc;
+pub(crate) mod column_grants;
 pub(crate) mod keyset_key;
 pub mod mongo;
 pub mod mssql;
@@ -453,45 +454,6 @@ pub(crate) fn columns_from_grants_boundary(engine: crate::config::SourceType) ->
         crate::config::SourceType::Oracle => oracle::column_grants::BOUNDARY,
         _ => mysql::column_grants::BOUNDARY,
     }
-}
-
-/// Code an export error under `columns_from.
-pub(crate) fn code_a_revoked_column(
-    err: anyhow::Error,
-    export: &str,
-    grants_on: bool,
-    cdc_leg: bool,
-) -> anyhow::Error {
-    if seeded!(
-        "column-grants-revoked-column-uncoded",
-        true,
-        !grants_on || crate::error::code_of(&err).is_some()
-    ) {
-        return err;
-    }
-    let Some(said) = mysql::column_grants::denied_by_server(&err) else {
-        return err;
-    };
-    if cdc_leg {
-        return crate::error::coded(
-            crate::error::codes::SOURCE_CDC_GRANTS_CHANGED,
-            format!(
-                "export '{export}': the account may no longer SELECT a column this snapshot reads \
-                 under `columns_from: grants` (the server said: {said}). The grants changed after \
-                 this run read them; the snapshot of this table was not completed and no change \
-                 stream was opened. Re-run: the run then reads the columns as they are now"
-            ),
-        );
-    }
-    crate::error::coded(
-        crate::error::codes::SOURCE_COLUMNS_UNREADABLE,
-        format!(
-            "export '{export}': the account may no longer SELECT a column this run reads under \
-             `columns_from: grants` (the server said: {said}). The grants changed after the plan \
-             or the settings named that column; nothing of this run was delivered. Run `rivet plan` \
-             again so the plan reads the columns the account may SELECT now, or GRANT SELECT on it"
-        ),
-    )
 }
 
 pub(crate) use crate::connect::driver_runtime;
