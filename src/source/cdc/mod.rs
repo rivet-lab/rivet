@@ -1205,7 +1205,10 @@ impl<'s> CdcSchemaResolver<'s> {
         validate_table_ident(table)?;
         let select =
             readable.map_or_else(|| format!("SELECT * FROM {table}"), |r| r.select.clone());
-        let mut mappings = match self.source().type_mappings(&select, overrides) {
+        let mut mappings = match self
+            .source()
+            .type_mappings(&select, &crate::types::ColumnOverrides::new())
+        {
             Ok(m) => m,
             Err(e) => return Err(schema_read_error(readable.is_some(), table, e)),
         };
@@ -1235,12 +1238,45 @@ impl<'s> CdcSchemaResolver<'s> {
         }
         mappings
             .into_iter()
-            .map(|m| {
-                let overridden = overrides.contains_key(&m.column_name);
-                plan_cdc_delivery(m, overridden)
+            .map(|m| match overrides.contains_key(&m.column_name) {
+                true => retype_for_stream(m, overrides),
+                false => plan_cdc_delivery(m, false),
             })
             .collect()
     }
+}
+
+/// The mapping of `m` under its `columns:` override: the declared type, refused when the CDC cell builder cannot build it.
+pub(crate) fn retype_for_stream(
+    m: crate::types::TypeMapping,
+    overrides: &crate::types::ColumnOverrides,
+) -> Result<crate::types::TypeMapping> {
+    let Some(target) = overrides.get(&m.column_name) else {
+        return Ok(m);
+    };
+    let source = crate::types::SourceColumn::simple(
+        m.column_name.clone(),
+        m.source_native_type.clone(),
+        m.nullable,
+    );
+    plan_cdc_delivery(
+        crate::types::TypeMapping::from_source(&source, target.clone()),
+        true,
+    )
+}
+
+/// `columns:` overrides of a stream export, graded by the CDC cell builder and not by the batch override table.
+pub(crate) fn stream_override_refusal(
+    src: &mut dyn crate::source::Source,
+    query: &str,
+    overrides: &crate::types::ColumnOverrides,
+) -> Result<()> {
+    let Ok(mappings) = src.type_mappings(query, &crate::types::ColumnOverrides::new()) else {
+        return Ok(());
+    };
+    mappings
+        .into_iter()
+        .try_for_each(|m| retype_for_stream(m, overrides).map(drop))
 }
 
 /// The CDC plan for one column: kept when the builder builds it, else the server's own text.
@@ -1442,6 +1478,43 @@ mod mod_decisions {
             Some("RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH")
         );
         assert!(format!("{err:#}").contains("column 'c'"), "{err:#}");
+    }
+
+    /// A stream override is graded by the CDC cell builder, so a pair only the stream reads is delivered.
+    #[test]
+    fn a_stream_override_is_graded_by_the_cell_builder_not_the_batch_table() {
+        use crate::types::{RivetType, SourceColumn, TimeUnit, TypeMapping};
+        let time = || {
+            TypeMapping::from_source(
+                &SourceColumn::simple("t", "time", true),
+                RivetType::Time {
+                    unit: TimeUnit::Microsecond,
+                },
+            )
+        };
+        let declared = |t: RivetType| [("t".to_string(), t)].into_iter().collect();
+        let kept = retype_for_stream(time(), &declared(RivetType::String)).unwrap();
+        assert_eq!(kept.arrow_type, Some(arrow::datatypes::DataType::Utf8));
+        assert!(!crate::types::override_table::override_is_read(
+            crate::types::override_table::Engine::Mysql,
+            "time",
+            &RivetType::Time {
+                unit: TimeUnit::Microsecond
+            },
+            &RivetType::String,
+        ));
+        let ns = RivetType::Timestamp {
+            unit: TimeUnit::Nanosecond,
+            timezone: None,
+        };
+        let err = retype_for_stream(time(), &declared(ns)).unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<crate::error::CodedError>()
+                .map(|c| c.code()),
+            Some("RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH")
+        );
+        let untouched = retype_for_stream(time(), &crate::types::ColumnOverrides::new()).unwrap();
+        assert_eq!(untouched.rivet_type, time().rivet_type);
     }
 
     #[test]

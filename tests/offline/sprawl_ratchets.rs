@@ -90,7 +90,7 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ("src/pipeline/job.rs::execute_resolved_plan#1", 264),
     ("src/pipeline/job.rs::run_export_job_inner#1", 230),
     ("src/pipeline/keyset.rs::run_keyset#1", 200),
-    ("src/pipeline/keyset.rs::run_keyset_parallel#1", 331),
+    ("src/pipeline/keyset.rs::run_keyset_parallel#1", 330),
     (
         "src/pipeline/parallel_children.rs::run_exports_as_child_processes#1",
         310,
@@ -105,7 +105,7 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ("src/plan/build.rs::build_plan_on#1", 226),
     (
         "src/plan/build.rs::chunked_strategy_from_introspection#1",
-        200,
+        196,
     ),
     ("src/plan/build.rs::resolve_chunked_strategy#1", 175),
     // 2026-11-17: 257 -> 238, the run-plan and named-check emitters left doctor (see #1041).

@@ -14,6 +14,15 @@ pub fn pg_connect() -> PgClient {
     PgClient::connect(POSTGRES_URL, NoTls).expect("connect to postgres")
 }
 
+/// Make the catalog estimate `rows` rows for `table`, kept by turning autovacuum off on it: a table the planner thinks is that large.
+pub fn pg_catalog_says_rows(c: &mut PgClient, table: &str, rows: i64) {
+    c.batch_execute(&format!(
+        "ALTER TABLE {table} SET (autovacuum_enabled = false);
+         UPDATE pg_class SET reltuples = {rows} WHERE oid = '{table}'::regclass;"
+    ))
+    .expect("set the catalog row estimate (the stand's rivet role is a superuser)");
+}
+
 /// RAII handle that drops the table on test exit (panic-safe via `Drop`).
 /// Without this, a test that seeds `orders_xyz` and then fails leaves the
 /// table behind, polluting the next run.

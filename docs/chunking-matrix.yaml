@@ -80,12 +80,20 @@ scenarios:
     oracle:   { test: composite_key_parallel_resume_after_a_crash_is_exact_oracle }
 
   - id: keyset_parallel_fanout
-    what: "chunk_by_key + parallel: N → N ROW-percentile-range workers seek concurrently (feat/parallel-keyset — a DISTINCT chunking strategy: nth-row percentile range sampling, sparse-key immune). Union reads every row exactly once AND the run fans to ≥2 workers (no silent collapse to a single serial worker)."
+    what: "chunk_by_key + parallel: N → N key-range workers seek concurrently (feat/parallel-keyset — a DISTINCT chunking strategy: the key's MIN..MAX split evenly by value, each cut snapped to an existing key by one index seek). Union reads every row exactly once AND the run fans to ≥2 workers (no silent collapse to a single serial worker)."
     postgres: { test: parallel_keyset_parity_postgres }
     mysql:    { test: parallel_keyset_parity_mysql }
     mssql:    { test: parallel_keyset_parity_mssql }
     mongo:    { na: "Mongo `parallel: N` is the SEPARATE `_id`-range reader (mongo_parallel), not SQL keyset fan-out — see the mongo_parallel runner, out of this SQL-keyset scenario" }
     oracle:   { test: parallel_keyset_reads_every_row_once }
+
+  - id: keyset_parallel_sampler_bounded
+    what: "chunk_by_key + parallel: N → the range sampler reads N+1 rows by index seek (first-row MIN, MAX, one per cut), never a COUNT(*) or an OFFSET skip: setup cost does not grow with the table (#1059)"
+    postgres: { test: parallel_keyset_sampler_reads_a_bounded_number_of_rows_postgres }
+    mysql:    { test: every_dialect_samples_by_seeks_to_the_same_boundaries }
+    mssql:    { test: every_dialect_samples_by_seeks_to_the_same_boundaries }
+    mongo:    { na: "Mongo `parallel: N` is the SEPARATE `_id`-range reader (mongo_parallel), not the SQL keyset range sampler" }
+    oracle:   { test: every_dialect_samples_by_seeks_to_the_same_boundaries }
 
   - id: keyset_parallel_incremental
     what: "chunk_by_key + parallel: N + keyset_incremental: a CLEAN re-run seeks past the persisted anchor + advances it, across N workers (run→unchanged=0→insert→only-new). Discriminator = total row count (1000→1000→1500, never a full re-read)."
