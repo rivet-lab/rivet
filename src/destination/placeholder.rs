@@ -1,60 +1,22 @@
 //! **Layer: Coordinator helper** (destination prefix templating)
-//!
-//! Single source of truth for `{date}`/`{export}`/`{table}`/`{run_id}`
-//! substitution in `destination.path` and `destination.prefix`.
-//!
-//! Every command that touches a destination prefix — `run`, `doctor`,
-//! `validate`, `reconcile`, `repair`, `plan`, `apply` — MUST resolve placeholders
-//! through this module so they all look at the same physical bytes.
-//!
-//! A sealed plan keeps `{date}` as written ([`PlaceholderContext::keeping_date`])
-//! and `rivet apply` resolves it to its own UTC day through
-//! [`resolve_destination`], the function `rivet run` resolves with; `rivet plan
-//! --date` freezes the day into the artifact instead (ADR-0005 PA1).
-//!
-//! Why this exists as its own module (ADR carveout for v0.7.2):
-//! the v0.7.1 lineage carried two divergent substitution paths
-//! (`plan::build::apply_destination_placeholders` and inline `replace()`
-//! calls scattered through validate/doctor wiring).  The v0.7.2 cloud-landing
-//! pass makes the resolver explicit and overridable so `validate --date`
-//! and `validate --run-id` can re-target an *earlier* run's prefix without
-//! re-running the export.
-//!
-//! Supported placeholders:
-//! - `{date}`   → context date, formatted `YYYY-MM-DD` (UTC by default); kept
-//!   verbatim by a context with no date (a plan sealed for a later apply).
-//! - `{export}` → export name.
-//! - `{table}`  → alias for `{export}`.
-//! - `{run_id}` → run identifier; substituted only when the context carries
-//!   one.  An unsubstituted `{run_id}` is left verbatim so a downstream
-//!   open / head-object call fails loudly instead of silently pointing at
-//!   a wrong prefix.
-//! - `{partition}` → Hive `col=value` segment for value-based partitioning.
-//!   Resolved out-of-band by [`expand_destination_partition`] during `run`'s
-//!   partition expansion, not by the [`PlaceholderContext`] pass below.
 
 use chrono::{NaiveDate, Utc};
 
 use crate::config::DestinationConfig;
 
-/// Substitution context shared by every command that resolves destination
-/// prefixes.
+/// Substitution context shared by every command that resolves destination prefixes.
 #[derive(Debug, Clone)]
 pub struct PlaceholderContext {
-    /// Date used for `{date}` substitution; `None` leaves the literal
-    /// `{date}` in place for the apply that resolves it.
+    /// Date used for `{date}` substitution; `None` leaves the literal `{date}` in place for the apply that resolves it.
     pub date: Option<NaiveDate>,
     /// Export name used for `{export}` and `{table}`.
     pub export_name: String,
-    /// Optional run identifier used for `{run_id}`.  `None` leaves the
-    /// literal `{run_id}` token in place.
+    /// Optional run identifier used for `{run_id}`.
     pub run_id: Option<String>,
 }
 
 impl PlaceholderContext {
-    /// Context anchored at today's UTC date.  Used by `run` and the
-    /// default branch of `doctor`/`validate` when the operator does not
-    /// override the resolution target.
+    /// Context anchored at today's UTC date.
     pub fn for_today(export_name: impl Into<String>) -> Self {
         Self {
             date: Some(Utc::now().date_naive()),
@@ -63,8 +25,7 @@ impl PlaceholderContext {
         }
     }
 
-    /// Context that resolves the names and keeps `{date}` as written: the sealed
-    /// plan's, so the apply resolves the day it runs on.
+    /// Context that resolves the names and keeps `{date}` as written.
     pub fn keeping_date(export_name: impl Into<String>) -> Self {
         Self {
             date: seeded!(
@@ -77,9 +38,7 @@ impl PlaceholderContext {
         }
     }
 
-    /// Context anchored at an explicit date.  Used by
-    /// `validate --date YYYY-MM-DD` to re-check a run that landed on
-    /// a prior day's prefix.
+    /// Context anchored at an explicit date.
     pub fn for_date(date: NaiveDate, export_name: impl Into<String>) -> Self {
         Self {
             date: Some(date),
@@ -96,10 +55,6 @@ impl PlaceholderContext {
 }
 
 /// Apply placeholder substitution to a single string.
-///
-/// Unrecognised `{token}` patterns are preserved verbatim — a missing
-/// `{run_id}` is left intact so the eventual destination open fails fast
-/// rather than silently aliasing to an unintended prefix.
 pub fn apply(s: &str, ctx: &PlaceholderContext) -> String {
     let mut out = s
         .replace("{export}", &ctx.export_name)
@@ -123,14 +78,7 @@ pub fn literal_parts(template: &str) -> Option<Vec<String>> {
         .then(|| cut.split(CUT).map(str::to_string).collect())
 }
 
-/// Substitute **only** the `{partition}` token in `destination.path` /
-/// `destination.prefix` with a Hive-style `col=value` segment.
-///
-/// This is a targeted pre-pass owned by `pipeline::partition_expand`: when
-/// `partition_by` is set, `run` expands one export into one concrete export
-/// per bucket and resolves `{partition}` here, *before* the normal plan-build
-/// pass resolves `{date}` / `{run_id}` / `{export}`. Keeping it separate avoids
-/// resolving the date twice and leaves every other token untouched.
+/// Substitute **only** the `{partition}` token in `destination.path` / `destination.prefix` with a Hive-style `col=value` segment.
 pub fn expand_destination_partition(
     mut dest: DestinationConfig,
     segment: &str,
@@ -141,8 +89,6 @@ pub fn expand_destination_partition(
 }
 
 /// Expand placeholders in `destination.path` and `destination.prefix`.
-///
-/// All other destination fields are passed through unchanged.
 pub fn expand_destination(
     mut dest: DestinationConfig,
     ctx: &PlaceholderContext,
@@ -188,8 +134,6 @@ mod tests {
         assert_eq!(literal_parts("runs/plain/"), None);
     }
 
-    // ── apply() ────────────────────────────────────────────────────────────
-
     #[test]
     fn apply_substitutes_date_export_table() {
         let ctx = ctx_on("2026-05-21", "orders");
@@ -202,8 +146,6 @@ mod tests {
     #[test]
     fn apply_leaves_unknown_tokens_verbatim() {
         let ctx = ctx_on("2026-05-21", "orders");
-        // Unknown tokens must round-trip — a typo is better surfaced as
-        // "object not found" than silently dropped.
         assert_eq!(
             apply("runs/{date}/{unknown}/", &ctx),
             "runs/2026-05-21/{unknown}/",
@@ -213,7 +155,6 @@ mod tests {
     #[test]
     fn apply_run_id_only_when_set() {
         let ctx = ctx_on("2026-05-21", "orders");
-        // No run_id on the context → literal `{run_id}` preserved.
         assert_eq!(apply("runs/{run_id}/", &ctx), "runs/{run_id}/");
 
         let ctx = ctx.with_run_id("r-abc123");
@@ -222,17 +163,12 @@ mod tests {
 
     #[test]
     fn apply_is_idempotent_on_already_expanded_string() {
-        // The v0.7.0/v0.7.1 wiring already calls the resolver from
-        // `validate` and `doctor`; both run against config that `run` may
-        // have just expanded.  Second pass must be a no-op.
         let ctx = ctx_on("2026-05-21", "orders");
         let once = apply("runs/{date}/{export}/", &ctx);
         let twice = apply(&once, &ctx);
         assert_eq!(once, twice);
         assert_eq!(once, "runs/2026-05-21/orders/");
     }
-
-    // ── expand_destination() ───────────────────────────────────────────────
 
     #[test]
     fn expand_destination_rewrites_path_and_prefix() {

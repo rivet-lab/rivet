@@ -7,11 +7,7 @@ use crate::config::{DestinationConfig, DestinationCredential};
 use crate::error::Result;
 use crate::gcp_auth;
 
-/// Build the async GCS [`Operator`] for `config`, using the same auth chain
-/// (ADC refreshing loader / credentials_file / anonymous emulator) as the
-/// streaming export destination. Reused by the load layer's one-off object ops
-/// so they never shell out to `gcloud` and never hand-roll a second auth path.
-/// The object-store operator for `config`'s destination: GCS, S3 or Azure.
+/// Build the async GCS [`Operator`] for `config`, using the same auth chain (ADC refreshing loader / credentials_file / anonymous emulator) as the streaming export destination.
 pub(crate) fn operator_for(config: &DestinationConfig) -> Result<Operator> {
     match config.destination_type {
         crate::config::DestinationType::S3 => super::s3::S3Backend::build_operator(config),
@@ -20,11 +16,7 @@ pub(crate) fn operator_for(config: &DestinationConfig) -> Result<Operator> {
     }
 }
 
-/// Scope a bucket-relative path to a DIRECTORY boundary for prefix listing and
-/// recursive delete. opendal (and GCS/S3 under it) match by STRING prefix, so a
-/// non-slash `exports/orders` also matches `exports/orders_archive/…`; the
-/// trailing slash confines the op to the directory. Empty stays empty (the
-/// bucket root is refused upstream by `split_object_uri`, never reached here).
+/// Scope a bucket-relative path to a DIRECTORY boundary for prefix listing and recursive delete.
 fn dir_boundary(path: &str) -> String {
     if path.is_empty() || path.ends_with('/') {
         path.to_string()
@@ -39,11 +31,7 @@ fn push_within(buf: &mut Vec<u8>, chunk: &[u8], cap: u64) -> Option<u64> {
     (buf.len() as u64 > cap).then_some(buf.len() as u64)
 }
 
-/// A blocking GCS handle for the load layer's one-off object ops — recursive
-/// list (manifests / parquet), read (manifest bytes), and recursive delete
-/// (source cleanup). Mirrors [`CloudDestination`]'s runtime + blocking wrap,
-/// but exposes the read/list/delete surface the streaming `Destination` trait
-/// does not. Holds the runtime the blocking operator drives.
+/// A blocking GCS handle for the load layer's one-off object ops.
 pub(crate) struct GcsStore {
     _runtime: Arc<tokio::runtime::Runtime>,
     op: opendal::blocking::Operator,
@@ -67,15 +55,12 @@ fn load_budget() -> opendal::layers::ConcurrentLimitLayer {
 }
 
 impl GcsStore {
-    /// Build a blocking GCS store for `config`'s bucket. Paths passed to the
-    /// methods below are **bucket-relative** (no `gs://bucket/` prefix).
+    /// Build a blocking GCS store for `config`'s bucket.
     pub(crate) fn new(config: &DestinationConfig) -> Result<Self> {
         Self::wrap(operator_for(config)?.layer(load_budget()))
     }
 
     fn wrap(async_op: Operator) -> Result<Self> {
-        // ONE runtime for every store: a store is built per load item and `--pool N`
-        // drops them while other workers reuse the global HTTP pool's connections.
         let runtime = super::cloud::io_runtime()?;
         let _guard = runtime.enter();
         let async_op = async_op.layer(super::cloud::retry_layer(3));
@@ -104,8 +89,7 @@ impl GcsStore {
             .collect())
     }
 
-    /// Byte size of the single object at the bucket-relative `path` — a metadata
-    /// `stat` (a recursive `list` does not reliably carry each object's length).
+    /// Byte size of the single object at the bucket-relative `path`.
     pub(crate) fn stat_size(&self, path: &str) -> Result<u64> {
         Ok(self.op.stat(path)?.content_length())
     }
@@ -115,12 +99,7 @@ impl GcsStore {
         Ok(self.op.read(path)?.to_vec())
     }
 
-    /// `parse(path, body)` over each object in `paths`, in order, 16 in flight. `body` is
-    /// the object's bytes, or `Err(size)` when it is over `cap`: a stat refuses it before
-    /// any byte is read, and the read itself stops past `cap` — so an object rewritten
-    /// in place between the two (a running marker becoming its terminal manifest) is
-    /// read whole when it still fits, and refused when it grew past the cap. A path
-    /// deleted after it was listed is left out, not an error.
+    /// `parse(path, body)` over each object in `paths`, in order, 16 in flight.
     pub(crate) fn read_each_within<T>(
         &self,
         paths: &[String],
@@ -166,15 +145,13 @@ impl GcsStore {
         Ok(self.op.read_options(path, opts)?.to_vec())
     }
 
-    /// Delete the single object at the bucket-relative `path`. Deleting a missing
-    /// object is a no-op `Ok` — opendal's delete is idempotent.
+    /// Delete the single object at the bucket-relative `path`.
     pub(crate) fn remove(&self, path: &str) -> Result<()> {
         self.op.delete(path)?;
         Ok(())
     }
 
-    /// A store backed by a local filesystem root — for offline tests of the
-    /// load layer's list/read/delete logic without a live bucket.
+    /// A store backed by a local filesystem root.
     #[cfg(test)]
     pub(crate) fn open_fs(root: &str) -> Result<Self> {
         Self::wrap(Operator::new(opendal::services::Fs::default().root(root))?.finish())
@@ -186,10 +163,7 @@ impl GcsStore {
         &self._runtime
     }
 
-    /// Write `bytes` to the bucket-relative `path`. The load store is otherwise
-    /// read/list/delete-only; this is a test-only seam for STAGING objects into a
-    /// live/emulated bucket (the fake-gcs-server contract test seeds manifests +
-    /// parts through it, then exercises the real list/read/remove path).
+    /// Write `bytes` to the bucket-relative `path`.
     #[cfg(test)]
     pub(crate) fn put(&self, path: &str, bytes: &[u8]) -> Result<()> {
         self.op.write(path, bytes.to_vec())?;
@@ -197,9 +171,7 @@ impl GcsStore {
     }
 }
 
-/// GCS object-store destination. The retry policy, blocking wrap, and ADR-0013
-/// read surface live in [`CloudDestination`]; this type only knows how to
-/// authenticate against Google Cloud Storage.
+/// GCS object-store destination.
 pub type GcsDestination = CloudDestination<GcsBackend>;
 
 /// Zero-sized backend marker carrying GCS's operator construction.
@@ -244,9 +216,6 @@ impl CloudBackend for GcsBackend {
             }
             log::info!("GCS: using credentials_file from config: {}", cred_file);
         } else if let Some(loader) = gcp_auth::try_authorized_user_loader()? {
-            // A refreshing loader, not a static `.token()`: opendal pins a
-            // static token with a usize::MAX expiry, so exports longer than
-            // the ~1h ADC token TTL would 401 mid-run, non-retryably.
             log::info!(
                 "GCS: using ADC {} credentials as {} (access token auto-refreshes before expiry)",
                 loader.credential_kind(),
@@ -432,10 +401,7 @@ mod tests {
         assert_eq!(got, vec![("kept".into(), true)]);
     }
 
-    /// The streamed read's own cap — the guard for an object that grew between the stat
-    /// and the read (the stat branch is covered above). A revert to reading exactly the
-    /// stat's size cannot be exercised here: the fs backend cannot swap an object between
-    /// the two calls.
+    /// The streamed read's own cap — the guard for an object that grew between the stat and the read (the stat branch is covered above).
     #[test]
     fn a_body_that_grows_past_the_cap_while_streaming_is_refused() {
         let mut buf = Vec::new();
@@ -467,8 +433,7 @@ mod tests {
             .expect("a dropped sibling store must not take the runtime with it");
     }
 
-    /// Write `bytes` to `root/rel`, creating parent dirs — a stand-in for objects
-    /// landing under a bucket prefix.
+    /// Write `bytes` to `root/rel`, creating parent dirs — a stand-in for objects landing under a bucket prefix.
     fn write_at(root: &std::path::Path, rel: &str, bytes: &[u8]) {
         let p = root.join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -483,7 +448,7 @@ mod tests {
         write_at(root, "base/b.parquet", b"b");
         write_at(root, "base/sub/c.parquet", b"c");
         write_at(root, "base/manifest.json", b"{}");
-        write_at(root, "other/d.parquet", b"d"); // outside `base` — must not appear
+        write_at(root, "other/d.parquet", b"d");
 
         let store = GcsStore::open_fs(root.to_str().unwrap()).unwrap();
         let mut got = store.list_files("base").unwrap();
@@ -499,9 +464,6 @@ mod tests {
             "every file under the prefix, recursively, keyed bucket-relative — dirs excluded, siblings excluded"
         );
 
-        // Real callers pass a trailing-slash prefix (`gs://bucket/base/`); it must
-        // list identically. Pins the `is_empty() || ends_with('/')` guard — an
-        // `&&` there would append a second slash (`base//`) and match nothing.
         let mut with_slash = store.list_files("base/").unwrap();
         with_slash.sort();
         assert_eq!(
@@ -552,22 +514,19 @@ mod tests {
             vec!["p/b.parquet".to_string()],
             "only the named object is gone; its sibling survives"
         );
-        // A crash/retry can call remove on an already-gone key — must be Ok.
         store.remove("p/a.parquet").unwrap();
     }
 
     #[test]
     fn stat_size_reports_the_object_length() {
         let dir = tempfile::tempdir().unwrap();
-        write_at(dir.path(), "p/a.parquet", b"abcd"); // 4 bytes
+        write_at(dir.path(), "p/a.parquet", b"abcd");
         let store = GcsStore::open_fs(dir.path().to_str().unwrap()).unwrap();
         assert_eq!(store.stat_size("p/a.parquet").unwrap(), 4);
     }
 
     #[test]
     fn list_files_on_a_missing_prefix_is_empty_not_an_error() {
-        // reconcile/plan list before they know a prefix has anything; a missing
-        // prefix must read as empty, not blow up the load.
         let dir = tempfile::tempdir().unwrap();
         let store = GcsStore::open_fs(dir.path().to_str().unwrap()).unwrap();
         assert!(
