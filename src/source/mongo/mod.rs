@@ -328,6 +328,25 @@ impl MongoSource {
         Ok(())
     }
 
+    /// The two blob mappings, the flat `_id` labelled by the BSON types `collection` holds when its `_id` is not overridden.
+    fn flat_mappings(
+        &self,
+        collection: Option<&str>,
+        overrides: &ColumnOverrides,
+    ) -> Result<Vec<TypeMapping>> {
+        let mut mappings = blob_mappings(overrides)?;
+        if let Some(c) = collection
+            && mappings[0].rivet_type == RivetType::String
+            && let Some((lo, hi)) = self.id_span(c)?
+            && let (Some(lo_id), Some(hi_id)) = (lo.get("_id"), hi.get("_id"))
+        {
+            let (native, fidelity) = id_types::flat_id_label(lo_id, hi_id);
+            mappings[0].source_native_type = native.to_string();
+            mappings[0].fidelity = fidelity;
+        }
+        Ok(mappings)
+    }
+
     /// Advisory sibling of [`Self::ensure_uniform_id_type`] for the **full-scan** path (no `page_size`, no `parallel`).
     pub(crate) fn warn_if_heterogeneous_id(&self, collection: &str) {
         let Ok(Some((lo, hi))) = self.id_span(collection) else {
@@ -414,16 +433,16 @@ fn blob_mappings(overrides: &ColumnOverrides) -> Result<Vec<TypeMapping>> {
     .collect()
 }
 
-/// Arrow schema for the JSON-blob model (`_id: Utf8`, `document: Utf8 + json`) under `overrides`.
-fn blob_schema(overrides: &ColumnOverrides) -> Result<SchemaRef> {
-    let fields = blob_mappings(overrides)?
+/// Arrow schema for the JSON-blob model (`_id: Utf8`, `document: Utf8 + json`) of `mappings`.
+fn blob_schema(mappings: &[TypeMapping]) -> SchemaRef {
+    let fields = mappings
         .iter()
         .map(|m| {
             crate::types::build_arrow_field(m)
                 .expect("blob columns (String/Json) always have an Arrow mapping")
         })
         .collect::<Vec<_>>();
-    Ok(Arc::new(Schema::new(fields)))
+    Arc::new(Schema::new(fields))
 }
 
 /// Stringify a document `_id` for the `_id` column.
@@ -630,7 +649,8 @@ impl Source for MongoSource {
         })?;
         let db = self.session.client().database(self.session.db());
         self.confirm_before_read(coll_name)?;
-        let schema = blob_schema(request.column_overrides)?;
+        let mappings = self.flat_mappings(Some(coll_name), request.column_overrides)?;
+        let schema = blob_schema(&mappings);
         sink.on_schema(schema.clone())?;
 
         let coll = if self.snapshot {
@@ -743,13 +763,13 @@ impl Source for MongoSource {
         Ok(())
     }
 
-    /// The JSON-blob model has a fixed two-column schema regardless of the query, so `check --type-report` shows it without touching the server.
+    /// The JSON-blob model has a fixed two-column schema; the flat `_id` is labelled by the BSON types the named collection holds.
     fn type_mappings(
         &mut self,
-        _query: &str,
+        query: &str,
         column_overrides: &ColumnOverrides,
     ) -> Result<Vec<TypeMapping>> {
-        blob_mappings(column_overrides)
+        self.flat_mappings(crate::sql::strip_select_star_from(query), column_overrides)
     }
 
     fn primary_key(&mut self, _table: &str) -> Result<Option<Vec<String>>> {
@@ -1222,7 +1242,7 @@ mod tests {
 
     #[test]
     fn blob_schema_is_two_columns_id_and_document_json() {
-        let schema = blob_schema(&ColumnOverrides::default()).unwrap();
+        let schema = blob_schema(&blob_mappings(&ColumnOverrides::default()).unwrap());
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert_eq!(names, vec!["_id", "document"]);
         let doc_field = schema.field_with_name("document").unwrap();
@@ -1237,14 +1257,14 @@ mod tests {
     fn a_columns_override_on_the_blob_columns_is_refused_or_read_never_ignored() {
         let one = |c: &str, t: RivetType| ColumnOverrides::from([(c.to_string(), t)]);
         for (c, t) in [("_id", RivetType::Int64), ("document", RivetType::Int64)] {
-            let err = blob_schema(&one(c, t)).unwrap_err();
+            let err = blob_mappings(&one(c, t)).unwrap_err();
             assert_eq!(
                 crate::error::code_of(&err).map(|c| c.id),
                 Some(crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH.id),
                 "{c}"
             );
         }
-        let doc = blob_schema(&one("document", RivetType::String)).unwrap();
+        let doc = blob_schema(&blob_mappings(&one("document", RivetType::String)).unwrap());
         assert!(
             doc.field_with_name("document")
                 .unwrap()
@@ -1553,6 +1573,19 @@ mod collection_identity_tests {
         assert_eq!(
             crate::error::error_code(&session.require_collection("t").expect_err("missing")),
             Some("RIVET_SOURCE_COLLECTION_NOT_FOUND")
+        );
+    }
+
+    #[test]
+    fn a_detected_flat_id_is_labelled_by_the_collection_ids() {
+        let fake = FakeMongo::serving(&FIRST, vec![doc! { "_id": "a", "v": 1 }]);
+        let mappings = source(&fake)
+            .flat_mappings(Some("t"), &ColumnOverrides::default())
+            .expect("mappings");
+        assert_eq!(mappings[0].source_native_type, "string");
+        assert_eq!(
+            mappings[0].fidelity,
+            crate::types::TypeFidelity::LogicalString
         );
     }
 }

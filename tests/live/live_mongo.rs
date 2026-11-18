@@ -658,3 +658,85 @@ fn roast_nan_id_refused_for_keyset_and_parallel_full_scan_complete() {
         "full scan must read every doc including the NaN _id"
     );
 }
+
+#[test]
+#[ignore = "live: requires docker compose up -d mongo"]
+fn mongo_batch_flat_id_is_labelled_by_the_bson_types_the_collection_holds() {
+    require_alive(LiveService::Mongo);
+    use mongodb::bson::{doc, oid::ObjectId};
+    let db = unique_name("mlabel");
+    let m = MongoTest::connect(PORT, &db);
+    let number = "number (int, long, double or decimal)";
+    let cases: [(&str, Vec<mongodb::bson::Document>, &str, &str, bool); 4] = [
+        (
+            "oid",
+            (0..4)
+                .map(|i| doc! { "_id": ObjectId::new(), "v": i })
+                .collect(),
+            "objectid",
+            "exact",
+            true,
+        ),
+        (
+            "int",
+            (1..=4_i64).map(|i| doc! { "_id": i, "v": i }).collect(),
+            number,
+            "logical_string",
+            true,
+        ),
+        (
+            "str",
+            (1..=4)
+                .map(|i| doc! { "_id": format!("s{i}"), "v": i })
+                .collect(),
+            "string",
+            "logical_string",
+            true,
+        ),
+        (
+            "mix",
+            vec![
+                doc! { "_id": 1001_i64, "v": 1 },
+                doc! { "_id": "1001", "v": 2 },
+                doc! { "_id": ObjectId::new(), "v": 3 },
+            ],
+            "mixed",
+            "logical_string",
+            false,
+        ),
+    ];
+    for (coll, docs, native, fidelity, keyset) in cases {
+        m.drop_collection(coll);
+        m.insert_many(coll, docs);
+        let modes: &[(&str, &str)] = if keyset {
+            &[
+                ("", ""),
+                ("page_size: 2", ""),
+                ("page_size: 2", "parallel: 2"),
+            ]
+        } else {
+            &[("", "")]
+        };
+        for mode in modes {
+            let mut rig = batch(&db, coll);
+            if !mode.0.is_empty() {
+                rig = rig.mongo(mode.0);
+            }
+            if !mode.1.is_empty() {
+                rig = rig.export_line(mode.1);
+            }
+            rig.run_ok();
+            let want = (native.to_string(), fidelity.to_string());
+            for got in parquet_field_labels(&rig.out_dir(), "_id") {
+                assert_eq!(got, want, "{coll} _id label ({mode:?})");
+            }
+            for got in parquet_field_labels(&rig.out_dir(), "document") {
+                assert_eq!(
+                    got,
+                    ("document".to_string(), "logical_string".to_string()),
+                    "{coll} document label ({mode:?})"
+                );
+            }
+        }
+    }
+}

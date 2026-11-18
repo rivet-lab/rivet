@@ -7,6 +7,7 @@ use mongodb::bson::{Bson, Document, doc};
 use super::{MongoSession, id_bracket};
 use crate::error::Result;
 use crate::source::cdc::Position;
+use crate::types::TypeFidelity;
 
 /// The checkpoint key holding the seen `_id` brackets per collection.
 pub(crate) const CHECKPOINT_KEY: &str = "idt";
@@ -23,6 +24,21 @@ fn bracket_of(id: &Bson) -> u8 {
     id_bracket(id)
         .map(|b| seeded!("mongo-id-types-mixed-under-a-keyed-view", 0, b))
         .unwrap_or(UNPLACED)
+}
+
+/// The `rivet.native_type` and fidelity of the flat `_id` column of a collection whose lowest and highest `_id` are `lo` and `hi`.
+pub(super) fn flat_id_label(lo: &Bson, hi: &Bson) -> (&'static str, TypeFidelity) {
+    if seeded!("mongo-flat-id-label-fixed-objectid", true, false) {
+        return ("objectid", TypeFidelity::Exact);
+    }
+    match (id_bracket(lo), id_bracket(hi)) {
+        (Some(6), Some(6)) => ("objectid", TypeFidelity::Exact),
+        (a, b) if a == b => (
+            bracket_name(a.unwrap_or(UNPLACED)),
+            TypeFidelity::LogicalString,
+        ),
+        _ => ("mixed", TypeFidelity::LogicalString),
+    }
 }
 
 /// The name of a bracket as the operator knows the BSON type.
@@ -449,6 +465,26 @@ mod tests {
         ];
         for (id, name) in cases {
             assert_eq!(bracket_name(bracket_of(&id)), name, "{id:?}");
+        }
+    }
+
+    #[test]
+    fn the_flat_id_label_follows_the_types_the_collection_holds() {
+        let oid = Bson::ObjectId(ObjectId::new());
+        let s = |v: &str| Bson::String(v.into());
+        let ls = TypeFidelity::LogicalString;
+        let number = "number (int, long, double or decimal)";
+        let cases = [
+            (&oid, &oid, ("objectid", TypeFidelity::Exact)),
+            (&Bson::Int32(1), &Bson::Int64(9), (number, ls)),
+            (&Bson::Double(1.5), &Bson::Int32(2), (number, ls)),
+            (&s("a"), &s("z"), ("string", ls)),
+            (&Bson::Int32(1), &s("1"), ("mixed", ls)),
+            (&s("1"), &oid, ("mixed", ls)),
+            (&Bson::MinKey, &Bson::MinKey, ("other", ls)),
+        ];
+        for (lo, hi, want) in cases {
+            assert_eq!(flat_id_label(lo, hi), want, "{lo:?} .. {hi:?}");
         }
     }
 

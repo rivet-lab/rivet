@@ -254,7 +254,7 @@ def ledger(engine: str, mode: str) -> tuple[dict, set[str]]:
     forms = set(doc.get("forms") or {})
     # One `rows:` list serves both modes; its `clickhouse:` map is read under the flat keys below, and `renders:` (by delivery) under each row's own render.
     eng = (doc.get("engines") or {}).get(engine) or {}
-    rows, by_delivery = eng.get("rows") or [], eng.get("renders") or {}
+    rows, by_delivery = [r for r in eng.get("rows") or [] if not isinstance(r, dict) or r.get("delivery")], eng.get("renders") or {}
     ch_keys = {"type": "clickhouse", "today": "today_clickhouse", "defect": "clickhouse_defect", "defect_samples": "clickhouse_defect_samples"}
     rows = [{**r, "render": {**by_delivery.get(r.get("delivery"), {}), **(r.get("render") or {})},
              **{ch_keys[k]: v for k, v in (r.get("clickhouse") or {}).items()}} if isinstance(r, dict) else r for r in rows]
@@ -1599,7 +1599,7 @@ def _prep(engine: str, cdc: bool) -> tuple[dict, set[str], dict, dict]:
     rows, forms = ledger(engine, "cdc" if cdc else "batch")
     renders = {
         n: _render(r).get("server")
-        or (PG_TEXT if engine == "postgres" and (r.get("delivery") in forms or r.get("delivery") == "server_text" or r.get("batch_refuses")) else None)
+        or (PG_TEXT if engine == "postgres" and (r.get("delivery") in forms or r.get("delivery") == "server_text" or r.get("refuses")) else None)
         for n, r in rows.items()
     }
     renders = {n: e for n, e in renders.items() if e}

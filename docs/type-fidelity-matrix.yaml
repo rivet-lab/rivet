@@ -93,3 +93,11 @@ scenarios:
     mssql:    { test: duckdb_validates_mssql_type_matrix_parquet, oracle: independent }
     mongo:    { na: "text rides the verbatim document blob" }
     oracle:   { test: oracle_full_export_matches_the_databases_own_rendering_for_every_type, oracle: independent }
+
+  - id: type_mongo_flat_id_label
+    what: "the flat Mongo `_id` column's `rivet.native_type` / `rivet.fidelity` names the BSON type the collection holds (objectid exact; int, string logical_string; mixed logical_string), in batch and CDC parts"
+    postgres: { na: "a SQL column has one declared type that the catalog names; only the flat Mongo `_id` column holds any BSON type per document" }
+    mysql:    { na: "a SQL column has one declared type that the catalog names; only the flat Mongo `_id` column holds any BSON type per document" }
+    mssql:    { na: "a SQL column has one declared type that the catalog names; only the flat Mongo `_id` column holds any BSON type per document" }
+    mongo:    { test: mongo_batch_flat_id_is_labelled_by_the_bson_types_the_collection_holds, oracle: independent }
+    oracle:   { na: "a SQL column has one declared type that the catalog names; only the flat Mongo `_id` column holds any BSON type per document" }
