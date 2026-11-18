@@ -536,16 +536,20 @@ fn spans_from(lo: i128, hi: i128, cuts: &[i128]) -> Vec<Span> {
 fn equal_row_cuts(spans: &[Span], parts: usize) -> Vec<i128> {
     let share = spans.iter().map(Span::rows).sum::<f64>() / parts as f64;
     let mut cuts: Vec<i128> = Vec::with_capacity(parts.saturating_sub(1));
-    let (mut seen, mut next) = (0.0, share);
-    for s in spans {
-        while cuts.len() + 1 < parts && next <= seen + s.rows() {
-            let at = s.start + ((next - seen) / s.density).round() as i128;
-            if at > s.start && at < s.end && cuts.last().is_none_or(|c| *c < at) {
-                cuts.push(at);
+    let mut next = share;
+    for _ in 1..parts {
+        let mut seen = 0.0;
+        for s in spans {
+            if next <= seen + s.rows() {
+                let at = s.start + ((next - seen) / s.density).round() as i128;
+                if at > s.start && at < s.end && cuts.last().is_none_or(|c| *c < at) {
+                    cuts.push(at);
+                }
+                break;
             }
-            next += share;
+            seen += s.rows();
         }
-        seen += s.rows();
+        next += share;
     }
     cuts
 }
@@ -2705,6 +2709,36 @@ mod tests {
         assert!(heaviest <= 2.0 * mean, "{spread:?}");
     }
 
+    /// The density probe reads rows per key from the key one seek lands on after skipping the probe rows, or from the whole span when fewer rows remain.
+    #[test]
+    fn a_density_probe_reads_rows_per_key_from_the_landing_key() {
+        let plan = crate::plan::test_support::test_plan();
+        let k = crate::sql::quote_ident(plan.source.source_type, "k");
+        let probe = |all: Vec<String>, start: i128, end: i128| {
+            let mut src = Indexed::new(all, true);
+            probe_density(&mut src, &plan, &k, &[], start, end).unwrap()
+        };
+        assert_eq!(probe(keys(1..=1000), 0, 1000), 200.0 / 201.0);
+        assert_eq!(
+            probe(keys((1..=1000).map(|i| i * 10)), 0, 10_000),
+            200.0 / 2_010.0
+        );
+        assert_eq!(probe(keys(1..=50), 0, 1000), 200.0 / 1000.0);
+        assert_eq!(probe(keys(1..=1000), 500, 1000), 200.0 / 201.0);
+    }
+
+    /// Spans without an estimated row give no cut and never loop.
+    #[test]
+    fn spans_without_estimated_rows_give_no_equal_row_cuts() {
+        let empty = |start, end| Span {
+            start,
+            end,
+            density: 0.0,
+        };
+        assert!(equal_row_cuts(&[empty(0, 1000), empty(1000, 2000)], 4).is_empty());
+        assert!(equal_row_cuts(&[], 4).is_empty());
+    }
+
     /// Equal-row cuts split a dense span and a sparse span into shares of their estimated rows.
     #[test]
     fn equal_row_cuts_split_estimated_rows_evenly() {
@@ -2721,6 +2755,25 @@ mod tests {
             },
         ];
         assert_eq!(equal_row_cuts(&spans, 2), vec![505]);
+        let later = [
+            Span {
+                start: 0,
+                end: 100,
+                density: 1.0,
+            },
+            Span {
+                start: 100,
+                end: 1100,
+                density: 0.1,
+            },
+        ];
+        assert_eq!(equal_row_cuts(&later, 4), vec![50, 600]);
+        let narrow = [Span {
+            start: 0,
+            end: 3,
+            density: 1.0,
+        }];
+        assert_eq!(equal_row_cuts(&narrow, 8), vec![1, 2]);
     }
 
     /// Every SQL dialect samples by first-row seeks alone and lands on the same boundaries, for number and text keys.
