@@ -186,9 +186,30 @@ fn mssql_sub_microsecond_key_is_refused(kind: WarehouseKind) {
     );
 }
 
+/// An MSSQL CDC export keyed on a `datetime2(7)` column: `check` refuses it by the code `load` refuses it by, and the load refuses twice.
+fn mssql_cdc_sub_microsecond_key_check_agrees_with_load(kind: WarehouseKind) {
+    let Some(mut w) = Warehouse::of(kind, "kadmc") else {
+        return;
+    };
+    let mut scn = CdcScenario::mssql_with(
+        "kadmc",
+        "dev INT NOT NULL, ts DATETIME2(7) NOT NULL, seq INT NOT NULL, PRIMARY KEY (dev, ts)",
+        |rig, _| w.shape(rig.cdc("initial: snapshot"), "dev, ts"),
+    );
+    let table = scn.table.clone();
+    w.adopt(&table);
+    scn.sql(&format!(
+        "INSERT INTO dbo.{table} (dev, ts, seq) VALUES (1, '2024-01-01 00:00:00.1234561', 1)"
+    ));
+    scn.settle();
+    scn.rig.run_ok();
+    assert_refused(&scn.rig.cli_env(&["load"], w.load_envs()), INEXACT);
+    assert_refused(&scn.rig.cli(&["check"]), INEXACT);
+}
+
 /// An Oracle `TIMESTAMP(9)` primary-key column declared as microsecond `timestamp`: the load is refused twice and by `check`, the warehouse is unchanged, and `timestamp_ns` then keeps both rows that differ below a microsecond.
 #[cfg(feature = "oracle")]
-fn oracle_sub_microsecond_key_is_refused(kind: WarehouseKind) {
+fn oracle_sub_microsecond_key_is_refused(kind: WarehouseKind, via_query: bool) {
     let e = SqlEngine::Oracle;
     e.alive();
     let Some(mut w) = Warehouse::of(kind, "kadmo") else {
@@ -202,10 +223,16 @@ fn oracle_sub_microsecond_key_is_refused(kind: WarehouseKind) {
     e.exec(&format!(
         "INSERT INTO {table} (dev, ts, seq) VALUES (1, TIMESTAMP '2024-01-01 00:00:00.123456100', 1)"
     ));
+    let source = if via_query {
+        e.rig(&table)
+            .query(&format!("SELECT dev, ts, seq FROM {table}"))
+    } else {
+        e.rig(&table)
+    };
     let mut rig = w
         .shape(
             e.staged(
-                e.rig(&table),
+                source,
                 "incremental",
                 &["cursor_column: seq", "columns: { TS: timestamp }"],
             ),
@@ -323,13 +350,26 @@ fn an_oracle_text_cursor_is_admitted_into_clickhouse() {
 #[test]
 #[ignore = "live: requires docker compose oracle + clickhouse + fake-gcs"]
 fn an_oracle_sub_microsecond_key_is_refused_into_clickhouse() {
-    oracle_sub_microsecond_key_is_refused(WarehouseKind::ClickHouse);
+    oracle_sub_microsecond_key_is_refused(WarehouseKind::ClickHouse, false);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle + clickhouse + fake-gcs"]
+fn an_oracle_sub_microsecond_query_key_is_refused_into_clickhouse() {
+    oracle_sub_microsecond_key_is_refused(WarehouseKind::ClickHouse, true);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mssql + clickhouse + fake-gcs"]
 fn an_mssql_sub_microsecond_key_is_refused_into_clickhouse() {
     mssql_sub_microsecond_key_is_refused(WarehouseKind::ClickHouse);
+}
+
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mssql-cdc with SQL Server Agent"]
+fn an_mssql_cdc_sub_microsecond_key_check_agrees_with_load_into_clickhouse() {
+    mssql_cdc_sub_microsecond_key_check_agrees_with_load(WarehouseKind::ClickHouse);
 }
 
 #[test]

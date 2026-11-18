@@ -370,6 +370,11 @@ pub trait Source: Send {
         Ok(Vec::new())
     }
 
+    /// The `timestamp` columns of the result of `query` the engine describes finer than a microsecond.
+    fn finer_than_microsecond_in_query(&mut self, _query: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
     /// The primary key columns of `table` in key order; `None` when it has none or the engine cannot tell.
     fn primary_key(&mut self, _table: &str) -> Result<Option<Vec<String>>> {
         Ok(None)

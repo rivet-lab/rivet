@@ -560,6 +560,22 @@ scenarios:
     mongo:    { na: "a MongoDB export is `mode: full` or `cdc` only and its key is the document _id" }
     oracle:   { test: an_oracle_sub_microsecond_key_is_refused_into_clickhouse }
 
+  - id: load_key_landing_check_agrees_with_load_on_cdc
+    what: "2026-11-18 issue 964: `rivet check` of a CDC export keyed on a column the source declares finer than a microsecond is refused by RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT (exit 5), the code and exit `rivet load` refuses it by, through one shared mode predicate (key_admission::admits_keys)"
+    postgres: { na: "a PostgreSQL timestamp holds at most microseconds, so the landing loses nothing" }
+    mysql:    { na: "a MySQL datetime/timestamp holds at most microseconds, so the landing loses nothing" }
+    mssql:    { test: an_mssql_cdc_sub_microsecond_key_check_agrees_with_load_into_clickhouse }
+    mongo:    { na: "a MongoDB timestamp holds at most milliseconds and its key is the document _id" }
+    oracle:   { na: "an Oracle CDC stream cannot be loaded (RIVET_CONFIG_SOURCE_MODE_UNSUPPORTED), so no CDC key is admitted by its landing" }
+
+  - id: load_key_landing_of_a_query_export
+    what: "2026-11-18 issue 964: a `query:` export whose primary-key column is an Oracle TIMESTAMP(7..9) declared as `timestamp` is refused by RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT (exit 5) by `rivet check` and by the load, the sub-microsecond fact read from the query's own cursor description when the export names no table"
+    postgres: { na: "a PostgreSQL timestamp holds at most microseconds, so the landing loses nothing" }
+    mysql:    { na: "a MySQL datetime/timestamp holds at most microseconds, so the landing loses nothing" }
+    mssql:    { na: "2026-11-18: the SQL Server query probe (sys.dm_exec_describe_first_result_set) is an override in src/source/mssql held back by the owner rule on that file; closes with that override and its live cell" }
+    mongo:    { na: "a MongoDB timestamp holds at most milliseconds and its key is the document _id" }
+    oracle:   { test: an_oracle_sub_microsecond_query_key_is_refused_into_clickhouse }
+
   - id: missing_relation_exits_by_its_code
     what: "2026-11-04 finding VP-8 (seam stop-class): a source table or collection the source does not hold is refused by its code (RIVET_SOURCE_TABLE_NOT_FOUND, RIVET_SOURCE_COLLECTION_NOT_FOUND) with exit 1 whatever words its name holds; a name with a transient word (login_timeouts, dns_zones, deadlock_log) exited 2 on SQL Server, Oracle and MongoDB because the exit was read from the message text that holds the name, and 1 on PostgreSQL and MySQL; the plain-named neighbours (users, orders_archive) exit 1 everywhere"
     postgres: { test: a_missing_relation_exits_by_its_code_whatever_its_name_holds_postgres }

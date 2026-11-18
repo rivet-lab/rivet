@@ -5901,6 +5901,44 @@ seeds:
       lib:
         cells: ["lib:a_text_number_with_its_plain_decimal_form_is_a_text_landing", "lib:a_numeric_source_type_landing_as_text_is_told_from_native_text", "lib:a_microsecond_landing_is_finer_only_where_the_source_says_so"]
 
+  - name: load-key-check-skips-cdc
+    class: "`rivet check` admits the load keys of an export only in incremental mode while `rivet load` refuses a CDC export keyed on a column the source declares finer than a microsecond, so check exits 0 where load exits 5"
+    history: "issue 964 gap 2, RED on main 2026-11-18: MSSQL CDC export keyed on a datetime2(7) column, check exit 0, load exit 5"
+    scope: source
+    switch: load-key-check-skips-cdc
+    engines:
+      postgres:
+        na: "a PostgreSQL timestamp is at most a microsecond, so no key column lands finer-collapsed"
+      mysql:
+        na: "DATETIME(6) is at most a microsecond, so no key column lands finer-collapsed"
+      mssql:
+        cells: [an_mssql_cdc_sub_microsecond_key_check_agrees_with_load_into_clickhouse, "lib:key_admission_reads_only_an_incremental_or_cdc_export_with_a_load"]
+      mongo:
+        na: "MongoDB timestamps are at most a millisecond"
+      oracle:
+        na: "an Oracle CDC stream cannot be loaded (RIVET_CONFIG_SOURCE_MODE_UNSUPPORTED), so no CDC key is admitted by landing"
+      lib:
+        cells: ["lib:key_admission_reads_only_an_incremental_or_cdc_export_with_a_load"]
+
+  - name: load-key-query-finer-unread
+    class: "a `query:` export's sub-microsecond key columns are read only from a table catalog, so a query keyed on a column finer than a microsecond records no such fact and `rivet check` exits 0 where the load collapses rows that differ below a microsecond"
+    history: "issue 964 gap 1, RED on main 2026-11-18: Oracle query export keyed on a TIMESTAMP(9) column, check exit 0"
+    scope: source
+    switch: load-key-query-finer-unread
+    engines:
+      postgres:
+        na: "a PostgreSQL timestamp is at most a microsecond, so no key column lands finer-collapsed"
+      mysql:
+        na: "DATETIME(6) is at most a microsecond, so no key column lands finer-collapsed"
+      mssql:
+        na: "the SQL Server query probe (sys.dm_exec_describe_first_result_set) needs an override in src/source/mssql, held back by the owner rule on that file (#964, 2026-11-18); closes with that override"
+      mongo:
+        na: "MongoDB timestamps are at most a millisecond"
+      oracle:
+        cells: [an_oracle_sub_microsecond_query_key_is_refused_into_clickhouse, "lib:the_open_probe_reads_the_finer_columns_of_a_table_and_of_a_query"]
+      lib:
+        cells: ["lib:the_open_probe_reads_the_finer_columns_of_a_table_and_of_a_query"]
+
   - name: init-name-folded-into-query
     class: "`rivet init` writes a table or column name holding a line break inside the folded `query: >` block, and a folded block turns the break plus the next line's indent into one space: the scaffold exports a different table (a twin named with a space) with every check green"
     history: "audit 2026-11-08 finding H5-F1 (hunt 5, `rivet init` on a PostgreSQL and a MySQL table named with a line break); RED on main 2026-11-10 (`a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names`: the scaffold of table \"nl<LF>      tab\" does not parse back to that relation)"
