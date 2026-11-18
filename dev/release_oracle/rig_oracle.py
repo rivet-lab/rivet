@@ -162,10 +162,12 @@ def type_family(t: str) -> str:
 
 
 def unpinned_loss(src: str, dst: str) -> str | None:
-    """Why a column no ledger row pins may not land as `dst`: it narrows (`type_loss`) or changes kind (a decimal as a double, a boolean as an integer, anything as text); a decimal past DuckDB's 38 digits is only ever read as exact text (Decimal256, docs/reference/config.md)."""
+    """Why a column no ledger row pins may not land as `dst`: it narrows (`type_loss`) or changes kind (a decimal as a double, a boolean as an integer, anything as text); a decimal past DuckDB's 38 digits and an instant delivered as a nanosecond part are only ever read as exact text (Decimal256, zoned Timestamp(ns); docs/reference/config.md)."""
     if (why := type_loss(src, dst)) is not None or src == dst:
         return why
     if dst == "VARCHAR" and (d := _decimal(src)) and d[0] > 38:
+        return None
+    if (src, dst) == ("TIMESTAMP WITH TIME ZONE", "VARCHAR"):
         return None
     fs, fd = type_family(src), type_family(dst)
     return None if fs == fd else f"a {fs} delivered as a {fd}, and no ledger row pins the column"
@@ -214,6 +216,7 @@ def norm_native(t: str | bytes) -> str:
     t = re.sub(r"^TIMESTAMP(\(\d+\))? WITHOUT TIME ZONE", r"TIMESTAMP\1", t)
     t = re.sub(r"^TIMESTAMP(\(\d+\))? WITH TIME ZONE", r"TIMESTAMPTZ\1", t)
     t = re.sub(r"^TIME(\(\d+\))? WITHOUT TIME ZONE", r"TIME\1", t)
+    t = re.sub(r"^(DATETIME2|DATETIMEOFFSET)\(7\)$", r"\1", t)
     t = re.sub(r"^CHARACTER VARYING", "VARCHAR", t)
     return re.sub(r"^CHARACTER\b", "CHAR", t)
 
@@ -234,7 +237,9 @@ def arrow_to_duck(delivery: str, text_forms: set[str]) -> str | None:
     }
     if delivery in fixed:
         return fixed[delivery]
-    if re.fullmatch(r'Timestamp\((s|ms|µs|ns), ".+"\)', delivery):
+    if re.fullmatch(r'Timestamp\(ns, ".+"\)', delivery):
+        return "VARCHAR"
+    if re.fullmatch(r'Timestamp\((s|ms|µs), ".+"\)', delivery):
         return "TIMESTAMP WITH TIME ZONE"
     m = re.fullmatch(r"Decimal128\((\d+), (\d+)\)", delivery)
     if m:
@@ -628,6 +633,7 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
             "SELECT * FROM mssql_scan('ms', " + _lit(
                 "SELECT COLUMN_NAME, UPPER(DATA_TYPE) + CASE WHEN DATA_TYPE IN ('decimal', 'numeric') THEN "
                 "'(' + CAST(NUMERIC_PRECISION AS varchar) + ',' + CAST(NUMERIC_SCALE AS varchar) + ')' "
+                "WHEN DATA_TYPE IN ('datetime2', 'datetimeoffset') THEN '(' + CAST(DATETIME_PRECISION AS varchar) + ')' "
                 "WHEN CHARACTER_MAXIMUM_LENGTH > 0 THEN '(' + CAST(CHARACTER_MAXIMUM_LENGTH AS varchar) + ')' "
                 "ELSE '' END FROM INFORMATION_SCHEMA.COLUMNS "
                 f"WHERE TABLE_SCHEMA = {_lit(sch)} AND TABLE_NAME = {_lit(leaf)}"
@@ -1740,8 +1746,8 @@ def grade_load(spec: dict) -> dict:
             wh_types = {n: t for n, t in cols}
             # ClickHouse ships a binary String as invalid UTF-8; read it as the hex the source canon uses.
             blobs = [c for c, t in _columns(ora, "source_rows") if t == "BLOB" and "String" in wh_types.get(c, "")]
-            # A Decimal wider than 38 digits reaches DuckDB as DOUBLE; read it as ClickHouse's exact text.
             wide = {c for c, t in wh_types.items() if (m := re.search(r"Decimal\((\d+)", t)) and int(m.group(1)) > 38}
+            wide |= {c for c, t in wh_types.items() if (m := re.search(r"DateTime64\((\d+)", t)) and int(m.group(1)) > 6}
             blob_lists = [c for c, n in native.items() if (rows.get(n) or {}).get("delivery") == "List(Binary)" and "String" in wh_types.get(c, "")]
             uuid_lists = [c for c, n in native.items() if (rows.get(n) or {}).get("delivery") == "List(arrow.uuid)" and "FixedString" in wh_types.get(c, "")]
             sel = ", ".join(
@@ -2271,7 +2277,11 @@ def _self_test() -> None:
     assert grade_findings(collapsed, rows, set(), {"b": "BIGINT"}, True), "DISTINCT relaxes only for a collapse column"
     assert norm_native("timestamp(6) without time zone[]") == "TIMESTAMP(6)[]"
     assert norm_native("character varying(50)") == "VARCHAR(50)"
+    assert unpinned_loss("TIMESTAMP WITH TIME ZONE", "VARCHAR") is None and unpinned_loss("TIMESTAMP", "VARCHAR") is not None
+    assert norm_native("DATETIME2(7)") == "DATETIME2" and norm_native("DATETIMEOFFSET(7)") == "DATETIMEOFFSET"
+    assert norm_native("DATETIME2(6)") == "DATETIME2(6)" and norm_native("DATETIME2(3)") == "DATETIME2(3)"
     assert arrow_to_duck('Timestamp(µs, "UTC")', set()) == "TIMESTAMP WITH TIME ZONE"
+    assert arrow_to_duck('Timestamp(ns, "UTC")', set()) == "VARCHAR", "a zoned nanosecond part is read as exact text"
     assert arrow_to_duck("List(Decimal128(18, 2))", set()) == "DECIMAL(18,2)[]"
     from .value_diff import canon
 

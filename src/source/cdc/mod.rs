@@ -1475,11 +1475,10 @@ mod mod_decisions {
             assert_eq!(m.delivery, Delivery::Native, "{list:?}");
         }
 
-        let ns = RivetType::Timestamp {
+        let ns = RivetType::Time {
             unit: TimeUnit::Nanosecond,
-            timezone: None,
         };
-        let err = plan_cdc_delivery(col("timestamp", ns), true).unwrap_err();
+        let err = plan_cdc_delivery(col("time", ns), true).unwrap_err();
         assert_eq!(
             err.downcast_ref::<crate::error::CodedError>()
                 .map(|c| c.code()),
@@ -1511,9 +1510,8 @@ mod mod_decisions {
             },
             &RivetType::String,
         ));
-        let ns = RivetType::Timestamp {
+        let ns = RivetType::Time {
             unit: TimeUnit::Nanosecond,
-            timezone: None,
         };
         let err = retype_for_stream(time(), &declared(ns)).unwrap_err();
         assert_eq!(

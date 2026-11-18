@@ -6,8 +6,8 @@ use arrow::array::{
     ArrayRef, BinaryBuilder, BooleanBuilder, Date32Builder, Decimal128Builder,
     FixedSizeBinaryBuilder, Float32Builder, Float64Builder, Int8Builder, Int16Builder,
     Int32Builder, Int64Builder, LargeBinaryBuilder, LargeStringBuilder, StringBuilder,
-    Time64MicrosecondBuilder, TimestampMicrosecondBuilder, UInt8Builder, UInt16Builder,
-    UInt32Builder, UInt64Builder,
+    Time64MicrosecondBuilder, TimestampMicrosecondBuilder, TimestampNanosecondBuilder,
+    UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
 };
 use arrow::datatypes::{DataType, TimeUnit};
 use chrono::{NaiveDate, NaiveDateTime};
@@ -158,6 +158,7 @@ pub(crate) fn is_buildable(dt: &DataType) -> bool {
             | DataType::LargeBinary
             | DataType::FixedSizeBinary(_)
             | DataType::Timestamp(TimeUnit::Microsecond, _)
+            | DataType::Timestamp(TimeUnit::Nanosecond, _)
     )
 }
 
@@ -336,6 +337,16 @@ fn timestamp_micros_value(v: &RivetValue) -> Result<i64, String> {
     }
 }
 
+/// The UTC instant a timestamp cell stores, as nanoseconds since the epoch; a value outside 1677-09-21..2262-04-11 is refused.
+fn timestamp_nanos_value(v: &RivetValue) -> Result<i64, String> {
+    match v {
+        RivetValue::DateTime(d) => d.and_utc().timestamp_nanos_opt().ok_or_else(|| {
+            "is outside the nanosecond timestamp range (1677-09-21..2262-04-11); declare the column `timestamp` (microseconds, full range) in `columns:`".to_string()
+        }),
+        _ => Err(NO_READING.into()),
+    }
+}
+
 /// The Time64 microseconds a time of day stores; a duration outside one day is refused.
 fn time_value(v: &RivetValue) -> Result<i64, String> {
     match v {
@@ -412,6 +423,16 @@ pub(crate) fn build_column(
             let arr = typed_col!(
                 TimestampMicrosecondBuilder::with_capacity(n),
                 timestamp_micros_value
+            );
+            match tz {
+                Some(tz) => Arc::new(arr.with_timezone(tz.clone())),
+                None => Arc::new(arr),
+            }
+        }
+        DataType::Timestamp(TimeUnit::Nanosecond, tz) => {
+            let arr = typed_col!(
+                TimestampNanosecondBuilder::with_capacity(n),
+                timestamp_nanos_value
             );
             match tz {
                 Some(tz) => Arc::new(arr.with_timezone(tz.clone())),
@@ -519,6 +540,13 @@ pub(crate) fn cells_checksum(dt: &DataType, cells: &[Option<&RivetValue>]) -> u6
             DataType::Timestamp(TimeUnit::Microsecond, _) => {
                 if let V::DateTime(dt) = c {
                     acc = acc.wrapping_add(xxh3_64(&dt.and_utc().timestamp_micros().to_le_bytes()));
+                }
+            }
+            DataType::Timestamp(TimeUnit::Nanosecond, _) => {
+                if let V::DateTime(dt) = c
+                    && let Some(ns) = dt.and_utc().timestamp_nanos_opt()
+                {
+                    acc = acc.wrapping_add(xxh3_64(&ns.to_le_bytes()));
                 }
             }
             DataType::Time64(TimeUnit::Microsecond) => le!(time_value(c)),
@@ -1793,6 +1821,8 @@ mod tests {
             DataType::FixedSizeBinary(16),
             DataType::Timestamp(TimeUnit::Microsecond, None),
             DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
         ];
         let list = |t| DataType::List(Arc::new(arrow::datatypes::Field::new("item", t, true)));
         let mut buildable = buildable.to_vec();
@@ -1818,7 +1848,6 @@ mod tests {
         }
         for dt in [
             DataType::Date64,
-            DataType::Timestamp(TimeUnit::Nanosecond, None),
             list(DataType::Timestamp(TimeUnit::Nanosecond, None)),
             list(DataType::FixedSizeBinary(8)),
             list(DataType::Time64(TimeUnit::Nanosecond)),
@@ -1826,6 +1855,26 @@ mod tests {
         ] {
             assert!(!is_buildable(&dt), "is_buildable must reject {dt:?}");
         }
+    }
+
+    /// A nanosecond timestamp cell keeps its 100 ns digit and refuses an instant outside Arrow's nanosecond range.
+    #[test]
+    fn a_nanosecond_timestamp_cell_keeps_its_digit_and_refuses_out_of_range() {
+        use arrow::array::{Array, TimestampNanosecondArray};
+        let at = |s: &str| RivetValue::DateTime(s.parse::<NaiveDateTime>().unwrap());
+        let dt = DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()));
+        let cells = [at("2026-01-02T03:04:05.1234567"), at("1677-09-21T00:12:44")];
+        let arr = build("c", &dt, &[Some(&cells[0]), None]).unwrap();
+        let ns = arr
+            .as_any()
+            .downcast_ref::<TimestampNanosecondArray>()
+            .unwrap();
+        assert_eq!(ns.value(0) % 1_000_000_000, 123_456_700);
+        assert!(ns.is_null(1));
+        let early = at("1000-01-01T00:00:00");
+        let err = build("c", &dt, &[Some(&early)]).unwrap_err();
+        assert!(err.to_string().contains("1677-09-21..2262-04-11"), "{err}");
+        assert!(build("c", &dt, &[Some(&cells[1])]).is_ok());
     }
 
     /// Date, time, timestamp, uuid and bytea list elements build to the stored values, with NULL elements, empty and NULL lists kept.

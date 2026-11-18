@@ -6,8 +6,22 @@ const INEXACT: Refused = Refused::by_code("RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT",
 
 /// The incremental export of `table` into `w`, keyed on `pk`, cursor `cursor`, graded by the second client.
 fn incremental(e: SqlEngine, w: &Warehouse, table: &str, cursor: &str, pk: &str) -> Rig {
+    incremental_with(e, w, table, cursor, pk, &[])
+}
+
+/// `incremental` with more export lines.
+fn incremental_with(
+    e: SqlEngine,
+    w: &Warehouse,
+    table: &str,
+    cursor: &str,
+    pk: &str,
+    extra: &[&str],
+) -> Rig {
     let line = format!("cursor_column: {cursor}");
-    w.shape(e.staged(e.rig(table), "incremental", &[line.as_str()]), pk)
+    let mut lines = vec![line.as_str()];
+    lines.extend_from_slice(extra);
+    w.shape(e.staged(e.rig(table), "incremental", &lines), pk)
 }
 
 /// `rivet state reset` of the rig's export, which must succeed.
@@ -128,8 +142,8 @@ fn oracle_neighbour_cursor_is_admitted(
     );
 }
 
-/// An MSSQL `datetime2(7)` primary-key column lands at microseconds: the load is refused twice and by `check`, the warehouse is unchanged, and `timestamp_ns` then keeps both rows that differ below a microsecond, read back by the second client (the rig oracle reads the source at microseconds).
-fn mssql_sub_microsecond_key_is_refused(kind: WarehouseKind) {
+/// An MSSQL `datetime2(7)` primary-key column with no declaration lands at nanoseconds, so the load is admitted and keeps both rows that differ below a microsecond; declared as microsecond `timestamp` the load is refused twice and by `check`, the warehouse is unchanged, and `timestamp_ns` then keeps both rows that differ below a microsecond, read back by the second client (the rig oracle reads the source at microseconds).
+fn mssql_sub_microsecond_key(kind: WarehouseKind, declared: bool) {
     let e = SqlEngine::Mssql;
     e.alive();
     let Some(mut w) = Warehouse::of(kind, "kadmk") else {
@@ -143,7 +157,19 @@ fn mssql_sub_microsecond_key_is_refused(kind: WarehouseKind) {
     e.exec(&format!(
         "INSERT INTO {table} (dev, ts, seq) VALUES (1, '2024-01-01 00:00:00.1234561', 1)"
     ));
-    let mut rig = incremental(e, &w, &table, "seq", "dev, ts").no_oracle(
+    let mut rig = incremental_with(
+        e,
+        &w,
+        &table,
+        "seq",
+        "dev, ts",
+        if declared {
+            &["columns: { ts: timestamp }"]
+        } else {
+            &[]
+        },
+    )
+    .no_oracle(
         "the datetime2(7) rows differ below a microsecond, which the oracle reads the source at; the view is read back by the second client",
     );
     rig.run_ok();
@@ -151,6 +177,17 @@ fn mssql_sub_microsecond_key_is_refused(kind: WarehouseKind) {
         "INSERT INTO {table} (dev, ts, seq) VALUES (1, '2024-01-01 00:00:00.1234569', 2)"
     ));
     rig.run_ok();
+    if !declared {
+        assert!(rig.cli(&["check"]).status.success(), "check admits the key");
+        let load = rig.cli_env(&["load"], w.load_envs());
+        assert!(load.status.success(), "the load: {load:?}");
+        assert_eq!(
+            w.pairs(&rig, &table, "seq", "dev", false, false),
+            vec![(1, 1), (2, 1)],
+            "both rows that differ below a microsecond are in the view"
+        );
+        return;
+    }
     let before = w.fingerprint(&rig, &table);
 
     assert_refused(&rig.cli(&["check"]), INEXACT);
@@ -174,7 +211,7 @@ fn mssql_sub_microsecond_key_is_refused(kind: WarehouseKind) {
     );
 
     rebaseline(&rig);
-    rig.amend_export_lines(&["columns: { ts: timestamp_ns }"]);
+    rig.set_export_lines(&["cursor_column: seq", "columns: { ts: timestamp_ns }"]);
     let run = rig.cli(&["run"]);
     assert!(run.status.success(), "the remedy's run: {run:?}");
     let load = rig.cli_env(&["load"], w.load_envs());
@@ -328,8 +365,14 @@ fn an_oracle_sub_microsecond_key_is_refused_into_clickhouse() {
 
 #[test]
 #[ignore = "live: requires docker compose mssql + clickhouse + fake-gcs"]
-fn an_mssql_sub_microsecond_key_is_refused_into_clickhouse() {
-    mssql_sub_microsecond_key_is_refused(WarehouseKind::ClickHouse);
+fn an_mssql_sub_microsecond_key_declared_timestamp_is_refused_into_clickhouse() {
+    mssql_sub_microsecond_key(WarehouseKind::ClickHouse, true);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql + clickhouse + fake-gcs"]
+fn an_mssql_sub_microsecond_key_lands_at_its_precision_into_clickhouse() {
+    mssql_sub_microsecond_key(WarehouseKind::ClickHouse, false);
 }
 
 #[test]

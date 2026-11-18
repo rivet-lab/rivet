@@ -211,7 +211,7 @@ scenarios:
     what: "rivet init --table --mode chunked writes chunk_by_key for a primary key the planner admits and none (with the NOTE: no chunk key line) for one the planner refuses, so a scaffold is never a config that check rejects"
     postgres: { test: init_scaffolds_no_keyset_key_for_a_bytea_primary_key_postgres }
     mysql:    { test: init_scaffolds_no_keyset_key_for_a_binary16_primary_key_mysql }
-    mssql:    { test: init_scaffolds_no_keyset_key_for_an_alias_type_over_datetime2_7_primary_key_mssql }
+    mssql:    { test: init_scaffolds_a_keyset_key_for_an_alias_type_over_datetime2_7_primary_key_mssql }
     mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
     oracle:   { na: "the Oracle refusal is the explicit chunk_by_key check, pinned by a_timestamp_9_keyset_key_stays_refused_oracle; no Oracle init cell yet" }
 

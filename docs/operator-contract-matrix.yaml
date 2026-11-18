@@ -556,7 +556,7 @@ scenarios:
     what: "2026-11-10 finding: an incremental load whose primary-key column is a SQL Server datetime2(7) or an Oracle TIMESTAMP(7..9) declared as `timestamp` (landed at microseconds) is refused by RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT (exit 5) on every attempt and by `rivet check`, before any warehouse statement; declaring the column `timestamp_ns` and running the export again then keeps both rows that differ below a microsecond"
     postgres: { na: "a PostgreSQL timestamp holds at most microseconds, so the landing loses nothing" }
     mysql:    { na: "a MySQL datetime/timestamp holds at most microseconds, so the landing loses nothing" }
-    mssql:    { test: an_mssql_sub_microsecond_key_is_refused_into_clickhouse }
+    mssql:    { test: an_mssql_sub_microsecond_key_declared_timestamp_is_refused_into_clickhouse }
     mongo:    { na: "a MongoDB export is `mode: full` or `cdc` only and its key is the document _id" }
     oracle:   { test: an_oracle_sub_microsecond_key_is_refused_into_clickhouse }
 

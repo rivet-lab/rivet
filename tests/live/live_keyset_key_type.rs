@@ -116,7 +116,7 @@ const MSSQL_TIME: Case = Case {
     composite: false,
 };
 const MSSQL_DT2_7_DISTINCT_US: Case = Case {
-    label: "SQL Server datetime2(7) key, a tick past each microsecond",
+    label: "SQL Server datetime2(7) key declared timestamp, a tick past each microsecond",
     key_ddl: "DATETIME2(7)",
     key_value: |i| {
         format!(
@@ -125,22 +125,22 @@ const MSSQL_DT2_7_DISTINCT_US: Case = Case {
     },
     primary: false,
     rows: 10,
-    overrides: None,
+    overrides: Some("columns: {k: timestamp}"),
     composite: false,
 };
 const MSSQL_DT2_7_ONE_US: Case = Case {
-    label: "SQL Server datetime2(7) key, nine ticks inside one microsecond",
+    label: "SQL Server datetime2(7) key declared timestamp, nine ticks inside one microsecond",
     key_ddl: "DATETIME2(7)",
     key_value: |i| {
         format!("DATEADD(NANOSECOND, {i} * 100, CAST('2024-01-01 00:00:01' AS DATETIME2(7)))")
     },
     primary: false,
     rows: 9,
-    overrides: None,
+    overrides: Some("columns: {k: timestamp}"),
     composite: false,
 };
 const MSSQL_DTO_7: Case = Case {
-    label: "SQL Server datetimeoffset(7) key, a tick past each microsecond",
+    label: "SQL Server datetimeoffset(7) key declared timestamp_tz, a tick past each microsecond",
     key_ddl: "DATETIMEOFFSET(7)",
     key_value: |i| {
         format!(
@@ -149,8 +149,23 @@ const MSSQL_DTO_7: Case = Case {
     },
     primary: false,
     rows: 10,
-    overrides: None,
+    overrides: Some("columns: {k: timestamp_tz}"),
     composite: false,
+};
+const MSSQL_DT2_7_DEFAULT: Case = Case {
+    label: "SQL Server datetime2(7) key, delivered at its own precision",
+    overrides: None,
+    ..MSSQL_DT2_7_DISTINCT_US
+};
+const MSSQL_DT2_7_ONE_US_DEFAULT: Case = Case {
+    label: "SQL Server datetime2(7) key, nine ticks inside one microsecond, delivered at its own precision",
+    overrides: None,
+    ..MSSQL_DT2_7_ONE_US
+};
+const MSSQL_DTO_7_DEFAULT: Case = Case {
+    label: "SQL Server datetimeoffset(7) key, delivered at its own precision",
+    overrides: None,
+    ..MSSQL_DTO_7
 };
 const MSSQL_DT2_7_NS_OVERRIDE: Case = Case {
     label: "SQL Server datetime2(7) key under the timestamp_ns override",
@@ -753,22 +768,44 @@ const MSSQL_DT2_6: Case = Case {
 
 #[test]
 #[ignore = "live: requires docker compose mssql"]
-fn init_scaffolds_no_keyset_key_for_a_datetime2_7_primary_key_mssql() {
+fn init_scaffolds_a_keyset_key_for_a_datetime2_7_primary_key_mssql() {
     init_scaffolds_a_keyset_key_exactly_when_the_planner_admits_it(
         SqlEngine::Mssql,
-        MSSQL_DT2_7_DISTINCT_US,
+        Case {
+            primary: true,
+            ..MSSQL_TIME
+        },
+        MSSQL_DT2_7_DEFAULT,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn init_scaffolds_a_keyset_key_for_a_datetime2_6_primary_key_mssql() {
+    init_scaffolds_a_keyset_key_exactly_when_the_planner_admits_it(
+        SqlEngine::Mssql,
+        Case {
+            primary: true,
+            ..MSSQL_TIME
+        },
         MSSQL_DT2_6,
     );
 }
 
 #[test]
 #[ignore = "live: requires docker compose mssql"]
-fn init_scaffolds_no_keyset_key_for_an_alias_type_over_datetime2_7_primary_key_mssql() {
+fn init_scaffolds_a_keyset_key_for_an_alias_type_over_datetime2_7_primary_key_mssql() {
     let _alias = AliasType::create(SqlEngine::Mssql, "rivet_ks_ts7_init", "DATETIME2(7)");
     init_scaffolds_a_keyset_key_exactly_when_the_planner_admits_it(
         SqlEngine::Mssql,
-        alias_dt2_7("dbo.rivet_ks_ts7_init"),
-        MSSQL_DT2_6,
+        Case {
+            primary: true,
+            ..MSSQL_TIME
+        },
+        Case {
+            overrides: None,
+            ..alias_dt2_7("dbo.rivet_ks_ts7_init")
+        },
     );
 }
 
@@ -922,10 +959,8 @@ fn a_bare_number_keyset_key_delivers_the_seeded_ids_once_in_parallel_oracle() {
     );
 }
 
-#[test]
-#[ignore = "live: requires docker compose mssql"]
-fn a_datetime2_7_key_under_the_timestamp_ns_override_delivers_the_seeded_ids_once_mssql() {
-    let case = MSSQL_DT2_7_NS_OVERRIDE;
+/// The key delivers the source's ids once over several pages, at a precision the oracle's microsecond read of the source cannot compare.
+fn a_fine_key_delivers_the_seeded_ids_once(case: Case) {
     let (table, _guard) = seeded(SqlEngine::Mssql, &case, "ks_ns");
     let rig = keyset_rig(SqlEngine::Mssql, &table, &case, SMALL_PAGE).no_oracle(
         "the oracle reads a datetime2(7) source at microsecond precision, so every 700 ns tick the run delivers differs from its source row",
@@ -943,6 +978,34 @@ fn a_datetime2_7_key_under_the_timestamp_ns_override_delivers_the_seeded_ids_onc
         "keyset key {}: every row once",
         case.label
     );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn a_datetime2_7_key_under_the_timestamp_ns_override_delivers_the_seeded_ids_once_mssql() {
+    a_fine_key_delivers_the_seeded_ids_once(MSSQL_DT2_7_NS_OVERRIDE);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn a_datetime2_7_key_delivers_the_seeded_ids_once_at_its_own_precision_mssql() {
+    for case in [
+        MSSQL_DT2_7_DEFAULT,
+        MSSQL_DT2_7_ONE_US_DEFAULT,
+        MSSQL_DTO_7_DEFAULT,
+    ] {
+        a_fine_key_delivers_the_seeded_ids_once(case);
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn an_alias_type_over_datetime2_7_keyset_key_delivers_the_seeded_ids_once_mssql() {
+    let _alias = AliasType::create(SqlEngine::Mssql, "rivet_ks_ts7_dflt", "DATETIME2(7)");
+    a_fine_key_delivers_the_seeded_ids_once(Case {
+        overrides: None,
+        ..alias_dt2_7("dbo.rivet_ks_ts7_dflt")
+    });
 }
 
 #[cfg(feature = "oracle")]
