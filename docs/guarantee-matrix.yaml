@@ -465,11 +465,11 @@ guarantees:
       - file: docs/reference/cli.md
         sentence: "`rivet plan` writes a plan only for a source it could read."
     held_by:
-      postgres: { test: plan_refuses_a_table_that_does_not_exist_postgres, asserts: "`plan` over a table that does not exist exited {} and {} the artifact" }
-      mysql: { test: plan_refuses_a_table_that_does_not_exist_mysql, asserts: "`plan` over a table that does not exist exited {} and {} the artifact" }
-      mssql: { test: plan_refuses_a_table_that_does_not_exist_mssql, asserts: "`plan` over a table that does not exist exited {} and {} the artifact" }
-      oracle: { test: plan_refuses_a_table_that_does_not_exist_oracle, asserts: "`plan` over a table that does not exist exited {} and {} the artifact" }
-      mongo: { test: plan_refuses_a_collection_that_does_not_exist_mongo, asserts: "`plan` over a table that does not exist exited {} and {} the artifact" }
+      postgres: { test: plan_refuses_a_table_that_does_not_exist_postgres, asserts: "`plan` over a source it cannot read exited {} and {} the artifact" }
+      mysql: { test: plan_refuses_a_table_that_does_not_exist_mysql, asserts: "`plan` over a source it cannot read exited {} and {} the artifact" }
+      mssql: { test: plan_refuses_a_table_that_does_not_exist_mssql, asserts: "`plan` over a source it cannot read exited {} and {} the artifact" }
+      oracle: { test: plan_refuses_a_table_that_does_not_exist_oracle, asserts: "`plan` over a source it cannot read exited {} and {} the artifact" }
+      mongo: { test: plan_refuses_a_collection_that_does_not_exist_mongo, asserts: "`plan` over a source it cannot read exited {} and {} the artifact" }
 
   - id: every_named_failure_has_a_stable_code_and_its_kind_decides_the_exit
     stated:
