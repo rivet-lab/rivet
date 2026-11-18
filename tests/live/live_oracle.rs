@@ -2362,7 +2362,7 @@ fn a_nine_digit_interval_stays_a_lossy_warning_and_is_not_refused() {
 /// The `columns:` override types beyond the autodetected ones, one column each.
 const OVERRIDE_DECODERS: &str = "columns: {N_SMALL: int16, D: date, TS9: timestamp_ns, \
     TS6: timestamp_tz, DT: text, T9TXT: text, BD: text, BF: float64, BFT: text, B: text, RW: uuid, R8: text, \
-    N_F4: float4, TZ9: timestamp_tz_ns}";
+    N_F4: float64, TZ9: timestamp_tz_ns}";
 
 /// A table whose every column is read through one of [`OVERRIDE_DECODERS`].
 fn override_decoder_table() -> OracleTable {
@@ -2473,9 +2473,9 @@ fn every_override_decoder_round_trips_against_oracles_rendering() {
         "BD as text"
     );
     assert_eq!(
-        bits(parquet_cells(out.path(), "N_F4"), true),
-        bits(oracle_cells(n, "TO_CHAR(n_f4)"), true),
-        "N_F4 as float4"
+        bits(parquet_cells(out.path(), "N_F4"), false),
+        bits(oracle_cells(n, "TO_CHAR(n_f4)"), false),
+        "N_F4 as float64"
     );
     assert_eq!(
         bits(parquet_cells(out.path(), "BF"), false),

@@ -1113,10 +1113,6 @@ fn chunked_strategy_from_introspection(
                 chunk_size,
                 checkpoint,
                 incremental,
-                // `parallel: N` fans N ROW-percentile-range keyset workers (feat/
-                // parallel-keyset). The runner samples the boundaries at run open and
-                // seeks each disjoint `(lo, hi]` range concurrently; recovery flags come
-                // from `keyset_recovery`, the same as sequential.
                 parallel: export.parallel,
                 key_rest: chunk_key.rest().to_vec(),
             }),

@@ -6186,6 +6186,26 @@ seeds:
           - "lib:a_per_table_pk_decides_for_its_table_only"
           - "lib:a_mongo_cdc_load_is_keyed_exactly_where_the_id_type_guards_see_a_key"
 
+  - name: mongo-flat-id-label-fixed-objectid
+    class: "the flat `_id` column of a MongoDB export is labelled `rivet.native_type = objectid` with `rivet.fidelity = exact` whatever BSON type the collection's `_id` values hold, so an int, string or mixed `_id` is declared an exact ObjectId in the Parquet field metadata of every batch part and CDC part"
+    history: "issue #996, found 2026-11-14; RED on main 5240ede7 (a collection of int `_id` values delivered `_id` as objectid/exact; expected number/logical_string)"
+    scope: source
+    switch: mongo-flat-id-label-fixed-objectid
+    engines:
+      postgres:
+        na: "a SQL column has one declared type that the catalog names; only the flat MongoDB `_id` column holds a value of any BSON type per document under one fixed label"
+      mysql:
+        na: "a SQL column has one declared type that the catalog names; only the flat MongoDB `_id` column holds a value of any BSON type per document under one fixed label"
+      mssql:
+        na: "a SQL column has one declared type that the catalog names; only the flat MongoDB `_id` column holds a value of any BSON type per document under one fixed label"
+      oracle:
+        na: "a SQL column has one declared type that the catalog names; only the flat MongoDB `_id` column holds a value of any BSON type per document under one fixed label"
+      mongo:
+        cells:
+          - mongo_batch_flat_id_is_labelled_by_the_bson_types_the_collection_holds
+          - mongo_cdc_flat_id_is_labelled_by_the_bson_types_the_collection_holds
+          - "lib:the_flat_id_label_follows_the_types_the_collection_holds"
+
   - name: url-part-read-raw
     class: "a hand-parsed connection URL part used as written: the Oracle service name and the SQL Server database kept their %XX bytes (`ORCL%2Edomain`, `Sales%20DB`) and a bracketed IPv6 host with no port was split at its last `:` into host `[:` and port `1]`, so the driver got a name that does not exist or the run was refused"
     history: "issues #705 and #706, found 2026-11-06 by the airflow-provider hostile-input hunt; RED on pre-0.34.0 2026-11-13 (`mssql url port not a number: 1]`, service `ORCL%2Edomain`); closed by url_text::pct_decode and url_text::split_host_port used by both parsers"
@@ -6202,6 +6222,23 @@ seeds:
         na: "the driver parses the URL: it reads a portless bracketed host and percent-decodes the database itself (lib:the_driver_parsed_engines_read_a_portless_bracketed_host_and_an_encoded_database)"
       oracle:
         cells: [lib:an_oracle_service_name_is_percent_decoded]
+
+  - name: keyset-sampler-scans-the-table
+    class: "the parallel keyset range sampler reads rows in proportion to the source (a COUNT(*) over the fenced key, or an ORDER BY key OFFSET n skip per boundary) before the first worker starts on a table the catalog puts at 10M rows or more, or has no estimate for, so setup cost grows with the table and every run pays a full scan"
+    history: "issue #1059; RED on main 2026-11-16: PostgreSQL ks_big_4m (4M rows, uuid + varchar primary key, parallel: 4) read 4,000,000 sequential and 10,000,022 index tuples for 4,000,000 exported (pg_stat_user_tables / pg_stat_user_indexes deltas); 1M rows read 1,000,000 + 2,500,007"
+    scope: source
+    switch: keyset-sampler-scans-the-table
+    engines:
+      postgres:
+        cells: [parallel_keyset_sampler_reads_a_bounded_number_of_rows_postgres, "lib:sampled_boundaries_are_seeks_to_even_cuts_inside_the_fence", "lib:every_dialect_samples_by_seeks_to_the_same_boundaries", "lib:the_catalog_estimate_picks_row_percentiles_or_seeks"]
+      mysql:
+        cells: ["lib:every_dialect_samples_by_seeks_to_the_same_boundaries"]
+      mssql:
+        cells: ["lib:every_dialect_samples_by_seeks_to_the_same_boundaries"]
+      oracle:
+        cells: ["lib:every_dialect_samples_by_seeks_to_the_same_boundaries"]
+      mongo:
+        na: "MongoDB parallel is the separate `_id`-range reader (mongo_parallel), not the SQL keyset range sampler"
 
   - name: store-error-detail-unmasked
     class: "a destination error carried into a validate failure's detail (manifest, `_SUCCESS` or listing read) is printed as the store returned it, so a credential the store put in the error's request URI (an Azure SAS token in `?<token>`) reaches the validate output file and stderr"

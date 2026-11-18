@@ -112,6 +112,10 @@ pub(crate) fn refuse_override_wire_mismatch(
     let mut src = connect_source(config, url, config.source.tls.as_ref())?;
     for (table, query) in report_units(export, config_dir, params)? {
         let overrides = unit_overrides(export, table.as_deref(), column_overrides);
+        if is_stream(export) {
+            source::cdc::stream_override_refusal(src.as_mut(), &query, &overrides)?;
+            continue;
+        }
         source::refuse_override_wire_mismatch(
             src.as_mut(),
             config.source.source_type,
@@ -120,6 +124,11 @@ pub(crate) fn refuse_override_wire_mismatch(
         )?;
     }
     Ok(())
+}
+
+/// Whether the export's types are the CDC change-event builder's, not the batch reader's.
+pub(crate) fn is_stream(export: &ExportConfig) -> bool {
+    export.mode == crate::config::ExportMode::Cdc
 }
 
 /// The `columns:` overrides that apply to ONE resolver unit.
@@ -388,7 +397,8 @@ pub fn capture_load_units(
         .into_iter()
         .map(|unit| {
             let overrides = unit_overrides(export, unit.table.as_deref(), column_overrides);
-            let mappings = probe_mappings(src.as_mut(), &unit.query, &overrides)?;
+            let mappings =
+                probe_mappings(src.as_mut(), is_stream(export), &unit.query, &overrides)?;
             let primary_key = match unit.relation.as_deref() {
                 Some(relation) => src.primary_key(relation).unwrap_or_else(|e| {
                     log::warn!(
@@ -519,7 +529,7 @@ fn collect_one(
     policy: &TypePolicy,
     target: Option<ExportTarget>,
 ) -> Result<ExportTypeReport> {
-    let mappings = probe_mappings(src, query, column_overrides)?;
+    let mappings = probe_mappings(src, is_stream(export), query, column_overrides)?;
     Ok(report_from_mappings(
         export,
         table,
@@ -533,10 +543,18 @@ fn collect_one(
 /// One unit's resolved mappings, with overrides that narrow the source type downgraded to lossy.
 pub(crate) fn probe_mappings(
     src: &mut dyn source::Source,
+    stream: bool,
     query: &str,
     column_overrides: &ColumnOverrides,
 ) -> Result<Vec<crate::types::TypeMapping>> {
-    let mut mappings = src.type_mappings(query, column_overrides)?;
+    let mut mappings = if stream {
+        src.type_mappings(query, &ColumnOverrides::new())?
+            .into_iter()
+            .map(|m| source::cdc::retype_for_stream(m, column_overrides))
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        src.type_mappings(query, column_overrides)?
+    };
 
     downgrade_narrowing_overrides(&mut mappings, column_overrides, || {
         src.type_mappings(query, &ColumnOverrides::new())
@@ -1006,6 +1024,13 @@ exports:
     }
 
     #[test]
+    fn only_a_cdc_export_is_typed_by_the_stream_builder() {
+        let config = cfg_from(OVERRIDE_PROBE_CFG);
+        assert!(!super::is_stream(&config.exports[0]));
+        assert!(super::is_stream(&config.exports[1]));
+    }
+
+    #[test]
     fn the_override_probe_connects_for_every_export_with_overrides_cdc_included() {
         let config = cfg_from(OVERRIDE_PROBE_CFG);
         let with =
@@ -1021,7 +1046,7 @@ exports:
         );
         assert!(
             probe(&config, &config.exports[1], &with).is_err(),
-            "a CDC export with overrides opens the source too, so the table grades its pairs"
+            "a CDC export with overrides opens the source too, so the stream builder grades its pairs"
         );
     }
 

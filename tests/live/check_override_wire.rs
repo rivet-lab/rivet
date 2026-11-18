@@ -6,7 +6,11 @@ const CODE: &str = "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH";
 
 /// The run and both `check` spellings refuse `rig`'s export by `CODE`, exit 1; returns the run's stderr.
 fn check_and_run_refuse_alike(rig: Rig, name: &str) -> String {
-    let want = Refused::by_code(CODE, 1);
+    check_and_run_refuse_alike_by(rig, name, Refused::by_code(CODE, 1))
+}
+
+/// The run and both `check` spellings refuse `rig`'s export by `want`; returns the run's stderr.
+fn check_and_run_refuse_alike_by(rig: Rig, name: &str, want: Refused<'_>) -> String {
     let run = rig.run_args(&["--export", name]);
     assert_refused(&run, want);
     assert_refused(&rig.cli(&["check", "--export", name]), want);
@@ -44,7 +48,12 @@ fn check_refuses_a_text_value_declared_uuid_mysql() {
         .export_line("columns:")
         .export_line("  u: \"uuid\"")
         .dest_path(out.path().to_path_buf());
-    check_and_run_refuse_alike(rig, &name);
+    let said = check_and_run_refuse_alike_by(
+        rig,
+        &name,
+        Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5),
+    );
+    assert!(said.contains("column `u` is declared uuid"), "{said}");
 }
 
 #[test]
@@ -130,9 +139,17 @@ fn check_still_accepts_overrides_the_run_accepts_postgres() {
 #[ignore = "live: mysql"]
 fn a_nanosecond_timestamp_override_is_refused_by_the_wire_check_mysql() {
     require_alive(LiveService::Mysql);
-    for (declared, remedy) in [
-        ("timestamp_ns", "declare `timestamp` (microseconds)"),
-        ("timestamp_tz_ns", "declare `timestamp_tz` (microseconds)"),
+    for (declared, remedy, label) in [
+        (
+            "timestamp_ns",
+            "declare `timestamp` (microseconds)",
+            "timestamp(nanosecond)",
+        ),
+        (
+            "timestamp_tz_ns",
+            "declare `timestamp_tz` (microseconds)",
+            "timestamp_tz(nanosecond,UTC)",
+        ),
     ] {
         let name = unique_name("ovw_ns_my");
         let out = tempfile::tempdir().unwrap();
@@ -145,7 +162,9 @@ fn a_nanosecond_timestamp_override_is_refused_by_the_wire_check_mysql() {
         let stderr = check_and_run_refuse_alike(rig, &name);
         assert!(stderr.contains(remedy), "{declared}: {stderr}");
         assert!(
-            stderr.contains("mysql: column `ts` is declared timestamp"),
+            stderr.contains(&format!(
+                "column `ts` is datetime (read as timestamp(microsecond)) and `columns:` declares it {label}"
+            )),
             "{declared}: {stderr}"
         );
     }
@@ -192,9 +211,10 @@ fn a_value_the_declared_type_cannot_read_is_refused_not_an_internal_stop_mssql()
             .dest_path(out.path().to_path_buf());
         let stderr = check_and_run_refuse_alike(rig, &name);
         assert!(
-            stderr.contains(&format!(
-                "column `c` is declared {label} by a `columns:` override"
-            )),
+            stderr.contains("column `c` is ")
+                && stderr.contains(&format!(
+                    "and `columns:` declares it {label} — Mssql does not convert that pair"
+                )),
             "{expr} as {declared}: {stderr}"
         );
     }

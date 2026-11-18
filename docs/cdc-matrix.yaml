@@ -441,3 +441,11 @@ scenarios:
     mssql:    { test: mssql_cdc_steady_state_run_opens_at_most_two_source_connections }
     mongo:    { test: mongo_cdc_steady_state_run_opens_at_most_six_source_connections }
     oracle:   { test: oracle_cdc_steady_state_run_opens_at_most_two_source_connections }
+
+  - id: cdc_flat_id_label
+    what: "the flat Mongo `_id` column of a CDC part is labelled by the BSON type the collection holds, not as an exact ObjectId"
+    postgres: { na: "a SQL column has one declared type that the catalog names; only the flat Mongo `_id` column holds any BSON type per document" }
+    mysql:    { na: "a SQL column has one declared type that the catalog names; only the flat Mongo `_id` column holds any BSON type per document" }
+    mssql:    { na: "a SQL column has one declared type that the catalog names; only the flat Mongo `_id` column holds any BSON type per document" }
+    mongo:    { test: mongo_cdc_flat_id_is_labelled_by_the_bson_types_the_collection_holds }
+    oracle:   { na: "a SQL column has one declared type that the catalog names; only the flat Mongo `_id` column holds any BSON type per document" }
