@@ -25,6 +25,8 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from dev.release_oracle import known_red  # noqa: E402
+from dev.release_oracle.core import DEVBOX  # noqa: E402
+from dev.release_oracle.halves import STAGE_HALF  # noqa: E402
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 MATRIX_RED = re.compile(r"^(?P<matrix>[a-z][a-z0-9_]*) (?P<cell>\S+) RED (?P<why>.*)$")
@@ -118,12 +120,19 @@ def verdict(names: list[str], root: Path, prefix: str, today: dt.date) -> dict:
     return {"parts": graded, "verdict": "red" if any(g["verdict"] in (NEW, LOST) for g in graded.values()) else "green"}
 
 
+def devbox_line() -> str:
+    """The stages this night does not grade and where they are graded."""
+    n = sum(h == DEVBOX for h in STAGE_HALF.values())
+    return (f"- not graded by this night: the {n} devbox-half stages (dev/release_oracle/halves.py), graded on the devbox by "
+            "`make release-oracle-full ARGS=\"--half devbox\"` and read at the tag by `release.py --halves`; the hosted live modules by Gate hosted half")
+
+
 def render(night: dict, baseline: dict[str, known_red.KnownRed]) -> str:
     """One table for the night: a row per part, then every new class and every acknowledged class with its reason."""
     rows = ["| part | exit | verdict | known classes | new |", "|---|---|---|---|---|"]
     for name, g in night["parts"].items():
         rows.append(f"| {name} | {g['exit'] if g['exit'] is not None else 'none'} | {g['verdict']} | {len(g['known'])} | {len(g['new'])} |")
-    out = [f"### Nightly delta: {night['verdict']}", *rows]
+    out = [f"### Nightly delta: {night['verdict']}", *rows, devbox_line()]
     for name, g in night["parts"].items():
         out += [f"- NEW {name}: {n}" for n in g["new"][:20]]
     seen = sorted({k for g in night["parts"].values() for k in g["known"]})
@@ -181,6 +190,8 @@ def self_test() -> int:
     wf = (ROOT / ".github" / "workflows" / "nightly-gate.yml").read_text()
     assert names == re.findall(r"- \{ name: ([\w-]+),", wf), "every part the workflow's matrix defines is graded, in its order"
     assert "nightly_delta.py" in wf, "the nightly gate verdict job must call the delta verdict"
+    table = render({"parts": {}, "verdict": "green"}, base)
+    assert f"the {sum(h == DEVBOX for h in STAGE_HALF.values())} devbox-half stages" in table and "--half devbox" in table, "the table does not say where the devbox half is graded"
     print(f"self-test ok: {len(names)} parts read from the workflow; acknowledged, new, lost, unexplained, crashed and expired each decide")
     return 0
 
