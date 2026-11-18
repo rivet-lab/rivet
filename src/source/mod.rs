@@ -456,6 +456,38 @@ pub(crate) fn columns_from_grants_boundary(engine: crate::config::SourceType) ->
     }
 }
 
+/// The account's readable columns of each table, read once from the engine that enforces `columns_from: grants`.
+pub(crate) fn resolve_column_grants(
+    engine: crate::config::SourceType,
+    url: &str,
+    tls: Option<&crate::config::TlsConfig>,
+    tables: &[String],
+    declared: &std::collections::HashMap<String, Vec<String>>,
+) -> crate::error::Result<std::sync::Arc<std::collections::HashMap<String, cdc::ReadableColumns>>> {
+    match engine {
+        crate::config::SourceType::Oracle => oracle_column_grants(url, tls, tables, declared),
+        _ => mysql::cdc::MysqlChangeStream::resolve_grants(url, tls, tables, declared),
+    }
+}
+
+/// Oracle's grants read, or the refusal of a build without the `oracle` feature.
+fn oracle_column_grants(
+    url: &str,
+    tls: Option<&crate::config::TlsConfig>,
+    tables: &[String],
+    declared: &std::collections::HashMap<String, Vec<String>>,
+) -> crate::error::Result<std::sync::Arc<std::collections::HashMap<String, cdc::ReadableColumns>>> {
+    #[cfg(feature = "oracle")]
+    {
+        oracle::column_grants::resolve_grants(url, tls, tables, declared)
+    }
+    #[cfg(not(feature = "oracle"))]
+    {
+        let _ = (url, tls, tables, declared);
+        Err(oracle_feature_missing())
+    }
+}
+
 pub(crate) use crate::connect::driver_runtime;
 
 /// A key column list, or `None` when the table has no key.
@@ -854,6 +886,29 @@ mod introspection_tests {
         assert!(intro.is_integer_column("ID"));
         assert!(intro.is_integer_column("User_Id"));
         assert!(!intro.is_integer_column("name"));
+    }
+}
+
+#[cfg(test)]
+mod column_grants_dispatch_tests {
+    use super::resolve_column_grants;
+    use crate::config::SourceType;
+    use std::collections::HashMap;
+
+    fn refusal(engine: SourceType, url: &str) -> String {
+        let tables = vec!["orders".to_string()];
+        let err = resolve_column_grants(engine, url, None, &tables, &HashMap::new())
+            .expect_err("an unreachable source refuses");
+        format!("{err:#}").to_lowercase()
+    }
+
+    /// The grants of each engine are read by that engine's reader, so an unreachable server is named by its own driver.
+    #[test]
+    fn the_grants_are_read_by_the_engine_that_enforces_them() {
+        let mysql = refusal(SourceType::Mysql, "mysql://u:p@127.0.0.1:1/app");
+        assert!(!mysql.contains("driver: oracle"), "{mysql}");
+        let oracle = refusal(SourceType::Oracle, "oracle://u:p@127.0.0.1:1/app");
+        assert!(oracle.contains("driver: oracle"), "{oracle}");
     }
 }
 

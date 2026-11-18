@@ -365,6 +365,22 @@ pub(super) fn record_file_anchor(
 pub(super) type RunGrants =
     std::sync::Arc<std::collections::HashMap<String, crate::source::cdc::ReadableColumns>>;
 
+/// What `until_current: false` means on `engine`, said in the continuous-model warning.
+fn continuous_shape(engine: crate::config::SourceType) -> &'static str {
+    match engine {
+        crate::config::SourceType::Mysql => "blocks on the binlog and stays up until stopped",
+        crate::config::SourceType::Mongo => {
+            "blocks on the change stream awaiting events and stays up until stopped \
+             (it ends only if the stream is invalidated or closed)"
+        }
+        _ => concat!(
+            "removes the open-time ceiling but STILL EXITS ON CATCH-UP — on ",
+            "this engine it is one unbounded pass, not a daemon; run it under ",
+            "a supervisor that restarts it, or use the scheduler model instead",
+        ),
+    }
+}
+
 /// Read the account's grants once for a `columns_from: grants` MySQL or Oracle CDC run.
 pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<Option<RunGrants>> {
     if !config.source.columns_from_grants() {
@@ -390,19 +406,13 @@ pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<O
         })
         .collect();
     let secret = config.source.resolve_url()?;
-    let url = secret.expose();
-    let tls = config.source.tls.as_ref();
-    match config.source.source_type {
-        #[cfg(feature = "oracle")]
-        crate::config::SourceType::Oracle => {
-            crate::source::oracle::column_grants::resolve_grants(url, tls, &tables, &declared)
-        }
-        #[cfg(not(feature = "oracle"))]
-        crate::config::SourceType::Oracle => Err(crate::source::oracle_feature_missing()),
-        _ => crate::source::mysql::cdc::MysqlChangeStream::resolve_grants(
-            url, tls, &tables, &declared,
-        ),
-    }
+    crate::source::resolve_column_grants(
+        config.source.source_type,
+        secret.expose(),
+        config.source.tls.as_ref(),
+        &tables,
+        &declared,
+    )
     .map(Some)
 }
 
@@ -782,18 +792,7 @@ fn run_cdc_inner(
     let now = chrono::Utc::now().to_rfc3339();
 
     if cdc.runs_until_stopped() {
-        let shape = match config.source.source_type {
-            crate::config::SourceType::Mysql => "blocks on the binlog and stays up until stopped",
-            crate::config::SourceType::Mongo => {
-                "blocks on the change stream awaiting events and stays up until stopped \
-                 (it ends only if the stream is invalidated or closed)"
-            }
-            _ => concat!(
-                "removes the open-time ceiling but STILL EXITS ON CATCH-UP — on ",
-                "this engine it is one unbounded pass, not a daemon; run it under ",
-                "a supervisor that restarts it, or use the scheduler model instead",
-            ),
-        };
+        let shape = continuous_shape(config.source.source_type);
         log::warn!(
             concat!(
                 "cdc: `until_current: false` opts into the continuous model, which on {:?} {}. ",
@@ -1840,6 +1839,29 @@ mod tests {
         let mut config = crate::config::Config::from_yaml(&yaml).unwrap();
         let export = config.exports.remove(0);
         (config, export)
+    }
+
+    /// The continuous-model warning says what each engine does: MySQL and MongoDB stay up, every other engine exits on catch-up.
+    #[test]
+    fn the_continuous_model_is_described_by_the_engine_that_runs_it() {
+        use crate::config::SourceType as S;
+        assert_eq!(
+            continuous_shape(S::Mysql),
+            "blocks on the binlog and stays up until stopped"
+        );
+        let mongo = continuous_shape(S::Mongo);
+        assert!(
+            mongo.starts_with("blocks on the change stream awaiting events")
+                && mongo.ends_with("(it ends only if the stream is invalidated or closed)"),
+            "{mongo}"
+        );
+        for engine in [S::Postgres, S::Mssql, S::Oracle] {
+            assert!(
+                continuous_shape(engine)
+                    .starts_with("removes the open-time ceiling but STILL EXITS ON CATCH-UP"),
+                "{engine:?}"
+            );
+        }
     }
 
     /// Without `columns_from: grants` no grants are read and none are returned.
