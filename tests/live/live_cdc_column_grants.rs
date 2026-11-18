@@ -1932,7 +1932,7 @@ fn a_declared_key_the_account_cannot_read_is_refused_by_code_before_anything_is_
     let said = said_by(&out);
     assert_refused(&out, Refused::by_code("RIVET_SOURCE_COLUMNS_UNREADABLE", 1));
     assert!(
-        said.contains("key column `code` (the `load.pk` of this export) is not readable under `columns_from: grants`")
+        said.contains(&format!("mysql: `rivet.{table}`: key column `code` (the `load.pk` of this export) is not readable under `columns_from: grants`"))
             && said.contains("GRANT SELECT on it")
             && said.contains("nothing was read or written")
             && !said.contains("which the table does not have"),
@@ -1954,9 +1954,9 @@ fn a_primary_key_the_account_cannot_read_is_refused_by_code_with_the_remedy_mysq
     let said = said_by(&out);
     assert_refused(&out, Refused::by_code("RIVET_SOURCE_COLUMNS_UNREADABLE", 1));
     assert!(
-        said.contains(
-            "key column `id` (the primary key) is not readable under `columns_from: grants`"
-        ) && said.contains("GRANT SELECT on it")
+        said.contains(&format!(
+            "mysql: `rivet.{table}`: key column `id` (the primary key) is not readable under `columns_from: grants`"
+        )) && said.contains("GRANT SELECT on it")
             && said.contains("`load.pk`"),
         "the refusal names the key, where it came from and both remedies:\n{said}"
     );
