@@ -18,6 +18,7 @@ mod governor;
 mod incarnation;
 pub(crate) mod ipc;
 mod job;
+mod key_space;
 mod keyset;
 mod load_spec;
 mod manifest_reconcile;

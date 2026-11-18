@@ -845,7 +845,8 @@ fn parallel_keyset_midrange_error_counts_pre_failure_page_parts_postgres() {
     c.batch_execute(&format!(
         "DROP TABLE IF EXISTS {table};
          CREATE TABLE {table} (id BIGINT PRIMARY KEY, payload INT NOT NULL);
-         INSERT INTO {table} SELECT g, g FROM generate_series(1, 4000) g;"
+         INSERT INTO {table} SELECT g, g FROM generate_series(1, 4000) g;
+         ANALYZE {table};"
     ))
     .unwrap();
     let rig = parallel_keyset(Rig::pg_batch(&format!("public.{table}")));
@@ -1313,4 +1314,319 @@ fn a_sequential_keyset_crash_resumed_in_parallel_exports_every_row_once() {
     rig.run_ok();
     assert_every_row_once(&rig, 2000);
     let _ = pg_connect().execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
+}
+
+/// Tuples PostgreSQL read from `table` and its indexes, once the shared counts settle.
+fn pg_tuples_read(c: &mut postgres::Client, table: &str) -> i64 {
+    let read = |c: &mut postgres::Client| -> i64 {
+        c.query_one(
+            "SELECT (COALESCE(t.seq_tup_read, 0) + COALESCE((SELECT sum(i.idx_tup_read) \
+             FROM pg_stat_user_indexes i WHERE i.relid = t.relid), 0))::bigint \
+             FROM pg_stat_user_tables t WHERE t.relname = $1",
+            &[&table],
+        )
+        .map(|r| r.get(0))
+        .unwrap()
+    };
+    let mut last = read(c);
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let now = read(c);
+        if now == last {
+            return now;
+        }
+        last = now;
+    }
+    last
+}
+
+/// Parallel keyset over a composite uuid + text key reads each row about once: the range sampler seeks, it never counts or skips through the table.
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn parallel_keyset_sampler_reads_a_bounded_number_of_rows_postgres() {
+    require_alive(LiveService::Postgres);
+    const ROWS: i64 = 100_000;
+    let table = unique_name("pk_bounded");
+    let mut c = pg_connect();
+    c.batch_execute(&format!(
+        "DROP TABLE IF EXISTS {table};
+         CREATE TABLE {table} (id UUID NOT NULL, kind VARCHAR(16) NOT NULL, payload TEXT NOT NULL, PRIMARY KEY (id, kind));
+         INSERT INTO {table} SELECT md5(g::text)::uuid, 'k' || (g % 3), repeat('x', 40) FROM generate_series(1, {ROWS}) g;"
+    ))
+    .unwrap();
+    pg_catalog_says_rows(&mut c, &table, 20_000_000);
+    let rig = Rig::pg_batch(&format!("public.{table}"))
+        .mode("chunked")
+        .export_line("chunk_by_key: [id, kind]")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 10000")
+        .no_oracle("the test counts reads of the source table; the oracle's own read-back would be counted");
+    let before = pg_tuples_read(&mut c, &table);
+    rig.run_ok();
+    let read = pg_tuples_read(&mut c, &table) - before;
+    let out = rig.out_dir();
+    let keys: std::collections::HashSet<_> = dir_parquet_display(&out, "id")
+        .into_iter()
+        .zip(dir_parquet_display(&out, "kind"))
+        .collect();
+    assert_eq!(
+        (
+            rows_per_range(&out).values().sum::<usize>(),
+            keys.len(),
+            worker_fanout(&out),
+        ),
+        (ROWS as usize, ROWS as usize, 4),
+        "declared rows, distinct keys, workers"
+    );
+    assert!(
+        read <= ROWS + ROWS / 20,
+        "the run read {read} tuples for {ROWS} rows: the range sampler scans the table"
+    );
+    let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
+}
+
+/// Rows each `pk_w{range}` range delivered, by range index, read from the parts themselves.
+fn rows_per_range(dir: &std::path::Path) -> std::collections::BTreeMap<usize, usize> {
+    let mut spread = std::collections::BTreeMap::new();
+    for part in declared_parquet_parts(dir) {
+        let name = part
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let range = name
+            .split("_pk_w")
+            .nth(1)
+            .and_then(|s| s.split('_').next())
+            .and_then(|r| r.parse().ok())
+            .unwrap_or_else(|| panic!("not a keyset range part: {name}"));
+        *spread.entry(range).or_insert(0) += parquet_rows(&part);
+    }
+    spread
+}
+
+/// A key with 90% of its rows in 5% of its span: every row once, in non-empty ranges that follow the key's value, not its row count.
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn a_skewed_parallel_keyset_key_reads_every_row_once_postgres() {
+    require_alive(LiveService::Postgres);
+    let table = unique_name("pk_skew");
+    let mut c = pg_connect();
+    c.batch_execute(&format!(
+        "DROP TABLE IF EXISTS {table};
+         CREATE TABLE {table} (id BIGINT PRIMARY KEY, payload INT NOT NULL);
+         INSERT INTO {table} SELECT g, g FROM generate_series(1, 18000) g;
+         INSERT INTO {table} SELECT 18000 + g * 171, g FROM generate_series(1, 2000) g;"
+    ))
+    .unwrap();
+    pg_catalog_says_rows(&mut c, &table, 20_000_000);
+    let rig = Rig::pg_batch(&format!("public.{table}"))
+        .mode("chunked")
+        .export_line("chunk_by_key: id")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000");
+    rig.run_ok();
+    let ids = dir_parquet_ids(&rig.out_dir());
+    let expected: Vec<i64> = (1..=18_000)
+        .chain((1..=2_000).map(|g| 18_000 + g * 171))
+        .collect();
+    assert_eq!(
+        (ids.len(), dir_parquet_id_set(&rig.out_dir())),
+        (expected.len(), expected.into_iter().collect()),
+        "every source id delivered once"
+    );
+    let spread = rows_per_range(&rig.out_dir());
+    eprintln!("SPREAD {table}: {spread:?}");
+    let spread: Vec<usize> = spread.into_values().collect();
+    assert_eq!(
+        (
+            spread.len(),
+            spread[..4].to_vec(),
+            spread.iter().max().copied()
+        ),
+        (64, vec![5_625, 5_625, 5_625, 1_152], Some(5_625)),
+        "16 key-space ranges per worker: the dense stretch spans four ranges: {spread:?}"
+    );
+    let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
+}
+
+/// A uuid key, which PostgreSQL has no MAX for, takes the incremental ceiling by a seek and re-reads only the keys past the anchor.
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn parallel_keyset_incremental_uuid_key_postgres() {
+    require_alive(LiveService::Postgres);
+    let table = unique_name("pk_inc_uuid");
+    let mut c = pg_connect();
+    let seed = |lo: i64, hi: i64| {
+        format!(
+            "INSERT INTO {table} SELECT lpad(to_hex(g), 32, '0')::uuid, g \
+             FROM generate_series({lo}, {hi}) g"
+        )
+    };
+    c.batch_execute(&format!(
+        "DROP TABLE IF EXISTS {table};
+         CREATE TABLE {table} (k UUID PRIMARY KEY, id BIGINT NOT NULL);
+         {};",
+        seed(1, 1000)
+    ))
+    .unwrap();
+    let rig = Rig::pg_batch(&format!("public.{table}"))
+        .mode("chunked")
+        .export_line("chunk_by_key: k")
+        .export_line("parallel: 4")
+        .export_line("chunk_checkpoint: true")
+        .export_line("keyset_incremental: true")
+        .export_line("chunk_size: 200");
+    let more = seed(1001, 1500);
+    assert_parallel_incremental(rig, || {
+        pg_connect().batch_execute(&more).unwrap();
+    });
+    let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
+}
+
+/// A datetimeoffset key, whose probe value is not a literal SQL Server can convert, keeps the run: every row once, the lost split named.
+#[test]
+#[ignore = "live: requires docker compose up -d mssql"]
+fn a_parallel_keyset_key_the_server_cannot_cast_a_split_point_to_keeps_the_run_mssql() {
+    require_alive(LiveService::Mssql);
+    let table = unique_name("pk_dto_ms");
+    mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));
+    mssql_exec(&format!(
+        "CREATE TABLE {table} (k DATETIMEOFFSET NOT NULL PRIMARY KEY, id BIGINT NOT NULL)"
+    ));
+    mssql_exec(&format!(
+        "WITH nums AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM nums WHERE n < 1000) \
+         INSERT INTO {table} (k, id) \
+         SELECT DATEADD(minute, n, CAST('2024-01-01 00:00:00 +00:00' AS DATETIMEOFFSET)), n FROM nums \
+         OPTION (MAXRECURSION 0)"
+    ));
+    let rig = Rig::mssql_batch(&table)
+        .mode("chunked")
+        .export_line("chunk_by_key: k")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 200");
+    let said = rig.run_ok_capture();
+    assert!(
+        said.contains("cannot seek the key to a split point"),
+        "the lost split is named: {said}"
+    );
+    let (count, keys, _) = id_set_and_fanout(&rig.out_dir());
+    assert_eq!(
+        (count, keys),
+        (1000, (1..=1000i64).collect::<BTreeSet<i64>>()),
+        "every source id delivered once"
+    );
+    mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));
+}
+
+/// The sparse-key fixture of dev/parallel_keyset/results.md Finding 1: 95% of the rows dense at the bottom, 5% spread out to 500M.
+const SPARSE_DENSE: i64 = 19_000;
+
+/// The ids of the sparse-key fixture.
+fn sparse_key_ids() -> BTreeSet<i64> {
+    (1..=SPARSE_DENSE)
+        .chain((1..=1_000).map(|g| SPARSE_DENSE + g * 500_000))
+        .collect()
+}
+
+/// Rows per range of a parallel keyset run over the sparse-key fixture, after checking every id arrived once.
+fn sparse_key_spread(rig: Rig) -> Vec<usize> {
+    let rig = rig
+        .mode("chunked")
+        .export_line("chunk_by_key: id")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 2000");
+    rig.run_ok();
+    let (count, ids, _) = id_set_and_fanout(&rig.out_dir());
+    assert_eq!(
+        (count, ids),
+        (20_000, sparse_key_ids()),
+        "every source id once"
+    );
+    let spread = rows_per_range(&rig.out_dir());
+    eprintln!("SPREAD {}: {spread:?}", rig.export_name());
+    spread.into_values().collect()
+}
+
+/// A sparse integer key under the row-percentile limit keeps main's row-balanced ranges; above it the key-space ranges are measured.
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn a_sparse_parallel_keyset_key_keeps_row_percentiles_below_the_limit_postgres() {
+    require_alive(LiveService::Postgres);
+    let table = unique_name("pk_sparse");
+    let mut c = pg_connect();
+    c.batch_execute(&format!(
+        "DROP TABLE IF EXISTS {table};
+         CREATE TABLE {table} (id BIGINT PRIMARY KEY, payload INT NOT NULL);
+         INSERT INTO {table} SELECT g, g FROM generate_series(1, {SPARSE_DENSE}) g;
+         INSERT INTO {table} SELECT {SPARSE_DENSE} + g * 500000, g FROM generate_series(1, 1000) g;
+         ANALYZE {table};"
+    ))
+    .unwrap();
+    let qualified = format!("public.{table}");
+    assert_eq!(
+        sparse_key_spread(Rig::pg_batch(&qualified)),
+        vec![5_001, 5_000, 5_000, 4_999],
+        "row percentiles under the limit"
+    );
+    pg_catalog_says_rows(&mut c, &table, 20_000_000);
+    let above = sparse_key_spread(Rig::pg_batch(&qualified));
+    assert_eq!(above.len(), 64, "16 key-space ranges per worker: {above:?}");
+    assert_eq!(
+        above[0], 19_016,
+        "the dense stretch stays in one range: {above:?}"
+    );
+    let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
+}
+
+/// The sparse-key fixture as a MySQL table; `options` ends its `CREATE TABLE`.
+fn mysql_sparse_table(c: &mut mysql::PooledConn, table: &str, options: &str) {
+    use mysql::prelude::Queryable;
+    c.query_drop(format!("DROP TABLE IF EXISTS {table}"))
+        .unwrap();
+    c.query_drop(format!(
+        "CREATE TABLE {table} (id BIGINT NOT NULL PRIMARY KEY, payload INT NOT NULL) {options}"
+    ))
+    .unwrap();
+    c.query_drop("SET SESSION cte_max_recursion_depth = 20000")
+        .unwrap();
+    c.query_drop(format!(
+        "INSERT INTO {table} (id, payload) \
+         WITH RECURSIVE seq AS (SELECT 1 n UNION ALL SELECT n+1 FROM seq WHERE n < {SPARSE_DENSE}) \
+         SELECT n, n FROM seq"
+    ))
+    .unwrap();
+    c.query_drop(format!(
+        "INSERT INTO {table} (id, payload) \
+         WITH RECURSIVE seq AS (SELECT 1 n UNION ALL SELECT n+1 FROM seq WHERE n < 1000) \
+         SELECT {SPARSE_DENSE} + n * 500000, n FROM seq"
+    ))
+    .unwrap();
+}
+
+/// The MySQL twin: an analyzed table keeps row percentiles; the same table the catalog puts at 20M rows takes key-space ranges.
+#[test]
+#[ignore = "live: requires docker compose up -d mysql"]
+fn a_sparse_parallel_keyset_key_keeps_row_percentiles_below_the_limit_mysql() {
+    use mysql::prelude::Queryable;
+    require_alive(LiveService::Mysql);
+    let (table, large) = (unique_name("pk_sparse_my"), unique_name("pk_sparse_my_l"));
+    let mut c = mysql_connect();
+    mysql_sparse_table(&mut c, &table, "");
+    c.query_drop(format!("ANALYZE TABLE {table}")).unwrap();
+    mysql_sparse_table(&mut c, &large, "STATS_PERSISTENT=1 STATS_AUTO_RECALC=0");
+    mysql_catalog_says_rows(&large, 20_000_000);
+    assert_eq!(
+        sparse_key_spread(Rig::mysql_batch(&table)),
+        vec![5_001, 5_000, 5_000, 4_999],
+        "row percentiles under the limit"
+    );
+    let above = sparse_key_spread(Rig::mysql_batch(&large));
+    assert_eq!(above.len(), 64, "16 key-space ranges per worker: {above:?}");
+    assert_eq!(
+        above[0], 19_016,
+        "the dense stretch stays in one range: {above:?}"
+    );
+    for t in [table, large] {
+        let _ = c.query_drop(format!("DROP TABLE IF EXISTS {t}"));
+    }
 }
