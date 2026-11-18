@@ -1019,7 +1019,7 @@ fn cdc_unicode_enum_labels_survive_end_to_end() {
     );
 }
 
-/// MySQL CDC ENUM and SET labels holding a backslash, LF, CR, NUL, a quote and non-ASCII text are the stored labels on the stream leg as on the snapshot leg.
+/// MySQL CDC ENUM and SET labels holding a backslash, LF, CR, NUL, a quote, non-ASCII text and a 4-byte character are the stored labels on the stream leg as on the snapshot leg.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn mysql_cdc_enum_set_labels_match_the_snapshot() {
@@ -1032,8 +1032,18 @@ fn mysql_cdc_enum_set_labels_match_the_snapshot() {
         "it's",
         "\u{43f}\u{440}\u{438}\u{432}\u{435}\u{442}",
         "lit\\n",
+        "\u{1F600}",
     ];
-    let set_labels = ["p\\q", "r\ns", "t\ru", "v\0w", "y'z", "üñ", "e\\"];
+    let set_labels = [
+        "p\\q",
+        "r\ns",
+        "t\ru",
+        "v\0w",
+        "y'z",
+        "üñ",
+        "e\\",
+        "\u{1F600}",
+    ];
     let sql_lit = |l: &str| {
         l.replace('\\', "\\\\")
             .replace('\n', "\\n")
