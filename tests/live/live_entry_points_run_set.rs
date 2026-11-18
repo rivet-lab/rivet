@@ -288,8 +288,7 @@ fn apply_forms_partition_like_run_oracle() {
     assert_every_apply_form_partitions(&|| Rig::oracle_batch(table.name()), "D");
 }
 
-/// A sealed plan cannot carry a `partition_by` expansion: `plan` says so, `apply` refuses it
-/// before writing anything, and the remedy the refusal names delivers the partition tree.
+/// `plan --output` of a `partition_by` export is refused and writes no artifact; the preview `plan` prints is refused by `apply`, and the remedy delivers the partition tree.
 #[test]
 #[ignore = "live: requires docker compose postgres"]
 fn a_sealed_plan_of_a_partitioned_export_is_refused_and_its_remedy_works_postgres() {
@@ -302,15 +301,41 @@ fn a_sealed_plan_of_a_partitioned_export_is_refused_and_its_remedy_works_postgre
         root.path(),
     );
     let env = [("DATABASE_URL", POSTGRES_URL)];
-    let plan = root.path().join("plan.json");
+    let sealed = root.path().join("plan.json");
 
-    let planned = rig.plan_json_env(&plan, &[], &env);
+    let seal = rig.plan_json_env(&sealed, &[], &env);
     assert!(
-        planned.status.success() && plan.is_file(),
-        "plan must still be written (it is the preview):\n{}",
-        text_of(&planned)
+        !seal.status.success() && !sealed.exists(),
+        "`rivet plan --output` of a partition_by export must refuse and write no artifact:\n{}",
+        text_of(&seal)
     );
-    let applied = rig.apply_env(&plan, &[], &env);
+    assert!(
+        text_of(&seal).contains("RIVET_PLAN_PARTITION_TOKEN_UNEXPANDED")
+            && text_of(&seal).contains("rivet apply <config.yaml>"),
+        "the refusal must name its code and the remedy:\n{}",
+        text_of(&seal)
+    );
+
+    let preview = rig.cli_env(
+        &["plan", "--export", rig.export_name(), "--format", "json"],
+        &env,
+    );
+    assert!(
+        preview.status.success(),
+        "`rivet plan` without --output is the preview and must still print it:\n{}",
+        text_of(&preview)
+    );
+    assert!(
+        text_of(&preview).contains(
+            "is a `partition_by` export: its plan is a preview of the whole table, and `rivet \
+             apply <plan-file>` refuses it"
+        ),
+        "plan must say the preview cannot be applied:\n{}",
+        text_of(&preview)
+    );
+    let kept = root.path().join("preview.json");
+    std::fs::write(&kept, &preview.stdout).unwrap();
+    let applied = rig.apply_env(&kept, &[], &env);
     assert!(
         !applied.status.success(),
         "`rivet apply <plan-file>` of a partition_by export must not exit 0:\n{}",
@@ -329,14 +354,6 @@ fn a_sealed_plan_of_a_partitioned_export_is_refused_and_its_remedy_works_postgre
         delivered_tree(root.path()),
         Tree::new(),
         "a refused plan must not have written a part"
-    );
-    assert!(
-        text_of(&planned).contains(
-            "is a `partition_by` export: its plan is a preview of the whole table, and `rivet \
-             apply <plan-file>` refuses it"
-        ),
-        "plan must say the artifact cannot be applied:\n{}",
-        text_of(&planned)
     );
 
     let cfg = rig.config_path();
