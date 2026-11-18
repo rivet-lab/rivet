@@ -662,6 +662,7 @@ fn resumed_parallel_keyset_then_incremental(e: SqlEngine) {
     let (table, _guard) = e.table("mode_transition");
     e.insert(&table, 1..=300, 180, Some(10));
     e.insert(&table, 400..=400, 180, Some(10));
+    e.refresh_row_estimate(&table);
     let dest = Stages::fresh();
     let parallel = Stage(
         "chunked",
