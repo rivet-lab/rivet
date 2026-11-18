@@ -1095,9 +1095,28 @@ seeds:
       mysql:
         na: "query_scalar reads the text protocol - every non-NULL scalar arrives as bytes whatever its type, so there is no per-type reader that can miss"
       mssql:
-        na: "scalar_to_string has an arm per ColumnData kind and renders any other kind through Debug - no arm returns None for a value"
+        na: "scalar_text has an arm per ColumnData kind and renders any other kind through the shared cell_text - no arm returns None for a value (the debug-dump class is mssql-scalar-text-debug-dump)"
       oracle:
         na: "cell_text dispatches on the column kind and propagates decode errors - it has no fall-through that returns None for a value"
+      mongo:
+        na: "query_scalar answers only the reconcile COUNT - MongoDB has no SQL probes"
+  - name: mssql-scalar-text-debug-dump
+    class: "a sampler's scalar read renders a SQL Server type it has no arm for as the driver's debug dump, so a split point is not text the server casts back and every range of a parallel keyset run fails"
+    history: "2026-11-18 nightly: a parallel keyset run on a datetimeoffset(6) key stopped with RIVET_SOURCE_QUERY_FAILED (error 241) on every range, on main; the sampler's DateTimeOffset cell fell to `format!(\"{other:?}\")`"
+    scope: source
+    switch: mssql-scalar-text-debug-dump
+    engines:
+      mssql:
+        cells:
+          - a_parallel_keyset_datetimeoffset_key_keeps_the_run_mssql
+          - keyset_key_types_the_sampler_reads_deliver_the_seeded_ids_in_parallel_mssql
+          - "lib:a_scalar_cell_reads_back_as_text_the_server_casts"
+      postgres:
+        na: "query_scalar tries each reader in turn and refuses a type none reads by code (a_probe_value_of_an_unreadable_type_is_refused_by_name_postgres); no arm renders a value as a debug dump"
+      mysql:
+        na: "query_scalar reads the text protocol - every non-NULL scalar arrives as bytes the server itself rendered, so no per-type arm can fall to a debug dump"
+      oracle:
+        na: "cell_text asks the server for text (Option<String>) for every kind it has no arm for - no debug-dump fallback exists"
       mongo:
         na: "query_scalar answers only the reconcile COUNT - MongoDB has no SQL probes"
   - name: reset-under-a-live-run

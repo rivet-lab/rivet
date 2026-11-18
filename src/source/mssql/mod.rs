@@ -1005,8 +1005,12 @@ fn numeric_to_display(raw: i128, scale: usize) -> String {
 
 /// Render a row's first column as a display string for `query_scalar` (min/max bounds, COUNT(*), SELECT 1).
 fn scalar_to_string(row: &tiberius::Row) -> Option<String> {
-    use tiberius::ColumnData;
-    let cell = row.cells().next().map(|(_, d)| d)?;
+    scalar_text(row.cells().next().map(|(_, d)| d)?)
+}
+
+/// A scalar cell as text SQL Server casts back to its own type: the shared ISO renderer for every type with no arm of its own.
+fn scalar_text(cell: &tiberius::ColumnData<'static>) -> Option<String> {
+    use tiberius::{ColumnData, FromSql};
     match cell {
         ColumnData::U8(v) => v.map(|x| x.to_string()),
         ColumnData::I16(v) => v.map(|x| x.to_string()),
@@ -1018,17 +1022,21 @@ fn scalar_to_string(row: &tiberius::Row) -> Option<String> {
         ColumnData::String(v) => v.as_ref().map(|s| s.to_string()),
         ColumnData::Numeric(v) => v.map(|n| numeric_to_display(n.value(), n.scale() as usize)),
         ColumnData::Guid(v) => v.map(|g| g.to_string()),
-        ColumnData::Date(_) => row
-            .try_get::<chrono::NaiveDate, _>(0)
+        ColumnData::Date(_) => chrono::NaiveDate::from_sql(cell)
             .ok()
             .flatten()
             .map(|d| d.format("%Y-%m-%d").to_string()),
-        ColumnData::DateTime(_) | ColumnData::DateTime2(_) | ColumnData::SmallDateTime(_) => row
-            .try_get::<chrono::NaiveDateTime, _>(0)
-            .ok()
-            .flatten()
-            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.f").to_string()),
-        other => Some(format!("{other:?}")),
+        ColumnData::DateTime(_) | ColumnData::DateTime2(_) | ColumnData::SmallDateTime(_) => {
+            chrono::NaiveDateTime::from_sql(cell)
+                .ok()
+                .flatten()
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.f").to_string())
+        }
+        other => seeded!(
+            "mssql-scalar-text-debug-dump",
+            Some(format!("{other:?}")),
+            arrow_convert::cell_text(other)
+        ),
     }
 }
 
@@ -1251,7 +1259,59 @@ mod tls_posture_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{catalog_decimal_to_params, parse_mssql_simple_from_table, parse_mssql_url};
+    use super::{
+        catalog_decimal_to_params, parse_mssql_simple_from_table, parse_mssql_url, scalar_text,
+    };
+
+    /// Every scalar a sampler reads back is text SQL Server casts, never a `ColumnData` debug dump.
+    #[test]
+    fn a_scalar_cell_reads_back_as_text_the_server_casts() {
+        use tiberius::ColumnData;
+        use tiberius::numeric::Numeric;
+        use tiberius::time::{Date, DateTime2, DateTimeOffset, Time};
+        let dt2 = |days, inc, scale| DateTime2::new(Date::new(days), Time::new(inc, scale));
+        let cases: Vec<(ColumnData<'static>, &str)> = vec![
+            (ColumnData::I32(Some(-7)), "-7"),
+            (ColumnData::I64(Some(i64::MAX)), "9223372036854775807"),
+            (ColumnData::F64(Some(0.1)), "0.1"),
+            (ColumnData::Bit(Some(true)), "true"),
+            (ColumnData::String(Some("a'b".into())), "a'b"),
+            (
+                ColumnData::Numeric(Some(Numeric::new_with_scale(-5, 3))),
+                "-0.005",
+            ),
+            (
+                ColumnData::Guid(Some(tiberius::Uuid::from_bytes([0xab; 16]))),
+                "abababab-abab-abab-abab-abababababab",
+            ),
+            (ColumnData::Date(Some(Date::new(693_595))), "1900-01-01"),
+            (
+                ColumnData::DateTime2(Some(dt2(693_595, 452_961_234_567, 7))),
+                "1900-01-01 12:34:56.123456700",
+            ),
+            (
+                ColumnData::DateTimeOffset(Some(DateTimeOffset::new(
+                    dt2(693_595, 36_000_000_000, 6),
+                    330,
+                ))),
+                "1900-01-01 15:30:00.000000 +05:30",
+            ),
+            (
+                ColumnData::DateTimeOffset(Some(DateTimeOffset::new(
+                    dt2(693_595, 123_456, 6),
+                    -480,
+                ))),
+                "1899-12-31 16:00:00.123456 -08:00",
+            ),
+            (ColumnData::Time(Some(Time::new(1_500, 3))), "00:00:01.500"),
+            (ColumnData::Binary(Some(vec![0xDE, 0xAD].into())), "dead"),
+        ];
+        for (cell, want) in cases {
+            assert_eq!(scalar_text(&cell).as_deref(), Some(want), "{cell:?}");
+        }
+        assert_eq!(scalar_text(&ColumnData::DateTimeOffset(None)), None);
+        assert_eq!(scalar_text(&ColumnData::I32(None)), None);
+    }
 
     #[test]
     fn mssql_url_percent_decodes_userinfo() {
