@@ -1487,7 +1487,7 @@ fn parallel_keyset_incremental_uuid_key_postgres() {
 
 /// A datetimeoffset key keeps the run: every row once, whatever text the sampler reads its split points as.
 #[test]
-#[ignore = "live: requires docker compose up -d mssql"]
+#[ignore = "live+gate-only: requires docker compose up -d mssql"]
 fn a_parallel_keyset_datetimeoffset_key_keeps_the_run_mssql() {
     require_alive(LiveService::Mssql);
     let table = unique_name("pk_dto_ms");
@@ -1638,4 +1638,231 @@ fn a_sparse_parallel_keyset_key_keeps_row_percentiles_below_the_limit_mysql() {
     for t in [table, large] {
         let _ = c.query_drop(format!("DROP TABLE IF EXISTS {t}"));
     }
+}
+
+/// Rows of the statement-timeout fixtures: a read that evaluates every row costs `TIMEOUT_ROWS` x 2 ms, well over the 1 s budget.
+const TIMEOUT_ROWS: i64 = 2_000;
+
+/// A `chunk_by_key: id` run of four workers under a `seconds` statement budget (0 lifts it).
+fn timeout_rig(rig: Rig, seconds: u64) -> Rig {
+    rig.mode("chunked")
+        .export_line("chunk_by_key: id")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 100")
+        .export_line(&format!(
+            "tuning: {{statement_timeout_s: {seconds}, max_retries: 0}}"
+        ))
+}
+
+/// Every generated id once, over at least four workers, from the delivered parts.
+fn assert_timeout_fixture_delivered(rig: &Rig, what: &str) {
+    let (count, ids, workers) = id_set_and_fanout(&rig.out_dir());
+    assert_eq!(
+        (count, ids == (1..=TIMEOUT_ROWS).collect::<BTreeSet<i64>>()),
+        (TIMEOUT_ROWS as usize, true),
+        "{what}: rows, and ids equal the generated 1..=N"
+    );
+    assert!(workers >= 4, "{what}: {workers} workers");
+}
+
+/// A table `(id BIGINT PRIMARY KEY, payload INT)` of `TIMEOUT_ROWS` rows whose rows cost a reader that is not its owner `sleep_s` each to see, and that reader's URL.
+fn pg_slow_to_read_table(c: &mut postgres::Client, table: &str, visible: &str) -> Reader {
+    c.batch_execute(&format!(
+        "DROP TABLE IF EXISTS {table};
+         CREATE TABLE {table} (id BIGINT PRIMARY KEY, payload INT NOT NULL);
+         INSERT INTO {table} SELECT g, g FROM generate_series(1, {TIMEOUT_ROWS}) g;
+         ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY slow_to_read ON {table} FOR SELECT USING ({visible});"
+    ))
+    .unwrap();
+    SqlEngine::Pg.reader(table)
+}
+
+/// The sampler's COUNT of a table the catalog puts under 10M rows is cancelled at the budget and fails the run by code; with no budget the same run delivers every row.
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn a_percentile_sampler_read_obeys_the_statement_timeout_postgres() {
+    require_alive(LiveService::Postgres);
+    let table = unique_name("pk_sto");
+    let mut c = pg_connect();
+    let reader = pg_slow_to_read_table(&mut c, &table, "pg_sleep(0.002) IS NOT NULL");
+    pg_catalog_says_rows(&mut c, &table, TIMEOUT_ROWS);
+    let out = timeout_rig(Rig::pg_batch(&table).source_url(reader.url()), 1).run();
+    assert_refused(&out, Refused::by_code("RIVET_SOURCE_STATEMENT_TIMEOUT", 1));
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("tuning.statement_timeout_s"),
+        "the refusal names the setting: {said}"
+    );
+    let unbounded = timeout_rig(Rig::pg_batch(&table).source_url(reader.url()), 0);
+    unbounded.run_ok();
+    assert_timeout_fixture_delivered(&unbounded, "no budget");
+    drop(reader);
+    let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
+}
+
+/// A seek that scans past rows the reader cannot see is cancelled at the budget: the run says it could not seek, naming the setting.
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn a_sampler_seek_that_scans_is_cancelled_by_the_statement_timeout_postgres() {
+    require_alive(LiveService::Postgres);
+    let table = unique_name("pk_sto_gap");
+    let mut c = pg_connect();
+    let half = TIMEOUT_ROWS / 2;
+    let reader = pg_slow_to_read_table(
+        &mut c,
+        &table,
+        &format!("id <= {half} OR pg_sleep(0.004) IS NULL"),
+    );
+    pg_catalog_says_rows(&mut c, &table, 20_000_000);
+    let said = timeout_rig(Rig::pg_batch(&table).source_url(reader.url()), 1)
+        .a_failed_run_may_leave(
+            &[
+                Leftover::OrphanPart,
+                Leftover::FileLog,
+                Leftover::ObservedSchema,
+                Leftover::ChunkCheckpoint,
+            ],
+            "the export of the rows past the cancelled seek fails after the ranges before it were written and checkpointed",
+        )
+        .run_expect_fail();
+    assert!(
+        said.contains("cannot seek the key to a split point")
+            && said.contains("tuning.statement_timeout_s"),
+        "the cancelled seek is named with its setting: {said}"
+    );
+    drop(reader);
+    let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
+}
+
+/// A key the seeks reach in one row keeps its run under the same budget: every id once over four workers, no lost split.
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn a_seek_sampler_under_the_statement_timeout_keeps_its_run_postgres() {
+    require_alive(LiveService::Postgres);
+    let table = unique_name("pk_sto_ix");
+    let mut c = pg_connect();
+    let reader = pg_slow_to_read_table(&mut c, &table, "pg_sleep(0.002) IS NOT NULL");
+    pg_catalog_says_rows(&mut c, &table, 20_000_000);
+    let bounded = timeout_rig(Rig::pg_batch(&table).source_url(reader.url()), 1);
+    let said = bounded.run_ok_capture();
+    assert!(
+        !said.contains("cannot seek the key to a split point"),
+        "no seek was lost: {said}"
+    );
+    assert_timeout_fixture_delivered(&bounded, "1 s budget");
+    let unbounded = timeout_rig(Rig::pg_batch(&table).source_url(reader.url()), 0);
+    unbounded.run_ok();
+    assert_timeout_fixture_delivered(&unbounded, "no budget");
+    drop(reader);
+    let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
+}
+
+/// MySQL: the sampler under a 1 s `max_execution_time` budget delivers every id once over four workers.
+#[test]
+#[ignore = "live: requires docker compose up -d mysql"]
+fn a_sampler_under_the_statement_timeout_keeps_its_run_mysql() {
+    use mysql::prelude::Queryable;
+    require_alive(LiveService::Mysql);
+    let table = unique_name("pk_sto_my");
+    let mut c = mysql_connect();
+    c.query_drop(format!("DROP TABLE IF EXISTS {table}"))
+        .unwrap();
+    c.query_drop(format!(
+        "CREATE TABLE {table} (id BIGINT NOT NULL PRIMARY KEY, payload INT NOT NULL)"
+    ))
+    .unwrap();
+    c.query_drop("SET SESSION cte_max_recursion_depth = 5000")
+        .unwrap();
+    c.query_drop(format!(
+        "INSERT INTO {table} (id, payload) \
+         WITH RECURSIVE seq AS (SELECT 1 n UNION ALL SELECT n+1 FROM seq WHERE n < {TIMEOUT_ROWS}) \
+         SELECT n, n FROM seq"
+    ))
+    .unwrap();
+    c.query_drop(format!("ANALYZE TABLE {table}")).unwrap();
+    let bounded = timeout_rig(Rig::mysql_batch(&table), 1);
+    let said = bounded.run_ok_capture();
+    assert!(
+        !said.contains("cannot seek the key to a split point"),
+        "no seek was lost: {said}"
+    );
+    assert_timeout_fixture_delivered(&bounded, "1 s budget");
+    let _ = c.query_drop(format!("DROP TABLE IF EXISTS {table}"));
+}
+
+/// `Source::query_scalar_within` cancels a read that outlasts its budget with the coded statement-timeout error, and with no budget it returns the read's value.
+fn assert_scalar_within_obeys_its_budget(source: &mut dyn rivet::source::Source, slow_count: &str) {
+    let started = std::time::Instant::now();
+    let err = source
+        .query_scalar_within(slow_count, 1)
+        .expect_err("a read that takes seconds is cancelled at 1 s");
+    assert_eq!(
+        rivet::error::error_code(&err),
+        Some("RIVET_SOURCE_STATEMENT_TIMEOUT"),
+        "{err:#}"
+    );
+    assert!(
+        format!("{err:#}").contains("tuning.statement_timeout_s"),
+        "names the setting: {err:#}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "cancelled at its budget, not at the end of the read: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        source.query_scalar_within("SELECT 41 + 1", 1).unwrap(),
+        Some("42".to_string()),
+        "the connection serves the next read after a cancelled one"
+    );
+    assert_eq!(
+        source.query_scalar_within(slow_count, 0).unwrap(),
+        Some(TIMEOUT_ROWS.to_string()),
+        "no budget: the read finishes"
+    );
+}
+
+/// PostgreSQL: the bounded scalar read is cancelled by `SET LOCAL statement_timeout` and leaves the connection usable.
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn a_bounded_scalar_read_is_cancelled_at_its_budget_postgres() {
+    require_alive(LiveService::Postgres);
+    let mut source = rivet::source::postgres::PostgresSource::connect(POSTGRES_URL).unwrap();
+    assert_scalar_within_obeys_its_budget(
+        &mut source,
+        &format!(
+            "SELECT COUNT(*) FROM generate_series(1, {TIMEOUT_ROWS}) g WHERE pg_sleep(0.002) IS NOT NULL"
+        ),
+    );
+}
+
+/// MySQL: the bounded scalar read is cancelled by `max_execution_time` and leaves the session as it was.
+#[test]
+#[ignore = "live: requires docker compose up -d mysql"]
+fn a_bounded_scalar_read_is_cancelled_at_its_budget_mysql() {
+    use mysql::prelude::Queryable;
+    require_alive(LiveService::Mysql);
+    let table = unique_name("pk_sto_sc");
+    let mut c = mysql_connect();
+    c.query_drop(format!("DROP TABLE IF EXISTS {table}"))
+        .unwrap();
+    c.query_drop(format!(
+        "CREATE TABLE {table} (id BIGINT NOT NULL PRIMARY KEY)"
+    ))
+    .unwrap();
+    c.query_drop("SET SESSION cte_max_recursion_depth = 5000")
+        .unwrap();
+    c.query_drop(format!(
+        "INSERT INTO {table} (id) \
+         WITH RECURSIVE seq AS (SELECT 1 n UNION ALL SELECT n+1 FROM seq WHERE n < {TIMEOUT_ROWS}) \
+         SELECT n FROM seq"
+    ))
+    .unwrap();
+    let mut source = rivet::source::mysql::MysqlSource::connect(MYSQL_URL).unwrap();
+    assert_scalar_within_obeys_its_budget(
+        &mut source,
+        &format!("SELECT COUNT(*) FROM {table} WHERE SLEEP(0.002) = 0"),
+    );
+    let _ = c.query_drop(format!("DROP TABLE IF EXISTS {table}"));
 }

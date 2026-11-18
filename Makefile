@@ -341,8 +341,8 @@ release-oracle-prev-bin:  ## Download the PREVIOUS release binary (the regressio
 
 
 .PHONY: release-oracle-nightly release-oracle-compat release-oracle-hosted-half
-release-oracle-nightly:  ## The per-run gate with the whole GATE_ENV and no prev-release comparison: the part of the gate a hosted runner can grade.
-	$(LIVE_ALL) env $(GATE_ENV) $(PY) -m dev.release_oracle --without-prev-release-comparison --without-replica-topologies --no-cloud --hosted $(ARGS)
+release-oracle-nightly:  ## The hosted half's stages but the live modules (slice 0 of the hosted half) with the whole GATE_ENV: what a 16 GB hosted runner can grade; the devbox half is graded on the devbox.
+	$(LIVE_ALL) env $(GATE_ENV) $(PY) -m dev.release_oracle --without-prev-release-comparison --without-replica-topologies --no-cloud --half hosted --live-shard 0/1 --hosted $(ARGS)
 
 release-oracle-compat: release-oracle-prev-bin  ## The measured stages (previous-release differential, field replay, regression) against the downloaded previous release.
 	@prev='$(PREV_RELEASE_BIN)'; \

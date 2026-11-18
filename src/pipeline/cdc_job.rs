@@ -365,7 +365,23 @@ pub(super) fn record_file_anchor(
 pub(super) type RunGrants =
     std::sync::Arc<std::collections::HashMap<String, crate::source::cdc::ReadableColumns>>;
 
-/// Read the account's grants once for a `columns_from: grants` MySQL CDC run.
+/// What `until_current: false` means on `engine`, said in the continuous-model warning.
+fn continuous_shape(engine: crate::config::SourceType) -> &'static str {
+    match engine {
+        crate::config::SourceType::Mysql => "blocks on the binlog and stays up until stopped",
+        crate::config::SourceType::Mongo => {
+            "blocks on the change stream awaiting events and stays up until stopped \
+             (it ends only if the stream is invalidated or closed)"
+        }
+        _ => concat!(
+            "removes the open-time ceiling but STILL EXITS ON CATCH-UP — on ",
+            "this engine it is one unbounded pass, not a daemon; run it under ",
+            "a supervisor that restarts it, or use the scheduler model instead",
+        ),
+    }
+}
+
+/// Read the account's grants once for a `columns_from: grants` MySQL, Oracle or MongoDB CDC run.
 pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<Option<RunGrants>> {
     if !config.source.columns_from_grants() {
         return Ok(None);
@@ -376,7 +392,10 @@ pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<O
         (None, None) => return Ok(None),
     };
     if seeded!("column-grants-boundary-unsaid", false, true) {
-        log::info!("{}", crate::source::mysql::column_grants::BOUNDARY);
+        log::info!(
+            "{}",
+            crate::source::columns_from_grants_boundary(config.source.source_type)
+        );
     }
     let declared = tables
         .iter()
@@ -386,8 +405,10 @@ pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<O
                 .map(|k| (t.clone(), k))
         })
         .collect();
-    crate::source::mysql::cdc::MysqlChangeStream::resolve_grants(
-        config.source.resolve_url()?.expose(),
+    let secret = config.source.resolve_url()?;
+    crate::source::resolve_column_grants(
+        config.source.source_type,
+        secret.expose(),
         config.source.tls.as_ref(),
         &tables,
         &declared,
@@ -687,6 +708,25 @@ fn cdc_drift_key(export: &str, table: &str, multi: bool) -> String {
     }
 }
 
+/// The MongoDB engine options of a CDC run.
+fn mongo_engine_opts(
+    config: &Config,
+    export: &ExportConfig,
+    configured_tables: Vec<String>,
+    resolved_grants: Option<RunGrants>,
+) -> CdcEngineOpts {
+    CdcEngineOpts::Mongo {
+        canonical: config
+            .source
+            .mongo
+            .as_ref()
+            .is_some_and(|m| matches!(m.json, crate::config::MongoJsonMode::Canonical)),
+        configured_tables,
+        keyed_tables: crate::source::mongo::id_types::keyed_tables(config, export),
+        resolved_grants,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_cdc_inner(
     config: &Config,
@@ -771,20 +811,7 @@ fn run_cdc_inner(
     let now = chrono::Utc::now().to_rfc3339();
 
     if cdc.runs_until_stopped() {
-        let shape = match config.source.source_type {
-            crate::config::SourceType::Mysql => "blocks on the binlog and stays up until stopped",
-            crate::config::SourceType::Mongo => {
-                "blocks on the change stream awaiting events and stays up until stopped \
-                 (it ends only if the stream is invalidated or closed)"
-            }
-            _ => {
-                concat!(
-                    "removes the open-time ceiling but STILL EXITS ON CATCH-UP — on ",
-                    "this engine it is one unbounded pass, not a daemon; run it under ",
-                    "a supervisor that restarts it, or use the scheduler model instead",
-                )
-            }
-        };
+        let shape = continuous_shape(config.source.source_type);
         log::warn!(
             concat!(
                 "cdc: `until_current: false` opts into the continuous model, which on {:?} {}. ",
@@ -833,14 +860,14 @@ fn run_cdc_inner(
                     },
                     crate::config::SourceType::Oracle => CdcEngineOpts::Oracle {
                         configured_tables: wired.iter().map(|(t, _, _)| t.clone()).collect(),
+                        resolved_grants: grants,
                     },
-                    crate::config::SourceType::Mongo => CdcEngineOpts::Mongo {
-                        canonical: config.source.mongo.as_ref().is_some_and(|m| {
-                            matches!(m.json, crate::config::MongoJsonMode::Canonical)
-                        }),
-                        configured_tables: wired.iter().map(|(t, _, _)| t.clone()).collect(),
-                        keyed_tables: crate::source::mongo::id_types::keyed_tables(config, export),
-                    },
+                    crate::config::SourceType::Mongo => mongo_engine_opts(
+                        config,
+                        export,
+                        wired.iter().map(|(t, _, _)| t.clone()).collect(),
+                        grants,
+                    ),
                 },
             },
             outputs,
@@ -1810,5 +1837,104 @@ mod tests {
         );
         write_ckpt(dir.path(), serde_json::json!({"idt": {"orders": [0, 2]}}));
         refuse_mixed_id_types(&config, &export, dir.path()).unwrap();
+    }
+
+    /// A `mode: cdc` config of `source_type` at an unreachable `url`, with or without `columns_from: grants`.
+    fn grants_config(
+        source_type: &str,
+        grants: bool,
+    ) -> (crate::config::Config, crate::config::ExportConfig) {
+        let policy = if grants {
+            "  columns_from: grants\n"
+        } else {
+            ""
+        };
+        let yaml = format!(
+            "source:\n  type: {source_type}\n  url: \"{source_type}://u:p@127.0.0.1:1/app\"\n{policy}exports:\n  - name: o\n    \
+             table: orders\n    mode: cdc\n    format: parquet\n    cdc: {{ slot: s1, server_id: 5000, checkpoint: /tmp/o.ckpt }}\n    \
+             destination: {{ type: local, path: ./out }}\n"
+        );
+        let mut config = crate::config::Config::from_yaml(&yaml).unwrap();
+        let export = config.exports.remove(0);
+        (config, export)
+    }
+
+    /// The continuous-model warning says what each engine does: MySQL and MongoDB stay up, every other engine exits on catch-up.
+    #[test]
+    fn the_continuous_model_is_described_by_the_engine_that_runs_it() {
+        use crate::config::SourceType as S;
+        assert_eq!(
+            continuous_shape(S::Mysql),
+            "blocks on the binlog and stays up until stopped"
+        );
+        let mongo = continuous_shape(S::Mongo);
+        assert!(
+            mongo.starts_with("blocks on the change stream awaiting events")
+                && mongo.ends_with("(it ends only if the stream is invalidated or closed)"),
+            "{mongo}"
+        );
+        for engine in [S::Postgres, S::Mssql, S::Oracle] {
+            assert!(
+                continuous_shape(engine)
+                    .starts_with("removes the open-time ceiling but STILL EXITS ON CATCH-UP"),
+                "{engine:?}"
+            );
+        }
+    }
+
+    /// Without `columns_from: grants` no grants are read and none are returned.
+    #[test]
+    fn no_grants_are_resolved_unless_the_source_asks_for_them() {
+        for engine in ["mysql", "oracle"] {
+            let (config, export) = grants_config(engine, false);
+            let grants = super::resolve_grants(&config, &export).unwrap();
+            assert!(grants.is_none(), "{engine}");
+        }
+    }
+
+    /// Under `columns_from: grants` the run reads the account's grants from the source and a source it cannot reach stops the run.
+    #[test]
+    fn grants_are_read_from_the_source_and_an_unreachable_one_stops_the_run() {
+        for engine in ["mysql", "oracle"] {
+            let (config, export) = grants_config(engine, true);
+            let err = super::resolve_grants(&config, &export)
+                .err()
+                .unwrap_or_else(|| panic!("{engine}: grants resolved without a source"));
+            assert!(!format!("{err:#}").is_empty(), "{engine}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod grants_tests {
+    use super::resolve_grants;
+
+    /// A `columns_from` CDC config of `source_type` against a server that cannot be reached, and its export.
+    fn dead(
+        source_type: &str,
+        url: &str,
+        columns_from: &str,
+    ) -> (crate::config::Config, crate::config::ExportConfig) {
+        let yaml = format!(
+            "source:\n  type: {source_type}\n  url: \"{url}\"\n{columns_from}exports:\n  - name: o\n    \
+             table: orders\n    mode: cdc\n    format: parquet\n    cdc:\n      checkpoint: ./o.ckpt\n    \
+             destination: {{ type: local, path: ./out }}\n"
+        );
+        let mut config = crate::config::Config::from_yaml(&yaml).unwrap();
+        let export = config.exports.remove(0);
+        (config, export)
+    }
+
+    const DEAD_MONGO: &str = "mongodb://u:p@127.0.0.1:1/app?serverSelectionTimeoutMS=300";
+
+    /// A MongoDB run with the policy reads the grants from its own server and fails there, a run without it reads none.
+    #[test]
+    fn a_mongo_run_resolves_its_grants_through_the_mongo_reader_only_with_the_policy() {
+        let (config, export) = dead("mongo", DEAD_MONGO, "  columns_from: grants\n");
+        let err = resolve_grants(&config, &export).unwrap_err();
+        let said = format!("{err:#}").to_lowercase();
+        assert!(said.contains("server selection"), "{said}");
+        let (config, export) = dead("mongo", DEAD_MONGO, "");
+        assert!(resolve_grants(&config, &export).unwrap().is_none());
     }
 }

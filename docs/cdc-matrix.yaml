@@ -250,12 +250,28 @@ scenarios:
     mongo:    { test: mongo_cdc_collection_switched_to_another_over_its_baseline_is_refused_and_switched_back_continues }
     oracle:   { test: oracle_cdc_table_switched_to_another_over_its_baseline_is_refused_and_switched_back_continues }
 
+  - id: cdc_grants_hidden_only_update_advances_the_checkpoint_and_delivers_no_row
+    what: "under columns_from: grants an update that changes only fields the account may not read delivers no row, and the checkpoint still moves past it"
+    postgres: { na: "`columns_from: grants` is refused at config load for PostgreSQL (columns_from_grants_is_refused_by_every_command_postgres)" }
+    mysql:    { test: an_update_of_hidden_columns_only_advances_the_checkpoint_mysql }
+    mssql: { na: "`columns_from: grants` is refused at config load for SQL Server (columns_from_grants_is_refused_by_every_command_mssql)" }
+    mongo:    { test: an_update_of_hidden_fields_only_advances_the_checkpoint_mongo }
+    oracle: { na: "`columns_from: grants` is refused at config load for Oracle (columns_from_grants_is_refused_by_every_command_oracle)" }
+
+  - id: cdc_grants_no_hidden_value_reaches_a_delivered_change
+    what: "under columns_from: grants no change delivered by a CDC run carries a field the account may not read: not in an insert, an update's fields, a removal, a delete's pre-image, nor in the baseline snapshot"
+    postgres: { na: "`columns_from: grants` is refused at config load for PostgreSQL (columns_from_grants_is_refused_by_every_command_postgres)" }
+    mysql:    { test: a_column_grant_account_delivers_no_hidden_column_by_name_or_value_mysql }
+    mssql: { na: "`columns_from: grants` is refused at config load for SQL Server (columns_from_grants_is_refused_by_every_command_mssql)" }
+    mongo:    { test: a_view_account_delivers_no_hidden_field_in_cdc_mongo }
+    oracle: { na: "`columns_from: grants` is refused at config load for Oracle (columns_from_grants_is_refused_by_every_command_oracle)" }
+
   - id: cdc_mysql_grants_statement_naming_a_captured_table_is_refused
     what: "under `columns_from: grants` a binlog statement whose bytes contain the name of a captured table (any case, any database, `ADD INDEX` and `ADD COLUMN` included) stops the stream before it with RIVET_SOURCE_CDC_UNDECODABLE (exit 5) naming the table and the re-baseline remedy, nothing past it delivered and the checkpoint kept, and the re-baseline gets past it; a statement that names none passes, a privilege statement marks one shared re-read that stops with RIVET_SOURCE_CDC_GRANTS_CHANGED (exit 2) only when a captured table's readable columns changed. Graded on 8.0, 8.4 and 8.4 with lower_case_table_names=1"
     postgres: { na: "`columns_from: grants` is refused at config load for PostgreSQL (columns_from_grants_is_refused_by_every_command_postgres)" }
     mysql:    { test: an_add_index_on_a_captured_table_is_refused_naming_the_table_and_the_remedy_mysql }
     mssql:    { na: "`columns_from: grants` is refused at config load for SQL Server (columns_from_grants_is_refused_by_every_command_mssql)" }
-    mongo:    { na: "`columns_from: grants` is refused at config load for MongoDB (columns_from_grants_is_refused_by_every_command_mongo)" }
+    mongo:    { na: "a MySQL binlog statement: a MongoDB change carries no statement text, and its fields are projected by the stream pipeline" }
     oracle:   { na: "`columns_from: grants` is refused at config load for Oracle (columns_from_grants_is_refused_by_every_command_oracle)" }
 
   - id: cdc_mysql_grants_truncate_spelled_in_another_case_or_folded_character_is_refused
@@ -263,7 +279,7 @@ scenarios:
     postgres: { na: "`columns_from: grants` is refused at config load for PostgreSQL (columns_from_grants_is_refused_by_every_command_postgres)" }
     mysql:    { test: a_truncate_spelled_with_a_character_the_server_folds_is_refused_under_the_policy_mysql }
     mssql: { na: "`columns_from: grants` is refused at config load for SQL Server (columns_from_grants_is_refused_by_every_command_mssql)" }
-    mongo: { na: "`columns_from: grants` is refused at config load for MongoDB (columns_from_grants_is_refused_by_every_command_mongo)" }
+    mongo: { na: "a MySQL binlog statement: a MongoDB change carries no statement text, and its fields are projected by the stream pipeline" }
     oracle: { na: "`columns_from: grants` is refused at config load for Oracle (columns_from_grants_is_refused_by_every_command_oracle)" }
 
   - id: cdc_mysql_grants_truncate_spelled_in_a_multibyte_client_character_set_is_refused
@@ -271,7 +287,7 @@ scenarios:
     postgres: { na: "`columns_from: grants` is refused at config load for PostgreSQL (columns_from_grants_is_refused_by_every_command_postgres)" }
     mysql:    { test: a_truncate_spelled_with_a_multibyte_character_the_server_folds_is_refused_under_the_policy_mysql }
     mssql: { na: "`columns_from: grants` is refused at config load for SQL Server (columns_from_grants_is_refused_by_every_command_mssql)" }
-    mongo: { na: "`columns_from: grants` is refused at config load for MongoDB (columns_from_grants_is_refused_by_every_command_mongo)" }
+    mongo: { na: "a MySQL binlog statement: a MongoDB change carries no statement text, and its fields are projected by the stream pipeline" }
     oracle: { na: "`columns_from: grants` is refused at config load for Oracle (columns_from_grants_is_refused_by_every_command_oracle)" }
 
   - id: cdc_mysql_grants_column_rename_under_a_folded_spelling_is_refused
@@ -279,7 +295,7 @@ scenarios:
     postgres: { na: "`columns_from: grants` is refused at config load for PostgreSQL (columns_from_grants_is_refused_by_every_command_postgres)" }
     mysql:    { test: a_column_renamed_or_swapped_under_a_folded_spelling_is_refused_mysql }
     mssql: { na: "`columns_from: grants` is refused at config load for SQL Server (columns_from_grants_is_refused_by_every_command_mssql)" }
-    mongo: { na: "`columns_from: grants` is refused at config load for MongoDB (columns_from_grants_is_refused_by_every_command_mongo)" }
+    mongo: { na: "a MySQL binlog statement: a MongoDB change carries no statement text, and its fields are projected by the stream pipeline" }
     oracle: { na: "`columns_from: grants` is refused at config load for Oracle (columns_from_grants_is_refused_by_every_command_oracle)" }
 
   - id: cdc_mysql_grants_non_ascii_comment_on_an_uncaptured_table_is_not_refused
@@ -287,7 +303,7 @@ scenarios:
     postgres: { na: "`columns_from: grants` is refused at config load for PostgreSQL (columns_from_grants_is_refused_by_every_command_postgres)" }
     mysql:    { test: a_non_ascii_comment_on_an_uncaptured_table_is_met_as_before_under_the_policy_mysql }
     mssql: { na: "`columns_from: grants` is refused at config load for SQL Server (columns_from_grants_is_refused_by_every_command_mssql)" }
-    mongo: { na: "`columns_from: grants` is refused at config load for MongoDB (columns_from_grants_is_refused_by_every_command_mongo)" }
+    mongo: { na: "a MySQL binlog statement: a MongoDB change carries no statement text, and its fields are projected by the stream pipeline" }
     oracle: { na: "`columns_from: grants` is refused at config load for Oracle (columns_from_grants_is_refused_by_every_command_oracle)" }
 
   - id: cdc_mysql_grants_uncaptured_rename_under_a_gbk_client_is_not_refused
@@ -295,7 +311,7 @@ scenarios:
     postgres: { na: "`columns_from: grants` is refused at config load for PostgreSQL (columns_from_grants_is_refused_by_every_command_postgres)" }
     mysql:    { test: an_uncaptured_table_renamed_under_a_two_byte_name_whose_trail_is_a_backtick_is_met_as_before_mysql }
     mssql: { na: "`columns_from: grants` is refused at config load for SQL Server (columns_from_grants_is_refused_by_every_command_mssql)" }
-    mongo: { na: "`columns_from: grants` is refused at config load for MongoDB (columns_from_grants_is_refused_by_every_command_mongo)" }
+    mongo: { na: "a MySQL binlog statement: a MongoDB change carries no statement text, and its fields are projected by the stream pipeline" }
     oracle: { na: "`columns_from: grants` is refused at config load for Oracle (columns_from_grants_is_refused_by_every_command_oracle)" }
 
   - id: cdc_mysql_grants_dropped_database_with_a_captured_table_stops_as_before
@@ -303,7 +319,7 @@ scenarios:
     postgres: { na: "`columns_from: grants` is refused at config load for PostgreSQL (columns_from_grants_is_refused_by_every_command_postgres)" }
     mysql:    { test: a_database_dropped_with_a_captured_table_is_met_as_before_by_the_unreadable_columns_stop_mysql }
     mssql: { na: "`columns_from: grants` is refused at config load for SQL Server (columns_from_grants_is_refused_by_every_command_mssql)" }
-    mongo: { na: "`columns_from: grants` is refused at config load for MongoDB (columns_from_grants_is_refused_by_every_command_mongo)" }
+    mongo: { na: "a MySQL binlog statement: a MongoDB change carries no statement text, and its fields are projected by the stream pipeline" }
     oracle: { na: "`columns_from: grants` is refused at config load for Oracle (columns_from_grants_is_refused_by_every_command_oracle)" }
 
   - id: cdc_mysql_a_truncate_spelled_in_another_case_stops_the_stream_on_a_folding_server

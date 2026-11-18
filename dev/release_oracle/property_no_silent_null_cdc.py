@@ -201,6 +201,17 @@ def unit_config(engine: str, t: str, u: Unit, d: Path, slot: str, sid: int) -> s
     return yaml.safe_dump({"source": {"type": engine, "url_env": "RIVET_NSN_URL"}, "exports": [exp]}, sort_keys=False)
 
 
+def zero_nulls_by_run(engine: str, c: Col, u: Unit, n: int, seen: dict) -> int:
+    """How many MySQL zero or partial dates of column c the delivered rows hold as NULL, per run that delivered them."""
+    counts: dict[str, int] = {}
+    for leg in legs():
+        for op, i, k in expected(leg, n):
+            row = seen.get((op, i))
+            if row is not None and nsn.is_zero_date_null(engine, lit(c, k), nsn.compare(engine, lit(c, k), c.family, u.target, row.get(c.name.lower()), u.fmt == "csv", c.native)):
+                counts[leg_run(leg)] = counts.get(leg_run(leg), 0) + 1
+    return counts
+
+
 def grade_unit(engine: str, u: Unit, cols: list[Col], n: int, runs: dict[str, core.Proc], checks: dict[str, core.Proc], d: Path, tag: str) -> list[Result]:
     """Grade every leg of one unit from the whole output directory against the seed literals; each run is held to the check made right before it."""
     graded = cols if u.target == "none" else [u.col]
@@ -238,12 +249,20 @@ def grade_unit(engine: str, u: Unit, cols: list[Col], n: int, runs: dict[str, co
                 out.append(Result(cell, DELIVERED, EMPTY, f"{len(missing)} of {len(exp)} change rows not delivered, e.g. {missing[:3]}"))
                 continue
             nulled, wrong = [], []
+            run = leg_run(leg)
+            zeros = 0
             for op, i, k in exp:
                 v = nsn.compare(engine, lit(c, k), c.family, u.target, seen[(op, i)].get(key), u.fmt == "csv", c.native)
-                if v == NULLED:
+                if nsn.is_zero_date_null(engine, lit(c, k), v):
+                    zeros += 1
+                elif v == NULLED:
                     nulled.append(f"{op or 'snapshot'}:{i}:{lit(c, k)}")
                 elif v == WRONG:
                     wrong.append(f"{op or 'snapshot'}:{i}:{lit(c, k)}->{seen[(op, i)].get(key)!r}")
+            if zeros:
+                total = zero_nulls_by_run(engine, c, u, n, seen)[run]
+                if unwarned := nsn.zero_date_unwarned(total, nsn.warned_counts(p.out).get(key, 0)):
+                    nulled.append(unwarned)
             if nulled:
                 out.append(Result(cell, DELIVERED, NULLED, f"{len(nulled)} non-NULL values delivered as NULL, e.g. {nulled[:3]}", fidelity=fid))
             elif wrong and fid in ("lossy", "logical_string", "unsupported"):
@@ -391,6 +410,20 @@ def self_test() -> None:
     assert all(rs[f"mysql/INT->none/cdc-{x}/parquet"].klass == "" for x in ("snapshot", "insert", "delete", "added")), rs
     rs = grade_unit("mysql", Unit("none", None, "parquet"), [c], 3, {"snapshot": nsn._proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE]")}, {"snapshot": ok}, d, "@MINIMAL")
     assert rs[0].cell.endswith("cdc-snapshot@MINIMAL/parquet") and rs[0].verdict == REFUSED and rs[1].klass == NOT_GRADED
+    day = Col("d00", "DATE", "Date32", "date", ("'0000-00-00'",))
+    zero_rows = [{"id": i, "__op": op or None, "d00": None} for leg in legs() for op, i, _ in expected(leg, 1)]
+    nsn.read_parts = lambda out, fmt, key="": ({"id": "INTEGER", "d00": "DATE", "__op": "VARCHAR"}, zero_rows, 1)
+
+    def warn(n: int):
+        return nsn._proc(0, f"WARN column `d00`: {n} MySQL zero or partial date value(s) written as NULL")
+
+    try:
+        counted, miscounted = (grade_unit("mysql", Unit("none", None, "parquet"), [day], 1, {"snapshot": warn(1), "stream": warn(n), **{k: warn(1) for k in ddl_kinds()}}, {"snapshot": ok}, d, "")
+                               for n in (2, 1))
+    finally:
+        nsn.read_parts = saved
+    assert [r.klass for r in counted] == [""] * len(legs()), [(r.cell, r.klass, r.detail) for r in counted]
+    assert {r.cell.split("/")[2] for r in miscounted if r.klass == NULLED} == {"cdc-insert", "cdc-update"}, [(r.cell, r.klass) for r in miscounted]
     shutil.rmtree(d, ignore_errors=True)
     print(f"no_silent_null_cdc self-test ok: legs {legs()}, row images {row_images()}")
 

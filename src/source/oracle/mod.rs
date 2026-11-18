@@ -2,6 +2,7 @@
 
 mod arrow_convert;
 pub(crate) mod cdc;
+pub(crate) mod column_grants;
 mod kind;
 
 use kind::OraKind;
@@ -497,6 +498,16 @@ fn cell_text(row: &Row, idx: usize) -> Result<Option<String>> {
 }
 
 impl OracleSource {
+    /// The first cell of `sql`'s first row.
+    fn scalar_read(&mut self, sql: &str) -> Result<Option<String>> {
+        let sql = self.projected(sql)?.sql;
+        let mut cursor = self.conn.query(&sql, &[]).ora()?;
+        match cursor.next() {
+            Some(row) => cell_text(&row.ora()?, 0),
+            None => Ok(None),
+        }
+    }
+
     /// One export under `tuning.statement_timeout_s`; `export` clears the call timeout after.
     fn export_within_budget(
         &mut self,
@@ -698,12 +709,29 @@ impl Source for OracleSource {
     }
 
     fn query_scalar(&mut self, sql: &str) -> Result<Option<String>> {
-        let sql = self.projected(sql)?.sql;
-        let mut cursor = self.conn.query(&sql, &[]).ora()?;
-        match cursor.next() {
-            Some(row) => cell_text(&row.ora()?, 0),
-            None => Ok(None),
+        self.scalar_read(sql)
+    }
+
+    fn query_scalar_within(
+        &mut self,
+        sql: &str,
+        statement_timeout_s: u64,
+    ) -> Result<Option<String>> {
+        if statement_timeout_s == 0 {
+            return self.scalar_read(sql);
         }
+        let budget = std::time::Duration::from_secs(statement_timeout_s);
+        self.conn.set_call_timeout(Some(budget)).ora()?;
+        let started = std::time::Instant::now();
+        let read = self.scalar_read(sql).map_err(|e| {
+            if budget_spent(started.elapsed(), budget) {
+                crate::source::StatementDurationTimeout::oracle(statement_timeout_s).into()
+            } else {
+                e
+            }
+        });
+        let reset = self.conn.set_call_timeout(None).ora();
+        read.and_then(|v| reset.map(|()| v))
     }
 
     fn type_mappings(
@@ -802,6 +830,13 @@ impl Source for OracleSource {
             })
             .to_string(),
         )
+    }
+
+    fn readable_columns(
+        &mut self,
+        table: &str,
+    ) -> Result<Option<crate::source::cdc::ReadableColumns>> {
+        column_grants::readable_relation(self, table).map(|(_, _, r)| Some(r))
     }
 
     fn primary_key(&mut self, table: &str) -> Result<Option<Vec<String>>> {
