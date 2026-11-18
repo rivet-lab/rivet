@@ -394,13 +394,13 @@ def oracle_result(url: str, sql: str) -> tuple[list[str], list[tuple]]:
 
 
 def oracle_table_select(url: str, table: str, renders: dict | None = None) -> str:
-    """`SELECT` of every column of `table` (`OWNER.TABLE` allowed), DATE/TIMESTAMP as ISO text with every fractional digit (python-oracledb would truncate TIMESTAMP(9) to microseconds and refuses BC years), a WITH TIME ZONE column rendered at UTC; `renders` maps a column name to its own `{c}` expression."""
+    """`SELECT` of every column `SELECT *` returns of `table` (`OWNER.TABLE` allowed; an INVISIBLE column is not one), DATE/TIMESTAMP as ISO text with every fractional digit (python-oracledb would truncate TIMESTAMP(9) to microseconds and refuses BC years), a WITH TIME ZONE column rendered at UTC; `renders` maps a column name to its own `{c}` expression."""
     owner, name = table.split(".", 1) if "." in table else (None, table)
     where = f"owner = '{owner.upper()}' AND " if owner else "owner = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') AND "
     cols = oracle_rows(
         url,
-        "SELECT column_name, data_type FROM all_tab_columns "
-        f"WHERE {where}table_name = '{name.upper()}' ORDER BY column_id",
+        "SELECT column_name, data_type FROM all_tab_cols "
+        f"WHERE {where}table_name = '{name.upper()}' AND hidden_column = 'NO' ORDER BY column_id",
     )
 
     def one(name: str, typ: str) -> str:
