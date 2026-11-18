@@ -189,6 +189,58 @@ fn mongo_cdc_initial_snapshot_covers_preexisting_rows() {
     );
 }
 
+#[test]
+#[ignore = "live: requires docker compose up -d mongo-rs"]
+fn mongo_cdc_flat_id_is_labelled_by_the_bson_types_the_collection_holds() {
+    require_alive(LiveService::MongoRs);
+    require_alive(LiveService::DuckDb);
+    use mongodb::bson::{doc, oid::ObjectId};
+    let db = unique_name("cdc_idlabel");
+    let m = MongoTest::connect(mongo_rs_port(), &db);
+    let number = "number (int, long, double or decimal)";
+    let cases = [
+        (
+            "oid",
+            (0..3)
+                .map(|i| doc! { "_id": ObjectId::new(), "v": i })
+                .collect(),
+            "objectid",
+            "exact",
+        ),
+        (
+            "int",
+            (1..=3_i64).map(|i| doc! { "_id": i, "v": i }).collect(),
+            number,
+            "logical_string",
+        ),
+        (
+            "str",
+            (1..=3)
+                .map(|i| doc! { "_id": format!("s{i}"), "v": i })
+                .collect(),
+            "string",
+            "logical_string",
+        ),
+    ];
+    for (coll, docs, native, fidelity) in cases {
+        m.drop_collection(coll);
+        m.insert_many(coll, docs);
+        let rig = cdc(&db, coll).cdc("initial: snapshot");
+        rig.run_ok();
+        assert_eq!(
+            walkdir_parquet_ids(&rig.out_dir(), "snapshot").len(),
+            3,
+            "{coll}: the delivered `_id` set must hold the 3 source documents"
+        );
+        let want = (native.to_string(), fidelity.to_string());
+        let got = parquet_field_labels(&rig.out_dir(), "_id");
+        assert!(
+            !got.is_empty() && got.iter().all(|l| *l == want),
+            "{coll} _id label: {got:?}"
+        );
+    }
+}
+
 /// The printed re-baseline remedy for a lost changes-only checkpoint re-reads the missed document.
 #[test]
 #[ignore = "live: requires docker compose up -d mongo-rs + the rivet-duckdb oracle"]
