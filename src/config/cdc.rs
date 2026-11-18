@@ -101,6 +101,8 @@ pub struct CdcExportConfig {
     pub server_id: Option<u32>,
     /// PostgreSQL logical replication slot name (default `rivet_slot`).
     pub slot: Option<String>,
+    /// PostgreSQL publication for the pgoutput stream (default: the slot name); validated now, read once the stream reads pgoutput.
+    pub publication: Option<String>,
     /// SQL Server CDC capture instance, e.g. `dbo_orders` — required for
     /// `sqlserver://` sources.
     pub capture_instance: Option<String>,
@@ -518,6 +520,7 @@ impl Default for CdcExportConfig {
             rollover_memory_mb: None,
             server_id: None,
             slot: None,
+            publication: None,
             capture_instance: None,
             backfill: None,
         }
@@ -530,6 +533,7 @@ impl Config {
         use std::collections::HashMap;
 
         let mut slots: HashMap<String, &str> = HashMap::new();
+        let mut publications: HashMap<String, &str> = HashMap::new();
         let mut server_ids: HashMap<u32, &str> = HashMap::new();
         let mut checkpoints: HashMap<String, &str> = HashMap::new();
 
@@ -572,6 +576,20 @@ impl Config {
                              has ONE consumer; each export's ack would advance it past changes \
                              the other never read (silent data loss). Set a distinct `cdc.slot:` \
                              per export (the default is '{DEFAULT_PG_SLOT}').",
+                            e.name
+                        );
+                    }
+                    let publication = cdc
+                        .and_then(|c| c.publication.clone())
+                        .unwrap_or_else(|| slot.clone());
+                    if let Some(prev) = publications.insert(publication.clone(), &e.name) {
+                        crate::config_bail!(
+                            crate::error::codes::CONFIG_CDC_RESOURCE_CONFLICT,
+                            "exports '{prev}' and '{}': same PostgreSQL publication \
+                             '{publication}' — a publication carries ONE export's tables, so \
+                             sharing it makes the second export's check see the first's tables as \
+                             drift. Set a distinct `cdc.publication:` per export (the default is \
+                             the export's slot name).",
                             e.name
                         );
                     }
@@ -719,6 +737,33 @@ impl Config {
                 "export '{}': a `cdc:` block is only valid with `mode: cdc`",
                 export.name
             );
+        }
+        Ok(())
+    }
+
+    /// `cdc.publication` is PostgreSQL's, one to 63 bytes with no NUL.
+    pub(super) fn validate_cdc_publication(
+        &self,
+        export: &ExportConfig,
+    ) -> crate::error::Result<()> {
+        if let Some(name) = export.cdc.as_ref().and_then(|c| c.publication.as_deref()) {
+            if self.source.source_type != SourceType::Postgres {
+                crate::config_bail!(
+                    crate::error::codes::CONFIG_CDC_SHAPE_INVALID,
+                    "export '{}': `cdc.publication` names a PostgreSQL publication, and this \
+                     source is not PostgreSQL — remove the key",
+                    export.name
+                );
+            }
+            if name.is_empty() || name.len() > 63 || name.contains('\0') {
+                crate::config_bail!(
+                    crate::error::codes::CONFIG_CDC_SHAPE_INVALID,
+                    "export '{}': `cdc.publication` must be 1 to 63 bytes with no NUL, as a \
+                     PostgreSQL identifier is (got {} bytes) — set a name of that length",
+                    export.name,
+                    name.len()
+                );
+            }
         }
         Ok(())
     }
@@ -873,6 +918,81 @@ mod tests {
             false,
         ))
         .expect("PostgreSQL may opt into the continuous model");
+    }
+
+    /// A two-export PostgreSQL CDC config with the given `cdc:` flow maps.
+    fn two_pg_exports(first: &str, second: &str) -> String {
+        format!(
+            "source: {{ type: postgres, url: \"postgresql://u:p@localhost/db\" }}\nexports:\n  \
+             - name: a\n    table: a\n    mode: cdc\n    format: parquet\n    cdc: {{ {first} }}\n    \
+             destination: {{ type: local, path: /tmp/x }}\n  \
+             - name: b\n    table: b\n    mode: cdc\n    format: parquet\n    cdc: {{ {second} }}\n    \
+             destination: {{ type: local, path: /tmp/y }}\n"
+        )
+    }
+
+    /// `cdc.publication` loads on PostgreSQL, and a name two exports resolve to is refused naming both.
+    #[test]
+    fn a_publication_two_exports_share_is_refused_and_distinct_ones_load() {
+        let ok = crate::config::Config::from_yaml(&two_pg_exports(
+            "slot: sa, publication: pa, checkpoint: ./a",
+            "slot: sb, checkpoint: ./b",
+        ))
+        .expect("distinct publications load");
+        assert_eq!(
+            ok.exports[0]
+                .cdc
+                .as_ref()
+                .and_then(|c| c.publication.as_deref()),
+            Some("pa")
+        );
+        let same = crate::config::Config::from_yaml(&two_pg_exports(
+            "slot: sa, publication: shared, checkpoint: ./a",
+            "slot: sb, publication: shared, checkpoint: ./b",
+        ))
+        .expect_err("a shared publication");
+        let text = format!("{same:#}");
+        assert!(
+            text.contains("same PostgreSQL publication 'shared'"),
+            "{text}"
+        );
+        assert!(text.contains("exports 'a' and 'b'"), "{text}");
+        let against_default = crate::config::Config::from_yaml(&two_pg_exports(
+            "slot: sa, checkpoint: ./a",
+            "slot: sb, publication: sa, checkpoint: ./b",
+        ))
+        .expect_err("an explicit name equal to another export's default");
+        assert!(format!("{against_default:#}").contains("same PostgreSQL publication 'sa'"));
+    }
+
+    /// The key is refused on a source that has no publications, and an empty or over-long name is refused.
+    #[test]
+    fn a_publication_key_is_refused_off_postgres_and_when_it_is_not_an_identifier() {
+        let mysql = cdc_yaml("mysql", "mysql://u:p@localhost/db", true).replace(
+            "until_current: true,",
+            "until_current: true, publication: p,",
+        );
+        let err = crate::config::Config::from_yaml(&mysql).expect_err("MySQL has no publication");
+        assert!(
+            format!("{err:#}").contains("`cdc.publication` names a PostgreSQL publication"),
+            "{err:#}"
+        );
+        for bad in ["\"\"", &format!("\"{}\"", "x".repeat(64))] {
+            let pg = cdc_yaml("postgres", "postgresql://u:p@localhost/db", true).replace(
+                "until_current: true,",
+                &format!("until_current: true, publication: {bad},"),
+            );
+            let err = crate::config::Config::from_yaml(&pg).expect_err("a bad name");
+            assert!(
+                format!("{err:#}").contains("1 to 63 bytes"),
+                "{bad}: {err:#}"
+            );
+        }
+        let ok = cdc_yaml("postgres", "postgresql://u:p@localhost/db", true).replace(
+            "until_current: true,",
+            &format!("until_current: true, publication: {},", "x".repeat(63)),
+        );
+        crate::config::Config::from_yaml(&ok).expect("63 bytes is the identifier limit");
     }
 
     /// A batch export reading one table, named as a recipe candidate.
