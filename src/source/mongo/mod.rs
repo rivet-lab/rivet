@@ -664,12 +664,8 @@ impl Source for MongoSource {
             db.collection::<Document>(coll_name)
         };
         let canonical = self.canonical_json;
-        let no_cursor_timeout = self.no_cursor_timeout
-            && seeded!(
-                "mongo-view-read-sets-no-cursor-timeout",
-                true,
-                !self.started_as.get(coll_name).is_some_and(Vec::is_empty)
-            );
+        let no_cursor_timeout =
+            sets_no_cursor_timeout(self.no_cursor_timeout, self.started_as.get(coll_name));
         let id_range = self.id_range.clone();
         let batch_rows = request.tuning.effective_batch_size(Some(&schema)).max(1);
         let batch_byte_cap = mongo_batch_byte_cap(request.tuning.max_batch_memory_mb);
@@ -1318,6 +1314,16 @@ mod tests {
     }
 }
 
+/// The `no_cursor_timeout` flag applies only when configured and the read is not of an empty-pipeline view.
+fn sets_no_cursor_timeout(configured: bool, started_as: Option<&Vec<u8>>) -> bool {
+    configured
+        && seeded!(
+            "mongo-view-read-sets-no-cursor-timeout",
+            true,
+            !started_as.is_some_and(Vec::is_empty)
+        )
+}
+
 #[cfg(test)]
 mod error_code_tests {
     use super::*;
@@ -1587,5 +1593,20 @@ mod collection_identity_tests {
             mappings[0].fidelity,
             crate::types::TypeFidelity::LogicalString
         );
+    }
+}
+
+#[cfg(test)]
+mod no_cursor_timeout_tests {
+    use super::sets_no_cursor_timeout;
+
+    /// An unconfigured `no_cursor_timeout` stays off whatever the collection looked like at open.
+    #[test]
+    fn no_cursor_timeout_is_set_only_when_configured_and_not_an_empty_view() {
+        assert!(!sets_no_cursor_timeout(false, None));
+        assert!(!sets_no_cursor_timeout(false, Some(&vec![1])));
+        assert!(sets_no_cursor_timeout(true, None));
+        assert!(sets_no_cursor_timeout(true, Some(&vec![1])));
+        assert!(!sets_no_cursor_timeout(true, Some(&Vec::new())));
     }
 }
