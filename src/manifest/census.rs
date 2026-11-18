@@ -526,6 +526,7 @@ mod tests {
             parts: Vec::new(),
             column_checksums: None,
             checksum_key_column: None,
+            nulled_cells: None,
             checksum_render: None,
             row_hash: None,
             mode: "batch".into(),

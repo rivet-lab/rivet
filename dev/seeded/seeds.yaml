@@ -5981,6 +5981,26 @@ seeds:
       mongo:
         na: "a MySQL zero date has no counterpart on MongoDB: its date types refuse the value or hold no such sentinel (property_no_silent_null grades it on MySQL only)"
 
+  - name: mysql-zero-date-column-claims-exact
+    class: "a MySQL DATE, DATETIME or TIMESTAMP column that can hold a zero or partial date is labelled rivet.fidelity exact although the run writes those values as NULL"
+    history: "2026-11-18 - issue #994 remainder: RED on main in the MySQL batch and CDC cells (the date columns of a table holding a zero date carried rivet.fidelity: exact); fixed by mysql_mapping labelling them compatible"
+    scope: source
+    engines:
+      mysql:
+        switch: mysql-zero-date-column-claims-exact
+        cells:
+          - zero_dates_are_labelled_compatible_batch_mysql
+          - zero_dates_are_labelled_compatible_cdc_mysql
+          - "lib:a_mysql_temporal_column_is_never_exact_and_the_rest_are_unchanged"
+      postgres:
+        na: "a PostgreSQL date has no zero or partial value: the type claim is exact and is not changed"
+      mssql:
+        na: "a SQL Server date has no zero or partial value: the type claim is exact and is not changed"
+      oracle:
+        na: "an Oracle date has no zero or partial value: the type claim is exact and is not changed"
+      mongo:
+        na: "a MongoDB date has no zero or partial value: the type claim is exact and is not changed"
+
   - name: cursor-column-admitted-at-plan
     class: "the incremental plan accepts any cursor_column: a nullable one exports its NULL-cursor rows on run 1 and never again (later NULL-cursor inserts are lost with exit 0), and a type the cursor cannot render (boolean, time, binary, array, a timestamp unit other than microsecond or nanosecond) is a WARN plus a full re-export every run"
     history: "2026-11-11 - owner decision 2026-11-10 (axis-6 hunt, P2 and P3): the plan now reads the server's nullability and the delivered type once and refuses with RIVET_PLAN_CURSOR_NULLABLE or RIVET_PLAN_CURSOR_TYPE_UNSUPPORTED from check, validate, plan, run and apply; fixed in src/plan/cursor_admission.rs::admit_incremental_cursor"

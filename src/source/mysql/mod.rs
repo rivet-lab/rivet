@@ -1,7 +1,7 @@
 //! MySQL `Source` implementation.
 
 mod arrow_convert;
-pub(crate) use arrow_convert::{time_outside_day, zero_date_warning};
+pub(crate) use arrow_convert::{time_outside_day, zero_date_counts, zero_date_warning};
 pub(crate) mod cdc;
 pub(crate) mod column_grants;
 mod folded_name;
@@ -28,8 +28,8 @@ use crate::types::ColumnOverrides;
 #[cfg(test)]
 use arrow_convert::bit_bytes_to_u64;
 use arrow_convert::{
-    mysql_native_type_name, mysql_schema_and_arrow_types, mysql_type_to_rivet, nulled_dates,
-    rows_to_record_batch_typed,
+    mysql_mapping, mysql_native_type_name, mysql_schema_and_arrow_types, mysql_type_to_rivet,
+    nulled_dates, rows_to_record_batch_typed,
 };
 use proxy::{detect_mysql_proxy_kind, warn_proxy_kind};
 
@@ -241,7 +241,7 @@ pub(crate) fn type_mappings_on(
                 || mysql_type_to_rivet(col),
             )?;
             let source = crate::types::SourceColumn::simple(col.name_str().as_ref(), native, true);
-            Ok(crate::types::TypeMapping::from_source(&source, rivet))
+            Ok(mysql_mapping(&source, rivet))
         })
         .collect()
 }
