@@ -1242,6 +1242,104 @@ fn mssql_a_partial_capture_instance_is_refused_even_beside_a_complete_sibling() 
     );
 }
 
+/// A char/varchar/text column in a codepage other than the database's is refused at open: the capture job would store `?`.
+#[test]
+#[ignore = "live: requires docker compose mssql with SQL Server Agent + CDC"]
+fn mssql_cdc_a_column_in_another_codepage_is_refused_not_stored_as_question_marks() {
+    let _serial = cross_process_serial("mssql_cdc");
+    let d = tempfile::tempdir().unwrap();
+    let table = unique_name("rivet_cdc_cp");
+    let ci = format!("{table}_ci");
+    mssql_cdc_drop_table(&format!("dbo.{table}"));
+    mssql_cdc_exec(&format!(
+        "CREATE TABLE dbo.{table}(id INT PRIMARY KEY, \
+         v VARCHAR(20) COLLATE Cyrillic_General_CI_AS)"
+    ));
+    enable_cdc(&table, &ci);
+    let _g = MssqlCdcTable {
+        table: table.clone(),
+        ci: ci.clone(),
+    };
+    mssql_cdc_exec(&format!("INSERT INTO dbo.{table} VALUES (1, N'Привет')")); // allow-cyrillic
+    wait_for_capture(&ci, 1);
+    let stored = mssql_cdc_query_i64(&format!(
+        "SELECT COUNT(*) FROM cdc.{ci}_CT WHERE v = '??????' COLLATE Latin1_General_BIN"
+    ));
+    assert_eq!(
+        stored, 1,
+        "fixture is inert: the capture job must store '?'"
+    );
+
+    let ckpt = d.path().join("cdc.ckpt");
+    let out = d.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let rig = mssql_cdc_rig(&table, &ci, &ckpt, &out);
+    let cfg = rig.config_path();
+    let res = run_rivet(&["run", "--config", cfg.to_str().unwrap()]);
+    let stderr = String::from_utf8_lossy(&res.stderr).into_owned();
+    assert!(
+        !res.status.success(),
+        "a column the capture job stores as '?' must be refused, not delivered with exit 0; \
+         stderr:\n{stderr}"
+    );
+    assert_refused(&res, Refused::by_code("RIVET_SOURCE_CDC_PREREQUISITE", 1));
+    assert!(
+        stderr.contains(&format!("dbo.{table}.v")) && stderr.contains("another codepage"),
+        "the refusal must name the column and the cause; stderr:\n{stderr}"
+    );
+    assert!(
+        read_all_parts(&out).is_empty(),
+        "a refused run must deliver no part"
+    );
+}
+
+/// A varchar column whose collation differs from the database's but shares its codepage is still captured.
+#[test]
+#[ignore = "live: requires docker compose mssql with SQL Server Agent + CDC"]
+fn mssql_cdc_a_column_in_the_same_codepage_is_still_captured() {
+    let _serial = cross_process_serial("mssql_cdc");
+    let d = tempfile::tempdir().unwrap();
+    let table = unique_name("rivet_cdc_samecp");
+    let ci = format!("{table}_ci");
+    mssql_cdc_drop_table(&format!("dbo.{table}"));
+    mssql_cdc_exec(&format!(
+        "CREATE TABLE dbo.{table}(id INT PRIMARY KEY, \
+         v VARCHAR(20) COLLATE Latin1_General_100_CS_AS, n NVARCHAR(20))"
+    ));
+    enable_cdc(&table, &ci);
+    let _g = MssqlCdcTable {
+        table: table.clone(),
+        ci: ci.clone(),
+    };
+    mssql_cdc_exec(&format!(
+        "INSERT INTO dbo.{table} VALUES (1, N'café', N'Привет')" // allow-cyrillic
+    ));
+    wait_for_capture(&ci, 1);
+    let ckpt = d.path().join("cdc.ckpt");
+    let out = d.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let rig = mssql_cdc_rig(&table, &ci, &ckpt, &out);
+    let cfg = rig.config_path();
+    let res = run_rivet(&["run", "--config", cfg.to_str().unwrap()]);
+    assert!(
+        res.status.success(),
+        "same-codepage columns must still be captured; stderr:\n{}",
+        String::from_utf8_lossy(&res.stderr)
+    );
+    let batches = read_all_parts(&out);
+    let v = batches[0]
+        .column_by_name("v")
+        .expect("column v")
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .expect("v is a string column");
+    assert_eq!(
+        v.value(0),
+        "café",
+        "the same-codepage value must arrive byte-equal"
+    );
+}
+
 /// A `table:` that differs from the catalog only in CASE must not silently capture nothing while the checkpoint advances past the changes.
 #[test]
 #[ignore = "live: requires docker compose mssql with SQL Server Agent + CDC"]

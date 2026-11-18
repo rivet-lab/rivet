@@ -31,7 +31,6 @@ impl super::Destination for StdoutDestination {
     }
 }
 
-// ─── ADR-0004 capability contract tests ──────────────────────────────────────
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -42,7 +41,6 @@ mod tests {
     }
 
     /// ADR-0004: stdout uses Streaming — there is no atomic commit boundary.
-    /// Partial output may be visible to the reader before `write()` returns.
     #[test]
     fn stdout_commit_protocol_is_streaming() {
         let caps = dest().capabilities();
