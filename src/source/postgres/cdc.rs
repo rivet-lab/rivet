@@ -11,7 +11,9 @@ use crate::connect::postgres::read_pinned_text;
 use crate::error::Result;
 use crate::source::cdc::tx_buffer::{SpooledTail, TxBuffer, replay};
 use crate::source::cdc::value::RivetValue;
-use crate::source::cdc::{ChangeEvent, ChangeOp, ChangeStream, DrainMode, Position, PriorRun};
+use crate::source::cdc::{
+    ChangeEvent, ChangeOp, ChangeStream, DrainMode, Position, PriorRun, ReadableColumns,
+};
 use crate::source::postgres::td_line::{
     self, split_qualified_ident, split_top_level_commas, utf8_len,
 };
@@ -51,6 +53,8 @@ pub(crate) struct PgChangeStream {
     barrier_nonce: Option<String>,
     /// The export's checkpoint file, kept at the slot's position before every advance rivet makes.
     checkpoint: Option<std::path::PathBuf>,
+    /// `columns_from: grants`: the columns each captured table may deliver, as the run resolved them.
+    readable: Option<std::sync::Arc<HashMap<String, ReadableColumns>>>,
 }
 
 /// The run-start warning emitted when a logical replication slot has to be CREATED — i.e.
@@ -354,6 +358,54 @@ pub(crate) fn classify_routing(rel: &RelationRouting<'_>) -> RoutingVerdict {
     }
 }
 
+/// What the prerequisite probe prepares for each captured table.
+pub(crate) enum Probe<'a> {
+    Whole,
+    Readable(Option<&'a HashMap<String, ReadableColumns>>),
+}
+
+impl<'a> Probe<'a> {
+    /// The probe a stream opened with `readable` runs.
+    fn of(readable: Option<&'a HashMap<String, ReadableColumns>>) -> Self {
+        match readable {
+            Some(r) => Self::Readable(Some(r)),
+            None => Self::Whole,
+        }
+    }
+
+    /// The statement that describes `table`: every column, or only the ones the account may read.
+    fn select_of(&self, client: &mut Client, table: &str) -> Result<String> {
+        match self {
+            Self::Whole => Ok(format!("SELECT * FROM {table}")),
+            Self::Readable(Some(resolved)) if resolved.contains_key(table) => {
+                Ok(resolved[table].select.clone())
+            }
+            Self::Readable(_) => super::column_grants::readable_columns(client, table.trim())
+                .map(|(_, _, r)| r.select),
+        }
+    }
+}
+
+/// Refuse a run whose captured tables' readable columns are no longer the ones it resolved before its anchor.
+fn refuse_grants_moved_since_resolved(
+    client: &mut Client,
+    configured: &[String],
+    resolved: &HashMap<String, ReadableColumns>,
+) -> Result<()> {
+    let now = super::column_grants::readable_columns_now(client, configured)?;
+    match super::column_grants::first_grants_change(configured, resolved, &now) {
+        Some(why) => Err(crate::error::coded(
+            crate::error::codes::SOURCE_CDC_GRANTS_CHANGED,
+            format!(
+                "pg cdc: {why}; nothing read since the last delivered change was delivered. \
+                 Re-run: the next run reads the grants as they are now and resumes from the \
+                 checkpoint, so nothing is lost"
+            ),
+        )),
+        None => Ok(()),
+    }
+}
+
 impl PgChangeStream {
     /// Each captured table's old image, from its replica identity and primary key; a catalog error answers nothing.
     pub(crate) fn old_images_on(client: &mut Client, tables: &[String]) -> Vec<(String, OldImage)> {
@@ -507,9 +559,15 @@ impl PgChangeStream {
         tls: Option<&TlsConfig>,
         configured_tables: &[String],
         mode: DrainMode,
+        columns_from_grants: bool,
     ) -> Result<()> {
         let mut client = super::connect_client(conn_str, tls)?;
-        Self::refuse_unmet_prerequisites_on(&mut client, configured_tables, mode, false)
+        let probe = if columns_from_grants {
+            Probe::Readable(None)
+        } else {
+            Probe::Whole
+        };
+        Self::refuse_unmet_prerequisites_on(&mut client, configured_tables, mode, false, probe)
     }
 
     /// Every refusal of the open (routing, an absent table, `wal_level`, a bounded drain on a standby), asked on `client`.
@@ -518,6 +576,7 @@ impl PgChangeStream {
         configured_tables: &[String],
         mode: DrainMode,
         say_note: bool,
+        probe: Probe<'_>,
     ) -> Result<()> {
         let wal_level: String = client.query_one("SHOW wal_level", &[])?.get(0);
         let in_recovery: bool = client.query_one("SELECT pg_is_in_recovery()", &[])?.get(0);
@@ -527,13 +586,13 @@ impl PgChangeStream {
         Self::check_configured_tables_are_routable(client, configured_tables, say_note)?;
         for table in configured_tables {
             crate::source::cdc::validate_table_ident(table)?;
-            let probe =
-                super::prepare_fresh(client, &format!("SELECT * FROM {table}")).map_err(|e| {
-                    table_probe_refusal(table, e.code().map(|c| c.code()), &e.to_string())
-                })?;
+            let select = probe.select_of(client, table)?;
+            let stmt = super::prepare_fresh(client, &select).map_err(|e| {
+                table_probe_refusal(table, e.code().map(|c| c.code()), &e.to_string())
+            })?;
             if let Some(why) = bit_column_refusal(
                 table.trim(),
-                probe.columns().iter().map(|c| (c.name(), c.type_())),
+                stmt.columns().iter().map(|c| (c.name(), c.type_())),
             ) {
                 crate::rivet_bail!(crate::error::codes::SOURCE_CDC_CELL_UNSUPPORTED, "{why}");
             }
@@ -553,8 +612,12 @@ impl PgChangeStream {
         configured_tables: &[String],
         spill_dir: Option<&std::path::Path>,
         checkpoint: Option<&std::path::Path>,
+        readable: Option<std::sync::Arc<HashMap<String, ReadableColumns>>>,
     ) -> Result<Self> {
         let mut client = super::connect_client(conn_str, tls)?;
+        if let Some(resolved) = &readable {
+            refuse_grants_moved_since_resolved(&mut client, configured_tables, resolved)?;
+        }
         if seeded!("session-set-on-a-pooled-cdc-connection", true, false) {
             client.batch_execute(
                 "SET datestyle = 'ISO, MDY'; SET bytea_output = 'hex'; SET intervalstyle = 'postgres'; \
@@ -562,7 +625,13 @@ impl PgChangeStream {
             )?;
         }
         if seeded!("cdc-anchor-written-before-the-refusal", false, true) {
-            Self::refuse_unmet_prerequisites_on(&mut client, configured_tables, mode, true)?;
+            Self::refuse_unmet_prerequisites_on(
+                &mut client,
+                configured_tables,
+                mode,
+                true,
+                Probe::of(readable.as_deref()),
+            )?;
         }
         let mut bare_schema = HashMap::new();
         for cfg in configured_tables {
@@ -589,7 +658,13 @@ impl PgChangeStream {
             }
         }
         if seeded!("cdc-anchor-written-before-the-refusal", true, false) {
-            Self::refuse_unmet_prerequisites_on(&mut client, configured_tables, mode, true)?;
+            Self::refuse_unmet_prerequisites_on(
+                &mut client,
+                configured_tables,
+                mode,
+                true,
+                Probe::of(readable.as_deref()),
+            )?;
         }
         let bound = if mode.is_bounded() {
             use anyhow::Context as _;
@@ -645,6 +720,7 @@ impl PgChangeStream {
             bare_schema,
             barrier_nonce,
             checkpoint: checkpoint.map(std::path::Path::to_path_buf),
+            readable,
         })
     }
 
@@ -659,6 +735,7 @@ impl PgChangeStream {
                 &[&self.slot, &self.batch_limit],
             )
         })?;
+        self.refuse_grants_moved()?;
         let n_rows = rows.len();
         let mut tx = TxBuffer::new(
             crate::source::cdc::CdcEngine::Postgres,
@@ -739,7 +816,7 @@ impl PgChangeStream {
                 self.pending_truncate_refusal = Some(why);
                 self.exhausted = true;
                 break;
-            } else if let Some(ev) = parse_test_decoding(&lsn, &data, &self.domains)? {
+            } else if let Some(ev) = self.parse(&lsn, &data)? {
                 if is_a_foreign_twin(
                     &self.configured_tables,
                     &self.bare_schema,
@@ -748,7 +825,11 @@ impl PgChangeStream {
                 ) {
                     continue;
                 }
-                tx.push(ev, |_| encode_wire_row(&lsn, &data), &lsn)?;
+                if self.readable.is_some() {
+                    tx.push(ev, crate::source::cdc::spill::encode_event, &lsn)?;
+                } else {
+                    tx.push(ev, |_| encode_wire_row(&lsn, &data), &lsn)?;
+                }
             }
         }
         if !stopped_to_spool && (n_rows < self.batch_limit as usize || !yielded_any) {
@@ -757,8 +838,47 @@ impl PgChangeStream {
         Ok(())
     }
 
+    /// One wire row as a change, cut to the columns the run may deliver.
+    fn parse(&self, lsn: &str, data: &str) -> Result<Option<ChangeEvent>> {
+        let projected = self
+            .readable
+            .as_deref()
+            .filter(|_| seeded!("column-grants-pg-stream-unprojected", false, true));
+        let Some(resolved) = projected else {
+            return parse_test_decoding(lsn, data, &self.domains);
+        };
+        let keep = |schema: &str, table: &str| {
+            super::column_grants::readable_of(
+                resolved,
+                &self.configured_tables,
+                &self.bare_schema,
+                schema,
+                table,
+            )
+        };
+        parse_test_decoding_keeping(lsn, data, &self.domains, Some(&keep))
+    }
+
+    /// Refuse a batch read while the readable columns of a captured table differ from the ones the run resolved.
+    fn refuse_grants_moved(&mut self) -> Result<()> {
+        if seeded!("column-grants-pg-batch-grants-not-reread", true, false) {
+            return Ok(());
+        }
+        match self.readable.clone() {
+            Some(resolved) => refuse_grants_moved_since_resolved(
+                &mut self.client,
+                &self.configured_tables,
+                &resolved,
+            ),
+            None => Ok(()),
+        }
+    }
+
     /// One row of a spilled tail: decode it, stamp it, and drop the reader once the last row is out.
     fn next_spooled(&mut self) -> Result<Option<ChangeEvent>> {
+        if self.readable.is_some() {
+            return replay(&mut self.spooled, crate::source::cdc::spill::decode_event);
+        }
         replay(&mut self.spooled, |rec| {
             let (lsn, data) = decode_wire_row(rec)?;
             parse_test_decoding(&lsn, &data, &self.domains)?.ok_or_else(|| {
@@ -1140,6 +1260,10 @@ impl ChangeStream for PgChangeStream {
         crate::source::cdc::CdcEngine::Postgres
     }
 
+    fn readable_columns(&self, configured: &str) -> Option<ReadableColumns> {
+        self.readable.as_ref()?.get(configured).cloned()
+    }
+
     fn next_change(&mut self) -> Option<Result<ChangeEvent>> {
         loop {
             while self.pending.is_empty() && self.spooled.is_none() && !self.exhausted {
@@ -1316,6 +1440,18 @@ pub(crate) fn parse_test_decoding(
     data: &str,
     domains: &Domains,
 ) -> Result<Option<ChangeEvent>> {
+    parse_test_decoding_keeping(lsn, data, domains, None)
+}
+
+type Keep<'a, 'r> = Option<&'r dyn Fn(&str, &str) -> Option<&'a [String]>>;
+
+/// [`parse_test_decoding`] keeping only the columns `keep` names for the line's table (all when it names none); an update that changed none of them is no change.
+pub(crate) fn parse_test_decoding_keeping<'a>(
+    lsn: &str,
+    data: &str,
+    domains: &Domains,
+    keep: Keep<'a, '_>,
+) -> Result<Option<ChangeEvent>> {
     let Some(line) = td_line::tokenize(data) else {
         return Ok(None);
     };
@@ -1326,7 +1462,15 @@ pub(crate) fn parse_test_decoding(
         td_line::LineOp::Delete => ChangeOp::Delete,
     };
     let mut named = map_columns(line.new, domains);
-    let old_named = line.old.map(|o| map_columns(o, domains));
+    let mut old_named = line.old.map(|o| map_columns(o, domains));
+    let keep = keep.and_then(|of| of(&schema, &table));
+    if let Some(keep) = keep {
+        let readable = |c: &ParsedColumn| keep.contains(&c.name);
+        named.retain(readable);
+        if let Some(o) = old_named.as_mut() {
+            o.retain(readable);
+        }
+    }
 
     let unrecovered = recover_unchanged_toast(&mut named, old_named.as_deref());
     let undecodable = |cols: &[ParsedColumn]| {
@@ -1405,6 +1549,17 @@ pub(crate) fn parse_test_decoding(
         }
         ChangeOp::Insert => (None, Some(cols), Some(names), None),
     };
+    let poisoned = poison.is_some() || infinity_poison.is_some() || before_poison.is_some();
+    if keep.is_some()
+        && seeded!("column-grants-pg-hidden-only-update-delivered", false, true)
+        && op == ChangeOp::Update
+        && !poisoned
+        && let (Some(before), Some(after), Some(names), Some(before_names)) =
+            (&before, &after, &image_names, &before_names)
+        && super::column_grants::only_unread_columns_changed(names, after, before_names, before)
+    {
+        return Ok(None);
+    }
     Ok(Some(ChangeEvent {
         op,
         schema,
@@ -3128,6 +3283,7 @@ mod tests {
             bare_schema: HashMap::new(),
             barrier_nonce: None,
             checkpoint: None,
+            readable: None,
         }
     }
 
@@ -3143,6 +3299,7 @@ mod tests {
             crate::source::cdc::PeekBound::Sized(10),
             DrainMode::Continuous,
             &[],
+            None,
             None,
             None,
         );
@@ -3617,6 +3774,7 @@ mod tests {
                 &[],
                 None,
                 None,
+                None,
             )
         };
         let err = open().err().expect("a pgoutput slot is refused");
@@ -3771,6 +3929,7 @@ mod tests {
             crate::source::cdc::PeekBound::Sized(10_000),
             DrainMode::Continuous,
             &[],
+            None,
             None,
             None,
         )

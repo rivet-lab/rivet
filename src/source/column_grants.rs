@@ -13,6 +13,7 @@ pub(crate) type NamesMatch = fn(&str, &str) -> bool;
 /// The server's text when `err` is an engine's typed "not yours to read" verdict.
 pub(crate) fn denied_by_server(err: &anyhow::Error) -> Option<String> {
     super::mysql::column_grants::denied_by_server(err)
+        .or_else(|| super::postgres::column_grants::denied_by_server(err))
 }
 
 /// `SELECT` of `columns` from `qualifier.table`, every name quoted for `engine`.

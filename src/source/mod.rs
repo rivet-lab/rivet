@@ -460,6 +460,7 @@ pub(crate) fn code_a_missing_relation(
 pub(crate) fn columns_from_grants_boundary(engine: crate::config::SourceType) -> &'static str {
     match engine {
         crate::config::SourceType::Mongo => mongo::column_grants::BOUNDARY,
+        crate::config::SourceType::Postgres => postgres::column_grants::BOUNDARY,
         #[cfg(feature = "oracle")]
         crate::config::SourceType::Oracle => oracle::column_grants::BOUNDARY,
         _ => mysql::column_grants::BOUNDARY,
@@ -476,6 +477,9 @@ pub(crate) fn resolve_column_grants(
 ) -> crate::error::Result<std::sync::Arc<std::collections::HashMap<String, cdc::ReadableColumns>>> {
     match engine {
         crate::config::SourceType::Oracle => oracle_column_grants(url, tls, tables, declared),
+        crate::config::SourceType::Postgres => {
+            postgres::column_grants::resolve_grants(url, tls, tables, declared)
+        }
         crate::config::SourceType::Mongo => {
             mongo::column_grants::resolve_for_tables(url, tls, tables).map(std::sync::Arc::new)
         }

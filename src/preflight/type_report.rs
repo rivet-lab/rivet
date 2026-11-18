@@ -246,6 +246,10 @@ fn readable_by_table(
             }
             Ok(by_table)
         }
+        SourceType::Postgres => {
+            let mut client = crate::source::postgres::connect_client(url, tls)?;
+            crate::source::postgres::column_grants::readable_columns_of(&mut client, tables)
+        }
         _ => Ok(std::collections::HashMap::new()),
     }
 }

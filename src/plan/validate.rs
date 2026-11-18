@@ -257,9 +257,9 @@ mod tests {
     }
 
     #[test]
-    fn a_plan_with_columns_from_grants_is_rejected_off_mysql_oracle_and_mongo() {
+    fn a_plan_with_columns_from_grants_is_rejected_only_on_sql_server() {
         for (engine, rejected) in [
-            (SourceType::Postgres, true),
+            (SourceType::Postgres, false),
             (SourceType::Mssql, true),
             (SourceType::Oracle, false),
             (SourceType::Mongo, false),
