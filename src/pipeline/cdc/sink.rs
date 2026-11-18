@@ -736,6 +736,14 @@ pub(crate) fn image_name_memo<'a>(
     Some((names, names.iter().position(|n| n == col)))
 }
 
+/// The labels `e`'s binlog table map carries for `column`, when the catalog cannot be trusted to spell them.
+fn wire_labels<'a>(e: &'a ChangeEvent, column: &str) -> Option<&'a value::WireLabels> {
+    e.image_labels
+        .as_deref()?
+        .iter()
+        .find(|w| w.column == column)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn flush(
     events: &[ChangeEvent],
@@ -799,12 +807,13 @@ fn flush(
                     .map(|(row, e)| {
                         image_cell(e, i, &m.column_name, &schema_names, memo)
                             .map(|v| {
-                                fix.apply(v).map_err(|r| value::CellRefusal {
-                                    row,
-                                    value: v.clone(),
-                                    reason: r.reason,
-                                    code: r.code,
-                                })
+                                fix.apply_with(v, wire_labels(e, &m.column_name), &e.table)
+                                    .map_err(|r| value::CellRefusal {
+                                        row,
+                                        value: v.clone(),
+                                        reason: r.reason,
+                                        code: r.code,
+                                    })
                             })
                             .transpose()
                     })
@@ -1582,6 +1591,7 @@ mod tests {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         }
     }
 
@@ -2112,6 +2122,109 @@ mod tests {
         );
     }
 
+    fn enum_flush(events: Vec<ChangeEvent>, native: &str) -> Result<Vec<Option<String>>> {
+        use arrow::array::Array;
+        let mut cols = vec![TypeMapping {
+            column_name: "e".into(),
+            source_native_type: native.into(),
+            rivet_type: crate::types::RivetType::String,
+            arrow_type: Some(DataType::Utf8),
+            ..int_col().remove(0)
+        }];
+        let mut schema = None;
+        let sch = ensure_schema(
+            &mut schema,
+            &mut cols,
+            &events,
+            &crate::config::RowHash::default(),
+        )
+        .unwrap();
+        let (batch, _) = flush(
+            &events,
+            &sch,
+            &cols,
+            crate::source::cdc::CdcEngine::Mysql,
+            &crate::config::RowHash::default(),
+            None,
+            &Default::default(),
+        )?;
+        let col = batch.column(sch.index_of("e").unwrap());
+        let strings = col
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("a Utf8 column");
+        Ok((0..strings.len())
+            .map(|i| (!strings.is_null(i)).then(|| strings.value(i).to_string()))
+            .collect())
+    }
+
+    fn enum_event(idx: i64, labels: Option<Vec<value::WireLabels>>) -> ChangeEvent {
+        ChangeEvent {
+            after: Some(vec![RivetValue::Int(idx)]),
+            image_names: Some(std::sync::Arc::from(vec!["e".to_string()])),
+            image_labels: labels.map(Into::into),
+            ..insert(0)
+        }
+    }
+
+    #[test]
+    fn flush_delivers_the_table_maps_labels_where_the_catalog_prints_a_question_mark() {
+        let listed = || {
+            Some(vec![value::WireLabels {
+                column: "e".into(),
+                labels: Some(vec!["a".into(), "\u{1F600}".into(), "b".into()]),
+            }])
+        };
+        let got = enum_flush(
+            vec![
+                enum_event(2, listed()),
+                enum_event(1, listed()),
+                enum_event(3, None),
+                enum_event(0, None),
+            ],
+            "enum('a','?','b')",
+        )
+        .unwrap();
+        assert_eq!(
+            got,
+            vec![
+                Some("\u{1F600}".to_string()),
+                Some("a".to_string()),
+                Some("b".to_string()),
+                Some(String::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn flush_refuses_a_question_mark_label_of_a_column_the_table_map_does_not_list() {
+        let unlisted = || {
+            Some(vec![value::WireLabels {
+                column: "e".into(),
+                labels: None,
+            }])
+        };
+        let err = enum_flush(vec![enum_event(2, unlisted())], "enum('a','?','b')")
+            .expect_err("a label only the catalog could supply");
+        assert_eq!(
+            crate::error::code_of(&err),
+            Some(crate::error::codes::SOURCE_CDC_CELL_UNSUPPORTED)
+        );
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("`t`.`e`") && msg.contains("SET PERSIST binlog_row_metadata = FULL;"),
+            "{msg}"
+        );
+        let kept = enum_flush(
+            vec![enum_event(1, unlisted()), enum_event(3, unlisted())],
+            "enum('a','?','b')",
+        )
+        .unwrap();
+        assert_eq!(kept, vec![Some("a".to_string()), Some("b".to_string())]);
+        let main = enum_flush(vec![enum_event(2, None)], "enum('a','?','b')").unwrap();
+        assert_eq!(main, vec![Some("?".to_string())]);
+    }
+
     fn int_col() -> Vec<TypeMapping> {
         vec![TypeMapping {
             column_name: "v".into(),
@@ -2635,6 +2748,7 @@ mod tests {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         };
         let mut cols = vec![
             decimal_col("placeholder", 38, 0),

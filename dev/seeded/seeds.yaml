@@ -5161,6 +5161,40 @@ seeds:
       mongo:
         na: "a MongoDB document carries no ENUM or SET column: this path is never reached"
 
+  - name: mysql-enum-4byte-label-wire-unread
+    class: "a MySQL ENUM or SET label with a character outside the Basic Multilingual Plane is read from the catalog, which prints it as '?', so the CDC stream delivers a changed label, exit 0, instead of the label the binlog table map carries (or a coded refusal when the table map carries none)"
+    history: "hand-probe on MySQL 8.0.46, 2026-11-18 (stored F09F9880, every catalog rendering prints '?'); RED on main (the rig oracle: ENUM and SET label U+1F600 delivered as '?')"
+    scope: source
+    engines:
+      mysql:
+        switch: mysql-enum-4byte-label-wire-unread
+        cells: [mysql_cdc_enum_set_labels_match_the_snapshot, "lib:listed_wire_labels_replace_the_catalog_labels_of_an_enum_and_a_set"]
+      postgres:
+        na: "an enum label arrives in the logical stream as stored text, with no catalog rendering to read it from: this path is never reached"
+      mssql:
+        na: "SQL Server has no ENUM or SET type: this path is never reached"
+      oracle:
+        na: "Oracle has no ENUM or SET type: this path is never reached"
+      mongo:
+        na: "a MongoDB document carries no ENUM or SET column: this path is never reached"
+
+  - name: mysql-enum-unlisted-label-delivered
+    class: "a MySQL ENUM or SET label the catalog spells '?' on a binlog whose table map carries no labels is delivered as '?' instead of refused by code, so a changed label reaches the destination, exit 0"
+    history: "found with the 4-byte label defect, 2026-11-18; the unlisted state needs binlog_row_metadata below FULL, which a run refuses at open, so the cells are lib cells"
+    scope: source
+    engines:
+      mysql:
+        switch: mysql-enum-unlisted-label-delivered
+        cells: ["lib:an_unlisted_column_refuses_a_label_the_catalog_spelled_with_a_question_mark", "lib:the_unlisted_refusal_is_the_coded_cell_refusal_naming_table_and_column"]
+      postgres:
+        na: "an enum label arrives in the logical stream as stored text, with no catalog rendering to read it from: this path is never reached"
+      mssql:
+        na: "SQL Server has no ENUM or SET type: this path is never reached"
+      oracle:
+        na: "Oracle has no ENUM or SET type: this path is never reached"
+      mongo:
+        na: "a MongoDB document carries no ENUM or SET column: this path is never reached"
+
   - name: manifest-census-reads-unfiltered
     class: "a reader of the run manifests under one prefix counts a Failed attempt or a foreign export's unit, so validate --depth full fails a healthy prefix on parts gc collected, and a foreign unit tiles a gap a split export still has"
     history: "found 2026-10-31 by the roast duplication lens and confirmed on the binary: a Failed unit manifest whose parts gc had collected made validate --depth full exit 1 (could not verify), and completed_units_tile counted a foreign family's unit; closed 2026-11-01 by routing the readers through ManifestCensus::succeeded / completed / completed_split_units"

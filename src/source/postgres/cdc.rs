@@ -1419,6 +1419,7 @@ pub(crate) fn parse_test_decoding(
         row_id: None,
         before_names,
         before_poison,
+        image_labels: None,
     }))
 }
 

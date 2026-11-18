@@ -229,6 +229,8 @@ pub(crate) struct ChangeEvent {
     pub(crate) before_names: Option<std::sync::Arc<[String]>>,
     /// A deferred refusal of an undecodable old-image cell, raised only where the old image is written.
     pub(crate) before_poison: Option<String>,
+    /// Labels of the ENUM and SET columns whose catalog spelling cannot be trusted, read from the binlog table map (MySQL only).
+    pub(crate) image_labels: Option<std::sync::Arc<[value::WireLabels]>>,
 }
 
 /// Stamps each change with its intra-transaction ordinal ([`ChangeEvent::seq`]).
@@ -343,6 +345,20 @@ impl ChangeEvent {
                 a.len() * std::mem::size_of::<String>() + a.iter().map(String::len).sum::<usize>();
             own / std::sync::Arc::strong_count(a).max(1)
         });
+        let labels = self.image_labels.as_ref().map_or(0, |a| {
+            let own: usize = a
+                .iter()
+                .map(|w| {
+                    std::mem::size_of::<value::WireLabels>()
+                        + w.column.len()
+                        + w.labels.as_ref().map_or(0, |l| {
+                            l.len() * std::mem::size_of::<String>()
+                                + l.iter().map(String::len).sum::<usize>()
+                        })
+                })
+                .sum();
+            own / std::sync::Arc::strong_count(a).max(1)
+        });
         let text = |s: &Option<String>| s.as_ref().map_or(0, String::len);
         std::mem::size_of::<Self>()
             + self.schema.len()
@@ -352,6 +368,7 @@ impl ChangeEvent {
             + text(&self.row_id)
             + names
             + before_names
+            + labels
             + img(&self.before)
             + img(&self.after)
     }
@@ -1666,6 +1683,7 @@ mod mod_decisions {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         };
         let mut seq = TxnSeq::default();
 
@@ -1707,6 +1725,7 @@ mod mod_decisions {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         };
         let empty = mk(None, None).estimated_bytes();
         assert_eq!(
@@ -2180,6 +2199,7 @@ mod tests {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         };
         let mut stream = Fake(
             [
@@ -2496,6 +2516,7 @@ mod tests {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         }
     }
 
@@ -2589,6 +2610,7 @@ mod tests {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         }
     }
 
@@ -2889,6 +2911,7 @@ mod tests {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         };
         let base = bare.estimated_bytes();
         let names = super::ChangeEvent {
@@ -2931,6 +2954,7 @@ mod tests {
             row_id: None,
             before_names: Some(vec!["id".to_string()].into()),
             before_poison: None,
+            image_labels: None,
         };
         assert_eq!(
             super::ndjson_line(&ev),
@@ -2943,6 +2967,7 @@ mod tests {
         let full = super::ChangeEvent {
             before_names: None,
             before_poison: None,
+            image_labels: None,
             before: Some(vec![RivetValue::Bytes(b"a".to_vec()), RivetValue::Int(1)]),
             ..ev
         };
@@ -3005,6 +3030,7 @@ mod tests {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         };
         let payload = ev.payload_bytes();
         assert_eq!(
