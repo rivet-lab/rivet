@@ -4235,7 +4235,8 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        switch: column-grants-batch-read-unprojected
+        cells: [an_invisible_column_is_never_read_in_every_batch_mode_oracle, a_table_the_account_may_not_read_is_refused_by_code_in_batch_cdc_and_check_oracle]
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
@@ -4252,7 +4253,8 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        switch: column-grants-invisible-columns-read
+        cells: [an_invisible_column_is_never_delivered_by_name_or_value_in_cdc_oracle, an_invisible_column_is_never_read_in_every_batch_mode_oracle]
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
@@ -4269,7 +4271,7 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the connect-hint seam is exercised through MySQL ERROR 1045 only; no Oracle cell denies a connect under the policy yet (2026-11-16, follow-up of #714)"
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
@@ -4286,7 +4288,7 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
@@ -4330,21 +4332,21 @@ seeds:
           - "lib:a_plan_pinned_to_its_run_refuses_a_reserved_source_column"
 
   - name: columns-from-grants-accepted-off-mysql
-    class: "`source.columns_from: grants` is accepted on a PostgreSQL, SQL Server or Oracle source, which then reads and delivers every column of a row: the operator who wrote the key believes hidden columns are not delivered"
+    class: "`source.columns_from: grants` is accepted on a PostgreSQL or SQL Server source, which then reads and delivers every column of a row: the operator who wrote the key believes hidden columns are not delivered"
     history: "found reviewing PR #719 (2026-10-28): the refusal was only reached for MongoDB-shaped validation and never on PostgreSQL, SQL Server or Oracle; RED from this patch: `rivet run` exits 0 on a PostgreSQL config with `columns_from: grants`"
     scope: source
     switch: columns-from-grants-accepted-off-mysql
     engines:
       postgres:
-        cells: [columns_from_grants_is_refused_by_every_command_postgres, "lib:columns_from_grants_is_refused_on_every_engine_but_mysql_and_mongo_in_every_mode"]
+        cells: [columns_from_grants_is_refused_by_every_command_postgres, "lib:columns_from_grants_is_refused_on_every_engine_but_mysql_oracle_and_mongo_in_every_mode"]
       mysql:
         na: "MySQL is an engine the policy is enforced on; the key is accepted there (every_engine_without_columns_from_loads_as_before and the whole live_cdc_column_grants file)"
       mssql:
-        cells: [columns_from_grants_is_refused_by_every_command_mssql, "lib:columns_from_grants_is_refused_on_every_engine_but_mysql_and_mongo_in_every_mode"]
+        cells: [columns_from_grants_is_refused_by_every_command_mssql, "lib:columns_from_grants_is_refused_on_every_engine_but_mysql_oracle_and_mongo_in_every_mode"]
       oracle:
-        cells: [columns_from_grants_is_refused_by_every_command_oracle, "lib:columns_from_grants_is_refused_on_every_engine_but_mysql_and_mongo_in_every_mode"]
+        cells: ["lib:columns_from_grants_is_refused_on_every_engine_but_mysql_oracle_and_mongo_in_every_mode"]
       mongo:
-        na: "MongoDB is an engine the policy is enforced on; the key is accepted there (columns_from_grants_is_refused_on_every_engine_but_mysql_and_mongo_in_every_mode and the whole live_cdc_column_grants_mongo file)"
+        na: "MongoDB is an engine the policy is enforced on; the key is accepted there (columns_from_grants_is_refused_on_every_engine_but_mysql_oracle_and_mongo_in_every_mode and the whole live_cdc_column_grants_mongo file)"
 
   - name: cdc-partial-image-projected
     class: "a MySQL change written with `binlog_row_image` MINIMAL or NOBLOB is projected by full-table positions under `source.columns_from: grants`: a hidden value lands under a visible column name and a key column is overwritten"
@@ -4359,7 +4361,7 @@ seeds:
       mssql:
         na: "the projection of a binlog row image exists on MySQL only: `columns_from: grants` is refused on SQL Server at config load (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "the projection of a binlog row image exists on MySQL only: `columns_from: grants` is refused on Oracle at config load (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
         na: "the projection of a binlog row image exists on MySQL only: a MongoDB event carries named fields, projected server-side by the change stream pipeline (a_view_account_delivers_no_hidden_field_in_cdc_mongo)"
 
@@ -4428,7 +4430,7 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
@@ -4445,7 +4447,7 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
         switch: mongo-cdc-hidden-only-update-delivered
         cells: [an_update_of_hidden_fields_only_advances_the_checkpoint_mongo]
@@ -4463,7 +4465,7 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the generated invisible primary key (sql_generate_invisible_primary_key) is MySQL only; an Oracle INVISIBLE key is covered by an_unreadable_key_is_refused_by_code_before_the_anchor_oracle"
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
@@ -4480,9 +4482,27 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        switch: column-grants-unreadable-key-accepted
+        cells: [an_unreadable_key_is_refused_by_code_before_the_anchor_oracle]
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
+
+  - name: column-grants-oracle-every-column-read-as-readable
+    class: "the readable set of an Oracle table under `columns_from: grants` takes every catalog column as readable instead of asking the server per column: a table the account may not SELECT is not refused by code and the explicit projection names columns the server denies"
+    history: "issue #714 (2026-11-16); RED from this patch: the unreadable table reaches the server and ends in a raw ORA-41900 instead of RIVET_SOURCE_COLUMNS_UNREADABLE"
+    scope: source
+    engines:
+      oracle:
+        switch: column-grants-oracle-every-column-read-as-readable
+        cells: [a_table_the_account_may_not_read_is_refused_by_code_in_batch_cdc_and_check_oracle]
+      postgres:
+        na: "the per-column SELECT probe of Oracle is read here only; PostgreSQL refuses the policy until #712"
+      mysql:
+        na: "the per-column SELECT probe of Oracle is read here only; MySQL reads information_schema column privileges"
+      mssql:
+        na: "the per-column SELECT probe of Oracle is read here only; SQL Server judges columns by HAS_PERMS_BY_NAME"
+      mongo:
+        na: "the per-column SELECT probe of Oracle is read here only; MongoDB refuses the policy until #715"
 
   - name: column-grants-hidden-cursor-column-uncoded
     class: "a `cursor_column`, `chunk_column`, `chunk_by_key`, `time_column` or `partition_by` naming a column the account may not SELECT is read anyway: the server answers mid-run with a raw ERROR 1054/1143, no RIVET_* code"
@@ -4497,7 +4517,8 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        switch: column-grants-hidden-cursor-column-uncoded
+        cells: [a_hidden_cursor_or_chunk_column_is_refused_by_code_before_the_read_oracle]
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
@@ -4514,7 +4535,7 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
@@ -4531,7 +4552,7 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
@@ -4548,7 +4569,7 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
@@ -4565,7 +4586,7 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
@@ -4582,7 +4603,7 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
@@ -4599,7 +4620,7 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
@@ -4616,7 +4637,7 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
@@ -4633,7 +4654,7 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
@@ -4650,7 +4671,7 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
@@ -4667,7 +4688,7 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
@@ -4684,7 +4705,7 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
@@ -4701,7 +4722,7 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
@@ -4718,7 +4739,7 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
@@ -4786,7 +4807,7 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
@@ -4803,7 +4824,7 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
@@ -4820,7 +4841,8 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        switch: column-grants-boundary-unsaid
+        cells: [the_policy_says_what_it_does_not_guarantee_at_check_and_at_the_start_of_a_run_oracle]
       mongo:
         switch: column-grants-boundary-unsaid
         cells: [a_view_account_delivers_no_hidden_field_by_name_or_value_in_batch_mongo]
@@ -4838,7 +4860,7 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
@@ -4855,7 +4877,7 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
@@ -4872,7 +4894,7 @@ seeds:
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
         na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
@@ -6268,6 +6290,23 @@ seeds:
         cells: ["lib:every_dialect_samples_by_seeks_to_the_same_boundaries"]
       oracle:
         cells: ["lib:every_dialect_samples_by_seeks_to_the_same_boundaries"]
+      mongo:
+        na: "MongoDB parallel is the separate `_id`-range reader (mongo_parallel), not the SQL keyset range sampler"
+
+  - name: keyset-sampler-unbounded
+    class: "the parallel keyset range sampler's reads (the row COUNT, the OFFSET skip, the catalog estimate, the MIN/MAX and snap seeks, the density probes) run with no statement timeout, so `tuning.statement_timeout_s` does not reach them: one COUNT over a large table runs for minutes while the run's own statements are cancelled at the budget"
+    history: "client run 2026-11-18 on PostgreSQL with `statement_timeout_s: 10`: the sampler's `SELECT COUNT(*) ... _rivet_pk_cnt` ran 14,251 ms (statement log lines 1308 and 1755 of cx50_main_r1); RED on main 2026-11-18 (lib:every_sampler_read_runs_under_the_statement_timeout, PostgreSQL a_percentile_sampler_read_obeys_the_statement_timeout_postgres)"
+    scope: source
+    switch: keyset-sampler-unbounded
+    engines:
+      postgres:
+        cells: [a_percentile_sampler_read_obeys_the_statement_timeout_postgres, a_sampler_seek_that_scans_is_cancelled_by_the_statement_timeout_postgres, "lib:every_sampler_read_runs_under_the_statement_timeout", "lib:a_seek_that_times_out_degrades_to_the_cuts_found_so_far", "lib:a_percentile_read_that_times_out_fails_with_the_statement_timeout_code"]
+      mysql:
+        cells: ["lib:every_sampler_read_runs_under_the_statement_timeout", "lib:a_seek_that_times_out_degrades_to_the_cuts_found_so_far", "lib:a_percentile_read_that_times_out_fails_with_the_statement_timeout_code"]
+      mssql:
+        cells: ["lib:every_sampler_read_runs_under_the_statement_timeout", "lib:a_seek_that_times_out_degrades_to_the_cuts_found_so_far", "lib:a_percentile_read_that_times_out_fails_with_the_statement_timeout_code"]
+      oracle:
+        cells: ["lib:every_sampler_read_runs_under_the_statement_timeout", "lib:a_seek_that_times_out_degrades_to_the_cuts_found_so_far", "lib:a_percentile_read_that_times_out_fails_with_the_statement_timeout_code"]
       mongo:
         na: "MongoDB parallel is the separate `_id`-range reader (mongo_parallel), not the SQL keyset range sampler"
 

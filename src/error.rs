@@ -203,6 +203,18 @@ impl StatementDurationTimeout {
         }
     }
 
+    /// PostgreSQL server-side `statement_timeout` (SQLSTATE 57014) on a read rivet bounded by `tuning.statement_timeout_s`.
+    pub fn postgres(seconds: u64) -> Self {
+        Self {
+            message: format!(
+                "postgres: statement timeout after {seconds}s (tuning.statement_timeout_s) — \
+                 this query cannot finish within the budget; split it with `mode: chunked` \
+                 (per-chunk statements stay under the limit) or raise \
+                 `tuning.statement_timeout_s`"
+            ),
+        }
+    }
+
     /// Oracle statement-duration timeout: the driver call timeout plus a check between rows.
     #[cfg(feature = "oracle")]
     pub fn oracle(seconds: u64) -> Self {

@@ -994,6 +994,20 @@ mod tests {
         );
     }
 
+    /// The postgres marker rivet raises for a bounded read is permanent, coded, and names the setting.
+    #[test]
+    fn the_postgres_duration_timeout_marker_is_permanent_and_coded() {
+        use crate::source::StatementDurationTimeout;
+        let pg: anyhow::Error = StatementDurationTimeout::postgres(10).into();
+        assert_eq!(classify_error(&pg), PERMANENT);
+        crate::error::assert_coded(&pg, "RIVET_SOURCE_STATEMENT_TIMEOUT", 1);
+        let msg = format!("{pg}");
+        assert!(
+            msg.starts_with("postgres: statement timeout after 10s (tuning.statement_timeout_s)"),
+            "{msg}"
+        );
+    }
+
     /// Belt-and-suspenders: the string fallback still classifies a genuinely
     /// driver-native duration-timeout message (one we do NOT raise ourselves)
     /// as permanent, so engines without a typed marker stay covered.

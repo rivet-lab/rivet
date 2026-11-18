@@ -508,8 +508,8 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
             "SELECT column_name, CASE WHEN data_type = 'NUMBER' AND data_precision IS NOT NULL THEN "
             "'NUMBER(' || data_precision || CASE WHEN data_scale > 0 THEN ',' || data_scale END || ')' "
             "WHEN data_type = 'NUMBER' AND data_scale = 0 THEN 'NUMBER(38)' "
-            "ELSE data_type END AS t FROM all_tab_columns "
-            f"WHERE {owner} AND table_name = {_lit(leaf.upper())}",
+            "ELSE data_type END AS t FROM all_tab_cols "
+            f"WHERE {owner} AND table_name = {_lit(leaf.upper())} AND hidden_column = 'NO'",
         )}
         if not query and not declared:
             raise LookupError(f"table {table} does not exist (no column in all_tab_columns)")

@@ -604,8 +604,11 @@ pub(crate) enum CdcEngineOpts {
         /// The `table:` values the CONFIG asked for.
         configured_tables: Vec<String>,
     },
-    /// Render the `document` blob as canonical (type-tagged) extended JSON.
-    Oracle { configured_tables: Vec<String> },
+    Oracle {
+        configured_tables: Vec<String>,
+        /// The grants the run resolved before its anchor.
+        resolved_grants: Option<std::sync::Arc<std::collections::HashMap<String, ReadableColumns>>>,
+    },
     Mongo {
         canonical: bool,
         /// The export's configured `table:` names.
@@ -1098,7 +1101,10 @@ pub(crate) fn create_change_stream(
             ))
         }
         #[cfg(feature = "oracle")]
-        CdcEngineOpts::Oracle { configured_tables } => {
+        CdcEngineOpts::Oracle {
+            configured_tables,
+            resolved_grants,
+        } => {
             if !cfg.drain.is_bounded() {
                 crate::rivet_bail!(
                     crate::error::codes::CONFIG_CDC_CONTINUOUS_UNSUPPORTED,
@@ -1114,6 +1120,7 @@ pub(crate) fn create_change_stream(
                     tls,
                     cfg.checkpoint.as_deref(),
                     configured_tables,
+                    resolved_grants.clone(),
                 )
                 .map_err(|e| with_setup_hint(e, ORACLE_CDC_HINT))?,
             ))
@@ -2114,6 +2121,7 @@ mod engine_identity {
             (
                 CdcEngineOpts::Oracle {
                     configured_tables: t(&["a"]),
+                    resolved_grants: None,
                 },
                 SourceType::Oracle,
                 "ORACLE://h/d",
@@ -2356,6 +2364,7 @@ mod tests {
                 tls: None,
                 engine: CdcEngineOpts::Oracle {
                     configured_tables: Vec::new(),
+                    resolved_grants: None,
                 },
             };
             match create_change_stream(&cfg, PeekBound::Unbounded) {

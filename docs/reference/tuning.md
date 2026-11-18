@@ -91,7 +91,7 @@ worst case held by any single query.
 | `batch_size` | integer | profile default | Rows fetched per query batch. Explicit value disables the profile's adaptive (memory-based) sizing — see footnote ¹ above |
 | `batch_size_memory_mb` | integer | — | Target memory per batch in MB (adaptive sizing; mutually exclusive with `batch_size`) |
 | `throttle_ms` | integer | profile default | Delay in ms between batches (reduces source load) |
-| `statement_timeout_s` | integer | profile default | Database statement timeout in seconds (0 = no timeout) |
+| `statement_timeout_s` | integer | profile default | Database statement timeout in seconds (0 = no timeout); it also bounds each read of the parallel keyset range sampler (a `COUNT`, an `OFFSET` skip, a `MIN`/`MAX` or snap seek) |
 | `max_retries` | integer | profile default | Max retry attempts for transient errors |
 | `retry_backoff_ms` | integer | profile default | Base delay between retries in ms (exponential backoff) |
 | `lock_timeout_s` | integer | profile default | Database lock timeout in seconds (0 = no timeout) |

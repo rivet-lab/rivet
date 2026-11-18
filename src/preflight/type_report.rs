@@ -224,6 +224,32 @@ struct ReportUnit {
     relation: Option<String>,
 }
 
+/// The readable columns of each named table for a `columns_from: grants` source.
+fn readable_by_table(
+    source_type: SourceType,
+    url: &str,
+    tls: Option<&crate::config::TlsConfig>,
+    tables: &[String],
+) -> Result<std::collections::HashMap<String, crate::source::cdc::ReadableColumns>> {
+    match source_type {
+        SourceType::Mysql => {
+            crate::source::mysql::cdc::MysqlChangeStream::readable_columns_at(url, tls, tables)
+        }
+        #[cfg(feature = "oracle")]
+        SourceType::Oracle => {
+            let mut src = crate::source::oracle::OracleSource::connect_with_tls(url, tls)?;
+            let mut by_table = std::collections::HashMap::new();
+            for t in tables {
+                if let Some(r) = crate::source::Source::readable_columns(&mut src, t)? {
+                    by_table.insert(t.clone(), r);
+                }
+            }
+            Ok(by_table)
+        }
+        _ => Ok(std::collections::HashMap::new()),
+    }
+}
+
 /// The export's resolver units, a SQL Server capture instance resolved to the relation it captures.
 fn resolved_units(
     config: &Config,
@@ -313,10 +339,9 @@ fn resolved_units(
             (Err(_), None) | (Ok(None), None) => unreachable!("every non-resolution has a reason"),
         }
     }
-    if config.source.source_type == SourceType::Mysql && config.source.columns_from_grants() {
+    if config.source.columns_from_grants() {
         let tables: Vec<String> = units.iter().filter_map(|u| u.relation.clone()).collect();
-        let readable =
-            crate::source::mysql::cdc::MysqlChangeStream::readable_columns_at(url, tls, &tables)?;
+        let readable = readable_by_table(config.source.source_type, url, tls, &tables)?;
         for unit in &mut units {
             if let Some(r) = unit.relation.as_ref().and_then(|t| readable.get(t)) {
                 unit.query = r.select.clone();
@@ -1517,5 +1542,83 @@ exports:
         );
         assert_eq!(refused(", pk: none", finer(Some(&["TS"]))), None);
         assert_eq!(refused(", pk: [VER]", finer(Some(&["TS"]))), None);
+    }
+
+    const DEAD_MYSQL: &str = "mysql://u:p@127.0.0.1:1/app";
+    const DEAD_ORACLE: &str = "oracle://u:p@127.0.0.1:1/app";
+
+    /// A multiplexed `mode: cdc` export of `engine` with an optional `columns_from: grants`.
+    fn multiplex_cfg(engine: &str, url: &str, grants: bool) -> Config {
+        let policy = if grants {
+            "  columns_from: grants\n"
+        } else {
+            ""
+        };
+        cfg_from(&format!(
+            "source:\n  type: {engine}\n  url: \"{url}\"\n{policy}exports:\n  - name: cdc\n    \
+             tables: [orders, customers]\n    mode: cdc\n    format: parquet\n    \
+             cdc: {{ checkpoint: ./cdc.ckpt }}\n    destination: {{ type: local, path: /tmp/x }}\n"
+        ))
+    }
+
+    type UnitRow = (Option<String>, String, Option<String>);
+
+    fn units_of(config: &Config, url: &str) -> Result<Vec<UnitRow>> {
+        let units = resolved_units(
+            config,
+            &config.exports[0],
+            url,
+            None,
+            std::path::Path::new("."),
+            None,
+            OnUnresolvedCapture::Degrade,
+        )?;
+        Ok(units
+            .into_iter()
+            .map(|u| (u.table, u.query, u.relation))
+            .collect())
+    }
+
+    /// Each multiplexed table is one unit probed by `SELECT *`, its relation the table itself.
+    #[test]
+    fn the_resolved_units_of_a_multiplexed_export_are_its_tables() {
+        let config = multiplex_cfg("postgres", "postgresql://h/d", false);
+        let units = units_of(&config, "postgresql://h/d").unwrap();
+        let unit = |t: &str| {
+            (
+                Some(t.to_string()),
+                format!("SELECT * FROM {t}"),
+                Some(t.to_string()),
+            )
+        };
+        assert_eq!(units, vec![unit("orders"), unit("customers")]);
+    }
+
+    /// Under `columns_from: grants` the unit queries come from the server's grants, so a source that cannot be read stops the report.
+    #[test]
+    fn a_grants_report_reads_the_grants_from_the_source_and_stops_when_it_cannot() {
+        for (engine, url) in [("mysql", DEAD_MYSQL), ("oracle", DEAD_ORACLE)] {
+            let config = multiplex_cfg(engine, url, true);
+            let err = units_of(&config, url)
+                .err()
+                .unwrap_or_else(|| panic!("{engine}: units resolved without a source"));
+            assert!(!format!("{err:#}").is_empty(), "{engine}");
+            let off = units_of(&multiplex_cfg(engine, url, false), url).unwrap();
+            assert_eq!(off.len(), 2, "{engine}: no policy, no source read");
+        }
+    }
+
+    /// Each engine that enforces grants reads them from its own server; any other engine reads none.
+    #[test]
+    fn the_grants_of_a_report_are_read_by_the_engine_that_enforces_them() {
+        let tables = vec!["orders".to_string()];
+        let read = |t: SourceType, url: &str| readable_by_table(t, url, None, &tables);
+        read(SourceType::Mysql, DEAD_MYSQL).expect_err("mysql reads its server");
+        #[cfg(feature = "oracle")]
+        read(SourceType::Oracle, DEAD_ORACLE).expect_err("oracle reads its server");
+        for other in [SourceType::Postgres, SourceType::Mssql, SourceType::Mongo] {
+            let none = read(other, "postgresql://u:p@127.0.0.1:1/app").unwrap();
+            assert!(none.is_empty(), "{other:?} reads no grants");
+        }
     }
 }

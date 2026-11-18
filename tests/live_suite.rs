@@ -82,6 +82,9 @@ mod live_cdc_cli_surface;
 mod live_cdc_column_grants;
 #[path = "live/live_cdc_column_grants_mongo.rs"]
 mod live_cdc_column_grants_mongo;
+#[cfg(feature = "oracle")]
+#[path = "live/live_cdc_column_grants_oracle.rs"]
+mod live_cdc_column_grants_oracle;
 #[path = "live/live_cdc_compact.rs"]
 mod live_cdc_compact;
 #[path = "live/live_cdc_full_cycle.rs"]

@@ -308,6 +308,15 @@ pub trait Source: Send {
 
     fn query_scalar(&mut self, sql: &str) -> Result<Option<String>>;
 
+    /// [`Source::query_scalar`] cancelled after `statement_timeout_s` seconds (0 = no limit) with the engine's typed statement-timeout error.
+    fn query_scalar_within(
+        &mut self,
+        sql: &str,
+        _statement_timeout_s: u64,
+    ) -> Result<Option<String>> {
+        self.query_scalar(sql)
+    }
+
     /// Whether the logical replication slot `slot` exists on the server this connection reads; only PostgreSQL has slots.
     fn replication_slot_exists(&mut self, _slot: &str) -> Result<bool> {
         crate::rivet_bail!(
@@ -383,14 +392,6 @@ pub(crate) fn split_key_list(joined: Option<String>) -> Option<Vec<String>> {
     )
 }
 
-/// What `columns_from: grants` guarantees on `source_type`, said at `rivet check` and at the start of a CDC run.
-pub(crate) fn columns_from_grants_boundary(source_type: crate::config::SourceType) -> &'static str {
-    match source_type {
-        crate::config::SourceType::Mongo => mongo::column_grants::BOUNDARY,
-        _ => mysql::column_grants::BOUNDARY,
-    }
-}
-
 /// The refusal for `source.type: oracle` in a build without the `oracle` feature.
 #[cfg_attr(feature = "oracle", allow(dead_code))]
 pub(crate) fn oracle_feature_missing() -> anyhow::Error {
@@ -453,6 +454,51 @@ pub(crate) fn code_a_missing_relation(
              on purpose"
         ),
     ))
+}
+
+/// What `columns_from: grants` guarantees on `engine`, said to the operator at `rivet check` and at the start of a change-stream run.
+pub(crate) fn columns_from_grants_boundary(engine: crate::config::SourceType) -> &'static str {
+    match engine {
+        crate::config::SourceType::Mongo => mongo::column_grants::BOUNDARY,
+        #[cfg(feature = "oracle")]
+        crate::config::SourceType::Oracle => oracle::column_grants::BOUNDARY,
+        _ => mysql::column_grants::BOUNDARY,
+    }
+}
+
+/// The account's readable columns of each table, read once from the engine that enforces `columns_from: grants`.
+pub(crate) fn resolve_column_grants(
+    engine: crate::config::SourceType,
+    url: &str,
+    tls: Option<&crate::config::TlsConfig>,
+    tables: &[String],
+    declared: &std::collections::HashMap<String, Vec<String>>,
+) -> crate::error::Result<std::sync::Arc<std::collections::HashMap<String, cdc::ReadableColumns>>> {
+    match engine {
+        crate::config::SourceType::Oracle => oracle_column_grants(url, tls, tables, declared),
+        crate::config::SourceType::Mongo => {
+            mongo::column_grants::resolve_for_tables(url, tls, tables).map(std::sync::Arc::new)
+        }
+        _ => mysql::cdc::MysqlChangeStream::resolve_grants(url, tls, tables, declared),
+    }
+}
+
+/// Oracle's grants read, or the refusal of a build without the `oracle` feature.
+fn oracle_column_grants(
+    url: &str,
+    tls: Option<&crate::config::TlsConfig>,
+    tables: &[String],
+    declared: &std::collections::HashMap<String, Vec<String>>,
+) -> crate::error::Result<std::sync::Arc<std::collections::HashMap<String, cdc::ReadableColumns>>> {
+    #[cfg(feature = "oracle")]
+    {
+        oracle::column_grants::resolve_grants(url, tls, tables, declared)
+    }
+    #[cfg(not(feature = "oracle"))]
+    {
+        let _ = (url, tls, tables, declared);
+        Err(oracle_feature_missing())
+    }
 }
 
 pub(crate) use crate::connect::driver_runtime;
@@ -853,6 +899,29 @@ mod introspection_tests {
         assert!(intro.is_integer_column("ID"));
         assert!(intro.is_integer_column("User_Id"));
         assert!(!intro.is_integer_column("name"));
+    }
+}
+
+#[cfg(test)]
+mod column_grants_dispatch_tests {
+    use super::resolve_column_grants;
+    use crate::config::SourceType;
+    use std::collections::HashMap;
+
+    fn refusal(engine: SourceType, url: &str) -> String {
+        let tables = vec!["orders".to_string()];
+        let err = resolve_column_grants(engine, url, None, &tables, &HashMap::new())
+            .expect_err("an unreachable source refuses");
+        format!("{err:#}").to_lowercase()
+    }
+
+    /// The grants of each engine are read by that engine's reader, so an unreachable server is named by its own driver.
+    #[test]
+    fn the_grants_are_read_by_the_engine_that_enforces_them() {
+        let mysql = refusal(SourceType::Mysql, "mysql://u:p@127.0.0.1:1/app");
+        assert!(!mysql.contains("driver: oracle"), "{mysql}");
+        let oracle = refusal(SourceType::Oracle, "oracle://u:p@127.0.0.1:1/app");
+        assert!(oracle.contains("driver: oracle"), "{oracle}");
     }
 }
 

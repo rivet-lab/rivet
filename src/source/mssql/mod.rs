@@ -451,6 +451,30 @@ fn parse_mssql_simple_from_table(query: &str) -> Option<(String, String)> {
     }
 }
 
+/// The first cell of `sql`'s first row on `client`.
+async fn scalar_on(client: &mut MssqlClient, sql: &str) -> Result<Option<String>> {
+    let row = client
+        .query(sql, &[])
+        .await
+        .map_err(|e| {
+            crate::error::coded_driver(
+                crate::error::codes::SOURCE_QUERY_FAILED,
+                "mssql: scalar query failed",
+                e,
+            )
+        })?
+        .into_row()
+        .await
+        .map_err(|e| {
+            crate::error::coded_driver(
+                crate::error::codes::SOURCE_QUERY_FAILED,
+                "mssql: reading scalar row failed",
+                e,
+            )
+        })?;
+    Ok(row.and_then(|r| scalar_to_string(&r)))
+}
+
 impl Source for MssqlSource {
     fn introspect_for_chunking(&mut self, qualified_table: &str) -> Result<TableIntrospection> {
         introspect_mssql_on(self, qualified_table)
@@ -616,27 +640,33 @@ impl Source for MssqlSource {
 
     fn query_scalar(&mut self, sql: &str) -> Result<Option<String>> {
         let Self { rt, client, .. } = self;
+        rt.block_on(scalar_on(client, sql))
+    }
+
+    fn query_scalar_within(
+        &mut self,
+        sql: &str,
+        statement_timeout_s: u64,
+    ) -> Result<Option<String>> {
+        if statement_timeout_s == 0 {
+            return self.query_scalar(sql);
+        }
+        let budget = std::time::Duration::from_secs(statement_timeout_s);
+        let Self { rt, client, .. } = self;
         rt.block_on(async {
-            let row = client
-                .query(sql, &[])
-                .await
-                .map_err(|e| {
-                    crate::error::coded_driver(
-                        crate::error::codes::SOURCE_QUERY_FAILED,
-                        "mssql: scalar query failed",
-                        e,
-                    )
-                })?
-                .into_row()
-                .await
-                .map_err(|e| {
-                    crate::error::coded_driver(
-                        crate::error::codes::SOURCE_QUERY_FAILED,
-                        "mssql: reading scalar row failed",
-                        e,
-                    )
-                })?;
-            Ok(row.and_then(|r| scalar_to_string(&r)))
+            match tokio::time::timeout(budget, scalar_on(client, sql)).await {
+                Ok(read) => read,
+                Err(_) => {
+                    client.cancel_query().await.map_err(|e| {
+                        crate::error::coded_driver(
+                            crate::error::codes::SOURCE_QUERY_FAILED,
+                            "mssql: cancelling the timed-out scalar query failed",
+                            e,
+                        )
+                    })?;
+                    Err(crate::source::StatementDurationTimeout::mssql(statement_timeout_s).into())
+                }
+            }
         })
     }
 

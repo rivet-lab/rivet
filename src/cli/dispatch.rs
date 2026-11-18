@@ -352,6 +352,7 @@ fn dispatch_cdc(a: CdcArgs) -> Result<()> {
             },
             CdcEngine::Oracle => CdcEngineOpts::Oracle {
                 configured_tables: a.table.clone(),
+                resolved_grants: None,
             },
         },
     };
