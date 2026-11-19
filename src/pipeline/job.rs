@@ -170,12 +170,11 @@ fn capture_open_forensics(
 
 /// The run's column plan.
 pub(super) fn plan_open_columns(
-    export_name: &str,
-    format: crate::config::FormatType,
+    plan: &ResolvedRunPlan,
     open: &mut Option<Vec<crate::types::TypeMapping>>,
     strict: bool,
 ) -> Result<()> {
-    let subject = format!("export '{export_name}'");
+    let subject = format!("export '{}'", plan.export_name);
     match open.as_ref() {
         Some(m) => {
             let planned = crate::types::plan_columns(
@@ -185,7 +184,7 @@ pub(super) fn plan_open_columns(
             )?;
             if seeded!("check-run-refusal-split", false, true) {
                 crate::format::refuse_unwritable_columns(
-                    format,
+                    plan.format,
                     planned
                         .iter()
                         .filter_map(|m| Some((m.column_name.as_str(), m.arrow_type.as_ref()?))),
@@ -1206,14 +1205,7 @@ fn execute_resolved_plan(
     }
 
     let gate = settle_columns_are_temporal(plan, summary.open_mappings.as_deref())
-        .and_then(|()| {
-            plan_open_columns(
-                &plan.export_name,
-                plan.format,
-                &mut summary.open_mappings,
-                tail.strict,
-            )
-        })
+        .and_then(|()| plan_open_columns(plan, &mut summary.open_mappings, tail.strict))
         .and_then(|()| super::frame::RunnerFrame::refuse_cross_shape_prefix(plan));
     let result = match gate {
         Err(e) => Err(e),
@@ -3673,7 +3665,7 @@ mod tests {
     /// The run's plan refuses a Lossy column only under --strict.
     #[test]
     fn plan_open_columns_refuses_only_under_strict() {
-        use crate::config::FormatType;
+        use crate::plan::test_support::test_plan;
         use crate::types::{RivetType, SourceColumn, TypeFidelity, TypeMapping};
         let lossy = || {
             let mut m = TypeMapping::from_source(
@@ -3683,13 +3675,14 @@ mod tests {
             m.fidelity = TypeFidelity::Lossy;
             Some(vec![m])
         };
+        let plan = test_plan();
         let mut open = lossy();
-        assert!(plan_open_columns("e", FormatType::Parquet, &mut open, false).is_ok());
+        assert!(plan_open_columns(&plan, &mut open, false).is_ok());
         assert_eq!(open.as_ref().map(Vec::len), Some(1), "warn keeps the plan");
-        let err = plan_open_columns("e", FormatType::Parquet, &mut lossy(), true).unwrap_err();
+        let err = plan_open_columns(&plan, &mut lossy(), true).unwrap_err();
         assert!(format!("{err:#}").contains("ts"), "{err:#}");
-        assert!(plan_open_columns("e", FormatType::Parquet, &mut None, false).is_ok());
-        let err = plan_open_columns("e", FormatType::Parquet, &mut None, true).unwrap_err();
+        assert!(plan_open_columns(&plan, &mut None, false).is_ok());
+        let err = plan_open_columns(&plan, &mut None, true).unwrap_err();
         assert!(
             format!("{err:#}").contains("could not be resolved"),
             "{err:#}"
@@ -3700,6 +3693,7 @@ mod tests {
     #[test]
     fn plan_open_columns_refuses_a_column_the_format_cannot_write() {
         use crate::config::FormatType;
+        use crate::plan::test_support::test_plan;
         use crate::types::{RivetType, SourceColumn, TypeMapping};
         let wide = || {
             Some(vec![TypeMapping::from_source(
@@ -3710,13 +3704,16 @@ mod tests {
                 },
             )])
         };
+        let mut csv = test_plan();
+        csv.format = FormatType::Csv;
+        let parquet = test_plan();
         for strict in [false, true] {
-            let err = plan_open_columns("e", FormatType::Csv, &mut wide(), strict).unwrap_err();
+            let err = plan_open_columns(&csv, &mut wide(), strict).unwrap_err();
             assert_eq!(
                 crate::error::error_code(&err),
                 Some("RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED")
             );
-            assert!(plan_open_columns("e", FormatType::Parquet, &mut wide(), strict).is_ok());
+            assert!(plan_open_columns(&parquet, &mut wide(), strict).is_ok());
         }
     }
 

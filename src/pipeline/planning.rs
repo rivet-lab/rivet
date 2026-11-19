@@ -102,7 +102,7 @@ pub(crate) fn admit_columns(
         }
     };
     settle_columns_are_temporal(plan, Some(&mappings))?;
-    plan_open_columns(&plan.export_name, plan.format, &mut Some(mappings), strict)
+    plan_open_columns(plan, &mut Some(mappings), strict)
 }
 
 /// The exports `config` runs for `export_name` with every `partition_by` expanded, as `run` selects them.
