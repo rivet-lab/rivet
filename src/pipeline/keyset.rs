@@ -347,6 +347,7 @@ impl Span {
 /// How the density check left the parallel key-space cuts.
 enum Recut {
     Even,
+    Held { ratio: f64 },
     Rounds(usize),
     Unbalanced { rounds: usize, ratio: f64 },
 }
@@ -436,7 +437,7 @@ pub(crate) fn sample_key_boundaries(
         }
     };
     let Some((axis, lo, hi)) = ends.and_then(|(a, b)| {
-        let axis = Axis::of(&a)?;
+        let axis = Axis::of(&a, st)?;
         Some((axis, axis.ord(&a)?, axis.ord(&b)?))
     }) else {
         log::info!(
@@ -454,6 +455,13 @@ pub(crate) fn sample_key_boundaries(
             );
             Ok(bounds)
         }
+        Ok((bounds, Recut::Held { ratio })) => {
+            log::info!(
+                "export '{}': parallel keyset path: seek (key-space cuts; probed densities differ over {DENSITY_RATIO}x, estimated heaviest range {ratio:.1}x the mean)",
+                plan.export_name
+            );
+            Ok(bounds)
+        }
         Ok((bounds, Recut::Rounds(rounds))) => {
             log::info!(
                 "export '{}': parallel keyset path: seek+recut ({rounds} round(s), {} range(s))",
@@ -464,7 +472,7 @@ pub(crate) fn sample_key_boundaries(
         }
         Ok((bounds, Recut::Unbalanced { rounds, ratio })) => {
             log::warn!(
-                "export '{}': parallel keyset path: seek+recut ({rounds} round(s), not balanced: heaviest range {ratio:.1}x the mean); data is complete, with uneven workers.",
+                "export '{}': parallel keyset path: seek+recut ({rounds} round(s), not balanced: estimated heaviest range {ratio:.1}x the mean); data is complete, with uneven workers.",
                 plan.export_name
             );
             Ok(bounds)
@@ -479,31 +487,33 @@ pub(crate) fn sample_key_boundaries(
     }
 }
 
-/// Rows per key just above `start` up to `end`, from the key one seek lands on after skipping [`PROBE_ROWS`] rows.
-fn probe_density(
+/// The key at row `offset` of the window past `start` up to `end`, by one index seek.
+fn probe_at(
     src: &mut dyn Source,
     plan: &ResolvedRunPlan,
     (k, axis): (&str, Axis),
     fence: &[String],
-    start: i128,
-    end: i128,
-) -> Result<f64> {
+    (start, end): (i128, i128),
+    offset: i64,
+) -> Result<Option<String>> {
     let st = plan.source.source_type;
     let of = crate::source::query::KeyOf {
         base: &plan.base_query,
         expr: k,
     };
+    let (past, past_at) = axis.after(start);
+    let (upto, upto_at) = axis.upto(end);
     let mut preds = fence.to_vec();
     preds.push(format!(
-        "{k} > {}",
-        crate::source::query::inline_literal(st, &axis.show(start), of)
+        "{k} {past} {}",
+        crate::source::query::inline_literal(st, &past_at, of)
     ));
     preds.push(format!(
-        "{k} <= {}",
-        crate::source::query::inline_literal(st, &axis.show(end), of)
+        "{k} {upto} {}",
+        crate::source::query::inline_literal(st, &upto_at, of)
     ));
     preds.push(format!("{k} IS NOT NULL"));
-    let landed = sampler_scalar(
+    sampler_scalar(
         src,
         plan,
         &format!(
@@ -511,10 +521,22 @@ fn probe_density(
             plan.base_query,
             crate::sql::derived(st, "_rivet_pk"),
             preds.join(" AND "),
-            nth_row_clause(st, PROBE_ROWS)
+            nth_row_clause(st, offset)
         ),
-    )?;
-    Ok(match landed.and_then(|v| axis.ord(&v)) {
+    )
+}
+
+/// Rows per key just above `start` up to `end`, from the key one seek lands on after skipping [`PROBE_ROWS`] rows, or from the whole span when fewer rows remain.
+fn probe_density(
+    src: &mut dyn Source,
+    plan: &ResolvedRunPlan,
+    key: (&str, Axis),
+    fence: &[String],
+    start: i128,
+    end: i128,
+) -> Result<f64> {
+    let landed = probe_at(src, plan, key, fence, (start, end), PROBE_ROWS)?;
+    Ok(match landed.and_then(|v| key.1.ord(&v)) {
         Some(at) => PROBE_ROWS as f64 / (at - start).max(1) as f64,
         None => PROBE_ROWS as f64 / (end - start).max(1) as f64,
     })
@@ -569,10 +591,11 @@ fn snap_key(
         base: &plan.base_query,
         expr: k,
     };
+    let (past, past_at) = axis.after(start);
     let mut preds = fence.to_vec();
     preds.push(format!(
-        "{k} > {}",
-        crate::source::query::inline_literal(st, &axis.show(start), of)
+        "{k} {past} {}",
+        crate::source::query::inline_literal(st, &past_at, of)
     ));
     preds.push(format!(
         "{k} >= {}",
@@ -581,7 +604,35 @@ fn snap_key(
     Ok(seek_key(src, plan, k, &preds, false)?.and_then(|v| axis.ord(&v)))
 }
 
-/// Each cut snapped to the next existing key past the previous one, stopping at the first that has none below `hi`.
+/// The last existing key above `start` and below `mid`, by one index seek.
+fn prior_key(
+    src: &mut dyn Source,
+    plan: &ResolvedRunPlan,
+    (k, axis): (&str, Axis),
+    fence: &[String],
+    start: i128,
+    mid: i128,
+) -> Result<Option<i128>> {
+    let st = plan.source.source_type;
+    let of = crate::source::query::KeyOf {
+        base: &plan.base_query,
+        expr: k,
+    };
+    let (past, past_at) = axis.after(start);
+    let (below, below_at) = axis.below(mid);
+    let mut preds = fence.to_vec();
+    preds.push(format!(
+        "{k} {past} {}",
+        crate::source::query::inline_literal(st, &past_at, of)
+    ));
+    preds.push(format!(
+        "{k} {below} {}",
+        crate::source::query::inline_literal(st, &below_at, of)
+    ));
+    Ok(seek_key(src, plan, k, &preds, true)?.and_then(|v| axis.ord(&v)))
+}
+
+/// Each cut snapped to the existing key nearest it, forward or back across an empty stretch, past the previous one, stopping at the first that has none below `hi`; with the cuts that moved back to the edge of a dense stretch.
 fn snap_cuts(
     src: &mut dyn Source,
     plan: &ResolvedRunPlan,
@@ -590,19 +641,32 @@ fn snap_cuts(
     first: i128,
     hi: i128,
     cuts: &[i128],
-) -> Result<Vec<i128>> {
+) -> Result<(Vec<i128>, Vec<i128>)> {
     let mut out = Vec::with_capacity(cuts.len());
+    let mut edges = Vec::new();
     let mut prev = first;
     for &c in cuts {
-        match snap_key(src, plan, key, fence, prev, c)? {
-            Some(b) if b > prev && b < hi => {
-                out.push(b);
-                prev = b;
+        let Some(mut b) = snap_key(src, plan, key, fence, prev, c)? else {
+            break;
+        };
+        let mut edge = false;
+        if b > c
+            && let Some(p) = prior_key(src, plan, key, fence, prev, c)?
+            && c - p < b - c
+        {
+            (b, edge) = (p, true);
+        }
+        if b > prev && b < hi {
+            out.push(b);
+            if edge {
+                edges.push(b);
             }
-            _ => break,
+            prev = b;
+        } else {
+            break;
         }
     }
-    Ok(out)
+    Ok((out, edges))
 }
 
 /// Recut the integer key-space cuts into equal-row ranges when the sampled densities are skewed; the cuts stand otherwise.
@@ -620,11 +684,11 @@ fn balance_by_density(
     }
     let m = cuts.len() + 1;
     let render = |cuts: &[i128]| -> Vec<String> { cuts.iter().map(|c| key.1.show(*c)).collect() };
-    let initial = spans_from(lo, hi, &cuts);
+    let mut spans = spans_from(lo, hi, &cuts);
     let points = m.min(PROBE_POINTS);
     let mut sampled = Vec::with_capacity(points);
     for j in 0..points {
-        let s = initial[j * m / points];
+        let s = spans[j * m / points];
         sampled.push(probe_density(src, plan, key, fence, s.start, s.end)?);
     }
     let (min, max) = sampled
@@ -633,26 +697,44 @@ fn balance_by_density(
     if max / min <= DENSITY_RATIO {
         return Ok((bounds, Recut::Even));
     }
+    let mut known = (points == m).then_some(sampled);
     let mut rounds = 0;
+    let mut best: Option<(f64, Vec<i128>, usize)> = None;
+    let mut worse = 0;
     loop {
-        let mut spans = spans_from(lo, hi, &cuts);
-        for s in spans.iter_mut() {
-            s.density = probe_density(src, plan, key, fence, s.start, s.end)?;
+        match known.take() {
+            Some(densities) => spans
+                .iter_mut()
+                .zip(densities)
+                .for_each(|(s, d)| s.density = d),
+            None => {
+                spans = spans_from(lo, hi, &cuts);
+                for s in spans.iter_mut() {
+                    s.density = probe_density(src, plan, key, fence, s.start, s.end)?;
+                }
+            }
         }
         let mean = spans.iter().map(Span::rows).sum::<f64>() / spans.len() as f64;
         let ratio = spans.iter().map(Span::rows).fold(0f64, f64::max) / mean;
         if ratio <= BALANCE_FACTOR {
             let recut = if rounds == 0 {
-                Recut::Even
+                Recut::Held { ratio }
             } else {
                 Recut::Rounds(rounds)
             };
             return Ok((render(&cuts), recut));
         }
-        if rounds == RECUT_ROUNDS {
+        if best.as_ref().is_none_or(|(r, ..)| ratio < *r) {
+            best = Some((ratio, cuts.clone(), rounds));
+            worse = 0;
+        } else {
+            worse += 1;
+        }
+        if worse == 2 || rounds == RECUT_ROUNDS {
+            let (ratio, cuts, rounds) = best.take().unwrap();
             return Ok((render(&cuts), Recut::Unbalanced { rounds, ratio }));
         }
-        cuts = snap_cuts(
+        let (next, _) = snap_cuts(
             src,
             plan,
             key,
@@ -661,6 +743,10 @@ fn balance_by_density(
             hi,
             &equal_row_cuts(&spans, m),
         )?;
+        if next == cuts {
+            return Ok((render(&cuts), Recut::Unbalanced { rounds, ratio }));
+        }
+        cuts = next;
         rounds += 1;
     }
 }
@@ -685,8 +771,8 @@ fn seek_bounds(
     ) else {
         return Ok(None);
     };
-    let integer = lo.parse::<i128>().is_ok() && hi.parse::<i128>().is_ok();
-    let parts = if integer { int_parts } else { parts };
+    let on_axis = Axis::of(&lo, st).is_some() && Axis::of(&hi, st).is_some();
+    let parts = if on_axis { int_parts } else { parts };
     for cut in super::key_space::split(&lo, &hi, parts) {
         let after = bounds.last().unwrap_or(&lo);
         let mut preds = fence.to_vec();
@@ -2273,6 +2359,7 @@ mod tests {
                     match op.as_str() {
                         ">" => o.is_gt(),
                         ">=" => o.is_ge(),
+                        "<" => o.is_lt(),
                         "<=" => o.is_le(),
                         other => panic!("unexpected operator {other}"),
                     }
@@ -2676,7 +2763,7 @@ mod tests {
         };
         let spread: Vec<usize> = ranges.iter().map(|(_, lo, hi, _)| held(lo, hi)).collect();
         assert_eq!(spread.iter().sum::<usize>(), all.len(), "{spread:?}");
-        assert_eq!(spread, vec![3_517, 3_518, 1_974, 991], "{bounds:?}");
+        assert_eq!(spread, vec![3_470, 3_469, 2_068, 993], "{bounds:?}");
     }
 
     /// A uuid key with 90% of its rows in 5% of its span keeps every row once, in ranges recut to near-equal row counts.
@@ -2707,6 +2794,79 @@ mod tests {
         let mean = all.len() as f64 / spread.len() as f64;
         let heaviest = *spread.iter().max().unwrap() as f64;
         assert!(heaviest <= 2.0 * mean, "{spread:?}");
+    }
+
+    /// Uuid keys with a dense block, a wide empty gap and a sparse tail keep every row once in ranges no heavier than twice the mean, whatever the workers and the low bit of the keys.
+    #[test]
+    fn a_uuid_key_with_a_gap_after_its_dense_block_is_recut_into_balanced_ranges() {
+        let plan = crate::plan::test_support::test_plan();
+        for low in [0u128, 1] {
+            let uuid = |units: i64| {
+                uuid::Uuid::from_u128(((units as u128) << 96) | low)
+                    .hyphenated()
+                    .to_string()
+            };
+            let dense = 1..=6_300i64;
+            let sparse = (1..=700i64).map(|i| 1_000_000 + i * 5_368);
+            {
+                let (parts, int_parts) = (4, 64);
+                let mut src = Indexed::new(
+                    dense.clone().chain(sparse.clone()).map(uuid).collect(),
+                    false,
+                );
+                let all = src.keys.clone();
+                let bounds =
+                    sample_key_boundaries(&mut src, &plan, "k", parts, int_parts, None, None)
+                        .unwrap();
+                let ranges = partition_ranges(&bounds, None, None);
+                let spread: Vec<usize> = ranges
+                    .iter()
+                    .map(|(_, lo, hi, _)| {
+                        all.iter()
+                            .filter(|k| {
+                                lo.as_deref().is_none_or(|l| k.as_str() > l)
+                                    && hi.as_deref().is_none_or(|h| k.as_str() <= h)
+                            })
+                            .count()
+                    })
+                    .collect();
+                assert_eq!(spread.iter().sum::<usize>(), all.len(), "{spread:?}");
+                assert!(
+                    spread.len() >= parts,
+                    "{parts} workers, low bit {low}: {spread:?}"
+                );
+                let share = all.len() as f64 / parts as f64;
+                let heaviest = *spread.iter().max().unwrap() as f64;
+                assert!(
+                    heaviest <= share,
+                    "{parts} workers, low bit {low}: {spread:?}"
+                );
+            }
+        }
+    }
+
+    /// A uuid key on SQL Server, which sorts uuids in its own byte order, is never probed or recut.
+    #[test]
+    fn a_sql_server_uuid_key_is_not_recut() {
+        let mut plan = crate::plan::test_support::test_plan();
+        plan.source.source_type = SourceType::Mssql;
+        let uuid = |units: i64| {
+            uuid::Uuid::from_u128((units as u128) << 96)
+                .hyphenated()
+                .to_string()
+        };
+        let keys: Vec<String> = (1..=9_000i64)
+            .chain((1..=1_000).map(|i| 9_000 + i * 191))
+            .map(uuid)
+            .collect();
+        let mut src = Indexed::new(keys, false);
+        src.st = SourceType::Mssql;
+        sample_key_boundaries(&mut src, &plan, "k", 4, 64, None, None).unwrap();
+        assert!(
+            src.sql.iter().all(|q| !q.contains("OFFSET 200 ROWS")),
+            "{:?}",
+            src.sql
+        );
     }
 
     /// A seeded sparse integer key, 95% dense and the rest spread wide, keeps every row once in ranges no heavier than twice the mean.
