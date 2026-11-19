@@ -439,7 +439,11 @@ fn an_unmapped_type_is_refused_within_the_bound(
     );
 }
 
-const COMPOSITE: (&str, &str, &str) = ("_c", "ROW(g, 'x')::{stem}_c", "no safe Rivet mapping");
+const COMPOSITE: (&str, &str, &str) = (
+    "_c",
+    "ROW(g, 'x')::{stem}_c",
+    "need a `columns:` declaration",
+);
 const ENUM_ARRAY: (&str, &str, &str) = (
     "_e[]",
     "ARRAY['new', 'paid']::{stem}_e[]",

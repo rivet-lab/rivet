@@ -86,7 +86,7 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ),
     ("src/pipeline/cli.rs::show_journal#1", 156),
     ("src/pipeline/finalize.rs::write_run_manifest#1", 182),
-    ("src/pipeline/job.rs::execute_resolved_plan#1", 262),
+    ("src/pipeline/job.rs::execute_resolved_plan#1", 260),
     ("src/pipeline/job.rs::run_export_job_inner#1", 230),
     ("src/pipeline/keyset.rs::run_keyset#1", 200),
     ("src/pipeline/keyset.rs::run_keyset_parallel#1", 330),

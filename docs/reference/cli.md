@@ -584,7 +584,7 @@ Fidelity levels:
 | `compatible` | Structurally compatible; minor representation difference |
 | `logical_string` | Serialized to STRING/text (no native Arrow type) |
 | `lossy` | Precision or range reduction |
-| `unsupported` | No safe mapping exists; the export fails with `N column(s) have no safe Rivet mapping — add column overrides in rivet.yaml`, and `rivet check --strict` exits non-zero |
+| `unsupported` | No safe mapping exists; the export is refused before any row is read with ``N column(s) need a `columns:` declaration`` (`RIVET_TYPE_UNSAFE_MAPPING`), naming the column, its source type and the reason, by `rivet run`, `check`, `plan` and `doctor` alike, and `rivet check --strict` exits non-zero |
 
 Output includes: table existence, estimated row count, index analysis, tuning recommendation.
 

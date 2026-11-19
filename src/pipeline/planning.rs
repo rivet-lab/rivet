@@ -102,7 +102,7 @@ pub(crate) fn admit_columns(
         }
     };
     settle_columns_are_temporal(plan, Some(&mappings))?;
-    plan_open_columns(&plan.export_name, &mut Some(mappings), strict)
+    plan_open_columns(plan, &mut Some(mappings), strict)
 }
 
 /// The exports `config` runs for `export_name` with every `partition_by` expanded, as `run` selects them.
@@ -189,6 +189,29 @@ mod tests {
         }
     }
 
+    /// A source that answers the column probe with the mappings it was given.
+    struct ScriptedSource(Vec<crate::types::TypeMapping>);
+
+    impl Source for ScriptedSource {
+        fn export(
+            &mut self,
+            _request: &crate::source::ExportRequest<'_>,
+            _sink: &mut dyn crate::source::BatchSink,
+        ) -> Result<()> {
+            Ok(())
+        }
+        fn query_scalar(&mut self, _sql: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+        fn type_mappings(
+            &mut self,
+            _query: &str,
+            _overrides: &crate::types::ColumnOverrides,
+        ) -> Result<Vec<crate::types::TypeMapping>> {
+            Ok(self.0.clone())
+        }
+    }
+
     fn one_export_config(source_type: &str, extra: &str) -> Config {
         Config::from_yaml(&format!(
             "source: {{ type: {source_type}, url: \"{source_type}://u:p@127.0.0.1:1/db\"{extra} }}\n\
@@ -218,6 +241,68 @@ mod tests {
         assert!(admit(false).is_ok());
         let err = admit(true).unwrap_err();
         assert!(format!("{err:#}").contains("ts"), "{err:#}");
+    }
+
+    /// The admission refuses, before any read, what `run` refuses by code: a column no Arrow type carries and a column the format cannot write; and admits the same columns where the run writes them.
+    #[test]
+    fn admit_columns_refuses_unmapped_and_unwritable_columns_and_admits_the_rest() {
+        use crate::config::FormatType;
+        use crate::types::{RivetType, SourceColumn, TypeMapping};
+        let col = |name: &str, t: RivetType| {
+            TypeMapping::from_source(&SourceColumn::simple(name, "native", true), t)
+        };
+        let unmapped = || {
+            col(
+                "net",
+                RivetType::Unsupported {
+                    native_type: "cidr".into(),
+                    reason: "no arrow type".into(),
+                },
+            )
+        };
+        let wide = || {
+            col(
+                "n",
+                RivetType::Decimal {
+                    precision: 60,
+                    scale: 10,
+                },
+            )
+        };
+        let config = one_export_config("postgres", "");
+        let admit = |m: TypeMapping, format: FormatType, strict: bool| {
+            let mut plan = crate::plan::test_support::test_plan();
+            plan.format = format;
+            admit_columns(
+                &mut ScriptedSource(vec![m]),
+                &config,
+                &plan,
+                &config.exports[0],
+                Path::new("."),
+                None,
+                strict,
+            )
+        };
+        for strict in [false, true] {
+            for format in [FormatType::Parquet, FormatType::Csv] {
+                let err = admit(unmapped(), format, strict).unwrap_err();
+                assert_eq!(
+                    crate::error::error_code(&err),
+                    Some("RIVET_TYPE_UNSAFE_MAPPING")
+                );
+                assert!(
+                    format!("{err:#}").contains("1 column(s) need a `columns:` declaration"),
+                    "{err:#}"
+                );
+            }
+            let err = admit(wide(), FormatType::Csv, strict).unwrap_err();
+            assert_eq!(
+                crate::error::error_code(&err),
+                Some("RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED")
+            );
+            assert!(admit(wide(), FormatType::Parquet, strict).is_ok());
+            assert!(admit(col("id", RivetType::Int64), FormatType::Csv, strict).is_ok());
+        }
     }
 
     /// A source that cannot connect stops a `columns_from: grants` plan with the connect refusal and lets any other plan go on without a catalog.
