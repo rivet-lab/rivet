@@ -1437,6 +1437,73 @@ mod tests {
         );
     }
 
+    /// The first non-null datetime2 / datetimeoffset value's own scale decides the type over the catalog; with no such value the catalog decides.
+    #[test]
+    fn a_fine_timestamp_is_read_from_the_first_values_own_scale() {
+        use tiberius::time::{Date, DateTime2, DateTimeOffset, Time};
+        let dt2 = |scale: u8| DateTime2::new(Date::new(693_595), Time::new(1, scale));
+        let one =
+            |name: &'static str, ty, data| vec![Row::builder().column(name, ty, data).build()];
+        let datetime2 = |scale: u8| {
+            one(
+                "t",
+                ColumnType::Datetime2,
+                ColumnData::DateTime2(Some(dt2(scale))),
+            )
+        };
+        let offset = |scale: u8| {
+            one(
+                "t",
+                ColumnType::DatetimeOffsetn,
+                ColumnData::DateTimeOffset(Some(DateTimeOffset::new(dt2(scale), 60))),
+            )
+        };
+        let us = RivetType::Timestamp {
+            unit: RivetTimeUnit::Microsecond,
+            timezone: None,
+        };
+        let ns = RivetType::Timestamp {
+            unit: RivetTimeUnit::Nanosecond,
+            timezone: None,
+        };
+        let none = ColumnOverrides::new();
+        let catalog_fine = CatalogHints {
+            decimals: HashMap::new(),
+            fine_timestamps: ["t".to_string()].into_iter().collect(),
+        };
+        let catalog_empty = CatalogHints {
+            decimals: HashMap::new(),
+            fine_timestamps: HashSet::new(),
+        };
+        let resolve = |hints: Option<&CatalogHints>, rows: &[Row]| {
+            resolve_catalog_type(us.clone(), "t", &none, hints, Some((0, rows)))
+        };
+        for scale in [7, 0] {
+            assert_eq!(first_timestamp_scale(0, &datetime2(scale)), Some(scale));
+            assert_eq!(first_timestamp_scale(0, &offset(scale)), Some(scale));
+        }
+        assert_eq!(resolve(None, &datetime2(7)), ns, "a query's scale-7 column");
+        assert_eq!(resolve(None, &offset(7)), ns, "a query's scale-7 offset");
+        assert_eq!(resolve(None, &datetime2(6)), us, "scale 6 is exact");
+        assert_eq!(resolve(None, &datetime2(0)), us);
+        assert_eq!(
+            resolve(Some(&catalog_fine), &datetime2(3)),
+            us,
+            "the value's scale over the catalog"
+        );
+        assert_eq!(resolve(Some(&catalog_empty), &datetime2(7)), ns);
+        let nulls = one("t", ColumnType::Datetime2, ColumnData::DateTime2(None));
+        assert_eq!(first_timestamp_scale(0, &nulls), None);
+        assert_eq!(
+            resolve(Some(&catalog_fine), &nulls),
+            ns,
+            "all null: the catalog"
+        );
+        assert_eq!(resolve(Some(&catalog_empty), &nulls), us);
+        let text = one("t", ColumnType::NVarchar, ColumnData::String(None));
+        assert_eq!(first_timestamp_scale(0, &text), None);
+    }
+
     #[test]
     fn rescale_i128_negative_values() {
         assert!(
