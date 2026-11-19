@@ -5574,7 +5574,7 @@ seeds:
       mysql:
         na: "MySQL has no user-defined column types"
       mssql:
-        cells: [keyset_key_is_refused_mssql_alias_type_over_datetime2_7, keyset_key_is_refused_on_a_one_chunk_table_mssql_alias_type_over_datetime2_7, init_scaffolds_no_keyset_key_for_an_alias_type_over_datetime2_7_primary_key_mssql, "lib:the_sub_microsecond_probe_reads_the_system_type_under_an_alias"]
+        cells: [keyset_key_is_refused_mssql_alias_type_over_datetime2_7, keyset_key_is_refused_on_a_one_chunk_table_mssql_alias_type_over_datetime2_7, init_scaffolds_a_keyset_key_for_an_alias_type_over_datetime2_7_primary_key_mssql, "lib:the_sub_microsecond_probe_reads_the_system_type_under_an_alias"]
       oracle:
         na: "Oracle has no scalar alias types for a column"
       mongo:
@@ -5604,6 +5604,23 @@ seeds:
           - "lib:a_bigquery_load_signs_with_the_destinations_named_key"
           - "lib:a_named_key_beside_a_static_bigquery_token_is_refused_by_code"
           - "lib:two_named_identities_are_refused_by_code"
+
+  - name: fine-timestamp-lands-at-microseconds
+    class: "a SQL Server datetime2(7) or datetimeoffset(7) column is delivered as a microsecond timestamp and its 7th digit is dropped, on batch and CDC, and the keyset or chunk key refusal that the microsecond landing causes stays"
+    history: "ADR-0038 CP1 engine step, owner decision 2026-11-18 (fix, do not ledger); RED on main 2026-11-18: the type ledger delivers Timestamp(ns), delivered Timestamp(us)"
+    scope: source
+    switch: fine-timestamp-lands-at-microseconds
+    engines:
+      mssql:
+        cells: [mssql_batch_and_cdc_deliver_every_ledger_row_alike, a_datetime2_7_key_delivers_the_seeded_ids_once_at_its_own_precision_mssql, "lib:a_fine_timestamp_column_is_nanoseconds_and_its_neighbours_are_untouched"]
+      postgres:
+        na: "PostgreSQL timestamp and timestamptz are microsecond natively, so no digit is lost"
+      mysql:
+        na: "MySQL datetime(6) and timestamp(6) are microsecond natively, so no digit is lost"
+      mongo:
+        na: "a BSON date is millisecond natively, so no digit is lost"
+      oracle:
+        na: "2026-11-18: the Oracle TIMESTAMP(9) engine step (ADR-0038 CP1) is the follow-up PR; the seam lives on the SQL Server reader until it lands"
 
   - name: mssql-ns-override-out-of-range-null
     class: "a SQL Server or Oracle value outside 1677-09-21..2262-04-11 under a `timestamp_ns` / `timestamp_tz_ns` override is written as NULL with exit 0 instead of being refused by code"
@@ -6022,7 +6039,7 @@ seeds:
       mysql:
         na: "a MySQL DECIMAL lands as a decimal and DATETIME(6) is at most a microsecond, so no key column lands as text or finer-collapsed"
       mssql:
-        cells: [an_mssql_sub_microsecond_key_is_refused_into_clickhouse, "lib:a_microsecond_landing_is_finer_only_where_the_source_says_so"]
+        cells: [an_mssql_sub_microsecond_key_declared_timestamp_is_refused_into_clickhouse, "lib:a_microsecond_landing_is_finer_only_where_the_source_says_so"]
       mongo:
         na: "MongoDB has no cursor_column type landing as text and its timestamps are at most a millisecond"
       oracle:
@@ -6032,7 +6049,7 @@ seeds:
 
   - name: load-key-check-skips-cdc
     class: "`rivet check` admits the load keys of an export only in incremental mode while `rivet load` refuses a CDC export keyed on a column the source declares finer than a microsecond, so check exits 0 where load exits 5"
-    history: "issue 964 gap 2, RED on main 2026-11-18: MSSQL CDC export keyed on a datetime2(7) column, check exit 0, load exit 5"
+    history: "issue 964 gap 2, RED on main 2026-11-18: MSSQL CDC export keyed on a datetime2(7) column declared as microsecond timestamp, check exit 0, load exit 5"
     scope: source
     switch: load-key-check-skips-cdc
     engines:
@@ -6041,7 +6058,7 @@ seeds:
       mysql:
         na: "DATETIME(6) is at most a microsecond, so no key column lands finer-collapsed"
       mssql:
-        cells: [an_mssql_cdc_sub_microsecond_key_check_agrees_with_load_into_clickhouse, "lib:key_admission_reads_only_an_incremental_or_cdc_export_with_a_load"]
+        cells: [an_mssql_cdc_sub_microsecond_key_declared_timestamp_check_agrees_with_load_into_clickhouse, "lib:key_admission_reads_only_an_incremental_or_cdc_export_with_a_load"]
       mongo:
         na: "MongoDB timestamps are at most a millisecond"
       oracle:
@@ -6060,7 +6077,7 @@ seeds:
       mysql:
         na: "DATETIME(6) is at most a microsecond, so no key column lands finer-collapsed"
       mssql:
-        cells: [an_mssql_sub_microsecond_query_key_is_refused_into_clickhouse, "lib:the_open_probe_reads_the_finer_columns_of_a_table_and_of_a_query"]
+        cells: [an_mssql_sub_microsecond_query_key_declared_timestamp_is_refused_into_clickhouse, "lib:the_open_probe_reads_the_finer_columns_of_a_table_and_of_a_query"]
       mongo:
         na: "MongoDB timestamps are at most a millisecond"
       oracle:

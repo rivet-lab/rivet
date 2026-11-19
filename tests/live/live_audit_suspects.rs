@@ -612,10 +612,10 @@ fn mongo_cdc_dropping_another_collection_does_not_stop_capture() {
     );
 }
 
-/// Keyset over a DATETIME2(7) primary key (100 ns ticks, finer than the microsecond the seek cursor keeps) is refused by code before any read.
+/// Keyset over a DATETIME2(7) primary key declared microsecond `timestamp` is refused by code before any read.
 #[test]
 #[ignore = "live: requires docker compose mssql"]
-fn keyset_over_an_mssql_datetime2_7_key_is_refused_before_any_read() {
+fn keyset_over_an_mssql_datetime2_7_key_declared_timestamp_is_refused_before_any_read() {
     let table = unique_name("dt2_key");
     mssql_exec(&format!(
         "IF OBJECT_ID('dbo.{table}') IS NOT NULL DROP TABLE dbo.{table}; \
@@ -627,6 +627,7 @@ fn keyset_over_an_mssql_datetime2_7_key_is_refused_before_any_read() {
     let rig = Rig::mssql_batch(&table)
         .mode("chunked")
         .export_line("chunk_by_key: ts")
+        .export_line("columns: {ts: timestamp}")
         .export_line("chunk_size: 1");
     let out = rig.run();
     let parts = files_with_extension(&rig.out_dir(), "parquet").len();
@@ -871,6 +872,7 @@ fn parallel_keyset_incremental_on_an_mssql_datetime_key_exports_the_newest_row()
             "2024-01-01 00:00:00.5",
             Some("columns: {ts: timestamp_ns}"),
         ),
+        ("DATETIME2(7)", "2024-01-01 00:00:00.5", None),
         ("DATETIME", "2024-01-01 00:00:00.997", None),
     ] {
         let table = unique_name("ks_dtinc");
@@ -906,10 +908,10 @@ fn parallel_keyset_incremental_on_an_mssql_datetime_key_exports_the_newest_row()
     }
 }
 
-/// Parallel keyset incremental over a `datetime2(7)` key without the `timestamp_ns` override is refused by code before any read.
+/// Parallel keyset incremental over a `datetime2(7)` key declared microsecond `timestamp` is refused by code before any read.
 #[test]
 #[ignore = "live: requires docker compose mssql"]
-fn parallel_keyset_incremental_on_an_mssql_datetime2_7_key_is_refused_without_the_override() {
+fn parallel_keyset_incremental_on_an_mssql_datetime2_7_key_declared_timestamp_is_refused() {
     let table = unique_name("ks_dt7ref");
     let values = (1..=200)
         .map(|i| {
@@ -928,6 +930,7 @@ fn parallel_keyset_incremental_on_an_mssql_datetime2_7_key_is_refused_without_th
         .export_line("parallel: 3")
         .export_line("chunk_checkpoint: true")
         .export_line("keyset_incremental: true")
+        .export_line("columns: {ts: timestamp}")
         .export_line("chunk_size: 40");
     let out = rig.run();
     let parts = files_with_extension(&rig.out_dir(), "parquet").len();

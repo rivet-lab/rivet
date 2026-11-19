@@ -75,7 +75,7 @@ scenarios:
     what: "date + time-of-day survive the change stream with the batch Arrow types"
     postgres: { test: postgres_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent }
     mysql:   { test: mysql_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent }
-    mssql:    { test: mssql_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent, known_defect: ["DATETIME2", "TIME"] }
+    mssql:    { test: mssql_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent, known_defect: ["TIME"] }
     mongo:    { na: "BSON dates ride the verbatim document blob; the extJSON test pins the mechanism" }
     oracle:   { test: oracle_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent, known_defect: ["TIMESTAMP(9)"] }
 
@@ -99,7 +99,7 @@ scenarios:
     what: "naive vs tz-aware timestamp — CDC preserves the UTC instant under a non-default session/DB timezone (the +9h render-time trap)"
     postgres: { test: pg_cdc_non_utc_database_timezone_matches_batch, oracle: independent }
     mysql:    { test: cdc_non_utc_server_timezone_matches_batch_and_utc_instant, oracle: independent }
-    mssql:    { test: mssql_cdc_datetimeoffset_value_is_preserved, oracle: independent, known_defect: ["DATETIMEOFFSET"] }
+    mssql:    { test: mssql_cdc_datetimeoffset_value_is_preserved, oracle: independent }
     mongo:    { na: "BSON dates ride the verbatim document blob" }
     oracle:   { test: oracle_cdc_non_utc_session_matches_batch, oracle: independent }
 

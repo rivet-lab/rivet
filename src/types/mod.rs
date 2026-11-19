@@ -86,9 +86,10 @@ pub fn timestamp_nanos_or_refuse(
             crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
             format!(
                 "{source}: column `{column}` holds {dt}, outside the nanosecond timestamp range \
-                 (1677-09-21..2262-04-11) its `timestamp_ns` / `timestamp_tz_ns` override declares, \
-                 and writing it as NULL would lose the value. Declare the column `timestamp` \
-                 (microseconds, full range) or `timestamp_tz` instead, or CAST it in the export's `query:`."
+                 (1677-09-21..2262-04-11) its nanosecond type (a sub-microsecond column, or a \
+                 `timestamp_ns` / `timestamp_tz_ns` override) delivers, and writing it as NULL would \
+                 lose the value. Declare the column `timestamp` (microseconds, full range) or \
+                 `timestamp_tz` in `columns:` instead, or CAST it in the export's `query:`."
             ),
         )
     })

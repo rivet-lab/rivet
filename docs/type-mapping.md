@@ -105,7 +105,7 @@ exports:
     columns:
       uid: uuid              # MySQL VARCHAR(36) → UUID semantic
       amount: decimal(18,2)  # also valid for MySQL DECIMAL without catalog
-      event_ts: timestamp_ns # keep SQL Server datetime2(7)'s 100 ns tick (see gap 4)
+      event_ts: timestamp    # SQL Server datetime2(7) in microseconds over the full range (see gap 4)
 ```
 
 Supported override types: `bool`, `int2/int4/int8`, `float4/float8`,
@@ -339,8 +339,10 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `float` | `float64` | `Float64` | float text | | live matrix |
 | `date` | `date` | `Date32` | ISO date | | live matrix |
 | `time` | `time(µs)` | `Time64(µs)` | time text | µs precision | live matrix |
-| `datetime2` / `datetime` / `smalldatetime` | `timestamp(µs, none)` | `Timestamp(µs, None)` | datetime text | naive; µs default (full range), `datetime2(7)`'s 100 ns tick truncated — opt into `timestamp_ns` to keep it, see known gap 4 | live matrix |
-| `datetimeoffset` | `timestamp_tz(µs, UTC)` | `Timestamp(µs, UTC)` | datetime text | normalised to UTC | type_roundtrip |
+| `datetime2(0..6)` / `datetime` / `smalldatetime` | `timestamp(µs, none)` | `Timestamp(µs, None)` | datetime text | naive; µs, full range | live matrix |
+| `datetime2(7)` | `timestamp(ns, none)` | `Timestamp(ns, None)` | datetime text | naive; the 100 ns tick is kept, 1677-09-21..2262-04-11 (a value outside it is refused); declare `timestamp` for µs over the full range, see known gap 4 | live matrix |
+| `datetimeoffset(0..6)` | `timestamp_tz(µs, UTC)` | `Timestamp(µs, UTC)` | datetime text | normalised to UTC | type_roundtrip |
+| `datetimeoffset(7)` | `timestamp_tz(ns, UTC)` | `Timestamp(ns, UTC)` | datetime text | normalised to UTC; the 100 ns tick is kept, 1677-09-21..2262-04-11 (a value outside it is refused); declare `timestamp_tz` for µs over the full range, see known gap 4 | live matrix |
 | `nvarchar` / `varchar` / `nchar` / `char` / `text` / `ntext` | `string` | `Utf8` | escaped UTF-8 | | live matrix |
 | `varbinary` / `binary` / `image` | `binary` | `Binary` | hex in CSV | | live matrix |
 | `uniqueidentifier` | `uuid` | `FixedSizeBinary(16)` + Parquet `LogicalType::Uuid` | canonical UUID text | native UUID downstream | live matrix |
@@ -382,27 +384,27 @@ CDC (change streams) emits the same two-column shape prefixed with the
    non-UUID fixed binary have no CSV cell — the export **fails loudly** naming
    the column (see [CSV serialization](#csv-serialization)) rather than silently
    writing empty values.
-4. **SQL Server `datetime2` sub-microsecond precision** — *default is
-   microsecond; nanosecond is opt-in.* rivet maps `datetime2` to `Timestamp(µs)`
-   **by default**, because Arrow nanosecond timestamps are i64 ns and span only
-   **1677-09-21 .. 2262-04-11**, while `datetime2` spans 0001–9999 — a blanket ns
-   mapping would silently corrupt any value outside that window (a far worse bug
-   than the precision gap). So the 7th fractional digit of a `datetime2(7)`
-   (100 ns) is truncated to µs by default; lossless for `datetime2(6)` and below.
+4. **SQL Server `datetime2(7)` / `datetimeoffset(7)` sub-microsecond precision** — *default is
+   nanosecond; microsecond is the per-column opt-out.* rivet delivers a column whose declared
+   scale is above 6 (a bare `datetime2` is `datetime2(7)`) as `Timestamp(ns)` on batch and on CDC,
+   so the 7th fractional digit (the 100 ns tick) is kept. Arrow nanosecond timestamps are i64 ns
+   and span only **1677-09-21 .. 2262-04-11**, while `datetime2` spans 0001–9999, so a value outside
+   that window is refused by code (below), never written as NULL or clamped. The scale comes from the
+   catalog for a single-table `SELECT` (and for every CDC table); a query that is not one is read from
+   its first non-null value, and a first batch that is all NULL stays microseconds with a warning.
+   `datetime2(0..6)`, `datetime` and `smalldatetime` are microseconds as before, lossless.
 
-   To **preserve the 100 ns tick** on a column whose data is inside the ns range,
-   opt in per column with a `timestamp_ns` override:
+   To get **microseconds over the full 0001..9999 range** instead (dropping the 100 ns tick), declare
+   the column per export:
 
    ```yaml
    columns:
-     event_ts: timestamp_ns       # naive; use timestamp_tz_ns for datetimeoffset
+     event_ts: timestamp          # naive; use timestamp_tz for datetimeoffset
    ```
 
-   The Parquet file then carries `Timestamp(ns)` and the full precision survives
-   (verified live 2026-06-07: DuckDB reads it natively as `TIMESTAMP_NS`,
-   `…12:00:00.1234567` intact; the default µs path truncates to `.123456`).
-   **Caveats (all verified live 2026-06-07):**
-   - A value outside 1677-09-21 .. 2262-04-11 (Arrow's nanosecond range) is **refused**: the run stops with `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5) naming the column and the value, before any part is written. Declare the column `timestamp` / `timestamp_tz` (microseconds, full range) or remove the override. Before 0.33.0 such a value was written as NULL with exit 0.
+   `timestamp_ns` / `timestamp_tz_ns` stay accepted and mean the same as the default.
+   **Caveats (verified live 2026-06-07; the default now takes this path):**
+   - A value outside 1677-09-21 .. 2262-04-11 (Arrow's nanosecond range) is **refused**: the run stops with `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5) naming the column and the value, before any part is written. Declare the column `timestamp` / `timestamp_tz` (microseconds, full range). Before 0.33.0 such a value was written as NULL with exit 0; before this release a `datetime2(7)` landed at microseconds over the full range with no override.
    - **DuckDB** — native `TIMESTAMP_NS`, fully lossless.
    - **Snowflake** — autoloads as `NUMBER(38,0)` (raw nanos); `TO_TIMESTAMP_NTZ(col, 9)`
      recovers a **lossless** `TIMESTAMP_NTZ` (it holds 9 digits — the 7th survives).
@@ -411,20 +413,19 @@ CDC (change streams) emits the same two-column shape prefixed with the
      is microsecond — the 7th digit drops). Keep the default `timestamp` for
      BigQuery unless you carry the raw nanos.
 
-   **Keyset key:** the µs cursor cannot page a `datetime2`/`datetimeoffset` key with
-   more than 6 fractional digits (a bare `datetime2` is `datetime2(7)`), so
-   `chunk_by_key:` refuses it with `RIVET_PLAN_CHUNK_KEY_UNUSABLE` unless the
-   `timestamp_ns` / `timestamp_tz_ns` override delivers it; for a BigQuery
+   **Keyset key:** a µs cursor cannot page a `datetime2`/`datetimeoffset` key with
+   more than 6 fractional digits, so
+   `chunk_by_key:` refuses it with `RIVET_PLAN_CHUNK_KEY_UNUSABLE` when the column is declared
+   `timestamp` / `timestamp_tz`; by default a `datetime2(7)` / `datetimeoffset(7)` key is delivered as a nanosecond timestamp and admitted; for a BigQuery
    `TIMESTAMP` use a `datetime2(6)`, an integer key or `mode: full` instead. On Oracle no override lifts the refusal of a `TIMESTAMP(7..9)` key.
 
-   **Incremental mode:** the default µs cursor on a `datetime2(7)` lands one tick
-   below the source max, re-exporting the boundary row every run — use
-   `timestamp_ns` (the cursor literal then carries all 9 digits), a `datetime2(6)`
-   (or coarser) cursor, or an integer/identity cursor.
+   **Incremental mode:** a µs cursor on a `datetime2(7)` (declared `timestamp`) lands one tick
+   below the source max, re-exporting the boundary row every run; the default nanosecond cursor
+   literal carries all 9 digits, as does a `datetime2(6)` (or coarser) or an integer/identity cursor.
 
    **Primary key of an incremental or CDC load:** a `datetime2(7)` / `datetimeoffset(7)` (or Oracle `TIMESTAMP(7..9)` read as `timestamp`) key column
-   lands at microseconds, so two rows that differ only below a microsecond would collapse into one row of the current-state view.
-   `rivet load` and `rivet check` refuse it with `RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT` (exit 5) until `timestamp_ns` / `timestamp_tz_ns` is declared or a `pk:` that
+   lands at microseconds when declared `timestamp` (or an Oracle one by default), so two rows that differ only below a microsecond would collapse into one row of the current-state view.
+   `rivet load` and `rivet check` refuse it with `RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT` (exit 5) until `timestamp_ns` / `timestamp_tz_ns` is declared (the SQL Server default) or a `pk:` that
    does not depend on it is named; parts already extracted hold microseconds, so run `rivet state reset --export <name>` and the export again before the reload. A table already loaded keeps its column type: drop its change log and view first.
    A cursor that lands as text (a bare Oracle `NUMBER`) is refused the same way for an incremental load: declare `int64` or `decimal(p,s)`.
 

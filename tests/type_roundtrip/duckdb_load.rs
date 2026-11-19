@@ -306,10 +306,7 @@ fn duckdb_validates_mssql_type_matrix_parquet() {
         ("c_float", "DOUBLE"),
         ("c_date", "DATE"),
         ("c_time", "TIME"),
-        ("created_at", "TIMESTAMP"),
-        // datetimeoffset is tz-aware → Arrow Timestamp(µs, UTC) → DuckDB reads
-        // the isAdjustedToUTC flag and lands it as a TIMESTAMPTZ (vs the naive
-        // datetime2 above), proving the tz-awareness survived the Parquet.
+        ("created_at", "TIMESTAMP_NS"),
         ("created_at_tz", "TIMESTAMP WITH TIME ZONE"),
         ("label", "VARCHAR"),
         ("c_varchar", "VARCHAR"),
