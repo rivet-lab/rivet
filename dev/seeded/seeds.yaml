@@ -6091,6 +6091,26 @@ seeds:
       mongo:
         na: "a MySQL zero date has no counterpart on MongoDB: its date types refuse the value or hold no such sentinel (property_no_silent_null grades it on MySQL only)"
 
+  - name: mysql-zero-date-column-claims-exact
+    class: "a MySQL DATE, DATETIME or TIMESTAMP column that can hold a zero or partial date is labelled rivet.fidelity exact although the run writes those values as NULL"
+    history: "2026-11-18 - issue #994 remainder: RED on main in the MySQL batch and CDC cells (the date columns of a table holding a zero date carried rivet.fidelity: exact); fixed by mysql_mapping labelling them compatible"
+    scope: source
+    engines:
+      mysql:
+        switch: mysql-zero-date-column-claims-exact
+        cells:
+          - zero_dates_are_labelled_compatible_batch_mysql
+          - zero_dates_are_labelled_compatible_cdc_mysql
+          - "lib:a_mysql_temporal_column_is_never_exact_and_the_rest_are_unchanged"
+      postgres:
+        na: "a PostgreSQL date has no zero or partial value: the type claim is exact and is not changed"
+      mssql:
+        na: "a SQL Server date has no zero or partial value: the type claim is exact and is not changed"
+      oracle:
+        na: "an Oracle date has no zero or partial value: the type claim is exact and is not changed"
+      mongo:
+        na: "a MongoDB date has no zero or partial value: the type claim is exact and is not changed"
+
   - name: mysql-cdc-int-bool-override-any-nonzero-true
     class: "a MySQL integer column (SMALLINT, INT, BIGINT, BIGINT UNSIGNED) declared `bool` in `columns:` is delivered by a stream as true for every value but 0, where the batch export refuses any value outside 0 and 1: 2, 300 or 18446744073709551615 become true with exit 0"
     history: "2026-11-18 - issue #995 remainder: the batch path (build_bool_strict) already refused; RED on main in the MySQL CDC cell (a SMALLINT or TINYINT holding 2 or 300 under `columns: {i: bool}` delivered, exit 0); fixed by MysqlCellFix::FlagInt chosen by mysql_flag_fix"
