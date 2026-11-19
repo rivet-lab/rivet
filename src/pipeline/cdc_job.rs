@@ -1449,7 +1449,8 @@ mod tests {
             .unwrap();
         let pending =
             super::initial_snapshot_pending(&config, &export, &state, dir.path(), None).unwrap();
-        assert!(pending.is_empty(), "{pending:?}");
+        let legs: Vec<&str> = pending.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(legs, Vec::<&str>::new());
     }
 
     #[test]
@@ -1460,7 +1461,8 @@ mod tests {
         std::fs::write(marker.join("_SUCCESS"), "{}").unwrap();
         let pending =
             super::initial_snapshot_pending(&config, &export, &state, dir.path(), None).unwrap();
-        assert!(pending.is_empty(), "{pending:?}");
+        let legs: Vec<&str> = pending.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(legs, Vec::<&str>::new());
     }
 
     #[test]
