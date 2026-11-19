@@ -88,12 +88,54 @@ def needs_problems(variants: Iterable[str]) -> list[str]:
     ] + [f"NEED_HALF places Need::{v} in {h!r}, not a half" for v, h in NEED_HALF.items() if h not in HALVES]
 
 
+def parse_shard_spec(spec: str) -> tuple[int, int, int]:
+    """`i/n` or `i/n:k` as (i, n, k): n live slices, k stage slices (default 1), 0 <= i <= n + k - 1; anything else raises ValueError."""
+    m = re.fullmatch(r"(\d+)/(\d+)(?::(\d+))?", spec)
+    i, n, k = (int(m[1]), int(m[2]), int(m[3] or 1)) if m else (-1, 0, 0)
+    if not m or n < 1 or k < 1 or not 0 <= i <= n + k - 1:
+        raise ValueError(f"--live-shard wants i/n or i/n:k with n, k >= 1 and 0 <= i <= n + k - 1 (1..n = a slice of the live modules, 0 and n+1..n+k-1 = a slice of the other hosted stages), got {spec!r}")
+    return i, n, k
+
+
 def parse_live_shard(spec: str) -> tuple[int, int]:
-    """`i/n` as (i, n) with 0 <= i <= n and n >= 1; anything else raises ValueError."""
-    m = re.fullmatch(r"(\d+)/(\d+)", spec)
-    if not m or not (0 <= int(m[1]) <= int(m[2])) or int(m[2]) < 1:
-        raise ValueError(f"--live-shard wants i/n with 0 <= i <= n and n >= 1 (0 = the hosted stages but the live modules, 1..n = a slice of them), got {spec!r}")
-    return int(m[1]), int(m[2])
+    """`i/n[:k]` as (i, n); anything else raises ValueError."""
+    i, n, _ = parse_shard_spec(spec)
+    return i, n
+
+
+def stage_slice_index(i: int, n: int) -> int | None:
+    """Which stage slice slice `i` of `n` live slices is (0 for slice 0, `i - n` past the live ones), or None when `i` is a live slice."""
+    return 0 if i == 0 else None if i <= n else i - n
+
+
+#: Minutes each hosted stage took on the hosted run 44261857361 (sha bd36fb3d, 4 cores); only the balance of the stage slices reads them, so a stale number costs minutes and never a verdict.
+STAGE_MINUTES: dict[str, float] = {
+    "no_secret_in_output": 20.8,
+    "release build path": 9.8,
+    "no silent null": 14.0,
+    "no silent null cdc": 6.0,
+    "no silent null grants": 4.0,
+    "no silent null load": 3.8,
+    "cdc differential": 3.5,
+    "state migrations": 3.4,
+    "byte-identical parts": 2.4,
+    "clickhouse load": 1.9,
+    "cdc e2e": 2.2,
+    "batch resume": 1.4,
+    "network faults": 1.0,
+}
+#: What a stage costs that `STAGE_MINUTES` does not name.
+DEFAULT_STAGE_MINUTES = 0.5
+
+
+def slice_stages(names: Sequence[str], k: int, weights: Mapping[str, float] = STAGE_MINUTES) -> list[list[str]]:
+    """The hosted stages `names` dealt into `k` stage slices, heaviest first into the lightest, each slice in the order of `names`; deterministic, each stage in exactly one slice."""
+    load, out = [0.0] * k, [[] for _ in range(k)]
+    for name in sorted(names, key=lambda n: (-weights.get(n, DEFAULT_STAGE_MINUTES), names.index(n))):
+        j = load.index(min(load))
+        out[j].append(name)
+        load[j] += weights.get(name, DEFAULT_STAGE_MINUTES)
+    return [[n for n in names if n in set(sl)] for sl in out]
 
 
 def slice_modules(weights: Mapping[str, float], n: int, anchored: Collection[str] | None = None) -> list[list[str]]:
