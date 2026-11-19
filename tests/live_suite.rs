@@ -54,6 +54,8 @@ mod audit_target_typo;
 mod batch_memory_policy;
 #[path = "live/check_override_wire.rs"]
 mod check_override_wire;
+#[path = "live/check_override_wire_cdc.rs"]
+mod check_override_wire_cdc;
 #[path = "live/chunking_stand.rs"]
 mod chunking_stand;
 #[path = "live/gate_tls_failures.rs"]

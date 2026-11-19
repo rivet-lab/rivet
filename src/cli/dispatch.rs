@@ -69,6 +69,7 @@ fn doctor_run_plan(
         None,
         None,
         crate::pipeline::planning::PlanFlags::default(),
+        true,
     )?
     .into_iter()
     .map(|(name, verdict)| (name, verdict.map(|_| ())))
@@ -544,6 +545,7 @@ fn batch_plans(
         export_name,
         params,
         check_plan_flags(strict),
+        true,
     )
 }
 

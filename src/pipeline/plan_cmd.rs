@@ -286,6 +286,7 @@ fn refuse_what_run_refuses(
         export_name,
         params,
         super::planning::PlanFlags::default(),
+        false,
     )? {
         verdict?;
     }

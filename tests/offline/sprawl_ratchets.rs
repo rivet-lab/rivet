@@ -66,7 +66,6 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ("src/load/plan.rs::build_plans_keyed#1", 178),
     ("src/pipeline/apply_cmd.rs::run_apply_command#1", 255),
     ("src/pipeline/cdc/sink.rs::run_to_files#1", 225),
-    ("src/pipeline/cdc_job.rs::initial_snapshot_pending#1", 184),
     (
         "src/pipeline/chunked/detect.rs::detect_and_generate_chunks#1",
         159,

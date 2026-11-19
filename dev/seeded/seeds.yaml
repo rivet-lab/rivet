@@ -6543,3 +6543,29 @@ seeds:
         cells:
           - "lib:plan_open_columns_refuses_a_column_the_format_cannot_write"
           - "lib:admit_columns_refuses_unmapped_and_unwritable_columns_and_admits_the_rest"
+
+  - name: check-skips-cdc-baseline-leg
+    class: "check and doctor pass a `mode: cdc` export whose first baseline run `rivet run` refuses by code: the baseline is written through a synthesized batch leg that only run's batch admission sees (a column the format cannot write, a column no Arrow type carries, a declared type the reader cannot build)"
+    history: "issue #918; RED on main 2026-11-19 by the no_silent_null_cdc matrix CHECK_RUN_SPLIT verdict (every engine) and by the live cells of tests/live/check_override_wire_cdc.rs"
+    scope: source
+    switch: check-skips-cdc-baseline-leg
+    engines:
+      postgres:
+        cells:
+          - a_pending_baseline_wire_mismatch_is_refused_by_check_postgres
+          - a_pending_baseline_csv_decimal256_is_refused_by_check_postgres
+      mysql:
+        cells:
+          - a_pending_baseline_wire_mismatch_is_refused_by_check_mysql
+          - a_pending_baseline_csv_decimal256_is_refused_by_check_mysql
+      mssql:
+        cells:
+          - a_pending_baseline_wire_mismatch_is_refused_by_check_mssql
+      oracle:
+        cells:
+          - a_pending_baseline_wire_mismatch_is_refused_by_check_oracle
+      mongo:
+        na: "a MongoDB baseline leg reads the fixed {_id, document, meta} shape: no column type reaches the format or the type mapping, so the admission has nothing to refuse (a_pending_baseline_over_columns_the_run_writes_is_accepted_mongo holds that it still accepts)"
+      lib:
+        cells:
+          - "lib:the_legs_check_admits_are_the_pending_baselines_and_nothing_else"
