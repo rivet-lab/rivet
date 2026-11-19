@@ -618,9 +618,13 @@ fn mssql_cdc_datetimeoffset_value_is_preserved() {
     );
 }
 
-/// The first row's `col` (a Timestamp(µs)) as its UTC `NaiveDateTime` string.
+/// The first row's `col` (a Timestamp(µs) or Timestamp(ns)) as its UTC `NaiveDateTime` string.
 fn parquet_one_timestamp(dir: &std::path::Path, col: &str) -> String {
-    use arrow::array::{AsArray, types::TimestampMicrosecondType};
+    use arrow::array::{
+        AsArray,
+        types::{TimestampMicrosecondType, TimestampNanosecondType},
+    };
+    use arrow::datatypes::{DataType, TimeUnit};
     let part = std::fs::read_dir(dir)
         .unwrap()
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -633,12 +637,16 @@ fn parquet_one_timestamp(dir: &std::path::Path, col: &str) -> String {
         .unwrap();
     let batch = r.next().expect("a row").unwrap();
     let idx = batch.schema().index_of(col).expect("column present");
-    batch
-        .column(idx)
-        .as_primitive::<TimestampMicrosecondType>()
-        .value_as_datetime(0)
-        .expect("a non-null instant")
-        .to_string()
+    let column = batch.column(idx);
+    let instant = match column.data_type() {
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => column
+            .as_primitive::<TimestampNanosecondType>()
+            .value_as_datetime(0),
+        _ => column
+            .as_primitive::<TimestampMicrosecondType>()
+            .value_as_datetime(0),
+    };
+    instant.expect("a non-null instant").to_string()
 }
 
 /// Whether the first row's `col` is non-null in the one `.parquet` part.

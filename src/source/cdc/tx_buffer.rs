@@ -333,6 +333,7 @@ mod tests {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         }
     }
 

@@ -229,6 +229,8 @@ pub(crate) struct ChangeEvent {
     pub(crate) before_names: Option<std::sync::Arc<[String]>>,
     /// A deferred refusal of an undecodable old-image cell, raised only where the old image is written.
     pub(crate) before_poison: Option<String>,
+    /// Labels of the ENUM and SET columns whose catalog spelling cannot be trusted, read from the binlog table map (MySQL only).
+    pub(crate) image_labels: Option<std::sync::Arc<[value::WireLabels]>>,
 }
 
 /// Stamps each change with its intra-transaction ordinal ([`ChangeEvent::seq`]).
@@ -343,6 +345,20 @@ impl ChangeEvent {
                 a.len() * std::mem::size_of::<String>() + a.iter().map(String::len).sum::<usize>();
             own / std::sync::Arc::strong_count(a).max(1)
         });
+        let labels = self.image_labels.as_ref().map_or(0, |a| {
+            let own: usize = a
+                .iter()
+                .map(|w| {
+                    std::mem::size_of::<value::WireLabels>()
+                        + w.column.len()
+                        + w.labels.as_ref().map_or(0, |l| {
+                            l.len() * std::mem::size_of::<String>()
+                                + l.iter().map(String::len).sum::<usize>()
+                        })
+                })
+                .sum();
+            own / std::sync::Arc::strong_count(a).max(1)
+        });
         let text = |s: &Option<String>| s.as_ref().map_or(0, String::len);
         std::mem::size_of::<Self>()
             + self.schema.len()
@@ -352,6 +368,7 @@ impl ChangeEvent {
             + text(&self.row_id)
             + names
             + before_names
+            + labels
             + img(&self.before)
             + img(&self.after)
     }
@@ -1541,11 +1558,10 @@ mod mod_decisions {
             assert_eq!(m.delivery, Delivery::Native, "{list:?}");
         }
 
-        let ns = RivetType::Timestamp {
+        let ns = RivetType::Time {
             unit: TimeUnit::Nanosecond,
-            timezone: None,
         };
-        let err = plan_cdc_delivery(col("timestamp", ns), true).unwrap_err();
+        let err = plan_cdc_delivery(col("time", ns), true).unwrap_err();
         assert_eq!(
             err.downcast_ref::<crate::error::CodedError>()
                 .map(|c| c.code()),
@@ -1577,9 +1593,8 @@ mod mod_decisions {
             },
             &RivetType::String,
         ));
-        let ns = RivetType::Timestamp {
+        let ns = RivetType::Time {
             unit: TimeUnit::Nanosecond,
-            timezone: None,
         };
         let err = retype_for_stream(time(), &declared(ns)).unwrap_err();
         assert_eq!(
@@ -1803,6 +1818,7 @@ mod mod_decisions {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         };
         let mut seq = TxnSeq::default();
 
@@ -1844,6 +1860,7 @@ mod mod_decisions {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         };
         let empty = mk(None, None).estimated_bytes();
         assert_eq!(
@@ -2321,6 +2338,7 @@ mod tests {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         };
         let mut stream = Fake(
             [
@@ -2638,6 +2656,7 @@ mod tests {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         }
     }
 
@@ -2731,6 +2750,7 @@ mod tests {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         }
     }
 
@@ -3031,6 +3051,7 @@ mod tests {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         };
         let base = bare.estimated_bytes();
         let names = super::ChangeEvent {
@@ -3056,6 +3077,58 @@ mod tests {
         assert_eq!(ids.estimated_bytes(), base + 6 + 3);
     }
 
+    /// The resident cost counts each wire-label column's own size, its name and its labels, and shares an Arc between its holders.
+    #[test]
+    fn estimated_bytes_counts_image_labels_and_splits_a_shared_arc() {
+        let bare = super::ChangeEvent {
+            op: super::ChangeOp::Insert,
+            schema: "public".into(),
+            table: "t".into(),
+            before: None,
+            after: Some(vec![RivetValue::Int(2)]),
+            position: Position::new(serde_json::json!({ "lsn": "0/ABC" })),
+            committed: true,
+            image_names: None,
+            seq: 0,
+            poison: None,
+            row_id: None,
+            before_names: None,
+            before_poison: None,
+            image_labels: None,
+        };
+        let base = bare.estimated_bytes();
+        let labels: std::sync::Arc<[super::value::WireLabels]> = vec![
+            super::value::WireLabels {
+                column: "mood".into(),
+                labels: Some(vec!["a".into(), "bcd".into()]),
+            },
+            super::value::WireLabels {
+                column: "xyz".into(),
+                labels: None,
+            },
+        ]
+        .into();
+        let own = 2 * std::mem::size_of::<super::value::WireLabels>()
+            + "mood".len()
+            + "xyz".len()
+            + 2 * std::mem::size_of::<String>()
+            + "a".len()
+            + "bcd".len();
+        let ev = super::ChangeEvent {
+            image_labels: Some(labels.clone()),
+            ..bare
+        };
+        drop(labels);
+        assert_eq!(ev.estimated_bytes(), base + own);
+        let sibling = ev.clone();
+        assert_eq!(
+            ev.estimated_bytes(),
+            base + own / 2,
+            "an Arc held twice charges each holder half"
+        );
+        drop(sibling);
+    }
+
     /// A key-only pre-image prints as carried, named by `before_columns`; a key move stays one update.
     #[test]
     fn an_ndjson_line_names_a_key_only_pre_image_and_does_not_split() {
@@ -3073,6 +3146,7 @@ mod tests {
             row_id: None,
             before_names: Some(vec!["id".to_string()].into()),
             before_poison: None,
+            image_labels: None,
         };
         assert_eq!(
             super::ndjson_line(&ev),
@@ -3085,6 +3159,7 @@ mod tests {
         let full = super::ChangeEvent {
             before_names: None,
             before_poison: None,
+            image_labels: None,
             before: Some(vec![RivetValue::Bytes(b"a".to_vec()), RivetValue::Int(1)]),
             ..ev
         };
@@ -3147,6 +3222,7 @@ mod tests {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         };
         let payload = ev.payload_bytes();
         assert_eq!(

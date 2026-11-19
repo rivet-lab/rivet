@@ -6,8 +6,8 @@ use arrow::array::{
     ArrayRef, BinaryBuilder, BooleanBuilder, Date32Builder, Decimal128Builder,
     FixedSizeBinaryBuilder, Float32Builder, Float64Builder, Int8Builder, Int16Builder,
     Int32Builder, Int64Builder, LargeBinaryBuilder, LargeStringBuilder, StringBuilder,
-    Time64MicrosecondBuilder, TimestampMicrosecondBuilder, UInt8Builder, UInt16Builder,
-    UInt32Builder, UInt64Builder,
+    Time64MicrosecondBuilder, TimestampMicrosecondBuilder, TimestampNanosecondBuilder,
+    UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
 };
 use arrow::datatypes::{DataType, TimeUnit};
 use chrono::{NaiveDate, NaiveDateTime};
@@ -158,6 +158,7 @@ pub(crate) fn is_buildable(dt: &DataType) -> bool {
             | DataType::LargeBinary
             | DataType::FixedSizeBinary(_)
             | DataType::Timestamp(TimeUnit::Microsecond, _)
+            | DataType::Timestamp(TimeUnit::Nanosecond, _)
     )
 }
 
@@ -336,6 +337,16 @@ fn timestamp_micros_value(v: &RivetValue) -> Result<i64, String> {
     }
 }
 
+/// The UTC instant a timestamp cell stores, as nanoseconds since the epoch; a value outside 1677-09-21..2262-04-11 is refused.
+fn timestamp_nanos_value(v: &RivetValue) -> Result<i64, String> {
+    match v {
+        RivetValue::DateTime(d) => d.and_utc().timestamp_nanos_opt().ok_or_else(|| {
+            "is outside the nanosecond timestamp range (1677-09-21..2262-04-11); declare the column `timestamp` (microseconds, full range) in `columns:`".to_string()
+        }),
+        _ => Err(NO_READING.into()),
+    }
+}
+
 /// The Time64 microseconds a time of day stores; a duration outside one day is refused.
 fn time_value(v: &RivetValue) -> Result<i64, String> {
     match v {
@@ -412,6 +423,16 @@ pub(crate) fn build_column(
             let arr = typed_col!(
                 TimestampMicrosecondBuilder::with_capacity(n),
                 timestamp_micros_value
+            );
+            match tz {
+                Some(tz) => Arc::new(arr.with_timezone(tz.clone())),
+                None => Arc::new(arr),
+            }
+        }
+        DataType::Timestamp(TimeUnit::Nanosecond, tz) => {
+            let arr = typed_col!(
+                TimestampNanosecondBuilder::with_capacity(n),
+                timestamp_nanos_value
             );
             match tz {
                 Some(tz) => Arc::new(arr.with_timezone(tz.clone())),
@@ -918,6 +939,65 @@ impl MysqlCellFix {
             && !matches!(input, RivetValue::Null)
     }
 
+    /// ENUM and SET cells against `labels`, or the refusal for a declaration that has none; every other cell passes through.
+    fn apply_labels(
+        &self,
+        labels: std::result::Result<&[String], &str>,
+        v: &RivetValue,
+    ) -> Result<RivetValue, FixRefusal> {
+        use RivetValue as V;
+        Ok(match (self, v) {
+            (MysqlCellFix::EnumLabels(_), V::Int(i)) => {
+                enum_label(labels.map_err(label_refusal)?, *i)?
+            }
+            (MysqlCellFix::EnumLabels(_), V::UInt(u)) => enum_label(
+                labels.map_err(label_refusal)?,
+                i64::try_from(*u).unwrap_or(i64::MAX),
+            )?,
+            (MysqlCellFix::SetLabels(_), V::Bytes(b)) if b.len() <= 8 => {
+                let mut word = [0u8; 8];
+                word.iter_mut().zip(b).for_each(|(d, s)| *d = *s);
+                set_labels(labels.map_err(label_refusal)?, u64::from_le_bytes(word))
+            }
+            (MysqlCellFix::SetLabels(_), V::Int(i)) => {
+                set_labels(labels.map_err(label_refusal)?, *i as u64)
+            }
+            (MysqlCellFix::SetLabels(_), V::UInt(u)) => {
+                set_labels(labels.map_err(label_refusal)?, *u)
+            }
+            (_, other) => other.clone(),
+        })
+    }
+
+    /// [`Self::apply`] with the labels `wire` carries from the event's binlog table map: listed labels replace the catalog's, an unlisted column refuses a label the catalog spelled with `?`.
+    pub(crate) fn apply_with(
+        &self,
+        v: &RivetValue,
+        wire: Option<&WireLabels>,
+        table: &str,
+    ) -> Result<RivetValue, FixRefusal> {
+        let (Some(wire), MysqlCellFix::EnumLabels(_) | MysqlCellFix::SetLabels(_)) = (wire, self)
+        else {
+            return self.apply(v);
+        };
+        if seeded!("mysql-enum-4byte-label-wire-unread", true, false) {
+            return self.apply(v);
+        }
+        let Some(listed) = &wire.labels else {
+            let out = self.apply(v)?;
+            return match &out {
+                RivetValue::Bytes(b)
+                    if b.contains(&b'?')
+                        && seeded!("mysql-enum-unlisted-label-delivered", false, true) =>
+                {
+                    Err(unlisted_refusal(table, &wire.column))
+                }
+                _ => Ok(out),
+            };
+        };
+        self.apply_labels(Ok(listed), v)
+    }
+
     pub(crate) fn apply(&self, v: &RivetValue) -> Result<RivetValue, FixRefusal> {
         use RivetValue as V;
         Ok(match (self, v) {
@@ -948,20 +1028,9 @@ impl MysqlCellFix {
                 let i = *u as i64;
                 V::Int(if i >= (1 << 23) { i - (1 << 24) } else { i })
             }
-            (MysqlCellFix::EnumLabels(labels), V::Int(i)) => enum_label(readable(labels)?, *i)?,
-            (MysqlCellFix::EnumLabels(labels), V::UInt(u)) => {
-                enum_label(readable(labels)?, i64::try_from(*u).unwrap_or(i64::MAX))?
+            (MysqlCellFix::EnumLabels(labels) | MysqlCellFix::SetLabels(labels), _) => {
+                self.apply_labels(labels.as_deref().map_err(String::as_str), v)?
             }
-            (MysqlCellFix::SetLabels(labels), V::Bytes(b)) if b.len() <= 8 => {
-                let mut word = [0u8; 8];
-                word.iter_mut().zip(b).for_each(|(d, s)| *d = *s);
-                let mask = u64::from_le_bytes(word);
-                set_labels(readable(labels)?, mask)
-            }
-            (MysqlCellFix::SetLabels(labels), V::Int(i)) => {
-                set_labels(readable(labels)?, *i as u64)
-            }
-            (MysqlCellFix::SetLabels(labels), V::UInt(u)) => set_labels(readable(labels)?, *u),
             (MysqlCellFix::TimeOfDay, V::TimeMicros(us)) if !crate::types::is_time_of_day(*us) => {
                 return Err(FixRefusal {
                     reason: seeded!(
@@ -1028,9 +1097,18 @@ fn label_refusal(why: impl Into<String>) -> FixRefusal {
     }
 }
 
-/// The labels, or the refusal for a declaration that has none.
-fn readable(labels: &Labels) -> Result<&[String], FixRefusal> {
-    labels.as_deref().map_err(|why| label_refusal(why.as_str()))
+/// The labels a binlog TABLE_MAP carries for one ENUM or SET column whose catalog rendering cannot be trusted; `None` when the table map carries no labels.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WireLabels {
+    pub(crate) column: String,
+    pub(crate) labels: Option<Vec<String>>,
+}
+
+/// The refusal of a label the catalog spells with `?` when the table map carries no labels to read it from.
+fn unlisted_refusal(table: &str, column: &str) -> FixRefusal {
+    label_refusal(format!(
+        "cannot be read: the catalog prints a character outside the Basic Multilingual Plane as '?', so a label of `{table}`.`{column}` holding '?' cannot be told from the stored label, and this binlog's table map carries no ENUM or SET labels to read it from. The table map carries them only under `binlog_row_metadata = FULL` (`SET PERSIST binlog_row_metadata = FULL;`, MySQL 8.0.1 or later)"
+    ))
 }
 
 fn set_labels(labels: &[String], mask: u64) -> RivetValue {
@@ -1301,6 +1379,153 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn wire(column: &str, labels: Option<&[&str]>) -> WireLabels {
+        WireLabels {
+            column: column.into(),
+            labels: labels.map(|l| l.iter().map(|s| s.to_string()).collect()),
+        }
+    }
+
+    fn fix_of(native: &str) -> MysqlCellFix {
+        mysql_cell_fix(crate::source::cdc::CdcEngine::Mysql, native).expect(native)
+    }
+
+    fn text(v: RivetValue) -> String {
+        match v {
+            RivetValue::Bytes(b) => String::from_utf8(b).unwrap(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn listed_wire_labels_replace_the_catalog_labels_of_an_enum_and_a_set() {
+        let grin = "\u{1F600}";
+        let e = fix_of("enum('a','?','b')");
+        let w = wire("status", Some(&["a", grin, "b"]));
+        for (idx, want) in [(0, ""), (1, "a"), (2, grin), (3, "b")] {
+            let got = e.apply_with(&RivetValue::Int(idx), Some(&w), "orders");
+            assert_eq!(text(got.unwrap()), want, "enum index {idx}");
+        }
+        assert_eq!(
+            text(
+                e.apply_with(&RivetValue::UInt(2), Some(&w), "orders")
+                    .unwrap()
+            ),
+            grin
+        );
+        let s = fix_of("set('x','?','z')");
+        let w = wire("tags", Some(&["x", grin, "z"]));
+        for (mask, want) in [(0, ""), (2, grin), (3, "x,\u{1F600}"), (7, "x,\u{1F600},z")] {
+            let got = s.apply_with(&RivetValue::Bytes(vec![mask]), Some(&w), "orders");
+            assert_eq!(text(got.unwrap()), want, "set mask {mask}");
+            let got = s.apply_with(&RivetValue::UInt(u64::from(mask)), Some(&w), "orders");
+            assert_eq!(text(got.unwrap()), want, "set uint mask {mask}");
+        }
+    }
+
+    #[test]
+    fn listed_wire_labels_are_the_labels_even_when_the_catalog_declares_another_count() {
+        let e = fix_of("enum('a','?')");
+        let w = wire("status", Some(&["a", "\u{1F600}", "c"]));
+        let got = e.apply_with(&RivetValue::Int(3), Some(&w), "orders");
+        assert_eq!(text(got.unwrap()), "c");
+        let past = e.apply_with(&RivetValue::Int(4), Some(&w), "orders");
+        assert!(
+            past.unwrap_err()
+                .reason
+                .contains("is past the column's 3 ENUM labels")
+        );
+    }
+
+    #[test]
+    fn an_unlisted_column_refuses_a_label_the_catalog_spelled_with_a_question_mark() {
+        let e = fix_of("enum('a','?','b')");
+        let w = wire("status", None);
+        for idx in [0, 1, 3] {
+            let got = e.apply_with(&RivetValue::Int(idx), Some(&w), "orders");
+            assert_eq!(got, e.apply(&RivetValue::Int(idx)), "enum index {idx}");
+        }
+        let err = e
+            .apply_with(&RivetValue::Int(2), Some(&w), "orders")
+            .unwrap_err();
+        assert_eq!(
+            err.code.map(|c| c.id),
+            Some("RIVET_SOURCE_CDC_CELL_UNSUPPORTED")
+        );
+        let want = "cannot be read: the catalog prints a character outside the Basic Multilingual Plane as '?', so a label of `orders`.`status` holding '?' cannot be told from the stored label, and this binlog's table map carries no ENUM or SET labels to read it from. The table map carries them only under `binlog_row_metadata = FULL` (`SET PERSIST binlog_row_metadata = FULL;`, MySQL 8.0.1 or later). A `columns:` override does not carry the label either: leave the column out of the capture, then: ";
+        assert!(err.reason.starts_with(want), "{}", err.reason);
+        let s = fix_of("set('a','?','c')");
+        let w = wire("tags", None);
+        for mask in [0u64, 1, 4, 5] {
+            let got = s.apply_with(&RivetValue::UInt(mask), Some(&w), "orders");
+            assert_eq!(got, s.apply(&RivetValue::UInt(mask)), "set mask {mask}");
+        }
+        for mask in [2u64, 3, 7] {
+            let err = s
+                .apply_with(&RivetValue::UInt(mask), Some(&w), "orders")
+                .unwrap_err();
+            assert!(err.reason.contains("`orders`.`tags`"), "mask {mask}");
+        }
+    }
+
+    #[test]
+    fn the_unlisted_refusal_is_the_coded_cell_refusal_naming_table_and_column() {
+        let e = fix_of("enum('?')");
+        let err = e
+            .apply_with(&RivetValue::Int(1), Some(&wire("status", None)), "orders")
+            .unwrap_err();
+        let msg = format!(
+            "{:#}",
+            CellRefusal {
+                row: 0,
+                value: RivetValue::Int(1),
+                reason: err.reason,
+                code: err.code,
+            }
+            .into_error("status", &DataType::Utf8, false)
+        );
+        assert!(
+            msg.contains("column 'status'")
+                && msg.contains("`orders`.`status`")
+                && msg.contains("binlog_row_metadata = FULL"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn a_column_without_wire_labels_reads_as_main_did() {
+        let cases = [
+            ("enum('a','?','b')", RivetValue::Int(2)),
+            ("enum('a','b')", RivetValue::Int(9)),
+            ("enum(x'12f09f9a80','a')", RivetValue::Int(1)),
+            ("set('a','?','c')", RivetValue::UInt(3)),
+            ("set('a','b')", RivetValue::Bytes(vec![1])),
+            ("timestamp", RivetValue::Bytes(b"1".to_vec())),
+            ("bit(1)", RivetValue::Bytes(vec![1])),
+        ];
+        for (native, v) in cases {
+            let f = fix_of(native);
+            assert_eq!(f.apply_with(&v, None, "orders"), f.apply(&v), "{native}");
+        }
+        let w = wire("c", None);
+        for (native, v) in [
+            ("timestamp", RivetValue::Bytes(b"1".to_vec())),
+            ("bit(1)", RivetValue::Bytes(vec![1])),
+        ] {
+            let f = fix_of(native);
+            assert_eq!(
+                f.apply_with(&v, Some(&w), "orders"),
+                f.apply(&v),
+                "{native}"
+            );
+        }
+        let e = fix_of("enum('a','?')");
+        assert_eq!(
+            e.apply_with(&RivetValue::Null, Some(&wire("c", None)), "orders"),
+            Ok(RivetValue::Null)
+        );
     }
 
     #[test]
@@ -1828,6 +2053,8 @@ mod tests {
             DataType::FixedSizeBinary(16),
             DataType::Timestamp(TimeUnit::Microsecond, None),
             DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
         ];
         let list = |t| DataType::List(Arc::new(arrow::datatypes::Field::new("item", t, true)));
         let mut buildable = buildable.to_vec();
@@ -1853,7 +2080,6 @@ mod tests {
         }
         for dt in [
             DataType::Date64,
-            DataType::Timestamp(TimeUnit::Nanosecond, None),
             list(DataType::Timestamp(TimeUnit::Nanosecond, None)),
             list(DataType::FixedSizeBinary(8)),
             list(DataType::Time64(TimeUnit::Nanosecond)),
@@ -1861,6 +2087,26 @@ mod tests {
         ] {
             assert!(!is_buildable(&dt), "is_buildable must reject {dt:?}");
         }
+    }
+
+    /// A nanosecond timestamp cell keeps its 100 ns digit and refuses an instant outside Arrow's nanosecond range.
+    #[test]
+    fn a_nanosecond_timestamp_cell_keeps_its_digit_and_refuses_out_of_range() {
+        use arrow::array::{Array, TimestampNanosecondArray};
+        let at = |s: &str| RivetValue::DateTime(s.parse::<NaiveDateTime>().unwrap());
+        let dt = DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()));
+        let cells = [at("2026-01-02T03:04:05.1234567"), at("1677-09-21T00:12:44")];
+        let arr = build("c", &dt, &[Some(&cells[0]), None]).unwrap();
+        let ns = arr
+            .as_any()
+            .downcast_ref::<TimestampNanosecondArray>()
+            .unwrap();
+        assert_eq!(ns.value(0) % 1_000_000_000, 123_456_700);
+        assert!(ns.is_null(1));
+        let early = at("1000-01-01T00:00:00");
+        let err = build("c", &dt, &[Some(&early)]).unwrap_err();
+        assert!(err.to_string().contains("1677-09-21..2262-04-11"), "{err}");
+        assert!(build("c", &dt, &[Some(&cells[1])]).is_ok());
     }
 
     /// Date, time, timestamp, uuid and bytea list elements build to the stored values, with NULL elements, empty and NULL lists kept.

@@ -9,6 +9,7 @@ mod proxy;
 mod statement;
 #[cfg(test)]
 mod statement_truth;
+mod table_map_labels;
 
 use std::sync::Arc;
 

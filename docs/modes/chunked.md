@@ -324,8 +324,8 @@ and compares it by its own btree order on both sides of the cursor), a MySQL
 `ENUM`/`SET` (it sorts by member position, not by the label the cursor binds), a
 column delivered as text (the one exception is an Oracle `NUMBER`, delivered as
 exact `decimal_plain` text), and a SQL Server `datetime2`/`datetimeoffset` finer
-than a microsecond unless the `timestamp_ns` / `timestamp_tz_ns` override
-delivers it in nanoseconds. On Oracle the catalog decides, not the delivered
+than a microsecond declared `timestamp` / `timestamp_tz` (the default delivers it
+in nanoseconds, and a nanosecond key is admitted). On Oracle the catalog decides, not the delivered
 type: a bare `NUMBER` and an integer `NUMBER(p)` key a seek; a `NUMBER` with a
 scale (`NUMBER(12,2)`, `NUMBER(5,-2)`, `NUMBER(*,2)`, `NUMBER(38,39)`), a `FLOAT`
 and a `TIMESTAMP(7)` to `TIMESTAMP(9)` are refused as a single key whatever

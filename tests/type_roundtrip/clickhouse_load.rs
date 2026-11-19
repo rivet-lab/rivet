@@ -305,11 +305,8 @@ fn clickhouse_validates_mssql_type_matrix_parquet() {
         ("c_real", "Nullable(Float32)"),
         ("c_float", "Nullable(Float64)"),
         ("c_date", "Nullable(Date32)"),
-        ("created_at", "Nullable(DateTime64(6))"),
-        // datetimeoffset → Timestamp(µs, UTC): ClickHouse carries the UTC zone
-        // into the type (vs the naive datetime2 above), so the tz-awareness is
-        // visible in the autoload schema, not just the value.
-        ("created_at_tz", "Nullable(DateTime64(6, 'UTC'))"),
+        ("created_at", "Nullable(DateTime64(9))"),
+        ("created_at_tz", "Nullable(DateTime64(9, 'UTC'))"),
         ("label", "Nullable(String)"),
         ("c_varchar", "Nullable(String)"),
         ("raw_bytes", "Nullable(String)"),

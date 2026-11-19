@@ -37,7 +37,6 @@ src/source/mysql/cdc.rs::binlog_value_to_rivet: Err(_) => None	2026-11-10 goes w
 src/source/mysql/cdc.rs::check_configured_tables_are_routable: Some(_) => None	2026-11-10 goes when the I2 compatibility table decides the pair before the read (ADR 0040)
 src/source/mysql/cdc.rs::client_collation: _ => None	2026-11-10 goes when the I2 compatibility table decides the pair before the read (ADR 0040)
 src/source/mysql/cdc.rs::drop_database_target: _ => None	2026-11-10 goes when the I2 compatibility table decides the pair before the read (ADR 0040)
-src/source/mysql/cdc.rs::fill: _ => None	2026-11-10 goes when the I2 compatibility table decides the pair before the read (ADR 0040)
 src/source/mysql/cdc.rs::mode_of: _ => None	2026-11-10 goes when the I2 compatibility table decides the pair before the read (ADR 0040)
 src/source/mysql/cdc.rs::server_error_code: _ => None	2026-11-10 goes when the I2 compatibility table decides the pair before the read (ADR 0040)
 src/source/mysql/cdc.rs::warning: _ => None	2026-11-10 goes when the I2 compatibility table decides the pair before the read (ADR 0040)

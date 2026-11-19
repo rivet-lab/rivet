@@ -93,7 +93,7 @@ and database are percent-decoded), driven by the async `tiberius` client. Suppor
   `int`/`bigint`/`smallint`/`tinyint`, `bit`, `decimal`/`numeric`,
   `real`/`float`, `money`, `date`, `time`, `datetime2`, `nvarchar`/`varchar`/
   `char`, `varbinary`, `uniqueidentifier` (→ native Parquet `LogicalType::Uuid`),
-  and `datetimeoffset` (→ `Timestamp(µs, UTC)`: the offset is applied and the UTC
+  and `datetimeoffset` (→ `Timestamp(µs, UTC)`, `Timestamp(ns, UTC)` at scale 7: the offset is applied and the UTC
   instant re-read correctly by the DuckDB/ClickHouse oracles — positive and
   negative offsets and NULL all covered in the type matrix).
 - **TLS**: required on the login handshake (SQL Server always encrypts it).
