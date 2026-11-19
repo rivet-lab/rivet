@@ -344,23 +344,34 @@ impl MssqlSource {
         }
     }
 
-    /// Declared `(precision, scale)` per decimal/numeric column, read from `sys.columns`, for a simple single-table `SELECT … FROM [schema.]table`.
-    fn mssql_decimal_catalog_hints_opt(
-        &mut self,
-        query: &str,
-    ) -> Option<HashMap<String, (u8, i8)>> {
+    /// The catalog facts of a simple single-table `SELECT … FROM [schema.]table`: declared decimal `(precision, scale)` and the `datetime2` / `datetimeoffset` columns finer than a microsecond.
+    fn mssql_catalog_hints_opt(&mut self, query: &str) -> Option<arrow_convert::CatalogHints> {
         let (schema, table) = parse_mssql_simple_from_table(query)?;
-        match self.fetch_mssql_decimal_catalog_hints(&schema, &table) {
-            Ok(m) => m,
+        let decimals = match self.fetch_mssql_decimal_catalog_hints(&schema, &table) {
+            Ok(m) => m.unwrap_or_default(),
             Err(e) => {
                 log::warn!(
                     "mssql decimal catalog lookup failed for {schema}.{table} — decimal scale \
                      will fall back to first-batch inference (declare it with a `columns:` \
                      override if an all-NULL first batch truncates it): {e}"
                 );
-                None
+                HashMap::new()
             }
-        }
+        };
+        let fine_timestamps = match finer_than_microsecond_columns(self, &schema, &table) {
+            Ok(v) => v.into_iter().map(|(name, _)| name).collect(),
+            Err(e) => {
+                log::warn!(
+                    "mssql timestamp-scale catalog lookup failed for {schema}.{table} — a \
+                     datetime2(7) column is read from its first batch instead: {e}"
+                );
+                std::collections::HashSet::new()
+            }
+        };
+        Some(arrow_convert::CatalogHints {
+            decimals,
+            fine_timestamps,
+        })
     }
 
     /// Probe `sys.columns` for each `decimal`/`numeric` column's declared `(precision, scale)`.
@@ -515,7 +526,7 @@ impl Source for MssqlSource {
             .then(|| std::time::Duration::from_secs(request.tuning.statement_timeout_s));
 
         let hint_query = request.catalog_hint_query.unwrap_or(request.query);
-        let decimal_hints = self.mssql_decimal_catalog_hints_opt(hint_query);
+        let catalog_hints = self.mssql_catalog_hints_opt(hint_query);
 
         if lock_timeout_ms > 0 {
             self.lock_timeout_applied = true;
@@ -570,7 +581,7 @@ impl Source for MssqlSource {
                             &columns,
                             &overrides,
                             &[],
-                            decimal_hints.as_ref(),
+                            catalog_hints.as_ref(),
                         ) {
                             let eff = request
                                 .tuning
@@ -585,7 +596,7 @@ impl Source for MssqlSource {
                             let arrow_bytes = emit_mssql_batch(
                                 &columns,
                                 &overrides,
-                                decimal_hints.as_ref(),
+                                catalog_hints.as_ref(),
                                 &mut schema,
                                 &buf,
                                 sink,
@@ -622,7 +633,7 @@ impl Source for MssqlSource {
                 emit_mssql_batch(
                     &columns,
                     &overrides,
-                    decimal_hints.as_ref(),
+                    catalog_hints.as_ref(),
                     &mut schema,
                     &buf,
                     sink,
@@ -690,7 +701,7 @@ impl Source for MssqlSource {
         query: &str,
         column_overrides: &ColumnOverrides,
     ) -> Result<Vec<TypeMapping>> {
-        let decimal_hints = self.mssql_decimal_catalog_hints_opt(query);
+        let catalog_hints = self.mssql_catalog_hints_opt(query);
         let wrapped = format!("SELECT * FROM ({query}) AS _rivet_q WHERE 1 = 0");
         let overrides = column_overrides.clone();
         let Self { rt, client, .. } = self;
@@ -715,7 +726,7 @@ impl Source for MssqlSource {
                 .map(<[_]>::to_vec)
                 .unwrap_or_default();
             let _ = stream.into_first_result().await;
-            arrow_convert::mssql_type_mappings(&columns, &overrides, decimal_hints.as_ref())
+            arrow_convert::mssql_type_mappings(&columns, &overrides, catalog_hints.as_ref())
         })
     }
 
@@ -1004,7 +1015,7 @@ pub(crate) fn sample_view_server_state(url: &str, tls: Option<&TlsConfig>) -> Op
 fn emit_mssql_batch(
     columns: &[tiberius::Column],
     overrides: &ColumnOverrides,
-    decimal_hints: Option<&HashMap<String, (u8, i8)>>,
+    hints: Option<&arrow_convert::CatalogHints>,
     schema: &mut Option<SchemaRef>,
     rows: &[tiberius::Row],
     sink: &mut dyn BatchSink,
@@ -1014,7 +1025,7 @@ fn emit_mssql_batch(
         Some(s) => s.clone(),
         None => {
             let (built, _decoders) =
-                arrow_convert::mssql_columns_to_schema(columns, overrides, rows, decimal_hints)?;
+                arrow_convert::mssql_columns_to_schema(columns, overrides, rows, hints)?;
             let s: SchemaRef = Arc::new(built);
             sink.on_schema(s.clone())?;
             *schema = Some(s.clone());

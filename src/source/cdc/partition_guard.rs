@@ -463,6 +463,7 @@ mod tests {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         }
     }
 
@@ -578,6 +579,7 @@ mod tests {
                     before: Some(before),
                     before_names: Some(names.into()),
                     before_poison: None,
+                    image_labels: None,
                     after: Some(after.clone()),
                     image_names: Some(vec!["a".into(), "b".into(), "v".into()].into()),
                     ..update(None, "0")

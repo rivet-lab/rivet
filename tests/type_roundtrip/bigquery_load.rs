@@ -512,10 +512,6 @@ fn bigquery_validates_mssql_type_matrix_parquet() {
     };
     cfg.load_parquet(&bq_table, &parquet);
 
-    // 1) Autoload schema. int family widens to INTEGER, bit → BOOLEAN,
-    //    decimal/money → NUMERIC, real/float → FLOAT, datetime2 → TIMESTAMP,
-    //    uniqueidentifier (FixedSizeBinary(16) + LogicalType::Uuid) lands as
-    //    BYTES (same as PG `uuid`; Snowflake autoload makes the same choice).
     let schema = cfg.schema(&bq_table);
     let expected: &[(&str, &str)] = &[
         ("id", "INTEGER"),
@@ -531,10 +527,8 @@ fn bigquery_validates_mssql_type_matrix_parquet() {
         ("c_float", "FLOAT"),
         ("c_date", "DATE"),
         ("c_time", "TIME"),
-        ("created_at", "TIMESTAMP"),
-        // datetimeoffset → Timestamp(µs, UTC) → BigQuery TIMESTAMP (a UTC instant,
-        // same as datetime2 here; BQ has no separate tz-aware type).
-        ("created_at_tz", "TIMESTAMP"),
+        ("created_at", "INTEGER"),
+        ("created_at_tz", "INTEGER"),
         ("label", "STRING"),
         ("c_varchar", "STRING"),
         ("c_char", "STRING"),
@@ -558,8 +552,8 @@ fn bigquery_validates_mssql_type_matrix_parquet() {
     //    as canonical-order bytes, and Unicode nvarchar byte-exact.
     let r1 = cfg.query_rows(&format!(
         "SELECT FORMAT_TIME('%H:%M:%E6S', c_time)                      AS t,
-                FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%E6S', created_at)    AS ts,
-                FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%E6S', created_at_tz) AS ts_tz,
+                FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%E6S', TIMESTAMP_MICROS(DIV(created_at, 1000))) AS ts,
+                FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%E6S', TIMESTAMP_MICROS(DIV(created_at_tz, 1000))) AS ts_tz,
                 TO_HEX(raw_bytes)                                      AS raw_hex,
                 TO_HEX(uid)                                            AS uid_hex,
                 c_nvarchar                                            AS nv

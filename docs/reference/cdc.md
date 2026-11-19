@@ -358,6 +358,13 @@ Notes:
   and writes no part. If the export already had a checkpoint,
   [re-baseline](cdc-failure-modes.md#the-shape-of-every-recovery) the stream after the switch. MySQL before
   8.0.1 has no such variable and is refused for the same reason.
+  Under `FULL` the table map also carries the ENUM and SET labels, which is the
+  only place a label with a character outside the Basic Multilingual Plane (an
+  emoji) survives: MySQL prints it as `?` in `information_schema.columns`,
+  `SHOW COLUMNS` and `SHOW CREATE TABLE`. rivet reads those labels from the
+  table map; a cell whose label can only come from the catalog's `?` stops the
+  run with `RIVET_SOURCE_CDC_CELL_UNSUPPORTED`, naming the table, the column and
+  the `SET PERSIST binlog_row_metadata = FULL;` remedy, and never delivers `?`.
 - `binlog_row_image = FULL` is MySQL's default; the risk is a source that has set
   it to `MINIMAL` to shrink the binlog — that path needs the column-mask MERGE,
   not the simple overwrite (see [Output shape](#output-shape)).
