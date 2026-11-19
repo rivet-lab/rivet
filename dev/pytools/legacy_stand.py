@@ -776,7 +776,7 @@ def seed_mssql(port: int, seed_file: Path) -> None:
     # even though sqlcmd is handed the absolute one.
     rel = seed_file.relative_to(STAND_DIR) if seed_file.is_relative_to(STAND_DIR) else seed_file
     say(f"seeding mssql:{port} from {rel}")
-    _sqlcmd(port, "-i", str(seed_file), timeout=None).check(f"seeding mssql:{port}")
+    _sqlcmd(port, "-b", "-i", str(seed_file), timeout=None).check(f"seeding mssql:{port}")
 
 
 def mongo_eval(container: str, js: str) -> str:
