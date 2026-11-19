@@ -597,6 +597,8 @@ pub(crate) enum CdcEngineOpts {
         slot: String,
         /// The `table:` values the CONFIG asked for.
         configured_tables: Vec<String>,
+        /// The grants the run resolved before its anchor.
+        resolved_grants: Option<std::sync::Arc<std::collections::HashMap<String, ReadableColumns>>>,
     },
     /// SQL Server capture instance (required for `sqlserver://`).
     Mssql {
@@ -816,7 +818,11 @@ impl CdcEngine {
             }
             Self::Postgres => {
                 crate::source::postgres::cdc::PgChangeStream::refuse_unmet_prerequisites(
-                    url, tls, tables, drain,
+                    url,
+                    tls,
+                    tables,
+                    drain,
+                    columns_from_grants,
                 )
             }
             #[cfg(feature = "oracle")]
@@ -853,6 +859,7 @@ impl CdcEngine {
                     PeekBound::Unbounded,
                     DrainMode::Continuous,
                     &[],
+                    None,
                     None,
                     None,
                 )?);
@@ -1004,6 +1011,18 @@ pub(crate) fn spill_dir_for(
     })
 }
 
+/// What a PostgreSQL stream finds already recorded for this run: a checkpoint or not.
+fn pg_prior_run(cfg: &CdcConfig) -> Result<PriorRun> {
+    let checkpoint = match cfg.checkpoint.as_deref() {
+        Some(p) => Position::load(p)?.is_some(),
+        None => false,
+    };
+    Ok(PriorRun {
+        checkpoint,
+        snapshot: false,
+    })
+}
+
 /// Construct the right [`ChangeStream`] adapter for the source URL's scheme.
 pub(crate) fn create_change_stream(
     cfg: &CdcConfig,
@@ -1045,14 +1064,9 @@ pub(crate) fn create_change_stream(
         CdcEngineOpts::Postgres {
             slot,
             configured_tables,
+            resolved_grants,
         } => {
-            let prior = PriorRun {
-                checkpoint: match cfg.checkpoint.as_deref() {
-                    Some(p) => Position::load(p)?.is_some(),
-                    None => false,
-                },
-                snapshot: false,
-            };
+            let prior = pg_prior_run(cfg)?;
             Ok(Box::new(
                 crate::source::postgres::cdc::PgChangeStream::open(
                     url,
@@ -1064,6 +1078,7 @@ pub(crate) fn create_change_stream(
                     configured_tables,
                     spill_dir_for(cfg.checkpoint.as_deref(), &cfg.config_dir).as_deref(),
                     cfg.checkpoint.as_deref(),
+                    resolved_grants.clone(),
                 )
                 .map_err(|e| with_setup_hint(e, PG_CDC_HINT))?,
             ))
@@ -2042,6 +2057,7 @@ mod setup_hint {
             &[],
             None,
             None,
+            None,
         );
         assert_names_refused_port(open.map(drop), super::PG_CDC_HINT);
     }
@@ -2106,6 +2122,7 @@ mod engine_identity {
                 CdcEngineOpts::Postgres {
                     slot: "s".into(),
                     configured_tables: t(&["a"]),
+                    resolved_grants: None,
                 },
                 SourceType::Postgres,
                 "postgresql://h/d",
