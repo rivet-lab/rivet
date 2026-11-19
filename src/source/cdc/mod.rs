@@ -1393,6 +1393,11 @@ fn grants_moved_under_a_failed_read(
     err: anyhow::Error,
 ) -> anyhow::Error {
     if seeded!("column-grants-failed-schema-read-not-reread", true, false)
+        || seeded!(
+            "column-grants-revoke-between-two-reads-uncoded",
+            true,
+            false
+        )
         || crate::error::code_of(&err) == Some(crate::error::codes::SOURCE_CDC_GRANTS_CHANGED)
     {
         return err;

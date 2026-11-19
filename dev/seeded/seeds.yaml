@@ -4638,7 +4638,7 @@ seeds:
         switch: column-grants-revoked-column-uncoded
         cells: [a_sealed_plan_applied_after_a_revoke_is_refused_by_code_with_the_replan_remedy_in_batch_postgres]
       mssql:
-        na: "a server's denial is coded as a grants-changed refusal for MySQL's 1142/1143 only; SQL Server answers a denied column mid-run as RIVET_SOURCE_QUERY_FAILED, an open point of #713 (no mssql cell grades it)"
+        na: "SQL Server's mid-run denial is graded by its own rows (column-grants-failed-schema-read-not-reread, column-grants-mssql-batch-grants-not-reread)"
       oracle:
         na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
