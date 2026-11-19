@@ -381,7 +381,7 @@ fn continuous_shape(engine: crate::config::SourceType) -> &'static str {
     }
 }
 
-/// Read the account's grants once for a `columns_from: grants` MySQL, PostgreSQL, Oracle or MongoDB CDC run.
+/// Read the account's grants once for a `columns_from: grants` MySQL, PostgreSQL, SQL Server, Oracle or MongoDB CDC run.
 pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<Option<RunGrants>> {
     if !config.source.columns_from_grants() {
         return Ok(None);
@@ -412,6 +412,10 @@ pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<O
         config.source.tls.as_ref(),
         &tables,
         &declared,
+        export
+            .cdc
+            .as_ref()
+            .and_then(|c| c.capture_instance.as_deref()),
     )
     .map(Some)
 }
@@ -806,6 +810,45 @@ fn mongo_engine_opts(
     }
 }
 
+/// The engine-specific options of a CDC capture, from the config and the tables it routes.
+fn cdc_engine_opts(
+    config: &Config,
+    export: &ExportConfig,
+    cdc: &crate::config::CdcExportConfig,
+    configured_tables: Vec<String>,
+    grants: Option<RunGrants>,
+) -> CdcEngineOpts {
+    match config.source.source_type {
+        crate::config::SourceType::Mysql => CdcEngineOpts::Mysql {
+            server_id: cdc
+                .server_id
+                .unwrap_or(crate::config::DEFAULT_MYSQL_SERVER_ID),
+            configured_tables,
+            resolved_grants: grants,
+        },
+        crate::config::SourceType::Postgres => CdcEngineOpts::Postgres {
+            slot: cdc
+                .slot
+                .clone()
+                .unwrap_or_else(|| crate::config::DEFAULT_PG_SLOT.to_string()),
+            configured_tables,
+            resolved_grants: grants,
+        },
+        crate::config::SourceType::Mssql => CdcEngineOpts::Mssql {
+            capture_instance: cdc.capture_instance.clone(),
+            configured_tables,
+            resolved_grants: grants,
+        },
+        crate::config::SourceType::Oracle => CdcEngineOpts::Oracle {
+            configured_tables,
+            resolved_grants: grants,
+        },
+        crate::config::SourceType::Mongo => {
+            mongo_engine_opts(config, export, configured_tables, grants)
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_cdc_inner(
     config: &Config,
@@ -918,37 +961,13 @@ fn run_cdc_inner(
                     .map(|raw| crate::source::cdc::resolve_checkpoint(raw, config_dir)),
                 drain: DrainMode::from_until_current(cdc.until_current),
                 tls: config.source.tls.clone(),
-                engine: match config.source.source_type {
-                    crate::config::SourceType::Mysql => CdcEngineOpts::Mysql {
-                        server_id: cdc
-                            .server_id
-                            .unwrap_or(crate::config::DEFAULT_MYSQL_SERVER_ID),
-                        configured_tables: wired.iter().map(|(t, _, _)| t.clone()).collect(),
-                        resolved_grants: grants,
-                    },
-                    crate::config::SourceType::Postgres => CdcEngineOpts::Postgres {
-                        slot: cdc
-                            .slot
-                            .clone()
-                            .unwrap_or_else(|| crate::config::DEFAULT_PG_SLOT.to_string()),
-                        configured_tables: wired.iter().map(|(t, _, _)| t.clone()).collect(),
-                        resolved_grants: grants,
-                    },
-                    crate::config::SourceType::Mssql => CdcEngineOpts::Mssql {
-                        capture_instance: cdc.capture_instance.clone(),
-                        configured_tables: wired.iter().map(|(t, _, _)| t.clone()).collect(),
-                    },
-                    crate::config::SourceType::Oracle => CdcEngineOpts::Oracle {
-                        configured_tables: wired.iter().map(|(t, _, _)| t.clone()).collect(),
-                        resolved_grants: grants,
-                    },
-                    crate::config::SourceType::Mongo => mongo_engine_opts(
-                        config,
-                        export,
-                        wired.iter().map(|(t, _, _)| t.clone()).collect(),
-                        grants,
-                    ),
-                },
+                engine: cdc_engine_opts(
+                    config,
+                    export,
+                    &cdc,
+                    wired.iter().map(|(t, _, _)| t.clone()).collect(),
+                    grants,
+                ),
             },
             outputs,
             format: export.format,

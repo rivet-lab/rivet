@@ -49,6 +49,8 @@ use std::path::{Path, PathBuf};
 // 52 -> 56 (2026-11-06): the first-CDC-run-refused-after-its-anchor cells on PostgreSQL, MySQL, SQL Server and Oracle (a_first_cdc_run_refused_after_its_anchor_releases_it_*): the observed schema of the refused baseline leg stays; the slot, the checkpoint and the captured-tables record are asserted gone.
 // 56 -> 58 (2026-11-12): the two Mongo resume cells that meet the heterogeneous `_id` refusal (roast_resume_must_not_bypass_heterogeneous_id_guard, removing_page_size_runs_after_the_heterogeneous_id_refusal_mongo): the refused fresh run records its shape with its anchor before the guard refuses, and the next run continues it.
 // 58 -> 59 (2026-11-18): a_sampler_seek_that_scans_is_cancelled_by_the_statement_timeout_postgres: the export of the rows past the cancelled seek fails after the ranges before it were written; their parts, file_log rows, observed schema and range checkpoints stay for the re-run.
+// 58 -> 59 (2026-11-19, #713): the SQL Server revoke-between-two-batches cell (a_revoke_between_two_batches_of_a_run_...): the refused run leaves the batch it committed before the revoke, its rows and its checkpoint for the re-run by design.
+// 59 -> 60 (2026-11-19, #918): the pending-baseline cells of check_override_wire_cdc.rs: the run refused by the baseline leg leaves its observed schema and a chunk checkpoint, asserted through one shared helper.
 // ratchet-pin: failed-run-leftover-declarations (review 2027-02-01) count tests/live/ \.a_failed_run_may_leave\(|FAILED_RUN_LEAVES_ENV
 
 /// Entries of `KNOWN_PRODUCT_DEFECTS` (tests/common/refusal.rs).

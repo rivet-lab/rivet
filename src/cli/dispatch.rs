@@ -345,6 +345,7 @@ fn dispatch_cdc(a: CdcArgs) -> Result<()> {
             CdcEngine::Mssql => CdcEngineOpts::Mssql {
                 configured_tables: a.table.clone(),
                 capture_instance: a.capture_instance,
+                resolved_grants: None,
             },
             CdcEngine::Mongo => CdcEngineOpts::Mongo {
                 canonical: false,
@@ -1441,7 +1442,7 @@ mod subcommand_error_tests {
         assert_eq!(one[0].0, "whole");
     }
 
-    /// A whole-config `check` plans the exports a run runs.
+    /// A whole-config `check` plans the exports a run runs and the pending baseline leg of a CDC export, and leaves a backfill recipe out.
     #[test]
     fn check_leaves_a_backfill_recipe_out_of_a_whole_config_and_keeps_it_when_named() {
         let dir = tempfile::tempdir().unwrap();
@@ -1464,7 +1465,7 @@ mod subcommand_error_tests {
             plans.iter().map(|(n, _)| n.clone()).collect()
         };
         let whole = super::batch_plans(path, None, None, false).unwrap();
-        assert_eq!(names(&whole), ["whole"]);
+        assert_eq!(names(&whole), ["whole", "stream__snapshot_t"]);
         assert!(super::report_plan_compatibility(whole, false).is_ok());
         let named = super::batch_plans(path, Some("base"), None, false).unwrap();
         assert_eq!(names(&named), ["base"]);

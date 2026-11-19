@@ -44,7 +44,7 @@ seams:
       - "& export . tables , & export . table )"
       - ". table . iter ( ) . chain ("
     exceptions:
-      - {at: src/pipeline/cdc_job.rs::initial_snapshot_pending, dated: 2026-10-31, reason: "copy of the table and tables fold plus a multi flag, not reachable", closes: "cdc_captured_tables returns the multi flag after the gate"}
+      - {at: src/pipeline/cdc_job.rs::cdc_tables, dated: 2026-10-31, reason: "copy of the table and tables fold plus a multi flag, not reachable", closes: "cdc_captured_tables returns the multi flag after the gate"}
       - {at: src/pipeline/cdc_job.rs::resolve_grants, dated: 2026-10-31, reason: "copy of the table and tables fold, not reachable", closes: "call cdc_captured_tables after the gate"}
       - {at: src/pipeline/cdc_job.rs::run_cdc_inner, dated: 2026-10-31, reason: "copy of the table and tables fold plus a multi flag, not reachable", closes: "cdc_captured_tables returns the multi flag after the gate"}
       - {at: src/preflight/cdc_health.rs::oracle_checks, dated: 2026-10-31, reason: "copy of the table and tables fold, not reachable", closes: "call cdc_captured_tables after the gate"}
