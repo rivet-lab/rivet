@@ -100,12 +100,11 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
         "src/pipeline/validate_manifest.rs::verify_unredacted#1",
         222,
     ),
-    ("src/plan/build.rs::build_plan_on#1", 226),
+    ("src/plan/build.rs::build_plan_on#1", 185),
     (
         "src/plan/build.rs::chunked_strategy_from_introspection#1",
-        196,
+        161,
     ),
-    ("src/plan/build.rs::resolve_chunked_strategy#1", 175),
     // 2026-11-17: 257 -> 238, the run-plan and named-check emitters left doctor (see #1041).
     ("src/preflight/doctor.rs::doctor#1", 238),
     ("src/preflight/mod.rs::check#1", 226),

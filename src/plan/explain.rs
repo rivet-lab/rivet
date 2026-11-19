@@ -1,41 +1,14 @@
-//! Strategy explanation — the *why* behind a plan's mode, geometry, and
-//! parallelism.
-//!
-//! `rivet plan` prints the computed numbers (mode, chunk count, row estimate,
-//! verdict). This module turns those numbers into a short, honest narrative: why
-//! *this* mode was chosen, why *this* chunk geometry, why *this* parallelism, and
-//! what the risk profile is (resumable? memory bound?).
-//!
-//! It is a **pure** function over data already available in the lib layer — the
-//! planner's resolved [`ExtractionStrategy`], the preflight [`ExportDiagnostic`]
-//! plus the [`ExportConfig`] — and the shared
-//! memory model in [`crate::tuning::memory`]. It deliberately does **not** touch
-//! `crate::init` (bin-only) even though `init::TableInfo::mode_rationale` covers
-//! the same ground for `rivet init`: the plan layer is library code and cannot
-//! reference the binary's modules.
-//!
-//! All numbers are data-driven: a missing `row_estimate` or `avg_row_bytes`
-//! degrades to an explicit "unavailable" note rather than a fabricated figure.
+//! Strategy explanation — the *why* behind a plan's mode, geometry, and parallelism.
 
 use crate::config::{ExportConfig, ExportMode};
 use crate::plan::ExtractionStrategy;
 use crate::preflight::ExportDiagnostic;
 use crate::tuning::memory::{DEFAULT_MEM_BUDGET_MB, estimate_peak_rss_mb};
 
-/// Tables at or below this row count are a one-shot full copy, not a workload
-/// worth a "DEGRADED" warning. Mirrors `init::TableInfo::suggest_mode`, which
-/// recommends plain `mode: full` (no index/cursor) up to the same threshold —
-/// so the scaffold init writes must not then be scolded by `check`.
+/// Tables at or below this row count are a one-shot full copy, not a workload worth a "DEGRADED" warning.
 pub(crate) const SMALL_TABLE_ROW_THRESHOLD: i64 = 100_000;
 
-/// Build a concise (1–3 sentence) narrative explaining why this export's
-/// strategy — mode, chunk geometry, parallelism — was chosen, plus its risk
-/// profile (resumable? memory bound?).
-///
-/// The mode, column and sizes come from the planner's resolved `strategy` —
-/// never re-derived from config — so the narrative names what will actually run
-/// (an auto-resolved PK, a memory-derived chunk_size, a small-table downgrade).
-/// Row and index facts come from the preflight [`ExportDiagnostic`].
+/// Build a concise (1–3 sentence) narrative explaining why this export's strategy.
 pub fn explain_strategy(
     diag: &ExportDiagnostic,
     strategy: &ExtractionStrategy,
@@ -53,8 +26,7 @@ pub fn explain_strategy(
     sentences.join(" ")
 }
 
-/// Why this mode — grounds the choice in the row estimate vs. the chunked
-/// threshold and the presence (or absence) of an indexed chunk/cursor column.
+/// Why this mode — grounds the choice in the row estimate vs.
 fn explain_mode(
     diag: &ExportDiagnostic,
     strategy: &ExtractionStrategy,
@@ -112,15 +84,12 @@ fn explain_mode(
     }
 }
 
-/// Why this chunk_size / file geometry — only meaningful for chunked exports;
-/// relates the row estimate to the chunk size and the resulting part count.
+/// Why this chunk_size / file geometry — only meaningful for chunked exports.
 fn explain_geometry(diag: &ExportDiagnostic, strategy: &ExtractionStrategy) -> Option<String> {
     let ExtractionStrategy::Chunked(cp) = strategy else {
         return None;
     };
 
-    // An explicit `chunk_count` fixes the number of windows directly; the size is
-    // derived from min/max at detect time, so don't claim a row-derived count.
     if let Some(count) = cp.chunk_count {
         return Some(format!(
             "Geometry: {count} equal key-range windows (chunk_count={count}); chunk_size is derived from the observed min/max."
@@ -144,9 +113,7 @@ fn explain_geometry(diag: &ExportDiagnostic, strategy: &ExtractionStrategy) -> O
     }
 }
 
-/// Why this parallelism — ties the configured worker count to the shared RSS
-/// budget via `tuning::memory::estimate_peak_rss_mb`, and surfaces the preflight
-/// recommendation when it diverges from what is configured.
+/// Why this parallelism — ties the configured worker count to the shared RSS budget via `tuning::memory::estimate_peak_rss_mb`, and surfaces the preflight recommendation when it diverges from what is configured.
 fn explain_parallelism(diag: &ExportDiagnostic, strategy: &ExtractionStrategy) -> String {
     let parallel = parallel_workers(strategy);
 
@@ -219,9 +186,7 @@ fn parallel_workers(strategy: &ExtractionStrategy) -> usize {
     }
 }
 
-/// Format an optional row count for prose: thousands-separated with a `M`/`K`
-/// shorthand for large values, or an explicit "row estimate unavailable" when
-/// `None` so the narrative never invents a number.
+/// Format an optional row count for prose: thousands-separated with a `M`/`K` shorthand for large values, or an explicit "row estimate unavailable" when `None` so the narrative never invents a number.
 fn fmt_rows(rows: Option<i64>) -> String {
     match rows {
         None => "row estimate unavailable".to_string(),
@@ -392,9 +357,7 @@ mod tests {
         assert!(s.contains("`id`"), "names the chunk column: {s}");
         assert!(s.contains("indexed"), "calls out the index: {s}");
         assert!(s.contains("~5.0M"), "uses the row estimate: {s}");
-        // Geometry: 5_000_000 / 250_000 = 20 parts.
         assert!(s.contains("~20 part"), "derives the part count: {s}");
-        // Parallelism: estimate_peak_rss_mb(4, 96) and the 2048 budget.
         let peak = estimate_peak_rss_mb(4, 96);
         assert!(
             s.contains(&format!("~{peak} MB")),
@@ -424,7 +387,6 @@ mod tests {
             s.contains("resumable: yes"),
             "incremental is resumable: {s}"
         );
-        // No geometry sentence for non-chunked modes.
         assert!(!s.contains("part file"), "no chunk geometry leaks in: {s}");
     }
 
@@ -450,11 +412,8 @@ mod tests {
 
     #[test]
     fn unknown_rows_falls_back_gracefully() {
-        // Chunked but no row estimate and no row width: every number must
-        // degrade to an explicit "unavailable", never a fabricated figure.
         let mut diag = base_diag("chunked");
         diag.uses_index = true;
-        // row_estimate = None, avg_row_bytes = None (from base_diag).
 
         let mut export = base_export("mystery");
         export.mode = ExportMode::Chunked;
@@ -476,14 +435,11 @@ mod tests {
             s.contains("row width unavailable") || s.contains("peak unavailable"),
             "memory bound degrades gracefully: {s}"
         );
-        // Crucially: no invented number where data is missing.
         assert!(!s.contains("~0 "), "must not fabricate a zero figure: {s}");
     }
 
     #[test]
     fn parallelism_flags_divergence_from_recommendation() {
-        // Configured parallel (8) diverges from the preflight recommendation (4):
-        // the narrative must surface the recommendation rather than hide it.
         let mut diag = base_diag("chunked");
         diag.row_estimate = Some(20_000_000);
         diag.avg_row_bytes = Some(40);
@@ -505,10 +461,9 @@ mod tests {
 
     #[test]
     fn over_budget_parallelism_says_exceeds() {
-        // Wide rows × high parallelism should blow the budget and say so.
         let mut diag = base_diag("chunked");
         diag.row_estimate = Some(50_000_000);
-        diag.avg_row_bytes = Some(8_000); // wide rows
+        diag.avg_row_bytes = Some(8_000);
         diag.uses_index = true;
         diag.recommended_parallel = (4, "large indexed dataset");
 

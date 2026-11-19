@@ -22,9 +22,6 @@ pub struct Diagnostic {
 }
 
 /// Validate a [`ResolvedRunPlan`] for known incompatible or degraded combinations.
-///
-/// Returns a list of diagnostics. The caller is responsible for treating
-/// [`DiagnosticLevel::Rejected`] entries as hard errors.
 pub fn validate_plan(plan: &ResolvedRunPlan) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
 
@@ -43,8 +40,7 @@ fn is_stdout(plan: &ResolvedRunPlan) -> bool {
     plan.destination.destination_type == DestinationType::Stdout
 }
 
-/// `stdout + max_file_size` — file splitting produces multiple named parts; stdout has no
-/// file boundary and cannot represent them.
+/// `stdout + max_file_size` — file splitting produces multiple named parts.
 fn check_stdout_split(diags: &mut Vec<Diagnostic>, plan: &ResolvedRunPlan) {
     if is_stdout(plan) && plan.max_file_size_bytes.is_some() {
         diags.push(Diagnostic {
@@ -59,10 +55,7 @@ fn check_stdout_split(diags: &mut Vec<Diagnostic>, plan: &ResolvedRunPlan) {
     }
 }
 
-/// `stdout + chunked/keyset` — each chunk (or keyset page) produces a separate binary
-/// stream; concatenating them to stdout produces unusable output for binary formats
-/// like Parquet. Keyset matters here because the planner auto-selects it for tables
-/// without a single-integer PK — the operator never opted into multi-part output.
+/// `stdout + chunked/keyset` — each chunk (or keyset page) produces a separate binary stream.
 fn check_stdout_chunked(diags: &mut Vec<Diagnostic>, plan: &ResolvedRunPlan) {
     if !is_stdout(plan) {
         return;
@@ -90,8 +83,7 @@ fn check_stdout_chunked(diags: &mut Vec<Diagnostic>, plan: &ResolvedRunPlan) {
     }
 }
 
-/// `incremental + reconcile` — reconcile runs COUNT(*) on the full base query but only
-/// new rows (since the cursor) are exported; the count will always appear mismatched.
+/// `incremental + reconcile` — reconcile runs COUNT(*) on the full base query but only new rows (since the cursor) are exported.
 fn check_incremental_reconcile(diags: &mut Vec<Diagnostic>, plan: &ResolvedRunPlan) {
     if plan.reconcile && matches!(&plan.strategy, ExtractionStrategy::Incremental(_)) {
         diags.push(Diagnostic {
@@ -107,8 +99,7 @@ fn check_incremental_reconcile(diags: &mut Vec<Diagnostic>, plan: &ResolvedRunPl
     }
 }
 
-/// `--resume` without `chunk_checkpoint: true` — the flag is silently ignored unless
-/// the strategy is chunked with checkpoint enabled.
+/// `--resume` without `chunk_checkpoint: true`.
 fn check_resume_without_checkpoint(diags: &mut Vec<Diagnostic>, plan: &ResolvedRunPlan) {
     if plan.resume {
         let is_checkpointed = matches!(
@@ -129,8 +120,7 @@ fn check_resume_without_checkpoint(diags: &mut Vec<Diagnostic>, plan: &ResolvedR
     }
 }
 
-/// `time_window + reconcile` — reconcile runs COUNT(*) on the full base query but only
-/// rows within the configured time window are exported; the count will always appear mismatched.
+/// `time_window + reconcile` — reconcile runs COUNT(*) on the full base query but only rows within the configured time window are exported.
 fn check_time_window_reconcile(diags: &mut Vec<Diagnostic>, plan: &ResolvedRunPlan) {
     if plan.reconcile && matches!(&plan.strategy, ExtractionStrategy::TimeWindow { .. }) {
         diags.push(Diagnostic {
@@ -146,8 +136,7 @@ fn check_time_window_reconcile(diags: &mut Vec<Diagnostic>, plan: &ResolvedRunPl
     }
 }
 
-/// `unique_columns` without `unique_max_entries` — uniqueness tracking on high-cardinality
-/// columns (id, uuid, email) can grow unbounded in memory.  A cap should be set.
+/// `unique_columns` without `unique_max_entries`.
 fn check_quality_unique_no_cap(diags: &mut Vec<Diagnostic>, plan: &ResolvedRunPlan) {
     if let Some(q) = &plan.quality
         && !q.unique_columns.is_empty()
@@ -166,8 +155,7 @@ fn check_quality_unique_no_cap(diags: &mut Vec<Diagnostic>, plan: &ResolvedRunPl
     }
 }
 
-/// `stdout + state recording` — the manifest records a generated filename that does not
-/// correspond to any real file path; `rivet state files` will list phantom entries.
+/// `stdout + state recording` — the manifest records a generated filename that does not correspond to any real file path.
 fn check_stdout_manifest(diags: &mut Vec<Diagnostic>, plan: &ResolvedRunPlan) {
     if is_stdout(plan) {
         diags.push(Diagnostic {
@@ -249,8 +237,6 @@ mod tests {
         assert!(validate_plan(&base_plan()).is_empty());
     }
 
-    // --- stdout-no-split ---
-
     #[test]
     fn stdout_with_max_file_size_is_rejected() {
         let mut p = stdout_plan();
@@ -277,8 +263,6 @@ mod tests {
         );
     }
 
-    // --- stdout-no-chunked ---
-
     #[test]
     fn stdout_with_chunked_is_rejected() {
         let mut p = stdout_plan();
@@ -304,8 +288,6 @@ mod tests {
             rules(&diags)
         );
     }
-
-    // --- incremental-reconcile-mismatch ---
 
     #[test]
     fn incremental_with_reconcile_warns() {
@@ -337,13 +319,10 @@ mod tests {
         );
     }
 
-    // --- resume-no-checkpoint ---
-
     #[test]
     fn resume_without_checkpoint_warns() {
         let mut p = base_plan();
         p.resume = true;
-        // snapshot strategy — checkpoint not applicable
         let diags = validate_plan(&p);
         assert!(
             diags
@@ -380,8 +359,6 @@ mod tests {
         );
     }
 
-    // --- stdout-manifest-phantom ---
-
     #[test]
     fn stdout_produces_degraded_manifest_diagnostic() {
         let p = stdout_plan();
@@ -405,8 +382,6 @@ mod tests {
             rules(&diags)
         );
     }
-
-    // --- time-window-reconcile-mismatch ---
 
     #[test]
     fn time_window_with_reconcile_warns() {
@@ -447,44 +422,6 @@ mod tests {
         );
     }
 
-    // ─── Compatibility Matrix ─────────────────────────────────────────────────────
-    //
-    // Each test encodes one row of the mode × destination × flag compatibility table.
-    // Tests that duplicate existing coverage are noted with a cross-reference rather
-    // than re-added. Add a new row whenever a new mode, destination type, or flag is
-    // introduced. The matrix is the authoritative record of what combinations are
-    // Accepted / Rejected / Warning-producing / Degraded.
-    //
-    //  ID  │ Mode        │ Destination │ Flags                   │ Expected outcome
-    // ─────┼─────────────┼─────────────┼─────────────────────────┼─────────────────────────────────────────
-    //  M1  │ Snapshot    │ Local       │ —                       │ Clean           (clean_plan_produces_no_diagnostics)
-    //  M2  │ Snapshot    │ Local       │ reconcile               │ Clean           (snapshot_with_reconcile_is_clean)
-    //  M3  │ Snapshot    │ Local       │ quality                 │ Clean
-    //  M4  │ Snapshot    │ Local       │ max_file_size           │ Clean           (local_with_max_file_size_is_clean)
-    //  M5  │ Incremental │ Local       │ —                       │ Clean
-    //  M6  │ Chunked     │ Local       │ checkpoint + resume     │ Clean           (resume_with_chunked_checkpoint_is_clean)
-    //  M7  │ Chunked     │ Local       │ parallel=4              │ Clean
-    //  M8  │ TimeWindow  │ Local       │ —                       │ Clean
-    //  M9  │ Stdout      │ —           │ snapshot (no flags)     │ Degraded        (stdout_produces_degraded_manifest_diagnostic)
-    //  M10 │ Stdout      │ —           │ incremental             │ Degraded        [stdout-manifest-phantom] only
-    //  M11 │ Stdout      │ —           │ max_file_size           │ Rejected+Degraded [stdout-no-split, stdout-manifest-phantom]
-    //  M12 │ Stdout      │ —           │ chunked                 │ Rejected+Degraded [stdout-no-chunked, stdout-manifest-phantom]
-    //  M13 │ Stdout      │ —           │ chunked + max_file_size │ Rejected×2+Degraded (all three rules)
-    //  M14 │ Incremental │ Local       │ reconcile               │ Warning         (incremental_with_reconcile_warns)
-    //  M15 │ TimeWindow  │ Local       │ reconcile               │ Warning         [time-window-reconcile-mismatch]
-    //  M16 │ Chunked     │ Local       │ quality (no checkpoint) │ Clean           (the gate grades every runner at the finalize seam)
-    //  M17 │ Snapshot    │ Local       │ resume                  │ Warning         (resume_without_checkpoint_warns)
-    //  M18 │ Incremental │ Local       │ resume                  │ Warning         [resume-no-checkpoint]
-    //  M19 │ Chunked     │ Local       │ no-checkpoint + resume  │ Warning         (resume_with_chunked_no_checkpoint_warns)
-    //  M20 │ Stdout      │ —           │ incremental + reconcile │ Warning+Degraded [incremental-reconcile-mismatch, stdout-manifest-phantom]
-    //  M21 │ Keyset      │ Local       │ —                       │ Clean
-    //  M22 │ Stdout      │ —           │ keyset                  │ Rejected+Degraded [stdout-no-keyset, stdout-manifest-phantom]
-    //  M23 │ Keyset      │ Local       │ quality                 │ Clean
-    //  M24 │ Keyset      │ Local       │ resume                  │ Warning         [resume-no-checkpoint]
-    //  M25 │ Keyset      │ Local       │ reconcile               │ Clean           (full-table export; COUNT(*) matches)
-    //  M26 │ Stdout      │ —           │ keyset + max_file_size  │ Rejected×2+Degraded [stdout-no-split, stdout-no-keyset, stdout-manifest-phantom]
-
-    // M5 — Incremental + Local + no flags → Clean
     #[test]
     fn matrix_m5_incremental_local_no_flags_is_clean() {
         let mut p = base_plan();
@@ -495,7 +432,6 @@ mod tests {
         );
     }
 
-    // M7 — Chunked + Local + parallel=4 (no quality, no resume) → Clean
     #[test]
     fn matrix_m7_chunked_local_parallel_is_clean() {
         let mut p = base_plan();
@@ -514,7 +450,6 @@ mod tests {
         );
     }
 
-    // M8 — TimeWindow + Local + no flags → Clean
     #[test]
     fn matrix_m8_time_window_local_no_flags_is_clean() {
         let mut p = base_plan();
@@ -529,8 +464,6 @@ mod tests {
         );
     }
 
-    // M10 — Stdout + Incremental → exactly one Degraded diagnostic (manifest phantom)
-    //        no other rules should fire for this clean-flags combination
     #[test]
     fn matrix_m10_stdout_incremental_degraded_manifest_only() {
         let mut p = stdout_plan();
@@ -548,7 +481,6 @@ mod tests {
         );
     }
 
-    // M11 — Stdout + max_file_size → both Rejected and Degraded diagnostics fire
     #[test]
     fn matrix_m11_stdout_max_file_size_fires_rejected_and_degraded() {
         let mut p = stdout_plan();
@@ -570,7 +502,6 @@ mod tests {
         );
     }
 
-    // M12 — Stdout + chunked → both Rejected and Degraded diagnostics fire
     #[test]
     fn matrix_m12_stdout_chunked_fires_rejected_and_degraded() {
         let mut p = stdout_plan();
@@ -592,7 +523,6 @@ mod tests {
         );
     }
 
-    // M13 — Stdout + chunked + max_file_size → two Rejected rules + one Degraded all fire
     #[test]
     fn matrix_m13_stdout_chunked_max_file_size_fires_all_three_rules() {
         let mut p = stdout_plan();
@@ -632,10 +562,6 @@ mod tests {
         );
     }
 
-    // M15 — TimeWindow + Local + reconcile → Warning [time-window-reconcile-mismatch]
-    //        (covered by time_window_with_reconcile_warns above — cross-reference only)
-
-    // M18 — Incremental + Local + resume → Warning [resume-no-checkpoint]
     #[test]
     fn matrix_m18_incremental_with_resume_warns() {
         let mut p = base_plan();
@@ -651,8 +577,6 @@ mod tests {
         );
     }
 
-    // M20 — Stdout + Incremental + reconcile → Warning [incremental-reconcile-mismatch]
-    //        AND Degraded [stdout-manifest-phantom] both fire
     #[test]
     fn matrix_m20_stdout_incremental_reconcile_fires_warning_and_degraded() {
         let mut p = stdout_plan();
@@ -681,8 +605,6 @@ mod tests {
             rules(&diags)
         );
     }
-
-    // ── quality-unique-no-cap ──────────────────────────────────────────────────
 
     #[test]
     fn unique_columns_without_cap_warns() {
@@ -751,8 +673,6 @@ mod tests {
         );
     }
 
-    // ── Keyset blind spot (ROAST-RED) ──────────────────────────────────────────
-
     fn keyset_plan_strategy() -> ExtractionStrategy {
         ExtractionStrategy::Keyset(crate::plan::KeysetPlan {
             key_column: "uuid_pk".into(),
@@ -764,10 +684,6 @@ mod tests {
         })
     }
 
-    // ROAST-RED plan-keyset-rules: compatibility rules match only Chunked(_); Keyset
-    // (one part PER PAGE — same multi-part binary shape, auto-selected by the planner
-    // for MySQL tables without an int PK) slips past stdout-no-chunked unflagged.
-    // Asserts CORRECT behavior; expected to FAIL until the fix lands.
     #[test]
     fn roast_stdout_with_keyset_is_rejected() {
         let mut p = stdout_plan();
@@ -783,7 +699,6 @@ mod tests {
         );
     }
 
-    // M21 — Keyset + Local + no flags → Clean
     #[test]
     fn matrix_m21_keyset_local_no_flags_is_clean() {
         let mut p = base_plan();
@@ -794,8 +709,6 @@ mod tests {
         );
     }
 
-    // M22 — Stdout + keyset → Rejected [stdout-no-keyset] and Degraded
-    //        [stdout-manifest-phantom] both fire; the chunked-specific rule must not
     #[test]
     fn matrix_m22_stdout_keyset_fires_rejected_and_degraded() {
         let mut p = stdout_plan();
@@ -822,8 +735,6 @@ mod tests {
         );
     }
 
-    // M24 — Keyset + Local + resume → Warning [resume-no-checkpoint]
-    //        keyset has no checkpoint support; --resume is silently ignored
     #[test]
     fn matrix_m24_keyset_with_resume_warns() {
         let mut p = base_plan();
@@ -839,9 +750,6 @@ mod tests {
         );
     }
 
-    // M25 — Keyset + Local + reconcile → Clean
-    //        keyset exports the full table, so reconcile's COUNT(*) is comparable —
-    //        unlike incremental/time_window it must NOT inherit a mismatch warning
     #[test]
     fn matrix_m25_keyset_with_reconcile_is_clean() {
         let mut p = base_plan();
@@ -853,9 +761,6 @@ mod tests {
         );
     }
 
-    // M26 — Stdout + keyset + max_file_size → two Rejected rules + one Degraded all
-    //        fire (keyset analogue of M13: the keyset rule composes independently
-    //        with stdout-no-split, neither masks the other)
     #[test]
     fn matrix_m26_stdout_keyset_max_file_size_fires_all_three_rules() {
         let mut p = stdout_plan();
