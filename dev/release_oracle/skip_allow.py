@@ -64,7 +64,7 @@ EXCUSES: tuple[Excuse, ...] = (
     *(Excuse("fix_cells", "all", cell,
              "2026-11-03: the cell self-skips on v0.32.2 (the stand's lower_case_table_names=0, b0446717 gate log), so it is not proven to fail there. "
              "Closes when the stand runs a folding MySQL or the next release leaves it out of the fix window",
-             "2026-11-17") for cell in FOLD_CELLS),
+             "2026-12-03") for cell in FOLD_CELLS),
     *(Excuse("fix_cells", "all", cell,
              "2026-11-12: the stage runs the previous binary on the SQLite state only, so a Postgres-state cell self-skips there and is not proven to fail on 0.32.2; "
              "it passes on the current binary in the live modules. Closes when the stage hands the previous binary a scratch Postgres state or the baseline moves past 0.32.2",
