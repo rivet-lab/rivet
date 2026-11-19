@@ -1010,4 +1010,12 @@ mod tests {
         let s = serde_json::to_string(&v).unwrap();
         assert_eq!(s, r#"{"a":{"x":0,"y":[3,2,1]},"b":1}"#);
     }
+
+    #[test]
+    fn canonicalize_value_sorts_objects_inside_arrays() {
+        let mut v = serde_json::json!({ "l": [{ "b": 1, "a": 2 }, [{ "d": 3, "c": 4 }]] });
+        canonicalize_value(&mut v);
+        let s = serde_json::to_string(&v).unwrap();
+        assert_eq!(s, r#"{"l":[{"a":2,"b":1},[{"c":4,"d":3}]]}"#);
+    }
 }

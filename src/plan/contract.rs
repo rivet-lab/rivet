@@ -572,6 +572,7 @@ mod tests {
         assert!(s.needs_cursor_state());
         assert!(!s.is_resumable());
         assert_eq!(s.cursor_column(), Some("updated_at"));
+        assert_eq!(s.cursor_extract_column(), Some("updated_at"));
         let q = s
             .resolve_query("SELECT * FROM orders", SourceType::Postgres)
             .unwrap();
