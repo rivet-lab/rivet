@@ -344,6 +344,36 @@ impl Span {
     }
 }
 
+/// The span cut where its density changes: the right half is probed, and the halves are split again while it differs from the left by more than [`DENSITY_RATIO`], so a dense stretch before an empty one is not spread across it.
+fn refine_span(
+    src: &mut dyn Source,
+    plan: &ResolvedRunPlan,
+    key: (&str, Axis),
+    fence: &[String],
+    span: Span,
+    out: &mut Vec<Span>,
+) -> Result<()> {
+    let mid = span.start + (span.end - span.start) / 2;
+    if mid <= span.start || span.rows() < PROBE_ROWS as f64 {
+        out.push(span);
+        return Ok(());
+    }
+    let right = probe_density(src, plan, key, fence, mid, span.end)?;
+    let (hi, lo) = (right.max(span.density), right.min(span.density));
+    if hi / lo <= DENSITY_RATIO {
+        out.push(span);
+        return Ok(());
+    }
+    let left = Span { end: mid, ..span };
+    let right = Span {
+        start: mid,
+        density: right,
+        ..span
+    };
+    refine_span(src, plan, key, fence, left, out)?;
+    refine_span(src, plan, key, fence, right, out)
+}
+
 /// How the density check left the parallel key-space cuts.
 enum Recut {
     Even,
@@ -714,7 +744,17 @@ fn balance_by_density(
                 }
             }
         }
-        let mean = spans.iter().map(Span::rows).sum::<f64>() / spans.len() as f64;
+        let heavy = spans.iter().map(Span::rows).sum::<f64>() / m as f64 * BALANCE_FACTOR;
+        let mut refined = Vec::with_capacity(spans.len());
+        for s in spans.drain(..) {
+            if s.rows() > heavy {
+                refine_span(src, plan, key, fence, s, &mut refined)?;
+            } else {
+                refined.push(s);
+            }
+        }
+        spans = refined;
+        let mean = spans.iter().map(Span::rows).sum::<f64>() / m as f64;
         let ratio = spans.iter().map(Span::rows).fold(0f64, f64::max) / mean;
         if ratio <= BALANCE_FACTOR {
             let recut = if rounds == 0 {
@@ -2763,7 +2803,7 @@ mod tests {
         };
         let spread: Vec<usize> = ranges.iter().map(|(_, lo, hi, _)| held(lo, hi)).collect();
         assert_eq!(spread.iter().sum::<usize>(), all.len(), "{spread:?}");
-        assert_eq!(spread, vec![3_470, 3_469, 2_068, 993], "{bounds:?}");
+        assert_eq!(spread, vec![3_426, 3_425, 2_156, 993], "{bounds:?}");
     }
 
     /// A uuid key with 90% of its rows in 5% of its span keeps every row once, in ranges recut to near-equal row counts.
@@ -2808,8 +2848,7 @@ mod tests {
             };
             let dense = 1..=6_300i64;
             let sparse = (1..=700i64).map(|i| 1_000_000 + i * 5_368);
-            {
-                let (parts, int_parts) = (4, 64);
+            for (parts, int_parts) in [(2, 32), (4, 64)] {
                 let mut src = Indexed::new(
                     dense.clone().chain(sparse.clone()).map(uuid).collect(),
                     false,
