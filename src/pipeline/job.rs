@@ -172,6 +172,7 @@ fn capture_open_forensics(
 /// The run's column plan.
 pub(super) fn plan_open_columns(
     export_name: &str,
+    format: crate::config::FormatType,
     open: &mut Option<Vec<crate::types::TypeMapping>>,
     strict: bool,
 ) -> Result<()> {
@@ -183,6 +184,14 @@ pub(super) fn plan_open_columns(
                 &crate::types::policy::TypePolicy::from_strict(strict),
                 &subject,
             )?;
+            if seeded!("check-run-refusal-split", false, true) {
+                crate::format::refuse_unwritable_columns(
+                    format,
+                    planned
+                        .iter()
+                        .filter_map(|m| Some((m.column_name.as_str(), m.arrow_type.as_ref()?))),
+                )?;
+            }
             *open = Some(planned);
         }
         None if strict => crate::rivet_bail!(
@@ -1199,7 +1208,12 @@ fn execute_resolved_plan(
 
     let gate = settle_columns_are_temporal(plan, summary.open_mappings.as_deref())
         .and_then(|()| {
-            plan_open_columns(&plan.export_name, &mut summary.open_mappings, tail.strict)
+            plan_open_columns(
+                &plan.export_name,
+                plan.format,
+                &mut summary.open_mappings,
+                tail.strict,
+            )
         })
         .and_then(|()| super::frame::RunnerFrame::refuse_cross_shape_prefix(plan));
     let result = match gate {
@@ -3660,6 +3674,7 @@ mod tests {
     /// The run's plan refuses a Lossy column only under --strict.
     #[test]
     fn plan_open_columns_refuses_only_under_strict() {
+        use crate::config::FormatType;
         use crate::types::{RivetType, SourceColumn, TypeFidelity, TypeMapping};
         let lossy = || {
             let mut m = TypeMapping::from_source(
@@ -3670,16 +3685,40 @@ mod tests {
             Some(vec![m])
         };
         let mut open = lossy();
-        assert!(plan_open_columns("e", &mut open, false).is_ok());
+        assert!(plan_open_columns("e", FormatType::Parquet, &mut open, false).is_ok());
         assert_eq!(open.as_ref().map(Vec::len), Some(1), "warn keeps the plan");
-        let err = plan_open_columns("e", &mut lossy(), true).unwrap_err();
+        let err = plan_open_columns("e", FormatType::Parquet, &mut lossy(), true).unwrap_err();
         assert!(format!("{err:#}").contains("ts"), "{err:#}");
-        assert!(plan_open_columns("e", &mut None, false).is_ok());
-        let err = plan_open_columns("e", &mut None, true).unwrap_err();
+        assert!(plan_open_columns("e", FormatType::Parquet, &mut None, false).is_ok());
+        let err = plan_open_columns("e", FormatType::Parquet, &mut None, true).unwrap_err();
         assert!(
             format!("{err:#}").contains("could not be resolved"),
             "{err:#}"
         );
+    }
+
+    /// A column the export's format cannot write stops the plan before any read, under warn and strict alike.
+    #[test]
+    fn plan_open_columns_refuses_a_column_the_format_cannot_write() {
+        use crate::config::FormatType;
+        use crate::types::{RivetType, SourceColumn, TypeMapping};
+        let wide = || {
+            Some(vec![TypeMapping::from_source(
+                &SourceColumn::simple("n", "numeric(60,10)", true),
+                RivetType::Decimal {
+                    precision: 60,
+                    scale: 10,
+                },
+            )])
+        };
+        for strict in [false, true] {
+            let err = plan_open_columns("e", FormatType::Csv, &mut wide(), strict).unwrap_err();
+            assert_eq!(
+                crate::error::error_code(&err),
+                Some("RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED")
+            );
+            assert!(plan_open_columns("e", FormatType::Parquet, &mut wide(), strict).is_ok());
+        }
     }
 
     /// A source that answers the run's metadata probes from a script.

@@ -564,7 +564,22 @@ pub(crate) fn probe_mappings(
     downgrade_narrowing_overrides(&mut mappings, column_overrides, || {
         src.type_mappings(query, &ColumnOverrides::new())
     })?;
+    if !stream && seeded!("check-run-refusal-split", false, true) {
+        mappings = mappings.into_iter().map(refuse_unmapped).collect();
+    }
     Ok(mappings)
+}
+
+/// A batch column no Arrow type carries is refused, under every policy, with the reason its mapping names.
+fn refuse_unmapped(m: crate::types::TypeMapping) -> crate::types::TypeMapping {
+    if m.arrow_type.is_some() || m.refusal.is_some() {
+        return m;
+    }
+    let reason = match &m.rivet_type {
+        crate::types::RivetType::Unsupported { reason, .. } => reason.clone(),
+        _ => "no Rivet mapping for this source type".to_string(),
+    };
+    m.with_refusal(reason)
 }
 
 /// One unit's report from already-resolved mappings, with no source connection.
@@ -893,6 +908,43 @@ fn rivet_type_label(t: &crate::types::RivetType) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A batch column with no Arrow type is refused under every policy, with its reason; the rest is untouched.
+    #[test]
+    fn an_unmapped_batch_column_is_refused_under_every_policy_and_nothing_else_is() {
+        use crate::types::policy::TypePolicy;
+        use crate::types::{RivetType, SourceColumn, TypeMapping};
+        let col = |name: &str, t: RivetType| {
+            TypeMapping::from_source(&SourceColumn::simple(name, "native", true), t)
+        };
+        let unmapped = col(
+            "net",
+            RivetType::Unsupported {
+                native_type: "cidr".into(),
+                reason: "no arrow type".into(),
+            },
+        );
+        let refused = super::refuse_unmapped(unmapped);
+        assert_eq!(refused.refusal.as_deref(), Some("no arrow type"));
+        for policy in [TypePolicy::warn_only(), TypePolicy::strict()] {
+            let v = policy.validate(std::slice::from_ref(&refused));
+            assert!(v.len() == 1 && v[0].fatal && v[0].refused, "{v:?}");
+        }
+        let mapped = col("id", RivetType::Int64);
+        assert_eq!(super::refuse_unmapped(mapped.clone()).refusal, None);
+        let own = col(
+            "x",
+            RivetType::Unsupported {
+                native_type: "t".into(),
+                reason: "r".into(),
+            },
+        )
+        .with_refusal("own remedy");
+        assert_eq!(
+            super::refuse_unmapped(own).refusal.as_deref(),
+            Some("own remedy")
+        );
+    }
+
     /// The two callers must DIVERGE, and only where divergence is warranted.
     #[test]
     fn only_a_bare_name_makes_an_unresolvable_capture_fatal_and_only_for_the_load() {

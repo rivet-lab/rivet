@@ -6437,3 +6437,31 @@ seeds:
         cells:
           - "lib:flush_warns_with_the_count_of_zero_dates_it_nulled_and_is_silent_otherwise"
           - "lib:a_run_that_nulled_cells_warns_once_per_column_with_its_count"
+
+  - name: check-run-refusal-split
+    class: "check, plan and doctor pass a batch export that run then refuses by code: a column the export's format cannot write (csv of decimal256, nanosecond timestamp, list; parquet of a negative-scale decimal) and a column no Arrow type carries and no `columns:` entry declares, because those two refusals were raised only where run opens its writer or converts a row"
+    history: "issues #912 and #918; RED on main 2026-11-19 by the no_silent_null matrix CHECK_RUN_SPLIT verdict (batch full tier: mssql 10 pairs, mysql 19, oracle 19, postgres 24)"
+    scope: source
+    switch: check-run-refusal-split
+    engines:
+      postgres:
+        cells:
+          - a_csv_export_of_a_decimal256_column_is_refused_by_check_like_the_run_postgres
+          - a_column_without_an_arrow_type_is_refused_by_check_like_the_run_postgres
+      mysql:
+        cells:
+          - a_csv_export_of_a_decimal256_column_is_refused_by_check_like_the_run_mysql
+          - a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mysql
+      mssql:
+        cells:
+          - a_csv_export_of_a_nanosecond_timestamp_column_is_refused_by_check_like_the_run_mssql
+          - a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mssql
+      oracle:
+        cells:
+          - a_csv_export_of_a_nanosecond_timestamp_column_is_refused_by_check_like_the_run_oracle
+      mongo:
+        na: "a MongoDB export lands the whole document in one column: no column type reaches the format or the type mapping"
+      lib:
+        cells:
+          - "lib:plan_open_columns_refuses_a_column_the_format_cannot_write"
+          - "lib:admit_columns_refuses_unmapped_and_unwritable_columns_and_admits_the_rest"
