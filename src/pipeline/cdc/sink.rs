@@ -992,7 +992,7 @@ fn budget_slices(buckets: &[i64], cap: usize) -> Vec<(std::ops::Range<usize>, us
             &buckets[start..],
             cap,
         );
-        let end = start + fit;
+        let end = start + fit.max(1);
         let held: std::collections::HashSet<i64> = buckets[start..end].iter().copied().collect();
         out.push((start..end, held.len()));
         start = end;
