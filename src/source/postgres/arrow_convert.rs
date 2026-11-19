@@ -982,13 +982,16 @@ fn build_pg_list_array(
         DataType::Boolean => list_of!(bool, BooleanBuilder),
         DataType::Int16 => list_of!(i16, Int16Builder),
         DataType::Int32 => list_of!(i32, Int32Builder),
-        DataType::Int64 if pg_list_elem_type(rows, col_idx) == Some(Type::OID) => {
+        DataType::Int64
+            if seeded!("pg-json-interval-oid-enum-array-refused", false, true)
+                && pg_list_elem_type(rows, col_idx) == Some(Type::OID) =>
+        {
             list_mapped!(u32, Int64Builder::new(), b, v => b.append_value(i64::from(v)))
         }
         DataType::Int64 => list_of!(i64, Int64Builder),
         DataType::Float32 => list_of!(f32, Float32Builder),
         DataType::Float64 => list_of!(f64, Float64Builder),
-        DataType::Utf8 if pg_list_elem_is_wire_special(rows, col_idx) => {
+        DataType::Utf8 if seeded!("pg-json-interval-oid-enum-array-refused", false, true) && pg_list_elem_is_wire_special(rows, col_idx) => {
             let elem = pg_list_elem_type(rows, col_idx).expect("checked by the guard");
             if elem == Type::JSON || elem == Type::JSONB {
                 list_mapped!(PgJsonRawText<'_>, StringBuilder::new(), b, t => b.append_value(t.0))

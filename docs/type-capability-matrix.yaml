@@ -188,6 +188,8 @@ engines:
       "List(Timestamp(µs, \"UTC\"))": {duck: "CAST(to_json({c}) AS VARCHAR)"}
       "List(Time64(µs))": {duck: "CAST(to_json({c}) AS VARCHAR)"}
       "List(arrow.uuid)": {duck: "CAST(to_json({c}) AS VARCHAR)"}
+      "List(arrow.json)": {duck: "CAST(to_json({c}) AS VARCHAR)"}
+      "List(Int64)": {duck: "CAST(to_json({c}) AS VARCHAR)"}
       "Decimal256(60, 10)": {duck: "arrow"}
     rows:
       - {native_type: "TEXT", sample: ["'üñíçødé ''q'''", "'hello'"], edges: ["''", "'a'", "' '", "'12'", "'-5'", "'1.5'", "'NULL'", "'0'", "'12abc'", "' 42'", "'x'", "'a''b'", "'é中😀'", "'tab\ttab'", "'nl\nnl'", "'q\"\\,;'", "'üñíçødé ''q'''", "'hello'"], delivery: "Utf8", clickhouse: {type: "Nullable(String)"}}
@@ -282,11 +284,11 @@ engines:
       - {native_type: "NUMERIC(10,2)[]", sample: [], edges: ["'{}'", "'{1.50,-99999999.99,NULL}'"], refuses: "refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
       - {native_type: "VARCHAR(10)[]", sample: [], edges: ["'{}'", "'{a,b}'", "'{NULL}'", {v: "NULL", bigquery: "PG_NULL_LIST_EMPTY_BQ!form:[]", clickhouse: "PG_NULL_LIST_EMPTY_CH!form:[]"}]}
       - {native_type: "CHAR(5)[]", sample: [], edges: ["'{}'", "'{a,b}'", {v: "NULL", bigquery: "PG_NULL_LIST_EMPTY_BQ!form:[]", clickhouse: "PG_NULL_LIST_EMPTY_CH!form:[]"}]}
-      - {native_type: "JSON[]", sample: [], edges: ["'{}'", "'{\"{\\\"a\\\":1}\"}'", "'{NULL}'"], refuses: "PG_ARRAY_ONE_DIM_MULTIDIM_MSG!refuse:RIVET_SOURCE_VALUE_UNREPRESENTABLE@extract"}
-      - {native_type: "JSONB[]", sample: [], edges: ["'{}'", "'{\"{\\\"a\\\":1}\"}'", "'{NULL}'"], refuses: "PG_ARRAY_ONE_DIM_MULTIDIM_MSG!refuse:RIVET_SOURCE_VALUE_UNREPRESENTABLE@extract"}
-      - {native_type: "INTERVAL[]", sample: [], edges: ["'{}'", "'{\"1 day\",\"2 hours\"}'", "'{NULL}'"], refuses: "PG_ARRAY_ONE_DIM_MULTIDIM_MSG!refuse:RIVET_SOURCE_VALUE_UNREPRESENTABLE@extract"}
-      - {native_type: "OID[]", sample: [], edges: ["'{}'", "'{1,2}'"], refuses: "PG_ARRAY_ONE_DIM_MULTIDIM_MSG!refuse:RIVET_SOURCE_VALUE_UNREPRESENTABLE@extract"}
-      - {native_type: "rivet_status[]", sample: [], edges: ["'{}'", "'{active,pending}'", "'{NULL}'"], refuses: "PG_ARRAY_ONE_DIM_MULTIDIM_MSG!refuse:RIVET_SOURCE_VALUE_UNREPRESENTABLE@extract"}
+      - {native_type: "JSON[]", sample: ["ARRAY['{\"k\": [1, 2]}'::json]"], edges: ["'{}'", "'{\"{\\\"a\\\":1}\"}'", "'{NULL}'"], delivery: "List(arrow.json)", clickhouse: {type: "Array(Nullable(String))"}}
+      - {native_type: "JSONB[]", sample: ["ARRAY['{\"n\":1}'::jsonb]"], edges: ["'{}'", "'{\"{\\\"a\\\":1}\"}'", "'{NULL}'"], delivery: "List(arrow.json)", clickhouse: {type: "Array(Nullable(String))"}}
+      - {native_type: "INTERVAL[]", sample: ["ARRAY[INTERVAL '1 year 2 mons 3 days']"], edges: ["'{}'", "'{\"1 day\",\"2 hours\"}'", "'{NULL}'"], delivery: "List(Utf8)", clickhouse: {type: "Array(Nullable(String))"}}
+      - {native_type: "OID[]", sample: ["ARRAY[1::oid, 16384::oid]"], edges: ["'{}'", "'{1,2}'"], delivery: "List(Int64)", clickhouse: {type: "Array(Nullable(Int64))"}}
+      - {native_type: "rivet_status[]", sample: ["ARRAY['active'::rivet_status]"], edges: ["'{}'", "'{active,pending}'", "'{NULL}'"], delivery: "List(Utf8)", clickhouse: {type: "Array(Nullable(String))"}}
       - {native_type: "INET[]", sample: [], edges: ["'{}'", "'{10.0.0.1}'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
       - {native_type: "MONEY[]", sample: [], edges: ["'{}'", "'{1.00}'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
       - {native_type: "INT4RANGE[]", sample: [], edges: ["'{}'", "'{\"[1,5)\"}'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
