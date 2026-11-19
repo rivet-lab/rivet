@@ -152,7 +152,7 @@ scenarios:
     oracle:   { na: "Oracle has no SET type" }
 
   - id: type_enum_set_label_text
-    what: "ENUM and SET labels holding a backslash, LF, CR, NUL, a quote and non-ASCII text are the stored labels on the stream leg as on the snapshot leg"
+    what: "ENUM and SET labels holding a backslash, LF, CR, NUL, a quote, non-ASCII text and a 4-byte character (U+1F600, which the catalog prints as a question mark) are the stored labels on the stream leg as on the snapshot leg; a label only the catalog can supply is refused by code, never delivered as a question mark"
     postgres: { na: "PostgreSQL sends an enum value as its label text; no label is parsed from a catalog rendering" }
     mysql:    { test: mysql_cdc_enum_set_labels_match_the_snapshot, oracle: independent }
     mssql:    { na: "SQL Server has no ENUM or SET type" }

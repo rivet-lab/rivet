@@ -1308,6 +1308,7 @@ impl OracleChangeStream {
                 row_id: seeded!("renumber-equal-images", row_id.filter(|_| false), row_id),
                 before_names: None,
                 before_poison: None,
+                image_labels: None,
             },
         })
     }
