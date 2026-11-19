@@ -79,7 +79,7 @@ def red_keys(log: str) -> list[str]:
     return sorted(keys)
 
 
-def history_line(root: Path, sha: str, slices: int, ident: dict[str, str], previous: dict | None) -> dict:
+def history_line(root: Path, sha: str, slices: int, ident: dict[str, str], previous: dict | None, spec: str | None = None) -> dict:
     """The line of `sha` graded by the run `ident`: per slice its facts, the sums, the red keys, and the delta against `previous`."""
     per, reds, skips = [], set(), set()
     for i in range(slices + 1):
@@ -96,7 +96,7 @@ def history_line(root: Path, sha: str, slices: int, ident: dict[str, str], previ
         if code != 0 and not keys:
             reds.add(f"exit {code} with no red cell")
         skips.update("/".join(map(str, s)) for s in rec.get("skipped_env") or [])
-    ok = hosted.render(root, sha, slices)[1]
+    ok = hosted.render(root, sha, slices, spec=spec)[1]
     before = set((previous or {}).get("red_keys", []))
     count = lambda k: sum(p.get(k) or 0 for p in per)  # noqa: E731
     who = {k: ident[k] for k in ("ref", "ref_name", "ref_type", "event", "run_id", "run_attempt", "run_url")}
@@ -144,7 +144,7 @@ def seen(sha: str, ref: str, event: str, remote: str, token: str) -> bool:
         return any(x.get("sha") == sha and x.get("ref") == ref for x in clone_branch(Path(tmp), remote, token))
 
 
-def record(root: Path, sha: str, slices: int, remote: str, token: str, ident: dict[str, str]) -> str:
+def record(root: Path, sha: str, slices: int, remote: str, token: str, ident: dict[str, str], spec: str | None = None) -> str:
     """Append the line of the run `ident` and push the branch; `recorded`, `already recorded` (same sha, ref and run), or an error after the retries."""
     for _ in range(RETRIES):
         with tempfile.TemporaryDirectory() as tmp:
@@ -152,7 +152,7 @@ def record(root: Path, sha: str, slices: int, remote: str, token: str, ident: di
             lines = clone_branch(work, remote, token)
             if any(line_key(x) == (sha, ident["ref"], ident["run_id"]) for x in lines):
                 return "already recorded"
-            line = history_line(root, sha, slices, ident, next((x for x in reversed(lines) if x.get("ref") == ident["ref"]), None))
+            line = history_line(root, sha, slices, ident, next((x for x in reversed(lines) if x.get("ref") == ident["ref"]), None), spec)
             with (work / FILE).open("a") as f:
                 f.write(json.dumps(line, sort_keys=True) + "\n")
             git(work, "add", FILE)
@@ -297,7 +297,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--artifacts", type=Path)
     ap.add_argument("--sha")
     ap.add_argument("--ref")
-    ap.add_argument("--slices", type=int)
+    ap.add_argument("--slices", help="n live slices, or n:k with k stage slices besides (the workflow's LIVE_SLICES)")
     ap.add_argument("--event", default="")
     ap.add_argument("--remote")
     ap.add_argument("--self-test", action="store_true")
@@ -325,11 +325,15 @@ def main(argv: list[str]) -> int:
         return 0
     if ns.artifacts is None or not ns.slices:
         ap.error("record needs --artifacts and --slices")
+    try:
+        top, spec = hosted.parse_slices(ns.slices)
+    except ValueError as e:
+        ap.error(str(e))
     ident = identity(env)
     if not on_main(ns.sha, env):
         print(f"gate-history: {ns.sha[:12]} is not a main commit of a main run; nothing recorded")
         return 0
-    print(f"gate-history: {record(ns.artifacts, ns.sha, ns.slices, remote, token, ident)}")
+    print(f"gate-history: {record(ns.artifacts, ns.sha, top, remote, token, ident, spec)}")
     return 0
 
 

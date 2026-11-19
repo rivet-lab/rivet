@@ -79,10 +79,10 @@ def job_names(plan: dict, slices: int) -> list[str]:
     return [fill(plan["plan"]), *(fill(plan["slice"], i) for i in range(slices + 1)), fill(plan["verdict"])]
 
 
-def stage_cuts(slices: int, stage_names: Callable[[Sequence[str]], list[str]]) -> tuple[list[str], dict[int, list[str]], list[str]]:
-    """The stages of the whole gate, of each hosted slice, and of the devbox half, cut by the very selector a run uses."""
+def stage_cuts(slices: int, stage_names: Callable[[Sequence[str]], list[str]], spec: str | None = None) -> tuple[list[str], dict[int, list[str]], list[str]]:
+    """The stages of the whole gate, of each hosted slice (named `i/<spec>`, `spec` is `slices` for one stage slice), and of the devbox half, cut by the very selector a run uses."""
     whole = stage_names([])
-    return whole, {i: stage_names(["--half", HOSTED, "--live-shard", f"{i}/{slices}"]) for i in range(slices + 1)}, stage_names(["--half", DEVBOX])
+    return whole, {i: stage_names(["--half", HOSTED, "--live-shard", f"{i}/{spec or slices}"]) for i in range(slices + 1)}, stage_names(["--half", DEVBOX])
 
 
 def default_stage_names(argv: Sequence[str]) -> list[str]:
@@ -186,20 +186,33 @@ def hosted_refusal(sha: str, hosted: Path, plan: dict, repo: str, ran: dict[int,
     n, records = slices_of(verdict), verdict.get("records")
     if not (n and isinstance(records, list)):
         return refuse("SLICE_MISSING", "the hosted verdict names no live slices")
+    spec = spec_of(verdict)
+    if spec is None:
+        return refuse("SLICE_MISSING", f"the hosted verdict's spec {verdict.get('spec')!r} does not name its {n + 1} slices")
     by_slice = {r.get("slice"): r for r in records if isinstance(r, dict)}
     for i in range(n + 1):
-        what, entry = f"hosted slice {i}/{n}", by_slice.get(i)
+        what, entry = f"hosted slice {i}/{spec}", by_slice.get(i)
         if not entry or not isinstance(entry.get("record"), dict):
             return refuse("SLICE_MISSING", f"{what} has no record")
         if entry.get("exit_code") != 0:
             return refuse("SLICE_FAILED", f"{what} exited {entry.get('exit_code')!r}")
         rec = entry["record"]
-        if rec.get("shard") != f"{i}/{n}":
+        if rec.get("shard") != f"{i}/{spec}":
             return refuse("SLICE_MISSING", f"{what} holds the record of shard {rec.get('shard')!r}")
         if why := record_refusal(rec, sha, HOSTED_SHARD_GATE, HOSTED, what):
             return why
         ran[i] = rec["stages"]
     return provenance_refusal(verdict, load_json(hosted / "run.json"), load_json(hosted / "jobs.json"), plan, repo)
+
+
+def spec_of(verdict: object) -> str | None:
+    """The `n` or `n:k` the hosted run's slices were named after, None when the verdict names none that fits its highest slice index (n live slices and k stage slices make n + k - 1)."""
+    if isinstance(verdict, dict) and "spec" not in verdict:
+        return str(slices_of(verdict)) if slices_of(verdict) else None
+    spec = verdict.get("spec") if isinstance(verdict, dict) else None
+    m = re.fullmatch(r"(\d+)(?::(\d+))?", spec) if isinstance(spec, str) else None
+    ok = m and int(m[1]) >= 1 and int(m[2] or 1) >= 1 and int(m[1]) + int(m[2] or 1) - 1 == slices_of(verdict)
+    return spec if ok else None
 
 
 def slices_of(verdict: object) -> int:
@@ -213,9 +226,11 @@ def halves_refusal(sha: str, gate_record: Path, hosted: Path, *, plan: dict | No
     """Why `sha` may not be tagged on the account of the two halves, or None when both are green on this commit, built from it, from the right runs, and together run every stage of the gate once."""
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         return refuse("SHA", f"the gate identity is a full 40-hex commit sha, got {sha!r}")
-    n = slices_of(load_json(hosted / "verdict.json")) or 1
+    verdict = load_json(hosted / "verdict.json")
+    n = slices_of(verdict) or 1
+    spec = spec_of(verdict) or str(n)
     try:
-        whole, hosted_cut, devbox_cut = stage_cuts(n, stage_names)
+        whole, hosted_cut, devbox_cut = stage_cuts(n, stage_names, spec)
     except SystemExit as e:
         return refuse("STAGE_UNPLACED", str(e))
     devbox: list[str] = []
@@ -226,7 +241,7 @@ def halves_refusal(sha: str, gate_record: Path, hosted: Path, *, plan: dict | No
     if why:
         return why
     return (stage_list_refusal(devbox, devbox_cut, "the devbox half")
-            or next((w for i, ran in sorted(slices.items()) if (w := stage_list_refusal(ran, hosted_cut[i], f"hosted slice {i}/{n}"))), None))
+            or next((w for i, ran in sorted(slices.items()) if (w := stage_list_refusal(ran, hosted_cut[i], f"hosted slice {i}/{spec}"))), None))
 
 
 def run_gh(args: Sequence[str]) -> str:
@@ -286,21 +301,21 @@ REPO = "rivet-lab/rivet"
 RUN_ID = 43625455951
 
 
-def green(slices: int = 3, sha: str = SHA) -> dict:
+def green(slices: int = 3, sha: str = SHA, spec: str | None = None) -> dict:
     """A green pair of halves of `sha` as plain data: the devbox gate line and the hosted verdict, run and job list, with the stages the real selector cuts."""
     from dev.pytools import release
 
-    whole, hosted_cut, devbox_cut = stage_cuts(slices, default_stage_names)
+    whole, hosted_cut, devbox_cut = stage_cuts(slices, default_stage_names, spec)
     base = {"at": "2026-11-14T10:00:00Z", "sha": sha, "binary": sha[:9], "config": release.CANONICAL_CONFIG, "dirty": False,
             "verdict": "RELEASE-READY", "skipped_env": []}
     plan = workflow_plan()
-    records = [{"slice": i, "exit_code": 0, "record": {**base, "gate": HOSTED_SHARD_GATE, "shard": f"{i}/{slices}", "binary_sha256": f"{i:x}" * 64,
+    records = [{"slice": i, "exit_code": 0, "record": {**base, "gate": HOSTED_SHARD_GATE, "shard": f"{i}/{spec or slices}", "binary_sha256": f"{i:x}" * 64,
                                                       "stages": hosted_cut[i], "host": {"system": "Linux", "machine": "x86_64"}}} for i in range(slices + 1)]
     flow = {"run_id": str(RUN_ID), "run_attempt": "1", "repository": REPO, "ref": "refs/heads/main", "event": "workflow_dispatch",
             "workflow_ref": f"{REPO}/{WORKFLOW}@refs/heads/main"}
     return {"plan": plan, "whole": whole, "devbox": [{**base, "gate": half_gate(DEVBOX), "binary_sha256": "d" * 64, "stages": devbox_cut,
                                                       "host": {"system": "Darwin", "machine": "arm64"}}],
-            "verdict": {"kind": verdict_script().VERDICT_KIND, "schema": 1, "sha": sha, "slices": slices, "github": flow, "records": records},
+            "verdict": {"kind": verdict_script().VERDICT_KIND, "schema": 1, "sha": sha, "slices": slices, **({"spec": spec} if spec else {}), "github": flow, "records": records},
             "run": {"id": RUN_ID, "run_attempt": 1, "path": WORKFLOW, "head_branch": BRANCH, "event": "workflow_dispatch", "status": "completed",
                     "conclusion": "success", "repository": {"full_name": REPO}, "head_repository": {"full_name": REPO}},
             "jobs": {"jobs": [{"name": n, "conclusion": "success"} for n in job_names(plan, slices)]}}
@@ -441,6 +456,16 @@ def self_test() -> int:
     good = green()
     assert refusal_of(good) is None, refusal_of(good)
     assert refusal_of(green(1)) is None, "one live slice is a legal cut"
+    assert refusal_of(green(4, spec="3:2")) is None, "3 live slices and 2 stage slices are a legal cut"
+    split = green(4, spec="3:2")
+    drop(split, 4, split["verdict"]["records"][4]["record"]["stages"][0])
+    assert (refusal_of(split) or "").startswith("HALVES_STAGE_MISSING: "), "a stage dropped from a stage slice is not refused"
+    swapped = green(4, spec="3:2")
+    swapped["verdict"]["records"][4]["record"]["stages"] = swapped["verdict"]["records"][0]["record"]["stages"]
+    assert (refusal_of(swapped) or "").startswith("HALVES_STAGE_MISSING: "), "a stage slice that ran another stage slice's stages is not refused"
+    odd_spec = green(4, spec="3:2")
+    odd_spec["verdict"]["spec"] = "3:3"
+    assert (refusal_of(odd_spec) or "").startswith("HALVES_SLICE_MISSING: "), "a spec that does not fit the slice count is not refused"
     for name, code, mutate in mutants():
         d = green()
         mutate(d)
