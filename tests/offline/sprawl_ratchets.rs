@@ -65,7 +65,7 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ("src/load/orchestrate.rs::run_loads#1", 159),
     ("src/load/plan.rs::build_plans_keyed#1", 178),
     ("src/pipeline/apply_cmd.rs::run_apply_command#1", 255),
-    ("src/pipeline/cdc/sink.rs::run_to_files#1", 225),
+    ("src/pipeline/cdc/sink.rs::run_to_files#1", 210),
     (
         "src/pipeline/chunked/detect.rs::detect_and_generate_chunks#1",
         159,
@@ -84,7 +84,7 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
         199,
     ),
     ("src/pipeline/cli.rs::show_journal#1", 156),
-    ("src/pipeline/finalize.rs::write_run_manifest#1", 187),
+    ("src/pipeline/finalize.rs::write_run_manifest#1", 182),
     ("src/pipeline/job.rs::execute_resolved_plan#1", 260),
     ("src/pipeline/job.rs::run_export_job_inner#1", 230),
     ("src/pipeline/keyset.rs::run_keyset#1", 200),
@@ -98,7 +98,7 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ("src/pipeline/run.rs::run_waves#1", 171),
     (
         "src/pipeline/validate_manifest.rs::verify_unredacted#1",
-        227,
+        222,
     ),
     ("src/plan/build.rs::build_plan_on#1", 226),
     (

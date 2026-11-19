@@ -968,6 +968,43 @@ mod tests {
         );
     }
 
+    /// A column no Arrow type carries is refused on the batch probe and kept as it is on the stream probe.
+    #[test]
+    fn the_probe_refuses_an_unmapped_column_for_batch_and_not_for_a_stream() {
+        use crate::types::{ColumnOverrides, RivetType, SourceColumn, TypeMapping};
+        struct Unmapped;
+        impl crate::source::Source for Unmapped {
+            fn export(
+                &mut self,
+                _request: &crate::source::ExportRequest<'_>,
+                _sink: &mut dyn crate::source::BatchSink,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn query_scalar(&mut self, _sql: &str) -> anyhow::Result<Option<String>> {
+                Ok(None)
+            }
+            fn type_mappings(
+                &mut self,
+                _query: &str,
+                _overrides: &ColumnOverrides,
+            ) -> anyhow::Result<Vec<TypeMapping>> {
+                Ok(vec![TypeMapping::from_source(
+                    &SourceColumn::simple("net", "cidr", true),
+                    RivetType::Unsupported {
+                        native_type: "cidr".into(),
+                        reason: "no arrow type".into(),
+                    },
+                )])
+            }
+        }
+        let overrides = ColumnOverrides::new();
+        let batch = super::probe_mappings(&mut Unmapped, false, "q", &overrides).unwrap();
+        assert_eq!(batch[0].refusal.as_deref(), Some("no arrow type"));
+        let stream = super::probe_mappings(&mut Unmapped, true, "q", &overrides).unwrap();
+        assert_eq!(stream[0].refusal, None);
+    }
+
     /// The two callers must DIVERGE, and only where divergence is warranted.
     #[test]
     fn only_a_bare_name_makes_an_unresolvable_capture_fatal_and_only_for_the_load() {

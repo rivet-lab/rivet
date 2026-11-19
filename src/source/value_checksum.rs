@@ -697,6 +697,7 @@ mod tests {
             parts,
             column_checksums: None,
             checksum_key_column: None,
+            nulled_cells: None,
         }
     }
 
@@ -1526,6 +1527,7 @@ mod tests {
             column_checksums: None,
             checksum_render: None,
             checksum_key_column: None,
+            nulled_cells: None,
             row_hash: None,
             split_window: Some(SplitWindow {
                 key_column: "id".into(),
