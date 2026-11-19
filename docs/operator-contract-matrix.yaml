@@ -569,10 +569,10 @@ scenarios:
     oracle:   { na: "an Oracle CDC stream cannot be loaded (RIVET_CONFIG_SOURCE_MODE_UNSUPPORTED), so no CDC key is admitted by its landing" }
 
   - id: load_key_landing_of_a_query_export
-    what: "2026-11-18 issue 964: a `query:` export whose primary-key column is an Oracle TIMESTAMP(7..9) declared as `timestamp` is refused by RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT (exit 5) by `rivet check` and by the load, the sub-microsecond fact read from the query's own cursor description when the export names no table"
+    what: "2026-11-18 issue 964: a `query:` export whose primary-key column is a SQL Server datetime2(7) or an Oracle TIMESTAMP(7..9) declared as `timestamp` is refused by RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT (exit 5) by `rivet check` and by the load, the sub-microsecond fact read from the query's own cursor description when the export names no table"
     postgres: { na: "a PostgreSQL timestamp holds at most microseconds, so the landing loses nothing" }
     mysql:    { na: "a MySQL datetime/timestamp holds at most microseconds, so the landing loses nothing" }
-    mssql:    { na: "2026-11-18: the SQL Server query probe (sys.dm_exec_describe_first_result_set) is an override in src/source/mssql held back by the owner rule on that file; closes with that override and its live cell" }
+    mssql:    { test: an_mssql_sub_microsecond_query_key_is_refused_into_clickhouse }
     mongo:    { na: "a MongoDB timestamp holds at most milliseconds and its key is the document _id" }
     oracle:   { test: an_oracle_sub_microsecond_query_key_is_refused_into_clickhouse }
 

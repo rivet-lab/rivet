@@ -5931,7 +5931,7 @@ seeds:
       mysql:
         na: "DATETIME(6) is at most a microsecond, so no key column lands finer-collapsed"
       mssql:
-        na: "the SQL Server query probe (sys.dm_exec_describe_first_result_set) needs an override in src/source/mssql, held back by the owner rule on that file (#964, 2026-11-18); closes with that override"
+        cells: [an_mssql_sub_microsecond_query_key_is_refused_into_clickhouse, "lib:the_open_probe_reads_the_finer_columns_of_a_table_and_of_a_query"]
       mongo:
         na: "MongoDB timestamps are at most a millisecond"
       oracle:

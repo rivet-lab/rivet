@@ -129,7 +129,7 @@ fn oracle_neighbour_cursor_is_admitted(
 }
 
 /// An MSSQL `datetime2(7)` primary-key column lands at microseconds: the load is refused twice and by `check`, the warehouse is unchanged, and `timestamp_ns` then keeps both rows that differ below a microsecond, read back by the second client (the rig oracle reads the source at microseconds).
-fn mssql_sub_microsecond_key_is_refused(kind: WarehouseKind) {
+fn mssql_sub_microsecond_key_is_refused(kind: WarehouseKind, via_query: bool) {
     let e = SqlEngine::Mssql;
     e.alive();
     let Some(mut w) = Warehouse::of(kind, "kadmk") else {
@@ -143,9 +143,20 @@ fn mssql_sub_microsecond_key_is_refused(kind: WarehouseKind) {
     e.exec(&format!(
         "INSERT INTO {table} (dev, ts, seq) VALUES (1, '2024-01-01 00:00:00.1234561', 1)"
     ));
-    let mut rig = incremental(e, &w, &table, "seq", "dev, ts").no_oracle(
-        "the datetime2(7) rows differ below a microsecond, which the oracle reads the source at; the view is read back by the second client",
-    );
+    let source = if via_query {
+        e.rig(&table)
+            .query(&format!("SELECT dev, ts, seq FROM {table}"))
+    } else {
+        e.rig(&table)
+    };
+    let mut rig = w
+        .shape(
+            e.staged(source, "incremental", &["cursor_column: seq"]),
+            "dev, ts",
+        )
+        .no_oracle(
+            "the datetime2(7) rows differ below a microsecond, which the oracle reads the source at; the view is read back by the second client",
+        );
     rig.run_ok();
     e.exec(&format!(
         "INSERT INTO {table} (dev, ts, seq) VALUES (1, '2024-01-01 00:00:00.1234569', 2)"
@@ -363,7 +374,13 @@ fn an_oracle_sub_microsecond_query_key_is_refused_into_clickhouse() {
 #[test]
 #[ignore = "live: requires docker compose mssql + clickhouse + fake-gcs"]
 fn an_mssql_sub_microsecond_key_is_refused_into_clickhouse() {
-    mssql_sub_microsecond_key_is_refused(WarehouseKind::ClickHouse);
+    mssql_sub_microsecond_key_is_refused(WarehouseKind::ClickHouse, false);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql + clickhouse + fake-gcs"]
+fn an_mssql_sub_microsecond_query_key_is_refused_into_clickhouse() {
+    mssql_sub_microsecond_key_is_refused(WarehouseKind::ClickHouse, true);
 }
 
 #[test]
