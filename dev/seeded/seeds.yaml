@@ -6169,6 +6169,27 @@ seeds:
           - "lib:a_remote_plaintext_webhook_is_refused_before_any_request"
           - "lib:a_remote_plaintext_api_endpoint_is_refused"
 
+  - name: state-copy-corrupt-source-read-as-empty
+    class: "`rivet state copy --to` reads a source file that is not a SQLite database as a state with no rows and refuses it as RIVET_STATE_COPY_SOURCE_EMPTY, so the operator is sent to name another file while the one named is damaged"
+    history: "#917, refusal_names_true_cause: the accepted RED guard/state_copy_--to_URL/state_corrupt on every source engine, RED on main 2026-11-19 (printed RIVET_STATE_COPY_SOURCE_EMPTY, injected RIVET_STATE_FILE_CORRUPT)"
+    scope: source
+    switch: state-copy-corrupt-source-read-as-empty
+    engines:
+      postgres:
+        cells: [every_refusal_is_coded_and_names_the_true_cause]
+      mysql:
+        cells: [every_refusal_is_coded_and_names_the_true_cause]
+      mssql:
+        cells: [every_refusal_is_coded_and_names_the_true_cause]
+      mongo:
+        cells: [every_refusal_is_coded_and_names_the_true_cause]
+      oracle:
+        cells: [every_refusal_is_coded_and_names_the_true_cause]
+      lib:
+        cells:
+          - "lib:a_corrupt_source_is_refused_as_corrupt"
+          - "lib:a_file_that_is_no_database_is_corrupt_for_the_reader_and_empty_for_the_guard"
+
   - name: plaintext-gate-decides-by-text
     class: "the remote-plaintext gate and the cloud-endpoint loopback gate decide by the text of the URL, not by the parser the HTTP client uses: `http:/host`, `http:host`, `ht<TAB>tp://host` and `http://host\\@127.0.0.1` pass as non-http or loopback while the client sends the loader password, the webhook secret, the bearer token or the uploaded rows to `host` in cleartext"
     history: "rivet-verifier on Linux, 2026-11-11: the four spellings passed require_https_or_loopback on main (#953); RED on main 2026-11-11 (lib cells for each spelling)"
