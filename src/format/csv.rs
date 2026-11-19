@@ -23,18 +23,8 @@ impl super::Format for CsvFormat {
         schema: &SchemaRef,
         mut writer: Box<dyn Write + Send>,
     ) -> Result<Box<dyn super::FormatWriter + Send>> {
-        if let Some(field) = schema
-            .fields()
-            .iter()
-            .find(|f| !csv_serializable(f.data_type()))
-        {
-            crate::rivet_bail!(
-                crate::error::codes::CONFIG_FORMAT_COLUMN_UNSUPPORTED,
-                "CSV cannot serialize column '{}' (Arrow type {:?}); use `format: parquet` \
-                 or drop the column from the query",
-                field.name(),
-                field.data_type()
-            );
+        for field in schema.fields() {
+            refuse_column(field.name(), field.data_type())?;
         }
         let header = schema
             .fields()
@@ -88,6 +78,18 @@ impl super::FormatWriter for CsvFormatWriter {
     }
 }
 
+/// The coded refusal for a column CSV cannot serialize.
+pub(crate) fn refuse_column(name: &str, dt: &DataType) -> Result<()> {
+    if csv_serializable(dt) {
+        return Ok(());
+    }
+    crate::rivet_bail!(
+        crate::error::codes::CONFIG_FORMAT_COLUMN_UNSUPPORTED,
+        "CSV cannot serialize column '{name}' (Arrow type {dt:?}); use `format: parquet` \
+         or drop the column from the query"
+    )
+}
+
 /// Arrow types `write_csv_value` can serialize.
 pub(crate) fn csv_serializable(dt: &DataType) -> bool {
     matches!(
@@ -123,6 +125,11 @@ fn write_lower_hex(writer: &mut dyn Write, bytes: &[u8]) -> Result<()> {
         writer.write_all(&chunk[..n])?;
     }
     Ok(())
+}
+
+/// The bytes of an empty string or an empty binary cell: a quoted empty field, never the bare field that spells NULL.
+fn empty_value() -> &'static [u8] {
+    seeded!("csv-empty-value-written-bare", &b""[..], &b"\"\""[..])
 }
 
 fn write_csv_value(writer: &mut dyn Write, array: &dyn Array, idx: usize) -> Result<()> {
@@ -192,7 +199,7 @@ fn write_csv_value(writer: &mut dyn Write, array: &dyn Array, idx: usize) -> Res
                 .expect("DataType/Array mismatch");
             let val = arr.value(idx);
             if val.is_empty() {
-                writer.write_all(b"\"\"")?;
+                writer.write_all(empty_value())?;
                 return Ok(());
             }
             if val
@@ -219,7 +226,7 @@ fn write_csv_value(writer: &mut dyn Write, array: &dyn Array, idx: usize) -> Res
                 .expect("DataType/Array mismatch");
             let val = arr.value(idx);
             if val.is_empty() {
-                writer.write_all(b"\"\"")?;
+                writer.write_all(empty_value())?;
                 return Ok(());
             }
             write_lower_hex(writer, val)?;

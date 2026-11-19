@@ -203,6 +203,18 @@ impl StatementDurationTimeout {
         }
     }
 
+    /// PostgreSQL server-side `statement_timeout` (SQLSTATE 57014) on a read rivet bounded by `tuning.statement_timeout_s`.
+    pub fn postgres(seconds: u64) -> Self {
+        Self {
+            message: format!(
+                "postgres: statement timeout after {seconds}s (tuning.statement_timeout_s) — \
+                 this query cannot finish within the budget; split it with `mode: chunked` \
+                 (per-chunk statements stay under the limit) or raise \
+                 `tuning.statement_timeout_s`"
+            ),
+        }
+    }
+
     /// Oracle statement-duration timeout: the driver call timeout plus a check between rows.
     #[cfg(feature = "oracle")]
     pub fn oracle(seconds: u64) -> Self {
@@ -1661,7 +1673,7 @@ pub mod codes {
     /// A `columns_from: grants` table whose account may read no column, or not its key.
     pub const SOURCE_COLUMNS_UNREADABLE: Code = usage(
         "RIVET_SOURCE_COLUMNS_UNREADABLE",
-        "grant the account `SELECT` on the columns the message names (at least the key), or drop the table from the export",
+        "grant the account `SELECT` on the columns the message names (at least the key), or on MongoDB create the `$project` view the message describes, or drop the table from the export",
     );
     /// A `columns_from: grants` stream met a grant change that alters what it may deliver.
     pub const SOURCE_CDC_GRANTS_CHANGED: Code = transient(

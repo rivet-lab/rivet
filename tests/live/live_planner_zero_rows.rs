@@ -223,6 +223,7 @@ fn parallel_keyset_incremental_delivers_the_source_rows(
     );
     let row = |g: i64| format!("{}, {g}", key(g));
     insert_rows(engine, &table, "id, v", 1..=3000, row);
+    engine.refresh_row_estimate(&table);
 
     let rig = parallel_keyset_rig(engine, &table).export_line("keyset_incremental: true");
     rig.run_ok();

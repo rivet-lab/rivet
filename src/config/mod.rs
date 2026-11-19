@@ -482,7 +482,6 @@ impl Config {
     fn validate(&self) -> crate::error::Result<()> {
         self.validate_exports_list()?;
         self.validate_source_connection()?;
-        self.validate_columns_from()?;
         self.validate_non_sql_source_modes()?;
         for export in &self.exports {
             self.validate_export(export)?;
@@ -669,15 +668,7 @@ impl Config {
         Ok(())
     }
 
-    /// `columns_from: grants` on an engine that does not enforce it is refused for every mode, SQL or not.
-    fn validate_columns_from(&self) -> crate::error::Result<()> {
-        if let Some(why) = source::columns_from_refusal(&self.source) {
-            crate::config_bail!(crate::error::codes::CONFIG_SOURCE_MODE_UNSUPPORTED, "{why}");
-        }
-        Ok(())
-    }
-
-    /// Non-SQL sources (MongoDB) support only `mode: full` today.
+    /// Non-SQL sources (MongoDB) support only `mode: full` and `mode: cdc`.
     fn validate_non_sql_source_modes(&self) -> crate::error::Result<()> {
         if self.source.source_type.is_sql() {
             return Ok(());

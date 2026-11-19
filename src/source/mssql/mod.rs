@@ -2,6 +2,7 @@
 
 mod arrow_convert;
 pub(crate) mod cdc;
+pub(crate) mod column_grants;
 mod proxy;
 
 pub use proxy::MssqlProxyKind;
@@ -451,9 +452,40 @@ fn parse_mssql_simple_from_table(query: &str) -> Option<(String, String)> {
     }
 }
 
+/// The first cell of `sql`'s first row on `client`.
+async fn scalar_on(client: &mut MssqlClient, sql: &str) -> Result<Option<String>> {
+    let row = client
+        .query(sql, &[])
+        .await
+        .map_err(|e| {
+            crate::error::coded_driver(
+                crate::error::codes::SOURCE_QUERY_FAILED,
+                "mssql: scalar query failed",
+                e,
+            )
+        })?
+        .into_row()
+        .await
+        .map_err(|e| {
+            crate::error::coded_driver(
+                crate::error::codes::SOURCE_QUERY_FAILED,
+                "mssql: reading scalar row failed",
+                e,
+            )
+        })?;
+    Ok(row.and_then(|r| scalar_to_string(&r)))
+}
+
 impl Source for MssqlSource {
     fn introspect_for_chunking(&mut self, qualified_table: &str) -> Result<TableIntrospection> {
         introspect_mssql_on(self, qualified_table)
+    }
+
+    fn readable_columns(
+        &mut self,
+        table: &str,
+    ) -> Result<Option<crate::source::cdc::ReadableColumns>> {
+        column_grants::readable_relation(self, table).map(|(_, _, r)| Some(r))
     }
 
     fn finer_than_microsecond_columns(&mut self, table: &str) -> Result<Vec<String>> {
@@ -462,6 +494,13 @@ impl Source for MssqlSource {
             .into_iter()
             .map(|(column, _)| column)
             .collect())
+    }
+
+    fn finer_than_microsecond_in_query(&mut self, query: &str) -> Result<Vec<String>> {
+        Ok(self
+            .query_scalar(&finer_than_microsecond_in_query_sql(query))?
+            .map(|s| split_char31(&s))
+            .unwrap_or_default())
     }
 
     fn export(&mut self, request: &ExportRequest<'_>, sink: &mut dyn BatchSink) -> Result<()> {
@@ -616,27 +655,33 @@ impl Source for MssqlSource {
 
     fn query_scalar(&mut self, sql: &str) -> Result<Option<String>> {
         let Self { rt, client, .. } = self;
+        rt.block_on(scalar_on(client, sql))
+    }
+
+    fn query_scalar_within(
+        &mut self,
+        sql: &str,
+        statement_timeout_s: u64,
+    ) -> Result<Option<String>> {
+        if statement_timeout_s == 0 {
+            return self.query_scalar(sql);
+        }
+        let budget = std::time::Duration::from_secs(statement_timeout_s);
+        let Self { rt, client, .. } = self;
         rt.block_on(async {
-            let row = client
-                .query(sql, &[])
-                .await
-                .map_err(|e| {
-                    crate::error::coded_driver(
-                        crate::error::codes::SOURCE_QUERY_FAILED,
-                        "mssql: scalar query failed",
-                        e,
-                    )
-                })?
-                .into_row()
-                .await
-                .map_err(|e| {
-                    crate::error::coded_driver(
-                        crate::error::codes::SOURCE_QUERY_FAILED,
-                        "mssql: reading scalar row failed",
-                        e,
-                    )
-                })?;
-            Ok(row.and_then(|r| scalar_to_string(&r)))
+            match tokio::time::timeout(budget, scalar_on(client, sql)).await {
+                Ok(read) => read,
+                Err(_) => {
+                    client.cancel_query().await.map_err(|e| {
+                        crate::error::coded_driver(
+                            crate::error::codes::SOURCE_QUERY_FAILED,
+                            "mssql: cancelling the timed-out scalar query failed",
+                            e,
+                        )
+                    })?;
+                    Err(crate::source::StatementDurationTimeout::mssql(statement_timeout_s).into())
+                }
+            }
         })
     }
 
@@ -1005,8 +1050,12 @@ fn numeric_to_display(raw: i128, scale: usize) -> String {
 
 /// Render a row's first column as a display string for `query_scalar` (min/max bounds, COUNT(*), SELECT 1).
 fn scalar_to_string(row: &tiberius::Row) -> Option<String> {
-    use tiberius::ColumnData;
-    let cell = row.cells().next().map(|(_, d)| d)?;
+    scalar_text(row.cells().next().map(|(_, d)| d)?)
+}
+
+/// A scalar cell as text SQL Server casts back to its own type: the shared ISO renderer for every type with no arm of its own.
+fn scalar_text(cell: &tiberius::ColumnData<'static>) -> Option<String> {
+    use tiberius::{ColumnData, FromSql};
     match cell {
         ColumnData::U8(v) => v.map(|x| x.to_string()),
         ColumnData::I16(v) => v.map(|x| x.to_string()),
@@ -1018,17 +1067,21 @@ fn scalar_to_string(row: &tiberius::Row) -> Option<String> {
         ColumnData::String(v) => v.as_ref().map(|s| s.to_string()),
         ColumnData::Numeric(v) => v.map(|n| numeric_to_display(n.value(), n.scale() as usize)),
         ColumnData::Guid(v) => v.map(|g| g.to_string()),
-        ColumnData::Date(_) => row
-            .try_get::<chrono::NaiveDate, _>(0)
+        ColumnData::Date(_) => chrono::NaiveDate::from_sql(cell)
             .ok()
             .flatten()
             .map(|d| d.format("%Y-%m-%d").to_string()),
-        ColumnData::DateTime(_) | ColumnData::DateTime2(_) | ColumnData::SmallDateTime(_) => row
-            .try_get::<chrono::NaiveDateTime, _>(0)
-            .ok()
-            .flatten()
-            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.f").to_string()),
-        other => Some(format!("{other:?}")),
+        ColumnData::DateTime(_) | ColumnData::DateTime2(_) | ColumnData::SmallDateTime(_) => {
+            chrono::NaiveDateTime::from_sql(cell)
+                .ok()
+                .flatten()
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.f").to_string())
+        }
+        other => seeded!(
+            "mssql-scalar-text-debug-dump",
+            Some(format!("{other:?}")),
+            arrow_convert::cell_text(other)
+        ),
     }
 }
 
@@ -1072,6 +1125,17 @@ pub(crate) fn finer_than_microsecond_sql(schema: &str, table: &str) -> String {
            AND {type_name} IN ('datetime2', 'datetimeoffset') AND c.scale > {}",
         schema.replace('\'', "''"),
         table.replace('\'', "''"),
+        crate::source::keyset_key::MICROSECOND_DIGITS
+    )
+}
+
+/// SQL for the CHAR(31)-joined `datetime2` / `datetimeoffset` columns a query's first result set types finer than a microsecond, through an alias type too.
+pub(crate) fn finer_than_microsecond_in_query_sql(query: &str) -> String {
+    format!(
+        "SELECT STRING_AGG(CONVERT(nvarchar(max), name), CHAR(31)) \
+         FROM sys.dm_exec_describe_first_result_set(N'{}', NULL, 0) \
+         WHERE system_type_id IN (42, 43) AND scale > {}",
+        query.replace('\'', "''"),
         crate::source::keyset_key::MICROSECOND_DIGITS
     )
 }
@@ -1251,7 +1315,59 @@ mod tls_posture_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{catalog_decimal_to_params, parse_mssql_simple_from_table, parse_mssql_url};
+    use super::{
+        catalog_decimal_to_params, parse_mssql_simple_from_table, parse_mssql_url, scalar_text,
+    };
+
+    /// Every scalar a sampler reads back is text SQL Server casts, never a `ColumnData` debug dump.
+    #[test]
+    fn a_scalar_cell_reads_back_as_text_the_server_casts() {
+        use tiberius::ColumnData;
+        use tiberius::numeric::Numeric;
+        use tiberius::time::{Date, DateTime2, DateTimeOffset, Time};
+        let dt2 = |days, inc, scale| DateTime2::new(Date::new(days), Time::new(inc, scale));
+        let cases: Vec<(ColumnData<'static>, &str)> = vec![
+            (ColumnData::I32(Some(-7)), "-7"),
+            (ColumnData::I64(Some(i64::MAX)), "9223372036854775807"),
+            (ColumnData::F64(Some(0.1)), "0.1"),
+            (ColumnData::Bit(Some(true)), "true"),
+            (ColumnData::String(Some("a'b".into())), "a'b"),
+            (
+                ColumnData::Numeric(Some(Numeric::new_with_scale(-5, 3))),
+                "-0.005",
+            ),
+            (
+                ColumnData::Guid(Some(tiberius::Uuid::from_bytes([0xab; 16]))),
+                "abababab-abab-abab-abab-abababababab",
+            ),
+            (ColumnData::Date(Some(Date::new(693_595))), "1900-01-01"),
+            (
+                ColumnData::DateTime2(Some(dt2(693_595, 452_961_234_567, 7))),
+                "1900-01-01 12:34:56.123456700",
+            ),
+            (
+                ColumnData::DateTimeOffset(Some(DateTimeOffset::new(
+                    dt2(693_595, 36_000_000_000, 6),
+                    330,
+                ))),
+                "1900-01-01 15:30:00.000000 +05:30",
+            ),
+            (
+                ColumnData::DateTimeOffset(Some(DateTimeOffset::new(
+                    dt2(693_595, 123_456, 6),
+                    -480,
+                ))),
+                "1899-12-31 16:00:00.123456 -08:00",
+            ),
+            (ColumnData::Time(Some(Time::new(1_500, 3))), "00:00:01.500"),
+            (ColumnData::Binary(Some(vec![0xDE, 0xAD].into())), "dead"),
+        ];
+        for (cell, want) in cases {
+            assert_eq!(scalar_text(&cell).as_deref(), Some(want), "{cell:?}");
+        }
+        assert_eq!(scalar_text(&ColumnData::DateTimeOffset(None)), None);
+        assert_eq!(scalar_text(&ColumnData::I32(None)), None);
+    }
 
     #[test]
     fn mssql_url_percent_decodes_userinfo() {
@@ -1571,7 +1687,10 @@ mod tests {
 
 #[cfg(test)]
 mod key_probe_sql_tests {
-    use super::{finer_than_microsecond_sql, keyset_keys_sql, single_int_pk_sql, split_char31};
+    use super::{
+        finer_than_microsecond_in_query_sql, finer_than_microsecond_sql, keyset_keys_sql,
+        single_int_pk_sql, split_char31,
+    };
 
     /// A catalog list splits on its separator and drops empty members.
     #[test]
@@ -1585,6 +1704,17 @@ mod key_probe_sql_tests {
         let w = sql.find("WHERE i.").expect("WHERE");
         let g = sql[w..].find("GROUP BY i.object_id").expect("GROUP BY") + w;
         &sql[w..g]
+    }
+
+    /// The query probe reads the system type under an alias, quotes the query, and compares the scale with the microsecond digits.
+    #[test]
+    fn the_query_sub_microsecond_probe_quotes_the_query_and_reads_the_system_type() {
+        let sql = finer_than_microsecond_in_query_sql("SELECT 'a' AS x");
+        assert!(sql.contains("N'SELECT ''a'' AS x'"), "{sql}");
+        assert!(
+            sql.contains("system_type_id IN (42, 43) AND scale > 6"),
+            "{sql}"
+        );
     }
 
     /// H24: a composite UNIQUE(a NOT NULL, b NULL) must not surface `a` as a keyset key, so the per-column filters live in HAVING where COUNT(*) still counts every key column.

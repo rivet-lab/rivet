@@ -31,6 +31,8 @@ pub struct ManifestBuilder {
     checksum_render: Option<String>,
     /// The column the Form B checksum is keyed to (cursor/key column); `None` = un-keyed.
     checksum_key_column: Option<String>,
+    /// Cells written as NULL for a zero or partial date, per column, set by [`set_nulled_cells`](Self::set_nulled_cells).
+    nulled_cells: Option<Vec<(String, u64)>>,
     /// What this run's `_rivet_row_hash` covers.
     row_hash: Option<crate::enrich::RowHashContract>,
     /// For an `apply --pool --split` range sub-export.
@@ -81,6 +83,7 @@ impl ManifestBuilder {
             parts: Vec::new(),
             column_checksums: None,
             checksum_key_column: None,
+            nulled_cells: None,
             row_hash: plan.row_hash.clone(),
         }
     }
@@ -94,6 +97,11 @@ impl ManifestBuilder {
         self.column_checksums = Some(checksums);
         self.checksum_key_column = key_column;
         self.checksum_render = Some(crate::source::value_checksum::CHECKSUM_RENDER_ID.to_string());
+    }
+
+    /// Record the cells this run wrote as NULL for a zero or partial date; an empty list records nothing.
+    pub fn set_nulled_cells(&mut self, cells: &[(String, u64)]) {
+        self.nulled_cells = (!cells.is_empty()).then(|| cells.to_vec());
     }
 
     /// Record a committed part.
@@ -175,6 +183,7 @@ impl ManifestBuilder {
             parts: self.parts,
             column_checksums: self.column_checksums,
             checksum_key_column: self.checksum_key_column,
+            nulled_cells: self.nulled_cells,
             row_hash: self.row_hash,
             split_window: self.split_window,
         }
@@ -585,6 +594,47 @@ mod tests {
             String::new(),
         );
         b.finalize(status)
+    }
+
+    /// Nulled cells reach the manifest only when there are some, and a manifest written without them still parses.
+    #[test]
+    fn nulled_cells_are_recorded_only_when_present_and_the_field_is_additive() {
+        let plain = build_manifest(ManifestStatus::Success);
+        assert_eq!(plain.nulled_cells, None);
+        assert!(
+            !serde_json::to_string(&plain)
+                .unwrap()
+                .contains("nulled_cells")
+        );
+        let mut b = ManifestBuilder::new(
+            &plan_snapshot(),
+            "e",
+            "run_002",
+            chrono::Utc::now(),
+            "xxh3:0123456789abcdef".into(),
+            "mysql",
+            None,
+            Some("orders".into()),
+            "file:///tmp/out/".into(),
+        );
+        b.set_nulled_cells(&[]);
+        assert_eq!(b.finalize(ManifestStatus::Success).nulled_cells, None);
+        let mut b = ManifestBuilder::new(
+            &plan_snapshot(),
+            "e",
+            "run_003",
+            chrono::Utc::now(),
+            "xxh3:0123456789abcdef".into(),
+            "mysql",
+            None,
+            Some("orders".into()),
+            "file:///tmp/out/".into(),
+        );
+        b.set_nulled_cells(&[("d".into(), 2)]);
+        let m = b.finalize(ManifestStatus::Success);
+        assert_eq!(m.nulled_cells, Some(vec![("d".to_string(), 2)]));
+        let back: RunManifest = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(back.nulled_cells, m.nulled_cells);
     }
 
     #[test]

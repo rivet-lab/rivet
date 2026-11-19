@@ -543,6 +543,37 @@ exclude_re = [
     "replace <impl CatalogRows for Client>::text_rows -> Result<Vec<Vec<Option<String>>>> with Ok\\(vec!\\[",
     # 2026-10-31 #728: `note_statement` only sets `in_transaction` and `grants_pending`, both live-only; the live_cdc_column_grants:: cells kill its stub.
     "replace MysqlChangeStream::note_statement with \\(\\)",
+    # 2026-11-18 readable_columns: live catalog read; witness live_cdc_column_grants::a_column_grant_account_delivers_no_hidden_column_by_name_or_value_mysql (RED in the 2026-11-15 stub run).
+    "^src/source/mysql/column_grants\\.rs:\\d+:\\d+: replace readable_columns \\-> Result<Vec<String>> with .*$",
+    # 2026-11-18 readable_columns_of: live catalog read; witness live_cdc_column_grants::a_column_grant_account_delivers_no_hidden_column_by_name_or_value_mysql (RED in the 2026-11-15 stub run).
+    "^src/source/mysql/column_grants\\.rs:\\d+:\\d+: replace readable_columns_of \\-> Result<HashMap<String, ReadableColumns>> with .*$",
+    # 2026-11-18 resolve_grants: live catalog read; witness live_cdc_column_grants::a_column_grant_account_is_refused_without_the_policy_or_without_the_key_mysql (RED in the 2026-11-15 stub run).
+    "^src/source/mysql/column_grants\\.rs:\\d+:\\d+: replace resolve_grants \\-> Result<HashMap<String, ReadableColumns>> with .*$",
+    # 2026-11-18 MysqlKeys::relation: live catalog read; witness live_cdc_column_grants::a_declared_key_the_account_cannot_read_is_refused_by_code_before_anything_is_written_mysql (RED in the 2026-11-15 stub run).
+    "^src/source/mysql/column_grants\\.rs:\\d+:\\d+: replace <impl KeyCatalog for MysqlKeys<'_>>::relation \\-> Result<String> with .*$",
+    # 2026-11-18 MysqlKeys::primary_key: live catalog read; witness live_cdc_column_grants::a_primary_key_the_account_cannot_read_is_refused_by_code_with_the_remedy_mysql (RED in the 2026-11-15 stub run).
+    "^src/source/mysql/column_grants\\.rs:\\d+:\\d+: replace <impl KeyCatalog for MysqlKeys<'_>>::primary_key \\-> Result<Vec<String>> with .*$",
+    # 2026-11-18 MysqlKeys::denies: live catalog read; witness live_cdc_column_grants::a_column_grant_account_is_refused_without_the_policy_or_without_the_key_mysql (RED in the 2026-11-15 stub run).
+    "^src/source/mysql/column_grants\\.rs:\\d+:\\d+: replace <impl KeyCatalog for MysqlKeys<'_>>::denies \\-> Result<bool> with .*$",
+    # readable_columns: a stream method over the live `readable` map; stub run by hand 2026-11-19 (5 cells RED, led by live_cdc_column_grants_postgres::a_column_grant_role_delivers_no_hidden_column_by_name_or_value_in_cdc_postgres).
+    "^src/source/postgres/cdc\\.rs:\\d+:\\d+: replace <impl ChangeStream for PgChangeStream>::readable_columns -> Option<ReadableColumns> with None$",
+    # Probe::select_of prepares the projected select on a live client; stub runs by hand 2026-11-19: "xyzzy" 7 cells RED, empty live_cdc_column_grants_postgres::a_bit_column_is_refused_when_the_role_reads_it_and_never_looked_at_when_it_may_not_in_cdc_postgres.
+    "^src/source/postgres/cdc\\.rs:\\d+:\\d+: replace Probe<'a>::select_of -> Result<String> with .*$",
+    # refuse_grants_moved_since_resolved re-reads the grants on a live client; stub run by hand 2026-11-19 (live_cdc_column_grants_postgres::a_revoke_during_a_run_is_refused_by_code_and_the_next_run_delivers_the_row_without_the_column_in_cdc_postgres RED).
+    "^src/source/postgres/cdc\\.rs:\\d+:\\d+: replace refuse_grants_moved_since_resolved -> Result<\\(\\)> with Ok\\(\\(\\)\\)$",
+    # PgChangeStream::parse reads a wire row of a live slot; stub run by hand 2026-11-19 (6 cells RED, led by live_cdc_column_grants_postgres::a_column_grant_role_delivers_no_hidden_column_by_name_or_value_in_cdc_postgres).
+    "^src/source/postgres/cdc\\.rs:\\d+:\\d+: replace PgChangeStream::parse -> Result<Option<ChangeEvent>> with Ok\\(None\\)$",
+    # PgChangeStream::refuse_grants_moved re-reads the grants after each peek on a live client; stub run by hand 2026-11-19 (live_cdc_column_grants_postgres::a_revoke_during_a_run_is_refused_by_code_and_the_next_run_delivers_the_row_without_the_column_in_cdc_postgres RED).
+    "^src/source/postgres/cdc\\.rs:\\d+:\\d+: replace PgChangeStream::refuse_grants_moved -> Result<\\(\\)> with Ok\\(\\(\\)\\)$",
+    # PgChangeStream::next_spooled replays a spilled tail of a live slot; stub run by hand 2026-11-19 (live_cdc_column_grants_postgres::a_spilled_transaction_delivers_no_hidden_column_in_cdc_postgres timed out, never passed).
+    "^src/source/postgres/cdc\\.rs:\\d+:\\d+: replace PgChangeStream::next_spooled -> Result<Option<ChangeEvent>> with Ok\\(None\\)$",
+    # denied_by_server reads a server's typed 42501 verdict, which only a live server can raise; stub runs by hand 2026-11-19 (live_cdc_column_grants_postgres::a_sealed_plan_applied_after_a_revoke_is_refused_by_code_with_the_replan_remedy_in_batch_postgres RED for both).
+    "^src/source/postgres/column_grants\\.rs:\\d+:\\d+: replace denied_by_server -> Option<String> with None$",
+    "^src/source/postgres/column_grants\\.rs:\\d+:\\d+: replace == with != in denied_by_server$",
+    # grants_projection reads the readable columns on a live client; stub runs by hand 2026-11-19 (None, empty and "xyzzy" each RED in live_cdc_column_grants_postgres::a_column_grant_role_delivers_no_hidden_column_by_name_or_value_in_cdc_postgres).
+    "^src/preflight/postgres\\.rs:\\d+:\\d+: replace grants_projection -> Result<Option<String>> with .*$",
+    # check_postgres connects once and diagnoses each export; stub run by hand 2026-11-19 (live_cdc_column_grants_postgres::a_column_grant_role_delivers_no_hidden_column_by_name_or_value_in_cdc_postgres RED on the check output).
+    "^src/preflight/postgres\\.rs:\\d+:\\d+: replace check_postgres -> Result<Vec<ExportDiagnostic>> with Ok\\(vec!\\[\\]\\)$",
     # 2026-10-31 #728: pre-existing arm, killed only by live cell a_prepared_xa_branch_is_never_published_by_another_transactions_commit (proven RED 2026-10-31).
     "^src/source/mysql/cdc\\.rs:\\d+:\\d+: delete match arm Some\\(EventData::XaPrepareLogEvent\\(_\\)\\) in MysqlChangeStream::fill$",
 

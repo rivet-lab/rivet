@@ -95,6 +95,14 @@ scenarios:
     mongo:    { na: "Mongo `parallel: N` is the SEPARATE `_id`-range reader (mongo_parallel), not the SQL keyset range sampler" }
     oracle:   { test: every_dialect_samples_by_seeks_to_the_same_boundaries }
 
+  - id: keyset_parallel_sampler_statement_timeout
+    what: "chunk_by_key + parallel: N → every range-sampler read (COUNT, OFFSET, catalog estimate, MIN/MAX, snap seeks, density probes) runs under tuning.statement_timeout_s: a timed-out seek degrades to the cuts found so far with a warn, a timed-out COUNT/OFFSET read on the row-percentile path fails by RIVET_SOURCE_STATEMENT_TIMEOUT naming the setting, 0 leaves the read unbounded"
+    postgres: { test: a_percentile_sampler_read_obeys_the_statement_timeout_postgres }
+    mysql:    { test: a_bounded_scalar_read_is_cancelled_at_its_budget_mysql }
+    mssql:    { test: every_sampler_read_runs_under_the_statement_timeout }
+    mongo:    { na: "Mongo `parallel: N` is the SEPARATE `_id`-range reader (mongo_parallel), not the SQL keyset range sampler" }
+    oracle:   { test: every_sampler_read_runs_under_the_statement_timeout }
+
   - id: keyset_parallel_incremental
     what: "chunk_by_key + parallel: N + keyset_incremental: a CLEAN re-run seeks past the persisted anchor + advances it, across N workers (run→unchanged=0→insert→only-new). Discriminator = total row count (1000→1000→1500, never a full re-read)."
     postgres: { test: parallel_keyset_incremental_postgres }
@@ -118,6 +126,14 @@ scenarios:
     mssql:    { test: a_datetime2_7_key_under_the_timestamp_ns_override_delivers_the_seeded_ids_once_mssql }
     mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
     oracle:   { test: keyset_key_types_the_cursor_reads_deliver_the_seeded_ids_oracle }
+
+  - id: keyset_key_type_parallel_sampler
+    what: "every key type the cursor reads, with a time-zone-aware timestamp where the engine has one (PostgreSQL timestamptz, SQL Server datetimeoffset(6)), delivers the source's ids exactly once under `parallel:` too: the sampler reads each split point as text its own engine casts back, never a driver debug dump; the parallel neighbour of keyset_key_type_readable_types"
+    postgres: { test: keyset_key_types_the_sampler_reads_deliver_the_seeded_ids_in_parallel_postgres }
+    mysql:    { test: keyset_key_types_the_sampler_reads_deliver_the_seeded_ids_in_parallel_mysql }
+    mssql:    { test: keyset_key_types_the_sampler_reads_deliver_the_seeded_ids_in_parallel_mssql }
+    mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
+    oracle:   { test: keyset_key_types_the_sampler_reads_deliver_the_seeded_ids_in_parallel_oracle }
 
   - id: keyset_key_type_oracle_bare_number
     what: "an Oracle NUMBER with no precision (held as exact text) keeps keying a keyset seek exactly as before the type check: integers, fractions across zero, 35 digits and both exponent extremes deliver the seeded ids once, sequential and parallel"

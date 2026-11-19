@@ -107,6 +107,11 @@ pub fn landings_of_mappings(mappings: &[TypeMapping], finer: &[String]) -> Vec<C
         .collect()
 }
 
+/// Whether a load in `mode` keys its current-state view by the export's pk, so the pk's landing is admitted.
+pub fn admits_keys(mode: LoadMode) -> bool {
+    matches!(mode, LoadMode::Incremental | LoadMode::Cdc)
+}
+
 /// Refuses a keyed load whose order column lands as text, or whose pk column lands finer-collapsed.
 pub fn admit_load_keys(
     export: &str,
@@ -141,7 +146,7 @@ pub fn admit_load_keys(
             col.column
         );
     }
-    if matches!(mode, LoadMode::Incremental | LoadMode::Cdc)
+    if admits_keys(mode)
         && let Some(col) = pk
             .iter()
             .filter_map(|p| find(p))

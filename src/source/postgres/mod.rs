@@ -4,6 +4,7 @@ mod arrow_convert;
 #[cfg(feature = "oracle")]
 pub(crate) use arrow_convert::pg_interval_to_iso8601;
 pub(crate) mod cdc;
+pub(crate) mod column_grants;
 mod from_parse;
 pub(crate) mod pgoutput;
 #[allow(dead_code)]
@@ -21,7 +22,7 @@ use postgres::types::Type;
 
 use crate::config::{SourceType, TlsConfig};
 pub(crate) use crate::connect::postgres::connect_client;
-use crate::connect::postgres::{PgTxnGuard, detect_pg_transaction_pooler, read_pinned};
+use crate::connect::postgres::{PgTxnGuard, detect_pg_transaction_pooler, read_pinned_within};
 use crate::error::Result;
 use crate::source::batch_controller::AdaptiveBatchController;
 use crate::source::query::build_export_query;
@@ -30,6 +31,18 @@ use crate::types::{ColumnOverrides, SourceColumn, TypeMapping};
 
 use arrow_convert::{pg_columns_to_schema, rivet_type_for_pg_column, rows_to_record_batch_typed};
 use from_parse::try_parse_pg_simple_from_regclass_literal;
+
+/// The catalog read of the primary key of `table` as one `chr(31)`-joined cell, in key order.
+pub(crate) fn primary_key_sql(table: &str) -> String {
+    format!(
+        "SELECT string_agg(a.attname::text, chr(31) ORDER BY k.ord) \
+         FROM pg_index i \
+         CROSS JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) \
+         JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum \
+         WHERE i.indrelid = to_regclass('{}') AND i.indisprimary",
+        table.replace('\'', "''")
+    )
+}
 
 pub struct PostgresSource {
     client: Client,
@@ -58,6 +71,76 @@ impl PostgresSource {
             client,
             transaction_pooler,
         })
+    }
+
+    /// The first cell of `sql`'s first row, read in a transaction of its own under `statement_timeout_s` (0 = no limit).
+    fn scalar_within(&mut self, sql: &str, statement_timeout_s: u64) -> Result<Option<String>> {
+        let rows = read_pinned_within(&mut self.client, statement_timeout_s, |client| {
+            let probe = prepare_fresh(client, sql)?;
+            client.query(&probe, &[])
+        })
+        .map_err(|e| {
+            if e.code() == Some(&postgres::error::SqlState::QUERY_CANCELED)
+                && statement_timeout_s > 0
+            {
+                super::StatementDurationTimeout::postgres(statement_timeout_s).into()
+            } else {
+                anyhow::Error::new(e)
+            }
+        })?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        let row = &rows[0];
+        if let Ok(Some(v)) = row.try_get::<_, Option<i64>>(0) {
+            return Ok(Some(v.to_string()));
+        }
+        if let Ok(Some(v)) = row.try_get::<_, Option<i32>>(0) {
+            return Ok(Some(v.to_string()));
+        }
+        if let Ok(Some(v)) = row.try_get::<_, Option<f64>>(0) {
+            return Ok(Some(v.to_string()));
+        }
+        let small = if seeded!("unreadable-probe-read-as-no-rows", false, true) {
+            row.try_get::<_, Option<i16>>(0)
+        } else {
+            Ok(None)
+        };
+        if let Ok(Some(v)) = small {
+            return Ok(Some(v.to_string()));
+        }
+        if let Ok(Some(v)) = row.try_get::<_, Option<u32>>(0) {
+            return Ok(Some(v.to_string()));
+        }
+        if let Ok(Some(v)) = row.try_get::<_, Option<chrono::NaiveDateTime>>(0) {
+            return Ok(Some(v.format("%Y-%m-%d %H:%M:%S%.f").to_string()));
+        }
+        if let Ok(Some(v)) = row.try_get::<_, Option<chrono::NaiveDate>>(0) {
+            return Ok(Some(v.format("%Y-%m-%d").to_string()));
+        }
+        if let Ok(Some(v)) = row.try_get::<_, Option<chrono::DateTime<chrono::Utc>>>(0) {
+            return Ok(Some(v.format("%Y-%m-%d %H:%M:%S%.f+00").to_string()));
+        }
+        if let Ok(Some(v)) = row.try_get::<_, Option<uuid::Uuid>>(0) {
+            return Ok(Some(v.to_string()));
+        }
+        if let Ok(Some(v)) = row.try_get::<_, Option<String>>(0) {
+            return Ok(Some(v));
+        }
+        if matches!(
+            row.try_get::<_, Option<arrow_convert::AnyAsString>>(0),
+            Ok(None)
+        ) {
+            return Ok(None);
+        }
+        if seeded!("unreadable-probe-read-as-no-rows", true, false) {
+            return Ok(None);
+        }
+        crate::rivet_bail!(
+            crate::error::codes::SOURCE_PROBE_UNREADABLE,
+            "{}",
+            unreadable_probe(row.columns()[0].type_().name(), sql)
+        )
     }
 }
 
@@ -522,15 +605,16 @@ impl super::Source for PostgresSource {
     }
 
     fn primary_key(&mut self, table: &str) -> Result<Option<Vec<String>>> {
-        let sql = format!(
-            "SELECT string_agg(a.attname::text, chr(31) ORDER BY k.ord) \
-             FROM pg_index i \
-             CROSS JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) \
-             JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum \
-             WHERE i.indrelid = to_regclass('{}') AND i.indisprimary",
-            table.replace('\'', "''")
-        );
-        Ok(crate::source::split_key_list(self.query_scalar(&sql)?))
+        Ok(crate::source::split_key_list(
+            self.query_scalar(&primary_key_sql(table))?,
+        ))
+    }
+
+    fn readable_columns(
+        &mut self,
+        table: &str,
+    ) -> Result<Option<crate::source::cdc::ReadableColumns>> {
+        column_grants::readable_columns(&mut self.client, table).map(|(_, _, r)| Some(r))
     }
 
     fn replication_slot_exists(&mut self, slot: &str) -> Result<bool> {
@@ -538,63 +622,15 @@ impl super::Source for PostgresSource {
     }
 
     fn query_scalar(&mut self, sql: &str) -> Result<Option<String>> {
-        let rows = read_pinned(&mut self.client, |client| {
-            let probe = prepare_fresh(client, sql)?;
-            client.query(&probe, &[])
-        })?;
-        if rows.is_empty() {
-            return Ok(None);
-        }
-        let row = &rows[0];
-        if let Ok(Some(v)) = row.try_get::<_, Option<i64>>(0) {
-            return Ok(Some(v.to_string()));
-        }
-        if let Ok(Some(v)) = row.try_get::<_, Option<i32>>(0) {
-            return Ok(Some(v.to_string()));
-        }
-        if let Ok(Some(v)) = row.try_get::<_, Option<f64>>(0) {
-            return Ok(Some(v.to_string()));
-        }
-        let small = if seeded!("unreadable-probe-read-as-no-rows", false, true) {
-            row.try_get::<_, Option<i16>>(0)
-        } else {
-            Ok(None)
-        };
-        if let Ok(Some(v)) = small {
-            return Ok(Some(v.to_string()));
-        }
-        if let Ok(Some(v)) = row.try_get::<_, Option<u32>>(0) {
-            return Ok(Some(v.to_string()));
-        }
-        if let Ok(Some(v)) = row.try_get::<_, Option<chrono::NaiveDateTime>>(0) {
-            return Ok(Some(v.format("%Y-%m-%d %H:%M:%S%.f").to_string()));
-        }
-        if let Ok(Some(v)) = row.try_get::<_, Option<chrono::NaiveDate>>(0) {
-            return Ok(Some(v.format("%Y-%m-%d").to_string()));
-        }
-        if let Ok(Some(v)) = row.try_get::<_, Option<chrono::DateTime<chrono::Utc>>>(0) {
-            return Ok(Some(v.format("%Y-%m-%d %H:%M:%S%.f+00").to_string()));
-        }
-        if let Ok(Some(v)) = row.try_get::<_, Option<uuid::Uuid>>(0) {
-            return Ok(Some(v.to_string()));
-        }
-        if let Ok(Some(v)) = row.try_get::<_, Option<String>>(0) {
-            return Ok(Some(v));
-        }
-        if matches!(
-            row.try_get::<_, Option<arrow_convert::AnyAsString>>(0),
-            Ok(None)
-        ) {
-            return Ok(None);
-        }
-        if seeded!("unreadable-probe-read-as-no-rows", true, false) {
-            return Ok(None);
-        }
-        crate::rivet_bail!(
-            crate::error::codes::SOURCE_PROBE_UNREADABLE,
-            "{}",
-            unreadable_probe(row.columns()[0].type_().name(), sql)
-        )
+        self.scalar_within(sql, 0)
+    }
+
+    fn query_scalar_within(
+        &mut self,
+        sql: &str,
+        statement_timeout_s: u64,
+    ) -> Result<Option<String>> {
+        self.scalar_within(sql, statement_timeout_s)
     }
 
     fn type_mappings(
@@ -830,6 +866,18 @@ fn unreadable_probe(pg_type: &str, sql: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The primary-key read names the catalog, the key order and the table it resolves, quoting a quote in the name.
+    #[test]
+    fn the_primary_key_read_resolves_the_table_by_its_quoted_name_in_key_order() {
+        let sql = super::primary_key_sql("public.o'rders");
+        assert!(
+            sql.contains("string_agg(a.attname::text, chr(31) ORDER BY k.ord)"),
+            "{sql}"
+        );
+        assert!(sql.contains("i.indisprimary"), "{sql}");
+        assert!(sql.contains("to_regclass('public.o''rders')"), "{sql}");
+    }
+
     #[test]
     fn a_row_takes_the_heap_size_over_the_row_estimate() {
         use super::avg_row_bytes;

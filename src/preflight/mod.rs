@@ -163,13 +163,19 @@ pub(crate) fn get_export_diagnostic(
     let tls = config.source.tls.as_ref();
     crate::source::warn_if_tls_disabled(&config.source);
     match config.source.source_type {
-        SourceType::Postgres => postgres::diagnose_export_pg(url, tls, export),
+        SourceType::Postgres => {
+            postgres::diagnose_export_pg(url, tls, export, config.source.columns_from_grants())
+        }
         SourceType::Mysql => {
             mysql::diagnose_export_mysql(url, tls, export, config.source.columns_from_grants())
         }
-        SourceType::Mssql => mssql::diagnose_export_mssql(url, tls, export),
+        SourceType::Mssql => {
+            mssql::diagnose_export_mssql(url, tls, export, config.source.columns_from_grants())
+        }
         #[cfg(feature = "oracle")]
-        SourceType::Oracle => oracle::diagnose_export_oracle(url, tls, export),
+        SourceType::Oracle => {
+            oracle::diagnose_export_oracle(url, tls, export, config.source.columns_from_grants())
+        }
         #[cfg(not(feature = "oracle"))]
         SourceType::Oracle => Err(crate::source::oracle_feature_missing()),
         SourceType::Mongo => {
@@ -358,14 +364,13 @@ pub fn check(
     crate::source::warn_if_tls_disabled(&config.source);
     let planned = exports_as_planned(&exports, strategies);
     let described: Vec<&ExportConfig> = planned.iter().collect();
+    let grants = config.source.columns_from_grants();
     let diagnostics: Vec<ExportDiagnostic> = match config.source.source_type {
-        SourceType::Postgres => postgres::check_postgres(url, tls, &described)?,
-        SourceType::Mysql => {
-            mysql::check_mysql(url, tls, &described, config.source.columns_from_grants())?
-        }
-        SourceType::Mssql => mssql::check_mssql(url, tls, &described)?,
+        SourceType::Postgres => postgres::check_postgres(url, tls, &described, grants)?,
+        SourceType::Mysql => mysql::check_mysql(url, tls, &described, grants)?,
+        SourceType::Mssql => mssql::check_mssql(url, tls, &described, grants)?,
         #[cfg(feature = "oracle")]
-        SourceType::Oracle => oracle::check_oracle(url, tls, &described)?,
+        SourceType::Oracle => oracle::check_oracle(url, tls, &described, grants)?,
         #[cfg(not(feature = "oracle"))]
         SourceType::Oracle => return Err(crate::source::oracle_feature_missing()),
         SourceType::Mongo => {
@@ -395,7 +400,7 @@ pub fn check(
                 seeded!(
                     "column-grants-boundary-unsaid",
                     "",
-                    crate::source::mysql::column_grants::BOUNDARY
+                    crate::source::columns_from_grants_boundary(config.source.source_type)
                 )
             );
         }

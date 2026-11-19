@@ -27,6 +27,20 @@ pub trait Format {
     fn file_extension(&self) -> &str;
 }
 
+/// The coded refusal for the first of `columns` that `format` cannot write.
+pub(crate) fn refuse_unwritable_columns<'a>(
+    format: FormatType,
+    columns: impl IntoIterator<Item = (&'a str, &'a arrow::datatypes::DataType)>,
+) -> Result<()> {
+    for (name, dt) in columns {
+        match format {
+            FormatType::Csv => csv::refuse_column(name, dt)?,
+            FormatType::Parquet => parquet::refuse_column(name, dt)?,
+        }
+    }
+    Ok(())
+}
+
 pub fn create_format(
     format_type: FormatType,
     compression: CompressionType,
@@ -60,6 +74,53 @@ mod tests {
             vec![Arc::new(Int64Array::from(vec![1i64, 2]))],
         )
         .unwrap()
+    }
+
+    fn refusal_code(r: Result<()>) -> Option<&'static str> {
+        crate::error::error_code(&r.unwrap_err())
+    }
+
+    /// The shared check refuses what each writer refuses, by the same code and message, and nothing else.
+    #[test]
+    fn unwritable_columns_are_refused_by_format_with_the_writers_own_message() {
+        let dec256 = DataType::Decimal256(60, 10);
+        let neg = DataType::Decimal128(10, -2);
+        let cols = |dt: &DataType| vec![("c", dt.clone())];
+        let check = |f: FormatType, dt: &DataType| {
+            let cols = cols(dt);
+            refuse_unwritable_columns(f, cols.iter().map(|(n, d)| (*n, d)))
+        };
+        assert_eq!(
+            refusal_code(check(FormatType::Csv, &dec256)),
+            Some("RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED")
+        );
+        assert_eq!(
+            refusal_code(check(FormatType::Parquet, &neg)),
+            Some("RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED")
+        );
+        for (f, dt) in [
+            (FormatType::Parquet, dec256.clone()),
+            (FormatType::Csv, DataType::Int64),
+            (FormatType::Csv, DataType::Decimal128(10, 2)),
+            (FormatType::Parquet, DataType::Decimal128(10, 2)),
+            (FormatType::Parquet, DataType::Int64),
+        ] {
+            assert!(check(f, &dt).is_ok(), "{f:?} {dt:?} is written today");
+        }
+        let schema = Arc::new(Schema::new(vec![Field::new("c", dec256.clone(), true)]));
+        let writer_err = create_format(FormatType::Csv, CompressionType::None, None, None)
+            .create_writer(&schema, Box::new(Vec::<u8>::new()))
+            .err()
+            .expect("csv writer refuses");
+        let seam_err = check(FormatType::Csv, &dec256).unwrap_err();
+        assert_eq!(format!("{writer_err:#}"), format!("{seam_err:#}"));
+        let schema = Arc::new(Schema::new(vec![Field::new("c", neg.clone(), true)]));
+        let writer_err = create_format(FormatType::Parquet, CompressionType::None, None, None)
+            .create_writer(&schema, Box::new(Vec::<u8>::new()))
+            .err()
+            .expect("parquet writer refuses");
+        let seam_err = check(FormatType::Parquet, &neg).unwrap_err();
+        assert_eq!(format!("{writer_err:#}"), format!("{seam_err:#}"));
     }
 
     #[test]

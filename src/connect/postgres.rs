@@ -130,6 +130,20 @@ pub(crate) fn read_pinned<T>(
     read_under(client, "", read)
 }
 
+/// [`read_pinned`] under `SET LOCAL statement_timeout` of `statement_timeout_s` seconds, none when it is 0.
+pub(crate) fn read_pinned_within<T>(
+    client: &mut Client,
+    statement_timeout_s: u64,
+    read: impl FnOnce(&mut Client) -> std::result::Result<T, postgres::Error>,
+) -> std::result::Result<T, postgres::Error> {
+    let more = if statement_timeout_s > 0 {
+        format!("; SET LOCAL statement_timeout = '{statement_timeout_s}s'")
+    } else {
+        String::new()
+    };
+    read_under(client, &more, read)
+}
+
 /// [`read_pinned`] with floats in their shortest exact text too, for a read whose values arrive as the server's text (`test_decoding`).
 pub(crate) fn read_pinned_text<T>(
     client: &mut Client,
@@ -456,6 +470,29 @@ mod tests {
         assert_eq!(read.unwrap(), 7);
         drop(client);
         assert_eq!(sent(queries), [BEGIN_PINNED_TEXT, "SELECT 1", "COMMIT"]);
+    }
+
+    #[test]
+    fn a_bounded_read_sets_the_statement_timeout_for_its_own_transaction_and_zero_sets_none() {
+        let (url, queries) = recording_server();
+        let mut client = super::connect_client(&url, None).unwrap();
+        let read = |c: &mut postgres::Client, s| {
+            super::read_pinned_within(c, s, |c| c.batch_execute("SELECT 1").map(|()| 7))
+        };
+        assert_eq!(read(&mut client, 10).unwrap(), 7);
+        assert_eq!(read(&mut client, 0).unwrap(), 7);
+        drop(client);
+        assert_eq!(
+            sent(queries),
+            [
+                format!("{BEGIN_PINNED}; SET LOCAL statement_timeout = '10s'").as_str(),
+                "SELECT 1",
+                "COMMIT",
+                BEGIN_PINNED,
+                "SELECT 1",
+                "COMMIT",
+            ]
+        );
     }
 
     #[test]

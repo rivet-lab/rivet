@@ -11,10 +11,10 @@ const MATRIX: &str = "check_equals_run";
 
 const NO_FIXTURE: &str = "no fixture:";
 
+const CONTROL_REFUSED: &str = "control refused:";
+
 const R_WRAP: &str = "2026-11-08: doctor and plan wrap a stop in their own code where run names it; closes when each passes the stop's code through";
 const R_CODES: &str = "2026-11-08: check and run name one stop with two codes; closes when both read the stop from one seam";
-const R_CHECK: &str =
-    "2026-11-08: check passes a config run refuses; closes when check probes what run reads";
 const R_DOCTOR: &str = "2026-11-08: doctor passes a config run refuses; closes when doctor runs the preflight run runs";
 const R_PLAN: &str =
     "2026-11-08: plan passes a config apply refuses; closes when plan runs the checks apply runs";
@@ -26,7 +26,6 @@ const R_PRIOR: &str = "2026-11-10: check, doctor and plan pass over stored state
 const R_UNCODED: &str = "2026-11-10: run or a pre-run command refuses without a RIVET_ code, so the pair cannot agree on the stop; closes when each refusal is raised through its coded seam";
 const R_URL: &str = "2026-11-10: check passes a mongodb URL without a database that run refuses as invalid; closes when check parses the source URL through run's parser";
 const R_STRICT_TYPE: &str = "2026-11-10: check --strict refuses an unsafe type mapping run delivers; closes when run and check --strict read one type-safety verdict";
-const R_ORDER: &str = "2026-11-13: the pre-run commands and run stop on different admission checks first (cursor nullability, source probe, override wire), not a silent loss; accepted for 0.33, closes in 0.34 when every command takes the admission checks in one shared order";
 
 /// RED signatures accepted on main: `<pair> pre[..]` or `<pair> pre[..] run[..]` and a dated reason with what closes it; the list only shrinks.
 const ACCEPTED_RED: &[(&str, &str)] = &[
@@ -165,10 +164,6 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
         R_PRIOR,
     ),
     (
-        "check-run pre[exit=0 code=-] run[exit=5 code=RIVET_SOURCE_VALUE_UNREPRESENTABLE]",
-        R_TYPE,
-    ),
-    (
         "check-run pre[exit=0 code=-] run[exit=5 code=RIVET_STATE_CURSOR_DESTINATION_MISMATCH]",
         R_PRIOR,
     ),
@@ -177,24 +172,8 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
         R_PRIOR,
     ),
     (
-        "check-strict-run pre[exit=0 code=-] run[exit=1 code=-]",
-        R_CHECK,
-    ),
-    (
-        "check-strict-run pre[exit=0 code=-] run[exit=1 code=RIVET_SOURCE_QUERY_FAILED]",
-        R_CHECK,
-    ),
-    (
-        "check-run pre[exit=1 code=RIVET_PLAN_REJECTED] run[exit=1 code=-]",
-        R_UNCODED,
-    ),
-    (
         "check-strict-run pre[exit=0 code=-] run[exit=5 code=RIVET_SOURCE_CDC_CHECKPOINT_INVALID]",
         R_PRIOR,
-    ),
-    (
-        "check-strict-run pre[exit=0 code=-] run[exit=5 code=RIVET_SOURCE_VALUE_UNREPRESENTABLE]",
-        R_TYPE,
     ),
     (
         "check-strict-run pre[exit=0 code=-] run[exit=5 code=RIVET_STATE_CURSOR_DESTINATION_MISMATCH]",
@@ -225,10 +204,6 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
         R_PRIOR,
     ),
     (
-        "doctor-run pre[exit=0 code=-] run[exit=5 code=RIVET_SOURCE_VALUE_UNREPRESENTABLE]",
-        R_TYPE,
-    ),
-    (
         "doctor-run pre[exit=0 code=-] run[exit=5 code=RIVET_STATE_CURSOR_DESTINATION_MISMATCH]",
         R_PRIOR,
     ),
@@ -253,10 +228,6 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
         R_TYPE,
     ),
     (
-        "plan-apply pre[exit=0 code=-] run[exit=5 code=RIVET_SOURCE_VALUE_UNREPRESENTABLE]",
-        R_TYPE,
-    ),
-    (
         "plan-apply pre[exit=0 code=-] run[exit=5 code=RIVET_STATE_CURSOR_DESTINATION_MISMATCH]",
         R_PRIOR,
     ),
@@ -271,26 +242,6 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
     (
         "plan-apply pre[exit=1 code=RIVET_PLAN_SOURCE_UNREADABLE] run[exit=1 code=RIVET_CONFIG_TLS_CA_INVALID]",
         R_WRAP,
-    ),
-    (
-        "check-run pre[exit=1 code=RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH] run[exit=5 code=RIVET_PLAN_CURSOR_NULLABLE]",
-        R_ORDER,
-    ),
-    (
-        "check-strict-run pre[exit=1 code=RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH] run[exit=5 code=RIVET_PLAN_CURSOR_NULLABLE]",
-        R_ORDER,
-    ),
-    (
-        "check-run pre[exit=5 code=RIVET_PLAN_CURSOR_NULLABLE] run[exit=5 code=RIVET_SOURCE_PROBE_UNREADABLE]",
-        R_ORDER,
-    ),
-    (
-        "check-strict-run pre[exit=5 code=RIVET_PLAN_CURSOR_NULLABLE] run[exit=5 code=RIVET_SOURCE_PROBE_UNREADABLE]",
-        R_ORDER,
-    ),
-    (
-        "doctor-run pre[exit=5 code=RIVET_PLAN_CURSOR_NULLABLE] run[exit=5 code=RIVET_SOURCE_PROBE_UNREADABLE]",
-        R_ORDER,
     ),
 ];
 
@@ -638,7 +589,7 @@ fn grade(
             match expect {
                 Expect::Pass => (
                     Outcome::NotGraded,
-                    format!("{ev} control refused: {}", pre.first),
+                    format!("{ev} {CONTROL_REFUSED} {}", pre.first),
                 ),
                 _ => (Outcome::Pass, ev),
             }
@@ -1085,8 +1036,25 @@ fn stale_entries(rows: &[String]) -> Result<Vec<&'static str>, BTreeSet<String>>
         .collect())
 }
 
-/// Fails on a RED signature outside the ledger; with `whole`, also on a ledger entry no RED cell shows.
+/// The rows of a clean control that both commands refused: the cell grades nothing.
+fn refused_controls(rows: &[String]) -> Vec<&String> {
+    rows.iter()
+        .filter(|r| r.contains(CONTROL_REFUSED))
+        .collect()
+}
+
+/// Fails on a clean control both commands refused, on a RED signature outside the ledger, and, with `whole`, on a ledger entry no RED cell shows.
 fn assert_ledger(rows: &[String], whole: bool) {
+    let refused = refused_controls(rows);
+    assert!(
+        refused.is_empty(),
+        "clean controls both commands refused, so their cells grade nothing:\n{}",
+        refused
+            .iter()
+            .map(|r| r.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
     let red = red_signatures(rows);
     let fresh: Vec<_> = red.iter().filter(|s| !accepted(s)).collect();
     assert!(
@@ -1116,7 +1084,10 @@ fn assert_ledger(rows: &[String], whole: bool) {
 fn stand_free(engine: SourceType, shape: Shape) -> bool {
     match shape {
         Shape::SecretMalformed => true,
-        Shape::GrantGap => !matches!(engine, SourceType::Mysql),
+        Shape::GrantGap => !matches!(
+            engine,
+            SourceType::Mysql | SourceType::Mssql | SourceType::Oracle | SourceType::Mongo
+        ),
         Shape::Clean
         | Shape::OverrideRefused
         | Shape::CursorMissing
@@ -1170,7 +1141,12 @@ fn run_raw_cells(
                 );
                 continue;
             }
-            if s == Shape::GrantGap && e == SourceType::Mysql {
+            if s == Shape::GrantGap
+                && matches!(
+                    e,
+                    SourceType::Mysql | SourceType::Mssql | SourceType::Oracle | SourceType::Mongo
+                )
+            {
                 continue;
             }
             let h = raw_cell(e, s, &url_of(e));
@@ -1299,6 +1275,28 @@ fn the_grade_reads_exit_class_and_code() {
         ),
         Outcome::NotGraded
     );
+}
+
+#[test]
+fn a_clean_control_both_commands_refused_fails_the_ledger() {
+    let refused = format!(
+        "check_equals_run mysql/incremental/clean/-/check-run NOT_GRADED pre[exit=5 code=RIVET_A] run[exit=5 code=RIVET_A] {CONTROL_REFUSED} Error"
+    );
+    let unprovoked = "check_equals_run postgres/full/override-refused/-/check-run NOT_GRADED pre[exit=0 code=-] run[exit=0 code=-] shape not provoked: both passed".to_string();
+    assert_eq!(
+        refused_controls(&[refused.clone(), unprovoked.clone()]),
+        [&refused]
+    );
+    assert!(refused_controls(&[unprovoked]).is_empty());
+}
+
+#[test]
+#[should_panic(expected = "clean controls both commands refused")]
+fn assert_ledger_stops_on_a_refused_clean_control() {
+    let refused = format!(
+        "check_equals_run mysql/incremental/clean/-/check-run NOT_GRADED pre[exit=5 code=RIVET_A] run[exit=5 code=RIVET_A] {CONTROL_REFUSED} Error"
+    );
+    assert_ledger(&[refused], false);
 }
 
 #[test]
@@ -1457,7 +1455,7 @@ fn mode_lines(engine: SourceType, mode: ExportMode, cursor: Option<&str>) -> Vec
             "cursor_column: {}",
             cursor.map(str::to_string).unwrap_or_else(|| match engine {
                 SourceType::Mongo => "_id".into(),
-                _ => col("updated_at"),
+                _ => col("server_time"),
             })
         )],
         ExportMode::Chunked => vec![

@@ -339,18 +339,22 @@ fn dispatch_cdc(a: CdcArgs) -> Result<()> {
             CdcEngine::Postgres => CdcEngineOpts::Postgres {
                 slot: a.slot,
                 configured_tables: a.table.clone(),
+                resolved_grants: None,
             },
             CdcEngine::Mssql => CdcEngineOpts::Mssql {
                 configured_tables: a.table.clone(),
                 capture_instance: a.capture_instance,
+                resolved_grants: None,
             },
             CdcEngine::Mongo => CdcEngineOpts::Mongo {
                 canonical: false,
                 configured_tables: a.table.clone(),
                 keyed_tables: Vec::new(),
+                resolved_grants: None,
             },
             CdcEngine::Oracle => CdcEngineOpts::Oracle {
                 configured_tables: a.table.clone(),
+                resolved_grants: None,
             },
         },
     };

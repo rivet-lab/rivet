@@ -46,6 +46,21 @@ impl ParquetFormat {
     }
 }
 
+/// The coded refusal for a column Parquet cannot write: a negative decimal scale.
+pub(crate) fn refuse_column(name: &str, dt: &arrow::datatypes::DataType) -> Result<()> {
+    use arrow::datatypes::DataType::{Decimal128, Decimal256};
+    if !matches!(dt, Decimal128(_, s) | Decimal256(_, s) if *s < 0) {
+        return Ok(());
+    }
+    crate::rivet_bail!(
+        crate::error::codes::CONFIG_FORMAT_COLUMN_UNSUPPORTED,
+        "Parquet cannot write column '{name}' ({dt:?}): a NEGATIVE decimal scale is valid in \
+         the source and in Arrow but not in the Parquet decimal type (scale must be >= 0). \
+         Cast the column to a non-negative scale in the query (e.g. \
+         `round(col)::numeric(p,0)`), or use `format: csv`."
+    )
+}
+
 pub struct ParquetFormatWriter {
     inner: ArrowWriter<Box<dyn Write + Send>>,
 }
@@ -56,22 +71,8 @@ impl super::Format for ParquetFormat {
         schema: &SchemaRef,
         writer: Box<dyn Write + Send>,
     ) -> Result<Box<dyn super::FormatWriter + Send>> {
-        if let Some(field) = schema.fields().iter().find(|f| {
-            matches!(
-                f.data_type(),
-                arrow::datatypes::DataType::Decimal128(_, s)
-                | arrow::datatypes::DataType::Decimal256(_, s) if *s < 0
-            )
-        }) {
-            crate::rivet_bail!(
-                crate::error::codes::CONFIG_FORMAT_COLUMN_UNSUPPORTED,
-                "Parquet cannot write column '{}' ({:?}): a NEGATIVE decimal scale is valid in \
-                 the source and in Arrow but not in the Parquet decimal type (scale must be >= 0). \
-                 Cast the column to a non-negative scale in the query (e.g. \
-                 `round(col)::numeric(p,0)`), or use `format: csv`.",
-                field.name(),
-                field.data_type()
-            );
+        for field in schema.fields() {
+            refuse_column(field.name(), field.data_type())?;
         }
         let builder = WriterProperties::builder()
             .set_compression(self.build_compression())
