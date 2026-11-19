@@ -369,6 +369,32 @@ pub(crate) fn connect_source(
     )
 }
 
+/// The columns the source declares finer than a microsecond: of `relation` by the catalog, of `query` by its description when there is no relation.
+pub(crate) fn finer_than_microsecond_of(
+    src: &mut dyn source::Source,
+    relation: Option<&str>,
+    query: &str,
+    export: &str,
+) -> Vec<String> {
+    let (read, what) = match relation {
+        Some(relation) => (src.finer_than_microsecond_columns(relation), relation),
+        None => (
+            seeded!(
+                "load-key-query-finer-unread",
+                Ok(Vec::new()),
+                src.finer_than_microsecond_in_query(query)
+            ),
+            "the export query",
+        ),
+    };
+    read.unwrap_or_else(|e| {
+        log::warn!(
+            "export '{export}': could not read the sub-microsecond columns of `{what}`: {e:#}"
+        );
+        Vec::new()
+    })
+}
+
 /// What a successful run records for the load about one unit.
 pub struct CapturedUnit {
     pub table: Option<String>,
@@ -414,20 +440,12 @@ pub fn capture_load_units(
                 }),
                 None => None,
             };
-            let finer_than_microsecond = match unit.relation.as_deref() {
-                Some(relation) => {
-                    src.finer_than_microsecond_columns(relation)
-                        .unwrap_or_else(|e| {
-                            log::warn!(
-                                "export '{}': could not read the sub-microsecond columns of \
-                             `{relation}`: {e:#}",
-                                export.name
-                            );
-                            Vec::new()
-                        })
-                }
-                None => Vec::new(),
-            };
+            let finer_than_microsecond = finer_than_microsecond_of(
+                src.as_mut(),
+                unit.relation.as_deref(),
+                &unit.query,
+                &export.name,
+            );
             Ok(CapturedUnit {
                 table: unit.table,
                 mappings,
@@ -457,11 +475,16 @@ pub(crate) fn refuse_inexact_load_keys(
     }
 }
 
-/// Whether the export loads incrementally, the only mode whose keys are admitted by their landing at check.
+/// Whether the export loads in a mode whose keys are admitted by their landing, the same predicate `rivet load` refuses by.
 fn admits_load_keys(config: &Config, export: &ExportConfig) -> bool {
+    let mode = crate::plan::load_settings::load_mode_of(config, export);
     config.load.is_some()
-        && crate::plan::load_settings::load_mode_of(config, export)
-            == crate::plan::load_settings::LoadMode::Incremental
+        && super::key_admission::admits_keys(mode)
+        && !seeded!(
+            "load-key-check-skips-cdc",
+            mode == crate::plan::load_settings::LoadMode::Cdc,
+            false
+        )
 }
 
 /// Refuses the captured units whose cursor or primary key lands inexactly.
@@ -1461,13 +1484,18 @@ exports:
         } else {
             String::new()
         };
-        let cursor = if mode == "incremental" {
-            "    cursor_column: VER\n"
+        let cursor = match mode {
+            "incremental" => "    cursor_column: VER\n",
+            "cdc" => "    cdc: { checkpoint: ./cdc.ckpt }\n",
+            _ => "",
+        };
+        let source = if mode == "cdc" {
+            "type: mssql\n  url: \"mssql://u:p@127.0.0.1:1/x\""
         } else {
-            ""
+            "type: oracle\n  url: \"oracle://u:p@127.0.0.1:1/x\""
         };
         cfg_from(&format!(
-            "source:\n  type: oracle\n  url: \"oracle://u:p@127.0.0.1:1/x\"\n{load}exports:\n  - name: e\n    table: T\n    mode: {mode}\n{cursor}    format: parquet\n    destination:\n      type: local\n      path: /tmp/x\n"
+            "source:\n  {source}\n{load}exports:\n  - name: e\n    table: T\n    mode: {mode}\n{cursor}    format: parquet\n    destination:\n      type: local\n      path: /tmp/x\n"
         ))
     }
 
@@ -1493,12 +1521,14 @@ exports:
 
     const INEXACT: &str = "RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT";
 
-    /// Key admission at check reads only an incremental export that has a load block.
+    /// Key admission at check reads an incremental or cdc export that has a load block.
     #[test]
-    fn key_admission_reads_only_an_incremental_export_with_a_load() {
+    fn key_admission_reads_only_an_incremental_or_cdc_export_with_a_load() {
         for (mode, load, want) in [
             ("incremental", true, true),
             ("incremental", false, false),
+            ("cdc", true, true),
+            ("cdc", false, false),
             ("full", true, false),
             ("full", false, false),
         ] {

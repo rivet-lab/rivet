@@ -488,6 +488,13 @@ impl Source for MssqlSource {
             .collect())
     }
 
+    fn finer_than_microsecond_in_query(&mut self, query: &str) -> Result<Vec<String>> {
+        Ok(self
+            .query_scalar(&finer_than_microsecond_in_query_sql(query))?
+            .map(|s| split_char31(&s))
+            .unwrap_or_default())
+    }
+
     fn export(&mut self, request: &ExportRequest<'_>, sink: &mut dyn BatchSink) -> Result<()> {
         let built = build_export_query(request, crate::config::SourceType::Mssql)?;
         let sql = built.sql.clone();
@@ -1114,6 +1121,17 @@ pub(crate) fn finer_than_microsecond_sql(schema: &str, table: &str) -> String {
     )
 }
 
+/// SQL for the CHAR(31)-joined `datetime2` / `datetimeoffset` columns a query's first result set types finer than a microsecond, through an alias type too.
+pub(crate) fn finer_than_microsecond_in_query_sql(query: &str) -> String {
+    format!(
+        "SELECT STRING_AGG(CONVERT(nvarchar(max), name), CHAR(31)) \
+         FROM sys.dm_exec_describe_first_result_set(N'{}', NULL, 0) \
+         WHERE system_type_id IN (42, 43) AND scale > {}",
+        query.replace('\'', "''"),
+        crate::source::keyset_key::MICROSECOND_DIGITS
+    )
+}
+
 /// The `datetime2` / `datetimeoffset` columns of `schema.table` declared finer than a microsecond, as the catalog fact the keyset seam reads.
 pub(crate) fn finer_than_microsecond_columns(
     src: &mut MssqlSource,
@@ -1661,7 +1679,10 @@ mod tests {
 
 #[cfg(test)]
 mod key_probe_sql_tests {
-    use super::{finer_than_microsecond_sql, keyset_keys_sql, single_int_pk_sql, split_char31};
+    use super::{
+        finer_than_microsecond_in_query_sql, finer_than_microsecond_sql, keyset_keys_sql,
+        single_int_pk_sql, split_char31,
+    };
 
     /// A catalog list splits on its separator and drops empty members.
     #[test]
@@ -1675,6 +1696,17 @@ mod key_probe_sql_tests {
         let w = sql.find("WHERE i.").expect("WHERE");
         let g = sql[w..].find("GROUP BY i.object_id").expect("GROUP BY") + w;
         &sql[w..g]
+    }
+
+    /// The query probe reads the system type under an alias, quotes the query, and compares the scale with the microsecond digits.
+    #[test]
+    fn the_query_sub_microsecond_probe_quotes_the_query_and_reads_the_system_type() {
+        let sql = finer_than_microsecond_in_query_sql("SELECT 'a' AS x");
+        assert!(sql.contains("N'SELECT ''a'' AS x'"), "{sql}");
+        assert!(
+            sql.contains("system_type_id IN (42, 43) AND scale > 6"),
+            "{sql}"
+        );
     }
 
     /// H24: a composite UNIQUE(a NOT NULL, b NULL) must not surface `a` as a keyset key, so the per-column filters live in HAVING where COUNT(*) still counts every key column.
