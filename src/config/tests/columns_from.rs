@@ -1,7 +1,6 @@
-//! `source.columns_from: grants` is accepted on MySQL, Oracle and MongoDB and refused on every engine that does not enforce it, read back through `Config::from_yaml`.
+//! `source.columns_from: grants` is accepted on every engine, in every mode, read back through `Config::from_yaml`.
 
 use super::*;
-use crate::error::{classify_exit, error_code};
 
 const ENGINES: [(&str, &str); 5] = [
     ("postgres", "postgresql://u:p@localhost/test"),
@@ -26,31 +25,13 @@ const BATCH: &str = "    table: orders\n    mode: full\n";
 const CDC: &str = "    table: orders\n    mode: cdc\n    cdc: { slot: s1, server_id: 5000, checkpoint: /tmp/c.ckpt, capture_instance: dbo_orders }\n";
 
 #[test]
-fn columns_from_grants_is_refused_on_every_engine_but_mysql_oracle_and_mongo_in_every_mode() {
+fn columns_from_grants_loads_on_every_engine_in_every_mode() {
     for (engine, url) in ENGINES {
         for (shape, export) in [("batch", BATCH), ("cdc", CDC)] {
             let text = config(engine, url, true, export);
-            let loaded = Config::from_yaml(&text);
-            if engine == "mysql" || engine == "oracle" || engine == "mongo" {
-                loaded.unwrap_or_else(|e| panic!("{engine} {shape} must load: {e:#}"));
-                continue;
-            }
-            let err = loaded.expect_err(&format!("{engine} {shape} must be refused"));
-            assert_eq!(
-                error_code(&err),
-                Some(crate::error::codes::CONFIG_SOURCE_MODE_UNSUPPORTED.id),
-                "{engine} {shape}: {err:#}"
-            );
-            assert_eq!(classify_exit(&err), 1, "{engine} {shape}");
-            let msg = format!("{err:#}");
-            assert!(
-                msg.contains(
-                    "`source.columns_from: grants` is supported on MySQL, Oracle and MongoDB sources only"
-                ) && msg.contains(&format!(
-                    "a {engine} source would read and deliver every column"
-                )) && msg.contains("Remove `columns_from:` from `source:`"),
-                "{engine} {shape} names its cause and the remedy: {msg}"
-            );
+            let cfg = Config::from_yaml(&text)
+                .unwrap_or_else(|e| panic!("{engine} {shape} must load: {e:#}"));
+            assert!(cfg.source.columns_from_grants(), "{engine} {shape}");
         }
     }
 }

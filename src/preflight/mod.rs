@@ -163,11 +163,15 @@ pub(crate) fn get_export_diagnostic(
     let tls = config.source.tls.as_ref();
     crate::source::warn_if_tls_disabled(&config.source);
     match config.source.source_type {
-        SourceType::Postgres => postgres::diagnose_export_pg(url, tls, export),
+        SourceType::Postgres => {
+            postgres::diagnose_export_pg(url, tls, export, config.source.columns_from_grants())
+        }
         SourceType::Mysql => {
             mysql::diagnose_export_mysql(url, tls, export, config.source.columns_from_grants())
         }
-        SourceType::Mssql => mssql::diagnose_export_mssql(url, tls, export),
+        SourceType::Mssql => {
+            mssql::diagnose_export_mssql(url, tls, export, config.source.columns_from_grants())
+        }
         #[cfg(feature = "oracle")]
         SourceType::Oracle => {
             oracle::diagnose_export_oracle(url, tls, export, config.source.columns_from_grants())
@@ -362,9 +366,9 @@ pub fn check(
     let described: Vec<&ExportConfig> = planned.iter().collect();
     let grants = config.source.columns_from_grants();
     let diagnostics: Vec<ExportDiagnostic> = match config.source.source_type {
-        SourceType::Postgres => postgres::check_postgres(url, tls, &described)?,
+        SourceType::Postgres => postgres::check_postgres(url, tls, &described, grants)?,
         SourceType::Mysql => mysql::check_mysql(url, tls, &described, grants)?,
-        SourceType::Mssql => mssql::check_mssql(url, tls, &described)?,
+        SourceType::Mssql => mssql::check_mssql(url, tls, &described, grants)?,
         #[cfg(feature = "oracle")]
         SourceType::Oracle => oracle::check_oracle(url, tls, &described, grants)?,
         #[cfg(not(feature = "oracle"))]

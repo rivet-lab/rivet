@@ -763,6 +763,28 @@ pub(crate) enum MysqlCellFix {
     ZeroDate,
     /// TIME is a duration up to 838:59:59; one outside a day is refused with the batch's MySQL wording.
     TimeOfDay,
+    /// An integer column read under a `bool` override: only 0 and 1 are flags, any other value is refused by code.
+    FlagInt,
+}
+
+/// The flag fix for a Boolean target over a MySQL integer column that is not itself a flag (`tinyint(1)`, BIT).
+pub(crate) fn mysql_flag_fix(
+    engine: crate::source::cdc::CdcEngine,
+    native: &str,
+    dt: &DataType,
+) -> Option<MysqlCellFix> {
+    if engine != crate::source::cdc::CdcEngine::Mysql || !matches!(dt, DataType::Boolean) {
+        return None;
+    }
+    let n = native.to_ascii_lowercase();
+    let integer = ["tinyint", "smallint", "mediumint", "int", "bigint"]
+        .iter()
+        .any(|t| n == *t || n.starts_with(&format!("{t}(")) || n.starts_with(&format!("{t} ")));
+    seeded!(
+        "mysql-cdc-int-bool-override-any-nonzero-true",
+        None,
+        (integer && !n.starts_with("tinyint(1)")).then_some(MysqlCellFix::FlagInt)
+    )
 }
 
 /// The fix (if any) for a column, from the engine + native type.
@@ -1003,6 +1025,19 @@ impl MysqlCellFix {
                             crate::source::mysql::time_outside_day(*us),
                             crate::source::cdc::checkpoint_identity::RECOVER
                         )
+                    ),
+                    code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
+                });
+            }
+            (MysqlCellFix::FlagInt, V::Int(0) | V::UInt(0)) => V::Bool(false),
+            (MysqlCellFix::FlagInt, V::Int(1) | V::UInt(1)) => V::Bool(true),
+            (MysqlCellFix::FlagInt, V::Int(_) | V::UInt(_)) => {
+                return Err(FixRefusal {
+                    reason: format!(
+                        "is not 0 or 1, the only values a `bool` override carries. Remove the \
+                         `columns:` override for the column, or leave the column out of the \
+                         capture, then: {}",
+                        crate::source::cdc::checkpoint_identity::RECOVER
                     ),
                     code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
                 });
@@ -2355,6 +2390,67 @@ mod tests {
         ] {
             assert_eq!(bool_value(&v), Ok(want), "{v:?}");
         }
+    }
+
+    /// An integer column under a `bool` override carries 0 and 1 only; any other value is refused by code, and a flag column keeps its own rule.
+    #[test]
+    fn an_integer_under_a_bool_override_is_a_flag_or_refused() {
+        use crate::source::cdc::CdcEngine::{Mssql, Mysql, Postgres};
+        use RivetValue as V;
+        let flag = |native: &str| mysql_flag_fix(Mysql, native, &DataType::Boolean);
+        for native in [
+            "tinyint",
+            "tinyint(4)",
+            "smallint",
+            "mediumint",
+            "mediumint unsigned",
+            "int",
+            "int(11)",
+            "int unsigned",
+            "bigint",
+            "bigint(20) unsigned",
+        ] {
+            let fix = flag(native).unwrap_or_else(|| panic!("{native}"));
+            assert_eq!(fix.apply(&V::Int(0)).unwrap(), V::Bool(false), "{native}");
+            assert_eq!(fix.apply(&V::Int(1)).unwrap(), V::Bool(true), "{native}");
+            assert_eq!(fix.apply(&V::UInt(1)).unwrap(), V::Bool(true), "{native}");
+            assert_eq!(fix.apply(&V::Null).unwrap(), V::Null, "{native}");
+            for bad in [V::Int(2), V::Int(-1), V::UInt(u64::MAX)] {
+                let err = fix.apply(&bad).unwrap_err();
+                assert_eq!(
+                    err.code.map(|c| c.id),
+                    Some("RIVET_SOURCE_VALUE_UNREPRESENTABLE"),
+                    "{native} {bad:?}"
+                );
+                assert!(
+                    err.reason.starts_with(
+                        "is not 0 or 1, the only values a `bool` override carries. Remove the \
+                         `columns:` override for the column, or leave the column out of the \
+                         capture, then: Re-baseline"
+                    ),
+                    "{err:?}"
+                );
+            }
+        }
+        for native in [
+            "tinyint(1)",
+            "tinyint(1) unsigned",
+            "bit(1)",
+            "bit(8)",
+            "varchar(5)",
+            "decimal(10,0)",
+        ] {
+            assert!(flag(native).is_none(), "{native} keeps its own reading");
+        }
+        assert!(mysql_flag_fix(Mysql, "bigint", &DataType::Int64).is_none());
+        assert!(mysql_flag_fix(Postgres, "bigint", &DataType::Boolean).is_none());
+        assert!(mysql_flag_fix(Mssql, "int", &DataType::Boolean).is_none());
+        let native_flag = mysql_cell_fix(Mysql, "tinyint(1)");
+        assert!(
+            native_flag.is_none(),
+            "a tinyint(1) is read by bool_value: non-zero is true"
+        );
+        assert_eq!(bool_value(&V::Int(2)), Ok(true));
     }
 
     /// Each numeric reader takes every wire variant a driver delivers for it.

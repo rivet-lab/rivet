@@ -614,12 +614,16 @@ pub(crate) enum CdcEngineOpts {
         slot: String,
         /// The `table:` values the CONFIG asked for.
         configured_tables: Vec<String>,
+        /// The grants the run resolved before its anchor.
+        resolved_grants: Option<std::sync::Arc<std::collections::HashMap<String, ReadableColumns>>>,
     },
     /// SQL Server capture instance (required for `sqlserver://`).
     Mssql {
         capture_instance: Option<String>,
         /// The `table:` values the CONFIG asked for.
         configured_tables: Vec<String>,
+        /// The grants the run resolved before its anchor.
+        resolved_grants: Option<std::sync::Arc<std::collections::HashMap<String, ReadableColumns>>>,
     },
     Oracle {
         configured_tables: Vec<String>,
@@ -833,7 +837,11 @@ impl CdcEngine {
             }
             Self::Postgres => {
                 crate::source::postgres::cdc::PgChangeStream::refuse_unmet_prerequisites(
-                    url, tls, tables, drain,
+                    url,
+                    tls,
+                    tables,
+                    drain,
+                    columns_from_grants,
                 )
             }
             #[cfg(feature = "oracle")]
@@ -870,6 +878,7 @@ impl CdcEngine {
                     PeekBound::Unbounded,
                     DrainMode::Continuous,
                     &[],
+                    None,
                     None,
                     None,
                 )?);
@@ -1021,6 +1030,18 @@ pub(crate) fn spill_dir_for(
     })
 }
 
+/// What a PostgreSQL stream finds already recorded for this run: a checkpoint or not.
+fn pg_prior_run(cfg: &CdcConfig) -> Result<PriorRun> {
+    let checkpoint = match cfg.checkpoint.as_deref() {
+        Some(p) => Position::load(p)?.is_some(),
+        None => false,
+    };
+    Ok(PriorRun {
+        checkpoint,
+        snapshot: false,
+    })
+}
+
 /// Construct the right [`ChangeStream`] adapter for the source URL's scheme.
 pub(crate) fn create_change_stream(
     cfg: &CdcConfig,
@@ -1062,14 +1083,9 @@ pub(crate) fn create_change_stream(
         CdcEngineOpts::Postgres {
             slot,
             configured_tables,
+            resolved_grants,
         } => {
-            let prior = PriorRun {
-                checkpoint: match cfg.checkpoint.as_deref() {
-                    Some(p) => Position::load(p)?.is_some(),
-                    None => false,
-                },
-                snapshot: false,
-            };
+            let prior = pg_prior_run(cfg)?;
             Ok(Box::new(
                 crate::source::postgres::cdc::PgChangeStream::open(
                     url,
@@ -1081,6 +1097,7 @@ pub(crate) fn create_change_stream(
                     configured_tables,
                     spill_dir_for(cfg.checkpoint.as_deref(), &cfg.config_dir).as_deref(),
                     cfg.checkpoint.as_deref(),
+                    resolved_grants.clone(),
                 )
                 .map_err(|e| with_setup_hint(e, PG_CDC_HINT))?,
             ))
@@ -1088,6 +1105,7 @@ pub(crate) fn create_change_stream(
         CdcEngineOpts::Mssql {
             capture_instance,
             configured_tables,
+            resolved_grants,
         } => {
             let ci = capture_instance.as_deref().ok_or_else(|| {
                 crate::error::coded(
@@ -1113,6 +1131,7 @@ pub(crate) fn create_change_stream(
                     cfg.drain,
                     configured_tables,
                     spill_dir_for(cfg.checkpoint.as_deref(), &cfg.config_dir),
+                    resolved_grants.clone(),
                 )
                 .map_err(|e| with_setup_hint(e, MSSQL_CDC_HINT))?,
             ))
@@ -1235,7 +1254,15 @@ impl<'s> CdcSchemaResolver<'s> {
             .type_mappings(&select, &crate::types::ColumnOverrides::new())
         {
             Ok(m) => m,
-            Err(e) => return Err(schema_read_error(readable.is_some(), table, e)),
+            Err(e) => {
+                let e = schema_read_error(readable.is_some(), table, e);
+                return Err(match readable {
+                    Some(before) => {
+                        grants_moved_under_a_failed_read(self.source(), table, before, e)
+                    }
+                    None => e,
+                });
+            }
         };
         if let Some(m) = mappings.iter().find(|m| {
             matches!(
@@ -1373,6 +1400,45 @@ fn schema_read_error(projecting: bool, table: &str, err: anyhow::Error) -> anyho
              delivered. Re-run: the run then reads the columns as they are now"
         ),
     )
+}
+
+/// A schema read that failed while the run projects: when the server now says another column set is readable, the grants moved.
+fn grants_moved_under_a_failed_read(
+    src: &mut dyn crate::source::Source,
+    table: &str,
+    before: &ReadableColumns,
+    err: anyhow::Error,
+) -> anyhow::Error {
+    if seeded!("column-grants-failed-schema-read-not-reread", true, false)
+        || seeded!(
+            "column-grants-revoke-between-two-reads-uncoded",
+            true,
+            false
+        )
+        || crate::error::code_of(&err) == Some(crate::error::codes::SOURCE_CDC_GRANTS_CHANGED)
+    {
+        return err;
+    }
+    let Ok(Some(now)) = src.readable_columns(table) else {
+        return err;
+    };
+    let named =
+        |c: &ReadableColumns| std::collections::HashMap::from([(table.to_string(), c.clone())]);
+    match crate::source::column_grants::first_grants_change(
+        &[table.to_string()],
+        &named(before),
+        &named(&now),
+    ) {
+        Some(why) => crate::error::coded(
+            crate::error::codes::SOURCE_CDC_GRANTS_CHANGED,
+            format!(
+                "cdc: {why}; the read of the schema of `{table}` failed after the grants moved and \
+                 nothing was delivered. Re-run: the next run reads the grants as they are now and \
+                 resumes from the checkpoint, so nothing is lost"
+            ),
+        ),
+        None => err,
+    }
 }
 
 /// A schema read refused by the server's privilege check while the run projects.
@@ -1593,6 +1659,77 @@ mod mod_decisions {
             assert_eq!(crate::error::code_of(&kept), None);
             assert_eq!(format!("{kept:#}"), said);
         }
+    }
+
+    struct Rereads(anyhow::Result<Option<Vec<&'static str>>>);
+
+    impl crate::source::Source for Rereads {
+        fn export(
+            &mut self,
+            _request: &crate::source::ExportRequest<'_>,
+            _sink: &mut dyn crate::source::BatchSink,
+        ) -> Result<()> {
+            unreachable!("a re-read exports nothing")
+        }
+
+        fn query_scalar(&mut self, _sql: &str) -> Result<Option<String>> {
+            unreachable!("a re-read reads no scalar")
+        }
+
+        fn type_mappings(
+            &mut self,
+            _query: &str,
+            _overrides: &crate::types::ColumnOverrides,
+        ) -> Result<Vec<crate::types::TypeMapping>> {
+            unreachable!("a re-read reads no types")
+        }
+
+        fn readable_columns(&mut self, _table: &str) -> Result<Option<ReadableColumns>> {
+            match &self.0 {
+                Ok(c) => Ok(c.as_ref().map(|c| readable(c))),
+                Err(e) => Err(anyhow::anyhow!("{e:#}")),
+            }
+        }
+    }
+
+    fn readable(columns: &[&str]) -> ReadableColumns {
+        ReadableColumns {
+            columns: columns.iter().map(|c| c.to_string()).collect(),
+            select: format!("SELECT {} FROM d.t", columns.join(", ")),
+        }
+    }
+
+    #[test]
+    fn a_failed_schema_read_is_a_grant_change_only_when_the_server_now_reads_another_set() {
+        let before = readable(&["id", "name", "pass"]);
+        let failed = || anyhow::anyhow!("type probe failed");
+        let run = |now: anyhow::Result<Option<Vec<&'static str>>>, err| {
+            super::grants_moved_under_a_failed_read(&mut Rereads(now), "d.t", &before, err)
+        };
+
+        let moved = run(Ok(Some(vec!["id", "name"])), failed());
+        assert_eq!(
+            crate::error::code_of(&moved),
+            Some(crate::error::codes::SOURCE_CDC_GRANTS_CHANGED)
+        );
+        assert!(format!("{moved:#}").contains("lost `pass`"), "{moved:#}");
+
+        for (now, err) in [
+            (Ok(Some(vec!["id", "name", "pass"])), failed()),
+            (Ok(None), failed()),
+            (Err(anyhow::anyhow!("connection lost")), failed()),
+        ] {
+            let kept = run(now, err);
+            assert_eq!(crate::error::code_of(&kept), None);
+            assert_eq!(format!("{kept:#}"), "type probe failed");
+        }
+
+        let coded = crate::error::coded(
+            crate::error::codes::SOURCE_CDC_GRANTS_CHANGED,
+            "mysql cdc: the account lost SELECT on a column of `d.t`",
+        );
+        let kept = run(Ok(Some(vec!["id"])), coded);
+        assert!(format!("{kept:#}").contains("mysql cdc: the account lost SELECT"));
     }
 
     /// A checkpoint that cannot be READ is not a checkpoint that is ABSENT.
@@ -2061,6 +2198,7 @@ mod setup_hint {
             &[],
             None,
             None,
+            None,
         );
         assert_names_refused_port(open.map(drop), super::PG_CDC_HINT);
     }
@@ -2090,6 +2228,7 @@ mod setup_hint {
             super::PeekBound::Unbounded,
             super::DrainMode::Continuous,
             &[],
+            None,
             None,
         );
         assert_names_refused_port(open.map(drop), super::MSSQL_CDC_HINT);
@@ -2125,6 +2264,7 @@ mod engine_identity {
                 CdcEngineOpts::Postgres {
                     slot: "s".into(),
                     configured_tables: t(&["a"]),
+                    resolved_grants: None,
                 },
                 SourceType::Postgres,
                 "postgresql://h/d",
@@ -2133,6 +2273,7 @@ mod engine_identity {
                 CdcEngineOpts::Mssql {
                     capture_instance: None,
                     configured_tables: t(&["a"]),
+                    resolved_grants: None,
                 },
                 SourceType::Mssql,
                 "sqlserver://h/d",
@@ -2414,6 +2555,7 @@ mod tests {
             engine: CdcEngineOpts::Mssql {
                 capture_instance: None,
                 configured_tables: Vec::new(),
+                resolved_grants: None,
             },
         };
         let err = match create_change_stream(&cfg, PeekBound::Unbounded) {

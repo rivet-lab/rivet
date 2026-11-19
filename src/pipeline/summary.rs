@@ -623,10 +623,17 @@ impl RunSummary {
                 .map(fmt_thousands)
                 .unwrap_or_else(|| "?".into());
             let exported = fmt_thousands(self.total_rows);
+            let nulled = match self.nulled_cells.is_empty() {
+                true => String::new(),
+                false => format!(
+                    "; zero or partial date cells written as NULL: {}",
+                    crate::source::mysql::zero_date_counts(&self.nulled_cells)
+                ),
+            };
             let value = if reconciled {
-                format!("MATCH ({exported}/{src})")
+                format!("MATCH ({exported}/{src}){nulled}")
             } else {
-                format!("MISMATCH (exported {exported} vs source {src})")
+                format!("MISMATCH (exported {exported} vs source {src}){nulled}")
             };
             rows.push(("reconcile", value));
         }
@@ -1516,6 +1523,27 @@ mod tests {
         assert!(
             csv.check_post_run_invariants(false).is_ok(),
             "a non-Parquet export must not trip the Form-B branch"
+        );
+    }
+
+    /// A reconcile row names the zero or partial date cells written as NULL, and is unchanged when there are none.
+    #[test]
+    fn the_reconcile_row_counts_the_cells_written_as_null() {
+        let mut s = RunSummary::stub_for_testing("r", "orders");
+        s.reconciled = Some(true);
+        s.source_count = Some(3);
+        s.total_rows = 3;
+        let row = |s: &RunSummary| {
+            s.outcome_rows()
+                .into_iter()
+                .find(|(l, _)| *l == "reconcile")
+                .map(|(_, v)| v)
+        };
+        assert_eq!(row(&s).as_deref(), Some("MATCH (3/3)"));
+        s.nulled_cells = vec![("d".into(), 2), ("ts".into(), 1)];
+        assert_eq!(
+            row(&s).as_deref(),
+            Some("MATCH (3/3); zero or partial date cells written as NULL: d=2, ts=1")
         );
     }
 
