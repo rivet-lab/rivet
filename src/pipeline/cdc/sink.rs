@@ -986,16 +986,16 @@ pub(crate) fn unbudgetable_partition_warning(
 fn budget_slices(buckets: &[i64], cap: usize) -> Vec<(std::ops::Range<usize>, usize)> {
     let mut out = Vec::new();
     let mut start = 0;
-    while start < buckets.len() {
-        let fit = crate::plan::rollover::rows_that_fit(
-            &std::collections::HashSet::new(),
-            &buckets[start..],
-            cap,
-        );
-        let end = start + fit;
-        let held: std::collections::HashSet<i64> = buckets[start..end].iter().copied().collect();
-        out.push((start..end, held.len()));
-        start = end;
+    let mut rest = buckets;
+    while !rest.is_empty() {
+        let fit =
+            crate::plan::rollover::rows_that_fit(&std::collections::HashSet::new(), rest, cap)
+                .max(1);
+        let (head, tail) = rest.split_at(fit);
+        let held: std::collections::HashSet<i64> = head.iter().copied().collect();
+        out.push((start..start + fit, held.len()));
+        start += fit;
+        rest = tail;
     }
     out
 }
