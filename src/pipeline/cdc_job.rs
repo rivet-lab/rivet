@@ -1419,6 +1419,50 @@ mod tests {
         assert!(format!("{err:#}").contains("TCP connect failed"), "{err:#}");
     }
 
+    fn mongo_baseline_scenario(
+        dir: &tempfile::TempDir,
+    ) -> (crate::config::Config, ExportConfig, StateStore, String) {
+        let out = dir.path().join("out");
+        let yaml = format!(
+            "source:\n  type: mongo\n  url: \"mongodb://u:p@127.0.0.1:1/app\"\nexports:\n  - name: o\n    \
+             table: orders\n    mode: cdc\n    format: parquet\n    cdc:\n      checkpoint: ./cdc/o.ckpt\n      \
+             initial: snapshot\n    destination: {{ type: local, path: \"{}\" }}\n",
+            out.display()
+        );
+        let path = dir.path().join("rivet.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        std::fs::create_dir_all(dir.path().join("cdc")).unwrap();
+        std::fs::write(dir.path().join("cdc/o.ckpt"), "{}").unwrap();
+        let config = crate::config::Config::load(&path.display().to_string()).unwrap();
+        let export = config.exports[0].clone();
+        let key = super::dest_for_table(&export.destination, "snapshot").state_key();
+        std::fs::create_dir_all(out.join("snapshot")).unwrap();
+        (config, export, StateStore::open_in_memory().unwrap(), key)
+    }
+
+    #[test]
+    fn a_baseline_the_state_records_done_is_not_pending_while_its_marker_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, export, state, key) = mongo_baseline_scenario(&dir);
+        state
+            .mark_snapshot_done("o", "orders", &key, "run-1")
+            .unwrap();
+        let pending =
+            super::initial_snapshot_pending(&config, &export, &state, dir.path(), None).unwrap();
+        assert!(pending.is_empty(), "{pending:?}");
+    }
+
+    #[test]
+    fn a_baseline_whose_marker_is_present_is_not_pending_while_the_state_has_no_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, export, state, _) = mongo_baseline_scenario(&dir);
+        let marker = dir.path().join("out").join("snapshot");
+        std::fs::write(marker.join("_SUCCESS"), "{}").unwrap();
+        let pending =
+            super::initial_snapshot_pending(&config, &export, &state, dir.path(), None).unwrap();
+        assert!(pending.is_empty(), "{pending:?}");
+    }
+
     #[test]
     fn cdc_warns_when_meta_columns_are_requested_on_a_cdc_export() {
         let mut e = crate::config::sample_export("orders");
