@@ -115,13 +115,39 @@ pub(crate) fn select_exports(
     RunSet::select(config, export_name)?.in_process(&config.source, config_dir, params)
 }
 
-/// Every selected batch export planned and admitted as `run` would, in run order, stopping before the first write.
+/// One batch export, or one baseline leg of a CDC export, planned and then admitted against the shared source connection.
+fn plan_and_admit(
+    src: &mut Option<Box<dyn Source>>,
+    config: &Config,
+    export: &ExportConfig,
+    config_dir: &Path,
+    flags: PlanFlags,
+    params: Option<&HashMap<String, String>>,
+) -> Result<PlannedExport> {
+    plan_batch_export(
+        src.as_deref_mut().map(|s| s as &mut dyn Source),
+        config,
+        export,
+        config_dir,
+        flags,
+        params,
+    )
+    .and_then(|p| match src.as_deref_mut() {
+        Some(s) => {
+            admit_columns(s, config, &p.plan, export, config_dir, params, flags.strict).map(|()| p)
+        }
+        None => Ok(p),
+    })
+}
+
+/// Every selected batch export, and with `cdc_baseline` every pending baseline leg of a selected CDC export, planned and admitted as `run` would, in run order, stopping before the first write.
 pub(crate) fn plan_run(
     config: &Config,
     config_dir: &Path,
     export_name: Option<&str>,
     params: Option<&HashMap<String, String>>,
     flags: PlanFlags,
+    cdc_baseline: bool,
 ) -> Result<Vec<(String, Result<PlannedExport>)>> {
     let exports = select_exports(config, export_name, config_dir, params)?;
     let mut src = match crate::source::create_source(&config.source) {
@@ -132,21 +158,24 @@ pub(crate) fn plan_run(
         Err(_) => None,
     };
     let mut planned = Vec::new();
-    for export in exports.iter().filter(|e| e.mode != ExportMode::Cdc) {
-        let one = plan_batch_export(
-            src.as_deref_mut().map(|s| s as &mut dyn Source),
-            config,
-            export,
-            config_dir,
-            flags,
-            params,
-        )
-        .and_then(|p| match src.as_deref_mut() {
-            Some(s) => admit_columns(s, config, &p.plan, export, config_dir, params, flags.strict)
-                .map(|()| p),
-            None => Ok(p),
-        });
-        planned.push((export.name.clone(), one));
+    for export in &exports {
+        if export.mode != ExportMode::Cdc {
+            let one = plan_and_admit(&mut src, config, export, config_dir, flags, params);
+            planned.push((export.name.clone(), one));
+            continue;
+        }
+        if !cdc_baseline || seeded!("check-skips-cdc-baseline-leg", true, false) {
+            continue;
+        }
+        match super::cdc_job::pending_snapshot_legs(config, export) {
+            Ok(legs) => {
+                for leg in legs {
+                    let one = plan_and_admit(&mut src, config, &leg, config_dir, flags, params);
+                    planned.push((leg.name.clone(), one));
+                }
+            }
+            Err(e) => planned.push((export.name.clone(), Err(e))),
+        }
     }
     Ok(planned)
 }
@@ -310,12 +339,12 @@ mod tests {
     fn an_unreachable_source_stops_a_grants_plan_and_not_a_plain_one() {
         let dir = Path::new(".");
         let grants = one_export_config("mysql", ", columns_from: grants");
-        let err = plan_run(&grants, dir, None, None, PlanFlags::default())
+        let err = plan_run(&grants, dir, None, None, PlanFlags::default(), false)
             .err()
             .expect("a grants plan needs its catalog");
         assert!(format!("{err:#}").contains("127.0.0.1"), "{err:#}");
         let plain = one_export_config("mysql", "");
-        let planned = plan_run(&plain, dir, None, None, PlanFlags::default()).unwrap();
+        let planned = plan_run(&plain, dir, None, None, PlanFlags::default(), false).unwrap();
         assert_eq!(planned.len(), 1);
         assert_eq!(planned[0].0, "e");
     }

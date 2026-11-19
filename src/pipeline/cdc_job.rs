@@ -420,34 +420,36 @@ pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<O
     .map(Some)
 }
 
-pub(super) fn initial_snapshot_pending(
-    config: &Config,
-    export: &ExportConfig,
-    state: &StateStore,
-    config_dir: &std::path::Path,
-    grants: Option<&RunGrants>,
-) -> Result<Vec<ExportConfig>> {
-    let cdc = export.cdc.clone().unwrap_or_default();
-    if cdc.captures_changes_only() {
-        return Ok(Vec::new());
-    }
-    let url = config.source.resolve_url()?;
-    let tls = config.source.tls.as_ref();
+/// One captured table's baseline leg before its state is read: the label, the relation its read names, its destination.
+struct SnapshotTarget {
+    label: String,
+    read: String,
+    dcfg: crate::config::DestinationConfig,
+}
 
-    let slot = cdc
-        .slot
-        .clone()
-        .unwrap_or_else(|| crate::config::DEFAULT_PG_SLOT.to_string());
-
-    let (tables, multi) = match (&export.tables, &export.table) {
-        (Some(ts), _) => (ts.clone(), true),
-        (None, Some(t)) => (vec![t.clone()], false),
+/// The tables a CDC export captures and whether the config names more than one.
+fn cdc_tables(export: &ExportConfig) -> Result<(Vec<String>, bool)> {
+    match (&export.tables, &export.table) {
+        (Some(ts), _) => Ok((ts.clone(), true)),
+        (None, Some(t)) => Ok((vec![t.clone()], false)),
         (None, None) => crate::rivet_bail!(
             crate::error::codes::CONFIG_MODE_SETTING_INVALID,
             "export '{}': cdc mode requires `table:`",
             export.name
         ),
-    };
+    }
+}
+
+/// The relation each baseline leg reads and the destination it writes, resolved from the catalog as a run resolves them.
+fn snapshot_targets(
+    config: &Config,
+    export: &ExportConfig,
+    tables: &[String],
+    multi: bool,
+) -> Result<Vec<SnapshotTarget>> {
+    let url = config.source.resolve_url()?;
+    let tls = config.source.tls.as_ref();
+    let cdc = export.cdc.clone().unwrap_or_default();
     let engine = CdcEngine::from(config.source.source_type);
     let catalog_read: Option<String> = match (engine, &cdc.capture_instance) {
         (CdcEngine::Mssql, Some(ci)) => {
@@ -469,7 +471,7 @@ pub(super) fn initial_snapshot_pending(
                     tables.first().map(String::as_str).unwrap_or("the table"),
                 );
             };
-            for t in &tables {
+            for t in tables {
                 if crate::source::cdc::sink::table_matches(CdcEngine::Mssql, t, &schema, &table) {
                     continue;
                 }
@@ -486,34 +488,121 @@ pub(super) fn initial_snapshot_pending(
         _ => None,
     };
     let mysql_reads = match engine {
-        CdcEngine::Mysql => crate::source::mysql::cdc::MysqlChangeStream::baseline_reads(
-            url.expose(),
-            tls,
-            &tables,
-        )?,
+        CdcEngine::Mysql => {
+            crate::source::mysql::cdc::MysqlChangeStream::baseline_reads(url.expose(), tls, tables)?
+        }
         _ => Default::default(),
     };
-    let mut table_dests = Vec::with_capacity(tables.len());
+    Ok(tables
+        .iter()
+        .map(|t| {
+            let table_dcfg = if multi {
+                dest_for_table(&export.destination, t)
+            } else {
+                export.destination.clone()
+            };
+            SnapshotTarget {
+                label: t.clone(),
+                read: catalog_read
+                    .clone()
+                    .or_else(|| mysql_reads.get(t).cloned())
+                    .unwrap_or_else(|| t.clone()),
+                dcfg: dest_for_table(&table_dcfg, "snapshot"),
+            }
+        })
+        .collect())
+}
+
+/// The `mode: full` leg one pending baseline runs as: its read, grants, backfill recipe and meta columns.
+fn snapshot_leg(
+    config: &Config,
+    export: &ExportConfig,
+    target: &SnapshotTarget,
+    recipes: &[(String, &ExportConfig)],
+    grants: Option<&RunGrants>,
+    anchor_pos: Option<&str>,
+) -> Result<ExportConfig> {
+    let label = &target.label;
+    let mut synth = synth_snapshot_export(export, label, &target.read, &target.dcfg);
+    synth.table_select = grants.and_then(|g| g.get(label)).map(|r| r.select.clone());
+    if let Some(recipe) = crate::config::backfill_recipe_for(recipes, label) {
+        apply_backfill_recipe(&mut synth, recipe, export, label)?;
+    }
+    let base_layout = crate::load::plan::resolved_layout(config, export, Some(label)).compacts();
+    synth.meta_columns.deleted_flag = crate::load::plan::base_carries_delete_flag(
+        base_layout,
+        crate::load::plan::resolved_deleted_flag(config, export, Some(label)),
+    );
+    synth.meta_columns.cdc_snapshot_pos = if base_layout {
+        None
+    } else {
+        anchor_pos.map(str::to_string)
+    };
+    Ok(synth)
+}
+
+/// The baseline legs `run` would execute, read from the destination's `_SUCCESS` marker alone, with no state opened.
+pub(crate) fn pending_snapshot_legs(
+    config: &Config,
+    export: &ExportConfig,
+) -> Result<Vec<ExportConfig>> {
+    let cdc = export.cdc.clone().unwrap_or_default();
+    if cdc.captures_changes_only() {
+        return Ok(Vec::new());
+    }
+    let (tables, multi) = cdc_tables(export)?;
+    let targets = snapshot_targets(config, export, &tables, multi)?;
+    let recipes = crate::config::resolve_backfill(export, &config.exports)
+        .map_err(|why| crate::error::coded(crate::error::codes::CONFIG_CDC_SHAPE_INVALID, why))?;
+    let grants = resolve_grants(config, export)?;
+    let mut legs = Vec::new();
+    for target in &targets {
+        let dest = crate::destination::create_destination(&target.dcfg)?;
+        if dest.head("_SUCCESS")?.is_some() {
+            continue;
+        }
+        legs.push(snapshot_leg(
+            config,
+            export,
+            target,
+            &recipes,
+            grants.as_ref(),
+            None,
+        )?);
+    }
+    Ok(legs)
+}
+
+/// The baseline legs this run executes, each table's done flag read from the state row or the destination marker.
+pub(super) fn initial_snapshot_pending(
+    config: &Config,
+    export: &ExportConfig,
+    state: &StateStore,
+    config_dir: &std::path::Path,
+    grants: Option<&RunGrants>,
+) -> Result<Vec<ExportConfig>> {
+    let cdc = export.cdc.clone().unwrap_or_default();
+    if cdc.captures_changes_only() {
+        return Ok(Vec::new());
+    }
+    let url = config.source.resolve_url()?;
+    let tls = config.source.tls.as_ref();
+
+    let slot = cdc
+        .slot
+        .clone()
+        .unwrap_or_else(|| crate::config::DEFAULT_PG_SLOT.to_string());
+
+    let (tables, multi) = cdc_tables(export)?;
+    let engine = CdcEngine::from(config.source.source_type);
+    let targets = snapshot_targets(config, export, &tables, multi)?;
     let mut done_flags = Vec::with_capacity(tables.len());
-    for t in &tables {
-        let table_dcfg = if multi {
-            dest_for_table(&export.destination, t)
-        } else {
-            export.destination.clone()
-        };
-        let snap_dcfg = dest_for_table(&table_dcfg, "snapshot");
-        let dest = crate::destination::create_destination(&snap_dcfg)?;
-        let done = state.snapshot_done(&export.name, t, &snap_dcfg.state_key())?
-            || dest.head("_SUCCESS")?.is_some();
-        table_dests.push((
-            t.clone(),
-            catalog_read
-                .clone()
-                .or_else(|| mysql_reads.get(t).cloned())
-                .unwrap_or_else(|| t.clone()),
-            snap_dcfg,
-        ));
-        done_flags.push(done);
+    for target in &targets {
+        let dest = crate::destination::create_destination(&target.dcfg)?;
+        done_flags.push(
+            state.snapshot_done(&export.name, &target.label, &target.dcfg.state_key())?
+                || dest.head("_SUCCESS")?.is_some(),
+        );
     }
     let capture = crate::state::ProgressKey::cdc(&export.name, &config.source.state_key(), &tables);
     let capture_dest = export.destination.state_key();
@@ -526,7 +615,7 @@ pub(super) fn initial_snapshot_pending(
     );
     if let Some(i) = rejoins_over_a_baseline(&captured, &tables, &done_flags) {
         let t = &tables[i];
-        let snap = super::finalize::destination_uri_for_manifest(&table_dests[i].2);
+        let snap = super::finalize::destination_uri_for_manifest(&targets[i].dcfg);
         let snap = snap.trim_end_matches('/');
         let dir = snap.strip_suffix("/snapshot").unwrap_or(snap);
         crate::rivet_bail!(
@@ -589,24 +678,14 @@ pub(super) fn initial_snapshot_pending(
         .map(|p| p.0.to_string());
     let mut pending = Vec::new();
     for idx in pending_idx {
-        let (label, read, snap_dcfg) = &table_dests[idx];
-        let mut synth = synth_snapshot_export(export, label, read, snap_dcfg);
-        synth.table_select = grants.and_then(|g| g.get(label)).map(|r| r.select.clone());
-        if let Some(recipe) = crate::config::backfill_recipe_for(&recipes, label) {
-            apply_backfill_recipe(&mut synth, recipe, export, label)?;
-        }
-        let base_layout =
-            crate::load::plan::resolved_layout(config, export, Some(label)).compacts();
-        synth.meta_columns.deleted_flag = crate::load::plan::base_carries_delete_flag(
-            base_layout,
-            crate::load::plan::resolved_deleted_flag(config, export, Some(label)),
-        );
-        synth.meta_columns.cdc_snapshot_pos = if base_layout {
-            None
-        } else {
-            anchor_pos.clone()
-        };
-        pending.push(synth);
+        pending.push(snapshot_leg(
+            config,
+            export,
+            &targets[idx],
+            &recipes,
+            grants,
+            anchor_pos.as_deref(),
+        )?);
     }
     Ok(pending)
 }
@@ -1340,6 +1419,52 @@ mod tests {
         assert!(format!("{err:#}").contains("TCP connect failed"), "{err:#}");
     }
 
+    fn mongo_baseline_scenario(
+        dir: &tempfile::TempDir,
+    ) -> (crate::config::Config, ExportConfig, StateStore, String) {
+        let out = dir.path().join("out");
+        let yaml = format!(
+            "source:\n  type: mongo\n  url: \"mongodb://u:p@127.0.0.1:1/app\"\nexports:\n  - name: o\n    \
+             table: orders\n    mode: cdc\n    format: parquet\n    cdc:\n      checkpoint: ./cdc/o.ckpt\n      \
+             initial: snapshot\n    destination: {{ type: local, path: \"{}\" }}\n",
+            out.display()
+        );
+        let path = dir.path().join("rivet.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        std::fs::create_dir_all(dir.path().join("cdc")).unwrap();
+        std::fs::write(dir.path().join("cdc/o.ckpt"), "{}").unwrap();
+        let config = crate::config::Config::load(&path.display().to_string()).unwrap();
+        let export = config.exports[0].clone();
+        let key = super::dest_for_table(&export.destination, "snapshot").state_key();
+        std::fs::create_dir_all(out.join("snapshot")).unwrap();
+        (config, export, StateStore::open_in_memory().unwrap(), key)
+    }
+
+    #[test]
+    fn a_baseline_the_state_records_done_is_not_pending_while_its_marker_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, export, state, key) = mongo_baseline_scenario(&dir);
+        state
+            .mark_snapshot_done("o", "orders", &key, "run-1")
+            .unwrap();
+        let pending =
+            super::initial_snapshot_pending(&config, &export, &state, dir.path(), None).unwrap();
+        let legs: Vec<&str> = pending.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(legs, Vec::<&str>::new());
+    }
+
+    #[test]
+    fn a_baseline_whose_marker_is_present_is_not_pending_while_the_state_has_no_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, export, state, _) = mongo_baseline_scenario(&dir);
+        let marker = dir.path().join("out").join("snapshot");
+        std::fs::write(marker.join("_SUCCESS"), "{}").unwrap();
+        let pending =
+            super::initial_snapshot_pending(&config, &export, &state, dir.path(), None).unwrap();
+        let legs: Vec<&str> = pending.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(legs, Vec::<&str>::new());
+    }
+
     #[test]
     fn cdc_warns_when_meta_columns_are_requested_on_a_cdc_export() {
         let mut e = crate::config::sample_export("orders");
@@ -1922,6 +2047,47 @@ mod tests {
                 .unwrap_or_else(|| panic!("{engine}: grants resolved without a source"));
             assert!(!format!("{err:#}").is_empty(), "{engine}");
         }
+    }
+
+    /// A postgres `mode: cdc` config over `orders` with `cdc_lines` under `cdc:`, writing to `out`.
+    fn pending_config(
+        out: &std::path::Path,
+        cdc_lines: &str,
+    ) -> (crate::config::Config, crate::config::ExportConfig) {
+        let yaml = format!(
+            "source:\n  type: postgres\n  url: \"postgres://u:p@localhost/app\"\nexports:\n  - name: o\n    \
+             table: orders\n    mode: cdc\n    format: parquet\n    cdc:\n{cdc_lines}    \
+             destination: {{ type: local, path: {} }}\n",
+            out.display()
+        );
+        let mut config = crate::config::Config::from_yaml(&yaml).unwrap();
+        let export = config.exports.remove(0);
+        (config, export)
+    }
+
+    /// A pending baseline is one `mode: full` leg named after its table; a done one and a stream-only export have none.
+    #[test]
+    fn the_legs_check_admits_are_the_pending_baselines_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, export) = pending_config(dir.path(), "      initial: snapshot\n");
+        let legs = super::pending_snapshot_legs(&config, &export).unwrap();
+        assert_eq!(legs.len(), 1);
+        assert_eq!(legs[0].name, "o__snapshot_orders");
+        assert_eq!(legs[0].mode, crate::config::ExportMode::Full);
+        let snapshot = dir.path().join("snapshot");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("_SUCCESS"), b"{}").unwrap();
+        assert!(
+            super::pending_snapshot_legs(&config, &export)
+                .unwrap()
+                .is_empty()
+        );
+        let (config, export) = pending_config(dir.path(), "      slot: s\n");
+        assert!(
+            super::pending_snapshot_legs(&config, &export)
+                .unwrap()
+                .is_empty()
+        );
     }
 }
 

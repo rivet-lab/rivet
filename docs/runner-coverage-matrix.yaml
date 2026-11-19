@@ -569,13 +569,13 @@ scenarios:
     cdc:            { test: oracle_cdc_timestamp9_is_refused_until_declared_and_a_declared_timestamp_delivers_the_row }
 
   - id: check_plan_doctor_refuse_what_run_refuses
-    what: "a batch export whose column the export's `format:` cannot write, or that no Arrow type carries and no `columns:` entry declares, is refused before any read by `check`, `plan`, `doctor` and `run` with the same code (RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED, RIVET_TYPE_UNSAFE_MAPPING): one `plan_open_columns` (format::refuse_unwritable_columns) and one `refuse_unmapped` in `probe_mappings`, both reached through `plan_run`"
+    what: "a batch export, or the pending baseline leg of a `mode: cdc` export (`initial: snapshot` or `backfill:` with no `snapshot/_SUCCESS` marker: `pending_snapshot_legs`), whose column the export's `format:` cannot write, or that no Arrow type carries and no `columns:` entry declares, is refused before any read by `check`, `doctor` and `run` (and by `plan` for a batch export) with the same code (RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED, RIVET_TYPE_UNSAFE_MAPPING): one `plan_open_columns` (format::refuse_unwritable_columns) and one `refuse_unmapped` in `probe_mappings`, both reached through `plan_run`"
     single:         { test: a_column_without_an_arrow_type_is_refused_by_check_like_the_run_postgres }
     chunked:        { na: "shared seam: plan_open_columns and probe_mappings run in plan_run/execute_resolved_plan before the strategy dispatch" }
     chunked_checkpoint: { na: "shared seam (plan_run, before the dispatch)" }
     keyset:         { na: "shared seam (plan_run, before the dispatch)" }
     mongo_parallel: { na: "a Mongo export's schema is the fixed {_id, document, meta} shape: no column type reaches the format or the type mapping" }
-    cdc:            { na: "the CDC stream plans its columns through plan_cdc_delivery, which keeps an unmapped column as text; its check-vs-run refusals are a separate change" }
+    cdc:            { test: a_pending_baseline_wire_mismatch_is_refused_by_check_postgres }
 
   - id: mongo_flat_id_label
     what: "the flat Mongo `_id` column's `rivet.native_type` / `rivet.fidelity` names the BSON type the collection holds (one seam: MongoSource::flat_mappings, read by export() and type_mappings)"

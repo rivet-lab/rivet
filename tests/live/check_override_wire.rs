@@ -10,7 +10,7 @@ fn check_and_run_refuse_alike(rig: Rig, name: &str) -> String {
 }
 
 /// The run and both `check` spellings refuse `rig`'s export by `want`; returns the run's stderr.
-fn check_and_run_refuse_alike_by(rig: Rig, name: &str, want: Refused<'_>) -> String {
+pub(crate) fn check_and_run_refuse_alike_by(rig: Rig, name: &str, want: Refused<'_>) -> String {
     let run = rig.run_args(&["--export", name]);
     assert_refused(&run, want);
     assert_refused(&rig.cli(&["check", "--export", name]), want);

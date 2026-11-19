@@ -529,6 +529,8 @@ The `Strategy:` and `Mode:` lines (and `strategy` / `mode` under `--json`) descr
 
 For an export that declares `columns:`, `check` reads the first row of the export through the same converter `rivet run` uses and ends with `RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH` (exit 1) when the run would refuse a declared type; this costs one extra one-row query per such export, and an empty source passes as it passes the run, except for an override the reader has no builder for (a nanosecond timestamp on MySQL, a decimal past precision 38 on SQL Server or Oracle), which is decided from the column list and refused even over no rows.
 
+For a `mode: cdc` export whose baseline is still pending (`initial: snapshot` or `backfill:` and no `snapshot/_SUCCESS` marker at the destination), `check` and `doctor` admit the baseline leg the first `run` executes, with the column, format and `columns:` refusals of a batch export, before any row is read. Once the marker exists the leg is done and is not admitted again; `check` never opens the state database. `rivet plan` does not plan a `mode: cdc` export and is unchanged.
+
 ```bash
 rivet check --config <PATH> [OPTIONS]
 ```
