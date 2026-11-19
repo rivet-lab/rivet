@@ -2222,6 +2222,51 @@ mod tests {
         );
     }
 
+    /// The cells a MySQL CDC run nulled are summed over its parts into the manifest, a column that nulled none is absent, and a clean run records none.
+    #[test]
+    fn a_cdc_manifest_sums_the_nulled_date_cells_over_its_parts_and_a_clean_run_records_none() {
+        let date = |name: &str| TypeMapping {
+            column_name: name.into(),
+            source_native_type: "date".into(),
+            rivet_type: crate::types::RivetType::String,
+            arrow_type: Some(DataType::Utf8),
+            ..int_col().remove(0)
+        };
+        let cols = vec![date("d"), date("e")];
+        let row = |zero: bool| ChangeEvent {
+            after: Some(vec![
+                RivetValue::Bytes(if zero {
+                    value::ZERO_DATE.to_vec()
+                } else {
+                    b"2026-01-02".to_vec()
+                }),
+                RivetValue::Bytes(b"2026-01-02".to_vec()),
+            ]),
+            image_names: Some(Arc::from(vec!["d".to_string(), "e".to_string()])),
+            ..insert(0)
+        };
+        let run = |zeros: &[bool]| {
+            let dir = tempfile::tempdir().unwrap();
+            let dest = local_dest(&dir);
+            let mut stream = FakeStream {
+                events: zeros.iter().map(|z| row(*z)).collect(),
+                acked: Vec::new(),
+            };
+            let (m, r) = run_to_files(
+                &mut stream,
+                cfg(dest.as_ref(), &cols, FormatType::Parquet, 2),
+            );
+            r.unwrap();
+            let manifest = m.into_iter().next().unwrap();
+            (manifest.part_count, manifest.nulled_cells)
+        };
+        assert_eq!(
+            run(&[true, false, true, true]),
+            (2, Some(vec![("d".to_string(), 3)]))
+        );
+        assert_eq!(run(&[false, false, false, false]), (2, None));
+    }
+
     #[test]
     fn run_to_files_rolls_parts_and_acks_each_committed_part() {
         let dir = tempfile::tempdir().unwrap();
