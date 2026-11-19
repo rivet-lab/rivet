@@ -59,6 +59,7 @@ fn a_pending_baseline_over_columns_the_run_writes_is_accepted(mut scn: CdcScenar
     scn.settle();
     let name = scn.rig.export_name().to_string();
     both_check_spellings_accept(&scn.rig, &name);
+    scn.rig.run_ok();
 }
 
 fn a_stream_only_export_is_not_admitted_as_a_batch(mut scn: CdcScenario) {
@@ -66,6 +67,7 @@ fn a_stream_only_export_is_not_admitted_as_a_batch(mut scn: CdcScenario) {
     scn.settle();
     let name = scn.rig.export_name().to_string();
     both_check_spellings_accept(&scn.rig, &name);
+    scn.rig.run_ok();
 }
 
 #[test]
