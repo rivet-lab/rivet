@@ -229,9 +229,6 @@ KNOWN_RED: tuple[KnownRed, ...] = (
              alt=tuple(nightly_key("refusal_names_true_cause", kind, cause) for kind, cause in (
                  ("cmd", "printed"), ("cmd", "uncoded"), ("decoy", "uncoded"), ("field", "uncoded"), ("guard", "printed"), ("reader", "the"),
                  ("remedy", "remedy"), ("site", "remedy"), ("source", "named"), ("word", "printed"), ("wording", "remedy")))),
-    _open("live_keyset_parallel::open_defect_a_parallel_keyset_datetimeoffset_key_keeps_the_run_mssql",
-          "a datetimeoffset keyset key stops the run:",
-          "2026-11-18: the percentile sampler under 10M catalog rows (src/pipeline/keyset.rs) reads a DATETIMEOFFSET split point through scalar_to_string (src/source/mssql/mod.rs), which has no DateTimeOffset arm and returns its Debug text, so every range fails with RIVET_SOURCE_QUERY_FAILED (code 241); open, closes when the split point is read as a timestamp literal SQL Server casts"),
 )
 
 
