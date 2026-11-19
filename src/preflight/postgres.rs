@@ -11,12 +11,13 @@ pub(super) fn check_postgres(
     url: &str,
     tls: Option<&TlsConfig>,
     exports: &[&ExportConfig],
+    grants: bool,
 ) -> Result<Vec<ExportDiagnostic>> {
     let mut client = crate::source::postgres::connect_client(url, tls)?;
     let db_max_connections = fetch_max_connections_pg(&mut client);
 
     super::collect_diagnostics(exports, |export| {
-        diagnose_pg(&mut client, export, db_max_connections)
+        diagnose_pg(&mut client, export, db_max_connections, grants)
     })
 }
 
@@ -25,10 +26,24 @@ pub(super) fn diagnose_export_pg(
     url: &str,
     tls: Option<&TlsConfig>,
     export: &ExportConfig,
+    grants: bool,
 ) -> Result<super::ExportDiagnostic> {
     let mut client = crate::source::postgres::connect_client(url, tls)?;
     let db_max_connections = fetch_max_connections_pg(&mut client);
-    diagnose_pg(&mut client, export, db_max_connections)
+    diagnose_pg(&mut client, export, db_max_connections, grants)
+}
+
+/// The `columns_from: grants` projection of a `table:`, which the run reads instead of `SELECT *`.
+fn grants_projection(
+    client: &mut postgres::Client,
+    export: &ExportConfig,
+    grants: bool,
+) -> Result<Option<String>> {
+    let Some(table) = export.table.as_ref().filter(|_| grants) else {
+        return Ok(None);
+    };
+    crate::source::postgres::column_grants::readable_columns(client, table)
+        .map(|(_, _, r)| Some(r.select))
 }
 
 fn fetch_max_connections_pg(client: &mut postgres::Client) -> Option<u32> {
@@ -46,8 +61,12 @@ fn diagnose_pg(
     client: &mut postgres::Client,
     export: &ExportConfig,
     db_max_connections: Option<u32>,
+    grants: bool,
 ) -> Result<ExportDiagnostic> {
-    let base_query = resolve_preflight_base_query(export);
+    let base_query = match grants_projection(client, export, grants)? {
+        Some(select) => select,
+        None => resolve_preflight_base_query(export),
+    };
     let base_query = base_query.as_str();
     let base_table_owned = preflight_base_table(export, base_query);
     let base_table = base_table_owned.as_deref();

@@ -118,24 +118,23 @@ fn capture_open_forensics(
         &plan.column_overrides,
     ) {
         Ok(mappings) => {
-            if want_key && let Some(relation) = plan.source_table.as_deref() {
-                summary.open_primary_key = src.primary_key(relation).unwrap_or_else(|e| {
-                    log::warn!(
-                        "export '{}': could not read the primary key of `{relation}`: {e:#}",
-                        plan.export_name
-                    );
-                    None
-                });
-                summary.open_finer_than_microsecond = src
-                    .finer_than_microsecond_columns(relation)
-                    .unwrap_or_else(|e| {
+            if want_key {
+                if let Some(relation) = plan.source_table.as_deref() {
+                    summary.open_primary_key = src.primary_key(relation).unwrap_or_else(|e| {
                         log::warn!(
-                            "export '{}': could not read the sub-microsecond columns of \
-                             `{relation}`: {e:#}",
+                            "export '{}': could not read the primary key of `{relation}`: {e:#}",
                             plan.export_name
                         );
-                        Vec::new()
+                        None
                     });
+                }
+                summary.open_finer_than_microsecond =
+                    crate::preflight::type_report::finer_than_microsecond_of(
+                        src,
+                        plan.source_table.as_deref(),
+                        &plan.base_query,
+                        &plan.export_name,
+                    );
             }
             let cols: Vec<crate::state::SchemaColumn> = mappings
                 .iter()
@@ -3956,6 +3955,62 @@ mod tests {
         );
         assert_eq!(stored, ["payload", "id"]);
         assert_eq!(probed(false).0.open_primary_key, None);
+    }
+
+    struct FinerSource;
+
+    impl crate::source::Source for FinerSource {
+        fn export(
+            &mut self,
+            _request: &crate::source::ExportRequest<'_>,
+            _sink: &mut dyn crate::source::BatchSink,
+        ) -> crate::error::Result<()> {
+            Ok(())
+        }
+        fn query_scalar(&mut self, _sql: &str) -> crate::error::Result<Option<String>> {
+            Ok(None)
+        }
+        fn type_mappings(
+            &mut self,
+            _query: &str,
+            _overrides: &crate::types::ColumnOverrides,
+        ) -> crate::error::Result<Vec<crate::types::TypeMapping>> {
+            Ok(Vec::new())
+        }
+        fn finer_than_microsecond_columns(
+            &mut self,
+            _table: &str,
+        ) -> crate::error::Result<Vec<String>> {
+            Ok(vec!["BY_CATALOG".into()])
+        }
+        fn finer_than_microsecond_in_query(
+            &mut self,
+            _query: &str,
+        ) -> crate::error::Result<Vec<String>> {
+            Ok(vec!["BY_QUERY".into()])
+        }
+    }
+
+    /// The open probe reads the sub-microsecond columns from the catalog for a table export and from the query's description for a query export, only when the load wants the key.
+    #[test]
+    fn the_open_probe_reads_the_finer_columns_of_a_table_and_of_a_query() {
+        let finer = |source_table: Option<&str>, want_key: bool| {
+            let mut plan = chunked_plan_with_quality(None);
+            plan.source = unreachable_source();
+            plan.source_table = source_table.map(str::to_string);
+            let state = StateStore::open_in_memory().unwrap();
+            let mut summary = RunSummary::stub_for_testing("run-open", "orders");
+            let mut meta = MetaConn {
+                cfg: &plan.source,
+                src: Some(Box::new(FinerSource)),
+            };
+            capture_open_forensics(&plan, &state, &mut summary, want_key, &mut meta);
+            summary.open_finer_than_microsecond
+        };
+        assert_eq!(finer(Some("public.orders"), true), ["BY_CATALOG"]);
+        assert_eq!(finer(None, true), ["BY_QUERY"]);
+        assert_eq!(finer(None, false), Vec::<String>::new());
+        assert_eq!(finer(Some("public.orders"), false), Vec::<String>::new());
     }
 
     /// The count is read on the held connection and compared with the committed parts' rows.

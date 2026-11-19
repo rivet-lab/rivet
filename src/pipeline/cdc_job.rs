@@ -381,7 +381,7 @@ fn continuous_shape(engine: crate::config::SourceType) -> &'static str {
     }
 }
 
-/// Read the account's grants once for a `columns_from: grants` MySQL, Oracle or MongoDB CDC run.
+/// Read the account's grants once for a `columns_from: grants` MySQL, PostgreSQL, Oracle or MongoDB CDC run.
 pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<Option<RunGrants>> {
     if !config.source.columns_from_grants() {
         return Ok(None);
@@ -853,6 +853,7 @@ fn run_cdc_inner(
                             .clone()
                             .unwrap_or_else(|| crate::config::DEFAULT_PG_SLOT.to_string()),
                         configured_tables: wired.iter().map(|(t, _, _)| t.clone()).collect(),
+                        resolved_grants: grants,
                     },
                     crate::config::SourceType::Mssql => CdcEngineOpts::Mssql {
                         capture_instance: cdc.capture_instance.clone(),

@@ -95,7 +95,7 @@ pub fn done_note(
 
 /// Copy the SQLite state at `source` into the PostgreSQL state at `target_url`, which must hold no rows.
 pub fn copy_sqlite_to_postgres(source: &Path, target_url: &str) -> Result<CopyReport> {
-    if !super::holds_state(source) {
+    if super::state_file_rows(source)? == 0 {
         crate::rivet_bail!(
             crate::error::codes::STATE_COPY_SOURCE_EMPTY,
             "`{}` holds no state to copy (no cursor and no run): name the config whose \
@@ -565,6 +565,47 @@ mod tests {
             crate::error::error_code(&err),
             Some("RIVET_STATE_COPY_SOURCE_EMPTY")
         );
+    }
+
+    /// A source that is no SQLite database is `STATE_FILE_CORRUPT`, not an empty state.
+    #[test]
+    fn a_corrupt_source_is_refused_as_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let corrupt = dir.path().join("corrupt.db");
+        std::fs::write(&corrupt, "not a sqlite database ".repeat(60)).unwrap();
+        let err =
+            copy_sqlite_to_postgres(&corrupt, "postgresql://nobody@127.0.0.1:1/x").unwrap_err();
+        assert_eq!(
+            crate::error::error_code(&err),
+            Some("RIVET_STATE_FILE_CORRUPT"),
+            "{err}"
+        );
+        assert!(format!("{err}").contains("CORRUPT"), "{err}");
+    }
+
+    /// A migrated, table-less, zero-byte or missing source stays `STATE_COPY_SOURCE_EMPTY`.
+    #[test]
+    fn an_empty_missing_or_table_less_source_stays_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let migrated = dir.path().join("migrated.db");
+        crate::state::StateStore::open_at_path(&migrated).unwrap();
+        let bare = dir.path().join("bare.db");
+        rusqlite::Connection::open(&bare)
+            .unwrap()
+            .execute_batch("CREATE TABLE other (x INTEGER);")
+            .unwrap();
+        let zero = dir.path().join("zero.db");
+        std::fs::write(&zero, "").unwrap();
+        for path in [migrated, bare, zero, dir.path().join("missing.db")] {
+            let err =
+                copy_sqlite_to_postgres(&path, "postgresql://nobody@127.0.0.1:1/x").unwrap_err();
+            assert_eq!(
+                crate::error::error_code(&err),
+                Some("RIVET_STATE_COPY_SOURCE_EMPTY"),
+                "{}",
+                path.display()
+            );
+        }
     }
 
     /// A SQLite value is the text PostgreSQL casts to the column's type: bytes as hex for `bytea`.

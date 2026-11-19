@@ -178,7 +178,7 @@
           "default": null
         },
         "columns_from": {
-          "description": "`grants`: every export reads and delivers only the columns the source account may read: `SELECT` on MySQL and Oracle, the fields of a `$project` view on MongoDB.",
+          "description": "`grants`: every export reads and delivers only the columns the source account may read: `SELECT` on MySQL, PostgreSQL and Oracle, the fields of a `$project` view on MongoDB.",
           "anyOf": [
             {
               "$ref": "#/$defs/ColumnsFrom"
