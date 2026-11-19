@@ -2,6 +2,7 @@
 
 mod arrow_convert;
 pub(crate) mod cdc;
+pub(crate) mod column_grants;
 mod proxy;
 
 pub use proxy::MssqlProxyKind;
@@ -478,6 +479,13 @@ async fn scalar_on(client: &mut MssqlClient, sql: &str) -> Result<Option<String>
 impl Source for MssqlSource {
     fn introspect_for_chunking(&mut self, qualified_table: &str) -> Result<TableIntrospection> {
         introspect_mssql_on(self, qualified_table)
+    }
+
+    fn readable_columns(
+        &mut self,
+        table: &str,
+    ) -> Result<Option<crate::source::cdc::ReadableColumns>> {
+        column_grants::readable_relation(self, table).map(|(_, _, r)| Some(r))
     }
 
     fn finer_than_microsecond_columns(&mut self, table: &str) -> Result<Vec<String>> {

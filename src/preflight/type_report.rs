@@ -224,6 +224,20 @@ struct ReportUnit {
     relation: Option<String>,
 }
 
+/// The readable columns of each named table, as the source's own `readable_columns` answers them.
+fn readable_through_source(
+    src: &mut dyn crate::source::Source,
+    tables: &[String],
+) -> Result<std::collections::HashMap<String, crate::source::cdc::ReadableColumns>> {
+    let mut by_table = std::collections::HashMap::new();
+    for t in tables {
+        if let Some(r) = src.readable_columns(t)? {
+            by_table.insert(t.clone(), r);
+        }
+    }
+    Ok(by_table)
+}
+
 /// The readable columns of each named table for a `columns_from: grants` source.
 fn readable_by_table(
     source_type: SourceType,
@@ -235,16 +249,14 @@ fn readable_by_table(
         SourceType::Mysql => {
             crate::source::mysql::cdc::MysqlChangeStream::readable_columns_at(url, tls, tables)
         }
+        SourceType::Mssql => {
+            let mut src = crate::source::mssql::MssqlSource::connect_with_tls(url, tls)?;
+            readable_through_source(&mut src, tables)
+        }
         #[cfg(feature = "oracle")]
         SourceType::Oracle => {
             let mut src = crate::source::oracle::OracleSource::connect_with_tls(url, tls)?;
-            let mut by_table = std::collections::HashMap::new();
-            for t in tables {
-                if let Some(r) = crate::source::Source::readable_columns(&mut src, t)? {
-                    by_table.insert(t.clone(), r);
-                }
-            }
-            Ok(by_table)
+            readable_through_source(&mut src, tables)
         }
         SourceType::Postgres => {
             let mut client = crate::source::postgres::connect_client(url, tls)?;
@@ -1622,9 +1634,9 @@ exports:
         read(SourceType::Oracle, DEAD_ORACLE).expect_err("oracle reads its server");
         read(SourceType::Postgres, "postgresql://u:p@127.0.0.1:1/app")
             .expect_err("postgres reads its server");
-        for other in [SourceType::Mssql, SourceType::Mongo] {
-            let none = read(other, "postgresql://u:p@127.0.0.1:1/app").unwrap();
-            assert!(none.is_empty(), "{other:?} reads no grants");
-        }
+        read(SourceType::Mssql, "sqlserver://u:p@127.0.0.1:1/app")
+            .expect_err("mssql reads its server");
+        let none = read(SourceType::Mongo, "postgresql://u:p@127.0.0.1:1/app").unwrap();
+        assert!(none.is_empty(), "mongo reads no grants");
     }
 }
