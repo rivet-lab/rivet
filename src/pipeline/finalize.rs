@@ -180,6 +180,20 @@ pub(super) fn finalize_manifest(
     Finalized { gap, left_alone }
 }
 
+/// The per-column checksums and the cells written as NULL, as the summary holds them.
+fn record_value_checks(
+    builder: &mut crate::pipeline::manifest_writer::ManifestBuilder,
+    summary: &RunSummary,
+) {
+    if !summary.column_checksums.is_empty() {
+        builder.set_column_checksums(
+            summary.column_checksums.clone(),
+            summary.checksum_key_column.clone(),
+        );
+    }
+    builder.set_nulled_cells(&summary.nulled_cells);
+}
+
 fn write_run_manifest(
     plan: &ResolvedRunPlan,
     export_family: &str,
@@ -297,12 +311,7 @@ fn write_run_manifest(
             part.content_md5.clone(),
         );
     }
-    if !summary.column_checksums.is_empty() {
-        builder.set_column_checksums(
-            summary.column_checksums.clone(),
-            summary.checksum_key_column.clone(),
-        );
-    }
+    record_value_checks(&mut builder, summary);
     if summary.cursor_column.is_some() || summary.cursor_high.is_some() {
         builder.set_cursor_range(
             summary.cursor_column.clone(),
@@ -747,6 +756,7 @@ pub(super) fn write_running_manifest(
         checksum_render: None,
         column_checksums: None,
         checksum_key_column: None,
+        nulled_cells: None,
     };
     let dest = match crate::destination::create_destination(&plan.destination) {
         Ok(d) => d,
@@ -1792,6 +1802,7 @@ mod tests {
             column_checksums: None,
             checksum_render: None,
             checksum_key_column: None,
+            nulled_cells: None,
             row_hash: None,
             split_window: None,
         }

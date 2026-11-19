@@ -908,7 +908,8 @@ fn oracle_class_census_is_pinned() {
 // 2026-10-21: +2 independent - the PostgreSQL upgrade from a released 0.32.1 (slot and checkpoint
 // read through `confirmed_flush_lsn`) and its way back.
 // 2026-11-15: +1 independent - the flat Mongo `_id` label of a CDC part, the delivered `_id` set counted by DuckDB.
-const PIN_INDEPENDENT: usize = 120; // ratchet-pin: cdc-census-independent (review 2027-02-01) min
+// 2026-11-18: +6 independent (#712) - the PostgreSQL column-grants cells read the slot back through `confirmed_flush_lsn`.
+const PIN_INDEPENDENT: usize = 126; // ratchet-pin: cdc-census-independent (review 2027-02-01) min
 // 2026-09-28, source connection ceilings: +3 shared codec — the run's captured row is the
 // fixture check; the oracle is the server's own connection counter.
 // 2026-09-29: +2 shared codec — the Oracle TRUNCATE refusal on re-run and the uncaptured-truncate cell.
@@ -946,7 +947,8 @@ const PIN_INDEPENDENT: usize = 120; // ratchet-pin: cdc-census-independent (revi
 // 138 -> 139 (2026-11-11): the MySQL zero and partial date cell counts the NULL cells of the batch and the CDC part with arrow; the WARN text is its subject.
 // 139 -> 140 (2026-11-16, #714): the Oracle whole-table cell reads the delivered parts with arrow against the rows the test wrote; the rig oracle grades each run.
 // 142 -> 147 (2026-11-16, #715): the MongoDB column-grants cells read the delivered parts with arrow against the fields the view lists and the values the test wrote; the hidden bytes are asserted absent.
-const PIN_SHARED_CODEC: usize = 147; // ratchet-pin: cdc-census-shared-codec (review 2027-02-01)
+// 147 -> 155 (2026-11-19, #713): the SQL Server column-grants cells read the delivered parts with arrow against the rows and values the test wrote; the hidden bytes are asserted absent.
+const PIN_SHARED_CODEC: usize = 155; // ratchet-pin: cdc-census-shared-codec (review 2027-02-01)
 const PIN_SELF_COUNTER: usize = 6; // ratchet-pin: cdc-census-self-counter (review 2027-02-01)
 // 2026-09-28: +1 presence — the SQL Server undecodable-cell refusal, whose oracle is the refusal.
 // 2026-09-29: +2 presence — the PG CDC LMT-timezone and DOMAIN parity cells compare CDC to batch output.
@@ -974,7 +976,9 @@ const PIN_SELF_COUNTER: usize = 6; // ratchet-pin: cdc-census-self-counter (revi
 // 107 -> 113 (2026-11-16, #714): six Oracle columns_from: grants cells, whose oracle is the coded refusal or the delivered column set read back from the parts.
 // 105 -> 107 (2026-11-11): the two PG bit-column refusal cells, whose oracle is the coded refusal, no snapshot and only a failure record left.
 // 113 -> 115 (2026-11-16, #715): two MongoDB column-grants CDC cells whose oracle is a coded refusal or an unmoved checkpoint.
-const PIN_PRESENCE: usize = 115; // ratchet-pin: cdc-census-presence (review 2027-02-01)
+// 115 -> 117 (2026-11-19, #712): two PostgreSQL column-grants cells whose oracle is a coded refusal (a sealed plan after a revoke, a BIT column the role may not read).
+// 117 -> 122 (2026-11-19, #713): five SQL Server column-grants cells whose oracle is a coded refusal, the server's own refusal text, or an unmoved checkpoint.
+const PIN_PRESENCE: usize = 122; // ratchet-pin: cdc-census-presence (review 2027-02-01)
 
 /// TIER 2 (harness audit, 2026-08-29): a test whose NAME makes a
 /// COMPLETENESS claim must carry a class-(a) INDEPENDENT oracle — not merely

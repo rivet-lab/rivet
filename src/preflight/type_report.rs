@@ -224,6 +224,20 @@ struct ReportUnit {
     relation: Option<String>,
 }
 
+/// The readable columns of each named table, as the source's own `readable_columns` answers them.
+fn readable_through_source(
+    src: &mut dyn crate::source::Source,
+    tables: &[String],
+) -> Result<std::collections::HashMap<String, crate::source::cdc::ReadableColumns>> {
+    let mut by_table = std::collections::HashMap::new();
+    for t in tables {
+        if let Some(r) = src.readable_columns(t)? {
+            by_table.insert(t.clone(), r);
+        }
+    }
+    Ok(by_table)
+}
+
 /// The readable columns of each named table for a `columns_from: grants` source.
 fn readable_by_table(
     source_type: SourceType,
@@ -235,16 +249,18 @@ fn readable_by_table(
         SourceType::Mysql => {
             crate::source::mysql::cdc::MysqlChangeStream::readable_columns_at(url, tls, tables)
         }
+        SourceType::Mssql => {
+            let mut src = crate::source::mssql::MssqlSource::connect_with_tls(url, tls)?;
+            readable_through_source(&mut src, tables)
+        }
         #[cfg(feature = "oracle")]
         SourceType::Oracle => {
             let mut src = crate::source::oracle::OracleSource::connect_with_tls(url, tls)?;
-            let mut by_table = std::collections::HashMap::new();
-            for t in tables {
-                if let Some(r) = crate::source::Source::readable_columns(&mut src, t)? {
-                    by_table.insert(t.clone(), r);
-                }
-            }
-            Ok(by_table)
+            readable_through_source(&mut src, tables)
+        }
+        SourceType::Postgres => {
+            let mut client = crate::source::postgres::connect_client(url, tls)?;
+            crate::source::postgres::column_grants::readable_columns_of(&mut client, tables)
         }
         _ => Ok(std::collections::HashMap::new()),
     }
@@ -365,6 +381,32 @@ pub(crate) fn connect_source(
     )
 }
 
+/// The columns the source declares finer than a microsecond: of `relation` by the catalog, of `query` by its description when there is no relation.
+pub(crate) fn finer_than_microsecond_of(
+    src: &mut dyn source::Source,
+    relation: Option<&str>,
+    query: &str,
+    export: &str,
+) -> Vec<String> {
+    let (read, what) = match relation {
+        Some(relation) => (src.finer_than_microsecond_columns(relation), relation),
+        None => (
+            seeded!(
+                "load-key-query-finer-unread",
+                Ok(Vec::new()),
+                src.finer_than_microsecond_in_query(query)
+            ),
+            "the export query",
+        ),
+    };
+    read.unwrap_or_else(|e| {
+        log::warn!(
+            "export '{export}': could not read the sub-microsecond columns of `{what}`: {e:#}"
+        );
+        Vec::new()
+    })
+}
+
 /// What a successful run records for the load about one unit.
 pub struct CapturedUnit {
     pub table: Option<String>,
@@ -410,20 +452,12 @@ pub fn capture_load_units(
                 }),
                 None => None,
             };
-            let finer_than_microsecond = match unit.relation.as_deref() {
-                Some(relation) => {
-                    src.finer_than_microsecond_columns(relation)
-                        .unwrap_or_else(|e| {
-                            log::warn!(
-                                "export '{}': could not read the sub-microsecond columns of \
-                             `{relation}`: {e:#}",
-                                export.name
-                            );
-                            Vec::new()
-                        })
-                }
-                None => Vec::new(),
-            };
+            let finer_than_microsecond = finer_than_microsecond_of(
+                src.as_mut(),
+                unit.relation.as_deref(),
+                &unit.query,
+                &export.name,
+            );
             Ok(CapturedUnit {
                 table: unit.table,
                 mappings,
@@ -453,11 +487,16 @@ pub(crate) fn refuse_inexact_load_keys(
     }
 }
 
-/// Whether the export loads incrementally, the only mode whose keys are admitted by their landing at check.
+/// Whether the export loads in a mode whose keys are admitted by their landing, the same predicate `rivet load` refuses by.
 fn admits_load_keys(config: &Config, export: &ExportConfig) -> bool {
+    let mode = crate::plan::load_settings::load_mode_of(config, export);
     config.load.is_some()
-        && crate::plan::load_settings::load_mode_of(config, export)
-            == crate::plan::load_settings::LoadMode::Incremental
+        && super::key_admission::admits_keys(mode)
+        && !seeded!(
+            "load-key-check-skips-cdc",
+            mode == crate::plan::load_settings::LoadMode::Cdc,
+            false
+        )
 }
 
 /// Refuses the captured units whose cursor or primary key lands inexactly.
@@ -560,7 +599,22 @@ pub(crate) fn probe_mappings(
     downgrade_narrowing_overrides(&mut mappings, column_overrides, || {
         src.type_mappings(query, &ColumnOverrides::new())
     })?;
+    if !stream && seeded!("check-run-refusal-split", false, true) {
+        mappings = mappings.into_iter().map(refuse_unmapped).collect();
+    }
     Ok(mappings)
+}
+
+/// A batch column no Arrow type carries is refused, under every policy, with the reason its mapping names.
+fn refuse_unmapped(m: crate::types::TypeMapping) -> crate::types::TypeMapping {
+    if m.arrow_type.is_some() || m.refusal.is_some() {
+        return m;
+    }
+    let reason = match &m.rivet_type {
+        crate::types::RivetType::Unsupported { reason, .. } => reason.clone(),
+        _ => "no Rivet mapping for this source type".to_string(),
+    };
+    m.with_refusal(reason)
 }
 
 /// One unit's report from already-resolved mappings, with no source connection.
@@ -889,6 +943,80 @@ fn rivet_type_label(t: &crate::types::RivetType) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A batch column with no Arrow type is refused under every policy, with its reason; the rest is untouched.
+    #[test]
+    fn an_unmapped_batch_column_is_refused_under_every_policy_and_nothing_else_is() {
+        use crate::types::policy::TypePolicy;
+        use crate::types::{RivetType, SourceColumn, TypeMapping};
+        let col = |name: &str, t: RivetType| {
+            TypeMapping::from_source(&SourceColumn::simple(name, "native", true), t)
+        };
+        let unmapped = col(
+            "net",
+            RivetType::Unsupported {
+                native_type: "cidr".into(),
+                reason: "no arrow type".into(),
+            },
+        );
+        let refused = super::refuse_unmapped(unmapped);
+        assert_eq!(refused.refusal.as_deref(), Some("no arrow type"));
+        for policy in [TypePolicy::warn_only(), TypePolicy::strict()] {
+            let v = policy.validate(std::slice::from_ref(&refused));
+            assert!(v.len() == 1 && v[0].fatal && v[0].refused, "{v:?}");
+        }
+        let mapped = col("id", RivetType::Int64);
+        assert_eq!(super::refuse_unmapped(mapped.clone()).refusal, None);
+        let own = col(
+            "x",
+            RivetType::Unsupported {
+                native_type: "t".into(),
+                reason: "r".into(),
+            },
+        )
+        .with_refusal("own remedy");
+        assert_eq!(
+            super::refuse_unmapped(own).refusal.as_deref(),
+            Some("own remedy")
+        );
+    }
+
+    /// A column no Arrow type carries is refused on the batch probe and kept as it is on the stream probe.
+    #[test]
+    fn the_probe_refuses_an_unmapped_column_for_batch_and_not_for_a_stream() {
+        use crate::types::{ColumnOverrides, RivetType, SourceColumn, TypeMapping};
+        struct Unmapped;
+        impl crate::source::Source for Unmapped {
+            fn export(
+                &mut self,
+                _request: &crate::source::ExportRequest<'_>,
+                _sink: &mut dyn crate::source::BatchSink,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn query_scalar(&mut self, _sql: &str) -> anyhow::Result<Option<String>> {
+                Ok(None)
+            }
+            fn type_mappings(
+                &mut self,
+                _query: &str,
+                _overrides: &ColumnOverrides,
+            ) -> anyhow::Result<Vec<TypeMapping>> {
+                Ok(vec![TypeMapping::from_source(
+                    &SourceColumn::simple("net", "cidr", true),
+                    RivetType::Unsupported {
+                        native_type: "cidr".into(),
+                        reason: "no arrow type".into(),
+                    },
+                )])
+            }
+        }
+        let overrides = ColumnOverrides::new();
+        let batch = super::probe_mappings(&mut Unmapped, false, "q", &overrides).unwrap();
+        assert_eq!(batch[0].refusal.as_deref(), Some("no arrow type"));
+        let stream = super::probe_mappings(&mut Unmapped, true, "q", &overrides).unwrap();
+        assert_eq!(stream[0].refusal, None);
+    }
+
     /// The two callers must DIVERGE, and only where divergence is warranted.
     #[test]
     fn only_a_bare_name_makes_an_unresolvable_capture_fatal_and_only_for_the_load() {
@@ -1457,13 +1585,18 @@ exports:
         } else {
             String::new()
         };
-        let cursor = if mode == "incremental" {
-            "    cursor_column: VER\n"
+        let cursor = match mode {
+            "incremental" => "    cursor_column: VER\n",
+            "cdc" => "    cdc: { checkpoint: ./cdc.ckpt }\n",
+            _ => "",
+        };
+        let source = if mode == "cdc" {
+            "type: mssql\n  url: \"mssql://u:p@127.0.0.1:1/x\""
         } else {
-            ""
+            "type: oracle\n  url: \"oracle://u:p@127.0.0.1:1/x\""
         };
         cfg_from(&format!(
-            "source:\n  type: oracle\n  url: \"oracle://u:p@127.0.0.1:1/x\"\n{load}exports:\n  - name: e\n    table: T\n    mode: {mode}\n{cursor}    format: parquet\n    destination:\n      type: local\n      path: /tmp/x\n"
+            "source:\n  {source}\n{load}exports:\n  - name: e\n    table: T\n    mode: {mode}\n{cursor}    format: parquet\n    destination:\n      type: local\n      path: /tmp/x\n"
         ))
     }
 
@@ -1489,12 +1622,14 @@ exports:
 
     const INEXACT: &str = "RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT";
 
-    /// Key admission at check reads only an incremental export that has a load block.
+    /// Key admission at check reads an incremental or cdc export that has a load block.
     #[test]
-    fn key_admission_reads_only_an_incremental_export_with_a_load() {
+    fn key_admission_reads_only_an_incremental_or_cdc_export_with_a_load() {
         for (mode, load, want) in [
             ("incremental", true, true),
             ("incremental", false, false),
+            ("cdc", true, true),
+            ("cdc", false, false),
             ("full", true, false),
             ("full", false, false),
         ] {
@@ -1616,9 +1751,11 @@ exports:
         read(SourceType::Mysql, DEAD_MYSQL).expect_err("mysql reads its server");
         #[cfg(feature = "oracle")]
         read(SourceType::Oracle, DEAD_ORACLE).expect_err("oracle reads its server");
-        for other in [SourceType::Postgres, SourceType::Mssql, SourceType::Mongo] {
-            let none = read(other, "postgresql://u:p@127.0.0.1:1/app").unwrap();
-            assert!(none.is_empty(), "{other:?} reads no grants");
-        }
+        read(SourceType::Postgres, "postgresql://u:p@127.0.0.1:1/app")
+            .expect_err("postgres reads its server");
+        read(SourceType::Mssql, "sqlserver://u:p@127.0.0.1:1/app")
+            .expect_err("mssql reads its server");
+        let none = read(SourceType::Mongo, "postgresql://u:p@127.0.0.1:1/app").unwrap();
+        assert!(none.is_empty(), "mongo reads no grants");
     }
 }

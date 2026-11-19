@@ -118,24 +118,23 @@ fn capture_open_forensics(
         &plan.column_overrides,
     ) {
         Ok(mappings) => {
-            if want_key && let Some(relation) = plan.source_table.as_deref() {
-                summary.open_primary_key = src.primary_key(relation).unwrap_or_else(|e| {
-                    log::warn!(
-                        "export '{}': could not read the primary key of `{relation}`: {e:#}",
-                        plan.export_name
-                    );
-                    None
-                });
-                summary.open_finer_than_microsecond = src
-                    .finer_than_microsecond_columns(relation)
-                    .unwrap_or_else(|e| {
+            if want_key {
+                if let Some(relation) = plan.source_table.as_deref() {
+                    summary.open_primary_key = src.primary_key(relation).unwrap_or_else(|e| {
                         log::warn!(
-                            "export '{}': could not read the sub-microsecond columns of \
-                             `{relation}`: {e:#}",
+                            "export '{}': could not read the primary key of `{relation}`: {e:#}",
                             plan.export_name
                         );
-                        Vec::new()
+                        None
                     });
+                }
+                summary.open_finer_than_microsecond =
+                    crate::preflight::type_report::finer_than_microsecond_of(
+                        src,
+                        plan.source_table.as_deref(),
+                        &plan.base_query,
+                        &plan.export_name,
+                    );
             }
             let cols: Vec<crate::state::SchemaColumn> = mappings
                 .iter()
@@ -171,11 +170,11 @@ fn capture_open_forensics(
 
 /// The run's column plan.
 pub(super) fn plan_open_columns(
-    export_name: &str,
+    plan: &ResolvedRunPlan,
     open: &mut Option<Vec<crate::types::TypeMapping>>,
     strict: bool,
 ) -> Result<()> {
-    let subject = format!("export '{export_name}'");
+    let subject = format!("export '{}'", plan.export_name);
     match open.as_ref() {
         Some(m) => {
             let planned = crate::types::plan_columns(
@@ -183,6 +182,14 @@ pub(super) fn plan_open_columns(
                 &crate::types::policy::TypePolicy::from_strict(strict),
                 &subject,
             )?;
+            if seeded!("check-run-refusal-split", false, true) {
+                crate::format::refuse_unwritable_columns(
+                    plan.format,
+                    planned
+                        .iter()
+                        .filter_map(|m| Some((m.column_name.as_str(), m.arrow_type.as_ref()?))),
+                )?;
+            }
             *open = Some(planned);
         }
         None if strict => crate::rivet_bail!(
@@ -1198,9 +1205,7 @@ fn execute_resolved_plan(
     }
 
     let gate = settle_columns_are_temporal(plan, summary.open_mappings.as_deref())
-        .and_then(|()| {
-            plan_open_columns(&plan.export_name, &mut summary.open_mappings, tail.strict)
-        })
+        .and_then(|()| plan_open_columns(plan, &mut summary.open_mappings, tail.strict))
         .and_then(|()| super::frame::RunnerFrame::refuse_cross_shape_prefix(plan));
     let result = match gate {
         Err(e) => Err(e),
@@ -3660,6 +3665,7 @@ mod tests {
     /// The run's plan refuses a Lossy column only under --strict.
     #[test]
     fn plan_open_columns_refuses_only_under_strict() {
+        use crate::plan::test_support::test_plan;
         use crate::types::{RivetType, SourceColumn, TypeFidelity, TypeMapping};
         let lossy = || {
             let mut m = TypeMapping::from_source(
@@ -3669,17 +3675,46 @@ mod tests {
             m.fidelity = TypeFidelity::Lossy;
             Some(vec![m])
         };
+        let plan = test_plan();
         let mut open = lossy();
-        assert!(plan_open_columns("e", &mut open, false).is_ok());
+        assert!(plan_open_columns(&plan, &mut open, false).is_ok());
         assert_eq!(open.as_ref().map(Vec::len), Some(1), "warn keeps the plan");
-        let err = plan_open_columns("e", &mut lossy(), true).unwrap_err();
+        let err = plan_open_columns(&plan, &mut lossy(), true).unwrap_err();
         assert!(format!("{err:#}").contains("ts"), "{err:#}");
-        assert!(plan_open_columns("e", &mut None, false).is_ok());
-        let err = plan_open_columns("e", &mut None, true).unwrap_err();
+        assert!(plan_open_columns(&plan, &mut None, false).is_ok());
+        let err = plan_open_columns(&plan, &mut None, true).unwrap_err();
         assert!(
             format!("{err:#}").contains("could not be resolved"),
             "{err:#}"
         );
+    }
+
+    /// A column the export's format cannot write stops the plan before any read, under warn and strict alike.
+    #[test]
+    fn plan_open_columns_refuses_a_column_the_format_cannot_write() {
+        use crate::config::FormatType;
+        use crate::plan::test_support::test_plan;
+        use crate::types::{RivetType, SourceColumn, TypeMapping};
+        let wide = || {
+            Some(vec![TypeMapping::from_source(
+                &SourceColumn::simple("n", "numeric(60,10)", true),
+                RivetType::Decimal {
+                    precision: 60,
+                    scale: 10,
+                },
+            )])
+        };
+        let mut csv = test_plan();
+        csv.format = FormatType::Csv;
+        let parquet = test_plan();
+        for strict in [false, true] {
+            let err = plan_open_columns(&csv, &mut wide(), strict).unwrap_err();
+            assert_eq!(
+                crate::error::error_code(&err),
+                Some("RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED")
+            );
+            assert!(plan_open_columns(&parquet, &mut wide(), strict).is_ok());
+        }
     }
 
     /// A source that answers the run's metadata probes from a script.
@@ -3956,6 +3991,62 @@ mod tests {
         );
         assert_eq!(stored, ["payload", "id"]);
         assert_eq!(probed(false).0.open_primary_key, None);
+    }
+
+    struct FinerSource;
+
+    impl crate::source::Source for FinerSource {
+        fn export(
+            &mut self,
+            _request: &crate::source::ExportRequest<'_>,
+            _sink: &mut dyn crate::source::BatchSink,
+        ) -> crate::error::Result<()> {
+            Ok(())
+        }
+        fn query_scalar(&mut self, _sql: &str) -> crate::error::Result<Option<String>> {
+            Ok(None)
+        }
+        fn type_mappings(
+            &mut self,
+            _query: &str,
+            _overrides: &crate::types::ColumnOverrides,
+        ) -> crate::error::Result<Vec<crate::types::TypeMapping>> {
+            Ok(Vec::new())
+        }
+        fn finer_than_microsecond_columns(
+            &mut self,
+            _table: &str,
+        ) -> crate::error::Result<Vec<String>> {
+            Ok(vec!["BY_CATALOG".into()])
+        }
+        fn finer_than_microsecond_in_query(
+            &mut self,
+            _query: &str,
+        ) -> crate::error::Result<Vec<String>> {
+            Ok(vec!["BY_QUERY".into()])
+        }
+    }
+
+    /// The open probe reads the sub-microsecond columns from the catalog for a table export and from the query's description for a query export, only when the load wants the key.
+    #[test]
+    fn the_open_probe_reads_the_finer_columns_of_a_table_and_of_a_query() {
+        let finer = |source_table: Option<&str>, want_key: bool| {
+            let mut plan = chunked_plan_with_quality(None);
+            plan.source = unreachable_source();
+            plan.source_table = source_table.map(str::to_string);
+            let state = StateStore::open_in_memory().unwrap();
+            let mut summary = RunSummary::stub_for_testing("run-open", "orders");
+            let mut meta = MetaConn {
+                cfg: &plan.source,
+                src: Some(Box::new(FinerSource)),
+            };
+            capture_open_forensics(&plan, &state, &mut summary, want_key, &mut meta);
+            summary.open_finer_than_microsecond
+        };
+        assert_eq!(finer(Some("public.orders"), true), ["BY_CATALOG"]);
+        assert_eq!(finer(None, true), ["BY_QUERY"]);
+        assert_eq!(finer(None, false), Vec::<String>::new());
+        assert_eq!(finer(Some("public.orders"), false), Vec::<String>::new());
     }
 
     /// The count is read on the held connection and compared with the committed parts' rows.

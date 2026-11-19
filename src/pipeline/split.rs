@@ -619,6 +619,7 @@ mod tests {
             column_checksums: None,
             checksum_render: None,
             checksum_key_column: None,
+            nulled_cells: None,
             row_hash: None,
             split_window: None,
         }
@@ -1297,6 +1298,7 @@ mod tests {
             parts: vec![],
             column_checksums: None,
             checksum_key_column: None,
+            nulled_cells: None,
         };
         let name = run_unique_manifest_name(run_id);
         std::fs::write(dir.join(name), serde_json::to_vec(&m).unwrap()).unwrap();

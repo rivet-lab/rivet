@@ -6,22 +6,8 @@ const INEXACT: Refused = Refused::by_code("RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT",
 
 /// The incremental export of `table` into `w`, keyed on `pk`, cursor `cursor`, graded by the second client.
 fn incremental(e: SqlEngine, w: &Warehouse, table: &str, cursor: &str, pk: &str) -> Rig {
-    incremental_with(e, w, table, cursor, pk, &[])
-}
-
-/// `incremental` with more export lines.
-fn incremental_with(
-    e: SqlEngine,
-    w: &Warehouse,
-    table: &str,
-    cursor: &str,
-    pk: &str,
-    extra: &[&str],
-) -> Rig {
     let line = format!("cursor_column: {cursor}");
-    let mut lines = vec![line.as_str()];
-    lines.extend_from_slice(extra);
-    w.shape(e.staged(e.rig(table), "incremental", &lines), pk)
+    w.shape(e.staged(e.rig(table), "incremental", &[line.as_str()]), pk)
 }
 
 /// `rivet state reset` of the rig's export, which must succeed.
@@ -143,7 +129,7 @@ fn oracle_neighbour_cursor_is_admitted(
 }
 
 /// An MSSQL `datetime2(7)` primary-key column with no declaration lands at nanoseconds, so the load is admitted and keeps both rows that differ below a microsecond; declared as microsecond `timestamp` the load is refused twice and by `check`, the warehouse is unchanged, and `timestamp_ns` then keeps both rows that differ below a microsecond, read back by the second client (the rig oracle reads the source at microseconds).
-fn mssql_sub_microsecond_key(kind: WarehouseKind, declared: bool) {
+fn mssql_sub_microsecond_key(kind: WarehouseKind, declared: bool, via_query: bool) {
     let e = SqlEngine::Mssql;
     e.alive();
     let Some(mut w) = Warehouse::of(kind, "kadmk") else {
@@ -157,21 +143,22 @@ fn mssql_sub_microsecond_key(kind: WarehouseKind, declared: bool) {
     e.exec(&format!(
         "INSERT INTO {table} (dev, ts, seq) VALUES (1, '2024-01-01 00:00:00.1234561', 1)"
     ));
-    let mut rig = incremental_with(
-        e,
-        &w,
-        &table,
-        "seq",
-        "dev, ts",
-        if declared {
-            &["columns: { ts: timestamp }"]
-        } else {
-            &[]
-        },
-    )
-    .no_oracle(
-        "the datetime2(7) rows differ below a microsecond, which the oracle reads the source at; the view is read back by the second client",
-    );
+    let source = if via_query {
+        e.rig(&table)
+            .query(&format!("SELECT dev, ts, seq FROM {table}"))
+    } else {
+        e.rig(&table)
+    };
+    let lines: &[&str] = if declared {
+        &["cursor_column: seq", "columns: { ts: timestamp }"]
+    } else {
+        &["cursor_column: seq"]
+    };
+    let mut rig = w
+        .shape(e.staged(source, "incremental", lines), "dev, ts")
+        .no_oracle(
+            "the datetime2(7) rows differ below a microsecond, which the oracle reads the source at; the view is read back by the second client",
+        );
     rig.run_ok();
     e.exec(&format!(
         "INSERT INTO {table} (dev, ts, seq) VALUES (1, '2024-01-01 00:00:00.1234569', 2)"
@@ -211,7 +198,7 @@ fn mssql_sub_microsecond_key(kind: WarehouseKind, declared: bool) {
     );
 
     rebaseline(&rig);
-    rig.set_export_lines(&["cursor_column: seq", "columns: { ts: timestamp_ns }"]);
+    rig.replace_export_line("columns:", "columns: { ts: timestamp_ns }");
     let run = rig.cli(&["run"]);
     assert!(run.status.success(), "the remedy's run: {run:?}");
     let load = rig.cli_env(&["load"], w.load_envs());
@@ -223,9 +210,48 @@ fn mssql_sub_microsecond_key(kind: WarehouseKind, declared: bool) {
     );
 }
 
+/// An MSSQL CDC export keyed on a `datetime2(7)` column lands at nanoseconds and is admitted by `check` and `load`; declared as microsecond `timestamp`, `check` refuses it by the code `load` refuses it by, and the load refuses twice.
+fn mssql_cdc_sub_microsecond_key_check_agrees_with_load(kind: WarehouseKind, declared: bool) {
+    let Some(mut w) = Warehouse::of(kind, "kadmc") else {
+        return;
+    };
+    let mut scn = CdcScenario::mssql_with(
+        "kadmc",
+        "dev INT NOT NULL, ts DATETIME2(7) NOT NULL, seq INT NOT NULL, PRIMARY KEY (dev, ts)",
+        |rig, _| {
+            let rig = w.shape(rig.cdc("initial: snapshot"), "dev, ts");
+            if declared {
+                rig.export_line("columns: { ts: timestamp }").no_oracle(
+                    "the declared microsecond landing differs from the datetime2(7) source below a microsecond, which the oracle reads the source at",
+                )
+            } else {
+                rig
+            }
+        },
+    );
+    let table = scn.table.clone();
+    w.adopt(&table);
+    scn.sql(&format!(
+        "INSERT INTO dbo.{table} (dev, ts, seq) VALUES (1, '2024-01-01 00:00:00.1234561', 1)"
+    ));
+    scn.settle();
+    scn.rig.run_ok();
+    if declared {
+        assert_refused(&scn.rig.cli_env(&["load"], w.load_envs()), INEXACT);
+        assert_refused(&scn.rig.cli(&["check"]), INEXACT);
+        return;
+    }
+    assert!(
+        scn.rig.cli(&["check"]).status.success(),
+        "check admits the key"
+    );
+    let load = scn.rig.cli_env(&["load"], w.load_envs());
+    assert!(load.status.success(), "the load: {load:?}");
+}
+
 /// An Oracle `TIMESTAMP(9)` primary-key column declared as microsecond `timestamp`: the load is refused twice and by `check`, the warehouse is unchanged, and `timestamp_ns` then keeps both rows that differ below a microsecond.
 #[cfg(feature = "oracle")]
-fn oracle_sub_microsecond_key_is_refused(kind: WarehouseKind) {
+fn oracle_sub_microsecond_key_is_refused(kind: WarehouseKind, via_query: bool) {
     let e = SqlEngine::Oracle;
     e.alive();
     let Some(mut w) = Warehouse::of(kind, "kadmo") else {
@@ -239,10 +265,16 @@ fn oracle_sub_microsecond_key_is_refused(kind: WarehouseKind) {
     e.exec(&format!(
         "INSERT INTO {table} (dev, ts, seq) VALUES (1, TIMESTAMP '2024-01-01 00:00:00.123456100', 1)"
     ));
+    let source = if via_query {
+        e.rig(&table)
+            .query(&format!("SELECT dev, ts, seq FROM {table}"))
+    } else {
+        e.rig(&table)
+    };
     let mut rig = w
         .shape(
             e.staged(
-                e.rig(&table),
+                source,
                 "incremental",
                 &["cursor_column: seq", "columns: { TS: timestamp }"],
             ),
@@ -360,19 +392,50 @@ fn an_oracle_text_cursor_is_admitted_into_clickhouse() {
 #[test]
 #[ignore = "live: requires docker compose oracle + clickhouse + fake-gcs"]
 fn an_oracle_sub_microsecond_key_is_refused_into_clickhouse() {
-    oracle_sub_microsecond_key_is_refused(WarehouseKind::ClickHouse);
+    oracle_sub_microsecond_key_is_refused(WarehouseKind::ClickHouse, false);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle + clickhouse + fake-gcs"]
+fn an_oracle_sub_microsecond_query_key_is_refused_into_clickhouse() {
+    oracle_sub_microsecond_key_is_refused(WarehouseKind::ClickHouse, true);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mssql + clickhouse + fake-gcs"]
 fn an_mssql_sub_microsecond_key_declared_timestamp_is_refused_into_clickhouse() {
-    mssql_sub_microsecond_key(WarehouseKind::ClickHouse, true);
+    mssql_sub_microsecond_key(WarehouseKind::ClickHouse, true, false);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql + clickhouse + fake-gcs"]
+fn an_mssql_sub_microsecond_query_key_declared_timestamp_is_refused_into_clickhouse() {
+    mssql_sub_microsecond_key(WarehouseKind::ClickHouse, true, true);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mssql + clickhouse + fake-gcs"]
 fn an_mssql_sub_microsecond_key_lands_at_its_precision_into_clickhouse() {
-    mssql_sub_microsecond_key(WarehouseKind::ClickHouse, false);
+    mssql_sub_microsecond_key(WarehouseKind::ClickHouse, false, false);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql + clickhouse + fake-gcs"]
+fn an_mssql_sub_microsecond_query_key_lands_at_its_precision_into_clickhouse() {
+    mssql_sub_microsecond_key(WarehouseKind::ClickHouse, false, true);
+}
+
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mssql-cdc with SQL Server Agent"]
+fn an_mssql_cdc_sub_microsecond_key_declared_timestamp_check_agrees_with_load_into_clickhouse() {
+    mssql_cdc_sub_microsecond_key_check_agrees_with_load(WarehouseKind::ClickHouse, true);
+}
+
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mssql-cdc with SQL Server Agent"]
+fn an_mssql_cdc_sub_microsecond_key_is_admitted_at_its_precision_into_clickhouse() {
+    mssql_cdc_sub_microsecond_key_check_agrees_with_load(WarehouseKind::ClickHouse, false);
 }
 
 #[test]

@@ -163,7 +163,7 @@ const NOT_A_VALUE: &[(&str, &str, &str)] = &[
     ),
     (
         "uuid36",
-        "mssql/mod.rs::scalar_to_string",
+        "mssql/mod.rs::scalar_text",
         "query_scalar display of a bound",
     ),
     (

@@ -202,12 +202,41 @@ fn config_dir_of(config_path: &str) -> &std::path::Path {
 
 /// Whether the SQLite file at `path` holds state a run wrote: an export cursor or a run.
 fn holds_state(path: &std::path::Path) -> bool {
+    state_file_rows(path).is_ok_and(|n| n > 0)
+}
+
+/// The cursors and runs the SQLite file at `path` holds (0 for none); a file that is no database is `STATE_FILE_CORRUPT`.
+fn state_file_rows(path: &std::path::Path) -> Result<i64> {
     if !path.exists() {
-        return false;
+        return Ok(0);
     }
-    Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .and_then(|c| state_rows(&c))
-        .is_ok_and(|n| n > 0)
+    let read = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .and_then(|c| state_rows(&c));
+    match read {
+        Ok(n) => Ok(n),
+        Err(e)
+            if seeded!(
+                "state-copy-corrupt-source-read-as-empty",
+                false,
+                matches!(
+                    e.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt)
+                )
+            ) =>
+        {
+            Err(crate::error::coded(
+                crate::error::codes::STATE_FILE_CORRUPT,
+                format!(
+                    "state: `{}` is not a readable SQLite database ({e}): the file is CORRUPT, \
+                     not empty. Restore it from a backup, or name the file that holds the state \
+                     (the config whose `.rivet_state.db` holds it, or its \
+                     `RIVET_STATE_URL=sqlite:<path>`)",
+                    path.display()
+                ),
+            ))
+        }
+        Err(_) => Ok(0),
+    }
 }
 
 /// The export cursors plus the runs a SQLite state holds.
@@ -1015,6 +1044,21 @@ mod sqlite_state_url_tests {
         assert!(!holds_state(&db), "a migrated state with no row");
         s.update_legacy("orders", "1").unwrap();
         assert!(holds_state(&db), "one cursor row");
+    }
+
+    /// A file that is no database holds no state for the left-behind guard, and is `STATE_FILE_CORRUPT` for a reader that asks.
+    #[test]
+    fn a_file_that_is_no_database_is_corrupt_for_the_reader_and_empty_for_the_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("s.db");
+        std::fs::write(&db, "not a sqlite database ".repeat(60)).unwrap();
+        assert!(!holds_state(&db));
+        let err = state_file_rows(&db).unwrap_err();
+        assert_eq!(
+            crate::error::error_code(&err),
+            Some("RIVET_STATE_FILE_CORRUPT")
+        );
+        assert_eq!(state_file_rows(&dir.path().join("none.db")).unwrap(), 0);
     }
 
     /// Each condition that lets a `sqlite:` target open, alone.

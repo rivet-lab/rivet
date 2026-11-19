@@ -4,6 +4,7 @@ mod arrow_convert;
 #[cfg(feature = "oracle")]
 pub(crate) use arrow_convert::pg_interval_to_iso8601;
 pub(crate) mod cdc;
+pub(crate) mod column_grants;
 mod from_parse;
 pub(crate) mod pgoutput;
 #[allow(dead_code)]
@@ -30,6 +31,18 @@ use crate::types::{ColumnOverrides, SourceColumn, TypeMapping};
 
 use arrow_convert::{pg_columns_to_schema, rivet_type_for_pg_column, rows_to_record_batch_typed};
 use from_parse::try_parse_pg_simple_from_regclass_literal;
+
+/// The catalog read of the primary key of `table` as one `chr(31)`-joined cell, in key order.
+pub(crate) fn primary_key_sql(table: &str) -> String {
+    format!(
+        "SELECT string_agg(a.attname::text, chr(31) ORDER BY k.ord) \
+         FROM pg_index i \
+         CROSS JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) \
+         JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum \
+         WHERE i.indrelid = to_regclass('{}') AND i.indisprimary",
+        table.replace('\'', "''")
+    )
+}
 
 pub struct PostgresSource {
     client: Client,
@@ -592,15 +605,16 @@ impl super::Source for PostgresSource {
     }
 
     fn primary_key(&mut self, table: &str) -> Result<Option<Vec<String>>> {
-        let sql = format!(
-            "SELECT string_agg(a.attname::text, chr(31) ORDER BY k.ord) \
-             FROM pg_index i \
-             CROSS JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) \
-             JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum \
-             WHERE i.indrelid = to_regclass('{}') AND i.indisprimary",
-            table.replace('\'', "''")
-        );
-        Ok(crate::source::split_key_list(self.query_scalar(&sql)?))
+        Ok(crate::source::split_key_list(
+            self.query_scalar(&primary_key_sql(table))?,
+        ))
+    }
+
+    fn readable_columns(
+        &mut self,
+        table: &str,
+    ) -> Result<Option<crate::source::cdc::ReadableColumns>> {
+        column_grants::readable_columns(&mut self.client, table).map(|(_, _, r)| Some(r))
     }
 
     fn replication_slot_exists(&mut self, slot: &str) -> Result<bool> {
@@ -852,6 +866,18 @@ fn unreadable_probe(pg_type: &str, sql: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The primary-key read names the catalog, the key order and the table it resolves, quoting a quote in the name.
+    #[test]
+    fn the_primary_key_read_resolves_the_table_by_its_quoted_name_in_key_order() {
+        let sql = super::primary_key_sql("public.o'rders");
+        assert!(
+            sql.contains("string_agg(a.attname::text, chr(31) ORDER BY k.ord)"),
+            "{sql}"
+        );
+        assert!(sql.contains("i.indisprimary"), "{sql}");
+        assert!(sql.contains("to_regclass('public.o''rders')"), "{sql}");
+    }
+
     #[test]
     fn a_row_takes_the_heap_size_over_the_row_estimate() {
         use super::avg_row_bytes;

@@ -835,90 +835,145 @@ fn init_scaffolds_no_keyset_key_for_a_bytea_primary_key_postgres() {
     );
 }
 
+/// The MySQL key types the cursor reads.
+fn mysql_cursor_keys() -> Vec<KeyKind> {
+    vec![
+        ("MySQL BIGINT", "BIGINT", |i| i.to_string()),
+        ("MySQL VARCHAR(16)", "VARCHAR(16)", |i| format!("'k{i:03}'")),
+        ("MySQL DATETIME(6)", "DATETIME(6)", |i| {
+            format!("DATE_ADD(TIMESTAMP('2024-01-01 00:00:00'), INTERVAL {i} MICROSECOND)")
+        }),
+        ("MySQL DATE", "DATE", |i| {
+            format!("DATE_ADD('2024-01-01', INTERVAL {i} DAY)")
+        }),
+    ]
+}
+
 #[test]
 #[ignore = "live: requires docker compose mysql"]
 fn keyset_key_types_the_cursor_reads_deliver_the_seeded_ids_mysql() {
-    key_types_the_cursor_reads_deliver_the_seeded_ids(
+    key_types_the_cursor_reads_deliver_the_seeded_ids(SqlEngine::Mysql, &mysql_cursor_keys());
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn keyset_key_types_the_sampler_reads_deliver_the_seeded_ids_in_parallel_mysql() {
+    key_types_deliver_the_seeded_ids_over(
         SqlEngine::Mysql,
-        &[
-            ("MySQL BIGINT", "BIGINT", |i| i.to_string()),
-            ("MySQL VARCHAR(16)", "VARCHAR(16)", |i| format!("'k{i:03}'")),
-            ("MySQL DATETIME(6)", "DATETIME(6)", |i| {
-                format!("DATE_ADD(TIMESTAMP('2024-01-01 00:00:00'), INTERVAL {i} MICROSECOND)")
-            }),
-            ("MySQL DATE", "DATE", |i| {
-                format!("DATE_ADD('2024-01-01', INTERVAL {i} DAY)")
-            }),
-        ],
+        &mysql_cursor_keys(),
+        40,
+        &["parallel: 3"],
     );
+}
+
+/// The PostgreSQL key types the cursor reads.
+fn pg_cursor_keys() -> Vec<KeyKind> {
+    vec![
+        ("PostgreSQL bigint", "BIGINT", |i| i.to_string()),
+        ("PostgreSQL text", "TEXT", |i| format!("'k{i:03}'")),
+        ("PostgreSQL timestamp(6)", "TIMESTAMP(6)", |i| {
+            format!("TIMESTAMP '2024-01-01 00:00:00' + {i} * INTERVAL '1 microsecond'")
+        }),
+        ("PostgreSQL timestamptz(6)", "TIMESTAMPTZ(6)", |i| {
+            format!("TIMESTAMPTZ '2024-01-01 00:00:00+00' + {i} * INTERVAL '1 microsecond'")
+        }),
+        ("PostgreSQL date", "DATE", |i| {
+            format!("DATE '2024-01-01' + {i}")
+        }),
+        ("PostgreSQL uuid", "UUID", |i| {
+            format!("('00000000-0000-0000-0000-' || lpad(to_hex({i}), 12, '0'))::uuid")
+        }),
+    ]
 }
 
 #[test]
 #[ignore = "live: requires docker compose postgres"]
 fn keyset_key_types_the_cursor_reads_deliver_the_seeded_ids_postgres() {
-    key_types_the_cursor_reads_deliver_the_seeded_ids(
-        SqlEngine::Pg,
-        &[
-            ("PostgreSQL bigint", "BIGINT", |i| i.to_string()),
-            ("PostgreSQL text", "TEXT", |i| format!("'k{i:03}'")),
-            ("PostgreSQL timestamp(6)", "TIMESTAMP(6)", |i| {
-                format!("TIMESTAMP '2024-01-01 00:00:00' + {i} * INTERVAL '1 microsecond'")
-            }),
-            ("PostgreSQL date", "DATE", |i| {
-                format!("DATE '2024-01-01' + {i}")
-            }),
-            ("PostgreSQL uuid", "UUID", |i| {
-                format!("('00000000-0000-0000-0000-' || lpad(to_hex({i}), 12, '0'))::uuid")
-            }),
-        ],
-    );
+    key_types_the_cursor_reads_deliver_the_seeded_ids(SqlEngine::Pg, &pg_cursor_keys());
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn keyset_key_types_the_sampler_reads_deliver_the_seeded_ids_in_parallel_postgres() {
+    key_types_deliver_the_seeded_ids_over(SqlEngine::Pg, &pg_cursor_keys(), 40, &["parallel: 3"]);
+}
+
+/// The SQL Server key types the cursor reads.
+fn mssql_cursor_keys() -> Vec<KeyKind> {
+    vec![
+        ("SQL Server bigint", "BIGINT", |i| i.to_string()),
+        ("SQL Server varchar(16)", "VARCHAR(16)", |i| {
+            format!("'k{i:03}'")
+        }),
+        ("SQL Server datetime2(6)", "DATETIME2(6)", |i| {
+            format!("DATEADD(MICROSECOND, {i}, CAST('2024-01-01' AS DATETIME2(6)))")
+        }),
+        ("SQL Server datetimeoffset(6)", "DATETIMEOFFSET(6)", |i| {
+            format!(
+                "DATEADD(MICROSECOND, {i}, CAST('2024-01-01 00:00:00 +00:00' AS DATETIMEOFFSET(6)))"
+            )
+        }),
+        ("SQL Server date", "DATE", |i| {
+            format!("DATEADD(DAY, {i}, CAST('2024-01-01' AS DATE))")
+        }),
+    ]
 }
 
 #[test]
 #[ignore = "live: requires docker compose mssql"]
 fn keyset_key_types_the_cursor_reads_deliver_the_seeded_ids_mssql() {
-    key_types_the_cursor_reads_deliver_the_seeded_ids(
+    key_types_the_cursor_reads_deliver_the_seeded_ids(SqlEngine::Mssql, &mssql_cursor_keys());
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn keyset_key_types_the_sampler_reads_deliver_the_seeded_ids_in_parallel_mssql() {
+    key_types_deliver_the_seeded_ids_over(
         SqlEngine::Mssql,
-        &[
-            ("SQL Server bigint", "BIGINT", |i| i.to_string()),
-            ("SQL Server varchar(16)", "VARCHAR(16)", |i| {
-                format!("'k{i:03}'")
-            }),
-            ("SQL Server datetime2(6)", "DATETIME2(6)", |i| {
-                format!("DATEADD(MICROSECOND, {i}, CAST('2024-01-01' AS DATETIME2(6)))")
-            }),
-            ("SQL Server date", "DATE", |i| {
-                format!("DATEADD(DAY, {i}, CAST('2024-01-01' AS DATE))")
-            }),
-        ],
+        &mssql_cursor_keys(),
+        40,
+        &["parallel: 3"],
     );
+}
+
+/// The Oracle key types the cursor reads.
+#[cfg(feature = "oracle")]
+fn oracle_cursor_keys() -> Vec<KeyKind> {
+    vec![
+        ("Oracle NUMBER(18)", "NUMBER(18)", |i| i.to_string()),
+        ("Oracle NUMBER(38)", "NUMBER(38)", |i| i.to_string()),
+        ("Oracle VARCHAR2(16)", "VARCHAR2(16)", |i| {
+            format!("'k{i:03}'")
+        }),
+        ("Oracle NVARCHAR2(16)", "NVARCHAR2(16)", |i| {
+            format!("'k{i:03}'")
+        }),
+        ("Oracle CHAR(8)", "CHAR(8)", |i| format!("'k{i:03}'")),
+        ("Oracle DATE", "DATE", |i| {
+            format!("DATE '2024-01-01' + {i}")
+        }),
+        ("Oracle TIMESTAMP(6)", "TIMESTAMP(6)", |i| {
+            format!("TIMESTAMP '2024-01-01 00:00:00' + NUMTODSINTERVAL({i} / 1000000, 'SECOND')")
+        }),
+    ]
 }
 
 #[cfg(feature = "oracle")]
 #[test]
 #[ignore = "live: requires docker compose oracle"]
 fn keyset_key_types_the_cursor_reads_deliver_the_seeded_ids_oracle() {
-    key_types_the_cursor_reads_deliver_the_seeded_ids(
+    key_types_the_cursor_reads_deliver_the_seeded_ids(SqlEngine::Oracle, &oracle_cursor_keys());
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn keyset_key_types_the_sampler_reads_deliver_the_seeded_ids_in_parallel_oracle() {
+    key_types_deliver_the_seeded_ids_over(
         SqlEngine::Oracle,
-        &[
-            ("Oracle NUMBER(18)", "NUMBER(18)", |i| i.to_string()),
-            ("Oracle NUMBER(38)", "NUMBER(38)", |i| i.to_string()),
-            ("Oracle VARCHAR2(16)", "VARCHAR2(16)", |i| {
-                format!("'k{i:03}'")
-            }),
-            ("Oracle NVARCHAR2(16)", "NVARCHAR2(16)", |i| {
-                format!("'k{i:03}'")
-            }),
-            ("Oracle CHAR(8)", "CHAR(8)", |i| format!("'k{i:03}'")),
-            ("Oracle DATE", "DATE", |i| {
-                format!("DATE '2024-01-01' + {i}")
-            }),
-            ("Oracle TIMESTAMP(6)", "TIMESTAMP(6)", |i| {
-                format!(
-                    "TIMESTAMP '2024-01-01 00:00:00' + NUMTODSINTERVAL({i} / 1000000, 'SECOND')"
-                )
-            }),
-        ],
+        &oracle_cursor_keys(),
+        40,
+        &["parallel: 3"],
     );
 }
 

@@ -63,6 +63,7 @@ fn empty_success_manifest(run_id: &str, export_name: &str) -> RunManifest {
         parts: Vec::<ManifestPart>::new(),
         column_checksums: None,
         checksum_key_column: None,
+        nulled_cells: None,
     }
 }
 

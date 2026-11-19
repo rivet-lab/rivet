@@ -639,9 +639,18 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
                 f"WHERE TABLE_SCHEMA = {_lit(sch)} AND TABLE_NAME = {_lit(leaf)}"
             ) + ")"
         )}
+        readable = {r[0] for r in ora.rows(
+            "SELECT * FROM mssql_scan('ms', " + _lit(
+                f"SELECT c.name FROM sys.columns c WHERE c.object_id = {oid} AND HAS_PERMS_BY_NAME("
+                "QUOTENAME(OBJECT_SCHEMA_NAME(c.object_id)) + '.' + QUOTENAME(OBJECT_NAME(c.object_id)), "
+                "'OBJECT', 'SELECT', c.name, 'COLUMN') = 1"
+            ) + ")"
+        )}
+        partial = bool(readable) and any(c not in readable for c in native)
+        native = {c: n for c, n in native.items() if c in readable} if partial else native
         # The scanner trims CHAR/NCHAR padding; the server's own cast keeps it.
         renders = {**{n: "CAST({c} AS NVARCHAR(MAX))" for n in native.values() if n.startswith(("CHAR(", "NCHAR("))}, **renders}
-        if not any(n in renders for n in native.values()):
+        if not partial and not any(n in renders for n in native.values()):
             return f"ms.{sch}.{leaf}", key, native
         cols = ", ".join(renders.get(n, "{c}").replace("{c}", f"[{c}]") + f" AS [{c}]" for c, n in native.items())
         return f"mssql_scan('ms', {_lit(f'SELECT {cols} FROM [{sch}].[{leaf}]')})", key, native

@@ -1487,8 +1487,8 @@ fn parallel_keyset_incremental_uuid_key_postgres() {
 
 /// A datetimeoffset key keeps the run: every row once, whatever text the sampler reads its split points as.
 #[test]
-#[ignore = "live+gate-only: requires docker compose up -d mssql"]
-fn open_defect_a_parallel_keyset_datetimeoffset_key_keeps_the_run_mssql() {
+#[ignore = "live: requires docker compose up -d mssql"]
+fn a_parallel_keyset_datetimeoffset_key_keeps_the_run_mssql() {
     require_alive(LiveService::Mssql);
     let table = unique_name("pk_dto_ms");
     mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));

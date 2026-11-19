@@ -13,6 +13,7 @@ pub(crate) type NamesMatch = fn(&str, &str) -> bool;
 /// The server's text when `err` is an engine's typed "not yours to read" verdict.
 pub(crate) fn denied_by_server(err: &anyhow::Error) -> Option<String> {
     super::mysql::column_grants::denied_by_server(err)
+        .or_else(|| super::postgres::column_grants::denied_by_server(err))
 }
 
 /// `SELECT` of `columns` from `qualifier.table`, every name quoted for `engine`.
@@ -120,6 +121,52 @@ pub(crate) fn require_readable_keys(
         }
     }
     Ok(())
+}
+
+/// What differs between the columns of `table` a run delivers and the ones its account may `SELECT` now.
+pub(crate) fn grants_difference(table: &str, before: &[String], now: &[String]) -> String {
+    let missing = |from: &[String], of: &[String]| -> Vec<String> {
+        from.iter()
+            .filter(|c| !of.contains(c))
+            .map(|c| format!("`{c}`"))
+            .collect()
+    };
+    let mut changes = Vec::new();
+    let gained = missing(now, before);
+    if !gained.is_empty() {
+        changes.push(format!("gained {}", gained.join(", ")));
+    }
+    let lost = missing(before, now);
+    if !lost.is_empty() {
+        changes.push(format!("lost {}", lost.join(", ")));
+    }
+    if changes.is_empty() {
+        changes.push("the same columns in another order".to_string());
+    }
+    format!(
+        "the columns this account may SELECT of `{table}` changed ({}): a grant change, or a \
+         schema change under a table-level grant",
+        changes.join("; ")
+    )
+}
+
+/// The first configured table whose readable columns now differ from `resolved`, with what differs.
+pub(crate) fn first_grants_change(
+    configured: &[String],
+    resolved: &HashMap<String, ReadableColumns>,
+    now: &HashMap<String, ReadableColumns>,
+) -> Option<String> {
+    configured.iter().find_map(|t| {
+        let (before, after) = (resolved.get(t), now.get(t));
+        if before.map(|c| &c.columns) == after.map(|c| &c.columns) {
+            return None;
+        }
+        Some(grants_difference(
+            t,
+            before.map(|c| c.columns.as_slice()).unwrap_or(&[]),
+            after.map(|c| c.columns.as_slice()).unwrap_or(&[]),
+        ))
+    })
 }
 
 /// Code an export error under `columns_from: grants`: a refused column is COLUMNS_UNREADABLE for a batch, GRANTS_CHANGED for a stream leg.
@@ -239,6 +286,27 @@ mod tests {
             !changes_only_hidden(true, Some(&row(&["1"], &[])), Some(&same)),
             "a thin before image proves nothing"
         );
+    }
+
+    #[test]
+    fn the_difference_names_what_was_gained_and_what_was_lost() {
+        let d = grants_difference("t", &s(&["id", "a"]), &s(&["id", "b"]));
+        assert!(d.contains("gained `b`") && d.contains("lost `a`"), "{d}");
+        let same = grants_difference("t", &s(&["a", "b"]), &s(&["b", "a"]));
+        assert!(same.contains("the same columns in another order"), "{same}");
+    }
+
+    #[test]
+    fn first_grants_change_finds_a_lost_table_and_ignores_an_equal_set() {
+        let readable = |c: &[&str]| ReadableColumns {
+            columns: s(c),
+            select: String::new(),
+        };
+        let resolved = HashMap::from([("t".to_string(), readable(&["id", "a"]))]);
+        let configured = s(&["t"]);
+        assert!(first_grants_change(&configured, &resolved, &resolved.clone()).is_none());
+        let gone = first_grants_change(&configured, &resolved, &HashMap::new()).unwrap();
+        assert!(gone.contains("lost `id`, `a`"), "{gone}");
     }
 
     #[test]

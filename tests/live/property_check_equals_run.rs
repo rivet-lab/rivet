@@ -1086,7 +1086,7 @@ fn stand_free(engine: SourceType, shape: Shape) -> bool {
         Shape::SecretMalformed => true,
         Shape::GrantGap => !matches!(
             engine,
-            SourceType::Mysql | SourceType::Oracle | SourceType::Mongo
+            SourceType::Mysql | SourceType::Mssql | SourceType::Oracle | SourceType::Mongo
         ),
         Shape::Clean
         | Shape::OverrideRefused
@@ -1144,7 +1144,7 @@ fn run_raw_cells(
             if s == Shape::GrantGap
                 && matches!(
                     e,
-                    SourceType::Mysql | SourceType::Oracle | SourceType::Mongo
+                    SourceType::Mysql | SourceType::Mssql | SourceType::Oracle | SourceType::Mongo
                 )
             {
                 continue;
