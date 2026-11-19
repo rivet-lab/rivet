@@ -49,7 +49,7 @@ from .core import DEVBOX, GATE_FAILURES, HALVES, HOSTED, Ledger, SkipCause, Stat
 from ..pytools.release import CANONICAL_CONFIG, ISLAND_GATE, binary_is_tree
 from ..pytools.shell import find_keg_tools, loopback_publish, mysql_client
 from . import seed_charset
-from .halves import LIVE_DEVBOX_STAGE, LIVE_HOSTED_STAGE, half_seeds, parse_live_shard, stage_half
+from .halves import LIVE_DEVBOX_STAGE, LIVE_HOSTED_STAGE, half_seeds, parse_live_shard, parse_shard_spec, slice_stages, stage_half, stage_slice_index
 from . import (
     bigquery,
     blessed_flow,
@@ -922,6 +922,15 @@ def _halves_self_test() -> None:
         assert sorted(slices[0] + slices[1]) == sorted(cuts[HOSTED]), "slice 0 and a live slice do not re-form the hosted half"
         assert slices[0] == [n for n in cuts[HOSTED] if n != LIVE_HOSTED_STAGE] and all(sl == [LIVE_HOSTED_STAGE] for sl in slices[1:]), \
             "slice 0 is every hosted stage but the live modules and each other slice is the live modules alone"
+        for k in (1, 2, 3):
+            stage_cuts = [[st.name for st in selected_stages(parse_args([*argv, "--half", HOSTED, "--live-shard", f"{i}/3:{k}"]), table)] for i in [0, *range(4, 3 + k)]]
+            live_cuts = [[st.name for st in selected_stages(parse_args([*argv, "--half", HOSTED, "--live-shard", f"{i}/3:{k}"]), table)] for i in (1, 2, 3)]
+            body = [n for n in cuts[HOSTED] if n != LIVE_HOSTED_STAGE]
+            assert sorted(n for sl in stage_cuts for n in sl) == sorted(body), f"the {k} stage slices do not re-form the hosted stages but the live modules exactly once"
+            assert all(sl and sl == [n for n in body if n in sl] for sl in stage_cuts), f"a stage slice of {k} is empty or breaks the table's order"
+            assert all(sl == [LIVE_HOSTED_STAGE] for sl in live_cuts), "a live slice is not the live modules alone under stage slices"
+        assert [[st.name for st in selected_stages(parse_args([*argv, "--half", HOSTED, "--live-shard", f"{i}/3:1"]), table)] for i in range(4)] == slices, \
+            "one stage slice is not today's slice 0"
         if not argv:
             assert stage_names() == per_run and stage_names(["--half", HOSTED]) == cuts[HOSTED] and stage_names(["--half", DEVBOX]) == cuts[DEVBOX], \
                 "stage_names, which the two-halves tag reads, is not the cut a run makes"
@@ -933,7 +942,8 @@ def _halves_self_test() -> None:
     assert REPLICA_STAGE in names and STAGE_HALF[REPLICA_STAGE] == DEVBOX, "the stage that reads replica topologies runs where the replicas are"
     dropped = {k: v for k, v in STAGE_HALF.items() if k != names[0]}
     assert LIVE_DEVBOX_STAGE in names and STAGE_HALF[LIVE_DEVBOX_STAGE] == DEVBOX and STAGE_HALF[LIVE_HOSTED_STAGE] == HOSTED, "the live modules have a part in each half"
-    for bad in ("4/3", "-1/3", "0/0", "x", "1/"):
+    assert parse_live_shard("5/3:3") == (5, 3) and parse_shard_spec("0/3") == (0, 3, 1), "--live-shard i/n:k does not parse"
+    for bad in ("4/3", "-1/3", "0/0", "x", "1/", "6/3:3", "0/3:0", "1/3:"):
         try:
             parse_live_shard(bad)
         except ValueError:
@@ -1227,7 +1237,7 @@ def _self_test() -> int:
     import inspect
     assert "stand_disk.start_refusal(stand_disk.free_gib(), island=ns.island, hosted=ns.hosted)" in inspect.getsource(main), \
         "the start floor follows the run's mode"
-    assert "verify_oracle_verdict_census(led, kept, may_be_empty=(live_shard(ns) or (1, 1))[0] == 0)" in inspect.getsource(main), \
+    assert "verify_oracle_verdict_census(led, kept, may_be_empty=stage_slice_index(*(live_shard(ns) or (1, 1))) is not None)" in inspect.getsource(main), \
         "only slice 0 of the hosted half may log no rig oracle verdict"
     assert "led.close_known_red(known_red.ISLAND if ns.island else known_red.GATE)" in inspect.getsource(main), \
         "a full run closes the known reds its own lane owes, the island its own tier included"
@@ -1985,10 +1995,18 @@ def island_stages(table: Sequence[Stage]) -> list[Stage]:
 
 
 def selected_stages(ns: argparse.Namespace, table: Sequence[Stage]) -> list[Stage]:
-    """What this run executes of the table: only the island under `--island`, else everything, of one half under `--half`; under `--live-shard i/n` slice 0 is every stage but the live modules and slice i>=1 is the live modules alone."""
+    """What this run executes of the table: only the island under `--island`, else everything, of one half under `--half`; under `--live-shard i/n[:k]` the live modules go to the slices 1..n and the other hosted stages are dealt into k stage slices (0, n+1..n+k-1)."""
     shard = live_shard(ns)
-    return [st for st in table if (ALONE in st.needs) is ns.island and (not ns.half or stage_half(st.name) == ns.half)
-            and (shard is None or (st.name == LIVE_HOSTED_STAGE) is (shard[0] > 0))]
+    chosen = [st for st in table if (ALONE in st.needs) is ns.island and (not ns.half or stage_half(st.name) == ns.half)]
+    if shard is None:
+        return chosen
+    n, k = parse_shard_spec(ns.live_shard)[1:]
+    j = stage_slice_index(shard[0], n)
+    if j is None:
+        return [st for st in chosen if st.name == LIVE_HOSTED_STAGE]
+    others = [st.name for st in chosen if st.name != LIVE_HOSTED_STAGE]
+    mine = set(slice_stages(others, k)[j])
+    return [st for st in chosen if st.name in mine]
 
 
 def stage_names(argv: Sequence[str] = ()) -> list[str]:
@@ -2734,7 +2752,7 @@ def main(argv: list[str] | None = None) -> int:
         if (work / "rivet-oracle.log").is_file():
             keep_failure_log(work / "rivet-oracle.log", kept.name)
         if not ns.island:
-            skip_census.verify_oracle_verdict_census(led, kept, may_be_empty=(live_shard(ns) or (1, 1))[0] == 0)
+            skip_census.verify_oracle_verdict_census(led, kept, may_be_empty=stage_slice_index(*(live_shard(ns) or (1, 1))) is not None)
             live_modules.verify_registry_covered(led)
             verify_seeded_recall(led, ns.with_seeded_recall, ns.half)
         else:
