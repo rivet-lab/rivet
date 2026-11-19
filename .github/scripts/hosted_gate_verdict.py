@@ -93,21 +93,29 @@ def problems_of(rec: dict | None, sha: str) -> list[str]:
     return found
 
 
-def render(root: Path, sha: str, slices: int, github: dict[str, str] | None = None) -> tuple[str, bool]:
-    """The markdown table for every slice 0..`slices`, headed by the ref of `github`, and whether the whole hosted half is green."""
+def parse_slices(text: str) -> tuple[int, str]:
+    """`n` or `n:k` (n live slices, k stage slices) as (the highest slice index, the spec every slice's `--live-shard` names after its own index)."""
+    m = re.fullmatch(r"(\d+)(?::(\d+))?", text)
+    if not m or int(m[1]) < 1 or int(m[2] or 1) < 1:
+        raise ValueError(f"--slices wants n or n:k with n, k >= 1, got {text!r}")
+    return int(m[1]) + int(m[2] or 1) - 1, text
+
+
+def render(root: Path, sha: str, slices: int, github: dict[str, str] | None = None, spec: str | None = None) -> tuple[str, bool]:
+    """The markdown table for every slice 0..`slices`, headed by the ref of `github`, and whether the whole hosted half is green; each slice's shard label is `i/<spec>` (`spec` is `slices` for one stage slice)."""
     rows, ok = [], True
     for i in range(slices + 1):
         rec, log = load_slice(root, i)
         bad = problems_of(rec, sha)
-        if rec is not None and rec.get("shard") != f"{i}/{slices}":
-            bad.append(f"shard {rec.get('shard')!r}, expected '{i}/{slices}'")
+        if rec is not None and rec.get("shard") != f"{i}/{spec or slices}":
+            bad.append(f"shard {rec.get('shard')!r}, expected '{i}/{spec or slices}'")
         if (code := load_side(root, i, "exit-code.txt")) != 0:
             bad.append(f"gate exit code {code}")
         ok &= not bad
         result = "GREEN" if not bad else "RED: " + "; ".join(bad)
         stats = (f"pass {rec.get('passed')} fail {rec.get('failed')} skip {rec.get('skipped')} "
                  f"{rec.get('total_min')} min") if rec else "-"
-        rows.append(f"| slice {i}/{slices} | {result} | {stats} |")
+        rows.append(f"| slice {i}/{spec or slices} | {result} | {stats} |")
         for scenario, c in sorted(scenario_counts(log).items()):
             if any(c[s] for s in NOT_GREEN):
                 rows.append(f"| slice {i}: {scenario} | " + " ".join(f"{s} {c[s]}" for s in NOT_GREEN if c[s]) + " | |")
@@ -115,13 +123,13 @@ def render(root: Path, sha: str, slices: int, github: dict[str, str] | None = No
     return "\n".join(head + rows) + "\n", ok
 
 
-def verdict_record(root: Path, sha: str, slices: int, env: dict[str, str]) -> dict:
+def verdict_record(root: Path, sha: str, slices: int, env: dict[str, str], spec: str | None = None) -> dict:
     """The record the tag reads: this run's identity from `env`, and per slice its exit code and the kept fields of its record."""
     out = []
     for i in range(slices + 1):
         rec, _ = load_slice(root, i)
         out.append({"slice": i, "exit_code": load_side(root, i, "exit-code.txt"), "record": None if rec is None else {k: rec.get(k) for k in KEPT}})
-    return {"kind": VERDICT_KIND, "schema": 1, "sha": sha, "slices": slices,
+    return {"kind": VERDICT_KIND, "schema": 1, "sha": sha, "slices": slices, "spec": spec or str(slices),
             "github": run_identity(env), "records": out}
 
 
@@ -188,6 +196,22 @@ def self_test() -> None:
         assert first["exit_code"] == 0, first
         assert set(first["record"]) == set(KEPT) and first["record"]["stages"] == ["live modules"], first
         assert first["record"]["host"] == {"system": "Linux", "machine": "x86_64"}, first
+    assert parse_slices("5") == (5, "5") and parse_slices("5:2") == (6, "5:2") and parse_slices("3:3") == (5, "3:3"), "--slices does not parse"
+    for bad in ("0", "5:0", "5:", "x", ""):
+        try:
+            parse_slices(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"--slices accepted {bad!r}")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for i in range(3):
+            _fixture(root, i, shard=f"{i}/1:2")
+        text, ok = render(root, sha, 2, spec="1:2")
+        assert ok, text
+        _, wrong = render(root, sha, 2)
+        assert not wrong, "slices labelled 1:2 passed as one stage slice"
+        assert verdict_record(root, sha, 2, {}, "1:2")["spec"] == "1:2" and verdict_record(root, sha, 3, {})["spec"] == "3", "the verdict does not carry its spec"
     print("hosted_gate_verdict self-test ok")
 
 
@@ -195,7 +219,7 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--artifacts", type=Path)
     ap.add_argument("--sha")
-    ap.add_argument("--slices", type=int)
+    ap.add_argument("--slices", help="n live slices, or n:k with k stage slices besides (the workflow's LIVE_SLICES)")
     ap.add_argument("--json", type=Path, help="write the verdict record the tag reads to this file")
     ap.add_argument("--self-test", action="store_true")
     ns = ap.parse_args(argv)
@@ -204,9 +228,13 @@ def main(argv: list[str]) -> int:
         return 0
     if ns.artifacts is None or not ns.sha or not ns.slices:
         ap.error("--artifacts, --sha and --slices are required")
-    text, ok = render(ns.artifacts, ns.sha, ns.slices, run_identity(dict(os.environ)))
+    try:
+        top, spec = parse_slices(ns.slices)
+    except ValueError as e:
+        ap.error(str(e))
+    text, ok = render(ns.artifacts, ns.sha, top, run_identity(dict(os.environ)), spec)
     if ns.json:
-        ns.json.write_text(json.dumps(verdict_record(ns.artifacts, ns.sha, ns.slices, dict(os.environ)), indent=1) + "\n")
+        ns.json.write_text(json.dumps(verdict_record(ns.artifacts, ns.sha, top, dict(os.environ), spec), indent=1) + "\n")
     sys.stdout.write(text)
     return 0 if ok else 1
 

@@ -18,7 +18,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: never
   NO_COLOR: "1"
-  LIVE_SLICES: "5"
+  LIVE_SLICES: "5:2"
 
 jobs:
   plan:
