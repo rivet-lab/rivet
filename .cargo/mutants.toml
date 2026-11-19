@@ -958,4 +958,8 @@ exclude_re = [
     "replace match guard seeded!\\(.*, false ?\\) with false in stop_class$",
     "replace match guard seeded!\\(.*, false ?\\) with false in load_block$",
     "replace match guard seeded!\\(.*, false ?\\) with false in keyset_key_refusal$",
+    # 2026-11-19: stubbing rows_that_fit to 0 makes budget_slices push empty ranges without end (peak test RSS 6.3 GB, killed by a watchdog), which starves the hosted runner; closes never.
+    "replace rows_that_fit -> usize with 0$",
+    # 2026-11-19: `start * fit` keeps `start` at 0, so budget_slices never advances and grows its slice list (cargo-mutants TIMEOUT at 3.0 GB peak test RSS); closes never.
+    "replace \\+ with \\* in budget_slices$",
 ]
