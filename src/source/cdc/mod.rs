@@ -3079,6 +3079,58 @@ mod tests {
         assert_eq!(ids.estimated_bytes(), base + 6 + 3);
     }
 
+    /// The resident cost counts each wire-label column's own size, its name and its labels, and shares an Arc between its holders.
+    #[test]
+    fn estimated_bytes_counts_image_labels_and_splits_a_shared_arc() {
+        let bare = super::ChangeEvent {
+            op: super::ChangeOp::Insert,
+            schema: "public".into(),
+            table: "t".into(),
+            before: None,
+            after: Some(vec![RivetValue::Int(2)]),
+            position: Position::new(serde_json::json!({ "lsn": "0/ABC" })),
+            committed: true,
+            image_names: None,
+            seq: 0,
+            poison: None,
+            row_id: None,
+            before_names: None,
+            before_poison: None,
+            image_labels: None,
+        };
+        let base = bare.estimated_bytes();
+        let labels: std::sync::Arc<[super::value::WireLabels]> = vec![
+            super::value::WireLabels {
+                column: "mood".into(),
+                labels: Some(vec!["a".into(), "bcd".into()]),
+            },
+            super::value::WireLabels {
+                column: "xyz".into(),
+                labels: None,
+            },
+        ]
+        .into();
+        let own = 2 * std::mem::size_of::<super::value::WireLabels>()
+            + "mood".len()
+            + "xyz".len()
+            + 2 * std::mem::size_of::<String>()
+            + "a".len()
+            + "bcd".len();
+        let ev = super::ChangeEvent {
+            image_labels: Some(labels.clone()),
+            ..bare
+        };
+        drop(labels);
+        assert_eq!(ev.estimated_bytes(), base + own);
+        let sibling = ev.clone();
+        assert_eq!(
+            ev.estimated_bytes(),
+            base + own / 2,
+            "an Arc held twice charges each holder half"
+        );
+        drop(sibling);
+    }
+
     /// A key-only pre-image prints as carried, named by `before_columns`; a key move stays one update.
     #[test]
     fn an_ndjson_line_names_a_key_only_pre_image_and_does_not_split() {

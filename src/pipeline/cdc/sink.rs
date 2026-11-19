@@ -2165,7 +2165,7 @@ mod tests {
             &crate::config::RowHash::default(),
         )
         .unwrap();
-        let (batch, _) = flush(
+        let (batch, _, _) = flush(
             &events,
             &sch,
             &cols,

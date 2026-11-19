@@ -112,6 +112,20 @@ pub(crate) fn of(tme: &TableMapEvent<'_>, names: &[String]) -> Option<Arc<[WireL
     (!lossy.is_empty()).then(|| lossy.into())
 }
 
+/// The column names the table map's optional metadata carries, when the server sent them.
+pub(crate) fn column_names(tme: &TableMapEvent<'_>) -> Option<Arc<[String]>> {
+    tme.iter_optional_meta().find_map(|f| match f {
+        Ok(OptionalMetadataField::ColumnName(names)) => Some(
+            names
+                .iter_names()
+                .filter_map(|n| n.ok())
+                .map(|n| String::from_utf8_lossy(n.name_raw()).into_owned())
+                .collect(),
+        ),
+        Ok(_) | Err(_) => None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,5 +309,17 @@ mod tests {
             .concat(),
         );
         assert_eq!(of(&bmp, &names(&["e", "s"])), None);
+    }
+
+    #[test]
+    fn the_column_names_of_a_table_map_are_read_in_order_and_absent_without_them() {
+        let named = table_map("ie", tlv(4, strings(&[&["id", "mood"]])[1..].to_vec()));
+        assert_eq!(
+            column_names(&named).as_deref(),
+            Some(&["id".to_string(), "mood".to_string()][..])
+        );
+        let unnamed = table_map("ie", tlv(10, vec![255]));
+        assert_eq!(column_names(&unnamed), None);
+        assert_eq!(column_names(&table_map("i", Vec::new())), None);
     }
 }

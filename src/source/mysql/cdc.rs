@@ -28,20 +28,6 @@ type CachedTableMap = (
     Option<std::sync::Arc<[WireLabels]>>,
 );
 
-/// The column names the table map's optional metadata carries, when the server sent them.
-fn table_map_column_names(tme: &TableMapEvent<'_>) -> Option<std::sync::Arc<[String]>> {
-    tme.iter_optional_meta().find_map(|f| match f {
-        Ok(mysql::binlog::events::OptionalMetadataField::ColumnName(names)) => Some(
-            names
-                .iter_names()
-                .filter_map(|n| n.ok())
-                .map(|n| String::from_utf8_lossy(n.name_raw()).into_owned())
-                .collect(),
-        ),
-        Ok(_) | Err(_) => None,
-    })
-}
-
 /// How long the server keeps the binlog dump open while rivet is busy flushing a roll to the store (the server default is 60 s).
 const DUMP_WRITE_TIMEOUT_SECS: u32 = 3600;
 
@@ -1085,7 +1071,7 @@ impl MysqlChangeStream {
             }
             Some(EventData::TableMapEvent(tme)) => {
                 let tme = tme.into_owned();
-                let names = table_map_column_names(&tme);
+                let names = super::table_map_labels::column_names(&tme);
                 let labels = names
                     .as_deref()
                     .and_then(|n| super::table_map_labels::of(&tme, n));
