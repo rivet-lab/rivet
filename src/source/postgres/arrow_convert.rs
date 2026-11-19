@@ -898,6 +898,24 @@ fn array_decode_message(col: &str, e: &dyn std::fmt::Display) -> String {
     )
 }
 
+/// The PostgreSQL element type of the array column `col_idx`, when the batch has a row to read it from.
+fn pg_list_elem_type(rows: &[Row], col_idx: usize) -> Option<Type> {
+    match rows.first()?.columns().get(col_idx)?.type_().kind() {
+        Kind::Array(elem) => Some(elem.clone()),
+        _ => None,
+    }
+}
+
+/// True for an array whose elements the plain `text[]` read cannot take: `json`, `jsonb`, `interval` and enum.
+fn pg_list_elem_is_wire_special(rows: &[Row], col_idx: usize) -> bool {
+    pg_list_elem_type(rows, col_idx).is_some_and(|t| {
+        t == Type::JSON
+            || t == Type::JSONB
+            || t == Type::INTERVAL
+            || matches!(t.kind(), Kind::Enum(_))
+    })
+}
+
 /// Build an Arrow `ListArray` from a PostgreSQL array column.
 fn build_pg_list_array(
     target_type: &DataType,
@@ -964,9 +982,27 @@ fn build_pg_list_array(
         DataType::Boolean => list_of!(bool, BooleanBuilder),
         DataType::Int16 => list_of!(i16, Int16Builder),
         DataType::Int32 => list_of!(i32, Int32Builder),
+        DataType::Int64 if pg_list_elem_type(rows, col_idx) == Some(Type::OID) => {
+            list_mapped!(u32, Int64Builder::new(), b, v => b.append_value(i64::from(v)))
+        }
         DataType::Int64 => list_of!(i64, Int64Builder),
         DataType::Float32 => list_of!(f32, Float32Builder),
         DataType::Float64 => list_of!(f64, Float64Builder),
+        DataType::Utf8 if pg_list_elem_is_wire_special(rows, col_idx) => {
+            let elem = pg_list_elem_type(rows, col_idx).expect("checked by the guard");
+            if elem == Type::JSON || elem == Type::JSONB {
+                list_mapped!(PgJsonRawText<'_>, StringBuilder::new(), b, t => b.append_value(t.0))
+            } else if elem == Type::INTERVAL {
+                list_mapped!(
+                    PgInterval,
+                    StringBuilder::new(),
+                    b,
+                    iv => b.append_value(pg_interval_to_iso8601(iv.months, iv.days, iv.microseconds))
+                )
+            } else {
+                list_mapped!(AnyAsString, StringBuilder::new(), b, s => b.append_value(&s.0))
+            }
+        }
         DataType::Utf8 => {
             let mut lb = ListBuilder::new(StringBuilder::new());
             for row in rows {
