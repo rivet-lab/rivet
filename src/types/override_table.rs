@@ -441,6 +441,27 @@ mod tests {
     }
 
     #[test]
+    fn an_integer_is_read_as_a_flag_only_where_the_engine_checks_each_value() {
+        for (native, ty) in [
+            ("tinyint", RivetType::Int16),
+            ("int", RivetType::Int32),
+            ("bigint", RivetType::Int64),
+            ("bigint unsigned", RivetType::Int64),
+        ] {
+            assert!(
+                override_is_read(Engine::Mysql, native, &ty, &RivetType::Bool),
+                "mysql {native}"
+            );
+            for engine in [Engine::Postgres, Engine::Mssql, Engine::Oracle] {
+                assert!(
+                    !override_is_read(engine, native, &ty, &RivetType::Bool),
+                    "{engine:?} {native}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_wider_bit_or_an_unmapped_postgres_type_is_not_read_as_what_it_is_not() {
         assert!(!override_is_read(
             Engine::Mysql,

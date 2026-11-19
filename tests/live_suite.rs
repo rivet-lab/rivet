@@ -85,6 +85,8 @@ mod live_cdc_column_grants_mongo;
 #[cfg(feature = "oracle")]
 #[path = "live/live_cdc_column_grants_oracle.rs"]
 mod live_cdc_column_grants_oracle;
+#[path = "live/live_cdc_column_grants_postgres.rs"]
+mod live_cdc_column_grants_postgres;
 #[path = "live/live_cdc_compact.rs"]
 mod live_cdc_compact;
 #[path = "live/live_cdc_full_cycle.rs"]
@@ -166,6 +168,8 @@ mod live_init;
 mod live_init_delta;
 #[path = "live/live_init_extended.rs"]
 mod live_init_extended;
+#[path = "live/live_int_to_bool_override.rs"]
+mod live_int_to_bool_override;
 #[path = "live/live_int_to_float_override.rs"]
 mod live_int_to_float_override;
 #[path = "live/live_keyset.rs"]

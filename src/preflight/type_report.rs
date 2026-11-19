@@ -246,6 +246,10 @@ fn readable_by_table(
             }
             Ok(by_table)
         }
+        SourceType::Postgres => {
+            let mut client = crate::source::postgres::connect_client(url, tls)?;
+            crate::source::postgres::column_grants::readable_columns_of(&mut client, tables)
+        }
         _ => Ok(std::collections::HashMap::new()),
     }
 }
@@ -1646,7 +1650,9 @@ exports:
         read(SourceType::Mysql, DEAD_MYSQL).expect_err("mysql reads its server");
         #[cfg(feature = "oracle")]
         read(SourceType::Oracle, DEAD_ORACLE).expect_err("oracle reads its server");
-        for other in [SourceType::Postgres, SourceType::Mssql, SourceType::Mongo] {
+        read(SourceType::Postgres, "postgresql://u:p@127.0.0.1:1/app")
+            .expect_err("postgres reads its server");
+        for other in [SourceType::Mssql, SourceType::Mongo] {
             let none = read(other, "postgresql://u:p@127.0.0.1:1/app").unwrap();
             assert!(none.is_empty(), "{other:?} reads no grants");
         }

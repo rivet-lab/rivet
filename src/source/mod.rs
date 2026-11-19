@@ -465,6 +465,7 @@ pub(crate) fn code_a_missing_relation(
 pub(crate) fn columns_from_grants_boundary(engine: crate::config::SourceType) -> &'static str {
     match engine {
         crate::config::SourceType::Mongo => mongo::column_grants::BOUNDARY,
+        crate::config::SourceType::Postgres => postgres::column_grants::BOUNDARY,
         #[cfg(feature = "oracle")]
         crate::config::SourceType::Oracle => oracle::column_grants::BOUNDARY,
         _ => mysql::column_grants::BOUNDARY,
@@ -481,6 +482,9 @@ pub(crate) fn resolve_column_grants(
 ) -> crate::error::Result<std::sync::Arc<std::collections::HashMap<String, cdc::ReadableColumns>>> {
     match engine {
         crate::config::SourceType::Oracle => oracle_column_grants(url, tls, tables, declared),
+        crate::config::SourceType::Postgres => {
+            postgres::column_grants::resolve_grants(url, tls, tables, declared)
+        }
         crate::config::SourceType::Mongo => {
             mongo::column_grants::resolve_for_tables(url, tls, tables).map(std::sync::Arc::new)
         }
@@ -927,6 +931,20 @@ mod column_grants_dispatch_tests {
         assert!(!mysql.contains("driver: oracle"), "{mysql}");
         let oracle = refusal(SourceType::Oracle, "oracle://u:p@127.0.0.1:1/app");
         assert!(oracle.contains("driver: oracle"), "{oracle}");
+        let postgres = refusal(SourceType::Postgres, "postgresql://u:p@127.0.0.1:1/app");
+        assert!(
+            postgres.contains("error connecting to server"),
+            "{postgres}"
+        );
+    }
+
+    /// Each engine says its own boundary, and PostgreSQL's names the change stream as a client-side projection.
+    #[test]
+    fn each_engine_says_its_own_boundary() {
+        let say = |e| super::columns_from_grants_boundary(e);
+        assert!(say(SourceType::Postgres).contains("PostgreSQL change stream"));
+        assert_ne!(say(SourceType::Postgres), say(SourceType::Mysql));
+        assert_ne!(say(SourceType::Postgres), say(SourceType::Mongo));
     }
 }
 
