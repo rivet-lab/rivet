@@ -228,6 +228,16 @@ fn first_row_clause(st: crate::config::SourceType) -> &'static str {
     }
 }
 
+/// "The first `n` rows" clause (after the `ORDER BY`), per dialect.
+fn first_rows_clause(st: crate::config::SourceType, n: i64) -> String {
+    use crate::config::SourceType::*;
+    match st {
+        Postgres | Mysql => format!("LIMIT {n}"),
+        Mssql | Oracle => format!("OFFSET 0 ROWS FETCH NEXT {n} ROWS ONLY"),
+        Mongo => unreachable!("parallel keyset sampling is a SQL path; Mongo uses $sample"),
+    }
+}
+
 /// The 0-indexed ROW offset of the i-th of `parts` percentile boundaries over `total` rows (i in 1..parts).
 fn percentile_offset(total: i64, i: usize, parts: usize) -> i64 {
     total * i as i64 / parts as i64
@@ -517,15 +527,13 @@ pub(crate) fn sample_key_boundaries(
     }
 }
 
-/// The key at row `offset` of the window past `start` up to `end`, by one index seek.
-fn probe_at(
-    src: &mut dyn Source,
+/// The ordered key select over the window past `start` up to `end`, before its row clause.
+fn window_select(
     plan: &ResolvedRunPlan,
     (k, axis): (&str, Axis),
     fence: &[String],
     (start, end): (i128, i128),
-    offset: i64,
-) -> Result<Option<String>> {
+) -> String {
     let st = plan.source.source_type;
     let of = crate::source::query::KeyOf {
         base: &plan.base_query,
@@ -543,20 +551,56 @@ fn probe_at(
         crate::source::query::inline_literal(st, &upto_at, of)
     ));
     preds.push(format!("{k} IS NOT NULL"));
+    format!(
+        "SELECT {k} FROM ({}) {} WHERE {} ORDER BY {k}",
+        plan.base_query,
+        crate::sql::derived(st, "_rivet_pk"),
+        preds.join(" AND ")
+    )
+}
+
+/// The key at row `offset` of the window past `start` up to `end`, by one index seek.
+fn probe_at(
+    src: &mut dyn Source,
+    plan: &ResolvedRunPlan,
+    key: (&str, Axis),
+    fence: &[String],
+    window: (i128, i128),
+    offset: i64,
+) -> Result<Option<String>> {
+    let st = plan.source.source_type;
     sampler_scalar(
         src,
         plan,
         &format!(
-            "SELECT {k} FROM ({}) {} WHERE {} ORDER BY {k} {}",
-            plan.base_query,
-            crate::sql::derived(st, "_rivet_pk"),
-            preds.join(" AND "),
+            "{} {}",
+            window_select(plan, key, fence, window),
             nth_row_clause(st, offset)
         ),
     )
 }
 
-/// Rows per key just above `start` up to `end`, from the key one seek lands on after skipping [`PROBE_ROWS`] rows, or from the whole span when fewer rows remain.
+/// The rows of the window past `start` up to `end`, counted over at most [`PROBE_ROWS`] index entries.
+fn window_rows(
+    src: &mut dyn Source,
+    plan: &ResolvedRunPlan,
+    key: (&str, Axis),
+    fence: &[String],
+    window: (i128, i128),
+) -> Result<i64> {
+    let st = plan.source.source_type;
+    let sql = format!(
+        "SELECT COUNT(*) FROM ({} {}) {}",
+        window_select(plan, key, fence, window),
+        first_rows_clause(st, PROBE_ROWS),
+        crate::sql::derived(st, "_rivet_n")
+    );
+    Ok(sampler_scalar(src, plan, &sql)?
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0))
+}
+
+/// Rows per key just above `start` up to `end`, from the key one seek lands on after skipping [`PROBE_ROWS`] rows, or from the exact count of the fewer rows the window holds.
 fn probe_density(
     src: &mut dyn Source,
     plan: &ResolvedRunPlan,
@@ -568,7 +612,9 @@ fn probe_density(
     let landed = probe_at(src, plan, key, fence, (start, end), PROBE_ROWS)?;
     Ok(match landed.and_then(|v| key.1.ord(&v)) {
         Some(at) => PROBE_ROWS as f64 / (at - start).max(1) as f64,
-        None => PROBE_ROWS as f64 / (end - start).max(1) as f64,
+        None => {
+            window_rows(src, plan, key, fence, (start, end))? as f64 / (end - start).max(1) as f64
+        }
     })
 }
 
@@ -662,7 +708,7 @@ fn prior_key(
     Ok(seek_key(src, plan, k, &preds, true)?.and_then(|v| axis.ord(&v)))
 }
 
-/// Each cut snapped to the existing key nearest it, forward or back across an empty stretch, past the previous one, stopping at the first that has none below `hi`; with the cuts that moved back to the edge of a dense stretch.
+/// Each cut snapped to the existing key nearest it, forward or back across an empty stretch, past the previous one and skipping a cut the previous one already passed, stopping at the first that has none below `hi`; with the cuts that moved back to the edge of a dense stretch.
 fn snap_cuts(
     src: &mut dyn Source,
     plan: &ResolvedRunPlan,
@@ -676,6 +722,9 @@ fn snap_cuts(
     let mut edges = Vec::new();
     let mut prev = first;
     for &c in cuts {
+        if c <= prev {
+            continue;
+        }
         let Some(mut b) = snap_key(src, plan, key, fence, prev, c)? else {
             break;
         };
@@ -724,7 +773,7 @@ fn balance_by_density(
     let (min, max) = sampled
         .iter()
         .fold((f64::MAX, 0f64), |(a, b), d| (a.min(*d), b.max(*d)));
-    if max / min <= DENSITY_RATIO {
+    if max == 0.0 || max / min <= DENSITY_RATIO {
         return Ok((bounds, Recut::Even));
     }
     let mut known = (points == m).then_some(sampled);
@@ -2329,6 +2378,34 @@ mod tests {
             }
             panic!("unterminated literal: {w}")
         }
+        /// The keys, ascending, that the `SELECT k … ORDER BY k [DESC]` statement `head` selects.
+        fn hits(&self, head: &str) -> Vec<&String> {
+            assert!(
+                !head.contains("COUNT") && !head.contains("OFFSET"),
+                "a scan: {head}"
+            );
+            let order = format!(" ORDER BY {}", crate::sql::quote_ident(self.st, "k"));
+            let head = head.strip_suffix(" DESC").unwrap_or(head);
+            let head = head.strip_suffix(&order).unwrap();
+            let preds = head
+                .split_once(" WHERE ")
+                .map_or(vec![], |(_, w)| self.predicates(w));
+            self.keys
+                .iter()
+                .filter(|k| {
+                    preds.iter().all(|(op, v)| {
+                        let o = Indexed::order(self.numeric, k, v);
+                        match op.as_str() {
+                            ">" => o.is_gt(),
+                            ">=" => o.is_ge(),
+                            "<" => o.is_lt(),
+                            "<=" => o.is_le(),
+                            other => panic!("unexpected operator {other}"),
+                        }
+                    })
+                })
+                .collect()
+        }
         /// The `(operator, value)` predicates of a WHERE clause made of `k <op> '<v>'` and `k IS NOT NULL` joined by AND.
         fn predicates(&self, mut w: &str) -> Vec<(String, String)> {
             let k = format!("{} ", crate::sql::quote_ident(self.st, "k"));
@@ -2364,6 +2441,14 @@ mod tests {
             if self.refuse.is_some_and(|r| sql.contains(r)) {
                 anyhow::bail!("invalid input value for the key's type");
             }
+            if let Some(inner) = sql.strip_prefix("SELECT COUNT(*) FROM (") {
+                let inner = inner.rsplit_once(") ").unwrap().0;
+                let head = inner
+                    .strip_suffix(&format!(" {}", first_rows_clause(self.st, PROBE_ROWS)))
+                    .unwrap_or_else(|| panic!("not a bounded count: {sql}"));
+                let n = self.hits(head).len().min(PROBE_ROWS as usize);
+                return Ok(Some(n.to_string()));
+            }
             let (head, skip) = match sql.rsplit_once(" OFFSET ") {
                 Some((h, rest)) => {
                     let n = rest
@@ -2379,36 +2464,11 @@ mod tests {
                     0,
                 ),
             };
-            assert!(
-                !head.contains("COUNT") && !head.contains("OFFSET"),
-                "a scan: {sql}"
-            );
             assert!(skip <= PROBE_ROWS as usize, "a deep probe: {sql}");
-            let order = format!(" ORDER BY {}", crate::sql::quote_ident(self.st, "k"));
-            let (head, desc) = match head.strip_suffix(" DESC") {
-                Some(h) => (h.strip_suffix(&order).unwrap(), true),
-                None => (head.strip_suffix(&order).unwrap(), false),
-            };
-            let preds = head
-                .split_once(" WHERE ")
-                .map_or(vec![], |(_, w)| self.predicates(w));
-            let numeric = self.numeric;
-            let hit = |k: &&String| {
-                preds.iter().all(|(op, v)| {
-                    let o = Indexed::order(numeric, k, v);
-                    match op.as_str() {
-                        ">" => o.is_gt(),
-                        ">=" => o.is_ge(),
-                        "<" => o.is_lt(),
-                        "<=" => o.is_le(),
-                        other => panic!("unexpected operator {other}"),
-                    }
-                })
-            };
-            let found = if desc {
-                self.keys.iter().rev().filter(hit).nth(skip)
+            let found = if head.ends_with(" DESC") {
+                self.hits(head).into_iter().rev().nth(skip)
             } else {
-                self.keys.iter().filter(hit).nth(skip)
+                self.hits(head).into_iter().nth(skip)
             };
             Ok(found.cloned())
         }
@@ -2538,8 +2598,8 @@ mod tests {
         assert_eq!(got.len(), 15, "{got:?}");
         assert_eq!(
             ints.sql.len(),
-            33,
-            "MIN, MAX, one seek per cut and one probe per range"
+            49,
+            "MIN, MAX, one seek per cut, one probe and one bounded count per range"
         );
         let mut text = Indexed::new(keys(["a", "c", "e", "g", "i", "k", "m", "o"]), false);
         let got = sample_key_boundaries(&mut text, &plan, "k", 4, 16, None, None).unwrap();
@@ -2698,8 +2758,8 @@ mod tests {
         assert_eq!(got, keys([300, 500, 700]));
         assert_eq!(
             src.sql.len(),
-            9,
-            "MIN, MAX, one seek per cut and one probe per range"
+            13,
+            "MIN, MAX, one seek per cut, one probe and one bounded count per range"
         );
         for sql in &src.sql {
             assert!(sql.contains("\"k\" > E'100' AND \"k\" <= E'900'"), "{sql}");
@@ -2803,7 +2863,7 @@ mod tests {
         };
         let spread: Vec<usize> = ranges.iter().map(|(_, lo, hi, _)| held(lo, hi)).collect();
         assert_eq!(spread.iter().sum::<usize>(), all.len(), "{spread:?}");
-        assert_eq!(spread, vec![3_426, 3_425, 2_156, 993], "{bounds:?}");
+        assert_eq!(spread, vec![3_375, 3_374, 2_257, 994], "{bounds:?}");
     }
 
     /// A uuid key with 90% of its rows in 5% of its span keeps every row once, in ranges recut to near-equal row counts.
@@ -2875,6 +2935,8 @@ mod tests {
                     "{parts} workers, low bit {low}: {spread:?}"
                 );
                 let share = all.len() as f64 / parts as f64;
+                let thin = spread.iter().filter(|&&n| n < 3).count();
+                assert!(thin <= 1, "{parts} workers, low bit {low}: {spread:?}");
                 let heaviest = *spread.iter().max().unwrap() as f64;
                 assert!(
                     heaviest <= share,
@@ -2947,7 +3009,7 @@ mod tests {
         assert!(heaviest <= 2.0 * mean, "{spread:?}");
     }
 
-    /// The density probe reads rows per key from the key one seek lands on after skipping the probe rows, or from the whole span when fewer rows remain.
+    /// The density probe reads rows per key from the key one seek lands on after skipping the probe rows, or from the exact count of the fewer rows the span holds.
     #[test]
     fn a_density_probe_reads_rows_per_key_from_the_landing_key() {
         let plan = crate::plan::test_support::test_plan();
@@ -2961,7 +3023,7 @@ mod tests {
             probe(keys((1..=1000).map(|i| i * 10)), 0, 10_000),
             200.0 / 2_010.0
         );
-        assert_eq!(probe(keys(1..=50), 0, 1000), 200.0 / 1000.0);
+        assert_eq!(probe(keys(1..=50), 0, 1000), 50.0 / 1000.0);
         assert_eq!(probe(keys(1..=1000), 500, 1000), 200.0 / 201.0);
     }
 
