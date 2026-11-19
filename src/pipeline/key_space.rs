@@ -12,6 +12,48 @@ pub(crate) fn split(lo: &str, hi: &str, parts: usize) -> Vec<String> {
         .unwrap_or_else(|| text(lo, hi, parts))
 }
 
+/// How a key is read as one ordered integer: its own value, or a uuid's 128 bits without the lowest one.
+#[derive(Clone, Copy)]
+pub(crate) enum Axis {
+    Int,
+    Uuid { upper: bool },
+}
+
+impl Axis {
+    /// The axis a key's text reads on, or `None` for a shape with no integer order.
+    pub(crate) fn of(key: &str) -> Option<Axis> {
+        if key.parse::<i128>().is_ok() {
+            return Some(Axis::Int);
+        }
+        let upper = key.bytes().any(|c| c.is_ascii_uppercase());
+        Axis::Uuid { upper }.ord(key).map(|_| Axis::Uuid { upper })
+    }
+
+    /// The key's place on the axis.
+    pub(crate) fn ord(self, key: &str) -> Option<i128> {
+        match self {
+            Axis::Int => key.parse().ok(),
+            Axis::Uuid { .. } => (key.len() == 36)
+                .then(|| uuid::Uuid::try_parse(key).ok())
+                .flatten()
+                .map(|u| (u.as_u128() >> 1) as i128),
+        }
+    }
+
+    /// The key text for a place on the axis.
+    pub(crate) fn show(self, at: i128) -> String {
+        match self {
+            Axis::Int => at.to_string(),
+            Axis::Uuid { upper } => {
+                let s = uuid::Uuid::from_u128((at as u128) << 1)
+                    .hyphenated()
+                    .to_string();
+                if upper { s.to_uppercase() } else { s }
+            }
+        }
+    }
+}
+
 /// The `i`-th of `n` even steps from `lo` across `span`, without overflow.
 fn step(lo: u128, span: u128, i: usize, n: usize) -> u128 {
     let (i, n) = (i as u128, n as u128);
@@ -204,7 +246,7 @@ fn text(lo: &str, hi: &str, parts: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::split;
+    use super::{Axis, split};
 
     /// Owned strings for a comparison.
     fn v(xs: &[&str]) -> Vec<String> {
@@ -305,6 +347,23 @@ mod tests {
         assert_eq!(split("é", "ü", 2), Vec::<String>::new());
         assert!(split("same", "same", 4).is_empty());
         assert_eq!(split("zeta", "alpha", 2).len(), 1);
+    }
+
+    #[test]
+    fn an_axis_reads_integers_and_uuids_in_their_own_order_and_case() {
+        let lo = "00000000-0000-0000-0000-000000000001";
+        let hi = "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFE";
+        let up = Axis::of(hi).unwrap();
+        assert!(matches!(up, Axis::Uuid { upper: true }));
+        let (a, b) = (up.ord(lo).unwrap(), up.ord(hi).unwrap());
+        assert!(0 <= a && a < b);
+        assert_eq!(up.show(b), hi);
+        let mid = up.show(a + (b - a) / 2);
+        assert!(lo < mid.as_str() && mid.as_str() < hi, "{mid}");
+        assert!(matches!(Axis::of("-42"), Some(Axis::Int)));
+        assert_eq!(Axis::Int.show(Axis::Int.ord("-42").unwrap()), "-42");
+        assert!(Axis::of("abc").is_none());
+        assert!(Axis::of("0123456789abcdef0123456789abcdef").is_none());
     }
 
     #[test]

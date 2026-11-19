@@ -19,7 +19,7 @@
 //! key in `last_cursor_value` (its `cursor_extract_column` resolves to the
 //! keyset key), which the loop reads to advance to the next page.
 
-use super::{RunSummary, sink::ExportSink};
+use super::{RunSummary, key_space::Axis, sink::ExportSink};
 use crate::config::IncrementalCursorMode;
 use crate::destination;
 use crate::error::Result;
@@ -435,9 +435,10 @@ pub(crate) fn sample_key_boundaries(
             return Ok(bounds);
         }
     };
-    let Some((lo, hi)) =
-        ends.and_then(|(a, b)| Some((a.parse::<i128>().ok()?, b.parse::<i128>().ok()?)))
-    else {
+    let Some((axis, lo, hi)) = ends.and_then(|(a, b)| {
+        let axis = Axis::of(&a)?;
+        Some((axis, axis.ord(&a)?, axis.ord(&b)?))
+    }) else {
         log::info!(
             "export '{}': parallel keyset path: seek (no integer key range to balance)",
             plan.export_name
@@ -445,7 +446,7 @@ pub(crate) fn sample_key_boundaries(
         return Ok(bounds);
     };
     let seek_cut = bounds.clone();
-    match balance_by_density(src, plan, &k, &fence, (lo, hi), bounds) {
+    match balance_by_density(src, plan, (&k, axis), &fence, (lo, hi), bounds) {
         Ok((bounds, Recut::Even)) => {
             log::info!(
                 "export '{}': parallel keyset path: seek (key-space cuts, densities within {DENSITY_RATIO}x)",
@@ -482,7 +483,7 @@ pub(crate) fn sample_key_boundaries(
 fn probe_density(
     src: &mut dyn Source,
     plan: &ResolvedRunPlan,
-    k: &str,
+    (k, axis): (&str, Axis),
     fence: &[String],
     start: i128,
     end: i128,
@@ -495,11 +496,11 @@ fn probe_density(
     let mut preds = fence.to_vec();
     preds.push(format!(
         "{k} > {}",
-        crate::source::query::inline_literal(st, &start.to_string(), of)
+        crate::source::query::inline_literal(st, &axis.show(start), of)
     ));
     preds.push(format!(
         "{k} <= {}",
-        crate::source::query::inline_literal(st, &end.to_string(), of)
+        crate::source::query::inline_literal(st, &axis.show(end), of)
     ));
     preds.push(format!("{k} IS NOT NULL"));
     let landed = sampler_scalar(
@@ -513,7 +514,7 @@ fn probe_density(
             nth_row_clause(st, PROBE_ROWS)
         ),
     )?;
-    Ok(match landed.and_then(|v| v.parse::<i128>().ok()) {
+    Ok(match landed.and_then(|v| axis.ord(&v)) {
         Some(at) => PROBE_ROWS as f64 / (at - start).max(1) as f64,
         None => PROBE_ROWS as f64 / (end - start).max(1) as f64,
     })
@@ -558,7 +559,7 @@ fn equal_row_cuts(spans: &[Span], parts: usize) -> Vec<i128> {
 fn snap_key(
     src: &mut dyn Source,
     plan: &ResolvedRunPlan,
-    k: &str,
+    (k, axis): (&str, Axis),
     fence: &[String],
     start: i128,
     mid: i128,
@@ -571,20 +572,20 @@ fn snap_key(
     let mut preds = fence.to_vec();
     preds.push(format!(
         "{k} > {}",
-        crate::source::query::inline_literal(st, &start.to_string(), of)
+        crate::source::query::inline_literal(st, &axis.show(start), of)
     ));
     preds.push(format!(
         "{k} >= {}",
-        crate::source::query::inline_literal(st, &mid.to_string(), of)
+        crate::source::query::inline_literal(st, &axis.show(mid), of)
     ));
-    Ok(seek_key(src, plan, k, &preds, false)?.and_then(|v| v.parse().ok()))
+    Ok(seek_key(src, plan, k, &preds, false)?.and_then(|v| axis.ord(&v)))
 }
 
 /// Each cut snapped to the next existing key past the previous one, stopping at the first that has none below `hi`.
 fn snap_cuts(
     src: &mut dyn Source,
     plan: &ResolvedRunPlan,
-    k: &str,
+    key: (&str, Axis),
     fence: &[String],
     first: i128,
     hi: i128,
@@ -593,7 +594,7 @@ fn snap_cuts(
     let mut out = Vec::with_capacity(cuts.len());
     let mut prev = first;
     for &c in cuts {
-        match snap_key(src, plan, k, fence, prev, c)? {
+        match snap_key(src, plan, key, fence, prev, c)? {
             Some(b) if b > prev && b < hi => {
                 out.push(b);
                 prev = b;
@@ -608,23 +609,23 @@ fn snap_cuts(
 fn balance_by_density(
     src: &mut dyn Source,
     plan: &ResolvedRunPlan,
-    k: &str,
+    key: (&str, Axis),
     fence: &[String],
     (lo, hi): (i128, i128),
     bounds: Vec<String>,
 ) -> Result<(Vec<String>, Recut)> {
-    let mut cuts: Vec<i128> = bounds.iter().filter_map(|b| b.parse().ok()).collect();
+    let mut cuts: Vec<i128> = bounds.iter().filter_map(|b| key.1.ord(b)).collect();
     if cuts.len() != bounds.len() || cuts.is_empty() {
         return Ok((bounds, Recut::Even));
     }
     let m = cuts.len() + 1;
-    let render = |cuts: &[i128]| -> Vec<String> { cuts.iter().map(|c| c.to_string()).collect() };
+    let render = |cuts: &[i128]| -> Vec<String> { cuts.iter().map(|c| key.1.show(*c)).collect() };
     let initial = spans_from(lo, hi, &cuts);
     let points = m.min(PROBE_POINTS);
     let mut sampled = Vec::with_capacity(points);
     for j in 0..points {
         let s = initial[j * m / points];
-        sampled.push(probe_density(src, plan, k, fence, s.start, s.end)?);
+        sampled.push(probe_density(src, plan, key, fence, s.start, s.end)?);
     }
     let (min, max) = sampled
         .iter()
@@ -636,7 +637,7 @@ fn balance_by_density(
     loop {
         let mut spans = spans_from(lo, hi, &cuts);
         for s in spans.iter_mut() {
-            s.density = probe_density(src, plan, k, fence, s.start, s.end)?;
+            s.density = probe_density(src, plan, key, fence, s.start, s.end)?;
         }
         let mean = spans.iter().map(Span::rows).sum::<f64>() / spans.len() as f64;
         let ratio = spans.iter().map(Span::rows).fold(0f64, f64::max) / mean;
@@ -651,7 +652,15 @@ fn balance_by_density(
         if rounds == RECUT_ROUNDS {
             return Ok((render(&cuts), Recut::Unbalanced { rounds, ratio }));
         }
-        cuts = snap_cuts(src, plan, k, fence, lo - 1, hi, &equal_row_cuts(&spans, m))?;
+        cuts = snap_cuts(
+            src,
+            plan,
+            key,
+            fence,
+            lo - 1,
+            hi,
+            &equal_row_cuts(&spans, m),
+        )?;
         rounds += 1;
     }
 }
@@ -2670,6 +2679,36 @@ mod tests {
         assert_eq!(spread, vec![3_517, 3_518, 1_974, 991], "{bounds:?}");
     }
 
+    /// A uuid key with 90% of its rows in 5% of its span keeps every row once, in ranges recut to near-equal row counts.
+    #[test]
+    fn a_skewed_uuid_key_keeps_every_row_once_in_balanced_ranges() {
+        let plan = crate::plan::test_support::test_plan();
+        let uuid = |units: i64| {
+            uuid::Uuid::from_u128((units as u128) << 96)
+                .hyphenated()
+                .to_string()
+        };
+        let dense = 1..=9_000i64;
+        let sparse = (1..=1_000i64).map(|i| 9_000 + i * 191);
+        let mut src = Indexed::new(dense.chain(sparse).map(uuid).collect(), false);
+        let all = src.keys.clone();
+        let bounds = sample_key_boundaries(&mut src, &plan, "k", 4, 4, None, None).unwrap();
+        let ranges = partition_ranges(&bounds, None, None);
+        let held = |lo: &Option<String>, hi: &Option<String>| {
+            all.iter()
+                .filter(|k| {
+                    lo.as_deref().is_none_or(|l| k.as_str() > l)
+                        && hi.as_deref().is_none_or(|h| k.as_str() <= h)
+                })
+                .count()
+        };
+        let spread: Vec<usize> = ranges.iter().map(|(_, lo, hi, _)| held(lo, hi)).collect();
+        assert_eq!(spread.iter().sum::<usize>(), all.len(), "{spread:?}");
+        let mean = all.len() as f64 / spread.len() as f64;
+        let heaviest = *spread.iter().max().unwrap() as f64;
+        assert!(heaviest <= 2.0 * mean, "{spread:?}");
+    }
+
     /// A seeded sparse integer key, 95% dense and the rest spread wide, keeps every row once in ranges no heavier than twice the mean.
     #[test]
     fn a_seeded_sparse_key_is_recut_into_balanced_ranges() {
@@ -2716,7 +2755,7 @@ mod tests {
         let k = crate::sql::quote_ident(plan.source.source_type, "k");
         let probe = |all: Vec<String>, start: i128, end: i128| {
             let mut src = Indexed::new(all, true);
-            probe_density(&mut src, &plan, &k, &[], start, end).unwrap()
+            probe_density(&mut src, &plan, (&k, Axis::Int), &[], start, end).unwrap()
         };
         assert_eq!(probe(keys(1..=1000), 0, 1000), 200.0 / 201.0);
         assert_eq!(
