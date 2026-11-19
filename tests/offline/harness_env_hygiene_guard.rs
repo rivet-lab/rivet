@@ -97,8 +97,15 @@ fn gate_allow_list(core: &str, name: &str) -> BTreeSet<String> {
 
 /// Every `RIVET_*` the gate, its live-slot wrapper, the Rust harness and the Makefile's GATE_ENV read from the shell.
 fn harness_reads() -> BTreeSet<(String, String)> {
-    let py =
-        regex::Regex::new(r#"(?:environ(?:\.get)?\(?\[?|getenv\()"(RIVET_[A-Z0-9_]+)""#).unwrap();
+    let py = regex::Regex::new(
+        r#"(?:environ(?:\.get)?\(?\[?|getenv\(|env_flag\(|_wrapper_budget\(\s*)"(RIVET_[A-Z0-9_]+)""#,
+    )
+    .unwrap();
+    // `_GRACE_ENV = "RIVET_..."`: a name kept in a constant and read through it.
+    let py_const = regex::Regex::new(r#"(?m)^_?[A-Z_]*ENV\s*=\s*"(RIVET_[A-Z0-9_]+)""#).unwrap();
+    // dev/seeded also assigns names for its children: only the read forms count there.
+    let py_reads_only =
+        regex::Regex::new(r#"(?:environ\.get\(|getenv\(|env_flag\()"(RIVET_[A-Z0-9_]+)""#).unwrap();
     let rs = regex::Regex::new(r#"env::var(?:_os)?\("(RIVET_[A-Z0-9_]+)""#).unwrap();
     let mk = regex::Regex::new(r"(?m)^\s*(RIVET_[A-Z0-9_]+)='").unwrap();
     let mut reads = BTreeSet::new();
@@ -112,6 +119,13 @@ fn harness_reads() -> BTreeSet<(String, String)> {
         let p = e.unwrap().path();
         if p.extension().is_some_and(|x| x == "py") {
             scan(&py, &p);
+            scan(&py_const, &p);
+        }
+    }
+    for e in std::fs::read_dir(root().join("dev/seeded")).unwrap() {
+        let p = e.unwrap().path();
+        if p.extension().is_some_and(|x| x == "py") {
+            scan(&py_reads_only, &p);
         }
     }
     for dir in ["tests/live", "tests/common"] {
