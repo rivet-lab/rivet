@@ -866,6 +866,18 @@ fn unreadable_probe(pg_type: &str, sql: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The primary-key read names the catalog, the key order and the table it resolves, quoting a quote in the name.
+    #[test]
+    fn the_primary_key_read_resolves_the_table_by_its_quoted_name_in_key_order() {
+        let sql = super::primary_key_sql("public.o'rders");
+        assert!(
+            sql.contains("string_agg(a.attname::text, chr(31) ORDER BY k.ord)"),
+            "{sql}"
+        );
+        assert!(sql.contains("i.indisprimary"), "{sql}");
+        assert!(sql.contains("to_regclass('public.o''rders')"), "{sql}");
+    }
+
     #[test]
     fn a_row_takes_the_heap_size_over_the_row_estimate() {
         use super::avg_row_bytes;
