@@ -162,6 +162,16 @@ TEMPORAL = re.compile(r"(DATE|TIMESTAMPTZ|TIMESTAMP|DATETIME2|DATETIME|SMALLDATE
 
 ZERO_DATE_LIT = re.compile(r"'(0000-00-00|\d{4}-00-\d\d|\d{4}-\d\d-00)( [0-9:.]+)?'")
 ALTER_TABLE = re.compile(r"\bALTER\s+TABLE\b", re.I)
+
+
+def is_zero_date_null(engine: str, lit: str, verdict: str) -> bool:
+    """Whether a NULLED value is a MySQL zero or partial date, which rivet writes as NULL by design under a counted WARN."""
+    return verdict == NULLED and engine == "mysql" and bool(ZERO_DATE_LIT.fullmatch(lit.strip()))
+
+
+def zero_date_unwarned(zeros: int, warned: int) -> str:
+    """The failure text when the zero dates delivered as NULL are not the number the run's WARN counted, else empty."""
+    return f"{zeros} zero or partial dates delivered as NULL, the run's WARN counted {warned}" if zeros and zeros != warned else ""
 MYSQL_LAX = "SET SESSION sql_mode = ''; "
 ORACLE_SESSION_ZONE = "Europe/Brussels"
 ORACLE_ZONE = f"ALTER SESSION SET TIME_ZONE = '{ORACLE_SESSION_ZONE}'; "
@@ -263,9 +273,8 @@ def parse_lit(engine: str, lit: str):
     if m := _BITS.fullmatch(s):
         return Decimal(int(m.group(1), 2))
     if m := _HEX.fullmatch(s):
-        if engine == "oracle" and s.upper() == "HEXTORAW('')":
-            return None
-        return bytes.fromhex(m.group(1) or m.group(2) or m.group(3) or "")
+        hexed = m.group(1) or m.group(2) or m.group(3) or ""
+        return None if engine == "oracle" and not hexed else bytes.fromhex(hexed)
     if engine == "postgres" and (m := _PG_HEX.fullmatch(s)):
         return bytes.fromhex(m.group(1))
     if m := _TS_FUNC.fullmatch(s):
@@ -517,6 +526,11 @@ def same_array(engine: str, lit: str, native: str, target: str, got) -> str:
     return next((v for v in (WRONG, NULLED, "PRESENCE") if v in seen), "OK")
 
 
+def _blank(exp) -> bool:
+    """Whether a source value is the empty string or bytes, or a CHAR the server pads with blanks."""
+    return exp == b"" or (isinstance(exp, str) and exp.rstrip(" ") == "")
+
+
 def compare(engine: str, src_lit: str, src_family: str, target: str, got, csv: bool = False, native: str = "") -> str:
     """OK, PRESENCE (not comparable), NULLED or WRONG for one delivered cell against its source literal."""
     if src_family in ("float4", "float8") and (sp := te.special_float(src_lit)) is not None:
@@ -524,8 +538,10 @@ def compare(engine: str, src_lit: str, src_family: str, target: str, got, csv: b
     exp = parse_lit(engine, src_lit)
     if exp is None:
         return "OK"
-    if got is None or (csv and got == "" and exp != ""):
+    if got is None:
         return NULLED
+    if csv and got == "" and not _blank(exp):
+        return WRONG
     if engine == "postgres" and native.endswith("[]"):
         return same_array(engine, src_lit, native, target, got)
     if target == "binary" and csv and isinstance(got, str) and not isinstance(exp, bytes):
@@ -633,7 +649,7 @@ def read_files(parts: list[str], fmt: str, key: str = "id"):
             con.register("nsn_parts", tbl)
             src = "nsn_parts"
         else:
-            src = f"read_csv({parts!r}, header=true, all_varchar=true, union_by_name=true, nullstr='\\x00nsn')"
+            src = f"read_csv({parts!r}, header=true, all_varchar=true, union_by_name=true, allow_quoted_nulls=false)"
         desc = {r[0].lower(): wide.get(r[0].lower(), r[1]) for r in con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
         sel = ", ".join(f'CAST("{k}" AS VARCHAR{"[]" if t.endswith("[]") else ""}) AS "{k}"' if "TIME ZONE" in t else f'"{k}"' for k, t in desc.items())
         cur = con.execute(f"SELECT {sel} FROM {src}")
@@ -740,15 +756,14 @@ def grade_run(engine: str, cell: str, p: core.Proc, check: core.Proc, fidelity: 
     for i in range(1, n_rows + 1):
         lit = src_lits[i - 1] if i - 1 < len(src_lits) else "NULL"
         v = compare(engine, lit, col.family, target, rows[i][key], fmt == "csv", col.native)
-        if v == NULLED and engine == "mysql" and ZERO_DATE_LIT.fullmatch(lit.strip()):
+        if is_zero_date_null(engine, lit, v):
             zeros += 1
         elif v == NULLED:
             nulled.append(lit)
         elif v == WRONG:
             wrong.append(f"{lit}->{rows[i][key]!r}")
-    warned = warned_counts(p.out).get(key, 0)
-    if zeros and warned != zeros:
-        nulled.append(f"{zeros} zero or partial dates delivered as NULL, the run's WARN counted {warned}")
+    if unwarned := zero_date_unwarned(zeros, warned_counts(p.out).get(key, 0)):
+        nulled.append(unwarned)
     if nulled:
         return Result(cell, DELIVERED, NULLED, f"{len(nulled)} non-NULL values delivered as NULL, e.g. {nulled[:3]}", fidelity=fidelity)
     if wrong and fidelity in ("lossy", "logical_string", "unsupported"):
@@ -1085,7 +1100,10 @@ def self_test() -> None:
     assert "'12abc'" in next(c for c in columns("mysql") if c.native == "TEXT").lits
     assert compare("mysql", "NULL", "int", "float4", None) == "OK"
     assert compare("mysql", "7", "int", "float4", None) == NULLED, "a non-NULL value delivered as NULL is the harm of the MySQL int->float override"
-    assert compare("mysql", "7", "int", "float4", "", csv=True) == NULLED and compare("mysql", "''", "text", "none", "", csv=True) == "OK"
+    assert compare("mysql", "7", "int", "float4", None, csv=True) == NULLED and compare("mysql", "7", "int", "float4", "", csv=True) == WRONG
+    assert compare("mysql", "''", "text", "none", "", csv=True) == "OK" and compare("mysql", "''", "text", "none", None, csv=True) == NULLED
+    assert parse_lit("oracle", "HEXTORAW('')") is None and parse_lit("mysql", "UNHEX('')") == b"" and parse_lit("mysql", "x''") == b""
+    assert compare("oracle", "HEXTORAW('')", "other", "none", None, native="RAW(16)") == "OK", "an Oracle empty RAW is NULL at the source"
     with tempfile.TemporaryDirectory() as fc:
         assert format_config(Path(fc), "parquet").parent != format_config(Path(fc), "csv").parent, "two formats of a cell share the state a run keeps beside its config"
     assert compare("mysql", "7", "int", "float4", 7.0) == "OK" and compare("mysql", "7", "int", "float4", 7.5) == WRONG
@@ -1323,6 +1341,19 @@ def _reader_self_test() -> bool:
         (csvd / "p.csv").write_text("id,c00\n1,1\n2,\n3,-5\n4,\n")
         (csvd / "manifest.json").write_text('{"status": "success", "parts": ["p.csv"]}')
         assert grade(csvd, "none", "csv").klass == NULLED
+        for name, native, lits, body, want in (
+            ("csv-empty-bytes", "VARBINARY(4)", ("0x", "0xAB"), 'id,c00\n1,""\n2,ab\n3,\n4,\n', ""),
+            ("csv-null-for-empty-bytes", "VARBINARY(4)", ("0x", "0xAB"), "id,c00\n1,\n2,ab\n3,\n4,\n", NULLED),
+            ("csv-null-for-empty-text", "VARCHAR(4)", ("''", "'a'"), "id,c00\n1,\n2,a\n3,\n4,\n", NULLED),
+            ("csv-padded-char", "CHAR(8)", ("' '", "'a'"), 'id,c00\n1,""\n2,a\n3,\n4,\n', ""),
+        ):
+            d = root / name
+            d.mkdir()
+            (d / "p.csv").write_text(body)
+            (d / "manifest.json").write_text('{"status": "success", "parts": ["p.csv"]}')
+            cc = Col("c00", native, "Binary" if "BINARY" in native else "Utf8", "other" if "BINARY" in native else "text", lits)
+            r = grade_run("mysql", name, _proc(0), _proc(0), "exact", d, "csv", cc, 4, "none", list(lits))
+            assert r.klass == want, f"{name}: a CSV cell is NULL when bare and empty when quoted: {r}"
         stray = parts("stray", [1.0, 16777216.0, -5.0, None], pa.float32())
         pq.write_table(pa.table({"id": pa.array([9]), "c00": pa.array([1.0], pa.float32())}), stray / "extra.parquet")
         assert grade(stray, "float4").klass == PARTS, "a part on disk no manifest declares"

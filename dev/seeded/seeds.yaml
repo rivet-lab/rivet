@@ -1095,9 +1095,28 @@ seeds:
       mysql:
         na: "query_scalar reads the text protocol - every non-NULL scalar arrives as bytes whatever its type, so there is no per-type reader that can miss"
       mssql:
-        na: "scalar_to_string has an arm per ColumnData kind and renders any other kind through Debug - no arm returns None for a value"
+        na: "scalar_text has an arm per ColumnData kind and renders any other kind through the shared cell_text - no arm returns None for a value (the debug-dump class is mssql-scalar-text-debug-dump)"
       oracle:
         na: "cell_text dispatches on the column kind and propagates decode errors - it has no fall-through that returns None for a value"
+      mongo:
+        na: "query_scalar answers only the reconcile COUNT - MongoDB has no SQL probes"
+  - name: mssql-scalar-text-debug-dump
+    class: "a sampler's scalar read renders a SQL Server type it has no arm for as the driver's debug dump, so a split point is not text the server casts back and every range of a parallel keyset run fails"
+    history: "2026-11-18 nightly: a parallel keyset run on a datetimeoffset(6) key stopped with RIVET_SOURCE_QUERY_FAILED (error 241) on every range, on main; the sampler's DateTimeOffset cell fell to `format!(\"{other:?}\")`"
+    scope: source
+    switch: mssql-scalar-text-debug-dump
+    engines:
+      mssql:
+        cells:
+          - a_parallel_keyset_datetimeoffset_key_keeps_the_run_mssql
+          - keyset_key_types_the_sampler_reads_deliver_the_seeded_ids_in_parallel_mssql
+          - "lib:a_scalar_cell_reads_back_as_text_the_server_casts"
+      postgres:
+        na: "query_scalar tries each reader in turn and refuses a type none reads by code (a_probe_value_of_an_unreadable_type_is_refused_by_name_postgres); no arm renders a value as a debug dump"
+      mysql:
+        na: "query_scalar reads the text protocol - every non-NULL scalar arrives as bytes the server itself rendered, so no per-type arm can fall to a debug dump"
+      oracle:
+        na: "cell_text asks the server for text (Option<String>) for every kind it has no arm for - no debug-dump fallback exists"
       mongo:
         na: "query_scalar answers only the reconcile COUNT - MongoDB has no SQL probes"
   - name: reset-under-a-live-run
@@ -1618,15 +1637,12 @@ seeds:
     engines:
       postgres:
         cells:
-          - plan_refuses_a_table_that_does_not_exist_postgres
           - plan_refuses_a_password_the_source_rejects_postgres
       mysql:
         cells:
-          - plan_refuses_a_table_that_does_not_exist_mysql
           - plan_refuses_a_password_the_source_rejects_mysql
       mssql:
         cells:
-          - plan_refuses_a_table_that_does_not_exist_mssql
           - plan_refuses_a_password_the_source_rejects_mssql
       mongo:
         switch: plan-sealed-over-unreadable-source
@@ -1635,7 +1651,6 @@ seeds:
           - check_refuses_a_collection_that_does_not_exist_as_run_does_mongo
       oracle:
         cells:
-          - plan_refuses_a_table_that_does_not_exist_oracle
           - plan_refuses_a_password_the_source_rejects_oracle
 
   - name: missing-bucket-read-as-no-manifest
@@ -4231,13 +4246,14 @@ seeds:
         switch: column-grants-batch-read-unprojected
         cells: [a_column_grant_account_reads_only_its_columns_in_every_batch_mode_mysql]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        switch: column-grants-batch-read-unprojected
+        cells: [an_invisible_column_is_never_read_in_every_batch_mode_oracle, a_table_the_account_may_not_read_is_refused_by_code_in_batch_cdc_and_check_oracle]
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
   - name: column-grants-invisible-columns-read
     class: "the readable set under `source.columns_from: grants` includes MySQL `INVISIBLE` columns, which `SELECT *` leaves out: turning the policy on adds columns to a table already delivered"
@@ -4248,13 +4264,14 @@ seeds:
         switch: column-grants-invisible-columns-read
         cells: [a_full_grant_account_delivers_the_columns_select_star_does_mysql]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        switch: column-grants-invisible-columns-read
+        cells: [an_invisible_column_is_never_delivered_by_name_or_value_in_cdc_oracle, an_invisible_column_is_never_read_in_every_batch_mode_oracle]
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
   - name: column-grants-connect-hint-lost
     class: "under `source.columns_from: grants` the plan opens its own connection when the run's failed, so a denied connect surfaces as a bare driver error without the connect hint"
@@ -4265,13 +4282,13 @@ seeds:
         switch: column-grants-connect-hint-lost
         cells: [a_denied_connect_under_the_policy_carries_the_connect_hint_in_every_batch_mode_mysql]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the connect-hint seam is exercised through MySQL ERROR 1045 only; no Oracle cell denies a connect under the policy yet (2026-11-16, follow-up of #714)"
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
   - name: grant-change-not-seen-mid-run
     class: "a privilege statement in the binlog of an open MySQL CDC run that names no captured table marks no re-read of the grants: a database-level REVOKE or a default role taken away is not seen and the run keeps delivering the revoked column"
@@ -4282,13 +4299,13 @@ seeds:
         switch: grant-change-not-seen-mid-run
         cells: [a_database_level_revoke_after_an_earlier_re_read_stops_an_open_run_mysql, a_default_role_taken_away_after_an_earlier_re_read_stops_an_open_run_mysql, a_database_level_grant_that_adds_a_column_is_refused_naming_the_column_that_appeared_mysql]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
   - name: cursor-continued-under-another-source
     class: an incremental export finds no cursor under the source key its config names now because the same server is reached under another host spelling, and reads the whole table again beside what the old key delivered, exit 0
@@ -4330,21 +4347,21 @@ seeds:
           - "lib:a_plan_pinned_to_its_run_refuses_a_reserved_source_column"
 
   - name: columns-from-grants-accepted-off-mysql
-    class: "`source.columns_from: grants` is accepted on a PostgreSQL, SQL Server, Oracle or MongoDB source, which then reads and delivers every column of a row: the operator who wrote the key believes hidden columns are not delivered"
+    class: "`source.columns_from: grants` is accepted on a PostgreSQL or SQL Server source, which then reads and delivers every column of a row: the operator who wrote the key believes hidden columns are not delivered"
     history: "found reviewing PR #719 (2026-10-28): the refusal was only reached for MongoDB-shaped validation and never on PostgreSQL, SQL Server or Oracle; RED from this patch: `rivet run` exits 0 on a PostgreSQL config with `columns_from: grants`"
     scope: source
     switch: columns-from-grants-accepted-off-mysql
     engines:
       postgres:
-        cells: [columns_from_grants_is_refused_by_every_command_postgres, "lib:columns_from_grants_is_refused_on_every_engine_but_mysql_in_every_mode"]
+        na: "PostgreSQL is an engine the policy is enforced on since #712; the key is accepted there (columns_from_grants_is_refused_on_sql_server_only_in_every_mode and the whole live_cdc_column_grants_postgres file)"
       mysql:
-        na: "MySQL is the engine the policy is enforced on; the key is accepted there (every_engine_without_columns_from_loads_as_before and the whole live_cdc_column_grants file)"
+        na: "MySQL is an engine the policy is enforced on; the key is accepted there (every_engine_without_columns_from_loads_as_before and the whole live_cdc_column_grants file)"
       mssql:
-        cells: [columns_from_grants_is_refused_by_every_command_mssql, "lib:columns_from_grants_is_refused_on_every_engine_but_mysql_in_every_mode"]
+        cells: [columns_from_grants_is_refused_by_every_command_mssql, "lib:columns_from_grants_is_refused_on_sql_server_only_in_every_mode"]
       oracle:
-        cells: [columns_from_grants_is_refused_by_every_command_oracle, "lib:columns_from_grants_is_refused_on_every_engine_but_mysql_in_every_mode"]
+        cells: ["lib:columns_from_grants_is_refused_on_sql_server_only_in_every_mode"]
       mongo:
-        cells: [columns_from_grants_is_refused_by_every_command_mongo, "lib:columns_from_grants_is_refused_on_every_engine_but_mysql_in_every_mode"]
+        na: "MongoDB is an engine the policy is enforced on; the key is accepted there (columns_from_grants_is_refused_on_sql_server_only_in_every_mode and the whole live_cdc_column_grants_mongo file)"
 
   - name: cdc-partial-image-projected
     class: "a MySQL change written with `binlog_row_image` MINIMAL or NOBLOB is projected by full-table positions under `source.columns_from: grants`: a hidden value lands under a visible column name and a key column is overwritten"
@@ -4352,16 +4369,16 @@ seeds:
     scope: source
     engines:
       postgres:
-        na: "the projection of a binlog row image exists on MySQL only: `columns_from: grants` is refused on PostgreSQL at config load (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the projection of a binlog row image exists on MySQL only; PostgreSQL projects test_decoding rows in its own parser"
       mysql:
         switch: cdc-partial-image-projected
         cells: [a_partial_row_image_is_refused_before_it_is_projected_mysql, "lib:an_image_is_partial_when_it_holds_fewer_values_than_the_table_has_columns"]
       mssql:
         na: "the projection of a binlog row image exists on MySQL only: `columns_from: grants` is refused on SQL Server at config load (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "the projection of a binlog row image exists on MySQL only: `columns_from: grants` is refused on Oracle at config load (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
-        na: "the projection of a binlog row image exists on MySQL only: `columns_from: grants` is refused on MongoDB at config load (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "the projection of a binlog row image exists on MySQL only: a MongoDB event carries named fields, projected server-side by the change stream pipeline (a_view_account_delivers_no_hidden_field_in_cdc_mongo)"
 
   - name: cdc-stdout-partial-image
     class: "`rivet cdc` without `--output` prints a change whose row image is partial (MySQL `binlog_row_image` MINIMAL or NOBLOB, an MSSQL capture instance with fewer columns than the table, with or without `--table`) as positional values with no column names, exits 0 and advances the checkpoint"
@@ -4424,13 +4441,13 @@ seeds:
         switch: column-rename-in-the-backlog-read-as-before
         cells: [a_column_renamed_in_the_backlog_is_refused_not_silently_dropped_mysql]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
   - name: update-delivering-nothing-leaves-the-checkpoint-behind
     class: "under `columns_from: grants` an UPDATE that changes only hidden columns delivers no row and does not move the checkpoint past its transaction: a later run reads the same commit again, and an idle log never advances"
@@ -4441,13 +4458,14 @@ seeds:
         switch: update-delivering-nothing-leaves-the-checkpoint-behind
         cells: [an_update_of_hidden_columns_only_advances_the_checkpoint_mysql]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        switch: mongo-cdc-hidden-only-update-delivered
+        cells: [an_update_of_hidden_fields_only_advances_the_checkpoint_mongo]
 
   - name: column-grants-invisible-key-judged-by-name
     class: "the key of a captured table is judged readable by its name in the readable-column list: a generated invisible primary key (GIPK, `my_row_id`) the account can SELECT is refused as unreadable, because the list leaves INVISIBLE columns out"
@@ -4458,13 +4476,64 @@ seeds:
         switch: column-grants-invisible-key-judged-by-name
         cells: [a_table_with_a_generated_invisible_key_is_read_as_without_the_policy_mysql]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "PostgreSQL has no invisible columns: a column the account may SELECT is in the listing"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the generated invisible primary key (sql_generate_invisible_primary_key) is MySQL only; an Oracle INVISIBLE key is covered by an_unreadable_key_is_refused_by_code_before_the_anchor_oracle"
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
+
+  - name: column-grants-pg-stream-unprojected
+    class: "the PostgreSQL change stream under `columns_from: grants` keeps every column of a decoded row of a captured table: a hidden unchanged-TOAST column poisons a run that never reads it"
+    history: "issue #712 (2026-11-18); RED from this patch: an unchanged-TOAST hidden column poisons the run"
+    scope: source
+    engines:
+      postgres:
+        switch: column-grants-pg-stream-unprojected
+        cells: [a_column_grant_role_delivers_no_hidden_column_by_name_or_value_in_cdc_postgres, a_spilled_transaction_delivers_no_hidden_column_in_cdc_postgres, an_unchanged_toast_hidden_column_poisons_nothing_in_cdc_postgres]
+      mysql:
+        na: "a PostgreSQL mechanic (the test_decoding line parser and the slot batch read): MySQL projects binlog row images, graded by live_cdc_column_grants.rs"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+      oracle:
+        na: "a PostgreSQL mechanic (the test_decoding line parser and the slot batch read): Oracle reads LogMiner rows by column name"
+      mongo:
+        na: "a PostgreSQL mechanic (the test_decoding line parser and the slot batch read): MongoDB removes fields inside the change-stream pipeline"
+
+  - name: column-grants-pg-hidden-only-update-delivered
+    class: "under `columns_from: grants` on PostgreSQL an update of hidden columns only, both row images in the slot, is delivered as a change of nothing the account may read"
+    history: "issue #712 (2026-11-18); RED from this patch: an update row is delivered for the hidden-only update"
+    scope: source
+    engines:
+      postgres:
+        switch: column-grants-pg-hidden-only-update-delivered
+        cells: [an_update_of_hidden_columns_only_is_not_delivered_under_a_full_row_image_in_cdc_postgres, an_update_of_hidden_columns_only_advances_the_slot_in_cdc_postgres, "lib:an_update_of_hidden_columns_only_under_both_images_is_no_change"]
+      mysql:
+        na: "a PostgreSQL mechanic (the test_decoding line parser and the slot batch read): MySQL projects binlog row images, graded by live_cdc_column_grants.rs"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+      oracle:
+        na: "a PostgreSQL mechanic (the test_decoding line parser and the slot batch read): Oracle reads LogMiner rows by column name"
+      mongo:
+        na: "a PostgreSQL mechanic (the test_decoding line parser and the slot batch read): MongoDB removes fields inside the change-stream pipeline"
+
+  - name: column-grants-pg-batch-grants-not-reread
+    class: "the PostgreSQL slot batch is processed without asking the server again for the readable columns: a REVOKE made while the run is open delivers the batch under the old column set"
+    history: "issue #712 (2026-11-18); RED from this patch: the run exits 0 and delivers the batch instead of RIVET_SOURCE_CDC_GRANTS_CHANGED"
+    scope: source
+    engines:
+      postgres:
+        switch: column-grants-pg-batch-grants-not-reread
+        cells: [a_revoke_during_a_run_is_refused_by_code_and_the_next_run_delivers_the_row_without_the_column_in_cdc_postgres]
+      mysql:
+        na: "a PostgreSQL mechanic (the test_decoding line parser and the slot batch read): MySQL projects binlog row images, graded by live_cdc_column_grants.rs"
+      mssql:
+        na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
+      oracle:
+        na: "a PostgreSQL mechanic (the test_decoding line parser and the slot batch read): Oracle reads LogMiner rows by column name"
+      mongo:
+        na: "a PostgreSQL mechanic (the test_decoding line parser and the slot batch read): MongoDB removes fields inside the change-stream pipeline"
 
   - name: column-grants-unreadable-key-accepted
     class: "a primary key (or a declared `load.pk`) the account cannot SELECT is accepted under `columns_from: grants`: the run starts, writes parts and a marker, and cannot tell the changes of a row apart"
@@ -4475,13 +4544,32 @@ seeds:
         switch: column-grants-unreadable-key-accepted
         cells: [a_primary_key_the_account_cannot_read_is_refused_by_code_with_the_remedy_mysql, a_declared_key_the_account_cannot_read_is_refused_by_code_before_anything_is_written_mysql]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        switch: column-grants-unreadable-key-accepted
+        cells: [a_key_the_role_cannot_read_is_refused_by_code_before_anything_is_written_in_cdc_postgres]
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        switch: column-grants-unreadable-key-accepted
+        cells: [an_unreadable_key_is_refused_by_code_before_the_anchor_oracle]
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
+
+  - name: column-grants-oracle-every-column-read-as-readable
+    class: "the readable set of an Oracle table under `columns_from: grants` takes every catalog column as readable instead of asking the server per column: a table the account may not SELECT is not refused by code and the explicit projection names columns the server denies"
+    history: "issue #714 (2026-11-16); RED from this patch: the unreadable table reaches the server and ends in a raw ORA-41900 instead of RIVET_SOURCE_COLUMNS_UNREADABLE"
+    scope: source
+    engines:
+      oracle:
+        switch: column-grants-oracle-every-column-read-as-readable
+        cells: [a_table_the_account_may_not_read_is_refused_by_code_in_batch_cdc_and_check_oracle]
+      postgres:
+        na: "the per-column SELECT probe of Oracle is read here only; PostgreSQL judges a column by has_column_privilege"
+      mysql:
+        na: "the per-column SELECT probe of Oracle is read here only; MySQL reads information_schema column privileges"
+      mssql:
+        na: "the per-column SELECT probe of Oracle is read here only; SQL Server judges columns by HAS_PERMS_BY_NAME"
+      mongo:
+        na: "the per-column SELECT probe of Oracle is read here only; MongoDB refuses the policy until #715"
 
   - name: column-grants-hidden-cursor-column-uncoded
     class: "a `cursor_column`, `chunk_column`, `chunk_by_key`, `time_column` or `partition_by` naming a column the account may not SELECT is read anyway: the server answers mid-run with a raw ERROR 1054/1143, no RIVET_* code"
@@ -4492,13 +4580,14 @@ seeds:
         switch: column-grants-hidden-cursor-column-uncoded
         cells: [a_hidden_cursor_or_chunk_column_is_refused_by_code_before_the_read_mysql]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        switch: column-grants-hidden-cursor-column-uncoded
+        cells: [a_hidden_cursor_or_chunk_column_is_refused_by_code_before_the_read_oracle]
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
   - name: column-grants-revoked-column-uncoded
     class: "a sealed plan applied after the account lost SELECT on a column it reads ends with the server's raw ERROR 1143 and no code or remedy"
@@ -4509,13 +4598,14 @@ seeds:
         switch: column-grants-revoked-column-uncoded
         cells: [a_sealed_plan_applied_after_a_revoke_is_refused_by_code_with_the_replan_remedy_mysql]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        switch: column-grants-revoked-column-uncoded
+        cells: [a_sealed_plan_applied_after_a_revoke_is_refused_by_code_with_the_replan_remedy_in_batch_postgres]
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
   - name: column-grants-revoke-between-two-reads-uncoded
     class: "a REVOKE landing between a CDC run's read of the readable columns and its read of the schema surfaces as the server's raw ERROR 1143, not RIVET_SOURCE_CDC_GRANTS_CHANGED (exit 2)"
@@ -4526,13 +4616,13 @@ seeds:
         switch: column-grants-revoke-between-two-reads-uncoded
         cells: [a_revoke_between_the_stream_open_and_the_schema_read_is_refused_by_code_mysql]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
   - name: column-grants-privilege-statement-reconnects
     class: "every statement of the binlog backlog opens a new connection as the run's account to re-read the grants: a backlog of consecutive statements opens a connection each, where one re-read answers them all"
@@ -4543,13 +4633,13 @@ seeds:
         switch: column-grants-privilege-statement-reconnects
         cells: [privilege_statements_in_the_backlog_cost_the_server_a_bounded_number_of_connections_mysql]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
   - name: column-grants-statement-in-a-transaction-re-read
     class: "a statement-format write inside BEGIN ... COMMIT marks a re-read of the grants as a statement outside a transaction does, so a transaction of statements costs a connection as the run's account that no privilege statement can need"
@@ -4560,13 +4650,13 @@ seeds:
         switch: column-grants-statement-in-a-transaction-re-read
         cells: ["lib:a_statement_marks_a_re_read_only_outside_a_transaction_and_outside_its_frame"]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
   - name: column-grants-reread-on-a-cached-session
     class: "the re-read of the grants at a privilege statement runs on a connection kept from an earlier re-read: the session keeps its database-level privilege and its login-time global privileges and default roles, so a REVOKE at database level or a SET DEFAULT ROLE NONE in an open run is not seen and the run keeps delivering the hidden column"
@@ -4577,13 +4667,13 @@ seeds:
         switch: column-grants-reread-on-a-cached-session
         cells: [a_database_level_revoke_after_an_earlier_re_read_stops_an_open_run_mysql, a_default_role_taken_away_after_an_earlier_re_read_stops_an_open_run_mysql]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
   - name: column-grants-statement-name-match-dropped
     class: "under `columns_from: grants` a binlog statement that names a captured table (ALTER TABLE ... ADD INDEX, ADD COLUMN, a rename, a drop) is met as any other statement: the stream goes on and the rows after it are read through columns the statement may have changed"
@@ -4594,13 +4684,13 @@ seeds:
         switch: column-grants-statement-name-match-dropped
         cells: [an_add_index_on_a_captured_table_is_refused_naming_the_table_and_the_remedy_mysql, an_add_column_on_a_captured_table_is_refused_naming_the_table_and_the_remedy_mysql, "lib:a_statement_mentions_a_captured_table_by_its_bare_name_in_any_case_and_any_place"]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
   - name: column-grants-statement-name-match-case-sensitive
     class: "the name of a captured table is matched in the statement bytes case-sensitively: a statement spelling it in another case (the server folds it under lower_case_table_names) is met as any other statement"
@@ -4611,13 +4701,13 @@ seeds:
         switch: column-grants-statement-name-match-case-sensitive
         cells: [a_statement_spelling_the_table_name_in_another_case_is_refused_mysql, "lib:a_statement_mentions_a_captured_table_by_its_bare_name_in_any_case_and_any_place"]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
   - name: cdc-policy-name-arm-ignores-the-case-fold
     class: "under `columns_from: grants` the name of a captured table is looked for in a statement without the lower_case_table_names fold: a TRUNCATE spelled with a character the server folds (the Kelvin sign for k, a multibyte character in gb18030 or ujis) is not seen as the captured table, so the run exits 0 and the destination keeps rows the source lost"
@@ -4628,13 +4718,13 @@ seeds:
         switch: cdc-policy-name-arm-ignores-the-case-fold
         cells: ["lib:a_mention_follows_the_fold_of_the_server", "lib:under_the_policy_a_statement_text_is_refused_only_when_it_names_a_captured_table", a_truncate_spelled_with_a_character_the_server_folds_is_refused_under_the_policy_mysql, a_truncate_spelled_with_a_multibyte_character_the_server_folds_is_refused_under_the_policy_mysql]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
   - name: cdc-policy-non-ascii-unit-stands-for-any-letter
     class: "under `columns_from: grants` on a server that folds case, a non-ASCII character in a statement stands for any letter of a captured table's name, so Chinese or Cyrillic text in a comment on a table the run does not capture stops the stream as naming a captured table: the run exits 5 for a statement that touches nothing it captures"
@@ -4645,13 +4735,13 @@ seeds:
         switch: cdc-policy-non-ascii-unit-stands-for-any-letter
         cells: ["lib:a_non_ascii_unit_stands_only_for_the_letters_the_server_folds", "lib:the_one_pass_search_agrees_with_the_reading_by_sets", a_non_ascii_comment_on_an_uncaptured_table_is_met_as_before_under_the_policy_mysql]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
   - name: statement-line-comment-read-as-text
     class: "a `-- ` or `#` line comment in a binlog statement is read as statement text, so a column rename or a privilege statement written behind one is missed: the run exits 0 with the renamed column's later changes lost, or keeps delivering a revoked column"
@@ -4662,13 +4752,13 @@ seeds:
         switch: statement-line-comment-read-as-text
         cells: [a_column_renamed_after_a_dash_comment_is_refused_not_silently_dropped_mysql, a_column_renamed_after_a_hash_comment_is_refused_not_silently_dropped_mysql, "lib:every_comment_kind_is_a_blank_and_quoted_text_is_kept_as_written"]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
   - name: statement-ansi-quoted-name-read-as-text
     class: "a double-quoted name in a binlog statement (an identifier under `ANSI_QUOTES`) is read as a string, so a column rename written with double-quoted names is missed: the run exits 0 with the renamed column's later changes lost"
@@ -4679,13 +4769,13 @@ seeds:
         switch: statement-ansi-quoted-name-read-as-text
         cells: [a_column_renamed_with_ansi_quoted_names_is_refused_mysql, a_column_changed_with_ansi_quoted_names_is_refused_mysql, "lib:a_quoted_name_is_an_identifier_only_when_closed_and_has_its_doubled_quotes_undone"]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
   - name: column-rename-in-an-executable-comment-missed
     class: "a column rename written as an executable comment (`/*!80000 ALTER TABLE t RENAME COLUMN a TO b */`) is read as a comment by the rename refusal, so the run exits 0 and the rows around the rename are dropped or nulled"
@@ -4696,13 +4786,13 @@ seeds:
         switch: column-rename-in-an-executable-comment-missed
         cells: [a_column_renamed_in_an_executable_comment_is_refused_not_silently_dropped_mysql, a_column_renamed_beside_a_comment_in_an_executable_comment_is_refused_mysql, "lib:every_scan_of_a_statement_reads_an_executable_comment_as_the_server_runs_it"]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
   - name: column-grants-snapshot-leg-denial-read-as-a-stale-plan
     class: "a snapshot leg of a CDC run whose SELECT is denied because the grants changed after the run read them is refused as RIVET_SOURCE_COLUMNS_UNREADABLE (exit 1, run `rivet plan` again) instead of RIVET_SOURCE_CDC_GRANTS_CHANGED (exit 2, re-run)"
@@ -4713,13 +4803,13 @@ seeds:
         switch: column-grants-snapshot-leg-denial-read-as-a-stale-plan
         cells: [a_revoke_before_a_later_snapshot_is_read_is_a_grant_change_not_a_stale_plan_mysql]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
   - name: partial-image-refusal-names-a-remedy-that-loops
     class: "the refusal of a PARTIAL row image tells the operator to set `binlog_row_image = FULL` and re-run, but the image is already in the binlog under the checkpoint: every run meets it again and exits 1 for ever, where the remedy that works is the re-baseline"
@@ -4781,13 +4871,13 @@ seeds:
         switch: column-grants-batch-bare-name-read-by-the-stream-rule
         cells: [a_bare_table_name_is_read_from_the_same_relation_with_and_without_the_policy_mysql]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
   - name: column-grants-moved-between-reads-mixed-in-one-run
     class: "a grant change between a run's snapshot read and the stream open is not refused: one run delivers its snapshot rows with one column set and its changes with another"
@@ -4798,13 +4888,13 @@ seeds:
         switch: column-grants-moved-between-reads-mixed-in-one-run
         cells: [a_grant_while_the_snapshot_is_read_never_mixes_columns_in_one_run_mysql, a_revoke_while_the_last_snapshot_is_read_never_mixes_columns_in_one_run_mysql]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
   - name: column-grants-boundary-unsaid
     class: "`columns_from: grants` is switched on with no word about what it does not guarantee (a column renamed or hidden by other means, values in a column the account can read): neither `rivet check` nor the start of a run says it"
@@ -4815,13 +4905,15 @@ seeds:
         switch: column-grants-boundary-unsaid
         cells: [the_policy_says_what_it_does_not_guarantee_at_check_and_at_the_start_of_a_run_mysql]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        switch: column-grants-boundary-unsaid
+        cells: [the_policy_says_what_it_does_not_guarantee_at_check_and_at_the_start_of_a_run_oracle]
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        switch: column-grants-boundary-unsaid
+        cells: [a_view_account_delivers_no_hidden_field_by_name_or_value_in_batch_mongo]
 
   - name: column-grants-schema-change-names-no-column
     class: "the refusal of a changed column set under `columns_from: grants` says only that something changed: the operator is not told which column appeared or was lost, nor the two ways it happens"
@@ -4832,13 +4924,13 @@ seeds:
         switch: column-grants-schema-change-names-no-column
         cells: [a_database_level_grant_that_adds_a_column_is_refused_naming_the_column_that_appeared_mysql]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
   - name: cdc-table-rename-not-refused
     class: "a RENAME TABLE swap, or an ALTER TABLE ... RENAME, that touches a captured table under `columns_from: grants` is met as any other statement: privileges stay with the name, so the rows after the swap are read through another table's columns and delivered as the captured table's, exit 0"
@@ -4849,13 +4941,13 @@ seeds:
         switch: cdc-table-rename-not-refused
         cells: [a_table_swap_of_a_captured_table_is_refused_under_the_policy_mysql, a_rename_of_a_captured_table_is_refused_in_every_form_under_the_policy_mysql]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
   - name: cdc-sql-mode-not-read
     class: "the statement reader lexes a binlog statement in the default sql_mode whatever the QUERY event was logged under: under NO_BACKSLASH_ESCAPES a literal ending in a backslash, and under ANSI_QUOTES a double-quoted name ending in one, hide a following RENAME COLUMN or a name, so the rename is delivered with exit 0 and the column's later changes are lost"
@@ -4866,13 +4958,13 @@ seeds:
         switch: cdc-sql-mode-not-read
         cells: [a_column_renamed_after_a_backslash_literal_under_no_backslash_escapes_is_refused_mysql, a_column_renamed_after_a_backslash_name_under_ansi_quotes_is_refused_mysql, a_truncate_drop_or_statement_write_with_double_quoted_names_is_refused_under_ansi_quotes_mysql]
       postgres:
-        na: "`columns_from: grants` is refused on PostgreSQL at config load until #712, so this path is never reached (columns_from_grants_is_refused_by_every_command_postgres)"
+        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
-        na: "`columns_from: grants` is refused on Oracle at config load until #714, so this path is never reached (columns_from_grants_is_refused_by_every_command_oracle)"
+        na: "the mechanism is MySQL binlog handling (statement text, row image or checkpoint of the binlog); Oracle reads LogMiner rows by column name and has no such stream"
       mongo:
-        na: "`columns_from: grants` is refused on MongoDB at config load until #715, so this path is never reached (columns_from_grants_is_refused_by_every_command_mongo)"
+        na: "a MySQL mechanic (the grant reader, the binlog statement and row image): MongoDB reads a role-granted view, graded by live_cdc_column_grants_mongo.rs"
 
   - name: journal-manifest-gap
     class: "a run whose terminal manifest.json write failed is recorded `success` in the run journal and on the run card, because the journal row and the card are finished before the manifest is written and the failed status is set only afterwards"
@@ -5881,6 +5973,44 @@ seeds:
       lib:
         cells: ["lib:a_text_number_with_its_plain_decimal_form_is_a_text_landing", "lib:a_numeric_source_type_landing_as_text_is_told_from_native_text", "lib:a_microsecond_landing_is_finer_only_where_the_source_says_so"]
 
+  - name: load-key-check-skips-cdc
+    class: "`rivet check` admits the load keys of an export only in incremental mode while `rivet load` refuses a CDC export keyed on a column the source declares finer than a microsecond, so check exits 0 where load exits 5"
+    history: "issue 964 gap 2, RED on main 2026-11-18: MSSQL CDC export keyed on a datetime2(7) column, check exit 0, load exit 5"
+    scope: source
+    switch: load-key-check-skips-cdc
+    engines:
+      postgres:
+        na: "a PostgreSQL timestamp is at most a microsecond, so no key column lands finer-collapsed"
+      mysql:
+        na: "DATETIME(6) is at most a microsecond, so no key column lands finer-collapsed"
+      mssql:
+        cells: [an_mssql_cdc_sub_microsecond_key_check_agrees_with_load_into_clickhouse, "lib:key_admission_reads_only_an_incremental_or_cdc_export_with_a_load"]
+      mongo:
+        na: "MongoDB timestamps are at most a millisecond"
+      oracle:
+        na: "an Oracle CDC stream cannot be loaded (RIVET_CONFIG_SOURCE_MODE_UNSUPPORTED), so no CDC key is admitted by landing"
+      lib:
+        cells: ["lib:key_admission_reads_only_an_incremental_or_cdc_export_with_a_load"]
+
+  - name: load-key-query-finer-unread
+    class: "a `query:` export's sub-microsecond key columns are read only from a table catalog, so a query keyed on a column finer than a microsecond records no such fact and `rivet check` exits 0 where the load collapses rows that differ below a microsecond"
+    history: "issue 964 gap 1, RED on main 2026-11-18: Oracle query export keyed on a TIMESTAMP(9) column, check exit 0"
+    scope: source
+    switch: load-key-query-finer-unread
+    engines:
+      postgres:
+        na: "a PostgreSQL timestamp is at most a microsecond, so no key column lands finer-collapsed"
+      mysql:
+        na: "DATETIME(6) is at most a microsecond, so no key column lands finer-collapsed"
+      mssql:
+        cells: [an_mssql_sub_microsecond_query_key_is_refused_into_clickhouse, "lib:the_open_probe_reads_the_finer_columns_of_a_table_and_of_a_query"]
+      mongo:
+        na: "MongoDB timestamps are at most a millisecond"
+      oracle:
+        cells: [an_oracle_sub_microsecond_query_key_is_refused_into_clickhouse, "lib:the_open_probe_reads_the_finer_columns_of_a_table_and_of_a_query"]
+      lib:
+        cells: ["lib:the_open_probe_reads_the_finer_columns_of_a_table_and_of_a_query"]
+
   - name: init-name-folded-into-query
     class: "`rivet init` writes a table or column name holding a line break inside the folded `query: >` block, and a folded block turns the break plus the next line's indent into one space: the scaffold exports a different table (a twin named with a space) with every check green"
     history: "audit 2026-11-08 finding H5-F1 (hunt 5, `rivet init` on a PostgreSQL and a MySQL table named with a line break); RED on main 2026-11-10 (`a_hostile_catalog_name_is_scaffolded_as_the_relation_it_names`: the scaffold of table \"nl<LF>      tab\" does not parse back to that relation)"
@@ -5960,6 +6090,45 @@ seeds:
         na: "a MySQL zero date has no counterpart on Oracle: its date types refuse the value or hold no such sentinel (property_no_silent_null grades it on MySQL only)"
       mongo:
         na: "a MySQL zero date has no counterpart on MongoDB: its date types refuse the value or hold no such sentinel (property_no_silent_null grades it on MySQL only)"
+
+  - name: mysql-zero-date-column-claims-exact
+    class: "a MySQL DATE, DATETIME or TIMESTAMP column that can hold a zero or partial date is labelled rivet.fidelity exact although the run writes those values as NULL"
+    history: "2026-11-18 - issue #994 remainder: RED on main in the MySQL batch and CDC cells (the date columns of a table holding a zero date carried rivet.fidelity: exact); fixed by mysql_mapping labelling them compatible"
+    scope: source
+    engines:
+      mysql:
+        switch: mysql-zero-date-column-claims-exact
+        cells:
+          - zero_dates_are_labelled_compatible_batch_mysql
+          - zero_dates_are_labelled_compatible_cdc_mysql
+          - "lib:a_mysql_temporal_column_is_never_exact_and_the_rest_are_unchanged"
+      postgres:
+        na: "a PostgreSQL date has no zero or partial value: the type claim is exact and is not changed"
+      mssql:
+        na: "a SQL Server date has no zero or partial value: the type claim is exact and is not changed"
+      oracle:
+        na: "an Oracle date has no zero or partial value: the type claim is exact and is not changed"
+      mongo:
+        na: "a MongoDB date has no zero or partial value: the type claim is exact and is not changed"
+
+  - name: mysql-cdc-int-bool-override-any-nonzero-true
+    class: "a MySQL integer column (SMALLINT, INT, BIGINT, BIGINT UNSIGNED) declared `bool` in `columns:` is delivered by a stream as true for every value but 0, where the batch export refuses any value outside 0 and 1: 2, 300 or 18446744073709551615 become true with exit 0"
+    history: "2026-11-18 - issue #995 remainder: the batch path (build_bool_strict) already refused; RED on main in the MySQL CDC cell (a SMALLINT or TINYINT holding 2 or 300 under `columns: {i: bool}` delivered, exit 0); fixed by MysqlCellFix::FlagInt chosen by mysql_flag_fix"
+    scope: source
+    engines:
+      mysql:
+        switch: mysql-cdc-int-bool-override-any-nonzero-true
+        cells:
+          - an_integer_that_is_not_a_flag_is_refused_in_cdc_never_turned_into_true_mysql
+          - "lib:an_integer_under_a_bool_override_is_a_flag_or_refused"
+      postgres:
+        na: "an integer is not read as a flag on PostgreSQL: the override is refused at plan time (lib:an_integer_is_read_as_a_flag_only_where_the_engine_checks_each_value)"
+      mssql:
+        na: "an integer is not read as a flag on SQL Server: the override is refused at plan time (lib:an_integer_is_read_as_a_flag_only_where_the_engine_checks_each_value)"
+      oracle:
+        na: "an integer is not read as a flag on Oracle: the override is refused at plan time (lib:an_integer_is_read_as_a_flag_only_where_the_engine_checks_each_value)"
+      mongo:
+        na: "a MongoDB change row is two text cells, and the MySQL cell fix does not run"
 
   - name: cursor-column-admitted-at-plan
     class: "the incremental plan accepts any cursor_column: a nullable one exports its NULL-cursor rows on run 1 and never again (later NULL-cursor inserts are lost with exit 0), and a type the cursor cannot render (boolean, time, binary, array, a timestamp unit other than microsecond or nanosecond) is a WARN plus a full re-export every run"
@@ -6057,6 +6226,27 @@ seeds:
           - "lib:a_remote_plaintext_url_is_refused_when_the_client_is_built"
           - "lib:a_remote_plaintext_webhook_is_refused_before_any_request"
           - "lib:a_remote_plaintext_api_endpoint_is_refused"
+
+  - name: state-copy-corrupt-source-read-as-empty
+    class: "`rivet state copy --to` reads a source file that is not a SQLite database as a state with no rows and refuses it as RIVET_STATE_COPY_SOURCE_EMPTY, so the operator is sent to name another file while the one named is damaged"
+    history: "#917, refusal_names_true_cause: the accepted RED guard/state_copy_--to_URL/state_corrupt on every source engine, RED on main 2026-11-19 (printed RIVET_STATE_COPY_SOURCE_EMPTY, injected RIVET_STATE_FILE_CORRUPT)"
+    scope: source
+    switch: state-copy-corrupt-source-read-as-empty
+    engines:
+      postgres:
+        cells: [every_refusal_is_coded_and_names_the_true_cause]
+      mysql:
+        cells: [every_refusal_is_coded_and_names_the_true_cause]
+      mssql:
+        cells: [every_refusal_is_coded_and_names_the_true_cause]
+      mongo:
+        cells: [every_refusal_is_coded_and_names_the_true_cause]
+      oracle:
+        cells: [every_refusal_is_coded_and_names_the_true_cause]
+      lib:
+        cells:
+          - "lib:a_corrupt_source_is_refused_as_corrupt"
+          - "lib:a_file_that_is_no_database_is_corrupt_for_the_reader_and_empty_for_the_guard"
 
   - name: plaintext-gate-decides-by-text
     class: "the remote-plaintext gate and the cloud-endpoint loopback gate decide by the text of the URL, not by the parser the HTTP client uses: `http:/host`, `http:host`, `ht<TAB>tp://host` and `http://host\\@127.0.0.1` pass as non-http or loopback while the client sends the loader password, the webhook secret, the bearer token or the uploaded rows to `host` in cleartext"
@@ -6184,6 +6374,74 @@ seeds:
       oracle:
         cells: [lib:an_oracle_service_name_is_percent_decoded]
 
+  - name: mongo-grants-base-readable-accepted
+    class: "a MongoDB account that can read the base collection itself (find or changeStream on it, or on its whole database) is accepted under `columns_from: grants`: the view hides nothing the account reads directly, and the run delivers a field the operator meant to hide"
+    history: "#715 owner decision 2026-11-15 (MongoDB has no column privileges, so the policy holds only when the account reaches the view alone); RED from this seed: the batch run exits 0 over the base collection grant"
+    scope: source
+    switch: mongo-grants-base-readable-accepted
+    engines:
+      postgres:
+        na: "a view-and-pipeline protection is MongoDB's; the SQL engines' column grants have their own seeds"
+      mysql:
+        na: "a view-and-pipeline protection is MongoDB's; the SQL engines' column grants have their own seeds"
+      mssql:
+        na: "a view-and-pipeline protection is MongoDB's; the SQL engines' column grants have their own seeds"
+      oracle:
+        na: "a view-and-pipeline protection is MongoDB's; the SQL engines' column grants have their own seeds"
+      mongo:
+        cells: [a_batch_read_is_refused_when_the_account_can_read_the_collection_itself_mongo, a_batch_read_is_refused_when_the_account_holds_a_database_wide_read_mongo]
+
+  - name: mongo-cdc-pipeline-unprojected
+    class: "a MongoDB change stream under `columns_from: grants` opens without the server-side projection, so every field of a change leaves the server and a hidden value reaches the delivered row, the pre-image or the update description"
+    history: "#715 owner decision 2026-11-15 (CDC watches the base collection and removes fields in the stream pipeline); RED from this seed: the delivered change rows carry the hidden field"
+    scope: source
+    switch: mongo-cdc-pipeline-unprojected
+    engines:
+      postgres:
+        na: "a view-and-pipeline protection is MongoDB's; the SQL engines' column grants have their own seeds"
+      mysql:
+        na: "a view-and-pipeline protection is MongoDB's; the SQL engines' column grants have their own seeds"
+      mssql:
+        na: "a view-and-pipeline protection is MongoDB's; the SQL engines' column grants have their own seeds"
+      oracle:
+        na: "a view-and-pipeline protection is MongoDB's; the SQL engines' column grants have their own seeds"
+      mongo:
+        cells: [a_view_account_delivers_no_hidden_field_in_cdc_mongo]
+
+  - name: mongo-cdc-hidden-only-update-delivered
+    class: "under `columns_from: grants` a MongoDB update that touches only hidden fields is delivered as a change row instead of a checkpoint-only boundary marker, so the delivered table shows a change nothing readable explains"
+    history: "#715 (2026-11-16); RED from this seed: the hidden-only update lands a row with no readable field in the part"
+    scope: source
+    switch: mongo-cdc-hidden-only-update-delivered
+    engines:
+      postgres:
+        na: "a view-and-pipeline protection is MongoDB's; the SQL engines' column grants have their own seeds"
+      mysql:
+        na: "a view-and-pipeline protection is MongoDB's; the SQL engines' column grants have their own seeds"
+      mssql:
+        na: "a view-and-pipeline protection is MongoDB's; the SQL engines' column grants have their own seeds"
+      oracle:
+        na: "a view-and-pipeline protection is MongoDB's; the SQL engines' column grants have their own seeds"
+      mongo:
+        cells: [an_update_of_hidden_fields_only_advances_the_checkpoint_mongo]
+
+  - name: mongo-view-read-sets-no-cursor-timeout
+    class: "a MongoDB batch read of a view sets `noCursorTimeout`, which the server refuses on a view (InvalidPipelineOperator, code 168), so every `columns_from: grants` batch run ends in a raw driver error"
+    history: "#715 (2026-11-16) found while running the first view read on 8.0.13; RED from this seed: the batch run exits 1 with code 168"
+    scope: source
+    switch: mongo-view-read-sets-no-cursor-timeout
+    engines:
+      postgres:
+        na: "a view-and-pipeline protection is MongoDB's; the SQL engines' column grants have their own seeds"
+      mysql:
+        na: "a view-and-pipeline protection is MongoDB's; the SQL engines' column grants have their own seeds"
+      mssql:
+        na: "a view-and-pipeline protection is MongoDB's; the SQL engines' column grants have their own seeds"
+      oracle:
+        na: "a view-and-pipeline protection is MongoDB's; the SQL engines' column grants have their own seeds"
+      mongo:
+        cells: [a_view_account_delivers_no_hidden_field_by_name_or_value_in_batch_mongo]
+
   - name: keyset-sampler-scans-the-table
     class: "the parallel keyset range sampler reads rows in proportion to the source (a COUNT(*) over the fenced key, or an ORDER BY key OFFSET n skip per boundary) before the first worker starts on a table the catalog puts at 10M rows or more, or has no estimate for, so setup cost grows with the table and every run pays a full scan"
     history: "issue #1059; RED on main 2026-11-16: PostgreSQL ks_big_4m (4M rows, uuid + varchar primary key, parallel: 4) read 4,000,000 sequential and 10,000,022 index tuples for 4,000,000 exported (pg_stat_user_tables / pg_stat_user_indexes deltas); 1M rows read 1,000,000 + 2,500,007"
@@ -6198,6 +6456,23 @@ seeds:
         cells: ["lib:every_dialect_samples_by_seeks_to_the_same_boundaries"]
       oracle:
         cells: ["lib:every_dialect_samples_by_seeks_to_the_same_boundaries"]
+      mongo:
+        na: "MongoDB parallel is the separate `_id`-range reader (mongo_parallel), not the SQL keyset range sampler"
+
+  - name: keyset-sampler-unbounded
+    class: "the parallel keyset range sampler's reads (the row COUNT, the OFFSET skip, the catalog estimate, the MIN/MAX and snap seeks, the density probes) run with no statement timeout, so `tuning.statement_timeout_s` does not reach them: one COUNT over a large table runs for minutes while the run's own statements are cancelled at the budget"
+    history: "client run 2026-11-18 on PostgreSQL with `statement_timeout_s: 10`: the sampler's `SELECT COUNT(*) ... _rivet_pk_cnt` ran 14,251 ms (statement log lines 1308 and 1755 of cx50_main_r1); RED on main 2026-11-18 (lib:every_sampler_read_runs_under_the_statement_timeout, PostgreSQL a_percentile_sampler_read_obeys_the_statement_timeout_postgres)"
+    scope: source
+    switch: keyset-sampler-unbounded
+    engines:
+      postgres:
+        cells: [a_percentile_sampler_read_obeys_the_statement_timeout_postgres, a_sampler_seek_that_scans_is_cancelled_by_the_statement_timeout_postgres, "lib:every_sampler_read_runs_under_the_statement_timeout", "lib:a_seek_that_times_out_degrades_to_the_cuts_found_so_far", "lib:a_percentile_read_that_times_out_fails_with_the_statement_timeout_code"]
+      mysql:
+        cells: ["lib:every_sampler_read_runs_under_the_statement_timeout", "lib:a_seek_that_times_out_degrades_to_the_cuts_found_so_far", "lib:a_percentile_read_that_times_out_fails_with_the_statement_timeout_code"]
+      mssql:
+        cells: ["lib:every_sampler_read_runs_under_the_statement_timeout", "lib:a_seek_that_times_out_degrades_to_the_cuts_found_so_far", "lib:a_percentile_read_that_times_out_fails_with_the_statement_timeout_code"]
+      oracle:
+        cells: ["lib:every_sampler_read_runs_under_the_statement_timeout", "lib:a_seek_that_times_out_degrades_to_the_cuts_found_so_far", "lib:a_percentile_read_that_times_out_fails_with_the_statement_timeout_code"]
       mongo:
         na: "MongoDB parallel is the separate `_id`-range reader (mongo_parallel), not the SQL keyset range sampler"
 
@@ -6217,3 +6492,46 @@ seeds:
         cells: ["lib:a_store_error_in_a_failure_detail_never_carries_a_registered_credential"]
       stdout:
         na: "stdout writes nothing a validate reads back, so no verification verdict exists for it"
+
+  - name: csv-empty-value-written-bare
+    class: "the CSV writer writes an empty string or an empty binary as a bare empty field, the same bytes as NULL, so a reader that follows the convention (NULL bare, empty value quoted) reads NULL for a present empty value"
+    history: "2026-11-18, hosted gate run 44261857361: the no_silent_null matrix graded a csv blank as NULL for an empty value and could not tell the two apart; the grader now reads NULL bare and an empty value quoted, and this seed holds the writer side"
+    scope: source
+    switch: csv-empty-value-written-bare
+    engines:
+      postgres:
+        na: "the CSV writer is one engine-independent module (src/format/csv.rs); its lib cells and the no_silent_null matrix csv cells are the catch for every engine"
+      mysql:
+        na: "the CSV writer is one engine-independent module (src/format/csv.rs); its lib cells and the no_silent_null matrix csv cells are the catch for every engine"
+      mssql:
+        na: "the CSV writer is one engine-independent module (src/format/csv.rs); its lib cells and the no_silent_null matrix csv cells are the catch for every engine"
+      oracle:
+        na: "the CSV writer is one engine-independent module (src/format/csv.rs); its lib cells and the no_silent_null matrix csv cells are the catch for every engine"
+      mongo:
+        na: "a MongoDB export has no CSV format: the document lands whole in its one column"
+      lib:
+        cells:
+          - "lib:an_empty_string_is_quoted_and_distinct_from_null"
+          - "lib:an_empty_binary_is_quoted_and_distinct_from_null"
+
+  - name: mysql-zero-date-null-without-warn
+    class: "a MySQL zero or partial date is written as NULL with no counted WARN, so the NULL is silent: the WARN is the only record that the cell was not delivered"
+    history: "2026-11-18, hosted gate run 44261857361: the no_silent_null matrix exempts a zero-date NULL only when the run's WARN count equals the zero-date NULLs delivered; this seed drops the WARN on the batch and the CDC sink and the matrix must grade the NULLs SILENT_NULL"
+    scope: source
+    switch: mysql-zero-date-null-without-warn
+    engines:
+      postgres:
+        na: "PostgreSQL has no zero date: a date it holds is a calendar date"
+      mysql:
+        cells:
+          - a_zero_date_is_null_and_the_run_warns_with_the_count_batch_and_cdc_mysql
+      mssql:
+        na: "SQL Server has no zero date: datetime and date hold a calendar date"
+      oracle:
+        na: "Oracle has no zero date: DATE and TIMESTAMP hold a calendar date"
+      mongo:
+        na: "MongoDB has no zero date: a BSON date is an int64 of milliseconds"
+      lib:
+        cells:
+          - "lib:flush_warns_with_the_count_of_zero_dates_it_nulled_and_is_silent_otherwise"
+          - "lib:a_run_that_nulled_cells_warns_once_per_column_with_its_count"

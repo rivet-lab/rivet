@@ -80,6 +80,13 @@ mod live_cdc_backfill;
 mod live_cdc_cli_surface;
 #[path = "live/live_cdc_column_grants.rs"]
 mod live_cdc_column_grants;
+#[path = "live/live_cdc_column_grants_mongo.rs"]
+mod live_cdc_column_grants_mongo;
+#[cfg(feature = "oracle")]
+#[path = "live/live_cdc_column_grants_oracle.rs"]
+mod live_cdc_column_grants_oracle;
+#[path = "live/live_cdc_column_grants_postgres.rs"]
+mod live_cdc_column_grants_postgres;
 #[path = "live/live_cdc_compact.rs"]
 mod live_cdc_compact;
 #[path = "live/live_cdc_full_cycle.rs"]
@@ -161,6 +168,8 @@ mod live_init;
 mod live_init_delta;
 #[path = "live/live_init_extended.rs"]
 mod live_init_extended;
+#[path = "live/live_int_to_bool_override.rs"]
+mod live_int_to_bool_override;
 #[path = "live/live_int_to_float_override.rs"]
 mod live_int_to_float_override;
 #[path = "live/live_keyset.rs"]
@@ -312,6 +321,8 @@ mod live_three_cycles;
 mod live_type_policy;
 #[path = "live/live_wave_apply.rs"]
 mod live_wave_apply;
+#[path = "live/live_zero_date_fidelity.rs"]
+mod live_zero_date_fidelity;
 #[path = "live/preflight_missing_table.rs"]
 mod preflight_missing_table;
 #[path = "live/preflight_target_fail_note.rs"]

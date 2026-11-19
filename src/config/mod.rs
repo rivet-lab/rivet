@@ -677,7 +677,7 @@ impl Config {
         Ok(())
     }
 
-    /// Non-SQL sources (MongoDB) support only `mode: full` today.
+    /// Non-SQL sources (MongoDB) support only `mode: full` and `mode: cdc`.
     fn validate_non_sql_source_modes(&self) -> crate::error::Result<()> {
         if self.source.source_type.is_sql() {
             return Ok(());

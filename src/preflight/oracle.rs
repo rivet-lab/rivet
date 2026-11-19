@@ -16,9 +16,10 @@ pub(super) fn check_oracle(
     url: &str,
     tls: Option<&TlsConfig>,
     exports: &[&ExportConfig],
+    grants: bool,
 ) -> Result<Vec<ExportDiagnostic>> {
     let mut conn = OracleSource::connect_with_tls(url, tls)?;
-    super::collect_diagnostics(exports, |export| diagnose_oracle(&mut conn, export))
+    super::collect_diagnostics(exports, |export| diagnose_oracle(&mut conn, export, grants))
 }
 
 /// Diagnose a single export without printing — used by `rivet plan`.
@@ -26,9 +27,10 @@ pub(super) fn diagnose_export_oracle(
     url: &str,
     tls: Option<&TlsConfig>,
     export: &ExportConfig,
+    grants: bool,
 ) -> Result<ExportDiagnostic> {
     let mut conn = OracleSource::connect_with_tls(url, tls)?;
-    diagnose_oracle(&mut conn, export)
+    diagnose_oracle(&mut conn, export, grants)
 }
 
 fn scalar_i64(conn: &mut OracleSource, sql: &str, what: &str) -> Option<i64> {
@@ -41,8 +43,31 @@ fn scalar_i64(conn: &mut OracleSource, sql: &str, what: &str) -> Option<i64> {
     }
 }
 
-fn diagnose_oracle(conn: &mut OracleSource, export: &ExportConfig) -> Result<ExportDiagnostic> {
-    let base_query = resolve_preflight_base_query(export);
+/// The `columns_from: grants` projection of a `table:`; `readable` reads it and refuses by code when the account may read none.
+fn grants_projection(
+    export: &ExportConfig,
+    grants: bool,
+    readable: impl FnOnce(&str) -> Result<String>,
+) -> Result<Option<String>> {
+    let Some(table) = export.table.as_ref().filter(|_| grants) else {
+        return Ok(None);
+    };
+    readable(table).map(Some)
+}
+
+fn diagnose_oracle(
+    conn: &mut OracleSource,
+    export: &ExportConfig,
+    grants: bool,
+) -> Result<ExportDiagnostic> {
+    let projection = grants_projection(export, grants, |table| {
+        crate::source::oracle::column_grants::readable_relation(conn, table)
+            .map(|(_, _, readable)| readable.select)
+    })?;
+    let base_query = match projection {
+        Some(select) => select,
+        None => resolve_preflight_base_query(export),
+    };
     let base_query = base_query.as_str();
     if let Some(fail) = conn
         .parses(base_query)
@@ -363,5 +388,71 @@ mod tests {
             unknown_key_column_detail("NOPE", None),
             "column 'NOPE' is not in the export's result"
         );
+    }
+
+    const UNREACHABLE: &str = "oracle://u:p@127.0.0.1:1/XE";
+
+    #[test]
+    fn the_grants_projection_is_the_readable_select_of_a_table_export_only_under_grants() {
+        let orders = ExportConfig {
+            table: Some("rivet.orders".to_string()),
+            ..crate::config::sample_export("orders")
+        };
+        let seen = std::cell::RefCell::new(Vec::new());
+        let readable = |t: &str| -> Result<String> {
+            seen.borrow_mut().push(t.to_string());
+            Ok(format!("SELECT \"ID\" FROM \"RIVET\".\"{t}\""))
+        };
+        let on = grants_projection(&orders, true, readable).unwrap();
+        assert_eq!(
+            on.as_deref(),
+            Some("SELECT \"ID\" FROM \"RIVET\".\"rivet.orders\"")
+        );
+        assert_eq!(*seen.borrow(), vec!["rivet.orders".to_string()]);
+        assert_eq!(grants_projection(&orders, false, readable).unwrap(), None);
+        let query_only = ExportConfig {
+            table: None,
+            query: Some("SELECT 1 FROM dual".to_string()),
+            ..crate::config::sample_export("q")
+        };
+        assert_eq!(
+            grants_projection(&query_only, true, readable).unwrap(),
+            None
+        );
+        assert_eq!(
+            seen.borrow().len(),
+            1,
+            "no catalog read outside a grants table export"
+        );
+    }
+
+    #[test]
+    fn a_refusal_of_the_readable_read_is_the_projection_error_unchanged() {
+        let orders = ExportConfig {
+            table: Some("orders".to_string()),
+            ..crate::config::sample_export("orders")
+        };
+        let err = grants_projection(&orders, true, |_| {
+            crate::rivet_bail!(
+                crate::error::codes::SOURCE_COLUMNS_UNREADABLE,
+                "oracle: nothing readable"
+            )
+        })
+        .unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_SOURCE_COLUMNS_UNREADABLE", 1);
+    }
+
+    #[test]
+    fn check_oracle_reports_a_source_it_cannot_reach_instead_of_an_empty_verdict() {
+        let orders = ExportConfig {
+            table: Some("orders".to_string()),
+            ..crate::config::sample_export("orders")
+        };
+        for grants in [false, true] {
+            let err = check_oracle(UNREACHABLE, None, &[&orders], grants)
+                .err()
+                .unwrap_or_else(|| panic!("grants={grants}: an unreachable source was reported"));
+            assert!(!format!("{err:#}").is_empty(), "grants={grants}");
+        }
     }
 }

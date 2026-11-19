@@ -111,7 +111,7 @@ scenarios:
     oracle:   { test: apply_forms_partition_like_run_oracle }
 
   - id: sealed_plan_of_partition_by_refused
-    what: "`rivet apply <plan.json>` of a `partition_by` export is refused before any write, naming `rivet apply <config.yaml>` as the remedy, and the remedy delivers the tree; the refusal is in the shared executor, which reads the plan and no engine"
+    what: "`rivet plan --output` of a `partition_by` export is refused with `RIVET_PLAN_PARTITION_TOKEN_UNEXPANDED` and writes no artifact; `rivet apply <plan.json>` of the preview `rivet plan` prints is refused before any write, naming `rivet apply <config.yaml>` as the remedy, and the remedy delivers the tree; the apply refusal is in the shared executor, which reads the plan and no engine"
     postgres: { test: a_sealed_plan_of_a_partitioned_export_is_refused_and_its_remedy_works_postgres }
     mysql:    { test: a_plan_with_an_unexpanded_partition_token_is_refused_before_any_write }
     mssql:    { test: a_plan_with_an_unexpanded_partition_token_is_refused_before_any_write }

@@ -1,5 +1,6 @@
 pub(crate) mod batch_controller;
 pub(crate) mod cdc;
+pub(crate) mod column_grants;
 pub(crate) mod keyset_key;
 pub mod mongo;
 pub mod mssql;
@@ -307,6 +308,15 @@ pub trait Source: Send {
 
     fn query_scalar(&mut self, sql: &str) -> Result<Option<String>>;
 
+    /// [`Source::query_scalar`] cancelled after `statement_timeout_s` seconds (0 = no limit) with the engine's typed statement-timeout error.
+    fn query_scalar_within(
+        &mut self,
+        sql: &str,
+        _statement_timeout_s: u64,
+    ) -> Result<Option<String>> {
+        self.query_scalar(sql)
+    }
+
     /// Whether the logical replication slot `slot` exists on the server this connection reads; only PostgreSQL has slots.
     fn replication_slot_exists(&mut self, _slot: &str) -> Result<bool> {
         crate::rivet_bail!(
@@ -357,6 +367,11 @@ pub trait Source: Send {
 
     /// The `datetime2` / `datetimeoffset` / `TIMESTAMP` columns of `table` the catalog declares finer than a microsecond.
     fn finer_than_microsecond_columns(&mut self, _table: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    /// The `timestamp` columns of the result of `query` the engine describes finer than a microsecond.
+    fn finer_than_microsecond_in_query(&mut self, _query: &str) -> Result<Vec<String>> {
         Ok(Vec::new())
     }
 
@@ -446,43 +461,53 @@ pub(crate) fn code_a_missing_relation(
     ))
 }
 
-/// Code an export error under `columns_from.
-pub(crate) fn code_a_revoked_column(
-    err: anyhow::Error,
-    export: &str,
-    grants_on: bool,
-    cdc_leg: bool,
-) -> anyhow::Error {
-    if seeded!(
-        "column-grants-revoked-column-uncoded",
-        true,
-        !grants_on || crate::error::code_of(&err).is_some()
-    ) {
-        return err;
+/// What `columns_from: grants` guarantees on `engine`, said to the operator at `rivet check` and at the start of a change-stream run.
+pub(crate) fn columns_from_grants_boundary(engine: crate::config::SourceType) -> &'static str {
+    match engine {
+        crate::config::SourceType::Mongo => mongo::column_grants::BOUNDARY,
+        crate::config::SourceType::Postgres => postgres::column_grants::BOUNDARY,
+        #[cfg(feature = "oracle")]
+        crate::config::SourceType::Oracle => oracle::column_grants::BOUNDARY,
+        _ => mysql::column_grants::BOUNDARY,
     }
-    let Some(said) = mysql::column_grants::denied_by_server(&err) else {
-        return err;
-    };
-    if cdc_leg {
-        return crate::error::coded(
-            crate::error::codes::SOURCE_CDC_GRANTS_CHANGED,
-            format!(
-                "export '{export}': the account may no longer SELECT a column this snapshot reads \
-                 under `columns_from: grants` (the server said: {said}). The grants changed after \
-                 this run read them; the snapshot of this table was not completed and no change \
-                 stream was opened. Re-run: the run then reads the columns as they are now"
-            ),
-        );
+}
+
+/// The account's readable columns of each table, read once from the engine that enforces `columns_from: grants`.
+pub(crate) fn resolve_column_grants(
+    engine: crate::config::SourceType,
+    url: &str,
+    tls: Option<&crate::config::TlsConfig>,
+    tables: &[String],
+    declared: &std::collections::HashMap<String, Vec<String>>,
+) -> crate::error::Result<std::sync::Arc<std::collections::HashMap<String, cdc::ReadableColumns>>> {
+    match engine {
+        crate::config::SourceType::Oracle => oracle_column_grants(url, tls, tables, declared),
+        crate::config::SourceType::Postgres => {
+            postgres::column_grants::resolve_grants(url, tls, tables, declared)
+        }
+        crate::config::SourceType::Mongo => {
+            mongo::column_grants::resolve_for_tables(url, tls, tables).map(std::sync::Arc::new)
+        }
+        _ => mysql::cdc::MysqlChangeStream::resolve_grants(url, tls, tables, declared),
     }
-    crate::error::coded(
-        crate::error::codes::SOURCE_COLUMNS_UNREADABLE,
-        format!(
-            "export '{export}': the account may no longer SELECT a column this run reads under \
-             `columns_from: grants` (the server said: {said}). The grants changed after the plan \
-             or the settings named that column; nothing of this run was delivered. Run `rivet plan` \
-             again so the plan reads the columns the account may SELECT now, or GRANT SELECT on it"
-        ),
-    )
+}
+
+/// Oracle's grants read, or the refusal of a build without the `oracle` feature.
+fn oracle_column_grants(
+    url: &str,
+    tls: Option<&crate::config::TlsConfig>,
+    tables: &[String],
+    declared: &std::collections::HashMap<String, Vec<String>>,
+) -> crate::error::Result<std::sync::Arc<std::collections::HashMap<String, cdc::ReadableColumns>>> {
+    #[cfg(feature = "oracle")]
+    {
+        oracle::column_grants::resolve_grants(url, tls, tables, declared)
+    }
+    #[cfg(not(feature = "oracle"))]
+    {
+        let _ = (url, tls, tables, declared);
+        Err(oracle_feature_missing())
+    }
 }
 
 pub(crate) use crate::connect::driver_runtime;
@@ -887,6 +912,43 @@ mod introspection_tests {
 }
 
 #[cfg(test)]
+mod column_grants_dispatch_tests {
+    use super::resolve_column_grants;
+    use crate::config::SourceType;
+    use std::collections::HashMap;
+
+    fn refusal(engine: SourceType, url: &str) -> String {
+        let tables = vec!["orders".to_string()];
+        let err = resolve_column_grants(engine, url, None, &tables, &HashMap::new())
+            .expect_err("an unreachable source refuses");
+        format!("{err:#}").to_lowercase()
+    }
+
+    /// The grants of each engine are read by that engine's reader, so an unreachable server is named by its own driver.
+    #[test]
+    fn the_grants_are_read_by_the_engine_that_enforces_them() {
+        let mysql = refusal(SourceType::Mysql, "mysql://u:p@127.0.0.1:1/app");
+        assert!(!mysql.contains("driver: oracle"), "{mysql}");
+        let oracle = refusal(SourceType::Oracle, "oracle://u:p@127.0.0.1:1/app");
+        assert!(oracle.contains("driver: oracle"), "{oracle}");
+        let postgres = refusal(SourceType::Postgres, "postgresql://u:p@127.0.0.1:1/app");
+        assert!(
+            postgres.contains("error connecting to server"),
+            "{postgres}"
+        );
+    }
+
+    /// Each engine says its own boundary, and PostgreSQL's names the change stream as a client-side projection.
+    #[test]
+    fn each_engine_says_its_own_boundary() {
+        let say = |e| super::columns_from_grants_boundary(e);
+        assert!(say(SourceType::Postgres).contains("PostgreSQL change stream"));
+        assert_ne!(say(SourceType::Postgres), say(SourceType::Mysql));
+        assert_ne!(say(SourceType::Postgres), say(SourceType::Mongo));
+    }
+}
+
+#[cfg(test)]
 mod error_code_tests {
     use super::*;
 
@@ -1254,5 +1316,22 @@ mod override_probe_tests {
         refuse_unbuildable_override::<()>("mysql", "n", &rivet, Err(other)).unwrap();
         refuse_unbuildable_override::<()>("mysql", "n", &rivet, Err(anyhow::anyhow!("plain")))
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod grants_boundary_tests {
+    use crate::config::SourceType;
+
+    /// The boundary a MongoDB source states is its own, and each engine states one.
+    #[test]
+    fn each_engine_that_enforces_grants_states_its_own_boundary() {
+        let mongo = super::columns_from_grants_boundary(SourceType::Mongo);
+        let mysql = super::columns_from_grants_boundary(SourceType::Mysql);
+        assert!(
+            mongo.contains("view") && !mysql.contains("view"),
+            "{mongo}\n{mysql}"
+        );
+        assert!(!mysql.is_empty() && mongo != mysql && !mongo.contains("xyzzy"));
     }
 }

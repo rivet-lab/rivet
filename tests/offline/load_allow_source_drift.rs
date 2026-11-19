@@ -55,6 +55,7 @@ fn run_manifest(run_id: &str, rows: i64, source_rows: i64) -> RunManifest {
         }],
         column_checksums: None,
         checksum_key_column: None,
+        nulled_cells: None,
     }
 }
 

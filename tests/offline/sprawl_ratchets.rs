@@ -65,9 +65,8 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ("src/load/orchestrate.rs::run_loads#1", 159),
     ("src/load/plan.rs::build_plans_keyed#1", 178),
     ("src/pipeline/apply_cmd.rs::run_apply_command#1", 255),
-    ("src/pipeline/cdc/sink.rs::run_to_files#1", 225),
+    ("src/pipeline/cdc/sink.rs::run_to_files#1", 210),
     ("src/pipeline/cdc_job.rs::initial_snapshot_pending#1", 184),
-    ("src/pipeline/cdc_job.rs::run_cdc_inner#1", 162),
     (
         "src/pipeline/chunked/detect.rs::detect_and_generate_chunks#1",
         159,
@@ -86,8 +85,8 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
         199,
     ),
     ("src/pipeline/cli.rs::show_journal#1", 156),
-    ("src/pipeline/finalize.rs::write_run_manifest#1", 187),
-    ("src/pipeline/job.rs::execute_resolved_plan#1", 264),
+    ("src/pipeline/finalize.rs::write_run_manifest#1", 182),
+    ("src/pipeline/job.rs::execute_resolved_plan#1", 262),
     ("src/pipeline/job.rs::run_export_job_inner#1", 230),
     ("src/pipeline/keyset.rs::run_keyset#1", 200),
     ("src/pipeline/keyset.rs::run_keyset_parallel#1", 330),
@@ -100,7 +99,7 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ("src/pipeline/run.rs::run_waves#1", 171),
     (
         "src/pipeline/validate_manifest.rs::verify_unredacted#1",
-        227,
+        222,
     ),
     ("src/plan/build.rs::build_plan_on#1", 226),
     (
@@ -110,10 +109,10 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ("src/plan/build.rs::resolve_chunked_strategy#1", 175),
     // 2026-11-17: 257 -> 238, the run-plan and named-check emitters left doctor (see #1041).
     ("src/preflight/doctor.rs::doctor#1", 238),
-    ("src/preflight/mod.rs::check#1", 227),
+    ("src/preflight/mod.rs::check#1", 226),
     ("src/source/mssql/arrow_convert.rs::build_array#1", 253),
     ("src/source/mysql/arrow_convert.rs::build_array#1", 315),
-    ("src/source/mysql/cdc.rs::fill#1", 263),
+    ("src/source/mysql/cdc.rs::fill#1", 259),
     ("src/source/oracle/arrow_convert.rs::build_column#1", 178),
 ];
 

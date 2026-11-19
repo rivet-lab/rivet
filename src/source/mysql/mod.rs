@@ -1,7 +1,7 @@
 //! MySQL `Source` implementation.
 
 mod arrow_convert;
-pub(crate) use arrow_convert::{time_outside_day, zero_date_warning};
+pub(crate) use arrow_convert::{time_outside_day, zero_date_counts, zero_date_warning};
 pub(crate) mod cdc;
 pub(crate) mod column_grants;
 mod folded_name;
@@ -28,8 +28,8 @@ use crate::types::ColumnOverrides;
 #[cfg(test)]
 use arrow_convert::bit_bytes_to_u64;
 use arrow_convert::{
-    mysql_native_type_name, mysql_schema_and_arrow_types, mysql_type_to_rivet, nulled_dates,
-    rows_to_record_batch_typed,
+    mysql_mapping, mysql_native_type_name, mysql_schema_and_arrow_types, mysql_type_to_rivet,
+    nulled_dates, rows_to_record_batch_typed,
 };
 use proxy::{detect_mysql_proxy_kind, warn_proxy_kind};
 
@@ -130,6 +130,35 @@ impl MysqlSource {
     pub fn proxy_kind(&self) -> MysqlProxyKind {
         self.proxy_kind
     }
+    /// The first cell of `sql`'s first row under `max_execution_time` of `statement_timeout_s` seconds (0 = the server's).
+    fn scalar_within(&mut self, sql: &str, statement_timeout_s: u64) -> Result<Option<String>> {
+        let mut conn = self.pool.get_conn()?;
+        let max_exec_ms = max_execution_ms(statement_timeout_s);
+        let mut guard = MysqlSessionGuard::apply(&mut conn, &self.session, max_exec_ms)?;
+        let row: Option<mysql::Row> = guard.conn().query_first(sql).map_err(|e| {
+            if statement_timeout_s > 0 && is_statement_timeout(&e) {
+                super::StatementDurationTimeout::mysql(statement_timeout_s).into()
+            } else {
+                anyhow::Error::new(e)
+            }
+        })?;
+        match row {
+            Some(r) => {
+                let val: Option<mysql::Value> = r.get(0);
+                match val {
+                    Some(mysql::Value::Bytes(b)) => {
+                        Ok(Some(String::from_utf8_lossy(&b).into_owned()))
+                    }
+                    Some(mysql::Value::Int(v)) => Ok(Some(v.to_string())),
+                    Some(mysql::Value::UInt(v)) => Ok(Some(v.to_string())),
+                    Some(mysql::Value::Float(v)) => Ok(Some(v.to_string())),
+                    Some(mysql::Value::Double(v)) => Ok(Some(v.to_string())),
+                    _ => Ok(None),
+                }
+            }
+            None => Ok(None),
+        }
+    }
 }
 
 /// Build a MySQL connection pool honoring the configured TLS policy.
@@ -212,7 +241,7 @@ pub(crate) fn type_mappings_on(
                 || mysql_type_to_rivet(col),
             )?;
             let source = crate::types::SourceColumn::simple(col.name_str().as_ref(), native, true);
-            Ok(crate::types::TypeMapping::from_source(&source, rivet))
+            Ok(mysql_mapping(&source, rivet))
         })
         .collect()
 }
@@ -860,25 +889,15 @@ impl super::Source for MysqlSource {
     }
 
     fn query_scalar(&mut self, sql: &str) -> Result<Option<String>> {
-        let mut conn = self.pool.get_conn()?;
-        let mut guard = MysqlSessionGuard::apply(&mut conn, &self.session, None)?;
-        let row: Option<mysql::Row> = guard.conn().query_first(sql)?;
-        match row {
-            Some(r) => {
-                let val: Option<mysql::Value> = r.get(0);
-                match val {
-                    Some(mysql::Value::Bytes(b)) => {
-                        Ok(Some(String::from_utf8_lossy(&b).into_owned()))
-                    }
-                    Some(mysql::Value::Int(v)) => Ok(Some(v.to_string())),
-                    Some(mysql::Value::UInt(v)) => Ok(Some(v.to_string())),
-                    Some(mysql::Value::Float(v)) => Ok(Some(v.to_string())),
-                    Some(mysql::Value::Double(v)) => Ok(Some(v.to_string())),
-                    _ => Ok(None),
-                }
-            }
-            None => Ok(None),
-        }
+        self.scalar_within(sql, 0)
+    }
+
+    fn query_scalar_within(
+        &mut self,
+        sql: &str,
+        statement_timeout_s: u64,
+    ) -> Result<Option<String>> {
+        self.scalar_within(sql, statement_timeout_s)
     }
 
     fn type_mappings(

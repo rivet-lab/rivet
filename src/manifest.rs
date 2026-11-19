@@ -317,6 +317,9 @@ pub struct RunManifest {
     /// un-keyed (a full export with no cursor). See [`ColumnChecksum`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checksum_key_column: Option<String>,
+    /// Cells the run wrote as NULL because MySQL held a zero or partial date, per column; absent when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nulled_cells: Option<Vec<(String, u64)>>,
     /// What this run's `_rivet_row_hash` column covers, when
     /// `meta_columns.row_hash` was configured — the declared coverage plus the
     /// rendering's identity.
@@ -519,6 +522,7 @@ impl RunManifest {
             column_checksums: None,
             checksum_render: None,
             checksum_key_column: None,
+            nulled_cells: None,
             row_hash: None,
             split_window: None,
         }
@@ -679,6 +683,7 @@ mod tests {
             parts,
             column_checksums: None,
             checksum_key_column: None,
+            nulled_cells: None,
         }
     }
 

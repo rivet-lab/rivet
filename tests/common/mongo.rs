@@ -37,6 +37,33 @@ impl MongoTest {
         }
     }
 
+    /// Connect through a full `url` (credentials included) to `db`.
+    pub fn connect_url(url: &str, db: &str) -> Self {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let client =
+            rt.block_on(async { Client::with_uri_str(url).await.expect("mongo: connect") });
+        Self {
+            rt,
+            client,
+            db: db.to_string(),
+        }
+    }
+
+    /// Run `command` against `db` and return the server's reply or its error text.
+    pub fn run_command_on(&self, db: &str, command: Document) -> Result<Document, String> {
+        self.rt.block_on(async {
+            self.client
+                .database(db)
+                .run_command(command)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
     /// Test-URL for the rivet binary (matches the connection this helper uses).
     pub fn url(port: u16, db: &str) -> String {
         format!("mongodb://127.0.0.1:{port}/{db}?directConnection=true")
@@ -234,6 +261,27 @@ impl MongoTest {
                 .upsert(true)
                 .await
                 .expect("mongo: upsert");
+        });
+    }
+
+    /// `$set` `fields` on the document `id`, upserting it.
+    pub fn upsert_fields(&self, name: &str, id: i64, fields: Document) {
+        self.rt.block_on(async {
+            self.coll(name)
+                .update_one(doc! { "_id": id }, doc! { "$set": fields })
+                .upsert(true)
+                .await
+                .expect("mongo: upsert");
+        });
+    }
+
+    /// `$unset` `field` on the document `id`.
+    pub fn unset_field(&self, name: &str, id: i64, field: &str) {
+        self.rt.block_on(async {
+            self.coll(name)
+                .update_one(doc! { "_id": id }, doc! { "$unset": { field: "" } })
+                .await
+                .expect("mongo: unset");
         });
     }
 

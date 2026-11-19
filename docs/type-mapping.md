@@ -39,11 +39,13 @@ one either.
 
 | Source value | What rivet writes | Signal |
 |--------------|-------------------|--------|
-| MySQL zero, partial or invalid date (`0000-00-00`, `2026-00-15`, `2024-02-31` under `ALLOW_INVALID_DATES`) in `DATE`, `DATETIME`, `TIMESTAMP` | NULL, exit 0, batch and CDC | a WARN per column with the count; the batch summary has a `fidelity` row |
+| MySQL zero, partial or invalid date (`0000-00-00`, `2026-00-15`, `2024-02-31` under `ALLOW_INVALID_DATES`) in `DATE`, `DATETIME`, `TIMESTAMP` | NULL, exit 0, batch and CDC | a WARN per column with the count; the batch summary has a `fidelity` row; `nulled_cells` in the manifest; `validate` warns |
 | A date or instant the target type cannot hold (PostgreSQL `infinity` or an out-of-range date, a `timestamp_ns` value outside 1677..2262) | nothing: the run is refused | `RIVET_SOURCE_VALUE_UNREPRESENTABLE`, exit 5 |
 
-`validate` and `reconcile` do not count these NULLs: they compare rows and part
-checksums, not values against the source.
+The columns are labelled `rivet.fidelity: compatible`, never `exact`. The run records
+the per-column count in its manifest (`nulled_cells`); `validate` prints it as a
+`warning` (`RIVET_VERIFY_CELLS_WRITTEN_AS_NULL`, never a failure, exit unchanged) and
+the `reconcile` row of a run with `reconcile: true` appends it to its MATCH or MISMATCH line.
 
 To deliver the exact source text instead, select the column as text in the export
 query; the column then lands as a string and loses its date type downstream. This is
@@ -301,9 +303,9 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `bigint unsigned` | `u_int64` → `UInt64` | `UInt64` | integer text | values &gt; i64::MAX | type_roundtrip |
 | `decimal(p,s)` | `decimal(p,s)` | `DECIMAL(p,s)` | exact decimal text | p/s auto-resolved from the wire column definition (override only as fallback) | live matrix |
 | `float` / `double` | `float32` / `float64` | `Float32` / `Float64` | float text | | golden |
-| `date` | `date` | `Date32` | ISO date | a zero or partial date (`0000-00-00`, `2026-00-00`) is written as NULL, the run WARNs per column with the count and the summary has a `fidelity` row; see [Values with no Arrow representation](#values-with-no-arrow-representation) | golden |
-| `datetime` | `timestamp(µs, none)` | `Timestamp(µs, None)` | datetime text | naive; same zero-date rule as `date` | live matrix |
-| `timestamp` | `timestamp_tz(µs, UTC)` | `Timestamp(µs, UTC)` | datetime text | `SET time_zone = '+00:00'`; same zero-date rule as `date` | live matrix |
+| `date` | `date` | `Date32` | ISO date | a zero or partial date (`0000-00-00`, `2026-00-00`) is written as NULL, the run WARNs per column with the count and the summary has a `fidelity` row; the column is labelled `rivet.fidelity: compatible`, never `exact`; see [Values with no Arrow representation](#values-with-no-arrow-representation) | golden |
+| `datetime` | `timestamp(µs, none)` | `Timestamp(µs, None)` | datetime text | naive; same zero-date rule and `compatible` label as `date` | live matrix |
+| `timestamp` | `timestamp_tz(µs, UTC)` | `Timestamp(µs, UTC)` | datetime text | `SET time_zone = '+00:00'`; same zero-date rule and `compatible` label as `date` | live matrix |
 | `time` | `time(µs)` | `Time64(µs)` | time text | | partial |
 | `varchar` / `text` | `string` / `text` | `Utf8` | escaped UTF-8 | | live matrix |
 | `json` | `json` | `Utf8` + Parquet `LogicalType::Json` (via `arrow.json` extension) | JSON string | | live matrix |

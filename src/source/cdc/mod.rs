@@ -597,6 +597,8 @@ pub(crate) enum CdcEngineOpts {
         slot: String,
         /// The `table:` values the CONFIG asked for.
         configured_tables: Vec<String>,
+        /// The grants the run resolved before its anchor.
+        resolved_grants: Option<std::sync::Arc<std::collections::HashMap<String, ReadableColumns>>>,
     },
     /// SQL Server capture instance (required for `sqlserver://`).
     Mssql {
@@ -604,14 +606,19 @@ pub(crate) enum CdcEngineOpts {
         /// The `table:` values the CONFIG asked for.
         configured_tables: Vec<String>,
     },
-    /// Render the `document` blob as canonical (type-tagged) extended JSON.
-    Oracle { configured_tables: Vec<String> },
+    Oracle {
+        configured_tables: Vec<String>,
+        /// The grants the run resolved before its anchor.
+        resolved_grants: Option<std::sync::Arc<std::collections::HashMap<String, ReadableColumns>>>,
+    },
     Mongo {
         canonical: bool,
         /// The export's configured `table:` names.
         configured_tables: Vec<String>,
         /// The collections a keyed `load:` merges by `_id`.
         keyed_tables: Vec<String>,
+        /// The views the run resolved before its anchor.
+        resolved_grants: Option<std::sync::Arc<std::collections::HashMap<String, ReadableColumns>>>,
     },
 }
 
@@ -811,7 +818,11 @@ impl CdcEngine {
             }
             Self::Postgres => {
                 crate::source::postgres::cdc::PgChangeStream::refuse_unmet_prerequisites(
-                    url, tls, tables, drain,
+                    url,
+                    tls,
+                    tables,
+                    drain,
+                    columns_from_grants,
                 )
             }
             #[cfg(feature = "oracle")]
@@ -820,6 +831,10 @@ impl CdcEngine {
             }
             #[cfg(not(feature = "oracle"))]
             Self::Oracle => Err(crate::source::oracle_feature_missing()),
+            Self::Mongo if columns_from_grants => {
+                crate::source::mongo::column_grants::resolve_for_tables(url, tls, tables)
+                    .map(|_| ())
+            }
             Self::Mssql | Self::Mongo => Ok(()),
         }
     }
@@ -844,6 +859,7 @@ impl CdcEngine {
                     PeekBound::Unbounded,
                     DrainMode::Continuous,
                     &[],
+                    None,
                     None,
                     None,
                 )?);
@@ -995,6 +1011,18 @@ pub(crate) fn spill_dir_for(
     })
 }
 
+/// What a PostgreSQL stream finds already recorded for this run: a checkpoint or not.
+fn pg_prior_run(cfg: &CdcConfig) -> Result<PriorRun> {
+    let checkpoint = match cfg.checkpoint.as_deref() {
+        Some(p) => Position::load(p)?.is_some(),
+        None => false,
+    };
+    Ok(PriorRun {
+        checkpoint,
+        snapshot: false,
+    })
+}
+
 /// Construct the right [`ChangeStream`] adapter for the source URL's scheme.
 pub(crate) fn create_change_stream(
     cfg: &CdcConfig,
@@ -1036,14 +1064,9 @@ pub(crate) fn create_change_stream(
         CdcEngineOpts::Postgres {
             slot,
             configured_tables,
+            resolved_grants,
         } => {
-            let prior = PriorRun {
-                checkpoint: match cfg.checkpoint.as_deref() {
-                    Some(p) => Position::load(p)?.is_some(),
-                    None => false,
-                },
-                snapshot: false,
-            };
+            let prior = pg_prior_run(cfg)?;
             Ok(Box::new(
                 crate::source::postgres::cdc::PgChangeStream::open(
                     url,
@@ -1055,6 +1078,7 @@ pub(crate) fn create_change_stream(
                     configured_tables,
                     spill_dir_for(cfg.checkpoint.as_deref(), &cfg.config_dir).as_deref(),
                     cfg.checkpoint.as_deref(),
+                    resolved_grants.clone(),
                 )
                 .map_err(|e| with_setup_hint(e, PG_CDC_HINT))?,
             ))
@@ -1092,7 +1116,10 @@ pub(crate) fn create_change_stream(
             ))
         }
         #[cfg(feature = "oracle")]
-        CdcEngineOpts::Oracle { configured_tables } => {
+        CdcEngineOpts::Oracle {
+            configured_tables,
+            resolved_grants,
+        } => {
             if !cfg.drain.is_bounded() {
                 crate::rivet_bail!(
                     crate::error::codes::CONFIG_CDC_CONTINUOUS_UNSUPPORTED,
@@ -1108,6 +1135,7 @@ pub(crate) fn create_change_stream(
                     tls,
                     cfg.checkpoint.as_deref(),
                     configured_tables,
+                    resolved_grants.clone(),
                 )
                 .map_err(|e| with_setup_hint(e, ORACLE_CDC_HINT))?,
             ))
@@ -1118,6 +1146,7 @@ pub(crate) fn create_change_stream(
             canonical,
             configured_tables,
             keyed_tables,
+            resolved_grants,
         } => {
             if let Some(p) = cfg.checkpoint.as_deref() {
                 Position::load(std::path::Path::new(p))?;
@@ -1131,6 +1160,7 @@ pub(crate) fn create_change_stream(
                     cfg.drain,
                     configured_tables,
                     keyed_tables,
+                    resolved_grants.as_deref(),
                 )
                 .map_err(|e| {
                     if crate::source::mongo::cdc::error_names_its_own_cause(&e) {
@@ -1349,7 +1379,7 @@ fn grants_moved_mid_resolve(projecting: bool, err: &anyhow::Error) -> bool {
         "column-grants-revoke-between-two-reads-uncoded",
         false,
         projecting
-    ) && crate::source::mysql::column_grants::denied_by_server(err).is_some()
+    ) && crate::source::column_grants::denied_by_server(err).is_some()
 }
 
 /// The CDC probe could not read a captured table for a reason the server named; nothing was read or written.
@@ -2027,6 +2057,7 @@ mod setup_hint {
             &[],
             None,
             None,
+            None,
         );
         assert_names_refused_port(open.map(drop), super::PG_CDC_HINT);
     }
@@ -2091,6 +2122,7 @@ mod engine_identity {
                 CdcEngineOpts::Postgres {
                     slot: "s".into(),
                     configured_tables: t(&["a"]),
+                    resolved_grants: None,
                 },
                 SourceType::Postgres,
                 "postgresql://h/d",
@@ -2106,6 +2138,7 @@ mod engine_identity {
             (
                 CdcEngineOpts::Oracle {
                     configured_tables: t(&["a"]),
+                    resolved_grants: None,
                 },
                 SourceType::Oracle,
                 "ORACLE://h/d",
@@ -2115,6 +2148,7 @@ mod engine_identity {
                     canonical: false,
                     configured_tables: t(&["a"]),
                     keyed_tables: Vec::new(),
+                    resolved_grants: None,
                 },
                 SourceType::Mongo,
                 "mongodb+srv://h/d",
@@ -2347,6 +2381,7 @@ mod tests {
                 tls: None,
                 engine: CdcEngineOpts::Oracle {
                     configured_tables: Vec::new(),
+                    resolved_grants: None,
                 },
             };
             match create_change_stream(&cfg, PeekBound::Unbounded) {
@@ -3113,5 +3148,29 @@ mod error_code_tests {
         let err = super::raise_deferred(&Some("column(s) [c] hold a value".into())).unwrap_err();
         assert_coded(&err, "RIVET_SOURCE_CDC_CELL_UNSUPPORTED", 5);
         assert!(super::raise_deferred(&None).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod grants_prerequisite_tests {
+    use super::{CdcEngine, DrainMode};
+
+    /// A MongoDB capture with the policy reads its grants before the anchor and refuses at an unreachable server; without it nothing is read.
+    #[test]
+    fn a_mongo_capture_reads_the_grants_only_with_the_policy() {
+        let url = "mongodb://u:p@127.0.0.1:1/app?serverSelectionTimeoutMS=300";
+        let tables = vec!["orders".to_string()];
+        let said = CdcEngine::Mongo
+            .refuse_unmet_prerequisites(url, None, &tables, DrainMode::BoundedAtOpen, true)
+            .unwrap_err();
+        assert!(
+            format!("{said:#}")
+                .to_lowercase()
+                .contains("server selection"),
+            "{said:#}"
+        );
+        CdcEngine::Mongo
+            .refuse_unmet_prerequisites(url, None, &tables, DrainMode::BoundedAtOpen, false)
+            .unwrap();
     }
 }

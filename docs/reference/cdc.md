@@ -437,7 +437,7 @@ source:
 
 Limits:
 
-- MySQL only. On PostgreSQL, SQL Server, Oracle and MongoDB every command that loads the config (`run`, `check`, `plan`, `doctor`, `validate`, `load`, `state`) and `apply` of a plan that carries it refuses it with `RIVET_CONFIG_SOURCE_MODE_UNSUPPORTED` (exit 1, nothing connected or written), because those sources would read and deliver every column (see #711). Remove `columns_from:` from `source:` or point `source:` at a MySQL server.
+- MySQL, PostgreSQL, Oracle and MongoDB only. On SQL Server every command that loads the config (`run`, `check`, `plan`, `doctor`, `validate`, `load`, `state`) and `apply` of a plan that carries it refuses it with `RIVET_CONFIG_SOURCE_MODE_UNSUPPORTED` (exit 1, nothing connected or written), because that source would read and deliver every column (see #711). Remove `columns_from:` from `source:` or point `source:` at a MySQL, PostgreSQL, Oracle or MongoDB server.
 - The binlog still leaves the server in full: the filter is in rivet, not in MySQL.
 - Under `columns_from: grants` any statement that names a captured table stops the stream and needs a re-baseline, whatever it does: `ALTER TABLE orders ADD INDEX ...` and `ALTER TABLE orders ADD COLUMN ...` stop it as a rename does. A cheaper path that tells a benign change from a rename or a drop by the catalog (the InnoDB table id and each column's ordinal against its name and type) is a separate change and is not in this release.
 - Why a name match is enough, where the stream cannot read a statement: a captured name is built of ASCII letters, digits, `_` and `.` (the stream's open refuses any other); every client character set MySQL allows (it refuses `ucs2`, `utf16`, `utf16le` and `utf32`) writes ASCII as the same ASCII bytes; a comment cannot split an identifier (`ord/**/ers` is two words); an identifier has no escape that spells a letter another way (a doubled backtick is a different name); and DDL run from a procedure or `EXECUTE` is logged with its own text, naming what it changes. A statement that changes a captured table therefore carries its name as bytes, and the match finds it.
@@ -445,6 +445,78 @@ Limits:
 - Without `columns_from: grants`, and under it, three more statements that remove or move the rows of a captured table without a row event stop the stream before them with `RIVET_SOURCE_CDC_TRUNCATED` (exit 5; the re-baseline the message ends with is the remedy): `DROP DATABASE` or `DROP SCHEMA` of a database that holds a captured table (message: ``database `X`, which holds a captured table, was DROPped``), and `ALTER TABLE ... TRUNCATE PARTITION`, `DROP PARTITION` or `EXCHANGE PARTITION` of a captured table, or an `EXCHANGE PARTITION` that swaps one in (message: ``captured table `shop.kinds` had a partition truncated, dropped or exchanged``). MySQL logs none of them as row events, so every row they take out would stay live in the destination. Before this change they passed without a stop when `columns_from: grants` was off. `ANALYZE`, `OPTIMIZE`, `REBUILD` and `REORGANIZE PARTITION` change no row and continue. A `TRUNCATE`, `DROP TABLE` or statement-format write that the server resolves to a captured table through its case fold (`TRUNCATE TABLE SHOP.KINDS` on `lower_case_table_names` = 1) stops the same way; before this change it passed.
 - `DROP DATABASE` of a database that holds a captured table is refused when the next run starts, or by the grants re-read, with `RIVET_SOURCE_COLUMNS_UNREADABLE` (exit 1), as before: a table that is gone cannot be told from one whose columns were revoked, and the message asks for a `GRANT SELECT` that cannot be given on a table that does not exist. To get past it, re-create the table, `GRANT SELECT` on the columns the export needs, and re-baseline the stream (delete the checkpoint and the export's `cdc_snapshot` rows, move the destination files out, as the message of the other stops prints), or drop the table from the export.
 - A grant change not written to the binlog (`sql_log_bin = 0`, a direct `mysql.*` edit without `FLUSH PRIVILEGES`) takes effect on the next run only.
+
+#### PostgreSQL - column grants (`source.columns_from: grants`)
+
+Logical decoding does no column privilege check: the `test_decoding` output rivet reads carries every
+column of a changed row of every table the slot sees. Under `source.columns_from: grants` rivet delivers
+only the columns the account may `SELECT` (column-level and table-level grants, judged by the server with
+`has_column_privilege`), in every mode. Batch reads are enforced by the server (the `SELECT` names only
+readable columns). The change stream is a client-side projection: the unreadable columns of a captured
+table are dropped while the change is parsed, before it is buffered, spilled, recovered from TOAST or
+written. That is data minimisation, not access control: restrict the replication account itself if the
+values must not reach the host. `rivet check` prints this boundary and a change-stream run logs it at start.
+
+```sql
+GRANT SELECT (id, name) ON app.users TO rivet_cdc;  -- not `pass`
+```
+
+```yaml
+source:
+  type: postgres
+  url_env: DATABASE_URL
+  columns_from: grants
+```
+
+| What | Behaviour |
+|---|---|
+| Readable set | Each column is judged by `has_column_privilege(.., 'SELECT')`, read once before the anchor and shared by the snapshot legs, the stream open and every batch read |
+| Hidden column | Never in a Parquet part or its schema |
+| Grant change during a run | The readable set is read again at each batch of the slot, after the batch is peeked and before any of its rows is processed. A captured table whose readable set changed (a `REVOKE`, a `GRANT`, an `ALTER TABLE` under a table-level grant) is refused with `RIVET_SOURCE_CDC_GRANTS_CHANGED` (exit 2), nothing of that batch delivered and the checkpoint kept; a re-run reads the grants as they are now and resumes. A `REVOKE` that is undone before the next read is not seen |
+| Grant change since the read | The same refusal when the stream opens, before the slot is created |
+| Update of hidden columns only | Under `REPLICA IDENTITY FULL` (both images in the slot) the update is not delivered and the checkpoint advances over it. Under the default identity the slot carries no old image, so it cannot be told from an update of a readable column: it is delivered with the readable columns |
+| Key column not readable | The key the export uses (`load.pk` if declared, else the primary key) is judged by the server once, before the anchor; refused with `RIVET_SOURCE_COLUMNS_UNREADABLE` before anything is read or written |
+| No readable column | Refused with `RIVET_SOURCE_COLUMNS_UNREADABLE` |
+| `cursor_column`, `chunk_column`, `chunk_by_key`, `time_column` or `partition_by` naming a hidden column | Refused with `RIVET_SOURCE_COLUMNS_UNREADABLE`, naming the column and the setting, before the read |
+| Tables the export does not capture | Not projected: their changes are not delivered |
+| Without `columns_from` | A column-grant account is refused by PostgreSQL (`42501`) at the snapshot `SELECT *`; the change stream reads every column |
+
+Limits:
+
+- The slot leaves the server in full: the filter is in rivet, not in PostgreSQL.
+
+#### MongoDB - fields granted through a view (`source.columns_from: grants`)
+
+MongoDB has no column privileges. Under `source.columns_from: grants` the fields rivet delivers
+are the fields of a **view** of the collection whose only stage is a `$project` that keeps them
+(`_id` must be kept). Batch reads go through the view, and the server enforces it. A change stream
+cannot be opened on a view, so a CDC run watches the database and removes the hidden fields from
+each event inside the server's stream pipeline: a hidden value never reaches rivet or the
+destination, but the account itself can read the collection, so this is data minimisation, not
+access control. `rivet check` prints this boundary and a change-stream run logs it at start.
+
+```js
+db.createView("users_visible", "users", [{ $project: { name: 1, email: 1 } }])
+db.createRole({ role: "rivet_view", privileges: [
+  { resource: { db: "app", collection: "users_visible" }, actions: ["find"] },
+  { resource: { db: "app", collection: "" }, actions: ["listCollections"] } ], roles: [] })
+```
+
+| Mode | What is read |
+|---|---|
+| Batch (`table:` of the collection) | `SELECT * FROM <view>`; the view's fields only |
+| Batch `query:` | Not applicable: a MongoDB source reads a collection |
+| CDC snapshot and stream | The collection through the stream pipeline: insert, replace, update (`updatedFields`, `removedFields`, `truncatedArrays`), the post-image and the delete pre-image keep only the view's fields |
+| Update of hidden fields only | Not delivered as a row; the checkpoint advances over it |
+| Account holds `find` or `changeStream` on the collection itself, or database-wide (batch) | Refused with `RIVET_SOURCE_COLUMNS_UNREADABLE` (exit 1): the server would not enforce the view |
+| No view, or two views, of the collection; a view that is not a single `$project`; a view that drops `_id` | Refused with `RIVET_SOURCE_COLUMNS_UNREADABLE` (exit 1) with the `createView` remedy; nothing read or written |
+| Connection without credentials | Refused with `RIVET_SOURCE_COLUMNS_UNREADABLE` (batch) |
+
+Limits:
+
+- A CDC run needs `find` and `changeStream` on the collection (or database-wide); the view protects batch reads, the pipeline protects change events.
+- A delete carries its pre-image from MongoDB 6.0 with pre- and post-images enabled on the collection; before that, or without them, it carries only its key.
+- A view created, replaced or dropped while a run is open is read by the next run.
 
 ### PostgreSQL — the logical slot
 
