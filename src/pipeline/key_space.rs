@@ -45,7 +45,7 @@ impl Axis {
         match self {
             Axis::Int => at.to_string(),
             Axis::Uuid { upper } => {
-                let s = uuid::Uuid::from_u128((at as u128) << 1)
+                let s = uuid::Uuid::from_u128((at.max(0) as u128) << 1)
                     .hyphenated()
                     .to_string();
                 if upper { s.to_uppercase() } else { s }
@@ -364,6 +364,14 @@ mod tests {
         assert_eq!(Axis::Int.show(Axis::Int.ord("-42").unwrap()), "-42");
         assert!(Axis::of("abc").is_none());
         assert!(Axis::of("0123456789abcdef0123456789abcdef").is_none());
+    }
+
+    #[test]
+    fn a_place_below_the_nil_uuid_shows_as_the_nil_uuid() {
+        let nil = "00000000-0000-0000-0000-000000000000";
+        let axis = Axis::of(nil).unwrap();
+        assert_eq!(axis.ord(nil), Some(0));
+        assert_eq!(axis.show(-1), nil);
     }
 
     #[test]
