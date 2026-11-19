@@ -177,52 +177,6 @@ pub(crate) fn resolve_grants(
     resolve_grants_on(&mut client, configured, declared).map(Arc::new)
 }
 
-/// What differs between the columns of `table` a run delivers and the ones its account may `SELECT` now.
-pub(crate) fn grants_difference(table: &str, before: &[String], now: &[String]) -> String {
-    let missing = |from: &[String], of: &[String]| -> Vec<String> {
-        from.iter()
-            .filter(|c| !of.iter().any(|o| same_name(o, c)))
-            .map(|c| format!("`{c}`"))
-            .collect()
-    };
-    let mut changes = Vec::new();
-    let gained = missing(now, before);
-    if !gained.is_empty() {
-        changes.push(format!("gained {}", gained.join(", ")));
-    }
-    let lost = missing(before, now);
-    if !lost.is_empty() {
-        changes.push(format!("lost {}", lost.join(", ")));
-    }
-    if changes.is_empty() {
-        changes.push("the same columns in another order".to_string());
-    }
-    format!(
-        "the columns this account may SELECT of `{table}` changed ({}): a grant change, or a \
-         schema change under a table-level grant",
-        changes.join("; ")
-    )
-}
-
-/// The first configured table whose readable columns now differ from `resolved`, with what differs.
-pub(crate) fn first_grants_change(
-    configured: &[String],
-    resolved: &HashMap<String, ReadableColumns>,
-    now: &HashMap<String, ReadableColumns>,
-) -> Option<String> {
-    configured.iter().find_map(|t| {
-        let (before, after) = (resolved.get(t), now.get(t));
-        if before.map(|c| &c.columns) == after.map(|c| &c.columns) {
-            return None;
-        }
-        Some(grants_difference(
-            t,
-            before.map(|c| c.columns.as_slice()).unwrap_or(&[]),
-            after.map(|c| c.columns.as_slice()).unwrap_or(&[]),
-        ))
-    })
-}
-
 /// The columns the run may deliver of the captured table `schema.table`: the entry of the first configured name that routes to it.
 pub(crate) fn readable_of<'a>(
     resolved: &'a HashMap<String, ReadableColumns>,
@@ -383,22 +337,5 @@ mod tests {
             &names(&["id"]),
             &a[..1]
         ));
-    }
-
-    #[test]
-    fn the_difference_names_what_was_gained_and_what_was_lost() {
-        let d = grants_difference("t", &names(&["id", "a"]), &names(&["id", "b"]));
-        assert!(d.contains("gained `b`") && d.contains("lost `a`"), "{d}");
-        let same = grants_difference("t", &names(&["a", "b"]), &names(&["b", "a"]));
-        assert!(same.contains("the same columns in another order"), "{same}");
-    }
-
-    #[test]
-    fn first_grants_change_finds_a_lost_table_and_ignores_an_equal_set() {
-        let resolved = HashMap::from([("t".to_string(), readable(&["id", "a"]))]);
-        let configured = names(&["t"]);
-        assert!(first_grants_change(&configured, &resolved, &resolved.clone()).is_none());
-        let gone = first_grants_change(&configured, &resolved, &HashMap::new()).unwrap();
-        assert!(gone.contains("lost `id`, `a`"), "{gone}");
     }
 }

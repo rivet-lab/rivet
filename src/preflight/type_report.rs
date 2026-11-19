@@ -224,6 +224,20 @@ struct ReportUnit {
     relation: Option<String>,
 }
 
+/// The readable columns of each named table, as the source's own `readable_columns` answers them.
+fn readable_through_source(
+    src: &mut dyn crate::source::Source,
+    tables: &[String],
+) -> Result<std::collections::HashMap<String, crate::source::cdc::ReadableColumns>> {
+    let mut by_table = std::collections::HashMap::new();
+    for t in tables {
+        if let Some(r) = src.readable_columns(t)? {
+            by_table.insert(t.clone(), r);
+        }
+    }
+    Ok(by_table)
+}
+
 /// The readable columns of each named table for a `columns_from: grants` source.
 fn readable_by_table(
     source_type: SourceType,
@@ -235,16 +249,14 @@ fn readable_by_table(
         SourceType::Mysql => {
             crate::source::mysql::cdc::MysqlChangeStream::readable_columns_at(url, tls, tables)
         }
+        SourceType::Mssql => {
+            let mut src = crate::source::mssql::MssqlSource::connect_with_tls(url, tls)?;
+            readable_through_source(&mut src, tables)
+        }
         #[cfg(feature = "oracle")]
         SourceType::Oracle => {
             let mut src = crate::source::oracle::OracleSource::connect_with_tls(url, tls)?;
-            let mut by_table = std::collections::HashMap::new();
-            for t in tables {
-                if let Some(r) = crate::source::Source::readable_columns(&mut src, t)? {
-                    by_table.insert(t.clone(), r);
-                }
-            }
-            Ok(by_table)
+            readable_through_source(&mut src, tables)
         }
         SourceType::Postgres => {
             let mut client = crate::source::postgres::connect_client(url, tls)?;
@@ -587,7 +599,22 @@ pub(crate) fn probe_mappings(
     downgrade_narrowing_overrides(&mut mappings, column_overrides, || {
         src.type_mappings(query, &ColumnOverrides::new())
     })?;
+    if !stream && seeded!("check-run-refusal-split", false, true) {
+        mappings = mappings.into_iter().map(refuse_unmapped).collect();
+    }
     Ok(mappings)
+}
+
+/// A batch column no Arrow type carries is refused, under every policy, with the reason its mapping names.
+fn refuse_unmapped(m: crate::types::TypeMapping) -> crate::types::TypeMapping {
+    if m.arrow_type.is_some() || m.refusal.is_some() {
+        return m;
+    }
+    let reason = match &m.rivet_type {
+        crate::types::RivetType::Unsupported { reason, .. } => reason.clone(),
+        _ => "no Rivet mapping for this source type".to_string(),
+    };
+    m.with_refusal(reason)
 }
 
 /// One unit's report from already-resolved mappings, with no source connection.
@@ -916,6 +943,80 @@ fn rivet_type_label(t: &crate::types::RivetType) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A batch column with no Arrow type is refused under every policy, with its reason; the rest is untouched.
+    #[test]
+    fn an_unmapped_batch_column_is_refused_under_every_policy_and_nothing_else_is() {
+        use crate::types::policy::TypePolicy;
+        use crate::types::{RivetType, SourceColumn, TypeMapping};
+        let col = |name: &str, t: RivetType| {
+            TypeMapping::from_source(&SourceColumn::simple(name, "native", true), t)
+        };
+        let unmapped = col(
+            "net",
+            RivetType::Unsupported {
+                native_type: "cidr".into(),
+                reason: "no arrow type".into(),
+            },
+        );
+        let refused = super::refuse_unmapped(unmapped);
+        assert_eq!(refused.refusal.as_deref(), Some("no arrow type"));
+        for policy in [TypePolicy::warn_only(), TypePolicy::strict()] {
+            let v = policy.validate(std::slice::from_ref(&refused));
+            assert!(v.len() == 1 && v[0].fatal && v[0].refused, "{v:?}");
+        }
+        let mapped = col("id", RivetType::Int64);
+        assert_eq!(super::refuse_unmapped(mapped.clone()).refusal, None);
+        let own = col(
+            "x",
+            RivetType::Unsupported {
+                native_type: "t".into(),
+                reason: "r".into(),
+            },
+        )
+        .with_refusal("own remedy");
+        assert_eq!(
+            super::refuse_unmapped(own).refusal.as_deref(),
+            Some("own remedy")
+        );
+    }
+
+    /// A column no Arrow type carries is refused on the batch probe and kept as it is on the stream probe.
+    #[test]
+    fn the_probe_refuses_an_unmapped_column_for_batch_and_not_for_a_stream() {
+        use crate::types::{ColumnOverrides, RivetType, SourceColumn, TypeMapping};
+        struct Unmapped;
+        impl crate::source::Source for Unmapped {
+            fn export(
+                &mut self,
+                _request: &crate::source::ExportRequest<'_>,
+                _sink: &mut dyn crate::source::BatchSink,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn query_scalar(&mut self, _sql: &str) -> anyhow::Result<Option<String>> {
+                Ok(None)
+            }
+            fn type_mappings(
+                &mut self,
+                _query: &str,
+                _overrides: &ColumnOverrides,
+            ) -> anyhow::Result<Vec<TypeMapping>> {
+                Ok(vec![TypeMapping::from_source(
+                    &SourceColumn::simple("net", "cidr", true),
+                    RivetType::Unsupported {
+                        native_type: "cidr".into(),
+                        reason: "no arrow type".into(),
+                    },
+                )])
+            }
+        }
+        let overrides = ColumnOverrides::new();
+        let batch = super::probe_mappings(&mut Unmapped, false, "q", &overrides).unwrap();
+        assert_eq!(batch[0].refusal.as_deref(), Some("no arrow type"));
+        let stream = super::probe_mappings(&mut Unmapped, true, "q", &overrides).unwrap();
+        assert_eq!(stream[0].refusal, None);
+    }
+
     /// The two callers must DIVERGE, and only where divergence is warranted.
     #[test]
     fn only_a_bare_name_makes_an_unresolvable_capture_fatal_and_only_for_the_load() {
@@ -1652,9 +1753,9 @@ exports:
         read(SourceType::Oracle, DEAD_ORACLE).expect_err("oracle reads its server");
         read(SourceType::Postgres, "postgresql://u:p@127.0.0.1:1/app")
             .expect_err("postgres reads its server");
-        for other in [SourceType::Mssql, SourceType::Mongo] {
-            let none = read(other, "postgresql://u:p@127.0.0.1:1/app").unwrap();
-            assert!(none.is_empty(), "{other:?} reads no grants");
-        }
+        read(SourceType::Mssql, "sqlserver://u:p@127.0.0.1:1/app")
+            .expect_err("mssql reads its server");
+        let none = read(SourceType::Mongo, "postgresql://u:p@127.0.0.1:1/app").unwrap();
+        assert!(none.is_empty(), "mongo reads no grants");
     }
 }

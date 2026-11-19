@@ -790,25 +790,25 @@ def format_config(d: Path, fmt: str) -> Path:
 
 
 def run_unit(engine: str, work: Path, url: str, col: Col, n_rows: int, mode: str, target: str, fmts: list[str]) -> list[Result]:
-    """Check once, then run each format of one (column, override, mode) cell in its own directory."""
+    """Check then run each format of one (column, override, mode) cell in its own directory."""
     d = work / f"{col.name}-{target.replace('(', '_').replace(')', '').replace(',', '_')}-{mode}"
     shutil.rmtree(d, ignore_errors=True)
     d.mkdir(parents=True)
     env = {"RIVET_NSN_URL": url}
-    first = d / "check.yaml"
-    first.write_text(config(engine, "RIVET_NSN_URL", mode, fmts[0], col.name, target, str(d / "out-check")))
-    check = rivet(["check", "-c", str(first), "--type-report", "--json"], env, d)
-    fid = fidelity_of(check.stdout, col.name)
-    if stand_refused(check):
-        return [Result(f"{engine}/{col.native}->{target}/{mode}/{fmt}", REFUSED, NOT_GRADED, f"the stand refused the check's type probe {STAND_TRIES} times") for fmt in fmts]
     out = []
+    fid = ""
     for fmt in fmts:
         cell = f"{engine}/{col.native}->{target}/{mode}/{fmt}"
         cfg = format_config(d, fmt)
         cfg.write_text(config(engine, "RIVET_NSN_URL", mode, fmt, col.name, target, str(d / f"out-{fmt}")))
+        check = rivet(["check", "-c", str(cfg), "--type-report", "--json"], env, d)
+        if stand_refused(check):
+            out.append(Result(cell, REFUSED, NOT_GRADED, f"the stand refused the check's type probe {STAND_TRIES} times"))
+            continue
+        fid = fidelity_of(check.stdout, col.name) or fid
         p = rivet(["run", "-c", str(cfg)], env, d)
         if check.returncode == 0 and p.returncode != 0:
-            check = recheck(check, first, env, d)
+            check = recheck(check, cfg, env, d)
         want = frozenset(["id", col.name.lower(), *(["nsn_ts"] if mode == "time_window" else [])])
         r = grade_run(engine, cell, p, check, fid, d / f"out-{fmt}", fmt, col, n_rows, target, list(col.lits), want)
         out.append(r)

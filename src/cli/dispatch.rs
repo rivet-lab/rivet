@@ -344,6 +344,7 @@ fn dispatch_cdc(a: CdcArgs) -> Result<()> {
             CdcEngine::Mssql => CdcEngineOpts::Mssql {
                 configured_tables: a.table.clone(),
                 capture_instance: a.capture_instance,
+                resolved_grants: None,
             },
             CdcEngine::Mongo => CdcEngineOpts::Mongo {
                 canonical: false,
