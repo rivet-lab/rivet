@@ -43,7 +43,7 @@ fn fetch_max_connections_mssql(conn: &mut MssqlSource) -> Option<u32> {
 
 /// The `columns_from: grants` projection of a `table:`, which the run reads instead of `SELECT *`.
 fn grants_projection(
-    conn: &mut MssqlSource,
+    conn: &mut dyn Source,
     export: &ExportConfig,
     grants: bool,
 ) -> Result<Option<String>> {
@@ -274,6 +274,72 @@ use crate::sql::strip_select_star_from;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::cdc::ReadableColumns;
+
+    struct Grants(Option<&'static str>);
+
+    impl Source for Grants {
+        fn export(
+            &mut self,
+            _request: &crate::source::ExportRequest<'_>,
+            _sink: &mut dyn crate::source::BatchSink,
+        ) -> Result<()> {
+            unreachable!("a projection exports nothing")
+        }
+
+        fn query_scalar(&mut self, _sql: &str) -> Result<Option<String>> {
+            unreachable!("a projection reads no scalar")
+        }
+
+        fn type_mappings(
+            &mut self,
+            _query: &str,
+            _overrides: &crate::types::ColumnOverrides,
+        ) -> Result<Vec<crate::types::TypeMapping>> {
+            unreachable!("a projection reads no types")
+        }
+
+        fn readable_columns(&mut self, _table: &str) -> Result<Option<ReadableColumns>> {
+            Ok(self.0.map(|select| ReadableColumns {
+                columns: vec!["id".into()],
+                select: select.into(),
+            }))
+        }
+    }
+
+    fn export_of(extra_yaml: &str) -> ExportConfig {
+        let yaml = format!(
+            "name: t\nformat: parquet\ndestination:\n  type: local\n  path: /tmp\n{extra_yaml}"
+        );
+        serde_yaml_ng::from_str(&yaml).expect("parse ExportConfig")
+    }
+
+    /// Under `columns_from: grants` a `table:` is checked through the projection the run reads, and in no other case.
+    #[test]
+    fn a_table_under_the_grants_policy_is_checked_through_its_readable_projection_only() {
+        let select = "SELECT [id] FROM [dbo].[t]";
+        let table = export_of("table: dbo.t\n");
+        let on = grants_projection(&mut Grants(Some(select)), &table, true).unwrap();
+        assert_eq!(on.as_deref(), Some(select));
+        let off = grants_projection(&mut Grants(Some(select)), &table, false).unwrap();
+        assert_eq!(off, None);
+        let whole = grants_projection(&mut Grants(None), &table, true).unwrap();
+        assert_eq!(whole, None);
+        let query = export_of("query: SELECT 1\n");
+        let no_table = grants_projection(&mut Grants(Some(select)), &query, true).unwrap();
+        assert_eq!(no_table, None);
+    }
+
+    /// A check against an unreachable server refuses with the connect error, never an empty report.
+    #[test]
+    fn a_check_of_an_unreachable_server_is_refused_not_reported_clean() {
+        let export = export_of("table: dbo.t\n");
+        let Err(err) = check_mssql("sqlserver://u:p@127.0.0.1:1/app", None, &[&export], true)
+        else {
+            panic!("an unreachable server is not a clean check");
+        };
+        assert!(format!("{err:#}").contains("driver: mssql"), "{err:#}");
+    }
 
     #[test]
     fn split_qualified_defaults_schema_to_dbo() {

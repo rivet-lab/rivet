@@ -937,10 +937,7 @@ mod column_grants_dispatch_tests {
             "{postgres}"
         );
         let mssql = refusal(SourceType::Mssql, "sqlserver://u:p@127.0.0.1:1/app");
-        assert!(
-            !mssql.contains("driver: oracle") && !mssql.contains("error connecting to server"),
-            "{mssql}"
-        );
+        assert!(mssql.contains("driver: mssql"), "{mssql}");
     }
 
     /// Each engine says its own boundary, and PostgreSQL's names the change stream as a client-side projection.
