@@ -158,6 +158,8 @@ pub enum Failure {
     RunNotSuccessful { status: String },
     /// Advisory: `--depth full` re-counted this CSV export's rows per part.
     ValueCheckNotAvailable { format: String },
+    /// Advisory: the run wrote these cells as NULL because MySQL held a zero or partial date.
+    CellsWrittenAsNull { detail: String },
 }
 
 impl Failure {
@@ -165,7 +167,9 @@ impl Failure {
     pub fn is_fatal(&self) -> bool {
         !matches!(
             self,
-            Failure::UntrackedObject { .. } | Failure::ValueCheckNotAvailable { .. }
+            Failure::UntrackedObject { .. }
+                | Failure::ValueCheckNotAvailable { .. }
+                | Failure::CellsWrittenAsNull { .. }
         )
     }
 
@@ -213,6 +217,7 @@ impl Failure {
             Failure::ManifestMissingUnderMarker { .. } => "RIVET_VERIFY_MANIFEST_MISSING",
             Failure::RunNotSuccessful { .. } => "RIVET_VERIFY_RUN_NOT_SUCCESSFUL",
             Failure::ValueCheckNotAvailable { .. } => "RIVET_VERIFY_VALUE_CHECK_NOT_AVAILABLE",
+            Failure::CellsWrittenAsNull { .. } => "RIVET_VERIFY_CELLS_WRITTEN_AS_NULL",
         }
     }
 }
@@ -321,6 +326,10 @@ impl std::fmt::Display for Failure {
                 f,
                 "the manifest records its last run as {status}, not success: this prefix \
                  does not hold a completed export. Re-run the export."
+            ),
+            Failure::CellsWrittenAsNull { detail } => write!(
+                f,
+                "zero or partial date cells were written as NULL: {detail}; the columns are labelled \"compatible\", never \"exact\""
             ),
             Failure::ValueCheckNotAvailable { format } => write!(
                 f,
@@ -506,6 +515,21 @@ pub fn verify_at_destination(
 }
 
 /// The verdict at `manifest_dir` with the destination's error text as the store returned it.
+/// The manifest's own record of the run: its self-consistency and the cells it wrote as NULL.
+fn check_record_of_run(manifest: &RunManifest, out: &mut ManifestVerification) {
+    if let Err(e) = manifest.validate_self_consistency() {
+        out.manifest_self_consistent = false;
+        out.failures.push(Failure::ManifestSelfInconsistent {
+            detail: format!("{e}"),
+        });
+    }
+    if let Some(cells) = &manifest.nulled_cells {
+        out.failures.push(Failure::CellsWrittenAsNull {
+            detail: crate::source::mysql::zero_date_counts(cells),
+        });
+    }
+}
+
 fn verify_unredacted(
     dest: &dyn Destination,
     manifest_dir: &str,
@@ -585,12 +609,7 @@ fn verify_unredacted(
         ..ManifestVerification::empty()
     };
 
-    if let Err(e) = manifest.validate_self_consistency() {
-        out.manifest_self_consistent = false;
-        out.failures.push(Failure::ManifestSelfInconsistent {
-            detail: format!("{e}"),
-        });
-    }
+    check_record_of_run(&manifest, &mut out);
     if manifest.status != crate::manifest::ManifestStatus::Success {
         let status = serde_json::to_value(manifest.status)?;
         out.failures.push(Failure::RunNotSuccessful {
@@ -843,6 +862,7 @@ mod tests {
             parts,
             column_checksums: None,
             checksum_key_column: None,
+            nulled_cells: None,
         }
     }
 
@@ -2220,6 +2240,12 @@ mod tests {
                 },
                 "RIVET_VERIFY_VALUE_CHECK_NOT_AVAILABLE",
             ),
+            (
+                Failure::CellsWrittenAsNull {
+                    detail: "d=2".into(),
+                },
+                "RIVET_VERIFY_CELLS_WRITTEN_AS_NULL",
+            ),
         ];
         for (failure, code) in cases {
             assert_eq!(&failure.error_code(), code, "code for {failure:?}");
@@ -2277,6 +2303,7 @@ mod tests {
                 Failure::ManifestMissingUnderMarker { .. } => "ManifestMissingUnderMarker",
                 Failure::RunNotSuccessful { .. } => "RunNotSuccessful",
                 Failure::ValueCheckNotAvailable { .. } => "ValueCheckNotAvailable",
+                Failure::CellsWrittenAsNull { .. } => "CellsWrittenAsNull",
             })
             .collect();
         let missing: Vec<&&str> = declared.iter().filter(|v| !covered.contains(v)).collect();

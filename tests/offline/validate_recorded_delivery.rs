@@ -110,6 +110,7 @@ fn stage_dataset(prefix: &Path) {
         }],
         column_checksums: None,
         checksum_key_column: None,
+        nulled_cells: None,
     };
     let dest =
         rivet::destination_for_tests::create_destination(&rivet::config::DestinationConfig {
