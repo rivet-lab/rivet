@@ -1866,3 +1866,388 @@ fn a_bounded_scalar_read_is_cancelled_at_its_budget_mysql() {
     );
     let _ = c.query_drop(format!("DROP TABLE IF EXISTS {table}"));
 }
+
+/// Dense keys of a skew fixture: a block at the bottom of the key axis, the nil uuid among them.
+const SKEW_DENSE: i64 = 180_000;
+/// Sparse keys of a skew fixture, spread over the whole key axis above the dense block.
+const SKEW_SPARSE: i64 = 20_000;
+/// Rows of a skew fixture.
+const SKEW_ROWS: usize = (SKEW_DENSE + SKEW_SPARSE) as usize;
+
+/// The integer keys of the skew fixture.
+fn skew_int_keys() -> BTreeSet<i64> {
+    (1..=SKEW_DENSE)
+        .chain((1..=SKEW_SPARSE).map(|g| SKEW_DENSE + g * 500_000))
+        .collect()
+}
+
+/// The uuid keys of the skew fixture as canonical lowercase text.
+fn skew_uuid_keys() -> BTreeSet<String> {
+    (0..SKEW_DENSE as u128)
+        .chain((1..=SKEW_SPARSE as u128).map(|g| g << 96))
+        .map(|v| uuid::Uuid::from_u128(v).hyphenated().to_string())
+        .collect()
+}
+
+/// Runs a skew export at info level; returns what it logged and the rows per range.
+fn skew_run(rig: &Rig) -> (String, std::collections::BTreeMap<usize, usize>) {
+    let out = rig.run_args_env(&[], &[("RUST_LOG", "info")]);
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        out.status.success(),
+        "skewed keyset run must exit 0:\n{said}"
+    );
+    (said, rows_per_range(&rig.out_dir()))
+}
+
+/// The seek path with a density recut that balanced, not the percentile path nor an unbalanced recut.
+fn assert_seek_recut(said: &str) {
+    assert!(
+        said.contains("parallel keyset path: seek+recut (") && !said.contains("not balanced"),
+        "a skewed key takes the seek+recut path:\n{said}"
+    );
+}
+
+/// The row-percentile path, which is row-balanced by construction.
+fn assert_percentile(said: &str) {
+    assert!(
+        said.contains("parallel keyset path: percentile ("),
+        "a skewed key under the row limit takes the percentile path:\n{said}"
+    );
+}
+
+/// The heaviest range holds at most twice the mean range.
+fn assert_within_twice_the_mean(spread: &std::collections::BTreeMap<usize, usize>) {
+    let total: usize = spread.values().sum();
+    let heaviest = spread.values().max().copied().unwrap_or_default();
+    assert!(
+        spread.len() >= 4 && heaviest * spread.len() <= 2 * total,
+        "the heaviest range ({heaviest} rows) is over twice the mean over {} ranges: {spread:?}",
+        spread.len()
+    );
+}
+
+/// Every integer-keyed skew row lands once.
+fn assert_skew_int_delivered(dir: &std::path::Path) {
+    assert_eq!(
+        (count_rows(dir), dir_parquet_id_set(dir)),
+        (SKEW_ROWS, skew_int_keys()),
+        "every source id once"
+    );
+}
+
+/// Every uuid-keyed skew row lands once, the nil uuid among them.
+fn assert_skew_uuid_delivered(dir: &std::path::Path) {
+    let ids: Vec<String> = dir_parquet_display(dir, "id")
+        .into_iter()
+        .flatten()
+        .collect();
+    let distinct: BTreeSet<String> = ids.iter().cloned().collect();
+    assert_eq!(
+        (ids.len(), distinct),
+        (SKEW_ROWS, skew_uuid_keys()),
+        "every source uuid once"
+    );
+}
+
+/// SQL Server's uuids come from NEWID for the sparse part, so only counts and the nil uuid are fixed.
+fn assert_skew_mssql_uuid_delivered(dir: &std::path::Path) {
+    let ids: Vec<String> = dir_parquet_display(dir, "id")
+        .into_iter()
+        .flatten()
+        .collect();
+    let distinct: BTreeSet<String> = ids.iter().cloned().collect();
+    assert_eq!(
+        (
+            ids.len(),
+            distinct.len(),
+            distinct.contains("00000000-0000-0000-0000-000000000000")
+        ),
+        (SKEW_ROWS, SKEW_ROWS, true),
+        "every source uuid once, the nil uuid among them"
+    );
+}
+
+/// The integer skew fixture on MySQL: `options` ends its `CREATE TABLE`.
+fn mysql_skew_int(c: &mut mysql::PooledConn, table: &str, options: &str) {
+    use mysql::prelude::Queryable;
+    c.query_drop(format!("DROP TABLE IF EXISTS {table}"))
+        .unwrap();
+    c.query_drop(format!(
+        "CREATE TABLE {table} (id BIGINT NOT NULL PRIMARY KEY, payload INT NOT NULL) {options}"
+    ))
+    .unwrap();
+    c.query_drop(format!("SET SESSION cte_max_recursion_depth = {SKEW_ROWS}"))
+        .unwrap();
+    c.query_drop(format!(
+        "INSERT INTO {table} (id, payload) \
+         WITH RECURSIVE seq AS (SELECT 1 n UNION ALL SELECT n + 1 FROM seq WHERE n < {SKEW_DENSE}) \
+         SELECT n, n FROM seq"
+    ))
+    .unwrap();
+    c.query_drop(format!(
+        "INSERT INTO {table} (id, payload) \
+         WITH RECURSIVE seq AS (SELECT 1 n UNION ALL SELECT n + 1 FROM seq WHERE n < {SKEW_SPARSE}) \
+         SELECT {SKEW_DENSE} + n * 500000, n FROM seq"
+    ))
+    .unwrap();
+}
+
+/// The uuid skew fixture on MySQL as CHAR(36): `options` ends its `CREATE TABLE`.
+fn mysql_skew_uuid(c: &mut mysql::PooledConn, table: &str, options: &str) {
+    use mysql::prelude::Queryable;
+    let last = SKEW_DENSE - 1;
+    c.query_drop(format!("DROP TABLE IF EXISTS {table}"))
+        .unwrap();
+    c.query_drop(format!(
+        "CREATE TABLE {table} (id CHAR(36) NOT NULL PRIMARY KEY, payload INT NOT NULL) {options}"
+    ))
+    .unwrap();
+    c.query_drop(format!("SET SESSION cte_max_recursion_depth = {SKEW_ROWS}"))
+        .unwrap();
+    c.query_drop(format!(
+        "INSERT INTO {table} (id, payload) \
+         WITH RECURSIVE seq AS (SELECT 0 n UNION ALL SELECT n + 1 FROM seq WHERE n < {last}), \
+         hx AS (SELECT LPAD(HEX(n), 32, '0') h, n FROM seq) \
+         SELECT LOWER(CONCAT_WS('-', SUBSTR(h,1,8), SUBSTR(h,9,4), SUBSTR(h,13,4), SUBSTR(h,17,4), SUBSTR(h,21,12))), n FROM hx"
+    ))
+    .unwrap();
+    c.query_drop(format!(
+        "INSERT INTO {table} (id, payload) \
+         WITH RECURSIVE seq AS (SELECT 1 n UNION ALL SELECT n + 1 FROM seq WHERE n < {SKEW_SPARSE}), \
+         hx AS (SELECT CONCAT(LPAD(HEX(n), 8, '0'), REPEAT('0', 24)) h, n FROM seq) \
+         SELECT LOWER(CONCAT_WS('-', SUBSTR(h,1,8), SUBSTR(h,9,4), SUBSTR(h,13,4), SUBSTR(h,17,4), SUBSTR(h,21,12))), n FROM hx"
+    ))
+    .unwrap();
+}
+
+/// A skewed integer key (a dense block and a sparse tail) on PostgreSQL is recut by density: every row once, balanced, and no COUNT(*) read.
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn a_skewed_integer_keyset_is_recut_by_density_postgres() {
+    require_alive(LiveService::Postgres);
+    let table = unique_name("pk_skew_int");
+    let mut c = pg_connect();
+    c.batch_execute(&format!(
+        "DROP TABLE IF EXISTS {table};
+         CREATE TABLE {table} (id BIGINT PRIMARY KEY, payload INT NOT NULL);
+         INSERT INTO {table} SELECT g, g FROM generate_series(1, {SKEW_DENSE}) g;
+         INSERT INTO {table} SELECT {SKEW_DENSE} + g * 500000, g FROM generate_series(1, {SKEW_SPARSE}) g;"
+    ))
+    .unwrap();
+    pg_catalog_says_rows(&mut c, &table, 20_000_000);
+    let rig = Rig::pg_batch(&format!("public.{table}"))
+        .mode("chunked")
+        .export_line("chunk_by_key: id")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000")
+        .no_oracle("the test counts reads of the source table; the oracle's own read-back would be counted");
+    let before = pg_tuples_read(&mut c, &table);
+    let (said, spread) = skew_run(&rig);
+    let read = pg_tuples_read(&mut c, &table) - before;
+    assert_seek_recut(&said);
+    assert_skew_int_delivered(&rig.out_dir());
+    assert_within_twice_the_mean(&spread);
+    assert!(
+        read <= SKEW_ROWS as i64 * 6 / 5,
+        "the run read {read} tuples for {SKEW_ROWS} rows: the seek path counts or scans the table"
+    );
+    let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
+}
+
+/// A skewed uuid key (the nil uuid in the dense block) on PostgreSQL is recut by density: every row once, balanced.
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn a_skewed_uuid_keyset_is_recut_by_density_postgres() {
+    require_alive(LiveService::Postgres);
+    let table = unique_name("pk_skew_uuid");
+    let last = SKEW_DENSE - 1;
+    let mut c = pg_connect();
+    c.batch_execute(&format!(
+        "DROP TABLE IF EXISTS {table};
+         CREATE TABLE {table} (id UUID PRIMARY KEY, payload INT NOT NULL);
+         INSERT INTO {table} SELECT lpad(to_hex(g), 32, '0')::uuid, g FROM generate_series(0, {last}) g;
+         INSERT INTO {table} SELECT (lpad(to_hex(g), 8, '0') || repeat('0', 24))::uuid, g FROM generate_series(1, {SKEW_SPARSE}) g;"
+    ))
+    .unwrap();
+    pg_catalog_says_rows(&mut c, &table, 20_000_000);
+    let rig = Rig::pg_batch(&format!("public.{table}"))
+        .mode("chunked")
+        .export_line("chunk_by_key: id")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000")
+        .no_oracle("the test grades the delivered uuids itself against the fixture's keys");
+    let (said, spread) = skew_run(&rig);
+    assert_seek_recut(&said);
+    assert_skew_uuid_delivered(&rig.out_dir());
+    assert_within_twice_the_mean(&spread);
+    let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
+}
+
+/// A skewed integer key on MySQL is recut by density: every row once, balanced ranges.
+#[test]
+#[ignore = "live: requires docker compose up -d mysql"]
+fn a_skewed_integer_keyset_is_recut_by_density_mysql() {
+    require_alive(LiveService::Mysql);
+    use mysql::prelude::Queryable;
+    let table = unique_name("pk_skew_my");
+    let mut c = mysql_connect();
+    mysql_skew_int(&mut c, &table, "STATS_PERSISTENT=1 STATS_AUTO_RECALC=0");
+    mysql_catalog_says_rows(&table, 20_000_000);
+    let rig = Rig::mysql_batch(&table)
+        .mode("chunked")
+        .export_line("chunk_by_key: id")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000");
+    let (said, spread) = skew_run(&rig);
+    assert_seek_recut(&said);
+    assert_skew_int_delivered(&rig.out_dir());
+    assert_within_twice_the_mean(&spread);
+    let _ = c.query_drop(format!("DROP TABLE IF EXISTS {table}"));
+}
+
+/// A skewed uuid key stored as CHAR(36) on MySQL is recut by density: every row once, the nil uuid among them.
+#[test]
+#[ignore = "live: requires docker compose up -d mysql"]
+fn a_skewed_uuid_keyset_is_recut_by_density_mysql() {
+    require_alive(LiveService::Mysql);
+    use mysql::prelude::Queryable;
+    let table = unique_name("pk_skew_uuid_my");
+    let mut c = mysql_connect();
+    mysql_skew_uuid(&mut c, &table, "STATS_PERSISTENT=1 STATS_AUTO_RECALC=0");
+    mysql_catalog_says_rows(&table, 20_000_000);
+    let rig = Rig::mysql_batch(&table)
+        .mode("chunked")
+        .export_line("chunk_by_key: id")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000");
+    let (said, spread) = skew_run(&rig);
+    assert_seek_recut(&said);
+    assert_skew_uuid_delivered(&rig.out_dir());
+    assert_within_twice_the_mean(&spread);
+    let _ = c.query_drop(format!("DROP TABLE IF EXISTS {table}"));
+}
+
+/// A skewed integer key on Oracle, whose catalog gives no row estimate, is recut by density: every row once, NUMBER(19) key.
+#[test]
+#[ignore = "live: requires docker compose up -d oracle"]
+fn a_skewed_integer_keyset_is_recut_by_density_oracle() {
+    require_alive(LiveService::Oracle);
+    let t = OracleTable::create(
+        "ora_skew_int",
+        "id NUMBER(19) PRIMARY KEY, payload NUMBER(10) NOT NULL",
+    );
+    ora_exec(&format!(
+        "INSERT INTO {} SELECT LEVEL, LEVEL FROM dual CONNECT BY LEVEL <= {SKEW_DENSE}",
+        t.name()
+    ));
+    ora_exec(&format!(
+        "INSERT INTO {} SELECT {SKEW_DENSE} + LEVEL * 500000, LEVEL FROM dual CONNECT BY LEVEL <= {SKEW_SPARSE}",
+        t.name()
+    ));
+    let rig = Rig::oracle_batch(t.name())
+        .mode("chunked")
+        .export_line("chunk_by_key: ID")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000");
+    let (said, spread) = skew_run(&rig);
+    assert_seek_recut(&said);
+    assert_skew_int_delivered(&rig.out_dir());
+    assert_within_twice_the_mean(&spread);
+}
+
+/// A skewed uuid key stored as VARCHAR2(36) on Oracle is recut by density: every row once, the nil uuid among them.
+#[test]
+#[ignore = "live: requires docker compose up -d oracle"]
+fn a_skewed_uuid_keyset_is_recut_by_density_oracle() {
+    require_alive(LiveService::Oracle);
+    let t = OracleTable::create(
+        "ora_skew_uuid",
+        "id VARCHAR2(36) PRIMARY KEY, payload NUMBER(10) NOT NULL",
+    );
+    let canon = |h: &str| {
+        format!(
+            "LOWER(SUBSTR({h},1,8)||'-'||SUBSTR({h},9,4)||'-'||SUBSTR({h},13,4)||'-'||SUBSTR({h},17,4)||'-'||SUBSTR({h},21,12))"
+        )
+    };
+    ora_exec(&format!(
+        "INSERT INTO {} SELECT {}, g FROM (SELECT LEVEL - 1 g, LPAD(TO_CHAR(LEVEL - 1, 'FMXXXXXXXX'), 32, '0') h FROM dual CONNECT BY LEVEL <= {SKEW_DENSE})",
+        t.name(),
+        canon("h")
+    ));
+    ora_exec(&format!(
+        "INSERT INTO {} SELECT {}, g FROM (SELECT LEVEL g, LPAD(TO_CHAR(LEVEL, 'FMXXXXXXXX'), 8, '0') || RPAD('0', 24, '0') h FROM dual CONNECT BY LEVEL <= {SKEW_SPARSE})",
+        t.name(),
+        canon("h")
+    ));
+    let rig = Rig::oracle_batch(t.name())
+        .mode("chunked")
+        .export_line("chunk_by_key: ID")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000");
+    let (said, spread) = skew_run(&rig);
+    assert_seek_recut(&said);
+    assert_skew_uuid_delivered(&rig.out_dir());
+    assert_within_twice_the_mean(&spread);
+}
+
+/// A skewed integer key on SQL Server stays on the percentile path (sys.partitions counts 200k, under the limit): every row once, balanced.
+#[test]
+#[ignore = "live+gate-only: requires docker compose up -d mssql"]
+fn a_skewed_integer_keyset_keeps_row_percentiles_mssql() {
+    require_alive(LiveService::Mssql);
+    let table = unique_name("pk_skew_ms");
+    mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));
+    mssql_exec(&format!(
+        "CREATE TABLE {table} (id BIGINT NOT NULL PRIMARY KEY, payload INT NOT NULL)"
+    ));
+    mssql_exec(&format!(
+        "WITH nums AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM nums WHERE n < {SKEW_DENSE}) \
+         INSERT INTO {table} (id, payload) SELECT n, n FROM nums OPTION (MAXRECURSION 0)"
+    ));
+    mssql_exec(&format!(
+        "WITH nums AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM nums WHERE n < {SKEW_SPARSE}) \
+         INSERT INTO {table} (id, payload) SELECT {SKEW_DENSE} + CAST(n AS BIGINT) * 500000, n FROM nums OPTION (MAXRECURSION 0)"
+    ));
+    let rig = Rig::mssql_batch(&table)
+        .mode("chunked")
+        .export_line("chunk_by_key: id")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000");
+    let (said, spread) = skew_run(&rig);
+    assert_percentile(&said);
+    assert_skew_int_delivered(&rig.out_dir());
+    assert_within_twice_the_mean(&spread);
+    mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));
+}
+
+/// A skewed uniqueidentifier key on SQL Server stays on the percentile path, never the recut: every row once, the nil uuid among them.
+#[test]
+#[ignore = "live+gate-only: requires docker compose up -d mssql"]
+fn a_skewed_uniqueidentifier_keyset_keeps_row_percentiles_mssql() {
+    require_alive(LiveService::Mssql);
+    let table = unique_name("pk_skew_uid_ms");
+    mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));
+    mssql_exec(&format!(
+        "CREATE TABLE {table} (k UNIQUEIDENTIFIER NOT NULL PRIMARY KEY, payload INT NOT NULL)"
+    ));
+    mssql_exec(&format!(
+        "WITH nums AS (SELECT 0 AS n UNION ALL SELECT n + 1 FROM nums WHERE n < {}) \
+         INSERT INTO {table} (k, payload) SELECT CONVERT(UNIQUEIDENTIFIER, CONVERT(BINARY(16), n)), n FROM nums OPTION (MAXRECURSION 0)",
+        SKEW_DENSE - 1
+    ));
+    mssql_exec(&format!(
+        "WITH nums AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM nums WHERE n < {SKEW_SPARSE}) \
+         INSERT INTO {table} (k, payload) SELECT NEWID(), n FROM nums OPTION (MAXRECURSION 0)"
+    ));
+    let rig = Rig::mssql_batch(&table)
+        .mode("chunked")
+        .export_line("chunk_by_key: k")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000");
+    let (said, spread) = skew_run(&rig);
+    assert_percentile(&said);
+    assert_skew_mssql_uuid_delivered(&rig.out_dir());
+    assert_within_twice_the_mean(&spread);
+    mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));
+}
