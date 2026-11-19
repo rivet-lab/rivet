@@ -1471,6 +1471,57 @@ mod subcommand_error_tests {
         assert_eq!(names(&named), ["base"]);
     }
 
+    /// `check` plans the pending baseline leg of a CDC export; `plan`, a done baseline and a stream-only export have none.
+    #[test]
+    fn check_plans_the_pending_baseline_leg_of_a_cdc_export_and_only_that() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |cdc: &str, name: &str| {
+            let cfg = dir.path().join(name);
+            std::fs::write(
+                &cfg,
+                format!(
+                    "source:\n  type: postgres\n  url: postgresql://u:p@127.0.0.1:1/db\n\
+                     exports:\n\
+                     \x20 - name: s\n    table: t\n    mode: cdc\n\
+                     \x20   cdc: {cdc}\n    format: parquet\n    destination: {{ type: local, path: ./out }}\n"
+                ),
+            )
+            .unwrap();
+            cfg.to_str().unwrap().to_string()
+        };
+        let names = |plans: &[super::BatchPlan]| -> Vec<String> {
+            plans.iter().map(|(n, _)| n.clone()).collect()
+        };
+        let pending = write("{ initial: snapshot, checkpoint: ./c.ckpt }", "a.yaml");
+        let plans = super::batch_plans(&pending, None, None, false).unwrap();
+        assert_eq!(names(&plans), ["s__snapshot_t"]);
+        let config = crate::config::Config::load_with_params(&pending, None).unwrap();
+        let none = crate::pipeline::planning::plan_run(
+            &config,
+            dir.path(),
+            None,
+            None,
+            super::check_plan_flags(false),
+            false,
+        )
+        .unwrap();
+        assert!(none.is_empty());
+        let stream_only = write("{ slot: s, checkpoint: ./c.ckpt }", "b.yaml");
+        assert!(
+            super::batch_plans(&stream_only, None, None, false)
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::create_dir_all(dir.path().join("out/snapshot")).unwrap();
+        std::fs::write(dir.path().join("out/snapshot/_SUCCESS"), b"{}").unwrap();
+        let done = write("{ initial: snapshot, checkpoint: ./c.ckpt }", "c.yaml");
+        assert!(
+            super::batch_plans(&done, None, None, false)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     /// `rivet check` ends in an error for a config the planner refuses, before any connection is made.
     #[test]
     fn check_fails_on_a_config_the_planner_refuses() {

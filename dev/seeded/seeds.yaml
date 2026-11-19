@@ -6646,3 +6646,4 @@ seeds:
       lib:
         cells:
           - "lib:the_legs_check_admits_are_the_pending_baselines_and_nothing_else"
+          - "lib:check_plans_the_pending_baseline_leg_of_a_cdc_export_and_only_that"
