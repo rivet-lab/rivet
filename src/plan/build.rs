@@ -3037,6 +3037,31 @@ mod tests {
     }
 
     #[test]
+    fn full_strategy_warns_only_for_a_mongo_full_export_with_parallel_above_one_and_no_page_size() {
+        use crate::pipeline::run::run_tail_tests::{
+            captured_warnings_mentioning, install_warn_capture,
+        };
+        install_warn_capture();
+        let warned = |name: &str, source: &str, parallel: u32| {
+            let yaml = format!(
+                "source: {source}\nexports:\n  - name: {name}\n    table: coll\n    mode: full\n    \
+                 parallel: {parallel}\n    format: parquet\n    destination: {{ type: local, path: ./o }}\n"
+            );
+            let cfg = crate::config::Config::from_yaml(&yaml).expect("parses");
+            full_strategy(&cfg, &cfg.exports[0]);
+            captured_warnings_mentioning(&format!("export '{name}'"))
+        };
+        let mongo = "{ type: mongo, url: \"mongodb://127.0.0.1:27017/db\" }";
+        let postgres = "{ type: postgres, url: \"postgresql://u:p@127.0.0.1:5432/db\" }";
+        let said = warned("fs_mongo_par4", mongo, 4);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("page_size"), "{said:?}");
+        assert!(warned("fs_mongo_par2", mongo, 2).len() == 1);
+        assert!(warned("fs_mongo_par1", mongo, 1).is_empty());
+        assert!(warned("fs_pg_par4", postgres, 4).is_empty());
+    }
+
+    #[test]
     fn expand_destination_templates_no_placeholders_unchanged() {
         let dest = DestinationConfig {
             destination_type: DestinationType::Local,
