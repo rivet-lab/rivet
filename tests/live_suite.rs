@@ -168,6 +168,8 @@ mod live_init;
 mod live_init_delta;
 #[path = "live/live_init_extended.rs"]
 mod live_init_extended;
+#[path = "live/live_int_to_bool_override.rs"]
+mod live_int_to_bool_override;
 #[path = "live/live_int_to_float_override.rs"]
 mod live_int_to_float_override;
 #[path = "live/live_keyset.rs"]
