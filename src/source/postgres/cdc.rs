@@ -377,11 +377,11 @@ impl<'a> Probe<'a> {
     fn select_of(&self, client: &mut Client, table: &str) -> Result<String> {
         match self {
             Self::Whole => Ok(format!("SELECT * FROM {table}")),
-            Self::Readable(Some(resolved)) if resolved.contains_key(table) => {
-                Ok(resolved[table].select.clone())
-            }
-            Self::Readable(_) => super::column_grants::readable_columns(client, table.trim())
-                .map(|(_, _, r)| r.select),
+            Self::Readable(resolved) => match (*resolved).and_then(|r| r.get(table)) {
+                Some(r) => Ok(r.select.clone()),
+                None => super::column_grants::readable_columns(client, table.trim())
+                    .map(|(_, _, r)| r.select),
+            },
         }
     }
 }
@@ -1549,7 +1549,9 @@ pub(crate) fn parse_test_decoding_keeping<'a>(
         }
         ChangeOp::Insert => (None, Some(cols), Some(names), None),
     };
-    let poisoned = poison.is_some() || infinity_poison.is_some() || before_poison.is_some();
+    let poisoned = [&poison, &infinity_poison, &before_poison]
+        .iter()
+        .any(|p| p.is_some());
     if keep.is_some()
         && seeded!("column-grants-pg-hidden-only-update-delivered", false, true)
         && op == ChangeOp::Update

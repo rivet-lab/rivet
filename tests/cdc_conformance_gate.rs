@@ -975,7 +975,8 @@ const PIN_SELF_COUNTER: usize = 6; // ratchet-pin: cdc-census-self-counter (revi
 // 107 -> 113 (2026-11-16, #714): six Oracle columns_from: grants cells, whose oracle is the coded refusal or the delivered column set read back from the parts.
 // 105 -> 107 (2026-11-11): the two PG bit-column refusal cells, whose oracle is the coded refusal, no snapshot and only a failure record left.
 // 113 -> 115 (2026-11-16, #715): two MongoDB column-grants CDC cells whose oracle is a coded refusal or an unmoved checkpoint.
-const PIN_PRESENCE: usize = 115; // ratchet-pin: cdc-census-presence (review 2027-02-01)
+// 115 -> 117 (2026-11-19, #712): two PostgreSQL column-grants cells whose oracle is a coded refusal (a sealed plan after a revoke, a BIT column the role may not read).
+const PIN_PRESENCE: usize = 117; // ratchet-pin: cdc-census-presence (review 2027-02-01)
 
 /// TIER 2 (harness audit, 2026-08-29): a test whose NAME makes a
 /// COMPLETENESS claim must carry a class-(a) INDEPENDENT oracle — not merely

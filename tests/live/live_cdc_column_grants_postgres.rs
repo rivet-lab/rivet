@@ -183,6 +183,12 @@ fn a_column_grant_role_delivers_only_what_it_may_read(identity: &str, expected: 
         "check under a column grant:\n{}",
         said_by(&check)
     );
+    let checked = said_by(&check);
+    assert!(
+        checked.contains("Verdict:") && checked.contains("client-side projection"),
+        "check reads the export and says the boundary:
+{checked}"
+    );
     rig.run_ok();
     let mut c = root();
     for sql in [
@@ -513,4 +519,77 @@ fn an_unchanged_toast_hidden_column_poisons_nothing_in_cdc_postgres() {
     let parts = parts_under(&rig.out_dir());
     assert_no_hidden(&parts, "cdc");
     assert_eq!(changes(&parts), vec![change("update", 1, "ann2")]);
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc postgres-cdc (wal_level=logical)"]
+fn a_sealed_plan_applied_after_a_revoke_is_refused_by_code_with_the_replan_remedy_in_batch_postgres()
+ {
+    let (table, _table) = seeded("cg_pg_plan", "DEFAULT");
+    let role = GrantRole::new(&table, "id, name, pass");
+    let url_var = "RIVET_CG_PG_PLAN_URL";
+    let envs = [(url_var, role.url())];
+    let env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let slot = unique_name("cg_pg_plan_slot");
+    let _slot = Slot::new(slot.clone());
+    let rig = Rig::pg_cdc(&table, &slot)
+        .source_url_env(url_var)
+        .source_line("columns_from: grants")
+        .no_oracle("the oracle reads the source through the rig's account, which may not SELECT the hidden column; the cell grades the refusal and the files")
+        .into_full_batch()
+        .restage("full", &[]);
+    let plan = rig.out_dir().with_file_name("plan.json");
+    let planned = rig.plan_json_env(&plan, &[], &env_refs);
+    assert!(planned.status.success(), "plan: {}", said_by(&planned));
+    root()
+        .batch_execute(&format!("REVOKE SELECT (pass) ON {table} FROM {}", role.0))
+        .unwrap();
+    let out = rig.apply_env(&plan, &[], &env_refs);
+    let said = said_by(&out);
+    assert_refused(&out, Refused::by_code("RIVET_SOURCE_COLUMNS_UNREADABLE", 1));
+    assert!(
+        said.contains("rivet plan") && said.contains("the server said"),
+        "the refusal names the remedy (plan again) and the server's words:\n{said}"
+    );
+    assert!(
+        files_under(&rig.out_dir())
+            .iter()
+            .all(|f| f.extension().is_some_and(|e| e == "json")),
+        "a run refused at its read delivers no part"
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc postgres-cdc (wal_level=logical)"]
+fn a_bit_column_is_refused_when_the_role_reads_it_and_never_looked_at_when_it_may_not_in_cdc_postgres()
+ {
+    for (label, columns, refused) in [
+        ("cg_pg_bit_hid", "id, name", false),
+        ("cg_pg_bit_see", "id, flags", true),
+    ] {
+        let table = unique_name(label);
+        root()
+            .batch_execute(&format!(
+                "CREATE TABLE {table} (id INT PRIMARY KEY, name TEXT, flags BIT(3)); \
+                 INSERT INTO {table} VALUES (1, 'ann', B'110')"
+            ))
+            .unwrap();
+        let _table = PgTable::adopt_on(POSTGRES_CDC_URL, table.clone());
+        let slot = unique_name("cg_pg_bit_slot");
+        let _slot = Slot::new(slot.clone());
+        let role = GrantRole::new(&table, columns);
+        let rig = grant_rig(&table, &slot, &role);
+        if refused {
+            let out = rig.run_with_envs(&[]);
+            assert_refused(
+                &out,
+                Refused::by_code("RIVET_SOURCE_CDC_CELL_UNSUPPORTED", 5),
+            );
+            assert!(said_by(&out).contains("flags"), "{}", said_by(&out));
+        } else {
+            rig.run_ok();
+            let (names, _) = names_and_cells(&parts_under(&rig.out_dir()));
+            assert!(!names.iter().any(|n| n == "flags"), "{names:?}");
+        }
+    }
 }

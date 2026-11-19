@@ -4579,7 +4579,8 @@ seeds:
         switch: column-grants-revoked-column-uncoded
         cells: [a_sealed_plan_applied_after_a_revoke_is_refused_by_code_with_the_replan_remedy_mysql]
       postgres:
-        na: "the defect is in another engine's reader; the PostgreSQL projection is seeded by its own rows (the column-grants-pg-* rows)"
+        switch: column-grants-revoked-column-uncoded
+        cells: [a_sealed_plan_applied_after_a_revoke_is_refused_by_code_with_the_replan_remedy_in_batch_postgres]
       mssql:
         na: "`columns_from: grants` is refused on SQL Server at config load until #713, so this path is never reached (columns_from_grants_is_refused_by_every_command_mssql)"
       oracle:
