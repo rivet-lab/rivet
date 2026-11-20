@@ -609,6 +609,9 @@ pub(super) fn rows_to_batch(
 }
 
 #[cfg(test)]
+mod type_table;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
