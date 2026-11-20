@@ -158,6 +158,13 @@ fn row_violations(doc: &Value) -> Vec<String> {
             }
             let matrix_only =
                 r["delivery"].is_null() && r["edges"].as_sequence().is_some_and(|e| !e.is_empty());
+            if matrix_only && r["refuses"].is_null() && engine != DOCUMENT_ENGINE {
+                bad.push(format!(
+                    "{at}: no `delivery` — every delivered type declares the Arrow type or TextForm \
+                     its mapper produces, so the type check, CDC parity and the override grid \
+                     grade it; a type the engine refuses declares `refuses:` instead"
+                ));
+            }
             if !matrix_only && r["sample"].as_sequence().is_none_or(|s| s.is_empty()) {
                 bad.push(format!("{at}: no sample"));
             }
@@ -353,6 +360,9 @@ const KNOWN_DEFECTS: &[&str] = &[
     "oracle:TIMESTAMP(9)",
 ]; // ratchet-pin: end
 
+/// The engine whose rows are BSON value types inside its one `document` column: they have no column of their own to declare a delivery for.
+const DOCUMENT_ENGINE: &str = "mongo";
+
 /// The fields a ledger row may carry.
 const ROW_KEYS: [&str; 11] = [
     "native_type",
@@ -466,6 +476,18 @@ fn row_mut<'a>(doc: &'a mut Value, engine: &str, native: &str) -> &'a mut serde_
         .find(|r| r["native_type"] == native)
         .and_then(Value::as_mapping_mut)
         .unwrap_or_else(|| panic!("no {engine} row {native}"))
+}
+
+#[test]
+fn a_delivered_row_without_its_delivery_is_refused() {
+    let mut doc = ledger();
+    row_mut(&mut doc, "postgres", "INTEGER").remove("delivery");
+    let bad = row_violations(&doc);
+    assert!(
+        bad.iter()
+            .any(|b| b.starts_with("engines.postgres.rows[INTEGER]: no `delivery`")),
+        "{bad:?}"
+    );
 }
 
 #[test]
