@@ -2601,6 +2601,36 @@ mod roast_mysql_bit_decode_tests {
         Ok((!a.is_null(0)).then(|| a.value(0)))
     }
 
+    /// A text cell on a flag column reads as 0 or 1 only; any other text is refused by code, never delivered as true.
+    #[test]
+    fn a_text_cell_on_a_flag_column_is_zero_one_or_refused_never_true() {
+        use arrow::array::BooleanArray;
+        let columns: Arc<[mysql::Column]> =
+            Arc::from(vec![mysql::Column::new(ColumnType::MYSQL_TYPE_VAR_STRING)]);
+        let flags = |text: &str| {
+            let row = mysql_common::row::new_row(vec![Value::Bytes(text.into())], columns.clone());
+            super::build_flags(0, &[row], false, "c")
+        };
+        for (text, want) in [("0", false), ("1", true)] {
+            let arr = flags(text).expect(text);
+            let arr = arr
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .expect("Boolean");
+            assert_eq!(arr.value(0), want, "text {text:?}");
+        }
+        for text in ["2", "5", "01", "x", "true", ""] {
+            let err = flags(text)
+                .err()
+                .unwrap_or_else(|| panic!("text {text:?}: delivered, not refused"));
+            crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+            assert!(
+                err.to_string().contains("is not a valid bool (0 or 1)"),
+                "text {text:?}: {err}"
+            );
+        }
+    }
+
     /// A boolean flag carries 0 or 1: any other value is refused by code on every wire type that holds one, never delivered as true.
     #[test]
     fn a_flag_outside_zero_and_one_is_refused_by_code_never_delivered_as_true() {
