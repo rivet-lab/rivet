@@ -6805,3 +6805,19 @@ seeds:
         na: "Oracle has no TIME type; a time of day is a DATE or TIMESTAMP column"
       mongo:
         na: "BSON has no time-of-day type, so no MongoDB value is a TIME column"
+  - name: ch-date-footer-guard-skips-dates
+    class: "the ClickHouse load reads the footer statistics of a timestamp column only, so a Date32 column is never checked: 2300-01-01 is stored as 2299-12-31 silently, and a date before 1900-01-01 or after 2300-01-01 is refused by ClickHouse as RIVET_LOAD_WAREHOUSE_REJECTED instead of by rivet's coded range refusal"
+    history: "owner-approved 2026-11-20 (DEFECT_CH_DATE_CLAMP); RED on main 2026-11-20 by the type matrix (PostgreSQL, MySQL, SQL Server DATE 2300-01-01 read back 2299-12-31) and by the offline footer cell"
+    scope: target
+    switch: ch-date-footer-guard-skips-dates
+    engines:
+      clickhouse:
+        cells:
+          - a_date_clickhouse_cannot_hold_is_refused_not_clamped
+          - "lib:a_date_part_is_refused_only_past_either_end_of_date32"
+          - "lib:a_date_past_either_end_of_a_range_is_named_by_its_day"
+          - "lib:a_date_list_is_checked_by_its_own_leaf"
+      bigquery:
+        na: "the seed edits the footer guard of the ClickHouse load (temporal_outside), which only a ClickHouse load runs; BigQuery grades its own column types"
+      snowflake:
+        na: "the seed edits the footer guard of the ClickHouse load (temporal_outside), which only a ClickHouse load runs; Snowflake grades its own column types"

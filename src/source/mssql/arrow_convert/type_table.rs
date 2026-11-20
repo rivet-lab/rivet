@@ -130,7 +130,7 @@ fn table() -> Vec<Case> {
         case(
             "daten (date)",
             of(ColumnType::Daten, None),
-            "date | Date32 | native | exact | reads date # red:CH_DATE_CLAMP",
+            "date | Date32 | native | exact | reads date",
         ),
         case(
             "timen (time)",
