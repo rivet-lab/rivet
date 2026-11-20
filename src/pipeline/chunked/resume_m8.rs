@@ -663,6 +663,7 @@ pub(crate) mod tests {
             parts,
             column_checksums: None,
             checksum_key_column: None,
+            nulled_cells: None,
         }
     }
 

@@ -54,6 +54,8 @@ mod audit_target_typo;
 mod batch_memory_policy;
 #[path = "live/check_override_wire.rs"]
 mod check_override_wire;
+#[path = "live/check_override_wire_cdc.rs"]
+mod check_override_wire_cdc;
 #[path = "live/chunking_stand.rs"]
 mod chunking_stand;
 #[path = "live/gate_tls_failures.rs"]
@@ -82,6 +84,8 @@ mod live_cdc_cli_surface;
 mod live_cdc_column_grants;
 #[path = "live/live_cdc_column_grants_mongo.rs"]
 mod live_cdc_column_grants_mongo;
+#[path = "live/live_cdc_column_grants_mssql.rs"]
+mod live_cdc_column_grants_mssql;
 #[cfg(feature = "oracle")]
 #[path = "live/live_cdc_column_grants_oracle.rs"]
 mod live_cdc_column_grants_oracle;
@@ -321,6 +325,8 @@ mod live_three_cycles;
 mod live_type_policy;
 #[path = "live/live_wave_apply.rs"]
 mod live_wave_apply;
+#[path = "live/live_zero_date_fidelity.rs"]
+mod live_zero_date_fidelity;
 #[path = "live/preflight_missing_table.rs"]
 mod preflight_missing_table;
 #[path = "live/preflight_target_fail_note.rs"]

@@ -370,6 +370,11 @@ pub trait Source: Send {
         Ok(Vec::new())
     }
 
+    /// The `timestamp` columns of the result of `query` the engine describes finer than a microsecond.
+    fn finer_than_microsecond_in_query(&mut self, _query: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
     /// The primary key columns of `table` in key order; `None` when it has none or the engine cannot tell.
     fn primary_key(&mut self, _table: &str) -> Result<Option<Vec<String>>> {
         Ok(None)
@@ -461,6 +466,7 @@ pub(crate) fn columns_from_grants_boundary(engine: crate::config::SourceType) ->
     match engine {
         crate::config::SourceType::Mongo => mongo::column_grants::BOUNDARY,
         crate::config::SourceType::Postgres => postgres::column_grants::BOUNDARY,
+        crate::config::SourceType::Mssql => mssql::column_grants::BOUNDARY,
         #[cfg(feature = "oracle")]
         crate::config::SourceType::Oracle => oracle::column_grants::BOUNDARY,
         _ => mysql::column_grants::BOUNDARY,
@@ -474,9 +480,13 @@ pub(crate) fn resolve_column_grants(
     tls: Option<&crate::config::TlsConfig>,
     tables: &[String],
     declared: &std::collections::HashMap<String, Vec<String>>,
+    capture_instance: Option<&str>,
 ) -> crate::error::Result<std::sync::Arc<std::collections::HashMap<String, cdc::ReadableColumns>>> {
     match engine {
         crate::config::SourceType::Oracle => oracle_column_grants(url, tls, tables, declared),
+        crate::config::SourceType::Mssql => {
+            mssql::column_grants::resolve_grants(url, tls, tables, capture_instance, declared)
+        }
         crate::config::SourceType::Postgres => {
             postgres::column_grants::resolve_grants(url, tls, tables, declared)
         }
@@ -914,7 +924,7 @@ mod column_grants_dispatch_tests {
 
     fn refusal(engine: SourceType, url: &str) -> String {
         let tables = vec!["orders".to_string()];
-        let err = resolve_column_grants(engine, url, None, &tables, &HashMap::new())
+        let err = resolve_column_grants(engine, url, None, &tables, &HashMap::new(), None)
             .expect_err("an unreachable source refuses");
         format!("{err:#}").to_lowercase()
     }
@@ -931,6 +941,8 @@ mod column_grants_dispatch_tests {
             postgres.contains("error connecting to server"),
             "{postgres}"
         );
+        let mssql = refusal(SourceType::Mssql, "sqlserver://u:p@127.0.0.1:1/app");
+        assert!(mssql.contains("driver: mssql"), "{mssql}");
     }
 
     /// Each engine says its own boundary, and PostgreSQL's names the change stream as a client-side projection.
@@ -940,6 +952,8 @@ mod column_grants_dispatch_tests {
         assert!(say(SourceType::Postgres).contains("PostgreSQL change stream"));
         assert_ne!(say(SourceType::Postgres), say(SourceType::Mysql));
         assert_ne!(say(SourceType::Postgres), say(SourceType::Mongo));
+        assert!(say(SourceType::Mssql).contains("SQL Server change stream"));
+        assert_ne!(say(SourceType::Mssql), say(SourceType::Mysql));
     }
 }
 

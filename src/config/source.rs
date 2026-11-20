@@ -69,7 +69,7 @@ pub struct SourceConfig {
     #[serde(default)]
     pub mongo: Option<MongoConfig>,
 
-    /// `grants`: every export reads and delivers only the columns the source account may read: `SELECT` on MySQL, PostgreSQL and Oracle, the fields of a `$project` view on MongoDB.
+    /// `grants`: every export reads and delivers only the columns the source account may read: `SELECT` on MySQL, PostgreSQL, SQL Server and Oracle, the fields of a `$project` view on MongoDB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub columns_from: Option<ColumnsFrom>,
 }
@@ -297,21 +297,6 @@ fn bracket_ipv6(host: &str) -> std::borrow::Cow<'_, str> {
     } else {
         host.into()
     }
-}
-
-/// Why this source cannot take `columns_from: grants`, if it cannot.
-pub(crate) fn columns_from_refusal(source: &SourceConfig) -> Option<String> {
-    (source.columns_from_grants() && !source.source_type.enforces_columns_from_grants()).then(
-        || {
-            format!(
-                "`source.columns_from: grants` is supported on MySQL, PostgreSQL, Oracle and MongoDB sources only: a {} \
-             source would read and deliver every column of a row, hidden ones included. Remove \
-             `columns_from:` from `source:` or point `source:` at a MySQL, PostgreSQL, Oracle or MongoDB server \
-             (other engines: rivet-lab/rivet#711)",
-                source.source_type.label()
-            )
-        },
-    )
 }
 
 impl SourceConfig {
@@ -596,16 +581,6 @@ impl SourceType {
     /// Whether this engine speaks SQL (the relational read seam.
     pub fn is_sql(self) -> bool {
         !matches!(self, SourceType::Mongo)
-    }
-
-    /// Whether this engine reads and delivers only the columns the account may `SELECT` under `columns_from: grants`.
-    pub fn enforces_columns_from_grants(self) -> bool {
-        match self {
-            SourceType::Mysql | SourceType::Postgres | SourceType::Oracle | SourceType::Mongo => {
-                true
-            }
-            SourceType::Mssql => seeded!("columns-from-grants-accepted-off-mysql", true, false),
-        }
     }
 
     /// The engine as `export_metrics.source_type` records it (`postgres`, `mysql`, `mssql`, `mongo`).

@@ -179,7 +179,7 @@ fn mssql_batch_datetimeoffset_exports_the_utc_instant() {
     let arr = batches[0]
         .column_by_name("dto")
         .unwrap()
-        .as_primitive::<arrow::array::types::TimestampMicrosecondType>();
+        .as_primitive::<arrow::array::types::TimestampNanosecondType>();
     let instant = arr
         .value_as_datetime(0)
         .expect("a non-null instant")

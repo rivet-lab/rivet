@@ -15,7 +15,7 @@ use serde_json::{Value as Json, json};
 use crate::config::TlsConfig;
 use crate::error::Result;
 use crate::source::cdc::checkpoint_identity::IdentityVerdict;
-use crate::source::cdc::value::RivetValue;
+use crate::source::cdc::value::{RivetValue, WireLabels};
 use crate::source::cdc::{ChangeEvent, ChangeOp, ChangeStream, DrainMode, Position};
 use crate::source::column_grants as grants;
 use crate::source::mysql::column_grants::NAMES_MATCH;
@@ -25,6 +25,7 @@ use crate::source::mysql::statement::{SqlMode, Tok, tokens};
 type CachedTableMap = (
     std::sync::Arc<TableMapEvent<'static>>,
     Option<std::sync::Arc<[String]>>,
+    Option<std::sync::Arc<[WireLabels]>>,
 );
 
 /// How long the server keeps the binlog dump open while rivet is busy flushing a roll to the store (the server default is 60 s).
@@ -1070,21 +1071,12 @@ impl MysqlChangeStream {
             }
             Some(EventData::TableMapEvent(tme)) => {
                 let tme = tme.into_owned();
-                let names: Option<std::sync::Arc<[String]>> =
-                    tme.iter_optional_meta().find_map(|f| match f {
-                        Ok(mysql::binlog::events::OptionalMetadataField::ColumnName(names)) => {
-                            Some(
-                                names
-                                    .iter_names()
-                                    .filter_map(|n| n.ok())
-                                    .map(|n| String::from_utf8_lossy(n.name_raw()).into_owned())
-                                    .collect(),
-                            )
-                        }
-                        _ => None,
-                    });
+                let names = super::table_map_labels::column_names(&tme);
+                let labels = names
+                    .as_deref()
+                    .and_then(|n| super::table_map_labels::of(&tme, n));
                 self.tables
-                    .insert(tme.table_id(), (std::sync::Arc::new(tme), names));
+                    .insert(tme.table_id(), (std::sync::Arc::new(tme), names, labels));
             }
             Some(EventData::RowsEvent(re)) => {
                 let op = match &re {
@@ -1094,7 +1086,7 @@ impl MysqlChangeStream {
                     other => {
                         let resolved = self.tables.get(&other.table_id());
                         let named =
-                            resolved.map(|(tme, _)| (tme.database_name(), tme.table_name()));
+                            resolved.map(|(tme, ..)| (tme.database_name(), tme.table_name()));
                         let named = named.as_ref().map(|(d, t)| (d.as_ref(), t.as_ref()));
                         if undecodable_event_is_ours(named, &self.configured_tables) {
                             return Err(undecodable_rows_event_refusal(other));
@@ -1102,7 +1094,9 @@ impl MysqlChangeStream {
                         return Ok(true);
                     }
                 };
-                let Some((tme, image_names)) = self.tables.get(&re.table_id()).cloned() else {
+                let Some((tme, image_names, image_labels)) =
+                    self.tables.get(&re.table_id()).cloned()
+                else {
                     return Ok(true);
                 };
                 let schema = tme.database_name().to_string();
@@ -1244,6 +1238,7 @@ impl MysqlChangeStream {
                         row_id: None,
                         before_names: None,
                         before_poison: None,
+                        image_labels: image_labels.clone(),
                     };
                     self.tx.push(
                         ev,
@@ -1348,6 +1343,7 @@ fn boundary_marker(op: ChangeOp, position: &Position) -> ChangeEvent {
         row_id: None,
         before_names: None,
         before_poison: None,
+        image_labels: None,
     }
 }
 

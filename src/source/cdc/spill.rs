@@ -4,7 +4,7 @@ use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::PathBuf;
 
 use crate::error::Result;
-use crate::source::cdc::value::RivetValue;
+use crate::source::cdc::value::{RivetValue, WireLabels};
 use crate::source::cdc::{ChangeEvent, ChangeOp, Position};
 
 /// A length-prefixed record log in a temp file, deleted when dropped.
@@ -596,6 +596,7 @@ mod tests {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         };
         use crate::source::cdc::RivetValue as V;
         let seeds = [
@@ -1105,6 +1106,7 @@ pub(crate) fn encode_event(ev: &ChangeEvent) -> Vec<u8> {
     put_opt_str(&mut out, ev.before_poison.as_deref());
     put_names(&mut out, ev.image_names.as_deref());
     put_names(&mut out, ev.before_names.as_deref());
+    put_wire_labels(&mut out, ev.image_labels.as_deref());
     put_image(&mut out, ev.before.as_deref());
     put_image(&mut out, ev.after.as_deref());
     out
@@ -1122,6 +1124,39 @@ fn put_names(out: &mut Vec<u8>, names: Option<&[String]>) {
             }
         }
     }
+}
+
+/// A wire-label list is `None` (absent) or a list of columns, each with its labels or none.
+fn put_wire_labels(out: &mut Vec<u8>, labels: Option<&[WireLabels]>) {
+    match labels {
+        None => out.push(0),
+        Some(labels) => {
+            out.push(1);
+            put_len(out, labels.len());
+            for w in labels {
+                put_str(out, &w.column);
+                put_names(out, w.labels.as_deref());
+            }
+        }
+    }
+}
+
+/// Read what [`put_wire_labels`] wrote.
+fn get_wire_labels(c: &mut Cur<'_>) -> Result<Option<std::sync::Arc<[WireLabels]>>> {
+    if c.u8()? == 0 {
+        return Ok(None);
+    }
+    let n = c.len()?;
+    let mut labels = Vec::with_capacity(n.min(4096));
+    for _ in 0..n {
+        let column = c.string()?;
+        let listed = get_names(c)?.map(|l| l.to_vec());
+        labels.push(WireLabels {
+            column,
+            labels: listed,
+        });
+    }
+    Ok(Some(labels.into()))
 }
 
 /// Read what [`put_names`] wrote.
@@ -1212,6 +1247,7 @@ pub(crate) fn decode_event(rec: &[u8]) -> Result<ChangeEvent> {
     };
     let image_names = get_names(&mut c)?;
     let before_names = get_names(&mut c)?;
+    let image_labels = get_wire_labels(&mut c)?;
     let before = get_image(&mut c)?;
     let after = get_image(&mut c)?;
     if c.at != rec.len() {
@@ -1236,6 +1272,7 @@ pub(crate) fn decode_event(rec: &[u8]) -> Result<ChangeEvent> {
         row_id,
         before_names,
         before_poison,
+        image_labels,
     })
 }
 
@@ -1259,6 +1296,7 @@ mod frame_tests {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         }
     }
 
@@ -1279,6 +1317,7 @@ mod frame_tests {
             row_id,
             before_names,
             before_poison,
+            image_labels,
         } = &back;
         assert_eq!(op.as_str(), e.op.as_str(), "op");
         assert_eq!(schema, &e.schema, "schema");
@@ -1298,6 +1337,11 @@ mod frame_tests {
             image_names.as_deref(),
             e.image_names.as_deref(),
             "image_names"
+        );
+        assert_eq!(
+            image_labels.as_deref(),
+            e.image_labels.as_deref(),
+            "image_labels"
         );
         assert_eq!(format!("{before:?}"), format!("{:?}", e.before), "before");
         assert_eq!(format!("{after:?}"), format!("{:?}", e.after), "after");
@@ -1402,6 +1446,25 @@ mod frame_tests {
         let mut b0 = ev();
         b0.before_names = Some(Vec::<String>::new().into());
         cases.push(("before names empty", b0));
+        let wire = |column: &str, labels: Option<Vec<&str>>| WireLabels {
+            column: column.into(),
+            labels: labels.map(|l| l.into_iter().map(String::from).collect()),
+        };
+        for (name, labels) in [
+            ("wire labels empty", Some(Vec::new())),
+            (
+                "wire labels listed and unlisted",
+                Some(vec![
+                    wire("e", Some(vec!["a", "\u{1F600}", ""])),
+                    wire("s", None),
+                    wire("t", Some(Vec::new())),
+                ]),
+            ),
+        ] {
+            let mut w = ev();
+            w.image_labels = labels.map(Into::into);
+            cases.push((name, w));
+        }
         let mut i = ev();
         i.image_names = Some(Vec::<String>::new().into());
         cases.push(("names empty", i));
@@ -1645,6 +1708,7 @@ mod spill_cost {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         }
     }
 
@@ -1824,6 +1888,7 @@ mod event_cost {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         }
     }
 

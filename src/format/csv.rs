@@ -23,18 +23,8 @@ impl super::Format for CsvFormat {
         schema: &SchemaRef,
         mut writer: Box<dyn Write + Send>,
     ) -> Result<Box<dyn super::FormatWriter + Send>> {
-        if let Some(field) = schema
-            .fields()
-            .iter()
-            .find(|f| !csv_serializable(f.data_type()))
-        {
-            crate::rivet_bail!(
-                crate::error::codes::CONFIG_FORMAT_COLUMN_UNSUPPORTED,
-                "CSV cannot serialize column '{}' (Arrow type {:?}); use `format: parquet` \
-                 or drop the column from the query",
-                field.name(),
-                field.data_type()
-            );
+        for field in schema.fields() {
+            refuse_column(field.name(), field.data_type())?;
         }
         let header = schema
             .fields()
@@ -86,6 +76,18 @@ impl super::FormatWriter for CsvFormatWriter {
     fn bytes_written(&self) -> u64 {
         self.bytes_written
     }
+}
+
+/// The coded refusal for a column CSV cannot serialize.
+pub(crate) fn refuse_column(name: &str, dt: &DataType) -> Result<()> {
+    if csv_serializable(dt) {
+        return Ok(());
+    }
+    crate::rivet_bail!(
+        crate::error::codes::CONFIG_FORMAT_COLUMN_UNSUPPORTED,
+        "CSV cannot serialize column '{name}' (Arrow type {dt:?}); use `format: parquet` \
+         or drop the column from the query"
+    )
 }
 
 /// Arrow types `write_csv_value` can serialize.

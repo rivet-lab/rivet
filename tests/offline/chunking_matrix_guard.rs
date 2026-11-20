@@ -171,7 +171,8 @@ const MATRICES: &[(&str, usize)] = &[
     // Raised 5 -> 6 (2026-10-02): the new failover row's Oracle cell is an honest gap (no Data
     // Guard stand), recorded rather than left out of the matrix.
     // Lowered 6 -> 2 (2026-10-08): Oracle column-add, two-table and open-bound two-run cells; the two Data Guard rows stay (the stand's v$option reports the Data Guard options FALSE).
-    ("docs/cdc-matrix.yaml", 2),
+    // Raised 2 -> 3 (2026-11-19, #713): the Oracle cell of the hidden-columns-only update row is an honest gap until a live cell grades it; closes when that cell lands.
+    ("docs/cdc-matrix.yaml", 3),
     // Resilience / crash-recovery (BATCH + cross-cutting). Both Mongo holes closed:
     // batch-clobber filled with a live test; crash-after-source-read is na (that
     // hook is single.rs-only, and Mongo runs the keyset path).

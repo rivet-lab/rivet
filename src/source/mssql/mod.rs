@@ -2,6 +2,7 @@
 
 mod arrow_convert;
 pub(crate) mod cdc;
+pub(crate) mod column_grants;
 mod proxy;
 
 pub use proxy::MssqlProxyKind;
@@ -343,23 +344,34 @@ impl MssqlSource {
         }
     }
 
-    /// Declared `(precision, scale)` per decimal/numeric column, read from `sys.columns`, for a simple single-table `SELECT … FROM [schema.]table`.
-    fn mssql_decimal_catalog_hints_opt(
-        &mut self,
-        query: &str,
-    ) -> Option<HashMap<String, (u8, i8)>> {
+    /// The catalog facts of a simple single-table `SELECT … FROM [schema.]table`: declared decimal `(precision, scale)` and the `datetime2` / `datetimeoffset` columns finer than a microsecond.
+    fn mssql_catalog_hints_opt(&mut self, query: &str) -> Option<arrow_convert::CatalogHints> {
         let (schema, table) = parse_mssql_simple_from_table(query)?;
-        match self.fetch_mssql_decimal_catalog_hints(&schema, &table) {
-            Ok(m) => m,
+        let decimals = match self.fetch_mssql_decimal_catalog_hints(&schema, &table) {
+            Ok(m) => m.unwrap_or_default(),
             Err(e) => {
                 log::warn!(
                     "mssql decimal catalog lookup failed for {schema}.{table} — decimal scale \
                      will fall back to first-batch inference (declare it with a `columns:` \
                      override if an all-NULL first batch truncates it): {e}"
                 );
-                None
+                HashMap::new()
             }
-        }
+        };
+        let fine_timestamps = match finer_than_microsecond_columns(self, &schema, &table) {
+            Ok(v) => v.into_iter().map(|(name, _)| name).collect(),
+            Err(e) => {
+                log::warn!(
+                    "mssql timestamp-scale catalog lookup failed for {schema}.{table} — a \
+                     datetime2(7) column is read from its first batch instead: {e}"
+                );
+                std::collections::HashSet::new()
+            }
+        };
+        Some(arrow_convert::CatalogHints {
+            decimals,
+            fine_timestamps,
+        })
     }
 
     /// Probe `sys.columns` for each `decimal`/`numeric` column's declared `(precision, scale)`.
@@ -480,12 +492,26 @@ impl Source for MssqlSource {
         introspect_mssql_on(self, qualified_table)
     }
 
+    fn readable_columns(
+        &mut self,
+        table: &str,
+    ) -> Result<Option<crate::source::cdc::ReadableColumns>> {
+        column_grants::readable_relation(self, table).map(|(_, _, r)| Some(r))
+    }
+
     fn finer_than_microsecond_columns(&mut self, table: &str) -> Result<Vec<String>> {
         let (schema, table) = table.split_once('.').unwrap_or(("dbo", table));
         Ok(finer_than_microsecond_columns(self, schema, table)?
             .into_iter()
             .map(|(column, _)| column)
             .collect())
+    }
+
+    fn finer_than_microsecond_in_query(&mut self, query: &str) -> Result<Vec<String>> {
+        Ok(self
+            .query_scalar(&finer_than_microsecond_in_query_sql(query))?
+            .map(|s| split_char31(&s))
+            .unwrap_or_default())
     }
 
     fn export(&mut self, request: &ExportRequest<'_>, sink: &mut dyn BatchSink) -> Result<()> {
@@ -500,7 +526,7 @@ impl Source for MssqlSource {
             .then(|| std::time::Duration::from_secs(request.tuning.statement_timeout_s));
 
         let hint_query = request.catalog_hint_query.unwrap_or(request.query);
-        let decimal_hints = self.mssql_decimal_catalog_hints_opt(hint_query);
+        let catalog_hints = self.mssql_catalog_hints_opt(hint_query);
 
         if lock_timeout_ms > 0 {
             self.lock_timeout_applied = true;
@@ -555,7 +581,7 @@ impl Source for MssqlSource {
                             &columns,
                             &overrides,
                             &[],
-                            decimal_hints.as_ref(),
+                            catalog_hints.as_ref(),
                         ) {
                             let eff = request
                                 .tuning
@@ -570,7 +596,7 @@ impl Source for MssqlSource {
                             let arrow_bytes = emit_mssql_batch(
                                 &columns,
                                 &overrides,
-                                decimal_hints.as_ref(),
+                                catalog_hints.as_ref(),
                                 &mut schema,
                                 &buf,
                                 sink,
@@ -607,7 +633,7 @@ impl Source for MssqlSource {
                 emit_mssql_batch(
                     &columns,
                     &overrides,
-                    decimal_hints.as_ref(),
+                    catalog_hints.as_ref(),
                     &mut schema,
                     &buf,
                     sink,
@@ -675,7 +701,7 @@ impl Source for MssqlSource {
         query: &str,
         column_overrides: &ColumnOverrides,
     ) -> Result<Vec<TypeMapping>> {
-        let decimal_hints = self.mssql_decimal_catalog_hints_opt(query);
+        let catalog_hints = self.mssql_catalog_hints_opt(query);
         let wrapped = format!("SELECT * FROM ({query}) AS _rivet_q WHERE 1 = 0");
         let overrides = column_overrides.clone();
         let Self { rt, client, .. } = self;
@@ -700,7 +726,7 @@ impl Source for MssqlSource {
                 .map(<[_]>::to_vec)
                 .unwrap_or_default();
             let _ = stream.into_first_result().await;
-            arrow_convert::mssql_type_mappings(&columns, &overrides, decimal_hints.as_ref())
+            arrow_convert::mssql_type_mappings(&columns, &overrides, catalog_hints.as_ref())
         })
     }
 
@@ -989,7 +1015,7 @@ pub(crate) fn sample_view_server_state(url: &str, tls: Option<&TlsConfig>) -> Op
 fn emit_mssql_batch(
     columns: &[tiberius::Column],
     overrides: &ColumnOverrides,
-    decimal_hints: Option<&HashMap<String, (u8, i8)>>,
+    hints: Option<&arrow_convert::CatalogHints>,
     schema: &mut Option<SchemaRef>,
     rows: &[tiberius::Row],
     sink: &mut dyn BatchSink,
@@ -999,7 +1025,7 @@ fn emit_mssql_batch(
         Some(s) => s.clone(),
         None => {
             let (built, _decoders) =
-                arrow_convert::mssql_columns_to_schema(columns, overrides, rows, decimal_hints)?;
+                arrow_convert::mssql_columns_to_schema(columns, overrides, rows, hints)?;
             let s: SchemaRef = Arc::new(built);
             sink.on_schema(s.clone())?;
             *schema = Some(s.clone());
@@ -1035,8 +1061,12 @@ fn numeric_to_display(raw: i128, scale: usize) -> String {
 
 /// Render a row's first column as a display string for `query_scalar` (min/max bounds, COUNT(*), SELECT 1).
 fn scalar_to_string(row: &tiberius::Row) -> Option<String> {
-    use tiberius::ColumnData;
-    let cell = row.cells().next().map(|(_, d)| d)?;
+    scalar_text(row.cells().next().map(|(_, d)| d)?)
+}
+
+/// A scalar cell as text SQL Server casts back to its own type: the shared ISO renderer for every type with no arm of its own.
+fn scalar_text(cell: &tiberius::ColumnData<'static>) -> Option<String> {
+    use tiberius::{ColumnData, FromSql};
     match cell {
         ColumnData::U8(v) => v.map(|x| x.to_string()),
         ColumnData::I16(v) => v.map(|x| x.to_string()),
@@ -1048,17 +1078,21 @@ fn scalar_to_string(row: &tiberius::Row) -> Option<String> {
         ColumnData::String(v) => v.as_ref().map(|s| s.to_string()),
         ColumnData::Numeric(v) => v.map(|n| numeric_to_display(n.value(), n.scale() as usize)),
         ColumnData::Guid(v) => v.map(|g| g.to_string()),
-        ColumnData::Date(_) => row
-            .try_get::<chrono::NaiveDate, _>(0)
+        ColumnData::Date(_) => chrono::NaiveDate::from_sql(cell)
             .ok()
             .flatten()
             .map(|d| d.format("%Y-%m-%d").to_string()),
-        ColumnData::DateTime(_) | ColumnData::DateTime2(_) | ColumnData::SmallDateTime(_) => row
-            .try_get::<chrono::NaiveDateTime, _>(0)
-            .ok()
-            .flatten()
-            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.f").to_string()),
-        other => Some(format!("{other:?}")),
+        ColumnData::DateTime(_) | ColumnData::DateTime2(_) | ColumnData::SmallDateTime(_) => {
+            chrono::NaiveDateTime::from_sql(cell)
+                .ok()
+                .flatten()
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.f").to_string())
+        }
+        other => seeded!(
+            "mssql-scalar-text-debug-dump",
+            Some(format!("{other:?}")),
+            arrow_convert::cell_text(other)
+        ),
     }
 }
 
@@ -1102,6 +1136,17 @@ pub(crate) fn finer_than_microsecond_sql(schema: &str, table: &str) -> String {
            AND {type_name} IN ('datetime2', 'datetimeoffset') AND c.scale > {}",
         schema.replace('\'', "''"),
         table.replace('\'', "''"),
+        crate::source::keyset_key::MICROSECOND_DIGITS
+    )
+}
+
+/// SQL for the CHAR(31)-joined `datetime2` / `datetimeoffset` columns a query's first result set types finer than a microsecond, through an alias type too.
+pub(crate) fn finer_than_microsecond_in_query_sql(query: &str) -> String {
+    format!(
+        "SELECT STRING_AGG(CONVERT(nvarchar(max), name), CHAR(31)) \
+         FROM sys.dm_exec_describe_first_result_set(N'{}', NULL, 0) \
+         WHERE system_type_id IN (42, 43) AND scale > {}",
+        query.replace('\'', "''"),
         crate::source::keyset_key::MICROSECOND_DIGITS
     )
 }
@@ -1281,7 +1326,59 @@ mod tls_posture_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{catalog_decimal_to_params, parse_mssql_simple_from_table, parse_mssql_url};
+    use super::{
+        catalog_decimal_to_params, parse_mssql_simple_from_table, parse_mssql_url, scalar_text,
+    };
+
+    /// Every scalar a sampler reads back is text SQL Server casts, never a `ColumnData` debug dump.
+    #[test]
+    fn a_scalar_cell_reads_back_as_text_the_server_casts() {
+        use tiberius::ColumnData;
+        use tiberius::numeric::Numeric;
+        use tiberius::time::{Date, DateTime2, DateTimeOffset, Time};
+        let dt2 = |days, inc, scale| DateTime2::new(Date::new(days), Time::new(inc, scale));
+        let cases: Vec<(ColumnData<'static>, &str)> = vec![
+            (ColumnData::I32(Some(-7)), "-7"),
+            (ColumnData::I64(Some(i64::MAX)), "9223372036854775807"),
+            (ColumnData::F64(Some(0.1)), "0.1"),
+            (ColumnData::Bit(Some(true)), "true"),
+            (ColumnData::String(Some("a'b".into())), "a'b"),
+            (
+                ColumnData::Numeric(Some(Numeric::new_with_scale(-5, 3))),
+                "-0.005",
+            ),
+            (
+                ColumnData::Guid(Some(tiberius::Uuid::from_bytes([0xab; 16]))),
+                "abababab-abab-abab-abab-abababababab",
+            ),
+            (ColumnData::Date(Some(Date::new(693_595))), "1900-01-01"),
+            (
+                ColumnData::DateTime2(Some(dt2(693_595, 452_961_234_567, 7))),
+                "1900-01-01 12:34:56.123456700",
+            ),
+            (
+                ColumnData::DateTimeOffset(Some(DateTimeOffset::new(
+                    dt2(693_595, 36_000_000_000, 6),
+                    330,
+                ))),
+                "1900-01-01 15:30:00.000000 +05:30",
+            ),
+            (
+                ColumnData::DateTimeOffset(Some(DateTimeOffset::new(
+                    dt2(693_595, 123_456, 6),
+                    -480,
+                ))),
+                "1899-12-31 16:00:00.123456 -08:00",
+            ),
+            (ColumnData::Time(Some(Time::new(1_500, 3))), "00:00:01.500"),
+            (ColumnData::Binary(Some(vec![0xDE, 0xAD].into())), "dead"),
+        ];
+        for (cell, want) in cases {
+            assert_eq!(scalar_text(&cell).as_deref(), Some(want), "{cell:?}");
+        }
+        assert_eq!(scalar_text(&ColumnData::DateTimeOffset(None)), None);
+        assert_eq!(scalar_text(&ColumnData::I32(None)), None);
+    }
 
     #[test]
     fn mssql_url_percent_decodes_userinfo() {
@@ -1601,7 +1698,10 @@ mod tests {
 
 #[cfg(test)]
 mod key_probe_sql_tests {
-    use super::{finer_than_microsecond_sql, keyset_keys_sql, single_int_pk_sql, split_char31};
+    use super::{
+        finer_than_microsecond_in_query_sql, finer_than_microsecond_sql, keyset_keys_sql,
+        single_int_pk_sql, split_char31,
+    };
 
     /// A catalog list splits on its separator and drops empty members.
     #[test]
@@ -1615,6 +1715,17 @@ mod key_probe_sql_tests {
         let w = sql.find("WHERE i.").expect("WHERE");
         let g = sql[w..].find("GROUP BY i.object_id").expect("GROUP BY") + w;
         &sql[w..g]
+    }
+
+    /// The query probe reads the system type under an alias, quotes the query, and compares the scale with the microsecond digits.
+    #[test]
+    fn the_query_sub_microsecond_probe_quotes_the_query_and_reads_the_system_type() {
+        let sql = finer_than_microsecond_in_query_sql("SELECT 'a' AS x");
+        assert!(sql.contains("N'SELECT ''a'' AS x'"), "{sql}");
+        assert!(
+            sql.contains("system_type_id IN (42, 43) AND scale > 6"),
+            "{sql}"
+        );
     }
 
     /// H24: a composite UNIQUE(a NOT NULL, b NULL) must not surface `a` as a keyset key, so the per-column filters live in HAVING where COUNT(*) still counts every key column.

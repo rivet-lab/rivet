@@ -289,7 +289,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .mutants-cache
-          key: mutants-outcomes-v2-${{ hashFiles('src/**/*.rs', 'tests/**/*.rs', 'Cargo.lock', '.cargo/mutants.toml') }}
+          key: mutants-outcomes-v3-${{ hashFiles('src/**/*.rs', 'tests/**/*.rs', 'Cargo.lock', '.cargo/mutants.toml') }}
       # Prebuilt binaries: `cargo install` compiled cargo-mutants from source
       # on every cold cache (68s on PR #314).
       - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
@@ -733,14 +733,11 @@ jobs:
           fi
           exit "$rc"
       - name: Save mutation outcomes
-        # `always()`: a run that ends in MISSED mutants still measured them, and
-        # that measurement is exactly what a re-run of the same commit should
-        # not have to pay for again.
-        if: always() && needs.mutants-plan.outputs.cache == 'miss' && hashFiles('.mutants-cache/outcomes.json') != ''
+        if: always() && needs.mutants-plan.outputs.cache == 'miss' && steps.grade.outputs.p2_audit != 'oracle-lied' && hashFiles('.mutants-cache/outcomes.json') != ''
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .mutants-cache
-          key: mutants-outcomes-v2-${{ hashFiles('src/**/*.rs', 'tests/**/*.rs', 'Cargo.lock', '.cargo/mutants.toml') }}
+          key: mutants-outcomes-v3-${{ hashFiles('src/**/*.rs', 'tests/**/*.rs', 'Cargo.lock', '.cargo/mutants.toml') }}
       - name: Publish this run's verdict
         id: report
         if: always()

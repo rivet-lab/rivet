@@ -393,7 +393,7 @@ fn refuse_grants_moved_since_resolved(
     resolved: &HashMap<String, ReadableColumns>,
 ) -> Result<()> {
     let now = super::column_grants::readable_columns_now(client, configured)?;
-    match super::column_grants::first_grants_change(configured, resolved, &now) {
+    match crate::source::column_grants::first_grants_change(configured, resolved, &now) {
         Some(why) => Err(crate::error::coded(
             crate::error::codes::SOURCE_CDC_GRANTS_CHANGED,
             format!(
@@ -1576,6 +1576,7 @@ pub(crate) fn parse_test_decoding_keeping<'a>(
         row_id: None,
         before_names,
         before_poison,
+        image_labels: None,
     }))
 }
 

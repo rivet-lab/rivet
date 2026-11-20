@@ -10,7 +10,7 @@ fn check_and_run_refuse_alike(rig: Rig, name: &str) -> String {
 }
 
 /// The run and both `check` spellings refuse `rig`'s export by `want`; returns the run's stderr.
-fn check_and_run_refuse_alike_by(rig: Rig, name: &str, want: Refused<'_>) -> String {
+pub(crate) fn check_and_run_refuse_alike_by(rig: Rig, name: &str, want: Refused<'_>) -> String {
     let run = rig.run_args(&["--export", name]);
     assert_refused(&run, want);
     assert_refused(&rig.cli(&["check", "--export", name]), want);
@@ -304,4 +304,160 @@ fn a_decimal_override_past_precision_38_is_refused_by_the_wire_check_oracle() {
             case,
         );
     }
+}
+
+const FORMAT_REFUSAL: Refused<'static> =
+    Refused::by_code("RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED", 1);
+const UNMAPPED_REFUSAL: Refused<'static> = Refused::by_code("RIVET_TYPE_UNSAFE_MAPPING", 1);
+
+/// A `format: csv` export of a column declared `declared` is refused by the run and both `check` spellings, naming the column and the format's remedy.
+fn csv_column_is_refused_like_the_run(rig: Rig, name: &str, column: &str, declared: &str) {
+    let said = check_and_run_refuse_alike_by(
+        rig.with_format("csv")
+            .export_line("columns:")
+            .export_line(&format!("  {column}: \"{declared}\"")),
+        name,
+        FORMAT_REFUSAL,
+    );
+    assert!(
+        said.contains(&format!("CSV cannot serialize column '{column}'")),
+        "{said}"
+    );
+    assert!(said.contains("use `format: parquet`"), "{said}");
+}
+
+/// An export of a column no Arrow type carries is refused by the run and both `check` spellings with the one `columns:` declaration refusal.
+fn unmapped_column_is_refused_like_the_run(rig: Rig, name: &str, column: &str) {
+    let said = check_and_run_refuse_alike_by(rig, name, UNMAPPED_REFUSAL);
+    assert!(
+        said.contains("1 column(s) need a `columns:` declaration"),
+        "{said}"
+    );
+    assert!(said.contains(&format!("column '{column}'")), "{said}");
+}
+
+#[test]
+#[ignore = "live: postgres"]
+fn a_csv_export_of_a_decimal256_column_is_refused_by_check_like_the_run_postgres() {
+    require_alive(LiveService::Postgres);
+    let name = unique_name("fmt_dec_pg");
+    let out = tempfile::tempdir().unwrap();
+    let rig = Rig::pg_batch(&name)
+        .query("SELECT price FROM orders")
+        .mode("full")
+        .dest_path(out.path().to_path_buf());
+    csv_column_is_refused_like_the_run(rig, &name, "price", "decimal(60,10)");
+}
+
+#[test]
+#[ignore = "live: mysql"]
+fn a_csv_export_of_a_decimal256_column_is_refused_by_check_like_the_run_mysql() {
+    require_alive(LiveService::Mysql);
+    let name = unique_name("fmt_dec_my");
+    let out = tempfile::tempdir().unwrap();
+    let rig = Rig::mysql_batch(&name)
+        .query("SELECT CAST(12.5 AS DECIMAL(10,2)) AS d")
+        .mode("full")
+        .dest_path(out.path().to_path_buf());
+    csv_column_is_refused_like_the_run(rig, &name, "d", "decimal(60,10)");
+}
+
+#[test]
+#[ignore = "live: postgres"]
+fn a_column_without_an_arrow_type_is_refused_by_check_like_the_run_postgres() {
+    require_alive(LiveService::Postgres);
+    let name = unique_name("unmapped_pg");
+    let out = tempfile::tempdir().unwrap();
+    let rig = Rig::pg_batch(&name)
+        .query("SELECT '10.0.0.0/8'::cidr AS c")
+        .mode("full")
+        .dest_path(out.path().to_path_buf());
+    unmapped_column_is_refused_like_the_run(rig, &name, "c");
+}
+
+#[test]
+#[ignore = "live: mysql"]
+fn a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mysql() {
+    require_alive(LiveService::Mysql);
+    let name = unique_name("unmapped_my");
+    let out = tempfile::tempdir().unwrap();
+    let rig = Rig::mysql_batch(&name)
+        .query("SELECT ST_GeomFromText('POINT(1 1)') AS g")
+        .mode("full")
+        .dest_path(out.path().to_path_buf());
+    unmapped_column_is_refused_like_the_run(rig, &name, "g");
+}
+
+#[test]
+#[ignore = "live: postgres"]
+fn check_still_accepts_a_csv_decimal128_export_and_a_declared_cidr_postgres() {
+    require_alive(LiveService::Postgres);
+    let name = unique_name("fmt_ok_pg");
+    let out = tempfile::tempdir().unwrap();
+    let rig = Rig::pg_batch(&name)
+        .query("SELECT price, '10.0.0.0/8'::cidr::text AS c FROM orders")
+        .mode("full")
+        .export_line("columns:")
+        .export_line("  price: \"decimal(38,10)\"")
+        .with_format("csv")
+        .dest_path(out.path().to_path_buf());
+    for args in [
+        &["check", "--export", name.as_str()][..],
+        &["check", "--export", name.as_str(), "--type-report"][..],
+        &["plan", "--export", name.as_str()][..],
+    ] {
+        let o = rig.cli(args);
+        assert_eq!(
+            o.status.code(),
+            Some(0),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
+    let o = rig.run_args(&["--export", &name]);
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
+
+#[test]
+#[ignore = "live: mssql"]
+fn a_csv_export_of_a_nanosecond_timestamp_column_is_refused_by_check_like_the_run_mssql() {
+    require_alive(LiveService::Mssql);
+    let name = unique_name("fmt_ns_ms");
+    let out = tempfile::tempdir().unwrap();
+    let rig = Rig::mssql_batch(&name)
+        .query("SELECT CAST('2024-01-01 10:30:00' AS DATETIME2) AS d")
+        .mode("full")
+        .dest_path(out.path().to_path_buf());
+    csv_column_is_refused_like_the_run(rig, &name, "d", "timestamp_ns");
+}
+
+#[test]
+#[ignore = "live: oracle"]
+fn a_csv_export_of_a_nanosecond_timestamp_column_is_refused_by_check_like_the_run_oracle() {
+    require_alive(LiveService::Oracle);
+    let name = unique_name("fmt_ns_or");
+    let out = tempfile::tempdir().unwrap();
+    let rig = Rig::oracle_batch(&name)
+        .query("SELECT TIMESTAMP '2024-01-01 10:30:00' AS D FROM dual")
+        .mode("full")
+        .dest_path(out.path().to_path_buf());
+    csv_column_is_refused_like_the_run(rig, &name, "D", "timestamp_ns");
+}
+
+#[test]
+#[ignore = "live: mssql"]
+fn a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mssql() {
+    require_alive(LiveService::Mssql);
+    let name = unique_name("unmapped_ms");
+    let out = tempfile::tempdir().unwrap();
+    let rig = Rig::mssql_batch(&name)
+        .query("SELECT CAST('<a/>' AS XML) AS x")
+        .mode("full")
+        .dest_path(out.path().to_path_buf());
+    unmapped_column_is_refused_like_the_run(rig, &name, "x");
 }

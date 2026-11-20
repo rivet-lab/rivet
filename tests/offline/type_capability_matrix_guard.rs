@@ -348,8 +348,6 @@ const KNOWN_DEFECTS: &[&str] = &[
     "postgres:INTEGER[] (ClickHouse)",
     "postgres:DOUBLE PRECISION[] (ClickHouse)",
     "mysql:BOOLEAN",
-    "mssql:DATETIME2",
-    "mssql:DATETIMEOFFSET",
     "mssql:TIME",
     "mssql:UNIQUEIDENTIFIER (ClickHouse)",
     "oracle:TIMESTAMP(9)",

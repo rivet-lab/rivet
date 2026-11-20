@@ -1,5 +1,4 @@
-//! Build [`PrioritizationInputs`](super::PrioritizationInputs) from resolved plan, computed data,
-//! preflight diagnostics, and optional preflight hints.
+//! Build [`PrioritizationInputs`](super::PrioritizationInputs) from resolved plan, computed data, preflight diagnostics, and optional preflight hints.
 
 use crate::config::ExportConfig;
 
@@ -18,9 +17,6 @@ pub struct PrioritizationHints {
 }
 
 /// Assemble prioritization inputs for one export.
-///
-/// `history` carries optional signals from recent runs (`export_metrics`). When
-/// `None` or empty, history contribution to scoring is skipped.
 pub fn build_prioritization_inputs(
     export: &ExportConfig,
     plan: &ResolvedRunPlan,
@@ -168,8 +164,6 @@ mod tests {
         }))
     }
 
-    // ── snapshot strategy → None cursor quality ──────────────────────────────
-
     #[test]
     fn snapshot_strategy_cursor_quality_is_none() {
         let plan = minimal_plan(ExtractionStrategy::Snapshot);
@@ -185,8 +179,6 @@ mod tests {
         assert_eq!(inputs.cursor_quality, CursorQuality::None);
         assert!(inputs.source_freshness_hint.is_none());
     }
-
-    // ── incremental + SingleColumn cursor quality ────────────────────────────
 
     #[test]
     fn single_column_both_hints_strong_monotonic() {
@@ -260,8 +252,6 @@ mod tests {
         assert_eq!(inputs.cursor_quality, CursorQuality::None);
     }
 
-    // ── incremental + Coalesce cursor quality ────────────────────────────────
-
     #[test]
     fn coalesce_both_hints_weak_multi_candidate() {
         let plan = incremental_plan(IncrementalCursorMode::Coalesce);
@@ -299,8 +289,6 @@ mod tests {
         );
         assert_eq!(inputs.cursor_quality, CursorQuality::WeakTime);
     }
-
-    // ── TimeWindow freshness hint ─────────────────────────────────────────────
 
     #[test]
     fn timewindow_7_days_is_recent() {
@@ -343,8 +331,6 @@ mod tests {
         assert!(inputs.source_freshness_hint.is_none());
     }
 
-    // ── sparse_range_risk detection ──────────────────────────────────────────
-
     #[test]
     fn sparse_range_warning_sets_risk_flag() {
         let plan = minimal_plan(ExtractionStrategy::Snapshot);
@@ -386,8 +372,6 @@ mod tests {
         );
         assert!(!inputs.sparse_range_risk);
     }
-
-    // ── computed fields mapped correctly ─────────────────────────────────────
 
     #[test]
     fn estimated_rows_from_row_estimate() {
@@ -454,8 +438,6 @@ mod tests {
         assert_eq!(inputs.chunk_count, Some(5));
     }
 
-    // ── reconcile_required propagation ───────────────────────────────────────
-
     #[test]
     fn reconcile_required_from_plan_reconcile() {
         let mut plan = minimal_plan(ExtractionStrategy::Snapshot);
@@ -471,8 +453,6 @@ mod tests {
         );
         assert!(inputs.reconcile_required);
     }
-
-    // ── export_name and source_group forwarded ───────────────────────────────
 
     #[test]
     fn export_name_forwarded_to_inputs() {

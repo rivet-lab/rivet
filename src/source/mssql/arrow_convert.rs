@@ -1,7 +1,7 @@
 //! SQL Server `Row` → Arrow `RecordBatch` pipeline.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -221,19 +221,19 @@ pub(super) fn mssql_columns_to_schema(
     columns: &[Column],
     overrides: &ColumnOverrides,
     rows: &[Row],
-    decimal_hints: Option<&HashMap<String, (u8, i8)>>,
+    hints: Option<&CatalogHints>,
 ) -> Result<(Schema, Vec<(String, ColumnType)>)> {
     let mut fields: Vec<Field> = Vec::with_capacity(columns.len());
     let mut decoders: Vec<(String, ColumnType)> = Vec::with_capacity(columns.len());
     let mut errors: Vec<String> = Vec::new();
 
     for (idx, col) in columns.iter().enumerate() {
-        let rivet = resolve_decimal(
+        let rivet = resolve_catalog_type(
             mssql_type_to_rivet(col, overrides)?,
             col.name(),
             overrides,
-            decimal_hints,
-            decimal_scale_from_rows(idx, rows),
+            hints,
+            Some((idx, rows)),
         );
         let native = format!("{:?}", col.column_type()).to_lowercase();
         let source = SourceColumn::simple(col.name(), native, true);
@@ -287,27 +287,36 @@ pub(super) fn mssql_columns_to_schema(
 pub(super) fn mssql_type_mappings(
     columns: &[Column],
     overrides: &ColumnOverrides,
-    decimal_hints: Option<&HashMap<String, (u8, i8)>>,
+    hints: Option<&CatalogHints>,
 ) -> Result<Vec<TypeMapping>> {
     columns
         .iter()
         .map(|col| {
-            let rivet = resolve_decimal(
+            let rivet = resolve_catalog_type(
                 mssql_type_to_rivet(col, overrides)?,
                 col.name(),
                 overrides,
-                decimal_hints,
+                hints,
                 None,
             );
             let native = format!("{:?}", col.column_type()).to_lowercase();
             let source = SourceColumn::simple(col.name(), native.clone(), true);
             let mapping = TypeMapping::from_source(&source, rivet);
-            Ok(if native == "datetime2" {
+            Ok(if matches!(
+                mapping.rivet_type,
+                RivetType::Timestamp {
+                    unit: RivetTimeUnit::Nanosecond,
+                    ..
+                }
+            ) && !overrides.contains_key(col.name())
+            {
+                mapping.with_warning(FINE_TIMESTAMP_WARNING)
+            } else if native == "datetime2" && !overrides.contains_key(col.name()) {
                 mapping.with_warning(
-                    "datetime2 → Timestamp(microsecond): a scale-7 column (the bare `datetime2` \
-                     default) loses its 100ns sub-microsecond tick. Use a `timestamp_ns` column \
-                     override to preserve it (at the cost of the 1677–2262 date range); \
-                     datetime2(0..6) is exact.",
+                    "datetime2 → Timestamp(microsecond): the column's declared scale could not be \
+                     read from the catalog (a query that is not a single-table SELECT), so a \
+                     scale-7 column would lose its 100ns tick. Declare it `timestamp_ns` in \
+                     `columns:` to keep it; datetime2(0..6) is exact.",
                 )
             } else if native == "timen" {
                 mapping.with_warning(
@@ -320,6 +329,89 @@ pub(super) fn mssql_type_mappings(
             })
         })
         .collect()
+}
+
+/// The declared facts a result set's columns need from the catalog: decimal precision and scale, and the `datetime2` / `datetimeoffset` columns finer than a microsecond.
+#[derive(Default)]
+pub(super) struct CatalogHints {
+    pub decimals: HashMap<String, (u8, i8)>,
+    pub fine_timestamps: HashSet<String>,
+}
+
+/// The warning on a sub-microsecond timestamp column delivered as `Timestamp(ns)`.
+const FINE_TIMESTAMP_WARNING: &str = "datetime2 / datetimeoffset with a scale above 6 → Timestamp(nanosecond): the 100ns tick is kept; the column holds 1677-09-21..2262-04-11, and a value outside it stops the export. Declare the column `timestamp` (or `timestamp_tz`) in `columns:` for microseconds over the full 0001..9999 range.";
+
+/// A decimal's declared precision and scale, and a `datetime2` / `datetimeoffset` finer than a microsecond as nanoseconds (the first value's own scale decides over the catalog, so a query that re-types the column is read as written); a `columns:` override is never touched.
+fn resolve_catalog_type(
+    rivet: RivetType,
+    col_name: &str,
+    overrides: &ColumnOverrides,
+    hints: Option<&CatalogHints>,
+    rows: Option<(usize, &[Row])>,
+) -> RivetType {
+    let rivet = resolve_decimal(
+        rivet,
+        col_name,
+        overrides,
+        hints.map(|h| &h.decimals),
+        rows.and_then(|(idx, rows)| decimal_scale_from_rows(idx, rows)),
+    );
+    let finer = seeded!(
+        "fine-timestamp-lands-at-microseconds",
+        false,
+        rows.and_then(|(idx, rows)| first_timestamp_scale(idx, rows))
+            .map_or_else(
+                || hints.is_some_and(|h| h.fine_timestamps.contains(col_name)),
+                |scale| scale > 6
+            )
+    );
+    match rivet {
+        RivetType::Timestamp {
+            unit: RivetTimeUnit::Microsecond,
+            timezone,
+        } if finer && !overrides.contains_key(col_name) => RivetType::Timestamp {
+            unit: RivetTimeUnit::Nanosecond,
+            timezone,
+        },
+        other => other,
+    }
+}
+
+/// The scale of the first non-null `datetime2` / `datetimeoffset` value of column `idx` (every value of a column shares it).
+fn first_timestamp_scale(idx: usize, rows: &[Row]) -> Option<u8> {
+    rows.iter().find_map(|row| {
+        let value = cell(row, idx)?;
+        if let ColumnData::DateTime2(Some(dt)) = value {
+            return Some(dt.time().scale());
+        }
+        if let ColumnData::DateTimeOffset(Some(dto)) = value {
+            return Some(dto.datetime2().time().scale());
+        }
+        None
+    })
+}
+
+/// The UTC instant of a `datetime2` / `datetimeoffset` cell, or a coded mismatch when the cell is neither.
+fn utc_instant(
+    row: &Row,
+    idx: usize,
+    declared: Option<&RivetType>,
+    column: &str,
+    target: &DataType,
+) -> Result<Option<NaiveDateTime>> {
+    match row.try_get::<NaiveDateTime, _>(idx) {
+        Ok(v) => Ok(v),
+        Err(_) => match row.try_get::<chrono::DateTime<chrono::FixedOffset>, _>(idx) {
+            Ok(v) => Ok(v.map(|dt| dt.naive_utc())),
+            Err(e) => Err(cell_mismatch(
+                declared,
+                column,
+                target,
+                cell(row, idx),
+                &e.to_string(),
+            )),
+        },
+    }
 }
 
 /// Recover an autodetected decimal's declared precision/scale.
@@ -583,8 +675,8 @@ fn build_array(
         DataType::Timestamp(TimeUnit::Nanosecond, tz) => {
             let mut b = TimestampNanosecondBuilder::with_capacity(rows.len());
             for row in rows {
-                match row.try_get::<NaiveDateTime, _>(idx) {
-                    Ok(Some(dt)) => match seeded!(
+                match utc_instant(row, idx, declared, column, target)? {
+                    Some(dt) => match seeded!(
                         "mssql-ns-override-out-of-range-null",
                         dt.and_utc().timestamp_nanos_opt(),
                         Some(crate::types::timestamp_nanos_or_refuse(
@@ -594,16 +686,7 @@ fn build_array(
                         Some(ns) => b.append_value(ns),
                         None => b.append_null(),
                     },
-                    Ok(None) => b.append_null(),
-                    Err(e) => {
-                        return Err(cell_mismatch(
-                            declared,
-                            column,
-                            target,
-                            cell(row, idx),
-                            &e.to_string(),
-                        ));
-                    }
+                    None => b.append_null(),
                 }
             }
             let arr = b.finish();
@@ -1301,6 +1384,124 @@ mod tests {
             "DATETIME2 never rounds up"
         );
         assert_eq!(naive_micros(at(123_333_333), true) - base, 123_333);
+    }
+
+    /// A column the catalog marks finer than a microsecond is delivered as nanoseconds; every other column and every `columns:` override keeps its type.
+    #[test]
+    fn a_fine_timestamp_column_is_nanoseconds_and_its_neighbours_are_untouched() {
+        let ts = |unit, tz: Option<&str>| RivetType::Timestamp {
+            unit,
+            timezone: tz.map(str::to_string),
+        };
+        let hints = CatalogHints {
+            decimals: HashMap::new(),
+            fine_timestamps: [
+                "fine".to_string(),
+                "fine_tz".to_string(),
+                "forced".to_string(),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let none = ColumnOverrides::new();
+        let resolve = |rivet, name, overrides: &ColumnOverrides| {
+            resolve_catalog_type(rivet, name, overrides, Some(&hints), None)
+        };
+        let us = || ts(RivetTimeUnit::Microsecond, None);
+        let ns = || ts(RivetTimeUnit::Nanosecond, None);
+        assert_eq!(resolve(us(), "fine", &none), ns());
+        assert_eq!(
+            resolve(
+                ts(RivetTimeUnit::Microsecond, Some("UTC")),
+                "fine_tz",
+                &none
+            ),
+            ts(RivetTimeUnit::Nanosecond, Some("UTC"))
+        );
+        assert_eq!(
+            resolve(us(), "scale6", &none),
+            us(),
+            "datetime2(0..6) is exact"
+        );
+        let forced: ColumnOverrides = [("forced".to_string(), us())].into_iter().collect();
+        assert_eq!(
+            resolve(us(), "forced", &forced),
+            us(),
+            "an override is the operator's word"
+        );
+        assert_eq!(resolve(RivetType::Int32, "fine", &none), RivetType::Int32);
+        assert_eq!(
+            resolve_catalog_type(us(), "fine", &none, None, None),
+            us(),
+            "no catalog read, no first-batch evidence: the mapping is unchanged"
+        );
+    }
+
+    /// The first non-null datetime2 / datetimeoffset value's own scale decides the type over the catalog; with no such value the catalog decides.
+    #[test]
+    fn a_fine_timestamp_is_read_from_the_first_values_own_scale() {
+        use tiberius::time::{Date, DateTime2, DateTimeOffset, Time};
+        let dt2 = |scale: u8| DateTime2::new(Date::new(693_595), Time::new(1, scale));
+        let one =
+            |name: &'static str, ty, data| vec![Row::builder().column(name, ty, data).build()];
+        let datetime2 = |scale: u8| {
+            one(
+                "t",
+                ColumnType::Datetime2,
+                ColumnData::DateTime2(Some(dt2(scale))),
+            )
+        };
+        let offset = |scale: u8| {
+            one(
+                "t",
+                ColumnType::DatetimeOffsetn,
+                ColumnData::DateTimeOffset(Some(DateTimeOffset::new(dt2(scale), 60))),
+            )
+        };
+        let us = RivetType::Timestamp {
+            unit: RivetTimeUnit::Microsecond,
+            timezone: None,
+        };
+        let ns = RivetType::Timestamp {
+            unit: RivetTimeUnit::Nanosecond,
+            timezone: None,
+        };
+        let none = ColumnOverrides::new();
+        let catalog_fine = CatalogHints {
+            decimals: HashMap::new(),
+            fine_timestamps: ["t".to_string()].into_iter().collect(),
+        };
+        let catalog_empty = CatalogHints {
+            decimals: HashMap::new(),
+            fine_timestamps: HashSet::new(),
+        };
+        let resolve = |hints: Option<&CatalogHints>, rows: &[Row]| {
+            resolve_catalog_type(us.clone(), "t", &none, hints, Some((0, rows)))
+        };
+        for scale in [7, 0] {
+            assert_eq!(first_timestamp_scale(0, &datetime2(scale)), Some(scale));
+            assert_eq!(first_timestamp_scale(0, &offset(scale)), Some(scale));
+        }
+        assert_eq!(resolve(None, &datetime2(7)), ns, "a query's scale-7 column");
+        assert_eq!(resolve(None, &offset(7)), ns, "a query's scale-7 offset");
+        assert_eq!(resolve(None, &datetime2(6)), us, "scale 6 is exact");
+        assert_eq!(resolve(None, &datetime2(0)), us);
+        assert_eq!(
+            resolve(Some(&catalog_fine), &datetime2(3)),
+            us,
+            "the value's scale over the catalog"
+        );
+        assert_eq!(resolve(Some(&catalog_empty), &datetime2(7)), ns);
+        let nulls = one("t", ColumnType::Datetime2, ColumnData::DateTime2(None));
+        assert_eq!(first_timestamp_scale(0, &nulls), None);
+        assert_eq!(
+            resolve(Some(&catalog_fine), &nulls),
+            ns,
+            "all null: the catalog"
+        );
+        assert_eq!(resolve(Some(&catalog_empty), &nulls), us);
+        let text = one("t", ColumnType::NVarchar, ColumnData::String(None));
+        assert_eq!(first_timestamp_scale(0, &text), None);
     }
 
     #[test]

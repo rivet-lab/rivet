@@ -793,6 +793,7 @@ mod tests {
             parts: vec![part(1, 10), part(2, 10)],
             column_checksums: None,
             checksum_key_column: None,
+            nulled_cells: None,
         };
         let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
         std::fs::write(dir.path().join(MANIFEST_FILENAME), &bytes).unwrap();
@@ -915,6 +916,7 @@ mod tests {
             ),
             checksum_render: Some(CHECKSUM_RENDER_ID.into()),
             checksum_key_column: Some("id".into()),
+            nulled_cells: None,
             ..RunManifest::for_test("r1", &[(&chunk0, 3), (&chunk1, 2)])
         };
         crate::pipeline::manifest_writer::write_manifest(

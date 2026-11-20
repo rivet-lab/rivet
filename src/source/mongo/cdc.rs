@@ -705,6 +705,7 @@ fn to_change_event(
         row_id: None,
         before_names: None,
         before_poison: None,
+        image_labels: None,
     };
     crate::source::cdc::TxnFramer::single_event_commit(&mut ev);
     Ok(ev)
@@ -811,6 +812,7 @@ fn boundary_marker(cse: &ChangeStreamEvent<Document>, stamp: (u64, u64)) -> Resu
         row_id: None,
         before_names: None,
         before_poison: None,
+        image_labels: None,
     };
     crate::source::cdc::TxnFramer::single_event_commit(&mut ev);
     Ok(ev)
