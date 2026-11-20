@@ -6775,3 +6775,20 @@ seeds:
         na: "MySQL datetime, timestamp and time hold microseconds at most, so no time override keeps fewer digits than the source"
       mongo:
         na: "a BSON date holds milliseconds and a Mongo export has no `columns:` time override over it, so nothing narrows"
+
+  - name: check-values-unread-unsaid
+    class: "`rivet check` exits 0 over a column a run then refuses by a value (RIVET_SOURCE_VALUE_UNREPRESENTABLE, RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE) without saying that it read no values, so check and run disagree with nothing to tell the operator why"
+    history: "CHECK_RUN_SPLIT known-red class over every engine and leg (2026-11-10..19); owner decision 2026-11-20: check names the codes only a value decides (needs_values in the registry) instead of reading values, and the gate grades a split on such a code as noted"
+    scope: source
+    switch: check-values-unread-unsaid
+    engines:
+      postgres:
+        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises"]
+      mysql:
+        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises"]
+      mssql:
+        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises"]
+      oracle:
+        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises"]
+      mongo:
+        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises"]

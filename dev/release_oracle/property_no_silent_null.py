@@ -715,6 +715,23 @@ def rivet(args: list[str], env: dict, cwd: Path) -> core.Proc:
     return p
 
 
+VALUES_NOTE = "note[values-unread]: "
+ERRORS_REF = ROOT / "docs" / "reference" / "errors.md"
+
+
+def value_codes(ref: Path = ERRORS_REF) -> frozenset[str]:
+    """The codes only a value raises, as the generated error reference lists them under `## Decided by a value` (from `needs_values` in the code registry; no list is kept here)."""
+    text = ref.read_text()
+    _, _, section = text.partition("\n## Decided by a value\n")
+    return frozenset(re.findall(r"^- `(RIVET_[A-Z0-9_]+)`$", section.partition("\n## ")[0], re.M))
+
+
+def noted(check_out: str, code: str) -> bool:
+    """Whether `rivet check` named `code` as one it cannot decide because it reads no values: the code is value-decided in the registry AND check's note names it."""
+    return code in value_codes() and any(
+        line.startswith(VALUES_NOTE) and code in line for line in check_out.splitlines())
+
+
 def grade_stop(cell: str, p: core.Proc, check: core.Proc) -> Result | None:
     """The verdict of a run that stopped non-zero: a coded refusal is fine, a crash, an uncoded stop or a check/run split is not."""
     if p.returncode == 0:
@@ -730,6 +747,8 @@ def grade_stop(cell: str, p: core.Proc, check: core.Proc) -> Result | None:
         return Result(cell, REFUSED, UNGRADED, f"the harness's own config was refused before any value was read: exit {p.returncode} [{code}]", code)
     if not code or code.startswith("RIVET_INTERNAL"):
         return Result(cell, REFUSED, UNCODED, f"exit {p.returncode} {code or 'no code'}: {core.first_error(p.stderr)[:160]}", code)
+    if check.returncode == 0 and noted(check.stderr + check.stdout, code):
+        return Result(cell, REFUSED, "", f"check exit 0 and named [{code}] as decided by a value; run exit {p.returncode}", code)
     if check.returncode == 0:
         return Result(cell, REFUSED, SPLIT, f"check exit 0, run exit {p.returncode} [{code}]", code)
     return Result(cell, REFUSED, "", f"check exit {check.returncode} [{(CODE.search(check.stderr + check.stdout) or [None, ''])[1]}]", code)
@@ -1173,6 +1192,11 @@ def self_test() -> None:
     assert grade_stop("c", _proc(1, "error: boom"), no_check).klass == UNCODED
     assert grade_stop("c", _proc(6, "[RIVET_INTERNAL_TYPE_BUILDER] no builder"), no_check).klass == UNCODED
     assert grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] x"), no_check).klass == SPLIT, "check exit 0 where run refuses"
+    assert {"RIVET_SOURCE_VALUE_UNREPRESENTABLE", "RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE"} <= value_codes(), "the reference lists the value-decided codes"
+    note = _proc(0, VALUES_NOTE + "rivet check reads no values; a run may still refuse a value with RIVET_SOURCE_VALUE_UNREPRESENTABLE")
+    assert grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] x"), note).klass == "", "a value-decided refusal check named is no split"
+    assert grade_stop("c", _proc(5, "[RIVET_TYPE_UNSAFE_MAPPING] x"), _proc(0, VALUES_NOTE + "RIVET_TYPE_UNSAFE_MAPPING")).klass == SPLIT, "a code check decides stays a split, whatever a note says"
+    assert grade_stop("c", _proc(5, "[RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE] x"), note).klass == SPLIT, "a value code the note does not name stays a split"
     assert grade_stop("c", _proc(5, "[RIVET_SOURCE_CONNECT_FAILED] listener refused"), _proc(0)).klass == NOT_GRADED, "a stand that would not connect is not a graded refusal"
     assert grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] x"), _proc(5, "[RIVET_SOURCE_CONNECT_FAILED] x")).klass == NOT_GRADED
     probe = _proc(0, "WARN rivet::preflight] type report for 'nsn' failed: oracle: listener at host \"127.0.0.1\" port 1521 refused connection.")

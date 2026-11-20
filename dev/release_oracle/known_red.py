@@ -60,32 +60,14 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     KnownRed("upgrade[oracle/cdc-load/tz=Asia/Tokyo]: cycle1/load: prev exit 1 [RIVET_LOAD_BLOCK_MISSING]: Error: [RIVET_LOAD_BLOCK_MISSING] config has no top-level `load:` block — add `load: { target, ... }` to load into a warehouse",
              _ORACLE_CDC_LOAD,
              _EXPIRES),
-    KnownRed("no_silent_null[mssql] smoke: CHECK_RUN_SPLIT over 6 source->override pairs #520f3f12",
-             "2026-11-19: batch leg, PR-PRECHECK: check exits 0 and run refuses with RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5) because check reads no values; the format and unmapped-column refusals are decided by check, plan and doctor since 2026-11-19 and no pair of them remains; open, closes when check decides a value-dependent refusal or the owner accepts it; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-19 to the pairs left on the branch build",
-             _EXPIRES),
-    KnownRed("no_silent_null[mysql] smoke: CHECK_RUN_SPLIT over 9 source->override pairs #72410b51",
-             "2026-11-19: batch leg, PR-PRECHECK: check exits 0 and run refuses with RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5) because check reads no values; the format and unmapped-column refusals are decided by check, plan and doctor since 2026-11-19 and no pair of them remains; open, closes when check decides a value-dependent refusal or the owner accepts it; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-19 to the pairs left on the branch build",
-             _EXPIRES),
-    KnownRed("no_silent_null[oracle] smoke: CHECK_RUN_SPLIT over 15 source->override pairs #9fb19b01",
-             "2026-11-19: batch leg, PR-PRECHECK: check exits 0 and run refuses with RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5) because check reads no values; the format and unmapped-column refusals are decided by check, plan and doctor since 2026-11-19 and no pair of them remains; open, closes when check decides a value-dependent refusal or the owner accepts it; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-19 to the pairs left on the branch build",
-             _EXPIRES),
-    KnownRed("no_silent_null[postgres] smoke: CHECK_RUN_SPLIT over 4 source->override pairs #75e0db83",
-             "2026-11-19: batch leg, PR-PRECHECK: check exits 0 and run refuses with RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5) because check reads no values; the format and unmapped-column refusals are decided by check, plan and doctor since 2026-11-19 and no pair of them remains; open, closes when check decides a value-dependent refusal or the owner accepts it; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-19 to the pairs left on the branch build",
-             _EXPIRES),
     KnownRed("no_silent_null[mssql] full: WRONG_VALUE over 5 source->override pairs #01b25485",
              "2026-11-11: full tier, PR-NULL: exit 0 with fidelity exact while the value changed (integer to a narrower decimal wraps, text or integer to bool, NUMBER 1E125 to float4 as inf, a negative-scale decimal scaled the wrong way, DATETIME to date truncated, Oracle TIMESTAMP WITH TIME ZONE shifted); open, closes when the override refuses a value it cannot hold; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-19 from the full tier on main 7dc3e850 over the pairs left: DATETIME2 to none, timestamp, timestamp_ns, timestamp_tz, timestamp_tz_ns",
-             _EXPIRES),
-    KnownRed("no_silent_null[mssql] full: CHECK_RUN_SPLIT over 6 source->override pairs #520f3f12",
-             "2026-11-19: full tier, PR-PRECHECK: check exits 0 and run refuses with RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5) because check reads no values; the format and unmapped-column refusals are decided by check, plan and doctor since 2026-11-19 and no pair of them remains; open, closes when check decides a value-dependent refusal or the owner accepts it; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-19 to the pairs left on the branch build",
              _EXPIRES),
     KnownRed("no_silent_null[mssql] full: INTEGRITY_BLIND over 5 source->override pairs #01b25485",
              "2026-11-11: full tier, PR-SELF-GRADE: validate --depth full exits 0 over a cell whose values changed, it answers from rivet own fingerprint; open, closes when validate compares against the source; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-19 from the full tier on main 7dc3e850 over the pairs left: DATETIME2 to none, timestamp, timestamp_ns, timestamp_tz, timestamp_tz_ns",
              _EXPIRES),
     KnownRed("no_silent_null[mysql] full: WRONG_VALUE over 2 source->override pairs #8e570de1",
              "2026-11-11: full tier, PR-NULL: exit 0 with fidelity exact while the value changed (integer to a narrower decimal wraps, text or integer to bool, NUMBER 1E125 to float4 as inf, a negative-scale decimal scaled the wrong way, DATETIME to date truncated, Oracle TIMESTAMP WITH TIME ZONE shifted); open, closes when the override refuses a value it cannot hold; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-13 from island reads on devbox, stable over 3 runs; re-keyed 2026-11-19 from the full tier on main 7dc3e850 over the pairs left: BIT(8) and BIT(64) to binary",
-             _EXPIRES),
-    KnownRed("no_silent_null[mysql] full: CHECK_RUN_SPLIT over 9 source->override pairs #72410b51",
-             "2026-11-19: full tier, PR-PRECHECK: check exits 0 and run refuses with RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5) because check reads no values; the format and unmapped-column refusals are decided by check, plan and doctor since 2026-11-19 and no pair of them remains; open, closes when check decides a value-dependent refusal or the owner accepts it; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-19 to the pairs left on the branch build",
              _EXPIRES),
     KnownRed("no_silent_null[mysql] full: INTEGRITY_BLIND over 2 source->override pairs #8e570de1",
              "2026-11-11: full tier, PR-SELF-GRADE: validate --depth full exits 0 over a cell whose values changed, it answers from rivet own fingerprint; open, closes when validate compares against the source; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-13 from island reads on devbox, stable over 3 runs; re-keyed 2026-11-19 from the full tier on main 7dc3e850 over the pairs left: BIT(8) and BIT(64) to binary",
@@ -94,9 +76,6 @@ KNOWN_RED: tuple[KnownRed, ...] = (
              "2026-11-19: full tier, PR-PRECHECK: check exits 0 and run refuses with RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5) because check reads no values; the DATE and TIMESTAMP(9) to date pairs end in RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH (exit 1) and flap between check refusing (no red) and check exit 0, so the count may read 2 lower and the digest shift; the format and unmapped-column refusals are decided by check, plan and doctor since 2026-11-19 and no pair of them remains; open, closes when check decides a value-dependent refusal or the owner accepts it; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-19 to the pairs left on the branch build",
              _EXPIRES,
              alt=("no_silent_null[oracle] full: CHECK_RUN_SPLIT over 4 source->override pairs #867c0680",)),
-    KnownRed("no_silent_null[postgres] full: CHECK_RUN_SPLIT over 4 source->override pairs #75e0db83",
-             "2026-11-19: full tier, PR-PRECHECK: check exits 0 and run refuses with RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5) because check reads no values; the format and unmapped-column refusals are decided by check, plan and doctor since 2026-11-19 and no pair of them remains; open, closes when check decides a value-dependent refusal or the owner accepts it; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-19 to the pairs left on the branch build",
-             _EXPIRES),
     KnownRed("no_silent_null_cdc[mssql]: CHECK_RUN_SPLIT over 33 source->override pairs #d9724f13",
              "2026-11-19: CDC leg, PR-PRECHECK: check exits 0 and run refuses by code (RIVET_SOURCE_CDC_PREREQUISITE on the added and type_changed legs, a prerequisite the stream reads from the server at run time, and RIVET_SOURCE_VALUE_UNREPRESENTABLE, exit 5, because check reads no values); the format, unmapped-column and declared-type refusals of the pending baseline leg are decided by check and doctor since 2026-11-19 and no pair of them remains; open, closes when check decides the remaining refusal or the owner accepts it; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-19 to the pairs left on the branch build",
              _EXPIRES),
@@ -105,9 +84,6 @@ KNOWN_RED: tuple[KnownRed, ...] = (
              _EXPIRES),
     KnownRed("no_silent_null_cdc[oracle]: CHECK_RUN_SPLIT over 15 source->override pairs #5b995454",
              "2026-11-19: CDC leg, PR-PRECHECK: check exits 0 and run refuses by code (RIVET_SOURCE_VALUE_UNREPRESENTABLE, exit 5, because check reads no values, and RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH for a NUMBER column declared uuid on the snapshot leg, which check still passes); the format, unmapped-column and declared-type refusals of the pending baseline leg are decided by check and doctor since 2026-11-19 and no pair of them remains; open, closes when check decides the remaining refusal or the owner accepts it; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-19 to the pairs left on the branch build",
-             _EXPIRES),
-    KnownRed("no_silent_null_cdc[postgres]: CHECK_RUN_SPLIT over 2 source->override pairs #da166c32",
-             "2026-11-19: CDC leg, PR-PRECHECK: check exits 0 and run refuses by code (RIVET_SOURCE_VALUE_UNREPRESENTABLE, exit 5, because check reads no values); the format, unmapped-column and declared-type refusals of the pending baseline leg are decided by check and doctor since 2026-11-19 and no pair of them remains; open, closes when check decides the remaining refusal or the owner accepts it; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-19 to the pairs left on the branch build",
              _EXPIRES),
     KnownRed("check_equals_run_cloud[offline]: CHECK_RUN_SPLIT over 1 cells #3aec5ed8",
              "2026-11-10: BigQuery load leg, PR-PRECHECK: check exits 0 and load refuses by code (RIVET_LOAD_WAREHOUSE_REJECTED, dataset not found) because check never contacts the warehouse; open, closes when check probes the target dataset or the matrix accepts the split; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-13: the gate grades the cloud tier and reads the same line there, the offline CLI test the offline one",
@@ -275,7 +251,7 @@ def self_test() -> int:
     assert lane_of(own) == NIGHTLY and not any(owed_by(k, lane) for k in KNOWN_RED if own in k.keys() for lane in (GATE, ISLAND, OFFLINE)), \
         "a nightly class is owed by no gate run: a full gate would block on it"
     cut = nightly_classes()
-    assert nightly_key("no_silent_null", "mysql", "CHECK_RUN_SPLIT") in cut and nightly_key("no_silent_null", "mssql", "WRONG_VALUE") in cut, \
+    assert nightly_key("no_silent_null", "mysql", "WRONG_VALUE") in cut and nightly_key("no_silent_null", "mssql", "WRONG_VALUE") in cut, \
         "a gate entry is cut to its (matrix, engine, cause) class"
     held = KnownRed("m::open_defect_x — boom", "2026-11-16: why", "2026-11-22")
     assert cells((held,)) == {"m::open_defect_x": held} == nightly_classes((held,)), "a live-cell entry is held under its cell"

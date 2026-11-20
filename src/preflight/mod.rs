@@ -390,6 +390,10 @@ pub fn check(
             d.mode = note;
         }
     }
+    let note = crate::error::values_unread_note();
+    if !note.is_empty() {
+        eprintln!("{note}");
+    }
     if !json_output {
         for diag in &diagnostics {
             print_diagnostic(diag);
