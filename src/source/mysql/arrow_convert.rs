@@ -1993,6 +1993,7 @@ mod roast_mysql_bit_decode_tests {
             ("i32", v_int(-2_000_000_000)),
             ("i64", v_int(-9_000_000_000_000_000_000)),
             ("u64", v_uint(18_000_000_000_000_000_000)),
+            ("u64_text", v_bytes(b"18000000000000000000")),
             ("f32", v_float(0.5)),
             ("f64", v_double(-1.25)),
             ("f64_text", v_bytes(b"-2.5")),
@@ -2016,6 +2017,11 @@ mod roast_mysql_bit_decode_tests {
         assert_eq!(s.int32(col("i32"), 0), Some(-2_000_000_000));
         assert_eq!(s.int64(col("i64"), 0), Some(-9_000_000_000_000_000_000));
         assert_eq!(s.uint64(col("u64"), 0), Some(18_000_000_000_000_000_000));
+        assert_eq!(
+            s.uint64(col("u64_text"), 0),
+            Some(18_000_000_000_000_000_000),
+            "a text-wire unsigned integer is parsed, never read as BIT bytes"
+        );
         assert_eq!(s.float32(col("f32"), 0), Some(0.5));
         assert_eq!(s.float64(col("f64"), 0), Some(-1.25));
         assert_eq!(
