@@ -301,6 +301,38 @@ fn an_oracle_number_infinity_is_refused_by_code_and_to_char_delivers_the_server_
     assert_eq!(duckdb_dir_scalar(&out, "count(*)", Some(filter)), 3);
 }
 
+/// An Oracle NUMBER infinity read through a declared `float64` column is refused by code, and a finite value in the same column is delivered.
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn an_oracle_number_infinity_in_a_float64_override_is_refused_and_finite_is_delivered() {
+    require_alive(LiveService::Oracle);
+    let d = tempfile::tempdir().unwrap();
+    let run_with = |tag: &str, row: &str| {
+        let t = OracleTable::create("tp_f64", "id NUMBER(10) PRIMARY KEY, n FLOAT(10)");
+        ora_exec(&format!("INSERT INTO {} VALUES ({row})", t.name()));
+        let out = d.path().join(tag);
+        let run = Rig::oracle_batch(t.name())
+            .no_oracle("the column carries a declared `float64` override whose own rendering is this test's subject")
+            .export_line("columns: {N: float64}")
+            .dest_path(out.clone())
+            .run_args(&[]);
+        (run, out)
+    };
+    let (run, out) = run_with("inf", "1, 9.9999999999999999999999999999999999999E125");
+    let err = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(run.status.code(), Some(5), "{err}");
+    assert!(err.contains("RIVET_SOURCE_VALUE_UNREPRESENTABLE"), "{err}");
+    assert!(err.contains("column `N`"), "{err}");
+    assert_eq!(parquet_parts(&out), 0, "a refused run wrote a part");
+    let (run, out) = run_with("fin", "2, 123.5");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(parquet_parts(&out), 1);
+}
+
 /// An Oracle INTERVAL DAY TO SECOND with a sub-microsecond fraction is refused with a code, the column and the `TO_CHAR` remedy, which delivers the server's text.
 #[test]
 #[ignore = "live: requires docker compose oracle"]
