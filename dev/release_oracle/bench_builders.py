@@ -6,7 +6,7 @@ SQL engine, N rows × the ten types every engine has:
 - decimal(18,4)
 - float64
 - text
-- timestamp, date, time of day
+- timestamp, date, time of day (Oracle: DATE delivers a timestamp, INTERVAL DAY TO SECOND ISO text)
 - bool
 - binary
 
