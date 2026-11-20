@@ -304,7 +304,7 @@ impl ClickhouseLoader {
                     .read(key)
                     .with_context(|| format!("reading {uri} for the ClickHouse load"))?;
                 let meta = parquet_footer(&bytes).with_context(|| format!("reading {uri}"))?;
-                refuse_unholdable_timestamps(&meta, uri)?;
+                refuse_unholdable_temporals(&meta, uri)?;
                 let insert = format!("INSERT INTO {target} FORMAT Parquet");
                 (insert, bytes::Bytes::from(bytes))
             }
@@ -1008,10 +1008,9 @@ fn object_kind_of(engine: &str) -> ObjectKind {
     }
 }
 
-/// ClickHouse `DateTime64`'s range in Unix seconds: 1900-01-01 00:00:00 to 2299-12-31 23:59:59.
 const FOOTER_READERS: usize = 8;
 
-/// The row count of every part in `uris`, in order, each footer checked for a timestamp ClickHouse would clamp and, for a change log, the head of `__pos` for a position it cannot version.
+/// The row count of every part in `uris`, in order, each footer checked for a date or timestamp ClickHouse cannot hold and, for a change log, the head of `__pos` for a position it cannot version.
 fn checked_part_rows<'s>(
     store: impl FnOnce() -> Result<&'s GcsStore>,
     uris: &[String],
@@ -1025,7 +1024,7 @@ fn checked_part_rows<'s>(
         let (_, key) = super::split_object_uri(uri)?;
         let meta = super::partition_budget::read_footer(store, key)
             .with_context(|| format!("reading the footer of {uri}"))?;
-        refuse_unholdable_timestamps(&meta, uri)?;
+        refuse_unholdable_temporals(&meta, uri)?;
         if change_log {
             refuse_unorderable_positions(store, key, &meta, uri)?;
         }
@@ -1046,9 +1045,6 @@ fn checked_part_rows<'s>(
     }
     Ok(rows)
 }
-
-const DATETIME64_MIN_SECS: i64 = -2_208_988_800;
-const DATETIME64_MAX_SECS: i64 = 10_413_791_999;
 
 /// Refuse a change-log part whose `__pos` head is of a shape ClickHouse cannot version, before any table is created.
 fn refuse_unorderable_positions(
@@ -1071,31 +1067,35 @@ fn refuse_unorderable_positions(
     Ok(())
 }
 
-/// Refuse a part holding a timestamp ClickHouse would silently clamp (measured on 24.8.
-fn refuse_unholdable_timestamps(
+/// Refuse a part holding a date or timestamp outside the range ClickHouse holds, or one its footer cannot bound.
+fn refuse_unholdable_temporals(
     meta: &parquet::file::metadata::ParquetMetaData,
     uri: &str,
 ) -> Result<()> {
-    let Some((column, value)) =
-        super::partition_budget::timestamp_outside(meta, DATETIME64_MIN_SECS, DATETIME64_MAX_SECS)
-    else {
+    let Some(out) = super::partition_budget::temporal_outside(
+        meta,
+        &crate::types::target::CLICKHOUSE_TEMPORAL_RANGES,
+    ) else {
         return Ok(());
     };
-    match value {
+    let (column, range) = (&out.column, out.range);
+    let (name, span) = (range.type_name, range.span());
+    match out.value {
         None => crate::rivet_bail!(
             crate::error::codes::LOAD_VALUE_OUT_OF_TARGET_RANGE,
             "{uri}: column `{column}` has no min/max statistics in the Parquet footer, so rivet \
-             cannot check it against ClickHouse DateTime64's range (1900-01-01 to 2299-12-31), \
-             which ClickHouse enforces by storing the nearest end silently; nothing was inserted. \
+             cannot check it against ClickHouse {name}'s range ({span}), \
+             which ClickHouse enforces by {}; nothing was inserted. \
              Re-export the part with statistics enabled (rivet's writer keeps them), or declare \
-             the column as String in the export's `columns:`."
+             the column as String in the export's `columns:`.",
+            range.enforced
         ),
         Some(value) => crate::rivet_bail!(
             crate::error::codes::LOAD_VALUE_OUT_OF_TARGET_RANGE,
-            "{uri}: column `{column}` holds {value}, outside ClickHouse DateTime64's range \
-             (1900-01-01 to 2299-12-31). ClickHouse would store the nearest end instead, \
-             silently; nothing was inserted. Declare the column as String in the export's \
-             `columns:` to keep the value, or correct it at the source."
+            "{uri}: column `{column}` holds {value}, outside ClickHouse {name}'s range \
+             ({span}). ClickHouse would {}; nothing was inserted. Declare the column as String \
+             in the export's `columns:` to keep the value, or correct it at the source.",
+            range.beyond
         ),
     }
 }
@@ -1139,6 +1139,9 @@ mod tests {
     use super::*;
     use crate::types::target::{ExportTarget, TargetInput};
     use crate::types::{RivetType, TypeFidelity};
+
+    const DATETIME64_MIN_SECS: i64 = -2_208_988_800;
+    const DATETIME64_MAX_SECS: i64 = 10_413_791_999;
 
     /// The ClickHouse resolver's own spec for a column of `ty`.
     fn spec(name: &str, ty: RivetType) -> TargetColumnSpec {
@@ -1636,15 +1639,56 @@ mod tests {
         };
         for ok in [DATETIME64_MIN_SECS, 0, DATETIME64_MAX_SECS] {
             assert!(
-                refuse_unholdable_timestamps(&part(ok), "gs://b/p").is_ok(),
+                refuse_unholdable_temporals(&part(ok), "gs://b/p").is_ok(),
                 "{ok}"
             );
         }
         for bad in [DATETIME64_MIN_SECS - 1, DATETIME64_MAX_SECS + 1] {
-            let err = refuse_unholdable_timestamps(&part(bad), "gs://b/p").unwrap_err();
+            let err = refuse_unholdable_temporals(&part(bad), "gs://b/p").unwrap_err();
             assert!(
                 format!("{err:#}").contains("outside ClickHouse DateTime64's range"),
                 "{bad}"
+            );
+        }
+    }
+
+    /// A Date32 part is refused only past either end of the range ClickHouse holds.
+    #[test]
+    fn a_date_part_is_refused_only_past_either_end_of_date32() {
+        use std::sync::Arc;
+        let part = |days: i32| {
+            let col = arrow::array::Date32Array::from(vec![days]);
+            let batch = arrow::record_batch::RecordBatch::try_from_iter([(
+                "d",
+                Arc::new(col) as arrow::array::ArrayRef,
+            )])
+            .unwrap();
+            let mut buf = Vec::new();
+            let mut w =
+                parquet::arrow::ArrowWriter::try_new(&mut buf, batch.schema(), None).unwrap();
+            w.write(&batch).unwrap();
+            w.close().unwrap();
+            parquet_footer(&buf).unwrap()
+        };
+        let (lo, hi) = (-25_567, 120_529);
+        for ok in [lo, 0, hi] {
+            assert!(
+                refuse_unholdable_temporals(&part(ok), "gs://b/p").is_ok(),
+                "{ok}"
+            );
+        }
+        for (bad, shown) in [(lo - 1, "1899-12-31"), (hi + 1, "2300-01-01")] {
+            let err = refuse_unholdable_temporals(&part(bad), "gs://b/p").unwrap_err();
+            assert_eq!(
+                crate::error::error_code(&err),
+                Some("RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE"),
+                "{bad}"
+            );
+            let text = format!("{err:#}");
+            assert!(
+                text.contains(&format!("column `d` holds {shown}"))
+                    && text.contains("outside ClickHouse Date32's range"),
+                "{text}"
             );
         }
     }
@@ -1687,7 +1731,7 @@ mod tests {
         let hidden = part(&[vec![None], vec![late]], EnabledStatistics::Chunk);
         let err = format!(
             "{:#}",
-            refuse_unholdable_timestamps(&hidden, "gs://b/p").unwrap_err()
+            refuse_unholdable_temporals(&hidden, "gs://b/p").unwrap_err()
         );
         assert!(
             err.contains("outside ClickHouse DateTime64's range"),
@@ -1696,11 +1740,11 @@ mod tests {
         let blind = part(&[vec![Some(0)]], EnabledStatistics::None);
         let err = format!(
             "{:#}",
-            refuse_unholdable_timestamps(&blind, "gs://b/p").unwrap_err()
+            refuse_unholdable_temporals(&blind, "gs://b/p").unwrap_err()
         );
         assert!(err.contains("has no min/max statistics"), "{err}");
         assert!(
-            refuse_unholdable_timestamps(
+            refuse_unholdable_temporals(
                 &part(&[vec![None], vec![Some(0)]], EnabledStatistics::Chunk),
                 "gs://b/p"
             )

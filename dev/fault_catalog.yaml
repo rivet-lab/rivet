@@ -376,10 +376,10 @@
   class: "ClickHouse load pulled through a named collection skips the DateTime64 range check -> 9999-12-31 stored clamped to 2299-12-31, silently"
   file: src/load/clickhouse.rs
   old: |2-
-            refuse_unholdable_timestamps(&meta, uri)?;
+            refuse_unholdable_temporals(&meta, uri)?;
   new: |2-
             if !body.is_empty() {
-                refuse_unholdable_timestamps(&meta, uri)?;
+                refuse_unholdable_temporals(&meta, uri)?;
             }
   detectors:
     - test: a_timestamp_clickhouse_cannot_hold_is_refused_when_pulled_too
