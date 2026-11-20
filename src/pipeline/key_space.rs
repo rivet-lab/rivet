@@ -25,7 +25,11 @@ impl Axis {
         if key.parse::<i128>().is_ok() {
             return Some(Axis::Int);
         }
-        if st == crate::config::SourceType::Mssql {
+        if seeded!(
+            "keyset-mssql-uuid-gets-an-axis",
+            false,
+            st == crate::config::SourceType::Mssql
+        ) {
             return None;
         }
         let upper = key.bytes().any(|c| c.is_ascii_uppercase());
