@@ -284,6 +284,7 @@ pub(crate) fn temporal_outside(
         let span = match column_span_at(meta, idx) {
             ColumnStats::Span(span, _) => span,
             ColumnStats::NoValues => return None,
+            ColumnStats::Unknown if !range.silent => return None,
             ColumnStats::Unknown => {
                 return Some(Outside {
                     column,
@@ -537,11 +538,14 @@ mod tests {
 
     fn range_of(type_name: &'static str, lo: i64, hi: i64) -> ValueRange {
         ValueRange {
+            warehouse: "",
             type_name,
             lo_secs: lo,
             hi_secs: hi,
             enforced: "",
             beyond: "",
+            nothing_done: "",
+            silent: true,
         }
     }
 

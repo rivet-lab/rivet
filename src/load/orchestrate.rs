@@ -949,6 +949,17 @@ fn up_to_date_label(mode: load::plan::LoadMode) -> &'static str {
     }
 }
 
+/// The checks a plan's staged parts must pass for its warehouse before any write: the partition budget, then the value ranges.
+fn parts_fit_target(
+    store: &crate::destination::gcs::GcsStore,
+    plan: &load::plan::LoadPlan,
+    budgeted: &[String],
+    uris: &[String],
+) -> Result<()> {
+    partition_budget_ok(store, plan, budgeted)?;
+    load::target_range::refuse_parts_outside_ranges(store, plan, uris)
+}
+
 /// The shared load envelope: open the store, build the loader, reconcile via the ledger, then run + record.
 fn execute_load<R>(
     job: LoadJob<'_>,
@@ -1043,7 +1054,7 @@ fn execute_load<R>(
             ))
         )
     })
-    .and_then(|()| load::before_write(partition_budget_ok(store, job.plan, &budgeted)))
+    .and_then(|()| load::before_write(parts_fit_target(store, job.plan, &budgeted, &inputs.uris)))
     .and_then(|()| {
         lease_still_held(holds(&lease), &target_fqtn, false)?;
         load::before_write(ctx.record_writing())?;
@@ -2609,6 +2620,68 @@ mod load_ledger_tests {
             up_to_date_line(&cdc_job(&dir, &state, &plan)),
             "  cdc load orders → bigquery: up to date — every extraction run already loaded"
         );
+    }
+
+    /// A staged part holding a date BigQuery cannot hold is refused by code before the warehouse write, in every mode; the part one day inside the range reaches it.
+    #[test]
+    fn a_part_outside_bigquery_range_is_refused_before_the_warehouse_write() {
+        use crate::types::target::{BqType, TargetColumnSpec, TargetStatus};
+        use arrow::array::{ArrayRef, Date32Array};
+        let part = |days: i32| {
+            let col = std::sync::Arc::new(Date32Array::from(vec![days])) as ArrayRef;
+            let batch = arrow::record_batch::RecordBatch::try_from_iter([("d", col)]).unwrap();
+            let mut buf = Vec::new();
+            let mut w =
+                parquet::arrow::ArrowWriter::try_new(&mut buf, batch.schema(), None).unwrap();
+            w.write(&batch).unwrap();
+            w.close().unwrap();
+            buf
+        };
+        for mode in [load::plan::LoadMode::Cdc, load::plan::LoadMode::Full] {
+            for (days, refused) in [(-719_163, true), (-719_162, false)] {
+                let dir = tempfile::tempdir().expect("a temp prefix");
+                let state = StateStore::open_in_memory().unwrap();
+                let mut plan = cdc_plan(&dir, "orders_dates");
+                plan.mode = mode;
+                plan.specs = vec![TargetColumnSpec {
+                    column_name: "d".into(),
+                    target_type: BqType::Date.into(),
+                    autoload_type: BqType::Date.into(),
+                    status: TargetStatus::Ok,
+                    note: None,
+                    cast_sql: None,
+                }];
+                let m = super::live_only_decisions::success_manifest("r-d", "part-0.parquet");
+                super::live_only_decisions::write_at(
+                    &dir,
+                    "p/manifest-r-d.json",
+                    &serde_json::to_vec(&m).unwrap(),
+                );
+                super::live_only_decisions::write_at(&dir, "p/part-0.parquet", &part(days));
+                let reached = std::cell::Cell::new(false);
+                let mut job = cdc_job(&dir, &state, &plan);
+                job.mode = mode;
+                let out = execute_load(
+                    job,
+                    |_| {},
+                    |_, _, _, _| -> Result<(u64, ())> {
+                        reached.set(true);
+                        Ok((1, ()))
+                    },
+                    |_, _| {},
+                );
+                assert_eq!(reached.get(), !refused, "{mode:?} {days}: {out:?}");
+                match (refused, out) {
+                    (true, Err(e)) => assert_eq!(
+                        crate::error::error_code(&e),
+                        Some("RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE"),
+                        "{e:#}"
+                    ),
+                    (false, Ok(_)) => {}
+                    (_, other) => panic!("{mode:?} {days}: {other:?}"),
+                }
+            }
+        }
     }
 
     /// A run that DID produce files is loaded, not consumed as empty beside the idle ones.

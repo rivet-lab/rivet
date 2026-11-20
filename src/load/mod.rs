@@ -22,6 +22,7 @@ pub mod result;
 mod snowflake;
 pub(crate) mod snowflake_rest;
 mod staging;
+pub(crate) mod target_range;
 
 pub use bigquery::BigQueryLoader;
 pub use snowflake::SnowflakeLoader;

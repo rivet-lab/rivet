@@ -6839,3 +6839,19 @@ seeds:
         na: "the seed edits the footer guard of the ClickHouse load (temporal_outside), which only a ClickHouse load runs; BigQuery grades its own column types"
       snowflake:
         na: "the seed edits the footer guard of the ClickHouse load (temporal_outside), which only a ClickHouse load runs; Snowflake grades its own column types"
+
+  - name: bq-load-skips-range-guard
+    class: "a BigQuery load never reads the footer of a staged part for a date or timestamp outside BigQuery's 0001-01-01 to 9999-12-31, so a part holding one reaches the warehouse and the whole load job fails as RIVET_LOAD_WAREHOUSE_REJECTED instead of being refused by rivet's coded range refusal before any write"
+    history: "owner brief 2026-11-20 (MYSQL_DATE_ZERO_BQ_RAW); RED on main 2026-11-20 by the type matrix (MySQL DATE 0000-01-01 staged raw, BigQuery rejected the job)"
+    scope: target
+    switch: bq-load-skips-range-guard
+    engines:
+      bigquery:
+        cells:
+          - "lib:a_part_outside_bigquery_range_is_refused_before_the_warehouse_write"
+          - "lib:a_date_past_either_end_of_bigquery_date_is_refused_with_its_day"
+          - "lib:a_timestamp_past_either_end_of_bigquery_timestamp_is_refused"
+      clickhouse:
+        na: "the seed edits the orchestrated pre-write check (refuse_parts_outside_ranges), which gives ClickHouse no ranges: its own loader reads its footers (checked_part_rows)"
+      snowflake:
+        na: "the seed edits the orchestrated pre-write check (refuse_parts_outside_ranges), which gives Snowflake no ranges: Snowflake holds every year and delivers it as a form"
