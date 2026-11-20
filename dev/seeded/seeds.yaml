@@ -6275,6 +6275,24 @@ seeds:
       mongo:
         na: "a MongoDB value is read as a BSON bool and no integer is turned into a flag"
 
+  - name: mysql-checksum-flag-any-nonzero
+    class: "the value checksum of a MySQL flag column reads a cell by its own any-nonzero rule while the delivery reads 0 and 1 only, so a value the delivery refuses (2, 5, -1, 255, BIT 5) is checksummed as true and integrity is graded against a value the file does not hold"
+    history: "2026-11-20 - MysqlCellSource::boolean read Int and UInt as != 0 and every text cell through bit_bytes_to_u64 != 0 (text 0 was true); RED on main in a_flag_cell_is_one_value_to_the_checksum_and_to_the_delivery; fixed by flag_int and flag_bool, the one rule build_flags, the checksum and the stream read"
+    scope: source
+    engines:
+      mysql:
+        switch: mysql-checksum-flag-any-nonzero
+        cells:
+          - "lib:a_flag_cell_is_one_value_to_the_checksum_and_to_the_delivery"
+      postgres:
+        na: "PostgreSQL boolean is a true boolean read by the driver as bool on both sides, so there is no second rule to disagree"
+      mssql:
+        na: "SQL Server bit is read as ColumnData::Bit on both sides, so there is no second rule to disagree"
+      oracle:
+        na: "an Oracle source has no value checksum cell source, and its boolean is read by the driver as bool"
+      mongo:
+        na: "a MongoDB value is a BSON bool and no integer is turned into a flag"
+
   - name: mysql-cdc-tinyint1-flag-any-nonzero-true
     class: "a MySQL TINYINT(1) column read by a stream is delivered as true for every value but 0 and 1: 2, 5, -1 or 255 become true with exit 0, where the batch export refuses them"
     history: "2026-11-20 - owner decision MYSQL_TINYINT_BOOL: mysql_flag_fix excluded TINYINT(1) and bool_value read Int != 0; RED on main in the MySQL CDC cell (TINYINT(1) holding 2 delivered, exit 0); fixed by including TINYINT(1) in mysql_flag_fix"

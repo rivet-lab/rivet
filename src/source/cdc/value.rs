@@ -816,10 +816,9 @@ pub(crate) fn mysql_flag_fix(
 
 /// The flag a 0 or 1 holds as a boolean cell, or the refusal by code for any other value.
 fn flag_cell(v: i128) -> Result<RivetValue, FixRefusal> {
-    match v {
-        0 => Ok(RivetValue::Bool(false)),
-        1 => Ok(RivetValue::Bool(true)),
-        _ => Err(FixRefusal {
+    match crate::source::mysql::flag_bool(v) {
+        Some(f) => Ok(RivetValue::Bool(f)),
+        None => Err(FixRefusal {
             reason: format!(
                 "is not a flag: a boolean column carries 0 or 1 only. Declare the column an \
                  integer type in `columns:` (for example `int64`) to carry the number, or leave \

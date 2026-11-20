@@ -405,10 +405,14 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
     }
     fn boolean(&self, col: usize, row: usize) -> Option<bool> {
         match self.rows[row].as_ref(col) {
-            Some(Value::Int(v)) => Some(*v != 0),
-            Some(Value::UInt(v)) => Some(*v != 0),
-            Some(Value::Bytes(bv)) => Some(bit_bytes_to_u64(bv) != 0),
-            _ => None,
+            Some(v) => flag_int(v, self.is_bit(col)).and_then(|n| {
+                seeded!(
+                    "mysql-checksum-flag-any-nonzero",
+                    Some(n != 0),
+                    flag_bool(n)
+                )
+            }),
+            None => None,
         }
     }
     fn int16(&self, col: usize, row: usize) -> Option<i16> {
@@ -781,31 +785,48 @@ fn build_flags(
 ) -> Result<Arc<dyn Array>> {
     let mut b = BooleanBuilder::with_capacity(rows.len());
     for row in rows {
-        match row.as_ref(col_idx) {
-            Some(Value::Int(v)) => b.append_value(flag(column, i128::from(*v))?),
-            Some(Value::UInt(v)) => b.append_value(flag(column, i128::from(*v))?),
-            Some(Value::Bytes(bv)) if is_bit => {
-                b.append_value(flag(column, i128::from(bit_bytes_to_u64(bv)))?)
-            }
-            Some(Value::Bytes(bv)) if bv.as_slice() == b"0" => b.append_value(false),
-            Some(Value::Bytes(bv)) if bv.as_slice() == b"1" => b.append_value(true),
-            Some(Value::Bytes(bv)) => return unparsed(column, "bool (0 or 1)", bv),
-            other => {
-                null_or_refuse(column, &DataType::Boolean, other)?;
-                b.append_null();
-            }
+        let cell = row.as_ref(col_idx);
+        match cell.and_then(|v| flag_int(v, is_bit)) {
+            Some(n) => b.append_value(flag(column, n)?),
+            None => match cell {
+                Some(Value::Bytes(bv)) => return unparsed(column, "bool (0 or 1)", bv),
+                other => {
+                    null_or_refuse(column, &DataType::Boolean, other)?;
+                    b.append_null();
+                }
+            },
         }
     }
     Ok(Arc::new(b.finish()))
 }
 
+/// The number a flag cell holds on any wire type: an integer, BIT bytes, or the text `0` or `1`.
+fn flag_int(v: &Value, is_bit: bool) -> Option<i128> {
+    match v {
+        Value::Int(n) => Some(i128::from(*n)),
+        Value::UInt(n) => Some(i128::from(*n)),
+        Value::Bytes(bv) if is_bit => Some(i128::from(bit_bytes_to_u64(bv))),
+        Value::Bytes(bv) if bv.as_slice() == b"0" => Some(0),
+        Value::Bytes(bv) if bv.as_slice() == b"1" => Some(1),
+        _ => None,
+    }
+}
+
+/// The one flag rule: 0 is false, 1 is true, any other number is no flag.
+pub(crate) fn flag_bool(v: i128) -> Option<bool> {
+    match v {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
+}
+
 /// The flag a 0 or 1 holds; any other value is refused by code.
 fn flag(column: &str, v: i128) -> Result<bool> {
-    match v {
+    match flag_bool(v) {
         _ if seeded!("mysql-flag-outside-zero-one-delivered-true", v != 0, false) => Ok(true),
-        0 => Ok(false),
-        1 => Ok(true),
-        _ => crate::rivet_bail!(
+        Some(f) => Ok(f),
+        None => crate::rivet_bail!(
             crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
             "column `{column}` holds {v}, which is not a flag: a boolean column carries 0 or 1 \
              only, and rivet refuses rather than writing it as true. Fix the value, or declare \
