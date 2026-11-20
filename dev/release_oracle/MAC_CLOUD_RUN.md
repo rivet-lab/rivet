@@ -5,7 +5,7 @@ measurement, the edge values at load and the read-back. It needs the cloud crede
 so it runs on a machine that has them.
 
 ```sh
-git fetch origin claude/matrix-delivery-derived && git checkout claude/matrix-delivery-derived
+git fetch origin claude/integration-all-fixes && git checkout claude/integration-all-fixes   # every fix of this round, merged
 docker compose up -d postgres mysql mssql oracle           # the source stand (the same pinned images)
 cargo build --release
 uv sync                                                    # duckdb 1.5.5, pyarrow 18.1.0, oracledb, pytz (pyproject.toml)
