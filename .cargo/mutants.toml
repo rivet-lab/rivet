@@ -962,4 +962,6 @@ exclude_re = [
     "replace match guard seeded!\\(.*, false ?\\) with false in keyset_key_refusal$",
     # 2026-11-20: the BigQuery nanosecond zoned timestamp arm is guarded by `seeded!(name, false, true)`, true in the shipped build; the stub to true is the code as shipped, and dev/seeded/recall.py grades the switch (bq-ns-zoned-timestamp-int64 CAUGHT); closes never.
     "replace match guard seeded!\\(.*, false, true\\) with true in bigquery::native$",
+    # 2026-11-20: the ClickHouse footer guard covers Date columns behind `seeded!(name, false, true)`, true in the shipped build; the stub to true is the code as shipped, and dev/seeded/recall.py grades the switch (ch-date-footer-guard-skips-dates CAUGHT); closes never.
+    "replace match guard seeded!\\(.*, false, true\\) with true in temporal_outside$",
 ]
