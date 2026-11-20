@@ -6826,3 +6826,20 @@ seeds:
         na: "Oracle has no TIME type; a time of day is a DATE or TIMESTAMP column"
       mongo:
         na: "BSON has no time-of-day type, so no MongoDB value is a TIME column"
+
+  - name: oracle-interval-ns-truncated
+    class: "an Oracle INTERVAL DAY TO SECOND(7..9) is rendered at microseconds, so its sub-microsecond digits are dropped from the ISO 8601 text with only a warning, exit 0"
+    history: "type matrix class ORACLE_INTERVAL_DS_NS (known_red 2026-11-16); the renderer reused the PostgreSQL microsecond formatter; 2026-11-20: delivered exact (nine fraction digits) rather than refused, since the only override Oracle reads an interval under (text) goes through the same renderer and a refusal would have no lossless way out"
+    scope: source
+    switch: oracle-interval-ns-truncated
+    engines:
+      oracle:
+        cells: ["lib:a_day_to_second_interval_renders_every_field", "lib:a_sub_microsecond_interval_is_exact_text_with_no_warning_and_no_refusal"]
+      postgres:
+        na: "a PostgreSQL interval holds microseconds at most and renders through its own path, so no digit is lost"
+      mysql:
+        na: "MySQL has no interval column type, so no interval value reaches the renderer the seed edits"
+      mssql:
+        na: "SQL Server has no interval column type, so no interval value reaches the renderer the seed edits"
+      mongo:
+        na: "BSON has no interval type, so no MongoDB value reaches the renderer the seed edits"
