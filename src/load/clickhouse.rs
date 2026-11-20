@@ -1081,10 +1081,18 @@ fn refuse_unholdable_timestamps(
     else {
         return Ok(());
     };
-    let date = meta.file_metadata().schema_descr().columns().iter().any(|c| {
-        c.path().string() == column
-            && matches!(c.logical_type_ref(), Some(parquet::basic::LogicalType::Date))
-    });
+    let date = meta
+        .file_metadata()
+        .schema_descr()
+        .columns()
+        .iter()
+        .any(|c| {
+            c.path().string() == column
+                && matches!(
+                    c.logical_type_ref(),
+                    Some(parquet::basic::LogicalType::Date)
+                )
+        });
     let ty = if date { "Date32" } else { "DateTime64" };
     match value {
         None => crate::rivet_bail!(
@@ -1687,8 +1695,9 @@ mod tests {
                 "day {bad}"
             );
             assert!(
-                format!("{err:#}")
-                    .contains(&format!("column `d` holds {shown}, outside ClickHouse Date32's range")),
+                format!("{err:#}").contains(&format!(
+                    "column `d` holds {shown}, outside ClickHouse Date32's range"
+                )),
                 "{err:#}"
             );
         }

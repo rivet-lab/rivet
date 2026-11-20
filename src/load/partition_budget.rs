@@ -266,7 +266,9 @@ pub(crate) fn timestamp_outside(
     schema.columns().iter().enumerate().find_map(|(idx, c)| {
         let checked = match c.logical_type_ref() {
             Some(LogicalType::Timestamp(_)) => true,
-            Some(LogicalType::Date) => seeded!("clickhouse-date-outside-range-clamped", false, true),
+            Some(LogicalType::Date) => {
+                seeded!("clickhouse-date-outside-range-clamped", false, true)
+            }
             _ => false,
         };
         if !checked {
