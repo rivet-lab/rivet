@@ -407,7 +407,7 @@ class Matrix:
         self.obs: dict[tuple[str, str, int, str], Got] = {}
         self.unheld: dict[tuple[str, str, int], tuple[str, str]] = {}
         self.unmade: list[tuple[Column, str]] = []
-        self.checked: dict[tuple[str, str, str], int] = {}
+        self.checked: dict[tuple[str, str, str], tuple[int, str]] = {}
         self.splits: dict[tuple[str, str, str], set[str]] = {}
         self.lock = threading.Lock()
 
@@ -572,19 +572,21 @@ class Matrix:
         if not codes:
             return
         with self.lock:
-            rc = self.checked.get(key)
-        if rc is None:
+            seen = self.checked.get(key)
+        if seen is None:
             d = self.cwd("k")
             (d / "c.yaml").write_text(self.config(u.chunk, u.col, u.ids, "chk", t.stage(f"{self.run}/chk"), t.load_block()))
             p = nsn.rivet(["check", "-c", str(d / "c.yaml"), "--type-report", "--json"], {"RIVET_NSN_URL": self.url, **t.env()}, d)
             if nsn.stand_refused(p):
                 raise Unreachable(f"the stand refused `rivet check` {nsn.STAND_TRIES} times: exit {p.returncode}")
-            rc = p.returncode
+            seen = (p.returncode, p.stderr + p.stdout)
             with self.lock:
-                self.checked[key] = rc
-        if rc == 0:
+                self.checked[key] = seen
+        rc, out = seen
+        split = {c for c in codes if not nsn.noted(out, c)}
+        if rc == 0 and split:
             with self.lock:
-                self.splits.setdefault(key, set()).update(codes)
+                self.splits.setdefault(key, set()).update(split)
 
     def unit(self, u: Unit) -> None:
         """Observe one unit at the extract and at every target."""
@@ -778,10 +780,13 @@ def self_test() -> None:
     real_rivet = nsn.rivet
     try:
         with tempfile.TemporaryDirectory() as td:
-            for rc, have, want in ((0, coded, {key: {"RIVET_X"}}), (2, coded, {}), (0, uncoded, {}), (0, {1: Got(1)}, {})):
+            ranged = {1: Got(refused=te.Verdict(te.REFUSE, code="RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE", stage=te.LOAD))}
+            note = nsn.VALUES_NOTE + "a run may still refuse a value with RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE"
+            for rc, have, want, err in ((0, coded, {key: {"RIVET_X"}}, ""), (2, coded, {}, ""), (0, uncoded, {}, ""), (0, ranged, {}, note),
+                                        (0, ranged, {key: {"RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE"}}, ""), (0, {1: Got(1)}, {}, "")):
                 mc = Matrix("mssql", "u", Path(tempfile.mkdtemp(dir=td)), ("clickhouse",))
                 mc.targets[0].db = "x"
-                nsn.rivet = lambda a, e, c: nsn._proc(rc)
+                nsn.rivet = lambda a, e, c: nsn._proc(rc, err)
                 mc.split(mc.targets[0], Unit(ch_, col, (1,), True), have)
                 assert mc.splits == want, (rc, have, mc.splits)
             nsn.rivet = lambda a, e, c: nsn._proc(1, "error: [RIVET_SOURCE_CONNECT_FAILED] x")
