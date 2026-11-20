@@ -6703,7 +6703,7 @@ seeds:
     class: "a native type resolves into a common kind whose value domain is narrower than the type's, so the values outside it stop the run instead of reaching the file"
     history: "2026-11-20 - type matrix MYSQL_BIT_TOPBIT_REFUSED: a MySQL BIT(64) with bit 63 set was refused RIVET_SOURCE_VALUE_UNREPRESENTABLE because BIT(n) was delivered as Int64 for every n; fixed by BIT_INT64_MAX_WIDTH = 63, BIT(64) is delivered as UInt64"
     scope: source
-    patch: mysql-bit64-signed-delivery/mysql.patch
+    switch: mysql-bit64-signed-delivery
     engines:
       postgres:
         na: "a PostgreSQL bit(n) is delivered as its bit string; the MySQL BIT mapping does not run"

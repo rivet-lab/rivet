@@ -158,7 +158,12 @@ pub(super) fn mysql_type_to_rivet(col: &mysql::Column) -> RivetType {
         },
 
         MYSQL_TYPE_BIT if col.column_length() == 1 => RivetType::Bool,
-        MYSQL_TYPE_BIT if col.column_length() > BIT_INT64_MAX_WIDTH => RivetType::UInt64,
+        MYSQL_TYPE_BIT
+            if col.column_length()
+                > seeded!("mysql-bit64-signed-delivery", 64, BIT_INT64_MAX_WIDTH) =>
+        {
+            RivetType::UInt64
+        }
         MYSQL_TYPE_BIT => RivetType::Int64,
         MYSQL_TYPE_YEAR => RivetType::Int16,
 
@@ -553,6 +558,17 @@ pub(super) fn bit_bytes_to_u64(b: &[u8]) -> u64 {
     b.iter().fold(0u64, |acc, &byte| acc << 8 | u64::from(byte))
 }
 
+/// Decode a UInt64 cell that arrived as `Value::Bytes`.
+fn uint64_from_bytes(column: &str, bv: &[u8], is_bit: bool) -> Result<u64> {
+    if is_bit {
+        return Ok(bit_bytes_to_u64(bv));
+    }
+    match atoi::atoi::<u64>(bv) {
+        Some(v) => Ok(v),
+        None => unparsed(column, "unsigned bigint", bv),
+    }
+}
+
 /// Decode an Int64 cell that arrived as `Value::Bytes`.
 fn int64_from_bytes(bv: &[u8], is_bit: bool) -> Result<Option<i64>> {
     if is_bit {
@@ -835,11 +851,9 @@ fn build_array(
                 match row.as_ref(col_idx) {
                     Some(Value::UInt(v)) => b.append_value(*v),
                     Some(Value::Int(v)) if *v >= 0 => b.append_value(*v as u64),
-                    Some(Value::Bytes(bv)) if is_bit => b.append_value(bit_bytes_to_u64(bv)),
-                    Some(Value::Bytes(bv)) => match atoi::atoi::<u64>(bv) {
-                        Some(v) => b.append_value(v),
-                        None => b.append_value(unparsed(column, "unsigned bigint", bv)?),
-                    },
+                    Some(Value::Bytes(bv)) => {
+                        b.append_value(uint64_from_bytes(column, bv, is_bit)?)
+                    }
                     other => {
                         null_or_refuse(column, arrow_type, other)?;
                         b.append_null();
