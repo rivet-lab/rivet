@@ -1941,11 +1941,16 @@ fn assert_skew_uuid_delivered(dir: &std::path::Path) {
     let ids: Vec<String> = dir_parquet_display(dir, "id")
         .into_iter()
         .flatten()
+        .map(|id| id.replace('-', ""))
         .collect();
     let distinct: BTreeSet<String> = ids.iter().cloned().collect();
+    let want: BTreeSet<String> = skew_uuid_keys()
+        .iter()
+        .map(|k| k.replace('-', ""))
+        .collect();
     assert_eq!(
         (ids.len(), distinct),
-        (SKEW_ROWS, skew_uuid_keys()),
+        (SKEW_ROWS, want),
         "every source uuid once"
     );
 }
@@ -2032,7 +2037,7 @@ fn a_skewed_integer_keyset_is_recut_by_density_postgres() {
         "DROP TABLE IF EXISTS {table};
          CREATE TABLE {table} (id BIGINT PRIMARY KEY, payload INT NOT NULL);
          INSERT INTO {table} SELECT g, g FROM generate_series(1, {SKEW_DENSE}) g;
-         INSERT INTO {table} SELECT {SKEW_DENSE} + g * 500000, g FROM generate_series(1, {SKEW_SPARSE}) g;"
+         INSERT INTO {table} SELECT {SKEW_DENSE} + g::bigint * 500000, g FROM generate_series(1, {SKEW_SPARSE}) g;"
     ))
     .unwrap();
     pg_catalog_says_rows(&mut c, &table, 20_000_000);
