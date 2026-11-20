@@ -6238,6 +6238,44 @@ seeds:
       mongo:
         na: "a MongoDB change row is two text cells, and the MySQL cell fix does not run"
 
+  - name: mysql-flag-outside-zero-one-delivered-true
+    class: "a MySQL TINYINT(1) read as a boolean is delivered by a batch export as true for every value but 0 and 1: 2, 5, -1, 127 or 255 become true with exit 0 where a declared `bool` over a wider integer already refused"
+    history: "2026-11-20 - owner decision MYSQL_TINYINT_BOOL: TINYINT(1) stays Boolean and a value outside 0 and 1 is refused RIVET_SOURCE_VALUE_UNREPRESENTABLE; RED on main in the MySQL batch cell (TINYINT(1) holding 5 delivered, exit 0); fixed by removing the native_flag bypass so every Boolean column goes through arrow_convert::build_flags"
+    scope: source
+    engines:
+      mysql:
+        switch: mysql-flag-outside-zero-one-delivered-true
+        cells:
+          - a_flag_column_outside_zero_and_one_is_refused_never_turned_into_true_mysql
+          - "lib:a_flag_outside_zero_and_one_is_refused_by_code_never_delivered_as_true"
+      postgres:
+        na: "PostgreSQL boolean is a true boolean type and an integer under a bool override is refused at plan time (lib:an_integer_is_read_as_a_flag_only_where_the_engine_checks_each_value)"
+      mssql:
+        na: "SQL Server bit holds 0 or 1 only and an integer under a bool override is refused at plan time (lib:an_integer_is_read_as_a_flag_only_where_the_engine_checks_each_value)"
+      oracle:
+        na: "Oracle has no boolean column type and an integer under a bool override is refused at plan time (lib:an_integer_is_read_as_a_flag_only_where_the_engine_checks_each_value)"
+      mongo:
+        na: "a MongoDB value is read as a BSON bool and no integer is turned into a flag"
+
+  - name: mysql-cdc-tinyint1-flag-any-nonzero-true
+    class: "a MySQL TINYINT(1) column read by a stream is delivered as true for every value but 0 and 1: 2, 5, -1 or 255 become true with exit 0, where the batch export refuses them"
+    history: "2026-11-20 - owner decision MYSQL_TINYINT_BOOL: mysql_flag_fix excluded TINYINT(1) and bool_value read Int != 0; RED on main in the MySQL CDC cell (TINYINT(1) holding 2 delivered, exit 0); fixed by including TINYINT(1) in mysql_flag_fix"
+    scope: source
+    engines:
+      mysql:
+        switch: mysql-cdc-tinyint1-flag-any-nonzero-true
+        cells:
+          - a_flag_column_outside_zero_and_one_is_refused_in_cdc_never_turned_into_true_mysql
+          - "lib:a_tinyint_one_is_zero_one_or_refused_in_a_stream_and_a_bit_one_keeps_its_reading"
+      postgres:
+        na: "PostgreSQL boolean is a true boolean type and an integer under a bool override is refused at plan time (lib:an_integer_is_read_as_a_flag_only_where_the_engine_checks_each_value)"
+      mssql:
+        na: "SQL Server bit holds 0 or 1 only and an integer under a bool override is refused at plan time (lib:an_integer_is_read_as_a_flag_only_where_the_engine_checks_each_value)"
+      oracle:
+        na: "Oracle has no boolean column type and an integer under a bool override is refused at plan time (lib:an_integer_is_read_as_a_flag_only_where_the_engine_checks_each_value)"
+      mongo:
+        na: "a MongoDB change row is two text cells, and the MySQL cell fix does not run"
+
   - name: cursor-column-admitted-at-plan
     class: "the incremental plan accepts any cursor_column: a nullable one exports its NULL-cursor rows on run 1 and never again (later NULL-cursor inserts are lost with exit 0), and a type the cursor cannot render (boolean, time, binary, array, a timestamp unit other than microsecond or nanosecond) is a WARN plus a full re-export every run"
     history: "2026-11-11 - owner decision 2026-11-10 (axis-6 hunt, P2 and P3): the plan now reads the server's nullability and the delivered type once and refuses with RIVET_PLAN_CURSOR_NULLABLE or RIVET_PLAN_CURSOR_TYPE_UNSUPPORTED from check, validate, plan, run and apply; fixed in src/plan/cursor_admission.rs::admit_incremental_cursor"

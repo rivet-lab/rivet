@@ -42,7 +42,7 @@ scenarios:
   - id: type_boolean
     what: "boolean rides through the change stream as the same Arrow Boolean as batch"
     postgres: { test: postgres_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent }
-    mysql:   { test: mysql_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent, known_defect: ["BOOLEAN"] }
+    mysql:   { test: mysql_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent }
     mssql:   { test: mssql_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent }
     mongo:    { na: "boolean rides the verbatim document blob, not a typed column" }
     oracle:   { na: "Oracle CDC captures an allow-list of column kinds (ColKind::of, src/source/oracle/cdc.rs: NUMBER, FLOAT, BINARY_FLOAT/DOUBLE, DATE, the character types, RAW, TIMESTAMP [WITH TIME ZONE]); a BOOLEAN column is refused by name at open, so no value of it reaches the stream (column_kinds_cover_the_preview_types_and_refuse_the_rest)" }
