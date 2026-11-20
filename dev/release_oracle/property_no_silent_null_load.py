@@ -409,6 +409,7 @@ class Matrix:
         self.unmade: list[tuple[Column, str]] = []
         self.checked: dict[tuple[str, str, str], int] = {}
         self.splits: dict[tuple[str, str, str], set[str]] = {}
+        self.delivered: dict[tuple[str, str], set[str]] = {}
         self.lock = threading.Lock()
 
     def config(self, chunk: Chunk, col: Column, ids: tuple[int, ...], name: str, dest: dict, load: dict | None = None) -> str:
@@ -530,6 +531,10 @@ class Matrix:
         if p.returncode == 0:
             read = nsn.read_parts(out, "parquet", self.key)
             rows = read[1] if read else {}
+            if not self.read_col:
+                got = tm.measured_delivery([str(f) for f in nsn.data_files(out, "parquet")], u.col.name)
+                with self.lock:
+                    self.delivered.setdefault((u.chunk.table, u.col.name), set()).add(got or "")
             return {i: Got(rows[i].get(self.read_col or u.col.name)) if i in rows else Got(MISSING) for i in ids}
         v = stop_verdict(p, te.EXTRACT)
         budget[0] -= 1
@@ -586,6 +591,20 @@ class Matrix:
             with self.lock:
                 self.splits.setdefault(key, set()).update(codes)
 
+    def delivery_result(self, c: Chunk, col: Column) -> Result:
+        """The delivery the extract measured in the Parquet schema against the row's `delivery` (or its known_defect's today_delivery)."""
+        row = next((r for r in nsn.ledger_rows(self.engine) if r["native_type"] == col.native), {})
+        seen = {d for d in self.delivered.get((c.table, col.name), set()) if d}
+        measured = next(iter(seen)) if len(seen) == 1 else None
+        klass = tm.grade_delivery(col.delivery, row.get("today_delivery", ""), measured)
+        if len(seen) > 1:
+            klass = tm.DELIVERY_DIFFERS
+        cell = f"{self.engine}/{col.native}->delivery"
+        if klass == tm.DELIVERY_UNMEASURED:
+            return Result(cell, REFUSED, NOT_GRADED, f"declared {col.delivery}: no extract of the column delivered, so nothing was measured")
+        detail = f"declared {col.delivery}, measured {sorted(seen) if len(seen) > 1 else measured}"
+        return Result(cell, DELIVERED, klass, detail if klass else f"measured {measured}")
+
     def unit(self, u: Unit) -> None:
         """Observe one unit at the extract and at every target."""
         got = self.extract(u, u.ids, [BISECT_RUNS])
@@ -611,6 +630,8 @@ class Matrix:
             for col in c.cols:
                 out += [Result(f"{self.engine}/{col.native}->none/load-{t}", REFUSED, nsn.SPLIT, f"check exit 0, run refused {sorted(codes)}")
                         for t in names if (codes := self.splits.get((c.table, col.name, t)))]
+                if col.delivery and not self.read_col and (c.table, col.name) in self.delivered:
+                    out.append(self.delivery_result(c, col))
                 ids = range(1, len(col.lits) + 1) if col.whole else (*range(1, len(col.lits) + 1), c.null_id)
                 for i, target in ((i, t) for i in ids for t in names):
                     g = self.obs.get((c.table, col.name, i, target))
@@ -792,6 +813,12 @@ def self_test() -> None:
                 pass
     finally:
         nsn.rivet = real_rivet
+    ms.obs, ms.splits = {}, {}
+    ms.delivered = {("pm_tm0", "c001"): {"Int32"}}
+    assert [(r.cell, r.klass) for r in ms.results([ch_])[0]] == [("mssql/NUMBER(5)->delivery", tm.DELIVERY_DIFFERS)], "a measured delivery other than the row's is red"
+    ms.delivered = {("pm_tm0", "c001"): {col.delivery}}
+    assert [r.klass for r in ms.results([ch_])[0]] == [""], "the declared delivery, measured, holds"
+    ms.delivered = {}
     ms.targets = [ClickHouse()]
     ms.splits, ms.obs = {key: {"RIVET_X"}}, {}
     assert [(r.cell, r.klass) for r in ms.results([ch_])[0]] == [("mssql/NUMBER(5)->none/load-clickhouse", nsn.SPLIT)], "a refusal `rivet check` let through is a split"

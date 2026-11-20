@@ -70,6 +70,60 @@ class Unit:
         return f"{self.chunk.table}.{self.col.name}{'@' + str(self.ids[0]) if self.solo else ''}"
 
 
+DELIVERY_DIFFERS, DELIVERY_UNMEASURED = "DELIVERY_DIFFERS", "DELIVERY_UNMEASURED"
+TEXT_FORM_KEY, EXTENSION_KEY = b"rivet.text_form", b"ARROW:extension:name"
+UNITS = {"s": "s", "ms": "ms", "us": "µs", "ns": "ns"}
+
+
+def arrow_label(t, meta: dict | None = None) -> str:
+    """A pyarrow type (and its field metadata) spelled as the ledger's `delivery`: the TextForm label, a canonical extension name, else the Arrow `DataType` display."""
+    import pyarrow as pa
+
+    meta = meta or {}
+    if TEXT_FORM_KEY in meta:
+        return meta[TEXT_FORM_KEY].decode()
+    if isinstance(t, pa.BaseExtensionType):
+        return t.extension_name
+    if EXTENSION_KEY in meta:
+        return meta[EXTENSION_KEY].decode()
+    if pa.types.is_list(t) or pa.types.is_large_list(t):
+        f = t.value_field
+        return f"List({arrow_label(f.type, dict(f.metadata or {}))})"
+    if pa.types.is_decimal(t):
+        return f"Decimal{t.bit_width}({t.precision}, {t.scale})"
+    if pa.types.is_timestamp(t):
+        return f"Timestamp({UNITS[t.unit]}" + (f', "{t.tz}")' if t.tz else ")")
+    if pa.types.is_time(t):
+        return f"Time{t.bit_width}({UNITS[t.unit]})"
+    if pa.types.is_fixed_size_binary(t):
+        return f"FixedSizeBinary({t.byte_width})"
+    names = {pa.int8(): "Int8", pa.int16(): "Int16", pa.int32(): "Int32", pa.int64(): "Int64", pa.uint8(): "UInt8", pa.uint16(): "UInt16",
+             pa.uint32(): "UInt32", pa.uint64(): "UInt64", pa.float32(): "Float32", pa.float64(): "Float64", pa.bool_(): "Boolean",
+             pa.string(): "Utf8", pa.large_string(): "LargeUtf8", pa.binary(): "Binary", pa.large_binary(): "LargeBinary", pa.date32(): "Date32"}
+    return names.get(t, str(t))
+
+
+def measured_delivery(parts: list, column: str) -> str | None:
+    """What the delivered Parquet declares for `column` (read from the file's own Arrow schema), or None when no part holds it."""
+    import pyarrow.parquet as pq
+
+    for p in parts:
+        schema = pq.read_schema(p)
+        for f in schema:
+            if f.name.lower() == column.lower():
+                return arrow_label(f.type, dict(f.metadata or {}))
+    return None
+
+
+def grade_delivery(declared: str, today: str, measured: str | None) -> str:
+    """The class of a measured delivery against the ledger row: empty when it is the declared one (or the known_defect's today_delivery)."""
+    if not declared:
+        return ""
+    if measured is None:
+        return DELIVERY_UNMEASURED
+    return "" if measured in (declared, today) else DELIVERY_DIFFERS
+
+
 def columns(engine: str) -> list[Column]:
     """Every ledger row of the engine as a column; its index in the ledger names it, so a row added later renames nothing."""
     out = []
@@ -253,6 +307,19 @@ def self_test() -> None:
     assert klass(form("a"), form("b")) == UNEXPECTED_FORM and klass(null, exact) == UNEXPECTED_FORM
     assert klass(exact, te.Verdict(PRESENT, text="x")) == UNGRADED_VALUE
     assert klass(form("true", "BOOL"), form("true")) == "DEFECT_BOOL" and klass(form("true", "BOOL"), exact) == "DEFECT_GONE_BOOL"
+    try:
+        import pyarrow as pa
+    except ImportError:
+        pa = None
+    if pa is not None:
+        lab = lambda t, m=None: arrow_label(t, m)
+        assert lab(pa.int32()) == "Int32" and lab(pa.decimal128(38, 10)) == "Decimal128(38, 10)" and lab(pa.decimal256(76, 0)) == "Decimal256(76, 0)"
+        assert lab(pa.timestamp("us")) == "Timestamp(µs)" and lab(pa.timestamp("us", "UTC")) == 'Timestamp(µs, "UTC")' and lab(pa.time64("ns")) == "Time64(ns)"
+        assert lab(pa.list_(pa.int16())) == "List(Int16)" and lab(pa.string(), {TEXT_FORM_KEY: b"decimal_plain"}) == "decimal_plain"
+        assert lab(pa.uuid()) == "arrow.uuid" and lab(pa.list_(pa.uuid())) == "List(arrow.uuid)"
+        assert lab(pa.binary(16), {EXTENSION_KEY: b"arrow.uuid"}) == "arrow.uuid" and lab(pa.string(), {EXTENSION_KEY: b"arrow.json"}) == "arrow.json"
+    assert grade_delivery("Int32", "", "Int32") == "" and grade_delivery("Int32", "", "Int64") == DELIVERY_DIFFERS
+    assert grade_delivery("Int8", "Boolean", "Boolean") == "" and grade_delivery("Int32", "", None) == DELIVERY_UNMEASURED and grade_delivery("", "", "Utf8") == ""
     assert klass(refuse("RIVET_X", te.EXTRACT, "NAMED"), refuse("RIVET_X")) == "DEFECT_NAMED"
     col = Column("c000", "INT", "Int32", "int", None, ("1", "2", "3"), (te.Edge("1"), te.Edge("2", refuse("RIVET_X")), te.Edge("3")), te.Edge("NULL"))
     ch = Chunk("pm_tm0", (col,))
