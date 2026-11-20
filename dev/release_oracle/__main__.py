@@ -1215,13 +1215,14 @@ def _self_test() -> int:
     from .partner_shape import init_slot
     assert init_slot("    cdc:\n      slot: rivet_rivet_public_cdc  # logical slot\n") == "rivet_rivet_public_cdc"
     assert init_slot("mode: cdc\n") is None, "a config naming no slot names none"
-    from . import stand_disk, stand_memory, stand_profiles
+    from . import stand_disk, stand_memory, stand_profiles, stand_stacks
     failure.self_test()
     stand_disk.self_test()
     stand_health.self_test()
     stand_images.self_test()
     stand_memory.self_test()
     stand_profiles.self_test()
+    stand_stacks.self_test()
     import inspect
     assert "stand_disk.start_refusal(stand_disk.free_gib(), island=ns.island, hosted=ns.hosted)" in inspect.getsource(main), \
         "the start floor follows the run's mode"

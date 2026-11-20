@@ -22,11 +22,12 @@ from urllib.parse import urlparse
 from ..pytools import registry
 from ..pytools.shell import tcp_open
 from . import stand_health
-from .core import ROOT, run
+from .core import ROOT, Proc, run
 
 __all__ = ["bring_up", "preflight", "refusal", "unusable"]
 
 UP_WAIT_SECS = 240
+LOG_TAIL = 60
 RETRIES = 5
 RETRY_SECS = 3.0
 STORES = ("s3", "gcs", "azure")
@@ -71,12 +72,36 @@ def seed_args(spec: dict) -> list[str]:
             "-C", "-b", "-Q", spec["seed_sql"]]
 
 
+def compose_text(args: list[str], p: Proc) -> str:
+    """The transcript of a failed `docker compose` call: its command, exit status and the last lines of its output."""
+    tail = "\n".join(p.out.strip().splitlines()[-LOG_TAIL:]) or "(no output)"
+    return f"docker compose {' '.join(args)} exited {p.returncode}:\n{tail}"
+
+
+def compose_logged(args: list[str]) -> bool:
+    """Run `docker compose ARGS`; a call that fails prints its transcript, not only False."""
+    p = run(["docker", "compose", *args], cwd=ROOT, timeout=UP_WAIT_SECS + 120)
+    if not p.ok:
+        print(compose_text(args, p), flush=True)
+    return p.ok
+
+
+def diagnose(name: str, spec: dict) -> str:
+    """What a profile's containers are and say: `compose ps -a` and the log tail of each service."""
+    flags = profile_flag(name, spec)
+    parts = [f"profile {name}: containers", run(["docker", "compose", *flags, "ps", "-a"], cwd=ROOT, timeout=60).out.strip()]
+    for svc in spec["services"]:
+        logs = run(["docker", "compose", *flags, "logs", "--no-color", "--tail", str(LOG_TAIL), svc], cwd=ROOT, timeout=60)
+        parts += [f"profile {name}: last {LOG_TAIL} log lines of {svc}", logs.out.strip()]
+    return "\n".join(parts)
+
+
 def bring_up(profiles: dict[str, dict] | None = None, up: Callable[[str], bool] = is_up,
-             compose: Callable[[list[str]], bool] | None = None,
-             mounts: Callable[[str, dict], list[str]] = gone_mounts) -> dict[str, str]:
-    """Start each profile whose stand is down or mounts a source that is gone, waiting for health; profile -> why it is still unusable."""
+             compose: Callable[[list[str]], bool] = compose_logged,
+             mounts: Callable[[str, dict], list[str]] = gone_mounts,
+             explain: Callable[[str, dict], str] = diagnose) -> dict[str, str]:
+    """Start each profile whose stand is down or mounts a source that is gone, waiting for health; profile -> why it is still unusable, with its containers and logs printed."""
     profiles = registry.gate_profiles() if profiles is None else profiles
-    compose = compose or (lambda args: run(["docker", "compose", *args], cwd=ROOT, timeout=UP_WAIT_SECS + 120).ok)
     for name, spec in profiles.items():
         gone = mounts(name, spec)
         if gone or not up(spec["url"]):
@@ -89,6 +114,7 @@ def bring_up(profiles: dict[str, dict] | None = None, up: Callable[[str], bool] 
             still[name] = "bind-mount source gone: " + ", ".join(gone)
         elif not up(spec["url"]):
             still[name] = "did not come up"
+            print(explain(name, spec), flush=True)
         elif spec.get("seed_sql") and not compose(seed_args(spec)):
             still[name] = "its seed statement failed"
     return still
@@ -212,8 +238,12 @@ def preflight(replica: bool) -> str:
 
 def self_test() -> None:
     """Bring-up starts a stand that is down or mounts a gone source (recreating it), and a stand that stays broken is named in the refusal."""
+    import contextlib
+    import io
     import socket
     import threading
+    from unittest import mock
+
     import yaml
 
     probe = socket.socket()
@@ -248,7 +278,18 @@ def self_test() -> None:
     assert bring_up(spec, up=is_it_up, compose=compose, mounts=healthy) == {}
     assert calls == [["--profile", "b", "up", "-d", "--wait", "--wait-timeout", str(UP_WAIT_SECS), "sb1", "sb2"]], calls
     state.update(a=True, b=False, c=True)
-    assert bring_up(spec, up=is_it_up, compose=lambda args: False, mounts=healthy) == {"b": "did not come up"}
+    printed = io.StringIO()
+    with contextlib.redirect_stdout(printed):
+        stuck = bring_up(spec, up=is_it_up, compose=lambda args: False, mounts=healthy, explain=lambda name, s: f"CAUSE-OF-{name}: {s['services']}")
+    assert stuck == {"b": "did not come up"} and "CAUSE-OF-b: ['sb1', 'sb2']" in printed.getvalue() and "CAUSE-OF-a" not in printed.getvalue(), printed.getvalue()
+    failed = Proc(["docker", "compose", "up"], 1, "", "container rivet-x-1 is unhealthy\n")
+    assert "docker compose up exited 1" in compose_text(["up"], failed) and "container rivet-x-1 is unhealthy" in compose_text(["up"], failed)
+    assert "(no output)" in compose_text(["up"], Proc(["x"], 3, "", "")) and compose_text(["up"], Proc(["x"], 3, "\n".join(map(str, range(500))), "")).endswith("499")
+    with mock.patch.object(sys.modules[__name__], "run", lambda argv, **kw: failed), contextlib.redirect_stdout(io.StringIO()) as seen_out:
+        assert compose_logged(["up", "-d", "mongo-auth-rs"]) is False
+    assert "container rivet-x-1 is unhealthy" in seen_out.getvalue(), "a failed compose call prints what compose said"
+    with mock.patch.object(sys.modules[__name__], "run", lambda argv, **kw: Proc(argv, 0, "up", "")), contextlib.redirect_stdout(io.StringIO()) as quiet:
+        assert compose_logged(["up"]) is True and quiet.getvalue() == ""
     seeded = {"c": {**spec["c"], "seed_sql": "SELECT 1"}}
     seen: list[list[str]] = []
     state.update(a=True, b=True, c=True)
