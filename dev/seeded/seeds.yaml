@@ -6715,3 +6715,20 @@ seeds:
         cells:
           - "lib:the_legs_check_admits_are_the_pending_baselines_and_nothing_else"
           - "lib:check_plans_the_pending_baseline_leg_of_a_cdc_export_and_only_that"
+
+  - name: narrowing-override-reported-exact
+    class: "a `columns:` override that keeps fewer fraction digits than the source holds (timestamp over an Oracle TIMESTAMP(9) or a SQL Server datetime2(7)) truncates the finer digits while the type report calls the column exact, so the run exits 0 with fidelity exact over changed values"
+    history: "no_silent_null full tier WRONG_VALUE + INTEGRITY_BLIND (known_red 2026-11-11, oracle TIMESTAMP(9) -> timestamp / timestamp_tz, mssql DATETIME2 -> timestamp / timestamp_tz); fidelity was derived from the target type alone; owner decision 2026-11-20: a narrowing override is delivered and declared lossy"
+    scope: source
+    switch: narrowing-override-reported-exact
+    engines:
+      oracle:
+        cells: ["lib:a_time_type_coarser_than_its_source_is_lossy"]
+      mssql:
+        cells: ["lib:a_microsecond_override_over_a_scale_seven_column_is_reported_lossy"]
+      postgres:
+        na: "PostgreSQL timestamp, timestamptz and time hold microseconds at most, so no time override keeps fewer digits than the source"
+      mysql:
+        na: "MySQL datetime, timestamp and time hold microseconds at most, so no time override keeps fewer digits than the source"
+      mongo:
+        na: "a BSON date holds milliseconds and a Mongo export has no `columns:` time override over it, so nothing narrows"

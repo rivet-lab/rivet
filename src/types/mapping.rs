@@ -129,6 +129,28 @@ impl TypeMapping {
         self
     }
 
+    /// Mark a time column whose source holds `source_digits` fraction digits as lossy when its type keeps fewer: an override narrowing a sub-microsecond column truncates, and the type report says so instead of `exact`.
+    pub fn narrowed_fraction(mut self, source_digits: u8) -> Self {
+        let Some(kept) = fraction_digits(&self.rivet_type) else {
+            return self;
+        };
+        if kept < source_digits
+            && matches!(
+                self.fidelity,
+                TypeFidelity::Exact | TypeFidelity::Compatible
+            )
+            && seeded!("narrowing-override-reported-exact", false, true)
+        {
+            self.fidelity = TypeFidelity::Lossy;
+            self.warnings.push(format!(
+                "the source holds {source_digits} fraction digits of a second and this type keeps \
+                 {kept}: the finer digits are truncated. Declare the nanosecond form \
+                 (`timestamp_ns` / `timestamp_tz_ns`) to keep them."
+            ));
+        }
+        self
+    }
+
     /// Append a warning visible to the type-report and to logs.
     #[allow(dead_code)]
     pub fn with_warning(mut self, msg: impl Into<String>) -> Self {
@@ -237,6 +259,21 @@ fn arrow_unit(u: TimeUnit) -> ArrowTimeUnit {
 
 /// Compute the [`TypeFidelity`] for a freshly-resolved [`RivetType`].
 ///
+/// The fraction digits of a second a time type keeps; `None` for any other type.
+fn fraction_digits(t: &RivetType) -> Option<u8> {
+    let unit = match t {
+        RivetType::Timestamp { unit, .. } | RivetType::Time { unit } => unit,
+        RivetType::Date => return Some(0),
+        _ => return None,
+    };
+    Some(match unit {
+        TimeUnit::Second => 0,
+        TimeUnit::Millisecond => 3,
+        TimeUnit::Microsecond => 6,
+        TimeUnit::Nanosecond => 9,
+    })
+}
+
 /// The output of every vendor mapper goes through this so the fidelity
 /// label is computed in *exactly one place* and the type-report stays
 /// consistent across PostgreSQL / MySQL / future drivers.
@@ -626,6 +663,30 @@ mod tests {
         let mapping = TypeMapping::from_source(&col("x", "int4"), RivetType::Int32)
             .with_warning("autodetect uncertainty");
         assert_eq!(mapping.warnings, vec!["autodetect uncertainty".to_string()]);
+    }
+
+    /// An override narrowing a sub-microsecond source is lossy and says why; a type that keeps every digit, or text, is untouched.
+    #[test]
+    fn a_time_type_coarser_than_its_source_is_lossy() {
+        let src = SourceColumn::simple("t", "timestamp(9)".to_string(), true);
+        let at = |unit| RivetType::Timestamp {
+            unit,
+            timezone: None,
+        };
+        let us = TypeMapping::from_source(&src, at(TimeUnit::Microsecond)).narrowed_fraction(9);
+        assert_eq!(us.fidelity, TypeFidelity::Lossy);
+        assert!(
+            us.warnings.iter().any(|w| w.contains("keeps 6")),
+            "{:?}",
+            us.warnings
+        );
+        let ns = TypeMapping::from_source(&src, at(TimeUnit::Nanosecond)).narrowed_fraction(9);
+        assert_eq!(ns.fidelity, TypeFidelity::Exact);
+        assert!(ns.warnings.is_empty());
+        let date = TypeMapping::from_source(&src, RivetType::Date).narrowed_fraction(7);
+        assert_eq!(date.fidelity, TypeFidelity::Lossy);
+        let text = TypeMapping::from_source(&src, RivetType::String).narrowed_fraction(9);
+        assert_eq!(text.fidelity, TypeFidelity::Exact);
     }
 
     #[test]

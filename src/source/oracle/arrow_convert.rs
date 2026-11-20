@@ -138,7 +138,11 @@ pub(super) fn oracle_type_mappings(
             let source = SourceColumn::simple(m.name(), native.clone(), m.nullable());
             let mapping = TypeMapping::from_source(&source, rivet);
             Ok(if overrides.contains_key(m.name()) {
-                mapping
+                if sub_microsecond(native, m.scale()) {
+                    mapping.narrowed_fraction(m.scale().unsigned_abs())
+                } else {
+                    mapping
+                }
             } else {
                 let kind = OraKind::of(m);
                 let mapping = deliver_number_text(mapping, kind, m.precision(), m.scale());
