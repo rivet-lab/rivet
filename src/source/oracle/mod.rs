@@ -285,22 +285,38 @@ fn declared_type(kind: OraKind, base: String, precision: u8, scale: i8) -> Strin
 /// An export query's re-projected select list.
 #[derive(Debug, PartialEq)]
 struct SelectList {
-    /// Some column is read through a conversion or carries an empty-value flag.
+    /// Some column is read through a conversion or carries a flag.
     rewritten: bool,
-    /// Each column's expression, then the LOB empty-value flag columns.
+    /// Each column's expression, then the flag columns.
     cols: Vec<String>,
-    /// For a LOB column, the index of its flag column.
-    empty_flags: Vec<Option<usize>>,
+    /// The index of a column's flag column: a LOB's zero-length flag, an unbounded NUMBER's infinity flag.
+    cell_flags: Vec<Option<usize>>,
 }
 
-/// The select list re-reading each `(name, kind)` column the way the row decoder needs it.
-fn select_list(cols: &[(&str, OraKind)]) -> SelectList {
-    let names: Vec<&str> = cols.iter().map(|(n, _)| *n).collect();
+/// One result column as the select list sees it: its name, its kind, and whether it is a NUMBER with no declared precision or a FLOAT, the only NUMBERs that can hold ±infinity.
+type SelectCol<'a> = (&'a str, OraKind, bool);
+
+/// Whether a NUMBER of declared `precision` and `scale` can hold ±infinity: a bare NUMBER (precision 0) or a FLOAT (scale -127); a NUMBER(p,s) cannot.
+fn number_unbounded(precision: u8, scale: i8) -> bool {
+    precision == 0 || scale == -127
+}
+
+/// The flag of an unbounded NUMBER: 1 for +infinity, -1 for -infinity (Oracle's encodings 255,101 and 0), NULL otherwise; the comparisons spare DUMP on every finite row.
+fn infinity_flag(quoted: &str) -> String {
+    format!(
+        "CASE WHEN {quoted} > 9.9E125 THEN CASE WHEN DUMP({quoted}) = 'Typ=2 Len=2: 255,101' THEN 1 END \
+         WHEN {quoted} < -9.9E125 THEN CASE WHEN DUMP({quoted}) = 'Typ=2 Len=1: 0' THEN -1 END END"
+    )
+}
+
+/// The select list re-reading each column the way the row decoder needs it.
+fn select_list(cols: &[SelectCol<'_>]) -> SelectList {
+    let names: Vec<&str> = cols.iter().map(|(n, _, _)| *n).collect();
     let mut rewritten = false;
     let mut exprs = Vec::with_capacity(cols.len());
     let mut flags = Vec::new();
-    let mut empty_flags = vec![None; cols.len()];
-    for (i, (name, k)) in cols.iter().enumerate() {
+    let mut cell_flags = vec![None; cols.len()];
+    for (i, (name, k, unbounded)) in cols.iter().enumerate() {
         let quoted = crate::sql::quote_ident(crate::config::SourceType::Oracle, name);
         match k.projection(&quoted) {
             Some(expr) => {
@@ -311,29 +327,38 @@ fn select_list(cols: &[(&str, OraKind)]) -> SelectList {
         }
         if k.needs_empty_flag() {
             rewritten = true;
-            empty_flags[i] = Some(cols.len() + flags.len());
+            cell_flags[i] = Some(cols.len() + flags.len());
             let alias = unique_alias(&format!("_rivet_empty_{i}"), &names);
             flags.push(format!(
                 "CASE WHEN DBMS_LOB.GETLENGTH({quoted}) = 0 THEN 1 END \"{alias}\""
             ));
+        } else if *k == OraKind::Number
+            && *unbounded
+            && seeded!("oracle-number-infinity-read-as-finite", false, true)
+        {
+            rewritten = true;
+            cell_flags[i] = Some(cols.len() + flags.len());
+            let alias = unique_alias(&format!("_rivet_inf_{i}"), &names);
+            flags.push(format!("{} \"{alias}\"", infinity_flag(&quoted)));
         }
     }
     if cols.len() + flags.len() > MAX_SELECT_COLUMNS {
         log::warn!(
-            "oracle: {} LOB column(s) read a zero-length value as NULL: the query already \
-             has {} columns and Oracle allows {MAX_SELECT_COLUMNS}, so the empty-value flags \
-             do not fit — select fewer columns in a `query:` to keep the distinction",
+            "oracle: {} flag column(s) do not fit: the query already has {} columns and \
+             Oracle allows {MAX_SELECT_COLUMNS}, so a LOB reads a zero-length value as NULL and \
+             only a NUMBER's -infinity is refused (its +infinity reads as 1E125) — select \
+             fewer columns in a `query:` to keep both",
             flags.len(),
             cols.len()
         );
         flags.clear();
-        empty_flags.iter_mut().for_each(|f| *f = None);
+        cell_flags.iter_mut().for_each(|f| *f = None);
     }
     exprs.extend(flags);
     SelectList {
         rewritten,
         cols: exprs,
-        empty_flags,
+        cell_flags,
     }
 }
 
@@ -342,8 +367,8 @@ struct Projection {
     sql: String,
     /// Each exported column's declared type (before re-projection).
     native: Vec<String>,
-    /// For a LOB column, the index of its trailing "zero-length" flag column.
-    empty_flags: Vec<Option<usize>>,
+    /// The index of a column's trailing flag column (see [`SelectList::cell_flags`]).
+    cell_flags: Vec<Option<usize>>,
     /// Some column is fetched as a LOB, so the row width is unknown until rows arrive.
     has_lob: bool,
 }
@@ -431,15 +456,34 @@ impl OracleSource {
     fn projected(&self, query: &str) -> Result<Projection> {
         let metas = self.describe(query)?;
         let native: Vec<String> = metas.iter().map(native_type).collect();
-        let kinds: Vec<(&str, OraKind)> =
-            metas.iter().map(|m| (m.name(), OraKind::of(m))).collect();
+        let unref = metas.iter().find(|m| unreferenceable(m.name()));
+        let kinds: Vec<SelectCol<'_>> = metas
+            .iter()
+            .map(|m| {
+                let unbounded = number_unbounded(m.precision(), m.scale());
+                (m.name(), OraKind::of(m), unbounded)
+            })
+            .collect();
+        // An infinity flag needs the outer select a column the query cannot be re-read under refuses; without it only -infinity is refused.
+        let kinds: Vec<SelectCol<'_>> = match unref {
+            Some(m) if kinds.iter().any(|(_, k, u)| *k == OraKind::Number && *u) => {
+                log::warn!(
+                    "oracle: column {:?} cannot be referenced from an outer query, so the \
+                     NUMBER columns carry no infinity flag and a +infinity reads as 1E125 — \
+                     give it an alias in the `query:` to keep the check",
+                    m.name()
+                );
+                kinds.into_iter().map(|(n, k, _)| (n, k, false)).collect()
+            }
+            _ => kinds,
+        };
         let SelectList {
             rewritten,
             cols,
-            empty_flags,
+            cell_flags,
         } = select_list(&kinds);
         let sql = if rewritten {
-            if let Some(m) = metas.iter().find(|m| unreferenceable(m.name())) {
+            if let Some(m) = unref {
                 return Err(alias_required(m.name()));
             }
             format!("SELECT {} FROM ({query}) \"_rivet_p\"", cols.join(", "))
@@ -467,7 +511,7 @@ impl OracleSource {
         Ok(Projection {
             sql,
             native,
-            empty_flags,
+            cell_flags,
             has_lob: metas.iter().any(|m| OraKind::of(m).fetched_as_lob()),
         })
     }
@@ -554,7 +598,7 @@ impl OracleSource {
         let Some((row_index, metas)) = result_columns(
             cursor.columns(),
             projection.native.len(),
-            &projection.empty_flags,
+            &projection.cell_flags,
         ) else {
             crate::rivet_bail!(
                 crate::error::codes::SOURCE_COLUMNS_CHANGED_UNDER_READ,
@@ -580,7 +624,7 @@ impl OracleSource {
                 "{why}"
             );
         }
-        let empty_flags = projection.empty_flags.clone();
+        let cell_flags = projection.cell_flags.clone();
         let schema: SchemaRef = Arc::new(arrow_convert::oracle_schema(
             &metas,
             &native,
@@ -597,7 +641,7 @@ impl OracleSource {
                 buf,
                 &schema,
                 max_value_bytes,
-                &empty_flags,
+                &cell_flags,
                 &row_index,
             )?;
             let n = buf.len();
@@ -674,9 +718,9 @@ fn sub_micro_cursor_refusal(
 fn result_columns<M: Clone>(
     all: &[M],
     native: usize,
-    empty_flags: &[Option<usize>],
+    cell_flags: &[Option<usize>],
 ) -> Option<(Vec<usize>, Vec<M>)> {
-    let tail = native + empty_flags.iter().flatten().count();
+    let tail = native + cell_flags.iter().flatten().count();
     let row_index: Vec<usize> = (0..native).chain(tail..all.len()).collect();
     let metas = row_index
         .iter()
@@ -1136,34 +1180,55 @@ mod tests {
     #[test]
     fn each_lob_flag_index_points_past_every_column_and_the_flags_before_it() {
         let got = select_list(&[
-            ("ID", OraKind::Number),
-            ("C1", OraKind::Clob),
-            ("B2", OraKind::Blob),
+            ("ID", OraKind::Number, false),
+            ("C1", OraKind::Clob, false),
+            ("B2", OraKind::Blob, false),
         ]);
         assert!(got.rewritten);
-        assert_eq!(got.empty_flags, vec![None, Some(3), Some(4)]);
+        assert_eq!(got.cell_flags, vec![None, Some(3), Some(4)]);
         assert_eq!(got.cols.len(), 5);
         assert!(got.cols[3].contains("\"C1\"") && got.cols[4].contains("\"B2\""));
-        assert!(!select_list(&[("ID", OraKind::Number)]).rewritten);
+        assert!(!select_list(&[("ID", OraKind::Number, false)]).rewritten);
+    }
+
+    /// A bare NUMBER or a FLOAT can hold ±infinity, which the driver decodes as a finite number, so it carries a flag column read from Oracle's own encoding; a NUMBER(p,s) cannot hold one and carries none.
+    #[test]
+    fn an_unbounded_number_carries_an_infinity_flag_and_a_declared_one_does_not() {
+        assert!(number_unbounded(0, -127) && number_unbounded(0, 0) && number_unbounded(10, -127));
+        assert!(!number_unbounded(10, 2) && !number_unbounded(38, 0) && !number_unbounded(5, -2));
+        let got = select_list(&[
+            ("N", OraKind::Number, true),
+            ("P", OraKind::Number, false),
+            ("C", OraKind::Clob, false),
+        ]);
+        assert!(got.rewritten);
+        assert_eq!(got.cell_flags, vec![Some(3), None, Some(4)]);
+        assert!(
+            got.cols[3].contains("DUMP(\"N\") = 'Typ=2 Len=2: 255,101' THEN 1")
+                && got.cols[3].contains("DUMP(\"N\") = 'Typ=2 Len=1: 0' THEN -1"),
+            "{}",
+            got.cols[3]
+        );
+        assert!(got.cols[4].contains("DBMS_LOB.GETLENGTH(\"C\")"));
     }
 
     #[test]
     fn lob_flags_are_dropped_only_past_the_select_column_limit() {
         let names: Vec<String> = (0..MAX_SELECT_COLUMNS).map(|i| format!("N{i}")).collect();
         let with_lob = |width: usize| {
-            let mut cols: Vec<(&str, OraKind)> = names[..width - 1]
+            let mut cols: Vec<SelectCol<'_>> = names[..width - 1]
                 .iter()
-                .map(|n| (n.as_str(), OraKind::Number))
+                .map(|n| (n.as_str(), OraKind::Number, false))
                 .collect();
-            cols.push(("C", OraKind::Clob));
+            cols.push(("C", OraKind::Clob, false));
             select_list(&cols)
         };
         let fits = with_lob(MAX_SELECT_COLUMNS - 1);
         assert_eq!(fits.cols.len(), MAX_SELECT_COLUMNS);
-        assert_eq!(fits.empty_flags.last(), Some(&Some(MAX_SELECT_COLUMNS - 1)));
+        assert_eq!(fits.cell_flags.last(), Some(&Some(MAX_SELECT_COLUMNS - 1)));
         let over = with_lob(MAX_SELECT_COLUMNS);
         assert_eq!(over.cols.len(), MAX_SELECT_COLUMNS);
-        assert!(over.empty_flags.iter().all(Option::is_none));
+        assert!(over.cell_flags.iter().all(Option::is_none));
     }
 
     #[test]
