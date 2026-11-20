@@ -2059,6 +2059,19 @@ mod tests {
     }
 
     #[test]
+    fn a_bit64_value_with_the_top_bit_builds_in_an_unsigned_column() {
+        use arrow::array::UInt64Array;
+        let fix = mysql_cell_fix(crate::source::cdc::CdcEngine::Mysql, "bit(64)").expect("bit(64)");
+        let top = fix
+            .apply(&RivetValue::Bytes(vec![0x80, 0, 0, 0, 0, 0, 0, 0]))
+            .unwrap();
+        let max = fix.apply(&RivetValue::Bytes(vec![0xff; 8])).unwrap();
+        let arr = build("c", &DataType::UInt64, &[Some(&top), Some(&max)]).unwrap();
+        let a = arr.as_any().downcast_ref::<UInt64Array>().unwrap();
+        assert_eq!((a.value(0), a.value(1)), (1u64 << 63, u64::MAX));
+    }
+
+    #[test]
     fn build_column_narrows_int_and_fails_loud_on_overflow() {
         use arrow::array::{Array, Int32Array};
         let (v7, vnull_src) = (RivetValue::Int(7), RivetValue::Int(-5));
