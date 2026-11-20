@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 // 38 -> 39 (2026-11-18, #712): the PostgreSQL column-grants cells run as an account that may not SELECT the hidden column, which the oracle reads the source with; one shared helper, the cells grade the delivery against the values they seeded; closes when the oracle reads the account's columns.
 // 46 -> 47 (2026-11-19, #1083): the SQL Server CDC cell keyed on a datetime2(7) column the export declares `timestamp` delivers microseconds the oracle reads the source above; closes when the oracle grades a declared lossy override.
 // 47 -> 48 (2026-11-20): the PostgreSQL json/jsonb/interval/oid/enum array cell delivers INTERVAL[] as ISO text that no ledger delivery row pins; closes when the type ledger carries a delivery row for it.
+// 48 -> 49 (2026-11-21): the Oracle float64-override infinity cell reads a FLOAT(10) through a declared `float64` column whose own rendering is its subject; closes when the type ledger carries a delivery row for the override.
 // ratchet-pin: no-oracle-opt-outs (review 2027-02-01) count tests/live/ \.no_oracle\(|run_rivet_ok_no_oracle\(|"RIVET_TEST_NO_ORACLE"|NO_ORACLE_ENV
 
 // Typed declarations in tests/live of what a run that does not exit 0 may leave. History frozen at 2026-11-04.
