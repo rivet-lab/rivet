@@ -636,6 +636,18 @@ mod bigquery {
             RivetType::Float32 | RivetType::Float64 => Resolved::ok(BqType::Float64),
             RivetType::Decimal { precision, scale } => decimal(*precision, *scale),
             RivetType::Date => Resolved::ok(BqType::Date),
+            // BigQuery TIME keeps microseconds: a nanosecond time of day (SQL Server time(7)) lands as
+            // its raw INT64 nanoseconds, like the nanosecond timestamp below, so no digit is dropped.
+            RivetType::Time {
+                unit: TimeUnit::Nanosecond,
+            } => Resolved::diverge(
+                BqType::Int64,
+                BqType::Int64,
+                "nanosecond time of day has no BigQuery native type (TIME is microsecond) — lands \
+                 as INT64 nanoseconds of day, lossless; TIME(TIMESTAMP_MICROS(DIV(col,1000))) drops \
+                 the 100ns digit",
+                None,
+            ),
             RivetType::Time { .. } => Resolved::ok(BqType::Time),
             RivetType::Timestamp {
                 unit: TimeUnit::Nanosecond,
@@ -872,7 +884,15 @@ mod snowflake {
                 }
             }
             RivetType::Date => Resolved::ok(SfType::Date),
-            // TIME autoloads as NUMBER (µs of day); rebuild with TIME_FROM_PARTS.
+            // TIME autoloads as NUMBER (µs or ns of day); rebuild with TIME_FROM_PARTS.
+            RivetType::Time {
+                unit: TimeUnit::Nanosecond,
+            } => Resolved::diverge(
+                SfType::Time,
+                SfType::NumberPs(38, 0),
+                "TIME autoloads as NUMBER (ns of day); recover with TIME_FROM_PARTS after load",
+                Some(r#"TIME_FROM_PARTS(0,0,FLOOR("{col}"/1000000000),MOD("{col}",1000000000))"#),
+            ),
             RivetType::Time { .. } => Resolved::diverge(
                 SfType::Time,
                 SfType::NumberPs(38, 0),

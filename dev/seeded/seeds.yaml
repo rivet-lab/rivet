@@ -6807,6 +6807,22 @@ seeds:
       clickhouse:
         na: "the seed edits the BigQuery arm of src/types/target.rs, which only a BigQuery load resolves; ClickHouse resolves its own column types (DateTime64(9, UTC) holds the nanosecond zoned timestamp)"
 
+  - name: mssql-time7-lands-at-microseconds
+    class: "a SQL Server time(7) (the bare `time` default) is delivered as Time64(µs) and its 100ns digit is dropped, on batch and CDC, exit 0"
+    history: "type matrix class MSSQL_SCALE_SEVEN_TRUNC (known_red 2026-11-16, 68 pairs across ClickHouse, BigQuery and Snowflake); the twin of fine-timestamp-lands-at-microseconds (datetime2(7), #1083); owner decision 2026-11-20: fix, deliver Time64(ns)"
+    scope: source
+    switch: mssql-time7-lands-at-microseconds
+    engines:
+      mssql:
+        cells: ["lib:a_scale_seven_time_is_nanoseconds_and_keeps_its_100ns_tick", mssql_batch_and_cdc_deliver_every_ledger_row_alike]
+      postgres:
+        na: "PostgreSQL time holds microseconds at most, so no digit is lost"
+      mysql:
+        na: "MySQL TIME holds microseconds at most, so no digit is lost"
+      oracle:
+        na: "Oracle has no TIME type; a time of day is a DATE or TIMESTAMP column"
+      mongo:
+        na: "BSON has no time-of-day type, so no MongoDB value is a TIME column"
   - name: ch-date-footer-guard-skips-dates
     class: "the ClickHouse load reads the footer statistics of a timestamp column only, so a Date32 column is never checked: 2300-01-01 is stored as 2299-12-31 silently, and a date before 1900-01-01 or after 2300-01-01 is refused by ClickHouse as RIVET_LOAD_WAREHOUSE_REJECTED instead of by rivet's coded range refusal"
     history: "owner-approved 2026-11-20 (DEFECT_CH_DATE_CLAMP); RED on main 2026-11-20 by the type matrix (PostgreSQL, MySQL, SQL Server DATE 2300-01-01 read back 2299-12-31) and by the offline footer cell"
