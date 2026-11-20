@@ -288,7 +288,8 @@ jobs:
       - name: Start Mongo stack
         run: |
           mkdir -p tests/.live-tmp
-          docker compose --profile replica --profile shard up -d --wait mongo mongo-rs mongo-auth mongo-rs2-a mongo-rs2-b mongos toxiproxy minio fake-gcs duckdb clickhouse
+          docker compose --profile replica --profile shard up -d --wait mongo mongo-rs mongo-rs2-a mongo-rs2-b mongos toxiproxy minio fake-gcs duckdb clickhouse
+          uv run --frozen python -m dev.release_oracle.stand_stacks up mongo
           sudo chmod -R 0777 tests/.live-tmp
 
       - name: Run Mongo live tests

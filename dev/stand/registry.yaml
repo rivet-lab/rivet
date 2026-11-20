@@ -36,8 +36,10 @@ gate_profiles:
   minio:       {services: [minio],                url: "http://127.0.0.1:9000", profile: ""}
   fake-gcs:    {services: [fake-gcs],             url: "http://127.0.0.1:4443", profile: ""}
   azurite:     {services: [azurite],              url: "http://127.0.0.1:10000", profile: ""}
-  mongo-auth:  {services: [mongo-auth],           url: "mongodb://root:rootpass@127.0.0.1:27020/?authSource=admin", profile: ""}
-  mongo-auth-rs: {services: [mongo-auth-rs],      url: "mongodb://root:rootpass@127.0.0.1:27021/?authSource=admin&directConnection=true", profile: ""}
+  mongo-auth:  {services: [mongo-auth],           url: "mongodb://root:rootpass@127.0.0.1:27020/?authSource=admin", profile: "", stacks: [lean, full, mongo]}
+  mongo-auth-rs: {services: [mongo-auth-rs],      url: "mongodb://root:rootpass@127.0.0.1:27021/?authSource=admin&directConnection=true", profile: "", stacks: [lean, full, mongo]}
+
+stacks: [core, lean, full, mongo]
 
 # Persistent databases on every source: `rivet` (tests, gate) and `rivet_bench` (the seeded
 # 1M-row harness fixture, expensive to rebuild). Nothing else is permanent.
