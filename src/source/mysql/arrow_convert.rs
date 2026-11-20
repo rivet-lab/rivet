@@ -83,6 +83,9 @@ fn derive_decimal_ps(column_length: u32, scale: u8, signed: bool) -> Option<(u8,
     Some((u8::try_from(precision).ok()?, i8::try_from(scale).ok()?))
 }
 
+/// The widest `BIT(n)` whose every value fits a signed 64-bit integer; `BIT(64)` is delivered unsigned.
+const BIT_INT64_MAX_WIDTH: u32 = 63;
+
 /// Map a MySQL column descriptor to Rivet's canonical type.
 pub(super) fn mysql_type_to_rivet(col: &mysql::Column) -> RivetType {
     use mysql::consts::ColumnType::*;
@@ -155,6 +158,7 @@ pub(super) fn mysql_type_to_rivet(col: &mysql::Column) -> RivetType {
         },
 
         MYSQL_TYPE_BIT if col.column_length() == 1 => RivetType::Bool,
+        MYSQL_TYPE_BIT if col.column_length() > BIT_INT64_MAX_WIDTH => RivetType::UInt64,
         MYSQL_TYPE_BIT => RivetType::Int64,
         MYSQL_TYPE_YEAR => RivetType::Int16,
 
@@ -400,6 +404,7 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
         match self.rows[row].as_ref(col) {
             Some(Value::UInt(v)) => Some(*v),
             Some(Value::Int(v)) if *v >= 0 => Some(*v as u64),
+            Some(Value::Bytes(bv)) if self.is_bit(col) => Some(bit_bytes_to_u64(bv)),
             Some(Value::Bytes(bv)) => atoi::atoi::<u64>(bv),
             _ => None,
         }
@@ -830,6 +835,7 @@ fn build_array(
                 match row.as_ref(col_idx) {
                     Some(Value::UInt(v)) => b.append_value(*v),
                     Some(Value::Int(v)) if *v >= 0 => b.append_value(*v as u64),
+                    Some(Value::Bytes(bv)) if is_bit => b.append_value(bit_bytes_to_u64(bv)),
                     Some(Value::Bytes(bv)) => match atoi::atoi::<u64>(bv) {
                         Some(v) => b.append_value(v),
                         None => b.append_value(unparsed(column, "unsigned bigint", bv)?),
@@ -1518,6 +1524,100 @@ mod roast_mysql_bit_decode_tests {
 
     fn bit16_column_definition() -> Vec<u8> {
         column_definition("b", 63, 16, 0x10, 0x0020, 0)
+    }
+
+    /// Serve one connection whose first COM_QUERY returns one `BIT(width)` column holding `values` as raw big-endian bytes.
+    fn serve_bit_rows(listener: TcpListener, width: u32, values: Vec<Vec<u8>>) {
+        let (mut s, _) = listener.accept().expect("fake MySQL server: accept");
+        s.set_read_timeout(Some(FAKE_IO_TIMEOUT)).unwrap();
+        s.set_write_timeout(Some(FAKE_IO_TIMEOUT)).unwrap();
+
+        write_packet(&mut s, 0, &handshake_greeting());
+        let _handshake_response = read_packet(&mut s);
+        write_packet(&mut s, 2, &[0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00]);
+
+        let _com_query = read_packet(&mut s);
+        write_packet(&mut s, 1, &[0x01]);
+        write_packet(
+            &mut s,
+            2,
+            &column_definition("b", 63, width, 0x10, 0x0020, 0),
+        );
+        write_packet(&mut s, 3, &[0xfe, 0x00, 0x00, 0x02, 0x00]);
+        let mut seq = 4u8;
+        for v in &values {
+            let mut row = Vec::new();
+            lenc_bytes(&mut row, v);
+            write_packet(&mut s, seq, &row);
+            seq += 1;
+        }
+        write_packet(&mut s, seq, &[0xfe, 0x00, 0x00, 0x02, 0x00]);
+        let mut buf = [0u8; 64];
+        let _ = s.read(&mut buf);
+    }
+
+    /// Read `values` back through the product's batch path from a fake server holding a `BIT(width)` column.
+    fn read_bit_column(width: u32, values: Vec<Vec<u8>>) -> (DataType, arrow::array::ArrayRef) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake MySQL server");
+        let port = listener.local_addr().expect("local_addr").port();
+        let server = std::thread::spawn(move || serve_bit_rows(listener, width, values));
+        let opts = OptsBuilder::new()
+            .ip_or_hostname(Some("127.0.0.1"))
+            .tcp_port(port)
+            .user(Some("root"))
+            .pass(Some(""))
+            .prefer_socket(false)
+            .max_allowed_packet(Some(16 * 1024 * 1024))
+            .tcp_connect_timeout(Some(FAKE_IO_TIMEOUT))
+            .read_timeout(Some(FAKE_IO_TIMEOUT))
+            .write_timeout(Some(FAKE_IO_TIMEOUT));
+        let mut conn = Conn::new(opts).expect("connect to fake MySQL server");
+        let rows: Vec<mysql::Row> = {
+            let mut result = conn.query_iter("SELECT b FROM t").expect("COM_QUERY");
+            let row_set = result.iter().expect("one result set");
+            row_set.map(|r| r.expect("row decodes")).collect()
+        };
+        drop(conn);
+        server.join().expect("fake MySQL server thread");
+        let columns = rows[0].columns();
+        let (schema, arrow_types) = mysql_schema_and_arrow_types(&columns, &ColumnOverrides::new())
+            .expect("schema for a BIT column");
+        let batch = rows_to_record_batch_typed(&Arc::new(schema), &arrow_types, &rows, None)
+            .expect("a BIT value is delivered, never refused");
+        (arrow_types[0].clone(), batch.column(0).clone())
+    }
+
+    #[test]
+    fn a_bit64_is_delivered_unsigned_so_every_value_is_kept() {
+        let top = 1u64 << 63;
+        let values = [top, u64::MAX, u64::MAX - 1, top - 1, 1, 0];
+        let wire = values.iter().map(|v| v.to_be_bytes().to_vec()).collect();
+        let (ty, col) = read_bit_column(64, wire);
+        assert_eq!(
+            ty,
+            DataType::UInt64,
+            "BIT(64) holds 2^64 values, Int64 holds half"
+        );
+        let got = col
+            .as_any()
+            .downcast_ref::<arrow::array::UInt64Array>()
+            .expect("UInt64 column");
+        assert_eq!(got.values().to_vec(), values.to_vec());
+    }
+
+    #[test]
+    fn a_bit_up_to_63_bits_is_still_delivered_as_int64() {
+        for (width, value) in [(2u32, 3u64), (16, 0x3132), (63, (1u64 << 63) - 1)] {
+            let nbytes = width.div_ceil(8) as usize;
+            let wire = vec![value.to_be_bytes()[8 - nbytes..].to_vec()];
+            let (ty, col) = read_bit_column(width, wire);
+            assert_eq!(ty, DataType::Int64, "BIT({width})");
+            let got = col
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("Int64 column");
+            assert_eq!(got.value(0), value as i64, "BIT({width})");
+        }
     }
 
     /// Serve exactly one connection: handshake, auth OK, then answer the first COM_QUERY with one BIT(16) row whose raw wire bytes are [0x31, 0x32].
@@ -2450,6 +2550,8 @@ mod roast_mysql_bit_decode_tests {
              RivetType::Timestamp { unit: us, timezone: Some("UTC".into()) }),
             ("bit1",  BIN, 1,  MYSQL_TYPE_BIT as u8, UNSIGNED, 0, "bit(1)", RivetType::Bool),
             ("bit16", BIN, 16, MYSQL_TYPE_BIT as u8, UNSIGNED, 0, "bit", RivetType::Int64),
+            ("bit63", BIN, 63, MYSQL_TYPE_BIT as u8, UNSIGNED, 0, "bit", RivetType::Int64),
+            ("bit64", BIN, 64, MYSQL_TYPE_BIT as u8, UNSIGNED, 0, "bit", RivetType::UInt64),
         ];
 
         let defs = cases

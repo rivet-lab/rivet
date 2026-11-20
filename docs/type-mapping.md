@@ -311,7 +311,8 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `json` | `json` | `Utf8` + Parquet `LogicalType::Json` (via `arrow.json` extension) | JSON string | | live matrix |
 | `binary` / `varbinary` / `blob` | `binary` | `Binary` | hex in CSV | charset 63 / binary payload | type_roundtrip |
 | `bit(1)` | `bool` | `Boolean` | | | golden |
-| `bit(n>1)` | `int64` | `Int64` | | avoids silent truncation | type_roundtrip |
+| `bit(n)`, 1 < n <= 63 | `int64` | `Int64` | | avoids silent truncation | type_roundtrip |
+| `bit(64)` | `u_int64` → `UInt64` | `UInt64` | integer text | every value, including those with bit 63 set; `Int64` holds half of them | type_roundtrip |
 | `tinyint unsigned` | `int16` | `Int16` | integer text | 0–255 | type_roundtrip |
 | `smallint unsigned` | `int32` | `Int32` | integer text | up to 65535 | type_roundtrip |
 | `int unsigned` | `int64` | `Int64` | integer text | up to 4294967295 | type_roundtrip |
