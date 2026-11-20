@@ -83,6 +83,9 @@ fn derive_decimal_ps(column_length: u32, scale: u8, signed: bool) -> Option<(u8,
     Some((u8::try_from(precision).ok()?, i8::try_from(scale).ok()?))
 }
 
+/// The widest `BIT(n)` whose every value fits a signed 64-bit integer; `BIT(64)` is delivered unsigned.
+const BIT_INT64_MAX_WIDTH: u32 = 63;
+
 /// Map a MySQL column descriptor to Rivet's canonical type.
 pub(super) fn mysql_type_to_rivet(col: &mysql::Column) -> RivetType {
     use mysql::consts::ColumnType::*;
@@ -155,6 +158,12 @@ pub(super) fn mysql_type_to_rivet(col: &mysql::Column) -> RivetType {
         },
 
         MYSQL_TYPE_BIT if col.column_length() == 1 => RivetType::Bool,
+        MYSQL_TYPE_BIT
+            if col.column_length()
+                > seeded!("mysql-bit64-signed-delivery", 64, BIT_INT64_MAX_WIDTH) =>
+        {
+            RivetType::UInt64
+        }
         MYSQL_TYPE_BIT => RivetType::Int64,
         MYSQL_TYPE_YEAR => RivetType::Int16,
 
@@ -172,9 +181,15 @@ pub(crate) fn mysql_mapping(source: &SourceColumn, rivet: RivetType) -> TypeMapp
             source.native_type.as_str(),
             "date" | "datetime" | "timestamp"
         );
+    let duration = matches!(rivet, RivetType::Time { .. })
+        && seeded!("mysql-time-delivered-as-time-of-day", false, true);
+    let rivet = if duration { RivetType::String } else { rivet };
     let mut mapping = TypeMapping::from_source(source, rivet);
     if temporal && seeded!("mysql-zero-date-column-claims-exact", false, true) {
         mapping.fidelity = TypeFidelity::Compatible;
+    }
+    if duration {
+        mapping = mapping.with_text(crate::types::TextForm::TimeBeyondDay);
     }
     mapping
 }
@@ -333,6 +348,8 @@ pub(super) fn rows_to_record_batch_typed(
         });
         arrays.push(if matches!(arrow_type, DataType::Boolean) && !native_flag {
             build_bool_strict(col_idx, rows, column)?
+        } else if is_time_text(schema.field(col_idx)) {
+            build_time_text(col_idx, rows)?
         } else {
             build_array(arrow_type, col_idx, rows, is_bit, column, max_value_bytes)?
         });
@@ -342,6 +359,37 @@ pub(super) fn rows_to_record_batch_typed(
     let b = crate::source::value_checksum::arrow_batch_checksums(&batch);
     crate::source::value_checksum::verify(&a, &b, schema)?;
     Ok(batch)
+}
+
+/// Whether the field is declared as `time_beyond_day` text.
+fn is_time_text(field: &Field) -> bool {
+    field
+        .metadata()
+        .get(crate::types::META_TEXT_FORM)
+        .map(String::as_str)
+        == Some(crate::types::TextForm::TimeBeyondDay.label())
+}
+
+/// Whether wire column `col` is a MySQL `TIME`.
+fn is_time_wire(cols: Option<&[mysql::Column]>, col: usize) -> bool {
+    cols.and_then(|c| c.get(col)).is_some_and(|c| {
+        matches!(
+            c.column_type(),
+            ColumnType::MYSQL_TYPE_TIME | ColumnType::MYSQL_TYPE_TIME2
+        )
+    })
+}
+
+/// A `TIME` column as `[-]hh:mm:ss.ffffff` text: the whole signed duration, no range refusal.
+fn build_time_text(col_idx: usize, rows: &[mysql::Row]) -> Result<Arc<dyn Array>> {
+    let mut b = StringBuilder::with_capacity(rows.len(), rows.len() * 17);
+    for row in rows {
+        match mysql_time_micros(row.as_ref(col_idx))? {
+            Some(us) => b.append_value(crate::types::time_beyond_day(us)),
+            None => b.append_null(),
+        }
+    }
+    Ok(Arc::new(b.finish()))
 }
 
 /// Side A of the Form A value-checksum for MySQL.
@@ -400,6 +448,7 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
         match self.rows[row].as_ref(col) {
             Some(Value::UInt(v)) => Some(*v),
             Some(Value::Int(v)) if *v >= 0 => Some(*v as u64),
+            Some(Value::Bytes(bv)) if self.is_bit(col) => Some(bit_bytes_to_u64(bv)),
             Some(Value::Bytes(bv)) => atoi::atoi::<u64>(bv),
             _ => None,
         }
@@ -478,6 +527,12 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
         }
     }
     fn utf8(&self, col: usize, row: usize) -> Option<Cow<'_, [u8]>> {
+        if is_time_wire(self.rows.first().map(|r| r.columns_ref()), col) {
+            let us = mysql_time_micros(self.rows[row].as_ref(col))
+                .ok()
+                .flatten()?;
+            return Some(Cow::Owned(crate::types::time_beyond_day(us).into_bytes()));
+        }
         match self.rows[row].as_ref(col) {
             Some(Value::Bytes(bv)) => Some(match bytes_to_str(bv) {
                 Some(s) => Cow::Borrowed(s.as_bytes()),
@@ -548,6 +603,17 @@ pub(super) fn bit_bytes_to_u64(b: &[u8]) -> u64 {
     b.iter().fold(0u64, |acc, &byte| acc << 8 | u64::from(byte))
 }
 
+/// Decode a UInt64 cell that arrived as `Value::Bytes`.
+fn uint64_from_bytes(column: &str, bv: &[u8], is_bit: bool) -> Result<u64> {
+    if is_bit {
+        return Ok(bit_bytes_to_u64(bv));
+    }
+    match atoi::atoi::<u64>(bv) {
+        Some(v) => Ok(v),
+        None => unparsed(column, "unsigned bigint", bv),
+    }
+}
+
 /// Decode an Int64 cell that arrived as `Value::Bytes`.
 fn int64_from_bytes(bv: &[u8], is_bit: bool) -> Result<Option<i64>> {
     if is_bit {
@@ -560,7 +626,7 @@ fn int64_from_bytes(bv: &[u8], is_bit: bool) -> Result<Option<i64>> {
 }
 
 /// Parse MySQL text-protocol TIME string ("HH:MM:SS", "-HHH:MM:SS", "HH:MM:SS.uuuuuu") into microseconds since midnight.
-fn mysql_time_of_day(v: Option<&Value>) -> Result<Option<i64>> {
+fn mysql_time_micros(v: Option<&Value>) -> Result<Option<i64>> {
     let us = match v {
         None | Some(Value::NULL) => return Ok(None),
         Some(Value::Time(neg, days, h, m, s, us)) => {
@@ -582,7 +648,12 @@ fn mysql_time_of_day(v: Option<&Value>) -> Result<Option<i64>> {
             "mysql: a TIME column delivered {other:?}; rivet refuses rather than writing NULL"
         ),
     };
-    Ok(Some(time_of_day_in_range(us)?))
+    Ok(Some(us))
+}
+
+/// [`mysql_time_micros`] held to one day: a duration outside 00:00..24:00 is refused.
+fn mysql_time_of_day(v: Option<&Value>) -> Result<Option<i64>> {
+    mysql_time_micros(v)?.map(time_of_day_in_range).transpose()
 }
 
 /// MySQL TIME microseconds unchanged when inside 00:00..24:00; a refusal with the MySQL remedy otherwise.
@@ -830,10 +901,9 @@ fn build_array(
                 match row.as_ref(col_idx) {
                     Some(Value::UInt(v)) => b.append_value(*v),
                     Some(Value::Int(v)) if *v >= 0 => b.append_value(*v as u64),
-                    Some(Value::Bytes(bv)) => match atoi::atoi::<u64>(bv) {
-                        Some(v) => b.append_value(v),
-                        None => b.append_value(unparsed(column, "unsigned bigint", bv)?),
-                    },
+                    Some(Value::Bytes(bv)) => {
+                        b.append_value(uint64_from_bytes(column, bv, is_bit)?)
+                    }
                     other => {
                         null_or_refuse(column, arrow_type, other)?;
                         b.append_null();
@@ -1406,12 +1476,6 @@ mod roast_mysql_bit_decode_tests {
             assert_eq!(m.fidelity, TypeFidelity::Compatible, "{native}");
         }
         for (native, t) in [
-            (
-                "time",
-                RivetType::Time {
-                    unit: RivetTimeUnit::Microsecond,
-                },
-            ),
             ("int", RivetType::Int32),
             ("varchar", RivetType::String),
             ("date", RivetType::String),
@@ -1422,6 +1486,68 @@ mod roast_mysql_bit_decode_tests {
             let m = super::mysql_mapping(&SourceColumn::simple("c", native, true), t);
             assert_eq!(m.fidelity, same.fidelity, "{native}");
         }
+    }
+
+    /// A MySQL `TIME` is a signed duration to 838:59:59, so it is delivered as `time_beyond_day` text and every value is kept.
+    #[test]
+    fn a_time_column_is_delivered_as_text_so_a_duration_beyond_a_day_is_kept() {
+        use arrow::array::StringArray;
+        use mysql::consts::ColumnType::MYSQL_TYPE_TIME;
+
+        let def = column_definition("c", CS_BIN, 17, MYSQL_TYPE_TIME as u8, 0, 6);
+        let cols = vec![def.clone()];
+        let rows = fetch_binary_rows(
+            cols,
+            vec![
+                vec![Some(v_time(false, 0, 14, 30, 0, 123_456).1)],
+                vec![Some(v_time(false, 1, 1, 30, 15, 0).1)],
+                vec![Some(v_time(false, 34, 22, 59, 59, 0).1)],
+                vec![Some(v_time(true, 0, 0, 0, 1, 0).1)],
+                vec![Some(v_time(true, 34, 22, 59, 59, 0).1)],
+                vec![None],
+            ],
+        );
+        let column = rows[0].columns_ref()[0].clone();
+        let source = crate::types::SourceColumn::simple("c", mysql_native_type_name(&column), true);
+        let mapping = super::mysql_mapping(&source, mysql_type_to_rivet(&column));
+        assert_eq!(
+            mapping.delivery,
+            crate::types::Delivery::Text(crate::types::TextForm::TimeBeyondDay)
+        );
+        let dt = mapping.arrow_type.clone().expect("a delivery type");
+        assert_eq!(mapping.rivet_type, crate::types::RivetType::String);
+        assert_eq!(dt, DataType::Utf8);
+        let field = crate::types::build_arrow_field(&mapping).expect("a text field");
+        let schema = Arc::new(Schema::new(vec![field]));
+        let batch =
+            rows_to_record_batch_typed(&schema, &[dt], &rows, None).expect("TIME rows build");
+        let got = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("Utf8");
+        let shown: Vec<Option<&str>> = got.iter().collect();
+        assert_eq!(
+            shown,
+            vec![
+                Some("14:30:00.123456"),
+                Some("25:30:15.000000"),
+                Some("838:59:59.000000"),
+                Some("-00:00:01.000000"),
+                Some("-838:59:59.000000"),
+                None,
+            ]
+        );
+    }
+
+    /// A `text` override on a MySQL `TIME` reads nothing from it: the value is refused, as before the text delivery.
+    #[test]
+    fn a_text_override_on_a_time_column_is_still_refused() {
+        let (def, bytes) = v_time(false, 1, 1, 30, 15, 0);
+        let rows = fetch_binary_rows(vec![def], vec![vec![Some(bytes)]]);
+        let err = build_array(&DataType::Utf8, 0, &rows, false, "c", None)
+            .expect_err("a TIME under a text override");
+        crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
     }
 
     /// How long any socket in the fake harness waits.
@@ -1521,6 +1647,100 @@ mod roast_mysql_bit_decode_tests {
 
     fn bit16_column_definition() -> Vec<u8> {
         column_definition("b", 63, 16, 0x10, 0x0020, 0)
+    }
+
+    /// Serve one connection whose first COM_QUERY returns one `BIT(width)` column holding `values` as raw big-endian bytes.
+    fn serve_bit_rows(listener: TcpListener, width: u32, values: Vec<Vec<u8>>) {
+        let (mut s, _) = listener.accept().expect("fake MySQL server: accept");
+        s.set_read_timeout(Some(FAKE_IO_TIMEOUT)).unwrap();
+        s.set_write_timeout(Some(FAKE_IO_TIMEOUT)).unwrap();
+
+        write_packet(&mut s, 0, &handshake_greeting());
+        let _handshake_response = read_packet(&mut s);
+        write_packet(&mut s, 2, &[0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00]);
+
+        let _com_query = read_packet(&mut s);
+        write_packet(&mut s, 1, &[0x01]);
+        write_packet(
+            &mut s,
+            2,
+            &column_definition("b", 63, width, 0x10, 0x0020, 0),
+        );
+        write_packet(&mut s, 3, &[0xfe, 0x00, 0x00, 0x02, 0x00]);
+        let mut seq = 4u8;
+        for v in &values {
+            let mut row = Vec::new();
+            lenc_bytes(&mut row, v);
+            write_packet(&mut s, seq, &row);
+            seq += 1;
+        }
+        write_packet(&mut s, seq, &[0xfe, 0x00, 0x00, 0x02, 0x00]);
+        let mut buf = [0u8; 64];
+        let _ = s.read(&mut buf);
+    }
+
+    /// Read `values` back through the product's batch path from a fake server holding a `BIT(width)` column.
+    fn read_bit_column(width: u32, values: Vec<Vec<u8>>) -> (DataType, arrow::array::ArrayRef) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake MySQL server");
+        let port = listener.local_addr().expect("local_addr").port();
+        let server = std::thread::spawn(move || serve_bit_rows(listener, width, values));
+        let opts = OptsBuilder::new()
+            .ip_or_hostname(Some("127.0.0.1"))
+            .tcp_port(port)
+            .user(Some("root"))
+            .pass(Some(""))
+            .prefer_socket(false)
+            .max_allowed_packet(Some(16 * 1024 * 1024))
+            .tcp_connect_timeout(Some(FAKE_IO_TIMEOUT))
+            .read_timeout(Some(FAKE_IO_TIMEOUT))
+            .write_timeout(Some(FAKE_IO_TIMEOUT));
+        let mut conn = Conn::new(opts).expect("connect to fake MySQL server");
+        let rows: Vec<mysql::Row> = {
+            let mut result = conn.query_iter("SELECT b FROM t").expect("COM_QUERY");
+            let row_set = result.iter().expect("one result set");
+            row_set.map(|r| r.expect("row decodes")).collect()
+        };
+        drop(conn);
+        server.join().expect("fake MySQL server thread");
+        let columns = rows[0].columns();
+        let (schema, arrow_types) = mysql_schema_and_arrow_types(&columns, &ColumnOverrides::new())
+            .expect("schema for a BIT column");
+        let batch = rows_to_record_batch_typed(&Arc::new(schema), &arrow_types, &rows, None)
+            .expect("a BIT value is delivered, never refused");
+        (arrow_types[0].clone(), batch.column(0).clone())
+    }
+
+    #[test]
+    fn a_bit64_is_delivered_unsigned_so_every_value_is_kept() {
+        let top = 1u64 << 63;
+        let values = [top, u64::MAX, u64::MAX - 1, top - 1, 1, 0];
+        let wire = values.iter().map(|v| v.to_be_bytes().to_vec()).collect();
+        let (ty, col) = read_bit_column(64, wire);
+        assert_eq!(
+            ty,
+            DataType::UInt64,
+            "BIT(64) holds 2^64 values, Int64 holds half"
+        );
+        let got = col
+            .as_any()
+            .downcast_ref::<arrow::array::UInt64Array>()
+            .expect("UInt64 column");
+        assert_eq!(got.values().to_vec(), values.to_vec());
+    }
+
+    #[test]
+    fn a_bit_up_to_63_bits_is_still_delivered_as_int64() {
+        for (width, value) in [(2u32, 3u64), (16, 0x3132), (63, (1u64 << 63) - 1)] {
+            let nbytes = width.div_ceil(8) as usize;
+            let wire = vec![value.to_be_bytes()[8 - nbytes..].to_vec()];
+            let (ty, col) = read_bit_column(width, wire);
+            assert_eq!(ty, DataType::Int64, "BIT({width})");
+            let got = col
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("Int64 column");
+            assert_eq!(got.value(0), value as i64, "BIT({width})");
+        }
     }
 
     /// Serve exactly one connection: handshake, auth OK, then answer the first COM_QUERY with one BIT(16) row whose raw wire bytes are [0x31, 0x32].
@@ -1882,6 +2102,7 @@ mod roast_mysql_bit_decode_tests {
             ("i32", v_int(-2_000_000_000)),
             ("i64", v_int(-9_000_000_000_000_000_000)),
             ("u64", v_uint(18_000_000_000_000_000_000)),
+            ("u64_text", v_bytes(b"18000000000000000000")),
             ("f32", v_float(0.5)),
             ("f64", v_double(-1.25)),
             ("f64_text", v_bytes(b"-2.5")),
@@ -1905,6 +2126,11 @@ mod roast_mysql_bit_decode_tests {
         assert_eq!(s.int32(col("i32"), 0), Some(-2_000_000_000));
         assert_eq!(s.int64(col("i64"), 0), Some(-9_000_000_000_000_000_000));
         assert_eq!(s.uint64(col("u64"), 0), Some(18_000_000_000_000_000_000));
+        assert_eq!(
+            s.uint64(col("u64_text"), 0),
+            Some(18_000_000_000_000_000_000),
+            "a text-wire unsigned integer is parsed, never read as BIT bytes"
+        );
         assert_eq!(s.float32(col("f32"), 0), Some(0.5));
         assert_eq!(s.float64(col("f64"), 0), Some(-1.25));
         assert_eq!(
@@ -2453,6 +2679,8 @@ mod roast_mysql_bit_decode_tests {
              RivetType::Timestamp { unit: us, timezone: Some("UTC".into()) }),
             ("bit1",  BIN, 1,  MYSQL_TYPE_BIT as u8, UNSIGNED, 0, "bit(1)", RivetType::Bool),
             ("bit16", BIN, 16, MYSQL_TYPE_BIT as u8, UNSIGNED, 0, "bit", RivetType::Int64),
+            ("bit63", BIN, 63, MYSQL_TYPE_BIT as u8, UNSIGNED, 0, "bit", RivetType::Int64),
+            ("bit64", BIN, 64, MYSQL_TYPE_BIT as u8, UNSIGNED, 0, "bit", RivetType::UInt64),
         ];
 
         let defs = cases

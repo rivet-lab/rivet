@@ -1848,6 +1848,24 @@ seeds:
       lib:
         cells: ["lib:a_batch_load_skips_the_runs_of_a_cdc_export_nested_in_its_prefix_and_says_so"]
 
+  - name: mysql-time-delivered-as-time-of-day
+    class: "a native type resolves into a common kind whose value domain is narrower than the type's, so the values outside it stop the run instead of reaching the file"
+    history: "2026-11-20 - type matrix MYSQL_TIME_RANGE_REFUSED: a MySQL TIME beyond 00:00..24:00 or negative was refused RIVET_SOURCE_VALUE_UNREPRESENTABLE because every TIME was delivered as Time64(us), a time of day; fixed by delivering TIME as time_beyond_day text, `columns: { c: time }` keeps Time64"
+    scope: source
+    switch: mysql-time-delivered-as-time-of-day
+    engines:
+      postgres:
+        na: "a PostgreSQL time is a time of day, never a duration past it; the MySQL TIME mapping does not run"
+      mysql:
+        cells:
+          - mysql_batch_and_cdc_deliver_every_ledger_row_alike
+          - "lib:a_time_column_is_delivered_as_text_so_a_duration_beyond_a_day_is_kept"
+      mssql:
+        na: "a SQL Server time is a time of day, never a duration past it; the MySQL TIME mapping does not run"
+      mongo:
+        na: "a MongoDB document has no TIME type; the MySQL TIME mapping does not run"
+      oracle:
+        na: "Oracle has no TIME type; the MySQL TIME mapping does not run"
   - name: mysql-session-off-utc-read
     class: "a MySQL read whose session is still at the server's time zone after rivet's `SET time_zone = '+00:00'` (a proxy dropped or rerouted the SET) writes every TIMESTAMP shifted by the offset, exit 0"
     history: "0.32.1 D5, 2026-10-18: a pilot's ProxySQL in front of a Europe/Moscow MySQL; measured on main 51a1b69c through proxysql-tz (a rule answering `SET time_zone` with OK): `2026-01-01T12:00:00Z` exported for `09:00:00Z`, exit 0. ProxySQL 2.5.5 with no rule forwards the SET and logs `Unable to parse unknown SET query ... Setting lock_hostgroup` for rivet's reset `SET time_zone = @@global.time_zone`"
@@ -3650,7 +3668,7 @@ seeds:
       postgres:
         na: "a PostgreSQL `time` is a time of day, never a duration past it, and the MySQL cell fix does not run"
       mysql:
-        cells: [a_time_past_a_day_in_a_stream_is_refused_by_code_and_both_remedies_deliver_mysql]
+        cells: ["lib:mysql_cell_fixes_refuse_an_unreadable_wire_value"]
       mssql:
         na: "a SQL Server `time` is a time of day, never a duration past it, and the MySQL cell fix does not run"
       mongo:
@@ -6698,6 +6716,26 @@ seeds:
         cells:
           - "lib:the_legs_check_admits_are_the_pending_baselines_and_nothing_else"
           - "lib:check_plans_the_pending_baseline_leg_of_a_cdc_export_and_only_that"
+
+  - name: mysql-bit64-signed-delivery
+    class: "a native type resolves into a common kind whose value domain is narrower than the type's, so the values outside it stop the run instead of reaching the file"
+    history: "2026-11-20 - type matrix MYSQL_BIT_TOPBIT_REFUSED: a MySQL BIT(64) with bit 63 set was refused RIVET_SOURCE_VALUE_UNREPRESENTABLE because BIT(n) was delivered as Int64 for every n; fixed by BIT_INT64_MAX_WIDTH = 63, BIT(64) is delivered as UInt64"
+    scope: source
+    switch: mysql-bit64-signed-delivery
+    engines:
+      postgres:
+        na: "a PostgreSQL bit(n) is delivered as its bit string; the MySQL BIT mapping does not run"
+      mysql:
+        cells:
+          - mysql_batch_and_cdc_deliver_every_ledger_row_alike
+          - "lib:a_bit64_is_delivered_unsigned_so_every_value_is_kept"
+          - "lib:a_bit64_value_with_the_top_bit_builds_in_an_unsigned_column"
+      mssql:
+        na: "SQL Server bit is a one-bit boolean; the MySQL BIT mapping does not run"
+      mongo:
+        na: "a MongoDB document has no BIT column; the MySQL BIT mapping does not run"
+      oracle:
+        na: "Oracle has no BIT type; the MySQL BIT mapping does not run"
 
   - name: bq-ns-zoned-timestamp-int64
     class: "a nanosecond zoned timestamp is declared TIMESTAMP in the BigQuery load, so BigQuery reads the Parquet nanosecond integers as microseconds (values 1000x wrong) or rejects the load, where the naive nanosecond timestamp is declared INT64"
