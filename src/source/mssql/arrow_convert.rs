@@ -148,6 +148,7 @@ fn cell_type_name(c: &ColumnData<'_>) -> String {
 }
 
 use crate::error::Result;
+use crate::types::kind::CommonKind;
 use crate::types::{
     ColumnOverrides, RivetType, SourceColumn, TimeUnit as RivetTimeUnit, TypeMapping,
     build_arrow_field, resolve_column,
@@ -158,6 +159,64 @@ const UNIX_EPOCH_DAY: i32 = 0;
 
 use crate::source::value_within_ceiling;
 
+/// The common kind a SQL Server wire type is read as, or `None` for a type this engine alone carries.
+fn mssql_common_kind(ct: ColumnType) -> Option<CommonKind> {
+    Some(match ct {
+        ColumnType::Bit | ColumnType::Bitn => CommonKind::Bool,
+        ColumnType::Int1 | ColumnType::Int2 => CommonKind::I16,
+        ColumnType::Int4 => CommonKind::I32,
+        ColumnType::Int8 | ColumnType::Intn => CommonKind::I64,
+        ColumnType::Float4 => CommonKind::F32,
+        ColumnType::Float8 | ColumnType::Floatn => CommonKind::F64,
+        ColumnType::Decimaln | ColumnType::Numericn => CommonKind::Dec,
+        ColumnType::Daten => CommonKind::Date,
+        ColumnType::Datetime
+        | ColumnType::Datetime4
+        | ColumnType::Datetimen
+        | ColumnType::Datetime2 => CommonKind::Naive,
+        ColumnType::DatetimeOffsetn => CommonKind::Utc,
+        ColumnType::NVarchar
+        | ColumnType::NChar
+        | ColumnType::BigVarChar
+        | ColumnType::BigChar
+        | ColumnType::Text
+        | ColumnType::NText => CommonKind::Text,
+        ColumnType::BigVarBin | ColumnType::BigBinary | ColumnType::Image => CommonKind::Binary,
+        _ => return None,
+    })
+}
+
+/// The type of a `decimal` / `numeric` column before the catalog supplies its precision and scale.
+fn bare_decimal() -> RivetType {
+    RivetType::Decimal {
+        precision: 38,
+        scale: 0,
+    }
+}
+
+/// The type of a wire type this engine alone carries, or `Unsupported` for one it does not map.
+fn mssql_engine_type(ct: ColumnType) -> RivetType {
+    match ct {
+        ColumnType::Money => RivetType::Decimal {
+            precision: 19,
+            scale: 4,
+        },
+        ColumnType::Money4 => RivetType::Decimal {
+            precision: 10,
+            scale: 4,
+        },
+        ColumnType::Guid => RivetType::Uuid,
+        ColumnType::SSVariant | ColumnType::Udt => RivetType::String,
+        ColumnType::Timen => RivetType::Time {
+            unit: RivetTimeUnit::Microsecond,
+        },
+        other => RivetType::Unsupported {
+            native_type: format!("{other:?}").to_lowercase(),
+            reason: format!("SQL Server column type {other:?} has no Rivet mapping yet"),
+        },
+    }
+}
+
 /// Map a SQL Server column type to its `RivetType`.
 pub(super) fn mssql_type_to_rivet(col: &Column, overrides: &ColumnOverrides) -> Result<RivetType> {
     resolve_column(
@@ -165,53 +224,9 @@ pub(super) fn mssql_type_to_rivet(col: &Column, overrides: &ColumnOverrides) -> 
         overrides,
         col.name(),
         &format!("{:?}", col.column_type()).to_lowercase(),
-        || match col.column_type() {
-            ColumnType::Bit | ColumnType::Bitn => RivetType::Bool,
-            ColumnType::Int1 | ColumnType::Int2 => RivetType::Int16,
-            ColumnType::Int4 => RivetType::Int32,
-            ColumnType::Int8 | ColumnType::Intn => RivetType::Int64,
-            ColumnType::Float4 => RivetType::Float32,
-            ColumnType::Float8 | ColumnType::Floatn => RivetType::Float64,
-            ColumnType::Money => RivetType::Decimal {
-                precision: 19,
-                scale: 4,
-            },
-            ColumnType::Money4 => RivetType::Decimal {
-                precision: 10,
-                scale: 4,
-            },
-            ColumnType::Decimaln | ColumnType::Numericn => RivetType::Decimal {
-                precision: 38,
-                scale: 0,
-            },
-            ColumnType::Guid => RivetType::Uuid,
-            ColumnType::NVarchar
-            | ColumnType::NChar
-            | ColumnType::BigVarChar
-            | ColumnType::BigChar
-            | ColumnType::Text
-            | ColumnType::NText => RivetType::String,
-            ColumnType::BigVarBin | ColumnType::BigBinary | ColumnType::Image => RivetType::Binary,
-            ColumnType::SSVariant | ColumnType::Udt => RivetType::String,
-            ColumnType::Daten => RivetType::Date,
-            ColumnType::Timen => RivetType::Time {
-                unit: RivetTimeUnit::Microsecond,
-            },
-            ColumnType::Datetime
-            | ColumnType::Datetime4
-            | ColumnType::Datetimen
-            | ColumnType::Datetime2 => RivetType::Timestamp {
-                unit: RivetTimeUnit::Microsecond,
-                timezone: None,
-            },
-            ColumnType::DatetimeOffsetn => RivetType::Timestamp {
-                unit: RivetTimeUnit::Microsecond,
-                timezone: Some("UTC".into()),
-            },
-            other => RivetType::Unsupported {
-                native_type: format!("{other:?}").to_lowercase(),
-                reason: format!("SQL Server column type {other:?} has no Rivet mapping yet"),
-            },
+        || match mssql_common_kind(col.column_type()) {
+            Some(kind) => kind.rivet_type().unwrap_or_else(bare_decimal),
+            None => mssql_engine_type(col.column_type()),
         },
     )
 }
@@ -1104,6 +1119,134 @@ impl crate::source::value_checksum::CellSource for MssqlCellSource<'_> {
 
 #[cfg(test)]
 mod type_table;
+
+#[cfg(test)]
+mod type_map_tests {
+    use super::{bare_decimal, mssql_common_kind, mssql_engine_type, mssql_type_to_rivet};
+    use crate::types::kind::CommonKind;
+    use crate::types::{ColumnOverrides, RivetType, TimeUnit as RivetTimeUnit};
+    use tiberius::{Column, ColumnType};
+
+    fn ts(timezone: Option<&str>) -> RivetType {
+        RivetType::Timestamp {
+            unit: RivetTimeUnit::Microsecond,
+            timezone: timezone.map(str::to_string),
+        }
+    }
+
+    fn unsupported(native: &str, ct: ColumnType) -> RivetType {
+        RivetType::Unsupported {
+            native_type: native.into(),
+            reason: format!("SQL Server column type {ct:?} has no Rivet mapping yet"),
+        }
+    }
+
+    /// Every wire type: the common kind it reads as, and the type the mapper gives it with no override or hint.
+    fn wire_table() -> Vec<(ColumnType, Option<CommonKind>, RivetType)> {
+        use CommonKind::*;
+        let dec = |precision, scale| RivetType::Decimal { precision, scale };
+        vec![
+            (
+                ColumnType::Null,
+                None,
+                unsupported("null", ColumnType::Null),
+            ),
+            (ColumnType::Bit, Some(Bool), RivetType::Bool),
+            (ColumnType::Bitn, Some(Bool), RivetType::Bool),
+            (ColumnType::Int1, Some(I16), RivetType::Int16),
+            (ColumnType::Int2, Some(I16), RivetType::Int16),
+            (ColumnType::Int4, Some(I32), RivetType::Int32),
+            (ColumnType::Int8, Some(I64), RivetType::Int64),
+            (ColumnType::Intn, Some(I64), RivetType::Int64),
+            (ColumnType::Float4, Some(F32), RivetType::Float32),
+            (ColumnType::Float8, Some(F64), RivetType::Float64),
+            (ColumnType::Floatn, Some(F64), RivetType::Float64),
+            (ColumnType::Decimaln, Some(Dec), dec(38, 0)),
+            (ColumnType::Numericn, Some(Dec), dec(38, 0)),
+            (ColumnType::Money, None, dec(19, 4)),
+            (ColumnType::Money4, None, dec(10, 4)),
+            (ColumnType::Daten, Some(Date), RivetType::Date),
+            (ColumnType::Datetime, Some(Naive), ts(None)),
+            (ColumnType::Datetime4, Some(Naive), ts(None)),
+            (ColumnType::Datetimen, Some(Naive), ts(None)),
+            (ColumnType::Datetime2, Some(Naive), ts(None)),
+            (ColumnType::DatetimeOffsetn, Some(Utc), ts(Some("UTC"))),
+            (
+                ColumnType::Timen,
+                None,
+                RivetType::Time {
+                    unit: RivetTimeUnit::Microsecond,
+                },
+            ),
+            (ColumnType::NVarchar, Some(Text), RivetType::String),
+            (ColumnType::NChar, Some(Text), RivetType::String),
+            (ColumnType::BigVarChar, Some(Text), RivetType::String),
+            (ColumnType::BigChar, Some(Text), RivetType::String),
+            (ColumnType::Text, Some(Text), RivetType::String),
+            (ColumnType::NText, Some(Text), RivetType::String),
+            (ColumnType::BigVarBin, Some(Binary), RivetType::Binary),
+            (ColumnType::BigBinary, Some(Binary), RivetType::Binary),
+            (ColumnType::Image, Some(Binary), RivetType::Binary),
+            (ColumnType::Guid, None, RivetType::Uuid),
+            (ColumnType::SSVariant, None, RivetType::String),
+            (ColumnType::Udt, None, RivetType::String),
+            (ColumnType::Xml, None, unsupported("xml", ColumnType::Xml)),
+        ]
+    }
+
+    /// Every wire type reads as its common kind, or as none for a type this engine alone carries.
+    #[test]
+    fn the_common_wire_types_read_as_their_common_kind_and_the_rest_as_none() {
+        let table = wire_table();
+        assert_eq!(table.len(), 35);
+        for (ct, kind, _) in &table {
+            assert_eq!(&mssql_common_kind(*ct), kind, "{ct:?}");
+        }
+    }
+
+    /// Every wire type is typed as pinned, through its kind when it has one and the engine table when it has none.
+    #[test]
+    fn every_wire_type_is_typed_through_its_kind_or_the_engine_table() {
+        for (ct, kind, want) in wire_table() {
+            let column = Column::new("c".to_string(), ct);
+            let got = mssql_type_to_rivet(&column, &ColumnOverrides::new()).expect("maps");
+            assert_eq!(got, want, "{ct:?}");
+            match kind.and_then(CommonKind::rivet_type) {
+                Some(by_kind) => assert_eq!(got, by_kind, "{ct:?} is the kind's own type"),
+                None if kind.is_some() => assert_eq!(got, bare_decimal(), "{ct:?}"),
+                None => assert_eq!(got, mssql_engine_type(ct), "{ct:?}"),
+            }
+        }
+    }
+
+    /// A decimal with no catalog hint is `decimal(38,0)`, and the one kind without a type is the one that takes it.
+    #[test]
+    fn a_decimal_without_a_hint_is_the_widest_scale_zero_decimal() {
+        assert_eq!(
+            bare_decimal(),
+            RivetType::Decimal {
+                precision: 38,
+                scale: 0
+            }
+        );
+        assert_eq!(CommonKind::Dec.rivet_type(), None);
+    }
+
+    /// An override names the type a column is read as, whatever its wire type reads as by default.
+    #[test]
+    fn an_override_wins_over_the_kind() {
+        let column = Column::new("c".to_string(), ColumnType::Int4);
+        let decimal = RivetType::Decimal {
+            precision: 18,
+            scale: 2,
+        };
+        let overrides = ColumnOverrides::from([("c".to_string(), decimal.clone())]);
+        assert_eq!(
+            mssql_type_to_rivet(&column, &overrides).expect("int to decimal is read"),
+            decimal
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {

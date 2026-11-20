@@ -228,7 +228,7 @@ fn table() -> Vec<Case> {
         case(
             "date",
             of(MYSQL_TYPE_DATE, BIN, 10, none, 0),
-            "date | Date32 | native | compatible | reads date,timestamp(microsecond),timestamp_tz(microsecond,UTC),string,json # red:MYSQL_DATE_ZERO_BQ_RAW",
+            "date | Date32 | native | compatible | reads date,timestamp(microsecond),timestamp_tz(microsecond,UTC),string,json",
         ),
         case(
             "time",
