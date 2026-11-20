@@ -455,7 +455,30 @@ def _same_special(exp: float, got) -> str:
 
 _ARRAY_FN = re.compile(r"ARRAY\[(.*?)\](?:::[A-Za-z_ ]+\[\])?", re.S | re.I)
 _ARRAY_TEXT = re.compile(r"'(\{.*\})'(?:::[A-Za-z_ ]+(?:\(\d+(?:,\s*\d+)?\))?\[\])?", re.S)
-_ELEM_DELIVERY = {"REAL": "Float32", "FLOAT4": "Float32", "DOUBLE PRECISION": "Float64", "FLOAT8": "Float64", "BOOLEAN": "Boolean"}
+_ELEM_DELIVERY = {"REAL": "Float32", "FLOAT4": "Float32", "DOUBLE PRECISION": "Float64", "FLOAT8": "Float64", "BOOLEAN": "Boolean", "OID": "Int64"}
+_PG_IV_UNIT = {"year": ("m", 12), "mon": ("m", 1), "month": ("m", 1), "day": ("d", 1), "hour": ("us", 3_600_000_000),
+               "min": ("us", 60_000_000), "minute": ("us", 60_000_000), "sec": ("us", 1_000_000), "second": ("us", 1_000_000)}
+
+
+def pg_interval_iso(text: str) -> str | None:
+    """The ISO 8601 text rivet delivers for a PostgreSQL interval written as `N unit ...` (src/source/postgres/arrow_convert.rs pg_interval_to_iso8601); None for another spelling."""
+    parts = {"m": 0, "d": 0, "us": 0}
+    words = re.findall(r"(-?\d+(?:\.\d+)?)\s*([a-z]+)", text.lower())
+    if not words or re.sub(r"(-?\d+(?:\.\d+)?)\s*([a-z]+)", "", text.lower()).strip():
+        return None
+    for n, unit in words:
+        u = _PG_IV_UNIT.get(unit.rstrip("s")) or _PG_IV_UNIT.get(unit)
+        if u is None:
+            return None
+        parts[u[0]] += int(Decimal(n) * u[1])
+    years, mons, days, us = parts["m"] // 12, parts["m"] % 12, parts["d"], parts["us"]
+    out = "P" + (f"{years}Y" if years else "") + (f"{mons}M" if mons else "") + (f"{days}D" if days else "")
+    if us:
+        a, sign = abs(us), "-" if us < 0 else ""
+        h, mi, sec, frac = a // 3_600_000_000, a // 60_000_000 % 60, a // 1_000_000 % 60, a % 1_000_000
+        out += "T" + (f"{sign}{h}H" if h else "") + (f"{sign}{mi}M" if mi else "")
+        out += f"{sign}{sec}.{frac:06d}S" if frac else (f"{sign}{sec}S" if sec or (not h and not mi) else "")
+    return "PT0S" if out == "P" else out
 
 
 def pg_array_elements(lit: str, base: str):
@@ -514,6 +537,15 @@ def same_array(engine: str, lit: str, native: str, target: str, got) -> str:
     fam = family(base, _ELEM_DELIVERY.get(base.upper(), ""), engine)
     seen = set()
     for e, g in zip(elems, got):
+        if base.upper() == "OID" and e.upper() != "NULL" and g is not None:
+            n = e.strip("'").split("::")[0].strip()
+            seen.add("OK" if n.isdigit() and int(n) == g else WRONG)
+            continue
+        if base.upper() == "INTERVAL" and e.upper() != "NULL" and g is not None:
+            iso = pg_interval_iso(re.sub(r"^INTERVAL\s*", "", e.strip(), flags=re.I).strip("'\""))
+            text = g.decode("utf-8", "replace") if isinstance(g, (bytes, bytearray)) else g
+            seen.add("PRESENCE" if iso is None else "OK" if text == iso else WRONG)
+            continue
         if fam == "bool" and e.lower() in ("'t'", "'f'"):
             e = "TRUE" if e.lower() == "'t'" else "FALSE"
         elif fam in ("int", "decimal", "float4", "float8") and _NUM.fullmatch(e.strip("'")):
@@ -1163,11 +1195,19 @@ def self_test() -> None:
     assert compare("postgres", "'{\"n\":1}'::jsonb", "other", "none", '{"n":2}', native="JSONB") == WRONG
     assert compare("mssql", "'12345678-1234-1234-1234-123456789012'", "other", "none", UUID("12345678-1234-1234-1234-123456789012"), native="UNIQUEIDENTIFIER") == "OK"
 <<<<<<< HEAD
+<<<<<<< HEAD
     assert parse_lit("oracle", "EMPTY_BLOB()") == b"" and parse_lit("oracle", "HEXTORAW('')") is None, "an empty LOB is a value, an empty RAW is NULL"
 =======
     assert _same_instant("mssql", "TIME", "12:34:56.1234567", Decimal("45296.1234567")) == "OK", "a time's 100ns digit is compared, not dropped"
     assert _same_instant("mssql", "TIME", "12:34:56.1234567", Decimal("45296.123456")) == WRONG
 >>>>>>> claude/fix-gate-ns-timestamp-reader
+=======
+    assert pg_interval_iso("1 day") == "P1D" and pg_interval_iso("2 hours") == "PT2H" and pg_interval_iso("1 year 2 mons 3 days") == "P1Y2M3D"
+    assert same_array("postgres", "'{\"1 day\",\"2 hours\"}'", "INTERVAL[]", "none", ["P1D", "PT2H"]) == "OK"
+    assert same_array("postgres", "ARRAY[INTERVAL '1 year 2 mons 3 days']", "INTERVAL[]", "none", [b"P1Y2M3D"]) == "OK"
+    assert same_array("postgres", "'{\"1 day\"}'", "INTERVAL[]", "none", ["P2D"]) == WRONG
+    assert same_array("postgres", "'{1,2}'", "OID[]", "none", [1, 2]) == "OK" and same_array("postgres", "ARRAY[1::oid, 16384::oid]", "OID[]", "none", [1, 16384]) == "OK"
+>>>>>>> claude/fix-pg-special-array-checksum
     assert compare("mssql", "0xAB", "other", "none", b"\xab\0\0", native="BINARY(8)") == "OK" and compare("mysql", "0xDEADBEEF", "other", "none", b"\xde\xad", native="VARBINARY(4)") == WRONG
     assert pg_array_elements("'{a,\"b,c\",NULL}'", "text") == ["'a'", "'b,c'", "NULL"] and pg_array_elements("ARRAY[1, NULL]::int[]", "int") == ["1", "NULL"]
     assert pg_array_elements("'{{1,2},{3}}'", "int") is None and pg_array_elements("'{}'", "int") == []
