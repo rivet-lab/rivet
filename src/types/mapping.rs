@@ -202,6 +202,12 @@ pub fn rivet_type_to_arrow(t: &RivetType) -> Option<DataType> {
                 item.try_with_extension_type(ArrowUuid)
                     .expect("Uuid extension is valid on FixedSizeBinary(16)");
             }
+            if matches!(**inner, RivetType::Json)
+                && seeded!("json-list-item-without-extension", false, true)
+            {
+                item.try_with_extension_type(ArrowJson::default())
+                    .expect("Json extension is valid on Utf8");
+            }
             DataType::List(Arc::new(item))
         }),
 
@@ -385,7 +391,7 @@ mod tests {
         assert!(!good.is_unsupported());
     }
 
-    /// Only a uuid list item carries the `arrow.uuid` extension; other list items stay bare.
+    /// A uuid list item carries `arrow.uuid`, a json one `arrow.json`; other list items stay bare.
     #[test]
     fn a_uuid_list_item_carries_the_uuid_extension_and_others_do_not() {
         let item_of = |inner: RivetType| match rivet_type_to_arrow(&RivetType::List {
@@ -401,6 +407,15 @@ mod tests {
                 .get("ARROW:extension:name")
                 .map(String::as_str),
             Some("arrow.uuid")
+        );
+        let json = item_of(RivetType::Json);
+        assert_eq!(json.data_type(), &DataType::Utf8);
+        assert_eq!(
+            json.metadata()
+                .get("ARROW:extension:name")
+                .map(String::as_str),
+            Some("arrow.json"),
+            "a json list item carries the arrow.json extension, as a json column does"
         );
         let int = item_of(RivetType::Int32);
         assert!(!int.metadata().contains_key("ARROW:extension:name"));
