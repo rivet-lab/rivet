@@ -326,6 +326,25 @@ pub enum DuckType {
     List(Box<DuckType>),
 }
 
+impl BqType {
+    /// A date or timestamp column, or a list of them.
+    pub(crate) fn is_temporal(&self) -> bool {
+        match self {
+            BqType::Date | BqType::Timestamp | BqType::DateTime => true,
+            BqType::Array(inner) => inner.is_temporal(),
+            BqType::Bool
+            | BqType::Int64
+            | BqType::Float64
+            | BqType::Numeric
+            | BqType::BigNumeric
+            | BqType::Time
+            | BqType::String
+            | BqType::Bytes
+            | BqType::Json => false,
+        }
+    }
+}
+
 impl From<BqType> for TargetType {
     fn from(t: BqType) -> Self {
         Self::BigQuery(t)
@@ -982,11 +1001,14 @@ pub(crate) enum TemporalKind {
 /// What one warehouse temporal type holds, in Unix seconds (a date is its midnight).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ValueRange {
+    pub warehouse: &'static str,
     pub type_name: &'static str,
     pub lo_secs: i64,
     pub hi_secs: i64,
     pub enforced: &'static str,
     pub beyond: &'static str,
+    pub nothing_done: &'static str,
+    pub silent: bool,
 }
 
 impl ValueRange {
@@ -1005,21 +1027,57 @@ pub(crate) const CLICKHOUSE_TEMPORAL_RANGES: [(TemporalKind, ValueRange); 2] = [
     (
         TemporalKind::Date,
         ValueRange {
+            warehouse: "ClickHouse",
             type_name: "Date32",
             lo_secs: -2_208_988_800,
             hi_secs: 10_413_791_999,
             enforced: "rejecting the insert, and storing 2300-01-01 as 2299-12-31 silently",
             beyond: "reject the insert, or store 2300-01-01 as 2299-12-31 silently",
+            nothing_done: "nothing was inserted",
+            silent: true,
         },
     ),
     (
         TemporalKind::Timestamp,
         ValueRange {
+            warehouse: "ClickHouse",
             type_name: "DateTime64",
             lo_secs: -2_208_988_800,
             hi_secs: 10_413_791_999,
             enforced: "storing the nearest end silently",
             beyond: "store the nearest end instead, silently",
+            nothing_done: "nothing was inserted",
+            silent: true,
+        },
+    ),
+];
+
+/// BigQuery `DATE`, `TIMESTAMP` and `DATETIME`: 0001-01-01 to 9999-12-31, which a load job enforces by failing as a whole.
+pub(crate) const BIGQUERY_TEMPORAL_RANGES: [(TemporalKind, ValueRange); 2] = [
+    (
+        TemporalKind::Date,
+        ValueRange {
+            warehouse: "BigQuery",
+            type_name: "DATE",
+            lo_secs: -62_135_596_800,
+            hi_secs: 253_402_300_799,
+            enforced: "failing the whole load job",
+            beyond: "fail the whole load job",
+            nothing_done: "nothing was loaded",
+            silent: false,
+        },
+    ),
+    (
+        TemporalKind::Timestamp,
+        ValueRange {
+            warehouse: "BigQuery",
+            type_name: "TIMESTAMP/DATETIME",
+            lo_secs: -62_135_596_800,
+            hi_secs: 253_402_300_799,
+            enforced: "failing the whole load job",
+            beyond: "fail the whole load job",
+            nothing_done: "nothing was loaded",
+            silent: false,
         },
     ),
 ];
