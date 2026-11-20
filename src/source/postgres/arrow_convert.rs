@@ -1426,6 +1426,9 @@ mod time_arithmetic_tests {
 }
 
 #[cfg(test)]
+mod type_table;
+
+#[cfg(test)]
 mod type_map_tests {
     use super::pg_type_to_rivet;
     use crate::types::{RivetType, TimeUnit as RivetTimeUnit};
