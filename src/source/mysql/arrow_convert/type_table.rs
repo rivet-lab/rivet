@@ -233,12 +233,12 @@ fn table() -> Vec<Case> {
         case(
             "time",
             of(MYSQL_TYPE_TIME, BIN, 10, none, 0),
-            "time(microsecond) | Time64(µs) | native | exact | reads time(microsecond) # red:MYSQL_TIME_RANGE_REFUSED # under-change",
+            "string | Utf8 | text:time_beyond_day | logical_string | reads int16,int32,int64,float32,float64,decimal(18,2),decimal(50,2),date,timestamp(microsecond),timestamp_tz(microsecond,UTC),string,json,uuid",
         ),
         case(
             "time (TIME2 wire)",
             of(MYSQL_TYPE_TIME2, BIN, 10, none, 0),
-            "time(microsecond) | Time64(µs) | native | exact | reads time(microsecond) # red:MYSQL_TIME_RANGE_REFUSED # under-change",
+            "string | Utf8 | text:time_beyond_day | logical_string | reads int16,int32,int64,float32,float64,decimal(18,2),decimal(50,2),date,timestamp(microsecond),timestamp_tz(microsecond,UTC),string,json,uuid",
         ),
         case(
             "datetime",
