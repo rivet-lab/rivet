@@ -348,7 +348,6 @@ const KNOWN_DEFECTS: &[&str] = &[
     "postgres:INTEGER[] (ClickHouse)",
     "postgres:DOUBLE PRECISION[] (ClickHouse)",
     "mysql:BOOLEAN",
-    "mssql:TIME",
     "mssql:UNIQUEIDENTIFIER (ClickHouse)",
     "oracle:TIMESTAMP(9)",
 ]; // ratchet-pin: end

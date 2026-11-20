@@ -6715,3 +6715,20 @@ seeds:
         cells:
           - "lib:the_legs_check_admits_are_the_pending_baselines_and_nothing_else"
           - "lib:check_plans_the_pending_baseline_leg_of_a_cdc_export_and_only_that"
+
+  - name: mssql-time7-lands-at-microseconds
+    class: "a SQL Server time(7) (the bare `time` default) is delivered as Time64(µs) and its 100ns digit is dropped, on batch and CDC, exit 0"
+    history: "type matrix class MSSQL_SCALE_SEVEN_TRUNC (known_red 2026-11-16, 68 pairs across ClickHouse, BigQuery and Snowflake); the twin of fine-timestamp-lands-at-microseconds (datetime2(7), #1083); owner decision 2026-11-20: fix, deliver Time64(ns)"
+    scope: source
+    switch: mssql-time7-lands-at-microseconds
+    engines:
+      mssql:
+        cells: ["lib:a_scale_seven_time_is_nanoseconds_and_keeps_its_100ns_tick", mssql_batch_and_cdc_deliver_every_ledger_row_alike]
+      postgres:
+        na: "PostgreSQL time holds microseconds at most, so no digit is lost"
+      mysql:
+        na: "MySQL TIME holds microseconds at most, so no digit is lost"
+      oracle:
+        na: "Oracle has no TIME type; a time of day is a DATE or TIMESTAMP column"
+      mongo:
+        na: "BSON has no time-of-day type, so no MongoDB value is a TIME column"

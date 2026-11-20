@@ -920,6 +920,7 @@ mod tag {
     pub(super) const TIME_MICROS: u8 = 6;
     pub(super) const BYTES: u8 = 7;
     pub(super) const ARRAY: u8 = 8;
+    pub(super) const TIME_NANOS: u8 = 9;
 }
 
 fn put_len(out: &mut Vec<u8>, n: usize) {
@@ -1020,6 +1021,10 @@ fn put_value(out: &mut Vec<u8>, v: &RivetValue) {
             out.push(tag::TIME_MICROS);
             out.extend_from_slice(&us.to_be_bytes());
         }
+        RivetValue::TimeNanos(ns) => {
+            out.push(tag::TIME_NANOS);
+            out.extend_from_slice(&ns.to_be_bytes());
+        }
         RivetValue::Bytes(b) => {
             out.push(tag::BYTES);
             put_bytes(out, b);
@@ -1071,6 +1076,9 @@ fn get_value_at(c: &mut Cur<'_>, depth: u32) -> Result<RivetValue> {
         }
         tag::TIME_MICROS => {
             RivetValue::TimeMicros(i64::from_be_bytes(c.take(8)?.try_into().expect("8")))
+        }
+        tag::TIME_NANOS => {
+            RivetValue::TimeNanos(i64::from_be_bytes(c.take(8)?.try_into().expect("8")))
         }
         tag::BYTES => RivetValue::Bytes(c.bytes()?),
         tag::ARRAY => {
@@ -1367,6 +1375,7 @@ mod frame_tests {
                     .naive_utc(),
             ),
             RivetValue::TimeMicros(-1),
+            RivetValue::TimeNanos(86_399_999_999_900),
             RivetValue::Bytes(Vec::new()),
             RivetValue::Bytes(vec![0x00, 0xff, 0xc3, 0x28]),
             RivetValue::Array(Vec::new()),

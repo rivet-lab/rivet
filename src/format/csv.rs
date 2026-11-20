@@ -107,6 +107,7 @@ pub(crate) fn csv_serializable(dt: &DataType) -> bool {
             | DataType::FixedSizeBinary(16)
             | DataType::Date32
             | DataType::Time64(TimeUnit::Microsecond)
+            | DataType::Time64(TimeUnit::Nanosecond)
             | DataType::Timestamp(TimeUnit::Microsecond, _)
     )
 }
@@ -274,6 +275,24 @@ fn write_csv_value(writer: &mut dyn Write, array: &dyn Array, idx: usize) -> Res
                 frac_us
             )?;
         }
+        DataType::Time64(TimeUnit::Nanosecond) => {
+            let ns = array
+                .as_any()
+                .downcast_ref::<arrow::array::Time64NanosecondArray>()
+                .expect("DataType/Array mismatch")
+                .value(idx);
+            let abs = ns.unsigned_abs();
+            let secs = abs / 1_000_000_000;
+            write!(
+                writer,
+                "{}{:02}:{:02}:{:02}.{:09}",
+                if ns < 0 { "-" } else { "" },
+                secs / 3600,
+                (secs % 3600) / 60,
+                secs % 60,
+                abs % 1_000_000_000
+            )?;
+        }
         DataType::Timestamp(TimeUnit::Microsecond, tz) => {
             let arr = array
                 .as_any()
@@ -369,6 +388,21 @@ mod tests {
         let mut buf = Vec::new();
         write_csv_value(&mut buf, arr.as_ref(), 0).unwrap();
         String::from_utf8(buf).unwrap()
+    }
+
+    /// A nanosecond time of day (SQL Server `time(7)`) keeps its 100ns tick in CSV.
+    #[test]
+    fn time64_nanoseconds_render_nine_fraction_digits() {
+        use arrow::array::Time64NanosecondArray;
+        assert!(csv_serializable(&DataType::Time64(TimeUnit::Nanosecond)));
+        assert_eq!(
+            cell(Time64NanosecondArray::from(vec![86_399_999_999_900_i64]), 0),
+            "23:59:59.999999900"
+        );
+        assert_eq!(
+            cell(Time64NanosecondArray::from(vec![100_i64]), 0),
+            "00:00:00.000000100"
+        );
     }
 
     #[test]

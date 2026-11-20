@@ -302,31 +302,42 @@ pub(super) fn mssql_type_mappings(
             let native = format!("{:?}", col.column_type()).to_lowercase();
             let source = SourceColumn::simple(col.name(), native.clone(), true);
             let mapping = TypeMapping::from_source(&source, rivet);
-            Ok(if matches!(
-                mapping.rivet_type,
-                RivetType::Timestamp {
-                    unit: RivetTimeUnit::Nanosecond,
-                    ..
-                }
-            ) && !overrides.contains_key(col.name())
-            {
-                mapping.with_warning(FINE_TIMESTAMP_WARNING)
-            } else if native == "datetime2" && !overrides.contains_key(col.name()) {
-                mapping.with_warning(
+            Ok(
+                if matches!(
+                    mapping.rivet_type,
+                    RivetType::Timestamp {
+                        unit: RivetTimeUnit::Nanosecond,
+                        ..
+                    }
+                ) && !overrides.contains_key(col.name())
+                {
+                    mapping.with_warning(FINE_TIMESTAMP_WARNING)
+                } else if native == "datetime2" && !overrides.contains_key(col.name()) {
+                    mapping.with_warning(
                     "datetime2 → Timestamp(microsecond): the column's declared scale could not be \
                      read from the catalog (a query that is not a single-table SELECT), so a \
                      scale-7 column would lose its 100ns tick. Declare it `timestamp_ns` in \
                      `columns:` to keep it; datetime2(0..6) is exact.",
                 )
-            } else if native == "timen" {
-                mapping.with_warning(
-                    "time → Time64(microsecond): a scale-7 column (the bare `time` default, and \
-                     time(4..7)) loses its 100ns sub-microsecond tick — Parquet Time64 has no \
-                     100ns unit, so the tick is unrepresentable in the target. time(0..3) is exact.",
-                )
-            } else {
-                mapping
-            })
+                } else if native == "timen"
+                    && !overrides.contains_key(col.name())
+                    && !matches!(
+                        mapping.rivet_type,
+                        RivetType::Time {
+                            unit: RivetTimeUnit::Nanosecond
+                        }
+                    )
+                {
+                    mapping.with_warning(
+                        "time → Time64(microsecond): the column's declared scale could not be read \
+                     from the catalog (a query that is not a single-table SELECT), so a scale-7 \
+                     column (the bare `time` default) is read from its first value's scale; \
+                     time(0..6) is exact.",
+                    )
+                } else {
+                    mapping
+                },
+            )
         })
         .collect()
 }
@@ -336,6 +347,8 @@ pub(super) fn mssql_type_mappings(
 pub(super) struct CatalogHints {
     pub decimals: HashMap<String, (u8, i8)>,
     pub fine_timestamps: HashSet<String>,
+    /// The `time` columns declared finer than a microsecond (the bare `time` is scale 7).
+    pub fine_times: HashSet<String>,
 }
 
 /// The warning on a sub-microsecond timestamp column delivered as `Timestamp(ns)`.
@@ -365,6 +378,15 @@ fn resolve_catalog_type(
                 |scale| scale > 6
             )
     );
+    let finer_time = seeded!(
+        "mssql-time7-lands-at-microseconds",
+        false,
+        rows.and_then(|(idx, rows)| first_time_scale(idx, rows))
+            .map_or_else(
+                || hints.is_some_and(|h| h.fine_times.contains(col_name)),
+                |scale| scale > 6
+            )
+    );
     match rivet {
         RivetType::Timestamp {
             unit: RivetTimeUnit::Microsecond,
@@ -373,8 +395,21 @@ fn resolve_catalog_type(
             unit: RivetTimeUnit::Nanosecond,
             timezone,
         },
+        RivetType::Time {
+            unit: RivetTimeUnit::Microsecond,
+        } if finer_time && !overrides.contains_key(col_name) => RivetType::Time {
+            unit: RivetTimeUnit::Nanosecond,
+        },
         other => other,
     }
+}
+
+/// The scale of the first non-null `time` value of column `idx` (every value of a column shares it).
+fn first_time_scale(idx: usize, rows: &[Row]) -> Option<u8> {
+    rows.iter().find_map(|row| match cell(row, idx)? {
+        ColumnData::Time(Some(t)) => Some(t.scale()),
+        _ => None,
+    })
 }
 
 /// The scale of the first non-null `datetime2` / `datetimeoffset` value of column `idx` (every value of a column shares it).
@@ -694,6 +729,28 @@ fn build_array(
                 Some(tz) => Arc::new(arr.with_timezone(tz.clone())),
                 None => Arc::new(arr),
             });
+        }
+        DataType::Time64(TimeUnit::Nanosecond) => {
+            let mut b = arrow::array::Time64NanosecondBuilder::with_capacity(rows.len());
+            for row in rows {
+                match row.try_get::<chrono::NaiveTime, _>(idx) {
+                    Ok(Some(t)) => b.append_value(
+                        t.num_seconds_from_midnight() as i64 * 1_000_000_000
+                            + t.nanosecond() as i64,
+                    ),
+                    Ok(None) => b.append_null(),
+                    Err(e) => {
+                        return Err(cell_mismatch(
+                            declared,
+                            column,
+                            target,
+                            cell(row, idx),
+                            &e.to_string(),
+                        ));
+                    }
+                }
+            }
+            Arc::new(b.finish())
         }
         DataType::Time64(TimeUnit::Microsecond) => {
             use arrow::array::Time64MicrosecondBuilder;
@@ -1402,6 +1459,7 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            fine_times: HashSet::new(),
         };
         let none = ColumnOverrides::new();
         let resolve = |rivet, name, overrides: &ColumnOverrides| {
@@ -1437,6 +1495,78 @@ mod tests {
         );
     }
 
+    /// A `time(7)` (the bare `time` default) is read at nanoseconds and keeps its 100ns tick; `time(0..6)` stays microseconds; the first value's own scale decides over the catalog, and an all-NULL column follows the catalog.
+    #[test]
+    fn a_scale_seven_time_is_nanoseconds_and_keeps_its_100ns_tick() {
+        use tiberius::time::Time;
+        let one = |scale: u8, increments: u64| {
+            vec![
+                Row::builder()
+                    .column(
+                        "t",
+                        ColumnType::Timen,
+                        ColumnData::Time(Some(Time::new(increments, scale))),
+                    )
+                    .build(),
+            ]
+        };
+        let us = RivetType::Time {
+            unit: RivetTimeUnit::Microsecond,
+        };
+        let ns = RivetType::Time {
+            unit: RivetTimeUnit::Nanosecond,
+        };
+        let none = ColumnOverrides::new();
+        let fine = CatalogHints {
+            fine_times: ["t".to_string()].into_iter().collect(),
+            ..CatalogHints::default()
+        };
+        let resolve = |hints: Option<&CatalogHints>, rows: &[Row]| {
+            resolve_catalog_type(us.clone(), "t", &none, hints, Some((0, rows)))
+        };
+        assert_eq!(resolve(None, &one(7, 1)), ns, "a value's scale 7");
+        assert_eq!(
+            resolve(None, &one(6, 1)),
+            us,
+            "time(6) is exact at microseconds"
+        );
+        assert_eq!(
+            resolve(Some(&fine), &one(3, 1)),
+            us,
+            "the value's scale over the catalog"
+        );
+        let nulls = vec![
+            Row::builder()
+                .column("t", ColumnType::Timen, ColumnData::Time(None))
+                .build(),
+        ];
+        assert_eq!(resolve(Some(&fine), &nulls), ns, "all null: the catalog");
+        assert_eq!(resolve(None, &nulls), us);
+        let forced: ColumnOverrides = [("t".to_string(), us.clone())].into_iter().collect();
+        assert_eq!(
+            resolve_catalog_type(us.clone(), "t", &forced, Some(&fine), Some((0, &one(7, 1)))),
+            us,
+            "an override is the operator's word"
+        );
+        // 00:00:00.0000001 and 23:59:59.9999999 at scale 7 keep their last digit.
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "t",
+            DataType::Time64(TimeUnit::Nanosecond),
+            true,
+        )]));
+        for (increments, want) in [(1u64, 100i64), (863_999_999_999, 86_399_999_999_900)] {
+            let rows = one(7, increments);
+            let batch =
+                mssql_rows_to_record_batch(&schema, &rows, None, &ColumnOverrides::new()).unwrap();
+            let col = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Time64NanosecondArray>()
+                .unwrap();
+            assert_eq!(col.value(0), want, "{increments}");
+        }
+    }
+
     /// The first non-null datetime2 / datetimeoffset value's own scale decides the type over the catalog; with no such value the catalog decides.
     #[test]
     fn a_fine_timestamp_is_read_from_the_first_values_own_scale() {
@@ -1470,10 +1600,12 @@ mod tests {
         let catalog_fine = CatalogHints {
             decimals: HashMap::new(),
             fine_timestamps: ["t".to_string()].into_iter().collect(),
+            fine_times: HashSet::new(),
         };
         let catalog_empty = CatalogHints {
             decimals: HashMap::new(),
             fine_timestamps: HashSet::new(),
+            fine_times: HashSet::new(),
         };
         let resolve = |hints: Option<&CatalogHints>, rows: &[Row]| {
             resolve_catalog_type(us.clone(), "t", &none, hints, Some((0, rows)))

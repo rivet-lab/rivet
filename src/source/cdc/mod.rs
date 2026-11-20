@@ -1559,7 +1559,7 @@ mod mod_decisions {
         }
 
         let ns = RivetType::Time {
-            unit: TimeUnit::Nanosecond,
+            unit: TimeUnit::Millisecond,
         };
         let err = plan_cdc_delivery(col("time", ns), true).unwrap_err();
         assert_eq!(
@@ -1594,7 +1594,7 @@ mod mod_decisions {
             &RivetType::String,
         ));
         let ns = RivetType::Time {
-            unit: TimeUnit::Nanosecond,
+            unit: TimeUnit::Millisecond,
         };
         let err = retype_for_stream(time(), &declared(ns)).unwrap_err();
         assert_eq!(
