@@ -6,8 +6,8 @@ use arrow::array::{
     ArrayRef, BinaryBuilder, BooleanBuilder, Date32Builder, Decimal128Builder,
     FixedSizeBinaryBuilder, Float32Builder, Float64Builder, Int8Builder, Int16Builder,
     Int32Builder, Int64Builder, LargeBinaryBuilder, LargeStringBuilder, StringBuilder,
-    Time64MicrosecondBuilder, TimestampMicrosecondBuilder, TimestampNanosecondBuilder,
-    UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
+    Time64MicrosecondBuilder, Time64NanosecondBuilder, TimestampMicrosecondBuilder,
+    TimestampNanosecondBuilder, UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
 };
 use arrow::datatypes::{DataType, TimeUnit};
 use chrono::{NaiveDate, NaiveDateTime};
@@ -32,6 +32,8 @@ pub(crate) enum RivetValue {
     DateTime(NaiveDateTime),
     /// Microseconds since midnight (`TIME`).
     TimeMicros(i64),
+    /// Nanoseconds since midnight (a SQL Server `time` of scale 7, whose 100ns tick a microsecond would drop).
+    TimeNanos(i64),
     /// Raw source bytes — `Utf8` text, `Binary`, or a `Decimal` string, decided by the target Arrow type at build time.
     Bytes(Vec<u8>),
     /// A one-dimensional array (PG `text[]`/`integer[]`/…).
@@ -77,7 +79,8 @@ impl RivetValue {
             RivetValue::Int(_)
             | RivetValue::UInt(_)
             | RivetValue::Float(_)
-            | RivetValue::TimeMicros(_) => 8,
+            | RivetValue::TimeMicros(_)
+            | RivetValue::TimeNanos(_) => 8,
             RivetValue::DateTime(_) => 12,
             RivetValue::Bytes(b) => b.len(),
             RivetValue::Array(v) => v.iter().map(RivetValue::payload_bytes).sum::<usize>(),
@@ -90,7 +93,8 @@ impl RivetValue {
             RivetValue::Int(_)
             | RivetValue::UInt(_)
             | RivetValue::Float(_)
-            | RivetValue::TimeMicros(_) => 8,
+            | RivetValue::TimeMicros(_)
+            | RivetValue::TimeNanos(_) => 8,
             RivetValue::DateTime(_) => 12,
             RivetValue::Bytes(b) => b.capacity(),
             RivetValue::Array(v) => {
@@ -110,6 +114,7 @@ impl RivetValue {
             RivetValue::Float(f) => Json::from(*f),
             RivetValue::DateTime(dt) => Json::String(dt.to_string()),
             RivetValue::TimeMicros(us) => Json::from(*us),
+            RivetValue::TimeNanos(ns) => Json::from(*ns),
             RivetValue::Bytes(b) => Json::String(bytes_to_recoverable_string(b)),
             RivetValue::Array(v) => Json::Array(v.iter().map(RivetValue::to_json).collect()),
         }
@@ -150,6 +155,7 @@ pub(crate) fn is_buildable(dt: &DataType) -> bool {
             | DataType::Float64
             | DataType::Date32
             | DataType::Time64(TimeUnit::Microsecond)
+            | DataType::Time64(TimeUnit::Nanosecond)
             | DataType::Decimal128(_, _)
             | DataType::Decimal256(_, _)
             | DataType::Utf8
@@ -354,8 +360,43 @@ fn time_value(v: &RivetValue) -> Result<i64, String> {
         RivetValue::TimeMicros(_) => {
             Err("is outside 00:00..24:00, which a Parquet TIME cannot hold".into())
         }
+        RivetValue::TimeNanos(ns) if ns % 1_000 == 0 => {
+            time_value(&RivetValue::TimeMicros(ns / 1_000))
+        }
+        RivetValue::TimeNanos(_) => Err(
+            "has a 100ns digit, which a microsecond TIME column would drop; the column is read \
+             at nanoseconds when the catalog shows its scale above 6"
+                .into(),
+        ),
         _ => Err(NO_READING.into()),
     }
+}
+
+/// Nanoseconds since midnight of a `TIME` cell, for a `Time64(ns)` column.
+fn time_nanos_value(v: &RivetValue) -> Result<i64, String> {
+    match v {
+        RivetValue::TimeNanos(ns) if (0..crate::types::MICROS_PER_DAY * 1_000).contains(ns) => {
+            Ok(*ns)
+        }
+        RivetValue::TimeNanos(_) => {
+            Err("is outside 00:00..24:00, which a Parquet TIME cannot hold".into())
+        }
+        RivetValue::TimeMicros(_) => time_value(v).map(|us| us * 1_000),
+        _ => Err(NO_READING.into()),
+    }
+}
+
+/// `HH:MM:SS.fffffffff` for nanoseconds since midnight.
+fn time_of_day_nanos(ns: i64) -> String {
+    let abs = ns.unsigned_abs();
+    format!(
+        "{}{:02}:{:02}:{:02}.{:09}",
+        if ns < 0 { "-" } else { "" },
+        abs / 3_600_000_000_000,
+        abs / 60_000_000_000 % 60,
+        abs / 1_000_000_000 % 60,
+        abs % 1_000_000_000
+    )
 }
 
 /// Why a decimal cell is refused.
@@ -442,6 +483,10 @@ pub(crate) fn build_column(
         DataType::Time64(TimeUnit::Microsecond) => Arc::new(typed_col!(
             Time64MicrosecondBuilder::with_capacity(n),
             time_value
+        )),
+        DataType::Time64(TimeUnit::Nanosecond) => Arc::new(typed_col!(
+            Time64NanosecondBuilder::with_capacity(n),
+            time_nanos_value
         )),
         DataType::Decimal128(p, s) => Arc::new(typed_col!(
             Decimal128Builder::with_capacity(n).with_data_type(DataType::Decimal128(*p, *s)),
@@ -1182,6 +1227,7 @@ fn render_str(v: &RivetValue) -> String {
         RivetValue::Float(f) => f.to_string(),
         RivetValue::DateTime(dt) => dt.to_string(),
         RivetValue::TimeMicros(us) => crate::types::time_beyond_day(*us),
+        RivetValue::TimeNanos(ns) => time_of_day_nanos(*ns),
         RivetValue::Bytes(b) => bytes_to_recoverable_string(b),
         RivetValue::Array(v) => {
             let inner: Vec<String> = v.iter().map(render_str).collect();
@@ -1193,6 +1239,30 @@ fn render_str(v: &RivetValue) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A SQL Server time(7) arrives as nanoseconds: a Time64(ns) column keeps the 100ns tick, a microsecond column takes a value with no such digit and refuses one that has it, never truncating.
+    #[test]
+    fn a_nanosecond_time_keeps_its_tick_and_never_truncates_into_microseconds() {
+        use arrow::array::{Array, Time64MicrosecondArray, Time64NanosecondArray};
+        let tick = RivetValue::TimeNanos(86_399_999_999_900);
+        let ns = build_column(
+            &DataType::Time64(TimeUnit::Nanosecond),
+            &[Some(&tick), None],
+        )
+        .unwrap();
+        let ns = ns.as_any().downcast_ref::<Time64NanosecondArray>().unwrap();
+        assert_eq!((ns.value(0), ns.is_null(1)), (86_399_999_999_900, true));
+        let whole = RivetValue::TimeNanos(3_723_456_789_000);
+        let us = build_column(&DataType::Time64(TimeUnit::Microsecond), &[Some(&whole)]).unwrap();
+        let us = us
+            .as_any()
+            .downcast_ref::<Time64MicrosecondArray>()
+            .unwrap();
+        assert_eq!(us.value(0), 3_723_456_789);
+        assert!(build_column(&DataType::Time64(TimeUnit::Microsecond), &[Some(&tick)]).is_err());
+        assert!(is_buildable(&DataType::Time64(TimeUnit::Nanosecond)));
+        assert_eq!(render_str(&tick), "23:59:59.999999900");
+    }
 
     /// `build_column` with the sink's refusal wording for a non-overridden column `col`.
     fn build(col: &str, dt: &DataType, cells: &[Option<&RivetValue>]) -> anyhow::Result<ArrayRef> {

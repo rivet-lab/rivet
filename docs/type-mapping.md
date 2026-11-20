@@ -338,7 +338,8 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `real` | `float32` | `Float32` | float text | | live matrix |
 | `float` | `float64` | `Float64` | float text | | live matrix |
 | `date` | `date` | `Date32` | ISO date | | live matrix |
-| `time` | `time(µs)` | `Time64(µs)` | time text | µs precision | live matrix |
+| `time(0..6)` | `time(µs)` | `Time64(µs)` | time text | µs precision | live matrix |
+| `time(7)` (the bare `time`) | `time(ns)` | `Time64(ns)` | time text | the 100 ns tick is kept; ClickHouse `Decimal(18, 9)`, BigQuery INT64 nanoseconds of day, Snowflake NUMBER recovered with `TIME_FROM_PARTS` | live matrix |
 | `datetime2(0..6)` / `datetime` / `smalldatetime` | `timestamp(µs, none)` | `Timestamp(µs, None)` | datetime text | naive; µs, full range | live matrix |
 | `datetime2(7)` | `timestamp(ns, none)` | `Timestamp(ns, None)` | datetime text | naive; the 100 ns tick is kept, 1677-09-21..2262-04-11 (a value outside it is refused); declare `timestamp` for µs over the full range, see known gap 4 | live matrix |
 | `datetimeoffset(0..6)` | `timestamp_tz(µs, UTC)` | `Timestamp(µs, UTC)` | datetime text | normalised to UTC | type_roundtrip |
