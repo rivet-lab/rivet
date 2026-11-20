@@ -20,6 +20,7 @@ use crate::error::Result;
 use crate::source::pg_numeric_wire::{
     PgNumericWire, numeric_wire_normalized_plain, numeric_wire_special_text,
 };
+use crate::types::kind::CommonKind;
 use crate::types::{
     ColumnOverrides, RivetType, SourceColumn, TimeUnit as RivetTimeUnit, TypeMapping,
     build_arrow_field,
@@ -251,45 +252,49 @@ fn numeric_raw_to_optional_decimal_text(raw: &[u8]) -> Option<String> {
         })
 }
 
+/// The common kind a PostgreSQL wire type is read as, or `None` for a type this engine alone carries.
+fn pg_common_kind(t: &Type) -> Option<CommonKind> {
+    Some(match *t {
+        Type::BOOL => CommonKind::Bool,
+        Type::INT2 => CommonKind::I16,
+        Type::INT4 => CommonKind::I32,
+        Type::INT8 => CommonKind::I64,
+        Type::FLOAT4 => CommonKind::F32,
+        Type::FLOAT8 => CommonKind::F64,
+        Type::NUMERIC => CommonKind::Dec,
+        Type::DATE => CommonKind::Date,
+        Type::TIMESTAMP => CommonKind::Naive,
+        Type::TIMESTAMPTZ => CommonKind::Utc,
+        Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME => CommonKind::Text,
+        Type::BYTEA => CommonKind::Binary,
+        Type::JSON | Type::JSONB => CommonKind::Json,
+        _ => return None,
+    })
+}
+
+/// The type of a `numeric` column whose precision and scale the wire does not carry.
+fn bare_numeric() -> RivetType {
+    RivetType::Unsupported {
+        native_type: "numeric".into(),
+        reason: "precision/scale unavailable from query metadata and catalog lookup; \
+                 use a column override (e.g. columns: amount: decimal(18,2)), \
+                 or a single-table SELECT ... FROM schema.table \
+                 when the DDL declares numeric precision."
+            .into(),
+    }
+}
+
 /// Map a PostgreSQL wire-protocol type to Rivet's canonical type.
 fn pg_type_to_rivet(t: &Type) -> RivetType {
+    if let Some(kind) = pg_common_kind(t) {
+        return kind.rivet_type().unwrap_or_else(bare_numeric);
+    }
     match *t {
-        Type::BOOL => RivetType::Bool,
-        Type::INT2 => RivetType::Int16,
-        Type::INT4 => RivetType::Int32,
-        Type::INT8 => RivetType::Int64,
         Type::OID => RivetType::Int64,
-        Type::FLOAT4 => RivetType::Float32,
-        Type::FLOAT8 => RivetType::Float64,
-
-        Type::NUMERIC => RivetType::Unsupported {
-            native_type: "numeric".into(),
-            reason: "precision/scale unavailable from query metadata and catalog lookup; \
-                     use a column override (e.g. columns: amount: decimal(18,2)), \
-                     or a single-table SELECT ... FROM schema.table \
-                     when the DDL declares numeric precision."
-                .into(),
-        },
-
-        Type::DATE => RivetType::Date,
         Type::TIME => RivetType::Time {
             unit: RivetTimeUnit::Microsecond,
         },
-        Type::TIMESTAMP => RivetType::Timestamp {
-            unit: RivetTimeUnit::Microsecond,
-            timezone: None,
-        },
-        Type::TIMESTAMPTZ => RivetType::Timestamp {
-            unit: RivetTimeUnit::Microsecond,
-            timezone: Some("UTC".into()),
-        },
-
-        Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME => RivetType::String,
-        Type::BYTEA => RivetType::Binary,
-
-        Type::JSON | Type::JSONB => RivetType::Json,
         Type::UUID => RivetType::Uuid,
-
         Type::INTERVAL => RivetType::Interval,
 
         _ => match t.kind() {
@@ -305,6 +310,20 @@ fn pg_type_to_rivet(t: &Type) -> RivetType {
     }
 }
 
+/// The type of column `name` read as wire type `t`; a `numeric` takes its catalog hint when it has one.
+fn pg_column_rivet_type(
+    t: &Type,
+    name: &str,
+    numeric_hints: Option<&HashMap<String, (u8, i8)>>,
+) -> RivetType {
+    if pg_common_kind(t) == Some(CommonKind::Dec)
+        && let Some(&(precision, scale)) = numeric_hints.and_then(|h| h.get(name))
+    {
+        return RivetType::Decimal { precision, scale };
+    }
+    pg_type_to_rivet(t)
+}
+
 /// Apply per-column overrides + numeric catalog hints on top of the wire-type derived RivetType.
 pub(super) fn rivet_type_for_pg_column(
     col: &postgres::Column,
@@ -316,17 +335,7 @@ pub(super) fn rivet_type_for_pg_column(
         column_overrides,
         col.name(),
         col.type_().name(),
-        || {
-            if *col.type_() == Type::NUMERIC
-                && let Some(&(p, s)) = numeric_hints.and_then(|h| h.get(col.name()))
-            {
-                return RivetType::Decimal {
-                    precision: p,
-                    scale: s,
-                };
-            }
-            pg_type_to_rivet(col.type_())
-        },
+        || pg_column_rivet_type(col.type_(), col.name(), numeric_hints),
     )
 }
 
@@ -1397,7 +1406,7 @@ mod temporal_refusal_tests {
         let panicking: Vec<&str> = product
             .lines()
             .filter(|l| l.contains(".get(") || l.contains(".get::<"))
-            .filter(|l| !l.contains("columns().get(") && !l.contains("h.get(col.name())"))
+            .filter(|l| !l.contains("columns().get(") && !l.contains("h.get(name)"))
             .collect();
         assert!(
             panicking.is_empty(),
@@ -1430,9 +1439,11 @@ mod type_table;
 
 #[cfg(test)]
 mod type_map_tests {
-    use super::pg_type_to_rivet;
+    use super::{bare_numeric, pg_column_rivet_type, pg_common_kind, pg_type_to_rivet};
+    use crate::types::kind::CommonKind;
     use crate::types::{RivetType, TimeUnit as RivetTimeUnit};
     use postgres::types::Type;
+    use std::collections::HashMap;
 
     /// Every arm of `pg_type_to_rivet`, in one table.
     #[test]
@@ -1470,6 +1481,68 @@ mod type_map_tests {
                  arm falls through to Unsupported and silently changes the schema"
             );
         }
+    }
+
+    /// Every wire type the table reads as a common kind, and the engine-only ones it leaves out.
+    #[test]
+    fn the_common_wire_types_read_as_their_common_kind_and_the_rest_as_none() {
+        use crate::types::kind::CommonKind::*;
+        let cases: &[(Type, Option<CommonKind>)] = &[
+            (Type::BOOL, Some(Bool)),
+            (Type::INT2, Some(I16)),
+            (Type::INT4, Some(I32)),
+            (Type::INT8, Some(I64)),
+            (Type::FLOAT4, Some(F32)),
+            (Type::FLOAT8, Some(F64)),
+            (Type::NUMERIC, Some(Dec)),
+            (Type::DATE, Some(Date)),
+            (Type::TIMESTAMP, Some(Naive)),
+            (Type::TIMESTAMPTZ, Some(Utc)),
+            (Type::TEXT, Some(Text)),
+            (Type::VARCHAR, Some(Text)),
+            (Type::BPCHAR, Some(Text)),
+            (Type::NAME, Some(Text)),
+            (Type::BYTEA, Some(Binary)),
+            (Type::JSON, Some(Json)),
+            (Type::JSONB, Some(Json)),
+            (Type::OID, None),
+            (Type::TIME, None),
+            (Type::UUID, None),
+            (Type::INTERVAL, None),
+            (Type::INT4_ARRAY, None),
+            (Type::MONEY, None),
+        ];
+        for (pg, want) in cases {
+            assert_eq!(&pg_common_kind(pg), want, "{pg:?}");
+        }
+    }
+
+    /// A catalog hint types a `numeric` column of that name and nothing else.
+    #[test]
+    fn a_numeric_hint_types_only_the_numeric_column_it_names() {
+        let hints = HashMap::from([("amount".to_string(), (18u8, 2i8))]);
+        let decimal = RivetType::Decimal {
+            precision: 18,
+            scale: 2,
+        };
+        assert_eq!(
+            pg_column_rivet_type(&Type::NUMERIC, "amount", Some(&hints)),
+            decimal
+        );
+        for (t, name, hints) in [
+            (&Type::NUMERIC, "other", Some(&hints)),
+            (&Type::NUMERIC, "amount", None),
+        ] {
+            assert_eq!(pg_column_rivet_type(t, name, hints), bare_numeric());
+        }
+        assert_eq!(
+            pg_column_rivet_type(&Type::INT8, "amount", Some(&hints)),
+            RivetType::Int64
+        );
+        assert_eq!(
+            pg_column_rivet_type(&Type::FLOAT8, "amount", Some(&hints)),
+            RivetType::Float64
+        );
     }
 
     /// The two timestamp arms differ ONLY in the timezone field, which is the whole point (roadmap §13.

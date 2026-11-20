@@ -49,6 +49,31 @@ impl CommonKind {
             | RivetType::Unsupported { .. } => return None,
         })
     }
+
+    /// The one type a kind is delivered as; `None` for `Dec`, whose precision and scale the source must supply.
+    pub(crate) fn rivet_type(self) -> Option<RivetType> {
+        Some(match self {
+            Self::Bool => RivetType::Bool,
+            Self::I16 => RivetType::Int16,
+            Self::I32 => RivetType::Int32,
+            Self::I64 => RivetType::Int64,
+            Self::F32 => RivetType::Float32,
+            Self::F64 => RivetType::Float64,
+            Self::Dec => return None,
+            Self::Date => RivetType::Date,
+            Self::Naive => RivetType::Timestamp {
+                unit: TimeUnit::Microsecond,
+                timezone: None,
+            },
+            Self::Utc => RivetType::Timestamp {
+                unit: TimeUnit::Microsecond,
+                timezone: Some("UTC".into()),
+            },
+            Self::Text => RivetType::String,
+            Self::Binary => RivetType::Binary,
+            Self::Json => RivetType::Json,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -110,6 +135,33 @@ mod tests {
         ];
         for (t, want) in cases {
             assert_eq!(CommonKind::of(&t), want, "{t:?}");
+        }
+    }
+
+    #[test]
+    fn every_kind_is_delivered_as_one_type_that_classifies_back_to_it() {
+        use CommonKind::*;
+        let cases = [
+            (Bool, Some(RivetType::Bool)),
+            (I16, Some(RivetType::Int16)),
+            (I32, Some(RivetType::Int32)),
+            (I64, Some(RivetType::Int64)),
+            (F32, Some(RivetType::Float32)),
+            (F64, Some(RivetType::Float64)),
+            (Dec, None),
+            (Date, Some(RivetType::Date)),
+            (Naive, Some(ts(TimeUnit::Microsecond, false))),
+            (Utc, Some(ts(TimeUnit::Microsecond, true))),
+            (Text, Some(RivetType::String)),
+            (Binary, Some(RivetType::Binary)),
+            (Json, Some(RivetType::Json)),
+        ];
+        for (kind, want) in cases {
+            let got = kind.rivet_type();
+            assert_eq!(got, want, "{kind:?}");
+            if let Some(t) = got {
+                assert_eq!(CommonKind::of(&t), Some(kind), "{kind:?}");
+            }
         }
     }
 }
