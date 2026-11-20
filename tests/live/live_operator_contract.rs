@@ -3519,7 +3519,12 @@ fn worker_refusal_fixture(
     match e {
         SqlEngine::Pg => ("TIMESTAMP", "'2024-01-01 00:00:00'", "'infinity'", ""),
         SqlEngine::Mysql => ("BIGINT", "1", "9007199254740993", "columns: { t: float8 }"),
-        SqlEngine::Mssql => ("MONEY", "1.00", "900000000000000.00", ""),
+        SqlEngine::Mssql => (
+            "DATETIME2(7)",
+            "'2024-01-01 00:00:00'",
+            "'1600-01-01'",
+            "columns: { t: timestamp_ns }",
+        ),
         #[cfg(feature = "oracle")]
         SqlEngine::Oracle => (
             "NUMBER(10, 4)",
@@ -3826,27 +3831,6 @@ fn a_hex_enum_label_in_a_stream_is_delivered_from_the_table_map_mysql() {
     assert!(
         labels.iter().any(|l| l == "\u{1F680}"),
         "the hex ENUM label is delivered from the table map, got {labels:?}"
-    );
-}
-
-/// SQL Server: a `MONEY` past the f64-exact range (1e12, which tiberius delivers rounded) is refused as `RIVET_SOURCE_CDC_CELL_UNSUPPORTED` (exit 5) on every run; the checkpoint deleted alone is refused under the baseline; the column dropped at the source and the re-baseline recipe deliver the source.
-#[test]
-#[ignore = "live: requires docker compose mssql (CDC)"]
-fn a_cell_the_stream_cannot_carry_is_refused_by_code_mssql() {
-    let _serial = cross_process_serial("mssql_cdc");
-    let s = CdcScenario::mssql_with(
-        "oc_money",
-        "id BIGINT PRIMARY KEY, v BIGINT, m MONEY",
-        |r, _| r.cdc("initial: snapshot"),
-    );
-    let table = s.table.clone();
-    let hostile = format!("INSERT INTO dbo.{table} VALUES (3, 3, 1000000000000.0)");
-    a_captured_cell_is_refused_by_code_and_walked_out(
-        s,
-        &hostile,
-        Refused::by_code("RIVET_SOURCE_CDC_CELL_UNSUPPORTED", 5),
-        vec![],
-        move || mssql_cdc_exec(&format!("ALTER TABLE dbo.{table} DROP COLUMN m")),
     );
 }
 
