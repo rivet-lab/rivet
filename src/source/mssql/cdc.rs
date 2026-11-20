@@ -20,18 +20,24 @@ use crate::types::hex_bytes;
 
 /// The query for the captured vs expected column count of the capture instance rivet reads, as `name:got/all`; `all` is the table's column count, or the readable count under `columns_from: grants`.
 fn row_image_sql(capture_instance: &str, readable: Option<usize>) -> String {
-    let all = match readable {
-        Some(n) => n.to_string(),
-        None => "(SELECT COUNT(*) FROM sys.columns sc WHERE sc.object_id = t.object_id)".into(),
+    let (got, all) = match readable {
+        Some(n) => ("COUNT(cc.column_name)".to_string(), n.to_string()),
+        None => (
+            "(SELECT COUNT(*) FROM sys.columns sc WHERE sc.object_id = t.object_id AND EXISTS \
+             (SELECT 1 FROM cdc.captured_columns c2 WHERE c2.object_id = ct.object_id \
+              AND c2.column_name = sc.name))"
+                .to_string(),
+            "(SELECT COUNT(*) FROM sys.columns sc WHERE sc.object_id = t.object_id)".to_string(),
+        ),
     };
     format!(
-        "SELECT t.name + ':' + CAST(COUNT(cc.column_name) AS varchar(12)) + '/' + \
+        "SELECT t.name + ':' + CAST({got} AS varchar(12)) + '/' + \
                 CAST({all} AS varchar(12)) \
          FROM cdc.change_tables ct \
          JOIN sys.tables t ON t.object_id = ct.source_object_id \
          JOIN cdc.captured_columns cc ON cc.object_id = ct.object_id \
          WHERE ct.capture_instance = '{ci}' \
-         GROUP BY t.name, t.object_id",
+         GROUP BY t.name, t.object_id, ct.object_id",
         ci = capture_instance.replace('\'', "''"),
     )
 }
@@ -1489,7 +1495,7 @@ mod tests {
     fn the_row_image_query_names_the_capture_instance_and_escapes_it() {
         let sql = row_image_sql("dbo_orders", None);
         assert!(
-            sql.contains("WHERE ct.capture_instance = 'dbo_orders' GROUP BY t.name, t.object_id"),
+            sql.contains("WHERE ct.capture_instance = 'dbo_orders' GROUP BY t.name, t.object_id, ct.object_id"),
             "{sql}"
         );
         assert!(
@@ -1508,6 +1514,18 @@ mod tests {
         let grants = row_image_sql("ci", Some(2));
         assert!(grants.contains("'/' + CAST(2 AS varchar(12))"), "{grants}");
         assert!(!grants.contains("sys.columns"), "{grants}");
+    }
+
+    /// Without grants the numerator counts the table's columns the instance names, so an added column plus a dropped captured one is short.
+    #[test]
+    fn the_row_image_numerator_matches_columns_by_name() {
+        let sql = row_image_sql("ci", None);
+        assert!(
+            sql.contains("c2.column_name = sc.name"),
+            "the captured count must be matched by column name: {sql}"
+        );
+        let grants = row_image_sql("ci", Some(2));
+        assert!(grants.contains("COUNT(cc.column_name)"), "{grants}");
     }
 
     /// Under `columns_from: grants` a capture of exactly the readable columns is whole and any other count is partial.
