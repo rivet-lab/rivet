@@ -4320,10 +4320,7 @@ fn mssql_stdout_table(tag: &str, captured: Option<&str>) -> (String, String, Mss
         table: table.clone(),
         ci: ci.clone(),
     };
-    mssql_cdc_exec(
-        "IF NOT EXISTS(SELECT 1 FROM sys.databases WHERE name='rivet' AND is_cdc_enabled=1) \
-         EXEC sys.sp_cdc_enable_db;",
-    );
+    enable_cdc_db();
     let list = captured.map_or(String::new(), |c| format!(", @captured_column_list=N'{c}'"));
     mssql_cdc_exec(&format!(
         "EXEC sys.sp_cdc_enable_table @source_schema=N'dbo', @source_name=N'{table}', \

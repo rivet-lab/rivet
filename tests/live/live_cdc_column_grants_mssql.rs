@@ -21,6 +21,7 @@ impl GrantLogin {
     /// A login with `grant` on the table, the documented `cdc` schema read and the performance-state read `rivet check` probes.
     fn with(grant: &str) -> Self {
         let name = unique_name("cg_u");
+        enable_cdc_db();
         mssql_cdc_exec(&format!(
             "CREATE LOGIN [{name}] WITH PASSWORD = '{PW}', CHECK_POLICY = OFF; \
              CREATE USER [{name}] FOR LOGIN [{name}]; \
@@ -70,10 +71,7 @@ fn seeded_table(label: &str) -> String {
 
 /// Capture instance `ci` of `dbo.table` over `columns` (`None`: every column), with no gating role.
 fn capture(table: &str, ci: &str, columns: Option<&str>) {
-    mssql_cdc_exec(
-        "IF NOT EXISTS(SELECT 1 FROM sys.databases WHERE name='rivet' AND is_cdc_enabled=1) \
-         EXEC sys.sp_cdc_enable_db;",
-    );
+    enable_cdc_db();
     let list = columns
         .map(|c| format!(", @captured_column_list = N'{c}'"))
         .unwrap_or_default();
