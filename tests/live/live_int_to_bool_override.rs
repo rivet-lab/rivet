@@ -82,23 +82,75 @@ fn an_integer_that_is_not_a_flag_is_refused_never_turned_into_true_mysql() {
     }
 }
 
-/// A `TINYINT(1)` flag read with no override keeps MySQL's own rule: any non-zero value is true.
+fn mysql_flag_rig(table: &str) -> Rig {
+    readback_only(Rig::mysql_batch(table))
+}
+
+/// A `TINYINT(1)` and a `BIT(1)` holding 0, 1 and NULL are delivered as false, true and NULL with no override.
 #[test]
 #[ignore = "live: requires docker compose mysql"]
-fn a_tinyint_one_without_an_override_keeps_the_non_zero_is_true_rule_mysql() {
+fn a_flag_column_holding_zero_one_and_null_is_delivered_as_a_flag_mysql() {
     require_alive(LiveService::Mysql);
-    let (table, _guard) = mysql_table("TINYINT(1)", &["0", "1", "2", "-1", "NULL"]);
-    let rig = readback_only(Rig::mysql_batch(&table));
+    for (ty, values) in [
+        ("TINYINT(1)", ["0", "1", "NULL"]),
+        ("TINYINT(1) UNSIGNED", ["0", "1", "NULL"]),
+        ("BIT(1)", ["b'0'", "b'1'", "NULL"]),
+    ] {
+        let (table, _guard) = mysql_table(ty, &values);
+        let rig = mysql_flag_rig(&table);
+        rig.run_ok();
+        assert_eq!(
+            dir_parquet_display(&rig.out_dir(), "i"),
+            vec![Some("false".into()), Some("true".into()), None],
+            "{ty}"
+        );
+    }
+}
+
+/// A `TINYINT(1)`, with or without the `bool` override, holding a value outside 0 and 1 is refused by code and nothing is written, never `true`.
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn a_flag_column_outside_zero_and_one_is_refused_never_turned_into_true_mysql() {
+    require_alive(LiveService::Mysql);
+    let cases: [(&str, &str, bool); 7] = [
+        ("TINYINT(1)", "2", false),
+        ("TINYINT(1)", "5", false),
+        ("TINYINT(1)", "-1", false),
+        ("TINYINT(1)", "127", false),
+        ("TINYINT(1)", "-128", false),
+        ("TINYINT(1)", "5", true),
+        ("TINYINT(1) UNSIGNED", "255", false),
+    ];
+    for (ty, value, overridden) in cases {
+        let (table, _guard) = mysql_table(ty, &["0", "1", value]);
+        let rig = if overridden {
+            mysql_rig(&table)
+        } else {
+            mysql_flag_rig(&table)
+        };
+        let out = rig.run();
+        assert_refused(&out, Refused::by_code(NOT_EXACT, 5));
+        assert_eq!(
+            files_with_extension(&rig.out_dir(), "parquet").len(),
+            0,
+            "{ty} holding {value}: nothing written"
+        );
+    }
+}
+
+/// The remedy the refusal names works: the same `TINYINT(1)` declared `int64` delivers the number.
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn a_refused_flag_column_is_delivered_as_the_number_when_declared_int64_mysql() {
+    require_alive(LiveService::Mysql);
+    let (table, _guard) = mysql_table("TINYINT(1)", &["0", "5", "-1"]);
+    let rig = readback_only(Rig::mysql_batch(&table)).export_line("columns: {i: int64}");
     rig.run_ok();
+    let mut got = dir_parquet_display(&rig.out_dir(), "i");
+    got.sort();
     assert_eq!(
-        dir_parquet_display(&rig.out_dir(), "i"),
-        vec![
-            Some("false".into()),
-            Some("true".into()),
-            Some("true".into()),
-            Some("true".into()),
-            None
-        ],
+        got,
+        vec![Some("-1".into()), Some("0".into()), Some("5".into())]
     );
 }
 
@@ -160,31 +212,90 @@ fn an_integer_that_is_not_a_flag_is_refused_in_cdc_never_turned_into_true_mysql(
     }
 }
 
-/// A `TINYINT(1)` flag in CDC with no override keeps MySQL's own rule: any non-zero value is true.
+/// A `TINYINT(1)` and a `BIT(1)` in CDC holding 0, 1 and NULL are delivered as false, true and NULL with no override.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
-fn a_tinyint_one_in_cdc_without_an_override_keeps_the_non_zero_is_true_rule_mysql() {
+fn a_flag_column_holding_zero_one_and_null_is_delivered_in_cdc_mysql() {
+    for (ty, values) in [
+        ("TINYINT(1)", "(1, 0), (2, 1), (3, NULL)"),
+        ("BIT(1)", "(1, b'0'), (2, b'1'), (3, NULL)"),
+    ] {
+        let mut sc = CdcScenario::mysql_with(
+            "ovb_cdc1",
+            &format!("id INT PRIMARY KEY, i {ty} NULL"),
+            |r, _| readback_only(r),
+        );
+        sc.rig.run_ok();
+        let t = sc.table.clone();
+        sc.sql(&format!("INSERT INTO {t} (id, i) VALUES {values}"));
+        sc.rig.run_ok();
+        let mut got = dir_parquet_display(&sc.rig.out_dir(), "i");
+        got.sort();
+        assert_eq!(
+            got,
+            vec![None, Some("false".into()), Some("true".into())],
+            "{ty} in CDC"
+        );
+    }
+}
+
+/// A `TINYINT(1)` in CDC, with or without the `bool` override, holding a value outside 0 and 1 is refused by code, never delivered as `true`.
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_flag_column_outside_zero_and_one_is_refused_in_cdc_never_turned_into_true_mysql() {
+    let cases: [(&str, &str, bool); 4] = [
+        ("TINYINT(1)", "2", false),
+        ("TINYINT(1)", "-1", false),
+        ("TINYINT(1)", "5", true),
+        ("TINYINT(1) UNSIGNED", "255", false),
+    ];
+    for (ty, value, overridden) in cases {
+        let mut sc = CdcScenario::mysql_with(
+            "ovb_cdc2",
+            &format!("id INT PRIMARY KEY, i {ty} NULL"),
+            |r, _| {
+                let r = readback_only(r);
+                if overridden {
+                    r.export_line("columns: {i: bool}")
+                } else {
+                    r
+                }
+            },
+        );
+        sc.rig.run_ok();
+        let t = sc.table.clone();
+        sc.sql(&format!(
+            "INSERT INTO {t} (id, i) VALUES (1, 0), (2, 1), (3, {value})"
+        ));
+        let out = sc.rig.run();
+        assert_refused(&out, Refused::by_code(NOT_EXACT, 5));
+        assert_eq!(
+            files_with_extension(&sc.rig.out_dir(), "parquet").len(),
+            0,
+            "{ty} holding {value}: nothing written"
+        );
+    }
+}
+
+/// The remedy the CDC refusal names works: the same `TINYINT(1)` declared `int64` delivers the number in a stream.
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_refused_flag_column_is_delivered_as_the_number_when_declared_int64_in_cdc_mysql() {
     let mut sc = CdcScenario::mysql_with(
-        "ovb_cdc1",
+        "ovb_cdc3",
         "id INT PRIMARY KEY, i TINYINT(1) NULL",
-        |r, _| readback_only(r),
+        |r, _| readback_only(r).export_line("columns: {i: int64}"),
     );
     sc.rig.run_ok();
     let t = sc.table.clone();
     sc.sql(&format!(
-        "INSERT INTO {t} (id, i) VALUES (1, 0), (2, 1), (3, 2), (4, -1), (5, NULL)"
+        "INSERT INTO {t} (id, i) VALUES (1, 0), (2, 5), (3, -1)"
     ));
     sc.rig.run_ok();
     let mut got = dir_parquet_display(&sc.rig.out_dir(), "i");
     got.sort();
     assert_eq!(
         got,
-        vec![
-            None,
-            Some("false".into()),
-            Some("true".into()),
-            Some("true".into()),
-            Some("true".into())
-        ],
+        vec![Some("-1".into()), Some("0".into()), Some("5".into())]
     );
 }

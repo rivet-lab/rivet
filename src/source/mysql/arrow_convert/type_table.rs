@@ -33,7 +33,7 @@ fn table() -> Vec<Case> {
         case(
             "tinyint(1)",
             of(MYSQL_TYPE_TINY, UTF8, 1, none, 0),
-            "bool | Boolean | native | exact | reads bool,int16,int32,int64,float32,float64,decimal(18,2),decimal(50,2),string,json # red:MYSQL_TINYINT_BOOL # under-change",
+            "bool | Boolean | native | exact | reads bool,int16,int32,int64,float32,float64,decimal(18,2),decimal(50,2),string,json",
         ),
         case(
             "tinyint",
