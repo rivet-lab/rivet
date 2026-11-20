@@ -6,7 +6,7 @@ must equal the source row for row with the deleted key flagged; a load killed
 after appending that re-runs without duplicating the view; a full load replacing
 the table; a full load killed at each of its fault points re-running to the source;
 a timestamp past DateTime64's range refused whether rivet sends the part or
-ClickHouse pulls it; an INSERT whose answer a proxy swallows resent into a CDC log
+ClickHouse pulls it, and a date past Date32's range refused or kept as text; an INSERT whose answer a proxy swallows resent into a CDC log
 (and not past five attempts) but never into a full load's swap table; an
 incremental export adopting the table behind a view; partitioned full, CDC and
 incremental loads (ADR-0035 CH8); and `rivet init`'s
@@ -39,6 +39,8 @@ CELLS = {
     "a_load_that_dies_after_adopting_the_table_resumes_into_the_log": "adopt-resume",
     "a_timestamp_clickhouse_cannot_hold_is_refused_not_clamped": "range-refused:push",
     "a_timestamp_clickhouse_cannot_hold_is_refused_when_pulled_too": "range-refused:pull",
+    "a_date_clickhouse_cannot_hold_is_refused_not_clamped": "range-refused:date",
+    "a_date_cast_to_text_in_the_query_keeps_the_value_clickhouse_cannot_hold": "range-refused:date-text",
     "a_lost_insert_answer_is_resent_and_the_cdc_view_still_matches_the_source": "retry:cdc",
     "a_cdc_insert_whose_every_answer_is_lost_fails_after_five_attempts": "retry:exhausted",
     "a_full_load_insert_whose_answer_is_lost_is_not_resent": "retry:full-not-resent",

@@ -89,7 +89,7 @@ fn table() -> Vec<Case> {
         case(
             "date",
             of(&Type::DATE),
-            "date | Date32 | native | exact | reads date # red:CH_DATE_CLAMP",
+            "date | Date32 | native | exact | reads date",
         ),
         case(
             "time",
