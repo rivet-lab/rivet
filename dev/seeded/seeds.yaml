@@ -6916,3 +6916,19 @@ seeds:
         na: "the seed edits the orchestrated pre-write check (refuse_parts_outside_ranges), which gives ClickHouse no ranges: its own loader reads its footers (checked_part_rows)"
       snowflake:
         na: "the seed edits the orchestrated pre-write check (refuse_parts_outside_ranges), which gives Snowflake no ranges: Snowflake holds every year and delivers it as a form"
+  - name: narrowing-override-reported-exact
+    class: "a `columns:` override that keeps fewer fraction digits than the source holds (timestamp over an Oracle TIMESTAMP(9) or a SQL Server datetime2(7)) truncates the finer digits while the type report calls the column exact, so the run exits 0 with fidelity exact over changed values"
+    history: "no_silent_null full tier WRONG_VALUE + INTEGRITY_BLIND (known_red 2026-11-11, oracle TIMESTAMP(9) -> timestamp / timestamp_tz, mssql DATETIME2 -> timestamp / timestamp_tz); fidelity was derived from the target type alone; owner decision 2026-11-20: a narrowing override is delivered and declared lossy"
+    scope: source
+    switch: narrowing-override-reported-exact
+    engines:
+      oracle:
+        cells: ["lib:a_time_type_coarser_than_its_source_is_lossy"]
+      mssql:
+        cells: ["lib:a_microsecond_override_over_a_scale_seven_column_is_reported_lossy"]
+      postgres:
+        na: "PostgreSQL timestamp, timestamptz and time hold microseconds at most, so no time override keeps fewer digits than the source"
+      mysql:
+        na: "MySQL datetime, timestamp and time hold microseconds at most, so no time override keeps fewer digits than the source"
+      mongo:
+        na: "a BSON date holds milliseconds and a Mongo export has no `columns:` time override over it, so nothing narrows"

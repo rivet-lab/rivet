@@ -335,6 +335,11 @@ pub(super) fn mssql_type_mappings(
             let native = format!("{:?}", col.column_type()).to_lowercase();
             let source = SourceColumn::simple(col.name(), native.clone(), true);
             let mapping = TypeMapping::from_source(&source, rivet);
+            if overrides.contains_key(col.name())
+                && hints.is_some_and(|h| h.fine_timestamps.contains(col.name()))
+            {
+                return Ok(mapping.narrowed_fraction(7));
+            }
             let mapping = if native == "timen" {
                 warn_time_scale_unread(mapping, overrides.contains_key(col.name()))
             } else {
@@ -1815,6 +1820,40 @@ mod tests {
                 .unwrap();
             assert_eq!(col.value(0), want, "{increments}");
         }
+    }
+
+    /// A `timestamp` override over a datetime2(7) column truncates the 100ns tick: the type report says lossy, not exact; a nanosecond override and a column the catalog shows at scale 0..6 stay exact.
+    #[test]
+    fn a_microsecond_override_over_a_scale_seven_column_is_reported_lossy() {
+        use tiberius::time::{Date, DateTime2, Time};
+        let dt2 = DateTime2::new(Date::new(693_595), Time::new(1, 7));
+        let rows = vec![
+            Row::builder()
+                .column("t", ColumnType::Datetime2, ColumnData::DateTime2(Some(dt2)))
+                .build(),
+        ];
+        let fine = CatalogHints {
+            decimals: HashMap::new(),
+            fine_timestamps: ["t".to_string()].into_iter().collect(),
+            fine_times: HashSet::new(),
+        };
+        let coarse = CatalogHints::default();
+        let fidelity = |ov: &str, hints: &CatalogHints| {
+            let overrides: ColumnOverrides =
+                [("t".to_string(), crate::types::parse_type_str(ov).unwrap())]
+                    .into_iter()
+                    .collect();
+            mssql_type_mappings(rows[0].columns(), &overrides, Some(hints)).unwrap()[0].fidelity
+        };
+        use crate::types::TypeFidelity::{Exact, Lossy};
+        assert_eq!(fidelity("timestamp", &fine), Lossy);
+        assert_eq!(fidelity("timestamp_tz", &fine), Lossy);
+        assert_eq!(fidelity("timestamp_ns", &fine), Exact);
+        assert_eq!(
+            fidelity("timestamp", &coarse),
+            Exact,
+            "datetime2(0..6) is exact"
+        );
     }
 
     /// The first non-null datetime2 / datetimeoffset value's own scale decides the type over the catalog; with no such value the catalog decides.
