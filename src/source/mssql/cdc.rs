@@ -904,8 +904,9 @@ fn cell_from_data(data: &ColumnData<'_>) -> Option<RivetValue> {
 }
 
 /// Microseconds since midnight, truncating sub-microsecond nanos.
-fn naive_time_to_micros(t: NaiveTime) -> i64 {
-    t.num_seconds_from_midnight() as i64 * 1_000_000 + t.nanosecond() as i64 / 1000
+/// Nanoseconds since midnight: a `time(7)` keeps its 100ns tick, and the column's builder decides the unit.
+fn naive_time_to_nanos(t: NaiveTime) -> i64 {
+    t.num_seconds_from_midnight() as i64 * 1_000_000_000 + t.nanosecond() as i64
 }
 
 fn cell_to_rivet(row: &Row, idx: usize, data: &ColumnData<'_>) -> Result<RivetValue> {
@@ -942,7 +943,11 @@ fn cell_to_rivet(row: &Row, idx: usize, data: &ColumnData<'_>) -> Result<RivetVa
             .try_get::<NaiveTime, _>(idx)
             .map_err(unreadable)?
             .map_or(RivetValue::Null, |t| {
-                RivetValue::TimeMicros(naive_time_to_micros(t))
+                seeded!(
+                    "mssql-time7-lands-at-microseconds",
+                    RivetValue::TimeMicros(naive_time_to_nanos(t) / 1_000),
+                    RivetValue::TimeNanos(naive_time_to_nanos(t))
+                )
             }),
         other => cell_fallthrough(other)?,
     })
@@ -1318,13 +1323,17 @@ mod tests {
 
     /// Pins every arithmetic step of the `time` conversion.
     #[test]
-    fn naive_time_to_micros_pins_every_arithmetic_step() {
+    fn naive_time_to_nanos_pins_every_arithmetic_step() {
         let t = NaiveTime::from_hms_nano_opt(1, 2, 3, 456_789_000).unwrap();
-        assert_eq!(naive_time_to_micros(t), 3723 * 1_000_000 + 456_789);
-        let t = NaiveTime::from_hms_nano_opt(0, 0, 1, 999).unwrap();
-        assert_eq!(naive_time_to_micros(t), 1_000_000);
-        let t = NaiveTime::from_hms_nano_opt(23, 59, 59, 999_999_000).unwrap();
-        assert_eq!(naive_time_to_micros(t), 86_399 * 1_000_000 + 999_999);
+        assert_eq!(naive_time_to_nanos(t), 3723 * 1_000_000_000 + 456_789_000);
+        let t = NaiveTime::from_hms_nano_opt(0, 0, 0, 100).unwrap();
+        assert_eq!(
+            naive_time_to_nanos(t),
+            100,
+            "the 100ns tick of a time(7) is kept"
+        );
+        let t = NaiveTime::from_hms_nano_opt(23, 59, 59, 999_999_900).unwrap();
+        assert_eq!(naive_time_to_nanos(t), 86_399 * 1_000_000_000 + 999_999_900);
     }
 
     #[test]

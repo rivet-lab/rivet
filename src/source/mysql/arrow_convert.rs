@@ -405,10 +405,14 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
     }
     fn boolean(&self, col: usize, row: usize) -> Option<bool> {
         match self.rows[row].as_ref(col) {
-            Some(Value::Int(v)) => Some(*v != 0),
-            Some(Value::UInt(v)) => Some(*v != 0),
-            Some(Value::Bytes(bv)) => Some(bit_bytes_to_u64(bv) != 0),
-            _ => None,
+            Some(v) => flag_int(v, self.is_bit(col)).and_then(|n| {
+                seeded!(
+                    "mysql-checksum-flag-any-nonzero",
+                    Some(n != 0),
+                    flag_bool(n)
+                )
+            }),
+            None => None,
         }
     }
     fn int16(&self, col: usize, row: usize) -> Option<i16> {
@@ -781,31 +785,48 @@ fn build_flags(
 ) -> Result<Arc<dyn Array>> {
     let mut b = BooleanBuilder::with_capacity(rows.len());
     for row in rows {
-        match row.as_ref(col_idx) {
-            Some(Value::Int(v)) => b.append_value(flag(column, i128::from(*v))?),
-            Some(Value::UInt(v)) => b.append_value(flag(column, i128::from(*v))?),
-            Some(Value::Bytes(bv)) if is_bit => {
-                b.append_value(flag(column, i128::from(bit_bytes_to_u64(bv)))?)
-            }
-            Some(Value::Bytes(bv)) if bv.as_slice() == b"0" => b.append_value(false),
-            Some(Value::Bytes(bv)) if bv.as_slice() == b"1" => b.append_value(true),
-            Some(Value::Bytes(bv)) => return unparsed(column, "bool (0 or 1)", bv),
-            other => {
-                null_or_refuse(column, &DataType::Boolean, other)?;
-                b.append_null();
-            }
+        let cell = row.as_ref(col_idx);
+        match cell.and_then(|v| flag_int(v, is_bit)) {
+            Some(n) => b.append_value(flag(column, n)?),
+            None => match cell {
+                Some(Value::Bytes(bv)) => return unparsed(column, "bool (0 or 1)", bv),
+                other => {
+                    null_or_refuse(column, &DataType::Boolean, other)?;
+                    b.append_null();
+                }
+            },
         }
     }
     Ok(Arc::new(b.finish()))
 }
 
+/// The number a flag cell holds on any wire type: an integer, BIT bytes, or the text `0` or `1`.
+fn flag_int(v: &Value, is_bit: bool) -> Option<i128> {
+    match v {
+        Value::Int(n) => Some(i128::from(*n)),
+        Value::UInt(n) => Some(i128::from(*n)),
+        Value::Bytes(bv) if is_bit => Some(i128::from(bit_bytes_to_u64(bv))),
+        Value::Bytes(bv) => match bv.as_slice() {
+            [d @ (b'0' | b'1')] => Some(i128::from(d - b'0')),
+            [..] => None,
+        },
+        Value::NULL | Value::Float(_) | Value::Double(_) | Value::Date(..) | Value::Time(..) => {
+            None
+        }
+    }
+}
+
+/// The one flag rule: 0 is false, 1 is true, any other number is no flag.
+pub(crate) fn flag_bool(v: i128) -> Option<bool> {
+    (0..=1).contains(&v).then_some(v == 1)
+}
+
 /// The flag a 0 or 1 holds; any other value is refused by code.
 fn flag(column: &str, v: i128) -> Result<bool> {
-    match v {
+    match flag_bool(v) {
         _ if seeded!("mysql-flag-outside-zero-one-delivered-true", v != 0, false) => Ok(true),
-        0 => Ok(false),
-        1 => Ok(true),
-        _ => crate::rivet_bail!(
+        Some(f) => Ok(f),
+        None => crate::rivet_bail!(
             crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
             "column `{column}` holds {v}, which is not a flag: a boolean column carries 0 or 1 \
              only, and rivet refuses rather than writing it as true. Fix the value, or declare \
@@ -2895,6 +2916,107 @@ mod roast_mysql_bit_decode_tests {
                     other => panic!("{label}: {other}"),
                 };
                 assert_eq!(got.expect(label), want, "{label}");
+            }
+        }
+    }
+
+    /// The checksum side and the delivery side read a flag cell by one rule: a cell delivery refuses is no flag to the checksum, and a delivered flag is the checksummed one.
+    #[test]
+    fn a_flag_cell_is_one_value_to_the_checksum_and_to_the_delivery() {
+        use crate::source::value_checksum::CellSource;
+        use arrow::array::BooleanArray;
+        let text = |t: &str| Value::Bytes(t.into());
+        let cells: Vec<(&str, Value, ColumnType, Option<bool>)> = vec![
+            (
+                "text 0",
+                text("0"),
+                ColumnType::MYSQL_TYPE_VAR_STRING,
+                Some(false),
+            ),
+            (
+                "text 1",
+                text("1"),
+                ColumnType::MYSQL_TYPE_VAR_STRING,
+                Some(true),
+            ),
+            ("text 2", text("2"), ColumnType::MYSQL_TYPE_VAR_STRING, None),
+            ("text 5", text("5"), ColumnType::MYSQL_TYPE_VAR_STRING, None),
+            (
+                "text 01",
+                text("01"),
+                ColumnType::MYSQL_TYPE_VAR_STRING,
+                None,
+            ),
+            ("text x", text("x"), ColumnType::MYSQL_TYPE_VAR_STRING, None),
+            (
+                "text empty",
+                text(""),
+                ColumnType::MYSQL_TYPE_VAR_STRING,
+                None,
+            ),
+            (
+                "int 0",
+                Value::Int(0),
+                ColumnType::MYSQL_TYPE_TINY,
+                Some(false),
+            ),
+            (
+                "int 1",
+                Value::Int(1),
+                ColumnType::MYSQL_TYPE_TINY,
+                Some(true),
+            ),
+            ("int 2", Value::Int(2), ColumnType::MYSQL_TYPE_TINY, None),
+            ("int -1", Value::Int(-1), ColumnType::MYSQL_TYPE_TINY, None),
+            (
+                "uint 255",
+                Value::UInt(255),
+                ColumnType::MYSQL_TYPE_TINY,
+                None,
+            ),
+            (
+                "bit 0",
+                Value::Bytes(vec![0]),
+                ColumnType::MYSQL_TYPE_BIT,
+                Some(false),
+            ),
+            (
+                "bit 1",
+                Value::Bytes(vec![1]),
+                ColumnType::MYSQL_TYPE_BIT,
+                Some(true),
+            ),
+            (
+                "bit 5",
+                Value::Bytes(vec![5]),
+                ColumnType::MYSQL_TYPE_BIT,
+                None,
+            ),
+        ];
+        for (label, value, column_type, delivered) in cells {
+            let columns: Arc<[mysql::Column]> = Arc::from(vec![mysql::Column::new(column_type)]);
+            let rows = [mysql_common::row::new_row(vec![value], columns)];
+            let is_bit = matches!(column_type, ColumnType::MYSQL_TYPE_BIT);
+            let checksum = MysqlCellSource { rows: &rows }.boolean(0, 0);
+            match super::build_flags(0, &rows, is_bit, "c") {
+                Ok(arr) => {
+                    let arr = arr
+                        .as_any()
+                        .downcast_ref::<BooleanArray>()
+                        .expect("Boolean");
+                    assert_eq!(Some(arr.value(0)), delivered, "{label}: delivered");
+                    assert_eq!(checksum, delivered, "{label}: checksum");
+                }
+                Err(_) => {
+                    assert_eq!(
+                        delivered, None,
+                        "{label}: delivery refused an accepted flag"
+                    );
+                    assert_eq!(
+                        checksum, None,
+                        "{label}: checksum read a flag delivery refuses"
+                    );
+                }
             }
         }
     }

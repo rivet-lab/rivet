@@ -6329,6 +6329,24 @@ seeds:
       mongo:
         na: "a MongoDB value is read as a BSON bool and no integer is turned into a flag"
 
+  - name: mysql-checksum-flag-any-nonzero
+    class: "the value checksum of a MySQL flag column reads a cell by its own any-nonzero rule while the delivery reads 0 and 1 only, so a value the delivery refuses (2, 5, -1, 255, BIT 5) is checksummed as true and integrity is graded against a value the file does not hold"
+    history: "2026-11-20 - MysqlCellSource::boolean read Int and UInt as != 0 and every text cell through bit_bytes_to_u64 != 0 (text 0 was true); RED on main in a_flag_cell_is_one_value_to_the_checksum_and_to_the_delivery; fixed by flag_int and flag_bool, the one rule build_flags, the checksum and the stream read"
+    scope: source
+    engines:
+      mysql:
+        switch: mysql-checksum-flag-any-nonzero
+        cells:
+          - "lib:a_flag_cell_is_one_value_to_the_checksum_and_to_the_delivery"
+      postgres:
+        na: "PostgreSQL boolean is a true boolean read by the driver as bool on both sides, so there is no second rule to disagree"
+      mssql:
+        na: "SQL Server bit is read as ColumnData::Bit on both sides, so there is no second rule to disagree"
+      oracle:
+        na: "an Oracle source has no value checksum cell source, and its boolean is read by the driver as bool"
+      mongo:
+        na: "a MongoDB value is a BSON bool and no integer is turned into a flag"
+
   - name: mysql-cdc-tinyint1-flag-any-nonzero-true
     class: "a MySQL TINYINT(1) column read by a stream is delivered as true for every value but 0 and 1: 2, 5, -1 or 255 become true with exit 0, where the batch export refuses them"
     history: "2026-11-20 - owner decision MYSQL_TINYINT_BOOL: mysql_flag_fix excluded TINYINT(1) and bool_value read Int != 0; RED on main in the MySQL CDC cell (TINYINT(1) holding 2 delivered, exit 0); fixed by including TINYINT(1) in mysql_flag_fix"
@@ -6843,6 +6861,22 @@ seeds:
       clickhouse:
         na: "the seed edits the BigQuery arm of src/types/target.rs, which only a BigQuery load resolves; ClickHouse resolves its own column types (DateTime64(9, UTC) holds the nanosecond zoned timestamp)"
 
+  - name: mssql-time7-lands-at-microseconds
+    class: "a SQL Server time(7) (the bare `time` default) is delivered as Time64(µs) and its 100ns digit is dropped, on batch and CDC, exit 0"
+    history: "type matrix class MSSQL_SCALE_SEVEN_TRUNC (known_red 2026-11-16, 68 pairs across ClickHouse, BigQuery and Snowflake); the twin of fine-timestamp-lands-at-microseconds (datetime2(7), #1083); owner decision 2026-11-20: fix, deliver Time64(ns)"
+    scope: source
+    switch: mssql-time7-lands-at-microseconds
+    engines:
+      mssql:
+        cells: ["lib:a_scale_seven_time_is_nanoseconds_and_keeps_its_100ns_tick", mssql_batch_and_cdc_deliver_every_ledger_row_alike]
+      postgres:
+        na: "PostgreSQL time holds microseconds at most, so no digit is lost"
+      mysql:
+        na: "MySQL TIME holds microseconds at most, so no digit is lost"
+      oracle:
+        na: "Oracle has no TIME type; a time of day is a DATE or TIMESTAMP column"
+      mongo:
+        na: "BSON has no time-of-day type, so no MongoDB value is a TIME column"
   - name: ch-date-footer-guard-skips-dates
     class: "the ClickHouse load reads the footer statistics of a timestamp column only, so a Date32 column is never checked: 2300-01-01 is stored as 2299-12-31 silently, and a date before 1900-01-01 or after 2300-01-01 is refused by ClickHouse as RIVET_LOAD_WAREHOUSE_REJECTED instead of by rivet's coded range refusal"
     history: "owner-approved 2026-11-20 (DEFECT_CH_DATE_CLAMP); RED on main 2026-11-20 by the type matrix (PostgreSQL, MySQL, SQL Server DATE 2300-01-01 read back 2299-12-31) and by the offline footer cell"

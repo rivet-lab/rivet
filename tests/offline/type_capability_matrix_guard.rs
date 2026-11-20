@@ -347,7 +347,6 @@ const KNOWN_DEFECTS: &[&str] = &[
     "postgres:TEXT[] (ClickHouse)",
     "postgres:INTEGER[] (ClickHouse)",
     "postgres:DOUBLE PRECISION[] (ClickHouse)",
-    "mssql:TIME",
     "mssql:UNIQUEIDENTIFIER (ClickHouse)",
     "oracle:TIMESTAMP(9)",
 ]; // ratchet-pin: end
@@ -470,15 +469,15 @@ fn row_mut<'a>(doc: &'a mut Value, engine: &str, native: &str) -> &'a mut serde_
 #[test]
 fn a_known_defect_moved_to_another_row_is_refused() {
     let mut doc = ledger();
-    let marker = row_mut(&mut doc, "mssql", "TIME")
+    let marker = row_mut(&mut doc, "postgres", "NUMERIC")
         .remove("known_defect")
         .unwrap();
     row_mut(&mut doc, "mysql", "DATETIME(6)").insert("known_defect".into(), marker);
     assert_eq!(
         known_defect_violations(&doc),
         [
-            "mssql:TIME: fixed, its marker is gone — delete its KNOWN_DEFECTS line",
-            "mysql:DATETIME(6): a new known defect, blessed into the ledger instead of fixed"
+            "mysql:DATETIME(6): a new known defect, blessed into the ledger instead of fixed",
+            "postgres:NUMERIC: fixed, its marker is gone — delete its KNOWN_DEFECTS line"
         ],
         "a marker moved to another row kept the count and went unnoticed"
     );
@@ -487,21 +486,23 @@ fn a_known_defect_moved_to_another_row_is_refused() {
 #[test]
 fn a_fixed_defect_left_in_known_defects_is_refused() {
     let mut doc = ledger();
-    row_mut(&mut doc, "mssql", "TIME")
+    row_mut(&mut doc, "postgres", "NUMERIC")
         .remove("known_defect")
         .unwrap();
     assert_eq!(
         known_defect_violations(&doc),
-        ["mssql:TIME: fixed, its marker is gone — delete its KNOWN_DEFECTS line"]
+        ["postgres:NUMERIC: fixed, its marker is gone — delete its KNOWN_DEFECTS line"]
     );
 }
 
 #[test]
 fn a_known_defect_without_today_delivery_is_refused() {
     let mut doc = ledger();
-    let row = row_mut(&mut doc, "mssql", "TIME");
-    row.remove("today_delivery").unwrap();
-    row.get_mut("clickhouse")
+    row_mut(&mut doc, "postgres", "NUMERIC")
+        .remove("today_delivery")
+        .unwrap();
+    row_mut(&mut doc, "mssql", "UNIQUEIDENTIFIER")
+        .get_mut("clickhouse")
         .and_then(Value::as_mapping_mut)
         .unwrap()
         .remove("today")
@@ -692,13 +693,13 @@ fn the_cdc_fidelity_matrix_names_exactly_the_ledger_known_defects() {
 #[test]
 fn a_known_defect_fixed_in_the_ledger_only_is_refused() {
     let mut doc = ledger();
-    row_mut(&mut doc, "mssql", "TIME")
+    row_mut(&mut doc, "postgres", "NUMERIC")
         .remove("known_defect")
         .unwrap();
     assert_eq!(
         fidelity_violations(&doc, &fidelity()),
         [format!(
-            "mssql:TIME: {FIDELITY} names a known_defect the ledger does not mark"
+            "postgres:NUMERIC: {FIDELITY} names a known_defect the ledger does not mark"
         )]
     );
 }
