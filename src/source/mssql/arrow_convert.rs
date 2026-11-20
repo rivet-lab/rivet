@@ -1042,6 +1042,9 @@ impl crate::source::value_checksum::CellSource for MssqlCellSource<'_> {
 }
 
 #[cfg(test)]
+mod type_table;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

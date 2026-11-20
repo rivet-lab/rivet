@@ -27,6 +27,8 @@
 //! metrics, or hold any pipeline state. Vendor mappers live in
 //! `crate::source::*` and call into this module.
 
+#[cfg(test)]
+pub(crate) mod characterization;
 mod cursor;
 pub mod decimal;
 mod delivery;

@@ -342,7 +342,7 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `datetime2(0..6)` / `datetime` / `smalldatetime` | `timestamp(µs, none)` | `Timestamp(µs, None)` | datetime text | naive; µs, full range | live matrix |
 | `datetime2(7)` | `timestamp(ns, none)` | `Timestamp(ns, None)` | datetime text | naive; the 100 ns tick is kept, 1677-09-21..2262-04-11 (a value outside it is refused); declare `timestamp` for µs over the full range, see known gap 4 | live matrix |
 | `datetimeoffset(0..6)` | `timestamp_tz(µs, UTC)` | `Timestamp(µs, UTC)` | datetime text | normalised to UTC | type_roundtrip |
-| `datetimeoffset(7)` | `timestamp_tz(ns, UTC)` | `Timestamp(ns, UTC)` | datetime text | normalised to UTC; the 100 ns tick is kept, 1677-09-21..2262-04-11 (a value outside it is refused); declare `timestamp_tz` for µs over the full range, see known gap 4 | live matrix |
+| `datetimeoffset(7)` | `timestamp_tz(ns, UTC)` | `Timestamp(ns, UTC)` | datetime text | normalised to UTC; the 100 ns tick is kept, 1677-09-21..2262-04-11 (a value outside it is refused); declare `timestamp_tz` for µs over the full range, see known gap 4; BigQuery lands it as INT64 UTC nanoseconds since the epoch | live matrix |
 | `nvarchar` / `varchar` / `nchar` / `char` / `text` / `ntext` | `string` | `Utf8` | escaped UTF-8 | | live matrix |
 | `varbinary` / `binary` / `image` | `binary` | `Binary` | hex in CSV | | live matrix |
 | `uniqueidentifier` | `uuid` | `FixedSizeBinary(16)` + Parquet `LogicalType::Uuid` | canonical UUID text | native UUID downstream | live matrix |
