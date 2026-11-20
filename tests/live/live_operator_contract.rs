@@ -3804,27 +3804,37 @@ fn a_time_past_a_day_in_a_stream_is_refused_by_code_and_both_remedies_deliver_my
     );
 }
 
-/// MySQL: a binary-charset ENUM whose label is bytes MySQL writes as the hex literal `x'f09f9a80'` (no zero padding, so no bytes to recover) is refused as `RIVET_SOURCE_CDC_CELL_UNSUPPORTED` (exit 5) on every run, with or without a `columns:` override of the column; the checkpoint deleted alone is refused under the baseline, and the column dropped at the source with the re-baseline recipe delivers the source.
+/// MySQL: a binary-charset ENUM whose label is bytes MySQL writes as the hex literal `x'f09f9a80'` is delivered by a stream, its label read from the binlog table map, and the rig oracle grades the delivered rows against the source.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
-fn a_hex_enum_label_in_a_stream_is_refused_by_code_with_or_without_an_override_mysql() {
-    let s = CdcScenario::mysql_with(
+fn a_hex_enum_label_in_a_stream_is_delivered_from_the_table_map_mysql() {
+    let mut s = CdcScenario::mysql_with(
         "oc_enum_hex",
         "id BIGINT PRIMARY KEY, v BIGINT, e ENUM(0xF09F9A80) CHARACTER SET binary",
         |r, _| r.cdc("initial: snapshot"),
     );
+    s.insert(1);
+    s.settle();
+    s.rig.run_ok();
+    s.insert(2);
+    s.settle();
+    s.rig.run_ok();
     let table = s.table.clone();
-    let hostile = format!("INSERT INTO {table} VALUES (3, 3, 1)");
-    a_captured_cell_is_refused_by_code_and_walked_out(
-        s,
-        &hostile,
-        Refused::by_code("RIVET_SOURCE_CDC_CELL_UNSUPPORTED", 5),
-        vec![Remedy::wrong(
-            "declare the column `string` in `columns:`",
-            Then::Refuses(Refused::by_code("RIVET_SOURCE_CDC_CELL_UNSUPPORTED", 5)),
-            |r| r.rebuilt(|rig| rig.export_line("columns: { e: string }")),
-        )],
-        move || mysql_cdc_drop_column(&table, "e"),
+    s.sql(&format!("INSERT INTO {table} VALUES (3, 3, 1)"));
+    s.settle();
+    let batches = s.drain_and_read();
+    let labels: Vec<String> = batches
+        .iter()
+        .flat_map(|b| {
+            let col = b.column_by_name("e").expect("the ENUM column is delivered");
+            (0..b.num_rows())
+                .map(|i| arrow::util::display::array_value_to_string(col, i).unwrap())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(
+        labels.iter().any(|l| l == "\u{1F680}"),
+        "the hex ENUM label is delivered from the table map, got {labels:?}"
     );
 }
 
