@@ -261,6 +261,8 @@ _CAST = re.compile(r"('(?:[^']|'')*')::[a-z_]+")
 
 def parse_lit(engine: str, lit: str):
     """The Python value of a simple SQL literal: None for NULL, Decimal, bool, str; `...` when it cannot be read."""
+    if engine == "oracle" and lit.strip().upper() == "EMPTY_BLOB()":
+        return b""
     s = te.reduce(engine, lit).strip()
     if (n := te.numeric_of(s)) is not None:
         return n
@@ -1156,6 +1158,7 @@ def self_test() -> None:
     assert compare("postgres", '\'{"k": "v", "n": 42}\'', "other", "none", '{"n":42,"k":"v"}', native="JSONB") == "OK"
     assert compare("postgres", "'{\"n\":1}'::jsonb", "other", "none", '{"n":2}', native="JSONB") == WRONG
     assert compare("mssql", "'12345678-1234-1234-1234-123456789012'", "other", "none", UUID("12345678-1234-1234-1234-123456789012"), native="UNIQUEIDENTIFIER") == "OK"
+    assert parse_lit("oracle", "EMPTY_BLOB()") == b"" and parse_lit("oracle", "HEXTORAW('')") is None, "an empty LOB is a value, an empty RAW is NULL"
     assert compare("mssql", "0xAB", "other", "none", b"\xab\0\0", native="BINARY(8)") == "OK" and compare("mysql", "0xDEADBEEF", "other", "none", b"\xde\xad", native="VARBINARY(4)") == WRONG
     assert pg_array_elements("'{a,\"b,c\",NULL}'", "text") == ["'a'", "'b,c'", "NULL"] and pg_array_elements("ARRAY[1, NULL]::int[]", "int") == ["1", "NULL"]
     assert pg_array_elements("'{{1,2},{3}}'", "int") is None and pg_array_elements("'{}'", "int") == []
