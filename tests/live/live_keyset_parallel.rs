@@ -2146,6 +2146,98 @@ fn a_skewed_uuid_keyset_is_recut_by_density_mysql() {
     let _ = c.query_drop(format!("DROP TABLE IF EXISTS {table}"));
 }
 
+/// Bursts of a UUIDv7-shaped key: rows per burst and bursts in the fixture.
+const V7_BURST: u32 = 1200;
+const V7_BURSTS: u32 = 5;
+
+/// The UUIDv7-shaped keys: a timestamp prefix per burst, far apart, and a counter inside it.
+fn v7_keys() -> BTreeSet<String> {
+    (0..V7_BURSTS)
+        .flat_map(|b| (1..=V7_BURST).map(move |g| (u128::from(b + 1) << 112) | u128::from(g)))
+        .map(|v| uuid::Uuid::from_u128(v).simple().to_string())
+        .collect()
+}
+
+/// Every burst row lands once.
+fn assert_v7_delivered(dir: &std::path::Path) {
+    let ids: Vec<String> = dir_parquet_display(dir, "id")
+        .into_iter()
+        .flatten()
+        .map(|id| id.replace('-', ""))
+        .collect();
+    let distinct: BTreeSet<String> = ids.iter().cloned().collect();
+    assert_eq!(
+        (ids.len(), distinct),
+        ((V7_BURST * V7_BURSTS) as usize, v7_keys()),
+        "every source uuid once"
+    );
+}
+
+/// UUIDv7 bursts far apart in time on PostgreSQL are recut into balanced ranges: every row once.
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn uuid_v7_bursts_are_recut_into_balanced_ranges_postgres() {
+    require_alive(LiveService::Postgres);
+    let table = unique_name("pk_v7");
+    let mut c = pg_connect();
+    c.batch_execute(&format!(
+        "DROP TABLE IF EXISTS {table};
+         CREATE TABLE {table} (id UUID PRIMARY KEY, payload INT NOT NULL);
+         INSERT INTO {table} SELECT (lpad(to_hex(b), 4, '0') || repeat('0', 12) || lpad(to_hex(g), 16, '0'))::uuid, g
+           FROM generate_series(1, {V7_BURSTS}) b, generate_series(1, {V7_BURST}) g;"
+    ))
+    .unwrap();
+    pg_catalog_says_rows(&mut c, &table, 20_000_000);
+    let rig = Rig::pg_batch(&format!("public.{table}"))
+        .mode("chunked")
+        .export_line("chunk_by_key: id")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000")
+        .no_oracle("the test grades the delivered uuids itself against the fixture's keys");
+    let (said, spread) = skew_run(&rig);
+    assert_seek_recut(&said);
+    assert_v7_delivered(&rig.out_dir());
+    assert_within_twice_the_mean(&spread);
+    let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
+}
+
+/// UUIDv7 bursts far apart in time on MySQL (CHAR(36)) are recut into balanced ranges: every row once.
+#[test]
+#[ignore = "live: requires docker compose up -d mysql"]
+fn uuid_v7_bursts_are_recut_into_balanced_ranges_mysql() {
+    require_alive(LiveService::Mysql);
+    use mysql::prelude::Queryable;
+    let table = unique_name("pk_v7_my");
+    let mut c = mysql_connect();
+    c.query_drop(format!("DROP TABLE IF EXISTS {table}"))
+        .unwrap();
+    c.query_drop(format!(
+        "CREATE TABLE {table} (id CHAR(36) NOT NULL PRIMARY KEY, payload INT NOT NULL) STATS_PERSISTENT=1 STATS_AUTO_RECALC=0"
+    ))
+    .unwrap();
+    c.query_drop(format!("SET SESSION cte_max_recursion_depth = {V7_BURST}"))
+        .unwrap();
+    c.query_drop(format!(
+        "INSERT INTO {table} (id, payload) \
+         WITH RECURSIVE g AS (SELECT 1 n UNION ALL SELECT n + 1 FROM g WHERE n < {V7_BURST}), \
+         b AS (SELECT 1 k UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5), \
+         hx AS (SELECT CONCAT(LPAD(HEX(k), 4, '0'), REPEAT('0', 12), LPAD(HEX(n), 16, '0')) h, n FROM g CROSS JOIN b) \
+         SELECT LOWER(CONCAT_WS('-', SUBSTR(h,1,8), SUBSTR(h,9,4), SUBSTR(h,13,4), SUBSTR(h,17,4), SUBSTR(h,21,12))), n FROM hx"
+    ))
+    .unwrap();
+    mysql_catalog_says_rows(&table, 20_000_000);
+    let rig = Rig::mysql_batch(&table)
+        .mode("chunked")
+        .export_line("chunk_by_key: id")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000");
+    let (said, spread) = skew_run(&rig);
+    assert_seek_recut(&said);
+    assert_v7_delivered(&rig.out_dir());
+    assert_within_twice_the_mean(&spread);
+    let _ = c.query_drop(format!("DROP TABLE IF EXISTS {table}"));
+}
+
 /// A skewed integer key on Oracle, whose catalog gives no row estimate, is recut by density: every row once, NUMBER(19) key.
 #[test]
 #[ignore = "live: requires docker compose up -d oracle"]
