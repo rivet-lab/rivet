@@ -24,13 +24,13 @@ impl Secret {
         Self::registered(Zeroizing::new(value.into()))
     }
 
-    /// `value` as a secret, registered for masking unless it is a URL: a URL's password is masked by the URL scanner, and a URL without one is not a credential.
+    /// `value` as a secret, registered for masking unless it is a connection string: the URL and keyword scanners mask the password inside one, and the rest of it is not a credential.
     fn registered(value: Zeroizing<String>) -> Self {
         let secret = Self(value);
         if seeded!(
             "secret-value-not-registered",
             false,
-            !secret.0.contains("://")
+            !is_connection_string(&secret.0)
         ) {
             secret.mask_in_output();
         }
@@ -46,6 +46,11 @@ impl Secret {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+}
+
+/// A URL (`scheme://…`) or a keyword/value DSN (`host=h password=p`, `Server=h;Password=p`).
+fn is_connection_string(value: &str) -> bool {
+    value.contains("://") || (value.contains('=') && value.contains([' ', ';']))
 }
 
 impl fmt::Display for Secret {
@@ -167,6 +172,13 @@ mod tests {
             crate::redact::redact_secrets(url),
             url,
             "a URL is left to the URL scanner"
+        );
+        let dsn = "host=h user=u password=Dsn0nlyPw dbname=by-construction";
+        let _dsn = Secret::new(dsn);
+        assert_eq!(
+            crate::redact::redact_secrets(dsn),
+            "host=h user=u password=*** dbname=by-construction",
+            "a keyword DSN is left to the keyword scanner"
         );
     }
 
