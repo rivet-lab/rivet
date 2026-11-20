@@ -428,6 +428,12 @@ fn number_text(n: &OracleNumber, column: &str) -> Result<String> {
     Ok(text)
 }
 
+/// A NUMBER cell as plain text, refused by code when it is infinity.
+fn number_cell(row: &Row, idx: usize, column: &str) -> Result<Option<String>> {
+    let cell = row.get::<Option<OracleNumber>>(idx).ora()?;
+    cell.map(|n| number_text(&n, column)).transpose()
+}
+
 /// The integer an Oracle NUMBER's text holds, or a coded refusal naming the column when it holds a fraction or overflows `T`.
 fn integer<T: std::str::FromStr>(column: &str, text: &str) -> Result<T> {
     text.parse::<T>().map_err(|_| {
@@ -450,12 +456,7 @@ fn build_column(
     max_value_bytes: Option<usize>,
     empty_flag: Option<usize>,
 ) -> Result<ArrayRef> {
-    let number = |r: &Row| -> Result<Option<String>> {
-        r.get::<Option<OracleNumber>>(idx)
-            .ora()?
-            .map(|n| number_text(&n, name))
-            .transpose()
-    };
+    let number = |r: &Row| number_cell(r, idx, name);
     let kind = rows
         .first()
         .and_then(|r| r.columns().get(idx))

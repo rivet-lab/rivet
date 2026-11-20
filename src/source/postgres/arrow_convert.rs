@@ -919,9 +919,10 @@ fn array_decode_message(col: &str, e: &dyn std::fmt::Display) -> String {
 
 /// The element type of a PostgreSQL array wire type.
 fn pg_array_element(pg_type: &Type) -> Option<&Type> {
-    match pg_type.kind() {
-        Kind::Array(elem) => Some(elem),
-        _ => None,
+    if let Kind::Array(elem) = pg_type.kind() {
+        Some(elem)
+    } else {
+        None
     }
 }
 
