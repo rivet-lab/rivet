@@ -1,7 +1,7 @@
 //! MySQL `Source` implementation.
 
 mod arrow_convert;
-pub(crate) use arrow_convert::{time_outside_day, zero_date_counts, zero_date_warning};
+pub(crate) use arrow_convert::{flag_bool, time_outside_day, zero_date_counts, zero_date_warning};
 pub(crate) mod cdc;
 pub(crate) mod column_grants;
 mod folded_name;
