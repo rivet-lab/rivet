@@ -1240,6 +1240,55 @@ mod tests {
         assert_eq!(render_str(&tick), "23:59:59.999999900");
     }
 
+    /// The two time readers take each time value at its own unit and refuse a duration outside one day, a 100ns digit into microseconds, and a value that is no time.
+    #[test]
+    fn the_time_readers_take_each_unit_and_refuse_what_does_not_fit() {
+        let day_us = crate::types::MICROS_PER_DAY;
+        assert_eq!(time_value(&RivetValue::TimeMicros(5)), Ok(5));
+        assert_eq!(time_value(&RivetValue::TimeNanos(5_000)), Ok(5));
+        assert!(
+            time_value(&RivetValue::TimeNanos(5_100))
+                .unwrap_err()
+                .contains("100ns digit")
+        );
+        assert!(
+            time_value(&RivetValue::TimeNanos(day_us * 1_000))
+                .unwrap_err()
+                .contains("outside 00:00..24:00")
+        );
+        assert!(
+            time_value(&RivetValue::TimeMicros(-1))
+                .unwrap_err()
+                .contains("outside 00:00..24:00")
+        );
+        assert_eq!(time_value(&RivetValue::Int(1)), Err(NO_READING.into()));
+
+        assert_eq!(time_nanos_value(&RivetValue::TimeNanos(0)), Ok(0));
+        let last = day_us * 1_000 - 1;
+        assert_eq!(time_nanos_value(&RivetValue::TimeNanos(last)), Ok(last));
+        for bad in [-1, day_us * 1_000] {
+            assert!(
+                time_nanos_value(&RivetValue::TimeNanos(bad))
+                    .unwrap_err()
+                    .contains("outside 00:00..24:00"),
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            time_nanos_value(&RivetValue::TimeMicros(1_000)),
+            Ok(1_000_000)
+        );
+        assert!(
+            time_nanos_value(&RivetValue::TimeMicros(day_us))
+                .unwrap_err()
+                .contains("outside 00:00..24:00")
+        );
+        assert_eq!(
+            time_nanos_value(&RivetValue::Int(1)),
+            Err(NO_READING.into())
+        );
+    }
+
     /// `build_column` with the sink's refusal wording for a non-overridden column `col`.
     fn build(col: &str, dt: &DataType, cells: &[Option<&RivetValue>]) -> anyhow::Result<ArrayRef> {
         build_column(dt, cells).map_err(|r| r.into_error(col, dt, false))

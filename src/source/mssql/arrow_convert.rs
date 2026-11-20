@@ -283,6 +283,24 @@ pub(super) fn mssql_columns_to_schema(
     Ok((Schema::new(fields), decoders))
 }
 
+/// The warning on a `time` column whose scale could not be read: delivered at microseconds.
+const TIME_SCALE_UNREAD_WARNING: &str = "time → Time64(microsecond): the column's declared scale could not be read from the catalog (a query that is not a single-table SELECT), so a scale-7 column (the bare `time` default) is read from its first value's scale; time(0..6) is exact.";
+
+/// A `time` column still at microseconds with no override keeps the scale-unread warning.
+fn warn_time_scale_unread(mapping: TypeMapping, overridden: bool) -> TypeMapping {
+    if overridden
+        || matches!(
+            mapping.rivet_type,
+            RivetType::Time {
+                unit: RivetTimeUnit::Nanosecond
+            }
+        )
+    {
+        return mapping;
+    }
+    mapping.with_warning(TIME_SCALE_UNREAD_WARNING)
+}
+
 /// `TypeMapping` for every column — drives `rivet check --type-report`.
 pub(super) fn mssql_type_mappings(
     columns: &[Column],
@@ -302,6 +320,11 @@ pub(super) fn mssql_type_mappings(
             let native = format!("{:?}", col.column_type()).to_lowercase();
             let source = SourceColumn::simple(col.name(), native.clone(), true);
             let mapping = TypeMapping::from_source(&source, rivet);
+            let mapping = if native == "timen" {
+                warn_time_scale_unread(mapping, overrides.contains_key(col.name()))
+            } else {
+                mapping
+            };
             Ok(
                 if matches!(
                     mapping.rivet_type,
@@ -319,21 +342,6 @@ pub(super) fn mssql_type_mappings(
                      scale-7 column would lose its 100ns tick. Declare it `timestamp_ns` in \
                      `columns:` to keep it; datetime2(0..6) is exact.",
                 )
-                } else if native == "timen"
-                    && !overrides.contains_key(col.name())
-                    && !matches!(
-                        mapping.rivet_type,
-                        RivetType::Time {
-                            unit: RivetTimeUnit::Nanosecond
-                        }
-                    )
-                {
-                    mapping.with_warning(
-                        "time → Time64(microsecond): the column's declared scale could not be read \
-                     from the catalog (a query that is not a single-table SELECT), so a scale-7 \
-                     column (the bare `time` default) is read from its first value's scale; \
-                     time(0..6) is exact.",
-                    )
                 } else {
                     mapping
                 },
@@ -1560,6 +1568,90 @@ mod tests {
                 .column(0)
                 .as_any()
                 .downcast_ref::<arrow::array::Time64NanosecondArray>()
+                .unwrap();
+            assert_eq!(col.value(0), want, "{increments}");
+        }
+    }
+
+    /// A datetime2 or time column whose scale the catalog did not give is warned, a fine one by the catalog is not, and an override is the operator's word.
+    #[test]
+    fn a_catalog_blind_time_column_is_warned_unless_it_is_fine_or_overridden() {
+        let row = Row::builder()
+            .column("ts", ColumnType::Datetime2, ColumnData::DateTime2(None))
+            .column("t", ColumnType::Timen, ColumnData::Time(None))
+            .build();
+        let warnings = |overrides: &ColumnOverrides, hints: Option<&CatalogHints>| {
+            mssql_type_mappings(row.columns(), overrides, hints)
+                .unwrap()
+                .into_iter()
+                .map(|m| m.warnings)
+                .collect::<Vec<_>>()
+        };
+        let none = ColumnOverrides::new();
+        let blind = warnings(&none, None);
+        assert!(blind[0][0].starts_with("datetime2 → Timestamp(microsecond)"));
+        assert_eq!(blind[1], vec![TIME_SCALE_UNREAD_WARNING.to_string()]);
+        let empty = CatalogHints::default();
+        assert_eq!(warnings(&none, Some(&empty)), blind);
+        let fine = CatalogHints {
+            fine_timestamps: ["ts".to_string()].into_iter().collect(),
+            fine_times: ["t".to_string()].into_iter().collect(),
+            ..CatalogHints::default()
+        };
+        assert_eq!(
+            warnings(&none, Some(&fine)),
+            vec![vec![FINE_TIMESTAMP_WARNING.to_string()], Vec::new()]
+        );
+        let forced: ColumnOverrides = [
+            (
+                "ts".to_string(),
+                RivetType::Timestamp {
+                    unit: RivetTimeUnit::Microsecond,
+                    timezone: None,
+                },
+            ),
+            (
+                "t".to_string(),
+                RivetType::Time {
+                    unit: RivetTimeUnit::Microsecond,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+        for hints in [None, Some(&fine)] {
+            assert_eq!(
+                warnings(&forced, hints),
+                vec![Vec::<String>::new(), Vec::new()]
+            );
+        }
+    }
+
+    /// A `time(7)` built at microseconds drops the 100ns tick and keeps whole microseconds.
+    #[test]
+    fn a_scale_seven_time_built_at_microseconds_keeps_whole_microseconds() {
+        use tiberius::time::Time;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "t",
+            DataType::Time64(TimeUnit::Microsecond),
+            true,
+        )]));
+        for (increments, want) in [(1u64, 0i64), (10, 1), (863_999_999_999, 86_399_999_999)] {
+            let rows = vec![
+                Row::builder()
+                    .column(
+                        "t",
+                        ColumnType::Timen,
+                        ColumnData::Time(Some(Time::new(increments, 7))),
+                    )
+                    .build(),
+            ];
+            let batch =
+                mssql_rows_to_record_batch(&schema, &rows, None, &ColumnOverrides::new()).unwrap();
+            let col = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Time64MicrosecondArray>()
                 .unwrap();
             assert_eq!(col.value(0), want, "{increments}");
         }
