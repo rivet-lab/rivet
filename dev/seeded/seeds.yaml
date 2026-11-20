@@ -6728,3 +6728,16 @@ seeds:
         na: "the seed edits the footer guard src/load/clickhouse.rs reads; a BigQuery load never calls it (src/load/bq_rest.rs)"
       snowflake:
         na: "the seed edits the footer guard src/load/clickhouse.rs reads; a Snowflake load never calls it (src/load/snowflake.rs)"
+
+  - name: secret-value-not-registered
+    class: "a credential held in a Secret is masked only where a call site remembers to register it, so a BigQuery access token (RIVET_BQ_ACCESS_TOKEN or an ADC token) a warehouse echoes in its error body reaches stderr and --summary-output verbatim"
+    history: "known_red no_secret_in_output_cloud[offline] SECRET_LEAK 2026-11-10 (the hostile replay echoes the Authorization header in a 401); Secret::new did not register, only the S3 and Azure call sites did; owner decision 2026-11-20: fix at the I1 seam (ADR-0040), register by construction"
+    scope: target
+    switch: secret-value-not-registered
+    engines:
+      bigquery:
+        cells: ["lib:a_secret_is_masked_in_output_by_construction"]
+      snowflake:
+        cells: ["lib:a_secret_is_masked_in_output_by_construction"]
+      clickhouse:
+        cells: ["lib:a_secret_is_masked_in_output_by_construction"]
