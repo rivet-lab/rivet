@@ -1194,20 +1194,14 @@ def self_test() -> None:
     assert compare("postgres", '\'{"k": "v", "n": 42}\'', "other", "none", '{"n":42,"k":"v"}', native="JSONB") == "OK"
     assert compare("postgres", "'{\"n\":1}'::jsonb", "other", "none", '{"n":2}', native="JSONB") == WRONG
     assert compare("mssql", "'12345678-1234-1234-1234-123456789012'", "other", "none", UUID("12345678-1234-1234-1234-123456789012"), native="UNIQUEIDENTIFIER") == "OK"
-<<<<<<< HEAD
-<<<<<<< HEAD
     assert parse_lit("oracle", "EMPTY_BLOB()") == b"" and parse_lit("oracle", "HEXTORAW('')") is None, "an empty LOB is a value, an empty RAW is NULL"
-=======
     assert _same_instant("mssql", "TIME", "12:34:56.1234567", Decimal("45296.1234567")) == "OK", "a time's 100ns digit is compared, not dropped"
     assert _same_instant("mssql", "TIME", "12:34:56.1234567", Decimal("45296.123456")) == WRONG
->>>>>>> claude/fix-gate-ns-timestamp-reader
-=======
     assert pg_interval_iso("1 day") == "P1D" and pg_interval_iso("2 hours") == "PT2H" and pg_interval_iso("1 year 2 mons 3 days") == "P1Y2M3D"
     assert same_array("postgres", "'{\"1 day\",\"2 hours\"}'", "INTERVAL[]", "none", ["P1D", "PT2H"]) == "OK"
     assert same_array("postgres", "ARRAY[INTERVAL '1 year 2 mons 3 days']", "INTERVAL[]", "none", [b"P1Y2M3D"]) == "OK"
     assert same_array("postgres", "'{\"1 day\"}'", "INTERVAL[]", "none", ["P2D"]) == WRONG
     assert same_array("postgres", "'{1,2}'", "OID[]", "none", [1, 2]) == "OK" and same_array("postgres", "ARRAY[1::oid, 16384::oid]", "OID[]", "none", [1, 16384]) == "OK"
->>>>>>> claude/fix-pg-special-array-checksum
     assert compare("mssql", "0xAB", "other", "none", b"\xab\0\0", native="BINARY(8)") == "OK" and compare("mysql", "0xDEADBEEF", "other", "none", b"\xde\xad", native="VARBINARY(4)") == WRONG
     assert pg_array_elements("'{a,\"b,c\",NULL}'", "text") == ["'a'", "'b,c'", "NULL"] and pg_array_elements("ARRAY[1, NULL]::int[]", "int") == ["1", "NULL"]
     assert pg_array_elements("'{{1,2},{3}}'", "int") is None and pg_array_elements("'{}'", "int") == []
