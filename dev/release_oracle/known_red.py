@@ -34,7 +34,7 @@ GATE, ISLAND, OFFLINE, NIGHTLY = "gate", "island", "offline", "nightly"
 _ISLAND_TIER = re.compile(r"\] full: ")
 _OFFLINE_TIER = re.compile(r"\[offline\]: ")
 _NIGHTLY_KEY = re.compile(r"^nightly\[")
-_GATE_CLASS = re.compile(r"^(?P<matrix>[a-z_]+)\[(?P<kind>[a-z_]+)\] (?:smoke|full): (?P<cause>[A-Z_]+) over ")
+_GATE_CLASS = re.compile(r"^(?P<matrix>[a-z_]+)\[(?P<kind>[a-z_]+)\](?: [a-z]+)?: (?P<cause>[A-Z_]+) over ")
 _CELL = re.compile(r"^(?P<cell>[A-Za-z_]\w*::\w[\w:]*) — ")
 _DATED = re.compile(r"\b20\d\d-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b")
 _ORACLE_CDC_LOAD = (
@@ -307,6 +307,12 @@ def self_test() -> int:
     cut = nightly_classes()
     assert nightly_key("no_silent_null", "mysql", "CHECK_RUN_SPLIT") in cut and nightly_key("no_silent_null", "mssql", "WRONG_VALUE") in cut, \
         "a gate entry is cut to its (matrix, engine, cause) class"
+    from .property_no_silent_null import Result, failure_message
+    rs = [Result("mysql/a->b/full/parquet", "x")]
+    for scenario, tier in (("no_silent_null", "smoke"), ("no_silent_null", "full"), ("no_silent_null_load", ""), ("no_silent_null_cdc", ""), ("no_silent_null_load_cloud", "")):
+        msg = failure_message("mysql", "CHECK_RUN_SPLIT", rs, scenario, tier)
+        assert nightly_key(scenario, "mysql", "CHECK_RUN_SPLIT") in nightly_classes((KnownRed(msg, "2026-11-19: x", _EXPIRES),)), f"a producer line is cut to its class: {msg}"
+    assert all(nightly_classes((k,)) for k in KNOWN_RED if " over " in k.match), "every per-cell-set entry of the ledger is cut to a class"
     held = KnownRed("m::open_defect_x — boom", "2026-11-16: why", "2026-11-22")
     assert cells((held,)) == {"m::open_defect_x": held} == nightly_classes((held,)), "a live-cell entry is held under its cell"
     framed = "audit suspects FAILED · m::t — [2026-11-16T00:13:32Z WARN rivet::config::source] inline `url:` plaintext password (see log)"
