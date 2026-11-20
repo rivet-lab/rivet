@@ -337,7 +337,7 @@ const DENSITY_RATIO: f64 = 8.0;
 const BALANCE_FACTOR: f64 = 2.0;
 
 /// Most recut rounds one parallel run spends before it keeps the cuts it has.
-const RECUT_ROUNDS: usize = 4;
+const RECUT_ROUNDS: usize = 8;
 
 /// One integer key range (start, end] and its probed density in rows per key.
 #[derive(Clone, Copy)]
@@ -827,7 +827,7 @@ fn balance_by_density(
         } else {
             worse += 1;
         }
-        if worse == 2 || rounds == RECUT_ROUNDS {
+        if worse == 3 || rounds == RECUT_ROUNDS {
             let (ratio, cuts, rounds) = best.take().unwrap();
             return Ok((render(&cuts), Recut::Unbalanced { rounds, ratio }));
         }
@@ -2965,6 +2965,45 @@ mod tests {
                     "{parts} workers, low bit {low}: {spread:?}"
                 );
             }
+        }
+    }
+
+    /// UUIDv7 keys written in narrow bursts far apart in time keep every row once in ranges no heavier than twice the mean.
+    #[test]
+    fn uuid_v7_bursts_are_recut_into_balanced_ranges() {
+        let plan = crate::plan::test_support::test_plan();
+        let uuid = |ms: u128, seq: u128| {
+            let n = (ms << 80) | (0x7u128 << 76) | (seq << 64) | 0x8000_0000_0000_0000u128;
+            uuid::Uuid::from_u128(n).hyphenated().to_string()
+        };
+        let bursts = [1_000u128, 90_000, 91_000, 7_000_000, 7_000_500];
+        let all: Vec<String> = bursts
+            .iter()
+            .flat_map(|&ms| (0..1_200u128).map(move |i| (ms + i / 40, i % 40)))
+            .map(|(ms, seq)| uuid(ms, seq))
+            .collect();
+        for (parts, int_parts) in [(2, 32), (4, 64)] {
+            let mut src = Indexed::new(all.clone(), false);
+            let bounds =
+                sample_key_boundaries(&mut src, &plan, "k", parts, int_parts, None, None).unwrap();
+            let spread: Vec<usize> = partition_ranges(&bounds, None, None)
+                .iter()
+                .map(|(_, lo, hi, _)| {
+                    all.iter()
+                        .filter(|k| {
+                            lo.as_deref().is_none_or(|l| k.as_str() > l)
+                                && hi.as_deref().is_none_or(|h| k.as_str() <= h)
+                        })
+                        .count()
+                })
+                .collect();
+            assert_eq!(spread.iter().sum::<usize>(), all.len(), "{spread:?}");
+            let mean = all.len() as f64 / spread.len() as f64;
+            let heaviest = *spread.iter().max().unwrap() as f64;
+            assert!(
+                spread.len() >= parts && heaviest <= 2.0 * mean,
+                "{parts} workers: {spread:?}"
+            );
         }
     }
 
