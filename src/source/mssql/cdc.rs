@@ -114,6 +114,43 @@ pub(crate) fn row_image_verdict(
     }
 }
 
+/// The refusal the stream open raises for a capture instance whose change table does not carry every column, asked before any anchor or snapshot part is written.
+pub(crate) fn refuse_partial_image(
+    url: &str,
+    capture_instance: &str,
+    tls: Option<&TlsConfig>,
+) -> Result<()> {
+    use crate::source::Source;
+    if !capture_instance
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return Ok(());
+    }
+    let mut src = crate::source::mssql::MssqlSource::connect_with_tls(url, tls)?;
+    let named: Vec<String> = src
+        .query_scalar(&row_image_sql(capture_instance, None))
+        .ok()
+        .flatten()
+        .into_iter()
+        .collect();
+    let lossy: Vec<String> = src
+        .query_scalar(&lossy_columns_sql(capture_instance))
+        .ok()
+        .flatten()
+        .into_iter()
+        .collect();
+    match row_image_verdict(&named, &lossy, false) {
+        crate::source::cdc::RowImage::Partial { why } => {
+            Err(crate::source::cdc::open_partial_image_refusal(
+                crate::source::cdc::CdcEngine::Mssql,
+                &why,
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Build one poll's T-SQL.
 struct Poll<'a> {
     /// The capture instance whose change function is read.

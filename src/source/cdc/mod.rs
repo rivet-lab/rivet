@@ -825,6 +825,7 @@ impl CdcEngine {
         tables: &[String],
         drain: DrainMode,
         columns_from_grants: bool,
+        capture_instance: Option<&str>,
     ) -> Result<()> {
         match self {
             Self::Mysql => {
@@ -854,7 +855,13 @@ impl CdcEngine {
                 crate::source::mongo::column_grants::resolve_for_tables(url, tls, tables)
                     .map(|_| ())
             }
-            Self::Mssql | Self::Mongo => Ok(()),
+            Self::Mssql => match capture_instance {
+                Some(ci) if !columns_from_grants => {
+                    crate::source::mssql::cdc::refuse_partial_image(url, ci, tls)
+                }
+                _ => Ok(()),
+            },
+            Self::Mongo => Ok(()),
         }
     }
 
@@ -3362,7 +3369,7 @@ mod grants_prerequisite_tests {
         let url = "mongodb://u:p@127.0.0.1:1/app?serverSelectionTimeoutMS=300";
         let tables = vec!["orders".to_string()];
         let said = CdcEngine::Mongo
-            .refuse_unmet_prerequisites(url, None, &tables, DrainMode::BoundedAtOpen, true)
+            .refuse_unmet_prerequisites(url, None, &tables, DrainMode::BoundedAtOpen, true, None)
             .unwrap_err();
         assert!(
             format!("{said:#}")
@@ -3371,7 +3378,7 @@ mod grants_prerequisite_tests {
             "{said:#}"
         );
         CdcEngine::Mongo
-            .refuse_unmet_prerequisites(url, None, &tables, DrainMode::BoundedAtOpen, false)
+            .refuse_unmet_prerequisites(url, None, &tables, DrainMode::BoundedAtOpen, false, None)
             .unwrap();
     }
 }

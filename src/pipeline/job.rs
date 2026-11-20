@@ -1658,6 +1658,7 @@ fn run_export_job_inner(
             reconcile: opts.reconcile,
             resume: opts.resume,
             strict: opts.strict,
+            cdc_admission: false,
         },
         opts.params,
     ) {

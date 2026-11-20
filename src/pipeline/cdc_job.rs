@@ -420,6 +420,27 @@ pub(super) fn resolve_grants(config: &Config, export: &ExportConfig) -> Result<O
     .map(Some)
 }
 
+/// The refusals a capture open raises, asked of the server before any anchor or snapshot part is written: the one function `run`, `check` and `doctor` ask.
+pub(crate) fn refuse_unmet_prerequisites(
+    config: &Config,
+    export: &ExportConfig,
+    drain: DrainMode,
+) -> Result<()> {
+    let url = config.source.resolve_url()?;
+    let (tables, _) = cdc_tables(export)?;
+    CdcEngine::from(config.source.source_type).refuse_unmet_prerequisites(
+        url.expose(),
+        config.source.tls.as_ref(),
+        &tables,
+        drain,
+        config.source.columns_from_grants(),
+        export
+            .cdc
+            .as_ref()
+            .and_then(|c| c.capture_instance.as_deref()),
+    )
+}
+
 /// One captured table's baseline leg before its state is read: the label, the relation its read names, its destination.
 struct SnapshotTarget {
     label: String,
@@ -646,16 +667,14 @@ pub(super) fn initial_snapshot_pending(
     };
     let (pending_idx, prior) = snapshot_plan(&done_flags, ckpt_resume);
     if writes_before_the_drain(&pending_idx) {
-        engine.refuse_unmet_prerequisites(
-            url.expose(),
-            tls,
-            &tables,
+        refuse_unmet_prerequisites(
+            config,
+            export,
             seeded!(
                 "bounded-standby-refused-after-the-baseline",
                 DrainMode::Continuous,
                 DrainMode::from_until_current(cdc.until_current)
             ),
-            config.source.columns_from_grants(),
         )?;
     }
 

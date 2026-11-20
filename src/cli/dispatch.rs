@@ -554,6 +554,7 @@ fn batch_plans(
 fn check_plan_flags(strict: bool) -> crate::pipeline::planning::PlanFlags {
     crate::pipeline::planning::PlanFlags {
         strict,
+        cdc_admission: true,
         ..Default::default()
     }
 }
@@ -1425,6 +1426,18 @@ mod subcommand_error_tests {
         .unwrap();
         let path = cfg.to_str().unwrap();
         let plans = super::batch_plans(path, None, None, false).unwrap();
+        let (stream, plans): (Vec<_>, Vec<_>) = plans.into_iter().partition(|(n, _)| n == "stream");
+        assert!(
+            format!(
+                "{:#}",
+                stream[0]
+                    .1
+                    .as_ref()
+                    .err()
+                    .expect("an unreachable source refuses the stream")
+            )
+            .contains("127.0.0.1"),
+        );
         let names: Vec<&str> = plans.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, ["ranged", "whole"]);
         let strategies = super::planned_strategies(&plans);
@@ -1464,7 +1477,11 @@ mod subcommand_error_tests {
         let names = |plans: &[super::BatchPlan]| -> Vec<String> {
             plans.iter().map(|(n, _)| n.clone()).collect()
         };
-        let whole = super::batch_plans(path, None, None, false).unwrap();
+        let whole: Vec<_> = super::batch_plans(path, None, None, false)
+            .unwrap()
+            .into_iter()
+            .filter(|(n, _)| n != "stream")
+            .collect();
         assert_eq!(names(&whole), ["whole", "stream__snapshot_t"]);
         assert!(super::report_plan_compatibility(whole, false).is_ok());
         let named = super::batch_plans(path, Some("base"), None, false).unwrap();
@@ -1493,7 +1510,14 @@ mod subcommand_error_tests {
             plans.iter().map(|(n, _)| n.clone()).collect()
         };
         let pending = write("{ initial: snapshot, checkpoint: ./c.ckpt }", "a.yaml");
-        let plans = super::batch_plans(&pending, None, None, false).unwrap();
+        let legs = |path: &str| -> Vec<super::BatchPlan> {
+            super::batch_plans(path, None, None, false)
+                .unwrap()
+                .into_iter()
+                .filter(|(n, _)| n != "s")
+                .collect()
+        };
+        let plans = legs(&pending);
         assert_eq!(names(&plans), ["s__snapshot_t"]);
         let config = crate::config::Config::load_with_params(&pending, None).unwrap();
         let none = crate::pipeline::planning::plan_run(
@@ -1501,25 +1525,17 @@ mod subcommand_error_tests {
             dir.path(),
             None,
             None,
-            super::check_plan_flags(false),
+            crate::pipeline::planning::PlanFlags::default(),
             false,
         )
         .unwrap();
         assert!(none.is_empty());
         let stream_only = write("{ slot: s, checkpoint: ./c.ckpt }", "b.yaml");
-        assert!(
-            super::batch_plans(&stream_only, None, None, false)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(legs(&stream_only).is_empty());
         std::fs::create_dir_all(dir.path().join("out/snapshot")).unwrap();
         std::fs::write(dir.path().join("out/snapshot/_SUCCESS"), b"{}").unwrap();
         let done = write("{ initial: snapshot, checkpoint: ./c.ckpt }", "c.yaml");
-        assert!(
-            super::batch_plans(&done, None, None, false)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(legs(&done).is_empty());
     }
 
     /// `rivet check` ends in an error for a config the planner refuses, before any connection is made.

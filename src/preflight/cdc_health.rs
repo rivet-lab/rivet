@@ -97,35 +97,21 @@ pub(super) fn collect(
         Ok(()) => checks.extend(run_refusals(
             config,
             seeded!("doctor-green-where-the-run-refuses", &cdc[..0], &cdc[..]),
-            url,
         )),
     }
     (checks, probe)
 }
 
 /// One failed check per CDC export whose prerequisites the run itself would refuse, asked through the run's own function.
-fn run_refusals(config: &Config, exports: &[&ExportConfig], url: &str) -> Vec<DoctorCheck> {
-    let engine = crate::source::cdc::CdcEngine::from(config.source.source_type);
+fn run_refusals(config: &Config, exports: &[&ExportConfig]) -> Vec<DoctorCheck> {
     exports
         .iter()
         .filter_map(|e| {
-            let cdc = e.cdc.clone().unwrap_or_default();
-            let tables: Vec<String> = e
-                .table
-                .iter()
-                .chain(e.tables.iter().flatten())
-                .cloned()
-                .collect();
-            let drain = crate::source::cdc::DrainMode::from_until_current(cdc.until_current);
-            let refused = engine
-                .refuse_unmet_prerequisites(
-                    url,
-                    config.source.tls.as_ref(),
-                    &tables,
-                    drain,
-                    config.source.columns_from_grants(),
-                )
-                .err()?;
+            let drain = crate::source::cdc::DrainMode::from_until_current(
+                e.cdc.clone().unwrap_or_default().until_current,
+            );
+            let refused =
+                crate::pipeline::cdc_job::refuse_unmet_prerequisites(config, e, drain).err()?;
             Some(run_refusal_check(&e.name, &refused))
         })
         .collect()
@@ -938,11 +924,12 @@ mod tests {
         };
         let run = |c: &Config| {
             let exports: Vec<&ExportConfig> = c.exports.iter().collect();
-            run_refusals(c, &exports, c.source.resolve_url().unwrap().expose())
+            run_refusals(c, &exports)
         };
         for source in [
             "type: postgres\n  url: postgresql://rivet:rivet@127.0.0.1:1/rivet",
             "type: mysql\n  url: mysql://rivet:rivet@127.0.0.1:1/rivet",
+            "type: mssql\n  url: sqlserver://sa:x@127.0.0.1:1/rivet",
         ] {
             let refused = run(&cfg(source));
             assert_eq!(refused.len(), 1, "{refused:?}");
@@ -957,12 +944,6 @@ mod tests {
             );
             assert!(refused[0].hint.is_none(), "{refused:?}");
         }
-        assert!(
-            run(&cfg(
-                "type: mssql\n  url: sqlserver://sa:x@127.0.0.1:1/rivet"
-            ))
-            .is_empty()
-        );
     }
 
     #[test]

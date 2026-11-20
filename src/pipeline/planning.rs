@@ -22,6 +22,7 @@ pub(crate) struct PlanFlags {
     pub reconcile: bool,
     pub resume: bool,
     pub strict: bool,
+    pub cdc_admission: bool,
 }
 
 /// One batch export as run would plan it: its plan and the non-refusing diagnostics.
@@ -163,6 +164,14 @@ pub(crate) fn plan_run(
             let one = plan_and_admit(&mut src, config, export, config_dir, flags, params);
             planned.push((export.name.clone(), one));
             continue;
+        }
+        if flags.cdc_admission {
+            let drain = crate::source::cdc::DrainMode::from_until_current(
+                export.cdc.clone().unwrap_or_default().until_current,
+            );
+            if let Err(e) = super::cdc_job::refuse_unmet_prerequisites(config, export, drain) {
+                planned.push((export.name.clone(), Err(e)));
+            }
         }
         if !cdc_baseline || seeded!("check-skips-cdc-baseline-leg", true, false) {
             continue;
