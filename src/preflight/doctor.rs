@@ -143,6 +143,9 @@ fn run_plan_checks(
     json: bool,
     checks: &mut Vec<DoctorCheck>,
 ) -> Option<anyhow::Error> {
+    if !seeded!("doctor-skips-cursor-admission", false, true) {
+        return None;
+    }
     let mut refusal: Option<anyhow::Error> = None;
     let planned =
         run_plan(config, config_dir).unwrap_or_else(|e| vec![("config".to_string(), Err(e))]);
