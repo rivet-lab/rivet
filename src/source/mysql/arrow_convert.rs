@@ -15,6 +15,7 @@ use mysql::Value;
 use mysql::consts::{ColumnFlags, ColumnType};
 
 use crate::error::Result;
+use crate::types::kind::CommonKind;
 use crate::types::{
     ColumnOverrides, RivetType, SourceColumn, TimeUnit as RivetTimeUnit, TypeFidelity, TypeMapping,
     build_arrow_field,
@@ -86,77 +87,86 @@ fn derive_decimal_ps(column_length: u32, scale: u8, signed: bool) -> Option<(u8,
 /// The widest `BIT(n)` whose every value fits a signed 64-bit integer; `BIT(64)` is delivered unsigned.
 const BIT_INT64_MAX_WIDTH: u32 = 63;
 
-/// Map a MySQL column descriptor to Rivet's canonical type.
-pub(super) fn mysql_type_to_rivet(col: &mysql::Column) -> RivetType {
+/// The common kind a MySQL column is read as, or `None` for a type this engine alone carries.
+fn mysql_common_kind(col: &mysql::Column) -> Option<CommonKind> {
     use mysql::consts::ColumnType::*;
-    match col.column_type() {
-        MYSQL_TYPE_TINY if col.column_length() == 1 => RivetType::Bool,
-        MYSQL_TYPE_TINY => RivetType::Int16,
-        MYSQL_TYPE_SHORT if col.flags().contains(ColumnFlags::UNSIGNED_FLAG) => RivetType::Int32,
-        MYSQL_TYPE_SHORT => RivetType::Int16,
-        MYSQL_TYPE_INT24 if col.flags().contains(ColumnFlags::UNSIGNED_FLAG) => RivetType::Int64,
-        MYSQL_TYPE_LONG if col.flags().contains(ColumnFlags::UNSIGNED_FLAG) => RivetType::Int64,
-        MYSQL_TYPE_INT24 => RivetType::Int32,
-        MYSQL_TYPE_LONG => RivetType::Int32,
-        MYSQL_TYPE_LONGLONG if col.flags().contains(ColumnFlags::UNSIGNED_FLAG) => {
-            RivetType::UInt64
-        }
-        MYSQL_TYPE_LONGLONG => RivetType::Int64,
-        MYSQL_TYPE_FLOAT => RivetType::Float32,
-        MYSQL_TYPE_DOUBLE => RivetType::Float64,
-
-        MYSQL_TYPE_DECIMAL | MYSQL_TYPE_NEWDECIMAL => {
-            let signed = !col.flags().contains(ColumnFlags::UNSIGNED_FLAG);
-            match derive_decimal_ps(col.column_length(), col.decimals(), signed) {
-                Some((precision, scale)) => RivetType::Decimal { precision, scale },
-                None => RivetType::Unsupported {
-                    native_type: "decimal".into(),
-                    reason: "could not derive precision/scale from the MySQL column metadata; \
-                             add a column override (columns: amount: decimal(18,2))"
-                        .into(),
-                },
-            }
-        }
-
+    let unsigned = col.flags().contains(ColumnFlags::UNSIGNED_FLAG);
+    Some(match col.column_type() {
+        MYSQL_TYPE_TINY if col.column_length() == 1 => CommonKind::Bool,
+        MYSQL_TYPE_TINY => CommonKind::I16,
+        MYSQL_TYPE_SHORT if unsigned => CommonKind::I32,
+        MYSQL_TYPE_SHORT => CommonKind::I16,
+        MYSQL_TYPE_INT24 | MYSQL_TYPE_LONG if unsigned => CommonKind::I64,
+        MYSQL_TYPE_INT24 | MYSQL_TYPE_LONG => CommonKind::I32,
+        MYSQL_TYPE_LONGLONG if !unsigned => CommonKind::I64,
+        MYSQL_TYPE_FLOAT => CommonKind::F32,
+        MYSQL_TYPE_DOUBLE => CommonKind::F64,
+        MYSQL_TYPE_DECIMAL | MYSQL_TYPE_NEWDECIMAL => CommonKind::Dec,
         MYSQL_TYPE_VARCHAR | MYSQL_TYPE_VAR_STRING | MYSQL_TYPE_STRING
             if col.flags().contains(ColumnFlags::ENUM_FLAG)
                 || col.flags().contains(ColumnFlags::SET_FLAG) =>
         {
-            RivetType::Enum
+            return None;
         }
-        MYSQL_TYPE_VARCHAR | MYSQL_TYPE_VAR_STRING | MYSQL_TYPE_STRING => {
+        MYSQL_TYPE_VARCHAR
+        | MYSQL_TYPE_VAR_STRING
+        | MYSQL_TYPE_STRING
+        | MYSQL_TYPE_TINY_BLOB
+        | MYSQL_TYPE_MEDIUM_BLOB
+        | MYSQL_TYPE_LONG_BLOB
+        | MYSQL_TYPE_BLOB => {
             if col.character_set() == 63 {
-                RivetType::Binary
+                CommonKind::Binary
             } else {
-                RivetType::String
+                CommonKind::Text
             }
         }
-        MYSQL_TYPE_ENUM | MYSQL_TYPE_SET => RivetType::Enum,
-        MYSQL_TYPE_JSON => RivetType::Json,
+        MYSQL_TYPE_JSON => CommonKind::Json,
+        MYSQL_TYPE_DATE | MYSQL_TYPE_NEWDATE => CommonKind::Date,
+        MYSQL_TYPE_DATETIME | MYSQL_TYPE_DATETIME2 => CommonKind::Naive,
+        MYSQL_TYPE_TIMESTAMP | MYSQL_TYPE_TIMESTAMP2 => CommonKind::Utc,
+        _ => return None,
+    })
+}
 
-        MYSQL_TYPE_TINY_BLOB | MYSQL_TYPE_MEDIUM_BLOB | MYSQL_TYPE_LONG_BLOB | MYSQL_TYPE_BLOB => {
-            if col.character_set() == 63 {
-                RivetType::Binary
-            } else {
-                RivetType::Text
-            }
-        }
+/// Whether the wire type is one of the four `*BLOB` types, the ones a text column of this engine is delivered as `Text` on.
+fn is_blob_wire(col: &mysql::Column) -> bool {
+    matches!(
+        col.column_type(),
+        ColumnType::MYSQL_TYPE_TINY_BLOB
+            | ColumnType::MYSQL_TYPE_MEDIUM_BLOB
+            | ColumnType::MYSQL_TYPE_LONG_BLOB
+            | ColumnType::MYSQL_TYPE_BLOB
+    )
+}
 
-        MYSQL_TYPE_DATE | MYSQL_TYPE_NEWDATE => RivetType::Date,
+/// The type of a `decimal` column from its wire precision and scale, or `Unsupported` when they cannot be derived.
+fn mysql_decimal(col: &mysql::Column) -> RivetType {
+    let signed = !col.flags().contains(ColumnFlags::UNSIGNED_FLAG);
+    match derive_decimal_ps(col.column_length(), col.decimals(), signed) {
+        Some((precision, scale)) => RivetType::Decimal { precision, scale },
+        None => RivetType::Unsupported {
+            native_type: "decimal".into(),
+            reason: "could not derive precision/scale from the MySQL column metadata; \
+                     add a column override (columns: amount: decimal(18,2))"
+                .into(),
+        },
+    }
+}
 
+/// The type of a column this engine alone carries, or `Unsupported` for a wire type it does not map.
+fn mysql_engine_type(col: &mysql::Column) -> RivetType {
+    use mysql::consts::ColumnType::*;
+    match col.column_type() {
+        MYSQL_TYPE_LONGLONG => RivetType::UInt64,
+        MYSQL_TYPE_VARCHAR
+        | MYSQL_TYPE_VAR_STRING
+        | MYSQL_TYPE_STRING
+        | MYSQL_TYPE_ENUM
+        | MYSQL_TYPE_SET => RivetType::Enum,
         MYSQL_TYPE_TIME | MYSQL_TYPE_TIME2 => RivetType::Time {
             unit: RivetTimeUnit::Microsecond,
         },
-
-        MYSQL_TYPE_DATETIME | MYSQL_TYPE_DATETIME2 => RivetType::Timestamp {
-            unit: RivetTimeUnit::Microsecond,
-            timezone: None,
-        },
-        MYSQL_TYPE_TIMESTAMP | MYSQL_TYPE_TIMESTAMP2 => RivetType::Timestamp {
-            unit: RivetTimeUnit::Microsecond,
-            timezone: Some("UTC".into()),
-        },
-
         MYSQL_TYPE_BIT if col.column_length() == 1 => RivetType::Bool,
         MYSQL_TYPE_BIT
             if col.column_length()
@@ -166,11 +176,19 @@ pub(super) fn mysql_type_to_rivet(col: &mysql::Column) -> RivetType {
         }
         MYSQL_TYPE_BIT => RivetType::Int64,
         MYSQL_TYPE_YEAR => RivetType::Int16,
-
         _ => RivetType::Unsupported {
             native_type: mysql_native_type_name(col),
             reason: "no Rivet mapping for this MySQL type".into(),
         },
+    }
+}
+
+/// Map a MySQL column descriptor to Rivet's canonical type.
+pub(super) fn mysql_type_to_rivet(col: &mysql::Column) -> RivetType {
+    match mysql_common_kind(col) {
+        Some(CommonKind::Text) if is_blob_wire(col) => RivetType::Text,
+        Some(kind) => kind.rivet_type().unwrap_or_else(|| mysql_decimal(col)),
+        None => mysql_engine_type(col),
     }
 }
 
@@ -1302,6 +1320,8 @@ fn mysql_decimal_to_decimal256(
     ))
 }
 
+#[cfg(test)]
+mod common_kind_tests;
 #[cfg(test)]
 mod type_table;
 
