@@ -1268,6 +1268,9 @@ fn mysql_decimal_to_decimal256(
 }
 
 #[cfg(test)]
+mod type_table;
+
+#[cfg(test)]
 mod time_parse_tests {
     use super::parse_time_str_to_micros;
 
