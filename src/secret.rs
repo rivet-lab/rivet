@@ -19,9 +19,22 @@ impl Secret {
         crate::redact::mask_value_in_output(&self.0);
     }
 
-    /// A secret holding `value`.
+    /// A secret holding `value`, registered with the shared redactor so it is masked wherever it reaches output (ADR-0040 I1: by construction, not per call site).
     pub fn new(value: impl Into<String>) -> Self {
-        Self(Zeroizing::new(value.into()))
+        Self::registered(Zeroizing::new(value.into()))
+    }
+
+    /// `value` as a secret, registered for masking unless it is a URL: a URL's password is masked by the URL scanner, and a URL without one is not a credential.
+    fn registered(value: Zeroizing<String>) -> Self {
+        let secret = Self(value);
+        if seeded!(
+            "secret-value-not-registered",
+            false,
+            !secret.0.contains("://")
+        ) {
+            secret.mask_in_output();
+        }
+        secret
     }
 
     /// The raw text: call it at the connect or request site that sends it, nowhere else.
@@ -75,7 +88,7 @@ impl std::str::FromStr for Secret {
 
 impl From<Zeroizing<String>> for Secret {
     fn from(value: Zeroizing<String>) -> Self {
-        Self(value)
+        Self::registered(value)
     }
 }
 
@@ -131,6 +144,29 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Secret::json_schema(&mut generator)).unwrap(),
             serde_json::json!({"type": "string", "writeOnly": true})
+        );
+    }
+
+    /// A token that reaches output inside text rivet does not control (a warehouse echoing the Authorization header in its 401 body) is masked because the Secret holding it registered itself.
+    #[test]
+    fn a_secret_is_masked_in_output_by_construction() {
+        let token = "ya29.secret-is-masked-by-construction-0123456789";
+        let _held = Secret::new(token);
+        let echoed = anyhow::anyhow!("HTTP 401: Invalid credentials: Bearer {token}");
+        let shown = crate::redact::redact_error(&echoed);
+        assert!(!shown.contains(token), "{shown}");
+        assert!(shown.contains("Invalid credentials: Bearer ***"), "{shown}");
+        let from_zeroizing: Secret = Zeroizing::new("zeroized-token-0123456789".to_string()).into();
+        assert!(
+            !crate::redact::redact_secrets("got zeroized-token-0123456789")
+                .contains(from_zeroizing.expose())
+        );
+        let url = "postgresql://reader@db.internal:5432/app-by-construction";
+        let _plain = Secret::new(url);
+        assert_eq!(
+            crate::redact::redact_secrets(url),
+            url,
+            "a URL is left to the URL scanner"
         );
     }
 
