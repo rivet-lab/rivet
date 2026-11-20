@@ -1968,17 +1968,18 @@ fn assert_skew_uuid_delivered(dir: &std::path::Path) {
 }
 
 /// SQL Server's uuids come from NEWID for the sparse part, so only counts and the nil uuid are fixed.
-fn assert_skew_mssql_uuid_delivered(dir: &std::path::Path) {
-    let ids: Vec<String> = dir_parquet_display(dir, "id")
+fn assert_skew_mssql_uuid_delivered(dir: &std::path::Path, col: &str) {
+    let ids: Vec<String> = dir_parquet_display(dir, col)
         .into_iter()
         .flatten()
+        .map(|id| id.replace('-', ""))
         .collect();
     let distinct: BTreeSet<String> = ids.iter().cloned().collect();
     assert_eq!(
         (
             ids.len(),
             distinct.len(),
-            distinct.contains("00000000-0000-0000-0000-000000000000")
+            distinct.contains(&"0".repeat(32))
         ),
         (SKEW_ROWS, SKEW_ROWS, true),
         "every source uuid once, the nil uuid among them"
@@ -2264,7 +2265,7 @@ fn a_skewed_uniqueidentifier_keyset_keeps_row_percentiles_mssql() {
         .export_line("chunk_size: 1000");
     let (said, spread) = skew_run(&rig);
     assert_percentile(&said);
-    assert_skew_mssql_uuid_delivered(&rig.out_dir());
+    assert_skew_mssql_uuid_delivered(&rig.out_dir(), "k");
     assert_within_twice_the_mean(&spread);
     mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));
 }
