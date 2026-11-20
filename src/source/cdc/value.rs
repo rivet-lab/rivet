@@ -786,6 +786,8 @@ pub(crate) enum MysqlCellFix {
     TimeOfDay,
     /// An integer column read under a `bool` override: only 0 and 1 are flags, any other value is refused by code.
     FlagInt,
+    /// A `TINYINT(1)` read as a flag: only 0 and 1 are flags, any other value is refused by code.
+    FlagTinyint,
 }
 
 /// The flag fix for a Boolean target over a MySQL integer column that is not itself a flag (`tinyint(1)`, BIT).
@@ -801,10 +803,17 @@ pub(crate) fn mysql_flag_fix(
     let integer = ["tinyint", "smallint", "mediumint", "int", "bigint"]
         .iter()
         .any(|t| n == *t || n.starts_with(&format!("{t}(")) || n.starts_with(&format!("{t} ")));
+    if n.starts_with("tinyint(1)") {
+        return seeded!(
+            "mysql-tinyint1-any-nonzero-true",
+            None,
+            Some(MysqlCellFix::FlagTinyint)
+        );
+    }
     seeded!(
         "mysql-cdc-int-bool-override-any-nonzero-true",
         None,
-        (integer && !n.starts_with("tinyint(1)")).then_some(MysqlCellFix::FlagInt)
+        integer.then_some(MysqlCellFix::FlagInt)
     )
 }
 
@@ -1050,8 +1059,23 @@ impl MysqlCellFix {
                     code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
                 });
             }
-            (MysqlCellFix::FlagInt, V::Int(0) | V::UInt(0)) => V::Bool(false),
-            (MysqlCellFix::FlagInt, V::Int(1) | V::UInt(1)) => V::Bool(true),
+            (MysqlCellFix::FlagInt | MysqlCellFix::FlagTinyint, V::Int(0) | V::UInt(0)) => {
+                V::Bool(false)
+            }
+            (MysqlCellFix::FlagInt | MysqlCellFix::FlagTinyint, V::Int(1) | V::UInt(1)) => {
+                V::Bool(true)
+            }
+            (MysqlCellFix::FlagTinyint, V::Int(_) | V::UInt(_)) => {
+                return Err(FixRefusal {
+                    reason: format!(
+                        "is TINYINT(1), read as a 0/1 flag, and holds a value other than 0 or 1 — {} \
+                         Then: {}",
+                        crate::source::mysql::TINYINT1_REMEDY,
+                        crate::source::cdc::checkpoint_identity::RECOVER
+                    ),
+                    code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
+                });
+            }
             (MysqlCellFix::FlagInt, V::Int(_) | V::UInt(_)) => {
                 return Err(FixRefusal {
                     reason: format!(
@@ -2474,14 +2498,31 @@ mod tests {
                 );
             }
         }
-        for native in [
-            "tinyint(1)",
-            "tinyint(1) unsigned",
-            "bit(1)",
-            "bit(8)",
-            "varchar(5)",
-            "decimal(10,0)",
-        ] {
+        for native in ["tinyint(1)", "tinyint(1) unsigned"] {
+            let fix = flag(native).unwrap_or_else(|| panic!("{native}"));
+            assert_eq!(fix.apply(&V::Int(0)).unwrap(), V::Bool(false), "{native}");
+            assert_eq!(fix.apply(&V::UInt(1)).unwrap(), V::Bool(true), "{native}");
+            for bad in [
+                V::Int(2),
+                V::Int(-1),
+                V::Int(127),
+                V::Int(-128),
+                V::UInt(255),
+            ] {
+                let err = fix.apply(&bad).unwrap_err();
+                assert_eq!(
+                    err.code.map(|c| c.id),
+                    Some("RIVET_SOURCE_VALUE_UNREPRESENTABLE"),
+                    "a TINYINT(1) holding {bad:?} is refused, never delivered as true"
+                );
+                assert!(
+                    err.reason.starts_with("is TINYINT(1), read as a 0/1 flag")
+                        && err.reason.contains("Declare the column `int16`"),
+                    "{err:?}"
+                );
+            }
+        }
+        for native in ["bit(1)", "bit(8)", "varchar(5)", "decimal(10,0)"] {
             assert!(flag(native).is_none(), "{native} keeps its own reading");
         }
         assert!(mysql_flag_fix(Mysql, "bigint", &DataType::Int64).is_none());

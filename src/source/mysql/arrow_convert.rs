@@ -324,15 +324,15 @@ pub(super) fn rows_to_record_batch_typed(
                 .is_some_and(|c| matches!(c.column_type(), ColumnType::MYSQL_TYPE_BIT))
         });
         let column = schema.field(col_idx).name();
-        let native_flag = wire_columns.is_some_and(|cols| {
+        let tinyint1 = wire_columns.is_some_and(|cols| {
             cols.get(col_idx).is_some_and(|c| {
-                matches!(c.column_type(), ColumnType::MYSQL_TYPE_BIT)
-                    || (matches!(c.column_type(), ColumnType::MYSQL_TYPE_TINY)
-                        && c.column_length() == 1)
+                matches!(c.column_type(), ColumnType::MYSQL_TYPE_TINY) && c.column_length() == 1
             })
         });
+        let native_flag =
+            is_bit || (tinyint1 && seeded!("mysql-tinyint1-any-nonzero-true", true, false));
         arrays.push(if matches!(arrow_type, DataType::Boolean) && !native_flag {
-            build_bool_strict(col_idx, rows, column)?
+            build_bool_strict(col_idx, rows, column, tinyint1)?
         } else {
             build_array(arrow_type, col_idx, rows, is_bit, column, max_value_bytes)?
         });
@@ -705,13 +705,32 @@ fn unparsed<T>(column: &str, target: &str, bv: &[u8]) -> Result<T> {
     )
 }
 
+/// The way out for a `TINYINT(1)` holding a value other than 0 or 1, batch and CDC alike.
+pub(crate) const TINYINT1_REMEDY: &str = "rivet refuses rather than writing it as true. \
+     Declare the column `int16` in `columns:` to carry its integers, or correct the value at the source.";
+
 /// True for the zero date MySQL stores in place of a missing one.
 fn is_zero_date(bv: &[u8]) -> bool {
     bv.starts_with(b"0000-00-00")
 }
 
-/// A 0/1 flag column read under a `bool` override: any other value is refused by code.
-fn build_bool_strict(col_idx: usize, rows: &[mysql::Row], column: &str) -> Result<Arc<dyn Array>> {
+/// A 0/1 flag column (a `TINYINT(1)`, or an integer under a `bool` override): any other value is refused by code.
+fn build_bool_strict(
+    col_idx: usize,
+    rows: &[mysql::Row],
+    column: &str,
+    tinyint1: bool,
+) -> Result<Arc<dyn Array>> {
+    let refuse = |text: &[u8]| -> Result<Arc<dyn Array>> {
+        if tinyint1 {
+            crate::rivet_bail!(
+                crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+                "column `{column}` is TINYINT(1), read as a 0/1 flag, and holds {} — {TINYINT1_REMEDY}",
+                String::from_utf8_lossy(text)
+            )
+        }
+        unparsed(column, "bool (0 or 1)", text)
+    };
     let mut b = BooleanBuilder::with_capacity(rows.len());
     for row in rows {
         match row.as_ref(col_idx) {
@@ -719,13 +738,9 @@ fn build_bool_strict(col_idx: usize, rows: &[mysql::Row], column: &str) -> Resul
             Some(Value::Int(1)) | Some(Value::UInt(1)) => b.append_value(true),
             Some(Value::Bytes(bv)) if bv.as_slice() == b"0" => b.append_value(false),
             Some(Value::Bytes(bv)) if bv.as_slice() == b"1" => b.append_value(true),
-            Some(Value::Int(v)) => {
-                return unparsed(column, "bool (0 or 1)", v.to_string().as_bytes());
-            }
-            Some(Value::UInt(v)) => {
-                return unparsed(column, "bool (0 or 1)", v.to_string().as_bytes());
-            }
-            Some(Value::Bytes(bv)) => return unparsed(column, "bool (0 or 1)", bv),
+            Some(Value::Int(v)) => return refuse(v.to_string().as_bytes()),
+            Some(Value::UInt(v)) => return refuse(v.to_string().as_bytes()),
+            Some(Value::Bytes(bv)) => return refuse(bv),
             other => {
                 null_or_refuse(column, &DataType::Boolean, other)?;
                 b.append_null();
@@ -1705,6 +1720,44 @@ mod roast_mysql_bit_decode_tests {
         drop(conn);
         server.join().expect("fake MySQL server thread");
         mapped
+    }
+
+    /// A TINYINT(1) is read as a 0/1 flag: 0 and 1 land as false and true, any other value is refused by code, never written as true.
+    #[test]
+    fn a_tinyint1_holding_a_value_other_than_0_or_1_is_refused() {
+        use mysql::consts::ColumnType::*;
+        let batch_of = |v: i8| {
+            let defs = vec![column_definition("f", 63, 1, MYSQL_TYPE_TINY as u8, 0, 0)];
+            let rows = fetch_binary_rows(defs, vec![vec![Some(v.to_le_bytes().to_vec())]]);
+            let columns = rows[0].columns_ref().to_vec();
+            let (schema, arrow_types) =
+                mysql_schema_and_arrow_types(&columns, &ColumnOverrides::new()).unwrap();
+            assert_eq!(arrow_types, vec![DataType::Boolean]);
+            rows_to_record_batch_typed(&Arc::new(schema), &arrow_types, &rows, None)
+        };
+        for (v, want) in [(0, false), (1, true)] {
+            let batch = batch_of(v).unwrap();
+            let col = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::BooleanArray>()
+                .unwrap();
+            assert_eq!(col.value(0), want, "{v}");
+        }
+        for v in [2, 5, -1, 127, -128] {
+            let err = batch_of(v).unwrap_err();
+            assert_eq!(
+                crate::error::error_code(&err),
+                Some("RIVET_SOURCE_VALUE_UNREPRESENTABLE"),
+                "{v}: {err:#}"
+            );
+            assert!(
+                format!("{err:#}").contains(&format!(
+                    "column `f` is TINYINT(1), read as a 0/1 flag, and holds {v}"
+                )),
+                "{err:#}"
+            );
+        }
     }
 
     /// Smoke test for the binary-protocol server.

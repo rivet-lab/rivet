@@ -6792,3 +6792,20 @@ seeds:
         cells: ["lib:check_names_exactly_the_codes_only_a_value_raises"]
       mongo:
         cells: ["lib:check_names_exactly_the_codes_only_a_value_raises"]
+
+  - name: mysql-tinyint1-any-nonzero-true
+    class: "a MySQL TINYINT(1) is read as a flag where any nonzero value is true, so 2, 5, 127, -1 or 255 arrive as true in batch and CDC, exit 0"
+    history: "type matrix class MYSQL_TINYINT_BOOL (known_red 2026-11-16, 35 pairs across ClickHouse, BigQuery and Snowflake); owner decision 2026-11-20: refuse a value other than 0 or 1 now, deliver Int8 later"
+    scope: source
+    switch: mysql-tinyint1-any-nonzero-true
+    engines:
+      mysql:
+        cells: ["lib:a_tinyint1_holding_a_value_other_than_0_or_1_is_refused", "lib:an_integer_under_a_bool_override_is_a_flag_or_refused"]
+      postgres:
+        na: "PostgreSQL has a real boolean and no TINYINT(1) display-width convention, so no integer is read as a flag without a `bool` override"
+      mssql:
+        na: "SQL Server bit holds only 0 and 1, so no wider integer is read as a flag without a `bool` override"
+      oracle:
+        na: "Oracle has a real BOOLEAN (23ai) and NUMBER(1) maps to an integer, so no integer is read as a flag without a `bool` override"
+      mongo:
+        na: "a BSON boolean is its own type; an integer field is never read as a flag"
