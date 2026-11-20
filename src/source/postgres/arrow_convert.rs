@@ -631,13 +631,36 @@ impl crate::source::value_checksum::CellSource for PgCellSource<'_> {
                     })
             };
         }
+        let elem_type = r.columns().get(col).and_then(|c| match c.type_().kind() {
+            Kind::Array(e) => Some(e.clone()),
+            _ => None,
+        });
+        // The same element decoders `build_pg_list_array` reads with: a json, interval, enum or oid element the plain read cannot take would hash as an empty list and stop the export.
+        let special = seeded!("pg-special-array-checksum-reads-nothing", false, true);
         match elem {
             DataType::Boolean => l!(bool, E::Bool),
             DataType::Int16 => l!(i16, E::I16),
             DataType::Int32 => l!(i32, E::I32),
+            DataType::Int64 if special && elem_type == Some(Type::OID) => {
+                l!(u32, |v: u32| E::I64(i64::from(v)))
+            }
             DataType::Int64 => l!(i64, E::I64),
             DataType::Float32 => l!(f32, E::F32),
             DataType::Float64 => l!(f64, E::F64),
+            DataType::Utf8 if special => match &elem_type {
+                Some(t) if *t == Type::JSON || *t == Type::JSONB => {
+                    l!(PgJsonRawText<'_>, |t: PgJsonRawText<'_>| E::Str(
+                        t.0.as_bytes().to_vec()
+                    ))
+                }
+                Some(t) if *t == Type::INTERVAL => l!(PgInterval, |iv: PgInterval| E::Str(
+                    pg_interval_to_iso8601(iv.months, iv.days, iv.microseconds).into_bytes()
+                )),
+                Some(t) if matches!(t.kind(), Kind::Enum(_)) => {
+                    l!(AnyAsString, |s: AnyAsString| E::Str(s.0.into_bytes()))
+                }
+                _ => l!(String, |s: String| E::Str(s.into_bytes())),
+            },
             DataType::Utf8 => l!(String, |s: String| E::Str(s.into_bytes())),
             _ => None,
         }
@@ -991,7 +1014,10 @@ fn build_pg_list_array(
         DataType::Int64 => list_of!(i64, Int64Builder),
         DataType::Float32 => list_of!(f32, Float32Builder),
         DataType::Float64 => list_of!(f64, Float64Builder),
-        DataType::Utf8 if seeded!("pg-json-interval-oid-enum-array-refused", false, true) && pg_list_elem_is_wire_special(rows, col_idx) => {
+        DataType::Utf8
+            if seeded!("pg-json-interval-oid-enum-array-refused", false, true)
+                && pg_list_elem_is_wire_special(rows, col_idx) =>
+        {
             let elem = pg_list_elem_type(rows, col_idx).expect("checked by the guard");
             if elem == Type::JSON || elem == Type::JSONB {
                 list_mapped!(PgJsonRawText<'_>, StringBuilder::new(), b, t => b.append_value(t.0))

@@ -6843,3 +6843,20 @@ seeds:
         na: "SQL Server has no interval column type, so no interval value reaches the renderer the seed edits"
       mongo:
         na: "BSON has no interval type, so no MongoDB value reaches the renderer the seed edits"
+
+  - name: pg-special-array-checksum-reads-nothing
+    class: "a non-empty PostgreSQL json[], jsonb[], interval[], oid[] or enum[] value stops the whole batch export with RIVET_INTERNAL_VALUE_CONVERTER: the value checksum's source side reads those elements with the plain typed decoder, which cannot take them, and hashes the list as empty"
+    history: "measured 2026-11-20 on PostgreSQL 16.14 (type-matrix delivery measurement, local stand): every non-empty cell of the five rows refused with `value checksum mismatch ... source=0`; the builder learned those element types in #1069 (pg-json-interval-oid-enum-array-refused) but the checksum's source side did not"
+    scope: source
+    engines:
+      postgres:
+        switch: pg-special-array-checksum-reads-nothing
+        cells: [postgres_batch_and_cdc_deliver_every_ledger_row_alike]
+      mysql:
+        na: "the seed edits the PostgreSQL value checksum's list reader; MySQL has no array column type"
+      mssql:
+        na: "the seed edits the PostgreSQL value checksum's list reader; SQL Server has no array column type"
+      oracle:
+        na: "the seed edits the PostgreSQL value checksum's list reader; an Oracle collection column is refused by type, not built as a list"
+      mongo:
+        na: "the seed edits the PostgreSQL value checksum's list reader; a MongoDB array rides the document column"
