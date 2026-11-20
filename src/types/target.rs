@@ -637,7 +637,18 @@ mod bigquery {
             RivetType::Decimal { precision, scale } => decimal(*precision, *scale),
             RivetType::Date => Resolved::ok(BqType::Date),
             RivetType::Time { .. } => Resolved::ok(BqType::Time),
-            // tz-aware timestamp → instant → TIMESTAMP, autoloads cleanly.
+            RivetType::Timestamp {
+                unit: TimeUnit::Nanosecond,
+                timezone: Some(_),
+            } => Resolved::diverge(
+                BqType::Int64,
+                BqType::Int64,
+                "nanosecond zoned timestamp has no BigQuery native type (TIMESTAMP is microsecond) — \
+                 lands as INT64 UTC nanoseconds since the epoch, lossless; a TIMESTAMP declared over \
+                 it reads the nanoseconds as microseconds. Declare the column `timestamp_tz` for a \
+                 microsecond TIMESTAMP",
+                None,
+            ),
             RivetType::Timestamp {
                 timezone: Some(_), ..
             } => Resolved::ok(BqType::Timestamp),
@@ -1266,6 +1277,31 @@ mod tests {
         assert_eq!(s.status, TargetStatus::Warn);
         // No lossless temporal recovery (ns→µs is lossy) — like the UINT64 case.
         assert!(s.cast_sql.is_none(), "ns→BQ has no lossless temporal cast");
+    }
+
+    #[test]
+    fn bq_nanosecond_zoned_timestamp_lands_as_int64_like_the_naive_one() {
+        let ns_tz = RivetType::Timestamp {
+            unit: super::super::TimeUnit::Nanosecond,
+            timezone: Some("UTC".into()),
+        };
+        let s = bq(&ns_tz);
+        assert_eq!(s.target_type, "INT64");
+        assert_eq!(s.autoload_type, "INT64");
+        assert_eq!(s.status, TargetStatus::Warn);
+        assert!(s.cast_sql.is_none());
+        for unit in [
+            super::super::TimeUnit::Second,
+            super::super::TimeUnit::Millisecond,
+            super::super::TimeUnit::Microsecond,
+        ] {
+            let s = bq(&RivetType::Timestamp {
+                unit,
+                timezone: Some("UTC".into()),
+            });
+            assert_eq!(s.target_type, "TIMESTAMP");
+            assert_eq!(s.status, TargetStatus::Ok);
+        }
     }
 
     #[test]
