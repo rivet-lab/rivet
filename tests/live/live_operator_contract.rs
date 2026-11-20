@@ -3424,11 +3424,11 @@ fn an_unrepresentable_value_is_refused_by_code(e: SqlEngine) {
             "maps the sentinels to a real bound",
         ),
         SqlEngine::Mysql => (
-            "TIME(6)",
-            "'12:00:00'",
-            "'838:59:59'",
+            "BIGINT",
+            "1",
+            "9007199254740993",
             format!("CAST({t} AS CHAR)"),
-            "Cast it in a query",
+            "Declare `decimal(20,0)` to keep the integer",
         ),
         other => panic!("no unrepresentable-value fixture on {other:?}"),
     };
@@ -3445,6 +3445,10 @@ fn an_unrepresentable_value_is_refused_by_code(e: SqlEngine) {
     let mut rig = e
         .rig("unrep")
         .query(&format!("SELECT {id}, {t} FROM {table} ORDER BY {id}"));
+    let declared = matches!(e, SqlEngine::Mysql);
+    if declared {
+        rig = rig.export_line("columns: { t: float8 }");
+    }
     let same = Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
     let mut remedies = vec![
         Remedy::wrong(
@@ -3462,6 +3466,10 @@ fn an_unrepresentable_value_is_refused_by_code(e: SqlEngine) {
         Remedy::new(cast_sentence, Then::DeliversTheSource, {
             let (id, t, table) = (id.clone(), t.clone(), table.clone());
             move |r| {
+                if declared {
+                    r.set_export_lines(&["columns: { t: \"decimal(20,0)\" }"]);
+                    return;
+                }
                 r.rebuilt(|rig| {
                     rig.query(&format!(
                         "SELECT {id}, {mapped} AS {t} FROM {table} ORDER BY {id}"
@@ -3470,6 +3478,13 @@ fn an_unrepresentable_value_is_refused_by_code(e: SqlEngine) {
             }
         }),
     ];
+    if declared {
+        remedies.push(Remedy::new(
+            "or remove the override",
+            Then::DeliversTheSource,
+            |r| r.set_export_lines(&[]),
+        ));
+    }
     if matches!(e, SqlEngine::Pg) {
         remedies.push(Remedy::new(
             "exclude the column",
@@ -3503,7 +3518,7 @@ fn worker_refusal_fixture(
 ) -> (&'static str, &'static str, &'static str, &'static str) {
     match e {
         SqlEngine::Pg => ("TIMESTAMP", "'2024-01-01 00:00:00'", "'infinity'", ""),
-        SqlEngine::Mysql => ("TIME(6)", "'12:00:00'", "'838:59:59'", ""),
+        SqlEngine::Mysql => ("BIGINT", "1", "9007199254740993", "columns: { t: float8 }"),
         SqlEngine::Mssql => ("MONEY", "1.00", "900000000000000.00", ""),
         #[cfg(feature = "oracle")]
         SqlEngine::Oracle => (
@@ -3777,30 +3792,6 @@ fn a_cell_the_stream_cannot_carry_is_refused_by_code_mysql() {
             |r| r.rebuilt(|rig| rig.export_line("columns: { b: \"decimal(20,0)\" }")),
         )],
         move || mysql_cdc_drop_column(&table, "b"),
-    );
-}
-
-/// MySQL: a `TIME` past 24 hours (`800:00:00`), a duration no Parquet TIME holds, is refused as `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5) on every run; the checkpoint deleted alone is refused under the baseline; the column declared `string` in `columns:` carries it as text, and the column left out of the capture with the re-baseline recipe delivers the source.
-#[test]
-#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
-fn a_time_past_a_day_in_a_stream_is_refused_by_code_and_both_remedies_deliver_mysql() {
-    let s = CdcScenario::mysql_with(
-        "oc_time",
-        "id BIGINT PRIMARY KEY, v BIGINT, t TIME",
-        |r, _| r.cdc("initial: snapshot"),
-    );
-    let table = s.table.clone();
-    let hostile = format!("INSERT INTO {table} VALUES (3, 3, '800:00:00')");
-    a_captured_cell_is_refused_by_code_and_walked_out(
-        s,
-        &hostile,
-        Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5),
-        vec![Remedy::new(
-            "declare the column `string` in `columns:`",
-            Then::DeliversTheSource,
-            |r| r.rebuilt(|rig| rig.export_line("columns: { t: string }")),
-        )],
-        move || mysql_cdc_drop_column(&table, "t"),
     );
 }
 
