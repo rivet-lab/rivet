@@ -278,7 +278,7 @@ pub fn doctor(config_path: &str, json: bool, run_plan: RunPlanProbe<'_>) -> Resu
         }
     }
 
-    let run_refusal = source_ok
+    let run_refusal = (source_ok && seeded!("doctor-skips-cursor-admission", false, true))
         .then(|| run_plan_checks(&config, config_dir, run_plan, json, &mut checks))
         .flatten();
     all_ok &= run_refusal.is_none();
