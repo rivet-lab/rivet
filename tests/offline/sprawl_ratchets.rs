@@ -58,7 +58,7 @@ const LONG_FUNCTION_LINES: usize = 150;
 const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ("src/cli/dispatch.rs::dispatch#1", 195),
     ("src/error/retry.rs::classify_error#1", 206),
-    ("src/format/csv.rs::write_csv_value#1", 184),
+    ("src/format/csv.rs::write_csv_value#1", 165),
     ("src/init/yaml_scaffold.rs::export_block_lines#1", 243),
     ("src/load/orchestrate.rs::load_incremental_job#1", 163),
     ("src/load/orchestrate.rs::load_one_cdc_base#1", 155),
@@ -108,7 +108,7 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
     // 2026-11-17: 257 -> 238, the run-plan and named-check emitters left doctor (see #1041).
     ("src/preflight/doctor.rs::doctor#1", 238),
     ("src/preflight/mod.rs::check#1", 226),
-    ("src/source/mssql/arrow_convert.rs::build_array#1", 244),
+    ("src/source/mssql/arrow_convert.rs::build_array#1", 222),
     ("src/source/mysql/arrow_convert.rs::build_array#1", 300),
     ("src/source/mysql/cdc.rs::fill#1", 253),
     ("src/source/oracle/arrow_convert.rs::build_column#1", 178),

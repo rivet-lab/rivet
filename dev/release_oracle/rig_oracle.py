@@ -232,7 +232,7 @@ def arrow_to_duck(delivery: str, text_forms: set[str]) -> str | None:
         "UInt8": "UTINYINT", "UInt16": "USMALLINT", "UInt32": "UINTEGER", "UInt64": "UBIGINT",
         "Float32": "FLOAT", "Float64": "DOUBLE", "Boolean": "BOOLEAN", "Utf8": "VARCHAR",
         "LargeUtf8": "VARCHAR", "Binary": "BLOB", "LargeBinary": "BLOB", "Date32": "DATE",
-        "Time64(µs)": "TIME", "Time64(ns)": "TIME_NS", "Timestamp(µs)": "TIMESTAMP", "Timestamp(ns)": "TIMESTAMP_NS",
+        "Time64(µs)": "TIME", "Time64(ns)": "VARCHAR", "Timestamp(µs)": "TIMESTAMP", "Timestamp(ns)": "TIMESTAMP_NS",
         "Timestamp(ms)": "TIMESTAMP_MS", "Timestamp(s)": "TIMESTAMP_S", "arrow.uuid": "UUID",
     }
     if delivery in fixed:
@@ -2312,6 +2312,7 @@ def _self_test() -> None:
     assert norm_native("DATETIME2(6)") == "DATETIME2(6)" and norm_native("DATETIME2(3)") == "DATETIME2(3)"
     assert arrow_to_duck('Timestamp(µs, "UTC")', set()) == "TIMESTAMP WITH TIME ZONE"
     assert arrow_to_duck('Timestamp(ns, "UTC")', set()) == "VARCHAR", "a zoned nanosecond part is read as exact text"
+    assert arrow_to_duck("Time64(ns)", set()) == "VARCHAR", "a nanosecond time part is read as exact text"
     assert arrow_to_duck("List(Decimal128(18, 2))", set()) == "DECIMAL(18,2)[]"
     from .value_diff import canon
 
