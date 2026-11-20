@@ -639,7 +639,7 @@ pub(crate) fn refuse_override_wire_mismatch(
         return Ok(());
     }
     if let Err(e) = src.type_mappings(base_query, column_overrides) {
-        if is_wire_mismatch(&e) {
+        if is_wire_mismatch(&e) && seeded!("check-override-wire-not-refused", false, true) {
             return Err(e);
         }
         log::debug!("override table probe ended without a verdict: {e:#}");
