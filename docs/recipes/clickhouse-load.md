@@ -166,13 +166,17 @@ works the same way: name it in `named_collection:`.
 
 ## Known limits
 
-- **Timestamp range.** `DateTime64` holds 1900-01-01 to 2299-12-31, and ClickHouse
-  stores a value outside it as the nearest end, silently. So rivet reads each part's
-  footer first, whether it sends the part or ClickHouse pulls it through a named
-  collection, and refuses the part, inserting nothing, if a timestamp column holds a
-  value outside that range or has no min/max statistics
-  (`RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE`). A `Date32` outside the same range fails the
-  insert: ClickHouse refuses it itself (measured on a part rivet sends).
+- **Date and timestamp range.** `DateTime64` and `Date32` hold 1900-01-01 to 2299-12-31.
+  ClickHouse stores a `DateTime64` outside it as the nearest end, silently, and stores the
+  `Date32` 2300-01-01 as 2299-12-31, silently (any other `Date32` outside the range it
+  refuses itself). So rivet reads each part's footer first, whether it sends the part or
+  ClickHouse pulls it through a named collection, and refuses the part, inserting
+  nothing, if a date or timestamp column holds a value outside that range or has no
+  min/max statistics (`RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE`, exit 5). Cast the column
+  to text in the export's `query:` to keep the value (`columns:` does not convert a date or
+  timestamp to `string` on PostgreSQL or SQL Server), or correct it at the source.
+  Until 2026-11-20 a date outside the range was not inspected: 2300-01-01 loaded as
+  2299-12-31 and the others were refused by ClickHouse as `RIVET_LOAD_WAREHOUSE_REJECTED`.
 - **Naive timestamps are declared in UTC.** A timestamp without a zone lands as
   `DateTime64(p, 'UTC')`, so it reads back as the source wrote it whatever the server's
   or the session's time zone. A table created by 0.32.2 or earlier declares it

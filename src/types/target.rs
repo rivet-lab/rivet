@@ -972,6 +972,67 @@ fn clickhouse_recovery_sql(specs: &[TargetColumnSpec], table: &str) -> String {
 /// The zone every ClickHouse timestamp column is declared in, naive or not.
 pub(crate) const CLICKHOUSE_TIMESTAMP_ZONE: &str = "UTC";
 
+/// The calendar families whose range a warehouse states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TemporalKind {
+    Date,
+    Timestamp,
+}
+
+/// What one warehouse temporal type holds, in Unix seconds (a date is its midnight).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ValueRange {
+    pub type_name: &'static str,
+    pub lo_secs: i64,
+    pub hi_secs: i64,
+    pub enforced: &'static str,
+    pub beyond: &'static str,
+}
+
+impl ValueRange {
+    /// `1900-01-01 to 2299-12-31`.
+    pub(crate) fn span(&self) -> String {
+        let day = |secs: i64| {
+            chrono::DateTime::from_timestamp(secs, 0)
+                .map_or_else(|| secs.to_string(), |t| t.format("%Y-%m-%d").to_string())
+        };
+        format!("{} to {}", day(self.lo_secs), day(self.hi_secs))
+    }
+}
+
+/// ClickHouse `Date32` and `DateTime64`: 1900-01-01 to 2299-12-31, the one place every guard and note reads.
+pub(crate) const CLICKHOUSE_TEMPORAL_RANGES: [(TemporalKind, ValueRange); 2] = [
+    (
+        TemporalKind::Date,
+        ValueRange {
+            type_name: "Date32",
+            lo_secs: -2_208_988_800,
+            hi_secs: 10_413_791_999,
+            enforced: "rejecting the insert, and storing 2300-01-01 as 2299-12-31 silently",
+            beyond: "reject the insert, or store 2300-01-01 as 2299-12-31 silently",
+        },
+    ),
+    (
+        TemporalKind::Timestamp,
+        ValueRange {
+            type_name: "DateTime64",
+            lo_secs: -2_208_988_800,
+            hi_secs: 10_413_791_999,
+            enforced: "storing the nearest end silently",
+            beyond: "store the nearest end instead, silently",
+        },
+    ),
+];
+
+/// The ClickHouse range of one temporal kind.
+pub(crate) fn clickhouse_range(kind: TemporalKind) -> ValueRange {
+    CLICKHOUSE_TEMPORAL_RANGES
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .map(|(_, r)| *r)
+        .expect("every temporal kind has a ClickHouse range")
+}
+
 mod clickhouse {
     use super::*;
 
@@ -1027,7 +1088,19 @@ mod clickhouse {
                     Resolved::ok(ChType::Decimal(u16::from(*precision), *scale))
                 }
             }
-            RivetType::Date => Resolved::ok(ChType::Date32),
+            RivetType::Date => {
+                let range = clickhouse_range(TemporalKind::Date);
+                Resolved::warn(
+                    ChType::Date32,
+                    format!(
+                        "{} holds {}; rivet load refuses a part holding a value outside it, pushed \
+                         or pulled through a named collection, before ClickHouse would {}",
+                        range.type_name,
+                        range.span(),
+                        range.beyond
+                    ),
+                )
+            }
             // No time-of-day type: an Int64 column keeps whole seconds only (measured:
             // 13:45:07.123456 -> 49507); Decimal64 keeps the fraction (49507.123456).
             RivetType::Time { unit } => {
@@ -1053,11 +1126,16 @@ mod clickhouse {
                     TimeUnit::Microsecond => 6,
                     TimeUnit::Nanosecond => 9,
                 };
+                let range = clickhouse_range(TemporalKind::Timestamp);
                 Resolved::warn(
                     ChType::DateTime64(p, Some(super::CLICKHOUSE_TIMESTAMP_ZONE.into())),
-                    "DateTime64 holds 1900-01-01 to 2299-12-31; rivet load refuses a part holding a \
-                     value outside it, pushed or pulled through a named collection, but any other \
-                     reader of the Parquet gets the nearest end, silently",
+                    format!(
+                        "{} holds {}; rivet load refuses a part holding a value outside it, pushed \
+                         or pulled through a named collection, but any other reader of the Parquet \
+                         gets the nearest end, silently",
+                        range.type_name,
+                        range.span()
+                    ),
                 )
             }
             RivetType::String | RivetType::Text | RivetType::Enum => Resolved::ok(ChType::String),
@@ -1834,6 +1912,51 @@ mod tests {
                 .contains("1900-01-01 to 2299-12-31"),
             "an element's range warning reaches the array: {:?}",
             stamps.note
+        );
+    }
+
+    /// ClickHouse's date and timestamp ranges are the ones measured on the server, and the notes quote them.
+    #[test]
+    fn clickhouse_ranges_are_the_measured_ones_and_the_notes_quote_them() {
+        for (kind, name) in [
+            (TemporalKind::Date, "Date32"),
+            (TemporalKind::Timestamp, "DateTime64"),
+        ] {
+            let r = clickhouse_range(kind);
+            assert_eq!(
+                (r.type_name, r.lo_secs, r.hi_secs, r.span().as_str()),
+                (
+                    name,
+                    -2_208_988_800,
+                    10_413_791_999,
+                    "1900-01-01 to 2299-12-31"
+                )
+            );
+        }
+        let date = ch(&RivetType::Date);
+        assert_eq!(
+            (date.target_type.to_string().as_str(), date.status),
+            ("Date32", TargetStatus::Warn)
+        );
+        assert_eq!(
+            date.note.as_deref(),
+            Some(
+                "Date32 holds 1900-01-01 to 2299-12-31; rivet load refuses a part holding a value \
+                 outside it, pushed or pulled through a named collection, before ClickHouse would \
+                 reject the insert, or store 2300-01-01 as 2299-12-31 silently"
+            )
+        );
+        let dates = ch(&RivetType::List {
+            inner: Box::new(RivetType::Date),
+        });
+        assert!(
+            dates
+                .note
+                .as_deref()
+                .unwrap_or("")
+                .contains("Date32 holds 1900-01-01 to 2299-12-31"),
+            "{:?}",
+            dates.note
         );
     }
 

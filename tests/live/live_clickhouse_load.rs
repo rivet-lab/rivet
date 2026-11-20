@@ -1592,6 +1592,87 @@ fn a_timestamp_clickhouse_cannot_hold_is_refused_not_clamped() {
     );
 }
 
+/// A DATE past ClickHouse Date32's range is refused before any row is inserted, 2300-01-01 included.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + postgres"]
+fn a_date_clickhouse_cannot_hold_is_refused_not_clamped() {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    for (day, shown) in [
+        ("2300-01-01", "2300-01-01"),
+        ("9999-12-31", "9999-12-31"),
+        ("1899-12-31", "1899-12-31"),
+    ] {
+        let mut c = pg_connect();
+        let tbl = unique_name("rivet_ch_fard");
+        c.batch_execute(&format!(
+            "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, d DATE); \
+             INSERT INTO {tbl} VALUES (1, DATE '2024-01-01'), (2, DATE '{day}')"
+        ))
+        .expect("seed");
+        let _t = PgTable::adopt(tbl.clone());
+        let db = Db::new("rivet_chtest");
+        let rig = batch_into_clickhouse(Rig::pg_batch(&tbl).mode("full"), &db);
+        rig.run_ok();
+        let out = rig.load_args_env(&[], &[(PASSWORD_ENV, CLICKHOUSE_PASSWORD)]);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{day}: the load must refuse:\n{err}");
+        assert!(
+            err.contains(&format!(
+                "column `d` holds {shown}, outside ClickHouse Date32's range (1900-01-01 to 2299-12-31)"
+            )) && err.contains("RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE"),
+            "{day}: {err}"
+        );
+        let stored = ch(&format!(
+            "SELECT count() FROM system.tables WHERE database = '{}' AND name = '{tbl}' FORMAT TSV",
+            db.0
+        ));
+        let rows = if stored.trim() == "1" {
+            ch(&format!("SELECT count() FROM {}.{tbl} FORMAT TSV", db.0))
+        } else {
+            "0".to_string()
+        };
+        assert_eq!(rows.trim(), "0", "{day}: nothing was inserted");
+    }
+}
+
+/// The remedy the date refusal names, a String column, delivers 2300-01-01 as the source holds it.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + postgres"]
+fn a_date_cast_to_text_in_the_query_keeps_the_value_clickhouse_cannot_hold() {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let mut c = pg_connect();
+    let tbl = unique_name("rivet_ch_strd");
+    c.batch_execute(&format!(
+        "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, d DATE); \
+         INSERT INTO {tbl} VALUES (1, DATE '2024-01-01'), (2, DATE '2300-01-01')"
+    ))
+    .expect("seed");
+    let _t = PgTable::adopt(tbl.clone());
+    let db = Db::new("rivet_chtest");
+    let rig = batch_into_clickhouse(
+        Rig::pg_batch(&tbl)
+            .mode("full")
+            .query(&format!("SELECT id, d::text AS d FROM {tbl}")),
+        &db,
+    );
+    rig.run_ok();
+    let out = rig.load_args_env(&[], &[(PASSWORD_ENV, CLICKHOUSE_PASSWORD)]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let got = clickhouse_rows_tsv(&format!(
+        "SELECT toString(d) FROM {}.{tbl} ORDER BY id FORMAT TSV",
+        db.0
+    ));
+    assert_eq!(got.trim(), "2024-01-01\n2300-01-01");
+}
+
 /// A column added between the first full pass and the first delta: the adoption refuses,
 /// and the remedy its message names must keep the baseline rows in the view.
 #[test]

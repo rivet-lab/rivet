@@ -3,6 +3,7 @@
 use crate::destination::gcs::GcsStore;
 use crate::load;
 use crate::load::plan::{Granularity, PartitionKey, TablePartition};
+use crate::types::target::{TemporalKind, ValueRange};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike};
 use parquet::basic::{LogicalType, TimeUnit, TimestampType, Type as PhysicalType};
@@ -256,32 +257,63 @@ fn column_span_at(meta: &ParquetMetaData, idx: usize) -> ColumnStats {
     span.map_or(ColumnStats::NoValues, |s| ColumnStats::Span(s, nulls))
 }
 
-/// The first timestamp column the footer does not show inside `[lo_secs, hi_secs]` (Unix seconds).
-pub(crate) fn timestamp_outside(
+/// A temporal column the footer does not show inside the target's range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Outside {
+    pub column: String,
+    pub range: ValueRange,
+    pub value: Option<String>,
+}
+
+/// The first date or timestamp column the footer does not show inside its kind's range.
+pub(crate) fn temporal_outside(
     meta: &ParquetMetaData,
-    lo_secs: i64,
-    hi_secs: i64,
-) -> Option<(String, Option<String>)> {
+    ranges: &[(TemporalKind, ValueRange)],
+) -> Option<Outside> {
     let schema = meta.file_metadata().schema_descr();
     schema.columns().iter().enumerate().find_map(|(idx, c)| {
-        if !matches!(c.logical_type_ref(), Some(LogicalType::Timestamp(_))) {
-            return None;
-        }
-        let name = c.path().string();
+        let kind = match c.logical_type_ref() {
+            Some(LogicalType::Timestamp(_)) => TemporalKind::Timestamp,
+            Some(LogicalType::Date) if seeded!("ch-date-footer-guard-skips-dates", false, true) => {
+                TemporalKind::Date
+            }
+            _ => return None,
+        };
+        let range = ranges.iter().find(|(k, _)| *k == kind).map(|(_, r)| *r)?;
+        let column = c.path().string();
         let span = match column_span_at(meta, idx) {
             ColumnStats::Span(span, _) => span,
             ColumnStats::NoValues => return None,
-            ColumnStats::Unknown => return Some((name, None)),
+            ColumnStats::Unknown => {
+                return Some(Outside {
+                    column,
+                    range,
+                    value: None,
+                });
+            }
         };
-        let end = if to_seconds(span.lo, span.unit) < lo_secs {
+        let end = if to_seconds(span.lo, span.unit) < range.lo_secs {
             span.lo
-        } else if to_seconds(span.hi, span.unit) > hi_secs {
+        } else if to_seconds(span.hi, span.unit) > range.hi_secs {
             span.hi
         } else {
             return None;
         };
-        Some((name, Some(render(end, span.unit))))
+        Some(Outside {
+            column,
+            range,
+            value: Some(render_end(end, span.unit)),
+        })
     })
+}
+
+/// A value past a range end: a date as `2300-01-01`, a timestamp as `2300-01-01 00:00`.
+fn render_end(v: i64, unit: Unit) -> String {
+    match unit {
+        Unit::Days => DateTime::from_timestamp(to_seconds(v, unit), 0)
+            .map_or_else(|| v.to_string(), |t| t.format("%Y-%m-%d").to_string()),
+        unit => render(v, unit),
+    }
 }
 
 /// The unit a partitionable column's statistics are in, by its Parquet type.
@@ -503,6 +535,95 @@ mod tests {
         write_noted(dir, name, field, column, stats, None);
     }
 
+    fn range_of(type_name: &'static str, lo: i64, hi: i64) -> ValueRange {
+        ValueRange {
+            type_name,
+            lo_secs: lo,
+            hi_secs: hi,
+            enforced: "",
+            beyond: "",
+        }
+    }
+
+    /// The first timestamp column outside `lo..=hi` as `(column, value)`.
+    fn timestamp_outside(
+        meta: &ParquetMetaData,
+        lo: i64,
+        hi: i64,
+    ) -> Option<(String, Option<String>)> {
+        let ranges = [(TemporalKind::Timestamp, range_of("DateTime64", lo, hi))];
+        temporal_outside(meta, &ranges).map(|o| (o.column, o.value))
+    }
+
+    /// The first date column outside `lo..=hi` as `(column, value)`.
+    fn date_outside(meta: &ParquetMetaData, lo: i64, hi: i64) -> Option<(String, Option<String>)> {
+        let ranges = [(TemporalKind::Date, range_of("Date32", lo, hi))];
+        temporal_outside(meta, &ranges).map(|o| (o.column, o.value))
+    }
+
+    /// Footer metadata of one file of `Date32` column `d` over `days`, with one `ts` timestamp column when `ts` is set.
+    fn date_meta(days: &[i32], ts: Option<i64>, stats: bool) -> ParquetMetaData {
+        let mut fields = vec![Field::new("d", DataType::Date32, false)];
+        let mut cols: Vec<ArrayRef> = vec![Arc::new(Date32Array::from(days.to_vec()))];
+        if let Some(t) = ts {
+            let n = days.len();
+            fields.push(Field::new(
+                "ts",
+                DataType::Timestamp(ArrowUnit::Microsecond, Some("UTC".into())),
+                false,
+            ));
+            cols.push(Arc::new(
+                TimestampMicrosecondArray::from(vec![micros(t); n]).with_timezone("UTC"),
+            ));
+        }
+        let schema = Arc::new(Schema::new(fields));
+        let props = WriterProperties::builder()
+            .set_statistics_enabled(if stats {
+                EnabledStatistics::Chunk
+            } else {
+                EnabledStatistics::None
+            })
+            .build();
+        let mut buf = Vec::new();
+        let mut w = ArrowWriter::try_new(&mut buf, schema.clone(), Some(props)).unwrap();
+        w.write(&RecordBatch::try_new(schema, cols).unwrap())
+            .unwrap();
+        w.close().unwrap();
+        ParquetMetaDataReader::new()
+            .parse_and_finish(&bytes::Bytes::from(buf))
+            .unwrap()
+    }
+
+    /// A date past either end of a range is named by its day; a timestamp column is judged by the timestamp range alone.
+    #[test]
+    fn a_date_past_either_end_of_a_range_is_named_by_its_day() {
+        let (lo, hi) = (at(1900, 1, 1, 0), at(2299, 12, 31, 23));
+        let (first, last) = ((lo / DAY) as i32, (hi / DAY) as i32);
+        assert_eq!(
+            date_outside(&date_meta(&[first, 0, last], None, true), lo, hi),
+            None
+        );
+        assert_eq!(
+            date_outside(&date_meta(&[0, last + 1], None, true), lo, hi),
+            Some(("d".to_string(), Some("2300-01-01".to_string())))
+        );
+        assert_eq!(
+            date_outside(&date_meta(&[first - 1, 0], None, true), lo, hi),
+            Some(("d".to_string(), Some("1899-12-31".to_string())))
+        );
+        assert_eq!(
+            date_outside(&date_meta(&[last + 1], None, false), lo, hi),
+            Some(("d".to_string(), None)),
+            "no statistics is named, never passed"
+        );
+        let both = date_meta(&[0], Some(at(9999, 12, 31, 0)), true);
+        assert_eq!(date_outside(&both, lo, hi), None);
+        assert_eq!(
+            timestamp_outside(&both, lo, hi),
+            Some(("ts".to_string(), Some("9999-12-31 00:00".to_string())))
+        );
+    }
+
     /// The metadata is cut from the bytes in hand only when all of it is there.
     #[test]
     fn the_metadata_is_taken_from_the_first_read_only_when_it_holds_all_of_it() {
@@ -655,6 +776,39 @@ mod tests {
                 Some("9999-12-31 00:00".to_string())
             )),
             "the second list is checked, not the first one twice"
+        );
+    }
+
+    /// A date list is checked by its own leaf, an in-range one passes and a past-the-end element is named.
+    #[test]
+    fn a_date_list_is_checked_by_its_own_leaf() {
+        use arrow::array::{Array, Date32Builder, ListBuilder};
+        let (lo, hi) = (at(1900, 1, 1, 0), at(2299, 12, 31, 23));
+        let meta = |days: &[i32]| {
+            let mut b = ListBuilder::new(Date32Builder::new());
+            for d in days {
+                b.values().append_value(*d);
+            }
+            b.append(true);
+            let a = b.finish();
+            let schema = Arc::new(Schema::new(vec![Field::new(
+                "days",
+                a.data_type().clone(),
+                true,
+            )]));
+            let mut buf = Vec::new();
+            let mut w = ArrowWriter::try_new(&mut buf, schema.clone(), None).unwrap();
+            w.write(&RecordBatch::try_new(schema, vec![Arc::new(a)]).unwrap())
+                .unwrap();
+            w.close().unwrap();
+            ParquetMetaDataReader::new()
+                .parse_and_finish(&bytes::Bytes::from(buf))
+                .unwrap()
+        };
+        assert_eq!(date_outside(&meta(&[0, 20_000]), lo, hi), None);
+        assert_eq!(
+            date_outside(&meta(&[0, 120_530]), lo, hi),
+            Some(("days.list.item".to_string(), Some("2300-01-01".to_string())))
         );
     }
 
