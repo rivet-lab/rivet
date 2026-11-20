@@ -365,11 +365,7 @@ pub(super) fn run_single_export(
         &plan.tuning,
         &plan.column_overrides,
     )
-    .with_catalog_hint_query(seeded!(
-        "partition-child-loses-catalog-hints",
-        None,
-        plan.catalog_query.as_deref()
-    ))
+    .with_catalog_hint_query(plan.catalog_hint_query())
     .with_incremental(plan.strategy.incremental_plan())
     .with_cursor(cursor);
 

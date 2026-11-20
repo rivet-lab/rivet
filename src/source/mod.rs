@@ -345,6 +345,17 @@ pub trait Source: Send {
         column_overrides: &ColumnOverrides,
     ) -> Result<Vec<TypeMapping>>;
 
+    /// `type_mappings` of `query` with the catalog facts read from `hint_query`, the single-table query a wrapped `query` hides.
+    fn type_mappings_hinted(
+        &mut self,
+        query: &str,
+        hint_query: Option<&str>,
+        column_overrides: &ColumnOverrides,
+    ) -> Result<Vec<TypeMapping>> {
+        let _ = hint_query;
+        self.type_mappings(query, column_overrides)
+    }
+
     /// Whether `column` of `query` may hold NULL as the server describes the statement; `None` when it does not say.
     fn column_nullable(&mut self, _query: &str, _column: &str) -> Result<Option<bool>> {
         Ok(None)

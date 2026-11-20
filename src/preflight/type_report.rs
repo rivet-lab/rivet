@@ -440,8 +440,13 @@ pub fn capture_load_units(
         .into_iter()
         .map(|unit| {
             let overrides = unit_overrides(export, unit.table.as_deref(), column_overrides);
-            let mappings =
-                probe_mappings(src.as_mut(), is_stream(export), &unit.query, &overrides)?;
+            let mappings = probe_mappings(
+                src.as_mut(),
+                is_stream(export),
+                &unit.query,
+                None,
+                &overrides,
+            )?;
             let primary_key = match unit.relation.as_deref() {
                 Some(relation) => src.primary_key(relation).unwrap_or_else(|e| {
                     log::warn!(
@@ -569,7 +574,7 @@ fn collect_one(
     policy: &TypePolicy,
     target: Option<ExportTarget>,
 ) -> Result<ExportTypeReport> {
-    let mappings = probe_mappings(src, is_stream(export), query, column_overrides)?;
+    let mappings = probe_mappings(src, is_stream(export), query, None, column_overrides)?;
     Ok(report_from_mappings(
         export,
         table,
@@ -585,19 +590,20 @@ pub(crate) fn probe_mappings(
     src: &mut dyn source::Source,
     stream: bool,
     query: &str,
+    hint_query: Option<&str>,
     column_overrides: &ColumnOverrides,
 ) -> Result<Vec<crate::types::TypeMapping>> {
     let mut mappings = if stream {
-        src.type_mappings(query, &ColumnOverrides::new())?
+        src.type_mappings_hinted(query, hint_query, &ColumnOverrides::new())?
             .into_iter()
             .map(|m| source::cdc::retype_for_stream(m, column_overrides))
             .collect::<Result<Vec<_>>>()?
     } else {
-        src.type_mappings(query, column_overrides)?
+        src.type_mappings_hinted(query, hint_query, column_overrides)?
     };
 
     downgrade_narrowing_overrides(&mut mappings, column_overrides, || {
-        src.type_mappings(query, &ColumnOverrides::new())
+        src.type_mappings_hinted(query, hint_query, &ColumnOverrides::new())
     })?;
     if !stream && seeded!("check-run-refusal-split", false, true) {
         mappings = mappings.into_iter().map(refuse_unmapped).collect();
@@ -1011,9 +1017,9 @@ mod tests {
             }
         }
         let overrides = ColumnOverrides::new();
-        let batch = super::probe_mappings(&mut Unmapped, false, "q", &overrides).unwrap();
+        let batch = super::probe_mappings(&mut Unmapped, false, "q", None, &overrides).unwrap();
         assert_eq!(batch[0].refusal.as_deref(), Some("no arrow type"));
-        let stream = super::probe_mappings(&mut Unmapped, true, "q", &overrides).unwrap();
+        let stream = super::probe_mappings(&mut Unmapped, true, "q", None, &overrides).unwrap();
         assert_eq!(stream[0].refusal, None);
     }
 

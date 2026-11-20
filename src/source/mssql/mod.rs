@@ -701,7 +701,16 @@ impl Source for MssqlSource {
         query: &str,
         column_overrides: &ColumnOverrides,
     ) -> Result<Vec<TypeMapping>> {
-        let catalog_hints = self.mssql_catalog_hints_opt(query);
+        self.type_mappings_hinted(query, None, column_overrides)
+    }
+
+    fn type_mappings_hinted(
+        &mut self,
+        query: &str,
+        hint_query: Option<&str>,
+        column_overrides: &ColumnOverrides,
+    ) -> Result<Vec<TypeMapping>> {
+        let catalog_hints = self.mssql_catalog_hints_opt(hint_query.unwrap_or(query));
         let wrapped = format!("SELECT * FROM ({query}) AS _rivet_q WHERE 1 = 0");
         let overrides = column_overrides.clone();
         let Self { rt, client, .. } = self;

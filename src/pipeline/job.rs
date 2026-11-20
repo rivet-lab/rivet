@@ -115,6 +115,7 @@ fn capture_open_forensics(
         src,
         false,
         &plan.base_query,
+        plan.catalog_hint_query(),
         &plan.column_overrides,
     ) {
         Ok(mappings) => {

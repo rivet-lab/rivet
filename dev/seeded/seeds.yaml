@@ -3197,7 +3197,7 @@ seeds:
         cells: [a_crashed_runs_rows_are_closed_by_the_next_oracle]
   - name: partition-child-loses-catalog-hints
     class: a `partition_by` child resolves catalog type hints from the bucket wrapper, which hides the source table, so a PostgreSQL NUMERIC(p,s) column refuses the export
-    history: 2026-10-14 - open defect (partition_by over a NUMERIC column refused with `precision/scale unavailable`) through 0.31.0; fixed by the plan's catalog_query
+    history: 2026-10-14 - open defect (partition_by over a NUMERIC column refused with `precision/scale unavailable`) through 0.31.0; fixed by the plan's catalog_query; 2026-11-20 - the run-start admission and the drift probe read the wrapper again after #1103 (nightly red), now one plan.catalog_hint_query()
     scope: source
     switch: partition-child-loses-catalog-hints
     engines:

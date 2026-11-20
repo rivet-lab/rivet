@@ -35,7 +35,11 @@ pub(super) fn check_from_type_mappings(
         summary.schema_changed.get_or_insert(false);
         return Ok(());
     }
-    let mappings = match src.type_mappings(&plan.base_query, &plan.column_overrides) {
+    let mappings = match src.type_mappings_hinted(
+        &plan.base_query,
+        plan.catalog_hint_query(),
+        &plan.column_overrides,
+    ) {
         Ok(m) => m,
         Err(e) => {
             log::warn!(

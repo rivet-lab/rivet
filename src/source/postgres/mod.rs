@@ -256,9 +256,19 @@ pub(crate) fn type_mappings_on(
     query: &str,
     column_overrides: &ColumnOverrides,
 ) -> Result<Vec<TypeMapping>> {
+    type_mappings_hinted_on(client, query, query, column_overrides)
+}
+
+/// `type_mappings_on` with the NUMERIC catalog hints read from `hint_query`.
+fn type_mappings_hinted_on(
+    client: &mut Client,
+    query: &str,
+    hint_query: &str,
+    column_overrides: &ColumnOverrides,
+) -> Result<Vec<TypeMapping>> {
     let wrapped = format!("SELECT * FROM ({}) AS _rivet_type_probe LIMIT 0", query);
     let stmt = prepare_fresh(client, &wrapped)?;
-    let hints = pg_numeric_catalog_hints_opt(client, query);
+    let hints = pg_numeric_catalog_hints_opt(client, hint_query);
     stmt.columns()
         .iter()
         .map(|col| {
@@ -639,6 +649,20 @@ impl super::Source for PostgresSource {
         column_overrides: &ColumnOverrides,
     ) -> Result<Vec<TypeMapping>> {
         type_mappings_on(&mut self.client, query, column_overrides)
+    }
+
+    fn type_mappings_hinted(
+        &mut self,
+        query: &str,
+        hint_query: Option<&str>,
+        column_overrides: &ColumnOverrides,
+    ) -> Result<Vec<TypeMapping>> {
+        type_mappings_hinted_on(
+            &mut self.client,
+            query,
+            hint_query.unwrap_or(query),
+            column_overrides,
+        )
     }
 
     fn column_nullable(&mut self, query: &str, column: &str) -> Result<Option<bool>> {

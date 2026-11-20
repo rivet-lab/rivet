@@ -293,3 +293,29 @@ fn partition_by_exports_a_declared_numeric_column() {
     rig.run_ok();
     assert_eq!(parquet_rows_recursive(out_dir.path()), 30);
 }
+
+/// `partition_by` over a SQL Server table with a DECIMAL(p,s) and a datetime2(7) column delivers every row under `--strict`, as the unpartitioned export does.
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn partition_by_exports_a_declared_decimal_and_datetime2_column_mssql() {
+    require_alive(LiveService::Mssql);
+    let table = unique_name("part_dec_ms");
+    mssql_drop_table(&table);
+    mssql_exec(&format!(
+        "CREATE TABLE {table} (id BIGINT PRIMARY KEY, amount DECIMAL(10,2) NOT NULL, ts DATETIME2(7) NOT NULL, created_at DATE NOT NULL); \
+         INSERT INTO {table} SELECT TOP (30) n, n * 1.5, '2026-03-01 00:00:00.1234567', DATEADD(day, n % 3, '2026-03-01') FROM ( \
+         SELECT ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n FROM sys.all_objects) q"
+    ));
+    let _guard = MssqlTable::adopt(table.clone());
+    let out_dir = tempfile::tempdir().unwrap();
+    let rig = Rig::mssql_batch(&table)
+        .export_line("partition_by: created_at")
+        .dest_path(out_dir.path().join("{partition}"));
+    let result = rig.run_args(&["--export", &table, "--strict"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(parquet_rows_recursive(out_dir.path()), 30);
+}

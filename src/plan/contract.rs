@@ -245,6 +245,15 @@ pub enum ExtractionStrategy {
 }
 
 impl ResolvedRunPlan {
+    /// The single-table query the source reads catalog facts from when `base_query` wraps it.
+    pub(crate) fn catalog_hint_query(&self) -> Option<&str> {
+        seeded!(
+            "partition-child-loses-catalog-hints",
+            None,
+            self.catalog_query.as_deref()
+        )
+    }
+
     /// The stream stored progress belongs to: the relation the query's outermost `FROM` names.
     fn stream(&self) -> String {
         crate::sql::outer_from_relation(&self.base_query).unwrap_or_default()

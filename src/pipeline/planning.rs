@@ -85,6 +85,7 @@ pub(crate) fn admit_columns(
         src,
         crate::preflight::type_report::is_stream(export),
         &plan.base_query,
+        plan.catalog_hint_query(),
         &plan.column_overrides,
     ) {
         Ok(m) => m,
@@ -241,6 +242,52 @@ mod tests {
         }
     }
 
+    /// A source whose NUMERIC column resolves only when the catalog hint names the single-table query.
+    struct CatalogSource(&'static str);
+
+    impl Source for CatalogSource {
+        fn export(
+            &mut self,
+            _request: &crate::source::ExportRequest<'_>,
+            _sink: &mut dyn crate::source::BatchSink,
+        ) -> Result<()> {
+            Ok(())
+        }
+        fn query_scalar(&mut self, _sql: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+        fn type_mappings(
+            &mut self,
+            query: &str,
+            overrides: &crate::types::ColumnOverrides,
+        ) -> Result<Vec<crate::types::TypeMapping>> {
+            self.type_mappings_hinted(query, None, overrides)
+        }
+        fn type_mappings_hinted(
+            &mut self,
+            _query: &str,
+            hint_query: Option<&str>,
+            _overrides: &crate::types::ColumnOverrides,
+        ) -> Result<Vec<crate::types::TypeMapping>> {
+            use crate::types::{RivetType, SourceColumn, TypeMapping};
+            let rivet = if hint_query == Some(self.0) {
+                RivetType::Decimal {
+                    precision: 10,
+                    scale: 2,
+                }
+            } else {
+                RivetType::Unsupported {
+                    native_type: "numeric".into(),
+                    reason: "precision/scale unavailable".into(),
+                }
+            };
+            Ok(vec![TypeMapping::from_source(
+                &SourceColumn::simple("amount", "numeric", true),
+                rivet,
+            )])
+        }
+    }
+
     fn one_export_config(source_type: &str, extra: &str) -> Config {
         Config::from_yaml(&format!(
             "source: {{ type: {source_type}, url: \"{source_type}://u:p@127.0.0.1:1/db\"{extra} }}\n\
@@ -270,6 +317,32 @@ mod tests {
         assert!(admit(false).is_ok());
         let err = admit(true).unwrap_err();
         assert!(format!("{err:#}").contains("ts"), "{err:#}");
+    }
+
+    /// A plan whose base query wraps the table (a `partition_by` or range-split child) is admitted on the catalog hint its `catalog_query` names, and a plan without one is refused as before.
+    #[test]
+    fn admit_columns_reads_the_catalog_hint_a_wrapped_plan_carries() {
+        let config = one_export_config("postgres", "");
+        let admit = |catalog_query: Option<&str>| {
+            let mut plan = crate::plan::test_support::test_plan();
+            plan.catalog_query = catalog_query.map(str::to_string);
+            admit_columns(
+                &mut CatalogSource("SELECT * FROM t"),
+                &config,
+                &plan,
+                &config.exports[0],
+                Path::new("."),
+                None,
+                false,
+            )
+        };
+        assert!(admit(Some("SELECT * FROM t")).is_ok());
+        let err = admit(None).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("precision/scale unavailable"),
+            "{err:#}"
+        );
+        assert!(admit(Some("SELECT * FROM other")).is_err());
     }
 
     /// The admission refuses, before any read, what `run` refuses by code: a column no Arrow type carries and a column the format cannot write; and admits the same columns where the run writes them.
