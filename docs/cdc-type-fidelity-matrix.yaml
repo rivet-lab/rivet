@@ -75,7 +75,7 @@ scenarios:
     what: "date + time-of-day survive the change stream with the batch Arrow types"
     postgres: { test: postgres_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent }
     mysql:   { test: mysql_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent }
-    mssql:    { test: mssql_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent, known_defect: ["TIME"] }
+    mssql:    { test: mssql_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent }
     mongo:    { na: "BSON dates ride the verbatim document blob; the extJSON test pins the mechanism" }
     oracle:   { test: oracle_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent, known_defect: ["TIMESTAMP(9)"] }
 
