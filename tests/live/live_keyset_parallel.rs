@@ -2238,6 +2238,50 @@ fn uuid_v7_bursts_are_recut_into_balanced_ranges_mysql() {
     let _ = c.query_drop(format!("DROP TABLE IF EXISTS {table}"));
 }
 
+/// A composite key whose first column holds one hot value for 90% of the rows exports every row once, in more than one range.
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn a_composite_key_with_a_hot_first_value_exports_every_row_once_postgres() {
+    require_alive(LiveService::Postgres);
+    const HOT: i64 = 18_000;
+    const TAIL: i64 = 2_000;
+    let table = unique_name("pk_hot_first");
+    let mut c = pg_connect();
+    c.batch_execute(&format!(
+        "DROP TABLE IF EXISTS {table};
+         CREATE TABLE {table} (grp INT NOT NULL, id BIGINT NOT NULL, payload INT NOT NULL, PRIMARY KEY (grp, id));
+         INSERT INTO {table} SELECT 1, g, g FROM generate_series(1, {HOT}) g;
+         INSERT INTO {table} SELECT 1 + g, g, g FROM generate_series(1, {TAIL}) g;"
+    ))
+    .unwrap();
+    pg_catalog_says_rows(&mut c, &table, 20_000_000);
+    let rig = Rig::pg_batch(&format!("public.{table}"))
+        .mode("chunked")
+        .export_line("chunk_by_key: [grp, id]")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000")
+        .no_oracle("the test grades the delivered key pairs itself against the fixture");
+    rig.run_ok();
+    let out = rig.out_dir();
+    let want: BTreeSet<(String, String)> = (1..=HOT)
+        .map(|g| (1, g))
+        .chain((1..=TAIL).map(|g| (1 + g, g)))
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+    let got: Vec<(String, String)> = dir_parquet_display(&out, "grp")
+        .into_iter()
+        .flatten()
+        .zip(dir_parquet_display(&out, "id").into_iter().flatten())
+        .collect();
+    let distinct: BTreeSet<(String, String)> = got.iter().cloned().collect();
+    assert_eq!(
+        (got.len(), distinct, worker_fanout(&out) >= 2),
+        ((HOT + TAIL) as usize, want, true),
+        "rows, distinct key pairs, more than one worker"
+    );
+    let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
+}
+
 /// A skewed integer key on Oracle, whose catalog gives no row estimate, is recut by density: every row once, NUMBER(19) key.
 #[test]
 #[ignore = "live: requires docker compose up -d oracle"]
