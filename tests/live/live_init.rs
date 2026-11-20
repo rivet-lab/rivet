@@ -581,10 +581,7 @@ fn init_mongo_refuses_a_forced_mode_mongo_cannot_run() {
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mssql-cdc"]
 fn init_mssql_schema_wide_leaves_out_the_tables_sql_server_ships() {
-    mssql_cdc_exec(
-        "IF NOT EXISTS(SELECT 1 FROM sys.databases WHERE name='rivet' AND is_cdc_enabled=1) \
-         EXEC sys.sp_cdc_enable_db;",
-    );
+    enable_cdc_db();
     assert_eq!(
         mssql_cdc_query_i64(
             "SELECT COUNT(*) FROM sys.tables WHERE name = 'systranschemas' AND is_ms_shipped = 1"
