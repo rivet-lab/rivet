@@ -27,7 +27,13 @@ const PARTITIONED_RUNS_IN_PROCESS: &str = "partition_by: --parallel-export-proce
 impl RunSet {
     /// Select `export_name`, or every export a whole-config invocation runs itself.
     pub(crate) fn select(config: &Config, export_name: Option<&str>) -> Result<Self> {
-        let declared = crate::config::declared_exports(config, export_name)?;
+        let declared = if export_name.is_none()
+            && seeded!("check-reads-declared-list-not-run-set", true, false)
+        {
+            config.exports.clone()
+        } else {
+            crate::config::declared_exports(config, export_name)?
+        };
         Ok(Self {
             declared,
             config_asks_children: config.parallel_export_processes,
