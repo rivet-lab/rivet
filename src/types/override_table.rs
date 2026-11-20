@@ -101,7 +101,13 @@ fn mysql_reads(native: &str, src: Kind, tgt: Kind) -> bool {
         Enum | Json => &[Binary, Text, Json],
         Binary => &[Bool, Uuid, Binary, Text, Json],
         Date => &[Date, Naive, Utc, Text, Json],
-        Naive | Utc => &[Naive, Utc, Text, Json],
+        Naive | Utc => {
+            if seeded!("override-without-builder-internal-stop", true, false) {
+                &[Naive, Utc, NaiveNs, UtcNs, Text, Json]
+            } else {
+                &[Naive, Utc, Text, Json]
+            }
+        }
         _ => &[],
     };
     allowed.contains(&tgt)
@@ -494,5 +500,57 @@ mod tests {
             },
             &RivetType::Date
         ));
+    }
+
+    fn ts(unit: TimeUnit, utc: bool) -> RivetType {
+        RivetType::Timestamp {
+            unit,
+            timezone: utc.then(|| "UTC".into()),
+        }
+    }
+
+    #[test]
+    fn mysql_reads_a_date_and_a_datetime_as_the_stamps_and_text_it_can_build() {
+        let us = |utc| ts(TimeUnit::Microsecond, utc);
+        let read = [
+            ("date", RivetType::Date, RivetType::Date),
+            ("date", RivetType::Date, us(false)),
+            ("date", RivetType::Date, us(true)),
+            ("date", RivetType::Date, RivetType::Text),
+            ("date", RivetType::Date, RivetType::Json),
+            ("datetime", us(false), us(true)),
+            ("datetime", us(true), us(false)),
+            ("datetime", us(false), RivetType::Text),
+            ("datetime", us(true), RivetType::Json),
+        ];
+        for (native, src, tgt) in read {
+            assert!(
+                override_is_read(Engine::Mysql, native, &src, &tgt),
+                "mysql {native} -> {}",
+                tgt.label()
+            );
+        }
+    }
+
+    #[test]
+    fn mysql_refuses_a_stamp_or_date_override_it_cannot_build() {
+        let us = |utc| ts(TimeUnit::Microsecond, utc);
+        let ns = |utc| ts(TimeUnit::Nanosecond, utc);
+        let refused = [
+            ("date", RivetType::Date, RivetType::Int64),
+            ("date", RivetType::Date, ns(false)),
+            ("datetime", us(false), RivetType::Date),
+            ("datetime", us(false), ns(false)),
+            ("datetime", us(false), ns(true)),
+            ("datetime", us(true), ns(true)),
+            ("datetime", us(false), RivetType::Int64),
+        ];
+        for (native, src, tgt) in refused {
+            assert!(
+                !override_is_read(Engine::Mysql, native, &src, &tgt),
+                "mysql {native} -> {}",
+                tgt.label()
+            );
+        }
     }
 }
