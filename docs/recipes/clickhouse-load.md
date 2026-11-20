@@ -166,13 +166,13 @@ works the same way: name it in `named_collection:`.
 
 ## Known limits
 
-- **Timestamp range.** `DateTime64` holds 1900-01-01 to 2299-12-31, and ClickHouse
-  stores a value outside it as the nearest end, silently. So rivet reads each part's
-  footer first, whether it sends the part or ClickHouse pulls it through a named
-  collection, and refuses the part, inserting nothing, if a timestamp column holds a
-  value outside that range or has no min/max statistics
-  (`RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE`). A `Date32` outside the same range fails the
-  insert: ClickHouse refuses it itself (measured on a part rivet sends).
+- **Date and timestamp range.** `Date32` and `DateTime64` hold 1900-01-01 to
+  2299-12-31, and ClickHouse can store a value outside it as the nearest end, silently
+  (a `DATE` 2300-01-01 reads back as 2299-12-31). So rivet reads each part's footer
+  first, whether it sends the part or ClickHouse pulls it through a named collection,
+  and refuses the part, inserting nothing, if a date or timestamp column holds a value
+  outside that range or has no min/max statistics
+  (`RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE`).
 - **Naive timestamps are declared in UTC.** A timestamp without a zone lands as
   `DateTime64(p, 'UTC')`, so it reads back as the source wrote it whatever the server's
   or the session's time zone. A table created by 0.32.2 or earlier declares it

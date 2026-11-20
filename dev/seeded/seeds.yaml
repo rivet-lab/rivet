@@ -6715,3 +6715,16 @@ seeds:
         cells:
           - "lib:the_legs_check_admits_are_the_pending_baselines_and_nothing_else"
           - "lib:check_plans_the_pending_baseline_leg_of_a_cdc_export_and_only_that"
+
+  - name: clickhouse-date-outside-range-clamped
+    class: "a Parquet DATE (Date32) column holding a day before 1900-01-01 or after 2299-12-31 reaches the ClickHouse insert unchecked: ClickHouse stores the nearest end (2300-01-01 reads back as 2299-12-31), exit 0, or fails the insert uncoded"
+    history: "type matrix class CH_DATE_CLAMP (known_red 2026-11-16, PostgreSQL, MySQL and SQL Server DATE '2300-01-01' -> 2299-12-31); the footer guard of ADR-0035 CH12 read Timestamp columns only; owner decision 2026-11-20: fix, refuse by code before the insert"
+    scope: target
+    switch: clickhouse-date-outside-range-clamped
+    engines:
+      clickhouse:
+        cells: ["lib:a_part_is_refused_only_past_either_end_of_date32"]
+      bigquery:
+        na: "the seed edits the footer guard src/load/clickhouse.rs reads; a BigQuery load never calls it (src/load/bq_rest.rs)"
+      snowflake:
+        na: "the seed edits the footer guard src/load/clickhouse.rs reads; a Snowflake load never calls it (src/load/snowflake.rs)"

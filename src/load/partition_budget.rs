@@ -256,7 +256,7 @@ fn column_span_at(meta: &ParquetMetaData, idx: usize) -> ColumnStats {
     span.map_or(ColumnStats::NoValues, |s| ColumnStats::Span(s, nulls))
 }
 
-/// The first timestamp column the footer does not show inside `[lo_secs, hi_secs]` (Unix seconds).
+/// The first date or timestamp column the footer does not show inside `[lo_secs, hi_secs]` (Unix seconds).
 pub(crate) fn timestamp_outside(
     meta: &ParquetMetaData,
     lo_secs: i64,
@@ -264,7 +264,12 @@ pub(crate) fn timestamp_outside(
 ) -> Option<(String, Option<String>)> {
     let schema = meta.file_metadata().schema_descr();
     schema.columns().iter().enumerate().find_map(|(idx, c)| {
-        if !matches!(c.logical_type_ref(), Some(LogicalType::Timestamp(_))) {
+        let checked = match c.logical_type_ref() {
+            Some(LogicalType::Timestamp(_)) => true,
+            Some(LogicalType::Date) => seeded!("clickhouse-date-outside-range-clamped", false, true),
+            _ => false,
+        };
+        if !checked {
             return None;
         }
         let name = c.path().string();
@@ -280,7 +285,13 @@ pub(crate) fn timestamp_outside(
         } else {
             return None;
         };
-        Some((name, Some(render(end, span.unit))))
+        let shown = match span.unit {
+            Unit::Days => render(end, span.unit)
+                .split_once(' ')
+                .map_or_else(|| end.to_string(), |(day, _)| day.to_string()),
+            unit => render(end, unit),
+        };
+        Some((name, Some(shown)))
     })
 }
 

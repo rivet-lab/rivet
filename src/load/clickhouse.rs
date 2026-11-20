@@ -1071,7 +1071,7 @@ fn refuse_unorderable_positions(
     Ok(())
 }
 
-/// Refuse a part holding a timestamp ClickHouse would silently clamp (measured on 24.8.
+/// Refuse a part holding a date or timestamp ClickHouse would silently clamp (measured on 24.8; a Date32 past 2299-12-31 too).
 fn refuse_unholdable_timestamps(
     meta: &parquet::file::metadata::ParquetMetaData,
     uri: &str,
@@ -1081,18 +1081,23 @@ fn refuse_unholdable_timestamps(
     else {
         return Ok(());
     };
+    let date = meta.file_metadata().schema_descr().columns().iter().any(|c| {
+        c.path().string() == column
+            && matches!(c.logical_type_ref(), Some(parquet::basic::LogicalType::Date))
+    });
+    let ty = if date { "Date32" } else { "DateTime64" };
     match value {
         None => crate::rivet_bail!(
             crate::error::codes::LOAD_VALUE_OUT_OF_TARGET_RANGE,
             "{uri}: column `{column}` has no min/max statistics in the Parquet footer, so rivet \
-             cannot check it against ClickHouse DateTime64's range (1900-01-01 to 2299-12-31), \
+             cannot check it against ClickHouse {ty}'s range (1900-01-01 to 2299-12-31), \
              which ClickHouse enforces by storing the nearest end silently; nothing was inserted. \
              Re-export the part with statistics enabled (rivet's writer keeps them), or declare \
              the column as String in the export's `columns:`."
         ),
         Some(value) => crate::rivet_bail!(
             crate::error::codes::LOAD_VALUE_OUT_OF_TARGET_RANGE,
-            "{uri}: column `{column}` holds {value}, outside ClickHouse DateTime64's range \
+            "{uri}: column `{column}` holds {value}, outside ClickHouse {ty}'s range \
              (1900-01-01 to 2299-12-31). ClickHouse would store the nearest end instead, \
              silently; nothing was inserted. Declare the column as String in the export's \
              `columns:` to keep the value, or correct it at the source."
@@ -1645,6 +1650,46 @@ mod tests {
             assert!(
                 format!("{err:#}").contains("outside ClickHouse DateTime64's range"),
                 "{bad}"
+            );
+        }
+    }
+
+    /// A Date32 past 2299-12-31 is clamped by ClickHouse (2300-01-01 read back as 2299-12-31), so a date column is held to the same range as a timestamp.
+    #[test]
+    fn a_part_is_refused_only_past_either_end_of_date32() {
+        use std::sync::Arc;
+        let part = |day: i32| {
+            let col = arrow::array::Date32Array::from(vec![Some(day), None]);
+            let batch = arrow::record_batch::RecordBatch::try_from_iter([(
+                "d",
+                Arc::new(col) as arrow::array::ArrayRef,
+            )])
+            .unwrap();
+            let mut buf = Vec::new();
+            let mut w =
+                parquet::arrow::ArrowWriter::try_new(&mut buf, batch.schema(), None).unwrap();
+            w.write(&batch).unwrap();
+            w.close().unwrap();
+            parquet_footer(&buf).unwrap()
+        };
+        let (first, last) = (-25_567, 120_529);
+        for ok in [first, 0, last] {
+            assert!(
+                refuse_unholdable_timestamps(&part(ok), "gs://b/p").is_ok(),
+                "day {ok}"
+            );
+        }
+        for (bad, shown) in [(first - 1, "1899-12-31"), (last + 1, "2300-01-01")] {
+            let err = refuse_unholdable_timestamps(&part(bad), "gs://b/p").unwrap_err();
+            assert_eq!(
+                crate::error::error_code(&err),
+                Some("RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE"),
+                "day {bad}"
+            );
+            assert!(
+                format!("{err:#}")
+                    .contains(&format!("column `d` holds {shown}, outside ClickHouse Date32's range")),
+                "{err:#}"
             );
         }
     }
