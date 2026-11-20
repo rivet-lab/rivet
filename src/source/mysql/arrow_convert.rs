@@ -806,19 +806,19 @@ fn flag_int(v: &Value, is_bit: bool) -> Option<i128> {
         Value::Int(n) => Some(i128::from(*n)),
         Value::UInt(n) => Some(i128::from(*n)),
         Value::Bytes(bv) if is_bit => Some(i128::from(bit_bytes_to_u64(bv))),
-        Value::Bytes(bv) if bv.as_slice() == b"0" => Some(0),
-        Value::Bytes(bv) if bv.as_slice() == b"1" => Some(1),
-        _ => None,
+        Value::Bytes(bv) => match bv.as_slice() {
+            [d @ (b'0' | b'1')] => Some(i128::from(d - b'0')),
+            [..] => None,
+        },
+        Value::NULL | Value::Float(_) | Value::Double(_) | Value::Date(..) | Value::Time(..) => {
+            None
+        }
     }
 }
 
 /// The one flag rule: 0 is false, 1 is true, any other number is no flag.
 pub(crate) fn flag_bool(v: i128) -> Option<bool> {
-    match v {
-        0 => Some(false),
-        1 => Some(true),
-        _ => None,
-    }
+    (0..=1).contains(&v).then_some(v == 1)
 }
 
 /// The flag a 0 or 1 holds; any other value is refused by code.
