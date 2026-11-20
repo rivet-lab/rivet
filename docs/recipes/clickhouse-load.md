@@ -174,7 +174,7 @@ works the same way: name it in `named_collection:`.
   nothing, if a date or timestamp column holds a value outside that range or has no
   min/max statistics (`RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE`, exit 5). Cast the column
   to text in the export's `query:` to keep the value (`columns:` does not convert a date or
-  timestamp to `string` on PostgreSQL, SQL Server or Oracle), or correct it at the source.
+  timestamp to `string` on PostgreSQL or SQL Server), or correct it at the source.
   Until 2026-11-20 a date outside the range was not inspected: 2300-01-01 loaded as
   2299-12-31 and the others were refused by ClickHouse as `RIVET_LOAD_WAREHOUSE_REJECTED`.
 - **Naive timestamps are declared in UTC.** A timestamp without a zone lands as
