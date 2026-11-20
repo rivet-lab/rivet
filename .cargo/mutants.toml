@@ -964,4 +964,6 @@ exclude_re = [
     "replace match guard seeded!\\(.*, false, true\\) with true in bigquery::native$",
     # 2026-11-20: the ClickHouse footer guard covers Date columns behind `seeded!(name, false, true)`, true in the shipped build; the stub to true is the code as shipped, and dev/seeded/recall.py grades the switch (ch-date-footer-guard-skips-dates CAUGHT); closes never.
     "replace match guard seeded!\\(.*, false, true\\) with true in temporal_outside$",
+    # 2026-11-20: the MySQL flag arm is guarded by `seeded!(name, v != 0, false)`, false in the shipped build; the stub to false is the code as shipped, and dev/seeded/recall.py grades the switch (mysql-flag-outside-zero-one-delivered-true CAUGHT); closes never.
+    "replace match guard seeded!\\(.*, false\\) with false in flag$",
 ]

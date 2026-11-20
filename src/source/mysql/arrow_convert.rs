@@ -339,16 +339,7 @@ pub(super) fn rows_to_record_batch_typed(
                 .is_some_and(|c| matches!(c.column_type(), ColumnType::MYSQL_TYPE_BIT))
         });
         let column = schema.field(col_idx).name();
-        let native_flag = wire_columns.is_some_and(|cols| {
-            cols.get(col_idx).is_some_and(|c| {
-                matches!(c.column_type(), ColumnType::MYSQL_TYPE_BIT)
-                    || (matches!(c.column_type(), ColumnType::MYSQL_TYPE_TINY)
-                        && c.column_length() == 1)
-            })
-        });
-        arrays.push(if matches!(arrow_type, DataType::Boolean) && !native_flag {
-            build_bool_strict(col_idx, rows, column)?
-        } else if is_time_text(schema.field(col_idx)) {
+        arrays.push(if is_time_text(schema.field(col_idx)) {
             build_time_text(col_idx, rows)?
         } else {
             build_array(arrow_type, col_idx, rows, is_bit, column, max_value_bytes)?
@@ -781,21 +772,23 @@ fn is_zero_date(bv: &[u8]) -> bool {
     bv.starts_with(b"0000-00-00")
 }
 
-/// A 0/1 flag column read under a `bool` override: any other value is refused by code.
-fn build_bool_strict(col_idx: usize, rows: &[mysql::Row], column: &str) -> Result<Arc<dyn Array>> {
+/// A flag read as a boolean: 0 and 1 are the only values, any other is refused by code whatever wire type holds it.
+fn build_flags(
+    col_idx: usize,
+    rows: &[mysql::Row],
+    is_bit: bool,
+    column: &str,
+) -> Result<Arc<dyn Array>> {
     let mut b = BooleanBuilder::with_capacity(rows.len());
     for row in rows {
         match row.as_ref(col_idx) {
-            Some(Value::Int(0)) | Some(Value::UInt(0)) => b.append_value(false),
-            Some(Value::Int(1)) | Some(Value::UInt(1)) => b.append_value(true),
+            Some(Value::Int(v)) => b.append_value(flag(column, i128::from(*v))?),
+            Some(Value::UInt(v)) => b.append_value(flag(column, i128::from(*v))?),
+            Some(Value::Bytes(bv)) if is_bit => {
+                b.append_value(flag(column, i128::from(bit_bytes_to_u64(bv)))?)
+            }
             Some(Value::Bytes(bv)) if bv.as_slice() == b"0" => b.append_value(false),
             Some(Value::Bytes(bv)) if bv.as_slice() == b"1" => b.append_value(true),
-            Some(Value::Int(v)) => {
-                return unparsed(column, "bool (0 or 1)", v.to_string().as_bytes());
-            }
-            Some(Value::UInt(v)) => {
-                return unparsed(column, "bool (0 or 1)", v.to_string().as_bytes());
-            }
             Some(Value::Bytes(bv)) => return unparsed(column, "bool (0 or 1)", bv),
             other => {
                 null_or_refuse(column, &DataType::Boolean, other)?;
@@ -804,6 +797,21 @@ fn build_bool_strict(col_idx: usize, rows: &[mysql::Row], column: &str) -> Resul
         }
     }
     Ok(Arc::new(b.finish()))
+}
+
+/// The flag a 0 or 1 holds; any other value is refused by code.
+fn flag(column: &str, v: i128) -> Result<bool> {
+    match v {
+        _ if seeded!("mysql-flag-outside-zero-one-delivered-true", v != 0, false) => Ok(true),
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => crate::rivet_bail!(
+            crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+            "column `{column}` holds {v}, which is not a flag: a boolean column carries 0 or 1 \
+             only, and rivet refuses rather than writing it as true. Fix the value, or declare \
+             the column an integer type in `columns:` (for example `int64`) to carry the number."
+        ),
+    }
 }
 
 /// The kind of value MySQL sent, for a refusal.
@@ -844,21 +852,7 @@ fn build_array(
     max_value_bytes: Option<usize>,
 ) -> Result<Arc<dyn Array>> {
     match arrow_type {
-        DataType::Boolean => {
-            let mut b = BooleanBuilder::with_capacity(rows.len());
-            for row in rows {
-                match row.as_ref(col_idx) {
-                    Some(Value::Int(v)) => b.append_value(*v != 0),
-                    Some(Value::UInt(v)) => b.append_value(*v != 0),
-                    Some(Value::Bytes(bv)) => b.append_value(bit_bytes_to_u64(bv) != 0),
-                    other => {
-                        null_or_refuse(column, arrow_type, other)?;
-                        b.append_null();
-                    }
-                }
-            }
-            Ok(Arc::new(b.finish()))
-        }
+        DataType::Boolean => build_flags(col_idx, rows, is_bit, column),
         DataType::Int16 => {
             let mut b = Int16Builder::with_capacity(rows.len());
             for row in rows {
@@ -2189,7 +2183,6 @@ mod roast_mysql_bit_decode_tests {
         let cases: Vec<GridCase> = vec![
             ("bool/int", v_int(1), DataType::Boolean, "true"),
             ("bool/int0", v_int(0), DataType::Boolean, "false"),
-            ("bool/uint", v_uint(u64::MAX), DataType::Boolean, "true"),
             ("bool/bytes", v_bytes(b"1"), DataType::Boolean, "true"),
             ("i16/int", v_int(-12345), DataType::Int16, "-12345"),
             ("i16/bytes", v_bytes(b"-42"), DataType::Int16, "-42"),
@@ -2770,6 +2763,140 @@ mod roast_mysql_bit_decode_tests {
              atoi-first Int64 path reads bytes [0x31, 0x32] as ASCII \"12\" and \
              yields the wrong value 12"
         );
+    }
+
+    type FlagCase = (&'static str, Vec<u8>, Option<Vec<u8>>);
+
+    /// Wire cells for a flag read as a boolean: TINYINT(1), a wider TINYINT or an integer under a `bool` override, and BIT.
+    fn flag_cases() -> Vec<FlagCase> {
+        use mysql::consts::ColumnType::*;
+        let tiny1 = column_definition("c", CS_UTF8, 1, MYSQL_TYPE_TINY as u8, 0, 0);
+        let tiny1u = column_definition("c", CS_UTF8, 1, MYSQL_TYPE_TINY as u8, F_UNSIGNED, 0);
+        let tiny4 = column_definition("c", CS_UTF8, 4, MYSQL_TYPE_TINY as u8, 0, 0);
+        let big = column_definition("c", CS_UTF8, 20, MYSQL_TYPE_LONGLONG as u8, 0, 0);
+        let bigu = column_definition("c", CS_UTF8, 20, MYSQL_TYPE_LONGLONG as u8, F_UNSIGNED, 0);
+        let bit8 = column_definition("c", CS_BIN, 8, MYSQL_TYPE_BIT as u8, F_UNSIGNED, 0);
+        let bit1 = column_definition("c", CS_BIN, 1, MYSQL_TYPE_BIT as u8, F_UNSIGNED, 0);
+        vec![
+            ("tinyint(1) 0", tiny1.clone(), Some(vec![0])),
+            ("tinyint(1) 1", tiny1.clone(), Some(vec![1])),
+            ("tinyint(1) 2", tiny1.clone(), Some(vec![2])),
+            ("tinyint(1) 5", tiny1.clone(), Some(vec![5])),
+            ("tinyint(1) -1", tiny1.clone(), Some(vec![0xFF])),
+            ("tinyint(1) 127", tiny1.clone(), Some(vec![127])),
+            ("tinyint(1) -128", tiny1.clone(), Some(vec![0x80])),
+            ("tinyint(1) NULL", tiny1, None),
+            ("tinyint(1) unsigned 1", tiny1u.clone(), Some(vec![1])),
+            ("tinyint(1) unsigned 255", tiny1u, Some(vec![255])),
+            ("tinyint(4) bool 1", tiny4.clone(), Some(vec![1])),
+            ("tinyint(4) bool 5", tiny4, Some(vec![5])),
+            (
+                "bigint bool 1",
+                big.clone(),
+                Some(1i64.to_le_bytes().to_vec()),
+            ),
+            ("bigint bool 2", big, Some(2i64.to_le_bytes().to_vec())),
+            (
+                "bigint unsigned bool max",
+                bigu,
+                Some(u64::MAX.to_le_bytes().to_vec()),
+            ),
+            ("bit(1) 0", bit1.clone(), Some(lenc_of(&[0]))),
+            ("bit(1) 1", bit1, Some(lenc_of(&[1]))),
+            ("bit(8) bool 0", bit8.clone(), Some(lenc_of(&[0]))),
+            ("bit(8) bool 1", bit8.clone(), Some(lenc_of(&[1]))),
+            ("bit(8) bool 5", bit8.clone(), Some(lenc_of(&[5]))),
+            ("bit(8) bool 255", bit8, Some(lenc_of(&[0xFF]))),
+        ]
+    }
+
+    /// A flag cell built as a boolean column: the delivered value, or the refusal.
+    fn build_flag(def: Vec<u8>, cell: Option<Vec<u8>>) -> anyhow::Result<Option<bool>> {
+        use arrow::array::BooleanArray;
+        let rows = fetch_binary_rows(vec![def], vec![vec![cell]]);
+        let schema = Arc::new(Schema::new(vec![Field::new("c", DataType::Boolean, true)]));
+        let batch = rows_to_record_batch_typed(&schema, &[DataType::Boolean], &rows, None)?;
+        let a = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .expect("Boolean");
+        Ok((!a.is_null(0)).then(|| a.value(0)))
+    }
+
+    /// A text cell on a flag column reads as 0 or 1 only; any other text is refused by code, never delivered as true.
+    #[test]
+    fn a_text_cell_on_a_flag_column_is_zero_one_or_refused_never_true() {
+        use arrow::array::BooleanArray;
+        let columns: Arc<[mysql::Column]> =
+            Arc::from(vec![mysql::Column::new(ColumnType::MYSQL_TYPE_VAR_STRING)]);
+        let flags = |text: &str| {
+            let row = mysql_common::row::new_row(vec![Value::Bytes(text.into())], columns.clone());
+            super::build_flags(0, &[row], false, "c")
+        };
+        for (text, want) in [("0", false), ("1", true)] {
+            let arr = flags(text).expect(text);
+            let arr = arr
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .expect("Boolean");
+            assert_eq!(arr.value(0), want, "text {text:?}");
+        }
+        for text in ["2", "5", "01", "x", "true", ""] {
+            let err = flags(text)
+                .err()
+                .unwrap_or_else(|| panic!("text {text:?}: delivered, not refused"));
+            crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+            assert!(
+                err.to_string().contains("is not a valid bool (0 or 1)"),
+                "text {text:?}: {err}"
+            );
+        }
+    }
+
+    /// A boolean flag carries 0 or 1: any other value is refused by code on every wire type that holds one, never delivered as true.
+    #[test]
+    fn a_flag_outside_zero_and_one_is_refused_by_code_never_delivered_as_true() {
+        let refused = [
+            "tinyint(1) 2",
+            "tinyint(1) 5",
+            "tinyint(1) -1",
+            "tinyint(1) 127",
+            "tinyint(1) -128",
+            "tinyint(1) unsigned 255",
+            "tinyint(4) bool 5",
+            "bigint bool 2",
+            "bigint unsigned bool max",
+            "bit(8) bool 5",
+            "bit(8) bool 255",
+        ];
+        for (label, def, cell) in flag_cases() {
+            let got = build_flag(def, cell);
+            if refused.contains(&label) {
+                let err = got
+                    .err()
+                    .unwrap_or_else(|| panic!("{label}: delivered, not refused"));
+                crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+                let said = err.to_string();
+                assert!(said.contains("column `c` holds "), "{label}: {said}");
+                assert!(
+                    said.contains("not a flag: a boolean column carries 0 or 1 only"),
+                    "{label}: {said}"
+                );
+                assert!(
+                    said.contains("declare the column an integer type"),
+                    "{label}: {said}"
+                );
+            } else {
+                let want = match label.rsplit(' ').next().unwrap_or_default() {
+                    "NULL" => None,
+                    "0" => Some(false),
+                    "1" => Some(true),
+                    other => panic!("{label}: {other}"),
+                };
+                assert_eq!(got.expect(label), want, "{label}");
+            }
+        }
     }
 }
 

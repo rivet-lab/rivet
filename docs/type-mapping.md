@@ -296,7 +296,7 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | Source type | Rivet logical | Parquet (Arrow) | CSV | Notes | Tested |
 |-------------|---------------|-----------------|-----|-------|--------|
 | `tinyint` (not width 1) | `int16` | `Int16` | integer text | widened signed | golden |
-| `tinyint(1)` | `bool` | `Boolean` | 0/1 | MySQL boolean convention | golden |
+| `tinyint(1)` | `bool` | `Boolean` | 0/1 | MySQL boolean convention; a value outside 0 and 1 is refused `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5), declare `int64` in `columns:` to carry the number | golden |
 | `smallint` | `int16` | `Int16` | integer text | | golden |
 | `int` | `int32` | `Int32` | integer text | | golden |
 | `bigint` | `int64` | `Int64` | integer text | signed | golden |
