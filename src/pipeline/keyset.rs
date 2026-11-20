@@ -315,7 +315,7 @@ fn percentile_boundaries(
     Ok(bounds)
 }
 
-/// Below this many rows by the catalog's estimate a parallel keyset run samples exact row percentiles; above it, or with no estimate, it seeks key-space cuts.
+/// Below this many rows by the catalog's estimate a key with no axis (a string, a SQL Server uniqueidentifier) samples exact row percentiles; above it, or with no estimate, it seeks.
 const ROW_PERCENTILE_ROWS: i64 = 10_000_000;
 
 /// Key-space ranges per worker for an integer key, so a dense stretch of keys is spread over more than one range.
@@ -419,7 +419,7 @@ fn catalog_rows(src: &mut dyn Source, plan: &ResolvedRunPlan) -> Option<i64> {
         .filter(|n| *n > 0)
 }
 
-/// Up to N−1 range boundaries of the keyset key: row percentiles under [`ROW_PERCENTILE_ROWS`] catalog rows, else key-space cuts (`int_parts` for an integer key) snapped to existing keys by index seeks.
+/// Up to N−1 range boundaries of the keyset key: key-space cuts (`int_parts` for an integer key) snapped to existing keys by index seeks and recut by density; a key with no axis under [`ROW_PERCENTILE_ROWS`] catalog rows samples row percentiles.
 pub(crate) fn sample_key_boundaries(
     src: &mut dyn Source,
     plan: &ResolvedRunPlan,
@@ -429,13 +429,6 @@ pub(crate) fn sample_key_boundaries(
     floor: Option<&str>,
     ceil: Option<&str>,
 ) -> Result<Vec<String>> {
-    if catalog_rows(src, plan).is_some_and(|n| n < ROW_PERCENTILE_ROWS) {
-        log::info!(
-            "export '{}': parallel keyset path: percentile (catalog estimate under {ROW_PERCENTILE_ROWS} rows)",
-            plan.export_name
-        );
-        return percentile_boundaries(src, plan, key, parts, floor, ceil);
-    }
     let st = plan.source.source_type;
     let base = &plan.base_query;
     let k = crate::sql::quote_ident(st, key);
@@ -462,8 +455,16 @@ pub(crate) fn sample_key_boundaries(
         ()
     );
     let mut bounds: Vec<String> = Vec::with_capacity(parts.saturating_sub(1));
-    let ends = match seek_bounds(src, plan, &k, &fence, (parts, int_parts), &mut bounds) {
-        Ok(ends) => ends,
+    let seeked = seek_bounds(src, plan, &k, &fence, (parts, int_parts), &mut bounds);
+    let ends = match seeked {
+        Ok(Seeked::Ends(ends)) => ends,
+        Ok(Seeked::Percentile) => {
+            log::info!(
+                "export '{}': parallel keyset path: percentile (key has no axis, catalog estimate under {ROW_PERCENTILE_ROWS} rows)",
+                plan.export_name
+            );
+            return percentile_boundaries(src, plan, key, parts, floor, ceil);
+        }
         Err(e) => {
             log::warn!(
                 "export '{}': parallel keyset cannot seek the key to a split point ({e:#}); \
@@ -855,7 +856,7 @@ fn seek_bounds(
     fence: &[String],
     (parts, int_parts): (usize, usize),
     bounds: &mut Vec<String>,
-) -> Result<Option<(String, String)>> {
+) -> Result<Seeked> {
     let st = plan.source.source_type;
     let of = crate::source::query::KeyOf {
         base: &plan.base_query,
@@ -865,9 +866,12 @@ fn seek_bounds(
         seek_key(src, plan, k, fence, false)?,
         seek_key(src, plan, k, fence, true)?,
     ) else {
-        return Ok(None);
+        return Ok(Seeked::Ends(None));
     };
     let on_axis = Axis::of(&lo, st).is_some() && Axis::of(&hi, st).is_some();
+    if !on_axis && catalog_rows(src, plan).is_some_and(|n| n < ROW_PERCENTILE_ROWS) {
+        return Ok(Seeked::Percentile);
+    }
     let parts = if on_axis { int_parts } else { parts };
     for cut in super::key_space::split(&lo, &hi, parts) {
         let after = bounds.last().unwrap_or(&lo);
@@ -885,7 +889,13 @@ fn seek_bounds(
             _ => break,
         }
     }
-    Ok(Some((lo, hi)))
+    Ok(Seeked::Ends(Some((lo, hi))))
+}
+
+/// What the endpoint seeks found: the lowest and highest key (none on an empty table), or a key with no axis small enough for row percentiles.
+enum Seeked {
+    Ends(Option<(String, String)>),
+    Percentile,
 }
 
 /// The first non-NULL key of the base query under `preds` in key order (the last with `desc`), by one index seek.
@@ -2510,7 +2520,7 @@ mod tests {
         );
     }
 
-    /// A table of 1000 rows whose catalog estimate is `estimate`: counts, offset reads and seeks answered by row number.
+    /// A table of 1000 rows whose catalog estimate is `estimate`: counts and offset reads answered by row number, MIN and MAX of a text key `a`..`z`.
     struct Cataloged {
         estimate: &'static str,
         sql: Vec<String>,
@@ -2531,6 +2541,9 @@ mod tests {
             if sql.contains("COUNT(*)") {
                 return Ok(Some("1000".into()));
             }
+            if !sql.contains("OFFSET ") && sql.contains("LIMIT 1") {
+                return Ok(Some(if sql.contains("DESC") { "z" } else { "a" }.into()));
+            }
             Ok(sql
                 .split_once("OFFSET ")
                 .map(|(_, off)| (off.trim().parse::<i64>().unwrap() + 1).to_string()))
@@ -2544,7 +2557,7 @@ mod tests {
         }
     }
 
-    /// A table the catalog puts under the row-percentile limit keeps the exact percentile sampler; a larger, unanalyzed or query export never counts.
+    /// A key with no axis on a table the catalog puts under the row-percentile limit keeps the exact percentile sampler; a larger, unanalyzed or query export never counts.
     #[test]
     fn the_catalog_estimate_picks_row_percentiles_or_seeks() {
         let mut plan = crate::plan::test_support::test_plan();
@@ -2557,22 +2570,22 @@ mod tests {
         assert_eq!(got, keys([251, 501, 751]));
         assert_eq!(
             small.sql.len(),
-            5,
-            "estimate, COUNT, three offsets: {:?}",
+            7,
+            "MIN, MAX, estimate, COUNT, three offsets: {:?}",
             small.sql
         );
-        assert!(small.sql[1].contains("COUNT(*)"), "{:?}", small.sql);
+        assert!(small.sql[3].contains("COUNT(*)"), "{:?}", small.sql);
         for estimate in ["10000000", "0"] {
             let mut large = Cataloged {
                 estimate,
                 sql: vec![],
             };
+            sample_key_boundaries(&mut large, &plan, "k", 4, 64, None, None).unwrap();
             assert!(
-                sample_key_boundaries(&mut large, &plan, "k", 4, 64, None, None)
-                    .unwrap()
-                    .is_empty()
+                large.sql.iter().any(|q| q.contains("reltuples")),
+                "{:?}",
+                large.sql
             );
-            assert_eq!(large.sql.len(), 3, "estimate, MIN, MAX: {:?}", large.sql);
             assert!(
                 large
                     .sql
@@ -2588,10 +2601,12 @@ mod tests {
             sql: vec![],
         };
         sample_key_boundaries(&mut query, &plan, "k", 4, 64, None, None).unwrap();
-        assert_eq!(
-            query.sql.len(),
-            2,
-            "a query has no catalog estimate: {:?}",
+        assert!(
+            query
+                .sql
+                .iter()
+                .all(|q| !q.contains("reltuples") && !q.contains("COUNT")),
+            "a query has no catalog estimate and takes the seek path: {:?}",
             query.sql
         );
     }
@@ -2733,7 +2748,7 @@ mod tests {
         let mut plan = crate::plan::test_support::test_plan();
         plan.base_query = "SELECT * FROM public.t".into();
         plan.tuning.statement_timeout_s = 10;
-        for expire_at in [1, 2, 4] {
+        for expire_at in [3, 4, 6] {
             let mut src = Timed::new(
                 Cataloged {
                     estimate: "9999999",

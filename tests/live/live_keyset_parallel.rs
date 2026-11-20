@@ -1550,10 +1550,10 @@ fn sparse_key_spread(rig: Rig) -> Vec<usize> {
     spread.into_values().collect()
 }
 
-/// A sparse integer key under the row-percentile limit keeps main's row-balanced ranges; above it the key-space ranges are measured.
+/// A sparse integer key takes key-space ranges whatever the catalog estimate says: several per worker, balanced by the density recut.
 #[test]
 #[ignore = "live: requires docker compose up -d postgres"]
-fn a_sparse_parallel_keyset_key_keeps_row_percentiles_below_the_limit_postgres() {
+fn a_sparse_parallel_keyset_key_takes_key_space_ranges_postgres() {
     require_alive(LiveService::Postgres);
     let table = unique_name("pk_sparse");
     let mut c = pg_connect();
@@ -1566,20 +1566,18 @@ fn a_sparse_parallel_keyset_key_keeps_row_percentiles_below_the_limit_postgres()
     ))
     .unwrap();
     let qualified = format!("public.{table}");
-    assert_eq!(
-        sparse_key_spread(Rig::pg_batch(&qualified)),
-        vec![5_001, 5_000, 5_000, 4_999],
-        "row percentiles under the limit"
-    );
-    pg_catalog_says_rows(&mut c, &table, 20_000_000);
     let above = sparse_key_spread(Rig::pg_batch(&qualified));
     assert!(
         (5..=64).contains(&above.len()),
         "key-space ranges, not four row percentiles, at most 16 per worker: {above:?}"
     );
+    let (total, heaviest) = (
+        above.iter().sum::<usize>(),
+        above.iter().max().copied().unwrap_or(0),
+    );
     assert!(
-        above[0] >= SPARSE_DENSE as usize,
-        "the dense stretch stays in one range: {above:?}"
+        heaviest * above.len() <= 2 * total,
+        "the density recut spreads the dense stretch: {above:?}"
     );
     let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
 }
@@ -1609,10 +1607,10 @@ fn mysql_sparse_table(c: &mut mysql::PooledConn, table: &str, options: &str) {
     .unwrap();
 }
 
-/// The MySQL twin: an analyzed table keeps row percentiles; the same table the catalog puts at 20M rows takes key-space ranges.
+/// The MySQL twin: an analyzed table and the same table the catalog puts at 20M rows both take key-space ranges.
 #[test]
 #[ignore = "live: requires docker compose up -d mysql"]
-fn a_sparse_parallel_keyset_key_keeps_row_percentiles_below_the_limit_mysql() {
+fn a_sparse_parallel_keyset_key_takes_key_space_ranges_mysql() {
     use mysql::prelude::Queryable;
     require_alive(LiveService::Mysql);
     let (table, large) = (unique_name("pk_sparse_my"), unique_name("pk_sparse_my_l"));
@@ -1621,19 +1619,23 @@ fn a_sparse_parallel_keyset_key_keeps_row_percentiles_below_the_limit_mysql() {
     c.query_drop(format!("ANALYZE TABLE {table}")).unwrap();
     mysql_sparse_table(&mut c, &large, "STATS_PERSISTENT=1 STATS_AUTO_RECALC=0");
     mysql_catalog_says_rows(&large, 20_000_000);
-    assert_eq!(
-        sparse_key_spread(Rig::mysql_batch(&table)),
-        vec![5_001, 5_000, 5_000, 4_999],
-        "row percentiles under the limit"
+    let small = sparse_key_spread(Rig::mysql_batch(&table));
+    assert!(
+        (5..=64).contains(&small.len()),
+        "key-space ranges under the limit too: {small:?}"
     );
     let above = sparse_key_spread(Rig::mysql_batch(&large));
     assert!(
         (5..=64).contains(&above.len()),
         "key-space ranges, not four row percentiles, at most 16 per worker: {above:?}"
     );
+    let (total, heaviest) = (
+        above.iter().sum::<usize>(),
+        above.iter().max().copied().unwrap_or(0),
+    );
     assert!(
-        above[0] >= SPARSE_DENSE as usize,
-        "the dense stretch stays in one range: {above:?}"
+        heaviest * above.len() <= 2 * total,
+        "the density recut spreads the dense stretch: {above:?}"
     );
     for t in [table, large] {
         let _ = c.query_drop(format!("DROP TABLE IF EXISTS {t}"));
@@ -1645,8 +1647,13 @@ const TIMEOUT_ROWS: i64 = 2_000;
 
 /// A `chunk_by_key: id` run of four workers under a `seconds` statement budget (0 lifts it).
 fn timeout_rig(rig: Rig, seconds: u64) -> Rig {
+    timeout_rig_by(rig, seconds, "id")
+}
+
+/// `timeout_rig` over the key column `key`.
+fn timeout_rig_by(rig: Rig, seconds: u64, key: &str) -> Rig {
     rig.mode("chunked")
-        .export_line("chunk_by_key: id")
+        .export_line(&format!("chunk_by_key: {key}"))
         .export_line("parallel: 4")
         .export_line("chunk_size: 100")
         .export_line(&format!(
@@ -1678,7 +1685,7 @@ fn pg_slow_to_read_table(c: &mut postgres::Client, table: &str, visible: &str) -
     SqlEngine::Pg.reader(table)
 }
 
-/// The sampler's COUNT of a table the catalog puts under 10M rows is cancelled at the budget and fails the run by code; with no budget the same run delivers every row.
+/// The sampler's COUNT of a text key (no axis) on a table the catalog puts under 10M rows is cancelled at the budget and fails the run by code; with no budget the same run delivers every row.
 #[test]
 #[ignore = "live: requires docker compose up -d postgres"]
 fn a_percentile_sampler_read_obeys_the_statement_timeout_postgres() {
@@ -1686,15 +1693,20 @@ fn a_percentile_sampler_read_obeys_the_statement_timeout_postgres() {
     let table = unique_name("pk_sto");
     let mut c = pg_connect();
     let reader = pg_slow_to_read_table(&mut c, &table, "pg_sleep(0.002) IS NOT NULL");
+    c.batch_execute(&format!(
+        "ALTER TABLE {table} ADD COLUMN k TEXT GENERATED ALWAYS AS ('k' || lpad(id::text, 6, '0')) STORED NOT NULL;
+         CREATE UNIQUE INDEX {table}_k ON {table} (k);"
+    ))
+    .unwrap();
     pg_catalog_says_rows(&mut c, &table, TIMEOUT_ROWS);
-    let out = timeout_rig(Rig::pg_batch(&table).source_url(reader.url()), 1).run();
+    let out = timeout_rig_by(Rig::pg_batch(&table).source_url(reader.url()), 1, "k").run();
     assert_refused(&out, Refused::by_code("RIVET_SOURCE_STATEMENT_TIMEOUT", 1));
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(
         said.contains("tuning.statement_timeout_s"),
         "the refusal names the setting: {said}"
     );
-    let unbounded = timeout_rig(Rig::pg_batch(&table).source_url(reader.url()), 0);
+    let unbounded = timeout_rig_by(Rig::pg_batch(&table).source_url(reader.url()), 0, "k");
     unbounded.run_ok();
     assert_timeout_fixture_delivered(&unbounded, "no budget");
     drop(reader);
@@ -2196,10 +2208,10 @@ fn a_skewed_uuid_keyset_is_recut_by_density_oracle() {
     assert_within_twice_the_mean(&spread);
 }
 
-/// A skewed integer key on SQL Server stays on the percentile path (sys.partitions counts 200k, under the limit): every row once, balanced.
+/// A skewed integer key on SQL Server is recut by density although sys.partitions counts 200k, under the limit: every row once, balanced.
 #[test]
 #[ignore = "live+gate-only: requires docker compose up -d mssql"]
-fn a_skewed_integer_keyset_keeps_row_percentiles_mssql() {
+fn a_skewed_integer_keyset_is_recut_by_density_mssql() {
     require_alive(LiveService::Mssql);
     let table = unique_name("pk_skew_ms");
     mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));
@@ -2220,7 +2232,7 @@ fn a_skewed_integer_keyset_keeps_row_percentiles_mssql() {
         .export_line("parallel: 4")
         .export_line("chunk_size: 1000");
     let (said, spread) = skew_run(&rig);
-    assert_percentile(&said);
+    assert_seek_recut(&said);
     assert_skew_int_delivered(&rig.out_dir());
     assert_within_twice_the_mean(&spread);
     mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));
