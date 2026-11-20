@@ -640,7 +640,7 @@ mod bigquery {
             RivetType::Timestamp {
                 unit: TimeUnit::Nanosecond,
                 timezone: Some(_),
-            } => Resolved::diverge(
+            } if seeded!("bq-ns-zoned-timestamp-int64", false, true) => Resolved::diverge(
                 BqType::Int64,
                 BqType::Int64,
                 "nanosecond zoned timestamp has no BigQuery native type (TIMESTAMP is microsecond) — \
