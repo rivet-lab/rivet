@@ -644,10 +644,20 @@ impl crate::source::value_checksum::CellSource for PgCellSource<'_> {
             DataType::Boolean => l!(bool, E::Bool),
             DataType::Int16 => l!(i16, E::I16),
             DataType::Int32 => l!(i32, E::I32),
+            DataType::Int64 if is_oid_array(&self.columns[col].1) => {
+                l!(PgInt, |v: PgInt| E::I64(v.0))
+            }
             DataType::Int64 => l!(i64, E::I64),
             DataType::Float32 => l!(f32, E::F32),
             DataType::Float64 => l!(f64, E::F64),
-            DataType::Utf8 => l!(String, |s: String| E::Str(s.into_bytes())),
+            DataType::Utf8 => read_utf8_list(&self.columns[col].1, r, col)
+                .ok()
+                .flatten()
+                .map(|v| {
+                    v.into_iter()
+                        .map(|o| o.map(|s| E::Str(s.into_bytes())).unwrap_or(E::Null))
+                        .collect()
+                }),
             _ => None,
         }
     }
@@ -796,7 +806,7 @@ fn build_array(
             Ok(Arc::new(b.finish()))
         }
         DataType::Utf8 => build_pg_text_array(pg_type, col_idx, rows, column, max_value_bytes),
-        DataType::List(_) => build_pg_list_array(target_type, col_idx, rows),
+        DataType::List(_) => build_pg_list_array(pg_type, target_type, col_idx, rows),
         other => crate::rivet_bail!(
             crate::error::codes::INTERNAL_TYPE_BUILDER,
             "no PostgreSQL value converter for target Arrow type {other:?} \
@@ -907,8 +917,93 @@ fn array_decode_message(col: &str, e: &dyn std::fmt::Display) -> String {
     )
 }
 
+/// The element type of a PostgreSQL array wire type.
+fn pg_array_element(pg_type: &Type) -> Option<&Type> {
+    match pg_type.kind() {
+        Kind::Array(elem) => Some(elem),
+        _ => None,
+    }
+}
+
+/// Whether the wire type is an array of `oid`, read at its unsigned width.
+fn is_oid_array(pg_type: &Type) -> bool {
+    pg_array_element(pg_type) == Some(&Type::OID)
+        && seeded!("pg-array-element-wire-type-refused", false, true)
+}
+
+/// A `json` / `jsonb` element read as its raw source text.
+struct PgJsonText(String);
+
+impl<'a> PgFromSql<'a> for PgJsonText {
+    fn accepts(ty: &Type) -> bool {
+        PgJsonRawText::accepts(ty)
+    }
+
+    fn from_sql(
+        ty: &Type,
+        raw: &'a [u8],
+    ) -> std::result::Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        Ok(Self(PgJsonRawText::from_sql(ty, raw)?.0.to_owned()))
+    }
+}
+
+/// The elements of an array cell, each turned into text by `read`.
+fn text_elements<T>(
+    row: &Row,
+    col: usize,
+    read: impl Fn(T) -> String,
+) -> std::result::Result<Option<Vec<Option<String>>>, postgres::Error>
+where
+    T: for<'a> PgFromSql<'a>,
+{
+    Ok(row
+        .try_get::<_, Option<Vec<Option<T>>>>(col)?
+        .map(|v| v.into_iter().map(|e| e.map(&read)).collect()))
+}
+
+/// The text of every element of a `text`, `json`, `jsonb`, `interval` or enum array cell.
+fn read_utf8_list(
+    pg_type: &Type,
+    row: &Row,
+    col: usize,
+) -> std::result::Result<Option<Vec<Option<String>>>, postgres::Error> {
+    let element = pg_array_element(pg_type);
+    let typed = seeded!("pg-array-element-wire-type-refused", false, true);
+    match element {
+        Some(e) if typed && (*e == Type::JSON || *e == Type::JSONB) => {
+            text_elements::<PgJsonText>(row, col, |v| v.0)
+        }
+        Some(e) if typed && *e == Type::INTERVAL => text_elements::<PgInterval>(row, col, |v| {
+            pg_interval_to_iso8601(v.months, v.days, v.microseconds)
+        }),
+        Some(e) if typed && matches!(e.kind(), Kind::Enum(_)) => {
+            text_elements::<AnyAsString>(row, col, |v| v.0)
+        }
+        _ => text_elements::<String>(row, col, |v| v),
+    }
+}
+
+/// Build a `List<Utf8>` from an array of text, json, interval or enum elements.
+fn build_pg_utf8_list(pg_type: &Type, col_idx: usize, rows: &[Row]) -> Result<Arc<dyn Array>> {
+    let mut lb = ListBuilder::new(StringBuilder::new());
+    for row in rows {
+        match read_utf8_list(pg_type, row, col_idx) {
+            Ok(Some(v)) => {
+                for elem in v {
+                    lb.values().append_option(elem);
+                }
+                lb.append(true);
+            }
+            Ok(None) => lb.append(false),
+            Err(e) => return Err(pg_array_decode_error(rows, col_idx, &e)),
+        }
+    }
+    Ok(Arc::new(lb.finish()))
+}
+
 /// Build an Arrow `ListArray` from a PostgreSQL array column.
 fn build_pg_list_array(
+    pg_type: &Type,
     target_type: &DataType,
     col_idx: usize,
     rows: &[Row],
@@ -973,28 +1068,13 @@ fn build_pg_list_array(
         DataType::Boolean => list_of!(bool, BooleanBuilder),
         DataType::Int16 => list_of!(i16, Int16Builder),
         DataType::Int32 => list_of!(i32, Int32Builder),
+        DataType::Int64 if is_oid_array(pg_type) => {
+            list_mapped!(PgInt, Int64Builder::new(), b, v => b.append_value(v.0))
+        }
         DataType::Int64 => list_of!(i64, Int64Builder),
         DataType::Float32 => list_of!(f32, Float32Builder),
         DataType::Float64 => list_of!(f64, Float64Builder),
-        DataType::Utf8 => {
-            let mut lb = ListBuilder::new(StringBuilder::new());
-            for row in rows {
-                match row.try_get::<_, Option<Vec<Option<String>>>>(col_idx) {
-                    Ok(Some(v)) => {
-                        for s in &v {
-                            match s {
-                                Some(val) => lb.values().append_value(val),
-                                None => lb.values().append_null(),
-                            }
-                        }
-                        lb.append(true);
-                    }
-                    Ok(None) => lb.append(false),
-                    Err(e) => return Err(pg_array_decode_error(rows, col_idx, &e)),
-                }
-            }
-            Ok(Arc::new(lb.finish()))
-        }
+        DataType::Utf8 => build_pg_utf8_list(pg_type, col_idx, rows),
         DataType::Date32 if seeded!("pg-temporal-uuid-bytea-array-refused", false, true) => {
             list_mapped!(
                 chrono::NaiveDate,
@@ -1708,5 +1788,67 @@ mod array_decode_message_text {
         assert!(m.contains(
             "In a date, time or timestamp array an element of `infinity`, `-infinity` or `24:00:00` fails the same way: map it to a real bound in the query."
         ));
+    }
+}
+
+#[cfg(test)]
+mod array_element_tests {
+    use super::*;
+
+    #[test]
+    fn an_array_type_names_its_element_and_a_scalar_names_none() {
+        assert_eq!(pg_array_element(&Type::JSON_ARRAY), Some(&Type::JSON));
+        assert_eq!(pg_array_element(&Type::JSONB_ARRAY), Some(&Type::JSONB));
+        assert_eq!(
+            pg_array_element(&Type::INTERVAL_ARRAY),
+            Some(&Type::INTERVAL)
+        );
+        assert_eq!(pg_array_element(&Type::OID_ARRAY), Some(&Type::OID));
+        assert_eq!(pg_array_element(&Type::INT4_ARRAY), Some(&Type::INT4));
+        assert_eq!(pg_array_element(&Type::TEXT_ARRAY), Some(&Type::TEXT));
+        assert_eq!(pg_array_element(&Type::JSONB), None);
+        assert_eq!(pg_array_element(&Type::OID), None);
+    }
+
+    #[test]
+    fn a_json_element_reads_its_own_text() {
+        let json = PgJsonText::from_sql(&Type::JSON, br#"{"a": 1}"#).unwrap();
+        assert_eq!(json.0, r#"{"a": 1}"#);
+        let mut jsonb = vec![1u8];
+        jsonb.extend_from_slice(br#"{"a": 1}"#);
+        let jsonb = PgJsonText::from_sql(&Type::JSONB, &jsonb).unwrap();
+        assert_eq!(jsonb.0, r#"{"a": 1}"#);
+    }
+
+    #[test]
+    fn a_jsonb_element_of_another_wire_version_or_none_is_refused() {
+        assert!(PgJsonText::from_sql(&Type::JSONB, &[2, b'1']).is_err());
+        assert!(PgJsonText::from_sql(&Type::JSONB, &[0, b'1']).is_err());
+        assert!(PgJsonText::from_sql(&Type::JSONB, &[]).is_err());
+    }
+
+    #[test]
+    fn only_json_and_jsonb_elements_are_read_as_json_text() {
+        assert!(PgJsonText::accepts(&Type::JSON));
+        assert!(PgJsonText::accepts(&Type::JSONB));
+        assert!(!PgJsonText::accepts(&Type::TEXT));
+        assert!(!PgJsonText::accepts(&Type::JSON_ARRAY));
+    }
+
+    #[test]
+    fn only_an_oid_array_is_read_at_its_unsigned_width() {
+        assert!(is_oid_array(&Type::OID_ARRAY));
+        assert!(!is_oid_array(&Type::INT8_ARRAY));
+        assert!(!is_oid_array(&Type::INT4_ARRAY));
+        assert!(!is_oid_array(&Type::OID));
+    }
+
+    #[test]
+    fn an_oid_element_keeps_its_unsigned_range() {
+        let top = PgInt::from_sql(&Type::OID, &u32::MAX.to_be_bytes()).unwrap();
+        assert_eq!(top.0, 4_294_967_295);
+        let zero = PgInt::from_sql(&Type::OID, &0u32.to_be_bytes()).unwrap();
+        assert_eq!(zero.0, 0);
+        assert!(PgInt::from_sql(&Type::OID, &[0, 0, 1]).is_err());
     }
 }

@@ -5756,6 +5756,60 @@ seeds:
       mongo:
         na: "the seed edits the PostgreSQL list builder; a MongoDB array is a value inside the one document column, never a list column"
 
+  - name: pg-array-element-wire-type-refused
+    class: "a PostgreSQL json[], jsonb[], interval[], oid[] or enum[] column is refused by the batch export with the multi-dimensional message instead of being delivered as a list of its elements"
+    history: "type matrix class PG_ARRAY_ONE_DIM_MULTIDIM_MSG (2026-11-16): the Vec<Option<String>> read refused every element type String does not accept and the refusal blamed multi-dimensional arrays; RED from this patch: the live cell reads the list back through DuckDB and the lib cell reads the oid array at the wrong width"
+    scope: source
+    engines:
+      postgres:
+        switch: pg-array-element-wire-type-refused
+        cells:
+          - a_postgres_json_interval_oid_enum_array_is_delivered_as_a_list_of_its_elements
+          - "lib:only_an_oid_array_is_read_at_its_unsigned_width"
+      mysql:
+        na: "the seed edits the PostgreSQL list builder; MySQL has no array column type"
+      mssql:
+        na: "the seed edits the PostgreSQL list builder; SQL Server has no array column type"
+      oracle:
+        na: "the seed edits the PostgreSQL list builder; an Oracle collection column is refused by type, not built as a list"
+      mongo:
+        na: "the seed edits the PostgreSQL list builder; a MongoDB array is a value inside the one document column, never a list column"
+  - name: oracle-number-infinity-delivered-finite
+    class: "an Oracle NUMBER or FLOAT of infinity, or an exact 1E125 the client prints with the same bytes, is delivered as a finite number with exit 0"
+    history: "type matrix class ORACLE_NUMBER_INF_FINITE (2026-11-16): FLOAT arithmetic that overflows 9.99E125 stores infinity, which the client prints as 1 and 125 zeros; RED from this patch: the live cell sees the run succeed where it must exit 5"
+    scope: source
+    engines:
+      oracle:
+        switch: oracle-number-infinity-delivered-finite
+        cells:
+          - an_oracle_number_infinity_is_refused_by_code_and_to_char_delivers_the_server_text
+      postgres:
+        na: "a PostgreSQL numeric or float8 holds Infinity and NaN as distinct values, so no finite text stands for them"
+      mysql:
+        na: "MySQL DECIMAL and DOUBLE hold no infinity"
+      mssql:
+        na: "SQL Server decimal and float hold no infinity"
+      mongo:
+        na: "a document source has no Oracle NUMBER column"
+  - name: oracle-interval-ns-truncated
+    class: "an Oracle INTERVAL DAY TO SECOND with a sub-microsecond fraction is delivered truncated to microseconds with exit 0"
+    history: "type matrix class ORACLE_INTERVAL_DS_NS (2026-11-16): the converter wrote microseconds and a per-column warning; RED from this patch: the live cell sees the run succeed where it must exit 5 and the lib cell sees the nanoseconds dropped"
+    scope: source
+    engines:
+      oracle:
+        switch: oracle-interval-ns-truncated
+        cells:
+          - an_oracle_interval_with_nanoseconds_is_refused_by_code_and_to_char_delivers_the_text
+          - "lib:a_sub_microsecond_interval_is_refused_with_its_column_and_remedy"
+      postgres:
+        na: "a PostgreSQL interval is microsecond-exact, so no value has a sub-microsecond fraction to drop"
+      mysql:
+        na: "MySQL has no interval column type"
+      mssql:
+        na: "SQL Server has no interval column type"
+      mongo:
+        na: "a document source has no interval column type"
+
   - name: batch-runner-stores-state-before-the-cross-shape-refusal
     class: a batch run onto a prefix that holds another shape's manifest stores its plan, anchor or cursor before the refusal, so a refused run leaves that resume point behind
     history: "known defect in tests/offline/rig_oracle_ratchet.rs since the cross-shape guard landed: a parallel chunk-checkpoint run refused for a CDC manifest left an in_progress chunk run with pending tasks; the keyset runners (every engine, MongoDB included) opened their guarded frame after their resume run id, ranges or anchor were written, and a skip_empty run with no rows never opened it; on main and on v0.32.2"

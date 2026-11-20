@@ -29,10 +29,6 @@ pub(super) fn bare_number_warning(name: &str) -> String {
     )
 }
 
-/// Warning attached to an `INTERVAL DAY TO SECOND(7..9)` column truncated to microseconds.
-pub(super) const INTERVAL_NS_WARNING: &str = "INTERVAL DAY TO SECOND(7..9) → microseconds: the sub-microsecond \
-     digits are truncated; a fractional precision of 0..6 is exact.";
-
 /// The refusal for an undeclared `TIMESTAMP(7..9)`, naming the two declarations (`zoned` picks the `_tz` forms).
 pub(super) fn timestamp_ns_refusal(name: &str, zoned: bool) -> String {
     let (ns, us) = if zoned {
@@ -174,8 +170,7 @@ fn with_oracle_warning(mapping: TypeMapping, bare_number: bool, sub_us: bool) ->
     if bare_number {
         let name = mapping.column_name.clone();
         mapping.with_warning(bare_number_warning(&name))
-    } else if sub_us {
-        let timestamp = mapping.source_native_type.starts_with("timestamp");
+    } else if sub_us && mapping.source_native_type.starts_with("timestamp") {
         let zoned = mapping.source_native_type.starts_with("timestamp_tz")
             || mapping.source_native_type.starts_with("timestamp_ltz");
         let name = mapping.column_name.clone();
@@ -183,15 +178,11 @@ fn with_oracle_warning(mapping: TypeMapping, bare_number: bool, sub_us: bool) ->
             fidelity: crate::types::TypeFidelity::Lossy,
             ..mapping
         };
-        if timestamp {
-            seeded!(
-                "oracle-timestamp-ns-undeclared-truncated",
-                lossy.with_warning(timestamp_ns_refusal(&name, zoned)),
-                lossy.with_refusal(timestamp_ns_refusal(&name, zoned))
-            )
-        } else {
-            lossy.with_warning(INTERVAL_NS_WARNING)
-        }
+        seeded!(
+            "oracle-timestamp-ns-undeclared-truncated",
+            lossy.with_warning(timestamp_ns_refusal(&name, zoned)),
+            lossy.with_refusal(timestamp_ns_refusal(&name, zoned))
+        )
     } else {
         mapping
     }
@@ -255,17 +246,22 @@ fn schema_from_mappings(mappings: Vec<TypeMapping>, overrides: &ColumnOverrides)
 }
 
 /// An Oracle interval cell as the ISO 8601 duration rivet writes for every engine.
-fn interval_iso(row: &Row, idx: usize, kind: OraKind) -> Result<Option<String>> {
+fn interval_iso(row: &Row, idx: usize, kind: OraKind, column: &str) -> Result<Option<String>> {
     Ok(match kind {
-        OraKind::IntervalDs => row.get::<Option<OracleIntervalDS>>(idx).ora()?.map(|v| {
-            interval_ds_iso(
-                v.days(),
-                v.hours(),
-                v.minutes(),
-                v.seconds(),
-                v.nanoseconds(),
-            )
-        }),
+        OraKind::IntervalDs => row
+            .get::<Option<OracleIntervalDS>>(idx)
+            .ora()?
+            .map(|v| {
+                interval_ds_iso(
+                    column,
+                    v.days(),
+                    v.hours(),
+                    v.minutes(),
+                    v.seconds(),
+                    v.nanoseconds(),
+                )
+            })
+            .transpose()?,
         _ => row
             .get::<Option<OracleIntervalYM>>(idx)
             .ora()?
@@ -273,13 +269,29 @@ fn interval_iso(row: &Row, idx: usize, kind: OraKind) -> Result<Option<String>> 
     })
 }
 
-/// ISO 8601 for a DAY TO SECOND interval's fields, truncated to microseconds.
-fn interval_ds_iso(days: i32, hours: i8, minutes: i8, seconds: i8, nanos: i32) -> String {
+/// ISO 8601 for a DAY TO SECOND interval's fields, or a coded refusal when a sub-microsecond digit would be dropped.
+fn interval_ds_iso(
+    column: &str,
+    days: i32,
+    hours: i8,
+    minutes: i8,
+    seconds: i8,
+    nanos: i32,
+) -> Result<String> {
+    if nanos % 1_000 != 0 && seeded!("oracle-interval-ns-truncated", false, true) {
+        crate::rivet_bail!(
+            crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+            "oracle: column `{column}` holds an INTERVAL DAY TO SECOND with a sub-microsecond \
+             fraction ({nanos} ns): rivet writes microseconds and refuses rather than dropping \
+             the last digits. Select `TO_CHAR({column}) AS {column}` in the query to export the \
+             exact text."
+        );
+    }
     let us = i64::from(hours) * 3_600_000_000
         + i64::from(minutes) * 60_000_000
         + i64::from(seconds) * 1_000_000
         + i64::from(nanos) / 1_000;
-    crate::source::postgres::pg_interval_to_iso8601(0, days, us)
+    Ok(crate::source::postgres::pg_interval_to_iso8601(0, days, us))
 }
 
 /// ISO 8601 for a YEAR TO MONTH interval, straight from its fields (YEAR(9) overflows i32 months).
@@ -387,6 +399,35 @@ fn flagged_empty(row: &Row, flag: Option<usize>) -> Result<bool> {
     }
 }
 
+/// Whether `text` is what the client prints for Oracle's NUMBER infinity: `-` and 126 zeros, or `1` and 125 zeros.
+pub(super) fn is_number_infinity_text(text: &str) -> bool {
+    let (negative, digits) = text.strip_prefix('-').map_or((false, text), |d| (true, d));
+    let zeros = |s: &str| s.bytes().all(|b| b == b'0');
+    digits.len() == 126
+        && match negative {
+            true => zeros(digits),
+            false => digits.starts_with('1') && zeros(&digits[1..]),
+        }
+}
+
+/// An Oracle NUMBER as plain text, or a coded refusal when it is the text the client cannot tell from infinity.
+fn number_text(n: &OracleNumber, column: &str) -> Result<String> {
+    let text = n.to_string();
+    if is_number_infinity_text(&text)
+        && seeded!("oracle-number-infinity-delivered-finite", false, true)
+    {
+        crate::rivet_bail!(
+            crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+            "oracle: column `{column}` holds Oracle's NUMBER infinity (FLOAT arithmetic that \
+             overflows 9.99E125 stores it), or exactly 1E125, which the client reads as the \
+             same bytes. rivet refuses rather than writing a finite number for an infinite \
+             value. Select `TO_CHAR({column}) AS {column}` in the query to export the \
+             server's own text for every value (infinity prints as `~`)."
+        );
+    }
+    Ok(text)
+}
+
 /// The integer an Oracle NUMBER's text holds, or a coded refusal naming the column when it holds a fraction or overflows `T`.
 fn integer<T: std::str::FromStr>(column: &str, text: &str) -> Result<T> {
     text.parse::<T>().map_err(|_| {
@@ -409,10 +450,11 @@ fn build_column(
     max_value_bytes: Option<usize>,
     empty_flag: Option<usize>,
 ) -> Result<ArrayRef> {
-    let number = |r: &Row| {
+    let number = |r: &Row| -> Result<Option<String>> {
         r.get::<Option<OracleNumber>>(idx)
-            .ora()
-            .map(|v| v.map(|n| n.to_string()))
+            .ora()?
+            .map(|n| number_text(&n, name))
+            .transpose()
     };
     let kind = rows
         .first()
@@ -470,6 +512,10 @@ fn build_column(
             for r in rows {
                 b.append_option(match kind {
                     OraKind::BinaryFloat => r.get::<Option<f32>>(idx).ora()?.map(f64::from),
+                    OraKind::Number => {
+                        number(r)?;
+                        r.get::<Option<f64>>(idx).ora()?
+                    }
                     _ => r.get::<Option<f64>>(idx).ora()?,
                 });
             }
@@ -554,7 +600,7 @@ fn build_column(
             for r in rows {
                 let v = match kind {
                     OraKind::Number => number(r)?,
-                    OraKind::IntervalDs | OraKind::IntervalYm => interval_iso(r, idx, kind)?,
+                    OraKind::IntervalDs | OraKind::IntervalYm => interval_iso(r, idx, kind, name)?,
                     OraKind::Date | OraKind::Timestamp => r
                         .get::<Option<OracleTimestamp>>(idx)
                         .ora()?
@@ -814,11 +860,11 @@ mod tests {
     }
 
     #[test]
-    fn a_sub_microsecond_interval_stays_lossy_with_its_warning_and_no_refusal() {
+    fn a_sub_microsecond_interval_is_decided_per_value_not_per_column() {
         use crate::types::TypeFidelity;
         let iv = with_oracle_warning(mapping("interval_ds(9)"), false, true);
-        assert_eq!(iv.fidelity, TypeFidelity::Lossy);
-        assert_eq!(iv.warnings, vec![INTERVAL_NS_WARNING.to_string()]);
+        assert_ne!(iv.fidelity, TypeFidelity::Lossy);
+        assert!(iv.warnings.is_empty());
         assert_eq!(iv.refusal, None);
     }
 
@@ -1075,11 +1121,48 @@ mod tests {
 
     #[test]
     fn a_day_to_second_interval_renders_every_field() {
-        assert_eq!(interval_ds_iso(1, 2, 3, 4, 5_000), "P1DT2H3M4.000005S");
-        assert_eq!(interval_ds_iso(0, 0, 0, 0, 999), "PT0S", "sub-µs truncated");
-        assert_eq!(interval_ds_iso(0, 0, 0, 1, 0), "PT1S");
-        assert_eq!(interval_ds_iso(0, 0, 1, 0, 0), "PT1M");
-        assert_eq!(interval_ds_iso(0, 1, 0, 0, 0), "PT1H");
+        let iso = |d, h, m, s, n| interval_ds_iso("c", d, h, m, s, n).unwrap();
+        assert_eq!(iso(1, 2, 3, 4, 5_000), "P1DT2H3M4.000005S");
+        assert_eq!(iso(0, 0, 0, 1, 0), "PT1S");
+        assert_eq!(iso(0, 0, 1, 0, 0), "PT1M");
+        assert_eq!(iso(0, 1, 0, 0, 0), "PT1H");
+    }
+
+    #[test]
+    fn a_sub_microsecond_interval_is_refused_with_its_column_and_remedy() {
+        for nanos in [1, 999, 1_001, 999_999_999] {
+            let e = interval_ds_iso("dur", 1, 2, 3, 4, nanos)
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("column `dur`"), "{e}");
+            assert!(e.contains("`TO_CHAR(dur) AS dur`"), "{e}");
+        }
+        for nanos in [0, 1_000, 999_000, 123_456_000] {
+            assert!(interval_ds_iso("dur", 0, 0, 0, 0, nanos).is_ok(), "{nanos}");
+        }
+        assert_eq!(
+            interval_ds_iso("dur", 999_999_999, 23, 59, 59, 999_999_000).unwrap(),
+            "P999999999DT23H59M59.999999S"
+        );
+    }
+
+    #[test]
+    fn number_infinity_text_is_exactly_the_two_126_digit_shapes() {
+        let zeros = |n: usize| "0".repeat(n);
+        assert!(is_number_infinity_text(&format!("-{}", zeros(126))));
+        assert!(is_number_infinity_text(&format!("1{}", zeros(125))));
+        assert!(!is_number_infinity_text(&format!("-{}", zeros(125))));
+        assert!(!is_number_infinity_text(&format!("-{}", zeros(127))));
+        assert!(!is_number_infinity_text(&format!("1{}", zeros(124))));
+        assert!(!is_number_infinity_text(&format!("1{}", zeros(126))));
+        assert!(!is_number_infinity_text(&format!("2{}", zeros(125))));
+        assert!(!is_number_infinity_text(&format!("-1{}", zeros(125))));
+        assert!(!is_number_infinity_text(&format!("1{}1", zeros(124))));
+        assert!(!is_number_infinity_text(&format!("9{}", "9".repeat(125))));
+        assert!(!is_number_infinity_text(""));
+        assert!(!is_number_infinity_text("-"));
+        assert!(!is_number_infinity_text("0"));
+        assert!(!is_number_infinity_text("1"));
     }
 
     #[test]

@@ -429,22 +429,22 @@ fn table() -> Vec<Case> {
         case(
             "json[]",
             of(&Type::JSON_ARRAY),
-            "list<json> | List(Utf8) | native | compatible | reads list<int32> # red:PG_ARRAY_ONE_DIM_MULTIDIM_MSG",
+            "list<json> | List(Utf8) | native | compatible | reads list<int32>",
         ),
         case(
             "jsonb[]",
             of(&Type::JSONB_ARRAY),
-            "list<json> | List(Utf8) | native | compatible | reads list<int32> # red:PG_ARRAY_ONE_DIM_MULTIDIM_MSG",
+            "list<json> | List(Utf8) | native | compatible | reads list<int32>",
         ),
         case(
             "interval[]",
             of(&Type::INTERVAL_ARRAY),
-            "list<interval> | List(Utf8) | native | compatible | reads list<int32> # red:PG_ARRAY_ONE_DIM_MULTIDIM_MSG",
+            "list<interval> | List(Utf8) | native | compatible | reads list<int32>",
         ),
         case(
             "oid[]",
             of(&Type::OID_ARRAY),
-            "list<int64> | List(Int64) | native | compatible | reads list<int32> # red:PG_ARRAY_ONE_DIM_MULTIDIM_MSG",
+            "list<int64> | List(Int64) | native | compatible | reads list<int32>",
         ),
         case(
             "inet[]",
@@ -469,7 +469,7 @@ fn table() -> Vec<Case> {
         case(
             "rivet_status[]",
             of(&earr),
-            "list<enum> | List(Utf8) | native | compatible | reads list<int32> # red:PG_ARRAY_ONE_DIM_MULTIDIM_MSG",
+            "list<enum> | List(Utf8) | native | compatible | reads list<int32>",
         ),
     ]
 }
