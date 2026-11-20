@@ -3822,7 +3822,20 @@ fn a_hex_enum_label_in_a_stream_is_delivered_from_the_table_map_mysql() {
     let table = s.table.clone();
     s.sql(&format!("INSERT INTO {table} VALUES (3, 3, 1)"));
     s.settle();
-    s.rig.run_ok();
+    let batches = s.drain_and_read();
+    let labels: Vec<String> = batches
+        .iter()
+        .flat_map(|b| {
+            let col = b.column_by_name("e").expect("the ENUM column is delivered");
+            (0..b.num_rows())
+                .map(|i| arrow::util::display::array_value_to_string(col, i).unwrap())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(
+        labels.iter().any(|l| l == "\u{1F680}"),
+        "the hex ENUM label is delivered from the table map, got {labels:?}"
+    );
 }
 
 /// SQL Server: a `MONEY` past the f64-exact range (1e12, which tiberius delivers rounded) is refused as `RIVET_SOURCE_CDC_CELL_UNSUPPORTED` (exit 5) on every run; the checkpoint deleted alone is refused under the baseline; the column dropped at the source and the re-baseline recipe deliver the source.
