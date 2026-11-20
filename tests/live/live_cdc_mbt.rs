@@ -1137,13 +1137,8 @@ fn mysql_cdc_enum_set_labels_match_the_snapshot() {
     );
 }
 
-/// The stream legs of a TIME-column table against the source: a `string` column carries MySQL's own text, a default column refuses with the sentence the batch export prints.
-fn time_stream_legs_disagree(
-    tbl: &str,
-    cols: &[&str],
-    rows: &[(i64, Vec<&str>)],
-    refused_value: Option<&str>,
-) -> Vec<String> {
+/// The stream legs of a TIME-column table against the source: a default column and a `string` column both carry MySQL's own text.
+fn time_stream_legs_disagree(tbl: &str, cols: &[&str], rows: &[(i64, Vec<&str>)]) -> Vec<String> {
     use arrow::array::StringArray;
     let ids: Vec<String> = rows.iter().map(|r| r.0.to_string()).collect();
     let mut c = mysql::Pool::new(MYSQL_CDC_URL).unwrap().get_conn().unwrap();
@@ -1154,11 +1149,9 @@ fn time_stream_legs_disagree(
         .join(", ");
     let stream = |leg: &str| Rig::mysql_cdc(tbl).export_named(&format!("{tbl}_{leg}"));
     let text = stream("text").export_line(&format!("columns: {{ {decl} }}"));
-    let refuse = stream("refuse");
+    let plain = stream("plain");
     text.pin_binlog_here();
-    if refused_value.is_some() {
-        refuse.pin_binlog_here();
-    }
+    plain.pin_binlog_here();
     for (id, vals) in rows {
         let lits = vals
             .iter()
@@ -1189,18 +1182,20 @@ fn time_stream_legs_disagree(
         want.insert(id.parse::<i64>().unwrap(), cells);
     }
     let mut bad = Vec::new();
-    let out = text.run();
-    if !out.status.success() {
-        bad.push(format!(
-            "string columns: the stream run failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-                .lines()
-                .find(|l| l.contains("panicked") || l.contains("Error"))
-                .unwrap_or("")
-        ));
-    } else {
+    for (leg, rig) in [("string columns", &text), ("default columns", &plain)] {
+        let out = rig.run();
+        if !out.status.success() {
+            bad.push(format!(
+                "{leg}: the stream run failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+                    .lines()
+                    .find(|l| l.contains("panicked") || l.contains("Error"))
+                    .unwrap_or("")
+            ));
+            continue;
+        }
         let mut got = std::collections::BTreeMap::new();
-        for b in read_all_parts(&text.out_dir()) {
+        for b in read_all_parts(&rig.out_dir()) {
             let id = arrow::compute::cast(
                 b.column(b.schema().index_of("id").unwrap()),
                 &arrow::datatypes::DataType::Int64,
@@ -1230,49 +1225,16 @@ fn time_stream_legs_disagree(
         for (id, w) in &want {
             if got.get(id) != Some(w) {
                 bad.push(format!(
-                    "string columns id {id}: source {w:?}, stream {:?}",
+                    "{leg} id {id}: source {w:?}, stream {:?}",
                     got.get(id)
                 ));
             }
         }
     }
-    if let Some(value) = refused_value {
-        let batch = Rig::mysql_batch(tbl)
-            .export_named(&format!("{tbl}_batch"))
-            .source_url(MYSQL_CDC_URL)
-            .run_expect_fail();
-        let sentence = batch
-            .find("mysql: TIME ")
-            .and_then(|i| {
-                batch[i..]
-                    .find(" Cast it in a query")
-                    .map(|j| &batch[i..i + j])
-            })
-            .unwrap_or("");
-        let out = refuse.run();
-        let said = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        if sentence.is_empty()
-            || !sentence.contains(value)
-            || out.status.success()
-            || !said.contains(sentence)
-            || !said.contains("RIVET_SOURCE_VALUE_UNREPRESENTABLE")
-        {
-            bad.push(format!(
-                "default column: the snapshot refuses {sentence:?}; the stream said {}",
-                said.lines()
-                    .find(|l| l.contains("TIME") || l.contains("panicked"))
-                    .unwrap_or("nothing about the value")
-            ));
-        }
-    }
     bad
 }
 
-/// A negative MySQL TIME(1) or TIME(2) with a fraction is the stored duration on the stream leg: MySQL's own text in a `string` column, the snapshot's refusal in a default one.
+/// A negative MySQL TIME(1) or TIME(2) with a fraction is the stored duration on the stream leg, in a default column and in a `string` one.
 #[test]
 #[ignore = "live: requires docker compose mysql-cdc (binlog ROW + REPLICATION grant)"]
 fn mysql_cdc_negative_time_fraction_matches_the_snapshot() {
@@ -1292,11 +1254,39 @@ fn mysql_cdc_negative_time_fraction_matches_the_snapshot() {
         (4, vec!["-00:00:00.1", "-00:00:00.01"]),
         (5, vec!["-838:59:58.9", "-838:59:58.99"]),
     ];
-    let bad = time_stream_legs_disagree(&tbl, &["t1", "t2"], &rows, Some("TIME -0:00:00.500000"));
+    let bad = time_stream_legs_disagree(&tbl, &["t1", "t2"], &rows);
     assert_eq!(
         bad,
         Vec::<String>::new(),
         "stream differs from the source on negative TIME(1)/TIME(2) with a fraction"
+    );
+}
+
+/// A MySQL TIME of 24 hours or more, or negative past a day, is delivered by the stream as the stored duration, in a default column and in a `string` one.
+#[test]
+#[ignore = "live: requires docker compose mysql-cdc (binlog ROW + REPLICATION grant)"]
+fn mysql_cdc_time_past_a_day_matches_the_source() {
+    let _serial = cross_process_serial("mysql_cdc_time_fraction");
+    let tbl = unique_name("cdc_tday");
+    let mut c = mysql::Pool::new(MYSQL_CDC_URL).unwrap().get_conn().unwrap();
+    c.query_drop(format!("DROP TABLE IF EXISTS {tbl}")).unwrap();
+    c.query_drop(format!(
+        "CREATE TABLE {tbl} (id INT PRIMARY KEY, t TIME(6))"
+    ))
+    .unwrap();
+    let _guard = Table(tbl.clone());
+    let rows = vec![
+        (1, vec!["838:59:59"]),
+        (2, vec!["-838:59:59"]),
+        (3, vec!["25:30:15.5"]),
+        (4, vec!["-24:00:00"]),
+        (5, vec!["14:30:00.123456"]),
+    ];
+    let bad = time_stream_legs_disagree(&tbl, &["t"], &rows);
+    assert_eq!(
+        bad,
+        Vec::<String>::new(),
+        "stream differs from the source on a TIME past a day"
     );
 }
 
@@ -1348,7 +1338,7 @@ fn mysql_cdc_time_values_beside_a_negative_fraction_match_the_source() {
             ],
         ),
     ];
-    let bad = time_stream_legs_disagree(&tbl, &["a", "b", "c", "d", "e", "f"], &rows, None);
+    let bad = time_stream_legs_disagree(&tbl, &["a", "b", "c", "d", "e", "f"], &rows);
     assert_eq!(
         bad,
         Vec::<String>::new(),

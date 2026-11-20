@@ -306,7 +306,7 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `date` | `date` | `Date32` | ISO date | a zero or partial date (`0000-00-00`, `2026-00-00`) is written as NULL, the run WARNs per column with the count and the summary has a `fidelity` row; the column is labelled `rivet.fidelity: compatible`, never `exact`; see [Values with no Arrow representation](#values-with-no-arrow-representation) | golden |
 | `datetime` | `timestamp(µs, none)` | `Timestamp(µs, None)` | datetime text | naive; same zero-date rule and `compatible` label as `date` | live matrix |
 | `timestamp` | `timestamp_tz(µs, UTC)` | `Timestamp(µs, UTC)` | datetime text | `SET time_zone = '+00:00'`; same zero-date rule and `compatible` label as `date` | live matrix |
-| `time` | `time(µs)` | `Time64(µs)` | time text | | partial |
+| `time` | `string` | `Utf8` | `[-]hh:mm:ss.ffffff` text (`rivet.text_form: time_beyond_day`) | a MySQL `TIME` is a signed duration of -838:59:59 to 838:59:59, which `Time64(µs)` (00:00..24:00) cannot hold, so every value is delivered as text, batch and CDC, in a `logical_string` column | live matrix |
 | `varchar` / `text` | `string` / `text` | `Utf8` | escaped UTF-8 | | live matrix |
 | `json` | `json` | `Utf8` + Parquet `LogicalType::Json` (via `arrow.json` extension) | JSON string | | live matrix |
 | `binary` / `varbinary` / `blob` | `binary` | `Binary` | hex in CSV | charset 63 / binary payload | type_roundtrip |
