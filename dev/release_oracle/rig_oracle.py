@@ -491,6 +491,25 @@ def mysql_query_native(url: str, query: str) -> dict:
     return {n: MYSQL_TEMPORAL[code] + (f"({fsp})" if fsp else "") for n, code, fsp in mysql_describe(url, query) if code in MYSQL_TEMPORAL}
 
 
+def _mssql_query_projection(query: str, native: dict, renders: dict) -> tuple[str, dict] | None:
+    """(the query with each column the ledger renders server-side projected through its render, those columns' declared types), or `None` when no column of the result needs one: the scanner reads a datetime2(7) at microseconds."""
+    drawn = {c: n for c, n in native.items() if n in renders}
+    if not drawn:
+        return None
+    name = lambda c: "[" + c.replace("]", "]]") + "]"  # noqa: E731
+    cols = ", ".join(renders[drawn[c]].replace("{c}", name(c)) + f" AS {name(c)}" if c in drawn else name(c) for c in native)
+    return f"SELECT {cols} FROM ({query.rstrip().rstrip(';')}) AS rivet_q", drawn
+
+
+def _mssql_query_native(ora, query: str) -> dict:
+    """The declared type of each named column of a SQL Server query result, in the ledger's spelling."""
+    described = (
+        f"SELECT name, system_type_name FROM sys.dm_exec_describe_first_result_set(N{_lit(query.rstrip().rstrip(';'))}, NULL, 0) "
+        "WHERE name IS NOT NULL ORDER BY column_ordinal"
+    )
+    return {n: norm_native(t) for n, t in ora.rows(f"SELECT * FROM mssql_scan('ms', {_lit(described)})")}
+
+
 def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
     """(source relation, primary key columns, declared type per column in the ledger's spelling) for the spec's engine."""
     from .value_diff import oracle_rows
@@ -606,6 +625,8 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
     if engine == "mssql":
         sch = schema or "dbo"
         if query:
+            if projected := _mssql_query_projection(query, _mssql_query_native(ora, query), renders):
+                return f"mssql_scan('ms', {_lit(projected[0])})", [], projected[1]
             return f"mssql_scan('ms', {_lit(query)})", [], native
         oid = f"OBJECT_ID({_lit(sch + '.' + leaf)})"
         if spec.get("capture_instance"):
@@ -2312,6 +2333,7 @@ def _self_test() -> None:
     _zone_less_self_test()
     _absent_table_self_test()
     _folded_duplicate_self_test()
+    _mssql_query_projection_self_test()
     print("rig_oracle self-test ok")
 
 
@@ -2396,6 +2418,15 @@ def _absent_table_self_test() -> None:
         assert "bigquery_query" in str(e), f"a BigQuery view is read through a query job, not called absent: {e}"
     else:
         raise AssertionError("a BigQuery view must reach its read, which the stand-in cannot serve")
+
+
+def _mssql_query_projection_self_test() -> None:
+    """A SQL Server query whose result holds a ledger-rendered type is read through the server's render; one that does not is read as it is."""
+    renders = {"DATETIME2": "CONVERT(varchar(max), {c}, 121)"}
+    sql, drawn = _mssql_query_projection("SELECT id, t2 FROM t;", {"id": "INT", "t2": "DATETIME2", "o]k": "INT"}, renders)
+    assert sql == "SELECT [id], CONVERT(varchar(max), [t2], 121) AS [t2], [o]]k] FROM (SELECT id, t2 FROM t) AS rivet_q", sql
+    assert drawn == {"t2": "DATETIME2"}, drawn
+    assert _mssql_query_projection("SELECT id FROM t", {"id": "INT"}, renders) is None, "no rendered column leaves the query as written"
 
 
 def _folded_duplicate_self_test() -> None:
