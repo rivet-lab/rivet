@@ -1008,8 +1008,6 @@ fn object_kind_of(engine: &str) -> ObjectKind {
     }
 }
 
-const FOOTER_READERS: usize = 8;
-
 /// The row count of every part in `uris`, in order, each footer checked for a date or timestamp ClickHouse cannot hold and, for a change log, the head of `__pos` for a position it cannot version.
 fn checked_part_rows<'s>(
     store: impl FnOnce() -> Result<&'s GcsStore>,
@@ -1020,30 +1018,13 @@ fn checked_part_rows<'s>(
         return Ok(Vec::new());
     }
     let store = store()?;
-    let one = |uri: &String| -> Result<u64> {
-        let (_, key) = super::split_object_uri(uri)?;
-        let meta = super::partition_budget::read_footer(store, key)
-            .with_context(|| format!("reading the footer of {uri}"))?;
-        refuse_unholdable_temporals(&meta, uri)?;
+    super::target_range::map_footers(store, uris, |key, uri, meta| {
+        refuse_unholdable_temporals(meta, uri)?;
         if change_log {
-            refuse_unorderable_positions(store, key, &meta, uri)?;
+            refuse_unorderable_positions(store, key, meta, uri)?;
         }
-        footer_rows(&meta)
-    };
-    let mut rows = Vec::with_capacity(uris.len());
-    for wave in uris.chunks(FOOTER_READERS) {
-        let checked: Vec<Result<u64>> = std::thread::scope(|scope| {
-            let readers: Vec<_> = wave.iter().map(|uri| scope.spawn(|| one(uri))).collect();
-            readers
-                .into_iter()
-                .map(|r| r.join().unwrap_or_else(|p| std::panic::resume_unwind(p)))
-                .collect()
-        });
-        for r in checked {
-            rows.push(r?);
-        }
-    }
-    Ok(rows)
+        footer_rows(meta)
+    })
 }
 
 /// Refuse a change-log part whose `__pos` head is of a shape ClickHouse cannot version, before any table is created.
@@ -1072,32 +1053,11 @@ fn refuse_unholdable_temporals(
     meta: &parquet::file::metadata::ParquetMetaData,
     uri: &str,
 ) -> Result<()> {
-    let Some(out) = super::partition_budget::temporal_outside(
+    super::target_range::refuse_outside_ranges(
         meta,
+        uri,
         &crate::types::target::CLICKHOUSE_TEMPORAL_RANGES,
-    ) else {
-        return Ok(());
-    };
-    let (column, range) = (&out.column, out.range);
-    let (name, span) = (range.type_name, range.span());
-    match out.value {
-        None => crate::rivet_bail!(
-            crate::error::codes::LOAD_VALUE_OUT_OF_TARGET_RANGE,
-            "{uri}: column `{column}` has no min/max statistics in the Parquet footer, so rivet \
-             cannot check it against ClickHouse {name}'s range ({span}), \
-             which ClickHouse enforces by {}; nothing was inserted. \
-             Re-export the part with statistics enabled (rivet's writer keeps them), or cast \
-             the column to text in the export's `query:`.",
-            range.enforced
-        ),
-        Some(value) => crate::rivet_bail!(
-            crate::error::codes::LOAD_VALUE_OUT_OF_TARGET_RANGE,
-            "{uri}: column `{column}` holds {value}, outside ClickHouse {name}'s range \
-             ({span}). ClickHouse would {}; nothing was inserted. Cast the column to text \
-             in the export's `query:` to keep the value, or correct it at the source.",
-            range.beyond
-        ),
-    }
+    )
 }
 
 /// A Parquet file's footer metadata.
@@ -1513,7 +1473,7 @@ mod tests {
             format!("gs://b/{name}")
         };
         let store = GcsStore::open_fs(dir.path().to_str().unwrap()).unwrap();
-        let good: Vec<String> = (0..FOOTER_READERS + 3)
+        let good: Vec<String> = (0..crate::load::target_range::FOOTER_READERS + 3)
             .map(|i| write(&format!("p{i:02}.parquet"), &vec![0; i + 1]))
             .collect();
         assert_eq!(
