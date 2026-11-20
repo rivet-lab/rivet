@@ -6860,3 +6860,20 @@ seeds:
         na: "the seed edits the PostgreSQL value checksum's list reader; an Oracle collection column is refused by type, not built as a list"
       mongo:
         na: "the seed edits the PostgreSQL value checksum's list reader; a MongoDB array rides the document column"
+
+  - name: json-list-item-without-extension
+    class: "a list of json (PostgreSQL json[] / jsonb[]) is written as List(Utf8): the list item carries no arrow.json extension, so the Parquet loses that its elements are JSON while a json column keeps it"
+    history: "measured 2026-11-20 on PostgreSQL 16.14 (type-matrix delivery measurement, local stand): the JSON[] and JSONB[] rows declare List(arrow.json) and delivered List(Utf8); rivet_type_to_arrow tagged only a uuid list item"
+    scope: source
+    engines:
+      postgres:
+        switch: json-list-item-without-extension
+        cells: ["lib:a_uuid_list_item_carries_the_uuid_extension_and_others_do_not"]
+      mysql:
+        na: "MySQL has no array column type, so no list of json is built from it"
+      mssql:
+        na: "SQL Server has no array column type, so no list of json is built from it"
+      oracle:
+        na: "an Oracle collection column is refused by type, not built as a list"
+      mongo:
+        na: "a MongoDB array rides the document column, so no list of json is built from it"
