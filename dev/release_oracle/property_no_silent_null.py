@@ -643,6 +643,10 @@ def read_files(parts: list[str], fmt: str, key: str = "id"):
 
             tbl = pa.concat_tables([pq.read_table(p) for p in parts], promote_options="permissive")
             wide = {f.name.lower(): f"DECIMAL({f.type.precision},{f.type.scale})" for f in tbl.schema if pa.types.is_decimal256(f.type)}
+            # A nanosecond timestamp is read as its text: DuckDB rounds TIMESTAMP_NS to a Python datetime's microseconds
+            # on fetch, and truncates a zoned one to TIMESTAMP WITH TIME ZONE on register (both measured on 1.5.5).
+            wide |= {f.name.lower(): ("TIMESTAMP WITH TIME ZONE" if f.type.tz else "TIMESTAMP_NS") for f in tbl.schema
+                     if pa.types.is_timestamp(f.type) and f.type.unit == "ns"}
             for f in tbl.schema:
                 if f.name.lower() in wide:
                     tbl = tbl.set_column(tbl.schema.get_field_index(f.name), f.name, tbl.column(f.name).cast(pa.string()))
