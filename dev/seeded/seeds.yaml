@@ -6722,7 +6722,6 @@ seeds:
       clickhouse:
         cells:
           - a_date_clickhouse_cannot_hold_is_refused_not_clamped
-          - a_date_declared_string_keeps_the_value_clickhouse_cannot_hold
           - "lib:a_date_part_is_refused_only_past_either_end_of_date32"
           - "lib:a_date_past_either_end_of_a_range_is_named_by_its_day"
           - "lib:a_date_list_is_checked_by_its_own_leaf"

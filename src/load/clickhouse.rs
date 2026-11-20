@@ -1086,15 +1086,15 @@ fn refuse_unholdable_temporals(
             "{uri}: column `{column}` has no min/max statistics in the Parquet footer, so rivet \
              cannot check it against ClickHouse {name}'s range ({span}), \
              which ClickHouse enforces by {}; nothing was inserted. \
-             Re-export the part with statistics enabled (rivet's writer keeps them), or declare \
-             the column as String in the export's `columns:`.",
+             Re-export the part with statistics enabled (rivet's writer keeps them), or cast \
+             the column to text in the export's `query:`.",
             range.enforced
         ),
         Some(value) => crate::rivet_bail!(
             crate::error::codes::LOAD_VALUE_OUT_OF_TARGET_RANGE,
             "{uri}: column `{column}` holds {value}, outside ClickHouse {name}'s range \
-             ({span}). ClickHouse would {}; nothing was inserted. Declare the column as String \
-             in the export's `columns:` to keep the value, or correct it at the source.",
+             ({span}). ClickHouse would {}; nothing was inserted. Cast the column to text \
+             in the export's `query:` to keep the value, or correct it at the source.",
             range.beyond
         ),
     }
@@ -1687,7 +1687,8 @@ mod tests {
             let text = format!("{err:#}");
             assert!(
                 text.contains(&format!("column `d` holds {shown}"))
-                    && text.contains("outside ClickHouse Date32's range"),
+                    && text.contains("outside ClickHouse Date32's range")
+                    && text.contains("Cast the column to text in the export's `query:`"),
                 "{text}"
             );
         }

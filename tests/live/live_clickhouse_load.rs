@@ -1640,7 +1640,7 @@ fn a_date_clickhouse_cannot_hold_is_refused_not_clamped() {
 /// The remedy the date refusal names, a String column, delivers 2300-01-01 as the source holds it.
 #[test]
 #[ignore = "live: requires clickhouse + fake-gcs + postgres"]
-fn a_date_declared_string_keeps_the_value_clickhouse_cannot_hold() {
+fn a_date_cast_to_text_in_the_query_keeps_the_value_clickhouse_cannot_hold() {
     require_alive(LiveService::ClickHouse);
     require_alive(LiveService::FakeGcs);
     ensure_gcs_bucket(BUCKET);
@@ -1656,7 +1656,7 @@ fn a_date_declared_string_keeps_the_value_clickhouse_cannot_hold() {
     let rig = batch_into_clickhouse(
         Rig::pg_batch(&tbl)
             .mode("full")
-            .export_line("columns: {d: string}"),
+            .query(&format!("SELECT id, d::text AS d FROM {tbl}")),
         &db,
     );
     rig.run_ok();
@@ -1666,7 +1666,7 @@ fn a_date_declared_string_keeps_the_value_clickhouse_cannot_hold() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let got = ch(&format!(
+    let got = clickhouse_rows_tsv(&format!(
         "SELECT toString(d) FROM {}.{tbl} ORDER BY id FORMAT TSV",
         db.0
     ));
