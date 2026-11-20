@@ -387,6 +387,38 @@ fn flagged_empty(row: &Row, flag: Option<usize>) -> Result<bool> {
     }
 }
 
+/// The sign of an infinite NUMBER cell: its flag column's value (see `super::infinity_flag`), else `-` for the text the driver decodes -infinity to, `-` followed by zeros only, which no finite NUMBER prints (the driver decodes +infinity as 1E125, which only the flag tells apart).
+fn infinity_sign(row: &Row, flag: Option<usize>, text: &str) -> Result<Option<char>> {
+    if let Some(j) = flag
+        && let Some(f) = row.get::<Option<OracleNumber>>(j).ora()?
+    {
+        return Ok(Some(if f.to_string().starts_with('-') {
+            '-'
+        } else {
+            '+'
+        }));
+    }
+    Ok(negative_infinity_text(text).then_some('-'))
+}
+
+/// Whether `text` is what the driver prints for -infinity: a minus sign and zeros only.
+fn negative_infinity_text(text: &str) -> bool {
+    text.strip_prefix('-')
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b == b'0'))
+}
+
+/// The refusal for an Oracle NUMBER or FLOAT holding ±infinity, which no Arrow type rivet delivers holds.
+fn infinity_refusal(column: &str, sign: char) -> anyhow::Error {
+    crate::error::coded(
+        crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+        format!(
+            "oracle: column `{column}` holds {sign}infinity, which no decimal, integer or decimal \
+             text holds — rivet refuses rather than writing it as a finite number. Map the value \
+             to a representable one in the export's `query:`, or exclude the column."
+        ),
+    )
+}
+
 /// The integer an Oracle NUMBER's text holds, or a coded refusal naming the column when it holds a fraction or overflows `T`.
 fn integer<T: std::str::FromStr>(column: &str, text: &str) -> Result<T> {
     text.parse::<T>().map_err(|_| {
@@ -407,12 +439,23 @@ fn build_column(
     name: &str,
     dt: &DataType,
     max_value_bytes: Option<usize>,
-    empty_flag: Option<usize>,
+    cell_flag: Option<usize>,
 ) -> Result<ArrayRef> {
-    let number = |r: &Row| {
-        r.get::<Option<OracleNumber>>(idx)
-            .ora()
-            .map(|v| v.map(|n| n.to_string()))
+    let number = |r: &Row| -> Result<Option<String>> {
+        let text = r
+            .get::<Option<OracleNumber>>(idx)
+            .ora()?
+            .map(|n| n.to_string());
+        let infinite = match &text {
+            Some(t) => infinity_sign(r, cell_flag, t)?,
+            None => None,
+        };
+        match infinite {
+            Some(sign) if seeded!("oracle-number-infinity-read-as-finite", false, true) => {
+                Err(infinity_refusal(name, sign))
+            }
+            _ => Ok(text),
+        }
     };
     let kind = rows
         .first()
@@ -543,7 +586,7 @@ fn build_column(
                         crate::source::value_within_ceiling(name, v.len(), max_value_bytes)?;
                         b.append_value(v);
                     }
-                    None if flagged_empty(r, empty_flag)? => b.append_value(b""),
+                    None if flagged_empty(r, cell_flag)? => b.append_value(b""),
                     None => b.append_null(),
                 }
             }
@@ -574,7 +617,7 @@ fn build_column(
                         crate::source::value_within_ceiling(name, v.len(), max_value_bytes)?;
                         b.append_value(v);
                     }
-                    None if flagged_empty(r, empty_flag)? => b.append_value(""),
+                    None if flagged_empty(r, cell_flag)? => b.append_value(""),
                     None => b.append_null(),
                 }
             }
@@ -592,7 +635,7 @@ pub(super) fn rows_to_batch(
     rows: &[Row],
     schema: &Arc<Schema>,
     max_value_bytes: Option<usize>,
-    empty_flags: &[Option<usize>],
+    cell_flags: &[Option<usize>],
     row_index: &[usize],
 ) -> Result<RecordBatch> {
     let columns = schema
@@ -600,7 +643,7 @@ pub(super) fn rows_to_batch(
         .iter()
         .enumerate()
         .map(|(i, f)| {
-            let flag = empty_flags.get(i).copied().flatten();
+            let flag = cell_flags.get(i).copied().flatten();
             let at = row_index.get(i).copied().unwrap_or(i);
             build_column(rows, at, f.name(), f.data_type(), max_value_bytes, flag)
         })
@@ -611,6 +654,33 @@ pub(super) fn rows_to_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The driver decodes Oracle's -infinity (one byte, 0) as a minus sign and 126 zeros; no finite NUMBER prints that, so the text alone refuses it even where no flag column fits.
+    #[test]
+    fn the_text_the_driver_decodes_negative_infinity_to_is_recognised_and_nothing_finite_is() {
+        assert!(negative_infinity_text(&format!("-{}", "0".repeat(126))));
+        for finite in [
+            "0",
+            "-0.5",
+            "-1",
+            "-10",
+            "1",
+            &format!("1{}", "0".repeat(125)),
+            "-",
+            "",
+        ] {
+            assert!(!negative_infinity_text(finite), "{finite}");
+        }
+        let err = infinity_refusal("F", '+');
+        assert_eq!(
+            crate::error::error_code(&err),
+            Some("RIVET_SOURCE_VALUE_UNREPRESENTABLE")
+        );
+        assert!(
+            format!("{err:#}").contains("column `F` holds +infinity"),
+            "{err:#}"
+        );
+    }
 
     /// What the Oracle mapper lands a catalog type as is what a load key or order is admitted by.
     #[test]

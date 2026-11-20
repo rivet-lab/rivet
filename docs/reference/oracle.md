@@ -102,7 +102,7 @@ stops the query at the budget.
 |---|---|
 | `NUMBER(1..9, 0)` / `NUMBER(10..18, 0)` | Int32 / Int64 |
 | `NUMBER(p, s)` otherwise | Decimal128(p, s); `s > p` widens to (s, s), negative `s` to (p − s, 0) |
-| bare `NUMBER`, `FLOAT` | exact decimal text (Utf8) with a warning — declare `columns:` to load it as a number; as the cursor of an incremental load it is refused (`RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT`, exit 5) until declared, because the warehouse orders text `99` after `100` |
+| bare `NUMBER`, `FLOAT` | exact decimal text (Utf8) with a warning — declare `columns:` to load it as a number; as the cursor of an incremental load it is refused (`RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT`, exit 5) until declared, because the warehouse orders text `99` after `100`. A value of ±infinity (which a bare `NUMBER` or a `FLOAT` can hold, e.g. a `FLOAT(10)` rounding past 9.99E125) is refused (`RIVET_SOURCE_VALUE_UNREPRESENTABLE`, exit 5): the driver would decode it as the finite 1E125, so rivet reads Oracle's own encoding in a flag column beside the export |
 | `BINARY_FLOAT` / `BINARY_DOUBLE` | Float32 / Float64 (NaN, ±Inf kept) |
 | `BOOLEAN` (23ai and later) | Boolean |
 | `DATE`, `TIMESTAMP(0..6)` | Timestamp(µs) |

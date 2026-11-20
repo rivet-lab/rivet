@@ -6715,3 +6715,20 @@ seeds:
         cells:
           - "lib:the_legs_check_admits_are_the_pending_baselines_and_nothing_else"
           - "lib:check_plans_the_pending_baseline_leg_of_a_cdc_export_and_only_that"
+
+  - name: oracle-number-infinity-read-as-finite
+    class: "an Oracle NUMBER or FLOAT holding ±infinity is delivered as a finite value, exit 0: the thin driver decodes +infinity (bytes 255,101) as 1E125 and -infinity (byte 0) as a minus sign and 126 zeros"
+    history: "type matrix class ORACLE_NUMBER_INF_FINITE (known_red 2026-11-16, FLOAT(10) edges ±9.99E125, which round to infinity); traced 2026-11-20 to oracledb 26.0.0-beta.4 OracleNumber FromBuf/Display; owner decision 2026-11-20: fix, refuse by code"
+    scope: source
+    switch: oracle-number-infinity-read-as-finite
+    engines:
+      oracle:
+        cells: ["lib:an_unbounded_number_carries_an_infinity_flag_and_a_declared_one_does_not", "lib:the_text_the_driver_decodes_negative_infinity_to_is_recognised_and_nothing_finite_is"]
+      postgres:
+        na: "a PostgreSQL numeric infinity arrives as the text 'Infinity' through its own reader (src/source/pg_numeric_wire.rs), never through the Oracle NUMBER decoder the seed edits"
+      mysql:
+        na: "MySQL DECIMAL has no infinity and its DOUBLE is read as a float, so no value reaches the Oracle NUMBER decoder the seed edits"
+      mssql:
+        na: "SQL Server decimal has no infinity and its float is read as a float, so no value reaches the Oracle NUMBER decoder the seed edits"
+      mongo:
+        na: "a BSON double infinity is read as a float and a Decimal128 infinity by the MongoDB reader; neither reaches the Oracle NUMBER decoder the seed edits"
