@@ -229,6 +229,8 @@ pub(crate) struct ChangeEvent {
     pub(crate) before_names: Option<std::sync::Arc<[String]>>,
     /// A deferred refusal of an undecodable old-image cell, raised only where the old image is written.
     pub(crate) before_poison: Option<String>,
+    /// Labels of the ENUM and SET columns whose catalog spelling cannot be trusted, read from the binlog table map (MySQL only).
+    pub(crate) image_labels: Option<std::sync::Arc<[value::WireLabels]>>,
 }
 
 /// Stamps each change with its intra-transaction ordinal ([`ChangeEvent::seq`]).
@@ -343,6 +345,20 @@ impl ChangeEvent {
                 a.len() * std::mem::size_of::<String>() + a.iter().map(String::len).sum::<usize>();
             own / std::sync::Arc::strong_count(a).max(1)
         });
+        let labels = self.image_labels.as_ref().map_or(0, |a| {
+            let own: usize = a
+                .iter()
+                .map(|w| {
+                    std::mem::size_of::<value::WireLabels>()
+                        + w.column.len()
+                        + w.labels.as_ref().map_or(0, |l| {
+                            l.len() * std::mem::size_of::<String>()
+                                + l.iter().map(String::len).sum::<usize>()
+                        })
+                })
+                .sum();
+            own / std::sync::Arc::strong_count(a).max(1)
+        });
         let text = |s: &Option<String>| s.as_ref().map_or(0, String::len);
         std::mem::size_of::<Self>()
             + self.schema.len()
@@ -352,6 +368,7 @@ impl ChangeEvent {
             + text(&self.row_id)
             + names
             + before_names
+            + labels
             + img(&self.before)
             + img(&self.after)
     }
@@ -605,6 +622,8 @@ pub(crate) enum CdcEngineOpts {
         capture_instance: Option<String>,
         /// The `table:` values the CONFIG asked for.
         configured_tables: Vec<String>,
+        /// The grants the run resolved before its anchor.
+        resolved_grants: Option<std::sync::Arc<std::collections::HashMap<String, ReadableColumns>>>,
     },
     Oracle {
         configured_tables: Vec<String>,
@@ -1086,6 +1105,7 @@ pub(crate) fn create_change_stream(
         CdcEngineOpts::Mssql {
             capture_instance,
             configured_tables,
+            resolved_grants,
         } => {
             let ci = capture_instance.as_deref().ok_or_else(|| {
                 crate::error::coded(
@@ -1111,6 +1131,7 @@ pub(crate) fn create_change_stream(
                     cfg.drain,
                     configured_tables,
                     spill_dir_for(cfg.checkpoint.as_deref(), &cfg.config_dir),
+                    resolved_grants.clone(),
                 )
                 .map_err(|e| with_setup_hint(e, MSSQL_CDC_HINT))?,
             ))
@@ -1233,7 +1254,15 @@ impl<'s> CdcSchemaResolver<'s> {
             .type_mappings(&select, &crate::types::ColumnOverrides::new())
         {
             Ok(m) => m,
-            Err(e) => return Err(schema_read_error(readable.is_some(), table, e)),
+            Err(e) => {
+                let e = schema_read_error(readable.is_some(), table, e);
+                return Err(match readable {
+                    Some(before) => {
+                        grants_moved_under_a_failed_read(self.source(), table, before, e)
+                    }
+                    None => e,
+                });
+            }
         };
         if let Some(m) = mappings.iter().find(|m| {
             matches!(
@@ -1373,6 +1402,45 @@ fn schema_read_error(projecting: bool, table: &str, err: anyhow::Error) -> anyho
     )
 }
 
+/// A schema read that failed while the run projects: when the server now says another column set is readable, the grants moved.
+fn grants_moved_under_a_failed_read(
+    src: &mut dyn crate::source::Source,
+    table: &str,
+    before: &ReadableColumns,
+    err: anyhow::Error,
+) -> anyhow::Error {
+    if seeded!("column-grants-failed-schema-read-not-reread", true, false)
+        || seeded!(
+            "column-grants-revoke-between-two-reads-uncoded",
+            true,
+            false
+        )
+        || crate::error::code_of(&err) == Some(crate::error::codes::SOURCE_CDC_GRANTS_CHANGED)
+    {
+        return err;
+    }
+    let Ok(Some(now)) = src.readable_columns(table) else {
+        return err;
+    };
+    let named =
+        |c: &ReadableColumns| std::collections::HashMap::from([(table.to_string(), c.clone())]);
+    match crate::source::column_grants::first_grants_change(
+        &[table.to_string()],
+        &named(before),
+        &named(&now),
+    ) {
+        Some(why) => crate::error::coded(
+            crate::error::codes::SOURCE_CDC_GRANTS_CHANGED,
+            format!(
+                "cdc: {why}; the read of the schema of `{table}` failed after the grants moved and \
+                 nothing was delivered. Re-run: the next run reads the grants as they are now and \
+                 resumes from the checkpoint, so nothing is lost"
+            ),
+        ),
+        None => err,
+    }
+}
+
 /// A schema read refused by the server's privilege check while the run projects.
 fn grants_moved_mid_resolve(projecting: bool, err: &anyhow::Error) -> bool {
     seeded!(
@@ -1490,11 +1558,10 @@ mod mod_decisions {
             assert_eq!(m.delivery, Delivery::Native, "{list:?}");
         }
 
-        let ns = RivetType::Timestamp {
+        let ns = RivetType::Time {
             unit: TimeUnit::Nanosecond,
-            timezone: None,
         };
-        let err = plan_cdc_delivery(col("timestamp", ns), true).unwrap_err();
+        let err = plan_cdc_delivery(col("time", ns), true).unwrap_err();
         assert_eq!(
             err.downcast_ref::<crate::error::CodedError>()
                 .map(|c| c.code()),
@@ -1526,9 +1593,8 @@ mod mod_decisions {
             },
             &RivetType::String,
         ));
-        let ns = RivetType::Timestamp {
+        let ns = RivetType::Time {
             unit: TimeUnit::Nanosecond,
-            timezone: None,
         };
         let err = retype_for_stream(time(), &declared(ns)).unwrap_err();
         assert_eq!(
@@ -1591,6 +1657,77 @@ mod mod_decisions {
             assert_eq!(crate::error::code_of(&kept), None);
             assert_eq!(format!("{kept:#}"), said);
         }
+    }
+
+    struct Rereads(anyhow::Result<Option<Vec<&'static str>>>);
+
+    impl crate::source::Source for Rereads {
+        fn export(
+            &mut self,
+            _request: &crate::source::ExportRequest<'_>,
+            _sink: &mut dyn crate::source::BatchSink,
+        ) -> Result<()> {
+            unreachable!("a re-read exports nothing")
+        }
+
+        fn query_scalar(&mut self, _sql: &str) -> Result<Option<String>> {
+            unreachable!("a re-read reads no scalar")
+        }
+
+        fn type_mappings(
+            &mut self,
+            _query: &str,
+            _overrides: &crate::types::ColumnOverrides,
+        ) -> Result<Vec<crate::types::TypeMapping>> {
+            unreachable!("a re-read reads no types")
+        }
+
+        fn readable_columns(&mut self, _table: &str) -> Result<Option<ReadableColumns>> {
+            match &self.0 {
+                Ok(c) => Ok(c.as_ref().map(|c| readable(c))),
+                Err(e) => Err(anyhow::anyhow!("{e:#}")),
+            }
+        }
+    }
+
+    fn readable(columns: &[&str]) -> ReadableColumns {
+        ReadableColumns {
+            columns: columns.iter().map(|c| c.to_string()).collect(),
+            select: format!("SELECT {} FROM d.t", columns.join(", ")),
+        }
+    }
+
+    #[test]
+    fn a_failed_schema_read_is_a_grant_change_only_when_the_server_now_reads_another_set() {
+        let before = readable(&["id", "name", "pass"]);
+        let failed = || anyhow::anyhow!("type probe failed");
+        let run = |now: anyhow::Result<Option<Vec<&'static str>>>, err| {
+            super::grants_moved_under_a_failed_read(&mut Rereads(now), "d.t", &before, err)
+        };
+
+        let moved = run(Ok(Some(vec!["id", "name"])), failed());
+        assert_eq!(
+            crate::error::code_of(&moved),
+            Some(crate::error::codes::SOURCE_CDC_GRANTS_CHANGED)
+        );
+        assert!(format!("{moved:#}").contains("lost `pass`"), "{moved:#}");
+
+        for (now, err) in [
+            (Ok(Some(vec!["id", "name", "pass"])), failed()),
+            (Ok(None), failed()),
+            (Err(anyhow::anyhow!("connection lost")), failed()),
+        ] {
+            let kept = run(now, err);
+            assert_eq!(crate::error::code_of(&kept), None);
+            assert_eq!(format!("{kept:#}"), "type probe failed");
+        }
+
+        let coded = crate::error::coded(
+            crate::error::codes::SOURCE_CDC_GRANTS_CHANGED,
+            "mysql cdc: the account lost SELECT on a column of `d.t`",
+        );
+        let kept = run(Ok(Some(vec!["id"])), coded);
+        assert!(format!("{kept:#}").contains("mysql cdc: the account lost SELECT"));
     }
 
     /// A checkpoint that cannot be READ is not a checkpoint that is ABSENT.
@@ -1681,6 +1818,7 @@ mod mod_decisions {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         };
         let mut seq = TxnSeq::default();
 
@@ -1722,6 +1860,7 @@ mod mod_decisions {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         };
         let empty = mk(None, None).estimated_bytes();
         assert_eq!(
@@ -2088,6 +2227,7 @@ mod setup_hint {
             super::DrainMode::Continuous,
             &[],
             None,
+            None,
         );
         assert_names_refused_port(open.map(drop), super::MSSQL_CDC_HINT);
     }
@@ -2131,6 +2271,7 @@ mod engine_identity {
                 CdcEngineOpts::Mssql {
                     capture_instance: None,
                     configured_tables: t(&["a"]),
+                    resolved_grants: None,
                 },
                 SourceType::Mssql,
                 "sqlserver://h/d",
@@ -2197,6 +2338,7 @@ mod tests {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         };
         let mut stream = Fake(
             [
@@ -2411,6 +2553,7 @@ mod tests {
             engine: CdcEngineOpts::Mssql {
                 capture_instance: None,
                 configured_tables: Vec::new(),
+                resolved_grants: None,
             },
         };
         let err = match create_change_stream(&cfg, PeekBound::Unbounded) {
@@ -2513,6 +2656,7 @@ mod tests {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         }
     }
 
@@ -2606,6 +2750,7 @@ mod tests {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         }
     }
 
@@ -2906,6 +3051,7 @@ mod tests {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         };
         let base = bare.estimated_bytes();
         let names = super::ChangeEvent {
@@ -2931,6 +3077,58 @@ mod tests {
         assert_eq!(ids.estimated_bytes(), base + 6 + 3);
     }
 
+    /// The resident cost counts each wire-label column's own size, its name and its labels, and shares an Arc between its holders.
+    #[test]
+    fn estimated_bytes_counts_image_labels_and_splits_a_shared_arc() {
+        let bare = super::ChangeEvent {
+            op: super::ChangeOp::Insert,
+            schema: "public".into(),
+            table: "t".into(),
+            before: None,
+            after: Some(vec![RivetValue::Int(2)]),
+            position: Position::new(serde_json::json!({ "lsn": "0/ABC" })),
+            committed: true,
+            image_names: None,
+            seq: 0,
+            poison: None,
+            row_id: None,
+            before_names: None,
+            before_poison: None,
+            image_labels: None,
+        };
+        let base = bare.estimated_bytes();
+        let labels: std::sync::Arc<[super::value::WireLabels]> = vec![
+            super::value::WireLabels {
+                column: "mood".into(),
+                labels: Some(vec!["a".into(), "bcd".into()]),
+            },
+            super::value::WireLabels {
+                column: "xyz".into(),
+                labels: None,
+            },
+        ]
+        .into();
+        let own = 2 * std::mem::size_of::<super::value::WireLabels>()
+            + "mood".len()
+            + "xyz".len()
+            + 2 * std::mem::size_of::<String>()
+            + "a".len()
+            + "bcd".len();
+        let ev = super::ChangeEvent {
+            image_labels: Some(labels.clone()),
+            ..bare
+        };
+        drop(labels);
+        assert_eq!(ev.estimated_bytes(), base + own);
+        let sibling = ev.clone();
+        assert_eq!(
+            ev.estimated_bytes(),
+            base + own / 2,
+            "an Arc held twice charges each holder half"
+        );
+        drop(sibling);
+    }
+
     /// A key-only pre-image prints as carried, named by `before_columns`; a key move stays one update.
     #[test]
     fn an_ndjson_line_names_a_key_only_pre_image_and_does_not_split() {
@@ -2948,6 +3146,7 @@ mod tests {
             row_id: None,
             before_names: Some(vec!["id".to_string()].into()),
             before_poison: None,
+            image_labels: None,
         };
         assert_eq!(
             super::ndjson_line(&ev),
@@ -2960,6 +3159,7 @@ mod tests {
         let full = super::ChangeEvent {
             before_names: None,
             before_poison: None,
+            image_labels: None,
             before: Some(vec![RivetValue::Bytes(b"a".to_vec()), RivetValue::Int(1)]),
             ..ev
         };
@@ -3022,6 +3222,7 @@ mod tests {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         };
         let payload = ev.payload_bytes();
         assert_eq!(

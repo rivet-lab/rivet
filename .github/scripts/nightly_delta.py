@@ -149,9 +149,14 @@ def self_test() -> int:
     refusal = "refusal_names_true_cause cmd/load/X/postgres RED printed RIVET_A, injected RIVET_B\n"
     assert known_red.nightly_key("no_silent_null", "mysql", "CHECK_RUN_SPLIT") in base, "the gate's per-cell-set entries are cut to classes"
     assert known_red.nightly_key("refusal_names_true_cause", "cmd", "printed") in base, "the nightly entry of #917 is in the baseline"
+    load_line = "no_silent_null_load mssql/money->decimal/full/parquet RED DEFECT_MSSQL_MONEY_BIG: x\n"
+    cdc_line = "no_silent_null_cdc oracle/ts->date/cdc-x/parquet RED CHECK_RUN_SPLIT: check exit 0, run exit 5\n"
+    for key in ("nightly[no_silent_null_load|mssql] DEFECT_MSSQL_MONEY_BIG", "nightly[no_silent_null_cdc|oracle] CHECK_RUN_SPLIT", "nightly[no_silent_null_load|postgres] DEFECT_PG_UNMAPPED_TYPE"):
+        assert key in base, f"the tierless load and cdc entries are cut to classes: {key}"
     g = lambda code, text, when=today: grade_part(code, text, base, when)  # noqa: E731
     assert g(0, "") ["verdict"] == GREEN
     assert g(1, known_line + refusal)["verdict"] == KNOWN, "acknowledged classes are not a red night"
+    assert g(1, load_line + cdc_line)["verdict"] == KNOWN, "the load and cdc lanes' acknowledged classes are not a red night"
     assert g(1, known_line + other_line)["verdict"] == NEW, "an unknown class is NEW"
     assert g(2, "")["verdict"] == NEW, "an exit no class explains is NEW, never green"
     assert g(1, known_line + "Traceback (most recent call last)\n")["verdict"] == NEW, "a crash beside acknowledged reds is NEW"

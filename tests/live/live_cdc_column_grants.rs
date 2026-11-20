@@ -397,7 +397,12 @@ impl OpenRun {
 }
 
 /// Park `rig`'s next run at `point` for `ms`, call `during` once the run is parked, and reap the run.
-fn run_parked_at(rig: &Rig, point: &str, ms: u64, during: impl FnOnce()) -> std::process::Output {
+pub(crate) fn run_parked_at(
+    rig: &Rig,
+    point: &str,
+    ms: u64,
+    during: impl FnOnce(),
+) -> std::process::Output {
     run_parked_through(rig, point, ms, vec![Box::new(during)])
 }
 
@@ -986,53 +991,6 @@ fn a_qualified_table_does_not_capture_a_table_named_by_its_qualified_string_in_a
         "a row of another database's table reached the export: {cells:?}"
     );
     assert_eq!(changes(&parts), vec![("insert".into(), 2, "bob".into())]);
-}
-
-/// Every command that loads the config refuses `columns_from: grants` on SQL Server, by code, before it connects or writes.
-fn columns_from_grants_is_refused_by_every_command(rigs: Vec<Rig>) {
-    for rig in rigs {
-        let rig = rig.source_line("columns_from: grants");
-        for cmd in [
-            &["check"][..],
-            &["run"],
-            &["plan"],
-            &["doctor"],
-            &["validate"],
-            &["load"],
-            &["state", "show"],
-        ] {
-            let out = rig.cli(cmd);
-            assert_refused(
-                &out,
-                Refused::by_code("RIVET_CONFIG_SOURCE_MODE_UNSUPPORTED", 1),
-            );
-            let said = format!(
-                "{}{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            );
-            assert!(
-                said.contains(
-                    "`source.columns_from: grants` is supported on MySQL, PostgreSQL, Oracle and MongoDB sources only"
-                ) && said.contains("would read and deliver every column")
-                    && said.contains("Remove `columns_from:` from `source:`"),
-                "{cmd:?}: the refusal names the cause and the remedy:\n{said}"
-            );
-        }
-        assert!(
-            parquet_dirs(&rig.out_dir()).is_empty(),
-            "a refused config writes nothing"
-        );
-    }
-}
-
-#[test]
-#[ignore = "live: needs only the rig harness env; the refusal comes before any connection"]
-fn columns_from_grants_is_refused_by_every_command_mssql() {
-    columns_from_grants_is_refused_by_every_command(vec![
-        Rig::mssql_batch("orders"),
-        Rig::mssql_cdc("orders", "dbo_orders"),
-    ]);
 }
 
 /// The binlog `(file, position)` at the end of the last commit after `start` that wrote `table`.

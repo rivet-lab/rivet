@@ -31,6 +31,7 @@ runs:
           *) services="postgres postgres-state mysql mssql mssql-governor minio fake-gcs azurite toxiproxy pgbouncer pgbouncer-state proxysql mysql-tz proxysql-tz clickhouse-tz duckdb clickhouse postgres-cdc mysql-cdc mysql-reset mssql-cdc mysql-primary mysql-replica mysql-replica-nolog oracle mysql-stmt-84-lctn1 mongo mongo-rs" ;;
         esac
         docker compose --profile pool --profile loaders --profile cdc --profile replica --profile governor --profile tz --profile mysql-stmt up -d $services
+        uv run --frozen python -m dev.release_oracle.stand_stacks up "$STACK"
         sudo chmod -R 0777 tests/.live-tmp
 
     - name: Wait for services

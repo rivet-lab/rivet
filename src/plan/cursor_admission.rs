@@ -9,7 +9,7 @@ use crate::error::Result;
 use crate::source::Source;
 use crate::types::{TypeMapping, parse_column_overrides};
 
-/// Whether an array of `data_type` is a type the cursor renderer reads: the one set the plan admits a cursor column by.
+/// Whether an array of `data_type` is a type the cursor renderer reads.
 pub(crate) fn cursor_renders(data_type: &DataType) -> bool {
     matches!(
         data_type,
@@ -64,7 +64,7 @@ pub(crate) enum Admission {
     Unverified(String),
 }
 
-/// Refuse the export when its primary cursor column can hold NULL or has a type the cursor cannot render; a source that cannot be asked is warned about, not refused.
+/// Refuse the export when its primary cursor column can hold NULL or has a type the cursor cannot render.
 pub(crate) fn admit_incremental_cursor(
     probe: Option<&mut (dyn Source + '_)>,
     config: &Config,
@@ -78,7 +78,7 @@ pub(crate) fn admit_incremental_cursor(
     Ok(())
 }
 
-/// The verdict on the primary cursor `column` of `query`: admitted, unverified with the warning to print, or a coded refusal.
+/// The verdict on the primary cursor `column` of `query`.
 pub(crate) fn admission(
     probe: Option<&mut (dyn Source + '_)>,
     config: &Config,

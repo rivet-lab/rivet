@@ -162,10 +162,12 @@ def type_family(t: str) -> str:
 
 
 def unpinned_loss(src: str, dst: str) -> str | None:
-    """Why a column no ledger row pins may not land as `dst`: it narrows (`type_loss`) or changes kind (a decimal as a double, a boolean as an integer, anything as text); a decimal past DuckDB's 38 digits is only ever read as exact text (Decimal256, docs/reference/config.md)."""
+    """Why a column no ledger row pins may not land as `dst`: it narrows (`type_loss`) or changes kind (a decimal as a double, a boolean as an integer, anything as text); a decimal past DuckDB's 38 digits and an instant delivered as a nanosecond part are only ever read as exact text (Decimal256, zoned Timestamp(ns); docs/reference/config.md)."""
     if (why := type_loss(src, dst)) is not None or src == dst:
         return why
     if dst == "VARCHAR" and (d := _decimal(src)) and d[0] > 38:
+        return None
+    if (src, dst) == ("TIMESTAMP WITH TIME ZONE", "VARCHAR"):
         return None
     fs, fd = type_family(src), type_family(dst)
     return None if fs == fd else f"a {fs} delivered as a {fd}, and no ledger row pins the column"
@@ -214,6 +216,7 @@ def norm_native(t: str | bytes) -> str:
     t = re.sub(r"^TIMESTAMP(\(\d+\))? WITHOUT TIME ZONE", r"TIMESTAMP\1", t)
     t = re.sub(r"^TIMESTAMP(\(\d+\))? WITH TIME ZONE", r"TIMESTAMPTZ\1", t)
     t = re.sub(r"^TIME(\(\d+\))? WITHOUT TIME ZONE", r"TIME\1", t)
+    t = re.sub(r"^(DATETIME2|DATETIMEOFFSET)\(7\)$", r"\1", t)
     t = re.sub(r"^CHARACTER VARYING", "VARCHAR", t)
     return re.sub(r"^CHARACTER\b", "CHAR", t)
 
@@ -234,7 +237,9 @@ def arrow_to_duck(delivery: str, text_forms: set[str]) -> str | None:
     }
     if delivery in fixed:
         return fixed[delivery]
-    if re.fullmatch(r'Timestamp\((s|ms|µs|ns), ".+"\)', delivery):
+    if re.fullmatch(r'Timestamp\(ns, ".+"\)', delivery):
+        return "VARCHAR"
+    if re.fullmatch(r'Timestamp\((s|ms|µs), ".+"\)', delivery):
         return "TIMESTAMP WITH TIME ZONE"
     m = re.fullmatch(r"Decimal128\((\d+), (\d+)\)", delivery)
     if m:
@@ -486,6 +491,25 @@ def mysql_query_native(url: str, query: str) -> dict:
     return {n: MYSQL_TEMPORAL[code] + (f"({fsp})" if fsp else "") for n, code, fsp in mysql_describe(url, query) if code in MYSQL_TEMPORAL}
 
 
+def _mssql_query_projection(query: str, native: dict, renders: dict) -> tuple[str, dict] | None:
+    """(the query with each column the ledger renders server-side projected through its render, those columns' declared types), or `None` when no column of the result needs one: the scanner reads a datetime2(7) at microseconds."""
+    drawn = {c: n for c, n in native.items() if n in renders}
+    if not drawn:
+        return None
+    name = lambda c: "[" + c.replace("]", "]]") + "]"  # noqa: E731
+    cols = ", ".join(renders[drawn[c]].replace("{c}", name(c)) + f" AS {name(c)}" if c in drawn else name(c) for c in native)
+    return f"SELECT {cols} FROM ({query.rstrip().rstrip(';')}) AS rivet_q", drawn
+
+
+def _mssql_query_native(ora, query: str) -> dict:
+    """The declared type of each named column of a SQL Server query result, in the ledger's spelling."""
+    described = (
+        f"SELECT name, system_type_name FROM sys.dm_exec_describe_first_result_set(N{_lit(query.rstrip().rstrip(';'))}, NULL, 0) "
+        "WHERE name IS NOT NULL ORDER BY column_ordinal"
+    )
+    return {n: norm_native(t) for n, t in ora.rows(f"SELECT * FROM mssql_scan('ms', {_lit(described)})")}
+
+
 def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
     """(source relation, primary key columns, declared type per column in the ledger's spelling) for the spec's engine."""
     from .value_diff import oracle_rows
@@ -601,6 +625,8 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
     if engine == "mssql":
         sch = schema or "dbo"
         if query:
+            if projected := _mssql_query_projection(query, _mssql_query_native(ora, query), renders):
+                return f"mssql_scan('ms', {_lit(projected[0])})", [], projected[1]
             return f"mssql_scan('ms', {_lit(query)})", [], native
         oid = f"OBJECT_ID({_lit(sch + '.' + leaf)})"
         if spec.get("capture_instance"):
@@ -628,14 +654,24 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
             "SELECT * FROM mssql_scan('ms', " + _lit(
                 "SELECT COLUMN_NAME, UPPER(DATA_TYPE) + CASE WHEN DATA_TYPE IN ('decimal', 'numeric') THEN "
                 "'(' + CAST(NUMERIC_PRECISION AS varchar) + ',' + CAST(NUMERIC_SCALE AS varchar) + ')' "
+                "WHEN DATA_TYPE IN ('datetime2', 'datetimeoffset') THEN '(' + CAST(DATETIME_PRECISION AS varchar) + ')' "
                 "WHEN CHARACTER_MAXIMUM_LENGTH > 0 THEN '(' + CAST(CHARACTER_MAXIMUM_LENGTH AS varchar) + ')' "
                 "ELSE '' END FROM INFORMATION_SCHEMA.COLUMNS "
                 f"WHERE TABLE_SCHEMA = {_lit(sch)} AND TABLE_NAME = {_lit(leaf)}"
             ) + ")"
         )}
+        readable = {r[0] for r in ora.rows(
+            "SELECT * FROM mssql_scan('ms', " + _lit(
+                f"SELECT c.name FROM sys.columns c WHERE c.object_id = {oid} AND HAS_PERMS_BY_NAME("
+                "QUOTENAME(OBJECT_SCHEMA_NAME(c.object_id)) + '.' + QUOTENAME(OBJECT_NAME(c.object_id)), "
+                "'OBJECT', 'SELECT', c.name, 'COLUMN') = 1"
+            ) + ")"
+        )}
+        partial = bool(readable) and any(c not in readable for c in native)
+        native = {c: n for c, n in native.items() if c in readable} if partial else native
         # The scanner trims CHAR/NCHAR padding; the server's own cast keeps it.
         renders = {**{n: "CAST({c} AS NVARCHAR(MAX))" for n in native.values() if n.startswith(("CHAR(", "NCHAR("))}, **renders}
-        if not any(n in renders for n in native.values()):
+        if not partial and not any(n in renders for n in native.values()):
             return f"ms.{sch}.{leaf}", key, native
         cols = ", ".join(renders.get(n, "{c}").replace("{c}", f"[{c}]") + f" AS [{c}]" for c, n in native.items())
         return f"mssql_scan('ms', {_lit(f'SELECT {cols} FROM [{sch}].[{leaf}]')})", key, native
@@ -1740,8 +1776,8 @@ def grade_load(spec: dict) -> dict:
             wh_types = {n: t for n, t in cols}
             # ClickHouse ships a binary String as invalid UTF-8; read it as the hex the source canon uses.
             blobs = [c for c, t in _columns(ora, "source_rows") if t == "BLOB" and "String" in wh_types.get(c, "")]
-            # A Decimal wider than 38 digits reaches DuckDB as DOUBLE; read it as ClickHouse's exact text.
             wide = {c for c, t in wh_types.items() if (m := re.search(r"Decimal\((\d+)", t)) and int(m.group(1)) > 38}
+            wide |= {c for c, t in wh_types.items() if (m := re.search(r"DateTime64\((\d+)", t)) and int(m.group(1)) > 6}
             blob_lists = [c for c, n in native.items() if (rows.get(n) or {}).get("delivery") == "List(Binary)" and "String" in wh_types.get(c, "")]
             uuid_lists = [c for c, n in native.items() if (rows.get(n) or {}).get("delivery") == "List(arrow.uuid)" and "FixedString" in wh_types.get(c, "")]
             sel = ", ".join(
@@ -2271,7 +2307,11 @@ def _self_test() -> None:
     assert grade_findings(collapsed, rows, set(), {"b": "BIGINT"}, True), "DISTINCT relaxes only for a collapse column"
     assert norm_native("timestamp(6) without time zone[]") == "TIMESTAMP(6)[]"
     assert norm_native("character varying(50)") == "VARCHAR(50)"
+    assert unpinned_loss("TIMESTAMP WITH TIME ZONE", "VARCHAR") is None and unpinned_loss("TIMESTAMP", "VARCHAR") is not None
+    assert norm_native("DATETIME2(7)") == "DATETIME2" and norm_native("DATETIMEOFFSET(7)") == "DATETIMEOFFSET"
+    assert norm_native("DATETIME2(6)") == "DATETIME2(6)" and norm_native("DATETIME2(3)") == "DATETIME2(3)"
     assert arrow_to_duck('Timestamp(µs, "UTC")', set()) == "TIMESTAMP WITH TIME ZONE"
+    assert arrow_to_duck('Timestamp(ns, "UTC")', set()) == "VARCHAR", "a zoned nanosecond part is read as exact text"
     assert arrow_to_duck("List(Decimal128(18, 2))", set()) == "DECIMAL(18,2)[]"
     from .value_diff import canon
 
@@ -2293,6 +2333,7 @@ def _self_test() -> None:
     _zone_less_self_test()
     _absent_table_self_test()
     _folded_duplicate_self_test()
+    _mssql_query_projection_self_test()
     print("rig_oracle self-test ok")
 
 
@@ -2377,6 +2418,15 @@ def _absent_table_self_test() -> None:
         assert "bigquery_query" in str(e), f"a BigQuery view is read through a query job, not called absent: {e}"
     else:
         raise AssertionError("a BigQuery view must reach its read, which the stand-in cannot serve")
+
+
+def _mssql_query_projection_self_test() -> None:
+    """A SQL Server query whose result holds a ledger-rendered type is read through the server's render; one that does not is read as it is."""
+    renders = {"DATETIME2": "CONVERT(varchar(max), {c}, 121)"}
+    sql, drawn = _mssql_query_projection("SELECT id, t2 FROM t;", {"id": "INT", "t2": "DATETIME2", "o]k": "INT"}, renders)
+    assert sql == "SELECT [id], CONVERT(varchar(max), [t2], 121) AS [t2], [o]]k] FROM (SELECT id, t2 FROM t) AS rivet_q", sql
+    assert drawn == {"t2": "DATETIME2"}, drawn
+    assert _mssql_query_projection("SELECT id FROM t", {"id": "INT"}, renders) is None, "no rendered column leaves the query as written"
 
 
 def _folded_duplicate_self_test() -> None:

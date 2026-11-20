@@ -116,7 +116,7 @@ const MSSQL_TIME: Case = Case {
     composite: false,
 };
 const MSSQL_DT2_7_DISTINCT_US: Case = Case {
-    label: "SQL Server datetime2(7) key, a tick past each microsecond",
+    label: "SQL Server datetime2(7) key declared timestamp, a tick past each microsecond",
     key_ddl: "DATETIME2(7)",
     key_value: |i| {
         format!(
@@ -125,22 +125,22 @@ const MSSQL_DT2_7_DISTINCT_US: Case = Case {
     },
     primary: false,
     rows: 10,
-    overrides: None,
+    overrides: Some("columns: {k: timestamp}"),
     composite: false,
 };
 const MSSQL_DT2_7_ONE_US: Case = Case {
-    label: "SQL Server datetime2(7) key, nine ticks inside one microsecond",
+    label: "SQL Server datetime2(7) key declared timestamp, nine ticks inside one microsecond",
     key_ddl: "DATETIME2(7)",
     key_value: |i| {
         format!("DATEADD(NANOSECOND, {i} * 100, CAST('2024-01-01 00:00:01' AS DATETIME2(7)))")
     },
     primary: false,
     rows: 9,
-    overrides: None,
+    overrides: Some("columns: {k: timestamp}"),
     composite: false,
 };
 const MSSQL_DTO_7: Case = Case {
-    label: "SQL Server datetimeoffset(7) key, a tick past each microsecond",
+    label: "SQL Server datetimeoffset(7) key declared timestamp_tz, a tick past each microsecond",
     key_ddl: "DATETIMEOFFSET(7)",
     key_value: |i| {
         format!(
@@ -149,8 +149,23 @@ const MSSQL_DTO_7: Case = Case {
     },
     primary: false,
     rows: 10,
-    overrides: None,
+    overrides: Some("columns: {k: timestamp_tz}"),
     composite: false,
+};
+const MSSQL_DT2_7_DEFAULT: Case = Case {
+    label: "SQL Server datetime2(7) key, delivered at its own precision",
+    overrides: None,
+    ..MSSQL_DT2_7_DISTINCT_US
+};
+const MSSQL_DT2_7_ONE_US_DEFAULT: Case = Case {
+    label: "SQL Server datetime2(7) key, nine ticks inside one microsecond, delivered at its own precision",
+    overrides: None,
+    ..MSSQL_DT2_7_ONE_US
+};
+const MSSQL_DTO_7_DEFAULT: Case = Case {
+    label: "SQL Server datetimeoffset(7) key, delivered at its own precision",
+    overrides: None,
+    ..MSSQL_DTO_7
 };
 const MSSQL_DT2_7_NS_OVERRIDE: Case = Case {
     label: "SQL Server datetime2(7) key under the timestamp_ns override",
@@ -753,22 +768,44 @@ const MSSQL_DT2_6: Case = Case {
 
 #[test]
 #[ignore = "live: requires docker compose mssql"]
-fn init_scaffolds_no_keyset_key_for_a_datetime2_7_primary_key_mssql() {
+fn init_scaffolds_a_keyset_key_for_a_datetime2_7_primary_key_mssql() {
     init_scaffolds_a_keyset_key_exactly_when_the_planner_admits_it(
         SqlEngine::Mssql,
-        MSSQL_DT2_7_DISTINCT_US,
+        Case {
+            primary: true,
+            ..MSSQL_TIME
+        },
+        MSSQL_DT2_7_DEFAULT,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn init_scaffolds_a_keyset_key_for_a_datetime2_6_primary_key_mssql() {
+    init_scaffolds_a_keyset_key_exactly_when_the_planner_admits_it(
+        SqlEngine::Mssql,
+        Case {
+            primary: true,
+            ..MSSQL_TIME
+        },
         MSSQL_DT2_6,
     );
 }
 
 #[test]
 #[ignore = "live: requires docker compose mssql"]
-fn init_scaffolds_no_keyset_key_for_an_alias_type_over_datetime2_7_primary_key_mssql() {
+fn init_scaffolds_a_keyset_key_for_an_alias_type_over_datetime2_7_primary_key_mssql() {
     let _alias = AliasType::create(SqlEngine::Mssql, "rivet_ks_ts7_init", "DATETIME2(7)");
     init_scaffolds_a_keyset_key_exactly_when_the_planner_admits_it(
         SqlEngine::Mssql,
-        alias_dt2_7("dbo.rivet_ks_ts7_init"),
-        MSSQL_DT2_6,
+        Case {
+            primary: true,
+            ..MSSQL_TIME
+        },
+        Case {
+            overrides: None,
+            ..alias_dt2_7("dbo.rivet_ks_ts7_init")
+        },
     );
 }
 
@@ -798,90 +835,145 @@ fn init_scaffolds_no_keyset_key_for_a_bytea_primary_key_postgres() {
     );
 }
 
+/// The MySQL key types the cursor reads.
+fn mysql_cursor_keys() -> Vec<KeyKind> {
+    vec![
+        ("MySQL BIGINT", "BIGINT", |i| i.to_string()),
+        ("MySQL VARCHAR(16)", "VARCHAR(16)", |i| format!("'k{i:03}'")),
+        ("MySQL DATETIME(6)", "DATETIME(6)", |i| {
+            format!("DATE_ADD(TIMESTAMP('2024-01-01 00:00:00'), INTERVAL {i} MICROSECOND)")
+        }),
+        ("MySQL DATE", "DATE", |i| {
+            format!("DATE_ADD('2024-01-01', INTERVAL {i} DAY)")
+        }),
+    ]
+}
+
 #[test]
 #[ignore = "live: requires docker compose mysql"]
 fn keyset_key_types_the_cursor_reads_deliver_the_seeded_ids_mysql() {
-    key_types_the_cursor_reads_deliver_the_seeded_ids(
+    key_types_the_cursor_reads_deliver_the_seeded_ids(SqlEngine::Mysql, &mysql_cursor_keys());
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn keyset_key_types_the_sampler_reads_deliver_the_seeded_ids_in_parallel_mysql() {
+    key_types_deliver_the_seeded_ids_over(
         SqlEngine::Mysql,
-        &[
-            ("MySQL BIGINT", "BIGINT", |i| i.to_string()),
-            ("MySQL VARCHAR(16)", "VARCHAR(16)", |i| format!("'k{i:03}'")),
-            ("MySQL DATETIME(6)", "DATETIME(6)", |i| {
-                format!("DATE_ADD(TIMESTAMP('2024-01-01 00:00:00'), INTERVAL {i} MICROSECOND)")
-            }),
-            ("MySQL DATE", "DATE", |i| {
-                format!("DATE_ADD('2024-01-01', INTERVAL {i} DAY)")
-            }),
-        ],
+        &mysql_cursor_keys(),
+        40,
+        &["parallel: 3"],
     );
+}
+
+/// The PostgreSQL key types the cursor reads.
+fn pg_cursor_keys() -> Vec<KeyKind> {
+    vec![
+        ("PostgreSQL bigint", "BIGINT", |i| i.to_string()),
+        ("PostgreSQL text", "TEXT", |i| format!("'k{i:03}'")),
+        ("PostgreSQL timestamp(6)", "TIMESTAMP(6)", |i| {
+            format!("TIMESTAMP '2024-01-01 00:00:00' + {i} * INTERVAL '1 microsecond'")
+        }),
+        ("PostgreSQL timestamptz(6)", "TIMESTAMPTZ(6)", |i| {
+            format!("TIMESTAMPTZ '2024-01-01 00:00:00+00' + {i} * INTERVAL '1 microsecond'")
+        }),
+        ("PostgreSQL date", "DATE", |i| {
+            format!("DATE '2024-01-01' + {i}")
+        }),
+        ("PostgreSQL uuid", "UUID", |i| {
+            format!("('00000000-0000-0000-0000-' || lpad(to_hex({i}), 12, '0'))::uuid")
+        }),
+    ]
 }
 
 #[test]
 #[ignore = "live: requires docker compose postgres"]
 fn keyset_key_types_the_cursor_reads_deliver_the_seeded_ids_postgres() {
-    key_types_the_cursor_reads_deliver_the_seeded_ids(
-        SqlEngine::Pg,
-        &[
-            ("PostgreSQL bigint", "BIGINT", |i| i.to_string()),
-            ("PostgreSQL text", "TEXT", |i| format!("'k{i:03}'")),
-            ("PostgreSQL timestamp(6)", "TIMESTAMP(6)", |i| {
-                format!("TIMESTAMP '2024-01-01 00:00:00' + {i} * INTERVAL '1 microsecond'")
-            }),
-            ("PostgreSQL date", "DATE", |i| {
-                format!("DATE '2024-01-01' + {i}")
-            }),
-            ("PostgreSQL uuid", "UUID", |i| {
-                format!("('00000000-0000-0000-0000-' || lpad(to_hex({i}), 12, '0'))::uuid")
-            }),
-        ],
-    );
+    key_types_the_cursor_reads_deliver_the_seeded_ids(SqlEngine::Pg, &pg_cursor_keys());
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn keyset_key_types_the_sampler_reads_deliver_the_seeded_ids_in_parallel_postgres() {
+    key_types_deliver_the_seeded_ids_over(SqlEngine::Pg, &pg_cursor_keys(), 40, &["parallel: 3"]);
+}
+
+/// The SQL Server key types the cursor reads.
+fn mssql_cursor_keys() -> Vec<KeyKind> {
+    vec![
+        ("SQL Server bigint", "BIGINT", |i| i.to_string()),
+        ("SQL Server varchar(16)", "VARCHAR(16)", |i| {
+            format!("'k{i:03}'")
+        }),
+        ("SQL Server datetime2(6)", "DATETIME2(6)", |i| {
+            format!("DATEADD(MICROSECOND, {i}, CAST('2024-01-01' AS DATETIME2(6)))")
+        }),
+        ("SQL Server datetimeoffset(6)", "DATETIMEOFFSET(6)", |i| {
+            format!(
+                "DATEADD(MICROSECOND, {i}, CAST('2024-01-01 00:00:00 +00:00' AS DATETIMEOFFSET(6)))"
+            )
+        }),
+        ("SQL Server date", "DATE", |i| {
+            format!("DATEADD(DAY, {i}, CAST('2024-01-01' AS DATE))")
+        }),
+    ]
 }
 
 #[test]
 #[ignore = "live: requires docker compose mssql"]
 fn keyset_key_types_the_cursor_reads_deliver_the_seeded_ids_mssql() {
-    key_types_the_cursor_reads_deliver_the_seeded_ids(
+    key_types_the_cursor_reads_deliver_the_seeded_ids(SqlEngine::Mssql, &mssql_cursor_keys());
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn keyset_key_types_the_sampler_reads_deliver_the_seeded_ids_in_parallel_mssql() {
+    key_types_deliver_the_seeded_ids_over(
         SqlEngine::Mssql,
-        &[
-            ("SQL Server bigint", "BIGINT", |i| i.to_string()),
-            ("SQL Server varchar(16)", "VARCHAR(16)", |i| {
-                format!("'k{i:03}'")
-            }),
-            ("SQL Server datetime2(6)", "DATETIME2(6)", |i| {
-                format!("DATEADD(MICROSECOND, {i}, CAST('2024-01-01' AS DATETIME2(6)))")
-            }),
-            ("SQL Server date", "DATE", |i| {
-                format!("DATEADD(DAY, {i}, CAST('2024-01-01' AS DATE))")
-            }),
-        ],
+        &mssql_cursor_keys(),
+        40,
+        &["parallel: 3"],
     );
+}
+
+/// The Oracle key types the cursor reads.
+#[cfg(feature = "oracle")]
+fn oracle_cursor_keys() -> Vec<KeyKind> {
+    vec![
+        ("Oracle NUMBER(18)", "NUMBER(18)", |i| i.to_string()),
+        ("Oracle NUMBER(38)", "NUMBER(38)", |i| i.to_string()),
+        ("Oracle VARCHAR2(16)", "VARCHAR2(16)", |i| {
+            format!("'k{i:03}'")
+        }),
+        ("Oracle NVARCHAR2(16)", "NVARCHAR2(16)", |i| {
+            format!("'k{i:03}'")
+        }),
+        ("Oracle CHAR(8)", "CHAR(8)", |i| format!("'k{i:03}'")),
+        ("Oracle DATE", "DATE", |i| {
+            format!("DATE '2024-01-01' + {i}")
+        }),
+        ("Oracle TIMESTAMP(6)", "TIMESTAMP(6)", |i| {
+            format!("TIMESTAMP '2024-01-01 00:00:00' + NUMTODSINTERVAL({i} / 1000000, 'SECOND')")
+        }),
+    ]
 }
 
 #[cfg(feature = "oracle")]
 #[test]
 #[ignore = "live: requires docker compose oracle"]
 fn keyset_key_types_the_cursor_reads_deliver_the_seeded_ids_oracle() {
-    key_types_the_cursor_reads_deliver_the_seeded_ids(
+    key_types_the_cursor_reads_deliver_the_seeded_ids(SqlEngine::Oracle, &oracle_cursor_keys());
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn keyset_key_types_the_sampler_reads_deliver_the_seeded_ids_in_parallel_oracle() {
+    key_types_deliver_the_seeded_ids_over(
         SqlEngine::Oracle,
-        &[
-            ("Oracle NUMBER(18)", "NUMBER(18)", |i| i.to_string()),
-            ("Oracle NUMBER(38)", "NUMBER(38)", |i| i.to_string()),
-            ("Oracle VARCHAR2(16)", "VARCHAR2(16)", |i| {
-                format!("'k{i:03}'")
-            }),
-            ("Oracle NVARCHAR2(16)", "NVARCHAR2(16)", |i| {
-                format!("'k{i:03}'")
-            }),
-            ("Oracle CHAR(8)", "CHAR(8)", |i| format!("'k{i:03}'")),
-            ("Oracle DATE", "DATE", |i| {
-                format!("DATE '2024-01-01' + {i}")
-            }),
-            ("Oracle TIMESTAMP(6)", "TIMESTAMP(6)", |i| {
-                format!(
-                    "TIMESTAMP '2024-01-01 00:00:00' + NUMTODSINTERVAL({i} / 1000000, 'SECOND')"
-                )
-            }),
-        ],
+        &oracle_cursor_keys(),
+        40,
+        &["parallel: 3"],
     );
 }
 
@@ -922,10 +1014,8 @@ fn a_bare_number_keyset_key_delivers_the_seeded_ids_once_in_parallel_oracle() {
     );
 }
 
-#[test]
-#[ignore = "live: requires docker compose mssql"]
-fn a_datetime2_7_key_under_the_timestamp_ns_override_delivers_the_seeded_ids_once_mssql() {
-    let case = MSSQL_DT2_7_NS_OVERRIDE;
+/// The key delivers the source's ids once over several pages, at a precision the oracle's microsecond read of the source cannot compare.
+fn a_fine_key_delivers_the_seeded_ids_once(case: Case) {
     let (table, _guard) = seeded(SqlEngine::Mssql, &case, "ks_ns");
     let rig = keyset_rig(SqlEngine::Mssql, &table, &case, SMALL_PAGE).no_oracle(
         "the oracle reads a datetime2(7) source at microsecond precision, so every 700 ns tick the run delivers differs from its source row",
@@ -943,6 +1033,34 @@ fn a_datetime2_7_key_under_the_timestamp_ns_override_delivers_the_seeded_ids_onc
         "keyset key {}: every row once",
         case.label
     );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn a_datetime2_7_key_under_the_timestamp_ns_override_delivers_the_seeded_ids_once_mssql() {
+    a_fine_key_delivers_the_seeded_ids_once(MSSQL_DT2_7_NS_OVERRIDE);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn a_datetime2_7_key_delivers_the_seeded_ids_once_at_its_own_precision_mssql() {
+    for case in [
+        MSSQL_DT2_7_DEFAULT,
+        MSSQL_DT2_7_ONE_US_DEFAULT,
+        MSSQL_DTO_7_DEFAULT,
+    ] {
+        a_fine_key_delivers_the_seeded_ids_once(case);
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn an_alias_type_over_datetime2_7_keyset_key_delivers_the_seeded_ids_once_mssql() {
+    let _alias = AliasType::create(SqlEngine::Mssql, "rivet_ks_ts7_dflt", "DATETIME2(7)");
+    a_fine_key_delivers_the_seeded_ids_once(Case {
+        overrides: None,
+        ..alias_dt2_7("dbo.rivet_ks_ts7_dflt")
+    });
 }
 
 #[cfg(feature = "oracle")]

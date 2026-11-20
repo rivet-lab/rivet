@@ -35,8 +35,6 @@ pub use reconcile::{
 pub use repair::{RepairAction, RepairOutcome, RepairPlan, RepairReport, RepairSummary};
 pub use validate::{DiagnosticLevel, validate_plan};
 
-// Re-export value types so pipeline modules import from `crate::plan`, not `crate::config`.
-// `DestinationType` is used by validate.rs internally and by external callers of the plan API.
 #[allow(unused_imports)]
 pub use crate::config::{
     CompressionType, DestinationConfig, DestinationType, FormatType, MetaColumns, QualityConfig,

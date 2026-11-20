@@ -29,17 +29,14 @@ impl Drop for BqFailTable {
     }
 }
 
-/// Postgres table whose `huge` column is `NUMERIC(80,0)` — precision 80 exceeds
-/// BigQuery BIGNUMERIC's max of 76, so the BigQuery target resolver returns a
-/// hard `Fail` for it (src/types/target.rs `decimal`). That is what renders the
-/// "fail ✗" glyph the note explains.
+/// Postgres table whose `huge` column is `NUMERIC(76,0)`: Arrow carries it, BigQuery's BIGNUMERIC (38 integer digits) does not, so its target status is a hard `Fail`.
 fn seed_bq_failing_table() -> BqFailTable {
     let name = unique_name("rivet_bqfail_tbl");
     let mut c = pg_connect();
     c.batch_execute(&format!(
         "CREATE TABLE {name} (
             id BIGINT PRIMARY KEY,
-            huge NUMERIC(80,0) NOT NULL
+            huge NUMERIC(76,0) NOT NULL
         );
         INSERT INTO {name} (id, huge) VALUES (1, 12345);"
     ))

@@ -176,10 +176,10 @@ scenarios:
     mongo:    { na: "a MongoDB change row is two text cells (`_id`, `document`), with no TIME column" }
     oracle:   { na: "Oracle has no TIME type; a DATE or TIMESTAMP carries a time of day inside a day" }
 
-  - id: cdc_hex_enum_label_refusal
-    what: "an ENUM label MySQL writes as a hex literal (a binary-charset label of bytes that are not utf8mb3 text; the digits carry no zero padding) is refused as RIVET_SOURCE_CDC_CELL_UNSUPPORTED (exit 5) on every run, also under a `columns:` override of the column, and the column left out of the capture with the re-baseline recipe delivers"
+  - id: cdc_hex_enum_label_delivery
+    what: "an ENUM label MySQL writes as a hex literal (a binary-charset label of bytes that are not utf8mb3 text; the digits carry no zero padding) is delivered by a stream, its label read from the binlog table map, and the rig oracle grades the delivered rows against the source"
     postgres: { na: "a PostgreSQL enum value arrives as its label text; no label is read from a catalog rendering" }
-    mysql:    { test: a_hex_enum_label_in_a_stream_is_refused_by_code_with_or_without_an_override_mysql }
+    mysql:    { test: a_hex_enum_label_in_a_stream_is_delivered_from_the_table_map_mysql }
     mssql:    { na: "SQL Server has no ENUM type" }
     mongo:    { na: "a MongoDB document carries no ENUM column" }
     oracle:   { na: "Oracle has no ENUM type" }
@@ -556,9 +556,25 @@ scenarios:
     what: "2026-11-10 finding: an incremental load whose primary-key column is a SQL Server datetime2(7) or an Oracle TIMESTAMP(7..9) declared as `timestamp` (landed at microseconds) is refused by RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT (exit 5) on every attempt and by `rivet check`, before any warehouse statement; declaring the column `timestamp_ns` and running the export again then keeps both rows that differ below a microsecond"
     postgres: { na: "a PostgreSQL timestamp holds at most microseconds, so the landing loses nothing" }
     mysql:    { na: "a MySQL datetime/timestamp holds at most microseconds, so the landing loses nothing" }
-    mssql:    { test: an_mssql_sub_microsecond_key_is_refused_into_clickhouse }
+    mssql:    { test: an_mssql_sub_microsecond_key_declared_timestamp_is_refused_into_clickhouse }
     mongo:    { na: "a MongoDB export is `mode: full` or `cdc` only and its key is the document _id" }
     oracle:   { test: an_oracle_sub_microsecond_key_is_refused_into_clickhouse }
+
+  - id: load_key_landing_check_agrees_with_load_on_cdc
+    what: "2026-11-18 issue 964: `rivet check` of a CDC export keyed on a column the source declares finer than a microsecond and the export declares as `timestamp` is refused by RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT (exit 5), the code and exit `rivet load` refuses it by, through one shared mode predicate (key_admission::admits_keys); undeclared it lands at nanoseconds and both admit it"
+    postgres: { na: "a PostgreSQL timestamp holds at most microseconds, so the landing loses nothing" }
+    mysql:    { na: "a MySQL datetime/timestamp holds at most microseconds, so the landing loses nothing" }
+    mssql:    { test: an_mssql_cdc_sub_microsecond_key_declared_timestamp_check_agrees_with_load_into_clickhouse }
+    mongo:    { na: "a MongoDB timestamp holds at most milliseconds and its key is the document _id" }
+    oracle:   { na: "an Oracle CDC stream cannot be loaded (RIVET_CONFIG_SOURCE_MODE_UNSUPPORTED), so no CDC key is admitted by its landing" }
+
+  - id: load_key_landing_of_a_query_export
+    what: "2026-11-18 issue 964: a `query:` export whose primary-key column is a SQL Server datetime2(7) or an Oracle TIMESTAMP(7..9) declared as `timestamp` is refused by RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT (exit 5) by `rivet check` and by the load, the sub-microsecond fact read from the query's own cursor description when the export names no table"
+    postgres: { na: "a PostgreSQL timestamp holds at most microseconds, so the landing loses nothing" }
+    mysql:    { na: "a MySQL datetime/timestamp holds at most microseconds, so the landing loses nothing" }
+    mssql:    { test: an_mssql_sub_microsecond_query_key_declared_timestamp_is_refused_into_clickhouse }
+    mongo:    { na: "a MongoDB timestamp holds at most milliseconds and its key is the document _id" }
+    oracle:   { test: an_oracle_sub_microsecond_query_key_is_refused_into_clickhouse }
 
   - id: missing_relation_exits_by_its_code
     what: "2026-11-04 finding VP-8 (seam stop-class): a source table or collection the source does not hold is refused by its code (RIVET_SOURCE_TABLE_NOT_FOUND, RIVET_SOURCE_COLLECTION_NOT_FOUND) with exit 1 whatever words its name holds; a name with a transient word (login_timeouts, dns_zones, deadlock_log) exited 2 on SQL Server, Oracle and MongoDB because the exit was read from the message text that holds the name, and 1 on PostgreSQL and MySQL; the plain-named neighbours (users, orders_archive) exit 1 everywhere"

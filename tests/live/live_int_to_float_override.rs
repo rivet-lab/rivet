@@ -9,7 +9,7 @@ const WIRE: &str = "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH";
 const VALUES: [&str; 4] = ["7", "0", "-5", "NULL"];
 
 /// The rig oracle compares source types to delivered ones, which a declared override changes by design; every cell here reads the parquet back itself.
-fn readback_only(rig: Rig) -> Rig {
+pub(crate) fn readback_only(rig: Rig) -> Rig {
     rig.no_oracle(
         "the subject is the value a declared override delivers, graded against the inserted rows",
     )

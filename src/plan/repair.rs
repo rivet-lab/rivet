@@ -1,14 +1,4 @@
 //! Targeted repair types (Epic H).
-//!
-//! Consumes a [`ReconcileReport`] (Epic F) and produces a `RepairPlan` —
-//! the minimal set of partitions to re-export without rerunning the whole
-//! export. Both plan and outcome (`RepairReport`) are JSON-serializable so
-//! external tooling can review / approve before execution (ADR-0005-style
-//! plan/apply separation).
-//!
-//! Execution lives in `pipeline::repair_cmd`; this module is data + rules only.
-//!
-//! Consumer lives in the `rivet` binary; silence library-only dead_code checks.
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
@@ -26,9 +16,7 @@ pub struct RepairAction {
 }
 
 impl RepairAction {
-    /// Parse `chunk_index` and `[start..end]` from a partition identifier
-    /// like `"chunk 3 [1000..2000]"`. Returns `None` if the identifier is
-    /// not in the canonical shape (e.g. unparseable chunk keys).
+    /// Parse `chunk_index` and `[start..end]` from a partition identifier like `"chunk 3 [1000..2000]"`.
     pub fn from_identifier(identifier: &str, reason: String) -> Option<Self> {
         let rest = identifier.strip_prefix("chunk ")?;
         let (idx_str, bracket) = rest.split_once(' ')?;
@@ -53,7 +41,7 @@ pub struct RepairPlan {
     pub reconcile_run_id: String,
     pub strategy: String,
     pub actions: Vec<RepairAction>,
-    /// Reasons for skipped partitions (e.g. unparseable identifiers).
+    /// Reasons for skipped partitions (e.g.
     pub skipped: Vec<String>,
 }
 
@@ -200,9 +188,9 @@ mod tests {
     #[test]
     fn repair_plan_derives_actions_from_mismatches_only() {
         let r = report(vec![
-            chunk("chunk 0 [1..100]", Some(100), Some(100)), // match
-            chunk("chunk 1 [101..200]", Some(100), Some(90)), // mismatch
-            chunk("chunk 2 [201..300]", Some(80), None),     // unknown
+            chunk("chunk 0 [1..100]", Some(100), Some(100)),
+            chunk("chunk 1 [101..200]", Some(100), Some(90)),
+            chunk("chunk 2 [201..300]", Some(80), None),
         ]);
         let p = RepairPlan::from_reconcile(&r);
         let indexes: Vec<_> = p.actions.iter().map(|a| a.chunk_index).collect();
@@ -214,8 +202,6 @@ mod tests {
     #[test]
     fn repair_plan_skips_unparseable_identifiers() {
         let mut partition = chunk("chunk 0 [alpha..beta]", None, Some(5));
-        // status Unknown path already — still unparseable i64 keys but the identifier is still in canonical form.
-        // Force a weird identifier for this test:
         partition.identifier = "day 2024-01-01".into();
         let r = report(vec![partition]);
         let p = RepairPlan::from_reconcile(&r);

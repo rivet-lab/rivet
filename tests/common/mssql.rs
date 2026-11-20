@@ -97,32 +97,26 @@ fn soft_exec_at(port: u16, sql: &str) -> bool {
     })
 }
 
+/// Run a setup batch on `port`, three tries on a fresh connection; the panic names the first error and the last.
 fn exec_at(port: u16, sql: &str) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("mssql: tokio runtime");
-    // Bounded retry: under the full E2E matrix the SQL Server container drops
-    // connections / times out queries mid-batch (a transient the loaded runner
-    // hits — two setup flakes: wait_for_capture, then this exec). These are
-    // test-SETUP batches (seed / CDC-enable); seeds are DROP-first idempotent,
-    // and a DETERMINISTIC error (bad SQL, permission) still surfaces after the
-    // last attempt rather than being masked. Re-establishes the connection
-    // each try. r7/r8: the mssql-under-load class.
     rt.block_on(async {
-        let mut last_err: Option<String> = None;
+        let mut errs: Vec<String> = Vec::new();
         for attempt in 0..3 {
             match run_batch(port, sql).await {
                 Ok(()) => return,
                 Err(e) => {
-                    last_err = Some(e);
+                    errs.push(e);
                     tokio::time::sleep(std::time::Duration::from_millis(500 * (attempt + 1))).await;
                 }
             }
         }
         panic!(
-            "mssql: exec batch failed after 3 attempts: {}",
-            last_err.unwrap()
+            "mssql: exec batch failed after 3 attempts; first: {}; last: {}",
+            errs[0], errs[2]
         );
     });
 }
@@ -538,13 +532,18 @@ pub fn mssql_seed_one_transaction_wide(
 // two suites need is harness, not test body — the same rule that put the transaction
 // seeds here.
 
-/// Enable CDC on the database (idempotent) + the table, creating capture instance
-/// `ci`. The capture job (SQL Server Agent) then populates `cdc.<ci>_CT`.
-pub fn enable_cdc(table: &str, ci: &str) {
+/// Enable CDC on the `mssql-cdc` instance's `rivet` database, whatever ran before (idempotent).
+pub fn enable_cdc_db() {
     mssql_cdc_exec(
         "IF NOT EXISTS(SELECT 1 FROM sys.databases WHERE name='rivet' AND is_cdc_enabled=1) \
          EXEC sys.sp_cdc_enable_db;",
     );
+}
+
+/// Enable CDC on the database (idempotent) + the table, creating capture instance
+/// `ci`. The capture job (SQL Server Agent) then populates `cdc.<ci>_CT`.
+pub fn enable_cdc(table: &str, ci: &str) {
+    enable_cdc_db();
     mssql_cdc_exec(&format!(
         "EXEC sys.sp_cdc_enable_table @source_schema=N'dbo', @source_name=N'{table}', \
          @role_name=NULL, @capture_instance=N'{ci}';"
@@ -607,10 +606,7 @@ pub struct CaptureJobStalled(std::time::Instant);
 
 /// Stop the capture job and keep the Agent from restarting it; the caller holds `cross_process_serial("mssql_cdc")`.
 pub fn stall_capture_job() -> CaptureJobStalled {
-    mssql_cdc_exec(
-        "IF NOT EXISTS(SELECT 1 FROM sys.databases WHERE name='rivet' AND is_cdc_enabled=1) \
-         EXEC sys.sp_cdc_enable_db;",
-    );
+    enable_cdc_db();
     wait_for_a_max_lsn();
     let stalled = CaptureJobStalled(std::time::Instant::now());
     mssql_cdc_try_exec(

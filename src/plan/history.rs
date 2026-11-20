@@ -1,10 +1,4 @@
 //! Historical refinement for prioritization scoring (Epic I).
-//!
-//! Summarizes recent `export_metrics` rows into a small, deterministic snapshot
-//! that the scoring engine can fold in. Bounded contribution by design: history
-//! is a signal, not an oracle (ADR-0006 principle 3).
-//!
-//! Internal consumer (binary) only; silence library-only dead_code checks.
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
@@ -31,9 +25,6 @@ pub enum LastStatus {
 
 impl HistorySnapshot {
     /// Build a snapshot from the most recent `metrics` (caller decides the window; up to ~20 is typical).
-    ///
-    /// `metrics` is expected in descending `run_at` order — same shape as
-    /// [`crate::state::StateStore::get_metrics`] returns.
     pub fn summarize(metrics: &[ExportMetric]) -> Self {
         if metrics.is_empty() {
             return Self::empty();

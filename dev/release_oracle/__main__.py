@@ -668,7 +668,9 @@ def _skip_cause_self_test() -> None:
     assert fifth.verdict(core.FULL_GATE) == "NOT GRADED", "a new fix cell that self-skips for the folding text is not excused by the four named ones"
     assert skip_allow.excused("fix_cells", "all", "a_fifth_fix_cell_that_self_skips_mysql", date(2026, 11, 3)) is None
     assert all(skip_allow.excused("fix_cells", "all", c, date(2026, 11, 3)) for c in skip_allow.FOLD_CELLS) and len(skip_allow.FOLD_CELLS) == 4
-    assert all(skip_allow.excused("fix_cells", "all", c, date(2026, 11, 18)) is None for c in skip_allow.FOLD_CELLS), "an excuse ends on its day"
+    fold_ends = {a.store: date.fromisoformat(a.expires) for a in skip_allow.EXCUSES if a.scenario == "fix_cells" and a.store in skip_allow.FOLD_CELLS}
+    assert set(fold_ends) == set(skip_allow.FOLD_CELLS), "every fold cell has its own excuse"
+    assert all(skip_allow.excused("fix_cells", "all", c, fold_ends[c] + timedelta(days=1)) is None for c in skip_allow.FOLD_CELLS), "an excuse ends on its day"
     scale = [skip_allow.excused(regression._S_SCENARIO, e, regression._S_STORE, date(2026, 11, 14)) for e in ("postgres", "mysql", "mssql", "mongo")]
     assert all(scale), "the scale-memory env skip the island records on every engine is excused today"
     assert skip_allow.excused(regression._S_SCENARIO, "oracle", regression._S_STORE, date(2026, 11, 14)) is None, "the excuse names the four engines the stage loops"
@@ -1213,13 +1215,14 @@ def _self_test() -> int:
     from .partner_shape import init_slot
     assert init_slot("    cdc:\n      slot: rivet_rivet_public_cdc  # logical slot\n") == "rivet_rivet_public_cdc"
     assert init_slot("mode: cdc\n") is None, "a config naming no slot names none"
-    from . import stand_disk, stand_memory, stand_profiles
+    from . import stand_disk, stand_memory, stand_profiles, stand_stacks
     failure.self_test()
     stand_disk.self_test()
     stand_health.self_test()
     stand_images.self_test()
     stand_memory.self_test()
     stand_profiles.self_test()
+    stand_stacks.self_test()
     import inspect
     assert "stand_disk.start_refusal(stand_disk.free_gib(), island=ns.island, hosted=ns.hosted)" in inspect.getsource(main), \
         "the start floor follows the run's mode"

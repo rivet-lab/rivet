@@ -403,7 +403,7 @@ By default `validate` resolves the destination prefix the same way `run` does (`
 | `--run-id` | | string | Substitute `{run_id}` in the destination prefix template (composes with `--date`). No run lookup is performed — if the template has no `{run_id}` placeholder this has no effect; use `--prefix` for an arbitrary path |
 | `--prefix` | | string | Point at an explicit destination prefix |
 
-Exits non-zero when the manifest references a part that is missing or whose size does not match, and when the manifest records its last run as anything but `success` (`RIVET_VERIFY_RUN_NOT_SUCCESSFUL`, exit 1: a failed, interrupted or still-running export is not a completed dataset). A run that failed before its first write did not touch the prefix, so `validate` still reads the export that was complete before it. A prefix with no manifest and no `_SUCCESS` that the state has no successful run of the export at (never delivered, or delivered before manifests) falls back to the M6 reduced-guarantee path, is labelled `legacy_run: true` and exits 0; when `run_status` records a `success` run of that export at that destination, the delivery is gone and `validate` exits 3 with `RIVET_VERIFY_DELIVERY_ABSENT` (a batch export; the check reads the state only for such a prefix, creates none, and an unreadable state is refused with `RIVET_STATE_FILE_CORRUPT` rather than read as never delivered). A `_SUCCESS` without a manifest fails with `RIVET_VERIFY_MANIFEST_MISSING` (exit 3). A bucket or container that does not exist is not a legacy prefix: the export's verdict carries `RIVET_VERIFY_MANIFEST_READ_ERROR` naming the bucket, and `validate` exits 1.
+Exits non-zero when the manifest references a part that is missing or whose size does not match, and when the manifest records its last run as anything but `success` (`RIVET_VERIFY_RUN_NOT_SUCCESSFUL`, exit 1: a failed, interrupted or still-running export is not a completed dataset). A run that failed before its first write did not touch the prefix, so `validate` still reads the export that was complete before it. A prefix with no manifest and no `_SUCCESS` that the state has no successful run of the export at (never delivered, or delivered before manifests) falls back to the M6 reduced-guarantee path, is labelled `legacy_run: true` and exits 0; when `run_status` records a `success` run of that export at that destination, the delivery is gone and `validate` exits 3 with `RIVET_VERIFY_DELIVERY_ABSENT` (a batch export; the check reads the state only for such a prefix, creates none, and an unreadable state is refused with `RIVET_STATE_FILE_CORRUPT` rather than read as never delivered). A `_SUCCESS` without a manifest fails with `RIVET_VERIFY_MANIFEST_MISSING` (exit 3). A bucket or container that does not exist is not a legacy prefix: the export's verdict carries `RIVET_VERIFY_MANIFEST_READ_ERROR` naming the bucket, and `validate` exits 1. A run that wrote MySQL zero or partial dates as NULL records the per-column count in its manifest, and `validate` prints it as a `warning` (`RIVET_VERIFY_CELLS_WRITTEN_AS_NULL`, never a failure, exit unchanged): `d=2, dt=2` names each column and how many cells it lost.
 
 ### Examples
 
@@ -529,6 +529,8 @@ The `Strategy:` and `Mode:` lines (and `strategy` / `mode` under `--json`) descr
 
 For an export that declares `columns:`, `check` reads the first row of the export through the same converter `rivet run` uses and ends with `RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH` (exit 1) when the run would refuse a declared type; this costs one extra one-row query per such export, and an empty source passes as it passes the run, except for an override the reader has no builder for (a nanosecond timestamp on MySQL, a decimal past precision 38 on SQL Server or Oracle), which is decided from the column list and refused even over no rows.
 
+For a `mode: cdc` export whose baseline is still pending (`initial: snapshot` or `backfill:` and no `snapshot/_SUCCESS` marker at the destination), `check` and `doctor` admit the baseline leg the first `run` executes, with the column, format and `columns:` refusals of a batch export, before any row is read. Once the marker exists the leg is done and is not admitted again; `check` never opens the state database. `rivet plan` does not plan a `mode: cdc` export and is unchanged.
+
 ```bash
 rivet check --config <PATH> [OPTIONS]
 ```
@@ -584,7 +586,7 @@ Fidelity levels:
 | `compatible` | Structurally compatible; minor representation difference |
 | `logical_string` | Serialized to STRING/text (no native Arrow type) |
 | `lossy` | Precision or range reduction |
-| `unsupported` | No safe mapping exists; the export fails with `N column(s) have no safe Rivet mapping — add column overrides in rivet.yaml`, and `rivet check --strict` exits non-zero |
+| `unsupported` | No safe mapping exists; the export is refused before any row is read with ``N column(s) need a `columns:` declaration`` (`RIVET_TYPE_UNSAFE_MAPPING`), naming the column, its source type and the reason, by `rivet run`, `check`, `plan` and `doctor` alike, and `rivet check --strict` exits non-zero |
 
 Output includes: table existence, estimated row count, index analysis, tuning recommendation.
 

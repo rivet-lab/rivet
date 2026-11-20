@@ -179,7 +179,7 @@ fn mssql_batch_datetimeoffset_exports_the_utc_instant() {
     let arr = batches[0]
         .column_by_name("dto")
         .unwrap()
-        .as_primitive::<arrow::array::types::TimestampMicrosecondType>();
+        .as_primitive::<arrow::array::types::TimestampNanosecondType>();
     let instant = arr
         .value_as_datetime(0)
         .expect("a non-null instant")
@@ -188,4 +188,41 @@ fn mssql_batch_datetimeoffset_exports_the_utc_instant() {
         instant.starts_with("2026-06-23 04:30:00"),
         "the UTC instant must be 04:30 (10:00 +05:30), got {instant}"
     );
+}
+
+/// A query over `datetime2(7)` and `datetimeoffset(7)` columns with a tick past every microsecond delivers the tick, and the rig oracle reads the source query at the same precision.
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn a_query_over_datetime2_7_and_datetimeoffset_7_is_graded_at_the_tick_mssql() {
+    require_alive(LiveService::Mssql);
+    let table_name = unique_name("dt7_query");
+    mssql_drop_table(&table_name);
+    mssql_exec(&format!(
+        "CREATE TABLE {table_name} (id INT PRIMARY KEY, t2 DATETIME2(7), dto DATETIMEOFFSET(7)); \
+         INSERT INTO {table_name} VALUES \
+         (1, '2026-06-23 10:00:00.1234567', '2026-06-23 10:00:00.1234567 +05:30'), \
+         (2, '2026-06-23 10:00:01.7654321', '2026-06-23 10:00:01.7654321 -08:00');"
+    ));
+    let _guard = MssqlCleanup(table_name.clone());
+
+    let export_name = unique_name("dt7_query_run");
+    let out_dir = tempfile::tempdir().unwrap();
+    let rig = Rig::mssql_batch(&export_name)
+        .query(&format!("SELECT id, t2, dto FROM {table_name}"))
+        .dest_path(out_dir.path().to_path_buf());
+    rig.run_ok();
+
+    let files = files_with_extension(out_dir.path(), "parquet");
+    let (_, batches) = read_parquet_batches(&files[0]);
+    let ticks = |column: &str| -> Vec<i64> {
+        let arr = batches[0]
+            .column_by_name(column)
+            .unwrap()
+            .as_primitive::<arrow::array::types::TimestampNanosecondType>();
+        (0..arr.len())
+            .map(|i| arr.value(i) % 1_000_000_000)
+            .collect()
+    };
+    assert_eq!(ticks("t2"), vec![123_456_700, 765_432_100]);
+    assert_eq!(ticks("dto"), vec![123_456_700, 765_432_100]);
 }

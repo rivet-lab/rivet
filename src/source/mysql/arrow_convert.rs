@@ -16,7 +16,7 @@ use mysql::consts::{ColumnFlags, ColumnType};
 
 use crate::error::Result;
 use crate::types::{
-    ColumnOverrides, RivetType, SourceColumn, TimeUnit as RivetTimeUnit, TypeMapping,
+    ColumnOverrides, RivetType, SourceColumn, TimeUnit as RivetTimeUnit, TypeFidelity, TypeMapping,
     build_arrow_field,
 };
 
@@ -165,6 +165,20 @@ pub(super) fn mysql_type_to_rivet(col: &mysql::Column) -> RivetType {
     }
 }
 
+/// The mapping of a MySQL column; a date or time stamp column that can hold a zero or partial date is `compatible`, never `exact`.
+pub(crate) fn mysql_mapping(source: &SourceColumn, rivet: RivetType) -> TypeMapping {
+    let temporal = matches!(rivet, RivetType::Date | RivetType::Timestamp { .. })
+        && matches!(
+            source.native_type.as_str(),
+            "date" | "datetime" | "timestamp"
+        );
+    let mut mapping = TypeMapping::from_source(source, rivet);
+    if temporal && seeded!("mysql-zero-date-column-claims-exact", false, true) {
+        mapping.fidelity = TypeFidelity::Compatible;
+    }
+    mapping
+}
+
 /// Build an Arrow `Schema` and a parallel `Vec<DataType>` from MySQL column descriptors.
 pub(super) fn mysql_schema_and_arrow_types(
     columns: &[mysql::Column],
@@ -184,7 +198,7 @@ pub(super) fn mysql_schema_and_arrow_types(
             || mysql_type_to_rivet(col),
         )?;
         let source = SourceColumn::simple(col.name_str().to_string(), native.clone(), true);
-        let mapping = TypeMapping::from_source(&source, rivet);
+        let mapping = mysql_mapping(&source, rivet);
 
         match (build_arrow_field(&mapping), mapping.arrow_type) {
             (Some(field), Some(dt)) => {
@@ -243,6 +257,15 @@ fn datetime_of(
 ) -> Option<chrono::NaiveDateTime> {
     date_of(y, mo, d)
         .and_then(|d| d.and_hms_micro_opt(u32::from(h), u32::from(mi), u32::from(s), us))
+}
+
+/// The per-column counts of zero or partial date cells written as NULL, as `col=n` joined by commas.
+pub(crate) fn zero_date_counts(cells: &[(String, u64)]) -> String {
+    cells
+        .iter()
+        .map(|(c, n)| format!("{c}={n}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The warning for `n` zero or partial date cells of `column` written as NULL.
@@ -1195,6 +1218,9 @@ fn mysql_decimal_to_decimal256(
 }
 
 #[cfg(test)]
+mod type_table;
+
+#[cfg(test)]
 mod time_parse_tests {
     use super::parse_time_str_to_micros;
 
@@ -1362,6 +1388,41 @@ mod roast_mysql_bit_decode_tests {
     };
     use super::{RivetTimeUnit, RivetType};
     use std::io::{Read, Write};
+
+    /// A MySQL date or time stamp column is `compatible` and every other mapping keeps the fidelity `from_source` derives.
+    #[test]
+    fn a_mysql_temporal_column_is_never_exact_and_the_rest_are_unchanged() {
+        use crate::types::{SourceColumn, TypeFidelity, TypeMapping};
+        let utc = || RivetType::Timestamp {
+            unit: RivetTimeUnit::Microsecond,
+            timezone: Some("UTC".into()),
+        };
+        for (native, t) in [
+            ("date", RivetType::Date),
+            ("datetime", utc()),
+            ("timestamp", utc()),
+        ] {
+            let m = super::mysql_mapping(&SourceColumn::simple("c", native, true), t);
+            assert_eq!(m.fidelity, TypeFidelity::Compatible, "{native}");
+        }
+        for (native, t) in [
+            (
+                "time",
+                RivetType::Time {
+                    unit: RivetTimeUnit::Microsecond,
+                },
+            ),
+            ("int", RivetType::Int32),
+            ("varchar", RivetType::String),
+            ("date", RivetType::String),
+            ("datetime", RivetType::String),
+        ] {
+            let same =
+                TypeMapping::from_source(&SourceColumn::simple("c", native, true), t.clone());
+            let m = super::mysql_mapping(&SourceColumn::simple("c", native, true), t);
+            assert_eq!(m.fidelity, same.fidelity, "{native}");
+        }
+    }
 
     /// How long any socket in the fake harness waits.
     const FAKE_IO_TIMEOUT: Duration = Duration::from_secs(1);

@@ -136,6 +136,8 @@ struct TableSink<'a> {
     seq: usize,
     /// Finding #38: per-column value checksums, sum-accumulated across parts (the same combining rule `validate_recorded_checksums` applies on re-read.
     column_sums: std::collections::BTreeMap<String, u64>,
+    /// Cells written as NULL for a zero or partial date, per column, summed across parts.
+    nulled: std::collections::BTreeMap<String, u64>,
     /// How many of `parts` the last per-roll manifest already declared.
     manifested_parts: usize,
     /// Whether this table's `running` marker is already at the destination.
@@ -156,6 +158,25 @@ struct SinkRun<'a> {
     started_at: &'a str,
     checkpoint: Option<&'a Path>,
     state: Option<&'a crate::state::StateStore>,
+}
+
+impl<'a> TableSink<'a> {
+    /// An empty sink for one table's output.
+    fn new(out: TableOutput<'a>) -> Self {
+        TableSink {
+            out,
+            schema: None,
+            buf: Vec::new(),
+            parts: Vec::new(),
+            seq: 0,
+            column_sums: std::collections::BTreeMap::new(),
+            nulled: std::collections::BTreeMap::new(),
+            manifested_parts: 0,
+            marked: false,
+            moved: Default::default(),
+            gone: Default::default(),
+        }
+    }
 }
 
 impl TableSink<'_> {
@@ -197,6 +218,7 @@ impl TableSink<'_> {
         build_manifest(
             run.engine,
             &self.column_sums,
+            &self.nulled,
             &self.out,
             run.export_name,
             run.format,
@@ -237,9 +259,10 @@ impl TableSink<'_> {
             self.out.partition.as_ref(),
             &self.out.overridden,
         ) {
-            Ok((batch, slices)) => upload_slices(
+            Ok((batch, slices, nulled)) => upload_slices(
                 &batch,
                 slices,
+                nulled,
                 sch,
                 &self.out.columns,
                 format,
@@ -256,12 +279,16 @@ impl TableSink<'_> {
         &mut self,
         part: PartRecord,
         sums: Vec<(String, u64)>,
+        nulled: Vec<(String, u64)>,
         format: FormatType,
         ledger: Option<(&crate::state::StateStore, &str, &str)>,
     ) {
         for (name, sum) in sums {
             let e = self.column_sums.entry(name).or_insert(0);
             *e = e.wrapping_add(sum);
+        }
+        for (name, n) in nulled {
+            *self.nulled.entry(name).or_insert(0) += n;
         }
         let ledger_name = ledger_part_name(&self.out.table, &part.file_name);
         if let Some((state, export_name, run_id)) = ledger
@@ -339,10 +366,11 @@ fn roll_all(
     for (i, flushed) in pending.into_iter().zip(uploaded) {
         let (parts, outcome) = flushed.unwrap_or_else(|panicked| (Vec::new(), Err(panicked)));
         part_counts.push(parts.len());
-        for (part, sums) in parts {
+        for (part, sums, nulled) in parts {
             sinks[i].record_part(
                 part,
                 sums,
+                nulled,
                 run.format,
                 run.state.map(|st| (st, run.export_name, run.run_id)),
             );
@@ -398,22 +426,7 @@ pub(crate) fn run_to_files(
     let run_token = file_token(&cfg.run_id);
     let read_bytes = std::sync::Arc::clone(&cfg.read_bytes);
     let mut reschema = cfg.reschema;
-    let mut sinks: Vec<TableSink<'_>> = cfg
-        .outputs
-        .into_iter()
-        .map(|out| TableSink {
-            out,
-            schema: None,
-            buf: Vec::new(),
-            parts: Vec::new(),
-            seq: 0,
-            column_sums: std::collections::BTreeMap::new(),
-            manifested_parts: 0,
-            marked: false,
-            moved: Default::default(),
-            gone: Default::default(),
-        })
-        .collect();
+    let mut sinks: Vec<TableSink<'_>> = cfg.outputs.into_iter().map(TableSink::new).collect();
 
     let policy = RolloverPolicy {
         rollover_rows: cfg.rollover,
@@ -736,6 +749,14 @@ pub(crate) fn image_name_memo<'a>(
     Some((names, names.iter().position(|n| n == col)))
 }
 
+/// The labels `e`'s binlog table map carries for `column`, when the catalog cannot be trusted to spell them.
+fn wire_labels<'a>(e: &'a ChangeEvent, column: &str) -> Option<&'a value::WireLabels> {
+    e.image_labels
+        .as_deref()?
+        .iter()
+        .find(|w| w.column == column)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn flush(
     events: &[ChangeEvent],
@@ -778,14 +799,17 @@ fn flush(
 
     let mut arrays: Vec<ArrayRef> = vec![ops, poss, seqs];
     let schema_names: Vec<&str> = columns.iter().map(|m| m.column_name.as_str()).collect();
+    let mut nulled_cells: Vec<(String, u64)> = Vec::new();
     for (i, m) in columns.iter().enumerate() {
         let dt = schema.field(arrays.len()).data_type();
-        let fix = value::mysql_cell_fix(engine, &m.source_native_type).filter(|f| {
-            seeded!(
-                "mysql-cdc-time-remedy-names-the-batch-cast",
-                true,
-                f.applies_to(dt)
-            )
+        let fix = value::mysql_flag_fix(engine, &m.source_native_type, dt).or_else(|| {
+            value::mysql_cell_fix(engine, &m.source_native_type).filter(|f| {
+                seeded!(
+                    "mysql-cdc-time-remedy-names-the-batch-cast",
+                    true,
+                    f.applies_to(dt)
+                )
+            })
         });
         let memo = image_name_memo(events, &m.column_name);
         let refuse = |r: value::CellRefusal| {
@@ -799,12 +823,13 @@ fn flush(
                     .map(|(row, e)| {
                         image_cell(e, i, &m.column_name, &schema_names, memo)
                             .map(|v| {
-                                fix.apply(v).map_err(|r| value::CellRefusal {
-                                    row,
-                                    value: v.clone(),
-                                    reason: r.reason,
-                                    code: r.code,
-                                })
+                                fix.apply_with(v, wire_labels(e, &m.column_name), &e.table)
+                                    .map_err(|r| value::CellRefusal {
+                                        row,
+                                        value: v.clone(),
+                                        reason: r.reason,
+                                        code: r.code,
+                                    })
                             })
                             .transpose()
                     })
@@ -824,6 +849,9 @@ fn flush(
                     }
                 })
                 .count();
+            if nulled > 0 {
+                nulled_cells.push((m.column_name.clone(), nulled as u64));
+            }
             if nulled > 0 && seeded!("mysql-zero-date-null-without-warn", false, true) {
                 log::warn!(
                     "{}",
@@ -884,7 +912,7 @@ fn flush(
             .collect(),
         None => vec![(0..batch.num_rows(), None)],
     };
-    Ok((batch, slices))
+    Ok((batch, slices, nulled_cells))
 }
 
 /// Write + upload each slice as one part, stopping at the first failure.
@@ -892,6 +920,7 @@ fn flush(
 fn upload_slices(
     batch: &RecordBatch,
     slices: Vec<Slice>,
+    mut nulled: Vec<(String, u64)>,
     schema: &SchemaRef,
     columns: &[TypeMapping],
     format: FormatType,
@@ -918,7 +947,7 @@ fn upload_slices(
             Ok((part, slice_column_sums(&data, columns)))
         };
         match one() {
-            Ok(p) => parts.push(p),
+            Ok((part, sums)) => parts.push((part, sums, std::mem::take(&mut nulled))),
             Err(e) => return (parts, Err(e)),
         }
     }
@@ -966,16 +995,16 @@ pub(crate) fn unbudgetable_partition_warning(
 fn budget_slices(buckets: &[i64], cap: usize) -> Vec<(std::ops::Range<usize>, usize)> {
     let mut out = Vec::new();
     let mut start = 0;
-    while start < buckets.len() {
-        let fit = crate::plan::rollover::rows_that_fit(
-            &std::collections::HashSet::new(),
-            &buckets[start..],
-            cap,
-        );
-        let end = start + fit;
-        let held: std::collections::HashSet<i64> = buckets[start..end].iter().copied().collect();
-        out.push((start..end, held.len()));
-        start = end;
+    let mut rest = buckets;
+    while !rest.is_empty() {
+        let fit =
+            crate::plan::rollover::rows_that_fit(&std::collections::HashSet::new(), rest, cap)
+                .max(1);
+        let (head, tail) = rest.split_at(fit);
+        let held: std::collections::HashSet<i64> = head.iter().copied().collect();
+        out.push((start..start + fit, held.len()));
+        start += fit;
+        rest = tail;
     }
     out
 }
@@ -984,10 +1013,13 @@ fn budget_slices(buckets: &[i64], cap: usize) -> Vec<(std::ops::Range<usize>, us
 type Slice = (std::ops::Range<usize>, Option<String>);
 
 /// A flush's encoded batch and the slices it is cut into.
-type EncodedBatch = (RecordBatch, Vec<Slice>);
+type EncodedBatch = (RecordBatch, Vec<Slice>, Vec<(String, u64)>);
 
 /// The parts a flush made durable, each with its own column checksums, and whether it finished.
-type FlushedParts = (Vec<(PartRecord, Vec<(String, u64)>)>, Result<()>);
+type FlushedParts = (Vec<FlushedPart>, Result<()>);
+
+/// One uploaded part with its column checksums and the cells written as NULL for it.
+type FlushedPart = (PartRecord, Vec<(String, u64)>, Vec<(String, u64)>);
 
 /// The name a CDC part is recorded under in `file_log`.
 pub(crate) fn ledger_part_name(table: &str, file_name: &str) -> String {
@@ -1007,6 +1039,7 @@ pub(crate) fn part_compression(format: FormatType) -> CompressionType {
 fn build_manifest(
     engine: CdcEngine,
     column_sums: &std::collections::BTreeMap<String, u64>,
+    nulled: &std::collections::BTreeMap<String, u64>,
     out: &TableOutput<'_>,
     export_name: &str,
     format: FormatType,
@@ -1071,6 +1104,8 @@ fn build_manifest(
                 .collect(),
         ),
         checksum_key_column: None,
+        nulled_cells: (!nulled.is_empty())
+            .then(|| nulled.iter().map(|(c, n)| (c.clone(), *n)).collect()),
     }
 }
 
@@ -1582,6 +1617,7 @@ mod tests {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         }
     }
 
@@ -2112,6 +2148,109 @@ mod tests {
         );
     }
 
+    fn enum_flush(events: Vec<ChangeEvent>, native: &str) -> Result<Vec<Option<String>>> {
+        use arrow::array::Array;
+        let mut cols = vec![TypeMapping {
+            column_name: "e".into(),
+            source_native_type: native.into(),
+            rivet_type: crate::types::RivetType::String,
+            arrow_type: Some(DataType::Utf8),
+            ..int_col().remove(0)
+        }];
+        let mut schema = None;
+        let sch = ensure_schema(
+            &mut schema,
+            &mut cols,
+            &events,
+            &crate::config::RowHash::default(),
+        )
+        .unwrap();
+        let (batch, _, _) = flush(
+            &events,
+            &sch,
+            &cols,
+            crate::source::cdc::CdcEngine::Mysql,
+            &crate::config::RowHash::default(),
+            None,
+            &Default::default(),
+        )?;
+        let col = batch.column(sch.index_of("e").unwrap());
+        let strings = col
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("a Utf8 column");
+        Ok((0..strings.len())
+            .map(|i| (!strings.is_null(i)).then(|| strings.value(i).to_string()))
+            .collect())
+    }
+
+    fn enum_event(idx: i64, labels: Option<Vec<value::WireLabels>>) -> ChangeEvent {
+        ChangeEvent {
+            after: Some(vec![RivetValue::Int(idx)]),
+            image_names: Some(std::sync::Arc::from(vec!["e".to_string()])),
+            image_labels: labels.map(Into::into),
+            ..insert(0)
+        }
+    }
+
+    #[test]
+    fn flush_delivers_the_table_maps_labels_where_the_catalog_prints_a_question_mark() {
+        let listed = || {
+            Some(vec![value::WireLabels {
+                column: "e".into(),
+                labels: Some(vec!["a".into(), "\u{1F600}".into(), "b".into()]),
+            }])
+        };
+        let got = enum_flush(
+            vec![
+                enum_event(2, listed()),
+                enum_event(1, listed()),
+                enum_event(3, None),
+                enum_event(0, None),
+            ],
+            "enum('a','?','b')",
+        )
+        .unwrap();
+        assert_eq!(
+            got,
+            vec![
+                Some("\u{1F600}".to_string()),
+                Some("a".to_string()),
+                Some("b".to_string()),
+                Some(String::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn flush_refuses_a_question_mark_label_of_a_column_the_table_map_does_not_list() {
+        let unlisted = || {
+            Some(vec![value::WireLabels {
+                column: "e".into(),
+                labels: None,
+            }])
+        };
+        let err = enum_flush(vec![enum_event(2, unlisted())], "enum('a','?','b')")
+            .expect_err("a label only the catalog could supply");
+        assert_eq!(
+            crate::error::code_of(&err),
+            Some(crate::error::codes::SOURCE_CDC_CELL_UNSUPPORTED)
+        );
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("`t`.`e`") && msg.contains("SET PERSIST binlog_row_metadata = FULL;"),
+            "{msg}"
+        );
+        let kept = enum_flush(
+            vec![enum_event(1, unlisted()), enum_event(3, unlisted())],
+            "enum('a','?','b')",
+        )
+        .unwrap();
+        assert_eq!(kept, vec![Some("a".to_string()), Some("b".to_string())]);
+        let main = enum_flush(vec![enum_event(2, None)], "enum('a','?','b')").unwrap();
+        assert_eq!(main, vec![Some("?".to_string())]);
+    }
+
     fn int_col() -> Vec<TypeMapping> {
         vec![TypeMapping {
             column_name: "v".into(),
@@ -2196,6 +2335,51 @@ mod tests {
             ],
             "five days under a budget of two: three parts, each named apart and noting what it holds"
         );
+    }
+
+    /// The cells a MySQL CDC run nulled are summed over its parts into the manifest, a column that nulled none is absent, and a clean run records none.
+    #[test]
+    fn a_cdc_manifest_sums_the_nulled_date_cells_over_its_parts_and_a_clean_run_records_none() {
+        let date = |name: &str| TypeMapping {
+            column_name: name.into(),
+            source_native_type: "date".into(),
+            rivet_type: crate::types::RivetType::String,
+            arrow_type: Some(DataType::Utf8),
+            ..int_col().remove(0)
+        };
+        let cols = vec![date("d"), date("e")];
+        let row = |zero: bool| ChangeEvent {
+            after: Some(vec![
+                RivetValue::Bytes(if zero {
+                    value::ZERO_DATE.to_vec()
+                } else {
+                    b"2026-01-02".to_vec()
+                }),
+                RivetValue::Bytes(b"2026-01-02".to_vec()),
+            ]),
+            image_names: Some(Arc::from(vec!["d".to_string(), "e".to_string()])),
+            ..insert(0)
+        };
+        let run = |zeros: &[bool]| {
+            let dir = tempfile::tempdir().unwrap();
+            let dest = local_dest(&dir);
+            let mut stream = FakeStream {
+                events: zeros.iter().map(|z| row(*z)).collect(),
+                acked: Vec::new(),
+            };
+            let (m, r) = run_to_files(
+                &mut stream,
+                cfg(dest.as_ref(), &cols, FormatType::Parquet, 2),
+            );
+            r.unwrap();
+            let manifest = m.into_iter().next().unwrap();
+            (manifest.part_count, manifest.nulled_cells)
+        };
+        assert_eq!(
+            run(&[true, false, true, true]),
+            (2, Some(vec![("d".to_string(), 3)]))
+        );
+        assert_eq!(run(&[false, false, false, false]), (2, None));
     }
 
     #[test]
@@ -2635,6 +2819,7 @@ mod tests {
             row_id: None,
             before_names: None,
             before_poison: None,
+            image_labels: None,
         };
         let mut cols = vec![
             decimal_col("placeholder", 38, 0),

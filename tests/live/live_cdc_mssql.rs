@@ -618,9 +618,13 @@ fn mssql_cdc_datetimeoffset_value_is_preserved() {
     );
 }
 
-/// The first row's `col` (a Timestamp(µs)) as its UTC `NaiveDateTime` string.
+/// The first row's `col` (a Timestamp(µs) or Timestamp(ns)) as its UTC `NaiveDateTime` string.
 fn parquet_one_timestamp(dir: &std::path::Path, col: &str) -> String {
-    use arrow::array::{AsArray, types::TimestampMicrosecondType};
+    use arrow::array::{
+        AsArray,
+        types::{TimestampMicrosecondType, TimestampNanosecondType},
+    };
+    use arrow::datatypes::{DataType, TimeUnit};
     let part = std::fs::read_dir(dir)
         .unwrap()
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -633,12 +637,16 @@ fn parquet_one_timestamp(dir: &std::path::Path, col: &str) -> String {
         .unwrap();
     let batch = r.next().expect("a row").unwrap();
     let idx = batch.schema().index_of(col).expect("column present");
-    batch
-        .column(idx)
-        .as_primitive::<TimestampMicrosecondType>()
-        .value_as_datetime(0)
-        .expect("a non-null instant")
-        .to_string()
+    let column = batch.column(idx);
+    let instant = match column.data_type() {
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => column
+            .as_primitive::<TimestampNanosecondType>()
+            .value_as_datetime(0),
+        _ => column
+            .as_primitive::<TimestampMicrosecondType>()
+            .value_as_datetime(0),
+    };
+    instant.expect("a non-null instant").to_string()
 }
 
 /// Whether the first row's `col` is non-null in the one `.parquet` part.
@@ -931,10 +939,7 @@ fn mssql_cdc_column_added_via_new_capture_instance_is_captured() {
     mssql_cdc_exec(&format!(
         "CREATE TABLE dbo.{table}(id BIGINT PRIMARY KEY, v INT)"
     ));
-    mssql_cdc_exec(
-        "IF NOT EXISTS(SELECT 1 FROM sys.databases WHERE name='rivet' AND is_cdc_enabled=1) \
-         EXEC sys.sp_cdc_enable_db;",
-    );
+    enable_cdc_db();
     mssql_cdc_exec(&format!(
         "EXEC sys.sp_cdc_enable_table @source_schema=N'dbo', @source_name=N'{table}', \
          @role_name=NULL, @capture_instance=N'{ci1}';"
@@ -1661,10 +1666,7 @@ fn mssql_cdc_schema_probe_follows_the_capture_instance_not_the_default_schema() 
     mssql_cdc_exec(&format!(
         "CREATE TABLE rvsales.{table}(id INT PRIMARY KEY, note NVARCHAR(50))"
     ));
-    mssql_cdc_exec(
-        "IF NOT EXISTS(SELECT 1 FROM sys.databases WHERE name='rivet' AND is_cdc_enabled=1) \
-         EXEC sys.sp_cdc_enable_db;",
-    );
+    enable_cdc_db();
     mssql_cdc_exec(&format!(
         "EXEC sys.sp_cdc_enable_table @source_schema=N'rvsales', @source_name=N'{table}', \
          @role_name=NULL, @capture_instance=N'{ci}';"
@@ -1773,10 +1775,7 @@ fn mssql_cdc_snapshot_leg_reads_the_captured_relation_not_the_default_schema() {
         "CREATE TABLE rvsales.{table}(id INT PRIMARY KEY, note NVARCHAR(50)); \
          INSERT INTO rvsales.{table} VALUES (1, N'base-one'), (2, N'base-two');"
     ));
-    mssql_cdc_exec(
-        "IF NOT EXISTS(SELECT 1 FROM sys.databases WHERE name='rivet' AND is_cdc_enabled=1) \
-         EXEC sys.sp_cdc_enable_db;",
-    );
+    enable_cdc_db();
     mssql_cdc_exec(&format!(
         "EXEC sys.sp_cdc_enable_table @source_schema=N'rvsales', @source_name=N'{table}', \
          @role_name=NULL, @capture_instance=N'{ci}';"
@@ -1847,10 +1846,7 @@ fn mssql_cdc_refuses_an_unknown_capture_instance_before_the_snapshot_is_durable(
         "CREATE TABLE rvsales.{table}(id INT PRIMARY KEY, note NVARCHAR(50)); \
          INSERT INTO rvsales.{table} VALUES (1, N'real-one'), (2, N'real-two');"
     ));
-    mssql_cdc_exec(
-        "IF NOT EXISTS(SELECT 1 FROM sys.databases WHERE name='rivet' AND is_cdc_enabled=1) \
-         EXEC sys.sp_cdc_enable_db;",
-    );
+    enable_cdc_db();
     mssql_cdc_exec(&format!(
         "EXEC sys.sp_cdc_enable_table @source_schema=N'rvsales', @source_name=N'{table}', \
          @role_name=NULL, @capture_instance=N'{ci}';"
@@ -1907,10 +1903,7 @@ fn mssql_cdc_a_completed_snapshot_is_not_redone_after_the_destination_is_wiped()
         "CREATE TABLE dbo.{table}(id INT PRIMARY KEY, v INT); \
          INSERT INTO dbo.{table} VALUES (1,10),(2,20);"
     ));
-    mssql_cdc_exec(
-        "IF NOT EXISTS(SELECT 1 FROM sys.databases WHERE name='rivet' AND is_cdc_enabled=1) \
-         EXEC sys.sp_cdc_enable_db;",
-    );
+    enable_cdc_db();
     mssql_cdc_exec(&format!(
         "EXEC sys.sp_cdc_enable_table @source_schema=N'dbo', @source_name=N'{table}', \
          @role_name=NULL, @capture_instance=N'{ci}';"
@@ -2169,10 +2162,7 @@ fn mssql_cdc_a_marker_only_snapshot_survives_a_fresh_state_db() {
         "CREATE TABLE dbo.{table}(id INT PRIMARY KEY, v INT); \
          INSERT INTO dbo.{table} VALUES (1,10),(2,20);"
     ));
-    mssql_cdc_exec(
-        "IF NOT EXISTS(SELECT 1 FROM sys.databases WHERE name='rivet' AND is_cdc_enabled=1) \
-         EXEC sys.sp_cdc_enable_db;",
-    );
+    enable_cdc_db();
     mssql_cdc_exec(&format!(
         "EXEC sys.sp_cdc_enable_table @source_schema=N'dbo', @source_name=N'{table}', \
          @role_name=NULL, @capture_instance=N'{ci}';"

@@ -127,6 +127,14 @@ scenarios:
     mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
     oracle:   { test: keyset_key_types_the_cursor_reads_deliver_the_seeded_ids_oracle }
 
+  - id: keyset_key_type_parallel_sampler
+    what: "every key type the cursor reads, with a time-zone-aware timestamp where the engine has one (PostgreSQL timestamptz, SQL Server datetimeoffset(6)), delivers the source's ids exactly once under `parallel:` too: the sampler reads each split point as text its own engine casts back, never a driver debug dump; the parallel neighbour of keyset_key_type_readable_types"
+    postgres: { test: keyset_key_types_the_sampler_reads_deliver_the_seeded_ids_in_parallel_postgres }
+    mysql:    { test: keyset_key_types_the_sampler_reads_deliver_the_seeded_ids_in_parallel_mysql }
+    mssql:    { test: keyset_key_types_the_sampler_reads_deliver_the_seeded_ids_in_parallel_mssql }
+    mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
+    oracle:   { test: keyset_key_types_the_sampler_reads_deliver_the_seeded_ids_in_parallel_oracle }
+
   - id: keyset_key_type_oracle_bare_number
     what: "an Oracle NUMBER with no precision (held as exact text) keeps keying a keyset seek exactly as before the type check: integers, fractions across zero, 35 digits and both exponent extremes deliver the seeded ids once, sequential and parallel"
     postgres: { na: "only an Oracle NUMBER is held as exact text and keys a seek; a PostgreSQL numeric stays refused as a decimal key" }
@@ -211,7 +219,7 @@ scenarios:
     what: "rivet init --table --mode chunked writes chunk_by_key for a primary key the planner admits and none (with the NOTE: no chunk key line) for one the planner refuses, so a scaffold is never a config that check rejects"
     postgres: { test: init_scaffolds_no_keyset_key_for_a_bytea_primary_key_postgres }
     mysql:    { test: init_scaffolds_no_keyset_key_for_a_binary16_primary_key_mysql }
-    mssql:    { test: init_scaffolds_no_keyset_key_for_an_alias_type_over_datetime2_7_primary_key_mssql }
+    mssql:    { test: init_scaffolds_a_keyset_key_for_an_alias_type_over_datetime2_7_primary_key_mssql }
     mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
     oracle:   { na: "the Oracle refusal is the explicit chunk_by_key check, pinned by a_timestamp_9_keyset_key_stays_refused_oracle; no Oracle init cell yet" }
 

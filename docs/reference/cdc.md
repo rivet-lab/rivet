@@ -358,6 +358,13 @@ Notes:
   and writes no part. If the export already had a checkpoint,
   [re-baseline](cdc-failure-modes.md#the-shape-of-every-recovery) the stream after the switch. MySQL before
   8.0.1 has no such variable and is refused for the same reason.
+  Under `FULL` the table map also carries the ENUM and SET labels, which is the
+  only place a label with a character outside the Basic Multilingual Plane (an
+  emoji) survives: MySQL prints it as `?` in `information_schema.columns`,
+  `SHOW COLUMNS` and `SHOW CREATE TABLE`. rivet reads those labels from the
+  table map; a cell whose label can only come from the catalog's `?` stops the
+  run with `RIVET_SOURCE_CDC_CELL_UNSUPPORTED`, naming the table, the column and
+  the `SET PERSIST binlog_row_metadata = FULL;` remedy, and never delivers `?`.
 - `binlog_row_image = FULL` is MySQL's default; the risk is a source that has set
   it to `MINIMAL` to shrink the binlog — that path needs the column-mask MERGE,
   not the simple overwrite (see [Output shape](#output-shape)).
@@ -437,7 +444,7 @@ source:
 
 Limits:
 
-- MySQL, PostgreSQL, Oracle and MongoDB only. On SQL Server every command that loads the config (`run`, `check`, `plan`, `doctor`, `validate`, `load`, `state`) and `apply` of a plan that carries it refuses it with `RIVET_CONFIG_SOURCE_MODE_UNSUPPORTED` (exit 1, nothing connected or written), because that source would read and deliver every column (see #711). Remove `columns_from:` from `source:` or point `source:` at a MySQL, PostgreSQL, Oracle or MongoDB server.
+- Every source engine enforces the policy: MySQL here, PostgreSQL, SQL Server, Oracle and MongoDB in their sections below.
 - The binlog still leaves the server in full: the filter is in rivet, not in MySQL.
 - Under `columns_from: grants` any statement that names a captured table stops the stream and needs a re-baseline, whatever it does: `ALTER TABLE orders ADD INDEX ...` and `ALTER TABLE orders ADD COLUMN ...` stop it as a rename does. A cheaper path that tells a benign change from a rename or a drop by the catalog (the InnoDB table id and each column's ordinal against its name and type) is a separate change and is not in this release.
 - Why a name match is enough, where the stream cannot read a statement: a captured name is built of ASCII letters, digits, `_` and `.` (the stream's open refuses any other); every client character set MySQL allows (it refuses `ucs2`, `utf16`, `utf16le` and `utf32`) writes ASCII as the same ASCII bytes; a comment cannot split an identifier (`ord/**/ers` is two words); an identifier has no escape that spells a letter another way (a doubled backtick is a different name); and DDL run from a procedure or `EXECUTE` is logged with its own text, naming what it changes. A statement that changes a captured table therefore carries its name as bytes, and the match finds it.
@@ -600,6 +607,57 @@ Notes:
 - **Retention:** the cleanup job keeps ~3 days by default. If rivet is offline
   longer than retention, the saved LSN falls below `sys.fn_cdc_get_min_lsn()` and
   the read errors — [re-baseline](cdc-failure-modes.md#the-shape-of-every-recovery) the stream.
+
+#### SQL Server — column grants (`source.columns_from: grants`)
+
+SQL Server enforces the policy itself. Batch reads (and the baseline snapshot) `SELECT` an
+explicit column list of the columns the login may `SELECT`, each judged by the server
+(`HAS_PERMS_BY_NAME(..., 'COLUMN')`). The change stream is read through the capture
+instance's `cdc.fn_cdc_get_all_changes_<instance>`, which returns **nothing** to a reader that
+may not `SELECT` every column the instance captures. So the instance must capture exactly the
+columns the login may read: rivet compares `cdc.captured_columns` of `cdc.capture_instance` to
+the readable set at run start and refuses an instance that holds a column the login may not
+read (or leaves a readable one out) with `RIVET_SOURCE_CDC_PREREQUISITE` (exit 1), nothing read
+or written. `rivet check` prints the boundary and a change-stream run logs it at start.
+
+```sql
+GRANT SELECT ON dbo.users (id, name) TO rivet_cdc;          -- not `pass`
+GRANT SELECT ON SCHEMA::cdc TO rivet_cdc;                    -- read the catalog and change functions
+EXEC sys.sp_cdc_enable_table
+     @source_schema = N'dbo', @source_name = N'users', @role_name = NULL,
+     @capture_instance = N'dbo_users_grants',
+     @captured_column_list = N'[id], [name]';                -- exactly the readable columns
+```
+
+```yaml
+source:
+  type: mssql
+  url_env: DATABASE_URL
+  columns_from: grants
+exports:
+  - name: users
+    cdc: { capture_instance: dbo_users_grants }
+```
+
+| What | Behaviour |
+|---|---|
+| Readable set | One query per table at run start: every column of `sys.columns` with the server's `SELECT` verdict, in `column_id` order |
+| Hidden column | Never in a Parquet part, a schema, the spill or the load plan: batch and snapshot select the readable list, the stream reads an instance made of exactly it |
+| Instance captures a column the login may not read | Refused with `RIVET_SOURCE_CDC_PREREQUISITE` (exit 1) naming the columns and the `sys.sp_cdc_enable_table ... @captured_column_list` statement over the readable ones. Create that instance and point `cdc.capture_instance` at it |
+| Instance leaves out a readable column | Refused the same way: every change would miss a column the baseline carries |
+| Instance equal to the readable set (a subset of the table) | Read as a whole image |
+| Key not readable | The key the export uses (`load.pk` if declared, else the primary key) must be readable; otherwise `RIVET_SOURCE_COLUMNS_UNREADABLE` (exit 1), nothing read or written |
+| `cursor_column`, `chunk_by_key`, `time_column` or `partition_by` naming a hidden column | `RIVET_SOURCE_COLUMNS_UNREADABLE` (exit 1), naming the column and the setting |
+| Grant change between runs | Takes effect on the next run: a revoked column makes the instance wider than the grants and the run is refused as above |
+| Batch `query:` | The query as written; a hidden column is refused by the server |
+| Without `columns_from` | A column-grant login is refused by the server (`SELECT` denied) at the `SELECT *` |
+
+Limits:
+
+- The login needs `GRANT SELECT ON SCHEMA::cdc` to read `cdc.captured_columns`; without it the policy cannot read the instance and refuses with the setup statement.
+- A checkpoint taken on the old (wider) instance cannot resume on the new one: its LSN is below the new instance's minimum and the run stops with `RIVET_SOURCE_CDC_LOG_GAP`. [Re-baseline](cdc-failure-modes.md#the-shape-of-every-recovery) with `cdc.initial: snapshot` and a fresh checkpoint.
+- A grant change while a run is open is seen when rivet reads each batch of the change table, not when it happens: the run is refused with `RIVET_SOURCE_CDC_GRANTS_CHANGED` (exit 2) naming what changed, nothing of that batch is delivered, and the next run reads the grants as they are then (a revoked column makes the instance wider than the grants and that run is refused as above). A `REVOKE` undone before the next batch read is not seen. A denied read inside a run ends with the server's error (`RIVET_SOURCE_QUERY_FAILED`).
+- `rivet check` needs `VIEW DATABASE PERFORMANCE STATE` for its row-size probe on any account, with or without the policy.
 
 ### Oracle — LogMiner (preview)
 
