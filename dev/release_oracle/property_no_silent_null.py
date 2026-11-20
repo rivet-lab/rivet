@@ -381,7 +381,9 @@ def _same_instant(engine: str, native: str, exp: str, got) -> str:
         except OverflowError:
             return "PRESENCE"
     if isinstance(e, timedelta) and isinstance(got, (int, float, Decimal)) and not isinstance(got, bool):
-        return "OK" if Decimal(e.days * 86400 + e.seconds) + Decimal(e.microseconds) / 10**6 == Decimal(str(got)) else WRONG
+        whole = Decimal(e.days * 86400 + e.seconds) + Decimal(e.microseconds) / 10**6
+        sub = Decimal(_sub_us(exp)) / 10**9
+        return "OK" if (whole - sub if whole < 0 else whole + sub) == Decimal(str(got)) else WRONG
     if e is None or g is None:
         return WRONG if e is None and isinstance(got, (date, dtime, timedelta)) else "PRESENCE"
     if type(e) is date and type(g) is datetime:
@@ -649,6 +651,8 @@ def read_files(parts: list[str], fmt: str, key: str = "id"):
             # on fetch, and truncates a zoned one to TIMESTAMP WITH TIME ZONE on register (both measured on 1.5.5).
             wide |= {f.name.lower(): ("TIMESTAMP WITH TIME ZONE" if f.type.tz else "TIMESTAMP_NS") for f in tbl.schema
                      if pa.types.is_timestamp(f.type) and f.type.unit == "ns"}
+            # A nanosecond time of day likewise: DuckDB's TIME holds microseconds.
+            wide |= {f.name.lower(): "TIME" for f in tbl.schema if pa.types.is_time64(f.type) and f.type.unit == "ns"}
             for f in tbl.schema:
                 if f.name.lower() in wide:
                     tbl = tbl.set_column(tbl.schema.get_field_index(f.name), f.name, tbl.column(f.name).cast(pa.string()))
@@ -1158,7 +1162,12 @@ def self_test() -> None:
     assert compare("postgres", '\'{"k": "v", "n": 42}\'', "other", "none", '{"n":42,"k":"v"}', native="JSONB") == "OK"
     assert compare("postgres", "'{\"n\":1}'::jsonb", "other", "none", '{"n":2}', native="JSONB") == WRONG
     assert compare("mssql", "'12345678-1234-1234-1234-123456789012'", "other", "none", UUID("12345678-1234-1234-1234-123456789012"), native="UNIQUEIDENTIFIER") == "OK"
+<<<<<<< HEAD
     assert parse_lit("oracle", "EMPTY_BLOB()") == b"" and parse_lit("oracle", "HEXTORAW('')") is None, "an empty LOB is a value, an empty RAW is NULL"
+=======
+    assert _same_instant("mssql", "TIME", "12:34:56.1234567", Decimal("45296.1234567")) == "OK", "a time's 100ns digit is compared, not dropped"
+    assert _same_instant("mssql", "TIME", "12:34:56.1234567", Decimal("45296.123456")) == WRONG
+>>>>>>> claude/fix-gate-ns-timestamp-reader
     assert compare("mssql", "0xAB", "other", "none", b"\xab\0\0", native="BINARY(8)") == "OK" and compare("mysql", "0xDEADBEEF", "other", "none", b"\xde\xad", native="VARBINARY(4)") == WRONG
     assert pg_array_elements("'{a,\"b,c\",NULL}'", "text") == ["'a'", "'b,c'", "NULL"] and pg_array_elements("ARRAY[1, NULL]::int[]", "int") == ["1", "NULL"]
     assert pg_array_elements("'{{1,2},{3}}'", "int") is None and pg_array_elements("'{}'", "int") == []
