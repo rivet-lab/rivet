@@ -109,7 +109,7 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ("src/preflight/doctor.rs::doctor#1", 238),
     ("src/preflight/mod.rs::check#1", 226),
     ("src/source/mssql/arrow_convert.rs::build_array#1", 244),
-    ("src/source/mysql/arrow_convert.rs::build_array#1", 301),
+    ("src/source/mysql/arrow_convert.rs::build_array#1", 300),
     ("src/source/mysql/cdc.rs::fill#1", 253),
     ("src/source/oracle/arrow_convert.rs::build_column#1", 178),
 ];
