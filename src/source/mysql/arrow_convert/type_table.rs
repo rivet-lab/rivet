@@ -273,7 +273,7 @@ fn table() -> Vec<Case> {
         case(
             "bit(64)",
             of(MYSQL_TYPE_BIT, BIN, 64, UNSIGNED, 0),
-            "int64 | Int64 | native | exact | reads int64,string,binary,json # red:MYSQL_BIT_TOPBIT_REFUSED # under-change",
+            "uint64 | UInt64 | native | exact | reads int64,uint64,string,binary,json",
         ),
         case(
             "geometry",
