@@ -101,6 +101,9 @@ fn mysql_reads(native: &str, src: Kind, tgt: Kind) -> bool {
         Enum | Json => &[Binary, Text, Json],
         Binary => &[Bool, Uuid, Binary, Text, Json],
         Date => &[Date, Naive, Utc, Text, Json],
+        Naive | Utc if seeded!("override-without-builder-internal-stop", true, false) => {
+            &[Naive, Utc, NaiveNs, UtcNs, Text, Json]
+        }
         Naive | Utc => &[Naive, Utc, Text, Json],
         _ => &[],
     };
