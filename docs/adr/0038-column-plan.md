@@ -47,6 +47,10 @@ CP12 says each `TextForm` renders in one place. `tests/offline/renderer_locality
 
 Twin tests (`renderer_twins` beside each local renderer) feed both renderers the same inputs. Where they disagree, the case is an `#[ignore]` test naming the engine step that unifies it: PostgreSQL interval fractions (`PT0.500000S` vs `PT0.5S`) and `numeric` trailing zeros (`1.5` vs `1.50`); Oracle upper-case hex, six-digit and signed-year timestamps, YEAR(9) intervals past `i32` months, and CDC number trailing zeros; SQL Server upper-case GUID; CDC `\x`-prefixed hex and chrono-`Display` timestamps.
 
+### Amendment: common kinds (2026-11-20)
+
+`src/types/kind.rs` holds `CommonKind`, the 13 kinds that mean the same on every engine (bool, int16/32/64, float32/64, decimal, date, naive and UTC timestamp, text, binary, json), classified once from a `RivetType`. It is a planning-layer classification, run once per column per run: it is not a decoder enum, so the rejection of a cross-engine decoder enum below stands and no cell is routed through it. Kinds only some engines carry (unsigned, time of day, nanosecond stamps, enum, interval, uuid, list) and every engine-specific native-type row stay in that engine's own table; `override_table.rs` reads the shared table through `CommonKind::of` and classifies the native string once per column (`native_class`).
+
 ## Why this shape
 
 - **One field on an existing record.** `TypeMapping` already travels to every consumer (type report, load spec, schema-drift check, CDC resolver). Adding `delivery` there reaches all of them without a new type or a new call path.
