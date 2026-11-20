@@ -6418,3 +6418,37 @@ seeds:
         cells:
           - "lib:flush_warns_with_the_count_of_zero_dates_it_nulled_and_is_silent_otherwise"
           - "lib:a_run_that_nulled_cells_warns_once_per_column_with_its_count"
+
+  - name: keyset-uuid-not-recut
+    class: "a uuid keyset key is cut by key space only and never recut by density: a key whose rows sit in a dense block with a gap above it lands most rows in a few ranges, so one worker reads the table while the rest idle"
+    history: "client case #1059, 2026-11-19: composite key (uuid_v7, varchar) on PostgreSQL, ranges of 14.9x the mean on the su7 fixture before the recut; RED 2026-11-20 (lib:a_uuid_key_with_a_gap_after_its_dense_block_is_recut_into_balanced_ranges)"
+    scope: source
+    switch: keyset-uuid-not-recut
+    engines:
+      postgres:
+        cells: [a_skewed_uuid_keyset_is_recut_by_density_postgres, "lib:a_uuid_key_with_a_gap_after_its_dense_block_is_recut_into_balanced_ranges"]
+      mysql:
+        cells: [a_skewed_uuid_keyset_is_recut_by_density_mysql, "lib:a_uuid_key_with_a_gap_after_its_dense_block_is_recut_into_balanced_ranges"]
+      oracle:
+        cells: [a_skewed_uuid_keyset_is_recut_by_density_oracle, "lib:a_uuid_key_with_a_gap_after_its_dense_block_is_recut_into_balanced_ranges"]
+      mssql:
+        na: "a SQL Server uniqueidentifier orders by its last bytes, so it has no key-space axis and keeps row percentiles by design (a_skewed_uniqueidentifier_keyset_keeps_row_percentiles_mssql, lib:a_sql_server_uuid_key_is_not_recut)"
+      mongo:
+        na: "MongoDB parallel is the separate `_id`-range reader (mongo_parallel), not the SQL keyset range sampler"
+
+  - name: keyset-snap-stacks-passed-cuts
+    class: "the keyset sampler snaps a cut that the previous snapped boundary already passed to the next existing key, so several cuts inside an empty stretch become consecutive one-row ranges and one-row files"
+    history: "client-shape fixture su7, 2026-11-19: ranges 23-28 each held one sparse key after the dense block (3 one-row files in the p2 run log); RED 2026-11-20 (lib:a_uuid_key_with_a_gap_after_its_dense_block_is_recut_into_balanced_ranges)"
+    scope: source
+    switch: keyset-snap-stacks-passed-cuts
+    engines:
+      postgres:
+        cells: ["lib:a_uuid_key_with_a_gap_after_its_dense_block_is_recut_into_balanced_ranges"]
+      mysql:
+        cells: ["lib:a_uuid_key_with_a_gap_after_its_dense_block_is_recut_into_balanced_ranges"]
+      mssql:
+        cells: ["lib:a_uuid_key_with_a_gap_after_its_dense_block_is_recut_into_balanced_ranges"]
+      oracle:
+        cells: ["lib:a_uuid_key_with_a_gap_after_its_dense_block_is_recut_into_balanced_ranges"]
+      mongo:
+        na: "MongoDB parallel is the separate `_id`-range reader (mongo_parallel), not the SQL keyset range sampler"

@@ -478,6 +478,13 @@ pub(crate) fn sample_key_boundaries(
     };
     let Some((axis, lo, hi)) = ends.and_then(|(a, b)| {
         let axis = Axis::of(&a, st)?;
+        if seeded!(
+            "keyset-uuid-not-recut",
+            matches!(axis, Axis::Uuid { .. }),
+            false
+        ) {
+            return None;
+        }
         Some((axis, axis.ord(&a)?, axis.ord(&b)?))
     }) else {
         log::info!(
@@ -722,7 +729,7 @@ fn snap_cuts(
     let mut edges = Vec::new();
     let mut prev = first;
     for &c in cuts {
-        if c <= prev {
+        if seeded!("keyset-snap-stacks-passed-cuts", false, c <= prev) {
             continue;
         }
         let Some(mut b) = snap_key(src, plan, key, fence, prev, c)? else {
