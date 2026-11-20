@@ -176,10 +176,10 @@ scenarios:
     mongo:    { na: "a MongoDB change row is two text cells (`_id`, `document`), with no TIME column" }
     oracle:   { na: "Oracle has no TIME type; a DATE or TIMESTAMP carries a time of day inside a day" }
 
-  - id: cdc_hex_enum_label_refusal
-    what: "an ENUM label MySQL writes as a hex literal (a binary-charset label of bytes that are not utf8mb3 text; the digits carry no zero padding) is refused as RIVET_SOURCE_CDC_CELL_UNSUPPORTED (exit 5) on every run, also under a `columns:` override of the column, and the column left out of the capture with the re-baseline recipe delivers"
+  - id: cdc_hex_enum_label_delivery
+    what: "an ENUM label MySQL writes as a hex literal (a binary-charset label of bytes that are not utf8mb3 text; the digits carry no zero padding) is delivered by a stream, its label read from the binlog table map, and the rig oracle grades the delivered rows against the source"
     postgres: { na: "a PostgreSQL enum value arrives as its label text; no label is read from a catalog rendering" }
-    mysql:    { test: a_hex_enum_label_in_a_stream_is_refused_by_code_with_or_without_an_override_mysql }
+    mysql:    { test: a_hex_enum_label_in_a_stream_is_delivered_from_the_table_map_mysql }
     mssql:    { na: "SQL Server has no ENUM type" }
     mongo:    { na: "a MongoDB document carries no ENUM column" }
     oracle:   { na: "Oracle has no ENUM type" }
