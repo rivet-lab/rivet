@@ -388,17 +388,21 @@ fn flagged_empty(row: &Row, flag: Option<usize>) -> Result<bool> {
 }
 
 /// The sign of an infinite NUMBER cell: its flag column's value (see `super::infinity_flag`), else `-` for the text the driver decodes -infinity to, `-` followed by zeros only, which no finite NUMBER prints (the driver decodes +infinity as 1E125, which only the flag tells apart).
-fn infinity_sign(row: &Row, flag: Option<usize>, text: &str) -> Result<Option<char>> {
+fn infinity_sign(row: &Row, flag: Option<usize>, idx: usize, text: &str) -> Result<Option<char>> {
     if let Some(j) = flag
-        && let Some(f) = row.get::<Option<OracleNumber>>(j).ora()?
+        && let Some(f) = row.get::<Option<String>>(j).ora()?
+        && let Some(sign) = flagged_sign(&f, idx)
     {
-        return Ok(Some(if f.to_string().starts_with('-') {
-            '-'
-        } else {
-            '+'
-        }));
+        return Ok(Some(sign));
     }
     Ok(negative_infinity_text(text).then_some('-'))
+}
+
+/// The sign the row's infinity flag (`,i+,` / `,i-,` per column, see `super::infinity_flag`) gives column `idx`.
+fn flagged_sign(flag: &str, idx: usize) -> Option<char> {
+    ['+', '-']
+        .into_iter()
+        .find(|s| flag.contains(&format!(",{idx}{s},")))
 }
 
 /// Whether `text` is what the driver prints for -infinity: a minus sign and zeros only.
@@ -447,7 +451,7 @@ fn build_column(
             .ora()?
             .map(|n| n.to_string());
         let infinite = match &text {
-            Some(t) => infinity_sign(r, cell_flag, t)?,
+            Some(t) => infinity_sign(r, cell_flag, idx, t)?,
             None => None,
         };
         match infinite {
@@ -679,6 +683,14 @@ mod tests {
         assert!(
             format!("{err:#}").contains("column `F` holds +infinity"),
             "{err:#}"
+        );
+        assert_eq!(flagged_sign(",0+,3-,", 0), Some('+'));
+        assert_eq!(flagged_sign(",0+,3-,", 3), Some('-'));
+        assert_eq!(flagged_sign(",10+,", 0), None, "column 0 is not column 10");
+        assert_eq!(
+            flagged_sign(",", 1),
+            None,
+            "a value past 9.9E125 that is finite"
         );
     }
 
