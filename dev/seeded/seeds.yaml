@@ -6916,3 +6916,19 @@ seeds:
         na: "the seed edits the orchestrated pre-write check (refuse_parts_outside_ranges), which gives ClickHouse no ranges: its own loader reads its footers (checked_part_rows)"
       snowflake:
         na: "the seed edits the orchestrated pre-write check (refuse_parts_outside_ranges), which gives Snowflake no ranges: Snowflake holds every year and delivers it as a form"
+  - name: check-values-unread-unsaid
+    class: "`rivet check` exits 0 over a column a run then refuses by a value (RIVET_SOURCE_VALUE_UNREPRESENTABLE, RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE) without saying that it read no values, so check and run disagree with nothing to tell the operator why"
+    history: "CHECK_RUN_SPLIT known-red class over every engine and leg (2026-11-10..19); owner decision 2026-11-20: check names the codes only a value decides (needs_values in the registry) instead of reading values, and the gate grades a split on such a code as noted"
+    scope: source
+    switch: check-values-unread-unsaid
+    engines:
+      postgres:
+        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises"]
+      mysql:
+        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises"]
+      mssql:
+        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises"]
+      oracle:
+        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises"]
+      mongo:
+        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises"]
