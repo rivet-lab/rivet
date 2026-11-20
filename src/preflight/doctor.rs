@@ -143,6 +143,9 @@ fn run_plan_checks(
     json: bool,
     checks: &mut Vec<DoctorCheck>,
 ) -> Option<anyhow::Error> {
+    if !seeded!("doctor-skips-cursor-admission", false, true) {
+        return None;
+    }
     let mut refusal: Option<anyhow::Error> = None;
     let planned =
         run_plan(config, config_dir).unwrap_or_else(|e| vec![("config".to_string(), Err(e))]);
@@ -279,13 +282,7 @@ pub fn doctor(config_path: &str, json: bool, run_plan: RunPlanProbe<'_>) -> Resu
     }
 
     let run_refusal = source_ok
-        .then(|| {
-            if seeded!("doctor-skips-cursor-admission", false, true) {
-                run_plan_checks(&config, config_dir, run_plan, json, &mut checks)
-            } else {
-                None
-            }
-        })
+        .then(|| run_plan_checks(&config, config_dir, run_plan, json, &mut checks))
         .flatten();
     all_ok &= run_refusal.is_none();
 
