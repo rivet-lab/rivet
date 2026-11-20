@@ -132,8 +132,9 @@ Parquet); dates before 1582-10-15 are not converted from Oracle's Julian calenda
   all nine digits (range 1677-09-21..2262-04-11), `timestamp` reads microseconds.
   A change-data-capture export reads microseconds only, so there `timestamp` is the
   one remedy. Such a column is also refused as an incremental cursor.
-- An `INTERVAL DAY TO SECOND(7..9)` column is still read at microseconds, reported
-  Lossy with a warning.
+- An `INTERVAL DAY TO SECOND(7..9)` column is delivered exact as ISO 8601 text: a
+  value with sub-microsecond digits carries nine fraction digits (`PT0.000000001S`),
+  any other keeps the six-digit form.
 - CDC (LogMiner) is a preview and runs only as a bounded drain to files, to the SCN
   current at open; continuous CDC (`until_current: false`, `rivet cdc --stream`) is refused at config load
   (`RIVET_CONFIG_CDC_CONTINUOUS_UNSUPPORTED`), and an Oracle CDC export cannot feed a

@@ -190,7 +190,14 @@ fn with_oracle_warning(mapping: TypeMapping, bare_number: bool, sub_us: bool) ->
                 lossy.with_refusal(timestamp_ns_refusal(&name, zoned))
             )
         } else {
-            lossy.with_warning(INTERVAL_NS_WARNING)
+            seeded!(
+                "oracle-interval-ns-truncated",
+                lossy.with_warning(INTERVAL_NS_WARNING),
+                TypeMapping {
+                    fidelity: crate::types::TypeFidelity::LogicalString,
+                    ..lossy
+                }
+            )
         }
     } else {
         mapping
@@ -273,13 +280,36 @@ fn interval_iso(row: &Row, idx: usize, kind: OraKind) -> Result<Option<String>> 
     })
 }
 
-/// ISO 8601 for a DAY TO SECOND interval's fields, truncated to microseconds.
+/// ISO 8601 for a DAY TO SECOND interval's fields, exact to the nanosecond: the PostgreSQL form when no digit is finer than a microsecond, nine fraction digits otherwise.
 fn interval_ds_iso(days: i32, hours: i8, minutes: i8, seconds: i8, nanos: i32) -> String {
-    let us = i64::from(hours) * 3_600_000_000
-        + i64::from(minutes) * 60_000_000
-        + i64::from(seconds) * 1_000_000
-        + i64::from(nanos) / 1_000;
-    crate::source::postgres::pg_interval_to_iso8601(0, days, us)
+    let ns = i64::from(hours) * 3_600_000_000_000
+        + i64::from(minutes) * 60_000_000_000
+        + i64::from(seconds) * 1_000_000_000
+        + i64::from(nanos);
+    if ns % 1_000 == 0 || seeded!("oracle-interval-ns-truncated", true, false) {
+        return crate::source::postgres::pg_interval_to_iso8601(0, days, ns / 1_000);
+    }
+    let abs = ns.unsigned_abs();
+    let sign = if ns < 0 { "-" } else { "" };
+    let (h, mi, sec, frac) = (
+        abs / 3_600_000_000_000,
+        abs / 60_000_000_000 % 60,
+        abs / 1_000_000_000 % 60,
+        abs % 1_000_000_000,
+    );
+    let mut s = String::from("P");
+    if days != 0 {
+        s.push_str(&format!("{days}D"));
+    }
+    s.push('T');
+    if h != 0 {
+        s.push_str(&format!("{sign}{h}H"));
+    }
+    if mi != 0 {
+        s.push_str(&format!("{sign}{mi}M"));
+    }
+    s.push_str(&format!("{sign}{sec}.{frac:09}S"));
+    s
 }
 
 /// ISO 8601 for a YEAR TO MONTH interval, straight from its fields (YEAR(9) overflows i32 months).
@@ -810,12 +840,13 @@ mod tests {
         assert_eq!(bare.refusal, None);
     }
 
+    /// An INTERVAL DAY TO SECOND(7..9) is delivered exact as ISO 8601 text with nine fraction digits, so it is neither lossy, warned nor refused.
     #[test]
-    fn a_sub_microsecond_interval_stays_lossy_with_its_warning_and_no_refusal() {
+    fn a_sub_microsecond_interval_is_exact_text_with_no_warning_and_no_refusal() {
         use crate::types::TypeFidelity;
         let iv = with_oracle_warning(mapping("interval_ds(9)"), false, true);
-        assert_eq!(iv.fidelity, TypeFidelity::Lossy);
-        assert_eq!(iv.warnings, vec![INTERVAL_NS_WARNING.to_string()]);
+        assert_eq!(iv.fidelity, TypeFidelity::LogicalString);
+        assert!(iv.warnings.is_empty(), "{:?}", iv.warnings);
         assert_eq!(iv.refusal, None);
     }
 
@@ -1073,7 +1104,30 @@ mod tests {
     #[test]
     fn a_day_to_second_interval_renders_every_field() {
         assert_eq!(interval_ds_iso(1, 2, 3, 4, 5_000), "P1DT2H3M4.000005S");
-        assert_eq!(interval_ds_iso(0, 0, 0, 0, 999), "PT0S", "sub-µs truncated");
+        assert_eq!(
+            interval_ds_iso(0, 0, 0, 0, 1),
+            "PT0.000000001S",
+            "the nanosecond is kept"
+        );
+        assert_eq!(interval_ds_iso(0, 0, 0, 0, 999), "PT0.000000999S");
+        assert_eq!(
+            interval_ds_iso(999_999_999, 23, 59, 59, 999_999_999),
+            "P999999999DT23H59M59.999999999S"
+        );
+        assert_eq!(
+            interval_ds_iso(-999_999_999, -23, -59, -59, -999_999_999),
+            "P-999999999DT-23H-59M-59.999999999S"
+        );
+        assert_eq!(
+            interval_ds_iso(-1, -2, -3, -4, -5),
+            "P-1DT-2H-3M-4.000000005S"
+        );
+        assert_eq!(interval_ds_iso(0, 0, 0, 0, -1), "PT-0.000000001S");
+        assert_eq!(
+            interval_ds_iso(0, 0, 0, 0, 1_000),
+            "PT0.000001S",
+            "a whole microsecond keeps the six-digit form"
+        );
         assert_eq!(interval_ds_iso(0, 0, 0, 1, 0), "PT1S");
         assert_eq!(interval_ds_iso(0, 0, 1, 0, 0), "PT1M");
         assert_eq!(interval_ds_iso(0, 1, 0, 0, 0), "PT1H");
