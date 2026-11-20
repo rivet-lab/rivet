@@ -1,0 +1,98 @@
+{
+  "rivet": "target/release/rivet of claude/integration-all-fixes 1fa72c2 (batch); cdc from claude/converter-bench-adr",
+  "engines": {
+    "postgres": {
+      "rows": 500000,
+      "wall_s": 3.853,
+      "cpu_s": 1.585,
+      "rows_per_cpu_s": 315516,
+      "walls": [
+        3.96,
+        3.949,
+        4.051,
+        3.853,
+        4.054
+      ],
+      "cpus": [
+        1.62,
+        1.634,
+        1.669,
+        1.61,
+        1.585
+      ]
+    },
+    "mysql": {
+      "rows": 500000,
+      "wall_s": 1.143,
+      "cpu_s": 1.133,
+      "rows_per_cpu_s": 441192,
+      "walls": [
+        1.251,
+        1.145,
+        1.146,
+        1.143,
+        1.155
+      ],
+      "cpus": [
+        1.275,
+        1.153,
+        1.133,
+        1.163,
+        1.139
+      ]
+    },
+    "mssql": {
+      "rows": 500000,
+      "wall_s": 2.087,
+      "cpu_s": 2.099,
+      "rows_per_cpu_s": 238263,
+      "walls": [
+        2.188,
+        2.186,
+        2.087,
+        2.17,
+        2.284
+      ],
+      "cpus": [
+        2.105,
+        2.164,
+        2.099,
+        2.102,
+        2.285
+      ]
+    },
+    "oracle": {
+      "rows": 500000,
+      "wall_s": 2.474,
+      "cpu_s": 1.824,
+      "rows_per_cpu_s": 274114,
+      "walls": [
+        2.474,
+        2.58,
+        2.501,
+        2.485,
+        2.485
+      ],
+      "cpus": [
+        1.92,
+        1.872,
+        1.858,
+        1.824,
+        1.91
+      ]
+    }
+  },
+  "stand": "cloud container, 4 vCPU, docker rv-pg/rv-my/rv-ms/rv-ora; compare only on the same stand",
+  "cdc": {
+    "int32": 156947558,
+    "int64": 144677810,
+    "decimal": 13013030,
+    "float64": 146389843,
+    "text": 34251936,
+    "timestamp": 167376903,
+    "date": 148864129,
+    "time": 183196150,
+    "bool": 167463093,
+    "binary": 41809402
+  }
+}
