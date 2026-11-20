@@ -827,7 +827,7 @@ fn balance_by_density(
         } else {
             worse += 1;
         }
-        if worse == 3 || rounds == RECUT_ROUNDS {
+        if worse == seeded!("keyset-recut-quits-early", 2, 3) || rounds == RECUT_ROUNDS {
             let (ratio, cuts, rounds) = best.take().unwrap();
             return Ok((render(&cuts), Recut::Unbalanced { rounds, ratio }));
         }

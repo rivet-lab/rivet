@@ -6452,3 +6452,20 @@ seeds:
         cells: ["lib:a_uuid_key_with_a_gap_after_its_dense_block_is_recut_into_balanced_ranges"]
       mongo:
         na: "MongoDB parallel is the separate `_id`-range reader (mongo_parallel), not the SQL keyset range sampler"
+
+  - name: keyset-recut-quits-early
+    class: "the density recut gives up after two rounds that do not improve the estimate and keeps a cut whose heaviest range holds several bursts, so one worker reads a large share of the table"
+    history: "UUIDv7 bursts far apart in time, 2026-11-20: 4 workers left a range of 2519 of 6000 rows, estimated 6.9x the mean; RED 2026-11-20 (lib:uuid_v7_bursts_are_recut_into_balanced_ranges)"
+    scope: source
+    switch: keyset-recut-quits-early
+    engines:
+      postgres:
+        cells: ["lib:uuid_v7_bursts_are_recut_into_balanced_ranges"]
+      mysql:
+        cells: ["lib:uuid_v7_bursts_are_recut_into_balanced_ranges"]
+      mssql:
+        cells: ["lib:uuid_v7_bursts_are_recut_into_balanced_ranges"]
+      oracle:
+        cells: ["lib:uuid_v7_bursts_are_recut_into_balanced_ranges"]
+      mongo:
+        na: "MongoDB parallel is the separate `_id`-range reader (mongo_parallel), not the SQL keyset range sampler"
