@@ -527,15 +527,12 @@ fn a_cdc_run_is_refused_when_no_view_exposes_the_collection_mongo() {
         account.privilege("", &["listCollections", "find", "changeStream"]),
     ]);
     let rig = cdc_rig(&account);
-    for (cmd, code) in [
-        (&["run"][..], "RIVET_SOURCE_COLUMNS_UNREADABLE"),
-        (&["doctor"][..], "RIVET_CLI_PREFLIGHT_FAILED"),
-    ] {
-        let out = rig.cli(cmd);
-        assert_refused(&out, Refused::by_code(code, 1));
+    for cmd in ["run", "check", "doctor"] {
+        let out = rig.cli(&[cmd]);
+        assert_refused(&out, Refused::by_code("RIVET_SOURCE_COLUMNS_UNREADABLE", 1));
         assert!(
             said_by(&out).contains("found no view of this collection"),
-            "{cmd:?}:\n{}",
+            "{cmd}:\n{}",
             said_by(&out)
         );
     }
