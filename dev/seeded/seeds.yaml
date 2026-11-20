@@ -6470,6 +6470,23 @@ seeds:
       mongo:
         na: "MongoDB parallel is the separate `_id`-range reader (mongo_parallel), not the SQL keyset range sampler"
 
+  - name: keyset-refine-span-never-splits
+    class: "the keyset density recut never splits a span where its density changes, so a dense stretch before an empty one is spread across it and one worker reads most of the table"
+    history: "uuid and integer density recut, 2026-11-20 (a_skewed_key_keeps_every_row_once_in_balanced_ranges, uuid_v7_bursts_are_recut_into_balanced_ranges fail RED)"
+    scope: source
+    switch: keyset-refine-span-never-splits
+    engines:
+      postgres:
+        cells: ["lib:a_skewed_key_keeps_every_row_once_in_balanced_ranges", "lib:uuid_v7_bursts_are_recut_into_balanced_ranges"]
+      mysql:
+        cells: ["lib:a_skewed_key_keeps_every_row_once_in_balanced_ranges", "lib:uuid_v7_bursts_are_recut_into_balanced_ranges"]
+      mssql:
+        cells: ["lib:a_skewed_key_keeps_every_row_once_in_balanced_ranges", "lib:uuid_v7_bursts_are_recut_into_balanced_ranges"]
+      oracle:
+        cells: ["lib:a_skewed_key_keeps_every_row_once_in_balanced_ranges", "lib:uuid_v7_bursts_are_recut_into_balanced_ranges"]
+      mongo:
+        na: "MongoDB parallel is the separate `_id`-range reader (mongo_parallel), not the SQL keyset range sampler"
+
   - name: keyset-recut-quits-early
     class: "the density recut gives up after two rounds that do not improve the estimate and keeps a cut whose heaviest range holds several bursts, so one worker reads a large share of the table"
     history: "UUIDv7 bursts far apart in time, 2026-11-20: 4 workers left a range of 2519 of 6000 rows, estimated 6.9x the mean; RED 2026-11-20 (lib:uuid_v7_bursts_are_recut_into_balanced_ranges)"

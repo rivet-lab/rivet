@@ -370,7 +370,7 @@ fn refine_span(
     }
     let right = probe_density(src, plan, key, fence, mid, span.end)?;
     let (hi, lo) = (right.max(span.density), right.min(span.density));
-    if hi / lo <= DENSITY_RATIO {
+    if hi / lo <= seeded!("keyset-refine-span-never-splits", f64::MAX, DENSITY_RATIO) {
         out.push(span);
         return Ok(());
     }
