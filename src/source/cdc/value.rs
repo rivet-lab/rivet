@@ -2639,3 +2639,103 @@ mod renderer_twins {
         }
     }
 }
+
+/// Throughput of `build_column` over the common types, the CDC side of the converter
+/// baseline (ADR-0041). Ignored by default: run in release by
+/// `dev/release_oracle/bench_builders.py --cdc`, which parses the `cdc_build_column` lines.
+#[cfg(test)]
+mod build_column_bench {
+    use super::*;
+    use arrow::datatypes::TimeUnit;
+
+    #[test]
+    #[ignore = "a timing, run in release by bench_builders.py --cdc"]
+    fn cdc_build_column_throughput() {
+        const N: usize = 200_000;
+        const ROUNDS: usize = 7;
+        let ts = NaiveDate::from_ymd_opt(2020, 1, 1)
+            .expect("date")
+            .and_hms_opt(0, 0, 0)
+            .expect("time");
+        let columns: Vec<(&str, DataType, Vec<RivetValue>)> = vec![
+            (
+                "int32",
+                DataType::Int32,
+                (0..N).map(|i| RivetValue::Int(i as i64)).collect(),
+            ),
+            (
+                "int64",
+                DataType::Int64,
+                (0..N).map(|i| RivetValue::Int(i as i64 * 1000)).collect(),
+            ),
+            (
+                "decimal",
+                DataType::Decimal128(18, 4),
+                (0..N)
+                    .map(|i| RivetValue::Bytes(format!("{}.{:04}", i, i % 10_000).into_bytes()))
+                    .collect(),
+            ),
+            (
+                "float64",
+                DataType::Float64,
+                (0..N).map(|i| RivetValue::Float(i as f64 * 1.5)).collect(),
+            ),
+            (
+                "text",
+                DataType::Utf8,
+                (0..N)
+                    .map(|i| RivetValue::Bytes(format!("{i:032x}").into_bytes()))
+                    .collect(),
+            ),
+            (
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                (0..N)
+                    .map(|i| RivetValue::DateTime(ts + chrono::Duration::seconds(i as i64)))
+                    .collect(),
+            ),
+            (
+                "date",
+                DataType::Date32,
+                (0..N)
+                    .map(|i| RivetValue::DateTime(ts + chrono::Duration::days((i % 3000) as i64)))
+                    .collect(),
+            ),
+            (
+                "time",
+                DataType::Time64(TimeUnit::Microsecond),
+                (0..N)
+                    .map(|i| RivetValue::TimeMicros((i % 86_400) as i64 * 1_000_000))
+                    .collect(),
+            ),
+            (
+                "bool",
+                DataType::Boolean,
+                (0..N).map(|i| RivetValue::Bool(i % 2 == 0)).collect(),
+            ),
+            (
+                "binary",
+                DataType::Binary,
+                (0..N)
+                    .map(|i| RivetValue::Bytes((i as u128).to_le_bytes().to_vec()))
+                    .collect(),
+            ),
+        ];
+        for (name, dt, values) in &columns {
+            let cells: Vec<Option<&RivetValue>> = values.iter().map(Some).collect();
+            let best = (0..ROUNDS)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    let col = build_column(dt, &cells).expect("every bench cell is buildable");
+                    assert_eq!(col.len(), N);
+                    t.elapsed()
+                })
+                .min()
+                .expect("rounds");
+            println!(
+                "cdc_build_column {name} {N} {:.0}",
+                N as f64 / best.as_secs_f64()
+            );
+        }
+    }
+}
