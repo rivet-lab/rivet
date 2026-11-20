@@ -6698,3 +6698,17 @@ seeds:
         cells:
           - "lib:the_legs_check_admits_are_the_pending_baselines_and_nothing_else"
           - "lib:check_plans_the_pending_baseline_leg_of_a_cdc_export_and_only_that"
+
+  - name: bq-ns-zoned-timestamp-int64
+    class: "a nanosecond zoned timestamp is declared TIMESTAMP in the BigQuery load, so BigQuery reads the Parquet nanosecond integers as microseconds (values 1000x wrong) or rejects the load, where the naive nanosecond timestamp is declared INT64"
+    history: "2026-11-20 - SQL Server datetimeoffset(7) to BigQuery: 1970-01-02 03:04:05 read back as 1973-02-01T20:03:20Z and five edges were rejected with RIVET_LOAD_WAREHOUSE_REJECTED (cloud leg of the type matrix); fixed by the INT64 arm for a zoned nanosecond timestamp in the BigQuery target resolver"
+    scope: target
+    switch: bq-ns-zoned-timestamp-int64
+    engines:
+      bigquery:
+        cells:
+          - "lib:bq_nanosecond_zoned_timestamp_lands_as_int64_like_the_naive_one"
+      snowflake:
+        na: "the seed edits the BigQuery arm of src/types/target.rs, which only a BigQuery load resolves; Snowflake resolves its own column types"
+      clickhouse:
+        na: "the seed edits the BigQuery arm of src/types/target.rs, which only a BigQuery load resolves; ClickHouse resolves its own column types (DateTime64(9, UTC) holds the nanosecond zoned timestamp)"
