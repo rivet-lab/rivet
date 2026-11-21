@@ -43,7 +43,7 @@ if not Path(CARGO).exists():
     CARGO = shutil.which("cargo") or "cargo"
 
 CYRILLIC = re.compile(r"[\u0400-\u04ff]")
-CLOSING = re.compile(r"\b(fix|fixe[sd]|close[sd]?|resolve[sd]?):? +#[0-9]+", re.I)
+CLOSING = re.compile(r"\b(fix|fixe[sd]|close[sd]?|resolve[sd]?):?\s+(?:[\w.-]+/[\w.-]+#|https?://github\.com/[\w.-]+/[\w.-]+/(?:issues|pull)/|#)[0-9]+", re.I)
 TRAILER = re.compile(r"^\s*(co-authored-by|claude-session):", re.I)
 BYTE_SLICE = re.compile(r"\[\s*\.\.\s*[A-Za-z_][\w.]*\.len\(\)\s*\]|\[\s*[A-Za-z_]\w*\s*\.\.\s*[A-Za-z_]\w*\s*\+\s*\w+\s*\]")
 SQL_PARSER = re.compile(r"^\+?\s*(sqlparser|sqlformat|sql-parse|pg_query|sqlparse)\b")
@@ -564,6 +564,9 @@ def self_test() -> int:
     assert text_violations(f"feat: x\n\n{cyr}\n", "m"), "Cyrillic in a message must fail"
     assert text_violations("feat: x\n\nThis fixes #413.\n", "m"), "closing keyword must fail"
     assert text_violations("x\n\nResolved: #9\n", "m"), "closing keyword with a colon must fail"
+    for spelling in ("Fixes rivet-lab/rivet#9", "closes https://github.com/rivet-lab/rivet/issues/9", "Fixes\t#9"):
+        assert text_violations(f"x\n\n{spelling}\n", "m"), f"closing keyword spelled `{spelling}` must fail (#1099 S11)"
+    assert not text_violations("x\n\nsee rivet-lab/rivet#9 and https://github.com/rivet-lab/rivet/issues/9\n", "m")
     assert text_violations("x\n\nCo-Authored-By: A <a@b>\n", "m"), "trailer must fail"
     assert text_violations("x\n\nClaude-Session: https://x\n", "m"), "trailer must fail"
     assert not text_violations("x\n\nSee #413; hotfixes #3; the fixture #4.\n", "m"), "a keyword inside a word is not one"
