@@ -31,9 +31,10 @@ fn timestamp(engine: SqlEngine) -> &'static str {
     }
 }
 
-/// A column type the cursor cannot render: a time of day, or RAW on Oracle (which has no time of day).
+/// A column type the cursor cannot render: a time of day on PostgreSQL and SQL Server, VARBINARY on MySQL (whose TIME lands as text), RAW on Oracle.
 fn unrenderable(engine: SqlEngine) -> &'static str {
     match engine {
+        SqlEngine::Mysql => "VARBINARY(16)",
         #[cfg(feature = "oracle")]
         SqlEngine::Oracle => "RAW(8)",
         _ => "TIME",
@@ -267,6 +268,28 @@ fn unrenderable_cursor_is_refused(engine: SqlEngine) {
     );
 }
 
+/// A MySQL TIME cursor, which lands as text the server orders as a duration, is admitted and delivers each row once, a value past a day included.
+fn a_mysql_time_cursor_delivers_each_row_once() {
+    let engine = SqlEngine::Mysql;
+    let (table, _guard) = seeded(engine, "TIME", "NOT NULL", false);
+    let rig = incremental(engine, &table, &["cursor_column: c"]);
+    assert_doctor_passes(&rig);
+    rig.run_ok();
+    assert_eq!(delivered_ids(&rig.out_dir()), vec![1, 2, 3]);
+    let parts = files_with_extension(&rig.out_dir(), "parquet").len();
+    rig.run_ok();
+    assert_eq!(
+        files_with_extension(&rig.out_dir(), "parquet").len(),
+        parts,
+        "second run wrote a part"
+    );
+    engine.exec(&format!(
+        "INSERT INTO {table} (id, c, d) VALUES (4, '100:00:00', '2026-01-01 00:00:04')"
+    ));
+    rig.run_ok();
+    assert_eq!(delivered_ids(&rig.out_dir()), vec![1, 2, 3, 4]);
+}
+
 /// Drops the view it names when the cell ends.
 struct DropView(SqlEngine, String);
 
@@ -383,6 +406,12 @@ fn unrenderable_cursor_is_refused_postgres() {
 #[ignore = "live: requires docker compose mysql"]
 fn unrenderable_cursor_is_refused_mysql() {
     unrenderable_cursor_is_refused(SqlEngine::Mysql);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn a_mysql_time_cursor_delivers_each_row_once_mysql() {
+    a_mysql_time_cursor_delivers_each_row_once();
 }
 
 #[test]

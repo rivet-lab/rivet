@@ -123,9 +123,9 @@ def self_test() -> None:
     with admitted("oracle", held.append, lambda: "waited 5s"):
         assert _ONE_AT_A_TIME.locked(), "a heavy engine holds the slot while it starts"
     assert not _ONE_AT_A_TIME.locked() and held == ["oracle: waited 5s"], held
-    svc = {"image": "mcr.microsoft.com/mssql/server:2022-latest", "mem_limit": MSSQL_MEM_LIMIT,
+    svc = {"image": "mcr.microsoft.com/mssql/server:2022-CU25-ubuntu-22.04@sha256:e07b9699a2b749969f19d86563ceeea22bd3a69f7f1db85a8d1ac4bdaf0c6f56", "mem_limit": MSSQL_MEM_LIMIT,
            "environment": {"MSSQL_MEMORY_LIMIT_MB": str(MSSQL_LIMIT_MB)}}
-    assert unbounded_mssql({"services": {"ok": svc, "pg": {"image": "postgres:16"}}}) == []
+    assert unbounded_mssql({"services": {"ok": svc, "pg": {"image": "postgres:16.14@sha256:f8e2cc2a36ddb8700e639570f0bc70d0c1495951ba61df903a015dc87db07d02"}}}) == []
     assert unbounded_mssql({"services": {"a": {**svc, "mem_limit": None}}}) == ["a"], "a SQL Server without mem_limit is unbounded"
     assert unbounded_mssql({"services": {"b": {**svc, "environment": {"MSSQL_PID": "Developer"}}}}) == ["b"], "no MSSQL_MEMORY_LIMIT_MB"
     assert unbounded_mssql({"services": {"c": {**svc, "environment": [f"MSSQL_MEMORY_LIMIT_MB={MSSQL_LIMIT_MB}"]}}}) == []

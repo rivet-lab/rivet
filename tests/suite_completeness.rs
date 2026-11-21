@@ -71,6 +71,7 @@ fn entry_path_includes(entry: &str, subdir: &str) -> BTreeSet<String> {
     let src = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     let open = format!("\"{subdir}/");
     src.lines()
+        .filter(|line| line.trim_start().starts_with("#[path"))
         .filter_map(|line| {
             let start = line.find(&open)? + open.len();
             let rest = &line[start..];
