@@ -585,6 +585,8 @@ two independent engines and pins the autoload type. The full matrix:
 | `bool`                        | `BOOLEAN`          | `Nullable(Bool)`                   |
 | `list<inner>`                 | `inner[]`          | `Array(Nullable(inner))`           |
 
+A NULL list and an empty list are indistinguishable at ClickHouse and BigQuery (an `Array` and a `REPEATED` field cannot hold a NULL list); `columns: {col: string}` keeps NULL.
+
 Round-trip values that the suite pins per row: `sum(decimal * 10^scale)`
 matches the in-process Arrow check; `json_valid` / `isValidJSON` returns true
 for every row; `TRY_CAST(uid AS UUID)` / `toUUID(uid)` parses every row; BLOB

@@ -169,9 +169,14 @@ def is_zero_date_null(engine: str, lit: str, verdict: str) -> bool:
     return verdict == NULLED and engine == "mysql" and bool(ZERO_DATE_LIT.fullmatch(lit.strip()))
 
 
-def server_text_of(url: str, col: Col, n_rows: int) -> list[str | None] | None:
-    """The source's own text of each seeded value (PostgreSQL `::text`), the expectation of a column delivered as server text; None when unreadable."""
-    p = cdc._psql(url, "-Atc", f"SELECT id, {col.name} IS NULL, {col.name}::text FROM {TABLE} ORDER BY id")
+def server_text_graded(engine: str, delivery: str) -> bool:
+    """Whether a column of this engine and delivery is graded against the source's own text of its value, not the seed literal."""
+    return engine == "postgres" and delivery == "server_text"
+
+
+def server_text_of(url: str, table: str, column: str, n_rows: int) -> list[str | None] | None:
+    """The source's own text of each seeded value by id (PostgreSQL `::text`), the expectation of a column delivered as server text; None when unreadable."""
+    p = cdc._psql(url, "-Atc", f"SELECT id, {column}::text IS NULL, {column}::text FROM {table} ORDER BY id")
     rows = [line.split("|", 2) for line in p.out.splitlines() if line.strip()] if p.ok else []
     if len(rows) != n_rows or any(len(r) != 3 for r in rows):
         return None
@@ -274,6 +279,7 @@ _TS_FUNC = re.compile(r"(?:TO_DATE|TO_TIMESTAMP_TZ|TO_TIMESTAMP)\('([^']*)'\s*,\
 _HEX = re.compile(r"0x([0-9A-Fa-f]*)|(?:UNHEX|HEXTORAW)\('([0-9A-Fa-f]*)'\)|x'([0-9A-Fa-f]*)'", re.I)
 _PG_HEX = re.compile(r"'\\x([0-9A-Fa-f]*)'(?:::bytea)?")
 _BITS = re.compile(r"b'([01]+)'")
+_PG_BITS = re.compile(r"b'([01]*)'", re.I)
 _CAST = re.compile(r"('(?:[^']|'')*')::[a-z_]+")
 
 
@@ -288,6 +294,8 @@ def parse_lit(engine: str, lit: str):
         return Decimal(s)
     if s.upper() in ("TRUE", "FALSE"):
         return s.upper() == "TRUE"
+    if engine == "postgres" and (m := _PG_BITS.fullmatch(s)):
+        return m.group(1)
     if m := _BITS.fullmatch(s):
         return Decimal(int(m.group(1), 2))
     if m := _HEX.fullmatch(s):
@@ -830,8 +838,9 @@ def run_unit(engine: str, work: Path, url: str, col: Col, n_rows: int, mode: str
         if check.returncode == 0 and p.returncode != 0:
             check = recheck(check, cfg, env, d)
         want = frozenset(["id", col.name.lower(), *(["nsn_ts"] if mode == "time_window" else [])])
-        expect = server_text_of(url, col, n_rows) if engine == "postgres" and col.delivery == "server_text" else None
-        if engine == "postgres" and col.delivery == "server_text" and expect is None:
+        graded_as_text = server_text_graded(engine, col.delivery)
+        expect = server_text_of(url, TABLE, col.name, n_rows) if graded_as_text else None
+        if graded_as_text and expect is None:
             out.append(Result(cell, DELIVERED, NOT_GRADED, "the source's own text of the seeded values could not be read"))
             continue
         r = grade_run(engine, cell, p, check, fid, d / f"out-{fmt}", fmt, col, n_rows, target, list(col.lits), want, expect=expect)
@@ -1115,6 +1124,7 @@ def self_test() -> None:
     assert parse_lit("mysql", "'a\\\\b'") == "a\\b" and parse_lit("mysql", "'l\\nf'") == "l\nf" and parse_lit("mysql", "'n\\0l'") == "n\0l"
     assert parse_lit("postgres", "'a\\b'") == "a\\b" and parse_lit("oracle", "TO_DATE('2024-02-29 13:14:15','YYYY-MM-DD HH24:MI:SS')") == "2024-02-29 13:14:15"
     assert parse_lit("postgres", "'\\x00ff01'::bytea") == b"\x00\xff\x01" and parse_lit("postgres", "'{\"n\":1}'::jsonb") == '{"n":1}' and parse_lit("mysql", "b'101'") == 5
+    assert parse_lit("postgres", "B'0101'") == "0101" and parse_lit("postgres", "B''") == "", "a PostgreSQL bit string is its text, a MySQL bit its number"
     harmed = Result("c", DELIVERED, NULLED, "1 non-NULL value delivered as NULL")
     assert integrity("c", _proc(0), harmed).klass == BLIND and integrity("c", _proc(3, "[RIVET_VALIDATE_CHECKSUM]"), harmed).klass == ""
     sib = {c.native: c for c in columns("mysql")}

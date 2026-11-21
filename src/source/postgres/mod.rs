@@ -195,7 +195,12 @@ fn declare_server_text(
     n: usize,
 ) -> Result<Option<postgres::Statement>> {
     let declared = fetch_statement(client, fetches, n)?.clone();
-    let Some(text_sql) = pg_server_text_query(built_sql, declared.columns()) else {
+    let columns: Vec<(&str, &postgres::types::Type)> = declared
+        .columns()
+        .iter()
+        .map(|c| (c.name(), c.type_()))
+        .collect();
+    let Some(text_sql) = pg_server_text_query(built_sql, &columns) else {
         return Ok(None);
     };
     client.batch_execute(&format!(

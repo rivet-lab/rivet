@@ -367,8 +367,8 @@ fn pg_text_render(t: &Type, expr: &str) -> String {
 }
 
 /// `sql` read through a projection that renders every server-text column as text, or `None` when no column is one.
-pub(super) fn pg_server_text_query(sql: &str, columns: &[postgres::Column]) -> Option<String> {
-    if !columns.iter().any(|c| pg_server_text(c.type_())) {
+pub(super) fn pg_server_text_query(sql: &str, columns: &[(&str, &Type)]) -> Option<String> {
+    if !columns.iter().any(|(_, t)| pg_server_text(t)) {
         return None;
     }
     let names = (0..columns.len())
@@ -378,14 +378,14 @@ pub(super) fn pg_server_text_query(sql: &str, columns: &[postgres::Column]) -> O
     let projection = columns
         .iter()
         .enumerate()
-        .map(|(i, c)| {
+        .map(|(i, (name, t))| {
             let cell = format!("_rivet_text._c{i}");
-            let value = if pg_server_text(c.type_()) {
-                pg_text_render(c.type_(), &cell)
+            let value = if pg_server_text(t) {
+                pg_text_render(t, &cell)
             } else {
                 cell
             };
-            let name = crate::sql::quote_ident(crate::config::SourceType::Postgres, c.name());
+            let name = crate::sql::quote_ident(crate::config::SourceType::Postgres, name);
             format!("{value} AS {name}")
         })
         .collect::<Vec<_>>()
@@ -1494,6 +1494,67 @@ mod cell_refusal_tests {
             e.to_string()
                 .contains("`n` is declared int4 by a `columns:` override"),
             "{e}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod server_text_projection_tests {
+    use super::{pg_server_text, pg_server_text_query, pg_text_render};
+    use postgres::types::Type;
+
+    /// A type with no Arrow mapping, and a list of one, is server text; a mapped type and a bare numeric are not.
+    #[test]
+    fn only_a_type_with_no_mapping_is_server_text() {
+        for t in [
+            Type::INET,
+            Type::CIDR,
+            Type::MACADDR,
+            Type::MONEY,
+            Type::INET_ARRAY,
+        ] {
+            assert!(pg_server_text(&t), "{t} is server text");
+        }
+        for t in [
+            Type::INT4,
+            Type::TEXT,
+            Type::NUMERIC,
+            Type::INT4_ARRAY,
+            Type::TEXT_ARRAY,
+        ] {
+            assert!(!pg_server_text(&t), "{t} is not server text");
+        }
+    }
+
+    /// An `inet` cell loses a host mask only, every other type is the server's `::text`.
+    #[test]
+    fn a_cell_is_rendered_as_its_text_and_an_inet_without_a_host_mask() {
+        assert_eq!(
+            pg_text_render(&Type::INET, "c"),
+            "CASE WHEN masklen(c) = CASE family(c) WHEN 4 THEN 32 ELSE 128 END THEN host(c) ELSE c::text END"
+        );
+        assert_eq!(pg_text_render(&Type::MONEY, "c"), "c::text");
+        assert_eq!(pg_text_render(&Type::CIDR, "c"), "c::text");
+    }
+
+    /// A query with no server-text column is left as it is; with one, only that column is rendered and the others pass through by name.
+    #[test]
+    fn the_projection_renders_the_server_text_columns_and_nothing_else() {
+        assert_eq!(
+            pg_server_text_query("SELECT 1", &[("a", &Type::INT4), ("b", &Type::TEXT)]),
+            None
+        );
+        assert_eq!(pg_server_text_query("SELECT 1", &[]), None);
+        assert_eq!(
+            pg_server_text_query(
+                "SELECT * FROM t",
+                &[("id", &Type::INT4), ("m\"x", &Type::MONEY)]
+            ),
+            Some(
+                "SELECT _rivet_text._c0 AS \"id\", _rivet_text._c1::text AS \"m\"\"x\" \
+                 FROM (SELECT * FROM t\n) AS _rivet_text (_c0, _c1)"
+                    .to_string()
+            )
         );
     }
 }
