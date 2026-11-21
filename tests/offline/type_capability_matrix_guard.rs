@@ -333,7 +333,6 @@ fn every_ledger_row_has_a_sample_and_a_real_delivery() {
 const KNOWN_DEFECTS: &[&str] = &[
     // ratchet-pin: type-known-defects (review 2027-02-01) strings
     "postgres:NUMERIC",
-    "postgres:MONEY",
     "postgres:INET",
     "postgres:CIDR",
     "postgres:NUMERIC[]",
