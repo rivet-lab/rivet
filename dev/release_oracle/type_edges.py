@@ -55,13 +55,14 @@ class Edge:
     lit: str
     x: Verdict = EXACT_V
     by_target: dict = field(default_factory=dict, hash=False, compare=False)
+    cdc: Verdict | None = None
 
     def verdict(self, target: str) -> Verdict:
         """The verdict at `target`: its own key, else the extract verdict."""
         return self.by_target.get(target, self.x)
 
     def verdicts(self) -> list[Verdict]:
-        """Every verdict the edge declares."""
+        """Every batch verdict the edge declares: the extract and every target; the CDC verdict is graded by its own matrix."""
         return [self.x, *self.by_target.values()]
 
     @property
@@ -79,11 +80,12 @@ def edge_of(item) -> Edge:
     """The edge a ledger `edges:` item spells: a literal string, or a mapping with `v:` and verdict keys."""
     if isinstance(item, str):
         return Edge(item)
-    unknown = set(item) - {"v", "x", *TARGETS}
+    unknown = set(item) - {"v", "x", "cdc", *TARGETS}
     if unknown or not isinstance(item.get("v"), str):
-        raise ValueError(f"edge {item!r}: keys are v, x and {TARGETS}")
+        raise ValueError(f"edge {item!r}: keys are v, x, cdc and {TARGETS}")
     return Edge(item["v"], parse_verdict(item["x"], EXTRACT) if "x" in item else EXACT_V,
-                {t: parse_verdict(item[t], LOAD) for t in TARGETS if t in item})
+                {t: parse_verdict(item[t], LOAD) for t in TARGETS if t in item},
+                parse_verdict(item["cdc"], EXTRACT) if "cdc" in item else None)
 
 
 def edges_of(row: dict) -> list[Edge]:
@@ -93,6 +95,24 @@ def edges_of(row: dict) -> list[Edge]:
     if len(set(lits)) != len(lits):
         raise ValueError(f"row {row.get('native_type')}: an edge is listed twice")
     return out
+
+
+def row_cdc(row: dict) -> Verdict:
+    """The CDC verdict of a delivering row: `exact` (as batch) or a coded refusal; a row without one, a known defect or a form is an error."""
+    if "cdc" not in row:
+        raise ValueError(f"row {row.get('native_type')}: no `cdc:` verdict")
+    v = parse_verdict(row["cdc"], EXTRACT)
+    if v.kind not in (EXACT, REFUSE) or v.defect:
+        raise ValueError(f"row {row.get('native_type')}: `cdc: {row['cdc']}` is exact or refuse:CODE; a form belongs to an edge, a known defect to known_defect")
+    return v
+
+
+def cdc_of(row: dict, edge: Edge) -> Verdict:
+    """What the change stream delivers for one edge: its own `cdc`, else the row's refusal, else what batch extracts."""
+    if edge.cdc is not None:
+        return edge.cdc
+    whole = row_cdc(row)
+    return whole if whole.kind == REFUSE else edge.x
 
 
 def row_verdict(row: dict) -> Verdict | None:
@@ -366,6 +386,17 @@ def self_test() -> None:
     assert canon(b"\x00\xff") == "0x00ff" and canon(None) == "NULL" and canon(-0.0) == "-0.0" and canon(float("nan")) == "NaN" and canon(True) == "true"
     long_a, long_b = "x" * 500, "x" * 499 + "y"
     assert canon(long_a).startswith("sha:500:") and canon(long_a) != canon(long_b)
+    assert edge_of({"v": "1", "cdc": "form:1.0"}).cdc == Verdict(FORM, text="1.0") and edge_of("1").cdc is None and not edge_of({"v": "1", "cdc": "refuse:RIVET_X"}).solo
+    plain, shut = {"native_type": "T", "cdc": "exact"}, {"native_type": "T", "cdc": "refuse:RIVET_X"}
+    assert row_cdc(plain) == EXACT_V and row_cdc(shut).code == "RIVET_X" and row_cdc(shut).stage == EXTRACT
+    assert cdc_of(plain, edge_of("1")) == EXACT_V and cdc_of(plain, edge_of({"v": "1", "x": "form:a"})).kind == FORM
+    assert cdc_of(shut, edge_of("1")).kind == REFUSE and cdc_of(shut, edge_of({"v": "1", "cdc": "null"})).kind == NULL
+    for bad_row in ({"native_type": "T"}, {"native_type": "T", "cdc": "form:a"}, {"native_type": "T", "cdc": "D!exact"}, {"native_type": "T", "cdc": "null"}, {"native_type": "T", "cdc": "ok"}):
+        try:
+            row_cdc(bad_row)
+        except ValueError:
+            continue
+        raise AssertionError(f"{bad_row!r} must not read as a CDC verdict")
     assert lits_of({"sample": ["1"], "edges": ["1", {"v": "2"}, "NULL"]}) == ["1", "2"]
     from bson import Int64
 

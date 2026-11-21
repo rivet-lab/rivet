@@ -170,6 +170,7 @@ fn row_violations(doc: &Value) -> Vec<String> {
                 ));
             }
             bad.extend(edge_violations(&at, r));
+            bad.extend(cdc_violations(&at, r));
             for key in r.as_mapping().into_iter().flat_map(|m| m.keys()) {
                 let key = key.as_str().unwrap_or("");
                 if !ROW_KEYS.contains(&key) {
@@ -352,7 +353,7 @@ const KNOWN_DEFECTS: &[&str] = &[
 ]; // ratchet-pin: end
 
 /// The fields a ledger row may carry.
-const ROW_KEYS: [&str; 11] = [
+const ROW_KEYS: [&str; 13] = [
     "native_type",
     "sample",
     "delivery",
@@ -364,10 +365,12 @@ const ROW_KEYS: [&str; 11] = [
     "clickhouse",
     "edges",
     "refuses",
+    "cdc",
+    "cdc_reason",
 ];
 
 /// The fields of an edge written as a mapping: its literal and a verdict per stage or target.
-const EDGE_KEYS: [&str; 5] = ["v", "x", "bigquery", "snowflake", "clickhouse"];
+const EDGE_KEYS: [&str; 6] = ["v", "x", "cdc", "bigquery", "snowflake", "clickhouse"];
 
 /// Every error in a row's `edges:` and `refuses:`: the shape only, the verdict grammar is `dev/release_oracle/type_edges.py`'s.
 fn edge_violations(at: &str, r: &Value) -> Vec<String> {
@@ -409,6 +412,61 @@ fn edge_violations(at: &str, r: &Value) -> Vec<String> {
             _ => bad.push(format!(
                 "{at}: edges[{i}] is a literal or a mapping with `v:`"
             )),
+        }
+    }
+    bad
+}
+
+/// Every error in a row's `cdc:` verdict: a delivering row has one, `exact` or a registered `refuse:CODE` with a dated `cdc_reason`; the grammar of the rest is `dev/release_oracle/type_edges.py`'s.
+fn cdc_violations(at: &str, r: &Value) -> Vec<String> {
+    let mut bad = Vec::new();
+    let reason = r["cdc_reason"].as_str();
+    if r["delivery"].is_null() {
+        if !r["cdc"].is_null() || reason.is_some() {
+            bad.push(format!(
+                "{at}: `cdc:` belongs to a row with `delivery`; a matrix-only row has no CDC parity"
+            ));
+        }
+        return bad;
+    }
+    let Some(verdict) = r["cdc"].as_str() else {
+        return vec![format!(
+            "{at}: a row with `delivery` needs `cdc:`, `exact` (as batch) or `refuse:CODE` with a dated `cdc_reason:`"
+        )];
+    };
+    match verdict.strip_prefix("refuse:") {
+        None if verdict == "exact" => {
+            if reason.is_some() {
+                bad.push(format!("{at}: `cdc_reason:` belongs beside `cdc: refuse:CODE`"));
+            }
+        }
+        None => bad.push(format!(
+            "{at}: `cdc: {verdict}` is `exact` or `refuse:CODE` (a form belongs to an edge, a known defect to known_defect)"
+        )),
+        Some(coded) => {
+            let code = coded.strip_suffix("@extract").unwrap_or(coded);
+            if !rivet::error::codes::ALL.iter().any(|c| c.id == code) {
+                bad.push(format!(
+                    "{at}: `cdc: {verdict}` names `{code}`, no registered code (rivet::error::codes::ALL)"
+                ));
+            }
+            let dated = reason.is_some_and(|w| {
+                let d = w.as_bytes();
+                d.len() > 11
+                    && d[..10].iter().enumerate().all(|(i, b)| {
+                        if i == 4 || i == 7 {
+                            *b == b'-'
+                        } else {
+                            b.is_ascii_digit()
+                        }
+                    })
+                    && d[10] == b':'
+            });
+            if !dated {
+                bad.push(format!(
+                    "{at}: `cdc: {verdict}` needs `cdc_reason: \"YYYY-MM-DD: why\"`"
+                ));
+            }
         }
     }
     bad
@@ -544,6 +602,84 @@ fn an_edge_listed_twice_or_with_an_unknown_key_is_refused() {
     for want in ["is listed twice", "`bigquerry:` is not an edge field"] {
         assert!(bad.iter().any(|b| b.contains(want)), "{want}: {bad:?}");
     }
+}
+
+#[test]
+fn a_delivering_row_without_a_cdc_verdict_is_refused() {
+    let mut doc = ledger();
+    row_mut(&mut doc, "postgres", "TEXT").remove("cdc").unwrap();
+    let bad = row_violations(&doc);
+    assert!(
+        bad.iter()
+            .any(|b| b.contains("rows[TEXT]") && b.contains("needs `cdc:`")),
+        "{bad:?}"
+    );
+}
+
+#[test]
+fn a_cdc_verdict_off_the_grammar_or_without_its_reason_is_refused() {
+    let coded = "refuse:RIVET_TYPE_UNSAFE_MAPPING";
+    for (verdict, reason, want) in [
+        ("form:x", None, "is `exact` or `refuse:CODE`"),
+        ("NAMED!exact", None, "is `exact` or `refuse:CODE`"),
+        ("exact ", None, "is `exact` or `refuse:CODE`"),
+        (
+            "refuse:RIVET_NO_SUCH_CODE",
+            Some("2026-11-21: why"),
+            "no registered code",
+        ),
+        (
+            "refuse:UNCODED",
+            Some("2026-11-21: why"),
+            "no registered code",
+        ),
+        (coded, None, "needs `cdc_reason:"),
+        (coded, Some("why, undated"), "needs `cdc_reason:"),
+        (coded, Some("2026-11-21 why"), "needs `cdc_reason:"),
+        (
+            "exact",
+            Some("2026-11-21: why"),
+            "belongs beside `cdc: refuse:CODE`",
+        ),
+    ] {
+        let mut doc = ledger();
+        let row = row_mut(&mut doc, "postgres", "TEXT");
+        row.insert("cdc".into(), verdict.into());
+        if let Some(r) = reason {
+            row.insert("cdc_reason".into(), r.into());
+        }
+        let bad = row_violations(&doc);
+        assert!(
+            bad.iter()
+                .any(|b| b.contains("rows[TEXT]") && b.contains(want)),
+            "{verdict} / {reason:?}: {bad:?}"
+        );
+    }
+    let mut doc = ledger();
+    let row = row_mut(&mut doc, "postgres", "TEXT");
+    row.insert("cdc".into(), coded.into());
+    row.insert(
+        "cdc_reason".into(),
+        "2026-11-21: the stand cannot decode it".into(),
+    );
+    assert!(
+        !row_violations(&doc)
+            .iter()
+            .any(|b| b.contains("rows[TEXT]")),
+        "a registered code with a dated reason is a CDC verdict"
+    );
+}
+
+#[test]
+fn a_matrix_only_row_with_a_cdc_verdict_is_refused() {
+    let mut doc = ledger();
+    row_mut(&mut doc, "mongo", "int").insert("cdc".into(), "exact".into());
+    let bad = row_violations(&doc);
+    assert!(
+        bad.iter()
+            .any(|b| b.contains("rows[int]") && b.contains("matrix-only row has no CDC parity")),
+        "{bad:?}"
+    );
 }
 
 #[test]

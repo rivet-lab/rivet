@@ -191,6 +191,10 @@ named `uid_*` → probably UUID") — guessing risks misclassifying a non-UUID
 varchar and silently producing wrong-shape Parquet. Operators who want UUID
 semantics on a MySQL column add the override explicitly.
 
+## The change stream per type
+
+`docs/type-capability-matrix.yaml` carries one CDC verdict per delivering row, beside its batch verdicts: `cdc: exact` (the change stream delivers what batch delivers, in the same Arrow type and value) or `cdc: refuse:CODE` with a dated `cdc_reason` (rivet stops by that registered code, never silently). A row without a verdict, a form or a known defect spelled there, or an unregistered code fails `type_capability_matrix_guard`. The release oracle's change-stream grid (`property_no_silent_null_cdc`) grades each column against it: an `exact` column that stops, or a `refuse` column that delivers or stops by another code, is `CDC_VERDICT_DIFFERS`; `live_cdc_type_parity` reads the same rows and compares batch, snapshot, stream and the ClickHouse load value for value.
+
 ## Test commands
 
 ```bash
