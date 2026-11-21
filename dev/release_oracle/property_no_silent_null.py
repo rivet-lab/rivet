@@ -142,7 +142,7 @@ FLOAT8_NATIVE = {"mysql": r"DOUBLE(\(\d+,\d+\))?( UNSIGNED)?", "mssql": r"FLOAT(
 def family(native: str, delivery: str, engine: str = "") -> str:
     """The value family a source column belongs to: what its values can be compared as."""
     n = native.upper()
-    if re.fullmatch(r"(TINY|SMALL|MEDIUM|BIG)?INT(EGER)?( UNSIGNED)?|YEAR|NUMBER\(\d+\)", n):
+    if re.fullmatch(r"(TINY|SMALL|MEDIUM|BIG)?INT(EGER)?( UNSIGNED)?|YEAR|OID|NUMBER\(\d+\)", n):
         return "int"
     if re.fullmatch(r"(N|VAR|NVAR)?CHAR2?\(.*\)|N?TEXT|(NVAR|VAR)CHAR2?(\(.*\))?", n):
         return "text"

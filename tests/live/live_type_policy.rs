@@ -183,3 +183,232 @@ fn check_strict_and_run_strict_refuse_the_same_config_with_the_same_code() {
     }
     assert_eq!(parquet_parts(&out), 0, "the lax run wrote a part");
 }
+
+/// A PostgreSQL json[], jsonb[], interval[], oid[] and enum[] column is delivered as a list of its elements, NULL elements kept.
+#[test]
+#[ignore = "live: requires docker compose postgres + duckdb"]
+fn a_postgres_json_interval_oid_enum_array_is_delivered_as_a_list_of_its_elements() {
+    require_alive(LiveService::Postgres);
+    let table = unique_name("tp_arr_wire");
+    let ty = format!("{table}_st");
+    let mut c = pg_connect();
+    c.batch_execute(&format!(
+        "CREATE TYPE {ty} AS ENUM ('active', 'pending');
+         CREATE TABLE {table} (id INT PRIMARY KEY, a_json JSON[], a_jsonb JSONB[], a_interval INTERVAL[], a_oid OID[], a_enum {ty}[]);
+         INSERT INTO {table} VALUES (1, ARRAY['{{\"a\":1}}'::json, NULL], ARRAY['{{\"a\":1}}'::jsonb, NULL],
+            ARRAY['1 day'::interval, '2 hours'::interval, NULL], ARRAY[1::oid, 4294967295::oid, NULL],
+            ARRAY['active'::{ty}, 'pending', NULL])"
+    ))
+    .unwrap();
+    let _guard = PgTable::adopt(table.clone());
+    let d = tempfile::tempdir().unwrap();
+    let out = d.path().join("out");
+    let run = Rig::pg_batch(&table)
+        .dest_path(out.clone())
+        .no_oracle(
+            "the cell reads every list element back through DuckDB; the matrix grades these types",
+        )
+        .run_args(&[]);
+    c.batch_execute(&format!("DROP TABLE {table}; DROP TYPE {ty}"))
+        .unwrap();
+    let err = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{err}");
+    let filter = "a_json[1] = '{\"a\":1}' AND len(a_json) = 2 AND a_json[2] IS NULL \
+        AND a_jsonb[1] = '{\"a\": 1}' AND len(a_jsonb) = 2 \
+        AND a_interval[1] = 'P1D' AND a_interval[2] = 'PT2H' AND len(a_interval) = 3 \
+        AND a_oid[1] = 1 AND a_oid[2] = 4294967295 AND len(a_oid) = 3 \
+        AND a_enum[1] = 'active' AND a_enum[2] = 'pending' AND len(a_enum) = 3";
+    assert_eq!(duckdb_dir_scalar(&out, "count(*)", Some(filter)), 1);
+}
+
+/// A two-dimensional jsonb[] keeps its refusal naming the multi-dimensional cause, the column and the cast to text.
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn a_postgres_two_dimensional_jsonb_array_keeps_the_multi_dimensional_refusal() {
+    require_alive(LiveService::Postgres);
+    let table = unique_name("tp_arr_2d");
+    let mut c = pg_connect();
+    c.batch_execute(&format!(
+        "CREATE TABLE {table} (id INT PRIMARY KEY, grid JSONB[]);
+         INSERT INTO {table} VALUES (1, ARRAY[ARRAY['1'::jsonb,'2'::jsonb],ARRAY['3'::jsonb,'4'::jsonb]])"
+    ))
+    .unwrap();
+    let _guard = PgTable::adopt(table.clone());
+    let d = tempfile::tempdir().unwrap();
+    let out = d.path().join("out");
+    let run = Rig::pg_batch(&table).dest_path(out.clone()).run_args(&[]);
+    let err = String::from_utf8_lossy(&run.stderr).to_lowercase();
+    assert!(!run.status.success(), "{err}");
+    assert!(
+        err.contains("multi-dimensional") && err.contains("grid") && err.contains("::text"),
+        "{err}"
+    );
+    assert_eq!(parquet_parts(&out), 0, "a refused run wrote a part");
+}
+
+/// An Oracle table of `columns` with `rows` inserted, exported by `query` (the whole table when `None`) under `out`.
+fn oracle_export(
+    columns: &str,
+    rows: &[&str],
+    query: Option<&str>,
+    out: &std::path::Path,
+) -> (std::process::Output, OracleTable) {
+    let t = OracleTable::create("tp_wire", columns);
+    for r in rows {
+        ora_exec(&format!("INSERT INTO {} VALUES ({r})", t.name()));
+    }
+    let mut rig = Rig::oracle_batch(t.name()).dest_path(out.to_path_buf());
+    if let Some(q) = query {
+        rig = rig.query(&q.replace("{t}", t.name()));
+    }
+    (rig.run_args(&[]), t)
+}
+
+/// An Oracle NUMBER infinity or an exact 1E125 is refused with a code, the column and the `TO_CHAR` remedy, which then delivers the server's own text; finite values are delivered as before.
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn an_oracle_number_infinity_is_refused_by_code_and_to_char_delivers_the_server_text() {
+    require_alive(LiveService::Oracle);
+    let d = tempfile::tempdir().unwrap();
+    let cols = "id NUMBER(10) PRIMARY KEY, v FLOAT(10), n NUMBER";
+    let inf = "1, 9.9999999999999999999999999999999999999E125, 1";
+    let exact = "2, 1, 1E125";
+    let fin = "3, 1.5, 123.456";
+    for (n, row) in [inf, exact].into_iter().enumerate() {
+        let out = d.path().join(format!("refused{n}"));
+        let (run, _t) = oracle_export(cols, &[row], Some("SELECT id, v, n FROM {t}"), &out);
+        let err = String::from_utf8_lossy(&run.stderr);
+        assert_eq!(run.status.code(), Some(5), "{err}");
+        assert!(err.contains("RIVET_SOURCE_VALUE_UNREPRESENTABLE"), "{err}");
+        let col = if n == 0 { "V" } else { "N" };
+        assert!(err.contains(&format!("column `{col}`")), "{err}");
+        assert!(err.contains(&format!("`TO_CHAR({col}) AS {col}`")), "{err}");
+        assert_eq!(parquet_parts(&out), 0, "a refused run wrote a part");
+    }
+    let out = d.path().join("remedy");
+    let (run, _t) = oracle_export(
+        cols,
+        &[inf, exact.replace("2,", "4,").as_str(), fin],
+        Some("SELECT id, TO_CHAR(v) AS v, TO_CHAR(n) AS n FROM {t}"),
+        &out,
+    );
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let filter = "(\"ID\" = 1 AND \"V\" = '~') OR (\"ID\" = 4 AND \"N\" LIKE '1.0%E+125') OR (\"ID\" = 3 AND \"V\" = '1.5' AND \"N\" = '123.456')";
+    assert_eq!(duckdb_dir_scalar(&out, "count(*)", Some(filter)), 3);
+}
+
+/// An Oracle NUMBER infinity read through a declared `float64` column is refused by code, and a finite value in the same column is delivered.
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn an_oracle_number_infinity_in_a_float64_override_is_refused_and_finite_is_delivered() {
+    require_alive(LiveService::Oracle);
+    let d = tempfile::tempdir().unwrap();
+    let run_with = |tag: &str, row: &str| {
+        let t = OracleTable::create("tp_f64", "id NUMBER(10) PRIMARY KEY, n FLOAT(10)");
+        ora_exec(&format!("INSERT INTO {} VALUES ({row})", t.name()));
+        let out = d.path().join(tag);
+        let run = Rig::oracle_batch(t.name())
+            .no_oracle("the column carries a declared `float64` override whose own rendering is this test's subject")
+            .export_line("columns: {N: float64}")
+            .dest_path(out.clone())
+            .run_args(&[]);
+        (run, out)
+    };
+    let (run, out) = run_with("inf", "1, 9.9999999999999999999999999999999999999E125");
+    let err = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(run.status.code(), Some(5), "{err}");
+    assert!(err.contains("RIVET_SOURCE_VALUE_UNREPRESENTABLE"), "{err}");
+    assert!(err.contains("column `N`"), "{err}");
+    assert_eq!(parquet_parts(&out), 0, "a refused run wrote a part");
+    let (run, out) = run_with("fin", "2, 123.5");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(parquet_parts(&out), 1);
+}
+
+/// An Oracle INTERVAL DAY TO SECOND with a sub-microsecond fraction is refused with a code, the column and the `TO_CHAR` remedy, which delivers the server's text.
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn an_oracle_interval_with_nanoseconds_is_refused_by_code_and_to_char_delivers_the_text() {
+    require_alive(LiveService::Oracle);
+    let d = tempfile::tempdir().unwrap();
+    let cols = "id NUMBER(10) PRIMARY KEY, iv INTERVAL DAY(9) TO SECOND(9)";
+    let ns = "1, INTERVAL '1 02:03:04.000000005' DAY(9) TO SECOND(9)";
+    let out = d.path().join("refused");
+    let (run, _t) = oracle_export(cols, &[ns], None, &out);
+    let err = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(run.status.code(), Some(5), "{err}");
+    assert!(err.contains("RIVET_SOURCE_VALUE_UNREPRESENTABLE"), "{err}");
+    assert!(
+        err.contains("column `IV`") && err.contains("(5 ns)"),
+        "{err}"
+    );
+    assert!(err.contains("`TO_CHAR(IV) AS IV`"), "{err}");
+    assert_eq!(parquet_parts(&out), 0, "a refused run wrote a part");
+    let out = d.path().join("remedy");
+    let (run, _t) = oracle_export(
+        cols,
+        &[ns],
+        Some("SELECT id, TO_CHAR(iv) AS iv FROM {t}"),
+        &out,
+    );
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        duckdb_dir_scalar(
+            &out,
+            "count(*)",
+            Some("\"IV\" = '+000000001 02:03:04.000000005'")
+        ),
+        1
+    );
+}
+
+/// Finite Oracle NUMBER and FLOAT values (also the largest 38-digit one) and a microsecond-exact INTERVAL DAY TO SECOND are delivered unchanged.
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn finite_oracle_numbers_and_a_microsecond_interval_are_delivered_unchanged() {
+    require_alive(LiveService::Oracle);
+    let d = tempfile::tempdir().unwrap();
+    let cols = "id NUMBER(10) PRIMARY KEY, v FLOAT(10), n NUMBER";
+    let fin = "3, 1.5, 123.456";
+    let out = d.path().join("finite");
+    let (run, _t) = oracle_export(
+        cols,
+        &[
+            fin,
+            "5, 1.5E124, 9.9999999999999999999999999999999999999E125",
+        ],
+        None,
+        &out,
+    );
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(duckdb_dir_scalar(&out, "count(*)", None), 2);
+    let cols = "id NUMBER(10) PRIMARY KEY, iv INTERVAL DAY(9) TO SECOND(9)";
+    let us = "2, INTERVAL '1 02:03:04.123456000' DAY(9) TO SECOND(9)";
+    let out = d.path().join("micro");
+    let (run, _t) = oracle_export(cols, &[us], None, &out);
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        duckdb_dir_scalar(&out, "count(*)", Some("\"IV\" = 'P1DT2H3M4.123456S'")),
+        1
+    );
+}
