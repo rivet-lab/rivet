@@ -1739,9 +1739,8 @@ fn rewritten_type_refusal(relation: &str, columns: &[String]) -> String {
     format!(
         "pg cdc: {relation}: column(s) [{}] are bit strings, and `test_decoding` prints a bit \
          string as the literal B'110' where the server's text is 110. Delivering it would write a \
-         value the batch run never writes (batch refuses these columns with \
-         RIVET_TYPE_UNSAFE_MAPPING, and the pgoutput reader refuses them too), so rivet stops \
-         instead, before it writes anything. Change the column to text: ALTER TABLE {relation} \
+         value the batch run never writes (batch delivers a bit string as the server's text \
+         110), so rivet stops instead, before it writes anything. Change the column to text: ALTER TABLE {relation} \
          ALTER COLUMN <column> TYPE text USING <column>::text; changes already in the slot keep \
          the bit type and would refuse again, so drop the export's slot (cdc.slot) on the \
          source, SELECT pg_drop_replication_slot('<slot>'), and then re-baseline the stream, \
@@ -4095,6 +4094,7 @@ mod tests {
         let said = rewritten_type_refusal("public.bits", &["flags (bit)".to_string()]);
         for part in [
             "pg cdc: public.bits: column(s) [flags (bit)] are bit strings",
+            "batch delivers a bit string as the server's text 110",
             "ALTER TABLE public.bits ALTER COLUMN <column> TYPE text USING <column>::text",
             "SELECT pg_drop_replication_slot('<slot>')",
             crate::source::cdc::checkpoint_identity::RECOVER,

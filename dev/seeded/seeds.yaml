@@ -6118,7 +6118,7 @@ seeds:
         na: "Oracle LogMiner rows are decoded through typed column lists; there is no text line to cut"
 
   - name: pg-bit-literal-delivered-as-server-text
-    class: "the PostgreSQL CDC reader delivers a bit or bit varying column as the decoder's literal `B'110'` where the server's text is `110`, with exit 0 (batch refuses these columns with RIVET_TYPE_UNSAFE_MAPPING)"
+    class: "the PostgreSQL CDC reader delivers a bit or bit varying column as the decoder's literal `B'110'` where the server's text is `110`, with exit 0 (batch delivers these columns as the server's text)"
     history: "found 2026-11-10 hunting the untrusted parse surface (axis 5, P2); RED on main: the run exits 0 and delivers B'110', rig oracle VALUES differing column(s) flags, vb"
     scope: source
     engines:
@@ -6877,7 +6877,7 @@ seeds:
       mssql:
         cells: ["lib:money_extremes_are_delivered_exact", money_and_smallmoney_keep_every_digit_over_their_whole_range, mssql_money_values_survive_batch_and_cdc]
       postgres:
-        na: "PostgreSQL batch refuses a money column as an unmapped type and its CDC carries the server text, so neither reaches the SQL Server money decode (PG_UNMAPPED_TYPE in the type matrix)"
+        na: "PostgreSQL batch and CDC both deliver a money column as the server's text, so neither reaches the SQL Server money decode"
       mysql:
         na: "MySQL has no MONEY type, so no MySQL column reaches the SQL Server money decode"
       oracle:
@@ -6916,3 +6916,45 @@ seeds:
         na: "the seed edits the orchestrated pre-write check (refuse_parts_outside_ranges), which gives ClickHouse no ranges: its own loader reads its footers (checked_part_rows)"
       snowflake:
         na: "the seed edits the orchestrated pre-write check (refuse_parts_outside_ranges), which gives Snowflake no ranges: Snowflake holds every year and delivers it as a form"
+
+  - name: pg-unmapped-type-refused
+    class: "a PostgreSQL type with no Arrow mapping (network, bit, money, geometric, range, tsvector, OID alias, composite, extension type) is refused by a batch run with RIVET_TYPE_UNSAFE_MAPPING where it is delivered as the server's text"
+    history: "owner decision 2026-11-21 (DEFECT_PG_UNMAPPED_TYPE); RED on main 2026-11-21 by live_pg_server_text: every mode exits 5 over the first unmapped column"
+    scope: source
+    engines:
+      postgres:
+        switch: pg-unmapped-type-refused
+        cells:
+          - a_table_of_every_unmapped_type_is_delivered_as_server_text_full_postgres
+          - a_table_of_every_unmapped_type_is_delivered_as_server_text_keyset_postgres
+          - a_table_of_every_unmapped_type_is_delivered_as_server_text_range_postgres
+          - a_table_of_every_unmapped_type_is_delivered_as_server_text_incremental_postgres
+      mysql:
+        na: "the seed edits the PostgreSQL column classification (pg_server_text); the other sources map their own types in their own tables"
+      mssql:
+        na: "the seed edits the PostgreSQL column classification (pg_server_text); the other sources map their own types in their own tables"
+      mongo:
+        na: "the seed edits the PostgreSQL column classification (pg_server_text); the other sources map their own types in their own tables"
+      oracle:
+        na: "the seed edits the PostgreSQL column classification (pg_server_text); the other sources map their own types in their own tables"
+
+  - name: pg-inet-host-text-gains-a-mask
+    class: "a PostgreSQL inet column holding a host address is delivered as `10.1.2.3/32` where the server's own text is `10.1.2.3`, because inet cast to text appends the full mask"
+    history: "found 2026-11-21 while writing live_pg_server_text: the server's inet::text is not inet_out; RED from this switch by the same cells"
+    scope: source
+    engines:
+      postgres:
+        switch: pg-inet-host-text-gains-a-mask
+        cells:
+          - a_table_of_every_unmapped_type_is_delivered_as_server_text_full_postgres
+          - a_table_of_every_unmapped_type_is_delivered_as_server_text_keyset_postgres
+          - a_table_of_every_unmapped_type_is_delivered_as_server_text_range_postgres
+          - a_table_of_every_unmapped_type_is_delivered_as_server_text_incremental_postgres
+      mysql:
+        na: "the seed edits the PostgreSQL text projection of an inet column; the other sources have no inet type"
+      mssql:
+        na: "the seed edits the PostgreSQL text projection of an inet column; the other sources have no inet type"
+      mongo:
+        na: "the seed edits the PostgreSQL text projection of an inet column; the other sources have no inet type"
+      oracle:
+        na: "the seed edits the PostgreSQL text projection of an inet column; the other sources have no inet type"

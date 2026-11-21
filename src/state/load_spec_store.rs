@@ -21,12 +21,16 @@ pub struct LoadSpecColumn {
 }
 
 impl LoadSpecColumn {
-    /// The recorded form of a resolved mapping.
+    /// The recorded form of a resolved mapping; a text-delivered column records the text type.
     pub fn from_mapping(m: &TypeMapping) -> Self {
+        let rivet_type = match m.delivery {
+            crate::types::Delivery::Text(_) => RivetType::String,
+            crate::types::Delivery::Native => m.rivet_type.clone(),
+        };
         Self {
             name: m.column_name.clone(),
             source_type: m.source_native_type.clone(),
-            rivet_type: m.rivet_type.clone(),
+            rivet_type,
             fidelity: m.fidelity,
             nullable: m.nullable,
             warnings: m.warnings.clone(),
@@ -741,6 +745,27 @@ mod tests {
         assert_eq!(
             LoadSpecColumn::from_mapping(&m),
             col("id", RivetType::Int64)
+        );
+    }
+    #[test]
+    fn a_server_text_column_is_recorded_as_text() {
+        let mapping = TypeMapping {
+            column_name: "c".into(),
+            source_native_type: "money".into(),
+            rivet_type: RivetType::Unsupported {
+                native_type: "money".into(),
+                reason: "no Arrow mapping".into(),
+            },
+            arrow_type: Some(arrow::datatypes::DataType::Utf8),
+            fidelity: TypeFidelity::LogicalString,
+            nullable: true,
+            warnings: Vec::new(),
+            delivery: crate::types::Delivery::Text(crate::types::TextForm::ServerText),
+            refusal: None,
+        };
+        assert_eq!(
+            LoadSpecColumn::from_mapping(&mapping).rivet_type,
+            RivetType::String
         );
     }
     /// One export name read from two sources keeps a spec and a key each.

@@ -594,3 +594,12 @@ scenarios:
     keyset:         { test: mongo_batch_flat_id_is_labelled_by_the_bson_types_the_collection_holds }
     mongo_parallel: { test: mongo_batch_flat_id_is_labelled_by_the_bson_types_the_collection_holds }
     cdc:            { test: mongo_cdc_flat_id_is_labelled_by_the_bson_types_the_collection_holds }
+
+  - id: pg_unmapped_type_server_text
+    what: "a PostgreSQL column of a type with no Arrow mapping is delivered as the server's text (one seam: pg_run_export re-declares the cursor over a text projection when pg_server_text names a column)"
+    single:         { test: a_table_of_every_unmapped_type_is_delivered_as_server_text_full_postgres }
+    chunked:        { test: a_table_of_every_unmapped_type_is_delivered_as_server_text_range_postgres }
+    chunked_checkpoint: { na: "shared seam (pg_run_export, below the dispatch)" }
+    keyset:         { test: a_table_of_every_unmapped_type_is_delivered_as_server_text_keyset_postgres }
+    mongo_parallel: { na: "a Mongo export has no PostgreSQL column type" }
+    cdc:            { na: "CDC reads the decoder's text and plans its own ServerText columns (plan_cdc_delivery); bit and bit varying stay refused there" }
