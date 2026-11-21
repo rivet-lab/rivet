@@ -24,9 +24,6 @@ const SMALLMONEY: &[&str] = &[
     "12.34",
 ];
 
-const NO_ORACLE: &str =
-    "the subject is MONEY exactness, graded below by the server's own CONVERT text";
-
 /// A table `id, v` holding `values` then a NULL row; returns the guard.
 fn table_of(ty: &str, values: &[&str]) -> (String, MssqlTable) {
     let table = unique_name("mssql_money");
@@ -61,11 +58,11 @@ fn server_rendering(table: &str) -> Vec<String> {
 /// A money value of 9e11 or more is delivered exact, as are the type's extremes and the NULL row.
 #[test]
 #[ignore = "live: requires docker compose mssql"]
-fn money_and_smallmoney_are_delivered_exact_over_their_whole_range() {
+fn money_and_smallmoney_keep_every_digit_over_their_whole_range() {
     require_alive(LiveService::Mssql);
     for (ty, values) in [("MONEY", MONEY), ("SMALLMONEY", SMALLMONEY)] {
         let (table, _guard) = table_of(ty, values);
-        let rig = Rig::mssql_batch(&table).no_oracle(NO_ORACLE);
+        let rig = Rig::mssql_batch(&table);
         rig.run_ok();
         let got = delivered(&rig);
         assert_eq!(got, server_rendering(&table), "{ty}");
@@ -86,10 +83,10 @@ const NEAR: &[&str] = &[
 /// A MONEY value inside the old f64-exact range under the default mapping is delivered as it was before.
 #[test]
 #[ignore = "live: requires docker compose mssql"]
-fn money_inside_the_old_exact_range_is_delivered_as_before() {
+fn money_inside_the_old_range_keeps_its_digits() {
     require_alive(LiveService::Mssql);
     let (table, _guard) = table_of("MONEY", NEAR);
-    let rig = Rig::mssql_batch(&table).no_oracle(NO_ORACLE);
+    let rig = Rig::mssql_batch(&table);
     rig.run_ok();
     assert_eq!(delivered(&rig), server_rendering(&table));
 }
@@ -100,9 +97,7 @@ fn money_inside_the_old_exact_range_is_delivered_as_before() {
 fn a_float64_override_over_money_delivers_the_nearest_f64() {
     require_alive(LiveService::Mssql);
     let (table, _guard) = table_of("MONEY", NEAR);
-    let rig = Rig::mssql_batch(&table)
-        .no_oracle(NO_ORACLE)
-        .export_line("columns: {v: float64}");
+    let rig = Rig::mssql_batch(&table).export_line("columns: {v: float64}");
     rig.run_ok();
     let want: Vec<Option<f64>> = server_rendering(&table)
         .iter()
@@ -117,9 +112,7 @@ fn a_float64_override_over_money_delivers_the_nearest_f64() {
 fn a_narrower_decimal_override_over_money_delivers_values_that_fit() {
     require_alive(LiveService::Mssql);
     let (table, _guard) = table_of("MONEY", &["900719925474.09", "-5.5", "0", "12.34"]);
-    let rig = Rig::mssql_batch(&table)
-        .no_oracle(NO_ORACLE)
-        .export_line("columns: {v: \"decimal(19,2)\"}");
+    let rig = Rig::mssql_batch(&table).export_line("columns: {v: \"decimal(19,2)\"}");
     rig.run_ok();
     let want = sqlcmd_lines(
         "rivet-mssql-1",
@@ -157,8 +150,7 @@ fn a_money_cursor_column_advances_an_incremental_run() {
     let _guard = MssqlTable::adopt(table.clone());
     let rig = Rig::mssql_batch(&table)
         .mode("incremental")
-        .export_line("cursor_column: v")
-        .no_oracle(NO_ORACLE);
+        .export_line("cursor_column: v");
     rig.run_ok();
     let first = delivered(&rig);
     assert_eq!(first.len(), 3);
@@ -195,7 +187,7 @@ fn a_sql_variant_holding_money_is_delivered_as_the_servers_text() {
          INSERT INTO dbo.{table} VALUES (1, CAST('123.4567' AS MONEY)), (2, CAST('922337203685477.5807' AS MONEY)), (3, CAST('-0.0001' AS SMALLMONEY)), (4, NULL)"
     ));
     let _guard = MssqlTable::adopt(table.clone());
-    let rig = Rig::mssql_batch(&table).no_oracle(NO_ORACLE);
+    let rig = Rig::mssql_batch(&table);
     rig.run_ok();
     let got: std::collections::BTreeSet<String> = dir_parquet_distinct_strings(&rig.out_dir(), "v")
         .into_iter()

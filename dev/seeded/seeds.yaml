@@ -6830,7 +6830,7 @@ seeds:
     switch: mssql-money-decoded-as-f64
     engines:
       mssql:
-        cells: ["lib:money_extremes_are_delivered_exact", money_and_smallmoney_are_delivered_exact_over_their_whole_range, mssql_money_values_survive_batch_and_cdc]
+        cells: ["lib:money_extremes_are_delivered_exact", money_and_smallmoney_keep_every_digit_over_their_whole_range, mssql_money_values_survive_batch_and_cdc]
       postgres:
         na: "PostgreSQL batch refuses a money column as an unmapped type and its CDC carries the server text, so neither reaches the SQL Server money decode (PG_UNMAPPED_TYPE in the type matrix)"
       mysql:
