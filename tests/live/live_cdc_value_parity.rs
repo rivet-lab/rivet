@@ -395,14 +395,27 @@ fn pg_batch_and_stream_differences(label: &str, cols: &[Col]) -> Vec<String> {
         .export_named(&format!("{table}_batch"))
         .source_url(POSTGRES_CDC_URL);
     let want = source_text(POSTGRES_CDC_URL, &table, cols);
+    modes_against_source(cols, &want, &batch, &cdc, snapshot, |_| {})
+}
+
+/// The differences of a batch run and a stream run against the source's text; `settle` is called with the change rows to wait for before the stream reads.
+fn modes_against_source(
+    cols: &[Col],
+    want: &[Vec<Option<String>>],
+    batch: &Rig,
+    cdc: &Rig,
+    snapshot: std::process::Output,
+    settle: impl Fn(i64),
+) -> Vec<String> {
     let mut bad = Vec::new();
     let out = batch.run();
     if out.status.success() {
         let got = delivered(&batch.out_dir(), cols, None);
-        bad.extend(differences("batch", cols, &want, &got));
+        bad.extend(differences("batch", cols, want, &got));
     } else {
         bad.push(format!("batch refused: {}", refusal_line(&out.stderr)));
     }
+    settle(want.len() as i64);
     let out = if snapshot.status.success() {
         cdc.run()
     } else {
@@ -410,7 +423,7 @@ fn pg_batch_and_stream_differences(label: &str, cols: &[Col]) -> Vec<String> {
     };
     if out.status.success() {
         let got = delivered(&cdc.out_dir(), cols, Some(&["insert"]));
-        bad.extend(differences("cdc", cols, &want, &got));
+        bad.extend(differences("cdc", cols, want, &got));
     } else {
         bad.push(format!("cdc refused: {}", refusal_line(&out.stderr)));
     }
@@ -476,6 +489,136 @@ fn postgres_batch_and_cdc_deliver_float_specials_alike() {
     assert_alike(
         "postgres float specials",
         per_column("vp_float", &pg_floats()),
+    );
+}
+
+/// The float columns MySQL and SQL Server can hold: finite extremes and negative zero.
+fn sql_floats(f8: &str, f4: &str, tiny8: &str, tiny4: &str, max4: &str) -> Vec<Col> {
+    vec![
+        col(
+            "f8",
+            f8,
+            Kind::F64,
+            &["1.7976931348623157e308", "-0e0", tiny8, "-1.5e300"],
+        ),
+        col("f4", f4, Kind::F32, &[max4, "-0e0", tiny4, "-1.5e30"]),
+    ]
+}
+
+/// The non-finite float spellings each engine is asked to store.
+const NON_FINITE: [&str; 4] = ["'Infinity'", "'-Infinity'", "'NaN'", "1e309"];
+
+/// The text of a float source column holds a finite number.
+fn assert_finite_source(engine: &str, want: &[Vec<Option<String>>]) {
+    for row in want {
+        for cell in row.iter().skip(1).flatten() {
+            assert!(
+                cell.parse::<f64>().is_ok_and(f64::is_finite),
+                "{engine} stored a non-finite float `{cell}`"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn mysql_batch_and_cdc_deliver_float_extremes_alike_and_the_engine_stores_no_infinity() {
+    use mysql::prelude::Queryable;
+    let cols = sql_floats(
+        "double",
+        "float",
+        "2.2250738585072014e-308",
+        "1.17549435e-38",
+        "3.4028235e38",
+    );
+    let table = unique_name("vp_my_float");
+    let mut conn = cdc_conn();
+    conn.query_drop(format!(
+        "CREATE TABLE {table} ({}) ENGINE=InnoDB",
+        ddl_of(&cols)
+    ))
+    .unwrap();
+    let _t = MysqlCdcTable(table.clone());
+    let cdc = Rig::mysql_cdc(&table).cdc_line("initial: snapshot");
+    let snapshot = cdc.run();
+    for (i, lit) in NON_FINITE.iter().enumerate() {
+        let attempt = conn.query_drop(format!(
+            "INSERT INTO {table} (id, f8, f4) VALUES ({}, {lit}, {lit})",
+            100 + i
+        ));
+        assert!(attempt.is_err(), "mysql accepted {lit} into a float");
+    }
+    conn.query_drop(insert_of(&table, &cols)).unwrap();
+    let batch = Rig::mysql_batch(&table)
+        .export_named(&format!("{table}_batch"))
+        .source_url(MYSQL_CDC_URL);
+    let want: Vec<Vec<Option<String>>> = conn
+        .query_map(
+            format!("SELECT id, CAST(f8 AS CHAR), CAST(f4 AS CHAR) FROM {table} ORDER BY id"),
+            |(id, a, b): (i64, Option<String>, Option<String>)| vec![Some(id.to_string()), a, b],
+        )
+        .unwrap();
+    assert_finite_source("mysql", &want);
+    assert_alike(
+        "mysql floats",
+        modes_against_source(&cols, &want, &batch, &cdc, snapshot, |_| {}),
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql with SQL Server Agent + CDC"]
+fn mssql_batch_and_cdc_deliver_float_extremes_alike_and_the_engine_stores_no_infinity() {
+    let _serial = cross_process_serial("mssql_cdc");
+    let cols = sql_floats(
+        "float",
+        "real",
+        "2.2250738585072014e-308",
+        "1.17549435e-38",
+        "3.4028235e38",
+    );
+    let table = unique_name("vp_ms_float");
+    let ci = format!("dbo_{table}");
+    let ddl = ddl_of(&cols).replace("id BIGINT", "id INT");
+    mssql_cdc_exec(&format!("CREATE TABLE dbo.{table} ({ddl})"));
+    let _t = MssqlCdcTable {
+        table: table.clone(),
+        ci: ci.clone(),
+    };
+    enable_cdc(&table, &ci);
+    let cdc = Rig::mssql_cdc(&table, &ci).cdc_line("initial: snapshot");
+    let snapshot = cdc.run();
+    for (i, lit) in NON_FINITE.iter().enumerate() {
+        mssql_cdc_try_exec(&format!(
+            "INSERT INTO dbo.{table} (id, f8, f4) VALUES ({}, {lit}, {lit})",
+            100 + i
+        ));
+    }
+    assert_eq!(
+        mssql_cdc_query_i64(&format!("SELECT COUNT(*) FROM dbo.{table}")),
+        0,
+        "sql server accepted a non-finite float"
+    );
+    mssql_cdc_exec(&insert_of(&format!("dbo.{table}"), &cols));
+    let batch = Rig::mssql_batch(&table)
+        .export_named(&format!("{table}_batch"))
+        .source_url(MSSQL_CDC_URL);
+    let want: Vec<Vec<Option<String>>> = mssql_cdc_query_strings(&format!(
+        "SELECT CONCAT(id, '|', COALESCE(CONVERT(varchar(64), f8, 3), '~'), '|', \
+         COALESCE(CONVERT(varchar(64), f4, 3), '~')) FROM dbo.{table} ORDER BY id"
+    ))
+    .iter()
+    .map(|l| {
+        l.split('|')
+            .map(|c| (c != "~").then(|| c.to_string()))
+            .collect()
+    })
+    .collect();
+    assert_finite_source("mssql", &want);
+    assert_alike(
+        "mssql floats",
+        modes_against_source(&cols, &want, &batch, &cdc, snapshot, |rows| {
+            wait_for_capture(&ci, rows)
+        }),
     );
 }
 
