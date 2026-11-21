@@ -62,9 +62,10 @@ LEASE_REFUSAL = "RIVET_STATE_RUN_IN_PROGRESS"
 CELL_STATE = {"RIVET_STATE_URL": "", "RIVET_GATE_STATE_URL": ""}
 DELIVERED, REFUSED, DECLARED = "delivered", "refused", "declared_lossy"
 HIDDEN, SHAPE = "HIDDEN_COLUMN_DELIVERED", "LEG_SHAPE_DIFFERS"
+CDC_DIFFERS = "CDC_VERDICT_DIFFERS"
 BLIND = "INTEGRITY_BLIND"
 COLUMNS, PARTS = "COLUMN_SET_DIFFERS", "PART_SET_DIFFERS"
-FAIL_CLASSES = (NULLED, WRONG, SPLIT, UNCODED, IGNORED, EMPTY, CRASH, UNGRADED, HIDDEN, SHAPE, COLUMNS, PARTS, BLIND)
+FAIL_CLASSES = (NULLED, WRONG, SPLIT, UNCODED, IGNORED, EMPTY, CRASH, UNGRADED, HIDDEN, SHAPE, COLUMNS, PARTS, BLIND, CDC_DIFFERS)
 NOT_GRADED = "NOT_GRADED"
 
 
@@ -133,6 +134,7 @@ class Col:
     lits: tuple[str, ...]
     edges: tuple = ()
     refuses: object = None
+    cdc: object = None
 
 
 FLOAT4_NATIVE = {"mysql": r"FLOAT(\(\d+,\d+\))?( UNSIGNED)?", "mssql": "REAL", "postgres": "REAL|FLOAT4", "oracle": "BINARY_FLOAT"}
@@ -206,9 +208,11 @@ def row_cols(engine: str, i: int, r: dict) -> Col:
     """The seed column of ledger row `i`: its samples and the edges every stage delivers (a column that refuses holds every edge)."""
     fam, delivery, whole = family(r["native_type"], r.get("delivery", ""), engine), r.get("delivery", ""), te.row_verdict(r)
     edges = te.edges_of(r)
+    if (cut := next((e.lit for e in edges if e.cdc is not None and e.cdc.kind == te.REFUSE), None)) is not None:
+        raise ValueError(f"row {r['native_type']}: edge {cut} refuses on the change stream; the CDC grid grades a refusal per column, `cdc: refuse:CODE` on the row")
     lits = list(dict.fromkeys([*r["sample"], *(e.lit for e in edges if whole or (not e.solo and e.x.kind in (te.EXACT, te.NULL)))]))
     by_lit = {e.lit: e for e in edges}
-    return Col(f"c{i:02d}", r["native_type"], delivery, fam, tuple(lits), tuple(by_lit.get(x, te.Edge(x)) for x in lits), whole)
+    return Col(f"c{i:02d}", r["native_type"], delivery, fam, tuple(lits), tuple(by_lit.get(x, te.Edge(x)) for x in lits), whole, te.row_cdc(r) if delivery else None)
 
 
 def columns(engine: str) -> list[Col]:
@@ -1175,11 +1179,18 @@ def self_test() -> None:
     assert compare("mysql", "1e2000000", "decimal", "none", "2e2000000") == WRONG and compare("mysql", "1e2000000", "decimal", "none", "1e2000000") == "OK"
     assert compare("mysql", "1.5", "float", "float8", "NaN") == WRONG and compare("mysql", "1.5", "float", "float8", "Infinity") == WRONG
     assert tolerance("int", "float4", Decimal(2 ** 24)) == Decimal(2) and tolerance("int", "int8", Decimal(5)) == 0
-    syn = {"native_type": "INT", "delivery": "Int32", "sample": ["1"], "edges": ["2", {"v": "3", "x": "refuse:RIVET_X@extract"}, {"v": "4", "bigquery": "BOOL_COLLAPSE!form:true"}]}
+    syn = {"native_type": "INT", "delivery": "Int32", "cdc": "exact", "sample": ["1"], "edges": ["2", {"v": "3", "x": "refuse:RIVET_X@extract"}, {"v": "4", "bigquery": "BOOL_COLLAPSE!form:true"}]}
     grp = row_cols("mysql", 0, syn)
     assert grp.lits == ("1", "2", "4") and grp.edges[2].defect == "BOOL_COLLAPSE", grp
     grp = row_cols("mysql", 1, {**syn, "refuses": "refuse:RIVET_Y@extract"})
     assert grp.lits == ("1", "2", "3", "4") and grp.refuses.code == "RIVET_Y", "a refused row keeps every edge in its one column"
+    assert grp.cdc == te.EXACT_V and row_cols("mysql", 2, {**syn, "cdc": "refuse:RIVET_Z"}).cdc.code == "RIVET_Z"
+    for bad_row in ({k: v for k, v in syn.items() if k != "cdc"}, {**syn, "edges": [{"v": "2", "cdc": "refuse:RIVET_Z"}]}):
+        try:
+            row_cols("mysql", 3, bad_row)
+            raise SystemExit(f"row {bad_row} became a column")
+        except ValueError:
+            pass
     assert te.parse_verdict("TRUNC!form:1.5").defect == "TRUNC" and te.parse_verdict("refuse:C", te.LOAD).stage == te.LOAD
     for bad_verdict in ("", "exactly", "refuse:", "refuse:c@extract", "refuse:C@plan", "X1!exact"):
         try:
