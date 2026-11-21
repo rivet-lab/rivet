@@ -314,6 +314,9 @@ fn warn_time_scale_unread(mapping: TypeMapping, overridden: bool) -> TypeMapping
     mapping.with_warning(TIME_SCALE_UNREAD_WARNING)
 }
 
+/// The most fraction digits a `datetime2` / `datetimeoffset` holds.
+const DATETIME2_MAX_SCALE: u8 = 7;
+
 /// `TypeMapping` for every column — drives `rivet check --type-report`.
 pub(super) fn mssql_type_mappings(
     columns: &[Column],
@@ -333,11 +336,15 @@ pub(super) fn mssql_type_mappings(
             let native = format!("{:?}", col.column_type()).to_lowercase();
             let source = SourceColumn::simple(col.name(), native.clone(), true);
             let mapping = TypeMapping::from_source(&source, rivet);
-            if overrides.contains_key(col.name())
-                && hints.is_some_and(|h| h.fine_timestamps.contains(col.name()))
-            {
-                return Ok(mapping.narrowed_fraction(7));
+            let fine = hints.is_some_and(|h| h.fine_timestamps.contains(col.name()));
+            if fine && overrides.contains_key(col.name()) {
+                return Ok(mapping.narrowed_fraction(DATETIME2_MAX_SCALE));
             }
+            let mapping = if fine {
+                mapping.with_source_fraction(DATETIME2_MAX_SCALE)
+            } else {
+                mapping
+            };
             let mapping = if native == "timen" {
                 warn_time_scale_unread(mapping, overrides.contains_key(col.name()))
             } else {

@@ -1312,7 +1312,7 @@ pub(crate) fn retype_for_stream(
         m.nullable,
     );
     plan_cdc_delivery(
-        crate::types::TypeMapping::from_source(&source, target.clone()),
+        crate::types::TypeMapping::from_source(&source, target.clone()).narrowed_from(&m),
         true,
     )
 }
@@ -3020,6 +3020,7 @@ mod tests {
                 warnings: vec![],
                 delivery: crate::types::Delivery::Native,
                 refusal: None,
+                source_fraction_digits: None,
             })
             .collect();
         let k = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();

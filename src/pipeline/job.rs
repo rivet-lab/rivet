@@ -3279,6 +3279,7 @@ mod tests {
             warnings: Vec::new(),
             delivery: crate::types::Delivery::Native,
             refusal: None,
+            source_fraction_digits: None,
         };
         let mappings = [
             mapping("id", "bigint", RivetType::Int64),

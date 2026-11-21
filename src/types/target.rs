@@ -1309,6 +1309,7 @@ mod tests {
             warnings: Vec::new(),
             delivery: crate::types::Delivery::Text(crate::types::TextForm::ServerText),
             refusal: None,
+            source_fraction_digits: None,
         };
         for target in [
             ExportTarget::DuckDb,

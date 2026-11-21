@@ -166,14 +166,27 @@ pub(super) fn oracle_type_mappings(
             } else {
                 let kind = OraKind::of(m);
                 let mapping = deliver_number_text(mapping, kind, m.precision(), m.scale());
-                with_oracle_warning(
-                    mapping,
-                    is_bare_number(kind, m.precision(), m.scale()),
-                    sub_microsecond(native, m.scale()),
+                holding_fraction(
+                    with_oracle_warning(
+                        mapping,
+                        is_bare_number(kind, m.precision(), m.scale()),
+                        sub_microsecond(native, m.scale()),
+                    ),
+                    native,
+                    m.scale(),
                 )
             })
         })
         .collect()
+}
+
+/// A `TIMESTAMP` finer than a microsecond records the digits it holds, for a `columns:` override that narrows it.
+fn holding_fraction(mapping: TypeMapping, native: &str, scale: i8) -> TypeMapping {
+    if native.starts_with("timestamp") && sub_microsecond(native, scale) {
+        mapping.with_source_fraction(scale.unsigned_abs())
+    } else {
+        mapping
+    }
 }
 
 /// A NUMBER that no fixed-scale decimal holds, labelled as plain decimal text (ADR-0038 CP5).
@@ -899,6 +912,44 @@ mod tests {
         let bare = with_oracle_warning(mapping("timestamp(9)"), true, false);
         assert_eq!(bare.warnings, vec![bare_number_warning("TS9")]);
         assert_eq!(bare.refusal, None);
+    }
+
+    #[test]
+    fn a_stream_override_over_a_sub_microsecond_timestamp_is_lossy_and_a_microsecond_one_is_exact()
+    {
+        use crate::types::{TypeFidelity, parse_type_str};
+        let over = |ov: &str| -> crate::types::ColumnOverrides {
+            [("TS9".to_string(), parse_type_str(ov).unwrap())]
+                .into_iter()
+                .collect()
+        };
+        let held = |native: &str, scale: i8| {
+            holding_fraction(
+                with_oracle_warning(mapping(native), false, sub_microsecond(native, scale)),
+                native,
+                scale,
+            )
+        };
+        let under = |native: &str, scale: i8, ov: &str| {
+            crate::source::cdc::retype_for_stream(held(native, scale), &over(ov)).unwrap()
+        };
+        for (native, scale) in [("timestamp(7)", 7), ("timestamp(9)", 9)] {
+            let lossy = under(native, scale, "timestamp");
+            assert_eq!(lossy.fidelity, TypeFidelity::Lossy, "{native}");
+            assert!(lossy.warnings.iter().any(|w| w.contains("keeps 6")));
+        }
+        assert_eq!(
+            under("timestamp_tz(9)", 9, "timestamp_tz").fidelity,
+            TypeFidelity::Lossy
+        );
+        assert_eq!(held("timestamp(9)", 9).source_fraction_digits, Some(9));
+        for (native, scale) in [("timestamp(6)", 6), ("timestamp(3)", 3), ("date", 0)] {
+            assert_eq!(held(native, scale).source_fraction_digits, None, "{native}");
+            let kept = under(native, scale, "timestamp");
+            assert_ne!(kept.fidelity, TypeFidelity::Lossy, "{native}");
+            assert!(kept.warnings.is_empty(), "{native}");
+        }
+        assert_eq!(held("interval_ds(9)", 9).source_fraction_digits, None);
     }
 
     #[test]

@@ -439,6 +439,7 @@ mod tests {
             warnings: vec![],
             delivery: crate::types::Delivery::Native,
             refusal: None,
+            source_fraction_digits: None,
         }]
     }
 

@@ -80,6 +80,9 @@ pub struct TypeMapping {
     /// Set when the default mapping may not be delivered without a `columns:` declaration; the text names the declarations.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refusal: Option<String>,
+    /// Fraction digits of a second the source column holds when finer than a microsecond; read by a `columns:` override that narrows it.
+    #[serde(skip)]
+    pub source_fraction_digits: Option<u8>,
 }
 
 impl TypeMapping {
@@ -103,6 +106,7 @@ impl TypeMapping {
             warnings: Vec::new(),
             delivery: Delivery::Native,
             refusal: None,
+            source_fraction_digits: None,
         };
         if interval {
             seeded!(
@@ -127,6 +131,22 @@ impl TypeMapping {
         self.arrow_type = Some(DataType::Utf8);
         self.fidelity = TypeFidelity::LogicalString;
         self
+    }
+
+    /// Record that the source column holds `digits` fraction digits of a second, finer than a microsecond.
+    pub fn with_source_fraction(mut self, digits: u8) -> Self {
+        self.source_fraction_digits = Some(digits);
+        self
+    }
+
+    /// This mapping, built from a `columns:` override over `source`, lossy when the override keeps fewer fraction digits than the source column holds.
+    pub fn narrowed_from(self, source: &TypeMapping) -> Self {
+        match source.source_fraction_digits {
+            Some(digits) if seeded!("stream-override-narrowing-not-read", false, true) => {
+                self.narrowed_fraction(digits)
+            }
+            _ => self,
+        }
     }
 
     /// Mark a time column whose source holds `source_digits` fraction digits as lossy when its type keeps fewer: an override narrowing a sub-microsecond column truncates, and the type report says so instead of `exact`.

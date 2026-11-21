@@ -7047,6 +7047,23 @@ seeds:
       oracle:
         cells: ["lib:narrows_flags_a_decimal_float8_override_past_fifteen_digits_as_lossy", "lib:a_float8_override_over_a_wide_decimal_is_reported_lossy"]
 
+  - name: stream-override-narrowing-not-read
+    class: "a change-stream `columns:` override is built from the column's type alone, so a `timestamp` override over an Oracle TIMESTAMP(9) or a SQL Server datetime2(7) is reported fidelity exact by `rivet check --type-report` while the change rows are truncated to microseconds"
+    history: "RED on main 2026-11-21 (4b39920d with the batch fix): the CDC check passes no overrides to type_mappings and retype_for_stream rebuilt the mapping from the override, so the digits the source holds were lost; owner decision 2026-11-20: a narrowing override is delivered and declared lossy, on batch and on CDC"
+    scope: source
+    switch: stream-override-narrowing-not-read
+    engines:
+      oracle:
+        cells: ["lib:a_stream_override_over_a_sub_microsecond_timestamp_is_lossy_and_a_microsecond_one_is_exact"]
+      mssql:
+        cells: ["lib:a_stream_override_over_a_scale_seven_column_is_graded_as_the_batch_override"]
+      postgres:
+        na: "PostgreSQL timestamp and timestamptz hold microseconds at most, so no change-stream time override keeps fewer digits than the source"
+      mysql:
+        na: "MySQL datetime, timestamp and time hold microseconds at most, so no change-stream time override keeps fewer digits than the source"
+      mongo:
+        na: "a BSON date holds milliseconds and a Mongo change stream has no `columns:` time override over it, so nothing narrows"
+
   - name: narrowing-override-reported-exact
     class: "a `columns:` override that keeps fewer fraction digits than the source holds (timestamp over an Oracle TIMESTAMP(9) or a SQL Server datetime2(7)) truncates the finer digits while the type report calls the column exact, so the run exits 0 with fidelity exact over changed values"
     history: "no_silent_null full tier WRONG_VALUE + INTEGRITY_BLIND (known_red 2026-11-11, oracle TIMESTAMP(9) -> timestamp / timestamp_tz, mssql DATETIME2 -> timestamp / timestamp_tz); fidelity was derived from the target type alone; owner decision 2026-11-20: a narrowing override is delivered and declared lossy"

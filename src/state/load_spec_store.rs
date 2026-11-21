@@ -56,6 +56,7 @@ impl LoadSpecColumn {
             warnings: self.warnings.clone(),
             delivery: crate::types::Delivery::Native,
             refusal: None,
+            source_fraction_digits: None,
         }
     }
 }
@@ -762,6 +763,7 @@ mod tests {
             warnings: Vec::new(),
             delivery: crate::types::Delivery::Text(crate::types::TextForm::ServerText),
             refusal: None,
+            source_fraction_digits: None,
         };
         assert_eq!(
             LoadSpecColumn::from_mapping(&mapping).rivet_type,

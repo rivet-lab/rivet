@@ -461,6 +461,19 @@ def self_test() -> None:
     assert rs[0].klass == CDC_DIFFERS and rs[0].verdict == REFUSED, rs[0]
     rs = grade_unit("mysql", none, [gone_c], 1, {"snapshot": refused}, {"snapshot": nsn._proc(5, "[RIVET_X] no")}, d, "")
     assert rs[0].klass == "" and rs[0].verdict == REFUSED, rs[0]
+    fine = Col("t00", "DATETIME2", "Timestamp", "other", ("'2000-01-01 00:00:00.1234567'",))
+    cut = [{"id": i, "__op": op or None, "t00": "2000-01-01 00:00:00.123456"} for leg in legs() for op, i, _ in expected(leg, 1)]
+    nsn.read_parts = lambda out, fmt, key="": ({"id": "INTEGER", "t00": "TIMESTAMP", "__op": "VARCHAR"}, cut, 1)
+
+    def report(fidelity: str) -> core.Proc:
+        return core.Proc(["rivet"], 0, json.dumps({"columns": [{"column": "t00", "fidelity": fidelity}]}) + "\n", "", gated=False)
+
+    try:
+        graded = {f: grade_unit("mssql", Unit("timestamp", fine, "parquet"), [fine], 1, {k: ok for k in ("snapshot", "stream", *ddl_kinds())}, {"snapshot": report(f)}, d, "") for f in ("lossy", "exact")}
+    finally:
+        nsn.read_parts = saved
+    assert nsn.DECLARED in {r.verdict for r in graded["lossy"]} and {r.klass for r in graded["lossy"]} == {""}, [(r.cell, r.verdict, r.klass) for r in graded["lossy"]]
+    assert WRONG in {r.klass for r in graded["exact"]} and not any(r.verdict == nsn.DECLARED for r in graded["exact"]), "a truncated stream value under fidelity exact is WRONG_VALUE"
     shutil.rmtree(d, ignore_errors=True)
     print(f"no_silent_null_cdc self-test ok: legs {legs()}, row images {row_images()}")
 
