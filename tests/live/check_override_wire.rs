@@ -98,7 +98,11 @@ fn check_refuses_a_timestamp_with_a_time_declared_date_oracle() {
         .export_line("columns:")
         .export_line("  D: \"date\"")
         .dest_path(out.path().to_path_buf());
-    check_and_run_refuse_alike(rig, &name);
+    check_and_run_refuse_alike_by(
+        rig,
+        &name,
+        Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5),
+    );
 }
 
 #[test]
