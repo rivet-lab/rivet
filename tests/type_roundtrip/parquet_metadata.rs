@@ -212,7 +212,7 @@ fn parquet_metadata_pins_mysql_matrix_field_provenance() {
         ("c_float", "float", "exact", None),
         ("c_double", "double", "exact", None),
         ("c_date", "date", "compatible", None),
-        ("c_time", "time", "exact", None),
+        ("c_time", "time", "logical_string", None),
         ("created_at_dt", "datetime", "compatible", None),
         ("created_at_ts", "timestamp", "compatible", None),
         // MySQL string family: `mysql_native_type_name` distinguishes CHAR

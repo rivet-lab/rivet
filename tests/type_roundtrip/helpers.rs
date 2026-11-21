@@ -323,7 +323,7 @@ pub fn assert_mysql_doc_parquet_schema(schema: &SchemaRef) {
     assert_field_dtype(schema, "c_float", DataType::Float32);
     assert_field_dtype(schema, "c_double", DataType::Float64);
     assert_field_dtype(schema, "c_date", DataType::Date32);
-    assert_field_dtype(schema, "c_time", DataType::Time64(TimeUnit::Microsecond));
+    assert_field_dtype(schema, "c_time", DataType::Utf8);
     assert_field_dtype(
         schema,
         "created_at_dt",
