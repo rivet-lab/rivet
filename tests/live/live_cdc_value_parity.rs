@@ -523,6 +523,11 @@ fn assert_finite_source(engine: &str, want: &[Vec<Option<String>>]) {
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
 fn mysql_batch_and_cdc_deliver_float_extremes_alike_and_the_engine_stores_no_infinity() {
+    assert_alike("mysql floats", mysql_float_differences());
+}
+
+/// The differences of a mysql float table between batch, stream and the source text.
+fn mysql_float_differences() -> Vec<String> {
     use mysql::prelude::Queryable;
     let cols = sql_floats(
         "double",
@@ -559,16 +564,18 @@ fn mysql_batch_and_cdc_deliver_float_extremes_alike_and_the_engine_stores_no_inf
         )
         .unwrap();
     assert_finite_source("mysql", &want);
-    assert_alike(
-        "mysql floats",
-        modes_against_source(&cols, &want, &batch, &cdc, snapshot, |_| {}),
-    );
+    modes_against_source(&cols, &want, &batch, &cdc, snapshot, |_| {})
 }
 
 #[test]
 #[ignore = "live: requires docker compose mssql with SQL Server Agent + CDC"]
 fn mssql_batch_and_cdc_deliver_float_extremes_alike_and_the_engine_stores_no_infinity() {
     let _serial = cross_process_serial("mssql_cdc");
+    assert_alike("mssql floats", mssql_float_differences());
+}
+
+/// The differences of a mssql float table between batch, stream and the source text.
+fn mssql_float_differences() -> Vec<String> {
     let cols = sql_floats(
         "float",
         "real",
@@ -614,12 +621,9 @@ fn mssql_batch_and_cdc_deliver_float_extremes_alike_and_the_engine_stores_no_inf
     })
     .collect();
     assert_finite_source("mssql", &want);
-    assert_alike(
-        "mssql floats",
-        modes_against_source(&cols, &want, &batch, &cdc, snapshot, |rows| {
-            wait_for_capture(&ci, rows)
-        }),
-    );
+    modes_against_source(&cols, &want, &batch, &cdc, snapshot, |rows| {
+        wait_for_capture(&ci, rows)
+    })
 }
 
 #[cfg(feature = "oracle")]
