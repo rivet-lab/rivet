@@ -34,10 +34,16 @@ fn assert_fidelity(dir: &std::path::Path) {
             );
         }
     }
-    for col in ["t", "n", "id"] {
+    for col in ["n", "id"] {
         for (native, fidelity) in parquet_field_labels(dir, col) {
             assert_eq!(fidelity, "exact", "column {col} ({native}) is unchanged");
         }
+    }
+    for (native, fidelity) in parquet_field_labels(dir, "t") {
+        assert_eq!(
+            fidelity, "logical_string",
+            "column t ({native}) is time_beyond_day text"
+        );
     }
 }
 

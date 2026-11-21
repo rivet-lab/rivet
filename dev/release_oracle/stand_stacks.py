@@ -1,7 +1,7 @@
 """The gate profiles a CI stack starts, read from dev/stand/registry.yaml, and the guard that a live test's service is started.
 
-A gate profile with `stacks: [...]` is started in each of those stacks (the live-stack action's `stack` input and the Mongo job
-of nightly-live) by `up STACK`, so a workflow names a stack and never a service. The self-test fails when a service a live test
+A gate profile with `stacks: [...]` is started in each of those stacks (the live-stack action's `stack` input, the Mongo job, the
+`live-full` job and the `e2e` job of nightly-live) by `up STACK`, so a workflow names a stack and never a service. The self-test fails when a service a live test
 requires (tests/common/env.rs) is in neither a stack's hand-kept compose list nor a profile of that stack.
 
     python3 -m dev.release_oracle.stand_stacks up STACK
@@ -24,6 +24,7 @@ NIGHTLY = ROOT / ".github/workflows/nightly-live.yml"
 ENV_RS = ROOT / "tests/common/env.rs"
 COMPOSE = ROOT / "docker-compose.yaml"
 LIVE_STACKS = ("lean", "full")
+FULL_JOBS = ("live-full", "e2e")
 CALL = "dev.release_oracle.stand_stacks up"
 SERVICE_NAME = re.compile(r"service `([a-z0-9-]+)`|up -d (?:--wait )?([a-z0-9-]+)\"")
 ACTION_LIST = re.compile(r'(core|lean|\*)\) services="([^"]*)"')
@@ -79,6 +80,11 @@ def mongo_job_started(workflow: dict, profiles: dict[str, dict] | None = None) -
     return listed | (profile_services("mongo", profiles) if f"{CALL} mongo" in step else set())
 
 
+def calls_up(workflow: dict, job: str, stack: str) -> bool:
+    """Does a step of the workflow's `job` run `up STACK`?"""
+    return any(f"{CALL} {stack}" in (step.get("run") or "") for step in workflow["jobs"][job]["steps"])
+
+
 def gaps(required: set[str], started: dict[str, set[str]], exempt: dict[tuple[str, str], str] = EXEMPT) -> list[str]:
     """`stack: service` for each required service a stack does not start and no exemption names, and each exemption that no longer applies."""
     missing = [f"{stack}: {svc}" for stack, have in started.items() for svc in sorted(required - have) if (stack, svc) not in exempt]
@@ -92,7 +98,9 @@ def live_gaps() -> list[str]:
     action = yaml.safe_load(ACTION.read_text())
     found = gaps(required, {s: action_started(action, s) for s in LIVE_STACKS})
     mongo = {s for s in required if s.startswith("mongo")}
-    return found + [f"mongo job: {s}" for s in sorted(mongo - mongo_job_started(yaml.safe_load(NIGHTLY.read_text())))]
+    nightly = yaml.safe_load(NIGHTLY.read_text())
+    unstarted = [f"{job}: no step runs `{CALL} full`, so its gate profiles are down" for job in FULL_JOBS if not calls_up(nightly, job, "full")]
+    return found + [f"mongo job: {s}" for s in sorted(mongo - mongo_job_started(nightly))] + unstarted
 
 
 def self_test() -> None:
@@ -118,6 +126,10 @@ def self_test() -> None:
     assert mongo_job_started(job, spec) == {"m1", "m2", "sb1", "sb2"}
     job["jobs"]["mongo-versions"]["steps"][0]["run"] = "docker compose up -d --wait m1 m2"
     assert mongo_job_started(job, spec) == {"m1", "m2"}
+    job = {"jobs": {"j": {"steps": [{"run": f"x\n{CALL} full"}, {"name": "n"}]}}}
+    assert calls_up(job, "j", "full") and not calls_up(job, "j", "lean")
+    job["jobs"]["j"]["steps"][0]["run"] = "x"
+    assert not calls_up(job, "j", "full"), "a job that does not call `up` starts no gate profile"
     assert required_services("service `mongo-auth-rs` x up -d --wait mongos\" service `nope`", {"mongo-auth-rs", "mongos"}) == {"mongo-auth-rs", "mongos"}
     assert set(registry.load()["stacks"]) >= {"core", *LIVE_STACKS, "mongo"}
     assert {s for p in registry.gate_profiles().values() for s in p.get("stacks", [])} <= set(registry.load()["stacks"]), "a profile names a stack the registry does not list"

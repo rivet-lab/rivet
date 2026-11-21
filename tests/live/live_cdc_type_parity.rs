@@ -52,7 +52,7 @@ struct Ledger {
     rows: Vec<Row>,
 }
 
-/// The ledger's rows for `engine`, graded alike in both modes.
+/// The ledger's rows for `engine` whose `cdc:` verdict is `exact`, graded alike in both modes; a row the change stream refuses is graded by the release oracle's CDC grid.
 fn ledger(engine: &str) -> Ledger {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/type-capability-matrix.yaml");
     let doc: serde_yaml_ng::Value =
@@ -79,6 +79,14 @@ fn ledger(engine: &str) -> Ledger {
         .unwrap_or_else(|| panic!("engines.{engine}.rows is not a list"))
         .iter()
         .filter(|r| !r["delivery"].is_null())
+        .filter(|r| match r["cdc"].as_str() {
+            Some("exact") => true,
+            Some(v) if v.starts_with("refuse:") => false,
+            other => panic!(
+                "engines.{engine}.rows[{}]: a delivering row needs `cdc: exact` or `cdc: refuse:CODE`, got {other:?}",
+                r["native_type"].as_str().unwrap_or("?")
+            ),
+        })
         .map(|r| {
             let ch = &r["clickhouse"];
             Row {

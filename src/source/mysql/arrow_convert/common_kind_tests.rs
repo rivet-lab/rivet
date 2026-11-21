@@ -453,14 +453,24 @@ fn table() -> Vec<(&'static str, Spec, Option<CommonKind>, RivetType)> {
             Some(Utc),
             ts(Some("UTC")),
         ),
-        ("time", (MYSQL_TYPE_TIME, BIN, 10, none, 0), None, time()),
+        (
+            "time",
+            (MYSQL_TYPE_TIME, BIN, 10, none, 0),
+            Some(Time),
+            time(),
+        ),
         (
             "time fsp 6",
             (MYSQL_TYPE_TIME, BIN, 17, none, 6),
-            None,
+            Some(Time),
             time(),
         ),
-        ("time2", (MYSQL_TYPE_TIME2, BIN, 10, none, 0), None, time()),
+        (
+            "time2",
+            (MYSQL_TYPE_TIME2, BIN, 10, none, 0),
+            Some(Time),
+            time(),
+        ),
         (
             "bit len 0",
             (MYSQL_TYPE_BIT, BIN, 0, UNSIGNED, 0),
