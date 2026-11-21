@@ -126,13 +126,17 @@ fn audit_run_rejects_quality_on_nonexistent_column() {
 fn audit_type_report_flags_lossy_scale_reduction() {
     require_alive(LiveService::Postgres);
 
+    let table = seed_pg_numeric_table(2);
     let export_name = unique_name("audit_lossy_scale");
     let out = tempfile::tempdir().unwrap();
     let rig = Rig::pg_batch(&export_name)
-        .query("SELECT 1 AS id, CAST(10.00 AS numeric(10,2)) AS price")
+        .query(&format!(
+            "SELECT id, amount FROM {} WHERE id = 0",
+            table.name()
+        ))
         .mode("full")
         .export_line("columns:")
-        .export_line("  price: \"decimal(20,0)\"")
+        .export_line("  amount: \"decimal(20,0)\"")
         .dest_path(out.path().to_path_buf());
 
     let result = rig.cli(&["check", "--export", &export_name, "--type-report", "--json"]);
@@ -146,15 +150,15 @@ fn audit_type_report_flags_lossy_scale_reduction() {
     let cols = json["columns"]
         .as_array()
         .expect("'columns' must be a JSON array");
-    let price = cols
+    let amount = cols
         .iter()
-        .find(|c| c["column"].as_str() == Some("price"))
-        .unwrap_or_else(|| panic!("type-report must include the `price` column; got:\n{stdout}"));
-    let fidelity = price["fidelity"].as_str().unwrap_or("<missing>");
+        .find(|c| c["column"].as_str() == Some("amount"))
+        .unwrap_or_else(|| panic!("type-report must include the `amount` column; got:\n{stdout}"));
+    let fidelity = amount["fidelity"].as_str().unwrap_or("<missing>");
 
     assert_eq!(
         fidelity, "lossy",
-        "scale-reduction numeric(10,2)->decimal(20,0) must be reported 'lossy'; \
+        "scale-reduction numeric(12,2)->decimal(20,0) must be reported 'lossy'; \
          reported fidelity={fidelity:?}\nstdout:\n{stdout}"
     );
 }
