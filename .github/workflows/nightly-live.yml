@@ -832,6 +832,7 @@ jobs:
             RIVET_SNOWFLAKE_ACCOUNT
             RIVET_TEST_EXCLUSIVE
             pg18-batch (:5518)
+            pg18-cdc (:5618)
             RIVET_PREV_RELEASE_BIN
             RIVET_MIGRATION_CARRIER_BIN
             RIVET_LEASE_CARRIER_BIN
