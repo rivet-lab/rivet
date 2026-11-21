@@ -135,6 +135,46 @@ fn check_still_accepts_overrides_the_run_accepts_postgres() {
     );
 }
 
+/// The run and both `check` spellings refuse a `decimal(20,0)` override over a value with cents, exit 5.
+fn lossy_scale_override_is_refused_like_the_run(rig: Rig, name: &str) {
+    let said = check_and_run_refuse_alike_by(
+        rig,
+        name,
+        Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5),
+    );
+    assert!(said.contains("10.99"), "{said}");
+}
+
+#[test]
+#[ignore = "live: postgres"]
+fn a_lossy_scale_override_is_refused_by_check_like_the_run_postgres() {
+    require_alive(LiveService::Postgres);
+    let name = unique_name("ovw_scale_pg");
+    let out = tempfile::tempdir().unwrap();
+    let rig = Rig::pg_batch(&name)
+        .query("SELECT 1 AS id, CAST(10.99 AS numeric(10,2)) AS price")
+        .mode("full")
+        .export_line("columns:")
+        .export_line("  price: \"decimal(20,0)\"")
+        .dest_path(out.path().to_path_buf());
+    lossy_scale_override_is_refused_like_the_run(rig, &name);
+}
+
+#[test]
+#[ignore = "live: mysql"]
+fn a_lossy_scale_override_is_refused_by_check_like_the_run_mysql() {
+    require_alive(LiveService::Mysql);
+    let name = unique_name("ovw_scale_my");
+    let out = tempfile::tempdir().unwrap();
+    let rig = Rig::mysql_batch(&name)
+        .query("SELECT 1 AS id, CAST(10.99 AS DECIMAL(10,2)) AS price")
+        .mode("full")
+        .export_line("columns:")
+        .export_line("  price: \"decimal(20,0)\"")
+        .dest_path(out.path().to_path_buf());
+    lossy_scale_override_is_refused_like_the_run(rig, &name);
+}
+
 #[test]
 #[ignore = "live: mysql"]
 fn a_nanosecond_timestamp_override_is_refused_by_the_wire_check_mysql() {
