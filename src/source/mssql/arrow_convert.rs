@@ -533,6 +533,49 @@ fn decimal_scale_from_rows(idx: usize, rows: &[Row]) -> Option<u8> {
     })
 }
 
+/// A `Float64` column: an f64 cell as is, a MONEY cell as the nearest double of its exact value, any other cell refused.
+fn float64_array(
+    idx: usize,
+    rows: &[Row],
+    column: &str,
+    declared: Option<&RivetType>,
+) -> Result<ArrayRef> {
+    let money = rows
+        .first()
+        .is_some_and(|r| is_money(r.columns()[idx].column_type()));
+    let mut b = Float64Builder::with_capacity(rows.len());
+    for row in rows {
+        match cell(row, idx) {
+            Some(ColumnData::F64(Some(v))) => b.append_value(*v),
+            Some(ColumnData::Numeric(Some(n))) if money => b.append_value(numeric_to_f64(n)),
+            Some(
+                ColumnData::U8(None)
+                | ColumnData::I16(None)
+                | ColumnData::I32(None)
+                | ColumnData::I64(None)
+                | ColumnData::F32(None)
+                | ColumnData::F64(None)
+                | ColumnData::Bit(None)
+                | ColumnData::String(None)
+                | ColumnData::Binary(None)
+                | ColumnData::Guid(None)
+                | ColumnData::Numeric(None),
+            )
+            | None => b.append_null(),
+            Some(other) => {
+                return Err(cell_mismatch(
+                    declared,
+                    column,
+                    &DataType::Float64,
+                    Some(other),
+                    "",
+                ));
+            }
+        }
+    }
+    Ok(Arc::new(b.finish()))
+}
+
 /// Build one Arrow array for column `idx`, dispatching on the Arrow target type (so the array always matches the schema field by construction).
 fn build_array(
     target: &DataType,
@@ -599,7 +642,7 @@ fn build_array(
         DataType::Int32 => simple!(Int32Builder, Some(ColumnData::I32(Some(v))) => *v),
         DataType::Int64 => simple!(Int64Builder, Some(ColumnData::I64(Some(v))) => *v),
         DataType::Float32 => simple!(Float32Builder, Some(ColumnData::F32(Some(v))) => *v),
-        DataType::Float64 => simple!(Float64Builder, Some(ColumnData::F64(Some(v))) => *v),
+        DataType::Float64 => float64_array(idx, rows, column, declared)?,
         DataType::Utf8
             if rows
                 .first()
@@ -840,12 +883,28 @@ fn declared_mismatch(column: &str, declared: &str, sent: &str) -> anyhow::Error 
     ))
 }
 
-/// A `Decimal128(_, scale)` cell: numeric rescaled, MONEY exact, an integer scaled; any other value refused.
+/// Whether a column is MONEY or SMALLMONEY.
+fn is_money(t: ColumnType) -> bool {
+    matches!(t, ColumnType::Money | ColumnType::Money4)
+}
+
+/// A money value as the f64 a `float64` override stores: the unscaled integer over 10^scale.
+fn numeric_to_f64(n: &tiberius::numeric::Numeric) -> f64 {
+    n.value() as f64 / 10f64.powi(i32::from(n.scale()))
+}
+
+/// A `Decimal128(_, scale)` cell: numeric or money rescaled, an integer scaled; any other value refused.
 fn decimal_cell(c: Option<&ColumnData<'_>>, scale: u8, column: &str) -> Result<Option<i128>> {
     let int = |v: i128| rescale_i128(v, 0, scale).map(Some);
     match c {
-        Some(ColumnData::Numeric(Some(n))) => rescale_i128(n.value(), n.scale(), scale).map(Some),
-        Some(ColumnData::F64(Some(v))) => f64_to_scaled_i128(*v, scale).map(Some),
+        Some(ColumnData::Numeric(Some(n))) => {
+            let unscaled = seeded!(
+                "mssql-money-decoded-as-f64",
+                crate::seeded::money_through_f64(n.value(), n.scale())?,
+                n.value()
+            );
+            rescale_i128(unscaled, n.scale(), scale).map(Some)
+        }
         Some(ColumnData::U8(Some(v))) => int(i128::from(*v)),
         Some(ColumnData::I16(Some(v))) => int(i128::from(*v)),
         Some(ColumnData::I32(Some(v))) => int(i128::from(*v)),
@@ -882,36 +941,6 @@ fn binary_cell<'a>(c: Option<&'a ColumnData<'_>>, column: &str) -> Result<Option
         Some(other) if !is_null_cell(other) => Err(override_mismatch(column, "bytes", other)),
         _ => Ok(None),
     }
-}
-
-/// An f64-delivered fixed-point value (MONEY/SMALLMONEY) as the unscaled i128 of a `Decimal128(_, scale)` column.
-fn f64_to_scaled_i128(v: f64, scale: u8) -> Result<i128> {
-    if !v.is_finite() {
-        crate::rivet_bail!(
-            crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
-            "non-finite money value {v:?}"
-        );
-    }
-    let scaled_abs = v.abs() * 10f64.powi(scale as i32);
-    if scaled_abs >= 9_007_199_254_740_992.0 {
-        crate::rivet_bail!(
-            crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
-            "mssql money value {v} exceeds the range representable without precision loss \
-             (|value| ≥ 2^53 ÷ 10^{scale} ≈ {:.3e}). tiberius decodes MONEY as f64, so this \
-             value was already rounded before rivet read it — it cannot be recovered here. \
-             Convert it to text on the server with all four decimals: select \
-             CONVERT(nvarchar(40), <name>, 2) AS <name> in the export's `query:` (a plain \
-             CAST keeps only two).",
-            9_007_199_254_740_992.0 / 10f64.powi(scale as i32),
-        );
-    }
-    let txt = format!("{v:.prec$}", prec = scale as usize);
-    crate::types::decimal::decimal_str_to_scaled_i128(&txt, scale as i8).ok_or_else(|| {
-        crate::error::coded(
-            crate::error::codes::INTERNAL_VALUE_CONVERTER,
-            format!("money render {txt:?} did not parse"),
-        )
-    })
 }
 
 /// Rescale an unscaled decimal from `from_scale` to `to_scale` (Arrow's fixed column scale).
@@ -1029,6 +1058,7 @@ impl crate::source::value_checksum::CellSource for MssqlCellSource<'_> {
     fn float64(&self, col: usize, row: usize) -> Option<f64> {
         match cell(&self.rows[row], col) {
             Some(ColumnData::F64(Some(v))) => Some(*v),
+            Some(ColumnData::Numeric(Some(n))) => Some(numeric_to_f64(n)),
             _ => None,
         }
     }
@@ -1044,7 +1074,6 @@ impl crate::source::value_checksum::CellSource for MssqlCellSource<'_> {
                     .0
                     .to_i128()
             }
-            Some(ColumnData::F64(Some(v))) => f64_to_scaled_i128(*v, scale.max(0) as u8).ok(),
             Some(ColumnData::U8(Some(v))) => int(i128::from(*v)),
             Some(ColumnData::I16(Some(v))) => int(i128::from(*v)),
             Some(ColumnData::I32(Some(v))) => int(i128::from(*v)),
@@ -1512,30 +1541,6 @@ mod tests {
     }
 
     #[test]
-    fn non_finite_money_is_a_loud_error_not_a_silent_null() {
-        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert!(
-                f64_to_scaled_i128(bad, 4).is_err(),
-                "non-finite money {bad:?} must be a loud error, not a silent null"
-            );
-        }
-        assert!(f64_to_scaled_i128(12.34, 4).is_ok());
-    }
-
-    #[test]
-    fn money_beyond_f64_exact_range_fails_loudly_not_silently_rounded() {
-        let huge = 1.0e12_f64;
-        assert!(
-            f64_to_scaled_i128(huge, 4).is_err(),
-            "a MONEY value past the f64-exact range must fail loudly, not store a rounded value"
-        );
-        assert!(
-            f64_to_scaled_i128(9.0e11, 4).is_ok(),
-            "a MONEY value within the exact range must still export"
-        );
-    }
-
-    #[test]
     fn roast_rescale_i128_lossless_paths_stay_ok() {
         let down = rescale_i128(12300, 2, 0)
             .expect("lossless down-scale of 12300 (scale 2 -> 0) must stay Ok");
@@ -1983,13 +1988,9 @@ mod renderer_twins {
 mod error_code_tests {
     use super::*;
 
-    /// A MONEY the driver already rounded or a non-finite one is unrepresentable (exit 5).
+    /// A lossy decimal rescale and an overflowing one carry their codes.
     #[test]
     fn money_and_decimal_refusals_carry_their_codes() {
-        for v in [f64::NAN, 1e20] {
-            let err = f64_to_scaled_i128(v, 4).unwrap_err();
-            crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
-        }
         let err = rescale_i128(123, 2, 0).unwrap_err();
         crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
         let err = rescale_i128(i128::MAX, 0, 2).unwrap_err();
@@ -2197,5 +2198,145 @@ mod error_code_tests {
             let (schema, _) = mssql_columns_to_schema(rows[0].columns(), &ok, &rows, None).unwrap();
             assert_eq!(schema.fields().len(), 1);
         }
+    }
+}
+
+#[cfg(test)]
+mod money_tests {
+    use super::*;
+    use crate::source::value_checksum::CellSource;
+    use arrow::array::{Array, Decimal128Array, Float64Array};
+    use tiberius::numeric::Numeric;
+
+    fn money(v: i64) -> ColumnData<'static> {
+        ColumnData::Numeric(Some(Numeric::new_with_scale(i128::from(v), 4)))
+    }
+
+    fn rows_of(ty: ColumnType, cells: Vec<ColumnData<'static>>) -> Vec<Row> {
+        cells
+            .into_iter()
+            .map(|c| Row::builder().column("c", ty, c).build())
+            .collect()
+    }
+
+    fn batch(
+        dt: DataType,
+        rows: &[Row],
+        declared: &ColumnOverrides,
+    ) -> Result<arrow::record_batch::RecordBatch> {
+        let schema = Arc::new(Schema::new(vec![Field::new("c", dt, true)]));
+        mssql_rows_to_record_batch(&schema, rows, None, declared)
+    }
+
+    /// MONEY at the type's extremes and a NULL arrive as the exact unscaled integers.
+    #[test]
+    fn money_extremes_are_delivered_exact() {
+        let rows = rows_of(
+            ColumnType::Money,
+            vec![
+                money(i64::MAX),
+                money(i64::MIN),
+                money(9_007_199_254_740_993),
+                ColumnData::Numeric(None),
+            ],
+        );
+        let b = batch(DataType::Decimal128(19, 4), &rows, &ColumnOverrides::new()).unwrap();
+        let a = b
+            .column(0)
+            .as_any()
+            .downcast_ref::<Decimal128Array>()
+            .unwrap();
+        assert_eq!(a.value(0), i128::from(i64::MAX));
+        assert_eq!(a.value(1), i128::from(i64::MIN));
+        assert_eq!(a.value(2), 9_007_199_254_740_993);
+        assert!(a.is_null(3));
+    }
+
+    /// SMALLMONEY at the type's extremes is exact.
+    #[test]
+    fn smallmoney_extremes_are_delivered_exact() {
+        let rows = rows_of(
+            ColumnType::Money4,
+            vec![money(i64::from(i32::MAX)), money(i64::from(i32::MIN))],
+        );
+        let b = batch(DataType::Decimal128(10, 4), &rows, &ColumnOverrides::new()).unwrap();
+        let a = b
+            .column(0)
+            .as_any()
+            .downcast_ref::<Decimal128Array>()
+            .unwrap();
+        assert_eq!(a.value(0), i128::from(i32::MAX));
+        assert_eq!(a.value(1), i128::from(i32::MIN));
+    }
+
+    /// The value-checksum side reads every exact integer cell and a money cell without the f64 detour.
+    #[test]
+    fn the_checksum_source_reads_integers_and_money_exact() {
+        let cases = [
+            (ColumnType::Int1, ColumnData::U8(Some(7)), 70_000_i128),
+            (ColumnType::Int2, ColumnData::I16(Some(-7)), -70_000),
+            (ColumnType::Int4, ColumnData::I32(Some(7)), 70_000),
+            (ColumnType::Int8, ColumnData::I64(Some(-7)), -70_000),
+            (ColumnType::Money, money(i64::MAX), i128::from(i64::MAX)),
+        ];
+        for (ty, cell, want) in cases {
+            let rows = rows_of(ty, vec![cell]);
+            let src = MssqlCellSource { rows: &rows };
+            assert_eq!(src.decimal128(0, 0, 4), Some(want), "{ty:?}");
+        }
+        let rows = rows_of(ColumnType::Money, vec![money(1_234_500)]);
+        assert_eq!(MssqlCellSource { rows: &rows }.float64(0, 0), Some(123.45));
+    }
+
+    /// A `float64` override over MONEY stores the same f64 the driver used to deliver, NULL kept.
+    #[test]
+    fn a_float64_override_over_money_keeps_the_old_f64() {
+        for (scaled, want) in [(123_456_i64, 12.3456_f64), (-5, -0.0005), (0, 0.0)] {
+            let rows = rows_of(
+                ColumnType::Money,
+                vec![money(scaled), ColumnData::Numeric(None)],
+            );
+            let b = batch(DataType::Float64, &rows, &ColumnOverrides::new()).unwrap();
+            let a = b.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+            assert_eq!(a.value(0), want);
+            assert_eq!(a.value(0), scaled as f64 / 10000.0);
+            assert!(a.is_null(1));
+        }
+    }
+
+    /// A NUMERIC column is still refused by a Float64 target; only MONEY widens.
+    #[test]
+    fn a_numeric_column_into_float64_is_still_refused() {
+        let rows = rows_of(
+            ColumnType::Numericn,
+            vec![ColumnData::Numeric(Some(Numeric::new_with_scale(125, 2)))],
+        );
+        assert!(batch(DataType::Float64, &rows, &ColumnOverrides::new()).is_err());
+    }
+
+    /// A `decimal` override at a narrower scale keeps a value that fits and refuses one that would lose digits.
+    #[test]
+    fn a_narrower_decimal_override_over_money_refuses_lost_digits() {
+        let fits = rows_of(ColumnType::Money, vec![money(123_400)]);
+        let b = batch(DataType::Decimal128(19, 2), &fits, &ColumnOverrides::new()).unwrap();
+        let a = b
+            .column(0)
+            .as_any()
+            .downcast_ref::<Decimal128Array>()
+            .unwrap();
+        assert_eq!(a.value(0), 1_234);
+        let lossy = rows_of(ColumnType::Money, vec![money(123_456)]);
+        let err = batch(DataType::Decimal128(19, 2), &lossy, &ColumnOverrides::new()).unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+    }
+
+    /// Only the two money wire types are money.
+    #[test]
+    fn only_money_and_smallmoney_are_money() {
+        assert!(is_money(ColumnType::Money));
+        assert!(is_money(ColumnType::Money4));
+        assert!(!is_money(ColumnType::Float8));
+        assert!(!is_money(ColumnType::Numericn));
+        assert!(!is_money(ColumnType::Decimaln));
     }
 }

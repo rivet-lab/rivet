@@ -105,7 +105,7 @@ fn table() -> Vec<Case> {
         case(
             "money",
             of(ColumnType::Money, None),
-            "decimal(19,4) | Decimal128(19, 4) | native | exact | reads float64,decimal(18,2) # red:MSSQL_MONEY_BIG",
+            "decimal(19,4) | Decimal128(19, 4) | native | exact | reads float64,decimal(18,2)",
         ),
         case(
             "money4 (smallmoney)",

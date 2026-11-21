@@ -222,6 +222,8 @@ mod live_mssql_crash_recovery;
 mod live_mssql_harm_permission;
 #[path = "live/live_mssql_incremental_isolation.rs"]
 mod live_mssql_incremental_isolation;
+#[path = "live/live_mssql_money.rs"]
+mod live_mssql_money;
 #[path = "live/live_mssql_ns_override.rs"]
 mod live_mssql_ns_override;
 #[path = "live/live_mssql_reconcile_repair.rs"]

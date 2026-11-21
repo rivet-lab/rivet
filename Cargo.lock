@@ -4671,7 +4671,7 @@ dependencies = [
 [[package]]
 name = "tiberius"
 version = "0.13.0"
-source = "git+https://github.com/rivet-lab/tiberius?rev=f84c3c7eb7fceaa2a8f88beaa3afa73213310088#f84c3c7eb7fceaa2a8f88beaa3afa73213310088"
+source = "git+https://github.com/rivet-lab/tiberius?rev=3630ffbc9e5b06379f8dda3f5db72b01fdfaebea#3630ffbc9e5b06379f8dda3f5db72b01fdfaebea"
 dependencies = [
  "async-trait",
  "asynchronous-codec",
@@ -4701,7 +4701,7 @@ dependencies = [
 [[package]]
 name = "tiberius-macros"
 version = "0.1.0"
-source = "git+https://github.com/rivet-lab/tiberius?rev=f84c3c7eb7fceaa2a8f88beaa3afa73213310088#f84c3c7eb7fceaa2a8f88beaa3afa73213310088"
+source = "git+https://github.com/rivet-lab/tiberius?rev=3630ffbc9e5b06379f8dda3f5db72b01fdfaebea#3630ffbc9e5b06379f8dda3f5db72b01fdfaebea"
 dependencies = [
  "proc-macro2",
  "quote",

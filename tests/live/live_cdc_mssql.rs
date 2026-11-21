@@ -416,9 +416,11 @@ fn mssql_money_values_survive_batch_and_cdc() {
     };
     let ckpt = d.path().join("cdc.ckpt");
     mssql_cdc_exec(&format!(
-        "INSERT INTO dbo.{table} VALUES (1, 123.4567, 12.34), (2, NULL, NULL)"
+        "INSERT INTO dbo.{table} VALUES (1, 123.4567, 12.34), (2, NULL, NULL), \
+         (3, 922337203685477.5807, 214748.3647), (4, -922337203685477.5808, -214748.3648), \
+         (5, 1000000000000.0001, -0.0001)"
     ));
-    wait_for_capture(&ci, 2);
+    wait_for_capture(&ci, 5);
 
     let cdc_out = d.path().join("cdc");
     let batch_out = d.path().join("batch");
@@ -445,6 +447,28 @@ fn mssql_money_values_survive_batch_and_cdc() {
         .expect("smallmoney must be Decimal128");
     assert_eq!(sm.value(0), 123_400, "12.34 at scale 4");
     assert!(m.is_null(1) && sm.is_null(1), "real NULLs stay NULL");
+    assert_eq!(
+        m.value(2),
+        i128::from(i64::MAX),
+        "the MONEY maximum is exact"
+    );
+    assert_eq!(
+        m.value(3),
+        i128::from(i64::MIN),
+        "the MONEY minimum is exact"
+    );
+    assert_eq!(m.value(4), 10_000_000_000_000_001, "1e12 + 0.0001 is exact");
+    assert_eq!(
+        sm.value(2),
+        i128::from(i32::MAX),
+        "the SMALLMONEY maximum is exact"
+    );
+    assert_eq!(
+        sm.value(3),
+        i128::from(i32::MIN),
+        "the SMALLMONEY minimum is exact"
+    );
+    assert_eq!(sm.value(4), -1, "-0.0001 is exact");
 
     let cdc = read_one_batch(&cdc_out);
     for (i, field) in batch.schema().fields().iter().enumerate() {

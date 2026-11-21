@@ -339,8 +339,8 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `bigint` | `int64` | `Int64` | integer text | | live matrix |
 | `bit` | `bool` | `Boolean` | 0/1 | | live matrix |
 | `decimal(p,s)` / `numeric(p,s)` | `decimal(p,s)` | `DECIMAL(p,s)` | exact decimal text | scale recovered from the data (tiberius drops declared scale) | live matrix |
-| `money` | `decimal(19,4)` | `DECIMAL(19,4)` | exact decimal text | fixed scale | live matrix |
-| `smallmoney` | `decimal(10,4)` | `DECIMAL(10,4)` | exact decimal text | fixed scale | type_roundtrip |
+| `money` | `decimal(19,4)` | `DECIMAL(19,4)` | exact decimal text | fixed scale; the whole range (±922337203685477.5807) is exact on batch and CDC; a `float64` override gives the nearest double, a narrower `decimal(p,s)` override refuses a value it would round (`RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH`) | live matrix |
+| `smallmoney` | `decimal(10,4)` | `DECIMAL(10,4)` | exact decimal text | fixed scale; exact over the whole range on batch and CDC | type_roundtrip |
 | `real` | `float32` | `Float32` | float text | | live matrix |
 | `float` | `float64` | `Float64` | float text | | live matrix |
 | `date` | `date` | `Date32` | ISO date | | live matrix |

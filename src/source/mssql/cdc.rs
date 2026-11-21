@@ -896,9 +896,11 @@ fn cell_from_data(data: &ColumnData<'_>) -> Option<RivetValue> {
         ColumnData::String(Some(s)) => RivetValue::Bytes(s.as_bytes().to_vec()),
         ColumnData::Guid(Some(g)) => RivetValue::Bytes(g.as_bytes().to_vec()),
         ColumnData::Binary(Some(b)) => RivetValue::Bytes(b.to_vec()),
-        ColumnData::Numeric(Some(n)) => {
+        ColumnData::Numeric(Some(n)) => seeded!(
+            "mssql-money-decoded-as-f64",
+            RivetValue::Float(n.value() as f64 / 10f64.powi(i32::from(n.scale()))),
             RivetValue::Bytes(numeric_to_decimal_string(n.value(), n.scale()).into_bytes())
-        }
+        ),
         _ => return None,
     })
 }
