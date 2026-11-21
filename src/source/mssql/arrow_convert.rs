@@ -1784,12 +1784,16 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        for hints in [None, Some(&fine)] {
-            assert_eq!(
-                warnings(&forced, hints),
-                vec![Vec::<String>::new(), Vec::new()]
-            );
-        }
+        assert_eq!(
+            warnings(&forced, None),
+            vec![Vec::<String>::new(), Vec::new()]
+        );
+        let narrowed = warnings(&forced, Some(&fine));
+        assert!(
+            narrowed[0].len() == 1 && narrowed[0][0].contains("keeps 6"),
+            "a microsecond override over a scale-7 datetime2 says it truncates: {narrowed:?}"
+        );
+        assert!(narrowed[1].is_empty(), "{narrowed:?}");
     }
 
     /// A `time(7)` built at microseconds drops the 100ns tick and keeps whole microseconds.
