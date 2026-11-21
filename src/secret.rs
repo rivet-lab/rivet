@@ -167,6 +167,12 @@ mod tests {
             !crate::redact::redact_secrets("got zeroized-token-0123456789")
                 .contains("zeroized-token-0123456789")
         );
+        let padded = "dG9rZW4tYnktY29uc3RydWN0aW9uLWJhc2U2NA==";
+        let _padded = Secret::new(padded);
+        assert!(
+            !crate::redact::redact_secrets(&format!("got {padded}")).contains(padded),
+            "a base64 token ending in `=` is a credential, not a keyword DSN"
+        );
         let url = "postgresql://reader@db.internal:5432/app-by-construction";
         let _plain = Secret::new(url);
         assert_eq!(
