@@ -381,7 +381,7 @@ fn date_days(t: &OracleTimestamp, name: &str) -> Result<i32> {
     let dt = timestamp_datetime(t)?;
     if dt.time() != chrono::NaiveTime::MIN {
         crate::rivet_bail!(
-            crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH,
+            crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
             "oracle: column {name} = {t} has a time of day, which a `date` override would drop; \
          declare it `timestamp`, or select TRUNC({name}) in a `query:`"
         )
@@ -598,7 +598,7 @@ fn build_column(
             for r in rows {
                 match r.get::<Option<Vec<u8>>>(idx).ora()? {
                     Some(v) => b.append_value(&v).map_err(|_| {
-                        crate::error::coded(crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH, format!(
+                        crate::error::coded(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE, format!(
                             "oracle: column {name} holds a {}-byte value; a `uuid` override needs \
                              exactly {width} bytes (RAW({width}))",
                             v.len()

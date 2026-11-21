@@ -921,7 +921,7 @@ fn uuid_cell(c: Option<&ColumnData<'_>>, column: &str) -> Result<Option<[u8; 16]
         Some(ColumnData::String(Some(s))) => match uuid::Uuid::parse_str(s.trim()) {
             Ok(u) => Ok(Some(*u.as_bytes())),
             Err(e) => Err(anyhow::Error::new(crate::error::CodedError::new(
-                crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH,
+                crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
                 format!(
                     "column `{column}` is declared uuid by a `columns:` override but holds \
                      {s:?}, which is not a uuid ({e}) — rivet refuses rather than writing NULL. \
@@ -964,7 +964,7 @@ fn rescale_i128(value: i128, from_scale: u8, to_scale: u8) -> Result<i128> {
             let factor = 10i128.pow((from_scale - to_scale) as u32);
             if value % factor != 0 {
                 crate::rivet_bail!(
-                    crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH,
+                    crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
                     "mssql decimal rescale is lossy: unscaled value {value} at scale \
                      {from_scale} does not fit column scale {to_scale} (non-zero digits \
                      would be dropped). The column's declared scale was likely lost — \
@@ -2004,7 +2004,7 @@ mod error_code_tests {
     #[test]
     fn money_and_decimal_refusals_carry_their_codes() {
         let err = rescale_i128(123, 2, 0).unwrap_err();
-        crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+        crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
         let err = rescale_i128(i128::MAX, 0, 2).unwrap_err();
         crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
     }
@@ -2339,7 +2339,7 @@ mod money_tests {
         assert_eq!(a.value(0), 1_234);
         let lossy = rows_of(ColumnType::Money, vec![money(123_456)]);
         let err = batch(DataType::Decimal128(19, 2), &lossy, &ColumnOverrides::new()).unwrap_err();
-        crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+        crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
     }
 
     /// Only the two money wire types are money.
