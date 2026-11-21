@@ -142,7 +142,7 @@ fn lossy_scale_override_is_refused_like_the_run(rig: Rig, name: &str) {
         name,
         Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5),
     );
-    assert!(said.contains("1.50"), "{said}");
+    assert!(said.contains("DECIMAL \"1.5"), "{said}");
 }
 
 #[test]
