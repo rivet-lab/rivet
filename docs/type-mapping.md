@@ -53,12 +53,16 @@ stays per engine, in the engine's own decoder
 | text | `string` | `text`, `varchar`, `char`, `name` | `char`, `varchar`, `text` family | `char`, `varchar`, `nchar`, `nvarchar`, `text`, `ntext` | `VARCHAR2`, `NVARCHAR2`, `CHAR`, `NCHAR`, `LONG`, `CLOB`, `NCLOB`; a `NUMBER` no decimal holds |
 | binary | `binary` | `bytea` | `binary`, `varbinary`, `blob` | `binary`, `varbinary`, `image` | `RAW`, `LONG RAW`, `BLOB` |
 | json | `json` | `json`, `jsonb` | `json` | none | `JSON` |
+| time | `time(µs)` | `time` | `time` | `time` | none |
+| uuid | `uuid` | `uuid` | none | `uniqueidentifier` | none |
+| interval | `interval` | `interval` | none | none | `INTERVAL DAY TO SECOND`, `INTERVAL YEAR TO MONTH` |
 
-Types an engine carries alone stay in its own table: PostgreSQL `oid`, `time`,
-`uuid`, `interval`, enums, arrays and the types it does not map; MySQL
-`bigint unsigned`, `bit`, `year`, `time`, `enum`, `set`; SQL Server `money`,
-`smallmoney`, `time`, `uniqueidentifier`, `sql_variant`, CLR types; Oracle
-`INTERVAL DAY TO SECOND` and `INTERVAL YEAR TO MONTH`. MongoDB has no native-type
+Types an engine carries alone stay in its own table: PostgreSQL `oid`, `timetz`, enums,
+arrays and the types it does not map; MySQL `bigint unsigned`, `bit`, `year`, `enum`,
+`set`; SQL Server `money`, `smallmoney`, `sql_variant`, CLR types. Within a shared
+kind the engine keeps its own reading: MySQL `time` beyond 24 hours and negative,
+SQL Server `time(7)` precision, Oracle interval units, PostgreSQL `interval` months,
+days and microseconds. MongoDB has no native-type
 mapping to route: its two columns are fixed, see [MongoDB](#mongodb-json-blob-model).
 CDC does not classify types a second time: it reads the batch mapping of the
 same columns, and its value decoders are per engine.
@@ -177,6 +181,13 @@ the declared type cannot read at all is a different case and is never `NULL`:
   `float8`). Past that the run stops with `RIVET_SOURCE_VALUE_UNREPRESENTABLE`
   (exit 5) naming the column and the value; the remedy is `decimal(20,0)` or
   `float8`, or removing the override.
+- **A decimal under `float8`** (MySQL `DECIMAL`, SQL Server `money`, Oracle `NUMBER`,
+  batch and CDC) is delivered as the same number while the double prints back the
+  same digits (always for up to 15 significant digits, and for the integers up to
+  2^53). Past that the run stops with `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5)
+  naming the column and the value; the remedy is `decimal(p,s)`, or removing the
+  override. `rivet check` reports a `float8` over a source decimal of precision
+  above 15 as `lossy`, never `exact`.
 - **MySQL value of a kind the declared type does not read** (a `DOUBLE`
   under `int8`, a `TIME` under `text`, an integer under `date`) stops with
   `RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH` (exit 1); the remedy is removing the
@@ -190,6 +201,10 @@ the declared type cannot read at all is a different case and is never `NULL`:
 named `uid_*` → probably UUID") — guessing risks misclassifying a non-UUID
 varchar and silently producing wrong-shape Parquet. Operators who want UUID
 semantics on a MySQL column add the override explicitly.
+
+## The change stream per type
+
+`docs/type-capability-matrix.yaml` carries one CDC verdict per delivering row, beside its batch verdicts: `cdc: exact` (the change stream delivers what batch delivers, in the same Arrow type and value) or `cdc: refuse:CODE` with a dated `cdc_reason` (rivet stops by that registered code, never silently). A row without a verdict, a form or a known defect spelled there, or an unregistered code fails `type_capability_matrix_guard`. The release oracle's change-stream grid (`property_no_silent_null_cdc`) grades each column against it: an `exact` column that stops, or a `refuse` column that delivers or stops by another code, is `CDC_VERDICT_DIFFERS`; `live_cdc_type_parity` reads the same rows and compares batch, snapshot, stream and the ClickHouse load value for value.
 
 ## Test commands
 
@@ -332,6 +347,7 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `interval[]` | `list<interval>` | `List<Utf8>` | — | 1-D arrays; each element is its ISO 8601 duration text | type capability ledger |
 | `oid[]` | `list<int64>` | `List<Int64>` | — | 1-D arrays; read at the unsigned 32-bit width | type capability ledger |
 | enum array | `list<enum>` | `List<Utf8>` | — | 1-D arrays; each element is its label | type capability ledger |
+| any other type with no Arrow mapping: `inet`, `cidr`, `macaddr`, `macaddr8`, `bit`, `varbit`, `money`, `"char"`, `timetz`, `xml`, `tsvector`, `tsquery`, `point`, `line`, `lseg`, `box`, `path`, `polygon`, `circle`, ranges and multiranges, `regclass`, `regtype`, `xid`, `xid8`, `cid`, `tid`, `pg_lsn`, composites, extension types, and arrays of them | `string` (text form `server_text`) | `Utf8` labelled `rivet.text_form = server_text` | escaped UTF-8 | batch delivers the text the server prints for the value (`inet` without a `/32` or `/128` host mask, as the server prints it); the session is fixed to `datestyle ISO, MDY`, `TimeZone UTC`, `extra_float_digits 3`, `intervalstyle postgres`, `bytea_output hex`, so a range of dates or timestamps reads as ISO text; `money` is printed in the server's `lc_monetary`; a column declared in `columns:` keeps its declaration; a bare `numeric` is still refused. CDC delivers the same text, `bit` and `bit varying` (`B'110'` unwrapped to `110`) and every array of these types included | live `live_pg_server_text`, `live_cdc_value_parity` |
 | nullable / all-null | — | null bitmap preserved | empty cells | `note_nullable`, `note_all_null` | type_roundtrip |
 | large `text` | `string` | `Utf8` | escaped | 2k–5k chars | type_roundtrip |
 
@@ -353,7 +369,7 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `time` | `string` | `Utf8` | `[-]hh:mm:ss.ffffff` text (`rivet.text_form: time_beyond_day`) | a MySQL `TIME` is a signed duration of -838:59:59 to 838:59:59, which `Time64(µs)` (00:00..24:00) cannot hold, so every value is delivered as text, batch and CDC, in a `logical_string` column | live matrix |
 | `varchar` / `text` | `string` / `text` | `Utf8` | escaped UTF-8 | | live matrix |
 | `json` | `json` | `Utf8` + Parquet `LogicalType::Json` (via `arrow.json` extension) | JSON string | | live matrix |
-| `binary` / `varbinary` / `blob` | `binary` | `Binary` | hex in CSV | charset 63 / binary payload | type_roundtrip |
+| `binary` / `varbinary` / `blob` | `binary` | `Binary` | hex in CSV | charset 63 / binary payload; under `columns: {c: string}` a value that is valid UTF-8 is delivered as that text and any other byte stops the run with `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (declare `binary`, or select `HEX(c)` / `ST_AsText(c)`), never U+FFFD | type_roundtrip, live matrix |
 | `bit(1)` | `bool` | `Boolean` | | | golden |
 | `bit(n)`, 1 < n <= 63 | `int64` | `Int64` | | avoids silent truncation | type_roundtrip |
 | `bit(64)` | `u_int64` → `UInt64` | `UInt64` | integer text | every value, including those with bit 63 set; `Int64` holds half of them | type_roundtrip |
@@ -378,7 +394,7 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `bigint` | `int64` | `Int64` | integer text | | live matrix |
 | `bit` | `bool` | `Boolean` | 0/1 | | live matrix |
 | `decimal(p,s)` / `numeric(p,s)` | `decimal(p,s)` | `DECIMAL(p,s)` | exact decimal text | scale recovered from the data (tiberius drops declared scale) | live matrix |
-| `money` | `decimal(19,4)` | `DECIMAL(19,4)` | exact decimal text | fixed scale; the whole range (±922337203685477.5807) is exact on batch and CDC; a `float64` override gives the nearest double, a narrower `decimal(p,s)` override refuses a value it would round (`RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH`) | live matrix |
+| `money` | `decimal(19,4)` | `DECIMAL(19,4)` | exact decimal text | fixed scale; the whole range (±922337203685477.5807) is exact on batch and CDC; a `float64` override is delivered while the double prints back the same digits and refused `RIVET_SOURCE_VALUE_UNREPRESENTABLE` for a value it would round, a narrower `decimal(p,s)` override refuses a value it would round (`RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH`) | live matrix |
 | `smallmoney` | `decimal(10,4)` | `DECIMAL(10,4)` | exact decimal text | fixed scale; exact over the whole range on batch and CDC | type_roundtrip |
 | `real` | `float32` | `Float32` | float text | | live matrix |
 | `float` | `float64` | `Float64` | float text | | live matrix |
@@ -451,9 +467,10 @@ CDC (change streams) emits the same two-column shape prefixed with the
 
 ## Known gaps (tracked)
 
-1. **Nested arrays, ranges, inet, PostGIS, geometry**: not in the type matrix —
-   they resolve to `Unsupported` and fail at schema build unless a `columns:`
-   override maps them.
+1. **Multi-dimensional arrays**: not in the type matrix; they fail at the read
+   unless a `columns:` override maps them. A PostgreSQL type with no Arrow
+   mapping (ranges, `inet`, geometric types, PostGIS and the rest of the
+   PostgreSQL row above) is delivered as the server's text.
 2. **Nullability**: every exported column is `OPTIONAL`; a source `NOT NULL`
    constraint is not propagated into the Parquet schema (ADR-0016, deferred to
    v0.8 Phase A).
@@ -582,6 +599,8 @@ two independent engines and pins the autoload type. The full matrix:
 | `binary` (`bytea` / `BLOB`)   | `BLOB`             | `Nullable(String)` (raw bytes)     |
 | `bool`                        | `BOOLEAN`          | `Nullable(Bool)`                   |
 | `list<inner>`                 | `inner[]`          | `Array(Nullable(inner))`           |
+
+A NULL list and an empty list are indistinguishable at ClickHouse and BigQuery (an `Array` and a `REPEATED` field cannot hold a NULL list); `columns: {col: string}` keeps NULL.
 
 Round-trip values that the suite pins per row: `sum(decimal * 10^scale)`
 matches the in-process Arrow check; `json_valid` / `isValidJSON` returns true

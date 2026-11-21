@@ -187,11 +187,18 @@ pub struct TargetInput<'a> {
     pub fidelity: TypeFidelity,
 }
 
+static TEXT_DELIVERED: RivetType = RivetType::String;
+
 impl<'a> From<&'a TypeMapping> for TargetInput<'a> {
+    /// A text-delivered column resolves as the text type on every target.
     fn from(m: &'a TypeMapping) -> Self {
+        let rivet_type = match m.delivery {
+            crate::types::Delivery::Text(_) => &TEXT_DELIVERED,
+            crate::types::Delivery::Native => &m.rivet_type,
+        };
         TargetInput {
             column_name: &m.column_name,
-            rivet_type: &m.rivet_type,
+            rivet_type,
             arrow_type: m.arrow_type.as_ref(),
             fidelity: m.fidelity,
         }
@@ -1285,6 +1292,33 @@ mod tests {
 
     fn bq(rt: &RivetType) -> TargetColumnSpec {
         ExportTarget::BigQuery.resolve_column(input(rt))
+    }
+
+    #[test]
+    fn a_server_text_column_resolves_as_text_on_every_target() {
+        let mapping = crate::types::TypeMapping {
+            column_name: "c".into(),
+            source_native_type: "money".into(),
+            rivet_type: RivetType::Unsupported {
+                native_type: "money".into(),
+                reason: "no Arrow mapping".into(),
+            },
+            arrow_type: Some(DataType::Utf8),
+            fidelity: TypeFidelity::LogicalString,
+            nullable: true,
+            warnings: Vec::new(),
+            delivery: crate::types::Delivery::Text(crate::types::TextForm::ServerText),
+            refusal: None,
+        };
+        for target in [
+            ExportTarget::DuckDb,
+            ExportTarget::BigQuery,
+            ExportTarget::Snowflake,
+            ExportTarget::ClickHouse,
+        ] {
+            let spec = target.resolve_column(TargetInput::from(&mapping));
+            assert_eq!(spec.status, TargetStatus::Ok, "{target:?}: {:?}", spec.note);
+        }
     }
 
     #[test]

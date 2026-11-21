@@ -560,15 +560,14 @@ Notes:
   `SELECT pg_drop_replication_slot('rivet_slot');`.
 - `wal2json` / `pgoutput` are alternatives to `test_decoding`; `test_decoding` is
   always built in and needs no extension.
-- **`bit` / `bit varying` columns are refused.** `test_decoding` prints a bit string as the
-  literal `B'110'` where the server's text is `110`, so rivet stops with
-  `RIVET_SOURCE_CDC_CELL_UNSUPPORTED` (exit 5) instead of delivering a value the batch run never
-  writes (batch refuses these columns with `RIVET_TYPE_UNSAFE_MAPPING`). A captured table whose
-  catalog holds such a column is refused before the slot, the snapshot or any file is written.
-  Change the column to text (`ALTER TABLE ... ALTER COLUMN ... TYPE text USING ...::text`), drop
-  the export's slot (`SELECT pg_drop_replication_slot('rivet_slot');`: changes already in the
-  slot keep the bit type and would refuse again), then re-baseline; the re-baseline creates the
-  slot again at the current position and its snapshot holds every row.
+- **`bit` / `bit varying` columns and arrays of types without an Arrow mapping are delivered as the
+  server's text, as batch delivers them.** `test_decoding` prints a bit string as the literal
+  `B'110'`; rivet unwraps it to `110`, the text batch writes. An array of a type batch delivers as
+  the server's text (`inet[]`, `cidr[]`, `macaddr[]`, `point[]`, `int4range[]`, `tstzrange[]`,
+  `bit(n)[]`, `money[]`, `daterange[]` and the like) arrives as the server's own array literal in
+  one text column, with no list column; the set is read from the catalog through the same
+  function batch uses. A bit string that arrives in any other form is refused with
+  `RIVET_SOURCE_CDC_CELL_UNSUPPORTED` rather than delivered as the decoder's text.
 - A schema, table or column name that holds `: `, `[` or `]:` is read whole; the line is cut
   at the operation and at each quoted name's closing quote, never at the first separator.
 
@@ -1192,8 +1191,7 @@ engines. What remains:
   and bytea (real `List` columns, inner NULLs preserved) and `NUMERIC`/`DECIMAL`
   above precision 38 (`Decimal256`) — is byte-identical to the batch export.
   Where the modes differ today (PostgreSQL
-  bare `numeric`, `money`, `inet`, `cidr` and numeric arrays:
-  batch refuses the column, CDC carries the server's text) the difference is
-  declared in `docs/type-capability-matrix.yaml`. Enforced per engine by the live
+  bare `numeric` and numeric arrays: batch refuses the column, CDC carries the
+  server's text) the difference is declared in `docs/type-capability-matrix.yaml`. Enforced per engine by the live
   `*_batch_and_cdc_deliver_every_ledger_row_alike` tests, generated from that
   ledger.
