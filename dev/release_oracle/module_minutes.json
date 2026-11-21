@@ -49,6 +49,7 @@
   "live_cdc_schema_drift": {"tests": 7, "minutes": 5.28},
   "live_cdc_source_connections": {"tests": 6, "minutes": 0.3},
   "live_cdc_type_parity": {"tests": 9, "minutes": 2.09},
+  "live_cdc_value_parity": {"tests": 6, "minutes": 3.0},
   "live_chaos": {"tests": 3, "minutes": 1.55},
   "live_cli_flags": {"tests": 44, "minutes": 1.7},
   "live_clickhouse_load": {"tests": 60, "minutes": 16.03},

@@ -948,7 +948,7 @@ const PIN_INDEPENDENT: usize = 126; // ratchet-pin: cdc-census-independent (revi
 // 139 -> 140 (2026-11-16, #714): the Oracle whole-table cell reads the delivered parts with arrow against the rows the test wrote; the rig oracle grades each run.
 // 142 -> 147 (2026-11-16, #715): the MongoDB column-grants cells read the delivered parts with arrow against the fields the view lists and the values the test wrote; the hidden bytes are asserted absent.
 // 147 -> 155 (2026-11-19, #713): the SQL Server column-grants cells read the delivered parts with arrow against the rows and values the test wrote; the hidden bytes are asserted absent.
-const PIN_SHARED_CODEC: usize = 155; // ratchet-pin: cdc-census-shared-codec (review 2027-02-01)
+const PIN_SHARED_CODEC: usize = 154; // ratchet-pin: cdc-census-shared-codec (review 2027-02-01)
 const PIN_SELF_COUNTER: usize = 6; // ratchet-pin: cdc-census-self-counter (review 2027-02-01)
 // 2026-09-28: +1 presence — the SQL Server undecodable-cell refusal, whose oracle is the refusal.
 // 2026-09-29: +2 presence — the PG CDC LMT-timezone and DOMAIN parity cells compare CDC to batch output.
@@ -979,7 +979,7 @@ const PIN_SELF_COUNTER: usize = 6; // ratchet-pin: cdc-census-self-counter (revi
 // 115 -> 117 (2026-11-19, #712): two PostgreSQL column-grants cells whose oracle is a coded refusal (a sealed plan after a revoke, a BIT column the role may not read).
 // 117 -> 122 (2026-11-19, #713): five SQL Server column-grants cells whose oracle is a coded refusal, the server's own refusal text, or an unmoved checkpoint.
 // 122 -> 121 (2026-11-20, MYSQL_TIME_RANGE_REFUSED): the MySQL TIME refusal-text capture cell now compares the stream text with the source, so it left the presence bucket.
-const PIN_PRESENCE: usize = 121; // ratchet-pin: cdc-census-presence (review 2027-02-01)
+const PIN_PRESENCE: usize = 119; // ratchet-pin: cdc-census-presence (review 2027-02-01)
 
 /// TIER 2 (harness audit, 2026-08-29): a test whose NAME makes a
 /// COMPLETENESS claim must carry a class-(a) INDEPENDENT oracle — not merely
