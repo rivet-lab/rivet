@@ -21,10 +21,7 @@ use crate::source::pg_numeric_wire::{
     PgNumericWire, numeric_wire_normalized_plain, numeric_wire_special_text,
 };
 use crate::types::kind::CommonKind;
-use crate::types::{
-    ColumnOverrides, RivetType, SourceColumn, TimeUnit as RivetTimeUnit, TypeMapping,
-    build_arrow_field,
-};
+use crate::types::{ColumnOverrides, RivetType, SourceColumn, TypeMapping, build_arrow_field};
 
 use crate::source::value_within_ceiling;
 
@@ -265,6 +262,9 @@ fn pg_common_kind(t: &Type) -> Option<CommonKind> {
         Type::DATE => CommonKind::Date,
         Type::TIMESTAMP => CommonKind::Naive,
         Type::TIMESTAMPTZ => CommonKind::Utc,
+        Type::TIME => CommonKind::Time,
+        Type::UUID => CommonKind::Uuid,
+        Type::INTERVAL => CommonKind::Interval,
         Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME => CommonKind::Text,
         Type::BYTEA => CommonKind::Binary,
         Type::JSON | Type::JSONB => CommonKind::Json,
@@ -291,12 +291,6 @@ fn pg_type_to_rivet(t: &Type) -> RivetType {
     }
     match *t {
         Type::OID => RivetType::Int64,
-        Type::TIME => RivetType::Time {
-            unit: RivetTimeUnit::Microsecond,
-        },
-        Type::UUID => RivetType::Uuid,
-        Type::INTERVAL => RivetType::Interval,
-
         _ => match t.kind() {
             Kind::Enum(_) => RivetType::Enum,
             Kind::Array(elem_type) => RivetType::List {
@@ -339,6 +333,87 @@ pub(super) fn rivet_type_for_pg_column(
     )
 }
 
+/// Whether a wire type has no Rivet mapping and is delivered as the server's own text; a bare `numeric` keeps its refusal.
+pub(super) fn pg_server_text(t: &Type) -> bool {
+    fn unmapped(r: &RivetType) -> bool {
+        match r {
+            RivetType::Unsupported { .. } => *r != bare_numeric(),
+            RivetType::List { inner } => unmapped(inner),
+            _ => false,
+        }
+    }
+    seeded!(
+        "pg-unmapped-type-refused",
+        false,
+        unmapped(&pg_type_to_rivet(t))
+    )
+}
+
+/// The SQL that renders `expr`, a cell of wire type `t`, as the server's own output text.
+fn pg_text_render(t: &Type, expr: &str) -> String {
+    if *t == Type::INET && seeded!("pg-inet-host-text-gains-a-mask", false, true) {
+        return format!(
+            "CASE WHEN masklen({expr}) = CASE family({expr}) WHEN 4 THEN 32 ELSE 128 END \
+             THEN host({expr}) ELSE {expr}::text END"
+        );
+    }
+    format!("{expr}::text")
+}
+
+/// `sql` read through a projection that renders every server-text column as text, or `None` when no column is one.
+pub(super) fn pg_server_text_query(sql: &str, columns: &[(&str, &Type)]) -> Option<String> {
+    if !columns.iter().any(|(_, t)| pg_server_text(t)) {
+        return None;
+    }
+    let names = (0..columns.len())
+        .map(|i| format!("_c{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let projection = columns
+        .iter()
+        .enumerate()
+        .map(|(i, (name, t))| {
+            let cell = format!("_rivet_text._c{i}");
+            let value = if pg_server_text(t) {
+                pg_text_render(t, &cell)
+            } else {
+                cell
+            };
+            let name = crate::sql::quote_ident(crate::config::SourceType::Postgres, name);
+            format!("{value} AS {name}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "SELECT {projection} FROM ({sql}\n) AS _rivet_text ({names})"
+    ))
+}
+
+/// The mapping of one PostgreSQL column: its override, else its autodetected type, an unmapped type as the server's text.
+pub(super) fn pg_column_mapping(
+    col: &postgres::Column,
+    column_overrides: &ColumnOverrides,
+    numeric_hints: Option<&HashMap<String, (u8, i8)>>,
+) -> crate::error::Result<TypeMapping> {
+    let rivet = rivet_type_for_pg_column(col, column_overrides, numeric_hints)?;
+    let source = SourceColumn::simple(col.name(), col.type_().name(), true);
+    let overridden = column_overrides.contains_key(col.name());
+    Ok(pg_delivery(
+        TypeMapping::from_source(&source, rivet),
+        col.type_(),
+        overridden,
+    ))
+}
+
+/// `mapping` of a column of wire type `t`: an undeclared unmapped type is delivered as the server's text.
+pub(super) fn pg_delivery(mapping: TypeMapping, t: &Type, overridden: bool) -> TypeMapping {
+    if !overridden && pg_server_text(t) {
+        mapping.with_text(crate::types::TextForm::ServerText)
+    } else {
+        mapping
+    }
+}
+
 /// Build an Arrow `Schema` from PostgreSQL `Column` descriptors by routing each column through the `SourceColumn → RivetType → TypeMapping → Field` pipeline.
 pub(super) fn pg_columns_to_schema(
     columns: &[postgres::Column],
@@ -348,9 +423,7 @@ pub(super) fn pg_columns_to_schema(
     let mut fields: Vec<Field> = Vec::with_capacity(columns.len());
     let mut errors: Vec<String> = Vec::new();
     for col in columns {
-        let rivet = rivet_type_for_pg_column(col, column_overrides, numeric_catalog_hints)?;
-        let source = SourceColumn::simple(col.name(), col.type_().name(), true);
-        let mapping = TypeMapping::from_source(&source, rivet);
+        let mapping = pg_column_mapping(col, column_overrides, numeric_catalog_hints)?;
         match build_arrow_field(&mapping) {
             Some(field) => fields.push(field),
             None => {
@@ -1420,6 +1493,67 @@ mod cell_refusal_tests {
 }
 
 #[cfg(test)]
+mod server_text_projection_tests {
+    use super::{pg_server_text, pg_server_text_query, pg_text_render};
+    use postgres::types::Type;
+
+    /// A type with no Arrow mapping, and a list of one, is server text; a mapped type and a bare numeric are not.
+    #[test]
+    fn only_a_type_with_no_mapping_is_server_text() {
+        for t in [
+            Type::INET,
+            Type::CIDR,
+            Type::MACADDR,
+            Type::MONEY,
+            Type::INET_ARRAY,
+        ] {
+            assert!(pg_server_text(&t), "{t} is server text");
+        }
+        for t in [
+            Type::INT4,
+            Type::TEXT,
+            Type::NUMERIC,
+            Type::INT4_ARRAY,
+            Type::TEXT_ARRAY,
+        ] {
+            assert!(!pg_server_text(&t), "{t} is not server text");
+        }
+    }
+
+    /// An `inet` cell loses a host mask only, every other type is the server's `::text`.
+    #[test]
+    fn a_cell_is_rendered_as_its_text_and_an_inet_without_a_host_mask() {
+        assert_eq!(
+            pg_text_render(&Type::INET, "c"),
+            "CASE WHEN masklen(c) = CASE family(c) WHEN 4 THEN 32 ELSE 128 END THEN host(c) ELSE c::text END"
+        );
+        assert_eq!(pg_text_render(&Type::MONEY, "c"), "c::text");
+        assert_eq!(pg_text_render(&Type::CIDR, "c"), "c::text");
+    }
+
+    /// A query with no server-text column is left as it is; with one, only that column is rendered and the others pass through by name.
+    #[test]
+    fn the_projection_renders_the_server_text_columns_and_nothing_else() {
+        assert_eq!(
+            pg_server_text_query("SELECT 1", &[("a", &Type::INT4), ("b", &Type::TEXT)]),
+            None
+        );
+        assert_eq!(pg_server_text_query("SELECT 1", &[]), None);
+        assert_eq!(
+            pg_server_text_query(
+                "SELECT * FROM t",
+                &[("id", &Type::INT4), ("m\"x", &Type::MONEY)]
+            ),
+            Some(
+                "SELECT _rivet_text._c0 AS \"id\", _rivet_text._c1::text AS \"m\"\"x\" \
+                 FROM (SELECT * FROM t\n) AS _rivet_text (_c0, _c1)"
+                    .to_string()
+            )
+        );
+    }
+}
+
+#[cfg(test)]
 mod temporal_refusal_tests {
     use super::{PgInt, PgTimeMicros};
     use crate::types::MICROS_PER_DAY;
@@ -1600,10 +1734,10 @@ mod type_map_tests {
             (Type::BYTEA, Some(Binary)),
             (Type::JSON, Some(Json)),
             (Type::JSONB, Some(Json)),
+            (Type::TIME, Some(Time)),
+            (Type::UUID, Some(Uuid)),
+            (Type::INTERVAL, Some(Interval)),
             (Type::OID, None),
-            (Type::TIME, None),
-            (Type::UUID, None),
-            (Type::INTERVAL, None),
             (Type::INT4_ARRAY, None),
             (Type::MONEY, None),
         ];

@@ -1358,7 +1358,7 @@ fn cdc_replication_grant_revoked_mid_life_fails_loud_and_resumes_after_regrant()
     let root_url = MYSQL_CDC_URL.replace("rivet:rivet@", "root:rivet@");
     let mut root = mysql::Conn::new(mysql::Opts::from_url(&root_url).unwrap()).unwrap();
     // A dedicated user so revoking cannot break the parallel suite.
-    let user = unique_name("cdc_u");
+    let user = mysql_user_name("cdc_u");
     root.query_drop(format!("DROP USER IF EXISTS '{user}'@'%'"))
         .unwrap();
     root.query_drop(format!("CREATE USER '{user}'@'%' IDENTIFIED BY 'pw'"))

@@ -89,6 +89,7 @@ jobs:
           # nightly after the cdc-oracle suite landed failed exactly there.
           mkdir -p tests/.live-tmp
           docker compose --profile pool --profile loaders --profile cdc --profile replica --profile governor --profile tz --profile mysql-stmt up -d postgres postgres-state mysql mssql mssql-governor minio fake-gcs azurite toxiproxy pgbouncer pgbouncer-state proxysql mysql-tz proxysql-tz clickhouse-tz duckdb clickhouse postgres-cdc mysql-cdc mysql-reset mssql-cdc mysql-primary mysql-replica mysql-replica-nolog oracle mysql-stmt-84-lctn1 mongo
+          uv run --frozen python -m dev.release_oracle.stand_stacks up full
           sudo chmod -R 0777 tests/.live-tmp
 
       - name: Wait for services
@@ -288,7 +289,7 @@ jobs:
       - name: Start Mongo stack
         run: |
           mkdir -p tests/.live-tmp
-          docker compose --profile replica --profile shard up -d --wait mongo mongo-rs mongo-rs2-a mongo-rs2-b mongos toxiproxy minio fake-gcs duckdb clickhouse
+          docker compose --profile replica --profile shard up -d --wait mongo mongo-rs2-a mongo-rs2-b mongos toxiproxy minio fake-gcs duckdb clickhouse
           uv run --frozen python -m dev.release_oracle.stand_stacks up mongo
           sudo chmod -R 0777 tests/.live-tmp
 
@@ -628,6 +629,7 @@ jobs:
           fi
           cat "$RUNNER_TEMP/compose.log"
           [ "$(cat "$RUNNER_TEMP/compose.rc")" = 0 ]
+          uv run --frozen python -m dev.release_oracle.stand_stacks up full
           sudo chmod -R 0777 tests/.live-tmp
           df -h /
 
