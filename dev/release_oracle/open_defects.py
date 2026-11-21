@@ -106,6 +106,17 @@ def _self_test() -> None:
     all_recorded = grade(_SAMPLE, {"m::open_defect_as_recorded": ledger["m::open_defect_as_recorded"]})
     assert all_recorded["OTHER REASON"] == [] and len(all_recorded["NO ENTRY"]) == 3
     assert all(f"::{OPEN}" in cell for cell in recorded()), "the real ledger's open cells are named open_defect_"
+    import contextlib
+    import io
+    import tempfile
+    with tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(io.StringIO()):
+        empty, ran_none = os.path.join(d, "empty.log"), os.path.join(d, "none.log")
+        open(empty, "w").close()
+        with open(ran_none, "w") as f:
+            f.write("    Starting 1 test across 1 binary\n        PASS [   1.0s] (1/1) rivet-cli::live_suite m::a_regular_cell\n")
+        graded_empty, graded_none = main([empty]), main([ran_none])
+    assert graded_empty == 2, "an empty log graded as a pass (#1098)"
+    assert graded_none == 2, "a run with no open_defect_ cell graded as a pass (#1098)"
     print("self-test ok: a cell red for another reason, a fixed one and one without an entry each fail; a cell not run is listed")
 
 
@@ -116,6 +127,9 @@ def main(argv: list[str]) -> int:
     if argv:
         with open(argv[0], encoding="utf-8", errors="replace") as f:
             log = f.read()
+        if "Starting " not in log:
+            print(f"open defects: {argv[0]} holds no nextest run; nothing was graded")
+            return 2
     else:
         ran = subprocess.run(RUN, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
                              env=nextest_pinned(dict(os.environ)))
@@ -124,7 +138,12 @@ def main(argv: list[str]) -> int:
             print(log[-3000:])
             print("open defects: nextest did not start; nothing was graded")
             return 2
-    return report(grade(log, recorded()))
+    kinds = grade(log, recorded())
+    if not any(kinds[k] for k in ("as recorded", "OTHER REASON", "FIXED", "NO ENTRY")):
+        report(kinds)
+        print("open defects: no open_defect_ cell ran; nothing was graded")
+        return 2
+    return report(kinds)
 
 
 if __name__ == "__main__":

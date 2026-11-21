@@ -35,7 +35,7 @@ def regen(tag: str) -> int:
     try:
         shutil.copy(ROOT / TEST, tree / TEST)
         (tree / DIGESTS).parent.mkdir(parents=True, exist_ok=True)
-        env = {**os.environ, "CARGO_TARGET_DIR": str(ROOT / "target" / "parquet-golden")}
+        env = {**os.environ, "CARGO_TARGET_DIR": str(ROOT / "target" / "parquet-golden"), "RIVET_PARQUET_GOLDEN_WRITE": "1"}
         subprocess.run(
             ["cargo", "test", "--locked", "--test", "parquet_bytes_golden", "parquet_bytes_dump",
              "--", "--ignored"],
