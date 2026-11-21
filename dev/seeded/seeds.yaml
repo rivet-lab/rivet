@@ -1909,7 +1909,7 @@ seeds:
 
   - name: mysql-string-override-replaces-bytes
     class: "a MySQL binary column (VARBINARY, BLOB, GEOMETRY) declared `string` in `columns:` writes U+FFFD in place of every byte that is not UTF-8 instead of the bytes or a coded refusal, exit 0"
-    history: "verifier probe 2026-11-21 (unit level): WKB byte 0xf8 delivered as `ef bf bd`; RED on main 2026-11-21 (`a_string_column_holding_non_utf8_bytes_is_refused_instead_of_replaced` built Ok with U+FFFD in the string); PostgreSQL and SQL Server refuse the pair, Oracle delivers upper hex"
+    history: "verifier probe 2026-11-21 (unit level): WKB byte 0xf8 delivered as `ef bf bd`; RED on main 2026-11-21 (`a_string_column_holding_non_utf8_bytes_is_refused_instead_of_replaced` built Ok with U+FFFD in the string); PostgreSQL and SQL Server refuse the pair by code, Oracle delivers upper hex"
     scope: source
     switch: mysql-string-override-replaces-bytes
     engines:
@@ -1919,9 +1919,9 @@ seeds:
           - the_remedy_of_the_refusal_delivers_the_bytes_mysql
           - "lib:a_string_column_holding_non_utf8_bytes_is_refused_instead_of_replaced"
       postgres:
-        na: "the MySQL Utf8 builder's lossy fallback is the seam; PostgreSQL refuses a bytea under `string` at check (a_binary_column_declared_string_never_loses_a_byte_postgres)"
+        na: "the MySQL Utf8 builder's lossy fallback is the seam; PostgreSQL refuses a bytea under `string` by code RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH before any write (a_binary_column_declared_string_never_loses_a_byte_postgres)"
       mssql:
-        na: "the MySQL Utf8 builder's lossy fallback is the seam; SQL Server refuses a varbinary under `string` (a_binary_column_declared_string_never_loses_a_byte_mssql)"
+        na: "the MySQL Utf8 builder's lossy fallback is the seam; SQL Server refuses a varbinary under `string` by code RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH before any write (a_binary_column_declared_string_never_loses_a_byte_mssql)"
       mongo:
         na: "a MongoDB document rides one verbatim `document` column, so no column is declared binary and retyped"
       oracle:
