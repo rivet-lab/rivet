@@ -174,7 +174,7 @@ mod tests {
             url,
             "a URL is left to the URL scanner"
         );
-        let dsn = "host=h user=u password=Dsn0nlyPw dbname=by-construction";
+        let dsn = "host=h user=u password=DsnPassword7 dbname=by-construction";
         let _dsn = Secret::new(dsn);
         assert_eq!(
             crate::redact::redact_secrets(dsn),
