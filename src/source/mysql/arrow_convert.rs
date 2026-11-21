@@ -786,6 +786,18 @@ fn unparsed<T>(column: &str, target: &str, bv: &[u8]) -> Result<T> {
     )
 }
 
+/// A float8 read from text: the same number when the float prints it back, refused by code when it would round or is not a number.
+fn float_of_bytes(column: &str, bv: &[u8]) -> Result<f64> {
+    match bytes_to_str(bv)
+        .map(|s| crate::types::decimal::exact_f64_of_text(column, s))
+        .transpose()?
+        .flatten()
+    {
+        Some(v) => Ok(v),
+        None => unparsed(column, "float", bv),
+    }
+}
+
 /// True for the zero date MySQL stores in place of a missing one.
 fn is_zero_date(bv: &[u8]) -> bool {
     bv.starts_with(b"0000-00-00")
@@ -1006,14 +1018,7 @@ fn build_array(
                     {
                         b.append_value(exact_f64(*v as i128, column)?)
                     }
-                    Some(Value::Bytes(bv)) => match bytes_to_str(bv)
-                        .map(|s| crate::types::decimal::exact_f64_of_text(column, s))
-                        .transpose()?
-                        .flatten()
-                    {
-                        Some(v) => b.append_value(v),
-                        None => b.append_value(unparsed(column, "float", bv)?),
-                    },
+                    Some(Value::Bytes(bv)) => b.append_value(float_of_bytes(column, bv)?),
                     other => {
                         null_or_refuse(column, arrow_type, other)?;
                         b.append_null();
