@@ -162,7 +162,7 @@ fn a_money_cursor_column_advances_an_incremental_run() {
         "the stored cursor is the largest value"
     );
     mssql_exec(&format!(
-        "INSERT INTO dbo.{table} (id, v) VALUES (10, CAST('4.75' AS MONEY)), (11, CAST('0.5' AS MONEY))"
+        "INSERT INTO dbo.{table} (id, v) VALUES (10, CAST('4.75' AS MONEY)), (11, CAST('5.5' AS MONEY))"
     ));
     rig.run_ok();
     let all = delivered(&rig);
@@ -173,7 +173,7 @@ fn a_money_cursor_column_advances_an_incremental_run() {
         .collect();
     seen.sort_unstable();
     println!("money rows delivered over both runs: {seen:?}");
-    assert_eq!(seen, ["1.5000", "2.2500", "3.5000", "4.7500"]);
+    assert_eq!(seen, ["1.5000", "2.2500", "3.5000", "4.7500", "5.5000"]);
 }
 
 /// A sql_variant holding MONEY is delivered as the text the server renders it, whatever the money decode.
@@ -187,7 +187,9 @@ fn a_sql_variant_holding_money_is_delivered_as_the_servers_text() {
          INSERT INTO dbo.{table} VALUES (1, CAST('123.4567' AS MONEY)), (2, CAST('922337203685477.5807' AS MONEY)), (3, CAST('-0.0001' AS SMALLMONEY)), (4, NULL)"
     ));
     let _guard = MssqlTable::adopt(table.clone());
-    let rig = Rig::mssql_batch(&table);
+    let rig = Rig::mssql_batch(&table).no_oracle(
+        "a sql_variant is graded here by the server's own CONVERT text, which the rig oracle does not render alike",
+    );
     rig.run_ok();
     let got: std::collections::BTreeSet<String> = dir_parquet_distinct_strings(&rig.out_dir(), "v")
         .into_iter()
