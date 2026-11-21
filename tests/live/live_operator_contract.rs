@@ -3736,68 +3736,37 @@ fn a_cell_the_stream_cannot_carry_is_refused_by_code_postgres() {
     );
 }
 
-/// The walk out of a refused captured cell on an engine whose stream keeps no server-side position: `s` is baselined with one drained change, `hostile` writes the cell, the checkpoint deleted alone is refused under the baseline, each of `named` delivers as printed, and `leave_out` (the column dropped at the source, last since it cannot be undone) with the re-baseline recipe delivers the source.
-fn a_captured_cell_is_refused_by_code_and_walked_out(
-    mut s: CdcScenario,
-    hostile: &str,
-    code: Refused<'static>,
-    named: Vec<Remedy<'static>>,
-    leave_out: impl FnOnce() + 'static,
-) {
-    s.insert(1);
-    s.settle();
-    s.rig.run_ok();
-    s.insert(2);
-    s.settle();
-    s.rig.run_ok();
-    s.sql(hostile);
-    s.settle();
-    let mut remedies = vec![deletes_only_the_checkpoint(Then::Refuses(
-        CHECKPOINT_INVALID,
-    ))];
-    remedies.extend(named);
-    remedies.push(Remedy::new(
-        "leave the column out of the capture",
-        Then::DeliversTheSource,
-        move |r| {
-            leave_out();
-            apply_rebaseline_remedy(r, true)
-        },
-    ));
-    s.rig
-        .refuses_twice_and_walks_out(&["run"], &[], code, remedies);
-}
-
-/// `ALTER TABLE .. DROP COLUMN` on the MySQL CDC instance, for a remedy closure.
-fn mysql_cdc_drop_column(table: &str, column: &str) {
-    use mysql::prelude::Queryable as _;
-    cdc_conn()
-        .query_drop(format!("ALTER TABLE {table} DROP COLUMN {column}"))
-        .expect("leave the column out at the source");
-}
-
-/// MySQL: a `BIT(64)` with bit 63 set, past the stream's Int64 column, is refused as `RIVET_SOURCE_CDC_CELL_UNSUPPORTED` (exit 5) on every run; the checkpoint deleted alone is refused under the baseline; "map the column to decimal(20,0)" (a `columns:` override) delivers the stream as it stands, and the column dropped at the source with the re-baseline recipe delivers the source.
+/// MySQL: a `BIT(64)` with bit 63 set is delivered by a stream as the UInt64 the source holds, and the rig oracle grades the delivered rows against the source.
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
-fn a_cell_the_stream_cannot_carry_is_refused_by_code_mysql() {
-    let s = CdcScenario::mysql_with(
+fn a_bit64_value_with_bit_63_in_a_stream_is_delivered_mysql() {
+    let mut s = CdcScenario::mysql_with(
         "oc_bit",
         "id BIGINT PRIMARY KEY, v BIGINT, b BIT(64)",
         |r, _| r.cdc("initial: snapshot"),
     );
+    s.insert(1);
+    s.settle();
+    s.rig.run_ok();
     let table = s.table.clone();
-    let hostile = format!("INSERT INTO {table} VALUES (3, 3, b'1{}')", "0".repeat(63));
-    a_captured_cell_is_refused_by_code_and_walked_out(
-        s,
-        &hostile,
-        Refused::by_code("RIVET_SOURCE_CDC_CELL_UNSUPPORTED", 5),
-        vec![Remedy::new(
-            "map the column to decimal(20,0)",
-            Then::DeliversTheSource,
-            |r| r.rebuilt(|rig| rig.export_line("columns: { b: \"decimal(20,0)\" }")),
-        )],
-        move || mysql_cdc_drop_column(&table, "b"),
-    );
+    s.sql(&format!(
+        "INSERT INTO {table} VALUES (2, 2, b'1{}')",
+        "0".repeat(63)
+    ));
+    s.settle();
+    let batches = s.drain_and_read();
+    let top: Vec<u64> = batches
+        .iter()
+        .flat_map(|b| {
+            let col = b.column_by_name("b").expect("the BIT column is delivered");
+            let col = col
+                .as_any()
+                .downcast_ref::<arrow::array::UInt64Array>()
+                .expect("a BIT(64) is delivered as UInt64");
+            col.iter().flatten().collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(top.contains(&(1u64 << 63)), "bit 63 is kept, got {top:?}");
 }
 
 /// MySQL: a binary-charset ENUM whose label is bytes MySQL writes as the hex literal `x'f09f9a80'` is delivered by a stream, its label read from the binlog table map, and the rig oracle grades the delivered rows against the source.

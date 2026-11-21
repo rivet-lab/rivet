@@ -27,6 +27,7 @@ from .core import ROOT, Proc, run
 __all__ = ["bring_up", "preflight", "refusal", "unusable"]
 
 UP_WAIT_SECS = 240
+UP_ATTEMPTS = 2
 LOG_TAIL = 60
 RETRIES = 5
 RETRY_SECS = 3.0
@@ -100,13 +101,19 @@ def bring_up(profiles: dict[str, dict] | None = None, up: Callable[[str], bool] 
              compose: Callable[[list[str]], bool] = compose_logged,
              mounts: Callable[[str, dict], list[str]] = gone_mounts,
              explain: Callable[[str, dict], str] = diagnose) -> dict[str, str]:
-    """Start each profile whose stand is down or mounts a source that is gone, waiting for health; profile -> why it is still unusable, with its containers and logs printed."""
+    """Start each profile whose stand is down or mounts a source that is gone, recreating it once if it is still down; profile -> why it is still unusable, with its containers and logs printed."""
     profiles = registry.gate_profiles() if profiles is None else profiles
     for name, spec in profiles.items():
-        gone = mounts(name, spec)
-        if gone or not up(spec["url"]):
+        recreate = bool(mounts(name, spec))
+        for attempt in range(1, UP_ATTEMPTS + 1):
+            if attempt == 1 and not recreate and up(spec["url"]):
+                break
+            if attempt > 1:
+                print(f"profile {name}: attempt {attempt - 1} of {UP_ATTEMPTS} left it down; recreating its containers", flush=True)
             compose([*profile_flag(name, spec), "up", "-d", "--wait", "--wait-timeout", str(UP_WAIT_SECS),
-                     *(["--force-recreate", "--no-deps"] if gone else []), *spec["services"]])
+                     *(["--force-recreate", "--no-deps"] if recreate or attempt > 1 else []), *spec["services"]])
+            if up(spec["url"]):
+                break
     still: dict[str, str] = {}
     for name, spec in profiles.items():
         gone = mounts(name, spec)
@@ -279,9 +286,22 @@ def self_test() -> None:
     assert calls == [["--profile", "b", "up", "-d", "--wait", "--wait-timeout", str(UP_WAIT_SECS), "sb1", "sb2"]], calls
     state.update(a=True, b=False, c=True)
     printed = io.StringIO()
+    stuck_calls: list[list[str]] = []
     with contextlib.redirect_stdout(printed):
-        stuck = bring_up(spec, up=is_it_up, compose=lambda args: False, mounts=healthy, explain=lambda name, s: f"CAUSE-OF-{name}: {s['services']}")
+        stuck = bring_up(spec, up=is_it_up, compose=lambda args: stuck_calls.append(args) or False, mounts=healthy, explain=lambda name, s: f"CAUSE-OF-{name}: {s['services']}")
     assert stuck == {"b": "did not come up"} and "CAUSE-OF-b: ['sb1', 'sb2']" in printed.getvalue() and "CAUSE-OF-a" not in printed.getvalue(), printed.getvalue()
+    assert len(stuck_calls) == 2 == UP_ATTEMPTS and "--force-recreate" not in stuck_calls[0] and "--force-recreate" in stuck_calls[1], stuck_calls
+    state.update(a=True, b=False, c=True)
+    tries: list[list[str]] = []
+
+    def exits_once(args: list[str]) -> bool:
+        tries.append(args)
+        state["b"] = len(tries) > 1
+        return state["b"]
+
+    with contextlib.redirect_stdout(io.StringIO()) as again:
+        assert bring_up(spec, up=is_it_up, compose=exits_once, mounts=healthy) == {}, "a container that exited on its first start comes up on the recreate"
+    assert len(tries) == 2 and "--force-recreate" in tries[1] and "attempt 1 of" in again.getvalue(), (tries, again.getvalue())
     failed = Proc(["docker", "compose", "up"], 1, "", "container rivet-x-1 is unhealthy\n")
     assert "docker compose up exited 1" in compose_text(["up"], failed) and "container rivet-x-1 is unhealthy" in compose_text(["up"], failed)
     assert "(no output)" in compose_text(["up"], Proc(["x"], 3, "", "")) and compose_text(["up"], Proc(["x"], 3, "\n".join(map(str, range(500))), "")).endswith("499")
