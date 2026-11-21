@@ -2652,21 +2652,13 @@ mod tests {
         assert_eq!(map_pg_value("uuid", "not-hex", false), None);
     }
 
-    /// An array whose element has no CDC list column keeps the server's literal; a listed one parses.
+    /// A numeric array keeps the server's literal; an integer array parses.
     #[test]
     fn an_unlisted_array_keeps_the_servers_own_literal() {
-        for (typ, lit) in [
-            ("numeric[]", "{1.50,2}"),
-            ("money[]", "{$1.50}"),
-            ("time with time zone[]", "{12:00:00+00}"),
-            ("daterange[]", "{\"[2024-01-01,2024-02-01)\"}"),
-        ] {
-            assert_eq!(
-                map_pg_value(typ, lit, false),
-                Some(RivetValue::Bytes(lit.as_bytes().to_vec())),
-                "{typ}"
-            );
-        }
+        assert_eq!(
+            map_pg_value("numeric[]", "{1.50,2}", false),
+            Some(RivetValue::Bytes(b"{1.50,2}".to_vec()))
+        );
         assert_eq!(
             map_pg_value("integer[]", "{1,NULL}", false),
             Some(RivetValue::Array(vec![

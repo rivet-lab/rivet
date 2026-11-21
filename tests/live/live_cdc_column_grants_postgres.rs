@@ -579,7 +579,10 @@ fn a_bit_column_is_delivered_when_the_role_reads_it_and_absent_when_it_may_not_i
         let role = GrantRole::new(&table, columns);
         let rig = grant_rig(&table, &slot, &role);
         rig.run_ok();
-        let (names, _) = names_and_cells(&parts_under(&rig.out_dir()));
+        let batches = parts_under(&rig.out_dir());
+        let (names, cells) = names_and_cells(&batches);
+        assert!(batches.iter().map(|b| b.num_rows()).sum::<usize>() > 0);
         assert_eq!(names.iter().any(|n| n == "flags"), delivered, "{names:?}");
+        assert_eq!(cells.iter().any(|c| c == "110"), delivered, "{cells:?}");
     }
 }

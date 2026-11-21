@@ -479,6 +479,7 @@ fn postgres_batch_and_cdc_deliver_float_specials_alike() {
     );
 }
 
+#[cfg(feature = "oracle")]
 /// What a run left: the coded refusal, or the delivered cells of `col` as text.
 fn outcome(out: &std::process::Output, dir: &std::path::Path, col: &str, cdc: bool) -> String {
     if !out.status.success() {
@@ -509,6 +510,7 @@ fn outcome(out: &std::process::Output, dir: &std::path::Path, col: &str, cdc: bo
     format!("value {}", cells.join("|"))
 }
 
+#[cfg(feature = "oracle")]
 /// One Oracle column holding `literal`, delivered by a batch run and by the stream: both outcomes as text.
 fn oracle_outcomes(ddl: &str, literal: &str) -> (String, String, String) {
     let t = crate::live_cdc_oracledb::cdc_table(
@@ -538,6 +540,7 @@ fn oracle_outcomes(ddl: &str, literal: &str) -> (String, String, String) {
     )
 }
 
+#[cfg(feature = "oracle")]
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn oracle_batch_and_cdc_deliver_number_and_float_specials_alike() {
