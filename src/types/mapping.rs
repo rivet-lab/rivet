@@ -257,8 +257,6 @@ fn arrow_unit(u: TimeUnit) -> ArrowTimeUnit {
     }
 }
 
-/// Compute the [`TypeFidelity`] for a freshly-resolved [`RivetType`].
-///
 /// The fraction digits of a second a time type keeps; `None` for any other type.
 fn fraction_digits(t: &RivetType) -> Option<u8> {
     let unit = match t {
@@ -274,9 +272,7 @@ fn fraction_digits(t: &RivetType) -> Option<u8> {
     })
 }
 
-/// The output of every vendor mapper goes through this so the fidelity
-/// label is computed in *exactly one place* and the type-report stays
-/// consistent across PostgreSQL / MySQL / future drivers.
+/// Compute the [`TypeFidelity`] for a freshly-resolved [`RivetType`], the one place every vendor mapper's label is decided.
 pub fn derive_fidelity(t: &RivetType) -> TypeFidelity {
     match t {
         RivetType::Bool

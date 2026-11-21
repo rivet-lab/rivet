@@ -109,7 +109,7 @@ fn oracle_cdc_timestamp9_is_refused_until_declared_and_a_declared_timestamp_deli
     );
 }
 
-/// An undeclared Oracle batch `TIMESTAMP(9)` is refused with or without `--strict` before any part; declared `timestamp`, it runs under both.
+/// An undeclared Oracle batch `TIMESTAMP(9)` is refused with or without `--strict`; declared `timestamp` it is delivered lossy without `--strict` and refused under it; declared `timestamp_ns` it runs under both.
 #[test]
 #[ignore = "live: requires docker compose oracle"]
 fn oracle_batch_timestamp9_is_refused_until_declared_under_every_policy() {
@@ -128,17 +128,58 @@ fn oracle_batch_timestamp9_is_refused_until_declared_under_every_policy() {
         assert_eq!(parquet_parts(&out), 0, "a refused run wrote a part");
     }
 
+    let declared = |n: usize, decl: &str| {
+        let out = d.path().join(format!("declared{n}"));
+        let rig = Rig::oracle_batch(t.name())
+            .dest_path(out.clone())
+            .export_line(decl);
+        (rig, out)
+    };
+
+    let (lossy, lossy_out) = declared(0, "columns: {TS9: timestamp}");
+    let run = lossy.run_args(&[]);
+    let err = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "declared timestamp:\n{err}");
+    assert!(
+        err.contains("column 'TS9'") && err.contains("fidelity=lossy"),
+        "{err}"
+    );
+    assert_eq!(
+        duckdb_dir_scalar(
+            &lossy_out,
+            "count(*)",
+            Some("\"ID\" = 1 AND \"TS9\" = TIMESTAMP '2024-01-02 03:04:05.123456'")
+        ),
+        1,
+        "the declared timestamp keeps microseconds"
+    );
+
+    let (strict, strict_out) = declared(1, "columns: {TS9: timestamp}");
+    let run = strict.run_args(&["--strict"]);
+    let err = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        !run.status.success(),
+        "declared timestamp under --strict:\n{err}"
+    );
+    assert!(err.contains("RIVET_TYPE_UNSAFE_MAPPING"), "{err}");
+    assert!(err.contains("strict mode"), "{err}");
+    assert!(
+        err.contains("column 'TS9'") && err.contains("fidelity=lossy"),
+        "{err}"
+    );
+    assert_eq!(parquet_parts(&strict_out), 0, "a refused run wrote a part");
+
     for (n, args) in [&["--strict"][..], &[][..]].into_iter().enumerate() {
-        let declared_out = d.path().join(format!("declared{n}"));
-        let declared = Rig::oracle_batch(t.name())
-            .dest_path(declared_out.clone())
-            .export_line("columns: {TS9: timestamp}");
-        let run = declared.run_args(args);
+        let (exact, exact_out) = declared(2 + n, "columns: {TS9: timestamp_ns}");
+        let run = exact.run_args(args);
         let err = String::from_utf8_lossy(&run.stderr);
-        assert!(run.status.success(), "{args:?} declared:\n{err}");
+        assert!(
+            run.status.success(),
+            "{args:?} declared timestamp_ns:\n{err}"
+        );
         assert!(!err.contains("fidelity=lossy"), "{err}");
         assert_eq!(
-            duckdb_dir_scalar(&declared_out, "count(*)", Some("\"ID\" = 1")),
+            duckdb_dir_scalar(&exact_out, "count(*)", Some("\"ID\" = 1")),
             1
         );
     }
