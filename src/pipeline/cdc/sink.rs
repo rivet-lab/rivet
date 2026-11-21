@@ -802,14 +802,12 @@ fn flush(
     let mut nulled_cells: Vec<(String, u64)> = Vec::new();
     for (i, m) in columns.iter().enumerate() {
         let dt = schema.field(arrays.len()).data_type();
-        let fix = value::mysql_flag_fix(engine, &m.source_native_type, dt).or_else(|| {
-            value::mysql_cell_fix(engine, &m.source_native_type).filter(|f| {
-                seeded!(
-                    "mysql-cdc-time-remedy-names-the-batch-cast",
-                    true,
-                    f.applies_to(dt)
-                )
-            })
+        let fix = value::mysql_cell_fix(engine, &m.source_native_type).filter(|f| {
+            seeded!(
+                "mysql-cdc-time-remedy-names-the-batch-cast",
+                true,
+                f.applies_to(dt)
+            )
         });
         let memo = image_name_memo(events, &m.column_name);
         let refuse = |r: value::CellRefusal| {
@@ -2249,6 +2247,167 @@ mod tests {
         assert_eq!(kept, vec![Some("a".to_string()), Some("b".to_string())]);
         let main = enum_flush(vec![enum_event(2, None)], "enum('a','?','b')").unwrap();
         assert_eq!(main, vec![Some("?".to_string())]);
+    }
+
+    const BOOL_ENGINES: [(CdcEngine, &str); 4] = [
+        (CdcEngine::Mysql, "int"),
+        (CdcEngine::Postgres, "integer"),
+        (CdcEngine::Mssql, "int"),
+        (CdcEngine::Oracle, "NUMBER"),
+    ];
+
+    fn bool_flush(
+        engine: CdcEngine,
+        native: &str,
+        cells: Vec<RivetValue>,
+    ) -> Result<Vec<Option<bool>>> {
+        use arrow::array::Array;
+        let events: Vec<ChangeEvent> = cells
+            .into_iter()
+            .map(|v| ChangeEvent {
+                after: Some(vec![v]),
+                ..insert(0)
+            })
+            .collect();
+        let mut cols = vec![TypeMapping {
+            source_native_type: native.into(),
+            rivet_type: crate::types::RivetType::Bool,
+            arrow_type: Some(DataType::Boolean),
+            ..int_col().remove(0)
+        }];
+        let mut schema = None;
+        let sch = ensure_schema(
+            &mut schema,
+            &mut cols,
+            &events,
+            &crate::config::RowHash::default(),
+        )
+        .unwrap();
+        let overridden: std::collections::HashSet<String> = ["v".to_string()].into();
+        let (batch, _, _) = flush(
+            &events,
+            &sch,
+            &cols,
+            engine,
+            &crate::config::RowHash::default(),
+            None,
+            &overridden,
+        )?;
+        let col = batch.column(sch.index_of("v").unwrap());
+        let flags = col
+            .as_any()
+            .downcast_ref::<arrow::array::BooleanArray>()
+            .expect("a Boolean column");
+        Ok((0..flags.len())
+            .map(|i| (!flags.is_null(i)).then(|| flags.value(i)))
+            .collect())
+    }
+
+    /// An integer cell outside 0 and 1 under a `bool` override is refused by code on every engine, with the one wording MySQL gives, never delivered as true.
+    #[test]
+    fn a_bool_override_over_an_integer_that_is_not_a_flag_is_refused_on_every_engine() {
+        for bad in [
+            RivetValue::Int(5),
+            RivetValue::Int(2),
+            RivetValue::Int(-1),
+            RivetValue::Int(i64::MIN),
+            RivetValue::UInt(u64::MAX),
+        ] {
+            let mut texts = Vec::new();
+            for (engine, native) in BOOL_ENGINES {
+                let err = bool_flush(engine, native, vec![RivetValue::Int(1), bad.clone()])
+                    .expect_err(&format!("{engine:?} {bad:?} must be refused"));
+                assert_eq!(
+                    crate::error::code_of(&err),
+                    Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
+                    "{engine:?} {bad:?}"
+                );
+                texts.push(format!("{err:#}"));
+            }
+            assert!(
+                texts[0].contains("is not a flag: a boolean column carries 0 or 1 only")
+                    && texts[0].contains("(row 1)"),
+                "{}",
+                texts[0]
+            );
+            assert!(texts.iter().all(|t| *t == texts[0]), "{texts:#?}");
+        }
+    }
+
+    /// The refusal reads as MySQL's always did, row and remedy included; a signed MEDIUMINT names its sign-extended value and a BIT(n>1) is a number, not a flag.
+    #[test]
+    fn the_flag_refusal_keeps_the_wording_mysql_gave_and_names_the_value_the_column_holds() {
+        let err = bool_flush(
+            CdcEngine::Mysql,
+            "int",
+            vec![RivetValue::Int(1), RivetValue::Int(2)],
+        )
+        .unwrap_err();
+        let want = format!(
+            "cdc: column 'v' is Boolean but the captured value \"2\" (row 1) is not a flag: a \
+             boolean column carries 0 or 1 only. Declare the column an integer type in `columns:` \
+             (for example `int64`) to carry the number, or leave the column out of the capture, \
+             then: {}; rivet refuses rather than writing NULL.",
+            crate::source::cdc::checkpoint_identity::RECOVER
+        );
+        assert_eq!(format!("{err:#}"), want);
+        let err = bool_flush(
+            CdcEngine::Mysql,
+            "mediumint",
+            vec![RivetValue::UInt(16_777_215)],
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("captured value \"-1\" (row 0)"),
+            "{err:#}"
+        );
+        let err =
+            bool_flush(CdcEngine::Mysql, "bit(8)", vec![RivetValue::Bytes(vec![5])]).unwrap_err();
+        assert_eq!(
+            crate::error::code_of(&err),
+            Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE)
+        );
+        let bits = bool_flush(
+            CdcEngine::Mysql,
+            "bit(1)",
+            vec![RivetValue::Bytes(vec![1]), RivetValue::Bytes(vec![0])],
+        )
+        .unwrap();
+        assert_eq!(bits, vec![Some(true), Some(false)]);
+    }
+
+    /// 0, 1 and NULL under a `bool` override are delivered as false, true and NULL on every engine, signed or unsigned on the wire.
+    #[test]
+    fn a_bool_override_over_an_integer_delivers_zero_one_and_null_on_every_engine() {
+        for (engine, native) in BOOL_ENGINES {
+            let got = bool_flush(
+                engine,
+                native,
+                vec![
+                    RivetValue::Int(0),
+                    RivetValue::Int(1),
+                    RivetValue::UInt(0),
+                    RivetValue::UInt(1),
+                    RivetValue::Null,
+                    RivetValue::Bool(true),
+                    RivetValue::Bool(false),
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                got,
+                vec![
+                    Some(false),
+                    Some(true),
+                    Some(false),
+                    Some(true),
+                    None,
+                    Some(true),
+                    Some(false)
+                ],
+                "{engine:?}"
+            );
+        }
     }
 
     fn int_col() -> Vec<TypeMapping> {

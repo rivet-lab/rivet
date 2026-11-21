@@ -128,6 +128,8 @@ mod live_cdc_schema_drift;
 mod live_cdc_source_connections;
 #[path = "live/live_cdc_type_parity.rs"]
 mod live_cdc_type_parity;
+#[path = "live/live_cdc_value_parity.rs"]
+mod live_cdc_value_parity;
 #[path = "live/live_chaos.rs"]
 mod live_chaos;
 #[path = "live/live_chunked_recovery.rs"]
@@ -267,6 +269,8 @@ mod live_partition_cloud;
 mod live_partition_footer;
 #[path = "live/live_performance_smoke.rs"]
 mod live_performance_smoke;
+#[path = "live/live_pg_server_text.rs"]
+mod live_pg_server_text;
 #[path = "live/live_pg_state.rs"]
 mod live_pg_state;
 #[path = "live/live_plan_apply.rs"]

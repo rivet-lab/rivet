@@ -648,7 +648,7 @@ fn seed_types(table: &str) {
          TO_TIMESTAMP('9999-12-31 23:59:59.999999','YYYY-MM-DD HH24:MI:SS.FF'), NULL, \
          TO_TIMESTAMP_TZ('2024-07-01 10:00:00 Europe/Berlin','YYYY-MM-DD HH24:MI:SS TZR'), \
          NULL, '   ', NULL, 'x', HEXTORAW('01')",
-        "3, 1.5E124, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '', N'日本語', \
+        "3, 1E124, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '', N'日本語', \
          NULL, NULL",
         "4, -0.000000000000000000000000000000000000001, 0.5, 0, 0, -0.1, 0.1, NULL, NULL, \
          NULL, NULL, NULL, NULL, NULL, NULL, NULL",

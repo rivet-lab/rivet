@@ -164,6 +164,8 @@ same way on SQL Server and Oracle (declare the source column's own `decimal(p,s)
 Server a value whose wire type the declared type cannot read is refused at the
 first batch with the same code.
 
+A `bool` override over an integer column is a flag only for 0 and 1. PostgreSQL, SQL Server and Oracle refuse it for a batch export at plan time; MySQL, which checks each value, refuses a value outside 0 and 1 at the cell. A CDC stream reads every engine the way MySQL does: 0, 1 and NULL are delivered as `false`, `true` and NULL, and any other integer (2, 5, -1) is refused `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5) naming the column, the value and its row, before a part is written and before the checkpoint moves. Declare the column `int64` in `columns:` to carry the number.
+
 The override path is safe: a `uid: uuid` declaration tries to parse each
 cell — either 16 raw bytes (BINARY(16) layout) or a 36-char canonical text
 form. **Text that does not parse emits `NULL`, never silent garbage.** Same
@@ -188,6 +190,10 @@ the declared type cannot read at all is a different case and is never `NULL`:
 named `uid_*` → probably UUID") — guessing risks misclassifying a non-UUID
 varchar and silently producing wrong-shape Parquet. Operators who want UUID
 semantics on a MySQL column add the override explicitly.
+
+## The change stream per type
+
+`docs/type-capability-matrix.yaml` carries one CDC verdict per delivering row, beside its batch verdicts: `cdc: exact` (the change stream delivers what batch delivers, in the same Arrow type and value) or `cdc: refuse:CODE` with a dated `cdc_reason` (rivet stops by that registered code, never silently). A row without a verdict, a form or a known defect spelled there, or an unregistered code fails `type_capability_matrix_guard`. The release oracle's change-stream grid (`property_no_silent_null_cdc`) grades each column against it: an `exact` column that stops, or a `refuse` column that delivers or stops by another code, is `CDC_VERDICT_DIFFERS`; `live_cdc_type_parity` reads the same rows and compares batch, snapshot, stream and the ClickHouse load value for value.
 
 ## Test commands
 
@@ -330,6 +336,7 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `interval[]` | `list<interval>` | `List<Utf8>` | — | 1-D arrays; each element is its ISO 8601 duration text | type capability ledger |
 | `oid[]` | `list<int64>` | `List<Int64>` | — | 1-D arrays; read at the unsigned 32-bit width | type capability ledger |
 | enum array | `list<enum>` | `List<Utf8>` | — | 1-D arrays; each element is its label | type capability ledger |
+| any other type with no Arrow mapping: `inet`, `cidr`, `macaddr`, `macaddr8`, `bit`, `varbit`, `money`, `"char"`, `timetz`, `xml`, `tsvector`, `tsquery`, `point`, `line`, `lseg`, `box`, `path`, `polygon`, `circle`, ranges and multiranges, `regclass`, `regtype`, `xid`, `xid8`, `cid`, `tid`, `pg_lsn`, composites, extension types, and arrays of them | `string` (text form `server_text`) | `Utf8` labelled `rivet.text_form = server_text` | escaped UTF-8 | batch delivers the text the server prints for the value (`inet` without a `/32` or `/128` host mask, as the server prints it); the session is fixed to `datestyle ISO, MDY`, `TimeZone UTC`, `extra_float_digits 3`, `intervalstyle postgres`, `bytea_output hex`, so a range of dates or timestamps reads as ISO text; `money` is printed in the server's `lc_monetary`; a column declared in `columns:` keeps its declaration; a bare `numeric` is still refused. CDC delivers the same text, `bit` and `bit varying` (`B'110'` unwrapped to `110`) and every array of these types included | live `live_pg_server_text`, `live_cdc_value_parity` |
 | nullable / all-null | — | null bitmap preserved | empty cells | `note_nullable`, `note_all_null` | type_roundtrip |
 | large `text` | `string` | `Utf8` | escaped | 2k–5k chars | type_roundtrip |
 
@@ -449,9 +456,10 @@ CDC (change streams) emits the same two-column shape prefixed with the
 
 ## Known gaps (tracked)
 
-1. **Nested arrays, ranges, inet, PostGIS, geometry**: not in the type matrix —
-   they resolve to `Unsupported` and fail at schema build unless a `columns:`
-   override maps them.
+1. **Multi-dimensional arrays**: not in the type matrix; they fail at the read
+   unless a `columns:` override maps them. A PostgreSQL type with no Arrow
+   mapping (ranges, `inet`, geometric types, PostGIS and the rest of the
+   PostgreSQL row above) is delivered as the server's text.
 2. **Nullability**: every exported column is `OPTIONAL`; a source `NOT NULL`
    constraint is not propagated into the Parquet schema (ADR-0016, deferred to
    v0.8 Phase A).
@@ -580,6 +588,8 @@ two independent engines and pins the autoload type. The full matrix:
 | `binary` (`bytea` / `BLOB`)   | `BLOB`             | `Nullable(String)` (raw bytes)     |
 | `bool`                        | `BOOLEAN`          | `Nullable(Bool)`                   |
 | `list<inner>`                 | `inner[]`          | `Array(Nullable(inner))`           |
+
+A NULL list and an empty list are indistinguishable at ClickHouse and BigQuery (an `Array` and a `REPEATED` field cannot hold a NULL list); `columns: {col: string}` keeps NULL.
 
 Round-trip values that the suite pins per row: `sum(decimal * 10^scale)`
 matches the in-process Arrow check; `json_valid` / `isValidJSON` returns true

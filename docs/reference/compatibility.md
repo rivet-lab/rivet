@@ -265,8 +265,8 @@ every setting as rivet found it.
 `mode: cdc` reads the slot the same way. Its `test_decoding` reader parses the server's text of
 every value, so each read of the slot runs in a transaction of its own that sets the four formats
 and `extra_float_digits = 3` with `SET LOCAL`.
-A `bit` or `bit varying` column is refused with `RIVET_SOURCE_CDC_CELL_UNSUPPORTED`: the reader's
-text for it (`B'110'`) is not the server's text (`110`).
+A `bit` or `bit varying` column is delivered as the server's text (`110`): the reader unwraps the
+decoder's literal `B'110'`.
 
 ## What "passes" means per target
 
