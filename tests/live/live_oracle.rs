@@ -2362,7 +2362,7 @@ fn a_nine_digit_interval_holding_microseconds_is_delivered_not_refused() {
     let delivered = got[&1].as_deref().expect("IV9 delivered");
     assert!(
         want[&1].as_deref().unwrap().contains("02:03:04.123456")
-            && delivered.contains("02:03:04.123456"),
+            && delivered == "P1DT2H3M4.123456S",
         "IV9 {delivered:?} vs the server's {want:?}"
     );
 }
