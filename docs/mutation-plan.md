@@ -62,10 +62,10 @@ Narrow live filters for Tier 3 (mutate X → run only its guards):
    dependencies reused through `--copy-target`); `Mutants (changed lines)`
    grades their outcomes as one run, and the P2 audit rides in that same run
    rather than paying a second build.
-2. **Nightly (devbox self-hosted runner).** Full `--lib` runs over Tier 0-2 in
-   rotation (~500-1000 mutants/night). Result diffed against the committed
-   baseline (`docs/mutants-baseline.txt`): any missed mutant NOT in the
-   baseline fails the job. The baseline only shrinks (gap-ratchet discipline).
+2. **Nightly: removed 2026-08-17.** The rotation over Tier 0-2 hit the job's
+   time ceiling and reported `cancelled` (see the note in `nightly-live.yml`).
+   `docs/mutants-baseline.txt` stays as the record of the misses it
+   adjudicated; no job reads it.
 3. **Weekly (devbox).** One Tier-3 module against its narrow live filter.
 
 ## Why mutants survive — the degenerate-fixture rule
