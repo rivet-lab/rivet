@@ -2237,9 +2237,9 @@ pub fn codes_markdown() -> String {
         ));
     }
     out.push_str(
-        "\n## Decided by a value\n\n`rivet check` reads no values, so it cannot decide these \
-         codes: it names them in a note on stderr, and only `rivet run` or `rivet load` raises \
-         them, on the value that needs it.\n\n",
+        "\n## Decided by a value\n\n`rivet check` reads at most the first row of an export that \
+         declares `columns:`, so a later value can still raise these codes in `rivet run` or \
+         `rivet load` after check passed: check names them in a note on stderr.\n\n",
     );
     for id in value_codes() {
         out.push_str(&format!("- `{id}`\n"));
@@ -2260,13 +2260,13 @@ pub fn print_values_unread_note() {
     }
 }
 
-/// The note `rivet check` prints: the codes it cannot decide because it reads no values.
+/// The note `rivet check` prints: the codes a value it did not read can still raise.
 pub fn values_unread_note() -> String {
     seeded!(
         "check-values-unread-unsaid",
         String::new(),
         format!(
-            "note[values-unread]: rivet check reads no values; a run may still refuse a value with {}",
+            "note[values-unread]: rivet check reads at most the first row of an export that declares `columns:`; a run may still refuse a value it did not read with {}",
             value_codes().collect::<Vec<_>>().join(", ")
         )
     )
@@ -2371,7 +2371,12 @@ mod tests {
             "a value-decided code is added here on purpose: check names it instead of deciding it"
         );
         let note = super::values_unread_note();
-        assert!(note.starts_with("note[values-unread]: "), "{note}");
+        assert_eq!(
+            note,
+            "note[values-unread]: rivet check reads at most the first row of an export that \
+             declares `columns:`; a run may still refuse a value it did not read with \
+             RIVET_SOURCE_VALUE_UNREPRESENTABLE, RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE"
+        );
         assert!(super::value_codes().all(|c| note.contains(c)), "{note}");
         assert!(
             super::codes::ALL

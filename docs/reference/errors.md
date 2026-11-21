@@ -243,7 +243,7 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 
 ## Decided by a value
 
-`rivet check` reads no values, so it cannot decide these codes: it names them in a note on stderr, and only `rivet run` or `rivet load` raises them, on the value that needs it.
+`rivet check` reads at most the first row of an export that declares `columns:`, so a later value can still raise these codes in `rivet run` or `rivet load` after check passed: check names them in a note on stderr.
 
 - `RIVET_SOURCE_VALUE_UNREPRESENTABLE`
 - `RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE`

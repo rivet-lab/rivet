@@ -1531,6 +1531,7 @@ mod tests {
         );
         let bad = ColumnData::String(Some("not-a-uuid".into()));
         let err = uuid_cell(Some(&bad), "u").unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
         assert!(
             err.to_string()
                 .contains("\"not-a-uuid\", which is not a uuid"),

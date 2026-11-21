@@ -810,7 +810,7 @@ def self_test() -> None:
     try:
         with tempfile.TemporaryDirectory() as td:
             ranged = {1: Got(refused=te.Verdict(te.REFUSE, code="RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE", stage=te.LOAD))}
-            note = nsn.VALUES_NOTE + "a run may still refuse a value with RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE"
+            note = nsn.VALUES_NOTE + "a run may still refuse a value it did not read with " + ", ".join(sorted(nsn.value_codes()))
             for rc, have, want, err in ((0, coded, {key: {"RIVET_X"}}, ""), (2, coded, {}, ""), (0, uncoded, {}, ""), (0, ranged, {}, note),
                                         (0, ranged, {key: {"RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE"}}, ""), (0, {1: Got(1)}, {}, "")):
                 mc = Matrix("mssql", "u", Path(tempfile.mkdtemp(dir=td)), ("clickhouse",))

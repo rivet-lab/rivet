@@ -753,7 +753,7 @@ def value_codes(ref: Path = ERRORS_REF) -> frozenset[str]:
 
 
 def noted(check_out: str, code: str) -> bool:
-    """Whether `rivet check` named `code` as one it cannot decide because it reads no values: the code is value-decided in the registry AND check's note names it."""
+    """Whether `rivet check` named `code` as one a value it did not read can still raise: the code is value-decided in the registry AND check's note names it."""
     return code in value_codes() and any(
         line.startswith(VALUES_NOTE) and code in line for line in check_out.splitlines())
 
@@ -1234,10 +1234,11 @@ def self_test() -> None:
     assert grade_stop("c", _proc(6, "[RIVET_INTERNAL_TYPE_BUILDER] no builder"), no_check).klass == UNCODED
     assert grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] x"), no_check).klass == SPLIT, "check exit 0 where run refuses"
     assert {"RIVET_SOURCE_VALUE_UNREPRESENTABLE", "RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE"} <= value_codes(), "the reference lists the value-decided codes"
-    note = _proc(0, VALUES_NOTE + "rivet check reads no values; a run may still refuse a value with RIVET_SOURCE_VALUE_UNREPRESENTABLE")
-    assert grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] x"), note).klass == "", "a value-decided refusal check named is no split"
+    note = _proc(0, VALUES_NOTE + "rivet check reads at most the first row of an export that declares `columns:`; a run may still refuse a value it did not read with " + ", ".join(sorted(value_codes())))
+    for value_code in sorted(value_codes()):
+        assert grade_stop("c", _proc(5, f"[{value_code}] x"), note).klass == "", f"{value_code}: a value-decided refusal check named is no split"
+        assert grade_stop("c", _proc(5, f"[{value_code}] x"), ok).klass == SPLIT, f"{value_code}: a check that printed no note is a split"
     assert grade_stop("c", _proc(5, "[RIVET_TYPE_UNSAFE_MAPPING] x"), _proc(0, VALUES_NOTE + "RIVET_TYPE_UNSAFE_MAPPING")).klass == SPLIT, "a code check decides stays a split, whatever a note says"
-    assert grade_stop("c", _proc(5, "[RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE] x"), note).klass == SPLIT, "a value code the note does not name stays a split"
     assert grade_stop("c", _proc(5, "[RIVET_SOURCE_CONNECT_FAILED] listener refused"), _proc(0)).klass == NOT_GRADED, "a stand that would not connect is not a graded refusal"
     assert grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] x"), _proc(5, "[RIVET_SOURCE_CONNECT_FAILED] x")).klass == NOT_GRADED
     probe = _proc(0, "WARN rivet::preflight] type report for 'nsn' failed: oracle: listener at host \"127.0.0.1\" port 1521 refused connection.")

@@ -168,6 +168,14 @@ same way on SQL Server and Oracle (declare the source column's own `decimal(p,s)
 Server a value whose wire type the declared type cannot read is refused at the
 first batch with the same code.
 
+A value of a readable wire type that the declared type cannot hold (an Oracle `DATE`
+with a time of day under `date`, an Oracle `RAW` of the wrong length or SQL Server
+text that is not a uuid under `uuid`, a SQL Server decimal a narrower scale would
+round, fractional text under an integer override on a CDC stream) is refused
+`RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5) naming the column and the value, on a
+batch run and on a CDC snapshot or stream alike; `RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH`
+is only for a wire type the declared type cannot read.
+
 A `bool` override over an integer column is a flag only for 0 and 1. PostgreSQL, SQL Server and Oracle refuse it for a batch export at plan time; MySQL, which checks each value, refuses a value outside 0 and 1 at the cell. A CDC stream reads every engine the way MySQL does: 0, 1 and NULL are delivered as `false`, `true` and NULL, and any other integer (2, 5, -1) is refused `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5) naming the column, the value and its row, before a part is written and before the checkpoint moves. Declare the column `int64` in `columns:` to carry the number.
 
 The override path is safe: a `uid: uuid` declaration tries to parse each

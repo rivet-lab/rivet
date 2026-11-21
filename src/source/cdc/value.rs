@@ -235,7 +235,7 @@ impl CellRefusal {
         }
     }
 
-    /// The coded run error naming `column` of type `dt`; `overridden` picks the override code and remedy.
+    /// The coded run error naming `column` of type `dt`; under an override a value the type cannot hold is the value code, a variant it cannot read the wire-mismatch code.
     pub(crate) fn into_error(self, column: &str, dt: &DataType, overridden: bool) -> anyhow::Error {
         let full = render_str(&self.value);
         let shown: String = full.chars().take(64).collect();
@@ -244,7 +244,11 @@ impl CellRefusal {
             (code, String::new())
         } else if overridden {
             (
-                crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH,
+                if self.reason == NO_READING {
+                    crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH
+                } else {
+                    crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE
+                },
                 format!(
                     "correct or drop the `columns:` override for '{column}', then re-snapshot \
                      the table"
@@ -554,8 +558,19 @@ pub(crate) fn build_column(
                         b.append_null();
                         continue;
                     }
-                    Some(v @ V::Bytes(by)) => fixed_binary_bytes(by, *w as usize)
-                        .ok_or_else(|| CellRefusal::new(row, v, NO_READING))?,
+                    Some(v @ V::Bytes(by)) => {
+                        fixed_binary_bytes(by, *w as usize).ok_or_else(|| {
+                            CellRefusal::new(
+                                row,
+                                v,
+                                format!(
+                                    "is {} bytes, which fills no {w}-byte value (and is not a \
+                                     uuid text)",
+                                    by.len()
+                                ),
+                            )
+                        })?
+                    }
                     Some(v) => return Err(CellRefusal::new(row, v, NO_READING)),
                 };
                 b.append_value(&bytes)
@@ -2408,6 +2423,41 @@ mod tests {
             let arr = build("amount", dt, &[Some(&V::Null), None]).unwrap();
             assert_eq!(arr.null_count(), 2, "{dt:?}: a genuine NULL stays NULL");
         }
+    }
+
+    /// Under an override a value the declared type cannot hold is the value code, a variant it cannot read the wire-mismatch code.
+    #[test]
+    fn an_override_refusal_by_value_carries_the_value_code_as_batch_does() {
+        use RivetValue as V;
+        let midnight_plus = chrono::NaiveDate::from_ymd_opt(2024, 3, 15)
+            .unwrap()
+            .and_hms_opt(13, 14, 0)
+            .unwrap();
+        let cases = [
+            (DataType::Date32, V::DateTime(midnight_plus), true),
+            (DataType::FixedSizeBinary(16), V::Bytes(vec![1; 15]), true),
+            (
+                DataType::FixedSizeBinary(16),
+                V::Bytes(b"not-a-uuid".to_vec()),
+                true,
+            ),
+            (DataType::Int32, V::Bytes(b"1.5".to_vec()), true),
+            (DataType::Date32, V::Int(1), false),
+            (DataType::FixedSizeBinary(16), V::Int(1), false),
+            (DataType::Int32, V::DateTime(midnight_plus), false),
+        ];
+        for (dt, v, by_value) in cases {
+            let r = build_column(&dt, &[Some(&v)]).unwrap_err();
+            let err = r.into_error("c", &dt, true);
+            if by_value {
+                crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+            } else {
+                crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+            }
+        }
+        let r = build_column(&DataType::Date32, &[Some(&V::Int(1))]).unwrap_err();
+        let err = r.into_error("c", &DataType::Date32, false);
+        crate::error::assert_coded(&err, "RIVET_SOURCE_CDC_CELL_UNSUPPORTED", 5);
     }
 
     /// A long offending value is shown truncated, not dumped whole into the message.
