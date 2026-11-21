@@ -252,5 +252,8 @@ fn a_grader_that_graded_nothing_exits_two() {
          d = pathlib.Path(tempfile.mkdtemp()); c = d / 'expected_msg.txt'; c.write_text('# no assertion\\n'); \
          sys.exit(matrices.check_contract(c, d))",
     );
-    assert_eq!(code, 2, "check-msg over an empty contract must exit 2:\n{out}");
+    assert_eq!(
+        code, 2,
+        "check-msg over an empty contract must exit 2:\n{out}"
+    );
 }
