@@ -136,7 +136,7 @@ def observe(engine: str, col: Column, lit: str, got, want: te.Verdict) -> te.Ver
     if got is None:
         return te.Verdict(te.NULL)
     got = nsn.element_got(exp, got, col.native)
-    if want.kind == te.FORM and te.canon(got) == want.text:
+    if want.kind == te.FORM and te.canon(text_elements(got, col.native)) == want.text:
         return te.Verdict(te.FORM, text=want.text)
     v = nsn.compare(engine, lit, col.family, "none", got, False, col.native)
     if v == "OK" and isinstance(got, bool) and isinstance(exp, Decimal) and exp not in (0, 1):
@@ -146,6 +146,20 @@ def observe(engine: str, col: Column, lit: str, got, want: te.Verdict) -> te.Ver
     if v == "PRESENCE":
         return te.Verdict(PRESENT, text=te.canon(got))
     return te.Verdict(te.FORM, text=te.canon(got))
+
+
+def text_elements(got, native: str):
+    """A delivered list of a text type with its bytes elements decoded (a reader that returns strings as bytes); any other value as it is."""
+    base = native[:-2].upper() if native.endswith("[]") else ""
+    if not isinstance(got, (list, tuple)) or base in ("", "UUID", "BYTEA"):
+        return got
+    return [x.decode("utf-8", "surrogateescape") if isinstance(x, bytes) else x for x in got]
+
+
+def observe_server_text(exp: str | None, got) -> te.Verdict:
+    """The verdict a delivered value amounts to against the source's own text of it: exact when equal, null when it is NULL, else its canonical form."""
+    v = nsn.server_text_verdict(exp, got, False)
+    return te.Verdict(te.EXACT) if v == "OK" else te.Verdict(te.NULL) if v == nsn.NULLED else te.Verdict(te.FORM, text=te.canon(got))
 
 
 def observe_mongo(col: Column, lit: str, doc, want: te.Verdict) -> te.Verdict:
@@ -245,6 +259,9 @@ def self_test() -> None:
     assert observe("mysql", boolcol, "5", True, exact) == form("true") and observe("mysql", boolcol, "1", True, exact) == exact, "a number delivered as a bool is a changed value"
     intcol = Column("c001", "INT", "Int64", "int", None, ("5",), (te.Edge("5"),), te.Edge("NULL"))
     assert observe("mysql", intcol, "5", b"5", form("5")) == form("5"), "a value delivered as bytes is read as its text before its form is compared"
+    ivcol = Column("c004", "INTERVAL[]", "List<Utf8>", "other", None, ("'{\"1 day\"}'",), (te.Edge("'{\"1 day\"}'"),), te.Edge("NULL"))
+    assert observe("postgres", ivcol, "'{\"1 day\"}'", [b"P1D"], form('["P1D"]')) == form('["P1D"]'), "a list of text delivered as bytes is read as its text before its form is compared"
+    assert text_elements([b"\x00"], "BYTEA[]") == [b"\x00"] and text_elements([b"a"], "TEXT") == [b"a"], "a binary list is never decoded"
     assert klass(exact, exact) == "" and klass(null, null) == "" and klass(form("[]"), form("[]")) == ""
     assert klass(exact, null) == NULLED and klass(exact, form("1")) == WRONG
     assert klass(exact, refuse("RIVET_X")) == UNEXPECTED_REFUSAL and klass(refuse("RIVET_X"), exact) == REFUSAL_GONE
