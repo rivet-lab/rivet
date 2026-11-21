@@ -552,6 +552,18 @@ fn every_column_is_typed_through_its_kind_or_the_engine_table() {
     }
 }
 
+/// Every column shape: one no common kind reads is delivered as a common type only where the engine declares it.
+#[test]
+fn no_column_shape_outside_the_common_kinds_is_delivered_as_a_common_type() {
+    let rows = table()
+        .into_iter()
+        .map(|(label, _, kind, t)| (label.to_string(), kind, t));
+    crate::types::kind::assert_engine_only_rows_are_declared(
+        crate::types::override_table::Engine::Mysql,
+        rows,
+    );
+}
+
 /// Only the four `*BLOB` wire types are blobs; a text column of any other wire type is `String`.
 #[test]
 fn only_the_four_blob_wire_types_are_blobs() {

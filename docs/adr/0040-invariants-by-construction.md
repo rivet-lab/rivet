@@ -27,6 +27,8 @@
 | I4 | Every refusal is coded, names the true cause, and its remedy works | typed errors; one precheck pipeline in a fixed order for every command; a remedy names a command from the clap tree | the exit class is decided by the error type, never by message text; remedies are checked against `rivet schema cli` (`SchemaKind::Cli`, `src/cli/args.rs:675`) | `refusal_names_true_cause` |
 | I5 | After any stop no debris is left, and a re-run equals an uninterrupted run | a per-run staging directory; atomic publish by manifest; the run that owns the staging removes it | no writer writes into the published location directly | `no_debris_after_stop` |
 
+I2's one table is made of two parts that do not contradict ADR-0038: the types every engine reads the same way are decided once by `CommonKind` (`src/types/kind.rs`, ADR-0038 amendment of 2026-11-20), the types only an engine carries stay in that engine's own table, and the value decoders stay per engine.
+
 Rejected for I5: cleaning orphan parts on the next run. It keeps "who owns this file" a guess made after the fact; a per-run directory makes ownership a property of the path.
 
 The five names are registered once, in `PROPERTIES` (`dev/release_oracle/properties.py`). A matrix is found on the tree by its `property_<name>` files under `tests/offline`, `tests/live`, `dev/release_oracle` and `dev/pytools`. The gate stage `verify_property_matrices` writes a FAIL row for a registered property with no matrix on the tree, and for a `property_*` file that grades no registered property.

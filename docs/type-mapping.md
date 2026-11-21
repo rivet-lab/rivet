@@ -25,6 +25,43 @@ out?" — the short answer is no:
   [Values with no Arrow representation](#values-with-no-arrow-representation).
 
 The per-engine tables below are the precise contract; this is just the gist.
+[Types by kind](#types-by-kind) lists, for each type that means the same on every
+engine, which native type of which engine it comes from.
+
+## Types by kind
+
+Types that mean the same on every engine are decided once, in one shared place
+(`CommonKind` in [`src/types/kind.rs`](https://github.com/rivet-lab/rivet/blob/main/src/types/kind.rs)),
+and delivered as the same `RivetType` whichever engine the column comes from.
+A type only one engine (or some engines) carries is decided in that engine's own
+table and is listed in the engine's section. How a value is read off the wire
+stays per engine, in the engine's own decoder
+([ADR-0038](adr/0038-column-plan.md), amendment of 2026-11-20).
+
+| Kind | Delivered as | [PostgreSQL](#postgresql) | [MySQL](#mysql) | [SQL Server](#sql-server-mssql) | [Oracle](#oracle) |
+|------|--------------|------------|-------|------------|--------|
+| bool | `bool` | `boolean` | `tinyint(1)` | `bit` | `BOOLEAN` |
+| int16 | `int16` | `smallint` | `tinyint`, `smallint`, `tinyint unsigned` | `tinyint`, `smallint` | none |
+| int32 | `int32` | `integer` | `mediumint`, `int`, `smallint unsigned` | `int` | `NUMBER(1..9, 0)` |
+| int64 | `int64` | `bigint` | signed `bigint`, `mediumint unsigned`, `int unsigned` | `bigint` | `NUMBER(10..18, 0)` |
+| float32 | `float32` | `real` | `float` | `real` | `BINARY_FLOAT` |
+| float64 | `float64` | `double precision` | `double` | `float` | `BINARY_DOUBLE` |
+| decimal | `decimal(p,s)` | `numeric(p,s)` | `decimal(p,s)` | `decimal(p,s)`, `numeric(p,s)` | `NUMBER(19..38, 0)`, `NUMBER(p,s)` with a scale |
+| date | `date` | `date` | `date` | `date` | none (`DATE` carries a time) |
+| timestamp | `timestamp(µs, none)` | `timestamp` | `datetime` | `datetime`, `smalldatetime`, `datetime2(0..6)` | `DATE`, `TIMESTAMP(0..6)` |
+| timestamp_tz | `timestamp_tz(µs, UTC)` | `timestamptz` | `timestamp` | `datetimeoffset(0..6)` | `TIMESTAMP WITH TIME ZONE`, `WITH LOCAL TIME ZONE` |
+| text | `string` | `text`, `varchar`, `char`, `name` | `char`, `varchar`, `text` family | `char`, `varchar`, `nchar`, `nvarchar`, `text`, `ntext` | `VARCHAR2`, `NVARCHAR2`, `CHAR`, `NCHAR`, `LONG`, `CLOB`, `NCLOB`; a `NUMBER` no decimal holds |
+| binary | `binary` | `bytea` | `binary`, `varbinary`, `blob` | `binary`, `varbinary`, `image` | `RAW`, `LONG RAW`, `BLOB` |
+| json | `json` | `json`, `jsonb` | `json` | none | `JSON` |
+
+Types an engine carries alone stay in its own table: PostgreSQL `oid`, `time`,
+`uuid`, `interval`, enums, arrays and the types it does not map; MySQL
+`bigint unsigned`, `bit`, `year`, `time`, `enum`, `set`; SQL Server `money`,
+`smallmoney`, `time`, `uniqueidentifier`, `sql_variant`, CLR types; Oracle
+`INTERVAL DAY TO SECOND` and `INTERVAL YEAR TO MONTH`. MongoDB has no native-type
+mapping to route: its two columns are fixed, see [MongoDB](#mongodb-json-blob-model).
+CDC does not classify types a second time: it reads the batch mapping of the
+same columns, and its value decoders are per engine.
 
 ## Values with no Arrow representation
 
@@ -361,6 +398,37 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 
 Unmapped SQL Server types resolve to `Unsupported` and fail loudly at schema
 build unless a `columns:` override maps them.
+
+## Oracle
+
+Behind the `oracle` feature (on by default). The common kinds are read from the
+driver's column description, the declared native type, precision and scale
+(see [Types by kind](#types-by-kind)); a `NUMBER` picks its kind by precision
+and scale.
+
+| Source type | Rivet logical | Parquet (Arrow) | CSV | Notes | Tested |
+|-------------|---------------|-----------------|-----|-------|--------|
+| `NUMBER(p,0)`, p 1..9 | `int32` | `Int32` | integer text | | type table |
+| `NUMBER(p,0)`, p 10..18 | `int64` | `Int64` | integer text | | type table |
+| `NUMBER(p,0)`, p 19..38 | `decimal(p,0)` | `DECIMAL(p,0)` | exact decimal text | | type table |
+| `NUMBER(p,s)`, s > 0 | `decimal(p,s)` | `DECIMAL(p,s)` | exact decimal text | a precision below the scale is widened to the scale | type table |
+| `NUMBER(p,s)`, s < 0 | `decimal(p-s,0)` | `DECIMAL(p-s,0)` | exact decimal text | the scale is folded into the integer digits, up to 38 | type table |
+| bare `NUMBER`, `FLOAT(n)`, a `NUMBER` past 38 digits or with a scale above 38 | `string` | `Utf8` labelled `rivet.text_form = decimal_plain` | plain decimal text | no fixed-scale decimal holds every value; declare `decimal(p,s)` with p <= 38 in `columns:` to get a native decimal; a `NUMBER` of infinity is refused, see [Values with no Arrow representation](#values-with-no-arrow-representation) | type table |
+| `BINARY_FLOAT` / `BINARY_DOUBLE` | `float32` / `float64` | `Float32` / `Float64` | float text | | type table |
+| `BOOLEAN` | `bool` | `Boolean` | true/false | | type table |
+| `DATE` | `timestamp(µs, none)` | `Timestamp(µs, None)` | datetime text | an Oracle `DATE` holds a time of day | type table |
+| `TIMESTAMP(0..6)` | `timestamp(µs, none)` | `Timestamp(µs, None)` | datetime text | naive | type table |
+| `TIMESTAMP(7..9)` | `timestamp(µs, none)` | `Timestamp(µs, None)` | datetime text | labelled `lossy`; undeclared, the run is refused (`RIVET_TYPE_UNSAFE_MAPPING`); declare the column in `columns:` | type table |
+| `TIMESTAMP WITH TIME ZONE` / `WITH LOCAL TIME ZONE` | `timestamp_tz(µs, UTC)` | `Timestamp(µs, UTC)` | datetime text | normalised to UTC; the `(7..9)` precisions are `lossy` like the naive one | type table |
+| `INTERVAL DAY TO SECOND`, `INTERVAL YEAR TO MONTH` | `interval` | `Utf8` labelled `rivet.text_form = iso8601_duration` | ISO 8601 duration text | a day-to-second value with a sub-microsecond fraction is refused (`RIVET_SOURCE_VALUE_UNREPRESENTABLE`) | type table |
+| `VARCHAR2` / `NVARCHAR2` / `CHAR` / `NCHAR` / `LONG` / `CLOB` / `NCLOB` | `string` | `Utf8` | escaped UTF-8 | | type table |
+| `JSON` | `json` | `Utf8` + Parquet `LogicalType::Json` (via `arrow.json` extension) | JSON string | labelled `logical_string` | type table |
+| `RAW` / `LONG RAW` / `BLOB` | `binary` | `Binary` | hex in CSV | | type table |
+
+Any other Oracle type (`BFILE`, ...) resolves to `Unsupported` and is named by
+`rivet check`; select a convertible expression of it in a `query:`, or drop it.
+The type table is the offline test `the_oracle_type_table_is_pinned`
+(`src/source/oracle/arrow_convert/type_table.rs`).
 
 ## MongoDB (JSON-blob model)
 
