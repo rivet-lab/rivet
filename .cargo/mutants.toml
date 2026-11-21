@@ -979,5 +979,6 @@ exclude_re = [
     # 2026-11-21: text_elements reads a live tokio_postgres::Row; RED by hand under Ok(None) and Ok(Some(vec![Some(String::new())])) by a_postgres_json_interval_oid_enum_array_is_delivered_as_a_list_of_its_elements, which asserts every delivered element; closes with an offline Postgres row fake.
     "replace text_elements -> std::result::Result<Option<Vec<Option<String>>>, postgres::Error> with ",
     # 2026-11-21: the is_oid_array guard in build_pg_list_array and PgCellSource::list; `false` is RED by hand (the OID[] cell fails with the lossy-wire refusal), `true` is a true equivalent because PgInt accepts INT2, INT4, INT8 and OID at their own wire widths, so an int8[] read through it is the same i64; is_oid_array itself is unit-tested.
-    "replace match guard is_oid_array\\(.*\\) with (true|false) in (build_pg_list_array|<impl crate::source::value_checksum::CellSource for PgCellSource<'_>>::list)$",
+    "replace match guard is_oid_array\\(.*\\) with (true|false) in build_pg_list_array$",
+    "replace match guard is_oid_array\\(.*\\) with (true|false) in <impl crate::source::value_checksum::CellSource for PgCellSource<'_>>::list$",
 ]
