@@ -413,7 +413,29 @@ fn an_enum_and_a_domain_are_delivered(mode: &str, url: &str) {
     destination_equals_the_source(&rig, &table, mode, "an enum and a domain");
 }
 
-/// A column of a type rivet has no mapping for, beside wide rows, over `url`: refused with `needle`, within `BOUND`.
+/// A composite column beside wide rows, over `url`: delivered as the server's text and equal to the source, within `BOUND`.
+fn a_composite_is_delivered_as_server_text_within_the_bound(url: &str) {
+    if url == PGBOUNCER_URL {
+        forget_pooled_statements();
+    }
+    let types = OwnTypes::new();
+    let stem = &types.stem;
+    let (table, _table) = table_of(
+        "pool_composite",
+        &format!("id BIGINT PRIMARY KEY, x {stem}_c NOT NULL, wide TEXT NOT NULL"),
+        &format!("g, ROW(g, 'x')::{stem}_c, {WIDE}"),
+    );
+    let rig = ENGINE.rig(&table).source_url(url);
+    let out = run_within_the_bound(&rig, "full");
+    assert!(
+        out.status.success(),
+        "the full export of a composite failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    destination_equals_the_source(&rig, &table, "full", "a composite");
+}
+
+/// A column of a type rivet has no flat mapping for, beside wide rows, over `url`: refused with `needle`, within `BOUND`.
 fn an_unmapped_type_is_refused_within_the_bound(
     url: &str,
     suffix: &str,
@@ -439,11 +461,6 @@ fn an_unmapped_type_is_refused_within_the_bound(
     );
 }
 
-const COMPOSITE: (&str, &str, &str) = (
-    "_c",
-    "ROW(g, 'x')::{stem}_c",
-    "need a `columns:` declaration",
-);
 const ENUM_ARRAY: (&str, &str, &str) = (
     "_e[]",
     "ARRAY['new', 'paid']::{stem}_e[]",
@@ -508,18 +525,17 @@ fn a_table_of_an_enum_and_a_domain_with_wide_rows_through_one_transaction_pooler
 
 #[test]
 #[ignore = "live: requires docker compose up -d postgres"]
-fn a_composite_column_with_wide_rows_is_refused_within_the_bound_direct_postgres() {
-    let (suffix, value, needle) = COMPOSITE;
-    an_unmapped_type_is_refused_within_the_bound(POSTGRES_URL, suffix, value, needle);
+fn a_composite_column_with_wide_rows_is_delivered_as_server_text_within_the_bound_direct_postgres()
+{
+    a_composite_is_delivered_as_server_text_within_the_bound(POSTGRES_URL);
 }
 
 #[test]
 #[ignore = "live: requires docker compose --profile pool up -d pgbouncer (transaction mode, pool_size=1)"]
-fn a_composite_column_with_wide_rows_through_one_transaction_pooler_is_refused_within_the_bound_postgres()
+fn a_composite_column_with_wide_rows_through_one_transaction_pooler_is_delivered_as_server_text_within_the_bound_postgres()
  {
     let _alone = pgbouncer_alone();
-    let (suffix, value, needle) = COMPOSITE;
-    an_unmapped_type_is_refused_within_the_bound(PGBOUNCER_URL, suffix, value, needle);
+    a_composite_is_delivered_as_server_text_within_the_bound(PGBOUNCER_URL);
 }
 
 #[test]

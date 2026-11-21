@@ -109,6 +109,7 @@
   "live_partition_by": {"tests": 5, "minutes": 0.14},
   "live_partition_cloud": {"tests": 2, "minutes": 0.16},
   "live_performance_smoke": {"tests": 3, "minutes": 0.15},
+  "live_pg_server_text": {"tests": 4, "minutes": 0.1},
   "live_pg_state": {"tests": 16, "minutes": 0.36},
   "live_plan_apply": {"tests": 13, "minutes": 1.1},
   "live_plan_output_ux": {"tests": 3, "minutes": 0.02},

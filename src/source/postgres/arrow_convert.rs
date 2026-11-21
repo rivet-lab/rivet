@@ -348,12 +348,16 @@ pub(super) fn pg_server_text(t: &Type) -> bool {
             _ => false,
         }
     }
-    unmapped(&pg_type_to_rivet(t))
+    seeded!(
+        "pg-unmapped-type-refused",
+        false,
+        unmapped(&pg_type_to_rivet(t))
+    )
 }
 
 /// The SQL that renders `expr`, a cell of wire type `t`, as the server's own output text.
 fn pg_text_render(t: &Type, expr: &str) -> String {
-    if *t == Type::INET {
+    if *t == Type::INET && seeded!("pg-inet-host-text-gains-a-mask", false, true) {
         return format!(
             "CASE WHEN masklen({expr}) = CASE family({expr}) WHEN 4 THEN 32 ELSE 128 END \
              THEN host({expr}) ELSE {expr}::text END"

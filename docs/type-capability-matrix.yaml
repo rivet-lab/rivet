@@ -216,9 +216,9 @@ engines:
       - {native_type: "DOUBLE PRECISION[]", sample: ["ARRAY[2.5, -0.5]"], edges: ["'{}'", {v: "'{1.5,NaN,Infinity,-Infinity,-0}'", bigquery: "form:[1.5,NaN,Infinity,-Infinity,0]"}, "'{NULL}'", "ARRAY[2.5, -0.5]", {v: "NULL", bigquery: "PG_NULL_LIST_EMPTY_BQ!form:[]", clickhouse: "PG_NULL_LIST_EMPTY_CH!form:[]"}], delivery: "List(Float64)", clickhouse: {type: "Array(Nullable(Float64))", today: "Array(Nullable(Float64))", defect: "a NULL array loads as [] (ClickHouse arrays cannot be NULL), so NULL and empty merge (ADR-0038 CP1, ClickHouse load step)", defect_samples: ["NULL"]}}
       - {native_type: "NUMERIC(60,10)", sample: ["123456789012345678901234567890.0123456789"], edges: [{v: "99999999999999999999999999999999999999999999999999.9999999999", bigquery: "refuse:RIVET_LOAD_COLUMN_TYPE_UNSUPPORTED@load", snowflake: "refuse:RIVET_LOAD_COLUMN_TYPE_UNSUPPORTED@load"}, {v: "-99999999999999999999999999999999999999999999999999.9999999999", bigquery: "refuse:RIVET_LOAD_COLUMN_TYPE_UNSUPPORTED@load", snowflake: "refuse:RIVET_LOAD_COLUMN_TYPE_UNSUPPORTED@load"}, {v: "0", bigquery: "refuse:RIVET_LOAD_COLUMN_TYPE_UNSUPPORTED@load", snowflake: "refuse:RIVET_LOAD_COLUMN_TYPE_UNSUPPORTED@load"}, {v: "0.0000000001", bigquery: "refuse:RIVET_LOAD_COLUMN_TYPE_UNSUPPORTED@load", snowflake: "refuse:RIVET_LOAD_COLUMN_TYPE_UNSUPPORTED@load"}, {v: "123456789012345678901234567890.0123456789", bigquery: "refuse:RIVET_LOAD_COLUMN_TYPE_UNSUPPORTED@load", snowflake: "refuse:RIVET_LOAD_COLUMN_TYPE_UNSUPPORTED@load"}, {v: "NULL", bigquery: "refuse:RIVET_LOAD_COLUMN_TYPE_UNSUPPORTED@load", snowflake: "refuse:RIVET_LOAD_COLUMN_TYPE_UNSUPPORTED@load"}], delivery: "Decimal256(60, 10)", clickhouse: {type: "Nullable(Decimal(60, 10))"}}
       - {native_type: "NUMERIC", sample: ["1.50", "-0.000001234", "123456789012345678901234567890.123456789012", "'NaN'"], edges: ["99999999999999.9999", "-99999999999999.9999", "0", "0.0001", "'Infinity'", "'-Infinity'", "1.5"], delivery: "decimal_plain", today_delivery: "server_text", known_defect: "batch refuses the column; CDC carries the server's own text labelled server_text (ADR-0038 CP1/CP5, PostgreSQL engine step)", refuses: "refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "MONEY", sample: ["'12.34'"], edges: ["922337203685477.5807", "-922337203685477.5807", "0", "0.0001", "'0'", "'-92233720368547758.08'", "'92233720368547758.07'", "'0.01'"], delivery: "server_text", today_delivery: "server_text", known_defect: "batch refuses the column; CDC carries the server's own text labelled server_text (ADR-0038 CP1/CP5, PostgreSQL engine step)", refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "INET", sample: ["'192.168.0.1'"], edges: ["'0.0.0.0'", "'255.255.255.255'", "'::1'", "'192.168.0.1/24'"], delivery: "inet_text", today_delivery: "server_text", known_defect: "batch refuses the column; CDC carries the server's own text labelled server_text (ADR-0038 CP1/CP5, PostgreSQL engine step)", refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "CIDR", sample: ["'10.0.0.0/8'"], edges: ["'::/0'"], delivery: "inet_text", today_delivery: "server_text", known_defect: "batch refuses the column; CDC carries the server's own text labelled server_text (ADR-0038 CP1/CP5, PostgreSQL engine step)", refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
+      - {native_type: "MONEY", sample: ["'12.34'"], edges: ["922337203685477.5807", "-922337203685477.5807", "0", "0.0001", "'0'", "'-92233720368547758.08'", "'92233720368547758.07'", "'0.01'"], delivery: "server_text", today_delivery: "server_text", known_defect: "batch and CDC carry the server's own text labelled server_text (ADR-0038 CP1/CP5, PostgreSQL engine step)"}
+      - {native_type: "INET", sample: ["'192.168.0.1'"], edges: ["'0.0.0.0'", "'255.255.255.255'", "'::1'", "'192.168.0.1/24'"], delivery: "inet_text", today_delivery: "server_text", known_defect: "batch and CDC carry the server's own text labelled server_text (ADR-0038 CP1/CP5, PostgreSQL engine step)"}
+      - {native_type: "CIDR", sample: ["'10.0.0.0/8'"], edges: ["'::/0'"], delivery: "inet_text", today_delivery: "server_text", known_defect: "batch and CDC carry the server's own text labelled server_text (ADR-0038 CP1/CP5, PostgreSQL engine step)"}
       - {native_type: "DATE[]", sample: ["ARRAY['2024-01-01'::date]"], edges: ["'{}'", "'{2020-01-01,1970-01-01}'", "'{NULL}'", {v: "'{0001-01-01,9999-12-31}'", clickhouse: "refuse:RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE@load"}, "ARRAY['2024-01-01'::date]", {v: "NULL", bigquery: "PG_NULL_LIST_EMPTY_BQ!form:[]", clickhouse: "PG_NULL_LIST_EMPTY_CH!form:[]"}], delivery: "List(Date32)", clickhouse: {type: "Array(Nullable(Date32))", today: "Array(Nullable(Date32))", defect: "a NULL array loads as [] (ClickHouse arrays cannot be NULL), so NULL and empty merge (ADR-0038 CP1, ClickHouse load step)", defect_samples: ["NULL"]}}
       - {native_type: "TIMESTAMP[]", sample: ["ARRAY['2024-01-01 10:00:00'::timestamp]"], edges: ["'{}'", {v: "'{\"2020-01-01 00:00:00\",\"1970-01-01 00:00:00.123456\"}'", snowflake: "form:[\"2020-01-01 00:00:00.000\",\"1970-01-01 00:00:00.123\"]"}, "'{NULL}'", "ARRAY['2024-01-01 10:00:00'::timestamp]", {v: "NULL", bigquery: "PG_NULL_LIST_EMPTY_BQ!form:[]", clickhouse: "PG_NULL_LIST_EMPTY_CH!form:[]"}], delivery: "List(Timestamp(µs))", clickhouse: {type: "Array(Nullable(DateTime64(6, 'UTC')))", today: "Array(Nullable(DateTime64(6, 'UTC')))", defect: "a NULL array loads as [] (ClickHouse arrays cannot be NULL), so NULL and empty merge (ADR-0038 CP1, ClickHouse load step)", defect_samples: ["NULL"]}}
       - {native_type: "TIMESTAMPTZ[]", sample: ["ARRAY['2024-01-01 10:00:00+00'::timestamptz]"], edges: ["'{}'", "'{\"2020-01-01 00:00:00+00\"}'", "'{NULL}'", "ARRAY['2024-01-01 10:00:00+00'::timestamptz]", {v: "NULL", bigquery: "PG_NULL_LIST_EMPTY_BQ!form:[]", clickhouse: "PG_NULL_LIST_EMPTY_CH!form:[]"}], delivery: "List(Timestamp(µs, \"UTC\"))", clickhouse: {type: "Array(Nullable(DateTime64(6, 'UTC')))", today: "Array(Nullable(DateTime64(6, 'UTC')))", defect: "a NULL array loads as [] (ClickHouse arrays cannot be NULL), so NULL and empty merge (ADR-0038 CP1, ClickHouse load step)", defect_samples: ["NULL"]}}
@@ -237,43 +237,43 @@ engines:
       - {native_type: "BPCHAR", sample: [], edges: ["''", "'a'", "'  a  '", "'abc'"]}
       - {native_type: "CHARACTER VARYING(10)", sample: [], edges: ["''", "'a'", "'abcdefghij'", "'  a  '", "'é中'", "'😀'"]}
       - {native_type: "NAME", sample: [], edges: ["''", "'x'", "'abc_def'"]}
-      - {native_type: "\"char\"", sample: [], edges: ["'a'", "'z'", "''"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
+      - {native_type: "\"char\"", sample: [], edges: ["'a'", "'z'", "''"], delivery: "server_text"}
       - {native_type: "TIME(3)", sample: [], edges: ["'00:00:00'", "'12:34:56.123'", "'23:59:59.999'"]}
-      - {native_type: "TIMETZ", sample: [], edges: ["'00:00:00+00'", "'12:34:56+05:30'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
+      - {native_type: "TIMETZ", sample: [], edges: ["'00:00:00+00'", "'12:34:56+05:30'"], delivery: "server_text"}
       - {native_type: "TIMESTAMP(0)", sample: [], edges: ["'1970-01-01 00:00:00'", "'2000-02-29 12:34:56'", {v: "'9999-12-31 23:59:59'", clickhouse: "refuse:RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE@load"}]}
       - {native_type: "TIMESTAMP(3)", sample: [], edges: ["'1970-01-01 00:00:00.001'", "'2000-02-29 12:34:56.789'", {v: "'9999-12-31 23:59:59.999'", clickhouse: "refuse:RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE@load"}]}
-      - {native_type: "MACADDR", sample: [], edges: ["'08:00:2b:01:02:03'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "MACADDR8", sample: [], edges: ["'08:00:2b:01:02:03:04:05'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "BIT(8)", sample: [], edges: ["B'00000000'", "B'11111111'", "B'10101010'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "BIT(1)", sample: [], edges: ["B'0'", "B'1'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "BIT(64)", sample: [], edges: ["B'1111111111111111111111111111111111111111111111111111111111111111'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "BIT VARYING(16)", sample: [], edges: ["B''", "B'1'", "B'1010101010101010'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "XML", sample: [], edges: ["'<a/>'", "'<a x=\"1\">é</a>'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "TSVECTOR", sample: [], edges: ["'a b c'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "TSQUERY", sample: [], edges: ["'a & b'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "POINT", sample: [], edges: ["'(0,0)'", "'(1.5,-2.5)'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "LINE", sample: [], edges: ["'{1,-1,0}'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "LSEG", sample: [], edges: ["'[(0,0),(1,1)]'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "BOX", sample: [], edges: ["'(1,1),(0,0)'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "PATH", sample: [], edges: ["'[(0,0),(1,1)]'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "POLYGON", sample: [], edges: ["'((0,0),(1,0),(1,1))'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "CIRCLE", sample: [], edges: ["'<(0,0),1>'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "INT4RANGE", sample: [], edges: ["'[1,10)'", "'empty'", "'(,)'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "INT8RANGE", sample: [], edges: ["'[1,10)'", "'empty'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "NUMRANGE", sample: [], edges: ["'[1.5,10.5)'", "'empty'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "DATERANGE", sample: [], edges: ["'[2020-01-01,2020-12-31)'", "'empty'", "'[2020-01-01,infinity)'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "TSRANGE", sample: [], edges: ["'[2020-01-01 00:00:00,2020-12-31 00:00:00)'", "'empty'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "TSTZRANGE", sample: [], edges: ["'[2020-01-01 00:00:00+00,2020-12-31 00:00:00+00)'", "'empty'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "INT4MULTIRANGE", sample: [], edges: ["'{[1,5),[10,20)}'", "'{}'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
+      - {native_type: "MACADDR", sample: [], edges: ["'08:00:2b:01:02:03'"], delivery: "server_text"}
+      - {native_type: "MACADDR8", sample: [], edges: ["'08:00:2b:01:02:03:04:05'"], delivery: "server_text"}
+      - {native_type: "BIT(8)", sample: [], edges: ["B'00000000'", "B'11111111'", "B'10101010'"], delivery: "server_text"}
+      - {native_type: "BIT(1)", sample: [], edges: ["B'0'", "B'1'"], delivery: "server_text"}
+      - {native_type: "BIT(64)", sample: [], edges: ["B'1111111111111111111111111111111111111111111111111111111111111111'"], delivery: "server_text"}
+      - {native_type: "BIT VARYING(16)", sample: [], edges: ["B''", "B'1'", "B'1010101010101010'"], delivery: "server_text"}
+      - {native_type: "XML", sample: [], edges: ["'<a/>'", "'<a x=\"1\">é</a>'"], delivery: "server_text"}
+      - {native_type: "TSVECTOR", sample: [], edges: ["'a b c'"], delivery: "server_text"}
+      - {native_type: "TSQUERY", sample: [], edges: ["'a & b'"], delivery: "server_text"}
+      - {native_type: "POINT", sample: [], edges: ["'(0,0)'", "'(1.5,-2.5)'"], delivery: "server_text"}
+      - {native_type: "LINE", sample: [], edges: ["'{1,-1,0}'"], delivery: "server_text"}
+      - {native_type: "LSEG", sample: [], edges: ["'[(0,0),(1,1)]'"], delivery: "server_text"}
+      - {native_type: "BOX", sample: [], edges: ["'(1,1),(0,0)'"], delivery: "server_text"}
+      - {native_type: "PATH", sample: [], edges: ["'[(0,0),(1,1)]'"], delivery: "server_text"}
+      - {native_type: "POLYGON", sample: [], edges: ["'((0,0),(1,0),(1,1))'"], delivery: "server_text"}
+      - {native_type: "CIRCLE", sample: [], edges: ["'<(0,0),1>'"], delivery: "server_text"}
+      - {native_type: "INT4RANGE", sample: [], edges: ["'[1,10)'", "'empty'", "'(,)'"], delivery: "server_text"}
+      - {native_type: "INT8RANGE", sample: [], edges: ["'[1,10)'", "'empty'"], delivery: "server_text"}
+      - {native_type: "NUMRANGE", sample: [], edges: ["'[1.5,10.5)'", "'empty'"], delivery: "server_text"}
+      - {native_type: "DATERANGE", sample: [], edges: ["'[2020-01-01,2020-12-31)'", "'empty'", "'[2020-01-01,infinity)'"], delivery: "server_text"}
+      - {native_type: "TSRANGE", sample: [], edges: ["'[2020-01-01 00:00:00,2020-12-31 00:00:00)'", "'empty'"], delivery: "server_text"}
+      - {native_type: "TSTZRANGE", sample: [], edges: ["'[2020-01-01 00:00:00+00,2020-12-31 00:00:00+00)'", "'empty'"], delivery: "server_text"}
+      - {native_type: "INT4MULTIRANGE", sample: [], edges: ["'{[1,5),[10,20)}'", "'{}'"], delivery: "server_text"}
       - {native_type: "OID", sample: [], edges: ["0", "4294967295", "16384"]}
-      - {native_type: "REGCLASS", sample: [], edges: ["'pg_class'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "REGTYPE", sample: [], edges: ["'integer'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "XID", sample: [], edges: ["'0'", "'4294967295'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "CID", sample: [], edges: ["'0'", "'4294967295'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "XID8", sample: [], edges: ["'0'", "'18446744073709551615'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "PG_LSN", sample: [], edges: ["'0/0'", "'FFFFFFFF/FFFFFFFF'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "TID", sample: [], edges: ["'(0,1)'", "'(4294967295,65535)'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "rivet_pair", sample: [], edges: ["ROW(1,'a')", "ROW(NULL,NULL)", "ROW(2147483647,'é😀')"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
+      - {native_type: "REGCLASS", sample: [], edges: ["'pg_class'"], delivery: "server_text"}
+      - {native_type: "REGTYPE", sample: [], edges: ["'integer'"], delivery: "server_text"}
+      - {native_type: "XID", sample: [], edges: ["'0'", "'4294967295'"], delivery: "server_text"}
+      - {native_type: "CID", sample: [], edges: ["'0'", "'4294967295'"], delivery: "server_text"}
+      - {native_type: "XID8", sample: [], edges: ["'0'", "'18446744073709551615'"], delivery: "server_text"}
+      - {native_type: "PG_LSN", sample: [], edges: ["'0/0'", "'FFFFFFFF/FFFFFFFF'"], delivery: "server_text"}
+      - {native_type: "TID", sample: [], edges: ["'(0,1)'", "'(4294967295,65535)'"], delivery: "server_text"}
+      - {native_type: "rivet_pair", sample: [], edges: ["ROW(1,'a')", "ROW(NULL,NULL)", "ROW(2147483647,'é😀')"], delivery: "server_text"}
       - {native_type: "rivet_posint", sample: [], edges: ["1", "2147483647"]}
       - {native_type: "SMALLINT[]", sample: [], edges: ["'{}'", "'{1,2,3}'", "'{NULL}'", "'{-32768,32767}'", "'{1,NULL,3}'", {v: "NULL", bigquery: "PG_NULL_LIST_EMPTY_BQ!form:[]", clickhouse: "PG_NULL_LIST_EMPTY_CH!form:[]"}]}
       - {native_type: "BIGINT[]", sample: [], edges: ["'{}'", "'{-9223372036854775808,9223372036854775807}'", "'{NULL}'", {v: "NULL", bigquery: "PG_NULL_LIST_EMPTY_BQ!form:[]", clickhouse: "PG_NULL_LIST_EMPTY_CH!form:[]"}]}
@@ -287,10 +287,10 @@ engines:
       - {native_type: "INTERVAL[]", sample: [], edges: ["'{}'", {v: "'{\"1 day\",\"2 hours\"}'", x: "form:[\"P1D\",\"PT2H\"]"}, "'{NULL}'"]}
       - {native_type: "OID[]", sample: [], edges: ["'{}'", "'{1,2}'"]}
       - {native_type: "rivet_status[]", sample: [], edges: ["'{}'", "'{active,pending}'", "'{NULL}'"]}
-      - {native_type: "INET[]", sample: [], edges: ["'{}'", "'{10.0.0.1}'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "MONEY[]", sample: [], edges: ["'{}'", "'{1.00}'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "INT4RANGE[]", sample: [], edges: ["'{}'", "'{\"[1,5)\"}'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
-      - {native_type: "POINT[]", sample: [], edges: ["'{}'", "'{\"(1,2)\"}'"], refuses: "PG_UNMAPPED_TYPE!refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
+      - {native_type: "INET[]", sample: [], edges: ["'{}'", "'{10.0.0.1}'"], delivery: "server_text"}
+      - {native_type: "MONEY[]", sample: [], edges: ["'{}'", "'{1.00}'"], delivery: "server_text"}
+      - {native_type: "INT4RANGE[]", sample: [], edges: ["'{}'", "'{\"[1,5)\"}'"], delivery: "server_text"}
+      - {native_type: "POINT[]", sample: [], edges: ["'{}'", "'{\"(1,2)\"}'"], delivery: "server_text"}
   mysql:
     renders:
       "Binary": {duck: "lower(hex({c}))"}

@@ -369,7 +369,7 @@ fn a_column_without_an_arrow_type_is_refused_by_check_like_the_run_postgres() {
     let name = unique_name("unmapped_pg");
     let out = tempfile::tempdir().unwrap();
     let rig = Rig::pg_batch(&name)
-        .query("SELECT '10.0.0.0/8'::cidr AS c")
+        .query("SELECT 12.5::numeric AS c")
         .mode("full")
         .dest_path(out.path().to_path_buf());
     unmapped_column_is_refused_like_the_run(rig, &name, "c");

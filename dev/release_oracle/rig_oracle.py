@@ -216,6 +216,7 @@ def norm_native(t: str | bytes) -> str:
     t = re.sub(r"^TIMESTAMP(\(\d+\))? WITHOUT TIME ZONE", r"TIMESTAMP\1", t)
     t = re.sub(r"^TIMESTAMP(\(\d+\))? WITH TIME ZONE", r"TIMESTAMPTZ\1", t)
     t = re.sub(r"^TIME(\(\d+\))? WITHOUT TIME ZONE", r"TIME\1", t)
+    t = re.sub(r"^TIME(\(\d+\))? WITH TIME ZONE", r"TIMETZ\1", t)
     t = re.sub(r"^(DATETIME2|DATETIMEOFFSET)\(7\)$", r"\1", t)
     t = re.sub(r"^CHARACTER VARYING", "VARCHAR", t)
     return re.sub(r"^CHARACTER\b", "CHAR", t)
@@ -2307,6 +2308,7 @@ def _self_test() -> None:
     assert grade_findings(collapsed, rows, set(), {"b": "BIGINT"}, True), "DISTINCT relaxes only for a collapse column"
     assert norm_native("timestamp(6) without time zone[]") == "TIMESTAMP(6)[]"
     assert norm_native("character varying(50)") == "VARCHAR(50)"
+    assert norm_native("time with time zone") == "TIMETZ" and norm_native("time(3) without time zone") == "TIME(3)"
     assert unpinned_loss("TIMESTAMP WITH TIME ZONE", "VARCHAR") is None and unpinned_loss("TIMESTAMP", "VARCHAR") is not None
     assert norm_native("DATETIME2(7)") == "DATETIME2" and norm_native("DATETIMEOFFSET(7)") == "DATETIMEOFFSET"
     assert norm_native("DATETIME2(6)") == "DATETIME2(6)" and norm_native("DATETIME2(3)") == "DATETIME2(3)"
