@@ -171,7 +171,7 @@ def is_zero_date_null(engine: str, lit: str, verdict: str) -> bool:
 
 def server_text_of(url: str, col: Col, n_rows: int) -> list[str | None] | None:
     """The source's own text of each seeded value (PostgreSQL `::text`), the expectation of a column delivered as server text; None when unreadable."""
-    p = cdc._psql(url, "-Atc", f"SELECT id, {col.name} IS NULL, {col.name}::text FROM {TABLE} ORDER BY id")
+    p = cdc._psql(url, "-Atc", f"SELECT id, {col.name}::text IS NULL, {col.name}::text FROM {TABLE} ORDER BY id")
     rows = [line.split("|", 2) for line in p.out.splitlines() if line.strip()] if p.ok else []
     if len(rows) != n_rows or any(len(r) != 3 for r in rows):
         return None
