@@ -602,4 +602,4 @@ scenarios:
     chunked_checkpoint: { na: "shared seam (pg_run_export, below the dispatch)" }
     keyset:         { test: a_table_of_every_unmapped_type_is_delivered_as_server_text_keyset_postgres }
     mongo_parallel: { na: "a Mongo export has no PostgreSQL column type" }
-    cdc:            { na: "CDC reads the decoder's text and plans its own ServerText columns (plan_cdc_delivery); bit and bit varying stay refused there" }
+    cdc:            { test: postgres_batch_and_cdc_deliver_every_text_type_alike }
