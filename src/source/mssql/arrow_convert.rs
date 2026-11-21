@@ -883,18 +883,6 @@ fn declared_mismatch(column: &str, declared: &str, sent: &str) -> anyhow::Error 
     ))
 }
 
-/// The seeded defect: the unscaled value as an f64 would carry it, refused past 2^53 as the driver's f64 money was.
-#[cfg(feature = "seeded")]
-fn through_f64(value: i128, scale: u8) -> Result<i128> {
-    if (value as f64).abs() >= 9_007_199_254_740_992.0 {
-        crate::rivet_bail!(
-            crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
-            "seeded: a money value past 2^53 scaled units was rounded by an f64 (scale {scale})"
-        );
-    }
-    Ok(value)
-}
-
 /// Whether a column is MONEY or SMALLMONEY.
 fn is_money(t: ColumnType) -> bool {
     matches!(t, ColumnType::Money | ColumnType::Money4)
@@ -912,7 +900,7 @@ fn decimal_cell(c: Option<&ColumnData<'_>>, scale: u8, column: &str) -> Result<O
         Some(ColumnData::Numeric(Some(n))) => {
             let unscaled = seeded!(
                 "mssql-money-decoded-as-f64",
-                through_f64(n.value(), n.scale())?,
+                crate::seeded::money_through_f64(n.value(), n.scale())?,
                 n.value()
             );
             rescale_i128(unscaled, n.scale(), scale).map(Some)
@@ -2216,6 +2204,7 @@ mod error_code_tests {
 #[cfg(test)]
 mod money_tests {
     use super::*;
+    use crate::source::value_checksum::CellSource;
     use arrow::array::{Array, Decimal128Array, Float64Array};
     use tiberius::numeric::Numeric;
 
@@ -2278,6 +2267,25 @@ mod money_tests {
             .unwrap();
         assert_eq!(a.value(0), i128::from(i32::MAX));
         assert_eq!(a.value(1), i128::from(i32::MIN));
+    }
+
+    /// The value-checksum side reads every exact integer cell and a money cell without the f64 detour.
+    #[test]
+    fn the_checksum_source_reads_integers_and_money_exact() {
+        let cases = [
+            (ColumnType::Int1, ColumnData::U8(Some(7)), 70_000_i128),
+            (ColumnType::Int2, ColumnData::I16(Some(-7)), -70_000),
+            (ColumnType::Int4, ColumnData::I32(Some(7)), 70_000),
+            (ColumnType::Int8, ColumnData::I64(Some(-7)), -70_000),
+            (ColumnType::Money, money(i64::MAX), i128::from(i64::MAX)),
+        ];
+        for (ty, cell, want) in cases {
+            let rows = rows_of(ty, vec![cell]);
+            let src = MssqlCellSource { rows: &rows };
+            assert_eq!(src.decimal128(0, 0, 4), Some(want), "{ty:?}");
+        }
+        let rows = rows_of(ColumnType::Money, vec![money(1_234_500)]);
+        assert_eq!(MssqlCellSource { rows: &rows }.float64(0, 0), Some(123.45));
     }
 
     /// A `float64` override over MONEY stores the same f64 the driver used to deliver, NULL kept.
