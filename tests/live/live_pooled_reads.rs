@@ -435,37 +435,41 @@ fn a_composite_is_delivered_as_server_text_within_the_bound(url: &str) {
     destination_equals_the_source(&rig, &table, "full", "a composite");
 }
 
-/// A column of a type rivet has no flat mapping for, beside wide rows, over `url`: refused with `needle`, within `BOUND`.
-fn an_unmapped_type_is_refused_within_the_bound(
-    url: &str,
-    suffix: &str,
-    value: &str,
-    needle: &str,
-) {
+/// An enum array beside wide rows, over `url`: delivered as a list of strings holding the source's labels, within `BOUND`.
+fn an_enum_array_is_delivered_as_a_list_within_the_bound(url: &str) {
     if url == PGBOUNCER_URL {
         forget_pooled_statements();
     }
     let types = OwnTypes::new();
     let stem = &types.stem;
     let (table, _table) = table_of(
-        "pool_unmapped",
-        &format!("id BIGINT PRIMARY KEY, x {stem}{suffix} NOT NULL, wide TEXT NOT NULL"),
-        &format!("g, {}, {WIDE}", value.replace("{stem}", stem)),
+        "pool_enum_array",
+        &format!("id BIGINT PRIMARY KEY, x {stem}_e[] NOT NULL, wide TEXT NOT NULL"),
+        &format!("g, ARRAY['new', 'paid']::{stem}_e[], {WIDE}"),
     );
     let rig = ENGINE.rig(&table).source_url(url);
     let out = run_within_the_bound(&rig, "full");
-    let said = String::from_utf8_lossy(&out.stderr);
     assert!(
-        !out.status.success() && said.contains(needle),
-        "a `{stem}{suffix}` column must be refused with `{needle}`:\n{said}"
+        out.status.success(),
+        "the full export of an enum array failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
     );
+    let (columns, rows) = delivered(&rig);
+    let kind = &columns
+        .iter()
+        .find(|(name, _)| name == "x")
+        .expect("column x")
+        .1;
+    assert!(
+        kind.starts_with("List") && kind.contains("Utf8"),
+        "an enum array must arrive as a list of strings, got `{kind}`"
+    );
+    for row in &rows {
+        let cell: String = row[1].chars().filter(|c| !" \"".contains(*c)).collect();
+        assert_eq!(cell, "[new,paid]", "an enum array arrived as {:?}", row[1]);
+    }
+    assert!(!rows.is_empty(), "an enum array export delivered no rows");
 }
-
-const ENUM_ARRAY: (&str, &str, &str) = (
-    "_e[]",
-    "ARRAY['new', 'paid']::{stem}_e[]",
-    "has no flat mapping",
-);
 
 #[test]
 #[ignore = "live: requires docker compose up -d postgres"]
@@ -540,16 +544,14 @@ fn a_composite_column_with_wide_rows_through_one_transaction_pooler_is_delivered
 
 #[test]
 #[ignore = "live: requires docker compose up -d postgres"]
-fn an_array_of_an_enum_with_wide_rows_is_refused_within_the_bound_direct_postgres() {
-    let (suffix, value, needle) = ENUM_ARRAY;
-    an_unmapped_type_is_refused_within_the_bound(POSTGRES_URL, suffix, value, needle);
+fn an_array_of_an_enum_with_wide_rows_is_delivered_as_a_list_within_the_bound_direct_postgres() {
+    an_enum_array_is_delivered_as_a_list_within_the_bound(POSTGRES_URL);
 }
 
 #[test]
 #[ignore = "live: requires docker compose --profile pool up -d pgbouncer (transaction mode, pool_size=1)"]
-fn an_array_of_an_enum_with_wide_rows_through_one_transaction_pooler_is_refused_within_the_bound_postgres()
+fn an_array_of_an_enum_with_wide_rows_through_one_transaction_pooler_is_delivered_as_a_list_within_the_bound_postgres()
  {
     let _alone = pgbouncer_alone();
-    let (suffix, value, needle) = ENUM_ARRAY;
-    an_unmapped_type_is_refused_within_the_bound(PGBOUNCER_URL, suffix, value, needle);
+    an_enum_array_is_delivered_as_a_list_within_the_bound(PGBOUNCER_URL);
 }
