@@ -161,7 +161,7 @@ fn enum_variants(source: &str) -> Vec<String> {
 
 #[test]
 fn the_doc_table_lists_the_common_kinds_in_code_order_with_their_delivered_type() {
-    check_kinds(DOC).unwrap();
+    assert_eq!(check_kinds(DOC), Ok(()));
 }
 
 #[test]
