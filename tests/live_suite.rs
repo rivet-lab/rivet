@@ -72,6 +72,8 @@ mod live_audit_suspects;
 mod live_azure_multipart;
 #[path = "live/live_batch_switch_golden.rs"]
 mod live_batch_switch_golden;
+#[path = "live/live_binary_to_string_override.rs"]
+mod live_binary_to_string_override;
 #[path = "live/live_catalog_hints.rs"]
 mod live_catalog_hints;
 #[path = "live/live_cdc.rs"]

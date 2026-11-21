@@ -369,7 +369,7 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `time` | `string` | `Utf8` | `[-]hh:mm:ss.ffffff` text (`rivet.text_form: time_beyond_day`) | a MySQL `TIME` is a signed duration of -838:59:59 to 838:59:59, which `Time64(µs)` (00:00..24:00) cannot hold, so every value is delivered as text, batch and CDC, in a `logical_string` column | live matrix |
 | `varchar` / `text` | `string` / `text` | `Utf8` | escaped UTF-8 | | live matrix |
 | `json` | `json` | `Utf8` + Parquet `LogicalType::Json` (via `arrow.json` extension) | JSON string | | live matrix |
-| `binary` / `varbinary` / `blob` | `binary` | `Binary` | hex in CSV | charset 63 / binary payload | type_roundtrip |
+| `binary` / `varbinary` / `blob` | `binary` | `Binary` | hex in CSV | charset 63 / binary payload; under `columns: {c: string}` a value that is valid UTF-8 is delivered as that text and any other byte stops the run with `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (declare `binary`, or select `HEX(c)` / `ST_AsText(c)`), never U+FFFD | type_roundtrip, live matrix |
 | `bit(1)` | `bool` | `Boolean` | | | golden |
 | `bit(n)`, 1 < n <= 63 | `int64` | `Int64` | | avoids silent truncation | type_roundtrip |
 | `bit(64)` | `u_int64` → `UInt64` | `UInt64` | integer text | every value, including those with bit 63 set; `Int64` holds half of them | type_roundtrip |

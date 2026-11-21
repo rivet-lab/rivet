@@ -970,6 +970,8 @@ exclude_re = [
     "replace match guard seeded!\\(.*, false, true\\) with true in temporal_outside$",
     # 2026-11-20: the MySQL flag arm is guarded by `seeded!(name, v != 0, false)`, false in the shipped build; the stub to false is the code as shipped, and dev/seeded/recall.py grades the switch (mysql-flag-outside-zero-one-delivered-true CAUGHT); closes never.
     "replace match guard seeded!\\(.*, false\\) with false in flag$",
+    # 2026-11-21: the MySQL lossy-text arm is guarded by `seeded!(name, true, false)`, false in the shipped build; the stub to false is the code as shipped, and dev/seeded/recall.py grades the switch (mysql-string-override-replaces-bytes CAUGHT); closes never.
+    "replace match guard seeded!\\(.*, true, false\\) with false in text_of$",
     # 2026-11-20: mssql_catalog_hints_opt and finer_time_sql read sys.* over a live SQL Server connection, unkillable under --lib --bins; live cell mssql_batch_and_cdc_deliver_every_ledger_row_alike is RED under each stub (None and String::new() proven by hand 2026-11-20: the time(7) column loads Decimal(18, 6) where the ledger says Decimal(18, 9)) and seed mssql-time7-lands-at-microseconds CAUGHT; closes with an offline SQL Server fake.
     "replace MssqlSource::mssql_catalog_hints_opt ->",
     "replace finer_time_sql ->",
