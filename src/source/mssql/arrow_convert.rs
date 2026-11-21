@@ -1864,6 +1864,46 @@ mod tests {
         );
     }
 
+    /// A change-stream `columns:` override over a scale-7 column is graded as the batch override is: lossy when it keeps fewer digits, the same otherwise.
+    #[test]
+    fn a_stream_override_over_a_scale_seven_column_is_graded_as_the_batch_override() {
+        use tiberius::time::{Date, DateTime2, Time};
+        let dt2 = DateTime2::new(Date::new(693_595), Time::new(1, 7));
+        let row = Row::builder()
+            .column("t", ColumnType::Datetime2, ColumnData::DateTime2(Some(dt2)))
+            .build();
+        let hints = |fine: bool| CatalogHints {
+            decimals: HashMap::new(),
+            fine_timestamps: fine.then(|| "t".to_string()).into_iter().collect(),
+            fine_times: HashSet::new(),
+        };
+        use crate::types::TypeFidelity::{Exact, Lossy};
+        for (fine, ov, want) in [
+            (true, "timestamp", Lossy),
+            (true, "timestamp_tz", Lossy),
+            (true, "timestamp_ns", Exact),
+            (false, "timestamp", Exact),
+        ] {
+            let overrides: ColumnOverrides =
+                [("t".to_string(), crate::types::parse_type_str(ov).unwrap())]
+                    .into_iter()
+                    .collect();
+            let batch = mssql_type_mappings(row.columns(), &overrides, Some(&hints(fine))).unwrap();
+            let source =
+                mssql_type_mappings(row.columns(), &ColumnOverrides::new(), Some(&hints(fine)))
+                    .unwrap();
+            let stream =
+                crate::source::cdc::retype_for_stream(source[0].clone(), &overrides).unwrap();
+            assert_eq!(batch[0].fidelity, want, "batch {ov} fine={fine}");
+            assert_eq!(stream.fidelity, want, "stream {ov} fine={fine}");
+            assert_eq!(
+                stream.warnings.is_empty(),
+                batch[0].warnings.is_empty(),
+                "{ov} fine={fine}"
+            );
+        }
+    }
+
     /// The first non-null datetime2 / datetimeoffset value's own scale decides the type over the catalog; with no such value the catalog decides.
     #[test]
     fn a_fine_timestamp_is_read_from_the_first_values_own_scale() {
