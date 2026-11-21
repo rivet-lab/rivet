@@ -7054,7 +7054,7 @@ seeds:
     switch: narrowing-override-reported-exact
     engines:
       oracle:
-        cells: ["lib:a_time_type_coarser_than_its_source_is_lossy"]
+        cells: ["lib:a_time_type_coarser_than_its_source_is_lossy", "lib:an_override_narrowing_a_sub_microsecond_oracle_column_is_lossy"]
       mssql:
         cells: ["lib:a_microsecond_override_over_a_scale_seven_column_is_reported_lossy"]
       postgres:
