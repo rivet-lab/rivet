@@ -59,6 +59,7 @@ STAND_REFUSALS = ("RIVET_SOURCE_CONNECT_FAILED", "RIVET_SOURCE_RUNTIME_UNAVAILAB
 STAND_TRIES = 5
 RECHECKS = 2
 LEASE_REFUSAL = "RIVET_STATE_RUN_IN_PROGRESS"
+MISSING_SEED = "RIVET_SOURCE_TABLE_NOT_FOUND"
 CELL_STATE = {"RIVET_STATE_URL": "", "RIVET_GATE_STATE_URL": ""}
 DELIVERED, REFUSED, DECLARED = "delivered", "refused", "declared_lossy"
 HIDDEN, SHAPE = "HIDDEN_COLUMN_DELIVERED", "LEG_SHAPE_DIFFERS"
@@ -787,6 +788,8 @@ def grade_stop(cell: str, p: core.Proc, check: core.Proc) -> Result | None:
         return Result(cell, REFUSED, UNGRADED, f"another cell of this matrix holds the run lease, so no value was read: exit {p.returncode} [{code}]", code)
     if code.startswith("RIVET_CONFIG_") and code not in TYPE_REFUSALS:
         return Result(cell, REFUSED, UNGRADED, f"the harness's own config was refused before any value was read: exit {p.returncode} [{code}]", code)
+    if code == MISSING_SEED:
+        return Result(cell, REFUSED, UNGRADED, f"the seed table is not on the stand, so no value was read: exit {p.returncode} [{code}]", code)
     if not code or code.startswith("RIVET_INTERNAL"):
         return Result(cell, REFUSED, UNCODED, f"exit {p.returncode} {code or 'no code'}: {core.first_error(p.stderr)[:160]}", code)
     if check.returncode == 0:
@@ -1272,6 +1275,7 @@ def self_test() -> None:
     assert grade_stop("c", _proc(1, "[RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH] x"), probe).klass == NOT_GRADED, "a check whose type probe never ran is no evidence of a split"
     assert grade_stop("c", _proc(2, "[RIVET_CONFIG_COLUMN_OVERRIDE_CASE] x"), _proc(2)).klass == UNGRADED, "a refusal of the harness's own config is not a graded refusal"
     assert grade_stop("c", _proc(2, "[RIVET_STATE_RUN_IN_PROGRESS] x"), _proc(0)).klass == UNGRADED, "a lease refusal between two cells is not a graded refusal"
+    assert grade_stop("c", _proc(5, f"[{MISSING_SEED}] x"), _proc(5, f"[{MISSING_SEED}] x")).klass == UNGRADED, "a stand that lost the seed table is no refusal that check and run agree on"
     seen: dict = {}
     real_run = core.run
     core.run = lambda argv, **kw: seen.update(kw["env"]) or _proc(0)

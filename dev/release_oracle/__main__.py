@@ -984,6 +984,7 @@ def _matrix_exit_code_self_test() -> None:
     for name, (mod, runner, stub, call) in table.items():
         for cell, want in ((ok, 0), (red, 1), (ng, 2)):
             with mock.patch.object(mod, runner, lambda *a, _c=cell, _s=stub, **k: _s(_c)), \
+                    mock.patch.object(nsn, "binary_line", lambda: "binary: stub"), \
                     mock.patch.object(sys, "argv", ["x", "--work", tmp]), contextlib.redirect_stdout(io.StringIO()):
                 got = call(mod)
             assert got == want, f"{name} exits {got} for a {cell.klass or 'passing'} cell, want {want}"
