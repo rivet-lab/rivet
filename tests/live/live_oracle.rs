@@ -2359,7 +2359,12 @@ fn a_nine_digit_interval_holding_microseconds_is_delivered_not_refused() {
     assert_eq!(fidelity("IV6"), "logical_string");
     let want = oracle_cells(t.name(), "TO_CHAR(iv9)");
     let got = parquet_cells(out.path(), "IV9");
-    assert_eq!(got.len(), want.len(), "one delivered row per source row");
+    let delivered = got[&1].as_deref().expect("IV9 delivered");
+    assert!(
+        want[&1].as_deref().unwrap().contains("02:03:04.123456")
+            && delivered.contains("02:03:04.123456"),
+        "IV9 {delivered:?} vs the server's {want:?}"
+    );
 }
 
 /// The `columns:` override types beyond the autodetected ones, one column each.
