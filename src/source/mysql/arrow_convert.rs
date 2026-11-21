@@ -803,6 +803,17 @@ fn not_utf8(column: &str, bv: &[u8]) -> anyhow::Error {
     )
 }
 
+/// A byte cell read as text: borrowed when it is UTF-8, else refused by code.
+fn text_of<'a>(column: &str, bv: &'a [u8]) -> Result<std::borrow::Cow<'a, str>> {
+    match bytes_to_str(bv) {
+        Some(s) => Ok(s.into()),
+        None if seeded!("mysql-string-override-replaces-bytes", true, false) => {
+            Ok(String::from_utf8_lossy(bv))
+        }
+        None => Err(not_utf8(column, bv)),
+    }
+}
+
 /// True for the zero date MySQL stores in place of a missing one.
 fn is_zero_date(bv: &[u8]) -> bool {
     bv.starts_with(b"0000-00-00")
@@ -1043,18 +1054,7 @@ fn build_array(
                 match row.as_ref(col_idx) {
                     Some(Value::Bytes(bv)) => {
                         value_within_ceiling(column, bv.len(), max_value_bytes)?;
-                        match bytes_to_str(bv) {
-                            Some(s) => b.append_value(s),
-                            None if seeded!(
-                                "mysql-string-override-replaces-bytes",
-                                true,
-                                false
-                            ) =>
-                            {
-                                b.append_value(String::from_utf8_lossy(bv).as_ref())
-                            }
-                            None => return Err(not_utf8(column, bv)),
-                        }
+                        b.append_value(text_of(column, bv)?.as_ref());
                     }
                     Some(Value::Int(v)) => b.append_value(v.to_string()),
                     Some(Value::UInt(v)) => b.append_value(v.to_string()),
