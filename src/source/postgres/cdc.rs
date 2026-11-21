@@ -1674,9 +1674,32 @@ struct ParsedColumn {
     unrepresentable: bool,
 }
 
+/// Whether batch delivers an array of this catalog type as the server's text, which CDC then keeps as the raw literal.
+fn array_is_server_text(oid: u32, elem_typtype: &str) -> bool {
+    let server_text = match postgres::types::Type::from_oid(oid) {
+        Some(t) => super::arrow_convert::pg_server_text(&t),
+        None => elem_typtype != "e",
+    };
+    server_text && !seeded!("cdc-array-text-parsed-as-list", true, false)
+}
+
 /// Every domain's label mapped to its base type's label, and every array label batch delivers as the server's text mapped to `text`.
+fn domain_map(
+    domains: impl IntoIterator<Item = (String, String)>,
+    arrays: impl IntoIterator<Item = (u32, String, String)>,
+) -> Domains {
+    let mut map: Domains = domains.into_iter().collect();
+    for (oid, label, elem_typtype) in arrays {
+        if array_is_server_text(oid, &elem_typtype) {
+            map.insert(label, "text".to_string());
+        }
+    }
+    map
+}
+
+/// The catalog's domains and arrays read on the reader's session, as `domain_map` takes them.
 fn load_domains(client: &mut Client) -> Result<Domains> {
-    let mut map: Domains = client
+    let domains: Vec<(String, String)> = client
         .query(
             "SELECT format_type(oid, NULL), format_type(typbasetype, NULL) \
              FROM pg_type WHERE typtype = 'd'",
@@ -1685,23 +1708,17 @@ fn load_domains(client: &mut Client) -> Result<Domains> {
         .iter()
         .map(|r| (r.get(0), r.get(1)))
         .collect();
-    for row in client.query(
-        "SELECT a.oid, format_type(a.oid, NULL), e.typtype::text \
-           FROM pg_type a JOIN pg_type e ON e.oid = a.typelem \
-          WHERE a.typcategory = 'A' AND a.typelem <> 0",
-        &[],
-    )? {
-        let oid: u32 = row.get(0);
-        let enum_elem = row.get::<_, String>(2) == "e";
-        let server_text = match postgres::types::Type::from_oid(oid) {
-            Some(t) => super::arrow_convert::pg_server_text(&t),
-            None => !enum_elem,
-        };
-        if server_text && !seeded!("cdc-array-text-parsed-as-list", true, false) {
-            map.insert(row.get(1), "text".to_string());
-        }
-    }
-    Ok(map)
+    let arrays: Vec<(u32, String, String)> = client
+        .query(
+            "SELECT a.oid, format_type(a.oid, NULL), e.typtype::text \
+               FROM pg_type a JOIN pg_type e ON e.oid = a.typelem \
+              WHERE a.typcategory = 'A' AND a.typelem <> 0",
+            &[],
+        )?
+        .iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2)))
+        .collect();
+    Ok(domain_map(domains, arrays))
 }
 
 /// The built-in type a (possibly nested) domain label decodes as; any other label as is.
@@ -2653,6 +2670,61 @@ mod tests {
     }
 
     /// A numeric array keeps the server's literal; an integer array parses.
+    /// A catalog array is kept as the server's text exactly when batch delivers it as server text.
+    #[test]
+    fn an_array_is_server_text_where_batch_delivers_it_so() {
+        use postgres::types::Type;
+        for (t, elem, want) in [
+            (Type::INET_ARRAY, "b", true),
+            (Type::MONEY_ARRAY, "b", true),
+            (Type::INT4_ARRAY, "b", false),
+            (Type::TEXT_ARRAY, "b", false),
+        ] {
+            assert_eq!(array_is_server_text(t.oid(), elem), want, "{t}");
+        }
+        assert!(array_is_server_text(900_001, "c"), "a composite array");
+        assert!(array_is_server_text(900_002, "b"), "a user base type array");
+        assert!(
+            !array_is_server_text(900_003, "e"),
+            "an enum array stays a list"
+        );
+    }
+
+    /// The map holds each domain at its base label, each server-text array at `text`, and nothing for a mapped array.
+    #[test]
+    fn the_domain_map_holds_domains_and_server_text_arrays_only() {
+        use postgres::types::Type;
+        let map = domain_map(
+            [("money_d".to_string(), "numeric".to_string())],
+            [
+                (
+                    Type::INET_ARRAY.oid(),
+                    "inet[]".to_string(),
+                    "b".to_string(),
+                ),
+                (
+                    Type::INT4_ARRAY.oid(),
+                    "integer[]".to_string(),
+                    "b".to_string(),
+                ),
+                (900_003, "mood[]".to_string(), "e".to_string()),
+                (900_001, "pair[]".to_string(), "c".to_string()),
+            ],
+        );
+        let mut got: Vec<_> = map.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        got.sort();
+        assert_eq!(
+            got,
+            [
+                ("inet[]", "text"),
+                ("money_d", "numeric"),
+                ("pair[]", "text")
+            ]
+        );
+        assert_eq!(domain_base(&map, "inet[]"), "text");
+        assert_eq!(domain_base(&map, "integer[]"), "integer[]");
+    }
+
     #[test]
     fn an_unlisted_array_keeps_the_servers_own_literal() {
         assert_eq!(
