@@ -177,10 +177,11 @@ fn outcome(eng: Eng, case: &Case) -> Option<String> {
         ));
     }
     let got = dir_parquet_display(&rig.out_dir(), eng.col());
-    if got.len() != 2 || got[1].is_some() {
+    let held: Vec<&String> = got.iter().flatten().collect();
+    if got.len() != 2 || held.len() != 1 {
         return Some(format!("WRONG {got:?}"));
     }
-    let s = got[0].clone().unwrap_or_default();
+    let s = held[0].clone();
     let bytes = hex_bytes(case.hex);
     Some(if s.contains('\u{fffd}') {
         format!("LOSSY {s:?}")
@@ -196,14 +197,15 @@ fn outcome(eng: Eng, case: &Case) -> Option<String> {
 const BYTES: &str = "delivered the bytes";
 const HEX: &str = "delivered hex";
 const U: &str = "refused RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5)";
+const W: &str = "refused RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH (exit 1)";
 const NA: &str = "-";
 
 /// Pinned outcome per case in `CASES` order: MySQL, PostgreSQL, SQL Server, Oracle.
 const EXPECTED: [[&str; 4]; 5] = [
-    [U, NA, NA, NA],
+    [U, W, W, HEX],
+    [BYTES, W, W, HEX],
+    [U, NA, NA, HEX],
     [BYTES, NA, NA, HEX],
-    [U, NA, NA, NA],
-    [BYTES, NA, NA, NA],
     [U, NA, NA, NA],
 ];
 
@@ -238,6 +240,47 @@ fn matrix(eng: Eng) {
 #[ignore = "live: requires docker compose mysql"]
 fn a_binary_column_declared_string_never_loses_a_byte_mysql() {
     matrix(Eng::Mysql);
+}
+
+/// The refusal's remedy delivers: the same VARBINARY and GEOMETRY columns declared `binary` are written as the bytes the source holds, and the refusal names that remedy.
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn the_remedy_of_the_refusal_delivers_the_bytes_mysql() {
+    use mysql::prelude::Queryable;
+    require_alive(LiveService::Mysql);
+    for (src, hex) in [(Src::Varbinary, NON_UTF8), (Src::Geometry, "")] {
+        let eng = Eng::Mysql;
+        let ty = eng.ty(src).unwrap();
+        let (table, _guard) = eng.table(ty, &eng.literal(src, hex));
+        let said = {
+            let rig = readback_only(eng.rig(&table)).export_line("columns: {v: string}");
+            String::from_utf8_lossy(&rig.run().stderr).into_owned()
+        };
+        assert!(
+            said.contains("Declare `v: binary` in `columns:`") && said.contains("`HEX(v)`"),
+            "{ty}: the refusal names its remedy: {said}"
+        );
+        let rig = readback_only(eng.rig(&table)).export_line("columns: {v: binary}");
+        rig.run_ok();
+        let held: Option<String> = mysql_connect()
+            .query_first(format!("SELECT HEX(v) FROM {table} WHERE id = 1"))
+            .unwrap();
+        let got = dir_parquet_display(&rig.out_dir(), "v");
+        assert_eq!(got.len(), 2, "{ty}");
+        assert_eq!(
+            got.iter().filter(|v| v.is_none()).count(),
+            1,
+            "{ty}: the NULL row stays NULL"
+        );
+        assert_eq!(
+            got.into_iter()
+                .flatten()
+                .next()
+                .map(|v| v.to_ascii_uppercase()),
+            held,
+            "{ty} as binary"
+        );
+    }
 }
 
 #[test]
