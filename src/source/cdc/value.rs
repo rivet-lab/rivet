@@ -244,7 +244,9 @@ impl CellRefusal {
             (code, String::new())
         } else if overridden {
             (
-                if self.reason == NO_READING {
+                if self.reason == NO_READING
+                    || seeded!("cdc-override-value-refusal-wire-coded", true, false)
+                {
                     crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH
                 } else {
                     crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE

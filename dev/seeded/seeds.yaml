@@ -7047,6 +7047,22 @@ seeds:
       oracle:
         cells: ["lib:narrows_flags_a_decimal_float8_override_past_fifteen_digits_as_lossy", "lib:a_float8_override_over_a_wide_decimal_is_reported_lossy"]
 
+  - name: cdc-override-value-refusal-wire-coded
+    class: "a value a `columns:` override cannot hold is refused on the change stream with the wire-mismatch code (exit 1) while the batch converter and the snapshot leg of the same engine refuse it with the value code (exit 5), so one condition has two exits and `rivet check` names the other"
+    history: "2026-11-21: Oracle CDC `initial: snapshot` refused a DATE with a time of day under `date` with exit 5 and the stream leg with exit 1; CellRefusal::into_error coded every overridden refusal as the wire-mismatch code"
+    scope: source
+    switch: cdc-override-value-refusal-wire-coded
+    engines:
+      postgres:
+        cells: ["lib:an_override_refusal_by_value_carries_the_value_code_as_batch_does"]
+      mysql:
+        cells: ["lib:an_override_refusal_by_value_carries_the_value_code_as_batch_does"]
+      mssql:
+        cells: ["lib:an_override_refusal_by_value_carries_the_value_code_as_batch_does"]
+      mongo:
+        na: "a MongoDB change row is two text cells; the typed cell builder does not run"
+      oracle:
+        cells: ["lib:an_override_refusal_by_value_carries_the_value_code_as_batch_does", "oracle_cdc_a_date_override_refuses_a_time_of_day_not_drops_it"]
   - name: check-values-unread-unsaid
     class: "`rivet check` exits 0 over a column a run then refuses by a value (RIVET_SOURCE_VALUE_UNREPRESENTABLE, RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE) without saying that it read no values, so check and run disagree with nothing to tell the operator why"
     history: "CHECK_RUN_SPLIT known-red class over every engine and leg (2026-11-10..19); owner decision 2026-11-20: check names the codes only a value decides (needs_values in the registry) instead of reading values, and the gate grades a split on such a code as noted"
