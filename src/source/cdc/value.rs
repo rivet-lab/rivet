@@ -401,8 +401,8 @@ fn time_of_day_nanos(ns: i64) -> String {
 
 /// Why a decimal cell is refused.
 const NOT_A_DECIMAL: &str = "is not representable in this decimal column (NaN/Infinity, more \
-                             fraction digits than the column's scale, or a MONEY value past the \
-                             f64-exact 2^53 range that tiberius already rounded)";
+                             fraction digits than the column's scale, or a float past the \
+                             f64-exact 2^53 range, which the source already rounded)";
 
 /// Build one Arrow column of exactly `dt` from typed cells (one per row; `None` ⇒ null).
 #[allow(clippy::redundant_closure_call)]
@@ -2055,7 +2055,7 @@ mod tests {
     }
 
     #[test]
-    fn cdc_money_past_f64_exact_range_fails_loud_not_a_falsely_exact_decimal() {
+    fn a_float_past_the_f64_exact_range_is_refused_not_a_falsely_exact_decimal() {
         use arrow::datatypes::DataType;
         assert_eq!(
             decimal_to_i128(&RivetValue::Float(9.0e11), 4),
@@ -2065,15 +2065,15 @@ mod tests {
         assert!(decimal_to_i256(&RivetValue::Float(1e12), 4).is_none());
         let small = RivetValue::Float(12.34);
         let ok = build("c", &DataType::Decimal128(19, 4), &[Some(&small)])
-            .expect("a small MONEY value builds");
+            .expect("a small float builds");
         assert_eq!(ok.len(), 1);
         let huge = RivetValue::Float(1e12);
         let err = build("c", &DataType::Decimal128(19, 4), &[Some(&huge)])
-            .expect_err("a MONEY value past f64-exact range must fail loud, not round silently");
+            .expect_err("a float past the f64-exact range must fail loud, not round silently");
         let msg = err.to_string().to_lowercase();
         assert!(
-            msg.contains("2^53") && msg.contains("money"),
-            "message must name the 2^53 range and MONEY: {msg}"
+            msg.contains("2^53") && msg.contains("float"),
+            "message must name the 2^53 range and the float: {msg}"
         );
     }
 

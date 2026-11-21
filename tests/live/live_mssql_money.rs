@@ -45,8 +45,13 @@ fn table_of(ty: &str, values: &[&str]) -> (String, MssqlTable) {
     (table, guard)
 }
 
+/// The delivered `v` column as decimal text, NULL as the empty string.
+fn delivered(rig: &Rig) -> Vec<String> {
+    dir_parquet_decimal_strings(&rig.out_dir(), "v")
+}
+
 /// What the server itself prints for each row, four decimals, NULL as the empty string.
-fn server_text(table: &str) -> Vec<String> {
+fn server_rendering(table: &str) -> Vec<String> {
     sqlcmd_lines(
         "rivet-mssql-1",
         &format!("SELECT ISNULL(CONVERT(varchar(40), v, 2), '') FROM dbo.{table} ORDER BY id"),
@@ -62,8 +67,8 @@ fn money_and_smallmoney_are_delivered_exact_over_their_whole_range() {
         let (table, _guard) = table_of(ty, values);
         let rig = Rig::mssql_batch(&table).no_oracle(NO_ORACLE);
         rig.run_ok();
-        let got = dir_parquet_decimal_strings(&rig.out_dir(), "v");
-        assert_eq!(got, server_text(&table), "{ty}");
+        let got = delivered(&rig);
+        assert_eq!(got, server_rendering(&table), "{ty}");
         assert_eq!(got.len(), values.len() + 1, "{ty}: every row and the NULL");
     }
 }
@@ -86,10 +91,7 @@ fn money_inside_the_old_exact_range_is_delivered_as_before() {
     let (table, _guard) = table_of("MONEY", NEAR);
     let rig = Rig::mssql_batch(&table).no_oracle(NO_ORACLE);
     rig.run_ok();
-    assert_eq!(
-        dir_parquet_decimal_strings(&rig.out_dir(), "v"),
-        server_text(&table)
-    );
+    assert_eq!(delivered(&rig), server_rendering(&table));
 }
 
 /// A `float64` override over MONEY delivers the nearest f64 of the server's value, NULL kept.
@@ -102,7 +104,7 @@ fn a_float64_override_over_money_delivers_the_nearest_f64() {
         .no_oracle(NO_ORACLE)
         .export_line("columns: {v: float64}");
     rig.run_ok();
-    let want: Vec<Option<f64>> = server_text(&table)
+    let want: Vec<Option<f64>> = server_rendering(&table)
         .iter()
         .map(|t| (!t.is_empty()).then(|| t.parse().unwrap()))
         .collect();
@@ -125,7 +127,7 @@ fn a_narrower_decimal_override_over_money_delivers_values_that_fit() {
             "SELECT ISNULL(CONVERT(varchar(40), CAST(v AS decimal(19,2))), '') FROM dbo.{table} ORDER BY id"
         ),
     );
-    assert_eq!(dir_parquet_decimal_strings(&rig.out_dir(), "v"), want);
+    assert_eq!(delivered(&rig), want);
 }
 
 /// A `decimal(19,2)` override over a MONEY value holding four decimals is refused by code, never written rounded.
@@ -140,4 +142,72 @@ fn a_narrower_decimal_override_over_money_refuses_a_value_it_would_round() {
         &out,
         Refused::by_code("RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1),
     );
+}
+
+/// A MONEY cursor column advances the incremental run by its value: the second run delivers only the row past the stored cursor.
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn a_money_cursor_column_advances_an_incremental_run() {
+    require_alive(LiveService::Mssql);
+    let table = unique_name("mssql_money_cursor");
+    mssql_exec(&format!(
+        "CREATE TABLE dbo.{table} (id INT PRIMARY KEY, v MONEY NOT NULL);\n\
+         INSERT INTO dbo.{table} VALUES (1, 1.5), (2, 3.5), (3, 2.25)"
+    ));
+    let _guard = MssqlTable::adopt(table.clone());
+    let rig = Rig::mssql_batch(&table)
+        .mode("incremental")
+        .export_line("cursor_column: v")
+        .no_oracle(NO_ORACLE);
+    rig.run_ok();
+    let first = delivered(&rig);
+    assert_eq!(first.len(), 3);
+    let cursor = StateDb::next_to_config(&rig.config_path()).cursor_value(rig.export_name());
+    println!("money cursor after run 1: {cursor:?}");
+    assert_eq!(
+        cursor.as_deref().and_then(|c| c.parse::<f64>().ok()),
+        Some(3.5),
+        "the stored cursor is the largest value"
+    );
+    mssql_exec(&format!(
+        "INSERT INTO dbo.{table} (id, v) VALUES (10, CAST('4.75' AS MONEY)), (11, CAST('0.5' AS MONEY))"
+    ));
+    rig.run_ok();
+    let all = delivered(&rig);
+    let mut seen: Vec<&str> = all
+        .iter()
+        .map(String::as_str)
+        .filter(|t| !t.is_empty())
+        .collect();
+    seen.sort_unstable();
+    println!("money rows delivered over both runs: {seen:?}");
+    assert_eq!(seen, ["1.5000", "2.2500", "3.5000", "4.7500"]);
+}
+
+/// A sql_variant holding MONEY is delivered as the text the server renders it, whatever the money decode.
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn a_sql_variant_holding_money_is_delivered_as_the_servers_text() {
+    require_alive(LiveService::Mssql);
+    let table = unique_name("mssql_money_variant");
+    mssql_exec(&format!(
+        "CREATE TABLE dbo.{table} (id INT PRIMARY KEY, v SQL_VARIANT NULL);\n\
+         INSERT INTO dbo.{table} VALUES (1, CAST('123.4567' AS MONEY)), (2, CAST('922337203685477.5807' AS MONEY)), (3, CAST('-0.0001' AS SMALLMONEY)), (4, NULL)"
+    ));
+    let _guard = MssqlTable::adopt(table.clone());
+    let rig = Rig::mssql_batch(&table).no_oracle(NO_ORACLE);
+    rig.run_ok();
+    let got: std::collections::BTreeSet<String> = dir_parquet_distinct_strings(&rig.out_dir(), "v")
+        .into_iter()
+        .filter(|t| !t.is_empty())
+        .collect();
+    println!("variant money text: {got:?}");
+    let want: std::collections::BTreeSet<String> = sqlcmd_lines(
+        "rivet-mssql-1",
+        &format!("SELECT ISNULL(CONVERT(varchar(40), CONVERT(money, v), 2), '') FROM dbo.{table} ORDER BY id"),
+    )
+    .into_iter()
+    .filter(|t| !t.is_empty())
+    .collect();
+    assert_eq!(got, want);
 }

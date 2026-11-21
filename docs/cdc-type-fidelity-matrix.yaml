@@ -2,7 +2,7 @@
 # CHANGE-STREAM path (decode → typed RivetValue sink → Parquet) with correct
 # precision/encoding, per engine? The batch axis is docs/type-fidelity-matrix.yaml;
 # this is its CDC sibling. The audit found the per-type CDC axis un-systematized —
-# the class where findings #2 (MSSQL MONEY>2^53), #3 (MySQL ENUM cross-db) and #4
+# the class where findings #2 (MSSQL MONEY>2^53, closed: money is exact since 2026-11-21), #3 (MySQL ENUM cross-db) and #4
 # (BIT(64) bit 63) lived: the batch path was correct, the CDC/edge sibling was not.
 # Same shape + drift-guard as the other ledgers. Cell = { test } | { gap } | { na }.
 #
@@ -64,10 +64,10 @@ scenarios:
     oracle:   { test: oracle_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent }
 
   - id: type_decimal
-    what: "decimal(p,s) precision + scale through CDC (MySQL cell INDEPENDENT: DuckDB re-read vs source literal); MSSQL MONEY past the f64-exact 2^53 range fails loud, not falsely-exact (finding #2)"
+    what: "decimal(p,s) precision + scale through CDC (MySQL cell INDEPENDENT: DuckDB re-read vs source literal); MSSQL MONEY and SMALLMONEY are carried exact over their whole range (finding #2)"
     postgres: { test: postgres_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent, known_defect: ["NUMERIC"] }
     mysql:    { test: mysql_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent }
-    mssql:    { test: cdc_money_past_f64_exact_range_fails_loud_not_a_falsely_exact_decimal, oracle: fail_loud }
+    mssql:    { test: mssql_money_values_survive_batch_and_cdc, oracle: independent }
     mongo:    { test: mongo_cdc_change_stream_renders_tricky_bson_verbatim_like_batch, oracle: independent }
     oracle:   { test: oracle_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent }
 
@@ -176,7 +176,7 @@ scenarios:
     oracle:   { na: "Oracle has no BIT type" }
 
   - id: type_money
-    what: "MSSQL MONEY/SMALLMONEY — the exact scaled value through CDC (f64-delivered by tiberius), fails loud past the 2^53-exact range (finding #2)"
+    what: "MSSQL MONEY/SMALLMONEY — the exact scaled value through CDC over the whole range, past 2^53 scaled units included (finding #2)"
     postgres: { test: postgres_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent, known_defect: ["MONEY"] }
     mysql:    { na: "MySQL has no MONEY type" }
     mssql:    { test: mssql_money_values_survive_batch_and_cdc, oracle: independent }

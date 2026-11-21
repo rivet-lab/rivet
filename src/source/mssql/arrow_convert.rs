@@ -533,6 +533,49 @@ fn decimal_scale_from_rows(idx: usize, rows: &[Row]) -> Option<u8> {
     })
 }
 
+/// A `Float64` column: an f64 cell as is, a MONEY cell as the nearest double of its exact value, any other cell refused.
+fn float64_array(
+    idx: usize,
+    rows: &[Row],
+    column: &str,
+    declared: Option<&RivetType>,
+) -> Result<ArrayRef> {
+    let money = rows
+        .first()
+        .is_some_and(|r| is_money(r.columns()[idx].column_type()));
+    let mut b = Float64Builder::with_capacity(rows.len());
+    for row in rows {
+        match cell(row, idx) {
+            Some(ColumnData::F64(Some(v))) => b.append_value(*v),
+            Some(ColumnData::Numeric(Some(n))) if money => b.append_value(numeric_to_f64(n)),
+            Some(
+                ColumnData::U8(None)
+                | ColumnData::I16(None)
+                | ColumnData::I32(None)
+                | ColumnData::I64(None)
+                | ColumnData::F32(None)
+                | ColumnData::F64(None)
+                | ColumnData::Bit(None)
+                | ColumnData::String(None)
+                | ColumnData::Binary(None)
+                | ColumnData::Guid(None)
+                | ColumnData::Numeric(None),
+            )
+            | None => b.append_null(),
+            Some(other) => {
+                return Err(cell_mismatch(
+                    declared,
+                    column,
+                    &DataType::Float64,
+                    Some(other),
+                    "",
+                ));
+            }
+        }
+    }
+    Ok(Arc::new(b.finish()))
+}
+
 /// Build one Arrow array for column `idx`, dispatching on the Arrow target type (so the array always matches the schema field by construction).
 fn build_array(
     target: &DataType,
@@ -599,16 +642,7 @@ fn build_array(
         DataType::Int32 => simple!(Int32Builder, Some(ColumnData::I32(Some(v))) => *v),
         DataType::Int64 => simple!(Int64Builder, Some(ColumnData::I64(Some(v))) => *v),
         DataType::Float32 => simple!(Float32Builder, Some(ColumnData::F32(Some(v))) => *v),
-        DataType::Float64 => {
-            let money = rows
-                .first()
-                .is_some_and(|r| is_money(r.columns()[idx].column_type()));
-            if money {
-                simple!(Float64Builder, Some(ColumnData::Numeric(Some(n))) => numeric_to_f64(n))
-            } else {
-                simple!(Float64Builder, Some(ColumnData::F64(Some(v))) => *v)
-            }
-        }
+        DataType::Float64 => float64_array(idx, rows, column, declared)?,
         DataType::Utf8
             if rows
                 .first()
@@ -849,6 +883,18 @@ fn declared_mismatch(column: &str, declared: &str, sent: &str) -> anyhow::Error 
     ))
 }
 
+/// The seeded defect: the unscaled value as an f64 would carry it, refused past 2^53 as the driver's f64 money was.
+#[cfg(feature = "seeded")]
+fn through_f64(value: i128, scale: u8) -> Result<i128> {
+    if (value as f64).abs() >= 9_007_199_254_740_992.0 {
+        crate::rivet_bail!(
+            crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+            "seeded: a money value past 2^53 scaled units was rounded by an f64 (scale {scale})"
+        );
+    }
+    Ok(value)
+}
+
 /// Whether a column is MONEY or SMALLMONEY.
 fn is_money(t: ColumnType) -> bool {
     matches!(t, ColumnType::Money | ColumnType::Money4)
@@ -863,7 +909,14 @@ fn numeric_to_f64(n: &tiberius::numeric::Numeric) -> f64 {
 fn decimal_cell(c: Option<&ColumnData<'_>>, scale: u8, column: &str) -> Result<Option<i128>> {
     let int = |v: i128| rescale_i128(v, 0, scale).map(Some);
     match c {
-        Some(ColumnData::Numeric(Some(n))) => rescale_i128(n.value(), n.scale(), scale).map(Some),
+        Some(ColumnData::Numeric(Some(n))) => {
+            let unscaled = seeded!(
+                "mssql-money-decoded-as-f64",
+                through_f64(n.value(), n.scale())?,
+                n.value()
+            );
+            rescale_i128(unscaled, n.scale(), scale).map(Some)
+        }
         Some(ColumnData::U8(Some(v))) => int(i128::from(*v)),
         Some(ColumnData::I16(Some(v))) => int(i128::from(*v)),
         Some(ColumnData::I32(Some(v))) => int(i128::from(*v)),

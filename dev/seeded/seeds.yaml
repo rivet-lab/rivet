@@ -6823,6 +6823,22 @@ seeds:
         na: "Oracle has no TIME type; a time of day is a DATE or TIMESTAMP column"
       mongo:
         na: "BSON has no time-of-day type, so no MongoDB value is a TIME column"
+  - name: mssql-money-decoded-as-f64
+    class: "a SQL Server MONEY or SMALLMONEY past 2^53 scaled units (|value| of about 9.007e11 and more) is carried as an f64 and so is refused by code (batch, RIVET_SOURCE_VALUE_UNREPRESENTABLE) or stopped in the stream (CDC, RIVET_SOURCE_CDC_CELL_UNSUPPORTED) instead of delivered exact"
+    history: "type matrix class MSSQL_MONEY_BIG (known_red 2026-11-16, MONEY Decimal(19,4) and SMALLMONEY Decimal(10,4) across ClickHouse, BigQuery and Snowflake); fixed 2026-11-21 by decoding money as Numeric at scale 4 in the tiberius pin"
+    scope: source
+    switch: mssql-money-decoded-as-f64
+    engines:
+      mssql:
+        cells: ["lib:money_extremes_are_delivered_exact", money_and_smallmoney_are_delivered_exact_over_their_whole_range, mssql_money_values_survive_batch_and_cdc]
+      postgres:
+        na: "PostgreSQL money is read through its own text form by the PostgreSQL converter, which never holds it as an f64"
+      mysql:
+        na: "MySQL has no MONEY type"
+      oracle:
+        na: "Oracle has no MONEY type"
+      mongo:
+        na: "BSON has no MONEY type"
   - name: ch-date-footer-guard-skips-dates
     class: "the ClickHouse load reads the footer statistics of a timestamp column only, so a Date32 column is never checked: 2300-01-01 is stored as 2299-12-31 silently, and a date before 1900-01-01 or after 2300-01-01 is refused by ClickHouse as RIVET_LOAD_WAREHOUSE_REJECTED instead of by rivet's coded range refusal"
     history: "owner-approved 2026-11-20 (DEFECT_CH_DATE_CLAMP); RED on main 2026-11-20 by the type matrix (PostgreSQL, MySQL, SQL Server DATE 2300-01-01 read back 2299-12-31) and by the offline footer cell"
