@@ -42,7 +42,7 @@ impl GrantUser {
 
     /// As `select_only`, for a table of the database `db`.
     fn select_only_in(db: &str, table: &str, columns: &str) -> Self {
-        let user = unique_name("cg_u");
+        let user = mysql_user_name("cg_u");
         let mut c = root();
         c.query_drop(format!("DROP USER IF EXISTS '{user}'@'%'"))
             .unwrap();
@@ -57,7 +57,7 @@ impl GrantUser {
 
     /// An account that may SELECT the whole of `table` (every column, by table privilege), plus replication.
     fn whole_table(table: &str) -> Self {
-        let user = unique_name("cg_u");
+        let user = mysql_user_name("cg_u");
         let mut c = root();
         c.query_drop(format!("CREATE USER '{user}'@'%' IDENTIFIED BY 'pw'"))
             .unwrap();
