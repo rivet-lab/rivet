@@ -34,7 +34,8 @@ import sys
 try:
     import duckdb
 except ImportError:
-    sys.exit("verify_export: needs DuckDB — run `pip install duckdb`")
+    print("verify_export: needs DuckDB — run `pip install duckdb`", file=sys.stderr)
+    sys.exit(2)
 
 # DuckDB type prefixes → fingerprint treatment.
 _NUMERIC = ("TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT",
@@ -84,7 +85,8 @@ def main():
             con.execute(f"INSTALL {ext}; LOAD {ext};")
             con.execute(f"ATTACH '{args.dsn}' AS src (TYPE {ext}, READ_ONLY);")
         except Exception as e:  # noqa: BLE001
-            sys.exit(f"verify_export: could not attach source ({ext}): {e}")
+            print(f"verify_export: could not attach source ({ext}): {e}", file=sys.stderr)
+            sys.exit(2)
 
         src_q = args.query.replace("'", "''")
         scan = f"postgres_query('src', '{src_q}')" if ext == "postgres" else f"mysql_query('src', '{src_q}')"
@@ -93,14 +95,16 @@ def main():
             schema = con.execute(f"DESCRIBE SELECT * FROM {scan}").fetchall()
             schema = [(r[0], r[1]) for r in schema]
         except Exception as e:  # noqa: BLE001
-            sys.exit(f"verify_export: could not read source query schema: {e}")
+            print(f"verify_export: could not read source query schema: {e}", file=sys.stderr)
+            sys.exit(2)
 
         exprs = fingerprint_exprs(schema, args.key)
         try:
             src = run_fp(con, exprs, scan)
             dst = run_fp(con, exprs, f"read_parquet('{glob}')")
         except Exception as e:  # noqa: BLE001
-            sys.exit(f"verify_export: fingerprint failed: {e}")
+            print(f"verify_export: fingerprint failed: {e}", file=sys.stderr)
+            sys.exit(2)
 
         diffs = [(a, src[a], dst[a]) for a, _ in exprs if src[a] != dst[a]]
         width = max(len(a) for a, _ in exprs)
