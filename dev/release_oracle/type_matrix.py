@@ -157,7 +157,8 @@ def text_elements(got, native: str):
 
 
 def observe_server_text(exp: str | None, got) -> te.Verdict:
-    """The verdict a delivered value amounts to against the source's own text of it: exact when equal, null when it is NULL, else its canonical form."""
+    """The verdict a delivered value amounts to against the source's own text of it (a reader that returns strings as bytes read as text): exact when equal, null when it is NULL, else its canonical form."""
+    got = got.decode("utf-8", "surrogateescape") if isinstance(got, bytes) else got
     v = nsn.server_text_verdict(exp, got, False)
     return te.Verdict(te.EXACT) if v == "OK" else te.Verdict(te.NULL) if v == nsn.NULLED else te.Verdict(te.FORM, text=te.canon(got))
 

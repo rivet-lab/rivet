@@ -787,6 +787,9 @@ def self_test() -> None:
     for delivered, klass_ in (("$12.34", ""), ("12.34", nsn.WRONG), (None, nsn.NULLED)):
         mp.obs = {("pm_tm0", "c002", 1, "duck"): Got(delivered), ("pm_tm0", "c002", 2, "duck"): Got(None)}
         assert mp.results([mc])[0][0].klass == klass_, (delivered, klass_, "a server_text column is graded against the server's text, not the seed literal")
+    mp.texts = {("pm_tm0", "c002"): ["$12.34", None]}
+    mp.obs = {("pm_tm0", "c002", 1, "duck"): Got(b"$12.34"), ("pm_tm0", "c002", 2, "duck"): Got(None)}
+    assert mp.results([mc])[0][0].klass == "", "a server text a reader returns as bytes is read as text"
     mp.texts = {("pm_tm0", "c002"): None}
     assert [r.klass for r in mp.results([mc])[0]] == [NOT_GRADED, NOT_GRADED], "a server text that could not be read is not graded, never green"
     plain = Column("c003", "TEXT", "Utf8", "text", None, ("a",), (te.Edge("'a'"),), te.Edge("NULL"))
