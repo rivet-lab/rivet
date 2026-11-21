@@ -786,6 +786,18 @@ fn unparsed<T>(column: &str, target: &str, bv: &[u8]) -> Result<T> {
     )
 }
 
+/// A float8 read from text: the same number when the float prints it back, refused by code when it would round or is not a number.
+fn float_of_bytes(column: &str, bv: &[u8]) -> Result<f64> {
+    match bytes_to_str(bv)
+        .map(|s| crate::types::decimal::exact_f64_of_text(column, s))
+        .transpose()?
+        .flatten()
+    {
+        Some(v) => Ok(v),
+        None => unparsed(column, "float", bv),
+    }
+}
+
 /// True for the zero date MySQL stores in place of a missing one.
 fn is_zero_date(bv: &[u8]) -> bool {
     bv.starts_with(b"0000-00-00")
@@ -1006,12 +1018,7 @@ fn build_array(
                     {
                         b.append_value(exact_f64(*v as i128, column)?)
                     }
-                    Some(Value::Bytes(bv)) => match bytes_to_str(bv)
-                        .and_then(crate::types::decimal::decimal_text_to_float)
-                    {
-                        Some(v) => b.append_value(v),
-                        None => b.append_value(unparsed(column, "float", bv)?),
-                    },
+                    Some(Value::Bytes(bv)) => b.append_value(float_of_bytes(column, bv)?),
                     other => {
                         null_or_refuse(column, arrow_type, other)?;
                         b.append_null();
@@ -2366,6 +2373,41 @@ mod roast_mysql_bit_decode_tests {
         let err = build_array(&DataType::UInt64, 0, &rows, false, "c", None)
             .expect_err("a negative into UInt64 is a refusal, not a NULL");
         crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+    }
+
+    /// DECIMAL text under a `float8` override is the same number when the float prints it back, and refused by code when it would round.
+    #[test]
+    fn decimal_text_is_a_float8_only_when_the_float_prints_it_back() {
+        use arrow::array::AsArray;
+        use arrow::datatypes::Float64Type;
+        let build = |text: &[u8]| {
+            let (def, bytes) = v_bytes(text);
+            let rows = fetch_binary_rows(vec![def], vec![vec![Some(bytes)]]);
+            build_array(&DataType::Float64, 0, &rows, false, "c", None)
+        };
+        for (text, want) in [
+            (&b"2.50"[..], 2.5),
+            (b"-7.00", -7.0),
+            (b"12345678901.2345", 12345678901.2345),
+            (b"9007199254740992", 9_007_199_254_740_992.0),
+            (b"0.1", 0.1),
+        ] {
+            let a = build(text).unwrap();
+            assert_eq!(a.as_primitive::<Float64Type>().value(0), want);
+        }
+        for text in [
+            &b"922337203685477.5807"[..],
+            b"9007199254740993",
+            b"-9007199254740993",
+            b"12345678901234567890123456789012345678",
+            b"0.1234567890123456789",
+        ] {
+            let err = build(text).unwrap_err();
+            crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+            let said = err.to_string();
+            assert!(said.contains("column `c` is declared float8"), "{said}");
+            assert!(said.contains("Declare `decimal(p,s)`"), "{said}");
+        }
     }
 
     /// An integer under `float4`/`float8` is the same number up to 2^24 / 2^53 and refused by code past it.
