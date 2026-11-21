@@ -15,8 +15,9 @@ use super::Ora;
 use super::kind::{OraKind, native_label};
 use crate::error::Result;
 use crate::types::decimal::decimal_str_to_scaled_i128;
+use crate::types::kind::CommonKind;
 use crate::types::{
-    ColumnOverrides, RivetType, SourceColumn, TextForm, TimeUnit, TypeMapping, build_arrow_field,
+    ColumnOverrides, RivetType, SourceColumn, TextForm, TypeMapping, build_arrow_field,
 };
 
 /// Warning attached to a bare `NUMBER` column `name` (no declared precision) exported as exact text.
@@ -68,50 +69,76 @@ pub(super) fn oracle_type_to_rivet(
     )
 }
 
-/// The Rivet type of a re-projected column of `kind`, declared as `native`; `label` names it when unmapped.
-fn autodetect(kind: OraKind, native: &str, precision: u8, scale: i8, label: &str) -> RivetType {
-    match kind {
+/// The common kind a re-projected column of `kind`, declared as `native`, is read as, or `None` for a type this engine alone carries.
+fn oracle_common_kind(kind: OraKind, native: &str, precision: u8, scale: i8) -> Option<CommonKind> {
+    Some(match kind {
         _ if native.starts_with("timestamp_tz") || native.starts_with("timestamp_ltz") => {
-            RivetType::Timestamp {
-                unit: TimeUnit::Microsecond,
-                timezone: Some("UTC".into()),
-            }
+            CommonKind::Utc
         }
-        _ if native.starts_with("interval") => RivetType::Interval,
-        _ if native == "json" => RivetType::Json,
-        OraKind::Number => number_type(precision, scale),
-        OraKind::BinaryFloat => RivetType::Float32,
-        OraKind::BinaryDouble => RivetType::Float64,
-        OraKind::Boolean => RivetType::Bool,
-        OraKind::Date | OraKind::Timestamp => RivetType::Timestamp {
-            unit: TimeUnit::Microsecond,
-            timezone: None,
-        },
-        OraKind::Text | OraKind::Clob => RivetType::String,
-        OraKind::Raw | OraKind::Blob => RivetType::Binary,
-        _ => RivetType::Unsupported {
-            native_type: label.to_string(),
-            reason: format!(
-                "Oracle column type {label} has no Rivet mapping; select a convertible \
-                 expression of it in a `query:`, or drop it"
-            ),
-        },
+        _ if native.starts_with("interval") => return None,
+        _ if native == "json" => CommonKind::Json,
+        OraKind::Number => number_kind(precision, scale),
+        OraKind::BinaryFloat => CommonKind::F32,
+        OraKind::BinaryDouble => CommonKind::F64,
+        OraKind::Boolean => CommonKind::Bool,
+        OraKind::Date | OraKind::Timestamp => CommonKind::Naive,
+        OraKind::Text | OraKind::Clob => CommonKind::Text,
+        OraKind::Raw | OraKind::Blob => CommonKind::Binary,
+        _ => return None,
+    })
+}
+
+/// The type of a column this engine alone carries: an interval, else `Unsupported` named `label`.
+fn oracle_engine_type(native: &str, label: &str) -> RivetType {
+    if native.starts_with("interval") {
+        return RivetType::Interval;
+    }
+    RivetType::Unsupported {
+        native_type: label.to_string(),
+        reason: format!(
+            "Oracle column type {label} has no Rivet mapping; select a convertible \
+             expression of it in a `query:`, or drop it"
+        ),
     }
 }
 
-/// NUMBER(p,s): small integers, then `Decimal`; bare `NUMBER`/`FLOAT` as exact text.
-fn number_type(precision: u8, scale: i8) -> RivetType {
-    let decimal = |precision: u8, scale: i8| RivetType::Decimal { precision, scale };
+/// The Rivet type of a re-projected column of `kind`, declared as `native`; `label` names it when unmapped.
+fn autodetect(kind: OraKind, native: &str, precision: u8, scale: i8, label: &str) -> RivetType {
+    match oracle_common_kind(kind, native, precision, scale) {
+        Some(common) => common
+            .rivet_type()
+            .unwrap_or_else(|| number_decimal(precision, scale)),
+        None => oracle_engine_type(native, label),
+    }
+}
+
+/// NUMBER(p,s): small integers, then `Dec`; a bare NUMBER, a FLOAT (scale -127) and what no fixed-scale decimal holds as text.
+fn number_kind(precision: u8, scale: i8) -> CommonKind {
     match (precision, scale) {
-        (0, _) | (_, -127) => RivetType::String,
-        (1..=9, 0) => RivetType::Int32,
-        (10..=18, 0) => RivetType::Int64,
+        (0, _) => CommonKind::Text,
+        (1..=9, 0) => CommonKind::I32,
+        (10..=18, 0) => CommonKind::I64,
         (p, s) if s.is_negative() => match p.checked_add(s.unsigned_abs()).filter(|w| *w <= 38) {
-            Some(w) => decimal(w, 0),
-            None => RivetType::String,
+            Some(_) => CommonKind::Dec,
+            None => CommonKind::Text,
         },
-        (_, s) if s > 38 => RivetType::String,
-        (p, s) => decimal(p.max(s.unsigned_abs()), s),
+        (_, s) if s > 38 => CommonKind::Text,
+        _ => CommonKind::Dec,
+    }
+}
+
+/// The `Decimal` a NUMBER of kind `Dec` is delivered as: a negative scale widens the precision into an integer.
+fn number_decimal(precision: u8, scale: i8) -> RivetType {
+    if scale.is_negative() {
+        RivetType::Decimal {
+            precision: precision + scale.unsigned_abs(),
+            scale: 0,
+        }
+    } else {
+        RivetType::Decimal {
+            precision: precision.max(scale.unsigned_abs()),
+            scale,
+        }
     }
 }
 
@@ -156,7 +183,7 @@ fn deliver_number_text(
     scale: i8,
 ) -> TypeMapping {
     if kind == OraKind::Number
-        && number_type(precision, scale) == RivetType::String
+        && number_kind(precision, scale) == CommonKind::Text
         && seeded!("number-text-without-its-label", false, true)
     {
         mapping.with_text(TextForm::DecimalPlain)
@@ -656,11 +683,14 @@ pub(super) fn rows_to_batch(
 }
 
 #[cfg(test)]
+mod common_kind_tests;
+#[cfg(test)]
 mod type_table;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::TimeUnit;
 
     /// What the Oracle mapper lands a catalog type as is what a load key or order is admitted by.
     #[test]
@@ -888,6 +918,7 @@ mod tests {
 
     #[test]
     fn number_precision_and_scale_pick_the_narrowest_lossless_type() {
+        let number_type = |p, s| autodetect(OraKind::Number, "number", p, s, "number");
         assert_eq!(number_type(9, 0), RivetType::Int32);
         assert_eq!(number_type(10, 0), RivetType::Int64);
         assert_eq!(number_type(18, 0), RivetType::Int64);
