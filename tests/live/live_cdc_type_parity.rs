@@ -193,7 +193,7 @@ impl Drop for Warehouse {
 const CH_BUCKET: &str = "rivet-qa-ledger-parity";
 const CH_PASSWORD_ENV: &str = "RIVET_TEST_CH_PASSWORD";
 
-/// `rig` exporting to the fake-gcs bucket and loading into a fresh ClickHouse database; the view is named `view`.
+/// `rig` exporting to the fake-gcs bucket as `<view>_wh` and loading into a fresh ClickHouse database; the view is named `view`.
 fn warehouse(rig: Rig, view: &str) -> Warehouse {
     require_alive(LiveService::ClickHouse);
     require_alive(LiveService::FakeGcs);
@@ -201,6 +201,7 @@ fn warehouse(rig: Rig, view: &str) -> Warehouse {
     let db = unique_name("ledger_ch");
     clickhouse_run_sql_json(&format!("CREATE DATABASE {db}"));
     let rig = rig
+        .export_named(&format!("{view}_wh"))
         .cdc("initial: snapshot")
         .dest_gcs(CH_BUCKET, &unique_name("ledger"), FAKE_GCS_ENDPOINT)
         .top_line(&format!(
@@ -774,15 +775,13 @@ fn server_rendered(rows: &[Row], from: &str, pass: &str, bare: &str) -> String {
 
 /// ATTACH the state backend a `census_oracle()` rig ran against as `alias`: Postgres when the gate grades one, else the SQLite file beside its config.
 fn state_attach(rig: &Rig, alias: &str) -> String {
-    match state_url_under_test() {
-        Some(url) => format!(
-            "INSTALL postgres; LOAD postgres; ATTACH '{url}' AS {alias} (TYPE postgres, READ_ONLY);"
-        ),
-        None => format!(
-            "INSTALL sqlite; LOAD sqlite; ATTACH '{}/.rivet_state.db' AS {alias} (TYPE sqlite, READ_ONLY);",
+    let state = state_url_under_test().unwrap_or_else(|| {
+        format!(
+            "{}/.rivet_state.db",
             rig.oracle_container_out().trim_end_matches("/out")
-        ),
-    }
+        )
+    });
+    state_attach_sql(&state, alias)
 }
 
 /// `COUNT(*)`, then `COUNT(col)` and `COUNT(DISTINCT col)` per column, over `leg`'s rows.
@@ -938,6 +937,25 @@ fn graded_row(delivery: &str) -> Row {
         clickhouse_defect_samples: Vec::new(),
         refuses: false,
     }
+}
+
+#[test]
+fn the_state_backend_is_attached_where_the_duckdb_container_reaches_it() {
+    let pg = state_attach_sql(
+        "postgresql://rivet:rivet@127.0.0.1:5433/postgres?options=-csearch_path%3Dx",
+        "bst",
+    );
+    assert!(
+        pg.contains("@postgres-state:5432/postgres?options=-csearch_path%3Dx")
+            && pg.contains("AS bst (TYPE postgres, READ_ONLY)")
+            && !pg.contains("127.0.0.1"),
+        "{pg}"
+    );
+    let lite = state_attach_sql("/work/t/.rivet_state.db", "cst");
+    assert!(
+        lite.contains("ATTACH '/work/t/.rivet_state.db' AS cst (TYPE sqlite, READ_ONLY)"),
+        "{lite}"
+    );
 }
 
 #[test]
@@ -1736,6 +1754,11 @@ fn columns_ddl(rows: &[Row], id_ddl: &str) -> String {
         .join(", ")
 }
 
+/// `rig` exporting under its own name, so a shared state backend keeps its rows apart from the CDC rig's on `table`.
+fn batch_named(rig: Rig, table: &str) -> Rig {
+    rig.export_named(&format!("{table}_batch"))
+}
+
 /// Put `rig`'s parts and state DB where DuckDB reads them.
 fn graded(rig: Rig) -> Rig {
     rig.census_oracle()
@@ -1782,9 +1805,7 @@ fn postgres_batch_and_cdc_deliver_every_ledger_row_alike() {
         if snapshot {
             cdc = cdc.cdc_line("initial: snapshot");
         }
-        let batch = Rig::pg_batch(&table)
-            .export_named(&format!("{table}_batch"))
-            .source_url(POSTGRES_CDC_URL);
+        let batch = batch_named(Rig::pg_batch(&table), &table).source_url(POSTGRES_CDC_URL);
         let wh = snapshot.then(|| warehouse(Rig::pg_cdc(&table, &wslot), &table));
         let st = Stand {
             engine: "postgres",
@@ -1856,9 +1877,7 @@ fn mysql_batch_and_cdc_deliver_every_ledger_row_alike() {
             .unwrap_or_else(|e| panic!("{q}: {e}"))
     };
     let cdc = Rig::mysql_cdc(&table).cdc_line("initial: snapshot");
-    let batch = Rig::mysql_batch(&table)
-        .export_named(&format!("{table}_batch"))
-        .source_url(MYSQL_CDC_URL);
+    let batch = batch_named(Rig::mysql_batch(&table), &table).source_url(MYSQL_CDC_URL);
     let st = Stand {
         engine: "mysql",
         bare: table.clone(),
@@ -1906,9 +1925,7 @@ fn mssql_batch_and_cdc_deliver_every_ledger_row_alike() {
     };
     enable_cdc(&table, &ci);
     let cdc = Rig::mssql_cdc(&table, &ci).cdc_line("initial: snapshot");
-    let batch = Rig::mssql_batch(&table)
-        .export_named(&format!("{table}_batch"))
-        .source_url(MSSQL_CDC_URL);
+    let batch = batch_named(Rig::mssql_batch(&table), &table).source_url(MSSQL_CDC_URL);
     let st = Stand {
         engine: "mssql",
         bare: table.clone(),
@@ -1968,7 +1985,7 @@ fn oracle_batch_and_cdc_deliver_every_ledger_row_alike() {
     let cdc = Rig::oracle_cdc(t.name())
         .cdc_line("initial: snapshot")
         .export_line(&declared);
-    let batch = Rig::oracle_batch(t.name()).export_line(&declared);
+    let batch = batch_named(Rig::oracle_batch(t.name()), t.name()).export_line(&declared);
     let st = Stand {
         engine: "oracle",
         bare: t.name().to_string(),
