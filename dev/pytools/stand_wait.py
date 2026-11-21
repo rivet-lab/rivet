@@ -7,7 +7,7 @@
 Readiness is read from docker, not listed here: a service with a healthcheck is ready when docker calls it
 healthy and its budget is that healthcheck's own (start period + retries x interval); one without is ready when
 its first published TCP port accepts a connection, within `PORT_BUDGET_S`; one with neither is reported as not
-probed. A container that exited fails at once. The failure prints `docker compose ps -a` and the log tail of
+probed. A container that exited, or never started, fails at once. The failure prints `docker compose ps -a` and the log tail of
 each service that did not answer, and exits 1.
 """
 
@@ -76,6 +76,8 @@ def verdict(svc: Service, probe: Callable[[int], bool]) -> str:
     """`ready`, `waiting` or `failed` for one service from its container state and its readiness probe."""
     if svc.state in ("exited", "dead"):
         return "ready" if svc.state == "exited" and svc.exit_code == 0 else "failed"
+    if svc.state == "created":
+        return "failed"  # `compose up -d` has returned, so a container that never started will not start by waiting
     if svc.health is not None:
         return {"healthy": "ready", "unhealthy": "failed"}.get(svc.health, "waiting")
     if svc.state != "running":
@@ -176,6 +178,8 @@ def self_test() -> int:
     assert failed == ["a"], "a crashed container was waited for"
     failed, _ = play([[_box("job", state="exited", hc=False, code=0)]])
     assert failed == [], "a one-shot container that finished was refused"
+    failed, lines = play([[_box("c", state="created", health=None)]])
+    assert failed == ["c"] and not any("not ready within" in x for x in lines), "a container that never started was waited for its whole budget"
     failed, lines = play([[_box("a", health="starting")]])
     assert failed == ["a"] and any("not ready within" in x for x in lines), "a service that never turned healthy did not fail"
     open_port = {"8080/tcp": [{"HostIp": "0.0.0.0", "HostPort": "8080"}]}
