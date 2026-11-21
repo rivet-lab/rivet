@@ -254,12 +254,7 @@ fn parked_and_signalled(
                 if seen != quiet.0 {
                     quiet = (seen, std::time::Instant::now());
                 }
-                let staged = files_under(&rig.out_dir())
-                    .iter()
-                    .any(|f| f.to_string_lossy().ends_with(".tmp"));
-                quiet.0.ends_with("/1")
-                    && quiet.1.elapsed() >= QUIET
-                    && (hook.name != "before_commit_rename" || staged)
+                quiet.0.ends_with("/1") && quiet.1.elapsed() >= QUIET
             }
         };
         if ready {
