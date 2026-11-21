@@ -353,21 +353,29 @@ def groups(cols: list[Col]) -> list[list[Col]]:
 
 
 FINE_FRACTION = re.compile(r"^(DATETIME2|DATETIMEOFFSET)$|^TIMESTAMP\([789]\)")
+FINE_TARGETS = ("timestamp", "timestamp_tz")
 
 
 def rounds(engine: str, cols: list[Col]) -> list[tuple[list[Col], list[Unit], str]]:
-    """(columns, units, row image) rounds: per column group the `none` units in every format and one override unit per family representative (and per fine-fraction representative) and target on Parquet; MySQL adds every non-default row image; a column whose CDC verdict is a refusal is a round of its own."""
+    """(columns, units, row image) rounds: per column group the `none` units in every format and one override unit per family representative and target on Parquet, plus the timestamp and timestamp_tz units of one fine-fraction column when the representative is not one; MySQL adds every non-default row image; a column whose CDC verdict is a refusal is a round of its own."""
     ax = nsn.axes()
     cap = UNITS_PER_ROUND.get(engine, 64)
     seen: set[str] = set()
+    fine_seen = False
     out = []
     for group in groups(cols):
         units = [Unit("none", None, f) for f in ax["formats"]]
         for c in group:
-            rep = (c.family, FINE_FRACTION.search(c.native) is not None)
-            if rep not in seen and (c.cdc is None or c.cdc.kind != te.REFUSE):
-                seen.add(rep)
+            if c.cdc is not None and c.cdc.kind == te.REFUSE:
+                continue
+            fine = FINE_FRACTION.search(c.native) is not None
+            if c.family not in seen:
+                seen.add(c.family)
+                fine_seen |= fine
                 units += [Unit(t, c, "parquet") for t in ax["targets"] if t != "none"]
+            elif fine and not fine_seen:
+                fine_seen = True
+                units += [Unit(t, c, "parquet") for t in FINE_TARGETS if t in ax["targets"]]
         out += [(group, units[k:k + cap], "") for k in range(0, len(units), cap)]
     if engine == "mysql":
         default = nsn.sql("mysql", CDC_STAND["mysql"], "SELECT @@global.binlog_row_image;").out
@@ -480,7 +488,7 @@ def self_test() -> None:
     assert WRONG in {r.klass for r in graded["exact"]} and not any(r.verdict == nsn.DECLARED for r in graded["exact"]), "a truncated stream value under fidelity exact is WRONG_VALUE"
     day, ns9 = Col("t01", "DATE", "Timestamp", "other", ("DATE '2000-01-01'",)), Col("t02", "TIMESTAMP(9)", "Timestamp", "other", ("TIMESTAMP '2000-01-01 00:00:00.123456789'",))
     reps = {(u.col.native, u.target) for _, units, _ in rounds("oracle", [day, ns9]) for u in units if u.col is not None}
-    assert ("TIMESTAMP(9)", "timestamp") in reps and ("DATE", "timestamp") in reps, "a fine-fraction column is its own override representative beside the family's"
+    assert ("TIMESTAMP(9)", "timestamp") in reps and ("DATE", "timestamp") in reps and ("TIMESTAMP(9)", "text") not in reps, "a fine-fraction column is graded under the timestamp overrides beside the family's representative"
     shutil.rmtree(d, ignore_errors=True)
     print(f"no_silent_null_cdc self-test ok: legs {legs()}, row images {row_images()}")
 
