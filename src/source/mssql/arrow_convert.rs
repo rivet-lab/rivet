@@ -531,7 +531,7 @@ fn decimal_scale_from_rows(idx: usize, rows: &[Row]) -> Option<u8> {
     })
 }
 
-/// A `Float64` column: an f64 cell as is, a MONEY cell as the nearest double of its exact value, any other cell refused.
+/// A `Float64` column: an f64 cell as is, a MONEY cell as its double when the double prints back the same digits, any other cell refused.
 fn float64_array(
     idx: usize,
     rows: &[Row],
@@ -545,7 +545,13 @@ fn float64_array(
     for row in rows {
         match cell(row, idx) {
             Some(ColumnData::F64(Some(v))) => b.append_value(*v),
-            Some(ColumnData::Numeric(Some(n))) if money => b.append_value(numeric_to_f64(n)),
+            Some(ColumnData::Numeric(Some(n))) if money => {
+                let text = numeric_to_decimal_string(n.value(), n.scale());
+                b.append_value(
+                    crate::types::decimal::exact_f64_of_text(column, &text)?
+                        .unwrap_or_else(|| numeric_to_f64(n)),
+                )
+            }
             Some(
                 ColumnData::U8(None)
                 | ColumnData::I16(None)
@@ -886,9 +892,11 @@ fn is_money(t: ColumnType) -> bool {
     matches!(t, ColumnType::Money | ColumnType::Money4)
 }
 
-/// A money value as the f64 a `float64` override stores: the unscaled integer over 10^scale.
+/// A money value as the nearest f64 of its exact decimal text.
 fn numeric_to_f64(n: &tiberius::numeric::Numeric) -> f64 {
-    n.value() as f64 / 10f64.powi(i32::from(n.scale()))
+    numeric_to_decimal_string(n.value(), n.scale())
+        .parse()
+        .unwrap_or(f64::NAN)
 }
 
 /// A `Decimal128(_, scale)` cell: numeric or money rescaled, an integer scaled; any other value refused.
@@ -2311,6 +2319,34 @@ mod money_tests {
             assert_eq!(a.value(0), want);
             assert_eq!(a.value(0), scaled as f64 / 10000.0);
             assert!(a.is_null(1));
+        }
+    }
+
+    /// A `float64` override over MONEY delivers a value the float prints back as written and refuses, by code, one it would round.
+    #[test]
+    fn a_float64_override_over_money_refuses_a_value_the_float_would_round() {
+        for (scaled, want) in [
+            (123_456_789_012_345_i64, 12345678901.2345_f64),
+            (9_223_372_036_854_775, 922337203685.4775),
+            (-9_007_199_254_740_992, -900719925474.0992),
+        ] {
+            let rows = rows_of(ColumnType::Money, vec![money(scaled)]);
+            let b = batch(DataType::Float64, &rows, &ColumnOverrides::new()).unwrap();
+            let a = b.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+            assert_eq!(a.value(0), want, "{scaled}");
+        }
+        for scaled in [
+            i64::MAX,
+            i64::MIN,
+            9_007_199_254_740_993,
+            9_223_372_036_854_775_806,
+        ] {
+            let rows = rows_of(ColumnType::Money, vec![money(scaled)]);
+            let err = batch(DataType::Float64, &rows, &ColumnOverrides::new()).unwrap_err();
+            crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+            let said = format!("{err:#}");
+            assert!(said.contains("column `c` is declared float8"), "{said}");
+            assert!(said.contains("Declare `decimal(p,s)`"), "{said}");
         }
     }
 
