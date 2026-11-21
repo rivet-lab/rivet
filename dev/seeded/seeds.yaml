@@ -6832,13 +6832,13 @@ seeds:
       mssql:
         cells: ["lib:money_extremes_are_delivered_exact", money_and_smallmoney_are_delivered_exact_over_their_whole_range, mssql_money_values_survive_batch_and_cdc]
       postgres:
-        na: "PostgreSQL money is read through its own text form by the PostgreSQL converter, which never holds it as an f64"
+        na: "PostgreSQL batch refuses a money column as an unmapped type and its CDC carries the server text, so neither reaches the SQL Server money decode (PG_UNMAPPED_TYPE in the type matrix)"
       mysql:
-        na: "MySQL has no MONEY type"
+        na: "MySQL has no MONEY type, so no MySQL column reaches the SQL Server money decode"
       oracle:
-        na: "Oracle has no MONEY type"
+        na: "Oracle has no MONEY type, so no Oracle column reaches the SQL Server money decode"
       mongo:
-        na: "BSON has no MONEY type"
+        na: "BSON has no MONEY type, so no MongoDB value reaches the SQL Server money decode"
   - name: ch-date-footer-guard-skips-dates
     class: "the ClickHouse load reads the footer statistics of a timestamp column only, so a Date32 column is never checked: 2300-01-01 is stored as 2299-12-31 silently, and a date before 1900-01-01 or after 2300-01-01 is refused by ClickHouse as RIVET_LOAD_WAREHOUSE_REJECTED instead of by rivet's coded range refusal"
     history: "owner-approved 2026-11-20 (DEFECT_CH_DATE_CLAMP); RED on main 2026-11-20 by the type matrix (PostgreSQL, MySQL, SQL Server DATE 2300-01-01 read back 2299-12-31) and by the offline footer cell"
