@@ -981,7 +981,6 @@ exclude_re = [
     # 2026-11-21: the is_oid_array guard in build_pg_list_array and PgCellSource::list; `false` is RED by hand (the OID[] cell fails with the lossy-wire refusal), `true` is a true equivalent because PgInt accepts INT2, INT4, INT8 and OID at their own wire widths, so an int8[] read through it is the same i64; is_oid_array itself is unit-tested.
     "replace match guard is_oid_array\\(.*\\) with (true|false) in build_pg_list_array$",
     "replace match guard is_oid_array\\(.*\\) with (true|false) in <impl crate::source::value_checksum::CellSource for PgCellSource<'_>>::list$",
-    # 2026-11-21: read_utf8_list reads a live tokio_postgres::Row, unkillable under --lib --bins; RED by hand under every whole-body stub (None, vec![None], "xyzzy", empty string, empty vec) and every JSON and INTERVAL guard and operator mutant by a_postgres_json_interval_oid_enum_array_is_delivered_as_a_list_of_its_elements; the two enum-guard mutants (`true`, `&&` to `||`) are true equivalents because AnyAsString reads a text[] element as the same text as String, so the enum arm and the fallback return one value; closes with an offline Postgres row fake.
+    # 2026-11-21: read_utf8_list reads a live tokio_postgres::Row, unkillable under --lib --bins; its choice of reader lives in utf8_list_read, unit-tested; RED by hand under every whole-body stub (None, vec![None], "xyzzy", empty string, empty vec) by a_postgres_json_interval_oid_enum_array_is_delivered_as_a_list_of_its_elements; closes with an offline Postgres row fake.
     "replace read_utf8_list ->",
-    " in read_utf8_list$",
 ]

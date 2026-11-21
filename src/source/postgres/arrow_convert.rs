@@ -962,25 +962,39 @@ where
         .map(|v| v.into_iter().map(|e| e.map(&read)).collect()))
 }
 
+/// How the elements of a text-like array are read off the wire.
+#[derive(Debug, PartialEq, Eq)]
+enum Utf8ListRead {
+    Json,
+    Interval,
+    Enum,
+    Text,
+}
+
+/// The wire reader for an array whose element type is `element`.
+fn utf8_list_read(element: Option<&Type>) -> Utf8ListRead {
+    let typed = seeded!("pg-array-element-wire-type-refused", false, true);
+    match element {
+        Some(e) if typed && (*e == Type::JSON || *e == Type::JSONB) => Utf8ListRead::Json,
+        Some(e) if typed && *e == Type::INTERVAL => Utf8ListRead::Interval,
+        Some(e) if typed && matches!(e.kind(), Kind::Enum(_)) => Utf8ListRead::Enum,
+        _ => Utf8ListRead::Text,
+    }
+}
+
 /// The text of every element of a `text`, `json`, `jsonb`, `interval` or enum array cell.
 fn read_utf8_list(
     pg_type: &Type,
     row: &Row,
     col: usize,
 ) -> std::result::Result<Option<Vec<Option<String>>>, postgres::Error> {
-    let element = pg_array_element(pg_type);
-    let typed = seeded!("pg-array-element-wire-type-refused", false, true);
-    match element {
-        Some(e) if typed && (*e == Type::JSON || *e == Type::JSONB) => {
-            text_elements::<PgJsonText>(row, col, |v| v.0)
-        }
-        Some(e) if typed && *e == Type::INTERVAL => text_elements::<PgInterval>(row, col, |v| {
+    match utf8_list_read(pg_array_element(pg_type)) {
+        Utf8ListRead::Json => text_elements::<PgJsonText>(row, col, |v| v.0),
+        Utf8ListRead::Interval => text_elements::<PgInterval>(row, col, |v| {
             pg_interval_to_iso8601(v.months, v.days, v.microseconds)
         }),
-        Some(e) if typed && matches!(e.kind(), Kind::Enum(_)) => {
-            text_elements::<AnyAsString>(row, col, |v| v.0)
-        }
-        _ => text_elements::<String>(row, col, |v| v),
+        Utf8ListRead::Enum => text_elements::<AnyAsString>(row, col, |v| v.0),
+        Utf8ListRead::Text => text_elements::<String>(row, col, |v| v),
     }
 }
 
@@ -1842,6 +1856,25 @@ mod array_element_tests {
         assert!(!is_oid_array(&Type::INT8_ARRAY));
         assert!(!is_oid_array(&Type::INT4_ARRAY));
         assert!(!is_oid_array(&Type::OID));
+    }
+
+    #[test]
+    fn an_array_is_read_by_its_element_type() {
+        use super::{Utf8ListRead as R, utf8_list_read};
+        let en = Type::new(
+            "st".into(),
+            90_000,
+            postgres::types::Kind::Enum(vec!["a".into()]),
+            "public".into(),
+        );
+        assert_eq!(utf8_list_read(Some(&Type::JSON)), R::Json);
+        assert_eq!(utf8_list_read(Some(&Type::JSONB)), R::Json);
+        assert_eq!(utf8_list_read(Some(&Type::INTERVAL)), R::Interval);
+        assert_eq!(utf8_list_read(Some(&en)), R::Enum);
+        assert_eq!(utf8_list_read(Some(&Type::TEXT)), R::Text);
+        assert_eq!(utf8_list_read(Some(&Type::VARCHAR)), R::Text);
+        assert_eq!(utf8_list_read(Some(&Type::INT4)), R::Text);
+        assert_eq!(utf8_list_read(None), R::Text);
     }
 
     #[test]
