@@ -286,11 +286,11 @@ engines:
       - {native_type: "NUMERIC(10,2)[]", sample: [], edges: ["'{}'", "'{1.50,-99999999.99,NULL}'"], refuses: "refuse:RIVET_TYPE_UNSAFE_MAPPING@extract"}
       - {native_type: "VARCHAR(10)[]", sample: [], edges: ["'{}'", "'{a,b}'", "'{NULL}'", {v: "NULL", bigquery: "PG_NULL_LIST_EMPTY_BQ!form:[]", clickhouse: "PG_NULL_LIST_EMPTY_CH!form:[]"}]}
       - {native_type: "CHAR(5)[]", sample: [], edges: ["'{}'", "'{a,b}'", {v: "NULL", bigquery: "PG_NULL_LIST_EMPTY_BQ!form:[]", clickhouse: "PG_NULL_LIST_EMPTY_CH!form:[]"}]}
-      - {native_type: "JSON[]", sample: [], edges: ["'{}'", "'{\"{\\\"a\\\":1}\"}'", "'{NULL}'"]}
-      - {native_type: "JSONB[]", sample: [], edges: ["'{}'", "'{\"{\\\"a\\\":1}\"}'", "'{NULL}'"]}
-      - {native_type: "INTERVAL[]", sample: [], edges: ["'{}'", {v: "'{\"1 day\",\"2 hours\"}'", x: "form:[\"P1D\",\"PT2H\"]"}, "'{NULL}'"]}
-      - {native_type: "OID[]", sample: [], edges: ["'{}'", "'{1,2}'"]}
-      - {native_type: "rivet_status[]", sample: [], edges: ["'{}'", "'{active,pending}'", "'{NULL}'"]}
+      - {native_type: "JSON[]", sample: [], edges: ["'{}'", "'{\"{\\\"a\\\":1}\"}'", "'{NULL}'", {v: "NULL", bigquery: "PG_NULL_LIST_EMPTY_BQ!form:[]", clickhouse: "PG_NULL_LIST_EMPTY_CH!form:[]"}]}
+      - {native_type: "JSONB[]", sample: [], edges: ["'{}'", "'{\"{\\\"a\\\":1}\"}'", "'{NULL}'", {v: "NULL", bigquery: "PG_NULL_LIST_EMPTY_BQ!form:[]", clickhouse: "PG_NULL_LIST_EMPTY_CH!form:[]"}]}
+      - {native_type: "INTERVAL[]", sample: [], edges: ["'{}'", {v: "'{\"1 day\",\"2 hours\"}'", x: "form:[\"P1D\",\"PT2H\"]"}, "'{NULL}'", {v: "NULL", bigquery: "PG_NULL_LIST_EMPTY_BQ!form:[]", clickhouse: "PG_NULL_LIST_EMPTY_CH!form:[]"}]}
+      - {native_type: "OID[]", sample: [], edges: ["'{}'", "'{1,2}'", {v: "NULL", bigquery: "PG_NULL_LIST_EMPTY_BQ!form:[]", clickhouse: "PG_NULL_LIST_EMPTY_CH!form:[]"}]}
+      - {native_type: "rivet_status[]", sample: [], edges: ["'{}'", "'{active,pending}'", "'{NULL}'", {v: "NULL", bigquery: "PG_NULL_LIST_EMPTY_BQ!form:[]", clickhouse: "PG_NULL_LIST_EMPTY_CH!form:[]"}]}
       - {native_type: "INET[]", sample: ["'{10.0.0.1}'"], edges: ["'{}'", "'{10.0.0.1}'"], delivery: "server_text", cdc: exact}
       - {native_type: "MONEY[]", sample: ["'{1.00}'"], edges: ["'{}'", "'{1.00}'"], delivery: "server_text", cdc: exact}
       - {native_type: "INT4RANGE[]", sample: ["'{\"[1,5)\"}'"], edges: ["'{}'", "'{\"[1,5)\"}'"], delivery: "server_text", cdc: exact}
