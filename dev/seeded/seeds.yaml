@@ -6325,24 +6325,34 @@ seeds:
       mongo:
         na: "a MongoDB date has no zero or partial value: the type claim is exact and is not changed"
 
-  - name: mysql-cdc-int-bool-override-any-nonzero-true
-    class: "a MySQL integer column (SMALLINT, INT, BIGINT, BIGINT UNSIGNED) declared `bool` in `columns:` is delivered by a stream as true for every value but 0, where the batch export refuses any value outside 0 and 1: 2, 300 or 18446744073709551615 become true with exit 0"
-    history: "2026-11-18 - issue #995 remainder: the batch path (build_bool_strict) already refused; RED on main in the MySQL CDC cell (a SMALLINT or TINYINT holding 2 or 300 under `columns: {i: bool}` delivered, exit 0); fixed by MysqlCellFix::FlagInt chosen by mysql_flag_fix"
+  - name: cdc-bool-cell-any-nonzero-true
+    class: "a stream cell read as a boolean turns every integer but 0 into true: a column declared `bool` in `columns:` over an integer (PostgreSQL integer, SQL Server int, Oracle NUMBER, MySQL integer or TINYINT(1)) delivers 2, 5, -1 or 2147483647 as true with exit 0, where the batch export refuses a value outside 0 and 1"
+    history: "2026-11-21 - RED on main in every stream cell but MySQL (a PostgreSQL, SQL Server or Oracle `v` holding 5 under `columns: {v: bool}` delivered true, exit 0); the MySQL-only mysql_flag_fix (2026-11-18 issue #995 remainder, 2026-11-20 owner decision MYSQL_TINYINT_BOOL) is removed and the one rule, flag_value in src/source/cdc/value.rs::bool_value, is the cell builder's for every engine"
     scope: source
     engines:
+      postgres:
+        switch: cdc-bool-cell-any-nonzero-true
+        cells:
+          - an_integer_that_is_not_a_flag_is_refused_in_cdc_never_turned_into_true_postgres
+          - "lib:a_bool_override_over_an_integer_that_is_not_a_flag_is_refused_on_every_engine"
       mysql:
-        switch: mysql-cdc-int-bool-override-any-nonzero-true
+        switch: cdc-bool-cell-any-nonzero-true
         cells:
           - an_integer_that_is_not_a_flag_is_refused_in_cdc_never_turned_into_true_mysql
-          - "lib:an_integer_under_a_bool_override_is_a_flag_or_refused"
-      postgres:
-        na: "an integer is not read as a flag on PostgreSQL: the override is refused at plan time (lib:an_integer_is_read_as_a_flag_only_where_the_engine_checks_each_value)"
+          - a_flag_column_outside_zero_and_one_is_refused_in_cdc_never_turned_into_true_mysql
+          - "lib:a_boolean_is_a_flag_or_refused_by_code_for_signed_and_unsigned_wire_ints"
       mssql:
-        na: "an integer is not read as a flag on SQL Server: the override is refused at plan time (lib:an_integer_is_read_as_a_flag_only_where_the_engine_checks_each_value)"
+        switch: cdc-bool-cell-any-nonzero-true
+        cells:
+          - an_integer_that_is_not_a_flag_is_refused_in_cdc_never_turned_into_true_mssql
+          - "lib:a_bool_override_over_an_integer_that_is_not_a_flag_is_refused_on_every_engine"
       oracle:
-        na: "an integer is not read as a flag on Oracle: the override is refused at plan time (lib:an_integer_is_read_as_a_flag_only_where_the_engine_checks_each_value)"
+        switch: cdc-bool-cell-any-nonzero-true
+        cells:
+          - an_integer_that_is_not_a_flag_is_refused_in_cdc_never_turned_into_true_oracle
+          - "lib:a_bool_override_over_an_integer_that_is_not_a_flag_is_refused_on_every_engine"
       mongo:
-        na: "a MongoDB change row is two text cells, and the MySQL cell fix does not run"
+        na: "a MongoDB change row is two text cells, and no integer is built as a boolean"
 
   - name: mysql-flag-outside-zero-one-delivered-true
     class: "a MySQL TINYINT(1) read as a boolean is delivered by a batch export as true for every value but 0 and 1: 2, 5, -1, 127 or 255 become true with exit 0 where a declared `bool` over a wider integer already refused"
@@ -6380,25 +6390,6 @@ seeds:
         na: "an Oracle source has no value checksum cell source, and its boolean is read by the driver as bool"
       mongo:
         na: "a MongoDB value is a BSON bool and no integer is turned into a flag"
-
-  - name: mysql-cdc-tinyint1-flag-any-nonzero-true
-    class: "a MySQL TINYINT(1) column read by a stream is delivered as true for every value but 0 and 1: 2, 5, -1 or 255 become true with exit 0, where the batch export refuses them"
-    history: "2026-11-20 - owner decision MYSQL_TINYINT_BOOL: mysql_flag_fix excluded TINYINT(1) and bool_value read Int != 0; RED on main in the MySQL CDC cell (TINYINT(1) holding 2 delivered, exit 0); fixed by including TINYINT(1) in mysql_flag_fix"
-    scope: source
-    engines:
-      mysql:
-        switch: mysql-cdc-tinyint1-flag-any-nonzero-true
-        cells:
-          - a_flag_column_outside_zero_and_one_is_refused_in_cdc_never_turned_into_true_mysql
-          - "lib:a_tinyint_one_is_zero_one_or_refused_in_a_stream_and_a_bit_one_keeps_its_reading"
-      postgres:
-        na: "PostgreSQL boolean is a true boolean type and an integer under a bool override is refused at plan time (lib:an_integer_is_read_as_a_flag_only_where_the_engine_checks_each_value)"
-      mssql:
-        na: "SQL Server bit holds 0 or 1 only and an integer under a bool override is refused at plan time (lib:an_integer_is_read_as_a_flag_only_where_the_engine_checks_each_value)"
-      oracle:
-        na: "Oracle has no boolean column type and an integer under a bool override is refused at plan time (lib:an_integer_is_read_as_a_flag_only_where_the_engine_checks_each_value)"
-      mongo:
-        na: "a MongoDB change row is two text cells, and the MySQL cell fix does not run"
 
   - name: cursor-column-admitted-at-plan
     class: "the incremental plan accepts any cursor_column: a nullable one exports its NULL-cursor rows on run 1 and never again (later NULL-cursor inserts are lost with exit 0), and a type the cursor cannot render (boolean, time, binary, array, a timestamp unit other than microsecond or nanosecond) is a WARN plus a full re-export every run"

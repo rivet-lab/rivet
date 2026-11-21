@@ -169,6 +169,24 @@ def is_zero_date_null(engine: str, lit: str, verdict: str) -> bool:
     return verdict == NULLED and engine == "mysql" and bool(ZERO_DATE_LIT.fullmatch(lit.strip()))
 
 
+def server_text_of(url: str, col: Col, n_rows: int) -> list[str | None] | None:
+    """The source's own text of each seeded value (PostgreSQL `::text`), the expectation of a column delivered as server text; None when unreadable."""
+    p = cdc._psql(url, "-Atc", f"SELECT id, {col.name} IS NULL, {col.name}::text FROM {TABLE} ORDER BY id")
+    rows = [line.split("|", 2) for line in p.out.splitlines() if line.strip()] if p.ok else []
+    if len(rows) != n_rows or any(len(r) != 3 for r in rows):
+        return None
+    return [None if r[1] == "t" else r[2] for r in rows]
+
+
+def server_text_verdict(exp: str | None, got, csv: bool) -> str:
+    """OK, WRONG or NULLED for one delivered cell against the source's own text of its value."""
+    if exp is None:
+        return "OK" if got is None or (csv and got == "") else WRONG
+    if got is None:
+        return NULLED
+    return "OK" if got == exp else WRONG
+
+
 def zero_date_unwarned(zeros: int, warned: int) -> str:
     """The failure text when the zero dates delivered as NULL are not the number the run's WARN counted, else empty."""
     return f"{zeros} zero or partial dates delivered as NULL, the run's WARN counted {warned}" if zeros and zeros != warned else ""
@@ -732,7 +750,8 @@ def grade_stop(cell: str, p: core.Proc, check: core.Proc) -> Result | None:
 
 
 def grade_run(engine: str, cell: str, p: core.Proc, check: core.Proc, fidelity: str, out: Path, fmt: str, col: Col,
-              n_rows: int, target: str, src_lits: list[str], want: frozenset[str] = frozenset(), reader=None) -> Result:
+              n_rows: int, target: str, src_lits: list[str], want: frozenset[str] = frozenset(), reader=None,
+              expect: list[str | None] | None = None) -> Result:
     """Grade one delivered or refused run against the source rows seeded by native SQL: the second reader over the whole output directory, never rivet's own counters or manifest."""
     stop = grade_stop(cell, p, check)
     if stop:
@@ -755,7 +774,8 @@ def grade_run(engine: str, cell: str, p: core.Proc, check: core.Proc, fidelity: 
     nulled, wrong, zeros = [], [], 0
     for i in range(1, n_rows + 1):
         lit = src_lits[i - 1] if i - 1 < len(src_lits) else "NULL"
-        v = compare(engine, lit, col.family, target, rows[i][key], fmt == "csv", col.native)
+        v = compare(engine, lit, col.family, target, rows[i][key], fmt == "csv", col.native) if expect is None \
+            else server_text_verdict(expect[i - 1], rows[i][key], fmt == "csv")
         if is_zero_date_null(engine, lit, v):
             zeros += 1
         elif v == NULLED:
@@ -810,7 +830,11 @@ def run_unit(engine: str, work: Path, url: str, col: Col, n_rows: int, mode: str
         if check.returncode == 0 and p.returncode != 0:
             check = recheck(check, cfg, env, d)
         want = frozenset(["id", col.name.lower(), *(["nsn_ts"] if mode == "time_window" else [])])
-        r = grade_run(engine, cell, p, check, fid, d / f"out-{fmt}", fmt, col, n_rows, target, list(col.lits), want)
+        expect = server_text_of(url, col, n_rows) if engine == "postgres" and col.delivery == "server_text" else None
+        if engine == "postgres" and col.delivery == "server_text" and expect is None:
+            out.append(Result(cell, DELIVERED, NOT_GRADED, "the source's own text of the seeded values could not be read"))
+            continue
+        r = grade_run(engine, cell, p, check, fid, d / f"out-{fmt}", fmt, col, n_rows, target, list(col.lits), want, expect=expect)
         out.append(r)
         if r.klass in (NULLED, WRONG):
             out.append(integrity(cell, rivet(["validate", "-c", str(cfg), "--depth", "full"], env, d), r))
