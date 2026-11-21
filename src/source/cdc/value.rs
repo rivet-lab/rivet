@@ -222,11 +222,16 @@ const NO_READING: &str = "cannot be read as that type";
 impl CellRefusal {
     /// A refusal of `value` at `row` for `reason`.
     fn new(row: usize, value: &RivetValue, reason: impl Into<String>) -> Self {
+        Self::refused(row, value, FixRefusal::from(reason.into()))
+    }
+
+    /// A refusal of `value` at `row` as worded, and coded, by the fix that met it.
+    fn refused(row: usize, value: &RivetValue, r: FixRefusal) -> Self {
         Self {
             row,
             value: value.clone(),
-            reason: reason.into(),
-            code: None,
+            reason: r.reason,
+            code: r.code,
         }
     }
 
@@ -267,12 +272,29 @@ impl CellRefusal {
     }
 }
 
-/// The value a Boolean column stores for `v`.
-fn bool_value(v: &RivetValue) -> Result<bool, String> {
+/// The flag a 0 or 1 holds as a boolean, or the refusal by code for any other integer.
+fn flag_value(v: i128) -> Result<bool, FixRefusal> {
+    match crate::source::mysql::flag_bool(v) {
+        _ if seeded!("cdc-bool-cell-any-nonzero-true", v != 0, false) => Ok(true),
+        Some(f) => Ok(f),
+        None => Err(FixRefusal {
+            reason: format!(
+                "is not a flag: a boolean column carries 0 or 1 only. Declare the column an \
+                 integer type in `columns:` (for example `int64`) to carry the number, or leave \
+                 the column out of the capture, then: {}",
+                crate::source::cdc::checkpoint_identity::RECOVER
+            ),
+            code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
+        }),
+    }
+}
+
+/// The value a Boolean column stores for `v`: a boolean, or an integer that is a flag.
+fn bool_value(v: &RivetValue) -> Result<bool, FixRefusal> {
     match v {
         RivetValue::Bool(b) => Ok(*b),
-        RivetValue::Int(i) => Ok(*i != 0),
-        RivetValue::UInt(u) => Ok(*u != 0),
+        RivetValue::Int(i) => flag_value(i128::from(*i)),
+        RivetValue::UInt(u) => flag_value(i128::from(*u)),
         _ => Err(NO_READING.into()),
     }
 }
@@ -429,7 +451,7 @@ pub(crate) fn build_column(
                     None => b.append_null(),
                     Some(v) => match $value(*v) {
                         Ok(x) => b.append_value(x),
-                        Err(reason) => return Err(CellRefusal::new(row, v, reason)),
+                        Err(reason) => return Err(CellRefusal::refused(row, v, reason.into())),
                     },
                 }
             }
@@ -829,50 +851,6 @@ pub(crate) enum MysqlCellFix {
     ZeroDate,
     /// TIME is a duration up to 838:59:59; one outside a day is refused with the batch's MySQL wording.
     TimeOfDay,
-    /// An integer column read as a boolean (`tinyint(1)` or a `bool` override): only 0 and 1 are flags, any other value is refused by code.
-    FlagInt,
-}
-
-/// The flag fix for a Boolean target over a MySQL integer column, `tinyint(1)` included.
-pub(crate) fn mysql_flag_fix(
-    engine: crate::source::cdc::CdcEngine,
-    native: &str,
-    dt: &DataType,
-) -> Option<MysqlCellFix> {
-    if engine != crate::source::cdc::CdcEngine::Mysql || !matches!(dt, DataType::Boolean) {
-        return None;
-    }
-    let n = native.to_ascii_lowercase();
-    let integer = ["tinyint", "smallint", "mediumint", "int", "bigint"]
-        .iter()
-        .any(|t| n == *t || n.starts_with(&format!("{t}(")) || n.starts_with(&format!("{t} ")));
-    let flag_int = integer
-        && !seeded!(
-            "mysql-cdc-tinyint1-flag-any-nonzero-true",
-            n.starts_with("tinyint(1)"),
-            false
-        );
-    seeded!(
-        "mysql-cdc-int-bool-override-any-nonzero-true",
-        None,
-        flag_int.then_some(MysqlCellFix::FlagInt)
-    )
-}
-
-/// The flag a 0 or 1 holds as a boolean cell, or the refusal by code for any other value.
-fn flag_cell(v: i128) -> Result<RivetValue, FixRefusal> {
-    match crate::source::mysql::flag_bool(v) {
-        Some(f) => Ok(RivetValue::Bool(f)),
-        None => Err(FixRefusal {
-            reason: format!(
-                "is not a flag: a boolean column carries 0 or 1 only. Declare the column an \
-                 integer type in `columns:` (for example `int64`) to carry the number, or leave \
-                 the column out of the capture, then: {}",
-                crate::source::cdc::checkpoint_identity::RECOVER
-            ),
-            code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
-        }),
-    }
 }
 
 /// The fix (if any) for a column, from the engine + native type.
@@ -1117,8 +1095,6 @@ impl MysqlCellFix {
                     code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
                 });
             }
-            (MysqlCellFix::FlagInt, V::Int(i)) => flag_cell(i128::from(*i))?,
-            (MysqlCellFix::FlagInt, V::UInt(u)) => flag_cell(i128::from(*u))?,
             (MysqlCellFix::BinaryPad(w), V::Bytes(b)) if b.len() < *w => {
                 let mut p = b.clone();
                 p.resize(*w, 0);
@@ -2563,94 +2539,77 @@ mod tests {
         assert_eq!(arr.len(), 1);
     }
 
-    /// A Boolean column reads a zero integer of either signedness as false and any other as true.
+    /// A Boolean column carries 0 and 1 of either signedness; any other integer is refused by code with the remedy, on every engine.
     #[test]
-    fn a_boolean_reads_zero_as_false_for_signed_and_unsigned_wire_ints() {
+    fn a_boolean_is_a_flag_or_refused_by_code_for_signed_and_unsigned_wire_ints() {
         use RivetValue as V;
         for (v, want) in [
+            (V::Bool(true), true),
+            (V::Bool(false), false),
             (V::Int(0), false),
-            (V::Int(-1), true),
+            (V::Int(1), true),
             (V::UInt(0), false),
             (V::UInt(1), true),
         ] {
             assert_eq!(bool_value(&v), Ok(want), "{v:?}");
         }
-    }
-
-    /// An integer column read as a boolean carries 0 and 1 only; any other value is refused by code, and a BIT(1) flag keeps its own rule.
-    #[test]
-    fn an_integer_under_a_bool_override_is_a_flag_or_refused() {
-        use crate::source::cdc::CdcEngine::{Mssql, Mysql, Postgres};
-        use RivetValue as V;
-        let flag = |native: &str| mysql_flag_fix(Mysql, native, &DataType::Boolean);
-        for native in [
-            "tinyint",
-            "tinyint(4)",
-            "smallint",
-            "mediumint",
-            "mediumint unsigned",
-            "int",
-            "int(11)",
-            "int unsigned",
-            "bigint",
-            "bigint(20) unsigned",
-            "tinyint(1)",
-            "tinyint(1) unsigned",
+        for bad in [
+            V::Int(2),
+            V::Int(-1),
+            V::Int(i64::MIN),
+            V::Int(i64::MAX),
+            V::UInt(2),
+            V::UInt(u64::MAX),
         ] {
-            let fix = flag(native).unwrap_or_else(|| panic!("{native}"));
-            assert_eq!(fix.apply(&V::Int(0)).unwrap(), V::Bool(false), "{native}");
-            assert_eq!(fix.apply(&V::Int(1)).unwrap(), V::Bool(true), "{native}");
-            assert_eq!(fix.apply(&V::UInt(1)).unwrap(), V::Bool(true), "{native}");
-            assert_eq!(fix.apply(&V::Null).unwrap(), V::Null, "{native}");
-            for bad in [V::Int(2), V::Int(-1), V::UInt(u64::MAX)] {
-                let err = fix.apply(&bad).unwrap_err();
-                assert_eq!(
-                    err.code.map(|c| c.id),
-                    Some("RIVET_SOURCE_VALUE_UNREPRESENTABLE"),
-                    "{native} {bad:?}"
-                );
-                assert!(
-                    err.reason.starts_with(
-                        "is not a flag: a boolean column carries 0 or 1 only. Declare the column \
-                         an integer type in `columns:` (for example `int64`) to carry the number, \
-                         or leave the column out of the capture, then: Re-baseline"
-                    ),
-                    "{err:?}"
-                );
-            }
+            let err = bool_value(&bad).unwrap_err();
+            assert_eq!(
+                err.code.map(|c| c.id),
+                Some("RIVET_SOURCE_VALUE_UNREPRESENTABLE"),
+                "{bad:?}"
+            );
+            assert!(
+                err.reason.starts_with(
+                    "is not a flag: a boolean column carries 0 or 1 only. Declare the column \
+                     an integer type in `columns:` (for example `int64`) to carry the number, \
+                     or leave the column out of the capture, then: Re-baseline"
+                ),
+                "{err:?}"
+            );
         }
-        for native in ["bit(1)", "varchar(5)", "decimal(10,0)"] {
-            assert!(flag(native).is_none(), "{native} keeps its own reading");
-        }
-        assert!(mysql_flag_fix(Mysql, "bigint", &DataType::Int64).is_none());
-        assert!(mysql_flag_fix(Postgres, "bigint", &DataType::Boolean).is_none());
-        assert!(mysql_flag_fix(Mssql, "int", &DataType::Boolean).is_none());
+        assert_eq!(
+            bool_value(&V::Float(1.0)).unwrap_err().reason,
+            NO_READING,
+            "a variant with no reading keeps its own refusal"
+        );
     }
 
-    /// A TINYINT(1) read as a boolean carries 0 or 1: any other value is refused by code in a stream, and BIT(1) keeps its own reading.
+    /// The flag rule is one function: 0 and 1 are flags at either edge of every integer width, the neighbours are not.
     #[test]
-    fn a_tinyint_one_is_zero_one_or_refused_in_a_stream_and_a_bit_one_keeps_its_reading() {
+    fn a_flag_is_zero_or_one_at_every_edge_of_the_wire_widths() {
+        for (v, want) in [(0i128, Some(false)), (1, Some(true))] {
+            assert_eq!(flag_value(v).ok(), want, "{v}");
+        }
+        for v in [-1i128, 2, i128::from(i64::MIN), i128::from(u64::MAX)] {
+            assert!(flag_value(v).is_err(), "{v}");
+        }
+    }
+
+    /// A MySQL BIT(1) keeps its own reading (any set bit), and a built Boolean column refuses the cell that is no flag with the row.
+    #[test]
+    fn a_bit_one_keeps_its_reading_and_a_built_boolean_names_the_row_of_a_cell_that_is_no_flag() {
         use crate::source::cdc::CdcEngine::Mysql;
         use RivetValue as V;
-        let flag = |native: &str| mysql_flag_fix(Mysql, native, &DataType::Boolean);
-        for native in ["tinyint(1)", "tinyint(1) unsigned"] {
-            let fix = flag(native).unwrap_or_else(|| panic!("{native}"));
-            assert_eq!(fix.apply(&V::Int(0)).unwrap(), V::Bool(false), "{native}");
-            assert_eq!(fix.apply(&V::Int(1)).unwrap(), V::Bool(true), "{native}");
-            assert_eq!(fix.apply(&V::Null).unwrap(), V::Null, "{native}");
-            for bad in [V::Int(2), V::Int(-1), V::Int(127), V::UInt(255)] {
-                let err = fix.apply(&bad).unwrap_err();
-                assert_eq!(
-                    err.code.map(|c| c.id),
-                    Some("RIVET_SOURCE_VALUE_UNREPRESENTABLE"),
-                    "{native} {bad:?}"
-                );
-            }
-        }
-        assert!(flag("bit(1)").is_none(), "a BIT(1) is a flag by definition");
         let bit1 = mysql_cell_fix(Mysql, "bit(1)").expect("BitBool");
         assert_eq!(bit1.apply(&V::Bytes(vec![1])).unwrap(), V::Bool(true));
         assert_eq!(bit1.apply(&V::Bytes(vec![0])).unwrap(), V::Bool(false));
+        let ok = V::Int(1);
+        let bad = V::Int(5);
+        let r = build_column(&DataType::Boolean, &[Some(&ok), Some(&bad)]).unwrap_err();
+        assert_eq!((r.row, r.value.clone()), (1, V::Int(5)));
+        assert_eq!(
+            r.code.map(|c| c.id),
+            Some("RIVET_SOURCE_VALUE_UNREPRESENTABLE")
+        );
     }
 
     /// Each numeric reader takes every wire variant a driver delivers for it.

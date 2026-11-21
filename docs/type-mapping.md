@@ -127,6 +127,8 @@ same way on SQL Server and Oracle (declare the source column's own `decimal(p,s)
 Server a value whose wire type the declared type cannot read is refused at the
 first batch with the same code.
 
+A `bool` override over an integer column is a flag only for 0 and 1. PostgreSQL, SQL Server and Oracle refuse it for a batch export at plan time; MySQL, which checks each value, refuses a value outside 0 and 1 at the cell. A CDC stream reads every engine the way MySQL does: 0, 1 and NULL are delivered as `false`, `true` and NULL, and any other integer (2, 5, -1) is refused `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5) naming the column, the value and its row, before a part is written and before the checkpoint moves. Declare the column `int64` in `columns:` to carry the number.
+
 The override path is safe: a `uid: uuid` declaration tries to parse each
 cell — either 16 raw bytes (BINARY(16) layout) or a 36-char canonical text
 form. **Text that does not parse emits `NULL`, never silent garbage.** Same
