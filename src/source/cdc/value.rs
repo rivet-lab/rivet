@@ -1095,9 +1095,9 @@ impl MysqlCellFix {
                     code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
                 });
             }
-            (MysqlCellFix::BinaryPad(w), V::Bytes(b)) if b.len() < *w => {
+            (MysqlCellFix::BinaryPad(w), V::Bytes(b)) => {
                 let mut p = b.clone();
-                p.resize(*w, 0);
+                p.resize(p.len().max(*w), 0);
                 V::Bytes(p)
             }
             (_, other) => other.clone(),
@@ -1995,6 +1995,19 @@ mod tests {
         assert_eq!(
             fix("binary(4)").apply(&V::Bytes(Vec::new())).unwrap(),
             V::Bytes(vec![0, 0, 0, 0])
+        );
+        let pad = fix("binary(4)");
+        assert_eq!(
+            pad.apply(&V::Bytes(vec![7, 8])).unwrap(),
+            V::Bytes(vec![7, 8, 0, 0])
+        );
+        assert_eq!(
+            pad.apply(&V::Bytes(vec![1, 2, 3, 4])).unwrap(),
+            V::Bytes(vec![1, 2, 3, 4])
+        );
+        assert_eq!(
+            pad.apply(&V::Bytes(vec![1, 2, 3, 4, 5])).unwrap(),
+            V::Bytes(vec![1, 2, 3, 4, 5])
         );
 
         let mi = fix("mediumint");
