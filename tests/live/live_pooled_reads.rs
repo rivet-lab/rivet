@@ -444,11 +444,30 @@ const COMPOSITE: (&str, &str, &str) = (
     "ROW(g, 'x')::{stem}_c",
     "need a `columns:` declaration",
 );
-const ENUM_ARRAY: (&str, &str, &str) = (
-    "_e[]",
-    "ARRAY['new', 'paid']::{stem}_e[]",
-    "has no flat mapping",
-);
+
+/// An array of an enum beside wide rows, over `url`: delivered as a list of its labels within `BOUND`.
+fn an_enum_array_is_delivered_within_the_bound(url: &str) {
+    if url == PGBOUNCER_URL {
+        forget_pooled_statements();
+    }
+    let types = OwnTypes::new();
+    let stem = &types.stem;
+    let (table, _table) = table_of(
+        "pool_enum_array",
+        &format!("id BIGINT PRIMARY KEY, x {stem}_e[] NOT NULL, wide TEXT NOT NULL"),
+        &format!("g, ARRAY['new', 'paid']::{stem}_e[], {WIDE}"),
+    );
+    let rig = ENGINE.rig(&table).source_url(url);
+    let out = run_within_the_bound(&rig, "full");
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "an array of an enum must be delivered:\n{said}"
+    );
+    let (_, rows) = delivered(&rig);
+    assert_eq!(rows.len(), ROWS as usize, "{said}");
+    assert!(rows.iter().all(|r| r[1] == "[new, paid]"), "{rows:?}");
+}
 
 #[test]
 #[ignore = "live: requires docker compose up -d postgres"]
@@ -524,16 +543,14 @@ fn a_composite_column_with_wide_rows_through_one_transaction_pooler_is_refused_w
 
 #[test]
 #[ignore = "live: requires docker compose up -d postgres"]
-fn an_array_of_an_enum_with_wide_rows_is_refused_within_the_bound_direct_postgres() {
-    let (suffix, value, needle) = ENUM_ARRAY;
-    an_unmapped_type_is_refused_within_the_bound(POSTGRES_URL, suffix, value, needle);
+fn an_array_of_an_enum_with_wide_rows_is_delivered_within_the_bound_direct_postgres() {
+    an_enum_array_is_delivered_within_the_bound(POSTGRES_URL);
 }
 
 #[test]
 #[ignore = "live: requires docker compose --profile pool up -d pgbouncer (transaction mode, pool_size=1)"]
-fn an_array_of_an_enum_with_wide_rows_through_one_transaction_pooler_is_refused_within_the_bound_postgres()
+fn an_array_of_an_enum_with_wide_rows_through_one_transaction_pooler_is_delivered_within_the_bound_postgres()
  {
     let _alone = pgbouncer_alone();
-    let (suffix, value, needle) = ENUM_ARRAY;
-    an_unmapped_type_is_refused_within_the_bound(PGBOUNCER_URL, suffix, value, needle);
+    an_enum_array_is_delivered_within_the_bound(PGBOUNCER_URL);
 }

@@ -429,7 +429,7 @@ scenarios:
   - id: refusal_source_cdc_cell_unsupported
     what: "RIVET_SOURCE_CDC_CELL_UNSUPPORTED: a captured cell of a type the stream cannot carry"
     postgres: { test: a_cell_the_stream_cannot_carry_is_refused_by_code_postgres }
-    mysql:    { test: a_cell_the_stream_cannot_carry_is_refused_by_code_mysql }
+    mysql:    { na: "no MySQL value reaches the sink's `build_column` refusal: BIT(64) lands UInt64 (2026-11-20, #1122), a TINYINT(1) outside 0 and 1 and a TIME past a day are RIVET_SOURCE_VALUE_UNREPRESENTABLE, and an ENUM or SET label is read from the binlog table map that binlog_row_metadata = FULL, the only mode the stream opens under, carries; `label_refusal` guards a table map without labels" }
     mssql:    { na: "every SQL Server column type the stream reads arrives as a typed value its column builds exactly (MONEY and SMALLMONEY as Numeric at scale 4 since the tiberius pin 3630ffb); a type with no mapping (XML) is refused at the snapshot or by the source-side decoder, not by the sink's `build_column`" }
     mongo:    { na: "a MongoDB change row is two text cells (`_id` as text, `document` as JSON text; `change_event` in src/source/mongo/cdc.rs) and a text column reads any bytes, so the sink's `build_column` has no Mongo cell to refuse" }
     oracle:   { na: "the server rounds a NUMBER to its declared scale at insert and refuses one past its precision, so every mined NUMBER text fits its Decimal column; BINARY_FLOAT/BINARY_DOUBLE NaN and Infinity are Float values; a date is mined in `SYYYY` form and parses; the sink's `build_column` has no Oracle cell to refuse (a redo whose text `decode` cannot read is the undecodable class, refusal_source_cdc_undecodable)" }

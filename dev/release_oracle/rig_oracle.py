@@ -362,12 +362,12 @@ def _render(row: dict) -> dict:
     return (row.get("today_render") if row.get("known_defect") else None) or row.get("render") or {}
 
 
-def _pg_projection(table: str, native: dict, renders: dict) -> str:
-    """A server-side SELECT rendering each column the ledger renders server-side, and every numeric, with PostgreSQL's own text (the scanner reads a wide one as DOUBLE, and a NaN has no DECIMAL)."""
+def _pg_projection(table: str, native: dict, renders: dict, enum_arrays: frozenset = frozenset()) -> str:
+    """A server-side SELECT rendering each column the ledger renders server-side, and every numeric, with PostgreSQL's own text (the scanner reads a wide one as DOUBLE, and a NaN has no DECIMAL); an array of a user enum is cast to text[] (the scanner returns its literal)."""
     cols = []
     for name, nat in native.items():
         q = _qi(name)
-        expr = renders.get(nat) or (PG_TEXT if nat == "NUMERIC[]" or re.fullmatch(r"NUMERIC(\(.*\))?", nat) else "{c}")
+        expr = renders.get(nat) or (PG_TEXT if nat == "NUMERIC[]" or re.fullmatch(r"NUMERIC(\(.*\))?", nat) else "{c}::text[]" if name in enum_arrays else "{c}")
         cols.append(f"{expr.replace('{c}', q)} AS {q}")
     return f"postgres_query('pg', {_lit('SELECT ' + ', '.join(cols) + ' FROM ' + table)})"
 
@@ -580,7 +580,13 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
                 f"WHERE a.attrelid = {reg}::regclass AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum"
             ) + ")"
         )}
-        return _pg_projection(table, native, renders), key, native
+        enum_arrays = frozenset(r[0] for r in ora.rows(
+            "SELECT * FROM postgres_query('pg', " + _lit(
+                "SELECT a.attname::text FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid JOIN pg_type e ON e.oid = t.typelem "
+                f"WHERE a.attrelid = {reg}::regclass AND a.attnum > 0 AND NOT a.attisdropped AND t.typcategory = 'A' AND e.typtype = 'e'"
+            ) + ")"
+        ))
+        return _pg_projection(table, native, renders, enum_arrays), key, native
     if engine == "mysql":
         db = spec["database"]
         if query:
@@ -2796,6 +2802,8 @@ def _layout_self_test() -> None:
     assert absent(Exception('relation "t" does not exist')) and absent(Exception("cross-database references are not implemented"))
     assert not absent(Exception('Conversion Error: Could not convert string "NaN" to DECIMAL(18,2)')), "a read error is an oracle error, never absence"
     assert "format(''%s'', \"n\")" in _pg_projection("t", {"n": "NUMERIC(18,2)"}, {}), "a bounded NUMERIC is read as text: NaN has no DECIMAL"
+    assert '"e"::text[] AS "e"' in _pg_projection("t", {"e": "status[]", "n": "TEXT[]"}, {}, frozenset({"e"})), "an array of a user enum is read as text[]"
+    assert '"n"::text[]' not in _pg_projection("t", {"e": "status[]", "n": "TEXT[]"}, {}, frozenset({"e"})), "another array keeps its own read"
     with tempfile.TemporaryDirectory() as d:
         with _Mem() as ora:
             ora.db.sql("CREATE TABLE src AS SELECT * FROM (VALUES (1, true, '\\x0A\\xFF'::BLOB, '', NULL::VARCHAR, 1.50::DECIMAL(10,2), 'a,\"b'), "
