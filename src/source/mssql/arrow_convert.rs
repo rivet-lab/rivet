@@ -1248,6 +1248,18 @@ mod type_map_tests {
         }
     }
 
+    /// Every wire type: one no common kind reads is delivered as a common type only where the engine declares it.
+    #[test]
+    fn no_wire_type_outside_the_common_kinds_is_delivered_as_a_common_type() {
+        let rows = wire_table()
+            .into_iter()
+            .map(|(ct, kind, t)| (format!("{ct:?}").to_lowercase(), kind, t));
+        crate::types::kind::assert_engine_only_rows_are_declared(
+            crate::types::override_table::Engine::Mssql,
+            rows,
+        );
+    }
+
     /// A decimal with no catalog hint is `decimal(38,0)`, and the one kind without a type is the one that takes it.
     #[test]
     fn a_decimal_without_a_hint_is_the_widest_scale_zero_decimal() {

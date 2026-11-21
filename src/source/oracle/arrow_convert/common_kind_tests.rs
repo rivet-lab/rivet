@@ -348,6 +348,18 @@ fn every_column_is_typed_through_its_kind_or_the_engine_table() {
     }
 }
 
+/// Every column shape: one no common kind reads is delivered as a common type only where the engine declares it.
+#[test]
+fn no_column_shape_outside_the_common_kinds_is_delivered_as_a_common_type() {
+    let rows = table()
+        .into_iter()
+        .map(|(label, _, kind, t)| (label.to_string(), kind, t));
+    crate::types::kind::assert_engine_only_rows_are_declared(
+        crate::types::override_table::Engine::Oracle,
+        rows,
+    );
+}
+
 /// The engine table keeps the interval and names every other unmapped type by its label.
 #[test]
 fn the_engine_table_holds_the_interval_and_the_unmapped_types() {

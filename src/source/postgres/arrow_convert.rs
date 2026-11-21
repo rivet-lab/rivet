@@ -1612,6 +1612,22 @@ mod type_map_tests {
         }
     }
 
+    /// Every built-in wire type: one no common kind reads is delivered as a common type only where the engine declares it.
+    #[test]
+    fn no_built_in_type_outside_the_common_kinds_is_delivered_as_a_common_type() {
+        let rows = (0..20_000).filter_map(Type::from_oid).map(|t| {
+            (
+                t.name().to_string(),
+                pg_common_kind(&t),
+                pg_type_to_rivet(&t),
+            )
+        });
+        crate::types::kind::assert_engine_only_rows_are_declared(
+            crate::types::override_table::Engine::Postgres,
+            rows,
+        );
+    }
+
     /// A catalog hint types a `numeric` column of that name and nothing else.
     #[test]
     fn a_numeric_hint_types_only_the_numeric_column_it_names() {

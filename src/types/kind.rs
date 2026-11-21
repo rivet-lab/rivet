@@ -76,6 +76,82 @@ impl CommonKind {
     }
 }
 
+/// Native types an engine reads outside every `CommonKind` yet delivers as a type a common kind also delivers: engine, row label, why.
+#[cfg(test)]
+const ENGINE_ONLY_IN_COMMON_SHAPE: &[(super::override_table::Engine, &str, &str)] = {
+    use super::override_table::Engine::{Mssql, Mysql, Postgres};
+    &[
+        (
+            Postgres,
+            "oid",
+            "2026-11-21: unsigned 32-bit object id, read as int64",
+        ),
+        (
+            Mysql,
+            "bit len 0",
+            "2026-11-21: BIT(n) bit field, int64 up to 63 bits",
+        ),
+        (Mysql, "bit len 1", "2026-11-21: BIT(1) is bool"),
+        (
+            Mysql,
+            "bit len 2",
+            "2026-11-21: BIT(n) bit field, int64 up to 63 bits",
+        ),
+        (
+            Mysql,
+            "bit len 63",
+            "2026-11-21: BIT(n) bit field, int64 up to 63 bits",
+        ),
+        (Mysql, "year", "2026-11-21: calendar year, read as int16"),
+        (
+            Mssql,
+            "money",
+            "2026-11-21: fixed-scale decimal(19,4), exact over its range",
+        ),
+        (
+            Mssql,
+            "money4",
+            "2026-11-21: smallmoney, fixed-scale decimal(10,4)",
+        ),
+        (
+            Mssql,
+            "ssvariant",
+            "2026-11-21: sql_variant, the base value as text",
+        ),
+        (
+            Mssql,
+            "udt",
+            "2026-11-21: CLR type, serialized bytes as text",
+        ),
+    ]
+};
+
+/// Fails unless the rows no common kind reads but whose type is common-shaped are exactly the declared engine-only ones.
+#[cfg(test)]
+pub(crate) fn assert_engine_only_rows_are_declared(
+    engine: super::override_table::Engine,
+    rows: impl IntoIterator<Item = (String, Option<CommonKind>, RivetType)>,
+) {
+    let mut got: Vec<String> = rows
+        .into_iter()
+        .filter(|(_, kind, t)| kind.is_none() && CommonKind::of(t).is_some())
+        .map(|(label, _, _)| label)
+        .collect();
+    got.sort();
+    got.dedup();
+    let mut want: Vec<String> = ENGINE_ONLY_IN_COMMON_SHAPE
+        .iter()
+        .filter(|(e, _, _)| *e == engine)
+        .map(|(_, label, _)| label.to_string())
+        .collect();
+    want.sort();
+    assert_eq!(
+        got, want,
+        "{engine:?}: a native type no common kind reads is delivered as a common type; route it through its \
+         `CommonKind`, or declare it in ENGINE_ONLY_IN_COMMON_SHAPE with the reason it is engine-only"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
