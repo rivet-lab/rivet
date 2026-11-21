@@ -559,7 +559,7 @@ fn mysql_float_differences() -> Vec<String> {
         .source_url(MYSQL_CDC_URL);
     let want: Vec<Vec<Option<String>>> = conn
         .query_map(
-            format!("SELECT id, CAST(f8 AS CHAR), CAST(f4 AS CHAR) FROM {table} ORDER BY id"),
+            format!("SELECT id, CAST(f8 AS CHAR), CAST(CAST(f4 AS DOUBLE) AS CHAR) FROM {table} ORDER BY id"),
             |(id, a, b): (i64, Option<String>, Option<String>)| vec![Some(id.to_string()), a, b],
         )
         .unwrap();
