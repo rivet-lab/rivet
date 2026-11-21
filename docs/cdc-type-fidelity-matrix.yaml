@@ -168,8 +168,8 @@ scenarios:
     oracle:   { na: "Oracle has no ENUM or SET type" }
 
   - id: type_bit
-    what: "BIT(n) through CDC — BIT(1) boolean, BIT(2..63) Int64, BIT(64) UInt64 so a value with bit 63 set is delivered whole (finding #4)"
-    postgres: { test: pg_cdc_a_bit_column_is_refused_not_delivered_as_the_decoders_literal, oracle: fail_loud }
+    what: "BIT(n) through CDC — PostgreSQL bit and bit varying (and their arrays) as the server's text, BIT(1) boolean, BIT(2..63) Int64, BIT(64) UInt64 so a value with bit 63 set is delivered whole (finding #4)"
+    postgres: { test: postgres_batch_and_cdc_deliver_bit_strings_alike, oracle: independent }
     mysql:    { test: a_bit64_value_with_the_top_bit_builds_in_an_unsigned_column, oracle: independent }
     mssql:   { test: mssql_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent }
     mongo:    { na: "no BIT type" }

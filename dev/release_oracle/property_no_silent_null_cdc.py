@@ -18,7 +18,8 @@ import yaml
 from . import cdc, core
 from . import property_no_silent_null as nsn
 from .core import Ledger, SkipCause
-from .property_no_silent_null import DELIVERED, EMPTY, IGNORED, NOT_GRADED, NULLED, REFUSED, WRONG, Col, Result
+from . import type_edges as te
+from .property_no_silent_null import CDC_DIFFERS, DELIVERED, EMPTY, IGNORED, NOT_GRADED, NULLED, REFUSED, WRONG, Col, Result
 
 SCENARIO = "no_silent_null_cdc"
 TABLE = "pm_no_silent_null_c"
@@ -212,6 +213,21 @@ def zero_nulls_by_run(engine: str, c: Col, u: Unit, n: int, seen: dict) -> int:
     return counts
 
 
+def judge_stop(c: Col, u: Unit, cell: str, stop: Result | None) -> Result | None:
+    """The ledger's CDC verdict of column c against how a no-override leg stopped: `exact` never stops, `refuse:CODE` stops with that code."""
+    if u.target != "none" or c.cdc is None or (stop is not None and stop.klass):
+        return stop
+    if c.cdc.kind == te.REFUSE:
+        if stop is None:
+            return Result(cell, DELIVERED, CDC_DIFFERS, f"the ledger says `cdc: refuse:{c.cdc.code}`, the leg delivered")
+        if stop.code != c.cdc.code:
+            return Result(cell, REFUSED, CDC_DIFFERS, f"the ledger says `cdc: refuse:{c.cdc.code}`, the leg stopped with [{stop.code}]", stop.code)
+        return stop
+    if stop is not None:
+        return Result(cell, REFUSED, CDC_DIFFERS, f"the ledger says `cdc: exact`, the leg stopped with [{stop.code}]: {stop.detail}"[:300], stop.code)
+    return None
+
+
 def grade_unit(engine: str, u: Unit, cols: list[Col], n: int, runs: dict[str, core.Proc], checks: dict[str, core.Proc], d: Path, tag: str) -> list[Result]:
     """Grade every leg of one unit from the whole output directory against the seed literals; each run is held to the check made right before it."""
     graded = cols if u.target == "none" else [u.col]
@@ -233,6 +249,7 @@ def grade_unit(engine: str, u: Unit, cols: list[Col], n: int, runs: dict[str, co
             cell = f"{engine}/{c.native}->{u.target}/cdc-{leg}{tag}/{u.fmt}"
             p, check = runs.get(leg_run(leg)), checks.get(leg_run(leg), checks.get("snapshot"))
             stop = nsn.grade_stop(cell, p, check) if p is not None else Result(cell, REFUSED, NOT_GRADED, "the run of this leg never started")
+            stop = judge_stop(c, u, cell, stop)
             if stop:
                 out.append(stop)
                 continue
@@ -329,24 +346,29 @@ def run_round(engine: str, r: int, cols: list[Col], units: list[Unit], image: st
     return results
 
 
+def groups(cols: list[Col]) -> list[list[Col]]:
+    """Column groups of one table: GROUP delivering columns together, each column the ledger says the change stream refuses alone so its refusal cannot stop another's run."""
+    whole = [c for c in cols if c.cdc is None or c.cdc.kind != te.REFUSE]
+    return [whole[g:g + GROUP] for g in range(0, len(whole), GROUP)] + [[c] for c in cols if c not in whole]
+
+
 def rounds(engine: str, cols: list[Col]) -> list[tuple[list[Col], list[Unit], str]]:
-    """(columns, units, row image) rounds: per column group the `none` units in every format and one override unit per family representative and target on Parquet; MySQL adds every non-default row image."""
+    """(columns, units, row image) rounds: per column group the `none` units in every format and one override unit per family representative and target on Parquet; MySQL adds every non-default row image; a column whose CDC verdict is a refusal is a round of its own."""
     ax = nsn.axes()
     cap = UNITS_PER_ROUND.get(engine, 64)
     seen: set[str] = set()
     out = []
-    for g in range(0, len(cols), GROUP):
-        group = cols[g:g + GROUP]
+    for group in groups(cols):
         units = [Unit("none", None, f) for f in ax["formats"]]
         for c in group:
-            if c.family not in seen:
+            if c.family not in seen and (c.cdc is None or c.cdc.kind != te.REFUSE):
                 seen.add(c.family)
                 units += [Unit(t, c, "parquet") for t in ax["targets"] if t != "none"]
         out += [(group, units[k:k + cap], "") for k in range(0, len(units), cap)]
     if engine == "mysql":
         default = nsn.sql("mysql", CDC_STAND["mysql"], "SELECT @@global.binlog_row_image;").out
         for image in (i for i in row_images() if i not in default):
-            out += [(cols[g:g + GROUP], [Unit("none", None, "parquet")], image) for g in range(0, len(cols), GROUP)]
+            out += [(group, [Unit("none", None, "parquet")], image) for group in groups(cols)]
     return out
 
 
@@ -424,6 +446,21 @@ def self_test() -> None:
         nsn.read_parts = saved
     assert [r.klass for r in counted] == [""] * len(legs()), [(r.cell, r.klass, r.detail) for r in counted]
     assert {r.cell.split("/")[2] for r in miscounted if r.klass == NULLED} == {"cdc-insert", "cdc-update"}, [(r.cell, r.klass) for r in miscounted]
+    exact_c, gone_c = Col("e00", "INT", "Int32", "int", ("1",), cdc=te.EXACT_V), Col("g00", "XML", "Utf8", "text", ("'<a/>'",), cdc=te.parse_verdict("refuse:RIVET_X", te.EXTRACT))
+    assert [[c.name for c in g] for g in groups([exact_c, gone_c, exact_c])] == [["e00", "e00"], ["g00"]], "a column the change stream refuses is its own round"
+    refused, none = nsn._proc(5, "[RIVET_X] no"), Unit("none", None, "parquet")
+    stop = Result("cell", REFUSED, "", "", "RIVET_X")
+    assert judge_stop(exact_c, none, "cell", None) is None and judge_stop(gone_c, none, "cell", stop) is stop
+    assert judge_stop(exact_c, none, "cell", stop).klass == CDC_DIFFERS, "the ledger says exact, the leg stopped"
+    assert judge_stop(gone_c, none, "cell", None).klass == CDC_DIFFERS, "the ledger says refuse, the leg delivered"
+    assert judge_stop(gone_c, none, "cell", Result("cell", REFUSED, "", "", "RIVET_Y")).klass == CDC_DIFFERS, "the ledger names another code"
+    crash = Result("cell", REFUSED, nsn.CRASH, "", "")
+    assert judge_stop(exact_c, none, "cell", crash) is crash and judge_stop(gone_c, none, "cell", crash) is crash, "a crash keeps its own class"
+    assert judge_stop(exact_c, Unit("float8", exact_c, "parquet"), "cell", stop) is stop, "an override unit may refuse"
+    rs = grade_unit("mysql", none, [exact_c], 1, {"snapshot": refused}, {"snapshot": nsn._proc(5, "[RIVET_X] no")}, d, "")
+    assert rs[0].klass == CDC_DIFFERS and rs[0].verdict == REFUSED, rs[0]
+    rs = grade_unit("mysql", none, [gone_c], 1, {"snapshot": refused}, {"snapshot": nsn._proc(5, "[RIVET_X] no")}, d, "")
+    assert rs[0].klass == "" and rs[0].verdict == REFUSED, rs[0]
     shutil.rmtree(d, ignore_errors=True)
     print(f"no_silent_null_cdc self-test ok: legs {legs()}, row images {row_images()}")
 

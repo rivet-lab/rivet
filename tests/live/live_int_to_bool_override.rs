@@ -299,3 +299,148 @@ fn a_refused_flag_column_is_delivered_as_the_number_when_declared_int64_in_cdc_m
         vec![Some("-1".into()), Some("0".into()), Some("5".into())]
     );
 }
+
+fn put(sc: &mut CdcScenario, table: &str, rows: &[(i64, &str)]) {
+    for (id, v) in rows {
+        sc.sql(&format!("INSERT INTO {table} (id, v) VALUES ({id}, {v})"));
+    }
+    sc.settle();
+}
+
+fn pg_flag_scenario(declared: &str) -> (CdcScenario, String, &'static str) {
+    let sc = CdcScenario::pg_with("ovb_cdc_pg", "id BIGINT PRIMARY KEY, v INT", |r, _| {
+        readback_only(r).export_line(&format!("columns: {{v: {declared}}}"))
+    });
+    sc.rig.run_ok();
+    let t = sc.table.clone();
+    (sc, t, "v")
+}
+
+fn mssql_flag_scenario(declared: &str) -> (CdcScenario, String, &'static str) {
+    let sc = CdcScenario::mssql_with("ovb_cdc_ms", "id BIGINT PRIMARY KEY, v INT", |r, t| {
+        readback_only(r.repoint(&format!("dbo.{t}")))
+            .export_line(&format!("columns: {{v: {declared}}}"))
+    });
+    sc.rig.run_ok();
+    let t = format!("dbo.{}", sc.table);
+    (sc, t, "v")
+}
+
+#[cfg(feature = "oracle")]
+fn oracle_flag_scenario(declared: &str) -> (CdcScenario, String, &'static str) {
+    let sc = CdcScenario::oracle_with("ovb_cdc_or", |r, _| {
+        readback_only(r).export_line(&format!("columns: {{V: {declared}}}"))
+    });
+    sc.rig.run_ok();
+    let t = sc.table.clone();
+    (sc, t, "V")
+}
+
+fn flags_are_delivered_in_cdc(make: fn(&str) -> (CdcScenario, String, &'static str)) {
+    let (mut sc, t, col) = make("bool");
+    put(&mut sc, &t, &[(1, "0"), (2, "1"), (3, "NULL")]);
+    sc.rig.run_ok();
+    let mut got = dir_parquet_display(&sc.rig.out_dir(), col);
+    got.sort();
+    assert_eq!(got, vec![None, Some("false".into()), Some("true".into())]);
+}
+
+fn a_non_flag_is_refused_in_cdc(make: fn(&str) -> (CdcScenario, String, &'static str)) {
+    for value in ["2", "5", "-1", "2147483647"] {
+        let (mut sc, t, _) = make("bool");
+        put(&mut sc, &t, &[(1, "0"), (2, "1"), (3, value)]);
+        let out = sc.rig.run();
+        assert_refused(&out, Refused::by_code(NOT_EXACT, 5));
+        assert_eq!(
+            files_with_extension(&sc.rig.out_dir(), "parquet").len(),
+            0,
+            "holding {value}: nothing written"
+        );
+    }
+}
+
+fn the_refusal_remedy_delivers_the_number_in_cdc(
+    make: fn(&str) -> (CdcScenario, String, &'static str),
+) {
+    let (mut sc, t, col) = make("int64");
+    put(&mut sc, &t, &[(1, "0"), (2, "5"), (3, "-1")]);
+    sc.rig.run_ok();
+    let mut got = dir_parquet_display(&sc.rig.out_dir(), col);
+    got.sort();
+    assert_eq!(
+        got,
+        vec![Some("-1".into()), Some("0".into()), Some("5".into())]
+    );
+}
+
+/// 0, 1 and NULL under a `bool` override over an integer column are delivered as false, true and NULL in a PostgreSQL stream.
+#[test]
+#[ignore = "live: requires docker compose --profile cdc postgres-cdc"]
+fn zero_and_one_under_a_bool_override_are_delivered_as_flags_in_cdc_postgres() {
+    flags_are_delivered_in_cdc(pg_flag_scenario);
+}
+
+/// An integer outside 0 and 1 under a `bool` override is refused by code in a PostgreSQL stream, never delivered as `true`.
+#[test]
+#[ignore = "live: requires docker compose --profile cdc postgres-cdc"]
+fn an_integer_that_is_not_a_flag_is_refused_in_cdc_never_turned_into_true_postgres() {
+    a_non_flag_is_refused_in_cdc(pg_flag_scenario);
+}
+
+/// The remedy the PostgreSQL stream refusal names works: the same column declared `int64` delivers the number.
+#[test]
+#[ignore = "live: requires docker compose --profile cdc postgres-cdc"]
+fn a_refused_flag_column_is_delivered_as_the_number_when_declared_int64_in_cdc_postgres() {
+    the_refusal_remedy_delivers_the_number_in_cdc(pg_flag_scenario);
+}
+
+/// 0, 1 and NULL under a `bool` override over an integer column are delivered as false, true and NULL in a SQL Server stream.
+#[test]
+#[ignore = "live: requires docker compose mssql (CDC)"]
+fn zero_and_one_under_a_bool_override_are_delivered_as_flags_in_cdc_mssql() {
+    let _serial = cross_process_serial("mssql_cdc");
+    flags_are_delivered_in_cdc(mssql_flag_scenario);
+}
+
+/// An integer outside 0 and 1 under a `bool` override is refused by code in a SQL Server stream, never delivered as `true`.
+#[test]
+#[ignore = "live: requires docker compose mssql (CDC)"]
+fn an_integer_that_is_not_a_flag_is_refused_in_cdc_never_turned_into_true_mssql() {
+    let _serial = cross_process_serial("mssql_cdc");
+    a_non_flag_is_refused_in_cdc(mssql_flag_scenario);
+}
+
+/// The remedy the SQL Server stream refusal names works: the same column declared `int64` delivers the number.
+#[test]
+#[ignore = "live: requires docker compose mssql (CDC)"]
+fn a_refused_flag_column_is_delivered_as_the_number_when_declared_int64_in_cdc_mssql() {
+    let _serial = cross_process_serial("mssql_cdc");
+    the_refusal_remedy_delivers_the_number_in_cdc(mssql_flag_scenario);
+}
+
+/// 0, 1 and NULL under a `bool` override over a NUMBER column are delivered as false, true and NULL in an Oracle stream.
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle (LogMiner)"]
+fn zero_and_one_under_a_bool_override_are_delivered_as_flags_in_cdc_oracle() {
+    let _serial = cross_process_serial("oracle_cdc");
+    flags_are_delivered_in_cdc(oracle_flag_scenario);
+}
+
+/// A NUMBER outside 0 and 1 under a `bool` override is refused by code in an Oracle stream, never delivered as `true`.
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle (LogMiner)"]
+fn an_integer_that_is_not_a_flag_is_refused_in_cdc_never_turned_into_true_oracle() {
+    let _serial = cross_process_serial("oracle_cdc");
+    a_non_flag_is_refused_in_cdc(oracle_flag_scenario);
+}
+
+/// The remedy the Oracle stream refusal names works: the same column declared `int64` delivers the number.
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle (LogMiner)"]
+fn a_refused_flag_column_is_delivered_as_the_number_when_declared_int64_in_cdc_oracle() {
+    let _serial = cross_process_serial("oracle_cdc");
+    the_refusal_remedy_delivers_the_number_in_cdc(oracle_flag_scenario);
+}
