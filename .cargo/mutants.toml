@@ -969,4 +969,18 @@ exclude_re = [
     # 2026-11-20: mssql_catalog_hints_opt and finer_time_sql read sys.* over a live SQL Server connection, unkillable under --lib --bins; live cell mssql_batch_and_cdc_deliver_every_ledger_row_alike is RED under each stub (None and String::new() proven by hand 2026-11-20: the time(7) column loads Decimal(18, 6) where the ledger says Decimal(18, 9)) and seed mssql-time7-lands-at-microseconds CAUGHT; closes with an offline SQL Server fake.
     "replace MssqlSource::mssql_catalog_hints_opt ->",
     "replace finer_time_sql ->",
+    # 2026-11-21: Oracle build_column arms read a live oracle::Row, unkillable under --lib --bins; each is RED by hand under its stub: Number in the Utf8 branch by an_oracle_number_infinity_is_refused_by_code_and_to_char_delivers_the_server_text and finite_oracle_numbers_and_a_microsecond_interval_are_delivered_unchanged, Number in the Float64 branch by an_oracle_number_infinity_in_a_float64_override_is_refused_and_finite_is_delivered, the interval arm by an_oracle_interval_with_nanoseconds_is_refused_by_code_and_to_char_delivers_the_text; closes with an offline Oracle row fake.
+    "delete match arm OraKind::Number in build_column$",
+    "delete match arm OraKind::IntervalDs \\| OraKind::IntervalYm in build_column$",
+    # 2026-11-21: PgCellSource::list and its Float64 and Utf8 arms read a live tokio_postgres::Row; RED by hand under each stub: list None and Some(vec![]) and the Utf8 arm by a_postgres_json_interval_oid_enum_array_is_delivered_as_a_list_of_its_elements, the Float64 arm by the postgres DOUBLE PRECISION[] cells of property_no_silent_null_load (UNEXPECTED_REFUSAL RIVET_INTERNAL_VALUE_CONVERTER); closes with an offline Postgres row fake.
+    "replace <impl crate::source::value_checksum::CellSource for PgCellSource<'_>>::list -> Option<Vec<crate::source::value_checksum::ListElem>> with (None|Some\\(vec!\\[\\]\\)|Some\\(vec!\\[Default::default\\(\\)\\]\\))$",
+    "delete match arm DataType::Float64 in <impl crate::source::value_checksum::CellSource for PgCellSource<'_>>::list$",
+    "delete match arm DataType::Utf8 in <impl crate::source::value_checksum::CellSource for PgCellSource<'_>>::list$",
+    # 2026-11-21: text_elements reads a live tokio_postgres::Row; RED by hand under Ok(None) and Ok(Some(vec![Some(String::new())])) by a_postgres_json_interval_oid_enum_array_is_delivered_as_a_list_of_its_elements, which asserts every delivered element; closes with an offline Postgres row fake.
+    "replace text_elements -> std::result::Result<Option<Vec<Option<String>>>, postgres::Error> with ",
+    # 2026-11-21: the is_oid_array guard in build_pg_list_array and PgCellSource::list; `false` is RED by hand (the OID[] cell fails with the lossy-wire refusal), `true` is a true equivalent because PgInt accepts INT2, INT4, INT8 and OID at their own wire widths, so an int8[] read through it is the same i64; is_oid_array itself is unit-tested.
+    "replace match guard is_oid_array\\(.*\\) with (true|false) in build_pg_list_array$",
+    "replace match guard is_oid_array\\(.*\\) with (true|false) in <impl crate::source::value_checksum::CellSource for PgCellSource<'_>>::list$",
+    # 2026-11-21: read_utf8_list reads a live tokio_postgres::Row, unkillable under --lib --bins; its choice of reader lives in utf8_list_read, unit-tested; RED by hand under every whole-body stub (None, vec![None], "xyzzy", empty string, empty vec) by a_postgres_json_interval_oid_enum_array_is_delivered_as_a_list_of_its_elements; closes with an offline Postgres row fake.
+    "replace read_utf8_list ->",
 ]

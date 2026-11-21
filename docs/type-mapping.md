@@ -41,6 +41,7 @@ one either.
 |--------------|-------------------|--------|
 | MySQL zero, partial or invalid date (`0000-00-00`, `2026-00-15`, `2024-02-31` under `ALLOW_INVALID_DATES`) in `DATE`, `DATETIME`, `TIMESTAMP` | NULL, exit 0, batch and CDC | a WARN per column with the count; the batch summary has a `fidelity` row; `nulled_cells` in the manifest; `validate` warns |
 | A date or instant the target type cannot hold (PostgreSQL `infinity` or an out-of-range date, a `timestamp_ns` value outside 1677..2262) | nothing: the run is refused | `RIVET_SOURCE_VALUE_UNREPRESENTABLE`, exit 5 |
+| An Oracle `NUMBER` or `FLOAT` of infinity (or an exact `1E125`, which the client prints with the same bytes), an Oracle `INTERVAL DAY TO SECOND` with a sub-microsecond fraction | nothing: the run is refused; `TO_CHAR(col) AS col` in the query exports the exact text | `RIVET_SOURCE_VALUE_UNREPRESENTABLE`, exit 5 |
 
 The columns are labelled `rivet.fidelity: compatible`, never `exact`. The run records
 the per-column count in its manifest (`nulled_cells`); `validate` prints it as a
@@ -288,6 +289,10 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `time[]` | `list<time>` | `List<Time64(µs)>` | — | 1-D arrays; an element of `24:00:00` is refused | type capability ledger |
 | `uuid[]` | `list<uuid>` | `List<FixedSizeBinary(16)>` with the `arrow.uuid` item | — | read as native UUID lists downstream | type capability ledger |
 | `bytea[]` | `list<binary>` | `List<Binary>` | — | 1-D arrays | type capability ledger |
+| `json[]` / `jsonb[]` | `list<json>` | `List<Utf8>` | — | 1-D arrays; each element is its JSON text | type capability ledger |
+| `interval[]` | `list<interval>` | `List<Utf8>` | — | 1-D arrays; each element is its ISO 8601 duration text | type capability ledger |
+| `oid[]` | `list<int64>` | `List<Int64>` | — | 1-D arrays; read at the unsigned 32-bit width | type capability ledger |
+| enum array | `list<enum>` | `List<Utf8>` | — | 1-D arrays; each element is its label | type capability ledger |
 | nullable / all-null | — | null bitmap preserved | empty cells | `note_nullable`, `note_all_null` | type_roundtrip |
 | large `text` | `string` | `Utf8` | escaped | 2k–5k chars | type_roundtrip |
 
