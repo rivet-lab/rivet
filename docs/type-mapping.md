@@ -156,7 +156,10 @@ Supported override types: `bool`, `int2/int4/int8`, `float4/float8`,
 variants preserve sub-microsecond precision (range 1677–2262; see gap 4) — the
 plain `timestamp` is microsecond with full date range. An Oracle
 `TIMESTAMP(7..9)` column is the one case where the declaration is required: undeclared, the run is refused
-(`RIVET_TYPE_UNSAFE_MAPPING`) rather than truncated.
+(`RIVET_TYPE_UNSAFE_MAPPING`) rather than truncated. Declared `timestamp` / `timestamp_tz` over a source that holds
+more than six fraction digits (Oracle `TIMESTAMP(7..9)`, SQL Server `datetime2(7)` / `datetimeoffset(7)`) is delivered
+and reported fidelity `lossy`, on batch and on CDC, with a warning that names `timestamp_ns` / `timestamp_tz_ns`;
+`--strict` refuses it.
 
 An override the source reader cannot build is refused by code, not run:
 `RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH` (exit 1) names the column, the declared
