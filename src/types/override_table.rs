@@ -59,6 +59,9 @@ impl From<CommonKind> for Kind {
             CommonKind::Text => Text,
             CommonKind::Binary => Binary,
             CommonKind::Json => Json,
+            CommonKind::Time => Time,
+            CommonKind::Uuid => Uuid,
+            CommonKind::Interval => Interval,
         }
     }
 }
@@ -66,7 +69,6 @@ impl From<CommonKind> for Kind {
 fn kind_of(t: &RivetType) -> Kind {
     match t {
         RivetType::UInt64 => U64,
-        RivetType::Time { .. } => Time,
         RivetType::Timestamp {
             unit: TimeUnit::Nanosecond,
             timezone: None,
@@ -76,8 +78,6 @@ fn kind_of(t: &RivetType) -> Kind {
             timezone: Some(_),
         } => UtcNs,
         RivetType::Enum => Enum,
-        RivetType::Interval => Interval,
-        RivetType::Uuid => Uuid,
         RivetType::List { .. } => List,
         RivetType::Unsupported { .. } => Unsupported,
         RivetType::Bool
@@ -92,7 +92,10 @@ fn kind_of(t: &RivetType) -> Kind {
         | RivetType::String
         | RivetType::Text
         | RivetType::Json
-        | RivetType::Binary => CommonKind::of(t).map_or(Unsupported, Kind::from),
+        | RivetType::Binary
+        | RivetType::Time { .. }
+        | RivetType::Uuid
+        | RivetType::Interval => CommonKind::of(t).map_or(Unsupported, Kind::from),
     }
 }
 
