@@ -161,10 +161,11 @@ mod tests {
         let shown = crate::redact::redact_error(&echoed);
         assert!(!shown.contains(token), "{shown}");
         assert!(shown.contains("Invalid credentials: Bearer ***"), "{shown}");
-        let from_zeroizing: Secret = Zeroizing::new("zeroized-token-0123456789".to_string()).into();
+        let _from_zeroizing: Secret =
+            Zeroizing::new("zeroized-token-0123456789".to_string()).into();
         assert!(
             !crate::redact::redact_secrets("got zeroized-token-0123456789")
-                .contains(from_zeroizing.expose())
+                .contains("zeroized-token-0123456789")
         );
         let url = "postgresql://reader@db.internal:5432/app-by-construction";
         let _plain = Secret::new(url);
