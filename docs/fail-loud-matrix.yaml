@@ -56,6 +56,14 @@ scenarios:
     mongo:    { test: a_columns_override_on_a_numeric_field_never_nulls_it_mongo }
     oracle:   { test: a_declared_override_delivers_the_source_or_refuses_by_code_oracle }
 
+  - id: override_value_refusal_one_code_on_every_leg
+    what: "a value a `columns:` override cannot hold → RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5) on the batch converter, the CDC snapshot leg and the CDC stream leg alike; RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH (exit 1) only for a wire type the declared type cannot read"
+    postgres: { test: an_override_refusal_by_value_carries_the_value_code_as_batch_does }
+    mysql:    { test: an_override_refusal_by_value_carries_the_value_code_as_batch_does }
+    mssql:    { test: an_override_refusal_by_value_carries_the_value_code_as_batch_does }
+    mongo:    { na: "a MongoDB change row is two text cells; no `columns:` override retypes a field on the stream" }
+    oracle:   { test: oracle_cdc_a_date_override_refuses_a_time_of_day_not_drops_it }
+
   - id: sparse_range_plan_guard
     what: "a sparse range-chunk key that would blow up into thousands of near-empty windows → bail (PG/MSSQL, scan-free estimate proves ≥4×) or loud warn (MySQL, no trustworthy estimate)"
     postgres: { test: stand_sparse_guard_postgres }
