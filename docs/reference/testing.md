@@ -195,15 +195,16 @@ hard rules over the live CDC suite's SOURCES:
    a bare exit-0 assertion would wave a 0-row silent success through, which
    is how three of the campaign's worst bugs hid.
 
-## Mutation testing (nightly)
+## Mutation testing (per PR)
 
-`mutants-nightly` in `nightly-live.yml` runs `cargo-mutants` on a rotating
-tier group per night (day-of-year modulo the group count: ledger/pipeline,
-CDC/value/integrity, planning/formats/gates, ...) against the offline suite,
-and passes/fails on the diff against `docs/mutants-baseline.txt` — a NEW
-missed mutant fails the job; known misses live in the baseline and only ever
-shrink. A surviving mutant is a named test blind spot — the meta-gate that
-finds holes in the gates above.
+`ci.yml` runs `cargo-mutants` on the lines a PR changes: `mutants-plan` lists the
+mutants of the diff, `mutants-shard` runs them against the offline suite, and
+`mutants-verdict` fails the PR on a missed mutant in code the offline suite
+executes (`Mutants (changed lines)`). A surviving mutant is a named test blind
+spot — the meta-gate that finds holes in the gates above. The nightly rotation
+(`mutants-nightly`) was removed on 2026-08-17 (see the note in
+`nightly-live.yml`); `docs/mutants-baseline.txt` is kept only as the record of
+the misses it adjudicated and no job reads it.
 
 ## Config-key composition gate (per PR)
 

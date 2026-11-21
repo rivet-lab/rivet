@@ -110,7 +110,7 @@ Per-backend commit contracts: [ADR-0004](adr/0004-destination-write-contracts.md
 
 | Area | PR CI | Nightly | Manual | Notes |
 |---|:---:|:---:|:---:|---|
-| Per-type golden round-trip (PG + MySQL) | ✅ gate | ✅ | — | `live_type_golden` — runs in dedicated `test-type-golden` job with live DBs |
+| Per-type golden round-trip (PG + MySQL) | ✅ gate | ✅ | — | `live_type_golden` — runs in the nightly `e2e` job (`nightly-live.yml`) with live DBs |
 | Per-type round-trip via oracle (SQL Server) | ✅ gate | ✅ | — | `type_roundtrip::{duckdb,clickhouse}_validates_mssql_type_matrix_parquet` — the e2e job's type round-trip step (DuckDB + ClickHouse readers) |
 | Parquet round-trip | ✅ | ✅ | — | `live_parquet_roundtrip`, `format_golden`, `format_fuzz` |
 | Format writer (CSV + Parquet, row-group golden) | ✅ gate | ✅ | — | `format_golden`, the `Tests` job's stability step |
