@@ -60,6 +60,7 @@ import sys
 import time
 from collections import Counter
 
+from . import type_edges
 from .cdc_position import READERS, MysqlReader, position_findings
 
 META = ("__op", "__pos", "__seq")
@@ -251,7 +252,7 @@ def arrow_to_duck(delivery: str, text_forms: set[str]) -> str | None:
 
 
 def ledger(engine: str, mode: str) -> tuple[dict, set[str]]:
-    """The type ledger's rows for `engine` x `mode` keyed by normalized native type, and its TEXT form names."""
+    """The type ledger's rows for `engine` x `mode` keyed by normalized native type, and its TEXT form names; the change stream's rows are those whose `cdc:` verdict is `exact`."""
     import yaml
 
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -261,6 +262,8 @@ def ledger(engine: str, mode: str) -> tuple[dict, set[str]]:
     # One `rows:` list serves both modes; its `clickhouse:` map is read under the flat keys below, and `renders:` (by delivery) under each row's own render.
     eng = (doc.get("engines") or {}).get(engine) or {}
     rows, by_delivery = [r for r in eng.get("rows") or [] if not isinstance(r, dict) or r.get("delivery")], eng.get("renders") or {}
+    if mode == "cdc":
+        rows = [r for r in rows if not isinstance(r, dict) or type_edges.row_cdc(r).kind == type_edges.EXACT]
     ch_keys = {"type": "clickhouse", "today": "today_clickhouse", "defect": "clickhouse_defect", "defect_samples": "clickhouse_defect_samples"}
     rows = [{**r, "render": {**by_delivery.get(r.get("delivery"), {}), **(r.get("render") or {})},
              **{ch_keys[k]: v for k, v in (r.get("clickhouse") or {}).items()}} if isinstance(r, dict) else r for r in rows]

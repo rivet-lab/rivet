@@ -2,7 +2,7 @@
 
 use super::{RivetType, TimeUnit};
 
-/// A type every engine reads the same way; kinds only some engines have stay in each engine's own table.
+/// A type that means the same on every engine that carries it; a type with engine-only meaning stays in that engine's own table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CommonKind {
     Bool,
@@ -18,10 +18,13 @@ pub(crate) enum CommonKind {
     Text,
     Binary,
     Json,
+    Time,
+    Uuid,
+    Interval,
 }
 
 impl CommonKind {
-    /// The common kind of `t`, or `None` for a type only some engines carry (unsigned, time of day, nanosecond stamp, enum, interval, uuid, list, unsupported).
+    /// The common kind of `t`, or `None` for a type only some engines carry (unsigned, nanosecond stamp, enum, list, unsupported).
     pub(crate) fn of(t: &RivetType) -> Option<Self> {
         Some(match t {
             RivetType::Bool => Self::Bool,
@@ -40,11 +43,11 @@ impl CommonKind {
             RivetType::String | RivetType::Text => Self::Text,
             RivetType::Json => Self::Json,
             RivetType::Binary => Self::Binary,
+            RivetType::Time { .. } => Self::Time,
+            RivetType::Uuid => Self::Uuid,
+            RivetType::Interval => Self::Interval,
             RivetType::UInt64
-            | RivetType::Time { .. }
             | RivetType::Enum
-            | RivetType::Interval
-            | RivetType::Uuid
             | RivetType::List { .. }
             | RivetType::Unsupported { .. } => return None,
         })
@@ -72,6 +75,11 @@ impl CommonKind {
             Self::Text => RivetType::String,
             Self::Binary => RivetType::Binary,
             Self::Json => RivetType::Json,
+            Self::Time => RivetType::Time {
+                unit: TimeUnit::Microsecond,
+            },
+            Self::Uuid => RivetType::Uuid,
+            Self::Interval => RivetType::Interval,
         })
     }
 }
@@ -126,17 +134,45 @@ const ENGINE_ONLY_IN_COMMON_SHAPE: &[(super::override_table::Engine, &str, &str)
     ]
 };
 
-/// Fails unless the rows no common kind reads but whose type is common-shaped are exactly the declared engine-only ones.
+/// The kinds an engine table may never answer outside `CommonKind`, not even under a declared label.
+#[cfg(test)]
+const NEVER_ENGINE_ONLY: [CommonKind; 3] =
+    [CommonKind::Time, CommonKind::Uuid, CommonKind::Interval];
+
+/// Fails unless the rows no common kind reads but whose type is common-shaped are exactly the declared engine-only ones, none is a time, uuid or interval, and the doc's by-kind column for the engine matches the kinds read.
 #[cfg(test)]
 pub(crate) fn assert_engine_only_rows_are_declared(
     engine: super::override_table::Engine,
     rows: impl IntoIterator<Item = (String, Option<CommonKind>, RivetType)>,
 ) {
-    let mut got: Vec<String> = rows
+    let rows: Vec<_> = rows.into_iter().collect();
+    let seen: Vec<CommonKind> = rows.iter().filter_map(|(_, kind, _)| *kind).collect();
+    super::kind_doc::assert_doc_column_matches(engine, &seen);
+    assert_rows_are_declared(engine, rows);
+}
+
+/// Fails unless the rows no common kind reads but whose type is common-shaped are exactly the declared engine-only ones, and none is a time, uuid or interval.
+#[cfg(test)]
+fn assert_rows_are_declared(
+    engine: super::override_table::Engine,
+    rows: Vec<(String, Option<CommonKind>, RivetType)>,
+) {
+    let loose: Vec<(String, CommonKind)> = rows
         .into_iter()
-        .filter(|(_, kind, t)| kind.is_none() && CommonKind::of(t).is_some())
-        .map(|(label, _, _)| label)
+        .filter(|(_, kind, _)| kind.is_none())
+        .filter_map(|(label, _, t)| CommonKind::of(&t).map(|k| (label, k)))
         .collect();
+    let leaked: Vec<&str> = loose
+        .iter()
+        .filter(|(_, k)| NEVER_ENGINE_ONLY.contains(k))
+        .map(|(label, _)| label.as_str())
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "{engine:?}: {leaked:?} answer a time, uuid or interval outside `CommonKind`; route them through it, \
+         a declared label never excuses these three"
+    );
+    let mut got: Vec<String> = loose.into_iter().map(|(label, _)| label).collect();
     got.sort();
     got.dedup();
     let mut want: Vec<String> = ENGINE_ONLY_IN_COMMON_SHAPE
@@ -189,7 +225,13 @@ mod tests {
                 RivetType::Time {
                     unit: TimeUnit::Microsecond,
                 },
-                None,
+                Some(Time),
+            ),
+            (
+                RivetType::Time {
+                    unit: TimeUnit::Nanosecond,
+                },
+                Some(Time),
             ),
             (ts(TimeUnit::Second, false), Some(Naive)),
             (ts(TimeUnit::Millisecond, false), Some(Naive)),
@@ -203,8 +245,8 @@ mod tests {
             (RivetType::Text, Some(Text)),
             (RivetType::Json, Some(Json)),
             (RivetType::Enum, None),
-            (RivetType::Interval, None),
-            (RivetType::Uuid, None),
+            (RivetType::Interval, Some(Interval)),
+            (RivetType::Uuid, Some(Uuid)),
             (RivetType::Binary, Some(Binary)),
             (list, None),
             (unsupported, None),
@@ -231,6 +273,14 @@ mod tests {
             (Text, Some(RivetType::String)),
             (Binary, Some(RivetType::Binary)),
             (Json, Some(RivetType::Json)),
+            (
+                Time,
+                Some(RivetType::Time {
+                    unit: TimeUnit::Microsecond,
+                }),
+            ),
+            (Uuid, Some(RivetType::Uuid)),
+            (Interval, Some(RivetType::Interval)),
         ];
         for (kind, want) in cases {
             let got = kind.rivet_type();
@@ -239,5 +289,48 @@ mod tests {
                 assert_eq!(CommonKind::of(&t), Some(kind), "{kind:?}");
             }
         }
+    }
+
+    fn row(label: &str, t: RivetType) -> (String, Option<CommonKind>, RivetType) {
+        (label.to_string(), None, t)
+    }
+
+    #[test]
+    #[should_panic(expected = "outside `CommonKind`")]
+    fn a_time_read_by_no_kind_is_refused_even_under_a_declared_label() {
+        use super::super::override_table::Engine::Mysql;
+        let time = RivetType::Time {
+            unit: TimeUnit::Microsecond,
+        };
+        assert_rows_are_declared(Mysql, vec![row("year", time)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "outside `CommonKind`")]
+    fn a_uuid_read_by_no_kind_is_refused_even_under_a_declared_label() {
+        use super::super::override_table::Engine::Mssql;
+        assert_rows_are_declared(Mssql, vec![row("money", RivetType::Uuid)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "outside `CommonKind`")]
+    fn an_interval_read_by_no_kind_is_refused_even_under_a_declared_label() {
+        use super::super::override_table::Engine::Postgres;
+        assert_rows_are_declared(Postgres, vec![row("oid", RivetType::Interval)]);
+    }
+
+    #[test]
+    fn a_time_uuid_or_interval_read_by_its_kind_is_no_engine_only_row() {
+        use super::super::override_table::Engine::Postgres;
+        let read = |label: &str, kind: CommonKind| {
+            (label.to_string(), Some(kind), kind.rivet_type().unwrap())
+        };
+        let rows = vec![
+            read("time", CommonKind::Time),
+            read("uuid", CommonKind::Uuid),
+            read("interval", CommonKind::Interval),
+            row("oid", RivetType::Int64),
+        ];
+        assert_rows_are_declared(Postgres, rows);
     }
 }

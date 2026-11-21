@@ -587,15 +587,9 @@ impl PgChangeStream {
         for table in configured_tables {
             crate::source::cdc::validate_table_ident(table)?;
             let select = probe.select_of(client, table)?;
-            let stmt = super::prepare_fresh(client, &select).map_err(|e| {
+            super::prepare_fresh(client, &select).map_err(|e| {
                 table_probe_refusal(table, e.code().map(|c| c.code()), &e.to_string())
             })?;
-            if let Some(why) = bit_column_refusal(
-                table.trim(),
-                stmt.columns().iter().map(|c| (c.name(), c.type_())),
-            ) {
-                crate::rivet_bail!(crate::error::codes::SOURCE_CDC_CELL_UNSUPPORTED, "{why}");
-            }
         }
         Ok(())
     }
@@ -1491,21 +1485,8 @@ pub(crate) fn parse_test_decoding_keeping<'a>(
             )
         })
     };
-    let rewritten = |cols: &[ParsedColumn]| {
-        let bad: Vec<String> = cols
-            .iter()
-            .filter_map(|c| {
-                c.rewritten_type
-                    .as_ref()
-                    .map(|t| format!("{} ({t})", c.name))
-            })
-            .collect();
-        (!bad.is_empty()).then(|| rewritten_type_refusal(&format!("{schema}.{table}"), &bad))
-    };
-    let infinity_poison = rewritten(&named).or_else(|| undecodable(&named));
-    let before_poison = old_named
-        .as_deref()
-        .and_then(|o| rewritten(o).or_else(|| undecodable(o)));
+    let infinity_poison = undecodable(&named);
+    let before_poison = old_named.as_deref().and_then(undecodable);
     let poison = (!unrecovered.is_empty()).then(|| {
         format!(
             "pg cdc: {schema}.{table}: column(s) [{}] arrived as an unchanged-TOAST \
@@ -1691,68 +1672,34 @@ struct ParsedColumn {
     value: RivetValue,
     toast_unchanged: bool,
     unrepresentable: bool,
-    rewritten_type: Option<String>,
 }
 
-/// Types whose `test_decoding` text is not the server's text for the value.
-const DECODER_REWRITTEN_TYPES: &[&str] = &["bit", "bit varying"];
-
-/// The decoder-rewritten types, none when the defect is seeded.
-fn decoder_rewritten_types() -> &'static [&'static str] {
-    seeded!(
-        "pg-bit-literal-delivered-as-server-text",
-        &[],
-        DECODER_REWRITTEN_TYPES
-    )
+/// Whether batch delivers an array of this catalog type as the server's text, which CDC then keeps as the raw literal.
+fn array_is_server_text(oid: u32, elem_typtype: &str) -> bool {
+    let server_text = match postgres::types::Type::from_oid(oid) {
+        Some(t) => super::arrow_convert::pg_server_text(&t),
+        None => elem_typtype != "e",
+    };
+    server_text && !seeded!("cdc-array-text-parsed-as-list", true, false)
 }
 
-/// The `name (type)` of each column whose wire type is one the decoder rewrites.
-fn decoder_rewritten_columns<'a>(
-    columns: impl IntoIterator<Item = (&'a str, &'a postgres::types::Type)>,
-) -> Vec<String> {
-    columns
-        .into_iter()
-        .filter_map(|(name, typ)| {
-            let label = match *typ {
-                postgres::types::Type::BIT => "bit",
-                postgres::types::Type::VARBIT => "bit varying",
-                _ => return None,
-            };
-            decoder_rewritten_types()
-                .contains(&label)
-                .then(|| format!("{name} ({label})"))
-        })
-        .collect()
+/// Every domain's label mapped to its base type's label, and every array label batch delivers as the server's text mapped to `text`.
+fn domain_map(
+    domains: impl IntoIterator<Item = (String, String)>,
+    arrays: impl IntoIterator<Item = (u32, String, String)>,
+) -> Domains {
+    let mut map: Domains = domains.into_iter().collect();
+    for (oid, label, elem_typtype) in arrays {
+        if array_is_server_text(oid, &elem_typtype) {
+            map.insert(label, "text".to_string());
+        }
+    }
+    map
 }
 
-/// The refusal for a captured relation when any of its columns has a type the decoder rewrites.
-fn bit_column_refusal<'a>(
-    relation: &str,
-    columns: impl IntoIterator<Item = (&'a str, &'a postgres::types::Type)>,
-) -> Option<String> {
-    let bits = decoder_rewritten_columns(columns);
-    (!bits.is_empty()).then(|| rewritten_type_refusal(relation, &bits))
-}
-
-/// The refusal for a captured relation whose columns have a type the decoder rewrites, with its remedy.
-fn rewritten_type_refusal(relation: &str, columns: &[String]) -> String {
-    format!(
-        "pg cdc: {relation}: column(s) [{}] are bit strings, and `test_decoding` prints a bit \
-         string as the literal B'110' where the server's text is 110. Delivering it would write a \
-         value the batch run never writes (batch delivers a bit string as the server's text \
-         110), so rivet stops instead, before it writes anything. Change the column to text: ALTER TABLE {relation} \
-         ALTER COLUMN <column> TYPE text USING <column>::text; changes already in the slot keep \
-         the bit type and would refuse again, so drop the export's slot (cdc.slot) on the \
-         source, SELECT pg_drop_replication_slot('<slot>'), and then re-baseline the stream, \
-         which creates the slot again at the current position: {}",
-        columns.join(", "),
-        crate::source::cdc::checkpoint_identity::RECOVER
-    )
-}
-
-/// Every domain's label mapped to its base type's label, on the reader's own session.
+/// The catalog's domains and arrays read on the reader's session, as `domain_map` takes them.
 fn load_domains(client: &mut Client) -> Result<Domains> {
-    Ok(client
+    let domains: Vec<(String, String)> = client
         .query(
             "SELECT format_type(oid, NULL), format_type(typbasetype, NULL) \
              FROM pg_type WHERE typtype = 'd'",
@@ -1760,7 +1707,18 @@ fn load_domains(client: &mut Client) -> Result<Domains> {
         )?
         .iter()
         .map(|r| (r.get(0), r.get(1)))
-        .collect())
+        .collect();
+    let arrays: Vec<(u32, String, String)> = client
+        .query(
+            "SELECT a.oid, format_type(a.oid, NULL), e.typtype::text \
+               FROM pg_type a JOIN pg_type e ON e.oid = a.typelem \
+              WHERE a.typcategory = 'A' AND a.typelem <> 0",
+            &[],
+        )?
+        .iter()
+        .map(|r| (r.get(0), r.get(1), r.get(2)))
+        .collect();
+    Ok(domain_map(domains, arrays))
 }
 
 /// The built-in type a (possibly nested) domain label decodes as; any other label as is.
@@ -1779,15 +1737,11 @@ fn map_columns(raw: Vec<td_line::RawColumn>, domains: &Domains) -> Vec<ParsedCol
             let toast_unchanged = !c.quoted && c.value == "unchanged-toast-datum";
             let mapped = map_pg_value(base, &c.value, c.quoted);
             let unrepresentable = mapped.is_none() && !toast_unchanged;
-            let rewritten_type = decoder_rewritten_types()
-                .contains(&base)
-                .then(|| base.to_string());
             ParsedColumn {
                 name: c.name,
                 value: mapped.unwrap_or(RivetValue::Null),
                 toast_unchanged,
                 unrepresentable,
-                rewritten_type,
             }
         })
         .collect()
@@ -1874,6 +1828,14 @@ fn map_pg_value(typ: &str, val: &str, quoted: bool) -> Option<RivetValue> {
             .filter(|b| b.len() == 16)
             .map(RivetValue::Bytes);
     }
+    if t == "bit" || t == "bit varying" {
+        return seeded!(
+            "cdc-bit-literal-delivered-as-server-text",
+            Some(val),
+            val.strip_prefix("B'").and_then(|v| v.strip_suffix('\''))
+        )
+        .map(|bits| RivetValue::Bytes(bits.as_bytes().to_vec()));
+    }
     if t == "bytea" {
         if let Some(hex) = val.strip_prefix("\\x")
             && let Some(b) = decode_hex(hex)
@@ -1885,28 +1847,9 @@ fn map_pg_value(typ: &str, val: &str, quoted: bool) -> Option<RivetValue> {
     Some(RivetValue::Bytes(val.as_bytes().to_vec()))
 }
 
-/// True when an array of `inner` becomes a CDC list column; other arrays travel as the server's own literal text.
+/// True when an array of `inner` becomes a CDC list column; a `numeric` array travels as the server's own literal text.
 fn array_elem_is_listed(inner: &str) -> bool {
-    const NATIVE: [&str; 6] = [
-        "date",
-        "time without time zone",
-        "timestamp without time zone",
-        "timestamp with time zone",
-        "uuid",
-        "bytea",
-    ];
-    NATIVE.contains(&inner)
-        || ![
-            "timestamp",
-            "time",
-            "date",
-            "uuid",
-            "bytea",
-            "numeric",
-            "money",
-        ]
-        .iter()
-        .any(|p| inner.starts_with(p))
+    !inner.starts_with("numeric")
 }
 
 /// Parse a PG array literal (`{alpha,"with,comma","he said \"hi\"",NULL}`) into element values, mapped through [`map_pg_value`] with the element type.
@@ -2726,21 +2669,68 @@ mod tests {
         assert_eq!(map_pg_value("uuid", "not-hex", false), None);
     }
 
-    /// An array whose element has no CDC list column keeps the server's literal; a listed one parses.
+    /// A numeric array keeps the server's literal; an integer array parses.
+    /// A catalog array is kept as the server's text exactly when batch delivers it as server text.
+    #[test]
+    fn an_array_is_server_text_where_batch_delivers_it_so() {
+        use postgres::types::Type;
+        for (t, elem, want) in [
+            (Type::INET_ARRAY, "b", true),
+            (Type::MONEY_ARRAY, "b", true),
+            (Type::INT4_ARRAY, "b", false),
+            (Type::TEXT_ARRAY, "b", false),
+        ] {
+            assert_eq!(array_is_server_text(t.oid(), elem), want, "{t}");
+        }
+        assert!(array_is_server_text(900_001, "c"), "a composite array");
+        assert!(array_is_server_text(900_002, "b"), "a user base type array");
+        assert!(
+            !array_is_server_text(900_003, "e"),
+            "an enum array stays a list"
+        );
+    }
+
+    /// The map holds each domain at its base label, each server-text array at `text`, and nothing for a mapped array.
+    #[test]
+    fn the_domain_map_holds_domains_and_server_text_arrays_only() {
+        use postgres::types::Type;
+        let map = domain_map(
+            [("money_d".to_string(), "numeric".to_string())],
+            [
+                (
+                    Type::INET_ARRAY.oid(),
+                    "inet[]".to_string(),
+                    "b".to_string(),
+                ),
+                (
+                    Type::INT4_ARRAY.oid(),
+                    "integer[]".to_string(),
+                    "b".to_string(),
+                ),
+                (900_003, "mood[]".to_string(), "e".to_string()),
+                (900_001, "pair[]".to_string(), "c".to_string()),
+            ],
+        );
+        let mut got: Vec<_> = map.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        got.sort();
+        assert_eq!(
+            got,
+            [
+                ("inet[]", "text"),
+                ("money_d", "numeric"),
+                ("pair[]", "text")
+            ]
+        );
+        assert_eq!(domain_base(&map, "inet[]"), "text");
+        assert_eq!(domain_base(&map, "integer[]"), "integer[]");
+    }
+
     #[test]
     fn an_unlisted_array_keeps_the_servers_own_literal() {
-        for (typ, lit) in [
-            ("numeric[]", "{1.50,2}"),
-            ("money[]", "{$1.50}"),
-            ("time with time zone[]", "{12:00:00+00}"),
-            ("daterange[]", "{\"[2024-01-01,2024-02-01)\"}"),
-        ] {
-            assert_eq!(
-                map_pg_value(typ, lit, false),
-                Some(RivetValue::Bytes(lit.as_bytes().to_vec())),
-                "{typ}"
-            );
-        }
+        assert_eq!(
+            map_pg_value("numeric[]", "{1.50,2}", false),
+            Some(RivetValue::Bytes(b"{1.50,2}".to_vec()))
+        );
         assert_eq!(
             map_pg_value("integer[]", "{1,NULL}", false),
             Some(RivetValue::Array(vec![
@@ -2825,25 +2815,49 @@ mod tests {
         }
     }
 
-    /// Only the exact element names the batch export maps natively become list columns.
+    /// A `numeric` array keeps travelling as the server's literal text; every other element type is parsed.
     #[test]
-    fn array_elem_is_listed_matches_the_native_set_exactly() {
-        for inner in [
-            "date",
-            "time without time zone",
-            "timestamp without time zone",
-            "timestamp with time zone",
-            "uuid",
-            "bytea",
-            "text",
-            "integer",
-            "tstzrange",
-        ] {
+    fn array_elem_is_listed_excludes_only_numeric() {
+        for inner in ["date", "text", "integer", "uuid", "bytea", "tstzrange"] {
             assert!(array_elem_is_listed(inner), "{inner}");
         }
-        for inner in ["numeric", "money", "time with time zone", "daterange"] {
-            assert!(!array_elem_is_listed(inner), "{inner}");
+        assert!(!array_elem_is_listed("numeric"));
+    }
+
+    /// A bit or bit varying cell loses the decoder's `B'..'` wrapper and keeps the server's text; any other shape is unrepresentable.
+    #[test]
+    fn a_bit_literal_is_unwrapped_to_the_servers_text() {
+        for (typ, lit, text) in [
+            ("bit", "B'110'", "110"),
+            ("bit varying", "B'10101'", "10101"),
+            ("bit varying", "B''", ""),
+            ("bit", "B'1'", "1"),
+        ] {
+            assert_eq!(
+                map_pg_value(typ, lit, false),
+                Some(RivetValue::Bytes(text.as_bytes().to_vec())),
+                "{typ} {lit}"
+            );
         }
+        assert_eq!(map_pg_value("bit", "110", false), None);
+        assert_eq!(map_pg_value("bit", "null", false), Some(RivetValue::Null));
+    }
+
+    /// A line whose array type label is in the domain map decodes as text and keeps the server's literal whole.
+    #[test]
+    fn an_array_label_mapped_to_text_keeps_the_servers_literal() {
+        let domains: Domains = [("inet[]".to_string(), "text".to_string())].into();
+        let ev = parse_test_decoding(
+            "0/ABC",
+            "table public.t: INSERT: id[integer]:1 ips[inet[]]:'{10.0.0.1,\"::1\"}'",
+            &domains,
+        )
+        .unwrap()
+        .expect("an insert");
+        assert_eq!(
+            ev.after.expect("after image")[1],
+            RivetValue::Bytes(b"{10.0.0.1,\"::1\"}".to_vec())
+        );
     }
 
     fn td_ident(n: &str) -> String {
@@ -4057,49 +4071,6 @@ mod tests {
                 "qualifier `{input}` split wrongly — a mis-split yields identifiers that \
                  never existed, and the router then drops every event for the table"
             );
-        }
-    }
-
-    /// Only a bit or bit varying wire type is named by the catalog check, each under its own label and column.
-    #[test]
-    fn the_catalog_check_names_exactly_the_bit_typed_columns() {
-        use postgres::types::Type;
-        let cols = [
-            ("id", Type::INT4),
-            ("flags", Type::BIT),
-            ("note", Type::TEXT),
-            ("vb", Type::VARBIT),
-            ("raw", Type::BYTEA),
-        ];
-        let named = decoder_rewritten_columns(cols.iter().map(|(n, t)| (*n, t)));
-        assert_eq!(named, ["flags (bit)", "vb (bit varying)"]);
-        let none = decoder_rewritten_columns(
-            [("id", Type::INT4), ("t", Type::TEXT)]
-                .iter()
-                .map(|(n, t)| (*n, t)),
-        );
-        assert!(none.is_empty(), "{none:?}");
-        assert!(bit_column_refusal("public.t", [("id", &Type::INT4)]).is_none());
-        let refusal = bit_column_refusal("public.t", [("id", &Type::INT4), ("flags", &Type::BIT)])
-            .expect("a bit column is refused");
-        assert!(
-            refusal.starts_with("pg cdc: public.t: column(s) [flags (bit)] are bit strings"),
-            "{refusal}"
-        );
-    }
-
-    /// The bit refusal names the relation, the ALTER, the slot drop and the re-baseline in one message.
-    #[test]
-    fn the_bit_refusal_names_the_alter_the_slot_drop_and_the_rebaseline() {
-        let said = rewritten_type_refusal("public.bits", &["flags (bit)".to_string()]);
-        for part in [
-            "pg cdc: public.bits: column(s) [flags (bit)] are bit strings",
-            "batch delivers a bit string as the server's text 110",
-            "ALTER TABLE public.bits ALTER COLUMN <column> TYPE text USING <column>::text",
-            "SELECT pg_drop_replication_slot('<slot>')",
-            crate::source::cdc::checkpoint_identity::RECOVER,
-        ] {
-            assert!(said.contains(part), "{part} missing from: {said}");
         }
     }
 }

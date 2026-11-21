@@ -412,7 +412,7 @@ exports:
         ("c_float", "FLOAT"),
         ("c_double", "FLOAT"),
         ("c_date", "DATE"),
-        ("c_time", "TIME"),
+        ("c_time", "STRING"),
         ("created_at_dt", "TIMESTAMP"),
         ("created_at_ts", "TIMESTAMP"),
         ("label", "STRING"),
@@ -451,7 +451,7 @@ exports:
 
     // 3) Microsecond precision on TIME and TIMESTAMP for the id=1 row.
     let r1 = cfg.query_rows(&format!(
-        "SELECT FORMAT_TIME('%H:%M:%E6S', c_time)                       AS t,
+        "SELECT c_time                                                  AS t,
                 FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%E6S', created_at_dt)  AS dt,
                 FORMAT_TIMESTAMP('%Y-%m-%d %H:%M:%E6S', created_at_ts)  AS ts,
                 TO_HEX(raw_bytes)                                       AS raw_hex,
