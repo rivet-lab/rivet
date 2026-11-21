@@ -21,10 +21,7 @@ use crate::source::pg_numeric_wire::{
     PgNumericWire, numeric_wire_normalized_plain, numeric_wire_special_text,
 };
 use crate::types::kind::CommonKind;
-use crate::types::{
-    ColumnOverrides, RivetType, SourceColumn, TimeUnit as RivetTimeUnit, TypeMapping,
-    build_arrow_field,
-};
+use crate::types::{ColumnOverrides, RivetType, SourceColumn, TypeMapping, build_arrow_field};
 
 use crate::source::value_within_ceiling;
 
@@ -265,6 +262,9 @@ fn pg_common_kind(t: &Type) -> Option<CommonKind> {
         Type::DATE => CommonKind::Date,
         Type::TIMESTAMP => CommonKind::Naive,
         Type::TIMESTAMPTZ => CommonKind::Utc,
+        Type::TIME => CommonKind::Time,
+        Type::UUID => CommonKind::Uuid,
+        Type::INTERVAL => CommonKind::Interval,
         Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME => CommonKind::Text,
         Type::BYTEA => CommonKind::Binary,
         Type::JSON | Type::JSONB => CommonKind::Json,
@@ -291,12 +291,6 @@ fn pg_type_to_rivet(t: &Type) -> RivetType {
     }
     match *t {
         Type::OID => RivetType::Int64,
-        Type::TIME => RivetType::Time {
-            unit: RivetTimeUnit::Microsecond,
-        },
-        Type::UUID => RivetType::Uuid,
-        Type::INTERVAL => RivetType::Interval,
-
         _ => match t.kind() {
             Kind::Enum(_) => RivetType::Enum,
             Kind::Array(elem_type) => RivetType::List {
@@ -1740,10 +1734,10 @@ mod type_map_tests {
             (Type::BYTEA, Some(Binary)),
             (Type::JSON, Some(Json)),
             (Type::JSONB, Some(Json)),
+            (Type::TIME, Some(Time)),
+            (Type::UUID, Some(Uuid)),
+            (Type::INTERVAL, Some(Interval)),
             (Type::OID, None),
-            (Type::TIME, None),
-            (Type::UUID, None),
-            (Type::INTERVAL, None),
             (Type::INT4_ARRAY, None),
             (Type::MONEY, None),
         ];
