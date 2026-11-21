@@ -10,7 +10,7 @@ use arrow::array::{Array, StringArray};
 
 const ENGINE: SqlEngine = SqlEngine::Pg;
 
-const FAMILIES: &[(&str, &str, &str, &str, &str)] = &[
+pub(crate) const FAMILIES: &[(&str, &str, &str, &str, &str)] = &[
     (
         "inet",
         "inet",

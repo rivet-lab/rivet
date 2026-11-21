@@ -244,10 +244,10 @@ engines:
       - {native_type: "TIMESTAMP(3)", sample: [], edges: ["'1970-01-01 00:00:00.001'", "'2000-02-29 12:34:56.789'", {v: "'9999-12-31 23:59:59.999'", clickhouse: "refuse:RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE@load"}]}
       - {native_type: "MACADDR", sample: ["'08:00:2b:01:02:03'"], edges: ["'08:00:2b:01:02:03'"], delivery: "server_text"}
       - {native_type: "MACADDR8", sample: ["'08:00:2b:01:02:03:04:05'"], edges: ["'08:00:2b:01:02:03:04:05'"], delivery: "server_text"}
-      - {native_type: "BIT(8)", sample: [], edges: ["B'00000000'", "B'11111111'", "B'10101010'"]}
-      - {native_type: "BIT(1)", sample: [], edges: ["B'0'", "B'1'"]}
-      - {native_type: "BIT(64)", sample: [], edges: ["B'1111111111111111111111111111111111111111111111111111111111111111'"]}
-      - {native_type: "BIT VARYING(16)", sample: [], edges: ["B''", "B'1'", "B'1010101010101010'"]}
+      - {native_type: "BIT(8)", sample: [], edges: ["B'00000000'", "B'11111111'", "B'10101010'"], delivery: "server_text"}
+      - {native_type: "BIT(1)", sample: [], edges: ["B'0'", "B'1'"], delivery: "server_text"}
+      - {native_type: "BIT(64)", sample: [], edges: ["B'1111111111111111111111111111111111111111111111111111111111111111'"], delivery: "server_text"}
+      - {native_type: "BIT VARYING(16)", sample: [], edges: ["B''", "B'1'", "B'1010101010101010'"], delivery: "server_text"}
       - {native_type: "XML", sample: ["'<a/>'"], edges: ["'<a/>'", "'<a x=\"1\">é</a>'"], delivery: "server_text"}
       - {native_type: "TSVECTOR", sample: ["'a b c'"], edges: ["'a b c'"], delivery: "server_text"}
       - {native_type: "TSQUERY", sample: ["'a & b'"], edges: ["'a & b'"], delivery: "server_text"}
@@ -291,6 +291,8 @@ engines:
       - {native_type: "MONEY[]", sample: ["'{1.00}'"], edges: ["'{}'", "'{1.00}'"], delivery: "server_text"}
       - {native_type: "INT4RANGE[]", sample: ["'{\"[1,5)\"}'"], edges: ["'{}'", "'{\"[1,5)\"}'"], delivery: "server_text"}
       - {native_type: "POINT[]", sample: ["'{\"(1,2)\"}'"], edges: ["'{}'", "'{\"(1,2)\"}'"], delivery: "server_text"}
+      - {native_type: "BIT(5)[]", sample: ["'{10101}'"], edges: ["'{}'", "'{10101,00000}'", "'{NULL}'"], delivery: "server_text"}
+      - {native_type: "BIT VARYING[]", sample: ["'{101}'"], edges: ["'{}'", "'{1,101,\"\"}'", "'{NULL}'"], delivery: "server_text"}
   mysql:
     renders:
       "Binary": {duck: "lower(hex({c}))"}

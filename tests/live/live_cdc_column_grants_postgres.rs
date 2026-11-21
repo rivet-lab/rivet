@@ -561,9 +561,8 @@ fn a_sealed_plan_applied_after_a_revoke_is_refused_by_code_with_the_replan_remed
 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc postgres-cdc (wal_level=logical)"]
-fn a_bit_column_is_refused_when_the_role_reads_it_and_never_looked_at_when_it_may_not_in_cdc_postgres()
- {
-    for (label, columns, refused) in [
+fn a_bit_column_is_delivered_when_the_role_reads_it_and_absent_when_it_may_not_in_cdc_postgres() {
+    for (label, columns, delivered) in [
         ("cg_pg_bit_hid", "id, name", false),
         ("cg_pg_bit_see", "id, flags", true),
     ] {
@@ -579,17 +578,8 @@ fn a_bit_column_is_refused_when_the_role_reads_it_and_never_looked_at_when_it_ma
         let _slot = Slot::new(slot.clone());
         let role = GrantRole::new(&table, columns);
         let rig = grant_rig(&table, &slot, &role);
-        if refused {
-            let out = rig.run_with_envs(&[]);
-            assert_refused(
-                &out,
-                Refused::by_code("RIVET_SOURCE_CDC_CELL_UNSUPPORTED", 5),
-            );
-            assert!(said_by(&out).contains("flags"), "{}", said_by(&out));
-        } else {
-            rig.run_ok();
-            let (names, _) = names_and_cells(&parts_under(&rig.out_dir()));
-            assert!(!names.iter().any(|n| n == "flags"), "{names:?}");
-        }
+        rig.run_ok();
+        let (names, _) = names_and_cells(&parts_under(&rig.out_dir()));
+        assert_eq!(names.iter().any(|n| n == "flags"), delivered, "{names:?}");
     }
 }
