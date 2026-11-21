@@ -193,8 +193,8 @@ fn pg_edge_decimal_negative_scale_without_override_is_refused_as_unsafe_mapping(
     assert_refused(&out, Refused::by_code("RIVET_TYPE_UNSAFE_MAPPING", 1));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("`d`") || err.contains("\"d\"") || err.contains(" d "),
-        "the refusal must name the column:\n{err}"
+        err.contains("column 'd' (source type 'numeric')"),
+        "the refusal must name the column and its source type:\n{err}"
     );
 }
 
