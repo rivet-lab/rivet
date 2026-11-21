@@ -1475,7 +1475,8 @@ exports:
     );
     assert_eq!(
         *schema.field_with_name("time_col").unwrap().data_type(),
-        DataType::Time64(TimeUnit::Microsecond)
+        DataType::Utf8,
+        "TIME must map to Utf8 time_beyond_day text"
     );
     assert_eq!(
         *schema.field_with_name("year_col").unwrap().data_type(),
