@@ -136,6 +136,8 @@ fn oracle_batch_timestamp9_is_refused_until_declared_under_every_policy() {
         (rig, out)
     };
 
+    let rows =
+        |out: &std::path::Path, filter: &str| duckdb_dir_scalar(out, "count(*)", Some(filter));
     let (lossy, lossy_out) = declared(0, "columns: {TS9: timestamp}");
     let run = lossy.run_args(&[]);
     let err = String::from_utf8_lossy(&run.stderr);
@@ -145,10 +147,9 @@ fn oracle_batch_timestamp9_is_refused_until_declared_under_every_policy() {
         "{err}"
     );
     assert_eq!(
-        duckdb_dir_scalar(
+        rows(
             &lossy_out,
-            "count(*)",
-            Some("\"ID\" = 1 AND \"TS9\" = TIMESTAMP '2024-01-02 03:04:05.123456'")
+            "\"ID\" = 1 AND \"TS9\" = TIMESTAMP '2024-01-02 03:04:05.123456'"
         ),
         1,
         "the declared timestamp keeps microseconds"
@@ -179,8 +180,12 @@ fn oracle_batch_timestamp9_is_refused_until_declared_under_every_policy() {
         );
         assert!(!err.contains("fidelity=lossy"), "{err}");
         assert_eq!(
-            duckdb_dir_scalar(&exact_out, "count(*)", Some("\"ID\" = 1")),
-            1
+            rows(
+                &exact_out,
+                "\"ID\" = 1 AND \"TS9\" = TIMESTAMP_NS '2024-01-02 03:04:05.123456789'"
+            ),
+            1,
+            "the declared timestamp_ns keeps every digit"
         );
     }
 }
