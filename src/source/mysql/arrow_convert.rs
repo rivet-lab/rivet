@@ -17,8 +17,7 @@ use mysql::consts::{ColumnFlags, ColumnType};
 use crate::error::Result;
 use crate::types::kind::CommonKind;
 use crate::types::{
-    ColumnOverrides, RivetType, SourceColumn, TimeUnit as RivetTimeUnit, TypeFidelity, TypeMapping,
-    build_arrow_field,
+    ColumnOverrides, RivetType, SourceColumn, TypeFidelity, TypeMapping, build_arrow_field,
 };
 
 use crate::source::value_within_ceiling;
@@ -125,6 +124,7 @@ fn mysql_common_kind(col: &mysql::Column) -> Option<CommonKind> {
         MYSQL_TYPE_DATE | MYSQL_TYPE_NEWDATE => CommonKind::Date,
         MYSQL_TYPE_DATETIME | MYSQL_TYPE_DATETIME2 => CommonKind::Naive,
         MYSQL_TYPE_TIMESTAMP | MYSQL_TYPE_TIMESTAMP2 => CommonKind::Utc,
+        MYSQL_TYPE_TIME | MYSQL_TYPE_TIME2 => CommonKind::Time,
         _ => return None,
     })
 }
@@ -164,9 +164,6 @@ fn mysql_engine_type(col: &mysql::Column) -> RivetType {
         | MYSQL_TYPE_STRING
         | MYSQL_TYPE_ENUM
         | MYSQL_TYPE_SET => RivetType::Enum,
-        MYSQL_TYPE_TIME | MYSQL_TYPE_TIME2 => RivetType::Time {
-            unit: RivetTimeUnit::Microsecond,
-        },
         MYSQL_TYPE_BIT if col.column_length() == 1 => RivetType::Bool,
         MYSQL_TYPE_BIT
             if col.column_length()
@@ -789,6 +786,46 @@ fn unparsed<T>(column: &str, target: &str, bv: &[u8]) -> Result<T> {
     )
 }
 
+/// A byte cell under a text type that is not UTF-8: refused by code, since a replacement character would write a value the source does not hold.
+fn not_utf8(column: &str, bv: &[u8]) -> anyhow::Error {
+    let at = simdutf8::compat::from_utf8(bv)
+        .err()
+        .map_or(0, |e| e.valid_up_to());
+    crate::error::coded(
+        crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+        format!(
+            "column `{column}` holds {} bytes that are not valid UTF-8 (the first at offset {at}), \
+             which a text column cannot carry — rivet refuses rather than writing U+FFFD in place \
+             of them. Declare `{column}: binary` in `columns:` to deliver the bytes, or select a \
+             text form in the query (`HEX({column})`, `ST_AsText({column})`).",
+            bv.len()
+        ),
+    )
+}
+
+/// A byte cell read as text: borrowed when it is UTF-8, else refused by code.
+fn text_of<'a>(column: &str, bv: &'a [u8]) -> Result<std::borrow::Cow<'a, str>> {
+    match bytes_to_str(bv) {
+        Some(s) => Ok(s.into()),
+        None if seeded!("mysql-string-override-replaces-bytes", true, false) => {
+            Ok(String::from_utf8_lossy(bv))
+        }
+        None => Err(not_utf8(column, bv)),
+    }
+}
+
+/// A float8 read from text: the same number when the float prints it back, refused by code when it would round or is not a number.
+fn float_of_bytes(column: &str, bv: &[u8]) -> Result<f64> {
+    match bytes_to_str(bv)
+        .map(|s| crate::types::decimal::exact_f64_of_text(column, s))
+        .transpose()?
+        .flatten()
+    {
+        Some(v) => Ok(v),
+        None => unparsed(column, "float", bv),
+    }
+}
+
 /// True for the zero date MySQL stores in place of a missing one.
 fn is_zero_date(bv: &[u8]) -> bool {
     bv.starts_with(b"0000-00-00")
@@ -1009,12 +1046,7 @@ fn build_array(
                     {
                         b.append_value(exact_f64(*v as i128, column)?)
                     }
-                    Some(Value::Bytes(bv)) => match bytes_to_str(bv)
-                        .and_then(crate::types::decimal::decimal_text_to_float)
-                    {
-                        Some(v) => b.append_value(v),
-                        None => b.append_value(unparsed(column, "float", bv)?),
-                    },
+                    Some(Value::Bytes(bv)) => b.append_value(float_of_bytes(column, bv)?),
                     other => {
                         null_or_refuse(column, arrow_type, other)?;
                         b.append_null();
@@ -1029,10 +1061,7 @@ fn build_array(
                 match row.as_ref(col_idx) {
                     Some(Value::Bytes(bv)) => {
                         value_within_ceiling(column, bv.len(), max_value_bytes)?;
-                        match bytes_to_str(bv) {
-                            Some(s) => b.append_value(s),
-                            None => b.append_value(String::from_utf8_lossy(bv).as_ref()),
-                        }
+                        b.append_value(text_of(column, bv)?.as_ref());
                     }
                     Some(Value::Int(v)) => b.append_value(v.to_string()),
                     Some(Value::UInt(v)) => b.append_value(v.to_string()),
@@ -1423,30 +1452,20 @@ mod scale_int_overflow_tests {
 mod utf8_fast_path_tests {
     use super::bytes_to_str;
 
-    /// The Utf8 text-column append swaps `String::from_utf8_lossy` for a simdutf8 fast path (`bytes_to_str`) with a lossy fallback on the rare invalid value.
-    fn append_as_done_in_decode(bv: &[u8]) -> String {
-        match bytes_to_str(bv) {
-            Some(s) => s.to_owned(),
-            None => String::from_utf8_lossy(bv).into_owned(),
-        }
-    }
-
+    /// The simdutf8 fast path reads valid UTF-8 as `String::from_utf8_lossy` does and reads nothing else.
     #[test]
-    fn fast_path_is_byte_identical_to_lossy() {
-        let cases: &[&[u8]] = &[
-            b"",
-            b"plain ascii",
-            "héllo wörld 日本語".as_bytes(),
+    fn fast_path_is_byte_identical_to_lossy_on_valid_text_and_refuses_the_rest() {
+        let valid: &[&[u8]] = &[b"", b"plain ascii", "héllo wörld 日本語".as_bytes()];
+        for &bv in valid {
+            assert_eq!(bytes_to_str(bv), Some(String::from_utf8_lossy(bv).as_ref()));
+        }
+        let invalid: &[&[u8]] = &[
             &[0xff, 0xfe, 0x00, 0x41],
             &[0x41, 0xc0, 0x42],
             &[0xe4, 0xb8],
         ];
-        for &bv in cases {
-            assert_eq!(
-                append_as_done_in_decode(bv),
-                String::from_utf8_lossy(bv),
-                "fast path diverged from lossy for {bv:?}"
-            );
+        for &bv in invalid {
+            assert_eq!(bytes_to_str(bv), None, "{bv:?}");
         }
     }
 }
@@ -1488,10 +1507,11 @@ mod int64_bytes_dispatch_tests {
 
 #[cfg(test)]
 mod roast_mysql_bit_decode_tests {
+    use super::RivetType;
     use super::{
         MysqlCellSource, TimeUnit, build_array, mysql_native_type_name, mysql_type_to_rivet,
     };
-    use super::{RivetTimeUnit, RivetType};
+    use crate::types::TimeUnit as RivetTimeUnit;
     use std::io::{Read, Write};
 
     /// A MySQL date or time stamp column is `compatible` and every other mapping keeps the fidelity `from_source` derives.
@@ -2125,6 +2145,37 @@ mod roast_mysql_bit_decode_tests {
         assert_eq!((a.len(), a.null_count()), (1, 1));
     }
 
+    /// A string column holding bytes that are not UTF-8 is refused by code with the column named, never written with U+FFFD; valid UTF-8 and NULL are delivered as they were.
+    #[test]
+    fn a_string_column_holding_non_utf8_bytes_is_refused_instead_of_replaced() {
+        let wkb_with_f8: &[u8] = &[0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xf8, 0x3f];
+        for (label, (def, bytes)) in [
+            ("blob", v_blob(wkb_with_f8)),
+            ("varchar", v_bytes(&[b'a', 0xc0, b'b'])),
+        ] {
+            let rows = fetch_binary_rows(vec![def], vec![vec![Some(bytes)]]);
+            let err = build_array(&DataType::Utf8, 0, &rows, false, "geom", None).unwrap_err();
+            let coded = err
+                .downcast_ref::<crate::error::CodedError>()
+                .unwrap_or_else(|| panic!("{label}: not coded: {err}"));
+            assert_eq!(
+                coded.code(),
+                "RIVET_SOURCE_VALUE_UNREPRESENTABLE",
+                "{label}"
+            );
+            assert!(err.to_string().contains("column `geom`"), "{label}: {err}");
+        }
+        let (def, bytes) = v_blob("h\u{e9}llo \u{65e5}\u{672c}".as_bytes());
+        let rows = fetch_binary_rows(vec![def], vec![vec![Some(bytes)], vec![None]]);
+        let a = build_array(&DataType::Utf8, 0, &rows, false, "geom", None).unwrap();
+        let s = a
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .expect("string array");
+        assert_eq!(s.value(0), "h\u{e9}llo \u{65e5}\u{672c}");
+        assert!(s.is_null(1));
+    }
+
     /// Every `CellSource` accessor, over the BINARY protocol.
     #[test]
     fn every_cell_source_accessor_reads_the_binary_value_it_should() {
@@ -2368,6 +2419,41 @@ mod roast_mysql_bit_decode_tests {
         let err = build_array(&DataType::UInt64, 0, &rows, false, "c", None)
             .expect_err("a negative into UInt64 is a refusal, not a NULL");
         crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+    }
+
+    /// DECIMAL text under a `float8` override is the same number when the float prints it back, and refused by code when it would round.
+    #[test]
+    fn decimal_text_is_a_float8_only_when_the_float_prints_it_back() {
+        use arrow::array::AsArray;
+        use arrow::datatypes::Float64Type;
+        let build = |text: &[u8]| {
+            let (def, bytes) = v_bytes(text);
+            let rows = fetch_binary_rows(vec![def], vec![vec![Some(bytes)]]);
+            build_array(&DataType::Float64, 0, &rows, false, "c", None)
+        };
+        for (text, want) in [
+            (&b"2.50"[..], 2.5),
+            (b"-7.00", -7.0),
+            (b"12345678901.2345", 12345678901.2345),
+            (b"9007199254740992", 9_007_199_254_740_992.0),
+            (b"0.1", 0.1),
+        ] {
+            let a = build(text).unwrap();
+            assert_eq!(a.as_primitive::<Float64Type>().value(0), want);
+        }
+        for text in [
+            &b"922337203685477.5807"[..],
+            b"9007199254740993",
+            b"-9007199254740993",
+            b"12345678901234567890123456789012345678",
+            b"0.1234567890123456789",
+        ] {
+            let err = build(text).unwrap_err();
+            crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+            let said = err.to_string();
+            assert!(said.contains("column `c` is declared float8"), "{said}");
+            assert!(said.contains("Declare `decimal(p,s)`"), "{said}");
+        }
     }
 
     /// An integer under `float4`/`float8` is the same number up to 2^24 / 2^53 and refused by code past it.
