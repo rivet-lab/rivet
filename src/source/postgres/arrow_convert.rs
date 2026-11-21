@@ -339,6 +339,83 @@ pub(super) fn rivet_type_for_pg_column(
     )
 }
 
+/// Whether a wire type has no Rivet mapping and is delivered as the server's own text; a bare `numeric` keeps its refusal.
+pub(super) fn pg_server_text(t: &Type) -> bool {
+    fn unmapped(r: &RivetType) -> bool {
+        match r {
+            RivetType::Unsupported { .. } => *r != bare_numeric(),
+            RivetType::List { inner } => unmapped(inner),
+            _ => false,
+        }
+    }
+    unmapped(&pg_type_to_rivet(t))
+}
+
+/// The SQL that renders `expr`, a cell of wire type `t`, as the server's own output text.
+fn pg_text_render(t: &Type, expr: &str) -> String {
+    if *t == Type::INET {
+        return format!(
+            "CASE WHEN masklen({expr}) = CASE family({expr}) WHEN 4 THEN 32 ELSE 128 END \
+             THEN host({expr}) ELSE {expr}::text END"
+        );
+    }
+    format!("{expr}::text")
+}
+
+/// `sql` read through a projection that renders every server-text column as text, or `None` when no column is one.
+pub(super) fn pg_server_text_query(sql: &str, columns: &[postgres::Column]) -> Option<String> {
+    if !columns.iter().any(|c| pg_server_text(c.type_())) {
+        return None;
+    }
+    let names = (0..columns.len())
+        .map(|i| format!("_c{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let projection = columns
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let cell = format!("_rivet_text._c{i}");
+            let value = if pg_server_text(c.type_()) {
+                pg_text_render(c.type_(), &cell)
+            } else {
+                cell
+            };
+            let name = crate::sql::quote_ident(crate::config::SourceType::Postgres, c.name());
+            format!("{value} AS {name}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "SELECT {projection} FROM ({sql}\n) AS _rivet_text ({names})"
+    ))
+}
+
+/// The mapping of one PostgreSQL column: its override, else its autodetected type, an unmapped type as the server's text.
+pub(super) fn pg_column_mapping(
+    col: &postgres::Column,
+    column_overrides: &ColumnOverrides,
+    numeric_hints: Option<&HashMap<String, (u8, i8)>>,
+) -> crate::error::Result<TypeMapping> {
+    let rivet = rivet_type_for_pg_column(col, column_overrides, numeric_hints)?;
+    let source = SourceColumn::simple(col.name(), col.type_().name(), true);
+    let overridden = column_overrides.contains_key(col.name());
+    Ok(pg_delivery(
+        TypeMapping::from_source(&source, rivet),
+        col.type_(),
+        overridden,
+    ))
+}
+
+/// `mapping` of a column of wire type `t`: an undeclared unmapped type is delivered as the server's text.
+pub(super) fn pg_delivery(mapping: TypeMapping, t: &Type, overridden: bool) -> TypeMapping {
+    if !overridden && pg_server_text(t) {
+        mapping.with_text(crate::types::TextForm::ServerText)
+    } else {
+        mapping
+    }
+}
+
 /// Build an Arrow `Schema` from PostgreSQL `Column` descriptors by routing each column through the `SourceColumn → RivetType → TypeMapping → Field` pipeline.
 pub(super) fn pg_columns_to_schema(
     columns: &[postgres::Column],
@@ -348,9 +425,7 @@ pub(super) fn pg_columns_to_schema(
     let mut fields: Vec<Field> = Vec::with_capacity(columns.len());
     let mut errors: Vec<String> = Vec::new();
     for col in columns {
-        let rivet = rivet_type_for_pg_column(col, column_overrides, numeric_catalog_hints)?;
-        let source = SourceColumn::simple(col.name(), col.type_().name(), true);
-        let mapping = TypeMapping::from_source(&source, rivet);
+        let mapping = pg_column_mapping(col, column_overrides, numeric_catalog_hints)?;
         match build_arrow_field(&mapping) {
             Some(field) => fields.push(field),
             None => {

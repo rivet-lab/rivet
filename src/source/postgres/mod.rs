@@ -27,9 +27,11 @@ use crate::error::Result;
 use crate::source::batch_controller::AdaptiveBatchController;
 use crate::source::query::build_export_query;
 use crate::tuning::SourceTuning;
-use crate::types::{ColumnOverrides, SourceColumn, TypeMapping};
+use crate::types::{ColumnOverrides, TypeMapping};
 
-use arrow_convert::{pg_columns_to_schema, rivet_type_for_pg_column, rows_to_record_batch_typed};
+use arrow_convert::{
+    pg_column_mapping, pg_columns_to_schema, pg_server_text_query, rows_to_record_batch_typed,
+};
 use from_parse::try_parse_pg_simple_from_regclass_literal;
 
 /// The catalog read of the primary key of `table` as one `chr(31)`-joined cell, in key order.
@@ -182,6 +184,27 @@ fn fetch_statement<'a>(
     Ok(&prepared[at].1)
 }
 
+const SERVER_TEXT_SESSION: &str = "SET LOCAL datestyle = 'ISO, MDY'; SET LOCAL bytea_output = 'hex'; \
+     SET LOCAL intervalstyle = 'postgres'; SET LOCAL extra_float_digits = 3; SET LOCAL TimeZone = 'UTC';";
+
+/// Re-declare `_rivet` over the text projection of `built_sql` when a column has no Rivet mapping; the statement the server first described, or `None` when the cursor stands.
+fn declare_server_text(
+    client: &mut Client,
+    built_sql: &str,
+    fetches: &mut Vec<(usize, postgres::Statement)>,
+    n: usize,
+) -> Result<Option<postgres::Statement>> {
+    let declared = fetch_statement(client, fetches, n)?.clone();
+    let Some(text_sql) = pg_server_text_query(built_sql, declared.columns()) else {
+        return Ok(None);
+    };
+    client.batch_execute(&format!(
+        "{SERVER_TEXT_SESSION} CLOSE _rivet; DECLARE _rivet NO SCROLL CURSOR FOR {text_sql}"
+    ))?;
+    fetches.clear();
+    Ok(Some(declared))
+}
+
 /// Probe `SHOW work_mem` and return the value in bytes.
 fn pg_fetch_work_mem_bytes(client: &mut Client) -> Option<i64> {
     let raw: Option<String> = client
@@ -261,11 +284,7 @@ pub(crate) fn type_mappings_on(
     let hints = pg_numeric_catalog_hints_opt(client, query);
     stmt.columns()
         .iter()
-        .map(|col| {
-            let rivet = rivet_type_for_pg_column(col, column_overrides, hints.as_ref())?;
-            let source = SourceColumn::simple(col.name(), col.type_().name(), true);
-            Ok(TypeMapping::from_source(&source, rivet))
-        })
+        .map(|col| pg_column_mapping(col, column_overrides, hints.as_ref()))
         .collect()
 }
 
@@ -461,6 +480,8 @@ fn pg_run_export(
 
     let mut first_fetch_done = false;
     let mut fetches: Vec<(usize, postgres::Statement)> = Vec::new();
+    let text_columns =
+        declare_server_text(guard.client_mut(), built_sql, &mut fetches, ctl.target())?;
     loop {
         let requested = ctl.target();
         let fetch = fetch_statement(guard.client_mut(), &mut fetches, requested)?;
@@ -480,7 +501,9 @@ fn pg_run_export(
                 .map(|c| (c.name().to_string(), c.type_().clone()))
                 .collect();
             let s = Arc::new(pg_columns_to_schema(
-                rows[0].columns(),
+                text_columns
+                    .as_ref()
+                    .map_or(rows[0].columns(), |declared| declared.columns()),
                 column_overrides,
                 numeric_hints,
             )?);
