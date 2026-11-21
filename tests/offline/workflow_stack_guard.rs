@@ -157,10 +157,12 @@ fn the_stack_check_goes_red_on_each_spelling_it_guards() {
         1,
         "a polling loop passed"
     );
-    assert!(stack_problems(
-        "for i in $(seq 1 600); do [ -f \"$RUNNER_TEMP/compose.rc\" ] && break; sleep 2; done"
-    )
-    .is_empty());
+    assert!(
+        stack_problems(
+            "for i in $(seq 1 600); do [ -f \"$RUNNER_TEMP/compose.rc\" ] && break; sleep 2; done"
+        )
+        .is_empty()
+    );
     assert_eq!(
         stack_problems("psql -h h -d d -f seed.sql").len(),
         1,

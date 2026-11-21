@@ -76,6 +76,13 @@ pub(crate) fn decode(kind: ColKind, text: &str) -> std::result::Result<RivetValu
     })
 }
 
+/// Whether `text` is how LogMiner prints Oracle's NUMBER infinity (`~`, `-~`) for a NUMBER or FLOAT column.
+fn is_number_infinity(kind: ColKind, text: &str) -> bool {
+    kind == ColKind::Number
+        && matches!(text.trim(), "~" | "-~")
+        && seeded!("oracle-cdc-number-infinity-uncoded", false, true)
+}
+
 /// Hex text (either case) as bytes; `None` on an odd length or a non-hex digit.
 fn decode_hex(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2) {
@@ -1273,6 +1280,18 @@ impl OracleChangeStream {
                 let raw = text(value_slot(j, side))?;
                 match raw {
                     None => Ok(RivetValue::Null),
+                    Some(s) if is_number_infinity(*kind, &s) => Err(crate::error::coded(
+                        crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+                        format!(
+                            "oracle cdc: `{owner}.{table}`.{name} holds Oracle's NUMBER infinity \
+                             (LogMiner prints it as `{s}`; FLOAT arithmetic that overflows 9.99E125 \
+                             stores it). rivet refuses rather than writing a finite number for an \
+                             infinite value, as the batch export does. Set the column to a finite \
+                             value at the source; the redo that holds the infinity is read again on \
+                             resume, so re-baseline the stream past it. {}",
+                            crate::source::cdc::checkpoint_identity::RECOVER
+                        ),
+                    )),
                     Some(s) => decode(*kind, &s).map_err(|e| {
                         crate::error::coded(
                             crate::error::codes::SOURCE_CDC_CELL_UNSUPPORTED,
@@ -2103,6 +2122,17 @@ mod tests {
         }
         assert_eq!(canonical_number("1,5"), None);
         assert_eq!(canonical_number(""), None);
+    }
+
+    /// Only a NUMBER or FLOAT column holding `~` or `-~` is the NUMBER infinity the stream refuses.
+    #[test]
+    fn only_a_number_kind_with_the_infinity_text_is_number_infinity() {
+        assert!(is_number_infinity(ColKind::Number, "~"));
+        assert!(is_number_infinity(ColKind::Number, " -~ "));
+        assert!(!is_number_infinity(ColKind::Number, "1.0E+125"));
+        assert!(!is_number_infinity(ColKind::Number, "1"));
+        assert!(!is_number_infinity(ColKind::Text, "~"));
+        assert!(!is_number_infinity(ColKind::Float, "-~"));
     }
 
     #[test]

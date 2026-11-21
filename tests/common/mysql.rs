@@ -8,6 +8,21 @@
 use super::env::MYSQL_URL;
 use super::unique_name;
 
+/// The longest account name MySQL accepts.
+pub const MYSQL_USER_MAX: usize = 32;
+
+/// The longest `_<pid>_<n>` suffix `unique_name` appends: a 7-digit Linux pid and a 6-digit counter.
+const UNIQUE_SUFFIX_MAX: usize = "_4194304_999999".len();
+
+/// A unique MySQL account name; the prefix must leave room for the widest suffix, so no pid or counter can overflow the server's limit.
+pub fn mysql_user_name(prefix: &str) -> String {
+    assert!(
+        prefix.len() + UNIQUE_SUFFIX_MAX <= MYSQL_USER_MAX,
+        "MySQL account prefix `{prefix}` leaves no room for the pid and counter inside {MYSQL_USER_MAX} characters"
+    );
+    unique_name(prefix)
+}
+
 /// Open a fresh MySQL connection to the primary instance.
 pub fn mysql_connect() -> mysql::PooledConn {
     let pool = mysql::Pool::new(MYSQL_URL).expect("mysql pool");

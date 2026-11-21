@@ -254,10 +254,10 @@ fn cdc_full_surface_cross_oracle_matches_literals() {
             "1",
         ),
         (
-            "tm_max_us",
-            "CAST(extract(epoch FROM max(tm))*1000000 AS BIGINT)",
-            "toString(toUnixTimestamp64Micro(max(tm)))",
-            "86399999999",
+            "tm_max_text",
+            "CAST(max(tm) AS VARCHAR)",
+            "toString(max(tm))",
+            "23:59:59.999999",
         ),
         (
             "dt_max_us",

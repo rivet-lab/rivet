@@ -1907,6 +1907,26 @@ seeds:
       oracle:
         na: "the MySQL converter's arms are the seam; Oracle reads each column through a typed driver get that errors on a mismatch (a_declared_override_delivers_the_source_or_refuses_by_code_oracle)"
 
+  - name: mysql-string-override-replaces-bytes
+    class: "a MySQL binary column (VARBINARY, BLOB, GEOMETRY) declared `string` in `columns:` writes U+FFFD in place of every byte that is not UTF-8 instead of the bytes or a coded refusal, exit 0"
+    history: "verifier probe 2026-11-21 (unit level): WKB byte 0xf8 delivered as `ef bf bd`; RED on main 2026-11-21 (`a_string_column_holding_non_utf8_bytes_is_refused_instead_of_replaced` built Ok with U+FFFD in the string); PostgreSQL and SQL Server refuse the pair by code, Oracle delivers upper hex"
+    scope: source
+    switch: mysql-string-override-replaces-bytes
+    engines:
+      mysql:
+        cells:
+          - a_binary_column_declared_string_never_loses_a_byte_mysql
+          - the_remedy_of_the_refusal_delivers_the_bytes_mysql
+          - "lib:a_string_column_holding_non_utf8_bytes_is_refused_instead_of_replaced"
+      postgres:
+        na: "the MySQL Utf8 builder's lossy fallback is the seam; PostgreSQL refuses a bytea under `string` by code RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH before any write (a_binary_column_declared_string_never_loses_a_byte_postgres)"
+      mssql:
+        na: "the MySQL Utf8 builder's lossy fallback is the seam; SQL Server refuses a varbinary under `string` by code RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH before any write (a_binary_column_declared_string_never_loses_a_byte_mssql)"
+      mongo:
+        na: "a MongoDB document rides one verbatim `document` column, so no column is declared binary and retyped"
+      oracle:
+        na: "the MySQL Utf8 builder's lossy fallback is the seam; Oracle reads a RAW or BLOB under `string` as upper hex, every byte kept (a_binary_column_declared_string_never_loses_a_byte_oracle)"
+
   - name: summary-skip-reason-dropped
     class: "the run summary's `per_export[]` entry of a `skip_empty` run says `skipped` without the reason the metrics row and the console card carry"
     history: "0.32.1 item 6, 2026-10-18: measured on main 935064e8: `--summary-output` entry `\"status\":\"skipped\"`, `skip_reason` absent (read as null) on the sequential and the process runner"
@@ -6117,22 +6137,56 @@ seeds:
       oracle:
         na: "Oracle LogMiner rows are decoded through typed column lists; there is no text line to cut"
 
-  - name: pg-bit-literal-delivered-as-server-text
-    class: "the PostgreSQL CDC reader delivers a bit or bit varying column as the decoder's literal `B'110'` where the server's text is `110`, with exit 0 (batch delivers these columns as the server's text)"
-    history: "found 2026-11-10 hunting the untrusted parse surface (axis 5, P2); RED on main: the run exits 0 and delivers B'110', rig oracle VALUES differing column(s) flags, vb"
+  - name: cdc-bit-literal-delivered-as-server-text
+    class: "the PostgreSQL CDC reader delivers a bit or bit varying column as the decoder's literal `B'110'` where the server's text, which batch delivers, is `110`"
+    history: "owner 2026-11-21 (batch and CDC must not disagree about a value); the stream refused the type before this PR, the seed re-introduces the decoder's literal as the delivered value"
     scope: source
     engines:
       postgres:
-        switch: pg-bit-literal-delivered-as-server-text
-        cells: [pg_cdc_a_bit_column_is_refused_not_delivered_as_the_decoders_literal, pg_cdc_a_bit_column_refusal_precedes_the_snapshot_and_leaves_only_a_failure_record, pg_cdc_a_bit_column_refusal_remedy_delivers_the_rows_the_refused_run_held, "lib:the_catalog_check_names_exactly_the_bit_typed_columns"]
+        switch: cdc-bit-literal-delivered-as-server-text
+        cells: [postgres_batch_and_cdc_deliver_bit_strings_alike, "lib:a_bit_literal_is_unwrapped_to_the_servers_text"]
       mysql:
-        na: "MySQL BIT(n) is decoded from a typed binlog cell as an integer (mysql type_bit cell), never read from a decoder's text literal"
+        na: "MySQL BIT(n) is decoded from a typed binlog cell as an integer, never read from a decoder's text literal"
       mssql:
         na: "SQL Server BIT is a typed driver column, never read from a decoder's text literal"
       mongo:
         na: "MongoDB has no bit string type and change events are BSON documents"
       oracle:
         na: "Oracle has no bit string type and its change rows are typed LogMiner columns"
+
+  - name: cdc-array-text-parsed-as-list
+    class: "the PostgreSQL CDC reader parses an array of a type batch delivers as the server's text (inet[], cidr[], macaddr[], point[], int4range[], tstzrange[], bit[]) into a list its text column cannot hold, so the stream refuses a column batch delivers"
+    history: "owner 2026-11-21 (batch and CDC must not disagree about a value); RED on #1144 head: the stream stopped with RIVET_SOURCE_CDC_CELL_UNSUPPORTED on eight array columns batch delivers"
+    scope: source
+    engines:
+      postgres:
+        switch: cdc-array-text-parsed-as-list
+        cells: [postgres_batch_and_cdc_deliver_every_text_type_alike, postgres_batch_and_cdc_deliver_bit_strings_alike, "lib:an_array_label_mapped_to_text_keeps_the_servers_literal"]
+      mysql:
+        na: "MySQL has no array column type"
+      mssql:
+        na: "SQL Server has no array column type"
+      mongo:
+        na: "a MongoDB array is a BSON value inside the document column, never a typed array column"
+      oracle:
+        na: "an Oracle collection type is refused at the mining schema, never read as an array literal"
+
+  - name: oracle-cdc-number-infinity-uncoded
+    class: "an Oracle CDC run that reads NUMBER infinity (LogMiner `~`) stops as an unreadable cell under RIVET_SOURCE_CDC_CELL_UNSUPPORTED where batch refuses the same value as RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+    history: "owner 2026-11-21 (batch and CDC must not disagree about a value); RED on #1144 head: oracle probe, FLOAT 9.99..E125 mined as `~`, batch VALUE_UNREPRESENTABLE, cdc CELL_UNSUPPORTED"
+    scope: source
+    engines:
+      oracle:
+        switch: oracle-cdc-number-infinity-uncoded
+        cells: [oracle_batch_and_cdc_deliver_number_and_float_specials_alike, "lib:only_a_number_kind_with_the_infinity_text_is_number_infinity"]
+      postgres:
+        na: "PostgreSQL has no Oracle NUMBER; its float infinity and NaN are graded by postgres_batch_and_cdc_deliver_float_specials_alike"
+      mysql:
+        na: "MySQL cannot store NUMBER infinity; DECIMAL and FLOAT hold no infinity"
+      mssql:
+        na: "SQL Server cannot store infinity in a float or decimal column"
+      mongo:
+        na: "a MongoDB change is a BSON document read whole, no per-column infinity text"
 
   - name: load-key-landed-type-not-admitted
     class: "the keyed load admits its order and key columns by name alone, so an incremental cursor that lands as text (an Oracle bare NUMBER) is ranked as a string by the current-state view (99 stays after 100), and a primary-key column the source declares finer than a microsecond (an MSSQL datetime2(7)) lands at microseconds and collapses rows into one, both with exit 0"
@@ -6958,3 +7012,37 @@ seeds:
         na: "the seed edits the PostgreSQL text projection of an inet column; the other sources have no inet type"
       oracle:
         na: "the seed edits the PostgreSQL text projection of an inet column; the other sources have no inet type"
+
+  - name: decimal-float8-override-rounded
+    class: "a source decimal declared `float8` in `columns:` is delivered rounded to the nearest double with exit 0: MySQL DECIMAL, SQL Server money and Oracle NUMBER in batch, and decimal text on every change stream"
+    history: "a verifier's probes 2026-11-21: money 922337203685477.5807 became 922337203685477.6250, NUMBER(38) 2^53+1 became 2^53; RED on main 2026-11-21 (lib: decimal_text_is_a_float8_only_when_the_float_prints_it_back, a_float64_override_over_money_refuses_a_value_the_float_would_round, decimal_text_a_float8_would_round_is_refused_by_code)"
+    scope: source
+    switch: decimal-float8-override-rounded
+    engines:
+      postgres:
+        na: "PostgreSQL refuses a numeric declared float8 at check and at run (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH), so no decimal reaches the float8 builder"
+      mysql:
+        cells: [a_decimal_under_float8_is_delivered_or_refused_never_rounded_mysql, "lib:decimal_text_is_a_float8_only_when_the_float_prints_it_back", "lib:decimal_text_a_float8_would_round_is_refused_by_code"]
+      mssql:
+        cells: [a_money_under_float8_is_delivered_or_refused_never_rounded_mssql, "lib:a_float64_override_over_money_refuses_a_value_the_float_would_round", "lib:decimal_text_a_float8_would_round_is_refused_by_code"]
+      mongo:
+        na: "a MongoDB field is read into its one `document` column; no `columns:` override retypes a decimal there"
+      oracle:
+        cells: [a_number_under_float8_is_delivered_or_refused_never_rounded_oracle, "lib:decimal_text_a_float8_would_round_is_refused_by_code"]
+
+  - name: decimal-float8-override-reported-exact
+    class: "`rivet check` labels a `float8` override over a source decimal of precision above 15 as fidelity `exact` although a value past 15 significant digits is rounded or refused at run"
+    history: "a verifier's probe 2026-11-21: override_is_read(Mssql, money, decimal(19,4), float64) is true and the mapping reads exact; RED on main 2026-11-21 (lib: narrows_flags_a_decimal_float8_override_past_fifteen_digits_as_lossy)"
+    scope: source
+    switch: decimal-float8-override-reported-exact
+    engines:
+      postgres:
+        na: "PostgreSQL refuses a numeric declared float8 at check, so no `float8` override over a decimal is labelled"
+      mysql:
+        cells: ["lib:narrows_flags_a_decimal_float8_override_past_fifteen_digits_as_lossy", "lib:a_float8_override_over_a_wide_decimal_is_reported_lossy"]
+      mssql:
+        cells: ["lib:narrows_flags_a_decimal_float8_override_past_fifteen_digits_as_lossy", "lib:a_float8_override_over_a_wide_decimal_is_reported_lossy"]
+      mongo:
+        na: "a MongoDB field is read into its one `document` column; no `columns:` override retypes a decimal there"
+      oracle:
+        cells: ["lib:narrows_flags_a_decimal_float8_override_past_fifteen_digits_as_lossy", "lib:a_float8_override_over_a_wide_decimal_is_reported_lossy"]
