@@ -54,11 +54,13 @@ PASS, FAIL, NOT_RUN, FLAKY = "PASS", "FAIL", "NOT-RUN", "FLAKY"
 
 
 def previous_release(version: str, changelog: str) -> str:
-    """The release a satellite upgrades from: the newest `## X.Y.Z — date` heading of the changelog older than `version`, the one Cargo.toml builds."""
+    """The release a satellite upgrades from: the newest dated `## X.Y.Z — date` heading of the changelog not newer than `version`, the one Cargo.toml builds.
+
+    A version Cargo.toml still names after its release (the tree is past the tag, its changes under `## Unreleased`) is that release itself."""
     key = lambda v: tuple(int(x) for x in v.split("."))  # noqa: E731
-    older = [v for v in re.findall(r"^## (\d+\.\d+\.\d+) — ", changelog, re.M) if key(v) < key(version)]
+    older = [v for v in re.findall(r"^## (\d+\.\d+\.\d+) — ", changelog, re.M) if key(v) <= key(version)]
     if not older:
-        raise SystemExit(f"CHANGELOG.md has no release older than {version}: the satellite has nothing to upgrade from")
+        raise SystemExit(f"CHANGELOG.md has no release up to {version}: the satellite has nothing to upgrade from")
     return max(older, key=key)
 
 
@@ -910,10 +912,11 @@ def self_test() -> int:
     assert published_port("127.0.0.1:49153\n[exit 0]") == 49153
     assert published_port("0.0.0.0:49153\n") is None and published_port("") is None, "only a 127.0.0.1 binding is a pilot port"
     log = "# Changelog\n\n## Unreleased\n\n## 0.33.0 — 2026-11-13\n\n## 0.32.2 — 2026-10-22\n\n## 0.9.5 — 2026-03-01\n"
-    assert previous_release("0.33.0", log) == "0.32.2" and previous_release("0.34.0", log) == "0.33.0", "the satellite does not follow the version Cargo.toml builds"
-    assert previous_release("0.32.2", log) == "0.9.5", "releases are compared as numbers, not as text"
+    assert previous_release("0.34.0", log) == "0.33.0", "the satellite does not follow the version Cargo.toml builds"
+    assert previous_release("0.33.0", log) == "0.33.0", "a version already released is the one the tree upgrades from (#1099 S01: 0.33.0 is out)"
+    assert previous_release("0.32.3", log) == "0.32.2" and previous_release("0.10.0", log) == "0.9.5", "releases are compared as numbers, not as text"
     try:
-        previous_release("0.9.5", log)
+        previous_release("0.9.4", log)
     except SystemExit:
         pass
     else:
