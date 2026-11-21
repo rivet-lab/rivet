@@ -447,7 +447,9 @@ fn an_enum_array_is_delivered_as_a_list_within_the_bound(url: &str) {
         &format!("id BIGINT PRIMARY KEY, x {stem}_e[] NOT NULL, wide TEXT NOT NULL"),
         &format!("g, ARRAY['new', 'paid']::{stem}_e[], {WIDE}"),
     );
-    let rig = ENGINE.rig(&table).source_url(url);
+    let rig = ENGINE.rig(&table).source_url(url).no_oracle(
+        "the cell reads every list element back from the delivered Parquet; the source side is PostgreSQL text",
+    );
     let out = run_within_the_bound(&rig, "full");
     assert!(
         out.status.success(),
