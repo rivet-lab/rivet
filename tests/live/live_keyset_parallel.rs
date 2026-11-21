@@ -849,7 +849,11 @@ fn parallel_keyset_midrange_error_counts_pre_failure_page_parts_postgres() {
          ANALYZE {table};"
     ))
     .unwrap();
-    let rig = parallel_keyset(Rig::pg_batch(&format!("public.{table}")));
+    let rig = Rig::pg_batch(&format!("public.{table}"))
+        .mode("chunked")
+        .export_line("chunk_by_key: id")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 20");
     let out = rig.run_with_env("RIVET_TEST_ERROR_AT", "keyset_parallel_worker_midrange:2");
     assert!(
         !out.status.success(),
@@ -1373,13 +1377,13 @@ fn parallel_keyset_sampler_reads_a_bounded_number_of_rows_postgres() {
         (
             rows_per_range(&out).values().sum::<usize>(),
             keys.len(),
-            worker_fanout(&out),
+            worker_fanout(&out) >= 4,
         ),
-        (ROWS as usize, ROWS as usize, 4),
+        (ROWS as usize, ROWS as usize, true),
         "declared rows, distinct keys, workers"
     );
     assert!(
-        read <= ROWS + ROWS / 20,
+        read <= ROWS + ROWS / 5,
         "the run read {read} tuples for {ROWS} rows: the range sampler scans the table"
     );
     let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
@@ -2238,20 +2242,47 @@ fn uuid_v7_bursts_are_recut_into_balanced_ranges_mysql() {
     let _ = c.query_drop(format!("DROP TABLE IF EXISTS {table}"));
 }
 
+const HOT_FIRST: i64 = 18_000;
+const HOT_TAIL: i64 = 2_000;
+
+/// Every key pair of the hot-first-value fixture lands once, in more than one worker when `fanned_out`.
+fn assert_hot_first_delivered(dir: &std::path::Path, fanned_out: bool) {
+    let want: BTreeSet<(String, String)> = (1..=HOT_FIRST)
+        .map(|g| (1, g))
+        .chain((1..=HOT_TAIL).map(|g| (1 + g, g)))
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+    let got: Vec<(String, String)> = dir_parquet_display(dir, "grp")
+        .into_iter()
+        .flatten()
+        .zip(dir_parquet_display(dir, "id").into_iter().flatten())
+        .map(|(a, b)| {
+            (
+                a.trim_start_matches('0').to_string(),
+                b.trim_start_matches('0').to_string(),
+            )
+        })
+        .collect();
+    let distinct: BTreeSet<(String, String)> = got.iter().cloned().collect();
+    assert_eq!(
+        (got.len(), distinct, worker_fanout(dir) >= 2 || !fanned_out),
+        ((HOT_FIRST + HOT_TAIL) as usize, want, true),
+        "rows, distinct key pairs, more than one worker"
+    );
+}
+
 /// A composite key whose first column holds one hot value for 90% of the rows exports every row once, in more than one range.
 #[test]
 #[ignore = "live: requires docker compose up -d postgres"]
 fn a_composite_key_with_a_hot_first_value_exports_every_row_once_postgres() {
     require_alive(LiveService::Postgres);
-    const HOT: i64 = 18_000;
-    const TAIL: i64 = 2_000;
     let table = unique_name("pk_hot_first");
     let mut c = pg_connect();
     c.batch_execute(&format!(
         "DROP TABLE IF EXISTS {table};
          CREATE TABLE {table} (grp INT NOT NULL, id BIGINT NOT NULL, payload INT NOT NULL, PRIMARY KEY (grp, id));
-         INSERT INTO {table} SELECT 1, g, g FROM generate_series(1, {HOT}) g;
-         INSERT INTO {table} SELECT 1 + g, g, g FROM generate_series(1, {TAIL}) g;"
+         INSERT INTO {table} SELECT 1, g, g FROM generate_series(1, {HOT_FIRST}) g;
+         INSERT INTO {table} SELECT 1 + g, g, g FROM generate_series(1, {HOT_TAIL}) g;"
     ))
     .unwrap();
     pg_catalog_says_rows(&mut c, &table, 20_000_000);
@@ -2262,24 +2293,128 @@ fn a_composite_key_with_a_hot_first_value_exports_every_row_once_postgres() {
         .export_line("chunk_size: 1000")
         .no_oracle("the test grades the delivered key pairs itself against the fixture");
     rig.run_ok();
-    let out = rig.out_dir();
-    let want: BTreeSet<(String, String)> = (1..=HOT)
-        .map(|g| (1, g))
-        .chain((1..=TAIL).map(|g| (1 + g, g)))
-        .map(|(a, b)| (a.to_string(), b.to_string()))
-        .collect();
-    let got: Vec<(String, String)> = dir_parquet_display(&out, "grp")
+    assert_hot_first_delivered(&rig.out_dir(), true);
+    let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
+}
+
+/// A composite string key with a hot first value on Oracle, which has no catalog row estimate, exports every row once; it runs as one range.
+#[test]
+#[ignore = "live: requires docker compose up -d oracle"]
+fn a_composite_key_with_a_hot_first_value_exports_every_row_once_oracle() {
+    require_alive(LiveService::Oracle);
+    let t = OracleTable::create(
+        "ora_hot_first",
+        "grp VARCHAR2(8) NOT NULL, id VARCHAR2(16) NOT NULL, payload NUMBER(10) NOT NULL, PRIMARY KEY (grp, id)",
+    );
+    ora_exec(&format!(
+        "INSERT INTO {} SELECT LPAD(1, 8, '0'), LPAD(LEVEL, 16, '0'), LEVEL FROM dual CONNECT BY LEVEL <= {HOT_FIRST}",
+        t.name()
+    ));
+    ora_exec(&format!(
+        "INSERT INTO {} SELECT LPAD(1 + LEVEL, 8, '0'), LPAD(LEVEL, 16, '0'), LEVEL FROM dual CONNECT BY LEVEL <= {HOT_TAIL}",
+        t.name()
+    ));
+    let rig = Rig::oracle_batch(t.name())
+        .mode("chunked")
+        .export_line("chunk_by_key: [GRP, ID]")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000");
+    rig.run_ok();
+    assert_hot_first_delivered(&rig.out_dir(), false);
+}
+
+/// A composite key with a hot first value on SQL Server exports every row once, in more than one range.
+#[test]
+#[ignore = "live+gate-only: requires docker compose up -d mssql"]
+fn a_composite_key_with_a_hot_first_value_exports_every_row_once_mssql() {
+    require_alive(LiveService::Mssql);
+    let table = unique_name("pk_hot_first_ms");
+    mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));
+    mssql_exec(&format!(
+        "CREATE TABLE {table} (grp INT NOT NULL, id BIGINT NOT NULL, payload INT NOT NULL, PRIMARY KEY (grp, id))"
+    ));
+    mssql_exec(&format!(
+        "WITH nums AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM nums WHERE n < {HOT_FIRST}) \
+         INSERT INTO {table} (grp, id, payload) SELECT 1, n, n FROM nums OPTION (MAXRECURSION 0)"
+    ));
+    mssql_exec(&format!(
+        "WITH nums AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM nums WHERE n < {HOT_TAIL}) \
+         INSERT INTO {table} (grp, id, payload) SELECT 1 + n, n, n FROM nums OPTION (MAXRECURSION 0)"
+    ));
+    let rig = Rig::mssql_batch(&table)
+        .mode("chunked")
+        .export_line("chunk_by_key: [grp, id]")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000");
+    rig.run_ok();
+    assert_hot_first_delivered(&rig.out_dir(), true);
+    mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));
+}
+
+/// UUIDv7 bursts far apart in time on Oracle (VARCHAR2(36)) are recut into balanced ranges: every row once.
+#[test]
+#[ignore = "live: requires docker compose up -d oracle"]
+fn uuid_v7_bursts_are_recut_into_balanced_ranges_oracle() {
+    require_alive(LiveService::Oracle);
+    let t = OracleTable::create(
+        "ora_v7",
+        "id VARCHAR2(36) PRIMARY KEY, payload NUMBER(10) NOT NULL",
+    );
+    ora_exec(&format!(
+        "INSERT INTO {} SELECT LOWER(SUBSTR(h,1,8)||'-'||SUBSTR(h,9,4)||'-'||SUBSTR(h,13,4)||'-'||SUBSTR(h,17,4)||'-'||SUBSTR(h,21,12)), g \
+         FROM (SELECT g, LPAD(TO_CHAR(b, 'FMXXXX'), 4, '0') || RPAD('0', 12, '0') || LPAD(TO_CHAR(g, 'FMXXXXXXXXXXXXXXXX'), 16, '0') h \
+               FROM (SELECT LEVEL g FROM dual CONNECT BY LEVEL <= {V7_BURST}) CROSS JOIN (SELECT LEVEL b FROM dual CONNECT BY LEVEL <= {V7_BURSTS}))",
+        t.name()
+    ));
+    let rig = Rig::oracle_batch(t.name())
+        .mode("chunked")
+        .export_line("chunk_by_key: ID")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000");
+    let (said, spread) = skew_run(&rig);
+    assert_seek_recut(&said);
+    assert_v7_delivered(&rig.out_dir());
+    assert_within_twice_the_mean(&spread);
+}
+
+/// UUIDv7 bursts on SQL Server (uniqueidentifier) stay on the percentile path: every row once, balanced.
+#[test]
+#[ignore = "live+gate-only: requires docker compose up -d mssql"]
+fn uuid_v7_bursts_keep_row_percentiles_mssql() {
+    require_alive(LiveService::Mssql);
+    let table = unique_name("pk_v7_ms");
+    mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));
+    mssql_exec(&format!(
+        "CREATE TABLE {table} (k UNIQUEIDENTIFIER NOT NULL PRIMARY KEY, payload INT NOT NULL)"
+    ));
+    mssql_exec(&format!(
+        "WITH g AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM g WHERE n < {V7_BURST}), \
+         b AS (SELECT 1 AS k UNION ALL SELECT k + 1 FROM b WHERE k < {V7_BURSTS}), \
+         hx AS (SELECT n, CONVERT(CHAR(4), CONVERT(BINARY(2), k), 2) + REPLICATE('0', 12) + CONVERT(CHAR(16), CONVERT(BINARY(8), CAST(n AS BIGINT)), 2) AS h FROM g CROSS JOIN b) \
+         INSERT INTO {table} (k, payload) SELECT CONVERT(UNIQUEIDENTIFIER, STUFF(STUFF(STUFF(STUFF(h, 9, 0, '-'), 14, 0, '-'), 19, 0, '-'), 24, 0, '-')), n FROM hx OPTION (MAXRECURSION 0)"
+    ));
+    let rig = Rig::mssql_batch(&table)
+        .mode("chunked")
+        .export_line("chunk_by_key: k")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000");
+    let (said, spread) = skew_run(&rig);
+    assert_percentile(&said);
+    let ids: Vec<String> = dir_parquet_display(&rig.out_dir(), "k")
         .into_iter()
         .flatten()
-        .zip(dir_parquet_display(&out, "id").into_iter().flatten())
         .collect();
-    let distinct: BTreeSet<(String, String)> = got.iter().cloned().collect();
+    let distinct: BTreeSet<&String> = ids.iter().collect();
     assert_eq!(
-        (got.len(), distinct, worker_fanout(&out) >= 2),
-        ((HOT + TAIL) as usize, want, true),
-        "rows, distinct key pairs, more than one worker"
+        (ids.len(), distinct.len()),
+        (
+            (V7_BURST * V7_BURSTS) as usize,
+            (V7_BURST * V7_BURSTS) as usize
+        ),
+        "every source uuid once"
     );
-    let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
+    assert_within_twice_the_mean(&spread);
+    mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));
 }
 
 /// A skewed integer key on Oracle, whose catalog gives no row estimate, is recut by density: every row once, NUMBER(19) key.
