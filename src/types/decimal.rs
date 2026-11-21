@@ -295,7 +295,11 @@ pub fn decimal_text_to_f64_exact(s: &str) -> DecimalAsF64 {
     let Some(text) = decimal_parts(s) else {
         return DecimalAsF64::Exact(f);
     };
-    if f.is_finite() && decimal_parts(&format!("{f:e}")) == Some(text) {
+    if seeded!(
+        "decimal-float8-override-rounded",
+        true,
+        f.is_finite() && decimal_parts(&format!("{f:e}")) == Some(text)
+    ) {
         DecimalAsF64::Exact(f)
     } else {
         DecimalAsF64::Rounded

@@ -910,7 +910,11 @@ fn override_narrows(
         }
     }
     if let (Decimal { precision, scale }, crate::types::RivetType::Float64) = (source, overridden)
-        && *precision > crate::types::decimal::F64_DECIMAL_DIGITS
+        && seeded!(
+            "decimal-float8-override-reported-exact",
+            false,
+            *precision > crate::types::decimal::F64_DECIMAL_DIGITS
+        )
     {
         return Some(format!(
             "override float8 keeps {} significant digits exactly and the source numeric({precision},{scale}) \
