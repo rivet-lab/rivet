@@ -181,6 +181,13 @@ the declared type cannot read at all is a different case and is never `NULL`:
   `float8`). Past that the run stops with `RIVET_SOURCE_VALUE_UNREPRESENTABLE`
   (exit 5) naming the column and the value; the remedy is `decimal(20,0)` or
   `float8`, or removing the override.
+- **A decimal under `float8`** (MySQL `DECIMAL`, SQL Server `money`, Oracle `NUMBER`,
+  batch and CDC) is delivered as the same number while the double prints back the
+  same digits (always for up to 15 significant digits, and for the integers up to
+  2^53). Past that the run stops with `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5)
+  naming the column and the value; the remedy is `decimal(p,s)`, or removing the
+  override. `rivet check` reports a `float8` over a source decimal of precision
+  above 15 as `lossy`, never `exact`.
 - **MySQL value of a kind the declared type does not read** (a `DOUBLE`
   under `int8`, a `TIME` under `text`, an integer under `date`) stops with
   `RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH` (exit 1); the remedy is removing the
@@ -387,7 +394,7 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `bigint` | `int64` | `Int64` | integer text | | live matrix |
 | `bit` | `bool` | `Boolean` | 0/1 | | live matrix |
 | `decimal(p,s)` / `numeric(p,s)` | `decimal(p,s)` | `DECIMAL(p,s)` | exact decimal text | scale recovered from the data (tiberius drops declared scale) | live matrix |
-| `money` | `decimal(19,4)` | `DECIMAL(19,4)` | exact decimal text | fixed scale; the whole range (±922337203685477.5807) is exact on batch and CDC; a `float64` override gives the nearest double, a narrower `decimal(p,s)` override refuses a value it would round (`RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH`) | live matrix |
+| `money` | `decimal(19,4)` | `DECIMAL(19,4)` | exact decimal text | fixed scale; the whole range (±922337203685477.5807) is exact on batch and CDC; a `float64` override is delivered while the double prints back the same digits and refused `RIVET_SOURCE_VALUE_UNREPRESENTABLE` for a value it would round, a narrower `decimal(p,s)` override refuses a value it would round (`RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH`) | live matrix |
 | `smallmoney` | `decimal(10,4)` | `DECIMAL(10,4)` | exact decimal text | fixed scale; exact over the whole range on batch and CDC | type_roundtrip |
 | `real` | `float32` | `Float32` | float text | | live matrix |
 | `float` | `float64` | `Float64` | float text | | live matrix |

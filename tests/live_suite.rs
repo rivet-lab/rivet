@@ -156,6 +156,8 @@ mod live_crash_soak;
 mod live_cross_db_parity;
 #[path = "live/live_cursor_admission.rs"]
 mod live_cursor_admission;
+#[path = "live/live_decimal_to_float_override.rs"]
+mod live_decimal_to_float_override;
 #[path = "live/live_density_probe.rs"]
 mod live_density_probe;
 #[path = "live/live_destination_credential.rs"]

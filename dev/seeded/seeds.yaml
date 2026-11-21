@@ -7012,3 +7012,37 @@ seeds:
         na: "the seed edits the PostgreSQL text projection of an inet column; the other sources have no inet type"
       oracle:
         na: "the seed edits the PostgreSQL text projection of an inet column; the other sources have no inet type"
+
+  - name: decimal-float8-override-rounded
+    class: "a source decimal declared `float8` in `columns:` is delivered rounded to the nearest double with exit 0: MySQL DECIMAL, SQL Server money and Oracle NUMBER in batch, and decimal text on every change stream"
+    history: "a verifier's probes 2026-11-21: money 922337203685477.5807 became 922337203685477.6250, NUMBER(38) 2^53+1 became 2^53; RED on main 2026-11-21 (lib: decimal_text_is_a_float8_only_when_the_float_prints_it_back, a_float64_override_over_money_refuses_a_value_the_float_would_round, decimal_text_a_float8_would_round_is_refused_by_code)"
+    scope: source
+    switch: decimal-float8-override-rounded
+    engines:
+      postgres:
+        na: "PostgreSQL refuses a numeric declared float8 at check and at run (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH), so no decimal reaches the float8 builder"
+      mysql:
+        cells: [a_decimal_under_float8_is_delivered_or_refused_never_rounded_mysql, "lib:decimal_text_is_a_float8_only_when_the_float_prints_it_back", "lib:decimal_text_a_float8_would_round_is_refused_by_code"]
+      mssql:
+        cells: [a_money_under_float8_is_delivered_or_refused_never_rounded_mssql, "lib:a_float64_override_over_money_refuses_a_value_the_float_would_round", "lib:decimal_text_a_float8_would_round_is_refused_by_code"]
+      mongo:
+        na: "a MongoDB field is read into its one `document` column; no `columns:` override retypes a decimal there"
+      oracle:
+        cells: [a_number_under_float8_is_delivered_or_refused_never_rounded_oracle, "lib:decimal_text_a_float8_would_round_is_refused_by_code"]
+
+  - name: decimal-float8-override-reported-exact
+    class: "`rivet check` labels a `float8` override over a source decimal of precision above 15 as fidelity `exact` although a value past 15 significant digits is rounded or refused at run"
+    history: "a verifier's probe 2026-11-21: override_is_read(Mssql, money, decimal(19,4), float64) is true and the mapping reads exact; RED on main 2026-11-21 (lib: narrows_flags_a_decimal_float8_override_past_fifteen_digits_as_lossy)"
+    scope: source
+    switch: decimal-float8-override-reported-exact
+    engines:
+      postgres:
+        na: "PostgreSQL refuses a numeric declared float8 at check, so no `float8` override over a decimal is labelled"
+      mysql:
+        cells: ["lib:narrows_flags_a_decimal_float8_override_past_fifteen_digits_as_lossy", "lib:a_float8_override_over_a_wide_decimal_is_reported_lossy"]
+      mssql:
+        cells: ["lib:narrows_flags_a_decimal_float8_override_past_fifteen_digits_as_lossy", "lib:a_float8_override_over_a_wide_decimal_is_reported_lossy"]
+      mongo:
+        na: "a MongoDB field is read into its one `document` column; no `columns:` override retypes a decimal there"
+      oracle:
+        cells: ["lib:narrows_flags_a_decimal_float8_override_past_fifteen_digits_as_lossy", "lib:a_float8_override_over_a_wide_decimal_is_reported_lossy"]
