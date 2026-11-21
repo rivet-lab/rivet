@@ -364,6 +364,35 @@ mod tests {
         }
     }
 
+    /// A plus sign is read like no sign: signed text that would round is `Rounded`, never mistaken for a non-number.
+    #[test]
+    fn a_plus_signed_decimal_that_would_round_is_rounded() {
+        use super::{DecimalAsF64::*, decimal_text_to_f64_exact as f};
+        assert_eq!(f("+9007199254740993"), Rounded);
+        assert_eq!(f("+0.1234567890123456789"), Rounded);
+        assert_eq!(f("+2.5"), Exact(2.5));
+        assert_eq!(super::decimal_parts("+25"), Some((false, "25".into(), 1)));
+        assert_eq!(super::decimal_parts("-25"), Some((true, "25".into(), 1)));
+    }
+
+    /// The exponent of the leading digit counts integer digits, minus leading zeros, minus one, plus the written exponent.
+    #[test]
+    fn decimal_parts_places_the_leading_digit() {
+        use super::decimal_parts as p;
+        for (text, digits, exp) in [
+            ("123.45", "12345", 2),
+            ("5", "5", 0),
+            ("0.00123", "123", -3),
+            ("0.5", "5", -1),
+            ("1.5e3", "15", 3),
+            ("12e-1", "12", 0),
+            ("0.5e-2", "5", -3),
+            ("00120", "12", 2),
+        ] {
+            assert_eq!(p(text), Some((false, digits.to_string(), exp)), "{text:?}");
+        }
+    }
+
     /// A float8 holds decimal text exactly when it prints back the same digits; text it would round is `Rounded`, words are `NotANumber`.
     #[test]
     fn decimal_text_is_a_float8_exactly_only_when_it_prints_back_the_same_digits() {
