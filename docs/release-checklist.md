@@ -27,9 +27,9 @@ checklist is what a maintainer fills out **before** pushing the tag.
       matches the running binary.
 - [ ] `rivet schema config | diff - schemas/rivet.schema.json` — no drift.
 - [ ] All sample configs in `examples/` parse + validate (offline):
-      `cargo test --test examples_parse`
+      `cargo test --test offline_suite examples_parse`
       *(loads every `examples/*.yaml` through `Config::from_yaml`; no DB/network).*
-- [ ] `tests/config_parse_errors.rs` — unknown-field + did-you-mean
+- [ ] `tests/offline/config_parse_errors.rs` — unknown-field + did-you-mean
       regression suite green.
 
 ## 2. Local extraction
@@ -83,8 +83,7 @@ checklist is what a maintainer fills out **before** pushing the tag.
 ## 4. Security
 
 - [ ] `cargo deny check` — no unpatched advisories, license, ban or source violations.
-- [ ] Secret-redaction tests green: `tests/config_secrets.rs`,
-      `tests/validate_secrets.rs` (where present).
+- [ ] Secret-redaction tests green: `tests/offline/config_secrets.rs`.
 - [ ] No new code path emits raw `DATABASE_URL` / `RIVET_STATE_URL` / cloud
       keys into logs, summaries, manifest, journal, or panic backtraces.
       Search: `rg -n 'url|password|secret_key|account_key|sas_token' src/`
@@ -110,10 +109,10 @@ checklist is what a maintainer fills out **before** pushing the tag.
 For non-major releases:
 
 - [ ] Old configs without the new fields still parse and run.
-- [ ] State-DB migration roundtrip green: `tests/state_compat.rs`
+- [ ] State-DB migration roundtrip green: `tests/offline/state_compat.rs`
       (v1 → vN).
 - [ ] CLI flag contract unchanged at the offline level
-      (`tests/cli_contract.rs`).
+      (`tests/offline/cli_contract.rs`).
 
 ## 7. Release artifacts
 
