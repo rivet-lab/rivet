@@ -436,7 +436,7 @@ fn a_composite_is_delivered_as_server_text_within_the_bound(url: &str) {
 }
 
 /// An enum array beside wide rows, over `url`: delivered as a list of strings holding the source's labels, within `BOUND`.
-fn an_enum_array_is_delivered_as_a_list_within_the_bound(url: &str) {
+fn an_enum_array_is_delivered_within_the_bound(url: &str) {
     if url == PGBOUNCER_URL {
         forget_pooled_statements();
     }
@@ -546,14 +546,14 @@ fn a_composite_column_with_wide_rows_through_one_transaction_pooler_is_delivered
 
 #[test]
 #[ignore = "live: requires docker compose up -d postgres"]
-fn an_array_of_an_enum_with_wide_rows_is_delivered_as_a_list_within_the_bound_direct_postgres() {
-    an_enum_array_is_delivered_as_a_list_within_the_bound(POSTGRES_URL);
+fn an_array_of_an_enum_with_wide_rows_is_delivered_within_the_bound_direct_postgres() {
+    an_enum_array_is_delivered_within_the_bound(POSTGRES_URL);
 }
 
 #[test]
 #[ignore = "live: requires docker compose --profile pool up -d pgbouncer (transaction mode, pool_size=1)"]
-fn an_array_of_an_enum_with_wide_rows_through_one_transaction_pooler_is_delivered_as_a_list_within_the_bound_postgres()
+fn an_array_of_an_enum_with_wide_rows_through_one_transaction_pooler_is_delivered_within_the_bound_postgres()
  {
     let _alone = pgbouncer_alone();
-    an_enum_array_is_delivered_as_a_list_within_the_bound(PGBOUNCER_URL);
+    an_enum_array_is_delivered_within_the_bound(PGBOUNCER_URL);
 }

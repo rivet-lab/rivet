@@ -107,7 +107,8 @@ cargo build --quiet --bin rivet
 ./target/debug/rivet schema config > schemas/rivet.schema.json
 cp schemas/rivet.schema.json schemas/latest/rivet.schema.json
 RIVET=./target/debug/rivet python3 -m dev.pytools.docgen
-git add -u schemas docs   # stage the regenerated (tracked) schema + reference docs
+# stage only what was regenerated, by name: `git add -u docs` also staged hand edits made after the scans (#1099 S12)
+git add schemas/rivet.schema.json schemas/latest/rivet.schema.json $(python3 -m dev.pytools.docgen --list)
 
 # Dependency gate: cargo-deny check (deny.toml); skipped when the tool is missing, CI still enforces it.
 echo "pre-commit: cargo deny check"

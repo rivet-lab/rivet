@@ -59,8 +59,8 @@ UV_ASSET = f"https://github.com/astral-sh/uv/releases/download/{UV_VERSION}/uv-x
 LABEL = "rivet.satellite=1"
 PREFIX = "rivet-satellite"
 ENGINES = {
-    "postgres": {"port": 0, "inner": 5432, "image": "postgres:16"},
-    "mysql": {"port": 0, "inner": 3306, "image": "mysql:8.0"},
+    "postgres": {"port": 0, "inner": 5432, "image": "postgres:16.14@sha256:f8e2cc2a36ddb8700e639570f0bc70d0c1495951ba61df903a015dc87db07d02"},
+    "mysql": {"port": 0, "inner": 3306, "image": "mysql:8.0.46@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b"},
 }
 SEED_ROWS, DELTA_A, DELTA_B = 500, (501, 700), (701, 800)
 CLOUD_CELLS = {

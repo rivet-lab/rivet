@@ -148,9 +148,13 @@ fn py_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Every module-level `<NAME>IMAGE = "<ref>"` in dev/**/*.py.
+/// Every module-level `<NAME>IMAGE = "<ref>"` and every `"image": "<ref>"` entry in dev/**/*.py (#1099 S10:
+/// the satellite's engine table spelled its images the second way and was not read).
 fn python_images() -> Vec<(String, String)> {
-    let re = Regex::new(r#"(?m)^[A-Z][A-Z0-9_]*IMAGE\s*=\s*"([^"]+)""#).unwrap();
+    let re = Regex::new(
+        r#"(?m)^[A-Z][A-Z0-9_]*IMAGE\s*=\s*"([^"]+)"|["']image["']\s*:\s*["']([^"' ]*[:/][^"' ]*)["']"#,
+    )
+    .unwrap();
     let mut files = Vec::new();
     py_files(&root().join("dev"), &mut files);
     files.sort();
@@ -159,10 +163,12 @@ fn python_images() -> Vec<(String, String)> {
         let text = std::fs::read_to_string(&f).unwrap_or_default();
         for c in re.captures_iter(&text) {
             let rel = f.strip_prefix(root()).unwrap().display().to_string();
-            out.push((
-                format!("{rel} {}", &c[0][..c[0].find('=').unwrap()].trim()),
-                c[1].to_string(),
-            ));
+            let image = c.get(1).or_else(|| c.get(2)).unwrap().as_str();
+            let name = match c[0].find('=') {
+                Some(eq) if c.get(1).is_some() => c[0][..eq].trim().to_string(),
+                _ => "\"image\"".to_string(),
+            };
+            out.push((format!("{rel} {name}"), image.to_string()));
         }
     }
     out
