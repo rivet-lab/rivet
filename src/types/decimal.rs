@@ -247,6 +247,85 @@ pub fn decimal_text_to_float<F: std::str::FromStr>(s: &str) -> Option<F> {
     s.trim().parse().ok()
 }
 
+/// Most significant decimal digits a `float8` always prints back as written.
+pub const F64_DECIMAL_DIGITS: u8 = 15;
+
+/// The sign, significant digits and base-10 exponent of the leading digit of plain or `e` decimal text; `None` for any other text.
+fn decimal_parts(s: &str) -> Option<(bool, String, i64)> {
+    let s = s.trim();
+    let (neg, s) = match s.as_bytes().first()? {
+        b'-' => (true, &s[1..]),
+        b'+' => (false, &s[1..]),
+        _ => (false, s),
+    };
+    let (mantissa, exp) = match s.split_once(['e', 'E']) {
+        Some((m, e)) => (m, e.parse::<i64>().ok()?),
+        None => (s, 0),
+    };
+    let (int, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let all = format!("{int}{frac}");
+    if all.is_empty() || !all.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let lead = all.len() - all.trim_start_matches('0').len();
+    let digits = all.trim_matches('0').to_string();
+    if digits.is_empty() {
+        return Some((false, digits, 0));
+    }
+    let point = i64::try_from(int.len()).ok()?;
+    Some((neg, digits, point - i64::try_from(lead).ok()? - 1 + exp))
+}
+
+/// What a `float8` makes of decimal text.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DecimalAsF64 {
+    /// The float prints back as the same digits.
+    Exact(f64),
+    /// The nearest float prints other digits: the value would be rounded.
+    Rounded,
+    /// The text is not a number.
+    NotANumber,
+}
+
+/// Decimal text as a `float8` when the float prints back as the same digits, `Rounded` when it would change them.
+pub fn decimal_text_to_f64_exact(s: &str) -> DecimalAsF64 {
+    let Some(f) = decimal_text_to_float::<f64>(s) else {
+        return DecimalAsF64::NotANumber;
+    };
+    let Some(text) = decimal_parts(s) else {
+        return DecimalAsF64::Exact(f);
+    };
+    if f.is_finite() && decimal_parts(&format!("{f:e}")) == Some(text) {
+        DecimalAsF64::Exact(f)
+    } else {
+        DecimalAsF64::Rounded
+    }
+}
+
+/// The `float8` of decimal text, `Ok(None)` for text that is not a number, a coded refusal when the float would round it.
+pub fn exact_f64_of_text(column: &str, text: &str) -> crate::error::Result<Option<f64>> {
+    match decimal_text_to_f64_exact(text) {
+        DecimalAsF64::Exact(f) => Ok(Some(f)),
+        DecimalAsF64::NotANumber => Ok(None),
+        DecimalAsF64::Rounded => crate::rivet_bail!(
+            crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+            "{}",
+            rounded_f64_refusal(column, text)
+        ),
+    }
+}
+
+/// The refusal text for decimal `text` that a `float8` declared for `column` would round.
+pub fn rounded_f64_refusal(column: &str, text: &str) -> String {
+    format!(
+        "column `{column}` is declared float8 by a `columns:` override but holds {}, which a float8 \
+         cannot hold exactly (it keeps {F64_DECIMAL_DIGITS} significant digits and the integers up to \
+         2^53) - rivet refuses rather than rounding it. Declare `decimal(p,s)` to keep the digits, or \
+         remove the override.",
+        text.trim()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{decimal_str_to_scaled_i128, decimal_text_to_float, decimal_text_to_int};
@@ -278,6 +357,42 @@ mod tests {
         assert_eq!(decimal_text_to_float::<f64>("1e3"), Some(1000.0));
         for bad in ["", "abc", "1,5", "1.5x", "0x10"] {
             assert_eq!(decimal_text_to_float::<f64>(bad), None, "{bad:?}");
+        }
+    }
+
+    /// A float8 holds decimal text exactly when it prints back the same digits; text it would round is `Rounded`, words are `NotANumber`.
+    #[test]
+    fn decimal_text_is_a_float8_exactly_only_when_it_prints_back_the_same_digits() {
+        use super::{DecimalAsF64::*, decimal_text_to_f64_exact as f};
+        for (text, want) in [
+            ("1.5", 1.5),
+            ("-12345.67", -12345.67),
+            (" 0.10 ", 0.1),
+            ("0.0000", 0.0),
+            ("-0.0005", -0.0005),
+            ("100", 100.0),
+            ("1e3", 1000.0),
+            ("+7", 7.0),
+            ("9007199254740992", 9_007_199_254_740_992.0),
+            ("123456789012345", 123_456_789_012_345.0),
+            ("12345678901.2345", 12345678901.2345),
+        ] {
+            assert_eq!(f(text), Exact(want), "{text:?}");
+        }
+        for text in [
+            "922337203685477.5807",
+            "9007199254740993",
+            "-9007199254740993",
+            "0.1234567890123456789",
+            "12345678901234567890123456789012345678",
+            "1e999",
+        ] {
+            assert_eq!(f(text), Rounded, "{text:?}");
+        }
+        assert!(matches!(f("NaN"), Exact(v) if v.is_nan()));
+        assert!(matches!(f("inf"), Exact(v) if v.is_infinite()));
+        for text in ["", "abc", "1,5", "1.5x", "0x10"] {
+            assert_eq!(f(text), NotANumber, "{text:?}");
         }
     }
 

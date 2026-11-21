@@ -318,16 +318,28 @@ fn int_value<T: TryFrom<i128>>(v: &RivetValue) -> Result<T, String> {
     })
 }
 
-/// The value a Float64 column stores for `v`; decimal text parses through the shared parser.
-fn f64_value(v: &RivetValue) -> Result<f64, String> {
+/// The value a Float64 column stores for `v`; decimal text is read by the shared parser and refused when a float8 would round it.
+fn f64_value(v: &RivetValue) -> Result<f64, FixRefusal> {
+    use crate::types::decimal::{DecimalAsF64, decimal_text_to_f64_exact};
     match v {
         RivetValue::Float(f) => Ok(*f),
         RivetValue::Int(i) => Ok(*i as f64),
         RivetValue::UInt(u) => Ok(*u as f64),
-        RivetValue::Bytes(b) => std::str::from_utf8(b)
-            .ok()
-            .and_then(crate::types::decimal::decimal_text_to_float)
-            .ok_or_else(|| "is not a number".into()),
+        RivetValue::Bytes(b) => match std::str::from_utf8(b).map(decimal_text_to_f64_exact) {
+            Ok(DecimalAsF64::Exact(f)) => Ok(f),
+            Ok(DecimalAsF64::Rounded) => Err(FixRefusal {
+                reason: format!(
+                    "is a decimal that a float8 cannot hold exactly (it keeps {} significant \
+                     digits and the integers up to 2^53). Declare the column `decimal(p,s)` in \
+                     `columns:` to keep the digits, or leave the column out of the capture, \
+                     then: {}",
+                    crate::types::decimal::F64_DECIMAL_DIGITS,
+                    crate::source::cdc::checkpoint_identity::RECOVER
+                ),
+                code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
+            }),
+            _ => Err("is not a number".into()),
+        },
         _ => Err(NO_READING.into()),
     }
 }
@@ -2502,6 +2514,37 @@ mod tests {
             assert_eq!(
                 (r.row, &r.value, r.reason.as_str()),
                 (0, &bad, "is not a number")
+            );
+        }
+    }
+
+    /// Decimal text a float8 prints back is delivered; text it would round is refused by code, on the change stream as in batch.
+    #[test]
+    fn decimal_text_a_float8_would_round_is_refused_by_code() {
+        use arrow::array::Float64Array;
+        let kept = [
+            RivetValue::Bytes(b"12345678901.2345".to_vec()),
+            RivetValue::Bytes(b"9007199254740992".to_vec()),
+            RivetValue::Bytes(b"-0.10".to_vec()),
+        ];
+        let refs: Vec<Option<&RivetValue>> = kept.iter().map(Some).collect();
+        let a = build_column(&DataType::Float64, &refs).unwrap();
+        let a = a.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(
+            a.values().to_vec(),
+            vec![12345678901.2345, 9_007_199_254_740_992.0, -0.1]
+        );
+        for text in [
+            &b"922337203685477.5807"[..],
+            b"9007199254740993",
+            b"0.1234567890123456789",
+        ] {
+            let bad = RivetValue::Bytes(text.to_vec());
+            let r = build_column(&DataType::Float64, &[Some(&bad)]).unwrap_err();
+            assert_eq!(
+                r.code.map(|c| c.id),
+                Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE.id),
+                "{r:?}"
             );
         }
     }

@@ -909,6 +909,16 @@ fn override_narrows(
             ));
         }
     }
+    if let (Decimal { precision, scale }, crate::types::RivetType::Float64) = (source, overridden)
+        && *precision > crate::types::decimal::F64_DECIMAL_DIGITS
+    {
+        return Some(format!(
+            "override float8 keeps {} significant digits exactly and the source numeric({precision},{scale}) \
+             holds up to {precision} — a value the float cannot hold exactly is refused at run \
+             (RIVET_SOURCE_VALUE_UNREPRESENTABLE); this is lossy, not exact",
+            crate::types::decimal::F64_DECIMAL_DIGITS
+        ));
+    }
     None
 }
 
@@ -1114,6 +1124,43 @@ mod tests {
             TypeFidelity::Exact,
             "a non-narrowing override is not downgraded — the rule is narrowing, \
              not overridden-at-all"
+        );
+    }
+
+    /// A `float8` override reads `lossy` over a source decimal of precision above 15 and stays `exact` over a decimal that fits and over an integer.
+    #[test]
+    fn a_float8_override_over_a_wide_decimal_is_reported_lossy() {
+        let source = vec![
+            mapping("cash", "money", dec(19, 4)),
+            mapping("cents", "numeric(10,2)", dec(10, 2)),
+            mapping("id", "int8", RivetType::Int64),
+            mapping("exact15", "numeric(15,0)", dec(15, 0)),
+        ];
+        let mut overrides = ColumnOverrides::new();
+        for c in ["cash", "cents", "id", "exact15"] {
+            overrides.insert(c.into(), RivetType::Float64);
+        }
+        let mut mapped = ["cash", "cents", "id", "exact15"]
+            .map(|c| mapping(c, "float8", RivetType::Float64))
+            .to_vec();
+        downgrade_narrowing_overrides(&mut mapped, &overrides, || Ok(source)).unwrap();
+        let verdicts: Vec<_> = mapped.iter().map(|m| m.fidelity).collect();
+        assert_eq!(
+            verdicts,
+            vec![
+                TypeFidelity::Lossy,
+                TypeFidelity::Exact,
+                TypeFidelity::Exact,
+                TypeFidelity::Exact
+            ]
+        );
+        assert!(
+            mapped[0]
+                .warnings
+                .iter()
+                .any(|w| w.contains("RIVET_SOURCE_VALUE_UNREPRESENTABLE")),
+            "{:?}",
+            mapped[0].warnings
         );
     }
 
@@ -1373,6 +1420,24 @@ exports:
             reason.contains("integer-digit") && reason.contains("lossy"),
             "reason: {reason}"
         );
+    }
+
+    #[test]
+    fn narrows_flags_a_decimal_float8_override_past_fifteen_digits_as_lossy() {
+        for (p, s) in [(19, 4), (38, 0), (16, 0), (20, 6)] {
+            let reason = override_narrows(&dec(p, s), &RivetType::Float64)
+                .unwrap_or_else(|| panic!("decimal({p},{s}) into float8 is lossy"));
+            assert!(
+                reason.contains("lossy") && reason.contains("RIVET_SOURCE_VALUE_UNREPRESENTABLE"),
+                "reason: {reason}"
+            );
+        }
+        for (p, s) in [(15, 2), (10, 4), (9, 0), (1, 0)] {
+            assert!(override_narrows(&dec(p, s), &RivetType::Float64).is_none());
+        }
+        assert!(override_narrows(&RivetType::Int64, &RivetType::Float64).is_none());
+        assert!(override_narrows(&RivetType::Float64, &RivetType::Float64).is_none());
+        assert!(override_narrows(&dec(38, 0), &RivetType::String).is_none());
     }
 
     #[test]

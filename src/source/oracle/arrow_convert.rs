@@ -458,6 +458,16 @@ fn number_cell(row: &Row, idx: usize, column: &str) -> Result<Option<String>> {
     cell.map(|n| number_text(&n, column)).transpose()
 }
 
+/// The `float8` of an Oracle NUMBER's text, or a coded refusal when the float would round it.
+fn number_f64(column: &str, text: &str) -> Result<f64> {
+    crate::types::decimal::exact_f64_of_text(column, text)?.ok_or_else(|| {
+        crate::error::coded(
+            crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+            format!("column `{column}` holds {text}, which is not a number a float8 reads"),
+        )
+    })
+}
+
 /// The integer an Oracle NUMBER's text holds, or a coded refusal naming the column when it holds a fraction or overflows `T`.
 fn integer<T: std::str::FromStr>(column: &str, text: &str) -> Result<T> {
     text.parse::<T>().map_err(|_| {
@@ -537,10 +547,10 @@ fn build_column(
             for r in rows {
                 b.append_option(match kind {
                     OraKind::BinaryFloat => r.get::<Option<f32>>(idx).ora()?.map(f64::from),
-                    OraKind::Number => {
-                        number(r)?;
-                        r.get::<Option<f64>>(idx).ora()?
-                    }
+                    OraKind::Number => match number(r)? {
+                        Some(text) => Some(number_f64(name, &text)?),
+                        None => None,
+                    },
                     _ => r.get::<Option<f64>>(idx).ora()?,
                 });
             }
