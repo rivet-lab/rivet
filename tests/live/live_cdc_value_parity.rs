@@ -529,7 +529,7 @@ fn mysql_batch_and_cdc_deliver_float_extremes_alike_and_the_engine_stores_no_inf
         "float",
         "2.2250738585072014e-308",
         "1.17549435e-38",
-        "3.4028235e38",
+        "3.4028234e38",
     );
     let table = unique_name("vp_my_float");
     let mut conn = cdc_conn();
