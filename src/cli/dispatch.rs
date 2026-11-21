@@ -483,6 +483,7 @@ fn dispatch_check(
         tgt,
         &planned_strategies(&plans),
     )?;
+    crate::error::print_values_unread_note();
     report_plan_compatibility(plans, json)?;
     if let Err(e) = StateStore::probe(&config) {
         log::error!("check: the state this config uses does not answer: {e:#}");

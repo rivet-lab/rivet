@@ -454,6 +454,8 @@ pub struct Code {
     pub id: &'static str,
     pub kind: ErrorKind,
     pub action: &'static str,
+    /// Raised only by a value the source or warehouse holds, which `rivet check` never reads: check names these codes instead of deciding them.
+    pub needs_values: bool,
 }
 
 /// Typed marker carrying a **stable error code** (`RIVET_CONFIG_*` /
@@ -725,6 +727,7 @@ pub mod codes {
             id,
             kind: ErrorKind::Usage,
             action,
+            needs_values: false,
         }
     }
     const fn environment(id: &'static str, retry: Retry, action: &'static str) -> Code {
@@ -732,6 +735,7 @@ pub mod codes {
             id,
             kind: ErrorKind::Environment(retry),
             action,
+            needs_values: false,
         }
     }
 
@@ -918,6 +922,14 @@ pub mod codes {
             id,
             kind: ErrorKind::Refusal,
             action,
+            needs_values: false,
+        }
+    }
+    /// A refusal only a value can raise (see [`Code::needs_values`]).
+    const fn refusal_on_values(id: &'static str, action: &'static str) -> Code {
+        Code {
+            needs_values: true,
+            ..refusal(id, action)
         }
     }
     const fn busy(id: &'static str, action: &'static str) -> Code {
@@ -925,6 +937,7 @@ pub mod codes {
             id,
             kind: ErrorKind::Busy,
             action,
+            needs_values: false,
         }
     }
     const fn transient(id: &'static str, action: &'static str) -> Code {
@@ -932,6 +945,7 @@ pub mod codes {
             id,
             kind: ErrorKind::Transient,
             action,
+            needs_values: false,
         }
     }
     const fn integrity(id: &'static str, action: &'static str) -> Code {
@@ -939,6 +953,7 @@ pub mod codes {
             id,
             kind: ErrorKind::Integrity,
             action,
+            needs_values: false,
         }
     }
     const fn internal(id: &'static str, action: &'static str) -> Code {
@@ -946,6 +961,7 @@ pub mod codes {
             id,
             kind: ErrorKind::Internal,
             action,
+            needs_values: false,
         }
     }
 
@@ -1133,7 +1149,7 @@ pub mod codes {
         "remove the slot, checkpoint file or `export_state` row the warning names, or leave it for the next run of the export to reuse",
     );
     /// A source value the column's Arrow type has no faithful reading for (PG `infinity`, `24:00:00`).
-    pub const SOURCE_VALUE_UNREPRESENTABLE: Code = refusal(
+    pub const SOURCE_VALUE_UNREPRESENTABLE: Code = refusal_on_values(
         "RIVET_SOURCE_VALUE_UNREPRESENTABLE",
         "map the value to a representable one in the export's `query:`, or exclude the column",
     );
@@ -1198,7 +1214,7 @@ pub mod codes {
         "RIVET_DEST_ALREADY_COMPLETE",
         "pass `--force` with `--resume` to continue an interrupted run or, with none, run as a plain run does (new parts beside the complete export); or use another destination prefix",
     );
-    pub const LOAD_VALUE_OUT_OF_TARGET_RANGE: Code = refusal(
+    pub const LOAD_VALUE_OUT_OF_TARGET_RANGE: Code = refusal_on_values(
         "RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE",
         "the warehouse type cannot hold this value; declare a wider type (e.g. String) for the column, or fix the source value",
     );
@@ -2220,7 +2236,40 @@ pub fn codes_markdown() -> String {
             c.action.replace('|', "\\|")
         ));
     }
+    out.push_str(
+        "\n## Decided by a value\n\n`rivet check` reads no values, so it cannot decide these \
+         codes: it names them in a note on stderr, and only `rivet run` or `rivet load` raises \
+         them, on the value that needs it.\n\n",
+    );
+    for id in value_codes() {
+        out.push_str(&format!("- `{id}`\n"));
+    }
     out
+}
+
+/// The codes only a value raises (see [`Code::needs_values`]), in registry order.
+pub fn value_codes() -> impl Iterator<Item = &'static str> {
+    codes::ALL.iter().filter(|c| c.needs_values).map(|c| c.id)
+}
+
+/// Print [`values_unread_note`] to stderr, when it says anything.
+pub fn print_values_unread_note() {
+    let note = values_unread_note();
+    if !note.is_empty() {
+        eprintln!("{note}");
+    }
+}
+
+/// The note `rivet check` prints: the codes it cannot decide because it reads no values.
+pub fn values_unread_note() -> String {
+    seeded!(
+        "check-values-unread-unsaid",
+        String::new(),
+        format!(
+            "note[values-unread]: rivet check reads no values; a run may still refuse a value with {}",
+            value_codes().collect::<Vec<_>>().join(", ")
+        )
+    )
 }
 
 pub type Result<T> = anyhow::Result<T>;
@@ -2309,6 +2358,28 @@ mod tests {
         ] {
             assert!(md.contains(row), "missing row: {row}\n{md}");
         }
+    }
+
+    #[test]
+    fn check_names_exactly_the_codes_only_a_value_raises() {
+        assert_eq!(
+            super::value_codes().collect::<Vec<_>>(),
+            [
+                "RIVET_SOURCE_VALUE_UNREPRESENTABLE",
+                "RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE"
+            ],
+            "a value-decided code is added here on purpose: check names it instead of deciding it"
+        );
+        let note = super::values_unread_note();
+        assert!(note.starts_with("note[values-unread]: "), "{note}");
+        assert!(super::value_codes().all(|c| note.contains(c)), "{note}");
+        assert!(
+            super::codes::ALL
+                .iter()
+                .filter(|c| !c.needs_values)
+                .all(|c| !note.contains(c.id)),
+            "{note}"
+        );
     }
 
     #[test]
@@ -2460,6 +2531,7 @@ mod tests {
                 id: "RIVET_STATE_TEST",
                 kind,
                 action: "x",
+                needs_values: false,
             };
             classify_exit(&anyhow::Error::new(CodedError::new(c, "permission denied")))
         };
