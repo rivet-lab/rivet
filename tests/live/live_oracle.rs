@@ -128,7 +128,7 @@ fn type_matrix_table() -> OracleTable {
          TO_TIMESTAMP_TZ('2024-07-01 10:00:00 Europe/Berlin','YYYY-MM-DD HH24:MI:SS TZR'), NULL, \
          '   ', NULL, 'x', TO_CLOB(RPAD('a',4000,'a')) || TO_CLOB(RPAD('b',4000,'b')), NULL, \
          HEXTORAW('01'), JSON('\"str\"')",
-        "3, 1E125, NULL, NULL, NULL, NULL, NULL, NULL, NULL, \
+        "3, 1.5E124, NULL, NULL, NULL, NULL, NULL, NULL, NULL, \
          TO_DATE('-4712-01-01','SYYYY-MM-DD'), NULL, NULL, NULL, NULL, '', N'日本語', NULL, \
          NULL, NULL, NULL, NULL",
         "4, 1E-130, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, \
@@ -2323,17 +2323,17 @@ fn an_undeclared_nanosecond_timestamp_is_refused_and_the_declared_ns_type_delive
     }
 }
 
-/// An `INTERVAL DAY TO SECOND(9)` column, unlike `TIMESTAMP(9)`, stays a warning in the type report and the run it vouches for delivers.
+/// An `INTERVAL DAY TO SECOND(9)` column holding microsecond-exact values is a logical string in the type report and the run it vouches for delivers.
 #[test]
 #[ignore = "live: requires docker compose oracle"]
-fn a_nine_digit_interval_stays_a_lossy_warning_and_is_not_refused() {
+fn a_nine_digit_interval_holding_microseconds_is_delivered_not_refused() {
     require_alive(LiveService::Oracle);
     let t = OracleTable::create(
         "ora_iv9",
         "id NUMBER(10) PRIMARY KEY, iv9 INTERVAL DAY TO SECOND(9), iv6 INTERVAL DAY TO SECOND(6)",
     );
     ora_exec(&format!(
-        "INSERT INTO {} VALUES (1, INTERVAL '1 02:03:04.123456789' DAY TO SECOND(9), INTERVAL '1 02:03:04.123456' DAY TO SECOND(6))",
+        "INSERT INTO {} VALUES (1, INTERVAL '1 02:03:04.123456' DAY TO SECOND(9), INTERVAL '1 02:03:04.123456' DAY TO SECOND(6))",
         t.name()
     ));
     let out = tempfile::tempdir().unwrap();
@@ -2355,8 +2355,11 @@ fn a_nine_digit_interval_stays_a_lossy_warning_and_is_not_refused() {
             .unwrap()["fidelity"]
             .clone()
     };
-    assert_eq!(fidelity("IV9"), "lossy");
+    assert_eq!(fidelity("IV9"), "logical_string");
     assert_eq!(fidelity("IV6"), "logical_string");
+    let want = oracle_cells(t.name(), "TO_CHAR(iv9)");
+    let got = parquet_cells(out.path(), "IV9");
+    assert_eq!(got.len(), want.len(), "one delivered row per source row");
 }
 
 /// The `columns:` override types beyond the autodetected ones, one column each.
