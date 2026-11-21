@@ -1,10 +1,10 @@
 //! Generative completeness guard for the MySQL wire-type fixture.
 //!
-//! `mysql_native_type_name` and `mysql_type_to_rivet` branch on `MYSQL_TYPE_*`
-//! column types. `the_mysql_wire_type_map_is_exhaustive_and_stable` drives a
+//! `mysql_native_type_name`, `mysql_common_kind`, `mysql_engine_type` and `is_blob_wire` branch on
+//! `MYSQL_TYPE_*` column types. `the_mysql_wire_type_map_is_exhaustive_and_stable` drives a
 //! table of column definitions through a real driver and checks what they map
 //! to. This guard checks the one thing that test cannot check about itself:
-//! that its table exercises EVERY type the two functions branch on.
+//! that its table exercises EVERY type those functions branch on.
 //!
 //! Why a separate instrument, when mutation testing already grades this file.
 //! `cargo mutants` deletes a match ARM, and nine of these arms are SHARED by
@@ -95,17 +95,20 @@ fn tokens(text: &str) -> BTreeSet<String> {
 
 fn required() -> BTreeSet<String> {
     let src = source();
-    let mut r = types_named_by_fn(&src, "mysql_native_type_name");
-    r.extend(types_named_by_fn(&src, "mysql_type_to_rivet"));
-    // The REQUIRED side is where this guard can go blind: both functions are
-    // sliced by `find("\n}\n")` off their `fn` header, so a formatting change
-    // that moves the first top-level `}` earlier truncates the branch list —
-    // and a truncated requirement is trivially satisfied by whatever the
-    // fixture happens to cover. 29 types today.
+    let mut r = BTreeSet::new();
+    for name in [
+        "mysql_native_type_name",
+        "mysql_type_to_rivet",
+        "mysql_common_kind",
+        "mysql_engine_type",
+        "is_blob_wire",
+    ] {
+        r.extend(types_named_by_fn(&src, name));
+    }
     super::nonvacuity::require_enumerated(
         r.len(),
         20,
-        &format!("MYSQL_TYPE_* branches parsed out of the two mappers in {SRC}"),
+        &format!("MYSQL_TYPE_* branches parsed out of the mapper functions in {SRC}"),
         "Fix the slice (the mappers are still there) rather than the floor — this set IS the \
          requirement the fixture is graded against.",
     );
