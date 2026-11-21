@@ -175,6 +175,8 @@ fn mssql_common_kind(ct: ColumnType) -> Option<CommonKind> {
         | ColumnType::Datetimen
         | ColumnType::Datetime2 => CommonKind::Naive,
         ColumnType::DatetimeOffsetn => CommonKind::Utc,
+        ColumnType::Timen => CommonKind::Time,
+        ColumnType::Guid => CommonKind::Uuid,
         ColumnType::NVarchar
         | ColumnType::NChar
         | ColumnType::BigVarChar
@@ -205,11 +207,7 @@ fn mssql_engine_type(ct: ColumnType) -> RivetType {
             precision: 10,
             scale: 4,
         },
-        ColumnType::Guid => RivetType::Uuid,
         ColumnType::SSVariant | ColumnType::Udt => RivetType::String,
-        ColumnType::Timen => RivetType::Time {
-            unit: RivetTimeUnit::Microsecond,
-        },
         other => RivetType::Unsupported {
             native_type: format!("{other:?}").to_lowercase(),
             reason: format!("SQL Server column type {other:?} has no Rivet mapping yet"),
@@ -1202,7 +1200,7 @@ mod type_map_tests {
             (ColumnType::DatetimeOffsetn, Some(Utc), ts(Some("UTC"))),
             (
                 ColumnType::Timen,
-                None,
+                Some(Time),
                 RivetType::Time {
                     unit: RivetTimeUnit::Microsecond,
                 },
@@ -1216,7 +1214,7 @@ mod type_map_tests {
             (ColumnType::BigVarBin, Some(Binary), RivetType::Binary),
             (ColumnType::BigBinary, Some(Binary), RivetType::Binary),
             (ColumnType::Image, Some(Binary), RivetType::Binary),
-            (ColumnType::Guid, None, RivetType::Uuid),
+            (ColumnType::Guid, Some(Uuid), RivetType::Uuid),
             (ColumnType::SSVariant, None, RivetType::String),
             (ColumnType::Udt, None, RivetType::String),
             (ColumnType::Xml, None, unsupported("xml", ColumnType::Xml)),

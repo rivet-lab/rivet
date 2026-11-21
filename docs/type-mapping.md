@@ -53,12 +53,16 @@ stays per engine, in the engine's own decoder
 | text | `string` | `text`, `varchar`, `char`, `name` | `char`, `varchar`, `text` family | `char`, `varchar`, `nchar`, `nvarchar`, `text`, `ntext` | `VARCHAR2`, `NVARCHAR2`, `CHAR`, `NCHAR`, `LONG`, `CLOB`, `NCLOB`; a `NUMBER` no decimal holds |
 | binary | `binary` | `bytea` | `binary`, `varbinary`, `blob` | `binary`, `varbinary`, `image` | `RAW`, `LONG RAW`, `BLOB` |
 | json | `json` | `json`, `jsonb` | `json` | none | `JSON` |
+| time | `time(µs)` | `time` | `time` | `time` | none |
+| uuid | `uuid` | `uuid` | none | `uniqueidentifier` | none |
+| interval | `interval` | `interval` | none | none | `INTERVAL DAY TO SECOND`, `INTERVAL YEAR TO MONTH` |
 
-Types an engine carries alone stay in its own table: PostgreSQL `oid`, `time`,
-`uuid`, `interval`, enums, arrays and the types it does not map; MySQL
-`bigint unsigned`, `bit`, `year`, `time`, `enum`, `set`; SQL Server `money`,
-`smallmoney`, `time`, `uniqueidentifier`, `sql_variant`, CLR types; Oracle
-`INTERVAL DAY TO SECOND` and `INTERVAL YEAR TO MONTH`. MongoDB has no native-type
+Types an engine carries alone stay in its own table: PostgreSQL `oid`, `timetz`, enums,
+arrays and the types it does not map; MySQL `bigint unsigned`, `bit`, `year`, `enum`,
+`set`; SQL Server `money`, `smallmoney`, `sql_variant`, CLR types. Within a shared
+kind the engine keeps its own reading: MySQL `time` beyond 24 hours and negative,
+SQL Server `time(7)` precision, Oracle interval units, PostgreSQL `interval` months,
+days and microseconds. MongoDB has no native-type
 mapping to route: its two columns are fixed, see [MongoDB](#mongodb-json-blob-model).
 CDC does not classify types a second time: it reads the batch mapping of the
 same columns, and its value decoders are per engine.

@@ -75,7 +75,7 @@ fn oracle_common_kind(kind: OraKind, native: &str, precision: u8, scale: i8) -> 
         _ if native.starts_with("timestamp_tz") || native.starts_with("timestamp_ltz") => {
             CommonKind::Utc
         }
-        _ if native.starts_with("interval") => return None,
+        _ if native.starts_with("interval") => CommonKind::Interval,
         _ if native == "json" => CommonKind::Json,
         OraKind::Number => number_kind(precision, scale),
         OraKind::BinaryFloat => CommonKind::F32,
@@ -88,11 +88,8 @@ fn oracle_common_kind(kind: OraKind, native: &str, precision: u8, scale: i8) -> 
     })
 }
 
-/// The type of a column this engine alone carries: an interval, else `Unsupported` named `label`.
-fn oracle_engine_type(native: &str, label: &str) -> RivetType {
-    if native.starts_with("interval") {
-        return RivetType::Interval;
-    }
+/// The type of a column this engine alone carries: `Unsupported` named `label`.
+fn oracle_engine_type(label: &str) -> RivetType {
     RivetType::Unsupported {
         native_type: label.to_string(),
         reason: format!(
@@ -108,7 +105,7 @@ fn autodetect(kind: OraKind, native: &str, precision: u8, scale: i8, label: &str
         Some(common) => common
             .rivet_type()
             .unwrap_or_else(|| number_decimal(precision, scale)),
-        None => oracle_engine_type(native, label),
+        None => oracle_engine_type(label),
     }
 }
 
