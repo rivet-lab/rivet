@@ -2252,6 +2252,14 @@ pub fn value_codes() -> impl Iterator<Item = &'static str> {
     codes::ALL.iter().filter(|c| c.needs_values).map(|c| c.id)
 }
 
+/// Print [`values_unread_note`] to stderr, when it says anything.
+pub fn print_values_unread_note() {
+    let note = values_unread_note();
+    if !note.is_empty() {
+        eprintln!("{note}");
+    }
+}
+
 /// The note `rivet check` prints: the codes it cannot decide because it reads no values.
 pub fn values_unread_note() -> String {
     seeded!(
