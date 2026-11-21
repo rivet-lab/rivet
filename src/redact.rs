@@ -74,7 +74,7 @@ const MIN_MASKED_LEN: usize = 8;
 /// Every value registered by [`mask_value_in_output`], raw and percent-encoded.
 static MASKED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
-/// `text` with every registered value replaced by the mask.
+/// `text` with every registered value replaced by the mask, the longest first so a registered prefix never leaves the tail of a longer one.
 fn mask_registered(text: &str) -> String {
     let known = MASKED.lock().unwrap_or_else(|e| e.into_inner());
     known
@@ -82,9 +82,9 @@ fn mask_registered(text: &str) -> String {
         .fold(text.to_string(), |acc, v| acc.replace(v.as_str(), MASK))
 }
 
-/// Register a credential value so [`redact_secrets`] masks it wherever it appears, raw or percent-encoded.
+/// Register a credential value so [`redact_secrets`] masks it wherever it appears, raw or percent-encoded; a value shorter than [`MIN_MASKED_LEN`] bytes or equal to `password`, the one keyword the scanners key on that reaches the minimum, is not registered.
 pub fn mask_value_in_output(value: &str) {
-    if value.len() < MIN_MASKED_LEN {
+    if value.len() < MIN_MASKED_LEN || value.eq_ignore_ascii_case("password") {
         return;
     }
     let encoded = percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC)
@@ -95,6 +95,7 @@ pub fn mask_value_in_output(value: &str) {
             known.push(v);
         }
     }
+    known.sort_by_key(|v| std::cmp::Reverse(v.len()));
 }
 
 /// Compose every redactor.  Use this at every boundary that turns a
@@ -1585,5 +1586,30 @@ mod tests {
             format!("a {MASK} b {MASK} c")
         );
         assert_eq!(redact_secrets("a Kp4!xR7 b"), "a Kp4!xR7 b");
+    }
+
+    /// A registered value that is a prefix of another registered value never leaves the longer one's tail in the text, whichever registered first.
+    #[test]
+    fn a_registered_prefix_does_not_leave_the_tail_of_a_longer_registered_value() {
+        for (short, long) in [
+            (
+                "V1146aaaaPREFIX",
+                "V1146aaaaPREFIX-and-LATER-TAIL-SECRET-99",
+            ),
+            (
+                "V1146bbbbPREFIX",
+                "V1146bbbbPREFIX-and-FIRST-TAIL-SECRET-99",
+            ),
+        ] {
+            if short.contains("bbbb") {
+                super::mask_value_in_output(long);
+                super::mask_value_in_output(short);
+            } else {
+                super::mask_value_in_output(short);
+                super::mask_value_in_output(long);
+            }
+            let shown = redact_secrets(&format!("echoed {long} end"));
+            assert_eq!(shown, format!("echoed {MASK} end"), "{shown}");
+        }
     }
 }

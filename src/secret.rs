@@ -180,12 +180,27 @@ mod tests {
             url,
             "a URL is left to the URL scanner"
         );
-        let dsn = "host=h user=u password=DsnPassword7 dbname=by-construction";
+        let dsn = "host=h user=u password=DsnPassword1146 dbname=by-construction";
         let _dsn = Secret::new(dsn);
         assert_eq!(
             crate::redact::redact_secrets(dsn),
             "host=h user=u password=*** dbname=by-construction",
             "a keyword DSN is left to the keyword scanner"
+        );
+    }
+
+    /// A credential that equals a word the scanners key on is not registered: masking it as free text would defeat the keyword scanner on `password=<other secret>` and rewrite the remedy hints that name `password_env`.
+    #[test]
+    fn a_secret_equal_to_a_scanner_keyword_does_not_rewrite_rivets_own_text() {
+        for word in ["password", "PASSWORD", "passwd", "pwd", "Pwd"] {
+            let _held = Secret::new(word);
+        }
+        let hint = "source: env var 'DB_PW' is not set (referenced by password_env).";
+        assert_eq!(crate::redact::redact_secrets(hint), hint);
+        let dsn = "host=h user=u password=LeakCheck1146x dbname=d";
+        assert_eq!(
+            crate::redact::redact_secrets(dsn),
+            "host=h user=u password=*** dbname=d"
         );
     }
 
