@@ -1176,7 +1176,6 @@ def self_test() -> None:
     assert parse_lit("postgres", "'\\x00ff01'::bytea") == b"\x00\xff\x01" and parse_lit("postgres", "'{\"n\":1}'::jsonb") == '{"n":1}' and parse_lit("mysql", "b'101'") == 5
     assert parse_lit("postgres", "B'0101'") == "0101" and parse_lit("postgres", "B''") == "", "a PostgreSQL bit string is its text, a MySQL bit its number"
     sha = "0123456789abcdef0123456789abcdef01234567"
-    assert nanosecond_read_keeps_every_digit(), "a nanosecond column is read as the text DuckDB holds, never a microsecond datetime"
     assert binary_refusal(__file__, f"rivet 0.34.0 ({sha[:9]})", sha, False) == "" and binary_refusal(__file__, "rivet 0.25.0 (abcdef0)", sha, True) == ""
     assert "no rivet binary" in binary_refusal("/nonexistent/rivet", f"rivet ({sha[:9]})", sha, False), "a missing binary is never graded"
     assert "not the tree's commit" in binary_refusal(__file__, "rivet 0.34.0 (abcdef012)", sha, False), "a stale binary is never graded"
@@ -1406,6 +1405,7 @@ def _reader_self_test() -> bool:
         import pyarrow.parquet as pq
     except ImportError:
         return False
+    assert nanosecond_read_keeps_every_digit(), "a nanosecond column is read as the text DuckDB holds, never a microsecond datetime"
     col = Col("c00", "INT", "Int32", "int", ("1", "16777217", "-5"))
     with tempfile.TemporaryDirectory() as t:
         root = Path(t)
