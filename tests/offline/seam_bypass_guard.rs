@@ -35,10 +35,12 @@ const LEDGER_STATUSES: &[&str] = &[
     "done",
 ];
 
-/// Seam bypass exceptions listed in docs/seams.yaml. Shrink-only.
+/// The exception lines of docs/seams.yaml, the census the shrink-only pin below counts with.
 // 0 -> 34 (2026-10-31): first registry; 8 manifest-census, 9 run-set, 11 url-authority, 1 object-store-retry, 5 cdc-captured-tables; each closes with the fix named on its entry.
 // 34 -> 23 (2026-11-01): the 11 url-authority exceptions closed by routing every reader through url_text.
-const SEAM_EXCEPTION_CEILING: usize = 8; // ratchet-pin: seam-bypass-exceptions (review 2027-02-01)
+// 23 -> 7: the hand-typed ceiling stayed at 8; the pin now counts the registry itself (#1099 S03).
+// ratchet-pin: seam-bypass-exceptions (review 2027-02-01) count docs/seams.yaml ^      - \{at:
+const EXCEPTION_LINE: &str = "      - {at: ";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -536,13 +538,20 @@ fn the_registry_matches_the_tree() {
     );
 }
 
+/// The shrink-only pin counts exception lines with a regex; the parsed registry must agree with that census,
+/// so an exception written in another shape cannot hide from the ratchet.
 #[test]
 fn exceptions_only_shrink() {
-    let reg = parse_registry(&super::nonvacuity::subject_text(SEAMS_PATH));
-    let n: usize = reg.seams.iter().map(|s| s.exceptions.len()).sum();
-    assert!(
-        n <= SEAM_EXCEPTION_CEILING,
-        "{n} seam exceptions, ceiling {SEAM_EXCEPTION_CEILING}: route the new bypass through its owner"
+    let text = super::nonvacuity::subject_text(SEAMS_PATH);
+    let reg = parse_registry(&text);
+    let parsed: usize = reg.seams.iter().map(|s| s.exceptions.len()).sum();
+    let counted = text
+        .lines()
+        .filter(|l| l.starts_with(EXCEPTION_LINE))
+        .count();
+    assert_eq!(
+        parsed, counted,
+        "{SEAMS_PATH}: write each exception as one `{EXCEPTION_LINE}...}}` line, so the seam-bypass-exceptions pin counts it"
     );
 }
 

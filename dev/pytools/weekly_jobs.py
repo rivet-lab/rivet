@@ -74,11 +74,14 @@ def sentinel_rc(log: Path) -> int | None:
     return int(m.group(1)) if m else None
 
 
+VERDICT_WORDS = re.compile(r"\b(RELEASE-READY|NOT RELEASABLE|NOT GRADED)\b")
+
+
 def oracle_lines(log: Path, keep: int = 6) -> list[str]:
-    """The last `keep` RIVET-ORACLE verdict lines of a gate log."""
+    """The last `keep` verdict lines of a gate log (the gate prints RELEASE-READY, NOT RELEASABLE or NOT GRADED)."""
     tail: collections.deque[str] = collections.deque(maxlen=keep)
     with log.open(errors="replace") as f:
-        tail.extend(line.rstrip() for line in f if "RIVET-ORACLE-" in line)
+        tail.extend(line.rstrip() for line in f if VERDICT_WORDS.search(line))
     return list(tail)
 
 
@@ -128,7 +131,7 @@ def run_gate(wt: Path, logs: Path, cmd: list[str], dry_run: bool, snap: Callable
     with log.open("w") as f:
         rc = subprocess.run(cmd, cwd=wt, env={**os.environ, "COMPOSE_PROJECT_NAME": "rivet"}, stdout=f, stderr=subprocess.STDOUT).returncode
         f.write(f"\nexit {rc} {dt.datetime.now(dt.timezone.utc):%Y-%m-%dT%H:%M:%SZ}\n")
-    lines = "\n".join(oracle_lines(log)) or "no RIVET-ORACLE verdict line in the log"
+    lines = "\n".join(oracle_lines(log)) or "no verdict line (RELEASE-READY, NOT RELEASABLE, NOT GRADED) in the log"
     return verdict(rc == 0, f"{moved}{sha}: `{' '.join(cmd)}` exit {rc}, log {log}\n{lines}")
 
 
@@ -464,8 +467,8 @@ def gate_selftest(t: Path, snap: dict) -> None:
                 ["git", "-C", str(origin), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "c1"],
                 ["git", "clone", "-q", str(origin), str(wt)]):
         subprocess.run(cmd, check=True)
-    ok = [sys.executable, "-c", "print('RIVET-ORACLE-GO: ready')"]
-    red = [sys.executable, "-c", "import sys; print('RIVET-ORACLE-NO-GO'); sys.exit(1)"]
+    ok = [sys.executable, "-c", "print('verdict: RELEASE-READY')"]
+    red = [sys.executable, "-c", "import sys; print('verdict: NOT RELEASABLE'); sys.exit(1)"]
     gate_wt = lambda: mock_gate_worktree(wt)
 
     def go(cmd, snap=snap, dry=False, **kw) -> tuple[int, str]:
@@ -481,7 +484,7 @@ def gate_selftest(t: Path, snap: dict) -> None:
     rc, out = go(ok, dry=True)
     assert rc == 0 and "dry-run" in out and not (logs / sha).exists()
     rc, out = go(ok)
-    assert rc == 0 and "RIVET-ORACLE-GO" in out and "VERDICT: done" in out, out
+    assert rc == 0 and "RELEASE-READY" in out and "VERDICT: done" in out, out
     assert sentinel_rc(logs / sha / "weekly-full.log") == 0
     (logs / sha / "weekly-full.log").write_text("x\n")
     (wt / "dirty").write_text("x")
@@ -490,7 +493,7 @@ def gate_selftest(t: Path, snap: dict) -> None:
     (wt / "dirty").unlink()
     (logs / sha / "weekly-full.log").unlink()
     rc, out = go(red)
-    assert rc != 0 and "RIVET-ORACLE-NO-GO" in out and sentinel_rc(logs / sha / "weekly-full.log") == 1, out
+    assert rc != 0 and "NOT RELEASABLE" in out and sentinel_rc(logs / sha / "weekly-full.log") == 1, out
     (logs / sha / "weekly-full.log").write_text("x\nexit 0 2026-11-07T20:00:00Z\n")
     rc, out = go(red)
     assert rc == 0 and "already graded green" in out, "a sha already graded green is not run again"

@@ -188,6 +188,9 @@ def main_cli(argv: Sequence[str] | None = None) -> int:
     for a in args:
         if a == "--check":
             check = True
+        elif a == "--list":
+            print("\n".join(g.out for g in generators("rivet")))
+            return 0
         elif a in ("-h", "--help"):
             print(USAGE)
             return 0
