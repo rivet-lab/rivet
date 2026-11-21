@@ -1158,6 +1158,16 @@ fn run_raw_cells(
 }
 
 #[test]
+fn the_gap_login_fits_the_mysql_account_limit() {
+    let name = mysql_user_name(GAP_USER_PREFIX);
+    assert!(name.len() <= MYSQL_USER_MAX, "{name}");
+    assert!(
+        std::panic::catch_unwind(|| mysql_user_name("pm_check_equals_run_u")).is_err(),
+        "a prefix that overflows MySQL's account limit with a 7-digit pid must be refused"
+    );
+}
+
+#[test]
 fn the_axes_come_from_the_code() {
     let leaves: Vec<String> = role_registry().into_iter().map(|l| l.path).collect();
     assert!(
@@ -1556,10 +1566,12 @@ impl Drop for MysqlUser {
     }
 }
 
+const GAP_USER_PREFIX: &str = "pm_cer_u";
+
 /// A MySQL login that may read only `id` of `table`, with its URL.
 fn mysql_gap(table: &str) -> (String, MysqlUser) {
     use ::mysql::prelude::Queryable;
-    let user = unique_name("pm_check_equals_run_u");
+    let user = mysql_user_name(GAP_USER_PREFIX);
     let db = MYSQL_URL.rsplit('/').next().unwrap().to_string();
     let mut root = mysql_root_connect();
     root.query_drop(format!("CREATE USER '{user}'@'%' IDENTIFIED BY 'rivet'"))
