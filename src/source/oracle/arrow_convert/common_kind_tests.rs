@@ -204,19 +204,19 @@ fn table() -> Vec<(&'static str, Spec, Option<CommonKind>, RivetType)> {
         (
             "interval ds",
             (K::Text, "interval_ds", 0, 6, "interval_ds"),
-            None,
+            Some(Interval),
             RivetType::Interval,
         ),
         (
             "interval ym",
             (K::Text, "interval_ym", 0, 0, "interval_ym"),
-            None,
+            Some(Interval),
             RivetType::Interval,
         ),
         (
             "interval described",
             (K::IntervalDs, "interval_ds", 0, 6, "interval_ds"),
-            None,
+            Some(Interval),
             RivetType::Interval,
         ),
         (
@@ -343,7 +343,7 @@ fn every_column_is_typed_through_its_kind_or_the_engine_table() {
         match common {
             Some(CommonKind::Dec) => assert_eq!(got, number_decimal(p, s), "{label}"),
             Some(k) => assert_eq!(Some(got), k.rivet_type(), "{label} is the kind's own type"),
-            None => assert_eq!(got, oracle_engine_type(native, lbl), "{label}"),
+            None => assert_eq!(got, oracle_engine_type(lbl), "{label}"),
         }
     }
 }
@@ -360,13 +360,21 @@ fn no_column_shape_outside_the_common_kinds_is_delivered_as_a_common_type() {
     );
 }
 
-/// The engine table keeps the interval and names every other unmapped type by its label.
+/// An interval is the shared interval kind, and the engine table names every unmapped type by its label.
 #[test]
-fn the_engine_table_holds_the_interval_and_the_unmapped_types() {
-    assert_eq!(oracle_engine_type("interval_ds", "x"), RivetType::Interval);
-    assert_eq!(oracle_engine_type("interval_ym", "x"), RivetType::Interval);
-    assert_eq!(oracle_engine_type("bfile", "bfile"), unsupported("bfile"));
-    assert_eq!(oracle_engine_type("bfile", "lbl"), unsupported("lbl"));
+fn an_interval_is_a_common_kind_and_the_engine_table_holds_the_unmapped_types() {
+    for native in ["interval_ds", "interval_ym"] {
+        assert_eq!(
+            oracle_common_kind(OraKind::Text, native, 0, 0),
+            Some(CommonKind::Interval)
+        );
+        assert_eq!(
+            autodetect(OraKind::Text, native, 0, 0, "x"),
+            RivetType::Interval
+        );
+    }
+    assert_eq!(oracle_engine_type("bfile"), unsupported("bfile"));
+    assert_eq!(oracle_engine_type("lbl"), unsupported("lbl"));
 }
 
 /// NUMBER(p,s) picks its kind at each edge: 9 and 10 digits, 18 and 19, scale 38 and 39, a negative scale that fits 38 digits and one that does not.

@@ -17,8 +17,7 @@ use mysql::consts::{ColumnFlags, ColumnType};
 use crate::error::Result;
 use crate::types::kind::CommonKind;
 use crate::types::{
-    ColumnOverrides, RivetType, SourceColumn, TimeUnit as RivetTimeUnit, TypeFidelity, TypeMapping,
-    build_arrow_field,
+    ColumnOverrides, RivetType, SourceColumn, TypeFidelity, TypeMapping, build_arrow_field,
 };
 
 use crate::source::value_within_ceiling;
@@ -125,6 +124,7 @@ fn mysql_common_kind(col: &mysql::Column) -> Option<CommonKind> {
         MYSQL_TYPE_DATE | MYSQL_TYPE_NEWDATE => CommonKind::Date,
         MYSQL_TYPE_DATETIME | MYSQL_TYPE_DATETIME2 => CommonKind::Naive,
         MYSQL_TYPE_TIMESTAMP | MYSQL_TYPE_TIMESTAMP2 => CommonKind::Utc,
+        MYSQL_TYPE_TIME | MYSQL_TYPE_TIME2 => CommonKind::Time,
         _ => return None,
     })
 }
@@ -164,9 +164,6 @@ fn mysql_engine_type(col: &mysql::Column) -> RivetType {
         | MYSQL_TYPE_STRING
         | MYSQL_TYPE_ENUM
         | MYSQL_TYPE_SET => RivetType::Enum,
-        MYSQL_TYPE_TIME | MYSQL_TYPE_TIME2 => RivetType::Time {
-            unit: RivetTimeUnit::Microsecond,
-        },
         MYSQL_TYPE_BIT if col.column_length() == 1 => RivetType::Bool,
         MYSQL_TYPE_BIT
             if col.column_length()
@@ -1488,10 +1485,11 @@ mod int64_bytes_dispatch_tests {
 
 #[cfg(test)]
 mod roast_mysql_bit_decode_tests {
+    use super::RivetType;
     use super::{
         MysqlCellSource, TimeUnit, build_array, mysql_native_type_name, mysql_type_to_rivet,
     };
-    use super::{RivetTimeUnit, RivetType};
+    use crate::types::TimeUnit as RivetTimeUnit;
     use std::io::{Read, Write};
 
     /// A MySQL date or time stamp column is `compatible` and every other mapping keeps the fidelity `from_source` derives.
