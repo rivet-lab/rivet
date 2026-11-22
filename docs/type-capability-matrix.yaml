@@ -193,6 +193,8 @@ engines:
       "List(Time64(µs))": {duck: "CAST(to_json({c}) AS VARCHAR)"}
       "List(arrow.uuid)": {duck: "CAST(to_json({c}) AS VARCHAR)"}
       "Decimal256(60, 10)": {duck: "arrow"}
+      "server_text": {server: "CASE WHEN {c} IS NOT NULL THEN format('%s', {c}) END"}
+      "inet_text": {server: "CASE WHEN {c} IS NOT NULL THEN format('%s', {c}) END"}
     rows:
       - {native_type: "TEXT", sample: ["'üñíçødé ''q'''", "'hello'"], edges: ["''", "'a'", "' '", "'12'", "'-5'", "'1.5'", "'NULL'", "'0'", "'12abc'", "' 42'", "'x'", "'a''b'", "'é中😀'", "'tab\ttab'", "'nl\nnl'", "'q\"\\,;'", "'üñíçødé ''q'''", "'hello'"], delivery: "Utf8", cdc: exact, clickhouse: {type: "Nullable(String)"}}
       - {native_type: "NUMERIC(18,2)", sample: ["999999999999.99"], edges: ["9999999999999999.99", "-9999999999999999.99", "0", "0.01", "999999999999.99"], delivery: "Decimal128(18, 2)", cdc: exact, clickhouse: {type: "Nullable(Decimal(18, 2))"}}
