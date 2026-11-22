@@ -2510,6 +2510,7 @@ fn an_ltz_instant_just_past_9999_is_delivered_exactly_as_a_tz_column_holds_it() 
     );
     let out = tempfile::tempdir().unwrap();
     let run = Rig::oracle_batch(t.name())
+        .no_oracle("Oracle cannot print the stored year-10000 instant (ORA-01841), so the oracle's source read fails")
         .dest_path(out.path().to_path_buf())
         .run();
     assert!(
