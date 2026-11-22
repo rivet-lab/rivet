@@ -2403,6 +2403,54 @@ fn an_ltz_value_stored_outside_the_range_is_refused_by_code_and_a_query_without_
     );
 }
 
+/// An LTZ value Oracle stored outside its range is refused by code under every override that reads it, never delivered a year off as text, JSON or a date.
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn an_ltz_value_outside_the_range_is_refused_by_code_under_every_override_that_reads_it() {
+    require_alive(LiveService::Oracle);
+    let ceiling = OracleTable::create(
+        "ora_ltzo",
+        "id NUMBER(10) PRIMARY KEY, l TIMESTAMP(6) WITH LOCAL TIME ZONE",
+    );
+    ora_insert_from_zone(
+        ceiling.name(),
+        "+14:00",
+        1,
+        "TIMESTAMP '9999-12-31 10:00:00 +00:00'",
+    );
+    let floor = OracleTable::create(
+        "ora_ltzp",
+        "id NUMBER(10) PRIMARY KEY, l TIMESTAMP(6) WITH LOCAL TIME ZONE",
+    );
+    ora_insert_from_zone(
+        floor.name(),
+        "-12:00",
+        1,
+        "TO_TIMESTAMP_TZ('-4712-01-01 00:00:00 +00:00','SYYYY-MM-DD HH24:MI:SS TZH:TZM')",
+    );
+    for (table, declared) in [
+        (ceiling.name(), "text"),
+        (ceiling.name(), "json"),
+        (ceiling.name(), "timestamp_ns"),
+        (ceiling.name(), "date"),
+        (floor.name(), "text"),
+        (floor.name(), "date"),
+    ] {
+        let out = tempfile::tempdir().unwrap();
+        let rig = Rig::oracle_batch(table)
+            .export_line(&format!("columns: {{L: {declared}}}"))
+            .dest_path(out.path().to_path_buf());
+        assert_refused(
+            &rig.run(),
+            Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5),
+        );
+        assert!(
+            files_with_extension(out.path(), "parquet").is_empty(),
+            "{table} as {declared}: nothing is written before the refusal"
+        );
+    }
+}
+
 /// An LTZ value on the last day of 9999 written from a UTC session, and a TZ value at the ceiling, are delivered as the database holds them.
 #[test]
 #[ignore = "live: requires docker compose oracle"]
