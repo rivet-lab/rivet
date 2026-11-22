@@ -7040,6 +7040,33 @@ seeds:
       oracle:
         na: "only PostgreSQL labels an unmapped type server text from the catalog's native name; the other sources never recorded a native name for a refused column"
 
+  - name: batch-absent-column-adopted
+    class: "a column with no Arrow type (inet, tsvector, a bare numeric) added to the source after the baseline is adopted into the baseline at run open by the server-text label migration, so a batch run reads `schema: unchanged` where main reported the column as added: exit 4 under fail, a warning under the default policy"
+    history: "verifier finding on #1163 head 877a693c 2026-11-22; RED on that head by the added-column cells below"
+    scope: source
+    switch: batch-absent-column-adopted
+    engines:
+      postgres:
+        cells:
+          - an_added_inet_column_is_drift_under_fail_full_postgres
+          - an_added_tsvector_column_is_drift_under_fail_full_postgres
+          - an_added_bare_numeric_column_is_drift_under_fail_full_postgres
+          - an_added_inet_column_is_drift_under_fail_keyset_postgres
+          - an_added_inet_column_is_drift_under_fail_range_postgres
+          - an_added_inet_column_is_drift_under_fail_incremental_postgres
+          - an_added_inet_column_is_reported_under_the_default_policy_incremental_postgres
+          - an_added_tsvector_column_is_reported_under_the_default_policy_incremental_postgres
+          - an_added_bare_numeric_column_is_reported_under_the_default_policy_incremental_postgres
+          - "lib:a_column_absent_from_a_batch_baseline_is_left_to_the_drift_check"
+      mysql:
+        na: "the other sources never labelled an unbuildable column server text, so no baseline migration reaches a new column there"
+      mssql:
+        na: "the other sources never labelled an unbuildable column server text, so no baseline migration reaches a new column there"
+      mongo:
+        na: "the other sources never labelled an unbuildable column server text, so no baseline migration reaches a new column there"
+      oracle:
+        na: "the other sources never labelled an unbuildable column server text, so no baseline migration reaches a new column there"
+
   - name: pg-inet-host-text-gains-a-mask
     class: "a PostgreSQL inet column holding a host address is delivered as `10.1.2.3/32` where the server's own text is `10.1.2.3`, because inet cast to text appends the full mask"
     history: "found 2026-11-21 while writing live_pg_server_text: the server's inet::text is not inet_out; RED from this switch by the same cells"

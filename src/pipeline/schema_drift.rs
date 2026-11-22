@@ -78,9 +78,16 @@ pub(super) fn check_from_cdc_mappings(
     if fields.is_empty() {
         return Ok(());
     }
-    migrate_baseline(state, key, mappings);
+    migrate_baseline(state, key, mappings, AbsentColumns::Adopt);
     let columns = crate::state::arrow_schema_to_columns(&arrow::datatypes::Schema::new(fields));
     check_and_persist(state, key, &columns, policy, &mut RunSummary::default())
+}
+
+/// Whether a column the baseline never recorded may be adopted into it: only a CDC baseline omitted an unbuildable column, a batch baseline did not.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum AbsentColumns {
+    Adopt,
+    Drift,
 }
 
 /// Rewrite the stored baseline of `key` where a column is now delivered as server text, so no run reads that as drift.
@@ -88,13 +95,14 @@ pub(super) fn migrate_baseline(
     state: &StateStore,
     key: &str,
     mappings: &[crate::types::TypeMapping],
+    absent: AbsentColumns,
 ) {
     if seeded!("upgrade-baseline-not-migrated", true, false) {
         return;
     }
     match state.get_stored_schema(key) {
         Ok(Some(stored)) => {
-            if let Some(migrated) = migrate_upgrade_labels(&stored, mappings)
+            if let Some(migrated) = migrate_upgrade_labels(&stored, mappings, absent)
                 && let Err(e) = state.store_schema(key, &migrated)
             {
                 log::warn!("schema drift: could not migrate the baseline of '{key}': {e:#}");
@@ -121,11 +129,18 @@ pub(super) fn is_upgrade_label_migration(
 fn migrate_upgrade_labels(
     stored: &[SchemaColumn],
     mappings: &[crate::types::TypeMapping],
+    absent: AbsentColumns,
 ) -> Option<Vec<SchemaColumn>> {
     let mut out = stored.to_vec();
     let mut moved = false;
     for m in mappings {
         let at = out.iter().position(|c| c.name == m.column_name);
+        if at.is_none()
+            && absent == AbsentColumns::Drift
+            && seeded!("batch-absent-column-adopted", false, true)
+        {
+            continue;
+        }
         if !is_upgrade_label_migration(at.map(|i| &out[i]), m) {
             continue;
         }
@@ -291,7 +306,7 @@ mod tests {
                 },
             ),
         ];
-        migrate_baseline(&st, "k", &cols);
+        migrate_baseline(&st, "k", &cols, AbsentColumns::Drift);
         let stored = st.get_stored_schema("k").unwrap().unwrap();
         assert_eq!(
             stored,
@@ -303,8 +318,39 @@ mod tests {
             ]
         );
         let again = st.get_stored_schema("k").unwrap();
-        migrate_baseline(&st, "k", &cols);
+        migrate_baseline(&st, "k", &cols, AbsentColumns::Drift);
         assert_eq!(st.get_stored_schema("k").unwrap(), again, "idempotent");
+    }
+
+    /// A column the batch baseline never recorded is drift, not a label migration; a CDC baseline adopts it.
+    #[test]
+    fn a_column_absent_from_a_batch_baseline_is_left_to_the_drift_check() {
+        let cols = vec![
+            mapping("id", "bigint", crate::types::RivetType::Int64),
+            server_text(
+                "x",
+                "inet",
+                crate::types::RivetType::Unsupported {
+                    native_type: "inet".into(),
+                    reason: "no arrow type".into(),
+                },
+            ),
+            server_text("n", "numeric", bare_numeric()),
+        ];
+        let batch = StateStore::open_in_memory().unwrap();
+        batch.store_schema("k", &[col("id", "Int64")]).unwrap();
+        migrate_baseline(&batch, "k", &cols, AbsentColumns::Drift);
+        assert_eq!(
+            batch.get_stored_schema("k").unwrap().unwrap(),
+            vec![col("id", "Int64")]
+        );
+        let cdc = StateStore::open_in_memory().unwrap();
+        cdc.store_schema("k", &[col("id", "Int64")]).unwrap();
+        migrate_baseline(&cdc, "k", &cols, AbsentColumns::Adopt);
+        assert_eq!(
+            cdc.get_stored_schema("k").unwrap().unwrap(),
+            vec![col("id", "Int64"), col("x", "Utf8"), col("n", "Utf8")]
+        );
     }
 
     fn date_list() -> crate::types::RivetType {
