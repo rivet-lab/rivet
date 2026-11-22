@@ -33,6 +33,7 @@ CELLS = {
     "a_postgres_uuid_and_uuid_array_load_into_clickhouse_as_native_uuid": "uuid:pg-batch",
     "a_sql_server_uniqueidentifier_loads_into_clickhouse_as_native_uuid": "uuid:mssql",
     "a_postgres_cdc_uuid_column_loads_into_clickhouse_as_native_uuid": "uuid:cdc",
+    "a_sql_server_cdc_uniqueidentifier_column_loads_into_clickhouse_as_native_uuid": "uuid:mssql-cdc",
     "a_postgres_incremental_uuid_column_loads_into_clickhouse_as_native_uuid": "uuid:incremental",
     "a_change_log_holding_uuid_as_fixed_string_is_refused_with_a_working_remedy": "uuid:old-log-refused",
     "a_full_load_replaces_a_fixed_string_uuid_table_with_the_native_column": "uuid:old-table-replaced",

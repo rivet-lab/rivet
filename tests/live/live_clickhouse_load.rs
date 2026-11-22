@@ -1409,6 +1409,68 @@ fn a_sql_server_uniqueidentifier_loads_into_clickhouse_as_native_uuid() {
     );
 }
 
+/// A SQL Server CDC stream with a `uniqueidentifier` column lands it as native `UUID`: inserted, updated and deleted keys read back as the source holds them.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mssql-cdc with SQL Server Agent"]
+fn a_sql_server_cdc_uniqueidentifier_column_loads_into_clickhouse_as_native_uuid() {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let _serial = cross_process_serial("mssql_cdc");
+    let table = unique_name("rivet_ch_msuid");
+    let ci = format!("dbo_{table}");
+    let [a, b, zero, full, _] = UUID_EDGES;
+    mssql_cdc_drop_table(&format!("dbo.{table}"));
+    mssql_cdc_exec(&format!(
+        "CREATE TABLE dbo.{table}(id BIGINT PRIMARY KEY, u UNIQUEIDENTIFIER NULL)"
+    ));
+    enable_cdc(&table, &ci);
+    let _guard = MssqlCdcTable {
+        table: table.clone(),
+        ci: ci.clone(),
+    };
+    mssql_cdc_exec(&format!(
+        "INSERT INTO dbo.{table} VALUES (1, '{a}'), (2, '{b}'), (3, NULL)"
+    ));
+    wait_for_capture(&ci, 3);
+    let source = || {
+        mssql_cdc_query_strings(&format!(
+            "SELECT CONCAT(id, CHAR(9), ISNULL(LOWER(CONVERT(varchar(36), u)), 'NULL')) \
+             FROM dbo.{table} ORDER BY id"
+        ))
+    };
+    let db = Db::new("rivet_chtest");
+    let rig = into_clickhouse(Rig::mssql_cdc(&table, &ci).cdc("until_current: true"), &db);
+    let view = format!("{}.{table}", db.0);
+    let live = || -> Vec<String> {
+        clickhouse_rows_tsv(&format!(
+            "SELECT concat(toString(id), '\t', ifNull(toString(u), 'NULL')) FROM {view} \
+             WHERE NOT __is_deleted ORDER BY id FORMAT TSVRaw"
+        ))
+        .lines()
+        .map(str::to_string)
+        .collect()
+    };
+
+    rig.run_ok();
+    load(&rig);
+    assert_eq!(
+        catalog_type(&db.0, &format!("{table}__changes"), "u"),
+        "Nullable(UUID)"
+    );
+    assert_eq!(live(), source());
+
+    mssql_cdc_exec(&format!(
+        "INSERT INTO dbo.{table} VALUES (4, '{zero}'); \
+         UPDATE dbo.{table} SET u = '{full}' WHERE id = 1; \
+         DELETE FROM dbo.{table} WHERE id = 2"
+    ));
+    wait_for_capture(&ci, 7);
+    rig.run_ok();
+    load(&rig);
+    assert_eq!(live(), source());
+}
+
 /// A PostgreSQL CDC stream with a `uuid` column lands it as native `UUID`: inserted, updated and deleted keys read back as the source holds them.
 #[test]
 #[ignore = "live: requires clickhouse + fake-gcs + postgres-cdc"]

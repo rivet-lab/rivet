@@ -7220,7 +7220,9 @@ seeds:
           - "lib:json_lands_as_its_parquet_type_and_uuid_native_also_inside_an_array"
           - "lib:a_part_with_uuid_columns_is_converted_and_one_without_is_untouched"
       mssql:
-        cells: [a_sql_server_uniqueidentifier_loads_into_clickhouse_as_native_uuid]
+        cells:
+          - a_sql_server_uniqueidentifier_loads_into_clickhouse_as_native_uuid
+          - a_sql_server_cdc_uniqueidentifier_column_loads_into_clickhouse_as_native_uuid
       mysql:
         na: "MySQL has no uuid column type; a `columns:` override reaches the same shared column_type (lib:json_lands_as_its_parquet_type_and_uuid_native_also_inside_an_array) and the type ledger holds no uuid row for it"
       oracle:
