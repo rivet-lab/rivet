@@ -617,26 +617,30 @@ jobs:
             -S localhost -U sa -P 'Rivet_Passw0rd!' -C -b \
             -Q "IF DB_ID('rivet') IS NULL CREATE DATABASE rivet;"
 
+      - name: Stand is ready
+        id: stand
+        run: echo "the services answered and every seed ran"
+
       - name: Type-golden tests (semantic gate)
-        if: ${{ !cancelled() && matrix.leg == 'pre' }}
+        if: ${{ !cancelled() && steps.stand.outcome == 'success' && matrix.leg == 'pre' }}
         run: cargo test --test live_type_golden -- --ignored
 
       - name: Type round-trip validators — DuckDB · ClickHouse · pyarrow (semantic gate)
-        if: ${{ !cancelled() && matrix.leg == 'pre' }}
+        if: ${{ !cancelled() && steps.stand.outcome == 'success' && matrix.leg == 'pre' }}
         run: cargo test --test type_roundtrip -- --include-ignored --skip bigquery
 
       - name: Differential correctness at scale (DuckDB vs source)
-        if: ${{ !cancelled() && matrix.leg == 'pre' }}
+        if: ${{ !cancelled() && steps.stand.outcome == 'success' && matrix.leg == 'pre' }}
         run: cargo test --test live_differential -- --ignored
 
       - name: Create matrix navigation links
-        if: ${{ !cancelled() && matrix.leg == 'pre' }}
+        if: ${{ !cancelled() && steps.stand.outcome == 'success' && matrix.leg == 'pre' }}
         env:
           RIVET_BIN: ${{ github.workspace }}/target/debug/rivet
         run: python3 -m dev.pytools.matrix_common setup-links
 
       - name: PR regression matrices (cli + cfg + path)
-        if: ${{ !cancelled() && matrix.leg == 'pre' }}
+        if: ${{ !cancelled() && steps.stand.outcome == 'success' && matrix.leg == 'pre' }}
         env:
           RIVET_BIN: ${{ github.workspace }}/target/debug/rivet
         shell: bash
@@ -656,7 +660,7 @@ jobs:
           retention-days: 14
 
       - name: Run E2E test suite
-        if: ${{ !cancelled() && matrix.leg == 'pre' }}
+        if: ${{ !cancelled() && steps.stand.outcome == 'success' && matrix.leg == 'pre' }}
         env:
           MINIO_ACCESS_KEY: minioadmin
           MINIO_SECRET_KEY: minioadmin
@@ -664,15 +668,15 @@ jobs:
         run: python3 -m dev.pytools.e2e
 
       - name: State lib tests on the Postgres state backend
-        if: ${{ !cancelled() && matrix.leg == 'pre' }}
+        if: ${{ !cancelled() && steps.stand.outcome == 'success' && matrix.leg == 'pre' }}
         run: python3 -m dev.release_oracle.state_lib
 
       - name: Ignored doc-tests
-        if: ${{ !cancelled() && matrix.leg == 'pre' }}
+        if: ${{ !cancelled() && steps.stand.outcome == 'success' && matrix.leg == 'pre' }}
         run: cargo test --doc -- --ignored
 
       - name: Run live cargo integration tests
-        if: ${{ !cancelled() && matrix.leg != 'pre' }}
+        if: ${{ !cancelled() && steps.stand.outcome == 'success' && matrix.leg != 'pre' }}
         run: |
           cargo nextest run --archive-file "$RUNNER_TEMP/e2e-nextest.tar.zst" \
           --extract-to "$GITHUB_WORKSPACE" --extract-overwrite \
