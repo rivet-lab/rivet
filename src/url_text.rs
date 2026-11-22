@@ -1,5 +1,14 @@
 //! Pure readers of the text of a connection URL: its authority, the userinfo a credential mask cuts, and the host list.
 
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC};
+
+/// Chars to percent-encode in a URL userinfo (user / password) component.
+pub(crate) const USERINFO: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
 /// The authority of a connection URL: its userinfo, its host list, and the text from the first `/`, `?` or `#` on.
 pub(crate) struct Authority<'a> {
     pub userinfo: Option<&'a str>,
@@ -104,18 +113,14 @@ fn password_span(word: &str) -> Option<(usize, usize)> {
     word.match_indices("://")
         .map(|(scheme_end, _)| (scheme_end, scheme_end + 3))
         .take_while(|(_, userinfo)| *userinfo <= last_colon)
-        .find(|(scheme_end, _)| ends_in_scheme(&word[..*scheme_end]))
+        .find(|(scheme_end, _)| {
+            word.as_bytes()[..*scheme_end]
+                .iter()
+                .rev()
+                .take_while(|b| is_scheme_byte(**b))
+                .any(u8::is_ascii_alphabetic)
+        })
         .map(|(_, userinfo)| (userinfo, at))
-}
-
-/// Whether `before` ends in a URL scheme: a run of scheme bytes with a letter in it.
-pub(crate) fn ends_in_scheme(before: &str) -> bool {
-    before
-        .as_bytes()
-        .iter()
-        .rev()
-        .take_while(|b| is_scheme_byte(**b))
-        .any(u8::is_ascii_alphabetic)
 }
 
 /// A byte a URL scheme may hold after its first letter.

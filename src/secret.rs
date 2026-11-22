@@ -24,7 +24,7 @@ impl Secret {
         Self::registered(Zeroizing::new(value.into()))
     }
 
-    /// `value` as a secret, registered for masking unless it holds `://` or `=` with a space or `;`: the URL and keyword scanners mask the password inside a connection string, and any other such text (a service-account JSON) is not masked by value.
+    /// `value` as a secret, registered for masking unless it holds `://` or `=` with a space or `;`: the URL and keyword scanners mask the password inside a connection string, and a service-account JSON read as one value is not masked as a whole.
     fn registered(value: Zeroizing<String>) -> Self {
         let secret = Self(value);
         if seeded!(
@@ -187,6 +187,19 @@ mod tests {
             "host=h user=u password=*** dbname=by-construction",
             "a keyword DSN is left to the keyword scanner"
         );
+    }
+
+    /// A service-account `private_key` is its own secret: masked by value unless its PEM holds `=` with a space, as the changelog states.
+    #[test]
+    fn a_pem_private_key_is_masked_by_value_unless_it_holds_padding() {
+        let bare = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSj\n-----END PRIVATE KEY-----\n";
+        let _held: Secret = serde_json::from_str(&serde_json::to_string(bare).unwrap()).unwrap();
+        let shown = crate::redact::redact_secrets(&format!("jwt failed for {bare}"));
+        assert_eq!(shown, "jwt failed for ***");
+        let padded = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAQ==\n-----END PRIVATE KEY-----\n";
+        let _padded = Secret::new(padded);
+        let echoed = format!("jwt failed for {padded}");
+        assert_eq!(crate::redact::redact_secrets(&echoed), echoed);
     }
 
     /// A credential that equals a word the scanners key on is not registered: masking it as free text would defeat the keyword scanner on `password=<other secret>` and rewrite the remedy hints that name `password_env`.
