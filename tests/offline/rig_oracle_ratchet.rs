@@ -73,8 +73,7 @@ const KNOWN_PRODUCT_DEFECT_CEILING: usize = 1; // ratchet-pin: failed-run-known-
 // 623 -> 626 (2026-11-06): mid-row cut cells read count + id set back through DuckDB; closed when they move to the rig oracle.
 // 626 -> 621 (2026-11-11): the mssql varchar keyset cell grades through the rig oracle; five helper calls left.
 // 621 -> 626 (2026-11-20): the PG json/interval/oid/enum array cell and the Oracle number/interval cells read the delivered list back through DuckDB; closed when they move to the rig oracle.
-// 626 -> 627 (2026-11-22): the PG negative-scale cell delivered as server text reads type and value in one DuckDB query; closes when pg_edge_export returns the host output dir for an arrow read.
-const DUCKDB_HELPER_CEILING: usize = 627; // ratchet-pin: duckdb-helper-sites (review 2027-02-01)
+const DUCKDB_HELPER_CEILING: usize = 626; // ratchet-pin: duckdb-helper-sites (review 2027-02-01)
 
 /// Owned by a concurrent branch and migrated after it lands; not counted.
 const EXCLUDED: &[&str] = &["tests/live/live_cdc_type_parity.rs"];

@@ -20,6 +20,9 @@
 
 use std::process::Output;
 
+use arrow::array::{Array, AsArray};
+use arrow::datatypes::DataType;
+
 use postgres::Client as PgClient;
 use postgres::NoTls;
 
@@ -32,6 +35,17 @@ fn pg_edge_export(
     label: &str,
     overrides_yaml: &str,
 ) -> (String, Output) {
+    let (_host_dir, glob, out) = pg_edge_export_at(setup_sql, query, label, overrides_yaml);
+    (glob, out)
+}
+
+/// Like `pg_edge_export`, also returning the host directory the parquet files were written to.
+fn pg_edge_export_at(
+    setup_sql: &str,
+    query: &str,
+    label: &str,
+    overrides_yaml: &str,
+) -> (std::path::PathBuf, String, Output) {
     let table = unique_name(label);
     let mut c = PgClient::connect(POSTGRES_URL, NoTls).expect("connect");
     c.batch_execute(&format!("DROP TABLE IF EXISTS {table} CASCADE;"))
@@ -68,7 +82,7 @@ exports:
     // schema and PgCleanup expects a fixed shape with an enum type.
     let _ = c.batch_execute(&format!("DROP TABLE IF EXISTS {table} CASCADE;"));
 
-    (format!("{container_dir}/*.parquet"), out)
+    (host_dir, format!("{container_dir}/*.parquet"), out)
 }
 
 /// Caller helper: assert the export succeeded and return the glob to pass
@@ -180,20 +194,38 @@ fn pg_edge_decimal_negative_scale_override_is_refused_by_the_override_table() {
 #[test]
 #[ignore = "live: requires docker compose postgres + duckdb"]
 fn pg_edge_decimal_negative_scale_without_override_is_delivered_as_the_servers_text() {
-    let glob = pg_edge_export_ok(
+    let (host_dir, _glob, out) = pg_edge_export_at(
         "CREATE TABLE {table_name} (id INT, d NUMERIC(5, -2));
          INSERT INTO {table_name} VALUES (1, 12345), (2, -99999), (3, NULL);",
         "SELECT id, d FROM {table_name} ORDER BY id",
         "pg_edge_negsc_bare",
         "",
     );
-    let v = duckdb_run_sql_json(&format!(
-        "SELECT d, typeof(d) FROM read_parquet('{glob}') ORDER BY id"
-    ));
-    let rows = v["rows"].as_array().unwrap();
-    assert!(rows.iter().all(|r| r[1].as_str() == Some("VARCHAR")));
-    let cells: Vec<Option<&str>> = rows.iter().map(|r| r[0].as_str()).collect();
-    assert_eq!(cells, [Some("12300"), Some("-100000"), None]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut cells: Vec<Option<String>> = Vec::new();
+    for entry in std::fs::read_dir(&host_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "parquet") {
+            continue;
+        }
+        let (schema, batches) = super::helpers::read_parquet_batches(&path);
+        assert_eq!(
+            schema.field_with_name("d").unwrap().data_type(),
+            &DataType::Utf8
+        );
+        for b in &batches {
+            let d = b.column_by_name("d").unwrap().as_string::<i32>();
+            cells.extend((0..d.len()).map(|i| (!d.is_null(i)).then(|| d.value(i).to_string())));
+        }
+    }
+    assert_eq!(
+        cells,
+        [Some("12300".to_string()), Some("-100000".to_string()), None]
+    );
 }
 
 // ─── Timestamps: pre-epoch + far future + non-UTC normalisation ────────────
