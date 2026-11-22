@@ -411,7 +411,7 @@ def _same_instant(engine: str, native: str, exp: str, got) -> str:
         except OverflowError:
             return "PRESENCE"
     if isinstance(e, timedelta) and isinstance(got, (int, float, Decimal)) and not isinstance(got, bool):
-        return "OK" if Decimal(e.days * 86400 + e.seconds) + Decimal(e.microseconds) / 10**6 == Decimal(str(got)) else WRONG
+        return "OK" if Decimal(e.days * 86400 + e.seconds) + Decimal(e.microseconds) / 10**6 + Decimal(_sub_us(exp)) / 10**9 == Decimal(str(got)) else WRONG
     if e is None or g is None:
         return WRONG if e is None and isinstance(got, (date, dtime, timedelta)) else "PRESENCE"
     if type(e) is date and type(g) is datetime:
@@ -1455,6 +1455,7 @@ def _reader_self_test() -> bool:
         import pyarrow.parquet as pq
     except ImportError:
         return False
+    assert _same_instant("mssql", "TIME", "00:00:00.0000001", Decimal("0.0000001")) == "OK" and _same_instant("mssql", "TIME", "00:00:00.0000001", Decimal("0")) == WRONG, "a 100ns tick is graded in seconds-of-day, never dropped to the microsecond"
     assert nanosecond_read_keeps_every_digit(), "a nanosecond column is read as the text DuckDB holds, never a microsecond datetime"
     col = Col("c00", "INT", "Int32", "int", ("1", "16777217", "-5"))
     with tempfile.TemporaryDirectory() as t:
