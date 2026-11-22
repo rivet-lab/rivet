@@ -141,11 +141,12 @@ impl TypeMapping {
 
     /// This mapping, built from a `columns:` override over `source`, lossy when the override keeps fewer fraction digits than the source column holds.
     pub fn narrowed_from(self, source: &TypeMapping) -> Self {
-        match source.source_fraction_digits {
-            Some(digits) if seeded!("stream-override-narrowing-not-read", false, true) => {
-                self.narrowed_fraction(digits)
-            }
-            _ => self,
+        match source
+            .source_fraction_digits
+            .filter(|_| seeded!("stream-override-narrowing-not-read", false, true))
+        {
+            Some(digits) => self.narrowed_fraction(digits),
+            None => self,
         }
     }
 
