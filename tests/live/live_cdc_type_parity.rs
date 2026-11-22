@@ -1985,6 +1985,7 @@ fn oracle_batch_and_cdc_deliver_every_ledger_row_alike() {
     let cdc = Rig::oracle_cdc(t.name())
         .cdc_line("initial: snapshot")
         .export_line(&declared);
+    let wh = warehouse(Rig::oracle_cdc(t.name()).export_line(&declared), t.name());
     let batch = batch_named(Rig::oracle_batch(t.name()), t.name()).export_line(&declared);
     let st = Stand {
         engine: "oracle",
@@ -1998,7 +1999,7 @@ fn oracle_batch_and_cdc_deliver_every_ledger_row_alike() {
         settle: &|_| {},
         cdc: graded(cdc),
         batch: graded(batch),
-        warehouse: None,
+        warehouse: Some(wh),
     };
     let n = seed(&lg, &st);
     capture(&st);

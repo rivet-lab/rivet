@@ -3,6 +3,8 @@
 
 use std::collections::BTreeSet;
 
+use rivet::types::target::{ExportTarget, TargetInput, TargetStatus};
+use rivet::types::{RivetType, TimeUnit, derive_fidelity, rivet_type_to_arrow};
 use serde_yaml_ng::Value;
 
 use super::chunking_matrix_guard::{enum_variants, source_engine_variants};
@@ -177,27 +179,13 @@ fn row_violations(doc: &Value) -> Vec<String> {
                     bad.push(format!("{at}: `{key}:` is not a row field"));
                 }
             }
-            let ch = &r["clickhouse"];
-            for key in ch.as_mapping().into_iter().flat_map(|m| m.keys()) {
-                let key = key.as_str().unwrap_or("");
-                if !CLICKHOUSE_KEYS.contains(&key) {
-                    bad.push(format!(
-                        "{at}: `clickhouse.{key}:` is not a ClickHouse field"
-                    ));
-                }
-            }
-            if !ch.is_null() && ch["type"].is_null() {
-                bad.push(format!("{at}: `clickhouse:` names no `type:`"));
-            }
-            let (kd, chd) = (&r["known_defect"], &ch["defect"]);
-            for (key, why) in [("known_defect", kd), ("clickhouse.defect", chd)] {
-                if let Some(why) = why.as_str()
-                    && !(why.contains("ADR-") && why.contains("step"))
-                {
-                    bad.push(format!(
-                        "{at}: {key} must name the ADR and the step that fixes it"
-                    ));
-                }
+            let kd = &r["known_defect"];
+            if let Some(why) = kd.as_str()
+                && !(why.contains("ADR-") && why.contains("step"))
+            {
+                bad.push(format!(
+                    "{at}: known_defect must name the ADR and the step that fixes it"
+                ));
             }
             if !kd.is_null() {
                 match r["today_delivery"].as_str() {
@@ -210,41 +198,28 @@ fn row_violations(doc: &Value) -> Vec<String> {
                     _ => {}
                 }
             }
-            let marked = !kd.is_null() || !chd.is_null();
-            match (marked, ch["today"].is_null()) {
-                (true, true) if !ch.is_null() => bad.push(format!(
-                    "{at}: a marked row with a ClickHouse type needs `clickhouse.today:`"
-                )),
-                (false, false) => {
-                    bad.push(format!("{at}: `clickhouse.today:` belongs beside a marker"))
-                }
-                _ => {}
-            }
-            for (key, val, marker, by) in [
-                ("today_render", &r["today_render"], "known_defect", kd),
-                ("today_delivery", &r["today_delivery"], "known_defect", kd),
-                ("defect_samples", &r["defect_samples"], "known_defect", kd),
-                (
-                    "clickhouse.defect_samples",
-                    &ch["defect_samples"],
-                    "clickhouse.defect",
-                    chd,
-                ),
+            for (key, val) in [
+                ("today_render", &r["today_render"]),
+                ("today_delivery", &r["today_delivery"]),
+                ("defect_samples", &r["defect_samples"]),
             ] {
-                if !val.is_null() && by.is_null() {
-                    bad.push(format!("{at}: `{key}:` belongs beside `{marker}:`"));
+                if !val.is_null() && kd.is_null() {
+                    bad.push(format!("{at}: `{key}:` belongs beside `known_defect:`"));
                 }
             }
+            bad.extend(leg_shape_violations(&at, r));
             let samples: Vec<&str> = r["sample"]
                 .as_sequence()
                 .into_iter()
                 .flatten()
                 .filter_map(Value::as_str)
                 .collect();
-            for (key, list) in [
-                ("defect_samples", &r["defect_samples"]),
-                ("clickhouse.defect_samples", &ch["defect_samples"]),
-            ] {
+            let leg_samples = LEGS
+                .iter()
+                .map(|(k, _)| (format!("{k}.defect_samples"), &r[*k]["defect_samples"]));
+            for (key, list) in std::iter::once(("defect_samples".to_string(), &r["defect_samples"]))
+                .chain(leg_samples)
+            {
                 for d in list.as_sequence().into_iter().flatten() {
                     let d = d.as_str().unwrap_or("");
                     if d != "NULL" && !samples.contains(&d) {
@@ -303,6 +278,145 @@ fn render_violations(engine: &str, at: &str, render: &Value) -> Vec<String> {
     bad
 }
 
+/// The type a delivery label names: a TextForm label and every text-valued column is a string, `arrow.json`/`arrow.uuid` are their kinds, anything else an Arrow display.
+fn rivet_type_of(forms: &BTreeSet<String>, d: &str) -> RivetType {
+    use arrow_schema::{DataType, TimeUnit as Unit};
+    let unit = |u: &Unit| match u {
+        Unit::Second => TimeUnit::Second,
+        Unit::Millisecond => TimeUnit::Millisecond,
+        Unit::Microsecond => TimeUnit::Microsecond,
+        Unit::Nanosecond => TimeUnit::Nanosecond,
+    };
+    if forms.contains(d) {
+        return RivetType::String;
+    }
+    match d {
+        "arrow.json" => return RivetType::Json,
+        "arrow.uuid" => return RivetType::Uuid,
+        _ => {}
+    }
+    if let Some(inner) = d.strip_prefix("List(").and_then(|e| e.strip_suffix(')')) {
+        return RivetType::List {
+            inner: Box::new(rivet_type_of(forms, inner)),
+        };
+    }
+    let t = match d
+        .parse::<DataType>()
+        .unwrap_or_else(|e| panic!("delivery `{d}`: {e}"))
+    {
+        DataType::Boolean => RivetType::Bool,
+        DataType::Int16 => RivetType::Int16,
+        DataType::Int32 => RivetType::Int32,
+        DataType::Int64 => RivetType::Int64,
+        DataType::UInt64 => RivetType::UInt64,
+        DataType::Float32 => RivetType::Float32,
+        DataType::Float64 => RivetType::Float64,
+        DataType::Decimal128(precision, scale) | DataType::Decimal256(precision, scale) => {
+            RivetType::Decimal { precision, scale }
+        }
+        DataType::Date32 => RivetType::Date,
+        DataType::Time64(u) => RivetType::Time { unit: unit(&u) },
+        DataType::Timestamp(u, tz) => RivetType::Timestamp {
+            unit: unit(&u),
+            timezone: tz.map(|z| z.to_string()),
+        },
+        DataType::Utf8 => RivetType::String,
+        DataType::Binary => RivetType::Binary,
+        other => panic!("delivery `{d}` ({other}) has no RivetType"),
+    };
+    assert_eq!(
+        rivet_type_to_arrow(&t).map(|a| a.to_string()).as_deref(),
+        Some(d),
+        "delivery `{d}` does not round-trip through RivetType"
+    );
+    t
+}
+
+/// The code a warehouse load refuses a column no type exists for.
+const LOAD_UNMAPPED: &str = "refuse:RIVET_LOAD_COLUMN_TYPE_UNSUPPORTED";
+
+/// The column type `rivet load` builds in `leg` for a column delivered as `d`, as the ledger spells it: the resolver's own type, `Nullable` around a ClickHouse scalar, ClickHouse's own name for `Decimal64(s)`.
+fn expected_leg(leg: &str, forms: &BTreeSet<String>, d: &str) -> String {
+    let rt = rivet_type_of(forms, d);
+    let target = match leg {
+        "bigquery" => ExportTarget::BigQuery,
+        "snowflake" => ExportTarget::Snowflake,
+        "clickhouse" => ExportTarget::ClickHouse,
+        other => panic!("no warehouse leg `{other}`"),
+    };
+    let spec = target.resolve_column(TargetInput {
+        column_name: "c",
+        rivet_type: &rt,
+        arrow_type: None,
+        fidelity: derive_fidelity(&rt),
+    });
+    if spec.status == TargetStatus::Fail {
+        return LOAD_UNMAPPED.to_string();
+    }
+    let t = spec.target_type.to_string();
+    if leg != "clickhouse" {
+        return t;
+    }
+    let t = canonical_decimal64(&t).replace("JSON", "String");
+    if t.starts_with("Array(") {
+        t
+    } else {
+        format!("Nullable({t})")
+    }
+}
+
+/// `Decimal64(s)` spelled the way `system.columns` prints it, `Decimal(18, s)`, also inside an Array.
+fn canonical_decimal64(t: &str) -> String {
+    match t.split_once("Decimal64(") {
+        Some((head, tail)) => {
+            let (s, rest) = tail.split_once(')').expect("Decimal64 closes");
+            format!("{head}Decimal(18, {s}){}", canonical_decimal64(rest))
+        }
+        None => t.to_string(),
+    }
+}
+
+/// Every delivering row whose `clickhouse`, `bigquery` or `snowflake` leg is absent or names a type the resolver does not build for its delivery (and, on a `known_defect` row, for its `today_delivery`).
+fn leg_violations(doc: &Value) -> Vec<String> {
+    let forms = keys(doc, "forms");
+    let mut bad = Vec::new();
+    for engine in keys(doc, "engines") {
+        for (native, r) in rows(doc, &engine) {
+            let Some(d) = r["delivery"].as_str() else {
+                continue;
+            };
+            for (leg, name) in LEGS {
+                let at = format!("engines.{engine}.rows[{native}].{leg}");
+                let want = expected_leg(leg, &forms, d);
+                let Some(got) = r[leg]["type"].as_str() else {
+                    bad.push(format!(
+                        "{at}: a delivering row names its {name} type, `rivet load` builds `{want}`"
+                    ));
+                    continue;
+                };
+                if got != want {
+                    bad.push(format!("{at}.type: `{got}`, `rivet load` builds `{want}`"));
+                }
+                if r["known_defect"].is_null() || !r[leg]["defect"].is_null() {
+                    continue;
+                }
+                let Some(td) = r["today_delivery"].as_str() else {
+                    continue;
+                };
+                let want = expected_leg(leg, &forms, td);
+                match r[leg]["today"].as_str() {
+                    Some(today) if today == want => {}
+                    Some(today) => bad.push(format!(
+                        "{at}.today: `{today}`, `rivet load` builds `{want}`"
+                    )),
+                    None => bad.push(format!("{at}.today: missing, `rivet load` builds `{want}`")),
+                }
+            }
+        }
+    }
+    bad
+}
+
 /// Rows per engine; a ledger may grow past these, never fall below them.
 const ROW_FLOOR: [(&str, usize); 5] = [
     // ratchet-pin: type-ledger-rows (review 2027-02-01) sum min
@@ -323,7 +437,8 @@ fn every_ledger_row_has_a_sample_and_a_real_delivery() {
             "engines.{engine}.rows lost rows: {got}, the floor is {floor}"
         );
     }
-    let bad = row_violations(&doc);
+    let mut bad = row_violations(&doc);
+    bad.extend(leg_violations(&doc));
     assert!(bad.is_empty(), "{LEDGER}:\n{}", bad.join("\n"));
 }
 
@@ -352,7 +467,7 @@ const KNOWN_DEFECTS: &[&str] = &[
 ]; // ratchet-pin: end
 
 /// The fields a ledger row may carry.
-const ROW_KEYS: [&str; 13] = [
+const ROW_KEYS: [&str; 15] = [
     "native_type",
     "sample",
     "delivery",
@@ -362,6 +477,8 @@ const ROW_KEYS: [&str; 13] = [
     "today_delivery",
     "defect_samples",
     "clickhouse",
+    "bigquery",
+    "snowflake",
     "edges",
     "refuses",
     "cdc",
@@ -471,8 +588,54 @@ fn cdc_violations(at: &str, r: &Value) -> Vec<String> {
     bad
 }
 
-/// The fields of a row's `clickhouse:` map.
-const CLICKHOUSE_KEYS: [&str; 4] = ["type", "today", "defect", "defect_samples"];
+/// The warehouse legs of a row: ledger key and the name `KNOWN_DEFECTS` spells.
+const LEGS: [(&str, &str); 3] = [
+    ("clickhouse", "ClickHouse"),
+    ("bigquery", "BigQuery"),
+    ("snowflake", "Snowflake"),
+];
+
+/// The fields of a row's warehouse leg map.
+const LEG_KEYS: [&str; 4] = ["type", "today", "defect", "defect_samples"];
+
+/// Every error in the shape of a row's warehouse legs: fields, `type`, markers and `today`.
+fn leg_shape_violations(at: &str, r: &Value) -> Vec<String> {
+    let mut bad = Vec::new();
+    for (key, name) in LEGS {
+        let leg = &r[key];
+        for field in leg.as_mapping().into_iter().flat_map(|m| m.keys()) {
+            let field = field.as_str().unwrap_or("");
+            if !LEG_KEYS.contains(&field) {
+                bad.push(format!("{at}: `{key}.{field}:` is not a {name} field"));
+            }
+        }
+        if !leg.is_null() && leg["type"].is_null() {
+            bad.push(format!("{at}: `{key}:` names no `type:`"));
+        }
+        let defect = &leg["defect"];
+        if let Some(why) = defect.as_str()
+            && !(why.contains("ADR-") && why.contains("step"))
+        {
+            bad.push(format!(
+                "{at}: {key}.defect must name the ADR and the step that fixes it"
+            ));
+        }
+        let marked = !r["known_defect"].is_null() || !defect.is_null();
+        match (marked, leg["today"].is_null()) {
+            (true, true) if !leg.is_null() => bad.push(format!(
+                "{at}: a marked row with a {name} type needs `{key}.today:`"
+            )),
+            (false, false) => bad.push(format!("{at}: `{key}.today:` belongs beside a marker")),
+            _ => {}
+        }
+        if !leg["defect_samples"].is_null() && defect.is_null() {
+            bad.push(format!(
+                "{at}: `{key}.defect_samples:` belongs beside `{key}.defect:`"
+            ));
+        }
+    }
+    bad
+}
 
 /// Every marked row of `doc` as `KNOWN_DEFECTS` spells it.
 fn marked(doc: &Value) -> BTreeSet<String> {
@@ -482,8 +645,10 @@ fn marked(doc: &Value) -> BTreeSet<String> {
             if !r["known_defect"].is_null() {
                 out.insert(format!("{e}:{n}"));
             }
-            if !r["clickhouse"]["defect"].is_null() {
-                out.insert(format!("{e}:{n} (ClickHouse)"));
+            for (key, name) in LEGS {
+                if !r[key]["defect"].is_null() {
+                    out.insert(format!("{e}:{n} ({name})"));
+                }
             }
         }
     }
@@ -566,6 +731,83 @@ fn a_known_defect_without_today_delivery_is_refused() {
         .unwrap();
     let bad = row_violations(&doc);
     for want in ["needs `today_delivery:`", "needs `clickhouse.today:`"] {
+        assert!(bad.iter().any(|b| b.contains(want)), "{want}: {bad:?}");
+    }
+}
+
+/// The leg map `leg` of `engine`'s row `native`, for a test to edit.
+fn leg_mut<'a>(
+    doc: &'a mut Value,
+    engine: &str,
+    native: &str,
+    leg: &str,
+) -> &'a mut serde_yaml_ng::Mapping {
+    row_mut(doc, engine, native)
+        .get_mut(leg)
+        .and_then(Value::as_mapping_mut)
+        .unwrap_or_else(|| panic!("no {engine} row {native} leg {leg}"))
+}
+
+#[test]
+fn a_warehouse_type_the_resolver_does_not_build_is_refused() {
+    for (engine, native, leg) in [
+        ("mssql", "BIGINT", "bigquery"),
+        ("postgres", "TEXT", "snowflake"),
+        ("mysql", "VARCHAR(200)", "clickhouse"),
+        ("oracle", "NUMBER(18)", "clickhouse"),
+    ] {
+        let mut doc = ledger();
+        leg_mut(&mut doc, engine, native, leg).insert("type".into(), "BLOB".into());
+        let bad = leg_violations(&doc);
+        let at = format!("engines.{engine}.rows[{native}].{leg}.type: `BLOB`");
+        assert!(bad.iter().any(|b| b.starts_with(&at)), "{at}: {bad:?}");
+    }
+}
+
+#[test]
+fn a_delivering_row_without_a_warehouse_leg_is_refused() {
+    for (engine, native, leg, name) in [
+        ("mysql", "VARCHAR(200)", "snowflake", "Snowflake"),
+        ("oracle", "NUMBER(18)", "clickhouse", "ClickHouse"),
+        ("postgres", "NUMERIC", "bigquery", "BigQuery"),
+    ] {
+        let mut doc = ledger();
+        row_mut(&mut doc, engine, native).remove(leg).unwrap();
+        let bad = leg_violations(&doc);
+        let want = format!(
+            "engines.{engine}.rows[{native}].{leg}: a delivering row names its {name} type"
+        );
+        assert!(bad.iter().any(|b| b.starts_with(&want)), "{want}: {bad:?}");
+    }
+}
+
+#[test]
+fn a_leg_today_the_resolver_does_not_build_is_refused() {
+    let mut doc = ledger();
+    leg_mut(&mut doc, "oracle", "TIMESTAMP(9)", "bigquery").insert("today".into(), "INT64".into());
+    leg_mut(&mut doc, "postgres", "NUMERIC", "snowflake")
+        .remove("today")
+        .unwrap();
+    let bad = leg_violations(&doc);
+    for want in [
+        "engines.oracle.rows[TIMESTAMP(9)].bigquery.today: `INT64`, `rivet load` builds `DATETIME`",
+        "engines.postgres.rows[NUMERIC].snowflake.today: missing, `rivet load` builds `TEXT`",
+    ] {
+        assert!(bad.iter().any(|b| b == want), "{want}: {bad:?}");
+    }
+}
+
+#[test]
+fn a_leg_today_without_a_marker_or_an_unknown_leg_field_is_refused() {
+    let mut doc = ledger();
+    let leg = leg_mut(&mut doc, "mssql", "BIGINT", "bigquery");
+    leg.insert("today".into(), "INT64".into());
+    leg.insert("note".into(), "x".into());
+    let bad = row_violations(&doc);
+    for want in [
+        "`bigquery.today:` belongs beside a marker",
+        "`bigquery.note:` is not a BigQuery field",
+    ] {
         assert!(bad.iter().any(|b| b.contains(want)), "{want}: {bad:?}");
     }
 }
