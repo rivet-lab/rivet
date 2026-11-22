@@ -336,10 +336,11 @@ pub(super) fn rivet_type_for_pg_column(
 /// Whether `r` has no Arrow mapping, alone or as the element of a list.
 fn unmapped(r: &RivetType) -> bool {
     match r {
-        RivetType::Unsupported { .. } => {
-            seeded!("pg-unmapped-type-refused", false, true)
-                && seeded!("pg-bare-numeric-refused", *r != bare_numeric(), true)
-        }
+        RivetType::Unsupported { .. } => seeded!(
+            "pg-unmapped-type-refused",
+            false,
+            seeded!("pg-bare-numeric-refused", *r != bare_numeric(), true)
+        ),
         RivetType::List { inner } => unmapped(inner),
         _ => false,
     }
@@ -406,15 +407,14 @@ pub(super) fn pg_server_text_query(sql: &str, columns: &[(&str, &Type, bool)]) -
 
 /// The statement's columns as `pg_server_text_query` takes them: name, wire type and whether the column is read as text.
 pub(super) fn pg_text_columns<'a>(
-    declared: &'a [postgres::Column],
+    declared: impl Iterator<Item = (&'a str, &'a Type)>,
     column_overrides: &ColumnOverrides,
     numeric_hints: Option<&HashMap<String, (u8, i8)>>,
 ) -> Vec<(&'a str, &'a Type, bool)> {
     declared
-        .iter()
-        .map(|c| {
-            let text = pg_text_projected(c.type_(), c.name(), column_overrides, numeric_hints);
-            (c.name(), c.type_(), text)
+        .map(|(name, t)| {
+            let text = pg_text_projected(t, name, column_overrides, numeric_hints);
+            (name, t, text)
         })
         .collect()
 }
@@ -1525,7 +1525,7 @@ mod cell_refusal_tests {
 mod server_text_projection_tests {
     use super::{
         ColumnOverrides, HashMap, RivetType, TypeMapping, pg_delivery, pg_server_text,
-        pg_server_text_query, pg_text_projected, pg_text_render,
+        pg_server_text_query, pg_text_columns, pg_text_projected, pg_text_render,
     };
     use postgres::types::Type;
 
@@ -1605,6 +1605,28 @@ mod server_text_projection_tests {
         );
         assert_eq!(pg_text_render(&Type::MONEY, "c"), "c::text");
         assert_eq!(pg_text_render(&Type::CIDR, "c"), "c::text");
+    }
+
+    /// Each declared column keeps its name and wire type, flagged as text exactly where `pg_text_projected` says so.
+    #[test]
+    fn the_declared_columns_are_flagged_in_order_by_what_projects_them() {
+        let hints: HashMap<String, (u8, i8)> = [("hinted".to_string(), (10, 2))].into();
+        let declared = [
+            ("id", &Type::INT4),
+            ("bare", &Type::NUMERIC),
+            ("hinted", &Type::NUMERIC),
+            ("ip", &Type::INET),
+        ];
+        assert_eq!(
+            pg_text_columns(declared.into_iter(), &ColumnOverrides::new(), Some(&hints)),
+            vec![
+                ("id", &Type::INT4, false),
+                ("bare", &Type::NUMERIC, true),
+                ("hinted", &Type::NUMERIC, false),
+                ("ip", &Type::INET, true),
+            ]
+        );
+        assert!(pg_text_columns(std::iter::empty(), &ColumnOverrides::new(), None).is_empty());
     }
 
     /// A query with no server-text column is left as it is; with one, only that column is rendered and the others pass through by name.

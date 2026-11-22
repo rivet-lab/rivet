@@ -198,7 +198,11 @@ fn declare_server_text(
     n: usize,
 ) -> Result<Option<postgres::Statement>> {
     let declared = fetch_statement(client, fetches, n)?.clone();
-    let columns = pg_text_columns(declared.columns(), column_overrides, numeric_hints);
+    let columns = pg_text_columns(
+        declared.columns().iter().map(|c| (c.name(), c.type_())),
+        column_overrides,
+        numeric_hints,
+    );
     let Some(text_sql) = pg_server_text_query(built_sql, &columns) else {
         return Ok(None);
     };
