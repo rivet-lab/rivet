@@ -153,7 +153,9 @@ fn row_violations(doc: &Value) -> Vec<String> {
             bad.extend(render_violations(&engine, &at, render));
         }
         let (mut seen, mut arrow_rows) = (BTreeSet::new(), Vec::new());
-        for (native, r) in rows(doc, &engine) {
+        let engine_rows = rows(doc, &engine);
+        let delivers = engine_rows.iter().any(|(_, r)| !r["delivery"].is_null());
+        for (native, r) in engine_rows {
             let at = format!("engines.{engine}.rows[{native}]");
             if !seen.insert(native.clone()) {
                 bad.push(format!("{at}: listed twice"));
@@ -173,6 +175,7 @@ fn row_violations(doc: &Value) -> Vec<String> {
             }
             bad.extend(edge_violations(&at, r));
             bad.extend(cdc_violations(&at, r));
+            bad.extend(na_violations(&at, r, delivers));
             for key in r.as_mapping().into_iter().flat_map(|m| m.keys()) {
                 let key = key.as_str().unwrap_or("");
                 if !ROW_KEYS.contains(&key) {
@@ -466,8 +469,42 @@ const KNOWN_DEFECTS: &[&str] = &[
     "oracle:TIMESTAMP(9)",
 ]; // ratchet-pin: end
 
+/// A row that never delivers carries `na:` dated and without `delivery`; an engine with no delivering row needs it on every row.
+fn na_violations(at: &str, r: &Value, engine_delivers: bool) -> Vec<String> {
+    let mut bad = Vec::new();
+    match r["na"].as_str() {
+        None if !r["na"].is_null() => bad.push(format!("{at}: `na:` is a string")),
+        None if !engine_delivers => bad.push(format!(
+            "{at}: the engine delivers no row, so every row needs a dated `na:` reason"
+        )),
+        None => {}
+        Some(why) => {
+            let dated = why.split_once(": ").is_some_and(|(d, rest)| {
+                !rest.is_empty()
+                    && d.len() == 10
+                    && d.bytes().enumerate().all(|(i, b)| {
+                        if i == 4 || i == 7 {
+                            b == b'-'
+                        } else {
+                            b.is_ascii_digit()
+                        }
+                    })
+            });
+            if !dated {
+                bad.push(format!(
+                    "{at}: `na:` starts with a `YYYY-MM-DD: ` date and gives a reason"
+                ));
+            }
+            if !r["delivery"].is_null() {
+                bad.push(format!("{at}: `na:` belongs to a row without `delivery`"));
+            }
+        }
+    }
+    bad
+}
+
 /// The fields a ledger row may carry.
-const ROW_KEYS: [&str; 15] = [
+const ROW_KEYS: [&str; 16] = [
     "native_type",
     "sample",
     "delivery",
@@ -483,6 +520,7 @@ const ROW_KEYS: [&str; 15] = [
     "refuses",
     "cdc",
     "cdc_reason",
+    "na",
 ];
 
 /// The fields of an edge written as a mapping: its literal and a verdict per stage or target.
@@ -908,6 +946,37 @@ fn a_cdc_verdict_off_the_grammar_or_without_its_reason_is_refused() {
             .iter()
             .any(|b| b.contains("rows[TEXT]")),
         "a registered code with a dated reason is a CDC verdict"
+    );
+}
+
+#[test]
+fn a_row_of_an_engine_that_never_delivers_needs_a_dated_na_reason() {
+    let mut doc = ledger();
+    row_mut(&mut doc, "mongo", "int").remove("na").unwrap();
+    let bad = row_violations(&doc);
+    assert!(
+        bad.iter()
+            .any(|b| b.contains("rows[int]") && b.contains("needs a dated `na:` reason")),
+        "{bad:?}"
+    );
+    row_mut(&mut doc, "mongo", "int").insert("na".into(), "no date".into());
+    let bad = row_violations(&doc);
+    assert!(
+        bad.iter()
+            .any(|b| b.contains("rows[int]") && b.contains("starts with a `YYYY-MM-DD: ` date")),
+        "{bad:?}"
+    );
+}
+
+#[test]
+fn an_na_reason_on_a_delivering_row_is_refused() {
+    let mut doc = ledger();
+    row_mut(&mut doc, "postgres", "TEXT").insert("na".into(), "2026-11-22: x".into());
+    let bad = row_violations(&doc);
+    assert!(
+        bad.iter()
+            .any(|b| b.contains("rows[TEXT]") && b.contains("belongs to a row without `delivery`")),
+        "{bad:?}"
     );
 }
 

@@ -10,7 +10,6 @@ LEDGER = ROOT / "docs" / "type-capability-matrix.yaml"
 LEGS = ("clickhouse", "bigquery", "snowflake")
 HEAD = ("engine", "native type", "batch", "CDC", "ClickHouse", "BigQuery", "Snowflake")
 GAP = "**GAP**"
-MONGO_NA = "n/a: no `delivery` declared; rows are BSON value forms graded by the edge matrix only, with no per-warehouse type"
 
 
 def esc(text: str) -> str:
@@ -51,10 +50,14 @@ def render(doc: dict) -> str:
             n_gap += sum(c == GAP for c in cells)
             body.append(cells)
             gaps += [f"- {engine} `{r['native_type']}`: {h} is empty" for h, c in zip(HEAD, cells) if c == GAP]
-        if matrix_only:
-            names = ", ".join(f"`{esc(r['native_type'])}`" for r in matrix_only)
-            note = MONGO_NA if not delivering else "n/a: no `delivery`, graded by the edge matrix only (a refused or text-only column)"
-            body.append([engine, f"{len(matrix_only)} matrix-only rows: {names}", note, "n/a", "n/a", "n/a", "n/a"])
+        with_na = [r for r in matrix_only if r.get("na")]
+        for r in with_na:
+            body.append([engine, f"`{esc(r['native_type'])}`", esc(r["na"]), "n/a", "n/a", "n/a", "n/a"])
+        rest = [r for r in matrix_only if not r.get("na")]
+        if rest:
+            names = ", ".join(f"`{esc(r['native_type'])}`" for r in rest)
+            note = "n/a: no `delivery`, graded by the edge matrix only (a refused or text-only column)"
+            body.append([engine, f"{len(rest)} matrix-only rows: {names}", note, "n/a", "n/a", "n/a", "n/a"])
         marked = sum(bool(r.get("known_defect") or any((r.get(g) or {}).get("defect") for g in LEGS)) for r in delivering)
         summary.append((engine, len(delivering), len(matrix_only), marked, n_gap))
     out = [
