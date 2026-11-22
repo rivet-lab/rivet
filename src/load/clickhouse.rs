@@ -1034,9 +1034,11 @@ fn typed(spec: &TargetColumnSpec, not_null: bool, land: fn(&ChType) -> ChType) -
 fn landed_type(t: &ChType) -> ChType {
     match t {
         ChType::Json => ChType::String,
-        ChType::Uuid if seeded!("clickhouse-uuid-lands-as-bytes", true, false) => {
-            ChType::FixedString16
-        }
+        ChType::Uuid => seeded!(
+            "clickhouse-uuid-lands-as-bytes",
+            ChType::FixedString16,
+            ChType::Uuid
+        ),
         ChType::Array(inner) => ChType::Array(Box::new(landed_type(inner))),
         other => other.clone(),
     }
