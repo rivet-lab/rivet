@@ -132,14 +132,6 @@ pub(crate) fn is_stream(export: &ExportConfig) -> bool {
     export.mode == crate::config::ExportMode::Cdc
 }
 
-/// The change-stream engine an export reads, or `None` for a batch export.
-pub(crate) fn stream_engine(
-    config: &Config,
-    export: &ExportConfig,
-) -> Option<source::cdc::CdcEngine> {
-    is_stream(export).then(|| config.source.source_type.into())
-}
-
 /// The `columns:` overrides that apply to ONE resolver unit.
 fn unit_overrides(
     export: &ExportConfig,
@@ -208,7 +200,7 @@ pub fn collect_reports(
     let tls = config.source.tls.as_ref();
     let units = resolved_units(config, export, url, tls, config_dir, params, on_unresolved)?;
     let mut src = connect_source(config, url, tls)?;
-    let stream = stream_engine(config, export);
+    let stream = is_stream(export);
 
     units
         .into_iter()
@@ -446,7 +438,7 @@ pub fn capture_load_units(
         OnUnresolvedCapture::Fail,
     )?;
     let mut src = connect_source(config, url, tls)?;
-    let stream = stream_engine(config, export);
+    let stream = is_stream(export);
     units
         .into_iter()
         .map(|unit| {
@@ -544,11 +536,11 @@ fn refuse_captured_units(
 /// One unit's resolved mappings, with overrides that narrow the source type downgraded to lossy.
 pub(crate) fn probe_mappings(
     src: &mut dyn source::Source,
-    stream: Option<source::cdc::CdcEngine>,
+    stream: bool,
     query: &str,
     column_overrides: &ColumnOverrides,
 ) -> Result<Vec<crate::types::TypeMapping>> {
-    let mut mappings = if stream.is_some() {
+    let mut mappings = if stream {
         src.type_mappings(query, &ColumnOverrides::new())?
             .into_iter()
             .map(|m| source::cdc::retype_for_stream(m, column_overrides))
@@ -557,19 +549,17 @@ pub(crate) fn probe_mappings(
         src.type_mappings(query, column_overrides)?
     };
 
-    let wire_digits = stream.map_or(9, source::cdc::CdcEngine::change_row_fraction_digits);
     let src = std::cell::RefCell::new(src);
     downgrade_narrowing_overrides(
         &mut mappings,
         column_overrides,
-        wire_digits,
         || {
             src.borrow_mut()
                 .type_mappings(query, &ColumnOverrides::new())
         },
         || src.borrow_mut().finer_than_microsecond_in_query(query),
     )?;
-    if stream.is_none() && seeded!("check-run-refusal-split", false, true) {
+    if !stream && seeded!("check-run-refusal-split", false, true) {
         mappings = mappings.into_iter().map(refuse_unmapped).collect();
     }
     Ok(mappings)
@@ -877,7 +867,6 @@ fn rivet_type_label(t: &crate::types::RivetType) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::source::cdc::CdcEngine;
 
     /// A batch column with no Arrow type is refused under every policy, with its reason; the rest is untouched.
     #[test]
@@ -947,11 +936,9 @@ mod tests {
             }
         }
         let overrides = ColumnOverrides::new();
-        let batch = super::probe_mappings(&mut Unmapped, None, "q", &overrides).unwrap();
+        let batch = super::probe_mappings(&mut Unmapped, false, "q", &overrides).unwrap();
         assert_eq!(batch[0].refusal.as_deref(), Some("no arrow type"));
-        let stream =
-            super::probe_mappings(&mut Unmapped, Some(CdcEngine::Postgres), "q", &overrides)
-                .unwrap();
+        let stream = super::probe_mappings(&mut Unmapped, true, "q", &overrides).unwrap();
         assert_eq!(stream[0].refusal, None);
     }
 
@@ -1008,7 +995,6 @@ mod tests {
         downgrade_narrowing_overrides(
             &mut untouched,
             &ColumnOverrides::new(),
-            9,
             || {
                 probed.set(true);
                 Ok(source())
@@ -1037,7 +1023,6 @@ mod tests {
         downgrade_narrowing_overrides(
             &mut mapped,
             &overrides,
-            9,
             || {
                 probed.set(true);
                 Ok(source())
@@ -1084,7 +1069,7 @@ mod tests {
         let mut mapped = ["cash", "cents", "id", "exact15"]
             .map(|c| mapping(c, "float8", RivetType::Float64))
             .to_vec();
-        downgrade_narrowing_overrides(&mut mapped, &overrides, 9, || Ok(source), || Ok(Vec::new()))
+        downgrade_narrowing_overrides(&mut mapped, &overrides, || Ok(source), || Ok(Vec::new()))
             .unwrap();
         let verdicts: Vec<_> = mapped.iter().map(|m| m.fidelity).collect();
         assert_eq!(
@@ -1146,17 +1131,6 @@ exports:
         let config = cfg_from(OVERRIDE_PROBE_CFG);
         assert!(!super::is_stream(&config.exports[0]));
         assert!(super::is_stream(&config.exports[1]));
-    }
-
-    /// A change stream reads through its source's engine and a batch export through none.
-    #[test]
-    fn only_a_cdc_export_names_a_stream_engine() {
-        let config = cfg_from(OVERRIDE_PROBE_CFG);
-        assert_eq!(super::stream_engine(&config, &config.exports[0]), None);
-        assert_eq!(
-            super::stream_engine(&config, &config.exports[1]),
-            Some(CdcEngine::Postgres)
-        );
     }
 
     /// A report whose source cannot be reached is the error of the connect, never an empty report.
@@ -1360,7 +1334,7 @@ exports:
     #[test]
     fn narrows_flags_scale_reduction_as_lossy() {
         let reason =
-            override_narrows(&dec(10, 2), &dec(20, 0), false, 9).expect("scale drop is lossy");
+            override_narrows(&dec(10, 2), &dec(20, 0), false).expect("scale drop is lossy");
         assert!(
             reason.contains("scale"),
             "reason should name scale: {reason}"
@@ -1373,42 +1347,40 @@ exports:
 
     #[test]
     fn narrows_none_when_scale_preserved() {
-        assert!(override_narrows(&dec(10, 2), &dec(20, 2), false, 9).is_none());
-        assert!(override_narrows(&dec(10, 2), &dec(10, 2), false, 9).is_none());
+        assert!(override_narrows(&dec(10, 2), &dec(20, 2), false).is_none());
+        assert!(override_narrows(&dec(10, 2), &dec(10, 2), false).is_none());
     }
 
     #[test]
     fn narrows_flags_integer_digit_reduction_at_a_wider_scale_as_lossy() {
-        let reason = override_narrows(&dec(10, 2), &dec(10, 5), false, 9)
+        let reason = override_narrows(&dec(10, 2), &dec(10, 5), false)
             .expect("5 integer digits cannot hold 8");
         assert!(reason.contains("integer-digit"), "{reason}");
     }
 
     #[test]
     fn narrows_none_when_integer_digits_are_kept_at_a_wider_scale() {
-        assert!(override_narrows(&dec(5, 2), &dec(6, 3), false, 9).is_none());
+        assert!(override_narrows(&dec(5, 2), &dec(6, 3), false).is_none());
     }
 
     #[test]
     fn a_date_override_over_a_finer_time_column_is_lossy() {
         use crate::types::TimeUnit::Nanosecond;
-        let reason = override_narrows(&timestamp(Nanosecond, false), &RivetType::Date, true, 9)
+        let reason = override_narrows(&timestamp(Nanosecond, false), &RivetType::Date, true)
             .expect("date keeps no fraction digits");
         assert!(reason.contains("lossy"), "{reason}");
-        assert!(
-            override_narrows(&timestamp(Nanosecond, false), &RivetType::Date, false, 9).is_none()
-        );
+        assert!(override_narrows(&timestamp(Nanosecond, false), &RivetType::Date, false).is_none());
     }
 
     #[test]
     fn narrows_none_when_scale_widened() {
-        assert!(override_narrows(&dec(10, 2), &dec(12, 4), false, 9).is_none());
+        assert!(override_narrows(&dec(10, 2), &dec(12, 4), false).is_none());
     }
 
     #[test]
     fn narrows_flags_integer_digit_reduction_as_lossy() {
-        let reason = override_narrows(&dec(20, 0), &dec(10, 0), false, 9)
-            .expect("integer-digit drop is lossy");
+        let reason =
+            override_narrows(&dec(20, 0), &dec(10, 0), false).expect("integer-digit drop is lossy");
         assert!(
             reason.contains("integer-digit") && reason.contains("lossy"),
             "reason: {reason}"
@@ -1418,7 +1390,7 @@ exports:
     #[test]
     fn narrows_flags_a_decimal_float8_override_past_fifteen_digits_as_lossy() {
         for (p, s) in [(19, 4), (38, 0), (16, 0), (20, 6)] {
-            let reason = override_narrows(&dec(p, s), &RivetType::Float64, false, 9)
+            let reason = override_narrows(&dec(p, s), &RivetType::Float64, false)
                 .unwrap_or_else(|| panic!("decimal({p},{s}) into float8 is lossy"));
             assert!(
                 reason.contains("lossy") && reason.contains("RIVET_SOURCE_VALUE_UNREPRESENTABLE"),
@@ -1426,17 +1398,17 @@ exports:
             );
         }
         for (p, s) in [(15, 2), (10, 4), (9, 0), (1, 0)] {
-            assert!(override_narrows(&dec(p, s), &RivetType::Float64, false, 9).is_none());
+            assert!(override_narrows(&dec(p, s), &RivetType::Float64, false).is_none());
         }
-        assert!(override_narrows(&RivetType::Int64, &RivetType::Float64, false, 9).is_none());
-        assert!(override_narrows(&RivetType::Float64, &RivetType::Float64, false, 9).is_none());
-        assert!(override_narrows(&dec(38, 0), &RivetType::String, false, 9).is_none());
+        assert!(override_narrows(&RivetType::Int64, &RivetType::Float64, false).is_none());
+        assert!(override_narrows(&RivetType::Float64, &RivetType::Float64, false).is_none());
+        assert!(override_narrows(&dec(38, 0), &RivetType::String, false).is_none());
     }
 
     #[test]
     fn narrows_none_for_non_decimal_overrides() {
-        assert!(override_narrows(&RivetType::Int32, &RivetType::Int64, false, 9).is_none());
-        assert!(override_narrows(&RivetType::Int64, &RivetType::String, false, 9).is_none());
+        assert!(override_narrows(&RivetType::Int32, &RivetType::Int64, false).is_none());
+        assert!(override_narrows(&RivetType::Int64, &RivetType::String, false).is_none());
     }
 
     #[test]
@@ -1890,7 +1862,7 @@ exports:
         let verdict = |source: &mut Described, stream: bool, ov: &[(&str, RivetType)]| {
             let overrides: ColumnOverrides =
                 ov.iter().map(|(c, t)| (c.to_string(), t.clone())).collect();
-            probe_mappings(source, stream.then_some(CdcEngine::Mssql), "q", &overrides)
+            probe_mappings(source, stream, "q", &overrides)
                 .unwrap()
                 .into_iter()
                 .map(|m| (m.column_name, m.fidelity, m.warnings))
@@ -1949,49 +1921,6 @@ exports:
         }
     }
 
-    /// An engine whose change row carries microseconds grades a nanosecond override lossy over a finer column on the stream, with a remedy that works there, and leaves batch, a coarser column and other engines as they were.
-    #[test]
-    fn a_change_row_that_carries_microseconds_grades_a_nanosecond_override_lossy() {
-        use crate::types::TimeUnit::Nanosecond;
-        let ns = || timestamp(Nanosecond, false);
-        let overrides: ColumnOverrides = [("x".to_string(), ns())].into_iter().collect();
-        let grade = |engine: Option<CdcEngine>, finer: &[&str]| {
-            let mut source = Described::of(&[("x", "timestamp", ns())], finer);
-            probe_mappings(&mut source, engine, "q", &overrides)
-                .unwrap()
-                .remove(0)
-        };
-        let lossy = grade(Some(CdcEngine::Oracle), &["x"]);
-        assert_eq!(lossy.fidelity, TypeFidelity::Lossy);
-        assert_eq!(
-            lossy.warnings,
-            vec![
-                "the source column holds more than 6 fraction digits of a second and a change row \
-                 carries 6 whatever type this override declares — the finer digits are truncated \
-                 at run; this is lossy, not exact. To keep every digit, read this table through a \
-                 batch export that declares `timestamp_ns` / `timestamp_tz_ns` (a change row \
-                 carries microseconds under every type), or run without `--strict`"
-            ]
-        );
-        for (engine, finer, what) in [
-            (None, &["x"][..], "batch reads the column in full"),
-            (
-                Some(CdcEngine::Oracle),
-                &[][..],
-                "a column not finer than a microsecond",
-            ),
-            (
-                Some(CdcEngine::Mssql),
-                &["x"][..],
-                "an engine whose change row carries nanoseconds",
-            ),
-        ] {
-            let got = grade(engine, finer);
-            assert_eq!(got.fidelity, TypeFidelity::Exact, "{what}");
-            assert!(got.warnings.is_empty(), "{what}: {:?}", got.warnings);
-        }
-    }
-
     /// The reason a narrowing time override carries is pinned, and names a remedy that works on each engine that can hold such a column.
     #[test]
     fn a_narrowing_time_override_names_its_cause_and_a_remedy_that_works() {
@@ -2000,7 +1929,6 @@ exports:
             &timestamp(Nanosecond, false),
             &timestamp(Microsecond, false),
             true,
-            9,
         )
         .expect("narrowing");
         assert_eq!(
@@ -2016,7 +1944,7 @@ exports:
             RivetType::Int64,
         ] {
             assert_eq!(
-                override_narrows(&timestamp(Nanosecond, false), &kept, true, 9),
+                override_narrows(&timestamp(Nanosecond, false), &kept, true),
                 None
             );
         }
@@ -2024,8 +1952,7 @@ exports:
             override_narrows(
                 &timestamp(Nanosecond, false),
                 &timestamp(Microsecond, false),
-                false,
-                9
+                false
             ),
             None
         );
@@ -2039,7 +1966,7 @@ exports:
         let probe = |source: &mut Described, ov: &[(&str, RivetType)]| {
             let overrides: ColumnOverrides =
                 ov.iter().map(|(c, t)| (c.to_string(), t.clone())).collect();
-            probe_mappings(source, None, "q", &overrides).unwrap()
+            probe_mappings(source, false, "q", &overrides).unwrap()
         };
         let mut asked = Described::of(&[("d", "datetime2", ns())], &["d"]);
         asked.describe_fails = true;
@@ -2080,22 +2007,13 @@ exports:
         let overrides: ColumnOverrides = [("d".to_string(), timestamp(Microsecond, false))]
             .into_iter()
             .collect();
-        let got = probe_mappings(&mut stream, Some(CdcEngine::Mssql), "q", &overrides).unwrap();
+        let got = probe_mappings(&mut stream, true, "q", &overrides).unwrap();
         assert_eq!(got[0].fidelity, TypeFidelity::Lossy, "stream");
         assert!(
             got[0].warnings[0].contains("To keep every digit, drop the override on SQL Server"),
             "{:?}",
             got[0].warnings
         );
-        let got = probe_mappings(&mut stream, Some(CdcEngine::Oracle), "q", &overrides).unwrap();
-        assert!(
-            got[0].warnings[0].contains(
-                "To keep every digit, read this table through a batch export that declares"
-            ),
-            "{:?}",
-            got[0].warnings
-        );
-        assert!(!got[0].warnings[0].contains("drop the override"));
     }
 
     /// A column the run does not override keeps its own grade whatever the describe says about it, and a column the override names but the source holds coarser than a microsecond is read from the describe once.
@@ -2112,7 +2030,7 @@ exports:
         let overrides: ColumnOverrides = [("cut".to_string(), timestamp(Microsecond, false))]
             .into_iter()
             .collect();
-        let got = probe_mappings(&mut source, None, "q", &overrides).unwrap();
+        let got = probe_mappings(&mut source, false, "q", &overrides).unwrap();
         assert_eq!(got[0].fidelity, TypeFidelity::Exact, "{:?}", got[0]);
         assert!(got[0].warnings.is_empty(), "{:?}", got[0].warnings);
         assert_eq!(got[1].fidelity, TypeFidelity::Lossy);

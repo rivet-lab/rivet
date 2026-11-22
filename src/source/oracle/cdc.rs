@@ -2169,12 +2169,6 @@ mod tests {
             decode(ColKind::TimestampTz, "2026-09-28T01:02:03.123456789 +09:00").unwrap(),
             RivetValue::DateTime(dt("2026-09-27 16:02:03.123456789"))
         );
-        let kept = parse_datetime("2026-09-28T01:02:03.123456789").unwrap();
-        let unit = 10u32.pow(9 - u32::from(crate::source::cdc::ORACLE_CHANGE_ROW_FRACTION_DIGITS));
-        assert_eq!(
-            kept.and_utc().timestamp_subsec_nanos(),
-            123_456_789 / unit * unit
-        );
         assert_eq!(
             parse_datetime("2026-09-28T01:02:03."),
             Some(dt("2026-09-28 01:02:03"))

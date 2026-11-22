@@ -4,11 +4,10 @@ use crate::error::Result;
 
 use super::{ColumnOverrides, RivetType, TypeFidelity, TypeMapping};
 
-/// #32 (column-applicability): downgrade every overridden column whose override *narrows* what the source holds to [`TypeFidelity::Lossy`]: a decimal that loses digits, a time type that keeps fewer fraction digits than a result column finer than a microsecond; `wire_digits` is the most fraction digits the delivery path carries.
+/// #32 (column-applicability): downgrade every overridden column whose override *narrows* what the source holds to [`TypeFidelity::Lossy`]: a decimal that loses digits, a time type that keeps fewer fraction digits than a result column finer than a microsecond.
 pub(crate) fn downgrade_narrowing_overrides(
     mappings: &mut [TypeMapping],
     column_overrides: &ColumnOverrides,
-    wire_digits: u8,
     reprobe: impl FnOnce() -> Result<Vec<TypeMapping>>,
     finer_columns: impl FnOnce() -> Result<Vec<String>>,
 ) -> Result<()> {
@@ -29,7 +28,7 @@ pub(crate) fn downgrade_narrowing_overrides(
     let truncates = |m: &TypeMapping| {
         column_overrides.contains_key(&m.column_name)
             && holds_time(m)
-            && kept_fraction_digits(&m.rivet_type).is_some_and(|kept| kept.min(wire_digits) < 9)
+            && kept_fraction_digits(&m.rivet_type).is_some_and(|kept| kept < 9)
     };
     let finer = mappings.iter().any(truncates).then(finer_columns);
     for m in mappings {
@@ -43,15 +42,15 @@ pub(crate) fn downgrade_narrowing_overrides(
                 m.warnings.push(format!(
                     "the source could not say whether it holds more fraction digits of a second \
                      than this type keeps ({e:#}), so a finer digit may be truncated at run; this \
-                     is lossy, not exact. {}",
-                    keep_digits_remedy(wire_digits)
+                     is lossy, not exact. To keep every digit, drop the override on SQL Server or \
+                     declare `timestamp_ns` / `timestamp_tz_ns` on Oracle"
                 ));
                 false
             }
             _ => false,
         };
         if let Some(&src_type) = source_by_name.get(m.column_name.as_str())
-            && let Some(reason) = override_narrows(src_type, &m.rivet_type, finer_here, wire_digits)
+            && let Some(reason) = override_narrows(src_type, &m.rivet_type, finer_here)
         {
             m.fidelity = TypeFidelity::Lossy;
             m.warnings.push(reason);
@@ -76,49 +75,24 @@ fn kept_fraction_digits(t: &RivetType) -> Option<u8> {
     })
 }
 
-/// What the operator does to keep every fraction digit, by what the delivery path carries.
-fn keep_digits_remedy(wire_digits: u8) -> &'static str {
-    match wire_digits < 9 {
-        true => {
-            "To keep every digit, read this table through a batch export that declares \
-             `timestamp_ns` / `timestamp_tz_ns` (a change row carries microseconds under every \
-             type), or run without `--strict`"
-        }
-        false => {
-            "To keep every digit, drop the override on SQL Server or declare `timestamp_ns` / \
-             `timestamp_tz_ns` on Oracle"
-        }
-    }
-}
-
-/// Detect whether a `columns:` override *narrows* the autodetected source type in a value-losing way; `finer_than_microsecond` says the result column holds more than a microsecond and `wire_digits` the most fraction digits the delivery path carries.
+/// Detect whether a `columns:` override *narrows* the autodetected source type in a value-losing way; `finer_than_microsecond` says the result column holds more than a microsecond.
 pub(crate) fn override_narrows(
     source: &RivetType,
     overridden: &RivetType,
     finer_than_microsecond: bool,
-    wire_digits: u8,
 ) -> Option<String> {
     use RivetType::Decimal;
     if finer_than_microsecond
-        && let Some(kept) = kept_fraction_digits(overridden).map(|k| k.min(wire_digits))
+        && let Some(kept) = kept_fraction_digits(overridden)
         && kept < 9
         && seeded!("narrowing-override-reported-exact", false, true)
     {
-        return Some(match wire_digits < 9 {
-            true => format!(
-                "the source column holds more than 6 fraction digits of a second and a change \
-                 row carries {kept} whatever type this override declares — the finer digits are \
-                 truncated at run; this is lossy, not exact. {}",
-                keep_digits_remedy(wire_digits)
-            ),
-            false => format!(
-                "the source column holds more than 6 fraction digits of a second and this \
-                 override keeps {kept} — the finer digits are truncated at run; this is lossy, \
-                 not exact. To keep them, drop the override on SQL Server (`datetime2(7)` and \
-                 `datetimeoffset(7)` keep nanoseconds by default) or declare `timestamp_ns` / \
-                 `timestamp_tz_ns` on Oracle"
-            ),
-        });
+        return Some(format!(
+            "the source column holds more than 6 fraction digits of a second and this override \
+             keeps {kept} — the finer digits are truncated at run; this is lossy, not exact. To \
+             keep them, drop the override on SQL Server (`datetime2(7)` and `datetimeoffset(7)` \
+             keep nanoseconds by default) or declare `timestamp_ns` / `timestamp_tz_ns` on Oracle"
+        ));
     }
     if let (
         Decimal {

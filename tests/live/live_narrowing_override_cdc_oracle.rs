@@ -1,4 +1,4 @@
-//! The Oracle CDC side of `live_narrowing_override`: the stream grades a time override over `TIMESTAMP(9)` and `TIMESTAMP(9) WITH TIME ZONE` by what a change row carries.
+//! The Oracle CDC side of `live_narrowing_override`: the stream grades a time override over `TIMESTAMP(9)` and `TIMESTAMP(9) WITH TIME ZONE` as batch does.
 
 use crate::common::*;
 use crate::live_int_to_float_override::readback_only;
@@ -15,7 +15,7 @@ pub type CdcCase<'a> = (
     &'a str,
 );
 
-/// An Oracle CDC declared `timestamp` / `timestamp_tz` or `timestamp_ns` / `timestamp_tz_ns` over `TIMESTAMP(9)` [WITH TIME ZONE] is lossy and refused by `--strict`, either over `TIMESTAMP(3)` exact; the change row holds the microseconds the verdict says.
+/// An Oracle CDC `timestamp` / `timestamp_tz` over `TIMESTAMP(9)` [WITH TIME ZONE] is lossy and refused by `--strict`, a `timestamp_ns` / `timestamp_tz_ns` or an override over `TIMESTAMP(3)` is exact; the change row holds the digits the verdict says.
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn an_oracle_cdc_time_override_is_graded_as_the_batch_override() {
@@ -53,18 +53,18 @@ fn an_oracle_cdc_time_override_is_graded_as_the_batch_override() {
             "id NUMBER(10) PRIMARY KEY, ts9 TIMESTAMP(9)",
             "TS9: timestamp_ns",
             "TS9",
-            Verdict::Lossy,
+            Verdict::Exact,
             "TIMESTAMP '2024-01-02 03:04:05.123456789'",
-            "2024-01-02T03:04:05.123456",
+            "2024-01-02T03:04:05.123456789",
         ),
         (
             "nso_cortz9n",
             "id NUMBER(10) PRIMARY KEY, tz9 TIMESTAMP(9) WITH TIME ZONE",
             "TZ9: timestamp_tz_ns",
             "TZ9",
-            Verdict::Lossy,
+            Verdict::Exact,
             "TIMESTAMP '2024-01-02 03:04:05.123456789 +00:00'",
-            "2024-01-02T03:04:05.123456Z",
+            "2024-01-02T03:04:05.123456789Z",
         ),
         (
             "nso_cor3n",
