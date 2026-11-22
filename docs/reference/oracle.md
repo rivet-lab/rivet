@@ -130,8 +130,13 @@ Parquet); dates before 1582-10-15 are not converted from Oracle's Julian calenda
 - A `TIMESTAMP(7..9)` column is refused with `RIVET_TYPE_UNSAFE_MAPPING`, with or
   without `--strict`, until a `columns:` entry declares it: `timestamp_ns` keeps
   all nine digits (range 1677-09-21..2262-04-11), `timestamp` reads microseconds.
-  A change-data-capture export reads microseconds only, so there `timestamp` is the
-  one remedy. Such a column is also refused as an incremental cursor.
+  A change-data-capture export (snapshot and stream) takes the same declarations and
+  delivers the same values as batch: `timestamp_ns` and `timestamp_tz_ns` keep all nine
+  digits, and `text` carries the batch text byte for byte (`SYYYY-MM-DDTHH24:MI:SS.FF6`,
+  nine fraction digits when a value is finer than a microsecond; the stream used to print
+  a space and a variable fraction). One value differs: a DATE only the Julian calendar holds
+  (`1500-02-29`) declared `text` is delivered by batch and refused by the stream with
+  `RIVET_SOURCE_CDC_CELL_UNSUPPORTED`. Such a column is also refused as an incremental cursor.
 - An `INTERVAL DAY TO SECOND(7..9)` value with a sub-microsecond fraction is refused with
   `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5) naming the column; a value that holds only
   microseconds is delivered as before. Select `TO_CHAR(col) AS col` to export the exact text.
