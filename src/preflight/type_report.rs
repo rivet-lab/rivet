@@ -1148,6 +1148,33 @@ exports:
         assert!(super::is_stream(&config.exports[1]));
     }
 
+    /// A change stream reads through its source's engine and a batch export through none.
+    #[test]
+    fn only_a_cdc_export_names_a_stream_engine() {
+        let config = cfg_from(OVERRIDE_PROBE_CFG);
+        assert_eq!(super::stream_engine(&config, &config.exports[0]), None);
+        assert_eq!(
+            super::stream_engine(&config, &config.exports[1]),
+            Some(CdcEngine::Postgres)
+        );
+    }
+
+    /// A report whose source cannot be reached is the error of the connect, never an empty report.
+    #[test]
+    fn a_report_of_an_unreachable_source_is_refused_not_empty() {
+        let config = cfg_from(OVERRIDE_PROBE_CFG);
+        let ctx = || ReportContext {
+            target: None,
+            config_dir: std::path::Path::new("."),
+            params: None,
+            on_unresolved: OnUnresolvedCapture::Fail,
+        };
+        let overrides = ColumnOverrides::new();
+        let policy = TypePolicy::default();
+        let got = collect_reports(&config, &config.exports[0], &overrides, &policy, ctx());
+        assert!(got.is_err(), "an unreachable source reports nothing");
+    }
+
     #[test]
     fn the_override_probe_connects_for_every_export_with_overrides_cdc_included() {
         let config = cfg_from(OVERRIDE_PROBE_CFG);
@@ -2040,6 +2067,11 @@ exports:
         assert_eq!(got[0].fidelity, TypeFidelity::Lossy);
         assert_eq!(got[0].warnings.len(), 1, "{:?}", got[0].warnings);
         assert!(got[0].warnings[0].contains("describe refused"));
+        assert!(
+            got[0].warnings[0].contains("To keep every digit, drop the override on SQL Server"),
+            "{:?}",
+            got[0].warnings
+        );
         assert_eq!(got[1].fidelity, TypeFidelity::Exact);
         assert!(got[1].warnings.is_empty(), "{:?}", got[1].warnings);
 
@@ -2050,6 +2082,20 @@ exports:
             .collect();
         let got = probe_mappings(&mut stream, Some(CdcEngine::Mssql), "q", &overrides).unwrap();
         assert_eq!(got[0].fidelity, TypeFidelity::Lossy, "stream");
+        assert!(
+            got[0].warnings[0].contains("To keep every digit, drop the override on SQL Server"),
+            "{:?}",
+            got[0].warnings
+        );
+        let got = probe_mappings(&mut stream, Some(CdcEngine::Oracle), "q", &overrides).unwrap();
+        assert!(
+            got[0].warnings[0].contains(
+                "To keep every digit, read this table through a batch export that declares"
+            ),
+            "{:?}",
+            got[0].warnings
+        );
+        assert!(!got[0].warnings[0].contains("drop the override"));
     }
 
     /// A column the run does not override keeps its own grade whatever the describe says about it, and a column the override names but the source holds coarser than a microsecond is read from the describe once.
