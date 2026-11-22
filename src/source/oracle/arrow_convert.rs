@@ -487,6 +487,39 @@ fn integer<T: std::str::FromStr>(column: &str, text: &str) -> Result<T> {
     })
 }
 
+/// One microsecond timestamp column; an LTZ value outside Oracle's own range is refused.
+fn timestamp_micros_column(
+    rows: &[Row],
+    idx: usize,
+    name: &str,
+    tz: Option<Arc<str>>,
+    ltz: bool,
+) -> Result<ArrayRef> {
+    let mut b = TimestampMicrosecondBuilder::with_capacity(rows.len());
+    for r in rows {
+        match r.get::<Option<OracleTimestamp>>(idx).ora()? {
+            Some(t) => {
+                ltz_within_range(&t, name, ltz)?;
+                b.append_value(timestamp_micros(&t)?)
+            }
+            None => b.append_null(),
+        }
+    }
+    Ok(Arc::new(b.finish().with_timezone_opt(tz)))
+}
+
+/// One Date32 column.
+fn date_column(rows: &[Row], idx: usize, name: &str) -> Result<ArrayRef> {
+    let mut b = Date32Builder::with_capacity(rows.len());
+    for r in rows {
+        match r.get::<Option<OracleTimestamp>>(idx).ora()? {
+            Some(t) => b.append_value(date_days(&t, name)?),
+            None => b.append_null(),
+        }
+    }
+    Ok(Arc::new(b.finish()))
+}
+
 /// One Arrow column from the fetched rows, typed by `dt`.
 fn build_column(
     rows: &[Row],
@@ -571,17 +604,7 @@ fn build_column(
             Arc::new(b.finish())
         }
         DataType::Timestamp(ArrowTimeUnit::Microsecond, tz) => {
-            let mut b = TimestampMicrosecondBuilder::with_capacity(rows.len());
-            for r in rows {
-                match r.get::<Option<OracleTimestamp>>(idx).ora()? {
-                    Some(t) => {
-                        ltz_within_range(&t, name, ltz)?;
-                        b.append_value(timestamp_micros(&t)?)
-                    }
-                    None => b.append_null(),
-                }
-            }
-            Arc::new(b.finish().with_timezone_opt(tz.clone()))
+            timestamp_micros_column(rows, idx, name, tz.clone(), ltz)?
         }
         DataType::Timestamp(ArrowTimeUnit::Nanosecond, tz) => {
             let mut b = TimestampNanosecondBuilder::with_capacity(rows.len());
@@ -600,16 +623,7 @@ fn build_column(
             }
             Arc::new(b.finish().with_timezone_opt(tz.clone()))
         }
-        DataType::Date32 => {
-            let mut b = Date32Builder::with_capacity(rows.len());
-            for r in rows {
-                match r.get::<Option<OracleTimestamp>>(idx).ora()? {
-                    Some(t) => b.append_value(date_days(&t, name)?),
-                    None => b.append_null(),
-                }
-            }
-            Arc::new(b.finish())
-        }
+        DataType::Date32 => date_column(rows, idx, name)?,
         DataType::FixedSizeBinary(width) => {
             let mut b = FixedSizeBinaryBuilder::with_capacity(rows.len(), *width);
             for r in rows {
