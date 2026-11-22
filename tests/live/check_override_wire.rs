@@ -425,7 +425,7 @@ fn a_declared_type_on_a_column_without_an_arrow_type_is_refused_by_check_like_th
         .dest_path(out.path().to_path_buf());
     let said = check_and_run_refuse_alike(rig, &name);
     assert!(
-        said.contains("column `c`") || said.contains("'c'"),
+        said.contains("column `c` is inet") && said.contains("Postgres does not convert that pair"),
         "{said}"
     );
 }
