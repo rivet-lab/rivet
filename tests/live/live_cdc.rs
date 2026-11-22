@@ -9083,7 +9083,7 @@ fn mysql_cdc_a_datetime_or_timestamp_as_text_is_the_batch_text_byte_for_byte() {
 
 /// A MySQL zero datetime declared `text` is the batch text on the change stream. Open defect: the stream writes NULL.
 #[test]
-#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+#[ignore = "live+gate-only: requires docker compose --profile cdc mysql-cdc"]
 fn open_defect_a_mysql_zero_datetime_declared_text_is_the_batch_text_on_the_stream() {
     use mysql::prelude::Queryable as _;
     let d = tempfile::tempdir().unwrap();
@@ -9142,7 +9142,7 @@ fn open_defect_a_mysql_zero_datetime_declared_text_is_the_batch_text_on_the_stre
 
 /// A PostgreSQL timestamp declared `text` gets one verdict from the batch export and the change stream. Open defect: batch refuses it, the stream writes chrono's text.
 #[test]
-#[ignore = "live: requires docker compose postgres (wal_level=logical)"]
+#[ignore = "live+gate-only: requires docker compose postgres (wal_level=logical)"]
 fn open_defect_a_pg_timestamp_declared_text_is_one_verdict_on_batch_and_the_stream() {
     let cdc_db = CdcDb::new("cdc_ts_text");
     let slot = unique_name("rivet_ts_text_slot").to_lowercase();

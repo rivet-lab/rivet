@@ -1779,7 +1779,7 @@ fn oracle_cdc_date_declared_text_is_the_batch_text() {
 
 /// A Julian-only DATE (1500-02-29) declared `text` is delivered by the change stream as the batch export delivers it. Open defect: the stream refuses it by SOURCE_CDC_CELL_UNSUPPORTED.
 #[test]
-#[ignore = "live: requires the oracle service with LogMiner prerequisites"]
+#[ignore = "live+gate-only: requires the oracle service with LogMiner prerequisites"]
 fn open_defect_an_oracle_julian_date_declared_text_is_delivered_by_the_stream_as_batch_delivers_it()
 {
     let _serial = cross_process_serial("oracle_cdc");
