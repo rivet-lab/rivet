@@ -171,15 +171,27 @@ struct Stand<'a> {
     /// Both rigs carry `census_oracle()`: their parts and state DBs are visible to DuckDB.
     cdc: Rig,
     batch: Rig,
-    /// A second CDC export into the fake-gcs bucket that `rivet load` puts into ClickHouse.
+    /// A second export (CDC, or a full batch where the engine's stream is not loadable) into the fake-gcs bucket that `rivet load` puts into ClickHouse.
     warehouse: Option<Warehouse>,
 }
 
-/// A CDC rig loaded into a scratch ClickHouse database, dropped on drop.
+/// A rig loaded into a scratch ClickHouse database, dropped on drop; a CDC load reads through a view that hides deleted rows.
 struct Warehouse {
     rig: Rig,
     db: String,
     view: String,
+    changes: bool,
+}
+
+impl Warehouse {
+    /// The `WHERE` that keeps only live rows of the loaded relation.
+    fn live(&self) -> &'static str {
+        if self.changes {
+            " WHERE NOT __is_deleted"
+        } else {
+            ""
+        }
+    }
 }
 
 impl Drop for Warehouse {
@@ -195,6 +207,16 @@ const CH_PASSWORD_ENV: &str = "RIVET_TEST_CH_PASSWORD";
 
 /// `rig` exporting to the fake-gcs bucket as `<view>_wh` and loading into a fresh ClickHouse database; the view is named `view`.
 fn warehouse(rig: Rig, view: &str) -> Warehouse {
+    warehouse_of(rig.cdc("initial: snapshot"), view, true)
+}
+
+/// `rig` as a `mode: full` batch export loaded into a fresh ClickHouse database; the loaded table is `view`.
+fn warehouse_batch(rig: Rig, view: &str) -> Warehouse {
+    warehouse_of(rig.mode("full"), view, false)
+}
+
+/// The shared wiring of [`warehouse`] and [`warehouse_batch`].
+fn warehouse_of(rig: Rig, view: &str, changes: bool) -> Warehouse {
     require_alive(LiveService::ClickHouse);
     require_alive(LiveService::FakeGcs);
     ensure_gcs_bucket(CH_BUCKET);
@@ -202,7 +224,6 @@ fn warehouse(rig: Rig, view: &str) -> Warehouse {
     clickhouse_run_sql_json(&format!("CREATE DATABASE {db}"));
     let rig = rig
         .export_named(&format!("{view}_wh"))
-        .cdc("initial: snapshot")
         .dest_gcs(CH_BUCKET, &unique_name("ledger"), FAKE_GCS_ENDPOINT)
         .top_line(&format!(
             "load: {{ target: clickhouse, url: \"{CLICKHOUSE_HTTP_URL}\", database: {db}, \
@@ -212,6 +233,7 @@ fn warehouse(rig: Rig, view: &str) -> Warehouse {
         rig,
         db,
         view: view.to_string(),
+        changes,
     }
 }
 
@@ -332,13 +354,14 @@ fn warehouse_relation(
         String::new()
     };
     let from = clickhouse_relation(&if ch_text.is_empty() {
-        format!("SELECT * FROM {}.{} WHERE NOT __is_deleted", w.db, w.view)
+        format!("SELECT * FROM {}.{}{}", w.db, w.view, w.live())
     } else {
         format!(
-            "SELECT * REPLACE ({}) FROM {}.{} WHERE NOT __is_deleted{settings}",
+            "SELECT * REPLACE ({}) FROM {}.{}{}{settings}",
             ch_text.join(", "),
             w.db,
-            w.view
+            w.view,
+            w.live()
         )
     });
     if text.is_empty() {
@@ -1230,8 +1253,10 @@ fn duckdb_ledger_verdict(lg: &Ledger, st: &Stand, n: i64) -> Vec<String> {
                         format!(
                             "SELECT decode(i), decode(v) FROM {}",
                             clickhouse_relation(&format!(
-                                "SELECT toString(id) AS i, toString({c}) AS v FROM {}.{} WHERE NOT __is_deleted",
-                                w.db, w.view
+                                "SELECT toString(id) AS i, toString({c}) AS v FROM {}.{}{}",
+                                w.db,
+                                w.view,
+                                w.live()
                             ))
                         ),
                     ));
@@ -1985,7 +2010,7 @@ fn oracle_batch_and_cdc_deliver_every_ledger_row_alike() {
     let cdc = Rig::oracle_cdc(t.name())
         .cdc_line("initial: snapshot")
         .export_line(&declared);
-    let wh = warehouse(Rig::oracle_cdc(t.name()).export_line(&declared), t.name());
+    let wh = warehouse_batch(Rig::oracle_batch(t.name()).export_line(&declared), t.name());
     let batch = batch_named(Rig::oracle_batch(t.name()), t.name()).export_line(&declared);
     let st = Stand {
         engine: "oracle",
