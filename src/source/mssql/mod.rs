@@ -523,6 +523,9 @@ impl Source for MssqlSource {
     }
 
     fn finer_than_microsecond_in_query(&mut self, query: &str) -> Result<Vec<String>> {
+        if let Some(refused) = self.query_scalar(&describe_error_sql(query))? {
+            anyhow::bail!("SQL Server cannot describe the query's result columns: {refused}");
+        }
         Ok(self
             .query_scalar(&finer_than_microsecond_in_query_sql(query))?
             .map(|s| split_char31(&s))
@@ -1180,6 +1183,15 @@ pub(crate) fn finer_than_microsecond_in_query_sql(query: &str) -> String {
     )
 }
 
+/// SQL for the message SQL Server gives when it cannot describe a query's first result set; no row when it can.
+pub(crate) fn describe_error_sql(query: &str) -> String {
+    format!(
+        "SELECT TOP 1 CONVERT(nvarchar(max), error_message) \
+         FROM sys.dm_exec_describe_first_result_set(N'{}', NULL, 0) WHERE error_number IS NOT NULL",
+        query.replace('\'', "''")
+    )
+}
+
 /// The `datetime2` / `datetimeoffset` columns of `schema.table` declared finer than a microsecond, as the catalog fact the keyset seam reads.
 pub(crate) fn finer_than_microsecond_columns(
     src: &mut MssqlSource,
@@ -1728,8 +1740,8 @@ mod tests {
 #[cfg(test)]
 mod key_probe_sql_tests {
     use super::{
-        finer_than_microsecond_in_query_sql, finer_than_microsecond_sql, keyset_keys_sql,
-        single_int_pk_sql, split_char31,
+        describe_error_sql, finer_than_microsecond_in_query_sql, finer_than_microsecond_sql,
+        keyset_keys_sql, single_int_pk_sql, split_char31,
     };
 
     /// A catalog list splits on its separator and drops empty members.
@@ -1755,6 +1767,14 @@ mod key_probe_sql_tests {
             sql.contains("system_type_id IN (42, 43) AND scale > 6"),
             "{sql}"
         );
+    }
+
+    /// The describe-error probe quotes the query and reads only the rows that carry an error.
+    #[test]
+    fn the_describe_error_probe_quotes_the_query_and_reads_the_error_rows() {
+        let sql = describe_error_sql("SELECT 'a' AS x");
+        assert!(sql.contains("N'SELECT ''a'' AS x'"), "{sql}");
+        assert!(sql.contains("WHERE error_number IS NOT NULL"), "{sql}");
     }
 
     /// H24: a composite UNIQUE(a NOT NULL, b NULL) must not surface `a` as a keyset key, so the per-column filters live in HAVING where COUNT(*) still counts every key column.

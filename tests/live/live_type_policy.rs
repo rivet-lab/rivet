@@ -136,7 +136,6 @@ fn oracle_batch_timestamp9_is_refused_until_declared_under_every_policy() {
         (rig, out)
     };
 
-    let rows = crate::live_narrowing_override::count_where;
     let (lossy, lossy_out) = declared(0, "columns: {TS9: timestamp}");
     let run = lossy.run_args(&[]);
     let err = String::from_utf8_lossy(&run.stderr);
@@ -145,13 +144,12 @@ fn oracle_batch_timestamp9_is_refused_until_declared_under_every_policy() {
         err.contains("column 'TS9'") && err.contains("fidelity=lossy"),
         "{err}"
     );
-    assert_eq!(
-        rows(
-            &lossy_out,
-            "\"ID\" = 1 AND \"TS9\" = TIMESTAMP '2024-01-02 03:04:05.123456'"
-        ),
+    crate::live_narrowing_override::assert_delivered(
+        &lossy_out,
+        &["ID", "TS9"],
+        &["1", "2024-01-02T03:04:05.123456"],
         1,
-        "the declared timestamp keeps microseconds"
+        "the declared timestamp keeps microseconds",
     );
 
     let (strict, strict_out) = declared(1, "columns: {TS9: timestamp}");
@@ -178,13 +176,12 @@ fn oracle_batch_timestamp9_is_refused_until_declared_under_every_policy() {
             "{args:?} declared timestamp_ns:\n{err}"
         );
         assert!(!err.contains("fidelity=lossy"), "{err}");
-        assert_eq!(
-            rows(
-                &exact_out,
-                "\"ID\" = 1 AND \"TS9\" = TIMESTAMP_NS '2024-01-02 03:04:05.123456789'"
-            ),
+        crate::live_narrowing_override::assert_delivered(
+            &exact_out,
+            &["ID", "TS9"],
+            &["1", "2024-01-02T03:04:05.123456789"],
             1,
-            "the declared timestamp_ns keeps every digit"
+            "the declared timestamp_ns keeps every digit",
         );
     }
 }

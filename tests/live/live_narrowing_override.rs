@@ -1,13 +1,48 @@
 //! A `columns:` time override that keeps fewer fraction digits than a result column holds is reported lossy on batch and on CDC, decided per result column of the query.
-//! The oracle for delivered rows is DuckDB over the parquet the run wrote.
+//! The oracle for delivered rows is Arrow's rendering of the parquet the run wrote.
 
 use crate::common::*;
 use crate::live_int_to_float_override::readback_only;
 
-/// Rows of the parquet under `out` matching `filter`; the one DuckDB read of this module.
-pub fn count_where(out: &std::path::Path, filter: &str) -> i64 {
-    duckdb_dir_scalar(out, "count(*)", Some(filter))
+/// Arrow's rendering of `cols` for every row under `out`, in file and row order.
+pub fn delivered_rows(out: &std::path::Path, cols: &[&str]) -> Vec<Vec<Option<String>>> {
+    let columns: Vec<Vec<Option<String>>> =
+        cols.iter().map(|c| dir_parquet_display(out, c)).collect();
+    let n = columns.first().map_or(0, Vec::len);
+    (0..n)
+        .map(|i| columns.iter().map(|c| c[i].clone()).collect())
+        .collect()
 }
+
+/// Asserts `out` holds exactly `n` rows and each renders `values` in `cols`.
+pub fn assert_delivered(
+    out: &std::path::Path,
+    cols: &[&str],
+    values: &[&str],
+    n: usize,
+    ctx: &str,
+) {
+    let row: Vec<Option<String>> = values.iter().map(|v| Some(v.to_string())).collect();
+    assert_eq!(
+        delivered_rows(out, cols),
+        vec![row; n],
+        "{ctx}: delivered rows of {cols:?}"
+    );
+}
+
+/// One batch case: name, optional query, declaration, verdict, delivered column, delivered value.
+pub type BatchCase<'a> = (&'a str, Option<String>, &'a str, Verdict, &'a str, &'a str);
+
+/// One CDC case: label, columns, declaration, delivered column, verdict, inserted value, delivered value.
+pub type CdcCase<'a> = (
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a str,
+    Verdict,
+    &'a str,
+    &'a str,
+);
 
 /// The verdict a declared column draws: lossy (warns by default, refused by `--strict`) or exact (runs under both).
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -74,11 +109,6 @@ pub fn lax_runs(rig: &Rig, ctx: &str) {
     );
 }
 
-/// The result column a `COL = ...` row filter names.
-pub fn col_of(row: &str) -> &str {
-    row.split(' ').next().unwrap()
-}
-
 /// Grades a fresh rig from `make` for `want` under `check`, `--strict` and the default policy; returns the destination of the default run.
 pub fn graded(make: &dyn Fn() -> Rig, want: Verdict, col: &str, ctx: &str) -> std::path::PathBuf {
     check_verdict(&make(), want, col, ctx);
@@ -89,7 +119,7 @@ pub fn graded(make: &dyn Fn() -> Rig, want: Verdict, col: &str, ctx: &str) -> st
 }
 
 /// Rows a pair of runs (`--strict`, then default) leaves: the refused strict run writes none.
-pub fn delivered(want: Verdict) -> i64 {
+pub fn delivered(want: Verdict) -> usize {
     match want {
         Verdict::Lossy => 1,
         Verdict::Exact => 2,
@@ -117,34 +147,46 @@ fn mssql_table() -> (String, MssqlTable) {
 fn a_mssql_batch_time_override_is_graded_by_the_result_column_it_lands_on() {
     require_alive(LiveService::Mssql);
     let (t, _guard) = mssql_table();
-    let cases: &[(&str, Option<String>, &str, Verdict, &str)] = &[
+    let cases: &[BatchCase] = &[
         (
             "table d7",
             None,
             "d7: timestamp",
             Verdict::Lossy,
-            "d7 = TIMESTAMP '2024-01-02 03:04:05.123456'",
+            "d7",
+            "2024-01-02T03:04:05.123456",
         ),
         (
             "table o7",
             None,
             "o7: timestamp_tz",
             Verdict::Lossy,
-            "o7 = TIMESTAMPTZ '2024-01-02 03:04:05.123456+00'",
+            "o7",
+            "2024-01-02T03:04:05.123456+00:00",
         ),
         (
             "table d7 ns",
             None,
             "d7: timestamp_ns",
             Verdict::Exact,
-            "d7 = TIMESTAMP_NS '2024-01-02 03:04:05.123456700'",
+            "d7",
+            "2024-01-02T03:04:05.123456700",
+        ),
+        (
+            "table o7 ns",
+            None,
+            "o7: timestamp_tz_ns",
+            Verdict::Exact,
+            "o7",
+            "2024-01-02T03:04:05.123456700+00:00",
         ),
         (
             "table d3",
             None,
             "d3: timestamp",
             Verdict::Exact,
-            "d3 = TIMESTAMP '2024-01-02 03:04:05.123'",
+            "d3",
+            "2024-01-02T03:04:05.123",
         ),
         (
             "cast",
@@ -153,14 +195,16 @@ fn a_mssql_batch_time_override_is_graded_by_the_result_column_it_lands_on() {
             )),
             "d7: timestamp",
             Verdict::Exact,
-            "d7 = TIMESTAMP '2024-01-02 03:04:05.123'",
+            "d7",
+            "2024-01-02T03:04:05.123",
         ),
         (
             "alias",
             Some(format!("SELECT id, d7 AS x FROM dbo.{t}")),
             "x: timestamp",
             Verdict::Lossy,
-            "x = TIMESTAMP '2024-01-02 03:04:05.123456'",
+            "x",
+            "2024-01-02T03:04:05.123456",
         ),
         (
             "join",
@@ -169,11 +213,12 @@ fn a_mssql_batch_time_override_is_graded_by_the_result_column_it_lands_on() {
             )),
             "d7: timestamp",
             Verdict::Lossy,
-            "d7 = TIMESTAMP '2024-01-02 03:04:05.123456'",
+            "d7",
+            "2024-01-02T03:04:05.123456",
         ),
     ];
     let mut failed = Vec::new();
-    for (n, (name, query, decl, want, row)) in cases.iter().enumerate() {
+    for (n, (name, query, decl, want, col, value)) in cases.iter().enumerate() {
         let case = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let out = std::env::temp_dir().join(format!("{t}_{n}"));
             let _ = std::fs::remove_dir_all(&out);
@@ -189,12 +234,8 @@ fn a_mssql_batch_time_override_is_graded_by_the_result_column_it_lands_on() {
                     Verdict::Exact => rig,
                 }
             };
-            let out = graded(&make, *want, col_of(row), name);
-            assert_eq!(
-                count_where(&out, &format!("id = 1 AND {row}")),
-                delivered(*want),
-                "{name}: delivered row"
-            );
+            let out = graded(&make, *want, col, name);
+            assert_delivered(&out, &["id", col], &["1", value], delivered(*want), name);
             let _ = std::fs::remove_dir_all(&out);
         }));
         if let Err(e) = case {
@@ -209,36 +250,53 @@ fn a_mssql_batch_time_override_is_graded_by_the_result_column_it_lands_on() {
     assert!(failed.is_empty(), "cases failed:\n{}", failed.join("\n"));
 }
 
-/// A SQL Server CDC override is graded as the batch one: `datetime2(7)` under `timestamp` is lossy, under `timestamp_ns` and over `datetime2(3)` exact; the change row holds what the verdict says.
+/// A SQL Server CDC override is graded as the batch one: `datetime2(7)` and `datetimeoffset(7)` under a microsecond type are lossy, under their nanosecond type and over `datetime2(3)` exact; the change row holds what the verdict says.
 #[test]
 #[ignore = "live: requires docker compose mssql (CDC)"]
 fn a_mssql_cdc_time_override_is_graded_as_the_batch_override() {
     let _serial = cross_process_serial("mssql_cdc");
-    let cases: &[(&str, &str, Verdict, &str)] = &[
+    let cases: &[(&str, &str, Verdict, &str, &str)] = &[
         (
             "nso_cdc_ms7",
             "d7: timestamp",
             Verdict::Lossy,
-            "d7 = TIMESTAMP '2024-01-02 03:04:05.123456'",
+            "d7",
+            "2024-01-02T03:04:05.123456",
         ),
         (
             "nso_cdc_msn",
             "d7: timestamp_ns",
             Verdict::Exact,
-            "d7 = TIMESTAMP_NS '2024-01-02 03:04:05.123456700'",
+            "d7",
+            "2024-01-02T03:04:05.123456700",
         ),
         (
             "nso_cdc_ms3",
             "d3: timestamp",
             Verdict::Exact,
-            "d3 = TIMESTAMP '2024-01-02 03:04:05.123'",
+            "d3",
+            "2024-01-02T03:04:05.123",
+        ),
+        (
+            "nso_cdc_mso7",
+            "o7: timestamp_tz",
+            Verdict::Lossy,
+            "o7",
+            "2024-01-02T03:04:05.123456+00:00",
+        ),
+        (
+            "nso_cdc_mson",
+            "o7: timestamp_tz_ns",
+            Verdict::Exact,
+            "o7",
+            "2024-01-02T03:04:05.123456700+00:00",
         ),
     ];
-    for (label, decl, want, row) in cases {
+    for (label, decl, want, col, value) in cases {
         let decl = decl.to_string();
         let mut scn = CdcScenario::mssql_with(
             label,
-            "id INT PRIMARY KEY, d7 DATETIME2(7), d3 DATETIME2(3)",
+            "id INT PRIMARY KEY, d7 DATETIME2(7), d3 DATETIME2(3), o7 DATETIMEOFFSET(7)",
             |r, _| {
                 let r = r.export_line(&format!("columns: {{{decl}}}"));
                 match want {
@@ -249,19 +307,22 @@ fn a_mssql_cdc_time_override_is_graded_as_the_batch_override() {
         );
         let out = scn.rig.out_dir();
         std::fs::create_dir_all(&out).unwrap();
-        check_verdict(&scn.rig, *want, col_of(row), label);
+        check_verdict(&scn.rig, *want, col, label);
         strict_verdict(&scn.rig, *want, label);
         lax_runs(&scn.rig, label);
         let table = scn.table.clone();
         scn.sql(&format!(
-            "INSERT INTO dbo.{table} VALUES (1, '{DT2_FINE}', '2024-01-02 03:04:05.123')"
+            "INSERT INTO dbo.{table} VALUES (1, '{DT2_FINE}', '2024-01-02 03:04:05.123', '{DT2_FINE} +00:00')"
         ));
         scn.settle();
         scn.rig.run_ok();
-        assert_eq!(
-            count_where(&out, &format!("__op = 'insert' AND id = 1 AND {row}")),
+        assert_eq!(cdc_id_ops(&out), vec![(1, "insert".to_string())], "{label}");
+        assert_delivered(
+            &out,
+            &["__op", "id", col],
+            &["insert", "1", value],
             1,
-            "{label}: delivered change row"
+            label,
         );
     }
 }

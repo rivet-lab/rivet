@@ -770,7 +770,6 @@ fn oracle_class_census_is_pinned() {
         "read_bq_",
         // Mongo `_id`s under a marker dir, read through DuckDB (live_cdc_mongo.rs).
         "walkdir_parquet_ids(",
-        "live_narrowing_override::count_where(",
     ];
     let shared_codec = [
         "cdc_id_ops(",
@@ -910,7 +909,7 @@ fn oracle_class_census_is_pinned() {
 // read through `confirmed_flush_lsn`) and its way back.
 // 2026-11-15: +1 independent - the flat Mongo `_id` label of a CDC part, the delivered `_id` set counted by DuckDB.
 // 2026-11-18: +6 independent (#712) - the PostgreSQL column-grants cells read the slot back through `confirmed_flush_lsn`.
-const PIN_INDEPENDENT: usize = 127; // ratchet-pin: cdc-census-independent (review 2027-02-01) min
+const PIN_INDEPENDENT: usize = 126; // ratchet-pin: cdc-census-independent (review 2027-02-01) min
 // 2026-09-28, source connection ceilings: +3 shared codec — the run's captured row is the
 // fixture check; the oracle is the server's own connection counter.
 // 2026-09-29: +2 shared codec — the Oracle TRUNCATE refusal on re-run and the uncaptured-truncate cell.
@@ -949,7 +948,8 @@ const PIN_INDEPENDENT: usize = 127; // ratchet-pin: cdc-census-independent (revi
 // 139 -> 140 (2026-11-16, #714): the Oracle whole-table cell reads the delivered parts with arrow against the rows the test wrote; the rig oracle grades each run.
 // 142 -> 147 (2026-11-16, #715): the MongoDB column-grants cells read the delivered parts with arrow against the fields the view lists and the values the test wrote; the hidden bytes are asserted absent.
 // 147 -> 155 (2026-11-19, #713): the SQL Server column-grants cells read the delivered parts with arrow against the rows and values the test wrote; the hidden bytes are asserted absent.
-const PIN_SHARED_CODEC: usize = 154; // ratchet-pin: cdc-census-shared-codec (review 2027-02-01)
+// 154 -> 155 (2026-11-22, #1149): the Oracle CDC time-override cell reads the delivered change ids and values with arrow against the rows the test wrote; the verdict is graded by `check` and `--strict`.
+const PIN_SHARED_CODEC: usize = 155; // ratchet-pin: cdc-census-shared-codec (review 2027-02-01)
 const PIN_SELF_COUNTER: usize = 6; // ratchet-pin: cdc-census-self-counter (review 2027-02-01)
 // 2026-09-28: +1 presence — the SQL Server undecodable-cell refusal, whose oracle is the refusal.
 // 2026-09-29: +2 presence — the PG CDC LMT-timezone and DOMAIN parity cells compare CDC to batch output.
@@ -1283,7 +1283,6 @@ fn every_live_cdc_test_asserts_an_outcome() {
                 || chunk.contains("duckdb_distinct_i64_set(")
                 || chunk.contains("duckdb_assert_complete(")
                 || chunk.contains("duckdb_assert_at_least_once(")
-                || chunk.contains("live_narrowing_override::count_where(")
                 || chunk.contains("duckdb_assert_rows_and_distinct(")
                 // The uv-pinned duckdb (dev/pytools/duckcli.py) as a read-back (round-5
                 // row-hash value oracle): the test pipes `-json` output into an

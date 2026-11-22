@@ -1797,6 +1797,7 @@ exports:
         columns: Vec<(&'static str, &'static str, RivetType)>,
         finer: Vec<String>,
         describe_fails: bool,
+        describes: usize,
     }
 
     impl Described {
@@ -1805,6 +1806,7 @@ exports:
                 columns: columns.to_vec(),
                 finer: finer.iter().map(|c| c.to_string()).collect(),
                 describe_fails: false,
+                describes: 0,
             }
         }
     }
@@ -1840,6 +1842,7 @@ exports:
                 .collect())
         }
         fn finer_than_microsecond_in_query(&mut self, _query: &str) -> anyhow::Result<Vec<String>> {
+            self.describes += 1;
             if self.describe_fails {
                 anyhow::bail!("describe refused");
             }
@@ -1958,41 +1961,72 @@ exports:
         );
     }
 
-    /// The describe is read only when an override keeps at most a microsecond, and a describe that fails is said in a warning, never read as `exact` in silence.
+    /// The describe is read once, and only when an override over a time column keeps fewer than nine digits; a describe that fails grades the column lossy with its cause, never exact in silence.
     #[test]
-    fn the_describe_is_read_only_for_a_time_override_and_its_failure_is_said() {
+    fn the_describe_is_read_only_for_a_time_override_and_its_failure_grades_lossy() {
         use crate::types::TimeUnit::{Microsecond, Nanosecond};
         let ns = || timestamp(Nanosecond, false);
-        let probe = |source: &mut Described, ov: (&str, RivetType)| {
-            let overrides: ColumnOverrides = [(ov.0.to_string(), ov.1)].into_iter().collect();
+        let probe = |source: &mut Described, ov: &[(&str, RivetType)]| {
+            let overrides: ColumnOverrides =
+                ov.iter().map(|(c, t)| (c.to_string(), t.clone())).collect();
             probe_mappings(source, false, "q", &overrides).unwrap()
         };
         let mut asked = Described::of(&[("d", "datetime2", ns())], &["d"]);
         asked.describe_fails = true;
         for ov in [("d", RivetType::String), ("d", ns())] {
-            let got = probe(&mut asked, ov);
+            let got = probe(&mut asked, &[ov]);
             assert!(got[0].warnings.is_empty(), "{:?}", got[0].warnings);
+            assert_eq!(got[0].fidelity, TypeFidelity::Exact);
         }
+        assert_eq!(asked.describes, 0, "no truncating override, no describe");
+        let mut dated = Described::of(&[("t", "date", RivetType::Date)], &[]);
+        let got = probe(&mut dated, &[("t", RivetType::Date)]);
+        assert!(got[0].warnings.is_empty(), "{:?}", got[0].warnings);
+        assert_eq!(dated.describes, 0, "a date over a date column asks nothing");
+
         let mut two = Described::of(
             &[("d", "datetime2", ns()), ("e", "datetime2", ns())],
             &["d", "e"],
         );
         two.describe_fails = true;
-        let overrides: ColumnOverrides = [
-            ("d".to_string(), timestamp(Microsecond, false)),
-            ("e".to_string(), ns()),
-        ]
-        .into_iter()
-        .collect();
-        let got = probe_mappings(&mut two, false, "q", &overrides).unwrap();
-        assert_eq!(got[0].warnings.len(), 1, "{:?}", got[0].warnings);
-        assert!(got[1].warnings.is_empty(), "{:?}", got[1].warnings);
-        let got = probe(&mut asked, ("d", timestamp(Microsecond, false)));
-        assert_eq!(got[0].fidelity, TypeFidelity::Exact);
-        assert!(
-            got[0].warnings.len() == 1 && got[0].warnings[0].contains("describe refused"),
-            "{:?}",
-            got[0].warnings
+        let got = probe(
+            &mut two,
+            &[("d", timestamp(Microsecond, false)), ("e", ns())],
         );
+        assert_eq!(two.describes, 1, "one describe for the whole query");
+        assert_eq!(got[0].fidelity, TypeFidelity::Lossy);
+        assert_eq!(got[0].warnings.len(), 1, "{:?}", got[0].warnings);
+        assert!(got[0].warnings[0].contains("describe refused"));
+        assert_eq!(got[1].fidelity, TypeFidelity::Exact);
+        assert!(got[1].warnings.is_empty(), "{:?}", got[1].warnings);
+
+        let mut stream = Described::of(&[("d", "datetime2", ns())], &["d"]);
+        stream.describe_fails = true;
+        let overrides: ColumnOverrides = [("d".to_string(), timestamp(Microsecond, false))]
+            .into_iter()
+            .collect();
+        let got = probe_mappings(&mut stream, true, "q", &overrides).unwrap();
+        assert_eq!(got[0].fidelity, TypeFidelity::Lossy, "stream");
+    }
+
+    /// A column the run does not override keeps its own grade whatever the describe says about it, and a column the override names but the source holds coarser than a microsecond is read from the describe once.
+    #[test]
+    fn a_column_without_an_override_is_never_graded_by_the_describe() {
+        use crate::types::TimeUnit::{Microsecond, Nanosecond};
+        let mut source = Described::of(
+            &[
+                ("kept", "datetime2", timestamp(Microsecond, false)),
+                ("cut", "datetime2", timestamp(Nanosecond, false)),
+            ],
+            &["kept", "cut"],
+        );
+        let overrides: ColumnOverrides = [("cut".to_string(), timestamp(Microsecond, false))]
+            .into_iter()
+            .collect();
+        let got = probe_mappings(&mut source, false, "q", &overrides).unwrap();
+        assert_eq!(got[0].fidelity, TypeFidelity::Exact, "{:?}", got[0]);
+        assert!(got[0].warnings.is_empty(), "{:?}", got[0].warnings);
+        assert_eq!(got[1].fidelity, TypeFidelity::Lossy);
+        assert_eq!(source.describes, 1);
     }
 }

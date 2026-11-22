@@ -23,27 +23,30 @@ fn an_oracle_batch_time_override_is_graded_by_the_result_column_it_lands_on() {
     require_alive(LiveService::Oracle);
     let t = table();
     let n = t.name();
-    let cases: &[(&str, Option<String>, &str, Verdict, &str)] = &[
+    let cases: &[BatchCase] = &[
         (
             "table",
             None,
             "TS9: timestamp",
             Verdict::Lossy,
-            "TS9 = TIMESTAMP '2024-01-02 03:04:05.123456'",
+            "TS9",
+            "2024-01-02T03:04:05.123456",
         ),
         (
             "table ns",
             None,
             "TS9: timestamp_ns",
             Verdict::Exact,
-            "TS9 = TIMESTAMP_NS '2024-01-02 03:04:05.123456789'",
+            "TS9",
+            "2024-01-02T03:04:05.123456789",
         ),
         (
             "table ts3",
             None,
             "TS9: timestamp_ns, TS3: timestamp",
             Verdict::Exact,
-            "TS3 = TIMESTAMP '2024-01-02 03:04:05.123'",
+            "TS3",
+            "2024-01-02T03:04:05.123",
         ),
         (
             "cast",
@@ -52,14 +55,16 @@ fn an_oracle_batch_time_override_is_graded_by_the_result_column_it_lands_on() {
             )),
             "TS9: timestamp",
             Verdict::Exact,
-            "TS9 = TIMESTAMP '2024-01-02 03:04:05.123'",
+            "TS9",
+            "2024-01-02T03:04:05.123",
         ),
         (
             "alias",
             Some(format!("SELECT ID, TS9 AS X FROM {n}")),
             "X: timestamp",
             Verdict::Lossy,
-            "X = TIMESTAMP '2024-01-02 03:04:05.123456'",
+            "X",
+            "2024-01-02T03:04:05.123456",
         ),
         (
             "join",
@@ -68,10 +73,11 @@ fn an_oracle_batch_time_override_is_graded_by_the_result_column_it_lands_on() {
             )),
             "TS9: timestamp",
             Verdict::Lossy,
-            "TS9 = TIMESTAMP '2024-01-02 03:04:05.123456'",
+            "TS9",
+            "2024-01-02T03:04:05.123456",
         ),
     ];
-    for (i, (name, query, decl, want, row)) in cases.iter().enumerate() {
+    for (i, (name, query, decl, want, col, value)) in cases.iter().enumerate() {
         let out = std::env::temp_dir().join(format!("{n}_{i}"));
         let _ = std::fs::remove_dir_all(&out);
         std::fs::create_dir_all(&out).unwrap();
@@ -82,12 +88,8 @@ fn an_oracle_batch_time_override_is_graded_by_the_result_column_it_lands_on() {
             }
             rig.export_line(&format!("columns: {{{decl}}}"))
         };
-        let out = graded(&make, *want, col_of(row), name);
-        assert_eq!(
-            count_where(&out, &format!("ID = 1 AND {row}")),
-            delivered(*want),
-            "{name}: delivered row"
-        );
+        let out = graded(&make, *want, col, name);
+        assert_delivered(&out, &["ID", col], &["1", value], delivered(*want), name);
         let _ = std::fs::remove_dir_all(&out);
     }
 }

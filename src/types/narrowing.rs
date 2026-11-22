@@ -19,8 +19,15 @@ pub(crate) fn downgrade_narrowing_overrides(
         .iter()
         .map(|m| (m.column_name.as_str(), &m.rivet_type))
         .collect();
+    let holds_time = |m: &TypeMapping| {
+        matches!(
+            source_by_name.get(m.column_name.as_str()),
+            Some(RivetType::Timestamp { .. } | RivetType::Time { .. })
+        )
+    };
     let truncates = |m: &TypeMapping| {
         column_overrides.contains_key(&m.column_name)
+            && holds_time(m)
             && kept_fraction_digits(&m.rivet_type).is_some_and(|kept| kept < 9)
     };
     let finer = mappings.iter().any(truncates).then(finer_columns);
@@ -31,9 +38,12 @@ pub(crate) fn downgrade_narrowing_overrides(
         let finer_here = match &finer {
             Some(Ok(columns)) => columns.contains(&m.column_name),
             Some(Err(e)) if truncates(m) => {
+                m.fidelity = TypeFidelity::Lossy;
                 m.warnings.push(format!(
                     "the source could not say whether it holds more fraction digits of a second \
-                     than this type keeps ({e:#}); a column finer than a microsecond is truncated"
+                     than this type keeps ({e:#}), so a finer digit may be truncated at run; this \
+                     is lossy, not exact. To keep every digit, drop the override on SQL Server or \
+                     declare `timestamp_ns` / `timestamp_tz_ns` on Oracle"
                 ));
                 false
             }

@@ -1,30 +1,61 @@
-//! The Oracle CDC side of `live_narrowing_override`: the stream grades a `timestamp` override over `TIMESTAMP(9)` as the batch run does.
+//! The Oracle CDC side of `live_narrowing_override`: the stream grades a time override over `TIMESTAMP(9)` and `TIMESTAMP(9) WITH TIME ZONE` as the batch run does.
 
 use crate::common::*;
 use crate::live_narrowing_override::*;
 
-/// An Oracle CDC declared `timestamp` over `TIMESTAMP(9)` is lossy and refused by `--strict`, over `TIMESTAMP(3)` exact; the change row holds what the verdict says.
+/// An Oracle CDC declared `timestamp` / `timestamp_tz` over `TIMESTAMP(9)` [WITH TIME ZONE] is lossy and refused by `--strict`, `timestamp_ns` / `timestamp_tz_ns` and `timestamp` over `TIMESTAMP(3)` exact; the change row holds what the verdict says.
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn an_oracle_cdc_time_override_is_graded_as_the_batch_override() {
     let _serial = cross_process_serial("oracle_cdc");
-    let cases: &[(&str, &str, &str, Verdict, &str)] = &[
+    let cases: &[CdcCase] = &[
         (
             "nso_cor9",
             "id NUMBER(10) PRIMARY KEY, ts9 TIMESTAMP(9)",
             "TS9: timestamp",
+            "TS9",
             Verdict::Lossy,
-            "TS9 = TIMESTAMP '2024-01-02 03:04:05.123456'",
+            "TIMESTAMP '2024-01-02 03:04:05.123456789'",
+            "2024-01-02T03:04:05.123456",
+        ),
+        (
+            "nso_cor9n",
+            "id NUMBER(10) PRIMARY KEY, ts9 TIMESTAMP(9)",
+            "TS9: timestamp_ns",
+            "TS9",
+            Verdict::Exact,
+            "TIMESTAMP '2024-01-02 03:04:05.123456789'",
+            "2024-01-02T03:04:05.123456789",
         ),
         (
             "nso_cor3",
             "id NUMBER(10) PRIMARY KEY, ts3 TIMESTAMP(3)",
             "TS3: timestamp",
+            "TS3",
             Verdict::Exact,
-            "TS3 = TIMESTAMP '2024-01-02 03:04:05.123'",
+            "TIMESTAMP '2024-01-02 03:04:05.123'",
+            "2024-01-02T03:04:05.123",
+        ),
+        (
+            "nso_cortz9",
+            "id NUMBER(10) PRIMARY KEY, tz9 TIMESTAMP(9) WITH TIME ZONE",
+            "TZ9: timestamp_tz",
+            "TZ9",
+            Verdict::Lossy,
+            "TIMESTAMP '2024-01-02 03:04:05.123456789 +00:00'",
+            "2024-01-02T03:04:05.123456+00:00",
+        ),
+        (
+            "nso_cortz9n",
+            "id NUMBER(10) PRIMARY KEY, tz9 TIMESTAMP(9) WITH TIME ZONE",
+            "TZ9: timestamp_tz_ns",
+            "TZ9",
+            Verdict::Exact,
+            "TIMESTAMP '2024-01-02 03:04:05.123456789 +00:00'",
+            "2024-01-02T03:04:05.123456789+00:00",
         ),
     ];
-    for (label, cols, decl, want, row) in cases {
+    for (label, cols, decl, col, want, value, shown) in cases {
         let t = OracleTable::create(label, cols);
         ora_exec(&format!(
             "ALTER TABLE {} ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS",
@@ -38,23 +69,18 @@ fn an_oracle_cdc_time_override_is_graded_as_the_batch_override() {
             .checkpoint_path(d.path().join("cdc.ckpt"))
             .dest_path(out.clone())
             .export_line(&format!("columns: {{{decl}}}"));
-        check_verdict(&rig, *want, col_of(row), label);
+        check_verdict(&rig, *want, col, label);
         strict_verdict(&rig, *want, label);
         lax_runs(&rig, label);
-        let value = if *want == Verdict::Lossy {
-            "TIMESTAMP '2024-01-02 03:04:05.123456789'"
-        } else {
-            "TIMESTAMP '2024-01-02 03:04:05.123'"
-        };
         ora_exec(&format!("INSERT INTO {} VALUES (1, {value})", t.name()));
         rig.run_ok();
-        assert_eq!(
-            crate::live_narrowing_override::count_where(
-                &out,
-                &format!("__op = 'insert' AND ID = 1 AND {row}")
-            ),
+        assert_eq!(cdc_id_ops(&out), vec![(1, "insert".to_string())], "{label}");
+        assert_delivered(
+            &out,
+            &["__op", "ID", col],
+            &["insert", "1", shown],
             1,
-            "{label}: delivered change row"
+            label,
         );
     }
 }
