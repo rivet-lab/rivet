@@ -7298,6 +7298,71 @@ seeds:
       oracle:
         cells: ["lib:narrows_flags_a_decimal_float8_override_past_fifteen_digits_as_lossy", "lib:a_float8_override_over_a_wide_decimal_is_reported_lossy"]
 
+  - name: cdc-override-value-refusal-wire-coded
+    class: "a value a `columns:` override cannot hold is refused on the change stream with the wire-mismatch code (exit 1) while the batch converter and the snapshot leg of the same engine refuse it with the value code (exit 5), so one condition has two exits and `rivet check` names the other"
+    history: "2026-11-21: Oracle CDC `initial: snapshot` refused a DATE with a time of day under `date` with exit 5 and the stream leg with exit 1; CellRefusal::into_error coded every overridden refusal as the wire-mismatch code"
+    scope: source
+    switch: cdc-override-value-refusal-wire-coded
+    engines:
+      postgres:
+        cells: ["lib:an_override_refusal_by_value_carries_the_value_code_as_batch_does"]
+      mysql:
+        cells: ["lib:an_override_refusal_by_value_carries_the_value_code_as_batch_does"]
+      mssql:
+        cells: ["lib:an_override_refusal_by_value_carries_the_value_code_as_batch_does"]
+      mongo:
+        na: "a MongoDB change row is two text cells; the typed cell builder does not run"
+      oracle:
+        cells: ["lib:an_override_refusal_by_value_carries_the_value_code_as_batch_does", "oracle_cdc_a_date_override_refuses_a_time_of_day_not_drops_it"]
+  - name: integer-text-cut-to-leading-digits
+    class: "a text cell under an integer override is read as its leading digits (`1.0`, `1.5` and `1 ` as 1) on one leg while another leg of the same engine refuses it, so one value is delivered changed by a run and refused by the next leg"
+    history: "2026-11-22: the MySQL CDC stream read `1.0` and `1 ` under int32 through decimal_text_to_int and delivered 1 while batch, check and the snapshot refused them; one shared whole_int_text now reads the cell on every leg"
+    scope: source
+    switch: integer-text-cut-to-leading-digits
+    engines:
+      postgres:
+        na: "a text column under an integer override is refused at plan time on the baseline leg and on a stream-only export alike (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH, a_text_under_an_integer_override_is_refused_alike_on_every_leg_postgres), so no text cell is read as an integer"
+      mysql:
+        cells: ["lib:whole_int_text_accepts_only_a_whole_cell_integer", "lib:an_override_refusal_by_value_carries_the_value_code_as_batch_does"]
+      mssql:
+        na: "a text column under an integer override is refused at plan time on the baseline leg and on a stream-only export alike (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH, a_text_under_an_integer_override_is_refused_alike_on_every_leg_mssql), so no text cell is read as an integer"
+      mongo:
+        na: "a MongoDB field has no text-to-integer column override"
+      oracle:
+        na: "a VARCHAR2 column under an integer override is refused at plan time on the baseline leg and on a stream-only export alike (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH, a_text_under_an_integer_override_is_refused_alike_on_every_leg_oracle), so no text cell is read as an integer"
+  - name: cdc-integer-override-skips-table
+    class: "a numeric, float or text column under an integer `columns:` override on a stream-only CDC export is graded by the cell builder by its first value and not by the override table the batch and snapshot legs read, so the same config is refused at plan on one leg, delivered on another and refused by a value on a third, with `check` saying exact"
+    history: "2026-11-22: PR #1148 verifier finding, a PostgreSQL numeric(10,2) declared int8 delivered 43 on main and stopped with a false `is not an exact integer` on the branch while the snapshot leg stopped RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH; the stream, the baseline and `check` now share one decision"
+    scope: source
+    switch: cdc-integer-override-skips-table
+    engines:
+      postgres:
+        cells: [a_numeric_under_an_integer_override_is_refused_alike_on_every_leg_postgres, a_text_under_an_integer_override_is_refused_alike_on_every_leg_postgres]
+      mysql:
+        cells: [a_numeric_under_an_integer_override_is_refused_alike_on_every_leg_mysql]
+      mssql:
+        cells: [a_numeric_under_an_integer_override_is_refused_alike_on_every_leg_mssql, a_text_under_an_integer_override_is_refused_alike_on_every_leg_mssql]
+      mongo:
+        na: "a MongoDB change row is two text cells; no `columns:` override retypes a field on the stream"
+      oracle:
+        cells: [a_numeric_under_an_integer_override_is_refused_alike_on_every_leg_oracle, a_text_under_an_integer_override_is_refused_alike_on_every_leg_oracle]
+  - name: check-values-unread-unsaid
+    class: "`rivet check` exits 0 over a column a run then refuses by a value (RIVET_SOURCE_VALUE_UNREPRESENTABLE, RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE) without saying that it read no values, so check and run disagree with nothing to tell the operator why"
+    history: "CHECK_RUN_SPLIT known-red class over every engine and leg (2026-11-10..19); owner decision 2026-11-20: check names the codes only a value decides (`VALUE_CODES` in the registry) instead of reading values, the note is the operator's statement and the gate grades no split by it (a column check reports exact that a run refuses by a value is a split, known-red or fixed)"
+    scope: source
+    switch: check-values-unread-unsaid
+    engines:
+      postgres:
+        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises", check_says_it_read_no_values_only_under_columns_postgres]
+      mysql:
+        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises", check_says_it_read_no_values_only_under_columns_mysql]
+      mssql:
+        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises", check_says_it_read_no_values_only_under_columns_mssql]
+      oracle:
+        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises", check_says_it_read_no_values_only_under_columns_oracle]
+      mongo:
+        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises"]
+
   - name: narrowing-override-reported-exact
     class: "a `columns:` override that keeps fewer fraction digits than a result column holds (timestamp over an Oracle TIMESTAMP(9) or a SQL Server datetime2(7), on batch and on CDC) truncates the finer digits while the type report calls the column exact, so the run exits 0 with fidelity exact over changed values"
     history: "no_silent_null full tier WRONG_VALUE + INTEGRITY_BLIND (known_red 2026-11-11, oracle TIMESTAMP(9) -> timestamp / timestamp_tz, mssql DATETIME2 -> timestamp / timestamp_tz); fidelity was derived from the target type alone; owner decision 2026-11-20: a narrowing override is delivered and declared lossy; verifier 2026-11-22: the CDC path never reached the check, an alias and a CAST were graded by the catalog name"

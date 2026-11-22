@@ -779,12 +779,7 @@ fn column_cells(
                     let fixed = match fix {
                         Some(fix) => fix
                             .apply_with(v, wire_labels(e, &m.column_name), &e.table)
-                            .map_err(|r| value::CellRefusal {
-                                row,
-                                value: v.clone(),
-                                reason: r.reason,
-                                code: r.code,
-                            })?,
+                            .map_err(|r| value::CellRefusal::refused(row, v, r))?,
                         None => v.clone(),
                     };
                     Ok(value::stamp_text(engine, dt, fixed))
@@ -1974,7 +1969,7 @@ mod tests {
             (format!("{err:#}"), code)
         };
         let (msg, code) = run(&["amount"]);
-        assert_eq!(code.as_deref(), Some("RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH"));
+        assert_eq!(code.as_deref(), Some("RIVET_SOURCE_VALUE_UNREPRESENTABLE"));
         assert_eq!(msg.matches("'amount'").count(), 2, "column + remedy: {msg}");
         assert!(msg.contains("column 'amount' is Int64"), "{msg}");
         assert!(msg.contains("\"1.5\""), "{msg}");

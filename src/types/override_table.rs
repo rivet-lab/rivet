@@ -276,7 +276,8 @@ pub fn refusal_message(
              the source column definition), or remove the override."
                 .to_string()
         }
-        _ => "Remove the override, or CAST the column to the declared type in the export's `query:`."
+        _ => "Remove the override, or CAST the column to the declared type in the export's `query:` \
+              (a `mode: cdc` export has no `query:`: remove the override)."
             .to_string(),
     };
     format!(
