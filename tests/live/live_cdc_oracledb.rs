@@ -1562,3 +1562,190 @@ fn oracle_cdc_a_redo_log_switch_during_mining_is_re_mined_not_failed() {
          nothing: {unmet:?}"
     );
 }
+
+type Ts9Cells = std::collections::BTreeMap<String, String>;
+
+/// One run's verdict: its refusal as `refused[CODE exit N]`, or every delivered row as `op:id` -> its TIMESTAMP(9) cells read off the Parquet.
+fn ts9_verdict(run: &std::process::Output, dir: &Path) -> Result<Ts9Cells, String> {
+    use arrow::array::{Array, AsArray};
+    use arrow::datatypes::{DataType, Int64Type};
+    if !run.status.success() {
+        let err = String::from_utf8_lossy(&run.stderr).to_string();
+        let code = err
+            .split(['[', ']'])
+            .find(|w| w.starts_with("RIVET_"))
+            .unwrap_or("uncoded");
+        return Err(format!(
+            "refused[{code} exit {}]",
+            run.status.code().unwrap_or(-1)
+        ));
+    }
+    let mut rows = Ts9Cells::new();
+    for b in read_all_parts(dir) {
+        let ids =
+            arrow::compute::cast(b.column_by_name("ID").expect("ID"), &DataType::Int64).unwrap();
+        let ops = b
+            .column_by_name("__op")
+            .map(|c| c.as_string::<i32>().clone());
+        for r in 0..b.num_rows() {
+            let cells: Vec<String> = ["T9", "Z9", "L9"]
+                .iter()
+                .map(|c| {
+                    let col = b.column_by_name(c).unwrap_or_else(|| panic!("{c} column"));
+                    if col.is_null(r) {
+                        return "NULL".to_string();
+                    }
+                    match col.data_type() {
+                        DataType::Utf8 => col.as_string::<i32>().value(r).replace('T', " "),
+                        DataType::Timestamp(u, _) => {
+                            let v = arrow::compute::cast(col, &DataType::Int64).unwrap();
+                            format!("{u:?}:{}", v.as_primitive::<Int64Type>().value(r))
+                        }
+                        t => format!("{t:?}"),
+                    }
+                })
+                .collect();
+            let op = ops.as_ref().map_or("", |o| o.value(r));
+            rows.insert(
+                format!("{op}:{}", ids.as_primitive::<Int64Type>().value(r)),
+                cells.join(" | "),
+            );
+        }
+    }
+    Ok(rows)
+}
+
+/// What the batch export and the CDC snapshot and change stream of one TIMESTAMP(9) table deliver under one declaration.
+#[derive(Debug)]
+struct Ts9Legs {
+    batch: Result<Ts9Cells, String>,
+    snapshot: Result<Ts9Cells, String>,
+    stream: Result<Ts9Cells, String>,
+    batch_after: Result<Ts9Cells, String>,
+}
+
+const TS9_SEED: [&str; 2] = [
+    "1, TIMESTAMP '2024-02-29 13:14:15.123456789', TIMESTAMP '2024-02-29 10:00:00.123456789 +02:00', TIMESTAMP '2024-02-29 13:14:15.123456789 +00:00'",
+    "2, TIMESTAMP '2262-04-11 23:47:16.854775807', TIMESTAMP '2262-04-11 23:47:16.854775807 +00:00', TIMESTAMP '2262-04-11 23:47:16.854775807 +00:00'",
+];
+
+const TS9_CHANGES: [&str; 3] = [
+    "INSERT INTO {t} VALUES (10, TIMESTAMP '2000-01-01 12:00:00.000000001', TIMESTAMP '2000-01-01 12:00:00.000000001 +00:00', TIMESTAMP '2000-01-01 12:00:00.000000001 +00:00')",
+    "UPDATE {t} SET t9 = TIMESTAMP '1999-12-31 23:59:59.999999999' WHERE id = 1",
+    "DELETE FROM {t} WHERE id = 2",
+];
+
+fn ts9_legs(declared: &str, seed: &[&str], changes: &[&str]) -> Ts9Legs {
+    let t = cdc_table(
+        "ora_ts9",
+        "id NUMBER(10) PRIMARY KEY, t9 TIMESTAMP(9), z9 TIMESTAMP(9) WITH TIME ZONE, l9 TIMESTAMP(9) WITH LOCAL TIME ZONE",
+    );
+    for row in seed {
+        ora_exec(&format!("INSERT INTO {} VALUES ({row})", t.name()));
+    }
+    let d = tempfile::tempdir().unwrap();
+    let with = |r: Rig| match declared {
+        "" => r,
+        line => r.export_line(line),
+    };
+    let batch_leg = || {
+        let r = with(Rig::oracle_batch(t.name()));
+        let run = r.run();
+        ts9_verdict(&run, &r.out_dir())
+    };
+    let batch = batch_leg();
+    let ckpt = d.path().join("cdc.ckpt");
+    let (snap, stream) = (d.path().join("snap"), d.path().join("stream"));
+    let snap_run = with(rig(&t, &ckpt, &snap).cdc("initial: snapshot")).run();
+    let snapshot = ts9_verdict(&snap_run, &snap.join("snapshot"));
+    for change in changes {
+        ora_exec(&change.replace("{t}", t.name()));
+    }
+    let stream_run = with(rig(&t, &ckpt, &stream)).run();
+    Ts9Legs {
+        batch,
+        snapshot,
+        stream: ts9_verdict(&stream_run, &stream),
+        batch_after: batch_leg(),
+    }
+}
+
+fn ts9_cells(leg: &Result<Ts9Cells, String>, what: &str) -> Ts9Cells {
+    leg.clone()
+        .unwrap_or_else(|e| panic!("{what} was refused: {e}"))
+}
+
+/// Under every declaration that delivers a TIMESTAMP(9) column the change stream carries the digits the batch export carries.
+#[test]
+#[ignore = "live: requires the oracle service with LogMiner prerequisites"]
+fn oracle_cdc_timestamp9_is_delivered_as_batch_delivers_it() {
+    let _serial = cross_process_serial("oracle_cdc");
+    for declared in [
+        "columns: {T9: timestamp_ns, Z9: timestamp_tz_ns, L9: timestamp_tz_ns}",
+        "columns: {T9: text, Z9: text, L9: text}",
+    ] {
+        let legs = ts9_legs(declared, &TS9_SEED, &TS9_CHANGES);
+        let (batch, after) = (
+            ts9_cells(&legs.batch, "batch"),
+            ts9_cells(&legs.batch_after, "batch after the changes"),
+        );
+        let (snapshot, stream) = (
+            ts9_cells(&legs.snapshot, "snapshot"),
+            ts9_cells(&legs.stream, "stream"),
+        );
+        let cell = |m: &Ts9Cells, k: &str| m.get(k).cloned().unwrap_or_default();
+        assert_eq!(
+            cell(&snapshot, ":1"),
+            cell(&batch, ":1"),
+            "{declared}: snapshot"
+        );
+        assert_eq!(
+            cell(&snapshot, ":2"),
+            cell(&batch, ":2"),
+            "{declared}: snapshot"
+        );
+        assert_eq!(
+            cell(&stream, "update:1"),
+            cell(&after, ":1"),
+            "{declared}: update"
+        );
+        assert_eq!(
+            cell(&stream, "insert:10"),
+            cell(&after, ":10"),
+            "{declared}: insert"
+        );
+        assert_eq!(
+            cell(&stream, "delete:2"),
+            cell(&batch, ":2"),
+            "{declared}: delete"
+        );
+    }
+}
+
+/// An undeclared TIMESTAMP(9) column gets one verdict from the batch export, the CDC snapshot and the change stream.
+#[test]
+#[ignore = "live: requires the oracle service with LogMiner prerequisites"]
+fn oracle_timestamp9_undeclared_is_one_verdict_on_batch_and_cdc() {
+    let _serial = cross_process_serial("oracle_cdc");
+    let legs = ts9_legs("", &TS9_SEED, &TS9_CHANGES);
+    let want = Err("refused[RIVET_TYPE_UNSAFE_MAPPING exit 1]".to_string());
+    assert_eq!(legs.batch, want);
+    assert_eq!(legs.snapshot, want);
+    assert_eq!(legs.stream, want);
+}
+
+/// A TIMESTAMP(9) value past the nanosecond range under `timestamp_ns` is refused by one code on batch and CDC.
+#[test]
+#[ignore = "live: requires the oracle service with LogMiner prerequisites"]
+fn oracle_timestamp9_past_the_nanosecond_range_is_one_refusal_on_batch_and_cdc() {
+    let _serial = cross_process_serial("oracle_cdc");
+    let far = "INSERT INTO {t} VALUES (3, TIMESTAMP '9999-12-31 23:59:59.999999999', TIMESTAMP '9999-12-31 23:59:59.999999999 +00:00', TIMESTAMP '9999-12-31 23:59:59.999999999 +00:00')";
+    let legs = ts9_legs(
+        "columns: {T9: timestamp_ns, Z9: timestamp_tz_ns, L9: timestamp_tz_ns}",
+        &TS9_SEED,
+        &[far],
+    );
+    let want = Err("refused[RIVET_SOURCE_VALUE_UNREPRESENTABLE exit 5]".to_string());
+    assert_eq!(legs.batch_after, want);
+    assert_eq!(legs.stream, want);
+}

@@ -5759,6 +5759,42 @@ seeds:
         na: "SQL Server datetime2(7) stays a warn-only Lossy mapping by an earlier decision; the mapping refusal is raised only by the Oracle source"
       mongo:
         na: "a document source has no declared column wire type, so no mapping carries a refusal"
+  - name: oracle-cdc-timestamp-fraction-truncated
+    class: "an Oracle CDC run reads a TIMESTAMP(7..9) value at microseconds where batch and the snapshot read every digit, so a nanosecond column (declared, or delivered as text) arrives as `.123456` for `.123456789` with exit 0"
+    history: "2026-11-22 Oracle TIMESTAMP(9) class: grid cell oracle/TIMESTAMP(9)->text/cdc-insert/parquet WRONG_VALUE; RED on main: stream rows .999999 and .000000 against .999999999 and .000000001"
+    scope: source
+    engines:
+      oracle:
+        switch: oracle-cdc-timestamp-fraction-truncated
+        cells:
+          - oracle_cdc_timestamp9_is_delivered_as_batch_delivers_it
+          - "lib:timestamps_keep_every_digit_and_an_offset_moves_to_utc"
+      postgres:
+        na: "a PostgreSQL timestamp is microsecond-exact, so no fraction digit is cut"
+      mysql:
+        na: "MySQL DATETIME and TIMESTAMP carry at most six fractional digits, so no fraction digit is cut"
+      mssql:
+        na: "the SQL Server change reader hands datetime2(7) as stored text read by its own parser, not the LogMiner text parser this seed cuts"
+      mongo:
+        na: "a BSON date is millisecond natively, so no fraction digit is cut"
+  - name: cdc-ns-out-of-range-uncoded
+    class: "a change-stream value outside 1677-09-21..2262-04-11 under a nanosecond column stops the run as RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH exit 1 where batch refuses the same value as RIVET_SOURCE_VALUE_UNREPRESENTABLE exit 5"
+    history: "2026-11-22 Oracle TIMESTAMP(9) class: RED on main, timestamp_ns over 9999-12-31 23:59:59.999999999, batch exit 5 and stream exit 1"
+    scope: source
+    engines:
+      oracle:
+        switch: cdc-ns-out-of-range-uncoded
+        cells:
+          - oracle_timestamp9_past_the_nanosecond_range_is_one_refusal_on_batch_and_cdc
+          - "lib:a_nanosecond_timestamp_cell_keeps_its_digit_and_refuses_out_of_range"
+      mssql:
+        na: "the change-stream builder is shared, but no SQL Server CDC cell declares a nanosecond column yet; the datetime2(7) cell is listed under the follow-up of this PR"
+      postgres:
+        na: "PostgreSQL refuses a nanosecond override at the wire check, so no change value reaches the nanosecond builder"
+      mysql:
+        na: "MySQL has no nanosecond builder; a timestamp_ns override is refused at the schema stage"
+      mongo:
+        na: "a document source has no declared column wire type and takes no nanosecond override"
   - name: pg-temporal-uuid-bytea-array-refused
     class: "a PostgreSQL date[], time[], timestamp[], timestamptz[], uuid[] or bytea[] column is refused by the batch export instead of being delivered as a native list"
     history: "type-known-defects cluster C7 (2026-11-05); RED from this patch: the batch export of a date[] column stops with the element-type refusal and the ledger test fails on the six array rows"

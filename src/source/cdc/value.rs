@@ -377,11 +377,24 @@ fn timestamp_micros_value(v: &RivetValue) -> Result<i64, String> {
     }
 }
 
-/// The UTC instant a timestamp cell stores, as nanoseconds since the epoch; a value outside 1677-09-21..2262-04-11 is refused.
-fn timestamp_nanos_value(v: &RivetValue) -> Result<i64, String> {
+/// The UTC instant a timestamp cell stores, as nanoseconds since the epoch; a value outside 1677-09-21..2262-04-11 is refused by code.
+fn timestamp_nanos_value(v: &RivetValue) -> Result<i64, FixRefusal> {
     match v {
-        RivetValue::DateTime(d) => d.and_utc().timestamp_nanos_opt().ok_or_else(|| {
-            "is outside the nanosecond timestamp range (1677-09-21..2262-04-11); declare the column `timestamp` (microseconds, full range) in `columns:`".to_string()
+        RivetValue::DateTime(d) => d.and_utc().timestamp_nanos_opt().ok_or_else(|| FixRefusal {
+            reason: format!(
+                "is outside the nanosecond timestamp range ({}) its nanosecond type (a \
+                 sub-microsecond column, or a `timestamp_ns` / `timestamp_tz_ns` override) \
+                 delivers, and writing it as NULL would lose the value. Declare the column \
+                 `timestamp` (microseconds, full range) or `timestamp_tz` in `columns:`, or \
+                 leave the column out of the capture, then: {}",
+                crate::types::NANOSECOND_RANGE,
+                crate::source::cdc::checkpoint_identity::RECOVER
+            ),
+            code: seeded!(
+                "cdc-ns-out-of-range-uncoded",
+                None,
+                Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE)
+            ),
         }),
         _ => Err(NO_READING.into()),
     }
@@ -2250,7 +2263,51 @@ mod tests {
         let early = at("1000-01-01T00:00:00");
         let err = build("c", &dt, &[Some(&early)]).unwrap_err();
         assert!(err.to_string().contains("1677-09-21..2262-04-11"), "{err}");
+        crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
         assert!(build("c", &dt, &[Some(&cells[1])]).is_ok());
+    }
+
+    /// A nine-digit instant keeps every digit in a nanosecond column and as text, and a microsecond column declared over it floors to the microsecond as before.
+    #[test]
+    fn a_nine_digit_instant_keeps_its_digits_and_a_microsecond_column_floors_it() {
+        use arrow::array::{TimestampMicrosecondArray, TimestampNanosecondArray};
+        let at = |s: &str| RivetValue::DateTime(s.parse::<NaiveDateTime>().unwrap());
+        let cell = at("1999-12-31T23:59:59.999999999");
+        assert_eq!(render_str(&cell), "1999-12-31 23:59:59.999999999");
+        let ns = build(
+            "c",
+            &DataType::Timestamp(TimeUnit::Nanosecond, None),
+            &[Some(&cell)],
+        )
+        .unwrap();
+        let ns = ns
+            .as_any()
+            .downcast_ref::<TimestampNanosecondArray>()
+            .unwrap();
+        assert_eq!(ns.value(0), 946_684_799_999_999_999);
+        let us = build(
+            "c",
+            &DataType::Timestamp(TimeUnit::Microsecond, None),
+            &[Some(&cell)],
+        )
+        .unwrap();
+        let us = us
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap();
+        assert_eq!(us.value(0), 946_684_799_999_999);
+        let before = at("1969-12-31T23:59:59.999999999");
+        let us = build(
+            "c",
+            &DataType::Timestamp(TimeUnit::Microsecond, None),
+            &[Some(&before)],
+        )
+        .unwrap();
+        let us = us
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap();
+        assert_eq!(us.value(0), -1);
     }
 
     /// Date, time, timestamp, uuid and bytea list elements build to the stored values, with NULL elements, empty and NULL lists kept.

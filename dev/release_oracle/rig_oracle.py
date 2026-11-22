@@ -541,7 +541,7 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
         )}
         if not query and not declared:
             raise LookupError(f"table {table} does not exist (no column in all_tab_columns)")
-        exact_ns = {c.upper() for c, t in (spec.get("overrides") or {}).items() if (t or "").lower() in ("timestamp_ns", "timestamp_tz_ns")}
+        exact_ns = exact_digit_columns(spec.get("overrides") or {}, declared)
         by_col = {c: None if c in exact_ns else renders.get(f"source:{n}") for c, n in declared.items()}
         sql = query.rstrip().rstrip(";") if query else oracle_table_select(spec["url"], table, {c: e for c, e in by_col.items() if e})
         zoned: frozenset = frozenset()
@@ -2035,7 +2035,20 @@ def _peek_self_test() -> None:
         raise AssertionError("a missing slot must surface as itself")
 
 
+def exact_digit_columns(overrides: dict, declared: dict) -> set[str]:
+    """The columns whose source is read with every fractional digit: a nanosecond override, or `text` over an Oracle TIMESTAMP."""
+    return {
+        c.upper()
+        for c, t in overrides.items()
+        if (t or "").lower() in ("timestamp_ns", "timestamp_tz_ns")
+        or ((t or "").lower() == "text" and declared.get(c.upper(), "").startswith("TIMESTAMP"))
+    }
+
+
 def _self_test() -> None:
+    declared = {"T9": "TIMESTAMP(9)", "N": "NUMBER(10)"}
+    assert exact_digit_columns({"T9": "text", "N": "text", "X": "timestamp_ns"}, declared) == {"T9", "X"}
+    assert not exact_digit_columns({"T9": "timestamp", "N": "text"}, declared), "a microsecond declaration and a number as text keep the ledger's source render"
     assert _bound('"ID"', "<=", "10", "NUMBER (by value)") == 'TRY_CAST("ID" AS DECIMAL(38, 10)) <= 10'
     assert _bound('"K"', ">", "10", "VARCHAR2") == """"K" > '10'""", "a text cursor compares as text"
     bq = {"target": "bigquery", "project": "p", "dataset": "d"}

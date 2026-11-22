@@ -82,6 +82,9 @@ pub fn is_time_of_day(us: i64) -> bool {
     (0..MICROS_PER_DAY).contains(&us)
 }
 
+/// The dates a nanosecond timestamp holds, in the words of every refusal of a value outside them.
+pub const NANOSECOND_RANGE: &str = "1677-09-21..2262-04-11";
+
 /// Nanoseconds since the Unix epoch of `dt` read as UTC, or the coded refusal naming `column` when `dt` is outside Arrow's 1677-09-21..2262-04-11.
 pub fn timestamp_nanos_or_refuse(
     dt: chrono::NaiveDateTime,
@@ -93,7 +96,7 @@ pub fn timestamp_nanos_or_refuse(
             crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
             format!(
                 "{source}: column `{column}` holds {dt}, outside the nanosecond timestamp range \
-                 (1677-09-21..2262-04-11) its nanosecond type (a sub-microsecond column, or a \
+                 ({NANOSECOND_RANGE}) its nanosecond type (a sub-microsecond column, or a \
                  `timestamp_ns` / `timestamp_tz_ns` override) delivers, and writing it as NULL would \
                  lose the value. Declare the column `timestamp` (microseconds, full range) or \
                  `timestamp_tz` in `columns:` instead, or CAST it in the export's `query:`."
