@@ -21,7 +21,7 @@ pub(crate) fn downgrade_narrowing_overrides(
         .collect();
     let truncates = |m: &TypeMapping| {
         column_overrides.contains_key(&m.column_name)
-            && kept_fraction_digits(&m.rivet_type).is_some_and(|kept| kept < 7)
+            && kept_fraction_digits(&m.rivet_type).is_some_and(|kept| kept < 9)
     };
     let finer = mappings.iter().any(truncates).then(finer_columns);
     for m in mappings {
@@ -74,7 +74,7 @@ pub(crate) fn override_narrows(
     use RivetType::Decimal;
     if finer_than_microsecond
         && let Some(kept) = kept_fraction_digits(overridden)
-        && kept < 7
+        && kept < 9
         && seeded!("narrowing-override-reported-exact", false, true)
     {
         return Some(format!(

@@ -1355,6 +1355,20 @@ exports:
     }
 
     #[test]
+    fn narrows_none_when_integer_digits_are_kept_at_a_wider_scale() {
+        assert!(override_narrows(&dec(5, 2), &dec(6, 3), false).is_none());
+    }
+
+    #[test]
+    fn a_date_override_over_a_finer_time_column_is_lossy() {
+        use crate::types::TimeUnit::Nanosecond;
+        let reason = override_narrows(&timestamp(Nanosecond, false), &RivetType::Date, true)
+            .expect("date keeps no fraction digits");
+        assert!(reason.contains("lossy"), "{reason}");
+        assert!(override_narrows(&timestamp(Nanosecond, false), &RivetType::Date, false).is_none());
+    }
+
+    #[test]
     fn narrows_none_when_scale_widened() {
         assert!(override_narrows(&dec(10, 2), &dec(12, 4), false).is_none());
     }
@@ -1952,6 +1966,20 @@ exports:
             let got = probe(&mut asked, ov);
             assert!(got[0].warnings.is_empty(), "{:?}", got[0].warnings);
         }
+        let mut two = Described::of(
+            &[("d", "datetime2", ns()), ("e", "datetime2", ns())],
+            &["d", "e"],
+        );
+        two.describe_fails = true;
+        let overrides: ColumnOverrides = [
+            ("d".to_string(), timestamp(Microsecond, false)),
+            ("e".to_string(), ns()),
+        ]
+        .into_iter()
+        .collect();
+        let got = probe_mappings(&mut two, false, "q", &overrides).unwrap();
+        assert_eq!(got[0].warnings.len(), 1, "{:?}", got[0].warnings);
+        assert!(got[1].warnings.is_empty(), "{:?}", got[1].warnings);
         let got = probe(&mut asked, ("d", timestamp(Microsecond, false)));
         assert_eq!(got[0].fidelity, TypeFidelity::Exact);
         assert!(
