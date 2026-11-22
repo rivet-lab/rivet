@@ -2741,6 +2741,10 @@ mod tests {
                 .expect_err(&format!("{dt}: {elem:?} must be refused"));
             assert_eq!((r.row, &r.value), (1, &cell), "{dt}");
             assert!(r.reason.starts_with("has an element"), "{}", r.reason);
+            assert!(
+                !r.by_value,
+                "{dt}: a list element refusal is never decided by a value"
+            );
         }
         let ok = RivetValue::Array(vec![RivetValue::Int(1), RivetValue::Null]);
         let arr = build_column(&list(DataType::Int16), &[Some(&ok)]).unwrap();
