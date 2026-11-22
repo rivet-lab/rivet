@@ -757,6 +757,44 @@ fn wire_labels<'a>(e: &'a ChangeEvent, column: &str) -> Option<&'a value::WireLa
         .find(|w| w.column == column)
 }
 
+type NameMemo<'a> = Option<(&'a Arc<[String]>, Option<usize>)>;
+
+/// The cells of one column after the engine fix and the batch text form, or `None` when neither applies.
+fn column_cells(
+    events: &[ChangeEvent],
+    (i, m): (usize, &TypeMapping),
+    (engine, dt): (CdcEngine, &DataType),
+    fix: Option<&value::MysqlCellFix>,
+    (schema_names, memo): (&[&str], NameMemo),
+) -> std::result::Result<Option<Vec<Option<RivetValue>>>, value::CellRefusal> {
+    if fix.is_none() && !value::prints_stamp_text(engine, &m.source_native_type, dt) {
+        return Ok(None);
+    }
+    events
+        .iter()
+        .enumerate()
+        .map(|(row, e)| {
+            image_cell(e, i, &m.column_name, schema_names, memo)
+                .map(|v| {
+                    let fixed = match fix {
+                        Some(fix) => fix
+                            .apply_with(v, wire_labels(e, &m.column_name), &e.table)
+                            .map_err(|r| value::CellRefusal {
+                                row,
+                                value: v.clone(),
+                                reason: r.reason,
+                                code: r.code,
+                            })?,
+                        None => v.clone(),
+                    };
+                    Ok(value::stamp_text(engine, dt, fixed))
+                })
+                .transpose()
+        })
+        .collect::<std::result::Result<_, _>>()
+        .map(Some)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn flush(
     events: &[ChangeEvent],
@@ -813,29 +851,14 @@ fn flush(
         let refuse = |r: value::CellRefusal| {
             r.into_error(&m.column_name, dt, overridden.contains(&m.column_name))
         };
-        let owned: Option<Vec<Option<RivetValue>>> = match &fix {
-            Some(fix) => Some(
-                events
-                    .iter()
-                    .enumerate()
-                    .map(|(row, e)| {
-                        image_cell(e, i, &m.column_name, &schema_names, memo)
-                            .map(|v| {
-                                fix.apply_with(v, wire_labels(e, &m.column_name), &e.table)
-                                    .map_err(|r| value::CellRefusal {
-                                        row,
-                                        value: v.clone(),
-                                        reason: r.reason,
-                                        code: r.code,
-                                    })
-                            })
-                            .transpose()
-                    })
-                    .collect::<std::result::Result<_, _>>()
-                    .map_err(refuse)?,
-            ),
-            None => None,
-        };
+        let owned = column_cells(
+            events,
+            (i, m),
+            (engine, dt),
+            fix.as_ref(),
+            (&schema_names, memo),
+        )
+        .map_err(refuse)?;
         if let (Some(o), Some(fix)) = (&owned, &fix) {
             let nulled = events
                 .iter()
@@ -1619,6 +1642,69 @@ mod tests {
             before_poison: None,
             image_labels: None,
         }
+    }
+
+    /// An Oracle date or timestamp under a text column is handed to the writer as the batch text; every other engine, native type or target is left to the default path.
+    #[test]
+    fn column_cells_rewrites_only_an_oracle_stamp_under_a_text_target() {
+        use crate::types::{RivetType, TypeFidelity, TypeMapping};
+        use arrow::datatypes::DataType;
+        let stamp = chrono::NaiveDate::from_ymd_opt(2000, 1, 1)
+            .and_then(|d| d.and_hms_nano_opt(12, 0, 0, 1))
+            .expect("stamp");
+        let events = [ChangeEvent {
+            after: Some(vec![RivetValue::DateTime(stamp)]),
+            image_names: Some(std::sync::Arc::from(vec!["v".to_string()])),
+            ..insert(0)
+        }];
+        let col = |native: &str| TypeMapping {
+            column_name: "v".into(),
+            source_native_type: native.into(),
+            rivet_type: RivetType::Int64,
+            arrow_type: Some(DataType::Utf8),
+            fidelity: TypeFidelity::Exact,
+            nullable: true,
+            warnings: vec![],
+            delivery: crate::types::Delivery::Native,
+            refusal: None,
+            source_fraction_digits: None,
+        };
+        let cells = |engine, native: &str, dt: &DataType| {
+            column_cells(
+                &events,
+                (0, &col(native)),
+                (engine, dt),
+                None,
+                (&["v"], None),
+            )
+            .expect("no refusal")
+        };
+        assert_eq!(
+            cells(CdcEngine::Oracle, "TIMESTAMP(9)", &DataType::Utf8),
+            Some(vec![Some(RivetValue::Bytes(
+                b"2000-01-01T12:00:00.000000001".to_vec()
+            ))]),
+            "an Oracle timestamp in a text column"
+        );
+        assert_eq!(
+            cells(CdcEngine::Postgres, "timestamp", &DataType::Utf8),
+            None,
+            "another engine"
+        );
+        assert_eq!(
+            cells(CdcEngine::Oracle, "VARCHAR2", &DataType::Utf8),
+            None,
+            "a non-date native type"
+        );
+        assert_eq!(
+            cells(
+                CdcEngine::Oracle,
+                "TIMESTAMP(9)",
+                &DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None)
+            ),
+            None,
+            "a typed target"
+        );
     }
 
     /// Every decision `image_cell` makes, one case each.

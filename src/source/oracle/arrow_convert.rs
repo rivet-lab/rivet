@@ -405,25 +405,10 @@ fn date_days(t: &OracleTimestamp, name: &str) -> Result<i32> {
 
 /// Oracle's own `SYYYY-MM-DD"T"HH24:MI:SS.FF` text of a timestamp: 6 fractional digits, 9 when finer.
 fn timestamp_text(t: &OracleTimestamp) -> String {
-    let y = t.year() as i32;
-    let year = if y < 0 {
-        format!("-{:04}", -y)
-    } else {
-        format!("{y:04}")
-    };
-    let ns = t.nanoseconds();
-    let frac = if ns.is_multiple_of(1_000) {
-        format!("{:06}", ns / 1_000)
-    } else {
-        format!("{ns:09}")
-    };
-    format!(
-        "{year}-{:02}-{:02}T{:02}:{:02}:{:02}.{frac}",
-        t.month(),
-        t.day(),
-        t.hour(),
-        t.minute(),
-        t.second()
+    crate::types::oracle_fields_text(
+        i32::from(t.year()),
+        [t.month(), t.day(), t.hour(), t.minute(), t.second()].map(u32::from),
+        t.nanoseconds(),
     )
 }
 
