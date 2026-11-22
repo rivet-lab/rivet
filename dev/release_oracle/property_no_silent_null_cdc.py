@@ -492,6 +492,12 @@ def self_test() -> None:
     assert rs[0].klass == CDC_DIFFERS and rs[0].verdict == REFUSED, rs[0]
     rs = grade_unit("mysql", none, [gone_c], 1, {"snapshot": refused}, {"snapshot": nsn._proc(5, "[RIVET_X] no")}, d, "")
     assert rs[0].klass == "" and rs[0].verdict == REFUSED, rs[0]
+    value_stop = nsn._proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] column `e00` holds 1.1234567890123456789")
+    stated = core.Proc(["rivet"], 0, json.dumps({"columns": [{"column": "E00", "fidelity": "lossy", "warnings": ["refused at run (RIVET_SOURCE_VALUE_UNREPRESENTABLE)"]}]}), "", gated=False)
+    rs = grade_unit("mysql", Unit("float8", exact_c, "parquet"), [exact_c], 1, {"snapshot": value_stop}, {"snapshot": stated}, d, "")
+    assert rs[0].verdict == REFUSED and rs[0].klass == "", "a value refusal that check states on the column is no split, on the change-stream legs too"
+    rs = grade_unit("mysql", Unit("float8", exact_c, "parquet"), [exact_c], 1, {"snapshot": value_stop}, {"snapshot": nsn._proc(0)}, d, "")
+    assert rs[0].klass == nsn.SPLIT, "a check that states nothing is a split"
     other = Col("e01", "INT", "Int32", "int", ("1",), cdc=te.EXACT_V)
     stopped, fine = [Result("c", REFUSED, CDC_DIFFERS, "", "RIVET_X")], [Result("c", DELIVERED, "", "")]
     assert shared_stop([exact_c, other], stopped) and not shared_stop([exact_c], stopped) and not shared_stop([exact_c, other], fine)
