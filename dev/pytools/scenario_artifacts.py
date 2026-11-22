@@ -993,6 +993,9 @@ def main_cli(argv: Sequence[str] | None = None) -> int:
     only_engine = None
     if "--engine" in args:
         i = args.index("--engine")
+        if i + 1 >= len(args) or args[i + 1].startswith("-"):
+            print("scenario-artifacts: --engine needs an engine name")
+            return 2
         only_engine = args[i + 1]
         del args[i:i + 2]
     only = args[0] if args and not args[0].startswith("-") else None
@@ -1024,6 +1027,12 @@ def main_cli(argv: Sequence[str] | None = None) -> int:
         )
 
     declared, _classes, scenarios = parse_matrix(MATRIX.read_text())
+    if only and not any(sc.id == only for sc in scenarios):
+        print(f"scenario-artifacts: no scenario `{only}` in {MATRIX.relative_to(REPO_ROOT)}; nothing was graded")
+        return 2
+    if only_engine and only_engine not in declared:
+        print(f"scenario-artifacts: engine `{only_engine}` is not one of {declared}; nothing was graded")
+        return 2
     if not Path(rivet_bin()).exists():
         raise SystemExit(f"binary not found: {rivet_bin()} (cargo build --bin rivet)")
 
@@ -1106,6 +1115,9 @@ def main_cli(argv: Sequence[str] | None = None) -> int:
         print("class every other gate is blind to. Fix the product, or correct the")
         print(f"expectation in {MATRIX.relative_to(REPO_ROOT)} with the reason.")
         return 1
+    if not passed:
+        print("scenario-artifacts: no scenario was graded (every row skipped); this is not a pass")
+        return 2
     return 0
 
 

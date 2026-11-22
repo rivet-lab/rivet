@@ -155,3 +155,6 @@ __pycache__/
 CLAUDE.md
 CLAUDE.local.md
 /dev/release-oracle/timings.jsonl
+
+# Stray compose and build logs dropped in the repo root.
+/target-*.log
