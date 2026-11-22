@@ -757,6 +757,44 @@ fn wire_labels<'a>(e: &'a ChangeEvent, column: &str) -> Option<&'a value::WireLa
         .find(|w| w.column == column)
 }
 
+type NameMemo<'a> = Option<(&'a Arc<[String]>, Option<usize>)>;
+
+/// The cells of one column after the engine fix and the batch text form, or `None` when neither applies.
+fn column_cells(
+    events: &[ChangeEvent],
+    (i, m): (usize, &TypeMapping),
+    (engine, dt): (CdcEngine, &DataType),
+    fix: Option<&value::MysqlCellFix>,
+    (schema_names, memo): (&[&str], NameMemo),
+) -> std::result::Result<Option<Vec<Option<RivetValue>>>, value::CellRefusal> {
+    if fix.is_none() && !value::prints_stamp_text(engine, &m.source_native_type, dt) {
+        return Ok(None);
+    }
+    events
+        .iter()
+        .enumerate()
+        .map(|(row, e)| {
+            image_cell(e, i, &m.column_name, schema_names, memo)
+                .map(|v| {
+                    let fixed = match fix {
+                        Some(fix) => fix
+                            .apply_with(v, wire_labels(e, &m.column_name), &e.table)
+                            .map_err(|r| value::CellRefusal {
+                                row,
+                                value: v.clone(),
+                                reason: r.reason,
+                                code: r.code,
+                            })?,
+                        None => v.clone(),
+                    };
+                    Ok(value::stamp_text(engine, dt, fixed))
+                })
+                .transpose()
+        })
+        .collect::<std::result::Result<_, _>>()
+        .map(Some)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn flush(
     events: &[ChangeEvent],
@@ -813,36 +851,14 @@ fn flush(
         let refuse = |r: value::CellRefusal| {
             r.into_error(&m.column_name, dt, overridden.contains(&m.column_name))
         };
-        let prints = value::prints_stamp_text(engine, &m.source_native_type, dt);
-        let owned: Option<Vec<Option<RivetValue>>> = if fix.is_some() || prints {
-            Some(
-                events
-                    .iter()
-                    .enumerate()
-                    .map(|(row, e)| {
-                        image_cell(e, i, &m.column_name, &schema_names, memo)
-                            .map(|v| {
-                                let fixed = match &fix {
-                                    Some(fix) => fix
-                                        .apply_with(v, wire_labels(e, &m.column_name), &e.table)
-                                        .map_err(|r| value::CellRefusal {
-                                            row,
-                                            value: v.clone(),
-                                            reason: r.reason,
-                                            code: r.code,
-                                        })?,
-                                    None => v.clone(),
-                                };
-                                Ok(value::stamp_text(engine, dt, fixed))
-                            })
-                            .transpose()
-                    })
-                    .collect::<std::result::Result<_, _>>()
-                    .map_err(refuse)?,
-            )
-        } else {
-            None
-        };
+        let owned = column_cells(
+            events,
+            (i, m),
+            (engine, dt),
+            fix.as_ref(),
+            (&schema_names, memo),
+        )
+        .map_err(refuse)?;
         if let (Some(o), Some(fix)) = (&owned, &fix) {
             let nulled = events
                 .iter()

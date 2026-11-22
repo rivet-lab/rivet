@@ -391,6 +391,14 @@ fn timestamp_text(t: &OracleTimestamp) -> Result<String> {
     Ok(crate::types::oracle_timestamp_text(timestamp_datetime(t)?))
 }
 
+/// One DATE or TIMESTAMP cell as Oracle's own text, `None` for NULL.
+fn timestamp_text_cell(r: &Row, idx: usize) -> Result<Option<String>> {
+    r.get::<Option<OracleTimestamp>>(idx)
+        .ora()?
+        .map(|t| timestamp_text(&t))
+        .transpose()
+}
+
 /// Upper-case hex, as Oracle's `RAWTOHEX` renders bytes.
 fn upper_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02X}")).collect()
@@ -617,11 +625,7 @@ fn build_column(
                 let v = match kind {
                     OraKind::Number => number(r)?,
                     OraKind::IntervalDs | OraKind::IntervalYm => interval_iso(r, idx, kind, name)?,
-                    OraKind::Date | OraKind::Timestamp => r
-                        .get::<Option<OracleTimestamp>>(idx)
-                        .ora()?
-                        .map(|t| timestamp_text(&t))
-                        .transpose()?,
+                    OraKind::Date | OraKind::Timestamp => timestamp_text_cell(r, idx)?,
                     OraKind::BinaryFloat => r.get::<Option<f32>>(idx).ora()?.map(|v| v.to_string()),
                     OraKind::BinaryDouble => {
                         r.get::<Option<f64>>(idx).ora()?.map(|v| v.to_string())

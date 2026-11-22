@@ -553,12 +553,7 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
             Some(Value::Float(v)) => Some(Cow::Owned(v.to_string().into_bytes())),
             Some(Value::Double(v)) => Some(Cow::Owned(v.to_string().into_bytes())),
             Some(Value::Date(y, m, d, hh, mi, sx, us)) => Some(Cow::Owned(
-                crate::types::mysql_datetime_text(
-                    (i32::from(*y), u32::from(*m), u32::from(*d)),
-                    (u32::from(*hh), u32::from(*mi), u32::from(*sx)),
-                    *us,
-                )
-                .into_bytes(),
+                date_text(*y, [*m, *d, *hh, *mi, *sx], *us).into_bytes(),
             )),
             _ => None,
         }
@@ -924,6 +919,15 @@ fn null_or_refuse(column: &str, target: &DataType, cell: Option<&Value>) -> Resu
     }
 }
 
+/// A MySQL DATE or DATETIME as the batch text prints it, shared with the change stream.
+fn date_text(y: u16, [m, d, h, mi, s]: [u8; 5], us: u32) -> String {
+    crate::types::mysql_datetime_text(
+        (i32::from(y), u32::from(m), u32::from(d)),
+        (u32::from(h), u32::from(mi), u32::from(s)),
+        us,
+    )
+}
+
 fn build_array(
     arrow_type: &DataType,
     col_idx: usize,
@@ -1073,11 +1077,7 @@ fn build_array(
                     Some(Value::Float(v)) => b.append_value(v.to_string()),
                     Some(Value::Double(v)) => b.append_value(v.to_string()),
                     Some(Value::Date(y, m, d, h, mi, s, us)) => {
-                        b.append_value(crate::types::mysql_datetime_text(
-                            (i32::from(*y), u32::from(*m), u32::from(*d)),
-                            (u32::from(*h), u32::from(*mi), u32::from(*s)),
-                            *us,
-                        ));
+                        b.append_value(date_text(*y, [*m, *d, *h, *mi, *s], *us));
                     }
                     other => {
                         null_or_refuse(column, arrow_type, other)?;
