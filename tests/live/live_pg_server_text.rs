@@ -550,6 +550,10 @@ fn a_column_added_after_the_baseline_is_drift(
         Some(line) => rig.export_line(line),
         None => rig,
     };
+    let rig = rig.a_failed_run_may_leave(
+        &[Leftover::OrphanPart, Leftover::FileLog],
+        "the drift gate fails the run after its parts are written",
+    );
     ENGINE.exec(&format!("INSERT INTO {table} VALUES (1, 10), (2, 20)"));
     rig.run_ok();
     ENGINE.exec(&format!("ALTER TABLE {table} ADD COLUMN x {ddl}"));
