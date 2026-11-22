@@ -70,29 +70,11 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     KnownRed("no_silent_null[oracle] smoke: CHECK_RUN_SPLIT over 17 source->override pairs #fdde23bd",
              "2026-11-19: batch leg, PR-PRECHECK: check exits 0 and run refuses with RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5) because check reads no values; the format and unmapped-column refusals are decided by check, plan and doctor since 2026-11-19 and no pair of them remains; open, closes when check decides a value-dependent refusal or the owner accepts it; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-22 to 17 pairs on the release binary of 4f6638cb, the pairs of the full tier",
              _EXPIRES),
-    KnownRed("no_silent_null[mssql] smoke: WRONG_VALUE over 4 source->override pairs #781efb66",
-             "2026-11-22: smoke tier, PR-NULL: exit 0 with fidelity exact while the value changed (a DATETIME2 or DATETIMEOFFSET declared timestamp or timestamp_tz loses the 7th fractional digit); open, closes when the override refuses a value it cannot hold; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; the smoke tier lists the pairs of the full tier entry of 2026-11-11, which the reader keeping the nanosecond digits shows here too",
-             _EXPIRES),
-    KnownRed("no_silent_null[mssql] smoke: INTEGRITY_BLIND over 4 source->override pairs #781efb66",
-             "2026-11-22: smoke tier, PR-SELF-GRADE: validate --depth full exits 0 over a cell whose values changed, it answers from rivet own fingerprint; open, closes when validate compares against the source; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; the smoke tier lists the pairs of the full tier entry of 2026-11-11",
-             _EXPIRES),
-    KnownRed("no_silent_null[oracle] smoke: WRONG_VALUE over 2 source->override pairs #9a439c62",
-             "2026-11-22: smoke tier, PR-NULL: exit 0 with fidelity exact while the value changed (Oracle TIMESTAMP(9) declared timestamp or timestamp_tz loses its nanosecond digits); open, closes when the override refuses a value it cannot hold; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; the smoke tier lists the pairs of the full tier entry of 2026-11-11, which the reader keeping the nanosecond digits shows here too",
-             _EXPIRES),
-    KnownRed("no_silent_null[oracle] smoke: INTEGRITY_BLIND over 2 source->override pairs #9a439c62",
-             "2026-11-22: smoke tier, PR-SELF-GRADE: validate --depth full exits 0 over a cell whose values changed, it answers from rivet own fingerprint; open, closes when validate compares against the source; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; the smoke tier lists the pairs of the full tier entry of 2026-11-11",
-             _EXPIRES),
     KnownRed("no_silent_null[postgres] smoke: CHECK_RUN_SPLIT over 4 source->override pairs #75e0db83",
              "2026-11-19: batch leg, PR-PRECHECK: check exits 0 and run refuses with RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5) because check reads no values; the format and unmapped-column refusals are decided by check, plan and doctor since 2026-11-19 and no pair of them remains; open, closes when check decides a value-dependent refusal or the owner accepts it; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-19 to the pairs left on the branch build",
              _EXPIRES),
-    KnownRed("no_silent_null[mssql] full: WRONG_VALUE over 5 source->override pairs #16aa6c08",
-             "2026-11-11: full tier, PR-NULL: exit 0 with fidelity exact while the value changed (integer to a narrower decimal wraps, text or integer to bool, NUMBER 1E125 to float4 as inf, a negative-scale decimal scaled the wrong way, DATETIME to date truncated, Oracle TIMESTAMP WITH TIME ZONE shifted); open, closes when the override refuses a value it cannot hold; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-22 from the full tier on the branch of PR #1149 over the pairs left: DATETIME2 to none, timestamp_ns and timestamp_tz_ns, DATETIMEOFFSET to none, TIME to none (a DATETIME2 declared timestamp or timestamp_tz passes as declared lossy since #1149); closes when the undeclared sub-microsecond and time pairs are refused or declared lossy, and the timestamp_ns pairs when the harness reads nanosecond targets as text (PR #1158)",
-             _EXPIRES),
     KnownRed("no_silent_null[mssql] full: CHECK_RUN_SPLIT over 7 source->override pairs #b2ad1f3b",
              "2026-11-19: full tier, PR-PRECHECK: check exits 0 and run refuses with RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5) because check reads no values; the format and unmapped-column refusals are decided by check, plan and doctor since 2026-11-19 and no pair of them remains; open, closes when check decides a value-dependent refusal or the owner accepts it; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-21 from the full tier on c3201f20, where MONEY to float8 joined the pairs with the float8 refusal",
-             _EXPIRES),
-    KnownRed("no_silent_null[mssql] full: INTEGRITY_BLIND over 5 source->override pairs #16aa6c08",
-             "2026-11-11: full tier, PR-SELF-GRADE: validate --depth full exits 0 over a cell whose values changed, it answers from rivet own fingerprint; open, closes when validate compares against the source; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-22 from the full tier on the branch of PR #1149 over the pairs left: DATETIME2 to none, timestamp_ns and timestamp_tz_ns, DATETIMEOFFSET to none, TIME to none (a DATETIME2 declared timestamp or timestamp_tz passes as declared lossy since #1149); closes when the undeclared sub-microsecond and time pairs are refused or declared lossy, and the timestamp_ns pairs when the harness reads nanosecond targets as text (PR #1158)",
              _EXPIRES),
     KnownRed("no_silent_null[mysql] full: WRONG_VALUE over 2 source->override pairs #8e570de1",
              "2026-11-11: full tier, PR-NULL: exit 0 with fidelity exact while the value changed (integer to a narrower decimal wraps, text or integer to bool, NUMBER 1E125 to float4 as inf, a negative-scale decimal scaled the wrong way, DATETIME to date truncated, Oracle TIMESTAMP WITH TIME ZONE shifted); open, closes when the override refuses a value it cannot hold; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-13 from island reads on devbox, stable over 3 runs; re-keyed 2026-11-19 from the full tier on main 7dc3e850 over the pairs left: BIT(8) and BIT(64) to binary",
@@ -275,7 +257,7 @@ def self_test() -> int:
     assert lane_of(own) == NIGHTLY and not any(owed_by(k, lane) for k in KNOWN_RED if own in k.keys() for lane in (GATE, ISLAND, OFFLINE)), \
         "a nightly class is owed by no gate run: a full gate would block on it"
     cut = nightly_classes()
-    assert nightly_key("no_silent_null", "mysql", "CHECK_RUN_SPLIT") in cut and nightly_key("no_silent_null", "mssql", "WRONG_VALUE") in cut, \
+    assert nightly_key("no_silent_null", "mysql", "CHECK_RUN_SPLIT") in cut and nightly_key("no_silent_null", "postgres", "WRONG_VALUE") in cut, \
         "a gate entry is cut to its (matrix, engine, cause) class"
     from .property_no_silent_null import Result, failure_message
     rs = [Result("mysql/a->b/full/parquet", "x")]
