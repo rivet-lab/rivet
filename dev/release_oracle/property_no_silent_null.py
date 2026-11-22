@@ -1296,6 +1296,10 @@ def self_test() -> None:
     assert grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] column `c04` holds 1.5"), stated, "c03").klass == SPLIT, "another column's refusal is no match for this column's note"
     assert grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] column `c030` holds 1.5"), stated, "c03").klass == SPLIT, "a column whose name only starts with this one is another column"
     assert grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] column `C03` holds 1.5"), stated, "c03").klass == "", "the column is matched in any case"
+    assert grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] column `ac03` holds 1.5"), stated, "c03").klass == SPLIT, "a column whose name only ends with this one is another column"
+    dec = Col("c03", "DECIMAL(18,2)", "Float64", "float", ("1",))
+    assert grade_run("mysql", "x", _proc(5, refusal), stated, "exact", Path("."), "csv", dec, 1, "float8", ["1"]).klass == "", "the batch grade passes the column it grades"
+    assert grade_mongo("m", _proc(5, refusal), stated, Path("."), "parquet", "c03", "float8", 1).klass == "", "the Mongo grade passes the column it grades"
     wire = report("lossy", "override timestamp_ns ... refused at run (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH); this is lossy, not exact")
     assert grade_stop("c", _proc(5, refusal), wire, "c03").klass == SPLIT, "a lossy note that names another code is no statement of this refusal"
     assert grade_stop("c", _proc(5, refusal), report("exact"), "c03").klass == SPLIT, "an exact column that the run refuses is a split"
