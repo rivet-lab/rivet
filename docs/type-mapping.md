@@ -158,14 +158,14 @@ plain `timestamp` is microsecond with full date range. An Oracle
 `TIMESTAMP(7..9)` column is the one case where the declaration is required: undeclared, the run is refused
 (`RIVET_TYPE_UNSAFE_MAPPING`) rather than truncated.
 
-A `timestamp`, `timestamp_tz` or `date` declared over a result column finer than a
+A `timestamp` or `timestamp_tz` declared over a result column finer than a
 microsecond (an Oracle `TIMESTAMP(7..9)` or `TIMESTAMP(7..9) WITH TIME ZONE`, a SQL Server `datetime2(7)` or
 `datetimeoffset(7)`), on batch and on CDC, truncates the finer digits: the type
 report says `lossy` with the cause and the remedy, the default policy runs, and `--strict` refuses it
 (`RIVET_TYPE_UNSAFE_MAPPING`). The verdict follows the column the query returns:
 an alias keeps it, a `CAST` to a coarser type or a column that is not finer is
 `exact`. When the source cannot say whether the column is finer (the query cannot be described), the column is graded `lossy` with that cause. To keep the digits, drop the override on SQL Server, or declare
-`timestamp_ns` on an Oracle `TIMESTAMP(7..9)` and `timestamp_tz_ns` on an Oracle `TIMESTAMP(7..9) WITH TIME ZONE`. That remedy is for batch: an Oracle CDC change row carries microseconds under every time type (the `known_defect` of the `TIMESTAMP(9)` row in `docs/type-capability-matrix.yaml`), and SQL Server refuses `timestamp_tz_ns` over `datetimeoffset(7)` on batch (`RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH`).
+`timestamp_ns` on an Oracle `TIMESTAMP(7..9)` and `timestamp_tz_ns` on an Oracle `TIMESTAMP(7..9) WITH TIME ZONE`. That remedy is for batch. An Oracle CDC change row carries microseconds under every time type (the `known_defect` of the `TIMESTAMP(9)` row in `docs/type-capability-matrix.yaml`), so on an Oracle CDC export a `timestamp_ns` or `timestamp_tz_ns` over a `TIMESTAMP(7..9)` is graded `lossy` too, and the way to keep the digits is a batch export that declares it. SQL Server refuses `timestamp_tz_ns` over `datetimeoffset(7)` on batch (`RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH`). A `date` declared over such a column is refused by code, on `check` and on `run`, with the same `RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH`: a time column keeps its time type or is read as text.
 
 An override the source reader cannot build is refused by code, not run:
 `RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH` (exit 1) names the column, the declared
