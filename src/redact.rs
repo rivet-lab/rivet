@@ -2040,6 +2040,8 @@ mod tests {
         );
         assert_eq!(without(&[(2, 6)], &[(0, 9)]), []);
         assert_eq!(without(&[(2, 6)], &[]), [(2, 6)]);
+        assert_eq!(without(&[(2, 6)], &[(4, 6)]), [(2, 4)]);
+        assert_eq!(without(&[(2, 6)], &[(2, 4)]), [(4, 6)]);
     }
 
     /// A registered value nested inside another is masked as the longer one, tail included.
