@@ -430,6 +430,101 @@ fn pg_cdc_upgrade_baseline_takes_server_text_silently_and_still_refuses_a_new_co
     );
 }
 
+/// The `export_schema` row the previous release's refused snapshot left for a bare `numeric` and a `numeric[]`: the native names.
+const BASELINE_A_REFUSED_SNAPSHOT_LEFT: &str = r#"[{"name":"id","type":"Int64"},{"name":"n","type":"numeric"},{"name":"m","type":"_numeric"}]"#;
+
+fn parquet_parts(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir)
+        .map(|d| {
+            d.filter_map(Result::ok)
+                .filter(|e| e.path().extension().is_some_and(|x| x == "parquet"))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// After a refused snapshot of the previous release, the first run on this release snapshots every row once, reads no drift, and the stream then delivers a new row, under `policy`.
+fn a_snapshot_after_a_refused_run_is_taken_without_drift(policy: Option<&str>) {
+    use postgres::NoTls;
+    let tbl = unique_name("cdc_snap_upg");
+    let slot = unique_name("rivet_snap_upg_slot");
+    let _slot = Slot::new(slot.clone());
+    let mut c = postgres::Client::connect(POSTGRES_CDC_URL, NoTls).expect("connect postgres");
+    c.batch_execute(&format!(
+        "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, n NUMERIC, m NUMERIC[]); \
+         INSERT INTO {tbl} VALUES (1, 1.50, ARRAY[2.5::numeric]), (2, 'NaN', NULL), (3, NULL, '{{}}')"
+    ))
+    .unwrap();
+    let _tbl = PgTable::adopt_on(POSTGRES_CDC_URL, tbl.clone());
+    let mut rig = Rig::pg_cdc(&tbl, &slot).cdc_line("initial: snapshot");
+    if let Some(line) = policy {
+        rig = rig.export_line(line);
+    }
+    let shown = rig.cli(&["state", "show"]);
+    assert!(
+        shown.status.success(),
+        "{}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+    let db = rig.config_path().parent().unwrap().join(".rivet_state.db");
+    let state = rusqlite::Connection::open(&db).expect("the state db");
+    let put = state
+        .execute(
+            "INSERT OR REPLACE INTO export_schema (export_name, columns_json, updated_at) VALUES (?1, ?2, '2026-11-01T00:00:00Z')",
+            [rig.export_name(), BASELINE_A_REFUSED_SNAPSHOT_LEFT],
+        )
+        .expect("the previous release's baseline");
+    assert_eq!(put, 1, "the previous release's baseline is in place");
+
+    let out = rig.run();
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        out.status.success(),
+        "the snapshot after the upgrade must deliver:\n{said}"
+    );
+    assert!(
+        !said.contains("type changed") && !said.contains("schema drift"),
+        "the upgrade is not drift:\n{said}"
+    );
+    let snapshot = rig.out_dir().join("snapshot");
+    assert_eq!(
+        duckdb_declared_dir_id_set(&snapshot),
+        [1, 2, 3].into_iter().collect(),
+        "the snapshot holds every row"
+    );
+    let parts = parquet_parts(&snapshot);
+    assert_eq!(parts, 1, "one snapshot part, not one per attempt");
+
+    c.batch_execute(&format!(
+        "INSERT INTO {tbl} VALUES (4, 4.5, ARRAY[1::numeric])"
+    ))
+    .unwrap();
+    rig.run_ok();
+    assert_eq!(
+        parquet_parts(&snapshot),
+        parts,
+        "the snapshot is not taken again"
+    );
+    assert!(
+        duckdb_declared_dir_id_set(&rig.out_dir()).contains(&4),
+        "the stream delivers the row after the snapshot"
+    );
+}
+
+/// Upgrading over a refused snapshot under `on_schema_drift: fail`.
+#[test]
+#[ignore = "live: requires docker compose postgres-cdc (wal_level=logical)"]
+fn pg_cdc_snapshot_after_a_refused_run_is_taken_without_drift_under_fail() {
+    a_snapshot_after_a_refused_run_is_taken_without_drift(Some(DRIFT_FAIL));
+}
+
+/// Upgrading over a refused snapshot under the default drift policy.
+#[test]
+#[ignore = "live: requires docker compose postgres-cdc (wal_level=logical)"]
+fn pg_cdc_snapshot_after_a_refused_run_is_taken_without_drift_under_the_default_policy() {
+    a_snapshot_after_a_refused_run_is_taken_without_drift(None);
+}
+
 // ── a column added while a run is open (#644) ────────────────────────────────
 
 /// How long the open run parks after each part, so the test changes the table while it is open.

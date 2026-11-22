@@ -78,6 +78,20 @@ pub(super) fn check_from_cdc_mappings(
     if fields.is_empty() {
         return Ok(());
     }
+    migrate_baseline(state, key, mappings);
+    let columns = crate::state::arrow_schema_to_columns(&arrow::datatypes::Schema::new(fields));
+    check_and_persist(state, key, &columns, policy, &mut RunSummary::default())
+}
+
+/// Rewrite the stored baseline of `key` where a column is now delivered as server text, so no run reads that as drift.
+pub(super) fn migrate_baseline(
+    state: &StateStore,
+    key: &str,
+    mappings: &[crate::types::TypeMapping],
+) {
+    if seeded!("upgrade-baseline-not-migrated", true, false) {
+        return;
+    }
     match state.get_stored_schema(key) {
         Ok(Some(stored)) => {
             if let Some(migrated) = migrate_upgrade_labels(&stored, mappings)
@@ -89,19 +103,18 @@ pub(super) fn check_from_cdc_mappings(
         Ok(None) => {}
         Err(e) => log::warn!("schema drift: could not read the baseline of '{key}': {e:#}"),
     }
-    let columns = crate::state::arrow_schema_to_columns(&arrow::datatypes::Schema::new(fields));
-    check_and_persist(state, key, &columns, policy, &mut RunSummary::default())
 }
 
-/// True when `new` differs from its baseline entry only because rivet now labels it server text.
+/// True when `new` differs from its baseline entry only because rivet now labels it server text: absent, the old Arrow type, or the native name a run that refused it recorded.
 pub(super) fn is_upgrade_label_migration(
     old: Option<&SchemaColumn>,
     new: &crate::types::TypeMapping,
 ) -> bool {
     use crate::types::{Delivery, TextForm, rivet_type_to_arrow};
     new.delivery == Delivery::Text(TextForm::ServerText)
-        && old.map(|c| c.data_type.clone())
+        && (old.map(|c| c.data_type.clone())
             == rivet_type_to_arrow(&new.rivet_type).map(|dt| format!("{dt:?}"))
+            || old.is_some_and(|c| c.data_type == new.source_native_type))
 }
 
 /// The baseline with every upgrade-label migration applied (one info line each), or `None` when nothing moved.
@@ -125,8 +138,7 @@ fn migrate_upgrade_labels(
         };
         log::info!(
             "schema drift: column '{}' ({}) is now delivered as server text; the baseline \
-             from before ADR-0038 did not record it that way, so it is updated without \
-             reporting drift",
+             did not record it that way, so it is updated without reporting drift",
             m.column_name,
             m.source_native_type
         );
@@ -246,6 +258,55 @@ mod tests {
         }
     }
 
+    fn array_of(inner: crate::types::RivetType) -> crate::types::RivetType {
+        crate::types::RivetType::List {
+            inner: Box::new(inner),
+        }
+    }
+
+    /// The baseline a refused run left, taken by `migrate_baseline` under `fail`; a typed column and a genuinely retyped one are not.
+    #[test]
+    fn a_baseline_a_refused_run_left_is_migrated_for_every_batch_mode_too() {
+        let st = StateStore::open_in_memory().unwrap();
+        st.store_schema(
+            "k",
+            &[
+                col("id", "Int64"),
+                col("n", "numeric"),
+                col("a", "_numeric"),
+                col("v", "Decimal128(10, 2)"),
+            ],
+        )
+        .unwrap();
+        let cols = vec![
+            mapping("id", "bigint", crate::types::RivetType::Int64),
+            server_text("n", "numeric", bare_numeric()),
+            server_text("a", "_numeric", array_of(bare_numeric())),
+            mapping(
+                "v",
+                "numeric(10,2)",
+                crate::types::RivetType::Decimal {
+                    precision: 10,
+                    scale: 2,
+                },
+            ),
+        ];
+        migrate_baseline(&st, "k", &cols);
+        let stored = st.get_stored_schema("k").unwrap().unwrap();
+        assert_eq!(
+            stored,
+            vec![
+                col("id", "Int64"),
+                col("n", "Utf8"),
+                col("a", "Utf8"),
+                col("v", "Decimal128(10, 2)")
+            ]
+        );
+        let again = st.get_stored_schema("k").unwrap();
+        migrate_baseline(&st, "k", &cols);
+        assert_eq!(st.get_stored_schema("k").unwrap(), again, "idempotent");
+    }
+
     fn date_list() -> crate::types::RivetType {
         crate::types::RivetType::List {
             inner: Box::new(crate::types::RivetType::Date),
@@ -276,6 +337,19 @@ mod tests {
         assert!(
             !is_upgrade_label_migration(None, &d),
             "a List column was recorded"
+        );
+
+        assert!(
+            is_upgrade_label_migration(Some(&col("n", "numeric")), &n),
+            "a refused run recorded the native name"
+        );
+        let na = server_text("a", "_numeric", array_of(bare_numeric()));
+        assert!(is_upgrade_label_migration(Some(&col("a", "_numeric")), &na));
+        assert!(!is_upgrade_label_migration(Some(&col("a", "numeric")), &na));
+        let still = mapping("n", "numeric", bare_numeric());
+        assert!(
+            !is_upgrade_label_migration(Some(&col("n", "numeric")), &still),
+            "a column that is still not delivered as server text is not migrated"
         );
 
         let native = mapping("v", "bigint", crate::types::RivetType::Int64);

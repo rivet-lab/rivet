@@ -342,7 +342,24 @@ fn unmapped(r: &RivetType) -> bool {
             seeded!("pg-bare-numeric-refused", *r != bare_numeric(), true)
         ),
         RivetType::List { inner } => unmapped(inner),
-        _ => false,
+        RivetType::Bool
+        | RivetType::Int16
+        | RivetType::Int32
+        | RivetType::Int64
+        | RivetType::UInt64
+        | RivetType::Float32
+        | RivetType::Float64
+        | RivetType::Decimal { .. }
+        | RivetType::Date
+        | RivetType::Time { .. }
+        | RivetType::Timestamp { .. }
+        | RivetType::String
+        | RivetType::Text
+        | RivetType::Binary
+        | RivetType::Json
+        | RivetType::Uuid
+        | RivetType::Enum
+        | RivetType::Interval => false,
     }
 }
 

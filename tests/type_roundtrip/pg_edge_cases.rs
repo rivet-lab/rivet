@@ -176,6 +176,29 @@ fn pg_edge_decimal_negative_scale_override_is_refused_by_the_override_table() {
     );
 }
 
+/// A `numeric(5,-2)` column with no override is delivered as the server's text, its value rounded to the hundreds exactly as the server prints it.
+#[test]
+#[ignore = "live: requires docker compose postgres + duckdb"]
+fn pg_edge_decimal_negative_scale_without_override_is_delivered_as_the_servers_text() {
+    let glob = pg_edge_export_ok(
+        "CREATE TABLE {table_name} (id INT, d NUMERIC(5, -2));
+         INSERT INTO {table_name} VALUES (1, 12345), (2, -99999), (3, NULL);",
+        "SELECT id, d FROM {table_name} ORDER BY id",
+        "pg_edge_negsc_bare",
+        "",
+    );
+    let described = duckdb_run_sql_json(&format!("DESCRIBE SELECT * FROM read_parquet('{glob}')"));
+    assert_eq!(duckdb_parse_describe(&described)["d"], "VARCHAR");
+    let v = duckdb_run_sql_json(&format!("SELECT d FROM read_parquet('{glob}') ORDER BY id"));
+    let cells: Vec<Option<&str>> = v["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r[0].as_str())
+        .collect();
+    assert_eq!(cells, [Some("12300"), Some("-100000"), None]);
+}
+
 // ─── Timestamps: pre-epoch + far future + non-UTC normalisation ────────────
 
 #[test]
