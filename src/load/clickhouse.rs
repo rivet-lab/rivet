@@ -1034,6 +1034,9 @@ fn typed(spec: &TargetColumnSpec, not_null: bool, land: fn(&ChType) -> ChType) -
 fn landed_type(t: &ChType) -> ChType {
     match t {
         ChType::Json => ChType::String,
+        ChType::Uuid if seeded!("clickhouse-uuid-lands-as-bytes", true, false) => {
+            ChType::FixedString16
+        }
         ChType::Array(inner) => ChType::Array(Box::new(landed_type(inner))),
         other => other.clone(),
     }
@@ -1083,35 +1086,38 @@ impl PartRead {
             TargetType::ClickHouse(t) => uuid_depth(t),
             _ => None,
         };
-        specs.iter().any(|s| depth(s).is_some()).then(|| {
-            let quoted: Vec<String> = specs
-                .iter()
-                .map(|s| Warehouse::ClickHouse.quote_ident(&s.column_name))
-                .collect();
-            let select = specs
-                .iter()
-                .zip(&quoted)
-                .map(|(s, q)| match depth(s) {
-                    Some(d) => format!("{} AS {q}", uuid_from_bytes(q, d)),
-                    None => q.clone(),
-                })
-                .collect::<Vec<_>>();
-            let structure = specs
-                .iter()
-                .zip(&quoted)
-                .map(|(s, q)| {
-                    format!(
-                        "{q} {}",
-                        file_column_type(s, not_null.contains(&s.column_name))
-                    )
-                })
-                .collect::<Vec<_>>();
-            Self {
-                columns: quoted.join(", "),
-                select: select.join(", "),
-                structure: structure.join(", "),
-            }
-        })
+        specs
+            .iter()
+            .any(|s| depth(s).is_some() && seeded!("clickhouse-uuid-lands-as-bytes", false, true))
+            .then(|| {
+                let quoted: Vec<String> = specs
+                    .iter()
+                    .map(|s| Warehouse::ClickHouse.quote_ident(&s.column_name))
+                    .collect();
+                let select = specs
+                    .iter()
+                    .zip(&quoted)
+                    .map(|(s, q)| match depth(s) {
+                        Some(d) => format!("{} AS {q}", uuid_from_bytes(q, d)),
+                        None => q.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let structure = specs
+                    .iter()
+                    .zip(&quoted)
+                    .map(|(s, q)| {
+                        format!(
+                            "{q} {}",
+                            file_column_type(s, not_null.contains(&s.column_name))
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                Self {
+                    columns: quoted.join(", "),
+                    select: select.join(", "),
+                    structure: structure.join(", "),
+                }
+            })
     }
 
     /// `INSERT INTO target (columns) SELECT … FROM source`, the UUID columns converted.
@@ -1417,6 +1423,12 @@ mod tests {
         let other = conflict("Nullable(FixedString(16))", "Nullable(String)").expect("refused");
         assert!(other.contains("MODIFY COLUMN"), "{other}");
         assert_eq!(conflict("Nullable(UUID)", "Nullable(UUID)"), None);
+        assert_eq!(uuid_bytes_depth("Nullable(String)", "Nullable(UUID)"), None);
+        assert_eq!(uuid_bytes_depth("Nullable(Int32)", "Nullable(Int64)"), None);
+        assert_eq!(
+            uuid_bytes_depth("Nullable(FixedString(16))", "Nullable(UUID)"),
+            Some(0)
+        );
     }
 
     #[test]

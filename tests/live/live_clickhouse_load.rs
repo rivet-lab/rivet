@@ -1234,7 +1234,7 @@ fn catalog_type(database: &str, table: &str, column: &str) -> String {
 }
 
 /// `id\tvalue` lines of a uuid column as ClickHouse prints it, a NULL as empty.
-fn clickhouse_uuid_lines(table: &str, column: &str) -> Vec<String> {
+fn clickhouse_rows_uuid_lines(table: &str, column: &str) -> Vec<String> {
     ch(&format!(
         "SELECT concat(toString(id), '\t', ifNull(toString({column}), 'NULL')) FROM {table} \
          ORDER BY id FORMAT TSVRaw"
@@ -1296,7 +1296,7 @@ fn a_postgres_uuid_and_uuid_array_load_into_clickhouse_as_native_uuid() {
             )
         })
         .collect();
-    let got: Vec<String> = ch(&format!(
+    let got: Vec<String> = clickhouse_rows_tsv(&format!(
         "SELECT concat(toString(id), '\t', ifNull(toString(u), ''), '\t', '{{', \
          arrayStringConcat(arrayMap(x -> ifNull(toString(x), 'NULL'), ua), ','), '}}') \
          FROM {table} ORDER BY id FORMAT TSVRaw"
@@ -1333,7 +1333,7 @@ fn a_postgres_incremental_uuid_column_loads_into_clickhouse_as_native_uuid() {
     );
     let view = format!("{}.{tbl}", db.0);
     let live = || -> Vec<String> {
-        ch(&format!(
+        clickhouse_rows_tsv(&format!(
             "SELECT concat(toString(id), '\t', ifNull(toString(u), 'NULL')) FROM {view} ORDER BY id FORMAT TSVRaw"
         ))
         .lines()
@@ -1403,7 +1403,7 @@ fn a_sql_server_uniqueidentifier_loads_into_clickhouse_as_native_uuid() {
         "SELECT CONCAT(id, CHAR(9), ISNULL(LOWER(CONVERT(varchar(36), u)), 'NULL')) FROM dbo.{tbl} ORDER BY id"
     ));
     assert_eq!(
-        clickhouse_uuid_lines(&format!("{}.{tbl}", db.0), "u"),
+        clickhouse_rows_uuid_lines(&format!("{}.{tbl}", db.0), "u"),
         source,
         "the values a second client reads back"
     );
@@ -1431,7 +1431,7 @@ fn a_postgres_cdc_uuid_column_loads_into_clickhouse_as_native_uuid() {
     let rig = into_clickhouse(Rig::pg_cdc(&tbl, &slot), &db);
     let view = format!("{}.{tbl}", db.0);
     let live = || -> Vec<String> {
-        ch(&format!(
+        clickhouse_rows_tsv(&format!(
             "SELECT concat(toString(id), '\t', ifNull(toString(u), 'NULL')) FROM {view} \
              WHERE NOT __is_deleted ORDER BY id FORMAT TSVRaw"
         ))
@@ -1560,7 +1560,7 @@ fn a_change_log_holding_uuid_as_fixed_string_is_refused_with_a_working_remedy() 
         "Nullable(UUID)"
     );
     assert_eq!(
-        clickhouse_uuid_lines(&format!("{}.{tbl}", db.0), "u"),
+        clickhouse_rows_uuid_lines(&format!("{}.{tbl}", db.0), "u"),
         [format!("1\t{a}"), format!("2\t{b}"), format!("3\t{a}")]
     );
 }
@@ -1593,7 +1593,7 @@ fn a_full_load_replaces_a_fixed_string_uuid_table_with_the_native_column() {
     load(&rig);
     assert_eq!(catalog_type(&db.0, &tbl, "u"), "Nullable(UUID)");
     assert_eq!(
-        clickhouse_uuid_lines(&format!("{}.{tbl}", db.0), "u"),
+        clickhouse_rows_uuid_lines(&format!("{}.{tbl}", db.0), "u"),
         [format!("1\t{a}")]
     );
 }

@@ -7211,13 +7211,14 @@ seeds:
     class: "a ClickHouse load lands a uuid column as `FixedString(16)` raw bytes where ClickHouse has a native `UUID`"
     history: "owner decision 2026-11-22 (types topic): the ledger carried clickhouse defect rows for PG UUID, PG UUID[] and MSSQL UNIQUEIDENTIFIER (ADR-0038 CP1); RED on main 2026-11-22 (the cells below)"
     scope: source
-    patch: clickhouse-uuid-lands-as-bytes/shared.patch
+    switch: clickhouse-uuid-lands-as-bytes
     engines:
       postgres:
         cells:
           - a_postgres_uuid_and_uuid_array_load_into_clickhouse_as_native_uuid
           - a_postgres_cdc_uuid_column_loads_into_clickhouse_as_native_uuid
           - "lib:json_lands_as_its_parquet_type_and_uuid_native_also_inside_an_array"
+          - "lib:a_part_with_uuid_columns_is_converted_and_one_without_is_untouched"
       mssql:
         cells: [a_sql_server_uniqueidentifier_loads_into_clickhouse_as_native_uuid]
       mysql:

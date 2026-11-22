@@ -452,7 +452,6 @@ const KNOWN_DEFECTS: &[&str] = &[
     // ratchet-pin: type-known-defects (review 2027-02-01) strings
     "postgres:INET",
     "postgres:CIDR",
-    "postgres:UUID (ClickHouse)",
     // 2026-11-05: six array rows moved from unsupported to delivered; a NULL array still loads as [] on ClickHouse, closes with the ClickHouse array-NULL step.
     "postgres:DATE[] (ClickHouse)",
     "postgres:TIMESTAMP[] (ClickHouse)",
@@ -463,7 +462,6 @@ const KNOWN_DEFECTS: &[&str] = &[
     "postgres:TEXT[] (ClickHouse)",
     "postgres:INTEGER[] (ClickHouse)",
     "postgres:DOUBLE PRECISION[] (ClickHouse)",
-    "mssql:UNIQUEIDENTIFIER (ClickHouse)",
     "oracle:TIMESTAMP(9)",
 ]; // ratchet-pin: end
 
@@ -759,7 +757,7 @@ fn a_known_defect_without_today_delivery_is_refused() {
     row_mut(&mut doc, "postgres", "INET")
         .remove("today_delivery")
         .unwrap();
-    row_mut(&mut doc, "mssql", "UNIQUEIDENTIFIER")
+    row_mut(&mut doc, "postgres", "UUID[]")
         .get_mut("clickhouse")
         .and_then(Value::as_mapping_mut)
         .unwrap()
