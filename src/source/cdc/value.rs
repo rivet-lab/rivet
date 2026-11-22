@@ -345,9 +345,7 @@ fn int_value<T: TryFrom<i128>>(v: &RivetValue) -> Result<T, FixRefusal> {
         RivetValue::Bool(b) => i128::from(*b),
         RivetValue::Int(i) => i128::from(*i),
         RivetValue::UInt(u) => i128::from(*u),
-        RivetValue::Bytes(b) => std::str::from_utf8(b)
-            .ok()
-            .and_then(crate::types::decimal::decimal_text_to_int)
+        RivetValue::Bytes(b) => crate::types::decimal::whole_int_text(b)
             .ok_or_else(|| FixRefusal::by_value("is not an exact integer"))?,
         _ => return Err(NO_READING.into()),
     };
@@ -379,14 +377,14 @@ fn f64_value(v: &RivetValue) -> Result<f64, FixRefusal> {
                 ),
                 crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
             )),
-            _ => Err("is not a number".into()),
+            _ => Err(FixRefusal::by_value("is not a number")),
         },
         _ => Err(NO_READING.into()),
     }
 }
 
 /// The value a Float32 column stores for `v`, cast directly (never through f64) so rounding matches batch.
-fn f32_value(v: &RivetValue) -> Result<f32, String> {
+fn f32_value(v: &RivetValue) -> Result<f32, FixRefusal> {
     match v {
         RivetValue::Float(f) => Ok(*f as f32),
         RivetValue::Int(i) => Ok(*i as f32),
@@ -394,7 +392,7 @@ fn f32_value(v: &RivetValue) -> Result<f32, String> {
         RivetValue::Bytes(b) => std::str::from_utf8(b)
             .ok()
             .and_then(crate::types::decimal::decimal_text_to_float)
-            .ok_or_else(|| "is not a number".into()),
+            .ok_or_else(|| FixRefusal::by_value("is not a number")),
         _ => Err(NO_READING.into()),
     }
 }
@@ -411,7 +409,7 @@ fn date_value(v: &RivetValue) -> Result<i32, FixRefusal> {
 }
 
 /// The UTC instant a timestamp cell stores, as microseconds since the epoch.
-fn timestamp_micros_value(v: &RivetValue) -> Result<i64, String> {
+fn timestamp_micros_value(v: &RivetValue) -> Result<i64, FixRefusal> {
     match v {
         RivetValue::DateTime(d) => Ok(d.and_utc().timestamp_micros()),
         _ => Err(NO_READING.into()),
@@ -419,43 +417,42 @@ fn timestamp_micros_value(v: &RivetValue) -> Result<i64, String> {
 }
 
 /// The UTC instant a timestamp cell stores, as nanoseconds since the epoch; a value outside 1677-09-21..2262-04-11 is refused.
-fn timestamp_nanos_value(v: &RivetValue) -> Result<i64, String> {
+fn timestamp_nanos_value(v: &RivetValue) -> Result<i64, FixRefusal> {
     match v {
         RivetValue::DateTime(d) => d.and_utc().timestamp_nanos_opt().ok_or_else(|| {
-            "is outside the nanosecond timestamp range (1677-09-21..2262-04-11); declare the column `timestamp` (microseconds, full range) in `columns:`".to_string()
+            FixRefusal::by_value("is outside the nanosecond timestamp range (1677-09-21..2262-04-11); declare the column `timestamp` (microseconds, full range) in `columns:`")
         }),
         _ => Err(NO_READING.into()),
     }
 }
 
 /// The Time64 microseconds a time of day stores; a duration outside one day is refused.
-fn time_value(v: &RivetValue) -> Result<i64, String> {
+fn time_value(v: &RivetValue) -> Result<i64, FixRefusal> {
     match v {
         RivetValue::TimeMicros(us) if crate::types::is_time_of_day(*us) => Ok(*us),
-        RivetValue::TimeMicros(_) => {
-            Err("is outside 00:00..24:00, which a Parquet TIME cannot hold".into())
-        }
+        RivetValue::TimeMicros(_) => Err(FixRefusal::by_value(
+            "is outside 00:00..24:00, which a Parquet TIME cannot hold",
+        )),
         RivetValue::TimeNanos(ns) if ns % 1_000 == 0 => {
             time_value(&RivetValue::TimeMicros(ns / 1_000))
         }
-        RivetValue::TimeNanos(_) => Err(
+        RivetValue::TimeNanos(_) => Err(FixRefusal::by_value(
             "has a 100ns digit, which a microsecond TIME column would drop; the column is read \
-             at nanoseconds when the catalog shows its scale above 6"
-                .into(),
-        ),
+             at nanoseconds when the catalog shows its scale above 6",
+        )),
         _ => Err(NO_READING.into()),
     }
 }
 
 /// Nanoseconds since midnight of a `TIME` cell, for a `Time64(ns)` column.
-fn time_nanos_value(v: &RivetValue) -> Result<i64, String> {
+fn time_nanos_value(v: &RivetValue) -> Result<i64, FixRefusal> {
     match v {
         RivetValue::TimeNanos(ns) if (0..crate::types::MICROS_PER_DAY * 1_000).contains(ns) => {
             Ok(*ns)
         }
-        RivetValue::TimeNanos(_) => {
-            Err("is outside 00:00..24:00, which a Parquet TIME cannot hold".into())
-        }
+        RivetValue::TimeNanos(_) => Err(FixRefusal::by_value(
+            "is outside 00:00..24:00, which a Parquet TIME cannot hold",
+        )),
         RivetValue::TimeMicros(_) => time_value(v).map(|us| us * 1_000),
         _ => Err(NO_READING.into()),
     }
@@ -478,6 +475,16 @@ fn time_of_day_nanos(ns: i64) -> String {
 const NOT_A_DECIMAL: &str = "is not representable in this decimal column (NaN/Infinity, more \
                              fraction digits than the column's scale, or a float past the \
                              f64-exact 2^53 range, which the source already rounded)";
+
+/// The refusal of a decimal cell: a number the column's digits cannot hold is decided by the value; any other variant has no reading.
+fn decimal_refusal(v: &RivetValue) -> FixRefusal {
+    match v {
+        RivetValue::Bytes(_) | RivetValue::Int(_) | RivetValue::UInt(_) | RivetValue::Float(_) => {
+            FixRefusal::by_value(NOT_A_DECIMAL)
+        }
+        _ => NO_READING.into(),
+    }
+}
 
 /// Build one Arrow column of exactly `dt` from typed cells (one per row; `None` ⇒ null).
 #[allow(clippy::redundant_closure_call)]
@@ -565,12 +572,12 @@ pub(crate) fn build_column(
         )),
         DataType::Decimal128(p, s) => Arc::new(typed_col!(
             Decimal128Builder::with_capacity(n).with_data_type(DataType::Decimal128(*p, *s)),
-            |v: &RivetValue| decimal_to_i128(v, *s).ok_or_else(|| NOT_A_DECIMAL.to_string())
+            |v: &RivetValue| decimal_to_i128(v, *s).ok_or_else(|| decimal_refusal(v))
         )),
         DataType::Decimal256(p, s) => Arc::new(typed_col!(
             arrow::array::Decimal256Builder::with_capacity(n)
                 .with_data_type(DataType::Decimal256(*p, *s)),
-            |v: &RivetValue| decimal_to_i256(v, *s).ok_or_else(|| NOT_A_DECIMAL.to_string())
+            |v: &RivetValue| decimal_to_i256(v, *s).ok_or_else(|| decimal_refusal(v))
         )),
         DataType::List(field) => build_list_column(field, cells)?,
         DataType::Binary => Arc::new(typed_col!(
@@ -1300,16 +1307,19 @@ mod tests {
         assert!(
             time_value(&RivetValue::TimeNanos(5_100))
                 .unwrap_err()
+                .reason
                 .contains("100ns digit")
         );
         assert!(
             time_value(&RivetValue::TimeNanos(day_us * 1_000))
                 .unwrap_err()
+                .reason
                 .contains("outside 00:00..24:00")
         );
         assert!(
             time_value(&RivetValue::TimeMicros(-1))
                 .unwrap_err()
+                .reason
                 .contains("outside 00:00..24:00")
         );
         assert_eq!(time_value(&RivetValue::Int(1)), Err(NO_READING.into()));
@@ -1321,6 +1331,7 @@ mod tests {
             assert!(
                 time_nanos_value(&RivetValue::TimeNanos(bad))
                     .unwrap_err()
+                    .reason
                     .contains("outside 00:00..24:00"),
                 "{bad}"
             );
@@ -1332,6 +1343,7 @@ mod tests {
         assert!(
             time_nanos_value(&RivetValue::TimeMicros(day_us))
                 .unwrap_err()
+                .reason
                 .contains("outside 00:00..24:00")
         );
         assert_eq!(
@@ -1787,7 +1799,7 @@ mod tests {
                 vec![
                     Some(V::Int(i64::MIN)),
                     Some(V::UInt(9_000_000_000)),
-                    Some(V::Bytes(b"-42.00".to_vec())),
+                    Some(V::Bytes(b"-42".to_vec())),
                     None,
                 ],
             ),
@@ -2478,9 +2490,51 @@ mod tests {
             (DataType::Int32, V::Bytes(b"x".to_vec()), true),
             (DataType::Int32, V::Int(5_000_000_000), true),
             (DataType::Int16, V::Int(40_000), true),
+            (DataType::Int32, V::Bytes(b"1.0".to_vec()), true),
+            (DataType::Int32, V::Bytes(b"1 ".to_vec()), true),
+            (DataType::Int64, V::Bytes(b" 1".to_vec()), true),
+            (
+                DataType::Decimal128(10, 2),
+                V::Bytes(b"1.234".to_vec()),
+                true,
+            ),
+            (DataType::Decimal128(10, 2), V::Float(f64::NAN), true),
+            (
+                DataType::Decimal256(40, 2),
+                V::Bytes(b"1.234".to_vec()),
+                true,
+            ),
+            (DataType::Float32, V::Bytes(b"x".to_vec()), true),
+            (DataType::Float64, V::Bytes(b"x".to_vec()), true),
+            (
+                DataType::Time64(TimeUnit::Microsecond),
+                V::TimeMicros(-1),
+                true,
+            ),
+            (
+                DataType::Time64(TimeUnit::Nanosecond),
+                V::TimeNanos(-1),
+                true,
+            ),
+            (
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+                V::DateTime(
+                    chrono::NaiveDate::from_ymd_opt(1500, 1, 1)
+                        .unwrap()
+                        .and_hms_opt(0, 0, 0)
+                        .unwrap(),
+                ),
+                true,
+            ),
             (DataType::Date32, V::Int(1), false),
             (DataType::FixedSizeBinary(16), V::Int(1), false),
             (DataType::Int32, V::DateTime(midnight_plus), false),
+            (
+                DataType::Decimal128(10, 2),
+                V::DateTime(midnight_plus),
+                false,
+            ),
+            (DataType::Float64, V::DateTime(midnight_plus), false),
         ];
         for (dt, v, by_value) in cases {
             let r = build_column(&dt, &[Some(&v)]).unwrap_err();
@@ -2650,15 +2704,18 @@ mod tests {
         use arrow::array::Int32Array;
         let cells = [
             RivetValue::Bytes(b"42".to_vec()),
-            RivetValue::Bytes(b"-7.00".to_vec()),
+            RivetValue::Bytes(b"-7".to_vec()),
         ];
         let refs: Vec<Option<&RivetValue>> = cells.iter().map(Some).collect();
         let arr = build_column(&DataType::Int32, &refs).unwrap();
         let a = arr.as_any().downcast_ref::<Int32Array>().unwrap();
         assert_eq!(a.values().to_vec(), vec![42, -7]);
-        let frac = RivetValue::Bytes(b"1.5".to_vec());
-        let r = build_column(&DataType::Int32, &[Some(&frac)]).unwrap_err();
-        assert_eq!(r.reason, "is not an exact integer");
+        for text in ["1.5", "1.0", "-7.00", "1 ", " 1", "1e3"] {
+            let cell = RivetValue::Bytes(text.as_bytes().to_vec());
+            let r = build_column(&DataType::Int32, &[Some(&cell)]).unwrap_err();
+            assert_eq!(r.reason, "is not an exact integer", "{text:?}");
+            assert!(r.by_value, "{text:?}");
+        }
         let big = RivetValue::Bytes(b"3000000000".to_vec());
         let r = build_column(&DataType::Int32, &[Some(&big)]).unwrap_err();
         assert!(r.reason.starts_with("overflows"), "{}", r.reason);

@@ -434,7 +434,7 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
         match self.rows[row].as_ref(col) {
             Some(Value::Int(v)) => Some(*v as i16),
             Some(Value::UInt(v)) => Some(*v as i16),
-            Some(Value::Bytes(bv)) => whole_int(bv).map(|v| v as i16),
+            Some(Value::Bytes(bv)) => crate::types::decimal::whole_int_text(bv).map(|v| v as i16),
             _ => None,
         }
     }
@@ -442,7 +442,7 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
         match self.rows[row].as_ref(col) {
             Some(Value::Int(v)) => Some(*v as i32),
             Some(Value::UInt(v)) => Some(*v as i32),
-            Some(Value::Bytes(bv)) => whole_int(bv).map(|v| v as i32),
+            Some(Value::Bytes(bv)) => crate::types::decimal::whole_int_text(bv).map(|v| v as i32),
             _ => None,
         }
     }
@@ -613,12 +613,6 @@ pub(super) fn bit_bytes_to_u64(b: &[u8]) -> u64 {
     b.iter().fold(0u64, |acc, &byte| acc << 8 | u64::from(byte))
 }
 
-/// The integer a text cell holds when the whole cell is that integer; a fraction, an exponent or trailing text is no integer.
-fn whole_int(bv: &[u8]) -> Option<i128> {
-    let (v, used) = atoi::FromRadix10SignedChecked::from_radix_10_signed_checked(bv);
-    v.filter(|_| used == bv.len() && bv.last().is_some_and(u8::is_ascii_digit))
-}
-
 /// The unsigned integer a text cell holds when the whole cell is that integer.
 fn whole_uint(bv: &[u8]) -> Option<u64> {
     let (v, used) = atoi::FromRadix10Checked::from_radix_10_checked(bv);
@@ -641,7 +635,7 @@ fn int64_from_bytes(bv: &[u8], is_bit: bool) -> Result<Option<i64>> {
     if is_bit {
         return Ok(Some(narrow::<i64>(bit_bytes_to_u64(bv) as i128, "bit")?));
     }
-    match whole_int(bv) {
+    match crate::types::decimal::whole_int_text(bv) {
         Some(v) => Ok(Some(narrow::<i64>(v, "bigint")?)),
         None => Ok(None),
     }
@@ -947,7 +941,7 @@ fn build_array(
                 match row.as_ref(col_idx) {
                     Some(Value::Int(v)) => b.append_value(narrow::<i16>(*v as i128, "smallint")?),
                     Some(Value::UInt(v)) => b.append_value(narrow::<i16>(*v as i128, "smallint")?),
-                    Some(Value::Bytes(bv)) => match whole_int(bv) {
+                    Some(Value::Bytes(bv)) => match crate::types::decimal::whole_int_text(bv) {
                         Some(v) => b.append_value(narrow::<i16>(v, "smallint")?),
                         None => b.append_value(unparsed(column, "smallint", bv)?),
                     },
@@ -965,7 +959,7 @@ fn build_array(
                 match row.as_ref(col_idx) {
                     Some(Value::Int(v)) => b.append_value(narrow::<i32>(*v as i128, "int")?),
                     Some(Value::UInt(v)) => b.append_value(narrow::<i32>(*v as i128, "int")?),
-                    Some(Value::Bytes(bv)) => match whole_int(bv) {
+                    Some(Value::Bytes(bv)) => match crate::types::decimal::whole_int_text(bv) {
                         Some(v) => b.append_value(narrow::<i32>(v, "int")?),
                         None => b.append_value(unparsed(column, "int", bv)?),
                     },
@@ -1484,7 +1478,7 @@ mod utf8_fast_path_tests {
 
 #[cfg(test)]
 mod int64_bytes_dispatch_tests {
-    use super::{int64_from_bytes, whole_int, whole_uint};
+    use super::{int64_from_bytes, whole_uint};
 
     #[test]
     fn bit_bytes_decode_big_endian_even_when_ascii_digits() {
@@ -1520,17 +1514,24 @@ mod int64_bytes_dispatch_tests {
     #[test]
     fn a_text_cell_is_an_integer_only_when_the_whole_cell_is() {
         for ok in ["0", "12", "-42", "+7", "2147483647"] {
-            assert!(whole_int(ok.as_bytes()).is_some(), "{ok}");
+            assert!(
+                crate::types::decimal::whole_int_text(ok.as_bytes()).is_some(),
+                "{ok}"
+            );
         }
         for bad in ["1.5", "1.0", "1e3", "12abc", "", "-", " 1", "1 ", "0x10"] {
-            assert_eq!(whole_int(bad.as_bytes()), None, "{bad:?}");
+            assert_eq!(
+                crate::types::decimal::whole_int_text(bad.as_bytes()),
+                None,
+                "{bad:?}"
+            );
             assert_eq!(whole_uint(bad.as_bytes()), None, "{bad:?}");
             assert!(
                 int64_from_bytes(bad.as_bytes(), false).unwrap().is_none(),
                 "{bad:?}"
             );
         }
-        assert_eq!(whole_int(b"-42"), Some(-42));
+        assert_eq!(crate::types::decimal::whole_int_text(b"-42"), Some(-42));
         assert_eq!(whole_uint(b"18446744073709551615"), Some(u64::MAX));
         assert_eq!(whole_uint(b"18446744073709551616"), None);
         assert_eq!(whole_uint(b"-1"), None);

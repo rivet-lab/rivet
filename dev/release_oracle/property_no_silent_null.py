@@ -792,23 +792,6 @@ def rivet(args: list[str], env: dict, cwd: Path) -> core.Proc:
     return p
 
 
-VALUES_NOTE = "note[values-unread]: "
-ERRORS_REF = ROOT / "docs" / "reference" / "errors.md"
-
-
-def value_codes(ref: Path = ERRORS_REF) -> frozenset[str]:
-    """The codes only a value raises, as the generated error reference lists them under `## Decided by a value` (from `needs_values` in the code registry; no list is kept here)."""
-    text = ref.read_text()
-    _, _, section = text.partition("\n## Decided by a value\n")
-    return frozenset(re.findall(r"^- `(RIVET_[A-Z0-9_]+)`$", section.partition("\n## ")[0], re.M))
-
-
-def noted(check_out: str, code: str) -> bool:
-    """Whether `rivet check` named `code` as one a value it did not read can still raise: the code is value-decided in the registry AND check's note names it."""
-    return code in value_codes() and any(
-        line.startswith(VALUES_NOTE) and code in line for line in check_out.splitlines())
-
-
 def grade_stop(cell: str, p: core.Proc, check: core.Proc, col: str = "") -> Result | None:
     """The verdict of a run that stopped non-zero: a coded refusal is fine, a crash, an uncoded stop or a check/run split is not; a value refusal that check states on column `col` is no split."""
     if p.returncode == 0:
@@ -828,8 +811,6 @@ def grade_stop(cell: str, p: core.Proc, check: core.Proc, col: str = "") -> Resu
         return Result(cell, REFUSED, UNCODED, f"exit {p.returncode} {code or 'no code'}: {core.first_error(p.stderr)[:160]}", code)
     if check.returncode == 0 and col and code in VALUE_REFUSALS and run_names_column(p, col) and names_value_refusal(check.stdout, col, code):
         return Result(cell, REFUSED, "", f"check exit 0 reports `{col}` lossy and names [{code}], run stopped on a value", code)
-    if check.returncode == 0 and noted(check.stderr + check.stdout, code):
-        return Result(cell, REFUSED, "", f"check exit 0 and named [{code}] as decided by a value; run exit {p.returncode}", code)
     if check.returncode == 0:
         return Result(cell, REFUSED, SPLIT, f"check exit 0, run exit {p.returncode} [{code}]", code)
     return Result(cell, REFUSED, "", f"check exit {check.returncode} [{(CODE.search(check.stderr + check.stdout) or [None, ''])[1]}]", code)
@@ -1306,12 +1287,6 @@ def self_test() -> None:
     assert grade_stop("c", _proc(1, "error: boom"), no_check).klass == UNCODED
     assert grade_stop("c", _proc(6, "[RIVET_INTERNAL_TYPE_BUILDER] no builder"), no_check).klass == UNCODED
     assert grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] x"), no_check).klass == SPLIT, "check exit 0 where run refuses"
-    assert {"RIVET_SOURCE_VALUE_UNREPRESENTABLE", "RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE"} <= value_codes(), "the reference lists the value-decided codes"
-    note = _proc(0, VALUES_NOTE + "rivet check reads at most the first row of an export that declares `columns:`; a run may still refuse a value it did not read with " + ", ".join(sorted(value_codes())))
-    for value_code in sorted(value_codes()):
-        assert grade_stop("c", _proc(5, f"[{value_code}] x"), note).klass == "", f"{value_code}: a value-decided refusal check named is no split"
-        assert grade_stop("c", _proc(5, f"[{value_code}] x"), ok).klass == SPLIT, f"{value_code}: a check that printed no note is a split"
-    assert grade_stop("c", _proc(5, "[RIVET_TYPE_UNSAFE_MAPPING] x"), _proc(0, VALUES_NOTE + "RIVET_TYPE_UNSAFE_MAPPING")).klass == SPLIT, "a code check decides stays a split, whatever a note says"
     refusal = "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] column `c03` holds 1.123456789012345678"
     report = lambda fid, *warnings: core.Proc(["rivet"], 0, json.dumps({"columns": [{"column": "C03", "fidelity": fid, "warnings": list(warnings)}]}), "", gated=False)
     stated = report("lossy", "override float8 ... refused at run (RIVET_SOURCE_VALUE_UNREPRESENTABLE); this is lossy, not exact")
@@ -1325,6 +1300,12 @@ def self_test() -> None:
     dec = Col("c03", "DECIMAL(18,2)", "Float64", "float", ("1",))
     assert grade_run("mysql", "x", _proc(5, refusal), stated, "exact", Path("."), "csv", dec, 1, "float8", ["1"]).klass == "", "the batch grade passes the column it grades"
     assert grade_mongo("m", _proc(5, refusal), stated, Path("."), "parquet", "c03", "float8", 1).klass == "", "the Mongo grade passes the column it grades"
+    noted_out = "note[values-unread]: rivet check reads at most the first row of an export that declares `columns:`; a run may still refuse a value it did not read with RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+    with_note = lambda fid, *warnings: core.Proc(["rivet"], 0, json.dumps({"columns": [{"column": "C03", "fidelity": fid, "warnings": list(warnings)}]}), noted_out, gated=False)
+    assert grade_stop("c", _proc(5, refusal), with_note("exact"), "c03").klass == SPLIT, "the note the product prints for every export with `columns:` excuses no refusal"
+    assert grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] column `c04` holds 1.5"), with_note("exact"), "c04").klass == SPLIT, "a refusal of a column check reports exact is a split, note or not"
+    assert grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] column `c04` holds 1.5"), with_note("lossy", "override float8 ... refused at run (RIVET_SOURCE_VALUE_UNREPRESENTABLE)"), "c04").klass == SPLIT, "another column's lossy row is no statement of this column"
+    assert grade_stop("c", _proc(5, refusal), with_note("lossy", "override float8 ... refused at run (RIVET_SOURCE_VALUE_UNREPRESENTABLE)"), "c03").klass == "", "a lossy row naming the code on the refused column is stated, note or not"
     wire = report("lossy", "override timestamp_ns ... refused at run (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH); this is lossy, not exact")
     assert grade_stop("c", _proc(5, refusal), wire, "c03").klass == SPLIT, "a lossy note that names another code is no statement of this refusal"
     assert grade_stop("c", _proc(5, refusal), report("exact"), "c03").klass == SPLIT, "an exact column that the run refuses is a split"

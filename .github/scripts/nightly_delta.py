@@ -144,10 +144,10 @@ def self_test() -> int:
     """Each rule of the verdict goes RED on the mutant it exists to catch."""
     today = dt.date(2026, 11, 14)
     base = known_red.nightly_classes()
-    known_line = "no_silent_null mysql/ts->date/full/parquet RED WRONG_VALUE: exit 0, value changed\n"
+    known_line = "no_silent_null mysql/ts->date/full/parquet RED CHECK_RUN_SPLIT: check exit 0, run exit 5\n"
     other_line = "no_silent_null mysql/ts->date/full/parquet RED BRAND_NEW_CAUSE: x\n"
     refusal = "refusal_names_true_cause cmd/load/X/postgres RED printed RIVET_A, injected RIVET_B\n"
-    assert known_red.nightly_key("no_silent_null", "mysql", "WRONG_VALUE") in base, "the gate's per-cell-set entries are cut to classes"
+    assert known_red.nightly_key("no_silent_null", "mysql", "CHECK_RUN_SPLIT") in base, "the gate's per-cell-set entries are cut to classes"
     assert known_red.nightly_key("refusal_names_true_cause", "cmd", "printed") in base, "the nightly entry of #917 is in the baseline"
     load_line = "no_silent_null_load postgres/list->list/full/parquet RED DEFECT_PG_NULL_LIST_EMPTY_CH: x\n"
     cdc_line = "no_silent_null_cdc oracle/ts->date/cdc-x/parquet RED CHECK_RUN_SPLIT: check exit 0, run exit 5\n"

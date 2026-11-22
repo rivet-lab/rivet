@@ -7065,7 +7065,7 @@ seeds:
         cells: ["lib:an_override_refusal_by_value_carries_the_value_code_as_batch_does", "oracle_cdc_a_date_override_refuses_a_time_of_day_not_drops_it"]
   - name: check-values-unread-unsaid
     class: "`rivet check` exits 0 over a column a run then refuses by a value (RIVET_SOURCE_VALUE_UNREPRESENTABLE, RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE) without saying that it read no values, so check and run disagree with nothing to tell the operator why"
-    history: "CHECK_RUN_SPLIT known-red class over every engine and leg (2026-11-10..19); owner decision 2026-11-20: check names the codes only a value decides (needs_values in the registry) instead of reading values, and the gate grades a split on such a code as noted"
+    history: "CHECK_RUN_SPLIT known-red class over every engine and leg (2026-11-10..19); owner decision 2026-11-20: check names the codes only a value decides (needs_values in the registry) instead of reading values, the note is the operator's statement and the gate grades no split by it (a column check reports exact that a run refuses by a value is a split, known-red or fixed)"
     scope: source
     switch: check-values-unread-unsaid
     engines:
