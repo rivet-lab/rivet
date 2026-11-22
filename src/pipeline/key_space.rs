@@ -12,6 +12,76 @@ pub(crate) fn split(lo: &str, hi: &str, parts: usize) -> Vec<String> {
         .unwrap_or_else(|| text(lo, hi, parts))
 }
 
+/// How a key is read as one ordered integer: its own value, or a uuid's 128 bits without the lowest one.
+#[derive(Clone, Copy)]
+pub(crate) enum Axis {
+    Int,
+    Uuid { upper: bool },
+}
+
+impl Axis {
+    /// The axis a key's text reads on, or `None` for a shape with no integer order or an engine that sorts it differently.
+    pub(crate) fn of(key: &str, st: crate::config::SourceType) -> Option<Axis> {
+        if key.parse::<i128>().is_ok() {
+            return Some(Axis::Int);
+        }
+        if seeded!(
+            "keyset-mssql-uuid-gets-an-axis",
+            false,
+            st == crate::config::SourceType::Mssql
+        ) {
+            return None;
+        }
+        let upper = key.bytes().any(|c| c.is_ascii_uppercase());
+        Axis::Uuid { upper }.ord(key).map(|_| Axis::Uuid { upper })
+    }
+
+    /// The key's place on the axis.
+    pub(crate) fn ord(self, key: &str) -> Option<i128> {
+        match self {
+            Axis::Int => key.parse().ok(),
+            Axis::Uuid { .. } => (key.len() == 36)
+                .then(|| uuid::Uuid::try_parse(key).ok())
+                .flatten()
+                .map(|u| (u.as_u128() >> 1) as i128),
+        }
+    }
+
+    /// The operator and key text that select every key past a place on the axis.
+    pub(crate) fn after(self, at: i128) -> (&'static str, String) {
+        match self {
+            Axis::Int => (">", self.show(at)),
+            Axis::Uuid { .. } => (">=", self.show(at + 1)),
+        }
+    }
+
+    /// The operator and key text that select every key up to a place on the axis.
+    pub(crate) fn upto(self, at: i128) -> (&'static str, String) {
+        match self {
+            Axis::Int => ("<=", self.show(at)),
+            Axis::Uuid { .. } => ("<", self.show(at + 1)),
+        }
+    }
+
+    /// The operator and key text that select every key below a place on the axis.
+    pub(crate) fn below(self, at: i128) -> (&'static str, String) {
+        ("<", self.show(at))
+    }
+
+    /// The key text for a place on the axis.
+    pub(crate) fn show(self, at: i128) -> String {
+        match self {
+            Axis::Int => at.to_string(),
+            Axis::Uuid { upper } => {
+                let s = uuid::Uuid::from_u128((at.max(0) as u128) << 1)
+                    .hyphenated()
+                    .to_string();
+                if upper { s.to_uppercase() } else { s }
+            }
+        }
+    }
+}
+
 /// The `i`-th of `n` even steps from `lo` across `span`, without overflow.
 fn step(lo: u128, span: u128, i: usize, n: usize) -> u128 {
     let (i, n) = (i as u128, n as u128);
@@ -204,7 +274,9 @@ fn text(lo: &str, hi: &str, parts: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::split;
+    use super::{Axis, split};
+
+    const ST: crate::config::SourceType = crate::config::SourceType::Postgres;
 
     /// Owned strings for a comparison.
     fn v(xs: &[&str]) -> Vec<String> {
@@ -305,6 +377,57 @@ mod tests {
         assert_eq!(split("é", "ü", 2), Vec::<String>::new());
         assert!(split("same", "same", 4).is_empty());
         assert_eq!(split("zeta", "alpha", 2).len(), 1);
+    }
+
+    #[test]
+    fn an_axis_reads_integers_and_uuids_in_their_own_order_and_case() {
+        let lo = "00000000-0000-0000-0000-000000000001";
+        let hi = "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFE";
+        let up = Axis::of(hi, ST).unwrap();
+        assert!(matches!(up, Axis::Uuid { upper: true }));
+        let (a, b) = (up.ord(lo).unwrap(), up.ord(hi).unwrap());
+        assert!(0 <= a && a < b);
+        assert_eq!(up.show(b), hi);
+        let mid = up.show(a + (b - a) / 2);
+        assert!(lo < mid.as_str() && mid.as_str() < hi, "{mid}");
+        assert!(matches!(Axis::of("-42", ST), Some(Axis::Int)));
+        assert_eq!(Axis::Int.show(Axis::Int.ord("-42").unwrap()), "-42");
+        assert!(Axis::of("abc", ST).is_none());
+        assert!(Axis::of("0123456789abcdef0123456789abcdef", ST).is_none());
+    }
+
+    #[test]
+    fn a_uuid_key_has_no_axis_on_sql_server_whose_order_differs() {
+        let u = "00000000-0000-0000-0000-000000000001";
+        assert!(Axis::of(u, crate::config::SourceType::Mssql).is_none());
+        assert!(Axis::of(u, crate::config::SourceType::Postgres).is_some());
+        assert!(matches!(
+            Axis::of("7", crate::config::SourceType::Mssql),
+            Some(Axis::Int)
+        ));
+    }
+
+    #[test]
+    fn a_uuid_place_selects_every_key_of_its_pair_on_both_sides() {
+        let odd = "00000000-0000-0000-0000-000000000003";
+        let axis = Axis::of(odd, ST).unwrap();
+        let at = axis.ord(odd).unwrap();
+        let (op, past) = axis.after(at);
+        assert_eq!(op, ">=");
+        assert!(odd < past.as_str(), "{past}");
+        let (op, upto) = axis.upto(at);
+        assert_eq!(op, "<");
+        assert!(odd < upto.as_str(), "{upto}");
+        assert_eq!(Axis::Int.after(5), (">", "5".to_string()));
+        assert_eq!(Axis::Int.upto(5), ("<=", "5".to_string()));
+    }
+
+    #[test]
+    fn a_place_below_the_nil_uuid_shows_as_the_nil_uuid() {
+        let nil = "00000000-0000-0000-0000-000000000000";
+        let axis = Axis::of(nil, ST).unwrap();
+        assert_eq!(axis.ord(nil), Some(0));
+        assert_eq!(axis.show(-1), nil);
     }
 
     #[test]

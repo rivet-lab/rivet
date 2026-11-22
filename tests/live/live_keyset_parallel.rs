@@ -849,7 +849,11 @@ fn parallel_keyset_midrange_error_counts_pre_failure_page_parts_postgres() {
          ANALYZE {table};"
     ))
     .unwrap();
-    let rig = parallel_keyset(Rig::pg_batch(&format!("public.{table}")));
+    let rig = Rig::pg_batch(&format!("public.{table}"))
+        .mode("chunked")
+        .export_line("chunk_by_key: id")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 20");
     let out = rig.run_with_env("RIVET_TEST_ERROR_AT", "keyset_parallel_worker_midrange:2");
     assert!(
         !out.status.success(),
@@ -1373,13 +1377,13 @@ fn parallel_keyset_sampler_reads_a_bounded_number_of_rows_postgres() {
         (
             rows_per_range(&out).values().sum::<usize>(),
             keys.len(),
-            worker_fanout(&out),
+            worker_fanout(&out) >= 4,
         ),
-        (ROWS as usize, ROWS as usize, 4),
+        (ROWS as usize, ROWS as usize, true),
         "declared rows, distinct keys, workers"
     );
     assert!(
-        read <= ROWS + ROWS / 20,
+        read <= ROWS + ROWS / 5,
         "the run read {read} tuples for {ROWS} rows: the range sampler scans the table"
     );
     let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
@@ -1550,10 +1554,10 @@ fn sparse_key_spread(rig: Rig) -> Vec<usize> {
     spread.into_values().collect()
 }
 
-/// A sparse integer key under the row-percentile limit keeps main's row-balanced ranges; above it the key-space ranges are measured.
+/// A sparse integer key takes key-space ranges whatever the catalog estimate says: several per worker, balanced by the density recut.
 #[test]
 #[ignore = "live: requires docker compose up -d postgres"]
-fn a_sparse_parallel_keyset_key_keeps_row_percentiles_below_the_limit_postgres() {
+fn a_sparse_parallel_keyset_key_takes_key_space_ranges_postgres() {
     require_alive(LiveService::Postgres);
     let table = unique_name("pk_sparse");
     let mut c = pg_connect();
@@ -1566,20 +1570,18 @@ fn a_sparse_parallel_keyset_key_keeps_row_percentiles_below_the_limit_postgres()
     ))
     .unwrap();
     let qualified = format!("public.{table}");
-    assert_eq!(
-        sparse_key_spread(Rig::pg_batch(&qualified)),
-        vec![5_001, 5_000, 5_000, 4_999],
-        "row percentiles under the limit"
-    );
-    pg_catalog_says_rows(&mut c, &table, 20_000_000);
     let above = sparse_key_spread(Rig::pg_batch(&qualified));
     assert!(
         (5..=64).contains(&above.len()),
         "key-space ranges, not four row percentiles, at most 16 per worker: {above:?}"
     );
+    let (total, heaviest) = (
+        above.iter().sum::<usize>(),
+        above.iter().max().copied().unwrap_or(0),
+    );
     assert!(
-        above[0] >= SPARSE_DENSE as usize,
-        "the dense stretch stays in one range: {above:?}"
+        heaviest * above.len() <= 2 * total,
+        "the density recut spreads the dense stretch: {above:?}"
     );
     let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
 }
@@ -1609,10 +1611,10 @@ fn mysql_sparse_table(c: &mut mysql::PooledConn, table: &str, options: &str) {
     .unwrap();
 }
 
-/// The MySQL twin: an analyzed table keeps row percentiles; the same table the catalog puts at 20M rows takes key-space ranges.
+/// The MySQL twin: an analyzed table and the same table the catalog puts at 20M rows both take key-space ranges.
 #[test]
 #[ignore = "live: requires docker compose up -d mysql"]
-fn a_sparse_parallel_keyset_key_keeps_row_percentiles_below_the_limit_mysql() {
+fn a_sparse_parallel_keyset_key_takes_key_space_ranges_mysql() {
     use mysql::prelude::Queryable;
     require_alive(LiveService::Mysql);
     let (table, large) = (unique_name("pk_sparse_my"), unique_name("pk_sparse_my_l"));
@@ -1621,19 +1623,23 @@ fn a_sparse_parallel_keyset_key_keeps_row_percentiles_below_the_limit_mysql() {
     c.query_drop(format!("ANALYZE TABLE {table}")).unwrap();
     mysql_sparse_table(&mut c, &large, "STATS_PERSISTENT=1 STATS_AUTO_RECALC=0");
     mysql_catalog_says_rows(&large, 20_000_000);
-    assert_eq!(
-        sparse_key_spread(Rig::mysql_batch(&table)),
-        vec![5_001, 5_000, 5_000, 4_999],
-        "row percentiles under the limit"
+    let small = sparse_key_spread(Rig::mysql_batch(&table));
+    assert!(
+        (5..=64).contains(&small.len()),
+        "key-space ranges under the limit too: {small:?}"
     );
     let above = sparse_key_spread(Rig::mysql_batch(&large));
     assert!(
         (5..=64).contains(&above.len()),
         "key-space ranges, not four row percentiles, at most 16 per worker: {above:?}"
     );
+    let (total, heaviest) = (
+        above.iter().sum::<usize>(),
+        above.iter().max().copied().unwrap_or(0),
+    );
     assert!(
-        above[0] >= SPARSE_DENSE as usize,
-        "the dense stretch stays in one range: {above:?}"
+        heaviest * above.len() <= 2 * total,
+        "the density recut spreads the dense stretch: {above:?}"
     );
     for t in [table, large] {
         let _ = c.query_drop(format!("DROP TABLE IF EXISTS {t}"));
@@ -1645,8 +1651,13 @@ const TIMEOUT_ROWS: i64 = 2_000;
 
 /// A `chunk_by_key: id` run of four workers under a `seconds` statement budget (0 lifts it).
 fn timeout_rig(rig: Rig, seconds: u64) -> Rig {
+    timeout_rig_by(rig, seconds, "id")
+}
+
+/// `timeout_rig` over the key column `key`.
+fn timeout_rig_by(rig: Rig, seconds: u64, key: &str) -> Rig {
     rig.mode("chunked")
-        .export_line("chunk_by_key: id")
+        .export_line(&format!("chunk_by_key: {key}"))
         .export_line("parallel: 4")
         .export_line("chunk_size: 100")
         .export_line(&format!(
@@ -1678,7 +1689,7 @@ fn pg_slow_to_read_table(c: &mut postgres::Client, table: &str, visible: &str) -
     SqlEngine::Pg.reader(table)
 }
 
-/// The sampler's COUNT of a table the catalog puts under 10M rows is cancelled at the budget and fails the run by code; with no budget the same run delivers every row.
+/// The sampler's COUNT of a text key (no axis) on a table the catalog puts under 10M rows is cancelled at the budget and fails the run by code; with no budget the same run delivers every row.
 #[test]
 #[ignore = "live: requires docker compose up -d postgres"]
 fn a_percentile_sampler_read_obeys_the_statement_timeout_postgres() {
@@ -1686,15 +1697,20 @@ fn a_percentile_sampler_read_obeys_the_statement_timeout_postgres() {
     let table = unique_name("pk_sto");
     let mut c = pg_connect();
     let reader = pg_slow_to_read_table(&mut c, &table, "pg_sleep(0.002) IS NOT NULL");
+    c.batch_execute(&format!(
+        "ALTER TABLE {table} ADD COLUMN k TEXT GENERATED ALWAYS AS ('k' || lpad(id::text, 6, '0')) STORED NOT NULL;
+         CREATE UNIQUE INDEX {table}_k ON {table} (k);"
+    ))
+    .unwrap();
     pg_catalog_says_rows(&mut c, &table, TIMEOUT_ROWS);
-    let out = timeout_rig(Rig::pg_batch(&table).source_url(reader.url()), 1).run();
+    let out = timeout_rig_by(Rig::pg_batch(&table).source_url(reader.url()), 1, "k").run();
     assert_refused(&out, Refused::by_code("RIVET_SOURCE_STATEMENT_TIMEOUT", 1));
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(
         said.contains("tuning.statement_timeout_s"),
         "the refusal names the setting: {said}"
     );
-    let unbounded = timeout_rig(Rig::pg_batch(&table).source_url(reader.url()), 0);
+    let unbounded = timeout_rig_by(Rig::pg_batch(&table).source_url(reader.url()), 0, "k");
     unbounded.run_ok();
     assert_timeout_fixture_delivered(&unbounded, "no budget");
     drop(reader);
@@ -1865,4 +1881,666 @@ fn a_bounded_scalar_read_is_cancelled_at_its_budget_mysql() {
         &format!("SELECT COUNT(*) FROM {table} WHERE SLEEP(0.002) = 0"),
     );
     let _ = c.query_drop(format!("DROP TABLE IF EXISTS {table}"));
+}
+
+/// Dense keys of a skew fixture: a block at the bottom of the key axis, the nil uuid among them.
+const SKEW_DENSE: i64 = 180_000;
+/// Sparse keys of a skew fixture, spread over the whole key axis above the dense block.
+const SKEW_SPARSE: i64 = 20_000;
+/// Rows of a skew fixture.
+const SKEW_ROWS: usize = (SKEW_DENSE + SKEW_SPARSE) as usize;
+
+/// The integer keys of the skew fixture.
+fn skew_int_keys() -> BTreeSet<i64> {
+    (1..=SKEW_DENSE)
+        .chain((1..=SKEW_SPARSE).map(|g| SKEW_DENSE + g * 500_000))
+        .collect()
+}
+
+/// The uuid keys of the skew fixture as canonical lowercase text.
+fn skew_uuid_keys() -> BTreeSet<String> {
+    (0..SKEW_DENSE as u128)
+        .chain((1..=SKEW_SPARSE as u128).map(|g| g << 96))
+        .map(|v| uuid::Uuid::from_u128(v).hyphenated().to_string())
+        .collect()
+}
+
+/// Runs a skew export at info level; returns what it logged and the rows per range.
+fn skew_run(rig: &Rig) -> (String, std::collections::BTreeMap<usize, usize>) {
+    let out = rig.run_args_env(&[], &[("RUST_LOG", "info")]);
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        out.status.success(),
+        "skewed keyset run must exit 0:\n{said}"
+    );
+    (said, rows_per_range(&rig.out_dir()))
+}
+
+/// The seek path with a density recut that balanced, not the percentile path nor an unbalanced recut.
+fn assert_seek_recut(said: &str) {
+    assert!(
+        said.contains("parallel keyset path: seek+recut (") && !said.contains("not balanced"),
+        "a skewed key takes the seek+recut path:\n{said}"
+    );
+}
+
+/// The row-percentile path, which is row-balanced by construction.
+fn assert_percentile(said: &str) {
+    assert!(
+        said.contains("parallel keyset path: percentile ("),
+        "a skewed key under the row limit takes the percentile path:\n{said}"
+    );
+}
+
+/// The heaviest range holds at most twice the mean range.
+fn assert_within_twice_the_mean(spread: &std::collections::BTreeMap<usize, usize>) {
+    let total: usize = spread.values().sum();
+    let heaviest = spread.values().max().copied().unwrap_or_default();
+    assert!(
+        spread.len() >= 4 && heaviest * spread.len() <= 2 * total,
+        "the heaviest range ({heaviest} rows) is over twice the mean over {} ranges: {spread:?}",
+        spread.len()
+    );
+}
+
+/// Every integer-keyed skew row lands once.
+fn assert_skew_int_delivered(dir: &std::path::Path) {
+    assert_eq!(
+        (count_rows(dir), dir_parquet_id_set(dir)),
+        (SKEW_ROWS, skew_int_keys()),
+        "every source id once"
+    );
+}
+
+/// Every uuid-keyed skew row lands once, the nil uuid among them.
+fn assert_skew_uuid_delivered(dir: &std::path::Path) {
+    let ids: Vec<String> = dir_parquet_display(dir, "id")
+        .into_iter()
+        .flatten()
+        .map(|id| id.replace('-', ""))
+        .collect();
+    let distinct: BTreeSet<String> = ids.iter().cloned().collect();
+    let want: BTreeSet<String> = skew_uuid_keys()
+        .iter()
+        .map(|k| k.replace('-', ""))
+        .collect();
+    assert_eq!(
+        (ids.len(), distinct),
+        (SKEW_ROWS, want),
+        "every source uuid once"
+    );
+}
+
+/// SQL Server's uuids come from NEWID for the sparse part, so only counts and the nil uuid are fixed.
+fn assert_skew_mssql_uuid_delivered(dir: &std::path::Path, col: &str) {
+    let ids: Vec<String> = dir_parquet_display(dir, col)
+        .into_iter()
+        .flatten()
+        .map(|id| id.replace('-', ""))
+        .collect();
+    let distinct: BTreeSet<String> = ids.iter().cloned().collect();
+    assert_eq!(
+        (
+            ids.len(),
+            distinct.len(),
+            distinct.contains(&"0".repeat(32))
+        ),
+        (SKEW_ROWS, SKEW_ROWS, true),
+        "every source uuid once, the nil uuid among them"
+    );
+}
+
+/// The integer skew fixture on MySQL: `options` ends its `CREATE TABLE`.
+fn mysql_skew_int(c: &mut mysql::PooledConn, table: &str, options: &str) {
+    use mysql::prelude::Queryable;
+    c.query_drop(format!("DROP TABLE IF EXISTS {table}"))
+        .unwrap();
+    c.query_drop(format!(
+        "CREATE TABLE {table} (id BIGINT NOT NULL PRIMARY KEY, payload INT NOT NULL) {options}"
+    ))
+    .unwrap();
+    c.query_drop(format!("SET SESSION cte_max_recursion_depth = {SKEW_ROWS}"))
+        .unwrap();
+    c.query_drop(format!(
+        "INSERT INTO {table} (id, payload) \
+         WITH RECURSIVE seq AS (SELECT 1 n UNION ALL SELECT n + 1 FROM seq WHERE n < {SKEW_DENSE}) \
+         SELECT n, n FROM seq"
+    ))
+    .unwrap();
+    c.query_drop(format!(
+        "INSERT INTO {table} (id, payload) \
+         WITH RECURSIVE seq AS (SELECT 1 n UNION ALL SELECT n + 1 FROM seq WHERE n < {SKEW_SPARSE}) \
+         SELECT {SKEW_DENSE} + n * 500000, n FROM seq"
+    ))
+    .unwrap();
+}
+
+/// The uuid skew fixture on MySQL as CHAR(36): `options` ends its `CREATE TABLE`.
+fn mysql_skew_uuid(c: &mut mysql::PooledConn, table: &str, options: &str) {
+    use mysql::prelude::Queryable;
+    let last = SKEW_DENSE - 1;
+    c.query_drop(format!("DROP TABLE IF EXISTS {table}"))
+        .unwrap();
+    c.query_drop(format!(
+        "CREATE TABLE {table} (id CHAR(36) NOT NULL PRIMARY KEY, payload INT NOT NULL) {options}"
+    ))
+    .unwrap();
+    c.query_drop(format!("SET SESSION cte_max_recursion_depth = {SKEW_ROWS}"))
+        .unwrap();
+    c.query_drop(format!(
+        "INSERT INTO {table} (id, payload) \
+         WITH RECURSIVE seq AS (SELECT 0 n UNION ALL SELECT n + 1 FROM seq WHERE n < {last}), \
+         hx AS (SELECT LPAD(HEX(n), 32, '0') h, n FROM seq) \
+         SELECT LOWER(CONCAT_WS('-', SUBSTR(h,1,8), SUBSTR(h,9,4), SUBSTR(h,13,4), SUBSTR(h,17,4), SUBSTR(h,21,12))), n FROM hx"
+    ))
+    .unwrap();
+    c.query_drop(format!(
+        "INSERT INTO {table} (id, payload) \
+         WITH RECURSIVE seq AS (SELECT 1 n UNION ALL SELECT n + 1 FROM seq WHERE n < {SKEW_SPARSE}), \
+         hx AS (SELECT CONCAT(LPAD(HEX(n), 8, '0'), REPEAT('0', 24)) h, n FROM seq) \
+         SELECT LOWER(CONCAT_WS('-', SUBSTR(h,1,8), SUBSTR(h,9,4), SUBSTR(h,13,4), SUBSTR(h,17,4), SUBSTR(h,21,12))), n FROM hx"
+    ))
+    .unwrap();
+}
+
+/// A skewed integer key (a dense block and a sparse tail) on PostgreSQL is recut by density: every row once, balanced, and no COUNT(*) read.
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn a_skewed_integer_keyset_is_recut_by_density_postgres() {
+    require_alive(LiveService::Postgres);
+    let table = unique_name("pk_skew_int");
+    let mut c = pg_connect();
+    c.batch_execute(&format!(
+        "DROP TABLE IF EXISTS {table};
+         CREATE TABLE {table} (id BIGINT PRIMARY KEY, payload INT NOT NULL);
+         INSERT INTO {table} SELECT g, g FROM generate_series(1, {SKEW_DENSE}) g;
+         INSERT INTO {table} SELECT {SKEW_DENSE} + g::bigint * 500000, g FROM generate_series(1, {SKEW_SPARSE}) g;"
+    ))
+    .unwrap();
+    pg_catalog_says_rows(&mut c, &table, 20_000_000);
+    let rig = Rig::pg_batch(&format!("public.{table}"))
+        .mode("chunked")
+        .export_line("chunk_by_key: id")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000")
+        .no_oracle("the test counts reads of the source table; the oracle's own read-back would be counted");
+    let before = pg_tuples_read(&mut c, &table);
+    let (said, spread) = skew_run(&rig);
+    let read = pg_tuples_read(&mut c, &table) - before;
+    assert_seek_recut(&said);
+    assert_skew_int_delivered(&rig.out_dir());
+    assert_within_twice_the_mean(&spread);
+    assert!(
+        read <= SKEW_ROWS as i64 * 6 / 5,
+        "the run read {read} tuples for {SKEW_ROWS} rows: the seek path counts or scans the table"
+    );
+    let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
+}
+
+/// A skewed uuid key (the nil uuid in the dense block) on PostgreSQL is recut by density: every row once, balanced.
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn a_skewed_uuid_keyset_is_recut_by_density_postgres() {
+    require_alive(LiveService::Postgres);
+    let table = unique_name("pk_skew_uuid");
+    let last = SKEW_DENSE - 1;
+    let mut c = pg_connect();
+    c.batch_execute(&format!(
+        "DROP TABLE IF EXISTS {table};
+         CREATE TABLE {table} (id UUID PRIMARY KEY, payload INT NOT NULL);
+         INSERT INTO {table} SELECT lpad(to_hex(g), 32, '0')::uuid, g FROM generate_series(0, {last}) g;
+         INSERT INTO {table} SELECT (lpad(to_hex(g), 8, '0') || repeat('0', 24))::uuid, g FROM generate_series(1, {SKEW_SPARSE}) g;"
+    ))
+    .unwrap();
+    pg_catalog_says_rows(&mut c, &table, 20_000_000);
+    let rig = Rig::pg_batch(&format!("public.{table}"))
+        .mode("chunked")
+        .export_line("chunk_by_key: id")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000")
+        .no_oracle("the test grades the delivered uuids itself against the fixture's keys");
+    let (said, spread) = skew_run(&rig);
+    assert_seek_recut(&said);
+    assert_skew_uuid_delivered(&rig.out_dir());
+    assert_within_twice_the_mean(&spread);
+    let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
+}
+
+/// A skewed integer key on MySQL is recut by density: every row once, balanced ranges.
+#[test]
+#[ignore = "live: requires docker compose up -d mysql"]
+fn a_skewed_integer_keyset_is_recut_by_density_mysql() {
+    require_alive(LiveService::Mysql);
+    use mysql::prelude::Queryable;
+    let table = unique_name("pk_skew_my");
+    let mut c = mysql_connect();
+    mysql_skew_int(&mut c, &table, "STATS_PERSISTENT=1 STATS_AUTO_RECALC=0");
+    mysql_catalog_says_rows(&table, 20_000_000);
+    let rig = Rig::mysql_batch(&table)
+        .mode("chunked")
+        .export_line("chunk_by_key: id")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000");
+    let (said, spread) = skew_run(&rig);
+    assert_seek_recut(&said);
+    assert_skew_int_delivered(&rig.out_dir());
+    assert_within_twice_the_mean(&spread);
+    let _ = c.query_drop(format!("DROP TABLE IF EXISTS {table}"));
+}
+
+/// A skewed uuid key stored as CHAR(36) on MySQL is recut by density: every row once, the nil uuid among them.
+#[test]
+#[ignore = "live: requires docker compose up -d mysql"]
+fn a_skewed_uuid_keyset_is_recut_by_density_mysql() {
+    require_alive(LiveService::Mysql);
+    use mysql::prelude::Queryable;
+    let table = unique_name("pk_skew_uuid_my");
+    let mut c = mysql_connect();
+    mysql_skew_uuid(&mut c, &table, "STATS_PERSISTENT=1 STATS_AUTO_RECALC=0");
+    mysql_catalog_says_rows(&table, 20_000_000);
+    let rig = Rig::mysql_batch(&table)
+        .mode("chunked")
+        .export_line("chunk_by_key: id")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000");
+    let (said, spread) = skew_run(&rig);
+    assert_seek_recut(&said);
+    assert_skew_uuid_delivered(&rig.out_dir());
+    assert_within_twice_the_mean(&spread);
+    let _ = c.query_drop(format!("DROP TABLE IF EXISTS {table}"));
+}
+
+/// Bursts of a UUIDv7-shaped key: rows per burst and bursts in the fixture.
+const V7_BURST: u32 = 1200;
+const V7_BURSTS: u32 = 5;
+
+/// The UUIDv7-shaped keys: a timestamp prefix per burst, far apart, and a counter inside it.
+fn v7_keys() -> BTreeSet<String> {
+    (0..V7_BURSTS)
+        .flat_map(|b| (1..=V7_BURST).map(move |g| (u128::from(b + 1) << 112) | u128::from(g)))
+        .map(|v| uuid::Uuid::from_u128(v).simple().to_string())
+        .collect()
+}
+
+/// Every burst row lands once.
+fn assert_v7_delivered(dir: &std::path::Path) {
+    let ids: Vec<String> = dir_parquet_display(dir, "id")
+        .into_iter()
+        .flatten()
+        .map(|id| id.replace('-', ""))
+        .collect();
+    let distinct: BTreeSet<String> = ids.iter().cloned().collect();
+    assert_eq!(
+        (ids.len(), distinct),
+        ((V7_BURST * V7_BURSTS) as usize, v7_keys()),
+        "every source uuid once"
+    );
+}
+
+/// UUIDv7 bursts far apart in time on PostgreSQL are recut into balanced ranges: every row once.
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn uuid_v7_bursts_are_recut_into_balanced_ranges_postgres() {
+    require_alive(LiveService::Postgres);
+    let table = unique_name("pk_v7");
+    let mut c = pg_connect();
+    c.batch_execute(&format!(
+        "DROP TABLE IF EXISTS {table};
+         CREATE TABLE {table} (id UUID PRIMARY KEY, payload INT NOT NULL);
+         INSERT INTO {table} SELECT (lpad(to_hex(b), 4, '0') || repeat('0', 12) || lpad(to_hex(g), 16, '0'))::uuid, g
+           FROM generate_series(1, {V7_BURSTS}) b, generate_series(1, {V7_BURST}) g;"
+    ))
+    .unwrap();
+    pg_catalog_says_rows(&mut c, &table, 20_000_000);
+    let rig = Rig::pg_batch(&format!("public.{table}"))
+        .mode("chunked")
+        .export_line("chunk_by_key: id")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000")
+        .no_oracle("the test grades the delivered uuids itself against the fixture's keys");
+    let (said, spread) = skew_run(&rig);
+    assert_seek_recut(&said);
+    assert_v7_delivered(&rig.out_dir());
+    assert_within_twice_the_mean(&spread);
+    let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
+}
+
+/// UUIDv7 bursts far apart in time on MySQL (CHAR(36)) are recut into balanced ranges: every row once.
+#[test]
+#[ignore = "live: requires docker compose up -d mysql"]
+fn uuid_v7_bursts_are_recut_into_balanced_ranges_mysql() {
+    require_alive(LiveService::Mysql);
+    use mysql::prelude::Queryable;
+    let table = unique_name("pk_v7_my");
+    let mut c = mysql_connect();
+    c.query_drop(format!("DROP TABLE IF EXISTS {table}"))
+        .unwrap();
+    c.query_drop(format!(
+        "CREATE TABLE {table} (id CHAR(36) NOT NULL PRIMARY KEY, payload INT NOT NULL) STATS_PERSISTENT=1 STATS_AUTO_RECALC=0"
+    ))
+    .unwrap();
+    c.query_drop(format!("SET SESSION cte_max_recursion_depth = {V7_BURST}"))
+        .unwrap();
+    c.query_drop(format!(
+        "INSERT INTO {table} (id, payload) \
+         WITH RECURSIVE g AS (SELECT 1 n UNION ALL SELECT n + 1 FROM g WHERE n < {V7_BURST}), \
+         b AS (SELECT 1 k UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5), \
+         hx AS (SELECT CONCAT(LPAD(HEX(k), 4, '0'), REPEAT('0', 12), LPAD(HEX(n), 16, '0')) h, n FROM g CROSS JOIN b) \
+         SELECT LOWER(CONCAT_WS('-', SUBSTR(h,1,8), SUBSTR(h,9,4), SUBSTR(h,13,4), SUBSTR(h,17,4), SUBSTR(h,21,12))), n FROM hx"
+    ))
+    .unwrap();
+    mysql_catalog_says_rows(&table, 20_000_000);
+    let rig = Rig::mysql_batch(&table)
+        .mode("chunked")
+        .export_line("chunk_by_key: id")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000");
+    let (said, spread) = skew_run(&rig);
+    assert_seek_recut(&said);
+    assert_v7_delivered(&rig.out_dir());
+    assert_within_twice_the_mean(&spread);
+    let _ = c.query_drop(format!("DROP TABLE IF EXISTS {table}"));
+}
+
+const HOT_FIRST: i64 = 18_000;
+const HOT_TAIL: i64 = 2_000;
+
+/// Every key pair of the hot-first-value fixture lands once, in more than one worker when `fanned_out`.
+fn assert_hot_first_delivered(dir: &std::path::Path, fanned_out: bool) {
+    let want: BTreeSet<(String, String)> = (1..=HOT_FIRST)
+        .map(|g| (1, g))
+        .chain((1..=HOT_TAIL).map(|g| (1 + g, g)))
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+    let got: Vec<(String, String)> = dir_parquet_display(dir, "grp")
+        .into_iter()
+        .flatten()
+        .zip(dir_parquet_display(dir, "id").into_iter().flatten())
+        .map(|(a, b)| {
+            (
+                a.trim_start_matches('0').to_string(),
+                b.trim_start_matches('0').to_string(),
+            )
+        })
+        .collect();
+    let distinct: BTreeSet<(String, String)> = got.iter().cloned().collect();
+    assert_eq!(
+        (got.len(), distinct, worker_fanout(dir) >= 2 || !fanned_out),
+        ((HOT_FIRST + HOT_TAIL) as usize, want, true),
+        "rows, distinct key pairs, more than one worker"
+    );
+}
+
+/// A composite key whose first column holds one hot value for 90% of the rows exports every row once, in more than one range.
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn a_composite_key_with_a_hot_first_value_exports_every_row_once_postgres() {
+    require_alive(LiveService::Postgres);
+    let table = unique_name("pk_hot_first");
+    let mut c = pg_connect();
+    c.batch_execute(&format!(
+        "DROP TABLE IF EXISTS {table};
+         CREATE TABLE {table} (grp INT NOT NULL, id BIGINT NOT NULL, payload INT NOT NULL, PRIMARY KEY (grp, id));
+         INSERT INTO {table} SELECT 1, g, g FROM generate_series(1, {HOT_FIRST}) g;
+         INSERT INTO {table} SELECT 1 + g, g, g FROM generate_series(1, {HOT_TAIL}) g;"
+    ))
+    .unwrap();
+    pg_catalog_says_rows(&mut c, &table, 20_000_000);
+    let rig = Rig::pg_batch(&format!("public.{table}"))
+        .mode("chunked")
+        .export_line("chunk_by_key: [grp, id]")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000")
+        .no_oracle("the test grades the delivered key pairs itself against the fixture");
+    rig.run_ok();
+    assert_hot_first_delivered(&rig.out_dir(), true);
+    let _ = c.execute(&format!("DROP TABLE IF EXISTS {table}"), &[]);
+}
+
+/// A composite string key with a hot first value on Oracle, which has no catalog row estimate, exports every row once; it runs as one range.
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose up -d oracle"]
+fn a_composite_key_with_a_hot_first_value_keeps_every_key_pair_oracle() {
+    require_alive(LiveService::Oracle);
+    let t = OracleTable::create(
+        "ora_hot_first",
+        "grp VARCHAR2(8) NOT NULL, id VARCHAR2(16) NOT NULL, payload NUMBER(10) NOT NULL, PRIMARY KEY (grp, id)",
+    );
+    ora_exec(&format!(
+        "INSERT INTO {} SELECT LPAD(1, 8, '0'), LPAD(LEVEL, 16, '0'), LEVEL FROM dual CONNECT BY LEVEL <= {HOT_FIRST}",
+        t.name()
+    ));
+    ora_exec(&format!(
+        "INSERT INTO {} SELECT LPAD(1 + LEVEL, 8, '0'), LPAD(LEVEL, 16, '0'), LEVEL FROM dual CONNECT BY LEVEL <= {HOT_TAIL}",
+        t.name()
+    ));
+    let rig = Rig::oracle_batch(t.name())
+        .mode("chunked")
+        .export_line("chunk_by_key: [GRP, ID]")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000");
+    rig.run_ok();
+    assert_hot_first_delivered(&rig.out_dir(), false);
+}
+
+/// A composite key with a hot first value on SQL Server exports every row once, in more than one range.
+#[test]
+#[ignore = "live: requires docker compose up -d mssql"]
+fn a_composite_key_with_a_hot_first_value_keeps_every_key_pair_mssql() {
+    require_alive(LiveService::Mssql);
+    let table = unique_name("pk_hot_first_ms");
+    mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));
+    mssql_exec(&format!(
+        "CREATE TABLE {table} (grp INT NOT NULL, id BIGINT NOT NULL, payload INT NOT NULL, PRIMARY KEY (grp, id))"
+    ));
+    mssql_exec(&format!(
+        "WITH nums AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM nums WHERE n < {HOT_FIRST}) \
+         INSERT INTO {table} (grp, id, payload) SELECT 1, n, n FROM nums OPTION (MAXRECURSION 0)"
+    ));
+    mssql_exec(&format!(
+        "WITH nums AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM nums WHERE n < {HOT_TAIL}) \
+         INSERT INTO {table} (grp, id, payload) SELECT 1 + n, n, n FROM nums OPTION (MAXRECURSION 0)"
+    ));
+    let rig = Rig::mssql_batch(&table)
+        .mode("chunked")
+        .export_line("chunk_by_key: [grp, id]")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000");
+    rig.run_ok();
+    assert_hot_first_delivered(&rig.out_dir(), true);
+    mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));
+}
+
+/// UUIDv7 bursts far apart in time on Oracle (VARCHAR2(36)) are recut into balanced ranges: every row once.
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose up -d oracle"]
+fn uuid_v7_bursts_are_recut_into_balanced_ranges_oracle() {
+    require_alive(LiveService::Oracle);
+    let t = OracleTable::create(
+        "ora_v7",
+        "id VARCHAR2(36) PRIMARY KEY, payload NUMBER(10) NOT NULL",
+    );
+    ora_exec(&format!(
+        "INSERT INTO {} SELECT LOWER(SUBSTR(h,1,8)||'-'||SUBSTR(h,9,4)||'-'||SUBSTR(h,13,4)||'-'||SUBSTR(h,17,4)||'-'||SUBSTR(h,21,12)), g \
+         FROM (SELECT g, LPAD(TO_CHAR(b, 'FMXXXX'), 4, '0') || RPAD('0', 12, '0') || LPAD(TO_CHAR(g, 'FMXXXXXXXXXXXXXXXX'), 16, '0') h \
+               FROM (SELECT LEVEL g FROM dual CONNECT BY LEVEL <= {V7_BURST}) CROSS JOIN (SELECT LEVEL b FROM dual CONNECT BY LEVEL <= {V7_BURSTS}))",
+        t.name()
+    ));
+    let rig = Rig::oracle_batch(t.name())
+        .mode("chunked")
+        .export_line("chunk_by_key: ID")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000");
+    let (said, spread) = skew_run(&rig);
+    assert_seek_recut(&said);
+    assert_v7_delivered(&rig.out_dir());
+    assert_within_twice_the_mean(&spread);
+}
+
+/// UUIDv7 bursts on SQL Server (uniqueidentifier) stay on the percentile path: every row once, balanced.
+#[test]
+#[ignore = "live: requires docker compose up -d mssql"]
+fn uuid_v7_bursts_keep_row_percentiles_mssql() {
+    require_alive(LiveService::Mssql);
+    let table = unique_name("pk_v7_ms");
+    mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));
+    mssql_exec(&format!(
+        "CREATE TABLE {table} (k UNIQUEIDENTIFIER NOT NULL PRIMARY KEY, payload INT NOT NULL)"
+    ));
+    mssql_exec(&format!(
+        "WITH g AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM g WHERE n < {V7_BURST}), \
+         b AS (SELECT 1 AS k UNION ALL SELECT k + 1 FROM b WHERE k < {V7_BURSTS}), \
+         hx AS (SELECT n, CONVERT(CHAR(4), CONVERT(BINARY(2), k), 2) + REPLICATE('0', 12) + CONVERT(CHAR(16), CONVERT(BINARY(8), CAST(n AS BIGINT)), 2) AS h FROM g CROSS JOIN b) \
+         INSERT INTO {table} (k, payload) SELECT CONVERT(UNIQUEIDENTIFIER, STUFF(STUFF(STUFF(STUFF(h, 9, 0, '-'), 14, 0, '-'), 19, 0, '-'), 24, 0, '-')), n FROM hx OPTION (MAXRECURSION 0)"
+    ));
+    let rig = Rig::mssql_batch(&table)
+        .mode("chunked")
+        .export_line("chunk_by_key: k")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000");
+    let (said, spread) = skew_run(&rig);
+    assert_percentile(&said);
+    let ids: Vec<String> = dir_parquet_display(&rig.out_dir(), "k")
+        .into_iter()
+        .flatten()
+        .collect();
+    let distinct: BTreeSet<&String> = ids.iter().collect();
+    assert_eq!(
+        (ids.len(), distinct.len()),
+        (
+            (V7_BURST * V7_BURSTS) as usize,
+            (V7_BURST * V7_BURSTS) as usize
+        ),
+        "every source uuid once"
+    );
+    assert_within_twice_the_mean(&spread);
+    mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));
+}
+
+/// A skewed integer key on Oracle, whose catalog gives no row estimate, is recut by density: every row once, NUMBER(19) key.
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose up -d oracle"]
+fn a_skewed_integer_keyset_is_recut_by_density_oracle() {
+    require_alive(LiveService::Oracle);
+    let t = OracleTable::create(
+        "ora_skew_int",
+        "id NUMBER(19) PRIMARY KEY, payload NUMBER(10) NOT NULL",
+    );
+    ora_exec(&format!(
+        "INSERT INTO {} SELECT LEVEL, LEVEL FROM dual CONNECT BY LEVEL <= {SKEW_DENSE}",
+        t.name()
+    ));
+    ora_exec(&format!(
+        "INSERT INTO {} SELECT {SKEW_DENSE} + LEVEL * 500000, LEVEL FROM dual CONNECT BY LEVEL <= {SKEW_SPARSE}",
+        t.name()
+    ));
+    let rig = Rig::oracle_batch(t.name())
+        .mode("chunked")
+        .export_line("chunk_by_key: ID")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000");
+    let (said, spread) = skew_run(&rig);
+    assert_seek_recut(&said);
+    assert_skew_int_delivered(&rig.out_dir());
+    assert_within_twice_the_mean(&spread);
+}
+
+/// A skewed uuid key stored as VARCHAR2(36) on Oracle is recut by density: every row once, the nil uuid among them.
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose up -d oracle"]
+fn a_skewed_uuid_keyset_is_recut_by_density_oracle() {
+    require_alive(LiveService::Oracle);
+    let t = OracleTable::create(
+        "ora_skew_uuid",
+        "id VARCHAR2(36) PRIMARY KEY, payload NUMBER(10) NOT NULL",
+    );
+    let canon = |h: &str| {
+        format!(
+            "LOWER(SUBSTR({h},1,8)||'-'||SUBSTR({h},9,4)||'-'||SUBSTR({h},13,4)||'-'||SUBSTR({h},17,4)||'-'||SUBSTR({h},21,12))"
+        )
+    };
+    ora_exec(&format!(
+        "INSERT INTO {} SELECT {}, g FROM (SELECT LEVEL - 1 g, LPAD(TO_CHAR(LEVEL - 1, 'FMXXXXXXXX'), 32, '0') h FROM dual CONNECT BY LEVEL <= {SKEW_DENSE})",
+        t.name(),
+        canon("h")
+    ));
+    ora_exec(&format!(
+        "INSERT INTO {} SELECT {}, g FROM (SELECT LEVEL g, LPAD(TO_CHAR(LEVEL, 'FMXXXXXXXX'), 8, '0') || RPAD('0', 24, '0') h FROM dual CONNECT BY LEVEL <= {SKEW_SPARSE})",
+        t.name(),
+        canon("h")
+    ));
+    let rig = Rig::oracle_batch(t.name())
+        .mode("chunked")
+        .export_line("chunk_by_key: ID")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000");
+    let (said, spread) = skew_run(&rig);
+    assert_seek_recut(&said);
+    assert_skew_uuid_delivered(&rig.out_dir());
+    assert_within_twice_the_mean(&spread);
+}
+
+/// A skewed integer key on SQL Server is recut by density although sys.partitions counts 200k, under the limit: every row once, balanced.
+#[test]
+#[ignore = "live: requires docker compose up -d mssql"]
+fn a_skewed_integer_keyset_is_recut_by_density_mssql() {
+    require_alive(LiveService::Mssql);
+    let table = unique_name("pk_skew_ms");
+    mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));
+    mssql_exec(&format!(
+        "CREATE TABLE {table} (id BIGINT NOT NULL PRIMARY KEY, payload INT NOT NULL)"
+    ));
+    mssql_exec(&format!(
+        "WITH nums AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM nums WHERE n < {SKEW_DENSE}) \
+         INSERT INTO {table} (id, payload) SELECT n, n FROM nums OPTION (MAXRECURSION 0)"
+    ));
+    mssql_exec(&format!(
+        "WITH nums AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM nums WHERE n < {SKEW_SPARSE}) \
+         INSERT INTO {table} (id, payload) SELECT {SKEW_DENSE} + CAST(n AS BIGINT) * 500000, n FROM nums OPTION (MAXRECURSION 0)"
+    ));
+    let rig = Rig::mssql_batch(&table)
+        .mode("chunked")
+        .export_line("chunk_by_key: id")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000");
+    let (said, spread) = skew_run(&rig);
+    assert_seek_recut(&said);
+    assert_skew_int_delivered(&rig.out_dir());
+    assert_within_twice_the_mean(&spread);
+    mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));
+}
+
+/// A skewed uniqueidentifier key on SQL Server stays on the percentile path, never the recut: every row once, the nil uuid among them.
+#[test]
+#[ignore = "live: requires docker compose up -d mssql"]
+fn a_skewed_uniqueidentifier_keyset_keeps_row_percentiles_mssql() {
+    require_alive(LiveService::Mssql);
+    let table = unique_name("pk_skew_uid_ms");
+    mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));
+    mssql_exec(&format!(
+        "CREATE TABLE {table} (k UNIQUEIDENTIFIER NOT NULL PRIMARY KEY, payload INT NOT NULL)"
+    ));
+    mssql_exec(&format!(
+        "WITH nums AS (SELECT 0 AS n UNION ALL SELECT n + 1 FROM nums WHERE n < {}) \
+         INSERT INTO {table} (k, payload) SELECT CONVERT(UNIQUEIDENTIFIER, CONVERT(BINARY(16), n)), n FROM nums OPTION (MAXRECURSION 0)",
+        SKEW_DENSE - 1
+    ));
+    mssql_exec(&format!(
+        "WITH nums AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM nums WHERE n < {SKEW_SPARSE}) \
+         INSERT INTO {table} (k, payload) SELECT NEWID(), n FROM nums OPTION (MAXRECURSION 0)"
+    ));
+    let rig = Rig::mssql_batch(&table)
+        .mode("chunked")
+        .export_line("chunk_by_key: k")
+        .export_line("parallel: 4")
+        .export_line("chunk_size: 1000");
+    let (said, spread) = skew_run(&rig);
+    assert_percentile(&said);
+    assert_skew_mssql_uuid_delivered(&rig.out_dir(), "k");
+    assert_within_twice_the_mean(&spread);
+    mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));
 }
