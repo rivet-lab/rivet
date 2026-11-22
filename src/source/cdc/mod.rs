@@ -1299,6 +1299,7 @@ impl<'s> CdcSchemaResolver<'s> {
         crate::types::narrowing::downgrade_narrowing_overrides(
             &mut planned,
             overrides,
+            self.source().change_row_fraction_digits(),
             || Ok(declared),
             || self.source().finer_than_microsecond_in_query(&select),
         )?;

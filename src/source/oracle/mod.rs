@@ -702,6 +702,10 @@ impl Source for OracleSource {
             .collect())
     }
 
+    fn change_row_fraction_digits(&self) -> u8 {
+        cdc::CHANGE_ROW_FRACTION_DIGITS
+    }
+
     fn finer_than_microsecond_in_query(&mut self, query: &str) -> Result<Vec<String>> {
         Ok(self
             .describe(query)?

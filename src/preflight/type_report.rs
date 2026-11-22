@@ -569,10 +569,15 @@ pub(crate) fn probe_mappings(
         src.type_mappings(query, column_overrides)?
     };
 
+    let wire_digits = match stream {
+        true => src.change_row_fraction_digits(),
+        false => 9,
+    };
     let src = std::cell::RefCell::new(src);
     downgrade_narrowing_overrides(
         &mut mappings,
         column_overrides,
+        wire_digits,
         || {
             src.borrow_mut()
                 .type_mappings(query, &ColumnOverrides::new())
@@ -1014,6 +1019,7 @@ mod tests {
         downgrade_narrowing_overrides(
             &mut untouched,
             &ColumnOverrides::new(),
+            9,
             || {
                 probed.set(true);
                 Ok(source())
@@ -1042,6 +1048,7 @@ mod tests {
         downgrade_narrowing_overrides(
             &mut mapped,
             &overrides,
+            9,
             || {
                 probed.set(true);
                 Ok(source())
@@ -1088,7 +1095,7 @@ mod tests {
         let mut mapped = ["cash", "cents", "id", "exact15"]
             .map(|c| mapping(c, "float8", RivetType::Float64))
             .to_vec();
-        downgrade_narrowing_overrides(&mut mapped, &overrides, || Ok(source), || Ok(Vec::new()))
+        downgrade_narrowing_overrides(&mut mapped, &overrides, 9, || Ok(source), || Ok(Vec::new()))
             .unwrap();
         let verdicts: Vec<_> = mapped.iter().map(|m| m.fidelity).collect();
         assert_eq!(
@@ -1337,7 +1344,7 @@ exports:
     #[test]
     fn narrows_flags_scale_reduction_as_lossy() {
         let reason =
-            override_narrows(&dec(10, 2), &dec(20, 0), false).expect("scale drop is lossy");
+            override_narrows(&dec(10, 2), &dec(20, 0), false, 9).expect("scale drop is lossy");
         assert!(
             reason.contains("scale"),
             "reason should name scale: {reason}"
@@ -1350,40 +1357,42 @@ exports:
 
     #[test]
     fn narrows_none_when_scale_preserved() {
-        assert!(override_narrows(&dec(10, 2), &dec(20, 2), false).is_none());
-        assert!(override_narrows(&dec(10, 2), &dec(10, 2), false).is_none());
+        assert!(override_narrows(&dec(10, 2), &dec(20, 2), false, 9).is_none());
+        assert!(override_narrows(&dec(10, 2), &dec(10, 2), false, 9).is_none());
     }
 
     #[test]
     fn narrows_flags_integer_digit_reduction_at_a_wider_scale_as_lossy() {
-        let reason = override_narrows(&dec(10, 2), &dec(10, 5), false)
+        let reason = override_narrows(&dec(10, 2), &dec(10, 5), false, 9)
             .expect("5 integer digits cannot hold 8");
         assert!(reason.contains("integer-digit"), "{reason}");
     }
 
     #[test]
     fn narrows_none_when_integer_digits_are_kept_at_a_wider_scale() {
-        assert!(override_narrows(&dec(5, 2), &dec(6, 3), false).is_none());
+        assert!(override_narrows(&dec(5, 2), &dec(6, 3), false, 9).is_none());
     }
 
     #[test]
     fn a_date_override_over_a_finer_time_column_is_lossy() {
         use crate::types::TimeUnit::Nanosecond;
-        let reason = override_narrows(&timestamp(Nanosecond, false), &RivetType::Date, true)
+        let reason = override_narrows(&timestamp(Nanosecond, false), &RivetType::Date, true, 9)
             .expect("date keeps no fraction digits");
         assert!(reason.contains("lossy"), "{reason}");
-        assert!(override_narrows(&timestamp(Nanosecond, false), &RivetType::Date, false).is_none());
+        assert!(
+            override_narrows(&timestamp(Nanosecond, false), &RivetType::Date, false, 9).is_none()
+        );
     }
 
     #[test]
     fn narrows_none_when_scale_widened() {
-        assert!(override_narrows(&dec(10, 2), &dec(12, 4), false).is_none());
+        assert!(override_narrows(&dec(10, 2), &dec(12, 4), false, 9).is_none());
     }
 
     #[test]
     fn narrows_flags_integer_digit_reduction_as_lossy() {
-        let reason =
-            override_narrows(&dec(20, 0), &dec(10, 0), false).expect("integer-digit drop is lossy");
+        let reason = override_narrows(&dec(20, 0), &dec(10, 0), false, 9)
+            .expect("integer-digit drop is lossy");
         assert!(
             reason.contains("integer-digit") && reason.contains("lossy"),
             "reason: {reason}"
@@ -1393,7 +1402,7 @@ exports:
     #[test]
     fn narrows_flags_a_decimal_float8_override_past_fifteen_digits_as_lossy() {
         for (p, s) in [(19, 4), (38, 0), (16, 0), (20, 6)] {
-            let reason = override_narrows(&dec(p, s), &RivetType::Float64, false)
+            let reason = override_narrows(&dec(p, s), &RivetType::Float64, false, 9)
                 .unwrap_or_else(|| panic!("decimal({p},{s}) into float8 is lossy"));
             assert!(
                 reason.contains("lossy") && reason.contains("RIVET_SOURCE_VALUE_UNREPRESENTABLE"),
@@ -1401,17 +1410,17 @@ exports:
             );
         }
         for (p, s) in [(15, 2), (10, 4), (9, 0), (1, 0)] {
-            assert!(override_narrows(&dec(p, s), &RivetType::Float64, false).is_none());
+            assert!(override_narrows(&dec(p, s), &RivetType::Float64, false, 9).is_none());
         }
-        assert!(override_narrows(&RivetType::Int64, &RivetType::Float64, false).is_none());
-        assert!(override_narrows(&RivetType::Float64, &RivetType::Float64, false).is_none());
-        assert!(override_narrows(&dec(38, 0), &RivetType::String, false).is_none());
+        assert!(override_narrows(&RivetType::Int64, &RivetType::Float64, false, 9).is_none());
+        assert!(override_narrows(&RivetType::Float64, &RivetType::Float64, false, 9).is_none());
+        assert!(override_narrows(&dec(38, 0), &RivetType::String, false, 9).is_none());
     }
 
     #[test]
     fn narrows_none_for_non_decimal_overrides() {
-        assert!(override_narrows(&RivetType::Int32, &RivetType::Int64, false).is_none());
-        assert!(override_narrows(&RivetType::Int64, &RivetType::String, false).is_none());
+        assert!(override_narrows(&RivetType::Int32, &RivetType::Int64, false, 9).is_none());
+        assert!(override_narrows(&RivetType::Int64, &RivetType::String, false, 9).is_none());
     }
 
     #[test]
@@ -1798,6 +1807,7 @@ exports:
         finer: Vec<String>,
         describe_fails: bool,
         describes: usize,
+        change_digits: u8,
     }
 
     impl Described {
@@ -1807,6 +1817,7 @@ exports:
                 finer: finer.iter().map(|c| c.to_string()).collect(),
                 describe_fails: false,
                 describes: 0,
+                change_digits: 9,
             }
         }
     }
@@ -1840,6 +1851,9 @@ exports:
                     )
                 })
                 .collect())
+        }
+        fn change_row_fraction_digits(&self) -> u8 {
+            self.change_digits
         }
         fn finer_than_microsecond_in_query(&mut self, _query: &str) -> anyhow::Result<Vec<String>> {
             self.describes += 1;
@@ -1924,6 +1938,47 @@ exports:
         }
     }
 
+    /// An engine whose change row carries microseconds grades a nanosecond override lossy over a finer column on the stream, with a remedy that works there, and leaves batch, a coarser column and other engines as they were.
+    #[test]
+    fn a_change_row_that_carries_microseconds_grades_a_nanosecond_override_lossy() {
+        use crate::types::TimeUnit::Nanosecond;
+        let ns = || timestamp(Nanosecond, false);
+        let overrides: ColumnOverrides = [("x".to_string(), ns())].into_iter().collect();
+        let grade = |change_digits: u8, finer: &[&str], stream: bool| {
+            let mut source = Described::of(&[("x", "timestamp", ns())], finer);
+            source.change_digits = change_digits;
+            probe_mappings(&mut source, stream, "q", &overrides)
+                .unwrap()
+                .remove(0)
+        };
+        let lossy = grade(6, &["x"], true);
+        assert_eq!(lossy.fidelity, TypeFidelity::Lossy);
+        assert_eq!(
+            lossy.warnings,
+            vec![
+                "the source column holds more than 6 fraction digits of a second and a change row \
+                 carries 6 whatever type this override declares — the finer digits are truncated \
+                 at run; this is lossy, not exact. To keep every digit, read this table through a \
+                 batch export that declares `timestamp_ns` / `timestamp_tz_ns` (a change row \
+                 carries microseconds under every type), or run without `--strict`"
+            ]
+        );
+        for (change_digits, finer, stream, what) in [
+            (6, &["x"][..], false, "batch reads the column in full"),
+            (6, &[][..], true, "a column not finer than a microsecond"),
+            (
+                9,
+                &["x"][..],
+                true,
+                "an engine whose change row carries nanoseconds",
+            ),
+        ] {
+            let got = grade(change_digits, finer, stream);
+            assert_eq!(got.fidelity, TypeFidelity::Exact, "{what}");
+            assert!(got.warnings.is_empty(), "{what}: {:?}", got.warnings);
+        }
+    }
+
     /// The reason a narrowing time override carries is pinned, and names a remedy that works on each engine that can hold such a column.
     #[test]
     fn a_narrowing_time_override_names_its_cause_and_a_remedy_that_works() {
@@ -1932,6 +1987,7 @@ exports:
             &timestamp(Nanosecond, false),
             &timestamp(Microsecond, false),
             true,
+            9,
         )
         .expect("narrowing");
         assert_eq!(
@@ -1947,7 +2003,7 @@ exports:
             RivetType::Int64,
         ] {
             assert_eq!(
-                override_narrows(&timestamp(Nanosecond, false), &kept, true),
+                override_narrows(&timestamp(Nanosecond, false), &kept, true, 9),
                 None
             );
         }
@@ -1955,7 +2011,8 @@ exports:
             override_narrows(
                 &timestamp(Nanosecond, false),
                 &timestamp(Microsecond, false),
-                false
+                false,
+                9
             ),
             None
         );

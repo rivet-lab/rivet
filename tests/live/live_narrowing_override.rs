@@ -88,6 +88,19 @@ pub fn check_verdict(rig: &Rig, want: Verdict, col: &str, ctx: &str) {
     assert_eq!(fidelity, expect, "{ctx}: check --type-report for `{col}`");
 }
 
+/// Asserts `check` and `run` both refuse the declaration of `rig` with `code`, before any row is delivered.
+pub fn refused_on_check_and_run(rig: &Rig, code: &str, ctx: &str) {
+    let name = rig.export_name().to_string();
+    let check = rig.cli(&["check", "--export", &name, "--type-report", "--json"]);
+    let err = String::from_utf8_lossy(&check.stderr).to_string();
+    assert!(!check.status.success(), "{ctx}: check refuses: {err}");
+    assert!(err.contains(code), "{ctx}: check: {err}");
+    let run = rig.run_args(&[]);
+    let err = String::from_utf8_lossy(&run.stderr).to_string();
+    assert!(!run.status.success(), "{ctx}: run refuses: {err}");
+    assert!(err.contains(code), "{ctx}: run: {err}");
+}
+
 /// Asserts the default-policy run of `rig` exits 0.
 pub fn lax_runs(rig: &Rig, ctx: &str) {
     let lax = rig.run_args(&[]);
@@ -229,15 +242,14 @@ fn a_mssql_batch_time_override_is_graded_by_the_result_column_it_lands_on() {
         }
     }
     assert_eq!(failed, Vec::<String>::new(), "cases failed");
-    let rig = Rig::mssql_batch(&t).export_line("columns: {o7: timestamp_tz_ns}");
-    let name = rig.export_name().to_string();
-    let refused = rig.cli(&["check", "--export", &name, "--type-report", "--json"]);
-    let err = String::from_utf8_lossy(&refused.stderr).to_string();
-    assert!(!refused.status.success(), "o7 ns: batch refuses: {err}");
-    assert!(
-        err.contains("RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH"),
-        "o7 ns: {err}"
-    );
+    for (decl, ctx) in [
+        ("o7: timestamp_tz_ns", "o7 ns"),
+        ("d7: date", "d7 date"),
+        ("o7: date", "o7 date"),
+    ] {
+        let rig = Rig::mssql_batch(&t).export_line(&format!("columns: {{{decl}}}"));
+        refused_on_check_and_run(&rig, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", ctx);
+    }
 }
 
 /// A SQL Server CDC override is graded as the batch one: `datetime2(7)` and `datetimeoffset(7)` under a microsecond type are lossy, under their nanosecond type and over `datetime2(3)` exact; the change row holds what the verdict says.
