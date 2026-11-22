@@ -8,7 +8,7 @@ One row per delivering ledger row: the source native type, the Arrow type batch 
 
 | engine | delivering rows | matrix-only rows | rows with a defect | empty cells |
 | --- | --- | --- | --- | --- |
-| postgres | 77 | 26 | 12 | 0 |
+| postgres | 77 | 26 | 4 | 0 |
 | mysql | 37 | 43 | 0 | 0 |
 | mssql | 21 | 34 | 1 | 0 |
 | oracle | 15 | 42 | 1 | 0 |
@@ -41,20 +41,20 @@ No cell is empty.
 | postgres | `CHAR(8)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `VARCHAR(50)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `REAL` | `Float32` | `exact` | `Nullable(Float32)` | `FLOAT64` | `FLOAT` |
-| postgres | `TEXT[]` | `List(Utf8)` | `exact` | `Array(Nullable(String))`; today `Array(Nullable(String))` (defect) | `ARRAY<STRUCT<item STRING>>` | `ARRAY` |
-| postgres | `INTEGER[]` | `List(Int32)` | `exact` | `Array(Nullable(Int32))`; today `Array(Nullable(Int32))` (defect) | `ARRAY<STRUCT<item INT64>>` | `ARRAY` |
-| postgres | `DOUBLE PRECISION[]` | `List(Float64)` | `exact` | `Array(Nullable(Float64))`; today `Array(Nullable(Float64))` (defect) | `ARRAY<STRUCT<item FLOAT64>>` | `ARRAY` |
+| postgres | `TEXT[]` | `List(Utf8)` | `exact` | `Array(Nullable(String))` | `ARRAY<STRUCT<item STRING>>` | `ARRAY` |
+| postgres | `INTEGER[]` | `List(Int32)` | `exact` | `Array(Nullable(Int32))` | `ARRAY<STRUCT<item INT64>>` | `ARRAY` |
+| postgres | `DOUBLE PRECISION[]` | `List(Float64)` | `exact` | `Array(Nullable(Float64))` | `ARRAY<STRUCT<item FLOAT64>>` | `ARRAY` |
 | postgres | `NUMERIC(60,10)` | `Decimal256(60, 10)` | `exact` | `Nullable(Decimal(60, 10))` | `refuse:RIVET_LOAD_COLUMN_TYPE_UNSUPPORTED` | `refuse:RIVET_LOAD_COLUMN_TYPE_UNSUPPORTED` |
 | postgres | `NUMERIC` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `MONEY` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `INET` | `inet_text`; today `server_text` (defect) | `exact` | `Nullable(String)`; today `Nullable(String)` (defect) | `STRING`; today `STRING` (defect) | `TEXT`; today `TEXT` (defect) |
 | postgres | `CIDR` | `inet_text`; today `server_text` (defect) | `exact` | `Nullable(String)`; today `Nullable(String)` (defect) | `STRING`; today `STRING` (defect) | `TEXT`; today `TEXT` (defect) |
-| postgres | `DATE[]` | `List(Date32)` | `exact` | `Array(Nullable(Date32))`; today `Array(Nullable(Date32))` (defect) | `ARRAY<STRUCT<item DATE>>` | `ARRAY` |
-| postgres | `TIMESTAMP[]` | `List(Timestamp(µs))` | `exact` | `Array(Nullable(DateTime64(6, 'UTC')))`; today `Array(Nullable(DateTime64(6, 'UTC')))` (defect) | `ARRAY<STRUCT<item DATETIME>>` | `ARRAY` |
-| postgres | `TIMESTAMPTZ[]` | `List(Timestamp(µs, "UTC"))` | `exact` | `Array(Nullable(DateTime64(6, 'UTC')))`; today `Array(Nullable(DateTime64(6, 'UTC')))` (defect) | `ARRAY<STRUCT<item TIMESTAMP>>` | `ARRAY` |
-| postgres | `TIME[]` | `List(Time64(µs))` | `exact` | `Array(Nullable(Decimal(18, 6)))`; today `Array(Nullable(Decimal(18, 6)))` (defect) | `ARRAY<STRUCT<item TIME>>` | `ARRAY` |
+| postgres | `DATE[]` | `List(Date32)` | `exact` | `Array(Nullable(Date32))` | `ARRAY<STRUCT<item DATE>>` | `ARRAY` |
+| postgres | `TIMESTAMP[]` | `List(Timestamp(µs))` | `exact` | `Array(Nullable(DateTime64(6, 'UTC')))` | `ARRAY<STRUCT<item DATETIME>>` | `ARRAY` |
+| postgres | `TIMESTAMPTZ[]` | `List(Timestamp(µs, "UTC"))` | `exact` | `Array(Nullable(DateTime64(6, 'UTC')))` | `ARRAY<STRUCT<item TIMESTAMP>>` | `ARRAY` |
+| postgres | `TIME[]` | `List(Time64(µs))` | `exact` | `Array(Nullable(Decimal(18, 6)))` | `ARRAY<STRUCT<item TIME>>` | `ARRAY` |
 | postgres | `UUID[]` | `List(arrow.uuid)` | `exact` | `Array(Nullable(UUID))`; today `Array(Nullable(FixedString(16)))` (defect) | `ARRAY<STRUCT<item BYTES>>` | `ARRAY` |
-| postgres | `BYTEA[]` | `List(Binary)` | `exact` | `Array(Nullable(String))`; today `Array(Nullable(String))` (defect) | `ARRAY<STRUCT<item BYTES>>` | `ARRAY` |
+| postgres | `BYTEA[]` | `List(Binary)` | `exact` | `Array(Nullable(String))` | `ARRAY<STRUCT<item BYTES>>` | `ARRAY` |
 | postgres | `NUMERIC[]` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `NUMERIC(1000,0)` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `"char"` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
