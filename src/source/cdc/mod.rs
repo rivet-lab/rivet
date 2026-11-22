@@ -1288,13 +1288,21 @@ impl<'s> CdcSchemaResolver<'s> {
                 m.source_native_type = ct.to_string();
             }
         }
-        mappings
+        let declared = mappings.clone();
+        let mut planned = mappings
             .into_iter()
             .map(|m| match overrides.contains_key(&m.column_name) {
                 true => retype_for_stream(m, overrides),
                 false => plan_cdc_delivery(m, false),
             })
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        crate::types::narrowing::downgrade_narrowing_overrides(
+            &mut planned,
+            overrides,
+            || Ok(declared),
+            || self.source().finer_than_microsecond_in_query(&select),
+        )?;
+        Ok(planned)
     }
 }
 
@@ -1688,6 +1696,66 @@ mod mod_decisions {
                 Err(e) => Err(anyhow::anyhow!("{e:#}")),
             }
         }
+    }
+
+    struct Fine(crate::types::RivetType, Vec<String>);
+
+    impl crate::source::Source for Fine {
+        fn export(
+            &mut self,
+            _request: &crate::source::ExportRequest<'_>,
+            _sink: &mut dyn crate::source::BatchSink,
+        ) -> Result<()> {
+            unreachable!("a resolve exports nothing")
+        }
+
+        fn query_scalar(&mut self, _sql: &str) -> Result<Option<String>> {
+            unreachable!("a resolve reads no scalar")
+        }
+
+        fn type_mappings(
+            &mut self,
+            _query: &str,
+            _overrides: &crate::types::ColumnOverrides,
+        ) -> Result<Vec<crate::types::TypeMapping>> {
+            Ok(vec![crate::types::TypeMapping::from_source(
+                &crate::types::SourceColumn::simple("c", "source", true),
+                self.0.clone(),
+            )])
+        }
+
+        fn finer_than_microsecond_in_query(&mut self, _query: &str) -> Result<Vec<String>> {
+            Ok(self.1.clone())
+        }
+    }
+
+    /// The stream resolver grades a narrowing override as `check` does, so `--strict` refuses what `check` reports lossy: a time override by the result column, a decimal override by its digits.
+    #[test]
+    fn the_stream_resolver_reports_a_narrowing_override_lossy_as_check_does() {
+        use crate::types::TimeUnit::{Microsecond, Nanosecond};
+        use crate::types::{ColumnOverrides, RivetType, TypeFidelity};
+        let time = |unit| RivetType::Timestamp {
+            unit,
+            timezone: None,
+        };
+        let dec = |precision, scale| RivetType::Decimal { precision, scale };
+        let fidelity = |source: RivetType, finer: &[&str], declared: Option<RivetType>| {
+            let overrides: ColumnOverrides =
+                declared.into_iter().map(|t| ("c".to_string(), t)).collect();
+            let mut src = Fine(source, finer.iter().map(|c| c.to_string()).collect());
+            CdcSchemaResolver::lent(&mut src)
+                .resolve("dbo.t", &overrides, None)
+                .unwrap()[0]
+                .fidelity
+        };
+        let (lossy, exact) = (TypeFidelity::Lossy, TypeFidelity::Exact);
+        let ns = || time(Nanosecond);
+        assert_eq!(fidelity(ns(), &["c"], Some(time(Microsecond))), lossy);
+        assert_eq!(fidelity(ns(), &[], Some(time(Microsecond))), exact);
+        assert_eq!(fidelity(ns(), &["c"], Some(ns())), exact);
+        assert_eq!(fidelity(ns(), &["c"], None), exact);
+        assert_eq!(fidelity(dec(10, 2), &[], Some(dec(20, 0))), lossy);
+        assert_eq!(fidelity(dec(10, 2), &[], Some(dec(12, 2))), exact);
     }
 
     fn readable(columns: &[&str]) -> ReadableColumns {
