@@ -1,6 +1,7 @@
 //! The Oracle CDC side of `live_narrowing_override`: the stream grades a time override over `TIMESTAMP(9)` and `TIMESTAMP(9) WITH TIME ZONE` as the batch run does.
 
 use crate::common::*;
+use crate::live_int_to_float_override::readback_only;
 use crate::live_narrowing_override::*;
 
 /// One CDC case: label, columns, declaration, delivered column, verdict, inserted value, delivered value.
@@ -62,6 +63,10 @@ fn an_oracle_cdc_time_override_is_graded_as_the_batch_override() {
             .checkpoint_path(d.path().join("cdc.ckpt"))
             .dest_path(out.clone())
             .export_line(&format!("columns: {{{decl}}}"));
+        let rig = match want {
+            Verdict::Lossy => readback_only(rig),
+            Verdict::Exact => rig,
+        };
         check_verdict(&rig, *want, col, label);
         strict_verdict(&rig, *want, label);
         lax_runs(&rig, label);
