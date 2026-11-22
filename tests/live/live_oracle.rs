@@ -2540,7 +2540,15 @@ fn a_chunked_run_refused_on_a_later_chunk_keeps_the_earlier_parts_and_a_failed_m
         .mode("chunked")
         .export_line("chunk_column: ID")
         .export_line("chunk_size: 10")
-        .export_line("columns: {DT: date}");
+        .export_line("columns: {DT: date}")
+        .a_failed_run_may_leave(
+            &[
+                Leftover::OrphanPart,
+                Leftover::FileLog,
+                Leftover::ObservedSchema,
+            ],
+            "the four chunks before the refusing one finished and keep their parts, rows and schema",
+        );
     let run = rig.run_args(&[]);
     let err = String::from_utf8_lossy(&run.stderr);
     assert_eq!(run.status.code(), Some(5), "stderr:\n{err}");
