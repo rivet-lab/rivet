@@ -194,6 +194,8 @@ fn pg_edge_decimal_negative_scale_override_is_refused_by_the_override_table() {
 #[test]
 #[ignore = "live: requires docker compose postgres + duckdb"]
 fn pg_edge_decimal_negative_scale_without_override_is_delivered_as_the_servers_text() {
+    require_alive(LiveService::Postgres);
+
     let (host_dir, _glob, out) = pg_edge_export_at(
         "CREATE TABLE {table_name} (id INT, d NUMERIC(5, -2));
          INSERT INTO {table_name} VALUES (1, 12345), (2, -99999), (3, NULL);",
