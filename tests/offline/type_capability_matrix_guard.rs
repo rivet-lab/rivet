@@ -821,13 +821,13 @@ fn a_delivering_row_without_a_warehouse_leg_is_refused() {
 fn a_leg_today_the_resolver_does_not_build_is_refused() {
     let mut doc = ledger();
     leg_mut(&mut doc, "oracle", "TIMESTAMP(9)", "bigquery").insert("today".into(), "INT64".into());
-    leg_mut(&mut doc, "postgres", "NUMERIC", "snowflake")
+    leg_mut(&mut doc, "postgres", "INET", "snowflake")
         .remove("today")
         .unwrap();
     let bad = leg_violations(&doc);
     for want in [
         "engines.oracle.rows[TIMESTAMP(9)].bigquery.today: `INT64`, `rivet load` builds `DATETIME`",
-        "engines.postgres.rows[NUMERIC].snowflake.today: missing, `rivet load` builds `TEXT`",
+        "engines.postgres.rows[INET].snowflake.today: missing, `rivet load` builds `TEXT`",
     ] {
         assert!(bad.iter().any(|b| b == want), "{want}: {bad:?}");
     }

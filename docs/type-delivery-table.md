@@ -8,18 +8,13 @@ One row per delivering ledger row: the source native type, the Arrow type batch 
 
 | engine | delivering rows | matrix-only rows | rows with a defect | empty cells |
 | --- | --- | --- | --- | --- |
-| postgres | 77 | 26 | 12 | 4 |
+| postgres | 77 | 26 | 12 | 0 |
 | mysql | 37 | 43 | 0 | 0 |
 | mssql | 21 | 34 | 1 | 0 |
 | oracle | 15 | 42 | 1 | 0 |
 | mongo | 0 | 20 | 0 | 0 |
 
-## Empty cells
-
-- postgres `NUMERIC(1000,0)`: BigQuery is empty
-- postgres `NUMERIC(1000,0)`: Snowflake is empty
-- postgres `NUMERIC(10,2)[]`: BigQuery is empty
-- postgres `NUMERIC(10,2)[]`: Snowflake is empty
+No cell is empty.
 
 ## Table
 
@@ -61,7 +56,7 @@ One row per delivering ledger row: the source native type, the Arrow type batch 
 | postgres | `UUID[]` | `List(arrow.uuid)` | `exact` | `Array(Nullable(UUID))`; today `Array(Nullable(FixedString(16)))` (defect) | `ARRAY<STRUCT<item BYTES>>` | `ARRAY` |
 | postgres | `BYTEA[]` | `List(Binary)` | `exact` | `Array(Nullable(String))`; today `Array(Nullable(String))` (defect) | `ARRAY<STRUCT<item BYTES>>` | `ARRAY` |
 | postgres | `NUMERIC[]` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
-| postgres | `NUMERIC(1000,0)` | `server_text` | `exact` | `Nullable(String)` | **GAP** | **GAP** |
+| postgres | `NUMERIC(1000,0)` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `"char"` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `TIMETZ` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `MACADDR` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
@@ -95,7 +90,7 @@ One row per delivering ledger row: the source native type, the Arrow type batch 
 | postgres | `PG_LSN` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `TID` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `rivet_pair` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
-| postgres | `NUMERIC(10,2)[]` | `server_text` | `exact` | `Nullable(String)` | **GAP** | **GAP** |
+| postgres | `NUMERIC(10,2)[]` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `INET[]` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `MONEY[]` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `INT4RANGE[]` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
