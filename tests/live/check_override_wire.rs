@@ -108,7 +108,13 @@ fn check_refuses_a_timestamp_with_a_time_declared_date_oracle() {
 /// `check` exits 0 and prints the values-unread note on stderr only for an export that declares `columns:`.
 fn check_says_it_read_no_values_only_under_columns(declared: Rig, plain: Rig, name: &str) {
     let said = |rig: &Rig| {
-        let o = rig.cli(&["check", "--export", name]);
+        let o = rig
+            .run_after(
+                &["check", "--export", name],
+                &["--export", name],
+                Pairing::SameRefusal,
+            )
+            .preflight;
         let (err, out) = (
             String::from_utf8_lossy(&o.stderr).into_owned(),
             String::from_utf8_lossy(&o.stdout).into_owned(),
