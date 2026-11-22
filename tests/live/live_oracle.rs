@@ -2323,6 +2323,116 @@ fn an_undeclared_nanosecond_timestamp_is_refused_and_the_declared_ns_type_delive
     }
 }
 
+/// An LTZ value Oracle stored outside its 4712 BC to 9999 range is refused by code before any part is written, and the remedy the text names delivers the other columns.
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn an_ltz_value_stored_outside_the_range_is_refused_by_code_and_a_query_without_it_delivers_the_rest()
+ {
+    require_alive(LiveService::Oracle);
+    let t = OracleTable::create(
+        "ora_ltzc",
+        "id NUMBER(10) PRIMARY KEY, l TIMESTAMP(6) WITH LOCAL TIME ZONE",
+    );
+    ora_insert_from_zone(
+        t.name(),
+        "+00:00",
+        1,
+        "TIMESTAMP '2024-02-29 10:00:00 +00:00'",
+    );
+    ora_insert_from_zone(
+        t.name(),
+        "+14:00",
+        2,
+        "TIMESTAMP '9999-12-31 23:59:59.999999 +00:00'",
+    );
+    let stored = ora_text_rows(&format!(
+        "SELECT TO_CHAR(id), DUMP(l) FROM {} ORDER BY id",
+        t.name()
+    ));
+    assert!(
+        stored[1][1].as_deref().unwrap().contains(": 200,100,"),
+        "the server holds year 10000 for row 2: {stored:?}"
+    );
+    let out = tempfile::tempdir().unwrap();
+    let table = t.name().to_string();
+    let mut rig = Rig::oracle_batch(t.name()).dest_path(out.path().to_path_buf());
+    let same = Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+    let said = rig.refuses_twice_and_walks_out(
+        &["run"],
+        &[],
+        same,
+        vec![
+            Remedy::wrong(
+                "empties the destination and runs again",
+                Then::Refuses(same),
+                |r| {
+                    for f in std::fs::read_dir(r.out_dir())
+                        .expect("the destination")
+                        .flatten()
+                    {
+                        let _ = std::fs::remove_file(f.path());
+                    }
+                },
+            ),
+            Remedy::new(
+                "list the other columns in a `query:`",
+                Then::DeliversTheSource,
+                move |r| {
+                    r.rebuilt(|rig| {
+                        rig.restage("full", &[])
+                            .query(&format!("SELECT id FROM {table} ORDER BY id"))
+                    })
+                },
+            ),
+        ],
+    );
+    assert!(said.contains("column L holds "), "{said}");
+    let floor = OracleTable::create(
+        "ora_ltzf",
+        "id NUMBER(10) PRIMARY KEY, l TIMESTAMP(6) WITH LOCAL TIME ZONE",
+    );
+    ora_insert_from_zone(
+        floor.name(),
+        "-12:00",
+        1,
+        "TO_TIMESTAMP_TZ('-4712-01-01 00:00:00 +00:00','SYYYY-MM-DD HH24:MI:SS TZH:TZM')",
+    );
+    assert_refused(
+        &Rig::oracle_batch(floor.name()).run(),
+        Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5),
+    );
+}
+
+/// An LTZ value on the last day of 9999 written from a UTC session, and a TZ value at the ceiling, are delivered as the database holds them.
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn an_ltz_on_the_last_day_of_9999_and_a_tz_at_the_ceiling_are_delivered_unchanged() {
+    require_alive(LiveService::Oracle);
+    let t = OracleTable::create(
+        "ora_ltzn",
+        "id NUMBER(10) PRIMARY KEY, l TIMESTAMP(6) WITH LOCAL TIME ZONE, z TIMESTAMP(6) WITH TIME ZONE",
+    );
+    ora_insert_from_zone(
+        t.name(),
+        "+00:00",
+        1,
+        "TIMESTAMP '9999-12-31 12:00:00.999999 +00:00'",
+    );
+    ora_exec(&format!(
+        "UPDATE {} SET z = TIMESTAMP '9999-12-31 23:59:59.999999 +00:00'",
+        t.name()
+    ));
+    let out = tempfile::tempdir().unwrap();
+    Rig::oracle_batch(t.name())
+        .dest_path(out.path().to_path_buf())
+        .run_ok();
+    let l = parquet_cells(out.path(), "L");
+    let z = parquet_cells(out.path(), "Z");
+    let canon = |c: &Option<String>| c.as_deref().map(canon_ts);
+    assert_eq!(canon(&l[&1]).as_deref(), Some("9999-12-31T12:00:00.999999"));
+    assert_eq!(canon(&z[&1]).as_deref(), Some("9999-12-31T23:59:59.999999"));
+}
+
 /// An `INTERVAL DAY TO SECOND(9)` column holding microsecond-exact values is a logical string in the type report and the run it vouches for delivers.
 #[test]
 #[ignore = "live: requires docker compose oracle"]

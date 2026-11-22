@@ -5711,6 +5711,22 @@ seeds:
         na: "MySQL has no nanosecond builder: a timestamp_ns override is refused at the schema stage with RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH before any value is read (seed override-without-builder-internal-stop), so no value reaches a nanosecond builder"
       mongo:
         na: "a document source has no declared column wire type and no builder takes a nanosecond override"
+  - name: oracle-ltz-year-past-ceiling-delivered
+    class: "an Oracle TIMESTAMP WITH LOCAL TIME ZONE value Oracle stored a year past either end of its own 4712 BC to 9999 range (a session whose zone is ahead of or behind UTC wrote a value within its offset of an end) is delivered as the instant 10000-12-31 23:59:59 UTC, exit 0, fidelity exact, instead of being refused by code"
+    history: "2026-11-22 probe of the type ledger (rows-156 report, HIGH finding 1): Parquet int64 253433923199000000 against 253402300799000000 for the TZ column with the same literal; the matrix recorded the shift as an accepted form since #1069"
+    scope: source
+    engines:
+      oracle:
+        switch: oracle-ltz-year-past-ceiling-delivered
+        cells: [an_ltz_value_stored_outside_the_range_is_refused_by_code_and_a_query_without_it_delivers_the_rest, "lib:an_ltz_value_outside_the_4712_bc_to_9999_range_is_refused_by_code_and_a_zoned_one_is_delivered"]
+      postgres:
+        na: "no PostgreSQL type is read through a session-zone conversion that can store a value past the type's ceiling; timestamptz is delivered as the server's UTC instant"
+      mysql:
+        na: "TIMESTAMP is stored as a UTC epoch second bounded at 2038-01-19, and DATETIME has no session zone"
+      mssql:
+        na: "datetimeoffset keeps the written offset beside the value and is read exact; no session-zone storage"
+      mongo:
+        na: "a BSON date is a UTC millisecond count with no session-zone conversion"
   - name: override-without-builder-internal-stop
     class: "a `columns:` override the source reader cannot build (a nanosecond timestamp on MySQL, a value of another wire type on SQL Server, a decimal past precision 38 on SQL Server or Oracle) stops the run as RIVET_INTERNAL_TYPE_BUILDER exit 6, which the gate reads as a rivet bug, instead of the coded usage refusal RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH exit 1"
     history: "2026-11-08 gate d6581394: the MySQL cell a_first_cdc_run_refused_after_its_anchor_releases_it_mysql graded exit 6 as the expected refusal and the run-integrity invariant failed on RIVET_INTERNAL_; 20 of 160 MySQL and 169 of 272 SQL Server override-by-column runs stopped that way on main"
