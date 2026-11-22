@@ -177,7 +177,7 @@ scenarios:
 
   - id: type_money
     what: "MSSQL MONEY/SMALLMONEY — the exact scaled value through CDC over the whole range, past 2^53 scaled units included (finding #2)"
-    postgres: { test: postgres_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent, known_defect: ["MONEY"] }
+    postgres: { test: postgres_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent }
     mysql:    { na: "MySQL has no MONEY type" }
     mssql:    { test: mssql_money_values_survive_batch_and_cdc, oracle: independent }
     mongo:    { na: "no MONEY type" }
