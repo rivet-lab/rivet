@@ -318,6 +318,9 @@ def check_contract(contract: Path, logs: Path, *, layout: str = "flat") -> int:
         if not expect_message(_read_log(file), a.substr, what=label, op=a.op, id_=a.id):
             failures += 1
 
+    if failures == 0 and missing == 0 and checked == 0:
+        print(f"check-msg: {contract} holds no assertion; nothing was graded", file=sys.stderr)
+        return 2
     if failures == 0 and missing == 0:
         print(f"OK: {checked} assertion(s) hold.", flush=True)
         return 0

@@ -244,9 +244,18 @@ fn arrow_and_parquet_are_pinned_to_the_versions_that_wrote_the_digests() {
     }
 }
 
+/// The variable `dev/pytools/parquet_golden.py` sets: only then does the dump write the golden file.
+const WRITE_ENV: &str = "RIVET_PARQUET_GOLDEN_WRITE";
+
 #[test]
 #[ignore = "writes the digests; run by dev/pytools/parquet_golden.py on the v0.32.2 tree"]
 fn parquet_bytes_dump() {
+    // A `--run-ignored all` sweep (make test-live) runs every ignored test; without the variable it
+    // would overwrite the golden with the current writer's bytes and the byte check would pass on them.
+    if std::env::var(WRITE_ENV).as_deref() != Ok("1") {
+        eprintln!("parquet_bytes_dump: {WRITE_ENV} is not 1, the golden is left as it is");
+        return;
+    }
     let lines: Vec<String> = shapes().iter().map(digest_line).collect();
     std::fs::write(digests_path(), lines.join("\n") + "\n").unwrap();
 }

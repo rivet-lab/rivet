@@ -214,3 +214,46 @@ fn every_scenario_asserts_at_least_one_artifact() {
          against any product behaviour: {empty:?}"
     );
 }
+
+/// Run `code` with python3 from the repository root; (exit code, stdout+stderr).
+fn python(code: &str) -> (i32, String) {
+    let out = std::process::Command::new("python3")
+        .args(["-c", code])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("python3 is a prerequisite of every gate script in this repo");
+    (
+        out.status.code().unwrap_or(-1),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    )
+}
+
+/// A grader that graded nothing exits 2, never 0 (#1098): an unknown scenario id, an `--engine` without
+/// a value or naming no declared engine, and a `check-msg` contract with no assertion.
+#[test]
+fn a_grader_that_graded_nothing_exits_two() {
+    for args in [
+        "['no_such_scenario_id']",
+        "['--engine']",
+        "['--engine', 'no_such_engine']",
+    ] {
+        let (code, out) = python(&format!(
+            "import sys; from dev.pytools import scenario_artifacts as s; \
+             sys.exit(s.main_cli({args}))"
+        ));
+        assert_eq!(code, 2, "scenario_artifacts {args} must exit 2:\n{out}");
+    }
+    let (code, out) = python(
+        "import sys, tempfile, pathlib; from dev.pytools import matrices; \
+         d = pathlib.Path(tempfile.mkdtemp()); c = d / 'expected_msg.txt'; c.write_text('# no assertion\\n'); \
+         sys.exit(matrices.check_contract(c, d))",
+    );
+    assert_eq!(
+        code, 2,
+        "check-msg over an empty contract must exit 2:\n{out}"
+    );
+}
