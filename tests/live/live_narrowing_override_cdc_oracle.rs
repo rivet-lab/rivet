@@ -53,6 +53,10 @@ fn an_oracle_cdc_time_override_is_graded_as_the_batch_override() {
             1,
             "{label}: delivered change row"
         );
-        duckdb_assert_at_least_once(out.to_str().unwrap(), "ID", 1, label);
+        assert_eq!(
+            duckdb_dir_parquet_distinct_strings(&out, "ID"),
+            std::collections::BTreeSet::from(["1".to_string()]),
+            "{label}: the delivered ids"
+        );
     }
 }
