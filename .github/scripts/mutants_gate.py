@@ -132,7 +132,7 @@ def check(env: dict[str, str], run: Run, out=print) -> int:
         except (RuntimeError, KeyError, ValueError, subprocess.CalledProcessError) as e:
             out(f"::error::mutants_gate: could not read the recorded verdict ({e}), which is a refusal, not a pass")
             return 1
-        out(f"{'ok' if ok else '::error::'} {reason}")
+        out(f"ok: {reason}" if ok else f"::error::{reason}")
         return 0 if ok else 1
     ok, kind, reason = decide_pr(surface, get("READY") == "true", get("HELD") == "true", get("STATE"), get("RESULT"))
     if not ok:
