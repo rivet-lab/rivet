@@ -1355,6 +1355,13 @@ exports:
     }
 
     #[test]
+    fn narrows_flags_integer_digit_reduction_at_a_wider_scale_as_lossy() {
+        let reason = override_narrows(&dec(10, 2), &dec(10, 5), false)
+            .expect("5 integer digits cannot hold 8");
+        assert!(reason.contains("integer-digit"), "{reason}");
+    }
+
+    #[test]
     fn narrows_none_when_integer_digits_are_kept_at_a_wider_scale() {
         assert!(override_narrows(&dec(5, 2), &dec(6, 3), false).is_none());
     }
