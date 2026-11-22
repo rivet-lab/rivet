@@ -190,8 +190,11 @@ works the same way: name it in `named_collection:`.
 - **A NULL array is refused.** A ClickHouse `Array` cannot be NULL, so a NULL array would
   load as `[]`, the same value as an empty array. A load whose parts hold one stops before
   any table is created, with `RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE` naming the column. In
-  the export's `query:` read the column as `COALESCE(a, '{}') AS a` to load `[]` on purpose,
-  or as `a::text AS a` to keep the NULL in a `String` column. An empty array and an array
+  a batch export's `query:` read the column as `COALESCE(a, '{}') AS a` to load `[]` on
+  purpose, or as `a::text AS a` to keep the NULL in a `String` column. A `mode: cdc` export
+  has no `query:`, and the part holding the NULL stays staged: give every row a list in the
+  source, then re-baseline the stream (the refusal prints the recipe, the same as
+  [CDC failure modes](../reference/cdc-failure-modes.md)). An empty array and an array
   holding NULL elements load as before. In a change log, the NULL columns of a delete are
   not NULL arrays and still load. A table written by an earlier version keeps the `[]` it
   holds; re-export its NULL-array rows through one of the two remedies to tell them apart.

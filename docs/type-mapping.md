@@ -601,7 +601,7 @@ two independent engines and pins the autoload type. The full matrix:
 | `bool`                        | `BOOLEAN`          | `Nullable(Bool)`                   |
 | `list<inner>`                 | `inner[]`          | `Array(Nullable(inner))`           |
 
-A NULL list and an empty list are indistinguishable at BigQuery (a `REPEATED` field cannot hold a NULL list); `columns: {col: string}` keeps NULL. A ClickHouse `Array` cannot hold a NULL list either, so `rivet load` refuses a part holding one with `RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE` before creating a table; read the column as `COALESCE(col, '{}')` to load `[]` on purpose, or as text to keep the NULL.
+A NULL list and an empty list are indistinguishable at BigQuery (a `REPEATED` field cannot hold a NULL list); `columns: {col: string}` keeps NULL. A ClickHouse `Array` cannot hold a NULL list either, so `rivet load` refuses a part holding one with `RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE` before creating a table; in a batch export read the column as `COALESCE(col, '{}')` to load `[]` on purpose, or as text to keep the NULL; a `mode: cdc` export has no `query:`, so give every source row a list and re-baseline the stream.
 
 Round-trip values that the suite pins per row: `sum(decimal * 10^scale)`
 matches the in-process Arrow check; `json_valid` / `isValidJSON` returns true

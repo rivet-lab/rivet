@@ -2,6 +2,7 @@
 
 use super::part_pos::{Chunk, Chunks};
 use crate::destination::gcs::GcsStore;
+use crate::source::cdc::ChangeOp;
 use anyhow::{Context, Result};
 use arrow::array::{Array, RecordBatch, StringArray};
 use arrow::datatypes::DataType;
@@ -17,9 +18,6 @@ use std::sync::Arc;
 
 const BATCH_ROWS: usize = 8192;
 
-/// The `__op` of a change-log row that deletes a key: its columns are not values, so a NULL there is no NULL array.
-const DELETE_OP: &str = "delete";
-
 /// The first of `columns` holding a NULL in a row of `batch` that is not a delete.
 fn first_null<'c>(batch: &RecordBatch, columns: &'c [String]) -> Result<Option<&'c str>> {
     let ops = match batch.column_by_name("__op") {
@@ -31,7 +29,9 @@ fn first_null<'c>(batch: &RecordBatch, columns: &'c [String]) -> Result<Option<&
     let ops = ops
         .as_ref()
         .and_then(|o| o.as_any().downcast_ref::<StringArray>());
-    let deletes = |row: usize| ops.is_some_and(|o| o.is_valid(row) && o.value(row) == DELETE_OP);
+    let deletes = |row: usize| {
+        ops.is_some_and(|o| o.is_valid(row) && o.value(row) == ChangeOp::Delete.as_str())
+    };
     Ok(columns.iter().map(String::as_str).find(|name| {
         batch
             .column_by_name(name)

@@ -4935,3 +4935,115 @@ fn an_unkeyed_mongo_cdc_export_of_mixed_id_types_still_runs_with_a_warning() {
         .sum();
     assert_eq!(delivered, 2, "both documents are delivered");
 }
+
+/// A PostgreSQL CDC export of `(id, v, a INT[])` into ClickHouse, ids 1..=5 holding `{id}`, plus `extra` as one more `VALUES` tuple.
+fn cdc_array_stream(extra: Option<&str>) -> (String, Slot, PgTable, Db, Rig, postgres::Client) {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let tbl = unique_name("rivet_ch_cdcarr");
+    let slot = unique_name("rivet_ch_cdcarr_slot");
+    let guard_slot = Slot::new(slot.clone());
+    let mut c = postgres::Client::connect(POSTGRES_CDC_URL, postgres::NoTls).expect("pg");
+    c.batch_execute(&format!(
+        "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, v BIGINT, a INT[]); \
+         INSERT INTO {tbl} SELECT g, g, ARRAY[g::int] FROM generate_series(1, 5) g"
+    ))
+    .expect("seed");
+    if let Some(row) = extra {
+        c.batch_execute(&format!("INSERT INTO {tbl} VALUES {row}"))
+            .expect("extra row");
+    }
+    let guard_tbl = PgTable::adopt_on(POSTGRES_CDC_URL, tbl.clone());
+    let db = Db::new("rivet_chtest");
+    let rig = into_clickhouse(Rig::pg_cdc(&tbl, &slot), &db);
+    (tbl, guard_slot, guard_tbl, db, rig, c)
+}
+
+/// Assert the CDC wording of the NULL-list refusal: coded, the re-baseline recipe, no `query:` remedy.
+fn assert_cdc_null_list_refusal(out: &std::process::Output, when: &str) {
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(5),
+        "{when}: refused by class 5:\n{err}"
+    );
+    assert!(
+        err.contains("[RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE]")
+            && err.contains("column `a` holds a NULL list"),
+        "{when}: {err}"
+    );
+    assert!(
+        err.contains("so fixing the source alone does not lift this refusal")
+            && err.contains("then re-baseline the stream. Re-baseline the stream in one run:")
+            && err.contains(REBASELINE_REMEDY),
+        "{when}: the refusal names the re-baseline recipe: {err}"
+    );
+    assert!(
+        !err.contains("query:") && !err.contains("COALESCE") && !err.contains("::text"),
+        "{when}: a CDC export has no `query:`, so none is named: {err}"
+    );
+}
+
+/// The re-baseline recipe as printed, against ClickHouse: destination emptied, checkpoint and `cdc_snapshot` rows gone, `__changes` truncated when it exists.
+fn rebaseline_into_clickhouse(rig: &Rig, db: &Db, tbl: &str, changes_exist: bool) {
+    rig.empty_fake_gcs_destination();
+    let _ = std::fs::remove_file(rig.checkpoint());
+    let cleared = clear_cdc_snapshot(&rig.config_path(), rig.export_name(), "");
+    assert!(cleared > 0, "the export has a baseline to clear");
+    if changes_exist {
+        ch(&format!("TRUNCATE TABLE {}.{tbl}__changes", db.0));
+    }
+}
+
+/// A NULL array captured after the baseline is refused with the CDC remedy, stays refused after the source is fixed, and loads after the printed re-baseline.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + postgres-cdc"]
+fn a_cdc_null_array_refusal_names_the_rebaseline_not_a_query_and_the_rebaseline_loads() {
+    let (tbl, _slot, _tbl_guard, db, rig, mut c) = cdc_array_stream(None);
+    let view = format!("{}.{tbl}", db.0);
+    let env = [(PASSWORD_ENV, CLICKHOUSE_PASSWORD)];
+    rig.run_ok();
+    load(&rig);
+
+    c.batch_execute(&format!("INSERT INTO {tbl} VALUES (6, 6, NULL)"))
+        .expect("a NULL array");
+    rig.run_ok();
+    assert_cdc_null_list_refusal(&rig.load_args_env(&[], &env), "change log, first load");
+    clickhouse_rows_match_source(&view, (1..=5).map(|i| (i, i)).collect(), "");
+
+    c.batch_execute(&format!("UPDATE {tbl} SET a = '{{}}' WHERE id = 6"))
+        .expect("fix the source");
+    rig.run_ok();
+    assert_cdc_null_list_refusal(&rig.load_args_env(&[], &env), "change log, source fixed");
+
+    rebaseline_into_clickhouse(&rig, &db, &tbl, true);
+    rig.run_ok();
+    load(&rig);
+    clickhouse_rows_match_source(&view, (1..=6).map(|i| (i, i)).collect(), "");
+    assert_eq!(
+        ch(&format!(
+            "SELECT id, toString(a) FROM {view} WHERE NOT __is_deleted ORDER BY id FORMAT TSV"
+        )),
+        "1\t[1]\n2\t[2]\n3\t[3]\n4\t[4]\n5\t[5]\n6\t[]",
+        "the re-baselined stream equals the corrected source"
+    );
+}
+
+/// A NULL array in the baseline itself is refused with the same CDC remedy, and loads after the source is fixed and the stream re-baselined.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + postgres-cdc"]
+fn a_cdc_baseline_holding_a_null_array_is_refused_with_the_rebaseline_and_loads_after_it() {
+    let (tbl, _slot, _tbl_guard, db, rig, mut c) = cdc_array_stream(Some("(6, 6, NULL)"));
+    let view = format!("{}.{tbl}", db.0);
+    let env = [(PASSWORD_ENV, CLICKHOUSE_PASSWORD)];
+    rig.run_ok();
+    assert_cdc_null_list_refusal(&rig.load_args_env(&[], &env), "baseline");
+
+    c.batch_execute(&format!("UPDATE {tbl} SET a = '{{}}' WHERE id = 6"))
+        .expect("fix the source");
+    rebaseline_into_clickhouse(&rig, &db, &tbl, false);
+    rig.run_ok();
+    load(&rig);
+    clickhouse_rows_match_source(&view, (1..=6).map(|i| (i, i)).collect(), "");
+}
