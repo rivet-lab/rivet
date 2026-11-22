@@ -483,6 +483,11 @@ fn dispatch_check(
         tgt,
         &planned_strategies(&plans),
     )?;
+    let cfg = Config::load_with_params(&config, p.as_ref())?;
+    crate::load::probe_load_target(
+        &cfg,
+        &crate::config::declared_exports(&cfg, export.as_deref())?,
+    )?;
     report_plan_compatibility(plans, json)?;
     if let Err(e) = StateStore::probe(&config) {
         log::error!("check: the state this config uses does not answer: {e:#}");

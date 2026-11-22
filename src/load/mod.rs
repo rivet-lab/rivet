@@ -457,6 +457,77 @@ pub(crate) fn warehouse_http_error(status: u16, message: String) -> anyhow::Erro
     crate::error::coded(code, message)
 }
 
+/// `rivet check`'s read of the warehouse a `load:` block names: a BigQuery dataset the project does not hold is refused as the load's first job refuses it.
+pub fn probe_load_target(
+    config: &crate::config::Config,
+    exports: &[crate::config::ExportConfig],
+) -> Result<()> {
+    probe_with(config, exports, bq_rest::BigQueryApi::for_dataset)
+}
+
+/// [`probe_load_target`] over the client `open` builds for a project, dataset and credential.
+fn probe_with(
+    config: &crate::config::Config,
+    exports: &[crate::config::ExportConfig],
+    open: impl Fn(&str, &str, &crate::config::DestinationCredential) -> Result<bq_rest::BigQueryApi>,
+) -> Result<()> {
+    let Some(section) = &config.load else {
+        return Ok(());
+    };
+    let plan::LoadTarget::Bigquery { project, dataset } = &section.target else {
+        return Ok(());
+    };
+    if seeded!("check-leaves-warehouse-target-unprobed", true, false) {
+        return Ok(());
+    }
+    let mut asked: Vec<crate::config::DestinationCredential> = Vec::new();
+    for export in exports {
+        if !section
+            .target
+            .reads_from(export.destination.destination_type)
+        {
+            continue;
+        }
+        let credential = crate::config::DestinationCredential::choose(
+            &export.destination,
+            &format!("export '{}'", export.name),
+        )?;
+        if asked.contains(&credential) {
+            continue;
+        }
+        confirm_bigquery_dataset(open(project, dataset, &credential), project, dataset)?;
+        asked.push(credential);
+    }
+    Ok(())
+}
+
+/// The refusal of a `dataset` the project does not hold; an answer that cannot say (credential, 401, 403, transport) is a warning.
+fn confirm_bigquery_dataset(
+    api: Result<bq_rest::BigQueryApi>,
+    project: &str,
+    dataset: &str,
+) -> Result<()> {
+    match api.and_then(|api| api.dataset_metadata(dataset)) {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(crate::error::coded(
+            crate::error::codes::LOAD_WAREHOUSE_REJECTED,
+            format!(
+                "BigQuery dataset `{project}:{dataset}` does not exist, so `rivet load` would \
+                 fail its first job with `Not found: Dataset`; rivet does not create datasets. \
+                 Create it in the location of the staging bucket (`bq mk -d {project}:{dataset}`), \
+                 then re-run `rivet check`"
+            ),
+        )),
+        Err(e) => {
+            log::warn!(
+                "check: could not confirm BigQuery dataset `{project}:{dataset}` exists ({e:#}); \
+                 `rivet load` asks the warehouse with the same credential"
+            );
+            Ok(())
+        }
+    }
+}
+
 /// Whether an existing warehouse table is one rivet loaded, per the load ledger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ownership {
@@ -3283,6 +3354,91 @@ pub(crate) mod tests {
             Some("RIVET_LOAD_BUFFER_NOT_COMPACTED")
         );
         assert_eq!(crate::error::classify_exit(&e), 5);
+    }
+
+    fn probe_config(load: &str, second_credentials: Option<&str>) -> crate::config::Config {
+        let second = second_credentials
+            .map(|f| format!("      credentials_file: {f}\n"))
+            .unwrap_or_default();
+        crate::config::Config::from_yaml(&format!(
+            "source:\n  type: postgres\n  url: \"postgresql://localhost/test\"\nexports:\n  \
+             - name: a\n    table: a\n    mode: full\n    format: parquet\n    destination:\n      \
+             type: gcs\n      bucket: b\n      prefix: a/\n  \
+             - name: b\n    table: b\n    mode: full\n    format: parquet\n    destination:\n      \
+             type: gcs\n      bucket: b\n      prefix: b/\n{second}{load}"
+        ))
+        .unwrap()
+    }
+
+    const BQ_LOAD: &str = "load:\n  target: bigquery\n  project: p\n  dataset: d\n";
+
+    fn probed(cfg: &crate::config::Config, status: u16) -> (Result<()>, usize) {
+        use bq_rest::stand::{Stand, json};
+        let stand = Stand::start(move |_, _| json(status, "{\"location\":\"US\"}"));
+        let out = probe_with(cfg, &cfg.exports, |_, _, _| Ok(stand.api()));
+        (out, stand.asked("/datasets/d"))
+    }
+
+    /// A dataset the project does not hold is refused with the load's code and the pinned text.
+    #[test]
+    fn a_missing_bigquery_dataset_is_refused_by_check_with_the_loads_code() {
+        let (out, asked) = probed(&probe_config(BQ_LOAD, None), 404);
+        let e = out.unwrap_err();
+        assert_eq!(
+            crate::error::error_code(&e),
+            Some("RIVET_LOAD_WAREHOUSE_REJECTED")
+        );
+        assert_eq!(
+            e.to_string(),
+            "BigQuery dataset `p:d` does not exist, so `rivet load` would fail its first job with \
+             `Not found: Dataset`; rivet does not create datasets. Create it in the location of \
+             the staging bucket (`bq mk -d p:d`), then re-run `rivet check`"
+        );
+        assert_eq!(asked, 1);
+    }
+
+    /// An existing dataset passes; an answer that cannot say (401, 403) is a warning, never a refusal.
+    #[test]
+    fn a_held_dataset_passes_and_an_answer_that_cannot_say_is_not_a_refusal() {
+        for status in [200, 403, 401] {
+            let (out, asked) = probed(&probe_config(BQ_LOAD, None), status);
+            assert!(out.is_ok(), "{status}: {out:?}");
+            assert_eq!(asked, 1, "{status}");
+        }
+    }
+
+    /// One question per distinct credential, not per export.
+    #[test]
+    fn the_dataset_is_asked_once_per_distinct_credential() {
+        assert_eq!(probed(&probe_config(BQ_LOAD, None), 200).1, 1);
+        assert_eq!(
+            probed(&probe_config(BQ_LOAD, Some("/k.json")), 200).1,
+            2,
+            "a key file is another identity"
+        );
+    }
+
+    /// A config with no `load:` block, another warehouse or a destination BigQuery cannot read asks nothing.
+    #[test]
+    fn a_config_without_a_bigquery_load_asks_the_warehouse_nothing() {
+        let snowflake = "load:\n  target: snowflake\n  account: a\n  user: u\n  \
+                         private_key_path: /k.p8\n  warehouse: w\n  database: d\n  schema: s\n  \
+                         storage_integration: si\n";
+        let clickhouse = "load:\n  target: clickhouse\n  url: \"http://127.0.0.1:1\"\n  database: d\n  \
+                          user: u\n  password_env: P\n";
+        for load in ["", snowflake, clickhouse] {
+            let (out, asked) = probed(&probe_config(load, None), 404);
+            assert!(out.is_ok(), "{load}: {out:?}");
+            assert_eq!(asked, 0, "{load}");
+        }
+        let s3 = crate::config::Config::from_yaml(&format!(
+            "source:\n  type: postgres\n  url: \"postgresql://localhost/test\"\nexports:\n  \
+             - name: a\n    table: a\n    mode: full\n    format: parquet\n    destination:\n      \
+             type: s3\n      bucket: b\n      prefix: a/\n{BQ_LOAD}"
+        ))
+        .unwrap();
+        let (out, asked) = probed(&s3, 404);
+        assert!(out.is_ok() && asked == 0, "{out:?} {asked}");
     }
 
     /// A bucket-root staging prefix, an unreadable probe answer and a warehouse HTTP status name their codes.

@@ -531,6 +531,8 @@ For an export that declares `columns:`, `check` reads the first row of the expor
 
 For a `mode: cdc` export whose baseline is still pending (`initial: snapshot` or `backfill:` and no `snapshot/_SUCCESS` marker at the destination), `check` and `doctor` admit the baseline leg the first `run` executes, with the column, format and `columns:` refusals of a batch export, before any row is read. Once the marker exists the leg is done and is not admitted again; `check` never opens the state database. `rivet plan` does not plan a `mode: cdc` export and is unchanged.
 
+For a config with `load: { target: bigquery }`, `check` asks BigQuery (`datasets.get`, once per distinct destination credential of the checked exports) whether `load.dataset` exists and stops with `RIVET_LOAD_WAREHOUSE_REJECTED` (exit 1) when it does not, as `rivet load` does at its first job; create it with `bq mk -d <project>:<dataset>`. An answer that cannot say (no credential, 401, 403, a transport failure) is a warning, not a refusal. `check` does not contact Snowflake or ClickHouse.
+
 ```bash
 rivet check --config <PATH> [OPTIONS]
 ```

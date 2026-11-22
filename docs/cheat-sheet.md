@@ -58,7 +58,7 @@ More auth paths (MinIO, Azurite, SAS details): [cloud-auth.md](cloud-auth.md) ·
 ```
 
 - **BigQuery:** the dataset must already exist, because rivet does not create
-  datasets. Keep it in the same location as the bucket.
+  datasets, and `rivet check` refuses a missing one. Keep it in the same location as the bucket.
 - **Snowflake:** database, schema and storage integration must already exist.
   rivet creates the file format, stage, tables and views itself, which is why the
   role needs the `CREATE` grants above.

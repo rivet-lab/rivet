@@ -4178,6 +4178,21 @@ seeds:
       clickhouse:
         na: "the seed edits src/load/bq_rest.rs, which only a BigQuery load runs; ClickHouse loads through its own loader (src/load/clickhouse.rs)"
 
+  - name: check-leaves-warehouse-target-unprobed
+    class: "`rivet check` exits 0 over a `load:` block whose BigQuery dataset the project does not hold, where `rivet load` stops RIVET_LOAD_WAREHOUSE_REJECTED (`Not found: Dataset`) at its first job, because check never contacts the warehouse"
+    history: "2026-11-10 - the check_equals_run_cloud cloud leg, known red #3aec5ed8 (CHECK_RUN_SPLIT: check exits 0, load exits 1); RED on main 2026-11-22 on the live BigQuery tier and the recorded offline tier"
+    scope: target
+    switch: check-leaves-warehouse-target-unprobed
+    engines:
+      bigquery:
+        cells:
+          - "lib:a_missing_bigquery_dataset_is_refused_by_check_with_the_loads_code"
+          - check_refuses_a_bigquery_dataset_the_project_does_not_hold
+      snowflake:
+        na: "the seed edits probe_load_target, which probes only a BigQuery target: a Snowflake load: block is still not read by check (open: check does not contact Snowflake)"
+      clickhouse:
+        na: "the seed edits probe_load_target, which probes only a BigQuery target: a ClickHouse load: block is still not read by check (open: check does not contact ClickHouse)"
+
   - name: token-endpoint-transient-final
     class: "an HTTP 5xx, 429 or 408 from Google's OAuth token endpoint is coded RIVET_DEST_CREDENTIALS_INVALID, exit 1, with no retry, so a scheduler fails the task for good on a blip of the endpoint"
     history: "2026-11-06 - observed live on 0.32.2: a BigQuery load stopped 'ADC token request failed (HTTP 500 Internal Server Error)', exit 1; the next load with the same credential succeeded"

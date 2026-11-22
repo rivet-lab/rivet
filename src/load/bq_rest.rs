@@ -137,14 +137,19 @@ impl BigQueryApi {
             .clone()
     }
 
-    /// `location` of `dataset` from `datasets.get`.
-    fn read_dataset_location(&self, dataset: &str) -> Result<Option<String>> {
+    /// `dataset`'s resource from `datasets.get`, `None` when the project holds no such dataset.
+    pub(crate) fn dataset_metadata(&self, dataset: &str) -> Result<Option<Value>> {
         let url = format!(
             "{}/bigquery/v2/projects/{}/datasets/{dataset}",
             self.endpoint, self.project
         );
+        self.get_json_if_found(&url, "datasets.get")
+    }
+
+    /// `location` of `dataset` from `datasets.get`.
+    fn read_dataset_location(&self, dataset: &str) -> Result<Option<String>> {
         Ok(self
-            .get_json_if_found(&url, "datasets.get")?
+            .dataset_metadata(dataset)?
             .as_ref()
             .and_then(parse_dataset_location))
     }
