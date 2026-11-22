@@ -487,7 +487,31 @@ fn integer<T: std::str::FromStr>(column: &str, text: &str) -> Result<T> {
     })
 }
 
-/// One microsecond timestamp column; an LTZ value outside Oracle's own range is refused.
+/// The timestamp as fetched, or the coded refusal when an LTZ value lies outside Oracle's own range.
+fn checked_timestamp(
+    t: Option<OracleTimestamp>,
+    name: &str,
+    ltz: bool,
+) -> Result<Option<OracleTimestamp>> {
+    if let Some(t) = &t {
+        ltz_within_range(t, name, ltz)?;
+    }
+    Ok(t)
+}
+
+/// True when column `i` of the projection is a `TIMESTAMP WITH LOCAL TIME ZONE`.
+fn is_ltz(native: &[String], i: usize) -> bool {
+    native
+        .get(i)
+        .is_some_and(|n| n.starts_with("timestamp_ltz"))
+}
+
+/// The timestamp cell at `idx`; every column type that reads a timestamp goes through here.
+fn timestamp_cell(r: &Row, idx: usize, name: &str, ltz: bool) -> Result<Option<OracleTimestamp>> {
+    checked_timestamp(r.get::<Option<OracleTimestamp>>(idx).ora()?, name, ltz)
+}
+
+/// One microsecond timestamp column.
 fn timestamp_micros_column(
     rows: &[Row],
     idx: usize,
@@ -497,11 +521,8 @@ fn timestamp_micros_column(
 ) -> Result<ArrayRef> {
     let mut b = TimestampMicrosecondBuilder::with_capacity(rows.len());
     for r in rows {
-        match r.get::<Option<OracleTimestamp>>(idx).ora()? {
-            Some(t) => {
-                ltz_within_range(&t, name, ltz)?;
-                b.append_value(timestamp_micros(&t)?)
-            }
+        match timestamp_cell(r, idx, name, ltz)? {
+            Some(t) => b.append_value(timestamp_micros(&t)?),
             None => b.append_null(),
         }
     }
@@ -509,10 +530,10 @@ fn timestamp_micros_column(
 }
 
 /// One Date32 column.
-fn date_column(rows: &[Row], idx: usize, name: &str) -> Result<ArrayRef> {
+fn date_column(rows: &[Row], idx: usize, name: &str, ltz: bool) -> Result<ArrayRef> {
     let mut b = Date32Builder::with_capacity(rows.len());
     for r in rows {
-        match r.get::<Option<OracleTimestamp>>(idx).ora()? {
+        match timestamp_cell(r, idx, name, ltz)? {
             Some(t) => b.append_value(date_days(&t, name)?),
             None => b.append_null(),
         }
@@ -609,7 +630,7 @@ fn build_column(
         DataType::Timestamp(ArrowTimeUnit::Nanosecond, tz) => {
             let mut b = TimestampNanosecondBuilder::with_capacity(rows.len());
             for r in rows {
-                match r.get::<Option<OracleTimestamp>>(idx).ora()? {
+                match timestamp_cell(r, idx, name, ltz)? {
                     Some(t) => match seeded!(
                         "mssql-ns-override-out-of-range-null",
                         timestamp_nanos(&t, name).ok(),
@@ -623,7 +644,7 @@ fn build_column(
             }
             Arc::new(b.finish().with_timezone_opt(tz.clone()))
         }
-        DataType::Date32 => date_column(rows, idx, name)?,
+        DataType::Date32 => date_column(rows, idx, name, ltz)?,
         DataType::FixedSizeBinary(width) => {
             let mut b = FixedSizeBinaryBuilder::with_capacity(rows.len(), *width);
             for r in rows {
@@ -660,10 +681,9 @@ fn build_column(
                 let v = match kind {
                     OraKind::Number => number(r)?,
                     OraKind::IntervalDs | OraKind::IntervalYm => interval_iso(r, idx, kind, name)?,
-                    OraKind::Date | OraKind::Timestamp => r
-                        .get::<Option<OracleTimestamp>>(idx)
-                        .ora()?
-                        .map(|t| timestamp_text(&t)),
+                    OraKind::Date | OraKind::Timestamp => {
+                        timestamp_cell(r, idx, name, ltz)?.map(|t| timestamp_text(&t))
+                    }
                     OraKind::BinaryFloat => r.get::<Option<f32>>(idx).ora()?.map(|v| v.to_string()),
                     OraKind::BinaryDouble => {
                         r.get::<Option<f64>>(idx).ora()?.map(|v| v.to_string())
@@ -708,9 +728,7 @@ pub(super) fn rows_to_batch(
         .map(|(i, f)| {
             let flag = empty_flags.get(i).copied().flatten();
             let at = row_index.get(i).copied().unwrap_or(i);
-            let ltz = native
-                .get(i)
-                .is_some_and(|n| n.starts_with("timestamp_ltz"));
+            let ltz = is_ltz(native, i);
             build_column(
                 rows,
                 at,
@@ -1092,6 +1110,31 @@ mod tests {
             w.contains("`columns: {AMT: \"decimal(38,0)\"}` for whole numbers"),
             "{w}"
         );
+    }
+
+    #[test]
+    fn every_timestamp_cell_passes_the_ltz_range_check_and_only_an_ltz_column_is_checked() {
+        let shifted = OracleTimestamp::new_timestamp(10000, 1, 1, 0, 0, 0, 0);
+        let err = checked_timestamp(Some(shifted), "L", true).unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+        assert!(err.to_string().contains("column L"), "{err}");
+        assert_eq!(
+            checked_timestamp(Some(shifted), "TZ", false).unwrap(),
+            Some(shifted)
+        );
+        let day = OracleTimestamp::new_timestamp(9999, 12, 31, 23, 59, 59, 0);
+        assert_eq!(checked_timestamp(Some(day), "L", true).unwrap(), Some(day));
+        assert_eq!(checked_timestamp(None, "L", true).unwrap(), None);
+        let native: Vec<String> = [
+            "timestamp_ltz(6)",
+            "timestamp_tz(6)",
+            "timestamp(6)",
+            "number",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert!(is_ltz(&native, 0));
+        assert!([1, 2, 3, 9].iter().all(|i| !is_ltz(&native, *i)));
     }
 
     #[test]

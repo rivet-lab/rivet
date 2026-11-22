@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 // 50 -> 51 (2026-11-21, #1144): the PostgreSQL enum-array live cells read every list element back from the delivered Parquet and grade it against their own element checks; the rig oracle reads the source side as PostgreSQL text. Closes when the rig oracle grades a list column against source text.
 // 51 -> 55 (2026-11-22, #1125): the keyset skew and hot-first cells count source reads, rows per range and key pairs themselves against the fixture they built; the rig oracle's own read-back would be counted. Closes when the rig oracle can run beside a source-read counter.
 // 55 -> 57 (2026-11-22, #1162): the MySQL zero-datetime and Oracle Julian-date open-defect cells deliver a text the oracle's own source read cannot represent (NULL for a zero datetime, a sign-spaced text for a Julian date); closes when the oracle reads both as the server prints them.
+// 57 -> 58 (2026-11-22): the Oracle CDC cell for an LTZ value stored outside Oracle's own range reads that source through the oracle, whose own read fails with ORA-01877; one shared closure for the stream and snapshot legs; closes when the oracle reads a stored value Oracle cannot print.
 // ratchet-pin: no-oracle-opt-outs (review 2027-02-01) count tests/live/ \.no_oracle\(|run_rivet_ok_no_oracle\(|"RIVET_TEST_NO_ORACLE"|NO_ORACLE_ENV
 
 // Typed declarations in tests/live of what a run that does not exit 0 may leave. History frozen at 2026-11-04.

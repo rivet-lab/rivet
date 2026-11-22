@@ -445,7 +445,7 @@ and scale.
 | `DATE` | `timestamp(µs, none)` | `Timestamp(µs, None)` | datetime text | an Oracle `DATE` holds a time of day | type table |
 | `TIMESTAMP(0..6)` | `timestamp(µs, none)` | `Timestamp(µs, None)` | datetime text | naive | type table |
 | `TIMESTAMP(7..9)` | `timestamp(µs, none)` | `Timestamp(µs, None)` | datetime text | labelled `lossy`; undeclared, the run is refused (`RIVET_TYPE_UNSAFE_MAPPING`); declare the column in `columns:` | type table |
-| `TIMESTAMP WITH TIME ZONE` / `WITH LOCAL TIME ZONE` | `timestamp_tz(µs, UTC)` | `Timestamp(µs, UTC)` | datetime text | normalised to UTC; the `(7..9)` precisions are `lossy` like the naive one | type table |
+| `TIMESTAMP WITH TIME ZONE` / `WITH LOCAL TIME ZONE` | `timestamp_tz(µs, UTC)` | `Timestamp(µs, UTC)` | datetime text | normalised to UTC; a `WITH LOCAL TIME ZONE` value Oracle stored outside 4712 BC to 9999 is refused with `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5) under every mapping; the `(7..9)` precisions are `lossy` like the naive one | type table |
 | `INTERVAL DAY TO SECOND`, `INTERVAL YEAR TO MONTH` | `interval` | `Utf8` labelled `rivet.text_form = iso8601_duration` | ISO 8601 duration text | a day-to-second value with a sub-microsecond fraction is refused (`RIVET_SOURCE_VALUE_UNREPRESENTABLE`) | type table |
 | `VARCHAR2` / `NVARCHAR2` / `CHAR` / `NCHAR` / `LONG` / `CLOB` / `NCLOB` | `string` | `Utf8` | escaped UTF-8 | | type table |
 | `JSON` | `json` | `Utf8` + Parquet `LogicalType::Json` (via `arrow.json` extension) | JSON string | labelled `logical_string` | type table |

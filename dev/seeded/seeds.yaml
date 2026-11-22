@@ -5718,7 +5718,12 @@ seeds:
     engines:
       oracle:
         switch: oracle-ltz-year-past-ceiling-delivered
-        cells: [an_ltz_value_stored_outside_the_range_is_refused_by_code_and_a_query_without_it_delivers_the_rest, "lib:an_ltz_value_outside_the_4712_bc_to_9999_range_is_refused_by_code_and_a_zoned_one_is_delivered"]
+        cells:
+          - an_ltz_value_stored_outside_the_range_is_refused_by_code_and_a_query_without_it_delivers_the_rest
+          - an_ltz_value_outside_the_range_is_refused_by_code_under_every_override_that_reads_it
+          - oracle_cdc_an_ltz_value_outside_the_range_is_refused_by_code_on_batch_snapshot_and_stream
+          - "lib:an_ltz_value_outside_the_4712_bc_to_9999_range_is_refused_by_code_and_a_zoned_one_is_delivered"
+          - "lib:every_timestamp_cell_passes_the_ltz_range_check_and_only_an_ltz_column_is_checked"
       postgres:
         na: "no PostgreSQL type is read through a session-zone conversion that can store a value past the type's ceiling; timestamptz is delivered as the server's UTC instant"
       mysql:
