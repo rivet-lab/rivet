@@ -49,7 +49,8 @@ pub use cursor::CursorState;
 #[allow(unused_imports)]
 pub use delivery::{
     Delivery, TextForm, bit_string, decimal_plain, hex_bytes, iso_timestamp_nanos,
-    iso8601_duration, time_beyond_day, time_of_day_offset, uuid36,
+    iso8601_duration, mysql_datetime_text, oracle_timestamp_text, time_beyond_day,
+    time_of_day_offset, uuid36,
 };
 pub use fidelity::TypeFidelity;
 // Public surface for contract/integration tests; not referenced from the binary.

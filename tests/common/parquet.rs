@@ -1308,3 +1308,62 @@ print(json.dumps({"checked": len(doc["rows"]), "bad": bad}))
     );
     true
 }
+
+/// One run's verdict: its refusal as `refused[CODE exit N]`, or every delivered row as `op:id` -> its `cols` cells read off the Parquet under `dir`, text as written and a timestamp as `unit:value`.
+pub fn run_cells(
+    run: &std::process::Output,
+    dir: &Path,
+    id_col: &str,
+    cols: &[&str],
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    use arrow::array::{Array, AsArray};
+    use arrow::datatypes::{DataType, Int64Type};
+    if !run.status.success() {
+        let err = String::from_utf8_lossy(&run.stderr).to_string();
+        let code = err
+            .split(['[', ']'])
+            .find(|w| w.starts_with("RIVET_"))
+            .unwrap_or("uncoded");
+        return Err(format!(
+            "refused[{code} exit {}]",
+            run.status.code().unwrap_or(-1)
+        ));
+    }
+    let mut rows = std::collections::BTreeMap::new();
+    for b in super::read_all_parts(dir) {
+        let ids = arrow::compute::cast(
+            b.column_by_name(id_col)
+                .unwrap_or_else(|| panic!("{id_col} column")),
+            &DataType::Int64,
+        )
+        .unwrap();
+        let ops = b
+            .column_by_name("__op")
+            .map(|c| c.as_string::<i32>().clone());
+        for r in 0..b.num_rows() {
+            let cells: Vec<String> = cols
+                .iter()
+                .map(|c| {
+                    let col = b.column_by_name(c).unwrap_or_else(|| panic!("{c} column"));
+                    if col.is_null(r) {
+                        return "NULL".to_string();
+                    }
+                    match col.data_type() {
+                        DataType::Utf8 => col.as_string::<i32>().value(r).to_string(),
+                        DataType::Timestamp(u, _) => {
+                            let v = arrow::compute::cast(col, &DataType::Int64).unwrap();
+                            format!("{u:?}:{}", v.as_primitive::<Int64Type>().value(r))
+                        }
+                        t => format!("{t:?}"),
+                    }
+                })
+                .collect();
+            let op = ops.as_ref().map_or("", |o| o.value(r));
+            rows.insert(
+                format!("{op}:{}", ids.as_primitive::<Int64Type>().value(r)),
+                cells.join(" | "),
+            );
+        }
+    }
+    Ok(rows)
+}

@@ -386,28 +386,9 @@ fn date_days(t: &OracleTimestamp, name: &str) -> Result<i32> {
     i32::try_from(dt.and_utc().timestamp() / 86_400).map_err(Into::into)
 }
 
-/// Oracle's own `SYYYY-MM-DD"T"HH24:MI:SS.FF` text of a timestamp: 6 fractional digits, 9 when finer.
-fn timestamp_text(t: &OracleTimestamp) -> String {
-    let y = t.year() as i32;
-    let year = if y < 0 {
-        format!("-{:04}", -y)
-    } else {
-        format!("{y:04}")
-    };
-    let ns = t.nanoseconds();
-    let frac = if ns.is_multiple_of(1_000) {
-        format!("{:06}", ns / 1_000)
-    } else {
-        format!("{ns:09}")
-    };
-    format!(
-        "{year}-{:02}-{:02}T{:02}:{:02}:{:02}.{frac}",
-        t.month(),
-        t.day(),
-        t.hour(),
-        t.minute(),
-        t.second()
-    )
+/// Oracle's own `SYYYY-MM-DD"T"HH24:MI:SS.FF` text of a timestamp, rendered once for batch and CDC.
+fn timestamp_text(t: &OracleTimestamp) -> Result<String> {
+    Ok(crate::types::oracle_timestamp_text(timestamp_datetime(t)?))
 }
 
 /// Upper-case hex, as Oracle's `RAWTOHEX` renders bytes.
@@ -639,7 +620,8 @@ fn build_column(
                     OraKind::Date | OraKind::Timestamp => r
                         .get::<Option<OracleTimestamp>>(idx)
                         .ora()?
-                        .map(|t| timestamp_text(&t)),
+                        .map(|t| timestamp_text(&t))
+                        .transpose()?,
                     OraKind::BinaryFloat => r.get::<Option<f32>>(idx).ora()?.map(|v| v.to_string()),
                     OraKind::BinaryDouble => {
                         r.get::<Option<f64>>(idx).ora()?.map(|v| v.to_string())
@@ -1061,13 +1043,16 @@ mod tests {
     #[test]
     fn timestamp_text_is_oracles_signed_iso_rendering() {
         let t = OracleTimestamp::new_timestamp(2024, 2, 29, 13, 14, 15, 123_456_000);
-        assert_eq!(timestamp_text(&t), "2024-02-29T13:14:15.123456");
+        assert_eq!(timestamp_text(&t).unwrap(), "2024-02-29T13:14:15.123456");
         let ns = OracleTimestamp::new_timestamp(2024, 2, 29, 13, 14, 15, 1);
-        assert_eq!(timestamp_text(&ns), "2024-02-29T13:14:15.000000001");
+        assert_eq!(
+            timestamp_text(&ns).unwrap(),
+            "2024-02-29T13:14:15.000000001"
+        );
         let bc = OracleTimestamp::new_date(-1, 6, 15);
-        assert_eq!(timestamp_text(&bc), "-0001-06-15T00:00:00.000000");
+        assert_eq!(timestamp_text(&bc).unwrap(), "-0001-06-15T00:00:00.000000");
         let one = OracleTimestamp::new_date(1, 1, 1);
-        assert_eq!(timestamp_text(&one), "0001-01-01T00:00:00.000000");
+        assert_eq!(timestamp_text(&one).unwrap(), "0001-01-01T00:00:00.000000");
     }
 
     #[test]
@@ -1276,7 +1261,7 @@ mod renderer_twins {
             OracleTimestamp::new_timestamp(1, 1, 1, 0, 0, 0, 123_456_789),
         ] {
             let canonical = iso_timestamp_nanos(timestamp_datetime(&t).unwrap(), false);
-            assert_eq!(timestamp_text(&t), canonical, "{t}");
+            assert_eq!(timestamp_text(&t).unwrap(), canonical, "{t}");
         }
     }
 
@@ -1290,7 +1275,7 @@ mod renderer_twins {
             OracleTimestamp::new_date(-1, 6, 15),
         ] {
             let canonical = iso_timestamp_nanos(timestamp_datetime(&t).unwrap(), false);
-            assert_eq!(timestamp_text(&t), canonical, "{t}");
+            assert_eq!(timestamp_text(&t).unwrap(), canonical, "{t}");
         }
     }
 }

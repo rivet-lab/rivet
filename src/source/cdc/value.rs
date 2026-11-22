@@ -1206,6 +1206,48 @@ fn bytes_to_recoverable_string(b: &[u8]) -> String {
     }
 }
 
+/// The cell a text column stores for a date or timestamp: Oracle and MySQL print it as their batch export prints it, every other engine and target are untouched.
+pub(crate) fn stamp_text(
+    engine: crate::source::cdc::CdcEngine,
+    dt: &DataType,
+    v: RivetValue,
+) -> RivetValue {
+    use crate::source::cdc::CdcEngine;
+    use chrono::{Datelike, Timelike};
+    match (engine, dt, v) {
+        (CdcEngine::Oracle, DataType::Utf8 | DataType::LargeUtf8, RivetValue::DateTime(d))
+            if seeded!("cdc-timestamp-text-is-the-batch-text", false, true) =>
+        {
+            RivetValue::Bytes(crate::types::oracle_timestamp_text(d).into_bytes())
+        }
+        (CdcEngine::Mysql, DataType::Utf8 | DataType::LargeUtf8, RivetValue::DateTime(d))
+            if seeded!("cdc-timestamp-text-is-the-batch-text", false, true) =>
+        {
+            RivetValue::Bytes(
+                crate::types::mysql_datetime_text(
+                    (d.year(), d.month(), d.day()),
+                    (d.hour(), d.minute(), d.second()),
+                    d.nanosecond() / 1_000,
+                )
+                .into_bytes(),
+            )
+        }
+        (_, _, v) => v,
+    }
+}
+
+/// Whether an Oracle column of this native type, written into `dt`, needs `stamp_text` (a MySQL date column always carries its fix).
+pub(crate) fn prints_stamp_text(
+    engine: crate::source::cdc::CdcEngine,
+    native: &str,
+    dt: &DataType,
+) -> bool {
+    let n = native.to_ascii_uppercase();
+    engine == crate::source::cdc::CdcEngine::Oracle
+        && matches!(dt, DataType::Utf8 | DataType::LargeUtf8)
+        && (n == "DATE" || n.starts_with("TIMESTAMP"))
+}
+
 fn render_str(v: &RivetValue) -> String {
     match v {
         RivetValue::Null => String::new(),
@@ -2265,6 +2307,95 @@ mod tests {
         assert!(err.to_string().contains("1677-09-21..2262-04-11"), "{err}");
         crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
         assert!(build("c", &dt, &[Some(&cells[1])]).is_ok());
+    }
+
+    /// A MySQL or Oracle date or timestamp in a text column prints as the batch export prints it, and every other engine and target is untouched.
+    #[test]
+    fn an_oracle_or_mysql_stamp_in_a_text_column_prints_as_the_batch_prints_it() {
+        use crate::source::cdc::CdcEngine;
+        let at = |s: &str| RivetValue::DateTime(s.parse::<NaiveDateTime>().unwrap());
+        let text = |s: &str| RivetValue::Bytes(s.as_bytes().to_vec());
+        for (cell, mysql, oracle) in [
+            (
+                "2024-02-29T13:14:15.500",
+                "2024-02-29 13:14:15.500000",
+                "2024-02-29T13:14:15.500000",
+            ),
+            (
+                "2024-02-29T13:14:15",
+                "2024-02-29 13:14:15.000000",
+                "2024-02-29T13:14:15.000000",
+            ),
+            (
+                "9999-12-31T23:59:59.999999",
+                "9999-12-31 23:59:59.999999",
+                "9999-12-31T23:59:59.999999",
+            ),
+            (
+                "0001-01-01T00:00:00.000001",
+                "0001-01-01 00:00:00.000001",
+                "0001-01-01T00:00:00.000001",
+            ),
+            (
+                "2024-02-29T13:14:15.123456789",
+                "2024-02-29 13:14:15.123456",
+                "2024-02-29T13:14:15.123456789",
+            ),
+        ] {
+            for dt in [DataType::Utf8, DataType::LargeUtf8] {
+                assert_eq!(
+                    stamp_text(CdcEngine::Mysql, &dt, at(cell)),
+                    text(mysql),
+                    "{cell}"
+                );
+                assert_eq!(
+                    stamp_text(CdcEngine::Oracle, &dt, at(cell)),
+                    text(oracle),
+                    "{cell}"
+                );
+                for native in [
+                    "DATE",
+                    "TIMESTAMP(9)",
+                    "TIMESTAMP(6) WITH TIME ZONE",
+                    "timestamp(9) with local time zone",
+                ] {
+                    assert!(
+                        prints_stamp_text(CdcEngine::Oracle, native, &dt),
+                        "{native}"
+                    );
+                    assert!(!prints_stamp_text(CdcEngine::Mysql, native, &dt));
+                }
+                for native in ["VARCHAR2(30)", "NUMBER(9)", "CLOB"] {
+                    assert!(
+                        !prints_stamp_text(CdcEngine::Oracle, native, &dt),
+                        "{native}"
+                    );
+                }
+            }
+        }
+        let typed = DataType::Timestamp(TimeUnit::Microsecond, None);
+        for engine in [CdcEngine::Mysql, CdcEngine::Oracle] {
+            assert_eq!(
+                stamp_text(engine, &typed, at("2024-02-29T13:14:15.5")),
+                at("2024-02-29T13:14:15.5")
+            );
+            assert!(!prints_stamp_text(engine, "TIMESTAMP(9)", &typed));
+            assert_eq!(
+                stamp_text(engine, &DataType::Utf8, RivetValue::Null),
+                RivetValue::Null
+            );
+        }
+        for engine in [CdcEngine::Postgres, CdcEngine::Mssql, CdcEngine::Mongo] {
+            assert_eq!(
+                stamp_text(engine, &DataType::Utf8, at("2024-02-29T13:14:15.5")),
+                at("2024-02-29T13:14:15.5")
+            );
+            assert!(!prints_stamp_text(engine, "TIMESTAMP(9)", &DataType::Utf8));
+        }
+        assert_eq!(
+            render_str(&at("2024-02-29T13:14:15.5")),
+            "2024-02-29 13:14:15.500"
+        );
     }
 
     /// A nine-digit instant keeps every digit in a nanosecond column and as text, and a microsecond column declared over it floors to the microsecond as before.

@@ -126,6 +126,39 @@ pub fn iso8601_duration(months: i32, days: i32, micros: i64) -> String {
     if out == "P" { "PT0S".into() } else { out }
 }
 
+/// Oracle's `SYYYY-MM-DD"T"HH24:MI:SS.FF` text: signed year (no year 0), six fraction digits, nine when finer than a microsecond.
+pub fn oracle_timestamp_text(dt: NaiveDateTime) -> String {
+    let y = dt.year();
+    let year = if y <= 0 {
+        format!("-{:04}", 1 - y)
+    } else {
+        format!("{y:04}")
+    };
+    let ns = dt.nanosecond();
+    let frac = if ns.is_multiple_of(1_000) {
+        format!("{:06}", ns / 1_000)
+    } else {
+        format!("{ns:09}")
+    };
+    format!(
+        "{year}-{:02}-{:02}T{:02}:{:02}:{:02}.{frac}",
+        dt.month(),
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second()
+    )
+}
+
+/// MySQL's text of a DATE, DATETIME or TIMESTAMP read over the binary protocol: space separator, always six fraction digits.
+pub fn mysql_datetime_text(
+    (y, m, d): (i32, u32, u32),
+    (h, mi, s): (u32, u32, u32),
+    micros: u32,
+) -> String {
+    format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02}:{s:02}.{micros:06}")
+}
+
 /// `[±]YYYY-MM-DDTHH:MM:SS.fffffffff[Z]`: astronomical year, always nine fraction digits.
 pub fn iso_timestamp_nanos(dt: NaiveDateTime, zoned: bool) -> String {
     let y = dt.year();
@@ -288,6 +321,46 @@ mod tests {
         assert_eq!(iso8601_duration(0, 0, 1), "PT0.000001S");
         assert_eq!(iso8601_duration(0, 0, 60_000_000), "PT1M");
         assert_eq!(iso8601_duration(0, 0, 90_000_000_000), "PT25H");
+    }
+
+    #[test]
+    fn oracle_timestamp_text_is_signed_iso_with_six_digits_or_nine_when_finer() {
+        for (dt, want) in [
+            (
+                ts(2024, 2, 29, 13, 14, 15, 123_456_000),
+                "2024-02-29T13:14:15.123456",
+            ),
+            (
+                ts(2024, 2, 29, 13, 14, 15, 500_000_000),
+                "2024-02-29T13:14:15.500000",
+            ),
+            (ts(2024, 2, 29, 13, 14, 15, 0), "2024-02-29T13:14:15.000000"),
+            (
+                ts(2024, 2, 29, 13, 14, 15, 1),
+                "2024-02-29T13:14:15.000000001",
+            ),
+            (
+                ts(9999, 12, 31, 23, 59, 59, 999_999_999),
+                "9999-12-31T23:59:59.999999999",
+            ),
+            (ts(1, 1, 1, 0, 0, 0, 0), "0001-01-01T00:00:00.000000"),
+            (ts(0, 6, 15, 0, 0, 0, 0), "-0001-06-15T00:00:00.000000"),
+            (ts(-1, 6, 15, 0, 0, 0, 0), "-0002-06-15T00:00:00.000000"),
+        ] {
+            assert_eq!(oracle_timestamp_text(dt), want);
+        }
+    }
+
+    #[test]
+    fn mysql_datetime_text_has_a_space_and_always_six_digits() {
+        assert_eq!(
+            mysql_datetime_text((2024, 2, 29), (13, 14, 15), 500_000),
+            "2024-02-29 13:14:15.500000"
+        );
+        assert_eq!(
+            mysql_datetime_text((1, 1, 1), (0, 0, 0), 0),
+            "0001-01-01 00:00:00.000000"
+        );
     }
 
     #[test]

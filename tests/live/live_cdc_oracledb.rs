@@ -1565,54 +1565,9 @@ fn oracle_cdc_a_redo_log_switch_during_mining_is_re_mined_not_failed() {
 
 type Ts9Cells = std::collections::BTreeMap<String, String>;
 
-/// One run's verdict: its refusal as `refused[CODE exit N]`, or every delivered row as `op:id` -> its TIMESTAMP(9) cells read off the Parquet.
+/// The TIMESTAMP(9) cells a run delivered, or its refusal.
 fn ts9_verdict(run: &std::process::Output, dir: &Path) -> Result<Ts9Cells, String> {
-    use arrow::array::{Array, AsArray};
-    use arrow::datatypes::{DataType, Int64Type};
-    if !run.status.success() {
-        let err = String::from_utf8_lossy(&run.stderr).to_string();
-        let code = err
-            .split(['[', ']'])
-            .find(|w| w.starts_with("RIVET_"))
-            .unwrap_or("uncoded");
-        return Err(format!(
-            "refused[{code} exit {}]",
-            run.status.code().unwrap_or(-1)
-        ));
-    }
-    let mut rows = Ts9Cells::new();
-    for b in read_all_parts(dir) {
-        let ids =
-            arrow::compute::cast(b.column_by_name("ID").expect("ID"), &DataType::Int64).unwrap();
-        let ops = b
-            .column_by_name("__op")
-            .map(|c| c.as_string::<i32>().clone());
-        for r in 0..b.num_rows() {
-            let cells: Vec<String> = ["T9", "Z9", "L9"]
-                .iter()
-                .map(|c| {
-                    let col = b.column_by_name(c).unwrap_or_else(|| panic!("{c} column"));
-                    if col.is_null(r) {
-                        return "NULL".to_string();
-                    }
-                    match col.data_type() {
-                        DataType::Utf8 => col.as_string::<i32>().value(r).replace('T', " "),
-                        DataType::Timestamp(u, _) => {
-                            let v = arrow::compute::cast(col, &DataType::Int64).unwrap();
-                            format!("{u:?}:{}", v.as_primitive::<Int64Type>().value(r))
-                        }
-                        t => format!("{t:?}"),
-                    }
-                })
-                .collect();
-            let op = ops.as_ref().map_or("", |o| o.value(r));
-            rows.insert(
-                format!("{op}:{}", ids.as_primitive::<Int64Type>().value(r)),
-                cells.join(" | "),
-            );
-        }
-    }
-    Ok(rows)
+    run_cells(run, dir, "ID", &["T9", "Z9", "L9"])
 }
 
 /// What the batch export and the CDC snapshot and change stream of one TIMESTAMP(9) table deliver under one declaration.
@@ -1624,14 +1579,19 @@ struct Ts9Legs {
     batch_after: Result<Ts9Cells, String>,
 }
 
-const TS9_SEED: [&str; 2] = [
+const TS9_SEED: [&str; 4] = [
     "1, TIMESTAMP '2024-02-29 13:14:15.123456789', TIMESTAMP '2024-02-29 10:00:00.123456789 +02:00', TIMESTAMP '2024-02-29 13:14:15.123456789 +00:00'",
     "2, TIMESTAMP '2262-04-11 23:47:16.854775807', TIMESTAMP '2262-04-11 23:47:16.854775807 +00:00', TIMESTAMP '2262-04-11 23:47:16.854775807 +00:00'",
+    "3, TIMESTAMP '2024-02-29 13:14:15.500000000', TIMESTAMP '2024-02-29 13:14:15.500000000 +00:00', TIMESTAMP '2024-02-29 13:14:15.500000000 +00:00'",
+    "4, TIMESTAMP '2024-02-29 13:14:15', TIMESTAMP '2024-02-29 13:14:15 +00:00', TIMESTAMP '2024-02-29 13:14:15 +00:00'",
 ];
 
-const TS9_CHANGES: [&str; 3] = [
+const TS9_CHANGES: [&str; 6] = [
     "INSERT INTO {t} VALUES (10, TIMESTAMP '2000-01-01 12:00:00.000000001', TIMESTAMP '2000-01-01 12:00:00.000000001 +00:00', TIMESTAMP '2000-01-01 12:00:00.000000001 +00:00')",
+    "INSERT INTO {t} VALUES (11, TIMESTAMP '2000-01-01 12:00:00.250000000', TIMESTAMP '2000-01-01 12:00:00.250000000 +00:00', TIMESTAMP '2000-01-01 12:00:00.250000000 +00:00')",
+    "INSERT INTO {t} VALUES (12, TIMESTAMP '2000-01-01 12:00:00', TIMESTAMP '2000-01-01 12:00:00 +00:00', TIMESTAMP '2000-01-01 12:00:00 +00:00')",
     "UPDATE {t} SET t9 = TIMESTAMP '1999-12-31 23:59:59.999999999' WHERE id = 1",
+    "UPDATE {t} SET t9 = TIMESTAMP '1999-12-31 23:59:59.500000000', z9 = TIMESTAMP '1999-12-31 23:59:59 +00:00' WHERE id = 3",
     "DELETE FROM {t} WHERE id = 2",
 ];
 
@@ -1694,31 +1654,28 @@ fn oracle_cdc_timestamp9_is_delivered_as_batch_delivers_it() {
             ts9_cells(&legs.stream, "stream"),
         );
         let cell = |m: &Ts9Cells, k: &str| m.get(k).cloned().unwrap_or_default();
-        assert_eq!(
-            cell(&snapshot, ":1"),
-            cell(&batch, ":1"),
-            "{declared}: snapshot"
-        );
-        assert_eq!(
-            cell(&snapshot, ":2"),
-            cell(&batch, ":2"),
-            "{declared}: snapshot"
-        );
-        assert_eq!(
-            cell(&stream, "update:1"),
-            cell(&after, ":1"),
-            "{declared}: update"
-        );
-        assert_eq!(
-            cell(&stream, "insert:10"),
-            cell(&after, ":10"),
-            "{declared}: insert"
-        );
-        assert_eq!(
-            cell(&stream, "delete:2"),
-            cell(&batch, ":2"),
-            "{declared}: delete"
-        );
+        for id in 1..=4 {
+            let k = format!(":{id}");
+            assert_eq!(
+                cell(&snapshot, &k),
+                cell(&batch, &k),
+                "{declared}: snapshot {id}"
+            );
+        }
+        for (op, id, from) in [
+            ("insert", 10, &after),
+            ("insert", 11, &after),
+            ("insert", 12, &after),
+            ("update", 1, &after),
+            ("update", 3, &after),
+            ("delete", 2, &batch),
+        ] {
+            assert_eq!(
+                cell(&stream, &format!("{op}:{id}")),
+                cell(from, &format!(":{id}")),
+                "{declared}: {op} {id}"
+            );
+        }
     }
 }
 
@@ -1739,7 +1696,7 @@ fn oracle_timestamp9_undeclared_is_one_verdict_on_batch_and_cdc() {
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn oracle_timestamp9_past_the_nanosecond_range_is_one_refusal_on_batch_and_cdc() {
     let _serial = cross_process_serial("oracle_cdc");
-    let far = "INSERT INTO {t} VALUES (3, TIMESTAMP '9999-12-31 23:59:59.999999999', TIMESTAMP '9999-12-31 23:59:59.999999999 +00:00', TIMESTAMP '9999-12-31 23:59:59.999999999 +00:00')";
+    let far = "INSERT INTO {t} VALUES (5, TIMESTAMP '9999-12-31 23:59:59.999999999', TIMESTAMP '9999-12-31 23:59:59.999999999 +00:00', TIMESTAMP '9999-12-31 23:59:59.999999999 +00:00')";
     let legs = ts9_legs(
         "columns: {T9: timestamp_ns, Z9: timestamp_tz_ns, L9: timestamp_tz_ns}",
         &TS9_SEED,

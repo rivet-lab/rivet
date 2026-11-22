@@ -813,28 +813,35 @@ fn flush(
         let refuse = |r: value::CellRefusal| {
             r.into_error(&m.column_name, dt, overridden.contains(&m.column_name))
         };
-        let owned: Option<Vec<Option<RivetValue>>> = match &fix {
-            Some(fix) => Some(
+        let prints = value::prints_stamp_text(engine, &m.source_native_type, dt);
+        let owned: Option<Vec<Option<RivetValue>>> = if fix.is_some() || prints {
+            Some(
                 events
                     .iter()
                     .enumerate()
                     .map(|(row, e)| {
                         image_cell(e, i, &m.column_name, &schema_names, memo)
                             .map(|v| {
-                                fix.apply_with(v, wire_labels(e, &m.column_name), &e.table)
-                                    .map_err(|r| value::CellRefusal {
-                                        row,
-                                        value: v.clone(),
-                                        reason: r.reason,
-                                        code: r.code,
-                                    })
+                                let fixed = match &fix {
+                                    Some(fix) => fix
+                                        .apply_with(v, wire_labels(e, &m.column_name), &e.table)
+                                        .map_err(|r| value::CellRefusal {
+                                            row,
+                                            value: v.clone(),
+                                            reason: r.reason,
+                                            code: r.code,
+                                        })?,
+                                    None => v.clone(),
+                                };
+                                Ok(value::stamp_text(engine, dt, fixed))
                             })
                             .transpose()
                     })
                     .collect::<std::result::Result<_, _>>()
                     .map_err(refuse)?,
-            ),
-            None => None,
+            )
+        } else {
+            None
         };
         if let (Some(o), Some(fix)) = (&owned, &fix) {
             let nulled = events

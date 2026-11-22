@@ -553,7 +553,12 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
             Some(Value::Float(v)) => Some(Cow::Owned(v.to_string().into_bytes())),
             Some(Value::Double(v)) => Some(Cow::Owned(v.to_string().into_bytes())),
             Some(Value::Date(y, m, d, hh, mi, sx, us)) => Some(Cow::Owned(
-                format!("{y:04}-{m:02}-{d:02} {hh:02}:{mi:02}:{sx:02}.{us:06}").into_bytes(),
+                crate::types::mysql_datetime_text(
+                    (i32::from(*y), u32::from(*m), u32::from(*d)),
+                    (u32::from(*hh), u32::from(*mi), u32::from(*sx)),
+                    *us,
+                )
+                .into_bytes(),
             )),
             _ => None,
         }
@@ -1068,8 +1073,10 @@ fn build_array(
                     Some(Value::Float(v)) => b.append_value(v.to_string()),
                     Some(Value::Double(v)) => b.append_value(v.to_string()),
                     Some(Value::Date(y, m, d, h, mi, s, us)) => {
-                        b.append_value(format!(
-                            "{y:04}-{m:02}-{d:02} {h:02}:{mi:02}:{s:02}.{us:06}"
+                        b.append_value(crate::types::mysql_datetime_text(
+                            (i32::from(*y), u32::from(*m), u32::from(*d)),
+                            (u32::from(*h), u32::from(*mi), u32::from(*s)),
+                            *us,
                         ));
                     }
                     other => {

@@ -330,14 +330,14 @@ def _oracle_cursor(url: str):
         yield cur
 
 
-def oracle_describe(url: str, sql: str) -> list[tuple[str, bool]]:
-    """`(column name, zoned)` of the SELECT `sql`, parsed and not run; zoned is TIMESTAMP WITH [LOCAL] TIME ZONE, which python-oracledb returns naive."""
+def oracle_describe(url: str, sql: str) -> list[tuple[str, bool, bool]]:
+    """`(column name, zoned, stamp)` of the SELECT `sql`, parsed and not run; zoned is TIMESTAMP WITH [LOCAL] TIME ZONE, which python-oracledb returns naive; stamp is any TIMESTAMP."""
     import oracledb
 
     with _oracle_cursor(url) as cur:
         cur.parse(sql)
         zoned = (oracledb.DB_TYPE_TIMESTAMP_TZ, oracledb.DB_TYPE_TIMESTAMP_LTZ)
-        return [(d[0], d[1] in zoned) for d in cur.description]
+        return [(d[0], d[1] in zoned, d[1] in zoned or d[1] == oracledb.DB_TYPE_TIMESTAMP) for d in cur.description]
 
 
 def mysql_describe(url: str, sql: str) -> list[tuple[str, int, int]]:
