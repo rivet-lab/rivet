@@ -199,9 +199,18 @@ hard rules over the live CDC suite's SOURCES:
 
 `ci.yml` runs `cargo-mutants` on the lines a PR changes: `mutants-plan` lists the
 mutants of the diff, `mutants-shard` runs them against the offline suite, and
-`mutants-verdict` fails the PR on a missed mutant in code the offline suite
-executes (`Mutants (changed lines)`). A surviving mutant is a named test blind
-spot — the meta-gate that finds holes in the gates above. The nightly rotation
+`mutants-in-diff` (`Mutants (grade)`) grades their outcomes. A surviving mutant is a named test blind
+spot — the meta-gate that finds holes in the gates above.
+
+The shards run once per PR, on the final head, not on every push:
+
+1. Push freely. An unlabeled push runs the cheap jobs and the plan; `Mutants (changed lines)` is red while the diff touches Rust, tests, Cargo files or `mutants.toml` and has no verdict.
+2. Add the `ready` label on the final head. The shards run on it, and on every later push while the label stays.
+3. Read the verdict from `Mutants (grade)` and `Mutants (coverage verdict)`. A clean grade is recorded on the head as the `mutants/graded` commit status and turns `Mutants (changed lines)` green. A diff already graded for the same code replays from the outcome cache without the shards.
+
+`Mutants (changed lines)` (`mutants-required`) always runs, so it cannot be skipped into a pass. In the merge queue it passes only when the PR head carries a recorded verdict for the same diff. A diff over the budget is accepted as ungraded only with the label.
+
+The nightly rotation
 (`mutants-nightly`) was removed on 2026-08-17 (see the note in
 `nightly-live.yml`); `docs/mutants-baseline.txt` is kept only as the record of
 the misses it adjudicated and no job reads it.
