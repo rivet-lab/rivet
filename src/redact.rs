@@ -76,20 +76,12 @@ static MASKED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new())
 
 /// `encoded` with the hex digits of every percent escape in lower case.
 fn lower_hex(encoded: &str) -> String {
-    let mut lower = String::with_capacity(encoded.len());
-    let mut hex_left = 0;
-    for c in encoded.chars() {
-        if c == '%' {
-            hex_left = 2;
-            lower.push(c);
-        } else if hex_left > 0 {
-            hex_left -= 1;
-            lower.push(c.to_ascii_lowercase());
-        } else {
-            lower.push(c);
-        }
-    }
-    lower
+    let mut parts = encoded.split('%');
+    let head = parts.next().unwrap_or_default().to_string();
+    parts.fold(head, |lower, part| {
+        let (hex, rest) = part.split_at(2);
+        format!("{lower}%{}{rest}", hex.to_ascii_lowercase())
+    })
 }
 
 /// Chars form encoding leaves as they are besides letters and digits.
@@ -151,21 +143,19 @@ fn prefix_function(value: &[u8]) -> Vec<usize> {
 
 /// Push the span of every occurrence of `value` in `text`, overlapping ones included, in one pass over `text`.
 fn push_occurrences(text: &str, value: &str, spans: &mut Vec<(usize, usize)>) {
-    let Some(first) = text.find(value) else {
-        return;
-    };
     let value = value.as_bytes();
     let fail = prefix_function(value);
     let mut matched = 0;
-    for (at, byte) in text.bytes().enumerate().skip(first) {
-        while matched > 0 && (matched == value.len() || value[matched] != byte) {
+    for (end, byte) in (1..).zip(text.bytes()) {
+        while matched > 0 && value[matched] != byte {
             matched = fail[matched - 1];
         }
         if value[matched] == byte {
             matched += 1;
         }
         if matched == value.len() {
-            spans.push((at + 1 - value.len(), at + 1));
+            spans.push((end - matched, end));
+            matched = fail[matched - 1];
         }
     }
 }
@@ -186,12 +176,9 @@ fn merged(mut spans: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
 /// The parts of the ordered, disjoint `spans` that lie outside the ordered, disjoint `holes`.
 fn without(spans: &[(usize, usize)], holes: &[(usize, usize)]) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
-    let mut first_hole = 0;
     for &(start, end) in spans {
         let mut at = start;
-        while first_hole < holes.len() && holes[first_hole].1 <= start {
-            first_hole += 1;
-        }
+        let first_hole = holes.partition_point(|hole| hole.1 <= start);
         for &(hole_start, hole_end) in holes[first_hole..].iter().take_while(|h| h.0 < end) {
             if hole_start > at {
                 out.push((at, hole_start));
@@ -222,11 +209,7 @@ fn anchor_ranges(text: &str) -> Vec<(usize, usize)> {
         ranges.extend(span.map(|(_, at)| (offset, offset + at + 1)));
         offset += word.len();
     }
-    ranges.extend(
-        query_secret_pairs(text)
-            .into_iter()
-            .map(|(key_start, eq, _)| (key_start - 1, eq + 1)),
-    );
+    mask_query_secrets(text, &mut ranges);
     merged(ranges)
 }
 
@@ -430,8 +413,8 @@ fn unescaped_whitespace(text: &str) -> usize {
     text.len()
 }
 
-/// Every secret-bearing URL query pair of `s` as (key start, the `=`, value end), the key read decoded; a value ends at `&`, a quote, `)`, `;` or whitespace.
-fn query_secret_pairs(s: &str) -> Vec<(usize, usize, usize)> {
+/// Mask the value of every secret-bearing URL query pair (`?token=`, `&client_secret=`, `sig=`, `sas=`, and any key [`is_password_keyword`] accepts), keeping the key's spelling; a percent-encoded key is read decoded.
+fn mask_query_secrets(s: &str, anchors: &mut Vec<(usize, usize)>) -> String {
     const FAMILIES: [&str; 7] = [
         "token",
         "apikey",
@@ -454,12 +437,11 @@ fn query_secret_pairs(s: &str) -> Vec<(usize, usize, usize)> {
         );
         keyword || FAMILIES.iter().any(|f| family(f)) || lower == "sas"
     }
-    let mut pairs = Vec::new();
-    let mut at = 0;
-    while let Some(q) = s[at..].find(['?', '&']) {
-        let key_start = at + q + 1;
-        let rest = &s[key_start..];
-        at = key_start;
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(q) = rest.find(['?', '&']) {
+        out.push_str(&rest[..=q]);
+        rest = &rest[q + 1..];
         let key_end = rest
             .find(|c: char| {
                 seeded!(
@@ -475,27 +457,25 @@ fn query_secret_pairs(s: &str) -> Vec<(usize, usize, usize)> {
             percent_encoding::percent_decode_str(&rest[..key_end]).decode_utf8_lossy()
         );
         if key_end < rest.len() && rest.as_bytes()[key_end] == b'=' && is_secret_key(&key) {
-            let value_end = rest[key_end + 1..]
+            let key_start = s.len() - rest.len();
+            anchors.push((key_start - 1, key_start + key_end + 1));
+            out.push_str(&rest[..key_end]);
+            out.push_str("=***");
+            let after = &rest[key_end + 1..];
+            let val_end = after
                 .find(|c: char| matches!(c, '&' | '\'' | '"' | ')' | ';') || c.is_whitespace())
-                .map_or(s.len(), |i| key_start + key_end + 1 + i);
-            pairs.push((key_start, key_start + key_end, value_end));
-            at = value_end;
+                .map(|i| key_end + 1 + i)
+                .unwrap_or(rest.len());
+            rest = &rest[val_end..];
         }
     }
-    pairs
+    out.push_str(rest);
+    out
 }
 
-/// Mask the value of every secret-bearing URL query pair (`?token=`, `&client_secret=`, `sig=`, `sas=`, and any key [`is_password_keyword`] accepts), keeping the key's spelling; a percent-encoded key is read decoded.
+/// Mask the value of every secret-bearing URL query pair, keeping the key's spelling.
 pub(crate) fn redact_query_secrets(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut copied = 0;
-    for (_, eq, value_end) in query_secret_pairs(s) {
-        out.push_str(&s[copied..eq]);
-        out.push_str("=***");
-        copied = value_end;
-    }
-    out.push_str(&s[copied..]);
-    out
+    mask_query_secrets(s, &mut Vec::new())
 }
 
 /// Neutralise terminal-control bytes in text that originates outside the
