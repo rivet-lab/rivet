@@ -2710,7 +2710,7 @@ mod tests {
         let arr = build_column(&DataType::Int32, &refs).unwrap();
         let a = arr.as_any().downcast_ref::<Int32Array>().unwrap();
         assert_eq!(a.values().to_vec(), vec![42, -7]);
-        for text in ["1.5", "1.0", "-7.00", "1 ", " 1", "1e3"] {
+        for text in ["1.5", "1.0", "-7.00", "-42.00", "1 ", " 1", "1e3"] {
             let cell = RivetValue::Bytes(text.as_bytes().to_vec());
             let r = build_column(&DataType::Int32, &[Some(&cell)]).unwrap_err();
             assert_eq!(r.reason, "is not an exact integer", "{text:?}");

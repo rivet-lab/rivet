@@ -459,7 +459,9 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
             Some(Value::UInt(v)) => Some(*v),
             Some(Value::Int(v)) if *v >= 0 => Some(*v as u64),
             Some(Value::Bytes(bv)) if self.is_bit(col) => Some(bit_bytes_to_u64(bv)),
-            Some(Value::Bytes(bv)) => whole_uint(bv),
+            Some(Value::Bytes(bv)) => {
+                crate::types::decimal::whole_int_text(bv).and_then(|v| u64::try_from(v).ok())
+            }
             _ => None,
         }
     }
@@ -613,18 +615,12 @@ pub(super) fn bit_bytes_to_u64(b: &[u8]) -> u64 {
     b.iter().fold(0u64, |acc, &byte| acc << 8 | u64::from(byte))
 }
 
-/// The unsigned integer a text cell holds when the whole cell is that integer.
-fn whole_uint(bv: &[u8]) -> Option<u64> {
-    let (v, used) = atoi::FromRadix10Checked::from_radix_10_checked(bv);
-    v.filter(|_| used == bv.len() && used > 0)
-}
-
 /// Decode a UInt64 cell that arrived as `Value::Bytes`.
 fn uint64_from_bytes(column: &str, bv: &[u8], is_bit: bool) -> Result<u64> {
     if is_bit {
         return Ok(bit_bytes_to_u64(bv));
     }
-    match whole_uint(bv) {
+    match crate::types::decimal::whole_int_text(bv).and_then(|v| u64::try_from(v).ok()) {
         Some(v) => Ok(v),
         None => unparsed(column, "unsigned bigint", bv),
     }
@@ -1478,7 +1474,7 @@ mod utf8_fast_path_tests {
 
 #[cfg(test)]
 mod int64_bytes_dispatch_tests {
-    use super::{int64_from_bytes, whole_uint};
+    use super::{int64_from_bytes, uint64_from_bytes};
 
     #[test]
     fn bit_bytes_decode_big_endian_even_when_ascii_digits() {
@@ -1525,16 +1521,17 @@ mod int64_bytes_dispatch_tests {
                 None,
                 "{bad:?}"
             );
-            assert_eq!(whole_uint(bad.as_bytes()), None, "{bad:?}");
             assert!(
                 int64_from_bytes(bad.as_bytes(), false).unwrap().is_none(),
                 "{bad:?}"
             );
         }
         assert_eq!(crate::types::decimal::whole_int_text(b"-42"), Some(-42));
-        assert_eq!(whole_uint(b"18446744073709551615"), Some(u64::MAX));
-        assert_eq!(whole_uint(b"18446744073709551616"), None);
-        assert_eq!(whole_uint(b"-1"), None);
+        let uint = |t: &[u8]| uint64_from_bytes("c", t, false).ok();
+        assert_eq!(uint(b"18446744073709551615"), Some(u64::MAX));
+        assert_eq!(uint(b"18446744073709551616"), None);
+        assert_eq!(uint(b"-1"), None);
+        assert_eq!(uint(b"1.0"), None);
     }
 }
 

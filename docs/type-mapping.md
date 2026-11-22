@@ -177,7 +177,7 @@ round (on a CDC stream as on batch), a MySQL text cell that is not a whole integ
 batch run and on a CDC snapshot or stream alike. A refusal decided by the column's
 type alone (PostgreSQL, SQL Server and Oracle numeric, float or text under an integer
 override; MySQL DECIMAL or DOUBLE under one) is `RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH`
-(exit 1) at plan time on every leg. A chunked run refused at a later chunk keeps the
+(exit 1) at plan time on every leg: a batch run, the baseline leg of a CDC export and a stream-only CDC export read the same table, so a `mode: cdc` export refuses the pair before it reads a change. A chunked run refused at a later chunk keeps the
 parts of the chunks it finished and a manifest whose run is marked `failed`; fix the
 value or declare a wider type, and re-run.
 

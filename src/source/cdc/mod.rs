@@ -1288,6 +1288,7 @@ impl<'s> CdcSchemaResolver<'s> {
                 m.source_native_type = ct.to_string();
             }
         }
+        refuse_by_override_table(self.source(), &select, &mappings, overrides)?;
         mappings
             .into_iter()
             .map(|m| match overrides.contains_key(&m.column_name) {
@@ -1317,7 +1318,7 @@ pub(crate) fn retype_for_stream(
     )
 }
 
-/// `columns:` overrides of a stream export, graded by the CDC cell builder and not by the batch override table.
+/// `columns:` overrides of a stream export, graded by the batch override table where it decides and by the CDC cell builder after it.
 pub(crate) fn stream_override_refusal(
     src: &mut dyn crate::source::Source,
     query: &str,
@@ -1326,9 +1327,38 @@ pub(crate) fn stream_override_refusal(
     let Ok(mappings) = src.type_mappings(query, &crate::types::ColumnOverrides::new()) else {
         return Ok(());
     };
+    refuse_by_override_table(src, query, &mappings, overrides)?;
     mappings
         .into_iter()
         .try_for_each(|m| retype_for_stream(m, overrides).map(drop))
+}
+
+/// An integer override over a numeric, float or text column is the batch table's pair, so the stream, the baseline and `check` refuse it alike before any row.
+pub(crate) fn refuse_by_override_table(
+    src: &mut dyn crate::source::Source,
+    query: &str,
+    detected: &[crate::types::TypeMapping],
+    overrides: &crate::types::ColumnOverrides,
+) -> Result<()> {
+    use crate::types::RivetType as T;
+    let routed: crate::types::ColumnOverrides = detected
+        .iter()
+        .filter_map(|m| {
+            let target = overrides.get(&m.column_name)?;
+            matches!(
+                (&m.rivet_type, target),
+                (
+                    T::Decimal { .. } | T::Float32 | T::Float64 | T::String | T::Text,
+                    T::Int16 | T::Int32 | T::Int64 | T::UInt64
+                )
+            )
+            .then(|| (m.column_name.clone(), target.clone()))
+        })
+        .collect();
+    if seeded!("cdc-integer-override-skips-table", true, routed.is_empty()) {
+        return Ok(());
+    }
+    src.type_mappings(query, &routed).map(drop)
 }
 
 /// The CDC plan for one column: kept when the builder builds it, else the server's own text.

@@ -588,7 +588,9 @@ pub(crate) fn probe_mappings(
     column_overrides: &ColumnOverrides,
 ) -> Result<Vec<crate::types::TypeMapping>> {
     let mut mappings = if stream {
-        src.type_mappings(query, &ColumnOverrides::new())?
+        let detected = src.type_mappings(query, &ColumnOverrides::new())?;
+        source::cdc::refuse_by_override_table(src, query, &detected, column_overrides)?;
+        detected
             .into_iter()
             .map(|m| source::cdc::retype_for_stream(m, column_overrides))
             .collect::<Result<Vec<_>>>()?

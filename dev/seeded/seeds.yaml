@@ -7070,18 +7070,34 @@ seeds:
     switch: integer-text-cut-to-leading-digits
     engines:
       postgres:
-        na: "a text column under an integer override is refused at plan time (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH), so no text cell is read as an integer"
+        na: "a text column under an integer override is refused at plan time on the baseline leg and on a stream-only export alike (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH, a_text_under_an_integer_override_is_refused_alike_on_every_leg_postgres), so no text cell is read as an integer"
       mysql:
         cells: ["lib:whole_int_text_accepts_only_a_whole_cell_integer", "lib:an_override_refusal_by_value_carries_the_value_code_as_batch_does"]
       mssql:
-        na: "a text column under an integer override is refused at plan time (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH), so no text cell is read as an integer"
+        na: "a text column under an integer override is refused at plan time on the baseline leg and on a stream-only export alike (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH, a_text_under_an_integer_override_is_refused_alike_on_every_leg_mssql), so no text cell is read as an integer"
       mongo:
         na: "a MongoDB field has no text-to-integer column override"
       oracle:
-        na: "a VARCHAR2 column under an integer override is refused at plan time (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH), so no text cell is read as an integer"
+        na: "a VARCHAR2 column under an integer override is refused at plan time on the baseline leg and on a stream-only export alike (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH, a_text_under_an_integer_override_is_refused_alike_on_every_leg_oracle), so no text cell is read as an integer"
+  - name: cdc-integer-override-skips-table
+    class: "a numeric, float or text column under an integer `columns:` override on a stream-only CDC export is graded by the cell builder by its first value and not by the override table the batch and snapshot legs read, so the same config is refused at plan on one leg, delivered on another and refused by a value on a third, with `check` saying exact"
+    history: "2026-11-22: PR #1148 verifier finding, a PostgreSQL numeric(10,2) declared int8 delivered 43 on main and stopped with a false `is not an exact integer` on the branch while the snapshot leg stopped RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH; the stream, the baseline and `check` now share one decision"
+    scope: source
+    switch: cdc-integer-override-skips-table
+    engines:
+      postgres:
+        cells: [a_numeric_under_an_integer_override_is_refused_alike_on_every_leg_postgres, a_text_under_an_integer_override_is_refused_alike_on_every_leg_postgres]
+      mysql:
+        cells: [a_numeric_under_an_integer_override_is_refused_alike_on_every_leg_mysql]
+      mssql:
+        cells: [a_numeric_under_an_integer_override_is_refused_alike_on_every_leg_mssql, a_text_under_an_integer_override_is_refused_alike_on_every_leg_mssql]
+      mongo:
+        na: "a MongoDB change row is two text cells; no `columns:` override retypes a field on the stream"
+      oracle:
+        cells: [a_numeric_under_an_integer_override_is_refused_alike_on_every_leg_oracle, a_text_under_an_integer_override_is_refused_alike_on_every_leg_oracle]
   - name: check-values-unread-unsaid
     class: "`rivet check` exits 0 over a column a run then refuses by a value (RIVET_SOURCE_VALUE_UNREPRESENTABLE, RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE) without saying that it read no values, so check and run disagree with nothing to tell the operator why"
-    history: "CHECK_RUN_SPLIT known-red class over every engine and leg (2026-11-10..19); owner decision 2026-11-20: check names the codes only a value decides (needs_values in the registry) instead of reading values, the note is the operator's statement and the gate grades no split by it (a column check reports exact that a run refuses by a value is a split, known-red or fixed)"
+    history: "CHECK_RUN_SPLIT known-red class over every engine and leg (2026-11-10..19); owner decision 2026-11-20: check names the codes only a value decides (`VALUE_CODES` in the registry) instead of reading values, the note is the operator's statement and the gate grades no split by it (a column check reports exact that a run refuses by a value is a split, known-red or fixed)"
     scope: source
     switch: check-values-unread-unsaid
     engines:

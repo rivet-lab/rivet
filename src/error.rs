@@ -454,8 +454,6 @@ pub struct Code {
     pub id: &'static str,
     pub kind: ErrorKind,
     pub action: &'static str,
-    /// Raised only by a value the source or warehouse holds; `rivet check` reads at most the first row of an export that declares `columns:`, so it names these codes for the rows it did not read.
-    pub needs_values: bool,
 }
 
 /// Typed marker carrying a **stable error code** (`RIVET_CONFIG_*` /
@@ -727,7 +725,6 @@ pub mod codes {
             id,
             kind: ErrorKind::Usage,
             action,
-            needs_values: false,
         }
     }
     const fn environment(id: &'static str, retry: Retry, action: &'static str) -> Code {
@@ -735,7 +732,6 @@ pub mod codes {
             id,
             kind: ErrorKind::Environment(retry),
             action,
-            needs_values: false,
         }
     }
 
@@ -922,14 +918,6 @@ pub mod codes {
             id,
             kind: ErrorKind::Refusal,
             action,
-            needs_values: false,
-        }
-    }
-    /// A refusal only a value can raise (see [`Code::needs_values`]).
-    const fn refusal_on_values(id: &'static str, action: &'static str) -> Code {
-        Code {
-            needs_values: true,
-            ..refusal(id, action)
         }
     }
     const fn busy(id: &'static str, action: &'static str) -> Code {
@@ -937,7 +925,6 @@ pub mod codes {
             id,
             kind: ErrorKind::Busy,
             action,
-            needs_values: false,
         }
     }
     const fn transient(id: &'static str, action: &'static str) -> Code {
@@ -945,7 +932,6 @@ pub mod codes {
             id,
             kind: ErrorKind::Transient,
             action,
-            needs_values: false,
         }
     }
     const fn integrity(id: &'static str, action: &'static str) -> Code {
@@ -953,7 +939,6 @@ pub mod codes {
             id,
             kind: ErrorKind::Integrity,
             action,
-            needs_values: false,
         }
     }
     const fn internal(id: &'static str, action: &'static str) -> Code {
@@ -961,7 +946,6 @@ pub mod codes {
             id,
             kind: ErrorKind::Internal,
             action,
-            needs_values: false,
         }
     }
 
@@ -1149,7 +1133,7 @@ pub mod codes {
         "remove the slot, checkpoint file or `export_state` row the warning names, or leave it for the next run of the export to reuse",
     );
     /// A source value the column's Arrow type has no faithful reading for (PG `infinity`, `24:00:00`).
-    pub const SOURCE_VALUE_UNREPRESENTABLE: Code = refusal_on_values(
+    pub const SOURCE_VALUE_UNREPRESENTABLE: Code = refusal(
         "RIVET_SOURCE_VALUE_UNREPRESENTABLE",
         "map the value to a representable one in the export's `query:`, or exclude the column",
     );
@@ -1214,7 +1198,7 @@ pub mod codes {
         "RIVET_DEST_ALREADY_COMPLETE",
         "pass `--force` with `--resume` to continue an interrupted run or, with none, run as a plain run does (new parts beside the complete export); or use another destination prefix",
     );
-    pub const LOAD_VALUE_OUT_OF_TARGET_RANGE: Code = refusal_on_values(
+    pub const LOAD_VALUE_OUT_OF_TARGET_RANGE: Code = refusal(
         "RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE",
         "the warehouse type cannot hold this value; declare a wider type (e.g. String) for the column, or fix the source value",
     );
@@ -2241,16 +2225,17 @@ pub fn codes_markdown() -> String {
          declares `columns:`, so a later value can still raise these codes in `rivet run` or \
          `rivet load` after check passed: check names them in a note on stderr.\n\n",
     );
-    for id in value_codes() {
+    for id in VALUE_CODES {
         out.push_str(&format!("- `{id}`\n"));
     }
     out
 }
 
-/// The codes only a value raises (see [`Code::needs_values`]), in registry order.
-pub fn value_codes() -> impl Iterator<Item = &'static str> {
-    codes::ALL.iter().filter(|c| c.needs_values).map(|c| c.id)
-}
+/// The codes only a value the source or warehouse holds raises: `rivet check` reads at most the first row of an export that declares `columns:`, so it names these for the rows it did not read.
+pub const VALUE_CODES: [&str; 2] = [
+    codes::SOURCE_VALUE_UNREPRESENTABLE.id,
+    codes::LOAD_VALUE_OUT_OF_TARGET_RANGE.id,
+];
 
 /// The note `rivet check` prints when an export declares `columns:`: the codes a value it did not read can still raise.
 pub fn values_unread_note(declares_columns: bool) -> Option<String> {
@@ -2262,7 +2247,7 @@ pub fn values_unread_note(declares_columns: bool) -> Option<String> {
         None,
         Some(format!(
             "note[values-unread]: rivet check reads at most the first row of an export that declares `columns:`; a run may still refuse a value it did not read with {}",
-            value_codes().collect::<Vec<_>>().join(", ")
+            VALUE_CODES.join(", ")
         ))
     )
 }
@@ -2358,7 +2343,7 @@ mod tests {
     #[test]
     fn check_names_exactly_the_codes_only_a_value_raises() {
         assert_eq!(
-            super::value_codes().collect::<Vec<_>>(),
+            super::VALUE_CODES,
             [
                 "RIVET_SOURCE_VALUE_UNREPRESENTABLE",
                 "RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE"
@@ -2373,11 +2358,14 @@ mod tests {
              declares `columns:`; a run may still refuse a value it did not read with \
              RIVET_SOURCE_VALUE_UNREPRESENTABLE, RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE"
         );
-        assert!(super::value_codes().all(|c| note.contains(c)), "{note}");
+        assert!(
+            super::VALUE_CODES.iter().all(|c| note.contains(c)),
+            "{note}"
+        );
         assert!(
             super::codes::ALL
                 .iter()
-                .filter(|c| !c.needs_values)
+                .filter(|c| !super::VALUE_CODES.contains(&c.id))
                 .all(|c| !note.contains(c.id)),
             "{note}"
         );
@@ -2532,7 +2520,6 @@ mod tests {
                 id: "RIVET_STATE_TEST",
                 kind,
                 action: "x",
-                needs_values: false,
             };
             classify_exit(&anyhow::Error::new(CodedError::new(c, "permission denied")))
         };
