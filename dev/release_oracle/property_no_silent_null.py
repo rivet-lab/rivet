@@ -714,7 +714,7 @@ def read_files(parts: list[str], fmt: str, key: str = "id"):
             con.register("nsn_parts", tbl)
             src = "nsn_parts"
         else:
-            src = f"read_csv({parts!r}, header=true, all_varchar=true, union_by_name=true, allow_quoted_nulls=false)"
+            src = f"read_csv({parts!r}, header=true, all_varchar=true, union_by_name=true, quote='\"', escape='\"', allow_quoted_nulls=false)"
         desc = {r[0].lower(): wide.get(r[0].lower(), r[1]) for r in con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
         sel = ", ".join(f'CAST("{k}" AS VARCHAR{"[]" if t.endswith("[]") else ""}) AS "{k}"' if "TIME ZONE" in t or t in TEXT_READ else f'"{k}"' for k, t in desc.items())
         cur = con.execute(f"SELECT {sel} FROM {src}")
@@ -1167,6 +1167,15 @@ def _proc(rc: int, err: str = "") -> core.Proc:
     return core.Proc(["rivet"], rc, "", err, gated=False)
 
 
+def csv_read_keeps_apostrophes() -> bool:
+    """Whether `read_files` hands back a CSV cell with apostrophes beside an empty cell exactly as written."""
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d) / "p.csv"
+        f.write_text("id,v\n1,'a' 'b' 'c'\n2,\n")
+        _, rows, _ = read_files([str(f)], "csv")
+    return [rows[1]["v"], rows[2]["v"]] == ["'a' 'b' 'c'", None]
+
+
 def nanosecond_read_keeps_every_digit() -> bool:
     """Whether `read_files` hands back a nanosecond timestamp, zoned timestamp and time of day with every digit."""
     import pyarrow as pa
@@ -1450,6 +1459,7 @@ def _reader_self_test() -> bool:
     except ImportError:
         return False
     assert nanosecond_read_keeps_every_digit(), "a nanosecond column is read as the text DuckDB holds, never a microsecond datetime"
+    assert csv_read_keeps_apostrophes(), "a CSV cell with apostrophes is read as written, never re-quoted by DuckDB dialect sniffing"
     col = Col("c00", "INT", "Int32", "int", ("1", "16777217", "-5"))
     with tempfile.TemporaryDirectory() as t:
         root = Path(t)
