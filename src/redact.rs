@@ -190,7 +190,7 @@ fn apply_edits(text: &str, edits: &[Edit]) -> String {
 }
 
 /// `text` with each of the ordered, disjoint `spans` replaced by the mask.
-#[cfg(any(feature = "seeded", test))]
+#[cfg(feature = "seeded")]
 fn mask_spans(text: &str, spans: &[(usize, usize)]) -> String {
     let edits: Vec<Edit> = spans
         .iter()
@@ -1951,11 +1951,8 @@ mod tests {
     fn a_hostile_megabyte_of_overlapping_occurrences_is_masked_in_one_pass() {
         let text = "a".repeat(1 << 20);
         assert_eq!(
-            mask_spans(
-                &text,
-                &known_spans(&text, &automaton(&known(&["aaaaaaaa"])).unwrap())
-            ),
-            MASK
+            known_spans(&text, &automaton(&known(&["aaaaaaaa"])).unwrap()),
+            vec![(0, 1 << 20)]
         );
     }
 
