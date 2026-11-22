@@ -375,11 +375,6 @@ pub trait Source: Send {
         Ok(Vec::new())
     }
 
-    /// The most fraction digits of a second a change row of this engine carries.
-    fn change_row_fraction_digits(&self) -> u8 {
-        9
-    }
-
     /// The primary key columns of `table` in key order; `None` when it has none or the engine cannot tell.
     fn primary_key(&mut self, _table: &str) -> Result<Option<Vec<String>>> {
         Ok(None)

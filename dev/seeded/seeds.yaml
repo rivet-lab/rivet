@@ -6826,7 +6826,7 @@ seeds:
       postgres:
         cells:
           - a_csv_export_of_a_decimal256_column_is_refused_by_check_like_the_run_postgres
-          - a_column_without_an_arrow_type_is_refused_by_check_like_the_run_postgres
+          - a_declared_type_on_a_column_without_an_arrow_type_is_refused_by_check_like_the_run_postgres
       mysql:
         cells:
           - a_csv_export_of_a_decimal256_column_is_refused_by_check_like_the_run_mysql
@@ -6992,6 +6992,81 @@ seeds:
       oracle:
         na: "the seed edits the PostgreSQL column classification (pg_server_text); the other sources map their own types in their own tables"
 
+  - name: pg-bare-numeric-refused
+    class: "a PostgreSQL numeric with no declared precision, or an array of numerics, is refused by a batch run with RIVET_TYPE_UNSAFE_MAPPING where the change stream delivers the server's text of it, so the two paths of one column disagree"
+    history: "owner rule 2026-11-21 (batch and CDC must not disagree); RED on main 2026-11-22 by live_pg_server_text: the num, numw and nums columns of every mode exit 1 naming `3 column(s) need a columns: declaration`"
+    scope: source
+    engines:
+      postgres:
+        switch: pg-bare-numeric-refused
+        cells:
+          - a_table_of_every_unmapped_type_is_delivered_as_server_text_full_postgres
+          - a_table_of_every_unmapped_type_is_delivered_as_server_text_keyset_postgres
+          - a_table_of_every_unmapped_type_is_delivered_as_server_text_range_postgres
+          - a_table_of_every_unmapped_type_is_delivered_as_server_text_incremental_postgres
+          - "lib:only_a_type_with_no_mapping_is_server_text"
+      mysql:
+        na: "the seed edits the PostgreSQL column classification (pg_server_text, pg_delivery); the other sources map their own types in their own tables"
+      mssql:
+        na: "the seed edits the PostgreSQL column classification (pg_server_text, pg_delivery); the other sources map their own types in their own tables"
+      mongo:
+        na: "the seed edits the PostgreSQL column classification (pg_server_text, pg_delivery); the other sources map their own types in their own tables"
+      oracle:
+        na: "the seed edits the PostgreSQL column classification (pg_server_text, pg_delivery); the other sources map their own types in their own tables"
+
+  - name: upgrade-baseline-not-migrated
+    class: "a drift baseline an earlier release stored for a column now delivered as server text (the native name a refused run recorded, `numeric` or `_numeric`) is read as drift on the first run after the upgrade: exit 4 under fail, a warning under the default policy, a new part every attempt"
+    history: "verifier finding on #1163 head 431e0b11 2026-11-22; RED on that head by the upgrade cells below (state written by the previous release, then this release)"
+    scope: source
+    switch: upgrade-baseline-not-migrated
+    engines:
+      postgres:
+        cells:
+          - an_upgraded_full_export_under_fail_reads_no_drift_postgres
+          - an_upgraded_keyset_export_under_fail_reads_no_drift_postgres
+          - an_upgraded_range_export_under_fail_reads_no_drift_postgres
+          - an_upgraded_incremental_export_under_fail_reads_no_drift_postgres
+          - an_upgraded_range_export_under_the_default_policy_reads_no_drift_postgres
+          - an_upgraded_incremental_export_under_the_default_policy_reads_no_drift_postgres
+          - pg_cdc_snapshot_after_a_refused_run_is_taken_without_drift_under_fail
+          - pg_cdc_snapshot_after_a_refused_run_is_taken_without_drift_under_the_default_policy
+          - "lib:a_baseline_a_refused_run_left_is_migrated_for_every_batch_mode_too"
+      mysql:
+        na: "only PostgreSQL labels an unmapped type server text from the catalog's native name; the other sources never recorded a native name for a refused column"
+      mssql:
+        na: "only PostgreSQL labels an unmapped type server text from the catalog's native name; the other sources never recorded a native name for a refused column"
+      mongo:
+        na: "only PostgreSQL labels an unmapped type server text from the catalog's native name; the other sources never recorded a native name for a refused column"
+      oracle:
+        na: "only PostgreSQL labels an unmapped type server text from the catalog's native name; the other sources never recorded a native name for a refused column"
+
+  - name: batch-absent-column-adopted
+    class: "a column with no Arrow type (inet, tsvector, a bare numeric) added to the source after the baseline is adopted into the baseline at run open by the server-text label migration, so a batch run reads `schema: unchanged` where main reported the column as added: exit 4 under fail, a warning under the default policy"
+    history: "verifier finding on #1163 head 877a693c 2026-11-22; RED on that head by the added-column cells below"
+    scope: source
+    switch: batch-absent-column-adopted
+    engines:
+      postgres:
+        cells:
+          - an_added_inet_column_is_drift_under_fail_full_postgres
+          - an_added_tsvector_column_is_drift_under_fail_full_postgres
+          - an_added_bare_numeric_column_is_drift_under_fail_full_postgres
+          - an_added_inet_column_is_drift_under_fail_keyset_postgres
+          - an_added_inet_column_is_drift_under_fail_range_postgres
+          - an_added_inet_column_is_drift_under_fail_incremental_postgres
+          - an_added_inet_column_is_reported_under_the_default_policy_incremental_postgres
+          - an_added_tsvector_column_is_reported_under_the_default_policy_incremental_postgres
+          - an_added_bare_numeric_column_is_reported_under_the_default_policy_incremental_postgres
+          - "lib:a_column_absent_from_a_batch_baseline_is_left_to_the_drift_check"
+      mysql:
+        na: "the other sources never labelled an unbuildable column server text, so no baseline migration reaches a new column there"
+      mssql:
+        na: "the other sources never labelled an unbuildable column server text, so no baseline migration reaches a new column there"
+      mongo:
+        na: "the other sources never labelled an unbuildable column server text, so no baseline migration reaches a new column there"
+      oracle:
+        na: "the other sources never labelled an unbuildable column server text, so no baseline migration reaches a new column there"
+
   - name: pg-inet-host-text-gains-a-mask
     class: "a PostgreSQL inet column holding a host address is delivered as `10.1.2.3/32` where the server's own text is `10.1.2.3`, because inet cast to text appends the full mask"
     history: "found 2026-11-21 while writing live_pg_server_text: the server's inet::text is not inet_out; RED from this switch by the same cells"
@@ -7054,7 +7129,7 @@ seeds:
     switch: narrowing-override-reported-exact
     engines:
       oracle:
-        cells: ["lib:a_time_override_narrowing_a_result_column_is_lossy_on_batch_and_stream", "lib:a_change_row_that_carries_microseconds_grades_a_nanosecond_override_lossy", "lib:the_stream_resolver_reports_a_narrowing_override_lossy_as_check_does", an_oracle_batch_time_override_is_graded_by_the_result_column_it_lands_on, an_oracle_cdc_time_override_is_graded_as_the_batch_override, oracle_batch_timestamp9_is_refused_until_declared_under_every_policy]
+        cells: ["lib:a_time_override_narrowing_a_result_column_is_lossy_on_batch_and_stream", "lib:a_change_row_that_carries_microseconds_grades_a_nanosecond_override_lossy", "lib:a_change_row_carries_microseconds_on_oracle_and_nanoseconds_elsewhere", "lib:the_stream_resolver_reports_a_narrowing_override_lossy_as_check_does", an_oracle_batch_time_override_is_graded_by_the_result_column_it_lands_on, an_oracle_cdc_time_override_is_graded_as_the_batch_override, oracle_batch_timestamp9_is_refused_until_declared_under_every_policy]
       mssql:
         cells: ["lib:a_time_override_narrowing_a_result_column_is_lossy_on_batch_and_stream", "lib:the_stream_resolver_reports_a_narrowing_override_lossy_as_check_does", a_mssql_batch_time_override_is_graded_by_the_result_column_it_lands_on, a_mssql_cdc_time_override_is_graded_as_the_batch_override]
       postgres:

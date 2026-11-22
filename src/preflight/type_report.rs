@@ -132,6 +132,14 @@ pub(crate) fn is_stream(export: &ExportConfig) -> bool {
     export.mode == crate::config::ExportMode::Cdc
 }
 
+/// The change-stream engine an export reads, or `None` for a batch export.
+pub(crate) fn stream_engine(
+    config: &Config,
+    export: &ExportConfig,
+) -> Option<source::cdc::CdcEngine> {
+    is_stream(export).then(|| config.source.source_type.into())
+}
+
 /// The `columns:` overrides that apply to ONE resolver unit.
 fn unit_overrides(
     export: &ExportConfig,
@@ -200,20 +208,21 @@ pub fn collect_reports(
     let tls = config.source.tls.as_ref();
     let units = resolved_units(config, export, url, tls, config_dir, params, on_unresolved)?;
     let mut src = connect_source(config, url, tls)?;
+    let stream = stream_engine(config, export);
 
     units
         .into_iter()
         .map(|unit| {
             let overrides = unit_overrides(export, unit.table.as_deref(), column_overrides);
-            collect_one(
-                src.as_mut(),
+            let mappings = probe_mappings(src.as_mut(), stream, &unit.query, &overrides)?;
+            Ok(report_from_mappings(
                 export,
                 unit.table,
-                &unit.query,
-                &overrides,
+                mappings,
                 policy,
                 target,
-            )
+                &[],
+            ))
         })
         .collect()
 }
@@ -437,12 +446,12 @@ pub fn capture_load_units(
         OnUnresolvedCapture::Fail,
     )?;
     let mut src = connect_source(config, url, tls)?;
+    let stream = stream_engine(config, export);
     units
         .into_iter()
         .map(|unit| {
             let overrides = unit_overrides(export, unit.table.as_deref(), column_overrides);
-            let mappings =
-                probe_mappings(src.as_mut(), is_stream(export), &unit.query, &overrides)?;
+            let mappings = probe_mappings(src.as_mut(), stream, &unit.query, &overrides)?;
             let primary_key = match unit.relation.as_deref() {
                 Some(relation) => src.primary_key(relation).unwrap_or_else(|e| {
                     log::warn!(
@@ -532,35 +541,14 @@ fn refuse_captured_units(
     Ok(())
 }
 
-/// One unit's report, against an already-open source connection.
-fn collect_one(
-    src: &mut dyn source::Source,
-    export: &ExportConfig,
-    table: Option<String>,
-    query: &str,
-    column_overrides: &ColumnOverrides,
-    policy: &TypePolicy,
-    target: Option<ExportTarget>,
-) -> Result<ExportTypeReport> {
-    let mappings = probe_mappings(src, is_stream(export), query, column_overrides)?;
-    Ok(report_from_mappings(
-        export,
-        table,
-        mappings,
-        policy,
-        target,
-        &[],
-    ))
-}
-
 /// One unit's resolved mappings, with overrides that narrow the source type downgraded to lossy.
 pub(crate) fn probe_mappings(
     src: &mut dyn source::Source,
-    stream: bool,
+    stream: Option<source::cdc::CdcEngine>,
     query: &str,
     column_overrides: &ColumnOverrides,
 ) -> Result<Vec<crate::types::TypeMapping>> {
-    let mut mappings = if stream {
+    let mut mappings = if stream.is_some() {
         src.type_mappings(query, &ColumnOverrides::new())?
             .into_iter()
             .map(|m| source::cdc::retype_for_stream(m, column_overrides))
@@ -569,10 +557,7 @@ pub(crate) fn probe_mappings(
         src.type_mappings(query, column_overrides)?
     };
 
-    let wire_digits = match stream {
-        true => src.change_row_fraction_digits(),
-        false => 9,
-    };
+    let wire_digits = stream.map_or(9, source::cdc::CdcEngine::change_row_fraction_digits);
     let src = std::cell::RefCell::new(src);
     downgrade_narrowing_overrides(
         &mut mappings,
@@ -584,7 +569,7 @@ pub(crate) fn probe_mappings(
         },
         || src.borrow_mut().finer_than_microsecond_in_query(query),
     )?;
-    if !stream && seeded!("check-run-refusal-split", false, true) {
+    if stream.is_none() && seeded!("check-run-refusal-split", false, true) {
         mappings = mappings.into_iter().map(refuse_unmapped).collect();
     }
     Ok(mappings)
@@ -892,6 +877,8 @@ fn rivet_type_label(t: &crate::types::RivetType) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::source::cdc::CdcEngine;
+
     /// A batch column with no Arrow type is refused under every policy, with its reason; the rest is untouched.
     #[test]
     fn an_unmapped_batch_column_is_refused_under_every_policy_and_nothing_else_is() {
@@ -960,9 +947,11 @@ mod tests {
             }
         }
         let overrides = ColumnOverrides::new();
-        let batch = super::probe_mappings(&mut Unmapped, false, "q", &overrides).unwrap();
+        let batch = super::probe_mappings(&mut Unmapped, None, "q", &overrides).unwrap();
         assert_eq!(batch[0].refusal.as_deref(), Some("no arrow type"));
-        let stream = super::probe_mappings(&mut Unmapped, true, "q", &overrides).unwrap();
+        let stream =
+            super::probe_mappings(&mut Unmapped, Some(CdcEngine::Postgres), "q", &overrides)
+                .unwrap();
         assert_eq!(stream[0].refusal, None);
     }
 
@@ -1807,7 +1796,6 @@ exports:
         finer: Vec<String>,
         describe_fails: bool,
         describes: usize,
-        change_digits: u8,
     }
 
     impl Described {
@@ -1817,7 +1805,6 @@ exports:
                 finer: finer.iter().map(|c| c.to_string()).collect(),
                 describe_fails: false,
                 describes: 0,
-                change_digits: 9,
             }
         }
     }
@@ -1852,9 +1839,6 @@ exports:
                 })
                 .collect())
         }
-        fn change_row_fraction_digits(&self) -> u8 {
-            self.change_digits
-        }
         fn finer_than_microsecond_in_query(&mut self, _query: &str) -> anyhow::Result<Vec<String>> {
             self.describes += 1;
             if self.describe_fails {
@@ -1879,7 +1863,7 @@ exports:
         let verdict = |source: &mut Described, stream: bool, ov: &[(&str, RivetType)]| {
             let overrides: ColumnOverrides =
                 ov.iter().map(|(c, t)| (c.to_string(), t.clone())).collect();
-            probe_mappings(source, stream, "q", &overrides)
+            probe_mappings(source, stream.then_some(CdcEngine::Mssql), "q", &overrides)
                 .unwrap()
                 .into_iter()
                 .map(|m| (m.column_name, m.fidelity, m.warnings))
@@ -1944,14 +1928,13 @@ exports:
         use crate::types::TimeUnit::Nanosecond;
         let ns = || timestamp(Nanosecond, false);
         let overrides: ColumnOverrides = [("x".to_string(), ns())].into_iter().collect();
-        let grade = |change_digits: u8, finer: &[&str], stream: bool| {
+        let grade = |engine: Option<CdcEngine>, finer: &[&str]| {
             let mut source = Described::of(&[("x", "timestamp", ns())], finer);
-            source.change_digits = change_digits;
-            probe_mappings(&mut source, stream, "q", &overrides)
+            probe_mappings(&mut source, engine, "q", &overrides)
                 .unwrap()
                 .remove(0)
         };
-        let lossy = grade(6, &["x"], true);
+        let lossy = grade(Some(CdcEngine::Oracle), &["x"]);
         assert_eq!(lossy.fidelity, TypeFidelity::Lossy);
         assert_eq!(
             lossy.warnings,
@@ -1963,17 +1946,20 @@ exports:
                  carries microseconds under every type), or run without `--strict`"
             ]
         );
-        for (change_digits, finer, stream, what) in [
-            (6, &["x"][..], false, "batch reads the column in full"),
-            (6, &[][..], true, "a column not finer than a microsecond"),
+        for (engine, finer, what) in [
+            (None, &["x"][..], "batch reads the column in full"),
             (
-                9,
+                Some(CdcEngine::Oracle),
+                &[][..],
+                "a column not finer than a microsecond",
+            ),
+            (
+                Some(CdcEngine::Mssql),
                 &["x"][..],
-                true,
                 "an engine whose change row carries nanoseconds",
             ),
         ] {
-            let got = grade(change_digits, finer, stream);
+            let got = grade(engine, finer);
             assert_eq!(got.fidelity, TypeFidelity::Exact, "{what}");
             assert!(got.warnings.is_empty(), "{what}: {:?}", got.warnings);
         }
@@ -2026,7 +2012,7 @@ exports:
         let probe = |source: &mut Described, ov: &[(&str, RivetType)]| {
             let overrides: ColumnOverrides =
                 ov.iter().map(|(c, t)| (c.to_string(), t.clone())).collect();
-            probe_mappings(source, false, "q", &overrides).unwrap()
+            probe_mappings(source, None, "q", &overrides).unwrap()
         };
         let mut asked = Described::of(&[("d", "datetime2", ns())], &["d"]);
         asked.describe_fails = true;
@@ -2062,7 +2048,7 @@ exports:
         let overrides: ColumnOverrides = [("d".to_string(), timestamp(Microsecond, false))]
             .into_iter()
             .collect();
-        let got = probe_mappings(&mut stream, true, "q", &overrides).unwrap();
+        let got = probe_mappings(&mut stream, Some(CdcEngine::Mssql), "q", &overrides).unwrap();
         assert_eq!(got[0].fidelity, TypeFidelity::Lossy, "stream");
     }
 
@@ -2080,7 +2066,7 @@ exports:
         let overrides: ColumnOverrides = [("cut".to_string(), timestamp(Microsecond, false))]
             .into_iter()
             .collect();
-        let got = probe_mappings(&mut source, false, "q", &overrides).unwrap();
+        let got = probe_mappings(&mut source, None, "q", &overrides).unwrap();
         assert_eq!(got[0].fidelity, TypeFidelity::Exact, "{:?}", got[0]);
         assert!(got[0].warnings.is_empty(), "{:?}", got[0].warnings);
         assert_eq!(got[1].fidelity, TypeFidelity::Lossy);

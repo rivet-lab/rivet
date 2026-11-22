@@ -788,7 +788,18 @@ impl CdcEngine {
     }
 }
 
+/// The fraction digits of a second an Oracle change row keeps under every time type.
+pub(crate) const ORACLE_CHANGE_ROW_FRACTION_DIGITS: u8 = 6;
+
 impl CdcEngine {
+    /// The most fraction digits of a second a change row of this engine carries.
+    pub(crate) fn change_row_fraction_digits(self) -> u8 {
+        match self {
+            Self::Oracle => ORACLE_CHANGE_ROW_FRACTION_DIGITS,
+            Self::Mysql | Self::Postgres | Self::Mssql | Self::Mongo => 9,
+        }
+    }
+
     /// The engine a URL's scheme names — for `rivet cdc`, which has a URL and no `source.type`.
     pub(crate) fn from_url(url: &str) -> Result<Self> {
         let Some(t) = crate::config::SourceType::from_url_scheme(url) else {
@@ -1198,6 +1209,7 @@ pub(crate) fn create_change_stream(
 /// Resolve CDC tables' column type mappings from the source.
 pub(crate) struct CdcSchemaResolver<'s> {
     src: ResolverSource<'s>,
+    engine: CdcEngine,
 }
 
 /// The resolver's connection: its own, or the run's metadata connection lent for the run.
@@ -1220,15 +1232,20 @@ impl CdcSchemaResolver<'static> {
         let src = crate::source::connect(engine.source_type(), url, tls, None)?;
         Ok(Self {
             src: ResolverSource::Own(src),
+            engine,
         })
     }
 }
 
 impl<'s> CdcSchemaResolver<'s> {
     /// Resolve on a connection the run already holds.
-    pub(crate) fn lent(src: &'s mut (dyn crate::source::Source + 'static)) -> Self {
+    pub(crate) fn lent(
+        src: &'s mut (dyn crate::source::Source + 'static),
+        engine: CdcEngine,
+    ) -> Self {
         Self {
             src: ResolverSource::Lent(src),
+            engine,
         }
     }
 
@@ -1299,7 +1316,7 @@ impl<'s> CdcSchemaResolver<'s> {
         crate::types::narrowing::downgrade_narrowing_overrides(
             &mut planned,
             overrides,
-            self.source().change_row_fraction_digits(),
+            self.engine.change_row_fraction_digits(),
             || Ok(declared),
             || self.source().finer_than_microsecond_in_query(&select),
         )?;
@@ -1730,6 +1747,20 @@ mod mod_decisions {
         }
     }
 
+    /// A change row carries microseconds on Oracle and nanoseconds on every other engine, so a nanosecond declaration is graded by what the row holds.
+    #[test]
+    fn a_change_row_carries_microseconds_on_oracle_and_nanoseconds_elsewhere() {
+        for engine in [
+            CdcEngine::Mysql,
+            CdcEngine::Postgres,
+            CdcEngine::Mssql,
+            CdcEngine::Mongo,
+        ] {
+            assert_eq!(engine.change_row_fraction_digits(), 9, "{engine:?}");
+        }
+        assert_eq!(CdcEngine::Oracle.change_row_fraction_digits(), 6);
+    }
+
     /// The stream resolver grades a narrowing override as `check` does, so `--strict` refuses what `check` reports lossy: a time override by the result column, a decimal override by its digits.
     #[test]
     fn the_stream_resolver_reports_a_narrowing_override_lossy_as_check_does() {
@@ -1740,14 +1771,17 @@ mod mod_decisions {
             timezone: None,
         };
         let dec = |precision, scale| RivetType::Decimal { precision, scale };
-        let fidelity = |source: RivetType, finer: &[&str], declared: Option<RivetType>| {
+        let on = |engine, source: RivetType, finer: &[&str], declared: Option<RivetType>| {
             let overrides: ColumnOverrides =
                 declared.into_iter().map(|t| ("c".to_string(), t)).collect();
             let mut src = Fine(source, finer.iter().map(|c| c.to_string()).collect());
-            CdcSchemaResolver::lent(&mut src)
+            CdcSchemaResolver::lent(&mut src, engine)
                 .resolve("dbo.t", &overrides, None)
                 .unwrap()[0]
                 .fidelity
+        };
+        let fidelity = |source: RivetType, finer: &[&str], declared: Option<RivetType>| {
+            on(CdcEngine::Mssql, source, finer, declared)
         };
         let (lossy, exact) = (TypeFidelity::Lossy, TypeFidelity::Exact);
         let ns = || time(Nanosecond);
@@ -1755,6 +1789,8 @@ mod mod_decisions {
         assert_eq!(fidelity(ns(), &[], Some(time(Microsecond))), exact);
         assert_eq!(fidelity(ns(), &["c"], Some(ns())), exact);
         assert_eq!(fidelity(ns(), &["c"], None), exact);
+        assert_eq!(on(CdcEngine::Oracle, ns(), &["c"], Some(ns())), lossy);
+        assert_eq!(on(CdcEngine::Oracle, ns(), &[], Some(ns())), exact);
         assert_eq!(fidelity(dec(10, 2), &[], Some(dec(20, 0))), lossy);
         assert_eq!(fidelity(dec(10, 2), &[], Some(dec(12, 2))), exact);
     }

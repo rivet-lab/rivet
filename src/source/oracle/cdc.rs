@@ -146,9 +146,6 @@ const SIGNED_YEAR_PIN: &[&str] = &[
     "ALTER SESSION SET NLS_TIMESTAMP_TZ_FORMAT = 'SYYYY-MM-DD\"T\"HH24:MI:SS.FF TZH:TZM'",
 ];
 
-/// The fraction digits of a second an Oracle change row keeps under every time type.
-pub(crate) const CHANGE_ROW_FRACTION_DIGITS: u8 = 6;
-
 /// `SYYYY-MM-DDTHH:MI:SS[.fraction]` (a `-` year is BC), the fraction any length, kept to microseconds.
 pub(crate) fn parse_datetime(text: &str) -> Option<NaiveDateTime> {
     use chrono::Datelike as _;
@@ -2162,7 +2159,7 @@ mod tests {
             Some(dt("2026-09-28 01:02:03.123456"))
         );
         let kept = parse_datetime("2026-09-28T01:02:03.123456789").unwrap();
-        let unit = 10u32.pow(9 - u32::from(CHANGE_ROW_FRACTION_DIGITS));
+        let unit = 10u32.pow(9 - u32::from(crate::source::cdc::ORACLE_CHANGE_ROW_FRACTION_DIGITS));
         assert_eq!(
             kept.and_utc().timestamp_subsec_nanos(),
             123_456_789 / unit * unit

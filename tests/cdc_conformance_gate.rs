@@ -948,8 +948,9 @@ const PIN_INDEPENDENT: usize = 126; // ratchet-pin: cdc-census-independent (revi
 // 139 -> 140 (2026-11-16, #714): the Oracle whole-table cell reads the delivered parts with arrow against the rows the test wrote; the rig oracle grades each run.
 // 142 -> 147 (2026-11-16, #715): the MongoDB column-grants cells read the delivered parts with arrow against the fields the view lists and the values the test wrote; the hidden bytes are asserted absent.
 // 147 -> 155 (2026-11-19, #713): the SQL Server column-grants cells read the delivered parts with arrow against the rows and values the test wrote; the hidden bytes are asserted absent.
-// 154 -> 155 (2026-11-22, #1149): the Oracle CDC time-override cell reads the delivered change ids and values with arrow against the rows the test wrote; the verdict is graded by `check` and `--strict`.
-const PIN_SHARED_CODEC: usize = 155; // ratchet-pin: cdc-census-shared-codec (review 2027-02-01)
+// 154 -> 155 (2026-11-22, #1163): the PG CDC added-column cell reads the delivered id set with arrow; the rig oracle grades the first run.
+// 155 -> 156 (2026-11-22, #1149): the Oracle CDC time-override cell reads the delivered change ids and values with arrow against the rows the test wrote; the verdict is graded by `check` and `--strict`.
+const PIN_SHARED_CODEC: usize = 156; // ratchet-pin: cdc-census-shared-codec (review 2027-02-01)
 const PIN_SELF_COUNTER: usize = 6; // ratchet-pin: cdc-census-self-counter (review 2027-02-01)
 // 2026-09-28: +1 presence — the SQL Server undecodable-cell refusal, whose oracle is the refusal.
 // 2026-09-29: +2 presence — the PG CDC LMT-timezone and DOMAIN parity cells compare CDC to batch output.
