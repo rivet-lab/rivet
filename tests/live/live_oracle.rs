@@ -2509,9 +2509,14 @@ fn an_ltz_instant_just_past_9999_is_delivered_exactly_as_a_tz_column_holds_it() 
         "the server holds 10000-01-01 03:00: {stored:?}"
     );
     let out = tempfile::tempdir().unwrap();
-    Rig::oracle_batch(t.name())
+    let run = Rig::oracle_batch(t.name())
         .dest_path(out.path().to_path_buf())
-        .run_ok();
+        .run();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     let l = parquet_cells(out.path(), "L");
     let z = parquet_cells(out.path(), "Z");
     assert!(l[&1].is_some(), "the instant is delivered");
