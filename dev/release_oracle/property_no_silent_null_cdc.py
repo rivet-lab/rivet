@@ -94,6 +94,9 @@ def lit(col: Col, k: int) -> str:
     return col.lits[k] if 0 <= k < len(col.lits) else "NULL"
 
 
+DATA_LEGS = ("snapshot", "insert", "update", "delete")
+
+
 def expected(leg: str, n: int) -> list[tuple[str, int, int]]:
     """(__op, id, value index) the leg must deliver for an n-row seed."""
     if leg == "snapshot":
@@ -230,6 +233,30 @@ def judge_stop(c: Col, u: Unit, cell: str, stop: Result | None) -> Result | None
     return stop
 
 
+def agree_on_code(results: list[Result]) -> list[Result]:
+    """One value, one verdict: a data leg of an override unit that delivered where its snapshot leg stopped, stopped where it delivered, or stopped with another code, is a CDC_VERDICT_DIFFERS, whatever check noted."""
+    def settled(r: Result) -> bool:
+        return r.klass in ("", nsn.SPLIT) and (r.verdict == DELIVERED or (r.verdict == REFUSED and bool(r.code)))
+
+    def data_leg(r: Result) -> bool:
+        return r.cell.split("/")[2].removeprefix("cdc-").split("@")[0] in DATA_LEGS
+
+    ref = next((r for r in results if "/cdc-snapshot" in r.cell and settled(r)), None)
+    if ref is None:
+        return results
+
+    def differs(r: Result) -> str:
+        if r is ref or not data_leg(r) or not settled(r):
+            return ""
+        if (r.verdict == REFUSED) != (ref.verdict == REFUSED):
+            return f"the snapshot leg {'stopped with [' + ref.code + ']' if ref.verdict == REFUSED else 'delivered'}, this leg {'stopped with [' + r.code + ']' if r.verdict == REFUSED else 'delivered'}"
+        if r.verdict == REFUSED and r.code != ref.code:
+            return f"the snapshot leg stopped with [{ref.code}], this leg with [{r.code}]"
+        return ""
+
+    return [Result(r.cell, r.verdict, CDC_DIFFERS, why, r.code) if (why := differs(r)) else r for r in results]
+
+
 def grade_unit(engine: str, u: Unit, cols: list[Col], n: int, runs: dict[str, core.Proc], checks: dict[str, core.Proc], d: Path, tag: str) -> list[Result]:
     """Grade every leg of one unit from the whole output directory against the seed literals; each run is held to the check made right before it."""
     graded = cols if u.target == "none" else [u.col]
@@ -290,7 +317,7 @@ def grade_unit(engine: str, u: Unit, cols: list[Col], n: int, runs: dict[str, co
                 out.append(Result(cell, DELIVERED, WRONG, f"{len(wrong)} values changed under fidelity {fid or '?'}, e.g. {wrong[:3]}", fidelity=fid))
             else:
                 out.append(Result(cell, DELIVERED, "", "", fidelity=fid))
-    return out
+    return out if u.target == "none" else agree_on_code(out)
 
 
 def run_round(engine: str, r: int, cols: list[Col], units: list[Unit], image: str, work: Path) -> list[Result]:
@@ -492,12 +519,28 @@ def self_test() -> None:
     assert rs[0].klass == CDC_DIFFERS and rs[0].verdict == REFUSED, rs[0]
     rs = grade_unit("mysql", none, [gone_c], 1, {"snapshot": refused}, {"snapshot": nsn._proc(5, "[RIVET_X] no")}, d, "")
     assert rs[0].klass == "" and rs[0].verdict == REFUSED, rs[0]
+    snap, ins = (Result(f"e/c->t/cdc-{leg}/parquet", REFUSED, "", "", code) for leg, code in (("snapshot", "RIVET_A"), ("insert", "RIVET_B")))
+    got = agree_on_code([snap, ins, Result("e/c->t/cdc-delete/parquet", REFUSED, "", "", "RIVET_A"), Result("e/c->t/cdc-update/parquet", DELIVERED, "", "")])
+    assert [r.klass for r in got] == ["", CDC_DIFFERS, "", CDC_DIFFERS] and got[0] is snap, "a leg that stops with another code than the snapshot leg, or delivers where it stopped, differs, whatever check noted"
+    assert agree_on_code([ins]) == [ins], "no snapshot leg, nothing to compare"
+    ok_snap = Result(snap.cell, DELIVERED, "", "")
+    assert agree_on_code([ok_snap, ins])[1].klass == CDC_DIFFERS, "a stream leg that stopped where the snapshot delivered differs"
+    assert agree_on_code([ok_snap, Result("e/c->t/cdc-insert/parquet", DELIVERED, "", "")])[1].klass == "", "two delivering legs agree"
+    ddl = Result("e/c->t/cdc-add_column/parquet", DELIVERED, "", "")
+    assert agree_on_code([snap, ddl])[1] is ddl, "a DDL leg carries one value of its own and is not compared"
+    held = Result("e/c->t/cdc-insert/parquet", DELIVERED, nsn.NULLED, "")
+    assert agree_on_code([snap, held])[1] is held, "a leg that carries another class keeps it"
+    split = Result(snap.cell, REFUSED, nsn.SPLIT, "", "RIVET_A")
+    assert agree_on_code([split, ins])[1].klass == CDC_DIFFERS, "a snapshot leg graded a check split still fixes the code its stream legs must carry"
     value_stop = nsn._proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] column `e00` holds 1.1234567890123456789")
     stated = core.Proc(["rivet"], 0, json.dumps({"columns": [{"column": "E00", "fidelity": "lossy", "warnings": ["refused at run (RIVET_SOURCE_VALUE_UNREPRESENTABLE)"]}]}), "", gated=False)
     rs = grade_unit("mysql", Unit("float8", exact_c, "parquet"), [exact_c], 1, {"snapshot": value_stop}, {"snapshot": stated}, d, "")
     assert rs[0].verdict == REFUSED and rs[0].klass == "", "a value refusal that check states on the column is no split, on the change-stream legs too"
     rs = grade_unit("mysql", Unit("float8", exact_c, "parquet"), [exact_c], 1, {"snapshot": value_stop}, {"snapshot": nsn._proc(0)}, d, "")
     assert rs[0].klass == nsn.SPLIT, "a check that states nothing is a split"
+    noted_exact = core.Proc(["rivet"], 0, json.dumps({"columns": [{"column": "E00", "fidelity": "exact", "warnings": []}]}), "note[values-unread]: rivet check reads at most the first row of an export that declares `columns:`; a run may still refuse a value it did not read with RIVET_SOURCE_VALUE_UNREPRESENTABLE", gated=False)
+    rs = grade_unit("mysql", Unit("float8", exact_c, "parquet"), [exact_c], 1, {"snapshot": value_stop}, {"snapshot": noted_exact}, d, "")
+    assert rs[0].klass == nsn.SPLIT, "the note the product prints for every export with `columns:` excuses no refusal on the change-stream legs either"
     other = Col("e01", "INT", "Int32", "int", ("1",), cdc=te.EXACT_V)
     stopped, fine = [Result("c", REFUSED, CDC_DIFFERS, "", "RIVET_X")], [Result("c", DELIVERED, "", "")]
     assert shared_stop([exact_c, other], stopped) and not shared_stop([exact_c], stopped) and not shared_stop([exact_c, other], fine)

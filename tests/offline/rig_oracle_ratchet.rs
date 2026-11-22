@@ -59,6 +59,7 @@ use std::path::{Path, PathBuf};
 // 58 -> 59 (2026-11-19, #713): the SQL Server revoke-between-two-batches cell (a_revoke_between_two_batches_of_a_run_...): the refused run leaves the batch it committed before the revoke, its rows and its checkpoint for the re-run by design.
 // 59 -> 60 (2026-11-19, #918): the pending-baseline cells of check_override_wire_cdc.rs: the run refused by the baseline leg leaves its observed schema and a chunk checkpoint, asserted through one shared helper.
 // 60 -> 61 (2026-11-22, #1163): the added-column cells of live_pg_server_text.rs run on_schema_drift: fail, whose gate fails the run after its parts are written; one shared declaration in the helper, closed when the drift gate stops failing after the write.
+// 61 -> 62 (2026-11-22, #1148): the Oracle chunked cell refused on its fifth chunk (a_chunked_run_refused_on_a_later_chunk_*): the four finished chunks keep their parts, file_log rows and observed schema by design, and the cell asserts them.
 // ratchet-pin: failed-run-leftover-declarations (review 2027-02-01) count tests/live/ \.a_failed_run_may_leave\(|FAILED_RUN_LEAVES_ENV
 
 /// Entries of `KNOWN_PRODUCT_DEFECTS` (tests/common/refusal.rs).
