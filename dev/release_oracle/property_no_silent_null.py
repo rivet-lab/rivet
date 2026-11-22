@@ -411,7 +411,7 @@ def _same_instant(engine: str, native: str, exp: str, got) -> str:
         except OverflowError:
             return "PRESENCE"
     if isinstance(e, timedelta) and isinstance(got, (int, float, Decimal)) and not isinstance(got, bool):
-        return "OK" if Decimal(e.days * 86400 + e.seconds) + Decimal(e.microseconds) / 10**6 == Decimal(str(got)) else WRONG
+        return "OK" if Decimal(e.days * 86400 + e.seconds) + Decimal(e.microseconds) / 10**6 + Decimal(_sub_us(exp)) / 10**9 == Decimal(str(got)) else WRONG
     if e is None or g is None:
         return WRONG if e is None and isinstance(got, (date, dtime, timedelta)) else "PRESENCE"
     if type(e) is date and type(g) is datetime:
@@ -692,6 +692,12 @@ def part_set_diff(out: Path, fmt: str) -> str:
 TEXT_READ = ("TIMESTAMP_NS", "TIME_NS")
 
 
+def ns_text(ns: int) -> str:
+    """A nanosecond count since the epoch as the text DuckDB prints, read without DuckDB's own conversion that refuses the edge of its range."""
+    whole, frac = divmod(ns, 10**9)
+    return (datetime(1970, 1, 1) + timedelta(seconds=whole)).isoformat(sep=" ") + (f".{frac:09d}".rstrip("0") if frac else "")
+
+
 def read_files(parts: list[str], fmt: str, key: str = "id"):
     """As `read_parts`, for an explicit list of part files."""
     import duckdb
@@ -711,6 +717,10 @@ def read_files(parts: list[str], fmt: str, key: str = "id"):
             for f in tbl.schema:
                 if f.name.lower() in wide:
                     tbl = tbl.set_column(tbl.schema.get_field_index(f.name), f.name, tbl.column(f.name).cast(pa.string()))
+                elif pa.types.is_timestamp(f.type) and f.type.unit == "ns":
+                    texts = pa.array([None if v is None else ns_text(v) for v in tbl.column(f.name).cast(pa.int64()).to_pylist()], pa.string())
+                    tbl = tbl.set_column(tbl.schema.get_field_index(f.name), f.name, texts)
+                    wide[f.name.lower()] = "TIMESTAMP_NS"
             con.register("nsn_parts", tbl)
             src = "nsn_parts"
         else:
@@ -1168,16 +1178,17 @@ def _proc(rc: int, err: str = "") -> core.Proc:
 
 
 def nanosecond_read_keeps_every_digit() -> bool:
-    """Whether `read_files` hands back a nanosecond timestamp, zoned timestamp and time of day with every digit."""
+    """Whether `read_files` hands back a nanosecond timestamp (even the one at the edge of DuckDB's range), zoned timestamp and time of day with every digit."""
     import pyarrow as pa
     import pyarrow.parquet as pq
 
     with tempfile.TemporaryDirectory() as d:
         f = str(Path(d) / "p.parquet")
-        pq.write_table(pa.table({"id": pa.array([1], pa.int32()), "t": pa.array([1782208800123456700], pa.timestamp("ns")), "d": pa.array([49530123456700], pa.time64("ns")), "z": pa.array([1782208800123456700], pa.timestamp("ns", tz="UTC"))}), f)
+        pq.write_table(pa.table({"id": pa.array([1], pa.int32()), "t": pa.array([1782208800123456700], pa.timestamp("ns")), "d": pa.array([49530123456700], pa.time64("ns")), "z": pa.array([1782208800123456700], pa.timestamp("ns", tz="UTC")), "m": pa.array([-9223372036854775800], pa.timestamp("ns"))}), f)
         desc, rows, _ = read_files([f], "parquet")
     got = rows[1]
-    return got["t"].endswith(".1234567") and got["d"].endswith(".1234567") and "123456700" in got["z"] and desc["z"] == "TIMESTAMP WITH TIME ZONE"
+    return got["t"].endswith(".1234567") and got["d"].endswith(".1234567") and "123456700" in got["z"] and desc["z"] == "TIMESTAMP WITH TIME ZONE" \
+        and got["m"] == "1677-09-21 00:12:43.1452242" and desc["m"] == "TIMESTAMP_NS"
 
 
 def self_test() -> None:
@@ -1232,6 +1243,7 @@ def self_test() -> None:
     assert compare("mssql", "'2026-06-23 10:00:00 +05:30'", "other", "none", "2026-06-23 04:30:00+00", native="DATETIMEOFFSET") == "OK"
     assert compare("mysql", "'14:30:00.123456'", "other", "none", dtime(14, 30, 0, 123456), native="TIME(6)") == "OK"
     assert compare("mssql", "'23:59:59.9999999'", "other", "none", dtime(23, 59, 59, 999999), native="TIME(7)") == WRONG, "the 100 ns digit dropped"
+    assert compare("mssql", "'12:34:56.1234567'", "other", "none", Decimal("45296.1234567"), native="TIME(7)") == "OK" and compare("mssql", "'12:34:56.1234567'", "other", "none", Decimal("45296.123456"), native="TIME(7)") == WRONG, "a time as decimal seconds keeps its 100 ns digit"
     assert compare("mssql", "'2000-01-01 00:00:00.1234567'", "other", "none", "2000-01-01 00:00:00.123456700", native="DATETIME2") == "OK"
     assert compare("mssql", "'2000-01-01 00:00:00.1234567'", "other", "none", "2000-01-01 00:00:00.123456", native="DATETIME2") == WRONG
     assert compare("mysql", "'-00:00:00.5'", "other", "none", dtime(0, 0, 0, 500000), native="TIME(1)") == WRONG, "a negative time delivered positive"

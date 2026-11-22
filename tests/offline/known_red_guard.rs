@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 
 const LEDGER: &str = "dev/release_oracle/known_red.py";
+const EXCUSES: &str = "dev/release_oracle/skip_allow.py";
 
 // The ledger's entries: `_open(...)` cells and bare `KnownRed(...)` gate rows. History frozen at 2026-11-04; a later raise is a dated entry in the ledger.
 // 25 (2026-10-14): 21 open-defect cells, 4 gate rows (Oracle cdc-load x2, Oracle TIMESTAMP(9) sentinels x2).
@@ -38,7 +39,7 @@ const LEDGER: &str = "dev/release_oracle/known_red.py";
 // 20 -> 16 (2026-11-05): the VP-8 cells on MSSQL, Oracle and Mongo and the MSSQL lock-timeout cell MT-F-F are plain cells again (fix/stop-class-by-code).
 // 16 -> 2 (2026-11-06): the 14 keyset key type cells are plain cells again (fix/seam-keyset-key-type).
 
-/// The horizon every `_open` entry expires at; moves only here and in the ledger together.
+/// The horizon every known-red entry and every excused skip expires at; moves only here and in both ledgers together.
 const EXPIRES: &str = "2026-11-29";
 
 fn root() -> PathBuf {
@@ -158,12 +159,6 @@ fn the_entry_pin_counts_every_ledger_entry() {
 
 #[test]
 fn the_known_red_horizon_moves_only_with_this_guard() {
-    let text = ledger();
-    assert!(
-        text.contains(&format!("\n_EXPIRES = \"{EXPIRES}\"\n")),
-        "the ledger's horizon is {EXPIRES} and moves only together with this guard: an extension is a reviewed diff, not an edit"
-    );
-    // No entry outlives the horizon: every quoted date in the ledger is on or before it.
     let is_date = |s: &str| {
         s.len() == 10
             && s.bytes().enumerate().all(|(i, b)| {
@@ -174,19 +169,26 @@ fn the_known_red_horizon_moves_only_with_this_guard() {
                 }
             })
     };
-    let later: Vec<&str> = text
-        .match_indices('"')
-        .filter_map(|(i, _)| {
-            text.get(i + 1..i + 11)
-                .filter(|s| is_date(s) && text[i + 11..].starts_with('"'))
-        })
-        .filter(|s| *s > EXPIRES)
-        .collect();
-    assert_eq!(
-        later,
-        Vec::<&str>::new(),
-        "known-red dates past the horizon {EXPIRES}. An entry that must outlive the horizon moves the horizon here, in the open."
-    );
+    for path in [LEDGER, EXCUSES] {
+        let text = std::fs::read_to_string(root().join(path)).expect("a dated ledger");
+        assert!(
+            text.contains(&format!("\n_EXPIRES = \"{EXPIRES}\"\n")),
+            "{path}: the horizon is {EXPIRES} and moves only together with this guard: an extension is a reviewed diff, not an edit"
+        );
+        let later: Vec<&str> = text
+            .match_indices('"')
+            .filter_map(|(i, _)| {
+                text.get(i + 1..i + 11)
+                    .filter(|s| is_date(s) && text[i + 11..].starts_with('"'))
+            })
+            .filter(|s| *s > EXPIRES)
+            .collect();
+        assert_eq!(
+            later,
+            Vec::<&str>::new(),
+            "{path}: dates past the horizon {EXPIRES}. An entry that must outlive the horizon moves the horizon here, in the open."
+        );
+    }
 }
 
 #[test]
