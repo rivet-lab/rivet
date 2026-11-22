@@ -136,7 +136,7 @@ know" is a config knob).
 |----------|------------|-------|------------|---------|
 | `JSON` / `JSONB` | **auto** — `Type::JSON` (OID 114) and `Type::JSONB` (OID 3802) are native PG wire types. | **auto** — `MYSQL_TYPE_JSON` is native since MySQL 5.7. | **manual override required** — SQL Server stores JSON in `nvarchar`; the catalog reports only `nvarchar`. | **always** — the whole document exports as one `document` column (`Utf8` + `arrow.json`), typed downstream by `PARSE_JSON`. |
 | `UUID` | **auto** — `Type::UUID` (OID 2950) is a native PG type. | **manual override required.** MySQL has no native UUID; they are stored in `VARCHAR(36)` or `BINARY(16)`. The catalog reports only `varchar`/`binary` — semantic UUID information is gone before the driver ever sees the column. Operators add an explicit override (see below). | **auto** — `uniqueidentifier` is a native type; exports as `FixedSizeBinary(16)` + `LogicalType::Uuid`. | n/a — MongoDB does no per-field typing; `_id` is a stringified `Utf8` key, values live inside the blob. |
-| `DECIMAL(p,s)` | **auto when declared** — PG's catalog returns `numeric_precision`/`numeric_scale` for table-qualified queries; ad-hoc `numeric` expressions need an override. | **auto** — precision/scale derive from the wire column definition (display width + decimals), including ad-hoc queries; a `columns:` override is needed only in the rare case derivation fails (Rivet then reports the column Unsupported and names the override). | **auto** — precision/scale recovered from the data (tiberius drops the declared scale). | n/a — numbers stay inside the JSON `document` blob. |
+| `DECIMAL(p,s)` | **auto when declared** — PG's catalog returns `numeric_precision`/`numeric_scale` for table-qualified queries; an ad-hoc `numeric` expression is delivered as the server's text (`string`, text form `server_text`) unless `columns:` declares a `decimal(p,s)`. | **auto** — precision/scale derive from the wire column definition (display width + decimals), including ad-hoc queries; a `columns:` override is needed only in the rare case derivation fails (Rivet then reports the column Unsupported and names the override). | **auto** — precision/scale recovered from the data (tiberius drops the declared scale). | n/a — numbers stay inside the JSON `document` blob. |
 
 Adding overrides looks like:
 
@@ -302,11 +302,12 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 
 * PG `numeric(p, -s)` (negative scale) cannot be written to Parquet — the
   spec requires non-negative DECIMAL scale. The catalog does not report a
-  negative scale, so a bare column is refused as `RIVET_TYPE_UNSAFE_MAPPING`
-  (`pg_edge_decimal_negative_scale_without_override_is_refused_as_unsafe_mapping`)
-  and a `decimal(p,-s)` override as `RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH`
+  negative scale, so a bare column is a bare `numeric` and is delivered as the
+  server's own text labelled `server_text`
+  (`pg_edge_decimal_negative_scale_without_override_is_delivered_as_the_servers_text`) and a
+  `decimal(p,-s)` override is refused as
+  `RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH`
   (`pg_edge_decimal_negative_scale_override_is_refused_by_the_override_table`).
-  Declare the column `string` to keep its digits.
 * DuckDB's `DECIMAL` is capped at precision 38 (HUGEINT-backed). For
   Parquet files with `precision > 38` DuckDB silently returns DOUBLE.
   Our file still carries `LogicalType::Decimal(p, s)` correctly — pyarrow
@@ -320,7 +321,7 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `smallint` | `int16` | `Int16` | integer text | | golden |
 | `integer` | `int32` | `Int32` | integer text | | golden |
 | `bigint` | `int64` | `Int64` | integer text | | golden |
-| `numeric(p,s)` | `decimal(p,s)` | `DECIMAL(p,s)` | exact decimal text | override if unbounded in query | contract + live matrix |
+| `numeric(p,s)` | `decimal(p,s)` | `DECIMAL(p,s)` | exact decimal text | a `numeric` with no precision is the server's text; declare `decimal(p,s)` to type it | contract + live matrix |
 | `real` | `float32` | `Float32` | float text | | golden |
 | `double precision` | `float64` | `Float64` | float text | | golden |
 | `date` | `date` | `Date32` | ISO date | | golden |
@@ -347,7 +348,7 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `interval[]` | `list<interval>` | `List<Utf8>` | — | 1-D arrays; each element is its ISO 8601 duration text | type capability ledger |
 | `oid[]` | `list<int64>` | `List<Int64>` | — | 1-D arrays; read at the unsigned 32-bit width | type capability ledger |
 | enum array | `list<enum>` | `List<Utf8>` | — | 1-D arrays; each element is its label | type capability ledger |
-| any other type with no Arrow mapping: `inet`, `cidr`, `macaddr`, `macaddr8`, `bit`, `varbit`, `money`, `"char"`, `timetz`, `xml`, `tsvector`, `tsquery`, `point`, `line`, `lseg`, `box`, `path`, `polygon`, `circle`, ranges and multiranges, `regclass`, `regtype`, `xid`, `xid8`, `cid`, `tid`, `pg_lsn`, composites, extension types, and arrays of them | `string` (text form `server_text`) | `Utf8` labelled `rivet.text_form = server_text` | escaped UTF-8 | batch delivers the text the server prints for the value (`inet` without a `/32` or `/128` host mask, as the server prints it); the session is fixed to `datestyle ISO, MDY`, `TimeZone UTC`, `extra_float_digits 3`, `intervalstyle postgres`, `bytea_output hex`, so a range of dates or timestamps reads as ISO text; `money` is printed in the server's `lc_monetary`; a column declared in `columns:` keeps its declaration; a bare `numeric` is still refused. CDC delivers the same text, `bit` and `bit varying` (`B'110'` unwrapped to `110`) and every array of these types included | live `live_pg_server_text`, `live_cdc_value_parity` |
+| any other type with no Arrow mapping: `inet`, `cidr`, `macaddr`, `macaddr8`, `bit`, `varbit`, `money`, `"char"`, `timetz`, `xml`, `tsvector`, `tsquery`, `point`, `line`, `lseg`, `box`, `path`, `polygon`, `circle`, ranges and multiranges, `regclass`, `regtype`, `xid`, `xid8`, `cid`, `tid`, `pg_lsn`, composites, extension types, and arrays of them | `string` (text form `server_text`) | `Utf8` labelled `rivet.text_form = server_text` | escaped UTF-8 | batch delivers the text the server prints for the value (`inet` without a `/32` or `/128` host mask, as the server prints it); the session is fixed to `datestyle ISO, MDY`, `TimeZone UTC`, `extra_float_digits 3`, `intervalstyle postgres`, `bytea_output hex`, so a range of dates or timestamps reads as ISO text; `money` is printed in the server's `lc_monetary`; a column declared in `columns:` keeps its declaration; a `numeric` with no declared precision (an ad-hoc expression, or a precision the catalog hint cannot carry) and an array of `numeric` are delivered as the server prints them, `NaN` and `Infinity` included; a `numeric(p,s)` the catalog types, or a `numeric` declared in `columns:`, keeps its decimal; `rivet check --strict` passes these columns (they are not refused) and still exits 1 for a type that is refused; a drift baseline the previous release stored for such a column under its native name (`numeric`, `_numeric`) is rewritten to `Utf8` on the first run after the upgrade without reporting drift. CDC delivers the same text, `bit` and `bit varying` (`B'110'` unwrapped to `110`) and every array of these types included | live `live_pg_server_text`, `live_cdc_value_parity` |
 | nullable / all-null | — | null bitmap preserved | empty cells | `note_nullable`, `note_all_null` | type_roundtrip |
 | large `text` | `string` | `Utf8` | escaped | 2k–5k chars | type_roundtrip |
 

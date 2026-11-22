@@ -104,10 +104,10 @@ type. Two traps inside that:
 - **arms that produce the same variant.** `TIMESTAMP` and `TIMESTAMPTZ` both map
   to `Timestamp` and differ only in the timezone field; asserting the variant
   would let the arms be swapped, losing the UTC semantics. Assert the FIELD.
-- **arms whose value is a diagnostic.** Bare `NUMERIC` is `Unsupported` on
-  purpose (the wire protocol carries no atttypmod), so the oracle is the REASON
-  text — it must still name the column-override escape, or the operator is told
-  "unsupported" with nowhere to go.
+- **arms whose value is a diagnostic.** Bare `NUMERIC` maps to `Unsupported`
+  (the wire protocol carries no atttypmod) and is delivered as the server's text,
+  so the oracle is the REASON text — it must still name the column-override
+  escape.
 
 ### One pure function, one test
 

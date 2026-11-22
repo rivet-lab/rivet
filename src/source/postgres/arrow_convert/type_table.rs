@@ -14,7 +14,6 @@ fn of(t: &Type) -> TypeMapping {
             &SourceColumn::simple("c", t.name(), true),
             pg_type_to_rivet(t),
         ),
-        t,
         false,
     )
 }
@@ -88,7 +87,7 @@ fn table() -> Vec<Case> {
         case(
             "numeric (no catalog hint)",
             of(&Type::NUMERIC),
-            "unsupported(numeric) | - | unsupported | unsupported | reads string,json,unsupported(x)",
+            "unsupported(numeric) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "date",
@@ -428,7 +427,7 @@ fn table() -> Vec<Case> {
         case(
             "numeric[]",
             of(&Type::NUMERIC_ARRAY),
-            "list<unsupported(numeric)> | - | unsupported | unsupported | reads list<int32>",
+            "list<unsupported(numeric)> | Utf8 | text:server_text | logical_string | reads list<int32>",
         ),
         case(
             "json[]",
