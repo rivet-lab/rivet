@@ -256,7 +256,7 @@ def self_test() -> int:
     assert lane_of(own) == NIGHTLY and not any(owed_by(k, lane) for k in KNOWN_RED if own in k.keys() for lane in (GATE, ISLAND, OFFLINE)), \
         "a nightly class is owed by no gate run: a full gate would block on it"
     cut = nightly_classes()
-    assert nightly_key("no_silent_null", "mysql", "CHECK_RUN_SPLIT") in cut and nightly_key("no_silent_null", "postgres", "WRONG_VALUE") in cut, \
+    assert nightly_key("no_silent_null", "mysql", "CHECK_RUN_SPLIT") in cut and nightly_key("no_silent_null", "oracle", "CHECK_RUN_SPLIT") in cut, \
         "a gate entry is cut to its (matrix, engine, cause) class"
     from .property_no_silent_null import Result, failure_message
     rs = [Result("mysql/a->b/full/parquet", "x")]
