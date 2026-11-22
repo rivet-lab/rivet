@@ -3383,6 +3383,74 @@ mod error_code_tests {
 }
 
 #[cfg(test)]
+mod override_table_tests {
+    use crate::types::{ColumnOverrides, RivetType, SourceColumn, TypeMapping};
+
+    struct TableSource(Vec<TypeMapping>);
+
+    impl crate::source::Source for TableSource {
+        fn export(
+            &mut self,
+            _request: &crate::source::ExportRequest<'_>,
+            _sink: &mut dyn crate::source::BatchSink,
+        ) -> crate::error::Result<()> {
+            unreachable!("a plan-time read exports nothing")
+        }
+
+        fn query_scalar(&mut self, _sql: &str) -> crate::error::Result<Option<String>> {
+            unreachable!("a plan-time read reads no scalar")
+        }
+
+        fn type_mappings(
+            &mut self,
+            _query: &str,
+            overrides: &ColumnOverrides,
+        ) -> crate::error::Result<Vec<TypeMapping>> {
+            if overrides.is_empty() {
+                return Ok(self.0.clone());
+            }
+            crate::rivet_bail!(
+                crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH,
+                "the batch table refuses this pair"
+            )
+        }
+    }
+
+    fn numeric() -> TypeMapping {
+        TypeMapping::from_source(
+            &SourceColumn::simple("v", "numeric(10,2)", true),
+            RivetType::Decimal {
+                precision: 10,
+                scale: 2,
+            },
+        )
+    }
+
+    fn declared(t: RivetType) -> ColumnOverrides {
+        ColumnOverrides::from([("v".to_string(), t)])
+    }
+
+    /// An integer override over a numeric column goes to the batch table and is refused there; a string override and no override are not its pair.
+    #[test]
+    fn an_integer_override_over_a_numeric_is_the_batch_tables_pair_and_nothing_else_is() {
+        use crate::error::assert_coded;
+        let mut src = TableSource(vec![numeric()]);
+        let detected = vec![numeric()];
+        let err =
+            super::refuse_by_override_table(&mut src, "q", &detected, &declared(RivetType::Int64))
+                .unwrap_err();
+        assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+        let err =
+            super::stream_override_refusal(&mut src, "q", &declared(RivetType::Int64)).unwrap_err();
+        assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+        super::refuse_by_override_table(&mut src, "q", &detected, &declared(RivetType::String))
+            .expect("a string override is not the table's pair");
+        super::refuse_by_override_table(&mut src, "q", &detected, &ColumnOverrides::new())
+            .expect("no override is not the table's pair");
+    }
+}
+
+#[cfg(test)]
 mod grants_prerequisite_tests {
     use super::{CdcEngine, DrainMode};
 

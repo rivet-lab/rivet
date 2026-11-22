@@ -1274,6 +1274,13 @@ fn render_str(v: &RivetValue) -> String {
 mod tests {
     use super::*;
 
+    /// A refusal prints the reason it was worded with.
+    #[test]
+    fn a_fix_refusal_displays_its_reason() {
+        assert_eq!(FixRefusal::from("a reason").to_string(), "a reason");
+        assert_eq!(FixRefusal::by_value("by value").to_string(), "by value");
+    }
+
     /// A SQL Server time(7) arrives as nanoseconds: a Time64(ns) column keeps the 100ns tick, a microsecond column takes a value with no such digit and refuses one that has it, never truncating.
     #[test]
     fn a_nanosecond_time_keeps_its_tick_and_never_truncates_into_microseconds() {

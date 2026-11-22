@@ -488,7 +488,7 @@ fn dispatch_check(
         export.as_deref(),
     )?;
     if let Some(note) =
-        crate::error::values_unread_note(declared.iter().any(|e| !e.columns.is_empty()))
+        crate::error::values_unread_note(crate::config::any_declares_columns(&declared))
     {
         eprintln!("{note}");
     }

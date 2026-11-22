@@ -2206,6 +2206,27 @@ mod roast_mysql_bit_decode_tests {
         assert!(s.is_null(1));
     }
 
+    /// An unsigned BIGINT and a text-wire integer are read by the 16 and 32 bit accessors; text with a fraction is not an integer.
+    #[test]
+    fn the_narrow_integer_accessors_read_an_unsigned_and_a_whole_text_cell() {
+        use crate::source::value_checksum::CellSource;
+        let cases: Vec<(&str, Cell)> = vec![
+            ("uint", v_uint((1u64 << 63) | 5)),
+            ("whole", v_bytes(b"42")),
+            ("fraction", v_bytes(b"1.5")),
+        ];
+        let defs: Vec<Vec<u8>> = cases.iter().map(|(_, (d, _))| d.clone()).collect();
+        let row: Vec<Option<Vec<u8>>> = cases.iter().map(|(_, (_, b))| Some(b.clone())).collect();
+        let rows = fetch_binary_rows(defs, vec![row]);
+        let s = MysqlCellSource { rows: &rows };
+        assert_eq!(s.int16(0, 0), Some(5));
+        assert_eq!(s.int32(0, 0), Some(5));
+        assert_eq!(s.int16(1, 0), Some(42));
+        assert_eq!(s.int32(1, 0), Some(42));
+        assert_eq!(s.int16(2, 0), None);
+        assert_eq!(s.int32(2, 0), None);
+    }
+
     /// Every `CellSource` accessor, over the BINARY protocol.
     #[test]
     fn every_cell_source_accessor_reads_the_binary_value_it_should() {
