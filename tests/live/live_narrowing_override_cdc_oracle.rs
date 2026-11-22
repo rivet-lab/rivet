@@ -3,6 +3,17 @@
 use crate::common::*;
 use crate::live_narrowing_override::*;
 
+/// One CDC case: label, columns, declaration, delivered column, verdict, inserted value, delivered value.
+pub type CdcCase<'a> = (
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a str,
+    Verdict,
+    &'a str,
+    &'a str,
+);
+
 /// An Oracle CDC declared `timestamp` / `timestamp_tz` over `TIMESTAMP(9)` [WITH TIME ZONE] is lossy and refused by `--strict`, `timestamp_ns` / `timestamp_tz_ns` and `timestamp` over `TIMESTAMP(3)` exact; the change row holds what the verdict says.
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]

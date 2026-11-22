@@ -33,17 +33,6 @@ pub fn assert_delivered(
 /// One batch case: name, optional query, declaration, verdict, delivered column, delivered value.
 pub type BatchCase<'a> = (&'a str, Option<String>, &'a str, Verdict, &'a str, &'a str);
 
-/// One CDC case: label, columns, declaration, delivered column, verdict, inserted value, delivered value.
-pub type CdcCase<'a> = (
-    &'a str,
-    &'a str,
-    &'a str,
-    &'a str,
-    Verdict,
-    &'a str,
-    &'a str,
-);
-
 /// The verdict a declared column draws: lossy (warns by default, refused by `--strict`) or exact (runs under both).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Verdict {
