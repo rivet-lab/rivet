@@ -105,6 +105,96 @@ fn check_refuses_a_timestamp_with_a_time_declared_date_oracle() {
     );
 }
 
+/// `check` exits 0 and prints the values-unread note on stderr only for an export that declares `columns:`.
+fn check_says_it_read_no_values_only_under_columns(declared: Rig, plain: Rig, name: &str) {
+    let said = |rig: &Rig| {
+        let o = rig.cli(&["check", "--export", name]);
+        let (err, out) = (
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+        );
+        assert_eq!(o.status.code(), Some(0), "{err}");
+        assert!(!out.contains("note[values-unread]"), "stdout: {out}");
+        err
+    };
+    let with = said(&declared);
+    assert!(with.contains("note[values-unread]"), "{with}");
+    for code in [
+        "RIVET_SOURCE_VALUE_UNREPRESENTABLE",
+        "RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE",
+    ] {
+        assert!(with.contains(code), "{code}: {with}");
+    }
+    let without = said(&plain);
+    assert!(!without.contains("note[values-unread]"), "{without}");
+}
+
+#[test]
+#[ignore = "live: postgres"]
+fn check_says_it_read_no_values_only_under_columns_postgres() {
+    require_alive(LiveService::Postgres);
+    let name = unique_name("ovw_note_pg");
+    let out = tempfile::tempdir().unwrap();
+    let rig = || {
+        Rig::pg_batch(&name)
+            .query("SELECT id, quantity FROM orders")
+            .mode("full")
+            .dest_path(out.path().to_path_buf())
+    };
+    let declared = rig()
+        .export_line("columns:")
+        .export_line("  quantity: \"int64\"");
+    check_says_it_read_no_values_only_under_columns(declared, rig(), &name);
+}
+
+#[test]
+#[ignore = "live: mysql"]
+fn check_says_it_read_no_values_only_under_columns_mysql() {
+    require_alive(LiveService::Mysql);
+    let name = unique_name("ovw_note_my");
+    let out = tempfile::tempdir().unwrap();
+    let rig = || {
+        Rig::mysql_batch(&name)
+            .query("SELECT CAST(7 AS SIGNED) AS n")
+            .mode("full")
+            .dest_path(out.path().to_path_buf())
+    };
+    let declared = rig().export_line("columns:").export_line("  n: \"int64\"");
+    check_says_it_read_no_values_only_under_columns(declared, rig(), &name);
+}
+
+#[test]
+#[ignore = "live: mssql"]
+fn check_says_it_read_no_values_only_under_columns_mssql() {
+    require_alive(LiveService::Mssql);
+    let name = unique_name("ovw_note_ms");
+    let out = tempfile::tempdir().unwrap();
+    let rig = || {
+        Rig::mssql_batch(&name)
+            .query("SELECT CAST(7 AS INT) AS n")
+            .mode("full")
+            .dest_path(out.path().to_path_buf())
+    };
+    let declared = rig().export_line("columns:").export_line("  n: \"int64\"");
+    check_says_it_read_no_values_only_under_columns(declared, rig(), &name);
+}
+
+#[test]
+#[ignore = "live: oracle"]
+fn check_says_it_read_no_values_only_under_columns_oracle() {
+    require_alive(LiveService::Oracle);
+    let name = unique_name("ovw_note_or");
+    let out = tempfile::tempdir().unwrap();
+    let rig = || {
+        Rig::oracle_batch(&name)
+            .query("SELECT CAST(7 AS NUMBER(10,0)) AS n FROM dual")
+            .mode("full")
+            .dest_path(out.path().to_path_buf())
+    };
+    let declared = rig().export_line("columns:").export_line("  N: \"int64\"");
+    check_says_it_read_no_values_only_under_columns(declared, rig(), &name);
+}
+
 #[test]
 #[ignore = "live: postgres"]
 fn check_still_accepts_overrides_the_run_accepts_postgres() {

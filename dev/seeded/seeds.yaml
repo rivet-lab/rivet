@@ -7321,12 +7321,12 @@ seeds:
     switch: check-values-unread-unsaid
     engines:
       postgres:
-        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises"]
+        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises", check_says_it_read_no_values_only_under_columns_postgres]
       mysql:
-        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises"]
+        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises", check_says_it_read_no_values_only_under_columns_mysql]
       mssql:
-        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises"]
+        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises", check_says_it_read_no_values_only_under_columns_mssql]
       oracle:
-        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises"]
+        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises", check_says_it_read_no_values_only_under_columns_oracle]
       mongo:
         cells: ["lib:check_names_exactly_the_codes_only_a_value_raises"]
