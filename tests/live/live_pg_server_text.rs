@@ -529,3 +529,127 @@ fn an_upgraded_range_export_under_the_default_policy_reads_no_drift_postgres() {
 fn an_upgraded_incremental_export_under_the_default_policy_reads_no_drift_postgres() {
     a_baseline_a_refused_run_left_is_taken_without_drift("incremental", None);
 }
+
+/// After a clean first run, a column of source type `ddl` added to the table is drift: `fail` refuses with exit 4 naming it, any other policy reports it as added.
+fn a_column_added_after_the_baseline_is_drift(
+    mode: &str,
+    policy_line: Option<&str>,
+    ddl: &str,
+    fails: bool,
+) {
+    let (table, _guard) = ENGINE.create("added_col", "id BIGINT PRIMARY KEY, v INT");
+    let rig = ENGINE.rig(&table);
+    let rig = match mode {
+        "full" => rig,
+        "keyset" => ENGINE.staged(rig, "chunked", &["chunk_by_key: id", "chunk_size: 2"]),
+        "range" => ENGINE.staged(rig, "chunked", &["chunk_column: id", "chunk_size: 2"]),
+        "incremental" => ENGINE.staged(rig, "incremental", &["cursor_column: id"]),
+        other => panic!("no batch mode `{other}`"),
+    };
+    let rig = match policy_line {
+        Some(line) => rig.export_line(line),
+        None => rig,
+    };
+    ENGINE.exec(&format!("INSERT INTO {table} VALUES (1, 10), (2, 20)"));
+    rig.run_ok();
+    ENGINE.exec(&format!("ALTER TABLE {table} ADD COLUMN x {ddl}"));
+    ENGINE.exec(&format!("INSERT INTO {table} VALUES (3, 30, NULL)"));
+    let out = rig.run();
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    if fails {
+        assert_eq!(
+            out.status.code(),
+            Some(4),
+            "{mode} {ddl}: a column added after the baseline is drift under `fail`:\n{said}"
+        );
+        assert!(
+            said.contains("1 column(s) added, 0 removed, 0 retyped"),
+            "{mode} {ddl}: the refusal counts the added column:\n{said}"
+        );
+    } else {
+        assert!(out.status.success(), "{mode} {ddl}:\n{said}");
+        assert!(
+            said.contains("schema changed!") && said.contains("added: x"),
+            "{mode} {ddl}: the added column is reported:\n{said}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_added_inet_column_is_drift_under_fail_full_postgres() {
+    a_column_added_after_the_baseline_is_drift("full", Some("on_schema_drift: fail"), "inet", true);
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_added_tsvector_column_is_drift_under_fail_full_postgres() {
+    a_column_added_after_the_baseline_is_drift(
+        "full",
+        Some("on_schema_drift: fail"),
+        "tsvector",
+        true,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_added_bare_numeric_column_is_drift_under_fail_full_postgres() {
+    a_column_added_after_the_baseline_is_drift(
+        "full",
+        Some("on_schema_drift: fail"),
+        "numeric",
+        true,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_added_inet_column_is_drift_under_fail_keyset_postgres() {
+    a_column_added_after_the_baseline_is_drift(
+        "keyset",
+        Some("on_schema_drift: fail"),
+        "inet",
+        true,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_added_inet_column_is_drift_under_fail_range_postgres() {
+    a_column_added_after_the_baseline_is_drift(
+        "range",
+        Some("on_schema_drift: fail"),
+        "inet",
+        true,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_added_inet_column_is_drift_under_fail_incremental_postgres() {
+    a_column_added_after_the_baseline_is_drift(
+        "incremental",
+        Some("on_schema_drift: fail"),
+        "inet",
+        true,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_added_inet_column_is_reported_under_the_default_policy_incremental_postgres() {
+    a_column_added_after_the_baseline_is_drift("incremental", None, "inet", false);
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_added_tsvector_column_is_reported_under_the_default_policy_incremental_postgres() {
+    a_column_added_after_the_baseline_is_drift("incremental", None, "tsvector", false);
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_added_bare_numeric_column_is_reported_under_the_default_policy_incremental_postgres() {
+    a_column_added_after_the_baseline_is_drift("incremental", None, "numeric", false);
+}
