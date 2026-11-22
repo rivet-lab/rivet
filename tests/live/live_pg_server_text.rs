@@ -208,6 +208,21 @@ pub(crate) const FAMILIES: &[(&str, &str, &str, &str, &str)] = &[
         "'{}'",
         "'{NULL,0.01}'",
     ),
+    ("num", "numeric", "1.50", "'NaN'", "-0.000001234"),
+    (
+        "numw",
+        "numeric",
+        "123456789012345678901234567890.123456789012",
+        "'-Infinity'",
+        "0",
+    ),
+    (
+        "nums",
+        "numeric[]",
+        "'{1.50,-0.000001234}'",
+        "'{}'",
+        "'{NULL,123456789012345678901234567890.123456789012}'",
+    ),
 ];
 
 /// The table's DDL columns and the INSERT of three populated rows and one all-NULL row.
@@ -347,4 +362,64 @@ fn a_table_of_every_unmapped_type_is_delivered_as_server_text_range_postgres() {
 #[ignore = "live: requires docker compose up -d postgres"]
 fn a_table_of_every_unmapped_type_is_delivered_as_server_text_incremental_postgres() {
     the_table_of_unmapped_types_is_delivered_as_server_text("incremental");
+}
+
+/// A `tsvector` column under a `text` override is delivered as the server's own text or refused by code, never reshaped.
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn a_tsvector_under_a_text_override_is_the_servers_text_or_refused_by_code_postgres() {
+    let (table, _guard) = ENGINE.create("tsv_ovr", "id BIGINT PRIMARY KEY, t tsvector");
+    ENGINE.exec(&format!(
+        "INSERT INTO {table} (id, t) VALUES (1, 'a:1 b:2'::tsvector), (2, 'a b c'), \
+         (3, to_tsvector('simple', 'the quick fox')), (4, 'x:3A,4B'::tsvector), (5, NULL), (6, $q$'a b c'$q$)"
+    ));
+    let rig = ENGINE.rig(&table).export_line("columns: {t: text}");
+    let out = rig.run();
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    if !out.status.success() {
+        assert!(said.contains("RIVET_"), "a refusal is coded:\n{said}");
+        return;
+    }
+    let (_, got) = delivered(&rig);
+    let want = source_text(&table);
+    assert_eq!(got.len(), want.len(), "the row count");
+    for (g, w) in got.iter().zip(&want) {
+        assert_eq!(
+            g[1], w[1],
+            "id {:?} delivered {:?} where the server prints {:?}",
+            g[0], g[1], w[1]
+        );
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn a_numeric_the_catalog_types_keeps_its_decimal_and_a_bare_one_is_server_text_postgres() {
+    let (table, _guard) = ENGINE.create(
+        "num_typed",
+        "id BIGINT PRIMARY KEY, hinted NUMERIC(10,2), bare NUMERIC",
+    );
+    ENGINE.exec(&format!(
+        "INSERT INTO {table} VALUES (1, 1.50, 2.5000000000), (2, -99999999.99, 'NaN'), (3, NULL, NULL)"
+    ));
+    let rig = ENGINE.rig(&table);
+    let out = rig.run();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let schema = read_all_parts(&rig.out_dir())[0].schema();
+    let kind = |c: &str| schema.field_with_name(c).unwrap().data_type().clone();
+    assert_eq!(
+        kind("hinted"),
+        arrow::datatypes::DataType::Decimal128(10, 2)
+    );
+    assert_eq!(kind("bare"), arrow::datatypes::DataType::Utf8);
+    let (names, got) = delivered(&rig);
+    let want = source_text(&table);
+    let bare = names.iter().position(|n| n == "bare").unwrap();
+    for (g, w) in got.iter().zip(&want) {
+        assert_eq!(g[bare], w[bare], "bare of id {:?}", g[0]);
+    }
 }

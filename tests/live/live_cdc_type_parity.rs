@@ -1839,6 +1839,9 @@ fn postgres_batch_and_cdc_deliver_every_ledger_row_alike() {
         bad.join("\n")
     );
 
+    if refused.is_empty() {
+        return;
+    }
     let (st, _g2) = stand(&refused, "ledger_pg_refused", false);
     st.cdc.run_ok();
     let n = seed_refused(&refused, &st);

@@ -333,20 +333,35 @@ pub(super) fn rivet_type_for_pg_column(
     )
 }
 
-/// Whether a wire type has no Rivet mapping and is delivered as the server's own text; a bare `numeric` keeps its refusal.
-pub(super) fn pg_server_text(t: &Type) -> bool {
-    fn unmapped(r: &RivetType) -> bool {
-        match r {
-            RivetType::Unsupported { .. } => *r != bare_numeric(),
-            RivetType::List { inner } => unmapped(inner),
-            _ => false,
+/// Whether `r` has no Arrow mapping, alone or as the element of a list.
+fn unmapped(r: &RivetType) -> bool {
+    match r {
+        RivetType::Unsupported { .. } => {
+            seeded!("pg-unmapped-type-refused", false, true)
+                && seeded!("pg-bare-numeric-refused", *r != bare_numeric(), true)
         }
+        RivetType::List { inner } => unmapped(inner),
+        _ => false,
     }
-    seeded!(
-        "pg-unmapped-type-refused",
-        false,
-        unmapped(&pg_type_to_rivet(t))
-    )
+}
+
+/// Whether wire type `t` has no Rivet mapping of its own and is delivered as the server's own text.
+pub(super) fn pg_server_text(t: &Type) -> bool {
+    unmapped(&pg_type_to_rivet(t))
+}
+
+/// Whether column `name` of wire type `t` is read through the text projection: a `numeric` keeps its wire read when a catalog hint or a `columns:` override types it.
+fn pg_text_projected(
+    t: &Type,
+    name: &str,
+    column_overrides: &ColumnOverrides,
+    numeric_hints: Option<&HashMap<String, (u8, i8)>>,
+) -> bool {
+    if pg_common_kind(t) == Some(CommonKind::Dec) {
+        return !column_overrides.contains_key(name)
+            && !numeric_hints.is_some_and(|h| h.contains_key(name));
+    }
+    pg_server_text(t)
 }
 
 /// The SQL that renders `expr`, a cell of wire type `t`, as the server's own output text.
@@ -360,9 +375,9 @@ fn pg_text_render(t: &Type, expr: &str) -> String {
     format!("{expr}::text")
 }
 
-/// `sql` read through a projection that renders every server-text column as text, or `None` when no column is one.
-pub(super) fn pg_server_text_query(sql: &str, columns: &[(&str, &Type)]) -> Option<String> {
-    if !columns.iter().any(|(_, t)| pg_server_text(t)) {
+/// `sql` read through a projection that renders every server-text column (name, wire type, whether it is one) as text, or `None` when no column is one.
+pub(super) fn pg_server_text_query(sql: &str, columns: &[(&str, &Type, bool)]) -> Option<String> {
+    if !columns.iter().any(|(.., text)| *text) {
         return None;
     }
     let names = (0..columns.len())
@@ -372,9 +387,9 @@ pub(super) fn pg_server_text_query(sql: &str, columns: &[(&str, &Type)]) -> Opti
     let projection = columns
         .iter()
         .enumerate()
-        .map(|(i, (name, t))| {
+        .map(|(i, (name, t, text))| {
             let cell = format!("_rivet_text._c{i}");
-            let value = if pg_server_text(t) {
+            let value = if *text {
                 pg_text_render(t, &cell)
             } else {
                 cell
@@ -389,6 +404,21 @@ pub(super) fn pg_server_text_query(sql: &str, columns: &[(&str, &Type)]) -> Opti
     ))
 }
 
+/// The statement's columns as `pg_server_text_query` takes them: name, wire type and whether the column is read as text.
+pub(super) fn pg_text_columns<'a>(
+    declared: &'a [postgres::Column],
+    column_overrides: &ColumnOverrides,
+    numeric_hints: Option<&HashMap<String, (u8, i8)>>,
+) -> Vec<(&'a str, &'a Type, bool)> {
+    declared
+        .iter()
+        .map(|c| {
+            let text = pg_text_projected(c.type_(), c.name(), column_overrides, numeric_hints);
+            (c.name(), c.type_(), text)
+        })
+        .collect()
+}
+
 /// The mapping of one PostgreSQL column: its override, else its autodetected type, an unmapped type as the server's text.
 pub(super) fn pg_column_mapping(
     col: &postgres::Column,
@@ -400,14 +430,13 @@ pub(super) fn pg_column_mapping(
     let overridden = column_overrides.contains_key(col.name());
     Ok(pg_delivery(
         TypeMapping::from_source(&source, rivet),
-        col.type_(),
         overridden,
     ))
 }
 
-/// `mapping` of a column of wire type `t`: an undeclared unmapped type is delivered as the server's text.
-pub(super) fn pg_delivery(mapping: TypeMapping, t: &Type, overridden: bool) -> TypeMapping {
-    if !overridden && pg_server_text(t) {
+/// `mapping` of a column: an undeclared type with no Arrow mapping is delivered as the server's text.
+pub(super) fn pg_delivery(mapping: TypeMapping, overridden: bool) -> TypeMapping {
+    if !overridden && unmapped(&mapping.rivet_type) {
         mapping.with_text(crate::types::TextForm::ServerText)
     } else {
         mapping
@@ -1494,10 +1523,13 @@ mod cell_refusal_tests {
 
 #[cfg(test)]
 mod server_text_projection_tests {
-    use super::{pg_server_text, pg_server_text_query, pg_text_render};
+    use super::{
+        ColumnOverrides, HashMap, RivetType, TypeMapping, pg_delivery, pg_server_text,
+        pg_server_text_query, pg_text_projected, pg_text_render,
+    };
     use postgres::types::Type;
 
-    /// A type with no Arrow mapping, and a list of one, is server text; a mapped type and a bare numeric are not.
+    /// A type with no Arrow mapping, a list of one, and a `numeric` with no precision are server text; a mapped type is not.
     #[test]
     fn only_a_type_with_no_mapping_is_server_text() {
         for t in [
@@ -1506,18 +1538,62 @@ mod server_text_projection_tests {
             Type::MACADDR,
             Type::MONEY,
             Type::INET_ARRAY,
+            Type::TS_VECTOR,
+            Type::NUMERIC,
+            Type::NUMERIC_ARRAY,
         ] {
             assert!(pg_server_text(&t), "{t} is server text");
         }
-        for t in [
-            Type::INT4,
-            Type::TEXT,
-            Type::NUMERIC,
-            Type::INT4_ARRAY,
-            Type::TEXT_ARRAY,
-        ] {
+        for t in [Type::INT4, Type::TEXT, Type::INT4_ARRAY, Type::TEXT_ARRAY] {
             assert!(!pg_server_text(&t), "{t} is not server text");
         }
+    }
+
+    /// A `numeric` the catalog or a `columns:` override types keeps its wire read; one nothing types, and a numeric array, is read as text.
+    #[test]
+    fn a_numeric_is_read_as_text_only_where_nothing_types_it() {
+        let hints: HashMap<String, (u8, i8)> = [("hinted".to_string(), (10, 2))].into();
+        let overrides: ColumnOverrides = [("declared".to_string(), RivetType::String)].into();
+        let projected = |t: &Type, name: &str| pg_text_projected(t, name, &overrides, Some(&hints));
+        assert!(projected(&Type::NUMERIC, "bare"));
+        assert!(!projected(&Type::NUMERIC, "hinted"));
+        assert!(!projected(&Type::NUMERIC, "declared"));
+        assert!(projected(&Type::NUMERIC_ARRAY, "hinted"));
+        assert!(projected(&Type::INET, "declared"));
+        assert!(!projected(&Type::INT4, "bare"));
+        assert!(pg_text_projected(
+            &Type::NUMERIC,
+            "bare",
+            &ColumnOverrides::new(),
+            None
+        ));
+    }
+
+    /// An undeclared column with no Arrow mapping is labelled server text; a hinted numeric and an overridden column are not.
+    #[test]
+    fn the_server_text_label_follows_the_mapping_the_column_resolved_to() {
+        let mapping = |t: RivetType| {
+            TypeMapping::from_source(&crate::types::SourceColumn::simple("c", "numeric", true), t)
+        };
+        let bare = super::bare_numeric();
+        let labelled = pg_delivery(mapping(bare.clone()), false);
+        assert_eq!(
+            labelled.delivery,
+            crate::types::Delivery::Text(crate::types::TextForm::ServerText)
+        );
+        assert_ne!(
+            pg_delivery(mapping(bare), true).delivery,
+            labelled.delivery,
+            "an overridden column is not labelled"
+        );
+        let hinted = pg_delivery(
+            mapping(RivetType::Decimal {
+                precision: 10,
+                scale: 2,
+            }),
+            false,
+        );
+        assert_eq!(hinted.delivery, crate::types::Delivery::Native);
     }
 
     /// An `inet` cell loses a host mask only, every other type is the server's `::text`.
@@ -1535,14 +1611,17 @@ mod server_text_projection_tests {
     #[test]
     fn the_projection_renders_the_server_text_columns_and_nothing_else() {
         assert_eq!(
-            pg_server_text_query("SELECT 1", &[("a", &Type::INT4), ("b", &Type::TEXT)]),
+            pg_server_text_query(
+                "SELECT 1",
+                &[("a", &Type::INT4, false), ("b", &Type::TEXT, false)]
+            ),
             None
         );
         assert_eq!(pg_server_text_query("SELECT 1", &[]), None);
         assert_eq!(
             pg_server_text_query(
                 "SELECT * FROM t",
-                &[("id", &Type::INT4), ("m\"x", &Type::MONEY)]
+                &[("id", &Type::INT4, false), ("m\"x", &Type::MONEY, true)]
             ),
             Some(
                 "SELECT _rivet_text._c0 AS \"id\", _rivet_text._c1::text AS \"m\"\"x\" \

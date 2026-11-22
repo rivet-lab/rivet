@@ -30,7 +30,8 @@ use crate::tuning::SourceTuning;
 use crate::types::{ColumnOverrides, TypeMapping};
 
 use arrow_convert::{
-    pg_column_mapping, pg_columns_to_schema, pg_server_text_query, rows_to_record_batch_typed,
+    pg_column_mapping, pg_columns_to_schema, pg_server_text_query, pg_text_columns,
+    rows_to_record_batch_typed,
 };
 use from_parse::try_parse_pg_simple_from_regclass_literal;
 
@@ -191,15 +192,13 @@ const SERVER_TEXT_SESSION: &str = "SET LOCAL datestyle = 'ISO, MDY'; SET LOCAL b
 fn declare_server_text(
     client: &mut Client,
     built_sql: &str,
+    column_overrides: &ColumnOverrides,
+    numeric_hints: Option<&HashMap<String, (u8, i8)>>,
     fetches: &mut Vec<(usize, postgres::Statement)>,
     n: usize,
 ) -> Result<Option<postgres::Statement>> {
     let declared = fetch_statement(client, fetches, n)?.clone();
-    let columns: Vec<(&str, &postgres::types::Type)> = declared
-        .columns()
-        .iter()
-        .map(|c| (c.name(), c.type_()))
-        .collect();
+    let columns = pg_text_columns(declared.columns(), column_overrides, numeric_hints);
     let Some(text_sql) = pg_server_text_query(built_sql, &columns) else {
         return Ok(None);
     };
@@ -485,8 +484,14 @@ fn pg_run_export(
 
     let mut first_fetch_done = false;
     let mut fetches: Vec<(usize, postgres::Statement)> = Vec::new();
-    let text_columns =
-        declare_server_text(guard.client_mut(), built_sql, &mut fetches, ctl.target())?;
+    let text_columns = declare_server_text(
+        guard.client_mut(),
+        built_sql,
+        column_overrides,
+        numeric_hints,
+        &mut fetches,
+        ctl.target(),
+    )?;
     loop {
         let requested = ctl.target();
         let fetch = fetch_statement(guard.client_mut(), &mut fetches, requested)?;

@@ -6826,7 +6826,6 @@ seeds:
       postgres:
         cells:
           - a_csv_export_of_a_decimal256_column_is_refused_by_check_like_the_run_postgres
-          - a_column_without_an_arrow_type_is_refused_by_check_like_the_run_postgres
       mysql:
         cells:
           - a_csv_export_of_a_decimal256_column_is_refused_by_check_like_the_run_mysql
@@ -6991,6 +6990,28 @@ seeds:
         na: "the seed edits the PostgreSQL column classification (pg_server_text); the other sources map their own types in their own tables"
       oracle:
         na: "the seed edits the PostgreSQL column classification (pg_server_text); the other sources map their own types in their own tables"
+
+  - name: pg-bare-numeric-refused
+    class: "a PostgreSQL numeric with no declared precision, or an array of numerics, is refused by a batch run with RIVET_TYPE_UNSAFE_MAPPING where the change stream delivers the server's text of it, so the two paths of one column disagree"
+    history: "owner rule 2026-11-21 (batch and CDC must not disagree); RED on main 2026-11-22 by live_pg_server_text: the num, numw and nums columns of every mode exit 1 naming `3 column(s) need a columns: declaration`"
+    scope: source
+    engines:
+      postgres:
+        switch: pg-bare-numeric-refused
+        cells:
+          - a_table_of_every_unmapped_type_is_delivered_as_server_text_full_postgres
+          - a_table_of_every_unmapped_type_is_delivered_as_server_text_keyset_postgres
+          - a_table_of_every_unmapped_type_is_delivered_as_server_text_range_postgres
+          - a_table_of_every_unmapped_type_is_delivered_as_server_text_incremental_postgres
+          - "lib:only_a_type_with_no_mapping_is_server_text"
+      mysql:
+        na: "the seed edits the PostgreSQL column classification (pg_server_text, pg_delivery); the other sources map their own types in their own tables"
+      mssql:
+        na: "the seed edits the PostgreSQL column classification (pg_server_text, pg_delivery); the other sources map their own types in their own tables"
+      mongo:
+        na: "the seed edits the PostgreSQL column classification (pg_server_text, pg_delivery); the other sources map their own types in their own tables"
+      oracle:
+        na: "the seed edits the PostgreSQL column classification (pg_server_text, pg_delivery); the other sources map their own types in their own tables"
 
   - name: pg-inet-host-text-gains-a-mask
     class: "a PostgreSQL inet column holding a host address is delivered as `10.1.2.3/32` where the server's own text is `10.1.2.3`, because inet cast to text appends the full mask"
