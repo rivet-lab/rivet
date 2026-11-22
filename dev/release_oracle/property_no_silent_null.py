@@ -467,6 +467,23 @@ def _unhex_text(hexed: str) -> str | None:
         return None
 
 
+def _bit_bytes(native: str, exp) -> bytes | None:
+    """The big-endian bytes a MySQL BIT(n>1) source number fills, ceil(n/8) wide; None for any other column."""
+    m = re.fullmatch(r"BIT\((\d+)\)", native.upper())
+    if not m or int(m[1]) < 2 or not isinstance(exp, Decimal) or exp != exp.to_integral_value():
+        return None
+    return int(exp).to_bytes((int(m[1]) + 7) // 8, "big")
+
+
+def _same_bit_bytes(exp: bytes, got, csv: bool) -> str:
+    """OK or WRONG for a BIT source against the bytes a binary override delivers: parquet bytes, or the hex text of CSV, exactly."""
+    try:
+        g = bytes.fromhex(got) if csv and isinstance(got, str) else bytes(got) if isinstance(got, (bytes, bytearray, memoryview)) else None
+    except ValueError:
+        g = None
+    return "OK" if g == exp else WRONG
+
+
 def _same_special(exp: float, got) -> str:
     """OK, WRONG or PRESENCE for a NaN, an infinity or a signed zero against a delivered float or its text."""
     if isinstance(got, str):
@@ -576,6 +593,8 @@ def compare(engine: str, src_lit: str, src_family: str, target: str, got, csv: b
         return WRONG
     if engine == "postgres" and native.endswith("[]"):
         return same_array(engine, src_lit, native, target, got)
+    if engine == "mysql" and target == "binary" and (bits := _bit_bytes(native, exp)) is not None:
+        return _same_bit_bytes(bits, got, csv)
     if target == "binary" and csv and isinstance(got, str) and not isinstance(exp, bytes):
         got = _unhex_text(got)
         if got is None:
@@ -1271,6 +1290,12 @@ def self_test() -> None:
     assert compare("mysql", "12345.6789", "decimal", "binary", "31323334352e36373839", csv=True, native="DECIMAL(18,4)") == "OK", "a binary override writes the hex of the value text to CSV"
     assert compare("mysql", "'\u00fc\u00f1a'", "text", "binary", "c3bcc3b161", csv=True, native="VARCHAR(20)") == "OK" and compare("mysql", "'a'", "text", "binary", "62", csv=True, native="VARCHAR(20)") == WRONG
     assert compare("mysql", "'a'", "text", "binary", "zz", csv=True, native="VARCHAR(20)") == WRONG and compare("mysql", "0xAB", "other", "binary", "ab", csv=True, native="VARBINARY(4)") == "OK"
+    bit = lambda lit, got, n, csv: compare("mysql", lit, "other", "binary", got, csv=csv, native=f"BIT({n})")
+    assert bit("b'10101010'", "aa", 8, True) == "OK" and bit("b'10101010'", b"\xaa", 8, False) == "OK", "a BIT delivered as its bytes grades equal in CSV hex and in parquet"
+    assert bit("b'0'", "00", 8, True) == "OK" and bit("b'1'", "0000000000000001", 64, True) == "OK" and bit("b'1'", b"\0" * 7 + b"\x01", 64, False) == "OK"
+    assert bit("b'10101010'", "ab", 8, True) == WRONG and bit("b'10101010'", b"\xab", 8, False) == WRONG and bit("b'1'", "0000000000000002", 64, True) == WRONG
+    assert bit("b'1'", "01", 64, True) == WRONG and bit("b'1'", b"\x01", 64, False) == WRONG and bit("b'10101010'", "aa00", 8, True) == WRONG, "a BIT delivered at another width is wrong"
+    assert bit("b'10101010'", "zz", 8, True) == WRONG and bit("b'10101010'", 170, 8, False) == WRONG, "a BIT delivered in a shape that is no bytes is wrong, never ungraded"
     assert compare("mysql", "1e2000000", "decimal", "none", "2e2000000") == WRONG and compare("mysql", "1e2000000", "decimal", "none", "1e2000000") == "OK"
     assert compare("mysql", "1.5", "float", "float8", "NaN") == WRONG and compare("mysql", "1.5", "float", "float8", "Infinity") == WRONG
     assert tolerance("int", "float4", Decimal(2 ** 24)) == Decimal(2) and tolerance("int", "int8", Decimal(5)) == 0
