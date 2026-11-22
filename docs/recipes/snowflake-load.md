@@ -47,7 +47,7 @@ PostgreSQL and MySQL sources):
 
 | Source type | Lands as | How `rivet load` gets it right |
 |---|---|---|
-| JSON / `jsonb` | `VARIANT` — navigable (`meta:k`) | `PARSE_JSON($1:col)` in the COPY transform |
+| JSON / `jsonb` | `VARIANT` — navigable (`meta:k`) | `PARSE_JSON($1:col)` in the COPY transform; a JSON number that Snowflake would render as an infinity (the largest finite double) is refused before the write, `RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE` |
 | `timestamptz` | `TIMESTAMP_TZ` — instant preserved (`…Z`) | `ALTER SESSION SET TIMEZONE = 'UTC'` before COPY |
 | `timestamp` / `datetime`, `TIME` | `TIMESTAMP_NTZ`, `TIME` — microseconds kept | `USE_LOGICAL_TYPE = TRUE` in the inline Parquet format |
 | binary / `bytea` | `BINARY` — raw bytes, `0xFF`-safe | `BINARY_AS_TEXT = FALSE` in the inline Parquet format, `$1:col::BINARY` in the COPY transform |

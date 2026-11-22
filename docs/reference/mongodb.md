@@ -424,6 +424,16 @@ paths:
 default. Choose `canonical` if a downstream f64 JSON parser will touch large
 integers.
 
+**One exception on Snowflake — the largest finite double.** A relaxed `Double`
+of `1.7976931348623157e+308` is a bare JSON number, `PARSE_JSON` stores it as a
+double and Snowflake renders a double at 16 significant digits
+(`1.797693134862316e+308`), which is larger than any double: a reader of that
+text gets an infinity. `rivet load` therefore refuses a Snowflake load whose
+`document` holds such a number, before any write, as
+`RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE` (exit 5). Set `json: canonical` and
+re-export: the double is then the string `{"$numberDouble":"1.7976931348623157e+308"}`
+and loads exact.
+
 ---
 
 ## Consuming in the warehouse

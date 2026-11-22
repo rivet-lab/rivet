@@ -111,6 +111,108 @@ fn holds_temporal(spec: &crate::types::target::TargetColumnSpec) -> bool {
     }
 }
 
+/// The JSON number in `json` that Snowflake stores as a double and renders, at 16 significant digits, past the largest finite double.
+pub(crate) fn number_past_snowflake_double(json: &[u8]) -> Option<&str> {
+    let (mut i, len) = (0, json.len());
+    while i < len {
+        match json[i] {
+            b'"' => {
+                i += 1;
+                while i < len && json[i] != b'"' {
+                    i += if json[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            b'-' | b'0'..=b'9' => {
+                let start = i;
+                while i < len && matches!(json[i], b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9') {
+                    i += 1;
+                }
+                let token = std::str::from_utf8(json.get(start..i)?).ok()?;
+                if renders_as_infinity(token) {
+                    return Some(token);
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Whether `token` is a finite double whose 16-significant-digit text reads back as an infinity.
+fn renders_as_infinity(token: &str) -> bool {
+    let Ok(v) = token.parse::<f64>() else {
+        return false;
+    };
+    v.is_finite()
+        && v.abs() >= 1e307
+        && format!("{v:.15e}")
+            .parse::<f64>()
+            .is_ok_and(f64::is_infinite)
+}
+
+/// Refuse a Snowflake load whose VARIANT columns hold a JSON number the warehouse renders as an infinity.
+pub(crate) fn refuse_variant_numbers_past_double(
+    store: &GcsStore,
+    plan: &super::plan::LoadPlan,
+    uris: &[String],
+) -> Result<()> {
+    let columns: Vec<&str> = plan
+        .specs
+        .iter()
+        .filter(|s| super::snowflake::needs_parse_json(s))
+        .map(|s| s.column_name.as_str())
+        .collect();
+    if columns.is_empty() {
+        return Ok(());
+    }
+    for uri in uris {
+        let (_, key) = super::split_object_uri(uri)?;
+        let part = bytes::Bytes::from(store.read(key)?);
+        if let Some((column, number)) = variant_number_in_part(part, &columns)
+            .with_context(|| format!("reading {uri}"))
+            .with_context(|| format!("export `{}`", plan.export_name))?
+        {
+            let said = format!("{:.15e}", number.parse::<f64>().unwrap_or_default());
+            crate::rivet_bail!(
+                crate::error::codes::LOAD_VALUE_OUT_OF_TARGET_RANGE,
+                "{uri}: column `{column}` holds the JSON number {number}, which Snowflake stores as a double and renders as {said}, larger than any double: a reader of the text gets an infinity. Nothing was loaded. Keep the value exact by delivering the column as text (cast it in the export's `query:`; MongoDB: set `source.mongo.json: canonical`) and re-export, or correct it at the source."
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The first (column, number) of `columns` in the Parquet `part` that `number_past_snowflake_double` finds.
+fn variant_number_in_part(
+    part: bytes::Bytes,
+    columns: &[&str],
+) -> Result<Option<(String, String)>> {
+    use arrow::array::AsArray;
+    use arrow::datatypes::DataType;
+    use parquet::arrow::{ProjectionMask, arrow_reader::ParquetRecordBatchReaderBuilder};
+    let builder = ParquetRecordBatchReaderBuilder::try_new(part)?;
+    let mask = ProjectionMask::columns(builder.parquet_schema(), columns.iter().copied());
+    for batch in builder.with_projection(mask).with_batch_size(64).build()? {
+        let batch = batch?;
+        for (field, column) in batch.schema().fields().iter().zip(batch.columns()) {
+            if !matches!(
+                column.data_type(),
+                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+            ) {
+                continue;
+            }
+            let text = arrow::compute::cast(column, &DataType::LargeUtf8)?;
+            for doc in text.as_string::<i64>().iter().flatten() {
+                if let Some(number) = number_past_snowflake_double(doc.as_bytes()) {
+                    return Ok(Some((field.name().clone(), number.to_string())));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,6 +224,40 @@ mod tests {
     use parquet::file::properties::{EnabledStatistics, WriterProperties};
     use parquet::schema::types::ColumnPath;
     use std::sync::Arc;
+
+    /// The scanner flags a double that renders past the largest finite one and nothing next to it.
+    #[test]
+    fn number_past_snowflake_double_flags_only_the_overflowing_doubles() {
+        fn flagged(j: &str) -> Option<&str> {
+            number_past_snowflake_double(j.as_bytes())
+        }
+        assert_eq!(
+            flagged(r#"{"f":1.7976931348623157e308}"#),
+            Some("1.7976931348623157e308")
+        );
+        assert_eq!(
+            flagged(r#"[1,-1.7976931348623157e+308]"#),
+            Some("-1.7976931348623157e+308")
+        );
+        assert_eq!(flagged(r#"{"a":{"b":[0,1.797693134862316e308]}}"#), None);
+        for same in [
+            r#"{"f":1.7976931348623e308}"#,
+            r#"{"f":1.5}"#,
+            r#"{"f":1e300}"#,
+            r#"{"f":-5e-324}"#,
+            r#"{"f":2.225073858507201e-308}"#,
+            r#"{"f":9223372036854775807}"#,
+            r#"{"f":18446744073709551616}"#,
+            r#"{"f":"1.7976931348623157e308"}"#,
+            r#"{"k\"1.7976931348623157e308":1}"#,
+            r#"{"$numberDouble":"1.7976931348623157e308"}"#,
+            r#"{"f":1e999}"#,
+            "",
+            "null",
+        ] {
+            assert_eq!(flagged(same), None, "{same}");
+        }
+    }
 
     const BQ_MIN_DAY: i32 = -719_162;
     const BQ_MAX_DAY: i32 = 2_932_896;

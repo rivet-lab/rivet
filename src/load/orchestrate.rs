@@ -949,7 +949,7 @@ fn up_to_date_label(mode: load::plan::LoadMode) -> &'static str {
     }
 }
 
-/// The checks a plan's staged parts must pass for its warehouse before any write: the partition budget, then the value ranges.
+/// The checks a plan's staged parts must pass for its warehouse before any write: the partition budget, the value ranges, then the VARIANT numbers.
 fn parts_fit_target(
     store: &crate::destination::gcs::GcsStore,
     plan: &load::plan::LoadPlan,
@@ -957,7 +957,8 @@ fn parts_fit_target(
     uris: &[String],
 ) -> Result<()> {
     partition_budget_ok(store, plan, budgeted)?;
-    load::target_range::refuse_parts_outside_ranges(store, plan, uris)
+    load::target_range::refuse_parts_outside_ranges(store, plan, uris)?;
+    load::target_range::refuse_variant_numbers_past_double(store, plan, uris)
 }
 
 /// The shared load envelope: open the store, build the loader, reconcile via the ledger, then run + record.
@@ -6493,5 +6494,145 @@ mod mixed_mongo_ids_tests {
         let (mysql, path) =
             cfg_with_ckpt(dir.path(), "mysql", serde_json::json!({"orders": [0, 2]}));
         refuse_mixed_mongo_ids(&mysql, &plan("orders", None), &path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod snowflake_variant_number_tests {
+    use super::*;
+    use crate::load::plan::{LoadMode, test_plan};
+    use crate::types::target::{SfType, TargetColumnSpec, TargetStatus};
+    use arrow::array::{ArrayRef, StringArray};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+    use std::sync::Arc;
+
+    const MAX: &str = "1.7976931348623157e308";
+
+    fn spec(name: &str, t: SfType) -> TargetColumnSpec {
+        TargetColumnSpec {
+            column_name: name.into(),
+            autoload_type: t.clone().into(),
+            target_type: t.into(),
+            status: TargetStatus::Ok,
+            note: None,
+            cast_sql: None,
+        }
+    }
+
+    fn part(dir: &std::path::Path, name: &str, document: &str, note: &str) -> String {
+        let col = |v: &str| Arc::new(StringArray::from(vec![v.to_string()])) as ArrayRef;
+        let batch =
+            RecordBatch::try_from_iter([("document", col(document)), ("note", col(note))]).unwrap();
+        let file = std::fs::File::create(dir.join(name)).unwrap();
+        let mut w = ArrowWriter::try_new(file, batch.schema(), None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+        format!("gs://b/{name}")
+    }
+
+    fn snowflake_plan() -> load::plan::LoadPlan {
+        let mut plan = test_plan(LoadMode::Full, "gs://b/");
+        plan.load.target = load::plan::LoadTarget::Snowflake {
+            account: "a".into(),
+            user: "u".into(),
+            private_key_path: "/k.p8".into(),
+            role: None,
+            warehouse: "w".into(),
+            database: "DB".into(),
+            schema: "SC".into(),
+            storage_integration: "i".into(),
+        };
+        plan.specs = vec![
+            spec("document", SfType::Variant),
+            spec("note", SfType::Varchar),
+        ];
+        plan
+    }
+
+    fn fits(
+        store: &crate::destination::gcs::GcsStore,
+        plan: &load::plan::LoadPlan,
+        uris: &[String],
+    ) -> Result<()> {
+        parts_fit_target(store, plan, uris, uris)
+    }
+
+    /// A VARIANT document holding the largest finite double is refused before the write, by code; the same text in a string, a text column or a smaller double is not.
+    #[test]
+    fn a_snowflake_load_refuses_a_variant_double_it_would_render_as_infinity() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            crate::destination::gcs::GcsStore::open_fs(dir.path().to_str().unwrap()).unwrap();
+        let plan = snowflake_plan();
+        let kept = [
+            part(
+                dir.path(),
+                "small.parquet",
+                r#"{"f":1.5,"g":1e300,"h":-5e-324}"#,
+                "",
+            ),
+            part(
+                dir.path(),
+                "tagged.parquet",
+                &format!(r#"{{"f":{{"$numberDouble":"{MAX}"}}}}"#),
+                "",
+            ),
+            part(
+                dir.path(),
+                "quoted.parquet",
+                &format!(r#"{{"f":"{MAX}"}}"#),
+                "",
+            ),
+            part(dir.path(), "text.parquet", "{}", MAX),
+        ];
+        fits(&store, &plan, &kept).unwrap();
+        for sign in ["", "-"] {
+            let bad = part(
+                dir.path(),
+                "bad.parquet",
+                &format!(r#"{{"_id":1,"f":[{sign}{MAX}]}}"#),
+                "",
+            );
+            let err = fits(&store, &plan, &[kept[0].clone(), bad.clone()]).unwrap_err();
+            assert_eq!(
+                crate::error::error_code(&err),
+                Some("RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE")
+            );
+            let said = format!("{err:#}");
+            assert!(
+                said.contains(&bad)
+                    && said.contains("column `document`")
+                    && said.contains(&format!("{sign}{MAX}")),
+                "{said}"
+            );
+        }
+    }
+
+    /// The inputs next to the defect pass exactly as on main: no VARIANT column, no specs, a VARIANT column without the number.
+    #[test]
+    fn the_variant_guard_leaves_every_neighbour_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            crate::destination::gcs::GcsStore::open_fs(dir.path().to_str().unwrap()).unwrap();
+        let hot = [part(
+            dir.path(),
+            "hot.parquet",
+            &format!(r#"{{"f":{MAX}}}"#),
+            "",
+        )];
+        let mut text_only = snowflake_plan();
+        text_only.specs = vec![spec("document", SfType::Varchar)];
+        fits(&store, &text_only, &hot).unwrap();
+        let mut no_specs = snowflake_plan();
+        no_specs.specs = vec![];
+        fits(&store, &no_specs, &hot).unwrap();
+        let cold = [part(
+            dir.path(),
+            "cold.parquet",
+            r#"{"f":1.7976931348623e308,"g":[1,2]}"#,
+            MAX,
+        )];
+        fits(&store, &snowflake_plan(), &cold).unwrap();
     }
 }

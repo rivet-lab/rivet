@@ -1236,6 +1236,24 @@ mod tests {
         );
     }
 
+    /// The largest finite double stages as a bare JSON number in relaxed and as a tagged string in canonical.
+    #[test]
+    fn the_largest_double_stages_where_the_snowflake_guard_sees_it_only_in_relaxed() {
+        let d = doc! { "f": f64::MAX, "g": 1.5f64 };
+        let relaxed = document_to_json(&d, false).unwrap();
+        assert_eq!(
+            crate::load::target_range::number_past_snowflake_double(relaxed.as_bytes()),
+            Some("1.7976931348623157e+308"),
+            "{relaxed}"
+        );
+        let canonical = document_to_json(&d, true).unwrap();
+        assert_eq!(
+            crate::load::target_range::number_past_snowflake_double(canonical.as_bytes()),
+            None,
+            "{canonical}"
+        );
+    }
+
     #[test]
     fn blob_schema_is_two_columns_id_and_document_json() {
         let schema = blob_schema(&blob_mappings(&ColumnOverrides::default()).unwrap());

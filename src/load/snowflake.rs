@@ -760,7 +760,7 @@ fn parquet_format() -> &'static str {
 }
 
 /// A column is loaded through `PARSE_JSON` iff its native type is `VARIANT` (Rivet's Snowflake resolver maps JSON → `VARIANT`).
-fn needs_parse_json(spec: &TargetColumnSpec) -> bool {
+pub(crate) fn needs_parse_json(spec: &TargetColumnSpec) -> bool {
     spec.target_type == TargetType::Snowflake(SfType::Variant)
 }
 
