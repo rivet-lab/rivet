@@ -2441,11 +2441,11 @@ mod tests {
                 }
             }
         }
-        assert!(
-            broken.is_empty(),
-            "{}: {:#?}",
-            broken.len(),
-            &broken[..broken.len().min(8)]
+        assert_eq!(
+            broken[..broken.len().min(8)],
+            Vec::<String>::new(),
+            "{} exposed",
+            broken.len()
         );
     }
 
@@ -2532,11 +2532,11 @@ mod tests {
                 broken.push(format!("{values:?} {text:?} -> {why}"));
             }
         }
-        assert!(
-            broken.is_empty(),
-            "{} of 400000: {:#?}",
-            broken.len(),
-            &broken[..broken.len().min(8)]
+        assert_eq!(
+            broken[..broken.len().min(8)],
+            Vec::<String>::new(),
+            "{} of 400000 exposed",
+            broken.len()
         );
     }
 }
