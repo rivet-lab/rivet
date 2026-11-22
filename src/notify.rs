@@ -566,3 +566,17 @@ mod tests {
         }
     }
 }
+
+/// Throwaway probe for the mutants gate flow; never merged.
+pub fn probe_double(x: u32) -> u32 {
+    x * 2
+}
+
+#[cfg(test)]
+mod probe_tests {
+    #[test]
+    fn probe_double_doubles() {
+        assert_eq!(super::probe_double(3), 6);
+        assert_eq!(super::probe_double(0), 0);
+    }
+}
