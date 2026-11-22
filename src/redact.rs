@@ -135,14 +135,14 @@ fn is_anchor(text: &str, end: usize) -> bool {
 fn mask_known(text: &str, known: &[String]) -> String {
     let mut spans = Vec::new();
     for value in known {
-        let mut from = 0;
-        while let Some(i) = text[from..].find(value.as_str()) {
-            let start = from + i;
+        for (start, _) in text.char_indices() {
+            if !text[start..].starts_with(value.as_str()) {
+                continue;
+            }
             let end = start + value.len();
             if seeded!("registered-anchor-masked", true, !is_anchor(text, end)) {
                 spans.push((start, end));
             }
-            from = start + text[start..].chars().next().map_or(1, char::len_utf8);
         }
     }
     spans.sort_unstable();
