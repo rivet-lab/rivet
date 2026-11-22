@@ -961,3 +961,36 @@ fn mongo_cdc_a_field_added_while_a_run_is_open_is_in_the_document() {
         "the new field is in the document: {docs:?}"
     );
 }
+
+/// A PostgreSQL CDC stream is unchanged by a column with no Arrow type added to the table: the stream delivers the row and reads no drift under `fail`, as before.
+#[test]
+#[ignore = "live: requires docker compose postgres-cdc (wal_level=logical)"]
+fn pg_cdc_stream_takes_an_added_column_without_an_arrow_type_without_drift() {
+    use postgres::NoTls;
+    let tbl = unique_name("cdc_added_inet");
+    let slot = unique_name("rivet_added_inet_slot");
+    let _slot = Slot::new(slot.clone());
+    let mut c = postgres::Client::connect(POSTGRES_CDC_URL, NoTls).expect("connect postgres");
+    c.batch_execute(&format!(
+        "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, v INT)"
+    ))
+    .unwrap();
+    let _tbl = PgTable::adopt_on(POSTGRES_CDC_URL, tbl.clone());
+    let rig = Rig::pg_cdc(&tbl, &slot).export_line(DRIFT_FAIL);
+    rig.run_ok();
+    c.batch_execute(&format!(
+        "ALTER TABLE {tbl} ADD COLUMN x inet; INSERT INTO {tbl} VALUES (1, 1, '10.0.0.1')"
+    ))
+    .unwrap();
+    let out = rig.run();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        dir_parquet_id_set(&rig.out_dir()),
+        [1].into_iter().collect(),
+        "the row after the added column is delivered"
+    );
+}
