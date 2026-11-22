@@ -2481,6 +2481,46 @@ fn an_ltz_on_the_last_day_of_9999_and_a_tz_at_the_ceiling_are_delivered_unchange
     assert_eq!(canon(&z[&1]).as_deref(), Some("9999-12-31T23:59:59.999999"));
 }
 
+/// An LTZ value that is a real instant just past 9999 (a zoned literal behind UTC) is delivered as the same literal in a TZ column is, never refused as a shifted value.
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn an_ltz_instant_just_past_9999_is_delivered_exactly_as_a_tz_column_holds_it() {
+    require_alive(LiveService::Oracle);
+    let t = OracleTable::create(
+        "ora_ltzr",
+        "id NUMBER(10) PRIMARY KEY, l TIMESTAMP(6) WITH LOCAL TIME ZONE, z TIMESTAMP(6) WITH TIME ZONE",
+    );
+    ora_insert_from_zone(
+        t.name(),
+        "-05:00",
+        1,
+        "TIMESTAMP '9999-12-31 22:00:00 -05:00'",
+    );
+    ora_exec(&format!(
+        "UPDATE {} SET z = TIMESTAMP '9999-12-31 22:00:00 -05:00'",
+        t.name()
+    ));
+    let stored = ora_text_rows(&format!("SELECT DUMP(l) FROM {}", t.name()));
+    assert!(
+        stored[0][0]
+            .as_deref()
+            .unwrap()
+            .contains(": 200,100,1,1,4,1,1"),
+        "the server holds 10000-01-01 03:00: {stored:?}"
+    );
+    let out = tempfile::tempdir().unwrap();
+    Rig::oracle_batch(t.name())
+        .dest_path(out.path().to_path_buf())
+        .run_ok();
+    let l = parquet_cells(out.path(), "L");
+    let z = parquet_cells(out.path(), "Z");
+    assert!(l[&1].is_some(), "the instant is delivered");
+    assert_eq!(
+        l[&1], z[&1],
+        "the LTZ column delivers what the TZ column does"
+    );
+}
+
 /// An `INTERVAL DAY TO SECOND(9)` column holding microsecond-exact values is a logical string in the type report and the run it vouches for delivers.
 #[test]
 #[ignore = "live: requires docker compose oracle"]
