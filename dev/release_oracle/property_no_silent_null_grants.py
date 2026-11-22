@@ -255,6 +255,7 @@ def run_grants(work: Path, progress=lambda s: None) -> list[nsn.Result]:
 def verify_no_silent_null_grants(led: Ledger) -> None:
     """Run the grants-CDC cells against the stand's mysql-cdc and record them; a stand that is down is an ENV skip."""
     work = Path(os.environ.get("RIVET_ORACLE_WORK") or tempfile.gettempdir()) / "no_silent_null" / "grants"
+    print(nsn.binary_line(), flush=True)
     t0 = time.time()
     try:
         results = run_grants(work, led.phase)

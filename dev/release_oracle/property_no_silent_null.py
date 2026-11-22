@@ -59,6 +59,7 @@ STAND_REFUSALS = ("RIVET_SOURCE_CONNECT_FAILED", "RIVET_SOURCE_RUNTIME_UNAVAILAB
 STAND_TRIES = 5
 RECHECKS = 2
 LEASE_REFUSAL = "RIVET_STATE_RUN_IN_PROGRESS"
+MISSING_SEED = "RIVET_SOURCE_TABLE_NOT_FOUND"
 CELL_STATE = {"RIVET_STATE_URL": "", "RIVET_GATE_STATE_URL": ""}
 DELIVERED, REFUSED, DECLARED = "delivered", "refused", "declared_lossy"
 HIDDEN, SHAPE = "HIDDEN_COLUMN_DELIVERED", "LEG_SHAPE_DIFFERS"
@@ -619,6 +620,35 @@ def _rivet_bin() -> str:
     return os.environ.get("RIVET_BIN_OVERRIDE") or str(core.rivet_bin())
 
 
+def binary_refusal(path: str, version: str, head: str, named: bool) -> str:
+    """Why the binary at `path` printing `version` must not be graded, or "": missing, silent, unstamped, or built from another commit than `head` unless the operator named it."""
+    if not Path(path).is_file():
+        return f"no rivet binary at {path}: build it (cargo build --release) or name one with RIVET_BIN_OVERRIDE"
+    m = core._VERSION_STAMP.search(version)
+    if not version.strip():
+        return f"{path} printed no --version: it does not run"
+    if named:
+        return ""
+    if not m or not head.startswith(m.group(1)):
+        return f"{path} reports `{version.strip()}`, not the tree's commit {head[:9]}: a stale or unstamped binary is never graded (RIVET_BIN_OVERRIDE names one on purpose)"
+    return ""
+
+
+def binary_line() -> str:
+    """`binary: PATH (VERSION)` of the binary every cell of this matrix runs; exits 2 with the reason when it must not be graded."""
+    import subprocess
+
+    path = _rivet_bin()
+    try:
+        version = core.run([path, "--version"], timeout=30).stdout if Path(path).is_file() else ""
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+    except OSError as e:
+        raise SystemExit(f"cannot run {path}: {e}")
+    if why := binary_refusal(path, version, head, bool(os.environ.get("RIVET_BIN_OVERRIDE"))):
+        raise SystemExit(why)
+    return f"binary: {path} ({version.strip()})"
+
+
 def read_parts(out: Path, fmt: str, key: str = "id"):
     """(types by column, rows by `key` or a list when key is empty, part count) of what a run delivered, read by pyarrow and DuckDB; None when nothing was delivered."""
     return read_files(sorted(str(p) for p in data_files(out, fmt)), fmt, key)
@@ -658,6 +688,9 @@ def part_set_diff(out: Path, fmt: str) -> str:
     return "; ".join(f"{k} {[x.name for x in v][:3]}" for k, v in (("declared but missing", missing), ("present but undeclared", unlisted)) if v)
 
 
+TEXT_READ = ("TIMESTAMP_NS", "TIME_NS")
+
+
 def read_files(parts: list[str], fmt: str, key: str = "id"):
     """As `read_parts`, for an explicit list of part files."""
     import duckdb
@@ -673,6 +706,7 @@ def read_files(parts: list[str], fmt: str, key: str = "id"):
 
             tbl = pa.concat_tables([pq.read_table(p) for p in parts], promote_options="permissive")
             wide = {f.name.lower(): f"DECIMAL({f.type.precision},{f.type.scale})" for f in tbl.schema if pa.types.is_decimal256(f.type)}
+            wide.update({f.name.lower(): "TIMESTAMP WITH TIME ZONE" for f in tbl.schema if pa.types.is_timestamp(f.type) and f.type.unit == "ns" and f.type.tz})
             for f in tbl.schema:
                 if f.name.lower() in wide:
                     tbl = tbl.set_column(tbl.schema.get_field_index(f.name), f.name, tbl.column(f.name).cast(pa.string()))
@@ -681,7 +715,7 @@ def read_files(parts: list[str], fmt: str, key: str = "id"):
         else:
             src = f"read_csv({parts!r}, header=true, all_varchar=true, union_by_name=true, allow_quoted_nulls=false)"
         desc = {r[0].lower(): wide.get(r[0].lower(), r[1]) for r in con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
-        sel = ", ".join(f'CAST("{k}" AS VARCHAR{"[]" if t.endswith("[]") else ""}) AS "{k}"' if "TIME ZONE" in t else f'"{k}"' for k, t in desc.items())
+        sel = ", ".join(f'CAST("{k}" AS VARCHAR{"[]" if t.endswith("[]") else ""}) AS "{k}"' if "TIME ZONE" in t or t in TEXT_READ else f'"{k}"' for k, t in desc.items())
         cur = con.execute(f"SELECT {sel} FROM {src}")
         names = [d[0].lower() for d in cur.description]
         rows = [dict(zip(names, r)) for r in cur.fetchall()]
@@ -754,6 +788,8 @@ def grade_stop(cell: str, p: core.Proc, check: core.Proc) -> Result | None:
         return Result(cell, REFUSED, UNGRADED, f"another cell of this matrix holds the run lease, so no value was read: exit {p.returncode} [{code}]", code)
     if code.startswith("RIVET_CONFIG_") and code not in TYPE_REFUSALS:
         return Result(cell, REFUSED, UNGRADED, f"the harness's own config was refused before any value was read: exit {p.returncode} [{code}]", code)
+    if code == MISSING_SEED:
+        return Result(cell, REFUSED, UNGRADED, f"the seed table is not on the stand, so no value was read: exit {p.returncode} [{code}]", code)
     if not code or code.startswith("RIVET_INTERNAL"):
         return Result(cell, REFUSED, UNCODED, f"exit {p.returncode} {code or 'no code'}: {core.first_error(p.stderr)[:160]}", code)
     if check.returncode == 0:
@@ -1112,6 +1148,19 @@ def _proc(rc: int, err: str = "") -> core.Proc:
     return core.Proc(["rivet"], rc, "", err, gated=False)
 
 
+def nanosecond_read_keeps_every_digit() -> bool:
+    """Whether `read_files` hands back a nanosecond timestamp, zoned timestamp and time of day with every digit."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    with tempfile.TemporaryDirectory() as d:
+        f = str(Path(d) / "p.parquet")
+        pq.write_table(pa.table({"id": pa.array([1], pa.int32()), "t": pa.array([1782208800123456700], pa.timestamp("ns")), "d": pa.array([49530123456700], pa.time64("ns")), "z": pa.array([1782208800123456700], pa.timestamp("ns", tz="UTC"))}), f)
+        desc, rows, _ = read_files([f], "parquet")
+    got = rows[1]
+    return got["t"].endswith(".1234567") and got["d"].endswith(".1234567") and "123456700" in got["z"] and desc["z"] == "TIMESTAMP WITH TIME ZONE"
+
+
 def self_test() -> None:
     """Grade the grader: axes come from the product, every failure class fires on its exact harm, a delivered value passes."""
     ax = axes()
@@ -1129,6 +1178,11 @@ def self_test() -> None:
     assert parse_lit("postgres", "'a\\b'") == "a\\b" and parse_lit("oracle", "TO_DATE('2024-02-29 13:14:15','YYYY-MM-DD HH24:MI:SS')") == "2024-02-29 13:14:15"
     assert parse_lit("postgres", "'\\x00ff01'::bytea") == b"\x00\xff\x01" and parse_lit("postgres", "'{\"n\":1}'::jsonb") == '{"n":1}' and parse_lit("mysql", "b'101'") == 5
     assert parse_lit("postgres", "B'0101'") == "0101" and parse_lit("postgres", "B''") == "", "a PostgreSQL bit string is its text, a MySQL bit its number"
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    assert binary_refusal(__file__, f"rivet 0.34.0 ({sha[:9]})", sha, False) == "" and binary_refusal(__file__, "rivet 0.25.0 (abcdef0)", sha, True) == ""
+    assert "no rivet binary" in binary_refusal("/nonexistent/rivet", f"rivet ({sha[:9]})", sha, False), "a missing binary is never graded"
+    assert "not the tree's commit" in binary_refusal(__file__, "rivet 0.34.0 (abcdef012)", sha, False), "a stale binary is never graded"
+    assert "not the tree's commit" in binary_refusal(__file__, "rivet 0.34.0 (unknown)", sha, False) and "does not run" in binary_refusal(__file__, "", sha, True)
     harmed = Result("c", DELIVERED, NULLED, "1 non-NULL value delivered as NULL")
     assert integrity("c", _proc(0), harmed).klass == BLIND and integrity("c", _proc(3, "[RIVET_VALIDATE_CHECKSUM]"), harmed).klass == ""
     sib = {c.native: c for c in columns("mysql")}
@@ -1221,6 +1275,7 @@ def self_test() -> None:
     assert grade_stop("c", _proc(1, "[RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH] x"), probe).klass == NOT_GRADED, "a check whose type probe never ran is no evidence of a split"
     assert grade_stop("c", _proc(2, "[RIVET_CONFIG_COLUMN_OVERRIDE_CASE] x"), _proc(2)).klass == UNGRADED, "a refusal of the harness's own config is not a graded refusal"
     assert grade_stop("c", _proc(2, "[RIVET_STATE_RUN_IN_PROGRESS] x"), _proc(0)).klass == UNGRADED, "a lease refusal between two cells is not a graded refusal"
+    assert grade_stop("c", _proc(5, f"[{MISSING_SEED}] x"), _proc(5, f"[{MISSING_SEED}] x")).klass == UNGRADED, "a stand that lost the seed table is no refusal that check and run agree on"
     seen: dict = {}
     real_run = core.run
     core.run = lambda argv, **kw: seen.update(kw["env"]) or _proc(0)
@@ -1354,6 +1409,7 @@ def _reader_self_test() -> bool:
         import pyarrow.parquet as pq
     except ImportError:
         return False
+    assert nanosecond_read_keeps_every_digit(), "a nanosecond column is read as the text DuckDB holds, never a microsecond datetime"
     col = Col("c00", "INT", "Int32", "int", ("1", "16777217", "-5"))
     with tempfile.TemporaryDirectory() as t:
         root = Path(t)
@@ -1440,6 +1496,7 @@ def main() -> int:
     if ns.self_test:
         self_test()
         return 0
+    print(binary_line(), flush=True)
     t0 = time.time()
     names = [e for e in axes()["engines"] if e in STAND] if ns.engine == "all" else [ns.engine]
     results: list[Result] = []
