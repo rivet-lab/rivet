@@ -10,8 +10,9 @@ use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{
     ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder,
 };
-use parquet::basic::{ConvertedType, LogicalType};
+use parquet::basic::ConvertedType;
 use parquet::file::metadata::ParquetMetaData;
+use parquet::schema::types::Type;
 use std::sync::Arc;
 
 const BATCH_ROWS: usize = 8192;
@@ -32,19 +33,19 @@ fn first_null<'c>(batch: &RecordBatch, columns: &'c [String]) -> Result<Option<&
         .and_then(|o| o.as_any().downcast_ref::<StringArray>());
     let deletes = |row: usize| ops.is_some_and(|o| o.is_valid(row) && o.value(row) == DELETE_OP);
     Ok(columns.iter().map(String::as_str).find(|name| {
-        batch.column_by_name(name).is_some_and(|c| {
-            c.null_count() > 0 && (0..c.len()).any(|r| c.is_null(r) && !deletes(r))
-        })
+        batch
+            .column_by_name(name)
+            .is_some_and(|c| (0..c.len()).any(|r| c.is_null(r) && !deletes(r)))
     }))
+}
+
+/// Whether the schema node is a list group.
+fn is_list(t: &Type) -> bool {
+    t.is_group() && t.get_basic_info().converted_type() == ConvertedType::LIST
 }
 
 /// The top-level columns of the part that are lists.
 pub(crate) fn list_columns(meta: &ParquetMetaData) -> Vec<String> {
-    let is_list = |t: &parquet::schema::types::Type| {
-        t.is_group()
-            && (t.get_basic_info().logical_type_ref() == Some(&LogicalType::List)
-                || t.get_basic_info().converted_type() == ConvertedType::LIST)
-    };
     let root = meta.file_metadata().schema_descr().root_schema();
     root.get_fields()
         .iter()
@@ -111,7 +112,9 @@ mod tests {
     use arrow::array::{ArrayRef, Int32Array, ListArray};
     use arrow::datatypes::{Field, Int32Type, Schema};
     use parquet::arrow::ArrowWriter;
+    use parquet::basic::{LogicalType, Repetition};
     use parquet::file::properties::{EnabledStatistics, WriterProperties};
+    use parquet::file::reader::Length;
 
     fn lists(rows: &[Option<Vec<Option<i32>>>]) -> ListArray {
         ListArray::from_iter_primitive::<Int32Type, _, _>(rows.iter().cloned())
@@ -221,6 +224,41 @@ mod tests {
             None,
             "a row group whose list leaf counts no nulls is not read"
         );
+    }
+
+    #[test]
+    fn a_list_group_is_told_from_a_struct_group_and_a_leaf() {
+        let leaf = || {
+            Arc::new(
+                Type::primitive_type_builder("e", parquet::basic::Type::INT32)
+                    .build()
+                    .unwrap(),
+            )
+        };
+        let group = |name: &'static str| Type::group_type_builder(name).with_fields(vec![leaf()]);
+        let logical = group("a")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_logical_type(Some(LogicalType::List))
+            .build()
+            .unwrap();
+        let converted = group("b")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_converted_type(ConvertedType::LIST)
+            .build()
+            .unwrap();
+        let plain = group("c").build().unwrap();
+        assert!(is_list(&logical) && is_list(&converted));
+        assert!(!is_list(&plain) && !is_list(&leaf()));
+    }
+
+    #[test]
+    fn the_chunks_read_are_as_long_as_the_furthest_byte() {
+        let chunk = |offset, n| Chunk {
+            offset,
+            bytes: Bytes::from(vec![0u8; n]),
+        };
+        assert_eq!(Chunks(vec![chunk(10, 5), chunk(0, 4)]).len(), 15);
+        assert_eq!(Chunks(Vec::new()).len(), 0);
     }
 
     #[test]
