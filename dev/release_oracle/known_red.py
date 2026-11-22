@@ -23,6 +23,7 @@ class KnownRed:
     reason: str
     expires: str  # YYYY-MM-DD
     alt: tuple[str, ...] = ()
+    by_class: bool = False
 
     def keys(self) -> tuple[str, ...]:
         """Every whole failure message this one defect may print."""
@@ -60,11 +61,23 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     KnownRed("upgrade[oracle/cdc-load/tz=Asia/Tokyo]: cycle1/load: prev exit 1 [RIVET_LOAD_BLOCK_MISSING]: Error: [RIVET_LOAD_BLOCK_MISSING] config has no top-level `load:` block — add `load: { target, ... }` to load into a warehouse",
              _ORACLE_CDC_LOAD,
              _EXPIRES),
-    KnownRed("no_silent_null[mssql] full: WRONG_VALUE over 5 source->override pairs #01b25485",
-             "2026-11-11: full tier, PR-NULL: exit 0 with fidelity exact while the value changed (integer to a narrower decimal wraps, text or integer to bool, NUMBER 1E125 to float4 as inf, a negative-scale decimal scaled the wrong way, DATETIME to date truncated, Oracle TIMESTAMP WITH TIME ZONE shifted); open, closes when the override refuses a value it cannot hold; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-19 from the full tier on main 7dc3e850 over the pairs left: DATETIME2 to none, timestamp, timestamp_ns, timestamp_tz, timestamp_tz_ns",
+    KnownRed("no_silent_null[mssql] smoke: WRONG_VALUE over 4 source->override pairs #781efb66",
+             "2026-11-22: smoke tier, PR-NULL: exit 0 with fidelity exact while the value changed (a DATETIME2 or DATETIMEOFFSET declared timestamp or timestamp_tz loses the 7th fractional digit); open, closes when the override refuses a value it cannot hold; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; the smoke tier lists the pairs of the full tier entry of 2026-11-11, which the reader keeping the nanosecond digits shows here too",
              _EXPIRES),
-    KnownRed("no_silent_null[mssql] full: INTEGRITY_BLIND over 5 source->override pairs #01b25485",
-             "2026-11-11: full tier, PR-SELF-GRADE: validate --depth full exits 0 over a cell whose values changed, it answers from rivet own fingerprint; open, closes when validate compares against the source; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-19 from the full tier on main 7dc3e850 over the pairs left: DATETIME2 to none, timestamp, timestamp_ns, timestamp_tz, timestamp_tz_ns",
+    KnownRed("no_silent_null[mssql] smoke: INTEGRITY_BLIND over 4 source->override pairs #781efb66",
+             "2026-11-22: smoke tier, PR-SELF-GRADE: validate --depth full exits 0 over a cell whose values changed, it answers from rivet own fingerprint; open, closes when validate compares against the source; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; the smoke tier lists the pairs of the full tier entry of 2026-11-11",
+             _EXPIRES),
+    KnownRed("no_silent_null[oracle] smoke: WRONG_VALUE over 2 source->override pairs #9a439c62",
+             "2026-11-22: smoke tier, PR-NULL: exit 0 with fidelity exact while the value changed (Oracle TIMESTAMP(9) declared timestamp or timestamp_tz loses its nanosecond digits); open, closes when the override refuses a value it cannot hold; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; the smoke tier lists the pairs of the full tier entry of 2026-11-11, which the reader keeping the nanosecond digits shows here too",
+             _EXPIRES),
+    KnownRed("no_silent_null[oracle] smoke: INTEGRITY_BLIND over 2 source->override pairs #9a439c62",
+             "2026-11-22: smoke tier, PR-SELF-GRADE: validate --depth full exits 0 over a cell whose values changed, it answers from rivet own fingerprint; open, closes when validate compares against the source; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; the smoke tier lists the pairs of the full tier entry of 2026-11-11",
+             _EXPIRES),
+    KnownRed("no_silent_null[mssql] full: WRONG_VALUE over 4 source->override pairs #781efb66",
+             "2026-11-11: full tier, PR-NULL: exit 0 with fidelity exact while the value changed (a DATETIME2 or DATETIMEOFFSET declared timestamp or timestamp_tz loses the 7th fractional digit); open, closes when the override refuses a value it cannot hold; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-21 from the full tier on 4b389582 over the pairs left once the reader keeps the nanosecond digits of TIMESTAMP_NS, TIME_NS and zoned nanosecond columns",
+             _EXPIRES),
+    KnownRed("no_silent_null[mssql] full: INTEGRITY_BLIND over 4 source->override pairs #781efb66",
+             "2026-11-11: full tier, PR-SELF-GRADE: validate --depth full exits 0 over a cell whose values changed, it answers from rivet own fingerprint; open, closes when validate compares against the source; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-21 from the full tier on 4b389582 over the pairs left: DATETIME2 and DATETIMEOFFSET to timestamp and timestamp_tz",
              _EXPIRES),
     KnownRed("no_silent_null[mysql] full: WRONG_VALUE over 2 source->override pairs #8e570de1",
              "2026-11-11: full tier, PR-NULL: exit 0 with fidelity exact while the value changed (integer to a narrower decimal wraps, text or integer to bool, NUMBER 1E125 to float4 as inf, a negative-scale decimal scaled the wrong way, DATETIME to date truncated, Oracle TIMESTAMP WITH TIME ZONE shifted); open, closes when the override refuses a value it cannot hold; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-13 from island reads on devbox, stable over 3 runs; re-keyed 2026-11-19 from the full tier on main 7dc3e850 over the pairs left: BIT(8) and BIT(64) to binary",
@@ -78,15 +91,27 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     KnownRed("no_silent_null[oracle] full: INTEGRITY_BLIND over 2 source->override pairs #9a439c62",
              "2026-11-11: full tier, PR-SELF-GRADE: validate --depth full exits 0 over a cell whose values changed, it answers from rivet own fingerprint; open, closes when validate compares against the source; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-19 from the full tier on main 7dc3e850 over the pairs left: TIMESTAMP(9) to timestamp and timestamp_tz",
              _EXPIRES),
+    KnownRed("no_silent_null[postgres] full: WRONG_VALUE over 1 source->override pairs #eee8bb4a",
+             "2026-11-21: full tier, PR-NULL: a TSVECTOR column declared text is delivered as `a b c` where the server's text of the value is `'a b c'`, the lexeme quotes dropped, while the cell claims fidelity exact; present on main 4b389582 and not caused by the CDC grid change; open, closes when the text override delivers the server's text of a server-text type or the ledger states the change; accepted 2026-11-21: 0.33 ships it as a known issue, 0.34 closes it",
+             _EXPIRES),
+    KnownRed("no_silent_null[postgres] full: INTEGRITY_BLIND over 1 source->override pairs #eee8bb4a",
+             "2026-11-21: full tier, PR-SELF-GRADE: validate --depth full exits 0 over the TSVECTOR to text cell whose value changed, it answers from rivet own fingerprint; open, closes when validate compares against the source; accepted 2026-11-21: 0.33 ships it as a known issue, 0.34 closes it",
+             _EXPIRES),
     KnownRed("no_silent_null_cdc[mssql]: CHECK_RUN_SPLIT over 33 source->override pairs #aee2fb98",
              "2026-11-19: CDC leg, PR-PRECHECK: check exits 0 and run refuses by code (RIVET_SOURCE_CDC_PREREQUISITE on the added and type_changed legs, a prerequisite the stream reads from the server at run time; a refusal only a value decides is named by check's values-unread note and graded noted); the format, unmapped-column and declared-type refusals of the pending baseline leg are decided by check and doctor since 2026-11-19 and no pair of them remains; open, closes when check decides the remaining refusal or the owner accepts it; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-22 on the branch of #1148: the value-decided pairs are noted, only the CDC_PREREQUISITE legs remain",
+             _EXPIRES,
+             by_class=True),
+    KnownRed("no_silent_null_cdc[mssql]: WRONG_VALUE over 2 source->override pairs #d9ee7d47",
+             "2026-11-21: CDC leg, PR-NULL: a DATETIME2 column declared timestamp or timestamp_tz is delivered with the 7th fractional digit dropped (microsecond targets) while the cell claims fidelity exact, on the snapshot, insert, update, delete and removed legs; accepted: 0.33 ships it as a known issue with the same family as the batch DATETIME2 entry, 0.34 closes it; closes when the override refuses a value it cannot hold or the ledger states the truncation",
              _EXPIRES),
     KnownRed("no_silent_null_cdc[mysql]: CHECK_RUN_SPLIT over 37 source->override pairs #bae71028",
              "2026-11-19: CDC leg, PR-PRECHECK: check exits 0 and run refuses by code (RIVET_SOURCE_CDC_PREREQUISITE on the MINIMAL and NOBLOB row-image legs, a prerequisite the stream reads from the server at run time; a refusal only a value decides is named by check's values-unread note and graded noted); the format, unmapped-column and declared-type refusals of the pending baseline leg are decided by check and doctor since 2026-11-19 and no pair of them remains; open, closes when check decides the remaining refusal or the owner accepts it; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-22 on the branch of #1148: the value-decided pairs are noted, only the CDC_PREREQUISITE legs remain",
-             _EXPIRES),
+             _EXPIRES,
+             by_class=True),
     KnownRed("no_silent_null_cdc[oracle]: CHECK_RUN_SPLIT over 10 source->override pairs #a56be50e",
              "2026-11-22: CDC leg, PR-PRECHECK: check exits 0 and run refuses RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH (exit 1) for a wire type the declared type cannot read (BINARY_FLOAT to binary or timestamp_tz, NUMBER to timestamp or uuid, DATE to decimal), which check passes on the first-row probe of some runs; every refusal a value decides is named by check's values-unread note and graded noted; open, closes when check decides the wire mismatch or the owner accepts it; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-22 on the branch of #1148 from one CDC grid run, 15 pairs became 10",
-             _EXPIRES),
+             _EXPIRES,
+             by_class=True),
     KnownRed("check_equals_run_cloud[offline]: CHECK_RUN_SPLIT over 1 cells #3aec5ed8",
              "2026-11-10: BigQuery load leg, PR-PRECHECK: check exits 0 and load refuses by code (RIVET_LOAD_WAREHOUSE_REJECTED, dataset not found) because check never contacts the warehouse; open, closes when check probes the target dataset or the matrix accepts the split; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-13: the gate grades the cloud tier and reads the same line there, the offline CLI test the offline one",
              _EXPIRES,
@@ -96,7 +121,8 @@ KNOWN_RED: tuple[KnownRed, ...] = (
              _EXPIRES),
     KnownRed("no_silent_null_load[mssql]: CHECK_RUN_SPLIT over 4 source->override pairs #2d3bb27f",
              "2026-11-10: ClickHouse load leg, PR-PRECHECK: check exits 0 and run refuses RIVET_SOURCE_QUERY_FAILED on the NCHAR, NTEXT and NVARCHAR columns, a code no value decides, so check's values-unread note does not name it; open, closes when check refuses the same pair; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-measured 2026-11-22 on the branch of #1148: the value-decided refusals (RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE, RIVET_SOURCE_VALUE_UNREPRESENTABLE) are noted by check, 15 pairs became 4",
-             _EXPIRES),
+             _EXPIRES,
+             by_class=True),
     KnownRed("no_silent_null_load[postgres]: DEFECT_PG_NULL_LIST_EMPTY_CH over 20 source->override pairs #f44a79b1",
              "2026-11-16: type matrix, class PG_NULL_LIST_EMPTY_CH: a NULL list is delivered as an empty list at ClickHouse; accepted by owner 2026-11-21: target cannot hold a NULL list; open, closes when the product delivers it exact or refuses it by a coded cause, and the line reads DEFECT_GONE_PG_NULL_LIST_EMPTY_CH when it changes",
              _EXPIRES),
@@ -164,11 +190,17 @@ def cell_key(msg: str) -> str:
     return cell_of(msg) or msg.partition(" over ")[0]
 
 
+def _of_class(msg: str, k: KnownRed) -> bool:
+    """Whether `msg` is a per-cell-set message of the class `k` is keyed by, whatever its pair count and digest."""
+    head, sep, _ = msg.partition(" over ")
+    return bool(sep) and head == k.match.partition(" over ")[0]
+
+
 def match(msg: str, today: _dt.date | None = None) -> tuple[KnownRed | None, bool]:
     """The entry `msg` matches and whether it is still in date."""
     today = today or _dt.date.today()
     for k in KNOWN_RED:
-        if msg in k.keys() or unframed(msg) in k.keys():
+        if msg in k.keys() or unframed(msg) in k.keys() or (k.by_class and _of_class(msg, k)):
             return k, today <= _dt.date.fromisoformat(k.expires)
     return None, False
 
@@ -180,6 +212,8 @@ def problems(entries: tuple[KnownRed, ...] | None = None) -> list[str]:
         name = k.match[:80] or "<empty match>"
         if not k.match.strip():
             out.append(f"{name}: empty match")
+        if k.by_class and " over " not in k.match:
+            out.append(f"{name}: keyed by class but not a per-cell-set message")
         if not _DATED.search(k.reason):
             out.append(f"{name}: the reason carries no date (YYYY-MM-DD)")
         try:
@@ -197,7 +231,19 @@ def self_test() -> int:
     assert problems((KnownRed("m", "opened 2026-13-40", "2026-11-15"),)), "a date that is no date must fail"
     assert problems((KnownRed(" ", "2026-11-04 why", "2026-11-15"),)), "an empty match must fail"
     assert problems((KnownRed("m", "2026-11-04 why", "soon"),)), "an expiry that is no date must fail"
+    assert problems((KnownRed("m::t — boom", "2026-11-04 why", "2026-11-15", by_class=True),)), "a class key needs a per-cell-set message"
     assert problems() == [], "the ledger itself must be clean"
+    cls = KnownRed("no_silent_null_cdc[e]: CHECK_RUN_SPLIT over 4 source->override pairs #aa", "2026-11-21: x", "2026-11-22", by_class=True)
+    exact = KnownRed(cls.match, cls.reason, cls.expires)
+    other = "no_silent_null_cdc[e]: CHECK_RUN_SPLIT over 9 source->override pairs #bb"
+    assert _of_class(other, cls) and _of_class(cls.match, cls), "a class entry matches any pair count and digest of its class"
+    for near in ("no_silent_null_cdc[f]: CHECK_RUN_SPLIT over 9 pairs #bb", "no_silent_null_cdc[e]: WRONG_VALUE over 9 pairs #bb", "no_silent_null[e] full: CHECK_RUN_SPLIT over 9 pairs #bb", "no_silent_null_cdc[e]: CHECK_RUN_SPLIT"):
+        assert not _of_class(near, cls), f"a class entry never covers another engine, cause or scenario: {near}"
+    day = _dt.date(2026, 11, 21)
+    assert match("no_silent_null_cdc[oracle]: CHECK_RUN_SPLIT over 17 source->override pairs #2b19b3e8", day)[1], "the oracle CDC class holds whatever pair set a run reports"
+    assert match("no_silent_null_cdc[oracle]: WRONG_VALUE over 17 source->override pairs #2b19b3e8", day)[0] is None and match("no_silent_null_cdc[postgres]: CHECK_RUN_SPLIT over 41 source->override pairs #2b19b3e8", day)[0] is None, \
+        "a class entry holds its own engine and cause only"
+    assert exact.by_class is False and not any(k.by_class and " over " not in k.match for k in KNOWN_RED)
     own = nightly_key("refusal_names_true_cause", "cmd", "printed")
     assert lane_of(own) == NIGHTLY and not any(owed_by(k, lane) for k in KNOWN_RED if own in k.keys() for lane in (GATE, ISLAND, OFFLINE)), \
         "a nightly class is owed by no gate run: a full gate would block on it"
