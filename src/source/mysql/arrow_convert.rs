@@ -2225,6 +2225,48 @@ mod roast_mysql_bit_decode_tests {
         assert_eq!(s.int32(1, 0), Some(42));
         assert_eq!(s.int16(2, 0), None);
         assert_eq!(s.int32(2, 0), None);
+        assert_eq!(s.uint64(1, 0), Some(42));
+        assert_eq!(s.uint64(2, 0), None);
+    }
+
+    /// A text cell under a smallint or int override is delivered when it is a whole integer and refused by code, naming the column and the target type, otherwise.
+    #[test]
+    fn a_text_cell_under_a_narrow_integer_override_is_read_whole_or_refused() {
+        use arrow::array::{Array, Int16Array, Int32Array};
+        for (dt, target) in [(DataType::Int16, "smallint"), (DataType::Int32, "int")] {
+            for bad in ["1.5", "12abc"] {
+                let (def, bytes) = v_bytes(bad.as_bytes());
+                let rows = fetch_binary_rows(vec![def], vec![vec![Some(bytes)]]);
+                let err = build_array(&dt, 0, &rows, false, "c", None).unwrap_err();
+                let coded = err
+                    .downcast_ref::<crate::error::CodedError>()
+                    .unwrap_or_else(|| panic!("{target} {bad}: not coded: {err}"));
+                assert_eq!(coded.code(), "RIVET_SOURCE_VALUE_UNREPRESENTABLE");
+                let said = err.to_string();
+                assert!(
+                    said.contains("column `c`") && said.contains(&format!("not a valid {target}")),
+                    "{target} {bad}: {said}"
+                );
+            }
+            let (def, bytes) = v_bytes(b"42");
+            let rows = fetch_binary_rows(vec![def], vec![vec![Some(bytes)]]);
+            let a = build_array(&dt, 0, &rows, false, "c", None).unwrap();
+            assert_eq!(a.null_count(), 0);
+            let got = match dt {
+                DataType::Int16 => i32::from(
+                    a.as_any()
+                        .downcast_ref::<Int16Array>()
+                        .expect("int16")
+                        .value(0),
+                ),
+                _ => a
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .expect("int32")
+                    .value(0),
+            };
+            assert_eq!(got, 42, "{target}");
+        }
     }
 
     /// Every `CellSource` accessor, over the BINARY protocol.
