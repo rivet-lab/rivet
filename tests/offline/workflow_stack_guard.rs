@@ -85,3 +85,108 @@ fn the_guard_reads_real_lists_not_an_empty_parse() {
         );
     }
 }
+
+const STACK_FILES: [&str; 2] = [".github/actions/live-stack/action.yml", NIGHTLY];
+
+/// What is wrong with how `text` waits for services and applies seeds: a shell polling loop (waiting is
+/// `python3 -m dev.pytools.stand_wait`, which fails when a service never answered), a psql file run that goes
+/// on after an error, a sqlcmd that exits 0 after one. The loop that waits for the background `docker compose up`
+/// to leave its exit code (`compose.rc`) checks that code itself and is not one of them.
+fn stack_problems(text: &str) -> Vec<String> {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .collect();
+    let mut out = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if line.contains("for i in $(seq") && !line.contains("compose.rc") {
+            out.push(format!(
+                "a shell polling loop (use `python3 -m dev.pytools.stand_wait`): {line}"
+            ));
+        }
+        if line.contains("psql ") && line.contains(" -f ") && !line.contains("ON_ERROR_STOP=1") {
+            out.push(format!(
+                "psql applies a file without -v ON_ERROR_STOP=1: {line}"
+            ));
+        }
+        let statement = if line.ends_with('\\') {
+            format!("{line} {}", lines.get(i + 1).unwrap_or(&""))
+        } else {
+            (*line).to_string()
+        };
+        if statement.contains("sqlcmd")
+            && (statement.contains(" -i ") || statement.contains(" -Q "))
+            && !statement.contains(" -b ")
+        {
+            out.push(format!("sqlcmd without -b exits 0 after an error: {line}"));
+        }
+    }
+    out
+}
+
+#[test]
+fn a_service_that_never_came_up_or_a_seed_that_failed_fails_the_step() {
+    for path in STACK_FILES {
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let problems = stack_problems(&text);
+        assert!(
+            problems.is_empty(),
+            "{path}: {} problem(s), the first: {}",
+            problems.len(),
+            problems[0]
+        );
+    }
+}
+
+#[test]
+fn the_stack_waits_through_the_python_tool() {
+    for path in STACK_FILES {
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        assert!(
+            text.contains("python3 -m dev.pytools.stand_wait"),
+            "{path} no longer waits for its services through dev.pytools.stand_wait"
+        );
+    }
+}
+
+#[test]
+fn the_stack_check_goes_red_on_each_spelling_it_guards() {
+    assert_eq!(
+        stack_problems("for i in $(seq 1 30); do pg_isready && break || sleep 2; done").len(),
+        1,
+        "a polling loop passed"
+    );
+    assert!(
+        stack_problems(
+            "for i in $(seq 1 600); do [ -f \"$RUNNER_TEMP/compose.rc\" ] && break; sleep 2; done"
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        stack_problems("psql -h h -d d -f seed.sql").len(),
+        1,
+        "psql -f without ON_ERROR_STOP passed"
+    );
+    assert!(stack_problems("psql -h h -d d -v ON_ERROR_STOP=1 -f seed.sql").is_empty());
+    assert_eq!(
+        stack_problems("sqlcmd -S s -C -i init.sql").len(),
+        1,
+        "sqlcmd -i without -b passed"
+    );
+    assert_eq!(
+        stack_problems("sqlcmd -S s -C -Q 'CREATE DATABASE d'").len(),
+        1,
+        "sqlcmd -Q without -b passed"
+    );
+    assert!(stack_problems("sqlcmd -S s -C -b -i init.sql").is_empty());
+    assert_eq!(
+        stack_problems("docker compose exec -T mssql sqlcmd \\\n  -S s -C -i init.sql").len(),
+        1,
+        "a continued sqlcmd line passed"
+    );
+    assert!(
+        stack_problems("# for i in $(seq 1 3); do x; done").is_empty(),
+        "a comment was graded"
+    );
+}

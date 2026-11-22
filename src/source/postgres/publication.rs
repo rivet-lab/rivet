@@ -431,10 +431,8 @@ mod tests {
         assert_eq!(l.get("public.b"), None);
     }
 
-    const STANDS: [&str; 2] = [
-        "postgresql://rivet:rivet@127.0.0.1:5434/rivet",
-        "postgresql://rivet:rivet@127.0.0.1:5618/rivet",
-    ];
+    const PG16: &str = "postgresql://rivet:rivet@127.0.0.1:5434/rivet";
+    const PG18: &str = "postgresql://rivet:rivet@127.0.0.1:5618/rivet";
 
     fn repair_in(err: &anyhow::Error, which: &str) -> String {
         let text = format!("{err:#}");
@@ -449,10 +447,19 @@ mod tests {
 
     /// Live: a publication is created when absent, accepted when equal, refused with a working repair when it drifted.
     #[test]
-    #[ignore = "live: requires docker compose postgres-cdc (:5434) and pg18-cdc (:5618)"]
+    #[ignore = "live: requires docker compose postgres-cdc (:5434); pg18-cdc (:5618) is graded when it answers"]
     fn live_a_publication_is_created_verified_and_a_drift_is_repaired_by_the_message() {
-        for url in STANDS {
-            let mut c = Client::connect(url, postgres::NoTls).unwrap();
+        for url in [PG16, PG18] {
+            let mut c = match Client::connect(url, postgres::NoTls) {
+                Ok(c) => c,
+                Err(e) if url == PG18 => {
+                    crate::test_hook::skip_live(&format!(
+                        "the optional dev/stand pg18-cdc (:5618) is not up: {e}"
+                    ));
+                    continue;
+                }
+                Err(e) => panic!("the postgres-cdc stand (:5434) does not answer: {e}"),
+            };
             let tag = format!(
                 "{}_{}",
                 std::process::id(),

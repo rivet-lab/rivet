@@ -1227,10 +1227,9 @@ def stand_target(engine: str) -> dict | None:
         from ..pytools import registry
     except ImportError:  # pragma: no cover
         import registry  # type: ignore
-    name = {"postgres": "postgres", "mysql": "mysql", "mssql": "mssql", "mongo": "mongo"}.get(engine)
-    if name is None:
+    if engine not in registry.load()["sources"]:
         return None
-    m = re.search(r":(\d+)(?:/|$|\?)", registry.source(name)["url"].split("@")[-1])
+    m = re.search(r":(\d+)(?:/|$|\?)", registry.source(engine)["url"].split("@")[-1])
     port = int(m.group(1)) if m else None
     if port is None:
         return None
@@ -1330,10 +1329,10 @@ def _verify(led: Ledger, binary: Path, cmds: list[Cmd], engines: list[str], mode
             led.skipped(e, "-", "no_secret_in_output/wrong-password-live", "-",
                         f"wrong-password against a real {e} server is NOT GRADED: " + ("no stand answers for it" if live_tier else "live tier off"), cause=SkipCause.ENV)
     for scenario, why in (
-            ("warehouse-load-success-path", "the warehouse load error path (clickhouse, BigQuery, Snowflake reached after staging) is NOT GRADED: `rivet load` refuses a local destination and no object-store emulator stages a bucket; the config-time refusals are graded"),
+            ("warehouse-load-success-path", "the warehouse load error path (clickhouse, BigQuery, Snowflake reached after staging) is NOT GRADED: `rivet load` refuses a local destination and this stage stages no emulator bucket; the config-time refusals are graded"),
             ("gcp-secret-resolved", "the resolved Secret Manager value reaching a sink is NOT GRADED: the endpoint is a const https URL (src/config/gcp_secret.rs:14) with no mock seam and the stand holds no Google project; the fetch-fail and token paths are graded"),
             ("state-tls-success", "state over TLS success is NOT GRADED: the stand postgres runs ssl=off; the sslmode=require error path is graded"),
-            ("oracle-cdc-events", "Oracle CDC with events is NOT GRADED: no Oracle stand answers")):
+            ("oracle-cdc-events", "Oracle CDC with events is NOT GRADED: this stage has no cell that drives it")):
         led.skipped("-", "-", f"no_secret_in_output/{scenario}", "-", why, cause=SkipCause.ENV)
     if lan_ip() is None:
         led.skipped("-", "-", "no_secret_in_output/endpoint-remote", "-",
@@ -1434,6 +1433,12 @@ def _self_test() -> None:
     stub.close()
     stub.acceptor.join(2)
     assert not stub.acceptor.is_alive(), "a closed stub leaks its acceptor thread"
+    real_connect, socket.create_connection = socket.create_connection, lambda *a, **k: socket.socket()
+    try:
+        silent = [e for e in SCHEME if stand_target(e) is None]
+    finally:
+        socket.create_connection = real_connect
+    assert not silent, f"an engine with a registry source and an open port is a live target: {silent}"
     print("no_secret_in_output self-test: ok")
 
 

@@ -844,6 +844,7 @@ def main() -> int:
         tm.self_test()
         self_test()
         return 0
+    print(nsn.binary_line(), flush=True)
     urls = {**nsn.STAND, **dict(u.split("=", 1) for u in ns.url)}
     targets = tuple(ns.targets.split(","))
     results, seen = [], []

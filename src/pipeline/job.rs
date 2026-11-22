@@ -136,6 +136,12 @@ fn capture_open_forensics(
                         &plan.export_name,
                     );
             }
+            super::schema_drift::migrate_baseline(
+                state,
+                &summary.export_name,
+                &mappings,
+                super::schema_drift::AbsentColumns::Drift,
+            );
             let cols: Vec<crate::state::SchemaColumn> = mappings
                 .iter()
                 .map(|m| crate::state::SchemaColumn {

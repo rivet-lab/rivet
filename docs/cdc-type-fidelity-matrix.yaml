@@ -65,7 +65,7 @@ scenarios:
 
   - id: type_decimal
     what: "decimal(p,s) precision + scale through CDC (MySQL cell INDEPENDENT: DuckDB re-read vs source literal); MSSQL MONEY and SMALLMONEY are carried exact over their whole range (finding #2)"
-    postgres: { test: postgres_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent, known_defect: ["NUMERIC"] }
+    postgres: { test: postgres_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent }
     mysql:    { test: mysql_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent }
     mssql:    { test: mssql_money_values_survive_batch_and_cdc, oracle: independent }
     mongo:    { test: mongo_cdc_change_stream_renders_tricky_bson_verbatim_like_batch, oracle: independent }
@@ -177,7 +177,7 @@ scenarios:
 
   - id: type_money
     what: "MSSQL MONEY/SMALLMONEY — the exact scaled value through CDC over the whole range, past 2^53 scaled units included (finding #2)"
-    postgres: { test: postgres_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent, known_defect: ["MONEY"] }
+    postgres: { test: postgres_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent }
     mysql:    { na: "MySQL has no MONEY type" }
     mssql:    { test: mssql_money_values_survive_batch_and_cdc, oracle: independent }
     mongo:    { na: "no MONEY type" }
@@ -193,7 +193,7 @@ scenarios:
 
   - id: type_list
     what: "PostgreSQL 1-D arrays (int[]/text[]/…) as a real Arrow List through CDC; a multi-dimensional array fails loud, never a flat NULL list (finding #6)"
-    postgres: { test: multidim_array_literal_is_refused_not_flattened_to_bogus_nulls, oracle: fail_loud, known_defect: ["NUMERIC[]"] }
+    postgres: { test: multidim_array_literal_is_refused_not_flattened_to_bogus_nulls, oracle: fail_loud }
     mysql:    { na: "MySQL has no array column type" }
     mssql:    { na: "SQL Server has no array column type" }
     mongo:    { na: "arrays ride the verbatim document blob (BSON array → extJSON)" }

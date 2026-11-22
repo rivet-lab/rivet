@@ -1190,8 +1190,7 @@ engines. What remains:
   including PostgreSQL arrays of text, numbers, dates, times, timestamps, uuids
   and bytea (real `List` columns, inner NULLs preserved) and `NUMERIC`/`DECIMAL`
   above precision 38 (`Decimal256`) — is byte-identical to the batch export.
-  Where the modes differ today (PostgreSQL
-  bare `numeric` and numeric arrays: batch refuses the column, CDC carries the
-  server's text) the difference is declared in `docs/type-capability-matrix.yaml`. Enforced per engine by the live
+  A PostgreSQL `numeric` with no declared precision and a numeric array are the
+  server's text in both modes. Enforced per engine by the live
   `*_batch_and_cdc_deliver_every_ledger_row_alike` tests, generated from that
   ledger.
