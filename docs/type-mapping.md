@@ -165,7 +165,7 @@ report says `lossy` with the cause and the remedy, the default policy runs, and 
 (`RIVET_TYPE_UNSAFE_MAPPING`). The verdict follows the column the query returns:
 an alias keeps it, a `CAST` to a coarser type or a column that is not finer is
 `exact`. When the source cannot say whether the column is finer (the query cannot be described), the column is graded `lossy` with that cause. To keep the digits, drop the override on SQL Server, or declare
-`timestamp_ns` on an Oracle `TIMESTAMP(7..9)` and `timestamp_tz_ns` on an Oracle `TIMESTAMP(7..9) WITH TIME ZONE`.
+`timestamp_ns` on an Oracle `TIMESTAMP(7..9)` and `timestamp_tz_ns` on an Oracle `TIMESTAMP(7..9) WITH TIME ZONE`. That remedy is for batch: an Oracle CDC change row carries microseconds under every time type (the `known_defect` of the `TIMESTAMP(9)` row in `docs/type-capability-matrix.yaml`), and SQL Server refuses `timestamp_tz_ns` over `datetimeoffset(7)` on batch (`RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH`).
 
 An override the source reader cannot build is refused by code, not run:
 `RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH` (exit 1) names the column, the declared

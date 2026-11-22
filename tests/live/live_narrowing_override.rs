@@ -130,7 +130,7 @@ fn mssql_table() -> (String, MssqlTable) {
     (table, guard)
 }
 
-/// A SQL Server batch override is graded per result column: the table, an alias, a join and a CAST to a coarser type each draw the verdict their own column deserves, and the rows are what the verdict says.
+/// A SQL Server batch override is graded per result column: the table, an alias, a join and a CAST to a coarser type each draw the verdict their own column deserves, and the rows are what the verdict says; `timestamp_tz_ns` over `datetimeoffset(7)` stays refused by code.
 #[test]
 #[ignore = "live: requires docker compose mssql"]
 fn a_mssql_batch_time_override_is_graded_by_the_result_column_it_lands_on() {
@@ -160,14 +160,6 @@ fn a_mssql_batch_time_override_is_graded_by_the_result_column_it_lands_on() {
             Verdict::Exact,
             "d7",
             "2024-01-02T03:04:05.123456700",
-        ),
-        (
-            "table o7 ns",
-            None,
-            "o7: timestamp_tz_ns",
-            Verdict::Exact,
-            "o7",
-            "2024-01-02T03:04:05.123456700Z",
         ),
         (
             "table d3",
@@ -237,6 +229,15 @@ fn a_mssql_batch_time_override_is_graded_by_the_result_column_it_lands_on() {
         }
     }
     assert_eq!(failed, Vec::<String>::new(), "cases failed");
+    let rig = Rig::mssql_batch(&t).export_line("columns: {o7: timestamp_tz_ns}");
+    let name = rig.export_name().to_string();
+    let refused = rig.cli(&["check", "--export", &name, "--type-report", "--json"]);
+    let err = String::from_utf8_lossy(&refused.stderr).to_string();
+    assert!(!refused.status.success(), "o7 ns: batch refuses: {err}");
+    assert!(
+        err.contains("RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH"),
+        "o7 ns: {err}"
+    );
 }
 
 /// A SQL Server CDC override is graded as the batch one: `datetime2(7)` and `datetimeoffset(7)` under a microsecond type are lossy, under their nanosecond type and over `datetime2(3)` exact; the change row holds what the verdict says.

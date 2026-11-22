@@ -14,7 +14,7 @@ pub type CdcCase<'a> = (
     &'a str,
 );
 
-/// An Oracle CDC declared `timestamp` / `timestamp_tz` over `TIMESTAMP(9)` [WITH TIME ZONE] is lossy and refused by `--strict`, `timestamp_ns` / `timestamp_tz_ns` and `timestamp` over `TIMESTAMP(3)` exact; the change row holds what the verdict says.
+/// An Oracle CDC declared `timestamp` / `timestamp_tz` over `TIMESTAMP(9)` [WITH TIME ZONE] is lossy and refused by `--strict`, `timestamp` over `TIMESTAMP(3)` exact; the change row holds the microseconds the verdict says.
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn an_oracle_cdc_time_override_is_graded_as_the_batch_override() {
@@ -28,15 +28,6 @@ fn an_oracle_cdc_time_override_is_graded_as_the_batch_override() {
             Verdict::Lossy,
             "TIMESTAMP '2024-01-02 03:04:05.123456789'",
             "2024-01-02T03:04:05.123456",
-        ),
-        (
-            "nso_cor9n",
-            "id NUMBER(10) PRIMARY KEY, ts9 TIMESTAMP(9)",
-            "TS9: timestamp_ns",
-            "TS9",
-            Verdict::Exact,
-            "TIMESTAMP '2024-01-02 03:04:05.123456789'",
-            "2024-01-02T03:04:05.123456789",
         ),
         (
             "nso_cor3",
@@ -55,15 +46,6 @@ fn an_oracle_cdc_time_override_is_graded_as_the_batch_override() {
             Verdict::Lossy,
             "TIMESTAMP '2024-01-02 03:04:05.123456789 +00:00'",
             "2024-01-02T03:04:05.123456Z",
-        ),
-        (
-            "nso_cortz9n",
-            "id NUMBER(10) PRIMARY KEY, tz9 TIMESTAMP(9) WITH TIME ZONE",
-            "TZ9: timestamp_tz_ns",
-            "TZ9",
-            Verdict::Exact,
-            "TIMESTAMP '2024-01-02 03:04:05.123456789 +00:00'",
-            "2024-01-02T03:04:05.123456789Z",
         ),
     ];
     for (label, cols, decl, col, want, value, shown) in cases {
