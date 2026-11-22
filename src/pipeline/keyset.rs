@@ -455,8 +455,8 @@ pub(crate) fn sample_key_boundaries(
         ()
     );
     let mut bounds: Vec<String> = Vec::with_capacity(parts.saturating_sub(1));
-    let seeked = seek_bounds(src, plan, &k, &fence, (parts, int_parts), &mut bounds);
-    let ends = match seeked {
+    let outcome = seek_bounds(src, plan, &k, &fence, (parts, int_parts), &mut bounds);
+    let ends = match outcome {
         Ok(SeekOutcome::Ends(ends)) => ends,
         Ok(SeekOutcome::Percentile) => {
             log::info!(
