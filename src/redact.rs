@@ -113,6 +113,8 @@ pub fn mask_value_in_output(value: &str) {
     }
 }
 
+const MAX_ANCHOR_KEY: usize = 256;
+
 /// Whether the occurrence ending at `end` of a registered value is a scanner anchor: a scheme before `://` or a password or secret key before `=`; masking it would hide the credential that follows from the scanner.
 fn is_anchor(text: &str, end: usize) -> bool {
     let after = &text[end..];
@@ -125,6 +127,7 @@ fn is_anchor(text: &str, end: usize) -> bool {
     let key_len = text.as_bytes()[..end]
         .iter()
         .rev()
+        .take(MAX_ANCHOR_KEY)
         .take_while(|b| is_keyword_byte(**b))
         .count();
     let key = &text[end - key_len..end];
@@ -1794,6 +1797,20 @@ mod tests {
     fn a_hostile_megabyte_of_overlapping_occurrences_is_masked_in_one_pass() {
         let text = "a".repeat(1 << 20);
         assert_eq!(mask_known(&text, &known(&["aaaaaaaa"])), MASK);
+    }
+
+    /// A registered keyword that is not followed by `=` is no anchor and is masked.
+    #[test]
+    fn a_registered_keyword_not_followed_by_an_equals_sign_is_masked() {
+        let known = known(&["db.password", "x-signature"]);
+        assert_eq!(
+            mask_known("use db.password here, x-signature too", &known),
+            format!("use {MASK} here, {MASK} too")
+        );
+        assert_eq!(
+            mask_known("db.password:x-signature", &known),
+            format!("{MASK}:{MASK}")
+        );
     }
 
     /// Text with no anchor and no overlap is masked exactly as a plain replace of each value would.
