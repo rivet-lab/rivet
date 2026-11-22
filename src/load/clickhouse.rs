@@ -1022,7 +1022,7 @@ fn object_kind_of(engine: &str) -> ObjectKind {
 }
 
 /// What a part is loaded as, which decides the checks it takes and the remedy a refusal names.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PartRole {
     Batch,
     CdcBaseline,
@@ -1711,6 +1711,45 @@ mod tests {
                      Give every row a list in `tags` in the source (an empty list if [] is what is meant), then re-baseline the stream. {}",
                     crate::source::cdc::checkpoint_identity::RECOVER
                 )
+            );
+        }
+    }
+
+    /// A NULL list in a change-log delete row passes only for the change-log role; every other role refuses it.
+    #[test]
+    fn a_null_list_in_a_delete_row_passes_only_for_the_change_log_role() {
+        use arrow::array::{ArrayRef, ListArray, StringArray};
+        use arrow::datatypes::Int32Type;
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let store = GcsStore::open_fs(dir.path().to_str().unwrap()).unwrap();
+        let tags =
+            ListArray::from_iter_primitive::<Int32Type, _, _>(vec![Some(vec![Some(1)]), None]);
+        let ops = StringArray::from(vec![
+            crate::source::cdc::ChangeOp::Insert.as_str(),
+            crate::source::cdc::ChangeOp::Delete.as_str(),
+        ]);
+        let batch = arrow::record_batch::RecordBatch::try_from_iter([
+            ("tags", Arc::new(tags) as ArrayRef),
+            ("__op", Arc::new(ops) as ArrayRef),
+        ])
+        .unwrap();
+        let mut buf = Vec::new();
+        let mut w = parquet::arrow::ArrowWriter::try_new(&mut buf, batch.schema(), None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+        std::fs::write(dir.path().join("del.parquet"), buf).unwrap();
+        let part = vec!["gs://b/del.parquet".to_string()];
+        assert_eq!(
+            checked_part_rows(|| Ok(&store), &part, PartRole::CdcChangeLog).unwrap(),
+            vec![2]
+        );
+        for role in [PartRole::Batch, PartRole::CdcBaseline] {
+            let err = checked_part_rows(|| Ok(&store), &part, role).unwrap_err();
+            assert_eq!(
+                crate::error::error_code(&err),
+                Some("RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE"),
+                "{role:?}"
             );
         }
     }
