@@ -267,6 +267,55 @@ fn a_postgres_cdc_stream_loads_into_clickhouse_and_the_view_matches_the_source()
     clickhouse_rows_match_source(&view, source(&mut c), "2\n4");
 }
 
+/// A PostgreSQL delete carries NULL in every non-key column, an array included: the change log still loads, and a NULL array in any other row is refused.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + postgres-cdc"]
+fn a_postgres_cdc_delete_of_a_row_with_an_array_column_still_loads_and_a_null_array_insert_is_refused()
+ {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let tbl = unique_name("rivet_ch_pgarr");
+    let slot = unique_name("rivet_ch_slot");
+    let _slot = Slot::new(slot.clone());
+    let mut c = postgres::Client::connect(POSTGRES_CDC_URL, postgres::NoTls).expect("pg");
+    c.batch_execute(&format!(
+        "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, v BIGINT, a INT[]); \
+         INSERT INTO {tbl} SELECT g, g, ARRAY[g::int] FROM generate_series(1, 5) g"
+    ))
+    .expect("seed");
+    let _tbl = PgTable::adopt_on(POSTGRES_CDC_URL, tbl.clone());
+    let db = Db::new("rivet_chtest");
+    let rig = into_clickhouse(Rig::pg_cdc(&tbl, &slot), &db);
+    let view = format!("{}.{tbl}", db.0);
+
+    rig.run_ok();
+    load(&rig);
+    c.batch_execute(&format!(
+        "UPDATE {tbl} SET v = 99 WHERE id = 1; DELETE FROM {tbl} WHERE id = 2"
+    ))
+    .expect("changes");
+    rig.run_ok();
+    load(&rig);
+    clickhouse_rows_match_source(&view, vec![(1, 99), (3, 3), (4, 4), (5, 5)], "2");
+
+    c.batch_execute(&format!("INSERT INTO {tbl} VALUES (6, 6, NULL)"))
+        .expect("a NULL array");
+    rig.run_ok();
+    let out = rig.load_args_env(&[], &[(PASSWORD_ENV, CLICKHOUSE_PASSWORD)]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "the NULL array must be refused:\n{err}"
+    );
+    assert!(
+        err.contains("column `a` holds a NULL list")
+            && err.contains("RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE"),
+        "{err}"
+    );
+    clickhouse_rows_match_source(&view, vec![(1, 99), (3, 3), (4, 4), (5, 5)], "2");
+}
+
 /// The same cycle from SQL Server: the version decodes a 10-byte LSN.
 #[test]
 #[ignore = "live: requires clickhouse + fake-gcs + mssql-cdc with SQL Server Agent"]
@@ -1180,7 +1229,7 @@ fn a_materialized_view_on_the_change_log_does_not_break_the_count() {
     clickhouse_rows_match_source(&view, source_rows(&tbl), "");
 }
 
-/// uuid, jsonb, a fractional time and arrays (one NULL) load and keep their values:
+/// uuid, jsonb, a fractional time and arrays (one empty) load and keep their values:
 /// the uuid recovers through the resolver's own cast, the time keeps its microseconds.
 #[test]
 #[ignore = "live: requires clickhouse + fake-gcs + postgres"]
@@ -1194,7 +1243,7 @@ fn uuid_json_time_and_array_columns_load_with_their_values() {
         "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, u UUID, j JSONB, t TIME, a INT[]); \
          INSERT INTO {tbl} VALUES \
            (1, 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', '{{\"k\": [1, 2]}}', '13:45:07.123456', '{{1,2}}'), \
-           (2, NULL, NULL, NULL, NULL)"
+           (2, NULL, NULL, NULL, '{{}}')"
     ))
     .expect("seed");
     let _t = PgTable::adopt(tbl.clone());
@@ -1221,10 +1270,7 @@ fn uuid_json_time_and_array_columns_load_with_their_values() {
     );
     assert_eq!(rows[0][4], "[1,2]", "array");
     assert_eq!(&rows[1][1..4], ["", "", ""], "NULLs stay NULL");
-    assert_eq!(
-        rows[1][4], "[]",
-        "a NULL array loads as [] — the resolver says so"
-    );
+    assert_eq!(rows[1][4], "[]", "an empty array loads as []");
 }
 
 /// One CDC cycle staged on `dest`, loaded into ClickHouse — by rivet sending each part,
@@ -1635,6 +1681,152 @@ fn a_date_clickhouse_cannot_hold_is_refused_not_clamped() {
         };
         assert_eq!(rows.trim(), "0", "{day}: nothing was inserted");
     }
+}
+
+const NULL_ARRAY_COLUMNS: [(&str, &str); 6] = [
+    ("INT[]", "'{1,2}'"),
+    ("TEXT[]", "'{a,b}'"),
+    ("DOUBLE PRECISION[]", "'{1.5}'"),
+    ("DATE[]", "'{2024-01-01}'"),
+    ("TIMESTAMPTZ[]", "'{2024-01-01 00:00:00+00}'"),
+    ("BYTEA[]", "ARRAY['\\x0102'::bytea]"),
+];
+
+/// Seeds `(id, a <ty>)` with `first` in row 1 and `second` in row 2, and loads it through `query` into ClickHouse.
+fn load_array_table(
+    ty: &str,
+    first: &str,
+    second: &str,
+    query: Option<&str>,
+) -> (std::process::Output, Db, String, PgTable) {
+    let mut c = pg_connect();
+    let tbl = unique_name("rivet_ch_nullarr");
+    c.batch_execute(&format!(
+        "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, a {ty}); \
+         INSERT INTO {tbl} VALUES (1, {first}), (2, {second})"
+    ))
+    .expect("seed");
+    let guard = PgTable::adopt(tbl.clone());
+    let db = Db::new("rivet_chtest");
+    let mut rig = Rig::pg_batch(&tbl).mode("full");
+    if let Some(q) = query {
+        rig = rig.query(&q.replace("{tbl}", &tbl));
+    }
+    let rig = batch_into_clickhouse(rig, &db);
+    rig.run_ok();
+    let out = rig.load_args_env(&[], &[(PASSWORD_ENV, CLICKHOUSE_PASSWORD)]);
+    (out, db, tbl, guard)
+}
+
+/// A NULL array is refused before any row is inserted, for every element type, never loaded as [].
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + postgres"]
+fn a_null_array_is_refused_not_loaded_as_an_empty_array() {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    for (ty, first) in NULL_ARRAY_COLUMNS {
+        let (out, db, tbl, _t) = load_array_table(ty, first, "NULL", None);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{ty}: the load must refuse:\n{err}");
+        assert!(
+            err.contains("column `a` holds a NULL list, and a ClickHouse Array cannot be NULL: it would load as [], the same value as an empty list. Nothing was written and no table was created.")
+                && err.contains("COALESCE(a, '{}') AS a")
+                && err.contains("a::text AS a")
+                && err.contains("RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE"),
+            "{ty}: {err}"
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(5),
+            "{ty}: exit follows the refusal class"
+        );
+        let stored = ch(&format!(
+            "SELECT count() FROM system.tables WHERE database = '{}' AND name = '{tbl}' FORMAT TSV",
+            db.0
+        ));
+        assert_eq!(stored.trim(), "0", "{ty}: no table was created");
+    }
+}
+
+/// The remedies the NULL-array refusal names load: COALESCE keeps [] by choice, a text cast keeps the NULL.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + postgres"]
+fn the_remedies_the_null_array_refusal_names_load() {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let (out, db, tbl, _t) = load_array_table(
+        "INT[]",
+        "'{1,2}'",
+        "NULL",
+        Some("SELECT id, COALESCE(a, '{}') AS a FROM {tbl}"),
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let got = clickhouse_rows_tsv(&format!(
+        "SELECT id, toString(a) FROM {}.{tbl} ORDER BY id FORMAT TSV",
+        db.0
+    ));
+    assert_eq!(
+        got.trim(),
+        "1\t[1,2]\n2\t[]",
+        "COALESCE loads [] on purpose"
+    );
+    let (out, db, tbl, _t) = load_array_table(
+        "INT[]",
+        "'{1,2}'",
+        "NULL",
+        Some("SELECT id, a::text AS a FROM {tbl}"),
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let got = clickhouse_rows_tsv(&format!(
+        "SELECT id, ifNull(a, '<NULL>') FROM {}.{tbl} ORDER BY id FORMAT TSV",
+        db.0
+    ));
+    assert_eq!(
+        got.trim(),
+        "1\t{1,2}\n2\t<NULL>",
+        "a text cast keeps the NULL"
+    );
+}
+
+/// What the NULL-array refusal does not reach: an empty array, a NULL element and a column without NULL lists load as they did.
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + postgres"]
+fn an_empty_array_a_null_element_and_a_table_without_null_arrays_still_load() {
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(BUCKET);
+    let (out, db, tbl, _t) = load_array_table("INT[]", "'{}'", "'{1,NULL,3}'", None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let got = clickhouse_rows_tsv(&format!(
+        "SELECT id, toString(a) FROM {}.{tbl} ORDER BY id FORMAT TSV",
+        db.0
+    ));
+    assert_eq!(got.trim(), "1\t[]\n2\t[1,NULL,3]");
+    let (out, db, tbl, _t) = load_array_table("TEXT[]", "'{a}'", "'{b,c}'", None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let got = clickhouse_rows_tsv(&format!(
+        "SELECT id, toString(a) FROM {}.{tbl} ORDER BY id FORMAT TSV",
+        db.0
+    ));
+    assert_eq!(got.trim(), "1\t['a']\n2\t['b','c']");
 }
 
 /// The remedy the date refusal names, a String column, delivers 2300-01-01 as the source holds it.

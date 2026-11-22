@@ -185,8 +185,16 @@ works the same way: name it in `named_collection:`.
   (the stored instants do not change; a key column cannot be altered).
 - **Types that land as something else.** `uuid` lands as `FixedString(16)` (the 16 raw
   bytes; the type report carries the `toUUID` expression to recover it), `json`/`jsonb`
-  as `String` holding the JSON text, `time` as `Decimal64` seconds since midnight, and a
-  NULL array as `[]` (a ClickHouse `Array` cannot be NULL). `rivet check --type-report --target clickhouse` lists each one.
+  as `String` holding the JSON text, and `time` as `Decimal64` seconds since midnight.
+  `rivet check --type-report --target clickhouse` lists each one.
+- **A NULL array is refused.** A ClickHouse `Array` cannot be NULL, so a NULL array would
+  load as `[]`, the same value as an empty array. A load whose parts hold one stops before
+  any table is created, with `RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE` naming the column. In
+  the export's `query:` read the column as `COALESCE(a, '{}') AS a` to load `[]` on purpose,
+  or as `a::text AS a` to keep the NULL in a `String` column. An empty array and an array
+  holding NULL elements load as before. In a change log, the NULL columns of a delete are
+  not NULL arrays and still load. A table written by an earlier version keeps the `[]` it
+  holds; re-export its NULL-array rows through one of the two remedies to tell them apart.
 - **Retries.** Every statement is one HTTP request with a 1200-second timeout, tried up
   to 5 times. A request that never connected is always tried again. A lost answer, a
   429/502/503/504, or "too many simultaneous queries"/"too many parts" is tried again
