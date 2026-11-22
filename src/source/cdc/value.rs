@@ -190,6 +190,8 @@ pub(crate) struct CellRefusal {
     pub reason: String,
     /// The engine's own code when the engine worded the refusal (its reason then carries the remedy).
     pub code: Option<crate::error::Code>,
+    /// The cell is a readable wire value the declared type cannot hold, decided by the converter, never by the wording.
+    pub by_value: bool,
 }
 
 /// Why an engine cell fix cannot read a wire value, optionally with the engine's own code.
@@ -197,6 +199,34 @@ pub(crate) struct CellRefusal {
 pub(crate) struct FixRefusal {
     pub reason: String,
     pub code: Option<crate::error::Code>,
+    pub by_value: bool,
+}
+
+impl FixRefusal {
+    /// A refusal the engine worded and coded itself.
+    fn coded(reason: String, code: crate::error::Code) -> Self {
+        Self {
+            reason,
+            code: Some(code),
+            by_value: false,
+        }
+    }
+
+    /// A readable wire value the declared type cannot hold: under an override it is the value code.
+    fn by_value(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            code: None,
+            by_value: true,
+        }
+    }
+}
+
+impl std::fmt::Display for FixRefusal {
+    /// The refusal's wording.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
 }
 
 impl From<&str> for FixRefusal {
@@ -205,6 +235,7 @@ impl From<&str> for FixRefusal {
         Self {
             reason: reason.into(),
             code: None,
+            by_value: false,
         }
     }
 }
@@ -212,7 +243,11 @@ impl From<&str> for FixRefusal {
 impl From<String> for FixRefusal {
     /// A refusal worded by the fix, coded by the sink.
     fn from(reason: String) -> Self {
-        Self { reason, code: None }
+        Self {
+            reason,
+            code: None,
+            by_value: false,
+        }
     }
 }
 
@@ -226,16 +261,17 @@ impl CellRefusal {
     }
 
     /// A refusal of `value` at `row` as worded, and coded, by the fix that met it.
-    fn refused(row: usize, value: &RivetValue, r: FixRefusal) -> Self {
+    pub(crate) fn refused(row: usize, value: &RivetValue, r: FixRefusal) -> Self {
         Self {
             row,
             value: value.clone(),
             reason: r.reason,
             code: r.code,
+            by_value: r.by_value,
         }
     }
 
-    /// The coded run error naming `column` of type `dt`; under an override a value the type cannot hold is the value code, a variant it cannot read the wire-mismatch code.
+    /// The coded run error naming `column` of type `dt`; under an override a value the converter marks `by_value` is the value code, any other refusal the wire-mismatch code.
     pub(crate) fn into_error(self, column: &str, dt: &DataType, overridden: bool) -> anyhow::Error {
         let full = render_str(&self.value);
         let shown: String = full.chars().take(64).collect();
@@ -244,12 +280,10 @@ impl CellRefusal {
             (code, String::new())
         } else if overridden {
             (
-                if self.reason == NO_READING
-                    || seeded!("cdc-override-value-refusal-wire-coded", true, false)
-                {
-                    crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH
-                } else {
+                if self.by_value && !seeded!("cdc-override-value-refusal-wire-coded", true, false) {
                     crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE
+                } else {
+                    crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH
                 },
                 format!(
                     "correct or drop the `columns:` override for '{column}', then re-snapshot \
@@ -283,15 +317,15 @@ fn flag_value(v: i128) -> Result<bool, FixRefusal> {
     match crate::source::mysql::flag_bool(v) {
         _ if seeded!("cdc-bool-cell-any-nonzero-true", v != 0, false) => Ok(true),
         Some(f) => Ok(f),
-        None => Err(FixRefusal {
-            reason: format!(
+        None => Err(FixRefusal::coded(
+            format!(
                 "is not a flag: a boolean column carries 0 or 1 only. Declare the column an \
                  integer type in `columns:` (for example `int64`) to carry the number, or leave \
                  the column out of the capture, then: {}",
                 crate::source::cdc::checkpoint_identity::RECOVER
             ),
-            code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
-        }),
+            crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+        )),
     }
 }
 
@@ -305,8 +339,8 @@ fn bool_value(v: &RivetValue) -> Result<bool, FixRefusal> {
     }
 }
 
-/// The value an integer column of width `T` stores for `v`: exact integer text parses, overflow refuses.
-fn int_value<T: TryFrom<i128>>(v: &RivetValue) -> Result<T, String> {
+/// The value an integer column of width `T` stores for `v`: exact integer text parses; text that is no integer and overflow refuse by value, as the batch converters do.
+fn int_value<T: TryFrom<i128>>(v: &RivetValue) -> Result<T, FixRefusal> {
     let wide: i128 = match v {
         RivetValue::Bool(b) => i128::from(*b),
         RivetValue::Int(i) => i128::from(*i),
@@ -314,13 +348,14 @@ fn int_value<T: TryFrom<i128>>(v: &RivetValue) -> Result<T, String> {
         RivetValue::Bytes(b) => std::str::from_utf8(b)
             .ok()
             .and_then(crate::types::decimal::decimal_text_to_int)
-            .ok_or("is not an exact integer")?,
+            .ok_or_else(|| FixRefusal::by_value("is not an exact integer"))?,
         _ => return Err(NO_READING.into()),
     };
     T::try_from(wide).map_err(|_| {
-        "overflows the column's integer width (a BIT(64) with bit 63 set, or a BIGINT \
-         UNSIGNED past i64::MAX); map the column to decimal(20,0) or a wider type"
-            .into()
+        FixRefusal::by_value(
+            "overflows the column's integer width (a BIT(64) with bit 63 set, or a BIGINT \
+             UNSIGNED past i64::MAX); map the column to decimal(20,0) or a wider type",
+        )
     })
 }
 
@@ -333,8 +368,8 @@ fn f64_value(v: &RivetValue) -> Result<f64, FixRefusal> {
         RivetValue::UInt(u) => Ok(*u as f64),
         RivetValue::Bytes(b) => match std::str::from_utf8(b).map(decimal_text_to_f64_exact) {
             Ok(DecimalAsF64::Exact(f)) => Ok(f),
-            Ok(DecimalAsF64::Rounded) => Err(FixRefusal {
-                reason: format!(
+            Ok(DecimalAsF64::Rounded) => Err(FixRefusal::coded(
+                format!(
                     "is a decimal that a float8 cannot hold exactly (it keeps {} significant \
                      digits and the integers up to 2^53). Declare the column `decimal(p,s)` in \
                      `columns:` to keep the digits, or leave the column out of the capture, \
@@ -342,8 +377,8 @@ fn f64_value(v: &RivetValue) -> Result<f64, FixRefusal> {
                     crate::types::decimal::F64_DECIMAL_DIGITS,
                     crate::source::cdc::checkpoint_identity::RECOVER
                 ),
-                code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
-            }),
+                crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+            )),
             _ => Err("is not a number".into()),
         },
         _ => Err(NO_READING.into()),
@@ -365,12 +400,12 @@ fn f32_value(v: &RivetValue) -> Result<f32, String> {
 }
 
 /// The Date32 a DateTime at midnight stores; a time of day is refused, never dropped.
-fn date_value(v: &RivetValue) -> Result<i32, String> {
+fn date_value(v: &RivetValue) -> Result<i32, FixRefusal> {
     match v {
         RivetValue::DateTime(d) if d.time() == chrono::NaiveTime::MIN => Ok(epoch_days(d.date())),
-        RivetValue::DateTime(_) => Err("has a time of day, which a `date` override would drop; \
-                                        declare it `timestamp`"
-            .into()),
+        RivetValue::DateTime(_) => Err(FixRefusal::by_value(
+            "has a time of day, which a `date` override would drop; declare it `timestamp`",
+        )),
         _ => Err(NO_READING.into()),
     }
 }
@@ -562,14 +597,14 @@ pub(crate) fn build_column(
                     }
                     Some(v @ V::Bytes(by)) => {
                         fixed_binary_bytes(by, *w as usize).ok_or_else(|| {
-                            CellRefusal::new(
+                            CellRefusal::refused(
                                 row,
                                 v,
-                                format!(
+                                FixRefusal::by_value(format!(
                                     "is {} bytes, which fills no {w}-byte value (and is not a \
                                      uuid text)",
                                     by.len()
-                                ),
+                                )),
                             )
                         })?
                     }
@@ -681,8 +716,8 @@ fn list_elem(elem: &DataType, e: &RivetValue) -> Result<ListElem, String> {
     Ok(match (elem, e) {
         (_, V::Null) => ListElem::Null,
         (DataType::Boolean, V::Bool(b)) => ListElem::Bool(*b),
-        (DataType::Int16, V::Int(_)) => ListElem::I16(int_value(e)?),
-        (DataType::Int32, V::Int(_)) => ListElem::I32(int_value(e)?),
+        (DataType::Int16, V::Int(_)) => ListElem::I16(int_value(e).map_err(|r| r.to_string())?),
+        (DataType::Int32, V::Int(_)) => ListElem::I32(int_value(e).map_err(|r| r.to_string())?),
         (DataType::Int64, V::Int(i)) => ListElem::I64(*i),
         (DataType::Float32, V::Float(x)) => ListElem::F32(*x as f32),
         (DataType::Float64, V::Float(x)) => ListElem::F64(*x),
@@ -1106,8 +1141,8 @@ impl MysqlCellFix {
                 self.apply_labels(labels.as_deref().map_err(String::as_str), v)?
             }
             (MysqlCellFix::TimeOfDay, V::TimeMicros(us)) if !crate::types::is_time_of_day(*us) => {
-                return Err(FixRefusal {
-                    reason: seeded!(
+                return Err(FixRefusal::coded(
+                    seeded!(
                         "mysql-cdc-time-remedy-names-the-batch-cast",
                         format!(
                             "{} Cast it in a query, e.g. TIME_TO_SEC(col) or CAST(col AS CHAR)",
@@ -1121,8 +1156,8 @@ impl MysqlCellFix {
                             crate::source::cdc::checkpoint_identity::RECOVER
                         )
                     ),
-                    code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
-                });
+                    crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+                ));
             }
             (MysqlCellFix::BinaryPad(w), V::Bytes(b)) => {
                 let mut p = b.clone();
@@ -1148,14 +1183,14 @@ fn epoch_text(b: &[u8]) -> Option<(i64, u32)> {
 
 /// The cell refusal of an ENUM or SET label that has no reading, coded and with the remedy no `columns:` override can replace.
 fn label_refusal(why: impl Into<String>) -> FixRefusal {
-    FixRefusal {
-        reason: format!(
+    FixRefusal::coded(
+        format!(
             "{}. A `columns:` override does not carry the label either: leave the column out of the capture, then: {}",
             why.into(),
             crate::source::cdc::checkpoint_identity::RECOVER
         ),
-        code: Some(crate::error::codes::SOURCE_CDC_CELL_UNSUPPORTED),
-    }
+        crate::error::codes::SOURCE_CDC_CELL_UNSUPPORTED,
+    )
 }
 
 /// The labels a binlog TABLE_MAP carries for one ENUM or SET column whose catalog rendering cannot be trusted; `None` when the table map carries no labels.
@@ -1492,13 +1527,11 @@ mod tests {
         ] {
             let err = enum_text(native, idx).unwrap_err();
             for overridden in [false, true] {
-                let e = CellRefusal {
-                    row: 3,
-                    value: RivetValue::Int(idx),
-                    reason: err.reason.clone(),
-                    code: err.code,
-                }
-                .into_error("status", &DataType::Utf8, overridden);
+                let e = CellRefusal::refused(3, &RivetValue::Int(idx), err.clone()).into_error(
+                    "status",
+                    &DataType::Utf8,
+                    overridden,
+                );
                 let msg = format!("{e:#}");
                 assert_eq!(
                     crate::error::code_of(&e).map(|c| c.id),
@@ -1613,13 +1646,11 @@ mod tests {
             .unwrap_err();
         let msg = format!(
             "{:#}",
-            CellRefusal {
-                row: 0,
-                value: RivetValue::Int(1),
-                reason: err.reason,
-                code: err.code,
-            }
-            .into_error("status", &DataType::Utf8, false)
+            CellRefusal::refused(0, &RivetValue::Int(1), err).into_error(
+                "status",
+                &DataType::Utf8,
+                false
+            )
         );
         assert!(
             msg.contains("column 'status'")
@@ -2427,7 +2458,7 @@ mod tests {
         }
     }
 
-    /// Under an override a value the declared type cannot hold is the value code, a variant it cannot read the wire-mismatch code.
+    /// Under an override a refusal the converter marks by value is the value code, every other refusal the wire-mismatch code; without an override neither changes.
     #[test]
     fn an_override_refusal_by_value_carries_the_value_code_as_batch_does() {
         use RivetValue as V;
@@ -2444,6 +2475,9 @@ mod tests {
                 true,
             ),
             (DataType::Int32, V::Bytes(b"1.5".to_vec()), true),
+            (DataType::Int32, V::Bytes(b"x".to_vec()), true),
+            (DataType::Int32, V::Int(5_000_000_000), true),
+            (DataType::Int16, V::Int(40_000), true),
             (DataType::Date32, V::Int(1), false),
             (DataType::FixedSizeBinary(16), V::Int(1), false),
             (DataType::Int32, V::DateTime(midnight_plus), false),
@@ -2460,6 +2494,15 @@ mod tests {
         let r = build_column(&DataType::Date32, &[Some(&V::Int(1))]).unwrap_err();
         let err = r.into_error("c", &DataType::Date32, false);
         crate::error::assert_coded(&err, "RIVET_SOURCE_CDC_CELL_UNSUPPORTED", 5);
+        for (dt, v) in [
+            (DataType::Date32, V::DateTime(midnight_plus)),
+            (DataType::FixedSizeBinary(16), V::Bytes(vec![1; 15])),
+        ] {
+            let err = build_column(&dt, &[Some(&v)])
+                .unwrap_err()
+                .into_error("c", &dt, false);
+            crate::error::assert_coded(&err, "RIVET_SOURCE_CDC_CELL_UNSUPPORTED", 5);
+        }
     }
 
     /// A long offending value is shown truncated, not dumped whole into the message.

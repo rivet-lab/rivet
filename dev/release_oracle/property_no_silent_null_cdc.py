@@ -230,6 +230,15 @@ def judge_stop(c: Col, u: Unit, cell: str, stop: Result | None) -> Result | None
     return stop
 
 
+def agree_on_code(results: list[Result]) -> list[Result]:
+    """One value, one code: a leg of an override unit that stopped with another code than its snapshot leg is a CDC_VERDICT_DIFFERS, whatever check noted."""
+    ref = next((r for r in results if "/cdc-snapshot" in r.cell and r.verdict == REFUSED and r.code and not r.klass), None)
+    if ref is None:
+        return results
+    return [Result(r.cell, REFUSED, CDC_DIFFERS, f"the snapshot leg stopped with [{ref.code}], this leg with [{r.code}]", r.code)
+            if r.verdict == REFUSED and r.code and not r.klass and r.code != ref.code else r for r in results]
+
+
 def grade_unit(engine: str, u: Unit, cols: list[Col], n: int, runs: dict[str, core.Proc], checks: dict[str, core.Proc], d: Path, tag: str) -> list[Result]:
     """Grade every leg of one unit from the whole output directory against the seed literals; each run is held to the check made right before it."""
     graded = cols if u.target == "none" else [u.col]
@@ -290,7 +299,7 @@ def grade_unit(engine: str, u: Unit, cols: list[Col], n: int, runs: dict[str, co
                 out.append(Result(cell, DELIVERED, WRONG, f"{len(wrong)} values changed under fidelity {fid or '?'}, e.g. {wrong[:3]}", fidelity=fid))
             else:
                 out.append(Result(cell, DELIVERED, "", "", fidelity=fid))
-    return out
+    return out if u.target == "none" else agree_on_code(out)
 
 
 def run_round(engine: str, r: int, cols: list[Col], units: list[Unit], image: str, work: Path) -> list[Result]:
@@ -492,6 +501,10 @@ def self_test() -> None:
     assert rs[0].klass == CDC_DIFFERS and rs[0].verdict == REFUSED, rs[0]
     rs = grade_unit("mysql", none, [gone_c], 1, {"snapshot": refused}, {"snapshot": nsn._proc(5, "[RIVET_X] no")}, d, "")
     assert rs[0].klass == "" and rs[0].verdict == REFUSED, rs[0]
+    snap, ins = (Result(f"e/c->t/cdc-{leg}/parquet", REFUSED, "", "", code) for leg, code in (("snapshot", "RIVET_A"), ("insert", "RIVET_B")))
+    got = agree_on_code([snap, ins, Result("e/c->t/cdc-delete/parquet", REFUSED, "", "", "RIVET_A"), Result("e/c->t/cdc-update/parquet", DELIVERED, "", "")])
+    assert [r.klass for r in got] == ["", CDC_DIFFERS, "", ""] and got[0] is snap, "a leg that stops with another code than the snapshot leg differs, whatever check noted"
+    assert agree_on_code([ins]) == [ins] and agree_on_code([Result(snap.cell, DELIVERED, "", ""), ins])[1] is ins, "no refusing snapshot leg, nothing to compare"
     other = Col("e01", "INT", "Int32", "int", ("1",), cdc=te.EXACT_V)
     stopped, fine = [Result("c", REFUSED, CDC_DIFFERS, "", "RIVET_X")], [Result("c", DELIVERED, "", "")]
     assert shared_stop([exact_c, other], stopped) and not shared_stop([exact_c], stopped) and not shared_stop([exact_c, other], fine)

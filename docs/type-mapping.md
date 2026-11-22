@@ -171,10 +171,15 @@ first batch with the same code.
 A value of a readable wire type that the declared type cannot hold (an Oracle `DATE`
 with a time of day under `date`, an Oracle `RAW` of the wrong length or SQL Server
 text that is not a uuid under `uuid`, a SQL Server decimal a narrower scale would
-round, fractional text under an integer override on a CDC stream) is refused
+round, a MySQL text cell that is not a whole integer under an integer override, an
+integer past the declared integer width) is refused
 `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5) naming the column and the value, on a
-batch run and on a CDC snapshot or stream alike; `RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH`
-is only for a wire type the declared type cannot read.
+batch run and on a CDC snapshot or stream alike. A refusal decided by the column's
+type alone (PostgreSQL, SQL Server and Oracle numeric, float or text under an integer
+override; MySQL DECIMAL or DOUBLE under one) is `RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH`
+(exit 1) at plan time on every leg. A chunked run refused at a later chunk keeps the
+parts of the chunks it finished and a manifest whose run is marked `failed`; fix the
+value or declare a wider type, and re-run.
 
 A `bool` override over an integer column is a flag only for 0 and 1. PostgreSQL, SQL Server and Oracle refuse it for a batch export at plan time; MySQL, which checks each value, refuses a value outside 0 and 1 at the cell. A CDC stream reads every engine the way MySQL does: 0, 1 and NULL are delivered as `false`, `true` and NULL, and any other integer (2, 5, -1) is refused `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5) naming the column, the value and its row, before a part is written and before the checkpoint moves. Declare the column `int64` in `columns:` to carry the number.
 

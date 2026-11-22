@@ -373,19 +373,23 @@ fn timestamp_nanos(t: &OracleTimestamp, name: &str) -> Result<i64> {
     crate::types::timestamp_nanos_or_refuse(timestamp_datetime(t)?, "oracle", name)
 }
 
-/// The RAW value when it fills exactly `width` bytes, or the value refusal naming `name`.
-fn raw_of_width<'a>(v: &'a [u8], width: usize, name: &str) -> Result<&'a [u8]> {
-    if v.len() == width {
-        return Ok(v);
-    }
-    Err(crate::error::coded(
-        crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
-        format!(
-            "oracle: column {name} holds a {}-byte value; a `uuid` override needs exactly \
-             {width} bytes (RAW({width}))",
-            v.len()
-        ),
-    ))
+/// Appends a RAW value that fills exactly `width` bytes, or refuses it by value code naming `name`.
+fn append_raw_of_width(
+    b: &mut FixedSizeBinaryBuilder,
+    v: &[u8],
+    width: i32,
+    name: &str,
+) -> Result<()> {
+    b.append_value(v).map_err(|_| {
+        crate::error::coded(
+            crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+            format!(
+                "oracle: column {name} holds a {}-byte value; a `uuid` override needs exactly \
+                 {width} bytes (RAW({width}))",
+                v.len()
+            ),
+        )
+    })
 }
 
 /// Days since the Unix epoch, or an error naming `name` when the value has a time of day.
@@ -619,9 +623,7 @@ fn build_column(
             let mut b = FixedSizeBinaryBuilder::with_capacity(rows.len(), *width);
             for r in rows {
                 match r.get::<Option<Vec<u8>>>(idx).ora()? {
-                    Some(v) => b
-                        .append_value(raw_of_width(&v, *width as usize, name)?)
-                        .expect("raw_of_width returns exactly the column width"),
+                    Some(v) => append_raw_of_width(&mut b, &v, *width, name)?,
                     None => b.append_null(),
                 }
             }
@@ -1112,9 +1114,10 @@ mod tests {
     /// A RAW that is not exactly the uuid width is refused by value code naming the column and the length.
     #[test]
     fn a_raw_of_the_wrong_width_is_a_value_refusal_and_the_right_width_passes() {
-        assert_eq!(raw_of_width(&[7; 16], 16, "U").unwrap(), &[7; 16][..]);
+        let mut b = FixedSizeBinaryBuilder::new(16);
+        append_raw_of_width(&mut b, &[7; 16], 16, "U").unwrap();
         for len in [0usize, 15, 17] {
-            let err = raw_of_width(&vec![7; len], 16, "U").unwrap_err();
+            let err = append_raw_of_width(&mut b, &vec![7; len], 16, "U").unwrap_err();
             crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
             let msg = err.to_string();
             assert!(

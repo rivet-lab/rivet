@@ -2524,6 +2524,42 @@ fn a_date_override_refuses_a_value_with_a_time_of_day() {
     );
 }
 
+/// A chunked run refused on its fifth chunk exits 5 and leaves the four finished chunks' parts and a manifest marked failed; the refusal never stops it before the first part.
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_chunked_run_refused_on_a_later_chunk_keeps_the_earlier_parts_and_a_failed_manifest() {
+    require_alive(LiveService::Oracle);
+    let t = OracleTable::create("ora_ovc", "id NUMBER(10) PRIMARY KEY, dt DATE");
+    ora_exec(&format!(
+        "INSERT INTO {} SELECT LEVEL, CASE WHEN LEVEL = 45 THEN \
+         TO_DATE('2024-02-29 13:14:15','YYYY-MM-DD HH24:MI:SS') \
+         ELSE TO_DATE('2024-02-29','YYYY-MM-DD') END FROM dual CONNECT BY LEVEL <= 50",
+        t.name()
+    ));
+    let rig = Rig::oracle_batch(t.name())
+        .mode("chunked")
+        .export_line("chunk_column: ID")
+        .export_line("chunk_size: 10")
+        .export_line("columns: {DT: date}");
+    let run = rig.run_args(&[]);
+    let err = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(run.status.code(), Some(5), "stderr:\n{err}");
+    assert!(
+        err.contains("RIVET_SOURCE_VALUE_UNREPRESENTABLE") && err.contains("column DT = "),
+        "stderr:\n{err}"
+    );
+    assert_eq!(
+        files_with_extension(&rig.out_dir(), "parquet").len(),
+        4,
+        "the four chunks before the refusing one keep their parts"
+    );
+    let manifest = std::fs::read_to_string(rig.out_dir().join("manifest.json")).unwrap();
+    assert!(
+        manifest.contains("\"status\": \"failed\"") && manifest.contains("\"row_count\": 40"),
+        "{manifest}"
+    );
+}
+
 /// `rivet check` refuses a `columns:` key spelled in another case than its result column, as the run does.
 #[test]
 #[ignore = "live: requires docker compose oracle"]

@@ -64,6 +64,14 @@ scenarios:
     mongo:    { na: "a MongoDB change row is two text cells; no `columns:` override retypes a field on the stream" }
     oracle:   { test: oracle_cdc_a_date_override_refuses_a_time_of_day_not_drops_it }
 
+  - id: override_integer_text_whole_cell_only
+    what: "a text cell under an integer override is an integer only when the whole cell is one: `1.5`, `1e3`, `12abc`, empty and `-` are refused RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5), never cut to a leading prefix"
+    postgres: { na: "a text column under an integer override is refused at plan time on every leg (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH), so no text cell is read as an integer" }
+    mysql:    { test: a_text_cell_is_an_integer_only_when_the_whole_cell_is }
+    mssql:    { na: "a text column under an integer override is refused at plan time on every leg (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH), so no text cell is read as an integer" }
+    mongo:    { na: "a MongoDB field has no text-to-integer column override on the batch or change-stream path" }
+    oracle:   { na: "a VARCHAR2 column under an integer override is refused at plan time on every leg (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH), so no text cell is read as an integer" }
+
   - id: sparse_range_plan_guard
     what: "a sparse range-chunk key that would blow up into thousands of near-empty windows → bail (PG/MSSQL, scan-free estimate proves ≥4×) or loud warn (MySQL, no trustworthy estimate)"
     postgres: { test: stand_sparse_guard_postgres }

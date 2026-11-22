@@ -454,7 +454,7 @@ pub struct Code {
     pub id: &'static str,
     pub kind: ErrorKind,
     pub action: &'static str,
-    /// Raised only by a value the source or warehouse holds, which `rivet check` never reads: check names these codes instead of deciding them.
+    /// Raised only by a value the source or warehouse holds; `rivet check` reads at most the first row of an export that declares `columns:`, so it names these codes for the rows it did not read.
     pub needs_values: bool,
 }
 
@@ -2252,23 +2252,18 @@ pub fn value_codes() -> impl Iterator<Item = &'static str> {
     codes::ALL.iter().filter(|c| c.needs_values).map(|c| c.id)
 }
 
-/// Print [`values_unread_note`] to stderr, when it says anything.
-pub fn print_values_unread_note() {
-    let note = values_unread_note();
-    if !note.is_empty() {
-        eprintln!("{note}");
+/// The note `rivet check` prints when an export declares `columns:`: the codes a value it did not read can still raise.
+pub fn values_unread_note(declares_columns: bool) -> Option<String> {
+    if !declares_columns {
+        return None;
     }
-}
-
-/// The note `rivet check` prints: the codes a value it did not read can still raise.
-pub fn values_unread_note() -> String {
     seeded!(
         "check-values-unread-unsaid",
-        String::new(),
-        format!(
+        None,
+        Some(format!(
             "note[values-unread]: rivet check reads at most the first row of an export that declares `columns:`; a run may still refuse a value it did not read with {}",
             value_codes().collect::<Vec<_>>().join(", ")
-        )
+        ))
     )
 }
 
@@ -2370,7 +2365,8 @@ mod tests {
             ],
             "a value-decided code is added here on purpose: check names it instead of deciding it"
         );
-        let note = super::values_unread_note();
+        assert_eq!(super::values_unread_note(false), None);
+        let note = super::values_unread_note(true).expect("an export that declares columns");
         assert_eq!(
             note,
             "note[values-unread]: rivet check reads at most the first row of an export that \

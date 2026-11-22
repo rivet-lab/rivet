@@ -483,7 +483,15 @@ fn dispatch_check(
         tgt,
         &planned_strategies(&plans),
     )?;
-    crate::error::print_values_unread_note();
+    let declared = crate::config::declared_exports(
+        &Config::load_with_params(&config, p.as_ref())?,
+        export.as_deref(),
+    )?;
+    if let Some(note) =
+        crate::error::values_unread_note(declared.iter().any(|e| !e.columns.is_empty()))
+    {
+        eprintln!("{note}");
+    }
     report_plan_compatibility(plans, json)?;
     if let Err(e) = StateStore::probe(&config) {
         log::error!("check: the state this config uses does not answer: {e:#}");

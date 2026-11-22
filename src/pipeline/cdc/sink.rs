@@ -822,12 +822,7 @@ fn flush(
                         image_cell(e, i, &m.column_name, &schema_names, memo)
                             .map(|v| {
                                 fix.apply_with(v, wire_labels(e, &m.column_name), &e.table)
-                                    .map_err(|r| value::CellRefusal {
-                                        row,
-                                        value: v.clone(),
-                                        reason: r.reason,
-                                        code: r.code,
-                                    })
+                                    .map_err(|r| value::CellRefusal::refused(row, v, r))
                             })
                             .transpose()
                     })
