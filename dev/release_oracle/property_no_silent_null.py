@@ -308,7 +308,7 @@ def parse_lit(engine: str, lit: str):
         return Decimal(int(m.group(1), 2))
     if m := _HEX.fullmatch(s):
         hexed = m.group(1) or m.group(2) or m.group(3) or ""
-        return None if engine == "oracle" and not hexed else bytes.fromhex(hexed)
+        return None if engine == "oracle" and lit.strip().upper() == "HEXTORAW('')" else bytes.fromhex(hexed)
     if engine == "postgres" and (m := _PG_HEX.fullmatch(s)):
         return bytes.fromhex(m.group(1))
     if m := _TS_FUNC.fullmatch(s):
@@ -1249,6 +1249,7 @@ def self_test() -> None:
     assert compare("mysql", "7", "int", "float4", None) == NULLED, "a non-NULL value delivered as NULL is the harm of the MySQL int->float override"
     assert compare("mysql", "7", "int", "float4", None, csv=True) == NULLED and compare("mysql", "7", "int", "float4", "", csv=True) == WRONG
     assert compare("mysql", "''", "text", "none", "", csv=True) == "OK" and compare("mysql", "''", "text", "none", None, csv=True) == NULLED
+    assert parse_lit("oracle", "EMPTY_BLOB()") == b"", "an Oracle empty LOB is zero-length, never NULL"
     assert parse_lit("oracle", "HEXTORAW('')") is None and parse_lit("mysql", "UNHEX('')") == b"" and parse_lit("mysql", "x''") == b""
     assert compare("oracle", "HEXTORAW('')", "other", "none", None, native="RAW(16)") == "OK", "an Oracle empty RAW is NULL at the source"
     with tempfile.TemporaryDirectory() as fc:
@@ -1486,6 +1487,7 @@ def _reader_self_test() -> bool:
         import pyarrow.parquet as pq
     except ImportError:
         return False
+    assert _same_instant("mssql", "TIME", "00:00:00.0000001", Decimal("0.0000001")) == "OK" and _same_instant("mssql", "TIME", "00:00:00.0000001", Decimal("0")) == WRONG, "a 100ns tick is graded in seconds-of-day, never dropped to the microsecond"
     assert nanosecond_read_keeps_every_digit(), "a nanosecond column is read as the text DuckDB holds, never a microsecond datetime"
     col = Col("c00", "INT", "Int32", "int", ("1", "16777217", "-5"))
     with tempfile.TemporaryDirectory() as t:
