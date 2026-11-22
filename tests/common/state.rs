@@ -333,6 +333,25 @@ pub fn state_url_under_test() -> Option<String> {
         .filter(|u| u.starts_with("postgres"))
 }
 
+/// The state backend as the DuckDB container reaches it: the stand's published `127.0.0.1:5433` is the `postgres-state` service's own port inside the compose network.
+pub fn state_url_in_container(url: &str) -> String {
+    url.replace("@127.0.0.1:5433/", "@postgres-state:5432/")
+}
+
+/// `INSTALL`, `LOAD` and `ATTACH` of a run's state backend as `alias`: a Postgres URL when the gate grades one, else a SQLite file in the container.
+pub fn state_attach_sql(state_db: &str, alias: &str) -> String {
+    if state_db.starts_with("postgres") {
+        format!(
+            "INSTALL postgres; LOAD postgres; ATTACH '{}' AS {alias} (TYPE postgres, READ_ONLY);",
+            state_url_in_container(state_db)
+        )
+    } else {
+        format!(
+            "INSTALL sqlite; LOAD sqlite; ATTACH '{state_db}' AS {alias} (TYPE sqlite, READ_ONLY);"
+        )
+    }
+}
+
 /// The SQLite file a rivet child spawned with `envs` uses when its `RIVET_STATE_URL` is `sqlite:<path>` (a relative path anchored to `config_dir`, as rivet anchors it).
 pub fn sqlite_state_for(
     envs: &[(&str, &str)],
