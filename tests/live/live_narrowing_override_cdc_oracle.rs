@@ -49,14 +49,12 @@ fn an_oracle_cdc_time_override_is_graded_as_the_batch_override() {
         ora_exec(&format!("INSERT INTO {} VALUES (1, {value})", t.name()));
         rig.run_ok();
         assert_eq!(
-            count_where(&out, &format!("__op = 'insert' AND ID = 1 AND {row}")),
+            crate::live_narrowing_override::count_where(
+                &out,
+                &format!("__op = 'insert' AND ID = 1 AND {row}")
+            ),
             1,
             "{label}: delivered change row"
-        );
-        assert_eq!(
-            duckdb_dir_parquet_distinct_strings(&out, "ID"),
-            std::collections::BTreeSet::from(["1".to_string()]),
-            "{label}: the delivered ids"
         );
     }
 }

@@ -770,6 +770,7 @@ fn oracle_class_census_is_pinned() {
         "read_bq_",
         // Mongo `_id`s under a marker dir, read through DuckDB (live_cdc_mongo.rs).
         "walkdir_parquet_ids(",
+        "live_narrowing_override::count_where(",
     ];
     let shared_codec = [
         "cdc_id_ops(",
@@ -1282,6 +1283,7 @@ fn every_live_cdc_test_asserts_an_outcome() {
                 || chunk.contains("duckdb_distinct_i64_set(")
                 || chunk.contains("duckdb_assert_complete(")
                 || chunk.contains("duckdb_assert_at_least_once(")
+                || chunk.contains("live_narrowing_override::count_where(")
                 || chunk.contains("duckdb_assert_rows_and_distinct(")
                 // The uv-pinned duckdb (dev/pytools/duckcli.py) as a read-back (round-5
                 // row-hash value oracle): the test pipes `-json` output into an
