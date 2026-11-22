@@ -248,6 +248,7 @@ fn warehouse(rig: Rig, view: &str) -> Warehouse {
 }
 
 /// `rig` as a `mode: full` batch export keyed on `pk` loaded into a fresh ClickHouse database; the loaded table is `view`.
+#[cfg(feature = "oracle")]
 fn warehouse_batch(rig: Rig, view: &str, pk: &str) -> Warehouse {
     warehouse_of(rig.mode("full"), view, false, pk)
 }
