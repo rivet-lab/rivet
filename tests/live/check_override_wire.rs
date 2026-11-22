@@ -414,17 +414,24 @@ fn a_csv_export_of_a_decimal256_column_is_refused_by_check_like_the_run_mysql() 
     csv_column_is_refused_like_the_run(rig, &name, "d", "decimal(60,10)");
 }
 
+/// A column no Arrow type carries, declared as an integer, is refused by the run and both `check` spellings with the one wire-mismatch code, naming the column.
 #[test]
 #[ignore = "live: postgres"]
-fn a_column_without_an_arrow_type_is_refused_by_check_like_the_run_postgres() {
+fn a_declared_type_on_a_column_without_an_arrow_type_is_refused_by_check_like_the_run_postgres() {
     require_alive(LiveService::Postgres);
-    let name = unique_name("unmapped_pg");
+    let name = unique_name("unmapped_ovr_pg");
     let out = tempfile::tempdir().unwrap();
     let rig = Rig::pg_batch(&name)
-        .query("SELECT 12.5::numeric AS c")
+        .query("SELECT '10.0.0.1'::inet AS c")
         .mode("full")
+        .export_line("columns:")
+        .export_line("  c: \"int64\"")
         .dest_path(out.path().to_path_buf());
-    unmapped_column_is_refused_like_the_run(rig, &name, "c");
+    let said = check_and_run_refuse_alike(rig, &name);
+    assert!(
+        said.contains("column `c` is inet") && said.contains("Postgres does not convert that pair"),
+        "{said}"
+    );
 }
 
 #[test]
