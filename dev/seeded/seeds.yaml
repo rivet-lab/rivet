@@ -6817,6 +6817,91 @@ seeds:
           - "lib:flush_warns_with_the_count_of_zero_dates_it_nulled_and_is_silent_otherwise"
           - "lib:a_run_that_nulled_cells_warns_once_per_column_with_its_count"
 
+  - name: keyset-uuid-not-recut
+    class: "a uuid keyset key is cut by key space only and never recut by density: a key whose rows sit in a dense block with a gap above it lands most rows in a few ranges, so one worker reads the table while the rest idle"
+    history: "client case #1059, 2026-11-19: composite key (uuid_v7, varchar) on PostgreSQL, ranges of 14.9x the mean on the su7 fixture before the recut; RED 2026-11-20 (lib:a_uuid_key_with_a_gap_after_its_dense_block_is_recut_into_balanced_ranges)"
+    scope: source
+    switch: keyset-uuid-not-recut
+    engines:
+      postgres:
+        cells: [a_skewed_uuid_keyset_is_recut_by_density_postgres, "lib:a_uuid_key_with_a_gap_after_its_dense_block_is_recut_into_balanced_ranges"]
+      mysql:
+        cells: [a_skewed_uuid_keyset_is_recut_by_density_mysql, "lib:a_uuid_key_with_a_gap_after_its_dense_block_is_recut_into_balanced_ranges"]
+      oracle:
+        cells: [a_skewed_uuid_keyset_is_recut_by_density_oracle, "lib:a_uuid_key_with_a_gap_after_its_dense_block_is_recut_into_balanced_ranges"]
+      mssql:
+        na: "a SQL Server uniqueidentifier orders by its last bytes, so it has no key-space axis and keeps row percentiles by design (a_skewed_uniqueidentifier_keyset_keeps_row_percentiles_mssql, lib:a_sql_server_uuid_key_is_not_recut)"
+      mongo:
+        na: "MongoDB parallel is the separate `_id`-range reader (mongo_parallel), not the SQL keyset range sampler"
+
+  - name: keyset-snap-stacks-passed-cuts
+    class: "the keyset sampler snaps a cut that the previous snapped boundary already passed to the next existing key, so several cuts inside an empty stretch become consecutive one-row ranges and one-row files"
+    history: "client-shape fixture su7, 2026-11-19: ranges 23-28 each held one sparse key after the dense block (3 one-row files in the p2 run log); RED 2026-11-20 (lib:a_uuid_key_with_a_gap_after_its_dense_block_is_recut_into_balanced_ranges)"
+    scope: source
+    switch: keyset-snap-stacks-passed-cuts
+    engines:
+      postgres:
+        cells: ["lib:a_uuid_key_with_a_gap_after_its_dense_block_is_recut_into_balanced_ranges"]
+      mysql:
+        cells: ["lib:a_uuid_key_with_a_gap_after_its_dense_block_is_recut_into_balanced_ranges"]
+      mssql:
+        cells: ["lib:a_uuid_key_with_a_gap_after_its_dense_block_is_recut_into_balanced_ranges"]
+      oracle:
+        cells: ["lib:a_uuid_key_with_a_gap_after_its_dense_block_is_recut_into_balanced_ranges"]
+      mongo:
+        na: "MongoDB parallel is the separate `_id`-range reader (mongo_parallel), not the SQL keyset range sampler"
+
+  - name: keyset-mssql-uuid-gets-an-axis
+    class: "the keyset sampler gives a SQL Server uniqueidentifier key a uuid axis although SQL Server sorts uuids in its own byte order, so key-space cuts and the recut split the table at places that are not where the sort puts them"
+    history: "SQL Server uniqueidentifier ordering, 2026-11-19 verification (8169 order differs from the text order); RED 2026-11-20 (lib:a_sql_server_uuid_key_is_not_recut)"
+    scope: source
+    switch: keyset-mssql-uuid-gets-an-axis
+    engines:
+      postgres:
+        na: "the guard is the SQL Server uniqueidentifier byte order; PostgreSQL uuid sorts as the text does"
+      mysql:
+        na: "the guard is the SQL Server uniqueidentifier byte order; MySQL stores the uuid as text"
+      mssql:
+        cells: ["lib:a_sql_server_uuid_key_is_not_recut"]
+      oracle:
+        na: "the guard is the SQL Server uniqueidentifier byte order; Oracle stores the uuid as text or RAW with the text order"
+      mongo:
+        na: "MongoDB parallel is the separate `_id`-range reader (mongo_parallel), not the SQL keyset range sampler"
+
+  - name: keyset-refine-span-never-splits
+    class: "the keyset density recut never splits a span where its density changes, so a dense stretch before an empty one is spread across it and one worker reads most of the table"
+    history: "uuid and integer density recut, 2026-11-20 (a_skewed_key_keeps_every_row_once_in_balanced_ranges, uuid_v7_bursts_are_recut_into_balanced_ranges fail RED)"
+    scope: source
+    switch: keyset-refine-span-never-splits
+    engines:
+      postgres:
+        cells: ["lib:a_skewed_key_keeps_every_row_once_in_balanced_ranges", "lib:uuid_v7_bursts_are_recut_into_balanced_ranges"]
+      mysql:
+        cells: ["lib:a_skewed_key_keeps_every_row_once_in_balanced_ranges", "lib:uuid_v7_bursts_are_recut_into_balanced_ranges"]
+      mssql:
+        cells: ["lib:a_skewed_key_keeps_every_row_once_in_balanced_ranges", "lib:uuid_v7_bursts_are_recut_into_balanced_ranges"]
+      oracle:
+        cells: ["lib:a_skewed_key_keeps_every_row_once_in_balanced_ranges", "lib:uuid_v7_bursts_are_recut_into_balanced_ranges"]
+      mongo:
+        na: "MongoDB parallel is the separate `_id`-range reader (mongo_parallel), not the SQL keyset range sampler"
+
+  - name: keyset-recut-quits-early
+    class: "the density recut gives up after two rounds that do not improve the estimate and keeps a cut whose heaviest range holds several bursts, so one worker reads a large share of the table"
+    history: "UUIDv7 bursts far apart in time, 2026-11-20: 4 workers left a range of 2519 of 6000 rows, estimated 6.9x the mean; RED 2026-11-20 (lib:uuid_v7_bursts_are_recut_into_balanced_ranges)"
+    scope: source
+    switch: keyset-recut-quits-early
+    engines:
+      postgres:
+        cells: ["lib:uuid_v7_bursts_are_recut_into_balanced_ranges"]
+      mysql:
+        cells: ["lib:uuid_v7_bursts_are_recut_into_balanced_ranges"]
+      mssql:
+        cells: ["lib:uuid_v7_bursts_are_recut_into_balanced_ranges"]
+      oracle:
+        cells: ["lib:uuid_v7_bursts_are_recut_into_balanced_ranges"]
+      mongo:
+        na: "MongoDB parallel is the separate `_id`-range reader (mongo_parallel), not the SQL keyset range sampler"
+
   - name: check-run-refusal-split
     class: "check, plan and doctor pass a batch export that run then refuses by code: a column the export's format cannot write (csv of decimal256, nanosecond timestamp, list; parquet of a negative-scale decimal) and a column no Arrow type carries and no `columns:` entry declares, because those two refusals were raised only where run opens its writer or converts a row"
     history: "issues #912 and #918; RED on main 2026-11-19 by the no_silent_null matrix CHECK_RUN_SPLIT verdict (batch full tier: mssql 10 pairs, mysql 19, oracle 19, postgres 24)"

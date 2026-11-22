@@ -1,6 +1,6 @@
 """Release-oracle BigQuery stage — the real-cloud final oracle.
 
-For every SQL engine (postgres / mysql / mssql — Mongo has no type matrix) the round
+For every SQL engine (postgres / mysql / mssql / oracle — Mongo has no type matrix) the round
 trip goes through rivet on BOTH legs: `rivet run` stages that engine's
 `rivet_type_matrix` to a REAL GCS bucket and `rivet load` loads it into BigQuery.
 The expected value is the SOURCE table, never a golden blessed from rivet's output:
@@ -31,7 +31,7 @@ from .core import (
 
 # Ports this stage owns, distinct from the main engine loop's so a BQ run can
 # share a machine with one.
-_PORTS = {"postgres": 55099, "mysql": 55098, "mssql": 55097}
+_PORTS = {"postgres": 55099, "mysql": 55098, "mssql": 55097, "oracle": 55096}
 
 _TAG = "bq"
 
