@@ -317,7 +317,7 @@ fn naive_ts(delivery: &str) -> bool {
 /// The session time zone of the warehouse leg that reads naive timestamps as ClickHouse's own text.
 const CH_SESSION_TZ: &str = "Asia/Tokyo";
 
-/// The loaded view as DuckDB reads it, re-typed to each row's delivery (text from the bytes a ClickHouse `String` travels as, UUID from `FixedString(16)`, time of day from its decimal seconds, a naive timestamp from Parquet's UTC, or with `as_text` from ClickHouse's own text under a non-UTC session); a column `ns` names keeps every digit as text.
+/// The loaded view as DuckDB reads it, re-typed to each row's delivery (text from the bytes a ClickHouse `String` travels as, UUID from its text, time of day from its decimal seconds, a naive timestamp from Parquet's UTC, or with `as_text` from ClickHouse's own text under a non-UTC session); a column `ns` names keeps every digit as text.
 fn warehouse_relation(
     rows: &[Row],
     w: &Warehouse,
@@ -332,8 +332,10 @@ fn warehouse_relation(
         .zip(columns(rows))
         .enumerate()
         .filter_map(|(k, (r, c))| {
-            if naive(r) {
+            if naive(r) || r.delivery == "arrow.uuid" {
                 Some(format!("toString({c}) AS {c}"))
+            } else if r.delivery == "List(arrow.uuid)" {
+                Some(format!("arrayMap(x -> toString(x), {c}) AS {c}"))
             } else if ns_ts(k) {
                 Some(format!("toString({c}, 'UTC') AS {c}"))
             } else {
@@ -362,10 +364,7 @@ fn warehouse_relation(
             } else if d == "List(Utf8)" {
                 format!("list_transform({c}, x -> decode(x))")
             } else if d == "List(arrow.uuid)" {
-                format!(
-                    "list_transform({c}, x -> CAST(regexp_replace(lower(hex(x)), \
-                     '^(.{{8}})(.{{4}})(.{{4}})(.{{4}})(.{{12}})$', '\\1-\\2-\\3-\\4-\\5') AS UUID))"
-                )
+                format!("list_transform({c}, x -> CAST(decode(x) AS UUID))")
             } else if d == "List(Time64(µs))" {
                 format!(
                     "list_transform({c}, x -> TIME '00:00:00' + to_microseconds(CAST(x * 1000000 AS BIGINT)))"
@@ -373,10 +372,7 @@ fn warehouse_relation(
             } else if d.starts_with("List(Timestamp(") && !d.contains(',') {
                 format!("list_transform({c}, x -> CAST(x AS TIMESTAMP))")
             } else if d == "arrow.uuid" {
-                format!(
-                    "CAST(regexp_replace(lower(hex({c})), \
-                     '^(.{{8}})(.{{4}})(.{{4}})(.{{4}})(.{{12}})$', '\\1-\\2-\\3-\\4-\\5') AS UUID)"
-                )
+                format!("CAST(decode({c}) AS UUID)")
             } else if naive(r) {
                 format!("CAST(decode({c}) AS TIMESTAMP)")
             } else if naive_ts(d) {

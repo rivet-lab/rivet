@@ -270,10 +270,11 @@ What this changes:
 - **DuckDB autoload**: `VARCHAR` → `UUID` native type. A view like
   `SELECT uid::VARCHAR FROM read_parquet(...)` keeps working because
   DuckDB's `UUID::VARCHAR` cast yields the canonical form.
-- **ClickHouse 24.8 autoload**: `String` → `FixedString(16)` (the bytes,
-  not the text). To get back the canonical string, use
-  `lower(hex(uid))` and reformat, or upgrade to ClickHouse 25.x which
-  decodes `LogicalType::Uuid` directly.
+- **ClickHouse autoload**: a plain Parquet read gives `FixedString(16)` (the bytes,
+  not the text) on 24.8 and 26.8. `rivet load` into ClickHouse reads the column as
+  those bytes and converts it with `toUUID(UUIDNumToString(...))`, so the table holds
+  a native `UUID` (`Array(UUID)` for a list); only a direct read of the file needs
+  the conversion.
 
 Consumers reading the old Utf8-shaped Parquet files keep working — only
 files produced by Rivet ≥ v0.7.8 carry the new layout.
@@ -596,7 +597,7 @@ two independent engines and pins the autoload type. The full matrix:
 | `timestamp_tz(µs, UTC)`       | `TIMESTAMP WITH TIME ZONE` | `Nullable(DateTime64(6, 'UTC'))` |
 | `string` / `text` / `enum` / `interval` | `VARCHAR` | `Nullable(String)` |
 | `json` (PG `JSON`/`JSONB`, MySQL `JSON`) | `JSON` | `Nullable(String)` (ClickHouse 24.8) — DuckDB autoloads as native `JSON` |
-| `uuid` (PG native; MySQL via override) | `UUID` | `Nullable(FixedString(16))` (ClickHouse 24.8) — DuckDB autoloads as native `UUID` |
+| `uuid` (PG native; MySQL via override) | `UUID` | `Nullable(UUID)` through `rivet load` (a plain ClickHouse 24.8 Parquet read gives `Nullable(FixedString(16))`) — DuckDB autoloads as native `UUID` |
 | `binary` (`bytea` / `BLOB`)   | `BLOB`             | `Nullable(String)` (raw bytes)     |
 | `bool`                        | `BOOLEAN`          | `Nullable(Bool)`                   |
 | `list<inner>`                 | `inner[]`          | `Array(Nullable(inner))`           |

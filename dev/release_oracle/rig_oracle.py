@@ -1789,16 +1789,19 @@ def grade_load(spec: dict) -> dict:
             wide = {c for c, t in wh_types.items() if (m := re.search(r"Decimal\((\d+)", t)) and int(m.group(1)) > 38}
             wide |= {c for c, t in wh_types.items() if (m := re.search(r"DateTime64\((\d+)", t)) and int(m.group(1)) > 6}
             blob_lists = [c for c, n in native.items() if (rows.get(n) or {}).get("delivery") == "List(Binary)" and "String" in wh_types.get(c, "")]
-            uuid_lists = [c for c, n in native.items() if (rows.get(n) or {}).get("delivery") == "List(arrow.uuid)" and "FixedString" in wh_types.get(c, "")]
+            uuid_lists = [c for c, t in wh_types.items() if t.startswith("Array(") and "UUID" in t]
+            uuid_scalars = [c for c, t in wh_types.items() if not t.startswith("Array(") and "UUID" in t]
             sel = ", ".join(
-                f"hex(`{c}`) AS `{c}`" if c in blobs else f"arrayMap(x -> hex(x), `{c}`) AS `{c}`" if c in blob_lists + uuid_lists
+                f"hex(`{c}`) AS `{c}`" if c in blobs else f"arrayMap(x -> hex(x), `{c}`) AS `{c}`" if c in blob_lists
+                else f"arrayMap(x -> toString(x), `{c}`) AS `{c}`" if c in uuid_lists else f"toString(`{c}`) AS `{c}`" if c in uuid_scalars
                 else f"toString(`{c}`) AS `{c}`" if c in wide else f"`{c}`" for c in wh_types
             )
             rel = _clickhouse(load, password, f"SELECT {sel} FROM `{db}`.`{leaf}`")
-            if blobs or blob_lists or uuid_lists:
+            if blobs or blob_lists or uuid_lists or uuid_scalars:
                 unhexed = [f"unhex(CAST({_qi(c)} AS VARCHAR)) AS {_qi(c)}" for c in blobs]
                 unhexed += [f"list_transform({_qi(c)}, x -> unhex(x)) AS {_qi(c)}" for c in blob_lists]
-                unhexed += [f"list_transform({_qi(c)}, x -> CAST(lower(x[1:8] || '-' || x[9:12] || '-' || x[13:16] || '-' || x[17:20] || '-' || x[21:32]) AS UUID)) AS {_qi(c)}" for c in uuid_lists]
+                unhexed += [f"list_transform({_qi(c)}, x -> CAST(x AS UUID)) AS {_qi(c)}" for c in uuid_lists]
+                unhexed += [f"CAST({_qi(c)} AS UUID) AS {_qi(c)}" for c in uuid_scalars]
                 rel = f"(SELECT * REPLACE ({', '.join(unhexed)}) FROM {rel})"
             buffered = 0
         elif target == "snowflake":

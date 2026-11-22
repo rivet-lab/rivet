@@ -8,9 +8,9 @@ One row per delivering ledger row: the source native type, the Arrow type batch 
 
 | engine | delivering rows | matrix-only rows | rows with a defect | empty cells |
 | --- | --- | --- | --- | --- |
-| postgres | 77 | 26 | 12 | 0 |
+| postgres | 77 | 26 | 11 | 0 |
 | mysql | 37 | 43 | 0 | 0 |
-| mssql | 21 | 34 | 1 | 0 |
+| mssql | 21 | 34 | 0 | 0 |
 | oracle | 15 | 42 | 1 | 0 |
 | mongo | 0 | 20 | 0 | 0 |
 
@@ -26,7 +26,7 @@ No cell is empty.
 | postgres | `TIMESTAMP` | `Timestamp(µs)` | `exact` | `Nullable(DateTime64(6, 'UTC'))` | `DATETIME` | `TIMESTAMP_NTZ` |
 | postgres | `TIMESTAMPTZ` | `Timestamp(µs, "UTC")` | `exact` | `Nullable(DateTime64(6, 'UTC'))` | `TIMESTAMP` | `TIMESTAMP_TZ` |
 | postgres | `BYTEA` | `Binary` | `exact` | `Nullable(String)` | `BYTES` | `BINARY` |
-| postgres | `UUID` | `arrow.uuid` | `exact` | `Nullable(UUID)`; today `Nullable(FixedString(16))` (defect) | `BYTES` | `TEXT` |
+| postgres | `UUID` | `arrow.uuid` | `exact` | `Nullable(UUID)` | `BYTES` | `TEXT` |
 | postgres | `JSONB` | `arrow.json` | `exact` | `Nullable(String)` | `JSON` | `VARIANT` |
 | postgres | `BOOLEAN` | `Boolean` | `exact` | `Nullable(Bool)` | `BOOL` | `BOOLEAN` |
 | postgres | `SMALLINT` | `Int16` | `exact` | `Nullable(Int16)` | `INT64` | `NUMBER(38,0)` |
@@ -53,7 +53,7 @@ No cell is empty.
 | postgres | `TIMESTAMP[]` | `List(Timestamp(µs))` | `exact` | `Array(Nullable(DateTime64(6, 'UTC')))`; today `Array(Nullable(DateTime64(6, 'UTC')))` (defect) | `ARRAY<STRUCT<item DATETIME>>` | `ARRAY` |
 | postgres | `TIMESTAMPTZ[]` | `List(Timestamp(µs, "UTC"))` | `exact` | `Array(Nullable(DateTime64(6, 'UTC')))`; today `Array(Nullable(DateTime64(6, 'UTC')))` (defect) | `ARRAY<STRUCT<item TIMESTAMP>>` | `ARRAY` |
 | postgres | `TIME[]` | `List(Time64(µs))` | `exact` | `Array(Nullable(Decimal(18, 6)))`; today `Array(Nullable(Decimal(18, 6)))` (defect) | `ARRAY<STRUCT<item TIME>>` | `ARRAY` |
-| postgres | `UUID[]` | `List(arrow.uuid)` | `exact` | `Array(Nullable(UUID))`; today `Array(Nullable(FixedString(16)))` (defect) | `ARRAY<STRUCT<item BYTES>>` | `ARRAY` |
+| postgres | `UUID[]` | `List(arrow.uuid)` | `exact` | `Array(Nullable(UUID))`; today `Array(Nullable(UUID))` (defect) | `ARRAY<STRUCT<item BYTES>>` | `ARRAY` |
 | postgres | `BYTEA[]` | `List(Binary)` | `exact` | `Array(Nullable(String))`; today `Array(Nullable(String))` (defect) | `ARRAY<STRUCT<item BYTES>>` | `ARRAY` |
 | postgres | `NUMERIC[]` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `NUMERIC(1000,0)` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
@@ -145,7 +145,7 @@ No cell is empty.
 | mssql | `DATETIMEOFFSET` | `Timestamp(ns, "UTC")` | `exact` | `Nullable(DateTime64(9, 'UTC'))` | `INT64` | `TIMESTAMP_TZ` |
 | mssql | `DATE` | `Date32` | `exact` | `Nullable(Date32)` | `DATE` | `DATE` |
 | mssql | `TIME` | `Time64(ns)` | `exact` | `Nullable(Decimal(18, 9))` | `INT64` | `TIME` |
-| mssql | `UNIQUEIDENTIFIER` | `arrow.uuid` | `exact` | `Nullable(UUID)`; today `Nullable(FixedString(16))` (defect) | `BYTES` | `TEXT` |
+| mssql | `UNIQUEIDENTIFIER` | `arrow.uuid` | `exact` | `Nullable(UUID)` | `BYTES` | `TEXT` |
 | mssql | `VARBINARY(16)` | `Binary` | `exact` | `Nullable(String)` | `BYTES` | `BINARY` |
 | mssql | `CHAR(8)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | mssql | `NCHAR(8)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
