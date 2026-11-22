@@ -22,11 +22,16 @@ fn pending_baseline_is_refused_by_check_like_the_run(mut scn: CdcScenario, want:
     scn.insert(1);
     scn.settle();
     let name = scn.rig.export_name().to_string();
-    let rig = scn.rig.a_failed_run_may_leave(
+    let rig = a_refused_baseline_may_leave_its_schema_and_checkpoint(scn.rig);
+    check_and_run_refuse_alike_by(rig, &name, want);
+}
+
+/// Declares the observed schema and range checkpoint a refused baseline leg leaves behind.
+fn a_refused_baseline_may_leave_its_schema_and_checkpoint(rig: Rig) -> Rig {
+    rig.a_failed_run_may_leave(
         &[Leftover::ObservedSchema, Leftover::ChunkCheckpoint],
         "the refused baseline leg stored the schema it observed and its range checkpoint before the converter refused",
-    );
-    check_and_run_refuse_alike_by(rig, &name, want);
+    )
 }
 
 fn both_check_spellings_accept(rig: &Rig, name: &str) {
@@ -303,10 +308,7 @@ fn a_non_integer_under_an_integer_override_is_refused_alike_on_every_leg(
                 .amend_export_lines(&["columns:", &format!("  {column}: \"int64\"")]);
         }
         let name = scn.rig.export_name().to_string();
-        let rig = scn.rig.a_failed_run_may_leave(
-            &[Leftover::ObservedSchema, Leftover::ChunkCheckpoint],
-            "the refused baseline leg stored the schema it observed and its range checkpoint before the converter refused",
-        );
+        let rig = a_refused_baseline_may_leave_its_schema_and_checkpoint(scn.rig);
         let said = check_and_run_refuse_alike_by(rig, &name, WIRE);
         assert!(said.contains("int64"), "{said}");
         assert!(
