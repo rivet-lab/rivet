@@ -187,11 +187,18 @@ pub struct TargetInput<'a> {
     pub fidelity: TypeFidelity,
 }
 
+static TEXT_DELIVERED: RivetType = RivetType::String;
+
 impl<'a> From<&'a TypeMapping> for TargetInput<'a> {
+    /// A text-delivered column resolves as the text type on every target.
     fn from(m: &'a TypeMapping) -> Self {
+        let rivet_type = match m.delivery {
+            crate::types::Delivery::Text(_) => &TEXT_DELIVERED,
+            crate::types::Delivery::Native => &m.rivet_type,
+        };
         TargetInput {
             column_name: &m.column_name,
-            rivet_type: &m.rivet_type,
+            rivet_type,
             arrow_type: m.arrow_type.as_ref(),
             fidelity: m.fidelity,
         }
@@ -324,6 +331,25 @@ pub enum DuckType {
     Interval,
     /// `T[]`.
     List(Box<DuckType>),
+}
+
+impl BqType {
+    /// A date or timestamp column, or a list of them.
+    pub(crate) fn is_temporal(&self) -> bool {
+        match self {
+            BqType::Date | BqType::Timestamp | BqType::DateTime => true,
+            BqType::Array(inner) => inner.is_temporal(),
+            BqType::Bool
+            | BqType::Int64
+            | BqType::Float64
+            | BqType::Numeric
+            | BqType::BigNumeric
+            | BqType::Time
+            | BqType::String
+            | BqType::Bytes
+            | BqType::Json => false,
+        }
+    }
 }
 
 impl From<BqType> for TargetType {
@@ -636,6 +662,18 @@ mod bigquery {
             RivetType::Float32 | RivetType::Float64 => Resolved::ok(BqType::Float64),
             RivetType::Decimal { precision, scale } => decimal(*precision, *scale),
             RivetType::Date => Resolved::ok(BqType::Date),
+            // BigQuery TIME keeps microseconds: a nanosecond time of day (SQL Server time(7)) lands as
+            // its raw INT64 nanoseconds, like the nanosecond timestamp below, so no digit is dropped.
+            RivetType::Time {
+                unit: TimeUnit::Nanosecond,
+            } => Resolved::diverge(
+                BqType::Int64,
+                BqType::Int64,
+                "nanosecond time of day has no BigQuery native type (TIME is microsecond) — lands \
+                 as INT64 nanoseconds of day, lossless; TIME(TIMESTAMP_MICROS(DIV(col,1000))) drops \
+                 the 100ns digit",
+                None,
+            ),
             RivetType::Time { .. } => Resolved::ok(BqType::Time),
             RivetType::Timestamp {
                 unit: TimeUnit::Nanosecond,
@@ -872,7 +910,15 @@ mod snowflake {
                 }
             }
             RivetType::Date => Resolved::ok(SfType::Date),
-            // TIME autoloads as NUMBER (µs of day); rebuild with TIME_FROM_PARTS.
+            // TIME autoloads as NUMBER (µs or ns of day); rebuild with TIME_FROM_PARTS.
+            RivetType::Time {
+                unit: TimeUnit::Nanosecond,
+            } => Resolved::diverge(
+                SfType::Time,
+                SfType::NumberPs(38, 0),
+                "TIME autoloads as NUMBER (ns of day); recover with TIME_FROM_PARTS after load",
+                Some(r#"TIME_FROM_PARTS(0,0,FLOOR("{col}"/1000000000),MOD("{col}",1000000000))"#),
+            ),
             RivetType::Time { .. } => Resolved::diverge(
                 SfType::Time,
                 SfType::NumberPs(38, 0),
@@ -972,6 +1018,106 @@ fn clickhouse_recovery_sql(specs: &[TargetColumnSpec], table: &str) -> String {
 /// The zone every ClickHouse timestamp column is declared in, naive or not.
 pub(crate) const CLICKHOUSE_TIMESTAMP_ZONE: &str = "UTC";
 
+/// The calendar families whose range a warehouse states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TemporalKind {
+    Date,
+    Timestamp,
+}
+
+/// What one warehouse temporal type holds, in Unix seconds (a date is its midnight).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ValueRange {
+    pub warehouse: &'static str,
+    pub type_name: &'static str,
+    pub lo_secs: i64,
+    pub hi_secs: i64,
+    pub enforced: &'static str,
+    pub beyond: &'static str,
+    pub nothing_done: &'static str,
+    pub silent: bool,
+}
+
+impl ValueRange {
+    /// `1900-01-01 to 2299-12-31`.
+    pub(crate) fn span(&self) -> String {
+        let day = |secs: i64| {
+            chrono::DateTime::from_timestamp(secs, 0)
+                .map_or_else(|| secs.to_string(), |t| t.format("%Y-%m-%d").to_string())
+        };
+        format!("{} to {}", day(self.lo_secs), day(self.hi_secs))
+    }
+}
+
+/// ClickHouse `Date32` and `DateTime64`: 1900-01-01 to 2299-12-31, the one place every guard and note reads.
+pub(crate) const CLICKHOUSE_TEMPORAL_RANGES: [(TemporalKind, ValueRange); 2] = [
+    (
+        TemporalKind::Date,
+        ValueRange {
+            warehouse: "ClickHouse",
+            type_name: "Date32",
+            lo_secs: -2_208_988_800,
+            hi_secs: 10_413_791_999,
+            enforced: "rejecting the insert, and storing 2300-01-01 as 2299-12-31 silently",
+            beyond: "reject the insert, or store 2300-01-01 as 2299-12-31 silently",
+            nothing_done: "nothing was inserted",
+            silent: true,
+        },
+    ),
+    (
+        TemporalKind::Timestamp,
+        ValueRange {
+            warehouse: "ClickHouse",
+            type_name: "DateTime64",
+            lo_secs: -2_208_988_800,
+            hi_secs: 10_413_791_999,
+            enforced: "storing the nearest end silently",
+            beyond: "store the nearest end instead, silently",
+            nothing_done: "nothing was inserted",
+            silent: true,
+        },
+    ),
+];
+
+/// BigQuery `DATE`, `TIMESTAMP` and `DATETIME`: 0001-01-01 to 9999-12-31, which a load job enforces by failing as a whole.
+pub(crate) const BIGQUERY_TEMPORAL_RANGES: [(TemporalKind, ValueRange); 2] = [
+    (
+        TemporalKind::Date,
+        ValueRange {
+            warehouse: "BigQuery",
+            type_name: "DATE",
+            lo_secs: -62_135_596_800,
+            hi_secs: 253_402_300_799,
+            enforced: "failing the whole load job",
+            beyond: "fail the whole load job",
+            nothing_done: "nothing was loaded",
+            silent: false,
+        },
+    ),
+    (
+        TemporalKind::Timestamp,
+        ValueRange {
+            warehouse: "BigQuery",
+            type_name: "TIMESTAMP/DATETIME",
+            lo_secs: -62_135_596_800,
+            hi_secs: 253_402_300_799,
+            enforced: "failing the whole load job",
+            beyond: "fail the whole load job",
+            nothing_done: "nothing was loaded",
+            silent: false,
+        },
+    ),
+];
+
+/// The ClickHouse range of one temporal kind.
+pub(crate) fn clickhouse_range(kind: TemporalKind) -> ValueRange {
+    CLICKHOUSE_TEMPORAL_RANGES
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .map(|(_, r)| *r)
+        .expect("every temporal kind has a ClickHouse range")
+}
+
 mod clickhouse {
     use super::*;
 
@@ -1027,7 +1173,19 @@ mod clickhouse {
                     Resolved::ok(ChType::Decimal(u16::from(*precision), *scale))
                 }
             }
-            RivetType::Date => Resolved::ok(ChType::Date32),
+            RivetType::Date => {
+                let range = clickhouse_range(TemporalKind::Date);
+                Resolved::warn(
+                    ChType::Date32,
+                    format!(
+                        "{} holds {}; rivet load refuses a part holding a value outside it, pushed \
+                         or pulled through a named collection, before ClickHouse would {}",
+                        range.type_name,
+                        range.span(),
+                        range.beyond
+                    ),
+                )
+            }
             // No time-of-day type: an Int64 column keeps whole seconds only (measured:
             // 13:45:07.123456 -> 49507); Decimal64 keeps the fraction (49507.123456).
             RivetType::Time { unit } => {
@@ -1053,11 +1211,16 @@ mod clickhouse {
                     TimeUnit::Microsecond => 6,
                     TimeUnit::Nanosecond => 9,
                 };
+                let range = clickhouse_range(TemporalKind::Timestamp);
                 Resolved::warn(
                     ChType::DateTime64(p, Some(super::CLICKHOUSE_TIMESTAMP_ZONE.into())),
-                    "DateTime64 holds 1900-01-01 to 2299-12-31; rivet load refuses a part holding a \
-                     value outside it, pushed or pulled through a named collection, but any other \
-                     reader of the Parquet gets the nearest end, silently",
+                    format!(
+                        "{} holds {}; rivet load refuses a part holding a value outside it, pushed \
+                         or pulled through a named collection, but any other reader of the Parquet \
+                         gets the nearest end, silently",
+                        range.type_name,
+                        range.span()
+                    ),
                 )
             }
             RivetType::String | RivetType::Text | RivetType::Enum => Resolved::ok(ChType::String),
@@ -1129,6 +1292,33 @@ mod tests {
 
     fn bq(rt: &RivetType) -> TargetColumnSpec {
         ExportTarget::BigQuery.resolve_column(input(rt))
+    }
+
+    #[test]
+    fn a_server_text_column_resolves_as_text_on_every_target() {
+        let mapping = crate::types::TypeMapping {
+            column_name: "c".into(),
+            source_native_type: "money".into(),
+            rivet_type: RivetType::Unsupported {
+                native_type: "money".into(),
+                reason: "no Arrow mapping".into(),
+            },
+            arrow_type: Some(DataType::Utf8),
+            fidelity: TypeFidelity::LogicalString,
+            nullable: true,
+            warnings: Vec::new(),
+            delivery: crate::types::Delivery::Text(crate::types::TextForm::ServerText),
+            refusal: None,
+        };
+        for target in [
+            ExportTarget::DuckDb,
+            ExportTarget::BigQuery,
+            ExportTarget::Snowflake,
+            ExportTarget::ClickHouse,
+        ] {
+            let spec = target.resolve_column(TargetInput::from(&mapping));
+            assert_eq!(spec.status, TargetStatus::Ok, "{target:?}: {:?}", spec.note);
+        }
     }
 
     #[test]
@@ -1834,6 +2024,51 @@ mod tests {
                 .contains("1900-01-01 to 2299-12-31"),
             "an element's range warning reaches the array: {:?}",
             stamps.note
+        );
+    }
+
+    /// ClickHouse's date and timestamp ranges are the ones measured on the server, and the notes quote them.
+    #[test]
+    fn clickhouse_ranges_are_the_measured_ones_and_the_notes_quote_them() {
+        for (kind, name) in [
+            (TemporalKind::Date, "Date32"),
+            (TemporalKind::Timestamp, "DateTime64"),
+        ] {
+            let r = clickhouse_range(kind);
+            assert_eq!(
+                (r.type_name, r.lo_secs, r.hi_secs, r.span().as_str()),
+                (
+                    name,
+                    -2_208_988_800,
+                    10_413_791_999,
+                    "1900-01-01 to 2299-12-31"
+                )
+            );
+        }
+        let date = ch(&RivetType::Date);
+        assert_eq!(
+            (date.target_type.to_string().as_str(), date.status),
+            ("Date32", TargetStatus::Warn)
+        );
+        assert_eq!(
+            date.note.as_deref(),
+            Some(
+                "Date32 holds 1900-01-01 to 2299-12-31; rivet load refuses a part holding a value \
+                 outside it, pushed or pulled through a named collection, before ClickHouse would \
+                 reject the insert, or store 2300-01-01 as 2299-12-31 silently"
+            )
+        );
+        let dates = ch(&RivetType::List {
+            inner: Box::new(RivetType::Date),
+        });
+        assert!(
+            dates
+                .note
+                .as_deref()
+                .unwrap_or("")
+                .contains("Date32 holds 1900-01-01 to 2299-12-31"),
+            "{:?}",
+            dates.note
         );
     }
 

@@ -1,5 +1,6 @@
 //! The override compatibility table: for one engine, may a `columns:` override retype a column it did not autodetect.
 
+use super::kind::CommonKind;
 use super::{ColumnOverrides, RivetType, TimeUnit};
 use crate::error::{Result, codes};
 
@@ -42,32 +43,59 @@ enum Kind {
 
 use Kind::*;
 
+impl From<CommonKind> for Kind {
+    fn from(c: CommonKind) -> Self {
+        match c {
+            CommonKind::Bool => Bool,
+            CommonKind::I16 => I16,
+            CommonKind::I32 => I32,
+            CommonKind::I64 => I64,
+            CommonKind::F32 => F32,
+            CommonKind::F64 => F64,
+            CommonKind::Dec => Dec,
+            CommonKind::Date => Date,
+            CommonKind::Naive => Naive,
+            CommonKind::Utc => Utc,
+            CommonKind::Text => Text,
+            CommonKind::Binary => Binary,
+            CommonKind::Json => Json,
+            CommonKind::Time => Time,
+            CommonKind::Uuid => Uuid,
+            CommonKind::Interval => Interval,
+        }
+    }
+}
+
 fn kind_of(t: &RivetType) -> Kind {
     match t {
-        RivetType::Bool => Bool,
-        RivetType::Int16 => I16,
-        RivetType::Int32 => I32,
-        RivetType::Int64 => I64,
         RivetType::UInt64 => U64,
-        RivetType::Float32 => F32,
-        RivetType::Float64 => F64,
-        RivetType::Decimal { .. } => Dec,
-        RivetType::Date => Date,
-        RivetType::Time { .. } => Time,
-        RivetType::Timestamp { unit, timezone } => match (unit, timezone) {
-            (TimeUnit::Nanosecond, None) => NaiveNs,
-            (TimeUnit::Nanosecond, Some(_)) => UtcNs,
-            (_, None) => Naive,
-            (_, Some(_)) => Utc,
-        },
-        RivetType::String | RivetType::Text => Text,
-        RivetType::Json => Json,
+        RivetType::Timestamp {
+            unit: TimeUnit::Nanosecond,
+            timezone: None,
+        } => NaiveNs,
+        RivetType::Timestamp {
+            unit: TimeUnit::Nanosecond,
+            timezone: Some(_),
+        } => UtcNs,
         RivetType::Enum => Enum,
-        RivetType::Interval => Interval,
-        RivetType::Uuid => Uuid,
-        RivetType::Binary => Binary,
         RivetType::List { .. } => List,
         RivetType::Unsupported { .. } => Unsupported,
+        RivetType::Bool
+        | RivetType::Int16
+        | RivetType::Int32
+        | RivetType::Int64
+        | RivetType::Float32
+        | RivetType::Float64
+        | RivetType::Decimal { .. }
+        | RivetType::Date
+        | RivetType::Timestamp { .. }
+        | RivetType::String
+        | RivetType::Text
+        | RivetType::Json
+        | RivetType::Binary
+        | RivetType::Time { .. }
+        | RivetType::Uuid
+        | RivetType::Interval => CommonKind::of(t).map_or(Unsupported, Kind::from),
     }
 }
 
@@ -75,21 +103,31 @@ const TEXTS: &[Kind] = &[Text, Json];
 const STAMPS: &[Kind] = &[Naive, Utc];
 const STAMPS_NS: &[Kind] = &[Naive, Utc, NaiveNs, UtcNs];
 
-fn is_bit(native: &str) -> bool {
-    native.to_ascii_lowercase().starts_with("bit")
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Native {
+    Bit,
+    Money,
+    Number,
+    Plain,
 }
 
-fn is_money(native: &str) -> bool {
-    matches!(
-        native.to_ascii_lowercase().as_str(),
-        "money" | "money4" | "smallmoney"
-    )
+fn native_class(native: &str) -> Native {
+    let n = native.to_ascii_lowercase();
+    if n.starts_with("bit") {
+        Native::Bit
+    } else if matches!(n.as_str(), "money" | "money4" | "smallmoney") {
+        Native::Money
+    } else if n.starts_with("number") {
+        Native::Number
+    } else {
+        Native::Plain
+    }
 }
 
-fn mysql_reads(native: &str, src: Kind, tgt: Kind) -> bool {
+fn mysql_reads(native: Native, src: Kind, tgt: Kind) -> bool {
     let allowed: &[Kind] = match src {
-        Bool if is_bit(native) => &[Bool, I64, Binary, Text, Json],
-        I16 | I32 | I64 | U64 if is_bit(native) => &[I64, Binary, Text, Json],
+        Bool if native == Native::Bit => &[Bool, I64, Binary, Text, Json],
+        I16 | I32 | I64 | U64 if native == Native::Bit => &[I64, Binary, Text, Json],
         Bool => &[Bool, I16, I32, I64, F32, F64, Dec, Text, Json],
         I16 | I32 | I64 | U64 => &[Bool, I16, I32, I64, F32, F64, Dec, Text, Json],
         F32 => &[F32, F64, Text, Json],
@@ -126,9 +164,9 @@ fn postgres_reads(src: Kind, tgt: Kind) -> bool {
     allowed.contains(&tgt)
 }
 
-fn mssql_reads(native: &str, src: Kind, tgt: Kind) -> bool {
+fn mssql_reads(native: Native, src: Kind, tgt: Kind) -> bool {
     let allowed: &[Kind] = match src {
-        Dec if is_money(native) => &[Dec, F64],
+        Dec if native == Native::Money => &[Dec, F64],
         Dec => &[Dec],
         I16 | I32 => &[Dec],
         I64 => &[I64, Dec],
@@ -140,11 +178,9 @@ fn mssql_reads(native: &str, src: Kind, tgt: Kind) -> bool {
     allowed.contains(&tgt)
 }
 
-fn oracle_reads(native: &str, src: Kind, tgt: Kind) -> bool {
+fn oracle_reads(native: Native, src: Kind, tgt: Kind) -> bool {
     let allowed: &[Kind] = match src {
-        _ if native.to_ascii_lowercase().starts_with("number") => {
-            &[I16, I32, I64, F64, Dec, Text, Json]
-        }
+        _ if native == Native::Number => &[I16, I32, I64, F64, Dec, Text, Json],
         F32 => &[F32, F64, Text, Json],
         F64 => &[F64, Text, Json],
         Text | Bool | Interval => TEXTS,
@@ -186,6 +222,7 @@ pub(crate) fn override_is_read(
     if !decimal_fits(engine, tgt) || narrows(src, t) {
         return false;
     }
+    let native = native_class(native);
     match engine {
         Engine::Mysql => mysql_reads(native, s, t),
         Engine::Postgres => postgres_reads(s, t),
@@ -550,6 +587,77 @@ mod tests {
                 !override_is_read(Engine::Mysql, native, &src, &tgt),
                 "mysql {native} -> {}",
                 tgt.label()
+            );
+        }
+    }
+
+    #[test]
+    fn a_native_name_is_classified_once_whatever_its_case() {
+        for native in ["money", "MONEY", "Money4", "smallmoney"] {
+            assert!(
+                override_is_read(Engine::Mssql, native, &dec(19, 4), &RivetType::Float64),
+                "{native}"
+            );
+        }
+        for native in ["decimal", "moneyx", "xmoney", "money "] {
+            assert!(
+                !override_is_read(Engine::Mssql, native, &dec(19, 4), &RivetType::Float64),
+                "{native}"
+            );
+        }
+        for native in ["NUMBER(9)", "number(9)", "Number", "numbers"] {
+            assert!(
+                override_is_read(Engine::Oracle, native, &RivetType::Int32, &RivetType::Int64),
+                "{native}"
+            );
+        }
+        for native in ["INTEGER", "numb", "xnumber"] {
+            assert!(
+                !override_is_read(Engine::Oracle, native, &RivetType::Int32, &RivetType::Int64),
+                "{native}"
+            );
+        }
+        for native in ["bit", "BIT", "Bit(1)", "bit(64)"] {
+            assert!(
+                !override_is_read(Engine::Mysql, native, &RivetType::Int64, &RivetType::Bool),
+                "{native}"
+            );
+            assert!(
+                !override_is_read(Engine::Mysql, native, &RivetType::Bool, &RivetType::Int16),
+                "{native}"
+            );
+        }
+        for native in ["bi", "tinyint", "xbit"] {
+            assert!(
+                override_is_read(Engine::Mysql, native, &RivetType::Int64, &RivetType::Bool),
+                "{native}"
+            );
+            assert!(
+                override_is_read(Engine::Mysql, native, &RivetType::Bool, &RivetType::Int16),
+                "{native}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_nanosecond_stamp_is_never_read_as_the_other_zone_on_any_engine() {
+        for e in ENGINES {
+            let ns = |utc| ts(TimeUnit::Nanosecond, utc);
+            assert!(
+                !override_is_read(e, "datetime2", &ns(false), &ns(true)),
+                "{e:?}"
+            );
+            assert!(
+                !override_is_read(e, "datetime2", &ns(true), &ns(false)),
+                "{e:?}"
+            );
+            assert!(
+                override_is_read(e, "datetime2", &ns(false), &ns(false)),
+                "{e:?}"
+            );
+            assert!(
+                override_is_read(e, "datetime2", &ns(true), &ns(true)),
+                "{e:?}"
             );
         }
     }

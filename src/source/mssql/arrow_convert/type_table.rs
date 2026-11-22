@@ -22,6 +22,7 @@ fn decimal(precision: u8, scale: i8) -> CatalogHints {
     CatalogHints {
         decimals: HashMap::from([("c".to_string(), (precision, scale))]),
         fine_timestamps: HashSet::new(),
+        fine_times: HashSet::new(),
     }
 }
 
@@ -30,6 +31,16 @@ fn fine() -> CatalogHints {
     CatalogHints {
         decimals: HashMap::new(),
         fine_timestamps: HashSet::from(["c".to_string()]),
+        fine_times: HashSet::new(),
+    }
+}
+
+/// The catalog hints of a `time` column finer than a microsecond.
+fn fine_time() -> CatalogHints {
+    CatalogHints {
+        decimals: HashMap::new(),
+        fine_timestamps: HashSet::new(),
+        fine_times: HashSet::from(["c".to_string()]),
     }
 }
 
@@ -94,7 +105,7 @@ fn table() -> Vec<Case> {
         case(
             "money",
             of(ColumnType::Money, None),
-            "decimal(19,4) | Decimal128(19, 4) | native | exact | reads float64,decimal(18,2) # red:MSSQL_MONEY_BIG",
+            "decimal(19,4) | Decimal128(19, 4) | native | exact | reads float64,decimal(18,2)",
         ),
         case(
             "money4 (smallmoney)",
@@ -119,12 +130,12 @@ fn table() -> Vec<Case> {
         case(
             "daten (date)",
             of(ColumnType::Daten, None),
-            "date | Date32 | native | exact | reads date # red:CH_DATE_CLAMP",
+            "date | Date32 | native | exact | reads date",
         ),
         case(
             "timen (time)",
             of(ColumnType::Timen, None),
-            "time(microsecond) | Time64(µs) | native | exact | reads time(microsecond) # red:MSSQL_SCALE_SEVEN_TRUNC # under-change",
+            "time(microsecond) | Time64(µs) | native | exact | reads time(microsecond)",
         ),
         case(
             "datetime",
@@ -235,6 +246,11 @@ fn table() -> Vec<Case> {
             "datetimeoffset(7) (catalog hint)",
             of(ColumnType::DatetimeOffsetn, Some(&fine())),
             "timestamp_tz(nanosecond,UTC) | Timestamp(ns, \"UTC\") | native | exact | reads timestamp_tz(nanosecond,UTC)",
+        ),
+        case(
+            "time(7) (catalog hint)",
+            of(ColumnType::Timen, Some(&fine_time())),
+            "time(nanosecond) | Time64(ns) | native | exact | reads time(microsecond)",
         ),
     ]
 }

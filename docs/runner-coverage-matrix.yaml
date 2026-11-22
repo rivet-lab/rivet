@@ -568,6 +568,15 @@ scenarios:
     mongo_parallel: { na: "shared seam (execute_resolved_plan, before the dispatch); a Mongo export's schema is the fixed {_id, document, meta} shape, so it has no lossy column to refuse" }
     cdc:            { test: oracle_cdc_timestamp9_is_refused_until_declared_and_a_declared_timestamp_delivers_the_row }
 
+  - id: oracle_value_the_type_cannot_carry_is_refused
+    what: "an Oracle NUMBER or FLOAT holding infinity (or an exact 1E125 the client prints with the same bytes) and an INTERVAL DAY TO SECOND with a sub-microsecond fraction stop the run with RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5), naming the column and the `TO_CHAR(col) AS col` remedy, before any part is written (a CDC run refuses the NUMBER infinity LogMiner prints as `~` the same way); finite values and microsecond-exact intervals are delivered unchanged"
+    single:         { test: an_oracle_number_infinity_is_refused_by_code_and_to_char_delivers_the_server_text }
+    chunked:        { na: "shared seam: the Oracle row converter (number_text, interval_ds_iso) runs under every strategy's page read" }
+    chunked_checkpoint: { na: "shared seam (the Oracle row converter, under every strategy's page read)" }
+    keyset:         { na: "shared seam (the Oracle row converter, under every strategy's page read)" }
+    mongo_parallel: { na: "a Mongo export has no Oracle column" }
+    cdc:            { test: oracle_batch_and_cdc_deliver_number_and_float_specials_alike }
+
   - id: check_plan_doctor_refuse_what_run_refuses
     what: "a batch export, or the pending baseline leg of a `mode: cdc` export (`initial: snapshot` or `backfill:` with no `snapshot/_SUCCESS` marker: `pending_snapshot_legs`), whose column the export's `format:` cannot write, or that no Arrow type carries and no `columns:` entry declares, is refused before any read by `check`, `doctor` and `run` (and by `plan` for a batch export) with the same code (RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED, RIVET_TYPE_UNSAFE_MAPPING): one `plan_open_columns` (format::refuse_unwritable_columns) and one `refuse_unmapped` in `probe_mappings`, both reached through `plan_run`"
     single:         { test: a_column_without_an_arrow_type_is_refused_by_check_like_the_run_postgres }
@@ -585,3 +594,12 @@ scenarios:
     keyset:         { test: mongo_batch_flat_id_is_labelled_by_the_bson_types_the_collection_holds }
     mongo_parallel: { test: mongo_batch_flat_id_is_labelled_by_the_bson_types_the_collection_holds }
     cdc:            { test: mongo_cdc_flat_id_is_labelled_by_the_bson_types_the_collection_holds }
+
+  - id: pg_unmapped_type_server_text
+    what: "a PostgreSQL column of a type with no Arrow mapping is delivered as the server's text (one seam: pg_run_export re-declares the cursor over a text projection when pg_server_text names a column)"
+    single:         { test: a_table_of_every_unmapped_type_is_delivered_as_server_text_full_postgres }
+    chunked:        { test: a_table_of_every_unmapped_type_is_delivered_as_server_text_range_postgres }
+    chunked_checkpoint: { na: "shared seam (pg_run_export, below the dispatch)" }
+    keyset:         { test: a_table_of_every_unmapped_type_is_delivered_as_server_text_keyset_postgres }
+    mongo_parallel: { na: "a Mongo export has no PostgreSQL column type" }
+    cdc:            { test: postgres_batch_and_cdc_deliver_every_text_type_alike }

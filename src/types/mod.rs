@@ -34,6 +34,9 @@ pub mod decimal;
 mod delivery;
 mod fidelity;
 pub(crate) mod ident;
+pub(crate) mod kind;
+#[cfg(test)]
+mod kind_doc;
 mod mapping;
 pub(crate) mod override_table;
 mod override_type;
@@ -51,7 +54,9 @@ pub use delivery::{
 pub use fidelity::TypeFidelity;
 // Public surface for contract/integration tests; not referenced from the binary.
 #[allow(unused_imports)]
-pub use mapping::{TypeMapping, build_arrow_field, derive_fidelity, rivet_type_to_arrow};
+pub use mapping::{
+    META_TEXT_FORM, TypeMapping, build_arrow_field, derive_fidelity, rivet_type_to_arrow,
+};
 pub(crate) use override_table::resolve_column;
 pub use override_type::{parse_column_overrides, parse_type_str};
 pub(crate) use override_type::{refuse_cursor_case_miss, refuse_override_case_miss};

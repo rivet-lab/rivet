@@ -31,3 +31,15 @@ macro_rules! seeded {
         ::std::convert::identity($good)
     };
 }
+
+/// The seeded defect: the unscaled value as an f64 would carry it, refused past 2^53 as the driver's f64 money was.
+#[cfg(feature = "seeded")]
+pub(crate) fn money_through_f64(value: i128, scale: u8) -> anyhow::Result<i128> {
+    if (value as f64).abs() >= 9_007_199_254_740_992.0 {
+        crate::rivet_bail!(
+            crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+            "seeded: a money value past 2^53 scaled units was rounded by an f64 (scale {scale})"
+        );
+    }
+    Ok(value)
+}

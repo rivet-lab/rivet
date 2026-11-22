@@ -20,10 +20,8 @@ use crate::error::Result;
 use crate::source::pg_numeric_wire::{
     PgNumericWire, numeric_wire_normalized_plain, numeric_wire_special_text,
 };
-use crate::types::{
-    ColumnOverrides, RivetType, SourceColumn, TimeUnit as RivetTimeUnit, TypeMapping,
-    build_arrow_field,
-};
+use crate::types::kind::CommonKind;
+use crate::types::{ColumnOverrides, RivetType, SourceColumn, TypeMapping, build_arrow_field};
 
 use crate::source::value_within_ceiling;
 
@@ -251,47 +249,48 @@ fn numeric_raw_to_optional_decimal_text(raw: &[u8]) -> Option<String> {
         })
 }
 
+/// The common kind a PostgreSQL wire type is read as, or `None` for a type this engine alone carries.
+fn pg_common_kind(t: &Type) -> Option<CommonKind> {
+    Some(match *t {
+        Type::BOOL => CommonKind::Bool,
+        Type::INT2 => CommonKind::I16,
+        Type::INT4 => CommonKind::I32,
+        Type::INT8 => CommonKind::I64,
+        Type::FLOAT4 => CommonKind::F32,
+        Type::FLOAT8 => CommonKind::F64,
+        Type::NUMERIC => CommonKind::Dec,
+        Type::DATE => CommonKind::Date,
+        Type::TIMESTAMP => CommonKind::Naive,
+        Type::TIMESTAMPTZ => CommonKind::Utc,
+        Type::TIME => CommonKind::Time,
+        Type::UUID => CommonKind::Uuid,
+        Type::INTERVAL => CommonKind::Interval,
+        Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME => CommonKind::Text,
+        Type::BYTEA => CommonKind::Binary,
+        Type::JSON | Type::JSONB => CommonKind::Json,
+        _ => return None,
+    })
+}
+
+/// The type of a `numeric` column whose precision and scale the wire does not carry.
+fn bare_numeric() -> RivetType {
+    RivetType::Unsupported {
+        native_type: "numeric".into(),
+        reason: "precision/scale unavailable from query metadata and catalog lookup; \
+                 use a column override (e.g. columns: amount: decimal(18,2)), \
+                 or a single-table SELECT ... FROM schema.table \
+                 when the DDL declares numeric precision."
+            .into(),
+    }
+}
+
 /// Map a PostgreSQL wire-protocol type to Rivet's canonical type.
 fn pg_type_to_rivet(t: &Type) -> RivetType {
+    if let Some(kind) = pg_common_kind(t) {
+        return kind.rivet_type().unwrap_or_else(bare_numeric);
+    }
     match *t {
-        Type::BOOL => RivetType::Bool,
-        Type::INT2 => RivetType::Int16,
-        Type::INT4 => RivetType::Int32,
-        Type::INT8 => RivetType::Int64,
         Type::OID => RivetType::Int64,
-        Type::FLOAT4 => RivetType::Float32,
-        Type::FLOAT8 => RivetType::Float64,
-
-        Type::NUMERIC => RivetType::Unsupported {
-            native_type: "numeric".into(),
-            reason: "precision/scale unavailable from query metadata and catalog lookup; \
-                     use a column override (e.g. columns: amount: decimal(18,2)), \
-                     or a single-table SELECT ... FROM schema.table \
-                     when the DDL declares numeric precision."
-                .into(),
-        },
-
-        Type::DATE => RivetType::Date,
-        Type::TIME => RivetType::Time {
-            unit: RivetTimeUnit::Microsecond,
-        },
-        Type::TIMESTAMP => RivetType::Timestamp {
-            unit: RivetTimeUnit::Microsecond,
-            timezone: None,
-        },
-        Type::TIMESTAMPTZ => RivetType::Timestamp {
-            unit: RivetTimeUnit::Microsecond,
-            timezone: Some("UTC".into()),
-        },
-
-        Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME => RivetType::String,
-        Type::BYTEA => RivetType::Binary,
-
-        Type::JSON | Type::JSONB => RivetType::Json,
-        Type::UUID => RivetType::Uuid,
-
-        Type::INTERVAL => RivetType::Interval,
-
         _ => match t.kind() {
             Kind::Enum(_) => RivetType::Enum,
             Kind::Array(elem_type) => RivetType::List {
@@ -305,6 +304,20 @@ fn pg_type_to_rivet(t: &Type) -> RivetType {
     }
 }
 
+/// The type of column `name` read as wire type `t`; a `numeric` takes its catalog hint when it has one.
+fn pg_column_rivet_type(
+    t: &Type,
+    name: &str,
+    numeric_hints: Option<&HashMap<String, (u8, i8)>>,
+) -> RivetType {
+    if pg_common_kind(t) == Some(CommonKind::Dec)
+        && let Some(&(precision, scale)) = numeric_hints.and_then(|h| h.get(name))
+    {
+        return RivetType::Decimal { precision, scale };
+    }
+    pg_type_to_rivet(t)
+}
+
 /// Apply per-column overrides + numeric catalog hints on top of the wire-type derived RivetType.
 pub(super) fn rivet_type_for_pg_column(
     col: &postgres::Column,
@@ -316,18 +329,89 @@ pub(super) fn rivet_type_for_pg_column(
         column_overrides,
         col.name(),
         col.type_().name(),
-        || {
-            if *col.type_() == Type::NUMERIC
-                && let Some(&(p, s)) = numeric_hints.and_then(|h| h.get(col.name()))
-            {
-                return RivetType::Decimal {
-                    precision: p,
-                    scale: s,
-                };
-            }
-            pg_type_to_rivet(col.type_())
-        },
+        || pg_column_rivet_type(col.type_(), col.name(), numeric_hints),
     )
+}
+
+/// Whether a wire type has no Rivet mapping and is delivered as the server's own text; a bare `numeric` keeps its refusal.
+pub(super) fn pg_server_text(t: &Type) -> bool {
+    fn unmapped(r: &RivetType) -> bool {
+        match r {
+            RivetType::Unsupported { .. } => *r != bare_numeric(),
+            RivetType::List { inner } => unmapped(inner),
+            _ => false,
+        }
+    }
+    seeded!(
+        "pg-unmapped-type-refused",
+        false,
+        unmapped(&pg_type_to_rivet(t))
+    )
+}
+
+/// The SQL that renders `expr`, a cell of wire type `t`, as the server's own output text.
+fn pg_text_render(t: &Type, expr: &str) -> String {
+    if *t == Type::INET && seeded!("pg-inet-host-text-gains-a-mask", false, true) {
+        return format!(
+            "CASE WHEN masklen({expr}) = CASE family({expr}) WHEN 4 THEN 32 ELSE 128 END \
+             THEN host({expr}) ELSE {expr}::text END"
+        );
+    }
+    format!("{expr}::text")
+}
+
+/// `sql` read through a projection that renders every server-text column as text, or `None` when no column is one.
+pub(super) fn pg_server_text_query(sql: &str, columns: &[(&str, &Type)]) -> Option<String> {
+    if !columns.iter().any(|(_, t)| pg_server_text(t)) {
+        return None;
+    }
+    let names = (0..columns.len())
+        .map(|i| format!("_c{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let projection = columns
+        .iter()
+        .enumerate()
+        .map(|(i, (name, t))| {
+            let cell = format!("_rivet_text._c{i}");
+            let value = if pg_server_text(t) {
+                pg_text_render(t, &cell)
+            } else {
+                cell
+            };
+            let name = crate::sql::quote_ident(crate::config::SourceType::Postgres, name);
+            format!("{value} AS {name}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "SELECT {projection} FROM ({sql}\n) AS _rivet_text ({names})"
+    ))
+}
+
+/// The mapping of one PostgreSQL column: its override, else its autodetected type, an unmapped type as the server's text.
+pub(super) fn pg_column_mapping(
+    col: &postgres::Column,
+    column_overrides: &ColumnOverrides,
+    numeric_hints: Option<&HashMap<String, (u8, i8)>>,
+) -> crate::error::Result<TypeMapping> {
+    let rivet = rivet_type_for_pg_column(col, column_overrides, numeric_hints)?;
+    let source = SourceColumn::simple(col.name(), col.type_().name(), true);
+    let overridden = column_overrides.contains_key(col.name());
+    Ok(pg_delivery(
+        TypeMapping::from_source(&source, rivet),
+        col.type_(),
+        overridden,
+    ))
+}
+
+/// `mapping` of a column of wire type `t`: an undeclared unmapped type is delivered as the server's text.
+pub(super) fn pg_delivery(mapping: TypeMapping, t: &Type, overridden: bool) -> TypeMapping {
+    if !overridden && pg_server_text(t) {
+        mapping.with_text(crate::types::TextForm::ServerText)
+    } else {
+        mapping
+    }
 }
 
 /// Build an Arrow `Schema` from PostgreSQL `Column` descriptors by routing each column through the `SourceColumn → RivetType → TypeMapping → Field` pipeline.
@@ -339,9 +423,7 @@ pub(super) fn pg_columns_to_schema(
     let mut fields: Vec<Field> = Vec::with_capacity(columns.len());
     let mut errors: Vec<String> = Vec::new();
     for col in columns {
-        let rivet = rivet_type_for_pg_column(col, column_overrides, numeric_catalog_hints)?;
-        let source = SourceColumn::simple(col.name(), col.type_().name(), true);
-        let mapping = TypeMapping::from_source(&source, rivet);
+        let mapping = pg_column_mapping(col, column_overrides, numeric_catalog_hints)?;
         match build_arrow_field(&mapping) {
             Some(field) => fields.push(field),
             None => {
@@ -635,10 +717,20 @@ impl crate::source::value_checksum::CellSource for PgCellSource<'_> {
             DataType::Boolean => l!(bool, E::Bool),
             DataType::Int16 => l!(i16, E::I16),
             DataType::Int32 => l!(i32, E::I32),
+            DataType::Int64 if is_oid_array(&self.columns[col].1) => {
+                l!(PgInt, |v: PgInt| E::I64(v.0))
+            }
             DataType::Int64 => l!(i64, E::I64),
             DataType::Float32 => l!(f32, E::F32),
             DataType::Float64 => l!(f64, E::F64),
-            DataType::Utf8 => l!(String, |s: String| E::Str(s.into_bytes())),
+            DataType::Utf8 => read_utf8_list(&self.columns[col].1, r, col)
+                .ok()
+                .flatten()
+                .map(|v| {
+                    v.into_iter()
+                        .map(|o| o.map(|s| E::Str(s.into_bytes())).unwrap_or(E::Null))
+                        .collect()
+                }),
             _ => None,
         }
     }
@@ -787,7 +879,7 @@ fn build_array(
             Ok(Arc::new(b.finish()))
         }
         DataType::Utf8 => build_pg_text_array(pg_type, col_idx, rows, column, max_value_bytes),
-        DataType::List(_) => build_pg_list_array(target_type, col_idx, rows),
+        DataType::List(_) => build_pg_list_array(pg_type, target_type, col_idx, rows),
         other => crate::rivet_bail!(
             crate::error::codes::INTERNAL_TYPE_BUILDER,
             "no PostgreSQL value converter for target Arrow type {other:?} \
@@ -898,8 +990,108 @@ fn array_decode_message(col: &str, e: &dyn std::fmt::Display) -> String {
     )
 }
 
+/// The element type of a PostgreSQL array wire type.
+fn pg_array_element(pg_type: &Type) -> Option<&Type> {
+    if let Kind::Array(elem) = pg_type.kind() {
+        Some(elem)
+    } else {
+        None
+    }
+}
+
+/// Whether the wire type is an array of `oid`, read at its unsigned width.
+fn is_oid_array(pg_type: &Type) -> bool {
+    pg_array_element(pg_type) == Some(&Type::OID)
+        && seeded!("pg-array-element-wire-type-refused", false, true)
+}
+
+/// A `json` / `jsonb` element read as its raw source text.
+struct PgJsonText(String);
+
+impl<'a> PgFromSql<'a> for PgJsonText {
+    fn accepts(ty: &Type) -> bool {
+        PgJsonRawText::accepts(ty)
+    }
+
+    fn from_sql(
+        ty: &Type,
+        raw: &'a [u8],
+    ) -> std::result::Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        Ok(Self(PgJsonRawText::from_sql(ty, raw)?.0.to_owned()))
+    }
+}
+
+/// The elements of an array cell, each turned into text by `read`.
+fn text_elements<T>(
+    row: &Row,
+    col: usize,
+    read: impl Fn(T) -> String,
+) -> std::result::Result<Option<Vec<Option<String>>>, postgres::Error>
+where
+    T: for<'a> PgFromSql<'a>,
+{
+    Ok(row
+        .try_get::<_, Option<Vec<Option<T>>>>(col)?
+        .map(|v| v.into_iter().map(|e| e.map(&read)).collect()))
+}
+
+/// How the elements of a text-like array are read off the wire.
+#[derive(Debug, PartialEq, Eq)]
+enum Utf8ListRead {
+    Json,
+    Interval,
+    Enum,
+    Text,
+}
+
+/// The wire reader for an array whose element type is `element`.
+fn utf8_list_read(element: Option<&Type>) -> Utf8ListRead {
+    let typed = seeded!("pg-array-element-wire-type-refused", false, true);
+    match element {
+        Some(e) if typed && (*e == Type::JSON || *e == Type::JSONB) => Utf8ListRead::Json,
+        Some(e) if typed && *e == Type::INTERVAL => Utf8ListRead::Interval,
+        Some(e) if typed && matches!(e.kind(), Kind::Enum(_)) => Utf8ListRead::Enum,
+        _ => Utf8ListRead::Text,
+    }
+}
+
+/// The text of every element of a `text`, `json`, `jsonb`, `interval` or enum array cell.
+fn read_utf8_list(
+    pg_type: &Type,
+    row: &Row,
+    col: usize,
+) -> std::result::Result<Option<Vec<Option<String>>>, postgres::Error> {
+    match utf8_list_read(pg_array_element(pg_type)) {
+        Utf8ListRead::Json => text_elements::<PgJsonText>(row, col, |v| v.0),
+        Utf8ListRead::Interval => text_elements::<PgInterval>(row, col, |v| {
+            pg_interval_to_iso8601(v.months, v.days, v.microseconds)
+        }),
+        Utf8ListRead::Enum => text_elements::<AnyAsString>(row, col, |v| v.0),
+        Utf8ListRead::Text => text_elements::<String>(row, col, |v| v),
+    }
+}
+
+/// Build a `List<Utf8>` from an array of text, json, interval or enum elements.
+fn build_pg_utf8_list(pg_type: &Type, col_idx: usize, rows: &[Row]) -> Result<Arc<dyn Array>> {
+    let mut lb = ListBuilder::new(StringBuilder::new());
+    for row in rows {
+        match read_utf8_list(pg_type, row, col_idx) {
+            Ok(Some(v)) => {
+                for elem in v {
+                    lb.values().append_option(elem);
+                }
+                lb.append(true);
+            }
+            Ok(None) => lb.append(false),
+            Err(e) => return Err(pg_array_decode_error(rows, col_idx, &e)),
+        }
+    }
+    Ok(Arc::new(lb.finish()))
+}
+
 /// Build an Arrow `ListArray` from a PostgreSQL array column.
 fn build_pg_list_array(
+    pg_type: &Type,
     target_type: &DataType,
     col_idx: usize,
     rows: &[Row],
@@ -964,28 +1156,13 @@ fn build_pg_list_array(
         DataType::Boolean => list_of!(bool, BooleanBuilder),
         DataType::Int16 => list_of!(i16, Int16Builder),
         DataType::Int32 => list_of!(i32, Int32Builder),
+        DataType::Int64 if is_oid_array(pg_type) => {
+            list_mapped!(PgInt, Int64Builder::new(), b, v => b.append_value(v.0))
+        }
         DataType::Int64 => list_of!(i64, Int64Builder),
         DataType::Float32 => list_of!(f32, Float32Builder),
         DataType::Float64 => list_of!(f64, Float64Builder),
-        DataType::Utf8 => {
-            let mut lb = ListBuilder::new(StringBuilder::new());
-            for row in rows {
-                match row.try_get::<_, Option<Vec<Option<String>>>>(col_idx) {
-                    Ok(Some(v)) => {
-                        for s in &v {
-                            match s {
-                                Some(val) => lb.values().append_value(val),
-                                None => lb.values().append_null(),
-                            }
-                        }
-                        lb.append(true);
-                    }
-                    Ok(None) => lb.append(false),
-                    Err(e) => return Err(pg_array_decode_error(rows, col_idx, &e)),
-                }
-            }
-            Ok(Arc::new(lb.finish()))
-        }
+        DataType::Utf8 => build_pg_utf8_list(pg_type, col_idx, rows),
         DataType::Date32 if seeded!("pg-temporal-uuid-bytea-array-refused", false, true) => {
             list_mapped!(
                 chrono::NaiveDate,
@@ -1316,6 +1493,67 @@ mod cell_refusal_tests {
 }
 
 #[cfg(test)]
+mod server_text_projection_tests {
+    use super::{pg_server_text, pg_server_text_query, pg_text_render};
+    use postgres::types::Type;
+
+    /// A type with no Arrow mapping, and a list of one, is server text; a mapped type and a bare numeric are not.
+    #[test]
+    fn only_a_type_with_no_mapping_is_server_text() {
+        for t in [
+            Type::INET,
+            Type::CIDR,
+            Type::MACADDR,
+            Type::MONEY,
+            Type::INET_ARRAY,
+        ] {
+            assert!(pg_server_text(&t), "{t} is server text");
+        }
+        for t in [
+            Type::INT4,
+            Type::TEXT,
+            Type::NUMERIC,
+            Type::INT4_ARRAY,
+            Type::TEXT_ARRAY,
+        ] {
+            assert!(!pg_server_text(&t), "{t} is not server text");
+        }
+    }
+
+    /// An `inet` cell loses a host mask only, every other type is the server's `::text`.
+    #[test]
+    fn a_cell_is_rendered_as_its_text_and_an_inet_without_a_host_mask() {
+        assert_eq!(
+            pg_text_render(&Type::INET, "c"),
+            "CASE WHEN masklen(c) = CASE family(c) WHEN 4 THEN 32 ELSE 128 END THEN host(c) ELSE c::text END"
+        );
+        assert_eq!(pg_text_render(&Type::MONEY, "c"), "c::text");
+        assert_eq!(pg_text_render(&Type::CIDR, "c"), "c::text");
+    }
+
+    /// A query with no server-text column is left as it is; with one, only that column is rendered and the others pass through by name.
+    #[test]
+    fn the_projection_renders_the_server_text_columns_and_nothing_else() {
+        assert_eq!(
+            pg_server_text_query("SELECT 1", &[("a", &Type::INT4), ("b", &Type::TEXT)]),
+            None
+        );
+        assert_eq!(pg_server_text_query("SELECT 1", &[]), None);
+        assert_eq!(
+            pg_server_text_query(
+                "SELECT * FROM t",
+                &[("id", &Type::INT4), ("m\"x", &Type::MONEY)]
+            ),
+            Some(
+                "SELECT _rivet_text._c0 AS \"id\", _rivet_text._c1::text AS \"m\"\"x\" \
+                 FROM (SELECT * FROM t\n) AS _rivet_text (_c0, _c1)"
+                    .to_string()
+            )
+        );
+    }
+}
+
+#[cfg(test)]
 mod temporal_refusal_tests {
     use super::{PgInt, PgTimeMicros};
     use crate::types::MICROS_PER_DAY;
@@ -1397,7 +1635,7 @@ mod temporal_refusal_tests {
         let panicking: Vec<&str> = product
             .lines()
             .filter(|l| l.contains(".get(") || l.contains(".get::<"))
-            .filter(|l| !l.contains("columns().get(") && !l.contains("h.get(col.name())"))
+            .filter(|l| !l.contains("columns().get(") && !l.contains("h.get(name)"))
             .collect();
         assert!(
             panicking.is_empty(),
@@ -1430,9 +1668,11 @@ mod type_table;
 
 #[cfg(test)]
 mod type_map_tests {
-    use super::pg_type_to_rivet;
+    use super::{bare_numeric, pg_column_rivet_type, pg_common_kind, pg_type_to_rivet};
+    use crate::types::kind::CommonKind;
     use crate::types::{RivetType, TimeUnit as RivetTimeUnit};
     use postgres::types::Type;
+    use std::collections::HashMap;
 
     /// Every arm of `pg_type_to_rivet`, in one table.
     #[test]
@@ -1470,6 +1710,84 @@ mod type_map_tests {
                  arm falls through to Unsupported and silently changes the schema"
             );
         }
+    }
+
+    /// Every wire type the table reads as a common kind, and the engine-only ones it leaves out.
+    #[test]
+    fn the_common_wire_types_read_as_their_common_kind_and_the_rest_as_none() {
+        use crate::types::kind::CommonKind::*;
+        let cases: &[(Type, Option<CommonKind>)] = &[
+            (Type::BOOL, Some(Bool)),
+            (Type::INT2, Some(I16)),
+            (Type::INT4, Some(I32)),
+            (Type::INT8, Some(I64)),
+            (Type::FLOAT4, Some(F32)),
+            (Type::FLOAT8, Some(F64)),
+            (Type::NUMERIC, Some(Dec)),
+            (Type::DATE, Some(Date)),
+            (Type::TIMESTAMP, Some(Naive)),
+            (Type::TIMESTAMPTZ, Some(Utc)),
+            (Type::TEXT, Some(Text)),
+            (Type::VARCHAR, Some(Text)),
+            (Type::BPCHAR, Some(Text)),
+            (Type::NAME, Some(Text)),
+            (Type::BYTEA, Some(Binary)),
+            (Type::JSON, Some(Json)),
+            (Type::JSONB, Some(Json)),
+            (Type::TIME, Some(Time)),
+            (Type::UUID, Some(Uuid)),
+            (Type::INTERVAL, Some(Interval)),
+            (Type::OID, None),
+            (Type::INT4_ARRAY, None),
+            (Type::MONEY, None),
+        ];
+        for (pg, want) in cases {
+            assert_eq!(&pg_common_kind(pg), want, "{pg:?}");
+        }
+    }
+
+    /// Every built-in wire type: one no common kind reads is delivered as a common type only where the engine declares it.
+    #[test]
+    fn no_built_in_type_outside_the_common_kinds_is_delivered_as_a_common_type() {
+        let rows = (0..20_000).filter_map(Type::from_oid).map(|t| {
+            (
+                t.name().to_string(),
+                pg_common_kind(&t),
+                pg_type_to_rivet(&t),
+            )
+        });
+        crate::types::kind::assert_engine_only_rows_are_declared(
+            crate::types::override_table::Engine::Postgres,
+            rows,
+        );
+    }
+
+    /// A catalog hint types a `numeric` column of that name and nothing else.
+    #[test]
+    fn a_numeric_hint_types_only_the_numeric_column_it_names() {
+        let hints = HashMap::from([("amount".to_string(), (18u8, 2i8))]);
+        let decimal = RivetType::Decimal {
+            precision: 18,
+            scale: 2,
+        };
+        assert_eq!(
+            pg_column_rivet_type(&Type::NUMERIC, "amount", Some(&hints)),
+            decimal
+        );
+        for (t, name, hints) in [
+            (&Type::NUMERIC, "other", Some(&hints)),
+            (&Type::NUMERIC, "amount", None),
+        ] {
+            assert_eq!(pg_column_rivet_type(t, name, hints), bare_numeric());
+        }
+        assert_eq!(
+            pg_column_rivet_type(&Type::INT8, "amount", Some(&hints)),
+            RivetType::Int64
+        );
+        assert_eq!(
+            pg_column_rivet_type(&Type::FLOAT8, "amount", Some(&hints)),
+            RivetType::Float64
+        );
     }
 
     /// The two timestamp arms differ ONLY in the timezone field, which is the whole point (roadmap §13.
@@ -1635,5 +1953,86 @@ mod array_decode_message_text {
         assert!(m.contains(
             "In a date, time or timestamp array an element of `infinity`, `-infinity` or `24:00:00` fails the same way: map it to a real bound in the query."
         ));
+    }
+}
+
+#[cfg(test)]
+mod array_element_tests {
+    use super::*;
+
+    #[test]
+    fn an_array_type_names_its_element_and_a_scalar_names_none() {
+        assert_eq!(pg_array_element(&Type::JSON_ARRAY), Some(&Type::JSON));
+        assert_eq!(pg_array_element(&Type::JSONB_ARRAY), Some(&Type::JSONB));
+        assert_eq!(
+            pg_array_element(&Type::INTERVAL_ARRAY),
+            Some(&Type::INTERVAL)
+        );
+        assert_eq!(pg_array_element(&Type::OID_ARRAY), Some(&Type::OID));
+        assert_eq!(pg_array_element(&Type::INT4_ARRAY), Some(&Type::INT4));
+        assert_eq!(pg_array_element(&Type::TEXT_ARRAY), Some(&Type::TEXT));
+        assert_eq!(pg_array_element(&Type::JSONB), None);
+        assert_eq!(pg_array_element(&Type::OID), None);
+    }
+
+    #[test]
+    fn a_json_element_reads_its_own_text() {
+        let json = PgJsonText::from_sql(&Type::JSON, br#"{"a": 1}"#).unwrap();
+        assert_eq!(json.0, r#"{"a": 1}"#);
+        let mut jsonb = vec![1u8];
+        jsonb.extend_from_slice(br#"{"a": 1}"#);
+        let jsonb = PgJsonText::from_sql(&Type::JSONB, &jsonb).unwrap();
+        assert_eq!(jsonb.0, r#"{"a": 1}"#);
+    }
+
+    #[test]
+    fn a_jsonb_element_of_another_wire_version_or_none_is_refused() {
+        assert!(PgJsonText::from_sql(&Type::JSONB, &[2, b'1']).is_err());
+        assert!(PgJsonText::from_sql(&Type::JSONB, &[0, b'1']).is_err());
+        assert!(PgJsonText::from_sql(&Type::JSONB, &[]).is_err());
+    }
+
+    #[test]
+    fn only_json_and_jsonb_elements_are_read_as_json_text() {
+        assert!(PgJsonText::accepts(&Type::JSON));
+        assert!(PgJsonText::accepts(&Type::JSONB));
+        assert!(!PgJsonText::accepts(&Type::TEXT));
+        assert!(!PgJsonText::accepts(&Type::JSON_ARRAY));
+    }
+
+    #[test]
+    fn only_an_oid_array_is_read_at_its_unsigned_width() {
+        assert!(is_oid_array(&Type::OID_ARRAY));
+        assert!(!is_oid_array(&Type::INT8_ARRAY));
+        assert!(!is_oid_array(&Type::INT4_ARRAY));
+        assert!(!is_oid_array(&Type::OID));
+    }
+
+    #[test]
+    fn an_array_is_read_by_its_element_type() {
+        use super::{Utf8ListRead as R, utf8_list_read};
+        let en = Type::new(
+            "st".into(),
+            90_000,
+            postgres::types::Kind::Enum(vec!["a".into()]),
+            "public".into(),
+        );
+        assert_eq!(utf8_list_read(Some(&Type::JSON)), R::Json);
+        assert_eq!(utf8_list_read(Some(&Type::JSONB)), R::Json);
+        assert_eq!(utf8_list_read(Some(&Type::INTERVAL)), R::Interval);
+        assert_eq!(utf8_list_read(Some(&en)), R::Enum);
+        assert_eq!(utf8_list_read(Some(&Type::TEXT)), R::Text);
+        assert_eq!(utf8_list_read(Some(&Type::VARCHAR)), R::Text);
+        assert_eq!(utf8_list_read(Some(&Type::INT4)), R::Text);
+        assert_eq!(utf8_list_read(None), R::Text);
+    }
+
+    #[test]
+    fn an_oid_element_keeps_its_unsigned_range() {
+        let top = PgInt::from_sql(&Type::OID, &u32::MAX.to_be_bytes()).unwrap();
+        assert_eq!(top.0, 4_294_967_295);
+        let zero = PgInt::from_sql(&Type::OID, &0u32.to_be_bytes()).unwrap();
+        assert_eq!(zero.0, 0);
+        assert!(PgInt::from_sql(&Type::OID, &[0, 0, 1]).is_err());
     }
 }

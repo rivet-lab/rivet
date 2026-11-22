@@ -25,6 +25,47 @@ out?" — the short answer is no:
   [Values with no Arrow representation](#values-with-no-arrow-representation).
 
 The per-engine tables below are the precise contract; this is just the gist.
+[Types by kind](#types-by-kind) lists, for each type that means the same on every
+engine, which native type of which engine it comes from.
+
+## Types by kind
+
+Types that mean the same on every engine are decided once, in one shared place
+(`CommonKind` in [`src/types/kind.rs`](https://github.com/rivet-lab/rivet/blob/main/src/types/kind.rs)),
+and delivered as the same `RivetType` whichever engine the column comes from.
+A type only one engine (or some engines) carries is decided in that engine's own
+table and is listed in the engine's section. How a value is read off the wire
+stays per engine, in the engine's own decoder
+([ADR-0038](adr/0038-column-plan.md), amendment of 2026-11-20).
+
+| Kind | Delivered as | [PostgreSQL](#postgresql) | [MySQL](#mysql) | [SQL Server](#sql-server-mssql) | [Oracle](#oracle) |
+|------|--------------|------------|-------|------------|--------|
+| bool | `bool` | `boolean` | `tinyint(1)` | `bit` | `BOOLEAN` |
+| int16 | `int16` | `smallint` | `tinyint`, `smallint`, `tinyint unsigned` | `tinyint`, `smallint` | none |
+| int32 | `int32` | `integer` | `mediumint`, `int`, `smallint unsigned` | `int` | `NUMBER(1..9, 0)` |
+| int64 | `int64` | `bigint` | signed `bigint`, `mediumint unsigned`, `int unsigned` | `bigint` | `NUMBER(10..18, 0)` |
+| float32 | `float32` | `real` | `float` | `real` | `BINARY_FLOAT` |
+| float64 | `float64` | `double precision` | `double` | `float` | `BINARY_DOUBLE` |
+| decimal | `decimal(p,s)` | `numeric(p,s)` | `decimal(p,s)` | `decimal(p,s)`, `numeric(p,s)` | `NUMBER(19..38, 0)`, `NUMBER(p,s)` with a scale |
+| date | `date` | `date` | `date` | `date` | none (`DATE` carries a time) |
+| timestamp | `timestamp(µs, none)` | `timestamp` | `datetime` | `datetime`, `smalldatetime`, `datetime2(0..6)` | `DATE`, `TIMESTAMP(0..6)` |
+| timestamp_tz | `timestamp_tz(µs, UTC)` | `timestamptz` | `timestamp` | `datetimeoffset(0..6)` | `TIMESTAMP WITH TIME ZONE`, `WITH LOCAL TIME ZONE` |
+| text | `string` | `text`, `varchar`, `char`, `name` | `char`, `varchar`, `text` family | `char`, `varchar`, `nchar`, `nvarchar`, `text`, `ntext` | `VARCHAR2`, `NVARCHAR2`, `CHAR`, `NCHAR`, `LONG`, `CLOB`, `NCLOB`; a `NUMBER` no decimal holds |
+| binary | `binary` | `bytea` | `binary`, `varbinary`, `blob` | `binary`, `varbinary`, `image` | `RAW`, `LONG RAW`, `BLOB` |
+| json | `json` | `json`, `jsonb` | `json` | none | `JSON` |
+| time | `time(µs)` | `time` | `time` | `time` | none |
+| uuid | `uuid` | `uuid` | none | `uniqueidentifier` | none |
+| interval | `interval` | `interval` | none | none | `INTERVAL DAY TO SECOND`, `INTERVAL YEAR TO MONTH` |
+
+Types an engine carries alone stay in its own table: PostgreSQL `oid`, `timetz`, enums,
+arrays and the types it does not map; MySQL `bigint unsigned`, `bit`, `year`, `enum`,
+`set`; SQL Server `money`, `smallmoney`, `sql_variant`, CLR types. Within a shared
+kind the engine keeps its own reading: MySQL `time` beyond 24 hours and negative,
+SQL Server `time(7)` precision, Oracle interval units, PostgreSQL `interval` months,
+days and microseconds. MongoDB has no native-type
+mapping to route: its two columns are fixed, see [MongoDB](#mongodb-json-blob-model).
+CDC does not classify types a second time: it reads the batch mapping of the
+same columns, and its value decoders are per engine.
 
 ## Values with no Arrow representation
 
@@ -41,6 +82,7 @@ one either.
 |--------------|-------------------|--------|
 | MySQL zero, partial or invalid date (`0000-00-00`, `2026-00-15`, `2024-02-31` under `ALLOW_INVALID_DATES`) in `DATE`, `DATETIME`, `TIMESTAMP` | NULL, exit 0, batch and CDC | a WARN per column with the count; the batch summary has a `fidelity` row; `nulled_cells` in the manifest; `validate` warns |
 | A date or instant the target type cannot hold (PostgreSQL `infinity` or an out-of-range date, a `timestamp_ns` value outside 1677..2262) | nothing: the run is refused | `RIVET_SOURCE_VALUE_UNREPRESENTABLE`, exit 5 |
+| An Oracle `NUMBER` or `FLOAT` of infinity (or an exact `1E125`, which the client prints with the same bytes), an Oracle `INTERVAL DAY TO SECOND` with a sub-microsecond fraction | nothing: the run is refused; `TO_CHAR(col) AS col` in the query exports the exact text | `RIVET_SOURCE_VALUE_UNREPRESENTABLE`, exit 5 |
 
 The columns are labelled `rivet.fidelity: compatible`, never `exact`. The run records
 the per-column count in its manifest (`nulled_cells`); `validate` prints it as a
@@ -126,6 +168,8 @@ same way on SQL Server and Oracle (declare the source column's own `decimal(p,s)
 Server a value whose wire type the declared type cannot read is refused at the
 first batch with the same code.
 
+A `bool` override over an integer column is a flag only for 0 and 1. PostgreSQL, SQL Server and Oracle refuse it for a batch export at plan time; MySQL, which checks each value, refuses a value outside 0 and 1 at the cell. A CDC stream reads every engine the way MySQL does: 0, 1 and NULL are delivered as `false`, `true` and NULL, and any other integer (2, 5, -1) is refused `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5) naming the column, the value and its row, before a part is written and before the checkpoint moves. Declare the column `int64` in `columns:` to carry the number.
+
 The override path is safe: a `uid: uuid` declaration tries to parse each
 cell — either 16 raw bytes (BINARY(16) layout) or a 36-char canonical text
 form. **Text that does not parse emits `NULL`, never silent garbage.** Same
@@ -137,6 +181,13 @@ the declared type cannot read at all is a different case and is never `NULL`:
   `float8`). Past that the run stops with `RIVET_SOURCE_VALUE_UNREPRESENTABLE`
   (exit 5) naming the column and the value; the remedy is `decimal(20,0)` or
   `float8`, or removing the override.
+- **A decimal under `float8`** (MySQL `DECIMAL`, SQL Server `money`, Oracle `NUMBER`,
+  batch and CDC) is delivered as the same number while the double prints back the
+  same digits (always for up to 15 significant digits, and for the integers up to
+  2^53). Past that the run stops with `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5)
+  naming the column and the value; the remedy is `decimal(p,s)`, or removing the
+  override. `rivet check` reports a `float8` over a source decimal of precision
+  above 15 as `lossy`, never `exact`.
 - **MySQL value of a kind the declared type does not read** (a `DOUBLE`
   under `int8`, a `TIME` under `text`, an integer under `date`) stops with
   `RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH` (exit 1); the remedy is removing the
@@ -150,6 +201,10 @@ the declared type cannot read at all is a different case and is never `NULL`:
 named `uid_*` → probably UUID") — guessing risks misclassifying a non-UUID
 varchar and silently producing wrong-shape Parquet. Operators who want UUID
 semantics on a MySQL column add the override explicitly.
+
+## The change stream per type
+
+`docs/type-capability-matrix.yaml` carries one CDC verdict per delivering row, beside its batch verdicts: `cdc: exact` (the change stream delivers what batch delivers, in the same Arrow type and value) or `cdc: refuse:CODE` with a dated `cdc_reason` (rivet stops by that registered code, never silently). A row without a verdict, a form or a known defect spelled there, or an unregistered code fails `type_capability_matrix_guard`. The release oracle's change-stream grid (`property_no_silent_null_cdc`) grades each column against it: an `exact` column that stops, or a `refuse` column that delivers or stops by another code, is `CDC_VERDICT_DIFFERS`; `live_cdc_type_parity` reads the same rows and compares batch, snapshot, stream and the ClickHouse load value for value.
 
 ## Test commands
 
@@ -288,6 +343,11 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `time[]` | `list<time>` | `List<Time64(µs)>` | — | 1-D arrays; an element of `24:00:00` is refused | type capability ledger |
 | `uuid[]` | `list<uuid>` | `List<FixedSizeBinary(16)>` with the `arrow.uuid` item | — | read as native UUID lists downstream | type capability ledger |
 | `bytea[]` | `list<binary>` | `List<Binary>` | — | 1-D arrays | type capability ledger |
+| `json[]` / `jsonb[]` | `list<json>` | `List<Utf8>` | — | 1-D arrays; each element is its JSON text | type capability ledger |
+| `interval[]` | `list<interval>` | `List<Utf8>` | — | 1-D arrays; each element is its ISO 8601 duration text | type capability ledger |
+| `oid[]` | `list<int64>` | `List<Int64>` | — | 1-D arrays; read at the unsigned 32-bit width | type capability ledger |
+| enum array | `list<enum>` | `List<Utf8>` | — | 1-D arrays; each element is its label | type capability ledger |
+| any other type with no Arrow mapping: `inet`, `cidr`, `macaddr`, `macaddr8`, `bit`, `varbit`, `money`, `"char"`, `timetz`, `xml`, `tsvector`, `tsquery`, `point`, `line`, `lseg`, `box`, `path`, `polygon`, `circle`, ranges and multiranges, `regclass`, `regtype`, `xid`, `xid8`, `cid`, `tid`, `pg_lsn`, composites, extension types, and arrays of them | `string` (text form `server_text`) | `Utf8` labelled `rivet.text_form = server_text` | escaped UTF-8 | batch delivers the text the server prints for the value (`inet` without a `/32` or `/128` host mask, as the server prints it); the session is fixed to `datestyle ISO, MDY`, `TimeZone UTC`, `extra_float_digits 3`, `intervalstyle postgres`, `bytea_output hex`, so a range of dates or timestamps reads as ISO text; `money` is printed in the server's `lc_monetary`; a column declared in `columns:` keeps its declaration; a bare `numeric` is still refused. CDC delivers the same text, `bit` and `bit varying` (`B'110'` unwrapped to `110`) and every array of these types included | live `live_pg_server_text`, `live_cdc_value_parity` |
 | nullable / all-null | — | null bitmap preserved | empty cells | `note_nullable`, `note_all_null` | type_roundtrip |
 | large `text` | `string` | `Utf8` | escaped | 2k–5k chars | type_roundtrip |
 
@@ -296,7 +356,7 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | Source type | Rivet logical | Parquet (Arrow) | CSV | Notes | Tested |
 |-------------|---------------|-----------------|-----|-------|--------|
 | `tinyint` (not width 1) | `int16` | `Int16` | integer text | widened signed | golden |
-| `tinyint(1)` | `bool` | `Boolean` | 0/1 | MySQL boolean convention | golden |
+| `tinyint(1)` | `bool` | `Boolean` | 0/1 | MySQL boolean convention; a value outside 0 and 1 is refused `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5), declare `int64` in `columns:` to carry the number | golden |
 | `smallint` | `int16` | `Int16` | integer text | | golden |
 | `int` | `int32` | `Int32` | integer text | | golden |
 | `bigint` | `int64` | `Int64` | integer text | signed | golden |
@@ -306,12 +366,13 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `date` | `date` | `Date32` | ISO date | a zero or partial date (`0000-00-00`, `2026-00-00`) is written as NULL, the run WARNs per column with the count and the summary has a `fidelity` row; the column is labelled `rivet.fidelity: compatible`, never `exact`; see [Values with no Arrow representation](#values-with-no-arrow-representation) | golden |
 | `datetime` | `timestamp(µs, none)` | `Timestamp(µs, None)` | datetime text | naive; same zero-date rule and `compatible` label as `date` | live matrix |
 | `timestamp` | `timestamp_tz(µs, UTC)` | `Timestamp(µs, UTC)` | datetime text | `SET time_zone = '+00:00'`; same zero-date rule and `compatible` label as `date` | live matrix |
-| `time` | `time(µs)` | `Time64(µs)` | time text | | partial |
+| `time` | `string` | `Utf8` | `[-]hh:mm:ss.ffffff` text (`rivet.text_form: time_beyond_day`) | a MySQL `TIME` is a signed duration of -838:59:59 to 838:59:59, which `Time64(µs)` (00:00..24:00) cannot hold, so every value is delivered as text, batch and CDC, in a `logical_string` column | live matrix |
 | `varchar` / `text` | `string` / `text` | `Utf8` | escaped UTF-8 | | live matrix |
 | `json` | `json` | `Utf8` + Parquet `LogicalType::Json` (via `arrow.json` extension) | JSON string | | live matrix |
-| `binary` / `varbinary` / `blob` | `binary` | `Binary` | hex in CSV | charset 63 / binary payload | type_roundtrip |
+| `binary` / `varbinary` / `blob` | `binary` | `Binary` | hex in CSV | charset 63 / binary payload; under `columns: {c: string}` a value that is valid UTF-8 is delivered as that text and any other byte stops the run with `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (declare `binary`, or select `HEX(c)` / `ST_AsText(c)`), never U+FFFD | type_roundtrip, live matrix |
 | `bit(1)` | `bool` | `Boolean` | | | golden |
-| `bit(n>1)` | `int64` | `Int64` | | avoids silent truncation | type_roundtrip |
+| `bit(n)`, 1 < n <= 63 | `int64` | `Int64` | | avoids silent truncation | type_roundtrip |
+| `bit(64)` | `u_int64` → `UInt64` | `UInt64` | integer text | every value, including those with bit 63 set; `Int64` holds half of them | type_roundtrip |
 | `tinyint unsigned` | `int16` | `Int16` | integer text | 0–255 | type_roundtrip |
 | `smallint unsigned` | `int32` | `Int32` | integer text | up to 65535 | type_roundtrip |
 | `int unsigned` | `int64` | `Int64` | integer text | up to 4294967295 | type_roundtrip |
@@ -333,12 +394,13 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `bigint` | `int64` | `Int64` | integer text | | live matrix |
 | `bit` | `bool` | `Boolean` | 0/1 | | live matrix |
 | `decimal(p,s)` / `numeric(p,s)` | `decimal(p,s)` | `DECIMAL(p,s)` | exact decimal text | scale recovered from the data (tiberius drops declared scale) | live matrix |
-| `money` | `decimal(19,4)` | `DECIMAL(19,4)` | exact decimal text | fixed scale | live matrix |
-| `smallmoney` | `decimal(10,4)` | `DECIMAL(10,4)` | exact decimal text | fixed scale | type_roundtrip |
+| `money` | `decimal(19,4)` | `DECIMAL(19,4)` | exact decimal text | fixed scale; the whole range (±922337203685477.5807) is exact on batch and CDC; a `float64` override is delivered while the double prints back the same digits and refused `RIVET_SOURCE_VALUE_UNREPRESENTABLE` for a value it would round, a narrower `decimal(p,s)` override refuses a value it would round (`RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH`) | live matrix |
+| `smallmoney` | `decimal(10,4)` | `DECIMAL(10,4)` | exact decimal text | fixed scale; exact over the whole range on batch and CDC | type_roundtrip |
 | `real` | `float32` | `Float32` | float text | | live matrix |
 | `float` | `float64` | `Float64` | float text | | live matrix |
 | `date` | `date` | `Date32` | ISO date | | live matrix |
-| `time` | `time(µs)` | `Time64(µs)` | time text | µs precision | live matrix |
+| `time(0..6)` | `time(µs)` | `Time64(µs)` | time text | µs precision | live matrix |
+| `time(7)` (the bare `time`) | `time(ns)` | `Time64(ns)` | time text | the 100 ns tick is kept; ClickHouse `Decimal(18, 9)`, BigQuery INT64 nanoseconds of day, Snowflake NUMBER recovered with `TIME_FROM_PARTS` | live matrix |
 | `datetime2(0..6)` / `datetime` / `smalldatetime` | `timestamp(µs, none)` | `Timestamp(µs, None)` | datetime text | naive; µs, full range | live matrix |
 | `datetime2(7)` | `timestamp(ns, none)` | `Timestamp(ns, None)` | datetime text | naive; the 100 ns tick is kept, 1677-09-21..2262-04-11 (a value outside it is refused); declare `timestamp` for µs over the full range, see known gap 4 | live matrix |
 | `datetimeoffset(0..6)` | `timestamp_tz(µs, UTC)` | `Timestamp(µs, UTC)` | datetime text | normalised to UTC | type_roundtrip |
@@ -352,6 +414,37 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 
 Unmapped SQL Server types resolve to `Unsupported` and fail loudly at schema
 build unless a `columns:` override maps them.
+
+## Oracle
+
+Behind the `oracle` feature (on by default). The common kinds are read from the
+driver's column description, the declared native type, precision and scale
+(see [Types by kind](#types-by-kind)); a `NUMBER` picks its kind by precision
+and scale.
+
+| Source type | Rivet logical | Parquet (Arrow) | CSV | Notes | Tested |
+|-------------|---------------|-----------------|-----|-------|--------|
+| `NUMBER(p,0)`, p 1..9 | `int32` | `Int32` | integer text | | type table |
+| `NUMBER(p,0)`, p 10..18 | `int64` | `Int64` | integer text | | type table |
+| `NUMBER(p,0)`, p 19..38 | `decimal(p,0)` | `DECIMAL(p,0)` | exact decimal text | | type table |
+| `NUMBER(p,s)`, s > 0 | `decimal(p,s)` | `DECIMAL(p,s)` | exact decimal text | a precision below the scale is widened to the scale | type table |
+| `NUMBER(p,s)`, s < 0 | `decimal(p-s,0)` | `DECIMAL(p-s,0)` | exact decimal text | the scale is folded into the integer digits, up to 38 | type table |
+| bare `NUMBER`, `FLOAT(n)`, a `NUMBER` past 38 digits or with a scale above 38 | `string` | `Utf8` labelled `rivet.text_form = decimal_plain` | plain decimal text | no fixed-scale decimal holds every value; declare `decimal(p,s)` with p <= 38 in `columns:` to get a native decimal; a `NUMBER` of infinity is refused, see [Values with no Arrow representation](#values-with-no-arrow-representation) | type table |
+| `BINARY_FLOAT` / `BINARY_DOUBLE` | `float32` / `float64` | `Float32` / `Float64` | float text | | type table |
+| `BOOLEAN` | `bool` | `Boolean` | true/false | | type table |
+| `DATE` | `timestamp(µs, none)` | `Timestamp(µs, None)` | datetime text | an Oracle `DATE` holds a time of day | type table |
+| `TIMESTAMP(0..6)` | `timestamp(µs, none)` | `Timestamp(µs, None)` | datetime text | naive | type table |
+| `TIMESTAMP(7..9)` | `timestamp(µs, none)` | `Timestamp(µs, None)` | datetime text | labelled `lossy`; undeclared, the run is refused (`RIVET_TYPE_UNSAFE_MAPPING`); declare the column in `columns:` | type table |
+| `TIMESTAMP WITH TIME ZONE` / `WITH LOCAL TIME ZONE` | `timestamp_tz(µs, UTC)` | `Timestamp(µs, UTC)` | datetime text | normalised to UTC; the `(7..9)` precisions are `lossy` like the naive one | type table |
+| `INTERVAL DAY TO SECOND`, `INTERVAL YEAR TO MONTH` | `interval` | `Utf8` labelled `rivet.text_form = iso8601_duration` | ISO 8601 duration text | a day-to-second value with a sub-microsecond fraction is refused (`RIVET_SOURCE_VALUE_UNREPRESENTABLE`) | type table |
+| `VARCHAR2` / `NVARCHAR2` / `CHAR` / `NCHAR` / `LONG` / `CLOB` / `NCLOB` | `string` | `Utf8` | escaped UTF-8 | | type table |
+| `JSON` | `json` | `Utf8` + Parquet `LogicalType::Json` (via `arrow.json` extension) | JSON string | labelled `logical_string` | type table |
+| `RAW` / `LONG RAW` / `BLOB` | `binary` | `Binary` | hex in CSV | | type table |
+
+Any other Oracle type (`BFILE`, ...) resolves to `Unsupported` and is named by
+`rivet check`; select a convertible expression of it in a `query:`, or drop it.
+The type table is the offline test `the_oracle_type_table_is_pinned`
+(`src/source/oracle/arrow_convert/type_table.rs`).
 
 ## MongoDB (JSON-blob model)
 
@@ -374,9 +467,10 @@ CDC (change streams) emits the same two-column shape prefixed with the
 
 ## Known gaps (tracked)
 
-1. **Nested arrays, ranges, inet, PostGIS, geometry**: not in the type matrix —
-   they resolve to `Unsupported` and fail at schema build unless a `columns:`
-   override maps them.
+1. **Multi-dimensional arrays**: not in the type matrix; they fail at the read
+   unless a `columns:` override maps them. A PostgreSQL type with no Arrow
+   mapping (ranges, `inet`, geometric types, PostGIS and the rest of the
+   PostgreSQL row above) is delivered as the server's text.
 2. **Nullability**: every exported column is `OPTIONAL`; a source `NOT NULL`
    constraint is not propagated into the Parquet schema (ADR-0016, deferred to
    v0.8 Phase A).
@@ -505,6 +599,8 @@ two independent engines and pins the autoload type. The full matrix:
 | `binary` (`bytea` / `BLOB`)   | `BLOB`             | `Nullable(String)` (raw bytes)     |
 | `bool`                        | `BOOLEAN`          | `Nullable(Bool)`                   |
 | `list<inner>`                 | `inner[]`          | `Array(Nullable(inner))`           |
+
+A NULL list and an empty list are indistinguishable at ClickHouse and BigQuery (an `Array` and a `REPEATED` field cannot hold a NULL list); `columns: {col: string}` keeps NULL.
 
 Round-trip values that the suite pins per row: `sum(decimal * 10^scale)`
 matches the in-process Arrow check; `json_valid` / `isValidJSON` returns true

@@ -368,9 +368,24 @@ impl MssqlSource {
                 std::collections::HashSet::new()
             }
         };
+        let fine_times = match self.query_scalar(&finer_time_sql(&schema, &table)) {
+            Ok(v) => v
+                .map(|s| split_char31(&s))
+                .unwrap_or_default()
+                .into_iter()
+                .collect(),
+            Err(e) => {
+                log::warn!(
+                    "mssql time-scale catalog lookup failed for {schema}.{table} — a time(7) \
+                     column is read from its first batch instead: {e}"
+                );
+                std::collections::HashSet::new()
+            }
+        };
         Some(arrow_convert::CatalogHints {
             decimals,
             fine_timestamps,
+            fine_times,
         })
     }
 
@@ -1134,6 +1149,20 @@ pub(crate) fn finer_than_microsecond_sql(schema: &str, table: &str) -> String {
          JOIN sys.schemas s ON s.schema_id = o.schema_id \
          WHERE s.name = N'{}' AND o.name = N'{}' \
            AND {type_name} IN ('datetime2', 'datetimeoffset') AND c.scale > {}",
+        schema.replace('\'', "''"),
+        table.replace('\'', "''"),
+        crate::source::keyset_key::MICROSECOND_DIGITS
+    )
+}
+
+/// SQL for the CHAR(31)-joined `time` columns of `schema.table` declared finer than a microsecond (the bare `time` is scale 7), through an alias type too.
+pub(crate) fn finer_time_sql(schema: &str, table: &str) -> String {
+    format!(
+        "SELECT STRING_AGG(CONVERT(nvarchar(max), c.name), CHAR(31)) FROM sys.columns c \
+         JOIN sys.objects o ON o.object_id = c.object_id \
+         JOIN sys.schemas s ON s.schema_id = o.schema_id \
+         WHERE s.name = N'{}' AND o.name = N'{}' \
+           AND TYPE_NAME(c.system_type_id) = 'time' AND c.scale > {}",
         schema.replace('\'', "''"),
         table.replace('\'', "''"),
         crate::source::keyset_key::MICROSECOND_DIGITS

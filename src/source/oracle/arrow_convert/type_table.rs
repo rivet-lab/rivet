@@ -93,12 +93,12 @@ fn table() -> Vec<Case> {
         case(
             "float(10)",
             of(OraKind::Number, "number", 10, -127),
-            "string | Utf8 | text:decimal_plain | logical_string | reads int16,int32,int64,float64,decimal(18,2),string,json # red:ORACLE_NUMBER_INF_FINITE",
+            "string | Utf8 | text:decimal_plain | logical_string | reads int16,int32,int64,float64,decimal(18,2),string,json",
         ),
         case(
             "float(126)",
             of(OraKind::Number, "number", 126, -127),
-            "string | Utf8 | text:decimal_plain | logical_string | reads int16,int32,int64,float64,decimal(18,2),string,json # red:ORACLE_NUMBER_INF_FINITE",
+            "string | Utf8 | text:decimal_plain | logical_string | reads int16,int32,int64,float64,decimal(18,2),string,json",
         ),
         case(
             "binary_float",
@@ -163,7 +163,7 @@ fn table() -> Vec<Case> {
         case(
             "interval day to second(9)",
             of(OraKind::IntervalDs, "interval_ds", 0, 9),
-            "interval | Utf8 | text:iso8601_duration | lossy | reads string,json,interval # red:ORACLE_INTERVAL_DS_NS",
+            "interval | Utf8 | text:iso8601_duration | logical_string | reads string,json,interval",
         ),
         case(
             "interval year to month",

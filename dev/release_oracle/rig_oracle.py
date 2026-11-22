@@ -60,6 +60,7 @@ import sys
 import time
 from collections import Counter
 
+from . import type_edges
 from .cdc_position import READERS, MysqlReader, position_findings
 
 META = ("__op", "__pos", "__seq")
@@ -216,6 +217,7 @@ def norm_native(t: str | bytes) -> str:
     t = re.sub(r"^TIMESTAMP(\(\d+\))? WITHOUT TIME ZONE", r"TIMESTAMP\1", t)
     t = re.sub(r"^TIMESTAMP(\(\d+\))? WITH TIME ZONE", r"TIMESTAMPTZ\1", t)
     t = re.sub(r"^TIME(\(\d+\))? WITHOUT TIME ZONE", r"TIME\1", t)
+    t = re.sub(r"^TIME(\(\d+\))? WITH TIME ZONE", r"TIMETZ\1", t)
     t = re.sub(r"^(DATETIME2|DATETIMEOFFSET)\(7\)$", r"\1", t)
     t = re.sub(r"^CHARACTER VARYING", "VARCHAR", t)
     return re.sub(r"^CHARACTER\b", "CHAR", t)
@@ -232,7 +234,7 @@ def arrow_to_duck(delivery: str, text_forms: set[str]) -> str | None:
         "UInt8": "UTINYINT", "UInt16": "USMALLINT", "UInt32": "UINTEGER", "UInt64": "UBIGINT",
         "Float32": "FLOAT", "Float64": "DOUBLE", "Boolean": "BOOLEAN", "Utf8": "VARCHAR",
         "LargeUtf8": "VARCHAR", "Binary": "BLOB", "LargeBinary": "BLOB", "Date32": "DATE",
-        "Time64(µs)": "TIME", "Time64(ns)": "TIME_NS", "Timestamp(µs)": "TIMESTAMP", "Timestamp(ns)": "TIMESTAMP_NS",
+        "Time64(µs)": "TIME", "Time64(ns)": "VARCHAR", "Timestamp(µs)": "TIMESTAMP", "Timestamp(ns)": "TIMESTAMP_NS",
         "Timestamp(ms)": "TIMESTAMP_MS", "Timestamp(s)": "TIMESTAMP_S", "arrow.uuid": "UUID",
     }
     if delivery in fixed:
@@ -250,7 +252,7 @@ def arrow_to_duck(delivery: str, text_forms: set[str]) -> str | None:
 
 
 def ledger(engine: str, mode: str) -> tuple[dict, set[str]]:
-    """The type ledger's rows for `engine` x `mode` keyed by normalized native type, and its TEXT form names."""
+    """The type ledger's rows for `engine` x `mode` keyed by normalized native type, and its TEXT form names; the change stream's rows are those whose `cdc:` verdict is `exact`."""
     import yaml
 
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -260,6 +262,8 @@ def ledger(engine: str, mode: str) -> tuple[dict, set[str]]:
     # One `rows:` list serves both modes; its `clickhouse:` map is read under the flat keys below, and `renders:` (by delivery) under each row's own render.
     eng = (doc.get("engines") or {}).get(engine) or {}
     rows, by_delivery = [r for r in eng.get("rows") or [] if not isinstance(r, dict) or r.get("delivery")], eng.get("renders") or {}
+    if mode == "cdc":
+        rows = [r for r in rows if not isinstance(r, dict) or type_edges.row_cdc(r).kind == type_edges.EXACT]
     ch_keys = {"type": "clickhouse", "today": "today_clickhouse", "defect": "clickhouse_defect", "defect_samples": "clickhouse_defect_samples"}
     rows = [{**r, "render": {**by_delivery.get(r.get("delivery"), {}), **(r.get("render") or {})},
              **{ch_keys[k]: v for k, v in (r.get("clickhouse") or {}).items()}} if isinstance(r, dict) else r for r in rows]
@@ -362,12 +366,12 @@ def _render(row: dict) -> dict:
     return (row.get("today_render") if row.get("known_defect") else None) or row.get("render") or {}
 
 
-def _pg_projection(table: str, native: dict, renders: dict) -> str:
-    """A server-side SELECT rendering each column the ledger renders server-side, and every numeric, with PostgreSQL's own text (the scanner reads a wide one as DOUBLE, and a NaN has no DECIMAL)."""
+def _pg_projection(table: str, native: dict, renders: dict, enum_arrays: frozenset = frozenset()) -> str:
+    """A server-side SELECT rendering each column the ledger renders server-side, and every numeric, with PostgreSQL's own text (the scanner reads a wide one as DOUBLE, and a NaN has no DECIMAL); an array of a user enum is cast to text[] (the scanner returns its literal)."""
     cols = []
     for name, nat in native.items():
         q = _qi(name)
-        expr = renders.get(nat) or (PG_TEXT if nat == "NUMERIC[]" or re.fullmatch(r"NUMERIC(\(.*\))?", nat) else "{c}")
+        expr = renders.get(nat) or (PG_TEXT if nat == "NUMERIC[]" or re.fullmatch(r"NUMERIC(\(.*\))?", nat) else "{c}::text[]" if name in enum_arrays else "{c}")
         cols.append(f"{expr.replace('{c}', q)} AS {q}")
     return f"postgres_query('pg', {_lit('SELECT ' + ', '.join(cols) + ' FROM ' + table)})"
 
@@ -580,7 +584,13 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
                 f"WHERE a.attrelid = {reg}::regclass AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum"
             ) + ")"
         )}
-        return _pg_projection(table, native, renders), key, native
+        enum_arrays = frozenset(r[0] for r in ora.rows(
+            "SELECT * FROM postgres_query('pg', " + _lit(
+                "SELECT a.attname::text FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid JOIN pg_type e ON e.oid = t.typelem "
+                f"WHERE a.attrelid = {reg}::regclass AND a.attnum > 0 AND NOT a.attisdropped AND t.typcategory = 'A' AND e.typtype = 'e'"
+            ) + ")"
+        ))
+        return _pg_projection(table, native, renders, enum_arrays), key, native
     if engine == "mysql":
         db = spec["database"]
         if query:
@@ -2307,11 +2317,13 @@ def _self_test() -> None:
     assert grade_findings(collapsed, rows, set(), {"b": "BIGINT"}, True), "DISTINCT relaxes only for a collapse column"
     assert norm_native("timestamp(6) without time zone[]") == "TIMESTAMP(6)[]"
     assert norm_native("character varying(50)") == "VARCHAR(50)"
+    assert norm_native("time with time zone") == "TIMETZ" and norm_native("time(3) without time zone") == "TIME(3)"
     assert unpinned_loss("TIMESTAMP WITH TIME ZONE", "VARCHAR") is None and unpinned_loss("TIMESTAMP", "VARCHAR") is not None
     assert norm_native("DATETIME2(7)") == "DATETIME2" and norm_native("DATETIMEOFFSET(7)") == "DATETIMEOFFSET"
     assert norm_native("DATETIME2(6)") == "DATETIME2(6)" and norm_native("DATETIME2(3)") == "DATETIME2(3)"
     assert arrow_to_duck('Timestamp(µs, "UTC")', set()) == "TIMESTAMP WITH TIME ZONE"
     assert arrow_to_duck('Timestamp(ns, "UTC")', set()) == "VARCHAR", "a zoned nanosecond part is read as exact text"
+    assert arrow_to_duck("Time64(ns)", set()) == "VARCHAR", "a nanosecond time part is read as exact text"
     assert arrow_to_duck("List(Decimal128(18, 2))", set()) == "DECIMAL(18,2)[]"
     from .value_diff import canon
 
@@ -2795,6 +2807,8 @@ def _layout_self_test() -> None:
     assert absent(Exception('relation "t" does not exist')) and absent(Exception("cross-database references are not implemented"))
     assert not absent(Exception('Conversion Error: Could not convert string "NaN" to DECIMAL(18,2)')), "a read error is an oracle error, never absence"
     assert "format(''%s'', \"n\")" in _pg_projection("t", {"n": "NUMERIC(18,2)"}, {}), "a bounded NUMERIC is read as text: NaN has no DECIMAL"
+    assert '"e"::text[] AS "e"' in _pg_projection("t", {"e": "status[]", "n": "TEXT[]"}, {}, frozenset({"e"})), "an array of a user enum is read as text[]"
+    assert '"n"::text[]' not in _pg_projection("t", {"e": "status[]", "n": "TEXT[]"}, {}, frozenset({"e"})), "another array keeps its own read"
     with tempfile.TemporaryDirectory() as d:
         with _Mem() as ora:
             ora.db.sql("CREATE TABLE src AS SELECT * FROM (VALUES (1, true, '\\x0A\\xFF'::BLOB, '', NULL::VARCHAR, 1.50::DECIMAL(10,2), 'a,\"b'), "

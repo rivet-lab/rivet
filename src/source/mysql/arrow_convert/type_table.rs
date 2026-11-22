@@ -33,7 +33,7 @@ fn table() -> Vec<Case> {
         case(
             "tinyint(1)",
             of(MYSQL_TYPE_TINY, UTF8, 1, none, 0),
-            "bool | Boolean | native | exact | reads bool,int16,int32,int64,float32,float64,decimal(18,2),decimal(50,2),string,json # red:MYSQL_TINYINT_BOOL # under-change",
+            "bool | Boolean | native | exact | reads bool,int16,int32,int64,float32,float64,decimal(18,2),decimal(50,2),string,json",
         ),
         case(
             "tinyint",
@@ -228,17 +228,17 @@ fn table() -> Vec<Case> {
         case(
             "date",
             of(MYSQL_TYPE_DATE, BIN, 10, none, 0),
-            "date | Date32 | native | compatible | reads date,timestamp(microsecond),timestamp_tz(microsecond,UTC),string,json # red:MYSQL_DATE_ZERO_BQ_RAW",
+            "date | Date32 | native | compatible | reads date,timestamp(microsecond),timestamp_tz(microsecond,UTC),string,json",
         ),
         case(
             "time",
             of(MYSQL_TYPE_TIME, BIN, 10, none, 0),
-            "time(microsecond) | Time64(µs) | native | exact | reads time(microsecond) # red:MYSQL_TIME_RANGE_REFUSED # under-change",
+            "string | Utf8 | text:time_beyond_day | logical_string | reads int16,int32,int64,float32,float64,decimal(18,2),decimal(50,2),date,timestamp(microsecond),timestamp_tz(microsecond,UTC),string,json,uuid",
         ),
         case(
             "time (TIME2 wire)",
             of(MYSQL_TYPE_TIME2, BIN, 10, none, 0),
-            "time(microsecond) | Time64(µs) | native | exact | reads time(microsecond) # red:MYSQL_TIME_RANGE_REFUSED # under-change",
+            "string | Utf8 | text:time_beyond_day | logical_string | reads int16,int32,int64,float32,float64,decimal(18,2),decimal(50,2),date,timestamp(microsecond),timestamp_tz(microsecond,UTC),string,json,uuid",
         ),
         case(
             "datetime",
@@ -273,7 +273,7 @@ fn table() -> Vec<Case> {
         case(
             "bit(64)",
             of(MYSQL_TYPE_BIT, BIN, 64, UNSIGNED, 0),
-            "int64 | Int64 | native | exact | reads int64,string,binary,json # red:MYSQL_BIT_TOPBIT_REFUSED # under-change",
+            "uint64 | UInt64 | native | exact | reads int64,uint64,string,binary,json",
         ),
         case(
             "geometry",

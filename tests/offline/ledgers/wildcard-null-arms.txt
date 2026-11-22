@@ -19,7 +19,6 @@ src/source/mssql/cdc.rs::map_op: _ => None	2026-11-10 goes when the I2 compatibi
 src/source/mssql/mod.rs::parse_mssql_simple_from_table: _ => None	2026-11-10 goes when the I2 compatibility table decides the pair before the read (ADR 0040)
 src/source/mssql/proxy.rs::detect_mssql_proxy_kind: _ => None	2026-11-10 goes when the I2 compatibility table decides the pair before the read (ADR 0040)
 src/source/mysql/arrow_convert.rs::binary: _ => None	2026-11-10 goes when the I2 compatibility table decides the pair before the read (ADR 0040)
-src/source/mysql/arrow_convert.rs::boolean: _ => None	2026-11-10 goes when the I2 compatibility table decides the pair before the read (ADR 0040)
 src/source/mysql/arrow_convert.rs::date32: _ => None	2026-11-10 goes when the I2 compatibility table decides the pair before the read (ADR 0040)
 src/source/mysql/arrow_convert.rs::decimal256: _ => None	2026-11-10 goes when the I2 compatibility table decides the pair before the read (ADR 0040)
 src/source/mysql/arrow_convert.rs::fixed_binary: _ => None	2026-11-10 goes when the I2 compatibility table decides the pair before the read (ADR 0040)

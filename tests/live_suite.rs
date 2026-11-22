@@ -72,6 +72,8 @@ mod live_audit_suspects;
 mod live_azure_multipart;
 #[path = "live/live_batch_switch_golden.rs"]
 mod live_batch_switch_golden;
+#[path = "live/live_binary_to_string_override.rs"]
+mod live_binary_to_string_override;
 #[path = "live/live_catalog_hints.rs"]
 mod live_catalog_hints;
 #[path = "live/live_cdc.rs"]
@@ -128,6 +130,8 @@ mod live_cdc_schema_drift;
 mod live_cdc_source_connections;
 #[path = "live/live_cdc_type_parity.rs"]
 mod live_cdc_type_parity;
+#[path = "live/live_cdc_value_parity.rs"]
+mod live_cdc_value_parity;
 #[path = "live/live_chaos.rs"]
 mod live_chaos;
 #[path = "live/live_chunked_recovery.rs"]
@@ -152,6 +156,8 @@ mod live_crash_soak;
 mod live_cross_db_parity;
 #[path = "live/live_cursor_admission.rs"]
 mod live_cursor_admission;
+#[path = "live/live_decimal_to_float_override.rs"]
+mod live_decimal_to_float_override;
 #[path = "live/live_density_probe.rs"]
 mod live_density_probe;
 #[path = "live/live_destination_credential.rs"]
@@ -222,6 +228,8 @@ mod live_mssql_crash_recovery;
 mod live_mssql_harm_permission;
 #[path = "live/live_mssql_incremental_isolation.rs"]
 mod live_mssql_incremental_isolation;
+#[path = "live/live_mssql_money.rs"]
+mod live_mssql_money;
 #[path = "live/live_mssql_ns_override.rs"]
 mod live_mssql_ns_override;
 #[path = "live/live_mssql_reconcile_repair.rs"]
@@ -265,6 +273,8 @@ mod live_partition_cloud;
 mod live_partition_footer;
 #[path = "live/live_performance_smoke.rs"]
 mod live_performance_smoke;
+#[path = "live/live_pg_server_text.rs"]
+mod live_pg_server_text;
 #[path = "live/live_pg_state.rs"]
 mod live_pg_state;
 #[path = "live/live_plan_apply.rs"]

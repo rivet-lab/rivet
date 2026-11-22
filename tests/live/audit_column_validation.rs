@@ -5,9 +5,7 @@
 //!
 //! - #31: `cursor_column: does_not_exist` — `check` exits 0; only `run` hits
 //!   "column does not exist". `check` should flag the missing cursor column.
-//! - #32: `columns: {price: decimal(20,0)}` on numeric(10,2) — `check
-//!   --type-report` labels the column 'exact', but `run` drops the `.99`
-//!   (lossy scale reduction). It must be flagged lossy, not 'exact'.
+//! - #32: `columns: {price: decimal(20,0)}` on numeric(10,2) is a lossy scale reduction, never 'exact'.
 //! - #33: quality `unique_columns: [nonexistent_col]` is a silent no-op
 //!   (run exits 0, quality: pass) — the gate silently vanishes
 //!   (the process rules "never a silent no-op").
@@ -122,21 +120,23 @@ fn audit_run_rejects_quality_on_nonexistent_column() {
 
 // ─── #32: lossy scale reduction must not be reported 'exact' ──────────────────
 
+/// `check --type-report` labels a scale-reducing override `lossy` when the value the check reads fits it.
 #[test]
 #[ignore = "live: postgres"]
-// AUDIT-RED column-applicability: `columns:{price:decimal(20,0)}` on numeric(10,2) — `check --type-report` says 'exact' but run drops the .99 (lossy scale reduction). Asserts CORRECT behavior; expected to FAIL until fixed.
 fn audit_type_report_flags_lossy_scale_reduction() {
     require_alive(LiveService::Postgres);
 
+    let table = seed_pg_numeric_table(2);
     let export_name = unique_name("audit_lossy_scale");
     let out = tempfile::tempdir().unwrap();
-    // price is numeric(10,2); overriding to decimal(20,0) drops the 2 scale
-    // digits — a lossy scale reduction that the run silently truncates.
     let rig = Rig::pg_batch(&export_name)
-        .query("SELECT id, price FROM orders")
+        .query(&format!(
+            "SELECT id, amount FROM {} WHERE id = 0",
+            table.name()
+        ))
         .mode("full")
         .export_line("columns:")
-        .export_line("  price: \"decimal(20,0)\"")
+        .export_line("  amount: \"decimal(20,0)\"")
         .dest_path(out.path().to_path_buf());
 
     let result = rig.cli(&["check", "--export", &export_name, "--type-report", "--json"]);
@@ -144,34 +144,21 @@ fn audit_type_report_flags_lossy_scale_reduction() {
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
 
-    // The check should still run (it is allowed to surface the problem as a
-    // fidelity downgrade rather than a hard exit). Parse the per-column report
-    // and inspect the fidelity of `price`.
     let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
         panic!("check --type-report --json must emit valid JSON ({e}); stdout:\n{stdout}\nstderr:\n{stderr}")
     });
     let cols = json["columns"]
         .as_array()
         .expect("'columns' must be a JSON array");
-    let price = cols
+    let amount = cols
         .iter()
-        .find(|c| c["column"].as_str() == Some("price"))
-        .unwrap_or_else(|| panic!("type-report must include the `price` column; got:\n{stdout}"));
-    let fidelity = price["fidelity"].as_str().unwrap_or("<missing>");
+        .find(|c| c["column"].as_str() == Some("amount"))
+        .unwrap_or_else(|| panic!("type-report must include the `amount` column; got:\n{stdout}"));
+    let fidelity = amount["fidelity"].as_str().unwrap_or("<missing>");
 
-    // CORRECT behavior: dropping numeric(10,2) → decimal(20,0) loses the two
-    // fractional digits, so the fidelity for `price` must NOT be reported as
-    // 'exact' (nor 'compatible'/lossless) — it must be 'lossy'. Today it is
-    // reported 'exact', which contradicts what `run` actually does (drops .99).
-    assert_ne!(
-        fidelity, "exact",
-        "type-report must NOT label `price` (numeric(10,2) overridden to \
-         decimal(20,0)) as 'exact' — scale-reduction is lossy. \
-         reported fidelity={fidelity:?}\nstdout:\n{stdout}"
-    );
-    assert!(
-        fidelity == "lossy",
-        "scale-reduction numeric(10,2)->decimal(20,0) must be reported 'lossy'; \
+    assert_eq!(
+        fidelity, "lossy",
+        "scale-reduction numeric(12,2)->decimal(20,0) must be reported 'lossy'; \
          reported fidelity={fidelity:?}\nstdout:\n{stdout}"
     );
 }
@@ -203,13 +190,6 @@ fn audit_type_report_flags_lossy_scale_reduction() {
 /// `cannot parse DECIMAL "1.234567" as decimal(scale=2)`. Same class of loss,
 /// same override mechanism, opposite outcome; the only difference is that the
 /// target scale is 0.
-///
-/// Distinct from its sibling `audit_type_report_flags_lossy_scale_reduction`,
-/// which is GREEN: that one asserts `check --type-report` labels the column
-/// `lossy`, and it does. The diagnostic was fixed; the RUN was not. Nothing
-/// asserted the exported VALUES — and that sibling could not have, because its
-/// fixture (`orders.price`) holds 5000 rows and not one of them has a non-zero
-/// cent, so no truncation is expressible in it.
 // AUDIT-RED decimal-scale0: a scale-0 `columns:` override silently truncates cents while every other scale fails loudly. Asserts CORRECT behavior; expected to FAIL until fixed.
 #[test]
 #[ignore = "live: postgres"]

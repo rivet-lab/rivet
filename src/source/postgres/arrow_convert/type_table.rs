@@ -2,16 +2,20 @@
 
 use postgres::types::{Kind, Type};
 
-use super::pg_type_to_rivet;
+use super::{pg_delivery, pg_type_to_rivet};
 use crate::types::characterization::{Case, case, table_message, wrong_rows};
 use crate::types::override_table::Engine;
 use crate::types::{RivetType, SourceColumn, TypeMapping};
 
 /// The mapping the PostgreSQL mapper gives a column of wire type `t`.
 fn of(t: &Type) -> TypeMapping {
-    TypeMapping::from_source(
-        &SourceColumn::simple("c", t.name(), true),
-        pg_type_to_rivet(t),
+    pg_delivery(
+        TypeMapping::from_source(
+            &SourceColumn::simple("c", t.name(), true),
+            pg_type_to_rivet(t),
+        ),
+        t,
+        false,
     )
 }
 
@@ -89,7 +93,7 @@ fn table() -> Vec<Case> {
         case(
             "date",
             of(&Type::DATE),
-            "date | Date32 | native | exact | reads date # red:CH_DATE_CLAMP",
+            "date | Date32 | native | exact | reads date",
         ),
         case(
             "time",
@@ -174,177 +178,177 @@ fn table() -> Vec<Case> {
         case(
             "char (unmapped)",
             of(&Type::CHAR),
-            "unsupported(char) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(char) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "money (unmapped)",
             of(&Type::MONEY),
-            "unsupported(money) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(money) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "inet (unmapped)",
             of(&Type::INET),
-            "unsupported(inet) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(inet) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "cidr (unmapped)",
             of(&Type::CIDR),
-            "unsupported(cidr) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(cidr) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "timetz (unmapped)",
             of(&Type::TIMETZ),
-            "unsupported(timetz) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(timetz) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "macaddr (unmapped)",
             of(&Type::MACADDR),
-            "unsupported(macaddr) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(macaddr) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "macaddr8 (unmapped)",
             of(&Type::MACADDR8),
-            "unsupported(macaddr8) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(macaddr8) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "bit (unmapped)",
             of(&Type::BIT),
-            "unsupported(bit) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(bit) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "varbit (unmapped)",
             of(&Type::VARBIT),
-            "unsupported(varbit) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(varbit) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "xml (unmapped)",
             of(&Type::XML),
-            "unsupported(xml) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(xml) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "ts vector (unmapped)",
             of(&Type::TS_VECTOR),
-            "unsupported(tsvector) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(tsvector) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "tsquery (unmapped)",
             of(&Type::TSQUERY),
-            "unsupported(tsquery) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(tsquery) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "point (unmapped)",
             of(&Type::POINT),
-            "unsupported(point) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(point) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "line (unmapped)",
             of(&Type::LINE),
-            "unsupported(line) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(line) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "lseg (unmapped)",
             of(&Type::LSEG),
-            "unsupported(lseg) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(lseg) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "box (unmapped)",
             of(&Type::BOX),
-            "unsupported(box) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(box) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "path (unmapped)",
             of(&Type::PATH),
-            "unsupported(path) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(path) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "polygon (unmapped)",
             of(&Type::POLYGON),
-            "unsupported(polygon) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(polygon) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "circle (unmapped)",
             of(&Type::CIRCLE),
-            "unsupported(circle) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(circle) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "int4 range (unmapped)",
             of(&Type::INT4_RANGE),
-            "unsupported(int4range) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(int4range) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "int8 range (unmapped)",
             of(&Type::INT8_RANGE),
-            "unsupported(int8range) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(int8range) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "num range (unmapped)",
             of(&Type::NUM_RANGE),
-            "unsupported(numrange) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(numrange) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "date range (unmapped)",
             of(&Type::DATE_RANGE),
-            "unsupported(daterange) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(daterange) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "ts range (unmapped)",
             of(&Type::TS_RANGE),
-            "unsupported(tsrange) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(tsrange) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "tstz range (unmapped)",
             of(&Type::TSTZ_RANGE),
-            "unsupported(tstzrange) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(tstzrange) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "int4multi range (unmapped)",
             of(&Type::INT4MULTI_RANGE),
-            "unsupported(int4multirange) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(int4multirange) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "regclass (unmapped)",
             of(&Type::REGCLASS),
-            "unsupported(regclass) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(regclass) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "regtype (unmapped)",
             of(&Type::REGTYPE),
-            "unsupported(regtype) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(regtype) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "xid (unmapped)",
             of(&Type::XID),
-            "unsupported(xid) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(xid) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "cid (unmapped)",
             of(&Type::CID),
-            "unsupported(cid) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(cid) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "xid8 (unmapped)",
             of(&Type::XID8),
-            "unsupported(xid8) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(xid8) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "pg lsn (unmapped)",
             of(&Type::PG_LSN),
-            "unsupported(pg_lsn) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(pg_lsn) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "tid (unmapped)",
             of(&Type::TID),
-            "unsupported(tid) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(tid) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "unknown (unmapped)",
             of(&Type::UNKNOWN),
-            "unsupported(unknown) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(unknown) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "composite rivet_pair",
             of(&composite),
-            "unsupported(rivet_pair) | - | unsupported | unsupported | reads string,json,unsupported(x) # red:PG_UNMAPPED_TYPE",
+            "unsupported(rivet_pair) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "bool[]",
@@ -429,47 +433,47 @@ fn table() -> Vec<Case> {
         case(
             "json[]",
             of(&Type::JSON_ARRAY),
-            "list<json> | List(Utf8) | native | compatible | reads list<int32> # red:PG_ARRAY_ONE_DIM_MULTIDIM_MSG",
+            "list<json> | List(Utf8) | native | compatible | reads list<int32>",
         ),
         case(
             "jsonb[]",
             of(&Type::JSONB_ARRAY),
-            "list<json> | List(Utf8) | native | compatible | reads list<int32> # red:PG_ARRAY_ONE_DIM_MULTIDIM_MSG",
+            "list<json> | List(Utf8) | native | compatible | reads list<int32>",
         ),
         case(
             "interval[]",
             of(&Type::INTERVAL_ARRAY),
-            "list<interval> | List(Utf8) | native | compatible | reads list<int32> # red:PG_ARRAY_ONE_DIM_MULTIDIM_MSG",
+            "list<interval> | List(Utf8) | native | compatible | reads list<int32>",
         ),
         case(
             "oid[]",
             of(&Type::OID_ARRAY),
-            "list<int64> | List(Int64) | native | compatible | reads list<int32> # red:PG_ARRAY_ONE_DIM_MULTIDIM_MSG",
+            "list<int64> | List(Int64) | native | compatible | reads list<int32>",
         ),
         case(
             "inet[]",
             of(&Type::INET_ARRAY),
-            "list<unsupported(inet)> | - | unsupported | unsupported | reads list<int32> # red:PG_UNMAPPED_TYPE",
+            "list<unsupported(inet)> | Utf8 | text:server_text | logical_string | reads list<int32>",
         ),
         case(
             "money[]",
             of(&Type::MONEY_ARRAY),
-            "list<unsupported(money)> | - | unsupported | unsupported | reads list<int32> # red:PG_UNMAPPED_TYPE",
+            "list<unsupported(money)> | Utf8 | text:server_text | logical_string | reads list<int32>",
         ),
         case(
             "int4_range[]",
             of(&Type::INT4_RANGE_ARRAY),
-            "list<unsupported(int4range)> | - | unsupported | unsupported | reads list<int32> # red:PG_UNMAPPED_TYPE",
+            "list<unsupported(int4range)> | Utf8 | text:server_text | logical_string | reads list<int32>",
         ),
         case(
             "point[]",
             of(&Type::POINT_ARRAY),
-            "list<unsupported(point)> | - | unsupported | unsupported | reads list<int32> # red:PG_UNMAPPED_TYPE",
+            "list<unsupported(point)> | Utf8 | text:server_text | logical_string | reads list<int32>",
         ),
         case(
             "rivet_status[]",
             of(&earr),
-            "list<enum> | List(Utf8) | native | compatible | reads list<int32> # red:PG_ARRAY_ONE_DIM_MULTIDIM_MSG",
+            "list<enum> | List(Utf8) | native | compatible | reads list<int32>",
         ),
     ]
 }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures as cf
+import itertools
 import json
 import os
 import re
@@ -10,6 +11,7 @@ import shutil
 import tempfile
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,7 +20,8 @@ import yaml
 from . import cdc, core
 from . import property_no_silent_null as nsn
 from .core import Ledger, SkipCause
-from .property_no_silent_null import DELIVERED, EMPTY, IGNORED, NOT_GRADED, NULLED, REFUSED, WRONG, Col, Result
+from . import type_edges as te
+from .property_no_silent_null import CDC_DIFFERS, DELIVERED, EMPTY, IGNORED, NOT_GRADED, NULLED, REFUSED, WRONG, Col, Result
 
 SCENARIO = "no_silent_null_cdc"
 TABLE = "pm_no_silent_null_c"
@@ -212,6 +215,21 @@ def zero_nulls_by_run(engine: str, c: Col, u: Unit, n: int, seen: dict) -> int:
     return counts
 
 
+def judge_stop(c: Col, u: Unit, cell: str, stop: Result | None) -> Result | None:
+    """The ledger's CDC verdict of column c against how a no-override leg stopped: `exact` never stops unless the row's `refuses` names that code (the snapshot export is batch's), `refuse:CODE` stops with that code; a format refusal is the format's, not the change stream's."""
+    if u.target != "none" or c.cdc is None or (stop is not None and (stop.klass or stop.code in nsn.TYPE_REFUSALS)):
+        return stop
+    if c.cdc.kind == te.REFUSE:
+        if stop is None:
+            return Result(cell, DELIVERED, CDC_DIFFERS, f"the ledger says `cdc: refuse:{c.cdc.code}`, the leg delivered")
+        if stop.code != c.cdc.code:
+            return Result(cell, REFUSED, CDC_DIFFERS, f"the ledger says `cdc: refuse:{c.cdc.code}`, the leg stopped with [{stop.code}]", stop.code)
+        return stop
+    if stop is not None and not (c.refuses is not None and stop.code == c.refuses.code):
+        return Result(cell, REFUSED, CDC_DIFFERS, f"the ledger says `cdc: exact`, the leg stopped with [{stop.code}]: {stop.detail}"[:300], stop.code)
+    return stop
+
+
 def grade_unit(engine: str, u: Unit, cols: list[Col], n: int, runs: dict[str, core.Proc], checks: dict[str, core.Proc], d: Path, tag: str) -> list[Result]:
     """Grade every leg of one unit from the whole output directory against the seed literals; each run is held to the check made right before it."""
     graded = cols if u.target == "none" else [u.col]
@@ -232,7 +250,8 @@ def grade_unit(engine: str, u: Unit, cols: list[Col], n: int, runs: dict[str, co
         for c in graded:
             cell = f"{engine}/{c.native}->{u.target}/cdc-{leg}{tag}/{u.fmt}"
             p, check = runs.get(leg_run(leg)), checks.get(leg_run(leg), checks.get("snapshot"))
-            stop = nsn.grade_stop(cell, p, check) if p is not None else Result(cell, REFUSED, NOT_GRADED, "the run of this leg never started")
+            stop = nsn.grade_stop(cell, p, check, c.name) if p is not None else Result(cell, REFUSED, NOT_GRADED, "the run of this leg never started")
+            stop = judge_stop(c, u, cell, stop)
             if stop:
                 out.append(stop)
                 continue
@@ -329,25 +348,52 @@ def run_round(engine: str, r: int, cols: list[Col], units: list[Unit], image: st
     return results
 
 
+def stops_alone(c: Col) -> bool:
+    """Whether the ledger says a run holding column c stops: the change stream refuses it (`cdc: refuse:CODE`) or its snapshot export is refused as batch refuses it (`refuses`)."""
+    return c.refuses is not None or (c.cdc is not None and c.cdc.kind == te.REFUSE)
+
+
+def groups(cols: list[Col]) -> list[list[Col]]:
+    """Column groups of one table: GROUP delivering columns together, each column whose run stops alone so its refusal cannot stop another's run."""
+    whole = [c for c in cols if not stops_alone(c)]
+    return [whole[g:g + GROUP] for g in range(0, len(whole), GROUP)] + [[c] for c in cols if c not in whole]
+
+
 def rounds(engine: str, cols: list[Col]) -> list[tuple[list[Col], list[Unit], str]]:
-    """(columns, units, row image) rounds: per column group the `none` units in every format and one override unit per family representative and target on Parquet; MySQL adds every non-default row image."""
+    """(columns, units, row image) rounds: per column group the `none` units in every format and one override unit per family representative and target on Parquet; MySQL adds every non-default row image; a column whose CDC verdict is a refusal is a round of its own."""
     ax = nsn.axes()
     cap = UNITS_PER_ROUND.get(engine, 64)
     seen: set[str] = set()
     out = []
-    for g in range(0, len(cols), GROUP):
-        group = cols[g:g + GROUP]
+    for group in groups(cols):
         units = [Unit("none", None, f) for f in ax["formats"]]
         for c in group:
-            if c.family not in seen:
+            if c.family not in seen and not stops_alone(c):
                 seen.add(c.family)
                 units += [Unit(t, c, "parquet") for t in ax["targets"] if t != "none"]
         out += [(group, units[k:k + cap], "") for k in range(0, len(units), cap)]
     if engine == "mysql":
         default = nsn.sql("mysql", CDC_STAND["mysql"], "SELECT @@global.binlog_row_image;").out
         for image in (i for i in row_images() if i not in default):
-            out += [(cols[g:g + GROUP], [Unit("none", None, "parquet")], image) for g in range(0, len(cols), GROUP)]
+            out += [(group, [Unit("none", None, "parquet")], image) for group in groups(cols)]
     return out
+
+
+def shared_stop(group: list[Col], results: list[Result]) -> bool:
+    """Whether a shared round was stopped by an `exact` column or by a format refusal: the stop is then every member's, and says nothing of which one caused it."""
+    return len(group) > 1 and any(r.verdict == REFUSED and (r.klass == CDC_DIFFERS or r.code in nsn.TYPE_REFUSALS) for r in results)
+
+
+def solo_units(units: list[Unit], c: Col) -> list[Unit]:
+    """The units of a shared round that grade column c: every `none` unit and the override units c represents."""
+    return [u for u in units if u.target == "none" or u.col == c]
+
+
+def attributed(engine: str, r: int, group: list[Col], units: list[Unit], image: str, work: Path, results: list[Result], solo: Iterator[int]) -> list[Result]:
+    """The round's results, or, when a shared stop hid whose it was, each column's own round so only the column that stops is red."""
+    if not shared_stop(group, results):
+        return results
+    return [x for c in group for x in run_round(engine, next(solo), [c], solo_units(units, c), image, work)]
 
 
 def run_engine(engine: str, work: Path, progress=lambda s: None) -> list[Result]:
@@ -360,8 +406,9 @@ def run_engine(engine: str, work: Path, progress=lambda s: None) -> list[Result]
     cols = nsn.columns(engine)
     results: list[Result] = []
     plan = rounds(engine, cols)
+    solo = itertools.count(len(plan))
     for r, (group, units, image) in enumerate(plan):
-        results += run_round(engine, r, group, units, image, work)
+        results += attributed(engine, r, group, units, image, work, run_round(engine, r, group, units, image, work), solo)
         progress(f"{engine}: round {r + 1}/{len(plan)}, {len(results)} cells")
     return results
 
@@ -424,6 +471,48 @@ def self_test() -> None:
         nsn.read_parts = saved
     assert [r.klass for r in counted] == [""] * len(legs()), [(r.cell, r.klass, r.detail) for r in counted]
     assert {r.cell.split("/")[2] for r in miscounted if r.klass == NULLED} == {"cdc-insert", "cdc-update"}, [(r.cell, r.klass) for r in miscounted]
+    exact_c, gone_c = Col("e00", "INT", "Int32", "int", ("1",), cdc=te.EXACT_V), Col("g00", "XML", "Utf8", "text", ("'<a/>'",), cdc=te.parse_verdict("refuse:RIVET_X", te.EXTRACT))
+    assert [[c.name for c in g] for g in groups([exact_c, gone_c, exact_c])] == [["e00", "e00"], ["g00"]], "a column the change stream refuses is its own round"
+    batch_c = Col("b00", "NUMERIC", "Utf8", "text", ("'1'",), cdc=te.EXACT_V, refuses=te.parse_verdict("refuse:RIVET_X@extract", te.EXTRACT))
+    assert [[c.name for c in g] for g in groups([exact_c, batch_c, exact_c])] == [["e00", "e00"], ["b00"]], "a column batch refuses is its own round"
+    refused, none = nsn._proc(5, "[RIVET_X] no"), Unit("none", None, "parquet")
+    stop = Result("cell", REFUSED, "", "", "RIVET_X")
+    assert judge_stop(exact_c, none, "cell", None) is None and judge_stop(gone_c, none, "cell", stop) is stop
+    assert judge_stop(exact_c, none, "cell", stop).klass == CDC_DIFFERS, "the ledger says exact, the leg stopped"
+    assert judge_stop(batch_c, none, "cell", stop) is stop and judge_stop(batch_c, none, "cell", None) is None, "the snapshot export refuses as batch does"
+    assert judge_stop(batch_c, none, "cell", Result("cell", REFUSED, "", "", "RIVET_Y")).klass == CDC_DIFFERS, "batch's refusal names another code"
+    assert judge_stop(gone_c, none, "cell", None).klass == CDC_DIFFERS, "the ledger says refuse, the leg delivered"
+    assert judge_stop(gone_c, none, "cell", Result("cell", REFUSED, "", "", "RIVET_Y")).klass == CDC_DIFFERS, "the ledger names another code"
+    crash = Result("cell", REFUSED, nsn.CRASH, "", "")
+    assert judge_stop(exact_c, none, "cell", crash) is crash and judge_stop(gone_c, none, "cell", crash) is crash, "a crash keeps its own class"
+    assert judge_stop(exact_c, Unit("float8", exact_c, "parquet"), "cell", stop) is stop, "an override unit may refuse"
+    fmt = Result("cell", REFUSED, "", "", nsn.TYPE_REFUSALS[0])
+    assert judge_stop(exact_c, none, "cell", fmt) is fmt and judge_stop(gone_c, none, "cell", fmt) is fmt, "a format refusal is no verdict on the change stream"
+    rs = grade_unit("mysql", none, [exact_c], 1, {"snapshot": refused}, {"snapshot": nsn._proc(5, "[RIVET_X] no")}, d, "")
+    assert rs[0].klass == CDC_DIFFERS and rs[0].verdict == REFUSED, rs[0]
+    rs = grade_unit("mysql", none, [gone_c], 1, {"snapshot": refused}, {"snapshot": nsn._proc(5, "[RIVET_X] no")}, d, "")
+    assert rs[0].klass == "" and rs[0].verdict == REFUSED, rs[0]
+    value_stop = nsn._proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] column `e00` holds 1.1234567890123456789")
+    stated = core.Proc(["rivet"], 0, json.dumps({"columns": [{"column": "E00", "fidelity": "lossy", "warnings": ["refused at run (RIVET_SOURCE_VALUE_UNREPRESENTABLE)"]}]}), "", gated=False)
+    rs = grade_unit("mysql", Unit("float8", exact_c, "parquet"), [exact_c], 1, {"snapshot": value_stop}, {"snapshot": stated}, d, "")
+    assert rs[0].verdict == REFUSED and rs[0].klass == "", "a value refusal that check states on the column is no split, on the change-stream legs too"
+    rs = grade_unit("mysql", Unit("float8", exact_c, "parquet"), [exact_c], 1, {"snapshot": value_stop}, {"snapshot": nsn._proc(0)}, d, "")
+    assert rs[0].klass == nsn.SPLIT, "a check that states nothing is a split"
+    other = Col("e01", "INT", "Int32", "int", ("1",), cdc=te.EXACT_V)
+    stopped, fine = [Result("c", REFUSED, CDC_DIFFERS, "", "RIVET_X")], [Result("c", DELIVERED, "", "")]
+    assert shared_stop([exact_c, other], stopped) and not shared_stop([exact_c], stopped) and not shared_stop([exact_c, other], fine)
+    assert not shared_stop([exact_c, other], [Result("c", DELIVERED, CDC_DIFFERS, "")]), "only a stop is a shared stop"
+    assert shared_stop([exact_c, other], [fmt]) and not shared_stop([exact_c], [fmt]), "a format refusal hides its column in a shared round"
+    units = [none, Unit("float8", exact_c, "parquet"), Unit("float8", other, "parquet")]
+    assert solo_units(units, other) == [none, units[2]]
+    asked, saved_round = [], run_round
+    globals()["run_round"] = lambda e, r, g, u, i, w: asked.append((r, [c.name for c in g], u)) or [Result(g[0].name, DELIVERED, "", "")]
+    try:
+        assert attributed("mysql", 0, [exact_c, other], units, "", d, fine, iter([7, 8])) is fine and not asked, "a round that did not stop is not re-run"
+        solo = attributed("mysql", 0, [exact_c, other], units, "", d, stopped, iter([7, 8]))
+    finally:
+        globals()["run_round"] = saved_round
+    assert asked == [(7, ["e00"], [none, units[1]]), (8, ["e01"], [none, units[2]])] and [x.cell for x in solo] == ["e00", "e01"], asked
     shutil.rmtree(d, ignore_errors=True)
     print(f"no_silent_null_cdc self-test ok: legs {legs()}, row images {row_images()}")
 
@@ -441,6 +530,7 @@ def main() -> int:
     if ns.self_test:
         self_test()
         return 0
+    print(nsn.binary_line(), flush=True)
     names = nsn.axes()["engines"] if ns.engine == "all" else [ns.engine]
     results: list[Result] = []
     for name in names:

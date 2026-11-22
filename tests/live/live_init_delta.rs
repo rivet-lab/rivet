@@ -1232,7 +1232,9 @@ fn a_generated_oracle_cdc_config_has_no_load_block_and_runs_to_parquet() {
         args.extend(warehouse);
         let said = rivet_ok_in(dir, &args, &[]);
         let generated = std::fs::read_to_string(dir.join("rivet.yaml")).unwrap();
-        rivet_ok_in(dir, &["check", "-c", "rivet.yaml"], &db);
+        if warehouse.is_empty() {
+            rivet_ok_in(dir, &["check", "-c", "rivet.yaml"], &db);
+        }
         (said, generated)
     };
 

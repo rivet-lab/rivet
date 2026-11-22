@@ -44,7 +44,7 @@ scenarios:
     what: "a non-finite value (NaN/Inf) in a lossy fixed-point numeric → loud error, never a silent NULL / truncate-to-zero"
     postgres: { test: pg_cdc_hostile_floats_match_batch_and_nan_numeric_fails_loudly }
     mysql:    { na: "MySQL DECIMAL cannot hold NaN/Inf; float NaN is representable in Parquet (preserved, not degraded) — no lossy-numeric bail path" }
-    mssql:    { test: non_finite_money_is_a_loud_error_not_a_silent_null }
+    mssql:    { na: "SQL Server MONEY is a scaled 64-bit integer: it holds no NaN or Infinity and decodes to an exact Numeric at scale 4 (a value past 2^53 scaled units is delivered, a narrower decimal override refuses a value it would round: a_narrower_decimal_override_over_money_refuses_a_value_it_would_round)" }
     mongo:    { na: "BSON double NaN is representable in Parquet; the NaN-as-_id keyset refusal is a separate row (unusable_keyset_key_loud)" }
     oracle:   { na: "Oracle NUMBER cannot hold NaN/Inf; BINARY_FLOAT/BINARY_DOUBLE NaN/Inf are representable in Parquet and exported as IEEE values (pinned by oracle_full_export_matches_the_databases_own_rendering_for_every_type)" }
 

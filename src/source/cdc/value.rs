@@ -6,8 +6,8 @@ use arrow::array::{
     ArrayRef, BinaryBuilder, BooleanBuilder, Date32Builder, Decimal128Builder,
     FixedSizeBinaryBuilder, Float32Builder, Float64Builder, Int8Builder, Int16Builder,
     Int32Builder, Int64Builder, LargeBinaryBuilder, LargeStringBuilder, StringBuilder,
-    Time64MicrosecondBuilder, TimestampMicrosecondBuilder, TimestampNanosecondBuilder,
-    UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
+    Time64MicrosecondBuilder, Time64NanosecondBuilder, TimestampMicrosecondBuilder,
+    TimestampNanosecondBuilder, UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
 };
 use arrow::datatypes::{DataType, TimeUnit};
 use chrono::{NaiveDate, NaiveDateTime};
@@ -32,6 +32,8 @@ pub(crate) enum RivetValue {
     DateTime(NaiveDateTime),
     /// Microseconds since midnight (`TIME`).
     TimeMicros(i64),
+    /// Nanoseconds since midnight (a SQL Server `time` of scale 7, whose 100ns tick a microsecond would drop).
+    TimeNanos(i64),
     /// Raw source bytes — `Utf8` text, `Binary`, or a `Decimal` string, decided by the target Arrow type at build time.
     Bytes(Vec<u8>),
     /// A one-dimensional array (PG `text[]`/`integer[]`/…).
@@ -77,7 +79,8 @@ impl RivetValue {
             RivetValue::Int(_)
             | RivetValue::UInt(_)
             | RivetValue::Float(_)
-            | RivetValue::TimeMicros(_) => 8,
+            | RivetValue::TimeMicros(_)
+            | RivetValue::TimeNanos(_) => 8,
             RivetValue::DateTime(_) => 12,
             RivetValue::Bytes(b) => b.len(),
             RivetValue::Array(v) => v.iter().map(RivetValue::payload_bytes).sum::<usize>(),
@@ -90,7 +93,8 @@ impl RivetValue {
             RivetValue::Int(_)
             | RivetValue::UInt(_)
             | RivetValue::Float(_)
-            | RivetValue::TimeMicros(_) => 8,
+            | RivetValue::TimeMicros(_)
+            | RivetValue::TimeNanos(_) => 8,
             RivetValue::DateTime(_) => 12,
             RivetValue::Bytes(b) => b.capacity(),
             RivetValue::Array(v) => {
@@ -110,6 +114,7 @@ impl RivetValue {
             RivetValue::Float(f) => Json::from(*f),
             RivetValue::DateTime(dt) => Json::String(dt.to_string()),
             RivetValue::TimeMicros(us) => Json::from(*us),
+            RivetValue::TimeNanos(ns) => Json::from(*ns),
             RivetValue::Bytes(b) => Json::String(bytes_to_recoverable_string(b)),
             RivetValue::Array(v) => Json::Array(v.iter().map(RivetValue::to_json).collect()),
         }
@@ -150,6 +155,7 @@ pub(crate) fn is_buildable(dt: &DataType) -> bool {
             | DataType::Float64
             | DataType::Date32
             | DataType::Time64(TimeUnit::Microsecond)
+            | DataType::Time64(TimeUnit::Nanosecond)
             | DataType::Decimal128(_, _)
             | DataType::Decimal256(_, _)
             | DataType::Utf8
@@ -216,11 +222,16 @@ const NO_READING: &str = "cannot be read as that type";
 impl CellRefusal {
     /// A refusal of `value` at `row` for `reason`.
     fn new(row: usize, value: &RivetValue, reason: impl Into<String>) -> Self {
+        Self::refused(row, value, FixRefusal::from(reason.into()))
+    }
+
+    /// A refusal of `value` at `row` as worded, and coded, by the fix that met it.
+    fn refused(row: usize, value: &RivetValue, r: FixRefusal) -> Self {
         Self {
             row,
             value: value.clone(),
-            reason: reason.into(),
-            code: None,
+            reason: r.reason,
+            code: r.code,
         }
     }
 
@@ -261,12 +272,29 @@ impl CellRefusal {
     }
 }
 
-/// The value a Boolean column stores for `v`.
-fn bool_value(v: &RivetValue) -> Result<bool, String> {
+/// The flag a 0 or 1 holds as a boolean, or the refusal by code for any other integer.
+fn flag_value(v: i128) -> Result<bool, FixRefusal> {
+    match crate::source::mysql::flag_bool(v) {
+        _ if seeded!("cdc-bool-cell-any-nonzero-true", v != 0, false) => Ok(true),
+        Some(f) => Ok(f),
+        None => Err(FixRefusal {
+            reason: format!(
+                "is not a flag: a boolean column carries 0 or 1 only. Declare the column an \
+                 integer type in `columns:` (for example `int64`) to carry the number, or leave \
+                 the column out of the capture, then: {}",
+                crate::source::cdc::checkpoint_identity::RECOVER
+            ),
+            code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
+        }),
+    }
+}
+
+/// The value a Boolean column stores for `v`: a boolean, or an integer that is a flag.
+fn bool_value(v: &RivetValue) -> Result<bool, FixRefusal> {
     match v {
         RivetValue::Bool(b) => Ok(*b),
-        RivetValue::Int(i) => Ok(*i != 0),
-        RivetValue::UInt(u) => Ok(*u != 0),
+        RivetValue::Int(i) => flag_value(i128::from(*i)),
+        RivetValue::UInt(u) => flag_value(i128::from(*u)),
         _ => Err(NO_READING.into()),
     }
 }
@@ -290,16 +318,28 @@ fn int_value<T: TryFrom<i128>>(v: &RivetValue) -> Result<T, String> {
     })
 }
 
-/// The value a Float64 column stores for `v`; decimal text parses through the shared parser.
-fn f64_value(v: &RivetValue) -> Result<f64, String> {
+/// The value a Float64 column stores for `v`; decimal text is read by the shared parser and refused when a float8 would round it.
+fn f64_value(v: &RivetValue) -> Result<f64, FixRefusal> {
+    use crate::types::decimal::{DecimalAsF64, decimal_text_to_f64_exact};
     match v {
         RivetValue::Float(f) => Ok(*f),
         RivetValue::Int(i) => Ok(*i as f64),
         RivetValue::UInt(u) => Ok(*u as f64),
-        RivetValue::Bytes(b) => std::str::from_utf8(b)
-            .ok()
-            .and_then(crate::types::decimal::decimal_text_to_float)
-            .ok_or_else(|| "is not a number".into()),
+        RivetValue::Bytes(b) => match std::str::from_utf8(b).map(decimal_text_to_f64_exact) {
+            Ok(DecimalAsF64::Exact(f)) => Ok(f),
+            Ok(DecimalAsF64::Rounded) => Err(FixRefusal {
+                reason: format!(
+                    "is a decimal that a float8 cannot hold exactly (it keeps {} significant \
+                     digits and the integers up to 2^53). Declare the column `decimal(p,s)` in \
+                     `columns:` to keep the digits, or leave the column out of the capture, \
+                     then: {}",
+                    crate::types::decimal::F64_DECIMAL_DIGITS,
+                    crate::source::cdc::checkpoint_identity::RECOVER
+                ),
+                code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
+            }),
+            _ => Err("is not a number".into()),
+        },
         _ => Err(NO_READING.into()),
     }
 }
@@ -354,14 +394,49 @@ fn time_value(v: &RivetValue) -> Result<i64, String> {
         RivetValue::TimeMicros(_) => {
             Err("is outside 00:00..24:00, which a Parquet TIME cannot hold".into())
         }
+        RivetValue::TimeNanos(ns) if ns % 1_000 == 0 => {
+            time_value(&RivetValue::TimeMicros(ns / 1_000))
+        }
+        RivetValue::TimeNanos(_) => Err(
+            "has a 100ns digit, which a microsecond TIME column would drop; the column is read \
+             at nanoseconds when the catalog shows its scale above 6"
+                .into(),
+        ),
         _ => Err(NO_READING.into()),
     }
 }
 
+/// Nanoseconds since midnight of a `TIME` cell, for a `Time64(ns)` column.
+fn time_nanos_value(v: &RivetValue) -> Result<i64, String> {
+    match v {
+        RivetValue::TimeNanos(ns) if (0..crate::types::MICROS_PER_DAY * 1_000).contains(ns) => {
+            Ok(*ns)
+        }
+        RivetValue::TimeNanos(_) => {
+            Err("is outside 00:00..24:00, which a Parquet TIME cannot hold".into())
+        }
+        RivetValue::TimeMicros(_) => time_value(v).map(|us| us * 1_000),
+        _ => Err(NO_READING.into()),
+    }
+}
+
+/// `HH:MM:SS.fffffffff` for nanoseconds since midnight.
+fn time_of_day_nanos(ns: i64) -> String {
+    let abs = ns.unsigned_abs();
+    format!(
+        "{}{:02}:{:02}:{:02}.{:09}",
+        if ns < 0 { "-" } else { "" },
+        abs / 3_600_000_000_000,
+        abs / 60_000_000_000 % 60,
+        abs / 1_000_000_000 % 60,
+        abs % 1_000_000_000
+    )
+}
+
 /// Why a decimal cell is refused.
 const NOT_A_DECIMAL: &str = "is not representable in this decimal column (NaN/Infinity, more \
-                             fraction digits than the column's scale, or a MONEY value past the \
-                             f64-exact 2^53 range that tiberius already rounded)";
+                             fraction digits than the column's scale, or a float past the \
+                             f64-exact 2^53 range, which the source already rounded)";
 
 /// Build one Arrow column of exactly `dt` from typed cells (one per row; `None` ⇒ null).
 #[allow(clippy::redundant_closure_call)]
@@ -388,7 +463,7 @@ pub(crate) fn build_column(
                     None => b.append_null(),
                     Some(v) => match $value(*v) {
                         Ok(x) => b.append_value(x),
-                        Err(reason) => return Err(CellRefusal::new(row, v, reason)),
+                        Err(reason) => return Err(CellRefusal::refused(row, v, reason.into())),
                     },
                 }
             }
@@ -442,6 +517,10 @@ pub(crate) fn build_column(
         DataType::Time64(TimeUnit::Microsecond) => Arc::new(typed_col!(
             Time64MicrosecondBuilder::with_capacity(n),
             time_value
+        )),
+        DataType::Time64(TimeUnit::Nanosecond) => Arc::new(typed_col!(
+            Time64NanosecondBuilder::with_capacity(n),
+            time_nanos_value
         )),
         DataType::Decimal128(p, s) => Arc::new(typed_col!(
             Decimal128Builder::with_capacity(n).with_data_type(DataType::Decimal128(*p, *s)),
@@ -784,28 +863,6 @@ pub(crate) enum MysqlCellFix {
     ZeroDate,
     /// TIME is a duration up to 838:59:59; one outside a day is refused with the batch's MySQL wording.
     TimeOfDay,
-    /// An integer column read under a `bool` override: only 0 and 1 are flags, any other value is refused by code.
-    FlagInt,
-}
-
-/// The flag fix for a Boolean target over a MySQL integer column that is not itself a flag (`tinyint(1)`, BIT).
-pub(crate) fn mysql_flag_fix(
-    engine: crate::source::cdc::CdcEngine,
-    native: &str,
-    dt: &DataType,
-) -> Option<MysqlCellFix> {
-    if engine != crate::source::cdc::CdcEngine::Mysql || !matches!(dt, DataType::Boolean) {
-        return None;
-    }
-    let n = native.to_ascii_lowercase();
-    let integer = ["tinyint", "smallint", "mediumint", "int", "bigint"]
-        .iter()
-        .any(|t| n == *t || n.starts_with(&format!("{t}(")) || n.starts_with(&format!("{t} ")));
-    seeded!(
-        "mysql-cdc-int-bool-override-any-nonzero-true",
-        None,
-        (integer && !n.starts_with("tinyint(1)")).then_some(MysqlCellFix::FlagInt)
-    )
 }
 
 /// The fix (if any) for a column, from the engine + native type.
@@ -1050,22 +1107,9 @@ impl MysqlCellFix {
                     code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
                 });
             }
-            (MysqlCellFix::FlagInt, V::Int(0) | V::UInt(0)) => V::Bool(false),
-            (MysqlCellFix::FlagInt, V::Int(1) | V::UInt(1)) => V::Bool(true),
-            (MysqlCellFix::FlagInt, V::Int(_) | V::UInt(_)) => {
-                return Err(FixRefusal {
-                    reason: format!(
-                        "is not 0 or 1, the only values a `bool` override carries. Remove the \
-                         `columns:` override for the column, or leave the column out of the \
-                         capture, then: {}",
-                        crate::source::cdc::checkpoint_identity::RECOVER
-                    ),
-                    code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
-                });
-            }
-            (MysqlCellFix::BinaryPad(w), V::Bytes(b)) if b.len() < *w => {
+            (MysqlCellFix::BinaryPad(w), V::Bytes(b)) => {
                 let mut p = b.clone();
-                p.resize(*w, 0);
+                p.resize(p.len().max(*w), 0);
                 V::Bytes(p)
             }
             (_, other) => other.clone(),
@@ -1158,6 +1202,7 @@ fn render_str(v: &RivetValue) -> String {
         RivetValue::Float(f) => f.to_string(),
         RivetValue::DateTime(dt) => dt.to_string(),
         RivetValue::TimeMicros(us) => crate::types::time_beyond_day(*us),
+        RivetValue::TimeNanos(ns) => time_of_day_nanos(*ns),
         RivetValue::Bytes(b) => bytes_to_recoverable_string(b),
         RivetValue::Array(v) => {
             let inner: Vec<String> = v.iter().map(render_str).collect();
@@ -1169,6 +1214,79 @@ fn render_str(v: &RivetValue) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A SQL Server time(7) arrives as nanoseconds: a Time64(ns) column keeps the 100ns tick, a microsecond column takes a value with no such digit and refuses one that has it, never truncating.
+    #[test]
+    fn a_nanosecond_time_keeps_its_tick_and_never_truncates_into_microseconds() {
+        use arrow::array::{Array, Time64MicrosecondArray, Time64NanosecondArray};
+        let tick = RivetValue::TimeNanos(86_399_999_999_900);
+        let ns = build_column(
+            &DataType::Time64(TimeUnit::Nanosecond),
+            &[Some(&tick), None],
+        )
+        .unwrap();
+        let ns = ns.as_any().downcast_ref::<Time64NanosecondArray>().unwrap();
+        assert_eq!((ns.value(0), ns.is_null(1)), (86_399_999_999_900, true));
+        let whole = RivetValue::TimeNanos(3_723_456_789_000);
+        let us = build_column(&DataType::Time64(TimeUnit::Microsecond), &[Some(&whole)]).unwrap();
+        let us = us
+            .as_any()
+            .downcast_ref::<Time64MicrosecondArray>()
+            .unwrap();
+        assert_eq!(us.value(0), 3_723_456_789);
+        assert!(build_column(&DataType::Time64(TimeUnit::Microsecond), &[Some(&tick)]).is_err());
+        assert!(is_buildable(&DataType::Time64(TimeUnit::Nanosecond)));
+        assert_eq!(render_str(&tick), "23:59:59.999999900");
+    }
+
+    /// The two time readers take each time value at its own unit and refuse a duration outside one day, a 100ns digit into microseconds, and a value that is no time.
+    #[test]
+    fn the_time_readers_take_each_unit_and_refuse_what_does_not_fit() {
+        let day_us = crate::types::MICROS_PER_DAY;
+        assert_eq!(time_value(&RivetValue::TimeMicros(5)), Ok(5));
+        assert_eq!(time_value(&RivetValue::TimeNanos(5_000)), Ok(5));
+        assert!(
+            time_value(&RivetValue::TimeNanos(5_100))
+                .unwrap_err()
+                .contains("100ns digit")
+        );
+        assert!(
+            time_value(&RivetValue::TimeNanos(day_us * 1_000))
+                .unwrap_err()
+                .contains("outside 00:00..24:00")
+        );
+        assert!(
+            time_value(&RivetValue::TimeMicros(-1))
+                .unwrap_err()
+                .contains("outside 00:00..24:00")
+        );
+        assert_eq!(time_value(&RivetValue::Int(1)), Err(NO_READING.into()));
+
+        assert_eq!(time_nanos_value(&RivetValue::TimeNanos(0)), Ok(0));
+        let last = day_us * 1_000 - 1;
+        assert_eq!(time_nanos_value(&RivetValue::TimeNanos(last)), Ok(last));
+        for bad in [-1, day_us * 1_000] {
+            assert!(
+                time_nanos_value(&RivetValue::TimeNanos(bad))
+                    .unwrap_err()
+                    .contains("outside 00:00..24:00"),
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            time_nanos_value(&RivetValue::TimeMicros(1_000)),
+            Ok(1_000_000)
+        );
+        assert!(
+            time_nanos_value(&RivetValue::TimeMicros(day_us))
+                .unwrap_err()
+                .contains("outside 00:00..24:00")
+        );
+        assert_eq!(
+            time_nanos_value(&RivetValue::Int(1)),
+            Err(NO_READING.into())
+        );
+    }
 
     /// `build_column` with the sink's refusal wording for a non-overridden column `col`.
     fn build(col: &str, dt: &DataType, cells: &[Option<&RivetValue>]) -> anyhow::Result<ArrayRef> {
@@ -1890,6 +2008,19 @@ mod tests {
             fix("binary(4)").apply(&V::Bytes(Vec::new())).unwrap(),
             V::Bytes(vec![0, 0, 0, 0])
         );
+        let pad = fix("binary(4)");
+        assert_eq!(
+            pad.apply(&V::Bytes(vec![7, 8])).unwrap(),
+            V::Bytes(vec![7, 8, 0, 0])
+        );
+        assert_eq!(
+            pad.apply(&V::Bytes(vec![1, 2, 3, 4])).unwrap(),
+            V::Bytes(vec![1, 2, 3, 4])
+        );
+        assert_eq!(
+            pad.apply(&V::Bytes(vec![1, 2, 3, 4, 5])).unwrap(),
+            V::Bytes(vec![1, 2, 3, 4, 5])
+        );
 
         let mi = fix("mediumint");
         assert_eq!(mi.apply(&V::Int(8_388_608)).unwrap(), V::Int(-8_388_608));
@@ -1925,7 +2056,7 @@ mod tests {
     }
 
     #[test]
-    fn cdc_money_past_f64_exact_range_fails_loud_not_a_falsely_exact_decimal() {
+    fn a_float_past_the_f64_exact_range_is_refused_not_a_falsely_exact_decimal() {
         use arrow::datatypes::DataType;
         assert_eq!(
             decimal_to_i128(&RivetValue::Float(9.0e11), 4),
@@ -1935,15 +2066,15 @@ mod tests {
         assert!(decimal_to_i256(&RivetValue::Float(1e12), 4).is_none());
         let small = RivetValue::Float(12.34);
         let ok = build("c", &DataType::Decimal128(19, 4), &[Some(&small)])
-            .expect("a small MONEY value builds");
+            .expect("a small float builds");
         assert_eq!(ok.len(), 1);
         let huge = RivetValue::Float(1e12);
         let err = build("c", &DataType::Decimal128(19, 4), &[Some(&huge)])
-            .expect_err("a MONEY value past f64-exact range must fail loud, not round silently");
+            .expect_err("a float past the f64-exact range must fail loud, not round silently");
         let msg = err.to_string().to_lowercase();
         assert!(
-            msg.contains("2^53") && msg.contains("money"),
-            "message must name the 2^53 range and MONEY: {msg}"
+            msg.contains("2^53") && msg.contains("float"),
+            "message must name the 2^53 range and the float: {msg}"
         );
     }
 
@@ -1986,6 +2117,19 @@ mod tests {
                 assert_eq!(fix.apply(&RivetValue::Null).unwrap(), RivetValue::Null);
             }
         }
+    }
+
+    #[test]
+    fn a_bit64_value_with_the_top_bit_builds_in_an_unsigned_column() {
+        use arrow::array::UInt64Array;
+        let fix = mysql_cell_fix(crate::source::cdc::CdcEngine::Mysql, "bit(64)").expect("bit(64)");
+        let top = fix
+            .apply(&RivetValue::Bytes(vec![0x80, 0, 0, 0, 0, 0, 0, 0]))
+            .unwrap();
+        let max = fix.apply(&RivetValue::Bytes(vec![0xff; 8])).unwrap();
+        let arr = build("c", &DataType::UInt64, &[Some(&top), Some(&max)]).unwrap();
+        let a = arr.as_any().downcast_ref::<UInt64Array>().unwrap();
+        assert_eq!((a.value(0), a.value(1)), (1u64 << 63, u64::MAX));
     }
 
     #[test]
@@ -2374,6 +2518,37 @@ mod tests {
         }
     }
 
+    /// Decimal text a float8 prints back is delivered; text it would round is refused by code, on the change stream as in batch.
+    #[test]
+    fn decimal_text_a_float8_would_round_is_refused_by_code() {
+        use arrow::array::Float64Array;
+        let kept = [
+            RivetValue::Bytes(b"12345678901.2345".to_vec()),
+            RivetValue::Bytes(b"9007199254740992".to_vec()),
+            RivetValue::Bytes(b"-0.10".to_vec()),
+        ];
+        let refs: Vec<Option<&RivetValue>> = kept.iter().map(Some).collect();
+        let a = build_column(&DataType::Float64, &refs).unwrap();
+        let a = a.as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(
+            a.values().to_vec(),
+            vec![12345678901.2345, 9_007_199_254_740_992.0, -0.1]
+        );
+        for text in [
+            &b"922337203685477.5807"[..],
+            b"9007199254740993",
+            b"0.1234567890123456789",
+        ] {
+            let bad = RivetValue::Bytes(text.to_vec());
+            let r = build_column(&DataType::Float64, &[Some(&bad)]).unwrap_err();
+            assert_eq!(
+                r.code.map(|c| c.id),
+                Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE.id),
+                "{r:?}"
+            );
+        }
+    }
+
     /// Exact integer text fills an integer column; a fraction or overflow is refused.
     #[test]
     fn integer_columns_take_exact_integer_text_only() {
@@ -2420,79 +2595,77 @@ mod tests {
         assert_eq!(arr.len(), 1);
     }
 
-    /// A Boolean column reads a zero integer of either signedness as false and any other as true.
+    /// A Boolean column carries 0 and 1 of either signedness; any other integer is refused by code with the remedy, on every engine.
     #[test]
-    fn a_boolean_reads_zero_as_false_for_signed_and_unsigned_wire_ints() {
+    fn a_boolean_is_a_flag_or_refused_by_code_for_signed_and_unsigned_wire_ints() {
         use RivetValue as V;
         for (v, want) in [
+            (V::Bool(true), true),
+            (V::Bool(false), false),
             (V::Int(0), false),
-            (V::Int(-1), true),
+            (V::Int(1), true),
             (V::UInt(0), false),
             (V::UInt(1), true),
         ] {
             assert_eq!(bool_value(&v), Ok(want), "{v:?}");
         }
+        for bad in [
+            V::Int(2),
+            V::Int(-1),
+            V::Int(i64::MIN),
+            V::Int(i64::MAX),
+            V::UInt(2),
+            V::UInt(u64::MAX),
+        ] {
+            let err = bool_value(&bad).unwrap_err();
+            assert_eq!(
+                err.code.map(|c| c.id),
+                Some("RIVET_SOURCE_VALUE_UNREPRESENTABLE"),
+                "{bad:?}"
+            );
+            assert!(
+                err.reason.starts_with(
+                    "is not a flag: a boolean column carries 0 or 1 only. Declare the column \
+                     an integer type in `columns:` (for example `int64`) to carry the number, \
+                     or leave the column out of the capture, then: Re-baseline"
+                ),
+                "{err:?}"
+            );
+        }
+        assert_eq!(
+            bool_value(&V::Float(1.0)).unwrap_err().reason,
+            NO_READING,
+            "a variant with no reading keeps its own refusal"
+        );
     }
 
-    /// An integer column under a `bool` override carries 0 and 1 only; any other value is refused by code, and a flag column keeps its own rule.
+    /// The flag rule is one function: 0 and 1 are flags at either edge of every integer width, the neighbours are not.
     #[test]
-    fn an_integer_under_a_bool_override_is_a_flag_or_refused() {
-        use crate::source::cdc::CdcEngine::{Mssql, Mysql, Postgres};
+    fn a_flag_is_zero_or_one_at_every_edge_of_the_wire_widths() {
+        for (v, want) in [(0i128, Some(false)), (1, Some(true))] {
+            assert_eq!(flag_value(v).ok(), want, "{v}");
+        }
+        for v in [-1i128, 2, i128::from(i64::MIN), i128::from(u64::MAX)] {
+            assert!(flag_value(v).is_err(), "{v}");
+        }
+    }
+
+    /// A MySQL BIT(1) keeps its own reading (any set bit), and a built Boolean column refuses the cell that is no flag with the row.
+    #[test]
+    fn a_bit_one_keeps_its_reading_and_a_built_boolean_names_the_row_of_a_cell_that_is_no_flag() {
+        use crate::source::cdc::CdcEngine::Mysql;
         use RivetValue as V;
-        let flag = |native: &str| mysql_flag_fix(Mysql, native, &DataType::Boolean);
-        for native in [
-            "tinyint",
-            "tinyint(4)",
-            "smallint",
-            "mediumint",
-            "mediumint unsigned",
-            "int",
-            "int(11)",
-            "int unsigned",
-            "bigint",
-            "bigint(20) unsigned",
-        ] {
-            let fix = flag(native).unwrap_or_else(|| panic!("{native}"));
-            assert_eq!(fix.apply(&V::Int(0)).unwrap(), V::Bool(false), "{native}");
-            assert_eq!(fix.apply(&V::Int(1)).unwrap(), V::Bool(true), "{native}");
-            assert_eq!(fix.apply(&V::UInt(1)).unwrap(), V::Bool(true), "{native}");
-            assert_eq!(fix.apply(&V::Null).unwrap(), V::Null, "{native}");
-            for bad in [V::Int(2), V::Int(-1), V::UInt(u64::MAX)] {
-                let err = fix.apply(&bad).unwrap_err();
-                assert_eq!(
-                    err.code.map(|c| c.id),
-                    Some("RIVET_SOURCE_VALUE_UNREPRESENTABLE"),
-                    "{native} {bad:?}"
-                );
-                assert!(
-                    err.reason.starts_with(
-                        "is not 0 or 1, the only values a `bool` override carries. Remove the \
-                         `columns:` override for the column, or leave the column out of the \
-                         capture, then: Re-baseline"
-                    ),
-                    "{err:?}"
-                );
-            }
-        }
-        for native in [
-            "tinyint(1)",
-            "tinyint(1) unsigned",
-            "bit(1)",
-            "bit(8)",
-            "varchar(5)",
-            "decimal(10,0)",
-        ] {
-            assert!(flag(native).is_none(), "{native} keeps its own reading");
-        }
-        assert!(mysql_flag_fix(Mysql, "bigint", &DataType::Int64).is_none());
-        assert!(mysql_flag_fix(Postgres, "bigint", &DataType::Boolean).is_none());
-        assert!(mysql_flag_fix(Mssql, "int", &DataType::Boolean).is_none());
-        let native_flag = mysql_cell_fix(Mysql, "tinyint(1)");
-        assert!(
-            native_flag.is_none(),
-            "a tinyint(1) is read by bool_value: non-zero is true"
+        let bit1 = mysql_cell_fix(Mysql, "bit(1)").expect("BitBool");
+        assert_eq!(bit1.apply(&V::Bytes(vec![1])).unwrap(), V::Bool(true));
+        assert_eq!(bit1.apply(&V::Bytes(vec![0])).unwrap(), V::Bool(false));
+        let ok = V::Int(1);
+        let bad = V::Int(5);
+        let r = build_column(&DataType::Boolean, &[Some(&ok), Some(&bad)]).unwrap_err();
+        assert_eq!((r.row, r.value.clone()), (1, V::Int(5)));
+        assert_eq!(
+            r.code.map(|c| c.id),
+            Some("RIVET_SOURCE_VALUE_UNREPRESENTABLE")
         );
-        assert_eq!(bool_value(&V::Int(2)), Ok(true));
     }
 
     /// Each numeric reader takes every wire variant a driver delivers for it.

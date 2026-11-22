@@ -407,6 +407,7 @@ class Matrix:
         self.obs: dict[tuple[str, str, int, str], Got] = {}
         self.unheld: dict[tuple[str, str, int], tuple[str, str]] = {}
         self.unmade: list[tuple[Column, str]] = []
+        self.texts: dict[tuple[str, str], list[str | None] | None] = {}
         self.checked: dict[tuple[str, str, str], int] = {}
         self.splits: dict[tuple[str, str, str], set[str]] = {}
         self.lock = threading.Lock()
@@ -444,6 +445,10 @@ class Matrix:
                 c = self.mask(c, *bad)
             if c.cols:
                 out.append(c)
+        for c in out:
+            for col in c.cols:
+                if nsn.server_text_graded(self.engine, col.delivery):
+                    self.texts[(c.table, col.name)] = nsn.server_text_of(self.url, c.table, col.name, c.null_id)
         return out
 
     def seed_chunk(self, c: Chunk) -> tuple[int, str] | None:
@@ -620,12 +625,16 @@ class Matrix:
                         out.append(Result(tm.cell_name(self.engine, col, held[0], target), REFUSED, NOT_GRADED, f"the {self.engine} server does not hold the literal: {held[1]}"))
                         continue
                     lit, want = tm.lit_at(col, i, c), tm.expected(col, i, c, target)
+                    text = self.texts.get((c.table, col.name), MISSING)
+                    if text is None:
+                        out.append(Result(tm.cell_name(self.engine, col, lit, target), DELIVERED, NOT_GRADED, "the source's own text of the seeded values could not be read"))
+                        continue
                     if g.refused is not None:
                         got = g.refused
                     elif g.value is MISSING:
                         got = te.Verdict(te.FORM, text="ROW_MISSING")
                     else:
-                        got = tm.observe(self.engine, col, lit, g.value, want)
+                        got = tm.observe(self.engine, col, lit, g.value, want) if text is MISSING else tm.observe_server_text(text[i - 1], g.value)
                     k = tm.klass(want, got)
                     out.append(Result(tm.cell_name(self.engine, col, lit, target), REFUSED if got.kind == te.REFUSE else DELIVERED, k,
                                       f"expected {tm.spell(want)}, observed {tm.spell(got)}"))
@@ -772,6 +781,26 @@ def self_test() -> None:
     assert [r.klass for r in mk.results(left)[0]] == [NOT_GRADED], "a type the server will not create is a recorded skip, never green"
     ms.obs = {("pm_tm0", "c001", 1, "duck"): Got(MISSING)}
     assert [r.klass for r in ms.results([ch_])[0]] == [nsn.WRONG], "a row the reader lacks is not exact"
+    money = Column("c002", "MONEY", "server_text", "decimal", None, ("12.34",), (te.Edge("12.34"),), te.Edge("NULL"))
+    mp, mc = Matrix("postgres", "u", Path("/nonexistent"), ()), Chunk("pm_tm0", (money,))
+    mp.texts = {("pm_tm0", "c002"): ["$12.34", None]}
+    for delivered, klass_ in (("$12.34", ""), ("12.34", nsn.WRONG), (None, nsn.NULLED)):
+        mp.obs = {("pm_tm0", "c002", 1, "duck"): Got(delivered), ("pm_tm0", "c002", 2, "duck"): Got(None)}
+        assert mp.results([mc])[0][0].klass == klass_, (delivered, klass_, "a server_text column is graded against the server's text, not the seed literal")
+    mp.texts = {("pm_tm0", "c002"): ["$12.34", None]}
+    mp.obs = {("pm_tm0", "c002", 1, "duck"): Got(b"$12.34"), ("pm_tm0", "c002", 2, "duck"): Got(None)}
+    assert mp.results([mc])[0][0].klass == "", "a server text a reader returns as bytes is read as text"
+    mp.texts = {("pm_tm0", "c002"): None}
+    assert [r.klass for r in mp.results([mc])[0]] == [NOT_GRADED, NOT_GRADED], "a server text that could not be read is not graded, never green"
+    plain = Column("c003", "TEXT", "Utf8", "text", None, ("a",), (te.Edge("'a'"),), te.Edge("NULL"))
+    real_text, nsn.sql, nsn.server_text_of = nsn.server_text_of, lambda e, u, st: nsn._proc(0), lambda u, t, c, n: [f"{t}.{c}.{n}"]
+    try:
+        mq = Matrix("postgres", "u", Path("/nonexistent"), ())
+        mq.seed([Chunk("pm_tm0", (money, plain))])
+    finally:
+        nsn.sql, nsn.server_text_of = real_sql, real_text
+    assert mq.texts == {("pm_tm0", "c002"): ["pm_tm0.c002.2"]}, "the server's text is read for the server_text columns of a seeded chunk, and only for them"
+    assert nsn.server_text_graded("postgres", "server_text") and not nsn.server_text_graded("postgres", "inet_text") and not nsn.server_text_graded("mysql", "server_text")
     coded = {1: Got(refused=te.Verdict(te.REFUSE, code="RIVET_X", stage=te.LOAD))}
     uncoded = {1: Got(refused=te.Verdict(te.REFUSE, code=te.UNCODED, stage=te.LOAD))}
     key = ("pm_tm0", "c001", "clickhouse")
@@ -815,6 +844,7 @@ def main() -> int:
         tm.self_test()
         self_test()
         return 0
+    print(nsn.binary_line(), flush=True)
     urls = {**nsn.STAND, **dict(u.split("=", 1) for u in ns.url)}
     targets = tuple(ns.targets.split(","))
     results, seen = [], []

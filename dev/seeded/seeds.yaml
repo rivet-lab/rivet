@@ -1848,6 +1848,24 @@ seeds:
       lib:
         cells: ["lib:a_batch_load_skips_the_runs_of_a_cdc_export_nested_in_its_prefix_and_says_so"]
 
+  - name: mysql-time-delivered-as-time-of-day
+    class: "a native type resolves into a common kind whose value domain is narrower than the type's, so the values outside it stop the run instead of reaching the file"
+    history: "2026-11-20 - type matrix MYSQL_TIME_RANGE_REFUSED: a MySQL TIME beyond 00:00..24:00 or negative was refused RIVET_SOURCE_VALUE_UNREPRESENTABLE because every TIME was delivered as Time64(us), a time of day; fixed by delivering TIME as time_beyond_day text, `columns: { c: time }` keeps Time64"
+    scope: source
+    switch: mysql-time-delivered-as-time-of-day
+    engines:
+      postgres:
+        na: "a PostgreSQL time is a time of day, never a duration past it; the MySQL TIME mapping does not run"
+      mysql:
+        cells:
+          - mysql_batch_and_cdc_deliver_every_ledger_row_alike
+          - "lib:a_time_column_is_delivered_as_text_so_a_duration_beyond_a_day_is_kept"
+      mssql:
+        na: "a SQL Server time is a time of day, never a duration past it; the MySQL TIME mapping does not run"
+      mongo:
+        na: "a MongoDB document has no TIME type; the MySQL TIME mapping does not run"
+      oracle:
+        na: "Oracle has no TIME type; the MySQL TIME mapping does not run"
   - name: mysql-session-off-utc-read
     class: "a MySQL read whose session is still at the server's time zone after rivet's `SET time_zone = '+00:00'` (a proxy dropped or rerouted the SET) writes every TIMESTAMP shifted by the offset, exit 0"
     history: "0.32.1 D5, 2026-10-18: a pilot's ProxySQL in front of a Europe/Moscow MySQL; measured on main 51a1b69c through proxysql-tz (a rule answering `SET time_zone` with OK): `2026-01-01T12:00:00Z` exported for `09:00:00Z`, exit 0. ProxySQL 2.5.5 with no rule forwards the SET and logs `Unable to parse unknown SET query ... Setting lock_hostgroup` for rivet's reset `SET time_zone = @@global.time_zone`"
@@ -1888,6 +1906,26 @@ seeds:
         na: "a MongoDB document rides one verbatim `document` column, so a numeric field has no declared type to mismatch (a_columns_override_on_a_numeric_field_never_nulls_it_mongo)"
       oracle:
         na: "the MySQL converter's arms are the seam; Oracle reads each column through a typed driver get that errors on a mismatch (a_declared_override_delivers_the_source_or_refuses_by_code_oracle)"
+
+  - name: mysql-string-override-replaces-bytes
+    class: "a MySQL binary column (VARBINARY, BLOB, GEOMETRY) declared `string` in `columns:` writes U+FFFD in place of every byte that is not UTF-8 instead of the bytes or a coded refusal, exit 0"
+    history: "verifier probe 2026-11-21 (unit level): WKB byte 0xf8 delivered as `ef bf bd`; RED on main 2026-11-21 (`a_string_column_holding_non_utf8_bytes_is_refused_instead_of_replaced` built Ok with U+FFFD in the string); PostgreSQL and SQL Server refuse the pair by code, Oracle delivers upper hex"
+    scope: source
+    switch: mysql-string-override-replaces-bytes
+    engines:
+      mysql:
+        cells:
+          - a_binary_column_declared_string_never_loses_a_byte_mysql
+          - the_remedy_of_the_refusal_delivers_the_bytes_mysql
+          - "lib:a_string_column_holding_non_utf8_bytes_is_refused_instead_of_replaced"
+      postgres:
+        na: "the MySQL Utf8 builder's lossy fallback is the seam; PostgreSQL refuses a bytea under `string` by code RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH before any write (a_binary_column_declared_string_never_loses_a_byte_postgres)"
+      mssql:
+        na: "the MySQL Utf8 builder's lossy fallback is the seam; SQL Server refuses a varbinary under `string` by code RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH before any write (a_binary_column_declared_string_never_loses_a_byte_mssql)"
+      mongo:
+        na: "a MongoDB document rides one verbatim `document` column, so no column is declared binary and retyped"
+      oracle:
+        na: "the MySQL Utf8 builder's lossy fallback is the seam; Oracle reads a RAW or BLOB under `string` as upper hex, every byte kept (a_binary_column_declared_string_never_loses_a_byte_oracle)"
 
   - name: summary-skip-reason-dropped
     class: "the run summary's `per_export[]` entry of a `skip_empty` run says `skipped` without the reason the metrics row and the console card carry"
@@ -3650,7 +3688,7 @@ seeds:
       postgres:
         na: "a PostgreSQL `time` is a time of day, never a duration past it, and the MySQL cell fix does not run"
       mysql:
-        cells: [a_time_past_a_day_in_a_stream_is_refused_by_code_and_both_remedies_deliver_mysql]
+        cells: ["lib:mysql_cell_fixes_refuse_an_unreadable_wire_value"]
       mssql:
         na: "a SQL Server `time` is a time of day, never a duration past it, and the MySQL cell fix does not run"
       mongo:
@@ -5738,6 +5776,60 @@ seeds:
       mongo:
         na: "the seed edits the PostgreSQL list builder; a MongoDB array is a value inside the one document column, never a list column"
 
+  - name: pg-array-element-wire-type-refused
+    class: "a PostgreSQL json[], jsonb[], interval[], oid[] or enum[] column is refused by the batch export with the multi-dimensional message instead of being delivered as a list of its elements"
+    history: "type matrix class PG_ARRAY_ONE_DIM_MULTIDIM_MSG (2026-11-16): the Vec<Option<String>> read refused every element type String does not accept and the refusal blamed multi-dimensional arrays; RED from this patch: the live cell reads the list back through DuckDB and the lib cell reads the oid array at the wrong width"
+    scope: source
+    engines:
+      postgres:
+        switch: pg-array-element-wire-type-refused
+        cells:
+          - a_postgres_json_interval_oid_enum_array_is_delivered_as_a_list_of_its_elements
+          - "lib:only_an_oid_array_is_read_at_its_unsigned_width"
+      mysql:
+        na: "the seed edits the PostgreSQL list builder; MySQL has no array column type"
+      mssql:
+        na: "the seed edits the PostgreSQL list builder; SQL Server has no array column type"
+      oracle:
+        na: "the seed edits the PostgreSQL list builder; an Oracle collection column is refused by type, not built as a list"
+      mongo:
+        na: "the seed edits the PostgreSQL list builder; a MongoDB array is a value inside the one document column, never a list column"
+  - name: oracle-number-infinity-delivered-finite
+    class: "an Oracle NUMBER or FLOAT of infinity, or an exact 1E125 the client prints with the same bytes, is delivered as a finite number with exit 0"
+    history: "type matrix class ORACLE_NUMBER_INF_FINITE (2026-11-16): FLOAT arithmetic that overflows 9.99E125 stores infinity, which the client prints as 1 and 125 zeros; RED from this patch: the live cell sees the run succeed where it must exit 5"
+    scope: source
+    engines:
+      oracle:
+        switch: oracle-number-infinity-delivered-finite
+        cells:
+          - an_oracle_number_infinity_is_refused_by_code_and_to_char_delivers_the_server_text
+      postgres:
+        na: "a PostgreSQL numeric or float8 holds Infinity and NaN as distinct values, so no finite text stands for them"
+      mysql:
+        na: "MySQL DECIMAL and DOUBLE hold no infinity"
+      mssql:
+        na: "SQL Server decimal and float hold no infinity"
+      mongo:
+        na: "a document source has no Oracle NUMBER column"
+  - name: oracle-interval-ns-truncated
+    class: "an Oracle INTERVAL DAY TO SECOND with a sub-microsecond fraction is delivered truncated to microseconds with exit 0"
+    history: "type matrix class ORACLE_INTERVAL_DS_NS (2026-11-16): the converter wrote microseconds and a per-column warning; RED from this patch: the live cell sees the run succeed where it must exit 5 and the lib cell sees the nanoseconds dropped"
+    scope: source
+    engines:
+      oracle:
+        switch: oracle-interval-ns-truncated
+        cells:
+          - an_oracle_interval_with_nanoseconds_is_refused_by_code_and_to_char_delivers_the_text
+          - "lib:a_sub_microsecond_interval_is_refused_with_its_column_and_remedy"
+      postgres:
+        na: "a PostgreSQL interval is microsecond-exact, so no value has a sub-microsecond fraction to drop"
+      mysql:
+        na: "MySQL has no interval column type"
+      mssql:
+        na: "SQL Server has no interval column type"
+      mongo:
+        na: "a document source has no interval column type"
+
   - name: batch-runner-stores-state-before-the-cross-shape-refusal
     class: a batch run onto a prefix that holds another shape's manifest stores its plan, anchor or cursor before the refusal, so a refused run leaves that resume point behind
     history: "known defect in tests/offline/rig_oracle_ratchet.rs since the cross-shape guard landed: a parallel chunk-checkpoint run refused for a CDC manifest left an in_progress chunk run with pending tasks; the keyset runners (every engine, MongoDB included) opened their guarded frame after their resume run id, ranges or anchor were written, and a skip_empty run with no rows never opened it; on main and on v0.32.2"
@@ -6045,22 +6137,56 @@ seeds:
       oracle:
         na: "Oracle LogMiner rows are decoded through typed column lists; there is no text line to cut"
 
-  - name: pg-bit-literal-delivered-as-server-text
-    class: "the PostgreSQL CDC reader delivers a bit or bit varying column as the decoder's literal `B'110'` where the server's text is `110`, with exit 0 (batch refuses these columns with RIVET_TYPE_UNSAFE_MAPPING)"
-    history: "found 2026-11-10 hunting the untrusted parse surface (axis 5, P2); RED on main: the run exits 0 and delivers B'110', rig oracle VALUES differing column(s) flags, vb"
+  - name: cdc-bit-literal-delivered-as-server-text
+    class: "the PostgreSQL CDC reader delivers a bit or bit varying column as the decoder's literal `B'110'` where the server's text, which batch delivers, is `110`"
+    history: "owner 2026-11-21 (batch and CDC must not disagree about a value); the stream refused the type before this PR, the seed re-introduces the decoder's literal as the delivered value"
     scope: source
     engines:
       postgres:
-        switch: pg-bit-literal-delivered-as-server-text
-        cells: [pg_cdc_a_bit_column_is_refused_not_delivered_as_the_decoders_literal, pg_cdc_a_bit_column_refusal_precedes_the_snapshot_and_leaves_only_a_failure_record, pg_cdc_a_bit_column_refusal_remedy_delivers_the_rows_the_refused_run_held, "lib:the_catalog_check_names_exactly_the_bit_typed_columns"]
+        switch: cdc-bit-literal-delivered-as-server-text
+        cells: [postgres_batch_and_cdc_deliver_bit_strings_alike, "lib:a_bit_literal_is_unwrapped_to_the_servers_text"]
       mysql:
-        na: "MySQL BIT(n) is decoded from a typed binlog cell as an integer (mysql type_bit cell), never read from a decoder's text literal"
+        na: "MySQL BIT(n) is decoded from a typed binlog cell as an integer, never read from a decoder's text literal"
       mssql:
         na: "SQL Server BIT is a typed driver column, never read from a decoder's text literal"
       mongo:
         na: "MongoDB has no bit string type and change events are BSON documents"
       oracle:
         na: "Oracle has no bit string type and its change rows are typed LogMiner columns"
+
+  - name: cdc-array-text-parsed-as-list
+    class: "the PostgreSQL CDC reader parses an array of a type batch delivers as the server's text (inet[], cidr[], macaddr[], point[], int4range[], tstzrange[], bit[]) into a list its text column cannot hold, so the stream refuses a column batch delivers"
+    history: "owner 2026-11-21 (batch and CDC must not disagree about a value); RED on #1144 head: the stream stopped with RIVET_SOURCE_CDC_CELL_UNSUPPORTED on eight array columns batch delivers"
+    scope: source
+    engines:
+      postgres:
+        switch: cdc-array-text-parsed-as-list
+        cells: [postgres_batch_and_cdc_deliver_every_text_type_alike, postgres_batch_and_cdc_deliver_bit_strings_alike, "lib:an_array_label_mapped_to_text_keeps_the_servers_literal"]
+      mysql:
+        na: "MySQL has no array column type"
+      mssql:
+        na: "SQL Server has no array column type"
+      mongo:
+        na: "a MongoDB array is a BSON value inside the document column, never a typed array column"
+      oracle:
+        na: "an Oracle collection type is refused at the mining schema, never read as an array literal"
+
+  - name: oracle-cdc-number-infinity-uncoded
+    class: "an Oracle CDC run that reads NUMBER infinity (LogMiner `~`) stops as an unreadable cell under RIVET_SOURCE_CDC_CELL_UNSUPPORTED where batch refuses the same value as RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+    history: "owner 2026-11-21 (batch and CDC must not disagree about a value); RED on #1144 head: oracle probe, FLOAT 9.99..E125 mined as `~`, batch VALUE_UNREPRESENTABLE, cdc CELL_UNSUPPORTED"
+    scope: source
+    engines:
+      oracle:
+        switch: oracle-cdc-number-infinity-uncoded
+        cells: [oracle_batch_and_cdc_deliver_number_and_float_specials_alike, "lib:only_a_number_kind_with_the_infinity_text_is_number_infinity"]
+      postgres:
+        na: "PostgreSQL has no Oracle NUMBER; its float infinity and NaN are graded by postgres_batch_and_cdc_deliver_float_specials_alike"
+      mysql:
+        na: "MySQL cannot store NUMBER infinity; DECIMAL and FLOAT hold no infinity"
+      mssql:
+        na: "SQL Server cannot store infinity in a float or decimal column"
+      mongo:
+        na: "a MongoDB change is a BSON document read whole, no per-column infinity text"
 
   - name: load-key-landed-type-not-admitted
     class: "the keyed load admits its order and key columns by name alone, so an incremental cursor that lands as text (an Oracle bare NUMBER) is ranked as a string by the current-state view (99 stays after 100), and a primary-key column the source declares finer than a microsecond (an MSSQL datetime2(7)) lands at microseconds and collapses rows into one, both with exit 0"
@@ -6219,24 +6345,71 @@ seeds:
       mongo:
         na: "a MongoDB date has no zero or partial value: the type claim is exact and is not changed"
 
-  - name: mysql-cdc-int-bool-override-any-nonzero-true
-    class: "a MySQL integer column (SMALLINT, INT, BIGINT, BIGINT UNSIGNED) declared `bool` in `columns:` is delivered by a stream as true for every value but 0, where the batch export refuses any value outside 0 and 1: 2, 300 or 18446744073709551615 become true with exit 0"
-    history: "2026-11-18 - issue #995 remainder: the batch path (build_bool_strict) already refused; RED on main in the MySQL CDC cell (a SMALLINT or TINYINT holding 2 or 300 under `columns: {i: bool}` delivered, exit 0); fixed by MysqlCellFix::FlagInt chosen by mysql_flag_fix"
+  - name: cdc-bool-cell-any-nonzero-true
+    class: "a stream cell read as a boolean turns every integer but 0 into true: a column declared `bool` in `columns:` over an integer (PostgreSQL integer, SQL Server int, Oracle NUMBER, MySQL integer or TINYINT(1)) delivers 2, 5, -1 or 2147483647 as true with exit 0, where the batch export refuses a value outside 0 and 1"
+    history: "2026-11-21 - RED on main in every stream cell but MySQL (a PostgreSQL, SQL Server or Oracle `v` holding 5 under `columns: {v: bool}` delivered true, exit 0); the MySQL-only mysql_flag_fix (2026-11-18 issue #995 remainder, 2026-11-20 owner decision MYSQL_TINYINT_BOOL) is removed and the one rule, flag_value in src/source/cdc/value.rs::bool_value, is the cell builder's for every engine"
+    scope: source
+    engines:
+      postgres:
+        switch: cdc-bool-cell-any-nonzero-true
+        cells:
+          - an_integer_that_is_not_a_flag_is_refused_in_cdc_never_turned_into_true_postgres
+          - "lib:a_bool_override_over_an_integer_that_is_not_a_flag_is_refused_on_every_engine"
+      mysql:
+        switch: cdc-bool-cell-any-nonzero-true
+        cells:
+          - an_integer_that_is_not_a_flag_is_refused_in_cdc_never_turned_into_true_mysql
+          - a_flag_column_outside_zero_and_one_is_refused_in_cdc_never_turned_into_true_mysql
+          - "lib:a_boolean_is_a_flag_or_refused_by_code_for_signed_and_unsigned_wire_ints"
+      mssql:
+        switch: cdc-bool-cell-any-nonzero-true
+        cells:
+          - an_integer_that_is_not_a_flag_is_refused_in_cdc_never_turned_into_true_mssql
+          - "lib:a_bool_override_over_an_integer_that_is_not_a_flag_is_refused_on_every_engine"
+      oracle:
+        switch: cdc-bool-cell-any-nonzero-true
+        cells:
+          - an_integer_that_is_not_a_flag_is_refused_in_cdc_never_turned_into_true_oracle
+          - "lib:a_bool_override_over_an_integer_that_is_not_a_flag_is_refused_on_every_engine"
+      mongo:
+        na: "a MongoDB change row is two text cells, and no integer is built as a boolean"
+
+  - name: mysql-flag-outside-zero-one-delivered-true
+    class: "a MySQL TINYINT(1) read as a boolean is delivered by a batch export as true for every value but 0 and 1: 2, 5, -1, 127 or 255 become true with exit 0 where a declared `bool` over a wider integer already refused"
+    history: "2026-11-20 - owner decision MYSQL_TINYINT_BOOL: TINYINT(1) stays Boolean and a value outside 0 and 1 is refused RIVET_SOURCE_VALUE_UNREPRESENTABLE; RED on main in the MySQL batch cell (TINYINT(1) holding 5 delivered, exit 0); fixed by removing the native_flag bypass so every Boolean column goes through arrow_convert::build_flags"
     scope: source
     engines:
       mysql:
-        switch: mysql-cdc-int-bool-override-any-nonzero-true
+        switch: mysql-flag-outside-zero-one-delivered-true
         cells:
-          - an_integer_that_is_not_a_flag_is_refused_in_cdc_never_turned_into_true_mysql
-          - "lib:an_integer_under_a_bool_override_is_a_flag_or_refused"
+          - a_flag_column_outside_zero_and_one_is_refused_never_turned_into_true_mysql
+          - "lib:a_flag_outside_zero_and_one_is_refused_by_code_never_delivered_as_true"
       postgres:
-        na: "an integer is not read as a flag on PostgreSQL: the override is refused at plan time (lib:an_integer_is_read_as_a_flag_only_where_the_engine_checks_each_value)"
+        na: "PostgreSQL boolean is a true boolean type and an integer under a bool override is refused at plan time (lib:an_integer_is_read_as_a_flag_only_where_the_engine_checks_each_value)"
       mssql:
-        na: "an integer is not read as a flag on SQL Server: the override is refused at plan time (lib:an_integer_is_read_as_a_flag_only_where_the_engine_checks_each_value)"
+        na: "SQL Server bit holds 0 or 1 only and an integer under a bool override is refused at plan time (lib:an_integer_is_read_as_a_flag_only_where_the_engine_checks_each_value)"
       oracle:
-        na: "an integer is not read as a flag on Oracle: the override is refused at plan time (lib:an_integer_is_read_as_a_flag_only_where_the_engine_checks_each_value)"
+        na: "Oracle has no boolean column type and an integer under a bool override is refused at plan time (lib:an_integer_is_read_as_a_flag_only_where_the_engine_checks_each_value)"
       mongo:
-        na: "a MongoDB change row is two text cells, and the MySQL cell fix does not run"
+        na: "a MongoDB value is read as a BSON bool and no integer is turned into a flag"
+
+  - name: mysql-checksum-flag-any-nonzero
+    class: "the value checksum of a MySQL flag column reads a cell by its own any-nonzero rule while the delivery reads 0 and 1 only, so a value the delivery refuses (2, 5, -1, 255, BIT 5) is checksummed as true and integrity is graded against a value the file does not hold"
+    history: "2026-11-20 - MysqlCellSource::boolean read Int and UInt as != 0 and every text cell through bit_bytes_to_u64 != 0 (text 0 was true); RED on main in a_flag_cell_is_one_value_to_the_checksum_and_to_the_delivery; fixed by flag_int and flag_bool, the one rule build_flags, the checksum and the stream read"
+    scope: source
+    engines:
+      mysql:
+        switch: mysql-checksum-flag-any-nonzero
+        cells:
+          - "lib:a_flag_cell_is_one_value_to_the_checksum_and_to_the_delivery"
+      postgres:
+        na: "PostgreSQL boolean is a true boolean read by the driver as bool on both sides, so there is no second rule to disagree"
+      mssql:
+        na: "SQL Server bit is read as ColumnData::Bit on both sides, so there is no second rule to disagree"
+      oracle:
+        na: "an Oracle source has no value checksum cell source, and its boolean is read by the driver as bool"
+      mongo:
+        na: "a MongoDB value is a BSON bool and no integer is turned into a flag"
 
   - name: cursor-column-admitted-at-plan
     class: "the incremental plan accepts any cursor_column: a nullable one exports its NULL-cursor rows on run 1 and never again (later NULL-cursor inserts are lost with exit 0), and a type the cursor cannot render (boolean, time, binary, array, a timestamp unit other than microsecond or nanosecond) is a WARN plus a full re-export every run"
@@ -6784,6 +6957,26 @@ seeds:
           - "lib:the_legs_check_admits_are_the_pending_baselines_and_nothing_else"
           - "lib:check_plans_the_pending_baseline_leg_of_a_cdc_export_and_only_that"
 
+  - name: mysql-bit64-signed-delivery
+    class: "a native type resolves into a common kind whose value domain is narrower than the type's, so the values outside it stop the run instead of reaching the file"
+    history: "2026-11-20 - type matrix MYSQL_BIT_TOPBIT_REFUSED: a MySQL BIT(64) with bit 63 set was refused RIVET_SOURCE_VALUE_UNREPRESENTABLE because BIT(n) was delivered as Int64 for every n; fixed by BIT_INT64_MAX_WIDTH = 63, BIT(64) is delivered as UInt64"
+    scope: source
+    switch: mysql-bit64-signed-delivery
+    engines:
+      postgres:
+        na: "a PostgreSQL bit(n) is delivered as its bit string; the MySQL BIT mapping does not run"
+      mysql:
+        cells:
+          - mysql_batch_and_cdc_deliver_every_ledger_row_alike
+          - "lib:a_bit64_is_delivered_unsigned_so_every_value_is_kept"
+          - "lib:a_bit64_value_with_the_top_bit_builds_in_an_unsigned_column"
+      mssql:
+        na: "SQL Server bit is a one-bit boolean; the MySQL BIT mapping does not run"
+      mongo:
+        na: "a MongoDB document has no BIT column; the MySQL BIT mapping does not run"
+      oracle:
+        na: "Oracle has no BIT type; the MySQL BIT mapping does not run"
+
   - name: bq-ns-zoned-timestamp-int64
     class: "a nanosecond zoned timestamp is declared TIMESTAMP in the BigQuery load, so BigQuery reads the Parquet nanosecond integers as microseconds (values 1000x wrong) or rejects the load, where the naive nanosecond timestamp is declared INT64"
     history: "2026-11-20 - SQL Server datetimeoffset(7) to BigQuery: 1970-01-02 03:04:05 read back as 1973-02-01T20:03:20Z and five edges were rejected with RIVET_LOAD_WAREHOUSE_REJECTED (cloud leg of the type matrix); fixed by the INT64 arm for a zoned nanosecond timestamp in the BigQuery target resolver"
@@ -6797,3 +6990,144 @@ seeds:
         na: "the seed edits the BigQuery arm of src/types/target.rs, which only a BigQuery load resolves; Snowflake resolves its own column types"
       clickhouse:
         na: "the seed edits the BigQuery arm of src/types/target.rs, which only a BigQuery load resolves; ClickHouse resolves its own column types (DateTime64(9, UTC) holds the nanosecond zoned timestamp)"
+
+  - name: mssql-time7-lands-at-microseconds
+    class: "a SQL Server time(7) (the bare `time` default) is delivered as Time64(µs) and its 100ns digit is dropped, on batch and CDC, exit 0"
+    history: "type matrix class MSSQL_SCALE_SEVEN_TRUNC (known_red 2026-11-16, 68 pairs across ClickHouse, BigQuery and Snowflake); the twin of fine-timestamp-lands-at-microseconds (datetime2(7), #1083); owner decision 2026-11-20: fix, deliver Time64(ns)"
+    scope: source
+    switch: mssql-time7-lands-at-microseconds
+    engines:
+      mssql:
+        cells: ["lib:a_scale_seven_time_is_nanoseconds_and_keeps_its_100ns_tick", mssql_batch_and_cdc_deliver_every_ledger_row_alike]
+      postgres:
+        na: "PostgreSQL time holds microseconds at most, so no digit is lost"
+      mysql:
+        na: "MySQL TIME holds microseconds at most, so no digit is lost"
+      oracle:
+        na: "Oracle has no TIME type; a time of day is a DATE or TIMESTAMP column"
+      mongo:
+        na: "BSON has no time-of-day type, so no MongoDB value is a TIME column"
+  - name: mssql-money-decoded-as-f64
+    class: "a SQL Server MONEY or SMALLMONEY past 2^53 scaled units (|value| of about 9.007e11 and more) is carried as an f64 and so is refused by code (batch, RIVET_SOURCE_VALUE_UNREPRESENTABLE) or stopped in the stream (CDC, RIVET_SOURCE_CDC_CELL_UNSUPPORTED) instead of delivered exact"
+    history: "type matrix class MSSQL_MONEY_BIG (known_red 2026-11-16, MONEY Decimal(19,4) and SMALLMONEY Decimal(10,4) across ClickHouse, BigQuery and Snowflake); fixed 2026-11-21 by decoding money as Numeric at scale 4 in the tiberius pin"
+    scope: source
+    switch: mssql-money-decoded-as-f64
+    engines:
+      mssql:
+        cells: ["lib:money_extremes_are_delivered_exact", money_and_smallmoney_keep_every_digit_over_their_whole_range, mssql_money_values_survive_batch_and_cdc]
+      postgres:
+        na: "PostgreSQL batch and CDC both deliver a money column as the server's text, so neither reaches the SQL Server money decode"
+      mysql:
+        na: "MySQL has no MONEY type, so no MySQL column reaches the SQL Server money decode"
+      oracle:
+        na: "Oracle has no MONEY type, so no Oracle column reaches the SQL Server money decode"
+      mongo:
+        na: "BSON has no MONEY type, so no MongoDB value reaches the SQL Server money decode"
+  - name: ch-date-footer-guard-skips-dates
+    class: "the ClickHouse load reads the footer statistics of a timestamp column only, so a Date32 column is never checked: 2300-01-01 is stored as 2299-12-31 silently, and a date before 1900-01-01 or after 2300-01-01 is refused by ClickHouse as RIVET_LOAD_WAREHOUSE_REJECTED instead of by rivet's coded range refusal"
+    history: "owner-approved 2026-11-20 (DEFECT_CH_DATE_CLAMP); RED on main 2026-11-20 by the type matrix (PostgreSQL, MySQL, SQL Server DATE 2300-01-01 read back 2299-12-31) and by the offline footer cell"
+    scope: target
+    switch: ch-date-footer-guard-skips-dates
+    engines:
+      clickhouse:
+        cells:
+          - a_date_clickhouse_cannot_hold_is_refused_not_clamped
+          - "lib:a_date_part_is_refused_only_past_either_end_of_date32"
+          - "lib:a_date_past_either_end_of_a_range_is_named_by_its_day"
+          - "lib:a_date_list_is_checked_by_its_own_leaf"
+      bigquery:
+        na: "the seed edits the footer guard of the ClickHouse load (temporal_outside), which only a ClickHouse load runs; BigQuery grades its own column types"
+      snowflake:
+        na: "the seed edits the footer guard of the ClickHouse load (temporal_outside), which only a ClickHouse load runs; Snowflake grades its own column types"
+
+  - name: bq-load-skips-range-guard
+    class: "a BigQuery load never reads the footer of a staged part for a date or timestamp outside BigQuery's 0001-01-01 to 9999-12-31, so a part holding one reaches the warehouse and the whole load job fails as RIVET_LOAD_WAREHOUSE_REJECTED instead of being refused by rivet's coded range refusal before any write"
+    history: "owner brief 2026-11-20 (MYSQL_DATE_ZERO_BQ_RAW); RED on main 2026-11-20 by the type matrix (MySQL DATE 0000-01-01 staged raw, BigQuery rejected the job)"
+    scope: target
+    switch: bq-load-skips-range-guard
+    engines:
+      bigquery:
+        cells:
+          - "lib:a_part_outside_bigquery_range_is_refused_before_the_warehouse_write"
+          - "lib:a_date_past_either_end_of_bigquery_date_is_refused_with_its_day"
+          - "lib:a_timestamp_past_either_end_of_bigquery_timestamp_is_refused"
+      clickhouse:
+        na: "the seed edits the orchestrated pre-write check (refuse_parts_outside_ranges), which gives ClickHouse no ranges: its own loader reads its footers (checked_part_rows)"
+      snowflake:
+        na: "the seed edits the orchestrated pre-write check (refuse_parts_outside_ranges), which gives Snowflake no ranges: Snowflake holds every year and delivers it as a form"
+
+  - name: pg-unmapped-type-refused
+    class: "a PostgreSQL type with no Arrow mapping (network, bit, money, geometric, range, tsvector, OID alias, composite, extension type) is refused by a batch run with RIVET_TYPE_UNSAFE_MAPPING where it is delivered as the server's text"
+    history: "owner decision 2026-11-21 (DEFECT_PG_UNMAPPED_TYPE); RED on main 2026-11-21 by live_pg_server_text: every mode exits 5 over the first unmapped column"
+    scope: source
+    engines:
+      postgres:
+        switch: pg-unmapped-type-refused
+        cells:
+          - a_table_of_every_unmapped_type_is_delivered_as_server_text_full_postgres
+          - a_table_of_every_unmapped_type_is_delivered_as_server_text_keyset_postgres
+          - a_table_of_every_unmapped_type_is_delivered_as_server_text_range_postgres
+          - a_table_of_every_unmapped_type_is_delivered_as_server_text_incremental_postgres
+      mysql:
+        na: "the seed edits the PostgreSQL column classification (pg_server_text); the other sources map their own types in their own tables"
+      mssql:
+        na: "the seed edits the PostgreSQL column classification (pg_server_text); the other sources map their own types in their own tables"
+      mongo:
+        na: "the seed edits the PostgreSQL column classification (pg_server_text); the other sources map their own types in their own tables"
+      oracle:
+        na: "the seed edits the PostgreSQL column classification (pg_server_text); the other sources map their own types in their own tables"
+
+  - name: pg-inet-host-text-gains-a-mask
+    class: "a PostgreSQL inet column holding a host address is delivered as `10.1.2.3/32` where the server's own text is `10.1.2.3`, because inet cast to text appends the full mask"
+    history: "found 2026-11-21 while writing live_pg_server_text: the server's inet::text is not inet_out; RED from this switch by the same cells"
+    scope: source
+    engines:
+      postgres:
+        switch: pg-inet-host-text-gains-a-mask
+        cells:
+          - a_table_of_every_unmapped_type_is_delivered_as_server_text_full_postgres
+          - a_table_of_every_unmapped_type_is_delivered_as_server_text_keyset_postgres
+          - a_table_of_every_unmapped_type_is_delivered_as_server_text_range_postgres
+          - a_table_of_every_unmapped_type_is_delivered_as_server_text_incremental_postgres
+      mysql:
+        na: "the seed edits the PostgreSQL text projection of an inet column; the other sources have no inet type"
+      mssql:
+        na: "the seed edits the PostgreSQL text projection of an inet column; the other sources have no inet type"
+      mongo:
+        na: "the seed edits the PostgreSQL text projection of an inet column; the other sources have no inet type"
+      oracle:
+        na: "the seed edits the PostgreSQL text projection of an inet column; the other sources have no inet type"
+
+  - name: decimal-float8-override-rounded
+    class: "a source decimal declared `float8` in `columns:` is delivered rounded to the nearest double with exit 0: MySQL DECIMAL, SQL Server money and Oracle NUMBER in batch, and decimal text on every change stream"
+    history: "a verifier's probes 2026-11-21: money 922337203685477.5807 became 922337203685477.6250, NUMBER(38) 2^53+1 became 2^53; RED on main 2026-11-21 (lib: decimal_text_is_a_float8_only_when_the_float_prints_it_back, a_float64_override_over_money_refuses_a_value_the_float_would_round, decimal_text_a_float8_would_round_is_refused_by_code)"
+    scope: source
+    switch: decimal-float8-override-rounded
+    engines:
+      postgres:
+        na: "PostgreSQL refuses a numeric declared float8 at check and at run (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH), so no decimal reaches the float8 builder"
+      mysql:
+        cells: [a_decimal_under_float8_is_delivered_or_refused_never_rounded_mysql, "lib:decimal_text_is_a_float8_only_when_the_float_prints_it_back", "lib:decimal_text_a_float8_would_round_is_refused_by_code"]
+      mssql:
+        cells: [a_money_under_float8_is_delivered_or_refused_never_rounded_mssql, "lib:a_float64_override_over_money_refuses_a_value_the_float_would_round", "lib:decimal_text_a_float8_would_round_is_refused_by_code"]
+      mongo:
+        na: "a MongoDB field is read into its one `document` column; no `columns:` override retypes a decimal there"
+      oracle:
+        cells: [a_number_under_float8_is_delivered_or_refused_never_rounded_oracle, "lib:decimal_text_a_float8_would_round_is_refused_by_code"]
+
+  - name: decimal-float8-override-reported-exact
+    class: "`rivet check` labels a `float8` override over a source decimal of precision above 15 as fidelity `exact` although a value past 15 significant digits is rounded or refused at run"
+    history: "a verifier's probe 2026-11-21: override_is_read(Mssql, money, decimal(19,4), float64) is true and the mapping reads exact; RED on main 2026-11-21 (lib: narrows_flags_a_decimal_float8_override_past_fifteen_digits_as_lossy)"
+    scope: source
+    switch: decimal-float8-override-reported-exact
+    engines:
+      postgres:
+        na: "PostgreSQL refuses a numeric declared float8 at check, so no `float8` override over a decimal is labelled"
+      mysql:
+        cells: ["lib:narrows_flags_a_decimal_float8_override_past_fifteen_digits_as_lossy", "lib:a_float8_override_over_a_wide_decimal_is_reported_lossy"]
+      mssql:
+        cells: ["lib:narrows_flags_a_decimal_float8_override_past_fifteen_digits_as_lossy", "lib:a_float8_override_over_a_wide_decimal_is_reported_lossy"]
+      mongo:
+        na: "a MongoDB field is read into its one `document` column; no `columns:` override retypes a decimal there"
+      oracle:
+        cells: ["lib:narrows_flags_a_decimal_float8_override_past_fifteen_digits_as_lossy", "lib:a_float8_override_over_a_wide_decimal_is_reported_lossy"]

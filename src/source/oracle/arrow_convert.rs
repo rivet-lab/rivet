@@ -15,8 +15,9 @@ use super::Ora;
 use super::kind::{OraKind, native_label};
 use crate::error::Result;
 use crate::types::decimal::decimal_str_to_scaled_i128;
+use crate::types::kind::CommonKind;
 use crate::types::{
-    ColumnOverrides, RivetType, SourceColumn, TextForm, TimeUnit, TypeMapping, build_arrow_field,
+    ColumnOverrides, RivetType, SourceColumn, TextForm, TypeMapping, build_arrow_field,
 };
 
 /// Warning attached to a bare `NUMBER` column `name` (no declared precision) exported as exact text.
@@ -28,10 +29,6 @@ pub(super) fn bare_number_warning(name: &str) -> String {
          the values need, e.g. \"decimal(38,10)\""
     )
 }
-
-/// Warning attached to an `INTERVAL DAY TO SECOND(7..9)` column truncated to microseconds.
-pub(super) const INTERVAL_NS_WARNING: &str = "INTERVAL DAY TO SECOND(7..9) → microseconds: the sub-microsecond \
-     digits are truncated; a fractional precision of 0..6 is exact.";
 
 /// The refusal for an undeclared `TIMESTAMP(7..9)`, naming the two declarations (`zoned` picks the `_tz` forms).
 pub(super) fn timestamp_ns_refusal(name: &str, zoned: bool) -> String {
@@ -72,50 +69,73 @@ pub(super) fn oracle_type_to_rivet(
     )
 }
 
-/// The Rivet type of a re-projected column of `kind`, declared as `native`; `label` names it when unmapped.
-fn autodetect(kind: OraKind, native: &str, precision: u8, scale: i8, label: &str) -> RivetType {
-    match kind {
+/// The common kind a re-projected column of `kind`, declared as `native`, is read as, or `None` for a type this engine alone carries.
+fn oracle_common_kind(kind: OraKind, native: &str, precision: u8, scale: i8) -> Option<CommonKind> {
+    Some(match kind {
         _ if native.starts_with("timestamp_tz") || native.starts_with("timestamp_ltz") => {
-            RivetType::Timestamp {
-                unit: TimeUnit::Microsecond,
-                timezone: Some("UTC".into()),
-            }
+            CommonKind::Utc
         }
-        _ if native.starts_with("interval") => RivetType::Interval,
-        _ if native == "json" => RivetType::Json,
-        OraKind::Number => number_type(precision, scale),
-        OraKind::BinaryFloat => RivetType::Float32,
-        OraKind::BinaryDouble => RivetType::Float64,
-        OraKind::Boolean => RivetType::Bool,
-        OraKind::Date | OraKind::Timestamp => RivetType::Timestamp {
-            unit: TimeUnit::Microsecond,
-            timezone: None,
-        },
-        OraKind::Text | OraKind::Clob => RivetType::String,
-        OraKind::Raw | OraKind::Blob => RivetType::Binary,
-        _ => RivetType::Unsupported {
-            native_type: label.to_string(),
-            reason: format!(
-                "Oracle column type {label} has no Rivet mapping; select a convertible \
-                 expression of it in a `query:`, or drop it"
-            ),
-        },
+        _ if native.starts_with("interval") => CommonKind::Interval,
+        _ if native == "json" => CommonKind::Json,
+        OraKind::Number => number_kind(precision, scale),
+        OraKind::BinaryFloat => CommonKind::F32,
+        OraKind::BinaryDouble => CommonKind::F64,
+        OraKind::Boolean => CommonKind::Bool,
+        OraKind::Date | OraKind::Timestamp => CommonKind::Naive,
+        OraKind::Text | OraKind::Clob => CommonKind::Text,
+        OraKind::Raw | OraKind::Blob => CommonKind::Binary,
+        _ => return None,
+    })
+}
+
+/// The type of a column this engine alone carries: `Unsupported` named `label`.
+fn oracle_engine_type(label: &str) -> RivetType {
+    RivetType::Unsupported {
+        native_type: label.to_string(),
+        reason: format!(
+            "Oracle column type {label} has no Rivet mapping; select a convertible \
+             expression of it in a `query:`, or drop it"
+        ),
     }
 }
 
-/// NUMBER(p,s): small integers, then `Decimal`; bare `NUMBER`/`FLOAT` as exact text.
-fn number_type(precision: u8, scale: i8) -> RivetType {
-    let decimal = |precision: u8, scale: i8| RivetType::Decimal { precision, scale };
+/// The Rivet type of a re-projected column of `kind`, declared as `native`; `label` names it when unmapped.
+fn autodetect(kind: OraKind, native: &str, precision: u8, scale: i8, label: &str) -> RivetType {
+    match oracle_common_kind(kind, native, precision, scale) {
+        Some(common) => common
+            .rivet_type()
+            .unwrap_or_else(|| number_decimal(precision, scale)),
+        None => oracle_engine_type(label),
+    }
+}
+
+/// NUMBER(p,s): small integers, then `Dec`; a bare NUMBER, a FLOAT (scale -127) and what no fixed-scale decimal holds as text.
+fn number_kind(precision: u8, scale: i8) -> CommonKind {
     match (precision, scale) {
-        (0, _) | (_, -127) => RivetType::String,
-        (1..=9, 0) => RivetType::Int32,
-        (10..=18, 0) => RivetType::Int64,
+        (0, _) => CommonKind::Text,
+        (1..=9, 0) => CommonKind::I32,
+        (10..=18, 0) => CommonKind::I64,
         (p, s) if s.is_negative() => match p.checked_add(s.unsigned_abs()).filter(|w| *w <= 38) {
-            Some(w) => decimal(w, 0),
-            None => RivetType::String,
+            Some(_) => CommonKind::Dec,
+            None => CommonKind::Text,
         },
-        (_, s) if s > 38 => RivetType::String,
-        (p, s) => decimal(p.max(s.unsigned_abs()), s),
+        (_, s) if s > 38 => CommonKind::Text,
+        _ => CommonKind::Dec,
+    }
+}
+
+/// The `Decimal` a NUMBER of kind `Dec` is delivered as: a negative scale widens the precision into an integer.
+fn number_decimal(precision: u8, scale: i8) -> RivetType {
+    if scale.is_negative() {
+        RivetType::Decimal {
+            precision: precision + scale.unsigned_abs(),
+            scale: 0,
+        }
+    } else {
+        RivetType::Decimal {
+            precision: precision.max(scale.unsigned_abs()),
+            scale,
+        }
     }
 }
 
@@ -160,7 +180,7 @@ fn deliver_number_text(
     scale: i8,
 ) -> TypeMapping {
     if kind == OraKind::Number
-        && number_type(precision, scale) == RivetType::String
+        && number_kind(precision, scale) == CommonKind::Text
         && seeded!("number-text-without-its-label", false, true)
     {
         mapping.with_text(TextForm::DecimalPlain)
@@ -174,8 +194,7 @@ fn with_oracle_warning(mapping: TypeMapping, bare_number: bool, sub_us: bool) ->
     if bare_number {
         let name = mapping.column_name.clone();
         mapping.with_warning(bare_number_warning(&name))
-    } else if sub_us {
-        let timestamp = mapping.source_native_type.starts_with("timestamp");
+    } else if sub_us && mapping.source_native_type.starts_with("timestamp") {
         let zoned = mapping.source_native_type.starts_with("timestamp_tz")
             || mapping.source_native_type.starts_with("timestamp_ltz");
         let name = mapping.column_name.clone();
@@ -183,15 +202,11 @@ fn with_oracle_warning(mapping: TypeMapping, bare_number: bool, sub_us: bool) ->
             fidelity: crate::types::TypeFidelity::Lossy,
             ..mapping
         };
-        if timestamp {
-            seeded!(
-                "oracle-timestamp-ns-undeclared-truncated",
-                lossy.with_warning(timestamp_ns_refusal(&name, zoned)),
-                lossy.with_refusal(timestamp_ns_refusal(&name, zoned))
-            )
-        } else {
-            lossy.with_warning(INTERVAL_NS_WARNING)
-        }
+        seeded!(
+            "oracle-timestamp-ns-undeclared-truncated",
+            lossy.with_warning(timestamp_ns_refusal(&name, zoned)),
+            lossy.with_refusal(timestamp_ns_refusal(&name, zoned))
+        )
     } else {
         mapping
     }
@@ -255,17 +270,22 @@ fn schema_from_mappings(mappings: Vec<TypeMapping>, overrides: &ColumnOverrides)
 }
 
 /// An Oracle interval cell as the ISO 8601 duration rivet writes for every engine.
-fn interval_iso(row: &Row, idx: usize, kind: OraKind) -> Result<Option<String>> {
+fn interval_iso(row: &Row, idx: usize, kind: OraKind, column: &str) -> Result<Option<String>> {
     Ok(match kind {
-        OraKind::IntervalDs => row.get::<Option<OracleIntervalDS>>(idx).ora()?.map(|v| {
-            interval_ds_iso(
-                v.days(),
-                v.hours(),
-                v.minutes(),
-                v.seconds(),
-                v.nanoseconds(),
-            )
-        }),
+        OraKind::IntervalDs => row
+            .get::<Option<OracleIntervalDS>>(idx)
+            .ora()?
+            .map(|v| {
+                interval_ds_iso(
+                    column,
+                    v.days(),
+                    v.hours(),
+                    v.minutes(),
+                    v.seconds(),
+                    v.nanoseconds(),
+                )
+            })
+            .transpose()?,
         _ => row
             .get::<Option<OracleIntervalYM>>(idx)
             .ora()?
@@ -273,13 +293,29 @@ fn interval_iso(row: &Row, idx: usize, kind: OraKind) -> Result<Option<String>> 
     })
 }
 
-/// ISO 8601 for a DAY TO SECOND interval's fields, truncated to microseconds.
-fn interval_ds_iso(days: i32, hours: i8, minutes: i8, seconds: i8, nanos: i32) -> String {
+/// ISO 8601 for a DAY TO SECOND interval's fields, or a coded refusal when a sub-microsecond digit would be dropped.
+fn interval_ds_iso(
+    column: &str,
+    days: i32,
+    hours: i8,
+    minutes: i8,
+    seconds: i8,
+    nanos: i32,
+) -> Result<String> {
+    if nanos % 1_000 != 0 && seeded!("oracle-interval-ns-truncated", false, true) {
+        crate::rivet_bail!(
+            crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+            "oracle: column `{column}` holds an INTERVAL DAY TO SECOND with a sub-microsecond \
+             fraction ({nanos} ns): rivet writes microseconds and refuses rather than dropping \
+             the last digits. Select `TO_CHAR({column}) AS {column}` in the query to export the \
+             exact text."
+        );
+    }
     let us = i64::from(hours) * 3_600_000_000
         + i64::from(minutes) * 60_000_000
         + i64::from(seconds) * 1_000_000
         + i64::from(nanos) / 1_000;
-    crate::source::postgres::pg_interval_to_iso8601(0, days, us)
+    Ok(crate::source::postgres::pg_interval_to_iso8601(0, days, us))
 }
 
 /// ISO 8601 for a YEAR TO MONTH interval, straight from its fields (YEAR(9) overflows i32 months).
@@ -387,6 +423,51 @@ fn flagged_empty(row: &Row, flag: Option<usize>) -> Result<bool> {
     }
 }
 
+/// Whether `text` is what the client prints for Oracle's NUMBER infinity: `-` and 126 zeros, or `1` and 125 zeros.
+pub(super) fn is_number_infinity_text(text: &str) -> bool {
+    let (negative, digits) = text.strip_prefix('-').map_or((false, text), |d| (true, d));
+    let zeros = |s: &str| s.bytes().all(|b| b == b'0');
+    digits.len() == 126
+        && match negative {
+            true => zeros(digits),
+            false => digits.starts_with('1') && zeros(&digits[1..]),
+        }
+}
+
+/// An Oracle NUMBER as plain text, or a coded refusal when it is the text the client cannot tell from infinity.
+fn number_text(n: &OracleNumber, column: &str) -> Result<String> {
+    let text = n.to_string();
+    if is_number_infinity_text(&text)
+        && seeded!("oracle-number-infinity-delivered-finite", false, true)
+    {
+        crate::rivet_bail!(
+            crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+            "oracle: column `{column}` holds Oracle's NUMBER infinity (FLOAT arithmetic that \
+             overflows 9.99E125 stores it), or exactly 1E125, which the client reads as the \
+             same bytes. rivet refuses rather than writing a finite number for an infinite \
+             value. Select `TO_CHAR({column}) AS {column}` in the query to export the \
+             server's own text for every value (infinity prints as `~`)."
+        );
+    }
+    Ok(text)
+}
+
+/// A NUMBER cell as plain text, refused by code when it is infinity.
+fn number_cell(row: &Row, idx: usize, column: &str) -> Result<Option<String>> {
+    let cell = row.get::<Option<OracleNumber>>(idx).ora()?;
+    cell.map(|n| number_text(&n, column)).transpose()
+}
+
+/// The `float8` of an Oracle NUMBER's text, or a coded refusal when the float would round it.
+fn number_f64(column: &str, text: &str) -> Result<f64> {
+    crate::types::decimal::exact_f64_of_text(column, text)?.ok_or_else(|| {
+        crate::error::coded(
+            crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+            format!("column `{column}` holds {text}, which is not a number a float8 reads"),
+        )
+    })
+}
+
 /// The integer an Oracle NUMBER's text holds, or a coded refusal naming the column when it holds a fraction or overflows `T`.
 fn integer<T: std::str::FromStr>(column: &str, text: &str) -> Result<T> {
     text.parse::<T>().map_err(|_| {
@@ -409,11 +490,7 @@ fn build_column(
     max_value_bytes: Option<usize>,
     empty_flag: Option<usize>,
 ) -> Result<ArrayRef> {
-    let number = |r: &Row| {
-        r.get::<Option<OracleNumber>>(idx)
-            .ora()
-            .map(|v| v.map(|n| n.to_string()))
-    };
+    let number = |r: &Row| number_cell(r, idx, name);
     let kind = rows
         .first()
         .and_then(|r| r.columns().get(idx))
@@ -470,6 +547,10 @@ fn build_column(
             for r in rows {
                 b.append_option(match kind {
                     OraKind::BinaryFloat => r.get::<Option<f32>>(idx).ora()?.map(f64::from),
+                    OraKind::Number => match number(r)? {
+                        Some(text) => Some(number_f64(name, &text)?),
+                        None => None,
+                    },
                     _ => r.get::<Option<f64>>(idx).ora()?,
                 });
             }
@@ -554,7 +635,7 @@ fn build_column(
             for r in rows {
                 let v = match kind {
                     OraKind::Number => number(r)?,
-                    OraKind::IntervalDs | OraKind::IntervalYm => interval_iso(r, idx, kind)?,
+                    OraKind::IntervalDs | OraKind::IntervalYm => interval_iso(r, idx, kind, name)?,
                     OraKind::Date | OraKind::Timestamp => r
                         .get::<Option<OracleTimestamp>>(idx)
                         .ora()?
@@ -609,11 +690,14 @@ pub(super) fn rows_to_batch(
 }
 
 #[cfg(test)]
+mod common_kind_tests;
+#[cfg(test)]
 mod type_table;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::TimeUnit;
 
     /// What the Oracle mapper lands a catalog type as is what a load key or order is admitted by.
     #[test]
@@ -814,11 +898,11 @@ mod tests {
     }
 
     #[test]
-    fn a_sub_microsecond_interval_stays_lossy_with_its_warning_and_no_refusal() {
+    fn a_sub_microsecond_interval_is_decided_per_value_not_per_column() {
         use crate::types::TypeFidelity;
         let iv = with_oracle_warning(mapping("interval_ds(9)"), false, true);
-        assert_eq!(iv.fidelity, TypeFidelity::Lossy);
-        assert_eq!(iv.warnings, vec![INTERVAL_NS_WARNING.to_string()]);
+        assert_ne!(iv.fidelity, TypeFidelity::Lossy);
+        assert!(iv.warnings.is_empty());
         assert_eq!(iv.refusal, None);
     }
 
@@ -841,6 +925,7 @@ mod tests {
 
     #[test]
     fn number_precision_and_scale_pick_the_narrowest_lossless_type() {
+        let number_type = |p, s| autodetect(OraKind::Number, "number", p, s, "number");
         assert_eq!(number_type(9, 0), RivetType::Int32);
         assert_eq!(number_type(10, 0), RivetType::Int64);
         assert_eq!(number_type(18, 0), RivetType::Int64);
@@ -1075,11 +1160,48 @@ mod tests {
 
     #[test]
     fn a_day_to_second_interval_renders_every_field() {
-        assert_eq!(interval_ds_iso(1, 2, 3, 4, 5_000), "P1DT2H3M4.000005S");
-        assert_eq!(interval_ds_iso(0, 0, 0, 0, 999), "PT0S", "sub-µs truncated");
-        assert_eq!(interval_ds_iso(0, 0, 0, 1, 0), "PT1S");
-        assert_eq!(interval_ds_iso(0, 0, 1, 0, 0), "PT1M");
-        assert_eq!(interval_ds_iso(0, 1, 0, 0, 0), "PT1H");
+        let iso = |d, h, m, s, n| interval_ds_iso("c", d, h, m, s, n).unwrap();
+        assert_eq!(iso(1, 2, 3, 4, 5_000), "P1DT2H3M4.000005S");
+        assert_eq!(iso(0, 0, 0, 1, 0), "PT1S");
+        assert_eq!(iso(0, 0, 1, 0, 0), "PT1M");
+        assert_eq!(iso(0, 1, 0, 0, 0), "PT1H");
+    }
+
+    #[test]
+    fn a_sub_microsecond_interval_is_refused_with_its_column_and_remedy() {
+        for nanos in [1, 999, 1_001, 999_999_999] {
+            let e = interval_ds_iso("dur", 1, 2, 3, 4, nanos)
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("column `dur`"), "{e}");
+            assert!(e.contains("`TO_CHAR(dur) AS dur`"), "{e}");
+        }
+        for nanos in [0, 1_000, 999_000, 123_456_000] {
+            assert!(interval_ds_iso("dur", 0, 0, 0, 0, nanos).is_ok(), "{nanos}");
+        }
+        assert_eq!(
+            interval_ds_iso("dur", 999_999_999, 23, 59, 59, 999_999_000).unwrap(),
+            "P999999999DT23H59M59.999999S"
+        );
+    }
+
+    #[test]
+    fn number_infinity_text_is_exactly_the_two_126_digit_shapes() {
+        let zeros = |n: usize| "0".repeat(n);
+        assert!(is_number_infinity_text(&format!("-{}", zeros(126))));
+        assert!(is_number_infinity_text(&format!("1{}", zeros(125))));
+        assert!(!is_number_infinity_text(&format!("-{}", zeros(125))));
+        assert!(!is_number_infinity_text(&format!("-{}", zeros(127))));
+        assert!(!is_number_infinity_text(&format!("1{}", zeros(124))));
+        assert!(!is_number_infinity_text(&format!("1{}", zeros(126))));
+        assert!(!is_number_infinity_text(&format!("2{}", zeros(125))));
+        assert!(!is_number_infinity_text(&format!("-1{}", zeros(125))));
+        assert!(!is_number_infinity_text(&format!("1{}1", zeros(124))));
+        assert!(!is_number_infinity_text(&format!("9{}", "9".repeat(125))));
+        assert!(!is_number_infinity_text(""));
+        assert!(!is_number_infinity_text("-"));
+        assert!(!is_number_infinity_text("0"));
+        assert!(!is_number_infinity_text("1"));
     }
 
     #[test]

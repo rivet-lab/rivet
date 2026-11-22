@@ -1,8 +1,7 @@
 use std::io::{BufRead, Write};
 use std::path::Path;
 
-use arrow::array::Time64MicrosecondArray;
-use arrow::array::types::Decimal128Type;
+use arrow::array::types::{Decimal128Type, Time64MicrosecondType, Time64NanosecondType};
 use arrow::array::*;
 use arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -107,6 +106,7 @@ pub(crate) fn csv_serializable(dt: &DataType) -> bool {
             | DataType::FixedSizeBinary(16)
             | DataType::Date32
             | DataType::Time64(TimeUnit::Microsecond)
+            | DataType::Time64(TimeUnit::Nanosecond)
             | DataType::Timestamp(TimeUnit::Microsecond, _)
     )
 }
@@ -124,6 +124,39 @@ fn write_lower_hex(writer: &mut dyn Write, bytes: &[u8]) -> Result<()> {
         }
         writer.write_all(&chunk[..n])?;
     }
+    Ok(())
+}
+
+/// A `Time64` cell as `[-]hh:mm:ss.f`, six fraction digits for microseconds and nine for nanoseconds.
+fn write_time64(
+    writer: &mut dyn Write,
+    array: &dyn Array,
+    idx: usize,
+    unit: &TimeUnit,
+) -> Result<()> {
+    let (value, per_second, digits) = match unit {
+        TimeUnit::Nanosecond => (
+            array.as_primitive::<Time64NanosecondType>().value(idx),
+            1_000_000_000_u64,
+            9,
+        ),
+        _ => (
+            array.as_primitive::<Time64MicrosecondType>().value(idx),
+            1_000_000_u64,
+            6,
+        ),
+    };
+    let abs = value.unsigned_abs();
+    let secs = abs / per_second;
+    write!(
+        writer,
+        "{}{:02}:{:02}:{:02}.{:0digits$}",
+        if value < 0 { "-" } else { "" },
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60,
+        abs % per_second
+    )?;
     Ok(())
 }
 
@@ -254,26 +287,7 @@ fn write_csv_value(writer: &mut dyn Write, array: &dyn Array, idx: usize) -> Res
                 write!(writer, "{}", date)?;
             }
         }
-        DataType::Time64(TimeUnit::Microsecond) => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Time64MicrosecondArray>()
-                .expect("DataType/Array mismatch");
-            let micros = arr.value(idx);
-            let neg = micros < 0;
-            let abs = micros.unsigned_abs();
-            let secs = abs / 1_000_000;
-            let frac_us = abs % 1_000_000;
-            write!(
-                writer,
-                "{}{:02}:{:02}:{:02}.{:06}",
-                if neg { "-" } else { "" },
-                secs / 3600,
-                (secs % 3600) / 60,
-                secs % 60,
-                frac_us
-            )?;
-        }
+        DataType::Time64(unit) => write_time64(writer, array, idx, unit)?,
         DataType::Timestamp(TimeUnit::Microsecond, tz) => {
             let arr = array
                 .as_any()
@@ -369,6 +383,21 @@ mod tests {
         let mut buf = Vec::new();
         write_csv_value(&mut buf, arr.as_ref(), 0).unwrap();
         String::from_utf8(buf).unwrap()
+    }
+
+    /// A nanosecond time of day (SQL Server `time(7)`) keeps its 100ns tick in CSV.
+    #[test]
+    fn time64_nanoseconds_render_nine_fraction_digits() {
+        use arrow::array::Time64NanosecondArray;
+        assert!(csv_serializable(&DataType::Time64(TimeUnit::Nanosecond)));
+        assert_eq!(
+            cell(Time64NanosecondArray::from(vec![86_399_999_999_900_i64]), 0),
+            "23:59:59.999999900"
+        );
+        assert_eq!(
+            cell(Time64NanosecondArray::from(vec![100_i64]), 0),
+            "00:00:00.000000100"
+        );
     }
 
     #[test]
