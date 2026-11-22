@@ -1008,7 +1008,7 @@ fn object_kind_of(engine: &str) -> ObjectKind {
     }
 }
 
-/// The row count of every part in `uris`, in order, each footer checked for a date or timestamp ClickHouse cannot hold and, for a change log, the head of `__pos` for a position it cannot version.
+/// The row count of every part in `uris`, in order, each checked for a date or timestamp, or a NULL list, ClickHouse cannot hold and, for a change log, the head of `__pos` for a position it cannot version.
 fn checked_part_rows<'s>(
     store: impl FnOnce() -> Result<&'s GcsStore>,
     uris: &[String],
@@ -1020,11 +1020,36 @@ fn checked_part_rows<'s>(
     let store = store()?;
     super::target_range::map_footers(store, uris, |key, uri, meta| {
         refuse_unholdable_temporals(meta, uri)?;
+        refuse_null_lists(store, key, meta, uri, change_log)?;
         if change_log {
             refuse_unorderable_positions(store, key, meta, uri)?;
         }
         footer_rows(meta)
     })
+}
+
+/// Refuse a part holding a NULL list, which a ClickHouse Array cannot keep and would load as `[]`, before any table is created.
+fn refuse_null_lists(
+    store: &GcsStore,
+    key: &str,
+    meta: &parquet::file::metadata::ParquetMetaData,
+    uri: &str,
+    change_log: bool,
+) -> Result<()> {
+    let columns = seeded!(
+        "clickhouse-null-array-loads-as-empty",
+        Vec::new(),
+        super::part_lists::list_columns(meta)
+    );
+    match super::part_lists::first_null_list(store, key, meta, &columns, change_log)? {
+        None => Ok(()),
+        Some(column) => crate::rivet_bail!(
+            crate::error::codes::LOAD_VALUE_OUT_OF_TARGET_RANGE,
+            "{uri}: column `{column}` holds a NULL list, and a ClickHouse Array cannot be NULL: it would load as [], the same value as an empty list. \
+             Nothing was written and no table was created. In the export's `query:` read it as COALESCE({column}, '{{}}') AS {column} to load [] on purpose, \
+             or as {column}::text AS {column} to keep the NULL, or correct the source value."
+        ),
+    }
 }
 
 /// Refuse a change-log part whose `__pos` head is of a shape ClickHouse cannot version, before any table is created.
@@ -1576,6 +1601,53 @@ mod tests {
             checked_part_rows(|| Ok(&store), &mixed, false).unwrap(),
             vec![2, 2],
             "a load that is not a change log never reads __pos"
+        );
+    }
+
+    /// A NULL list is refused before any write with its column and both remedies; an empty list and a NULL element pass.
+    #[test]
+    fn a_null_list_is_refused_before_any_write_and_an_empty_list_or_null_element_passes() {
+        use arrow::array::{ArrayRef, ListArray};
+        use arrow::datatypes::Int32Type;
+        let dir = tempfile::tempdir().unwrap();
+        let store = GcsStore::open_fs(dir.path().to_str().unwrap()).unwrap();
+        let write = |name: &str, rows: Vec<Option<Vec<Option<i32>>>>| {
+            let col = ListArray::from_iter_primitive::<Int32Type, _, _>(rows);
+            let batch = arrow::record_batch::RecordBatch::try_from_iter([(
+                "tags",
+                std::sync::Arc::new(col) as ArrayRef,
+            )])
+            .unwrap();
+            let mut buf = Vec::new();
+            let mut w =
+                parquet::arrow::ArrowWriter::try_new(&mut buf, batch.schema(), None).unwrap();
+            w.write(&batch).unwrap();
+            w.close().unwrap();
+            std::fs::write(dir.path().join(name), buf).unwrap();
+            format!("gs://b/{name}")
+        };
+        let clean = write(
+            "clean.parquet",
+            vec![Some(vec![]), Some(vec![Some(1), None])],
+        );
+        let nulls = write("nulls.parquet", vec![Some(vec![Some(1)]), None]);
+        assert_eq!(
+            checked_part_rows(|| Ok(&store), std::slice::from_ref(&clean), false).unwrap(),
+            vec![2]
+        );
+        let both = vec![clean, nulls.clone()];
+        let err = checked_part_rows(|| Ok(&store), &both, false).unwrap_err();
+        assert_eq!(
+            crate::error::error_code(&err),
+            Some("RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE")
+        );
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "{nulls}: column `tags` holds a NULL list, and a ClickHouse Array cannot be NULL: it would load as [], the same value as an empty list. \
+                 Nothing was written and no table was created. In the export's `query:` read it as COALESCE(tags, '{{}}') AS tags to load [] on purpose, \
+                 or as tags::text AS tags to keep the NULL, or correct the source value."
+            )
         );
     }
 

@@ -149,9 +149,9 @@ def self_test() -> int:
     refusal = "refusal_names_true_cause cmd/load/X/postgres RED printed RIVET_A, injected RIVET_B\n"
     assert known_red.nightly_key("no_silent_null", "mysql", "CHECK_RUN_SPLIT") in base, "the gate's per-cell-set entries are cut to classes"
     assert known_red.nightly_key("refusal_names_true_cause", "cmd", "printed") in base, "the nightly entry of #917 is in the baseline"
-    load_line = "no_silent_null_load postgres/list->list/full/parquet RED DEFECT_PG_NULL_LIST_EMPTY_CH: x\n"
+    load_line = "no_silent_null_load postgres/ts->date/full/parquet RED CHECK_RUN_SPLIT: x\n"
     cdc_line = "no_silent_null_cdc oracle/ts->date/cdc-x/parquet RED CHECK_RUN_SPLIT: check exit 0, run exit 5\n"
-    for key in ("nightly[no_silent_null_load|postgres] DEFECT_PG_NULL_LIST_EMPTY_CH", "nightly[no_silent_null_cdc|oracle] CHECK_RUN_SPLIT"):
+    for key in ("nightly[no_silent_null_load|postgres] CHECK_RUN_SPLIT", "nightly[no_silent_null_cdc|oracle] CHECK_RUN_SPLIT"):
         assert key in base, f"the tierless load and cdc entries are cut to classes: {key}"
     g = lambda code, text, when=today: grade_part(code, text, base, when)  # noqa: E731
     assert g(0, "") ["verdict"] == GREEN
