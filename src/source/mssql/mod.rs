@@ -524,7 +524,10 @@ impl Source for MssqlSource {
 
     fn finer_than_microsecond_in_query(&mut self, query: &str) -> Result<Vec<String>> {
         if let Some(refused) = self.query_scalar(&describe_error_sql(query))? {
-            anyhow::bail!("SQL Server cannot describe the query's result columns: {refused}");
+            crate::rivet_bail!(
+                crate::error::codes::SOURCE_QUERY_FAILED,
+                "SQL Server cannot describe the query's result columns: {refused}"
+            );
         }
         Ok(self
             .query_scalar(&finer_than_microsecond_in_query_sql(query))?

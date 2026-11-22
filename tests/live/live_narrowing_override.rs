@@ -247,7 +247,7 @@ fn a_mssql_batch_time_override_is_graded_by_the_result_column_it_lands_on() {
             failed.push(format!("{name}: {msg}"));
         }
     }
-    assert!(failed.is_empty(), "cases failed:\n{}", failed.join("\n"));
+    assert_eq!(failed, Vec::<String>::new(), "cases failed");
 }
 
 /// A SQL Server CDC override is graded as the batch one: `datetime2(7)` and `datetimeoffset(7)` under a microsecond type are lossy, under their nanosecond type and over `datetime2(3)` exact; the change row holds what the verdict says.
