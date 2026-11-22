@@ -137,7 +137,7 @@ scenarios:
 
   - id: keyset_key_type_oracle_bare_number
     what: "an Oracle NUMBER with no precision (held as exact text) keeps keying a keyset seek exactly as before the type check: integers, fractions across zero, 35 digits and both exponent extremes deliver the seeded ids once, sequential and parallel"
-    postgres: { na: "only an Oracle NUMBER is held as exact text and keys a seek; a PostgreSQL numeric stays refused as a decimal key" }
+    postgres: { na: "only an Oracle NUMBER is held as exact text and keys a seek; a PostgreSQL numeric stays refused as a decimal key (the keyset cursor excludes it whatever its delivery)" }
     mysql:    { na: "only an Oracle NUMBER is held as exact text and keys a seek; a MySQL DECIMAL stays refused as a decimal key" }
     mssql:    { na: "only an Oracle NUMBER is held as exact text and keys a seek; a SQL Server decimal stays refused as a decimal key" }
     mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
@@ -145,7 +145,7 @@ scenarios:
 
   - id: keyset_key_type_oracle_inexact_number
     what: "an Oracle key main refused stays refused by RIVET_PLAN_CHUNK_KEY_UNUSABLE at check, plan and run, with no file written: FLOAT, NUMBER(12,2), NUMBER(*,2), NUMBER(5,-2), NUMBER(38,-5), NUMBER(38,39), BINARY_DOUBLE and TIMESTAMP WITH LOCAL TIME ZONE; the neighbour of keyset_key_type_oracle_bare_number"
-    postgres: { na: "only an Oracle NUMBER is held as exact text and the catalog tells a FLOAT or a scaled NUMBER from a bare one; a PostgreSQL numeric stays refused as a decimal key" }
+    postgres: { na: "only an Oracle NUMBER is held as exact text and the catalog tells a FLOAT or a scaled NUMBER from a bare one; a PostgreSQL numeric stays refused as a decimal key (the keyset cursor excludes it whatever its delivery)" }
     mysql:    { na: "only an Oracle NUMBER is held as exact text and the catalog tells a FLOAT or a scaled NUMBER from a bare one; a MySQL DECIMAL stays refused as a decimal key" }
     mssql:    { na: "only an Oracle NUMBER is held as exact text and the catalog tells a FLOAT or a scaled NUMBER from a bare one; a SQL Server decimal stays refused as a decimal key" }
     mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }
@@ -177,7 +177,7 @@ scenarios:
 
   - id: keyset_key_composite_oracle_inexact_number
     what: "an Oracle composite key whose second column is a FLOAT, or a scaled NUMBER under an int64 or string override, delivers the seeded ids once as on main; the neighbour of keyset_key_composite_catalog_fact"
-    postgres: { na: "only an Oracle FLOAT or scaled NUMBER is held as exact text; a PostgreSQL numeric stays refused as a decimal key" }
+    postgres: { na: "only an Oracle FLOAT or scaled NUMBER is held as exact text; a PostgreSQL numeric stays refused as a decimal key (the keyset cursor excludes it whatever its delivery)" }
     mysql:    { na: "only an Oracle FLOAT or scaled NUMBER is held as exact text; a MySQL DECIMAL stays refused as a decimal key" }
     mssql:    { na: "only an Oracle FLOAT or scaled NUMBER is held as exact text; a SQL Server decimal stays refused as a decimal key" }
     mongo:    { na: "Mongo always pages by _id; there is no user chunk_by_key knob" }

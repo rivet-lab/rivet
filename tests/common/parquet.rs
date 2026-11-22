@@ -341,7 +341,13 @@ pub fn parquet_ids(path: &Path) -> Vec<i64> {
     let mut out = Vec::new();
     for batch in reader {
         let batch = batch.unwrap();
-        let col = batch.column_by_name("id").expect("id column present");
+        let schema = batch.schema();
+        let at = schema
+            .fields()
+            .iter()
+            .position(|f| f.name().eq_ignore_ascii_case("id"))
+            .expect("id column present");
+        let col = batch.column(at);
         match col.data_type() {
             arrow::datatypes::DataType::Int64 => {
                 let a = col.as_primitive::<arrow::datatypes::Int64Type>();

@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc b499bf21ddae4ec1d51f4fa97f731dd97af2888e5e8b11e6fa238233302b6bec # shrinks to mut bounds = ["a"], floor = None, ceil = None
 cc 1985ce3f9d0a9674384eb20d1b3e3eb905205671819d0d90b86d832726e2788a # shrinks to ts = [], is = [0, 1, -1], numeric = true, parts = 2, fence = None
+cc 051dc31306897c5abde42a886be270428ae6cac7a0f1407ce3a729a115fe5a6e # shrinks to ts = [], is = [0, 0, 450310, 0, 383561, 383561, 0, 0, 0, 696419, 0, 357881, 285976, 789318, 0, 0, 0], numeric = true, parts = 7, fence = None
