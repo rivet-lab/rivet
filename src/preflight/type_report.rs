@@ -541,7 +541,9 @@ pub(crate) fn probe_mappings(
     column_overrides: &ColumnOverrides,
 ) -> Result<Vec<crate::types::TypeMapping>> {
     let mut mappings = if stream {
-        src.type_mappings(query, &ColumnOverrides::new())?
+        let detected = src.type_mappings(query, &ColumnOverrides::new())?;
+        source::cdc::refuse_by_override_table(src, query, &detected, column_overrides)?;
+        detected
             .into_iter()
             .map(|m| source::cdc::retype_for_stream(m, column_overrides))
             .collect::<Result<Vec<_>>>()?
@@ -940,6 +942,50 @@ mod tests {
         assert_eq!(batch[0].refusal.as_deref(), Some("no arrow type"));
         let stream = super::probe_mappings(&mut Unmapped, true, "q", &overrides).unwrap();
         assert_eq!(stream[0].refusal, None);
+    }
+
+    /// The stream probe sends an integer override over a numeric column to the batch table, which refuses it; a text override passes.
+    #[test]
+    fn the_stream_probe_refuses_an_integer_override_over_a_numeric_by_the_batch_table() {
+        use crate::types::{ColumnOverrides, RivetType, SourceColumn, TypeMapping};
+        struct Table;
+        impl crate::source::Source for Table {
+            fn export(
+                &mut self,
+                _request: &crate::source::ExportRequest<'_>,
+                _sink: &mut dyn crate::source::BatchSink,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn query_scalar(&mut self, _sql: &str) -> anyhow::Result<Option<String>> {
+                Ok(None)
+            }
+            fn type_mappings(
+                &mut self,
+                _query: &str,
+                overrides: &ColumnOverrides,
+            ) -> anyhow::Result<Vec<TypeMapping>> {
+                if !overrides.is_empty() {
+                    crate::rivet_bail!(
+                        crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH,
+                        "the batch table refuses this pair"
+                    );
+                }
+                Ok(vec![TypeMapping::from_source(
+                    &SourceColumn::simple("v", "numeric(10,2)", true),
+                    RivetType::Decimal {
+                        precision: 10,
+                        scale: 2,
+                    },
+                )])
+            }
+        }
+        let declared = |t| ColumnOverrides::from([("v".to_string(), t)]);
+        let err =
+            super::probe_mappings(&mut Table, true, "q", &declared(RivetType::Int64)).unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+        super::probe_mappings(&mut Table, true, "q", &declared(RivetType::String))
+            .expect("a string override is not the batch table's pair");
     }
 
     /// The two callers must DIVERGE, and only where divergence is warranted.

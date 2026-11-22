@@ -101,7 +101,7 @@ fn oracle_cdc_an_int_override_on_a_fractional_number_fails_by_column_not_null() 
         .export_line(over)
         .run_expect_fail();
     assert!(
-        err.contains("RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH")
+        err.contains("RIVET_SOURCE_VALUE_UNREPRESENTABLE")
             && err.contains("column 'AMOUNT' is Int32")
             && err.contains("\"1.5\""),
         "CDC must refuse naming the column, its type and the value: {err}\nbatch: {batch}"
@@ -135,7 +135,7 @@ fn oracle_cdc_a_date_override_refuses_a_time_of_day_not_drops_it() {
         .export_line(over)
         .run_expect_fail();
     assert!(
-        err.contains("RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH")
+        err.contains("RIVET_SOURCE_VALUE_UNREPRESENTABLE")
             && err.contains("column 'DT' is Date32")
             && err.contains("has a time of day, which a `date` override would drop"),
         "CDC must refuse naming the column and the dropped time: {err}"
