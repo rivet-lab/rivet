@@ -171,7 +171,7 @@ fn check_says_it_read_no_values_only_under_columns_mssql() {
     let out = tempfile::tempdir().unwrap();
     let rig = || {
         Rig::mssql_batch(&name)
-            .query("SELECT CAST(7 AS INT) AS n")
+            .query("SELECT CAST(7 AS BIGINT) AS n")
             .mode("full")
             .dest_path(out.path().to_path_buf())
     };
