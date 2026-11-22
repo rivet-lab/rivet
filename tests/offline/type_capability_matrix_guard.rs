@@ -450,10 +450,8 @@ fn every_ledger_row_has_a_sample_and_a_real_delivery() {
 /// deletes its line here, and a new defect is fixed, not added here.
 const KNOWN_DEFECTS: &[&str] = &[
     // ratchet-pin: type-known-defects (review 2027-02-01) strings
-    "postgres:NUMERIC",
     "postgres:INET",
     "postgres:CIDR",
-    "postgres:NUMERIC[]",
     "postgres:UUID (ClickHouse)",
     // 2026-11-05: six array rows moved from unsupported to delivered; a NULL array still loads as [] on ClickHouse, closes with the ClickHouse array-NULL step.
     "postgres:DATE[] (ClickHouse)",
@@ -729,7 +727,7 @@ fn row_mut<'a>(doc: &'a mut Value, engine: &str, native: &str) -> &'a mut serde_
 #[test]
 fn a_known_defect_moved_to_another_row_is_refused() {
     let mut doc = ledger();
-    let marker = row_mut(&mut doc, "postgres", "NUMERIC")
+    let marker = row_mut(&mut doc, "postgres", "INET")
         .remove("known_defect")
         .unwrap();
     row_mut(&mut doc, "mysql", "DATETIME(6)").insert("known_defect".into(), marker);
@@ -737,7 +735,7 @@ fn a_known_defect_moved_to_another_row_is_refused() {
         known_defect_violations(&doc),
         [
             "mysql:DATETIME(6): a new known defect, blessed into the ledger instead of fixed",
-            "postgres:NUMERIC: fixed, its marker is gone — delete its KNOWN_DEFECTS line"
+            "postgres:INET: fixed, its marker is gone — delete its KNOWN_DEFECTS line"
         ],
         "a marker moved to another row kept the count and went unnoticed"
     );
@@ -746,19 +744,19 @@ fn a_known_defect_moved_to_another_row_is_refused() {
 #[test]
 fn a_fixed_defect_left_in_known_defects_is_refused() {
     let mut doc = ledger();
-    row_mut(&mut doc, "postgres", "NUMERIC")
+    row_mut(&mut doc, "postgres", "INET")
         .remove("known_defect")
         .unwrap();
     assert_eq!(
         known_defect_violations(&doc),
-        ["postgres:NUMERIC: fixed, its marker is gone — delete its KNOWN_DEFECTS line"]
+        ["postgres:INET: fixed, its marker is gone — delete its KNOWN_DEFECTS line"]
     );
 }
 
 #[test]
 fn a_known_defect_without_today_delivery_is_refused() {
     let mut doc = ledger();
-    row_mut(&mut doc, "postgres", "NUMERIC")
+    row_mut(&mut doc, "postgres", "INET")
         .remove("today_delivery")
         .unwrap();
     row_mut(&mut doc, "mssql", "UNIQUEIDENTIFIER")
@@ -1139,13 +1137,13 @@ fn the_cdc_fidelity_matrix_names_exactly_the_ledger_known_defects() {
 #[test]
 fn a_known_defect_fixed_in_the_ledger_only_is_refused() {
     let mut doc = ledger();
-    row_mut(&mut doc, "postgres", "NUMERIC")
+    row_mut(&mut doc, "postgres", "INET")
         .remove("known_defect")
         .unwrap();
     assert_eq!(
         fidelity_violations(&doc, &fidelity()),
         [format!(
-            "postgres:NUMERIC: {FIDELITY} names a known_defect the ledger does not mark"
+            "postgres:INET: {FIDELITY} names a known_defect the ledger does not mark"
         )]
     );
 }

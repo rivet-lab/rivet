@@ -8,13 +8,18 @@ One row per delivering ledger row: the source native type, the Arrow type batch 
 
 | engine | delivering rows | matrix-only rows | rows with a defect | empty cells |
 | --- | --- | --- | --- | --- |
-| postgres | 75 | 28 | 14 | 0 |
+| postgres | 77 | 26 | 12 | 4 |
 | mysql | 37 | 43 | 0 | 0 |
 | mssql | 21 | 34 | 1 | 0 |
 | oracle | 15 | 42 | 1 | 0 |
 | mongo | 0 | 20 | 0 | 0 |
 
-No cell is empty.
+## Empty cells
+
+- postgres `NUMERIC(1000,0)`: BigQuery is empty
+- postgres `NUMERIC(1000,0)`: Snowflake is empty
+- postgres `NUMERIC(10,2)[]`: BigQuery is empty
+- postgres `NUMERIC(10,2)[]`: Snowflake is empty
 
 ## Table
 
@@ -45,7 +50,7 @@ No cell is empty.
 | postgres | `INTEGER[]` | `List(Int32)` | `exact` | `Array(Nullable(Int32))`; today `Array(Nullable(Int32))` (defect) | `ARRAY<STRUCT<item INT64>>` | `ARRAY` |
 | postgres | `DOUBLE PRECISION[]` | `List(Float64)` | `exact` | `Array(Nullable(Float64))`; today `Array(Nullable(Float64))` (defect) | `ARRAY<STRUCT<item FLOAT64>>` | `ARRAY` |
 | postgres | `NUMERIC(60,10)` | `Decimal256(60, 10)` | `exact` | `Nullable(Decimal(60, 10))` | `refuse:RIVET_LOAD_COLUMN_TYPE_UNSUPPORTED` | `refuse:RIVET_LOAD_COLUMN_TYPE_UNSUPPORTED` |
-| postgres | `NUMERIC` | `decimal_plain`; today `server_text` (defect) | `exact` | `Nullable(String)`; today `Nullable(String)` (defect) | `STRING`; today `STRING` (defect) | `TEXT`; today `TEXT` (defect) |
+| postgres | `NUMERIC` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `MONEY` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `INET` | `inet_text`; today `server_text` (defect) | `exact` | `Nullable(String)`; today `Nullable(String)` (defect) | `STRING`; today `STRING` (defect) | `TEXT`; today `TEXT` (defect) |
 | postgres | `CIDR` | `inet_text`; today `server_text` (defect) | `exact` | `Nullable(String)`; today `Nullable(String)` (defect) | `STRING`; today `STRING` (defect) | `TEXT`; today `TEXT` (defect) |
@@ -55,7 +60,8 @@ No cell is empty.
 | postgres | `TIME[]` | `List(Time64(µs))` | `exact` | `Array(Nullable(Decimal(18, 6)))`; today `Array(Nullable(Decimal(18, 6)))` (defect) | `ARRAY<STRUCT<item TIME>>` | `ARRAY` |
 | postgres | `UUID[]` | `List(arrow.uuid)` | `exact` | `Array(Nullable(UUID))`; today `Array(Nullable(FixedString(16)))` (defect) | `ARRAY<STRUCT<item BYTES>>` | `ARRAY` |
 | postgres | `BYTEA[]` | `List(Binary)` | `exact` | `Array(Nullable(String))`; today `Array(Nullable(String))` (defect) | `ARRAY<STRUCT<item BYTES>>` | `ARRAY` |
-| postgres | `NUMERIC[]` | `server_text`; today `server_text` (defect) | `exact` | `Nullable(String)`; today `Nullable(String)` (defect) | `STRING`; today `STRING` (defect) | `TEXT`; today `TEXT` (defect) |
+| postgres | `NUMERIC[]` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| postgres | `NUMERIC(1000,0)` | `server_text` | `exact` | `Nullable(String)` | **GAP** | **GAP** |
 | postgres | `"char"` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `TIMETZ` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `MACADDR` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
@@ -89,13 +95,14 @@ No cell is empty.
 | postgres | `PG_LSN` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `TID` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `rivet_pair` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| postgres | `NUMERIC(10,2)[]` | `server_text` | `exact` | `Nullable(String)` | **GAP** | **GAP** |
 | postgres | `INET[]` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `MONEY[]` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `INT4RANGE[]` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `POINT[]` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `BIT(5)[]` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | postgres | `BIT VARYING[]` | `server_text` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
-| postgres | 28 matrix-only rows: `INTEGER`, `NUMERIC(38,10)`, `NUMERIC(38,0)`, `NUMERIC(38,38)`, `NUMERIC(76,0)`, `NUMERIC(1000,0)`, `NUMERIC(5,2)`, `CHAR(10)`, `BPCHAR`, `CHARACTER VARYING(10)`, `NAME`, `TIME(3)`, `TIMESTAMP(0)`, `TIMESTAMP(3)`, `OID`, `rivet_posint`, `SMALLINT[]`, `BIGINT[]`, `BOOLEAN[]`, `REAL[]`, `NUMERIC(10,2)[]`, `VARCHAR(10)[]`, `CHAR(5)[]`, `JSON[]`, `JSONB[]`, `INTERVAL[]`, `OID[]`, `rivet_status[]` | n/a: no `delivery`, graded by the edge matrix only (a refused or text-only column) | n/a | n/a | n/a | n/a |
+| postgres | 26 matrix-only rows: `INTEGER`, `NUMERIC(38,10)`, `NUMERIC(38,0)`, `NUMERIC(38,38)`, `NUMERIC(76,0)`, `NUMERIC(5,2)`, `CHAR(10)`, `BPCHAR`, `CHARACTER VARYING(10)`, `NAME`, `TIME(3)`, `TIMESTAMP(0)`, `TIMESTAMP(3)`, `OID`, `rivet_posint`, `SMALLINT[]`, `BIGINT[]`, `BOOLEAN[]`, `REAL[]`, `VARCHAR(10)[]`, `CHAR(5)[]`, `JSON[]`, `JSONB[]`, `INTERVAL[]`, `OID[]`, `rivet_status[]` | n/a: no `delivery`, graded by the edge matrix only (a refused or text-only column) | n/a | n/a | n/a | n/a |
 | mysql | `VARCHAR(200)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | mysql | `VARCHAR(20)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | mysql | `DECIMAL(18,2)` | `Decimal128(18, 2)` | `exact` | `Nullable(Decimal(18, 2))` | `NUMERIC` | `NUMBER(18,2)` |
