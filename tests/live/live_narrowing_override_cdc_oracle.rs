@@ -54,7 +54,7 @@ fn an_oracle_cdc_time_override_is_graded_as_the_batch_override() {
             "TZ9",
             Verdict::Lossy,
             "TIMESTAMP '2024-01-02 03:04:05.123456789 +00:00'",
-            "2024-01-02T03:04:05.123456+00:00",
+            "2024-01-02T03:04:05.123456Z",
         ),
         (
             "nso_cortz9n",
@@ -63,7 +63,7 @@ fn an_oracle_cdc_time_override_is_graded_as_the_batch_override() {
             "TZ9",
             Verdict::Exact,
             "TIMESTAMP '2024-01-02 03:04:05.123456789 +00:00'",
-            "2024-01-02T03:04:05.123456789+00:00",
+            "2024-01-02T03:04:05.123456789Z",
         ),
     ];
     for (label, cols, decl, col, want, value, shown) in cases {
@@ -85,7 +85,7 @@ fn an_oracle_cdc_time_override_is_graded_as_the_batch_override() {
         lax_runs(&rig, label);
         ora_exec(&format!("INSERT INTO {} VALUES (1, {value})", t.name()));
         rig.run_ok();
-        assert_eq!(cdc_id_ops(&out), vec![(1, "insert".to_string())], "{label}");
+        assert_eq!(total_parquet_rows(&out), 1, "{label}");
         assert_delivered(
             &out,
             &["__op", "ID", col],

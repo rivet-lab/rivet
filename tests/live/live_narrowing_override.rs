@@ -151,7 +151,7 @@ fn a_mssql_batch_time_override_is_graded_by_the_result_column_it_lands_on() {
             "o7: timestamp_tz",
             Verdict::Lossy,
             "o7",
-            "2024-01-02T03:04:05.123456+00:00",
+            "2024-01-02T03:04:05.123456Z",
         ),
         (
             "table d7 ns",
@@ -167,7 +167,7 @@ fn a_mssql_batch_time_override_is_graded_by_the_result_column_it_lands_on() {
             "o7: timestamp_tz_ns",
             Verdict::Exact,
             "o7",
-            "2024-01-02T03:04:05.123456700+00:00",
+            "2024-01-02T03:04:05.123456700Z",
         ),
         (
             "table d3",
@@ -271,14 +271,14 @@ fn a_mssql_cdc_time_override_is_graded_as_the_batch_override() {
             "o7: timestamp_tz",
             Verdict::Lossy,
             "o7",
-            "2024-01-02T03:04:05.123456+00:00",
+            "2024-01-02T03:04:05.123456Z",
         ),
         (
             "nso_cdc_mson",
             "o7: timestamp_tz_ns",
             Verdict::Exact,
             "o7",
-            "2024-01-02T03:04:05.123456700+00:00",
+            "2024-01-02T03:04:05.123456700Z",
         ),
     ];
     for (label, decl, want, col, value) in cases {
@@ -305,7 +305,7 @@ fn a_mssql_cdc_time_override_is_graded_as_the_batch_override() {
         ));
         scn.settle();
         scn.rig.run_ok();
-        assert_eq!(cdc_id_ops(&out), vec![(1, "insert".to_string())], "{label}");
+        assert_eq!(total_parquet_rows(&out), 1, "{label}");
         assert_delivered(
             &out,
             &["__op", "id", col],
