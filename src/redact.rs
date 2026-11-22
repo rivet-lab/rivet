@@ -34,6 +34,10 @@
 //! - Secrets the operator captured *outside* Rivet (shell history, env
 //!   var dumps, `ps` snapshots) — out of scope.
 
+use aho_corasick::automaton::Automaton;
+use aho_corasick::nfa::contiguous::NFA;
+use aho_corasick::{Anchored, MatchKind};
+
 /// Replace `user:password@host` userinfo segments in any URL-like
 /// substring with `REDACTED@host`.
 ///
@@ -124,39 +128,12 @@ pub fn mask_value_in_output(value: &str) {
     }
 }
 
-/// The length of each prefix of `value` that is also its suffix, as the failure function of the Knuth-Morris-Pratt search.
-fn prefix_function(value: &[u8]) -> Vec<usize> {
-    let mut fail = vec![0; value.len()];
-    let mut border = 0;
-    for i in 1..value.len() {
-        while border > 0 && value[i] != value[border] {
-            border = fail[border - 1];
-        }
-        if value[i] == value[border] {
-            border += 1;
-        }
-        fail[i] = border;
-    }
-    fail
-}
-
-/// Push the span of every occurrence of `value` in `text`, overlapping ones included, in one pass over `text`.
-fn push_occurrences(text: &str, value: &str, spans: &mut Vec<(usize, usize)>) {
-    let value = value.as_bytes();
-    let fail = prefix_function(value);
-    let mut matched = 0;
-    for (end, byte) in (1..).zip(text.bytes()) {
-        while matched > 0 && value[matched] != byte {
-            matched = fail[matched - 1];
-        }
-        if value[matched] == byte {
-            matched += 1;
-        }
-        if matched == value.len() {
-            spans.push((end - matched, end));
-            matched = fail[matched - 1];
-        }
-    }
+/// The automaton of the registered `known` values, none when there are none.
+fn automaton(known: &[String]) -> Option<NFA> {
+    (!known.is_empty()).then(|| {
+        let nfa = NFA::builder().match_kind(MatchKind::Standard).build(known);
+        nfa.expect("registered values fit an automaton")
+    })
 }
 
 /// `spans` in order with every overlapping pair merged into one; spans that only touch stay apart.
@@ -172,11 +149,20 @@ fn merged(mut spans: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
     out
 }
 
-/// The ordered spans of `text` that hold a `known` value, overlapping occurrences as one.
-fn known_spans(text: &str, known: &[String]) -> Vec<(usize, usize)> {
+/// The ordered spans of `text` that hold a registered value, overlapping occurrences as one, in one pass over `text`.
+fn known_spans(text: &str, nfa: &NFA) -> Vec<(usize, usize)> {
+    let mut state = nfa.start_state(Anchored::No).expect("an unanchored start");
     let mut spans = Vec::new();
-    for value in known {
-        push_occurrences(text, value, &mut spans);
+    for (end, byte) in (1..).zip(text.bytes()) {
+        state = nfa.next_state(Anchored::No, state, byte);
+        let lens: Vec<usize> = if nfa.is_match(state) {
+            (0..nfa.match_len(state))
+                .map(|i| nfa.pattern_len(nfa.match_pattern(state, i)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        spans.extend(lens.into_iter().map(|len| (end - len, end)));
     }
     merged(spans)
 }
@@ -204,6 +190,7 @@ fn apply_edits(text: &str, edits: &[Edit]) -> String {
 }
 
 /// `text` with each of the ordered, disjoint `spans` replaced by the mask.
+#[cfg(any(feature = "seeded", test))]
 fn mask_spans(text: &str, spans: &[(usize, usize)]) -> String {
     let edits: Vec<Edit> = spans
         .iter()
@@ -250,38 +237,78 @@ fn scan_around(text: &str, spans: &[(usize, usize)]) -> String {
     out
 }
 
-/// `text` with every `known` value that the mask and its neighbours form masked again, until none is left.
-fn mask_formed(mut text: String, known: &[String]) -> String {
-    loop {
-        let formed: Vec<_> = known_spans(&text, known)
-            .into_iter()
-            .filter(|&(start, end)| text[start..end].contains('*'))
-            .collect();
-        if formed.is_empty() {
-            return text;
+/// `text` with every registered value it holds, one a mask forms with its neighbours included, replaced by the mask, in one pass: a mask is read again with what follows it.
+fn mask_formed(text: &str, nfa: &NFA) -> String {
+    let mut pending: Vec<u8> = text.bytes().rev().collect();
+    let mut out = Vec::with_capacity(text.len());
+    let mut states = vec![nfa.start_state(Anchored::No).expect("an unanchored start")];
+    while let Some(byte) = pending.pop() {
+        let state = nfa.next_state(Anchored::No, states[states.len() - 1], byte);
+        out.push(byte);
+        states.push(state);
+        let lens: Vec<usize> = if nfa.is_match(state) {
+            (0..nfa.match_len(state))
+                .map(|i| nfa.pattern_len(nfa.match_pattern(state, i)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if let Some(len) = lens.into_iter().max() {
+            out.truncate(out.len() - len);
+            states.truncate(out.len() + 1);
+            pending.extend(MASK.bytes().rev());
         }
-        text = mask_spans(&text, &formed);
     }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
-/// The byte ranges of `text` that every scanner masks reading `text` with the `spans` starred, and the `spans` themselves, merged.
+/// The byte ranges of `text` that the scanners in turn mask reading `text` with the `spans` starred, and the `spans` themselves, merged where they overlap.
 fn hidden_ranges(text: &str, spans: &[(usize, usize)]) -> Vec<(usize, usize)> {
     let mut bytes = text.as_bytes().to_vec();
-    spans
-        .iter()
-        .for_each(|&(start, end)| bytes[start..end].fill(b'*'));
-    let starred = String::from_utf8_lossy(&bytes);
-    let read = SCANNERS.iter().flat_map(|scan| scan(&starred));
-    merged(
-        read.map(|(start, end, _)| (start, end))
-            .chain(spans.iter().copied())
-            .collect(),
-    )
+    let mut hidden = vec![false; bytes.len()];
+    for &(start, end) in spans {
+        bytes[start..end].fill(b'*');
+    }
+    let mut held = String::from_utf8_lossy(&bytes).into_owned();
+    let mut origin: Vec<Option<usize>> = (0..text.len()).map(Some).collect();
+    for scan in SCANNERS {
+        let edits = scan(&held);
+        let mut next = Vec::with_capacity(origin.len());
+        let mut at = 0;
+        for &(start, end, token) in &edits {
+            next.extend_from_slice(&origin[at..start]);
+            origin[start..end]
+                .iter()
+                .flatten()
+                .for_each(|&from| hidden[from] = true);
+            next.extend(std::iter::repeat_n(None, token.len()));
+            at = end;
+        }
+        next.extend_from_slice(&origin[at..]);
+        (held, origin) = (apply_edits(&held, &edits), next);
+    }
+    let mut ranges = spans.to_vec();
+    let mut at = 0;
+    for run in hidden.chunk_by(|a, b| a == b) {
+        if run[0] {
+            ranges.push((at, at + run.len()));
+        }
+        at += run.len();
+    }
+    merged(ranges)
 }
 
 /// `text` with every registered value masked and every credential a scanner reads in it masked, in the text as it was and in the text with the registered values read as masks.
 fn redact_with(text: &str, known: &[String]) -> String {
-    let spans = known_spans(text, known);
+    redact_by(text, automaton(known).as_ref())
+}
+
+/// [`redact_with`] for the values of an automaton, none when none are registered.
+fn redact_by(text: &str, nfa: Option<&NFA>) -> String {
+    let Some(nfa) = nfa else {
+        return scan_around(text, &[]);
+    };
+    let spans = known_spans(text, nfa);
     if spans.is_empty() {
         return scan_around(text, &spans);
     }
@@ -292,7 +319,7 @@ fn redact_with(text: &str, known: &[String]) -> String {
         ))),
         scan_around(text, &hidden_ranges(text, &spans))
     );
-    mask_formed(masked, known)
+    mask_formed(&masked, nfa)
 }
 
 /// Compose every redactor.  Use this at every boundary that turns a
@@ -469,10 +496,12 @@ fn query_edits(s: &str) -> Vec<Edit> {
         );
         keyword || FAMILIES.iter().any(|f| family(f)) || lower == "sas"
     }
-    let mut edits = Vec::new();
-    let mut rest = s;
-    while let Some(q) = rest.find(['?', '&']) {
-        rest = &rest[q + 1..];
+    let mut edits: Vec<Edit> = Vec::new();
+    for (q, _) in s.match_indices(['?', '&']) {
+        if edits.last().is_some_and(|&(_, end, _)| q < end) {
+            continue;
+        }
+        let rest = &s[q + 1..];
         let key_end = rest
             .find(|c: char| {
                 seeded!(
@@ -493,7 +522,6 @@ fn query_edits(s: &str) -> Vec<Edit> {
                 .find(|c: char| matches!(c, '&' | '\'' | '"' | ')' | ';') || c.is_whitespace())
                 .unwrap_or(after.len());
             edits.push(edit_of(s, &after[..val_len], MASK));
-            rest = &after[val_len..];
         }
     }
     edits
@@ -1923,7 +1951,10 @@ mod tests {
     fn a_hostile_megabyte_of_overlapping_occurrences_is_masked_in_one_pass() {
         let text = "a".repeat(1 << 20);
         assert_eq!(
-            mask_spans(&text, &known_spans(&text, &known(&["aaaaaaaa"]))),
+            mask_spans(
+                &text,
+                &known_spans(&text, &automaton(&known(&["aaaaaaaa"])).unwrap())
+            ),
             MASK
         );
     }
@@ -2035,13 +2066,39 @@ mod tests {
         }
     }
 
-    /// A registered value equal to the word the URL scanner prints leaves that word as the scanner printed it.
+    /// A registered value that holds a tab and `***` hides the userinfo the scanners hid when it was a plain mask.
     #[test]
-    fn a_registered_redacted_stays_in_the_url_scanners_own_output() {
+    fn a_registered_value_holding_a_tab_does_not_expose_what_a_plain_mask_hid() {
+        let text = "?\tQZ;*******mysql://Password=?\tQZ;***db.password ;user:K@h?\tQZ;***";
+        assert_eq!(
+            redact_with(text, &known(&["?\tQZ;***"])),
+            "*******mysql://***@h***"
+        );
+    }
+
+    /// A registered value equal to the word the URL scanner prints is masked there too.
+    #[test]
+    fn a_registered_redacted_is_masked_where_the_url_scanner_prints_it() {
         assert_eq!(
             redact_with("pg://u:pw@h REDACTED", &known(&["REDACTED"])),
-            "pg://REDACTED@h ***"
+            "pg://***@h ***"
         );
+    }
+
+    /// A value the original text does not hold is not looked for in what the scanners print.
+    #[test]
+    fn a_value_the_text_does_not_hold_is_not_looked_for_in_the_scanners_output() {
+        for (value, text, want) in [
+            ("pwd=***&QZ", "x ?pwd=K9&QZ y", "x ?pwd=***&QZ y"),
+            (
+                "REDACTED@hostQZ",
+                "pg://u:K9@hostQZ",
+                "pg://REDACTED@hostQZ",
+            ),
+        ] {
+            assert_eq!(redact_with(text, &known(&[value])), want, "{text}");
+            assert_eq!(redact_by(text, None), want, "{text}");
+        }
     }
 
     /// A value is masked in the encodings rivet itself writes: the URL userinfo set and form encoding, in both hex cases.
@@ -2127,7 +2184,7 @@ mod tests {
         let pairs = two_letter_words(3);
         for text in std::iter::once(String::new()).chain(two_letter_words(9)) {
             for v in &singles {
-                let found = known_spans(&text, std::slice::from_ref(v));
+                let found = known_spans(&text, &automaton(std::slice::from_ref(v)).unwrap());
                 assert_eq!(found, naive_spans(&text, &[v]), "{v:?} in {text:?}");
             }
             if text.len() > 7 {
@@ -2135,7 +2192,7 @@ mod tests {
             }
             for v in &pairs {
                 for w in &pairs {
-                    let found = known_spans(&text, &[v.clone(), w.clone()]);
+                    let found = known_spans(&text, &automaton(&[v.clone(), w.clone()]).unwrap());
                     assert_eq!(
                         found,
                         naive_spans(&text, &[v, w]),
@@ -2248,7 +2305,7 @@ mod tests {
     fn masking_registered_values_is_linear_on_a_hostile_text() {
         use crate::test_budget::{SCALE, SMALL, linear_cost};
         type Shape = (&'static str, fn(usize) -> (Vec<String>, String, String));
-        let shapes: [Shape; 4] = [
+        let shapes: [Shape; 6] = [
             ("blank value, blanks then =", |n| {
                 (
                     known(&["        "]),
@@ -2264,6 +2321,20 @@ mod tests {
             }),
             ("one long value, hits everywhere", |n| {
                 (known(&[&"a".repeat(n / 16)]), "a".repeat(n), MASK.into())
+            }),
+            ("a mask forms a value again, once per value", |n| {
+                (
+                    known(&["Passw0rd*"]),
+                    format!("{}*", "Passw0rd".repeat(n / 8)),
+                    "*".repeat(2 * (n / 8) + 1),
+                )
+            }),
+            ("a mask forms a value again, three masks", |n| {
+                (
+                    known(&["Passw0rd***"]),
+                    format!("{}***", "Passw0rd".repeat(n / 8)),
+                    MASK.into(),
+                )
             }),
             ("ab overlap", |n| {
                 (
@@ -2402,11 +2473,11 @@ mod tests {
     }
 
     /// What the output for `text` shows that it must not: a registered value, or a `letters` or `K` byte that the scanners alone or a plain replace hid.
-    fn exposure(text: &str, known: &[String], letters: &str) -> Option<String> {
-        let out = redact_with(text, known);
+    fn exposure(text: &str, known: &[String], nfa: &NFA, letters: &str) -> Option<String> {
+        let out = redact_by(text, Some(nfa));
         let plain = replace_then_scan(text, known);
-        let scanned = redact_with(text, &[]);
-        let again = redact_with(&out, known);
+        let scanned = redact_by(text, None);
+        let again = redact_by(&out, Some(nfa));
         let held = known
             .iter()
             .any(|f| out.contains(f.as_str()) || again.contains(f.as_str()));
@@ -2422,6 +2493,7 @@ mod tests {
         let mut broken = Vec::new();
         for value in ["QZQZQZQZ", ";QZQZQZQZ", "QZ QZQZQZ"] {
             let known = known(&[value]);
+            let nfa = automaton(&known).unwrap();
             let mut texts: Vec<Vec<usize>> = vec![Vec::new()];
             let mut level = texts.clone();
             for _ in 0..5 {
@@ -2436,7 +2508,7 @@ mod tests {
                     .iter()
                     .map(|&i| if i == 0 { value } else { TOKENS[i] })
                     .collect();
-                if let Some(why) = exposure(&text, &known, "QZ") {
+                if let Some(why) = exposure(&text, &known, &nfa, "QZ") {
                     broken.push(format!("{value:?} {text:?} -> {why}"));
                 }
             }
@@ -2492,44 +2564,47 @@ mod tests {
             "\u{e9}",
             "*",
         ];
-        const VALUE: [&str; 21] = [
-            "Q", "Z", "QZ", ";", "=", "&", "?", "@", ":", "/", " ", "'", "{", "\\", "p", "w", "d",
-            "password", "pwd", "\u{e9}", "*",
+        const VALUE: [&str; 23] = [
+            "Q", "Z", "QZ", ";", "=", "&", "?", "@", ":", "/", " ", "\t", "\n", "'", "{", "\\",
+            "p", "w", "d", "password", "pwd", "\u{e9}", "*",
         ];
         const OTHER: [&str; 12] = [
             "X", "J", "XJ", ";", "=", "&", "?", "@", ":", " ", "pwd", "*",
         ];
         let mut rng = Xorshift(0x9E37_79B9_7F4A_7C15);
         let mut broken = Vec::new();
-        for _ in 0..400_000 {
-            let build = |tokens: &[&str], letters: &str, rng: &mut Xorshift| {
-                let mut value = String::new();
-                while value.len() < 8 || letters_in(&value, letters) == 0 {
-                    value.push_str(rng.token(tokens));
-                }
-                value
-            };
+        let build = |tokens: &[&str], letters: &str, rng: &mut Xorshift| {
+            let mut value = String::new();
+            while value.len() < 8 || letters_in(&value, letters) == 0 {
+                value.push_str(rng.token(tokens));
+            }
+            value
+        };
+        for _ in 0..20_000 {
             let value = build(&VALUE, "QZ", &mut rng);
             let other = build(&OTHER, "XJ", &mut rng);
             let two = rng.below(4) == 0;
-            let mut text = String::new();
-            for _ in 0..3 + rng.below(12) {
-                match rng.token(&TEXT) {
-                    "V" => text.push_str(&value),
-                    "W" if two => text.push_str(&other),
-                    "W" => text.push('a'),
-                    token => text.push_str(token),
-                }
-            }
             let values: Vec<&str> = if two {
                 vec![&value, &other]
             } else {
                 vec![&value]
             };
             let known = known(&values);
+            let nfa = automaton(&known).unwrap();
             let letters = if two { "QZXJ" } else { "QZ" };
-            if let Some(why) = exposure(&text, &known, letters) {
-                broken.push(format!("{values:?} {text:?} -> {why}"));
+            for _ in 0..20 {
+                let mut text = String::new();
+                for _ in 0..3 + rng.below(12) {
+                    match rng.token(&TEXT) {
+                        "V" => text.push_str(&value),
+                        "W" if two => text.push_str(&other),
+                        "W" => text.push('a'),
+                        token => text.push_str(token),
+                    }
+                }
+                if let Some(why) = exposure(&text, &known, &nfa, letters) {
+                    broken.push(format!("{values:?} {text:?} -> {why}"));
+                }
             }
         }
         assert_eq!(
