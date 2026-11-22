@@ -7061,18 +7061,18 @@ seeds:
         cells: ["lib:a_secret_is_masked_in_output_by_construction"]
 
   - name: registered-anchor-masked
-    class: "a registered credential equal to a scanner anchor (a URL scheme such as `postgres`, a key such as `signature` or `db.password`) is masked before the URL, keyword and query scanners run, so the anchor becomes `***` and the scanner leaves ANOTHER credential after it in clear"
+    class: "a registered credential equal to a scanner anchor (a URL scheme such as `postgres`, a key such as `signature` or `db.password`) is masked before the URL, keyword and query scanners run, so the anchor becomes `***` (or, for a percent-encoded key or a value straddling the anchor, is cut) and the scanner leaves ANOTHER credential after it in clear"
     history: "independent verifier on PR 1146 head cd495ddb, 2026-11-21: registered `postgres` printed `***://rivet:StatePw1146x@db...` where main printed `postgres://REDACTED@...`; same for `signature` and `db.password`"
     scope: source
     switch: registered-anchor-masked
     engines:
       postgres:
-        cells: ["lib:a_registered_scanner_anchor_does_not_leave_another_credential_in_clear"]
+        cells: ["lib:a_registered_scanner_anchor_does_not_leave_another_credential_in_clear", "lib:a_registered_query_key_in_any_spelling_does_not_leave_another_credential_in_clear", "lib:a_registered_value_straddling_an_anchor_leaves_no_other_credential_in_clear"]
       mysql:
-        cells: ["lib:a_registered_scanner_anchor_does_not_leave_another_credential_in_clear"]
+        cells: ["lib:a_registered_scanner_anchor_does_not_leave_another_credential_in_clear", "lib:a_registered_query_key_in_any_spelling_does_not_leave_another_credential_in_clear", "lib:a_registered_value_straddling_an_anchor_leaves_no_other_credential_in_clear"]
       mssql:
-        cells: ["lib:a_registered_scanner_anchor_does_not_leave_another_credential_in_clear"]
+        cells: ["lib:a_registered_scanner_anchor_does_not_leave_another_credential_in_clear", "lib:a_registered_query_key_in_any_spelling_does_not_leave_another_credential_in_clear", "lib:a_registered_value_straddling_an_anchor_leaves_no_other_credential_in_clear"]
       mongo:
-        cells: ["lib:a_registered_scanner_anchor_does_not_leave_another_credential_in_clear"]
+        cells: ["lib:a_registered_scanner_anchor_does_not_leave_another_credential_in_clear", "lib:a_registered_query_key_in_any_spelling_does_not_leave_another_credential_in_clear", "lib:a_registered_value_straddling_an_anchor_leaves_no_other_credential_in_clear"]
       oracle:
-        cells: ["lib:a_registered_scanner_anchor_does_not_leave_another_credential_in_clear"]
+        cells: ["lib:a_registered_scanner_anchor_does_not_leave_another_credential_in_clear", "lib:a_registered_query_key_in_any_spelling_does_not_leave_another_credential_in_clear", "lib:a_registered_value_straddling_an_anchor_leaves_no_other_credential_in_clear"]
