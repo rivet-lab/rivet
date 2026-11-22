@@ -1563,20 +1563,15 @@ fn oracle_cdc_a_redo_log_switch_during_mining_is_re_mined_not_failed() {
     );
 }
 
-type Ts9Cells = std::collections::BTreeMap<String, String>;
+type StampCells = std::collections::BTreeMap<String, String>;
 
-/// The TIMESTAMP(9) cells a run delivered, or its refusal.
-fn ts9_verdict(run: &std::process::Output, dir: &Path) -> Result<Ts9Cells, String> {
-    run_cells(run, dir, "ID", &["T9", "Z9", "L9"])
-}
-
-/// What the batch export and the CDC snapshot and change stream of one TIMESTAMP(9) table deliver under one declaration.
+/// What the batch export and the CDC snapshot and change stream of one table of temporal columns deliver under one declaration.
 #[derive(Debug)]
-struct Ts9Legs {
-    batch: Result<Ts9Cells, String>,
-    snapshot: Result<Ts9Cells, String>,
-    stream: Result<Ts9Cells, String>,
-    batch_after: Result<Ts9Cells, String>,
+struct StampLegs {
+    batch: Result<StampCells, String>,
+    snapshot: Result<StampCells, String>,
+    stream: Result<StampCells, String>,
+    batch_after: Result<StampCells, String>,
 }
 
 const TS9_SEED: [&str; 4] = [
@@ -1595,44 +1590,100 @@ const TS9_CHANGES: [&str; 6] = [
     "DELETE FROM {t} WHERE id = 2",
 ];
 
-fn ts9_legs(declared: &str, seed: &[&str], changes: &[&str]) -> Ts9Legs {
-    let t = cdc_table(
-        "ora_ts9",
+fn ts9_legs(declared: &str, seed: &[&str], changes: &[&str]) -> StampLegs {
+    stamp_legs(
         "id NUMBER(10) PRIMARY KEY, t9 TIMESTAMP(9), z9 TIMESTAMP(9) WITH TIME ZONE, l9 TIMESTAMP(9) WITH LOCAL TIME ZONE",
-    );
+        &["T9", "Z9", "L9"],
+        None,
+        declared,
+        seed,
+        changes,
+    )
+}
+
+fn stamp_legs(
+    ddl: &str,
+    cols: &[&str],
+    no_oracle: Option<&str>,
+    declared: &str,
+    seed: &[&str],
+    changes: &[&str],
+) -> StampLegs {
+    let verdict = |run: &std::process::Output, dir: &Path| run_cells(run, dir, "ID", cols);
+    let t = cdc_table("ora_ts9", ddl);
     for row in seed {
         ora_exec(&format!("INSERT INTO {} VALUES ({row})", t.name()));
     }
     let d = tempfile::tempdir().unwrap();
-    let with = |r: Rig| match declared {
-        "" => r,
-        line => r.export_line(line),
+    let with = |r: Rig| {
+        let r = match declared {
+            "" => r,
+            line => r.export_line(line),
+        };
+        match no_oracle {
+            Some(why) => r.no_oracle(why),
+            None => r,
+        }
     };
     let batch_leg = || {
         let r = with(Rig::oracle_batch(t.name()));
         let run = r.run();
-        ts9_verdict(&run, &r.out_dir())
+        verdict(&run, &r.out_dir())
     };
     let batch = batch_leg();
     let ckpt = d.path().join("cdc.ckpt");
     let (snap, stream) = (d.path().join("snap"), d.path().join("stream"));
     let snap_run = with(rig(&t, &ckpt, &snap).cdc("initial: snapshot")).run();
-    let snapshot = ts9_verdict(&snap_run, &snap.join("snapshot"));
+    let snapshot = verdict(&snap_run, &snap.join("snapshot"));
     for change in changes {
         ora_exec(&change.replace("{t}", t.name()));
     }
     let stream_run = with(rig(&t, &ckpt, &stream)).run();
-    Ts9Legs {
+    StampLegs {
         batch,
         snapshot,
-        stream: ts9_verdict(&stream_run, &stream),
+        stream: verdict(&stream_run, &stream),
         batch_after: batch_leg(),
     }
 }
 
-fn ts9_cells(leg: &Result<Ts9Cells, String>, what: &str) -> Ts9Cells {
+fn stamp_cells(leg: &Result<StampCells, String>, what: &str) -> StampCells {
     leg.clone()
         .unwrap_or_else(|e| panic!("{what} was refused: {e}"))
+}
+
+/// The snapshot rows `seeded` and every `(op, id)` change the stream delivered carry the cells the batch export carries, before the changes for a delete and after them otherwise.
+fn assert_stream_is_batch(
+    legs: &StampLegs,
+    label: &str,
+    seeded: std::ops::RangeInclusive<i64>,
+    changed: &[(&str, i64)],
+) {
+    let (batch, after) = (
+        stamp_cells(&legs.batch, "batch"),
+        stamp_cells(&legs.batch_after, "batch after the changes"),
+    );
+    let (snapshot, stream) = (
+        stamp_cells(&legs.snapshot, "snapshot"),
+        stamp_cells(&legs.stream, "stream"),
+    );
+    let cell = |m: &StampCells, k: &str| m.get(k).cloned().unwrap_or_default();
+    for id in seeded {
+        let k = format!(":{id}");
+        assert_eq!(
+            cell(&snapshot, &k),
+            cell(&batch, &k),
+            "{label}: snapshot {id}"
+        );
+    }
+    for (op, id) in changed {
+        let from = if *op == "delete" { &batch } else { &after };
+        assert_eq!(
+            cell(&stream, &format!("{op}:{id}")),
+            cell(from, &format!(":{id}")),
+            "{label}: {op} {id}"
+        );
+    }
 }
 
 /// Under every declaration that delivers a TIMESTAMP(9) column the change stream carries the digits the batch export carries.
@@ -1645,37 +1696,19 @@ fn oracle_cdc_timestamp9_is_delivered_as_batch_delivers_it() {
         "columns: {T9: text, Z9: text, L9: text}",
     ] {
         let legs = ts9_legs(declared, &TS9_SEED, &TS9_CHANGES);
-        let (batch, after) = (
-            ts9_cells(&legs.batch, "batch"),
-            ts9_cells(&legs.batch_after, "batch after the changes"),
+        assert_stream_is_batch(
+            &legs,
+            declared,
+            1..=4,
+            &[
+                ("insert", 10),
+                ("insert", 11),
+                ("insert", 12),
+                ("update", 1),
+                ("update", 3),
+                ("delete", 2),
+            ],
         );
-        let (snapshot, stream) = (
-            ts9_cells(&legs.snapshot, "snapshot"),
-            ts9_cells(&legs.stream, "stream"),
-        );
-        let cell = |m: &Ts9Cells, k: &str| m.get(k).cloned().unwrap_or_default();
-        for id in 1..=4 {
-            let k = format!(":{id}");
-            assert_eq!(
-                cell(&snapshot, &k),
-                cell(&batch, &k),
-                "{declared}: snapshot {id}"
-            );
-        }
-        for (op, id, from) in [
-            ("insert", 10, &after),
-            ("insert", 11, &after),
-            ("insert", 12, &after),
-            ("update", 1, &after),
-            ("update", 3, &after),
-            ("delete", 2, &batch),
-        ] {
-            assert_eq!(
-                cell(&stream, &format!("{op}:{id}")),
-                cell(from, &format!(":{id}")),
-                "{declared}: {op} {id}"
-            );
-        }
     }
 }
 
@@ -1705,4 +1738,61 @@ fn oracle_timestamp9_past_the_nanosecond_range_is_one_refusal_on_batch_and_cdc()
     let want = Err("refused[RIVET_SOURCE_VALUE_UNREPRESENTABLE exit 5]".to_string());
     assert_eq!(legs.batch_after, want);
     assert_eq!(legs.stream, want);
+}
+
+const DATE_DDL: &str = "id NUMBER(10) PRIMARY KEY, d0 DATE";
+
+const DATE_SEED: [&str; 4] = [
+    "1, TO_DATE('2024-02-29 13:14:15', 'YYYY-MM-DD HH24:MI:SS')",
+    "2, TO_DATE('0001-01-01 00:00:00', 'YYYY-MM-DD HH24:MI:SS')",
+    "3, TO_DATE('9999-12-31 23:59:59', 'YYYY-MM-DD HH24:MI:SS')",
+    "4, NULL",
+];
+
+const DATE_CHANGES: [&str; 4] = [
+    "INSERT INTO {t} VALUES (10, TO_DATE('2000-01-01 00:00:00', 'YYYY-MM-DD HH24:MI:SS'))",
+    "INSERT INTO {t} VALUES (11, NULL)",
+    "UPDATE {t} SET d0 = TO_DATE('1999-12-31 23:59:59', 'YYYY-MM-DD HH24:MI:SS') WHERE id = 1",
+    "DELETE FROM {t} WHERE id = 2",
+];
+
+/// An Oracle DATE declared `text` carries the digits the batch export carries on the CDC snapshot and change stream.
+#[test]
+#[ignore = "live: requires the oracle service with LogMiner prerequisites"]
+fn oracle_cdc_date_declared_text_is_the_batch_text() {
+    let _serial = cross_process_serial("oracle_cdc");
+    let legs = stamp_legs(
+        DATE_DDL,
+        &["D0"],
+        None,
+        "columns: {D0: text}",
+        &DATE_SEED,
+        &DATE_CHANGES,
+    );
+    assert_stream_is_batch(
+        &legs,
+        "date as text",
+        1..=4,
+        &[("insert", 10), ("insert", 11), ("update", 1), ("delete", 2)],
+    );
+}
+
+/// A Julian-only DATE (1500-02-29) declared `text` is delivered by the change stream as the batch export delivers it. Open defect: the stream refuses it by SOURCE_CDC_CELL_UNSUPPORTED.
+#[test]
+#[ignore = "live: requires the oracle service with LogMiner prerequisites"]
+fn open_defect_an_oracle_julian_date_declared_text_is_delivered_by_the_stream_as_batch_delivers_it()
+{
+    let _serial = cross_process_serial("oracle_cdc");
+    let julian = "INSERT INTO {t} VALUES (20, TO_DATE('1500-02-29', 'YYYY-MM-DD'))";
+    let legs = stamp_legs(
+        DATE_DDL,
+        &["D0"],
+        Some(
+            "the oracle reads a Julian-only date as text with a leading sign space, so it cannot grade the batch text",
+        ),
+        "columns: {D0: text}",
+        &DATE_SEED,
+        &[julian],
+    );
+    assert_stream_is_batch(&legs, "julian date as text", 1..=4, &[("insert", 20)]);
 }

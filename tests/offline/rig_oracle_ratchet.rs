@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 // 47 -> 48 (2026-11-20): the PostgreSQL json/jsonb/interval/oid/enum array cell delivers INTERVAL[] as ISO text that no ledger delivery row pins; closes when the type ledger carries a delivery row for it.
 // 48 -> 49 (2026-11-21): the Oracle float64-override infinity cell reads a FLOAT(10) through a declared `float64` column whose own rendering is its subject; closes when the type ledger carries a delivery row for the override.
 // 50 -> 51 (2026-11-21, #1144): the PostgreSQL enum-array live cells read every list element back from the delivered Parquet and grade it against their own element checks; the rig oracle reads the source side as PostgreSQL text. Closes when the rig oracle grades a list column against source text.
+// 51 -> 53 (2026-11-22, #1162): the MySQL zero-datetime and Oracle Julian-date open-defect cells deliver a text the oracle's own source read cannot represent (NULL for a zero datetime, a sign-spaced text for a Julian date); closes when the oracle reads both as the server prints them.
 // ratchet-pin: no-oracle-opt-outs (review 2027-02-01) count tests/live/ \.no_oracle\(|run_rivet_ok_no_oracle\(|"RIVET_TEST_NO_ORACLE"|NO_ORACLE_ENV
 
 // Typed declarations in tests/live of what a run that does not exit 0 may leave. History frozen at 2026-11-04.

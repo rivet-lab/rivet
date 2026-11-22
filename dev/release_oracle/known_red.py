@@ -173,6 +173,15 @@ KNOWN_RED: tuple[KnownRed, ...] = (
              alt=tuple(nightly_key("refusal_names_true_cause", kind, cause) for kind, cause in (
                  ("cmd", "printed"), ("cmd", "uncoded"), ("decoy", "uncoded"), ("field", "uncoded"), ("guard", "printed"), ("reader", "the"),
                  ("remedy", "remedy"), ("site", "remedy"), ("source", "named"), ("word", "printed"), ("wording", "remedy")))),
+    _open("live_cdc::open_defect_a_pg_timestamp_declared_text_is_one_verdict_on_batch_and_the_stream",
+          "batch and the stream disagree on a timestamp declared text: batch refused[RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH exit 1], stream delivered",
+          "2026-11-22: a PostgreSQL timestamp declared `text` is refused by batch (the override table reads no text over a timestamp) while the stream writes chrono's text; closes when the override table and the stream agree, either by batch delivering the text or the stream refusing by the same code; found in #1162, not fixed there; the ledger horizon is shared, so the entry is renewed with it"),
+    _open("live_cdc::open_defect_a_mysql_zero_datetime_declared_text_is_the_batch_text_on_the_stream",
+          "assertion `left == right` failed: a zero datetime declared text reads differently on the stream and on batch",
+          "2026-11-22: a MySQL `0000-00-00 00:00:00` declared `text` is `0000-00-00 00:00:00.000000` on batch and NULL on the stream; closes when the stream writes the batch text; found in #1162, not fixed there; the ledger horizon is shared, so the entry is renewed with it"),
+    _open("live_cdc_oracledb::open_defect_an_oracle_julian_date_declared_text_is_delivered_by_the_stream_as_batch_delivers_it",
+          "stream was refused: refused[RIVET_SOURCE_CDC_CELL_UNSUPPORTED exit 5]",
+          "2026-11-22: an Oracle DATE only the Julian calendar holds (1500-02-29) declared `text` is delivered by batch and refused by the stream; closes when the stream delivers the text batch delivers; found in #1162, not fixed there; the ledger horizon is shared, so the entry is renewed with it"),
 )
 
 

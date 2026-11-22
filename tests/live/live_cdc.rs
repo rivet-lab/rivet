@@ -9081,10 +9081,69 @@ fn mysql_cdc_a_datetime_or_timestamp_as_text_is_the_batch_text_byte_for_byte() {
     }
 }
 
-/// A PostgreSQL timestamp declared `text` is refused by the batch export and written in chrono's form by the stream, as before.
+/// A MySQL zero datetime declared `text` is the batch text on the change stream. Open defect: the stream writes NULL.
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn open_defect_a_mysql_zero_datetime_declared_text_is_the_batch_text_on_the_stream() {
+    use mysql::prelude::Queryable as _;
+    let d = tempfile::tempdir().unwrap();
+    let t = unique_name("my_zero_text");
+    let _drop = Table(t.clone());
+    let mut c = conn();
+    c.query_drop(format!("DROP TABLE IF EXISTS {t}")).unwrap();
+    c.query_drop(format!(
+        "CREATE TABLE {t} (id INT PRIMARY KEY, dt DATETIME(6) NULL)"
+    ))
+    .unwrap();
+    c.query_drop(format!(
+        "INSERT INTO {t} VALUES (1, '2024-02-29 13:14:15.5')"
+    ))
+    .unwrap();
+    let declared = "columns: {dt: text}";
+    let leg = |rig: Rig, out: &std::path::Path| {
+        let run = rig.export_line(declared).run();
+        run_cells(&run, out, "id", &["dt"])
+    };
+    let ckpt = d.path().join("cdc.ckpt");
+    let (snap, stream, batch) = (
+        d.path().join("snap"),
+        d.path().join("stream"),
+        d.path().join("batch"),
+    );
+    for out in [&snap, &stream, &batch] {
+        std::fs::create_dir_all(out).unwrap();
+    }
+    leg(
+        cdc_rig(&t, &ckpt, &snap).cdc("initial: snapshot"),
+        &snap.join("snapshot"),
+    )
+    .unwrap_or_else(|e| panic!("snapshot was refused: {e}"));
+    c.query_drop("SET SESSION sql_mode=''").unwrap();
+    c.query_drop(format!("INSERT INTO {t} VALUES (2, '0000-00-00 00:00:00')"))
+        .unwrap();
+    let streamed = leg(cdc_rig(&t, &ckpt, &stream), &stream)
+        .unwrap_or_else(|e| panic!("stream was refused: {e}"));
+    let batched = leg(
+        Rig::mysql_batch(&t)
+            .source_url(MYSQL_CDC_URL)
+            .dest_path(batch.clone())
+            .no_oracle(
+                "the oracle reads a zero datetime as NULL, so it cannot grade the batch text",
+            ),
+        &batch,
+    )
+    .unwrap_or_else(|e| panic!("batch was refused: {e}"));
+    assert_eq!(
+        streamed.get("insert:2"),
+        batched.get(":2"),
+        "a zero datetime declared text reads differently on the stream and on batch"
+    );
+}
+
+/// A PostgreSQL timestamp declared `text` gets one verdict from the batch export and the change stream. Open defect: batch refuses it, the stream writes chrono's text.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
-fn pg_cdc_a_timestamp_declared_text_keeps_the_chrono_text_while_batch_refuses_it() {
+fn open_defect_a_pg_timestamp_declared_text_is_one_verdict_on_batch_and_the_stream() {
     let cdc_db = CdcDb::new("cdc_ts_text");
     let slot = unique_name("rivet_ts_text_slot").to_lowercase();
     let _slot = Slot::new(slot.clone());
@@ -9112,19 +9171,14 @@ fn pg_cdc_a_timestamp_declared_text_keeps_the_chrono_text_while_batch_refuses_it
         .dest_path(out.path().to_path_buf())
         .export_line(declared);
     let batched = run_cells(&batch.run(), out.path(), "id", &["t", "z"]);
-    assert_eq!(
-        batched,
-        Err("refused[RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH exit 1]".to_string())
+    let word = |v: &Result<_, String>| match v {
+        Ok(_) => "delivered".to_string(),
+        Err(e) => e.clone(),
+    };
+    assert!(
+        batched.is_ok() == streamed.is_ok(),
+        "batch and the stream disagree on a timestamp declared text: batch {}, stream {}",
+        word(&batched),
+        word(&streamed)
     );
-    let want: std::collections::BTreeMap<String, String> = [
-        ("insert:2", "2024-02-29 13:14:15 | 2024-02-29 13:14:15"),
-        (
-            "insert:3",
-            "2024-02-29 13:14:15.500 | 2024-02-29 13:14:15.500",
-        ),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_string(), v.to_string()))
-    .collect();
-    assert_eq!(streamed, Ok(want));
 }
