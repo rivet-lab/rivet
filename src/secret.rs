@@ -24,7 +24,7 @@ impl Secret {
         Self::registered(Zeroizing::new(value.into()))
     }
 
-    /// `value` as a secret, registered for masking unless it is a connection string: the URL and keyword scanners mask the password inside one, and the rest of it is not a credential.
+    /// `value` as a secret, registered for masking unless it holds `://` or `=` with a space or `;`: the URL and keyword scanners mask the password inside a connection string, and any other such text (a service-account JSON) is not masked by value.
     fn registered(value: Zeroizing<String>) -> Self {
         let secret = Self(value);
         if seeded!(

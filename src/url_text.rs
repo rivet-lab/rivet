@@ -104,14 +104,18 @@ fn password_span(word: &str) -> Option<(usize, usize)> {
     word.match_indices("://")
         .map(|(scheme_end, _)| (scheme_end, scheme_end + 3))
         .take_while(|(_, userinfo)| *userinfo <= last_colon)
-        .find(|(scheme_end, _)| {
-            word.as_bytes()[..*scheme_end]
-                .iter()
-                .rev()
-                .take_while(|b| is_scheme_byte(**b))
-                .any(u8::is_ascii_alphabetic)
-        })
+        .find(|(scheme_end, _)| ends_in_scheme(&word[..*scheme_end]))
         .map(|(_, userinfo)| (userinfo, at))
+}
+
+/// Whether `before` ends in a URL scheme: a run of scheme bytes with a letter in it.
+pub(crate) fn ends_in_scheme(before: &str) -> bool {
+    before
+        .as_bytes()
+        .iter()
+        .rev()
+        .take_while(|b| is_scheme_byte(**b))
+        .any(u8::is_ascii_alphabetic)
 }
 
 /// A byte a URL scheme may hold after its first letter.
