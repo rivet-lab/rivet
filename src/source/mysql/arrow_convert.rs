@@ -2958,6 +2958,29 @@ mod roast_mysql_bit_decode_tests {
         Ok((!a.is_null(0)).then(|| a.value(0)))
     }
 
+    /// A DATETIME under a text target prints as the one batch text in the Arrow column and in the value-checksum source.
+    #[test]
+    fn a_datetime_in_a_text_column_is_the_same_text_in_the_array_and_the_checksum_source() {
+        use crate::source::value_checksum::CellSource;
+        use arrow::array::StringArray;
+        let columns: Arc<[mysql::Column]> =
+            Arc::from(vec![mysql::Column::new(ColumnType::MYSQL_TYPE_DATETIME)]);
+        let rows = [mysql_common::row::new_row(
+            vec![Value::Date(2024, 2, 29, 23, 59, 58, 123_456)],
+            columns,
+        )];
+        let want = "2024-02-29 23:59:58.123456";
+        let arr = build_array(&DataType::Utf8, 0, &rows, false, "c", None).expect("array");
+        let arr = arr.as_any().downcast_ref::<StringArray>().expect("Utf8");
+        assert_eq!(arr.value(0), want, "array");
+        let source = MysqlCellSource { rows: &rows };
+        assert_eq!(
+            source.utf8(0, 0).as_deref(),
+            Some(want.as_bytes()),
+            "checksum source"
+        );
+    }
+
     /// A text cell on a flag column reads as 0 or 1 only; any other text is refused by code, never delivered as true.
     #[test]
     fn a_text_cell_on_a_flag_column_is_zero_one_or_refused_never_true() {

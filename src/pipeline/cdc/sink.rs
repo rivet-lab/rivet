@@ -1642,6 +1642,68 @@ mod tests {
         }
     }
 
+    /// An Oracle date or timestamp under a text column is handed to the writer as the batch text; every other engine, native type or target is left to the default path.
+    #[test]
+    fn column_cells_rewrites_only_an_oracle_stamp_under_a_text_target() {
+        use crate::types::{RivetType, TypeFidelity, TypeMapping};
+        use arrow::datatypes::DataType;
+        let stamp = chrono::NaiveDate::from_ymd_opt(2000, 1, 1)
+            .and_then(|d| d.and_hms_nano_opt(12, 0, 0, 1))
+            .expect("stamp");
+        let events = [ChangeEvent {
+            after: Some(vec![RivetValue::DateTime(stamp)]),
+            image_names: Some(std::sync::Arc::from(vec!["v".to_string()])),
+            ..insert(0)
+        }];
+        let col = |native: &str| TypeMapping {
+            column_name: "v".into(),
+            source_native_type: native.into(),
+            rivet_type: RivetType::Int64,
+            arrow_type: Some(DataType::Utf8),
+            fidelity: TypeFidelity::Exact,
+            nullable: true,
+            warnings: vec![],
+            delivery: crate::types::Delivery::Native,
+            refusal: None,
+        };
+        let cells = |engine, native: &str, dt: &DataType| {
+            column_cells(
+                &events,
+                (0, &col(native)),
+                (engine, dt),
+                None,
+                (&["v"], None),
+            )
+            .expect("no refusal")
+        };
+        assert_eq!(
+            cells(CdcEngine::Oracle, "TIMESTAMP(9)", &DataType::Utf8),
+            Some(vec![Some(RivetValue::Bytes(
+                b"2000-01-01T12:00:00.000000001".to_vec()
+            ))]),
+            "an Oracle timestamp in a text column"
+        );
+        assert_eq!(
+            cells(CdcEngine::Postgres, "timestamp", &DataType::Utf8),
+            None,
+            "another engine"
+        );
+        assert_eq!(
+            cells(CdcEngine::Oracle, "VARCHAR2", &DataType::Utf8),
+            None,
+            "a non-date native type"
+        );
+        assert_eq!(
+            cells(
+                CdcEngine::Oracle,
+                "TIMESTAMP(9)",
+                &DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None)
+            ),
+            None,
+            "a typed target"
+        );
+    }
+
     /// Every decision `image_cell` makes, one case each.
     #[test]
     fn image_cell_resolves_by_name_and_falls_back_only_at_matching_arity() {
