@@ -250,7 +250,7 @@ def grade_unit(engine: str, u: Unit, cols: list[Col], n: int, runs: dict[str, co
         for c in graded:
             cell = f"{engine}/{c.native}->{u.target}/cdc-{leg}{tag}/{u.fmt}"
             p, check = runs.get(leg_run(leg)), checks.get(leg_run(leg), checks.get("snapshot"))
-            stop = nsn.grade_stop(cell, p, check) if p is not None else Result(cell, REFUSED, NOT_GRADED, "the run of this leg never started")
+            stop = nsn.grade_stop(cell, p, check, c.name) if p is not None else Result(cell, REFUSED, NOT_GRADED, "the run of this leg never started")
             stop = judge_stop(c, u, cell, stop)
             if stop:
                 out.append(stop)
