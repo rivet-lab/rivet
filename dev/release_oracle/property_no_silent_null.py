@@ -703,14 +703,19 @@ def read_files(parts: list[str], fmt: str, key: str = "id"):
         wide: dict[str, str] = {}
         if fmt == "parquet":
             import pyarrow as pa
+            import pyarrow.compute as pc
             import pyarrow.parquet as pq
 
             tbl = pa.concat_tables([pq.read_table(p) for p in parts], promote_options="permissive")
             wide = {f.name.lower(): f"DECIMAL({f.type.precision},{f.type.scale})" for f in tbl.schema if pa.types.is_decimal256(f.type)}
             wide.update({f.name.lower(): "TIMESTAMP WITH TIME ZONE" for f in tbl.schema if pa.types.is_timestamp(f.type) and f.type.unit == "ns" and f.type.tz})
+            wide.update({f.name.lower(): "TIMESTAMP_NS" for f in tbl.schema if pa.types.is_timestamp(f.type) and f.type.unit == "ns" and not f.type.tz})
             for f in tbl.schema:
                 if f.name.lower() in wide:
-                    tbl = tbl.set_column(tbl.schema.get_field_index(f.name), f.name, tbl.column(f.name).cast(pa.string()))
+                    col = tbl.column(f.name).cast(pa.string())
+                    if wide[f.name.lower()] == "TIMESTAMP_NS":
+                        col = pc.replace_substring_regex(col, r"\.?0+$", "")
+                    tbl = tbl.set_column(tbl.schema.get_field_index(f.name), f.name, col)
             con.register("nsn_parts", tbl)
             src = "nsn_parts"
         else:
@@ -1174,10 +1179,10 @@ def nanosecond_read_keeps_every_digit() -> bool:
 
     with tempfile.TemporaryDirectory() as d:
         f = str(Path(d) / "p.parquet")
-        pq.write_table(pa.table({"id": pa.array([1], pa.int32()), "t": pa.array([1782208800123456700], pa.timestamp("ns")), "d": pa.array([49530123456700], pa.time64("ns")), "z": pa.array([1782208800123456700], pa.timestamp("ns", tz="UTC"))}), f)
+        pq.write_table(pa.table({"id": pa.array([1, 2], pa.int32()), "t": pa.array([1782208800123456700, -9223372036854775800], pa.timestamp("ns")), "d": pa.array([49530123456700, 0], pa.time64("ns")), "z": pa.array([1782208800123456700, 0], pa.timestamp("ns", tz="UTC"))}), f)
         desc, rows, _ = read_files([f], "parquet")
     got = rows[1]
-    return got["t"].endswith(".1234567") and got["d"].endswith(".1234567") and "123456700" in got["z"] and desc["z"] == "TIMESTAMP WITH TIME ZONE"
+    return rows[2]["t"] == "1677-09-21 00:12:43.1452242" and got["t"].endswith(".1234567") and got["d"].endswith(".1234567") and "123456700" in got["z"] and desc["z"] == "TIMESTAMP WITH TIME ZONE"
 
 
 def self_test() -> None:
