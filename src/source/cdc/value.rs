@@ -203,15 +203,6 @@ pub(crate) struct FixRefusal {
 }
 
 impl FixRefusal {
-    /// A refusal the engine worded and coded itself.
-    fn coded(reason: String, code: crate::error::Code) -> Self {
-        Self {
-            reason,
-            code: Some(code),
-            by_value: false,
-        }
-    }
-
     /// A readable wire value the declared type cannot hold: under an override it is the value code.
     fn by_value(reason: impl Into<String>) -> Self {
         Self {
@@ -219,6 +210,13 @@ impl FixRefusal {
             code: None,
             by_value: true,
         }
+    }
+}
+
+impl From<FixRefusal> for String {
+    /// The refusal's wording.
+    fn from(r: FixRefusal) -> Self {
+        r.reason
     }
 }
 
@@ -317,15 +315,16 @@ fn flag_value(v: i128) -> Result<bool, FixRefusal> {
     match crate::source::mysql::flag_bool(v) {
         _ if seeded!("cdc-bool-cell-any-nonzero-true", v != 0, false) => Ok(true),
         Some(f) => Ok(f),
-        None => Err(FixRefusal::coded(
-            format!(
+        None => Err(FixRefusal {
+            reason: format!(
                 "is not a flag: a boolean column carries 0 or 1 only. Declare the column an \
                  integer type in `columns:` (for example `int64`) to carry the number, or leave \
                  the column out of the capture, then: {}",
                 crate::source::cdc::checkpoint_identity::RECOVER
             ),
-            crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
-        )),
+            code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
+            by_value: false,
+        }),
     }
 }
 
@@ -366,8 +365,8 @@ fn f64_value(v: &RivetValue) -> Result<f64, FixRefusal> {
         RivetValue::UInt(u) => Ok(*u as f64),
         RivetValue::Bytes(b) => match std::str::from_utf8(b).map(decimal_text_to_f64_exact) {
             Ok(DecimalAsF64::Exact(f)) => Ok(f),
-            Ok(DecimalAsF64::Rounded) => Err(FixRefusal::coded(
-                format!(
+            Ok(DecimalAsF64::Rounded) => Err(FixRefusal {
+                reason: format!(
                     "is a decimal that a float8 cannot hold exactly (it keeps {} significant \
                      digits and the integers up to 2^53). Declare the column `decimal(p,s)` in \
                      `columns:` to keep the digits, or leave the column out of the capture, \
@@ -375,8 +374,9 @@ fn f64_value(v: &RivetValue) -> Result<f64, FixRefusal> {
                     crate::types::decimal::F64_DECIMAL_DIGITS,
                     crate::source::cdc::checkpoint_identity::RECOVER
                 ),
-                crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
-            )),
+                code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
+                by_value: false,
+            }),
             _ => Err(FixRefusal::by_value("is not a number")),
         },
         _ => Err(NO_READING.into()),
@@ -737,8 +737,8 @@ fn list_elem(elem: &DataType, e: &RivetValue) -> Result<ListElem, String> {
     Ok(match (elem, e) {
         (_, V::Null) => ListElem::Null,
         (DataType::Boolean, V::Bool(b)) => ListElem::Bool(*b),
-        (DataType::Int16, V::Int(_)) => ListElem::I16(int_value(e).map_err(|r| r.to_string())?),
-        (DataType::Int32, V::Int(_)) => ListElem::I32(int_value(e).map_err(|r| r.to_string())?),
+        (DataType::Int16, V::Int(_)) => ListElem::I16(int_value(e)?),
+        (DataType::Int32, V::Int(_)) => ListElem::I32(int_value(e)?),
         (DataType::Int64, V::Int(i)) => ListElem::I64(*i),
         (DataType::Float32, V::Float(x)) => ListElem::F32(*x as f32),
         (DataType::Float64, V::Float(x)) => ListElem::F64(*x),
@@ -1162,8 +1162,8 @@ impl MysqlCellFix {
                 self.apply_labels(labels.as_deref().map_err(String::as_str), v)?
             }
             (MysqlCellFix::TimeOfDay, V::TimeMicros(us)) if !crate::types::is_time_of_day(*us) => {
-                return Err(FixRefusal::coded(
-                    seeded!(
+                return Err(FixRefusal {
+                    reason: seeded!(
                         "mysql-cdc-time-remedy-names-the-batch-cast",
                         format!(
                             "{} Cast it in a query, e.g. TIME_TO_SEC(col) or CAST(col AS CHAR)",
@@ -1177,8 +1177,9 @@ impl MysqlCellFix {
                             crate::source::cdc::checkpoint_identity::RECOVER
                         )
                     ),
-                    crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
-                ));
+                    code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
+                    by_value: false,
+                });
             }
             (MysqlCellFix::BinaryPad(w), V::Bytes(b)) => {
                 let mut p = b.clone();
@@ -1204,14 +1205,15 @@ fn epoch_text(b: &[u8]) -> Option<(i64, u32)> {
 
 /// The cell refusal of an ENUM or SET label that has no reading, coded and with the remedy no `columns:` override can replace.
 fn label_refusal(why: impl Into<String>) -> FixRefusal {
-    FixRefusal::coded(
-        format!(
+    FixRefusal {
+        reason: format!(
             "{}. A `columns:` override does not carry the label either: leave the column out of the capture, then: {}",
             why.into(),
             crate::source::cdc::checkpoint_identity::RECOVER
         ),
-        crate::error::codes::SOURCE_CDC_CELL_UNSUPPORTED,
-    )
+        code: Some(crate::error::codes::SOURCE_CDC_CELL_UNSUPPORTED),
+        by_value: false,
+    }
 }
 
 /// The labels a binlog TABLE_MAP carries for one ENUM or SET column whose catalog rendering cannot be trusted; `None` when the table map carries no labels.
@@ -1338,6 +1340,7 @@ mod tests {
     #[test]
     fn a_fix_refusal_displays_its_reason() {
         assert_eq!(FixRefusal::from("a reason").to_string(), "a reason");
+        assert_eq!(String::from(FixRefusal::by_value("by value")), "by value");
         assert_eq!(FixRefusal::by_value("by value").to_string(), "by value");
     }
 
