@@ -5759,6 +5759,65 @@ seeds:
         na: "SQL Server datetime2(7) stays a warn-only Lossy mapping by an earlier decision; the mapping refusal is raised only by the Oracle source"
       mongo:
         na: "a document source has no declared column wire type, so no mapping carries a refusal"
+  - name: oracle-cdc-timestamp-fraction-truncated
+    class: "an Oracle CDC run reads a TIMESTAMP(7..9) value at microseconds where batch and the snapshot read every digit, so a nanosecond column (declared, or delivered as text) arrives as `.123456` for `.123456789` with exit 0"
+    history: "2026-11-22 Oracle TIMESTAMP(9) class: grid cell oracle/TIMESTAMP(9)->text/cdc-insert/parquet WRONG_VALUE; RED on main: stream rows .999999 and .000000 against .999999999 and .000000001"
+    scope: source
+    engines:
+      oracle:
+        switch: oracle-cdc-timestamp-fraction-truncated
+        cells:
+          - oracle_cdc_timestamp9_is_delivered_as_batch_delivers_it
+          - "lib:timestamps_keep_every_digit_and_an_offset_moves_to_utc"
+      postgres:
+        na: "a PostgreSQL timestamp is microsecond-exact, so no fraction digit is cut"
+      mysql:
+        na: "MySQL DATETIME and TIMESTAMP carry at most six fractional digits, so no fraction digit is cut"
+      mssql:
+        na: "the SQL Server change reader hands datetime2(7) as stored text read by its own parser, not the LogMiner text parser this seed cuts"
+      mongo:
+        na: "a BSON date is millisecond natively, so no fraction digit is cut"
+  - name: cdc-ns-out-of-range-uncoded
+    class: "a change-stream value outside 1677-09-21..2262-04-11 under a nanosecond column stops the run as RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH exit 1 where batch refuses the same value as RIVET_SOURCE_VALUE_UNREPRESENTABLE exit 5"
+    history: "2026-11-22 Oracle TIMESTAMP(9) class: RED on main, timestamp_ns over 9999-12-31 23:59:59.999999999, batch exit 5 and stream exit 1"
+    scope: source
+    engines:
+      oracle:
+        switch: cdc-ns-out-of-range-uncoded
+        cells:
+          - oracle_timestamp9_past_the_nanosecond_range_is_one_refusal_on_batch_and_cdc
+          - "lib:a_nanosecond_timestamp_cell_keeps_its_digit_and_refuses_out_of_range"
+      mssql:
+        switch: cdc-ns-out-of-range-uncoded
+        cells:
+          - mssql_datetime2_past_the_nanosecond_range_is_one_refusal_on_batch_and_cdc
+      postgres:
+        na: "PostgreSQL refuses a nanosecond override at the wire check, so no change value reaches the nanosecond builder"
+      mysql:
+        na: "MySQL has no nanosecond builder; a timestamp_ns override is refused at the schema stage"
+      mongo:
+        na: "a document source has no declared column wire type and takes no nanosecond override"
+  - name: cdc-timestamp-text-is-the-batch-text
+    class: "a change-stream timestamp or date under a text column is printed in chrono's form (space separator, variable fraction) where the batch export and the snapshot print the engine's own form, so one column holds two texts for one instant"
+    history: "2026-11-22 verifier of PR #1162: Oracle TIMESTAMP as text batch 2024-02-29T13:14:15.500000, stream 2024-02-29 13:14:15.500; MySQL datetime(6) as text batch .500000, stream .500"
+    scope: source
+    engines:
+      oracle:
+        switch: cdc-timestamp-text-is-the-batch-text
+        cells:
+          - oracle_cdc_timestamp9_is_delivered_as_batch_delivers_it
+          - "lib:an_oracle_or_mysql_stamp_in_a_text_column_prints_as_the_batch_prints_it"
+      mysql:
+        switch: cdc-timestamp-text-is-the-batch-text
+        cells:
+          - mysql_cdc_a_datetime_or_timestamp_as_text_is_the_batch_text_byte_for_byte
+          - "lib:an_oracle_or_mysql_stamp_in_a_text_column_prints_as_the_batch_prints_it"
+      postgres:
+        na: "the batch export refuses text over a timestamp on PostgreSQL, so no batch text exists to differ from; the stream text stays chrono form, an open defect graded by open_defect_a_pg_timestamp_declared_text_is_one_verdict_on_batch_and_the_stream"
+      mssql:
+        na: "the override table reads no text over a datetime2 on SQL Server, so batch and the stream both refuse it by code (mssql_a_datetime2_declared_text_is_one_refusal_on_batch_and_cdc) and no text is written to differ"
+      mongo:
+        na: "a document source reads its document as plain text and refuses any other column retype, so no per-column text override over a date exists"
   - name: pg-temporal-uuid-bytea-array-refused
     class: "a PostgreSQL date[], time[], timestamp[], timestamptz[], uuid[] or bytea[] column is refused by the batch export instead of being delivered as a native list"
     history: "type-known-defects cluster C7 (2026-11-05); RED from this patch: the batch export of a date[] column stops with the element-type refusal and the ledger test fails on the six array rows"

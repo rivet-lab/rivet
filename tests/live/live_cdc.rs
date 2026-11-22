@@ -8987,3 +8987,198 @@ fn pg_cdc_server_text_types_and_separator_values_are_delivered_unchanged() {
         "each cell is the server's own ::text"
     );
 }
+
+const MYSQL_STAMP_COLS: [&str; 6] = ["dt0", "dt3", "dt6", "ts0", "ts6", "dtn"];
+
+const MYSQL_STAMP_SEED: [&str; 4] = [
+    "1, '2024-02-29 13:14:15', '2024-02-29 13:14:15.500', '2024-02-29 13:14:15.123456', '2024-02-29 13:14:15', '2024-02-29 13:14:15.120000', NULL",
+    "2, '2000-01-01 00:00:00', '2000-01-01 00:00:00.000', '2000-01-01 00:00:00.000000', '2000-01-01 00:00:01', '2000-01-01 00:00:01.000000', '2000-01-01 00:00:00.000000'",
+    "3, '9999-12-31 23:59:59', '9999-12-31 23:59:59.999', '9999-12-31 23:59:59.999999', '2037-12-31 23:59:59', '2037-12-31 23:59:59.999999', '2024-02-29 13:14:15.500000'",
+    "4, '0001-01-01 00:00:00', '0001-01-01 00:00:00.001', '0001-01-01 00:00:00.000001', '1970-01-01 00:00:01', '1970-01-01 00:00:01.000001', '2024-02-29 13:14:15.000500'",
+];
+
+const MYSQL_STAMP_CHANGES: [&str; 5] = [
+    "INSERT INTO {t} VALUES (10, '2024-03-01 01:02:03', '2024-03-01 01:02:03.250', '2024-03-01 01:02:03.250000', '2024-03-01 01:02:03', '2024-03-01 01:02:03.250000', '2024-03-01 01:02:03.250000')",
+    "INSERT INTO {t} VALUES (11, '2024-03-02 00:00:00', '2024-03-02 00:00:00.000', '2024-03-02 00:00:00.000000', '2024-03-02 00:00:01', '2024-03-02 00:00:01.000000', '2024-03-02 00:00:00.000000')",
+    "UPDATE {t} SET dt6 = '2024-02-29 13:14:15.500000', ts6 = '2024-02-29 13:14:15.500000' WHERE id = 1",
+    "UPDATE {t} SET dt6 = '2024-02-29 13:14:15.000000', dtn = NULL WHERE id = 3",
+    "DELETE FROM {t} WHERE id = 2",
+];
+
+/// A MySQL datetime and timestamp column declared `text` carries the same bytes on the batch export, the CDC snapshot and the change stream.
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn mysql_cdc_a_datetime_or_timestamp_as_text_is_the_batch_text_byte_for_byte() {
+    use mysql::prelude::Queryable as _;
+    let d = tempfile::tempdir().unwrap();
+    let t = unique_name("my_stamp_text");
+    let _drop = Table(t.clone());
+    let mut c = conn();
+    c.query_drop(format!("DROP TABLE IF EXISTS {t}")).unwrap();
+    c.query_drop(format!(
+        "CREATE TABLE {t} (id INT PRIMARY KEY, dt0 DATETIME, dt3 DATETIME(3), dt6 DATETIME(6), \
+         ts0 TIMESTAMP NULL, ts6 TIMESTAMP(6) NULL, dtn DATETIME(6) NULL)"
+    ))
+    .unwrap();
+    for row in MYSQL_STAMP_SEED {
+        c.query_drop(format!("INSERT INTO {t} VALUES ({row})"))
+            .unwrap();
+    }
+    let declared = "columns: {dt0: text, dt3: text, dt6: text, ts0: text, ts6: text, dtn: text}";
+    let leg = |rig: Rig, out: &std::path::Path| {
+        let run = rig.export_line(declared).run();
+        run_cells(&run, out, "id", &MYSQL_STAMP_COLS)
+    };
+    let batch_leg = |name: &str| {
+        let out = d.path().join(name);
+        std::fs::create_dir_all(&out).unwrap();
+        leg(
+            Rig::mysql_batch(&t)
+                .source_url(MYSQL_CDC_URL)
+                .dest_path(out.clone()),
+            &out,
+        )
+    };
+    let batch = batch_leg("batch").unwrap_or_else(|e| panic!("batch was refused: {e}"));
+    let ckpt = d.path().join("cdc.ckpt");
+    let (snap, stream) = (d.path().join("snap"), d.path().join("stream"));
+    for out in [&snap, &stream] {
+        std::fs::create_dir_all(out).unwrap();
+    }
+    let snapshot = leg(
+        cdc_rig(&t, &ckpt, &snap).cdc("initial: snapshot"),
+        &snap.join("snapshot"),
+    )
+    .unwrap_or_else(|e| panic!("snapshot was refused: {e}"));
+    for change in MYSQL_STAMP_CHANGES {
+        c.query_drop(change.replace("{t}", &t)).unwrap();
+    }
+    let stream = leg(cdc_rig(&t, &ckpt, &stream), &stream)
+        .unwrap_or_else(|e| panic!("stream was refused: {e}"));
+    let after = batch_leg("after").unwrap_or_else(|e| panic!("batch after was refused: {e}"));
+    let cell = |m: &std::collections::BTreeMap<String, String>, k: String| {
+        m.get(&k).cloned().unwrap_or_default()
+    };
+    for id in 1..=4 {
+        assert_eq!(
+            cell(&snapshot, format!(":{id}")),
+            cell(&batch, format!(":{id}")),
+            "snapshot {id}"
+        );
+    }
+    for (op, id, from) in [
+        ("insert", 10, &after),
+        ("insert", 11, &after),
+        ("update", 1, &after),
+        ("update", 3, &after),
+        ("delete", 2, &batch),
+    ] {
+        assert_eq!(
+            cell(&stream, format!("{op}:{id}")),
+            cell(from, format!(":{id}")),
+            "{op} {id}"
+        );
+    }
+}
+
+/// A MySQL zero datetime declared `text` is the batch text on the change stream. Open defect: the stream writes NULL.
+#[test]
+#[ignore = "live+gate-only: requires docker compose --profile cdc mysql-cdc"]
+fn open_defect_a_mysql_zero_datetime_declared_text_is_the_batch_text_on_the_stream() {
+    use mysql::prelude::Queryable as _;
+    let d = tempfile::tempdir().unwrap();
+    let t = unique_name("my_zero_text");
+    let _drop = Table(t.clone());
+    let mut c = conn();
+    c.query_drop(format!("DROP TABLE IF EXISTS {t}")).unwrap();
+    c.query_drop(format!(
+        "CREATE TABLE {t} (id INT PRIMARY KEY, dt DATETIME(6) NULL)"
+    ))
+    .unwrap();
+    c.query_drop(format!(
+        "INSERT INTO {t} VALUES (1, '2024-02-29 13:14:15.5')"
+    ))
+    .unwrap();
+    let declared = "columns: {dt: text}";
+    let leg = |rig: Rig, out: &std::path::Path| {
+        let run = rig.export_line(declared).run();
+        run_cells(&run, out, "id", &["dt"])
+    };
+    let ckpt = d.path().join("cdc.ckpt");
+    let (snap, stream, batch) = (
+        d.path().join("snap"),
+        d.path().join("stream"),
+        d.path().join("batch"),
+    );
+    for out in [&snap, &stream, &batch] {
+        std::fs::create_dir_all(out).unwrap();
+    }
+    leg(
+        cdc_rig(&t, &ckpt, &snap).cdc("initial: snapshot"),
+        &snap.join("snapshot"),
+    )
+    .unwrap_or_else(|e| panic!("snapshot was refused: {e}"));
+    c.query_drop("SET SESSION sql_mode=''").unwrap();
+    c.query_drop(format!("INSERT INTO {t} VALUES (2, '0000-00-00 00:00:00')"))
+        .unwrap();
+    let streamed = leg(cdc_rig(&t, &ckpt, &stream), &stream)
+        .unwrap_or_else(|e| panic!("stream was refused: {e}"));
+    let batched = leg(
+        Rig::mysql_batch(&t)
+            .source_url(MYSQL_CDC_URL)
+            .dest_path(batch.clone())
+            .no_oracle(
+                "the oracle reads a zero datetime as NULL, so it cannot grade the batch text",
+            ),
+        &batch,
+    )
+    .unwrap_or_else(|e| panic!("batch was refused: {e}"));
+    assert_eq!(
+        streamed.get("insert:2"),
+        batched.get(":2"),
+        "a zero datetime declared text reads differently on the stream and on batch"
+    );
+}
+
+/// A PostgreSQL timestamp declared `text` gets one verdict from the batch export and the change stream. Open defect: batch refuses it, the stream writes chrono's text.
+#[test]
+#[ignore = "live+gate-only: requires docker compose postgres (wal_level=logical)"]
+fn open_defect_a_pg_timestamp_declared_text_is_one_verdict_on_batch_and_the_stream() {
+    let cdc_db = CdcDb::new("cdc_ts_text");
+    let slot = unique_name("rivet_ts_text_slot").to_lowercase();
+    let _slot = Slot::new(slot.clone());
+    let mut c = cdc_db.connect();
+    c.batch_execute("CREATE TABLE public.tst (id int primary key, t timestamp, z timestamptz)")
+        .unwrap();
+    c.execute(
+        "SELECT pg_create_logical_replication_slot($1, 'test_decoding')",
+        &[&slot],
+    )
+    .unwrap();
+    c.batch_execute(
+        "INSERT INTO public.tst VALUES (2, '2024-02-29 13:14:15', '2024-02-29 13:14:15+00'), \
+         (3, '2024-02-29 13:14:15.5', '2024-02-29 13:14:15.5+00')",
+    )
+    .unwrap();
+    let declared = "columns: {t: text, z: text}";
+    let stream = Rig::pg_cdc("public.tst", &slot)
+        .source_url(cdc_db.url())
+        .export_line(declared);
+    let streamed = run_cells(&stream.run(), &stream.out_dir(), "id", &["t", "z"]);
+    let out = tempfile::tempdir().unwrap();
+    let batch = Rig::pg_batch("public.tst")
+        .source_url(cdc_db.url())
+        .dest_path(out.path().to_path_buf())
+        .export_line(declared);
+    let batched = run_cells(&batch.run(), out.path(), "id", &["t", "z"]);
+    let word = |v: &Result<_, String>| match v {
+        Ok(_) => "delivered".to_string(),
+        Err(e) => e.clone(),
+    };
+    assert!(
+        batched.is_ok() == streamed.is_ok(),
+        "batch and the stream disagree on a timestamp declared text: batch {}, stream {}",
+        word(&batched),
+        word(&streamed)
+    );
+}

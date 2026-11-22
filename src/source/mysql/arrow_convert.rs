@@ -555,7 +555,7 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
             Some(Value::Float(v)) => Some(Cow::Owned(v.to_string().into_bytes())),
             Some(Value::Double(v)) => Some(Cow::Owned(v.to_string().into_bytes())),
             Some(Value::Date(y, m, d, hh, mi, sx, us)) => Some(Cow::Owned(
-                format!("{y:04}-{m:02}-{d:02} {hh:02}:{mi:02}:{sx:02}.{us:06}").into_bytes(),
+                date_text(*y, [*m, *d, *hh, *mi, *sx], *us).into_bytes(),
             )),
             _ => None,
         }
@@ -921,6 +921,15 @@ fn null_or_refuse(column: &str, target: &DataType, cell: Option<&Value>) -> Resu
     }
 }
 
+/// A MySQL DATE or DATETIME as the batch text prints it, shared with the change stream.
+fn date_text(y: u16, [m, d, h, mi, s]: [u8; 5], us: u32) -> String {
+    crate::types::mysql_datetime_text(
+        (i32::from(y), u32::from(m), u32::from(d)),
+        (u32::from(h), u32::from(mi), u32::from(s)),
+        us,
+    )
+}
+
 fn build_array(
     arrow_type: &DataType,
     col_idx: usize,
@@ -1070,9 +1079,7 @@ fn build_array(
                     Some(Value::Float(v)) => b.append_value(v.to_string()),
                     Some(Value::Double(v)) => b.append_value(v.to_string()),
                     Some(Value::Date(y, m, d, h, mi, s, us)) => {
-                        b.append_value(format!(
-                            "{y:04}-{m:02}-{d:02} {h:02}:{mi:02}:{s:02}.{us:06}"
-                        ));
+                        b.append_value(date_text(*y, [*m, *d, *h, *mi, *s], *us));
                     }
                     other => {
                         null_or_refuse(column, arrow_type, other)?;
@@ -3042,6 +3049,29 @@ mod roast_mysql_bit_decode_tests {
             .downcast_ref::<BooleanArray>()
             .expect("Boolean");
         Ok((!a.is_null(0)).then(|| a.value(0)))
+    }
+
+    /// A DATETIME under a text target prints as the one batch text in the Arrow column and in the value-checksum source.
+    #[test]
+    fn a_datetime_in_a_text_column_is_the_same_text_in_the_array_and_the_checksum_source() {
+        use crate::source::value_checksum::CellSource;
+        use arrow::array::StringArray;
+        let columns: Arc<[mysql::Column]> =
+            Arc::from(vec![mysql::Column::new(ColumnType::MYSQL_TYPE_DATETIME)]);
+        let rows = [mysql_common::row::new_row(
+            vec![Value::Date(2024, 2, 29, 23, 59, 58, 123_456)],
+            columns,
+        )];
+        let want = "2024-02-29 23:59:58.123456";
+        let arr = build_array(&DataType::Utf8, 0, &rows, false, "c", None).expect("array");
+        let arr = arr.as_any().downcast_ref::<StringArray>().expect("Utf8");
+        assert_eq!(arr.value(0), want, "array");
+        let source = MysqlCellSource { rows: &rows };
+        assert_eq!(
+            source.utf8(0, 0).as_deref(),
+            Some(want.as_bytes()),
+            "checksum source"
+        );
     }
 
     /// A text cell on a flag column reads as 0 or 1 only; any other text is refused by code, never delivered as true.
