@@ -587,3 +587,153 @@ fn bigquery_validates_mssql_type_matrix_parquet() {
     assert_eq!(a["s_amount"], "123455");
     assert_eq!(a["null_count"], "3", "note_all_null IS NULL for every row");
 }
+
+// ─── Oracle ledger rows → rivet run → rivet load → BigQuery ────────────────
+
+/// One delivering Oracle ledger row: its native type, sample literals and the BigQuery type `rivet load` builds today.
+#[cfg(feature = "oracle")]
+struct OracleLeg {
+    native: String,
+    sample: Vec<String>,
+    want: String,
+    declared_timestamp: bool,
+}
+
+/// The delivering rows of the Oracle ledger with their BigQuery leg (`today` beside a marker).
+#[cfg(feature = "oracle")]
+fn oracle_ledger_legs() -> Vec<OracleLeg> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/type-capability-matrix.yaml");
+    let doc: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let s = |v: &serde_yaml_ng::Value| v.as_str().map(str::to_string);
+    doc["engines"]["oracle"]["rows"]
+        .as_sequence()
+        .expect("engines.oracle.rows")
+        .iter()
+        .filter(|r| !r["delivery"].is_null())
+        .map(|r| {
+            let leg = &r["bigquery"];
+            OracleLeg {
+                native: s(&r["native_type"]).expect("native_type"),
+                sample: r["sample"]
+                    .as_sequence()
+                    .expect("sample")
+                    .iter()
+                    .map(|v| s(v).expect("sample literal"))
+                    .collect(),
+                want: s(&leg["today"])
+                    .or_else(|| s(&leg["type"]))
+                    .expect("a delivering Oracle row names its bigquery type"),
+                declared_timestamp: r["refuses"].is_string(),
+            }
+        })
+        .filter(|l| !l.sample.is_empty())
+        .collect()
+}
+
+/// The BigQuery type with its length or precision parameters dropped.
+#[cfg(feature = "oracle")]
+fn bq_bare_type(t: &str) -> String {
+    t.split('(').next().unwrap().trim().to_string()
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires the oracle service + BigQuery creds + GCS"]
+fn bigquery_validates_oracle_type_matrix_parquet() {
+    require_alive(LiveService::Oracle);
+    let Some(bq) = BqLive::from_env("bq_ora") else {
+        return;
+    };
+    let legs = oracle_ledger_legs();
+    let t = OracleTable::create(
+        "bq_ora",
+        &std::iter::once("id NUMBER(10) PRIMARY KEY".to_string())
+            .chain(
+                legs.iter()
+                    .enumerate()
+                    .map(|(i, l)| format!("c{i} {}", l.native)),
+            )
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    let rows = legs.iter().map(|l| l.sample.len()).max().unwrap();
+    for i in 0..rows {
+        let cols = (0..legs.len())
+            .map(|c| format!("c{c}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let vals = legs
+            .iter()
+            .map(|l| l.sample.get(i).cloned().unwrap_or_else(|| "NULL".into()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        ora_exec(&format!(
+            "INSERT INTO {} (id, {cols}) VALUES ({}, {vals})",
+            t.name(),
+            i + 1
+        ));
+    }
+    let declared = format!(
+        "columns: {{{}}}",
+        legs.iter()
+            .enumerate()
+            .filter(|(_, l)| l.declared_timestamp)
+            .map(|(i, _)| format!("C{i}: timestamp"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let rig = Rig::oracle_batch(t.name())
+        .export_line(&declared)
+        .dest_gcs_live(&bq.bucket, &bq.prefix)
+        .top_line(&bq.load_line(""));
+    rig.run_ok();
+    rig.load_ok(&[], &[]);
+
+    let tables = bq.read_bq_rows(&format!(
+        "SELECT table_name FROM `{}.{}`.INFORMATION_SCHEMA.TABLES",
+        bq.project, bq.dataset
+    ));
+    let table = tables
+        .iter()
+        .filter_map(|r| r["table_name"].as_str())
+        .find(|n| n.eq_ignore_ascii_case(t.name()))
+        .unwrap_or_else(|| panic!("no BigQuery table for {}; saw {tables:?}", t.name()))
+        .to_string();
+    assert_eq!(bq.read_bq_count(&table), rows.to_string());
+    let cols = bq.read_bq_rows(&format!(
+        "SELECT column_name, data_type FROM `{}.{}`.INFORMATION_SCHEMA.COLUMNS WHERE table_name = '{table}'",
+        bq.project, bq.dataset
+    ));
+    let got: HashMap<String, String> = cols
+        .iter()
+        .map(|r| {
+            (
+                r["column_name"].as_str().unwrap().to_uppercase(),
+                bq_bare_type(r["data_type"].as_str().unwrap()),
+            )
+        })
+        .collect();
+    let bad: Vec<String> = legs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| {
+            let have = got
+                .get(&format!("C{i}"))
+                .map(String::as_str)
+                .unwrap_or("<missing>");
+            (have != bq_bare_type(&l.want)).then(|| {
+                format!(
+                    "{}: ledger bigquery type `{}`, the warehouse holds `{have}`",
+                    l.native, l.want
+                )
+            })
+        })
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "{} ledger violations:\n{}",
+        bad.len(),
+        bad.join("\n")
+    );
+}
