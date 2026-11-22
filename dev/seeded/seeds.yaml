@@ -7281,3 +7281,20 @@ seeds:
         na: "a MongoDB field is read into its one `document` column; no `columns:` override retypes a decimal there"
       oracle:
         cells: ["lib:narrows_flags_a_decimal_float8_override_past_fifteen_digits_as_lossy", "lib:a_float8_override_over_a_wide_decimal_is_reported_lossy"]
+
+  - name: narrowing-override-reported-exact
+    class: "a `columns:` override that keeps fewer fraction digits than a result column holds (timestamp over an Oracle TIMESTAMP(9) or a SQL Server datetime2(7), on batch and on CDC) truncates the finer digits while the type report calls the column exact, so the run exits 0 with fidelity exact over changed values"
+    history: "no_silent_null full tier WRONG_VALUE + INTEGRITY_BLIND (known_red 2026-11-11, oracle TIMESTAMP(9) -> timestamp / timestamp_tz, mssql DATETIME2 -> timestamp / timestamp_tz); fidelity was derived from the target type alone; owner decision 2026-11-20: a narrowing override is delivered and declared lossy; verifier 2026-11-22: the CDC path never reached the check, an alias and a CAST were graded by the catalog name"
+    scope: source
+    switch: narrowing-override-reported-exact
+    engines:
+      oracle:
+        cells: ["lib:a_time_override_narrowing_a_result_column_is_lossy_on_batch_and_stream", "lib:the_stream_resolver_reports_a_narrowing_override_lossy_as_check_does", an_oracle_batch_time_override_is_graded_by_the_result_column_it_lands_on, an_oracle_cdc_time_override_is_graded_as_the_batch_override, oracle_batch_timestamp9_is_refused_until_declared_under_every_policy]
+      mssql:
+        cells: ["lib:a_time_override_narrowing_a_result_column_is_lossy_on_batch_and_stream", "lib:the_stream_resolver_reports_a_narrowing_override_lossy_as_check_does", a_mssql_batch_time_override_is_graded_by_the_result_column_it_lands_on, a_mssql_cdc_time_override_is_graded_as_the_batch_override]
+      postgres:
+        na: "PostgreSQL timestamp, timestamptz and time hold microseconds at most, so no time override keeps fewer digits than the source"
+      mysql:
+        na: "MySQL datetime, timestamp and time hold microseconds at most, so no time override keeps fewer digits than the source"
+      mongo:
+        na: "a BSON date holds milliseconds and a Mongo export has no `columns:` time override over it, so nothing narrows"
