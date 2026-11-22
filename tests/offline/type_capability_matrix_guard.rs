@@ -453,16 +453,8 @@ const KNOWN_DEFECTS: &[&str] = &[
     "postgres:INET",
     "postgres:CIDR",
     "postgres:UUID (ClickHouse)",
-    // 2026-11-05: six array rows moved from unsupported to delivered; a NULL array still loads as [] on ClickHouse, closes with the ClickHouse array-NULL step.
-    "postgres:DATE[] (ClickHouse)",
-    "postgres:TIMESTAMP[] (ClickHouse)",
-    "postgres:TIMESTAMPTZ[] (ClickHouse)",
-    "postgres:TIME[] (ClickHouse)",
+    // 2026-11-22: eight array rows left this list, a NULL array is refused at the ClickHouse load (RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE); UUID[] keeps its FixedString(16) defect.
     "postgres:UUID[] (ClickHouse)",
-    "postgres:BYTEA[] (ClickHouse)",
-    "postgres:TEXT[] (ClickHouse)",
-    "postgres:INTEGER[] (ClickHouse)",
-    "postgres:DOUBLE PRECISION[] (ClickHouse)",
     "mssql:UNIQUEIDENTIFIER (ClickHouse)",
     "oracle:TIMESTAMP(9)",
 ]; // ratchet-pin: end

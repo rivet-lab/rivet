@@ -19,9 +19,9 @@ use std::sync::Arc;
 const HEAD_ROWS: usize = 1024;
 
 /// One column chunk held in memory at its file offset, served as the file.
-struct Chunk {
-    offset: u64,
-    bytes: Bytes,
+pub(super) struct Chunk {
+    pub(super) offset: u64,
+    pub(super) bytes: Bytes,
 }
 
 impl Length for Chunk {
@@ -31,6 +31,10 @@ impl Length for Chunk {
 }
 
 impl Chunk {
+    fn holds(&self, start: u64) -> bool {
+        start >= self.offset && start - self.offset < self.bytes.len() as u64
+    }
+
     fn slice(&self, start: u64, len: Option<usize>) -> parquet::errors::Result<Bytes> {
         let outside = || ParquetError::General(format!("byte {start} is outside the chunk read"));
         let from = usize::try_from(start.checked_sub(self.offset).ok_or_else(outside)?)
@@ -55,6 +59,35 @@ impl ChunkReader for Chunk {
 
     fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<Bytes> {
         self.slice(start, Some(length))
+    }
+}
+
+/// Several column chunks of one file held in memory, served as the file.
+pub(super) struct Chunks(pub(super) Vec<Chunk>);
+
+impl Chunks {
+    fn at(&self, start: u64) -> parquet::errors::Result<&Chunk> {
+        self.0.iter().find(|c| c.holds(start)).ok_or_else(|| {
+            ParquetError::General(format!("byte {start} is outside the chunks read"))
+        })
+    }
+}
+
+impl Length for Chunks {
+    fn len(&self) -> u64 {
+        self.0.iter().map(Length::len).max().unwrap_or(0)
+    }
+}
+
+impl ChunkReader for Chunks {
+    type T = Cursor<Bytes>;
+
+    fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
+        self.at(start)?.get_read(start)
+    }
+
+    fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<Bytes> {
+        self.at(start)?.get_bytes(start, length)
     }
 }
 

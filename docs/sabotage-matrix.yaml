@@ -492,7 +492,7 @@ scenarios:
 
   - id: refusal_load_value_out_of_target_range
     what: "RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE: a value the warehouse type cannot hold"
-    postgres: { gap: "no cell asserts this refusal by code; the walk needs a ClickHouse or BigQuery load cell: refuse twice, a wider declared type, a fixed source value, and one wrong remedy" }
+    postgres: { gap: "a_null_array_is_refused_not_loaded_as_an_empty_array (live_clickhouse_load.rs) asserts the NULL-array refusal by code and exit 5, and the_remedies_the_null_array_refusal_names_load loads both remedies; the walk (refuse twice, a wider declared type, a fixed source value, one wrong remedy) still needs a ClickHouse or BigQuery load cell" }
     mysql:    { na: "the refusal is the load target's and does not depend on the source engine: the postgres column carries the row" }
     mssql:    { na: "the refusal is the load target's and does not depend on the source engine: the postgres column carries the row" }
     mongo:    { na: "the refusal is the load target's and does not depend on the source engine: the postgres column carries the row" }

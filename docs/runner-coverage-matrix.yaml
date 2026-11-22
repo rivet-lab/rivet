@@ -586,6 +586,24 @@ scenarios:
     mongo_parallel: { na: "a Mongo export has no Oracle column" }
     cdc:            { test: oracle_batch_and_cdc_deliver_number_and_float_specials_alike }
 
+  - id: clickhouse_load_refuses_a_null_array
+    what: "a part holding a NULL list column value is refused by `rivet load` into ClickHouse with RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE (exit 5) naming the column and the `COALESCE(col, '{}') AS col` and `col::text AS col` remedies, before a table is created or a row inserted, because a ClickHouse Array cannot be NULL and the load would turn it into []; an empty list, a list with a NULL element and a change-log delete row (non-key columns NULL) load unchanged (one seam: checked_part_rows reads the list leaf columns of every part, for a full load and a change log alike)"
+    single:         { test: a_null_array_is_refused_not_loaded_as_an_empty_array }
+    chunked:        { na: "shared seam: checked_part_rows runs in the load over the committed parts, whichever runner wrote them" }
+    chunked_checkpoint: { na: "shared seam (checked_part_rows in the load, over the committed parts)" }
+    keyset:         { na: "shared seam (checked_part_rows in the load, over the committed parts)" }
+    mongo_parallel: { na: "a Mongo export has no list column" }
+    cdc:            { test: a_postgres_cdc_delete_of_a_row_with_an_array_column_still_loads_and_a_null_array_insert_is_refused }
+
+  - id: clickhouse_cdc_null_array_refusal_names_the_rebaseline
+    what: "the NULL-list refusal of a `mode: cdc` export (a change-log part or the baseline) names the re-baseline recipe and a source fix, never a `query:` rewrite its config cannot hold, and says the staged part keeps the refusal until the stream is re-baselined; after the source fix and the printed re-baseline the stream loads and the view equals the source (one seam: null_list_remedy keyed by the loader's part role)"
+    single:         { na: "a batch export has a `query:`, and keeps the COALESCE and ::text remedies (a_null_array_is_refused_not_loaded_as_an_empty_array)" }
+    chunked:        { na: "a batch export has a `query:`, and keeps the COALESCE and ::text remedies" }
+    chunked_checkpoint: { na: "a batch export has a `query:`, and keeps the COALESCE and ::text remedies" }
+    keyset:         { na: "a batch export has a `query:`, and keeps the COALESCE and ::text remedies" }
+    mongo_parallel: { na: "a Mongo export has no list column" }
+    cdc:            { test: a_cdc_null_array_refusal_names_the_rebaseline_not_a_query_and_the_rebaseline_loads }
+
   - id: check_plan_doctor_refuse_what_run_refuses
     what: "a batch export, or the pending baseline leg of a `mode: cdc` export (`initial: snapshot` or `backfill:` with no `snapshot/_SUCCESS` marker: `pending_snapshot_legs`), whose column the export's `format:` cannot write, or that no Arrow type carries and no `columns:` entry declares, is refused before any read by `check`, `doctor` and `run` (and by `plan` for a batch export) with the same code (RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED, RIVET_TYPE_UNSAFE_MAPPING): one `plan_open_columns` (format::refuse_unwritable_columns) and one `refuse_unmapped` in `probe_mappings`, both reached through `plan_run`"
     single:         { test: a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mysql }

@@ -5237,6 +5237,38 @@ seeds:
         cells:
           - "lib:an_existing_change_log_that_this_load_would_corrupt_is_refused"
 
+  - name: clickhouse-null-array-loads-as-empty
+    class: "a ClickHouse Array cannot be NULL, so a NULL array column value loads as [] and is the same value as an empty array, exit 0"
+    history: "owner decision 2026-11-22 (DEFECT_PG_NULL_LIST_EMPTY_CH): every PostgreSQL array type loaded a NULL as []; the load now refuses a part holding a NULL list before any write"
+    scope: target
+    switch: clickhouse-null-array-loads-as-empty
+    engines:
+      bigquery:
+        na: "the seed edits src/load/clickhouse.rs, which only a ClickHouse load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
+      snowflake:
+        na: "the seed edits src/load/clickhouse.rs, which only a ClickHouse load runs; Snowflake loads through its own loader (src/load/snowflake.rs)"
+      clickhouse:
+        cells:
+          - a_null_array_is_refused_not_loaded_as_an_empty_array
+          - a_postgres_cdc_delete_of_a_row_with_an_array_column_still_loads_and_a_null_array_insert_is_refused
+          - "lib:a_null_list_is_refused_before_any_write_and_an_empty_list_or_null_element_passes"
+
+  - name: clickhouse-cdc-null-array-names-a-query
+    class: "the NULL-array refusal of a CDC export names a `query:` rewrite its config cannot hold, and no remedy that works"
+    history: "PR 1173 verifier F1: a mode: cdc export has no query:, and the part holding the NULL stays staged, so only a source fix plus the re-baseline recovers"
+    scope: target
+    switch: clickhouse-cdc-null-array-names-a-query
+    engines:
+      bigquery:
+        na: "the seed edits src/load/clickhouse.rs, which only a ClickHouse load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
+      snowflake:
+        na: "the seed edits src/load/clickhouse.rs, which only a ClickHouse load runs; Snowflake loads through its own loader (src/load/snowflake.rs)"
+      clickhouse:
+        cells:
+          - a_cdc_null_array_refusal_names_the_rebaseline_not_a_query_and_the_rebaseline_loads
+          - a_cdc_baseline_holding_a_null_array_is_refused_with_the_rebaseline_and_loads_after_it
+          - "lib:a_null_list_is_refused_before_any_write_and_an_empty_list_or_null_element_passes"
+
   - name: cleanup-removes-a-pointer-that-changed-hands
     class: "`cleanup_source` removes a directory's canonical manifest.json and _SUCCESS on the strength of a read taken before the warehouse jobs ran, so an extract that commits during the jobs loses its markers and the dataset reads as not whole, exit 0"
     history: "found 2026-11-01 by a rivet-verifier probe of cleanup_target_leased (canonical_run_id read once, maybe_cleanup removes unconditionally); RED on main 2026-11-01 (lib cell: r2's canonical manifest.json absent after the load cleaned r1)"

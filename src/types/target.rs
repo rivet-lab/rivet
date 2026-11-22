@@ -1256,8 +1256,8 @@ mod clickhouse {
                 if let (Some(inner), Some(inner_autoload)) =
                     (inner_r.target_type, inner_r.autoload_type)
                 {
-                    let null_note = "a ClickHouse Array cannot be NULL: a NULL list loads as [], \
-                                     the same value as an empty list";
+                    let null_note = "a ClickHouse Array cannot be NULL: a NULL list is refused at load \
+                                     (RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE)";
                     let note = match &inner_r.note {
                         Some(n) => format!("{null_note}; each element: {n}"),
                         None => null_note.to_string(),
@@ -1984,7 +1984,7 @@ mod tests {
             list.note
                 .as_deref()
                 .unwrap_or("")
-                .contains("a NULL list loads as []")
+                .contains("a NULL list is refused at load (RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE)")
         );
         let uuids = ch(&RivetType::List {
             inner: Box::new(RivetType::Uuid),
