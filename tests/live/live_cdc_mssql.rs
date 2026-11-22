@@ -2790,3 +2790,92 @@ fn mssql_cdc_table_switched_to_another_over_its_baseline_is_refused_and_switched
         },
     );
 }
+
+/// A datetime2(7) past the nanosecond range under `timestamp_ns` is refused by one code on the batch export and the change stream.
+#[test]
+#[ignore = "live: requires docker compose mssql with SQL Server Agent + CDC"]
+fn mssql_datetime2_past_the_nanosecond_range_is_one_refusal_on_batch_and_cdc() {
+    let _serial = cross_process_serial("mssql_cdc");
+    let table = unique_name("rivet_cdc_ns");
+    let ci = format!("dbo_{table}");
+    mssql_cdc_drop_table(&format!("dbo.{table}"));
+    mssql_cdc_exec(&format!(
+        "CREATE TABLE dbo.{table}(id INT PRIMARY KEY, t7 DATETIME2(7))"
+    ));
+    enable_cdc(&table, &ci);
+    let _guard = MssqlCdcTable {
+        table: table.clone(),
+        ci: ci.clone(),
+    };
+    mssql_cdc_exec(&format!(
+        "INSERT INTO dbo.{table} VALUES (1, '2000-01-01 00:00:00.1234567')"
+    ));
+    wait_for_capture(&ci, 1);
+    let declared = "columns: {t7: timestamp_ns}";
+    let rig = Rig::mssql_cdc(&table, &ci)
+        .cdc("initial: snapshot")
+        .cdc("until_current: true")
+        .export_line(declared);
+    let out = rig.out_dir();
+    let snapshot = run_cells(&rig.run(), &out.join("snapshot"), "id", &["t7"]);
+    assert!(
+        snapshot.as_ref().is_ok_and(|m| m.len() == 1),
+        "the in-range row is delivered: {snapshot:?}"
+    );
+    mssql_cdc_exec(&format!(
+        "INSERT INTO dbo.{table} VALUES (2, '9999-12-31 23:59:59.9999999')"
+    ));
+    wait_for_capture(&ci, 2);
+    let want = Err("refused[RIVET_SOURCE_VALUE_UNREPRESENTABLE exit 5]".to_string());
+    assert_eq!(run_cells(&rig.run(), &out, "id", &["t7"]), want, "stream");
+    let batch_out = tempfile::tempdir().unwrap();
+    let batch = Rig::mssql_batch(&table)
+        .source_url(MSSQL_CDC_URL)
+        .dest_path(batch_out.path().to_path_buf())
+        .export_line(declared);
+    assert_eq!(
+        run_cells(&batch.run(), batch_out.path(), "id", &["t7"]),
+        want,
+        "batch"
+    );
+}
+
+/// SQL Server refuses `text` over a datetime2 column by one code on the batch export and the change stream.
+#[test]
+#[ignore = "live: requires docker compose mssql with SQL Server Agent + CDC"]
+fn mssql_a_datetime2_declared_text_is_one_refusal_on_batch_and_cdc() {
+    let _serial = cross_process_serial("mssql_cdc");
+    let table = unique_name("rivet_cdc_tx");
+    let ci = format!("dbo_{table}");
+    mssql_cdc_drop_table(&format!("dbo.{table}"));
+    mssql_cdc_exec(&format!(
+        "CREATE TABLE dbo.{table}(id INT PRIMARY KEY, t7 DATETIME2(7))"
+    ));
+    enable_cdc(&table, &ci);
+    let _guard = MssqlCdcTable {
+        table: table.clone(),
+        ci: ci.clone(),
+    };
+    mssql_cdc_exec(&format!(
+        "INSERT INTO dbo.{table} VALUES (1, '2000-01-01 00:00:00.5')"
+    ));
+    wait_for_capture(&ci, 1);
+    let declared = "columns: {t7: text}";
+    let rig = Rig::mssql_cdc(&table, &ci)
+        .cdc("initial: snapshot")
+        .cdc("until_current: true")
+        .export_line(declared);
+    let streamed = run_cells(&rig.run(), &rig.out_dir(), "id", &["t7"]);
+    let batch_out = tempfile::tempdir().unwrap();
+    let batch = Rig::mssql_batch(&table)
+        .source_url(MSSQL_CDC_URL)
+        .dest_path(batch_out.path().to_path_buf())
+        .export_line(declared);
+    let batched = run_cells(&batch.run(), batch_out.path(), "id", &["t7"]);
+    assert_eq!(batched, streamed, "one verdict on both legs");
+    assert_eq!(
+        batched,
+        Err("refused[RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH exit 1]".to_string()),
+        "a datetime2 declared text is refused by code"
+    );
+}
