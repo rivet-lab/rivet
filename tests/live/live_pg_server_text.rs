@@ -208,6 +208,21 @@ pub(crate) const FAMILIES: &[(&str, &str, &str, &str, &str)] = &[
         "'{}'",
         "'{NULL,0.01}'",
     ),
+    ("num", "numeric", "1.50", "'NaN'", "-0.000001234"),
+    (
+        "numw",
+        "numeric",
+        "123456789012345678901234567890.123456789012",
+        "'-Infinity'",
+        "0",
+    ),
+    (
+        "nums",
+        "numeric[]",
+        "'{1.50,-0.000001234}'",
+        "'{}'",
+        "'{NULL,123456789012345678901234567890.123456789012}'",
+    ),
 ];
 
 /// The table's DDL columns and the INSERT of three populated rows and one all-NULL row.
@@ -347,4 +362,298 @@ fn a_table_of_every_unmapped_type_is_delivered_as_server_text_range_postgres() {
 #[ignore = "live: requires docker compose up -d postgres"]
 fn a_table_of_every_unmapped_type_is_delivered_as_server_text_incremental_postgres() {
     the_table_of_unmapped_types_is_delivered_as_server_text("incremental");
+}
+
+/// A `tsvector` column under a `text` override is delivered as the server's own text, never reshaped.
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn a_tsvector_under_a_text_override_is_the_servers_text_postgres() {
+    let (table, _guard) = ENGINE.create("tsv_ovr", "id BIGINT PRIMARY KEY, t tsvector");
+    ENGINE.exec(&format!(
+        "INSERT INTO {table} (id, t) VALUES (1, 'a:1 b:2'::tsvector), (2, 'a b c'), \
+         (3, to_tsvector('simple', 'the quick fox')), (4, 'x:3A,4B'::tsvector), (5, NULL), (6, $q$'a b c'$q$)"
+    ));
+    let rig = ENGINE.rig(&table).export_line("columns: {t: text}");
+    let out = rig.run();
+    assert!(
+        out.status.success(),
+        "a tsvector under `columns: text` is delivered:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (_, got) = delivered(&rig);
+    let want = source_text(&table);
+    assert_eq!(got.len(), want.len(), "the row count");
+    for (g, w) in got.iter().zip(&want) {
+        assert_eq!(
+            g[1], w[1],
+            "id {:?} delivered {:?} where the server prints {:?}",
+            g[0], g[1], w[1]
+        );
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn a_numeric_the_catalog_types_keeps_its_decimal_and_a_bare_one_is_server_text_postgres() {
+    let (table, _guard) = ENGINE.create(
+        "num_typed",
+        "id BIGINT PRIMARY KEY, hinted NUMERIC(10,2), bare NUMERIC",
+    );
+    ENGINE.exec(&format!(
+        "INSERT INTO {table} VALUES (1, 1.50, 2.5000000000), (2, -99999999.99, 'NaN'), (3, NULL, NULL)"
+    ));
+    let rig = ENGINE.rig(&table);
+    let out = rig.run();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let schema = read_all_parts(&rig.out_dir())[0].schema();
+    let kind = |c: &str| schema.field_with_name(c).unwrap().data_type().clone();
+    assert_eq!(
+        kind("hinted"),
+        arrow::datatypes::DataType::Decimal128(10, 2)
+    );
+    assert_eq!(kind("bare"), arrow::datatypes::DataType::Utf8);
+    let (names, got) = delivered(&rig);
+    let want = source_text(&table);
+    let bare = names.iter().position(|n| n == "bare").unwrap();
+    for (g, w) in got.iter().zip(&want) {
+        assert_eq!(g[bare], w[bare], "bare of id {:?}", g[0]);
+    }
+}
+
+/// The `export_schema` row a run of the previous release that refused a bare `numeric` and a `numeric[]` left behind: the native names.
+const BASELINE_A_REFUSED_RUN_LEFT: &str = r#"[{"name":"id","type":"Int64"},{"name":"b","type":"numeric"},{"name":"a","type":"_numeric"},{"name":"v","type":"Decimal128(10, 2)"}]"#;
+
+/// Overwrite the table's drift baseline with `columns_json` and return how many rows it touched.
+fn set_baseline(rig: &Rig, columns_json: &str) -> usize {
+    let db = rig.config_path().parent().unwrap().join(".rivet_state.db");
+    rusqlite::Connection::open(db)
+        .expect("the state db")
+        .execute(
+            "UPDATE export_schema SET columns_json = ?1 WHERE export_name = ?2",
+            [columns_json, rig.export_name()],
+        )
+        .expect("the baseline update")
+}
+
+/// After an upgrade from a refused run, `mode` under `policy_line` delivers the rows once and reads no drift in the columns the baseline named natively.
+fn a_baseline_a_refused_run_left_is_taken_without_drift(mode: &str, policy_line: Option<&str>) {
+    let (table, _guard) = ENGINE.create(
+        "num_upg",
+        "id BIGINT PRIMARY KEY, b NUMERIC, a NUMERIC[], v NUMERIC(10,2)",
+    );
+    let rig = ENGINE.rig(&table);
+    let rig = match mode {
+        "full" => rig,
+        "keyset" => ENGINE.staged(rig, "chunked", &["chunk_by_key: id", "chunk_size: 2"]),
+        "range" => ENGINE.staged(rig, "chunked", &["chunk_column: id", "chunk_size: 2"]),
+        "incremental" => ENGINE.staged(rig, "incremental", &["cursor_column: id"]),
+        other => panic!("no batch mode `{other}`"),
+    };
+    let rig = match policy_line {
+        Some(line) => rig.export_line(line),
+        None => rig,
+    };
+    rig.run_ok();
+    assert_eq!(
+        set_baseline(&rig, BASELINE_A_REFUSED_RUN_LEFT),
+        1,
+        "the previous release's baseline is in place"
+    );
+    ENGINE.exec(&format!(
+        "INSERT INTO {table} VALUES (1, 1.5, '{{2.5,NULL}}', 3.25), (2, 'NaN', '{{}}', NULL), (3, NULL, NULL, -1.00)"
+    ));
+    let out = rig.run();
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        out.status.success(),
+        "{mode} after the upgrade must deliver:\n{said}"
+    );
+    assert!(
+        !said.contains("type changed") && !said.contains("schema drift"),
+        "{mode}: the upgrade is not drift:\n{said}"
+    );
+    let (_, got) = delivered(&rig);
+    let ids: Vec<_> = got.iter().map(|r| r[0].clone().unwrap()).collect();
+    assert_eq!(ids, ["1", "2", "3"], "{mode}: every row exactly once");
+    let again = rig.run();
+    assert!(
+        again.status.success(),
+        "{mode}: the run after it: {}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    if mode == "incremental" {
+        let (_, after) = delivered(&rig);
+        assert_eq!(after.len(), 3, "incremental: no row twice");
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_upgraded_full_export_under_fail_reads_no_drift_postgres() {
+    a_baseline_a_refused_run_left_is_taken_without_drift("full", Some("on_schema_drift: fail"));
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_upgraded_keyset_export_under_fail_reads_no_drift_postgres() {
+    a_baseline_a_refused_run_left_is_taken_without_drift("keyset", Some("on_schema_drift: fail"));
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_upgraded_range_export_under_fail_reads_no_drift_postgres() {
+    a_baseline_a_refused_run_left_is_taken_without_drift("range", Some("on_schema_drift: fail"));
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_upgraded_incremental_export_under_fail_reads_no_drift_postgres() {
+    a_baseline_a_refused_run_left_is_taken_without_drift(
+        "incremental",
+        Some("on_schema_drift: fail"),
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_upgraded_range_export_under_the_default_policy_reads_no_drift_postgres() {
+    a_baseline_a_refused_run_left_is_taken_without_drift("range", None);
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_upgraded_incremental_export_under_the_default_policy_reads_no_drift_postgres() {
+    a_baseline_a_refused_run_left_is_taken_without_drift("incremental", None);
+}
+
+/// After a clean first run, a column of source type `ddl` added to the table is drift: `fail` refuses with exit 4 naming it, any other policy reports it as added.
+fn a_column_added_after_the_baseline_is_drift(
+    mode: &str,
+    policy_line: Option<&str>,
+    ddl: &str,
+    fails: bool,
+) {
+    let (table, _guard) = ENGINE.create("added_col", "id BIGINT PRIMARY KEY, v INT");
+    let rig = ENGINE.rig(&table);
+    let rig = match mode {
+        "full" => rig,
+        "keyset" => ENGINE.staged(rig, "chunked", &["chunk_by_key: id", "chunk_size: 2"]),
+        "range" => ENGINE.staged(rig, "chunked", &["chunk_column: id", "chunk_size: 2"]),
+        "incremental" => ENGINE.staged(rig, "incremental", &["cursor_column: id"]),
+        other => panic!("no batch mode `{other}`"),
+    };
+    let rig = match policy_line {
+        Some(line) => rig.export_line(line),
+        None => rig,
+    };
+    let rig = rig.a_failed_run_may_leave(
+        &[Leftover::OrphanPart, Leftover::FileLog],
+        "the drift gate fails the run after its parts are written",
+    );
+    ENGINE.exec(&format!("INSERT INTO {table} VALUES (1, 10), (2, 20)"));
+    rig.run_ok();
+    ENGINE.exec(&format!("ALTER TABLE {table} ADD COLUMN x {ddl}"));
+    ENGINE.exec(&format!("INSERT INTO {table} VALUES (3, 30, NULL)"));
+    let out = rig.run();
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    if fails {
+        assert_eq!(
+            out.status.code(),
+            Some(4),
+            "{mode} {ddl}: a column added after the baseline is drift under `fail`:\n{said}"
+        );
+        assert!(
+            said.contains("1 column(s) added, 0 removed, 0 retyped"),
+            "{mode} {ddl}: the refusal counts the added column:\n{said}"
+        );
+    } else {
+        assert!(out.status.success(), "{mode} {ddl}:\n{said}");
+        assert!(
+            said.contains("schema changed!") && said.contains("added: x"),
+            "{mode} {ddl}: the added column is reported:\n{said}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_added_inet_column_is_drift_under_fail_full_postgres() {
+    a_column_added_after_the_baseline_is_drift("full", Some("on_schema_drift: fail"), "inet", true);
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_added_tsvector_column_is_drift_under_fail_full_postgres() {
+    a_column_added_after_the_baseline_is_drift(
+        "full",
+        Some("on_schema_drift: fail"),
+        "tsvector",
+        true,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_added_bare_numeric_column_is_drift_under_fail_full_postgres() {
+    a_column_added_after_the_baseline_is_drift(
+        "full",
+        Some("on_schema_drift: fail"),
+        "numeric",
+        true,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_added_inet_column_is_drift_under_fail_keyset_postgres() {
+    a_column_added_after_the_baseline_is_drift(
+        "keyset",
+        Some("on_schema_drift: fail"),
+        "inet",
+        true,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_added_inet_column_is_drift_under_fail_range_postgres() {
+    a_column_added_after_the_baseline_is_drift(
+        "range",
+        Some("on_schema_drift: fail"),
+        "inet",
+        true,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_added_inet_column_is_drift_under_fail_incremental_postgres() {
+    a_column_added_after_the_baseline_is_drift(
+        "incremental",
+        Some("on_schema_drift: fail"),
+        "inet",
+        true,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_added_inet_column_is_reported_under_the_default_policy_incremental_postgres() {
+    a_column_added_after_the_baseline_is_drift("incremental", None, "inet", false);
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_added_tsvector_column_is_reported_under_the_default_policy_incremental_postgres() {
+    a_column_added_after_the_baseline_is_drift("incremental", None, "tsvector", false);
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_added_bare_numeric_column_is_reported_under_the_default_policy_incremental_postgres() {
+    a_column_added_after_the_baseline_is_drift("incremental", None, "numeric", false);
 }

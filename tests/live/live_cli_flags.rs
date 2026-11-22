@@ -762,13 +762,10 @@ fn check_strict_exits_zero_for_safe_types() {
 fn check_strict_exits_nonzero_for_unsafe_type() {
     require_alive(LiveService::Postgres);
 
-    // Unbounded NUMERIC (no precision/scale) maps to RivetType::Unsupported
-    // → TypeFidelity::Unsupported → is_unsafe_for_strict_mode() = true.
-    // rivet check --strict must exit non-zero and report the violation.
     let name = unique_name("rivet_strict_tbl");
     let mut c = pg_connect();
     c.batch_execute(&format!(
-        "CREATE TABLE {name} (id BIGINT PRIMARY KEY, val NUMERIC);"
+        "CREATE TABLE {name} (id BIGINT PRIMARY KEY, val NUMERIC(10,2));"
     ))
     .expect("create strict-test table");
 
@@ -790,6 +787,7 @@ fn check_strict_exits_nonzero_for_unsafe_type() {
     let out = tempfile::tempdir().unwrap();
     let rig = Rig::pg_batch(&name)
         .query(&format!("SELECT id, val FROM {name}"))
+        .export_line("columns: {val: float8}")
         .dest_path(out.path().to_path_buf());
 
     let result = rig
@@ -802,7 +800,7 @@ fn check_strict_exits_nonzero_for_unsafe_type() {
 
     assert!(
         !result.status.success(),
-        "check --strict must exit non-zero for an unbounded NUMERIC column; \
+        "check --strict must exit non-zero for a NUMERIC column declared float8; \
          stdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&result.stderr)

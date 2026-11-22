@@ -1839,23 +1839,32 @@ fn postgres_batch_and_cdc_deliver_every_ledger_row_alike() {
         bad.join("\n")
     );
 
-    let (st, _g2) = stand(&refused, "ledger_pg_refused", false);
-    st.cdc.run_ok();
-    let n = seed_refused(&refused, &st);
-    st.cdc.run_ok();
-    let t = st.table.clone();
-    let bad = duckdb_refused_verdict(&refused, &st, n, &|col| {
-        Rig::pg_batch(&t)
-            .export_named(&format!("{t}_{col}"))
-            .source_url(POSTGRES_CDC_URL)
-            .query(&format!("SELECT id, {col} FROM {t}"))
-    });
-    assert!(
-        bad.is_empty(),
-        "{} violations on batch-refused rows:\n{}",
-        bad.len(),
-        bad.join("\n")
-    );
+    for want in ["NUMERIC", "NUMERIC[]", "TSVECTOR"] {
+        assert!(
+            lg.rows.iter().any(|r| r.native == want),
+            "the delivered side must grade `{want}`: {:?}",
+            lg.rows.iter().map(|r| &r.native).collect::<Vec<_>>()
+        );
+    }
+    if !refused.is_empty() {
+        let (st, _g2) = stand(&refused, "ledger_pg_refused", false);
+        st.cdc.run_ok();
+        let n = seed_refused(&refused, &st);
+        st.cdc.run_ok();
+        let t = st.table.clone();
+        let bad = duckdb_refused_verdict(&refused, &st, n, &|col| {
+            Rig::pg_batch(&t)
+                .export_named(&format!("{t}_{col}"))
+                .source_url(POSTGRES_CDC_URL)
+                .query(&format!("SELECT id, {col} FROM {t}"))
+        });
+        assert!(
+            bad.is_empty(),
+            "{} violations on batch-refused rows:\n{}",
+            bad.len(),
+            bad.join("\n")
+        );
+    }
 }
 
 #[test]
