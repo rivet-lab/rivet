@@ -235,7 +235,13 @@ fn pow10_i256(n: u32) -> Option<i256> {
 /// The integer a text cell holds when the whole cell is that integer; a fraction (`1.0` too), an exponent, a space or trailing text is no integer.
 pub fn whole_int_text(bv: &[u8]) -> Option<i128> {
     let (v, used) = atoi::FromRadix10SignedChecked::from_radix_10_signed_checked(bv);
-    v.filter(|_| used == bv.len() && bv.last().is_some_and(u8::is_ascii_digit))
+    v.filter(|_| {
+        seeded!(
+            "integer-text-cut-to-leading-digits",
+            used > 0,
+            used == bv.len() && bv.last().is_some_and(u8::is_ascii_digit)
+        )
+    })
 }
 
 /// Decimal text as the nearest float of type `F` (correctly rounded); `None` for non-numeric text.

@@ -171,8 +171,8 @@ first batch with the same code.
 A value of a readable wire type that the declared type cannot hold (an Oracle `DATE`
 with a time of day under `date`, an Oracle `RAW` of the wrong length or SQL Server
 text that is not a uuid under `uuid`, a SQL Server decimal a narrower scale would
-round, a MySQL text cell that is not a whole integer under an integer override, an
-integer past the declared integer width) is refused
+round (on a CDC stream as on batch), a MySQL text cell that is not a whole integer under an integer override (`1.0` and
+`1 ` are not), an integer past the declared integer width) is refused
 `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5) naming the column and the value, on a
 batch run and on a CDC snapshot or stream alike. A refusal decided by the column's
 type alone (PostgreSQL, SQL Server and Oracle numeric, float or text under an integer

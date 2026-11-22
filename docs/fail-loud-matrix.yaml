@@ -57,7 +57,7 @@ scenarios:
     oracle:   { test: a_declared_override_delivers_the_source_or_refuses_by_code_oracle }
 
   - id: override_value_refusal_one_code_on_every_leg
-    what: "a value a `columns:` override cannot hold → RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5) on the batch converter, the CDC snapshot leg and the CDC stream leg alike; RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH (exit 1) only for a wire type the declared type cannot read"
+    what: "a value a `columns:` override cannot hold → RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5) on the batch converter, the CDC snapshot leg and the CDC stream leg alike; RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH (exit 1) only for a wire type the declared type cannot read; a decimal with more fraction digits than the declared scale is a value refusal on the stream as on batch"
     postgres: { test: an_override_refusal_by_value_carries_the_value_code_as_batch_does }
     mysql:    { test: an_override_refusal_by_value_carries_the_value_code_as_batch_does }
     mssql:    { test: an_override_refusal_by_value_carries_the_value_code_as_batch_does }
@@ -65,9 +65,9 @@ scenarios:
     oracle:   { test: oracle_cdc_a_date_override_refuses_a_time_of_day_not_drops_it }
 
   - id: override_integer_text_whole_cell_only
-    what: "a text cell under an integer override is an integer only when the whole cell is one: `1.5`, `1e3`, `12abc`, empty and `-` are refused RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5), never cut to a leading prefix"
+    what: "a text cell under an integer override is an integer only when the whole cell is one: `1.5`, `1.0`, `1e3`, `12abc`, a cell with a space, empty and `-` are refused RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5) on the batch converter, the CDC snapshot and the CDC stream through one reading (`whole_int_text`), never cut to a leading prefix or truncated to its integer part"
     postgres: { na: "a text column under an integer override is refused at plan time on every leg (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH), so no text cell is read as an integer" }
-    mysql:    { test: a_text_cell_is_an_integer_only_when_the_whole_cell_is }
+    mysql:    { test: whole_int_text_accepts_only_a_whole_cell_integer }
     mssql:    { na: "a text column under an integer override is refused at plan time on every leg (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH), so no text cell is read as an integer" }
     mongo:    { na: "a MongoDB field has no text-to-integer column override on the batch or change-stream path" }
     oracle:   { na: "a VARCHAR2 column under an integer override is refused at plan time on every leg (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH), so no text cell is read as an integer" }
