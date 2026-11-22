@@ -2298,9 +2298,10 @@ fn a_composite_key_with_a_hot_first_value_exports_every_row_once_postgres() {
 }
 
 /// A composite string key with a hot first value on Oracle, which has no catalog row estimate, exports every row once; it runs as one range.
+#[cfg(feature = "oracle")]
 #[test]
 #[ignore = "live: requires docker compose up -d oracle"]
-fn a_composite_key_with_a_hot_first_value_exports_every_row_once_oracle() {
+fn a_composite_key_with_a_hot_first_value_keeps_every_key_pair_oracle() {
     require_alive(LiveService::Oracle);
     let t = OracleTable::create(
         "ora_hot_first",
@@ -2325,8 +2326,8 @@ fn a_composite_key_with_a_hot_first_value_exports_every_row_once_oracle() {
 
 /// A composite key with a hot first value on SQL Server exports every row once, in more than one range.
 #[test]
-#[ignore = "live+gate-only: requires docker compose up -d mssql"]
-fn a_composite_key_with_a_hot_first_value_exports_every_row_once_mssql() {
+#[ignore = "live: requires docker compose up -d mssql"]
+fn a_composite_key_with_a_hot_first_value_keeps_every_key_pair_mssql() {
     require_alive(LiveService::Mssql);
     let table = unique_name("pk_hot_first_ms");
     mssql_exec(&format!("DROP TABLE IF EXISTS {table}"));
@@ -2352,6 +2353,7 @@ fn a_composite_key_with_a_hot_first_value_exports_every_row_once_mssql() {
 }
 
 /// UUIDv7 bursts far apart in time on Oracle (VARCHAR2(36)) are recut into balanced ranges: every row once.
+#[cfg(feature = "oracle")]
 #[test]
 #[ignore = "live: requires docker compose up -d oracle"]
 fn uuid_v7_bursts_are_recut_into_balanced_ranges_oracle() {
@@ -2379,7 +2381,7 @@ fn uuid_v7_bursts_are_recut_into_balanced_ranges_oracle() {
 
 /// UUIDv7 bursts on SQL Server (uniqueidentifier) stay on the percentile path: every row once, balanced.
 #[test]
-#[ignore = "live+gate-only: requires docker compose up -d mssql"]
+#[ignore = "live: requires docker compose up -d mssql"]
 fn uuid_v7_bursts_keep_row_percentiles_mssql() {
     require_alive(LiveService::Mssql);
     let table = unique_name("pk_v7_ms");
@@ -2418,6 +2420,7 @@ fn uuid_v7_bursts_keep_row_percentiles_mssql() {
 }
 
 /// A skewed integer key on Oracle, whose catalog gives no row estimate, is recut by density: every row once, NUMBER(19) key.
+#[cfg(feature = "oracle")]
 #[test]
 #[ignore = "live: requires docker compose up -d oracle"]
 fn a_skewed_integer_keyset_is_recut_by_density_oracle() {
@@ -2446,6 +2449,7 @@ fn a_skewed_integer_keyset_is_recut_by_density_oracle() {
 }
 
 /// A skewed uuid key stored as VARCHAR2(36) on Oracle is recut by density: every row once, the nil uuid among them.
+#[cfg(feature = "oracle")]
 #[test]
 #[ignore = "live: requires docker compose up -d oracle"]
 fn a_skewed_uuid_keyset_is_recut_by_density_oracle() {
@@ -2482,7 +2486,7 @@ fn a_skewed_uuid_keyset_is_recut_by_density_oracle() {
 
 /// A skewed integer key on SQL Server is recut by density although sys.partitions counts 200k, under the limit: every row once, balanced.
 #[test]
-#[ignore = "live+gate-only: requires docker compose up -d mssql"]
+#[ignore = "live: requires docker compose up -d mssql"]
 fn a_skewed_integer_keyset_is_recut_by_density_mssql() {
     require_alive(LiveService::Mssql);
     let table = unique_name("pk_skew_ms");
@@ -2512,7 +2516,7 @@ fn a_skewed_integer_keyset_is_recut_by_density_mssql() {
 
 /// A skewed uniqueidentifier key on SQL Server stays on the percentile path, never the recut: every row once, the nil uuid among them.
 #[test]
-#[ignore = "live+gate-only: requires docker compose up -d mssql"]
+#[ignore = "live: requires docker compose up -d mssql"]
 fn a_skewed_uniqueidentifier_keyset_keeps_row_percentiles_mssql() {
     require_alive(LiveService::Mssql);
     let table = unique_name("pk_skew_uid_ms");

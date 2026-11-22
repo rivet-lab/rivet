@@ -457,8 +457,8 @@ pub(crate) fn sample_key_boundaries(
     let mut bounds: Vec<String> = Vec::with_capacity(parts.saturating_sub(1));
     let seeked = seek_bounds(src, plan, &k, &fence, (parts, int_parts), &mut bounds);
     let ends = match seeked {
-        Ok(Seeked::Ends(ends)) => ends,
-        Ok(Seeked::Percentile) => {
+        Ok(SeekOutcome::Ends(ends)) => ends,
+        Ok(SeekOutcome::Percentile) => {
             log::info!(
                 "export '{}': parallel keyset path: percentile (key has no axis, catalog estimate under {ROW_PERCENTILE_ROWS} rows)",
                 plan.export_name
@@ -856,7 +856,7 @@ fn seek_bounds(
     fence: &[String],
     (parts, int_parts): (usize, usize),
     bounds: &mut Vec<String>,
-) -> Result<Seeked> {
+) -> Result<SeekOutcome> {
     let st = plan.source.source_type;
     let of = crate::source::query::KeyOf {
         base: &plan.base_query,
@@ -866,11 +866,11 @@ fn seek_bounds(
         seek_key(src, plan, k, fence, false)?,
         seek_key(src, plan, k, fence, true)?,
     ) else {
-        return Ok(Seeked::Ends(None));
+        return Ok(SeekOutcome::Ends(None));
     };
     let on_axis = Axis::of(&lo, st).is_some() && Axis::of(&hi, st).is_some();
     if !on_axis && catalog_rows(src, plan).is_some_and(|n| n < ROW_PERCENTILE_ROWS) {
-        return Ok(Seeked::Percentile);
+        return Ok(SeekOutcome::Percentile);
     }
     let parts = if on_axis { int_parts } else { parts };
     for cut in super::key_space::split(&lo, &hi, parts) {
@@ -889,11 +889,11 @@ fn seek_bounds(
             _ => break,
         }
     }
-    Ok(Seeked::Ends(Some((lo, hi))))
+    Ok(SeekOutcome::Ends(Some((lo, hi))))
 }
 
 /// What the endpoint seeks found: the lowest and highest key (none on an empty table), or a key with no axis small enough for row percentiles.
-enum Seeked {
+enum SeekOutcome {
     Ends(Option<(String, String)>),
     Percentile,
 }
