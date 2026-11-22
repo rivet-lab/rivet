@@ -53,5 +53,6 @@ fn an_oracle_cdc_time_override_is_graded_as_the_batch_override() {
             1,
             "{label}: delivered change row"
         );
+        duckdb_assert_at_least_once(out.to_str().unwrap(), "ID", 1, label);
     }
 }
