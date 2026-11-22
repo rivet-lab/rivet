@@ -1215,21 +1215,25 @@ pub(crate) fn stamp_text(
     use crate::source::cdc::CdcEngine;
     use chrono::{Datelike, Timelike};
     match (engine, dt, v) {
-        (CdcEngine::Oracle, DataType::Utf8 | DataType::LargeUtf8, RivetValue::DateTime(d))
-            if seeded!("cdc-timestamp-text-is-the-batch-text", false, true) =>
-        {
-            RivetValue::Bytes(crate::types::oracle_timestamp_text(d).into_bytes())
+        (CdcEngine::Oracle, DataType::Utf8 | DataType::LargeUtf8, RivetValue::DateTime(d)) => {
+            seeded!(
+                "cdc-timestamp-text-is-the-batch-text",
+                RivetValue::DateTime(d),
+                RivetValue::Bytes(crate::types::oracle_timestamp_text(d).into_bytes())
+            )
         }
-        (CdcEngine::Mysql, DataType::Utf8 | DataType::LargeUtf8, RivetValue::DateTime(d))
-            if seeded!("cdc-timestamp-text-is-the-batch-text", false, true) =>
-        {
-            RivetValue::Bytes(
-                crate::types::mysql_datetime_text(
-                    (d.year(), d.month(), d.day()),
-                    (d.hour(), d.minute(), d.second()),
-                    d.nanosecond() / 1_000,
+        (CdcEngine::Mysql, DataType::Utf8 | DataType::LargeUtf8, RivetValue::DateTime(d)) => {
+            seeded!(
+                "cdc-timestamp-text-is-the-batch-text",
+                RivetValue::DateTime(d),
+                RivetValue::Bytes(
+                    crate::types::mysql_datetime_text(
+                        (d.year(), d.month(), d.day()),
+                        (d.hour(), d.minute(), d.second()),
+                        d.nanosecond() / 1_000,
+                    )
+                    .into_bytes()
                 )
-                .into_bytes(),
             )
         }
         (_, _, v) => v,

@@ -126,28 +126,29 @@ pub fn iso8601_duration(months: i32, days: i32, micros: i64) -> String {
     if out == "P" { "PT0S".into() } else { out }
 }
 
-/// Oracle's `SYYYY-MM-DD"T"HH24:MI:SS.FF` text: signed year (no year 0), six fraction digits, nine when finer than a microsecond.
+/// Oracle's `SYYYY-MM-DD"T"HH24:MI:SS.FF` text of a timestamp whose year is chrono's astronomical year (0 is 1 BC).
 pub fn oracle_timestamp_text(dt: NaiveDateTime) -> String {
     let y = dt.year();
-    let year = if y <= 0 {
-        format!("-{:04}", 1 - y)
+    oracle_fields_text(
+        if y <= 0 { y - 1 } else { y },
+        [dt.month(), dt.day(), dt.hour(), dt.minute(), dt.second()],
+        dt.nanosecond(),
+    )
+}
+
+/// Oracle's `SYYYY-MM-DD"T"HH24:MI:SS.FF` text of plain fields: signed year (no year 0), six fraction digits, nine when finer than a microsecond.
+pub fn oracle_fields_text(year: i32, [mo, d, h, mi, s]: [u32; 5], ns: u32) -> String {
+    let year = if year < 0 {
+        format!("-{:04}", -year)
     } else {
-        format!("{y:04}")
+        format!("{year:04}")
     };
-    let ns = dt.nanosecond();
     let frac = if ns.is_multiple_of(1_000) {
         format!("{:06}", ns / 1_000)
     } else {
         format!("{ns:09}")
     };
-    format!(
-        "{year}-{:02}-{:02}T{:02}:{:02}:{:02}.{frac}",
-        dt.month(),
-        dt.day(),
-        dt.hour(),
-        dt.minute(),
-        dt.second()
-    )
+    format!("{year}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}.{frac}")
 }
 
 /// MySQL's text of a DATE, DATETIME or TIMESTAMP read over the binary protocol: space separator, always six fraction digits.
@@ -349,6 +350,16 @@ mod tests {
         ] {
             assert_eq!(oracle_timestamp_text(dt), want);
         }
+    }
+
+    #[test]
+    fn oracle_fields_text_prints_the_signed_year_the_fields_carry() {
+        let f = |year, ns| oracle_fields_text(year, [6, 15, 1, 2, 3], ns);
+        assert_eq!(f(2024, 0), "2024-06-15T01:02:03.000000");
+        assert_eq!(f(1, 1_000), "0001-06-15T01:02:03.000001");
+        assert_eq!(f(-1, 0), "-0001-06-15T01:02:03.000000");
+        assert_eq!(f(-4712, 7), "-4712-06-15T01:02:03.000000007");
+        assert_eq!(f(0, 0), "0000-06-15T01:02:03.000000");
     }
 
     #[test]
