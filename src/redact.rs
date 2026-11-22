@@ -205,9 +205,17 @@ fn without(spans: &[(usize, usize)], holes: &[(usize, usize)]) -> Vec<(usize, us
     out
 }
 
-/// The byte ranges of `text` a scanner reads to find a credential: a keyword password pair up to its value, a URL up to and including the `@` that ends its userinfo, a secret query key with its `?` or `&` and `=`.
+/// The byte ranges of `text` a scanner reads to find a credential: a keyword password pair from the `;` that opens it through the first character of its value, a URL up to and including the `@` that ends its userinfo, a secret query key with its `?` or `&` and `=`.
 fn anchor_ranges(text: &str) -> Vec<(usize, usize)> {
-    let mut ranges: Vec<(usize, usize)> = password_pairs(text).collect();
+    let mut ranges: Vec<(usize, usize)> = password_pairs(text)
+        .map(|(key_start, value_start)| {
+            let first = text[value_start..].chars().next().map_or(0, char::len_utf8);
+            (
+                semicolon_before(text, key_start).unwrap_or(key_start),
+                value_start + first,
+            )
+        })
+        .collect();
     let mut offset = 0;
     for word in text.split_inclusive(|c: char| c.is_ascii_whitespace()) {
         let span = crate::url_text::credential_span(word, crate::url_text::Mask::Password);
@@ -351,6 +359,14 @@ fn password_pairs(s: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
     })
 }
 
+/// The offset of the `;` that opens the pair whose keyword starts at `key_start`, blanks between them allowed.
+fn semicolon_before(s: &str, key_start: usize) -> Option<usize> {
+    s[..key_start]
+        .trim_end_matches([' ', '\t'])
+        .strip_suffix(';')
+        .map(str::len)
+}
+
 /// Length of the value starting at `value_start`, given the first `;` or line break at or after it (`stop`): the longer of its quoted and its unquoted reading, so a quote character that is not a quote in the string's grammar leaks nothing.
 fn keyword_value_len(s: &str, key_start: usize, value_start: usize, stop: usize) -> usize {
     let rest = &s[value_start..];
@@ -360,7 +376,7 @@ fn keyword_value_len(s: &str, key_start: usize, value_start: usize, stop: usize)
         Some('{') => quoted_value_len(rest, '}'),
         _ => 0,
     };
-    let after_semicolon = s[..key_start].trim_end_matches([' ', '\t']).ends_with(';');
+    let after_semicolon = semicolon_before(s, key_start).is_some();
     quoted.max(bare_value_len(rest, stop - value_start, after_semicolon))
 }
 
@@ -1988,6 +2004,37 @@ mod tests {
         }
     }
 
+    /// A registered password that stands in its own pair, in each grammar, is masked as the plain replace followed by the scanners masked it before the anchors were left to the scanners.
+    #[test]
+    fn a_registered_password_in_its_own_pair_is_masked_as_a_plain_replace_would() {
+        let password = "hunter2 hunter2";
+        let rows = [
+            "host=db password=hunter2 hunter2 port=1",
+            "Server=h;Password=hunter2 hunter2;Db=x",
+            "Server=h; Password = hunter2 hunter2;Db=x",
+            "password='hunter2 hunter2' x",
+            "password=\"hunter2 hunter2\" x",
+            "password={hunter2 hunter2};x",
+            "GET /x?a=1&password=hunter2 hunter2 end",
+            "postgres://rivet:hunter2 hunter2@db/x",
+        ];
+        for text in rows {
+            let plain = text.replace(password, MASK);
+            let want =
+                redact_query_secrets(&redact_url_passwords(&redact_keyword_passwords(&plain)));
+            assert_eq!(redact_with(text, &known(&[password])), want, "{text}");
+        }
+    }
+
+    /// A registered value equal to the word the URL scanner prints leaves that word as the scanner printed it.
+    #[test]
+    fn a_registered_redacted_stays_in_the_url_scanners_own_output() {
+        assert_eq!(
+            redact_with("pg://u:pw@h REDACTED", &known(&["REDACTED"])),
+            "pg://REDACTED@h ***"
+        );
+    }
+
     /// A value is masked in the encodings rivet itself writes: the URL userinfo set and form encoding, in both hex cases.
     #[test]
     fn a_registered_value_is_masked_in_its_userinfo_and_form_encodings() {
@@ -2024,6 +2071,164 @@ mod tests {
                 redact_with("xx abcdefghijklmnop yy", &known(&values)),
                 "xx *** yy",
                 "{values:?}"
+            );
+        }
+    }
+
+    /// Every two-letter word of 1 to `max` letters.
+    fn two_letter_words(max: usize) -> Vec<String> {
+        let mut words = vec![String::new()];
+        let mut all = Vec::new();
+        for _ in 0..max {
+            words = words
+                .iter()
+                .flat_map(|w| [format!("{w}a"), format!("{w}b")])
+                .collect();
+            all.extend(words.iter().cloned());
+        }
+        all
+    }
+
+    /// The spans of every occurrence of every value in `text`, found by trying each offset, with overlapping spans joined until none overlap.
+    fn naive_spans(text: &str, values: &[&str]) -> Vec<(usize, usize)> {
+        let mut spans: Vec<(usize, usize)> = values
+            .iter()
+            .flat_map(|v| {
+                (0..text.len())
+                    .filter(move |&i| text[i..].starts_with(v))
+                    .map(move |i| (i, i + v.len()))
+            })
+            .collect();
+        while let Some((i, j)) = (0..spans.len())
+            .flat_map(|i| (i + 1..spans.len()).map(move |j| (i, j)))
+            .find(|&(i, j)| spans[i].0 < spans[j].1 && spans[j].0 < spans[i].1)
+        {
+            spans[i] = (spans[i].0.min(spans[j].0), spans[i].1.max(spans[j].1));
+            spans.remove(j);
+        }
+        spans.sort_unstable();
+        spans
+    }
+
+    /// The spans found for one and for two values equal those of a search that tries every offset, on every small text over two letters.
+    #[test]
+    fn registered_spans_equal_a_naive_search_on_every_small_input() {
+        let singles = two_letter_words(4);
+        let pairs = two_letter_words(3);
+        for text in std::iter::once(String::new()).chain(two_letter_words(9)) {
+            for v in &singles {
+                let found = known_spans(&text, std::slice::from_ref(v));
+                assert_eq!(found, naive_spans(&text, &[v]), "{v:?} in {text:?}");
+            }
+            if text.len() > 7 {
+                continue;
+            }
+            for v in &pairs {
+                for w in &pairs {
+                    let found = known_spans(&text, &[v.clone(), w.clone()]);
+                    assert_eq!(
+                        found,
+                        naive_spans(&text, &[v, w]),
+                        "{v:?} {w:?} in {text:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A second occurrence that begins inside the partial match of a value whose prefix repeats is masked, the text around it kept.
+    #[test]
+    fn a_registered_value_with_a_repeating_prefix_is_masked_at_every_occurrence() {
+        assert_eq!(
+            redact_with("got aaaaaaab then aaaaaaaab end", &known(&["aaaaaaab"])),
+            "got *** then a*** end"
+        );
+    }
+
+    /// No registered substring of a text, whatever bytes around a scanner's anchor it covers, leaves any four bytes of the credential the scanners mask in clear.
+    #[test]
+    fn a_registered_substring_never_hides_the_password_a_scanner_masks() {
+        const SECRET: &str = "QZXWVYQZ";
+        let texts = [
+            "x1y2z3Server=h;Password=a QZXWVYQZ\nnext",
+            "x1y2z3 Server=h; \tPassword=a QZXWVYQZ\nnext",
+            "x1y2z3;Server=h;pwd = a QZXWVYQZ;next",
+            "x1y2z3 host=db password=QZXWVYQZ end",
+            "x1y2z3?a=b&password=QZXWVYQZ end",
+            "x1y2z3&p=1?token=QZXWVYQZ end",
+            "x1y2z3 postgres://rivet:QZXWVYQZ@db/x end",
+        ];
+        for text in texts {
+            for from in 0..text.len() {
+                for len in 8..=14 {
+                    let Some(value) = text.get(from..from + len) else {
+                        continue;
+                    };
+                    let shown = redact_with(text, &known(&[value]));
+                    let windows = SECRET.as_bytes().windows(4).map(|w| std::str::from_utf8(w));
+                    for window in windows.flatten() {
+                        assert!(!shown.contains(window), "{value:?} in {text:?}: {shown:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// A value that covers the separator before an ADO password key leaves the key's value masked whole, `;`, `?`, `&` and blanks included, and a line break after the value changes nothing.
+    #[test]
+    fn a_registered_value_covering_the_separator_before_a_password_key_keeps_the_value_masked() {
+        let rows = [
+            (
+                "Tr0ub4dor;",
+                "Server=h;App=Tr0ub4dor;Password=my secret pw\nnext",
+                "Server=h;App=***;Password=***\nnext",
+            ),
+            (
+                "Tr0ub4dor; ",
+                "Server=h;App=Tr0ub4dor; Password=my secret pw\nnext",
+                "Server=h;App=***; Password=***\nnext",
+            ),
+            (
+                "Tr0ub4dor; \t",
+                "Server=h;App=Tr0ub4dor; \tPassword=my secret pw\nnext",
+                "Server=h;App=***; \tPassword=***\nnext",
+            ),
+            (
+                "r=h;Password",
+                "Server=h;Password=a QZXWVYQZhy0mq",
+                "Serve***;Password=***",
+            ),
+            (
+                "=h;Passw",
+                "Server=h;Password=a QZXWVYQZhy0mq",
+                "Server***;Password=***",
+            ),
+            (
+                "r=h;Password=a",
+                "Server=h;Password=a QZXWVYQZhy0mq",
+                "Serve***;Password=***",
+            ),
+            (
+                "Tr0ub4dor&",
+                "GET /x?a=Tr0ub4dor&password=my secret pw end",
+                "GET /x?a=***&password=*** secret pw end",
+            ),
+            (
+                "Tr0ub4dor?",
+                "GET /x/Tr0ub4dor?token=my secret pw end",
+                "GET /x/***?token=*** secret pw end",
+            ),
+            (
+                "Tr0ub4dor\n",
+                "App=Tr0ub4dor\nPassword=my secret pw",
+                "App=***Password=*** secret pw",
+            ),
+        ];
+        for (value, text, want) in rows {
+            assert_eq!(
+                redact_with(text, &known(&[value])),
+                want,
+                "{value:?} {text:?}"
             );
         }
     }
