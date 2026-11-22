@@ -1,5 +1,4 @@
-//! A `columns:` time override that keeps fewer fraction digits than a result column holds is reported lossy on batch and on CDC, decided per result column of the query.
-//! The oracle for delivered rows is Arrow's rendering of the parquet the run wrote.
+//! A `columns:` time override that keeps fewer fraction digits than a result column holds is reported lossy on batch and on CDC, decided per result column of the query; delivered rows are read back with arrow.
 
 use crate::common::*;
 use crate::live_int_to_float_override::readback_only;

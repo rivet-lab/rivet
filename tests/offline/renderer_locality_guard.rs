@@ -107,11 +107,7 @@ const CEILING: &[(&str, &[&str])] = &[
     ),
     (
         "iso_timestamp_nanos",
-        &[
-            "cdc/value.rs::render_str",
-            "cdc/value.rs::to_json",
-            "oracle/arrow_convert.rs::timestamp_text",
-        ],
+        &["cdc/value.rs::render_str", "cdc/value.rs::to_json"],
     ),
     ("time_of_day_offset", &[]),
     ("time_beyond_day", &[]),

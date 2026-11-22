@@ -146,7 +146,7 @@ const SIGNED_YEAR_PIN: &[&str] = &[
     "ALTER SESSION SET NLS_TIMESTAMP_TZ_FORMAT = 'SYYYY-MM-DD\"T\"HH24:MI:SS.FF TZH:TZM'",
 ];
 
-/// `SYYYY-MM-DDTHH:MI:SS[.fraction]` (a `-` year is BC), the fraction any length, kept to microseconds.
+/// `SYYYY-MM-DDTHH:MI:SS[.fraction]` (a `-` year is BC), the fraction up to nine digits, every digit kept.
 pub(crate) fn parse_datetime(text: &str) -> Option<NaiveDateTime> {
     use chrono::Datelike as _;
     let t = text.trim();
@@ -156,13 +156,16 @@ pub(crate) fn parse_datetime(text: &str) -> Option<NaiveDateTime> {
     if !frac.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    let micros: u32 = format!("{:0<6}", &frac[..frac.len().min(6)]).parse().ok()?;
+    let kept = seeded!("oracle-cdc-timestamp-fraction-truncated", 6, 9);
+    let nanos: u32 = format!("{:0<9}", frac.get(..kept).unwrap_or(frac))
+        .parse()
+        .ok()?;
     let dt = if bc {
         dt.with_year(super::arrow_convert::chrono_year(-dt.year()))?
     } else {
         dt
     };
-    dt.checked_add_signed(chrono::Duration::microseconds(micros.into()))
+    dt.checked_add_signed(chrono::Duration::nanoseconds(nanos.into()))
 }
 
 /// `+HH:MM` / `-HH:MM` as seconds east of UTC.
@@ -2152,11 +2155,19 @@ mod tests {
     }
 
     #[test]
-    fn timestamps_keep_microseconds_and_an_offset_moves_to_utc() {
+    fn timestamps_keep_every_digit_and_an_offset_moves_to_utc() {
         let dt = |s| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f").unwrap();
         assert_eq!(
             parse_datetime("2026-09-28T01:02:03.123456789"),
-            Some(dt("2026-09-28 01:02:03.123456"))
+            Some(dt("2026-09-28 01:02:03.123456789"))
+        );
+        assert_eq!(
+            parse_datetime("2026-09-28T01:02:03.000000001"),
+            Some(dt("2026-09-28 01:02:03.000000001"))
+        );
+        assert_eq!(
+            decode(ColKind::TimestampTz, "2026-09-28T01:02:03.123456789 +09:00").unwrap(),
+            RivetValue::DateTime(dt("2026-09-27 16:02:03.123456789"))
         );
         let kept = parse_datetime("2026-09-28T01:02:03.123456789").unwrap();
         let unit = 10u32.pow(9 - u32::from(crate::source::cdc::ORACLE_CHANGE_ROW_FRACTION_DIGITS));
