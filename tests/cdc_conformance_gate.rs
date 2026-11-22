@@ -793,6 +793,7 @@ fn oracle_class_census_is_pinned() {
         "fake_gcs_parquet_total_rows(",
         "dir_parquet_id_set(",
         "dir_parquet_i64(",
+        "run_cells(",
     ];
     let self_counter = ["manifest_rows(", "dir_manifest_copy_total_rows("];
     let mut counts = [0usize; 4]; // [independent, shared_codec, self_counter, presence]
@@ -948,7 +949,8 @@ const PIN_INDEPENDENT: usize = 126; // ratchet-pin: cdc-census-independent (revi
 // 139 -> 140 (2026-11-16, #714): the Oracle whole-table cell reads the delivered parts with arrow against the rows the test wrote; the rig oracle grades each run.
 // 142 -> 147 (2026-11-16, #715): the MongoDB column-grants cells read the delivered parts with arrow against the fields the view lists and the values the test wrote; the hidden bytes are asserted absent.
 // 147 -> 155 (2026-11-19, #713): the SQL Server column-grants cells read the delivered parts with arrow against the rows and values the test wrote; the hidden bytes are asserted absent.
-const PIN_SHARED_CODEC: usize = 154; // ratchet-pin: cdc-census-shared-codec (review 2027-02-01)
+// 154 -> 158 (2026-11-22, #1162): the MySQL and PostgreSQL stream-text cells and the two SQL Server datetime2 cells compare the verdict of the stream and batch legs, read back with arrow, against the text the test names.
+const PIN_SHARED_CODEC: usize = 158; // ratchet-pin: cdc-census-shared-codec (review 2027-02-01)
 const PIN_SELF_COUNTER: usize = 6; // ratchet-pin: cdc-census-self-counter (review 2027-02-01)
 // 2026-09-28: +1 presence — the SQL Server undecodable-cell refusal, whose oracle is the refusal.
 // 2026-09-29: +2 presence — the PG CDC LMT-timezone and DOMAIN parity cells compare CDC to batch output.
@@ -1293,6 +1295,7 @@ fn every_live_cdc_test_asserts_an_outcome() {
                 || chunk.contains("assert_complete(")
                 || chunk.contains("read_all(")
                 || chunk.contains("read_all_parts(")
+                || chunk.contains("run_cells(")
                 // run_and_read( is deliberately NOT here: it is a CAPTURE
                 // marker (derived set), and a dual-role spelling lets
                 // `let _ = rig.run_and_read();` self-satisfy the gate. The
