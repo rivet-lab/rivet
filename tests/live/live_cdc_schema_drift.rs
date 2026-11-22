@@ -488,7 +488,7 @@ fn a_snapshot_after_a_refused_run_is_taken_without_drift(policy: Option<&str>) {
     );
     let snapshot = rig.out_dir().join("snapshot");
     assert_eq!(
-        duckdb_declared_dir_id_set(&snapshot),
+        dir_parquet_id_set(&snapshot),
         [1, 2, 3].into_iter().collect(),
         "the snapshot holds every row"
     );
@@ -506,7 +506,7 @@ fn a_snapshot_after_a_refused_run_is_taken_without_drift(policy: Option<&str>) {
         "the snapshot is not taken again"
     );
     assert!(
-        duckdb_declared_dir_id_set(&rig.out_dir()).contains(&4),
+        dir_parquet_id_set(&rig.out_dir()).contains(&4),
         "the stream delivers the row after the snapshot"
     );
 }

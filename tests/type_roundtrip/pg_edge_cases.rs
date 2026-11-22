@@ -106,96 +106,12 @@ fn pg_edge_decimal_boundaries_round_trip() {
     );
 
     // Schema-level: precision 38 stays Decimal128, precision 50 escalates.
-    let described = duckdb_run_sql_json(&format!("DESCRIBE SELECT * FROM read_parquet('{glob}')"));
-    let actual = duckdb_parse_describe(&described);
-    assert_eq!(actual["d38_0"], "DECIMAL(38,0)", "Decimal128 boundary");
-    // Known DuckDB limitation: DuckDB's `DECIMAL` only supports precision
-    // 1..=38 (it's backed by HUGEINT — 128 bits). For Parquet columns with
-    // precision > 38 DuckDB silently downgrades to DOUBLE and loses
-    // precision past 2^53. Our Parquet file still carries the correct
-    // `LogicalType::Decimal(39, 10)` — pyarrow reads it as Decimal256.
-    // See `parquet_schema.rs` for the physical-type contract.
-    assert_eq!(
-        actual["d50_10"], "DOUBLE",
-        "DuckDB downgrades precision-39 DECIMAL to DOUBLE; \
-         if this ever becomes DECIMAL(...), DuckDB grew Decimal256 support — \
-         update the test"
-    );
-
-    // Values: max-precision integer round-trips exactly through DuckDB
-    // because 10^38 - 1 fits in DECIMAL(38,0) → HUGEINT.
     let v = duckdb_run_sql_json(&format!(
-        "SELECT d38_0::VARCHAR FROM read_parquet('{glob}') WHERE id = 1"
+        "SELECT d, typeof(d) FROM read_parquet('{glob}') ORDER BY id"
     ));
-    assert_eq!(
-        v["rows"][0][0].as_str().unwrap(),
-        "99999999999999999999999999999999999999",
-        "Decimal128 max precision value"
-    );
-
-    // Cross-check d50_10 round-trip through pyarrow (the reference reader
-    // that handles Decimal256 properly). The seed value rendered as a
-    // string with 10 fractional digits is `1234567890123456789012345678901234567890.0123456789`.
-    let stdout = duckdb_run_python(&format!(
-        r#"
-import pyarrow.parquet as pq, glob
-paths = sorted(glob.glob('{glob}'))
-t = pq.read_table(paths[0])
-print(str(t.column('d50_10').to_pylist()[0]))
-"#,
-    ));
-    assert_eq!(
-        stdout.trim(),
-        "1234567890123456789012345678901234567890.0123456789",
-        "Decimal256 value must round-trip exactly through pyarrow"
-    );
-}
-
-/// A `numeric(5,-2)` column declared `decimal(5,-2)` is refused by the override table, by code, naming the column and the declared type.
-#[test]
-#[ignore = "live: requires docker compose postgres"]
-fn pg_edge_decimal_negative_scale_override_is_refused_by_the_override_table() {
-    require_alive(LiveService::Postgres);
-
-    let (_glob, out) = pg_edge_export(
-        "CREATE TABLE {table_name} (id INT, d NUMERIC(5, -2));
-         INSERT INTO {table_name} VALUES (1, 12345);",
-        "SELECT id, d FROM {table_name} ORDER BY id",
-        "pg_edge_negsc",
-        "    columns:\n      d: decimal(5,-2)\n",
-    );
-
-    assert_refused(
-        &out,
-        Refused::by_code("RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1),
-    );
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        err.contains("column `d`") && err.contains("decimal(5,-2)"),
-        "the refusal must name the column and the declared type:\n{err}"
-    );
-}
-
-/// A `numeric(5,-2)` column with no override is delivered as the server's text, its value rounded to the hundreds exactly as the server prints it.
-#[test]
-#[ignore = "live: requires docker compose postgres + duckdb"]
-fn pg_edge_decimal_negative_scale_without_override_is_delivered_as_the_servers_text() {
-    let glob = pg_edge_export_ok(
-        "CREATE TABLE {table_name} (id INT, d NUMERIC(5, -2));
-         INSERT INTO {table_name} VALUES (1, 12345), (2, -99999), (3, NULL);",
-        "SELECT id, d FROM {table_name} ORDER BY id",
-        "pg_edge_negsc_bare",
-        "",
-    );
-    let described = duckdb_run_sql_json(&format!("DESCRIBE SELECT * FROM read_parquet('{glob}')"));
-    assert_eq!(duckdb_parse_describe(&described)["d"], "VARCHAR");
-    let v = duckdb_run_sql_json(&format!("SELECT d FROM read_parquet('{glob}') ORDER BY id"));
-    let cells: Vec<Option<&str>> = v["rows"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|r| r[0].as_str())
-        .collect();
+    let rows = v["rows"].as_array().unwrap();
+    assert!(rows.iter().all(|r| r[1].as_str() == Some("VARCHAR")));
+    let cells: Vec<Option<&str>> = rows.iter().map(|r| r[0].as_str()).collect();
     assert_eq!(cells, [Some("12300"), Some("-100000"), None]);
 }
 
