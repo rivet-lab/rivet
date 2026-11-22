@@ -306,7 +306,7 @@ def parse_lit(engine: str, lit: str):
         return Decimal(int(m.group(1), 2))
     if m := _HEX.fullmatch(s):
         hexed = m.group(1) or m.group(2) or m.group(3) or ""
-        return None if engine == "oracle" and not hexed else bytes.fromhex(hexed)
+        return None if engine == "oracle" and lit.strip().upper() == "HEXTORAW('')" else bytes.fromhex(hexed)
     if engine == "postgres" and (m := _PG_HEX.fullmatch(s)):
         return bytes.fromhex(m.group(1))
     if m := _TS_FUNC.fullmatch(s):
@@ -1213,6 +1213,7 @@ def self_test() -> None:
     assert compare("mysql", "7", "int", "float4", None) == NULLED, "a non-NULL value delivered as NULL is the harm of the MySQL int->float override"
     assert compare("mysql", "7", "int", "float4", None, csv=True) == NULLED and compare("mysql", "7", "int", "float4", "", csv=True) == WRONG
     assert compare("mysql", "''", "text", "none", "", csv=True) == "OK" and compare("mysql", "''", "text", "none", None, csv=True) == NULLED
+    assert parse_lit("oracle", "EMPTY_BLOB()") == b"", "an Oracle empty LOB is zero-length, never NULL"
     assert parse_lit("oracle", "HEXTORAW('')") is None and parse_lit("mysql", "UNHEX('')") == b"" and parse_lit("mysql", "x''") == b""
     assert compare("oracle", "HEXTORAW('')", "other", "none", None, native="RAW(16)") == "OK", "an Oracle empty RAW is NULL at the source"
     with tempfile.TemporaryDirectory() as fc:
