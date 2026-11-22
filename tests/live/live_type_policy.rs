@@ -136,8 +136,7 @@ fn oracle_batch_timestamp9_is_refused_until_declared_under_every_policy() {
         (rig, out)
     };
 
-    let rows =
-        |out: &std::path::Path, filter: &str| duckdb_dir_scalar(out, "count(*)", Some(filter));
+    let rows = crate::live_narrowing_override::count_where;
     let (lossy, lossy_out) = declared(0, "columns: {TS9: timestamp}");
     let run = lossy.run_args(&[]);
     let err = String::from_utf8_lossy(&run.stderr);

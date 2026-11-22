@@ -158,6 +158,15 @@ plain `timestamp` is microsecond with full date range. An Oracle
 `TIMESTAMP(7..9)` column is the one case where the declaration is required: undeclared, the run is refused
 (`RIVET_TYPE_UNSAFE_MAPPING`) rather than truncated.
 
+A `timestamp` or `timestamp_tz` declared over a result column finer than a
+microsecond (an Oracle `TIMESTAMP(7..9)`, a SQL Server `datetime2(7)` or
+`datetimeoffset(7)`), on batch and on CDC, truncates the finer digits: the type
+report says `lossy` with the cause and the remedy, the default policy runs, and `--strict` refuses it
+(`RIVET_TYPE_UNSAFE_MAPPING`). The verdict follows the column the query returns:
+an alias keeps it, a `CAST` to a coarser type or a column that is not finer is
+`exact`. To keep the digits, drop the override on SQL Server or declare
+`timestamp_ns` on Oracle.
+
 An override the source reader cannot build is refused by code, not run:
 `RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH` (exit 1) names the column, the declared
 type and the remedy. MySQL has no nanosecond timestamp (DATETIME and TIMESTAMP

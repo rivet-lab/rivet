@@ -158,7 +158,7 @@ pub(super) fn oracle_type_mappings(
             let source = SourceColumn::simple(m.name(), native.clone(), m.nullable());
             let mapping = TypeMapping::from_source(&source, rivet);
             Ok(if overrides.contains_key(m.name()) {
-                overridden_mapping(mapping, native, m.scale())
+                mapping
             } else {
                 let kind = OraKind::of(m);
                 let mapping = deliver_number_text(mapping, kind, m.precision(), m.scale());
@@ -170,15 +170,6 @@ pub(super) fn oracle_type_mappings(
             })
         })
         .collect()
-}
-
-/// The mapping of a declared column: lossy when the declared type keeps fewer fraction digits than the sub-microsecond source holds.
-fn overridden_mapping(mapping: TypeMapping, native: &str, scale: i8) -> TypeMapping {
-    if sub_microsecond(native, scale) {
-        mapping.narrowed_fraction(scale.unsigned_abs())
-    } else {
-        mapping
-    }
 }
 
 /// A NUMBER that no fixed-scale decimal holds, labelled as plain decimal text (ADR-0038 CP5).
@@ -707,44 +698,6 @@ mod type_table;
 mod tests {
     use super::*;
     use crate::types::TimeUnit;
-
-    /// A declared type that keeps fewer digits than a TIMESTAMP(7..9) or INTERVAL DAY TO SECOND(7..9) holds is lossy; a nanosecond declaration, a scale up to 6 and a non-time native are exact.
-    #[test]
-    fn an_override_narrowing_a_sub_microsecond_oracle_column_is_lossy() {
-        use crate::types::{SourceColumn, TypeFidelity};
-        let at = |unit| RivetType::Timestamp {
-            unit,
-            timezone: None,
-        };
-        let fidelity = |native: &str, scale: i8, unit| {
-            let source = SourceColumn::simple("T", native, true);
-            let mapping = TypeMapping::from_source(&source, at(unit));
-            overridden_mapping(mapping, native, scale).fidelity
-        };
-        for (native, scale) in [
-            ("timestamp(9)", 9),
-            ("timestamp(7)", 7),
-            ("timestamp_tz(8)", 8),
-        ] {
-            assert_eq!(
-                fidelity(native, scale, TimeUnit::Microsecond),
-                TypeFidelity::Lossy,
-                "{native}"
-            );
-            assert_eq!(
-                fidelity(native, scale, TimeUnit::Nanosecond),
-                TypeFidelity::Exact,
-                "{native} declared at nanoseconds"
-            );
-        }
-        for (native, scale) in [("timestamp(6)", 6), ("timestamp(0)", 0), ("number", 9)] {
-            assert_eq!(
-                fidelity(native, scale, TimeUnit::Microsecond),
-                TypeFidelity::Exact,
-                "{native}"
-            );
-        }
-    }
 
     /// What the Oracle mapper lands a catalog type as is what a load key or order is admitted by.
     #[test]

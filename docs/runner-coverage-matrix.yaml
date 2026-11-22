@@ -568,6 +568,15 @@ scenarios:
     mongo_parallel: { na: "shared seam (execute_resolved_plan, before the dispatch); a Mongo export's schema is the fixed {_id, document, meta} shape, so it has no lossy column to refuse" }
     cdc:            { test: oracle_cdc_timestamp9_is_refused_until_declared_and_a_declared_timestamp_delivers_the_row }
 
+  - id: narrowing_time_override_is_graded_by_the_result_column
+    what: "a `timestamp` or `timestamp_tz` override over a result column finer than a microsecond (SQL Server datetime2(7) / datetimeoffset(7), Oracle TIMESTAMP(7..9)) reads `lossy` in `check --type-report` and is refused by `run --strict` with RIVET_TYPE_UNSAFE_MAPPING; the verdict follows the column the query returns (an alias or a join stays lossy, a CAST to a coarser type stays exact); the default policy runs and delivers the microsecond truncation; `downgrade_narrowing_overrides` is the one grading, reached by `probe_mappings` (batch, check, type report) and by `CdcSchemaResolver::resolve` (CDC)"
+    single:         { test: a_mssql_batch_time_override_is_graded_by_the_result_column_it_lands_on }
+    chunked:        { na: "shared seam: plan_open_columns grades the probe's mappings in execute_resolved_plan before the strategy dispatch" }
+    chunked_checkpoint: { na: "shared seam (execute_resolved_plan, before the dispatch)" }
+    keyset:         { na: "shared seam (execute_resolved_plan, before the dispatch)" }
+    mongo_parallel: { na: "a Mongo export's schema is the fixed {_id, document, meta} shape, so it has no time column to override" }
+    cdc:            { test: a_mssql_cdc_time_override_is_graded_as_the_batch_override }
+
   - id: oracle_value_the_type_cannot_carry_is_refused
     what: "an Oracle NUMBER or FLOAT holding infinity (or an exact 1E125 the client prints with the same bytes) and an INTERVAL DAY TO SECOND with a sub-microsecond fraction stop the run with RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5), naming the column and the `TO_CHAR(col) AS col` remedy, before any part is written (a CDC run refuses the NUMBER infinity LogMiner prints as `~` the same way); finite values and microsecond-exact intervals are delivered unchanged"
     single:         { test: an_oracle_number_infinity_is_refused_by_code_and_to_char_delivers_the_server_text }

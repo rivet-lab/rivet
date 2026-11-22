@@ -5,6 +5,7 @@ use serde::Serialize;
 use crate::config::{Config, ExportConfig, FormatType, SourceType};
 use crate::error::Result;
 use crate::source;
+use crate::types::narrowing::downgrade_narrowing_overrides;
 use crate::types::{
     ColumnOverrides, TypeFidelity,
     policy::{PolicyAction, PolicyViolation, TypePolicy},
@@ -531,34 +532,6 @@ fn refuse_captured_units(
     Ok(())
 }
 
-/// #32 (column-applicability): downgrade every overridden column whose override *narrows* the autodetected source type to [`TypeFidelity::Lossy`].
-fn downgrade_narrowing_overrides(
-    mappings: &mut [crate::types::TypeMapping],
-    column_overrides: &ColumnOverrides,
-    reprobe: impl FnOnce() -> Result<Vec<crate::types::TypeMapping>>,
-) -> Result<()> {
-    if column_overrides.is_empty() {
-        return Ok(());
-    }
-    let source_mappings = reprobe()?;
-    let source_by_name: std::collections::HashMap<&str, &crate::types::RivetType> = source_mappings
-        .iter()
-        .map(|m| (m.column_name.as_str(), &m.rivet_type))
-        .collect();
-    for m in mappings {
-        if !column_overrides.contains_key(&m.column_name) {
-            continue;
-        }
-        if let Some(&src_type) = source_by_name.get(m.column_name.as_str())
-            && let Some(reason) = override_narrows(src_type, &m.rivet_type)
-        {
-            m.fidelity = TypeFidelity::Lossy;
-            m.warnings.push(reason);
-        }
-    }
-    Ok(())
-}
-
 /// One unit's report, against an already-open source connection.
 fn collect_one(
     src: &mut dyn source::Source,
@@ -596,9 +569,16 @@ pub(crate) fn probe_mappings(
         src.type_mappings(query, column_overrides)?
     };
 
-    downgrade_narrowing_overrides(&mut mappings, column_overrides, || {
-        src.type_mappings(query, &ColumnOverrides::new())
-    })?;
+    let src = std::cell::RefCell::new(src);
+    downgrade_narrowing_overrides(
+        &mut mappings,
+        column_overrides,
+        || {
+            src.borrow_mut()
+                .type_mappings(query, &ColumnOverrides::new())
+        },
+        || src.borrow_mut().finer_than_microsecond_in_query(query),
+    )?;
     if !stream && seeded!("check-run-refusal-split", false, true) {
         mappings = mappings.into_iter().map(refuse_unmapped).collect();
     }
@@ -876,56 +856,6 @@ fn fidelity_marker(f: TypeFidelity) -> &'static str {
     }
 }
 
-/// Detect whether a `columns:` override *narrows* the autodetected source type in a value-losing way.
-fn override_narrows(
-    source: &crate::types::RivetType,
-    overridden: &crate::types::RivetType,
-) -> Option<String> {
-    use crate::types::RivetType::Decimal;
-    if let (
-        Decimal {
-            precision: sp,
-            scale: ss,
-        },
-        Decimal {
-            precision: op,
-            scale: os,
-        },
-    ) = (source, overridden)
-    {
-        if os < ss {
-            return Some(format!(
-                "override decimal({op},{os}) reduces scale from source numeric({sp},{ss}) — \
-                 {} fractional digit(s) are truncated at run; this is lossy, not exact",
-                (*ss as i16) - (*os as i16)
-            ));
-        }
-        let src_int_digits = *sp as i16 - *ss as i16;
-        let ov_int_digits = *op as i16 - *os as i16;
-        if ov_int_digits < src_int_digits {
-            return Some(format!(
-                "override decimal({op},{os}) reduces integer-digit capacity from source \
-                 numeric({sp},{ss}) — large values overflow at run; this is lossy, not exact"
-            ));
-        }
-    }
-    if let (Decimal { precision, scale }, crate::types::RivetType::Float64) = (source, overridden)
-        && seeded!(
-            "decimal-float8-override-reported-exact",
-            false,
-            *precision > crate::types::decimal::F64_DECIMAL_DIGITS
-        )
-    {
-        return Some(format!(
-            "override float8 keeps {} significant digits exactly and the source numeric({precision},{scale}) \
-             holds up to {precision} — a value the float cannot hold exactly is refused at run \
-             (RIVET_SOURCE_VALUE_UNREPRESENTABLE); this is lossy, not exact",
-            crate::types::decimal::F64_DECIMAL_DIGITS
-        ));
-    }
-    None
-}
-
 fn rivet_type_label(t: &crate::types::RivetType) -> String {
     use crate::types::RivetType::*;
     match t {
@@ -1052,6 +982,7 @@ mod tests {
     }
 
     use super::*;
+    use crate::types::narrowing::override_narrows;
     use crate::types::{RivetType, TypeFidelity};
 
     fn mapping(column: &str, native: &str, t: RivetType) -> crate::types::TypeMapping {
@@ -1080,10 +1011,15 @@ mod tests {
 
         let mut untouched = source();
         let probed = std::cell::Cell::new(false);
-        downgrade_narrowing_overrides(&mut untouched, &ColumnOverrides::new(), || {
-            probed.set(true);
-            Ok(source())
-        })
+        downgrade_narrowing_overrides(
+            &mut untouched,
+            &ColumnOverrides::new(),
+            || {
+                probed.set(true);
+                Ok(source())
+            },
+            || Ok(Vec::new()),
+        )
         .unwrap();
         assert!(
             !probed.get(),
@@ -1103,10 +1039,15 @@ mod tests {
             mapping("id", "int8", RivetType::Int64),
         ];
         let probed = std::cell::Cell::new(false);
-        downgrade_narrowing_overrides(&mut mapped, &overrides, || {
-            probed.set(true);
-            Ok(source())
-        })
+        downgrade_narrowing_overrides(
+            &mut mapped,
+            &overrides,
+            || {
+                probed.set(true);
+                Ok(source())
+            },
+            || Ok(Vec::new()),
+        )
         .unwrap();
         assert!(
             probed.get(),
@@ -1147,7 +1088,8 @@ mod tests {
         let mut mapped = ["cash", "cents", "id", "exact15"]
             .map(|c| mapping(c, "float8", RivetType::Float64))
             .to_vec();
-        downgrade_narrowing_overrides(&mut mapped, &overrides, || Ok(source)).unwrap();
+        downgrade_narrowing_overrides(&mut mapped, &overrides, || Ok(source), || Ok(Vec::new()))
+            .unwrap();
         let verdicts: Vec<_> = mapped.iter().map(|m| m.fidelity).collect();
         assert_eq!(
             verdicts,
@@ -1394,7 +1336,8 @@ exports:
 
     #[test]
     fn narrows_flags_scale_reduction_as_lossy() {
-        let reason = override_narrows(&dec(10, 2), &dec(20, 0)).expect("scale drop is lossy");
+        let reason =
+            override_narrows(&dec(10, 2), &dec(20, 0), false).expect("scale drop is lossy");
         assert!(
             reason.contains("scale"),
             "reason should name scale: {reason}"
@@ -1407,19 +1350,19 @@ exports:
 
     #[test]
     fn narrows_none_when_scale_preserved() {
-        assert!(override_narrows(&dec(10, 2), &dec(20, 2)).is_none());
-        assert!(override_narrows(&dec(10, 2), &dec(10, 2)).is_none());
+        assert!(override_narrows(&dec(10, 2), &dec(20, 2), false).is_none());
+        assert!(override_narrows(&dec(10, 2), &dec(10, 2), false).is_none());
     }
 
     #[test]
     fn narrows_none_when_scale_widened() {
-        assert!(override_narrows(&dec(10, 2), &dec(12, 4)).is_none());
+        assert!(override_narrows(&dec(10, 2), &dec(12, 4), false).is_none());
     }
 
     #[test]
     fn narrows_flags_integer_digit_reduction_as_lossy() {
         let reason =
-            override_narrows(&dec(20, 0), &dec(10, 0)).expect("integer-digit drop is lossy");
+            override_narrows(&dec(20, 0), &dec(10, 0), false).expect("integer-digit drop is lossy");
         assert!(
             reason.contains("integer-digit") && reason.contains("lossy"),
             "reason: {reason}"
@@ -1429,7 +1372,7 @@ exports:
     #[test]
     fn narrows_flags_a_decimal_float8_override_past_fifteen_digits_as_lossy() {
         for (p, s) in [(19, 4), (38, 0), (16, 0), (20, 6)] {
-            let reason = override_narrows(&dec(p, s), &RivetType::Float64)
+            let reason = override_narrows(&dec(p, s), &RivetType::Float64, false)
                 .unwrap_or_else(|| panic!("decimal({p},{s}) into float8 is lossy"));
             assert!(
                 reason.contains("lossy") && reason.contains("RIVET_SOURCE_VALUE_UNREPRESENTABLE"),
@@ -1437,17 +1380,17 @@ exports:
             );
         }
         for (p, s) in [(15, 2), (10, 4), (9, 0), (1, 0)] {
-            assert!(override_narrows(&dec(p, s), &RivetType::Float64).is_none());
+            assert!(override_narrows(&dec(p, s), &RivetType::Float64, false).is_none());
         }
-        assert!(override_narrows(&RivetType::Int64, &RivetType::Float64).is_none());
-        assert!(override_narrows(&RivetType::Float64, &RivetType::Float64).is_none());
-        assert!(override_narrows(&dec(38, 0), &RivetType::String).is_none());
+        assert!(override_narrows(&RivetType::Int64, &RivetType::Float64, false).is_none());
+        assert!(override_narrows(&RivetType::Float64, &RivetType::Float64, false).is_none());
+        assert!(override_narrows(&dec(38, 0), &RivetType::String, false).is_none());
     }
 
     #[test]
     fn narrows_none_for_non_decimal_overrides() {
-        assert!(override_narrows(&RivetType::Int32, &RivetType::Int64).is_none());
-        assert!(override_narrows(&RivetType::Int64, &RivetType::String).is_none());
+        assert!(override_narrows(&RivetType::Int32, &RivetType::Int64, false).is_none());
+        assert!(override_narrows(&RivetType::Int64, &RivetType::String, false).is_none());
     }
 
     #[test]
@@ -1826,5 +1769,195 @@ exports:
             .expect_err("mssql reads its server");
         let none = read(SourceType::Mongo, "postgresql://u:p@127.0.0.1:1/app").unwrap();
         assert!(none.is_empty(), "mongo reads no grants");
+    }
+
+    /// A source whose result columns are the given `(name, native type, default type)` and whose describe names the ones typed finer than a microsecond.
+    struct Described {
+        columns: Vec<(&'static str, &'static str, RivetType)>,
+        finer: Vec<String>,
+        describe_fails: bool,
+    }
+
+    impl Described {
+        fn of(columns: &[(&'static str, &'static str, RivetType)], finer: &[&str]) -> Self {
+            Described {
+                columns: columns.to_vec(),
+                finer: finer.iter().map(|c| c.to_string()).collect(),
+                describe_fails: false,
+            }
+        }
+    }
+
+    impl crate::source::Source for Described {
+        fn export(
+            &mut self,
+            _request: &crate::source::ExportRequest<'_>,
+            _sink: &mut dyn crate::source::BatchSink,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn query_scalar(&mut self, _sql: &str) -> anyhow::Result<Option<String>> {
+            Ok(None)
+        }
+        fn type_mappings(
+            &mut self,
+            _query: &str,
+            overrides: &ColumnOverrides,
+        ) -> anyhow::Result<Vec<crate::types::TypeMapping>> {
+            Ok(self
+                .columns
+                .iter()
+                .map(|(name, native, default)| {
+                    crate::types::TypeMapping::from_source(
+                        &crate::types::SourceColumn::simple(*name, *native, true),
+                        overrides
+                            .get(*name)
+                            .cloned()
+                            .unwrap_or_else(|| default.clone()),
+                    )
+                })
+                .collect())
+        }
+        fn finer_than_microsecond_in_query(&mut self, _query: &str) -> anyhow::Result<Vec<String>> {
+            if self.describe_fails {
+                anyhow::bail!("describe refused");
+            }
+            Ok(self.finer.clone())
+        }
+    }
+
+    fn timestamp(unit: crate::types::TimeUnit, tz: bool) -> RivetType {
+        RivetType::Timestamp {
+            unit,
+            timezone: tz.then(|| "UTC".into()),
+        }
+    }
+
+    /// A time override that keeps fewer fraction digits than its result column holds reads `lossy` on the batch and the stream probe, decided per result column of the query: an alias is lossy, a CAST to a coarser type is not.
+    #[test]
+    fn a_time_override_narrowing_a_result_column_is_lossy_on_batch_and_stream() {
+        use crate::types::TimeUnit::{Microsecond, Millisecond, Nanosecond};
+        let ns = || timestamp(Nanosecond, false);
+        let verdict = |source: &mut Described, stream: bool, ov: &[(&str, RivetType)]| {
+            let overrides: ColumnOverrides =
+                ov.iter().map(|(c, t)| (c.to_string(), t.clone())).collect();
+            probe_mappings(source, stream, "q", &overrides)
+                .unwrap()
+                .into_iter()
+                .map(|m| (m.column_name, m.fidelity, m.warnings))
+                .collect::<Vec<_>>()
+        };
+        for stream in [false, true] {
+            let mut aliased = Described::of(&[("x", "datetime2", ns())], &["x"]);
+            let got = verdict(
+                &mut aliased,
+                stream,
+                &[("x", timestamp(Microsecond, false))],
+            );
+            assert_eq!(got[0].1, TypeFidelity::Lossy, "alias, stream={stream}");
+            assert_eq!(
+                got[0].2.len(),
+                1,
+                "one warning, stream={stream}: {:?}",
+                got[0].2
+            );
+
+            let mut cast =
+                Described::of(&[("d7", "datetime2", timestamp(Millisecond, false))], &[]);
+            let got = verdict(&mut cast, stream, &[("d7", timestamp(Microsecond, false))]);
+            assert_eq!(got[0].1, TypeFidelity::Exact, "cast, stream={stream}");
+            assert!(got[0].2.is_empty(), "{:?}", got[0].2);
+
+            let mut zoned = Described::of(
+                &[("z", "datetimeoffset", timestamp(Nanosecond, true))],
+                &["z"],
+            );
+            let got = verdict(&mut zoned, stream, &[("z", timestamp(Microsecond, true))]);
+            assert_eq!(got[0].1, TypeFidelity::Lossy, "tz, stream={stream}");
+
+            let mut kept = Described::of(
+                &[
+                    ("a", "datetime2", ns()),
+                    ("b", "datetime2", ns()),
+                    ("c", "datetime2", ns()),
+                ],
+                &["a", "b"],
+            );
+            let got = verdict(
+                &mut kept,
+                stream,
+                &[
+                    ("a", timestamp(Nanosecond, false)),
+                    ("b", RivetType::String),
+                    ("c", timestamp(Microsecond, false)),
+                ],
+            );
+            assert_eq!(
+                got.iter().map(|g| g.1).collect::<Vec<_>>(),
+                vec![TypeFidelity::Exact; 3],
+                "a nanosecond override, a text override and a column the source holds at microseconds are not narrowed, stream={stream}"
+            );
+        }
+    }
+
+    /// The reason a narrowing time override carries is pinned, and names a remedy that works on each engine that can hold such a column.
+    #[test]
+    fn a_narrowing_time_override_names_its_cause_and_a_remedy_that_works() {
+        use crate::types::TimeUnit::{Microsecond, Nanosecond};
+        let reason = override_narrows(
+            &timestamp(Nanosecond, false),
+            &timestamp(Microsecond, false),
+            true,
+        )
+        .expect("narrowing");
+        assert_eq!(
+            reason,
+            "the source column holds more than 6 fraction digits of a second and this override keeps 6 \
+             — the finer digits are truncated at run; this is lossy, not exact. To keep them, drop the \
+             override on SQL Server (`datetime2(7)` and `datetimeoffset(7)` keep nanoseconds by default) \
+             or declare `timestamp_ns` / `timestamp_tz_ns` on Oracle"
+        );
+        for kept in [
+            timestamp(Nanosecond, false),
+            RivetType::String,
+            RivetType::Int64,
+        ] {
+            assert_eq!(
+                override_narrows(&timestamp(Nanosecond, false), &kept, true),
+                None
+            );
+        }
+        assert_eq!(
+            override_narrows(
+                &timestamp(Nanosecond, false),
+                &timestamp(Microsecond, false),
+                false
+            ),
+            None
+        );
+    }
+
+    /// The describe is read only when an override keeps at most a microsecond, and a describe that fails is said in a warning, never read as `exact` in silence.
+    #[test]
+    fn the_describe_is_read_only_for_a_time_override_and_its_failure_is_said() {
+        use crate::types::TimeUnit::{Microsecond, Nanosecond};
+        let ns = || timestamp(Nanosecond, false);
+        let probe = |source: &mut Described, ov: (&str, RivetType)| {
+            let overrides: ColumnOverrides = [(ov.0.to_string(), ov.1)].into_iter().collect();
+            probe_mappings(source, false, "q", &overrides).unwrap()
+        };
+        let mut asked = Described::of(&[("d", "datetime2", ns())], &["d"]);
+        asked.describe_fails = true;
+        for ov in [("d", RivetType::String), ("d", ns())] {
+            let got = probe(&mut asked, ov);
+            assert!(got[0].warnings.is_empty(), "{:?}", got[0].warnings);
+        }
+        let got = probe(&mut asked, ("d", timestamp(Microsecond, false)));
+        assert_eq!(got[0].fidelity, TypeFidelity::Exact);
+        assert!(
+            got[0].warnings.len() == 1 && got[0].warnings[0].contains("describe refused"),
+            "{:?}",
+            got[0].warnings
+        );
     }
 }
