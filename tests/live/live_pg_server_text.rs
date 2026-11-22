@@ -491,21 +491,41 @@ fn a_baseline_a_refused_run_left_is_taken_without_drift(mode: &str, policy_line:
     }
 }
 
-macro_rules! upgrade_cells {
-    ($($name:ident: $mode:literal, $policy:expr;)*) => {$(
-        #[test]
-        #[ignore = "live: requires docker compose up -d postgres"]
-        fn $name() {
-            a_baseline_a_refused_run_left_is_taken_without_drift($mode, $policy);
-        }
-    )*};
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_upgraded_full_export_under_fail_reads_no_drift_postgres() {
+    a_baseline_a_refused_run_left_is_taken_without_drift("full", Some("on_schema_drift: fail"));
 }
 
-upgrade_cells! {
-    an_upgraded_full_export_under_fail_reads_no_drift_postgres: "full", Some("on_schema_drift: fail");
-    an_upgraded_keyset_export_under_fail_reads_no_drift_postgres: "keyset", Some("on_schema_drift: fail");
-    an_upgraded_range_export_under_fail_reads_no_drift_postgres: "range", Some("on_schema_drift: fail");
-    an_upgraded_incremental_export_under_fail_reads_no_drift_postgres: "incremental", Some("on_schema_drift: fail");
-    an_upgraded_range_export_under_the_default_policy_reads_no_drift_postgres: "range", None;
-    an_upgraded_incremental_export_under_the_default_policy_reads_no_drift_postgres: "incremental", None;
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_upgraded_keyset_export_under_fail_reads_no_drift_postgres() {
+    a_baseline_a_refused_run_left_is_taken_without_drift("keyset", Some("on_schema_drift: fail"));
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_upgraded_range_export_under_fail_reads_no_drift_postgres() {
+    a_baseline_a_refused_run_left_is_taken_without_drift("range", Some("on_schema_drift: fail"));
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_upgraded_incremental_export_under_fail_reads_no_drift_postgres() {
+    a_baseline_a_refused_run_left_is_taken_without_drift(
+        "incremental",
+        Some("on_schema_drift: fail"),
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_upgraded_range_export_under_the_default_policy_reads_no_drift_postgres() {
+    a_baseline_a_refused_run_left_is_taken_without_drift("range", None);
+}
+
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn an_upgraded_incremental_export_under_the_default_policy_reads_no_drift_postgres() {
+    a_baseline_a_refused_run_left_is_taken_without_drift("incremental", None);
 }
