@@ -184,6 +184,43 @@ struct Warehouse {
 }
 
 impl Warehouse {
+    /// The relation the queries read: the dedup view of a CDC load, a lower-cased view of a batch table.
+    fn rel(&self) -> String {
+        if self.changes {
+            self.view.clone()
+        } else {
+            format!("{}_lc", self.view)
+        }
+    }
+
+    /// Lower-case view over a batch-loaded table, whose server-folded names ClickHouse reads case-sensitively.
+    fn lower_view(&self) {
+        let cols: Vec<String> = clickhouse_run_sql_json(&format!(
+            "SELECT name FROM system.columns WHERE database = '{}' AND table = '{}' ORDER BY position",
+            self.db, self.view
+        ))
+        .iter()
+        .map(|r| {
+            let n = r["name"].as_str().expect("column name");
+            format!("`{n}` AS `{}`", n.to_lowercase())
+        })
+        .collect();
+        assert!(
+            !cols.is_empty(),
+            "no loaded table {}.{}",
+            self.db,
+            self.view
+        );
+        clickhouse_run_sql_json(&format!(
+            "CREATE OR REPLACE VIEW {}.{} AS SELECT {} FROM {}.`{}`",
+            self.db,
+            self.rel(),
+            cols.join(", "),
+            self.db,
+            self.view
+        ));
+    }
+
     /// The `WHERE` that keeps only live rows of the loaded relation.
     fn live(&self) -> &'static str {
         if self.changes {
@@ -207,16 +244,16 @@ const CH_PASSWORD_ENV: &str = "RIVET_TEST_CH_PASSWORD";
 
 /// `rig` exporting to the fake-gcs bucket as `<view>_wh` and loading into a fresh ClickHouse database; the view is named `view`.
 fn warehouse(rig: Rig, view: &str) -> Warehouse {
-    warehouse_of(rig.cdc("initial: snapshot"), view, true)
+    warehouse_of(rig.cdc("initial: snapshot"), view, true, "id")
 }
 
-/// `rig` as a `mode: full` batch export loaded into a fresh ClickHouse database; the loaded table is `view`.
-fn warehouse_batch(rig: Rig, view: &str) -> Warehouse {
-    warehouse_of(rig.mode("full"), view, false)
+/// `rig` as a `mode: full` batch export keyed on `pk` loaded into a fresh ClickHouse database; the loaded table is `view`.
+fn warehouse_batch(rig: Rig, view: &str, pk: &str) -> Warehouse {
+    warehouse_of(rig.mode("full"), view, false, pk)
 }
 
 /// The shared wiring of [`warehouse`] and [`warehouse_batch`].
-fn warehouse_of(rig: Rig, view: &str, changes: bool) -> Warehouse {
+fn warehouse_of(rig: Rig, view: &str, changes: bool, pk: &str) -> Warehouse {
     require_alive(LiveService::ClickHouse);
     require_alive(LiveService::FakeGcs);
     ensure_gcs_bucket(CH_BUCKET);
@@ -227,7 +264,7 @@ fn warehouse_of(rig: Rig, view: &str, changes: bool) -> Warehouse {
         .dest_gcs(CH_BUCKET, &unique_name("ledger"), FAKE_GCS_ENDPOINT)
         .top_line(&format!(
             "load: {{ target: clickhouse, url: \"{CLICKHOUSE_HTTP_URL}\", database: {db}, \
-             user: {CLICKHOUSE_USER}, password_env: {CH_PASSWORD_ENV}, pk: [id] }}"
+             user: {CLICKHOUSE_USER}, password_env: {CH_PASSWORD_ENV}, pk: [{pk}] }}"
         ));
     Warehouse {
         rig,
@@ -250,6 +287,9 @@ fn load(st: &Stand) {
     if let Some(w) = &st.warehouse {
         w.rig
             .load_ok(&[], &[(CH_PASSWORD_ENV, CLICKHOUSE_PASSWORD)]);
+        if !w.changes {
+            w.lower_view();
+        }
     }
 }
 
@@ -354,13 +394,13 @@ fn warehouse_relation(
         String::new()
     };
     let from = clickhouse_relation(&if ch_text.is_empty() {
-        format!("SELECT * FROM {}.{}{}", w.db, w.view, w.live())
+        format!("SELECT * FROM {}.{}{}", w.db, w.rel(), w.live())
     } else {
         format!(
             "SELECT * REPLACE ({}) FROM {}.{}{}{settings}",
             ch_text.join(", "),
             w.db,
-            w.view,
+            w.rel(),
             w.live()
         )
     });
@@ -1185,7 +1225,8 @@ fn duckdb_ledger_verdict(lg: &Ledger, st: &Stand, n: i64) -> Vec<String> {
                 "SELECT decode(name), decode(type) FROM {}",
                 clickhouse_relation(&format!(
                     "SELECT name, type FROM system.columns WHERE database = '{}' AND table = '{}'",
-                    w.db, w.view
+                    w.db,
+                    w.rel()
                 ))
             ),
         )
@@ -2010,7 +2051,11 @@ fn oracle_batch_and_cdc_deliver_every_ledger_row_alike() {
     let cdc = Rig::oracle_cdc(t.name())
         .cdc_line("initial: snapshot")
         .export_line(&declared);
-    let wh = warehouse_batch(Rig::oracle_batch(t.name()).export_line(&declared), t.name());
+    let wh = warehouse_batch(
+        Rig::oracle_batch(t.name()).export_line(&declared),
+        t.name(),
+        "ID",
+    );
     let batch = batch_named(Rig::oracle_batch(t.name()), t.name()).export_line(&declared);
     let st = Stand {
         engine: "oracle",
