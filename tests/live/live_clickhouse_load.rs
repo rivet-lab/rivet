@@ -1826,7 +1826,7 @@ fn an_empty_array_a_null_element_and_a_table_without_null_arrays_still_load() {
         "SELECT id, toString(a) FROM {}.{tbl} ORDER BY id FORMAT TSV",
         db.0
     ));
-    assert_eq!(got.trim(), "1\t['a']\n2\t['b','c']");
+    assert_eq!(got.trim(), "1\t[\\'a\\']\n2\t[\\'b\\',\\'c\\']");
 }
 
 /// The remedy the date refusal names, a String column, delivers 2300-01-01 as the source holds it.
