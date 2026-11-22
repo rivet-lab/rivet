@@ -259,7 +259,7 @@ def grade_unit(engine: str, u: Unit, cols: list[Col], n: int, runs: dict[str, co
         for c in graded:
             cell = f"{engine}/{c.native}->{u.target}/cdc-{leg}{tag}/{u.fmt}"
             p, check = runs.get(leg_run(leg)), checks.get(leg_run(leg), checks.get("snapshot"))
-            stop = nsn.grade_stop(cell, p, check) if p is not None else Result(cell, REFUSED, NOT_GRADED, "the run of this leg never started")
+            stop = nsn.grade_stop(cell, p, check, c.name) if p is not None else Result(cell, REFUSED, NOT_GRADED, "the run of this leg never started")
             stop = judge_stop(c, u, cell, stop)
             if stop:
                 out.append(stop)
@@ -505,6 +505,12 @@ def self_test() -> None:
     got = agree_on_code([snap, ins, Result("e/c->t/cdc-delete/parquet", REFUSED, "", "", "RIVET_A"), Result("e/c->t/cdc-update/parquet", DELIVERED, "", "")])
     assert [r.klass for r in got] == ["", CDC_DIFFERS, "", ""] and got[0] is snap, "a leg that stops with another code than the snapshot leg differs, whatever check noted"
     assert agree_on_code([ins]) == [ins] and agree_on_code([Result(snap.cell, DELIVERED, "", ""), ins])[1] is ins, "no refusing snapshot leg, nothing to compare"
+    value_stop = nsn._proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] column `e00` holds 1.1234567890123456789")
+    stated = core.Proc(["rivet"], 0, json.dumps({"columns": [{"column": "E00", "fidelity": "lossy", "warnings": ["refused at run (RIVET_SOURCE_VALUE_UNREPRESENTABLE)"]}]}), "", gated=False)
+    rs = grade_unit("mysql", Unit("float8", exact_c, "parquet"), [exact_c], 1, {"snapshot": value_stop}, {"snapshot": stated}, d, "")
+    assert rs[0].verdict == REFUSED and rs[0].klass == "", "a value refusal that check states on the column is no split, on the change-stream legs too"
+    rs = grade_unit("mysql", Unit("float8", exact_c, "parquet"), [exact_c], 1, {"snapshot": value_stop}, {"snapshot": nsn._proc(0)}, d, "")
+    assert rs[0].klass == nsn.SPLIT, "a check that states nothing is a split"
     other = Col("e01", "INT", "Int32", "int", ("1",), cdc=te.EXACT_V)
     stopped, fine = [Result("c", REFUSED, CDC_DIFFERS, "", "RIVET_X")], [Result("c", DELIVERED, "", "")]
     assert shared_stop([exact_c, other], stopped) and not shared_stop([exact_c], stopped) and not shared_stop([exact_c, other], fine)
