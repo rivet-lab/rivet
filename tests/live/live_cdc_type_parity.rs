@@ -163,7 +163,7 @@ fn declared_timestamp_row(engine: &str, native: &str) -> Row {
         known_defect: None,
         today_delivery: None,
         defect_samples: Vec::new(),
-        clickhouse: None,
+        clickhouse: Some("Nullable(DateTime64(6, 'UTC'))".to_string()),
         today_clickhouse: None,
         clickhouse_defect: None,
         clickhouse_defect_samples: Vec::new(),
