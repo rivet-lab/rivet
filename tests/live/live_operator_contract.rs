@@ -3878,12 +3878,7 @@ fn a_checkpoint_of_another_database_is_refused_by_code_oracle() {
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn a_change_older_than_an_alter_is_refused_by_code_oracle() {
     let _serial = cross_process_serial("oracle_cdc");
-    let s = oracle_stream_with_a_change_waiting("oc_oalt", |r| {
-        r.oracle_known_defect(
-            "a failed run left: resume-point",
-            "known defect: a run refused for an undecodable change has already replaced the export's drift baseline in export_schema with the table's new shape (src/state/schema.rs `detect_schema_change`), which src/state/migrations.rs v18 documents as success-only",
-        )
-    });
+    let s = oracle_stream_with_a_change_waiting("oc_oalt", |r| r);
     ora_exec(&format!("ALTER TABLE {} ADD (w NUMBER(18))", s.table));
     oracle_walk_out_of(s, "RIVET_SOURCE_CDC_UNDECODABLE");
 }

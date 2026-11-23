@@ -846,12 +846,13 @@ fn oracle_cdc_a_change_older_than_an_alter_is_refused_by_code() {
     let d = tempfile::tempdir().unwrap();
     let t = cdc_table("ora_cmid", "id NUMBER(18) PRIMARY KEY, v NUMBER(18)");
     let ckpt = d.path().join("cdc.ckpt");
-    rig(&t, &ckpt, &d.path().join("anchor")).run_ok();
+    let anchor = rig(&t, &ckpt, &d.path().join("anchor"));
+    anchor.run_ok();
     let anchored = std::fs::read(&ckpt).unwrap();
     ora_exec(&format!("INSERT INTO {} VALUES (1, 10)", t.name()));
     ora_exec(&format!("ALTER TABLE {} ADD (w NUMBER(18))", t.name()));
     let out = d.path().join("out");
-    let err = rig(&t, &ckpt, &out).run_expect_fail();
+    let err = anchor.twin().dest_path(out.clone()).run_expect_fail();
     assert!(
         err.contains("[RIVET_SOURCE_CDC_UNDECODABLE]"),
         "the pre-ALTER change must be refused by code: {err}"
