@@ -292,9 +292,10 @@ mod tests {
         let wide = || {
             col(
                 "n",
-                RivetType::Decimal {
-                    precision: 60,
-                    scale: 10,
+                RivetType::List {
+                    inner: Box::new(RivetType::List {
+                        inner: Box::new(RivetType::String),
+                    }),
                 },
             )
         };
