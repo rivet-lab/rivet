@@ -832,6 +832,10 @@ exclude_re = [
     # decode and `side_a`, are unit-tested in postgres/arrow_convert.rs.
     "replace pg_cell -> Result<Option<T>> with Ok\\(None\\)",
     "replace pg_int_cell -> Result<Option<T>> with Ok\\(None\\)",
+    # pg_numeric_optional_plain reads a live `tokio_postgres::Row`; its Ok(None), "xyzzy" and empty-string stubs fail
+    # `a_typed_numeric_read_as_a_decimal_is_the_value_at_the_column_scale_postgres` and
+    # `a_decimal_column_keeps_its_catalog_precision_and_scale_postgres` (RED-checked 2026-11-23).
+    "replace pg_numeric_optional_plain -> Result<Option<String>> with",
     "replace <impl crate::source::value_checksum::CellSource for PgCellSource<'_>>::int16 -> Option<i16>",
     "replace <impl crate::source::value_checksum::CellSource for PgCellSource<'_>>::int32 -> Option<i32>",
     "replace <impl crate::source::value_checksum::CellSource for PgCellSource<'_>>::int64 -> Option<i64>",
