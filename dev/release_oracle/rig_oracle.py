@@ -1726,12 +1726,12 @@ def created_zone_less(spec: dict) -> bool:
     return any(release_version(b) <= LAST_ZONE_LESS_RELEASE for b in spec.get("released_by") or [])
 
 
-def clickhouse_type_findings(ch_of: dict, row_of: dict, wh_types: dict, native: dict, key: list[str], legacy: bool) -> list[str]:
-    """One line per column whose ClickHouse type is none the ledger allows; a naive timestamp may be zone-less only when `legacy`."""
+def clickhouse_type_findings(ch_of: dict, row_of: dict, wh_types: dict, native: dict, key: list[str], legacy: bool, overrides: dict) -> list[str]:
+    """One line per column whose ClickHouse type is none the ledger allows; a naive timestamp may be zone-less only when `legacy`; a `columns:` override column is not the ledger's."""
     bad: list[str] = []
     for col, r in ch_of.items():
         want, got = r.get("clickhouse"), wh_types.get(col)
-        if not want or got is None:
+        if not want or got is None or col in overrides:
             continue
         marked = r.get("clickhouse_defect") or r.get("known_defect") or row_of.get(col, {}).get("known_defect")
         allowed = {want, r.get("today_clickhouse")} if marked else {want}
@@ -1966,7 +1966,7 @@ def grade_load(spec: dict) -> dict:
     null_class = frozenset(c for c, xs in defects.items() if None in xs)
     bad = grade_findings(f, {}, forms, native, engine != "mongo", dict.fromkeys([*(spec.get("overrides") or {}), *ledgered]),
                          collapse=collapse, null_class=null_class, unpinned_strict=False)
-    bad += clickhouse_type_findings(ch_of, row_of, wh_types, native, key, created_zone_less(spec)) if target == "clickhouse" else []
+    bad += clickhouse_type_findings(ch_of, row_of, wh_types, native, key, created_zone_less(spec), spec.get("overrides") or {}) if target == "clickhouse" else []
     bad += [f"WAREHOUSE: {n}" for n in notes if "still exist" in n]
     out = {"failures": [f"WAREHOUSE {target} `{fq}`: {b}" for b in bad], "notes": notes,
            "facts": {k: v for k, v in f.items() if k not in ("pairs", "dst_cols", "src_stats", "dst_stats")}}
@@ -2514,7 +2514,7 @@ def _zone_less_self_test() -> None:
     ch_of, native = {"n": naive, "z": zoned}, {"n": "DATETIME(6)", "z": "TIMESTAMPTZ"}
 
     def findings(types: dict, legacy: bool) -> list[str]:
-        return clickhouse_type_findings(ch_of, {}, types, native, ["id"], legacy)
+        return clickhouse_type_findings(ch_of, {}, types, native, ["id"], legacy, {})
 
     old = {"n": "Nullable(DateTime64(6))", "z": utc}
     assert zone_less(utc) == "Nullable(DateTime64(6))" and zone_less("Int64") == "Int64"
@@ -2523,6 +2523,14 @@ def _zone_less_self_test() -> None:
     tree = findings(old, False)
     assert len(tree) == 1 and "`n`" in tree[0] and "TYPE" in tree[0], f"a zone-less type on a table this tree created is a finding: {tree}"
     assert len(findings({"n": utc, "z": "Nullable(DateTime64(6))"}, True)) == 1, "a zoned column never loses its zone, legacy or not"
+    number = {"VER": {"delivery": "decimal_plain", "clickhouse": "Nullable(String)"}, "ID": {"delivery": "Int64", "clickhouse": "Nullable(Int64)"}}
+    kinds = {"VER": "NUMBER", "ID": "NUMBER(10)"}
+    declared = clickhouse_type_findings(number, {}, {"VER": "Nullable(Int64)", "ID": "Nullable(Int64)"}, kinds, [], False, {"VER": "int64"})
+    assert declared == [], f"a column the export declares under `columns:` is not graded against the ledger's type: {declared}"
+    bare = clickhouse_type_findings(number, {}, {"VER": "Nullable(Int64)", "ID": "Nullable(Int64)"}, kinds, [], False, {})
+    assert len(bare) == 1 and "`VER`" in bare[0], f"an undeclared NUMBER column that lands as Int64 is still a finding: {bare}"
+    other = clickhouse_type_findings(number, {}, {"VER": "Nullable(Int64)", "ID": "Nullable(String)"}, kinds, [], False, {"VER": "int64"})
+    assert len(other) == 1 and "`ID`" in other[0], f"an override on one column excuses no other column: {other}"
     with tempfile.TemporaryDirectory() as d:
         def binary(version: str) -> str:
             path = os.path.join(d, f"rivet-{version}")

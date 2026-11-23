@@ -314,11 +314,6 @@ const KNOWN_DEFECTS: &[(&str, &str, &str)] = &[
         "a failed run left: resume-point",
         "known defect: a checkpointed run its quality gate fails is recorded in export_progression",
     ),
-    (
-        "a_change_older_than_an_alter_is_refused_by_code_oracle",
-        "a failed run left: resume-point",
-        "known defect: a run refused for an undecodable change has already replaced the export's drift baseline in export_schema",
-    ),
 ]; // ratchet-pin: end
 
 /// `(enclosing fn, class, reason)` of every known-defect call site in `text`.
