@@ -142,6 +142,9 @@ scenarios:
   - id: keyset_parallel
     what: "the feat/parallel-keyset fan-out end-to-end: users 150K exported with mode:chunked + chunk_by_key:id + parallel:4 must (a) lose/dup ZERO rows vs the DuckDB read of the parts (same independent oracle as integrity_types) AND (b) actually FAN OUT — >=2 distinct pk_w{ridx} worker parts, proving parallel:N engaged and did not silently degrade to sequential keyset (which integrity_types/load already exercise)."
     applies: [postgres, mysql, mssql, oracle]   # mongo keyset (page_size + parallel -> mongo_parallel) is the mongo_keyset row
+  - id: keyset_skew
+    what: "a skewed integer key (180,000 dense ids then 20,000 ids 500,000 apart, built at run time and dropped after) exported with mode:chunked + chunk_by_key + parallel:4: every row once vs the source (DuckDB over the declared parts), the log names `seek+recut` and not `not balanced`, >=2 ranges, no range above twice the mean rows. Red against a recut that never splits. dev/release_oracle/keyset_skew.py."
+    applies: [postgres, mysql, mssql, oracle]
   - id: mongo_keyset
     what: "one Mongo version: page_size keyset sequential AND parallel:4 (run_mongo_parallel) == the pymongo source count+distinct (DuckDB over DECLARED parts, >=2 range parts); an int+string _id collection is refused with zero parts (ensure_uniform_id_type)."
     applies: [mongo]

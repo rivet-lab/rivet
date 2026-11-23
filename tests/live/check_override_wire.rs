@@ -98,7 +98,107 @@ fn check_refuses_a_timestamp_with_a_time_declared_date_oracle() {
         .export_line("columns:")
         .export_line("  D: \"date\"")
         .dest_path(out.path().to_path_buf());
-    check_and_run_refuse_alike(rig, &name);
+    check_and_run_refuse_alike_by(
+        rig,
+        &name,
+        Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5),
+    );
+}
+
+/// `check` exits 0 and prints the values-unread note on stderr only for an export that declares `columns:`.
+fn check_says_it_read_no_values_only_under_columns(declared: Rig, plain: Rig, name: &str) {
+    let said = |rig: &Rig| {
+        let o = rig
+            .run_after(
+                &["check", "--export", name],
+                &["--export", name],
+                Pairing::SameRefusal,
+            )
+            .preflight;
+        let (err, out) = (
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+        );
+        assert_eq!(o.status.code(), Some(0), "{err}");
+        assert!(!out.contains("note[values-unread]"), "stdout: {out}");
+        err
+    };
+    let with = said(&declared);
+    assert!(with.contains("note[values-unread]"), "{with}");
+    for code in [
+        "RIVET_SOURCE_VALUE_UNREPRESENTABLE",
+        "RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE",
+    ] {
+        assert!(with.contains(code), "{code}: {with}");
+    }
+    let without = said(&plain);
+    assert!(!without.contains("note[values-unread]"), "{without}");
+}
+
+#[test]
+#[ignore = "live: postgres"]
+fn check_says_it_read_no_values_only_under_columns_postgres() {
+    require_alive(LiveService::Postgres);
+    let name = unique_name("ovw_note_pg");
+    let out = tempfile::tempdir().unwrap();
+    let rig = || {
+        Rig::pg_batch(&name)
+            .query("SELECT id, quantity FROM orders")
+            .mode("full")
+            .dest_path(out.path().to_path_buf())
+    };
+    let declared = rig()
+        .export_line("columns:")
+        .export_line("  quantity: \"int64\"");
+    check_says_it_read_no_values_only_under_columns(declared, rig(), &name);
+}
+
+#[test]
+#[ignore = "live: mysql"]
+fn check_says_it_read_no_values_only_under_columns_mysql() {
+    require_alive(LiveService::Mysql);
+    let name = unique_name("ovw_note_my");
+    let out = tempfile::tempdir().unwrap();
+    let rig = || {
+        Rig::mysql_batch(&name)
+            .query("SELECT CAST(7 AS SIGNED) AS n")
+            .mode("full")
+            .dest_path(out.path().to_path_buf())
+    };
+    let declared = rig().export_line("columns:").export_line("  n: \"int64\"");
+    check_says_it_read_no_values_only_under_columns(declared, rig(), &name);
+}
+
+#[test]
+#[ignore = "live: mssql"]
+fn check_says_it_read_no_values_only_under_columns_mssql() {
+    require_alive(LiveService::Mssql);
+    let name = unique_name("ovw_note_ms");
+    let out = tempfile::tempdir().unwrap();
+    let rig = || {
+        Rig::mssql_batch(&name)
+            .query("SELECT CAST(7 AS BIGINT) AS n")
+            .mode("full")
+            .dest_path(out.path().to_path_buf())
+    };
+    let declared = rig().export_line("columns:").export_line("  n: \"int64\"");
+    check_says_it_read_no_values_only_under_columns(declared, rig(), &name);
+}
+
+#[test]
+#[ignore = "live: oracle"]
+fn check_says_it_read_no_values_only_under_columns_oracle() {
+    require_alive(LiveService::Oracle);
+    let name = unique_name("ovw_note_or");
+    let out = tempfile::tempdir().unwrap();
+    let rig = || {
+        Rig::oracle_batch(&name)
+            .query("SELECT CAST(7 AS NUMBER(10,0)) AS n FROM dual")
+            .mode("full")
+            .dest_path(out.path().to_path_buf())
+    };
+    let declared = rig().export_line("columns:").export_line("  N: \"int64\"");
+    check_says_it_read_no_values_only_under_columns(declared, rig(), &name);
 }
 
 #[test]
@@ -410,17 +510,24 @@ fn a_csv_export_of_a_decimal256_column_is_refused_by_check_like_the_run_mysql() 
     csv_column_is_refused_like_the_run(rig, &name, "d", "decimal(60,10)");
 }
 
+/// A column no Arrow type carries, declared as an integer, is refused by the run and both `check` spellings with the one wire-mismatch code, naming the column.
 #[test]
 #[ignore = "live: postgres"]
-fn a_column_without_an_arrow_type_is_refused_by_check_like_the_run_postgres() {
+fn a_declared_type_on_a_column_without_an_arrow_type_is_refused_by_check_like_the_run_postgres() {
     require_alive(LiveService::Postgres);
-    let name = unique_name("unmapped_pg");
+    let name = unique_name("unmapped_ovr_pg");
     let out = tempfile::tempdir().unwrap();
     let rig = Rig::pg_batch(&name)
-        .query("SELECT 12.5::numeric AS c")
+        .query("SELECT '10.0.0.1'::inet AS c")
         .mode("full")
+        .export_line("columns:")
+        .export_line("  c: \"int64\"")
         .dest_path(out.path().to_path_buf());
-    unmapped_column_is_refused_like_the_run(rig, &name, "c");
+    let said = check_and_run_refuse_alike(rig, &name);
+    assert!(
+        said.contains("column `c` is inet") && said.contains("Postgres does not convert that pair"),
+        "{said}"
+    );
 }
 
 #[test]

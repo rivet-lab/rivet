@@ -38,6 +38,7 @@ pub(crate) mod kind;
 #[cfg(test)]
 mod kind_doc;
 mod mapping;
+pub(crate) mod narrowing;
 pub(crate) mod override_table;
 mod override_type;
 pub mod policy;
@@ -49,7 +50,8 @@ pub use cursor::CursorState;
 #[allow(unused_imports)]
 pub use delivery::{
     Delivery, TextForm, bit_string, decimal_plain, hex_bytes, iso_timestamp_nanos,
-    iso8601_duration, time_beyond_day, time_of_day_offset, uuid36,
+    iso8601_duration, mysql_datetime_text, oracle_fields_text, oracle_timestamp_text,
+    time_beyond_day, time_of_day_offset, uuid36,
 };
 pub use fidelity::TypeFidelity;
 // Public surface for contract/integration tests; not referenced from the binary.
@@ -82,6 +84,9 @@ pub fn is_time_of_day(us: i64) -> bool {
     (0..MICROS_PER_DAY).contains(&us)
 }
 
+/// The dates a nanosecond timestamp holds, in the words of every refusal of a value outside them.
+pub const NANOSECOND_RANGE: &str = "1677-09-21..2262-04-11";
+
 /// Nanoseconds since the Unix epoch of `dt` read as UTC, or the coded refusal naming `column` when `dt` is outside Arrow's 1677-09-21..2262-04-11.
 pub fn timestamp_nanos_or_refuse(
     dt: chrono::NaiveDateTime,
@@ -93,7 +98,7 @@ pub fn timestamp_nanos_or_refuse(
             crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
             format!(
                 "{source}: column `{column}` holds {dt}, outside the nanosecond timestamp range \
-                 (1677-09-21..2262-04-11) its nanosecond type (a sub-microsecond column, or a \
+                 ({NANOSECOND_RANGE}) its nanosecond type (a sub-microsecond column, or a \
                  `timestamp_ns` / `timestamp_tz_ns` override) delivers, and writing it as NULL would \
                  lose the value. Declare the column `timestamp` (microseconds, full range) or \
                  `timestamp_tz` in `columns:` instead, or CAST it in the export's `query:`."

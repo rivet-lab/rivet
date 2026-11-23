@@ -240,3 +240,10 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_STATE_MIGRATION_LOCKED` | environment | 2 | wait for the other rivet process migrating this state database to finish, then run again |
 | `RIVET_INTERNAL_DEST_INVARIANT` | internal | 6 | a destination invariant did not hold — a bug; report it with the message |
 | `RIVET_INTERNAL_STATE_INVARIANT` | internal | 6 | a state-store invariant did not hold — a bug; report it with the message |
+
+## Decided by a value
+
+`rivet check` reads at most the first row of an export that declares `columns:`, so a later value can still raise these codes in `rivet run` or `rivet load` after check passed: check names them in a note on stderr.
+
+- `RIVET_SOURCE_VALUE_UNREPRESENTABLE`
+- `RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE`
