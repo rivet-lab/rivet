@@ -2323,6 +2323,334 @@ fn an_undeclared_nanosecond_timestamp_is_refused_and_the_declared_ns_type_delive
     }
 }
 
+struct OracleView(String);
+
+impl Drop for OracleView {
+    /// Drops the view.
+    fn drop(&mut self) {
+        let name = self.0.clone();
+        let _ = std::panic::catch_unwind(move || ora_exec(&format!("DROP VIEW {name}")));
+    }
+}
+
+/// A shifted LTZ value is refused by code however it is read: through a `CAST` to TIMESTAMP WITH TIME ZONE or TIMESTAMP in a `query:`, and through a view that casts it.
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn an_ltz_value_stored_outside_the_range_is_refused_by_code_through_a_cast_or_a_view() {
+    require_alive(LiveService::Oracle);
+    let t = OracleTable::create(
+        "ora_ltzv",
+        "id NUMBER(10) PRIMARY KEY, l TIMESTAMP(6) WITH LOCAL TIME ZONE",
+    );
+    ora_insert_from_zone(
+        t.name(),
+        "+14:00",
+        1,
+        "TIMESTAMP '9999-12-31 10:00:00 +00:00'",
+    );
+    ora_insert_from_zone(
+        t.name(),
+        "+00:00",
+        2,
+        "TIMESTAMP '2024-02-29 10:00:00 +00:00'",
+    );
+    let view = OracleView(format!("{}_V", t.name()));
+    ora_exec(&format!(
+        "CREATE VIEW {} AS SELECT id, CAST(l AS TIMESTAMP WITH TIME ZONE) l FROM {}",
+        view.0,
+        t.name()
+    ));
+    let refused = Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+    for query in [
+        format!(
+            "SELECT id, CAST(l AS TIMESTAMP WITH TIME ZONE) l FROM {} ORDER BY id",
+            t.name()
+        ),
+        format!(
+            "SELECT id, CAST(l AS TIMESTAMP) l FROM {} ORDER BY id",
+            t.name()
+        ),
+        format!("SELECT id, l FROM {} ORDER BY id", view.0),
+    ] {
+        assert_refused(&Rig::oracle_batch(t.name()).query(&query).run(), refused);
+    }
+    for query in [
+        format!(
+            "SELECT id, CAST(l AS TIMESTAMP WITH TIME ZONE) l FROM {} WHERE id = 2",
+            t.name()
+        ),
+        format!(
+            "SELECT id, CAST(l AS TIMESTAMP) l FROM {} WHERE id = 2",
+            t.name()
+        ),
+        format!("SELECT id, l FROM {} WHERE id = 2", view.0),
+    ] {
+        Rig::oracle_batch(t.name()).query(&query).run_ok();
+    }
+}
+
+/// A value Oracle computes past 9999 from a real year-10000 instant is refused by code with a message that names no local-zone cause, and a query that keeps the computed value within 9999 delivers it.
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_value_oracle_computes_past_9999_is_refused_by_code_and_a_query_inside_9999_delivers() {
+    require_alive(LiveService::Oracle);
+    let t = OracleTable::create(
+        "ora_ltzk",
+        "id NUMBER(10) PRIMARY KEY, z TIMESTAMP(6) WITH TIME ZONE, d DATE, ts TIMESTAMP(6)",
+    );
+    ora_exec(&format!(
+        "INSERT INTO {} (id, z) VALUES (1, TIMESTAMP '9999-12-31 22:00:00 -05:00')",
+        t.name()
+    ));
+    ora_exec(&format!(
+        "UPDATE {} SET d = ADD_MONTHS(CAST(SYS_EXTRACT_UTC(z) AS DATE), 1), ts = CAST(SYS_EXTRACT_UTC(z) + INTERVAL '13' HOUR AS TIMESTAMP(6))",
+        t.name()
+    ));
+    assert_refused(
+        &Rig::oracle_batch(t.name()).run(),
+        Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5),
+    );
+    let query = format!(
+        "SELECT id, ADD_MONTHS(CAST(SYS_EXTRACT_UTC(z) AS DATE), 1) z FROM {}",
+        t.name()
+    );
+    let run = Rig::oracle_batch(t.name()).query(&query).run();
+    assert_refused(
+        &run,
+        Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5),
+    );
+    let said = String::from_utf8_lossy(&run.stderr).to_string();
+    assert!(
+        said.contains("Oracle stored or computed it a year past that end"),
+        "{said}"
+    );
+    assert!(
+        !said.contains("it is a TIMESTAMP WITH LOCAL TIME ZONE value"),
+        "{said}"
+    );
+    Rig::oracle_batch(t.name())
+        .query(&format!("SELECT id FROM {}", t.name()))
+        .run_ok();
+    let out = tempfile::tempdir().unwrap();
+    Rig::oracle_batch(t.name())
+        .query(&format!(
+            "SELECT id, LEAST(ADD_MONTHS(CAST(SYS_EXTRACT_UTC(z) AS DATE), 1), DATE '9999-12-31') z FROM {}",
+            t.name()
+        ))
+        .dest_path(out.path().to_path_buf())
+        .run_ok();
+    let z = parquet_cells(out.path(), "Z");
+    assert_eq!(
+        z[&1].as_deref().map(canon_ts).as_deref(),
+        Some("9999-12-31T00:00:00"),
+        "the remedy delivers 253402214400000000 microseconds: {z:?}"
+    );
+}
+
+/// An LTZ value Oracle stored outside its 4712 BC to 9999 range is refused by code before any part is written, and the remedy the text names delivers the other columns.
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn an_ltz_value_stored_outside_the_range_is_refused_by_code_and_a_query_without_it_delivers_the_rest()
+ {
+    require_alive(LiveService::Oracle);
+    let t = OracleTable::create(
+        "ora_ltzc",
+        "id NUMBER(10) PRIMARY KEY, l TIMESTAMP(6) WITH LOCAL TIME ZONE",
+    );
+    ora_insert_from_zone(
+        t.name(),
+        "+00:00",
+        1,
+        "TIMESTAMP '2024-02-29 10:00:00 +00:00'",
+    );
+    ora_insert_from_zone(
+        t.name(),
+        "+14:00",
+        2,
+        "TIMESTAMP '9999-12-31 23:59:59.999999 +00:00'",
+    );
+    let stored = ora_text_rows(&format!(
+        "SELECT TO_CHAR(id), DUMP(l) FROM {} ORDER BY id",
+        t.name()
+    ));
+    assert!(
+        stored[1][1].as_deref().unwrap().contains(": 200,100,"),
+        "the server holds year 10000 for row 2: {stored:?}"
+    );
+    let out = tempfile::tempdir().unwrap();
+    let table = t.name().to_string();
+    let mut rig = Rig::oracle_batch(t.name()).dest_path(out.path().to_path_buf());
+    let same = Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+    let said = rig.refuses_twice_and_walks_out(
+        &["run"],
+        &[],
+        same,
+        vec![
+            Remedy::wrong(
+                "empties the destination and runs again",
+                Then::Refuses(same),
+                |r| {
+                    for f in std::fs::read_dir(r.out_dir())
+                        .expect("the destination")
+                        .flatten()
+                    {
+                        let _ = std::fs::remove_file(f.path());
+                    }
+                },
+            ),
+            Remedy::new(
+                "list the other columns in a `query:`",
+                Then::DeliversTheSource,
+                move |r| {
+                    r.rebuilt(|rig| {
+                        rig.restage("full", &[])
+                            .query(&format!("SELECT id FROM {table} ORDER BY id"))
+                    })
+                },
+            ),
+        ],
+    );
+    assert!(said.contains("column L holds "), "{said}");
+    let floor = OracleTable::create(
+        "ora_ltzf",
+        "id NUMBER(10) PRIMARY KEY, l TIMESTAMP(6) WITH LOCAL TIME ZONE",
+    );
+    ora_insert_from_zone(
+        floor.name(),
+        "-12:00",
+        1,
+        "TO_TIMESTAMP_TZ('-4712-01-01 00:00:00 +00:00','SYYYY-MM-DD HH24:MI:SS TZH:TZM')",
+    );
+    assert_refused(
+        &Rig::oracle_batch(floor.name()).run(),
+        Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5),
+    );
+}
+
+/// An LTZ value Oracle stored outside its range is refused by code under every override that reads it, never delivered a year off as text, JSON or a date.
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn an_ltz_value_outside_the_range_is_refused_by_code_under_every_override_that_reads_it() {
+    require_alive(LiveService::Oracle);
+    let ceiling = OracleTable::create(
+        "ora_ltzo",
+        "id NUMBER(10) PRIMARY KEY, l TIMESTAMP(6) WITH LOCAL TIME ZONE",
+    );
+    ora_insert_from_zone(
+        ceiling.name(),
+        "+14:00",
+        1,
+        "TIMESTAMP '9999-12-31 10:00:00 +00:00'",
+    );
+    let floor = OracleTable::create(
+        "ora_ltzp",
+        "id NUMBER(10) PRIMARY KEY, l TIMESTAMP(6) WITH LOCAL TIME ZONE",
+    );
+    ora_insert_from_zone(
+        floor.name(),
+        "-12:00",
+        1,
+        "TO_TIMESTAMP_TZ('-4712-01-01 00:00:00 +00:00','SYYYY-MM-DD HH24:MI:SS TZH:TZM')",
+    );
+    for (table, declared) in [
+        (ceiling.name(), "text"),
+        (ceiling.name(), "json"),
+        (ceiling.name(), "timestamp_ns"),
+        (ceiling.name(), "date"),
+        (floor.name(), "text"),
+        (floor.name(), "date"),
+    ] {
+        let out = tempfile::tempdir().unwrap();
+        let rig = Rig::oracle_batch(table)
+            .export_line(&format!("columns: {{L: {declared}}}"))
+            .dest_path(out.path().to_path_buf());
+        assert_refused(
+            &rig.run(),
+            Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5),
+        );
+        assert!(
+            files_with_extension(out.path(), "parquet").is_empty(),
+            "{table} as {declared}: nothing is written before the refusal"
+        );
+    }
+}
+
+/// An LTZ value on the last day of 9999 written from a UTC session, and a TZ value at the ceiling, are delivered as the database holds them.
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn an_ltz_on_the_last_day_of_9999_and_a_tz_at_the_ceiling_are_delivered_unchanged() {
+    require_alive(LiveService::Oracle);
+    let t = OracleTable::create(
+        "ora_ltzn",
+        "id NUMBER(10) PRIMARY KEY, l TIMESTAMP(6) WITH LOCAL TIME ZONE, z TIMESTAMP(6) WITH TIME ZONE",
+    );
+    ora_insert_from_zone(
+        t.name(),
+        "+00:00",
+        1,
+        "TIMESTAMP '9999-12-31 12:00:00.999999 +00:00'",
+    );
+    ora_exec(&format!(
+        "UPDATE {} SET z = TIMESTAMP '9999-12-31 23:59:59.999999 +00:00'",
+        t.name()
+    ));
+    let out = tempfile::tempdir().unwrap();
+    Rig::oracle_batch(t.name())
+        .dest_path(out.path().to_path_buf())
+        .run_ok();
+    let l = parquet_cells(out.path(), "L");
+    let z = parquet_cells(out.path(), "Z");
+    let canon = |c: &Option<String>| c.as_deref().map(canon_ts);
+    assert_eq!(canon(&l[&1]).as_deref(), Some("9999-12-31T12:00:00.999999"));
+    assert_eq!(canon(&z[&1]).as_deref(), Some("9999-12-31T23:59:59.999999"));
+}
+
+/// An LTZ value that is a real instant just past 9999 (a zoned literal behind UTC) is delivered as the same literal in a TZ column is, never refused as a shifted value.
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn an_ltz_instant_just_past_9999_is_delivered_exactly_as_a_tz_column_holds_it() {
+    require_alive(LiveService::Oracle);
+    let t = OracleTable::create(
+        "ora_ltzr",
+        "id NUMBER(10) PRIMARY KEY, l TIMESTAMP(6) WITH LOCAL TIME ZONE, z TIMESTAMP(6) WITH TIME ZONE",
+    );
+    ora_insert_from_zone(
+        t.name(),
+        "-05:00",
+        1,
+        "TIMESTAMP '9999-12-31 22:00:00 -05:00'",
+    );
+    ora_exec(&format!(
+        "UPDATE {} SET z = TIMESTAMP '9999-12-31 22:00:00 -05:00'",
+        t.name()
+    ));
+    let stored = ora_text_rows(&format!("SELECT DUMP(l) FROM {}", t.name()));
+    assert!(
+        stored[0][0]
+            .as_deref()
+            .unwrap()
+            .contains(": 200,100,1,1,4,1,1"),
+        "the server holds 10000-01-01 03:00: {stored:?}"
+    );
+    let out = tempfile::tempdir().unwrap();
+    let run = Rig::oracle_batch(t.name())
+        .no_oracle("Oracle cannot print the stored year-10000 instant (ORA-01841), so the oracle's source read fails")
+        .dest_path(out.path().to_path_buf())
+        .run();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let l = parquet_cells(out.path(), "L");
+    let z = parquet_cells(out.path(), "Z");
+    assert!(l[&1].is_some(), "the instant is delivered");
+    assert_eq!(
+        l[&1], z[&1],
+        "the LTZ column delivers what the TZ column does"
+    );
+}
+
 /// An `INTERVAL DAY TO SECOND(9)` column holding microsecond-exact values is a logical string in the type report and the run it vouches for delivers.
 #[test]
 #[ignore = "live: requires docker compose oracle"]

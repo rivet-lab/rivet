@@ -1224,6 +1224,7 @@ def self_test() -> None:
     """Grade the grader: axes come from the product, every failure class fires on its exact harm, a delivered value passes."""
     ax = axes()
     assert {"postgres", "mysql", "mssql", "oracle", "mongo"} <= set(ax["engines"]), ax["engines"]
+    assert all(columns(e) for e in ("postgres", "mysql", "mssql", "oracle")), "every engine's ledger builds its override-grid columns"
     assert {"full", "incremental", "chunked", "cdc"} <= set(ax["modes"]) and set(ax["formats"]) == {"parquet", "csv"}, ax
     assert {"none", "float4", "float8", "int8", "bool", "decimal(38,10)", "text"} <= set(ax["targets"]), ax["targets"]
     assert {"decimal(18,-2)", "decimal(60,-2)"} <= set(ax["targets"]) and negative_scale_targets("fn parse_decimal_params let scale: u8 =") == []

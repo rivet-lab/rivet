@@ -111,7 +111,7 @@ const LONG_FUNCTIONS: &[(&str, usize)] = &[
     ("src/source/mssql/arrow_convert.rs::build_array#1", 222),
     ("src/source/mysql/arrow_convert.rs::build_array#1", 290),
     ("src/source/mysql/cdc.rs::fill#1", 253),
-    ("src/source/oracle/arrow_convert.rs::build_column#1", 172),
+    ("src/source/oracle/arrow_convert.rs::build_column#1", 155),
 ];
 
 /// Every text file under `dir` that may hold a reference, as (repo-relative path, text).

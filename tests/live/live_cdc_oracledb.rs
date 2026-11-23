@@ -1740,6 +1740,61 @@ fn oracle_timestamp9_past_the_nanosecond_range_is_one_refusal_on_batch_and_cdc()
     assert_eq!(legs.stream, want);
 }
 
+/// A TIMESTAMP WITH LOCAL TIME ZONE value Oracle stored outside its range stops the batch export and the CDC snapshot with RIVET_SOURCE_VALUE_UNREPRESENTABLE and the change stream with RIVET_SOURCE_CDC_UNDECODABLE, never a delivery.
+#[test]
+#[ignore = "live: requires the oracle service with LogMiner prerequisites"]
+fn oracle_cdc_an_ltz_value_outside_the_range_is_refused_by_code_on_batch_snapshot_and_stream() {
+    let _serial = cross_process_serial("oracle_cdc");
+    let t = cdc_table(
+        "ora_ltzcdc",
+        "id NUMBER(10) PRIMARY KEY, l TIMESTAMP(6) WITH LOCAL TIME ZONE",
+    );
+    ora_insert_from_zone(
+        t.name(),
+        "+00:00",
+        1,
+        "TIMESTAMP '2024-02-29 10:00:00 +00:00'",
+    );
+    let ungraded = |r: Rig| {
+        r.no_oracle("Oracle cannot print the stored out-of-range value (ORA-01877), so the oracle's source read fails")
+    };
+    let d = tempfile::tempdir().unwrap();
+    let ckpt = d.path().join("cdc.ckpt");
+    let (snap, stream) = (d.path().join("snap"), d.path().join("stream"));
+    let snap_run = rig(&t, &ckpt, &snap).cdc("initial: snapshot").run();
+    assert_eq!(
+        run_cells(&snap_run, &snap.join("snapshot"), "ID", &["L"]),
+        Ok(std::collections::BTreeMap::from([(
+            ":1".to_string(),
+            "Microsecond:1709200800000000".to_string()
+        )])),
+        "a value inside the range is delivered"
+    );
+    ora_insert_from_zone(
+        t.name(),
+        "+14:00",
+        2,
+        "TIMESTAMP '9999-12-31 10:00:00 +00:00'",
+    );
+    let want = |code: &str| Err(format!("refused[{code} exit 5]"));
+    let stream_run = ungraded(rig(&t, &ckpt, &stream)).run();
+    assert_eq!(
+        run_cells(&stream_run, &stream, "ID", &["L"]),
+        want("RIVET_SOURCE_CDC_UNDECODABLE")
+    );
+    let batch = Rig::oracle_batch(t.name());
+    assert_eq!(
+        run_cells(&batch.run(), &batch.out_dir(), "ID", &["L"]),
+        want("RIVET_SOURCE_VALUE_UNREPRESENTABLE")
+    );
+    let (again, again_out) = (d.path().join("again.ckpt"), d.path().join("again"));
+    let again_run = ungraded(rig(&t, &again, &again_out).cdc("initial: snapshot")).run();
+    assert_eq!(
+        run_cells(&again_run, &again_out.join("snapshot"), "ID", &["L"]),
+        want("RIVET_SOURCE_VALUE_UNREPRESENTABLE")
+    );
+}
+
 const DATE_DDL: &str = "id NUMBER(10) PRIMARY KEY, d0 DATE";
 
 const DATE_SEED: [&str; 4] = [

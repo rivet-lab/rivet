@@ -952,7 +952,8 @@ const PIN_INDEPENDENT: usize = 126; // ratchet-pin: cdc-census-independent (revi
 // 154 -> 155 (2026-11-22, #1163): the PG CDC added-column cell reads the delivered id set with arrow; the rig oracle grades the first run.
 // 155 -> 160 (2026-11-22, #1162): the MySQL and PostgreSQL stream-text cells, the two SQL Server datetime2 cells and the Oracle DATE text and open-defect cells compare the verdicts of the stream and batch legs, read back with arrow, against the text the test names.
 // 160 -> 161 (2026-11-22, #1149): the Oracle CDC time-override cell reads the delivered change ids and values with arrow against the rows the test wrote; the verdict is graded by `check` and `--strict`.
-const PIN_SHARED_CODEC: usize = 161; // ratchet-pin: cdc-census-shared-codec (review 2027-02-01)
+// 161 -> 162 (2026-11-22, #1183): the Oracle CDC cell for an LTZ value outside Oracle's range reads the delivered in-range snapshot value with arrow and compares the refusal codes of the batch, snapshot and stream legs; closes when the census reads it as independent.
+const PIN_SHARED_CODEC: usize = 162; // ratchet-pin: cdc-census-shared-codec (review 2027-02-01)
 const PIN_SELF_COUNTER: usize = 6; // ratchet-pin: cdc-census-self-counter (review 2027-02-01)
 // 2026-09-28: +1 presence — the SQL Server undecodable-cell refusal, whose oracle is the refusal.
 // 2026-09-29: +2 presence — the PG CDC LMT-timezone and DOMAIN parity cells compare CDC to batch output.
