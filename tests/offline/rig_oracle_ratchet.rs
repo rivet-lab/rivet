@@ -80,7 +80,8 @@ const KNOWN_PRODUCT_DEFECT_CEILING: usize = 1; // ratchet-pin: failed-run-known-
 // 626 -> 621 (2026-11-11): the mssql varchar keyset cell grades through the rig oracle; five helper calls left.
 // 621 -> 626 (2026-11-20): the PG json/interval/oid/enum array cell and the Oracle number/interval cells read the delivered list back through DuckDB; closed when they move to the rig oracle.
 // 626 -> 625 (2026-11-22): the Oracle TIMESTAMP(9) declared-override cell reads the delivered value back through Arrow, not DuckDB; one helper call left.
-const DUCKDB_HELPER_CEILING: usize = 625; // ratchet-pin: duckdb-helper-sites (review 2027-02-01)
+// 625 -> 627 (2026-11-23): the PG bare-numeric display-scale CDC cell reads the snapshot and stream text back through DuckDB; closed when it moves to the rig oracle.
+const DUCKDB_HELPER_CEILING: usize = 627; // ratchet-pin: duckdb-helper-sites (review 2027-02-01)
 
 /// Owned by a concurrent branch and migrated after it lands; not counted.
 const EXCLUDED: &[&str] = &["tests/live/live_cdc_type_parity.rs"];
