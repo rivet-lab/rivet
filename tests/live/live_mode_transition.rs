@@ -656,7 +656,7 @@ fn continues_after_the_acceptance(rig: &Rig, ids: &dyn Fn() -> Vec<i64>) {
     );
 }
 
-/// P-22: a parallel keyset run resumed after its last range committed stores the highest key it delivered.
+/// P-22: a parallel keyset run resumed after a crash stores the highest key it delivered.
 fn resumed_parallel_keyset_then_incremental(e: SqlEngine) {
     e.alive();
     let (table, _guard) = e.table("mode_transition");
@@ -674,7 +674,7 @@ fn resumed_parallel_keyset_then_incremental(e: SqlEngine) {
         ],
     );
     let rig = staged_for(e, e.rig(&table), &parallel, dest.path());
-    rig.crash_after_the_last_keyset_range();
+    rig.crash_as_the_last_keyset_range_commits();
     rig.run_ok();
     assert_eq!(
         delivered_ids(e, dest.added().path()).len(),

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish what `Mutants (changed lines)` concluded and fail when the plan could not be made.
+"""Publish what `Mutants (grade)` concluded and fail when the plan could not be made.
 
     mutants_report.py             read the job's env, append outputs to $GITHUB_OUTPUT, exit 1 on a plan error
     mutants_report.py --self-test
