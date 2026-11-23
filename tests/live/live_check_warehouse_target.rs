@@ -49,7 +49,7 @@ impl Warehouse {
         self.paths.lock().unwrap().clone()
     }
 
-    /// `rivet check` of a PostgreSQL export to fake-gcs, with the BigQuery API at this stand.
+    /// `rivet check` of a PostgreSQL export to fake-gcs, then the run it vouches for with the BigQuery API at this stand.
     fn check(&self, load: Option<&str>) -> std::process::Output {
         require_alive(LiveService::Postgres);
         ensure_gcs_bucket(GCS_BUCKET);
@@ -63,13 +63,12 @@ impl Warehouse {
             rig = rig.top_line(line);
         }
         let base = format!("http://127.0.0.1:{}", self.port);
-        rig.cli_env(
-            &["check"],
-            &[
-                ("RIVET_BQ_API_ENDPOINT", &base),
-                ("RIVET_BQ_ACCESS_TOKEN", "tok"),
-            ],
-        )
+        let envs = [
+            ("RIVET_BQ_API_ENDPOINT", base.as_str()),
+            ("RIVET_BQ_ACCESS_TOKEN", "tok"),
+        ];
+        rig.run_after_env(&["check"], &[], &envs, Pairing::GreenOnly)
+            .preflight
     }
 }
 
