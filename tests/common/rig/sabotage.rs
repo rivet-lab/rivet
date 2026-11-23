@@ -289,6 +289,27 @@ impl Rig {
         }
     }
 
+    /// Crash a parallel keyset run twice, after range 0 (which leaves every planned range in the state) and after the last one commits; returns how many ranges were planned.
+    pub fn crash_after_the_last_keyset_range(&self) -> i64 {
+        let crash = |index: i64| {
+            let out = self.run_with_env(
+                "RIVET_TEST_PANIC_AT",
+                &format!("keyset_parallel_range_committed:{index}"),
+            );
+            assert!(
+                matches!(out.status.code(), Some(101 | 70)),
+                "fixture: the run crashes after range {index}, it ended with {:?}\n{}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        crash(0);
+        let ranges =
+            self.state_count("SELECT COUNT(*) FROM keyset_range WHERE export_name = '{export}'");
+        crash(ranges - 1);
+        ranges
+    }
+
     /// The schema version of the state database this rig's runs use.
     pub fn state_schema(&self) -> i64 {
         match self.state_url(&[]) {

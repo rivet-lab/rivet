@@ -5596,7 +5596,7 @@ seeds:
       mssql:
         na: "2026-11-20 measured: the single-site defect left check_refuses_an_int_column_declared_string_mssql green; check shares the run's planning function since #1041; closes if check regains a path of its own"
       oracle:
-        cells: [check_refuses_a_timestamp_with_a_time_declared_date_oracle]
+        na: "2026-11-23 measured on 077fd826+seed: the only non-test raise of RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH is override_table.rs resolve_column in the type_mappings stage, which the seed leaves alone, and the Oracle reader never raises it from the probe export; check_refuses_a_timestamp_with_a_time_declared_date_oracle refuses by RIVET_SOURCE_VALUE_UNREPRESENTABLE since #1148, which the seeded comparison keeps, and it, a_declared_override_delivers_the_source_or_refuses_by_code_oracle, an_integer_column_declared_float_is_delivered_with_its_values_oracle and a_binary_column_declared_string_never_loses_a_byte_oracle stayed green; closes if the Oracle probe export raises the wire mismatch"
       mongo:
         na: "a document source has no declared column wire type: the probe returns before it reads a row (source_type == Mongo)"
 

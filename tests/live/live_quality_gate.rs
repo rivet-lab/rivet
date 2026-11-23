@@ -138,8 +138,8 @@ fn quality_gate_fails_a_duplicate_split_across_parallel_checkpoint_chunks() {
     );
 }
 
-/// 24 rows over `parallel: 4` keyset ranges of 6 rows, paged by 3: every range ends on an EMPTY page.
-/// Row 8 (range 2) repeats row 13's `v` (range 3), so the run must fail as `single` does.
+/// 24 rows over `parallel: 4` keyset ranges, paged by 1: every range ends on an EMPTY page.
+/// Row 8 repeats row 13's `v` in another range, so the run must fail as `single` does.
 fn parallel_keyset_duplicate_run(engine: SqlEngine, tag: &str) -> std::process::Output {
     engine.alive();
     let (k, v) = (engine.col("k"), engine.col("v"));
@@ -155,7 +155,7 @@ fn parallel_keyset_duplicate_run(engine: SqlEngine, tag: &str) -> std::process::
         .mode("chunked")
         .export_named(&export)
         .export_line("chunk_by_key: k")
-        .export_line("chunk_size: 3")
+        .export_line("chunk_size: 1")
         .export_line("parallel: 4")
         .export_line("quality:")
         .export_line("  unique_columns: [v]")

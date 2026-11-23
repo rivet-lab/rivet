@@ -656,7 +656,7 @@ fn continues_after_the_acceptance(rig: &Rig, ids: &dyn Fn() -> Vec<i64>) {
     );
 }
 
-/// P-22: a parallel keyset run resumed after a crash stores the highest key it delivered.
+/// P-22: a parallel keyset run resumed after its last range committed stores the highest key it delivered.
 fn resumed_parallel_keyset_then_incremental(e: SqlEngine) {
     e.alive();
     let (table, _guard) = e.table("mode_transition");
@@ -674,8 +674,7 @@ fn resumed_parallel_keyset_then_incremental(e: SqlEngine) {
         ],
     );
     let rig = staged_for(e, e.rig(&table), &parallel, dest.path());
-    let crash = rig.run_with_env("RIVET_TEST_PANIC_AT", "keyset_parallel_range_committed:3");
-    assert!(!crash.status.success(), "the injected crash must stop it");
+    rig.crash_after_the_last_keyset_range();
     rig.run_ok();
     assert_eq!(
         delivered_ids(e, dest.added().path()).len(),

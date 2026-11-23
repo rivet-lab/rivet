@@ -200,13 +200,16 @@ fn a_query_that_does_not_rename_the_chunk_column_delivers_its_rows_postgres() {
 /// The SQL literal of the key of row `g`.
 type KeyLiteral = fn(i64) -> String;
 
-/// A parallel keyset rig over `table`, keyed on `id`, 500 rows a page.
-fn parallel_keyset_rig(engine: SqlEngine, table: &str) -> Rig {
+/// Rows a page of the key-type cells: under the range a worker takes, so every range reads more than one page and its high-water key carries it on.
+const KEY_RANGE_PAGE: usize = 50;
+
+/// A parallel keyset rig over `table`, keyed on `id`, `page` rows a page.
+fn parallel_keyset_rig(engine: SqlEngine, table: &str, page: usize) -> Rig {
     engine
         .rig(table)
         .mode("chunked")
         .export_line(&format!("chunk_by_key: {}", spelled(engine, "id")))
-        .export_line("chunk_size: 500")
+        .export_line(&format!("chunk_size: {page}"))
         .export_line("parallel: 2")
 }
 
@@ -225,7 +228,8 @@ fn parallel_keyset_incremental_delivers_the_source_rows(
     insert_rows(engine, &table, "id, v", 1..=3000, row);
     engine.refresh_row_estimate(&table);
 
-    let rig = parallel_keyset_rig(engine, &table).export_line("keyset_incremental: true");
+    let rig =
+        parallel_keyset_rig(engine, &table, KEY_RANGE_PAGE).export_line("keyset_incremental: true");
     rig.run_ok();
     assert_delivers_the_source(
         engine,
@@ -338,7 +342,7 @@ fn parallel_keyset_incremental_on_a_real_key_is_refused_by_name_postgres() {
     engine.alive();
     let (table, _guard) = engine.create("ks_real", "id REAL PRIMARY KEY, v INT NOT NULL");
     insert_rows(engine, &table, "id, v", 1..=3000, |g| format!("{g}.5, {g}"));
-    let rig = parallel_keyset_rig(engine, &table).export_line("keyset_incremental: true");
+    let rig = parallel_keyset_rig(engine, &table, 500).export_line("keyset_incremental: true");
     for cycle in 1..=2 {
         let text = rig.run_expect_fail();
         assert!(
@@ -379,7 +383,7 @@ fn parallel_keyset_on_a_smallint_key_delivers_the_source_rows_postgres() {
     engine.alive();
     let (table, _guard) = engine.create("ks_small", "id SMALLINT PRIMARY KEY, v INT NOT NULL");
     insert_rows(engine, &table, "id, v", 1..=3000, |g| format!("{g}, {g}"));
-    let rig = parallel_keyset_rig(engine, &table);
+    let rig = parallel_keyset_rig(engine, &table, 500);
     rig.run_ok();
     let source = source_values(engine, &table, "id");
     assert_eq!(
