@@ -595,6 +595,15 @@ scenarios:
     mongo_parallel: { na: "a Mongo export has no list column" }
     cdc:            { test: a_postgres_cdc_delete_of_a_row_with_an_array_column_still_loads_and_a_null_array_insert_is_refused }
 
+  - id: bigquery_load_refuses_a_null_list
+    what: "a part holding a NULL list column value is refused by `rivet load` into BigQuery with RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE (exit 5) naming the column and the `COALESCE(col, '{}') AS col` and `col::text AS col` remedies (a CDC export: the source fix and the re-baseline), before the warehouse write, because a BigQuery REPEATED field cannot be NULL and the load would turn it into []; an empty list, a list with a NULL element, a column the plan does not declare an array and a change-log delete row load unchanged (one seam: refuse_unholdable_parts reads the list leaf columns of every part, for a full load and a change log alike)"
+    single:         { test: a_null_list_part_is_refused_before_the_warehouse_write }
+    chunked:        { na: "shared seam: refuse_unholdable_parts runs in the load over the committed parts, whichever runner wrote them" }
+    chunked_checkpoint: { na: "shared seam (refuse_unholdable_parts in the load, over the committed parts)" }
+    keyset:         { na: "shared seam (refuse_unholdable_parts in the load, over the committed parts)" }
+    mongo_parallel: { na: "a Mongo export has no list column" }
+    cdc:            { test: a_null_list_part_is_refused_before_the_warehouse_write }
+
   - id: clickhouse_cdc_null_array_refusal_names_the_rebaseline
     what: "the NULL-list refusal of a `mode: cdc` export (a change-log part or the baseline) names the re-baseline recipe and a source fix, never a `query:` rewrite its config cannot hold, and says the staged part keeps the refusal until the stream is re-baselined; after the source fix and the printed re-baseline the stream loads and the view equals the source (one seam: null_list_remedy keyed by the loader's part role)"
     single:         { na: "a batch export has a `query:`, and keeps the COALESCE and ::text remedies (a_null_array_is_refused_not_loaded_as_an_empty_array)" }
