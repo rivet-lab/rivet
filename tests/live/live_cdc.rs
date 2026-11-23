@@ -2576,6 +2576,86 @@ fn pg_cdc_bare_numeric_is_delivered_as_labelled_server_text() {
     assert_eq!(got, want, "each value is the server's own n::text");
 }
 
+/// A bare PostgreSQL `numeric` keeps its display scale in the snapshot leg and the stream leg of one CDC export.
+#[test]
+#[ignore = "live: requires docker compose postgres (wal_level=logical)"]
+fn pg_cdc_a_bare_numeric_keeps_its_display_scale_in_snapshot_and_stream() {
+    use arrow::array::{Array, Int64Array, StringArray};
+    use postgres::NoTls;
+    let read = |dir: &std::path::Path| {
+        let b = read_one_batch(dir);
+        let ids = b
+            .column_by_name("id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .clone();
+        let ns = b
+            .column_by_name("n")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .clone();
+        let mut got: Vec<(i64, Option<String>)> = (0..b.num_rows())
+            .map(|i| {
+                (
+                    ids.value(i),
+                    (!ns.is_null(i)).then(|| ns.value(i).to_string()),
+                )
+            })
+            .collect();
+        got.sort_by_key(|r| r.0);
+        got
+    };
+    let d = tempfile::tempdir().unwrap();
+    let tbl = unique_name("cdc_num_scale");
+    let slot = unique_name("rivet_num_scale_slot");
+    let _slot = Slot::new(slot.clone());
+    let mut c = postgres::Client::connect(POSTGRES_CDC_URL, NoTls).expect("connect postgres");
+    c.batch_execute(&format!(
+        "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, n NUMERIC); \
+         INSERT INTO {tbl} VALUES (1, 1.50), (2, 0.00), (3, 1000.000), (4, 'NaN'), (5, NULL)"
+    ))
+    .unwrap();
+    let _tbl = PgTable::adopt_on(POSTGRES_CDC_URL, tbl.clone());
+    let server = |c: &mut postgres::Client, lo: i64, hi: i64| -> Vec<(i64, Option<String>)> {
+        c.query(
+            &format!("SELECT id, n::text FROM {tbl} WHERE id BETWEEN {lo} AND {hi} ORDER BY id"),
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect()
+    };
+
+    let out = d.path().join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let rig = Rig::pg_cdc(&tbl, &slot)
+        .cdc_line("initial: snapshot")
+        .dest_path(out.clone());
+    let cfg = rig.config_path();
+    run_rivet_ok(&cfg);
+    assert_eq!(
+        read(&out.join("snapshot")),
+        server(&mut c, 1, 5),
+        "the snapshot leg is the server's own n::text"
+    );
+
+    c.batch_execute(&format!(
+        "INSERT INTO {tbl} VALUES (6, 2.50), (7, 0.000), (8, 100.10), (9, -0.50)"
+    ))
+    .unwrap();
+    run_rivet_ok(&cfg);
+    assert_eq!(
+        read(&out),
+        server(&mut c, 6, 9),
+        "the stream leg is the server's own n::text"
+    );
+}
+
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_multi_table_stream_uses_one_slot_and_resumes() {
