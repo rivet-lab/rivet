@@ -111,7 +111,10 @@ def record(run: Run, repo: str, sha: str, kind: str, key: str) -> None:
 
 
 def surface_of(run: Run, base: str) -> tuple[bool, str]:
-    """`(has a mutable-surface change, its key)` for the diff against `base`."""
+    """`(has a mutable-surface change, its key)` for the diff against `base`; a base that is not a commit is an error."""
+    if not base:
+        raise ValueError("no base commit was given, so an empty diff would read as nothing to mutate")
+    run(["git", "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"])
     lines = surface_diff(run(["git", "diff", "--binary", "--no-renames", "-U0", "--no-color", "--no-ext-diff", f"{base}...HEAD"]))
     return bool(lines), diff_key(lines)
 
@@ -125,7 +128,7 @@ def check(env: dict[str, str], run: Run, out=print) -> int:
         return 1
     try:
         surface, key = surface_of(run, get("BASE_SHA"))
-    except subprocess.CalledProcessError as e:
+    except (ValueError, subprocess.CalledProcessError) as e:
         out(f"::error::mutants_gate: could not diff against '{get('BASE_SHA')}' ({e}), so the scope of this head is unknown: a refusal, not a pass")
         return 1
     if event == "merge_group":
@@ -154,14 +157,31 @@ def shell(argv: list[str]) -> str:
 
 REQUIRED_IF = "always() && contains(fromJSON('[\"pull_request\", \"merge_group\"]'), github.event_name)"
 CHECK_LINE = "python3 .github/scripts/mutants_gate.py check"
+BASE_EXPR = "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}"
+CHECK_ENV = {
+    "GH_TOKEN": "${{ github.token }}",
+    "EVENT": "${{ github.event_name }}",
+    "BASE_SHA": BASE_EXPR,
+    "REPO": "${{ github.repository }}",
+    "PR_HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
+    "QUEUE_REF": "${{ github.event.merge_group.head_ref }}",
+    "READY": "${{ contains(github.event.pull_request.labels.*.name, env.MUTANTS_READY_LABEL) }}",
+    "HELD": "${{ needs.mutants-plan.outputs.held }}",
+    "STATE": "${{ needs.mutants-in-diff.outputs.state }}",
+    "RESULT": "${{ needs.mutants-in-diff.outputs.result }}",
+    "OUTCOME": "${{ needs.mutants-in-diff.outputs.outcome }}",
+}
+GRADE_OUTPUTS = {
+    "state": "${{ steps.grade.outputs.state || steps.report.outputs.state }}",
+    "result": "${{ steps.grade.outputs.result || steps.report.outputs.result }}",
+    "outcome": "${{ steps.report.outputs.outcome }}",
+}
+PUBLISH_LINE = 'if [ -n "$VERDICT" ]; then say result "$VERDICT"; fi'
 
 
-def workflow_failures(text: str) -> list[str]:
-    """The properties of ci.yml that make the required check impossible to skip into a pass."""
-    import yaml
-
+def required_job_failures(jobs: dict) -> list[str]:
+    """What keeps `mutants-required` from being skipped, masked or fed a value the gate did not compute."""
     bad: list[str] = []
-    jobs = (yaml.safe_load(text) or {}).get("jobs") or {}
     req = jobs.get("mutants-required") or {}
     steps = req.get("steps") or []
     checks = [s for s in steps if CHECK_LINE in str(s.get("run", ""))]
@@ -172,19 +192,44 @@ def workflow_failures(text: str) -> list[str]:
     if "continue-on-error" in req:
         bad.append("ci.yml: mutants-required must not be continue-on-error")
     if len(checks) != 1:
-        bad.append("ci.yml: mutants-required must run mutants_gate.py check in exactly one step")
-    for step in checks:
-        lines = [x.strip() for x in str(step["run"]).splitlines() if x.strip()]
-        if CHECK_LINE not in lines or any(x.startswith(("exit", "set +e")) for x in lines):
-            bad.append("ci.yml: the mutants_gate.py check step must run the bare command, with nothing that can turn its exit into a pass")
-        if "if" in step or "continue-on-error" in step or "shell" in step:
-            bad.append("ci.yml: the mutants_gate.py check step must have no `if`, `continue-on-error` or `shell`")
-    if steps and steps[-1] not in checks:
+        return bad + ["ci.yml: mutants-required must run mutants_gate.py check in exactly one step"]
+    step = checks[0]
+    lines = [x.strip() for x in str(step["run"]).splitlines() if x.strip()]
+    if CHECK_LINE not in lines or any(x.startswith(("exit", "set +e")) for x in lines):
+        bad.append("ci.yml: the mutants_gate.py check step must run the bare command, with nothing that can turn its exit into a pass")
+    if "if" in step or "continue-on-error" in step or "shell" in step:
+        bad.append("ci.yml: the mutants_gate.py check step must have no `if`, `continue-on-error` or `shell`")
+    if steps[-1] is not step:
         bad.append("ci.yml: the mutants_gate.py check must be the last step of mutants-required")
+    env = step.get("env") or {}
+    bad += [f"ci.yml: the check step's {k} must be `{want}`, it is `{env.get(k)}`" for k, want in CHECK_ENV.items() if env.get(k) != want]
+    bad += [f"ci.yml: the check step passes {k}, which the gate does not read" for k in env if k not in CHECK_ENV]
+    return bad
+
+
+def grade_failures(jobs: dict) -> list[str]:
+    """The grade job publishes its verdict last and holds the shards on a held head."""
+    bad: list[str] = []
     for job in ("mutants-shard", "mutants-in-diff"):
         if "held != 'true'" not in str((jobs.get(job) or {}).get("if", "")):
             bad.append(f"ci.yml: {job} does not stop on a held head, so an unlabeled push would run the expensive jobs")
+    grade = jobs.get("mutants-in-diff") or {}
+    outputs = grade.get("outputs") or {}
+    bad += [f"ci.yml: mutants-in-diff output {k} must be `{want}`, it is `{outputs.get(k)}`" for k, want in GRADE_OUTPUTS.items() if outputs.get(k) != want]
+    runs = [s for s in grade.get("steps") or [] if s.get("id") == "grade"]
+    lines = [x.strip() for x in str(runs[0].get("run", "")).splitlines() if x.strip()] if runs else []
+    says = [n for n, x in enumerate(lines) if "say result" in x and "tool-error" not in x]
+    if len(says) != 1 or lines[says[0]] != PUBLISH_LINE or lines[-1] != 'exit "$rc"' or any(x.startswith("say ") for x in lines[says[0] + 1:]):
+        bad.append("ci.yml: the grade step must publish `result` once, as its last `say`, right before `exit \"$rc\"`, so a crash earlier leaves no verdict")
     return bad
+
+
+def workflow_failures(text: str) -> list[str]:
+    """The properties of ci.yml that make the required check impossible to skip into a pass."""
+    import yaml
+
+    jobs = (yaml.safe_load(text) or {}).get("jobs") or {}
+    return required_job_failures(jobs) + grade_failures(jobs)
 
 
 def diff_of(files: dict[str, list[str]]) -> str:
@@ -282,6 +327,8 @@ def grade_flow(g: Grader) -> None:
 
     def fake(diff: str) -> Run:
         def run(argv: list[str]) -> str:
+            if argv[:2] == ["git", "rev-parse"] and argv[-1].startswith("missing"):
+                raise subprocess.CalledProcessError(128, argv)
             if argv[0] == "git":
                 return diff
             if argv[:3] == ["gh", "api", "-X"]:
@@ -297,7 +344,9 @@ def grade_flow(g: Grader) -> None:
     pr_env = {**base, "EVENT": "pull_request", "STATE": "in-budget", "RESULT": "clean", "OUTCOME": "success", "READY": "false", "HELD": "true"}
     queue_env = {**base, "EVENT": "merge_group", "QUEUE_REF": "refs/heads/gh-readonly-queue/main/pr-7-abc"}
     g.expect("flow: unlabeled src PR is refused", check(pr_env, fake(src), quiet), 1)
-    g.expect("flow: nothing recorded for it", statuses, {})
+    for event_env in (pr_env, queue_env):
+        for what, base_sha in (("an empty base", ""), ("a base that is no commit", "missing1")):
+            g.expect(f"flow: {event_env['EVENT']} with {what} is refused, not read as nothing to mutate", check({**event_env, "BASE_SHA": base_sha}, fake(docs), quiet), 1)
     g.expect("flow: workflow-only PR passes", check(pr_env, fake(docs), quiet), 0)
     g.expect("flow: queue entry with no record is refused", check(queue_env, fake(src), quiet), 1)
     over = {**pr_env, "STATE": "over-budget-ungraded", "RESULT": "n/a", "HELD": "false"}
@@ -342,7 +391,15 @@ def grade_workflow(g: Grader) -> None:
     if not live:
         return
     run_line = "        run: python3 .github/scripts/mutants_gate.py check"
+    base_old = "github.event.pull_request.base.sha || github.event.merge_group.base_sha"
     mutants = {
+        "a typo in the base expression": (base_old, base_old.replace("base.sha", "base.shaa")),
+        "READY forced true": ("          READY: ${{ contains(github.event.pull_request.labels.*.name, env.MUTANTS_READY_LABEL) }}", "          READY: 'true'"),
+        "OUTCOME forced success": ("          OUTCOME: ${{ needs.mutants-in-diff.outputs.outcome }}", "          OUTCOME: success"),
+        "the grade output outcome forced success": ("      outcome: ${{ steps.report.outputs.outcome }}", "      outcome: success"),
+        "the queue ref from head_sha": ("QUEUE_REF: ${{ github.event.merge_group.head_ref }}", "QUEUE_REF: ${{ github.event.merge_group.head_sha }}"),
+        "result published before the audit": ("            0) VERDICT=clean ;;", "            0) say result clean ;;"),
+        "an extra say after the result": ('          exit "$rc"\n      - name: Save mutation outcomes', '          say p2_audit late\n          exit "$rc"\n      - name: Save mutation outcomes'),
         "a skippable required job": ("if: always() && contains(fromJSON", "if: github.event_name == 'pull_request' && contains(fromJSON"),
         "an ungated shard": (" && needs.mutants-plan.outputs.held != 'true'", ""),
         "continue-on-error on the job": ("    name: Mutants (changed lines)\n", "    name: Mutants (changed lines)\n    continue-on-error: true\n"),
@@ -353,7 +410,7 @@ def grade_workflow(g: Grader) -> None:
         "a renamed required context": ("    name: Mutants (changed lines)\n    runs-on: ubuntu-latest\n    needs: [mutants-plan, mutants-in-diff]", "    name: Mutants (changed)\n    runs-on: ubuntu-latest\n    needs: [mutants-plan, mutants-in-diff]"),
     }
     for name, (old, new) in mutants.items():
-        g.expect(f"workflow: {name} is caught", old in live and bool(workflow_failures(live.replace(old, new, 1))), True)
+        g.expect(f"workflow: {name} is caught", old in live and bool(workflow_failures(new.join(live.rsplit(old, 1)))), True)
 
 
 def self_test() -> int:

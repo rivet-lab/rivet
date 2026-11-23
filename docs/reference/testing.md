@@ -214,7 +214,7 @@ A missed mutant, a grade that did not finish, a timeout and a tool error all lea
 
 Moving a PR to this flow:
 
-- A check that was green before the change still lets a PR into the merge queue, but `merge_group` refuses it with `no mutants verdict recorded` until the head has a verdict. Add the `ready` label and let a fresh run grade it.
+- A check that was green before the change still lets a PR into the merge queue, but `merge_group` refuses it with `no mutants verdict is recorded on the PR head` until the head has a verdict. Add the `ready` label and let a fresh run grade it.
 - "Re-run failed jobs" replays the original event, so it does not see a label added after that run started. Re-run after labelling is not enough; push, or remove the label and add it again.
 - Any `labeled` event, whatever the label, cancels the in-flight run, shards included, and starts a new one. Add `ready` last, when no other label is about to change. Removing a label starts no run.
 - The key of the recorded verdict is the diff of Rust, tests, Cargo files and `mutants.toml` against the base, binary files included.

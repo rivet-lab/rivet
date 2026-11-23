@@ -929,7 +929,7 @@ jobs:
           state over-budget-ungraded
           echo "::notice::this diff yields $graded mutants, past the $MUTANTS_DIFF_BUDGET the per-diff budget can grade, and there is no nightly rotation to defer to — so mutation testing says NOTHING about this diff. That is a size fact, not a failure; split the PR if you want the coverage."
 
-  # Checks the claim `Mutants (grade)` and `Mutants (gate sanity)` make about each other; `if: always()` because a job skipped by a failed `needs` counts as passing.
+  # Checks the claim `Mutants (grade)` and `Mutants (gate sanity)` make about each other.
   mutants-verdict:
     name: Mutants (coverage verdict)
     runs-on: ubuntu-latest
@@ -1050,7 +1050,7 @@ jobs:
           fi
           echo "ok: audit and run agree on '$STATE'; the run's verdict is '${RESULT:-n/a}' over ${P1:-$COUNT} graded / ${P2:-0} reported mutants (reach='${REACH:-n/a}', report-only audit '${P2_AUDIT:-n/a}')."
 
-  # The required `Mutants (changed lines)`: always runs, on a PR and in the merge queue, so it can never be skipped into a pass.
+  # The required `Mutants (changed lines)`; runs on every pull_request and merge_group event.
   mutants-required:
     name: Mutants (changed lines)
     runs-on: ubuntu-latest
