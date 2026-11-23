@@ -543,7 +543,8 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
             raise LookupError(f"table {table} does not exist (no column in all_tab_columns)")
         overrides = spec.get("overrides") or {}
         exact_ns = exact_digit_columns(overrides, {c.upper() for c, t in declared.items() if t.startswith("TIMESTAMP")})
-        by_col = {c: None if c in exact_ns else renders.get(f"source:{n}") for c, n in declared.items()}
+        micro = micro_digit_columns(overrides, declared)
+        by_col = {c: ORACLE_FF6_TRUNCATED if c in micro else None if c in exact_ns else renders.get(f"source:{n}") for c, n in declared.items()}
         sql = query.rstrip().rstrip(";") if query else oracle_table_select(spec["url"], table, {c: e for c, e in by_col.items() if e})
         zoned: frozenset = frozenset()
         if query:
@@ -1424,6 +1425,8 @@ def _value_findings(
     # A CSV holds text: no DuckDB render applies to it; the source is rendered as the CSV writer documents its text.
     duck = {} if engine == "oracle" or fmt in ("csv", "ndjson") else {c: _render(r)["duck"] for c, r in row_of.items() if _render(r).get("duck")}
     canons = {c: _render(r)["canon"] for c, r in row_of.items() if _render(r).get("canon")}
+    if engine == "oracle":
+        canons.update(dict.fromkeys(micro_digit_columns(overrides or {}, native), "timestamp"))
     verbatim = frozenset(
         c for c, n in native.items()
         if (engine == "postgres" and n == "JSON") or (TEXT_NATIVE.match(n) and c not in duck and c not in canons and c not in numbers)
@@ -2040,6 +2043,16 @@ def _peek_self_test() -> None:
         raise AssertionError("a missing slot must surface as itself")
 
 
+ORACLE_FF6_TRUNCATED = "SUBSTR(TO_CHAR({c}, 'SYYYY-MM-DD\"T\"HH24:MI:SS.FF9'), 1, 27)"
+NANO_TIMESTAMP = re.compile(r"TIMESTAMP\([789]\)")
+
+
+def micro_digit_columns(overrides: dict, declared: dict) -> set[str]:
+    """The columns of `declared` (name to native type) over TIMESTAMP(7..9) that a `timestamp` override delivers at microseconds, graded as lossy by declaration: the source is read at FF6, the digits past it cut."""
+    by_upper = {c.upper(): t for c, t in overrides.items()}
+    return {c for c, n in declared.items() if override_duck(by_upper.get(c.upper()) or "") == "TIMESTAMP" and NANO_TIMESTAMP.fullmatch(n)}
+
+
 def exact_digit_columns(overrides: dict, stamps: set[str]) -> set[str]:
     """The columns whose source is read with every fractional digit: a nanosecond override, or a text override over a timestamp column of `stamps` (upper-case names)."""
     return {
@@ -2050,6 +2063,9 @@ def exact_digit_columns(overrides: dict, stamps: set[str]) -> set[str]:
 
 
 def _self_test() -> None:
+    types = {"T9": "TIMESTAMP(9)", "T7": "TIMESTAMP(7)", "T6": "TIMESTAMP(6)", "Z9": "TIMESTAMP(9) WITH TIME ZONE", "N": "NUMBER"}
+    assert micro_digit_columns({"t9": "timestamp", "T7": " Timestamp ", "T6": "timestamp", "Z9": "timestamp", "N": "timestamp"}, types) == {"T9", "T7"}, "only a `timestamp` over TIMESTAMP(7..9) is read at FF6"
+    assert not micro_digit_columns({"T9": "timestamp_ns", "T7": "text", "Z9": "timestamp_tz_ns", "T8": "date"}, types), "a nanosecond, text or date declaration keeps its own read"
     stamps = {"T9", "Z9"}
     assert exact_digit_columns({"T9": "text", "N": "text", "X": "timestamp_ns"}, stamps) == {"T9", "X"}
     for spelling in ("string", "varchar", "char", "bpchar", " text", "TEXT ", "timestamptz_ns", "timestamp_tz_ns", "Timestamp_NS"):
