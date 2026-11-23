@@ -368,23 +368,19 @@ fn is_instant_past_the_ceiling(t: &OracleTimestamp) -> bool {
     t.year() == 10000 && t.month() == 1 && t.day() == 1 && t.hour() < 16
 }
 
-/// The coded refusal for a `TIMESTAMP WITH LOCAL TIME ZONE` value Oracle stored outside its own 4712 BC to 9999 range, except a real instant just past the ceiling.
-fn ltz_within_range(t: &OracleTimestamp, name: &str, ltz: bool) -> Result<()> {
-    let outside = (t.year() > 9999 && !is_instant_past_the_ceiling(t)) || t.year() < -4712;
-    if seeded!(
-        "oracle-ltz-year-past-ceiling-delivered",
-        false,
-        ltz && outside
-    ) {
+/// The coded refusal for a timestamp Oracle stored a year past its 9999 ceiling, whatever type the column reports (a TIMESTAMP WITH LOCAL TIME ZONE value reaches a TIMESTAMP or TIMESTAMP WITH TIME ZONE column through a CAST or a view), and, for an LTZ column, before its 4712 BC floor; a real instant just past the ceiling is delivered.
+fn timestamp_within_range(t: &OracleTimestamp, name: &str, ltz: bool) -> Result<()> {
+    let outside = (t.year() > 9999 && !is_instant_past_the_ceiling(t)) || (ltz && t.year() < -4712);
+    if seeded!("oracle-ltz-year-past-ceiling-delivered", false, outside) {
         crate::rivet_bail!(
             crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
-            "oracle: column {name} holds the TIMESTAMP WITH LOCAL TIME ZONE value {t}, outside \
-             Oracle's own 4712 BC to 9999 range: a session whose zone is ahead of or behind UTC \
-             wrote a value within its offset of a range end and Oracle stored it a year past that \
-             end, so the instant it stands for cannot be told from what Oracle stored (Oracle \
-             cannot print it either, ORA-01877). Nothing was written for it. Leave {name} out of \
-             the export (list the other columns in a `query:`), or rewrite the stored value from \
-             a UTC session"
+            "oracle: column {name} holds the value {t}, outside Oracle's own 4712 BC to 9999 \
+             range: it is a TIMESTAMP WITH LOCAL TIME ZONE value (read directly, or through a \
+             CAST or a view over one) that a session whose zone is ahead of or behind UTC wrote \
+             within its offset of a range end and Oracle stored a year past that end, so the \
+             instant it stands for cannot be told from what Oracle stored (Oracle cannot print it \
+             either, ORA-01877). Nothing was written for it. Leave {name} out of the export (list \
+             the other columns in a `query:`), or rewrite the stored value from a UTC session"
         )
     }
     Ok(())
@@ -512,14 +508,14 @@ fn integer<T: std::str::FromStr>(column: &str, text: &str) -> Result<T> {
     })
 }
 
-/// The timestamp as fetched, or the coded refusal when an LTZ value lies outside Oracle's own range.
+/// The timestamp as fetched, or the coded refusal when it lies outside Oracle's own range.
 fn checked_timestamp(
     t: Option<OracleTimestamp>,
     name: &str,
     ltz: bool,
 ) -> Result<Option<OracleTimestamp>> {
     if let Some(t) = &t {
-        ltz_within_range(t, name, ltz)?;
+        timestamp_within_range(t, name, ltz)?;
     }
     Ok(t)
 }
@@ -1132,15 +1128,14 @@ mod tests {
     }
 
     #[test]
-    fn every_timestamp_cell_passes_the_ltz_range_check_and_only_an_ltz_column_is_checked() {
+    fn every_timestamp_cell_passes_the_range_check_and_only_an_ltz_column_is_checked_at_the_floor()
+    {
         let shifted = OracleTimestamp::new_timestamp(10000, 12, 31, 0, 0, 0, 0);
         let err = checked_timestamp(Some(shifted), "L", true).unwrap_err();
         crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
         assert!(err.to_string().contains("column L"), "{err}");
-        assert_eq!(
-            checked_timestamp(Some(shifted), "TZ", false).unwrap(),
-            Some(shifted)
-        );
+        let err = checked_timestamp(Some(shifted), "TZ", false).unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
         let day = OracleTimestamp::new_timestamp(9999, 12, 31, 23, 59, 59, 0);
         assert_eq!(checked_timestamp(Some(day), "L", true).unwrap(), Some(day));
         assert_eq!(checked_timestamp(None, "L", true).unwrap(), None);
@@ -1172,36 +1167,42 @@ mod tests {
     fn an_ltz_value_outside_the_4712_bc_to_9999_range_is_refused_by_code_and_a_zoned_one_is_delivered()
      {
         let ceiling = OracleTimestamp::new_timestamp(9999, 12, 31, 23, 59, 59, 999_999_999);
-        ltz_within_range(&ceiling, "L", true).unwrap();
+        timestamp_within_range(&ceiling, "L", true).unwrap();
         let shifted = OracleTimestamp::new_timestamp(10000, 12, 31, 23, 59, 59, 0);
-        let err = ltz_within_range(&shifted, "L", true).unwrap_err();
+        let err = timestamp_within_range(&shifted, "L", true).unwrap_err();
         crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
         let text = err.to_string();
         assert!(
             text.contains("column L") && text.contains("ORA-01877") && text.contains("`query:`"),
             "{text}"
         );
-        ltz_within_range(&shifted, "TZ", false).unwrap();
+        for kind_is_ltz in [false, true] {
+            let err = timestamp_within_range(&shifted, "TZ", kind_is_ltz).unwrap_err();
+            crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+        }
         let real = OracleTimestamp::new_timestamp(10000, 1, 1, 3, 0, 0, 0);
-        ltz_within_range(&real, "L", true).unwrap();
+        timestamp_within_range(&real, "L", true).unwrap();
+        timestamp_within_range(&real, "TZ", false).unwrap();
         assert_eq!(timestamp_micros(&real).unwrap(), 253_402_311_600_000_000);
         let last = OracleTimestamp::new_timestamp(10000, 1, 1, 15, 59, 59, 999_999_000);
-        ltz_within_range(&last, "L", true).unwrap();
+        timestamp_within_range(&last, "L", true).unwrap();
         for stored in [
             OracleTimestamp::new_timestamp(10000, 1, 1, 16, 0, 0, 0),
             OracleTimestamp::new_timestamp(10000, 1, 2, 3, 0, 0, 0),
             OracleTimestamp::new_timestamp(10000, 12, 31, 10, 0, 0, 0),
             OracleTimestamp::new_timestamp(10001, 1, 1, 3, 0, 0, 0),
         ] {
-            let err = ltz_within_range(&stored, "L", true).unwrap_err();
-            crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+            for kind_is_ltz in [false, true] {
+                let err = timestamp_within_range(&stored, "L", kind_is_ltz).unwrap_err();
+                crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+            }
         }
         let first = OracleTimestamp::new_timestamp(-4712, 1, 1, 0, 0, 0, 0);
-        ltz_within_range(&first, "L", true).unwrap();
+        timestamp_within_range(&first, "L", true).unwrap();
         let before = OracleTimestamp::new_timestamp(-4713, 8, 3, 0, 0, 0, 0);
-        let err = ltz_within_range(&before, "L", true).unwrap_err();
+        let err = timestamp_within_range(&before, "L", true).unwrap_err();
         crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
-        ltz_within_range(&before, "TZ", false).unwrap();
+        timestamp_within_range(&before, "TZ", false).unwrap();
         assert_eq!(timestamp_micros(&shifted).unwrap(), 253_433_923_199_000_000);
     }
 

@@ -2323,6 +2323,72 @@ fn an_undeclared_nanosecond_timestamp_is_refused_and_the_declared_ns_type_delive
     }
 }
 
+struct OracleView(String);
+
+impl Drop for OracleView {
+    /// Drops the view.
+    fn drop(&mut self) {
+        let name = self.0.clone();
+        let _ = std::panic::catch_unwind(move || ora_exec(&format!("DROP VIEW {name}")));
+    }
+}
+
+/// A shifted LTZ value is refused by code however it is read: through a `CAST` to TIMESTAMP WITH TIME ZONE or TIMESTAMP in a `query:`, and through a view that casts it.
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn an_ltz_value_stored_outside_the_range_is_refused_by_code_through_a_cast_or_a_view() {
+    require_alive(LiveService::Oracle);
+    let t = OracleTable::create(
+        "ora_ltzv",
+        "id NUMBER(10) PRIMARY KEY, l TIMESTAMP(6) WITH LOCAL TIME ZONE",
+    );
+    ora_insert_from_zone(
+        t.name(),
+        "+14:00",
+        1,
+        "TIMESTAMP '9999-12-31 10:00:00 +00:00'",
+    );
+    ora_insert_from_zone(
+        t.name(),
+        "+00:00",
+        2,
+        "TIMESTAMP '2024-02-29 10:00:00 +00:00'",
+    );
+    let view = OracleView(format!("{}_V", t.name()));
+    ora_exec(&format!(
+        "CREATE VIEW {} AS SELECT id, CAST(l AS TIMESTAMP WITH TIME ZONE) l FROM {}",
+        view.0,
+        t.name()
+    ));
+    let refused = Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+    for query in [
+        format!(
+            "SELECT id, CAST(l AS TIMESTAMP WITH TIME ZONE) l FROM {} ORDER BY id",
+            t.name()
+        ),
+        format!(
+            "SELECT id, CAST(l AS TIMESTAMP) l FROM {} ORDER BY id",
+            t.name()
+        ),
+        format!("SELECT id, l FROM {} ORDER BY id", view.0),
+    ] {
+        assert_refused(&Rig::oracle_batch(t.name()).query(&query).run(), refused);
+    }
+    for query in [
+        format!(
+            "SELECT id, CAST(l AS TIMESTAMP WITH TIME ZONE) l FROM {} WHERE id = 2",
+            t.name()
+        ),
+        format!(
+            "SELECT id, CAST(l AS TIMESTAMP) l FROM {} WHERE id = 2",
+            t.name()
+        ),
+        format!("SELECT id, l FROM {} WHERE id = 2", view.0),
+    ] {
+        Rig::oracle_batch(t.name()).query(&query).run_ok();
+    }
+}
+
 /// An LTZ value Oracle stored outside its 4712 BC to 9999 range is refused by code before any part is written, and the remedy the text names delivers the other columns.
 #[test]
 #[ignore = "live: requires docker compose oracle"]
