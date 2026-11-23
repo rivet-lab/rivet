@@ -456,13 +456,13 @@ fn a_decimal_override_past_precision_38_is_refused_by_the_wire_check_oracle() {
 
 const UNMAPPED_REFUSAL: Refused<'static> = Refused::by_code("RIVET_TYPE_UNSAFE_MAPPING", 1);
 
-/// A `format: csv` export of a column declared `declared` is admitted by both `check` spellings and delivered by the run as `cell` in a csv part.
+/// A `format: csv` export of a column declared `declared` is admitted by both `check` spellings and delivered by the run as a csv line `is_cell` accepts.
 fn csv_column_is_delivered_like_check(
     rig: Rig,
     name: &str,
     column: &str,
     declared: &str,
-    cell: &str,
+    is_cell: impl Fn(&str) -> bool,
 ) {
     let out = tempfile::tempdir().unwrap();
     let rig = rig
@@ -489,10 +489,13 @@ fn csv_column_is_delivered_like_check(
         "{}",
         String::from_utf8_lossy(&o.stderr)
     );
-    let parts = files_with_extension(out.path(), "csv");
-    assert_eq!(parts.len(), 1, "{parts:?}");
+    let parts: Vec<_> = files_under(out.path())
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "csv"))
+        .collect();
+    assert_eq!(parts.len(), 1, "{parts:?} in {:?}", files_under(out.path()));
     let text = std::fs::read_to_string(&parts[0]).unwrap();
-    assert!(text.lines().any(|l| l == cell), "{cell} not in {text:?}");
+    assert!(text.lines().any(is_cell), "no delivered cell in {text:?}");
 }
 
 /// An export of a column no Arrow type carries is refused by the run and both `check` spellings with the one `columns:` declaration refusal.
@@ -510,10 +513,19 @@ fn unmapped_column_is_refused_like_the_run(rig: Rig, name: &str, column: &str) {
 fn a_csv_export_of_a_decimal256_column_is_delivered_like_check_admits_postgres() {
     require_alive(LiveService::Postgres);
     let name = unique_name("fmt_dec_pg");
+    let table = unique_name("fmt_dec_tbl");
+    pg_connect()
+        .batch_execute(&format!(
+            "CREATE TABLE {table} (price NUMERIC(10,2)); INSERT INTO {table} VALUES (12.5)"
+        ))
+        .unwrap();
+    let _drop = PgTable::adopt(table.clone());
     let rig = Rig::pg_batch(&name)
-        .query("SELECT 12.5::numeric(10,2) AS price")
+        .query(&format!("SELECT price FROM {table}"))
         .mode("full");
-    csv_column_is_delivered_like_check(rig, &name, "price", "decimal(60,10)", "12.5000000000");
+    csv_column_is_delivered_like_check(rig, &name, "price", "decimal(60,10)", |l| {
+        l == "12.5000000000"
+    });
 }
 
 #[test]
@@ -524,7 +536,7 @@ fn a_csv_export_of_a_decimal256_column_is_delivered_like_check_admits_mysql() {
     let rig = Rig::mysql_batch(&name)
         .query("SELECT CAST(12.5 AS DECIMAL(10,2)) AS d")
         .mode("full");
-    csv_column_is_delivered_like_check(rig, &name, "d", "decimal(60,10)", "12.5000000000");
+    csv_column_is_delivered_like_check(rig, &name, "d", "decimal(60,10)", |l| l == "12.5000000000");
 }
 
 /// A column no Arrow type carries, declared as an integer, is refused by the run and both `check` spellings with the one wire-mismatch code, naming the column.
@@ -603,13 +615,9 @@ fn a_csv_export_of_a_nanosecond_timestamp_column_is_delivered_like_check_admits_
     let rig = Rig::mssql_batch(&name)
         .query("SELECT CAST('2024-01-01 10:30:00' AS DATETIME2) AS d")
         .mode("full");
-    csv_column_is_delivered_like_check(
-        rig,
-        &name,
-        "d",
-        "timestamp_ns",
-        "2024-01-01T10:30:00.000000000",
-    );
+    csv_column_is_delivered_like_check(rig, &name, "d", "timestamp_ns", |l| {
+        l == "2024-01-01T10:30:00.000000000"
+    });
 }
 
 #[test]
@@ -620,13 +628,9 @@ fn a_csv_export_of_a_nanosecond_timestamp_column_is_delivered_like_check_admits_
     let rig = Rig::oracle_batch(&name)
         .query("SELECT TIMESTAMP '2024-01-01 10:30:00' AS D FROM dual")
         .mode("full");
-    csv_column_is_delivered_like_check(
-        rig,
-        &name,
-        "D",
-        "timestamp_ns",
-        "2024-01-01T10:30:00.000000000",
-    );
+    csv_column_is_delivered_like_check(rig, &name, "D", "timestamp_ns", |l| {
+        l == "2024-01-01T10:30:00.000000000"
+    });
 }
 
 #[test]
