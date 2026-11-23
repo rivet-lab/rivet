@@ -217,7 +217,7 @@ services:
       test: ["CMD", "healthcheck.sh"]
       interval: 10s
       timeout: 5s
-      retries: 30
+      retries: 60
 
   # A second Oracle Free whose LATIN1PDB has the WE8ISO8859P1 character set, for the
   # non-Unicode character-type tests. Its own container: a PDB of another character set in
