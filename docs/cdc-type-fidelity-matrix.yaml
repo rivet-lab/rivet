@@ -77,7 +77,7 @@ scenarios:
     mysql:   { test: mysql_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent }
     mssql:    { test: mssql_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent }
     mongo:    { na: "BSON dates ride the verbatim document blob; the extJSON test pins the mechanism" }
-    oracle:   { test: oracle_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent, known_defect: ["TIMESTAMP(9)"] }
+    oracle:   { test: oracle_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent }
 
   - id: type_time_negative_fraction
     what: "a negative TIME(1)/TIME(2) with a fraction is the stored duration on the stream leg: MySQL's own text, in a default column and in a string one"
