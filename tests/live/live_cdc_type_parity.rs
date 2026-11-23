@@ -47,6 +47,7 @@ struct Row {
     refuses: bool,
 }
 
+#[derive(Clone)]
 struct Ledger {
     setup: Vec<String>,
     rows: Vec<Row>,
@@ -181,6 +182,38 @@ fn split_refused(lg: Ledger) -> (Ledger, Vec<Row>) {
         },
         refused,
     )
+}
+
+/// The ledger without the rows ClickHouse loads as an `Array`, and those rows: a NULL list is refused at load.
+fn split_lists(lg: Ledger) -> (Ledger, Vec<Row>) {
+    let (lists, rows) = lg.rows.into_iter().partition(|r| {
+        r.clickhouse
+            .as_deref()
+            .is_some_and(|t| t.starts_with("Array("))
+    });
+    (
+        Ledger {
+            setup: lg.setup,
+            rows,
+        },
+        lists,
+    )
+}
+
+/// Load a warehouse export that holds NULL lists and assert the one coded refusal that names the list column.
+fn assert_null_list_refused(w: &Warehouse) {
+    let out = w
+        .rig
+        .load_args_env(&[], &[(CH_PASSWORD_ENV, CLICKHOUSE_PASSWORD)]);
+    assert_refused(
+        &out,
+        Refused::by_code("RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE", 5),
+    );
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("holds a NULL list, and a ClickHouse Array cannot be NULL"),
+        "the refusal must name the NULL list: {said}"
+    );
 }
 
 /// How the verdict reads the source.
@@ -955,7 +988,11 @@ struct Seen {
 /// The ledger verdict on one column: wrong types and values, excused only by the class a marker declares, and every marker or defect sample that no longer fires.
 fn grade_column(what: &str, r: &Row, seen: &Seen) -> Vec<String> {
     let mut bad = Vec::new();
-    let (kd, chd) = (r.known_defect.is_some(), r.clickhouse_defect.is_some());
+    let ch_ran = seen.clickhouse.is_some();
+    let (kd, chd) = (
+        r.known_defect.is_some(),
+        r.clickhouse_defect.is_some() && ch_ran,
+    );
     let (mut kd_hits, mut ch_hits) = (0usize, 0usize);
     let mut hit_samples: std::collections::BTreeSet<(bool, &str)> = Default::default();
     for (mode, got) in &seen.types {
@@ -1015,7 +1052,7 @@ fn grade_column(what: &str, r: &Row, seen: &Seen) -> Vec<String> {
         (false, &r.defect_samples),
         (true, &r.clickhouse_defect_samples),
     ] {
-        for s in list {
+        for s in list.iter().filter(|_| !ch || ch_ran) {
             if !hit_samples.contains(&(ch, s.as_str())) {
                 bad.push(format!(
                     "{what}: defect sample `{s}` now matches the source — drop it from the ledger"
@@ -1123,6 +1160,12 @@ fn grade_column_excuses_only_the_declared_defect_class_and_flags_stale_markers()
                 ..Seen::default()
             },
             vec!["c0 T id 1: batch Some(\"[]\"), source Some(\"NULL\")"],
+        ),
+        (
+            "a ClickHouse marker on a run that loaded nothing is not stale",
+            &chd,
+            Seen::default(),
+            vec![],
         ),
         (
             "a stale marker",
@@ -1887,6 +1930,11 @@ fn census_violations(rig: &Rig, want: i64) -> Vec<String> {
 fn postgres_batch_and_cdc_deliver_every_ledger_row_alike() {
     use postgres::NoTls;
     let (lg, refused) = split_refused(ledger("postgres"));
+    let (loadable, lists) = split_lists(lg.clone());
+    assert!(
+        !lists.is_empty(),
+        "the postgres ledger must hold list rows ClickHouse refuses a NULL of"
+    );
     let connect = || postgres::Client::connect(POSTGRES_CDC_URL, NoTls).expect("connect postgres");
     for s in &lg.setup {
         connect().batch_execute(s).unwrap();
@@ -1931,18 +1979,35 @@ fn postgres_batch_and_cdc_deliver_every_ledger_row_alike() {
         };
         (st, guards)
     };
-    let (st, _g) = stand(&lg.rows, "ledger_pg", true);
+    let (mut st, _g) = stand(&lg.rows, "ledger_pg", true);
     let n = seed(&lg, &st);
     capture(&st);
     rewrite(&lg, &st, n);
     capture(&st);
-    load(&st);
+    assert_null_list_refused(st.warehouse.as_ref().expect("warehouse leg"));
+    st.warehouse = None;
     st.batch.run_ok();
     let mut bad = duckdb_ledger_verdict(&lg, &st, n);
     bad.extend(census_violations(&st.batch, 3 * n));
     assert!(
         bad.is_empty(),
         "{} ledger violations:\n{}",
+        bad.len(),
+        bad.join("\n")
+    );
+
+    let (st, _gl) = stand(&loadable.rows, "ledger_pg_ch", true);
+    let n = seed(&loadable, &st);
+    capture(&st);
+    rewrite(&loadable, &st, n);
+    capture(&st);
+    load(&st);
+    st.batch.run_ok();
+    let mut bad = duckdb_ledger_verdict(&loadable, &st, n);
+    bad.extend(census_violations(&st.batch, 3 * n));
+    assert!(
+        bad.is_empty(),
+        "{} ledger violations (ClickHouse leg, rows without a list):\n{}",
         bad.len(),
         bad.join("\n")
     );

@@ -5584,17 +5584,17 @@ seeds:
         cells: [cdc_rollover_zero_is_refused_on_the_flag_mongo]
 
   - name: check-override-wire-not-refused
-    class: "rivet check reads a columns: override through the run's converter but drops the wire-mismatch refusal, so check exits 0 on a config the run refuses with RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH"
-    history: "audit defect 11, 2026-11-03: check and check --type-report accepted an int4 column declared string on PostgreSQL while run refused it, on all four SQL engines"
+    class: "rivet check reads a columns: override through the run's converter but drops the first-row probe's refusals (the wire-mismatch code and the value code), so check exits 0 on a config the run refuses"
+    history: "audit defect 11, 2026-11-03: check and check --type-report accepted an int4 column declared string on PostgreSQL while run refused it, on all four SQL engines; recut 2026-11-23 after #1148 recoded the value-decided refusals to RIVET_SOURCE_VALUE_UNREPRESENTABLE: the old mutant dropped only the wire-mismatch code, so the Oracle cell (a time of day under date) stopped reaching it and nightly recall 45168882457 read MISSED"
     scope: source
     switch: check-override-wire-not-refused
     engines:
       postgres:
-        na: "2026-11-20 measured on 31cd3fdd+seed: since #1041 check runs the run's planning function, which refuses an override wire mismatch at preflight/mod.rs and again in planning::admit_columns; the single-site defect left check_refuses_an_int4_column_declared_string_postgres green, so no check-only defect exists on this engine; closes if check regains a path of its own"
+        cells: [a_lossy_scale_override_is_refused_by_check_like_the_run_postgres]
       mysql:
-        na: "2026-11-20 measured: the single-site defect left check_refuses_a_text_value_declared_uuid_mysql green; MySQL refuses that cell by RIVET_SOURCE_VALUE_UNREPRESENTABLE, which the seeded comparison keeps, and check shares the run's planning function since #1041; closes if check regains a path of its own"
+        cells: [check_refuses_a_text_value_declared_uuid_mysql, a_lossy_scale_override_is_refused_by_check_like_the_run_mysql]
       mssql:
-        na: "2026-11-20 measured: the single-site defect left check_refuses_an_int_column_declared_string_mssql green; check shares the run's planning function since #1041; closes if check regains a path of its own"
+        na: "2026-11-20 measured: the single-site defect left check_refuses_an_int_column_declared_string_mssql green; check shares the run's planning function since #1041; closes if check_override_wire gains a value-decided SQL Server cell"
       oracle:
         cells: [check_refuses_a_timestamp_with_a_time_declared_date_oracle]
       mongo:
