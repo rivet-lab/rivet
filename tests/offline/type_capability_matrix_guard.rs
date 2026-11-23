@@ -457,7 +457,6 @@ const KNOWN_DEFECTS: &[&str] = &[
     // 2026-11-22: eight array rows left this list, a NULL array is refused at the ClickHouse load (RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE); UUID[] keeps its FixedString(16) defect.
     "postgres:UUID[] (ClickHouse)",
     "mssql:UNIQUEIDENTIFIER (ClickHouse)",
-    "oracle:TIMESTAMP(9)",
 ]; // ratchet-pin: end
 
 /// A row that never delivers carries `na:` dated and without `delivery`; an engine with no delivering row needs it on every row.
@@ -849,13 +848,13 @@ fn a_delivering_row_without_a_warehouse_leg_is_refused() {
 #[test]
 fn a_leg_today_the_resolver_does_not_build_is_refused() {
     let mut doc = ledger();
-    leg_mut(&mut doc, "oracle", "TIMESTAMP(9)", "bigquery").insert("today".into(), "INT64".into());
+    leg_mut(&mut doc, "postgres", "CIDR", "bigquery").insert("today".into(), "INT64".into());
     leg_mut(&mut doc, "postgres", "INET", "snowflake")
         .remove("today")
         .unwrap();
     let bad = leg_violations(&doc);
     for want in [
-        "engines.oracle.rows[TIMESTAMP(9)].bigquery.today: `INT64`, `rivet load` builds `DATETIME`",
+        "engines.postgres.rows[CIDR].bigquery.today: `INT64`, `rivet load` builds `STRING`",
         "engines.postgres.rows[INET].snowflake.today: missing, `rivet load` builds `TEXT`",
     ] {
         assert!(bad.iter().any(|b| b == want), "{want}: {bad:?}");
@@ -1215,7 +1214,7 @@ fn every_list_wide_decimal_and_nanosecond_row_of_the_ledger_carries_its_csv_deci
         }
     }
     assert_eq!(
-        deciding, 13,
-        "ten PostgreSQL rows, DATETIME2, DATETIMEOFFSET, TIMESTAMP(9)"
+        deciding, 12,
+        "ten PostgreSQL rows, DATETIME2, DATETIMEOFFSET"
     );
 }

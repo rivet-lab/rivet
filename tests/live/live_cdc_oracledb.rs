@@ -76,34 +76,34 @@ fn ops(v: &[(i64, &str)]) -> Vec<(i64, String)> {
     v.iter().map(|(i, o)| (*i, o.to_string())).collect()
 }
 
-/// An `int4` override on a fractional NUMBER fails the CDC run by column, like batch.
+/// An `int4` override on an integer NUMBER holding a value past int32 fails the CDC run by column, like batch.
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
-fn oracle_cdc_an_int_override_on_a_fractional_number_fails_by_column_not_null() {
+fn oracle_cdc_an_int_override_on_a_number_past_int32_fails_by_column_not_null() {
     let _serial = cross_process_serial("oracle_cdc");
     let d = tempfile::tempdir().unwrap();
-    let t = cdc_table(
-        "ora_cover",
-        "id NUMBER(18) PRIMARY KEY, amount NUMBER(10,2)",
-    );
+    let t = cdc_table("ora_cover", "id NUMBER(18) PRIMARY KEY, amount NUMBER(18)");
     let ckpt = d.path().join("cdc.ckpt");
     let over = r#"columns: { AMOUNT: int4 }"#;
     rig(&t, &ckpt, &d.path().join("anchor"))
         .export_line(over)
         .run_ok();
     let anchored = std::fs::read(&ckpt).unwrap();
-    ora_exec(&format!("INSERT INTO {} VALUES (1, 1.5)", t.name()));
+    ora_exec(&format!("INSERT INTO {} VALUES (1, 5000000000)", t.name()));
 
     let batch = Rig::oracle_batch(t.name())
         .export_line(over)
         .run_expect_fail();
-    let err = rig(&t, &ckpt, &d.path().join("out"))
+    let out = rig(&t, &ckpt, &d.path().join("out"))
         .export_line(over)
-        .run_expect_fail();
+        .run_args(&[]);
+    assert_refused(
+        &out,
+        Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5),
+    );
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(
-        err.contains("RIVET_SOURCE_VALUE_UNREPRESENTABLE")
-            && err.contains("column 'AMOUNT' is Int32")
-            && err.contains("\"1.5\""),
+        err.contains("column 'AMOUNT' is Int32") && err.contains("\"5000000000\""),
         "CDC must refuse naming the column, its type and the value: {err}\nbatch: {batch}"
     );
     assert_eq!(
@@ -846,12 +846,13 @@ fn oracle_cdc_a_change_older_than_an_alter_is_refused_by_code() {
     let d = tempfile::tempdir().unwrap();
     let t = cdc_table("ora_cmid", "id NUMBER(18) PRIMARY KEY, v NUMBER(18)");
     let ckpt = d.path().join("cdc.ckpt");
-    rig(&t, &ckpt, &d.path().join("anchor")).run_ok();
+    let anchor = rig(&t, &ckpt, &d.path().join("anchor"));
+    anchor.run_ok();
     let anchored = std::fs::read(&ckpt).unwrap();
     ora_exec(&format!("INSERT INTO {} VALUES (1, 10)", t.name()));
     ora_exec(&format!("ALTER TABLE {} ADD (w NUMBER(18))", t.name()));
     let out = d.path().join("out");
-    let err = rig(&t, &ckpt, &out).run_expect_fail();
+    let err = anchor.twin().dest_path(out.clone()).run_expect_fail();
     assert!(
         err.contains("[RIVET_SOURCE_CDC_UNDECODABLE]"),
         "the pre-ALTER change must be refused by code: {err}"

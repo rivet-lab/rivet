@@ -5,8 +5,12 @@
 use std::path::Path;
 
 const ALWAYS: &str = "${{ !cancelled() }}";
-/// The E2E job is a matrix; these run on its `pre` leg only, so once per check.
-const PRE_LEG: &str = "${{ !cancelled() && matrix.leg == 'pre' }}";
+/// The E2E job is a matrix; these run on its `pre` leg only, so once per check, and only on a stand that is ready.
+const PRE_LEG: &str =
+    "${{ !cancelled() && steps.stand.outcome == 'success' && matrix.leg == 'pre' }}";
+/// The partition legs run the live sweep, again only on a stand that is ready.
+const PARTITION_LEG: &str =
+    "${{ !cancelled() && steps.stand.outcome == 'success' && matrix.leg != 'pre' }}";
 
 /// (workflow, job id, step name, one line its `run:` must hold EXACTLY — a substring would accept `recovery_typo`, its `if:`)
 const GATES: &[(&str, &str, &str, &str, &str)] = &[
@@ -142,6 +146,32 @@ fn every_semantic_gate_is_a_step_with_its_command() {
     }
 }
 
+/// A failed stand wait is one red line: every conditional step after `Stand is ready` names that step's outcome.
+#[test]
+fn every_e2e_step_after_the_stand_waits_for_it() {
+    let steps = steps_of(&workflow("nightly-live.yml"), "e2e");
+    let at = steps
+        .iter()
+        .position(|s| s["id"].as_str() == Some("stand"))
+        .expect("the e2e job has a step with id `stand`");
+    let after = &steps[at + 1..];
+    assert!(
+        after.len() > 5,
+        "the steps after the stand are not read: {}",
+        after.len()
+    );
+    for s in after {
+        let cond = s["if"].as_str().unwrap_or_default();
+        if cond.contains("!cancelled() &&") {
+            assert!(
+                cond.contains("steps.stand.outcome == 'success'"),
+                "`{}` runs after a failed stand wait and prints consequence panics: `{cond}`",
+                s["name"].as_str().unwrap_or("?")
+            );
+        }
+    }
+}
+
 /// `Some(n)` when `parts` is every partition `i/n` of ONE n, each once.
 fn every_partition(parts: &[&str]) -> Option<usize> {
     let n = parts.len();
@@ -193,7 +223,7 @@ fn the_e2e_legs_are_pre_plus_every_partition_and_the_verdict_job_needs_them() {
         .expect("the e2e job runs the live sweep");
     assert_eq!(
         sweep["if"].as_str(),
-        Some("${{ !cancelled() && matrix.leg != 'pre' }}"),
+        Some(PARTITION_LEG),
         "every partition leg runs the sweep"
     );
     let run = sweep["run"].as_str().unwrap_or_default();

@@ -77,7 +77,7 @@ scenarios:
     no_corruption_on_escape: { na: "a decimal is `[-0-9.]` only — nothing to escape" }
 
   - id: timestamp_nanoseconds
-    what: "a nanosecond timestamp (SQL Server `datetime2(7)`, `datetimeoffset`, Oracle `TIMESTAMP(9)`) keeps all nine fraction digits and the `Z` of an instant; the microsecond form keeps its six."
+    what: "a nanosecond timestamp (SQL Server `datetime2(7)`, `datetimeoffset`, Oracle `TIMESTAMP(9)` when declared `timestamp_ns`) keeps all nine fraction digits and the `Z` of an instant; the microsecond form keeps its six."
     no_silent_loss:          { test: timestamp_nanos_write_nine_digits_and_z_only_for_an_instant }
     no_corruption_on_escape: { na: "an ISO-8601 timestamp is `[0-9-T:.Z]` — nothing to escape" }
 

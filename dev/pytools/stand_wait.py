@@ -7,7 +7,8 @@
 Readiness is read from docker, not listed here: a service with a healthcheck is ready when docker calls it
 healthy and its budget is that healthcheck's own (start period + retries x interval); one without is ready when
 its first published TCP port accepts a connection, within `PORT_BUDGET_S`; one with neither is reported as not
-probed. A container that exited, or never started, fails at once. The failure prints `docker compose ps -a` and the log tail of
+probed. A container that exited, or never started, fails at once. `--self-test` also grades the compose files: a healthcheck that reads
+`/dev/tcp` must run under `bash -c`. The failure prints `docker compose ps -a` and the log tail of
 each service that did not answer, and exits 1.
 """
 
@@ -15,13 +16,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import socket
 import subprocess
 import sys
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[2]
+COMPOSE_FILES = ("docker-compose.yaml", "dev/stand/docker-compose.yaml")
+BASH_C = re.compile(r"\bbash\s+-[a-z]*c\b")
 PORT_BUDGET_S = 60
 POLL_S = 2
 MARGIN_S = 60
@@ -63,6 +69,19 @@ def inspect_services(runner: Callable[[Sequence[str]], str], names: Sequence[str
         out.append(Service(labels.get("com.docker.compose.service") or box["Name"].lstrip("/"), box["State"]["Status"], health, budget,
                            None if health or not published else published[0], box["State"].get("ExitCode", 0)))
     return sorted(out, key=lambda s: s.name)
+
+
+def tcp_healthchecks(compose_text: str) -> dict[str, bool]:
+    """Every service whose healthcheck reads `/dev/tcp`, mapped to whether that test runs under `bash -c`."""
+    import yaml  # the wait itself needs only the standard library
+
+    found = {}
+    for name, svc in (yaml.safe_load(compose_text).get("services") or {}).items():
+        test = (svc.get("healthcheck") or {}).get("test") or []
+        words = " ".join([test] if isinstance(test, str) else map(str, test))
+        if "/dev/tcp" in words:
+            found[name] = bool(BASH_C.search(words))
+    return found
 
 
 def tcp_open(port: int) -> bool:
@@ -191,6 +210,14 @@ def self_test() -> int:
     assert failed == [], "a service with no healthcheck and no published port should not be waited for"
     failed, lines = play([])
     assert failed == [] and any("no started service" in x for x in lines), lines
+    compose = [(rel, tcp_healthchecks((ROOT / rel).read_text())) for rel in COMPOSE_FILES]
+    checked = {f"{rel}:{name}": ok for rel, found in compose for name, ok in found.items()}
+    assert checked, "no healthcheck reads /dev/tcp: the guard that every one runs under bash -c graded nothing"
+    assert all(checked.values()), f"a /dev/tcp healthcheck runs under the image's sh, which has no /dev/tcp: {sorted(k for k, ok in checked.items() if not ok)}"
+    shell = 'services:\n  p:\n    healthcheck:\n      test: ["CMD-SHELL", "%s"]\n'
+    assert tcp_healthchecks(shell % "(echo > /dev/tcp/127.0.0.1/6033) || exit 1") == {"p": False}, "a /dev/tcp healthcheck under CMD-SHELL was accepted"
+    assert tcp_healthchecks(shell % "bash -c '(echo > /dev/tcp/127.0.0.1/6033)' || exit 1") == {"p": True}, "a /dev/tcp healthcheck under bash -c was refused"
+    print(f"stand_wait compose guard: {len(checked)} /dev/tcp healthcheck(s) all under bash -c: {', '.join(sorted(checked))}")
     print("stand_wait self-test ok: healthy, late-healthy, unhealthy, crashed, finished one-shot, never-ready, open port, closed port, unprobed")
     return 0
 

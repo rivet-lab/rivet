@@ -3262,17 +3262,17 @@ fn every_keyset_runner_hook_loses_nothing_on_oracle() {
     }
 }
 
-/// Parallel keyset runner: a worker error at a range's start and mid-range, and a hard exit after a range commits.
+/// Parallel keyset runner: a worker error at a range's start and mid-range (range 0 holds several pages whatever the range count), and a hard exit after a range commits.
 #[test]
 #[ignore = "live: requires docker compose oracle"]
 fn every_parallel_keyset_runner_hook_loses_nothing_on_oracle() {
     require_alive(LiveService::Oracle);
     let t = crash_table(1_500);
     SqlEngine::Oracle.refresh_row_estimate(t.name());
-    let base = ["chunk_by_key: ID", "chunk_size: 200", "parallel: 3"];
+    let base = ["chunk_by_key: ID", "chunk_size: 10", "parallel: 3"];
     for fault in [
         (ERROR, "keyset_parallel_worker:1"),
-        (ERROR, "keyset_parallel_worker_midrange:1"),
+        (ERROR, "keyset_parallel_worker_midrange:0"),
     ] {
         let rig = crash_rig(t.name(), "chunked", &base);
         let ctx = format!("parallel keyset {fault:?}");

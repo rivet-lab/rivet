@@ -190,3 +190,66 @@ fn the_stack_check_goes_red_on_each_spelling_it_guards() {
         "a comment was graded"
     );
 }
+
+const COMPOSE_UP_TOOL: &str = "python3 -m dev.pytools.compose_up docker compose";
+
+/// Lines of `text` that run `docker compose … up` without the pull-retry tool in front of them.
+fn bare_compose_ups(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#') && !l.starts_with("echo"))
+        .filter(|l| l.contains("docker compose") && l.split_whitespace().any(|w| w == "up"))
+        .filter(|l| !l.contains(COMPOSE_UP_TOOL))
+        .map(str::to_string)
+        .collect()
+}
+
+fn workflow_and_action_files() -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(".github/workflows").expect("list workflows") {
+        out.push(entry.expect("workflow entry").path());
+    }
+    for entry in std::fs::read_dir(".github/actions").expect("list actions") {
+        let path = entry.expect("action entry").path().join("action.yml");
+        if path.exists() {
+            out.push(path);
+        }
+    }
+    out
+}
+
+#[test]
+fn every_compose_up_in_ci_pulls_through_the_retry_tool() {
+    let mut seen = 0;
+    for path in workflow_and_action_files() {
+        let text = std::fs::read_to_string(&path).expect("read workflow or action");
+        seen += text.matches(COMPOSE_UP_TOOL).count();
+        let bare = bare_compose_ups(&text);
+        assert!(
+            bare.is_empty(),
+            "{}: `docker compose … up` without `{COMPOSE_UP_TOOL}` (a registry error on the pull fails the \
+             whole step, as in gate run 45232816173): {}",
+            path.display(),
+            bare[0]
+        );
+    }
+    assert!(
+        seen >= 2,
+        "found {seen} wrapped compose ups: the scan lost its target"
+    );
+}
+
+#[test]
+fn the_compose_up_check_goes_red_on_a_bare_up() {
+    assert_eq!(
+        bare_compose_ups("run: docker compose up -d postgres").len(),
+        1
+    );
+    assert_eq!(
+        bare_compose_ups("( docker compose --profile cdc up -d x > log 2>&1 ) &").len(),
+        1
+    );
+    assert!(bare_compose_ups(&format!("run: {COMPOSE_UP_TOOL} up -d postgres")).is_empty());
+    assert!(bare_compose_ups("docker compose exec -T postgres psql").is_empty());
+    assert!(bare_compose_ups("echo \"::error::docker compose up did not finish\"").is_empty());
+}

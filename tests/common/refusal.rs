@@ -22,7 +22,7 @@ const FAULT_ENVS: &[&str] = &["RIVET_TEST_PANIC_AT", "RIVET_TEST_ERROR_AT"];
 /// Product defects every failed run may show until the product is fixed: the kind and why (pinned by tests/offline/rig_oracle_ratchet.rs; the list only shrinks).
 pub(crate) const KNOWN_PRODUCT_DEFECTS: &[(Leftover, &str)] = &[(
     Leftover::ObservedSchema,
-    "known defect: a first run that fails stores the drift baseline (src/state/schema.rs `detect_schema_change`) in export_schema, which src/state/migrations.rs v18 documents as success-only",
+    "known defect (2026-11-23): a run that fails stores or replaces the drift baseline (src/state/schema.rs `detect_schema_change`) in export_schema, which src/state/migrations.rs v18 documents as success-only; closes with the product fix 'persist the schema baseline only after a successful run', and this entry is removed when it merges",
 )];
 
 /// The kinds a failed run may leave with no declaration: its own record of the stop.
@@ -109,7 +109,7 @@ pub enum Leftover {
     DeliveredRun,
     /// A `file_log` row: the record of a part the run wrote.
     FileLog,
-    /// An `export_schema` row for an export that had none: the schema the run observed.
+    /// An `export_schema` row for an export that had none, or one the run replaced: the schema the run observed.
     ObservedSchema,
     /// A chunk or range checkpoint row (`chunk_run`, `chunk_task`, `keyset_range`) or the shape its run was opened with (`run_shape`).
     ChunkCheckpoint,
@@ -649,8 +649,18 @@ fn state_changes(
             Role::Rows(kind) => kind,
             Role::Telemetry | Role::Journal => Leftover::ResumePoint,
         };
+        let arrived: BTreeSet<Option<String>> = a
+            .difference(b)
+            .map(|row| field(row, "export_name"))
+            .collect();
         let table_kind = |row: &str| match row_kind {
             Leftover::ChunkCheckpoint => Leftover::ChunkCheckpoint,
+            Leftover::ObservedSchema
+                if gone.contains(&field(row, "export_name"))
+                    && arrived.contains(&field(row, "export_name")) =>
+            {
+                Leftover::ObservedSchema
+            }
             _ if gone.contains(&field(row, "export_name")) => Leftover::ResumePoint,
             _ if owner_pointer(t, row) => Leftover::ChunkCheckpoint,
             kind => kind,
@@ -1035,9 +1045,9 @@ mod tests {
                 Leftover::SuccessRecord,
                 Leftover::UnknownStatus,
                 Leftover::UnfinishedRecord,
-                Leftover::ResumePoint,
                 Leftover::ObservedSchema,
-                Leftover::ResumePoint,
+                Leftover::ObservedSchema,
+                Leftover::ObservedSchema,
                 Leftover::FileLog,
                 Leftover::LoadAttempt
             ]
@@ -1045,6 +1055,35 @@ mod tests {
         let (kinds, _) =
             kinds_after(|d| std::fs::remove_file(d.join("out/part-0.parquet")).unwrap());
         assert_eq!(kinds, vec![Leftover::ChangedFile]);
+    }
+
+    #[test]
+    fn a_replaced_baseline_is_the_observed_schema_defect_and_a_removed_one_is_a_resume_point() {
+        let (kinds, verdict) = kinds_after(|d| {
+            sql(
+                d,
+                "UPDATE export_schema SET columns_json = '[a, b]' WHERE export_name = 'e'",
+            )
+        });
+        assert_eq!(kinds, vec![Leftover::ObservedSchema; 2]);
+        assert!(matches!(verdict, Verdict::Refused { known, .. } if known.len() == 1));
+        let (kinds, verdict) =
+            kinds_after(|d| sql(d, "DELETE FROM export_schema WHERE export_name = 'e'"));
+        assert_eq!(kinds, vec![Leftover::ResumePoint]);
+        assert!(
+            matches!(verdict, Verdict::Fail(l) if l[0].starts_with("resume-point: export_schema - "))
+        );
+        let (_, verdict) = kinds_after(|d| {
+            sql(
+                d,
+                "UPDATE export_schema SET columns_json = '[a, b]' WHERE export_name = 'e';
+                 UPDATE export_state SET last_cursor_value = '99' WHERE export_name = 'e'",
+            )
+        });
+        assert!(
+            matches!(verdict, Verdict::Fail(l) if l.len() == 4),
+            "a replaced baseline never hides a moved cursor"
+        );
     }
 
     #[test]

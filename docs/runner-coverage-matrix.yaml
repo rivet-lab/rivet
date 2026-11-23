@@ -613,6 +613,15 @@ scenarios:
     mongo_parallel: { na: "a Mongo export's schema is the fixed {_id, document, meta} shape: no column type reaches the format or the type mapping" }
     cdc:            { test: a_pending_baseline_wire_mismatch_is_refused_by_check_postgres }
 
+  - id: check_refuses_an_override_it_could_not_admit
+    what: "an export that declares `columns:` and whose source connection failed is refused by `check`, `doctor` and `plan` with RIVET_SOURCE_CONNECT_FAILED (exit 2) naming the export and the driver's words, never passed as a plan whose overrides were not checked against the catalog; an export with no `columns:` plans as before and a `columns_from: grants` export still stops on the connect error (one seam: `plan_and_admit`, reached through `plan_run`, for a batch export and for the pending baseline leg of a `mode: cdc` export)"
+    single:         { test: an_unreachable_source_refuses_an_unadmitted_override_and_not_a_plain_plan }
+    chunked:        { na: "shared seam: plan_and_admit runs in plan_run before the strategy dispatch" }
+    chunked_checkpoint: { na: "shared seam (plan_run, before the dispatch)" }
+    keyset:         { na: "shared seam (plan_run, before the dispatch)" }
+    mongo_parallel: { na: "a Mongo export's schema is the fixed {_id, document, meta} shape: it has no `columns:` override to admit" }
+    cdc:            { test: an_unreachable_source_refuses_an_unadmitted_override_and_not_a_plain_plan }
+
   - id: mongo_flat_id_label
     what: "the flat Mongo `_id` column's `rivet.native_type` / `rivet.fidelity` names the BSON type the collection holds (one seam: MongoSource::flat_mappings, read by export() and type_mappings)"
     single:         { test: mongo_batch_flat_id_is_labelled_by_the_bson_types_the_collection_holds }
