@@ -81,6 +81,11 @@ scenarios:
     no_silent_loss:          { test: timestamp_nanos_write_nine_digits_and_z_only_for_an_instant }
     no_corruption_on_escape: { na: "an ISO-8601 timestamp is `[0-9-T:.Z]` — nothing to escape" }
 
+  - id: mssql_datetime_text_unchanged
+    what: "a SQL Server `datetime2(0..6)`, `datetime`, `smalldatetime`, `datetimeoffset(0..6)`, `date` and `time(6)` column keeps the six-digit text the previous release wrote, and a `datetime2(7)` / `datetimeoffset(7)` column, refused by 0.33.0, gets nine digits."
+    no_silent_loss:          { test: a_csv_export_of_a_datetime_table_keeps_the_previous_release_text_and_adds_the_seventh_digit_mssql }
+    no_corruption_on_escape: { na: "an ISO-8601 timestamp is `[0-9-T:.Z]` — nothing to escape" }
+
   - id: data_cell_delimiters
     what: "a comma / double-quote / LF / CR inside a text cell is RFC-4180 quoted (quotes doubled) so it never splits or shifts the row — verified end-to-end against an INDEPENDENT DuckDB re-read, not the writer's own rendering."
     no_silent_loss:          { na: "the value is present in the cell; the risk here is column MISALIGNMENT (escaping), covered by the sibling column" }

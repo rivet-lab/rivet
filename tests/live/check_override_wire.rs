@@ -620,6 +620,70 @@ fn a_csv_export_of_a_nanosecond_timestamp_column_is_delivered_like_check_admits_
     });
 }
 
+/// The csv text of a whole-table export of `table` under `format: csv`.
+fn csv_text_of_table_mssql(table: &str) -> String {
+    let out = tempfile::tempdir().unwrap();
+    let rig = Rig::mssql_batch(table)
+        .no_oracle("the subject is the csv text of a datetime column, graded below against the bytes the previous release wrote")
+        .with_format("csv")
+        .dest_path(out.path().to_path_buf());
+    let o = rig.run();
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let parts: Vec<_> = files_under(out.path())
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "csv"))
+        .collect();
+    assert_eq!(parts.len(), 1, "{parts:?}");
+    std::fs::read_to_string(&parts[0]).unwrap()
+}
+
+#[test]
+#[ignore = "live: mssql"]
+fn a_csv_export_of_a_datetime_table_keeps_the_previous_release_text_and_adds_the_seventh_digit_mssql()
+ {
+    require_alive(LiveService::Mssql);
+    let coarse = unique_name("csv_dt_coarse");
+    mssql_exec(&format!(
+        "CREATE TABLE dbo.{coarse} (id INT PRIMARY KEY, c0 DATETIME2(0) NOT NULL, c3 DATETIME2(3) NOT NULL, \
+         c6 DATETIME2(6) NOT NULL, o6 DATETIMEOFFSET(6) NULL, o3 DATETIMEOFFSET(3) NOT NULL, d DATE NOT NULL, \
+         t6 TIME(6) NOT NULL, sdt SMALLDATETIME NOT NULL, dt DATETIME NOT NULL)"
+    ));
+    let _coarse_guard = MssqlTable::adopt(coarse.clone());
+    mssql_exec(&format!(
+        "INSERT INTO dbo.{coarse} VALUES \
+         (1,'2026-01-15 13:45:30','2026-01-15 13:45:30.123','2026-01-15 13:45:30.123456','2026-01-15 13:45:30.123456 +05:30',\
+          '2026-01-15 13:45:30.123 -02:00','2026-01-15','13:45:30.123456','2026-01-15 13:46','2026-01-15 13:45:30.127'),\
+         (2,'1900-01-01 00:00:00','2000-01-01 00:00:00','0001-01-01 00:00:00',NULL,\
+          '9999-12-31 23:59:59.999 +00:00','0001-01-01','00:00:00','1900-01-01','1753-01-01')"
+    ));
+    assert_eq!(
+        csv_text_of_table_mssql(&coarse),
+        "id,c0,c3,c6,o6,o3,d,t6,sdt,dt\n\
+         1,2026-01-15T13:45:30.000000,2026-01-15T13:45:30.123000,2026-01-15T13:45:30.123456,2026-01-15T08:15:30.123456Z,\
+         2026-01-15T15:45:30.123000Z,2026-01-15,13:45:30.123456,2026-01-15T13:46:00.000000,2026-01-15T13:45:30.126667\n\
+         2,1900-01-01T00:00:00.000000,2000-01-01T00:00:00.000000,0001-01-01T00:00:00.000000,,\
+         9999-12-31T23:59:59.999000Z,0001-01-01,00:00:00.000000,1900-01-01T00:00:00.000000,1753-01-01T00:00:00.000000\n"
+    );
+    let fine = unique_name("csv_dt_fine");
+    mssql_exec(&format!(
+        "CREATE TABLE dbo.{fine} (id INT PRIMARY KEY, d7 DATETIME2 NOT NULL, o7 DATETIMEOFFSET NULL)"
+    ));
+    let _fine_guard = MssqlTable::adopt(fine.clone());
+    mssql_exec(&format!(
+        "INSERT INTO dbo.{fine} VALUES (1,'2026-01-15 13:45:30.1234567','2026-01-15 13:45:30.1234567 +05:30'),\
+         (2,'2000-01-01 00:00:00',NULL)"
+    ));
+    assert_eq!(
+        csv_text_of_table_mssql(&fine),
+        "id,d7,o7\n1,2026-01-15T13:45:30.123456700,2026-01-15T08:15:30.123456700Z\n2,2000-01-01T00:00:00.000000000,\n"
+    );
+}
+
 #[test]
 #[ignore = "live: oracle"]
 fn a_csv_export_of_a_nanosecond_timestamp_column_is_delivered_like_check_admits_oracle() {
