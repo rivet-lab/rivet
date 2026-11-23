@@ -94,6 +94,6 @@ fn an_oracle_batch_time_override_is_graded_by_the_result_column_it_lands_on() {
     }
     for decl in ["TS9: date", "TS9: timestamp_ns, TS3: date"] {
         let rig = Rig::oracle_batch(n).export_line(&format!("columns: {{{decl}}}"));
-        refused_on_check_and_run(&rig, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", decl);
+        refused_on_check_and_run(&rig, VALUE_REFUSAL, decl);
     }
 }

@@ -87,17 +87,22 @@ pub fn check_verdict(rig: &Rig, want: Verdict, col: &str, ctx: &str) {
     assert_eq!(fidelity, expect, "{ctx}: check --type-report for `{col}`");
 }
 
-/// Asserts `check` and `run` both refuse the declaration of `rig` with `code`, before any row is delivered.
-pub fn refused_on_check_and_run(rig: &Rig, code: &str, ctx: &str) {
+/// A pair the engine's override table does not read is refused by the pair code.
+pub const PAIR_REFUSAL: Refused<'static> =
+    Refused::by_code("RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+
+/// A value the declared type cannot hold is refused by the value code.
+pub const VALUE_REFUSAL: Refused<'static> =
+    Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+
+/// Asserts `check` and `run` both refuse the declaration of `rig` as `want` (code and exit class).
+pub fn refused_on_check_and_run(rig: &Rig, want: Refused<'_>, ctx: &str) {
     let name = rig.export_name().to_string();
     let check = rig.cli(&["check", "--export", &name, "--type-report", "--json"]);
-    let err = String::from_utf8_lossy(&check.stderr).to_string();
-    assert!(!check.status.success(), "{ctx}: check refuses: {err}");
-    assert!(err.contains(code), "{ctx}: check: {err}");
-    let run = rig.run_args(&[]);
-    let err = String::from_utf8_lossy(&run.stderr).to_string();
-    assert!(!run.status.success(), "{ctx}: run refuses: {err}");
-    assert!(err.contains(code), "{ctx}: run: {err}");
+    eprintln!("{ctx}: check");
+    assert_refused(&check, want);
+    eprintln!("{ctx}: run");
+    assert_refused(&rig.run_args(&[]), want);
 }
 
 /// Asserts the default-policy run of `rig` exits 0.
@@ -247,7 +252,7 @@ fn a_mssql_batch_time_override_is_graded_by_the_result_column_it_lands_on() {
         ("o7: date", "o7 date"),
     ] {
         let rig = Rig::mssql_batch(&t).export_line(&format!("columns: {{{decl}}}"));
-        refused_on_check_and_run(&rig, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", ctx);
+        refused_on_check_and_run(&rig, PAIR_REFUSAL, ctx);
     }
 }
 
