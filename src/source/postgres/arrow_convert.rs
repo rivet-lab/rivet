@@ -1275,10 +1275,7 @@ fn build_pg_list_array(
 fn pg_numeric_optional_plain(row: &Row, col_idx: usize) -> Result<Option<String>> {
     match row.try_get::<_, Option<PgNumericWire<'_>>>(col_idx) {
         Ok(Some(wire)) => match numeric_wire_plain_at_display_scale(wire.0) {
-            Some(plain) => {
-                let t = plain.trim();
-                Ok((!t.is_empty()).then(|| t.to_string()))
-            }
+            Some(plain) => Ok(non_empty_text(plain.trim().to_string())),
             None => Err(crate::error::coded(
                 crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
                 format!(
@@ -1288,7 +1285,7 @@ fn pg_numeric_optional_plain(row: &Row, col_idx: usize) -> Result<Option<String>
         },
         Ok(None) => Ok(None),
         Err(_) => match row.try_get::<_, Option<PgDecimalFallback>>(col_idx) {
-            Ok(v) => Ok(v.and_then(|PgDecimalFallback(t)| (!t.is_empty()).then_some(t))),
+            Ok(v) => Ok(v.and_then(|PgDecimalFallback(t)| non_empty_text(t))),
             Err(_) => {
                 let c = &row.columns()[col_idx];
                 crate::rivet_bail!(
@@ -1303,6 +1300,11 @@ fn pg_numeric_optional_plain(row: &Row, col_idx: usize) -> Result<Option<String>
             }
         },
     }
+}
+
+/// A cell's text, or `None` when it is empty.
+fn non_empty_text(t: String) -> Option<String> {
+    (!t.is_empty()).then_some(t)
 }
 
 /// A non-`numeric` cell read under a `decimal` override: an integer or text, as plain text.
@@ -2152,5 +2154,11 @@ mod array_element_tests {
         let zero = PgInt::from_sql(&Type::OID, &0u32.to_be_bytes()).unwrap();
         assert_eq!(zero.0, 0);
         assert!(PgInt::from_sql(&Type::OID, &[0, 0, 1]).is_err());
+    }
+    #[test]
+    fn a_numeric_cell_is_text_unless_it_is_empty() {
+        assert_eq!(non_empty_text(String::new()), None);
+        assert_eq!(non_empty_text("0".into()), Some("0".into()));
+        assert_eq!(non_empty_text("1.50".into()), Some("1.50".into()));
     }
 }
