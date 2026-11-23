@@ -655,11 +655,8 @@ pub(crate) fn refuse_override_wire_mismatch(
         Err(e) => e,
     };
     let refused = crate::error::code_of(&err).is_some_and(|c| {
-        c.id == seeded!(
-            "check-override-wire-not-refused",
-            crate::error::codes::SOURCE_QUERY_FAILED.id,
-            crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH.id
-        ) || c.id == crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE.id
+        c.id == crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH.id
+            || c.id == crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE.id
     });
     if refused {
         return Err(err);
