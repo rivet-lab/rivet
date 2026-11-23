@@ -72,6 +72,14 @@ scenarios:
     mongo:    { na: "a MongoDB field has no text-to-integer column override on the batch or change-stream path" }
     oracle:   { na: "a VARCHAR2 column under an integer override is refused at plan time on the baseline leg and on a stream-only export alike (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH, a_text_under_an_integer_override_is_refused_alike_on_every_leg_oracle), so no text cell is read as an integer" }
 
+  - id: check_refuses_an_override_it_could_not_admit
+    what: "a `columns:` override that `check`, `doctor` or `plan` could not check against the catalog because the source connection failed → RIVET_SOURCE_CONNECT_FAILED (exit 2) naming the export, never a pass that leaves run to refuse RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH; an export with no override plans as before"
+    postgres: { na: "plan_and_admit is one engine-agnostic seam (src/pipeline/planning.rs) — pinned once through a MySQL config by an_unreachable_source_refuses_an_unadmitted_override_and_not_a_plain_plan" }
+    mysql:    { test: an_unreachable_source_refuses_an_unadmitted_override_and_not_a_plain_plan }
+    mssql:    { na: "plan_and_admit is one engine-agnostic seam — pinned once through a MySQL config" }
+    mongo:    { na: "a Mongo export has no `columns:` override to admit; plan_and_admit is the same seam" }
+    oracle:   { na: "plan_and_admit is one engine-agnostic seam — pinned once through a MySQL config; the Oracle CDC grid reproduced the pass live under 8 concurrent checks" }
+
   - id: sparse_range_plan_guard
     what: "a sparse range-chunk key that would blow up into thousands of near-empty windows → bail (PG/MSSQL, scan-free estimate proves ≥4×) or loud warn (MySQL, no trustworthy estimate)"
     postgres: { test: stand_sparse_guard_postgres }

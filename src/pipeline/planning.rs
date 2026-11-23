@@ -136,7 +136,12 @@ fn plan_and_admit(
         Ok(s) => {
             admit_columns(s, config, &p.plan, export, config_dir, params, flags.strict).map(|()| p)
         }
-        Err(_) if p.plan.column_overrides.is_empty() => Ok(p),
+        Err(_)
+            if p.plan.column_overrides.is_empty()
+                || seeded!("check-unreachable-override-admitted", true, false) =>
+        {
+            Ok(p)
+        }
         Err(cause) => Err(crate::error::coded(
             crate::error::codes::SOURCE_CONNECT_FAILED,
             format!(
