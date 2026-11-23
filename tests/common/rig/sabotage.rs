@@ -289,7 +289,7 @@ impl Rig {
         }
     }
 
-    /// Crashes a parallel keyset run as its last key range commits: a first crash at range 0 shows how many ranges the plan holds, the resume then dies as the last of them commits; panics unless that last range is left committed.
+    /// Crashes a parallel keyset run with its open-ended last key range committed: a crash at range 0 shows how many ranges the plan holds, and a resume dies as the last of them commits unless the first crash already left it committed; panics unless that last range is left committed.
     pub fn crash_as_the_last_keyset_range_commits(&self) {
         let crash = |index: i64| {
             let point = format!("keyset_parallel_range_committed:{index}");
@@ -301,6 +301,13 @@ impl Rig {
                 String::from_utf8_lossy(&out.stderr)
             );
         };
+        let last_committed = |ranges: i64| {
+            self.state_count(&format!(
+                "SELECT COUNT(*) FROM keyset_range WHERE export_name = '{{export}}' \
+                 AND range_index = {} AND done = 1 AND hi IS NULL",
+                ranges - 1
+            ))
+        };
         crash(0);
         let ranges =
             self.state_count("SELECT COUNT(*) FROM keyset_range WHERE export_name = '{export}'");
@@ -308,14 +315,12 @@ impl Rig {
             ranges >= 2,
             "fixture: the plan holds {ranges} key range(s), so none is the last of several"
         );
-        crash(ranges - 1);
-        let last = self.state_count(&format!(
-            "SELECT COUNT(*) FROM keyset_range WHERE export_name = '{{export}}' \
-             AND range_index = {} AND done = 1 AND hi IS NULL",
-            ranges - 1
-        ));
+        if last_committed(ranges) == 0 {
+            crash(ranges - 1);
+        }
         assert_eq!(
-            last, 1,
+            last_committed(ranges),
+            1,
             "fixture: the crash left the open-ended last of {ranges} key ranges not committed"
         );
     }
