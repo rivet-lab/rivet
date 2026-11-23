@@ -132,6 +132,7 @@ fn ledger(engine: &str) -> Ledger {
 const ARROW: &str = "arrow";
 
 /// The `declarable` matrix-only row `native` of `engine` as the column a `columns: {C: timestamp}` override delivers: Timestamp(µs), the digits past the sixth cut.
+#[cfg(feature = "oracle")]
 fn declared_timestamp_row(engine: &str, native: &str) -> Row {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/type-capability-matrix.yaml");
     let doc: serde_yaml_ng::Value =
