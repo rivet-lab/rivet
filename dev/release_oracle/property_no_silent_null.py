@@ -287,6 +287,8 @@ _PG_HEX = re.compile(r"'\\x([0-9A-Fa-f]*)'(?:::bytea)?")
 _BITS = re.compile(r"b'([01]+)'")
 _PG_BITS = re.compile(r"b'([01]*)'", re.I)
 _CAST = re.compile(r"('(?:[^']|'')*')::[a-z_]+")
+_BIT_NATIVE = re.compile(r"BIT(?:\((\d+)\))?", re.I)
+_HEX_PAIRS = re.compile(r"(?:[0-9A-Fa-f]{2})*")
 
 
 def parse_lit(engine: str, lit: str):
@@ -306,7 +308,7 @@ def parse_lit(engine: str, lit: str):
         return Decimal(int(m.group(1), 2))
     if m := _HEX.fullmatch(s):
         hexed = m.group(1) or m.group(2) or m.group(3) or ""
-        return None if engine == "oracle" and not hexed else bytes.fromhex(hexed)
+        return None if engine == "oracle" and lit.strip().upper() == "HEXTORAW('')" else bytes.fromhex(hexed)
     if engine == "postgres" and (m := _PG_HEX.fullmatch(s)):
         return bytes.fromhex(m.group(1))
     if m := _TS_FUNC.fullmatch(s):
@@ -320,6 +322,22 @@ def parse_lit(engine: str, lit: str):
     if engine == "mysql":
         return re.sub(r"\\(.)", lambda e: _MYSQL_ESC.get(e.group(1), e.group(1)), body, flags=re.S)
     return body
+
+
+def _bit_bytes(native: str, exp) -> bytes | None:
+    """The big-endian bytes a MySQL BIT(M) column holds for the integer `exp`, ceil(M/8) of them; None when `native` is no BIT or `exp` no integer."""
+    m = _BIT_NATIVE.fullmatch(native.strip())
+    if not m or not isinstance(exp, (Decimal, bool)):
+        return None
+    width, n = (int(m.group(1) or 1) + 7) // 8, int(exp)
+    return n.to_bytes(width, "big") if 0 <= n < 1 << (8 * width) else None
+
+
+def _same_bit_bytes(exp: bytes, got, csv: bool) -> str:
+    """OK or WRONG for the bytes a binary override delivers of a BIT value: exactly the column's bytes, a CSV cell as their lowercase hex."""
+    if csv and isinstance(got, str):
+        got = bytes.fromhex(got) if _HEX_PAIRS.fullmatch(got) else None
+    return "OK" if isinstance(got, (bytes, bytearray, memoryview)) and bytes(got) == exp else WRONG
 
 
 def _num(v):
@@ -574,6 +592,8 @@ def compare(engine: str, src_lit: str, src_family: str, target: str, got, csv: b
         return NULLED
     if csv and got == "" and not _blank(exp):
         return WRONG
+    if target == "binary" and engine == "mysql" and (bits := _bit_bytes(native, exp)) is not None:
+        return _same_bit_bytes(bits, got, csv)
     if engine == "postgres" and native.endswith("[]"):
         return same_array(engine, src_lit, native, target, got)
     if target == "binary" and csv and isinstance(got, str) and not isinstance(exp, bytes):
@@ -724,7 +744,7 @@ def read_files(parts: list[str], fmt: str, key: str = "id"):
             con.register("nsn_parts", tbl)
             src = "nsn_parts"
         else:
-            src = f"read_csv({parts!r}, header=true, all_varchar=true, union_by_name=true, allow_quoted_nulls=false)"
+            src = f"read_csv({parts!r}, header=true, all_varchar=true, union_by_name=true, quote='\"', escape='\"', allow_quoted_nulls=false)"
         desc = {r[0].lower(): wide.get(r[0].lower(), r[1]) for r in con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
         sel = ", ".join(f'CAST("{k}" AS VARCHAR{"[]" if t.endswith("[]") else ""}) AS "{k}"' if "TIME ZONE" in t or t in TEXT_READ else f'"{k}"' for k, t in desc.items())
         cur = con.execute(f"SELECT {sel} FROM {src}")
@@ -1177,6 +1197,15 @@ def _proc(rc: int, err: str = "") -> core.Proc:
     return core.Proc(["rivet"], rc, "", err, gated=False)
 
 
+def csv_read_keeps_apostrophes() -> bool:
+    """Whether `read_files` hands back a CSV cell with apostrophes beside an empty cell exactly as written."""
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d) / "p.csv"
+        f.write_text("id,v\n1,'a' 'b' 'c'\n2,\n")
+        _, rows, _ = read_files([str(f)], "csv")
+    return [rows[1]["v"], rows[2]["v"]] == ["'a' 'b' 'c'", None]
+
+
 def nanosecond_read_keeps_every_digit() -> bool:
     """Whether `read_files` hands back a nanosecond timestamp (even the one at the edge of DuckDB's range), zoned timestamp and time of day with every digit."""
     import pyarrow as pa
@@ -1195,6 +1224,7 @@ def self_test() -> None:
     """Grade the grader: axes come from the product, every failure class fires on its exact harm, a delivered value passes."""
     ax = axes()
     assert {"postgres", "mysql", "mssql", "oracle", "mongo"} <= set(ax["engines"]), ax["engines"]
+    assert all(columns(e) for e in ("postgres", "mysql", "mssql", "oracle")), "every engine's ledger builds its override-grid columns"
     assert {"full", "incremental", "chunked", "cdc"} <= set(ax["modes"]) and set(ax["formats"]) == {"parquet", "csv"}, ax
     assert {"none", "float4", "float8", "int8", "bool", "decimal(38,10)", "text"} <= set(ax["targets"]), ax["targets"]
     assert {"decimal(18,-2)", "decimal(60,-2)"} <= set(ax["targets"]) and negative_scale_targets("fn parse_decimal_params let scale: u8 =") == []
@@ -1220,10 +1250,16 @@ def self_test() -> None:
     hostile = next(c for n, c in sib.items() if "\U0001F600" in n)
     assert {parse_lit("mysql", v) for v in hostile.lits} >= {"a\\b", "l\nf", "c\rr", "n\0l", "\U0001F600"}, hostile.lits
     assert "'12abc'" in next(c for c in columns("mysql") if c.native == "TEXT").lits
+    for lit, native, want, ok, bad in (("b'10101010'", "BIT(8)", "aa", b"\xaa", b"\xab"), ("b'1'", "BIT(64)", "0000000000000001", b"\0" * 7 + b"\1", b"\1"), ("1", "BIT(1)", "01", b"\1", b"\0")):
+        assert compare("mysql", lit, "int", "binary", ok, native=native) == "OK" and compare("mysql", lit, "int", "binary", bad, native=native) == WRONG, (lit, "a BIT under a binary override is compared as its bytes")
+        assert compare("mysql", lit, "int", "binary", want, csv=True, native=native) == "OK" and compare("mysql", lit, "int", "binary", want[:-2] + "ff", csv=True, native=native) == WRONG, (lit, "the CSV hex of a BIT is compared as its bytes")
+    assert compare("mysql", "b'10101010'", "int", "binary", "zz", csv=True, native="BIT(8)") == WRONG and compare("mysql", "b'10101010'", "int", "binary", 170, native="BIT(8)") == WRONG, "a shape that is no bytes is WRONG, never PRESENCE"
+    assert compare("mysql", "b'101'", "int", "int8", Decimal(5), native="BIT(8)") == "OK", "a BIT under an integer override is still a number"
     assert compare("mysql", "NULL", "int", "float4", None) == "OK"
     assert compare("mysql", "7", "int", "float4", None) == NULLED, "a non-NULL value delivered as NULL is the harm of the MySQL int->float override"
     assert compare("mysql", "7", "int", "float4", None, csv=True) == NULLED and compare("mysql", "7", "int", "float4", "", csv=True) == WRONG
     assert compare("mysql", "''", "text", "none", "", csv=True) == "OK" and compare("mysql", "''", "text", "none", None, csv=True) == NULLED
+    assert parse_lit("oracle", "EMPTY_BLOB()") == b"", "an Oracle empty LOB is zero-length, never NULL"
     assert parse_lit("oracle", "HEXTORAW('')") is None and parse_lit("mysql", "UNHEX('')") == b"" and parse_lit("mysql", "x''") == b""
     assert compare("oracle", "HEXTORAW('')", "other", "none", None, native="RAW(16)") == "OK", "an Oracle empty RAW is NULL at the source"
     with tempfile.TemporaryDirectory() as fc:
@@ -1312,6 +1348,12 @@ def self_test() -> None:
     dec = Col("c03", "DECIMAL(18,2)", "Float64", "float", ("1",))
     assert grade_run("mysql", "x", _proc(5, refusal), stated, "exact", Path("."), "csv", dec, 1, "float8", ["1"]).klass == "", "the batch grade passes the column it grades"
     assert grade_mongo("m", _proc(5, refusal), stated, Path("."), "parquet", "c03", "float8", 1).klass == "", "the Mongo grade passes the column it grades"
+    noted_out = "note[values-unread]: rivet check reads at most the first row of an export that declares `columns:`; a run may still refuse a value it did not read with RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+    with_note = lambda fid, *warnings: core.Proc(["rivet"], 0, json.dumps({"columns": [{"column": "C03", "fidelity": fid, "warnings": list(warnings)}]}), noted_out, gated=False)
+    assert grade_stop("c", _proc(5, refusal), with_note("exact"), "c03").klass == SPLIT, "the note the product prints for every export with `columns:` excuses no refusal"
+    assert grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] column `c04` holds 1.5"), with_note("exact"), "c04").klass == SPLIT, "a refusal of a column check reports exact is a split, note or not"
+    assert grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] column `c04` holds 1.5"), with_note("lossy", "override float8 ... refused at run (RIVET_SOURCE_VALUE_UNREPRESENTABLE)"), "c04").klass == SPLIT, "another column's lossy row is no statement of this column"
+    assert grade_stop("c", _proc(5, refusal), with_note("lossy", "override float8 ... refused at run (RIVET_SOURCE_VALUE_UNREPRESENTABLE)"), "c03").klass == "", "a lossy row naming the code on the refused column is stated, note or not"
     wire = report("lossy", "override timestamp_ns ... refused at run (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH); this is lossy, not exact")
     assert grade_stop("c", _proc(5, refusal), wire, "c03").klass == SPLIT, "a lossy note that names another code is no statement of this refusal"
     assert grade_stop("c", _proc(5, refusal), report("exact"), "c03").klass == SPLIT, "an exact column that the run refuses is a split"
@@ -1461,7 +1503,9 @@ def _reader_self_test() -> bool:
         import pyarrow.parquet as pq
     except ImportError:
         return False
+    assert _same_instant("mssql", "TIME", "00:00:00.0000001", Decimal("0.0000001")) == "OK" and _same_instant("mssql", "TIME", "00:00:00.0000001", Decimal("0")) == WRONG, "a 100ns tick is graded in seconds-of-day, never dropped to the microsecond"
     assert nanosecond_read_keeps_every_digit(), "a nanosecond column is read as the text DuckDB holds, never a microsecond datetime"
+    assert csv_read_keeps_apostrophes(), "a CSV cell with apostrophes is read as written, never re-quoted by DuckDB dialect sniffing"
     col = Col("c00", "INT", "Int32", "int", ("1", "16777217", "-5"))
     with tempfile.TemporaryDirectory() as t:
         root = Path(t)

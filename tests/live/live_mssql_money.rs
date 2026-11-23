@@ -133,7 +133,7 @@ fn a_narrower_decimal_override_over_money_refuses_a_value_it_would_round() {
     let out = rig.run();
     assert_refused(
         &out,
-        Refused::by_code("RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1),
+        Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5),
     );
 }
 

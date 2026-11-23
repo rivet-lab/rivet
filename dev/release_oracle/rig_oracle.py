@@ -541,7 +541,8 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
         )}
         if not query and not declared:
             raise LookupError(f"table {table} does not exist (no column in all_tab_columns)")
-        exact_ns = {c.upper() for c, t in (spec.get("overrides") or {}).items() if (t or "").lower() in ("timestamp_ns", "timestamp_tz_ns")}
+        overrides = spec.get("overrides") or {}
+        exact_ns = exact_digit_columns(overrides, {c.upper() for c, t in declared.items() if t.startswith("TIMESTAMP")})
         by_col = {c: None if c in exact_ns else renders.get(f"source:{n}") for c, n in declared.items()}
         sql = query.rstrip().rstrip(";") if query else oracle_table_select(spec["url"], table, {c: e for c, e in by_col.items() if e})
         zoned: frozenset = frozenset()
@@ -549,12 +550,13 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
             from .value_diff import oracle_describe
 
             cols = oracle_describe(spec["url"], sql)
-            zoned = frozenset(n for n, z in cols if z and n.upper() not in exact_ns)
+            exact_ns = exact_digit_columns(overrides, {n.upper() for n, _, stamp in cols if stamp})
+            zoned = frozenset(n for n, z, _ in cols if z and n.upper() not in exact_ns)
             if exact_ns or zoned:
                 proj = [
                     f"TO_CHAR(\"{n}\", 'SYYYY-MM-DD HH24:MI:SS.FF9') AS \"{n}\"" if n.upper() in exact_ns
                     else f"\"{n}\" AT TIME ZONE '+00:00' AS \"{n}\"" if n in zoned else f'"{n}"'
-                    for n, _ in cols
+                    for n, _, _ in cols
                 ]
                 sql = f"SELECT {', '.join(proj)} FROM ({sql})"
         native = {c: "NUMBER (by value)" for c in _oracle_register(ora, spec["url"], sql, frozenset(c for c, t in declared.items() if t == "JSON"), zoned)}
@@ -806,8 +808,9 @@ def compare(
     duck_source: bool = True,
     verbatim: frozenset = frozenset(),
     key: list | None = None,
+    text_dest: frozenset = frozenset(),
 ) -> dict:
-    """Column pairing, per-column counts and the canon multiset difference between `src` and `dst`. `bits`: MySQL BIT(n) columns (bytes as an unsigned integer); `numbers`: source columns read as numeric text; `defects`: known_defect column -> its `defect_samples`, the only source values that may differ (per `key` row when one is known); `duck`: the ledger's DuckDB render per column, applied alike to both sides; `canons`: the ledger's canon per column; `verbatim`: text columns compared as their exact text, never through a canon."""
+    """Column pairing, per-column counts and the canon multiset difference between `src` and `dst`. `bits`: MySQL BIT(n) columns (bytes as an unsigned integer); `numbers`: source columns read as numeric text; `defects`: known_defect column -> its `defect_samples`, the only source values that may differ (per `key` row when one is known); `duck`: the ledger's DuckDB render per column, applied alike to both sides; `canons`: the ledger's canon per column; `verbatim`: text columns compared as their exact text, never through a canon; `text_dest`: columns a `columns:` override delivers as text, whose delivered side the source's DuckDB render never rewrites."""
     import decimal
     import struct
 
@@ -826,7 +829,7 @@ def compare(
             missing.append(name)
 
     def proj(col: str, key: str, st: str, dt: str, own: str, side: str) -> str:
-        r = duck.get(key) if side == "d" or duck_source else None
+        r = duck.get(key) if (side == "d" and key not in text_dest) or (side == "s" and duck_source) else None
         return r.replace("{c}", _qi(col)) if r and r != "arrow" else _proj(col, st, dt, own)
 
     sp = ", ".join(f"{proj(s, s, st, dt, st, "s")} AS c{i}" for i, (s, st, _, dt) in enumerate(pairs)) or "1 AS c0"
@@ -1401,7 +1404,8 @@ def write_keys(keys: list[tuple[str, ...]], cols: list[str], path: str) -> None:
 
 
 def _value_findings(
-    ora, engine: str, fmt: str, native: dict, rows: dict, src: str, dst: str | None, key: list[str], partial: list[str]
+    ora, engine: str, fmt: str, native: dict, rows: dict, src: str, dst: str | None, key: list[str], partial: list[str],
+    overrides: dict | None = None,
 ) -> tuple[dict, dict, frozenset]:
     """The value leg every graded delivery shares: (`compare`'s findings of `src` against `dst`, the type-ledger row per column, the columns a known defect collapses to BOOLEAN); what it could not cover is appended to `partial`."""
     from .value_diff import mongo_document_columns
@@ -1426,7 +1430,8 @@ def _value_findings(
     )
     if fmt in ("csv", "ndjson"):
         src = f"(SELECT {csv_text(_columns(ora, 'source_rows'))} FROM {src})"
-    f = compare(ora, src, dst, bits, numbers, defects, duck, canons, engine != "oracle", verbatim, key)
+    text_dest = frozenset(c for c, t in (overrides or {}).items() if override_duck(t or "") == "VARCHAR")
+    f = compare(ora, src, dst, bits, numbers, defects, duck, canons, engine != "oracle", verbatim, key, text_dest)
     delivered = {d: t for _, _, d, t in f.get("pairs", [])}
     collapse = frozenset(c for c in defects if defects[c] and delivered.get(c) == "BOOLEAN")
     return f, row_of, collapse
@@ -1460,7 +1465,7 @@ def grade_stdout(spec: dict) -> dict:
         # No byte at all is a run that printed nothing: graded as an empty delivery, never as an unreadable file.
         dst = _parts(ora, [printed], fmt) if os.path.getsize(printed) else None
         n = ora.scalar(f"SELECT count(*) FROM {dst}") if dst else 0
-        f, row_of, collapse = _value_findings(ora, engine, fmt, native, rows, "source_rows", dst, key, partial)
+        f, row_of, collapse = _value_findings(ora, engine, fmt, native, rows, "source_rows", dst, key, partial, spec.get("overrides"))
         extra = _text_form_mismatches([printed], row_of, forms, spec.get("overrides")) if dst and fmt == "parquet" else []
         extra += stdout_ledger(ora, spec, n)
     failures = grade_findings(f, rows, forms, native, engine != "mongo" and fmt == "parquet", spec.get("overrides") or {}, collapse)
@@ -1598,7 +1603,7 @@ def grade(spec: dict) -> dict:
             on = " AND ".join(f"CAST(s.{_qi(k)} AS VARCHAR) = CAST(e.{_qi(k)} AS VARCHAR)" for k in key)
             src = f"(SELECT s.* FROM {src} s SEMI JOIN (SELECT DISTINCT {kl} FROM got) e ON {on})"
             partial.append("a sealed plan replays the chunk ranges it was planned with: the delivered rows are graded, completeness against the live source is not")
-        f, row_of, collapse = _value_findings(ora, engine, fmt, native, rows, src, dst, key, partial)
+        f, row_of, collapse = _value_findings(ora, engine, fmt, native, rows, src, dst, key, partial, spec.get("overrides"))
         if spec.get("nothing_new") and not cumulative:
             if spec.get("resume"):
                 raise Unreachable("a `--resume` run wrote no new manifest: it skipped an export a prior run completed")
@@ -2035,7 +2040,22 @@ def _peek_self_test() -> None:
         raise AssertionError("a missing slot must surface as itself")
 
 
+def exact_digit_columns(overrides: dict, stamps: set[str]) -> set[str]:
+    """The columns whose source is read with every fractional digit: a nanosecond override, or a text override over a timestamp column of `stamps` (upper-case names)."""
+    return {
+        c.upper()
+        for c, t in overrides.items()
+        if (duck := override_duck(t or "")) == "TIMESTAMP_NS" or (duck == "VARCHAR" and c.upper() in stamps)
+    }
+
+
 def _self_test() -> None:
+    stamps = {"T9", "Z9"}
+    assert exact_digit_columns({"T9": "text", "N": "text", "X": "timestamp_ns"}, stamps) == {"T9", "X"}
+    for spelling in ("string", "varchar", "char", "bpchar", " text", "TEXT ", "timestamptz_ns", "timestamp_tz_ns", "Timestamp_NS"):
+        assert exact_digit_columns({"z9": spelling}, stamps) == {"Z9"}, f"`{spelling}` over a timestamp is read with every digit"
+    assert not exact_digit_columns({"T9": "timestamp", "N": "text", "Z9": "timestamp_tz"}, stamps), "a microsecond declaration and a number as text keep the ledger's source render"
+    assert not exact_digit_columns({"T9": "text"}, set()), "a column that is no timestamp keeps the ledger's source render"
     assert _bound('"ID"', "<=", "10", "NUMBER (by value)") == 'TRY_CAST("ID" AS DECIMAL(38, 10)) <= 10'
     assert _bound('"K"', ">", "10", "VARCHAR2") == """"K" > '10'""", "a text cursor compares as text"
     bq = {"target": "bigquery", "project": "p", "dataset": "d"}
@@ -2641,6 +2661,9 @@ def _compare_self_test() -> None:
             f = compare(ora, "a", "b", **kw)
             return f["only_src"], f["only_dst"]
 
+    render = {"t": "strftime({c}, '%Y-%m-%d %H:%M:%S.%f')"}
+    stamp = "SELECT 1 AS id, TIMESTAMP '2024-02-29 13:14:15.5' AS t"
+    assert diff(stamp, "SELECT 1 AS id, '2024-02-29 13:14:15.500000'::VARCHAR AS t", duck=render, text_dest=frozenset({"t"})) == (0, 0)
     j = "SELECT 1 AS id, {!r}::VARCHAR AS j"
     assert diff(j.format('{"x": 3.141592653589793238462}'), j.format('{"x":3.141592653589793}')) == (1, 1), \
         "a JSON number rounded through a double is a difference"

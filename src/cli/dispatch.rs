@@ -484,10 +484,13 @@ fn dispatch_check(
         &planned_strategies(&plans),
     )?;
     let cfg = Config::load_with_params(&config, p.as_ref())?;
-    crate::load::probe_load_target(
-        &cfg,
-        &crate::config::declared_exports(&cfg, export.as_deref())?,
-    )?;
+    let declared = crate::config::declared_exports(&cfg, export.as_deref())?;
+    crate::load::probe_load_target(&cfg, &declared)?;
+    if let Some(note) =
+        crate::error::values_unread_note(crate::config::any_declares_columns(&declared))
+    {
+        eprintln!("{note}");
+    }
     report_plan_compatibility(plans, json)?;
     if let Err(e) = StateStore::probe(&config) {
         log::error!("check: the state this config uses does not answer: {e:#}");

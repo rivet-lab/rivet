@@ -238,7 +238,7 @@ fn schema_from_mappings(mappings: Vec<TypeMapping>, overrides: &ColumnOverrides)
                     .as_ref()
                     .filter(|_| overrides.contains_key(&mapping.column_name))
                 {
-                    let built = build_column(&[], 0, &mapping.column_name, dt, None, None);
+                    let built = build_column(&[], 0, &mapping.column_name, dt, None, None, false);
                     if seeded!("override-without-builder-internal-stop", false, true) {
                         crate::source::refuse_unbuildable_override(
                             "oracle",
@@ -363,6 +363,31 @@ fn timestamp_datetime(t: &OracleTimestamp) -> Result<chrono::NaiveDateTime> {
     Ok(date.and_time(time))
 }
 
+/// True for a stored year-10000 value that is a real instant: 1 January before 16:00, where a zoned value up to 9999-12-31 23:59:59.999999 with a negative offset lands.
+fn is_instant_past_the_ceiling(t: &OracleTimestamp) -> bool {
+    t.year() == 10000 && t.month() == 1 && t.day() == 1 && t.hour() < 16
+}
+
+/// The coded refusal for a timestamp Oracle stored or computed a year past its 9999 ceiling, whatever type the column reports, and, for an LTZ column, before its 4712 BC floor; a real instant just past the ceiling is delivered.
+fn timestamp_within_range(t: &OracleTimestamp, name: &str, ltz: bool) -> Result<()> {
+    let outside = (t.year() > 9999 && !is_instant_past_the_ceiling(t)) || (ltz && t.year() < -4712);
+    if seeded!("oracle-ltz-year-past-ceiling-delivered", false, outside) {
+        crate::rivet_bail!(
+            crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+            "oracle: column {name} holds the value {t}, outside Oracle's own 4712 BC to 9999 \
+             range: Oracle stored or computed it a year past that end, which a TIMESTAMP WITH \
+             LOCAL TIME ZONE value written from a session whose zone is ahead of or behind UTC \
+             within its offset of a range end also produces (read directly, or through a CAST, a \
+             view or arithmetic over one), so the instant it stands for cannot be told apart \
+             (Oracle cannot print such a stored value either, ORA-01877). Nothing was written for \
+             it. Leave {name} out of the export (list the other columns in a `query:`), keep the \
+             value Oracle computes within 9999 in the `query:`, or rewrite a stored local-zone \
+             value from a UTC session"
+        )
+    }
+    Ok(())
+}
+
 /// Microseconds since the Unix epoch for an Oracle timestamp's fields, read as UTC.
 pub(super) fn timestamp_micros(t: &OracleTimestamp) -> Result<i64> {
     Ok(timestamp_datetime(t)?.and_utc().timestamp_micros())
@@ -373,12 +398,31 @@ fn timestamp_nanos(t: &OracleTimestamp, name: &str) -> Result<i64> {
     crate::types::timestamp_nanos_or_refuse(timestamp_datetime(t)?, "oracle", name)
 }
 
+/// Appends a RAW value that fills exactly `width` bytes, or refuses it by value code naming `name`.
+fn append_raw_of_width(
+    b: &mut FixedSizeBinaryBuilder,
+    v: &[u8],
+    width: i32,
+    name: &str,
+) -> Result<()> {
+    b.append_value(v).map_err(|_| {
+        crate::error::coded(
+            crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+            format!(
+                "oracle: column {name} holds a {}-byte value; a `uuid` override needs exactly \
+                 {width} bytes (RAW({width}))",
+                v.len()
+            ),
+        )
+    })
+}
+
 /// Days since the Unix epoch, or an error naming `name` when the value has a time of day.
 fn date_days(t: &OracleTimestamp, name: &str) -> Result<i32> {
     let dt = timestamp_datetime(t)?;
     if dt.time() != chrono::NaiveTime::MIN {
         crate::rivet_bail!(
-            crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH,
+            crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
             "oracle: column {name} = {t} has a time of day, which a `date` override would drop; \
          declare it `timestamp`, or select TRUNC({name}) in a `query:`"
         )
@@ -388,25 +432,10 @@ fn date_days(t: &OracleTimestamp, name: &str) -> Result<i32> {
 
 /// Oracle's own `SYYYY-MM-DD"T"HH24:MI:SS.FF` text of a timestamp: 6 fractional digits, 9 when finer.
 fn timestamp_text(t: &OracleTimestamp) -> String {
-    let y = t.year() as i32;
-    let year = if y < 0 {
-        format!("-{:04}", -y)
-    } else {
-        format!("{y:04}")
-    };
-    let ns = t.nanoseconds();
-    let frac = if ns.is_multiple_of(1_000) {
-        format!("{:06}", ns / 1_000)
-    } else {
-        format!("{ns:09}")
-    };
-    format!(
-        "{year}-{:02}-{:02}T{:02}:{:02}:{:02}.{frac}",
-        t.month(),
-        t.day(),
-        t.hour(),
-        t.minute(),
-        t.second()
+    crate::types::oracle_fields_text(
+        i32::from(t.year()),
+        [t.month(), t.day(), t.hour(), t.minute(), t.second()].map(u32::from),
+        t.nanoseconds(),
     )
 }
 
@@ -481,6 +510,60 @@ fn integer<T: std::str::FromStr>(column: &str, text: &str) -> Result<T> {
     })
 }
 
+/// The timestamp as fetched, or the coded refusal when it lies outside Oracle's own range.
+fn checked_timestamp(
+    t: Option<OracleTimestamp>,
+    name: &str,
+    ltz: bool,
+) -> Result<Option<OracleTimestamp>> {
+    if let Some(t) = &t {
+        timestamp_within_range(t, name, ltz)?;
+    }
+    Ok(t)
+}
+
+/// True when column `i` of the projection is a `TIMESTAMP WITH LOCAL TIME ZONE`.
+fn is_ltz(native: &[String], i: usize) -> bool {
+    native
+        .get(i)
+        .is_some_and(|n| n.starts_with("timestamp_ltz"))
+}
+
+/// The timestamp cell at `idx`; every column type that reads a timestamp goes through here.
+fn timestamp_cell(r: &Row, idx: usize, name: &str, ltz: bool) -> Result<Option<OracleTimestamp>> {
+    checked_timestamp(r.get::<Option<OracleTimestamp>>(idx).ora()?, name, ltz)
+}
+
+/// One microsecond timestamp column.
+fn timestamp_micros_column(
+    rows: &[Row],
+    idx: usize,
+    name: &str,
+    tz: Option<Arc<str>>,
+    ltz: bool,
+) -> Result<ArrayRef> {
+    let mut b = TimestampMicrosecondBuilder::with_capacity(rows.len());
+    for r in rows {
+        match timestamp_cell(r, idx, name, ltz)? {
+            Some(t) => b.append_value(timestamp_micros(&t)?),
+            None => b.append_null(),
+        }
+    }
+    Ok(Arc::new(b.finish().with_timezone_opt(tz)))
+}
+
+/// One Date32 column.
+fn date_column(rows: &[Row], idx: usize, name: &str, ltz: bool) -> Result<ArrayRef> {
+    let mut b = Date32Builder::with_capacity(rows.len());
+    for r in rows {
+        match timestamp_cell(r, idx, name, ltz)? {
+            Some(t) => b.append_value(date_days(&t, name)?),
+            None => b.append_null(),
+        }
+    }
+    Ok(Arc::new(b.finish()))
+}
+
 /// One Arrow column from the fetched rows, typed by `dt`.
 fn build_column(
     rows: &[Row],
@@ -489,6 +572,7 @@ fn build_column(
     dt: &DataType,
     max_value_bytes: Option<usize>,
     empty_flag: Option<usize>,
+    ltz: bool,
 ) -> Result<ArrayRef> {
     let number = |r: &Row| number_cell(r, idx, name);
     let kind = rows
@@ -564,19 +648,12 @@ fn build_column(
             Arc::new(b.finish())
         }
         DataType::Timestamp(ArrowTimeUnit::Microsecond, tz) => {
-            let mut b = TimestampMicrosecondBuilder::with_capacity(rows.len());
-            for r in rows {
-                match r.get::<Option<OracleTimestamp>>(idx).ora()? {
-                    Some(t) => b.append_value(timestamp_micros(&t)?),
-                    None => b.append_null(),
-                }
-            }
-            Arc::new(b.finish().with_timezone_opt(tz.clone()))
+            timestamp_micros_column(rows, idx, name, tz.clone(), ltz)?
         }
         DataType::Timestamp(ArrowTimeUnit::Nanosecond, tz) => {
             let mut b = TimestampNanosecondBuilder::with_capacity(rows.len());
             for r in rows {
-                match r.get::<Option<OracleTimestamp>>(idx).ora()? {
+                match timestamp_cell(r, idx, name, ltz)? {
                     Some(t) => match seeded!(
                         "mssql-ns-override-out-of-range-null",
                         timestamp_nanos(&t, name).ok(),
@@ -590,27 +667,12 @@ fn build_column(
             }
             Arc::new(b.finish().with_timezone_opt(tz.clone()))
         }
-        DataType::Date32 => {
-            let mut b = Date32Builder::with_capacity(rows.len());
-            for r in rows {
-                match r.get::<Option<OracleTimestamp>>(idx).ora()? {
-                    Some(t) => b.append_value(date_days(&t, name)?),
-                    None => b.append_null(),
-                }
-            }
-            Arc::new(b.finish())
-        }
+        DataType::Date32 => date_column(rows, idx, name, ltz)?,
         DataType::FixedSizeBinary(width) => {
             let mut b = FixedSizeBinaryBuilder::with_capacity(rows.len(), *width);
             for r in rows {
                 match r.get::<Option<Vec<u8>>>(idx).ora()? {
-                    Some(v) => b.append_value(&v).map_err(|_| {
-                        crate::error::coded(crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH, format!(
-                            "oracle: column {name} holds a {}-byte value; a `uuid` override needs \
-                             exactly {width} bytes (RAW({width}))",
-                            v.len()
-                        ))
-                    })?,
+                    Some(v) => append_raw_of_width(&mut b, &v, *width, name)?,
                     None => b.append_null(),
                 }
             }
@@ -636,10 +698,9 @@ fn build_column(
                 let v = match kind {
                     OraKind::Number => number(r)?,
                     OraKind::IntervalDs | OraKind::IntervalYm => interval_iso(r, idx, kind, name)?,
-                    OraKind::Date | OraKind::Timestamp => r
-                        .get::<Option<OracleTimestamp>>(idx)
-                        .ora()?
-                        .map(|t| timestamp_text(&t)),
+                    OraKind::Date | OraKind::Timestamp => {
+                        timestamp_cell(r, idx, name, ltz)?.map(|t| timestamp_text(&t))
+                    }
                     OraKind::BinaryFloat => r.get::<Option<f32>>(idx).ora()?.map(|v| v.to_string()),
                     OraKind::BinaryDouble => {
                         r.get::<Option<f64>>(idx).ora()?.map(|v| v.to_string())
@@ -675,6 +736,7 @@ pub(super) fn rows_to_batch(
     max_value_bytes: Option<usize>,
     empty_flags: &[Option<usize>],
     row_index: &[usize],
+    native: &[String],
 ) -> Result<RecordBatch> {
     let columns = schema
         .fields()
@@ -683,7 +745,16 @@ pub(super) fn rows_to_batch(
         .map(|(i, f)| {
             let flag = empty_flags.get(i).copied().flatten();
             let at = row_index.get(i).copied().unwrap_or(i);
-            build_column(rows, at, f.name(), f.data_type(), max_value_bytes, flag)
+            let ltz = is_ltz(native, i);
+            build_column(
+                rows,
+                at,
+                f.name(),
+                f.data_type(),
+                max_value_bytes,
+                flag,
+                ltz,
+            )
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(RecordBatch::try_new(Arc::clone(schema), columns)?)
@@ -1059,6 +1130,30 @@ mod tests {
     }
 
     #[test]
+    fn every_timestamp_cell_passes_the_range_check_and_only_an_ltz_column_is_checked_at_the_floor()
+    {
+        let shifted = OracleTimestamp::new_timestamp(10000, 12, 31, 0, 0, 0, 0);
+        let err = checked_timestamp(Some(shifted), "L", true).unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+        assert!(err.to_string().contains("column L"), "{err}");
+        let err = checked_timestamp(Some(shifted), "TZ", false).unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+        let day = OracleTimestamp::new_timestamp(9999, 12, 31, 23, 59, 59, 0);
+        assert_eq!(checked_timestamp(Some(day), "L", true).unwrap(), Some(day));
+        assert_eq!(checked_timestamp(None, "L", true).unwrap(), None);
+        let native: Vec<String> = [
+            "timestamp_ltz(6)",
+            "timestamp_tz(6)",
+            "timestamp(6)",
+            "number",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert!(is_ltz(&native, 0));
+        assert!([1, 2, 3, 9].iter().all(|i| !is_ltz(&native, *i)));
+    }
+
+    #[test]
     fn timestamp_text_is_oracles_signed_iso_rendering() {
         let t = OracleTimestamp::new_timestamp(2024, 2, 29, 13, 14, 15, 123_456_000);
         assert_eq!(timestamp_text(&t), "2024-02-29T13:14:15.123456");
@@ -1068,6 +1163,54 @@ mod tests {
         assert_eq!(timestamp_text(&bc), "-0001-06-15T00:00:00.000000");
         let one = OracleTimestamp::new_date(1, 1, 1);
         assert_eq!(timestamp_text(&one), "0001-01-01T00:00:00.000000");
+    }
+
+    #[test]
+    fn an_ltz_value_outside_the_4712_bc_to_9999_range_is_refused_by_code_and_a_zoned_one_is_delivered()
+     {
+        let ceiling = OracleTimestamp::new_timestamp(9999, 12, 31, 23, 59, 59, 999_999_999);
+        timestamp_within_range(&ceiling, "L", true).unwrap();
+        let shifted = OracleTimestamp::new_timestamp(10000, 12, 31, 23, 59, 59, 0);
+        let err = timestamp_within_range(&shifted, "L", true).unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+        let text = err.to_string();
+        assert!(
+            text.contains("column L holds the value ")
+                && text.contains("Oracle stored or computed it a year past that end")
+                && text.contains("or arithmetic over one")
+                && text.contains("ORA-01877")
+                && text.contains("keep the value Oracle computes within 9999 in the `query:`")
+                && !text.contains("it is a TIMESTAMP WITH LOCAL TIME ZONE value"),
+            "{text}"
+        );
+        for kind_is_ltz in [false, true] {
+            let err = timestamp_within_range(&shifted, "TZ", kind_is_ltz).unwrap_err();
+            crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+        }
+        let real = OracleTimestamp::new_timestamp(10000, 1, 1, 3, 0, 0, 0);
+        timestamp_within_range(&real, "L", true).unwrap();
+        timestamp_within_range(&real, "TZ", false).unwrap();
+        assert_eq!(timestamp_micros(&real).unwrap(), 253_402_311_600_000_000);
+        let last = OracleTimestamp::new_timestamp(10000, 1, 1, 15, 59, 59, 999_999_000);
+        timestamp_within_range(&last, "L", true).unwrap();
+        for stored in [
+            OracleTimestamp::new_timestamp(10000, 1, 1, 16, 0, 0, 0),
+            OracleTimestamp::new_timestamp(10000, 1, 2, 3, 0, 0, 0),
+            OracleTimestamp::new_timestamp(10000, 12, 31, 10, 0, 0, 0),
+            OracleTimestamp::new_timestamp(10001, 1, 1, 3, 0, 0, 0),
+        ] {
+            for kind_is_ltz in [false, true] {
+                let err = timestamp_within_range(&stored, "L", kind_is_ltz).unwrap_err();
+                crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+            }
+        }
+        let first = OracleTimestamp::new_timestamp(-4712, 1, 1, 0, 0, 0, 0);
+        timestamp_within_range(&first, "L", true).unwrap();
+        let before = OracleTimestamp::new_timestamp(-4713, 8, 3, 0, 0, 0, 0);
+        let err = timestamp_within_range(&before, "L", true).unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+        timestamp_within_range(&before, "TZ", false).unwrap();
+        assert_eq!(timestamp_micros(&shifted).unwrap(), 253_433_923_199_000_000);
     }
 
     #[test]
@@ -1081,6 +1224,11 @@ mod tests {
             -1
         );
         let noon = OracleTimestamp::new_timestamp(1970, 1, 2, 12, 0, 0, 0);
+        crate::error::assert_coded(
+            &date_days(&noon, "DT").unwrap_err(),
+            "RIVET_SOURCE_VALUE_UNREPRESENTABLE",
+            5,
+        );
         let err = date_days(&noon, "DT").unwrap_err().to_string();
         assert!(
             err.contains("column DT = ") && err.contains("time of day"),
@@ -1091,6 +1239,22 @@ mod tests {
             date_days(&ns, "DT").is_err(),
             "a nanosecond is a time of day"
         );
+    }
+
+    /// A RAW that is not exactly the uuid width is refused by value code naming the column and the length.
+    #[test]
+    fn a_raw_of_the_wrong_width_is_a_value_refusal_and_the_right_width_passes() {
+        let mut b = FixedSizeBinaryBuilder::new(16);
+        append_raw_of_width(&mut b, &[7; 16], 16, "U").unwrap();
+        for len in [0usize, 15, 17] {
+            let err = append_raw_of_width(&mut b, &vec![7; len], 16, "U").unwrap_err();
+            crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+            let msg = err.to_string();
+            assert!(
+                msg.contains("column U") && msg.contains(&format!("{len}-byte")),
+                "{msg}"
+            );
+        }
     }
 
     #[test]
@@ -1327,7 +1491,7 @@ mod override_builder_tests {
                 .arrow_type
                 .clone()
                 .expect("override has an Arrow type");
-            let probe = build_column(&[], 0, "c", &dt, None, None);
+            let probe = build_column(&[], 0, "c", &dt, None, None, false);
             let verdict = crate::source::refuse_unbuildable_override(
                 "oracle",
                 "c",
