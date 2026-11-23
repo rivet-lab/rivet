@@ -2580,35 +2580,8 @@ fn pg_cdc_bare_numeric_is_delivered_as_labelled_server_text() {
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
 fn pg_cdc_a_bare_numeric_keeps_its_display_scale_in_snapshot_and_stream() {
-    use arrow::array::{Array, Int64Array, StringArray};
     use postgres::NoTls;
-    let read = |dir: &std::path::Path| {
-        let b = read_one_batch(dir);
-        let ids = b
-            .column_by_name("id")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap()
-            .clone();
-        let ns = b
-            .column_by_name("n")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap()
-            .clone();
-        let mut got: Vec<(i64, Option<String>)> = (0..b.num_rows())
-            .map(|i| {
-                (
-                    ids.value(i),
-                    (!ns.is_null(i)).then(|| ns.value(i).to_string()),
-                )
-            })
-            .collect();
-        got.sort_by_key(|r| r.0);
-        got
-    };
+    let read = |dir: &std::path::Path| duckdb_dir_parquet_id_text(dir, "n");
     let d = tempfile::tempdir().unwrap();
     let tbl = unique_name("cdc_num_scale");
     let slot = unique_name("rivet_num_scale_slot");

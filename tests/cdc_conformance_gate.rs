@@ -910,7 +910,8 @@ fn oracle_class_census_is_pinned() {
 // read through `confirmed_flush_lsn`) and its way back.
 // 2026-11-15: +1 independent - the flat Mongo `_id` label of a CDC part, the delivered `_id` set counted by DuckDB.
 // 2026-11-18: +6 independent (#712) - the PostgreSQL column-grants cells read the slot back through `confirmed_flush_lsn`.
-const PIN_INDEPENDENT: usize = 126; // ratchet-pin: cdc-census-independent (review 2027-02-01) min
+// 2026-11-23: +1 independent - a bare PostgreSQL numeric's display scale in the snapshot and the stream leg, read by DuckDB against the server's n::text.
+const PIN_INDEPENDENT: usize = 127; // ratchet-pin: cdc-census-independent (review 2027-02-01) min
 // 2026-09-28, source connection ceilings: +3 shared codec — the run's captured row is the
 // fixture check; the oracle is the server's own connection counter.
 // 2026-09-29: +2 shared codec — the Oracle TRUNCATE refusal on re-run and the uncaptured-truncate cell.
