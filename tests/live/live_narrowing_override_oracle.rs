@@ -3,6 +3,9 @@
 use crate::common::*;
 use crate::live_narrowing_override::*;
 
+/// A time of day under a `date` override is a value the declared type cannot hold: refused by the value code.
+const VALUE_REFUSAL: Refused<'static> = Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+
 /// `id NUMBER(10) PK, ts9 TIMESTAMP(9), ts3 TIMESTAMP(3)`, one row.
 fn table() -> OracleTable {
     let t = OracleTable::create(

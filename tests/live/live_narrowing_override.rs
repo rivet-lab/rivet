@@ -91,10 +91,6 @@ pub fn check_verdict(rig: &Rig, want: Verdict, col: &str, ctx: &str) {
 pub const PAIR_REFUSAL: Refused<'static> =
     Refused::by_code("RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
 
-/// A value the declared type cannot hold is refused by the value code.
-pub const VALUE_REFUSAL: Refused<'static> =
-    Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
-
 /// Asserts `check` and `run` both refuse the declaration of `rig` as `want` (code and exit class).
 pub fn refused_on_check_and_run(rig: &Rig, want: Refused<'_>, ctx: &str) {
     let name = rig.export_name().to_string();
