@@ -342,6 +342,118 @@ fn chunked_export_enforces_on_schema_drift_fail_oracle() {
     chunked_export_enforces_on_schema_drift_fail(SqlEngine::Oracle);
 }
 
+/// The stored baseline of the rig's export, as the columns it names, read from the state the run used.
+fn stored_baseline_has(rig: &Rig, column: &str) -> bool {
+    rig.state_count(&format!(
+        "SELECT COUNT(*) FROM export_schema WHERE export_name = '{{export}}' \
+         AND columns_json LIKE '%\"{column}\"%'"
+    )) > 0
+}
+
+/// A run that drifted under `warn` and is then refused by the quality gate leaves the stored baseline as it found it, and the retry that passes the gate moves it.
+fn a_refused_run_leaves_the_stored_baseline_as_it_found_it(
+    e: SqlEngine,
+    mode: &str,
+    lines: &[&str],
+) {
+    e.alive();
+    let (table, _guard) = e.range_table("base_keep");
+    e.insert(&table, 1..=4, 10, Some(1));
+    let mut rig = e.staged(e.rig(&table), mode, lines).a_failed_run_may_leave(
+        &[Leftover::OrphanPart, Leftover::FileLog],
+        "the quality gate judges the parts after they are written",
+    );
+    rig.run_ok();
+    let added = e.col("added_col");
+    e.exec(&format!(
+        "ALTER TABLE {table} ADD {added} {} NULL",
+        e.int64()
+    ));
+    assert!(!stored_baseline_has(&rig, "added_col"));
+    rig.amend_export_lines(&["quality:", "  row_count_min: 1000"]);
+    let refused = rig.run_expect_fail();
+    assert!(
+        refused.contains("below minimum"),
+        "the run must be refused by the quality gate, got:\n{refused}"
+    );
+    assert!(
+        !stored_baseline_has(&rig, "added_col"),
+        "a run the quality gate refused must not store the schema it observed"
+    );
+    rig.replace_export_line("  row_count_min", "  row_count_min: 1");
+    rig.run_ok();
+    assert!(
+        stored_baseline_has(&rig, "added_col"),
+        "the run that ended clean stores the schema it observed"
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn a_refused_single_run_leaves_the_stored_baseline_as_it_found_it_pg() {
+    a_refused_run_leaves_the_stored_baseline_as_it_found_it(SqlEngine::Pg, "full", &[]);
+}
+
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn a_refused_chunked_run_leaves_the_stored_baseline_as_it_found_it_pg() {
+    a_refused_run_leaves_the_stored_baseline_as_it_found_it(
+        SqlEngine::Pg,
+        "chunked",
+        &["chunk_column: id", "chunk_size: 2"],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn a_refused_single_run_leaves_the_stored_baseline_as_it_found_it_mysql() {
+    a_refused_run_leaves_the_stored_baseline_as_it_found_it(SqlEngine::Mysql, "full", &[]);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn a_refused_chunked_run_leaves_the_stored_baseline_as_it_found_it_mysql() {
+    a_refused_run_leaves_the_stored_baseline_as_it_found_it(
+        SqlEngine::Mysql,
+        "chunked",
+        &["chunk_column: id", "chunk_size: 2"],
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn a_refused_single_run_leaves_the_stored_baseline_as_it_found_it_mssql() {
+    a_refused_run_leaves_the_stored_baseline_as_it_found_it(SqlEngine::Mssql, "full", &[]);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn a_refused_chunked_run_leaves_the_stored_baseline_as_it_found_it_mssql() {
+    a_refused_run_leaves_the_stored_baseline_as_it_found_it(
+        SqlEngine::Mssql,
+        "chunked",
+        &["chunk_column: id", "chunk_size: 2"],
+    );
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_refused_single_run_leaves_the_stored_baseline_as_it_found_it_oracle() {
+    a_refused_run_leaves_the_stored_baseline_as_it_found_it(SqlEngine::Oracle, "full", &[]);
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_refused_chunked_run_leaves_the_stored_baseline_as_it_found_it_oracle() {
+    a_refused_run_leaves_the_stored_baseline_as_it_found_it(
+        SqlEngine::Oracle,
+        "chunked",
+        &["chunk_column: id", "chunk_size: 2"],
+    );
+}
+
 #[test]
 #[ignore = "live: requires docker compose postgres"]
 fn stable_schema_across_runs_reports_no_drift() {

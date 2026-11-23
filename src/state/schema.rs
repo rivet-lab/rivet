@@ -53,6 +53,43 @@ impl SchemaChange {
     }
 }
 
+/// Baselines a run observed but has not stored: they reach `export_schema` only when the run ends clean.
+#[derive(Debug, Clone, Default)]
+pub struct PendingBaselines(std::collections::BTreeMap<String, Vec<SchemaColumn>>);
+
+impl PendingBaselines {
+    /// The baseline a check judges against: this run's pending one, else the stored one.
+    pub fn effective(&self, state: &StateStore, key: &str) -> Result<Option<Vec<SchemaColumn>>> {
+        match self.0.get(key) {
+            Some(cols) => Ok(Some(cols.clone())),
+            None => state.get_stored_schema(key),
+        }
+    }
+
+    /// The baseline in force, `None` when there is none or it cannot be read.
+    pub fn in_force(&self, state: &StateStore, key: &str) -> Option<Vec<SchemaColumn>> {
+        self.effective(state, key).ok().flatten()
+    }
+
+    /// Hold `columns` as the baseline of `key` until `commit`.
+    pub fn set(&mut self, key: &str, columns: Vec<SchemaColumn>) {
+        self.0.insert(key.to_string(), columns);
+    }
+
+    /// Store every held baseline, a failure logged and not raised, then forget them.
+    pub fn commit(&mut self, state: &StateStore) {
+        for (key, columns) in std::mem::take(&mut self.0) {
+            if let Err(e) = state.store_schema(&key, &columns) {
+                log::warn!("export '{key}': schema store update failed: {e:#}");
+            }
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// Schema history store — reads and writes `export_schema`.
 impl StateStore {
     pub fn get_stored_schema(&self, export_name: &str) -> Result<Option<Vec<SchemaColumn>>> {
@@ -108,52 +145,55 @@ impl StateStore {
             }
         };
 
-        let stored_map: std::collections::HashMap<&str, &str> = stored
-            .iter()
-            .map(|c| (c.name.as_str(), c.data_type.as_str()))
-            .collect();
-        let current_map: std::collections::HashMap<&str, &str> = current
-            .iter()
-            .map(|c| (c.name.as_str(), c.data_type.as_str()))
-            .collect();
-
-        let added: Vec<String> = current
-            .iter()
-            .filter(|c| !stored_map.contains_key(c.name.as_str()))
-            .map(|c| format!("{} ({})", c.name, c.data_type))
-            .collect();
-
-        let removed: Vec<String> = stored
-            .iter()
-            .filter(|c| !current_map.contains_key(c.name.as_str()))
-            .map(|c| c.name.clone())
-            .collect();
-
-        let type_changed: Vec<(String, String, String)> = current
-            .iter()
-            .filter_map(|c| {
-                stored_map.get(c.name.as_str()).and_then(|old_type| {
-                    if *old_type != c.data_type.as_str() {
-                        Some((c.name.clone(), old_type.to_string(), c.data_type.clone()))
-                    } else {
-                        None
-                    }
-                })
-            })
-            .collect();
-
-        let change = SchemaChange {
-            added,
-            removed,
-            type_changed,
-        };
-
-        if change.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(change))
-        }
+        Ok(schema_change_between(&stored, current))
     }
+}
+
+/// The structural difference between a stored baseline and the columns a run observed, `None` when they match.
+pub fn schema_change_between(
+    stored: &[SchemaColumn],
+    current: &[SchemaColumn],
+) -> Option<SchemaChange> {
+    let stored_map: std::collections::HashMap<&str, &str> = stored
+        .iter()
+        .map(|c| (c.name.as_str(), c.data_type.as_str()))
+        .collect();
+    let current_map: std::collections::HashMap<&str, &str> = current
+        .iter()
+        .map(|c| (c.name.as_str(), c.data_type.as_str()))
+        .collect();
+
+    let added: Vec<String> = current
+        .iter()
+        .filter(|c| !stored_map.contains_key(c.name.as_str()))
+        .map(|c| format!("{} ({})", c.name, c.data_type))
+        .collect();
+
+    let removed: Vec<String> = stored
+        .iter()
+        .filter(|c| !current_map.contains_key(c.name.as_str()))
+        .map(|c| c.name.clone())
+        .collect();
+
+    let type_changed: Vec<(String, String, String)> = current
+        .iter()
+        .filter_map(|c| {
+            stored_map.get(c.name.as_str()).and_then(|old_type| {
+                if *old_type != c.data_type.as_str() {
+                    Some((c.name.clone(), old_type.to_string(), c.data_type.clone()))
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+
+    let change = SchemaChange {
+        added,
+        removed,
+        type_changed,
+    };
+    (!change.is_empty()).then_some(change)
 }
 
 #[cfg(test)]

@@ -138,6 +138,7 @@ fn capture_open_forensics(
             }
             super::schema_drift::migrate_baseline(
                 state,
+                &mut summary.pending_baselines,
                 &summary.export_name,
                 &mappings,
                 super::schema_drift::AbsentColumns::Drift,
@@ -767,6 +768,7 @@ pub(crate) fn synthetic_failed_summary(export_name: &str, err: &anyhow::Error) -
         cursor_low: None,
         cursor_high: None,
         open_mappings: None,
+        pending_baselines: Default::default(),
         open_primary_key: None,
         open_finer_than_microsecond: Vec::new(),
         offending_value: None,
@@ -867,6 +869,46 @@ fn ran_ahead_warning(export_name: &str, run_id: &str) -> String {
 /// Whether the incremental cursor may advance: only a successful run whose manifest landed.
 fn cursor_may_advance(status: &str, manifest_gap: &Option<String>) -> bool {
     status == "success" && manifest_gap.is_none()
+}
+
+/// Advance the incremental cursor of a run that succeeded with its manifest; the stop a failed store raises, else Ok.
+fn settle_incremental_cursor(
+    state: &StateStore,
+    plan: &ResolvedRunPlan,
+    summary: &RunSummary,
+    manifest_gap: &Option<String>,
+    kind: &str,
+) -> crate::error::Result<()> {
+    if !cursor_may_advance(&summary.status, manifest_gap) {
+        if summary.cursor_high.is_some() {
+            log::error!(
+                "{kind} '{}': incremental cursor NOT advanced — the run did not succeed with a \
+                 manifest, so the next run must re-export this window rather than skip past it",
+                summary.export_name,
+            );
+        }
+        return Ok(());
+    }
+    let Err(e) = commit_incremental_cursor(state, plan, summary) else {
+        return Ok(());
+    };
+    let stop = cursor_not_stored(kind, &summary.export_name, &e);
+    if seeded!("unstored-cursor-exits-zero", false, true) {
+        return Err(stop);
+    }
+    log::error!("{stop:#}");
+    Ok(())
+}
+
+/// Store the schema baselines a run held, only when it ended Ok as a success or a skip.
+fn commit_baselines_of_a_clean_run(
+    state: &StateStore,
+    summary: &mut RunSummary,
+    result: &crate::error::Result<()>,
+) {
+    if result.is_ok() && matches!(summary.status.as_str(), "success" | "skipped") {
+        summary.pending_baselines.commit(state);
+    }
 }
 
 /// Release or keep the keyset resume anchor of the run that just ended; returns the warning to log.
@@ -1355,24 +1397,7 @@ fn execute_resolved_plan(
     if marker_outlived_its_run(finalized.left_alone, &ledger_run_id, &summary.run_id) {
         super::finalize::retire_running_marker(plan, &ledger_run_id);
     }
-    let mut cursor_gate: crate::error::Result<()> = Ok(());
-    if !cursor_may_advance(&summary.status, &manifest_gap) {
-        if summary.cursor_high.is_some() {
-            log::error!(
-                "{} '{}': incremental cursor NOT advanced — the run did not succeed with a \
-                 manifest, so the next run must re-export this window rather than skip past it",
-                tail.kind,
-                summary.export_name,
-            );
-        }
-    } else if let Err(e) = commit_incremental_cursor(state, plan, &summary) {
-        let stop = cursor_not_stored(tail.kind, &summary.export_name, &e);
-        if seeded!("unstored-cursor-exits-zero", false, true) {
-            cursor_gate = Err(stop);
-        } else {
-            log::error!("{stop:#}");
-        }
-    }
+    let cursor_gate = settle_incremental_cursor(state, plan, &summary, &manifest_gap, tail.kind);
     let outcome = RunOutcome {
         failed,
         data_complete,
@@ -1409,6 +1434,7 @@ fn execute_resolved_plan(
         cursor_gate,
     ];
     let final_result = resolve_final_result(failed, result, manifest_gap, gates);
+    commit_baselines_of_a_clean_run(state, &mut summary, &final_result);
     (final_result, summary)
 }
 
@@ -2584,6 +2610,34 @@ mod tests {
                 "`{terminal}` is a decided status and must not be overwritten"
             );
         }
+    }
+
+    /// The schema baseline a run held reaches the state only when the run ended Ok as a success or a skip.
+    #[test]
+    fn a_held_baseline_is_stored_only_by_a_run_that_ended_clean() {
+        use super::commit_baselines_of_a_clean_run;
+        let held = vec![crate::state::SchemaColumn {
+            name: "id".into(),
+            data_type: "Int64".into(),
+        }];
+        let outcome = |status: &str, ok: bool| {
+            let st = crate::state::StateStore::open_in_memory().unwrap();
+            let mut summary = RunSummary::stub_for_testing("run-1", "orders");
+            summary.status = status.into();
+            summary.pending_baselines.set("orders", held.clone());
+            let result: crate::error::Result<()> = if ok {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("refused"))
+            };
+            commit_baselines_of_a_clean_run(&st, &mut summary, &result);
+            st.get_stored_schema("orders").unwrap()
+        };
+        assert_eq!(outcome("success", true), Some(held.clone()));
+        assert_eq!(outcome("skipped", true), Some(held.clone()));
+        assert_eq!(outcome("success", false), None, "a refused final result");
+        assert_eq!(outcome("failed", true), None, "a failed status");
+        assert_eq!(outcome("interrupted", true), None);
     }
 
     #[test]

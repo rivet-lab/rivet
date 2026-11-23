@@ -22,7 +22,7 @@ const FAULT_ENVS: &[&str] = &["RIVET_TEST_PANIC_AT", "RIVET_TEST_ERROR_AT"];
 /// Product defects every failed run may show until the product is fixed: the kind and why (pinned by tests/offline/rig_oracle_ratchet.rs; the list only shrinks).
 pub(crate) const KNOWN_PRODUCT_DEFECTS: &[(Leftover, &str)] = &[(
     Leftover::ObservedSchema,
-    "known defect: a first run that fails stores the drift baseline (src/state/schema.rs `detect_schema_change`) in export_schema, which src/state/migrations.rs v18 documents as success-only",
+    "known defect: a first batch run that fails stores the drift baseline (src/pipeline/job.rs `capture_open_forensics`, `store_schema_if_absent`) in export_schema, which src/state/migrations.rs v18 documents as success-only",
 )];
 
 /// The kinds a failed run may leave with no declaration: its own record of the stop.
