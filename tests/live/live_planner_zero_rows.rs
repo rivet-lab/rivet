@@ -200,13 +200,13 @@ fn a_query_that_does_not_rename_the_chunk_column_delivers_its_rows_postgres() {
 /// The SQL literal of the key of row `g`.
 type KeyLiteral = fn(i64) -> String;
 
-/// A parallel keyset rig over `table`, keyed on `id`, 500 rows a page.
+/// A parallel keyset rig over `table`, keyed on `id`, 50 rows a page.
 fn parallel_keyset_rig(engine: SqlEngine, table: &str) -> Rig {
     engine
         .rig(table)
         .mode("chunked")
         .export_line(&format!("chunk_by_key: {}", spelled(engine, "id")))
-        .export_line("chunk_size: 500")
+        .export_line("chunk_size: 50")
         .export_line("parallel: 2")
 }
 
