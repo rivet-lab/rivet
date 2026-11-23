@@ -2389,19 +2389,27 @@ fn an_ltz_value_stored_outside_the_range_is_refused_by_code_through_a_cast_or_a_
     }
 }
 
-/// A value Oracle computes past 9999 from a real year-10000 instant is refused by code with a message that names no local-zone cause, and the query that stays in range delivers.
+/// A value Oracle computes past 9999 from a real year-10000 instant is refused by code with a message that names no local-zone cause, and a query that keeps the computed value within 9999 delivers it.
 #[test]
 #[ignore = "live: requires docker compose oracle"]
 fn a_value_oracle_computes_past_9999_is_refused_by_code_and_a_query_inside_9999_delivers() {
     require_alive(LiveService::Oracle);
     let t = OracleTable::create(
         "ora_ltzk",
-        "id NUMBER(10) PRIMARY KEY, z TIMESTAMP(6) WITH TIME ZONE",
+        "id NUMBER(10) PRIMARY KEY, z TIMESTAMP(6) WITH TIME ZONE, d DATE, ts TIMESTAMP(6)",
     );
     ora_exec(&format!(
-        "INSERT INTO {} VALUES (1, TIMESTAMP '9999-12-31 22:00:00 -05:00')",
+        "INSERT INTO {} (id, z) VALUES (1, TIMESTAMP '9999-12-31 22:00:00 -05:00')",
         t.name()
     ));
+    ora_exec(&format!(
+        "UPDATE {} SET d = ADD_MONTHS(CAST(SYS_EXTRACT_UTC(z) AS DATE), 1), ts = CAST(SYS_EXTRACT_UTC(z) + INTERVAL '13' HOUR AS TIMESTAMP(6))",
+        t.name()
+    ));
+    assert_refused(
+        &Rig::oracle_batch(t.name()).run(),
+        Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5),
+    );
     let query = format!(
         "SELECT id, ADD_MONTHS(CAST(SYS_EXTRACT_UTC(z) AS DATE), 1) z FROM {}",
         t.name()
@@ -2423,6 +2431,20 @@ fn a_value_oracle_computes_past_9999_is_refused_by_code_and_a_query_inside_9999_
     Rig::oracle_batch(t.name())
         .query(&format!("SELECT id FROM {}", t.name()))
         .run_ok();
+    let out = tempfile::tempdir().unwrap();
+    Rig::oracle_batch(t.name())
+        .query(&format!(
+            "SELECT id, LEAST(ADD_MONTHS(CAST(SYS_EXTRACT_UTC(z) AS DATE), 1), DATE '9999-12-31') z FROM {}",
+            t.name()
+        ))
+        .dest_path(out.path().to_path_buf())
+        .run_ok();
+    let z = parquet_cells(out.path(), "Z");
+    assert_eq!(
+        z[&1].as_deref().map(canon_ts).as_deref(),
+        Some("9999-12-31T00:00:00"),
+        "the remedy delivers 253402214400000000 microseconds: {z:?}"
+    );
 }
 
 /// An LTZ value Oracle stored outside its 4712 BC to 9999 range is refused by code before any part is written, and the remedy the text names delivers the other columns.
