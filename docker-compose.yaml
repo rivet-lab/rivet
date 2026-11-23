@@ -217,7 +217,7 @@ services:
       test: ["CMD", "healthcheck.sh"]
       interval: 10s
       timeout: 5s
-      retries: 30
+      retries: 60
 
   # A second Oracle Free whose LATIN1PDB has the WE8ISO8859P1 character set, for the
   # non-Unicode character-type tests. Its own container: a PDB of another character set in
@@ -746,7 +746,7 @@ services:
       # Wait for the client-facing 6033 port to accept connections.  ProxySQL's
       # admin port (6032) comes up first; using 6033 ensures backend wiring is
       # in place before tests dial in.
-      test: ["CMD-SHELL", "(echo > /dev/tcp/127.0.0.1/6033) >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "bash -c '(echo > /dev/tcp/127.0.0.1/6033)' || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 20

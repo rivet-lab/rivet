@@ -14,7 +14,6 @@ fn of(t: &Type) -> TypeMapping {
             &SourceColumn::simple("c", t.name(), true),
             pg_type_to_rivet(t),
         ),
-        t,
         false,
     )
 }
@@ -88,7 +87,7 @@ fn table() -> Vec<Case> {
         case(
             "numeric (no catalog hint)",
             of(&Type::NUMERIC),
-            "unsupported(numeric) | - | unsupported | unsupported | reads string,json,unsupported(x)",
+            "unsupported(numeric) | Utf8 | text:server_text | logical_string | reads string,json,unsupported(x)",
         ),
         case(
             "date",
@@ -353,82 +352,82 @@ fn table() -> Vec<Case> {
         case(
             "bool[]",
             of(&Type::BOOL_ARRAY),
-            "list<bool> | List(Boolean) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ,PG_NULL_LIST_EMPTY_CH",
+            "list<bool> | List(Boolean) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ",
         ),
         case(
             "int2[]",
             of(&Type::INT2_ARRAY),
-            "list<int16> | List(Int16) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ,PG_NULL_LIST_EMPTY_CH",
+            "list<int16> | List(Int16) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ",
         ),
         case(
             "int4[]",
             of(&Type::INT4_ARRAY),
-            "list<int32> | List(Int32) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ,PG_NULL_LIST_EMPTY_CH",
+            "list<int32> | List(Int32) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ",
         ),
         case(
             "int8[]",
             of(&Type::INT8_ARRAY),
-            "list<int64> | List(Int64) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ,PG_NULL_LIST_EMPTY_CH",
+            "list<int64> | List(Int64) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ",
         ),
         case(
             "float4[]",
             of(&Type::FLOAT4_ARRAY),
-            "list<float32> | List(Float32) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ,PG_NULL_LIST_EMPTY_CH",
+            "list<float32> | List(Float32) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ",
         ),
         case(
             "float8[]",
             of(&Type::FLOAT8_ARRAY),
-            "list<float64> | List(Float64) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ,PG_NULL_LIST_EMPTY_CH",
+            "list<float64> | List(Float64) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ",
         ),
         case(
             "text[]",
             of(&Type::TEXT_ARRAY),
-            "list<string> | List(Utf8) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ,PG_NULL_LIST_EMPTY_CH",
+            "list<string> | List(Utf8) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ",
         ),
         case(
             "varchar[]",
             of(&Type::VARCHAR_ARRAY),
-            "list<string> | List(Utf8) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ,PG_NULL_LIST_EMPTY_CH",
+            "list<string> | List(Utf8) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ",
         ),
         case(
             "bpchar[]",
             of(&Type::BPCHAR_ARRAY),
-            "list<string> | List(Utf8) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ,PG_NULL_LIST_EMPTY_CH",
+            "list<string> | List(Utf8) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ",
         ),
         case(
             "date[]",
             of(&Type::DATE_ARRAY),
-            "list<date> | List(Date32) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ,PG_NULL_LIST_EMPTY_CH",
+            "list<date> | List(Date32) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ",
         ),
         case(
             "time[]",
             of(&Type::TIME_ARRAY),
-            "list<time(microsecond)> | List(Time64(µs)) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ,PG_NULL_LIST_EMPTY_CH",
+            "list<time(microsecond)> | List(Time64(µs)) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ",
         ),
         case(
             "timestamp[]",
             of(&Type::TIMESTAMP_ARRAY),
-            "list<timestamp(microsecond)> | List(Timestamp(µs)) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ,PG_NULL_LIST_EMPTY_CH",
+            "list<timestamp(microsecond)> | List(Timestamp(µs)) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ",
         ),
         case(
             "timestamptz[]",
             of(&Type::TIMESTAMPTZ_ARRAY),
-            "list<timestamp_tz(microsecond,UTC)> | List(Timestamp(µs, \"UTC\")) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ,PG_NULL_LIST_EMPTY_CH",
+            "list<timestamp_tz(microsecond,UTC)> | List(Timestamp(µs, \"UTC\")) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ",
         ),
         case(
             "uuid[]",
             of(&Type::UUID_ARRAY),
-            "list<uuid> | List(FixedSizeBinary(16), metadata: {\"ARROW:extension:name\": \"arrow.uuid\"}) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ,PG_NULL_LIST_EMPTY_CH",
+            "list<uuid> | List(FixedSizeBinary(16), metadata: {\"ARROW:extension:name\": \"arrow.uuid\"}) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ",
         ),
         case(
             "bytea[]",
             of(&Type::BYTEA_ARRAY),
-            "list<binary> | List(Binary) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ,PG_NULL_LIST_EMPTY_CH",
+            "list<binary> | List(Binary) | native | compatible | reads list<int32> # red:PG_NULL_LIST_EMPTY_BQ",
         ),
         case(
             "numeric[]",
             of(&Type::NUMERIC_ARRAY),
-            "list<unsupported(numeric)> | - | unsupported | unsupported | reads list<int32>",
+            "list<unsupported(numeric)> | Utf8 | text:server_text | logical_string | reads list<int32>",
         ),
         case(
             "json[]",

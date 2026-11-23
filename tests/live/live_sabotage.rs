@@ -1608,13 +1608,28 @@ fn killed_then_source_grows(engine: SqlEngine, shape: Shape, point: &str, argv: 
     recovers_to_the_source_as_it_is(&rig, argv, LIVE_ROWS + 3);
 }
 
-/// [`killed_then_source_grows`] for a parallel keyset run whose committed ranges recorded no highest key, as a state written before `keyset_range.max_key` holds them.
+/// A parallel keyset run crashed as its last range committed, then three more source rows; `RERUN` continues it.
+fn killed_at_the_last_range_then_source_grows(engine: SqlEngine) {
+    let (table, rig, _guard) = shaped(engine, "sab_grows", Shape::KeysetCheckpointParallel);
+    rig.crash_as_the_last_keyset_range_commits();
+    engine.insert(&table, LIVE_ROWS + 1..=LIVE_ROWS + 3, 170, Some(10));
+    recovers_to_the_source_as_it_is(&rig, RERUN, LIVE_ROWS + 3);
+}
+
+/// [`killed_at_the_last_range_then_source_grows`] whose committed ranges recorded no highest key, as a state written before `keyset_range.max_key` holds them.
 fn killed_with_no_recorded_top_then_source_grows(engine: SqlEngine) {
     let (table, rig, _guard) = shaped(engine, "sab_top", Shape::KeysetCheckpointParallel);
-    crashed_at(&rig, "keyset_parallel_range_committed:1");
+    rig.crash_as_the_last_keyset_range_commits();
+    let recorded = rig.state_count(
+        "SELECT COUNT(*) FROM keyset_range WHERE export_name = '{export}' AND max_key IS NOT NULL",
+    );
+    assert!(
+        recorded > 0,
+        "fixture: no committed range recorded a highest key, so there is none to forget"
+    );
     rig.edit_state(
-        "UPDATE keyset_range SET max_key = NULL WHERE export_name = '{export}'",
-        2,
+        "UPDATE keyset_range SET max_key = NULL WHERE export_name = '{export}' AND max_key IS NOT NULL",
+        recorded as u64,
     );
     engine.insert(&table, LIVE_ROWS + 1..=LIVE_ROWS + 3, 170, Some(10));
     recovers_to_the_source_as_it_is(&rig, RERUN, LIVE_ROWS + 3);
@@ -5243,46 +5258,26 @@ fn a_keyset_checkpoint_run_killed_before_the_source_grows_delivers_the_source_or
 #[test]
 #[ignore = "live: requires docker compose postgres"]
 fn a_keyset_checkpoint_parallel_run_killed_before_the_source_grows_delivers_the_source_postgres() {
-    killed_then_source_grows(
-        SqlEngine::Pg,
-        Shape::KeysetCheckpointParallel,
-        "keyset_parallel_range_committed:1",
-        RERUN,
-    );
+    killed_at_the_last_range_then_source_grows(SqlEngine::Pg);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mysql"]
 fn a_keyset_checkpoint_parallel_run_killed_before_the_source_grows_delivers_the_source_mysql() {
-    killed_then_source_grows(
-        SqlEngine::Mysql,
-        Shape::KeysetCheckpointParallel,
-        "keyset_parallel_range_committed:1",
-        RERUN,
-    );
+    killed_at_the_last_range_then_source_grows(SqlEngine::Mysql);
 }
 
 #[test]
 #[ignore = "live: requires docker compose mssql"]
 fn a_keyset_checkpoint_parallel_run_killed_before_the_source_grows_delivers_the_source_mssql() {
-    killed_then_source_grows(
-        SqlEngine::Mssql,
-        Shape::KeysetCheckpointParallel,
-        "keyset_parallel_range_committed:1",
-        RERUN,
-    );
+    killed_at_the_last_range_then_source_grows(SqlEngine::Mssql);
 }
 
 #[cfg(feature = "oracle")]
 #[test]
 #[ignore = "live: requires docker compose oracle"]
 fn a_keyset_checkpoint_parallel_run_killed_before_the_source_grows_delivers_the_source_oracle() {
-    killed_then_source_grows(
-        SqlEngine::Oracle,
-        Shape::KeysetCheckpointParallel,
-        "keyset_parallel_range_committed:1",
-        RERUN,
-    );
+    killed_at_the_last_range_then_source_grows(SqlEngine::Oracle);
 }
 
 #[test]

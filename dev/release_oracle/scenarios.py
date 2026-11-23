@@ -912,6 +912,8 @@ def _export_local(
     mode: str,
     fmt: str = "parquet",
     parallel: int | None = None,
+    chunk_size: int = 50000,
+    log: bool = False,
 ) -> Proc:
     """Export one table to a LOCAL dir. mode: chunked|full, fmt: parquet|csv.
 
@@ -937,7 +939,7 @@ def _export_local(
         mode = "full"  # Mongo keyset is `source.mongo.page_size` (+ `parallel`), not chunk_by_key — see mongo_keyset.py
     key_block = "    mode: full"
     if mode == "chunked":
-        key_block = f"    mode: chunked\n    chunk_by_key: {key_column(engine)}\n    chunk_size: 50000"
+        key_block = f"    mode: chunked\n    chunk_by_key: {key_column(engine)}\n    chunk_size: {chunk_size}"
         # parallel: N fans keyset out into N row-percentile ranges.
         if parallel:
             key_block += f"\n    parallel: {parallel}"
@@ -953,7 +955,8 @@ def _export_local(
         f"    format: {fmt}\n"
         f"    destination: {{type: local, path: {dest_dir}/}}\n"
     )
-    return rivet("run", "-c", str(yaml_path), env={"ORACLE_URL": url}, timeout=NO_TIMEOUT)
+    env = {"ORACLE_URL": url, **({"RUST_LOG": "info"} if log else {})}
+    return rivet("run", "-c", str(yaml_path), env=env, timeout=NO_TIMEOUT)
 
 
 # ── verdicts: init+check → {table: {strategy, verdict}} == GOLDEN ────────────
@@ -1362,6 +1365,10 @@ def run_scenarios(led: Ledger, engine: str, tag: str, url: str) -> None:
         return
     with led.span(f"{engine}: keyset_parallel"):
         sc_keyset_parallel(led, engine, tag, url)
+    from .keyset_skew import sc_keyset_skew
+
+    with led.span(f"{engine}: keyset_skew"):
+        sc_keyset_skew(led, engine, tag, url)
     if engine == "mongo":
         from . import mongo_keyset
 

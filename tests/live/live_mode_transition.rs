@@ -674,8 +674,7 @@ fn resumed_parallel_keyset_then_incremental(e: SqlEngine) {
         ],
     );
     let rig = staged_for(e, e.rig(&table), &parallel, dest.path());
-    let crash = rig.run_with_env("RIVET_TEST_PANIC_AT", "keyset_parallel_range_committed:3");
-    assert!(!crash.status.success(), "the injected crash must stop it");
+    rig.crash_as_the_last_keyset_range_commits();
     rig.run_ok();
     assert_eq!(
         delivered_ids(e, dest.added().path()).len(),

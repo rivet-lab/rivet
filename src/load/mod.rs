@@ -12,6 +12,7 @@ mod clickhouse;
 pub mod compact;
 pub(crate) mod ledger;
 pub mod orchestrate;
+pub(crate) mod part_lists;
 pub(crate) mod part_pos;
 pub(crate) mod partition_budget;
 mod pin;

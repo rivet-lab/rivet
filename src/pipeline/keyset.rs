@@ -19,7 +19,7 @@
 //! key in `last_cursor_value` (its `cursor_extract_column` resolves to the
 //! keyset key), which the loop reads to advance to the next page.
 
-use super::{RunSummary, sink::ExportSink};
+use super::{RunSummary, key_space::Axis, sink::ExportSink};
 use crate::config::IncrementalCursorMode;
 use crate::destination;
 use crate::error::Result;
@@ -228,6 +228,16 @@ fn first_row_clause(st: crate::config::SourceType) -> &'static str {
     }
 }
 
+/// "The first `n` rows" clause (after the `ORDER BY`), per dialect.
+fn first_rows_clause(st: crate::config::SourceType, n: i64) -> String {
+    use crate::config::SourceType::*;
+    match st {
+        Postgres | Mysql => format!("LIMIT {n}"),
+        Mssql | Oracle => format!("OFFSET 0 ROWS FETCH NEXT {n} ROWS ONLY"),
+        Mongo => unreachable!("parallel keyset sampling is a SQL path; Mongo uses $sample"),
+    }
+}
+
 /// The 0-indexed ROW offset of the i-th of `parts` percentile boundaries over `total` rows (i in 1..parts).
 fn percentile_offset(total: i64, i: usize, parts: usize) -> i64 {
     total * i as i64 / parts as i64
@@ -305,7 +315,7 @@ fn percentile_boundaries(
     Ok(bounds)
 }
 
-/// Below this many rows by the catalog's estimate a parallel keyset run samples exact row percentiles; above it, or with no estimate, it seeks key-space cuts.
+/// Below this many rows by the catalog's estimate a key with no axis (a string, a SQL Server uniqueidentifier) samples exact row percentiles; above it, or with no estimate, it seeks.
 const ROW_PERCENTILE_ROWS: i64 = 10_000_000;
 
 /// Key-space ranges per worker for an integer key, so a dense stretch of keys is spread over more than one range.
@@ -327,7 +337,7 @@ const DENSITY_RATIO: f64 = 8.0;
 const BALANCE_FACTOR: f64 = 2.0;
 
 /// Most recut rounds one parallel run spends before it keeps the cuts it has.
-const RECUT_ROUNDS: usize = 4;
+const RECUT_ROUNDS: usize = 8;
 
 /// One integer key range (start, end] and its probed density in rows per key.
 #[derive(Clone, Copy)]
@@ -344,9 +354,40 @@ impl Span {
     }
 }
 
+/// The span cut where its density changes: the right half is probed, and the halves are split again while it differs from the left by more than [`DENSITY_RATIO`], so a dense stretch before an empty one is not spread across it.
+fn refine_span(
+    src: &mut dyn Source,
+    plan: &ResolvedRunPlan,
+    key: (&str, Axis),
+    fence: &[String],
+    span: Span,
+    out: &mut Vec<Span>,
+) -> Result<()> {
+    let mid = span.start + (span.end - span.start) / 2;
+    if mid <= span.start || span.rows() < PROBE_ROWS as f64 {
+        out.push(span);
+        return Ok(());
+    }
+    let right = probe_density(src, plan, key, fence, mid, span.end)?;
+    let (hi, lo) = (right.max(span.density), right.min(span.density));
+    if hi / lo <= seeded!("keyset-refine-span-never-splits", f64::MAX, DENSITY_RATIO) {
+        out.push(span);
+        return Ok(());
+    }
+    let left = Span { end: mid, ..span };
+    let right = Span {
+        start: mid,
+        density: right,
+        ..span
+    };
+    refine_span(src, plan, key, fence, left, out)?;
+    refine_span(src, plan, key, fence, right, out)
+}
+
 /// How the density check left the parallel key-space cuts.
 enum Recut {
     Even,
+    Held { ratio: f64 },
     Rounds(usize),
     Unbalanced { rounds: usize, ratio: f64 },
 }
@@ -378,7 +419,7 @@ fn catalog_rows(src: &mut dyn Source, plan: &ResolvedRunPlan) -> Option<i64> {
         .filter(|n| *n > 0)
 }
 
-/// Up to N−1 range boundaries of the keyset key: row percentiles under [`ROW_PERCENTILE_ROWS`] catalog rows, else key-space cuts (`int_parts` for an integer key) snapped to existing keys by index seeks.
+/// Up to N−1 range boundaries of the keyset key: key-space cuts (`int_parts` for an integer key) snapped to existing keys by index seeks and recut by density; a key with no axis under [`ROW_PERCENTILE_ROWS`] catalog rows samples row percentiles.
 pub(crate) fn sample_key_boundaries(
     src: &mut dyn Source,
     plan: &ResolvedRunPlan,
@@ -388,13 +429,6 @@ pub(crate) fn sample_key_boundaries(
     floor: Option<&str>,
     ceil: Option<&str>,
 ) -> Result<Vec<String>> {
-    if catalog_rows(src, plan).is_some_and(|n| n < ROW_PERCENTILE_ROWS) {
-        log::info!(
-            "export '{}': parallel keyset path: percentile (catalog estimate under {ROW_PERCENTILE_ROWS} rows)",
-            plan.export_name
-        );
-        return percentile_boundaries(src, plan, key, parts, floor, ceil);
-    }
     let st = plan.source.source_type;
     let base = &plan.base_query;
     let k = crate::sql::quote_ident(st, key);
@@ -421,8 +455,16 @@ pub(crate) fn sample_key_boundaries(
         ()
     );
     let mut bounds: Vec<String> = Vec::with_capacity(parts.saturating_sub(1));
-    let ends = match seek_bounds(src, plan, &k, &fence, (parts, int_parts), &mut bounds) {
-        Ok(ends) => ends,
+    let outcome = seek_bounds(src, plan, &k, &fence, (parts, int_parts), &mut bounds);
+    let ends = match outcome {
+        Ok(SeekOutcome::Ends(ends)) => ends,
+        Ok(SeekOutcome::Percentile) => {
+            log::info!(
+                "export '{}': parallel keyset path: percentile (key has no axis, catalog estimate under {ROW_PERCENTILE_ROWS} rows)",
+                plan.export_name
+            );
+            return percentile_boundaries(src, plan, key, parts, floor, ceil);
+        }
         Err(e) => {
             log::warn!(
                 "export '{}': parallel keyset cannot seek the key to a split point ({e:#}); \
@@ -435,9 +477,17 @@ pub(crate) fn sample_key_boundaries(
             return Ok(bounds);
         }
     };
-    let Some((lo, hi)) =
-        ends.and_then(|(a, b)| Some((a.parse::<i128>().ok()?, b.parse::<i128>().ok()?)))
-    else {
+    let Some((axis, lo, hi)) = ends.and_then(|(a, b)| {
+        let axis = Axis::of(&a, st)?;
+        if seeded!(
+            "keyset-uuid-not-recut",
+            matches!(axis, Axis::Uuid { .. }),
+            false
+        ) {
+            return None;
+        }
+        Some((axis, axis.ord(&a)?, axis.ord(&b)?))
+    }) else {
         log::info!(
             "export '{}': parallel keyset path: seek (no integer key range to balance)",
             plan.export_name
@@ -445,10 +495,17 @@ pub(crate) fn sample_key_boundaries(
         return Ok(bounds);
     };
     let seek_cut = bounds.clone();
-    match balance_by_density(src, plan, &k, &fence, (lo, hi), bounds) {
+    match balance_by_density(src, plan, (&k, axis), &fence, (lo, hi), bounds) {
         Ok((bounds, Recut::Even)) => {
             log::info!(
                 "export '{}': parallel keyset path: seek (key-space cuts, densities within {DENSITY_RATIO}x)",
+                plan.export_name
+            );
+            Ok(bounds)
+        }
+        Ok((bounds, Recut::Held { ratio })) => {
+            log::info!(
+                "export '{}': parallel keyset path: seek (key-space cuts; probed densities differ over {DENSITY_RATIO}x, estimated heaviest range {ratio:.1}x the mean)",
                 plan.export_name
             );
             Ok(bounds)
@@ -463,7 +520,7 @@ pub(crate) fn sample_key_boundaries(
         }
         Ok((bounds, Recut::Unbalanced { rounds, ratio })) => {
             log::warn!(
-                "export '{}': parallel keyset path: seek+recut ({rounds} round(s), not balanced: heaviest range {ratio:.1}x the mean); data is complete, with uneven workers.",
+                "export '{}': parallel keyset path: seek+recut ({rounds} round(s), not balanced: estimated heaviest range {ratio:.1}x the mean); data is complete, with uneven workers.",
                 plan.export_name
             );
             Ok(bounds)
@@ -478,44 +535,94 @@ pub(crate) fn sample_key_boundaries(
     }
 }
 
-/// Rows per key just above `start` up to `end`, from the key one seek lands on after skipping [`PROBE_ROWS`] rows.
-fn probe_density(
-    src: &mut dyn Source,
+/// The ordered key select over the window past `start` up to `end`, before its row clause.
+fn window_select(
     plan: &ResolvedRunPlan,
-    k: &str,
+    (k, axis): (&str, Axis),
     fence: &[String],
-    start: i128,
-    end: i128,
-) -> Result<f64> {
+    (start, end): (i128, i128),
+) -> String {
     let st = plan.source.source_type;
     let of = crate::source::query::KeyOf {
         base: &plan.base_query,
         expr: k,
     };
+    let (past, past_at) = axis.after(start);
+    let (upto, upto_at) = axis.upto(end);
     let mut preds = fence.to_vec();
     preds.push(format!(
-        "{k} > {}",
-        crate::source::query::inline_literal(st, &start.to_string(), of)
+        "{k} {past} {}",
+        crate::source::query::inline_literal(st, &past_at, of)
     ));
     preds.push(format!(
-        "{k} <= {}",
-        crate::source::query::inline_literal(st, &end.to_string(), of)
+        "{k} {upto} {}",
+        crate::source::query::inline_literal(st, &upto_at, of)
     ));
     preds.push(format!("{k} IS NOT NULL"));
-    let landed = sampler_scalar(
+    format!(
+        "SELECT {k} FROM ({}) {} WHERE {} ORDER BY {k}",
+        plan.base_query,
+        crate::sql::derived(st, "_rivet_pk"),
+        preds.join(" AND ")
+    )
+}
+
+/// The key at row `offset` of the window past `start` up to `end`, by one index seek.
+fn probe_at(
+    src: &mut dyn Source,
+    plan: &ResolvedRunPlan,
+    key: (&str, Axis),
+    fence: &[String],
+    window: (i128, i128),
+    offset: i64,
+) -> Result<Option<String>> {
+    let st = plan.source.source_type;
+    sampler_scalar(
         src,
         plan,
         &format!(
-            "SELECT {k} FROM ({}) {} WHERE {} ORDER BY {k} {}",
-            plan.base_query,
-            crate::sql::derived(st, "_rivet_pk"),
-            preds.join(" AND "),
-            nth_row_clause(st, PROBE_ROWS)
+            "{} {}",
+            window_select(plan, key, fence, window),
+            nth_row_clause(st, offset)
         ),
-    )?;
-    Ok(match landed.and_then(|v| v.parse::<i128>().ok()) {
+    )
+}
+
+/// The rows of the window past `start` up to `end`, counted over at most [`PROBE_ROWS`] index entries.
+fn window_rows(
+    src: &mut dyn Source,
+    plan: &ResolvedRunPlan,
+    key: (&str, Axis),
+    fence: &[String],
+    window: (i128, i128),
+) -> Result<i64> {
+    let st = plan.source.source_type;
+    let sql = format!(
+        "SELECT COUNT(*) FROM ({} {}) {}",
+        window_select(plan, key, fence, window),
+        first_rows_clause(st, PROBE_ROWS),
+        crate::sql::derived(st, "_rivet_n")
+    );
+    Ok(sampler_scalar(src, plan, &sql)?
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0))
+}
+
+/// Rows per key just above `start` up to `end`, from the key one seek lands on after skipping [`PROBE_ROWS`] rows, or from the exact count of the fewer rows the window holds.
+fn probe_density(
+    src: &mut dyn Source,
+    plan: &ResolvedRunPlan,
+    key: (&str, Axis),
+    fence: &[String],
+    start: i128,
+    end: i128,
+) -> Result<f64> {
+    let landed = probe_at(src, plan, key, fence, (start, end), PROBE_ROWS)?;
+    Ok(match landed.and_then(|v| key.1.ord(&v)) {
         Some(at) => PROBE_ROWS as f64 / (at - start).max(1) as f64,
-        None => PROBE_ROWS as f64 / (end - start).max(1) as f64,
+        None => {
+            window_rows(src, plan, key, fence, (start, end))? as f64 / (end - start).max(1) as f64
+        }
     })
 }
 
@@ -558,7 +665,7 @@ fn equal_row_cuts(spans: &[Span], parts: usize) -> Vec<i128> {
 fn snap_key(
     src: &mut dyn Source,
     plan: &ResolvedRunPlan,
-    k: &str,
+    (k, axis): (&str, Axis),
     fence: &[String],
     start: i128,
     mid: i128,
@@ -568,90 +675,175 @@ fn snap_key(
         base: &plan.base_query,
         expr: k,
     };
+    let (past, past_at) = axis.after(start);
     let mut preds = fence.to_vec();
     preds.push(format!(
-        "{k} > {}",
-        crate::source::query::inline_literal(st, &start.to_string(), of)
+        "{k} {past} {}",
+        crate::source::query::inline_literal(st, &past_at, of)
     ));
     preds.push(format!(
         "{k} >= {}",
-        crate::source::query::inline_literal(st, &mid.to_string(), of)
+        crate::source::query::inline_literal(st, &axis.show(mid), of)
     ));
-    Ok(seek_key(src, plan, k, &preds, false)?.and_then(|v| v.parse().ok()))
+    Ok(seek_key(src, plan, k, &preds, false)?.and_then(|v| axis.ord(&v)))
 }
 
-/// Each cut snapped to the next existing key past the previous one, stopping at the first that has none below `hi`.
+/// The last existing key above `start` and below `mid`, by one index seek.
+fn prior_key(
+    src: &mut dyn Source,
+    plan: &ResolvedRunPlan,
+    (k, axis): (&str, Axis),
+    fence: &[String],
+    start: i128,
+    mid: i128,
+) -> Result<Option<i128>> {
+    let st = plan.source.source_type;
+    let of = crate::source::query::KeyOf {
+        base: &plan.base_query,
+        expr: k,
+    };
+    let (past, past_at) = axis.after(start);
+    let (below, below_at) = axis.below(mid);
+    let mut preds = fence.to_vec();
+    preds.push(format!(
+        "{k} {past} {}",
+        crate::source::query::inline_literal(st, &past_at, of)
+    ));
+    preds.push(format!(
+        "{k} {below} {}",
+        crate::source::query::inline_literal(st, &below_at, of)
+    ));
+    Ok(seek_key(src, plan, k, &preds, true)?.and_then(|v| axis.ord(&v)))
+}
+
+/// Each cut snapped to the existing key nearest it, forward or back across an empty stretch, past the previous one and skipping a cut the previous one already passed, stopping at the first that has none below `hi`; with the cuts that moved back to the edge of a dense stretch.
 fn snap_cuts(
     src: &mut dyn Source,
     plan: &ResolvedRunPlan,
-    k: &str,
+    key: (&str, Axis),
     fence: &[String],
     first: i128,
     hi: i128,
     cuts: &[i128],
-) -> Result<Vec<i128>> {
+) -> Result<(Vec<i128>, Vec<i128>)> {
     let mut out = Vec::with_capacity(cuts.len());
+    let mut edges = Vec::new();
     let mut prev = first;
     for &c in cuts {
-        match snap_key(src, plan, k, fence, prev, c)? {
-            Some(b) if b > prev && b < hi => {
-                out.push(b);
-                prev = b;
+        if seeded!("keyset-snap-stacks-passed-cuts", false, c <= prev) {
+            continue;
+        }
+        let Some(mut b) = snap_key(src, plan, key, fence, prev, c)? else {
+            break;
+        };
+        let mut edge = false;
+        if b > c
+            && let Some(p) = prior_key(src, plan, key, fence, prev, c)?
+            && c - p < b - c
+        {
+            (b, edge) = (p, true);
+        }
+        if b > prev && b < hi {
+            out.push(b);
+            if edge {
+                edges.push(b);
             }
-            _ => break,
+            prev = b;
+        } else {
+            break;
         }
     }
-    Ok(out)
+    Ok((out, edges))
 }
 
 /// Recut the integer key-space cuts into equal-row ranges when the sampled densities are skewed; the cuts stand otherwise.
 fn balance_by_density(
     src: &mut dyn Source,
     plan: &ResolvedRunPlan,
-    k: &str,
+    key: (&str, Axis),
     fence: &[String],
     (lo, hi): (i128, i128),
     bounds: Vec<String>,
 ) -> Result<(Vec<String>, Recut)> {
-    let mut cuts: Vec<i128> = bounds.iter().filter_map(|b| b.parse().ok()).collect();
+    let mut cuts: Vec<i128> = bounds.iter().filter_map(|b| key.1.ord(b)).collect();
     if cuts.len() != bounds.len() || cuts.is_empty() {
         return Ok((bounds, Recut::Even));
     }
     let m = cuts.len() + 1;
-    let render = |cuts: &[i128]| -> Vec<String> { cuts.iter().map(|c| c.to_string()).collect() };
-    let initial = spans_from(lo, hi, &cuts);
+    let render = |cuts: &[i128]| -> Vec<String> { cuts.iter().map(|c| key.1.show(*c)).collect() };
+    let mut spans = spans_from(lo, hi, &cuts);
     let points = m.min(PROBE_POINTS);
     let mut sampled = Vec::with_capacity(points);
     for j in 0..points {
-        let s = initial[j * m / points];
-        sampled.push(probe_density(src, plan, k, fence, s.start, s.end)?);
+        let s = spans[j * m / points];
+        sampled.push(probe_density(src, plan, key, fence, s.start, s.end)?);
     }
     let (min, max) = sampled
         .iter()
         .fold((f64::MAX, 0f64), |(a, b), d| (a.min(*d), b.max(*d)));
-    if max / min <= DENSITY_RATIO {
+    if max == 0.0 || max / min <= DENSITY_RATIO {
         return Ok((bounds, Recut::Even));
     }
+    let mut known = (points == m).then_some(sampled);
     let mut rounds = 0;
+    let mut best: Option<(f64, Vec<i128>, usize)> = None;
+    let mut worse = 0;
     loop {
-        let mut spans = spans_from(lo, hi, &cuts);
-        for s in spans.iter_mut() {
-            s.density = probe_density(src, plan, k, fence, s.start, s.end)?;
+        match known.take() {
+            Some(densities) => spans
+                .iter_mut()
+                .zip(densities)
+                .for_each(|(s, d)| s.density = d),
+            None => {
+                spans = spans_from(lo, hi, &cuts);
+                for s in spans.iter_mut() {
+                    s.density = probe_density(src, plan, key, fence, s.start, s.end)?;
+                }
+            }
         }
-        let mean = spans.iter().map(Span::rows).sum::<f64>() / spans.len() as f64;
+        let heavy = spans.iter().map(Span::rows).sum::<f64>() / m as f64 * BALANCE_FACTOR;
+        let mut refined = Vec::with_capacity(spans.len());
+        for s in spans.drain(..) {
+            if s.rows() > heavy {
+                refine_span(src, plan, key, fence, s, &mut refined)?;
+            } else {
+                refined.push(s);
+            }
+        }
+        spans = refined;
+        let mean = spans.iter().map(Span::rows).sum::<f64>() / m as f64;
         let ratio = spans.iter().map(Span::rows).fold(0f64, f64::max) / mean;
         if ratio <= BALANCE_FACTOR {
             let recut = if rounds == 0 {
-                Recut::Even
+                Recut::Held { ratio }
             } else {
                 Recut::Rounds(rounds)
             };
             return Ok((render(&cuts), recut));
         }
-        if rounds == RECUT_ROUNDS {
+        if best.as_ref().is_none_or(|(r, ..)| ratio < *r) {
+            best = Some((ratio, cuts.clone(), rounds));
+            worse = 0;
+        } else {
+            worse += 1;
+        }
+        if worse == seeded!("keyset-recut-quits-early", 2, 3) || rounds == RECUT_ROUNDS {
+            let (ratio, cuts, rounds) = best.take().unwrap();
             return Ok((render(&cuts), Recut::Unbalanced { rounds, ratio }));
         }
-        cuts = snap_cuts(src, plan, k, fence, lo - 1, hi, &equal_row_cuts(&spans, m))?;
+        let (next, _) = snap_cuts(
+            src,
+            plan,
+            key,
+            fence,
+            lo - 1,
+            hi,
+            &equal_row_cuts(&spans, m),
+        )?;
+        if next == cuts {
+            return Ok((render(&cuts), Recut::Unbalanced { rounds, ratio }));
+        }
+        cuts = next;
         rounds += 1;
     }
 }
@@ -664,7 +856,7 @@ fn seek_bounds(
     fence: &[String],
     (parts, int_parts): (usize, usize),
     bounds: &mut Vec<String>,
-) -> Result<Option<(String, String)>> {
+) -> Result<SeekOutcome> {
     let st = plan.source.source_type;
     let of = crate::source::query::KeyOf {
         base: &plan.base_query,
@@ -674,10 +866,13 @@ fn seek_bounds(
         seek_key(src, plan, k, fence, false)?,
         seek_key(src, plan, k, fence, true)?,
     ) else {
-        return Ok(None);
+        return Ok(SeekOutcome::Ends(None));
     };
-    let integer = lo.parse::<i128>().is_ok() && hi.parse::<i128>().is_ok();
-    let parts = if integer { int_parts } else { parts };
+    let on_axis = Axis::of(&lo, st).is_some() && Axis::of(&hi, st).is_some();
+    if !on_axis && catalog_rows(src, plan).is_some_and(|n| n < ROW_PERCENTILE_ROWS) {
+        return Ok(SeekOutcome::Percentile);
+    }
+    let parts = if on_axis { int_parts } else { parts };
     for cut in super::key_space::split(&lo, &hi, parts) {
         let after = bounds.last().unwrap_or(&lo);
         let mut preds = fence.to_vec();
@@ -694,7 +889,13 @@ fn seek_bounds(
             _ => break,
         }
     }
-    Ok(Some((lo, hi)))
+    Ok(SeekOutcome::Ends(Some((lo, hi))))
+}
+
+/// What the endpoint seeks found: the lowest and highest key (none on an empty table), or a key with no axis small enough for row percentiles.
+enum SeekOutcome {
+    Ends(Option<(String, String)>),
+    Percentile,
 }
 
 /// The first non-NULL key of the base query under `preds` in key order (the last with `desc`), by one index seek.
@@ -2194,6 +2395,34 @@ mod tests {
             }
             panic!("unterminated literal: {w}")
         }
+        /// The keys, ascending, that the `SELECT k … ORDER BY k [DESC]` statement `head` selects.
+        fn hits(&self, head: &str) -> Vec<&String> {
+            assert!(
+                !head.contains("COUNT") && !head.contains("OFFSET"),
+                "a scan: {head}"
+            );
+            let order = format!(" ORDER BY {}", crate::sql::quote_ident(self.st, "k"));
+            let head = head.strip_suffix(" DESC").unwrap_or(head);
+            let head = head.strip_suffix(&order).unwrap();
+            let preds = head
+                .split_once(" WHERE ")
+                .map_or(vec![], |(_, w)| self.predicates(w));
+            self.keys
+                .iter()
+                .filter(|k| {
+                    preds.iter().all(|(op, v)| {
+                        let o = Indexed::order(self.numeric, k, v);
+                        match op.as_str() {
+                            ">" => o.is_gt(),
+                            ">=" => o.is_ge(),
+                            "<" => o.is_lt(),
+                            "<=" => o.is_le(),
+                            other => panic!("unexpected operator {other}"),
+                        }
+                    })
+                })
+                .collect()
+        }
         /// The `(operator, value)` predicates of a WHERE clause made of `k <op> '<v>'` and `k IS NOT NULL` joined by AND.
         fn predicates(&self, mut w: &str) -> Vec<(String, String)> {
             let k = format!("{} ", crate::sql::quote_ident(self.st, "k"));
@@ -2229,6 +2458,14 @@ mod tests {
             if self.refuse.is_some_and(|r| sql.contains(r)) {
                 anyhow::bail!("invalid input value for the key's type");
             }
+            if let Some(inner) = sql.strip_prefix("SELECT COUNT(*) FROM (") {
+                let inner = inner.rsplit_once(") ").unwrap().0;
+                let head = inner
+                    .strip_suffix(&format!(" {}", first_rows_clause(self.st, PROBE_ROWS)))
+                    .unwrap_or_else(|| panic!("not a bounded count: {sql}"));
+                let n = self.hits(head).len().min(PROBE_ROWS as usize);
+                return Ok(Some(n.to_string()));
+            }
             let (head, skip) = match sql.rsplit_once(" OFFSET ") {
                 Some((h, rest)) => {
                     let n = rest
@@ -2244,35 +2481,11 @@ mod tests {
                     0,
                 ),
             };
-            assert!(
-                !head.contains("COUNT") && !head.contains("OFFSET"),
-                "a scan: {sql}"
-            );
             assert!(skip <= PROBE_ROWS as usize, "a deep probe: {sql}");
-            let order = format!(" ORDER BY {}", crate::sql::quote_ident(self.st, "k"));
-            let (head, desc) = match head.strip_suffix(" DESC") {
-                Some(h) => (h.strip_suffix(&order).unwrap(), true),
-                None => (head.strip_suffix(&order).unwrap(), false),
-            };
-            let preds = head
-                .split_once(" WHERE ")
-                .map_or(vec![], |(_, w)| self.predicates(w));
-            let numeric = self.numeric;
-            let hit = |k: &&String| {
-                preds.iter().all(|(op, v)| {
-                    let o = Indexed::order(numeric, k, v);
-                    match op.as_str() {
-                        ">" => o.is_gt(),
-                        ">=" => o.is_ge(),
-                        "<=" => o.is_le(),
-                        other => panic!("unexpected operator {other}"),
-                    }
-                })
-            };
-            let found = if desc {
-                self.keys.iter().rev().filter(hit).nth(skip)
+            let found = if head.ends_with(" DESC") {
+                self.hits(head).into_iter().rev().nth(skip)
             } else {
-                self.keys.iter().filter(hit).nth(skip)
+                self.hits(head).into_iter().nth(skip)
             };
             Ok(found.cloned())
         }
@@ -2307,7 +2520,7 @@ mod tests {
         );
     }
 
-    /// A table of 1000 rows whose catalog estimate is `estimate`: counts, offset reads and seeks answered by row number.
+    /// A table of 1000 rows whose catalog estimate is `estimate`: counts and offset reads answered by row number, MIN and MAX of a text key `a`..`z`.
     struct Cataloged {
         estimate: &'static str,
         sql: Vec<String>,
@@ -2328,6 +2541,9 @@ mod tests {
             if sql.contains("COUNT(*)") {
                 return Ok(Some("1000".into()));
             }
+            if !sql.contains("OFFSET ") && sql.contains("LIMIT 1") {
+                return Ok(Some(if sql.contains("DESC") { "z" } else { "a" }.into()));
+            }
             Ok(sql
                 .split_once("OFFSET ")
                 .map(|(_, off)| (off.trim().parse::<i64>().unwrap() + 1).to_string()))
@@ -2341,7 +2557,7 @@ mod tests {
         }
     }
 
-    /// A table the catalog puts under the row-percentile limit keeps the exact percentile sampler; a larger, unanalyzed or query export never counts.
+    /// A key with no axis on a table the catalog puts under the row-percentile limit keeps the exact percentile sampler; a larger, unanalyzed or query export never counts.
     #[test]
     fn the_catalog_estimate_picks_row_percentiles_or_seeks() {
         let mut plan = crate::plan::test_support::test_plan();
@@ -2354,22 +2570,22 @@ mod tests {
         assert_eq!(got, keys([251, 501, 751]));
         assert_eq!(
             small.sql.len(),
-            5,
-            "estimate, COUNT, three offsets: {:?}",
+            7,
+            "MIN, MAX, estimate, COUNT, three offsets: {:?}",
             small.sql
         );
-        assert!(small.sql[1].contains("COUNT(*)"), "{:?}", small.sql);
+        assert!(small.sql[3].contains("COUNT(*)"), "{:?}", small.sql);
         for estimate in ["10000000", "0"] {
             let mut large = Cataloged {
                 estimate,
                 sql: vec![],
             };
+            sample_key_boundaries(&mut large, &plan, "k", 4, 64, None, None).unwrap();
             assert!(
-                sample_key_boundaries(&mut large, &plan, "k", 4, 64, None, None)
-                    .unwrap()
-                    .is_empty()
+                large.sql.iter().any(|q| q.contains("reltuples")),
+                "{:?}",
+                large.sql
             );
-            assert_eq!(large.sql.len(), 3, "estimate, MIN, MAX: {:?}", large.sql);
             assert!(
                 large
                     .sql
@@ -2385,10 +2601,12 @@ mod tests {
             sql: vec![],
         };
         sample_key_boundaries(&mut query, &plan, "k", 4, 64, None, None).unwrap();
-        assert_eq!(
-            query.sql.len(),
-            2,
-            "a query has no catalog estimate: {:?}",
+        assert!(
+            query
+                .sql
+                .iter()
+                .all(|q| !q.contains("reltuples") && !q.contains("COUNT")),
+            "a query has no catalog estimate and takes the seek path: {:?}",
             query.sql
         );
     }
@@ -2402,8 +2620,8 @@ mod tests {
         assert_eq!(got.len(), 15, "{got:?}");
         assert_eq!(
             ints.sql.len(),
-            33,
-            "MIN, MAX, one seek per cut and one probe per range"
+            49,
+            "MIN, MAX, one seek per cut, one probe and one bounded count per range"
         );
         let mut text = Indexed::new(keys(["a", "c", "e", "g", "i", "k", "m", "o"]), false);
         let got = sample_key_boundaries(&mut text, &plan, "k", 4, 16, None, None).unwrap();
@@ -2530,7 +2748,7 @@ mod tests {
         let mut plan = crate::plan::test_support::test_plan();
         plan.base_query = "SELECT * FROM public.t".into();
         plan.tuning.statement_timeout_s = 10;
-        for expire_at in [1, 2, 4] {
+        for expire_at in [3, 4, 6] {
             let mut src = Timed::new(
                 Cataloged {
                     estimate: "9999999",
@@ -2562,8 +2780,8 @@ mod tests {
         assert_eq!(got, keys([300, 500, 700]));
         assert_eq!(
             src.sql.len(),
-            9,
-            "MIN, MAX, one seek per cut and one probe per range"
+            13,
+            "MIN, MAX, one seek per cut, one probe and one bounded count per range"
         );
         for sql in &src.sql {
             assert!(sql.contains("\"k\" > E'100' AND \"k\" <= E'900'"), "{sql}");
@@ -2667,7 +2885,150 @@ mod tests {
         };
         let spread: Vec<usize> = ranges.iter().map(|(_, lo, hi, _)| held(lo, hi)).collect();
         assert_eq!(spread.iter().sum::<usize>(), all.len(), "{spread:?}");
-        assert_eq!(spread, vec![3_517, 3_518, 1_974, 991], "{bounds:?}");
+        assert_eq!(spread, vec![3_375, 3_374, 2_257, 994], "{bounds:?}");
+    }
+
+    /// A uuid key with 90% of its rows in 5% of its span keeps every row once, in ranges recut to near-equal row counts.
+    #[test]
+    fn a_skewed_uuid_key_keeps_every_row_once_in_balanced_ranges() {
+        let plan = crate::plan::test_support::test_plan();
+        let uuid = |units: i64| {
+            uuid::Uuid::from_u128((units as u128) << 96)
+                .hyphenated()
+                .to_string()
+        };
+        let dense = 1..=9_000i64;
+        let sparse = (1..=1_000i64).map(|i| 9_000 + i * 191);
+        let mut src = Indexed::new(dense.chain(sparse).map(uuid).collect(), false);
+        let all = src.keys.clone();
+        let bounds = sample_key_boundaries(&mut src, &plan, "k", 4, 4, None, None).unwrap();
+        let ranges = partition_ranges(&bounds, None, None);
+        let held = |lo: &Option<String>, hi: &Option<String>| {
+            all.iter()
+                .filter(|k| {
+                    lo.as_deref().is_none_or(|l| k.as_str() > l)
+                        && hi.as_deref().is_none_or(|h| k.as_str() <= h)
+                })
+                .count()
+        };
+        let spread: Vec<usize> = ranges.iter().map(|(_, lo, hi, _)| held(lo, hi)).collect();
+        assert_eq!(spread.iter().sum::<usize>(), all.len(), "{spread:?}");
+        let mean = all.len() as f64 / spread.len() as f64;
+        let heaviest = *spread.iter().max().unwrap() as f64;
+        assert!(heaviest <= 2.0 * mean, "{spread:?}");
+    }
+
+    /// Uuid keys with a dense block, a wide empty gap and a sparse tail keep every row once in ranges no heavier than twice the mean, whatever the workers and the low bit of the keys.
+    #[test]
+    fn a_uuid_key_with_a_gap_after_its_dense_block_is_recut_into_balanced_ranges() {
+        let plan = crate::plan::test_support::test_plan();
+        for low in [0u128, 1] {
+            let uuid = |units: i64| {
+                uuid::Uuid::from_u128(((units as u128) << 96) | low)
+                    .hyphenated()
+                    .to_string()
+            };
+            let dense = 1..=6_300i64;
+            let sparse = (1..=700i64).map(|i| 1_000_000 + i * 5_368);
+            for (parts, int_parts) in [(2, 32), (4, 64)] {
+                let mut src = Indexed::new(
+                    dense.clone().chain(sparse.clone()).map(uuid).collect(),
+                    false,
+                );
+                let all = src.keys.clone();
+                let bounds =
+                    sample_key_boundaries(&mut src, &plan, "k", parts, int_parts, None, None)
+                        .unwrap();
+                let ranges = partition_ranges(&bounds, None, None);
+                let spread: Vec<usize> = ranges
+                    .iter()
+                    .map(|(_, lo, hi, _)| {
+                        all.iter()
+                            .filter(|k| {
+                                lo.as_deref().is_none_or(|l| k.as_str() > l)
+                                    && hi.as_deref().is_none_or(|h| k.as_str() <= h)
+                            })
+                            .count()
+                    })
+                    .collect();
+                assert_eq!(spread.iter().sum::<usize>(), all.len(), "{spread:?}");
+                assert!(
+                    spread.len() >= parts,
+                    "{parts} workers, low bit {low}: {spread:?}"
+                );
+                let share = all.len() as f64 / parts as f64;
+                let thin = spread.iter().filter(|&&n| n < 3).count();
+                assert!(thin <= 1, "{parts} workers, low bit {low}: {spread:?}");
+                let heaviest = *spread.iter().max().unwrap() as f64;
+                assert!(
+                    heaviest <= share,
+                    "{parts} workers, low bit {low}: {spread:?}"
+                );
+            }
+        }
+    }
+
+    /// UUIDv7 keys written in narrow bursts far apart in time keep every row once in ranges no heavier than twice the mean.
+    #[test]
+    fn uuid_v7_bursts_are_recut_into_balanced_ranges() {
+        let plan = crate::plan::test_support::test_plan();
+        let uuid = |ms: u128, seq: u128| {
+            let n = (ms << 80) | (0x7u128 << 76) | (seq << 64) | 0x8000_0000_0000_0000u128;
+            uuid::Uuid::from_u128(n).hyphenated().to_string()
+        };
+        let bursts = [1_000u128, 90_000, 91_000, 7_000_000, 7_000_500];
+        let all: Vec<String> = bursts
+            .iter()
+            .flat_map(|&ms| (0..1_200u128).map(move |i| (ms + i / 40, i % 40)))
+            .map(|(ms, seq)| uuid(ms, seq))
+            .collect();
+        for (parts, int_parts) in [(2, 32), (4, 64)] {
+            let mut src = Indexed::new(all.clone(), false);
+            let bounds =
+                sample_key_boundaries(&mut src, &plan, "k", parts, int_parts, None, None).unwrap();
+            let spread: Vec<usize> = partition_ranges(&bounds, None, None)
+                .iter()
+                .map(|(_, lo, hi, _)| {
+                    all.iter()
+                        .filter(|k| {
+                            lo.as_deref().is_none_or(|l| k.as_str() > l)
+                                && hi.as_deref().is_none_or(|h| k.as_str() <= h)
+                        })
+                        .count()
+                })
+                .collect();
+            assert_eq!(spread.iter().sum::<usize>(), all.len(), "{spread:?}");
+            let mean = all.len() as f64 / spread.len() as f64;
+            let heaviest = *spread.iter().max().unwrap() as f64;
+            assert!(
+                spread.len() >= parts && heaviest <= 2.0 * mean,
+                "{parts} workers: {spread:?}"
+            );
+        }
+    }
+
+    /// A uuid key on SQL Server, which sorts uuids in its own byte order, is never probed or recut.
+    #[test]
+    fn a_sql_server_uuid_key_is_not_recut() {
+        let mut plan = crate::plan::test_support::test_plan();
+        plan.source.source_type = SourceType::Mssql;
+        let uuid = |units: i64| {
+            uuid::Uuid::from_u128((units as u128) << 96)
+                .hyphenated()
+                .to_string()
+        };
+        let keys: Vec<String> = (1..=9_000i64)
+            .chain((1..=1_000).map(|i| 9_000 + i * 191))
+            .map(uuid)
+            .collect();
+        let mut src = Indexed::new(keys, false);
+        src.st = SourceType::Mssql;
+        sample_key_boundaries(&mut src, &plan, "k", 4, 64, None, None).unwrap();
+        assert!(
+            src.sql.iter().all(|q| !q.contains("OFFSET 200 ROWS")),
+            "{:?}",
+            src.sql
+        );
     }
 
     /// A seeded sparse integer key, 95% dense and the rest spread wide, keeps every row once in ranges no heavier than twice the mean.
@@ -2709,21 +3070,21 @@ mod tests {
         assert!(heaviest <= 2.0 * mean, "{spread:?}");
     }
 
-    /// The density probe reads rows per key from the key one seek lands on after skipping the probe rows, or from the whole span when fewer rows remain.
+    /// The density probe reads rows per key from the key one seek lands on after skipping the probe rows, or from the exact count of the fewer rows the span holds.
     #[test]
     fn a_density_probe_reads_rows_per_key_from_the_landing_key() {
         let plan = crate::plan::test_support::test_plan();
         let k = crate::sql::quote_ident(plan.source.source_type, "k");
         let probe = |all: Vec<String>, start: i128, end: i128| {
             let mut src = Indexed::new(all, true);
-            probe_density(&mut src, &plan, &k, &[], start, end).unwrap()
+            probe_density(&mut src, &plan, (&k, Axis::Int), &[], start, end).unwrap()
         };
         assert_eq!(probe(keys(1..=1000), 0, 1000), 200.0 / 201.0);
         assert_eq!(
             probe(keys((1..=1000).map(|i| i * 10)), 0, 10_000),
             200.0 / 2_010.0
         );
-        assert_eq!(probe(keys(1..=50), 0, 1000), 200.0 / 1000.0);
+        assert_eq!(probe(keys(1..=50), 0, 1000), 50.0 / 1000.0);
         assert_eq!(probe(keys(1..=1000), 500, 1000), 200.0 / 201.0);
     }
 

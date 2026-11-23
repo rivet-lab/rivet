@@ -171,15 +171,64 @@ struct Stand<'a> {
     /// Both rigs carry `census_oracle()`: their parts and state DBs are visible to DuckDB.
     cdc: Rig,
     batch: Rig,
-    /// A second CDC export into the fake-gcs bucket that `rivet load` puts into ClickHouse.
+    /// A second export (CDC, or a full batch where the engine's stream is not loadable) into the fake-gcs bucket that `rivet load` puts into ClickHouse.
     warehouse: Option<Warehouse>,
 }
 
-/// A CDC rig loaded into a scratch ClickHouse database, dropped on drop.
+/// A rig loaded into a scratch ClickHouse database, dropped on drop; a CDC load reads through a view that hides deleted rows.
 struct Warehouse {
     rig: Rig,
     db: String,
     view: String,
+    changes: bool,
+}
+
+impl Warehouse {
+    /// The relation the queries read: the dedup view of a CDC load, a lower-cased view of a batch table.
+    fn rel(&self) -> String {
+        if self.changes {
+            self.view.clone()
+        } else {
+            format!("{}_lc", self.view)
+        }
+    }
+
+    /// Lower-case view over a batch-loaded table, whose server-folded names ClickHouse reads case-sensitively.
+    fn lower_view(&self) {
+        let cols: Vec<String> = clickhouse_run_sql_json(&format!(
+            "SELECT name FROM system.columns WHERE database = '{}' AND table = '{}' ORDER BY position",
+            self.db, self.view
+        ))
+        .iter()
+        .map(|r| {
+            let n = r["name"].as_str().expect("column name");
+            format!("`{n}` AS `{}`", n.to_lowercase())
+        })
+        .collect();
+        assert!(
+            !cols.is_empty(),
+            "no loaded table {}.{}",
+            self.db,
+            self.view
+        );
+        clickhouse_run_sql_json(&format!(
+            "CREATE OR REPLACE VIEW {}.{} AS SELECT {} FROM {}.`{}`",
+            self.db,
+            self.rel(),
+            cols.join(", "),
+            self.db,
+            self.view
+        ));
+    }
+
+    /// The `WHERE` that keeps only live rows of the loaded relation.
+    fn live(&self) -> &'static str {
+        if self.changes {
+            " WHERE NOT __is_deleted"
+        } else {
+            ""
+        }
+    }
 }
 
 impl Drop for Warehouse {
@@ -195,6 +244,17 @@ const CH_PASSWORD_ENV: &str = "RIVET_TEST_CH_PASSWORD";
 
 /// `rig` exporting to the fake-gcs bucket as `<view>_wh` and loading into a fresh ClickHouse database; the view is named `view`.
 fn warehouse(rig: Rig, view: &str) -> Warehouse {
+    warehouse_of(rig.cdc("initial: snapshot"), view, true, "id")
+}
+
+/// `rig` as a `mode: full` batch export keyed on `pk` loaded into a fresh ClickHouse database; the loaded table is `view`.
+#[cfg(feature = "oracle")]
+fn warehouse_batch(rig: Rig, view: &str, pk: &str) -> Warehouse {
+    warehouse_of(rig.mode("full"), view, false, pk)
+}
+
+/// The shared wiring of [`warehouse`] and [`warehouse_batch`].
+fn warehouse_of(rig: Rig, view: &str, changes: bool, pk: &str) -> Warehouse {
     require_alive(LiveService::ClickHouse);
     require_alive(LiveService::FakeGcs);
     ensure_gcs_bucket(CH_BUCKET);
@@ -202,16 +262,16 @@ fn warehouse(rig: Rig, view: &str) -> Warehouse {
     clickhouse_run_sql_json(&format!("CREATE DATABASE {db}"));
     let rig = rig
         .export_named(&format!("{view}_wh"))
-        .cdc("initial: snapshot")
         .dest_gcs(CH_BUCKET, &unique_name("ledger"), FAKE_GCS_ENDPOINT)
         .top_line(&format!(
             "load: {{ target: clickhouse, url: \"{CLICKHOUSE_HTTP_URL}\", database: {db}, \
-             user: {CLICKHOUSE_USER}, password_env: {CH_PASSWORD_ENV}, pk: [id] }}"
+             user: {CLICKHOUSE_USER}, password_env: {CH_PASSWORD_ENV}, pk: [{pk}] }}"
         ));
     Warehouse {
         rig,
         db,
         view: view.to_string(),
+        changes,
     }
 }
 
@@ -228,6 +288,9 @@ fn load(st: &Stand) {
     if let Some(w) = &st.warehouse {
         w.rig
             .load_ok(&[], &[(CH_PASSWORD_ENV, CLICKHOUSE_PASSWORD)]);
+        if !w.changes {
+            w.lower_view();
+        }
     }
 }
 
@@ -332,13 +395,14 @@ fn warehouse_relation(
         String::new()
     };
     let from = clickhouse_relation(&if ch_text.is_empty() {
-        format!("SELECT * FROM {}.{} WHERE NOT __is_deleted", w.db, w.view)
+        format!("SELECT * FROM {}.{}{}", w.db, w.rel(), w.live())
     } else {
         format!(
-            "SELECT * REPLACE ({}) FROM {}.{} WHERE NOT __is_deleted{settings}",
+            "SELECT * REPLACE ({}) FROM {}.{}{}{settings}",
             ch_text.join(", "),
             w.db,
-            w.view
+            w.rel(),
+            w.live()
         )
     });
     if text.is_empty() {
@@ -1162,7 +1226,8 @@ fn duckdb_ledger_verdict(lg: &Ledger, st: &Stand, n: i64) -> Vec<String> {
                 "SELECT decode(name), decode(type) FROM {}",
                 clickhouse_relation(&format!(
                     "SELECT name, type FROM system.columns WHERE database = '{}' AND table = '{}'",
-                    w.db, w.view
+                    w.db,
+                    w.rel()
                 ))
             ),
         )
@@ -1230,8 +1295,10 @@ fn duckdb_ledger_verdict(lg: &Ledger, st: &Stand, n: i64) -> Vec<String> {
                         format!(
                             "SELECT decode(i), decode(v) FROM {}",
                             clickhouse_relation(&format!(
-                                "SELECT toString(id) AS i, toString({c}) AS v FROM {}.{} WHERE NOT __is_deleted",
-                                w.db, w.view
+                                "SELECT toString(id) AS i, toString({c}) AS v FROM {}.{}{}",
+                                w.db,
+                                w.view,
+                                w.live()
                             ))
                         ),
                     ));
@@ -1839,23 +1906,32 @@ fn postgres_batch_and_cdc_deliver_every_ledger_row_alike() {
         bad.join("\n")
     );
 
-    let (st, _g2) = stand(&refused, "ledger_pg_refused", false);
-    st.cdc.run_ok();
-    let n = seed_refused(&refused, &st);
-    st.cdc.run_ok();
-    let t = st.table.clone();
-    let bad = duckdb_refused_verdict(&refused, &st, n, &|col| {
-        Rig::pg_batch(&t)
-            .export_named(&format!("{t}_{col}"))
-            .source_url(POSTGRES_CDC_URL)
-            .query(&format!("SELECT id, {col} FROM {t}"))
-    });
-    assert!(
-        bad.is_empty(),
-        "{} violations on batch-refused rows:\n{}",
-        bad.len(),
-        bad.join("\n")
-    );
+    for want in ["NUMERIC", "NUMERIC[]", "TSVECTOR"] {
+        assert!(
+            lg.rows.iter().any(|r| r.native == want),
+            "the delivered side must grade `{want}`: {:?}",
+            lg.rows.iter().map(|r| &r.native).collect::<Vec<_>>()
+        );
+    }
+    if !refused.is_empty() {
+        let (st, _g2) = stand(&refused, "ledger_pg_refused", false);
+        st.cdc.run_ok();
+        let n = seed_refused(&refused, &st);
+        st.cdc.run_ok();
+        let t = st.table.clone();
+        let bad = duckdb_refused_verdict(&refused, &st, n, &|col| {
+            Rig::pg_batch(&t)
+                .export_named(&format!("{t}_{col}"))
+                .source_url(POSTGRES_CDC_URL)
+                .query(&format!("SELECT id, {col} FROM {t}"))
+        });
+        assert!(
+            bad.is_empty(),
+            "{} violations on batch-refused rows:\n{}",
+            bad.len(),
+            bad.join("\n")
+        );
+    }
 }
 
 #[test]
@@ -1985,6 +2061,11 @@ fn oracle_batch_and_cdc_deliver_every_ledger_row_alike() {
     let cdc = Rig::oracle_cdc(t.name())
         .cdc_line("initial: snapshot")
         .export_line(&declared);
+    let wh = warehouse_batch(
+        Rig::oracle_batch(t.name()).export_line(&declared),
+        t.name(),
+        "ID",
+    );
     let batch = batch_named(Rig::oracle_batch(t.name()), t.name()).export_line(&declared);
     let st = Stand {
         engine: "oracle",
@@ -1998,7 +2079,7 @@ fn oracle_batch_and_cdc_deliver_every_ledger_row_alike() {
         settle: &|_| {},
         cdc: graded(cdc),
         batch: graded(batch),
-        warehouse: None,
+        warehouse: Some(wh),
     };
     let n = seed(&lg, &st);
     capture(&st);
