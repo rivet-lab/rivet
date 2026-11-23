@@ -48,7 +48,7 @@ pub fn numeric_wire_special_text(wire: &[u8]) -> Option<&'static str> {
 }
 
 /// Plain decimal text at the value's display scale, the digits PostgreSQL's own output function prints.
-pub fn numeric_wire_normalized_plain(wire: &[u8]) -> Option<String> {
+pub fn numeric_wire_plain_at_display_scale(wire: &[u8]) -> Option<String> {
     let display_scale = i64::from(Cursor::new(wire.get(6..8)?).read_u16::<BigEndian>().ok()?);
     let bd = wire_to_big_decimal(wire)?.normalized();
     let natural_scale = bd.as_bigint_and_exponent().1;
@@ -141,26 +141,35 @@ mod tests {
     #[test]
     fn zero_ndigits_gives_zero() {
         let wire = encode(0, 0, NUMERIC_POS, 0, &[]);
-        assert_eq!(numeric_wire_normalized_plain(&wire).as_deref(), Some("0"));
+        assert_eq!(
+            numeric_wire_plain_at_display_scale(&wire).as_deref(),
+            Some("0")
+        );
     }
 
     #[test]
     fn value_one() {
         let wire = encode(1, 0, NUMERIC_POS, 0, &[1]);
-        assert_eq!(numeric_wire_normalized_plain(&wire).as_deref(), Some("1"));
+        assert_eq!(
+            numeric_wire_plain_at_display_scale(&wire).as_deref(),
+            Some("1")
+        );
     }
 
     #[test]
     fn value_one_hundred() {
         let wire = encode(1, 0, NUMERIC_POS, 0, &[100]);
-        assert_eq!(numeric_wire_normalized_plain(&wire).as_deref(), Some("100"));
+        assert_eq!(
+            numeric_wire_plain_at_display_scale(&wire).as_deref(),
+            Some("100")
+        );
     }
 
     #[test]
     fn value_9999_single_limb() {
         let wire = encode(1, 0, NUMERIC_POS, 0, &[9999]);
         assert_eq!(
-            numeric_wire_normalized_plain(&wire).as_deref(),
+            numeric_wire_plain_at_display_scale(&wire).as_deref(),
             Some("9999")
         );
     }
@@ -169,7 +178,7 @@ mod tests {
     fn value_10000_two_limbs() {
         let wire = encode(2, 1, NUMERIC_POS, 0, &[1, 0]);
         assert_eq!(
-            numeric_wire_normalized_plain(&wire).as_deref(),
+            numeric_wire_plain_at_display_scale(&wire).as_deref(),
             Some("10000")
         );
     }
@@ -177,14 +186,17 @@ mod tests {
     #[test]
     fn negative_five() {
         let wire = encode(1, 0, NUMERIC_NEG, 0, &[5]);
-        assert_eq!(numeric_wire_normalized_plain(&wire).as_deref(), Some("-5"));
+        assert_eq!(
+            numeric_wire_plain_at_display_scale(&wire).as_deref(),
+            Some("-5")
+        );
     }
 
     #[test]
     fn negative_large() {
         let wire = encode(2, 1, NUMERIC_NEG, 0, &[1, 2345]);
         assert_eq!(
-            numeric_wire_normalized_plain(&wire).as_deref(),
+            numeric_wire_plain_at_display_scale(&wire).as_deref(),
             Some("-12345")
         );
     }
@@ -193,7 +205,7 @@ mod tests {
     fn value_point_01() {
         let wire = encode(1, -1, NUMERIC_POS, 2, &[100]);
         assert_eq!(
-            numeric_wire_normalized_plain(&wire).as_deref(),
+            numeric_wire_plain_at_display_scale(&wire).as_deref(),
             Some("0.01")
         );
     }
@@ -202,7 +214,7 @@ mod tests {
     fn value_12_dot_34() {
         let wire = encode(2, 0, NUMERIC_POS, 2, &[12, 3400]);
         assert_eq!(
-            numeric_wire_normalized_plain(&wire).as_deref(),
+            numeric_wire_plain_at_display_scale(&wire).as_deref(),
             Some("12.34")
         );
     }
@@ -211,7 +223,7 @@ mod tests {
     fn negative_fractional() {
         let wire = encode(2, 0, NUMERIC_NEG, 2, &[12, 3400]);
         assert_eq!(
-            numeric_wire_normalized_plain(&wire).as_deref(),
+            numeric_wire_plain_at_display_scale(&wire).as_deref(),
             Some("-12.34")
         );
     }
@@ -227,7 +239,10 @@ mod tests {
             (encode(2, 0, NUMERIC_POS, 10, &[2, 5000]), "2.5000000000"),
             (encode(1, 1, NUMERIC_POS, 0, &[1]), "10000"),
         ] {
-            assert_eq!(numeric_wire_normalized_plain(&wire).as_deref(), Some(want));
+            assert_eq!(
+                numeric_wire_plain_at_display_scale(&wire).as_deref(),
+                Some(want)
+            );
         }
     }
 
@@ -235,66 +250,66 @@ mod tests {
     fn a_display_scale_below_the_digits_never_drops_a_digit() {
         let wire = encode(2, 0, NUMERIC_POS, 0, &[1, 2500]);
         assert_eq!(
-            numeric_wire_normalized_plain(&wire).as_deref(),
+            numeric_wire_plain_at_display_scale(&wire).as_deref(),
             Some("1.25")
         );
     }
 
     #[test]
     fn a_header_without_a_display_scale_returns_none() {
-        assert!(numeric_wire_normalized_plain(&[0, 0, 0, 0, 0, 0, 0]).is_none());
+        assert!(numeric_wire_plain_at_display_scale(&[0, 0, 0, 0, 0, 0, 0]).is_none());
     }
 
     #[test]
     fn nan_returns_none() {
         let wire = encode(0, 0, NUMERIC_NAN, 0, &[]);
-        assert!(numeric_wire_normalized_plain(&wire).is_none());
+        assert!(numeric_wire_plain_at_display_scale(&wire).is_none());
     }
 
     #[test]
     fn positive_infinity_returns_none() {
         let wire = encode(0, 0, NUMERIC_PINF, 0, &[]);
-        assert!(numeric_wire_normalized_plain(&wire).is_none());
+        assert!(numeric_wire_plain_at_display_scale(&wire).is_none());
     }
 
     #[test]
     fn negative_infinity_returns_none() {
         let wire = encode(0, 0, NUMERIC_NINF, 0, &[]);
-        assert!(numeric_wire_normalized_plain(&wire).is_none());
+        assert!(numeric_wire_plain_at_display_scale(&wire).is_none());
     }
 
     #[test]
     fn unknown_sign_field_returns_none() {
         let wire = encode(0, 0, 0xBEEF, 0, &[]);
-        assert!(numeric_wire_normalized_plain(&wire).is_none());
+        assert!(numeric_wire_plain_at_display_scale(&wire).is_none());
     }
 
     #[test]
     fn empty_slice_returns_none() {
-        assert!(numeric_wire_normalized_plain(&[]).is_none());
+        assert!(numeric_wire_plain_at_display_scale(&[]).is_none());
     }
 
     #[test]
     fn truncated_header_returns_none() {
-        assert!(numeric_wire_normalized_plain(&[0, 1, 0, 0, 0, 0]).is_none());
+        assert!(numeric_wire_plain_at_display_scale(&[0, 1, 0, 0, 0, 0]).is_none());
     }
 
     #[test]
     fn ndigits_exceeds_actual_data_returns_none() {
         let wire = encode(3, 0, NUMERIC_POS, 0, &[]);
-        assert!(numeric_wire_normalized_plain(&wire).is_none());
+        assert!(numeric_wire_plain_at_display_scale(&wire).is_none());
     }
 
     #[test]
     fn limb_out_of_range_returns_none() {
         let wire = encode(1, 0, NUMERIC_POS, 0, &[10000]);
-        assert!(numeric_wire_normalized_plain(&wire).is_none());
+        assert!(numeric_wire_plain_at_display_scale(&wire).is_none());
     }
 }
 
 #[cfg(test)]
 mod renderer_twins {
-    use super::numeric_wire_normalized_plain;
+    use super::numeric_wire_plain_at_display_scale;
     use crate::types::decimal_plain;
 
     /// The PG `numeric` wire payload for `unscaled * 10^-scale` with display scale `scale`.
@@ -322,7 +337,7 @@ mod renderer_twins {
     }
 
     #[test]
-    fn normalized_plain_matches_decimal_plain_without_trailing_zeros() {
+    fn plain_at_display_scale_matches_decimal_plain_without_trailing_zeros() {
         for (u, s) in [
             (12345, 2),
             (-12345, 2),
@@ -336,7 +351,7 @@ mod renderer_twins {
             (i128::MIN + 1, 0),
         ] {
             assert_eq!(
-                numeric_wire_normalized_plain(&wire(u, s)).as_deref(),
+                numeric_wire_plain_at_display_scale(&wire(u, s)).as_deref(),
                 Some(decimal_plain(u, s as i8).as_str()),
                 "({u}, {s})"
             );
@@ -344,11 +359,11 @@ mod renderer_twins {
     }
 
     #[test]
-    fn normalized_plain_keeps_every_scale_like_decimal_plain() {
+    fn plain_at_display_scale_keeps_every_scale_like_decimal_plain() {
         for s in 0..=24u16 {
             for u in [0i128, 1, -1, 150, -1_000, 123_456_789, i128::from(i64::MAX)] {
                 assert_eq!(
-                    numeric_wire_normalized_plain(&wire(u, s)).as_deref(),
+                    numeric_wire_plain_at_display_scale(&wire(u, s)).as_deref(),
                     Some(decimal_plain(u, s as i8).as_str()),
                     "({u}, {s})"
                 );
@@ -357,10 +372,10 @@ mod renderer_twins {
     }
 
     #[test]
-    fn normalized_plain_keeps_the_scale_like_decimal_plain() {
+    fn plain_at_display_scale_keeps_the_scale_like_decimal_plain() {
         for (u, s) in [(150, 2), (0, 3), (-1_000, 3)] {
             assert_eq!(
-                numeric_wire_normalized_plain(&wire(u, s)).as_deref(),
+                numeric_wire_plain_at_display_scale(&wire(u, s)).as_deref(),
                 Some(decimal_plain(u, s as i8).as_str()),
                 "({u}, {s})"
             );

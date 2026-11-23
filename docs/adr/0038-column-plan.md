@@ -37,7 +37,7 @@ CP12 says each `TextForm` renders in one place. `tests/offline/renderer_locality
 
 | Form | Canonical callers | Local renderers |
 |------|-------------------|-----------------|
-| `DecimalPlain` | 0 | `mssql::numeric_to_decimal_string`, `oracle/cdc::canonical_number`, `pg_numeric_wire::numeric_wire_normalized_plain` |
+| `DecimalPlain` | 0 | `mssql::numeric_to_decimal_string`, `oracle/cdc::canonical_number`, `pg_numeric_wire::numeric_wire_plain_at_display_scale` |
 | `Iso8601Duration` | 0 | `oracle::interval_ym_iso`, `postgres::pg_interval_to_iso8601` |
 | `IsoTimestampNanos` | 0 | `cdc/value::render_str`, `cdc/value::to_json`, `oracle::timestamp_text` |
 | `TimeBeyondDay` | 1 (`cdc/value::render_str`) | none |

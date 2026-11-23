@@ -18,7 +18,7 @@ use postgres::types::{FromSql as PgFromSql, Kind, Type};
 
 use crate::error::Result;
 use crate::source::pg_numeric_wire::{
-    PgNumericWire, numeric_wire_normalized_plain, numeric_wire_special_text,
+    PgNumericWire, numeric_wire_plain_at_display_scale, numeric_wire_special_text,
 };
 use crate::types::kind::CommonKind;
 use crate::types::{ColumnOverrides, RivetType, SourceColumn, TypeMapping, build_arrow_field};
@@ -241,7 +241,7 @@ fn pg_numeric_optional_utf8_string(row: &Row, col_idx: usize) -> Result<Option<S
 }
 
 fn numeric_raw_to_optional_decimal_text(raw: &[u8]) -> Option<String> {
-    numeric_wire_normalized_plain(raw)
+    numeric_wire_plain_at_display_scale(raw)
         .or_else(|| numeric_wire_special_text(raw).map(str::to_owned))
         .or_else(|| {
             let text = simdutf8::basic::from_utf8(raw).ok()?.trim();
@@ -1274,7 +1274,7 @@ fn build_pg_list_array(
 /// Decode a single `NUMERIC` cell to a scaled `i128` for Arrow `Decimal128`.
 fn pg_numeric_optional_plain(row: &Row, col_idx: usize) -> Result<Option<String>> {
     match row.try_get::<_, Option<PgNumericWire<'_>>>(col_idx) {
-        Ok(Some(wire)) => match numeric_wire_normalized_plain(wire.0) {
+        Ok(Some(wire)) => match numeric_wire_plain_at_display_scale(wire.0) {
             Some(plain) => {
                 let t = plain.trim();
                 Ok((!t.is_empty()).then(|| t.to_string()))

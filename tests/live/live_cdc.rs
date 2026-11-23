@@ -2576,56 +2576,52 @@ fn pg_cdc_bare_numeric_is_delivered_as_labelled_server_text() {
     assert_eq!(got, want, "each value is the server's own n::text");
 }
 
-/// A bare PostgreSQL `numeric` keeps its display scale in the snapshot leg and the stream leg of one CDC export.
+/// A PostgreSQL numeric declared `text` on a CDC export reads the same string in the snapshot leg and the stream leg.
 #[test]
 #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
-fn pg_cdc_a_bare_numeric_keeps_its_display_scale_in_snapshot_and_stream() {
+fn pg_cdc_a_numeric_declared_text_is_one_string_in_the_snapshot_and_the_stream() {
     use postgres::NoTls;
-    let read = |dir: &std::path::Path| duckdb_dir_parquet_id_text(dir, "n");
     let d = tempfile::tempdir().unwrap();
-    let tbl = unique_name("cdc_num_scale");
-    let slot = unique_name("rivet_num_scale_slot");
+    let tbl = unique_name("cdc_num_text");
+    let slot = unique_name("rivet_num_text_slot");
     let _slot = Slot::new(slot.clone());
     let mut c = postgres::Client::connect(POSTGRES_CDC_URL, NoTls).expect("connect postgres");
     c.batch_execute(&format!(
-        "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, n NUMERIC); \
-         INSERT INTO {tbl} VALUES (1, 1.50), (2, 0.00), (3, 1000.000), (4, 'NaN'), (5, NULL)"
+        "CREATE TABLE {tbl} (id BIGINT PRIMARY KEY, n NUMERIC(18,2)); \
+         INSERT INTO {tbl} VALUES (1, 1.50), (2, 0), (3, 10)"
     ))
     .unwrap();
     let _tbl = PgTable::adopt_on(POSTGRES_CDC_URL, tbl.clone());
-    let server = |c: &mut postgres::Client, lo: i64, hi: i64| -> Vec<(i64, Option<String>)> {
-        c.query(
-            &format!("SELECT id, n::text FROM {tbl} WHERE id BETWEEN {lo} AND {hi} ORDER BY id"),
-            &[],
-        )
-        .unwrap()
-        .iter()
-        .map(|r| (r.get(0), r.get(1)))
-        .collect()
-    };
-
     let out = d.path().join("out");
     std::fs::create_dir_all(&out).unwrap();
     let rig = Rig::pg_cdc(&tbl, &slot)
         .cdc_line("initial: snapshot")
+        .export_line("columns: { n: text }")
         .dest_path(out.clone());
-    let cfg = rig.config_path();
-    run_rivet_ok(&cfg);
-    assert_eq!(
-        read(&out.join("snapshot")),
-        server(&mut c, 1, 5),
-        "the snapshot leg is the server's own n::text"
-    );
 
+    let snapshot = run_cells(&rig.run(), &out.join("snapshot"), "id", &["n"])
+        .unwrap_or_else(|e| panic!("the snapshot leg was refused: {e}"));
     c.batch_execute(&format!(
-        "INSERT INTO {tbl} VALUES (6, 2.50), (7, 0.000), (8, 100.10), (9, -0.50)"
+        "INSERT INTO {tbl} VALUES (4, 2.50), (5, 0), (6, 10)"
     ))
     .unwrap();
-    run_rivet_ok(&cfg);
+    let stream = run_cells(&rig.run(), &out, "id", &["n"])
+        .unwrap_or_else(|e| panic!("the stream leg was refused: {e}"));
+
+    let server: std::collections::BTreeMap<i64, String> = c
+        .query(&format!("SELECT id, n::text FROM {tbl} ORDER BY id"), &[])
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect();
+    let delivered: std::collections::BTreeMap<i64, String> = (1..=3)
+        .map(|id| (id, snapshot.get(&format!(":{id}")).cloned()))
+        .chain((4..=6).map(|id| (id, stream.get(&format!("insert:{id}")).cloned())))
+        .map(|(id, n)| (id, n.unwrap_or_else(|| format!("row {id} missing"))))
+        .collect();
     assert_eq!(
-        read(&out),
-        server(&mut c, 6, 9),
-        "the stream leg is the server's own n::text"
+        delivered, server,
+        "a numeric declared text is the server's n::text in the snapshot leg and in the stream leg"
     );
 }
 

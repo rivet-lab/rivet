@@ -260,28 +260,6 @@ pub fn duckdb_dir_parquet_id_set(dir: &Path) -> BTreeSet<i64> {
     duckdb_dir_parquet_ids(dir).into_iter().collect()
 }
 
-/// Every `(id, text column)` pair under `dir`, ordered by id, by DuckDB.
-pub fn duckdb_dir_parquet_id_text(dir: &Path, col: &str) -> Vec<(i64, Option<String>)> {
-    if files_with_extension(dir, "parquet").is_empty() {
-        return Vec::new();
-    }
-    let c = stage_for_duckdb(dir);
-    let v = super::duckdb_run_sql_json(&format!(
-        "SELECT CAST(id AS BIGINT), {col} FROM read_parquet('{c}/**/*.parquet') ORDER BY id"
-    ));
-    v["rows"]
-        .as_array()
-        .unwrap_or_else(|| panic!("duckdb returned no rows array for {col}"))
-        .iter()
-        .map(|r| {
-            (
-                r[0].as_str().unwrap().parse::<i64>().unwrap(),
-                r[1].as_str().map(str::to_string),
-            )
-        })
-        .collect()
-}
-
 /// Every value of an integer column under `dir`, in file/row order, by DuckDB.
 pub fn duckdb_dir_parquet_i64(dir: &Path, col: &str) -> Vec<i64> {
     if files_with_extension(dir, "parquet").is_empty() {
