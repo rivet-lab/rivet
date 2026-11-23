@@ -2389,6 +2389,42 @@ fn an_ltz_value_stored_outside_the_range_is_refused_by_code_through_a_cast_or_a_
     }
 }
 
+/// A value Oracle computes past 9999 from a real year-10000 instant is refused by code with a message that names no local-zone cause, and the query that stays in range delivers.
+#[test]
+#[ignore = "live: requires docker compose oracle"]
+fn a_value_oracle_computes_past_9999_is_refused_by_code_and_a_query_inside_9999_delivers() {
+    require_alive(LiveService::Oracle);
+    let t = OracleTable::create(
+        "ora_ltzk",
+        "id NUMBER(10) PRIMARY KEY, z TIMESTAMP(6) WITH TIME ZONE",
+    );
+    ora_exec(&format!(
+        "INSERT INTO {} VALUES (1, TIMESTAMP '9999-12-31 22:00:00 -05:00')",
+        t.name()
+    ));
+    let query = format!(
+        "SELECT id, ADD_MONTHS(CAST(SYS_EXTRACT_UTC(z) AS DATE), 1) z FROM {}",
+        t.name()
+    );
+    let run = Rig::oracle_batch(t.name()).query(&query).run();
+    assert_refused(
+        &run,
+        Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5),
+    );
+    let said = String::from_utf8_lossy(&run.stderr).to_string();
+    assert!(
+        said.contains("Oracle stored or computed it a year past that end"),
+        "{said}"
+    );
+    assert!(
+        !said.contains("it is a TIMESTAMP WITH LOCAL TIME ZONE value"),
+        "{said}"
+    );
+    Rig::oracle_batch(t.name())
+        .query(&format!("SELECT id FROM {}", t.name()))
+        .run_ok();
+}
+
 /// An LTZ value Oracle stored outside its 4712 BC to 9999 range is refused by code before any part is written, and the remedy the text names delivers the other columns.
 #[test]
 #[ignore = "live: requires docker compose oracle"]

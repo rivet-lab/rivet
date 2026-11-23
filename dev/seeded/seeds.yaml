@@ -5753,6 +5753,7 @@ seeds:
         cells:
           - an_ltz_value_stored_outside_the_range_is_refused_by_code_and_a_query_without_it_delivers_the_rest
           - an_ltz_value_stored_outside_the_range_is_refused_by_code_through_a_cast_or_a_view
+          - a_value_oracle_computes_past_9999_is_refused_by_code_and_a_query_inside_9999_delivers
           - an_ltz_value_outside_the_range_is_refused_by_code_under_every_override_that_reads_it
           - oracle_cdc_an_ltz_value_outside_the_range_is_refused_by_code_on_batch_snapshot_and_stream
           - "lib:an_ltz_value_outside_the_4712_bc_to_9999_range_is_refused_by_code_and_a_zoned_one_is_delivered"

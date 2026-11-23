@@ -368,19 +368,21 @@ fn is_instant_past_the_ceiling(t: &OracleTimestamp) -> bool {
     t.year() == 10000 && t.month() == 1 && t.day() == 1 && t.hour() < 16
 }
 
-/// The coded refusal for a timestamp Oracle stored a year past its 9999 ceiling, whatever type the column reports (a TIMESTAMP WITH LOCAL TIME ZONE value reaches a TIMESTAMP or TIMESTAMP WITH TIME ZONE column through a CAST or a view), and, for an LTZ column, before its 4712 BC floor; a real instant just past the ceiling is delivered.
+/// The coded refusal for a timestamp Oracle stored or computed a year past its 9999 ceiling, whatever type the column reports, and, for an LTZ column, before its 4712 BC floor; a real instant just past the ceiling is delivered.
 fn timestamp_within_range(t: &OracleTimestamp, name: &str, ltz: bool) -> Result<()> {
     let outside = (t.year() > 9999 && !is_instant_past_the_ceiling(t)) || (ltz && t.year() < -4712);
     if seeded!("oracle-ltz-year-past-ceiling-delivered", false, outside) {
         crate::rivet_bail!(
             crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
             "oracle: column {name} holds the value {t}, outside Oracle's own 4712 BC to 9999 \
-             range: it is a TIMESTAMP WITH LOCAL TIME ZONE value (read directly, or through a \
-             CAST or a view over one) that a session whose zone is ahead of or behind UTC wrote \
-             within its offset of a range end and Oracle stored a year past that end, so the \
-             instant it stands for cannot be told from what Oracle stored (Oracle cannot print it \
-             either, ORA-01877). Nothing was written for it. Leave {name} out of the export (list \
-             the other columns in a `query:`), or rewrite the stored value from a UTC session"
+             range: Oracle stored or computed it a year past that end, which a TIMESTAMP WITH \
+             LOCAL TIME ZONE value written from a session whose zone is ahead of or behind UTC \
+             within its offset of a range end also produces (read directly, or through a CAST, a \
+             view or arithmetic over one), so the instant it stands for cannot be told apart \
+             (Oracle cannot print such a stored value either, ORA-01877). Nothing was written for \
+             it. Leave {name} out of the export (list the other columns in a `query:`), keep the \
+             value Oracle computes within 9999 in the `query:`, or rewrite a stored local-zone \
+             value from a UTC session"
         )
     }
     Ok(())
@@ -1173,7 +1175,12 @@ mod tests {
         crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
         let text = err.to_string();
         assert!(
-            text.contains("column L") && text.contains("ORA-01877") && text.contains("`query:`"),
+            text.contains("column L holds the value ")
+                && text.contains("Oracle stored or computed it a year past that end")
+                && text.contains("or arithmetic over one")
+                && text.contains("ORA-01877")
+                && text.contains("keep the value Oracle computes within 9999 in the `query:`")
+                && !text.contains("it is a TIMESTAMP WITH LOCAL TIME ZONE value"),
             "{text}"
         );
         for kind_is_ltz in [false, true] {
