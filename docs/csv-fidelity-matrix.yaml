@@ -86,6 +86,11 @@ scenarios:
     no_silent_loss:          { test: a_csv_export_of_a_datetime_table_keeps_the_previous_release_text_and_adds_the_seventh_digit_mssql }
     no_corruption_on_escape: { na: "an ISO-8601 timestamp is `[0-9-T:.Z]` — nothing to escape" }
 
+  - id: temporal_out_of_chrono_range
+    what: "a Date32 or microsecond timestamp outside the years -262143..+262142 (the span chrono can name) is refused by RIVET_SOURCE_VALUE_UNREPRESENTABLE naming the column, at top level and inside a list, never written as an empty cell that reads as NULL; PostgreSQL `infinity` and years past 262142 are already refused at the source, so the writer refusal is the backstop."
+    no_silent_loss:          { test: a_date32_chrono_cannot_name_is_refused_not_written_as_an_empty_cell }
+    no_corruption_on_escape: { na: "a refused value writes no text, so there is nothing to escape" }
+
   - id: data_cell_delimiters
     what: "a comma / double-quote / LF / CR inside a text cell is RFC-4180 quoted (quotes doubled) so it never splits or shifts the row — verified end-to-end against an INDEPENDENT DuckDB re-read, not the writer's own rendering."
     no_silent_loss:          { na: "the value is present in the cell; the risk here is column MISALIGNMENT (escaping), covered by the sibling column" }
