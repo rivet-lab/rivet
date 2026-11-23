@@ -239,6 +239,15 @@ fn row_violations(doc: &Value) -> Vec<String> {
                      behaviour; refusal is not an ADR target"
                 ));
             }
+            if !r["declarable"].is_null()
+                && (r["declarable"].as_bool() != Some(true)
+                    || !r["delivery"].is_null()
+                    || !r["refuses"].is_string())
+            {
+                bad.push(format!(
+                    "{at}: `declarable` is `true` on a matrix-only row with `refuses`"
+                ));
+            }
             for key in ["render", "today_render"] {
                 bad.extend(render_violations(&engine, &at, &r[key]));
             }
@@ -494,10 +503,11 @@ fn na_violations(at: &str, r: &Value, engine_delivers: bool) -> Vec<String> {
 }
 
 /// The fields a ledger row may carry.
-const ROW_KEYS: [&str; 18] = [
+const ROW_KEYS: [&str; 19] = [
     "native_type",
     "sample",
     "delivery",
+    "declarable",
     "render",
     "known_defect",
     "today_render",

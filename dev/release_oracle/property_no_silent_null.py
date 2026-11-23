@@ -223,8 +223,8 @@ def row_cols(engine: str, i: int, r: dict) -> Col:
 
 
 def columns(engine: str) -> list[Col]:
-    """The seed columns of the override grid: the column of every ledger row that names a delivery."""
-    return [row_cols(engine, i, r) for i, r in enumerate(ledger_rows(engine)) if r.get("delivery")]
+    """The seed columns of the override grid: the column of every ledger row that names a delivery or is `declarable`."""
+    return [row_cols(engine, i, r) for i, r in enumerate(ledger_rows(engine)) if r.get("delivery") or r.get("declarable")]
 
 
 def row_inserts(engine: str, cols: list[Col], table: str = TABLE, offset: int = 0) -> tuple[list[str], int]:

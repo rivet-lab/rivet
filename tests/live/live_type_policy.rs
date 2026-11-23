@@ -60,11 +60,7 @@ fn oracle_cdc_timestamp9_is_refused_until_declared_and_a_declared_timestamp_deli
             .checkpoint_path(ckpt.clone())
             .dest_path(out.clone());
         match declared {
-            true => r
-                .no_oracle(
-                    "a declared `timestamp` keeps microseconds of a nanosecond source on purpose; this test reads the delivered value back itself",
-                )
-                .export_line("columns: {TS9: timestamp}"),
+            true => r.export_line("columns: {TS9: timestamp}"),
             false => r,
         }
     };
@@ -141,9 +137,6 @@ fn oracle_batch_timestamp9_is_refused_until_declared_under_every_policy() {
     };
 
     let (lossy, lossy_out) = declared(0, "columns: {TS9: timestamp}");
-    let lossy = lossy.no_oracle(
-        "a declared `timestamp` keeps microseconds of a nanosecond source on purpose; this test reads the delivered value back itself",
-    );
     let run = lossy.run_args(&[]);
     let err = String::from_utf8_lossy(&run.stderr);
     assert!(run.status.success(), "declared timestamp:\n{err}");
