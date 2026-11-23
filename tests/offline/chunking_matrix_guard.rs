@@ -409,7 +409,8 @@ const MATRICES: &[(&str, usize)] = &[
     // cells are graded independently by oracle_batch_and_cdc_deliver_every_ledger_row_alike.
     // Lowered 5 -> 1 (2026-10-08): four Oracle kinds CDC refuses at open are na.
     // Lowered 1 -> 0 (2026-10-08): the Oracle non-UTC-session cell asserts hard-coded UTC instants.
-    ("docs/cdc-type-fidelity-matrix.yaml", 0),
+    // Raised 0 -> 1 (2026-11-22): the PostgreSQL timestamp-as-text cell is a disagreement of batch and stream, an open defect with a ledger entry (#1162).
+    ("docs/cdc-type-fidelity-matrix.yaml", 1),
     // Load spec (ADR-0034) — `load.partition` form × granularity × warehouse target. The
     // BigQuery form cells are live (run + load + tables.get per cell); Snowflake cells are
     // SQL-text proofs (no live Snowflake from this stand); duckdb/clickhouse are `na`. 0 gaps.

@@ -54,11 +54,13 @@ CODE = re.compile(r"\[(RIVET_[A-Z0-9_]+)\]")
 NULLED, WRONG, SPLIT, UNCODED, IGNORED, EMPTY, CRASH, UNGRADED = (
     "SILENT_NULL", "WRONG_VALUE", "CHECK_RUN_SPLIT", "UNCODED_STOP", "OVERRIDE_IGNORED", "NO_OUTPUT", "CRASH", "UNGRADED_CONFIG")
 TYPE_REFUSALS = ("RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED",)
+VALUE_REFUSALS = ("RIVET_SOURCE_VALUE_UNREPRESENTABLE",)
 PROBE_UNREACHED = re.compile(r"type report for '[^']*' failed: .*(?:refused|timed out|timeout|unreachable)", re.I)
 STAND_REFUSALS = ("RIVET_SOURCE_CONNECT_FAILED", "RIVET_SOURCE_RUNTIME_UNAVAILABLE", "RIVET_SOURCE_STATEMENT_TIMEOUT")
 STAND_TRIES = 5
 RECHECKS = 2
 LEASE_REFUSAL = "RIVET_STATE_RUN_IN_PROGRESS"
+MISSING_SEED = "RIVET_SOURCE_TABLE_NOT_FOUND"
 CELL_STATE = {"RIVET_STATE_URL": "", "RIVET_GATE_STATE_URL": ""}
 DELIVERED, REFUSED, DECLARED = "delivered", "refused", "declared_lossy"
 HIDDEN, SHAPE = "HIDDEN_COLUMN_DELIVERED", "LEG_SHAPE_DIFFERS"
@@ -285,6 +287,8 @@ _PG_HEX = re.compile(r"'\\x([0-9A-Fa-f]*)'(?:::bytea)?")
 _BITS = re.compile(r"b'([01]+)'")
 _PG_BITS = re.compile(r"b'([01]*)'", re.I)
 _CAST = re.compile(r"('(?:[^']|'')*')::[a-z_]+")
+_BIT_NATIVE = re.compile(r"BIT(?:\((\d+)\))?", re.I)
+_HEX_PAIRS = re.compile(r"(?:[0-9A-Fa-f]{2})*")
 
 
 def parse_lit(engine: str, lit: str):
@@ -304,7 +308,7 @@ def parse_lit(engine: str, lit: str):
         return Decimal(int(m.group(1), 2))
     if m := _HEX.fullmatch(s):
         hexed = m.group(1) or m.group(2) or m.group(3) or ""
-        return None if engine == "oracle" and not hexed else bytes.fromhex(hexed)
+        return None if engine == "oracle" and lit.strip().upper() == "HEXTORAW('')" else bytes.fromhex(hexed)
     if engine == "postgres" and (m := _PG_HEX.fullmatch(s)):
         return bytes.fromhex(m.group(1))
     if m := _TS_FUNC.fullmatch(s):
@@ -318,6 +322,22 @@ def parse_lit(engine: str, lit: str):
     if engine == "mysql":
         return re.sub(r"\\(.)", lambda e: _MYSQL_ESC.get(e.group(1), e.group(1)), body, flags=re.S)
     return body
+
+
+def _bit_bytes(native: str, exp) -> bytes | None:
+    """The big-endian bytes a MySQL BIT(M) column holds for the integer `exp`, ceil(M/8) of them; None when `native` is no BIT or `exp` no integer."""
+    m = _BIT_NATIVE.fullmatch(native.strip())
+    if not m or not isinstance(exp, (Decimal, bool)):
+        return None
+    width, n = (int(m.group(1) or 1) + 7) // 8, int(exp)
+    return n.to_bytes(width, "big") if 0 <= n < 1 << (8 * width) else None
+
+
+def _same_bit_bytes(exp: bytes, got, csv: bool) -> str:
+    """OK or WRONG for the bytes a binary override delivers of a BIT value: exactly the column's bytes, a CSV cell as their lowercase hex."""
+    if csv and isinstance(got, str):
+        got = bytes.fromhex(got) if _HEX_PAIRS.fullmatch(got) else None
+    return "OK" if isinstance(got, (bytes, bytearray, memoryview)) and bytes(got) == exp else WRONG
 
 
 def _num(v):
@@ -409,7 +429,7 @@ def _same_instant(engine: str, native: str, exp: str, got) -> str:
         except OverflowError:
             return "PRESENCE"
     if isinstance(e, timedelta) and isinstance(got, (int, float, Decimal)) and not isinstance(got, bool):
-        return "OK" if Decimal(e.days * 86400 + e.seconds) + Decimal(e.microseconds) / 10**6 == Decimal(str(got)) else WRONG
+        return "OK" if Decimal(e.days * 86400 + e.seconds) + Decimal(e.microseconds) / 10**6 + Decimal(_sub_us(exp)) / 10**9 == Decimal(str(got)) else WRONG
     if e is None or g is None:
         return WRONG if e is None and isinstance(got, (date, dtime, timedelta)) else "PRESENCE"
     if type(e) is date and type(g) is datetime:
@@ -572,6 +592,8 @@ def compare(engine: str, src_lit: str, src_family: str, target: str, got, csv: b
         return NULLED
     if csv and got == "" and not _blank(exp):
         return WRONG
+    if target == "binary" and engine == "mysql" and (bits := _bit_bytes(native, exp)) is not None:
+        return _same_bit_bytes(bits, got, csv)
     if engine == "postgres" and native.endswith("[]"):
         return same_array(engine, src_lit, native, target, got)
     if target == "binary" and csv and isinstance(got, str) and not isinstance(exp, bytes):
@@ -619,6 +641,35 @@ def _rivet_bin() -> str:
     return os.environ.get("RIVET_BIN_OVERRIDE") or str(core.rivet_bin())
 
 
+def binary_refusal(path: str, version: str, head: str, named: bool) -> str:
+    """Why the binary at `path` printing `version` must not be graded, or "": missing, silent, unstamped, or built from another commit than `head` unless the operator named it."""
+    if not Path(path).is_file():
+        return f"no rivet binary at {path}: build it (cargo build --release) or name one with RIVET_BIN_OVERRIDE"
+    m = core._VERSION_STAMP.search(version)
+    if not version.strip():
+        return f"{path} printed no --version: it does not run"
+    if named:
+        return ""
+    if not m or not head.startswith(m.group(1)):
+        return f"{path} reports `{version.strip()}`, not the tree's commit {head[:9]}: a stale or unstamped binary is never graded (RIVET_BIN_OVERRIDE names one on purpose)"
+    return ""
+
+
+def binary_line() -> str:
+    """`binary: PATH (VERSION)` of the binary every cell of this matrix runs; exits 2 with the reason when it must not be graded."""
+    import subprocess
+
+    path = _rivet_bin()
+    try:
+        version = core.run([path, "--version"], timeout=30).stdout if Path(path).is_file() else ""
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+    except OSError as e:
+        raise SystemExit(f"cannot run {path}: {e}")
+    if why := binary_refusal(path, version, head, bool(os.environ.get("RIVET_BIN_OVERRIDE"))):
+        raise SystemExit(why)
+    return f"binary: {path} ({version.strip()})"
+
+
 def read_parts(out: Path, fmt: str, key: str = "id"):
     """(types by column, rows by `key` or a list when key is empty, part count) of what a run delivered, read by pyarrow and DuckDB; None when nothing was delivered."""
     return read_files(sorted(str(p) for p in data_files(out, fmt)), fmt, key)
@@ -658,6 +709,15 @@ def part_set_diff(out: Path, fmt: str) -> str:
     return "; ".join(f"{k} {[x.name for x in v][:3]}" for k, v in (("declared but missing", missing), ("present but undeclared", unlisted)) if v)
 
 
+TEXT_READ = ("TIMESTAMP_NS", "TIME_NS")
+
+
+def ns_text(ns: int) -> str:
+    """A nanosecond count since the epoch as the text DuckDB prints, read without DuckDB's own conversion that refuses the edge of its range."""
+    whole, frac = divmod(ns, 10**9)
+    return (datetime(1970, 1, 1) + timedelta(seconds=whole)).isoformat(sep=" ") + (f".{frac:09d}".rstrip("0") if frac else "")
+
+
 def read_files(parts: list[str], fmt: str, key: str = "id"):
     """As `read_parts`, for an explicit list of part files."""
     import duckdb
@@ -673,15 +733,20 @@ def read_files(parts: list[str], fmt: str, key: str = "id"):
 
             tbl = pa.concat_tables([pq.read_table(p) for p in parts], promote_options="permissive")
             wide = {f.name.lower(): f"DECIMAL({f.type.precision},{f.type.scale})" for f in tbl.schema if pa.types.is_decimal256(f.type)}
+            wide.update({f.name.lower(): "TIMESTAMP WITH TIME ZONE" for f in tbl.schema if pa.types.is_timestamp(f.type) and f.type.unit == "ns" and f.type.tz})
             for f in tbl.schema:
                 if f.name.lower() in wide:
                     tbl = tbl.set_column(tbl.schema.get_field_index(f.name), f.name, tbl.column(f.name).cast(pa.string()))
+                elif pa.types.is_timestamp(f.type) and f.type.unit == "ns":
+                    texts = pa.array([None if v is None else ns_text(v) for v in tbl.column(f.name).cast(pa.int64()).to_pylist()], pa.string())
+                    tbl = tbl.set_column(tbl.schema.get_field_index(f.name), f.name, texts)
+                    wide[f.name.lower()] = "TIMESTAMP_NS"
             con.register("nsn_parts", tbl)
             src = "nsn_parts"
         else:
-            src = f"read_csv({parts!r}, header=true, all_varchar=true, union_by_name=true, allow_quoted_nulls=false)"
+            src = f"read_csv({parts!r}, header=true, all_varchar=true, union_by_name=true, quote='\"', escape='\"', allow_quoted_nulls=false)"
         desc = {r[0].lower(): wide.get(r[0].lower(), r[1]) for r in con.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()}
-        sel = ", ".join(f'CAST("{k}" AS VARCHAR{"[]" if t.endswith("[]") else ""}) AS "{k}"' if "TIME ZONE" in t else f'"{k}"' for k, t in desc.items())
+        sel = ", ".join(f'CAST("{k}" AS VARCHAR{"[]" if t.endswith("[]") else ""}) AS "{k}"' if "TIME ZONE" in t or t in TEXT_READ else f'"{k}"' for k, t in desc.items())
         cur = con.execute(f"SELECT {sel} FROM {src}")
         names = [d[0].lower() for d in cur.description]
         rows = [dict(zip(names, r)) for r in cur.fetchall()]
@@ -713,17 +778,33 @@ class Result:
     fidelity: str = ""
 
 
-def fidelity_of(stdout: str, col: str) -> str:
-    """The fidelity `rivet check --type-report --json` states for one column."""
+def check_column(stdout: str, col: str) -> dict:
+    """The row `rivet check --type-report --json` prints for one column, empty when it prints none."""
     for ln in stdout.splitlines():
         if ln.startswith("{"):
             try:
                 for c in json.loads(ln).get("columns", []):
                     if c["column"].lower() == col.lower():
-                        return c.get("fidelity", "")
+                        return c
             except (ValueError, KeyError):
                 continue
-    return ""
+    return {}
+
+
+def fidelity_of(stdout: str, col: str) -> str:
+    """The fidelity `rivet check --type-report --json` states for one column."""
+    return check_column(stdout, col).get("fidelity", "")
+
+
+def names_value_refusal(stdout: str, col: str, code: str) -> bool:
+    """Whether check reports the column `lossy` with a note that names the run's refusal code: the value-dependent stop is then stated, not hidden."""
+    row = check_column(stdout, col)
+    return row.get("fidelity") == "lossy" and any(code in w for w in row.get("warnings", []))
+
+
+def run_names_column(p: core.Proc, col: str) -> bool:
+    """Whether the run's refusal text names the column `col` as a whole word, in any case."""
+    return re.search(rf"(?<!\w){re.escape(col)}(?!\w)", p.stderr + p.stdout, re.IGNORECASE) is not None
 
 
 def stand_refused(p: core.Proc) -> bool:
@@ -741,8 +822,8 @@ def rivet(args: list[str], env: dict, cwd: Path) -> core.Proc:
     return p
 
 
-def grade_stop(cell: str, p: core.Proc, check: core.Proc) -> Result | None:
-    """The verdict of a run that stopped non-zero: a coded refusal is fine, a crash, an uncoded stop or a check/run split is not."""
+def grade_stop(cell: str, p: core.Proc, check: core.Proc, col: str = "") -> Result | None:
+    """The verdict of a run that stopped non-zero: a coded refusal is fine, a crash, an uncoded stop or a check/run split is not; a value refusal that check states on column `col` is no split."""
     if p.returncode == 0:
         return None
     code = (CODE.search(p.stderr + p.stdout) or [None, ""])[1]
@@ -754,8 +835,12 @@ def grade_stop(cell: str, p: core.Proc, check: core.Proc) -> Result | None:
         return Result(cell, REFUSED, UNGRADED, f"another cell of this matrix holds the run lease, so no value was read: exit {p.returncode} [{code}]", code)
     if code.startswith("RIVET_CONFIG_") and code not in TYPE_REFUSALS:
         return Result(cell, REFUSED, UNGRADED, f"the harness's own config was refused before any value was read: exit {p.returncode} [{code}]", code)
+    if code == MISSING_SEED:
+        return Result(cell, REFUSED, UNGRADED, f"the seed table is not on the stand, so no value was read: exit {p.returncode} [{code}]", code)
     if not code or code.startswith("RIVET_INTERNAL"):
         return Result(cell, REFUSED, UNCODED, f"exit {p.returncode} {code or 'no code'}: {core.first_error(p.stderr)[:160]}", code)
+    if check.returncode == 0 and col and code in VALUE_REFUSALS and run_names_column(p, col) and names_value_refusal(check.stdout, col, code):
+        return Result(cell, REFUSED, "", f"check exit 0 reports `{col}` lossy and names [{code}], run stopped on a value", code)
     if check.returncode == 0:
         return Result(cell, REFUSED, SPLIT, f"check exit 0, run exit {p.returncode} [{code}]", code)
     return Result(cell, REFUSED, "", f"check exit {check.returncode} [{(CODE.search(check.stderr + check.stdout) or [None, ''])[1]}]", code)
@@ -765,7 +850,7 @@ def grade_run(engine: str, cell: str, p: core.Proc, check: core.Proc, fidelity: 
               n_rows: int, target: str, src_lits: list[str], want: frozenset[str] = frozenset(), reader=None,
               expect: list[str | None] | None = None) -> Result:
     """Grade one delivered or refused run against the source rows seeded by native SQL: the second reader over the whole output directory, never rivet's own counters or manifest."""
-    stop = grade_stop(cell, p, check)
+    stop = grade_stop(cell, p, check, col.name)
     if stop:
         return stop
     try:
@@ -903,7 +988,7 @@ def grade_mongo(cell: str, p: core.Proc, check: core.Proc, out: Path, fmt: str, 
     """Grade one Mongo cell: coded refusal, or every document delivered whole in exactly the `_id` and `document` columns and the override honoured."""
     from . import type_matrix as tm
 
-    stop = grade_stop(cell, p, check)
+    stop = grade_stop(cell, p, check, column)
     if stop:
         return stop
     try:
@@ -1112,10 +1197,34 @@ def _proc(rc: int, err: str = "") -> core.Proc:
     return core.Proc(["rivet"], rc, "", err, gated=False)
 
 
+def csv_read_keeps_apostrophes() -> bool:
+    """Whether `read_files` hands back a CSV cell with apostrophes beside an empty cell exactly as written."""
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d) / "p.csv"
+        f.write_text("id,v\n1,'a' 'b' 'c'\n2,\n")
+        _, rows, _ = read_files([str(f)], "csv")
+    return [rows[1]["v"], rows[2]["v"]] == ["'a' 'b' 'c'", None]
+
+
+def nanosecond_read_keeps_every_digit() -> bool:
+    """Whether `read_files` hands back a nanosecond timestamp (even the one at the edge of DuckDB's range), zoned timestamp and time of day with every digit."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    with tempfile.TemporaryDirectory() as d:
+        f = str(Path(d) / "p.parquet")
+        pq.write_table(pa.table({"id": pa.array([1], pa.int32()), "t": pa.array([1782208800123456700], pa.timestamp("ns")), "d": pa.array([49530123456700], pa.time64("ns")), "z": pa.array([1782208800123456700], pa.timestamp("ns", tz="UTC")), "m": pa.array([-9223372036854775800], pa.timestamp("ns"))}), f)
+        desc, rows, _ = read_files([f], "parquet")
+    got = rows[1]
+    return got["t"].endswith(".1234567") and got["d"].endswith(".1234567") and "123456700" in got["z"] and desc["z"] == "TIMESTAMP WITH TIME ZONE" \
+        and got["m"] == "1677-09-21 00:12:43.1452242" and desc["m"] == "TIMESTAMP_NS"
+
+
 def self_test() -> None:
     """Grade the grader: axes come from the product, every failure class fires on its exact harm, a delivered value passes."""
     ax = axes()
     assert {"postgres", "mysql", "mssql", "oracle", "mongo"} <= set(ax["engines"]), ax["engines"]
+    assert all(columns(e) for e in ("postgres", "mysql", "mssql", "oracle")), "every engine's ledger builds its override-grid columns"
     assert {"full", "incremental", "chunked", "cdc"} <= set(ax["modes"]) and set(ax["formats"]) == {"parquet", "csv"}, ax
     assert {"none", "float4", "float8", "int8", "bool", "decimal(38,10)", "text"} <= set(ax["targets"]), ax["targets"]
     assert {"decimal(18,-2)", "decimal(60,-2)"} <= set(ax["targets"]) and negative_scale_targets("fn parse_decimal_params let scale: u8 =") == []
@@ -1129,6 +1238,11 @@ def self_test() -> None:
     assert parse_lit("postgres", "'a\\b'") == "a\\b" and parse_lit("oracle", "TO_DATE('2024-02-29 13:14:15','YYYY-MM-DD HH24:MI:SS')") == "2024-02-29 13:14:15"
     assert parse_lit("postgres", "'\\x00ff01'::bytea") == b"\x00\xff\x01" and parse_lit("postgres", "'{\"n\":1}'::jsonb") == '{"n":1}' and parse_lit("mysql", "b'101'") == 5
     assert parse_lit("postgres", "B'0101'") == "0101" and parse_lit("postgres", "B''") == "", "a PostgreSQL bit string is its text, a MySQL bit its number"
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    assert binary_refusal(__file__, f"rivet 0.34.0 ({sha[:9]})", sha, False) == "" and binary_refusal(__file__, "rivet 0.25.0 (abcdef0)", sha, True) == ""
+    assert "no rivet binary" in binary_refusal("/nonexistent/rivet", f"rivet ({sha[:9]})", sha, False), "a missing binary is never graded"
+    assert "not the tree's commit" in binary_refusal(__file__, "rivet 0.34.0 (abcdef012)", sha, False), "a stale binary is never graded"
+    assert "not the tree's commit" in binary_refusal(__file__, "rivet 0.34.0 (unknown)", sha, False) and "does not run" in binary_refusal(__file__, "", sha, True)
     harmed = Result("c", DELIVERED, NULLED, "1 non-NULL value delivered as NULL")
     assert integrity("c", _proc(0), harmed).klass == BLIND and integrity("c", _proc(3, "[RIVET_VALIDATE_CHECKSUM]"), harmed).klass == ""
     sib = {c.native: c for c in columns("mysql")}
@@ -1136,10 +1250,16 @@ def self_test() -> None:
     hostile = next(c for n, c in sib.items() if "\U0001F600" in n)
     assert {parse_lit("mysql", v) for v in hostile.lits} >= {"a\\b", "l\nf", "c\rr", "n\0l", "\U0001F600"}, hostile.lits
     assert "'12abc'" in next(c for c in columns("mysql") if c.native == "TEXT").lits
+    for lit, native, want, ok, bad in (("b'10101010'", "BIT(8)", "aa", b"\xaa", b"\xab"), ("b'1'", "BIT(64)", "0000000000000001", b"\0" * 7 + b"\1", b"\1"), ("1", "BIT(1)", "01", b"\1", b"\0")):
+        assert compare("mysql", lit, "int", "binary", ok, native=native) == "OK" and compare("mysql", lit, "int", "binary", bad, native=native) == WRONG, (lit, "a BIT under a binary override is compared as its bytes")
+        assert compare("mysql", lit, "int", "binary", want, csv=True, native=native) == "OK" and compare("mysql", lit, "int", "binary", want[:-2] + "ff", csv=True, native=native) == WRONG, (lit, "the CSV hex of a BIT is compared as its bytes")
+    assert compare("mysql", "b'10101010'", "int", "binary", "zz", csv=True, native="BIT(8)") == WRONG and compare("mysql", "b'10101010'", "int", "binary", 170, native="BIT(8)") == WRONG, "a shape that is no bytes is WRONG, never PRESENCE"
+    assert compare("mysql", "b'101'", "int", "int8", Decimal(5), native="BIT(8)") == "OK", "a BIT under an integer override is still a number"
     assert compare("mysql", "NULL", "int", "float4", None) == "OK"
     assert compare("mysql", "7", "int", "float4", None) == NULLED, "a non-NULL value delivered as NULL is the harm of the MySQL int->float override"
     assert compare("mysql", "7", "int", "float4", None, csv=True) == NULLED and compare("mysql", "7", "int", "float4", "", csv=True) == WRONG
     assert compare("mysql", "''", "text", "none", "", csv=True) == "OK" and compare("mysql", "''", "text", "none", None, csv=True) == NULLED
+    assert parse_lit("oracle", "EMPTY_BLOB()") == b"", "an Oracle empty LOB is zero-length, never NULL"
     assert parse_lit("oracle", "HEXTORAW('')") is None and parse_lit("mysql", "UNHEX('')") == b"" and parse_lit("mysql", "x''") == b""
     assert compare("oracle", "HEXTORAW('')", "other", "none", None, native="RAW(16)") == "OK", "an Oracle empty RAW is NULL at the source"
     with tempfile.TemporaryDirectory() as fc:
@@ -1159,6 +1279,7 @@ def self_test() -> None:
     assert compare("mssql", "'2026-06-23 10:00:00 +05:30'", "other", "none", "2026-06-23 04:30:00+00", native="DATETIMEOFFSET") == "OK"
     assert compare("mysql", "'14:30:00.123456'", "other", "none", dtime(14, 30, 0, 123456), native="TIME(6)") == "OK"
     assert compare("mssql", "'23:59:59.9999999'", "other", "none", dtime(23, 59, 59, 999999), native="TIME(7)") == WRONG, "the 100 ns digit dropped"
+    assert compare("mssql", "'12:34:56.1234567'", "other", "none", Decimal("45296.1234567"), native="TIME(7)") == "OK" and compare("mssql", "'12:34:56.1234567'", "other", "none", Decimal("45296.123456"), native="TIME(7)") == WRONG, "a time as decimal seconds keeps its 100 ns digit"
     assert compare("mssql", "'2000-01-01 00:00:00.1234567'", "other", "none", "2000-01-01 00:00:00.123456700", native="DATETIME2") == "OK"
     assert compare("mssql", "'2000-01-01 00:00:00.1234567'", "other", "none", "2000-01-01 00:00:00.123456", native="DATETIME2") == WRONG
     assert compare("mysql", "'-00:00:00.5'", "other", "none", dtime(0, 0, 0, 500000), native="TIME(1)") == WRONG, "a negative time delivered positive"
@@ -1214,6 +1335,33 @@ def self_test() -> None:
     assert grade_stop("c", _proc(1, "error: boom"), no_check).klass == UNCODED
     assert grade_stop("c", _proc(6, "[RIVET_INTERNAL_TYPE_BUILDER] no builder"), no_check).klass == UNCODED
     assert grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] x"), no_check).klass == SPLIT, "check exit 0 where run refuses"
+    refusal = "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] column `c03` holds 1.123456789012345678"
+    report = lambda fid, *warnings: core.Proc(["rivet"], 0, json.dumps({"columns": [{"column": "C03", "fidelity": fid, "warnings": list(warnings)}]}), "", gated=False)
+    stated = report("lossy", "override float8 ... refused at run (RIVET_SOURCE_VALUE_UNREPRESENTABLE); this is lossy, not exact")
+    assert grade_stop("c", _proc(5, refusal), stated, "c03").klass == "", "a value refusal that check states on the column is no split"
+    assert grade_stop("c", _proc(5, refusal), stated).klass == SPLIT, "without the column the report is not read"
+    assert grade_stop("c", _proc(5, refusal), stated, "c04").klass == SPLIT, "another column's note is no statement"
+    assert grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] column `c04` holds 1.5"), stated, "c03").klass == SPLIT, "another column's refusal is no match for this column's note"
+    assert grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] column `c030` holds 1.5"), stated, "c03").klass == SPLIT, "a column whose name only starts with this one is another column"
+    assert grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] column `C03` holds 1.5"), stated, "c03").klass == "", "the column is matched in any case"
+    assert grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] column `ac03` holds 1.5"), stated, "c03").klass == SPLIT, "a column whose name only ends with this one is another column"
+    dec = Col("c03", "DECIMAL(18,2)", "Float64", "float", ("1",))
+    assert grade_run("mysql", "x", _proc(5, refusal), stated, "exact", Path("."), "csv", dec, 1, "float8", ["1"]).klass == "", "the batch grade passes the column it grades"
+    assert grade_mongo("m", _proc(5, refusal), stated, Path("."), "parquet", "c03", "float8", 1).klass == "", "the Mongo grade passes the column it grades"
+    noted_out = "note[values-unread]: rivet check reads at most the first row of an export that declares `columns:`; a run may still refuse a value it did not read with RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+    with_note = lambda fid, *warnings: core.Proc(["rivet"], 0, json.dumps({"columns": [{"column": "C03", "fidelity": fid, "warnings": list(warnings)}]}), noted_out, gated=False)
+    assert grade_stop("c", _proc(5, refusal), with_note("exact"), "c03").klass == SPLIT, "the note the product prints for every export with `columns:` excuses no refusal"
+    assert grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] column `c04` holds 1.5"), with_note("exact"), "c04").klass == SPLIT, "a refusal of a column check reports exact is a split, note or not"
+    assert grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] column `c04` holds 1.5"), with_note("lossy", "override float8 ... refused at run (RIVET_SOURCE_VALUE_UNREPRESENTABLE)"), "c04").klass == SPLIT, "another column's lossy row is no statement of this column"
+    assert grade_stop("c", _proc(5, refusal), with_note("lossy", "override float8 ... refused at run (RIVET_SOURCE_VALUE_UNREPRESENTABLE)"), "c03").klass == "", "a lossy row naming the code on the refused column is stated, note or not"
+    wire = report("lossy", "override timestamp_ns ... refused at run (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH); this is lossy, not exact")
+    assert grade_stop("c", _proc(5, refusal), wire, "c03").klass == SPLIT, "a lossy note that names another code is no statement of this refusal"
+    assert grade_stop("c", _proc(5, refusal), report("exact"), "c03").klass == SPLIT, "an exact column that the run refuses is a split"
+    assert grade_stop("c", _proc(5, refusal), report("lossy", "reduces scale"), "c03").klass == SPLIT, "a lossy note that does not name the refusal is no statement"
+    assert grade_stop("c", _proc(5, refusal), report("logical_string", "RIVET_SOURCE_VALUE_UNREPRESENTABLE"), "c03").klass == SPLIT
+    assert grade_stop("c", _proc(5, "[RIVET_SOURCE_CDC_UNDECODABLE] x"), stated, "c03").klass == SPLIT, "only a value refusal can be stated by a report"
+    undecodable = report("lossy", "refused at run (RIVET_SOURCE_CDC_UNDECODABLE); this is lossy, not exact")
+    assert grade_stop("c", _proc(5, "[RIVET_SOURCE_CDC_UNDECODABLE] column `c03` x"), undecodable, "c03").klass == SPLIT, "a code outside the value refusals is never stated by a note"
     assert grade_stop("c", _proc(5, "[RIVET_SOURCE_CONNECT_FAILED] listener refused"), _proc(0)).klass == NOT_GRADED, "a stand that would not connect is not a graded refusal"
     assert grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] x"), _proc(5, "[RIVET_SOURCE_CONNECT_FAILED] x")).klass == NOT_GRADED
     probe = _proc(0, "WARN rivet::preflight] type report for 'nsn' failed: oracle: listener at host \"127.0.0.1\" port 1521 refused connection.")
@@ -1221,6 +1369,7 @@ def self_test() -> None:
     assert grade_stop("c", _proc(1, "[RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH] x"), probe).klass == NOT_GRADED, "a check whose type probe never ran is no evidence of a split"
     assert grade_stop("c", _proc(2, "[RIVET_CONFIG_COLUMN_OVERRIDE_CASE] x"), _proc(2)).klass == UNGRADED, "a refusal of the harness's own config is not a graded refusal"
     assert grade_stop("c", _proc(2, "[RIVET_STATE_RUN_IN_PROGRESS] x"), _proc(0)).klass == UNGRADED, "a lease refusal between two cells is not a graded refusal"
+    assert grade_stop("c", _proc(5, f"[{MISSING_SEED}] x"), _proc(5, f"[{MISSING_SEED}] x")).klass == UNGRADED, "a stand that lost the seed table is no refusal that check and run agree on"
     seen: dict = {}
     real_run = core.run
     core.run = lambda argv, **kw: seen.update(kw["env"]) or _proc(0)
@@ -1354,6 +1503,9 @@ def _reader_self_test() -> bool:
         import pyarrow.parquet as pq
     except ImportError:
         return False
+    assert _same_instant("mssql", "TIME", "00:00:00.0000001", Decimal("0.0000001")) == "OK" and _same_instant("mssql", "TIME", "00:00:00.0000001", Decimal("0")) == WRONG, "a 100ns tick is graded in seconds-of-day, never dropped to the microsecond"
+    assert nanosecond_read_keeps_every_digit(), "a nanosecond column is read as the text DuckDB holds, never a microsecond datetime"
+    assert csv_read_keeps_apostrophes(), "a CSV cell with apostrophes is read as written, never re-quoted by DuckDB dialect sniffing"
     col = Col("c00", "INT", "Int32", "int", ("1", "16777217", "-5"))
     with tempfile.TemporaryDirectory() as t:
         root = Path(t)
@@ -1440,6 +1592,7 @@ def main() -> int:
     if ns.self_test:
         self_test()
         return 0
+    print(binary_line(), flush=True)
     t0 = time.time()
     names = [e for e in axes()["engines"] if e in STAND] if ns.engine == "all" else [ns.engine]
     results: list[Result] = []

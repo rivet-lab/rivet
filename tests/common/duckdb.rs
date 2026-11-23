@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::process::Command;
 
 use super::env::DUCKDB_CONTAINER;
+use super::state::state_attach_sql;
 
 /// Re-exported under the historical `duckdb_*` names so existing call sites
 /// keep working. The implementations live in [`super::env`] because both
@@ -97,13 +98,20 @@ con = duckdb.connect()
 con.execute("SET enable_progress_bar=false")
 con.execute("SET TimeZone='UTC'")
 setup = {setup}
-if setup.strip():
-    con.execute(setup)
+try:
+    if setup.strip():
+        con.execute(setup)
+except Exception as e:
+    sys.exit(f"duckdb session setup failed: {{type(e).__name__}}: {{e}}")
 out = {{}}
 for name, q in [{qs}]:
-    cur = con.execute(q)
+    try:
+        cur = con.execute(q)
+        rows = cur.fetchall()
+    except Exception as e:
+        sys.exit(f"duckdb session query {{name!r}} failed: {{type(e).__name__}}: {{e}}")
     out[name] = {{"columns": [d[0] for d in cur.description],
-                 "rows": [[None if v is None else str(v) for v in r] for r in cur.fetchall()]}}
+                 "rows": [[None if v is None else str(v) for v in r] for r in rows]}}
 sys.stdout.write(json.dumps(out))
 "#,
         setup = python_repr(setup),
@@ -707,21 +715,6 @@ pub fn duckdb_row_census(
     key: Option<&str>,
 ) -> RowCensus {
     let (attach, from) = engine.source_sql(database, table);
-    // The state backend is whatever the run used: a `.rivet_state.db` file
-    // (SQLite, the default) or a Postgres URL when RIVET_STATE_URL is set. The
-    // census attached sqlite unconditionally, so it simply could not grade the
-    // gate's Postgres pass — the backend under test half the time.
-    let (state_load, state_attach) = if state_db.starts_with("postgres") {
-        (
-            "INSTALL postgres; LOAD postgres;".to_string(),
-            format!("ATTACH '{state_db}' AS st (TYPE postgres, READ_ONLY);"),
-        )
-    } else {
-        (
-            "INSTALL sqlite; LOAD sqlite;".to_string(),
-            format!("ATTACH '{state_db}' AS st (TYPE sqlite, READ_ONLY);"),
-        )
-    };
     // The manifest leg. SUCCESS only — a failed run's parts are gc candidates,
     // the rule four resolvers were fixed for on 2026-08-29. `union_by_name`
     // because manifests grew fields across versions and a fixed-order read
@@ -748,7 +741,7 @@ pub fn duckdb_row_census(
         None => ("NULL".to_string(), "NULL".to_string()),
     };
     let sql = format!(
-        "{load} {state_load} {attach} {state_attach} \
+        "{load} {attach} {state_attach} \
          SELECT (SELECT count(*) FROM {from}) AS source, \
                 (SELECT count(*) FROM read_parquet('{dest_glob}')) AS delivered, \
                 (SELECT coalesce(sum(total_rows), 0) FROM st.export_metrics \
@@ -759,6 +752,7 @@ pub fn duckdb_row_census(
                 {src_distinct} AS source_distinct, \
                 {del_distinct} AS delivered_distinct",
         load = engine.load_sql(),
+        state_attach = state_attach_sql(state_db, "st"),
     );
     let v = duckdb_run_sql_json(&sql);
     let (value_mismatches, missing_columns) = match key {

@@ -296,6 +296,11 @@ fn backfill_recipes_to_skip(exports: &[ExportConfig]) -> std::collections::HashS
     recipes
 }
 
+/// Whether any of `exports` declares a `columns:` override map.
+pub fn any_declares_columns(exports: &[ExportConfig]) -> bool {
+    exports.iter().any(|e| !e.columns.is_empty())
+}
+
 /// The exports an invocation was asked for: one named export, or the whole config minus the CDC backfill recipes.
 pub fn declared_exports(
     config: &super::Config,
@@ -993,6 +998,17 @@ mod tests {
             &format!("until_current: true, publication: {},", "x".repeat(63)),
         );
         crate::config::Config::from_yaml(&ok).expect("63 bytes is the identifier limit");
+    }
+
+    /// Only an export with a non-empty `columns:` map makes the set declare columns.
+    #[test]
+    fn a_set_declares_columns_only_when_one_export_has_a_columns_map() {
+        let plain = sample_export("plain");
+        let mut typed = sample_export("typed");
+        typed.columns.insert("v".to_string(), "int64".to_string());
+        assert!(!any_declares_columns(&[]));
+        assert!(!any_declares_columns(std::slice::from_ref(&plain)));
+        assert!(any_declares_columns(&[plain, typed]));
     }
 
     /// A batch export reading one table, named as a recipe candidate.

@@ -330,14 +330,14 @@ def _oracle_cursor(url: str):
         yield cur
 
 
-def oracle_describe(url: str, sql: str) -> list[tuple[str, bool]]:
-    """`(column name, zoned)` of the SELECT `sql`, parsed and not run; zoned is TIMESTAMP WITH [LOCAL] TIME ZONE, which python-oracledb returns naive."""
+def oracle_describe(url: str, sql: str) -> list[tuple[str, bool, bool]]:
+    """`(column name, zoned, stamp)` of the SELECT `sql`, parsed and not run; zoned is TIMESTAMP WITH [LOCAL] TIME ZONE, which python-oracledb returns naive; stamp is any TIMESTAMP."""
     import oracledb
 
     with _oracle_cursor(url) as cur:
         cur.parse(sql)
         zoned = (oracledb.DB_TYPE_TIMESTAMP_TZ, oracledb.DB_TYPE_TIMESTAMP_LTZ)
-        return [(d[0], d[1] in zoned) for d in cur.description]
+        return [(d[0], d[1] in zoned, d[1] in zoned or d[1] == oracledb.DB_TYPE_TIMESTAMP) for d in cur.description]
 
 
 def mysql_describe(url: str, sql: str) -> list[tuple[str, int, int]]:
@@ -543,7 +543,7 @@ def chain_census(
     """Source, declared manifests, parquet footers in GCS, rivet's ledger and BigQuery, counted in ONE DuckDB session for one run."""
     from .duck import Oracle
 
-    attach, src_prefix = source_attach(engine, url)
+    attach, src_prefix = ({}, "") if engine == "oracle" else source_attach(engine, url)
     root = f"gs://{bucket}/{prefix.strip('/')}"
     with Oracle(bigquery=True, bq_dataset=dataset, gcs=True, state=state, **attach) as ora:
         mans = fetch(ora, f"SELECT * FROM read_json_auto('{root}/manifest-*.json', union_by_name = true)")
@@ -560,7 +560,7 @@ def chain_census(
         one = lambda sql: ora.db.sql(sql).fetchone()[0]  # noqa: E731
         return {
             "run_ids": run_ids,
-            "source": one(f"SELECT count(*) FROM {src_prefix}.{table}"),
+            "source": int(oracle_rows(url, f"SELECT COUNT(*) AS n FROM {table}")[0]["N"]) if engine == "oracle" else one(f"SELECT count(*) FROM {src_prefix}.{table}"),
             "manifest": sum(int(m.get("row_count") or 0) for m in ok),
             "footers": one(f"SELECT coalesce(sum(num_rows), 0) FROM parquet_file_metadata([{lst}])") if declared else 0,
             "undeclared": sorted(set(held) - set(declared)),
@@ -592,12 +592,24 @@ def chain_disagreements(c: dict) -> list[str]:
     return out
 
 
+def _oracle_against_dest(ora, url: str, table: str, dest: str) -> tuple[int, list[str]]:
+    """`diff_rows` of the Oracle table (read by python-oracledb) against `dest` in the session `ora`; unreadable text is a finding."""
+    bad = invalid_text_columns(ora, dest)
+    if bad:
+        return 0, [f"STRING column(s) {bad} hold bytes that are not UTF-8 — unreadable as text"]
+    dst = fetch(ora, f"SELECT * FROM {dest} ORDER BY id")
+    return len(dst), diff_rows(oracle_rows(url, oracle_table_select(url, table)), dst, key="ID")
+
+
 def compare_to_bigquery(
     engine: str, url: str, dataset: str, table: str, warehouse_table: str | None = None
 ) -> tuple[int, list[str]]:
     """(warehouse rows, differences) between the source table and its BigQuery load (`warehouse_table`, default the same name), read by DuckDB on both sides."""
     from .duck import Oracle
 
+    if engine == "oracle":
+        with Oracle(bigquery=True, bq_dataset=dataset) as ora:
+            return _oracle_against_dest(ora, url, table, f"bq.{dataset}.{warehouse_table or table}")
     attach, prefix = source_attach(engine, url)
     with Oracle(bigquery=True, bq_dataset=dataset, **attach) as ora:
         return _rows_against_source(ora, engine, prefix, table, f"bq.{dataset}.{warehouse_table or table}")
@@ -611,12 +623,7 @@ def compare_rows_to_parquet(
 
     if engine == "oracle":
         with Oracle() as ora:
-            dest = f"(SELECT * FROM {parquet})"
-            bad = invalid_text_columns(ora, dest)
-            if bad:
-                return 0, [f"STRING column(s) {bad} hold bytes that are not UTF-8 — unreadable as text"]
-            dst = fetch(ora, f"SELECT * FROM {dest} ORDER BY id")
-        return len(dst), diff_rows(oracle_rows(url, oracle_table_select(url, table)), dst, key="ID")
+            return _oracle_against_dest(ora, url, table, f"(SELECT * FROM {parquet})")
     attach, prefix = source_attach(engine, url)
     with Oracle(**attach) as ora:
         return _rows_against_source(ora, engine, prefix, table, f"(SELECT * FROM {parquet})", declared_null, lost)

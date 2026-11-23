@@ -94,61 +94,14 @@ jobs:
 
       - name: Wait for services
         run: |
-          echo "Waiting for Postgres..."
-          for i in $(seq 1 30); do docker compose exec -T postgres pg_isready -U rivet && break || sleep 2; done
-          echo "Waiting for the Postgres state server, then its per-run database (RIVET_TEST_STATE_URL)..."
-          for i in $(seq 1 30); do docker compose exec -T postgres-state pg_isready -U rivet && break || sleep 2; done
+          python3 -m dev.pytools.stand_wait
           docker compose exec -T postgres-state psql -U rivet -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE rivet_state_ci"
-          echo "Waiting for MySQL..."
-          for i in $(seq 1 30); do docker compose exec -T mysql mysqladmin ping -h localhost -uroot -privet 2>/dev/null && break || sleep 2; done
-          echo "Waiting for pgBouncer..."
-          for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/6432) 2>/dev/null && break || sleep 1; done
-          echo "Waiting for pgBouncer in front of the state server..."
-          for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/6433) 2>/dev/null && break || sleep 1; done
-          echo "Waiting for ProxySQL..."
-          # 6033 is the client-facing MySQL protocol port; 6032 admin comes
-          # up first but we wait for 6033 so backend wiring is in place.
-          for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/6033) 2>/dev/null && break || sleep 1; done
-          echo "Waiting for ProxySQL in front of the +03:00 MySQL (mysql-tz, D5)..."
-          for i in $(seq 1 60); do (exec 3<>/dev/tcp/127.0.0.1/6097) 2>/dev/null && break || sleep 1; done
-          echo "Waiting for Azurite..."
-          # Blob emulator on :10000 — cloud_multipart_azure_* needs it. It was missing
-          # from `up` here (the e2e job has it) and panicked the whole nightly suite nightly.
-          for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/10000) 2>/dev/null && break || sleep 1; done
-          echo "Waiting for ClickHouse..."
-          # HTTP :8123/ping — the type_roundtrip clickhouse_load tests connect here.
-          for i in $(seq 1 30); do curl -sf localhost:8123/ping >/dev/null 2>&1 && break || sleep 2; done
-          echo "Waiting for duckdb loader..."
-          # Long-running exec container; wait until its `import duckdb` healthcheck passes.
-          for i in $(seq 1 30); do [ "$(docker inspect -f '{{.State.Health.Status}}' rivet-duckdb 2>/dev/null)" = "healthy" ] && break || sleep 2; done
-          echo "Waiting for SQL Server..."
-          # sqlcmd SELECT-1 healthcheck (start_period 30s); the live_mssql_* suites
-          # connect + seed against it.
-          for i in $(seq 1 40); do [ "$(docker inspect -f '{{.State.Health.Status}}' rivet-mssql 2>/dev/null)" = "healthy" ] && break || sleep 2; done
-          echo "Waiting for Oracle..."
-          # gvenzl faststart creates the app user on first start; healthcheck.sh is ready once the PDB takes logins.
-          for i in $(seq 1 90); do docker compose exec -T oracle healthcheck.sh >/dev/null 2>&1 && break || sleep 2; done
-          echo "Waiting for Mongo..."
-          for i in $(seq 1 30); do docker compose exec -T mongo sh -c "mongosh --quiet --eval 'db.runCommand({ping:1})' || mongo --quiet --eval 'db.runCommand({ping:1})'" >/dev/null 2>&1 && break || sleep 2; done
-          echo "Waiting for CDC services (cdc profile)..."
-          for i in $(seq 1 30); do docker compose exec -T postgres-cdc pg_isready -U rivet && break || sleep 2; done
-          for i in $(seq 1 30); do docker compose exec -T mysql-cdc mysqladmin ping -h localhost -uroot -privet 2>/dev/null && break || sleep 2; done
-          for i in $(seq 1 40); do docker compose exec -T mssql-cdc /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -Q 'SELECT 1' >/dev/null 2>&1 && break || sleep 2; done
-          docker compose exec -T mssql-cdc /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -Q "IF DB_ID('rivet') IS NULL CREATE DATABASE rivet;"
-          echo "Waiting for SQL Server (governor instance)..."
-          # The dedicated governor instance (`mssql-governor`, :1435) was added to
-          # the e2e job's stack on 2026-08-17 and MISSED here — the runner-bypass
-          # class, in workflow YAML: two hand-maintained service lists, and the
-          # nightly's fell behind on the first change. Both governor canaries then
-          # failed the 08-19 nightly with "requires MssqlGovernor reachable on
-          # :1435". Same wait + same database seed as the e2e job; its two canaries
-          # seed their own tables.
-          for i in $(seq 1 40); do docker compose exec -T mssql-governor /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -Q 'SELECT 1' >/dev/null 2>&1 && break || sleep 2; done
-          docker compose exec -T mssql-governor /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -Q "IF DB_ID('rivet') IS NULL CREATE DATABASE rivet;"
+          docker compose exec -T mssql-cdc /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -b -Q "IF DB_ID('rivet') IS NULL CREATE DATABASE rivet;"
+          docker compose exec -T mssql-governor /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -b -Q "IF DB_ID('rivet') IS NULL CREATE DATABASE rivet;"
 
       - name: Seed light fixtures (orders, etc.)
         run: |
-          PGPASSWORD=rivet psql -h localhost -U rivet -d rivet -f dev/e2e/seed_pg.sql
+          PGPASSWORD=rivet psql -h localhost -U rivet -d rivet -v ON_ERROR_STOP=1 -f dev/e2e/seed_pg.sql
           mysql -h 127.0.0.1 -u rivet -privet rivet < dev/e2e/seed_mysql.sql
 
       - name: Seed Oracle database
@@ -161,7 +114,7 @@ jobs:
         run: |
           docker compose cp dev/mssql/init.sql mssql:/tmp/init.sql
           docker compose exec -T mssql /opt/mssql-tools18/bin/sqlcmd \
-            -S localhost -U sa -P 'Rivet_Passw0rd!' -C -i /tmp/init.sql
+            -S localhost -U sa -P 'Rivet_Passw0rd!' -C -b -i /tmp/init.sql
 
       - name: Seed heavy fixture (content_items)
         # tests/live_content_load.rs asserts count >= 50_000 for the
@@ -635,41 +588,12 @@ jobs:
 
       - name: Wait for services
         run: |
-          echo "Waiting for Postgres..."
-          for i in $(seq 1 30); do docker compose exec -T postgres pg_isready -U rivet && break || sleep 2; done
-          echo "Waiting for the Postgres state server, then its per-run database (RIVET_TEST_STATE_URL)..."
-          for i in $(seq 1 30); do docker compose exec -T postgres-state pg_isready -U rivet && break || sleep 2; done
+          python3 -m dev.pytools.stand_wait
           docker compose exec -T postgres-state psql -U rivet -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE rivet_state_ci"
-          echo "Waiting for MySQL..."
-          for i in $(seq 1 30); do docker compose exec -T mysql mysqladmin ping -h localhost -uroot -privet 2>/dev/null && break || sleep 2; done
-          echo "Waiting for pgBouncer..."
-          for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/6432) 2>/dev/null && break || sleep 1; done
-          echo "Waiting for pgBouncer in front of the state server..."
-          for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/6433) 2>/dev/null && break || sleep 1; done
-          echo "Waiting for ProxySQL..."
-          for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/6033) 2>/dev/null && break || sleep 1; done
-          echo "Waiting for ProxySQL in front of the +03:00 MySQL (mysql-tz, D5)..."
-          for i in $(seq 1 60); do (exec 3<>/dev/tcp/127.0.0.1/6097) 2>/dev/null && break || sleep 1; done
-          echo "Waiting for Azurite..."
-          for i in $(seq 1 30); do (exec 3<>/dev/tcp/127.0.0.1/10000) 2>/dev/null && break || sleep 1; done
-          echo "Waiting for SQL Server..."
-          for i in $(seq 1 40); do docker compose exec -T mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -Q 'SELECT 1' >/dev/null 2>&1 && break || sleep 2; done
-          for i in $(seq 1 40); do docker compose exec -T mssql-governor /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -Q 'SELECT 1' >/dev/null 2>&1 && break || sleep 2; done
-          echo "Waiting for CDC services (cdc profile)..."
-          for i in $(seq 1 30); do docker compose exec -T postgres-cdc pg_isready -U rivet && break || sleep 2; done
-          for i in $(seq 1 30); do docker compose exec -T mysql-cdc mysqladmin ping -h localhost -uroot -privet 2>/dev/null && break || sleep 2; done
-          for i in $(seq 1 40); do docker compose exec -T mssql-cdc /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Rivet_Passw0rd!' -C -Q 'SELECT 1' >/dev/null 2>&1 && break || sleep 2; done
-          echo "Waiting for replica pair (replica profile)..."
-          for i in $(seq 1 30); do docker compose exec -T mysql-primary mysqladmin ping -h localhost -uroot -privet 2>/dev/null && break || sleep 2; done
-          for i in $(seq 1 60); do docker compose exec -T mysql-stmt-84-lctn1 mysql -h 127.0.0.1 -uroot -e "select 1" >/dev/null 2>&1 && break || sleep 2; done
-          for i in $(seq 1 30); do docker compose exec -T mysql-replica mysqladmin ping -h localhost -uroot -privet 2>/dev/null && break || sleep 2; done
-          for i in $(seq 1 90); do docker compose exec -T oracle healthcheck.sh >/dev/null 2>&1 && break || sleep 2; done
-          echo "Waiting for Mongo..."
-          for i in $(seq 1 30); do docker compose exec -T mongo sh -c "mongosh --quiet --eval 'db.runCommand({ping:1})' || mongo --quiet --eval 'db.runCommand({ping:1})'" >/dev/null 2>&1 && break || sleep 2; done
 
       - name: Seed databases
         run: |
-          PGPASSWORD=rivet psql -h 127.0.0.1 -U rivet -d rivet -f dev/e2e/seed_pg.sql
+          PGPASSWORD=rivet psql -h 127.0.0.1 -U rivet -d rivet -v ON_ERROR_STOP=1 -f dev/e2e/seed_pg.sql
           mysql -h 127.0.0.1 -u rivet -privet rivet < dev/e2e/seed_mysql.sql
 
       - name: Seed Oracle database
@@ -679,18 +603,18 @@ jobs:
         run: |
           docker compose cp dev/mssql/init.sql mssql:/tmp/init.sql
           docker compose exec -T mssql /opt/mssql-tools18/bin/sqlcmd \
-            -S localhost -U sa -P 'Rivet_Passw0rd!' -C -i /tmp/init.sql
+            -S localhost -U sa -P 'Rivet_Passw0rd!' -C -b -i /tmp/init.sql
 
       - name: Seed MSSQL-governor database
         run: |
           docker compose exec -T mssql-governor /opt/mssql-tools18/bin/sqlcmd \
-            -S localhost -U sa -P 'Rivet_Passw0rd!' -C \
+            -S localhost -U sa -P 'Rivet_Passw0rd!' -C -b \
             -Q "IF DB_ID('rivet') IS NULL CREATE DATABASE rivet;"
 
       - name: Seed MSSQL-CDC database
         run: |
           docker compose exec -T mssql-cdc /opt/mssql-tools18/bin/sqlcmd \
-            -S localhost -U sa -P 'Rivet_Passw0rd!' -C \
+            -S localhost -U sa -P 'Rivet_Passw0rd!' -C -b \
             -Q "IF DB_ID('rivet') IS NULL CREATE DATABASE rivet;"
 
       - name: Type-golden tests (semantic gate)

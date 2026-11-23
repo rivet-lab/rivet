@@ -34,6 +34,7 @@ Fail = shell.Fail
 DOCGEN = ROOT / "dev" / "docgen"
 EXPAND_INCLUDES = DOCGEN / "expand_includes.py"
 CONFIG_MD = DOCGEN / "config_md.py"
+TYPE_DELIVERY_TABLE = DOCGEN / "type_delivery_table.py"
 
 # `sys.executable`, not a bare "python3": the helpers must run under the same
 # interpreter as this module, not whichever python3 happens to be first on PATH.
@@ -80,6 +81,7 @@ def generators(rivet: str) -> tuple[Generated, ...]:
         Generated(out="docs/reference/cli-reference.md", argv=(rivet, "schema", "cli")),
         # Error codes — from the code registry (`codes::ALL` in src/error.rs).
         Generated(out="docs/reference/errors.md", argv=(rivet, "schema", "errors")),
+        Generated(out="docs/type-delivery-table.md", argv=(PY, str(TYPE_DELIVERY_TABLE))),
     )
 
 

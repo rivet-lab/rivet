@@ -568,6 +568,15 @@ scenarios:
     mongo_parallel: { na: "shared seam (execute_resolved_plan, before the dispatch); a Mongo export's schema is the fixed {_id, document, meta} shape, so it has no lossy column to refuse" }
     cdc:            { test: oracle_cdc_timestamp9_is_refused_until_declared_and_a_declared_timestamp_delivers_the_row }
 
+  - id: narrowing_time_override_is_graded_by_the_result_column
+    what: "a `timestamp` or `timestamp_tz` override over a result column finer than a microsecond (SQL Server datetime2(7) / datetimeoffset(7), Oracle TIMESTAMP(7..9) with or without a time zone) reads `lossy` in `check --type-report` and is refused by `run --strict` with RIVET_TYPE_UNSAFE_MAPPING; the verdict follows the column the query returns (an alias or a join stays lossy, a CAST to a coarser type stays exact, a describe that fails grades the column lossy with its cause); the default policy runs and delivers the microsecond truncation; `downgrade_narrowing_overrides` is the one grading, reached by `probe_mappings` (batch, check, type report) and by `CdcSchemaResolver::resolve` (CDC)"
+    single:         { test: a_mssql_batch_time_override_is_graded_by_the_result_column_it_lands_on }
+    chunked:        { na: "shared seam: plan_open_columns grades the probe's mappings in execute_resolved_plan before the strategy dispatch" }
+    chunked_checkpoint: { na: "shared seam (execute_resolved_plan, before the dispatch)" }
+    keyset:         { na: "shared seam (execute_resolved_plan, before the dispatch)" }
+    mongo_parallel: { na: "a Mongo export's schema is the fixed {_id, document, meta} shape, so it has no time column to override" }
+    cdc:            { test: a_mssql_cdc_time_override_is_graded_as_the_batch_override }
+
   - id: oracle_value_the_type_cannot_carry_is_refused
     what: "an Oracle NUMBER or FLOAT holding infinity (or an exact 1E125 the client prints with the same bytes) and an INTERVAL DAY TO SECOND with a sub-microsecond fraction stop the run with RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5), naming the column and the `TO_CHAR(col) AS col` remedy, before any part is written (a CDC run refuses the NUMBER infinity LogMiner prints as `~` the same way); finite values and microsecond-exact intervals are delivered unchanged"
     single:         { test: an_oracle_number_infinity_is_refused_by_code_and_to_char_delivers_the_server_text }
@@ -577,9 +586,27 @@ scenarios:
     mongo_parallel: { na: "a Mongo export has no Oracle column" }
     cdc:            { test: oracle_batch_and_cdc_deliver_number_and_float_specials_alike }
 
+  - id: clickhouse_load_refuses_a_null_array
+    what: "a part holding a NULL list column value is refused by `rivet load` into ClickHouse with RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE (exit 5) naming the column and the `COALESCE(col, '{}') AS col` and `col::text AS col` remedies, before a table is created or a row inserted, because a ClickHouse Array cannot be NULL and the load would turn it into []; an empty list, a list with a NULL element and a change-log delete row (non-key columns NULL) load unchanged (one seam: checked_part_rows reads the list leaf columns of every part, for a full load and a change log alike)"
+    single:         { test: a_null_array_is_refused_not_loaded_as_an_empty_array }
+    chunked:        { na: "shared seam: checked_part_rows runs in the load over the committed parts, whichever runner wrote them" }
+    chunked_checkpoint: { na: "shared seam (checked_part_rows in the load, over the committed parts)" }
+    keyset:         { na: "shared seam (checked_part_rows in the load, over the committed parts)" }
+    mongo_parallel: { na: "a Mongo export has no list column" }
+    cdc:            { test: a_postgres_cdc_delete_of_a_row_with_an_array_column_still_loads_and_a_null_array_insert_is_refused }
+
+  - id: clickhouse_cdc_null_array_refusal_names_the_rebaseline
+    what: "the NULL-list refusal of a `mode: cdc` export (a change-log part or the baseline) names the re-baseline recipe and a source fix, never a `query:` rewrite its config cannot hold, and says the staged part keeps the refusal until the stream is re-baselined; after the source fix and the printed re-baseline the stream loads and the view equals the source (one seam: null_list_remedy keyed by the loader's part role)"
+    single:         { na: "a batch export has a `query:`, and keeps the COALESCE and ::text remedies (a_null_array_is_refused_not_loaded_as_an_empty_array)" }
+    chunked:        { na: "a batch export has a `query:`, and keeps the COALESCE and ::text remedies" }
+    chunked_checkpoint: { na: "a batch export has a `query:`, and keeps the COALESCE and ::text remedies" }
+    keyset:         { na: "a batch export has a `query:`, and keeps the COALESCE and ::text remedies" }
+    mongo_parallel: { na: "a Mongo export has no list column" }
+    cdc:            { test: a_cdc_null_array_refusal_names_the_rebaseline_not_a_query_and_the_rebaseline_loads }
+
   - id: check_plan_doctor_refuse_what_run_refuses
     what: "a batch export, or the pending baseline leg of a `mode: cdc` export (`initial: snapshot` or `backfill:` with no `snapshot/_SUCCESS` marker: `pending_snapshot_legs`), whose column the export's `format:` cannot write, or that no Arrow type carries and no `columns:` entry declares, is refused before any read by `check`, `doctor` and `run` (and by `plan` for a batch export) with the same code (RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED, RIVET_TYPE_UNSAFE_MAPPING): one `plan_open_columns` (format::refuse_unwritable_columns) and one `refuse_unmapped` in `probe_mappings`, both reached through `plan_run`"
-    single:         { test: a_column_without_an_arrow_type_is_refused_by_check_like_the_run_postgres }
+    single:         { test: a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mysql }
     chunked:        { na: "shared seam: plan_open_columns and probe_mappings run in plan_run/execute_resolved_plan before the strategy dispatch" }
     chunked_checkpoint: { na: "shared seam (plan_run, before the dispatch)" }
     keyset:         { na: "shared seam (plan_run, before the dispatch)" }
