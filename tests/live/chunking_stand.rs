@@ -2956,7 +2956,7 @@ fn stand_pool_split_keyset_recovers_a_crash_postgres() {
         &dense_ids(300_000),
         Some((300_001, 450_000)),
         "chunk_by_key: id",
-        ("RIVET_TEST_PANIC_AT", "after_keyset_page:1"),
+        ("RIVET_TEST_PANIC_AT", "after_keyset_page:0"),
     );
 }
 
@@ -2973,7 +2973,7 @@ fn stand_pool_split_keyset_rerun_without_resume_after_a_crash_postgres() {
         &dense_ids(300_000),
         Some((300_001, 450_000)),
         "chunk_by_key: id",
-        ("RIVET_TEST_PANIC_AT", "after_keyset_page:1"),
+        ("RIVET_TEST_PANIC_AT", "after_keyset_page:0"),
         false,
     );
 }
@@ -2989,7 +2989,7 @@ fn stand_pool_split_keyset_recovers_a_crash_mysql() {
         &dense_ids(300_000),
         Some((300_001, 450_000)),
         "chunk_by_key: id",
-        ("RIVET_TEST_PANIC_AT", "after_keyset_page:1"),
+        ("RIVET_TEST_PANIC_AT", "after_keyset_page:0"),
     );
 }
 
@@ -3004,7 +3004,7 @@ fn stand_pool_split_keyset_recovers_a_crash_mssql() {
         &dense_ids(300_000),
         Some((300_001, 450_000)),
         "chunk_by_key: id",
-        ("RIVET_TEST_PANIC_AT", "after_keyset_page:1"),
+        ("RIVET_TEST_PANIC_AT", "after_keyset_page:0"),
     );
 }
 
@@ -3428,7 +3428,7 @@ mod oracle_cells {
             &dense_ids(300_000),
             Some((300_001, 450_000)),
             "chunk_by_key: ID",
-            ("RIVET_TEST_PANIC_AT", "after_keyset_page:1"),
+            ("RIVET_TEST_PANIC_AT", "after_keyset_page:0"),
         );
     }
 }

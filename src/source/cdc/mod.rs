@@ -1288,13 +1288,22 @@ impl<'s> CdcSchemaResolver<'s> {
                 m.source_native_type = ct.to_string();
             }
         }
-        mappings
+        refuse_by_override_table(self.source(), &select, &mappings, overrides)?;
+        let declared = mappings.clone();
+        let mut planned = mappings
             .into_iter()
             .map(|m| match overrides.contains_key(&m.column_name) {
                 true => retype_for_stream(m, overrides),
                 false => plan_cdc_delivery(m, false),
             })
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        crate::types::narrowing::downgrade_narrowing_overrides(
+            &mut planned,
+            overrides,
+            || Ok(declared),
+            || self.source().finer_than_microsecond_in_query(&select),
+        )?;
+        Ok(planned)
     }
 }
 
@@ -1317,7 +1326,7 @@ pub(crate) fn retype_for_stream(
     )
 }
 
-/// `columns:` overrides of a stream export, graded by the CDC cell builder and not by the batch override table.
+/// `columns:` overrides of a stream export, graded by the batch override table where it decides and by the CDC cell builder after it.
 pub(crate) fn stream_override_refusal(
     src: &mut dyn crate::source::Source,
     query: &str,
@@ -1326,9 +1335,38 @@ pub(crate) fn stream_override_refusal(
     let Ok(mappings) = src.type_mappings(query, &crate::types::ColumnOverrides::new()) else {
         return Ok(());
     };
+    refuse_by_override_table(src, query, &mappings, overrides)?;
     mappings
         .into_iter()
         .try_for_each(|m| retype_for_stream(m, overrides).map(drop))
+}
+
+/// An integer override over a numeric, float or text column is the batch table's pair, so the stream, the baseline and `check` refuse it alike before any row.
+pub(crate) fn refuse_by_override_table(
+    src: &mut dyn crate::source::Source,
+    query: &str,
+    detected: &[crate::types::TypeMapping],
+    overrides: &crate::types::ColumnOverrides,
+) -> Result<()> {
+    use crate::types::RivetType as T;
+    let routed: crate::types::ColumnOverrides = detected
+        .iter()
+        .filter_map(|m| {
+            let target = overrides.get(&m.column_name)?;
+            matches!(
+                (&m.rivet_type, target),
+                (
+                    T::Decimal { .. } | T::Float32 | T::Float64 | T::String | T::Text,
+                    T::Int16 | T::Int32 | T::Int64 | T::UInt64
+                )
+            )
+            .then(|| (m.column_name.clone(), target.clone()))
+        })
+        .collect();
+    if seeded!("cdc-integer-override-skips-table", true, routed.is_empty()) {
+        return Ok(());
+    }
+    src.type_mappings(query, &routed).map(drop)
 }
 
 /// The CDC plan for one column: kept when the builder builds it, else the server's own text.
@@ -1688,6 +1726,66 @@ mod mod_decisions {
                 Err(e) => Err(anyhow::anyhow!("{e:#}")),
             }
         }
+    }
+
+    struct Fine(crate::types::RivetType, Vec<String>);
+
+    impl crate::source::Source for Fine {
+        fn export(
+            &mut self,
+            _request: &crate::source::ExportRequest<'_>,
+            _sink: &mut dyn crate::source::BatchSink,
+        ) -> Result<()> {
+            unreachable!("a resolve exports nothing")
+        }
+
+        fn query_scalar(&mut self, _sql: &str) -> Result<Option<String>> {
+            unreachable!("a resolve reads no scalar")
+        }
+
+        fn type_mappings(
+            &mut self,
+            _query: &str,
+            _overrides: &crate::types::ColumnOverrides,
+        ) -> Result<Vec<crate::types::TypeMapping>> {
+            Ok(vec![crate::types::TypeMapping::from_source(
+                &crate::types::SourceColumn::simple("c", "source", true),
+                self.0.clone(),
+            )])
+        }
+
+        fn finer_than_microsecond_in_query(&mut self, _query: &str) -> Result<Vec<String>> {
+            Ok(self.1.clone())
+        }
+    }
+
+    /// The stream resolver grades a narrowing override as `check` does, so `--strict` refuses what `check` reports lossy: a time override by the result column, a decimal override by its digits.
+    #[test]
+    fn the_stream_resolver_reports_a_narrowing_override_lossy_as_check_does() {
+        use crate::types::TimeUnit::{Microsecond, Nanosecond};
+        use crate::types::{ColumnOverrides, RivetType, TypeFidelity};
+        let time = |unit| RivetType::Timestamp {
+            unit,
+            timezone: None,
+        };
+        let dec = |precision, scale| RivetType::Decimal { precision, scale };
+        let fidelity = |source: RivetType, finer: &[&str], declared: Option<RivetType>| {
+            let overrides: ColumnOverrides =
+                declared.into_iter().map(|t| ("c".to_string(), t)).collect();
+            let mut src = Fine(source, finer.iter().map(|c| c.to_string()).collect());
+            CdcSchemaResolver::lent(&mut src)
+                .resolve("dbo.t", &overrides, None)
+                .unwrap()[0]
+                .fidelity
+        };
+        let (lossy, exact) = (TypeFidelity::Lossy, TypeFidelity::Exact);
+        let ns = || time(Nanosecond);
+        assert_eq!(fidelity(ns(), &["c"], Some(time(Microsecond))), lossy);
+        assert_eq!(fidelity(ns(), &[], Some(time(Microsecond))), exact);
+        assert_eq!(fidelity(ns(), &["c"], Some(ns())), exact);
+        assert_eq!(fidelity(ns(), &["c"], None), exact);
+        assert_eq!(fidelity(dec(10, 2), &[], Some(dec(20, 0))), lossy);
+        assert_eq!(fidelity(dec(10, 2), &[], Some(dec(12, 2))), exact);
     }
 
     fn readable(columns: &[&str]) -> ReadableColumns {
@@ -3349,6 +3447,74 @@ mod error_code_tests {
         let err = super::raise_deferred(&Some("column(s) [c] hold a value".into())).unwrap_err();
         assert_coded(&err, "RIVET_SOURCE_CDC_CELL_UNSUPPORTED", 5);
         assert!(super::raise_deferred(&None).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod override_table_tests {
+    use crate::types::{ColumnOverrides, RivetType, SourceColumn, TypeMapping};
+
+    struct TableSource(Vec<TypeMapping>);
+
+    impl crate::source::Source for TableSource {
+        fn export(
+            &mut self,
+            _request: &crate::source::ExportRequest<'_>,
+            _sink: &mut dyn crate::source::BatchSink,
+        ) -> crate::error::Result<()> {
+            unreachable!("a plan-time read exports nothing")
+        }
+
+        fn query_scalar(&mut self, _sql: &str) -> crate::error::Result<Option<String>> {
+            unreachable!("a plan-time read reads no scalar")
+        }
+
+        fn type_mappings(
+            &mut self,
+            _query: &str,
+            overrides: &ColumnOverrides,
+        ) -> crate::error::Result<Vec<TypeMapping>> {
+            if overrides.is_empty() {
+                return Ok(self.0.clone());
+            }
+            crate::rivet_bail!(
+                crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH,
+                "the batch table refuses this pair"
+            )
+        }
+    }
+
+    fn numeric() -> TypeMapping {
+        TypeMapping::from_source(
+            &SourceColumn::simple("v", "numeric(10,2)", true),
+            RivetType::Decimal {
+                precision: 10,
+                scale: 2,
+            },
+        )
+    }
+
+    fn declared(t: RivetType) -> ColumnOverrides {
+        ColumnOverrides::from([("v".to_string(), t)])
+    }
+
+    /// An integer override over a numeric column goes to the batch table and is refused there; a string override and no override are not its pair.
+    #[test]
+    fn an_integer_override_over_a_numeric_is_the_batch_tables_pair_and_nothing_else_is() {
+        use crate::error::assert_coded;
+        let mut src = TableSource(vec![numeric()]);
+        let detected = vec![numeric()];
+        let err =
+            super::refuse_by_override_table(&mut src, "q", &detected, &declared(RivetType::Int64))
+                .unwrap_err();
+        assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+        let err =
+            super::stream_override_refusal(&mut src, "q", &declared(RivetType::Int64)).unwrap_err();
+        assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+        super::refuse_by_override_table(&mut src, "q", &detected, &declared(RivetType::String))
+            .expect("a string override is not the table's pair");
+        super::refuse_by_override_table(&mut src, "q", &detected, &ColumnOverrides::new())
+            .expect("no override is not the table's pair");
     }
 }
 

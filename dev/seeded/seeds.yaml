@@ -5237,6 +5237,38 @@ seeds:
         cells:
           - "lib:an_existing_change_log_that_this_load_would_corrupt_is_refused"
 
+  - name: clickhouse-null-array-loads-as-empty
+    class: "a ClickHouse Array cannot be NULL, so a NULL array column value loads as [] and is the same value as an empty array, exit 0"
+    history: "owner decision 2026-11-22 (DEFECT_PG_NULL_LIST_EMPTY_CH): every PostgreSQL array type loaded a NULL as []; the load now refuses a part holding a NULL list before any write"
+    scope: target
+    switch: clickhouse-null-array-loads-as-empty
+    engines:
+      bigquery:
+        na: "the seed edits src/load/clickhouse.rs, which only a ClickHouse load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
+      snowflake:
+        na: "the seed edits src/load/clickhouse.rs, which only a ClickHouse load runs; Snowflake loads through its own loader (src/load/snowflake.rs)"
+      clickhouse:
+        cells:
+          - a_null_array_is_refused_not_loaded_as_an_empty_array
+          - a_postgres_cdc_delete_of_a_row_with_an_array_column_still_loads_and_a_null_array_insert_is_refused
+          - "lib:a_null_list_is_refused_before_any_write_and_an_empty_list_or_null_element_passes"
+
+  - name: clickhouse-cdc-null-array-names-a-query
+    class: "the NULL-array refusal of a CDC export names a `query:` rewrite its config cannot hold, and no remedy that works"
+    history: "PR 1173 verifier F1: a mode: cdc export has no query:, and the part holding the NULL stays staged, so only a source fix plus the re-baseline recovers"
+    scope: target
+    switch: clickhouse-cdc-null-array-names-a-query
+    engines:
+      bigquery:
+        na: "the seed edits src/load/clickhouse.rs, which only a ClickHouse load runs; BigQuery loads through its own client (src/load/bq_rest.rs)"
+      snowflake:
+        na: "the seed edits src/load/clickhouse.rs, which only a ClickHouse load runs; Snowflake loads through its own loader (src/load/snowflake.rs)"
+      clickhouse:
+        cells:
+          - a_cdc_null_array_refusal_names_the_rebaseline_not_a_query_and_the_rebaseline_loads
+          - a_cdc_baseline_holding_a_null_array_is_refused_with_the_rebaseline_and_loads_after_it
+          - "lib:a_null_list_is_refused_before_any_write_and_an_empty_list_or_null_element_passes"
+
   - name: cleanup-removes-a-pointer-that-changed-hands
     class: "`cleanup_source` removes a directory's canonical manifest.json and _SUCCESS on the strength of a read taken before the warehouse jobs ran, so an extract that commits during the jobs loses its markers and the dataset reads as not whole, exit 0"
     history: "found 2026-11-01 by a rivet-verifier probe of cleanup_target_leased (canonical_run_id read once, maybe_cleanup removes unconditionally); RED on main 2026-11-01 (lib cell: r2's canonical manifest.json absent after the load cleaned r1)"
@@ -5711,6 +5743,29 @@ seeds:
         na: "MySQL has no nanosecond builder: a timestamp_ns override is refused at the schema stage with RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH before any value is read (seed override-without-builder-internal-stop), so no value reaches a nanosecond builder"
       mongo:
         na: "a document source has no declared column wire type and no builder takes a nanosecond override"
+  - name: oracle-ltz-year-past-ceiling-delivered
+    class: "an Oracle TIMESTAMP WITH LOCAL TIME ZONE value Oracle stored a year past either end of its own 4712 BC to 9999 range (a session whose zone is ahead of or behind UTC wrote a value within its offset of an end) is delivered as the instant 10000-12-31 23:59:59 UTC, exit 0, fidelity exact, instead of being refused by code"
+    history: "2026-11-22 probe of the type ledger (rows-156 report, HIGH finding 1): Parquet int64 253433923199000000 against 253402300799000000 for the TZ column with the same literal; the matrix recorded the shift as an accepted form since #1069"
+    scope: source
+    engines:
+      oracle:
+        switch: oracle-ltz-year-past-ceiling-delivered
+        cells:
+          - an_ltz_value_stored_outside_the_range_is_refused_by_code_and_a_query_without_it_delivers_the_rest
+          - an_ltz_value_stored_outside_the_range_is_refused_by_code_through_a_cast_or_a_view
+          - a_value_oracle_computes_past_9999_is_refused_by_code_and_a_query_inside_9999_delivers
+          - an_ltz_value_outside_the_range_is_refused_by_code_under_every_override_that_reads_it
+          - oracle_cdc_an_ltz_value_outside_the_range_is_refused_by_code_on_batch_snapshot_and_stream
+          - "lib:an_ltz_value_outside_the_4712_bc_to_9999_range_is_refused_by_code_and_a_zoned_one_is_delivered"
+          - "lib:every_timestamp_cell_passes_the_range_check_and_only_an_ltz_column_is_checked_at_the_floor"
+      postgres:
+        na: "no PostgreSQL type is read through a session-zone conversion that can store a value past the type's ceiling; timestamptz is delivered as the server's UTC instant"
+      mysql:
+        na: "TIMESTAMP is stored as a UTC epoch second bounded at 2038-01-19, and DATETIME has no session zone"
+      mssql:
+        na: "datetimeoffset keeps the written offset beside the value and is read exact; no session-zone storage"
+      mongo:
+        na: "a BSON date is a UTC millisecond count with no session-zone conversion"
   - name: override-without-builder-internal-stop
     class: "a `columns:` override the source reader cannot build (a nanosecond timestamp on MySQL, a value of another wire type on SQL Server, a decimal past precision 38 on SQL Server or Oracle) stops the run as RIVET_INTERNAL_TYPE_BUILDER exit 6, which the gate reads as a rivet bug, instead of the coded usage refusal RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH exit 1"
     history: "2026-11-08 gate d6581394: the MySQL cell a_first_cdc_run_refused_after_its_anchor_releases_it_mysql graded exit 6 as the expected refusal and the run-integrity invariant failed on RIVET_INTERNAL_; 20 of 160 MySQL and 169 of 272 SQL Server override-by-column runs stopped that way on main"
@@ -5759,6 +5814,65 @@ seeds:
         na: "SQL Server datetime2(7) stays a warn-only Lossy mapping by an earlier decision; the mapping refusal is raised only by the Oracle source"
       mongo:
         na: "a document source has no declared column wire type, so no mapping carries a refusal"
+  - name: oracle-cdc-timestamp-fraction-truncated
+    class: "an Oracle CDC run reads a TIMESTAMP(7..9) value at microseconds where batch and the snapshot read every digit, so a nanosecond column (declared, or delivered as text) arrives as `.123456` for `.123456789` with exit 0"
+    history: "2026-11-22 Oracle TIMESTAMP(9) class: grid cell oracle/TIMESTAMP(9)->text/cdc-insert/parquet WRONG_VALUE; RED on main: stream rows .999999 and .000000 against .999999999 and .000000001"
+    scope: source
+    engines:
+      oracle:
+        switch: oracle-cdc-timestamp-fraction-truncated
+        cells:
+          - oracle_cdc_timestamp9_is_delivered_as_batch_delivers_it
+          - "lib:timestamps_keep_every_digit_and_an_offset_moves_to_utc"
+      postgres:
+        na: "a PostgreSQL timestamp is microsecond-exact, so no fraction digit is cut"
+      mysql:
+        na: "MySQL DATETIME and TIMESTAMP carry at most six fractional digits, so no fraction digit is cut"
+      mssql:
+        na: "the SQL Server change reader hands datetime2(7) as stored text read by its own parser, not the LogMiner text parser this seed cuts"
+      mongo:
+        na: "a BSON date is millisecond natively, so no fraction digit is cut"
+  - name: cdc-ns-out-of-range-uncoded
+    class: "a change-stream value outside 1677-09-21..2262-04-11 under a nanosecond column stops the run as RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH exit 1 where batch refuses the same value as RIVET_SOURCE_VALUE_UNREPRESENTABLE exit 5"
+    history: "2026-11-22 Oracle TIMESTAMP(9) class: RED on main, timestamp_ns over 9999-12-31 23:59:59.999999999, batch exit 5 and stream exit 1"
+    scope: source
+    engines:
+      oracle:
+        switch: cdc-ns-out-of-range-uncoded
+        cells:
+          - oracle_timestamp9_past_the_nanosecond_range_is_one_refusal_on_batch_and_cdc
+          - "lib:a_nanosecond_timestamp_cell_keeps_its_digit_and_refuses_out_of_range"
+      mssql:
+        switch: cdc-ns-out-of-range-uncoded
+        cells:
+          - mssql_datetime2_past_the_nanosecond_range_is_one_refusal_on_batch_and_cdc
+      postgres:
+        na: "PostgreSQL refuses a nanosecond override at the wire check, so no change value reaches the nanosecond builder"
+      mysql:
+        na: "MySQL has no nanosecond builder; a timestamp_ns override is refused at the schema stage"
+      mongo:
+        na: "a document source has no declared column wire type and takes no nanosecond override"
+  - name: cdc-timestamp-text-is-the-batch-text
+    class: "a change-stream timestamp or date under a text column is printed in chrono's form (space separator, variable fraction) where the batch export and the snapshot print the engine's own form, so one column holds two texts for one instant"
+    history: "2026-11-22 verifier of PR #1162: Oracle TIMESTAMP as text batch 2024-02-29T13:14:15.500000, stream 2024-02-29 13:14:15.500; MySQL datetime(6) as text batch .500000, stream .500"
+    scope: source
+    engines:
+      oracle:
+        switch: cdc-timestamp-text-is-the-batch-text
+        cells:
+          - oracle_cdc_timestamp9_is_delivered_as_batch_delivers_it
+          - "lib:an_oracle_or_mysql_stamp_in_a_text_column_prints_as_the_batch_prints_it"
+      mysql:
+        switch: cdc-timestamp-text-is-the-batch-text
+        cells:
+          - mysql_cdc_a_datetime_or_timestamp_as_text_is_the_batch_text_byte_for_byte
+          - "lib:an_oracle_or_mysql_stamp_in_a_text_column_prints_as_the_batch_prints_it"
+      postgres:
+        na: "the batch export refuses text over a timestamp on PostgreSQL, so no batch text exists to differ from; the stream text stays chrono form, an open defect graded by open_defect_a_pg_timestamp_declared_text_is_one_verdict_on_batch_and_the_stream"
+      mssql:
+        na: "the override table reads no text over a datetime2 on SQL Server, so batch and the stream both refuse it by code (mssql_a_datetime2_declared_text_is_one_refusal_on_batch_and_cdc) and no text is written to differ"
+      mongo:
+        na: "a document source reads its document as plain text and refuses any other column retype, so no per-column text override over a date exists"
   - name: pg-temporal-uuid-bytea-array-refused
     class: "a PostgreSQL date[], time[], timestamp[], timestamptz[], uuid[] or bytea[] column is refused by the batch export instead of being delivered as a native list"
     history: "type-known-defects cluster C7 (2026-11-05); RED from this patch: the batch export of a date[] column stops with the element-type refusal and the ledger test fails on the six array rows"
@@ -7236,3 +7350,85 @@ seeds:
         cells: ["lib:a_registered_scanner_anchor_does_not_leave_another_credential_in_clear", "lib:a_registered_query_key_in_any_spelling_does_not_leave_another_credential_in_clear", "lib:a_registered_value_straddling_an_anchor_leaves_no_other_credential_in_clear", "lib:a_registered_value_covering_the_separator_before_a_password_key_keeps_the_value_masked", "lib:a_registered_substring_never_hides_the_password_a_scanner_masks"]
       oracle:
         cells: ["lib:a_registered_scanner_anchor_does_not_leave_another_credential_in_clear", "lib:a_registered_query_key_in_any_spelling_does_not_leave_another_credential_in_clear", "lib:a_registered_value_straddling_an_anchor_leaves_no_other_credential_in_clear", "lib:a_registered_value_covering_the_separator_before_a_password_key_keeps_the_value_masked", "lib:a_registered_substring_never_hides_the_password_a_scanner_masks"]
+
+  - name: cdc-override-value-refusal-wire-coded
+    class: "a value a `columns:` override cannot hold is refused on the change stream with the wire-mismatch code (exit 1) while the batch converter and the snapshot leg of the same engine refuse it with the value code (exit 5), so one condition has two exits and `rivet check` names the other"
+    history: "2026-11-21: Oracle CDC `initial: snapshot` refused a DATE with a time of day under `date` with exit 5 and the stream leg with exit 1; CellRefusal::into_error coded every overridden refusal as the wire-mismatch code"
+    scope: source
+    switch: cdc-override-value-refusal-wire-coded
+    engines:
+      postgres:
+        cells: ["lib:an_override_refusal_by_value_carries_the_value_code_as_batch_does"]
+      mysql:
+        cells: ["lib:an_override_refusal_by_value_carries_the_value_code_as_batch_does"]
+      mssql:
+        cells: ["lib:an_override_refusal_by_value_carries_the_value_code_as_batch_does"]
+      mongo:
+        na: "a MongoDB change row is two text cells; the typed cell builder does not run"
+      oracle:
+        cells: ["lib:an_override_refusal_by_value_carries_the_value_code_as_batch_does", "oracle_cdc_a_date_override_refuses_a_time_of_day_not_drops_it"]
+  - name: integer-text-cut-to-leading-digits
+    class: "a text cell under an integer override is read as its leading digits (`1.0`, `1.5` and `1 ` as 1) on one leg while another leg of the same engine refuses it, so one value is delivered changed by a run and refused by the next leg"
+    history: "2026-11-22: the MySQL CDC stream read `1.0` and `1 ` under int32 through decimal_text_to_int and delivered 1 while batch, check and the snapshot refused them; one shared whole_int_text now reads the cell on every leg"
+    scope: source
+    switch: integer-text-cut-to-leading-digits
+    engines:
+      postgres:
+        na: "a text column under an integer override is refused at plan time on the baseline leg and on a stream-only export alike (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH, a_text_under_an_integer_override_is_refused_alike_on_every_leg_postgres), so no text cell is read as an integer"
+      mysql:
+        cells: ["lib:whole_int_text_accepts_only_a_whole_cell_integer", "lib:an_override_refusal_by_value_carries_the_value_code_as_batch_does"]
+      mssql:
+        na: "a text column under an integer override is refused at plan time on the baseline leg and on a stream-only export alike (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH, a_text_under_an_integer_override_is_refused_alike_on_every_leg_mssql), so no text cell is read as an integer"
+      mongo:
+        na: "a MongoDB field has no text-to-integer column override"
+      oracle:
+        na: "a VARCHAR2 column under an integer override is refused at plan time on the baseline leg and on a stream-only export alike (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH, a_text_under_an_integer_override_is_refused_alike_on_every_leg_oracle), so no text cell is read as an integer"
+  - name: cdc-integer-override-skips-table
+    class: "a numeric, float or text column under an integer `columns:` override on a stream-only CDC export is graded by the cell builder by its first value and not by the override table the batch and snapshot legs read, so the same config is refused at plan on one leg, delivered on another and refused by a value on a third, with `check` saying exact"
+    history: "2026-11-22: PR #1148 verifier finding, a PostgreSQL numeric(10,2) declared int8 delivered 43 on main and stopped with a false `is not an exact integer` on the branch while the snapshot leg stopped RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH; the stream, the baseline and `check` now share one decision"
+    scope: source
+    switch: cdc-integer-override-skips-table
+    engines:
+      postgres:
+        cells: [a_numeric_under_an_integer_override_is_refused_alike_on_every_leg_postgres, a_text_under_an_integer_override_is_refused_alike_on_every_leg_postgres]
+      mysql:
+        cells: [a_numeric_under_an_integer_override_is_refused_alike_on_every_leg_mysql]
+      mssql:
+        cells: [a_numeric_under_an_integer_override_is_refused_alike_on_every_leg_mssql, a_text_under_an_integer_override_is_refused_alike_on_every_leg_mssql]
+      mongo:
+        na: "a MongoDB change row is two text cells; no `columns:` override retypes a field on the stream"
+      oracle:
+        cells: [a_numeric_under_an_integer_override_is_refused_alike_on_every_leg_oracle, a_text_under_an_integer_override_is_refused_alike_on_every_leg_oracle]
+  - name: check-values-unread-unsaid
+    class: "`rivet check` exits 0 over a column a run then refuses by a value (RIVET_SOURCE_VALUE_UNREPRESENTABLE, RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE) without saying that it read no values, so check and run disagree with nothing to tell the operator why"
+    history: "CHECK_RUN_SPLIT known-red class over every engine and leg (2026-11-10..19); owner decision 2026-11-20: check names the codes only a value decides (`VALUE_CODES` in the registry) instead of reading values, the note is the operator's statement and the gate grades no split by it (a column check reports exact that a run refuses by a value is a split, known-red or fixed)"
+    scope: source
+    switch: check-values-unread-unsaid
+    engines:
+      postgres:
+        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises", check_says_it_read_no_values_only_under_columns_postgres]
+      mysql:
+        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises", check_says_it_read_no_values_only_under_columns_mysql]
+      mssql:
+        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises", check_says_it_read_no_values_only_under_columns_mssql]
+      oracle:
+        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises", check_says_it_read_no_values_only_under_columns_oracle]
+      mongo:
+        cells: ["lib:check_names_exactly_the_codes_only_a_value_raises"]
+
+  - name: narrowing-override-reported-exact
+    class: "a `columns:` override that keeps fewer fraction digits than a result column holds (timestamp over an Oracle TIMESTAMP(9) or a SQL Server datetime2(7), on batch and on CDC) truncates the finer digits while the type report calls the column exact, so the run exits 0 with fidelity exact over changed values"
+    history: "no_silent_null full tier WRONG_VALUE + INTEGRITY_BLIND (known_red 2026-11-11, oracle TIMESTAMP(9) -> timestamp / timestamp_tz, mssql DATETIME2 -> timestamp / timestamp_tz); fidelity was derived from the target type alone; owner decision 2026-11-20: a narrowing override is delivered and declared lossy; verifier 2026-11-22: the CDC path never reached the check, an alias and a CAST were graded by the catalog name"
+    scope: source
+    switch: narrowing-override-reported-exact
+    engines:
+      oracle:
+        cells: ["lib:a_time_override_narrowing_a_result_column_is_lossy_on_batch_and_stream", "lib:the_stream_resolver_reports_a_narrowing_override_lossy_as_check_does", an_oracle_batch_time_override_is_graded_by_the_result_column_it_lands_on, an_oracle_cdc_time_override_is_graded_as_the_batch_override, oracle_batch_timestamp9_is_refused_until_declared_under_every_policy]
+      mssql:
+        cells: ["lib:a_time_override_narrowing_a_result_column_is_lossy_on_batch_and_stream", "lib:the_stream_resolver_reports_a_narrowing_override_lossy_as_check_does", a_mssql_batch_time_override_is_graded_by_the_result_column_it_lands_on, a_mssql_cdc_time_override_is_graded_as_the_batch_override]
+      postgres:
+        na: "PostgreSQL timestamp, timestamptz and time hold microseconds at most, so no time override keeps fewer digits than the source"
+      mysql:
+        na: "MySQL datetime, timestamp and time hold microseconds at most, so no time override keeps fewer digits than the source"
+      mongo:
+        na: "a BSON date holds milliseconds and a Mongo export has no `columns:` time override over it, so nothing narrows"

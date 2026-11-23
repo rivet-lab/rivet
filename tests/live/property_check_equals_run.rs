@@ -21,7 +21,7 @@ const R_PLAN: &str =
 const R_LOADS: &str = "2026-11-10: state loads on a config path that does not exist prints an empty list and exits 0; closes when it opens the config through the seam its state siblings use";
 const R_STRICT: &str = "2026-11-08: check --strict refuses a config target run accepts; closes when run and check agree on config target";
 
-const R_TYPE: &str = "2026-11-10: check, doctor, plan and init pass a column type or override run refuses (unsafe mapping, unrepresentable value); closes when the pre-run commands type each column through the seam run writes with";
+const R_TYPE: &str = "2026-11-10: init passes a column type run refuses (unsafe mapping); closes when init types each column through the seam run writes with";
 const R_PRIOR: &str = "2026-11-10: check, doctor and plan pass over stored state run refuses (a cursor another destination or export owns, a lost CDC checkpoint); closes when the pre-run commands read state and checkpoint through run's guard";
 const R_UNCODED: &str = "2026-11-10: run or a pre-run command refuses without a RIVET_ code, so the pair cannot agree on the stop; closes when each refusal is raised through its coded seam";
 const R_URL: &str = "2026-11-10: check passes a mongodb URL without a database that run refuses as invalid; closes when check parses the source URL through run's parser";
@@ -156,10 +156,6 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
         R_URL,
     ),
     (
-        "check-run pre[exit=0 code=-] run[exit=1 code=RIVET_TYPE_UNSAFE_MAPPING]",
-        R_TYPE,
-    ),
-    (
         "check-run pre[exit=0 code=-] run[exit=5 code=RIVET_SOURCE_CDC_CHECKPOINT_INVALID]",
         R_PRIOR,
     ),
@@ -196,10 +192,6 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
         R_STRICT_TYPE,
     ),
     (
-        "doctor-run pre[exit=0 code=-] run[exit=1 code=RIVET_TYPE_UNSAFE_MAPPING]",
-        R_TYPE,
-    ),
-    (
         "doctor-run pre[exit=0 code=-] run[exit=5 code=RIVET_SOURCE_CDC_CHECKPOINT_INVALID]",
         R_PRIOR,
     ),
@@ -221,10 +213,6 @@ const ACCEPTED_RED: &[(&str, &str)] = &[
     ),
     (
         "init-run pre[exit=0 code=-] run[exit=1 code=RIVET_TYPE_UNSAFE_MAPPING]",
-        R_TYPE,
-    ),
-    (
-        "plan-apply pre[exit=0 code=-] run[exit=1 code=RIVET_TYPE_UNSAFE_MAPPING]",
         R_TYPE,
     ),
     (

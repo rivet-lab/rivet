@@ -2702,7 +2702,7 @@ fn a_first_cdc_run_refused_after_its_anchor_releases_it_oracle() {
     rig.refuses_twice_then(
         &["run"],
         &[],
-        Refused::by_code("RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1),
+        Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5),
         vec![Remedy::new(
             "timestamp",
             Then::DeliversTheSource,

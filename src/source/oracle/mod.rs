@@ -599,6 +599,7 @@ impl OracleSource {
                 max_value_bytes,
                 &empty_flags,
                 &row_index,
+                &native,
             )?;
             let n = buf.len();
             buf.clear();
