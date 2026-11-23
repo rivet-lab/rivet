@@ -276,9 +276,14 @@ def grade(row: Row, control: dict[str, str], seeded: dict[str, str] | None,
 # ── the scratch tree ──────────────────────────────────────────────────────────
 
 
+GIT_HOOK_VARS = ("GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE")
+
+
 def sh(argv: list[str], *, cwd: Path = ROOT, env: dict[str, str] | None = None,
        timeout: float | None = None) -> subprocess.CompletedProcess:
-    """Run argv (no shell) with exactly `env` (or the inherited one); stdout+stderr merged into `.stdout`."""
+    """Run argv (no shell) with exactly `env` (or the inherited one less a hook's GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE); stdout+stderr merged into `.stdout`."""
+    if env is None:
+        env = {k: v for k, v in os.environ.items() if k not in GIT_HOOK_VARS}
     return subprocess.run(argv, cwd=cwd, env=env, timeout=timeout, text=True,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 

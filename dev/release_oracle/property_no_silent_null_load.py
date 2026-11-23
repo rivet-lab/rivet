@@ -174,6 +174,14 @@ class SnowflakeReader:
         self.stack.close()
 
 
+SF_DOUBLE_MAX_TEXT = re.compile(r"(?<![\d.])1\.797693134862316e\+308(?!\d)")
+
+
+def sf_json(text: str) -> str:
+    """Snowflake's JSON text with its 16-digit spelling of the largest double, which reads back as an infinity, spelled exactly."""
+    return SF_DOUBLE_MAX_TEXT.sub("1.7976931348623157e+308", text)
+
+
 def _sf_value(kind: str, text: str | None):
     """The Python value of one Snowflake `TO_VARCHAR` cell of column type `kind`."""
     if text is None:
@@ -187,8 +195,8 @@ def _sf_value(kind: str, text: str | None):
     if kind == "NUMBER":
         return Decimal(text)
     if kind in ("ARRAY", "OBJECT"):
-        return json.loads(text)
-    return text
+        return json.loads(sf_json(text))
+    return sf_json(text) if kind == "VARIANT" else text
 
 
 SF_TEXT_FORMATS = {"TIMESTAMP_NTZ": "YYYY-MM-DD HH24:MI:SS.FF9", "TIMESTAMP_LTZ": "YYYY-MM-DD HH24:MI:SS.FF9", "TIMESTAMP_TZ": "YYYY-MM-DD HH24:MI:SS.FF9 TZH:TZM", "TIME": "HH24:MI:SS.FF9"}
@@ -571,8 +579,8 @@ class Matrix:
         return {**self.load(t, u, ids[:half], budget), **self.load(t, u, ids[half:], budget)}
 
     def split(self, t: Target, u: Unit, have: dict[int, Got]) -> None:
-        """Note the coded refusals of a unit at `t` that `rivet check` of the same config let through (it reads neither the values nor the format); asked once per column."""
-        codes = {g.refused.code for g in have.values() if g.refused is not None and g.refused.code not in (te.UNCODED, "CRASH")}
+        """Note the coded load-stage refusals of a unit at `t` that `rivet check` of the same config let through (it reads neither the values nor the format); asked once per column."""
+        codes = {g.refused.code for g in have.values() if g.refused is not None and g.refused.stage == te.LOAD and g.refused.code not in (te.UNCODED, "CRASH")}
         key = (u.chunk.table, u.col.name, t.name)
         if not codes:
             return
@@ -734,6 +742,7 @@ def self_test() -> None:
     assert _sf_value("BINARY", "0102") == b"\x01\x02" and _sf_value("BOOLEAN", "true") is True and _sf_value("NUMBER", "12.50") == Decimal("12.50")
     assert sf_text("FLOAT", "c") == '"c"' and sf_text("TIME", "c") == 'TO_VARCHAR("c", \'HH24:MI:SS.FF9\')' and sf_text("TEXT", "c") == 'TO_VARCHAR("c")' and sf_text("VARIANT", "c") == 'TO_JSON("c")'
     assert sf_drops("D.S", ["t"]) == ["DROP TABLE IF EXISTS D.S.t", "DROP TABLE IF EXISTS D.S.t__changes", "DROP STAGE IF EXISTS D.S.rivet_stage_t", "DROP STAGE IF EXISTS D.S.rivet_stage_t__changes"]
+    assert _sf_value("VARIANT", '{"a":-1.797693134862316e+308,"b":21.797693134862316e+308}') == '{"a":-1.7976931348623157e+308,"b":21.797693134862316e+308}' and _sf_value("ARRAY", "[1.797693134862316e+308]") == [1.7976931348623157e+308], "Snowflake's 16-digit largest double reads as itself"
     assert _sf_value("FLOAT", "inf") == float("inf") and _sf_value("ARRAY", "[1,2]") == [1, 2] and _sf_value("TEXT", None) is None
     assert stop_verdict(nsn._proc(5, "error: [RIVET_SOURCE_VALUE_UNREPRESENTABLE] x"), te.EXTRACT) == te.Verdict(te.REFUSE, code="RIVET_SOURCE_VALUE_UNREPRESENTABLE", stage=te.EXTRACT)
     assert stop_verdict(nsn._proc(1, "error: boom"), te.LOAD).code == te.UNCODED and stop_verdict(nsn._proc(101, ""), te.LOAD).code == "CRASH"
@@ -803,11 +812,12 @@ def self_test() -> None:
     assert nsn.server_text_graded("postgres", "server_text") and not nsn.server_text_graded("postgres", "inet_text") and not nsn.server_text_graded("mysql", "server_text")
     coded = {1: Got(refused=te.Verdict(te.REFUSE, code="RIVET_X", stage=te.LOAD))}
     uncoded = {1: Got(refused=te.Verdict(te.REFUSE, code=te.UNCODED, stage=te.LOAD))}
+    extract_stage = {1: Got(refused=te.Verdict(te.REFUSE, code="RIVET_Y", stage=te.EXTRACT))}
     key = ("pm_tm0", "c001", "clickhouse")
     real_rivet = nsn.rivet
     try:
         with tempfile.TemporaryDirectory() as td:
-            for rc, have, want in ((0, coded, {key: {"RIVET_X"}}), (2, coded, {}), (0, uncoded, {}), (0, {1: Got(1)}, {})):
+            for rc, have, want in ((0, coded, {key: {"RIVET_X"}}), (2, coded, {}), (0, uncoded, {}), (0, extract_stage, {}), (0, extract_stage | {2: coded[1]}, {key: {"RIVET_X"}}), (0, {1: Got(1)}, {})):
                 mc = Matrix("mssql", "u", Path(tempfile.mkdtemp(dir=td)), ("clickhouse",))
                 mc.targets[0].db = "x"
                 nsn.rivet = lambda a, e, c: nsn._proc(rc)
