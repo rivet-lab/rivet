@@ -289,6 +289,37 @@ impl Rig {
         }
     }
 
+    /// Crashes a parallel keyset run as its last key range commits: a first crash at range 0 shows how many ranges the plan holds, the resume then dies as the last of them commits; panics unless that last range is left committed.
+    pub fn crash_as_the_last_keyset_range_commits(&self) {
+        let crash = |index: i64| {
+            let point = format!("keyset_parallel_range_committed:{index}");
+            let out = self.run_with_env("RIVET_TEST_PANIC_AT", &point);
+            assert!(
+                matches!(out.status.code(), Some(101 | 70)),
+                "fixture: the run crashes at `{point}`, it ended with {:?}\n{}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        crash(0);
+        let ranges =
+            self.state_count("SELECT COUNT(*) FROM keyset_range WHERE export_name = '{export}'");
+        assert!(
+            ranges >= 2,
+            "fixture: the plan holds {ranges} key range(s), so none is the last of several"
+        );
+        crash(ranges - 1);
+        let last = self.state_count(&format!(
+            "SELECT COUNT(*) FROM keyset_range WHERE export_name = '{{export}}' \
+             AND range_index = {} AND done = 1 AND hi IS NULL",
+            ranges - 1
+        ));
+        assert_eq!(
+            last, 1,
+            "fixture: the crash left the open-ended last of {ranges} key ranges not committed"
+        );
+    }
+
     /// The schema version of the state database this rig's runs use.
     pub fn state_schema(&self) -> i64 {
         match self.state_url(&[]) {
