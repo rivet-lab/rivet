@@ -38,6 +38,7 @@ pub(crate) mod kind;
 #[cfg(test)]
 mod kind_doc;
 mod mapping;
+pub(crate) mod narrowing;
 pub(crate) mod override_table;
 mod override_type;
 pub mod policy;

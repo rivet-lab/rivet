@@ -1224,6 +1224,7 @@ def self_test() -> None:
     """Grade the grader: axes come from the product, every failure class fires on its exact harm, a delivered value passes."""
     ax = axes()
     assert {"postgres", "mysql", "mssql", "oracle", "mongo"} <= set(ax["engines"]), ax["engines"]
+    assert all(columns(e) for e in ("postgres", "mysql", "mssql", "oracle")), "every engine's ledger builds its override-grid columns"
     assert {"full", "incremental", "chunked", "cdc"} <= set(ax["modes"]) and set(ax["formats"]) == {"parquet", "csv"}, ax
     assert {"none", "float4", "float8", "int8", "bool", "decimal(38,10)", "text"} <= set(ax["targets"]), ax["targets"]
     assert {"decimal(18,-2)", "decimal(60,-2)"} <= set(ax["targets"]) and negative_scale_targets("fn parse_decimal_params let scale: u8 =") == []
@@ -1347,6 +1348,12 @@ def self_test() -> None:
     dec = Col("c03", "DECIMAL(18,2)", "Float64", "float", ("1",))
     assert grade_run("mysql", "x", _proc(5, refusal), stated, "exact", Path("."), "csv", dec, 1, "float8", ["1"]).klass == "", "the batch grade passes the column it grades"
     assert grade_mongo("m", _proc(5, refusal), stated, Path("."), "parquet", "c03", "float8", 1).klass == "", "the Mongo grade passes the column it grades"
+    noted_out = "note[values-unread]: rivet check reads at most the first row of an export that declares `columns:`; a run may still refuse a value it did not read with RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+    with_note = lambda fid, *warnings: core.Proc(["rivet"], 0, json.dumps({"columns": [{"column": "C03", "fidelity": fid, "warnings": list(warnings)}]}), noted_out, gated=False)
+    assert grade_stop("c", _proc(5, refusal), with_note("exact"), "c03").klass == SPLIT, "the note the product prints for every export with `columns:` excuses no refusal"
+    assert grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] column `c04` holds 1.5"), with_note("exact"), "c04").klass == SPLIT, "a refusal of a column check reports exact is a split, note or not"
+    assert grade_stop("c", _proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] column `c04` holds 1.5"), with_note("lossy", "override float8 ... refused at run (RIVET_SOURCE_VALUE_UNREPRESENTABLE)"), "c04").klass == SPLIT, "another column's lossy row is no statement of this column"
+    assert grade_stop("c", _proc(5, refusal), with_note("lossy", "override float8 ... refused at run (RIVET_SOURCE_VALUE_UNREPRESENTABLE)"), "c03").klass == "", "a lossy row naming the code on the refused column is stated, note or not"
     wire = report("lossy", "override timestamp_ns ... refused at run (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH); this is lossy, not exact")
     assert grade_stop("c", _proc(5, refusal), wire, "c03").klass == SPLIT, "a lossy note that names another code is no statement of this refusal"
     assert grade_stop("c", _proc(5, refusal), report("exact"), "c03").klass == SPLIT, "an exact column that the run refuses is a split"

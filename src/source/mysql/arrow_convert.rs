@@ -434,7 +434,7 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
         match self.rows[row].as_ref(col) {
             Some(Value::Int(v)) => Some(*v as i16),
             Some(Value::UInt(v)) => Some(*v as i16),
-            Some(Value::Bytes(bv)) => atoi::atoi::<i128>(bv).map(|v| v as i16),
+            Some(Value::Bytes(bv)) => crate::types::decimal::whole_int_text(bv).map(|v| v as i16),
             _ => None,
         }
     }
@@ -442,7 +442,7 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
         match self.rows[row].as_ref(col) {
             Some(Value::Int(v)) => Some(*v as i32),
             Some(Value::UInt(v)) => Some(*v as i32),
-            Some(Value::Bytes(bv)) => atoi::atoi::<i128>(bv).map(|v| v as i32),
+            Some(Value::Bytes(bv)) => crate::types::decimal::whole_int_text(bv).map(|v| v as i32),
             _ => None,
         }
     }
@@ -459,7 +459,9 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
             Some(Value::UInt(v)) => Some(*v),
             Some(Value::Int(v)) if *v >= 0 => Some(*v as u64),
             Some(Value::Bytes(bv)) if self.is_bit(col) => Some(bit_bytes_to_u64(bv)),
-            Some(Value::Bytes(bv)) => atoi::atoi::<u64>(bv),
+            Some(Value::Bytes(bv)) => {
+                crate::types::decimal::whole_int_text(bv).and_then(|v| u64::try_from(v).ok())
+            }
             _ => None,
         }
     }
@@ -618,7 +620,7 @@ fn uint64_from_bytes(column: &str, bv: &[u8], is_bit: bool) -> Result<u64> {
     if is_bit {
         return Ok(bit_bytes_to_u64(bv));
     }
-    match atoi::atoi::<u64>(bv) {
+    match crate::types::decimal::whole_int_text(bv).and_then(|v| u64::try_from(v).ok()) {
         Some(v) => Ok(v),
         None => unparsed(column, "unsigned bigint", bv),
     }
@@ -629,7 +631,7 @@ fn int64_from_bytes(bv: &[u8], is_bit: bool) -> Result<Option<i64>> {
     if is_bit {
         return Ok(Some(narrow::<i64>(bit_bytes_to_u64(bv) as i128, "bit")?));
     }
-    match atoi::atoi::<i128>(bv) {
+    match crate::types::decimal::whole_int_text(bv) {
         Some(v) => Ok(Some(narrow::<i64>(v, "bigint")?)),
         None => Ok(None),
     }
@@ -944,7 +946,7 @@ fn build_array(
                 match row.as_ref(col_idx) {
                     Some(Value::Int(v)) => b.append_value(narrow::<i16>(*v as i128, "smallint")?),
                     Some(Value::UInt(v)) => b.append_value(narrow::<i16>(*v as i128, "smallint")?),
-                    Some(Value::Bytes(bv)) => match atoi::atoi::<i128>(bv) {
+                    Some(Value::Bytes(bv)) => match crate::types::decimal::whole_int_text(bv) {
                         Some(v) => b.append_value(narrow::<i16>(v, "smallint")?),
                         None => b.append_value(unparsed(column, "smallint", bv)?),
                     },
@@ -962,7 +964,7 @@ fn build_array(
                 match row.as_ref(col_idx) {
                     Some(Value::Int(v)) => b.append_value(narrow::<i32>(*v as i128, "int")?),
                     Some(Value::UInt(v)) => b.append_value(narrow::<i32>(*v as i128, "int")?),
-                    Some(Value::Bytes(bv)) => match atoi::atoi::<i128>(bv) {
+                    Some(Value::Bytes(bv)) => match crate::types::decimal::whole_int_text(bv) {
                         Some(v) => b.append_value(narrow::<i32>(v, "int")?),
                         None => b.append_value(unparsed(column, "int", bv)?),
                     },
@@ -1479,7 +1481,7 @@ mod utf8_fast_path_tests {
 
 #[cfg(test)]
 mod int64_bytes_dispatch_tests {
-    use super::int64_from_bytes;
+    use super::{int64_from_bytes, uint64_from_bytes};
 
     #[test]
     fn bit_bytes_decode_big_endian_even_when_ascii_digits() {
@@ -1509,6 +1511,34 @@ mod int64_bytes_dispatch_tests {
             int64_from_bytes(b"9223372036854775807", false).unwrap(),
             Some(i64::MAX)
         );
+    }
+
+    /// A text cell under an integer type is read whole: a fraction, an exponent or trailing text is refused, never cut to its leading digits.
+    #[test]
+    fn a_text_cell_is_an_integer_only_when_the_whole_cell_is() {
+        for ok in ["0", "12", "-42", "+7", "2147483647"] {
+            assert!(
+                crate::types::decimal::whole_int_text(ok.as_bytes()).is_some(),
+                "{ok}"
+            );
+        }
+        for bad in ["1.5", "1.0", "1e3", "12abc", "", "-", " 1", "1 ", "0x10"] {
+            assert_eq!(
+                crate::types::decimal::whole_int_text(bad.as_bytes()),
+                None,
+                "{bad:?}"
+            );
+            assert!(
+                int64_from_bytes(bad.as_bytes(), false).unwrap().is_none(),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(crate::types::decimal::whole_int_text(b"-42"), Some(-42));
+        let uint = |t: &[u8]| uint64_from_bytes("c", t, false).ok();
+        assert_eq!(uint(b"18446744073709551615"), Some(u64::MAX));
+        assert_eq!(uint(b"18446744073709551616"), None);
+        assert_eq!(uint(b"-1"), None);
+        assert_eq!(uint(b"1.0"), None);
     }
 }
 
@@ -2181,6 +2211,69 @@ mod roast_mysql_bit_decode_tests {
             .expect("string array");
         assert_eq!(s.value(0), "h\u{e9}llo \u{65e5}\u{672c}");
         assert!(s.is_null(1));
+    }
+
+    /// An unsigned BIGINT and a text-wire integer are read by the 16 and 32 bit accessors; text with a fraction is not an integer.
+    #[test]
+    fn the_narrow_integer_accessors_read_an_unsigned_and_a_whole_text_cell() {
+        use crate::source::value_checksum::CellSource;
+        let cases: Vec<(&str, Cell)> = vec![
+            ("uint", v_uint((1u64 << 63) | 5)),
+            ("whole", v_bytes(b"42")),
+            ("fraction", v_bytes(b"1.5")),
+        ];
+        let defs: Vec<Vec<u8>> = cases.iter().map(|(_, (d, _))| d.clone()).collect();
+        let row: Vec<Option<Vec<u8>>> = cases.iter().map(|(_, (_, b))| Some(b.clone())).collect();
+        let rows = fetch_binary_rows(defs, vec![row]);
+        let s = MysqlCellSource { rows: &rows };
+        assert_eq!(s.int16(0, 0), Some(5));
+        assert_eq!(s.int32(0, 0), Some(5));
+        assert_eq!(s.int16(1, 0), Some(42));
+        assert_eq!(s.int32(1, 0), Some(42));
+        assert_eq!(s.int16(2, 0), None);
+        assert_eq!(s.int32(2, 0), None);
+        assert_eq!(s.uint64(1, 0), Some(42));
+        assert_eq!(s.uint64(2, 0), None);
+    }
+
+    /// A text cell under a smallint or int override is delivered when it is a whole integer and refused by code, naming the column and the target type, otherwise.
+    #[test]
+    fn a_text_cell_under_a_narrow_integer_override_is_read_whole_or_refused() {
+        use arrow::array::{Array, Int16Array, Int32Array};
+        for (dt, target) in [(DataType::Int16, "smallint"), (DataType::Int32, "int")] {
+            for bad in ["1.5", "12abc"] {
+                let (def, bytes) = v_bytes(bad.as_bytes());
+                let rows = fetch_binary_rows(vec![def], vec![vec![Some(bytes)]]);
+                let err = build_array(&dt, 0, &rows, false, "c", None).unwrap_err();
+                let coded = err
+                    .downcast_ref::<crate::error::CodedError>()
+                    .unwrap_or_else(|| panic!("{target} {bad}: not coded: {err}"));
+                assert_eq!(coded.code(), "RIVET_SOURCE_VALUE_UNREPRESENTABLE");
+                let said = err.to_string();
+                assert!(
+                    said.contains("column `c`") && said.contains(&format!("not a valid {target}")),
+                    "{target} {bad}: {said}"
+                );
+            }
+            let (def, bytes) = v_bytes(b"42");
+            let rows = fetch_binary_rows(vec![def], vec![vec![Some(bytes)]]);
+            let a = build_array(&dt, 0, &rows, false, "c", None).unwrap();
+            assert_eq!(a.null_count(), 0);
+            let got = match dt {
+                DataType::Int16 => i32::from(
+                    a.as_any()
+                        .downcast_ref::<Int16Array>()
+                        .expect("int16")
+                        .value(0),
+                ),
+                _ => a
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .expect("int32")
+                    .value(0),
+            };
+            assert_eq!(got, 42, "{target}");
+        }
     }
 
     /// Every `CellSource` accessor, over the BINARY protocol.
