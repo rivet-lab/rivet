@@ -286,6 +286,33 @@ pub(crate) fn not_the_outcome(
     (!ok).then(|| format!("ended with {}, expected {expected}", ended(after)))
 }
 
+/// The refusal text a refuse-then-remedy walk returns, and whether every remedy was applied: a remedy a Postgres state or a cloud destination cannot copy back is skipped, and what only it leaves behind is not there to grade.
+pub struct Walk {
+    said: String,
+    skipped: usize,
+}
+
+impl Walk {
+    /// `false` when a remedy was skipped (the skip is recorded for the gate's census): the cell's later assertions about what a remedy left behind do not apply.
+    pub fn every_remedy_applied(&self) -> bool {
+        self.skipped == 0
+    }
+}
+
+impl std::ops::Deref for Walk {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.said
+    }
+}
+
+impl std::fmt::Display for Walk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.said)
+    }
+}
+
 /// A copy of everything local a rig's runs read and write, and of the rig's builder.
 struct RefusedState {
     builder: Rig,
@@ -394,14 +421,14 @@ impl Rig {
         *self.past_renders.borrow_mut() = old.past_renders.take();
     }
 
-    /// Refuse `argv` (`run`, `load`, ...) twice with the same exit, code and error line; then, for each remedy, put the refused state back, apply it and require the outcome it declares. Returns the refusal text.
+    /// Refuse `argv` (`run`, `load`, ...) twice with the same exit, code and error line; then, for each remedy, put the refused state back, apply it and require the outcome it declares. Returns the refusal text and whether every remedy was applied.
     pub fn refuses_twice_then(
         &mut self,
         argv: &[&str],
         envs: &[(&str, &str)],
         want: Refused,
         remedies: Vec<Remedy>,
-    ) -> String {
+    ) -> Walk {
         let first = said(&self.cli_env(argv, envs));
         let second = said(&self.cli_env(argv, envs));
         if let Some(why) = not_the_refusal(&[&first, &second], want) {
@@ -434,6 +461,7 @@ impl Rig {
         } else {
             None
         };
+        let mut skipped = 0;
         let copied = remedies.iter().skip(1).any(|r| !r.in_place);
         let state = copied.then(|| self.copy_refused_state());
         for (n, remedy) in remedies.into_iter().enumerate() {
@@ -456,6 +484,7 @@ impl Rig {
                     crate::common::skip_live(&format!(
                         "refuse-then-remedy: remedy `{sentence}` not applied, {what} cannot be copied back to the refused state"
                     ));
+                    skipped += 1;
                     continue;
                 }
                 if let (Some(state), false) = (&state, in_place) {
@@ -487,7 +516,10 @@ impl Rig {
                 );
             }
         }
-        first.text
+        Walk {
+            said: first.text,
+            skipped,
+        }
     }
 
     /// [`Rig::refuses_twice_then`] for a sabotage cell: a named remedy must deliver the source and a wrong remedy must be walked.
@@ -497,7 +529,7 @@ impl Rig {
         envs: &[(&str, &str)],
         want: Refused,
         remedies: Vec<Remedy>,
-    ) -> String {
+    ) -> Walk {
         if let Some(why) = not_a_walk(&remedies) {
             panic!("refusal walk: {why} ({})", want.named());
         }
