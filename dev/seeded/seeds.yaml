@@ -7402,3 +7402,20 @@ seeds:
         na: "MySQL datetime, timestamp and time hold microseconds at most, so no time override keeps fewer digits than the source"
       mongo:
         na: "a BSON date holds milliseconds and a Mongo export has no `columns:` time override over it, so nothing narrows"
+
+  - name: check-unreachable-override-admitted
+    class: "`check`, `doctor` and `plan` pass an export whose `columns:` overrides they could not check against the catalog because the source connection failed (a listener refusing one of several concurrent checks), so the override a run refuses by code (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH) is passed with exit 0"
+    history: "2026-11-23 - Oracle CDC grid, 6 parallel checks: 5 to 11 of 240 concurrent checks of one wire-mismatch config exited 0 on main (ORA-12516 on the connection), every serial check exited 1; RED on main: an_unreachable_source_refuses_an_unadmitted_override_and_not_a_plain_plan panics `an override is not a pass`"
+    scope: source
+    switch: check-unreachable-override-admitted
+    engines:
+      postgres:
+        cells: ["lib:an_unreachable_source_refuses_an_unadmitted_override_and_not_a_plain_plan"]
+      mysql:
+        cells: ["lib:an_unreachable_source_refuses_an_unadmitted_override_and_not_a_plain_plan"]
+      mssql:
+        cells: ["lib:an_unreachable_source_refuses_an_unadmitted_override_and_not_a_plain_plan"]
+      mongo:
+        cells: ["lib:an_unreachable_source_refuses_an_unadmitted_override_and_not_a_plain_plan"]
+      oracle:
+        cells: ["lib:an_unreachable_source_refuses_an_unadmitted_override_and_not_a_plain_plan"]
