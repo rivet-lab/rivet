@@ -1063,8 +1063,8 @@ mod tests {
         assert_eq!(bytes(1700, &[0, 0, 0, 0, 0xC0, 0, 0, 0]), "NaN");
         assert_eq!(
             bytes(1700, &[0, 2, 0, 0, 0, 0, 0, 2, 0, 1, 0x13, 0x88]),
-            "1.5",
-            "numeric is the batch reader's normalized text: 1.50 renders as 1.5"
+            "1.50",
+            "numeric keeps its display scale: 1.50 renders as 1.50"
         );
         assert!(
             value_from_binary(1700, &[0, 1]).is_err(),

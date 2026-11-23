@@ -47,11 +47,18 @@ pub fn numeric_wire_special_text(wire: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// Plain decimal text suitable for [`crate::types::decimal::decimal_str_to_scaled_i128`].
+/// Plain decimal text at the value's display scale, the digits PostgreSQL's own output function prints.
 pub fn numeric_wire_normalized_plain(wire: &[u8]) -> Option<String> {
-    let bd = wire_to_big_decimal(wire)?;
+    let display_scale = i64::from(Cursor::new(wire.get(6..8)?).read_u16::<BigEndian>().ok()?);
+    let bd = wire_to_big_decimal(wire)?.normalized();
+    let natural_scale = bd.as_bigint_and_exponent().1;
+    let scale = if seeded!("pg-numeric-text-drops-display-scale", true, false) {
+        natural_scale
+    } else {
+        natural_scale.max(display_scale)
+    };
 
-    Some(bd.normalized().to_plain_string().trim().to_string())
+    Some(bd.with_scale(scale).to_plain_string().trim().to_string())
 }
 
 pub(crate) fn wire_to_big_decimal(wire: &[u8]) -> Option<BigDecimal> {
@@ -210,6 +217,35 @@ mod tests {
     }
 
     #[test]
+    fn display_scale_pads_trailing_zeros_like_the_servers_text() {
+        for (wire, want) in [
+            (encode(2, 0, NUMERIC_POS, 2, &[1, 5000]), "1.50"),
+            (encode(1, -1, NUMERIC_POS, 2, &[1000]), "0.10"),
+            (encode(0, 0, NUMERIC_POS, 3, &[]), "0.000"),
+            (encode(1, 0, NUMERIC_NEG, 3, &[1]), "-1.000"),
+            (encode(1, 0, NUMERIC_POS, 3, &[1000]), "1000.000"),
+            (encode(2, 0, NUMERIC_POS, 10, &[2, 5000]), "2.5000000000"),
+            (encode(1, 1, NUMERIC_POS, 0, &[1]), "10000"),
+        ] {
+            assert_eq!(numeric_wire_normalized_plain(&wire).as_deref(), Some(want));
+        }
+    }
+
+    #[test]
+    fn a_display_scale_below_the_digits_never_drops_a_digit() {
+        let wire = encode(2, 0, NUMERIC_POS, 0, &[1, 2500]);
+        assert_eq!(
+            numeric_wire_normalized_plain(&wire).as_deref(),
+            Some("1.25")
+        );
+    }
+
+    #[test]
+    fn a_header_without_a_display_scale_returns_none() {
+        assert!(numeric_wire_normalized_plain(&[0, 0, 0, 0, 0, 0, 0]).is_none());
+    }
+
+    #[test]
     fn nan_returns_none() {
         let wire = encode(0, 0, NUMERIC_NAN, 0, &[]);
         assert!(numeric_wire_normalized_plain(&wire).is_none());
@@ -308,8 +344,19 @@ mod renderer_twins {
     }
 
     #[test]
-    /// Strict known divergence: ADR-0038 divergence.
-    #[should_panic(expected = "assertion")]
+    fn normalized_plain_keeps_every_scale_like_decimal_plain() {
+        for s in 0..=24u16 {
+            for u in [0i128, 1, -1, 150, -1_000, 123_456_789, i128::from(i64::MAX)] {
+                assert_eq!(
+                    numeric_wire_normalized_plain(&wire(u, s)).as_deref(),
+                    Some(decimal_plain(u, s as i8).as_str()),
+                    "({u}, {s})"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn normalized_plain_keeps_the_scale_like_decimal_plain() {
         for (u, s) in [(150, 2), (0, 3), (-1_000, 3)] {
             assert_eq!(
