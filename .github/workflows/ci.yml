@@ -173,8 +173,6 @@ jobs:
     if: github.event_name == 'pull_request'
     # The reach measurement is capped at 25m of its own; the rest is listing.
     timeout-minutes: 45
-    # Like the run it plans, this job cannot fail a PR: what it decided is
-    # published and `Mutants (grade)` re-publishes it for the verdict.
     continue-on-error: true
     outputs:
       code: ${{ steps.scope.outputs.code }}
@@ -332,22 +330,6 @@ jobs:
             fi
           }
           git diff "$BASE_SHA"...HEAD > pr.diff
-          # BUDGET GUARD. Every mutant is its own incremental build — ~80s on a
-          # 2-core runner at -j2, so the job's ceiling grades roughly 120
-          # ($MUTANTS_DIFF_BUDGET). A five-round branch like #230 yields 416
-          # (158 run.rs, 104 pool.rs, 44 adaptive.rs, ...) ≈ 4.6 h: the job dies
-          # at the ceiling having graded a fraction of the diff and reported
-          # nothing about the rest.
-          #
-          # What the guard hands the work to is CHECKED, not claimed. The first
-          # version of this notice said "these modules are covered by the nightly
-          # tier rotation" — a statement about a hand-written list of 31 files in
-          # nightly-live.yml, while the tree has 198 `src/**.rs`. The branch that
-          # introduced the notice rewrote plan_cmd.rs (+478) and aggregate.rs
-          # (+128), neither in ANY tier: 606 lines graded by nothing, under a
-          # notice saying otherwise. The rotation is gone (2026-08-17) and so is
-          # the deferral: an over-budget diff is now reported as UNGRADED rather
-          # than handed to a mechanism that never finished a tier.
           list_into diff-list.txt
           COUNT=$(grep -c . diff-list.txt || true)
           say count "$COUNT"
@@ -483,8 +465,6 @@ jobs:
           retention-days: 3
 
   # The graded set, cut in `shard_n` slices by cargo-mutants' own `--shard`.
-  # A shard never decides anything: it records its outcomes and its exit code,
-  # and `Mutants (grade)` grades them together.
   mutants-shard:
     name: Mutants (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
@@ -649,9 +629,10 @@ jobs:
               exit 1
             fi
           fi
+          VERDICT=""
           case "$rc" in
-            0) say result clean ;;
-            2) say result missed ;;
+            0) VERDICT=clean ;;
+            2) VERDICT=missed ;;
           esac
           # The run's own tally over the GRADED class, for the thermometer.
           for class in caught missed timeout unviable; do
@@ -678,6 +659,7 @@ jobs:
               say p2_audit skipped-over-budget
             fi
           fi
+          if [ -n "$VERDICT" ]; then say result "$VERDICT"; fi
           exit "$rc"
       - name: Save mutation outcomes
         if: always() && needs.mutants-plan.outputs.cache == 'miss' && steps.grade.outputs.p2_audit != 'oracle-lied' && hashFiles('.mutants-cache/outcomes.json') != ''
@@ -1084,6 +1066,10 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Make sure the base commit is present
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --no-tags origin "$BASE_SHA"
       - name: A head with Rust to mutate needs a recorded mutants verdict
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1096,9 +1082,8 @@ jobs:
           HELD: ${{ needs.mutants-plan.outputs.held }}
           STATE: ${{ needs.mutants-in-diff.outputs.state }}
           RESULT: ${{ needs.mutants-in-diff.outputs.result }}
-        run: |
-          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --no-tags origin "$BASE_SHA"
-          python3 .github/scripts/mutants_gate.py check
+          OUTCOME: ${{ needs.mutants-in-diff.outputs.outcome }}
+        run: python3 .github/scripts/mutants_gate.py check
 
   # A THERMOMETER for the harness itself — the one job here that grades nothing.
   #
