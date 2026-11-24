@@ -1344,7 +1344,10 @@ exports:
         );
     }
 
-    struct NestingStore(std::sync::atomic::AtomicBool);
+    struct NestingStore {
+        nest: std::sync::atomic::AtomicBool,
+        staged: std::sync::Mutex<Vec<std::path::PathBuf>>,
+    }
 
     impl crate::destination::Destination for NestingStore {
         fn write(
@@ -1352,8 +1355,11 @@ exports:
             local_path: &std::path::Path,
             _remote_key: &str,
         ) -> Result<crate::destination::WriteOutcome> {
-            if self.0.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.staged.lock().unwrap().push(local_path.to_path_buf());
+            if self.nest.swap(false, std::sync::atomic::Ordering::SeqCst) {
                 write_destination_probe(self, &dest_of(DestinationType::S3))?;
+                let staged = self.staged.lock().unwrap();
+                assert_ne!(staged[0], staged[1], "two probes staged at one path");
             }
             assert_eq!(std::fs::read(local_path)?, b"ok");
             Ok(crate::destination::WriteOutcome::default())
@@ -1370,7 +1376,10 @@ exports:
 
     #[test]
     fn a_probe_that_another_probe_completes_inside_is_still_read_by_a_store() {
-        let store = NestingStore(std::sync::atomic::AtomicBool::new(true));
+        let store = NestingStore {
+            nest: std::sync::atomic::AtomicBool::new(true),
+            staged: std::sync::Mutex::new(Vec::new()),
+        };
         let dest = dest_of(DestinationType::S3);
         assert_eq!(
             write_destination_probe(&store, &dest).map_err(|e| format!("{e:#}")),
