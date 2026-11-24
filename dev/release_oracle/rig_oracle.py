@@ -449,7 +449,7 @@ def _oracle_register(ora, url: str, sql: str, json_cols: frozenset = frozenset()
     def whole(chunks: list) -> pa.ChunkedArray:
         typed = {a.type for a in chunks if not pa.types.is_null(a.type)}
         if len(typed) > 1:
-            return pa.chunked_array([text([v for a in chunks for v in a.to_pylist()])])
+            return pa.chunked_array([column([v for a in chunks for v in a.to_pylist()])])
         target = next(iter(typed), pa.string())
         return pa.chunked_array([a if a.type == target else a.cast(target) for a in chunks], target)
 
@@ -2293,9 +2293,9 @@ def _self_test() -> None:
     assert pin("DATETIME(6)"), "a DATETIME delivered as an instant is still a finding"
     seen: dict = {}
     ora_fake = type("O", (), {"db": type("D", (), {"register": staticmethod(lambda n, t: seen.update({n: t}))})()})()
-    names = ["Z", "N", "I", "M", "E"]
-    first = [(dt.datetime(2024, 2, 29, 1), dt.datetime(2024, 2, 29, 1), None, 1, None)]
-    second = [(dt.datetime(2024, 3, 1, 1), dt.datetime(2024, 3, 1, 1), 5, "x", None)]
+    names = ["Z", "N", "I", "M", "E", "T", "W", "L"]
+    first = [(dt.datetime(2024, 2, 29, 1), dt.datetime(2024, 2, 29, 1), None, 1, None, dt.datetime(2024, 3, 1, 1), 1, [1])]
+    second = [(dt.datetime(2024, 3, 1, 1), dt.datetime(2024, 3, 1, 1), 5, "x", None, "x", 2.5, [2.5])]
 
     @contextlib.contextmanager
     def two_batches(url, sql):
@@ -2307,8 +2307,11 @@ def _self_test() -> None:
     finally:
         value_diff.oracle_batches = real_batches
     tys = {f.name: str(f.type) for f in seen["ora_src"].schema}
-    assert tys == {"Z": "timestamp[us, tz=UTC]", "N": "timestamp[us]", "I": "int64", "M": "string", "E": "string"}, f"batches are one column each, a null batch takes the type of the others: {tys}"
-    assert seen["ora_src"].column("M").to_pylist() == ["1", "x"] and seen["ora_src"].column("I").to_pylist() == [None, 5], "a column of mixed python types is text across batches"
+    assert tys == {"Z": "timestamp[us, tz=UTC]", "N": "timestamp[us]", "I": "int64", "M": "string", "E": "string", "T": "string", "W": "double", "L": "list<item: double>"}, f"batches are one column each, a null batch takes the type of the others, a width difference widens: {tys}"
+    got = seen["ora_src"]
+    assert got.column("M").to_pylist() == ["1", "x"] and got.column("I").to_pylist() == [None, 5], "a column of mixed python types is text across batches"
+    assert got.column("T").to_pylist() == ["2024-03-01 01:00:00", "x"], "incompatible batches are text as str() writes it, not as a cast of the first batch"
+    assert got.column("W").to_pylist() == [1.0, 2.5] and got.column("L").to_pylist() == [[1.0], [2.5]], "batches that differ only by number width widen as one pa.array did"
     assert one("DOUBLE[]", "VARCHAR", "VARRAY"), "a list with no pin delivered as text is a finding"
     class Described:
         """A DuckDB stand-in whose DESCRIBE answers the scanner's engine-labelled type names."""
