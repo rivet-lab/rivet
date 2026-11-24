@@ -48,16 +48,30 @@ def containers(out: str, top: int = 6) -> str:
 
 
 def processes(ps: str, top: int = 4) -> tuple[str, str]:
-    """(`comm:MB` of the `top` biggest processes, the names of the live tests) from `ps -eo rss=,args=` output."""
-    rows, tests = [], []
+    """(`name@test:MB` of the `top` biggest processes, the names of the live tests) from `ps -eo pid=,ppid=,rss=,args=` output; `name` is the program, or its `-m` module, and `test` the nearest ancestor's `--exact` test."""
+    rows: dict[int, tuple[int, int, str]] = {}
     for line in ps.splitlines():
-        parts = line.split(None, 1)
-        if len(parts) == 2 and parts[0].isdigit():
-            rows.append((int(parts[0]), parts[1]))
-            if t := RUNNING_TEST.search(parts[1]):
-                tests.append(t[1])
-    big = ",".join(f"{Path(args.split()[0]).name}:{kb // 1024}" for kb, args in sorted(rows, reverse=True)[:top])
-    return big, ",".join(sorted(set(tests))[:6])
+        parts = line.split(None, 3)
+        if len(parts) == 4 and all(p.isdigit() for p in parts[:3]):
+            rows[int(parts[0])] = (int(parts[1]), int(parts[2]), parts[3])
+    tests = {pid: t[1] for pid, (_, _, args) in rows.items() if (t := RUNNING_TEST.search(args))}
+
+    def owner(pid: int) -> str:
+        """The test of `pid` or of its nearest ancestor, `-` when none runs it."""
+        for _ in range(12):
+            if pid in tests:
+                return tests[pid].rsplit("::", 1)[-1][:40]
+            pid = rows[pid][0] if pid in rows else 0
+        return "-"
+
+    def name(args: str) -> str:
+        """The program of `args`, its `-m` module for an interpreter."""
+        words = args.split()
+        mod = words[words.index("-m") + 1].rsplit(".", 1)[-1] if "-m" in words[:-1] else ""
+        return mod or Path(words[0]).name
+
+    big = ",".join(f"{name(args)}@{owner(pid)}:{kb // 1024}" for pid, (_, kb, args) in sorted(rows.items(), key=lambda r: -r[1][1])[:top])
+    return big, ",".join(sorted(set(tests.values()))[:4])
 
 
 def sh(cmd: list[str]) -> str:
@@ -76,7 +90,7 @@ def sample(started: float, now: float | None = None, read=lambda p: Path(p).read
     used = (mem.get("MemTotal", 0) - mem.get("MemAvailable", 0)) // 1024
     kills = re.search(r"^oom_kill (\d+)", read("/proc/vmstat"), re.M)
     free_gb = shutil.disk_usage("/").free // (1 << 30)
-    big, tests = processes(run(["ps", "-eo", "rss=,args="]))
+    big, tests = processes(run(["ps", "-eww", "-o", "pid=,ppid=,rss=,args="]))
     cols = [time.strftime("%H:%M:%S", time.gmtime(now)), f"{now - started:.0f}", str(used), str(mem.get("MemAvailable", 0) // 1024), str(swap_used),
             read("/proc/loadavg").split()[0], str(free_gb), kills[1] if kills else "-",
             containers(run(["docker", "stats", "--no-stream", "--format", "{{.Name}} {{.MemUsage}}"])), big, tests]
@@ -207,12 +221,13 @@ def self_test() -> None:
 
     meminfo_text = "MemTotal:       16000000 kB\nMemAvailable:    4000000 kB\nSwapTotal:       3000000 kB\nSwapFree:         100000 kB\n"
     files = {"/proc/meminfo": meminfo_text, "/proc/vmstat": "nr_free 1\noom_kill 2\n", "/proc/loadavg": "7.50 3 2 1/1 1"}
-    ps = "  900000 /usr/bin/mongod --x\n 2048 /t/live_suite-abc --exact live_cdc::a_test --nocapture\n  5 bash\n"
+    ps = ("10 1 900000 /usr/bin/mongod --x\n20 1 2048 /t/live_suite-abc --exact live_cdc::a_test --nocapture\n"
+          "21 20 1800000 /usr/bin/python3 -m dev.release_oracle.rig_oracle verify\nimport duckdb, json\n22 1 5 bash\n")
     dstats = "rivet-oracle-1 2.4GiB / 15GiB\nrivet-mssql-1 800MiB / 3GiB\nnoise\n"
     row = sample(100.0, 160.0, read=lambda p: files[p], run=lambda c: ps if c[0] == "ps" else dstats).split("\t")
     assert row[1:8] == ["60", str(12000000 // 1024), str(4000000 // 1024), str(2900000 // 1024), "7.50", row[6], "2"], row
     assert row[8] == "oracle-1:2458,mssql-1:800", row[8]
-    assert row[9].startswith("mongod:878") and row[10] == "live_cdc::a_test", row[9:]
+    assert row[9] == "rig_oracle@a_test:1757,mongod@-:878,live_suite-abc@a_test:2,bash@-:0" and row[10] == "live_cdc::a_test", row[9:]
     assert len(row) == len(HEADER.split("\t")), "a row and its header differ in width"
     assert containers("a 1KiB / 3GiB") == "a:0" and containers("garbage") == "", "a unit or a line it cannot read is not skipped"
     with tempfile.TemporaryDirectory() as d:
