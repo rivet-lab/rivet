@@ -1027,6 +1027,18 @@ mod text_cell_tests {
     }
 
     #[test]
+    fn a_uint64_element_above_i64_max_is_a_bare_decimal_number() {
+        let list = ListArray::from_iter_primitive::<UInt64Type, _, _>(vec![Some(vec![
+            Some(u64::MAX),
+            Some(9_223_372_036_854_775_808),
+        ])]);
+        assert_eq!(
+            cell(&list, 0),
+            "\"[18446744073709551615,9223372036854775808]\""
+        );
+    }
+
+    #[test]
     fn a_null_list_is_the_bare_null_field_and_an_empty_list_is_not() {
         let list = ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
             None,

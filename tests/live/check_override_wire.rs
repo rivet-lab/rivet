@@ -624,7 +624,6 @@ fn a_csv_export_of_a_nanosecond_timestamp_column_is_delivered_like_check_admits_
 fn csv_text_of_table_mssql(table: &str) -> String {
     let out = tempfile::tempdir().unwrap();
     let rig = Rig::mssql_batch(table)
-        .no_oracle("the subject is the csv text of a datetime column, graded below against the bytes the previous release wrote")
         .with_format("csv")
         .dest_path(out.path().to_path_buf());
     let o = rig.run();

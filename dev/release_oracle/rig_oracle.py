@@ -543,7 +543,8 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
             raise LookupError(f"table {table} does not exist (no column in all_tab_columns)")
         overrides = spec.get("overrides") or {}
         exact_ns = exact_digit_columns(overrides, {c.upper() for c, t in declared.items() if t.startswith("TIMESTAMP")})
-        by_col = {c: None if c in exact_ns else renders.get(f"source:{n}") for c, n in declared.items()}
+        micro = micro_digit_columns(overrides, declared)
+        by_col = {c: ORACLE_FF6_TRUNCATED if c in micro else None if c in exact_ns else renders.get(f"source:{n}") for c, n in declared.items()}
         sql = query.rstrip().rstrip(";") if query else oracle_table_select(spec["url"], table, {c: e for c, e in by_col.items() if e})
         zoned: frozenset = frozenset()
         if query:
@@ -1424,6 +1425,8 @@ def _value_findings(
     # A CSV holds text: no DuckDB render applies to it; the source is rendered as the CSV writer documents its text.
     duck = {} if engine == "oracle" or fmt in ("csv", "ndjson") else {c: _render(r)["duck"] for c, r in row_of.items() if _render(r).get("duck")}
     canons = {c: _render(r)["canon"] for c, r in row_of.items() if _render(r).get("canon")}
+    if engine == "oracle":
+        canons.update(dict.fromkeys(micro_digit_columns(overrides or {}, native), "timestamp"))
     verbatim = frozenset(
         c for c, n in native.items()
         if (engine == "postgres" and n == "JSON") or (TEXT_NATIVE.match(n) and c not in duck and c not in canons and c not in numbers)
@@ -1726,12 +1729,12 @@ def created_zone_less(spec: dict) -> bool:
     return any(release_version(b) <= LAST_ZONE_LESS_RELEASE for b in spec.get("released_by") or [])
 
 
-def clickhouse_type_findings(ch_of: dict, row_of: dict, wh_types: dict, native: dict, key: list[str], legacy: bool) -> list[str]:
-    """One line per column whose ClickHouse type is none the ledger allows; a naive timestamp may be zone-less only when `legacy`."""
+def clickhouse_type_findings(ch_of: dict, row_of: dict, wh_types: dict, native: dict, key: list[str], legacy: bool, overrides: dict) -> list[str]:
+    """One line per column whose ClickHouse type is none the ledger allows; a naive timestamp may be zone-less only when `legacy`; a `columns:` override column is not the ledger's."""
     bad: list[str] = []
     for col, r in ch_of.items():
         want, got = r.get("clickhouse"), wh_types.get(col)
-        if not want or got is None:
+        if not want or got is None or col in overrides:
             continue
         marked = r.get("clickhouse_defect") or r.get("known_defect") or row_of.get(col, {}).get("known_defect")
         allowed = {want, r.get("today_clickhouse")} if marked else {want}
@@ -1966,7 +1969,7 @@ def grade_load(spec: dict) -> dict:
     null_class = frozenset(c for c, xs in defects.items() if None in xs)
     bad = grade_findings(f, {}, forms, native, engine != "mongo", dict.fromkeys([*(spec.get("overrides") or {}), *ledgered]),
                          collapse=collapse, null_class=null_class, unpinned_strict=False)
-    bad += clickhouse_type_findings(ch_of, row_of, wh_types, native, key, created_zone_less(spec)) if target == "clickhouse" else []
+    bad += clickhouse_type_findings(ch_of, row_of, wh_types, native, key, created_zone_less(spec), spec.get("overrides") or {}) if target == "clickhouse" else []
     bad += [f"WAREHOUSE: {n}" for n in notes if "still exist" in n]
     out = {"failures": [f"WAREHOUSE {target} `{fq}`: {b}" for b in bad], "notes": notes,
            "facts": {k: v for k, v in f.items() if k not in ("pairs", "dst_cols", "src_stats", "dst_stats")}}
@@ -2040,6 +2043,16 @@ def _peek_self_test() -> None:
         raise AssertionError("a missing slot must surface as itself")
 
 
+ORACLE_FF6_TRUNCATED = "SUBSTR(TO_CHAR({c}, 'SYYYY-MM-DD\"T\"HH24:MI:SS.FF9'), 1, 27)"
+NANO_TIMESTAMP = re.compile(r"TIMESTAMP\([789]\)")
+
+
+def micro_digit_columns(overrides: dict, declared: dict) -> set[str]:
+    """The columns of `declared` (name to native type) over TIMESTAMP(7..9) that a `timestamp` override delivers at microseconds, graded as lossy by declaration: the source is read at FF6, the digits past it cut."""
+    by_upper = {c.upper(): t for c, t in overrides.items()}
+    return {c for c, n in declared.items() if override_duck(by_upper.get(c.upper()) or "") == "TIMESTAMP" and NANO_TIMESTAMP.fullmatch(n)}
+
+
 def exact_digit_columns(overrides: dict, stamps: set[str]) -> set[str]:
     """The columns whose source is read with every fractional digit: a nanosecond override, or a text override over a timestamp column of `stamps` (upper-case names)."""
     return {
@@ -2050,6 +2063,9 @@ def exact_digit_columns(overrides: dict, stamps: set[str]) -> set[str]:
 
 
 def _self_test() -> None:
+    types = {"T9": "TIMESTAMP(9)", "T7": "TIMESTAMP(7)", "T6": "TIMESTAMP(6)", "Z9": "TIMESTAMP(9) WITH TIME ZONE", "N": "NUMBER"}
+    assert micro_digit_columns({"t9": "timestamp", "T7": " Timestamp ", "T6": "timestamp", "Z9": "timestamp", "N": "timestamp"}, types) == {"T9", "T7"}, "only a `timestamp` over TIMESTAMP(7..9) is read at FF6"
+    assert not micro_digit_columns({"T9": "timestamp_ns", "T7": "text", "Z9": "timestamp_tz_ns", "T8": "date"}, types), "a nanosecond, text or date declaration keeps its own read"
     stamps = {"T9", "Z9"}
     assert exact_digit_columns({"T9": "text", "N": "text", "X": "timestamp_ns"}, stamps) == {"T9", "X"}
     for spelling in ("string", "varchar", "char", "bpchar", " text", "TEXT ", "timestamptz_ns", "timestamp_tz_ns", "Timestamp_NS"):
@@ -2514,7 +2530,7 @@ def _zone_less_self_test() -> None:
     ch_of, native = {"n": naive, "z": zoned}, {"n": "DATETIME(6)", "z": "TIMESTAMPTZ"}
 
     def findings(types: dict, legacy: bool) -> list[str]:
-        return clickhouse_type_findings(ch_of, {}, types, native, ["id"], legacy)
+        return clickhouse_type_findings(ch_of, {}, types, native, ["id"], legacy, {})
 
     old = {"n": "Nullable(DateTime64(6))", "z": utc}
     assert zone_less(utc) == "Nullable(DateTime64(6))" and zone_less("Int64") == "Int64"
@@ -2523,6 +2539,14 @@ def _zone_less_self_test() -> None:
     tree = findings(old, False)
     assert len(tree) == 1 and "`n`" in tree[0] and "TYPE" in tree[0], f"a zone-less type on a table this tree created is a finding: {tree}"
     assert len(findings({"n": utc, "z": "Nullable(DateTime64(6))"}, True)) == 1, "a zoned column never loses its zone, legacy or not"
+    number = {"VER": {"delivery": "decimal_plain", "clickhouse": "Nullable(String)"}, "ID": {"delivery": "Int64", "clickhouse": "Nullable(Int64)"}}
+    kinds = {"VER": "NUMBER", "ID": "NUMBER(10)"}
+    declared = clickhouse_type_findings(number, {}, {"VER": "Nullable(Int64)", "ID": "Nullable(Int64)"}, kinds, [], False, {"VER": "int64"})
+    assert declared == [], f"a column the export declares under `columns:` is not graded against the ledger's type: {declared}"
+    bare = clickhouse_type_findings(number, {}, {"VER": "Nullable(Int64)", "ID": "Nullable(Int64)"}, kinds, [], False, {})
+    assert len(bare) == 1 and "`VER`" in bare[0], f"an undeclared NUMBER column that lands as Int64 is still a finding: {bare}"
+    other = clickhouse_type_findings(number, {}, {"VER": "Nullable(Int64)", "ID": "Nullable(String)"}, kinds, [], False, {"VER": "int64"})
+    assert len(other) == 1 and "`ID`" in other[0], f"an override on one column excuses no other column: {other}"
     with tempfile.TemporaryDirectory() as d:
         def binary(version: str) -> str:
             path = os.path.join(d, f"rivet-{version}")

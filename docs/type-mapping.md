@@ -498,7 +498,7 @@ CDC (change streams) emits the same two-column shape prefixed with the
    constraint is not propagated into the Parquet schema (ADR-0016, deferred to
    v0.8 Phase A).
 3. **CSV complex types**: a flat array (`List` of a scalar), `Decimal256` (precision > 38) and a
-   nanosecond timestamp are written as text (see [CSV serialization](#csv-serialization)); a nested
+   nanosecond timestamp (an Oracle `TIMESTAMP(9)` only when declared `timestamp_ns` or `text`) is written as text (see [CSV serialization](#csv-serialization)); a nested
    array and non-UUID fixed binary have no CSV cell — the export **fails loudly** naming the column
    rather than silently writing empty values.
 4. **SQL Server `datetime2(7)` / `datetimeoffset(7)` sub-microsecond precision** — *default is
