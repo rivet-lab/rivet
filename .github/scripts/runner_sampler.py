@@ -27,7 +27,7 @@ INTERVAL_S = 30
 REPORT_S = 120
 AGENTS = ("Runner.Listener", "Runner.Worker")
 TEXT_LIMIT = 60000
-HEADER = "time_utc\telapsed_s\tmem_used_mb\tmem_avail_mb\tswap_used_mb\tload1\tdisk_free_gb\toom_kills\tcontainers_mib\tprocesses_mb\trunning_tests"
+HEADER = "time_utc\telapsed_s\tmem_used_mb\tmem_avail_mb\tswap_used_mb\tload1\tdisk_free_gb\toom_kills\tcontainers_mib\tprocesses_mb\toracle_limits\trunning_tests"
 RUNNING_TEST = re.compile(r"--exact\s+(\S+)")
 
 
@@ -45,6 +45,17 @@ def containers(out: str, top: int = 6) -> str:
         if m and m[3] in units:
             rows.append((float(m[2]) * units[m[3]], m[1]))
     return ",".join(f"{n.removeprefix('rivet-')}:{mib:.0f}" for mib, n in sorted(rows, reverse=True)[:top])
+
+
+ORACLE_LIMITS_ARGV = ["docker", "exec", "rivet-oracle-1", "bash", "-c",
+                      "echo \"set pagesize 0 feedback off\nselect resource_name||' '||current_utilization||'/'||max_utilization||'/'||limit_value "
+                      "from v\\$resource_limit where resource_name in ('processes','sessions');\" | sqlplus -s / as sysdba"]
+
+
+def oracle_limits(out: str) -> str:
+    """`processes:current/peak/limit,sessions:...` of the stand Oracle's `v$resource_limit` rows, empty when it cannot be read."""
+    rows = re.findall(r"^(processes|sessions) (\d+/\d+/\w+)\s*$", out, re.M)
+    return ",".join(f"{name}:{figures}" for name, figures in rows)
 
 
 PS_ARGV = ["ps", "-eww", "-o", "pid=,ppid=,rss=,args="]
@@ -102,7 +113,7 @@ def sample(started: float, now: float | None = None, read=lambda p: Path(p).read
     big, tests = processes(run(PS_ARGV))
     cols = [time.strftime("%H:%M:%S", time.gmtime(now)), f"{now - started:.0f}", str(used), str(mem.get("MemAvailable", 0) // 1024), str(swap_used),
             read("/proc/loadavg").split()[0], str(free_gb), kills[1] if kills else "-",
-            containers(run(["docker", "stats", "--no-stream", "--format", "{{.Name}} {{.MemUsage}}"])), big, tests]
+            containers(run(["docker", "stats", "--no-stream", "--format", "{{.Name}} {{.MemUsage}}"])), big, oracle_limits(run(ORACLE_LIMITS_ARGV)), tests]
     return "\t".join(cols)
 
 
@@ -233,10 +244,14 @@ def self_test() -> None:
     ps = ("10 1 3000000 /usr/bin/mongod --x\n20 1 2048 /t/live_suite-abc --exact live_cdc::a_test --nocapture\n"
           "21 20 1800000 /usr/bin/python3 -m dev.release_oracle.rig_oracle verify\nimport duckdb, json\n22 21 5 bash\n")
     dstats = "rivet-oracle-1 2.4GiB / 15GiB\nrivet-mssql-1 800MiB / 3GiB\nnoise\n"
-    row = sample(100.0, 160.0, read=lambda p: files[p], run=lambda c: ps if c[0] == "ps" else dstats).split("\t")
+    limits = "processes 41/612/1000\nsessions 30/700/1522\nnoise 1/2/3\n"
+    row = sample(100.0, 160.0, read=lambda p: files[p],
+                 run=lambda c: ps if c[0] == "ps" else limits if c[:2] == ["docker", "exec"] else dstats).split("\t")
     assert row[1:8] == ["60", str(12000000 // 1024), str(4000000 // 1024), str(2900000 // 1024), "7.50", row[6], "2"], row
     assert row[8] == "oracle-1:2458,mssql-1:800", row[8]
-    assert row[9] == "mongod@-:2929,rig_oracle@a_test:1757,live_suite-abc@a_test:2,bash@a_test:0" and row[10] == "live_cdc::a_test", row[9:]
+    assert row[9] == "mongod@-:2929,rig_oracle@a_test:1757,live_suite-abc@a_test:2,bash@a_test:0" and row[11] == "live_cdc::a_test", row[9:]
+    assert row[10] == "processes:41/612/1000,sessions:30/700/1522", row[10]
+    assert oracle_limits("Error: No such container: rivet-oracle-1") == "", "an absent stand Oracle leaves the column empty"
     assert len(row) == len(HEADER.split("\t")), "a row and its header differ in width"
     me = ps_rows(sh(PS_ARGV)).get(os.getpid())
     assert me and me[0] == os.getppid() and me[1] > 0 and Path(sys.argv[0]).name in me[2], f"the ps argv and the parser disagree on this process: {me}"

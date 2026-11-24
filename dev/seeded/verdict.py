@@ -52,7 +52,13 @@ def judge(root: Path, sha: str, shards: int, expected: Sequence[str]) -> tuple[l
             problems.append(f"shard {i}: {why}")
         else:
             ran.append({"index": i, "seeds": ",".join(rec["seeds"])})
-    problems += coverage_problems(ran, expected)
+    gaps = coverage_problems(ran, expected)
+    if len(ran) < shards:
+        unread = [g for g in gaps if g.endswith(" is in no shard")]
+        gaps = [g for g in gaps if g not in unread]
+        if unread:
+            problems.append(f"{len(unread)} expected seed(s) sit in the {shards - len(ran)} shard(s) above that gave no record")
+    problems += gaps
     return problems, sorted(s for sh in ran for s in sh["seeds"].split(",") if s)
 
 
@@ -102,6 +108,7 @@ def self_test() -> int:
         ({"line1": {"dirty": True}}, "red or ran on a dirty tree"),
         ({"line1": {"sha": "b" * 40}}, "no record line"),
         ({"line1": {"seeds": ["s3"]}}, "seed s4 is in no shard"),
+        ({"line1": {"green": False}}, "2 expected seed(s) sit in the 1 shard(s) above"),
         ({"line1": {"seeds": ["s3", "s4", "s1"]}}, "seed s1 is in 2 shards"),
         ({"line1": {"seeds": ["s3", "s4", "s9"]}}, "seed s9 is in a shard but the ledger does not place it"),
         ({"line0": {"not_graded_here": 4}, "line1": {"not_graded_here": 4}}, "NOT-GRADED-HERE across the shards"),
@@ -112,6 +119,7 @@ def self_test() -> int:
             world(root, **kw)
             got = verdict(root, sha, 2, expected, 7, record)
             assert (not got) if want is None else any(want in p for p in got), (i, kw, got)
+            assert not (any(p.startswith("shard ") for p in got) and any("is in no shard" in p for p in got)), (i, "a not-green shard's seeds are one line, not one per seed", got)
             line = json.loads(record.read_text().splitlines()[-1])
             assert line["green"] is (want is None) and line["sha"] == sha and line["seeds"] == expected, (i, line)
             ok = run_record.refusal(sha, record, expected)

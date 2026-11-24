@@ -442,31 +442,35 @@ class Cargo:
         return out
 
     def _run_group(self, cells, log: Path, extra: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
-        """One nextest run of `cells` under this env plus `extra`, and the leg a self-skip naming the gate's state var owes."""
+        """One nextest run of `cells` under this env plus `extra`; a self-skip naming the gate's state var runs again under it, and a cell that died on the stand's own panic runs once more."""
         threads = ["--test-threads", "1"] if extra else []
-        skip_log = log.with_suffix(".skips")
-        skip_log.write_text("")
-        p = sh([*self.nextest(["run"], cells), "--run-ignored", "all", "--no-fail-fast", "--retries", "0", *threads,
-                "-E", nextest_filter([c.removeprefix(LIB) for c in cells])],
-               cwd=self.tree, env={**self.env, **extra, "RIVET_SKIP_LOG": str(skip_log)})
-        log.write_text(p.stdout)
-        skipped = self_skipped(skip_log)
-        out = cell_outcomes(p.stdout, skipped, tuple(cells))
-        why = {k.split("::")[-1]: v for k, v in skipped.items()}
+
+        def again(group: list[str], tag: str, env: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+            """One nextest run of `group` with its own skip log `tag`; each cell's verdict and each self-skip's reason."""
+            skip_log = log.with_suffix(f"{tag}.skips")
+            skip_log.write_text("")
+            p = sh([*self.nextest(["run"], group), "--run-ignored", "all", "--no-fail-fast", "--retries", "0", *threads,
+                    "-E", nextest_filter([c.removeprefix(LIB) for c in group])],
+                   cwd=self.tree, env={**self.env, **extra, **env, "RIVET_SKIP_LOG": str(skip_log)})
+            (log if not tag else log.with_suffix(f"{tag}.log")).write_text(p.stdout)
+            skipped = self_skipped(skip_log)
+            return cell_outcomes(p.stdout, skipped, tuple(group)), {k.split("::")[-1]: v for k, v in skipped.items()}
+
+        out, why = again(cells, "", {})
         owed = [c for c in cells if self.again and out.get(c) == "SKIP" and self.again[0] in why.get(c.removeprefix(LIB), "")]
         if owed:
-            # As the stage does: a self-skip naming the gate's state var runs again under it, and that leg is its verdict.
-            again_log = log.with_suffix(".again.skips")
-            again_log.write_text("")
-            q = sh([*self.nextest(["run"], owed), "--run-ignored", "all", "--no-fail-fast", "--retries", "0", *threads,
-                    "-E", nextest_filter([c.removeprefix(LIB) for c in owed])],
-                   cwd=self.tree, env={**self.env, **extra, **self.again[1], "RIVET_SKIP_LOG": str(again_log)})
-            log.with_suffix(".again.log").write_text(q.stdout)
-            second = self_skipped(again_log)
-            out.update(cell_outcomes(q.stdout, second, tuple(owed)))
+            second, second_why = again(owed, ".again", self.again[1])
+            out.update(second)
             for c in owed:
                 why.pop(c.removeprefix(LIB), None)
-            why.update({k.split("::")[-1]: v for k, v in second.items()})
+            why.update(second_why)
+        stood = [c for c in cells if out.get(c) == STAND]
+        if stood:
+            second, second_why = again(stood, ".stand", {})
+            out.update(second)
+            for c in stood:
+                why.pop(c.removeprefix(LIB), None)
+            why.update(second_why)
         return out, why
 
 
@@ -1168,6 +1172,21 @@ def self_test() -> int:
     runs = {("RIVET_TEST_EXCLUSIVE" in env, alone[0] in " ".join(argv)) for argv, env in calls}
     assert runs == {(True, True), (False, False)}, (
         "a live+exclusive cell runs alone under RIVET_TEST_EXCLUSIVE, the others without it", calls)
+    refused = ("        FAIL [   0.2s] (1/1) rivet-cli::live_suite live_a::t1\n  stderr ───\n\n    thread 'live_a::t1' panicked at tests/common/oracle.rs:8:9:\n"
+               "    live test requires Oracle reachable on 127.0.0.1:1521.\n\n")
+    passed = "        PASS [   0.2s] (1/1) rivet-cli::live_suite live_a::t1\n"
+    for answers, want in (([refused, passed], "PASS"), ([refused, refused], STAND), ([passed], "PASS")):
+        seen = iter(answers)
+        runs: list[list[str]] = []
+        globals()["sh"] = lambda argv, cwd=None, env=None, timeout=None: (
+            runs.append(list(argv)), subprocess.CompletedProcess(argv, 0, next(seen)))[1]
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                got = cargo.run(["t1"], Path(d) / "x.log")
+        finally:
+            globals()["sh"] = real_sh
+        assert got == {"t1": want} and len(runs) == len(answers), (
+            "a cell that died on the stand's own panic runs once more, and a second panic stays a stand-down", answers, got, len(runs))
     assert env["RIVET_SELFTEST_CARRIER_BIN"] == str(ROOT / ".gate-baseline/field/rivet"), env["RIVET_SELFTEST_CARRIER_BIN"]
     assert env["RIVET_TEST_STATE_TOXI_URL"] == "postgresql://u:p@127.0.0.1:15433/scratch", env["RIVET_TEST_STATE_TOXI_URL"]
     stale = []

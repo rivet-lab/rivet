@@ -1084,24 +1084,12 @@ def _imports_shadowed_by_a_local() -> list[str]:
 
 
 def _oracle_restart_self_test() -> None:
-    """`_oracle_restarted` on scripted answers: a slow restart is waited out, a dead one is named by its ORA- line and its log."""
+    """The ready probe waits for the image's init to finish, and that init raises `processes` before its restart."""
     import subprocess
-    from unittest import mock
 
-    from .core import Proc
-
-    def fake(out: str, rc: int = 0) -> Callable[..., Proc]:
-        return lambda *a, **kw: Proc(a, rc, out, "")
-
-    polls = iter(range(10**6))
-    late = lambda: next(polls) >= 61
-    with mock.patch("dev.release_oracle.core.docker_exec", fake("Database opened.")), mock.patch(f"{__name__}.docker", fake("")):
-        assert _oracle_restarted("c", late, delay=0) == "", "an Oracle that answers after 61 polls, which the old 60 gave up on, is waited for"
-    log = "ORA-00443: background process did not start"
-    with mock.patch("dev.release_oracle.core.docker_exec", fake("ORA-27102: out of memory\nSP2-0640: Not connected", 1)), \
-            mock.patch(f"{__name__}.docker", fake(f"line one\n{log}")):
-        why = _oracle_restarted("c", lambda: False, tries=3, delay=0)
-    assert "no answer in 3 polls" in why and "ORA-27102" in why and "SP2-0640" in why and "rc=1" in why and log in why, why
+    init = (ROOT / "dev" / "oracle" / "init" / "02-logminer.sh").read_text()
+    raised, restart = init.find("SET processes = 1000 SCOPE = SPFILE"), init.find("SHUTDOWN IMMEDIATE")
+    assert 0 <= raised < restart, "the Oracle init does not raise processes to 1000 before its restart: a 16-cell connect burst is refused (ORA-12516) at the default 200"
     with tempfile.TemporaryDirectory() as d:
         for name, body in (("healthcheck.sh", "exit $HC_RC"), ("sqlplus", "echo rivet-ready")):
             (Path(d) / name).write_text(f"#!/bin/sh\n{body}\n")
@@ -2130,26 +2118,11 @@ def _usable_port(port: int) -> int:
     return port
 
 
-#: Polls, two seconds apart, that Oracle gets to answer: after its first start and again after the processes restart.
+#: Polls, two seconds apart, that Oracle gets to answer after its first start.
 ORACLE_READY_TRIES = 150
 #: The image's own init-finished marker (healthcheck.sh exits non-zero while its user scripts run), then the app user's session.
 ORACLE_READY_PROBE = ("healthcheck.sh && echo \"select 'rivet-ready' from dual;\" | sqlplus -s -L "
                       "rivet/rivet@localhost/FREEPDB1 | grep -q rivet-ready")
-#: processes=200 lets the listener's lagging handler count refuse a 16-cell connect burst (ORA-12516); measured 189/300 refused at 200, 0/300 at 1000.
-ORACLE_RESTART_SQL = "alter system set processes=1000 scope=spfile;\nshutdown immediate\nstartup\nexit\n"
-
-
-def _oracle_restarted(name: str, ready: Callable[[], bool], tries: int = ORACLE_READY_TRIES, delay: float = 2.0) -> str:
-    """Restart Oracle with ORACLE_RESTART_SQL and wait until `ready`; "" when it answers, else the restart's own ORA- lines and the container log's tail."""
-    from .core import docker_exec, wait_until
-
-    sql = docker_exec(name, "sqlplus", "-s", "/", "as", "sysdba", timeout=180, stdin=ORACLE_RESTART_SQL)
-    if wait_until(ready, tries=tries, delay=delay):
-        return ""
-    ora = [ln for ln in sql.out.splitlines() if "ORA-" in ln or "SP2-" in ln]
-    tail = docker("logs", "--tail", "15", name).out.strip().splitlines()[-15:]
-    return (f"no answer in {tries} polls; sqlplus rc={sql.returncode}, {'; '.join(ora[-5:]) or 'no ORA- line'}; "
-            f"container log: {' | '.join(tail) or 'empty'}")
 
 
 def _host_port_open(port: int) -> bool:
@@ -2328,11 +2301,6 @@ def bring_up(led: Ledger, engine: str, tag: str, image: str, port: int) -> str:
         docker_exec(name, *sqlcmd(name), "-S", "localhost", "-U", "sa",
                     "-P", "Rivet_Passw0rd!", "-Q",
                     "IF DB_ID('rivet') IS NULL CREATE DATABASE rivet")
-
-    if engine == "oracle":
-        why = _oracle_restarted(name, lambda: not answers())
-        if why:
-            raise stand_health.BringUpError(f"not ready after the processes restart: {why}")
 
     return scenarios.cfg("url", engine).replace("%PORT%", str(port))
 
