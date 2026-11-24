@@ -31,6 +31,7 @@ class KnownRed:
 
 
 _EXPIRES = "2026-11-29"
+_BASELINE_EXPIRES = "2026-12-15"
 GATE, ISLAND, OFFLINE, NIGHTLY = "gate", "island", "offline", "nightly"
 _ISLAND_TIER = re.compile(r"\] full: ")
 _OFFLINE_TIER = re.compile(r"\[offline\]: ")
@@ -123,10 +124,10 @@ KNOWN_RED: tuple[KnownRed, ...] = (
               "no_silent_null_load[oracle]: REFUSAL_GONE over 1 source->override pairs #cbb1c851")),
     KnownRed("ab-diff[keyset_parallel]: DIFFERS from the previous release in files, manifest.fingerp, manifest.part_co, manifest.fingerprints[len], manifest.fingerprints[0], manifest.part_count — an observable behaviour change; it needs a verdict (intended and changelogged, or a regression)",
              "2026-11-24: ab-diff against the previous release: the parallel keyset export (chunk_by_key, chunk_size 5000, parallel 4, 50000 rows) writes 64 parts where 0.33.0 wrote 12; rows read back by DuckDB are identical (50000), exit 0 on both; the cause is the recut of #1125 (an integer or uuid key takes the seek and recut path at any table size, so the ranges are cut by density instead of by exact row percentiles), changelogged in changelog.d/keyset-uuid-recut.md; a run crashed by the previous release is resumed by this build with no duplicate and no lost row (50000 rows, 50000 distinct ids, manifest success), as it is by each release alone, measured 2026-11-24 on the live stand; intended by #1125, recorded 2026-11-24; closes when 0.34.0 is the previous release the ab-diff compares against, or when the part count is graded as intended; re-review 2026-12-15",
-             "2026-12-15"),
+             _BASELINE_EXPIRES),
     KnownRed("ab-diff: 8 scenarios compared, 1 DIFFER (keyset_parallel) — see the rows above",
              "2026-11-24: the count row of the ab-diff stage that reports the keyset_parallel part-count difference of the entry above; closes with it; re-review 2026-12-15",
-             "2026-12-15"),
+             _BASELINE_EXPIRES),
     KnownRed("no_silent_null_load[oracle]: WRONG_VALUE over 2 source->override pairs #2b335637",
              "2026-11-22: ClickHouse load leg: a BLOB column holding EMPTY_BLOB() reads back as the empty bytes (form 0x) where the ledger expects exact; reviewed 2026-11-22 on main 14cd46ab: seen on the load stage on the live stand, duck and clickhouse targets, one run; the cause is the grader, not the load: te.reduce spells EMPTY_BLOB() and HEXTORAW('') both as 0x and parse_lit reads Oracle's empty RAW is NULL rule on both, while tests/live/live_oracle.rs asserts EMPTY_BLOB() is empty, not NULL; open, closes when parse_lit keeps EMPTY_BLOB() a zero-length value; re-review 2026-11-29",
              _EXPIRES),
