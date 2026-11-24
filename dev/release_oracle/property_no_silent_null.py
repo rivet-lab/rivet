@@ -317,7 +317,8 @@ def spatial_verdict(exp: Spatial, target: str, got) -> str:
     if target == "binary":
         raw = got if isinstance(got, (bytes, bytearray, memoryview)) else bytes.fromhex(got) if isinstance(got, str) and _HEX_PAIRS.fullmatch(got) else None
         return "OK" if raw is not None and bytes(raw) == bytes(exp) else WRONG
-    return "OK" if isinstance(got, str) and got == bytes(exp[SRID_BYTES:]).hex() else WRONG
+    text = got.decode("ascii", "replace") if isinstance(got, (bytes, bytearray, memoryview)) else got
+    return "OK" if isinstance(text, str) and text == bytes(exp[SRID_BYTES:]).hex() else WRONG
 
 
 def parse_lit(engine: str, lit: str):
@@ -1290,6 +1291,7 @@ def spatial_self_test() -> None:
         assert compare("mysql", lit, "other", "none", wkb, False, "POINT") == "OK" and compare("mysql", lit, "other", "none", wkb, True, "POINT") == "OK"
         assert compare("mysql", lit, "other", "none", "garbage", True, "POINT") == WRONG and compare("mysql", lit, "other", "none", wkb[:-2] + "01", False, "POINT") == WRONG
         assert compare("mysql", lit, "other", "none", POINT_ORIGIN.hex(), True, "POINT") == WRONG, "the SRID prefix is not part of the delivered hex"
+        assert compare("mysql", lit, "other", "none", wkb.encode(), False, "POINT") == "OK" and compare("mysql", lit, "other", "none", wkb[:-2].encode() + b"01", False, "POINT") == WRONG, "a text column read back as bytes is its text"
         assert compare("mysql", lit, "other", "none", "", True, "POINT") == WRONG and compare("mysql", lit, "other", "none", None, False, "POINT") == NULLED
         assert compare("mysql", lit, "other", "binary", bytes(POINT_ORIGIN), False, "POINT") == "OK" and compare("mysql", lit, "other", "binary", POINT_ORIGIN.hex(), True, "POINT") == "OK"
         assert compare("mysql", lit, "other", "binary", bytes(POINT_ORIGIN[SRID_BYTES:]), False, "POINT") == WRONG, "under binary the server's own bytes are the SRID and the WKB"
