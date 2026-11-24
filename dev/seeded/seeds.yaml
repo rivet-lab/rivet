@@ -7455,3 +7455,20 @@ seeds:
         cells: ["lib:an_unreachable_source_refuses_an_unadmitted_override_and_not_a_plain_plan"]
       oracle:
         cells: ["lib:an_unreachable_source_refuses_an_unadmitted_override_and_not_a_plain_plan"]
+
+  - name: doctor-probe-fixed-temp-path
+    class: "`rivet doctor` stages its destination write-probe at one temp path shared by every process, so a parallel doctor removes the file between another's write and copy and reports `[FAIL] Destination ... No such file or directory (os error 2)`"
+    history: "2026-11-24 - gate cell sec_keyword_value_credentials, 12 parallel doctors with separate local destinations: 81 of 720 runs failed, 0 of 60 serial; RED on main: parallel_destination_probes_on_separate_local_destinations_all_succeed fails 857 of 1800 probes"
+    scope: destination
+    switch: doctor-probe-fixed-temp-path
+    engines:
+      local:
+        cells: ["lib:parallel_destination_probes_on_separate_local_destinations_all_succeed"]
+      s3:
+        cells: ["lib:a_probe_that_another_probe_completes_inside_is_still_read_by_a_store"]
+      gcs:
+        cells: ["lib:a_probe_that_another_probe_completes_inside_is_still_read_by_a_store"]
+      azure:
+        cells: ["lib:a_probe_that_another_probe_completes_inside_is_still_read_by_a_store"]
+      stdout:
+        na: "doctor reports a stdout destination as streaming and `continue`s before check_destination_auth, so no probe is staged for it"
