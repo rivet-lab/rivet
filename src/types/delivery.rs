@@ -39,7 +39,7 @@ pub enum TextForm {
     Uuid36,
     /// Engine-produced: the source's RFC 8259 text, passed through.
     Json,
-    /// Engine-produced WKB in lowercase hex; the SRID travels separately.
+    /// Standard WKB in lowercase hex; a value with an SRID other than 0 is refused, not delivered without it.
     HexWkb,
     /// Rendered by [`hex_bytes`].
     HexBytes,

@@ -936,6 +936,16 @@ pub(crate) enum MysqlCellFix {
     ZeroDate,
     /// TIME is a duration up to 838:59:59; one outside a day is refused with the batch's MySQL wording.
     TimeOfDay,
+    /// A spatial column arrives as MySQL's internal bytes (SRID prefix, then WKB); delivered as the batch's `hex_wkb` text.
+    HexWkb,
+}
+
+/// The remedy of an SRID refusal in a stream, which has no query to select the WKB and the SRID in.
+fn stream_srid_remedy() -> String {
+    format!(
+        "A stream has no query to select ST_AsBinary(col) in: declare the column `binary` in `columns:` to carry MySQL's internal bytes, or leave the column out of the capture, then: {}",
+        crate::source::cdc::checkpoint_identity::RECOVER
+    )
 }
 
 /// The fix (if any) for a column, from the engine + native type.
@@ -967,6 +977,11 @@ pub(crate) fn mysql_cell_fix(
     }
     if n == "time" || n.starts_with("time(") {
         return Some(MysqlCellFix::TimeOfDay);
+    }
+    if crate::source::mysql::is_spatial_native(&n)
+        && seeded!("cdc-mysql-spatial-cell-unconverted", false, true)
+    {
+        return Some(MysqlCellFix::HexWkb);
     }
     if n.starts_with("enum(") {
         return Some(MysqlCellFix::EnumLabels(parse_enum_labels(native)));
@@ -1054,9 +1069,14 @@ fn hex_refusal(n: usize, digits: &str) -> String {
 
 impl MysqlCellFix {
     /// The value the typed column needs for wire value `v`, or why the wire value has no reading.
-    pub(crate) fn applies_to(&self, dt: &DataType) -> bool {
-        !matches!(self, MysqlCellFix::TimeOfDay)
-            || matches!(dt, DataType::Time64(TimeUnit::Microsecond))
+    pub(crate) fn applies_to(&self, dt: &DataType, delivery: &crate::types::Delivery) -> bool {
+        match self {
+            MysqlCellFix::TimeOfDay => matches!(dt, DataType::Time64(TimeUnit::Microsecond)),
+            MysqlCellFix::HexWkb => {
+                *delivery == crate::types::Delivery::Text(crate::types::TextForm::HexWkb)
+            }
+            _ => true,
+        }
     }
 
     /// Whether the fix wrote NULL over a held `input` date: the zero or partial date a MySQL column cannot hand on.
@@ -1180,6 +1200,18 @@ impl MysqlCellFix {
                     code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
                     by_value: false,
                 });
+            }
+            (MysqlCellFix::HexWkb, V::Bytes(b)) => {
+                match crate::source::mysql::wkb_hex_of_internal(b, &stream_srid_remedy()) {
+                    Ok(hex) => V::Bytes(hex.into_bytes()),
+                    Err(reason) => {
+                        return Err(FixRefusal {
+                            reason,
+                            code: Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE),
+                            by_value: false,
+                        });
+                    }
+                }
             }
             (MysqlCellFix::BinaryPad(w), V::Bytes(b)) => {
                 let mut p = b.clone();
@@ -3070,6 +3102,57 @@ mod tests {
         }
     }
 
+    /// A spatial binlog cell is the hex of its WKB after the SRID prefix, the form the batch delivers; an SRID refuses by code with the stream's remedy.
+    #[test]
+    fn a_spatial_cell_is_delivered_as_the_batch_hex_and_an_srid_is_refused() {
+        use RivetValue as V;
+        const POINT: &str = "0101000000000000000000f03f0000000000000040";
+        let internal = |srid: u32| {
+            let mut v = srid.to_le_bytes().to_vec();
+            v.extend(
+                POINT
+                    .as_bytes()
+                    .chunks(2)
+                    .map(|c| u8::from_str_radix(std::str::from_utf8(c).unwrap(), 16).unwrap()),
+            );
+            v
+        };
+        for native in [
+            "geometry",
+            "point",
+            "linestring",
+            "polygon",
+            "multipoint",
+            "geomcollection",
+        ] {
+            let fix = mysql_cell_fix(crate::source::cdc::CdcEngine::Mysql, native).expect(native);
+            assert_eq!(
+                fix.apply(&V::Bytes(internal(0))).unwrap(),
+                V::Bytes(POINT.as_bytes().to_vec()),
+                "{native}"
+            );
+            assert_eq!(fix.apply(&V::Null).unwrap(), V::Null);
+        }
+        let fix = mysql_cell_fix(crate::source::cdc::CdcEngine::Mysql, "point").unwrap();
+        let err = fix.apply(&V::Bytes(internal(4326))).unwrap_err();
+        assert_eq!(
+            err.code,
+            Some(crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE)
+        );
+        assert!(err.reason.contains("has SRID 4326"), "{err:?}");
+        assert!(
+            err.reason
+                .contains("A stream has no query to select ST_AsBinary(col) in"),
+            "{err:?}"
+        );
+        assert!(!err.reason.contains("export query"), "{err:?}");
+        assert!(fix.apply(&V::Bytes(vec![1, 2])).is_err());
+        let hex = crate::types::Delivery::Text(crate::types::TextForm::HexWkb);
+        assert!(fix.applies_to(&DataType::Utf8, &hex));
+        assert!(!fix.applies_to(&DataType::Utf8, &crate::types::Delivery::Native));
+        assert!(!fix.applies_to(&DataType::Binary, &crate::types::Delivery::Native));
+    }
+
     /// Every MySQL cell fix refuses a wire value it cannot read instead of returning NULL.
     #[test]
     fn mysql_cell_fixes_refuse_an_unreadable_wire_value() {
@@ -3112,8 +3195,10 @@ mod tests {
             "a stream names the remedies it has, not the batch cast: {err:?}"
         );
         assert!(
-            t.applies_to(&DataType::Time64(TimeUnit::Microsecond))
-                && !t.applies_to(&DataType::Utf8),
+            t.applies_to(
+                &DataType::Time64(TimeUnit::Microsecond),
+                &crate::types::Delivery::Native
+            ) && !t.applies_to(&DataType::Utf8, &crate::types::Delivery::Native),
             "the TIME check guards a Time64 column only"
         );
         assert_eq!(

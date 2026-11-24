@@ -606,7 +606,7 @@ scenarios:
 
   - id: check_plan_doctor_refuse_what_run_refuses
     what: "a batch export, or the pending baseline leg of a `mode: cdc` export (`initial: snapshot` or `backfill:` with no `snapshot/_SUCCESS` marker: `pending_snapshot_legs`), whose column the export's `format:` cannot write, or that no Arrow type carries and no `columns:` entry declares, is refused before any read by `check`, `doctor` and `run` (and by `plan` for a batch export) with the same code (RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED, RIVET_TYPE_UNSAFE_MAPPING): one `plan_open_columns` (format::refuse_unwritable_columns) and one `refuse_unmapped` in `probe_mappings`, both reached through `plan_run`"
-    single:         { test: a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mysql }
+    single:         { test: a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mssql }
     chunked:        { na: "shared seam: plan_open_columns and probe_mappings run in plan_run/execute_resolved_plan before the strategy dispatch" }
     chunked_checkpoint: { na: "shared seam (plan_run, before the dispatch)" }
     keyset:         { na: "shared seam (plan_run, before the dispatch)" }

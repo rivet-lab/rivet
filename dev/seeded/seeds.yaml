@@ -1866,6 +1866,66 @@ seeds:
         na: "a MongoDB document has no TIME type; the MySQL TIME mapping does not run"
       oracle:
         na: "Oracle has no TIME type; the MySQL TIME mapping does not run"
+  - name: mysql-spatial-srid-dropped
+    class: "a MySQL spatial value with an SRID other than 0 is delivered as WKB hex without its SRID, so the coordinates reach the file with no SRS and, for a geographic SRS, in the other axis order than ST_AsBinary writes, exit 0"
+    history: "2026-11-24 - MySQL spatial types were refused RIVET_TYPE_UNSAFE_MAPPING; delivering them as hex_wkb must refuse an SRID other than 0 by code (RIVET_SOURCE_VALUE_UNREPRESENTABLE), because WKB holds no SRID; batch and CDC share wkb_hex_of_internal"
+    scope: source
+    switch: mysql-spatial-srid-dropped
+    engines:
+      postgres:
+        na: "a PostgreSQL geometry is the server's text and PostGIS has its own mapping; the MySQL spatial mapping does not run"
+      mysql:
+        cells:
+          - a_spatial_value_with_an_srid_is_refused_by_code_with_its_remedies
+          - a_cdc_stream_refuses_a_spatial_value_with_an_srid_by_code_with_the_streams_remedy
+          - "lib:a_nonzero_srid_is_refused_with_its_remedy"
+          - "lib:a_spatial_cell_is_delivered_as_the_batch_hex_and_an_srid_is_refused"
+      mssql:
+        na: "a SQL Server spatial type is its CLR bytes as hex; the MySQL spatial mapping does not run"
+      mongo:
+        na: "a MongoDB document has no MySQL spatial column; the MySQL spatial mapping does not run"
+      oracle:
+        na: "an Oracle SDO_GEOMETRY is refused by its own mapping; the MySQL spatial mapping does not run"
+  - name: mysql-spatial-srid-prefix-kept
+    class: "a MySQL spatial column is delivered as the hex of the server's internal bytes, the 4-byte SRID prefix included, labelled hex_wkb, so no WKB reader in the warehouse can parse it, exit 0"
+    history: "2026-11-24 - MySQL spatial types were refused RIVET_TYPE_UNSAFE_MAPPING; the hex_wkb form is the STANDARD WKB, equal to LOWER(HEX(ST_AsBinary(col))), so the SRID prefix must be stripped in batch and CDC"
+    scope: source
+    switch: mysql-spatial-srid-prefix-kept
+    engines:
+      postgres:
+        na: "a PostgreSQL geometry is the server's text and PostGIS has its own mapping; the MySQL spatial mapping does not run"
+      mysql:
+        cells:
+          - a_batch_parquet_export_delivers_every_spatial_type_as_the_servers_wkb_hex
+          - a_batch_csv_export_delivers_every_spatial_type_as_the_servers_wkb_hex
+          - a_cdc_run_delivers_every_spatial_type_as_the_servers_wkb_hex_from_snapshot_and_binlog
+          - mysql_batch_and_cdc_deliver_every_ledger_row_alike
+          - "lib:srid_zero_delivers_the_wkb_after_the_prefix"
+      mssql:
+        na: "a SQL Server spatial type is its CLR bytes as hex; the MySQL spatial mapping does not run"
+      mongo:
+        na: "a MongoDB document has no MySQL spatial column; the MySQL spatial mapping does not run"
+      oracle:
+        na: "an Oracle SDO_GEOMETRY is refused by its own mapping; the MySQL spatial mapping does not run"
+  - name: cdc-mysql-spatial-cell-unconverted
+    class: "a MySQL CDC stream writes a spatial column's internal bytes into the column the plan labels hex_wkb text, so the stream and the batch export of the same column disagree, or the sink stops on a type mismatch"
+    history: "2026-11-24 - MySQL spatial types were refused RIVET_TYPE_UNSAFE_MAPPING; the CDC sink converts a spatial cell through mysql_cell_fix exactly as the batch builder does (ADR-0038 CP12)"
+    scope: source
+    switch: cdc-mysql-spatial-cell-unconverted
+    engines:
+      postgres:
+        na: "a PostgreSQL geometry is the server's text and PostGIS has its own mapping; the MySQL spatial mapping does not run"
+      mysql:
+        cells:
+          - a_cdc_run_delivers_every_spatial_type_as_the_servers_wkb_hex_from_snapshot_and_binlog
+          - mysql_batch_and_cdc_deliver_every_ledger_row_alike
+          - "lib:a_spatial_cell_is_delivered_as_the_batch_hex_and_an_srid_is_refused"
+      mssql:
+        na: "a SQL Server spatial type is its CLR bytes as hex; the MySQL spatial mapping does not run"
+      mongo:
+        na: "a MongoDB document has no MySQL spatial column; the MySQL spatial mapping does not run"
+      oracle:
+        na: "an Oracle SDO_GEOMETRY is refused by its own mapping; the MySQL spatial mapping does not run"
   - name: mysql-session-off-utc-read
     class: "a MySQL read whose session is still at the server's time zone after rivet's `SET time_zone = '+00:00'` (a proxy dropped or rerouted the SET) writes every TIMESTAMP shifted by the offset, exit 0"
     history: "0.32.1 D5, 2026-10-18: a pilot's ProxySQL in front of a Europe/Moscow MySQL; measured on main 51a1b69c through proxysql-tz (a rule answering `SET time_zone` with OK): `2026-01-01T12:00:00Z` exported for `09:00:00Z`, exit 0. ProxySQL 2.5.5 with no rule forwards the SET and logs `Unable to parse unknown SET query ... Setting lock_hostgroup` for rivet's reset `SET time_zone = @@global.time_zone`"
@@ -7025,8 +7085,7 @@ seeds:
       postgres:
         na: "2026-11-24: a PostgreSQL type with no Arrow mapping is delivered as the server's text and an array is always a flat list, so no Postgres column reaches the format refusal or the unmapped refusal (measured: the declared-type cell stays green under the seed); reopens if a Postgres type or a declared override gains an Arrow type csv/parquet cannot write, or if an undeclared unmapped type stops being server text"
       mysql:
-        cells:
-          - a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mysql
+        na: "2026-11-24: every MySQL 8.0 wire type a result set can carry is mapped (spatial types are delivered as hex_wkb), so no MySQL column reaches the unmapped refusal; reopens if a MySQL type gains a wire type rivet does not map (VECTOR on MySQL 9 is the candidate)"
       mssql:
         cells:
           - a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mssql

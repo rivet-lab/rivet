@@ -1946,7 +1946,7 @@ fn natives(ty: &str) -> [Native; 4] {
         "List" => [Some(("INTEGER[]", "ARRAY[1,2]")), None, None, None],
         "Unsupported" => [
             Some(("POINT", "point(1,2)")),
-            Some(("GEOMETRY", "ST_GeomFromText('POINT(1 2)')")),
+            None,
             Some(("SQL_VARIANT", "1")),
             Some(("UROWID", "NULL")),
         ],
