@@ -7023,7 +7023,7 @@ seeds:
     switch: check-run-refusal-split
     engines:
       postgres:
-        na: "2026-11-24: a PostgreSQL type with no Arrow mapping is delivered as the server's text and an array is always a flat list, so no Postgres column reaches the format refusal or the unmapped refusal (measured: the declared-type cell stays green under the seed)"
+        na: "2026-11-24: a PostgreSQL type with no Arrow mapping is delivered as the server's text and an array is always a flat list, so no Postgres column reaches the format refusal or the unmapped refusal (measured: the declared-type cell stays green under the seed); reopens if a Postgres type or a declared override gains an Arrow type csv/parquet cannot write, or if an undeclared unmapped type stops being server text"
       mysql:
         cells:
           - a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mysql
