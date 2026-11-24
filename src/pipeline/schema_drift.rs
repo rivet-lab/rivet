@@ -90,7 +90,7 @@ pub(super) enum AbsentColumns {
     Drift,
 }
 
-/// Rewrite the stored baseline of `key` where a column is now delivered as server text, so no run reads that as drift.
+/// Rewrite the stored baseline of `key` where a column is now delivered as text, so no run reads that as drift.
 pub(super) fn migrate_baseline(
     state: &StateStore,
     key: &str,
@@ -113,17 +113,27 @@ pub(super) fn migrate_baseline(
     }
 }
 
-/// True when `new` differs from its baseline entry only because rivet now labels it server text: absent, the old Arrow type, or the native name a run that refused it recorded.
+/// True when `new` differs from its baseline entry only because rivet now labels it as text: absent, the old Arrow type, or the native name a run that refused it recorded.
 pub(super) fn is_upgrade_label_migration(
     old: Option<&SchemaColumn>,
     new: &crate::types::TypeMapping,
 ) -> bool {
     use crate::types::{Delivery, TextForm, rivet_type_to_arrow};
-    new.delivery == Delivery::Text(TextForm::ServerText)
-        && (old.map(|c| c.data_type.clone())
-            == rivet_type_to_arrow(&new.rivet_type).map(|dt| format!("{dt:?}"))
-            || old.is_some_and(|c| c.data_type == new.source_native_type))
+    match new.delivery {
+        Delivery::Text(TextForm::ServerText) => {
+            old.map(|c| c.data_type.clone())
+                == rivet_type_to_arrow(&new.rivet_type).map(|dt| format!("{dt:?}"))
+                || old.is_some_and(|c| c.data_type == new.source_native_type)
+        }
+        Delivery::Text(TextForm::HexWkb) => {
+            old.is_none_or(|c| c.data_type == REFUSED_SPATIAL_BASELINE)
+        }
+        _ => false,
+    }
 }
+
+/// The label a run that refused a MySQL spatial column recorded: the native name of a wire type rivet did not map.
+const REFUSED_SPATIAL_BASELINE: &str = "unknown";
 
 /// The baseline with every upgrade-label migration applied (one info line each), or `None` when nothing moved.
 fn migrate_upgrade_labels(
@@ -152,10 +162,14 @@ fn migrate_upgrade_labels(
             data_type: format!("{:?}", field.data_type()),
         };
         log::info!(
-            "schema drift: column '{}' ({}) is now delivered as server text; the baseline \
+            "schema drift: column '{}' ({}) is now delivered as {}; the baseline \
              did not record it that way, so it is updated without reporting drift",
             m.column_name,
-            m.source_native_type
+            m.source_native_type,
+            match m.delivery {
+                crate::types::Delivery::Text(form) => form.label(),
+                _ => "native",
+            }
         );
         match at {
             Some(i) => out[i] = col,
@@ -336,6 +350,15 @@ mod tests {
                 },
             ),
             server_text("n", "numeric", bare_numeric()),
+            mapping(
+                "g",
+                "geometry",
+                crate::types::RivetType::Unsupported {
+                    native_type: "geometry".into(),
+                    reason: "spatial".into(),
+                },
+            )
+            .with_text(crate::types::TextForm::HexWkb),
         ];
         let batch = StateStore::open_in_memory().unwrap();
         batch.store_schema("k", &[col("id", "Int64")]).unwrap();
@@ -349,7 +372,12 @@ mod tests {
         migrate_baseline(&cdc, "k", &cols, AbsentColumns::Adopt);
         assert_eq!(
             cdc.get_stored_schema("k").unwrap().unwrap(),
-            vec![col("id", "Int64"), col("x", "Utf8"), col("n", "Utf8")]
+            vec![
+                col("id", "Int64"),
+                col("x", "Utf8"),
+                col("n", "Utf8"),
+                col("g", "Utf8")
+            ]
         );
     }
 
@@ -405,6 +433,36 @@ mod tests {
         );
         let text = mapping("s", "text", crate::types::RivetType::String);
         assert!(!is_upgrade_label_migration(None, &text));
+    }
+
+    /// A spatial column delivered as hex WKB takes the `unknown` baseline a refused run recorded, and nothing else typed.
+    #[test]
+    fn a_hex_wkb_column_migrates_over_the_baseline_a_refused_run_recorded() {
+        let g = mapping(
+            "g",
+            "geometry",
+            crate::types::RivetType::Unsupported {
+                native_type: "geometry".into(),
+                reason: "spatial".into(),
+            },
+        )
+        .with_text(crate::types::TextForm::HexWkb);
+        assert!(is_upgrade_label_migration(Some(&col("g", "unknown")), &g));
+        assert!(is_upgrade_label_migration(None, &g));
+        assert!(!is_upgrade_label_migration(Some(&col("g", "Utf8")), &g));
+        assert!(!is_upgrade_label_migration(Some(&col("g", "Binary")), &g));
+        assert!(!is_upgrade_label_migration(Some(&col("g", "Int64")), &g));
+
+        let st = StateStore::open_in_memory().unwrap();
+        st.store_schema("k", &[col("id", "Int32"), col("g", "unknown")])
+            .unwrap();
+        let id = mapping("id", "int", crate::types::RivetType::Int32);
+        check_from_cdc_mappings(&st, "k", &[id.clone(), g.clone()], SchemaDriftPolicy::Fail)
+            .expect("the refused baseline is not drift");
+        let stored = st.get_stored_schema("k").unwrap().unwrap();
+        assert_eq!(stored[1].data_type, "Utf8");
+        check_from_cdc_mappings(&st, "k", &[id, g], SchemaDriftPolicy::Fail)
+            .expect("a second run stays clean");
     }
 
     /// Under `fail`, a 0.30.0 baseline takes the server-text column silently; a genuinely new column still fails.

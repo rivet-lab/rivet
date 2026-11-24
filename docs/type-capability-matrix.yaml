@@ -394,6 +394,8 @@ engines:
       - {native_type: "POLYGON", sample: ["ST_GeomFromText('POLYGON((0 0,1 0,1 1,0 0))')"], edges: ["ST_GeomFromText('POLYGON((0 0,1 0,1 1,0 0))')"], delivery: "hex_wkb", cdc: exact, clickhouse: {type: "Nullable(String)"}, bigquery: {type: "STRING"}, snowflake: {type: "TEXT"}}
       - {native_type: "GEOMETRYCOLLECTION", sample: ["ST_GeomFromText('GEOMETRYCOLLECTION(POINT(0 0))')"], edges: ["ST_GeomFromText('GEOMETRYCOLLECTION(POINT(0 0))')"], delivery: "hex_wkb", cdc: exact, clickhouse: {type: "Nullable(String)"}, bigquery: {type: "STRING"}, snowflake: {type: "TEXT"}}
       - {native_type: "MULTIPOINT", sample: ["ST_GeomFromText('MULTIPOINT(0 0,1 1)')"], edges: ["ST_GeomFromText('MULTIPOINT(0 0,1 1)')"], delivery: "hex_wkb", cdc: exact, clickhouse: {type: "Nullable(String)"}, bigquery: {type: "STRING"}, snowflake: {type: "TEXT"}}
+      - {native_type: "MULTILINESTRING", sample: ["ST_GeomFromText('MULTILINESTRING((0 0,1 1),(2 2,3 3))')"], edges: ["ST_GeomFromText('MULTILINESTRING((0 0,1 1),(2 2,3 3))')"], delivery: "hex_wkb", cdc: exact, clickhouse: {type: "Nullable(String)"}, bigquery: {type: "STRING"}, snowflake: {type: "TEXT"}}
+      - {native_type: "MULTIPOLYGON", sample: ["ST_GeomFromText('MULTIPOLYGON(((0 0,1 0,1 1,0 0)))')"], edges: ["ST_GeomFromText('MULTIPOLYGON(((0 0,1 0,1 1,0 0)))')"], delivery: "hex_wkb", cdc: exact, clickhouse: {type: "Nullable(String)"}, bigquery: {type: "STRING"}, snowflake: {type: "TEXT"}}
   mssql:
     renders:
       "Binary": {duck: "lower(hex({c}))"}

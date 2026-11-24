@@ -436,3 +436,149 @@ fn the_stream_remedy_of_the_srid_refusal_delivers_what_the_server_holds() {
     }
     assert_eq!(got, held.into_iter().collect());
 }
+
+fn upgrade_over_a_refused_baseline(policy: &str) {
+    require_alive(LiveService::Mysql);
+    let table = unique_name(&format!("mysql_spatial_up_{policy}"));
+    let _guard = create_and_seed(&table);
+    let want: Vec<_> = source_wkb_hex(&table)
+        .into_iter()
+        .map(|r| r[1].clone())
+        .collect();
+    let rig = Rig::mysql_batch(&table)
+        .query(&format!("SELECT id, g FROM {table}"))
+        .export_line(&format!("on_schema_drift: {policy}"));
+    let Some(old) = rig.as_previous_release() else {
+        return;
+    };
+    let refused = old.run();
+    assert!(
+        !refused.status.success(),
+        "the previous release refuses a spatial column"
+    );
+    let recorded = "SELECT COUNT(*) FROM export_schema WHERE export_name = '{export}' AND columns_json LIKE '%\"name\":\"g\",\"type\":\"unknown\"%'";
+    assert_eq!(
+        rig.state_count(recorded),
+        1,
+        "the refused run recorded the `unknown` baseline"
+    );
+    let mine = rig.run();
+    let err = String::from_utf8_lossy(&mine.stderr);
+    assert_eq!(mine.status.code(), Some(0), "{err}");
+    assert!(!err.contains("type changed"), "{err}");
+    assert!(!err.contains("schema changed"), "{err}");
+    let got: Vec<_> = dir_parquet_display(&rig.out_dir(), "g")
+        .into_iter()
+        .collect();
+    assert_eq!(got, want, "the upgraded run delivers the server's WKB hex");
+    let again = rig.run();
+    assert_eq!(
+        again.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+}
+
+/// The baseline a previous release recorded for a refused spatial column is not drift under `fail` once the column is delivered.
+#[test]
+#[ignore = "live: requires docker compose mysql + RIVET_PREV_RELEASE_BIN"]
+fn a_spatial_column_a_previous_release_refused_is_not_drift_under_fail() {
+    upgrade_over_a_refused_baseline("fail");
+}
+
+/// The same under the default `warn`: no drift warning is raised for the upgrade.
+#[test]
+#[ignore = "live: requires docker compose mysql + RIVET_PREV_RELEASE_BIN"]
+fn a_spatial_column_a_previous_release_refused_is_not_drift_under_warn() {
+    upgrade_over_a_refused_baseline("warn");
+}
+
+fn ring_wkt(points: usize) -> String {
+    let ring: Vec<String> = (0..points)
+        .map(|i| format!("{} {}", i, (i * i) % 7))
+        .collect();
+    format!("POLYGON(({},{}))", ring.join(","), ring[0])
+}
+
+fn seed_shapes(table: &str, big_points: usize) -> MysqlTable {
+    let mut c = mysql_connect();
+    c.query_drop(format!(
+        "CREATE TABLE {table} (id INT PRIMARY KEY, mls MULTILINESTRING, mpg MULTIPOLYGON, g GEOMETRY)"
+    ))
+    .unwrap();
+    let guard = MysqlTable::adopt(table.to_string());
+    for v in [
+        "1, ST_GeomFromText('MULTILINESTRING((0 0,1 1),(2 2,3 3,4 5))'), \
+         ST_GeomFromText('MULTIPOLYGON(((0 0,4 0,4 4,0 4,0 0)),((10 10,12 10,12 12,10 10)))'), \
+         ST_GeomFromText('GEOMETRYCOLLECTION(POINT(1 2),GEOMETRYCOLLECTION(LINESTRING(0 0,1 1),POINT(3 3)))')"
+            .to_string(),
+        "2, NULL, NULL, ST_GeomFromText('GEOMETRYCOLLECTION EMPTY')".to_string(),
+        format!(
+            "3, NULL, NULL, ST_GeomFromText('{}')",
+            ring_wkt(big_points)
+        ),
+        "4, NULL, NULL, NULL".to_string(),
+    ] {
+        c.query_drop(format!("INSERT INTO {table} VALUES ({v})"))
+            .unwrap();
+    }
+    guard
+}
+
+fn shapes_from_the_server(table: &str, col: &str) -> Vec<Option<String>> {
+    mysql_connect()
+        .query(format!(
+            "SELECT LOWER(HEX(ST_AsBinary({col}))) FROM {table} ORDER BY id"
+        ))
+        .unwrap()
+}
+
+/// MULTILINESTRING, MULTIPOLYGON, an empty and a nested collection, a polygon of 640 KB and NULL are delivered as the server's ST_AsBinary hex.
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn the_multi_types_a_large_polygon_empty_and_nested_collections_and_null_are_delivered_as_the_servers_wkb_hex()
+ {
+    require_alive(LiveService::Mysql);
+    let table = unique_name("mysql_spatial_shapes");
+    let _guard = seed_shapes(&table, 40_000);
+    let rig = rig(&table).query(&format!("SELECT id, mls, mpg, g FROM {table}"));
+    rig.run_ok();
+    for col in ["mls", "mpg", "g"] {
+        let want = shapes_from_the_server(&table, col);
+        assert_eq!(want.len(), 4, "{col}: {want:?}");
+        assert_eq!(dir_parquet_display(&rig.out_dir(), col), want, "{col}");
+    }
+    let big = shapes_from_the_server(&table, "g")[2].clone().unwrap();
+    assert!(
+        big.len() > 1_200_000,
+        "a 640 KB polygon holds {} hex digits",
+        big.len()
+    );
+}
+
+/// Under `max_value_mb: 1` a 640 KB geometry is delivered like a `binary` column, whose hex is twice the ceiling, and one over the ceiling is refused by code.
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn a_spatial_value_is_held_to_the_value_ceiling_on_its_bytes_like_a_binary_column() {
+    require_alive(LiveService::Mysql);
+    let held = unique_name("mysql_spatial_ceiling_ok");
+    let _g1 = seed_shapes(&held, 40_000);
+    let ok = rig(&held)
+        .query(&format!("SELECT id, g FROM {held}"))
+        .export_line("tuning: { max_value_mb: 1 }");
+    ok.run_ok();
+    assert_eq!(
+        dir_parquet_display(&ok.out_dir(), "g"),
+        shapes_from_the_server(&held, "g")
+    );
+    let over = unique_name("mysql_spatial_ceiling_over");
+    let _g2 = seed_shapes(&over, 80_000);
+    let refused = rig(&over)
+        .query(&format!("SELECT id, g FROM {over}"))
+        .export_line("tuning: { max_value_mb: 1 }");
+    let run = refused.run();
+    let err = String::from_utf8_lossy(&run.stderr);
+    assert!(err.contains("RIVET_SOURCE_VALUE_TOO_LARGE"), "{err}");
+    assert!(err.contains("column 'g' has a single value of"), "{err}");
+}

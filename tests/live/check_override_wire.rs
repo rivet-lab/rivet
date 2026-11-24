@@ -560,6 +560,33 @@ fn a_declared_type_on_a_column_without_an_arrow_type_is_refused_by_check_like_th
 }
 
 #[test]
+#[ignore = "live: mysql"]
+fn a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mysql() {
+    require_alive(LiveService::Mysql);
+    let name = unique_name("unmapped_my");
+    let out = tempfile::tempdir().unwrap();
+    let rig = Rig::mysql_batch(&name)
+        .query("SELECT ST_GeomFromText('POINT(1 1)') AS g")
+        .mode("full")
+        .dest_path(out.path().to_path_buf());
+    unmapped_column_is_refused_like_the_run(rig, &name, "g");
+}
+
+/// A NULL literal column is refused by `check` like the run. Open defect: check reads its wire type as binary and exits 0.
+#[test]
+#[ignore = "live+gate-only: mysql"]
+fn open_defect_a_mysql_null_literal_column_is_refused_by_check_like_the_run() {
+    require_alive(LiveService::Mysql);
+    let name = unique_name("unmapped_my");
+    let out = tempfile::tempdir().unwrap();
+    let rig = Rig::mysql_batch(&name)
+        .query("SELECT 1 AS id, NULL AS g")
+        .mode("full")
+        .dest_path(out.path().to_path_buf());
+    unmapped_column_is_refused_like_the_run(rig, &name, "g");
+}
+
+#[test]
 #[ignore = "live: postgres"]
 fn check_still_accepts_a_csv_decimal128_export_and_a_declared_cidr_postgres() {
     require_alive(LiveService::Postgres);

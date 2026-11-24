@@ -157,6 +157,9 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     _open("live_cdc_oracledb::open_defect_an_oracle_julian_date_declared_text_is_delivered_by_the_stream_as_batch_delivers_it",
           "stream was refused: refused[RIVET_SOURCE_CDC_CELL_UNSUPPORTED exit 5]",
           "2026-11-22: an Oracle DATE only the Julian calendar holds (1500-02-29) declared `text` is delivered by batch and refused by the stream; closes when the stream delivers the text batch delivers; found in #1162, not fixed there; the ledger horizon is shared, so the entry is renewed with it"),
+    _open("check_override_wire::open_defect_a_mysql_null_literal_column_is_refused_by_check_like_the_run",
+          "refusal contract: the invocation ended with success (exit 0), expected [RIVET_TYPE_UNSAFE_MAPPING] (exit 1)",
+          "2026-11-24: `SELECT NULL AS g` reads as binary through check's derived-table probe and as wire type NULL through the run, which refuses RIVET_TYPE_UNSAFE_MAPPING; closes when check reads the wire type the run reads; found in the MySQL spatial change, not fixed there; the ledger horizon is shared, so the entry is renewed with it"),
 )
 
 

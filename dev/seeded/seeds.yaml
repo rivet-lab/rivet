@@ -1886,6 +1886,24 @@ seeds:
         na: "a MongoDB document has no MySQL spatial column; the MySQL spatial mapping does not run"
       oracle:
         na: "an Oracle SDO_GEOMETRY is refused by its own mapping; the MySQL spatial mapping does not run"
+  - name: mysql-spatial-ceiling-on-hex
+    class: "the per-value ceiling is measured on the doubled hex of a MySQL spatial value, so a geometry whose bytes fit tuning.max_value_mb is refused RIVET_SOURCE_VALUE_TOO_LARGE where the same value declared binary is delivered"
+    history: "2026-11-24 - verifier finding on the MySQL spatial change: build_wkb_text skipped value_within_ceiling and the sink measured the hex at twice the bytes MySQL holds"
+    scope: source
+    switch: mysql-spatial-ceiling-on-hex
+    engines:
+      postgres:
+        na: "a PostgreSQL geometry is the server's text and PostGIS has its own mapping; the MySQL spatial mapping does not run"
+      mysql:
+        cells:
+          - a_spatial_value_is_held_to_the_value_ceiling_on_its_bytes_like_a_binary_column
+          - "lib:a_spatial_value_over_the_ceiling_is_refused_like_binary"
+      mssql:
+        na: "a SQL Server spatial type is its CLR bytes as hex; the MySQL spatial mapping does not run"
+      mongo:
+        na: "a MongoDB document has no MySQL spatial column; the MySQL spatial mapping does not run"
+      oracle:
+        na: "an Oracle SDO_GEOMETRY is refused by its own mapping; the MySQL spatial mapping does not run"
   - name: mysql-spatial-srid-prefix-kept
     class: "a MySQL spatial column is delivered as the hex of the server's internal bytes, the 4-byte SRID prefix included, labelled hex_wkb, so no WKB reader in the warehouse can parse it, exit 0"
     history: "2026-11-24 - MySQL spatial types were refused RIVET_TYPE_UNSAFE_MAPPING; the hex_wkb form is the STANDARD WKB, equal to LOWER(HEX(ST_AsBinary(col))), so the SRID prefix must be stripped in batch and CDC"
@@ -7085,7 +7103,7 @@ seeds:
       postgres:
         na: "2026-11-24: a PostgreSQL type with no Arrow mapping is delivered as the server's text and an array is always a flat list, so no Postgres column reaches the format refusal or the unmapped refusal (measured: the declared-type cell stays green under the seed); reopens if a Postgres type or a declared override gains an Arrow type csv/parquet cannot write, or if an undeclared unmapped type stops being server text"
       mysql:
-        na: "2026-11-24: every MySQL 8.0 wire type a result set can carry is mapped (spatial types are delivered as hex_wkb), so no MySQL column reaches the unmapped refusal; reopens if a MySQL type gains a wire type rivet does not map (VECTOR on MySQL 9 is the candidate)"
+        na: "2026-11-24: the only MySQL column that reaches the unmapped refusal is a NULL literal (SELECT NULL AS g, wire type NULL), which check reads as binary and run refuses RIVET_TYPE_UNSAFE_MAPPING, so its cell is red without the seed (open_defect_a_mysql_null_literal_column_is_refused_by_check_like_the_run) and cannot grade it; closes when check reads the NULL wire type as run does"
       mssql:
         cells:
           - a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mssql
@@ -7266,7 +7284,7 @@ seeds:
         na: "the seed edits the PostgreSQL column classification (pg_server_text, pg_delivery); the other sources map their own types in their own tables"
 
   - name: upgrade-baseline-not-migrated
-    class: "a drift baseline an earlier release stored for a column now delivered as server text (the native name a refused run recorded, `numeric` or `_numeric`) is read as drift on the first run after the upgrade: exit 4 under fail, a warning under the default policy, a new part every attempt"
+    class: "a drift baseline an earlier release stored for a column now delivered as text (the native name a refused run recorded: `numeric` or `_numeric`, or `unknown` for a MySQL spatial column) is read as drift on the first run after the upgrade: exit 4 under fail, a warning under the default policy, a new part every attempt"
     history: "verifier finding on #1163 head 431e0b11 2026-11-22; RED on that head by the upgrade cells below (state written by the previous release, then this release)"
     scope: source
     switch: upgrade-baseline-not-migrated
@@ -7283,7 +7301,10 @@ seeds:
           - pg_cdc_snapshot_after_a_refused_run_is_taken_without_drift_under_the_default_policy
           - "lib:a_baseline_a_refused_run_left_is_migrated_for_every_batch_mode_too"
       mysql:
-        na: "only PostgreSQL labels an unmapped type server text from the catalog's native name; the other sources never recorded a native name for a refused column"
+        cells:
+          - a_spatial_column_a_previous_release_refused_is_not_drift_under_fail
+          - a_spatial_column_a_previous_release_refused_is_not_drift_under_warn
+          - "lib:a_hex_wkb_column_migrates_over_the_baseline_a_refused_run_recorded"
       mssql:
         na: "only PostgreSQL labels an unmapped type server text from the catalog's native name; the other sources never recorded a native name for a refused column"
       mongo:

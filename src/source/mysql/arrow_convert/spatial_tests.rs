@@ -136,3 +136,37 @@ fn the_catalog_names_of_the_spatial_types_are_classified() {
         assert!(!is_spatial_native(n), "{n}");
     }
 }
+
+/// A spatial value is held to the per-value ceiling on its internal bytes, as a `binary` column is.
+#[test]
+fn a_spatial_value_over_the_ceiling_is_refused_like_binary() {
+    use crate::types::{ColumnOverrides, RivetType};
+    let ring: String = "00000000".to_string() + &"000000000000f03f0000000000000040".repeat(40_000);
+    let polygon = format!("0103000000{}{ring}", "01000000");
+    let value = internal(0, &polygon);
+    let ceiling = Some(value.len() - 1);
+    let wire = column(mysql::consts::ColumnType::MYSQL_TYPE_GEOMETRY);
+    let batch = |overrides: &ColumnOverrides, limit: Option<usize>| {
+        let (schema, types) =
+            super::mysql_schema_and_arrow_types(std::slice::from_ref(&wire), overrides).unwrap();
+        let columns: std::sync::Arc<[mysql::Column]> = std::sync::Arc::from(vec![wire.clone()]);
+        let rows = [mysql_common::row::new_row(
+            vec![mysql::Value::Bytes(value.clone())],
+            columns,
+        )];
+        let schema = std::sync::Arc::new(schema);
+        super::rows_to_record_batch_typed(&schema, &types, &rows, limit)
+    };
+    let declared = ColumnOverrides::from([("c".to_string(), RivetType::Binary)]);
+    for overrides in [&declared, &ColumnOverrides::new()] {
+        let err = batch(overrides, ceiling).expect_err("over the ceiling");
+        assert_eq!(
+            err.downcast_ref::<crate::error::CodedError>()
+                .map(|c| c.code()),
+            Some("RIVET_SOURCE_VALUE_TOO_LARGE"),
+            "{err:#}"
+        );
+        batch(overrides, Some(value.len())).expect("at the ceiling");
+        batch(overrides, None).expect("no ceiling");
+    }
+}

@@ -368,7 +368,7 @@ pub(super) fn rows_to_record_batch_typed(
             if has_text_form(field, crate::types::TextForm::TimeBeyondDay) {
                 build_time_text(col_idx, rows)?
             } else if has_text_form(field, crate::types::TextForm::HexWkb) {
-                build_wkb_text(col_idx, rows, column)?
+                build_wkb_text(col_idx, rows, column, max_value_bytes)?
             } else {
                 build_array(arrow_type, col_idx, rows, is_bit, column, max_value_bytes)?
             },
@@ -415,19 +415,29 @@ fn build_time_text(col_idx: usize, rows: &[mysql::Row]) -> Result<Arc<dyn Array>
     Ok(Arc::new(b.finish()))
 }
 
-/// A spatial column as the lowercase hex of its standard WKB; a value it cannot carry is refused by code.
-fn build_wkb_text(col_idx: usize, rows: &[mysql::Row], column: &str) -> Result<Arc<dyn Array>> {
+/// A spatial column as the lowercase hex of its standard WKB; a value over the ceiling or one it cannot carry is refused by code.
+fn build_wkb_text(
+    col_idx: usize,
+    rows: &[mysql::Row],
+    column: &str,
+    max_value_bytes: Option<usize>,
+) -> Result<Arc<dyn Array>> {
     let mut b = StringBuilder::with_capacity(rows.len(), rows.len() * 42);
     for row in rows {
         match row.as_ref(col_idx) {
             None | Some(Value::NULL) => b.append_null(),
-            Some(Value::Bytes(bv)) => match wkb_hex_of_internal(bv, BATCH_SRID_REMEDY) {
-                Ok(hex) => b.append_value(hex),
-                Err(why) => crate::rivet_bail!(
-                    crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
-                    "mysql: column `{column}`: {why}"
-                ),
-            },
+            Some(Value::Bytes(bv)) => {
+                if seeded!("mysql-spatial-ceiling-on-hex", false, true) {
+                    value_within_ceiling(column, bv.len(), max_value_bytes)?;
+                }
+                match wkb_hex_of_internal(bv, BATCH_SRID_REMEDY) {
+                    Ok(hex) => b.append_value(hex),
+                    Err(why) => crate::rivet_bail!(
+                        crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+                        "mysql: column `{column}`: {why}"
+                    ),
+                }
+            }
             Some(other) => crate::rivet_bail!(
                 crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
                 "mysql: column `{column}`: a spatial column delivered {other:?}; rivet refuses rather than writing NULL"
