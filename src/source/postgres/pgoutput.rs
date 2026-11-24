@@ -395,11 +395,11 @@ fn array_of<T>(
 /// PostgreSQL binary `numeric` -> the batch reader's decimal text (NaN/±Infinity by name).
 fn numeric_text(raw: &[u8]) -> Result<String> {
     use crate::source::pg_numeric_wire::{
-        numeric_wire_normalized_plain, numeric_wire_special_text,
+        numeric_wire_plain_at_display_scale, numeric_wire_special_text,
     };
     numeric_wire_special_text(raw)
         .map(str::to_string)
-        .or_else(|| numeric_wire_normalized_plain(raw))
+        .or_else(|| numeric_wire_plain_at_display_scale(raw))
         .ok_or_else(|| {
             crate::error::coded(
                 crate::error::codes::INTERNAL_SOURCE_INVARIANT,
@@ -1063,8 +1063,8 @@ mod tests {
         assert_eq!(bytes(1700, &[0, 0, 0, 0, 0xC0, 0, 0, 0]), "NaN");
         assert_eq!(
             bytes(1700, &[0, 2, 0, 0, 0, 0, 0, 2, 0, 1, 0x13, 0x88]),
-            "1.5",
-            "numeric is the batch reader's normalized text: 1.50 renders as 1.5"
+            "1.50",
+            "numeric keeps its display scale: 1.50 renders as 1.50"
         );
         assert!(
             value_from_binary(1700, &[0, 1]).is_err(),
