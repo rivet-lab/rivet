@@ -7429,10 +7429,10 @@ seeds:
       local:
         cells: ["lib:parallel_destination_probes_on_separate_local_destinations_all_succeed"]
       s3:
-        cells: ["lib:parallel_destination_probes_through_a_store_that_reads_the_file_all_succeed"]
+        cells: ["lib:a_probe_that_another_probe_completes_inside_is_still_read_by_a_store"]
       gcs:
-        cells: ["lib:parallel_destination_probes_through_a_store_that_reads_the_file_all_succeed"]
+        cells: ["lib:a_probe_that_another_probe_completes_inside_is_still_read_by_a_store"]
       azure:
-        cells: ["lib:parallel_destination_probes_through_a_store_that_reads_the_file_all_succeed"]
+        cells: ["lib:a_probe_that_another_probe_completes_inside_is_still_read_by_a_store"]
       stdout:
-        cells: ["lib:parallel_destination_probes_through_a_store_that_reads_the_file_all_succeed"]
+        na: "doctor reports a stdout destination as streaming and `continue`s before check_destination_auth, so no probe is staged for it"

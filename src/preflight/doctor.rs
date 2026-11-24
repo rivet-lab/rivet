@@ -516,7 +516,7 @@ fn write_destination_probe(
     tmp.flush()?;
     seeded!(
         "doctor-probe-fixed-temp-path",
-        crate::seeded::write_through_shared_probe(d, probe_key),
+        crate::seeded::through_shared_probe(probe_key, |shared| d.write(shared, probe_key)),
         d.write(tmp.path(), probe_key)
     )?;
     log::debug!("doctor: probe write succeeded, cleaning up");
@@ -1318,18 +1318,17 @@ exports:
 
     #[test]
     fn parallel_destination_probes_on_separate_local_destinations_all_succeed() {
-        let failures: Vec<String> = std::thread::scope(|s| {
+        let outcomes: Vec<std::result::Result<(), String>> = std::thread::scope(|s| {
             let workers: Vec<_> = (0..12)
                 .map(|_| {
                     s.spawn(|| {
-                        let mut errs = Vec::new();
-                        for _ in 0..150 {
-                            let dir = tempfile::tempdir().unwrap();
-                            if let Err(e) = check_destination_auth(&local_dest_at(dir.path())) {
-                                errs.push(format!("{e:#}"));
-                            }
-                        }
-                        errs
+                        (0..150)
+                            .map(|_| {
+                                let dir = tempfile::tempdir().unwrap();
+                                check_destination_auth(&local_dest_at(dir.path()))
+                                    .map_err(|e| format!("{e:#}"))
+                            })
+                            .collect::<Vec<_>>()
                     })
                 })
                 .collect();
@@ -1338,25 +1337,25 @@ exports:
                 .flat_map(|w| w.join().unwrap())
                 .collect()
         });
-        assert!(
-            failures.is_empty(),
-            "{} of 1800 probes failed: {:?}",
-            failures.len(),
-            failures.first()
+        let succeeded = outcomes.iter().filter(|o| o.is_ok()).count();
+        assert_eq!(
+            (succeeded, outcomes.iter().find_map(|o| o.clone().err())),
+            (1800, None)
         );
     }
 
-    struct ReadingStore(std::sync::atomic::AtomicUsize);
+    struct NestingStore(std::sync::atomic::AtomicBool);
 
-    impl crate::destination::Destination for ReadingStore {
+    impl crate::destination::Destination for NestingStore {
         fn write(
             &self,
             local_path: &std::path::Path,
             _remote_key: &str,
         ) -> Result<crate::destination::WriteOutcome> {
-            let body = std::fs::read(local_path)?;
-            assert_eq!(body, b"ok");
-            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.0.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                write_destination_probe(self, &dest_of(DestinationType::S3))?;
+            }
+            assert_eq!(std::fs::read(local_path)?, b"ok");
             Ok(crate::destination::WriteOutcome::default())
         }
         fn capabilities(&self) -> crate::destination::DestinationCapabilities {
@@ -1370,25 +1369,13 @@ exports:
     }
 
     #[test]
-    fn parallel_destination_probes_through_a_store_that_reads_the_file_all_succeed() {
-        let store = ReadingStore(Default::default());
+    fn a_probe_that_another_probe_completes_inside_is_still_read_by_a_store() {
+        let store = NestingStore(std::sync::atomic::AtomicBool::new(true));
         let dest = dest_of(DestinationType::S3);
-        let failures: usize = std::thread::scope(|s| {
-            (0..12)
-                .map(|_| {
-                    s.spawn(|| {
-                        (0..150)
-                            .filter(|_| write_destination_probe(&store, &dest).is_err())
-                            .count()
-                    })
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-                .map(|w| w.join().unwrap())
-                .sum()
-        });
-        assert_eq!(failures, 0);
-        assert_eq!(store.0.load(std::sync::atomic::Ordering::SeqCst), 1800);
+        assert_eq!(
+            write_destination_probe(&store, &dest).map_err(|e| format!("{e:#}")),
+            Ok(())
+        );
     }
 
     #[test]

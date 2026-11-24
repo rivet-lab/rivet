@@ -46,13 +46,13 @@ pub(crate) fn money_through_f64(value: i128, scale: u8) -> anyhow::Result<i128> 
 
 /// The seeded defect: the doctor probe is staged at one path shared by every process, and removed once written.
 #[cfg(feature = "seeded")]
-pub(crate) fn write_through_shared_probe(
-    d: &dyn crate::destination::Destination,
+pub(crate) fn through_shared_probe<T>(
     probe_key: &str,
-) -> anyhow::Result<crate::destination::WriteOutcome> {
+    write: impl FnOnce(&std::path::Path) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
     let shared = std::env::temp_dir().join(probe_key);
     std::fs::write(&shared, b"ok")?;
-    let out = d.write(&shared, probe_key);
+    let out = write(&shared);
     let _ = std::fs::remove_file(&shared);
     out
 }
