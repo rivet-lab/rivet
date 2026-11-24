@@ -633,6 +633,21 @@ def _self_test() -> int:
         want("…and both binaries are run the same number of times",
              invocations.count(str(old)) == invocations.count(str(new)) == RIVET_RUNS_PER_SIDE,
              f"old={invocations.count(str(old))} new={invocations.count(str(new))}")
+
+        # ── 3. every incremental scenario's cursor column is seeded NOT NULL ──
+        seen: list[str] = []
+        sh, seed = real_sh, real_seed
+        global pg
+        real_pg = pg
+        pg = lambda sql, **kw: (seen.append(sql), str(SEED_ROWS))[1]
+        try:
+            seed()
+        finally:
+            pg = real_pg
+        cursors = {m.group(1) for body, _ in SCENARIOS.values() for m in re.finditer(r"cursor_column: (\w+)", body)}
+        want("the cursor column of every incremental scenario is seeded NOT NULL",
+             bool(cursors) and all(re.search(rf"\b{c} \w+ NOT NULL\b", seen[0]) for c in cursors),
+             f"cursors {sorted(cursors)}")
     finally:
         sh, seed, duckdb_rows, ROOT = real_sh, real_seed, real_duckdb, real_root
 
