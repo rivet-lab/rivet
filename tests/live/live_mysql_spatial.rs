@@ -653,7 +653,9 @@ fn rows_a_previous_release_streamed_for_a_spatial_column_keep_their_form_and_the
         .query_first(format!("SELECT HEX(g) FROM {table} WHERE id = 1"))
         .unwrap()
         .unwrap();
-    let got = geometry_by_id(&delivered_batches(&rig));
+    let batches = delivered_batches(&rig);
+    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
+    let got = geometry_by_id(&batches);
     assert_eq!(
         got.get(&1),
         Some(&format!("\\X{internal}")),
