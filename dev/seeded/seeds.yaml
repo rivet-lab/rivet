@@ -7017,26 +7017,21 @@ seeds:
         na: "MongoDB parallel is the separate `_id`-range reader (mongo_parallel), not the SQL keyset range sampler"
 
   - name: check-run-refusal-split
-    class: "check, plan and doctor pass a batch export that run then refuses by code: a column the export's format cannot write (csv of decimal256, nanosecond timestamp, list; parquet of a negative-scale decimal) and a column no Arrow type carries and no `columns:` entry declares, because those two refusals were raised only where run opens its writer or converts a row"
+    class: "check, plan and doctor pass a batch export that run then refuses by code: a column the export's format cannot write (csv of a nested list; parquet of a negative-scale decimal) and a column no Arrow type carries and no `columns:` entry declares, because those two refusals were raised only where run opens its writer or converts a row"
     history: "issues #912 and #918; RED on main 2026-11-19 by the no_silent_null matrix CHECK_RUN_SPLIT verdict (batch full tier: mssql 10 pairs, mysql 19, oracle 19, postgres 24)"
     scope: source
     switch: check-run-refusal-split
     engines:
       postgres:
-        cells:
-          - a_csv_export_of_a_decimal256_column_is_refused_by_check_like_the_run_postgres
-          - a_declared_type_on_a_column_without_an_arrow_type_is_refused_by_check_like_the_run_postgres
+        na: "2026-11-24: a PostgreSQL type with no Arrow mapping is delivered as the server's text and an array is always a flat list, so no Postgres column reaches the format refusal or the unmapped refusal (measured: the declared-type cell stays green under the seed); reopens if a Postgres type or a declared override gains an Arrow type csv/parquet cannot write, or if an undeclared unmapped type stops being server text"
       mysql:
         cells:
-          - a_csv_export_of_a_decimal256_column_is_refused_by_check_like_the_run_mysql
           - a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mysql
       mssql:
         cells:
-          - a_csv_export_of_a_nanosecond_timestamp_column_is_refused_by_check_like_the_run_mssql
           - a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mssql
       oracle:
-        cells:
-          - a_csv_export_of_a_nanosecond_timestamp_column_is_refused_by_check_like_the_run_oracle
+        na: "2026-11-23: csv now writes every type an Oracle source delivers, so no Oracle column reaches the format refusal; the format half is held by the lib cells and the unmapped-column cell for Oracle is open"
       mongo:
         na: "a MongoDB export lands the whole document in one column: no column type reaches the format or the type mapping"
       lib:
@@ -7053,11 +7048,9 @@ seeds:
       postgres:
         cells:
           - a_pending_baseline_wire_mismatch_is_refused_by_check_postgres
-          - a_pending_baseline_csv_decimal256_is_refused_by_check_postgres
       mysql:
         cells:
           - a_pending_baseline_wire_mismatch_is_refused_by_check_mysql
-          - a_pending_baseline_csv_decimal256_is_refused_by_check_mysql
       mssql:
         cells:
           - a_pending_baseline_wire_mismatch_is_refused_by_check_mssql
@@ -7403,6 +7396,31 @@ seeds:
       mongo:
         na: "a BSON date holds milliseconds and a Mongo export has no `columns:` time override over it, so nothing narrows"
 
+  - name: csv-text-types-refused
+    class: "`format: csv` refuses by RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED a flat array, a Decimal256 and a nanosecond timestamp that Parquet delivers and CSV can hold as lossless text"
+    history: "owner rule 2026-11-21 (a type is delivered natively, else as server text where lossless, else refused by code); RED on main 2026-11-23 by the csv text cells (lib text_cell_tests: 10 failed) and by the PostgreSQL grid (10 array and numeric(60,10) types refused in csv, 40 cells)"
+    scope: source
+    switch: csv-text-types-refused
+    engines:
+      postgres:
+        cells:
+          - a_csv_export_of_a_decimal256_column_is_delivered_like_check_admits_postgres
+          - a_pending_baseline_csv_decimal256_is_accepted_by_check_postgres
+          - "lib:csv_admits_wide_decimals_nanosecond_timestamps_and_flat_lists"
+      mysql:
+        cells:
+          - a_csv_export_of_a_decimal256_column_is_delivered_like_check_admits_mysql
+          - a_pending_baseline_csv_decimal256_is_accepted_by_check_mysql
+          - "lib:csv_admits_wide_decimals_nanosecond_timestamps_and_flat_lists"
+      mssql:
+        cells:
+          - a_csv_export_of_a_nanosecond_timestamp_column_is_delivered_like_check_admits_mssql
+          - "lib:csv_admits_wide_decimals_nanosecond_timestamps_and_flat_lists"
+      oracle:
+        cells:
+          - "lib:csv_admits_wide_decimals_nanosecond_timestamps_and_flat_lists"
+      mongo:
+        na: "a MongoDB export lands the whole document in one column: no array, wide decimal or nanosecond timestamp column reaches the csv writer"
   - name: pg-numeric-text-drops-display-scale
     class: "a PostgreSQL numeric delivered as text from the binary wire loses its display scale: 1.50 lands as 1.5, 0.00 as 0, 1000.000 as 1000, exit 0 (the server's own text keeps every digit of the column's scale)"
     history: "release-oracle grid no_silent_null[postgres] WRONG_VALUE over 1 source->override pairs (known_red #5a2b070b, expiry 2026-11-29); RED on main 2026-11-23 (live: id 1 delivered 1.5 where the server prints 1.50)"
@@ -7469,3 +7487,26 @@ seeds:
         cells: ["lib:a_probe_that_another_probe_completes_inside_is_still_read_by_a_store"]
       stdout:
         na: "doctor reports a stdout destination as streaming and `continue`s before check_destination_auth, so no probe is staged for it"
+
+  - name: csv-temporal-out-of-range-written-empty
+    class: "the CSV writer writes an empty cell (inside a list, an empty string) for a Date32 or microsecond timestamp that chrono cannot name, the same bytes as NULL, instead of refusing it by RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+    history: "found 2026-11-23 reading src/format/csv.rs on PR #1193 (write_date32 and write_timestamp returned Ok without a byte for a value chrono could not hold); RED on its head 2026-11-23 by the four lib cells (the cell was `d\\n\\n`)"
+    scope: source
+    switch: csv-temporal-out-of-range-written-empty
+    engines:
+      postgres:
+        na: "the CSV writer is one engine-independent module (src/format/csv.rs): no source engine delivers a date or timestamp outside chrono's range, its own conversion refuses it first, so the lib cells over the writer are the catch for every engine (2026-11-23)"
+      mysql:
+        na: "the CSV writer is one engine-independent module (src/format/csv.rs): no source engine delivers a date or timestamp outside chrono's range, its own conversion refuses it first, so the lib cells over the writer are the catch for every engine (2026-11-23)"
+      mssql:
+        na: "the CSV writer is one engine-independent module (src/format/csv.rs): no source engine delivers a date or timestamp outside chrono's range, its own conversion refuses it first, so the lib cells over the writer are the catch for every engine (2026-11-23)"
+      oracle:
+        na: "the CSV writer is one engine-independent module (src/format/csv.rs): no source engine delivers a date or timestamp outside chrono's range, its own conversion refuses it first, so the lib cells over the writer are the catch for every engine (2026-11-23)"
+      mongo:
+        na: "a MongoDB export has no CSV format: the document lands whole in its one column"
+      lib:
+        cells:
+          - "lib:a_date32_chrono_cannot_name_is_refused_not_written_as_an_empty_cell"
+          - "lib:a_date32_inside_a_list_that_chrono_cannot_name_is_refused_not_written_as_an_empty_string"
+          - "lib:a_microsecond_timestamp_chrono_cannot_name_is_refused_not_written_as_an_empty_cell"
+          - "lib:a_microsecond_timestamp_inside_a_list_that_chrono_cannot_name_is_refused_not_written_as_an_empty_string"
