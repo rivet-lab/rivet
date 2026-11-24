@@ -157,7 +157,7 @@ def duckdb_rows(d: Path) -> int:
 
 def seed():
     pg(f"DROP TABLE IF EXISTS {TABLE};"
-       f"CREATE TABLE {TABLE} (id bigint PRIMARY KEY, payload text, updated_at timestamptz DEFAULT now());"
+       f"CREATE TABLE {TABLE} (id bigint PRIMARY KEY, payload text, updated_at timestamptz NOT NULL DEFAULT now());"
        f"INSERT INTO {TABLE} (id, payload) SELECT g, repeat('x', 256) FROM generate_series(1, {SEED_ROWS}) g;")
     # A seed that half-worked would surface later as a row-count difference
     # attributed to the BINARIES. Check it here, where it is still a fixture bug.
