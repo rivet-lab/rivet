@@ -6285,6 +6285,23 @@ seeds:
       oracle:
         na: "an Oracle collection type is refused at the mining schema, never read as an array literal"
 
+  - name: pg-cdc-session-reads-whole-type-catalog
+    class: "the PostgreSQL CDC reader reads every array type of pg_type when a session opens, whatever the captured tables hold, so each reader session costs about 1800 more source tuples than the tables it reads need"
+    history: "found 2026-11-24 by the Nightly Gate perf probe (postgres/cdc pg_tup_returned 6905 over its 5077 baseline, first red b04f2301, since #1145); RED on main: one session open returned 3135 tuples over the 2000 ceiling"
+    scope: source
+    switch: pg-cdc-session-reads-whole-type-catalog
+    engines:
+      postgres:
+        cells: ["lib:live_a_session_over_a_table_without_arrays_does_not_scan_the_type_catalog"]
+      mysql:
+        na: "the MySQL reader asks information_schema.TABLES for each configured table by name at open and holds no whole-catalog read"
+      mssql:
+        na: "the SQL Server reader joins sys.tables and sys.columns on the one capture instance it reads, never the whole catalog"
+      mongo:
+        na: "a MongoDB change stream reads no type catalog"
+      oracle:
+        na: "the Oracle reader reads all_tab_cols for the one owner and table it mines, never the whole catalog"
+
   - name: oracle-cdc-number-infinity-uncoded
     class: "an Oracle CDC run that reads NUMBER infinity (LogMiner `~`) stops as an unreadable cell under RIVET_SOURCE_CDC_CELL_UNSUPPORTED where batch refuses the same value as RIVET_SOURCE_VALUE_UNREPRESENTABLE"
     history: "owner 2026-11-21 (batch and CDC must not disagree about a value); RED on #1144 head: oracle probe, FLOAT 9.99..E125 mined as `~`, batch VALUE_UNREPRESENTABLE, cdc CELL_UNSUPPORTED"

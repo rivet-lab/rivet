@@ -25,6 +25,8 @@ pub(crate) struct PgChangeStream {
     client: Client,
     /// The database's domains, so a domain-typed cell decodes as its base type.
     domains: Domains,
+    /// Array labels the catalog has been asked about, whether or not they decode as server text.
+    arrays_seen: std::collections::HashSet<String>,
     slot: String,
     pending: VecDeque<ChangeEvent>,
     /// Directory for an oversized transaction's spill, or `None` when the run has nowhere it knows is sized for it.
@@ -699,6 +701,7 @@ impl PgChangeStream {
         Ok(Self {
             client,
             domains,
+            arrays_seen: std::collections::HashSet::new(),
             slot: slot.to_string(),
             pending: VecDeque::new(),
             spill_dir: spill_dir.map(std::path::Path::to_path_buf),
@@ -833,13 +836,17 @@ impl PgChangeStream {
     }
 
     /// One wire row as a change, cut to the columns the run may deliver.
-    fn parse(&self, lsn: &str, data: &str) -> Result<Option<ChangeEvent>> {
+    fn parse(&mut self, lsn: &str, data: &str) -> Result<Option<ChangeEvent>> {
+        let Some(line) = td_line::tokenize(data) else {
+            return Ok(None);
+        };
+        self.learn_arrays(&line)?;
         let projected = self
             .readable
             .as_deref()
             .filter(|_| seeded!("column-grants-pg-stream-unprojected", false, true));
         let Some(resolved) = projected else {
-            return parse_test_decoding(lsn, data, &self.domains);
+            return decode_line(lsn, line, &self.domains, None);
         };
         let keep = |schema: &str, table: &str| {
             super::column_grants::readable_of(
@@ -850,7 +857,34 @@ impl PgChangeStream {
                 table,
             )
         };
-        parse_test_decoding_keeping(lsn, data, &self.domains, Some(&keep))
+        decode_line(lsn, line, &self.domains, Some(&keep))
+    }
+
+    /// Read the array types the captured tables hold the first time a captured table's cell names an array the session has not asked the catalog about.
+    fn learn_arrays(&mut self, line: &td_line::Line<'_>) -> Result<()> {
+        let unseen = |cols: &[td_line::RawColumn]| {
+            cols.iter().any(|c| {
+                let base = domain_base(&self.domains, &c.typ);
+                base.ends_with("[]") && !self.arrays_seen.contains(base)
+            })
+        };
+        if !unseen(&line.new) && !line.old.as_deref().is_some_and(unseen) {
+            return Ok(());
+        }
+        let (schema, table) = split_qualified_ident(line.relations);
+        if !routes(&self.configured_tables, &self.bare_schema, &schema, &table) {
+            return Ok(());
+        }
+        let held = load_arrays(
+            &mut self.client,
+            &capture_scope(&self.configured_tables, &self.bare_schema),
+        )?;
+        for col in line.new.iter().chain(line.old.iter().flatten()) {
+            self.arrays_seen
+                .insert(domain_base(&self.domains, &col.typ).to_string());
+        }
+        absorb_arrays(&mut self.domains, &mut self.arrays_seen, held);
+        Ok(())
     }
 
     /// Refuse a batch read while the readable columns of a captured table differ from the ones the run resolved.
@@ -1449,6 +1483,16 @@ pub(crate) fn parse_test_decoding_keeping<'a>(
     let Some(line) = td_line::tokenize(data) else {
         return Ok(None);
     };
+    decode_line(lsn, line, domains, keep)
+}
+
+/// One tokenized `test_decoding` line as a canonical change, keeping only the columns `keep` names for its table.
+fn decode_line<'a>(
+    lsn: &str,
+    line: td_line::Line<'_>,
+    domains: &Domains,
+    keep: Keep<'a, '_>,
+) -> Result<Option<ChangeEvent>> {
     let (schema, table) = split_qualified_ident(line.relations);
     let op = match line.op {
         td_line::LineOp::Insert => ChangeOp::Insert,
@@ -1683,21 +1727,31 @@ fn array_is_server_text(oid: u32, elem_typtype: &str) -> bool {
     server_text && !seeded!("cdc-array-text-parsed-as-list", true, false)
 }
 
+/// Map every array label batch delivers as the server's text to `text`, and record every label read.
+fn absorb_arrays(
+    domains: &mut Domains,
+    seen: &mut std::collections::HashSet<String>,
+    arrays: impl IntoIterator<Item = (u32, String, String)>,
+) {
+    for (oid, label, elem_typtype) in arrays {
+        if array_is_server_text(oid, &elem_typtype) {
+            domains.insert(label.clone(), "text".to_string());
+        }
+        seen.insert(label);
+    }
+}
+
 /// Every domain's label mapped to its base type's label, and every array label batch delivers as the server's text mapped to `text`.
 fn domain_map(
     domains: impl IntoIterator<Item = (String, String)>,
     arrays: impl IntoIterator<Item = (u32, String, String)>,
 ) -> Domains {
     let mut map: Domains = domains.into_iter().collect();
-    for (oid, label, elem_typtype) in arrays {
-        if array_is_server_text(oid, &elem_typtype) {
-            map.insert(label, "text".to_string());
-        }
-    }
+    absorb_arrays(&mut map, &mut std::collections::HashSet::new(), arrays);
     map
 }
 
-/// The catalog's domains and arrays read on the reader's session, as `domain_map` takes them.
+/// The catalog's domains read on the reader's session, as `domain_map` takes them.
 fn load_domains(client: &mut Client) -> Result<Domains> {
     let domains: Vec<(String, String)> = client
         .query(
@@ -1708,17 +1762,62 @@ fn load_domains(client: &mut Client) -> Result<Domains> {
         .iter()
         .map(|r| (r.get(0), r.get(1)))
         .collect();
-    let arrays: Vec<(u32, String, String)> = client
-        .query(
+    let arrays = if seeded!("pg-cdc-session-reads-whole-type-catalog", true, false) {
+        load_arrays(client, &(Vec::new(), Vec::new()))?
+    } else {
+        Vec::new()
+    };
+    Ok(domain_map(domains, arrays))
+}
+
+/// The `(table, schema)` pairs a run captures, as `routes` reads them; an empty schema is any schema.
+fn capture_scope(
+    configured: &[String],
+    bare_schema: &HashMap<String, String>,
+) -> (Vec<String>, Vec<String>) {
+    configured
+        .iter()
+        .map(|c| match c.split_once('.') {
+            Some((schema, table)) => (table.to_string(), schema.to_string()),
+            None => (c.clone(), bare_schema.get(c).cloned().unwrap_or_default()),
+        })
+        .unzip()
+}
+
+/// The array types the captured tables' columns hold, domains over arrays followed; every array of the catalog when the run captures every table.
+fn load_arrays(
+    client: &mut Client,
+    scope: &(Vec<String>, Vec<String>),
+) -> Result<Vec<(u32, String, String)>> {
+    let rows = if scope.0.is_empty() {
+        client.query(
             "SELECT a.oid, format_type(a.oid, NULL), e.typtype::text \
                FROM pg_type a JOIN pg_type e ON e.oid = a.typelem \
               WHERE a.typcategory = 'A' AND a.typelem <> 0",
             &[],
         )?
+    } else {
+        client.query(
+            "WITH RECURSIVE held(oid) AS ( \
+                SELECT a.atttypid FROM pg_class c \
+                  JOIN pg_namespace n ON n.oid = c.relnamespace \
+                  JOIN pg_attribute a ON a.attrelid = c.oid \
+                 WHERE c.relname = ANY($1) AND a.attnum > 0 AND NOT a.attisdropped \
+                   AND EXISTS (SELECT 1 FROM unnest($1::text[], $2::text[]) AS s(tbl, sch) \
+                                WHERE s.tbl = c.relname AND (s.sch = '' OR s.sch = n.nspname)) \
+                UNION \
+                SELECT d.typbasetype FROM pg_type d JOIN held h ON d.oid = h.oid \
+                 WHERE d.typtype = 'd') \
+             SELECT a.oid, format_type(a.oid, NULL), e.typtype::text \
+               FROM pg_type a JOIN pg_type e ON e.oid = a.typelem \
+              WHERE a.oid IN (SELECT oid FROM held) AND a.typcategory = 'A' AND a.typelem <> 0",
+            &[&scope.0, &scope.1],
+        )?
+    };
+    Ok(rows
         .iter()
         .map(|r| (r.get(0), r.get(1), r.get(2)))
-        .collect();
-    Ok(domain_map(domains, arrays))
+        .collect())
 }
 
 /// The built-in type a (possibly nested) domain label decodes as; any other label as is.
@@ -2600,6 +2699,7 @@ mod tests {
 
     const CONN: &str = "postgresql://rivet:rivet@127.0.0.1:5434/rivet";
     const SLOT: &str = "rivet_cdc_test";
+    const SESSION_OPEN_TUPLE_CEILING: i64 = 2_000;
 
     #[test]
     fn tx_disposition_bound_frontier_matrix() {
@@ -2688,6 +2788,29 @@ mod tests {
             !array_is_server_text(900_003, "e"),
             "an enum array stays a list"
         );
+    }
+
+    /// The tables the array read names are the ones `routes` captures: a qualified name its schema, a resolved bare name its resolved schema, an unresolved bare name any schema.
+    #[test]
+    fn the_array_read_scope_is_the_set_routes_captures() {
+        let configured: Vec<String> = ["orders", "app.items", "ghost"].map(String::from).to_vec();
+        let bare: HashMap<String, String> = [("orders".to_string(), "tenant".to_string())].into();
+        let (tables, schemas) = capture_scope(&configured, &bare);
+        let in_scope = |schema: &str, table: &str| {
+            tables
+                .iter()
+                .zip(&schemas)
+                .any(|(t, s)| t == table && (s.is_empty() || s == schema))
+        };
+        for schema in ["tenant", "app", "public", "other"] {
+            for table in ["orders", "items", "ghost", "orders_archive", "Orders"] {
+                assert_eq!(
+                    in_scope(schema, table),
+                    routes(&configured, &bare, schema, table),
+                    "{schema}.{table}"
+                );
+            }
+        }
     }
 
     /// The map holds each domain at its base label, each server-text array at `text`, and nothing for a mapped array.
@@ -3284,6 +3407,7 @@ mod tests {
         PgChangeStream {
             client,
             domains: Domains::new(),
+            arrays_seen: std::collections::HashSet::new(),
             slot: "s".into(),
             pending: VecDeque::new(),
             spill_dir: None,
@@ -3875,6 +3999,174 @@ mod tests {
         );
         cleanup(&mut c);
         assert_eq!(slot_plugin_on(&mut c, &slot).unwrap(), None);
+    }
+
+    /// Live: a session whose captured table holds no array reads no array catalog; the tuples one open returns stay under the cost of the array scan alone.
+    #[test]
+    #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
+    fn live_a_session_over_a_table_without_arrays_does_not_scan_the_type_catalog() {
+        let mut admin = Client::connect(CONN, NoTls).unwrap();
+        let db = format!("rivet_pgd_scan_{}", std::process::id());
+        let slot = format!("{db}_slot");
+        admin
+            .batch_execute(&format!("DROP DATABASE IF EXISTS {db}"))
+            .unwrap();
+        admin
+            .batch_execute(&format!("CREATE DATABASE {db}"))
+            .unwrap();
+        let conn = format!("{}/{db}", CONN.rsplit_once('/').unwrap().0);
+        let mut setup = Client::connect(&conn, NoTls).unwrap();
+        setup
+            .batch_execute("CREATE TABLE public.t (id INT PRIMARY KEY, v TEXT)")
+            .unwrap();
+        drop(setup);
+        let returned = |admin: &mut Client| -> i64 {
+            let mut last = -1;
+            for _ in 0..40 {
+                admin
+                    .batch_execute("SELECT pg_stat_clear_snapshot()")
+                    .unwrap();
+                let now: i64 = admin
+                    .query_one(
+                        "SELECT tup_returned FROM pg_stat_database WHERE datname = $1",
+                        &[&db],
+                    )
+                    .unwrap()
+                    .get(0);
+                if now == last {
+                    return now;
+                }
+                last = now;
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            }
+            last
+        };
+        let before = returned(&mut admin);
+        let open = PgChangeStream::open(
+            &conn,
+            &slot,
+            PriorRun::default(),
+            None,
+            crate::source::cdc::PeekBound::Sized(10),
+            DrainMode::Continuous,
+            &["public.t".to_string()],
+            None,
+            None,
+            None,
+        );
+        drop(open.unwrap());
+        let after = returned(&mut admin);
+        admin
+            .execute("SELECT pg_drop_replication_slot($1)", &[&slot])
+            .ok();
+        admin
+            .batch_execute(&format!("DROP DATABASE IF EXISTS {db}"))
+            .unwrap();
+        let delta = after - before;
+        eprintln!("session open returned {delta} tuples");
+        assert!(
+            delta < SESSION_OPEN_TUPLE_CEILING,
+            "one session open returned {delta} tuples, over {SESSION_OPEN_TUPLE_CEILING}: it read the type catalog wholesale"
+        );
+    }
+
+    /// Live: arrays met after the open, a column added mid-run included, decode as the whole-catalog map decodes them.
+    #[test]
+    #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
+    fn live_arrays_met_after_open_decode_as_the_whole_catalog_map_does() {
+        let mut admin = Client::connect(CONN, NoTls).unwrap();
+        let id = std::process::id();
+        let slot = format!("rivet_arr_lazy_{id}");
+        let table = format!("pgd_arr_{id}");
+        let (mood, nets) = (format!("pgd_mood_{id}"), format!("pgd_nets_{id}"));
+        let cleanup = |c: &mut Client| {
+            c.execute(
+                "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1",
+                &[&slot],
+            )
+            .unwrap();
+            c.batch_execute(&format!(
+                "DROP TABLE IF EXISTS {table}; DROP DOMAIN IF EXISTS {nets}; DROP TYPE IF EXISTS {mood}"
+            ))
+            .unwrap();
+        };
+        cleanup(&mut admin);
+        admin
+            .batch_execute(&format!(
+                "CREATE TYPE {mood} AS ENUM ('a', 'b'); CREATE DOMAIN {nets} AS inet[]; \
+                 CREATE TABLE {table} (id INT PRIMARY KEY, ip inet[], n int[], m {mood}[], d {nets}, t text[], mac macaddr[], p point[])"
+            ))
+            .unwrap();
+        let mut stream = PgChangeStream::open(
+            CONN,
+            &slot,
+            PriorRun::default(),
+            None,
+            crate::source::cdc::PeekBound::Sized(10_000),
+            DrainMode::Continuous,
+            std::slice::from_ref(&table),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        admin
+            .batch_execute(&format!(
+                "INSERT INTO {table} VALUES (1, '{{10.0.0.1/32,::1}}', '{{1,2}}', '{{a,b}}', '{{192.168.0.0/16}}', '{{x,\"y z\"}}', '{{08:00:2b:01:02:03}}', '{{\"(1,2)\"}}'); \
+                 ALTER TABLE {table} ADD COLUMN late cidr[]; \
+                 INSERT INTO {table} (id, ip, late) VALUES (2, '{{10.0.0.2}}', '{{10.1.0.0/16}}')"
+            ))
+            .unwrap();
+        let mut got = Vec::new();
+        while let Some(ev) = stream.next_change() {
+            let ev = ev.unwrap();
+            if ev.table == table {
+                got.push((ev.image_names.clone(), ev.after.clone()));
+            }
+        }
+        let rows = admin
+            .query(
+                "SELECT lsn::text, data FROM pg_logical_slot_peek_changes($1, NULL, NULL)",
+                &[&slot],
+            )
+            .unwrap();
+        let mut probe = Client::connect(CONN, NoTls).unwrap();
+        let whole = domain_map(
+            probe
+                .query(
+                    "SELECT format_type(oid, NULL), format_type(typbasetype, NULL) FROM pg_type WHERE typtype = 'd'",
+                    &[],
+                )
+                .unwrap()
+                .iter()
+                .map(|r| (r.get(0), r.get(1))),
+            probe
+                .query(
+                    "SELECT a.oid, format_type(a.oid, NULL), e.typtype::text FROM pg_type a \
+                     JOIN pg_type e ON e.oid = a.typelem WHERE a.typcategory = 'A' AND a.typelem <> 0",
+                    &[],
+                )
+                .unwrap()
+                .iter()
+                .map(|r| (r.get(0), r.get(1), r.get(2))),
+        );
+        let mut want = Vec::new();
+        for r in &rows {
+            let (lsn, data): (String, String) = (r.get(0), r.get(1));
+            if let Some(ev) = parse_test_decoding(&lsn, &data, &whole).unwrap()
+                && ev.table == table
+            {
+                want.push((ev.image_names.clone(), ev.after.clone()));
+            }
+        }
+        cleanup(&mut admin);
+        assert_eq!(got.len(), 2, "both inserts are delivered");
+        assert_eq!(got, want);
+        assert_eq!(
+            got[1].1.as_ref().and_then(|a| a.last()),
+            Some(&RivetValue::Bytes(b"{10.1.0.0/16}".to_vec())),
+            "the column added mid-run carries the server's text: {got:?}"
+        );
     }
 
     /// Live: the label resolver agrees with the reader's own domain map for every domain on the server.
