@@ -125,9 +125,10 @@ pub(super) fn is_upgrade_label_migration(
                 == rivet_type_to_arrow(&new.rivet_type).map(|dt| format!("{dt:?}"))
                 || old.is_some_and(|c| c.data_type == new.source_native_type)
         }
-        Delivery::Text(TextForm::HexWkb) => {
-            old.is_none_or(|c| c.data_type == REFUSED_SPATIAL_BASELINE)
-        }
+        Delivery::Text(TextForm::HexWkb) => old.map_or_else(
+            || seeded!("cdc-spatial-new-column-adopted", true, false),
+            |c| c.data_type == REFUSED_SPATIAL_BASELINE,
+        ),
         _ => false,
     }
 }
@@ -336,7 +337,7 @@ mod tests {
         assert_eq!(st.get_stored_schema("k").unwrap(), again, "idempotent");
     }
 
-    /// A column the batch baseline never recorded is drift, not a label migration; a CDC baseline adopts it.
+    /// A column the batch baseline never recorded is drift, not a label migration; a CDC baseline adopts only a server-text one.
     #[test]
     fn a_column_absent_from_a_batch_baseline_is_left_to_the_drift_check() {
         let cols = vec![
@@ -372,12 +373,8 @@ mod tests {
         migrate_baseline(&cdc, "k", &cols, AbsentColumns::Adopt);
         assert_eq!(
             cdc.get_stored_schema("k").unwrap().unwrap(),
-            vec![
-                col("id", "Int64"),
-                col("x", "Utf8"),
-                col("n", "Utf8"),
-                col("g", "Utf8")
-            ]
+            vec![col("id", "Int64"), col("x", "Utf8"), col("n", "Utf8")],
+            "a spatial column absent from a CDC baseline is a new column, left to the drift check"
         );
     }
 
@@ -448,7 +445,7 @@ mod tests {
         )
         .with_text(crate::types::TextForm::HexWkb);
         assert!(is_upgrade_label_migration(Some(&col("g", "unknown")), &g));
-        assert!(is_upgrade_label_migration(None, &g));
+        assert!(!is_upgrade_label_migration(None, &g));
         assert!(!is_upgrade_label_migration(Some(&col("g", "Utf8")), &g));
         assert!(!is_upgrade_label_migration(Some(&col("g", "Binary")), &g));
         assert!(!is_upgrade_label_migration(Some(&col("g", "Int64")), &g));
@@ -461,8 +458,14 @@ mod tests {
             .expect("the refused baseline is not drift");
         let stored = st.get_stored_schema("k").unwrap().unwrap();
         assert_eq!(stored[1].data_type, "Utf8");
-        check_from_cdc_mappings(&st, "k", &[id, g], SchemaDriftPolicy::Fail)
+        check_from_cdc_mappings(&st, "k", &[id.clone(), g.clone()], SchemaDriftPolicy::Fail)
             .expect("a second run stays clean");
+
+        let fresh = StateStore::open_in_memory().unwrap();
+        fresh.store_schema("k", &[col("id", "Int32")]).unwrap();
+        let err = check_from_cdc_mappings(&fresh, "k", &[id, g], SchemaDriftPolicy::Fail)
+            .expect_err("a new spatial column on a CDC stream is drift under fail");
+        assert!(format!("{err:#}").contains("1 column(s) added"), "{err:#}");
     }
 
     /// Under `fail`, a 0.30.0 baseline takes the server-text column silently; a genuinely new column still fails.

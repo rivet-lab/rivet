@@ -1904,6 +1904,25 @@ seeds:
         na: "a MongoDB document has no MySQL spatial column; the MySQL spatial mapping does not run"
       oracle:
         na: "an Oracle SDO_GEOMETRY is refused by its own mapping; the MySQL spatial mapping does not run"
+  - name: cdc-spatial-new-column-adopted
+    class: "a spatial column added to a CDC stream is adopted into the schema baseline as an upgrade-label migration, so on_schema_drift fail and warn report no drift for a new column and the baseline gains it, exit 0"
+    history: "2026-11-24 - verifier finding on the MySQL spatial change: the HexWkb arm of is_upgrade_label_migration migrated an absent column and the CDC path adopts absent columns; a pre-upgrade CDC baseline already holds the spatial column as Utf8 (measured with v0.32.2 and v0.33.0), so only a recorded unknown migrates"
+    scope: source
+    switch: cdc-spatial-new-column-adopted
+    engines:
+      postgres:
+        na: "a PostgreSQL geometry is the server's text; the MySQL spatial migration arm does not run"
+      mysql:
+        cells:
+          - a_spatial_column_added_to_a_cdc_stream_is_drift_under_fail
+          - a_spatial_column_added_to_a_cdc_stream_is_reported_and_delivered_under_warn
+          - "lib:a_hex_wkb_column_migrates_over_the_baseline_a_refused_run_recorded"
+      mssql:
+        na: "a SQL Server spatial type is its CLR bytes as hex; the MySQL spatial migration arm does not run"
+      mongo:
+        na: "a MongoDB document has no MySQL spatial column; the MySQL spatial migration arm does not run"
+      oracle:
+        na: "an Oracle SDO_GEOMETRY is refused by its own mapping; the MySQL spatial migration arm does not run"
   - name: mysql-spatial-srid-prefix-kept
     class: "a MySQL spatial column is delivered as the hex of the server's internal bytes, the 4-byte SRID prefix included, labelled hex_wkb, so no WKB reader in the warehouse can parse it, exit 0"
     history: "2026-11-24 - MySQL spatial types were refused RIVET_TYPE_UNSAFE_MAPPING; the hex_wkb form is the STANDARD WKB, equal to LOWER(HEX(ST_AsBinary(col))), so the SRID prefix must be stripped in batch and CDC"

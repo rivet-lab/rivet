@@ -494,6 +494,94 @@ fn a_spatial_column_a_previous_release_refused_is_not_drift_under_warn() {
     upgrade_over_a_refused_baseline("warn");
 }
 
+const CDC_DRIFT_FAIL: &str = "on_schema_drift: fail";
+
+/// A spatial column added to a stream is drift under `fail`: exit 4 naming the column, the baseline unchanged.
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_spatial_column_added_to_a_cdc_stream_is_drift_under_fail() {
+    let table = unique_name("mysql_spatial_cdc_add");
+    let _guard = MysqlCdcTable(table.clone());
+    let mut c = cdc_conn();
+    c.query_drop(format!("CREATE TABLE {table} (id INT PRIMARY KEY, v INT)"))
+        .unwrap();
+    let rig = Rig::mysql_cdc(&table).export_line(CDC_DRIFT_FAIL);
+    rig.run_ok();
+    c.query_drop(format!("ALTER TABLE {table} ADD COLUMN g GEOMETRY"))
+        .unwrap();
+    c.query_drop(format!(
+        "INSERT INTO {table} VALUES (1, 1, ST_GeomFromText('POINT(1 2)'))"
+    ))
+    .unwrap();
+    let out = rig.run();
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(4), "{said}");
+    assert!(said.contains("added: g"), "{said}");
+    let recorded = "SELECT COUNT(*) FROM export_schema WHERE export_name = '{export}' AND columns_json LIKE '%\"name\":\"g\"%'";
+    assert_eq!(rig.state_count(recorded), 0, "the baseline did not adopt g");
+}
+
+/// Under `warn` the same added column is reported and delivered as the server's WKB hex.
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_spatial_column_added_to_a_cdc_stream_is_reported_and_delivered_under_warn() {
+    let table = unique_name("mysql_spatial_cdc_addw");
+    let _guard = MysqlCdcTable(table.clone());
+    let mut c = cdc_conn();
+    c.query_drop(format!("CREATE TABLE {table} (id INT PRIMARY KEY, v INT)"))
+        .unwrap();
+    let rig = Rig::mysql_cdc(&table).export_line("on_schema_drift: warn");
+    rig.run_ok();
+    c.query_drop(format!("ALTER TABLE {table} ADD COLUMN g GEOMETRY"))
+        .unwrap();
+    c.query_drop(format!(
+        "INSERT INTO {table} VALUES (1, 1, ST_GeomFromText('POINT(1 2)'))"
+    ))
+    .unwrap();
+    let out = rig.run();
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{said}");
+    assert!(said.contains("added: g"), "{said}");
+}
+
+/// A CDC baseline a previous release wrote already holds the spatial column as `Utf8`, so this build reads no drift in it under `fail`.
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc + RIVET_PREV_RELEASE_BIN"]
+fn a_cdc_baseline_a_previous_release_wrote_for_a_spatial_column_is_not_drift_under_fail() {
+    let table = unique_name("mysql_spatial_cdc_old");
+    let _guard = MysqlCdcTable(table.clone());
+    let mut c = cdc_conn();
+    c.query_drop(format!(
+        "CREATE TABLE {table} (id INT PRIMARY KEY, v INT, g GEOMETRY)"
+    ))
+    .unwrap();
+    let rig = Rig::mysql_cdc(&table).export_line(CDC_DRIFT_FAIL);
+    let Some(old) = rig.as_previous_release() else {
+        return;
+    };
+    let anchored = old.run();
+    assert_eq!(
+        anchored.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&anchored.stderr)
+    );
+    let held = "SELECT COUNT(*) FROM export_schema WHERE export_name = '{export}' AND columns_json LIKE '%\"name\":\"g\",\"type\":\"Utf8\"%'";
+    assert_eq!(
+        rig.state_count(held),
+        1,
+        "the previous release recorded g as Utf8"
+    );
+    c.query_drop(format!(
+        "INSERT INTO {table} VALUES (1, 1, ST_GeomFromText('POINT(1 2)'))"
+    ))
+    .unwrap();
+    let mine = rig.run();
+    let said = String::from_utf8_lossy(&mine.stderr);
+    assert_eq!(mine.status.code(), Some(0), "{said}");
+    assert!(!said.contains("schema drift"), "{said}");
+}
+
 fn ring_wkt(points: usize) -> String {
     let ring: Vec<String> = (0..points)
         .map(|i| format!("{} {}", i, (i * i) % 7))
