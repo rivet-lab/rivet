@@ -49,6 +49,7 @@ acknowledgement); Oracle's and Mongo's is not.
 from __future__ import annotations
 
 from contextlib import ExitStack
+import contextlib
 import datetime as dt
 import functools
 import itertools
@@ -417,7 +418,7 @@ def _oracle_register(ora, url: str, sql: str, json_cols: frozenset = frozenset()
 
     import pyarrow as pa
 
-    from .value_diff import oracle_result
+    from .value_diff import oracle_batches
 
     numeric: dict = {}
 
@@ -436,17 +437,29 @@ def _oracle_register(ora, url: str, sql: str, json_cols: frozenset = frozenset()
         as_json = v is not None and (name in json_cols or isinstance(v, dict))
         return json_text(v) if as_json else v
 
-    names, rows = oracle_result(url, sql)
-    cols = list(zip(*[[cell(n, v) for n, v in zip(names, r)] for r in rows])) or [[] for _ in names]
+    def text(c: list) -> pa.Array:
+        return pa.array([None if v is None else (v.hex() if isinstance(v, bytes) else str(v)) for v in c])
 
     def column(c: list) -> pa.Array:
         try:
-            a = pa.array(c)
-        except (pa.ArrowInvalid, pa.ArrowTypeError):  # a column of mixed python types: compared as text
-            return pa.array([None if v is None else (v.hex() if isinstance(v, bytes) else str(v)) for v in c])
-        return pa.array(c, pa.string()) if pa.types.is_null(a.type) else a
+            return pa.array(c)
+        except (pa.ArrowInvalid, pa.ArrowTypeError):
+            return text(c)
 
-    ora.db.register("ora_src", pa.table({n: column(list(c)) for n, c in zip(names, cols)}))
+    def whole(chunks: list) -> pa.ChunkedArray:
+        typed = {a.type for a in chunks if not pa.types.is_null(a.type)}
+        if len(typed) > 1:
+            return pa.chunked_array([text([v for a in chunks for v in a.to_pylist()])])
+        target = next(iter(typed), pa.string())
+        return pa.chunked_array([a if a.type == target else a.cast(target) for a in chunks], target)
+
+    with oracle_batches(url, sql) as (names, batches):
+        chunks: list = [[] for _ in names]
+        for batch in batches:
+            for n, c, col in zip(names, chunks, zip(*batch)):
+                c.append(column([cell(n, v) for v in col]))
+    columns = {n: whole(c) if c else pa.chunked_array([], pa.string()) for n, c in zip(names, chunks)}
+    ora.db.register("ora_src", pa.table(columns))
     return numeric
 
 
@@ -2280,13 +2293,22 @@ def _self_test() -> None:
     assert pin("DATETIME(6)"), "a DATETIME delivered as an instant is still a finding"
     seen: dict = {}
     ora_fake = type("O", (), {"db": type("D", (), {"register": staticmethod(lambda n, t: seen.update({n: t}))})()})()
-    real_result, value_diff.oracle_result = value_diff.oracle_result, lambda url, sql: (["Z", "N"], [(dt.datetime(2024, 2, 29, 1), dt.datetime(2024, 2, 29, 1))])
+    names = ["Z", "N", "I", "M", "E"]
+    first = [(dt.datetime(2024, 2, 29, 1), dt.datetime(2024, 2, 29, 1), None, 1, None)]
+    second = [(dt.datetime(2024, 3, 1, 1), dt.datetime(2024, 3, 1, 1), 5, "x", None)]
+
+    @contextlib.contextmanager
+    def two_batches(url, sql):
+        yield names, iter([first, second])
+
+    real_batches, value_diff.oracle_batches = value_diff.oracle_batches, two_batches
     try:
         _oracle_register(ora_fake, "", "", zoned=frozenset({"Z"}))
     finally:
-        value_diff.oracle_result = real_result
+        value_diff.oracle_batches = real_batches
     tys = {f.name: str(f.type) for f in seen["ora_src"].schema}
-    assert tys == {"Z": "timestamp[us, tz=UTC]", "N": "timestamp[us]"}, f"a zoned Oracle query column is registered as an instant: {tys}"
+    assert tys == {"Z": "timestamp[us, tz=UTC]", "N": "timestamp[us]", "I": "int64", "M": "string", "E": "string"}, f"batches are one column each, a null batch takes the type of the others: {tys}"
+    assert seen["ora_src"].column("M").to_pylist() == ["1", "x"] and seen["ora_src"].column("I").to_pylist() == [None, 5], "a column of mixed python types is text across batches"
     assert one("DOUBLE[]", "VARCHAR", "VARRAY"), "a list with no pin delivered as text is a finding"
     class Described:
         """A DuckDB stand-in whose DESCRIBE answers the scanner's engine-labelled type names."""
