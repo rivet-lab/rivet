@@ -37,7 +37,7 @@ CP12 says each `TextForm` renders in one place. `tests/offline/renderer_locality
 
 | Form | Canonical callers | Local renderers |
 |------|-------------------|-----------------|
-| `DecimalPlain` | 0 | `mssql::numeric_to_decimal_string`, `oracle/cdc::canonical_number`, `pg_numeric_wire::numeric_wire_normalized_plain` |
+| `DecimalPlain` | 0 | `mssql::numeric_to_decimal_string`, `oracle/cdc::canonical_number`, `pg_numeric_wire::numeric_wire_plain_at_display_scale` |
 | `Iso8601Duration` | 0 | `oracle::interval_ym_iso`, `postgres::pg_interval_to_iso8601` |
 | `IsoTimestampNanos` | 0 | `cdc/value::render_str`, `cdc/value::to_json`, `oracle::timestamp_text` |
 | `TimeBeyondDay` | 1 (`cdc/value::render_str`) | none |
@@ -45,7 +45,7 @@ CP12 says each `TextForm` renders in one place. `tests/offline/renderer_locality
 | `HexBytes` | 0 | `cdc/value::bytes_to_recoverable_string`, `mssql::cell_text`, `oracle::upper_hex` |
 | `TimeOfDayOffset`, `BitString` | 0 | none |
 
-Twin tests (`renderer_twins` beside each local renderer) feed both renderers the same inputs. Where they disagree, the case is an `#[ignore]` test naming the engine step that unifies it: PostgreSQL interval fractions (`PT0.500000S` vs `PT0.5S`) and `numeric` trailing zeros (`1.5` vs `1.50`); Oracle upper-case hex, six-digit and signed-year timestamps, YEAR(9) intervals past `i32` months, and CDC number trailing zeros; SQL Server upper-case GUID; CDC `\x`-prefixed hex and chrono-`Display` timestamps.
+Twin tests (`renderer_twins` beside each local renderer) feed both renderers the same inputs. Where they disagree, the case is an `#[ignore]` test naming the engine step that unifies it: PostgreSQL interval fractions (`PT0.500000S` vs `PT0.5S`); Oracle upper-case hex, six-digit and signed-year timestamps, YEAR(9) intervals past `i32` months, and CDC number trailing zeros; SQL Server upper-case GUID; CDC `\x`-prefixed hex and chrono-`Display` timestamps.
 
 ### Amendment: common kinds (2026-11-20, time, uuid and interval added 2026-11-21)
 

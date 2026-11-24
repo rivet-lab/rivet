@@ -75,10 +75,6 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     KnownRed("no_silent_null[postgres] smoke: CHECK_RUN_SPLIT over 4 source->override pairs #75e0db83",
              "2026-11-19: batch leg, PR-PRECHECK: check exits 0 and run refuses with RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5) because check reads no values; the format and unmapped-column refusals are decided by check, plan and doctor since 2026-11-19 and no pair of them remains; open, closes when check decides a value-dependent refusal or the owner accepts it; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-19 to the pairs left on the branch build; reviewed 2026-11-22 on main 1606571b: smoke stage on the live stand printed this exact key, still red; #1148 may close it, re-review 2026-11-27",
              "2026-11-27"),
-    KnownRed("no_silent_null[postgres] smoke: WRONG_VALUE over 1 source->override pairs #5a2b070b",
-             "2026-11-22: a NUMERIC(18,2) value 1.50 under a string override is delivered as '1.5' (scale dropped), graded WRONG_VALUE and, with validate --depth full exit 0 over it, INTEGRITY_BLIND; printed identically by main eac5df85 and by this branch on the live stand, so it is not this PR's; open, closes when the numeric-to-text delivery keeps the declared scale; re-review 2026-11-29",
-             _EXPIRES,
-             ("no_silent_null[postgres] smoke: INTEGRITY_BLIND over 1 source->override pairs #5a2b070b",)),
     KnownRed("no_silent_null[mssql] full: CHECK_RUN_SPLIT over 6 source->override pairs #2fcd1a9a",
              "2026-11-19: full tier, PR-PRECHECK: check exits 0 and run refuses with RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5) because check reads no values; the format and unmapped-column refusals are decided by check, plan and doctor since 2026-11-19 and no pair of them remains; open, closes when check decides a value-dependent refusal or the owner accepts it; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-22 to 6 pairs: MONEY to float8 left them, check reports it lossy and names RIVET_SOURCE_VALUE_UNREPRESENTABLE, which the matrix reads as a stated refusal; reviewed 2026-11-22 on main 1606571b: seen on the smoke and the full stage, one run each (digest #2fcd1a9a); #1148 may close it, re-review 2026-11-27",
              "2026-11-27"),
@@ -93,10 +89,6 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     KnownRed("no_silent_null[postgres] full: CHECK_RUN_SPLIT over 4 source->override pairs #75e0db83",
              "2026-11-19: full tier, PR-PRECHECK: check exits 0 and run refuses with RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5) because check reads no values; the format and unmapped-column refusals are decided by check, plan and doctor since 2026-11-19 and no pair of them remains; open, closes when check decides a value-dependent refusal or the owner accepts it; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-19 to the pairs left on the branch build; reviewed 2026-11-22 on main 1606571b: seen on the smoke and the full stage, one run each (digest #75e0db83); #1148 may close it, re-review 2026-11-27",
              "2026-11-27"),
-    KnownRed("no_silent_null[postgres] full: WRONG_VALUE over 1 source->override pairs #5a2b070b",
-             "2026-11-22: a NUMERIC(18,2) value 1.50 under a string override is delivered as '1.5' (scale dropped), graded WRONG_VALUE and, with validate --depth full exit 0 over it, INTEGRITY_BLIND; printed identically by main eac5df85 and by this branch on the live stand, so it is not this PR's; open, closes when the numeric-to-text delivery keeps the declared scale; re-review 2026-11-29",
-             _EXPIRES,
-             ("no_silent_null[postgres] full: INTEGRITY_BLIND over 1 source->override pairs #5a2b070b",)),
     KnownRed("no_silent_null_cdc[mssql]: CHECK_RUN_SPLIT over 35 source->override pairs #a35c1239",
              "2026-11-19: CDC leg, PR-PRECHECK: check exits 0 and run refuses by code (RIVET_SOURCE_CDC_PREREQUISITE on the added and type_changed legs, a prerequisite the stream reads from the server at run time, and RIVET_SOURCE_VALUE_UNREPRESENTABLE, exit 5, because check reads no values); open, closes when check decides the remaining refusal or the owner accepts it; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-keyed 2026-11-21 from two release-binary runs on 4b389582 over the pairs left once the grid stopped grading group-mates of a refused column and format refusals as stream failures; reviewed 2026-11-22 on main 1606571b: cdc stage on the live stand printed this exact key (35 pairs), still red; re-review 2026-11-29",
              _EXPIRES),
@@ -138,6 +130,19 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     KnownRed("no_silent_null_load_cloud[postgres]: DEFECT_PG_NULL_LIST_EMPTY_BQ over 20 source->override pairs #cf3f250f",
              "2026-11-16: type matrix, class PG_NULL_LIST_EMPTY_BQ: a NULL list is delivered as an empty list at BigQuery; accepted by owner 2026-11-21: target cannot hold a NULL list; open, closes when the product delivers it exact or refuses it by a coded cause, and the line reads DEFECT_GONE_PG_NULL_LIST_EMPTY_BQ when it changes; reviewed 2026-11-22: unverified on stand, the cloud tier needs BigQuery credentials that this review had no access to; owner accepted 2026-11-21, re-review 2026-11-25",
              "2026-11-25"),
+    KnownRed("byte-identical[mysql/full]: 1 of 1 parts differ in bytes",
+             "2026-11-24: v0.33.0 against this binary, same rows, same init config: the part's bytes differ and nothing else does; the Arrow field metadata of every MySQL date, datetime and timestamp column reads rivet.fidelity compatible where v0.33.0 wrote exact (#1084, see #994, changelog.d/fix-994-zero-date-fidelity-and-counts.md, a declared Behaviour change); the rows, the Parquet schema and the column statistics are equal, which is why the stamped cells pass; measured 2026-11-24 on a v0.33.0 release binary and a debug build of main 65586b63 over the gate's own 250000-row seed; open, closes when the release the gate grades against carries #1084: the cell passes and the entry is removed; re-review 2026-11-29",
+             _EXPIRES,
+             ("byte-identical[mysql/chunked]: 3 of 3 parts differ in bytes",)),
+    KnownRed("byte-identical[mssql/full]: 1 of 1 parts differ in bytes",
+             "2026-11-24: v0.33.0 against this binary, same rows, same init config: a DATETIME2(7) column is Timestamp(ns) where v0.33.0 wrote Timestamp(us), so the part's bytes differ and the stamped cells read updated_at as TIMESTAMP_NS against TIMESTAMP (#1083, ADR-0038 CP1, changelog.d/mssql-datetime2-7-nanoseconds.md, a declared Behaviour change that keeps the 100 ns tick the old type dropped); datetime2(0..6), datetime and smalldatetime are unchanged; measured 2026-11-24 on a v0.33.0 release binary and a debug build of main 65586b63 over the gate's own 250000-row seed; open, closes when the release the gate grades against carries #1083: the cells pass and the entry is removed; re-review 2026-11-29",
+             _EXPIRES,
+             ("byte-identical[mssql/chunked]: 3 of 3 parts differ in bytes",
+              "byte-identical[mssql/full_as_init_writes_it]: the schemas differ: previous [('id', 'BIGINT'), ('v', 'BIGINT'), ('updated_at', 'TIMESTAMP'), ('_rivet_exported_at', 'TIMESTAMP WITH TIME ZONE'), ('_rivet_row_hash', 'BIGINT')], this [('id', 'BIGINT'), ('v', 'BIGINT'), ('updated_at', 'TIMESTAMP_NS'), ('_rivet_exported_at', 'TIMESTAMP WITH TIME ZONE'), ('_rivet_row_hash', 'BIGINT')]",
+              "byte-identical[mssql/chunked_as_init_writes_it]: the schemas differ: previous [('id', 'BIGINT'), ('v', 'BIGINT'), ('updated_at', 'TIMESTAMP'), ('_rivet_exported_at', 'TIMESTAMP WITH TIME ZONE'), ('_rivet_row_hash', 'BIGINT')], this [('id', 'BIGINT'), ('v', 'BIGINT'), ('updated_at', 'TIMESTAMP_NS'), ('_rivet_exported_at', 'TIMESTAMP WITH TIME ZONE'), ('_rivet_row_hash', 'BIGINT')]")),
+    KnownRed("byte-identical[mongo/full]: 1 of 1 parts differ in bytes",
+             "2026-11-24: v0.33.0 against this binary, same documents, same init config: the part's bytes differ and nothing else does; the flat _id column of a collection holding int keys is labelled rivet.native_type number (int, long, double or decimal) with rivet.fidelity logical_string where v0.33.0 wrote objectid and exact (#1045, see #996, changelog.d/fix-996-mongo-flat-id-label.md, a declared Behaviour change); the value of every cell and the column's Arrow type are unchanged, which is why the stamped cell passes; measured 2026-11-24 on a v0.33.0 release binary and a debug build of main 65586b63 over the gate's own 250000-document seed; open, closes when the release the gate grades against carries #1045: the cell passes and the entry is removed; re-review 2026-11-29",
+             _EXPIRES),
     KnownRed(nightly_key("refusal_names_true_cause", "cause", "uncoded"),
              "2026-11-14: #917, the nightly refusal-names-true-cause part: refusals stay uncoded, name the wrong cause or a remedy flag that does not exist, or exit 0 on a refused config; open, closes with the fix of #917; reviewed 2026-11-22: #917 is still open; the refusal matrix was not re-run in this review, unverified on stand; re-review 2026-11-25",
              "2026-11-25",
@@ -278,8 +283,24 @@ def self_test() -> int:
     assert cell_of("no_silent_null[mysql] smoke: SILENT_NULL over 3 pairs #ab") is None and cell_of("x FAILED · no cell here") is None
     assert cell_key("no_silent_null[mysql] smoke: SILENT_NULL over 3 pairs #ab") == cell_key("no_silent_null[mysql] smoke: SILENT_NULL over 9 pairs #cd"), \
         "a gate class keeps its key when its count and digest change"
+    _byte_identical_keys_are_the_stage_messages()
     print("known_red self-test: ok")
     return 0
+
+
+def _byte_identical_keys_are_the_stage_messages() -> None:
+    """Every `byte-identical[...]` key of the ledger is a message the stage prints, built from its own graders."""
+    from .guarantees import Stamped, parts_differ, stamped_differ
+
+    held = {k for e in KNOWN_RED for k in e.keys() if k.startswith("byte-identical[")}
+    printed = {f"byte-identical[{engine}/{mode}]: {parts_differ(['a'] * n, ['b'] * n)}" for engine, mode, n in (("mysql", "full", 1), ("mysql", "chunked", 3), ("mssql", "full", 1), ("mssql", "chunked", 3), ("mongo", "full", 1))}
+    cols = [("id", "BIGINT"), ("v", "BIGINT"), ("updated_at", "TIMESTAMP"), ("_rivet_exported_at", "TIMESTAMP WITH TIME ZONE"), ("_rivet_row_hash", "BIGINT")]
+    now = [(n, "TIMESTAMP_NS" if n == "updated_at" else t) for n, t in cols]
+    why = stamped_differ(Stamped((1, 1), ((cols, []), (now, [])), (250000, 250000), None, None, None), 250000)
+    printed |= {f"byte-identical[mssql/{mode}_as_init_writes_it]: {why}" for mode in ("full", "chunked")}
+    assert held == printed, f"the ledger and the stage disagree: only in the ledger {sorted(held - printed)}, only in the stage {sorted(printed - held)}"
+    assert match("byte-identical[postgres/full]: 1 of 1 parts differ in bytes", _dt.date(2026, 11, 24))[0] is None and match("byte-identical[mysql/full]: 2 of 2 parts differ in bytes", _dt.date(2026, 11, 24))[0] is None, \
+        "an entry holds its own engine and cell only"
 
 
 def main() -> int:

@@ -424,6 +424,107 @@ fn a_numeric_the_catalog_types_keeps_its_decimal_and_a_bare_one_is_server_text_p
     }
 }
 
+/// The values whose display scale is the part of them a plain decimal text loses.
+const NUMERIC_SCALES: &str = "(1, 1.50), (2, 2.5000000000), (3, 0.00), (4, 100), (5, 1000.000), \
+     (6, -0.000001234), (7, 12345678901234567890.1200), (8, 'NaN'), (9, NULL), (10, 0.10)";
+
+/// A bare `numeric` under a `text` override is the server's own text, every display scale kept.
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn a_bare_numeric_under_a_text_override_keeps_its_display_scale_postgres() {
+    let (table, _guard) = ENGINE.create("num_scale_text", "id BIGINT PRIMARY KEY, n NUMERIC");
+    ENGINE.exec(&format!("INSERT INTO {table} VALUES {NUMERIC_SCALES}"));
+    let rig = ENGINE.rig(&table).export_line("columns: {n: text}");
+    let out = rig.run();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (_, got) = delivered(&rig);
+    let want = source_text(&table);
+    assert_eq!(got.len(), want.len(), "the row count");
+    for (g, w) in got.iter().zip(&want) {
+        assert_eq!(
+            g[1], w[1],
+            "id {:?} delivered {:?} where the server prints {:?}",
+            g[0], g[1], w[1]
+        );
+    }
+}
+
+/// A `numeric(p,s)` under a `text` override is the server's own text.
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn a_typed_numeric_under_a_text_override_is_the_servers_text_postgres() {
+    let (table, _guard) = ENGINE.create("num_typed_text", "id BIGINT PRIMARY KEY, n NUMERIC(18,4)");
+    ENGINE.exec(&format!(
+        "INSERT INTO {table} VALUES (1, 1.50), (2, 0), (3, -99999999999999.9999), (4, NULL)"
+    ));
+    let rig = ENGINE.rig(&table).export_line("columns: {n: text}");
+    let out = rig.run();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (_, got) = delivered(&rig);
+    let want = source_text(&table);
+    for (g, w) in got.iter().zip(&want) {
+        assert_eq!(g[1], w[1], "id {:?}", g[0]);
+    }
+}
+
+/// A `numeric(p,s)` read as a native decimal, declared or autodetected, delivers each value at the column's scale.
+#[test]
+#[ignore = "live: requires docker compose up -d postgres"]
+fn a_typed_numeric_read_as_a_decimal_is_the_value_at_the_column_scale_postgres() {
+    let (table, _guard) = ENGINE.create(
+        "num_dec_ovr",
+        "id BIGINT PRIMARY KEY, n NUMERIC(18,4), m NUMERIC(18,4)",
+    );
+    ENGINE.exec(&format!(
+        "INSERT INTO {table} VALUES (1, 1.50, 1.50), (2, 2.5000, 2.5000), (3, 0.00, 0.00), \
+         (4, 100, 100), (5, -0.0012, -0.0012), (6, NULL, NULL)"
+    ));
+    let rig = ENGINE
+        .rig(&table)
+        .export_line("columns: {n: \"decimal(20,6)\"}");
+    let out = rig.run();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (names, got) = delivered(&rig);
+    let col = |c: &str| names.iter().position(|n| n == c).unwrap();
+    let want_n = [
+        Some("1.500000"),
+        Some("2.500000"),
+        Some("0.000000"),
+        Some("100.000000"),
+        Some("-0.001200"),
+        None,
+    ];
+    let want_m = [
+        Some("1.5000"),
+        Some("2.5000"),
+        Some("0.0000"),
+        Some("100.0000"),
+        Some("-0.0012"),
+        None,
+    ];
+    for (i, g) in got.iter().enumerate() {
+        assert_eq!(g[col("n")].as_deref(), want_n[i], "declared, id {:?}", g[0]);
+        assert_eq!(
+            g[col("m")].as_deref(),
+            want_m[i],
+            "autodetected, id {:?}",
+            g[0]
+        );
+    }
+}
+
 /// The `export_schema` row a run of the previous release that refused a bare `numeric` and a `numeric[]` left behind: the native names.
 const BASELINE_A_REFUSED_RUN_LEFT: &str = r#"[{"name":"id","type":"Int64"},{"name":"b","type":"numeric"},{"name":"a","type":"_numeric"},{"name":"v","type":"Decimal128(10, 2)"}]"#;
 

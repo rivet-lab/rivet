@@ -731,7 +731,7 @@ def _first_red_self_test() -> None:
     colon = out.replace("    9.88s\n", "    expected a value:\n")
     assert scenarios._first_red(colon) == "FAIL source::mysql::folded_name::tests::a_megabyte: expected a value:", scenarios._first_red(colon)
     bare = "        FAIL [   9.882s] (4231/6029) rivet-cli t::quiet\n"
-    assert scenarios._first_red(bare) == "FAIL t::quiet", scenarios._first_red(bare)
+    assert scenarios._first_red(bare) == "FAIL t::quiet: nextest FAIL [9.882s], no panic line (the test process timed out or was killed)", scenarios._first_red(bare)
 
 
 def _lanes_self_test() -> None:
