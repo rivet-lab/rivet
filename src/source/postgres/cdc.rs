@@ -875,10 +875,7 @@ impl PgChangeStream {
         if !routes(&self.configured_tables, &self.bare_schema, &schema, &table) {
             return Ok(());
         }
-        let held = load_arrays(
-            &mut self.client,
-            &capture_scope(&self.configured_tables, &self.bare_schema),
-        )?;
+        let held = load_arrays(&mut self.client, &schema, &table)?;
         for col in line.new.iter().chain(line.old.iter().flatten()) {
             self.arrays_seen
                 .insert(domain_base(&self.domains, &col.typ).to_string());
@@ -1762,58 +1759,43 @@ fn load_domains(client: &mut Client) -> Result<Domains> {
         .iter()
         .map(|r| (r.get(0), r.get(1)))
         .collect();
-    let arrays = if seeded!("pg-cdc-session-reads-whole-type-catalog", true, false) {
-        load_arrays(client, &(Vec::new(), Vec::new()))?
-    } else {
+    let arrays: Vec<(u32, String, String)> = seeded!(
+        "pg-cdc-session-reads-whole-type-catalog",
+        client
+            .query(
+                "SELECT a.oid, format_type(a.oid, NULL), e.typtype::text \
+                   FROM pg_type a JOIN pg_type e ON e.oid = a.typelem \
+                  WHERE a.typcategory = 'A' AND a.typelem <> 0",
+                &[],
+            )?
+            .iter()
+            .map(|r| (r.get(0), r.get(1), r.get(2)))
+            .collect(),
         Vec::new()
-    };
+    );
     Ok(domain_map(domains, arrays))
 }
 
-/// The `(table, schema)` pairs a run captures, as `routes` reads them; an empty schema is any schema.
-fn capture_scope(
-    configured: &[String],
-    bare_schema: &HashMap<String, String>,
-) -> (Vec<String>, Vec<String>) {
-    configured
-        .iter()
-        .map(|c| match c.split_once('.') {
-            Some((schema, table)) => (table.to_string(), schema.to_string()),
-            None => (c.clone(), bare_schema.get(c).cloned().unwrap_or_default()),
-        })
-        .unzip()
-}
-
-/// The array types the captured tables' columns hold, domains over arrays followed; every array of the catalog when the run captures every table.
+/// The array types the columns of `schema.table` hold, domains over arrays followed.
 fn load_arrays(
     client: &mut Client,
-    scope: &(Vec<String>, Vec<String>),
+    schema: &str,
+    table: &str,
 ) -> Result<Vec<(u32, String, String)>> {
-    let rows = if scope.0.is_empty() {
-        client.query(
-            "SELECT a.oid, format_type(a.oid, NULL), e.typtype::text \
-               FROM pg_type a JOIN pg_type e ON e.oid = a.typelem \
-              WHERE a.typcategory = 'A' AND a.typelem <> 0",
-            &[],
-        )?
-    } else {
-        client.query(
-            "WITH RECURSIVE held(oid) AS ( \
-                SELECT a.atttypid FROM pg_class c \
-                  JOIN pg_namespace n ON n.oid = c.relnamespace \
-                  JOIN pg_attribute a ON a.attrelid = c.oid \
-                 WHERE c.relname = ANY($1) AND a.attnum > 0 AND NOT a.attisdropped \
-                   AND EXISTS (SELECT 1 FROM unnest($1::text[], $2::text[]) AS s(tbl, sch) \
-                                WHERE s.tbl = c.relname AND (s.sch = '' OR s.sch = n.nspname)) \
-                UNION \
-                SELECT d.typbasetype FROM pg_type d JOIN held h ON d.oid = h.oid \
-                 WHERE d.typtype = 'd') \
-             SELECT a.oid, format_type(a.oid, NULL), e.typtype::text \
-               FROM pg_type a JOIN pg_type e ON e.oid = a.typelem \
-              WHERE a.oid IN (SELECT oid FROM held) AND a.typcategory = 'A' AND a.typelem <> 0",
-            &[&scope.0, &scope.1],
-        )?
-    };
+    let rows = client.query(
+        "WITH RECURSIVE held(oid) AS ( \
+            SELECT a.atttypid FROM pg_class c \
+              JOIN pg_namespace n ON n.oid = c.relnamespace \
+              JOIN pg_attribute a ON a.attrelid = c.oid \
+             WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped \
+            UNION \
+            SELECT d.typbasetype FROM pg_type d JOIN held h ON d.oid = h.oid \
+             WHERE d.typtype = 'd') \
+         SELECT a.oid, format_type(a.oid, NULL), e.typtype::text \
+           FROM pg_type a JOIN pg_type e ON e.oid = a.typelem \
+          WHERE a.oid IN (SELECT oid FROM held) AND a.typcategory = 'A' AND a.typelem <> 0",
+        &[&schema, &table],
+    )?;
     Ok(rows
         .iter()
         .map(|r| (r.get(0), r.get(1), r.get(2)))
@@ -2788,29 +2770,6 @@ mod tests {
             !array_is_server_text(900_003, "e"),
             "an enum array stays a list"
         );
-    }
-
-    /// The tables the array read names are the ones `routes` captures: a qualified name its schema, a resolved bare name its resolved schema, an unresolved bare name any schema.
-    #[test]
-    fn the_array_read_scope_is_the_set_routes_captures() {
-        let configured: Vec<String> = ["orders", "app.items", "ghost"].map(String::from).to_vec();
-        let bare: HashMap<String, String> = [("orders".to_string(), "tenant".to_string())].into();
-        let (tables, schemas) = capture_scope(&configured, &bare);
-        let in_scope = |schema: &str, table: &str| {
-            tables
-                .iter()
-                .zip(&schemas)
-                .any(|(t, s)| t == table && (s.is_empty() || s == schema))
-        };
-        for schema in ["tenant", "app", "public", "other"] {
-            for table in ["orders", "items", "ghost", "orders_archive", "Orders"] {
-                assert_eq!(
-                    in_scope(schema, table),
-                    routes(&configured, &bare, schema, table),
-                    "{schema}.{table}"
-                );
-            }
-        }
     }
 
     /// The map holds each domain at its base label, each server-text array at `text`, and nothing for a mapped array.
@@ -4070,102 +4029,104 @@ mod tests {
         );
     }
 
-    /// Live: arrays met after the open, a column added mid-run included, decode as the whole-catalog map decodes them.
+    /// Live: arrays met after the open, a column added mid-run included, decode as the whole-catalog map decodes them, for a named table and for every table.
     #[test]
     #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
     fn live_arrays_met_after_open_decode_as_the_whole_catalog_map_does() {
+        arrays_met_after_open_match_the_whole_map(&["public.pgd_arr".to_string()], "named");
+        arrays_met_after_open_match_the_whole_map(&[], "every");
+    }
+
+    /// One scratch database, one stream over `configured`, every array cell compared with the whole-catalog map's decoding.
+    fn arrays_met_after_open_match_the_whole_map(configured: &[String], tag: &str) {
         let mut admin = Client::connect(CONN, NoTls).unwrap();
-        let id = std::process::id();
-        let slot = format!("rivet_arr_lazy_{id}");
-        let table = format!("pgd_arr_{id}");
-        let (mood, nets) = (format!("pgd_mood_{id}"), format!("pgd_nets_{id}"));
-        let cleanup = |c: &mut Client| {
-            c.execute(
-                "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1",
-                &[&slot],
-            )
-            .unwrap();
-            c.batch_execute(&format!(
-                "DROP TABLE IF EXISTS {table}; DROP DOMAIN IF EXISTS {nets}; DROP TYPE IF EXISTS {mood}"
-            ))
-            .unwrap();
-        };
-        cleanup(&mut admin);
+        let db = format!("rivet_pgd_arr_{tag}_{}", std::process::id());
+        let slot = format!("{db}_slot");
         admin
-            .batch_execute(&format!(
-                "CREATE TYPE {mood} AS ENUM ('a', 'b'); CREATE DOMAIN {nets} AS inet[]; \
-                 CREATE TABLE {table} (id INT PRIMARY KEY, ip inet[], n int[], m {mood}[], d {nets}, t text[], mac macaddr[], p point[])"
-            ))
+            .batch_execute(&format!("DROP DATABASE IF EXISTS {db}"))
             .unwrap();
+        admin
+            .batch_execute(&format!("CREATE DATABASE {db}"))
+            .unwrap();
+        let conn = format!("{}/{db}", CONN.rsplit_once('/').unwrap().0);
+        let mut c = Client::connect(&conn, NoTls).unwrap();
+        c.batch_execute(
+            "CREATE TYPE pgd_mood AS ENUM ('a', 'b'); CREATE DOMAIN pgd_nets AS inet[]; \
+             CREATE TABLE public.pgd_arr (id INT PRIMARY KEY, ip inet[], n int[], m pgd_mood[], d pgd_nets, t text[], mac macaddr[], p point[])",
+        )
+        .unwrap();
         let mut stream = PgChangeStream::open(
-            CONN,
+            &conn,
             &slot,
             PriorRun::default(),
             None,
             crate::source::cdc::PeekBound::Sized(10_000),
             DrainMode::Continuous,
-            std::slice::from_ref(&table),
+            configured,
             None,
             None,
             None,
         )
         .unwrap();
-        admin
-            .batch_execute(&format!(
-                "INSERT INTO {table} VALUES (1, '{{10.0.0.1/32,::1}}', '{{1,2}}', '{{a,b}}', '{{192.168.0.0/16}}', '{{x,\"y z\"}}', '{{08:00:2b:01:02:03}}', '{{\"(1,2)\"}}'); \
-                 ALTER TABLE {table} ADD COLUMN late cidr[]; \
-                 INSERT INTO {table} (id, ip, late) VALUES (2, '{{10.0.0.2}}', '{{10.1.0.0/16}}')"
-            ))
-            .unwrap();
+        c.batch_execute(
+            "INSERT INTO pgd_arr VALUES (1, '{10.0.0.1/32,::1}', '{1,2}', '{a,b}', '{192.168.0.0/16}', '{x,\"y z\"}', '{08:00:2b:01:02:03}', '{\"(1,2)\"}'); \
+             ALTER TABLE pgd_arr ADD COLUMN late cidr[]; \
+             INSERT INTO pgd_arr (id, ip, late) VALUES (2, '{10.0.0.2}', '{10.1.0.0/16}')",
+        )
+        .unwrap();
         let mut got = Vec::new();
         while let Some(ev) = stream.next_change() {
             let ev = ev.unwrap();
-            if ev.table == table {
+            if ev.table == "pgd_arr" {
                 got.push((ev.image_names.clone(), ev.after.clone()));
             }
         }
-        let rows = admin
+        let rows = c
             .query(
                 "SELECT lsn::text, data FROM pg_logical_slot_peek_changes($1, NULL, NULL)",
                 &[&slot],
             )
             .unwrap();
-        let mut probe = Client::connect(CONN, NoTls).unwrap();
         let whole = domain_map(
-            probe
-                .query(
-                    "SELECT format_type(oid, NULL), format_type(typbasetype, NULL) FROM pg_type WHERE typtype = 'd'",
-                    &[],
-                )
-                .unwrap()
-                .iter()
-                .map(|r| (r.get(0), r.get(1))),
-            probe
-                .query(
-                    "SELECT a.oid, format_type(a.oid, NULL), e.typtype::text FROM pg_type a \
-                     JOIN pg_type e ON e.oid = a.typelem WHERE a.typcategory = 'A' AND a.typelem <> 0",
-                    &[],
-                )
-                .unwrap()
-                .iter()
-                .map(|r| (r.get(0), r.get(1), r.get(2))),
+            c.query(
+                "SELECT format_type(oid, NULL), format_type(typbasetype, NULL) FROM pg_type WHERE typtype = 'd'",
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| (r.get(0), r.get(1))),
+            c.query(
+                "SELECT a.oid, format_type(a.oid, NULL), e.typtype::text FROM pg_type a \
+                 JOIN pg_type e ON e.oid = a.typelem WHERE a.typcategory = 'A' AND a.typelem <> 0",
+                &[],
+            )
+            .unwrap()
+            .iter()
+            .map(|r| (r.get(0), r.get(1), r.get(2))),
         );
         let mut want = Vec::new();
         for r in &rows {
             let (lsn, data): (String, String) = (r.get(0), r.get(1));
             if let Some(ev) = parse_test_decoding(&lsn, &data, &whole).unwrap()
-                && ev.table == table
+                && ev.table == "pgd_arr"
             {
                 want.push((ev.image_names.clone(), ev.after.clone()));
             }
         }
-        cleanup(&mut admin);
-        assert_eq!(got.len(), 2, "both inserts are delivered");
-        assert_eq!(got, want);
+        drop(stream);
+        drop(c);
+        admin
+            .execute("SELECT pg_drop_replication_slot($1)", &[&slot])
+            .ok();
+        admin
+            .batch_execute(&format!("DROP DATABASE IF EXISTS {db}"))
+            .unwrap();
+        assert_eq!(got.len(), 2, "{tag}: both inserts are delivered");
+        assert_eq!(got, want, "{tag}");
         assert_eq!(
             got[1].1.as_ref().and_then(|a| a.last()),
             Some(&RivetValue::Bytes(b"{10.1.0.0/16}".to_vec())),
-            "the column added mid-run carries the server's text: {got:?}"
+            "{tag}: the column added mid-run carries the server's text: {got:?}"
         );
     }
 
