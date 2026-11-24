@@ -1172,6 +1172,13 @@ def _meta_leg(ora, files: list[str], engine: str, snapshot: bool, fmt: str = "pa
     return f"SELECT *, {', '.join(add)} FROM {rel}"
 
 
+def keyless_finding(ora, rel: str, key: list[str]) -> list[str]:
+    """A FAIL finding when the delivered stream `rel` holds no column of the source's key (its rows cannot be folded per key), else nothing."""
+    have = {c for c, _ in _columns(ora, rel)}
+    lost = [k for k in key if k not in have]
+    return [f"KEY: the delivered change stream holds no column {lost} of the source's key {key}: its rows cannot be told apart"] if lost else []
+
+
 def _image(rel: str) -> str:
     """`rel` with every column as text: the form a source image is kept in."""
     return f"(SELECT CAST(COLUMNS(*) AS VARCHAR) FROM {rel})"
@@ -1534,6 +1541,8 @@ def grade(spec: dict) -> dict:
             extra += position_findings(ora, spec, "ev_new" if fresh else None, pos_order(engine), partial)
             if legs:
                 ora.db.sql("CREATE OR REPLACE TEMP TABLE ev AS " + " UNION ALL BY NAME ".join(f"({x})" for x in legs))
+                if keyless := keyless_finding(ora, "ev", key):
+                    return {"failures": keyless, "notes": notes, "facts": {}, "key": key}
                 ora.db.sql(
                     "CREATE OR REPLACE TEMP TABLE dst AS SELECT * EXCLUDE (__op, __pos, __seq, __ord, __rn) FROM "
                     f"(SELECT *, row_number() OVER (PARTITION BY {kl} ORDER BY __ord DESC, __seq DESC) AS __rn FROM ev) "
@@ -2381,6 +2390,7 @@ def _self_test() -> None:
     _zone_less_self_test()
     _absent_table_self_test()
     _folded_duplicate_self_test()
+    _keyless_stream_self_test()
     _mssql_query_projection_self_test()
     print("rig_oracle self-test ok")
 
@@ -2518,6 +2528,35 @@ def _folded_duplicate_self_test() -> None:
         f"a key delivered twice in one run is a finding naming the key and the manifest: {twice['failures']}"
     reload = graded_run([[[1, 2]], [[2, 3]]])
     assert not reload["failures"], f"a key an earlier run delivered and a later run delivers again is an update, not a duplicate: {reload['failures']}"
+
+
+def _keyless_stream_self_test() -> None:
+    """A CDC stream whose delivered rows hold no column of the source's key is a FAIL finding naming it, never an oracle crash."""
+    import tempfile
+    from unittest import mock
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from . import duck
+
+    Session = _fake_session()
+
+    def graded(cols: dict) -> dict:
+        with tempfile.TemporaryDirectory() as d:
+            pq.write_table(pa.table({**cols, "__op": ["insert"], "__pos": ['{"commit_scn":"7"}']}), os.path.join(d, "part.parquet"))
+            doc = {"status": "success", "run_id": "run0", "finished_at": "2026-11-10T00:00:00Z", "row_count": 1, "parts": [{"path": "part.parquet"}]}
+            with open(os.path.join(d, "manifest-0.json"), "w") as fh:
+                json.dump(doc, fh)
+            spec = {"engine": "oracle", "mode": "cdc", "url": "oracle://x/y", "table": "T", "out_dir": d, "snapshot_dir": os.path.join(d, "snapshot"),
+                    "manifests": ["manifest-0.json"], "new_manifests": ["manifest-0.json"], "snapshot_manifests": [], "new_snapshot_manifests": []}
+            with mock.patch.object(duck, "Oracle", Session), mock.patch(f"{__name__}._source", _fake_source(1)):
+                return grade(spec)
+
+    keyed = graded({"id": pa.array([1], pa.int64())})
+    assert not any(x.startswith("KEY:") for x in keyed["failures"]), f"a stream holding the key column is not a key finding: {keyed['failures']}"
+    lost = graded({"name": pa.array(["a"])})
+    assert any(x.startswith("KEY:") and "id" in x for x in lost["failures"]), f"a stream without the key column is a finding naming it: {lost['failures']}"
 
 
 def _zone_less_self_test() -> None:
