@@ -33,7 +33,7 @@ filter = 'test(/^live_cdc_mssql::/) or test(/^live_cdc_harm::a_mssql/)'
 slow-timeout = { period = "120s", terminate-after = 4 }
 
 [test-groups]
-oracle = { max-threads = 4 }
+oracle = { max-threads = 3 }
 toxiproxy = { max-threads = 1 }
 mssql_cdc = { max-threads = 1 }
 oracle_cdc = { max-threads = 1 }
@@ -43,9 +43,13 @@ warehouse_cells = { max-threads = 1 }
 heavy_reader = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'test(/^live_oracle::every_seeded_oracle_table_exports_every_row$/) or test(/^live_oracle::wide_clob_rows_stay_within_the_memory_budget$/) or test(/^live_pool_toxiproxy::pool_split_/)'
+filter = 'test(/^live_oracle::every_seeded_oracle_table_exports_every_row$/) or test(/^live_oracle::wide_clob_rows_stay_within_the_memory_budget$/)'
 test-group = 'heavy_reader'
 slow-timeout = { period = "300s", terminate-after = 4 }
+
+[[profile.default.overrides]]
+filter = 'test(/^live_pool_toxiproxy::pool_split_/)'
+test-group = 'heavy_reader'
 
 [[profile.default.overrides]]
 filter = 'binary(oracle_fixture_matrix)'
