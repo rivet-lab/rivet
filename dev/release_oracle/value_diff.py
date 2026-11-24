@@ -360,8 +360,12 @@ def mysql_describe(url: str, sql: str) -> list[tuple[str, int, int]]:
         return [(d[0], d[1], d[5]) for d in cur.description]
 
 
-def oracle_result(url: str, sql: str) -> tuple[list[str], list[tuple]]:
-    """(column names, rows) of `sql` read by python-oracledb, as `oracle_rows` reads them — the names survive an empty result. A LOB arrives inline as str/bytes (no round trip per LOB); the server's own LOB length tells an empty LOB from a NULL one."""
+ORACLE_LOB_BATCH_ROWS = 64
+
+
+@contextlib.contextmanager
+def oracle_batches(url: str, sql: str):
+    """`(column names, batches)` of `sql` read by python-oracledb: each batch a list of at most one fetch array of rows, so a wide LOB table is never held whole. A LOB arrives inline as str/bytes (no round trip per LOB); the server's own LOB length tells an empty LOB from a NULL one."""
     import oracledb
 
     inline = {
@@ -382,15 +386,27 @@ def oracle_result(url: str, sql: str) -> tuple[list[str], list[tuple]]:
             lens = ", ".join(f'DBMS_LOB.GETLENGTH(q."{names[i]}")' for i in lobs)
             sql = f"SELECT q.*, {lens} FROM ({sql}) q"
             cur.outputtypehandler = as_inline
-        cur.execute(sql)
-        out = []
-        for row in cur.fetchall():
-            row = list(row)
-            for k, (i, blob) in enumerate(lobs.items()):
-                if row[i] is None and row[len(names) + k] == 0:
-                    row[i] = b"" if blob else ""
-            out.append(tuple(row[: len(names)]))
-        return names, out
+            cur.arraysize = ORACLE_LOB_BATCH_ROWS
+
+        def batches():
+            cur.execute(sql)
+            while rows := cur.fetchmany():
+                out = []
+                for row in rows:
+                    row = list(row)
+                    for k, (i, blob) in enumerate(lobs.items()):
+                        if row[i] is None and row[len(names) + k] == 0:
+                            row[i] = b"" if blob else ""
+                    out.append(tuple(row[: len(names)]))
+                yield out
+
+        yield names, batches()
+
+
+def oracle_result(url: str, sql: str) -> tuple[list[str], list[tuple]]:
+    """(column names, rows) of `sql` read by python-oracledb, as `oracle_rows` reads them — the names survive an empty result."""
+    with oracle_batches(url, sql) as (names, batches):
+        return names, [row for batch in batches for row in batch]
 
 
 def oracle_table_select(url: str, table: str, renders: dict | None = None) -> str:
@@ -721,6 +737,41 @@ def _self_test() -> None:
             pass
         else:
             raise AssertionError("an undeclared column holding a non-calendar date is an oracle error")
+    import oracledb
+
+    class Cursor:
+        """A cursor of 200 rows with a CLOB column whose fetchall is forbidden."""
+
+        description = [("ID", oracledb.DB_TYPE_NUMBER), ("V", oracledb.DB_TYPE_CLOB)]
+        arraysize = 5000
+        left = 200
+
+        def parse(self, sql):
+            pass
+
+        def execute(self, sql):
+            pass
+
+        def fetchall(self):
+            raise AssertionError("fetchall holds the whole table")
+
+        def fetchmany(self):
+            n, self.left = min(self.arraysize, self.left), self.left - min(self.arraysize, self.left)
+            return [(i, None if i == 0 else "x", 0 if i == 0 else 1) for i in range(n)]
+
+    @contextlib.contextmanager
+    def fake_cursor(url):
+        yield Cursor()
+
+    real_cursor, globals()["_oracle_cursor"] = _oracle_cursor, fake_cursor
+    try:
+        with oracle_batches("", "SELECT id, v FROM t") as (names, batches):
+            sizes = [len(b) for b in batches]
+        names, rows = oracle_result("", "SELECT id, v FROM t")
+    finally:
+        globals()["_oracle_cursor"] = real_cursor
+    assert names == ["ID", "V"] and len(rows) == 200 and rows[0] == (0, ""), "an empty CLOB is '', not NULL"
+    assert sizes == [ORACLE_LOB_BATCH_ROWS] * 3 + [8], f"a LOB table is read {ORACLE_LOB_BATCH_ROWS} rows at a time: {sizes}"
     print("value_diff self-test ok")
 
 
