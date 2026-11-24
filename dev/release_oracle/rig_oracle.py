@@ -716,6 +716,19 @@ class Unreachable(Exception):
     """The source relation cannot be read for a stated reason: a named SKIP, never a pass."""
 
 
+class KeyAbsent(Exception):
+    """A key column the source holds is no column of what the run delivered: a finding about the delivery, never an oracle crash."""
+
+
+def require_key(ora, rel: str, key: list[str], what: str) -> None:
+    """Raise `KeyAbsent` when a `key` column is missing from `rel`, before any fold or join over the key reads it."""
+    have = {c.lower(): c for c, _ in _columns(ora, rel)}
+    gone = [k for k in key if k.lower() not in have]
+    if gone:
+        shown = ", ".join(c for c in have.values() if not c.startswith("__"))
+        raise KeyAbsent(f"KEY: key column(s) {', '.join(f'`{k}`' for k in gone)} of the source are absent from {what} (columns delivered: {shown or 'none'}): its rows cannot be folded per key")
+
+
 #: Engine messages that say the relation is not there (yet), the only source error a CDC stream may precede.
 ABSENT = ("does not exist", "not found", "invalid object name", "doesn't exist", "cross-database references are not implemented")
 
@@ -1547,6 +1560,7 @@ def grade(spec: dict) -> dict:
             extra += position_findings(ora, spec, "ev_new" if fresh else None, pos_order(engine), partial)
             if legs:
                 ora.db.sql("CREATE OR REPLACE TEMP TABLE ev AS " + " UNION ALL BY NAME ".join(f"({x})" for x in legs))
+                require_key(ora, "ev", key, "the change stream")
                 ora.db.sql(
                     "CREATE OR REPLACE TEMP TABLE dst AS SELECT * EXCLUDE (__op, __pos, __seq, __ord, __rn) FROM "
                     f"(SELECT *, row_number() OVER (PARTITION BY {kl} ORDER BY __ord DESC, __seq DESC) AS __rn FROM ev) "
@@ -1598,6 +1612,8 @@ def grade(spec: dict) -> dict:
             ]
             if legs:
                 ora.db.sql("CREATE OR REPLACE TEMP TABLE got AS " + " UNION ALL BY NAME ".join(f"({x})" for x in legs))
+                if key and (cumulative or spec.get("replay")):
+                    require_key(ora, "got", key, "the delivered parts")
                 if cumulative and key:
                     kl = ", ".join(_qi(k) for k in key)
                     extra += duplicate_deliveries(ora, "got", key, graded)
@@ -1897,6 +1913,8 @@ def grade_load(spec: dict) -> dict:
                 ora.db.sql(f"CREATE OR REPLACE TEMP TABLE wh_all AS SELECT * FROM bigquery_query('bq', {_lit(sql)})")
         have = [c for c, _ in _columns(ora, "wh_all")]
         keep = ", ".join(_qi(c) for c in have if not c.startswith(WAREHOUSE_META)) or "1"
+        if key and (("__pos" in have or "_rivet_src" in have) or (spec.get("delta") and not cdc)):
+            require_key(ora, "wh_all", key, "the warehouse table")
         if ("__pos" in have or "_rivet_src" in have) and key:
             # A change log (or base ∪ buffer): its live state is the latest image per key, deletes removed.
             kl = ", ".join(_qi(k) for k in key)
@@ -2406,6 +2424,7 @@ def _self_test() -> None:
     _zone_less_self_test()
     _absent_table_self_test()
     _folded_duplicate_self_test()
+    _key_absent_self_test()
     _mssql_query_projection_self_test()
     print("rig_oracle self-test ok")
 
@@ -2543,6 +2562,63 @@ def _folded_duplicate_self_test() -> None:
         f"a key delivered twice in one run is a finding naming the key and the manifest: {twice['failures']}"
     reload = graded_run([[[1, 2]], [[2, 3]]])
     assert not reload["failures"], f"a key an earlier run delivered and a later run delivers again is an update, not a duplicate: {reload['failures']}"
+
+
+def _key_absent_self_test() -> None:
+    """A CDC stream and a cumulative export that deliver no column of the source's key are a finding naming the key, never an oracle crash; a stream that carries it is graded."""
+    import tempfile
+    from unittest import mock
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from . import duck
+
+    Session = _fake_session()
+
+    def delivered(root: str, sub: str, cols: dict, cdc: bool) -> tuple[str, list[str]]:
+        d = os.path.join(root, sub)
+        os.makedirs(d)
+        pq.write_table(pa.table(cols), os.path.join(d, "p.parquet"))
+        name = "manifest-0.json"
+        with open(os.path.join(d, name), "w") as fh:
+            json.dump({"status": "success", "run_id": "r0", "finished_at": "2026-11-24T00:00:00Z", "row_count": 3, "parts": [{"path": "p.parquet"}],
+                       "source": {"extraction": {"cursor_column": "id", "cursor_high": "3"}}}, fh)
+        return d, [name]
+
+    def graded(cols: dict, cdc: bool) -> dict:
+        with tempfile.TemporaryDirectory() as root:
+            out, names = delivered(root, "out", cols, cdc)
+            snap, snames = delivered(root, "snapshot", cols, cdc) if cdc else (os.path.join(root, "snapshot"), [])
+            spec = {"engine": "postgres", "mode": "cdc" if cdc else "batch", "cumulative": not cdc, "url": "postgresql://x/y", "table": "public.t", "key": [],
+                    "out_dir": out, "snapshot_dir": snap, "manifests": [] if cdc else names, "new_manifests": [] if cdc else names,
+                    "snapshot_manifests": snames, "new_snapshot_manifests": snames, "snapshot": cdc}
+            with mock.patch.object(duck, "Oracle", Session), mock.patch(f"{__name__}._source", _fake_source(3)):
+                return verdict_of(grade, spec)
+
+    for cdc in (True, False):
+        said = graded({"name": ["a", "b", "c"]}, cdc).get("failures") or []
+        assert len(said) == 1 and said[0].startswith("KEY: key column(s) `id`") and "columns delivered: name" in said[0], \
+            f"{'cdc' if cdc else 'batch'}: a delivery without the source's key column is one finding naming the column: {said}"
+    Session.loads, Session.types = [("public_t", "db.public_t", "success", 3, "2026-11-24T00:00:00Z")], []
+
+    def warehouse(sql: str, *_a, **_k) -> str:
+        """A ClickHouse answer: a catalog of `name`, `__pos` or the change log itself, with no `id` column."""
+        return "(SELECT 'name' AS name, 'String' AS type UNION ALL SELECT '__pos', 'String')" if "system.columns" in sql else "(SELECT 'a' AS name, 'p1' AS __pos)"
+
+    spec = {"engine": "postgres", "mode": "batch", "state": "", "url": "postgresql://x/y", "export": "t", "table": "public.t", "load": {"target": "clickhouse", "database": "db"}}
+    with mock.patch.object(duck, "Oracle", Session), mock.patch(f"{__name__}._source", _fake_source(3)), mock.patch(f"{__name__}._clickhouse", lambda _l, _p, sql: warehouse(sql)):
+        said = verdict_of(grade_load, spec).get("failures") or []
+    assert len(said) == 1 and said[0].startswith("KEY: key column(s) `id`") and "the warehouse table" in said[0], f"a change log without the key column is one finding: {said}"
+    kept = graded({"id": pa.array([1, 2, 3], pa.int64()), "name": ["a", "b", "c"]}, True)
+    assert not any(x.startswith("KEY:") for x in kept.get("failures", [])), f"a stream that carries the key is graded as before: {kept}"
+    assert verdict_of(lambda _s: (_ for _ in ()).throw(Unreachable("x")), {}) == {"skip": "x"}, "an unreachable source stays a named skip"
+    try:
+        verdict_of(lambda _s: 1 / 0, {})
+    except ZeroDivisionError:
+        pass
+    else:
+        raise AssertionError("a real crash stays a crash, never a verdict")
 
 
 def _zone_less_self_test() -> None:
@@ -2937,23 +3013,31 @@ def _ns_self_test() -> None:
     assert ours(full) == [("dur", 0, 0, "45296.123456789"), ("ts", "1700000000.123456789")], ours(full)
 
 
+def verdict_of(run, spec: dict) -> dict:
+    """The JSON verdict of `run(spec)`: a named skip for an unreachable source, a finding for an absent key column, a transient read re-run."""
+    for attempt in range(3):
+        try:
+            verdict = run(spec)
+            break
+        except Unreachable as e:
+            verdict = {"skip": str(e)}
+            break
+        except KeyAbsent as e:
+            verdict = {"failures": [str(e)], "notes": [], "facts": {}, "key": []}
+            break
+        except Exception as e:  # noqa: BLE001 — every read is idempotent, so a transient one is re-run
+            if attempt == 2 or not transient(e):
+                raise
+            time.sleep(2 * (attempt + 1))
+    if verdict.get("failures") and spec.get("known_defect"):
+        verdict["known_defect"] = known_defect_covers(spec["known_defect"], verdict["failures"])
+    return verdict
+
+
 if __name__ == "__main__":
     if sys.argv[1:] in (["grade"], ["grade-load"], ["grade-stdout"], ["image"], ["pairs"]):
         spec = json.load(sys.stdin)
         run = {"grade": grade, "grade-load": grade_load, "grade-stdout": grade_stdout, "image": take_image, "pairs": pairs}[sys.argv[1]]
-        for attempt in range(3):
-            try:
-                verdict = run(spec)
-                break
-            except Unreachable as e:
-                verdict = {"skip": str(e)}
-                break
-            except Exception as e:  # noqa: BLE001 — every read is idempotent, so a transient one is re-run
-                if attempt == 2 or not transient(e):
-                    raise
-                time.sleep(2 * (attempt + 1))
-        if verdict.get("failures") and spec.get("known_defect"):
-            verdict["known_defect"] = known_defect_covers(spec["known_defect"], verdict["failures"])
-        sys.stdout.write(json.dumps(verdict, default=str))
+        sys.stdout.write(json.dumps(verdict_of(run, spec), default=str))
     else:
         _self_test()
