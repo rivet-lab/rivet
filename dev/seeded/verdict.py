@@ -42,23 +42,20 @@ def shard_line(shard: Path, sha: str) -> tuple[dict | None, str]:
     return last, ""
 
 
-def judge(root: Path, sha: str, shards: int, expected: Sequence[str]) -> tuple[list[str], list[str]]:
-    """(problems, the seeds the shards ran): every shard green and clean on `sha`, every expected seed in exactly one."""
+def judge(root: Path, sha: str, shards: int, expected: Sequence[str], dealt: Sequence[dict] = ()) -> tuple[list[str], list[str]]:
+    """(problems, the seeds the shards ran): every shard green and clean on `sha`, every expected seed in exactly one; the seeds `dealt` to a shard that gave no record are one line, any other unplaced seed its own."""
     problems: list[str] = []
     ran: list[dict] = []
+    unread: set[str] = set()
     for i in range(shards):
         rec, why = shard_line(root / f"recall-shard-{i}", sha)
         if rec is None:
-            problems.append(f"shard {i}: {why}")
+            mine = {x for d in dealt if d["index"] == i for x in d["seeds"].split(",") if x in expected}
+            unread |= mine
+            problems.append(f"shard {i}: {why}" + (f"; its {len(mine)} dealt seed(s) are not read" if mine else ""))
         else:
             ran.append({"index": i, "seeds": ",".join(rec["seeds"])})
-    gaps = coverage_problems(ran, expected)
-    if len(ran) < shards:
-        unread = [g for g in gaps if g.endswith(" is in no shard")]
-        gaps = [g for g in gaps if g not in unread]
-        if unread:
-            problems.append(f"{len(unread)} expected seed(s) sit in the {shards - len(ran)} shard(s) above that gave no record")
-    problems += gaps
+    problems += [g for g in coverage_problems(ran, expected) if g not in {f"seed {x} is in no shard" for x in unread}]
     return problems, sorted(s for sh in ran for s in sh["seeds"].split(",") if s)
 
 
@@ -71,9 +68,9 @@ def not_graded_here(root: Path, sha: str, shards: int) -> int:
     return total
 
 
-def verdict(root: Path, sha: str, shards: int, expected: Collection[str], ceiling: int, record: Path) -> list[str]:
+def verdict(root: Path, sha: str, shards: int, expected: Collection[str], ceiling: int, record: Path, dealt: Sequence[dict] = ()) -> list[str]:
     """Judge the shards under `root`, append the verdict line to `record`, return the problems."""
-    problems, ran = judge(root, sha, shards, sorted(expected))
+    problems, ran = judge(root, sha, shards, sorted(expected), dealt)
     here = not_graded_here(root, sha, shards)
     if here > ceiling:
         problems.append(f"{here} row(s) NOT-GRADED-HERE across the shards, over the gate matrix's ceiling of {ceiling}")
@@ -108,21 +105,25 @@ def self_test() -> int:
         ({"line1": {"dirty": True}}, "red or ran on a dirty tree"),
         ({"line1": {"sha": "b" * 40}}, "no record line"),
         ({"line1": {"seeds": ["s3"]}}, "seed s4 is in no shard"),
-        ({"line1": {"green": False}}, "2 expected seed(s) sit in the 1 shard(s) above"),
+        ({"line1": {"green": False}}, "its 2 dealt seed(s) are not read"),
+        ({"drop": True, "expected": ["s1", "s2", "s3", "s4", "s5"]}, "seed s5 is in no shard"),
         ({"line1": {"seeds": ["s3", "s4", "s1"]}}, "seed s1 is in 2 shards"),
         ({"line1": {"seeds": ["s3", "s4", "s9"]}}, "seed s9 is in a shard but the ledger does not place it"),
         ({"line0": {"not_graded_here": 4}, "line1": {"not_graded_here": 4}}, "NOT-GRADED-HERE across the shards"),
     ]
+    dealt = [{"index": 0, "seeds": "s1,s2"}, {"index": 1, "seeds": "s3,s4"}]
     for i, (kw, want) in enumerate(cases):
+        exp = kw.pop("expected", expected)
         with tempfile.TemporaryDirectory() as td:
             root, record = Path(td) / "shards", Path(td) / "rec.jsonl"
             world(root, **kw)
-            got = verdict(root, sha, 2, expected, 7, record)
+            got = verdict(root, sha, 2, exp, 7, record, dealt)
             assert (not got) if want is None else any(want in p for p in got), (i, kw, got)
-            assert not (any(p.startswith("shard ") for p in got) and any("is in no shard" in p for p in got)), (i, "a not-green shard's seeds are one line, not one per seed", got)
+            assert not (any(p.startswith("shard 1: ") for p in got) and {"seed s3 is in no shard", "seed s4 is in no shard"} & set(got)), (
+                i, "a not-green shard's dealt seeds are one line, not one per seed", got)
             line = json.loads(record.read_text().splitlines()[-1])
-            assert line["green"] is (want is None) and line["sha"] == sha and line["seeds"] == expected, (i, line)
-            ok = run_record.refusal(sha, record, expected)
+            assert line["green"] is (want is None) and line["sha"] == sha and line["seeds"] == exp, (i, line)
+            ok = run_record.refusal(sha, record, exp)
             assert (ok is None) if want is None else (ok is not None), (i, "the tag rule must read the verdict", ok)
     flow = WORKFLOW.read_text()
     for name in SHARD_FILES:
@@ -139,16 +140,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--sha", default="")
     ap.add_argument("--shards", type=int, default=0)
     ap.add_argument("--expected", default="")
+    ap.add_argument("--plan", default="", help="the shards matrix JSON the plan job dealt")
     ap.add_argument("--record", default="out/recall-runs.jsonl")
     ap.add_argument("--self-test", action="store_true")
     ns = ap.parse_args(argv)
     if ns.self_test:
         return self_test()
     expected = [s for s in ns.expected.split(",") if s]
-    if not (ns.sha and ns.shards and expected):
-        print("verdict: --sha, --shards and --expected are all required", file=sys.stderr)
+    if not (ns.sha and ns.shards and expected and ns.plan):
+        print("verdict: --sha, --shards, --expected and --plan are all required", file=sys.stderr)
         return 2
-    problems = verdict(Path(ns.dir), ns.sha, ns.shards, expected, gate_ceiling("not_graded_here_ceiling"), Path(ns.record))
+    try:
+        dealt = json.loads(ns.plan)
+        assert isinstance(dealt, list) and all(isinstance(d, dict) and isinstance(d.get("index"), int) and isinstance(d.get("seeds"), str) for d in dealt)
+    except (ValueError, AssertionError):
+        print("verdict: --plan is not the shards matrix ([{index, seeds, ...}])", file=sys.stderr)
+        return 2
+    problems = verdict(Path(ns.dir), ns.sha, ns.shards, expected, gate_ceiling("not_graded_here_ceiling"), Path(ns.record), dealt)
     print(f"recall verdict for {ns.sha[:12]}: {len(expected)} seed(s) over {ns.shards} shard(s): " + ("GREEN" if not problems else "RED"))
     for p in problems:
         print(f"  {p}")

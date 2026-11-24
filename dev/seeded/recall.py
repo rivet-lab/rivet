@@ -464,13 +464,14 @@ class Cargo:
             for c in owed:
                 why.pop(c.removeprefix(LIB), None)
             why.update(second_why)
-        stood = [c for c in cells if out.get(c) == STAND]
-        if stood:
-            second, second_why = again(stood, ".stand", {})
-            out.update(second)
-            for c in stood:
-                why.pop(c.removeprefix(LIB), None)
-            why.update(second_why)
+        for leg, tag, env in ((owed, ".stand.again", self.again[1] if self.again else {}), ([c for c in cells if c not in owed], ".stand", {})):
+            stood = [c for c in leg if out.get(c) == STAND]
+            if stood:
+                second, second_why = again(stood, tag, env)
+                out.update(second)
+                for c in stood:
+                    why.pop(c.removeprefix(LIB), None)
+                why.update(second_why)
         return out, why
 
 
@@ -1187,6 +1188,29 @@ def self_test() -> int:
             globals()["sh"] = real_sh
         assert got == {"t1": want} and len(runs) == len(answers), (
             "a cell that died on the stand's own panic runs once more, and a second panic stays a stand-down", answers, got, len(runs))
+    real_fail = "        FAIL [   0.2s] (1/1) rivet-cli::live_suite live_a::t1\n  stderr ───\n\n    thread 'live_a::t1' panicked at tests/x.rs:2:2:\n    assertion `left == right` failed\n"
+    gate_var = cargo.again[0]
+    for answers, want, legs in (([real_fail], "FAIL", [False]), (["owed", refused, passed], "PASS", [False, True, True])):
+        seen = iter(answers)
+        legs_seen: list[bool] = []
+
+        def scripted(argv, cwd=None, env=None, timeout=None):
+            """The next scripted nextest answer; `owed` is a self-skip naming the gate's state var."""
+            legs_seen.append(bool((env or {}).get(gate_var)))
+            reply = next(seen, real_fail)
+            if reply == "owed":
+                Path(env["RIVET_SKIP_LOG"]).write_text(f"RIVET-SKIP live_a::t1 — needs {gate_var} (postgres state)\n")
+                reply = passed
+            return subprocess.CompletedProcess(argv, 0, reply)
+
+        globals()["sh"] = scripted
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                got = cargo.run(["t1"], Path(d) / "x.log")
+        finally:
+            globals()["sh"] = real_sh
+        assert got == {"t1": want} and legs_seen == legs, (
+            "a real failure is never rerun, and a stand panic in the gate-state leg reruns under the gate's state", answers, got, legs_seen)
     assert env["RIVET_SELFTEST_CARRIER_BIN"] == str(ROOT / ".gate-baseline/field/rivet"), env["RIVET_SELFTEST_CARRIER_BIN"]
     assert env["RIVET_TEST_STATE_TOXI_URL"] == "postgresql://u:p@127.0.0.1:15433/scratch", env["RIVET_TEST_STATE_TOXI_URL"]
     stale = []

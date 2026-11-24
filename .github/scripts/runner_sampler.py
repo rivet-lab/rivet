@@ -47,15 +47,16 @@ def containers(out: str, top: int = 6) -> str:
     return ",".join(f"{n.removeprefix('rivet-')}:{mib:.0f}" for mib, n in sorted(rows, reverse=True)[:top])
 
 
+ORACLE_EXEC_S = 5
 ORACLE_LIMITS_ARGV = ["docker", "exec", "rivet-oracle-1", "bash", "-c",
-                      "echo \"set pagesize 0 feedback off\nselect resource_name||' '||current_utilization||'/'||max_utilization||'/'||limit_value "
+                      "echo \"set pagesize 0 feedback off\nselect resource_name||' '||current_utilization||'/'||max_utilization||'/'||trim(limit_value) "
                       "from v\\$resource_limit where resource_name in ('processes','sessions');\" | sqlplus -s / as sysdba"]
 
 
 def oracle_limits(out: str) -> str:
     """`processes:current/peak/limit,sessions:...` of the stand Oracle's `v$resource_limit` rows, empty when it cannot be read."""
-    rows = re.findall(r"^(processes|sessions) (\d+/\d+/\w+)\s*$", out, re.M)
-    return ",".join(f"{name}:{figures}" for name, figures in rows)
+    rows = re.findall(r"^(processes|sessions) (\d+/\d+/)\s*(\d+)\s*$", out, re.M)
+    return ",".join(f"{name}:{head}{limit}" for name, head, limit in rows)
 
 
 PS_ARGV = ["ps", "-eww", "-o", "pid=,ppid=,rss=,args="]
@@ -94,10 +95,10 @@ def processes(ps: str, top: int = 4) -> tuple[str, str]:
     return big, ",".join(sorted(set(tests.values()))[:4])
 
 
-def sh(cmd: list[str]) -> str:
-    """The stdout of `cmd`, empty when it cannot run or fails."""
+def sh(cmd: list[str], timeout: float = 30) -> str:
+    """The stdout of `cmd`, empty when it cannot run, fails or outlasts `timeout` seconds."""
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=30).stdout
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
     except (OSError, subprocess.SubprocessError):
         return ""
 
@@ -113,7 +114,7 @@ def sample(started: float, now: float | None = None, read=lambda p: Path(p).read
     big, tests = processes(run(PS_ARGV))
     cols = [time.strftime("%H:%M:%S", time.gmtime(now)), f"{now - started:.0f}", str(used), str(mem.get("MemAvailable", 0) // 1024), str(swap_used),
             read("/proc/loadavg").split()[0], str(free_gb), kills[1] if kills else "-",
-            containers(run(["docker", "stats", "--no-stream", "--format", "{{.Name}} {{.MemUsage}}"])), big, oracle_limits(run(ORACLE_LIMITS_ARGV)), tests]
+            containers(run(["docker", "stats", "--no-stream", "--format", "{{.Name}} {{.MemUsage}}"])), big, oracle_limits(run(ORACLE_LIMITS_ARGV, timeout=ORACLE_EXEC_S)), tests]
     return "\t".join(cols)
 
 
@@ -244,14 +245,26 @@ def self_test() -> None:
     ps = ("10 1 3000000 /usr/bin/mongod --x\n20 1 2048 /t/live_suite-abc --exact live_cdc::a_test --nocapture\n"
           "21 20 1800000 /usr/bin/python3 -m dev.release_oracle.rig_oracle verify\nimport duckdb, json\n22 21 5 bash\n")
     dstats = "rivet-oracle-1 2.4GiB / 15GiB\nrivet-mssql-1 800MiB / 3GiB\nnoise\n"
-    limits = "processes 41/612/1000\nsessions 30/700/1522\nnoise 1/2/3\n"
-    row = sample(100.0, 160.0, read=lambda p: files[p],
-                 run=lambda c: ps if c[0] == "ps" else limits if c[:2] == ["docker", "exec"] else dstats).split("\t")
+    limits = "processes 85/86/200\nsessions 98/99/322\nnoise 1/2/3\n"
+    waited: list[float] = []
+
+    def fake_run(c, timeout=30):
+        """The scripted answer of `c`; the timeout the Oracle exec was given is kept."""
+        if c[:2] == ["docker", "exec"]:
+            waited.append(timeout)
+            return limits
+        return ps if c[0] == "ps" else dstats
+
+    row = sample(100.0, 160.0, read=lambda p: files[p], run=fake_run).split("\t")
     assert row[1:8] == ["60", str(12000000 // 1024), str(4000000 // 1024), str(2900000 // 1024), "7.50", row[6], "2"], row
     assert row[8] == "oracle-1:2458,mssql-1:800", row[8]
     assert row[9] == "mongod@-:2929,rig_oracle@a_test:1757,live_suite-abc@a_test:2,bash@a_test:0" and row[11] == "live_cdc::a_test", row[9:]
-    assert row[10] == "processes:41/612/1000,sessions:30/700/1522", row[10]
+    assert row[10] == "processes:85/86/200,sessions:98/99/322", row[10]
+    assert oracle_limits("processes 97/99/      1000\nsessions 1/2/      UNLIMITED\n") == "processes:97/99/1000", "a padded limit column is read, a word is not a number"
     assert oracle_limits("Error: No such container: rivet-oracle-1") == "", "an absent stand Oracle leaves the column empty"
+    assert waited == [ORACLE_EXEC_S] and ORACLE_EXEC_S <= 5, f"the Oracle exec must be bounded well inside the {INTERVAL_S} s cadence: {waited}"
+    began = time.monotonic()
+    assert sh(["sleep", "5"], timeout=0.3) == "" and time.monotonic() - began < 3, "a hung command must give an empty answer within its timeout"
     assert len(row) == len(HEADER.split("\t")), "a row and its header differ in width"
     me = ps_rows(sh(PS_ARGV)).get(os.getpid())
     assert me and me[0] == os.getppid() and me[1] > 0 and Path(sys.argv[0]).name in me[2], f"the ps argv and the parser disagree on this process: {me}"
@@ -296,7 +309,7 @@ def self_test() -> None:
 
         def fake(started: float, now: float) -> str:
             """A sample of the fake machine."""
-            return sample(started, now, read=lambda p: files[p], run=lambda c: ps if c[0] == "ps" else dstats)
+            return sample(started, now, read=lambda p: files[p], run=lambda c, timeout=30: ps if c[0] == "ps" else dstats)
 
         def stopped() -> bool:
             """True from the seventh sample on."""

@@ -1087,9 +1087,21 @@ def _oracle_restart_self_test() -> None:
     """The ready probe waits for the image's init to finish, and that init raises `processes` before its restart."""
     import subprocess
 
+    import re
+
+    def raised_before_restart(init: str) -> bool:
+        """True when the live (not commented) statements of `init` set processes to 1000 in the spfile before SHUTDOWN IMMEDIATE."""
+        live = re.sub(r"/\*.*?\*/", "", re.sub(r"(?im)^\s*(--|#|rem\b).*$|\s--.*$", "", init), flags=re.S)
+        raised = re.search(r"(?i)alter\s+system\s+set\s+processes\s*=\s*1000\s+scope\s*=\s*spfile\s*;", live)
+        restart = re.search(r"(?i)^\s*shutdown\s+immediate", live, re.M)
+        return bool(raised and restart and raised.start() < restart.start())
+
     init = (ROOT / "dev" / "oracle" / "init" / "02-logminer.sh").read_text()
-    raised, restart = init.find("SET processes = 1000 SCOPE = SPFILE"), init.find("SHUTDOWN IMMEDIATE")
-    assert 0 <= raised < restart, "the Oracle init does not raise processes to 1000 before its restart: a 16-cell connect burst is refused (ORA-12516) at the default 200"
+    assert raised_before_restart(init), "the Oracle init does not raise processes to 1000 before its restart: a 16-cell connect burst is refused (ORA-12516) at the default 200"
+    line = "ALTER SYSTEM SET processes = 1000 SCOPE = SPFILE;\n"
+    for text, want in ((f"{line}SHUTDOWN IMMEDIATE\n", True), (f"-- {line}SHUTDOWN IMMEDIATE\n", False), (f"# {line}SHUTDOWN IMMEDIATE\n", False),
+                       (f"/* {line} */\nSHUTDOWN IMMEDIATE\n", False), (f"SHUTDOWN IMMEDIATE\n{line}", False), ("SHUTDOWN IMMEDIATE\n", False)):
+        assert raised_before_restart(text) is want, f"the processes guard misreads {text!r}"
     with tempfile.TemporaryDirectory() as d:
         for name, body in (("healthcheck.sh", "exit $HC_RC"), ("sqlplus", "echo rivet-ready")):
             (Path(d) / name).write_text(f"#!/bin/sh\n{body}\n")
