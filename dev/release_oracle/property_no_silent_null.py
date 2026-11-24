@@ -312,13 +312,21 @@ def server_geometry(lit: str) -> Spatial:
     raise RuntimeError(f"no MySQL stand rendered the spatial literal {lit}: it cannot be graded")
 
 
-def spatial_verdict(exp: Spatial, target: str, got) -> str:
-    """OK or WRONG for a delivered spatial cell: the lowercase hex of the WKB under no override, the server's own bytes under `binary`."""
+def spatial_verdict(exp: Spatial, target: str, got, csv: bool = False) -> str:
+    """OK or WRONG for a delivered spatial cell: the lowercase hex of the WKB under no override, the server's own bytes under `binary`, `text` and `json`."""
+    if target in ("text", "json"):
+        raw = got.encode("utf-8", "surrogateescape") if isinstance(got, str) else bytes(got) if isinstance(got, (bytes, bytearray, memoryview)) else None
+        return "OK" if raw == bytes(exp) else WRONG
     if target == "binary":
-        raw = got if isinstance(got, (bytes, bytearray, memoryview)) else bytes.fromhex(got) if isinstance(got, str) and _HEX_PAIRS.fullmatch(got) else None
+        raw = got if isinstance(got, (bytes, bytearray, memoryview)) else bytes.fromhex(got) if csv and isinstance(got, str) and _HEX_PAIRS.fullmatch(got) else None
         return "OK" if raw is not None and bytes(raw) == bytes(exp) else WRONG
     text = got.decode("ascii", "replace") if isinstance(got, (bytes, bytearray, memoryview)) else got
     return "OK" if isinstance(text, str) and text == bytes(exp[SRID_BYTES:]).hex() else WRONG
+
+
+def excused_by_fidelity(engine: str, lits: list[str], fidelity: str) -> bool:
+    """A changed value is declared lossy by the column's fidelity, never when the source literal is server truth (a spatial value)."""
+    return fidelity in ("lossy", "logical_string", "unsupported") and not any(isinstance(parse_lit(engine, l), Spatial) for l in lits)
 
 
 def parse_lit(engine: str, lit: str):
@@ -648,8 +656,8 @@ def compare(engine: str, src_lit: str, src_family: str, target: str, got, csv: b
         return NULLED
     if csv and got == "" and not _blank(exp):
         return WRONG
-    if isinstance(exp, Spatial) and target in ("none", "binary"):
-        return spatial_verdict(exp, target, got)
+    if isinstance(exp, Spatial) and target in ("none", "binary", "text", "json"):
+        return spatial_verdict(exp, target, got, csv)
     if target == "binary" and engine == "mysql" and (bits := _bit_bytes(native, exp)) is not None:
         return _same_bit_bytes(bits, got, csv)
     if engine == "postgres" and native.endswith("[]"):
@@ -926,7 +934,7 @@ def grade_run(engine: str, cell: str, p: core.Proc, check: core.Proc, fidelity: 
         return Result(cell, DELIVERED, COLUMNS, f"delivered {sorted(desc)}, expected {sorted(want)}", fidelity=fidelity)
     if fmt == "parquet" and target != "none" and not type_ok(target, desc.get(key, "?")):
         return Result(cell, DELIVERED, IGNORED, f"declared {target}, delivered {desc.get(key)}", fidelity=fidelity)
-    nulled, wrong, zeros = [], [], 0
+    nulled, wrong, wrong_lits, zeros = [], [], [], 0
     for i in range(1, n_rows + 1):
         lit = src_lits[i - 1] if i - 1 < len(src_lits) else "NULL"
         v = compare(engine, lit, col.family, target, rows[i][key], fmt == "csv", col.native) if expect is None \
@@ -937,11 +945,12 @@ def grade_run(engine: str, cell: str, p: core.Proc, check: core.Proc, fidelity: 
             nulled.append(lit)
         elif v == WRONG:
             wrong.append(f"{lit}->{rows[i][key]!r}")
+            wrong_lits.append(lit)
     if unwarned := zero_date_unwarned(zeros, warned_counts(p.out).get(key, 0)):
         nulled.append(unwarned)
     if nulled:
         return Result(cell, DELIVERED, NULLED, f"{len(nulled)} non-NULL values delivered as NULL, e.g. {nulled[:3]}", fidelity=fidelity)
-    if wrong and fidelity in ("lossy", "logical_string", "unsupported"):
+    if wrong and excused_by_fidelity(engine, wrong_lits, fidelity):
         return Result(cell, DECLARED, "", f"{len(wrong)} values changed under fidelity {fidelity}", fidelity=fidelity)
     if wrong:
         return Result(cell, DELIVERED, WRONG, f"{len(wrong)} values changed under fidelity {fidelity or '?'}, e.g. {wrong[:3]}", fidelity=fidelity)
@@ -1295,6 +1304,10 @@ def spatial_self_test() -> None:
         assert compare("mysql", lit, "other", "none", "", True, "POINT") == WRONG and compare("mysql", lit, "other", "none", None, False, "POINT") == NULLED
         assert compare("mysql", lit, "other", "binary", bytes(POINT_ORIGIN), False, "POINT") == "OK" and compare("mysql", lit, "other", "binary", POINT_ORIGIN.hex(), True, "POINT") == "OK"
         assert compare("mysql", lit, "other", "binary", bytes(POINT_ORIGIN[SRID_BYTES:]), False, "POINT") == WRONG, "under binary the server's own bytes are the SRID and the WKB"
+        assert compare("mysql", lit, "other", "binary", POINT_ORIGIN.hex(), False, "POINT") == WRONG, "a typed binary column holds bytes, not their hex text"
+        assert excused_by_fidelity("mysql", [lit], "logical_string") is False and excused_by_fidelity("mysql", ["1"], "logical_string") is True and excused_by_fidelity("mysql", ["1"], "exact") is False
+        internal = bytes(POINT_ORIGIN).decode("latin-1")
+        assert all(compare("mysql", lit, "other", t, internal, c, "POINT") == "OK" and compare("mysql", lit, "other", t, internal[:-1] + "\x01", c, "POINT") == WRONG and compare("mysql", lit, "other", t, "garbage", c, "POINT") == WRONG for t in ("text", "json") for c in (False, True)), "a text or json override holds the server's bytes"
         assert compare("mysql", lit, "other", "binary", b"garbage", False, "POINT") == WRONG and compare("mysql", lit, "other", "binary", "garbage", True, "POINT") == WRONG
     finally:
         server_geometry = real
