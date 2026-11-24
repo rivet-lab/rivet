@@ -35,7 +35,7 @@ GATE, ISLAND, OFFLINE, NIGHTLY = "gate", "island", "offline", "nightly"
 _ISLAND_TIER = re.compile(r"\] full: ")
 _OFFLINE_TIER = re.compile(r"\[offline\]: ")
 _NIGHTLY_KEY = re.compile(r"^nightly\[")
-_GATE_CLASS = re.compile(r"^(?P<matrix>[a-z_]+)\[(?P<kind>[a-z_]+)\](?: [a-z]+)?: (?P<cause>[A-Z_]+) over ")
+_GATE_CLASS = re.compile(r"^(?P<matrix>[a-z_]+)\[(?P<kind>[a-z_]+)\](?: (?P<tier>[a-z]+))?: (?P<cause>[A-Z_]+) over ")
 _CELL = re.compile(r"^(?P<cell>[A-Za-z_]\w*::\w[\w:]*) — ")
 _DATED = re.compile(r"\b20\d\d-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b")
 _ORACLE_CDC_LOAD = (
@@ -116,8 +116,9 @@ KNOWN_RED: tuple[KnownRed, ...] = (
              "2026-11-10: ClickHouse load leg, PR-PRECHECK: check exits 0 and run refuses by code (RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE, RIVET_LOAD_WAREHOUSE_REJECTED, RIVET_SOURCE_VALUE_UNREPRESENTABLE, RIVET_TYPE_UNSAFE_MAPPING) because check reads neither the values nor the format; open, closes when check refuses the same pair; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-measured 2026-11-17: the ledger-driven matrix restored the check-vs-run comparison and re-keyed the pairs to the ledger rows; re-keyed 2026-11-22 from the load stage on the live stand of main 1606571b, one run: 6 pairs (was 16), the class is the same; re-keyed 2026-11-22 to 4 pairs on the live stand of 0cd3a1c2: BOOLEAN and TINYINT(1) UNSIGNED end in an extract-stage RIVET_SOURCE_VALUE_UNREPRESENTABLE, graded at their own cells and no longer counted under the load key; re-review 2026-11-29",
              _EXPIRES),
     KnownRed("no_silent_null_load[oracle]: CHECK_RUN_SPLIT over 8 source->override pairs #e69fe066",
-             "2026-11-10: ClickHouse load leg, PR-PRECHECK: check exits 0 and run refuses by code (RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE) because check reads neither the values nor the format; open, closes when check refuses the same pair; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-measured 2026-11-17: the ledger-driven matrix restored the check-vs-run comparison and re-keyed the pairs to the ledger rows; re-keyed 2026-11-22 from the load stage on the live stand of main 1606571b, one run: 11 pairs (was 8; the Oracle pair set flaps between runs because check's one-row probe has no ORDER BY); re-keyed 2026-11-22 to the 8 load-stage pairs: the extract-stage refusals (FLOAT(10), INTERVAL DAY(9) TO SECOND(9), NUMBER) are graded at their own cell and no longer counted under the load key, the 11-pair set minus them is the 8-pair alt it replaces; re-review 2026-11-29",
-             _EXPIRES),
+             "2026-11-10: ClickHouse load leg, PR-PRECHECK: check exits 0 and run refuses by code (RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE) because check reads neither the values nor the format; open, closes when check refuses the same pair; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-measured 2026-11-17: the ledger-driven matrix restored the check-vs-run comparison and re-keyed the pairs to the ledger rows; re-keyed 2026-11-22 from the load stage on the live stand of main 1606571b, one run: 11 pairs (was 8; the Oracle pair set flaps between runs because check's one-row probe has no ORDER BY); re-keyed 2026-11-22 to the 8 load-stage pairs: the extract-stage refusals (FLOAT(10), INTERVAL DAY(9) TO SECOND(9), NUMBER) are graded at their own cell and no longer counted under the load key, the 11-pair set minus them is the 8-pair alt it replaces; re-keyed 2026-11-24 by class: gate run 45328713775 slice 0 printed 7 pairs #c2f5d4cb where this key held 8, the same flap, so the class holds whatever pair set a run reports; re-review 2026-11-29",
+             _EXPIRES,
+             by_class=True),
     KnownRed("no_silent_null_load[oracle]: WRONG_VALUE over 2 source->override pairs #2b335637",
              "2026-11-22: ClickHouse load leg: a BLOB column holding EMPTY_BLOB() reads back as the empty bytes (form 0x) where the ledger expects exact; reviewed 2026-11-22 on main 14cd46ab: seen on the load stage on the live stand, duck and clickhouse targets, one run; the cause is the grader, not the load: te.reduce spells EMPTY_BLOB() and HEXTORAW('') both as 0x and parse_lit reads Oracle's empty RAW is NULL rule on both, while tests/live/live_oracle.rs asserts EMPTY_BLOB() is empty, not NULL; open, closes when parse_lit keeps EMPTY_BLOB() a zero-length value; re-review 2026-11-29",
              _EXPIRES),
@@ -284,6 +285,7 @@ def self_test() -> int:
     assert cell_key("no_silent_null[mysql] smoke: SILENT_NULL over 3 pairs #ab") == cell_key("no_silent_null[mysql] smoke: SILENT_NULL over 9 pairs #cd"), \
         "a gate class keeps its key when its count and digest change"
     _byte_identical_keys_are_the_stage_messages()
+    _class_entries_hold_the_stage_messages()
     print("known_red self-test: ok")
     return 0
 
@@ -301,6 +303,25 @@ def _byte_identical_keys_are_the_stage_messages() -> None:
     assert held == printed, f"the ledger and the stage disagree: only in the ledger {sorted(held - printed)}, only in the stage {sorted(printed - held)}"
     assert match("byte-identical[postgres/full]: 1 of 1 parts differ in bytes", _dt.date(2026, 11, 24))[0] is None and match("byte-identical[mysql/full]: 2 of 2 parts differ in bytes", _dt.date(2026, 11, 24))[0] is None, \
         "an entry holds its own engine and cell only"
+
+
+def _class_entries_hold_the_stage_messages() -> None:
+    """Every `by_class` entry holds the message `failure_message` prints for any pair set of its own scenario, engine, tier and cause."""
+    from .property_no_silent_null import Result, failure_message
+
+    day = _dt.date(2026, 11, 24)
+    for k in KNOWN_RED:
+        if not k.by_class:
+            continue
+        m = _GATE_CLASS.match(k.match)
+        assert m, f"a class entry is a gate message: {k.match}"
+        for n in (1, 7, 9):
+            rs = [Result(f"{m['kind']}/p{i}->none/full/parquet", "x") for i in range(n)]
+            msg = failure_message(m["kind"], m["cause"], rs, m["matrix"], m["tier"] or "")
+            assert match(msg, day)[0] is k, f"the class entry {k.match} does not hold the stage message {msg}"
+    assert next(k for k in KNOWN_RED if k.match.startswith("no_silent_null_load[oracle]: CHECK_RUN_SPLIT")).by_class, \
+        "the Oracle load pair set flaps between runs (check's one-row probe has no ORDER BY): keyed by class"
+    assert match("no_silent_null_load[oracle]: CHECK_RUN_SPLIT over 7 source->override pairs #c2f5d4cb", day)[0] is not None
 
 
 def main() -> int:
