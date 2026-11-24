@@ -602,6 +602,71 @@ fn a_cdc_baseline_a_previous_release_wrote_for_a_spatial_column_is_not_drift_und
     assert_eq!(geometry_by_id(&batches), server_geometry(&mut c, &table));
 }
 
+/// A row a previous release streamed for a spatial column keeps its form `\x` + hex of the server's SRID and WKB bytes; the row this build streams after it is the WKB hex, with no drift under `fail`.
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc + RIVET_PREV_RELEASE_BIN"]
+fn rows_a_previous_release_streamed_for_a_spatial_column_keep_their_form_and_the_next_stream_row_is_wkb_hex()
+ {
+    let table = unique_name("mysql_spatial_cdc_mixed");
+    let _guard = MysqlCdcTable(table.clone());
+    let mut c = cdc_conn();
+    c.query_drop(format!(
+        "CREATE TABLE {table} (id INT PRIMARY KEY, v INT, g GEOMETRY)"
+    ))
+    .unwrap();
+    let rig = Rig::mysql_cdc(&table)
+        .no_oracle(
+            "spatial: the previous release streams the server's SRID and WKB bytes as `\\x` text, which the oracle reads as a disagreement with the source",
+        )
+        .export_line(CDC_DRIFT_FAIL);
+    let Some(old) = rig.as_previous_release() else {
+        return;
+    };
+    let anchored = old.run();
+    assert_eq!(
+        anchored.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&anchored.stderr)
+    );
+    c.query_drop(format!(
+        "INSERT INTO {table} VALUES (1, 1, ST_GeomFromText('POINT(1 2)'))"
+    ))
+    .unwrap();
+    let streamed_old = old.run();
+    assert_eq!(
+        streamed_old.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&streamed_old.stderr)
+    );
+    c.query_drop(format!(
+        "INSERT INTO {table} VALUES (2, 2, ST_GeomFromText('LINESTRING(0 0,1 1)'))"
+    ))
+    .unwrap();
+    let mine = rig.run();
+    let said = String::from_utf8_lossy(&mine.stderr);
+    assert_eq!(mine.status.code(), Some(0), "{said}");
+    assert!(!said.contains("schema drift"), "{said}");
+    let wkb = server_geometry(&mut c, &table);
+    let internal: String = c
+        .query_first(format!("SELECT HEX(g) FROM {table} WHERE id = 1"))
+        .unwrap()
+        .unwrap();
+    let got = geometry_by_id(&delivered_batches(&rig));
+    assert_eq!(
+        got.get(&1),
+        Some(&format!("\\X{internal}")),
+        "the row the previous release streamed keeps its form"
+    );
+    assert_eq!(
+        got.get(&2),
+        wkb.get(&2),
+        "the row this build streams is the WKB hex"
+    );
+    assert_eq!(got.len(), 2);
+}
+
 fn server_geometry(
     c: &mut impl mysql::prelude::Queryable,
     table: &str,
