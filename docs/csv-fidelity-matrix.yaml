@@ -63,8 +63,28 @@ scenarios:
 
   - id: unsupported_type_fails_loud
     what: "a type CSV cannot represent (nested list/struct/map) FAILS LOUD at writer construction, never a silently-skipped or mangled column."
-    no_silent_loss:          { test: csv_rejects_array_columns_loudly }
+    no_silent_loss:          { test: csv_rejects_nested_array_columns_loudly }
     no_corruption_on_escape: { na: "the run bails before any row is written — there is no cell to escape" }
+
+  - id: flat_list_json_text
+    what: "a flat array of scalars (PostgreSQL `text[]`, `int[]`, `date[]`, `uuid[]`, `bytea[]`) is one JSON array text in one quoted field: a NULL element is `null`, an empty string stays `\"\"` inside the array, an empty list is `[]` and a NULL list the bare empty field, a non-finite float the string `NaN`/`inf`. Graded against the source value of every element, not the writer's own rendering."
+    no_silent_loss:          { test: a_list_of_typed_scalars_renders_each_as_its_scalar_text }
+    no_corruption_on_escape: { test: a_list_of_text_keeps_commas_quotes_nulls_and_empty_strings_apart }
+
+  - id: decimal256_plain_text
+    what: "a Decimal256 (precision > 38) is its exact plain decimal text, beyond i128, never a float and never a refusal that Parquet does not make."
+    no_silent_loss:          { test: decimal256_writes_exact_plain_text_beyond_i128 }
+    no_corruption_on_escape: { na: "a decimal is `[-0-9.]` only — nothing to escape" }
+
+  - id: timestamp_nanoseconds
+    what: "a nanosecond timestamp (SQL Server `datetime2(7)`, `datetimeoffset`, Oracle `TIMESTAMP(9)` when declared `timestamp_ns`) keeps all nine fraction digits and the `Z` of an instant; the microsecond form keeps its six."
+    no_silent_loss:          { test: timestamp_nanos_write_nine_digits_and_z_only_for_an_instant }
+    no_corruption_on_escape: { na: "an ISO-8601 timestamp is `[0-9-T:.Z]` — nothing to escape" }
+
+  - id: mssql_datetime_text_unchanged
+    what: "a SQL Server `datetime2(0..6)`, `datetime`, `smalldatetime`, `datetimeoffset(0..6)`, `date` and `time(6)` column keeps the six-digit text the previous release wrote, and a `datetime2(7)` / `datetimeoffset(7)` column, refused by 0.33.0, gets nine digits."
+    no_silent_loss:          { test: a_csv_export_of_a_datetime_table_keeps_the_previous_release_text_and_adds_the_seventh_digit_mssql }
+    no_corruption_on_escape: { na: "an ISO-8601 timestamp is `[0-9-T:.Z]` — nothing to escape" }
 
   - id: data_cell_delimiters
     what: "a comma / double-quote / LF / CR inside a text cell is RFC-4180 quoted (quotes doubled) so it never splits or shifts the row — verified end-to-end against an INDEPENDENT DuckDB re-read, not the writer's own rendering."

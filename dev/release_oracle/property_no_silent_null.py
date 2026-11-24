@@ -540,8 +540,10 @@ def pg_array_elements(lit: str, base: str):
     return out
 
 
-def element_got(exp, got, base: str):
-    """A delivered element in the type its source literal is read as: bytes of a text value decode, text of a binary value encodes."""
+def element_got(exp, got, base: str, csv: bool = False):
+    """A delivered element in the type its source literal is read as: bytes of a text value decode, text of a binary value encodes, a CSV hex of bytes unhexes."""
+    if csv and isinstance(got, str) and isinstance(exp, bytes) and (raw := _unhex_text_bytes(got)) is not None:
+        return raw
     if isinstance(got, str) and isinstance(exp, bytes):
         return got.encode("utf-8", "surrogateescape")
     if isinstance(got, bytes) and not isinstance(exp, bytes) and base.upper() not in ("UUID", "UNIQUEIDENTIFIER"):
@@ -549,10 +551,30 @@ def element_got(exp, got, base: str):
     return got
 
 
-def same_array(engine: str, lit: str, native: str, target: str, got) -> str:
+def _unhex_text_bytes(hexed: str) -> bytes | None:
+    """The bytes a hex text spells; None when it is no hex."""
+    try:
+        return bytes.fromhex(hexed)
+    except ValueError:
+        return None
+
+
+def csv_array_cell(got):
+    """The elements of a CSV array cell, which is the JSON array text the writer renders; the cell itself when it is no JSON array."""
+    if isinstance(got, str):
+        try:
+            parsed = json.loads(got, parse_int=lambda t: -0.0 if t == "-0" else int(t))
+        except ValueError:
+            return got
+        return parsed if isinstance(parsed, list) else got
+    return got
+
+
+def same_array(engine: str, lit: str, native: str, target: str, got, csv: bool = False) -> str:
     """OK, WRONG, NULLED or PRESENCE for a one-dimensional array: each element against its source literal, never as a whole."""
     base = native[:-2]
     elems = pg_array_elements(lit, base)
+    got = csv_array_cell(got) if csv else got
     if elems is None or not isinstance(got, (list, tuple)):
         return "PRESENCE"
     if len(elems) != len(got):
@@ -572,7 +594,7 @@ def same_array(engine: str, lit: str, native: str, target: str, got) -> str:
         elif exp is ... and fam not in ("float4", "float8"):
             seen.add("PRESENCE")
         else:
-            seen.add(compare(engine, e, fam, target, element_got(exp, g, base), False, base))
+            seen.add(compare(engine, e, fam, target, element_got(exp, g, base, csv), False, base))
     return next((v for v in (WRONG, NULLED, "PRESENCE") if v in seen), "OK")
 
 
@@ -595,7 +617,7 @@ def compare(engine: str, src_lit: str, src_family: str, target: str, got, csv: b
     if target == "binary" and engine == "mysql" and (bits := _bit_bytes(native, exp)) is not None:
         return _same_bit_bytes(bits, got, csv)
     if engine == "postgres" and native.endswith("[]"):
-        return same_array(engine, src_lit, native, target, got)
+        return same_array(engine, src_lit, native, target, got, csv)
     if target == "binary" and csv and isinstance(got, str) and not isinstance(exp, bytes):
         got = _unhex_text(got)
         if got is None:
