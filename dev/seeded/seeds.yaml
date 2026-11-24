@@ -7471,3 +7471,26 @@ seeds:
         cells: ["lib:a_probe_that_another_probe_completes_inside_is_still_read_by_a_store"]
       stdout:
         na: "doctor reports a stdout destination as streaming and `continue`s before check_destination_auth, so no probe is staged for it"
+
+  - name: csv-temporal-out-of-range-written-empty
+    class: "the CSV writer writes an empty cell (inside a list, an empty string) for a Date32 or microsecond timestamp that chrono cannot name, the same bytes as NULL, instead of refusing it by RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+    history: "found 2026-11-23 reading src/format/csv.rs on PR #1193 (write_date32 and write_timestamp returned Ok without a byte for a value chrono could not hold); RED on its head 2026-11-23 by the four lib cells (the cell was `d\\n\\n`)"
+    scope: source
+    switch: csv-temporal-out-of-range-written-empty
+    engines:
+      postgres:
+        na: "the CSV writer is one engine-independent module (src/format/csv.rs): no source engine delivers a date or timestamp outside chrono's range, its own conversion refuses it first, so the lib cells over the writer are the catch for every engine (2026-11-23)"
+      mysql:
+        na: "the CSV writer is one engine-independent module (src/format/csv.rs): no source engine delivers a date or timestamp outside chrono's range, its own conversion refuses it first, so the lib cells over the writer are the catch for every engine (2026-11-23)"
+      mssql:
+        na: "the CSV writer is one engine-independent module (src/format/csv.rs): no source engine delivers a date or timestamp outside chrono's range, its own conversion refuses it first, so the lib cells over the writer are the catch for every engine (2026-11-23)"
+      oracle:
+        na: "the CSV writer is one engine-independent module (src/format/csv.rs): no source engine delivers a date or timestamp outside chrono's range, its own conversion refuses it first, so the lib cells over the writer are the catch for every engine (2026-11-23)"
+      mongo:
+        na: "a MongoDB export has no CSV format: the document lands whole in its one column"
+      lib:
+        cells:
+          - "lib:a_date32_chrono_cannot_name_is_refused_not_written_as_an_empty_cell"
+          - "lib:a_date32_inside_a_list_that_chrono_cannot_name_is_refused_not_written_as_an_empty_string"
+          - "lib:a_microsecond_timestamp_chrono_cannot_name_is_refused_not_written_as_an_empty_cell"
+          - "lib:a_microsecond_timestamp_inside_a_list_that_chrono_cannot_name_is_refused_not_written_as_an_empty_string"
