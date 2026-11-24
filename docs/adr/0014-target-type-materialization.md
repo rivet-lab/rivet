@@ -96,7 +96,7 @@ Documented in [type-mapping.md](../type-mapping.md). Summary:
 | `timestamptz` | `Timestamp` + UTC | `Timestamp(µs, UTC)` | `fidelity=exact` |
 | PG `enum` | `Enum` | `Utf8` | `logical_type=enum` |
 
-CSV rejects list (and other non-serializable) columns loudly at writer creation, naming the column — the export fails with `CSV cannot serialize column …` rather than omitting the column (and `rivet check --type-report` surfaces the same violation); metadata is Parquet-only.
+CSV writes a flat list as JSON array text and rejects nested list (and other non-serializable) columns loudly at writer creation, naming the column — the export fails with `CSV cannot serialize column …` rather than omitting the column (and `rivet check --type-report` surfaces the same violation); metadata is Parquet-only.
 
 ---
 

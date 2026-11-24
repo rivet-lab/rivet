@@ -1140,8 +1140,8 @@ fn second_run_beside(rig: Rig, n: usize) {
     rig.run_ok();
 }
 
-/// Mac report C: a TRUNCATE inside the stream is refused as `RIVET_SOURCE_CDC_TRUNCATED` (exit 5), every cycle; the re-baseline (after `first`, the engine's own step) delivers the source. Returns the refusal text.
-fn truncate_is_refused_by_code(mut s: CdcScenario, first: impl FnOnce(&mut Rig)) -> String {
+/// Mac report C: a TRUNCATE inside the stream is refused as `RIVET_SOURCE_CDC_TRUNCATED` (exit 5), every cycle; the re-baseline (after `first`, the engine's own step) delivers the source. Returns the walk.
+fn truncate_is_refused_by_code(mut s: CdcScenario, first: impl FnOnce(&mut Rig)) -> Walk {
     s.rig.run_ok();
     s.insert(1);
     s.settle();

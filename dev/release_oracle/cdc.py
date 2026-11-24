@@ -34,6 +34,7 @@ the two implementations apart.
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import os
 import re
@@ -342,42 +343,22 @@ def _cdc_mysql_cleanup(url: str, work: Path) -> None:
     _mysql(url, "DROP TABLE IF EXISTS orc_cdc_probe;")
 
 
+MSSQL_PROBE_SQL = (
+    "IF (SELECT is_cdc_enabled FROM sys.databases WHERE name = DB_NAME()) = 0 EXEC sys.sp_cdc_enable_db;\n"
+    "IF EXISTS (SELECT 1 FROM cdc.change_tables WHERE capture_instance = 'dbo_orc_cdc_probe')\n"
+    "  EXEC sys.sp_cdc_disable_table @source_schema='dbo', @source_name='orc_cdc_probe', @capture_instance='dbo_orc_cdc_probe';\n"
+    "IF OBJECT_ID('dbo.orc_cdc_probe') IS NOT NULL DROP TABLE dbo.orc_cdc_probe;\n"
+    "CREATE TABLE dbo.orc_cdc_probe (id int PRIMARY KEY, amount decimal(18,4), meta nvarchar(200));\n"
+    "EXEC sys.sp_cdc_enable_table @source_schema='dbo', @source_name='orc_cdc_probe', @role_name=NULL, @capture_instance='dbo_orc_cdc_probe';\n"
+)
+
+
 def _cdc_mssql(url: str, work: Path) -> str | None:
-    p = _sqlcmd(
-        url,
-        sql=(
-            # DISABLE BEFORE DROP, and guard on the capture instance rather than
-            # on a join to sys.tables.
-            #
-            # The original order was DROP TABLE first, then
-            # `IF EXISTS (cdc.change_tables ct JOIN sys.tables t ON
-            # ct.source_object_id = t.object_id WHERE t.name='orc_cdc_probe')`.
-            # Dropping the table ORPHANS its change table — the row survives in
-            # cdc.change_tables but `source_object_id` no longer resolves, so the
-            # join finds nothing, the disable is skipped, and the next
-            # `sp_cdc_enable_table` fails with 22926: "capture instance name
-            # 'dbo_orc_cdc_probe' already exists". It alternated pass/fail run to
-            # run, which read as a race and is not one: it is order-dependent
-            # state the guard could no longer see.
-            "IF EXISTS (SELECT 1 FROM cdc.change_tables WHERE capture_instance = 'dbo_orc_cdc_probe')\n"
-            "  EXEC sys.sp_cdc_disable_table @source_schema='dbo', @source_name='orc_cdc_probe', @capture_instance='dbo_orc_cdc_probe';\n"
-            "IF OBJECT_ID('dbo.orc_cdc_probe') IS NOT NULL DROP TABLE dbo.orc_cdc_probe;\n"
-            "CREATE TABLE dbo.orc_cdc_probe (id int PRIMARY KEY, amount decimal(18,4), meta nvarchar(200));\n"
-            "EXEC sys.sp_cdc_enable_table @source_schema='dbo', @source_name='orc_cdc_probe', @role_name=NULL, @capture_instance='dbo_orc_cdc_probe';\n"
-        ),
-    )
+    """Enable CDC on the database and the probe table; None, with sqlcmd's output on stderr, when that fails."""
+    p = _sqlcmd(url, sql=MSSQL_PROBE_SQL)
     if not p.ok:
+        print(f"cdc[mssql]: probe setup failed (exit {p.returncode}): {p.out.strip()[-600:]}", file=sys.stderr)
         return None
-    # `sp_cdc_enable_table` returning success does NOT mean the capture instance
-    # is queryable: `fn_cdc_get_min_lsn` stays NULL until the capture job has run
-    # once, and rivet's own preflight reads exactly that function. So the fixture
-    # is not ready when the enable call returns — it is ready when the LSN is.
-    #
-    # Every mssql CDC cell of blessed_flow failed at `doctor` on this
-    # ("fn_cdc_get_min_lsn returned NULL — the capture instance does not exist"),
-    # which is the preflight being right about a fixture that had lied about
-    # being up. Waiting on the enable call's exit code is waiting on the wrong
-    # signal; a `time.sleep` here would be the same guess with a nicer face.
     ready = wait_until(
         lambda: "NULL"
         not in _sqlcmd(
@@ -1556,4 +1537,12 @@ def self_test() -> None:
             globals()["note_invariant_violations"] = real_note
         got = {c.status.name for c in led.cells}
         assert got == {"FAIL"} and led.cells, f"exit {rc} with no verdict read {got}, not FAIL"
+    assert MSSQL_PROBE_SQL.index("sp_cdc_enable_db") < MSSQL_PROBE_SQL.index("cdc.change_tables"), "CDC is enabled on the database before the first cdc.* read"
+    real_sqlcmd, real_stderr = globals()["_sqlcmd"], sys.stderr
+    globals()["_sqlcmd"] = lambda *_a, **_k: Proc(["sqlcmd"], 1, "Msg 208, Invalid object name 'cdc.change_tables'.", "")
+    sys.stderr = io.StringIO()
+    try:
+        assert _cdc_mssql("u", Path("w")) is None and "Msg 208" in sys.stderr.getvalue(), "a failed probe setup says why"
+    finally:
+        globals()["_sqlcmd"], sys.stderr = real_sqlcmd, real_stderr
     print("self-test ok: a cdc probe is serialised per engine; a differential run with no verdict fails")

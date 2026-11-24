@@ -497,10 +497,10 @@ CDC (change streams) emits the same two-column shape prefixed with the
 2. **Nullability**: every exported column is `OPTIONAL`; a source `NOT NULL`
    constraint is not propagated into the Parquet schema (ADR-0016, deferred to
    v0.8 Phase A).
-3. **CSV complex types**: arrays (`List`), `Decimal256` (precision > 38), and
-   non-UUID fixed binary have no CSV cell — the export **fails loudly** naming
-   the column (see [CSV serialization](#csv-serialization)) rather than silently
-   writing empty values.
+3. **CSV complex types**: a flat array (`List` of a scalar), `Decimal256` (precision > 38) and a
+   nanosecond timestamp (an Oracle `TIMESTAMP(9)` only when declared `timestamp_ns` or `text`) is written as text (see [CSV serialization](#csv-serialization)); a nested
+   array and non-UUID fixed binary have no CSV cell — the export **fails loudly** naming the column
+   rather than silently writing empty values.
 4. **SQL Server `datetime2(7)` / `datetimeoffset(7)` sub-microsecond precision** — *default is
    nanosecond; microsecond is the per-column opt-out.* rivet delivers a column whose declared
    scale is above 6 (a bare `datetime2` is `datetime2(7)`) as `Timestamp(ns)` on batch and on CDC,
@@ -574,11 +574,14 @@ only the text rendering differs ([`src/format/csv.rs`](https://github.com/rivet-
 | `binary` (`bytea` / `BLOB`) | lowercase hex (`deadbeef`) |
 | `date` / `time` / `timestamp` | ISO 8601 (`2026-01-01T12:00:00.000000`) |
 | `timestamp_tz` | ISO 8601 normalised to UTC with a trailing `Z` (`2026-01-01T12:00:00.000000Z`) — distinguishable from a naive timestamp, which renders bare |
+| `list` (flat array of a scalar) | one JSON array text in one quoted field: `["a,b",null,""]`; each element keeps its scalar text (dates, timestamps, uuid, hex bytes and decimals as JSON strings, ints, bools and finite floats bare), a NULL element is `null`, a non-finite float is the string `"NaN"`, `"inf"` or `"-inf"`; an empty list is `[]`, distinct from the empty NULL cell |
+| `Decimal256` (precision > 38) | exact plain decimal text, never via float |
+| `timestamp` / `timestamp_tz` at nanosecond precision | ISO 8601 with nine fraction digits, `Z` for an instant (`2026-01-01T12:00:00.123456789Z`) |
 
-CSV has **no cell representation** for `list` (arrays), `Decimal256`
-(precision > 38), or non-UUID fixed binary. Rather than silently write an empty
-value, the export **fails at writer creation** naming the column — use
-`format: parquet` or drop the column from the query.
+CSV has **no cell representation** for a nested `list` (an array of arrays) or
+non-UUID fixed binary. Rather than silently write an empty value, the export
+**fails at writer creation** naming the column — use `format: parquet` or drop
+the column from the query.
 
 **Loading CSV into a warehouse:** unlike Parquet (whose loader will not coerce a
 declared type — see below), BigQuery's CSV loader *honors* a declared `--schema`.
