@@ -70,7 +70,7 @@ fn delivered_parquet(dir: &std::path::Path) -> Vec<Vec<Option<String>>> {
     out
 }
 
-fn delivered_csv(dir: &std::path::Path) -> Vec<Vec<Option<String>>> {
+fn read_csv(dir: &std::path::Path) -> Vec<Vec<Option<String>>> {
     let mut files: Vec<_> = std::fs::read_dir(dir)
         .unwrap()
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -94,7 +94,6 @@ fn delivered_csv(dir: &std::path::Path) -> Vec<Vec<Option<String>>> {
 
 fn rig(table: &str) -> Rig {
     Rig::mysql_batch(table)
-        .no_oracle("spatial: the oracle is the server's HEX(ST_AsBinary(col)) read by this test")
 }
 
 #[test]
@@ -119,7 +118,7 @@ fn a_batch_csv_export_delivers_every_spatial_type_as_the_servers_wkb_hex() {
     let want = source_wkb_hex(&table);
     let rig = rig(&table).with_format("csv");
     rig.run_ok();
-    assert_eq!(delivered_csv(&rig.out_dir()), want);
+    assert_eq!(read_csv(&rig.out_dir()), want);
 }
 
 fn parquet_parts(dir: &std::path::Path) -> usize {
@@ -190,7 +189,11 @@ fn the_remedies_of_the_srid_refusal_deliver_what_the_server_holds() {
             "SELECT id, HEX(g), LOWER(HEX(ST_AsBinary(g))), ST_SRID(g) FROM {table} ORDER BY id"
         ))
         .unwrap();
-    let binary = rig(&table).export_line("columns: {g: binary}");
+    let binary = rig(&table)
+        .no_oracle(
+            "spatial: a binary override delivers the internal bytes the test reads as HEX(g)",
+        )
+        .export_line("columns: {g: binary}");
     binary.run_ok();
     let got = dir_parquet_display(&binary.out_dir(), "g");
     let want: Vec<_> = held.iter().map(|r| Some(r.1.clone())).collect();
@@ -248,7 +251,7 @@ fn cdc_source_wkb_hex(table: &str) -> std::collections::BTreeMap<i64, Vec<Option
 type SpatialCells = std::collections::BTreeMap<i64, Vec<Vec<Option<String>>>>;
 
 /// Every spatial cell the parts under `dir` hold by id, with the `rivet.text_form` of each spatial column of each part.
-fn cdc_delivered(dir: &std::path::Path) -> (SpatialCells, Vec<Option<String>>) {
+fn parquet_cdc_cells(dir: &std::path::Path) -> (SpatialCells, Vec<Option<String>>) {
     use arrow::array::{Array, AsArray};
     let mut cells = SpatialCells::default();
     let mut forms = Vec::new();
@@ -331,7 +334,7 @@ fn a_cdc_run_delivers_every_spatial_type_as_the_servers_wkb_hex_from_snapshot_an
     );
     rig.run_ok();
     let want = cdc_source_wkb_hex(&table);
-    let (got, forms) = cdc_delivered(&rig.out_dir());
+    let (got, forms) = parquet_cdc_cells(&rig.out_dir());
     assert_eq!(forms, vec![Some("hex_wkb".to_string()); SPATIAL.len()]);
     for (id, cells) in &got {
         for cell in cells {
@@ -356,9 +359,7 @@ fn a_cdc_stream_refuses_a_spatial_value_with_an_srid_by_code_with_the_streams_re
         "INSERT INTO {table} VALUES (1, ST_GeomFromText('POINT(1 2)'))"
     ))
     .unwrap();
-    let rig = Rig::mysql_cdc(&table)
-        .cdc("initial: snapshot")
-        .no_oracle("spatial: the oracle is the server's ST_AsBinary read by this test");
+    let rig = Rig::mysql_cdc(&table).cdc("initial: snapshot");
     rig.run_ok();
     c.query_drop(format!(
         "INSERT INTO {table} VALUES (2, ST_GeomFromText('POINT(3 4)', 4326))"
