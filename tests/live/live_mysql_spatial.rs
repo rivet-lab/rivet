@@ -409,15 +409,30 @@ fn the_stream_remedy_of_the_srid_refusal_delivers_what_the_server_holds() {
     let held: Vec<(i64, String)> = c
         .query(format!("SELECT id, HEX(g) FROM {table} ORDER BY id"))
         .unwrap();
-    let mut got = std::collections::BTreeMap::new();
-    for b in files_under(&rig.out_dir())
+    let batches = delivered_batches(&rig);
+    assert_eq!(
+        batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+        held.len()
+    );
+    assert_eq!(geometry_by_id(&batches), held.into_iter().collect());
+}
+
+fn delivered_batches(rig: &Rig) -> Vec<arrow::record_batch::RecordBatch> {
+    files_under(&rig.out_dir())
         .into_iter()
         .filter(|f| f.extension().is_some_and(|x| x == "parquet"))
         .filter_map(|f| f.parent().map(std::path::Path::to_path_buf))
         .collect::<std::collections::BTreeSet<_>>()
         .iter()
         .flat_map(|d| read_all_parts(d))
-    {
+        .collect()
+}
+
+fn geometry_by_id(
+    batches: &[arrow::record_batch::RecordBatch],
+) -> std::collections::BTreeMap<i64, String> {
+    let mut got = std::collections::BTreeMap::new();
+    for b in batches {
         let ids = arrow::compute::cast(
             b.column_by_name("id").unwrap(),
             &arrow::datatypes::DataType::Int64,
@@ -434,7 +449,7 @@ fn the_stream_remedy_of_the_srid_refusal_delivers_what_the_server_holds() {
             );
         }
     }
-    assert_eq!(got, held.into_iter().collect());
+    got
 }
 
 fn upgrade_over_a_refused_baseline(policy: &str) {
@@ -513,10 +528,9 @@ fn a_spatial_column_added_to_a_cdc_stream_is_drift_under_fail() {
         "INSERT INTO {table} VALUES (1, 1, ST_GeomFromText('POINT(1 2)'))"
     ))
     .unwrap();
-    let out = rig.run();
-    let said = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(4), "{said}");
+    let said = rig.run_expect_fail();
     assert!(said.contains("added: g"), "{said}");
+    assert_eq!(rig.run().status.code(), Some(4), "{said}");
     let recorded = "SELECT COUNT(*) FROM export_schema WHERE export_name = '{export}' AND columns_json LIKE '%\"name\":\"g\"%'";
     assert_eq!(rig.state_count(recorded), 0, "the baseline did not adopt g");
 }
@@ -542,6 +556,9 @@ fn a_spatial_column_added_to_a_cdc_stream_is_reported_and_delivered_under_warn()
     let said = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{said}");
     assert!(said.contains("added: g"), "{said}");
+    let batches = delivered_batches(&rig);
+    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+    assert_eq!(geometry_by_id(&batches), server_geometry(&mut c, &table));
 }
 
 /// A CDC baseline a previous release wrote already holds the spatial column as `Utf8`, so this build reads no drift in it under `fail`.
@@ -580,6 +597,21 @@ fn a_cdc_baseline_a_previous_release_wrote_for_a_spatial_column_is_not_drift_und
     let said = String::from_utf8_lossy(&mine.stderr);
     assert_eq!(mine.status.code(), Some(0), "{said}");
     assert!(!said.contains("schema drift"), "{said}");
+    let batches = delivered_batches(&rig);
+    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+    assert_eq!(geometry_by_id(&batches), server_geometry(&mut c, &table));
+}
+
+fn server_geometry(
+    c: &mut impl mysql::prelude::Queryable,
+    table: &str,
+) -> std::collections::BTreeMap<i64, String> {
+    let rows: Vec<(i64, String)> = c
+        .query(format!(
+            "SELECT id, HEX(ST_AsBinary(g)) FROM {table} ORDER BY id"
+        ))
+        .unwrap();
+    rows.into_iter().collect()
 }
 
 fn ring_wkt(points: usize) -> String {
