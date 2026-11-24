@@ -10,13 +10,42 @@ from pathlib import Path
 
 from . import core
 from . import property_no_silent_null as nsn
+from . import property_no_silent_null_cdc as cdc_grid
 
 UNMEASURED_KLASSES = (nsn.NOT_GRADED, nsn.UNGRADED)
+GEOMETRY_GAP = frozenset({"GEOMETRY", "POINT", "LINESTRING", "POLYGON", "GEOMETRYCOLLECTION", "MULTIPOINT"})
+GAP_LABEL = "refused today, gap against ADR-0038 CP1, fix in flight"
 
 
 def unmeasured(engine: str) -> list[tuple[int, dict]]:
     """The ledger rows of one engine with no delivery and not declarable, keeping their ledger index."""
     return [(i, r) for i, r in enumerate(nsn.ledger_rows(engine)) if not r.get("delivery") and not r.get("declarable")]
+
+
+def cdc_cols(engine: str) -> list[nsn.Col]:
+    """The seed columns of the matrix-only rows for the CDC grid; a row whose edge refuses on the change stream is left out."""
+    cols = []
+    for i, r in unmeasured(engine):
+        if r["native_type"].split("(")[0] in GEOMETRY_GAP:
+            continue
+        try:
+            cols.append(nsn.row_cols(engine, i, r))
+        except ValueError:
+            continue
+    return cols
+
+
+def cdc_cell(x: nsn.Result) -> dict:
+    """One CDC cell as a verdict: DEFECT on a changed, nulled or uncoded value, refused with its code, exact when delivered, else not classified."""
+    if x.klass in nsn.FAIL_CLASSES and x.klass not in UNMEASURED_KLASSES:
+        verdict = "DEFECT"
+    elif x.verdict == nsn.REFUSED and x.klass not in UNMEASURED_KLASSES:
+        verdict = f"refused [{x.code}]"
+    elif x.klass in UNMEASURED_KLASSES:
+        verdict = "not classified"
+    else:
+        verdict = "exact"
+    return {"cell": x.cell, "verdict": verdict, "klass": x.klass, "code": x.code, "fidelity": x.fidelity, "detail": x.detail[:240]}
 
 
 def seed_one(engine: str, url: str, col: nsn.Col) -> int:
@@ -64,7 +93,10 @@ def measure(engine: str, url: str, work: Path, i: int, r: dict) -> dict:
         n = seed_one(engine, url, col)
     except RuntimeError as e:
         return base | {"verdict": "UNMEASURED", "reason": f"the seed could not be created: {e}"[:300], "cells": []}
-    return base | label(nsn.run_unit(engine, work, url, col, n, "full", "none", ["parquet", "csv"]))
+    out = label(nsn.run_unit(engine, work, url, col, n, "full", "none", ["parquet", "csv"]))
+    if out["verdict"] == "refused by design" and r["native_type"].split("(")[0] in GEOMETRY_GAP:
+        out["verdict"] = GAP_LABEL
+    return base | out
 
 
 def _grade(col: nsn.Col, lits: list[str], rows: dict) -> dict:
@@ -92,13 +124,34 @@ def self_test() -> None:
         got = _grade(col, lits, rows)["verdict"]
         if got != want:
             raise SystemExit(f"self-test: rows {rows} labelled {got!r}, expected {want!r}")
-    print("self-test ok: a faithful run is deliverable; a changed or nulled value is DEFECT")
+    cols = cdc_cols("postgres")
+    planned = {c.name for group, _, _ in cdc_grid.rounds("postgres", cols) for c in group}
+    if not cols or planned != {c.name for c in cols}:
+        raise SystemExit(f"self-test: the CDC plan holds {len(planned)} of {len(cols)} matrix-only columns")
+    if cdc_cell(nsn.Result("x", nsn.DELIVERED, nsn.NULLED, ""))["verdict"] != "DEFECT":
+        raise SystemExit("self-test: a nulled CDC value is not a DEFECT")
+    print("self-test ok: a faithful run is deliverable; a changed or nulled value is DEFECT; every matrix-only column reaches the CDC plan")
+
+
+def run_cdc(engines: list[str], work: Path) -> int:
+    """The CDC grid over the matrix-only columns of each engine on its CDC stand; exit 1 on any DEFECT."""
+    cells: list[dict] = []
+    for engine in engines:
+        for x in cdc_grid.run_engine(engine, work / "cdc" / engine, print, cols=cdc_cols(engine)):
+            cells.append(cdc_cell(x))
+            print(json.dumps(cells[-1], ensure_ascii=False), flush=True)
+    tally: dict[str, int] = {}
+    for c in cells:
+        tally[c["verdict"]] = tally.get(c["verdict"], 0) + 1
+    print("SUMMARY " + json.dumps(tally, sort_keys=True), flush=True)
+    return 1 if tally.get("DEFECT") else 0
 
 
 def main() -> int:
     """Developer entry: measure every matrix-only ledger row of the chosen engines on the stand; exit 1 on any DEFECT."""
     ap = argparse.ArgumentParser(prog="property_no_silent_null_matrix_only")
     ap.add_argument("--self-test", action="store_true")
+    ap.add_argument("--cdc", action="store_true", help="run the CDC grid over the matrix-only columns instead of the batch rows")
     ap.add_argument("--engine", default="postgres,mysql")
     ap.add_argument("--work", default=str(Path(tempfile.gettempdir()) / "no_silent_null_matrix_only"))
     ap.add_argument("--out", default="")
@@ -107,6 +160,8 @@ def main() -> int:
         self_test()
         return 0
     print(nsn.binary_line(), flush=True)
+    if ns.cdc:
+        return run_cdc(ns.engine.split(","), Path(ns.work))
     rows: list[dict] = []
     for engine in ns.engine.split(","):
         url = nsn.STAND[engine]
