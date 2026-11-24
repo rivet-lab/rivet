@@ -143,8 +143,8 @@ KNOWN_RED: tuple[KnownRed, ...] = (
              "2026-11-24: v0.33.0 against this binary, same documents, same init config: the part's bytes differ and nothing else does; the flat _id column of a collection holding int keys is labelled rivet.native_type number (int, long, double or decimal) with rivet.fidelity logical_string where v0.33.0 wrote objectid and exact (#1045, see #996, changelog.d/fix-996-mongo-flat-id-label.md, a declared Behaviour change); the value of every cell and the column's Arrow type are unchanged, which is why the stamped cell passes; measured 2026-11-24 on a v0.33.0 release binary and a debug build of main 65586b63 over the gate's own 250000-document seed; open, closes when the release the gate grades against carries #1045: the cell passes and the entry is removed; re-review 2026-11-29",
              _EXPIRES),
     KnownRed(nightly_key("refusal_names_true_cause", "cause", "uncoded"),
-             "2026-11-14: #917, the nightly refusal-names-true-cause part: refusals stay uncoded, name the wrong cause or a remedy flag that does not exist, or exit 0 on a refused config; open, closes with the fix of #917; reviewed 2026-11-22: #917 is still open; the refusal matrix was not re-run in this review, unverified on stand; re-review 2026-11-25",
-             "2026-11-25",
+             "2026-11-14: #917, the nightly refusal-names-true-cause part: refusals stay uncoded, name the wrong cause or a remedy flag that does not exist, or exit 0 on a refused config; open, closes with the fix of #917; reviewed 2026-11-22: #917 is still open; the refusal matrix was not re-run in this review, unverified on stand; reviewed 2026-11-25: #917 is still open; re-review 2026-11-29",
+             _EXPIRES,
              alt=tuple(nightly_key("refusal_names_true_cause", kind, cause) for kind, cause in (
                  ("cmd", "printed"), ("cmd", "uncoded"), ("decoy", "uncoded"), ("field", "uncoded"), ("guard", "printed"), ("reader", "the"),
                  ("remedy", "remedy"), ("site", "remedy"), ("source", "named"), ("word", "printed"), ("wording", "remedy")))),
