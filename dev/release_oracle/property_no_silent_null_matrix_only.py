@@ -35,9 +35,18 @@ def cdc_cols(engine: str) -> list[nsn.Col]:
     return cols
 
 
+SESSION_OVERRIDE_OPEN = "open: check cannot see a session override"
+
+
 def cdc_cell(x: nsn.Result) -> dict:
-    """One CDC cell as a verdict: DEFECT on a changed, nulled or uncoded value, refused with its code, exact when delivered, else not classified."""
-    if x.klass in nsn.FAIL_CLASSES and x.klass not in UNMEASURED_KLASSES:
+    """One CDC cell as a verdict: a run-side value refusal is refused, a session-override prerequisite is open, DEFECT on any other changed, nulled or uncoded value."""
+    run_side_value = x.klass == "CHECK_RUN_SPLIT" and x.code == "RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+    session_override = x.klass == "CHECK_RUN_SPLIT" and x.code == "RIVET_SOURCE_CDC_PREREQUISITE" and "@" in x.cell.split("/")[2]
+    if run_side_value:
+        verdict = f"refused [{x.code}]"
+    elif session_override:
+        verdict = SESSION_OVERRIDE_OPEN
+    elif x.klass in nsn.FAIL_CLASSES and x.klass not in UNMEASURED_KLASSES:
         verdict = "DEFECT"
     elif x.verdict == nsn.REFUSED and x.klass not in UNMEASURED_KLASSES:
         verdict = f"refused [{x.code}]"
@@ -130,6 +139,15 @@ def self_test() -> None:
         raise SystemExit(f"self-test: the CDC plan holds {len(planned)} of {len(cols)} matrix-only columns")
     if cdc_cell(nsn.Result("x", nsn.DELIVERED, nsn.NULLED, ""))["verdict"] != "DEFECT":
         raise SystemExit("self-test: a nulled CDC value is not a DEFECT")
+    value_refusal = nsn.Result("mysql/T->d/cdc-insert/parquet", nsn.REFUSED, "CHECK_RUN_SPLIT", "", "RIVET_SOURCE_VALUE_UNREPRESENTABLE")
+    if cdc_cell(value_refusal)["verdict"] != "refused [RIVET_SOURCE_VALUE_UNREPRESENTABLE]":
+        raise SystemExit("self-test: a run-side value refusal after a passing check is not refused")
+    session = nsn.Result("mysql/T->none/cdc-delete@MINIMAL/parquet", nsn.REFUSED, "CHECK_RUN_SPLIT", "", "RIVET_SOURCE_CDC_PREREQUISITE")
+    if cdc_cell(session)["verdict"] != "open: check cannot see a session override":
+        raise SystemExit("self-test: a session-override partial image is not its own open class")
+    unscoped = nsn.Result("mysql/T->none/cdc-delete/parquet", nsn.REFUSED, "CHECK_RUN_SPLIT", "", "RIVET_SOURCE_CDC_PREREQUISITE")
+    if cdc_cell(unscoped)["verdict"] != "DEFECT":
+        raise SystemExit("self-test: a prerequisite refusal without a session override is not a DEFECT")
     print("self-test ok: a faithful run is deliverable; a changed or nulled value is DEFECT; every matrix-only column reaches the CDC plan")
 
 
