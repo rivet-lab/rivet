@@ -95,7 +95,7 @@ const CEILING: &[(&str, &[&str])] = &[
         &[
             "mssql/arrow_convert.rs::numeric_to_decimal_string",
             "oracle/cdc.rs::canonical_number",
-            "pg_numeric_wire.rs::numeric_wire_normalized_plain",
+            "pg_numeric_wire.rs::numeric_wire_plain_at_display_scale",
         ],
     ),
     (
