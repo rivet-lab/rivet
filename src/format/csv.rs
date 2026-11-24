@@ -63,7 +63,8 @@ impl super::FormatWriter for CsvFormatWriter {
                 if col_idx > 0 {
                     buf.push(b',');
                 }
-                write_csv_value(&mut buf, batch.column(col_idx), row_idx)?;
+                write_csv_value(&mut buf, batch.column(col_idx), row_idx)
+                    .map_err(|e| name_column(e, batch.schema().field(col_idx).name()))?;
             }
             buf.push(b'\n');
         }
@@ -324,13 +325,43 @@ where
     Ok(())
 }
 
-/// A `Date32` cell as `YYYY-MM-DD`; nothing for a day count chrono cannot hold.
+/// The dates and timestamps a CSV text can name: chrono's proleptic range.
+const CSV_TEMPORAL_RANGE: &str = "-262143-01-01..+262142-12-31";
+
+/// The coded refusal for a temporal value the CSV text cannot name, which an empty cell would turn into NULL.
+fn unrepresentable_temporal(what: String) -> anyhow::Error {
+    crate::error::coded(
+        crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+        format!(
+            "holds {what}, outside the dates a CSV text can name ({CSV_TEMPORAL_RANGE}), and \
+             writing it as an empty cell would lose the value, since an empty cell reads as NULL. \
+             Select the column as text with a CAST in the export's `query:`, or use `format: parquet`."
+        ),
+    )
+}
+
+/// `err` with the column it came from named when it is a temporal refusal; any other error passes through.
+fn name_column(err: anyhow::Error, column: &str) -> anyhow::Error {
+    let code = crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE;
+    if crate::error::error_code(&err) != Some(code.id) {
+        return err;
+    }
+    crate::error::recoded(&err, code, format!("csv: column `{column}` {err}"))
+}
+
+/// A `Date32` cell as `YYYY-MM-DD`, or the coded refusal for a day count chrono cannot hold.
 fn write_date32(writer: &mut dyn Write, days: i32) -> Result<()> {
     let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is valid");
     let date = chrono::Duration::try_days(days as i64).and_then(|d| epoch.checked_add_signed(d));
-    if let Some(date) = date {
-        write!(writer, "{}", date)?;
-    }
+    let Some(date) = date else {
+        if seeded!("csv-temporal-out-of-range-written-empty", true, false) {
+            return Ok(());
+        }
+        return Err(unrepresentable_temporal(format!(
+            "a date {days} days from 1970-01-01"
+        )));
+    };
+    write!(writer, "{}", date)?;
     Ok(())
 }
 
@@ -345,7 +376,12 @@ fn write_timestamp(
     let secs = value.div_euclid(per_second);
     let nsecs = (value.rem_euclid(per_second) * nanos_per_unit) as u32;
     let Some(dt) = chrono::DateTime::from_timestamp(secs, nsecs) else {
-        return Ok(());
+        if seeded!("csv-temporal-out-of-range-written-empty", true, false) {
+            return Ok(());
+        }
+        return Err(unrepresentable_temporal(format!(
+            "a timestamp of {value} microseconds from 1970-01-01T00:00:00"
+        )));
     };
     if nanos_per_unit == 1 {
         let text = crate::types::iso_timestamp_nanos(dt.naive_utc(), is_instant);
@@ -858,22 +894,21 @@ mod tests {
 
     #[test]
     fn timestamp_fast_path_matches_chrono_format() {
-        let cases: [i64; 6] = [
+        let cases: [i64; 5] = [
             0,
             1_700_000_000_123_456,
             1_000_000 * 86_399 + 999_999,
             -62_135_596_800_000_000,
             253_402_300_799_000_000,
-            300_000_000_000_000_000,
         ];
         for micros in cases {
             let got = cell(TimestampMicrosecondArray::from(vec![micros]), 0);
             let secs = micros.div_euclid(1_000_000);
             let nsecs = (micros.rem_euclid(1_000_000) * 1_000) as u32;
-            let expected = match chrono::DateTime::from_timestamp(secs, nsecs) {
-                Some(dt) => format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.6f")),
-                None => String::new(),
-            };
+            let expected = chrono::DateTime::from_timestamp(secs, nsecs)
+                .expect("every case is inside chrono's range")
+                .format("%Y-%m-%dT%H:%M:%S%.6f")
+                .to_string();
             assert_eq!(got, expected, "timestamp mismatch for micros={micros}");
         }
     }
@@ -1172,5 +1207,191 @@ mod error_code_tests {
             .err()
             .expect("a nested list column has no CSV cell");
         crate::error::assert_coded(&err, "RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED", 1);
+    }
+}
+
+#[cfg(test)]
+mod out_of_range_tests {
+    use super::*;
+    use arrow::datatypes::{Field, Schema};
+    use std::sync::Arc;
+
+    fn natural_days(date: chrono::NaiveDate) -> i32 {
+        let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is valid");
+        (date - epoch).num_days() as i32
+    }
+
+    fn natural_micros(dt: chrono::NaiveDateTime) -> i64 {
+        dt.and_utc().timestamp_micros()
+    }
+
+    fn csv_of(array: ArrayRef) -> Result<String> {
+        let schema: SchemaRef = Arc::new(Schema::new(vec![Field::new(
+            "d",
+            array.data_type().clone(),
+            true,
+        )]));
+        let sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        struct Tee(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for Tee {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        use crate::format::Format as _;
+        let mut w = CsvFormat.create_writer(&schema, Box::new(Tee(sink.clone())))?;
+        w.write_batch(&RecordBatch::try_new(schema, vec![array])?)?;
+        let text = String::from_utf8(sink.lock().unwrap().clone()).unwrap();
+        Ok(text)
+    }
+
+    fn date_list(days: &[Option<i32>]) -> ArrayRef {
+        let mut b = ListBuilder::new(Date32Builder::new());
+        for d in days {
+            b.values().append_option(*d);
+        }
+        b.append(true);
+        Arc::new(b.finish())
+    }
+
+    fn timestamp_list(micros: &[i64]) -> ArrayRef {
+        let mut b = ListBuilder::new(TimestampMicrosecondBuilder::new());
+        for m in micros {
+            b.values().append_value(*m);
+        }
+        b.append(true);
+        Arc::new(b.finish())
+    }
+
+    fn assert_refused(got: Result<String>, what: &str) {
+        let err = got.expect_err(what);
+        crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+        assert!(format!("{err:#}").contains("column `d`"), "{err:#}");
+    }
+
+    #[test]
+    fn a_date32_chrono_cannot_name_is_refused_not_written_as_an_empty_cell() {
+        let past_max = natural_days(chrono::NaiveDate::MAX) + 1;
+        let before_min = natural_days(chrono::NaiveDate::MIN) - 1;
+        for days in [past_max, before_min, i32::MAX, i32::MIN] {
+            let got = csv_of(Arc::new(Date32Array::from(vec![days])));
+            assert_refused(
+                got,
+                &format!("Date32 {days} must be refused, not an empty cell"),
+            );
+        }
+    }
+
+    #[test]
+    fn a_date32_inside_a_list_that_chrono_cannot_name_is_refused_not_written_as_an_empty_string() {
+        let got = csv_of(date_list(&[Some(19_723), Some(i32::MAX)]));
+        assert_refused(
+            got,
+            "a list holding Date32 i32::MAX must be refused, not [\"2024-01-01\",\"\"]",
+        );
+    }
+
+    #[test]
+    fn a_microsecond_timestamp_chrono_cannot_name_is_refused_not_written_as_an_empty_cell() {
+        let past_max = natural_micros(chrono::NaiveDateTime::MAX) + 1;
+        for micros in [past_max, i64::MAX, i64::MIN] {
+            let got = csv_of(Arc::new(TimestampMicrosecondArray::from(vec![micros])));
+            assert_refused(
+                got,
+                &format!("timestamp {micros} us must be refused, not an empty cell"),
+            );
+        }
+    }
+
+    #[test]
+    fn a_microsecond_timestamp_inside_a_list_that_chrono_cannot_name_is_refused_not_written_as_an_empty_string()
+     {
+        let got = csv_of(timestamp_list(&[0, i64::MAX]));
+        assert_refused(got, "a list holding a timestamp i64::MAX must be refused");
+    }
+
+    #[test]
+    fn the_refusal_names_the_column_the_value_the_range_and_the_remedy() {
+        let err = csv_of(Arc::new(Date32Array::from(vec![i32::MAX]))).unwrap_err();
+        assert_eq!(
+            format!("{err}"),
+            "csv: column `d` holds a date 2147483647 days from 1970-01-01, outside the dates a CSV \
+             text can name (-262143-01-01..+262142-12-31), and writing it as an empty cell would \
+             lose the value, since an empty cell reads as NULL. Select the column as text with a \
+             CAST in the export's `query:`, or use `format: parquet`."
+        );
+    }
+
+    fn neighbours() -> Vec<String> {
+        let days = |d: chrono::NaiveDate| natural_days(d);
+        let ymd = |y, m, d| chrono::NaiveDate::from_ymd_opt(y, m, d).expect("valid");
+        let dates = vec![
+            Some(0),
+            Some(-1),
+            Some(19_723),
+            Some(days(ymd(1, 1, 1))),
+            Some(days(ymd(0, 12, 31))),
+            Some(days(ymd(9999, 12, 31))),
+            Some(days(ymd(10_000, 1, 1))),
+            Some(days(chrono::NaiveDate::MAX)),
+            Some(days(chrono::NaiveDate::MIN)),
+            None,
+        ];
+        let micros = vec![
+            Some(0),
+            Some(-1),
+            Some(1_719_136_800_123_456),
+            Some(natural_micros(chrono::NaiveDateTime::MAX)),
+            Some(natural_micros(chrono::NaiveDateTime::MIN)),
+            Some(natural_micros(
+                ymd(10_000, 1, 1).and_hms_opt(0, 0, 0).unwrap(),
+            )),
+            None,
+        ];
+        let mut out = vec![
+            csv_of(Arc::new(Date32Array::from(dates.clone()))).unwrap(),
+            csv_of(Arc::new(TimestampMicrosecondArray::from(micros.clone()))).unwrap(),
+            csv_of(Arc::new(
+                TimestampMicrosecondArray::from(micros).with_timezone("UTC"),
+            ))
+            .unwrap(),
+            csv_of(Arc::new(TimestampNanosecondArray::from(vec![
+                Some(i64::MIN),
+                Some(-1),
+                Some(0),
+                Some(i64::MAX),
+                None,
+            ])))
+            .unwrap(),
+            csv_of(Arc::new(Time64MicrosecondArray::from(vec![
+                Some(-1),
+                Some(0),
+                Some(86_399_999_999),
+                Some(i64::MAX),
+                None,
+            ])))
+            .unwrap(),
+        ];
+        out.push(csv_of(date_list(&dates)).unwrap());
+        out
+    }
+
+    #[test]
+    fn every_value_chrono_can_name_is_written_as_before() {
+        assert_eq!(
+            neighbours(),
+            vec![
+                "d\n1970-01-01\n1969-12-31\n2024-01-01\n0001-01-01\n0000-12-31\n9999-12-31\n+10000-01-01\n+262142-12-31\n-262143-01-01\n\n",
+                "d\n1970-01-01T00:00:00.000000\n1969-12-31T23:59:59.999999\n2024-06-23T10:00:00.123456\n+262142-12-31T23:59:59.999999\n-262143-01-01T00:00:00.000000\n+10000-01-01T00:00:00.000000\n\n",
+                "d\n1970-01-01T00:00:00.000000Z\n1969-12-31T23:59:59.999999Z\n2024-06-23T10:00:00.123456Z\n+262142-12-31T23:59:59.999999Z\n-262143-01-01T00:00:00.000000Z\n+10000-01-01T00:00:00.000000Z\n\n",
+                "d\n1677-09-21T00:12:43.145224192\n1969-12-31T23:59:59.999999999\n1970-01-01T00:00:00.000000000\n2262-04-11T23:47:16.854775807\n\n",
+                "d\n-00:00:00.000001\n00:00:00.000000\n23:59:59.999999\n2562047788:00:54.775807\n\n",
+                "d\n\"[\"\"1970-01-01\"\",\"\"1969-12-31\"\",\"\"2024-01-01\"\",\"\"0001-01-01\"\",\"\"0000-12-31\"\",\"\"9999-12-31\"\",\"\"+10000-01-01\"\",\"\"+262142-12-31\"\",\"\"-262143-01-01\"\",null]\"\n",
+            ]
+        );
     }
 }
