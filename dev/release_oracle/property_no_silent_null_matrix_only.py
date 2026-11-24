@@ -12,6 +12,8 @@ from . import core
 from . import property_no_silent_null as nsn
 
 UNMEASURED_KLASSES = (nsn.NOT_GRADED, nsn.UNGRADED)
+GEOMETRY_GAP = frozenset({"GEOMETRY", "POINT", "LINESTRING", "POLYGON", "GEOMETRYCOLLECTION", "MULTIPOINT"})
+GAP_LABEL = "refused today, gap against ADR-0038 CP1, fix in flight"
 
 
 def unmeasured(engine: str) -> list[tuple[int, dict]]:
@@ -64,7 +66,10 @@ def measure(engine: str, url: str, work: Path, i: int, r: dict) -> dict:
         n = seed_one(engine, url, col)
     except RuntimeError as e:
         return base | {"verdict": "UNMEASURED", "reason": f"the seed could not be created: {e}"[:300], "cells": []}
-    return base | label(nsn.run_unit(engine, work, url, col, n, "full", "none", ["parquet", "csv"]))
+    out = label(nsn.run_unit(engine, work, url, col, n, "full", "none", ["parquet", "csv"]))
+    if out["verdict"] == "refused by design" and r["native_type"].split("(")[0] in GEOMETRY_GAP:
+        out["verdict"] = GAP_LABEL
+    return base | out
 
 
 def _grade(col: nsn.Col, lits: list[str], rows: dict) -> dict:
