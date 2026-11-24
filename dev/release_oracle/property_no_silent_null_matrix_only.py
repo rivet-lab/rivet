@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -69,6 +70,26 @@ def seed_one(engine: str, url: str, col: nsn.Col) -> int:
     return n
 
 
+ARROW_SCALARS = {"bool": "Boolean", "int16": "Int16", "int32": "Int32", "int64": "Int64", "uint64": "UInt64", "float": "Float32", "double": "Float64", "string": "Utf8", "binary": "Binary", "date32[day]": "Date32"}
+ARROW_UNIT = {"us": "µs", "ns": "ns", "ms": "ms", "s": "s"}
+
+
+def arrow_label(pa_type: str) -> str:
+    """The ledger's delivery spelling of a pyarrow type string; empty for a type the ledger has no label for."""
+    if pa_type in ARROW_SCALARS:
+        return ARROW_SCALARS[pa_type]
+    if m := re.fullmatch(r"decimal(128|256)\((\d+), (\d+)\)", pa_type):
+        return f"Decimal{m[1]}({m[2]}, {m[3]})"
+    if m := re.fullmatch(r"timestamp\[(\w+)(?:, tz=([^\]]+))?\]", pa_type):
+        return f"Timestamp({ARROW_UNIT[m[1]]}, \"{m[2]}\")" if m[2] else f"Timestamp({ARROW_UNIT[m[1]]})"
+    if m := re.fullmatch(r"time64\[(\w+)\]", pa_type):
+        return f"Time64({ARROW_UNIT[m[1]]})"
+    if m := re.fullmatch(r"list<item: (.+)>", pa_type):
+        inner = arrow_label(m[1])
+        return f"List({inner})" if inner else ""
+    return ""
+
+
 def label(results: list[nsn.Result]) -> dict:
     """The row verdict from its graded cells: DEFECT on any changed, nulled or uncoded value; else the delivered fidelity or the refusal code."""
     cells = [{"cell": x.cell, "verdict": x.verdict, "klass": x.klass, "code": x.code, "fidelity": x.fidelity, "detail": x.detail[:240]} for x in results]
@@ -102,9 +123,12 @@ def measure(engine: str, url: str, work: Path, i: int, r: dict) -> dict:
         n = seed_one(engine, url, col)
     except RuntimeError as e:
         return base | {"verdict": "UNMEASURED", "reason": f"the seed could not be created: {e}"[:300], "cells": []}
-    out = label(nsn.run_unit(engine, work, url, col, n, "full", "none", ["parquet", "csv"]))
+    results = nsn.run_unit(engine, work, url, col, n, "full", "none", ["parquet", "csv"])
+    out = label(results)
     if out["verdict"] == "refused by design" and r["native_type"].split("(")[0] in GEOMETRY_GAP:
         out["verdict"] = GAP_LABEL
+    arrow = {x.arrow for x in results if x.arrow}
+    out["arrow"] = arrow_label(arrow.pop()) if len(arrow) == 1 else ""
     return base | out
 
 
@@ -148,6 +172,9 @@ def self_test() -> None:
     unscoped = nsn.Result("mysql/T->none/cdc-delete/parquet", nsn.REFUSED, "CHECK_RUN_SPLIT", "", "RIVET_SOURCE_CDC_PREREQUISITE")
     if cdc_cell(unscoped)["verdict"] != "DEFECT":
         raise SystemExit("self-test: a prerequisite refusal without a session override is not a DEFECT")
+    for pa_type, want in (("int32", "Int32"), ("decimal128(38, 10)", "Decimal128(38, 10)"), ("timestamp[us, tz=UTC]", 'Timestamp(µs, "UTC")'), ("string", "Utf8"), ("list<item: string>", "List(Utf8)"), ("struct<a: int32>", "")):
+        if arrow_label(pa_type) != want:
+            raise SystemExit(f"self-test: arrow type {pa_type!r} labelled {arrow_label(pa_type)!r}, expected {want!r}")
     print("self-test ok: a faithful run is deliverable; a changed or nulled value is DEFECT; every matrix-only column reaches the CDC plan")
 
 
