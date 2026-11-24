@@ -268,3 +268,28 @@ fn csv_writer_handles_binary_cells_with_extreme_bytes_without_panic() {
     let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(arr)]).unwrap();
     let _tmp = try_write_to_tempfile(&CsvFormat, &schema, &batch);
 }
+
+#[test]
+fn csv_list_of_uint64_above_i64_max_is_written_as_bare_decimal_digits() {
+    let mut builder = ListBuilder::new(UInt64Builder::new());
+    builder.values().append_value(u64::MAX);
+    builder.values().append_value(9_223_372_036_854_775_808u64);
+    builder.append(true);
+    let arr = builder.finish();
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "ids",
+        arr.data_type().clone(),
+        true,
+    )]));
+    let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(arr)]).unwrap();
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let file = tmp.as_file().try_clone().unwrap();
+    let mut writer = CsvFormat.create_writer(&schema, Box::new(file)).unwrap();
+    writer.write_batch(&batch).unwrap();
+    writer.finish().unwrap();
+    let text = std::fs::read_to_string(tmp.path()).unwrap();
+    assert!(
+        text.contains("[18446744073709551615,9223372036854775808]"),
+        "{text}"
+    );
+}

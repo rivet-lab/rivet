@@ -454,24 +454,48 @@ fn a_decimal_override_past_precision_38_is_refused_by_the_wire_check_oracle() {
     }
 }
 
-const FORMAT_REFUSAL: Refused<'static> =
-    Refused::by_code("RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED", 1);
 const UNMAPPED_REFUSAL: Refused<'static> = Refused::by_code("RIVET_TYPE_UNSAFE_MAPPING", 1);
 
-/// A `format: csv` export of a column declared `declared` is refused by the run and both `check` spellings, naming the column and the format's remedy.
-fn csv_column_is_refused_like_the_run(rig: Rig, name: &str, column: &str, declared: &str) {
-    let said = check_and_run_refuse_alike_by(
-        rig.with_format("csv")
-            .export_line("columns:")
-            .export_line(&format!("  {column}: \"{declared}\"")),
-        name,
-        FORMAT_REFUSAL,
+/// A `format: csv` export of a column declared `declared` is admitted by both `check` spellings and delivered by the run as a csv line `is_cell` accepts.
+fn csv_column_is_delivered_like_check(
+    rig: Rig,
+    name: &str,
+    column: &str,
+    declared: &str,
+    is_cell: impl Fn(&str) -> bool,
+) {
+    let out = tempfile::tempdir().unwrap();
+    let rig = rig
+        .with_format("csv")
+        .export_line("columns:")
+        .export_line(&format!("  {column}: \"{declared}\""))
+        .dest_path(out.path().to_path_buf());
+    for args in [
+        &["check", "--export", name][..],
+        &["check", "--export", name, "--type-report"][..],
+    ] {
+        let o = rig.cli(args);
+        assert_eq!(
+            o.status.code(),
+            Some(0),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
+    let o = rig.run_args(&["--export", name]);
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
     );
-    assert!(
-        said.contains(&format!("CSV cannot serialize column '{column}'")),
-        "{said}"
-    );
-    assert!(said.contains("use `format: parquet`"), "{said}");
+    let parts: Vec<_> = files_under(out.path())
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "csv"))
+        .collect();
+    assert_eq!(parts.len(), 1, "{parts:?} in {:?}", files_under(out.path()));
+    let text = std::fs::read_to_string(&parts[0]).unwrap();
+    assert!(text.lines().any(is_cell), "no delivered cell in {text:?}");
 }
 
 /// An export of a column no Arrow type carries is refused by the run and both `check` spellings with the one `columns:` declaration refusal.
@@ -486,28 +510,33 @@ fn unmapped_column_is_refused_like_the_run(rig: Rig, name: &str, column: &str) {
 
 #[test]
 #[ignore = "live: postgres"]
-fn a_csv_export_of_a_decimal256_column_is_refused_by_check_like_the_run_postgres() {
+fn a_csv_export_of_a_decimal256_column_is_delivered_like_check_admits_postgres() {
     require_alive(LiveService::Postgres);
     let name = unique_name("fmt_dec_pg");
-    let out = tempfile::tempdir().unwrap();
+    let table = unique_name("fmt_dec_tbl");
+    pg_connect()
+        .batch_execute(&format!(
+            "CREATE TABLE {table} (price NUMERIC(10,2)); INSERT INTO {table} VALUES (12.5)"
+        ))
+        .unwrap();
+    let _drop = PgTable::adopt(table.clone());
     let rig = Rig::pg_batch(&name)
-        .query("SELECT price FROM orders")
-        .mode("full")
-        .dest_path(out.path().to_path_buf());
-    csv_column_is_refused_like_the_run(rig, &name, "price", "decimal(60,10)");
+        .query(&format!("SELECT price FROM {table}"))
+        .mode("full");
+    csv_column_is_delivered_like_check(rig, &name, "price", "decimal(60,10)", |l| {
+        l == "12.5000000000"
+    });
 }
 
 #[test]
 #[ignore = "live: mysql"]
-fn a_csv_export_of_a_decimal256_column_is_refused_by_check_like_the_run_mysql() {
+fn a_csv_export_of_a_decimal256_column_is_delivered_like_check_admits_mysql() {
     require_alive(LiveService::Mysql);
     let name = unique_name("fmt_dec_my");
-    let out = tempfile::tempdir().unwrap();
     let rig = Rig::mysql_batch(&name)
         .query("SELECT CAST(12.5 AS DECIMAL(10,2)) AS d")
-        .mode("full")
-        .dest_path(out.path().to_path_buf());
-    csv_column_is_refused_like_the_run(rig, &name, "d", "decimal(60,10)");
+        .mode("full");
+    csv_column_is_delivered_like_check(rig, &name, "d", "decimal(60,10)", |l| l == "12.5000000000");
 }
 
 /// A column no Arrow type carries, declared as an integer, is refused by the run and both `check` spellings with the one wire-mismatch code, naming the column.
@@ -580,28 +609,91 @@ fn check_still_accepts_a_csv_decimal128_export_and_a_declared_cidr_postgres() {
 
 #[test]
 #[ignore = "live: mssql"]
-fn a_csv_export_of_a_nanosecond_timestamp_column_is_refused_by_check_like_the_run_mssql() {
+fn a_csv_export_of_a_nanosecond_timestamp_column_is_delivered_like_check_admits_mssql() {
     require_alive(LiveService::Mssql);
     let name = unique_name("fmt_ns_ms");
-    let out = tempfile::tempdir().unwrap();
     let rig = Rig::mssql_batch(&name)
         .query("SELECT CAST('2024-01-01 10:30:00' AS DATETIME2) AS d")
-        .mode("full")
+        .mode("full");
+    csv_column_is_delivered_like_check(rig, &name, "d", "timestamp_ns", |l| {
+        l == "2024-01-01T10:30:00.000000000"
+    });
+}
+
+/// The csv text of a whole-table export of `table` under `format: csv`.
+fn csv_text_of_table_mssql(table: &str) -> String {
+    let out = tempfile::tempdir().unwrap();
+    let rig = Rig::mssql_batch(table)
+        .with_format("csv")
         .dest_path(out.path().to_path_buf());
-    csv_column_is_refused_like_the_run(rig, &name, "d", "timestamp_ns");
+    let o = rig.run();
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let parts: Vec<_> = files_under(out.path())
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "csv"))
+        .collect();
+    assert_eq!(parts.len(), 1, "{parts:?}");
+    std::fs::read_to_string(&parts[0]).unwrap()
+}
+
+#[test]
+#[ignore = "live: mssql"]
+fn a_csv_export_of_a_datetime_table_keeps_the_previous_release_text_and_adds_the_seventh_digit_mssql()
+ {
+    require_alive(LiveService::Mssql);
+    let coarse = unique_name("csv_dt_coarse");
+    mssql_exec(&format!(
+        "CREATE TABLE dbo.{coarse} (id INT PRIMARY KEY, c0 DATETIME2(0) NOT NULL, c3 DATETIME2(3) NOT NULL, \
+         c6 DATETIME2(6) NOT NULL, o6 DATETIMEOFFSET(6) NULL, o3 DATETIMEOFFSET(3) NOT NULL, d DATE NOT NULL, \
+         t6 TIME(6) NOT NULL, sdt SMALLDATETIME NOT NULL, dt DATETIME NOT NULL)"
+    ));
+    let _coarse_guard = MssqlTable::adopt(coarse.clone());
+    mssql_exec(&format!(
+        "INSERT INTO dbo.{coarse} VALUES \
+         (1,'2026-01-15 13:45:30','2026-01-15 13:45:30.123','2026-01-15 13:45:30.123456','2026-01-15 13:45:30.123456 +05:30',\
+          '2026-01-15 13:45:30.123 -02:00','2026-01-15','13:45:30.123456','2026-01-15 13:46','2026-01-15 13:45:30.127'),\
+         (2,'1900-01-01 00:00:00','2000-01-01 00:00:00','0001-01-01 00:00:00',NULL,\
+          '9999-12-31 23:59:59.999 +00:00','0001-01-01','00:00:00','1900-01-01','1753-01-01')"
+    ));
+    assert_eq!(
+        csv_text_of_table_mssql(&coarse),
+        "id,c0,c3,c6,o6,o3,d,t6,sdt,dt\n\
+         1,2026-01-15T13:45:30.000000,2026-01-15T13:45:30.123000,2026-01-15T13:45:30.123456,2026-01-15T08:15:30.123456Z,\
+         2026-01-15T15:45:30.123000Z,2026-01-15,13:45:30.123456,2026-01-15T13:46:00.000000,2026-01-15T13:45:30.126667\n\
+         2,1900-01-01T00:00:00.000000,2000-01-01T00:00:00.000000,0001-01-01T00:00:00.000000,,\
+         9999-12-31T23:59:59.999000Z,0001-01-01,00:00:00.000000,1900-01-01T00:00:00.000000,1753-01-01T00:00:00.000000\n"
+    );
+    let fine = unique_name("csv_dt_fine");
+    mssql_exec(&format!(
+        "CREATE TABLE dbo.{fine} (id INT PRIMARY KEY, d7 DATETIME2 NOT NULL, o7 DATETIMEOFFSET NULL)"
+    ));
+    let _fine_guard = MssqlTable::adopt(fine.clone());
+    mssql_exec(&format!(
+        "INSERT INTO dbo.{fine} VALUES (1,'2026-01-15 13:45:30.1234567','2026-01-15 13:45:30.1234567 +05:30'),\
+         (2,'2000-01-01 00:00:00',NULL)"
+    ));
+    assert_eq!(
+        csv_text_of_table_mssql(&fine),
+        "id,d7,o7\n1,2026-01-15T13:45:30.123456700,2026-01-15T08:15:30.123456700Z\n2,2000-01-01T00:00:00.000000000,\n"
+    );
 }
 
 #[test]
 #[ignore = "live: oracle"]
-fn a_csv_export_of_a_nanosecond_timestamp_column_is_refused_by_check_like_the_run_oracle() {
+fn a_csv_export_of_a_nanosecond_timestamp_column_is_delivered_like_check_admits_oracle() {
     require_alive(LiveService::Oracle);
     let name = unique_name("fmt_ns_or");
-    let out = tempfile::tempdir().unwrap();
     let rig = Rig::oracle_batch(&name)
         .query("SELECT TIMESTAMP '2024-01-01 10:30:00' AS D FROM dual")
-        .mode("full")
-        .dest_path(out.path().to_path_buf());
-    csv_column_is_refused_like_the_run(rig, &name, "D", "timestamp_ns");
+        .mode("full");
+    csv_column_is_delivered_like_check(rig, &name, "D", "timestamp_ns", |l| {
+        l == "2024-01-01T10:30:00.000000000"
+    });
 }
 
 #[test]

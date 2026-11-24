@@ -209,6 +209,28 @@ pub fn decimal_str_to_scaled_i256(s: &str, scale: i8) -> Option<i256> {
     Some(if negative { -result } else { result })
 }
 
+/// Format a scaled `Decimal256` value as exact decimal text (no float).
+pub fn scaled_i256_to_decimal_str(value: i256, scale: i8) -> String {
+    let text = value.to_string();
+    let (sign, digits) = match text.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", text.as_str()),
+    };
+    if scale <= 0 {
+        if value == i256::ZERO {
+            return "0".to_string();
+        }
+        return format!(
+            "{sign}{digits}{}",
+            "0".repeat(scale.unsigned_abs() as usize)
+        );
+    }
+    let width = scale as usize;
+    let padded = format!("{digits:0>w$}", w = width + 1);
+    let (int_part, frac) = padded.split_at(padded.len() - width);
+    format!("{sign}{int_part}.{frac}")
+}
+
 /// Scale an integer (already widened to `i128`) by `10^scale` into `i256` — the
 /// `Decimal256` analogue of the source drivers' `scale_int_to_i128`. `None` on
 /// negative scale or `i256` overflow.
@@ -334,6 +356,23 @@ pub fn rounded_f64_refusal(column: &str, text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{i256, scaled_i256_to_decimal_str};
+
+    /// `Decimal256` text is exact at both ends of the 76-digit range.
+    #[test]
+    fn i256_text_is_exact_at_the_extremes() {
+        let max = scaled_i256_to_decimal_str(i256::MAX, 0);
+        assert_eq!(max.len(), 77);
+        assert_eq!(scaled_i256_to_decimal_str(i256::MAX, 76).len(), 78);
+        assert_eq!(
+            scaled_i256_to_decimal_str(i256::MIN, 0),
+            i256::MIN.to_string()
+        );
+        assert_eq!(scaled_i256_to_decimal_str(i256::ZERO, 3), "0.000");
+        assert_eq!(scaled_i256_to_decimal_str(i256::ZERO, -3), "0");
+        assert_eq!(scaled_i256_to_decimal_str(i256::from_i128(-7), 3), "-0.007");
+    }
+
     use super::{decimal_str_to_scaled_i128, decimal_text_to_float, whole_int_text};
 
     #[test]
