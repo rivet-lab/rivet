@@ -36,7 +36,7 @@ GATE, ISLAND, OFFLINE, NIGHTLY = "gate", "island", "offline", "nightly"
 _ISLAND_TIER = re.compile(r"\] full: ")
 _OFFLINE_TIER = re.compile(r"\[offline\]: ")
 _NIGHTLY_KEY = re.compile(r"^nightly\[")
-_GATE_CLASS = re.compile(r"^(?P<matrix>[a-z_]+)\[(?P<kind>[a-z_]+)\](?: [a-z]+)?: (?P<cause>[A-Z_]+) over ")
+_GATE_CLASS = re.compile(r"^(?P<matrix>[a-z_]+)\[(?P<kind>[a-z_]+)\](?: (?P<tier>[a-z]+))?: (?P<cause>[A-Z_]+) over ")
 _CELL = re.compile(r"^(?P<cell>[A-Za-z_]\w*::\w[\w:]*) — ")
 _DATED = re.compile(r"\b20\d\d-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b")
 _ORACLE_CDC_LOAD = (
@@ -118,10 +118,10 @@ KNOWN_RED: tuple[KnownRed, ...] = (
              "2026-11-10: ClickHouse load leg, PR-PRECHECK: check exits 0 and run refuses by code (RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE, RIVET_LOAD_WAREHOUSE_REJECTED, RIVET_SOURCE_VALUE_UNREPRESENTABLE, RIVET_TYPE_UNSAFE_MAPPING) because check reads neither the values nor the format; open, closes when check refuses the same pair; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-measured 2026-11-17: the ledger-driven matrix restored the check-vs-run comparison and re-keyed the pairs to the ledger rows; re-keyed 2026-11-22 from the load stage on the live stand of main 1606571b, one run: 6 pairs (was 16), the class is the same; re-keyed 2026-11-22 to 4 pairs on the live stand of 0cd3a1c2: BOOLEAN and TINYINT(1) UNSIGNED end in an extract-stage RIVET_SOURCE_VALUE_UNREPRESENTABLE, graded at their own cells and no longer counted under the load key; re-review 2026-11-29",
              _EXPIRES),
     KnownRed("no_silent_null_load[oracle]: CHECK_RUN_SPLIT over 8 source->override pairs #e69fe066",
-             "2026-11-10: ClickHouse load leg, PR-PRECHECK: check exits 0 and run refuses by code (RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE) because check reads neither the values nor the format; open, closes when check refuses the same pair; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-measured 2026-11-17: the ledger-driven matrix restored the check-vs-run comparison and re-keyed the pairs to the ledger rows; re-keyed 2026-11-22 from the load stage on the live stand of main 1606571b, one run: 11 pairs (was 8; the Oracle pair set flaps between runs because check's one-row probe has no ORDER BY); re-keyed 2026-11-22 to the 8 load-stage pairs: the extract-stage refusals (FLOAT(10), INTERVAL DAY(9) TO SECOND(9), NUMBER) are graded at their own cell and no longer counted under the load key, the 11-pair set minus them is the 8-pair alt it replaces; re-keyed 2026-11-24 with a second observed set (alt): 7 pairs (#c2f5d4cb), DATE and TIMESTAMP(0), (3), (6), the two zoned TIMESTAMP(0) and (6) and the TIMESTAMP(6) WITH LOCAL TIME ZONE, measured three times in a row with the release binary of main 65586b63 on the live stand (duck and clickhouse targets), the same check-probe flap without ORDER BY, so each observed set is its own key and the class is not widened; the 7-pair set printed on the hosted slice 0 too (run 45329613317, job 138227559112), where a second run also printed REFUSAL_GONE over 1 pair (#cbb1c851), a pair the ledger expects refused that was delivered that time, seen once and not reproduced on the stand, cause not examined; closes when check refuses the same pair; re-review 2026-11-29",
+             "2026-11-10: ClickHouse load leg, PR-PRECHECK: check exits 0 and run refuses by code (RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE) because check reads neither the values nor the format; open, closes when check refuses the same pair; accepted 2026-11-12: 0.33 ships it as a known issue, 0.34 closes it; re-measured 2026-11-17: the ledger-driven matrix restored the check-vs-run comparison and re-keyed the pairs to the ledger rows; re-keyed 2026-11-22 from the load stage on the live stand of main 1606571b, one run: 11 pairs (was 8; the Oracle pair set flaps between runs because check's one-row probe has no ORDER BY); re-keyed 2026-11-22 to the 8 load-stage pairs: the extract-stage refusals (FLOAT(10), INTERVAL DAY(9) TO SECOND(9), NUMBER) are graded at their own cell and no longer counted under the load key, the 11-pair set minus them is the 8-pair alt it replaces; re-keyed 2026-11-24 by class (#1220): the 7-pair set #c2f5d4cb, DATE and TIMESTAMP(0), (3), (6), the two zoned TIMESTAMP(0) and (6) and the TIMESTAMP(6) WITH LOCAL TIME ZONE, measured three times in a row with the release binary of main 65586b63 on the live stand (duck and clickhouse targets) and printed on the hosted slice 0 (run 45328713775 and run 45329613317, job 138227559112), is the same check-probe flap without ORDER BY, covered by the class, so it has no alt; the hosted run 45329613317 also printed REFUSAL_GONE over 1 pair (#cbb1c851), a pair the ledger expects refused that was delivered that time, seen once and not reproduced on the stand, cause not examined; this REFUSAL_GONE set is the one alt; closes when check refuses the same pair; re-review 2026-11-29",
              _EXPIRES,
-             ("no_silent_null_load[oracle]: CHECK_RUN_SPLIT over 7 source->override pairs #c2f5d4cb",
-              "no_silent_null_load[oracle]: REFUSAL_GONE over 1 source->override pairs #cbb1c851")),
+             ("no_silent_null_load[oracle]: REFUSAL_GONE over 1 source->override pairs #cbb1c851",),
+             by_class=True),
     KnownRed("ab-diff[keyset_parallel]: DIFFERS from the previous release in files, manifest.fingerp, manifest.part_co, manifest.fingerprints[len], manifest.fingerprints[0], manifest.part_count — an observable behaviour change; it needs a verdict (intended and changelogged, or a regression)",
              "2026-11-24: ab-diff against the previous release: the parallel keyset export (chunk_by_key, chunk_size 5000, parallel 4, 50000 rows) writes 64 parts where 0.33.0 wrote 12; rows read back by DuckDB are identical (50000), exit 0 on both; the cause is the recut of #1125 (an integer or uuid key takes the seek and recut path at any table size, so the ranges are cut by density instead of by exact row percentiles), changelogged in changelog.d/keyset-uuid-recut.md; a run crashed by the previous release is resumed by this build with no duplicate and no lost row (50000 rows, 50000 distinct ids, manifest success), as it is by each release alone, measured 2026-11-24 on the live stand; intended by #1125, recorded 2026-11-24; closes when 0.34.0 is the previous release the ab-diff compares against, or when the part count is graded as intended; re-review 2026-12-15",
              _BASELINE_EXPIRES),
@@ -140,6 +140,19 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     KnownRed("no_silent_null_load_cloud[postgres]: DEFECT_PG_NULL_LIST_EMPTY_BQ over 20 source->override pairs #cf3f250f",
              "2026-11-16: type matrix, class PG_NULL_LIST_EMPTY_BQ: a NULL list is delivered as an empty list at BigQuery; accepted by owner 2026-11-21: target cannot hold a NULL list; open, closes when the product delivers it exact or refuses it by a coded cause, and the line reads DEFECT_GONE_PG_NULL_LIST_EMPTY_BQ when it changes; reviewed 2026-11-22: unverified on stand, the cloud tier needs BigQuery credentials that this review had no access to; owner accepted 2026-11-21, re-review 2026-11-25",
              "2026-11-25"),
+    KnownRed("byte-identical[mysql/full]: 1 of 1 parts differ in bytes",
+             "2026-11-24: v0.33.0 against this binary, same rows, same init config: the part's bytes differ and nothing else does; the Arrow field metadata of every MySQL date, datetime and timestamp column reads rivet.fidelity compatible where v0.33.0 wrote exact (#1084, see #994, changelog.d/fix-994-zero-date-fidelity-and-counts.md, a declared Behaviour change); the rows, the Parquet schema and the column statistics are equal, which is why the stamped cells pass; measured 2026-11-24 on a v0.33.0 release binary and a debug build of main 65586b63 over the gate's own 250000-row seed; open, closes when the release the gate grades against carries #1084: the cell passes and the entry is removed; re-review 2026-11-29",
+             _EXPIRES,
+             ("byte-identical[mysql/chunked]: 3 of 3 parts differ in bytes",)),
+    KnownRed("byte-identical[mssql/full]: 1 of 1 parts differ in bytes",
+             "2026-11-24: v0.33.0 against this binary, same rows, same init config: a DATETIME2(7) column is Timestamp(ns) where v0.33.0 wrote Timestamp(us), so the part's bytes differ and the stamped cells read updated_at as TIMESTAMP_NS against TIMESTAMP (#1083, ADR-0038 CP1, changelog.d/mssql-datetime2-7-nanoseconds.md, a declared Behaviour change that keeps the 100 ns tick the old type dropped); datetime2(0..6), datetime and smalldatetime are unchanged; measured 2026-11-24 on a v0.33.0 release binary and a debug build of main 65586b63 over the gate's own 250000-row seed; open, closes when the release the gate grades against carries #1083: the cells pass and the entry is removed; re-review 2026-11-29",
+             _EXPIRES,
+             ("byte-identical[mssql/chunked]: 3 of 3 parts differ in bytes",
+              "byte-identical[mssql/full_as_init_writes_it]: the schemas differ: previous [('id', 'BIGINT'), ('v', 'BIGINT'), ('updated_at', 'TIMESTAMP'), ('_rivet_exported_at', 'TIMESTAMP WITH TIME ZONE'), ('_rivet_row_hash', 'BIGINT')], this [('id', 'BIGINT'), ('v', 'BIGINT'), ('updated_at', 'TIMESTAMP_NS'), ('_rivet_exported_at', 'TIMESTAMP WITH TIME ZONE'), ('_rivet_row_hash', 'BIGINT')]",
+              "byte-identical[mssql/chunked_as_init_writes_it]: the schemas differ: previous [('id', 'BIGINT'), ('v', 'BIGINT'), ('updated_at', 'TIMESTAMP'), ('_rivet_exported_at', 'TIMESTAMP WITH TIME ZONE'), ('_rivet_row_hash', 'BIGINT')], this [('id', 'BIGINT'), ('v', 'BIGINT'), ('updated_at', 'TIMESTAMP_NS'), ('_rivet_exported_at', 'TIMESTAMP WITH TIME ZONE'), ('_rivet_row_hash', 'BIGINT')]")),
+    KnownRed("byte-identical[mongo/full]: 1 of 1 parts differ in bytes",
+             "2026-11-24: v0.33.0 against this binary, same documents, same init config: the part's bytes differ and nothing else does; the flat _id column of a collection holding int keys is labelled rivet.native_type number (int, long, double or decimal) with rivet.fidelity logical_string where v0.33.0 wrote objectid and exact (#1045, see #996, changelog.d/fix-996-mongo-flat-id-label.md, a declared Behaviour change); the value of every cell and the column's Arrow type are unchanged, which is why the stamped cell passes; measured 2026-11-24 on a v0.33.0 release binary and a debug build of main 65586b63 over the gate's own 250000-document seed; open, closes when the release the gate grades against carries #1045: the cell passes and the entry is removed; re-review 2026-11-29",
+             _EXPIRES),
     KnownRed(nightly_key("refusal_names_true_cause", "cause", "uncoded"),
              "2026-11-14: #917, the nightly refusal-names-true-cause part: refusals stay uncoded, name the wrong cause or a remedy flag that does not exist, or exit 0 on a refused config; open, closes with the fix of #917; reviewed 2026-11-22: #917 is still open; the refusal matrix was not re-run in this review, unverified on stand; re-review 2026-11-25",
              "2026-11-25",
@@ -280,8 +293,44 @@ def self_test() -> int:
     assert cell_of("no_silent_null[mysql] smoke: SILENT_NULL over 3 pairs #ab") is None and cell_of("x FAILED · no cell here") is None
     assert cell_key("no_silent_null[mysql] smoke: SILENT_NULL over 3 pairs #ab") == cell_key("no_silent_null[mysql] smoke: SILENT_NULL over 9 pairs #cd"), \
         "a gate class keeps its key when its count and digest change"
+    _byte_identical_keys_are_the_stage_messages()
+    _class_entries_hold_the_stage_messages()
     print("known_red self-test: ok")
     return 0
+
+
+def _byte_identical_keys_are_the_stage_messages() -> None:
+    """Every `byte-identical[...]` key of the ledger is a message the stage prints, built from its own graders."""
+    from .guarantees import Stamped, parts_differ, stamped_differ
+
+    held = {k for e in KNOWN_RED for k in e.keys() if k.startswith("byte-identical[")}
+    printed = {f"byte-identical[{engine}/{mode}]: {parts_differ(['a'] * n, ['b'] * n)}" for engine, mode, n in (("mysql", "full", 1), ("mysql", "chunked", 3), ("mssql", "full", 1), ("mssql", "chunked", 3), ("mongo", "full", 1))}
+    cols = [("id", "BIGINT"), ("v", "BIGINT"), ("updated_at", "TIMESTAMP"), ("_rivet_exported_at", "TIMESTAMP WITH TIME ZONE"), ("_rivet_row_hash", "BIGINT")]
+    now = [(n, "TIMESTAMP_NS" if n == "updated_at" else t) for n, t in cols]
+    why = stamped_differ(Stamped((1, 1), ((cols, []), (now, [])), (250000, 250000), None, None, None), 250000)
+    printed |= {f"byte-identical[mssql/{mode}_as_init_writes_it]: {why}" for mode in ("full", "chunked")}
+    assert held == printed, f"the ledger and the stage disagree: only in the ledger {sorted(held - printed)}, only in the stage {sorted(printed - held)}"
+    assert match("byte-identical[postgres/full]: 1 of 1 parts differ in bytes", _dt.date(2026, 11, 24))[0] is None and match("byte-identical[mysql/full]: 2 of 2 parts differ in bytes", _dt.date(2026, 11, 24))[0] is None, \
+        "an entry holds its own engine and cell only"
+
+
+def _class_entries_hold_the_stage_messages() -> None:
+    """Every `by_class` entry holds the message `failure_message` prints for any pair set of its own scenario, engine, tier and cause."""
+    from .property_no_silent_null import Result, failure_message
+
+    day = _dt.date(2026, 11, 24)
+    for k in KNOWN_RED:
+        if not k.by_class:
+            continue
+        m = _GATE_CLASS.match(k.match)
+        assert m, f"a class entry is a gate message: {k.match}"
+        for n in (1, 7, 9):
+            rs = [Result(f"{m['kind']}/p{i}->none/full/parquet", "x") for i in range(n)]
+            msg = failure_message(m["kind"], m["cause"], rs, m["matrix"], m["tier"] or "")
+            assert match(msg, day)[0] is k, f"the class entry {k.match} does not hold the stage message {msg}"
+    assert next(k for k in KNOWN_RED if k.match.startswith("no_silent_null_load[oracle]: CHECK_RUN_SPLIT")).by_class, \
+        "the Oracle load pair set flaps between runs (check's one-row probe has no ORDER BY): keyed by class"
+    assert match("no_silent_null_load[oracle]: CHECK_RUN_SPLIT over 7 source->override pairs #c2f5d4cb", day)[0] is not None
 
 
 def main() -> int:
