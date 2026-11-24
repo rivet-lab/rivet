@@ -3703,10 +3703,11 @@ mod tests {
         use crate::types::{RivetType, SourceColumn, TypeMapping};
         let wide = || {
             Some(vec![TypeMapping::from_source(
-                &SourceColumn::simple("n", "numeric(60,10)", true),
-                RivetType::Decimal {
-                    precision: 60,
-                    scale: 10,
+                &SourceColumn::simple("n", "text[][]", true),
+                RivetType::List {
+                    inner: Box::new(RivetType::List {
+                        inner: Box::new(RivetType::String),
+                    }),
                 },
             )])
         };

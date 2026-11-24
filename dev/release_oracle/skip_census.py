@@ -61,15 +61,16 @@ GRADED = ("PASS", "FAIL", "XFAIL", "PARTIAL")
 #: 20 counted on main and the 4 `incremental_adding_settle_*`, opted out (OFF) on main and graded now.
 #: 2026-10-29 (#719): skip 53 -> 59 (CI measured 56 on main): 3 column-grants cells grade nothing by design (2 backfill recipes whose stream carries the rows, 1 `time_window`); closes when the oracle reads a relative window.
 #: 2026-11-18 (nightly run 44227262825, 4 legs, skip 84): 42 of the 84 are `cdc.backfill` recipe runs, out of the counter and paired per test (`unpaired_backfills`); #1035 made every one-table MySQL/PostgreSQL CDC init scaffold a backfill recipe, so 20 tests carry them. 59 -> 42 is the rest: 14 skipped-export reruns, 12 empty-source runs, 10 `time_window`, 5 keyless CDC, 1 unset url_env.
+#: 2026-11-24 (nightly runs 44978587648 and 45019189856, all 4 legs logged, both measured skip 37, partial 20, deferred 7): skip 42 -> 37, partial 24 -> 20, deferred 9 -> 7. Runs with a cancelled 3/3 leg log 26/16/7 and are not a measure: lower again only from a run with every leg's log.
 VERDICT_CEILINGS: dict[str, dict[str, tuple[int, int]]] = {
     "ci": {
         "first-run": (0,  # ratchet-pin: rig-oracle-first-run (review 2027-02-01)
                       0),
-        "skip": (42,  # ratchet-pin: rig-oracle-skip (review 2027-02-01)
+        "skip": (37,  # ratchet-pin: rig-oracle-skip (review 2027-02-01)
                  3),
-        "partial": (24,  # ratchet-pin: rig-oracle-partial (review 2027-02-01)
+        "partial": (20,  # ratchet-pin: rig-oracle-partial (review 2027-02-01)
                     3),
-        "deferred": (9,  # ratchet-pin: rig-oracle-deferred (review 2027-02-01)
+        "deferred": (7,  # ratchet-pin: rig-oracle-deferred (review 2027-02-01)
                      0),
     },
     "gate": {"first-run": (0,  # ratchet-pin: rig-oracle-first-run-gate (review 2027-02-01)
