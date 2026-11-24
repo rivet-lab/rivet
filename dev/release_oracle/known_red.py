@@ -130,6 +130,19 @@ KNOWN_RED: tuple[KnownRed, ...] = (
     KnownRed("no_silent_null_load_cloud[postgres]: DEFECT_PG_NULL_LIST_EMPTY_BQ over 20 source->override pairs #cf3f250f",
              "2026-11-16: type matrix, class PG_NULL_LIST_EMPTY_BQ: a NULL list is delivered as an empty list at BigQuery; accepted by owner 2026-11-21: target cannot hold a NULL list; open, closes when the product delivers it exact or refuses it by a coded cause, and the line reads DEFECT_GONE_PG_NULL_LIST_EMPTY_BQ when it changes; reviewed 2026-11-22: unverified on stand, the cloud tier needs BigQuery credentials that this review had no access to; owner accepted 2026-11-21, re-review 2026-11-25",
              "2026-11-25"),
+    KnownRed("byte-identical[mysql/full]: 1 of 1 parts differ in bytes",
+             "2026-11-24: v0.33.0 against this binary, same rows, same init config: the part's bytes differ and nothing else does; the Arrow field metadata of every MySQL date, datetime and timestamp column reads rivet.fidelity compatible where v0.33.0 wrote exact (#1084, see #994, changelog.d/fix-994-zero-date-fidelity-and-counts.md, a declared Behaviour change); the rows, the Parquet schema and the column statistics are equal, which is why the stamped cells pass; measured 2026-11-24 on a v0.33.0 release binary and a debug build of main 65586b63 over the gate's own 250000-row seed; open, closes when the release the gate grades against carries #1084: the cell passes and the entry is removed; re-review 2026-11-29",
+             _EXPIRES,
+             ("byte-identical[mysql/chunked]: 3 of 3 parts differ in bytes",)),
+    KnownRed("byte-identical[mssql/full]: 1 of 1 parts differ in bytes",
+             "2026-11-24: v0.33.0 against this binary, same rows, same init config: a DATETIME2(7) column is Timestamp(ns) where v0.33.0 wrote Timestamp(us), so the part's bytes differ and the stamped cells read updated_at as TIMESTAMP_NS against TIMESTAMP (#1083, ADR-0038 CP1, changelog.d/mssql-datetime2-7-nanoseconds.md, a declared Behaviour change that keeps the 100 ns tick the old type dropped); datetime2(0..6), datetime and smalldatetime are unchanged; measured 2026-11-24 on a v0.33.0 release binary and a debug build of main 65586b63 over the gate's own 250000-row seed; open, closes when the release the gate grades against carries #1083: the cells pass and the entry is removed; re-review 2026-11-29",
+             _EXPIRES,
+             ("byte-identical[mssql/chunked]: 3 of 3 parts differ in bytes",
+              "byte-identical[mssql/full_as_init_writes_it]: the schemas differ: previous [('id', 'BIGINT'), ('v', 'BIGINT'), ('updated_at', 'TIMESTAMP'), ('_rivet_exported_at', 'TIMESTAMP WITH TIME ZONE'), ('_rivet_row_hash', 'BIGINT')], this [('id', 'BIGINT'), ('v', 'BIGINT'), ('updated_at', 'TIMESTAMP_NS'), ('_rivet_exported_at', 'TIMESTAMP WITH TIME ZONE'), ('_rivet_row_hash', 'BIGINT')]",
+              "byte-identical[mssql/chunked_as_init_writes_it]: the schemas differ: previous [('id', 'BIGINT'), ('v', 'BIGINT'), ('updated_at', 'TIMESTAMP'), ('_rivet_exported_at', 'TIMESTAMP WITH TIME ZONE'), ('_rivet_row_hash', 'BIGINT')], this [('id', 'BIGINT'), ('v', 'BIGINT'), ('updated_at', 'TIMESTAMP_NS'), ('_rivet_exported_at', 'TIMESTAMP WITH TIME ZONE'), ('_rivet_row_hash', 'BIGINT')]")),
+    KnownRed("byte-identical[mongo/full]: 1 of 1 parts differ in bytes",
+             "2026-11-24: v0.33.0 against this binary, same documents, same init config: the part's bytes differ and nothing else does; the flat _id column of a collection holding int keys is labelled rivet.native_type number (int, long, double or decimal) with rivet.fidelity logical_string where v0.33.0 wrote objectid and exact (#1045, see #996, changelog.d/fix-996-mongo-flat-id-label.md, a declared Behaviour change); the value of every cell and the column's Arrow type are unchanged, which is why the stamped cell passes; measured 2026-11-24 on a v0.33.0 release binary and a debug build of main 65586b63 over the gate's own 250000-document seed; open, closes when the release the gate grades against carries #1045: the cell passes and the entry is removed; re-review 2026-11-29",
+             _EXPIRES),
     KnownRed(nightly_key("refusal_names_true_cause", "cause", "uncoded"),
              "2026-11-14: #917, the nightly refusal-names-true-cause part: refusals stay uncoded, name the wrong cause or a remedy flag that does not exist, or exit 0 on a refused config; open, closes with the fix of #917; reviewed 2026-11-22: #917 is still open; the refusal matrix was not re-run in this review, unverified on stand; re-review 2026-11-25",
              "2026-11-25",
@@ -270,8 +283,24 @@ def self_test() -> int:
     assert cell_of("no_silent_null[mysql] smoke: SILENT_NULL over 3 pairs #ab") is None and cell_of("x FAILED · no cell here") is None
     assert cell_key("no_silent_null[mysql] smoke: SILENT_NULL over 3 pairs #ab") == cell_key("no_silent_null[mysql] smoke: SILENT_NULL over 9 pairs #cd"), \
         "a gate class keeps its key when its count and digest change"
+    _byte_identical_keys_are_the_stage_messages()
     print("known_red self-test: ok")
     return 0
+
+
+def _byte_identical_keys_are_the_stage_messages() -> None:
+    """Every `byte-identical[...]` key of the ledger is a message the stage prints, built from its own graders."""
+    from .guarantees import Stamped, parts_differ, stamped_differ
+
+    held = {k for e in KNOWN_RED for k in e.keys() if k.startswith("byte-identical[")}
+    printed = {f"byte-identical[{engine}/{mode}]: {parts_differ(['a'] * n, ['b'] * n)}" for engine, mode, n in (("mysql", "full", 1), ("mysql", "chunked", 3), ("mssql", "full", 1), ("mssql", "chunked", 3), ("mongo", "full", 1))}
+    cols = [("id", "BIGINT"), ("v", "BIGINT"), ("updated_at", "TIMESTAMP"), ("_rivet_exported_at", "TIMESTAMP WITH TIME ZONE"), ("_rivet_row_hash", "BIGINT")]
+    now = [(n, "TIMESTAMP_NS" if n == "updated_at" else t) for n, t in cols]
+    why = stamped_differ(Stamped((1, 1), ((cols, []), (now, [])), (250000, 250000), None, None, None), 250000)
+    printed |= {f"byte-identical[mssql/{mode}_as_init_writes_it]: {why}" for mode in ("full", "chunked")}
+    assert held == printed, f"the ledger and the stage disagree: only in the ledger {sorted(held - printed)}, only in the stage {sorted(printed - held)}"
+    assert match("byte-identical[postgres/full]: 1 of 1 parts differ in bytes", _dt.date(2026, 11, 24))[0] is None and match("byte-identical[mysql/full]: 2 of 2 parts differ in bytes", _dt.date(2026, 11, 24))[0] is None, \
+        "an entry holds its own engine and cell only"
 
 
 def main() -> int:
