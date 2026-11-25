@@ -102,7 +102,7 @@ GREEN_ON_PREV: dict[str, tuple[str, str]] = {  # ratchet-pin: fix-cells-green-on
 }  # ratchet-pin: end
 #: Fix commit (short sha) → pattern of the only cells it is the fix for, with its reason. Shrink-only.
 FIX_SCOPE: dict[str, tuple[str, str]] = {
-    "5ae3d4a5": (r"_mssql$", "2026-11-25: #1078 is an mssql-only fix; its mysql, oracle and postgres keyset cells are engine coverage added beside it and a hoist of their key lists, green on 0.33.0 by design"),
+    "5ae3d4a5": (r"(_in_parallel|_keeps_the_run)_mssql$", "2026-11-25: #1078 is an mssql-only fix of the parallel sampler; the cursor cell of every engine only had its key list hoisted and the other engines' parallel cells are coverage added beside it, green on 0.33.0 by design"),
 }
 #: Fix commit (short sha) → (a test that sees its defect, reason) for a fix that credits no live cell. Shrink-only.
 NO_LIVE_CELL: dict[str, tuple[str, str]] = {
