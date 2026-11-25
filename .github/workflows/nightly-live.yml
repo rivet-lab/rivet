@@ -489,7 +489,6 @@ jobs:
         if: always()
         run: python3 dev/pytools/statement_truth.py mysql down
 
-  # E2E: one nextest archive, four legs on a full stack, one census job.
   e2e-build:
     name: E2E build (nextest archive)
     needs: start
@@ -529,7 +528,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        leg: [pre, 1/3, 2/3, 3/3]
+        leg: [pre, 1/4, 2/4, 3/4, 4/4]
     env:
       RIVET_TEST_STATE_URL: postgresql://rivet:rivet@127.0.0.1:5433/rivet_state_ci
       RIVET_SKIP_LOG: ${{ github.workspace }}/target/rivet-skips.log
@@ -766,12 +765,15 @@ jobs:
             RIVET_LEASE_CARRIER_BIN
             macOS `hdiutil`
             RIVET_GATE_STATE_URL
+          LEGS: ${{ needs.e2e.result }}
         run: |
-          python3 -m dev.release_oracle.skip_census target/rivet-skips.log --lacking "$LACKING"
+          python3 -m dev.release_oracle.skip_census target/rivet-skips.log --lacking "$LACKING" --legs-result "$LEGS"
 
       - name: Rig oracle verdict census
         if: ${{ !cancelled() }}
-        run: python3 -m dev.release_oracle.skip_census --verdicts target/rivet-oracle.log --lane ci
+        env:
+          LEGS: ${{ needs.e2e.result }}
+        run: python3 -m dev.release_oracle.skip_census --verdicts target/rivet-oracle.log --lane ci --legs-result "$LEGS"
 
   nightly-verdict:
     name: Nightly verdict
