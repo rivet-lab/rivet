@@ -1289,6 +1289,34 @@ fn oracle_cdc_a_lob_column_is_refused_by_name() {
     assert!(err.contains("BODY CLOB"), "{err}");
 }
 
+/// A column LogMiner cannot mine (it returns no value or an UNSUPPORTED row) refuses the table by code, naming the column and its type.
+#[test]
+#[ignore = "live: requires the oracle service with LogMiner prerequisites"]
+fn oracle_cdc_a_column_logminer_cannot_mine_is_refused_by_code_and_name() {
+    let _serial = cross_process_serial("oracle_cdc");
+    for (ddl, catalog) in [
+        ("CLOB", "CLOB"),
+        ("NCLOB", "NCLOB"),
+        ("BLOB", "BLOB"),
+        ("LONG", "LONG"),
+        ("LONG RAW", "LONG RAW"),
+        ("XMLTYPE", "XMLTYPE"),
+        ("JSON", "JSON"),
+        ("BOOLEAN", "BOOLEAN"),
+        ("VECTOR(3, FLOAT32)", "VECTOR"),
+        ("UROWID", "UROWID"),
+    ] {
+        let d = tempfile::tempdir().unwrap();
+        let t = cdc_table("ora_unmin", &format!("id NUMBER(18) PRIMARY KEY, v {ddl}"));
+        let err = rig(&t, &d.path().join("cdc.ckpt"), &d.path().join("out")).run_expect_fail();
+        assert!(
+            err.contains("[RIVET_SOURCE_CDC_TABLE_UNSUPPORTED]"),
+            "{ddl}: {err}"
+        );
+        assert!(err.contains(&format!("V {catalog}")), "{ddl}: {err}");
+    }
+}
+
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
 fn oracle_cdc_cli_resolves_the_source_from_env_and_file_alike() {
@@ -1831,6 +1859,82 @@ fn oracle_cdc_date_declared_text_is_the_batch_text() {
         1..=4,
         &[("insert", 10), ("insert", 11), ("update", 1), ("delete", 2)],
     );
+}
+
+const INTERVAL_DDL: &str = "id NUMBER(10) PRIMARY KEY, ym INTERVAL YEAR(9) TO MONTH, ds INTERVAL DAY(9) TO SECOND(6), rid ROWID";
+
+const INTERVAL_SEED: [&str; 4] = [
+    "1, INTERVAL '999999999-11' YEAR(9) TO MONTH, INTERVAL '-1 02:03:04.123456' DAY(9) TO SECOND(6), CHARTOROWID('AAAR3sAAEAAAACXAAA')",
+    "2, INTERVAL '-0-1' YEAR TO MONTH, INTERVAL '0 00:00:00.000001' DAY(9) TO SECOND(6), CHARTOROWID('AAAAAAAAAAAAAAAAAA')",
+    "3, INTERVAL '0-0' YEAR TO MONTH, INTERVAL '0 00:00:00' DAY TO SECOND, NULL",
+    "4, NULL, NULL, NULL",
+];
+
+const INTERVAL_CHANGES: [&str; 5] = [
+    "INSERT INTO {t} VALUES (10, INTERVAL '-999999999-11' YEAR(9) TO MONTH, INTERVAL '99 23:59:59.999999' DAY(9) TO SECOND(6), CHARTOROWID('AAAR3sAAEAAAACXAAB'))",
+    "INSERT INTO {t} VALUES (11, NULL, NULL, NULL)",
+    "UPDATE {t} SET ym = INTERVAL '1-1' YEAR TO MONTH, ds = INTERVAL '1 02:03:04.5' DAY TO SECOND(6), rid = CHARTOROWID('AAAAAAAAAAAAAAAAAA') WHERE id = 1",
+    "UPDATE {t} SET ym = NULL WHERE id = 2",
+    "DELETE FROM {t} WHERE id = 3",
+];
+
+/// INTERVAL YEAR TO MONTH, INTERVAL DAY TO SECOND and ROWID columns reach the change stream as the ISO 8601 durations and the rowid text the batch export delivers, which the ledger spells.
+#[test]
+#[ignore = "live: requires the oracle service with LogMiner prerequisites"]
+fn oracle_cdc_interval_and_rowid_are_delivered_as_batch_delivers_them() {
+    let _serial = cross_process_serial("oracle_cdc");
+    let legs = stamp_legs(
+        INTERVAL_DDL,
+        &["YM", "DS", "RID"],
+        None,
+        "",
+        &INTERVAL_SEED,
+        &INTERVAL_CHANGES,
+    );
+    let batch = stamp_cells(&legs.batch, "batch");
+    let want = [
+        (
+            ":1",
+            "P999999999Y11M | P-1DT-2H-3M-4.123456S | AAAR3sAAEAAAACXAAA",
+        ),
+        (":2", "P-1M | PT0.000001S | 00000000.0000.0000"),
+        (":3", "PT0S | PT0S | NULL"),
+        (":4", "NULL | NULL | NULL"),
+    ];
+    for (k, cells) in want {
+        assert_eq!(batch.get(k).map(String::as_str), Some(cells), "batch {k}");
+    }
+    assert_stream_is_batch(
+        &legs,
+        "interval and rowid",
+        1..=4,
+        &[
+            ("insert", 10),
+            ("insert", 11),
+            ("update", 1),
+            ("update", 2),
+            ("delete", 3),
+        ],
+    );
+}
+
+/// A DAY TO SECOND value with a sub-microsecond digit is refused by one code on the batch export, the CDC snapshot and the change stream.
+#[test]
+#[ignore = "live: requires the oracle service with LogMiner prerequisites"]
+fn oracle_cdc_a_sub_microsecond_interval_is_one_refusal_on_batch_snapshot_and_stream() {
+    let _serial = cross_process_serial("oracle_cdc");
+    let legs = stamp_legs(
+        "id NUMBER(10) PRIMARY KEY, ds INTERVAL DAY(9) TO SECOND(9)",
+        &["DS"],
+        None,
+        "",
+        &["1, INTERVAL '0 00:00:00.000000001' DAY(9) TO SECOND(9)"],
+        &["INSERT INTO {t} VALUES (2, INTERVAL '1 00:00:00.000000005' DAY(9) TO SECOND(9))"],
+    );
+    let want = Err("refused[RIVET_SOURCE_VALUE_UNREPRESENTABLE exit 5]".to_string());
+    assert_eq!(legs.batch, want, "batch");
+    assert_eq!(legs.snapshot, want, "snapshot");
+    assert_eq!(legs.stream, want, "stream");
 }
 
 /// A Julian-only DATE (1500-02-29) declared `text` is delivered by the change stream as the batch export delivers it. Open defect: the stream refuses it by SOURCE_CDC_CELL_UNSUPPORTED.
