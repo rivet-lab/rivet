@@ -131,7 +131,7 @@ fn ledger(engine: &str) -> Ledger {
 /// `render.duck` for a type DuckDB cannot read exactly (Decimal256 reads as DOUBLE, ADR-0038 CP11).
 const ARROW: &str = "arrow";
 
-/// The `declarable` matrix-only row `native` of `engine` as the column a `columns: {C: timestamp}` override delivers: Timestamp(µs), the digits past the sixth cut.
+/// The ledger row `native` of `engine` as the column a `columns: {C: timestamp}` override delivers: Timestamp(µs), the digits past the sixth cut.
 #[cfg(feature = "oracle")]
 fn declared_timestamp_row(engine: &str, native: &str) -> Row {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/type-capability-matrix.yaml");
@@ -141,10 +141,8 @@ fn declared_timestamp_row(engine: &str, native: &str) -> Row {
         .as_sequence()
         .unwrap_or_else(|| panic!("engines.{engine}.rows is not a list"))
         .iter()
-        .find(|r| {
-            r["native_type"].as_str() == Some(native) && r["declarable"].as_bool() == Some(true)
-        })
-        .unwrap_or_else(|| panic!("engines.{engine}: no `declarable` row {native}"));
+        .find(|r| r["native_type"].as_str() == Some(native))
+        .unwrap_or_else(|| panic!("engines.{engine}: no ledger row {native}"));
     Row {
         native: native.to_string(),
         sample: r["sample"]
@@ -2147,24 +2145,13 @@ fn oracle_batch_and_cdc_deliver_every_ledger_row_alike() {
     let _serial = cross_process_serial("oracle_cdc");
     const DECLARED: &str = "TIMESTAMP(9)";
     let mut lg = ledger("oracle");
+    let declared_at = lg.rows.len();
     lg.rows.push(declared_timestamp_row("oracle", DECLARED));
     let t = crate::live_cdc_oracledb::cdc_table(
         "ledger_ora",
         &columns_ddl(&lg.rows, "id NUMBER(10) PRIMARY KEY"),
     );
-    let declared_cols: Vec<String> = lg
-        .rows
-        .iter()
-        .enumerate()
-        .filter(|(_, r)| r.native == DECLARED)
-        .map(|(i, _)| format!("C{i}: timestamp"))
-        .collect();
-    assert_eq!(
-        declared_cols.len(),
-        1,
-        "exactly one {DECLARED} column is declared `timestamp`"
-    );
-    let declared = format!("columns: {{{}}}", declared_cols.join(", "));
+    let declared = format!("columns: {{C{declared_at}: timestamp}}");
     let cdc = Rig::oracle_cdc(t.name())
         .cdc_line("initial: snapshot")
         .export_line(&declared);
