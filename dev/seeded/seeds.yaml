@@ -7506,6 +7506,8 @@ seeds:
         cells:
           - the_remedy_of_a_value_refusal_delivers_the_server_text_postgres
           - "lib:a_temporal_or_array_declared_text_is_projected_and_nothing_else_is"
+          - a_text_declared_column_loads_into_clickhouse_as_the_server_text
+          - a_text_declared_column_loads_into_bigquery_as_the_server_text
       mysql:
         na: "a MySQL date, time and datetime are read as text already and refuse nothing a text declaration would recover; the PostgreSQL text projection does not run"
       mssql:

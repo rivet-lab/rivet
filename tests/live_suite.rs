@@ -343,6 +343,8 @@ mod live_three_cycles;
 mod live_type_policy;
 #[path = "live/live_value_refusal_text_remedy.rs"]
 mod live_value_refusal_text_remedy;
+#[path = "live/live_value_refusal_text_remedy_load.rs"]
+mod live_value_refusal_text_remedy_load;
 #[path = "live/live_wave_apply.rs"]
 mod live_wave_apply;
 #[path = "live/live_zero_date_fidelity.rs"]
