@@ -862,16 +862,7 @@ impl PgChangeStream {
 
     /// Ask the catalog about each array label of a captured table's change the session has not yet had confirmed, and keep only the labels it confirms.
     fn learn_arrays(&mut self, line: &td_line::Line<'_>) -> Result<()> {
-        let mut unseen: Vec<String> = Vec::new();
-        for col in line.new.iter().chain(line.old.iter().flatten()) {
-            let base = domain_base(&self.domains, &col.typ);
-            if base.ends_with("[]")
-                && !self.arrays_seen.contains(base)
-                && !unseen.iter().any(|u| u == base)
-            {
-                unseen.push(base.to_string());
-            }
-        }
+        let unseen = unseen_array_labels(&self.domains, &self.arrays_seen, line);
         if unseen.is_empty() {
             return Ok(());
         }
@@ -1722,6 +1713,22 @@ fn array_is_server_text(oid: u32, elem_typtype: &str) -> bool {
         None => elem_typtype != "e",
     };
     server_text && !seeded!("cdc-array-text-parsed-as-list", true, false)
+}
+
+/// The distinct array labels of a line's cells, domains followed, that the catalog has not confirmed yet.
+fn unseen_array_labels(
+    domains: &Domains,
+    seen: &std::collections::HashSet<String>,
+    line: &td_line::Line<'_>,
+) -> Vec<String> {
+    let mut unseen: Vec<String> = Vec::new();
+    for col in line.new.iter().chain(line.old.iter().flatten()) {
+        let base = domain_base(domains, &col.typ);
+        if base.ends_with("[]") && !seen.contains(base) && !unseen.iter().any(|u| u == base) {
+            unseen.push(base.to_string());
+        }
+    }
+    unseen
 }
 
 /// Map every array label batch delivers as the server's text to `text`, and record every label the catalog returned.
@@ -2932,6 +2939,28 @@ mod tests {
         }
         assert_eq!(map_pg_value("bit", "110", false), None);
         assert_eq!(map_pg_value("bit", "null", false), Some(RivetValue::Null));
+    }
+
+    /// A line asks the catalog once for each array label it carries that is neither confirmed nor a plain type, the old image and a domain over an array included.
+    #[test]
+    fn unseen_array_labels_names_each_unconfirmed_array_once() {
+        let domains: Domains = [("pgd_nets".to_string(), "inet[]".to_string())].into();
+        let line = td_line::tokenize(
+            "table public.t: UPDATE: old-key: a[integer[]]:'{1}' b[inet[]]:'{2}' new-tuple: id[integer]:1 a[integer[]]:'{1}' d[pgd_nets]:'{3}' c[cidr[]]:'{4}' t[text]:'x'",
+        )
+        .unwrap();
+        let mut seen = std::collections::HashSet::new();
+        assert_eq!(
+            unseen_array_labels(&domains, &seen, &line),
+            ["integer[]", "inet[]", "cidr[]"]
+        );
+        seen.insert("inet[]".to_string());
+        assert_eq!(
+            unseen_array_labels(&domains, &seen, &line),
+            ["integer[]", "cidr[]"]
+        );
+        seen.extend(["integer[]".to_string(), "cidr[]".to_string()]);
+        assert!(unseen_array_labels(&domains, &seen, &line).is_empty());
     }
 
     /// A line whose array type label is in the domain map decodes as text and keeps the server's literal whole.
