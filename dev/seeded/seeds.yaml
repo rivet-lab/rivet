@@ -6302,6 +6302,23 @@ seeds:
       oracle:
         na: "the Oracle reader reads all_tab_cols for the one owner and table it mines, never the whole catalog"
 
+  - name: pg-cdc-array-lookup-scoped-to-current-columns
+    class: "the PostgreSQL CDC reader resolves an array label through the columns the table holds now, so a row whose column was dropped, retyped or whose table was renamed before the read is delivered as a list where the whole-catalog map delivers the server's text, and every later row of the session with it"
+    history: "found 2026-11-25 by rivet-verifier on #1214 head 3a30d17e: DROP COLUMN, ALTER COLUMN TYPE and RENAME before the first read of an inet[] row delivered Array([...]) where main delivered Bytes(\"{10.0.0.1/32,::1}\")"
+    scope: source
+    switch: pg-cdc-array-lookup-scoped-to-current-columns
+    engines:
+      postgres:
+        cells: ["lib:live_ddl_before_the_read_leaves_array_decoding_as_the_whole_catalog_map_does"]
+      mysql:
+        na: "MySQL has no array column type, so no array label is resolved"
+      mssql:
+        na: "SQL Server has no array column type, so no array label is resolved"
+      mongo:
+        na: "a MongoDB change stream carries no column types to resolve"
+      oracle:
+        na: "an Oracle collection type is refused at the mining schema, never read as an array literal"
+
   - name: oracle-cdc-number-infinity-uncoded
     class: "an Oracle CDC run that reads NUMBER infinity (LogMiner `~`) stops as an unreadable cell under RIVET_SOURCE_CDC_CELL_UNSUPPORTED where batch refuses the same value as RIVET_SOURCE_VALUE_UNREPRESENTABLE"
     history: "owner 2026-11-21 (batch and CDC must not disagree about a value); RED on #1144 head: oracle probe, FLOAT 9.99..E125 mined as `~`, batch VALUE_UNREPRESENTABLE, cdc CELL_UNSUPPORTED"

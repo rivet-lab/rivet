@@ -25,7 +25,7 @@ pub(crate) struct PgChangeStream {
     client: Client,
     /// The database's domains, so a domain-typed cell decodes as its base type.
     domains: Domains,
-    /// Array labels the catalog has been asked about, whether or not they decode as server text.
+    /// Array labels the catalog has confirmed, whether or not they decode as server text.
     arrays_seen: std::collections::HashSet<String>,
     slot: String,
     pending: VecDeque<ChangeEvent>,
@@ -860,26 +860,26 @@ impl PgChangeStream {
         decode_line(lsn, line, &self.domains, Some(&keep))
     }
 
-    /// Read the array types the captured tables hold the first time a captured table's cell names an array the session has not asked the catalog about.
+    /// Ask the catalog about each array label of a captured table's change the session has not yet had confirmed, and keep only the labels it confirms.
     fn learn_arrays(&mut self, line: &td_line::Line<'_>) -> Result<()> {
-        let unseen = |cols: &[td_line::RawColumn]| {
-            cols.iter().any(|c| {
-                let base = domain_base(&self.domains, &c.typ);
-                base.ends_with("[]") && !self.arrays_seen.contains(base)
-            })
-        };
-        if !unseen(&line.new) && !line.old.as_deref().is_some_and(unseen) {
+        let mut unseen: Vec<String> = Vec::new();
+        for col in line.new.iter().chain(line.old.iter().flatten()) {
+            let base = domain_base(&self.domains, &col.typ);
+            if base.ends_with("[]")
+                && !self.arrays_seen.contains(base)
+                && !unseen.iter().any(|u| u == base)
+            {
+                unseen.push(base.to_string());
+            }
+        }
+        if unseen.is_empty() {
             return Ok(());
         }
         let (schema, table) = split_qualified_ident(line.relations);
         if !routes(&self.configured_tables, &self.bare_schema, &schema, &table) {
             return Ok(());
         }
-        let held = load_arrays(&mut self.client, &schema, &table)?;
-        for col in line.new.iter().chain(line.old.iter().flatten()) {
-            self.arrays_seen
-                .insert(domain_base(&self.domains, &col.typ).to_string());
-        }
+        let held = load_arrays(&mut self.client, &schema, &table, &unseen)?;
         absorb_arrays(&mut self.domains, &mut self.arrays_seen, held);
         Ok(())
     }
@@ -1724,7 +1724,7 @@ fn array_is_server_text(oid: u32, elem_typtype: &str) -> bool {
     server_text && !seeded!("cdc-array-text-parsed-as-list", true, false)
 }
 
-/// Map every array label batch delivers as the server's text to `text`, and record every label read.
+/// Map every array label batch delivers as the server's text to `text`, and record every label the catalog returned.
 fn absorb_arrays(
     domains: &mut Domains,
     seen: &mut std::collections::HashSet<String>,
@@ -1776,26 +1776,35 @@ fn load_domains(client: &mut Client) -> Result<Domains> {
     Ok(domain_map(domains, arrays))
 }
 
-/// The array types the columns of `schema.table` hold, domains over arrays followed.
+/// The array types the catalog holds under `labels`, resolved by name and not through any table.
 fn load_arrays(
     client: &mut Client,
-    schema: &str,
-    table: &str,
+    #[cfg_attr(not(feature = "seeded"), allow(unused_variables))] schema: &str,
+    #[cfg_attr(not(feature = "seeded"), allow(unused_variables))] table: &str,
+    labels: &[String],
 ) -> Result<Vec<(u32, String, String)>> {
-    let rows = client.query(
-        "WITH RECURSIVE held(oid) AS ( \
-            SELECT a.atttypid FROM pg_class c \
-              JOIN pg_namespace n ON n.oid = c.relnamespace \
-              JOIN pg_attribute a ON a.attrelid = c.oid \
-             WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped \
-            UNION \
-            SELECT d.typbasetype FROM pg_type d JOIN held h ON d.oid = h.oid \
-             WHERE d.typtype = 'd') \
-         SELECT a.oid, format_type(a.oid, NULL), e.typtype::text \
-           FROM pg_type a JOIN pg_type e ON e.oid = a.typelem \
-          WHERE a.oid IN (SELECT oid FROM held) AND a.typcategory = 'A' AND a.typelem <> 0",
-        &[&schema, &table],
-    )?;
+    let rows = seeded!(
+        "pg-cdc-array-lookup-scoped-to-current-columns",
+        client.query(
+            "SELECT a.oid, format_type(a.oid, NULL), e.typtype::text \
+               FROM pg_type a JOIN pg_type e ON e.oid = a.typelem \
+              WHERE a.oid IN (SELECT to_regtype(l)::oid FROM unnest($1::text[]) l) \
+                AND a.typcategory = 'A' AND a.typelem <> 0 \
+                AND EXISTS (SELECT 1 FROM pg_class c \
+                              JOIN pg_namespace n ON n.oid = c.relnamespace \
+                              JOIN pg_attribute t ON t.attrelid = c.oid \
+                             WHERE n.nspname = $2 AND c.relname = $3 \
+                               AND t.atttypid = a.oid AND NOT t.attisdropped)",
+            &[&labels, &schema, &table],
+        )?,
+        client.query(
+            "SELECT a.oid, format_type(a.oid, NULL), e.typtype::text \
+               FROM pg_type a JOIN pg_type e ON e.oid = a.typelem \
+              WHERE a.oid IN (SELECT to_regtype(l)::oid FROM unnest($1::text[]) l) \
+                AND a.typcategory = 'A' AND a.typelem <> 0",
+            &[&labels],
+        )?
+    );
     Ok(rows
         .iter()
         .map(|r| (r.get(0), r.get(1), r.get(2)))
@@ -4037,6 +4046,91 @@ mod tests {
         arrays_met_after_open_match_the_whole_map(&[], "every");
     }
 
+    /// Live: DDL that lands between a row's write and its read leaves its array columns delivered as the whole-catalog map delivers them, for that row and for every later row of the session.
+    #[test]
+    #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
+    fn live_ddl_before_the_read_leaves_array_decoding_as_the_whole_catalog_map_does() {
+        for (tag, ddl) in [
+            ("drop", "ALTER TABLE pgd_vf DROP COLUMN ip"),
+            (
+                "retype",
+                "ALTER TABLE pgd_vf ALTER COLUMN ip TYPE text[] USING ip::text[]",
+            ),
+            ("rename", "ALTER TABLE pgd_vf RENAME TO pgd_vf2"),
+            ("droptable", "DROP TABLE pgd_vf"),
+        ] {
+            ddl_before_the_read_matches_the_whole_map(tag, ddl);
+        }
+    }
+
+    /// One scratch database: a row written, `ddl` run, then the stream reads; every cell is compared with the whole-catalog map and the array cell with the source literal.
+    fn ddl_before_the_read_matches_the_whole_map(tag: &str, ddl: &str) {
+        let mut admin = Client::connect(CONN, NoTls).unwrap();
+        let db = format!("rivet_pgd_ddl_{tag}_{}", std::process::id());
+        let slot = format!("{db}_slot");
+        admin
+            .batch_execute(&format!("DROP DATABASE IF EXISTS {db}"))
+            .unwrap();
+        admin
+            .batch_execute(&format!("CREATE DATABASE {db}"))
+            .unwrap();
+        let conn = format!("{}/{db}", CONN.rsplit_once('/').unwrap().0);
+        let mut c = Client::connect(&conn, NoTls).unwrap();
+        c.batch_execute(
+            "CREATE TABLE public.pgd_vf (id INT PRIMARY KEY, ip inet[], n int[], v text); \
+             CREATE TABLE public.pgd_vf_other (id INT PRIMARY KEY, ip inet[])",
+        )
+        .unwrap();
+        let mut stream = PgChangeStream::open(
+            &conn,
+            &slot,
+            PriorRun::default(),
+            None,
+            crate::source::cdc::PeekBound::Sized(10_000),
+            DrainMode::Continuous,
+            &[
+                "public.pgd_vf".to_string(),
+                "public.pgd_vf_other".to_string(),
+            ],
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        c.batch_execute(&format!(
+            "INSERT INTO pgd_vf VALUES (1, '{{10.0.0.1/32,::1}}', '{{1,2}}', 'x'); {ddl}; \
+             INSERT INTO pgd_vf_other VALUES (2, '{{10.9.0.1}}')"
+        ))
+        .unwrap();
+        let mut got = Vec::new();
+        while let Some(ev) = stream.next_change() {
+            let ev = ev.unwrap();
+            if ev.table.starts_with("pgd_vf") {
+                got.push((ev.image_names.clone(), ev.after.clone()));
+            }
+        }
+        let want = whole_map_changes(&mut c, &slot, &["pgd_vf", "pgd_vf_other"]);
+        drop(stream);
+        drop(c);
+        admin
+            .execute("SELECT pg_drop_replication_slot($1)", &[&slot])
+            .ok();
+        admin
+            .batch_execute(&format!("DROP DATABASE IF EXISTS {db}"))
+            .unwrap();
+        assert_eq!(got.len(), 2, "{tag}: both inserts are delivered: {got:?}");
+        assert_eq!(got, want, "{tag}");
+        for (row, literal) in [(0, "{10.0.0.1,::1}"), (1, "{10.9.0.1}")] {
+            let (names, after) = &got[row];
+            let at = names.as_ref().unwrap().iter().position(|n| n == "ip");
+            assert_eq!(
+                at.and_then(|i| after.as_ref().and_then(|a| a.get(i))),
+                Some(&RivetValue::Bytes(literal.as_bytes().to_vec())),
+                "{tag}: row {row} carries the server's text of the array: {got:?}"
+            );
+        }
+    }
+
     /// One scratch database, one stream over `configured`, every array cell compared with the whole-catalog map's decoding.
     fn arrays_met_after_open_match_the_whole_map(configured: &[String], tag: &str) {
         let mut admin = Client::connect(CONN, NoTls).unwrap();
@@ -4081,6 +4175,28 @@ mod tests {
                 got.push((ev.image_names.clone(), ev.after.clone()));
             }
         }
+        let want = whole_map_changes(&mut c, &slot, &["pgd_arr"]);
+        drop(stream);
+        drop(c);
+        admin
+            .execute("SELECT pg_drop_replication_slot($1)", &[&slot])
+            .ok();
+        admin
+            .batch_execute(&format!("DROP DATABASE IF EXISTS {db}"))
+            .unwrap();
+        assert_eq!(got.len(), 2, "{tag}: both inserts are delivered");
+        assert_eq!(got, want, "{tag}");
+        assert_eq!(
+            got[1].1.as_ref().and_then(|a| a.last()),
+            Some(&RivetValue::Bytes(b"{10.1.0.0/16}".to_vec())),
+            "{tag}: the column added mid-run carries the server's text: {got:?}"
+        );
+    }
+
+    type DecodedImage = (Option<std::sync::Arc<[String]>>, Option<Vec<RivetValue>>);
+
+    /// Every change the slot holds, decoded by the whole-catalog map as of now, cut to `tables`.
+    fn whole_map_changes(c: &mut Client, slot: &str, tables: &[&str]) -> Vec<DecodedImage> {
         let rows = c
             .query(
                 "SELECT lsn::text, data FROM pg_logical_slot_peek_changes($1, NULL, NULL)",
@@ -4108,26 +4224,12 @@ mod tests {
         for r in &rows {
             let (lsn, data): (String, String) = (r.get(0), r.get(1));
             if let Some(ev) = parse_test_decoding(&lsn, &data, &whole).unwrap()
-                && ev.table == "pgd_arr"
+                && tables.contains(&ev.table.as_str())
             {
                 want.push((ev.image_names.clone(), ev.after.clone()));
             }
         }
-        drop(stream);
-        drop(c);
-        admin
-            .execute("SELECT pg_drop_replication_slot($1)", &[&slot])
-            .ok();
-        admin
-            .batch_execute(&format!("DROP DATABASE IF EXISTS {db}"))
-            .unwrap();
-        assert_eq!(got.len(), 2, "{tag}: both inserts are delivered");
-        assert_eq!(got, want, "{tag}");
-        assert_eq!(
-            got[1].1.as_ref().and_then(|a| a.last()),
-            Some(&RivetValue::Bytes(b"{10.1.0.0/16}".to_vec())),
-            "{tag}: the column added mid-run carries the server's text: {got:?}"
-        );
+        want
     }
 
     /// Live: the label resolver agrees with the reader's own domain map for every domain on the server.
