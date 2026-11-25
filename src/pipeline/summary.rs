@@ -84,6 +84,8 @@ pub struct RunSummary {
     pub cursor_high: Option<String>,
     /// The source columns as the run resolved them at OPEN — what the load spec records.
     pub open_mappings: Option<Vec<crate::types::TypeMapping>>,
+    /// Schema baselines this run observed, stored only when the run ends clean.
+    pub pending_baselines: crate::state::PendingBaselines,
     /// The source primary key of the run's table, read at OPEN with the mappings.
     pub open_primary_key: Option<Vec<String>>,
     /// The columns the source declares finer than a microsecond, read at OPEN with the mappings.
@@ -246,6 +248,7 @@ impl RunSummary {
             cursor_low: None,
             cursor_high: None,
             open_mappings: None,
+            pending_baselines: Default::default(),
             open_primary_key: None,
             open_finer_than_microsecond: Vec::new(),
             journal,
@@ -309,6 +312,7 @@ impl RunSummary {
             cursor_low: None,
             cursor_high: None,
             open_mappings: None,
+            pending_baselines: Default::default(),
             open_primary_key: None,
             open_finer_than_microsecond: Vec::new(),
             journal,

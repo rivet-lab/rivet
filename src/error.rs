@@ -1135,7 +1135,7 @@ pub mod codes {
     /// A source value the column's Arrow type has no faithful reading for (PG `infinity`, `24:00:00`).
     pub const SOURCE_VALUE_UNREPRESENTABLE: Code = refusal(
         "RIVET_SOURCE_VALUE_UNREPRESENTABLE",
-        "map the value to a representable one in the export's `query:`, or exclude the column",
+        "declare the column `text` under `columns:` where the message names it, or map the value to a representable one in the export's `query:`, or exclude the column",
     );
     /// A planner probe (range bound, keyset boundary or ceiling) returned a value of a type the adapter has no reader for.
     pub const SOURCE_PROBE_UNREADABLE: Code = refusal(
