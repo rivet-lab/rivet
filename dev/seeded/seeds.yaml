@@ -6353,6 +6353,23 @@ seeds:
       oracle:
         na: "an Oracle collection type is refused at the mining schema, never read as an array literal"
 
+  - name: pg-cdc-user-schema-label-asked-of-catalog
+    class: "the PostgreSQL CDC reader puts the array label of a schema other than pg_catalog to the catalog by to_regtype, which raises permission denied for a schema the CDC role cannot use, so a change of a table outside the export stops the run"
+    history: "found 2026-11-25 by rivet-verifier on #1214 head 27141343: a REPLICATION role with no USAGE on schema secret, a secret.mood[] column changed and then a captured public table changed, stopped on permission denied for schema secret where main delivered both rows"
+    scope: source
+    switch: pg-cdc-user-schema-label-asked-of-catalog
+    engines:
+      postgres:
+        cells: ["lib:live_a_role_without_usage_on_a_schema_reads_past_its_array_labels"]
+      mysql:
+        na: "MySQL has no array column type, so no array label is resolved"
+      mssql:
+        na: "SQL Server has no array column type, so no array label is resolved"
+      mongo:
+        na: "a MongoDB change stream carries no column types to resolve"
+      oracle:
+        na: "an Oracle collection type is refused at the mining schema, never read as an array literal"
+
   - name: pg-cdc-unheld-array-label-asked-per-row
     class: "the PostgreSQL CDC reader asks the catalog again for an array label it has been told the catalog does not hold, so each row carrying a renamed or dropped type costs a catalog query and its transactions"
     history: "found 2026-11-25 by rivet-verifier on #1214 head a719fc94: 20000 rows of a renamed composite array read in 18.6 s and 40025 transactions against 0.26 s and 25 on main"

@@ -1852,8 +1852,34 @@ fn load_domains(client: &mut Client) -> Result<(Domains, bool)> {
     ))
 }
 
-/// The built-in array types the catalog holds under `labels`, named as a search path of `pg_catalog` alone prints them; an array type outside `pg_catalog` is decided at the session open, never here.
+/// Whether a printed array label can name a built-in `pg_catalog` type: unqualified, or qualified by `pg_catalog`; a label of another schema is decided at the session open and never asked.
+fn names_pg_catalog_type(label: &str) -> bool {
+    let mut quoted = false;
+    for (at, ch) in label.char_indices() {
+        match ch {
+            '"' => quoted = !quoted,
+            '.' if !quoted => return &label[..at] == "pg_catalog",
+            _ => {}
+        }
+    }
+    true
+}
+
+/// The built-in array types the catalog holds under the `pg_catalog` names among `labels`, named as a search path of `pg_catalog` alone prints them; an array type outside `pg_catalog` is decided at the session open, and a label of a schema the role cannot use is never put to the catalog.
 fn load_arrays(client: &mut Client, labels: &[String]) -> Result<Vec<(u32, String, String)>> {
+    let asked: Vec<&String> = labels
+        .iter()
+        .filter(|l| {
+            seeded!(
+                "pg-cdc-user-schema-label-asked-of-catalog",
+                true,
+                names_pg_catalog_type(l)
+            )
+        })
+        .collect();
+    if asked.is_empty() {
+        return Ok(Vec::new());
+    }
     let ceiling = seeded!(
         "pg-cdc-array-map-decided-at-read-time",
         u32::MAX,
@@ -1866,7 +1892,7 @@ fn load_arrays(client: &mut Client, labels: &[String]) -> Result<Vec<(u32, Strin
            FROM pg_type a JOIN pg_type e ON e.oid = a.typelem \
           WHERE a.oid IN (SELECT to_regtype(l)::oid FROM unnest($1::text[]) l) \
             AND a.typcategory = 'A' AND a.typelem <> 0 AND a.oid < $2",
-        &[&labels, &ceiling],
+        &[&asked, &ceiling],
     )?;
     tx.commit()?;
     Ok(rows
@@ -3049,6 +3075,28 @@ mod tests {
         assert_eq!(domains.get("gone[]"), None);
         let want: std::collections::HashSet<String> = asked.into_iter().collect();
         assert_eq!(seen, want);
+    }
+
+    /// Only an unqualified label or one qualified by `pg_catalog` is put to the catalog; a label of any other schema, quoted or not, never is.
+    #[test]
+    fn only_a_pg_catalog_label_is_put_to_the_catalog() {
+        for (label, asked) in [
+            ("inet[]", true),
+            ("integer[]", true),
+            ("character varying[]", true),
+            ("\"char\"[]", true),
+            ("\"a.b\"[]", true),
+            ("pg_catalog.inet[]", true),
+            ("secret.mood[]", false),
+            ("public.comp[]", false),
+            ("information_schema.sql_identifier[]", false),
+            ("\"Odd Schema\".t[]", false),
+            ("\"a.b\".t[]", false),
+            ("\"a\"\"b\".t[]", false),
+            ("pg_catalogs.t[]", false),
+        ] {
+            assert_eq!(names_pg_catalog_type(label), asked, "{label}");
+        }
     }
 
     /// The session open reads every array type when a user type takes a built-in name, and only the user-defined ones otherwise.
@@ -4508,7 +4556,7 @@ mod tests {
         );
     }
 
-    /// Live: after the open, 300 rows carry the label of a composite type renamed after it, and are read in a handful of transactions, not one lookup per row.
+    /// Live: a session that opens and then reads 300 rows carrying the label of a composite type renamed after the open commits a handful of transactions, counted once every backend of the database has exited and flushed its statistics.
     #[test]
     #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
     fn live_a_label_the_catalog_does_not_hold_is_asked_once_per_session() {
@@ -4522,8 +4570,44 @@ mod tests {
             .batch_execute(&format!("CREATE DATABASE {db}"))
             .unwrap();
         let conn = format!("{}/{db}", CONN.rsplit_once('/').unwrap().0);
-        let mut c = Client::connect(&conn, NoTls).unwrap();
-        c.batch_execute(COMP_TABLE).unwrap();
+        let mut setup = Client::connect(&conn, NoTls).unwrap();
+        setup.batch_execute(COMP_TABLE).unwrap();
+        drop(setup);
+        let settled = |admin: &mut Client| -> i64 {
+            for _ in 0..100 {
+                let backends: i64 = admin
+                    .query_one(
+                        "SELECT count(*) FROM pg_stat_activity WHERE datname = $1",
+                        &[&db],
+                    )
+                    .unwrap()
+                    .get(0);
+                if backends == 0 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            let mut last = -1;
+            for _ in 0..40 {
+                admin
+                    .batch_execute("SELECT pg_stat_clear_snapshot()")
+                    .unwrap();
+                let now: i64 = admin
+                    .query_one(
+                        "SELECT (xact_commit + xact_rollback)::bigint FROM pg_stat_database WHERE datname = $1",
+                        &[&db],
+                    )
+                    .unwrap()
+                    .get(0);
+                if now == last {
+                    return now;
+                }
+                last = now;
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            }
+            last
+        };
+        let before = settled(&mut admin);
         let mut stream = PgChangeStream::open(
             &conn,
             &slot,
@@ -4537,48 +4621,109 @@ mod tests {
             None,
         )
         .unwrap();
+        let mut c = Client::connect(&conn, NoTls).unwrap();
         c.batch_execute(
             "ALTER TYPE comp RENAME TO comp2; \
              INSERT INTO t SELECT g, ARRAY[ROW(g,'x')::comp2] FROM generate_series(1,300) g; \
              ALTER TABLE t ADD COLUMN v text; INSERT INTO t (id, v) VALUES (1000, 'z')",
         )
         .unwrap();
-        let settled = |admin: &mut Client, col: &str| -> i64 {
-            let mut last = -1;
-            for _ in 0..40 {
-                admin
-                    .batch_execute("SELECT pg_stat_clear_snapshot()")
-                    .unwrap();
-                let now: i64 = admin
-                    .query_one(
-                        &format!("SELECT {col}::bigint FROM pg_stat_database WHERE datname = $1"),
-                        &[&db],
-                    )
-                    .unwrap()
-                    .get(0);
-                if now == last {
-                    return now;
-                }
-                last = now;
-                std::thread::sleep(std::time::Duration::from_millis(400));
-            }
-            last
-        };
-        let xacts = "xact_commit + xact_rollback";
-        let before = (
-            settled(&mut admin, xacts),
-            settled(&mut admin, "tup_returned"),
-        );
         let mut events = 0;
         while let Some(ev) = stream.next_change() {
             ev.unwrap();
             events += 1;
         }
-        let after = (
-            settled(&mut admin, xacts),
-            settled(&mut admin, "tup_returned"),
-        );
         drop(stream);
+        drop(c);
+        let txs = settled(&mut admin) - before;
+        admin
+            .execute("SELECT pg_drop_replication_slot($1)", &[&slot])
+            .ok();
+        admin
+            .batch_execute(&format!("DROP DATABASE IF EXISTS {db}"))
+            .unwrap();
+        eprintln!("{events} events read in {txs} transactions");
+        assert_eq!(events, 301);
+        assert!(
+            txs < LABEL_LOOKUP_TRANSACTION_CEILING,
+            "301 events read in {txs} transactions, over {LABEL_LOOKUP_TRANSACTION_CEILING}: a label the catalog does not hold is asked again for each row"
+        );
+    }
+
+    /// Live: a session under a role with no USAGE on the schema of a changed table's array type delivers the captured table's rows as the whole-catalog map does, where the slot also holds a change of that schema.
+    #[test]
+    #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
+    fn live_a_role_without_usage_on_a_schema_reads_past_its_array_labels() {
+        let mut admin = Client::connect(CONN, NoTls).unwrap();
+        let db = format!("rivet_pgd_role_{}", std::process::id());
+        let role = format!("rvt_pgd_{}", std::process::id());
+        let slot = format!("{db}_slot");
+        admin
+            .batch_execute(&format!("DROP DATABASE IF EXISTS {db}"))
+            .unwrap();
+        admin
+            .batch_execute(&format!("DROP ROLE IF EXISTS {role}"))
+            .unwrap();
+        admin
+            .batch_execute(&format!("CREATE DATABASE {db}"))
+            .unwrap();
+        admin
+            .batch_execute(&format!(
+                "CREATE ROLE {role} LOGIN REPLICATION PASSWORD 'pw'"
+            ))
+            .unwrap();
+        let base = CONN.rsplit_once('/').unwrap().0;
+        let conn = format!("{base}/{db}");
+        let role_conn = format!(
+            "{}/{db}",
+            base.replacen("rivet:rivet@", &format!("{role}:pw@"), 1)
+        );
+        let mut c = Client::connect(&conn, NoTls).unwrap();
+        c.batch_execute(&format!(
+            "CREATE SCHEMA secret; CREATE TYPE secret.mood AS ENUM ('a', 'b'); \
+             CREATE TABLE secret.s (id INT PRIMARY KEY, m secret.mood[]); \
+             CREATE TABLE public.pgd_role_t (id INT PRIMARY KEY, ip inet[], v TEXT); \
+             GRANT SELECT ON public.pgd_role_t TO {role}"
+        ))
+        .unwrap();
+        let opened = PgChangeStream::open(
+            &role_conn,
+            &slot,
+            PriorRun::default(),
+            None,
+            crate::source::cdc::PeekBound::Sized(10_000),
+            DrainMode::Continuous,
+            &["public.pgd_role_t".to_string()],
+            None,
+            None,
+            None,
+        );
+        let mut got = Vec::new();
+        let mut failures = Vec::new();
+        let mut whole = None;
+        if let Ok(mut stream) = opened {
+            whole = Some(whole_map(&mut c));
+            c.batch_execute(
+                "INSERT INTO secret.s VALUES (1, '{a,b}'); \
+                 INSERT INTO public.pgd_role_t VALUES (1, '{10.0.0.1}', 'x')",
+            )
+            .unwrap();
+            while let Some(ev) = stream.next_change() {
+                match ev {
+                    Ok(ev) if ev.table == "pgd_role_t" => {
+                        got.push((ev.image_names.clone(), ev.after.clone()));
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        failures.push(format!("{e:#}"));
+                        break;
+                    }
+                }
+            }
+        } else if let Err(e) = opened {
+            failures.push(format!("open: {e:#}"));
+        }
+        let want = whole.map(|w| changes_under(&mut c, &slot, &["pgd_role_t"], &w));
         drop(c);
         admin
             .execute("SELECT pg_drop_replication_slot($1)", &[&slot])
@@ -4586,12 +4731,18 @@ mod tests {
         admin
             .batch_execute(&format!("DROP DATABASE IF EXISTS {db}"))
             .unwrap();
-        let (txs, tups) = (after.0 - before.0, after.1 - before.1);
-        eprintln!("{events} events read in {txs} transactions, {tups} tuples");
-        assert_eq!(events, 301);
-        assert!(
-            txs < LABEL_LOOKUP_TRANSACTION_CEILING,
-            "301 events read in {txs} transactions, over {LABEL_LOOKUP_TRANSACTION_CEILING}: a label the catalog does not hold is asked again for each row"
+        admin
+            .batch_execute(&format!("DROP ROLE IF EXISTS {role}"))
+            .unwrap();
+        assert_eq!(failures, Vec::<String>::new(), "the stream stopped");
+        assert_eq!(Some(&got), want.as_ref());
+        assert_eq!(got.len(), 1, "{got:?}");
+        let (names, after) = &got[0];
+        let at = names.as_ref().unwrap().iter().position(|n| n == "ip");
+        assert_eq!(
+            at.and_then(|i| after.as_ref().and_then(|a| a.get(i))),
+            Some(&RivetValue::Bytes(b"{10.0.0.1}".to_vec())),
+            "{got:?}"
         );
     }
 
