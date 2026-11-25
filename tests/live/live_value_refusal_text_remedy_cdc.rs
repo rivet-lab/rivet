@@ -135,6 +135,16 @@ fn a_stream_only_export_declared_text_is_admitted_as_it_was_postgres() {
         put(&mut scn, literal);
         let name = scn.rig.export_name().to_string();
         both_check_spellings_accept(&scn.rig, &name);
+        scn.rig.run_ok();
+        let source: i64 = oracle()
+            .query_one(&format!("SELECT count(*) FROM {}", scn.table), &[])
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            parquet_column_values(&scn.rig, "id").len() as i64,
+            source,
+            "{label}: the stream-only run delivers every source row"
+        );
     }
 }
 

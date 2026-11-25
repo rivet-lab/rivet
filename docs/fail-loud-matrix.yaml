@@ -65,7 +65,7 @@ scenarios:
     oracle:   { test: oracle_cdc_a_date_override_refuses_a_time_of_day_not_drops_it }
 
   - id: override_text_over_a_server_text_column_is_refused_on_a_pending_cdc_baseline
-    what: "a PostgreSQL date, time, timestamp, timestamptz or array column declared `text` under `columns:` on a CDC export with a pending baseline is refused RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH (exit 1) by plan, check, doctor and run before a row is delivered, because the baseline would write the server's text while the change stream renders the cell in its own form; removing the declaration delivers the column's own type; a temporal cursor_column declared `text` is refused RIVET_PLAN_CURSOR_TYPE_UNSUPPORTED (exit 5)"
+    what: "a PostgreSQL date, time, timestamp, timestamptz or array column declared `text` under `columns:` on a CDC export with a pending baseline is refused RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH (exit 1) by check, doctor and run before a row is delivered, because the baseline would write the server's text while the change stream renders the cell in its own form; removing the declaration delivers the column's own type; a temporal cursor_column declared `text` is refused RIVET_PLAN_CURSOR_TYPE_UNSUPPORTED (exit 5)"
     postgres: { test: a_pending_baseline_declared_text_over_a_server_text_column_is_refused_and_its_remedy_delivers_postgres }
     mysql:    { na: "the server-text projection of a declared text column is a PostgreSQL batch path (col::text); MySQL reads its temporal values through its own converter on every leg" }
     mssql:    { na: "SQL Server refuses a datetime2 under a text override on every leg (mssql_a_datetime2_declared_text_is_one_refusal_on_batch_and_cdc), so no server text reaches a baseline" }
