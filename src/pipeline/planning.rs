@@ -99,8 +99,8 @@ fn refuse_text_the_stream_renders_otherwise(
         crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH,
         "export '{parent}': column '{column}' is declared text over a `{native}` column, which the \
          baseline leg would deliver as the server's own text while the change stream renders the \
-         same cell in its own form, so one `__changes` log would hold two spellings of it; nothing \
-         was read or written. Remove `{column}` from `columns:`: the baseline and the stream then \
+         same cell in its own form, so one `__changes` log would hold two spellings of it; no row \
+         was delivered. Remove `{column}` from `columns:`: the baseline and the stream then \
          both deliver the `{native}` column's own type."
     )
 }

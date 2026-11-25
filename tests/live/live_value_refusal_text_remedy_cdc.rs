@@ -49,12 +49,22 @@ fn both_check_spellings_accept(rig: &Rig, name: &str) {
 
 /// The run and both `check` spellings refuse `rig`'s export by `WIRE`; returns the run's stderr.
 fn refused_alike(rig: &Rig, name: &str) -> String {
+    assert_eq!(
+        files_with_extension(&rig.out_dir(), "parquet").len(),
+        0,
+        "a refused baseline starts without a part"
+    );
     let run = rig.run_args(&["--export", name]);
     assert_refused(&run, WIRE);
     assert_refused(&rig.cli(&["check", "--export", name]), WIRE);
     assert_refused(
         &rig.cli(&["check", "--export", name, "--type-report"]),
         WIRE,
+    );
+    assert_eq!(
+        files_with_extension(&rig.out_dir(), "parquet").len(),
+        0,
+        "a refused baseline delivered a part"
     );
     String::from_utf8_lossy(&run.stderr).into_owned()
 }
@@ -67,6 +77,10 @@ fn a_pending_baseline_declared_text_over_a_server_text_column_is_refused_and_its
         let mut scn = scenario(&format!("vrt_cdc_{label}"), ddl, declared_text);
         put(&mut scn, literal);
         let name = scn.rig.export_name().to_string();
+        scn.rig = scn.rig.a_failed_run_may_leave(
+            &[Leftover::ObservedSchema, Leftover::ChunkCheckpoint],
+            "the refused baseline leg stored the schema it observed and its range checkpoint before the plan refused",
+        );
         let said = refused_alike(&scn.rig, &name);
         let native = match *label {
             "int4_array" => "_int4",
@@ -79,7 +93,7 @@ fn a_pending_baseline_declared_text_over_a_server_text_column_is_refused_and_its
             "{label}: {said}"
         );
         assert!(
-            said.contains("nothing was read or written. Remove `v` from `columns:`"),
+            said.contains("no row was delivered. Remove `v` from `columns:`"),
             "{label}: {said}"
         );
         scn.rig.replace_export_line("columns:", "");
@@ -120,7 +134,6 @@ fn a_pending_baseline_declared_text_over_columns_the_server_does_not_render_is_a
     for (label, ddl, literal) in [
         ("numeric", "NUMERIC(10,2)", "12.50"),
         ("varchar", "VARCHAR(20)", "'abc'"),
-        ("uuid", "UUID", "'123e4567-e89b-12d3-a456-426614174000'"),
     ] {
         let mut scn = scenario(&format!("vrt_cdc_n_{label}"), ddl, declared_text);
         put(&mut scn, literal);

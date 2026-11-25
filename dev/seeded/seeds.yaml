@@ -5868,7 +5868,7 @@ seeds:
           - mysql_cdc_a_datetime_or_timestamp_as_text_is_the_batch_text_byte_for_byte
           - "lib:an_oracle_or_mysql_stamp_in_a_text_column_prints_as_the_batch_prints_it"
       postgres:
-        na: "the batch export refuses text over a timestamp on PostgreSQL, so no batch text exists to differ from; the stream text stays chrono form, an open defect graded by open_defect_a_pg_timestamp_declared_text_is_one_verdict_on_batch_and_the_stream"
+        na: "the PostgreSQL stream text stays chrono form while batch delivers the server's text, an open defect graded by open_defect_a_pg_timestamp_declared_text_is_one_verdict_on_batch_and_the_stream"
       mssql:
         na: "the override table reads no text over a datetime2 on SQL Server, so batch and the stream both refuse it by code (mssql_a_datetime2_declared_text_is_one_refusal_on_batch_and_cdc) and no text is written to differ"
       mongo:
