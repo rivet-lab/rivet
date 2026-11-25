@@ -535,21 +535,31 @@ mod tests {
         let pg = config_of("postgres");
         let mut mysql = config_of("postgres");
         mysql.source.source_type = SourceType::Mysql;
-        text_declared(&mysql, RivetType::Date, RivetType::String)
-            .expect("a source that is not PostgreSQL");
-        text_declared(&pg, RivetType::Int64, RivetType::String).expect("an integer cursor");
-        text_declared(&pg, RivetType::Date, RivetType::Int64)
-            .expect("a declaration that is not text");
+        assert!(
+            text_declared(&mysql, RivetType::Date, RivetType::String).is_ok(),
+            "a source that is not PostgreSQL"
+        );
+        assert!(
+            text_declared(&pg, RivetType::Int64, RivetType::String).is_ok(),
+            "an integer cursor"
+        );
+        assert!(
+            text_declared(&pg, RivetType::Date, RivetType::Int64).is_ok(),
+            "a declaration that is not text"
+        );
         let mut probe = ProbeSource::describing(RivetType::Date, Some(false));
         let overrides = crate::types::ColumnOverrides::from([("k".to_string(), RivetType::String)]);
-        refuse_text_declared_temporal(
-            &mut probe,
-            &pg,
-            &pg.exports[0],
-            "SELECT k FROM t",
-            "other",
-            &overrides,
-        )
-        .expect("a column nothing declares");
+        assert!(
+            refuse_text_declared_temporal(
+                &mut probe,
+                &pg,
+                &pg.exports[0],
+                "SELECT k FROM t",
+                "other",
+                &overrides,
+            )
+            .is_ok(),
+            "a column nothing declares"
+        );
     }
 }

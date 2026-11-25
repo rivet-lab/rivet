@@ -500,34 +500,51 @@ mod tests {
     fn the_inputs_next_to_a_refused_baseline_declaration_are_admitted() {
         let date = || connect_to("date", crate::types::RivetType::Date);
         let pg = one_export_config("postgres", "");
-        run(&pg, &pg.exports[0], &declared_text_plan("d"), date()).expect("no snapshot parent");
-        run(
-            &pg,
-            &stream_leg(&pg),
-            &crate::plan::test_support::test_plan(),
-            date(),
-        )
-        .expect("no declared column");
-        run(
-            &pg,
-            &stream_leg(&pg),
-            &declared_text_plan("d"),
-            connect_to("int4", crate::types::RivetType::Int32),
-        )
-        .expect("a column the server does not render as text");
-        run(&pg, &stream_leg(&pg), &declared_text_plan("other"), date())
-            .expect("a declaration over another column");
-        run(&pg, &stream_leg(&pg), &declared_text_plan("d"), |_| {
-            anyhow::bail!("unreachable")
-        })
-        .expect("an unreachable source");
+        assert!(
+            run(&pg, &pg.exports[0], &declared_text_plan("d"), date()).is_ok(),
+            "no snapshot parent"
+        );
+        assert!(
+            run(
+                &pg,
+                &stream_leg(&pg),
+                &crate::plan::test_support::test_plan(),
+                date(),
+            )
+            .is_ok(),
+            "no declared column"
+        );
+        assert!(
+            run(
+                &pg,
+                &stream_leg(&pg),
+                &declared_text_plan("d"),
+                connect_to("int4", crate::types::RivetType::Int32),
+            )
+            .is_ok(),
+            "a column the server does not render as text"
+        );
+        assert!(
+            run(&pg, &stream_leg(&pg), &declared_text_plan("other"), date()).is_ok(),
+            "a declaration over another column"
+        );
+        assert!(
+            run(&pg, &stream_leg(&pg), &declared_text_plan("d"), |_| {
+                anyhow::bail!("unreachable")
+            })
+            .is_ok(),
+            "an unreachable source"
+        );
         let mysql = one_export_config("mysql", "");
-        run(
-            &mysql,
-            &stream_leg(&mysql),
-            &declared_text_plan("d"),
-            date(),
-        )
-        .expect("a source that is not PostgreSQL");
+        assert!(
+            run(
+                &mysql,
+                &stream_leg(&mysql),
+                &declared_text_plan("d"),
+                date(),
+            )
+            .is_ok(),
+            "a source that is not PostgreSQL"
+        );
     }
 }
