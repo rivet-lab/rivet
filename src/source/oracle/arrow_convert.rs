@@ -30,14 +30,6 @@ pub(super) fn bare_number_warning(name: &str) -> String {
     )
 }
 
-/// The warning of a `TIMESTAMP(7..9)` column `name` read at microseconds.
-#[cfg(feature = "seeded")]
-fn truncated_timestamp_warning(name: &str) -> String {
-    format!(
-        "column `{name}`: TIMESTAMP(7..9) is read at microseconds, so its sub-microsecond digits are dropped"
-    )
-}
-
 /// The Rivet type for one re-projected column.
 pub(super) fn oracle_type_to_rivet(
     meta: &Metadata,
@@ -195,7 +187,9 @@ fn with_oracle_warning(mapping: TypeMapping, bare_number: bool, sub_us: bool) ->
                     fidelity: crate::types::TypeFidelity::Lossy,
                     ..mapping
                 }
-                .with_warning(truncated_timestamp_warning(&name))
+                .with_warning(format!(
+                    "column `{name}`: TIMESTAMP(7..9) is read at microseconds, so its sub-microsecond digits are dropped"
+                ))
             },
             mapping.with_text(TextForm::IsoTimestampNanos)
         )
