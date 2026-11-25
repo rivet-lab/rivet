@@ -4473,12 +4473,11 @@ mod tests {
                 diverged.push(format!("{tag}:\n  stream {got:?}\n  main   {want:?}"));
             }
         }
-        assert!(
-            diverged.is_empty(),
-            "{} of {} scenarios decode differently from the open-time whole map:\n{}",
-            diverged.len(),
-            scenarios.len(),
-            diverged.join("\n")
+        assert_eq!(
+            diverged,
+            Vec::<String>::new(),
+            "scenarios of {} decode differently from the open-time whole map",
+            scenarios.len()
         );
     }
 
