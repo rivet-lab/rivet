@@ -7495,3 +7495,21 @@ seeds:
           - "lib:a_date32_inside_a_list_that_chrono_cannot_name_is_refused_not_written_as_an_empty_string"
           - "lib:a_microsecond_timestamp_chrono_cannot_name_is_refused_not_written_as_an_empty_cell"
           - "lib:a_microsecond_timestamp_inside_a_list_that_chrono_cannot_name_is_refused_not_written_as_an_empty_string"
+
+  - name: range-refusal-names-no-columns-remedy
+    class: "a date or timestamp load refusal (RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE) names only a CAST in the export's query: and never the columns: {c: text} declaration that delivers the value as text, so an operator on a source whose query: is not theirs to edit is told no remedy that fits their export"
+    history: "owner decision 2026-11-25 (native first, operator text remedy); RED on main 2026-11-25 by the declared-text cells (the refusal named only query:)"
+    scope: target
+    switch: range-refusal-names-no-columns-remedy
+    engines:
+      clickhouse:
+        cells:
+          - text_remedy_lands_in_clickhouse_mysql_date
+          - text_remedy_lands_in_clickhouse_mysql_datetime6
+          - "lib:a_range_refusal_names_the_text_remedy_in_both_forms"
+      bigquery:
+        cells:
+          - text_remedy_lands_in_bigquery_mysql_date
+          - "lib:a_range_refusal_names_the_text_remedy_in_both_forms"
+      snowflake:
+        na: "Snowflake holds every year as a form and has no range refusal, so no Snowflake load reaches the range remedy"

@@ -137,6 +137,44 @@ impl SqlEngine {
         }
     }
 
+    /// `(id, expr)` of every row of `table` ordered by id, `expr` read as the server's own text (`None` for NULL).
+    pub fn id_texts(self, table: &str, expr: &str) -> Vec<(i64, Option<String>)> {
+        const NULL: &str = "<<NULL>>";
+        let split = |l: String| -> (i64, Option<String>) {
+            let (a, b) = l.split_once('\t').expect("two columns");
+            (a.parse().expect("id"), (b != NULL).then(|| b.to_string()))
+        };
+        match self {
+            SqlEngine::Mysql => mysql_connect()
+                .query::<(i64, Option<String>), _>(format!(
+                    "SELECT id, CAST(({expr}) AS CHAR) FROM {table} ORDER BY id"
+                ))
+                .expect("mysql read"),
+            SqlEngine::Pg => pg_connect()
+                .query(
+                    &format!("SELECT id, ({expr})::text FROM {table} ORDER BY id"),
+                    &[],
+                )
+                .expect("pg read")
+                .iter()
+                .map(|r| (r.get(0), r.get(1)))
+                .collect(),
+            SqlEngine::Mssql => mssql_query_strings(&format!(
+                "SELECT CONCAT(id, CHAR(9), ISNULL(CONVERT(NVARCHAR(100), ({expr})), '{NULL}')) FROM {table} ORDER BY id"
+            ))
+            .into_iter()
+            .map(split)
+            .collect(),
+            #[cfg(feature = "oracle")]
+            SqlEngine::Oracle => ora_text_rows(&format!(
+                "SELECT TO_CHAR(\"id\"), ({expr}) FROM {table} ORDER BY \"id\""
+            ))
+            .into_iter()
+            .map(|r| (r[0].clone().expect("id").parse().expect("id"), r[1].clone()))
+            .collect(),
+        }
+    }
+
     /// SQL for UTC now minus `minutes`.
     pub fn ago(self, minutes: i64) -> String {
         match self {

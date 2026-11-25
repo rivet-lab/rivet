@@ -172,9 +172,13 @@ works the same way: name it in `named_collection:`.
   refuses itself). So rivet reads each part's footer first, whether it sends the part or
   ClickHouse pulls it through a named collection, and refuses the part, inserting
   nothing, if a date or timestamp column holds a value outside that range or has no
-  min/max statistics (`RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE`, exit 5). Cast the column
-  to text in the export's `query:` to keep the value (`columns:` does not convert a date or
-  timestamp to `string` on PostgreSQL or SQL Server), or correct it at the source.
+  min/max statistics (`RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE`, exit 5). To keep the value,
+  declare the column `text` under `columns:` in the export (MySQL and Oracle read a date or
+  timestamp as text), or cast it to text in the export's `query:` (the only way on
+  PostgreSQL and SQL Server today: their `columns:` does not convert a date or timestamp
+  to `string`), and run it again: the table then holds the value as text, in the form rivet
+  prints it (a MySQL `DATE` as `1000-01-01 00:00:00.000000`, an Oracle `DATE` as
+  `0001-01-01T00:00:00.000000`). Or correct it at the source.
   Until 2026-11-20 a date outside the range was not inspected: 2300-01-01 loaded as
   2299-12-31 and the others were refused by ClickHouse as `RIVET_LOAD_WAREHOUSE_REJECTED`.
 - **Naive timestamps are declared in UTC.** A timestamp without a zone lands as

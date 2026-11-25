@@ -327,7 +327,8 @@ const MATRICES: &[(&str, usize)] = &[
     // or oplog for one cell without a SYSDBA handle or a dedicated replica set.
     // Lowered 4 -> 2 (2026-10-08): the MongoDB oplog-gone cells on a throwaway replica set; the Oracle pair was attempted and stays.
     // Raised 2 -> 3 (2026-11-06): the MongoDB first-CDC-run refusal after its anchor has no reachable trigger; closes when one exists.
-    ("docs/operator-contract-matrix.yaml", 3),
+    // Raised 3 -> 6 (2026-11-25): the declared-text remedy of a range refusal has no PostgreSQL or SQL Server cell until their override tables read a date or timestamp as text, and the INT64 nanosecond recovery has no Oracle cell; closes with PR #1233, the SQL Server override pair and an Oracle timestamp_ns cell.
+    ("docs/operator-contract-matrix.yaml", 6),
     // Sabotage: every `refusal` code of the registry walked out of (refuse, again, each named remedy,
     // one wrong remedy) and damage to what a run reads about itself. Born at 78 (2026-10-08): 62 are
     // refusal codes other cells assert but nobody walks (the CDC, load and legacy-state codes), 9 are

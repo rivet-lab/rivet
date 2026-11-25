@@ -528,7 +528,13 @@ CDC (change streams) emits the same two-column shape prefixed with the
    - **BigQuery** — autoloads as `INT64` (raw nanos, lossless as an integer); a
      native `TIMESTAMP_MICROS(DIV(col,1000))` is **lossy** (BigQuery `TIMESTAMP`
      is microsecond — the 7th digit drops). Keep the default `timestamp` for
-     BigQuery unless you carry the raw nanos.
+     BigQuery unless you carry the raw nanos. To read the `INT64` back as a native value, with `col` the column
+     (verified on BigQuery against SQL Server's own text, every row to the 100 ns tick):
+     `TIMESTAMP_MICROS(DIV(col, 1000))` is the instant, `DATETIME(TIMESTAMP_MICROS(DIV(col, 1000)), 'UTC')` the
+     `datetime2`, and `MOD(col, 1000)` the nanoseconds below the microsecond that a `TIMESTAMP` cannot store.
+     `DIV` and `MOD` truncate toward zero, so a value before 1970 with a sub-microsecond part needs the floor form:
+     `TIMESTAMP_MICROS(DIV(col, 1000) - IF(MOD(col, 1000) < 0, 1, 0))` and `MOD(col, 1000) + IF(MOD(col, 1000) < 0, 1000, 0)`.
+     The ledger holds them as `native_recover` in `docs/type-capability-matrix.yaml`, and `docs/type-delivery-table.md` lists them.
 
    **Keyset key:** a µs cursor cannot page a `datetime2`/`datetimeoffset` key with
    more than 6 fractional digits, so
