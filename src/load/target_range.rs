@@ -21,6 +21,9 @@ pub(crate) fn orchestrated_ranges(target: &LoadTarget) -> &'static Ranges {
 
 /// The remedy a range refusal names: the operator declares the column text, and the export delivers the value as text.
 pub(crate) fn text_remedy(column: &str) -> String {
+    if seeded!("range-refusal-names-no-columns-remedy", true, false) {
+        return "Cast the column to text in the export's `query:` to keep the value, or correct it at the source.".to_string();
+    }
     format!(
         "To keep the value, declare `{column}: text` under `columns:` in the export, or cast it \
          to text in the export's `query:`, and run it again: the warehouse then holds the value \
@@ -240,6 +243,17 @@ mod tests {
              To keep the value, declare `ts: text` under `columns:` in the export, or cast it \
              to text in the export's `query:`, and run it again: the warehouse then holds the \
              value as text. Or correct it at the source."
+        );
+    }
+
+    /// A range refusal names `columns: {c: text}` and the `query:` cast, and says what the warehouse then holds.
+    #[test]
+    fn a_range_refusal_names_the_text_remedy_in_both_forms() {
+        assert_eq!(
+            text_remedy("d"),
+            "To keep the value, declare `d: text` under `columns:` in the export, or cast it to \
+             text in the export's `query:`, and run it again: the warehouse then holds the value \
+             as text. Or correct it at the source."
         );
     }
 
