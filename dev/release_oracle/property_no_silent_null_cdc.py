@@ -533,14 +533,13 @@ def self_test() -> None:
     split = Result(snap.cell, REFUSED, nsn.SPLIT, "", "RIVET_A")
     assert agree_on_code([split, ins])[1].klass == CDC_DIFFERS, "a snapshot leg graded a check split still fixes the code its stream legs must carry"
     value_stop = nsn._proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] column `e00` holds 1.1234567890123456789")
-    stated = core.Proc(["rivet"], 0, json.dumps({"columns": [{"column": "E00", "fidelity": "lossy", "warnings": ["refused at run (RIVET_SOURCE_VALUE_UNREPRESENTABLE)"]}]}), "", gated=False)
-    rs = grade_unit("mysql", Unit("float8", exact_c, "parquet"), [exact_c], 1, {"snapshot": value_stop}, {"snapshot": stated}, d, "")
-    assert rs[0].verdict == REFUSED and rs[0].klass == "", "a value refusal that check states on the column is no split, on the change-stream legs too"
-    rs = grade_unit("mysql", Unit("float8", exact_c, "parquet"), [exact_c], 1, {"snapshot": value_stop}, {"snapshot": nsn._proc(0)}, d, "")
-    assert rs[0].klass == nsn.SPLIT, "a check that states nothing is a split"
-    noted_exact = core.Proc(["rivet"], 0, json.dumps({"columns": [{"column": "E00", "fidelity": "exact", "warnings": []}]}), "note[values-unread]: rivet check reads at most the first row of an export that declares `columns:`; a run may still refuse a value it did not read with RIVET_SOURCE_VALUE_UNREPRESENTABLE", gated=False)
-    rs = grade_unit("mysql", Unit("float8", exact_c, "parquet"), [exact_c], 1, {"snapshot": value_stop}, {"snapshot": noted_exact}, d, "")
-    assert rs[0].klass == nsn.SPLIT, "the note the product prints for every export with `columns:` excuses no refusal on the change-stream legs either"
+    for fid in ("exact", "lossy"):
+        said = core.Proc(["rivet"], 0, json.dumps({"columns": [{"column": "E00", "fidelity": fid, "warnings": []}]}), "", gated=False)
+        rs = grade_unit("mysql", Unit("float8", exact_c, "parquet"), [exact_c], 1, {"snapshot": value_stop}, {"snapshot": said}, d, "")
+        assert rs[0].verdict == REFUSED and rs[0].klass == "", f"a value refusal of a column check calls {fid} is the run's decision, no split, on the change-stream legs too"
+    prerequisite = nsn._proc(5, "[RIVET_SOURCE_CDC_PREREQUISITE] column `e00` row image")
+    rs = grade_unit("mysql", Unit("float8", exact_c, "parquet"), [exact_c], 1, {"snapshot": prerequisite}, {"snapshot": nsn._proc(0)}, d, "")
+    assert rs[0].klass == nsn.SPLIT, "a prerequisite the server decides is a split on the change-stream legs"
     other = Col("e01", "INT", "Int32", "int", ("1",), cdc=te.EXACT_V)
     stopped, fine = [Result("c", REFUSED, CDC_DIFFERS, "", "RIVET_X")], [Result("c", DELIVERED, "", "")]
     assert shared_stop([exact_c, other], stopped) and not shared_stop([exact_c], stopped) and not shared_stop([exact_c, other], fine)

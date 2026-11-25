@@ -579,8 +579,8 @@ class Matrix:
         return {**self.load(t, u, ids[:half], budget), **self.load(t, u, ids[half:], budget)}
 
     def split(self, t: Target, u: Unit, have: dict[int, Got]) -> None:
-        """Note the coded load-stage refusals of a unit at `t` that `rivet check` of the same config let through (it reads neither the values nor the format); asked once per column."""
-        codes = {g.refused.code for g in have.values() if g.refused is not None and g.refused.stage == te.LOAD and g.refused.code not in (te.UNCODED, "CRASH")}
+        """Note the coded load-stage refusals of a unit at `t` that `rivet check` of the same config let through, a refusal only a value decides excepted (it belongs to run); asked once per column."""
+        codes = {g.refused.code for g in have.values() if g.refused is not None and g.refused.stage == te.LOAD and g.refused.code not in (te.UNCODED, "CRASH") and g.refused.code not in nsn.value_codes()}
         key = (u.chunk.table, u.col.name, t.name)
         if not codes:
             return
@@ -816,11 +816,12 @@ def self_test() -> None:
     coded = {1: Got(refused=te.Verdict(te.REFUSE, code="RIVET_X", stage=te.LOAD))}
     uncoded = {1: Got(refused=te.Verdict(te.REFUSE, code=te.UNCODED, stage=te.LOAD))}
     extract_stage = {1: Got(refused=te.Verdict(te.REFUSE, code="RIVET_Y", stage=te.EXTRACT))}
+    valued = {1: Got(refused=te.Verdict(te.REFUSE, code="RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE", stage=te.LOAD))}
     key = ("pm_tm0", "c001", "clickhouse")
     real_rivet = nsn.rivet
     try:
         with tempfile.TemporaryDirectory() as td:
-            for rc, have, want in ((0, coded, {key: {"RIVET_X"}}), (2, coded, {}), (0, uncoded, {}), (0, extract_stage, {}), (0, extract_stage | {2: coded[1]}, {key: {"RIVET_X"}}), (0, {1: Got(1)}, {})):
+            for rc, have, want in ((0, coded, {key: {"RIVET_X"}}), (2, coded, {}), (0, uncoded, {}), (0, extract_stage, {}), (0, extract_stage | {2: coded[1]}, {key: {"RIVET_X"}}), (0, valued, {}), (0, valued | {2: coded[1]}, {key: {"RIVET_X"}}), (0, {1: Got(1)}, {})):
                 mc = Matrix("mssql", "u", Path(tempfile.mkdtemp(dir=td)), ("clickhouse",))
                 mc.targets[0].db = "x"
                 nsn.rivet = lambda a, e, c: nsn._proc(rc)
