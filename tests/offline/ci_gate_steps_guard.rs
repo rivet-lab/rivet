@@ -95,14 +95,14 @@ const GATES: &[(&str, &str, &str, &str, &str)] = &[
         "nightly-live.yml",
         "e2e-matrix",
         "Self-skip census",
-        "python3 -m dev.release_oracle.skip_census target/rivet-skips.log --lacking \"$LACKING\"",
+        "python3 -m dev.release_oracle.skip_census target/rivet-skips.log --lacking \"$LACKING\" --legs-result \"$LEGS\"",
         ALWAYS,
     ),
     (
         "nightly-live.yml",
         "e2e-matrix",
         "Rig oracle verdict census",
-        "python3 -m dev.release_oracle.skip_census --verdicts target/rivet-oracle.log --lane ci",
+        "python3 -m dev.release_oracle.skip_census --verdicts target/rivet-oracle.log --lane ci --legs-result \"$LEGS\"",
         ALWAYS,
     ),
 ];
@@ -251,6 +251,17 @@ fn the_e2e_legs_are_pre_plus_every_partition_and_the_verdict_job_needs_them() {
                 .any(|l| l.trim() == r#"[ "${{ needs.e2e.result }}" = success ]"#),
         "the verdict job must fail unless every leg succeeded"
     );
+    for name in ["Self-skip census", "Rig oracle verdict census"] {
+        let step = steps_of(&ci, "e2e-matrix")
+            .into_iter()
+            .find(|s| s["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("the verdict job lost its `{name}` step"));
+        assert_eq!(
+            step["env"]["LEGS"].as_str(),
+            Some("${{ needs.e2e.result }}"),
+            "`{name}` must be told the legs' result, or it grades the log of a cancelled leg"
+        );
+    }
 }
 
 /// A shard nobody runs, or a `Tests` check that does not wait for every `Tests (...)` job, is a silent cut.
