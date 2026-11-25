@@ -27,6 +27,8 @@ pub(crate) struct PgChangeStream {
     domains: Domains,
     /// Array labels the catalog has confirmed, whether or not they decode as server text.
     arrays_seen: std::collections::HashSet<String>,
+    /// Whether the open read every array type, so no label met later is asked of the catalog.
+    arrays_complete: bool,
     slot: String,
     pending: VecDeque<ChangeEvent>,
     /// Directory for an oversized transaction's spill, or `None` when the run has nowhere it knows is sized for it.
@@ -635,7 +637,7 @@ impl PgChangeStream {
                 bare_schema.insert(cfg.clone(), sch);
             }
         }
-        let domains = load_domains(&mut client)?;
+        let (domains, arrays_complete) = load_domains(&mut client)?;
         let existing = slot_plugin_on(&mut client, slot)?;
         match slot_action(slot, existing.is_some(), prior) {
             SlotAction::Reuse => {
@@ -702,6 +704,7 @@ impl PgChangeStream {
             client,
             domains,
             arrays_seen: std::collections::HashSet::new(),
+            arrays_complete,
             slot: slot.to_string(),
             pending: VecDeque::new(),
             spill_dir: spill_dir.map(std::path::Path::to_path_buf),
@@ -860,18 +863,15 @@ impl PgChangeStream {
         decode_line(lsn, line, &self.domains, Some(&keep))
     }
 
-    /// Ask the catalog about each array label of a captured table's change the session has not yet had confirmed, and keep only the labels it confirms.
+    /// Ask the catalog once about each array label of a change that the session has not decided yet.
     fn learn_arrays(&mut self, line: &td_line::Line<'_>) -> Result<()> {
-        let unseen = unseen_array_labels(&self.domains, &self.arrays_seen, line);
+        let unseen =
+            unseen_array_labels(&self.domains, &self.arrays_seen, self.arrays_complete, line);
         if unseen.is_empty() {
             return Ok(());
         }
-        let (schema, table) = split_qualified_ident(line.relations);
-        if !routes(&self.configured_tables, &self.bare_schema, &schema, &table) {
-            return Ok(());
-        }
-        let held = load_arrays(&mut self.client, &schema, &table, &unseen)?;
-        absorb_arrays(&mut self.domains, &mut self.arrays_seen, held);
+        let held = load_arrays(&mut self.client, &unseen)?;
+        absorb_arrays(&mut self.domains, &mut self.arrays_seen, &unseen, held);
         Ok(())
     }
 
@@ -1715,13 +1715,17 @@ fn array_is_server_text(oid: u32, elem_typtype: &str) -> bool {
     server_text && !seeded!("cdc-array-text-parsed-as-list", true, false)
 }
 
-/// The distinct array labels of a line's cells, domains followed, that the catalog has not confirmed yet.
+/// The distinct array labels of a line's cells, domains followed, that the catalog has not confirmed yet; none once the open read every array type.
 fn unseen_array_labels(
     domains: &Domains,
     seen: &std::collections::HashSet<String>,
+    complete: bool,
     line: &td_line::Line<'_>,
 ) -> Vec<String> {
     let mut unseen: Vec<String> = Vec::new();
+    if complete {
+        return unseen;
+    }
     for col in line.new.iter().chain(line.old.iter().flatten()) {
         let base = domain_base(domains, &col.typ);
         if base.ends_with("[]") && !seen.contains(base) && !unseen.iter().any(|u| u == base) {
@@ -1731,10 +1735,11 @@ fn unseen_array_labels(
     unseen
 }
 
-/// Map every array label batch delivers as the server's text to `text`, and record every label the catalog returned.
+/// Map every array label batch delivers as the server's text to `text`, and record every label asked or returned, so a label the catalog does not hold is asked once.
 fn absorb_arrays(
     domains: &mut Domains,
     seen: &mut std::collections::HashSet<String>,
+    asked: &[String],
     arrays: impl IntoIterator<Item = (u32, String, String)>,
 ) {
     for (oid, label, elem_typtype) in arrays {
@@ -1743,6 +1748,8 @@ fn absorb_arrays(
         }
         seen.insert(label);
     }
+    let decided: &[String] = seeded!("pg-cdc-unheld-array-label-asked-per-row", &[], asked);
+    seen.extend(decided.iter().cloned());
 }
 
 /// Every domain's label mapped to its base type's label, and every array label batch delivers as the server's text mapped to `text`.
@@ -1751,12 +1758,39 @@ fn domain_map(
     arrays: impl IntoIterator<Item = (u32, String, String)>,
 ) -> Domains {
     let mut map: Domains = domains.into_iter().collect();
-    absorb_arrays(&mut map, &mut std::collections::HashSet::new(), arrays);
+    absorb_arrays(&mut map, &mut std::collections::HashSet::new(), &[], arrays);
     map
 }
 
-/// The catalog's domains read on the reader's session, as `domain_map` takes them.
-fn load_domains(client: &mut Client) -> Result<Domains> {
+/// The first object id a user creates: every catalog type below it is built in and keeps its name.
+const FIRST_USER_OID: u32 = 16384;
+
+/// The lowest array type object id the session open reads: every one when a user type takes the name of a built-in one, else the user-defined ones only.
+fn array_scan_floor(builtin_names_taken: bool) -> u32 {
+    if builtin_names_taken {
+        0
+    } else {
+        FIRST_USER_OID
+    }
+}
+
+/// Whether a user-defined type bears the name of a built-in `pg_catalog` type, so a built-in array label may print schema-qualified.
+fn builtin_names_taken(client: &mut Client) -> Result<bool> {
+    Ok(seeded!(
+        "pg-cdc-builtin-name-taken-not-read-at-open",
+        false,
+        client
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM pg_type u JOIN pg_type b ON b.typname = u.typname \
+                                 WHERE u.oid >= $1 AND b.oid < $1 AND b.typnamespace = 'pg_catalog'::regnamespace)",
+                &[&FIRST_USER_OID],
+            )?
+            .get(0)
+    ))
+}
+
+/// The catalog's domains and the array types the open decides, as `domain_map` takes them, and whether that is every array type.
+fn load_domains(client: &mut Client) -> Result<(Domains, bool)> {
     let domains: Vec<(String, String)> = client
         .query(
             "SELECT format_type(oid, NULL), format_type(typbasetype, NULL) \
@@ -1766,6 +1800,7 @@ fn load_domains(client: &mut Client) -> Result<Domains> {
         .iter()
         .map(|r| (r.get(0), r.get(1)))
         .collect();
+    let floor = array_scan_floor(builtin_names_taken(client)?);
     let arrays: Vec<(u32, String, String)> = seeded!(
         "pg-cdc-session-reads-whole-type-catalog",
         client
@@ -1778,40 +1813,41 @@ fn load_domains(client: &mut Client) -> Result<Domains> {
             .iter()
             .map(|r| (r.get(0), r.get(1), r.get(2)))
             .collect(),
-        Vec::new()
+        seeded!(
+            "pg-cdc-array-map-decided-at-read-time",
+            Vec::new(),
+            client
+                .query(
+                    "SELECT a.oid, format_type(a.oid, NULL), e.typtype::text \
+                       FROM pg_type a JOIN pg_type e ON e.oid = a.typelem \
+                      WHERE a.typcategory = 'A' AND a.typelem <> 0 AND a.oid >= $1",
+                    &[&floor],
+                )?
+                .iter()
+                .map(|r| (r.get(0), r.get(1), r.get(2)))
+                .collect()
+        )
     );
-    Ok(domain_map(domains, arrays))
+    Ok((domain_map(domains, arrays), floor == 0))
 }
 
-/// The array types the catalog holds under `labels`, resolved by name and not through any table.
-fn load_arrays(
-    client: &mut Client,
-    #[cfg_attr(not(feature = "seeded"), allow(unused_variables))] schema: &str,
-    #[cfg_attr(not(feature = "seeded"), allow(unused_variables))] table: &str,
-    labels: &[String],
-) -> Result<Vec<(u32, String, String)>> {
-    let rows = seeded!(
-        "pg-cdc-array-lookup-scoped-to-current-columns",
-        client.query(
-            "SELECT a.oid, format_type(a.oid, NULL), e.typtype::text \
-               FROM pg_type a JOIN pg_type e ON e.oid = a.typelem \
-              WHERE a.oid IN (SELECT to_regtype(l)::oid FROM unnest($1::text[]) l) \
-                AND a.typcategory = 'A' AND a.typelem <> 0 \
-                AND EXISTS (SELECT 1 FROM pg_class c \
-                              JOIN pg_namespace n ON n.oid = c.relnamespace \
-                              JOIN pg_attribute t ON t.attrelid = c.oid \
-                             WHERE n.nspname = $2 AND c.relname = $3 \
-                               AND t.atttypid = a.oid AND NOT t.attisdropped)",
-            &[&labels, &schema, &table],
-        )?,
-        client.query(
-            "SELECT a.oid, format_type(a.oid, NULL), e.typtype::text \
-               FROM pg_type a JOIN pg_type e ON e.oid = a.typelem \
-              WHERE a.oid IN (SELECT to_regtype(l)::oid FROM unnest($1::text[]) l) \
-                AND a.typcategory = 'A' AND a.typelem <> 0",
-            &[&labels],
-        )?
+/// The built-in array types the catalog holds under `labels`, named as a search path of `pg_catalog` alone prints them; a user-defined array type is decided at the session open, never here.
+fn load_arrays(client: &mut Client, labels: &[String]) -> Result<Vec<(u32, String, String)>> {
+    let ceiling = seeded!(
+        "pg-cdc-array-map-decided-at-read-time",
+        u32::MAX,
+        FIRST_USER_OID
     );
+    let mut tx = client.transaction()?;
+    tx.batch_execute("SET LOCAL search_path = pg_catalog")?;
+    let rows = tx.query(
+        "SELECT a.oid, format_type(a.oid, NULL), e.typtype::text \
+           FROM pg_type a JOIN pg_type e ON e.oid = a.typelem \
+          WHERE a.oid IN (SELECT to_regtype(l)::oid FROM unnest($1::text[]) l) \
+            AND a.typcategory = 'A' AND a.typelem <> 0 AND a.oid < $2",
+        &[&labels, &ceiling],
+    )?;
+    tx.commit()?;
     Ok(rows
         .iter()
         .map(|r| (r.get(0), r.get(1), r.get(2)))
@@ -2698,6 +2734,7 @@ mod tests {
     const CONN: &str = "postgresql://rivet:rivet@127.0.0.1:5434/rivet";
     const SLOT: &str = "rivet_cdc_test";
     const SESSION_OPEN_TUPLE_CEILING: i64 = 2_000;
+    const LABEL_LOOKUP_TRANSACTION_CEILING: i64 = 60;
 
     #[test]
     fn tx_disposition_bound_frontier_matrix() {
@@ -2951,16 +2988,53 @@ mod tests {
         .unwrap();
         let mut seen = std::collections::HashSet::new();
         assert_eq!(
-            unseen_array_labels(&domains, &seen, &line),
+            unseen_array_labels(&domains, &seen, false, &line),
             ["integer[]", "inet[]", "cidr[]"]
         );
         seen.insert("inet[]".to_string());
         assert_eq!(
-            unseen_array_labels(&domains, &seen, &line),
+            unseen_array_labels(&domains, &seen, false, &line),
             ["integer[]", "cidr[]"]
         );
         seen.extend(["integer[]".to_string(), "cidr[]".to_string()]);
-        assert!(unseen_array_labels(&domains, &seen, &line).is_empty());
+        assert!(unseen_array_labels(&domains, &seen, false, &line).is_empty());
+        assert!(
+            unseen_array_labels(&domains, &std::collections::HashSet::new(), true, &line)
+                .is_empty()
+        );
+    }
+
+    /// A label the catalog was asked about is decided for the session, whether the catalog held it or not, and only a held server-text array is mapped to text.
+    #[test]
+    fn absorbing_an_answer_decides_every_label_asked() {
+        let mut domains = Domains::new();
+        let mut seen = std::collections::HashSet::new();
+        let asked = [
+            "inet[]".to_string(),
+            "gone[]".to_string(),
+            "integer[]".to_string(),
+        ];
+        absorb_arrays(
+            &mut domains,
+            &mut seen,
+            &asked,
+            [
+                (1041, "inet[]".to_string(), "b".to_string()),
+                (1007, "integer[]".to_string(), "b".to_string()),
+            ],
+        );
+        assert_eq!(domains.get("inet[]").map(String::as_str), Some("text"));
+        assert_eq!(domains.get("integer[]"), None);
+        assert_eq!(domains.get("gone[]"), None);
+        let want: std::collections::HashSet<String> = asked.into_iter().collect();
+        assert_eq!(seen, want);
+    }
+
+    /// The session open reads every array type when a user type takes a built-in name, and only the user-defined ones otherwise.
+    #[test]
+    fn the_open_reads_every_array_type_only_when_a_user_type_takes_a_built_in_name() {
+        assert_eq!(array_scan_floor(true), 0);
+        assert_eq!(array_scan_floor(false), FIRST_USER_OID);
     }
 
     /// A line whose array type label is in the domain map decodes as text and keeps the server's literal whole.
@@ -3405,6 +3479,7 @@ mod tests {
             client,
             domains: Domains::new(),
             arrays_seen: std::collections::HashSet::new(),
+            arrays_complete: false,
             slot: "s".into(),
             pending: VecDeque::new(),
             spill_dir: None,
@@ -4126,6 +4201,7 @@ mod tests {
             None,
         )
         .unwrap();
+        let whole = whole_map(&mut c);
         c.batch_execute(&format!(
             "INSERT INTO pgd_vf VALUES (1, '{{10.0.0.1/32,::1}}', '{{1,2}}', 'x'); {ddl}; \
              INSERT INTO pgd_vf_other VALUES (2, '{{10.9.0.1}}')"
@@ -4138,7 +4214,7 @@ mod tests {
                 got.push((ev.image_names.clone(), ev.after.clone()));
             }
         }
-        let want = whole_map_changes(&mut c, &slot, &["pgd_vf", "pgd_vf_other"]);
+        let want = changes_under(&mut c, &slot, &["pgd_vf", "pgd_vf_other"], &whole);
         drop(stream);
         drop(c);
         admin
@@ -4191,6 +4267,7 @@ mod tests {
             None,
         )
         .unwrap();
+        let whole = whole_map(&mut c);
         c.batch_execute(
             "INSERT INTO pgd_arr VALUES (1, '{10.0.0.1/32,::1}', '{1,2}', '{a,b}', '{192.168.0.0/16}', '{x,\"y z\"}', '{08:00:2b:01:02:03}', '{\"(1,2)\"}'); \
              ALTER TABLE pgd_arr ADD COLUMN late cidr[]; \
@@ -4204,7 +4281,7 @@ mod tests {
                 got.push((ev.image_names.clone(), ev.after.clone()));
             }
         }
-        let want = whole_map_changes(&mut c, &slot, &["pgd_arr"]);
+        let want = changes_under(&mut c, &slot, &["pgd_arr"], &whole);
         drop(stream);
         drop(c);
         admin
@@ -4222,17 +4299,280 @@ mod tests {
         );
     }
 
+    const COMP_TABLE: &str =
+        "CREATE TYPE comp AS (a int, b text); CREATE TABLE t (id int primary key, c comp[]);";
+    const SEARCH_PATH_TYPES: &str = "CREATE SCHEMA s1; CREATE SCHEMA s2; CREATE TYPE s1.ct AS ENUM ('a','b'); \
+         CREATE TYPE s2.ct AS (a int, b text); CREATE TABLE public.t (id int primary key, x s1.ct[], y s2.ct[]);";
+
+    /// One scratch database: `setup`, a stream open, the open-time whole map, `after`, then every change read and compared with that map.
+    fn scenario_matches_the_open_map(
+        tag: &str,
+        db_set: &str,
+        setup: &str,
+        after: &str,
+    ) -> (Vec<DecodedImage>, Vec<DecodedImage>) {
+        let mut admin = Client::connect(CONN, NoTls).unwrap();
+        let db = format!("rivet_pgd_sc_{tag}_{}", std::process::id());
+        let slot = format!("{db}_slot");
+        admin
+            .batch_execute(&format!("DROP DATABASE IF EXISTS {db}"))
+            .unwrap();
+        admin
+            .batch_execute(&format!("CREATE DATABASE {db}"))
+            .unwrap();
+        if !db_set.is_empty() {
+            admin
+                .batch_execute(&format!("ALTER DATABASE {db} SET {db_set}"))
+                .unwrap();
+        }
+        let conn = format!("{}/{db}", CONN.rsplit_once('/').unwrap().0);
+        let mut c = Client::connect(&conn, NoTls).unwrap();
+        c.batch_execute(setup).unwrap();
+        let mut stream = PgChangeStream::open(
+            &conn,
+            &slot,
+            PriorRun::default(),
+            None,
+            crate::source::cdc::PeekBound::Sized(10_000),
+            DrainMode::Continuous,
+            &["public.t".to_string()],
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let mut oracle = Client::connect(&conn, NoTls).unwrap();
+        let whole = whole_map(&mut oracle);
+        c.batch_execute(after).unwrap();
+        let mut got = Vec::new();
+        while let Some(ev) = stream.next_change() {
+            let ev = ev.unwrap();
+            if ev.table == "t" {
+                got.push((ev.image_names.clone(), ev.after.clone()));
+            }
+        }
+        let want = changes_under(&mut oracle, &slot, &["t"], &whole);
+        drop(stream);
+        drop(oracle);
+        drop(c);
+        admin
+            .execute("SELECT pg_drop_replication_slot($1)", &[&slot])
+            .ok();
+        admin
+            .batch_execute(&format!("DROP DATABASE IF EXISTS {db}"))
+            .unwrap();
+        (got, want)
+    }
+
+    /// Live: DDL on a type after the open, on its name, its schema or the search_path, leaves array decoding as the map the open builds decodes it.
+    #[test]
+    #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
+    fn live_ddl_on_a_type_after_the_open_leaves_array_decoding_as_the_open_map_does() {
+        let scenarios: [(&str, &str, String, &str); 16] = [
+            (
+                "rename_composite",
+                "",
+                COMP_TABLE.to_string(),
+                "INSERT INTO t VALUES (1, ARRAY[ROW(1,'x')::comp]); ALTER TYPE comp RENAME TO comp2; INSERT INTO t VALUES (2, ARRAY[ROW(2,'y')::comp2])",
+            ),
+            (
+                "rename_then_recreate_as_enum",
+                "",
+                COMP_TABLE.to_string(),
+                "INSERT INTO t VALUES (1, ARRAY[ROW(1,'x')::comp]); ALTER TYPE comp RENAME TO comp_old; CREATE TYPE comp AS ENUM ('a','b'); ALTER TABLE t ADD COLUMN e comp[]; INSERT INTO t (id, e) VALUES (2, '{a,b}')",
+            ),
+            (
+                "rename_range",
+                "",
+                "CREATE TYPE fr AS RANGE (subtype = float8); CREATE TABLE t (id int primary key, c fr[]);".to_string(),
+                "INSERT INTO t VALUES (1, ARRAY[fr(1.5, 2.5)]); ALTER TYPE fr RENAME TO fr2; INSERT INTO t VALUES (2, ARRAY[fr(3.5, 4.5)])",
+            ),
+            (
+                "rename_domain_of_an_element",
+                "",
+                "CREATE DOMAIN posint AS int CHECK (VALUE > 0); CREATE TABLE t (id int primary key, c posint[]);".to_string(),
+                "INSERT INTO t VALUES (1, '{1,2}'); ALTER DOMAIN posint RENAME TO posint2; INSERT INTO t VALUES (2, '{3,4}')",
+            ),
+            (
+                "rename_domain_over_an_array",
+                "",
+                "CREATE DOMAIN nets AS inet[]; CREATE TABLE t (id int primary key, d nets);".to_string(),
+                "INSERT INTO t VALUES (1, '{10.0.0.1/32}'); ALTER DOMAIN nets RENAME TO nets2; INSERT INTO t VALUES (2, '{10.0.0.2/32}')",
+            ),
+            (
+                "rename_row_type_of_a_table",
+                "",
+                "CREATE TABLE rt (x int, y text); CREATE TABLE t (id int primary key, c rt[]);".to_string(),
+                "INSERT INTO t VALUES (1, ARRAY[ROW(1,'x')::rt]); ALTER TABLE rt RENAME TO rt2; INSERT INTO t VALUES (2, ARRAY[ROW(2,'y')::rt2])",
+            ),
+            (
+                "rename_schema",
+                "",
+                "CREATE SCHEMA s; CREATE TYPE s.comp AS (a int); CREATE TABLE t (id int primary key, c s.comp[]);".to_string(),
+                "INSERT INTO t VALUES (1, ARRAY[ROW(1)::s.comp]); ALTER SCHEMA s RENAME TO s9; INSERT INTO t VALUES (2, ARRAY[ROW(2)::s9.comp])",
+            ),
+            (
+                "set_schema",
+                "",
+                format!("CREATE SCHEMA s2; {COMP_TABLE}"),
+                "INSERT INTO t VALUES (1, ARRAY[ROW(1,'x')::comp]); ALTER TYPE comp SET SCHEMA s2; INSERT INTO t VALUES (2, ARRAY[ROW(2,'y')::s2.comp])",
+            ),
+            (
+                "search_path_same_name_types",
+                "search_path = s1, s2, public",
+                SEARCH_PATH_TYPES.to_string(),
+                "INSERT INTO public.t VALUES (1, '{a,b}', ARRAY[ROW(1,'q')::s2.ct])",
+            ),
+            (
+                "search_path_same_name_types_renamed",
+                "search_path = s1, s2, public",
+                SEARCH_PATH_TYPES.to_string(),
+                "INSERT INTO public.t VALUES (1, '{a,b}', ARRAY[ROW(1,'q')::s2.ct]); ALTER TYPE s1.ct RENAME TO ct_e; INSERT INTO public.t VALUES (2, '{b,a}', ARRAY[ROW(2,'r')::s2.ct])",
+            ),
+            (
+                "drop_type_cascade",
+                "",
+                COMP_TABLE.to_string(),
+                "INSERT INTO t VALUES (1, ARRAY[ROW(1,'x')::comp]); DROP TYPE comp CASCADE; ALTER TABLE t ADD COLUMN v text; INSERT INTO t VALUES (2, 'z')",
+            ),
+            (
+                "composite_created_after_the_open",
+                "",
+                "CREATE TABLE t (id int primary key, v text);".to_string(),
+                "CREATE TYPE cm AS (a int); ALTER TABLE t ADD COLUMN m cm[]; INSERT INTO t VALUES (1, 'x', ARRAY[ROW(1)::cm])",
+            ),
+            (
+                "enum_created_after_the_open",
+                "",
+                "CREATE TABLE t (id int primary key, v text);".to_string(),
+                "CREATE TYPE mood AS ENUM ('a','b'); ALTER TABLE t ADD COLUMN m mood[]; INSERT INTO t VALUES (1, 'x', '{a,b}')",
+            ),
+            (
+                "builtin_name_taken_before_the_open",
+                "search_path = public, pg_catalog",
+                "CREATE TYPE public.inet AS (a int); CREATE TABLE t (id int primary key, ip pg_catalog.inet[], q public.inet[]);".to_string(),
+                "INSERT INTO t VALUES (1, '{10.0.0.1}', ARRAY[ROW(1)::public.inet])",
+            ),
+            (
+                "builtin_name_taken_after_the_open",
+                "search_path = public, pg_catalog",
+                "CREATE TABLE t (id int primary key, ip pg_catalog.inet[]);".to_string(),
+                "INSERT INTO t VALUES (1, '{10.0.0.1}'); CREATE TYPE public.inet AS (a int); INSERT INTO t VALUES (2, '{10.0.0.2}')",
+            ),
+            (
+                "existing_composite_added_as_a_column",
+                "",
+                format!("{COMP_TABLE} CREATE TABLE u (id int primary key);"),
+                "ALTER TABLE u ADD COLUMN c comp[]; INSERT INTO t VALUES (1, ARRAY[ROW(1,'x')::comp]); ALTER TYPE comp RENAME TO comp3; INSERT INTO t VALUES (2, ARRAY[ROW(2,'y')::comp3])",
+            ),
+        ];
+        let mut diverged = Vec::new();
+        for (tag, db_set, setup, after) in &scenarios {
+            let (got, want) = scenario_matches_the_open_map(tag, db_set, setup, after);
+            if got.is_empty() || got != want {
+                diverged.push(format!("{tag}:\n  stream {got:?}\n  main   {want:?}"));
+            }
+        }
+        assert!(
+            diverged.is_empty(),
+            "{} of {} scenarios decode differently from the open-time whole map:\n{}",
+            diverged.len(),
+            scenarios.len(),
+            diverged.join("\n")
+        );
+    }
+
+    /// Live: after a composite type is renamed, 300 rows carrying its old label are read in a handful of transactions, not one lookup per row.
+    #[test]
+    #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
+    fn live_a_label_the_catalog_does_not_hold_is_asked_once_per_session() {
+        let mut admin = Client::connect(CONN, NoTls).unwrap();
+        let db = format!("rivet_pgd_neg_{}", std::process::id());
+        let slot = format!("{db}_slot");
+        admin
+            .batch_execute(&format!("DROP DATABASE IF EXISTS {db}"))
+            .unwrap();
+        admin
+            .batch_execute(&format!("CREATE DATABASE {db}"))
+            .unwrap();
+        let conn = format!("{}/{db}", CONN.rsplit_once('/').unwrap().0);
+        let mut c = Client::connect(&conn, NoTls).unwrap();
+        c.batch_execute(COMP_TABLE).unwrap();
+        let mut stream = PgChangeStream::open(
+            &conn,
+            &slot,
+            PriorRun::default(),
+            None,
+            crate::source::cdc::PeekBound::Sized(10_000),
+            DrainMode::Continuous,
+            &["public.t".to_string()],
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        c.batch_execute(
+            "INSERT INTO t SELECT g, ARRAY[ROW(g,'x')::comp] FROM generate_series(1,300) g; \
+             DROP TYPE comp CASCADE; ALTER TABLE t ADD COLUMN v text; INSERT INTO t VALUES (1000, 'z')",
+        )
+        .unwrap();
+        let settled = |admin: &mut Client, col: &str| -> i64 {
+            let mut last = -1;
+            for _ in 0..40 {
+                admin
+                    .batch_execute("SELECT pg_stat_clear_snapshot()")
+                    .unwrap();
+                let now: i64 = admin
+                    .query_one(
+                        &format!("SELECT {col}::bigint FROM pg_stat_database WHERE datname = $1"),
+                        &[&db],
+                    )
+                    .unwrap()
+                    .get(0);
+                if now == last {
+                    return now;
+                }
+                last = now;
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            }
+            last
+        };
+        let xacts = "xact_commit + xact_rollback";
+        let before = (
+            settled(&mut admin, xacts),
+            settled(&mut admin, "tup_returned"),
+        );
+        let mut events = 0;
+        while let Some(ev) = stream.next_change() {
+            ev.unwrap();
+            events += 1;
+        }
+        let after = (
+            settled(&mut admin, xacts),
+            settled(&mut admin, "tup_returned"),
+        );
+        drop(stream);
+        drop(c);
+        admin
+            .execute("SELECT pg_drop_replication_slot($1)", &[&slot])
+            .ok();
+        admin
+            .batch_execute(&format!("DROP DATABASE IF EXISTS {db}"))
+            .unwrap();
+        let (txs, tups) = (after.0 - before.0, after.1 - before.1);
+        eprintln!("{events} events read in {txs} transactions, {tups} tuples");
+        assert_eq!(events, 301);
+        assert!(
+            txs < LABEL_LOOKUP_TRANSACTION_CEILING,
+            "301 events read in {txs} transactions, over {LABEL_LOOKUP_TRANSACTION_CEILING}: a label the catalog does not hold is asked again for each row"
+        );
+    }
+
     type DecodedImage = (Option<std::sync::Arc<[String]>>, Option<Vec<RivetValue>>);
 
-    /// Every change the slot holds, decoded by the whole-catalog map as of now, cut to `tables`.
-    fn whole_map_changes(c: &mut Client, slot: &str, tables: &[&str]) -> Vec<DecodedImage> {
-        let rows = c
-            .query(
-                "SELECT lsn::text, data FROM pg_logical_slot_peek_changes($1, NULL, NULL)",
-                &[&slot],
-            )
-            .unwrap();
-        let whole = domain_map(
+    /// The whole-catalog map as the session open of a server as it is now builds it.
+    fn whole_map(c: &mut Client) -> Domains {
+        domain_map(
             c.query(
                 "SELECT format_type(oid, NULL), format_type(typbasetype, NULL) FROM pg_type WHERE typtype = 'd'",
                 &[],
@@ -4248,11 +4588,26 @@ mod tests {
             .unwrap()
             .iter()
             .map(|r| (r.get(0), r.get(1), r.get(2))),
-        );
+        )
+    }
+
+    /// Every change the slot holds, decoded by `whole`, cut to `tables`.
+    fn changes_under(
+        c: &mut Client,
+        slot: &str,
+        tables: &[&str],
+        whole: &Domains,
+    ) -> Vec<DecodedImage> {
+        let rows = c
+            .query(
+                "SELECT lsn::text, data FROM pg_logical_slot_peek_changes($1, NULL, NULL)",
+                &[&slot],
+            )
+            .unwrap();
         let mut want = Vec::new();
         for r in &rows {
             let (lsn, data): (String, String) = (r.get(0), r.get(1));
-            if let Some(ev) = parse_test_decoding(&lsn, &data, &whole).unwrap()
+            if let Some(ev) = parse_test_decoding(&lsn, &data, whole).unwrap()
                 && tables.contains(&ev.table.as_str())
             {
                 want.push((ev.image_names.clone(), ev.after.clone()));
@@ -4272,7 +4627,7 @@ mod tests {
              CREATE DOMAIN pgo_label_v AS varchar(10)",
         )
         .unwrap();
-        let domains = load_domains(&mut c).unwrap();
+        let (domains, _) = load_domains(&mut c).unwrap();
         let labels = crate::source::postgres::type_labels::TypeLabels::load(&mut c).unwrap();
         let rows = c
             .query(
