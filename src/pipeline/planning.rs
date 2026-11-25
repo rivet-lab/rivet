@@ -32,7 +32,7 @@ pub(crate) struct PlannedExport {
 
 /// The batch plan of one export, with a missing relation coded and a rejected plan refused: the one build `run` executes.
 pub(crate) fn plan_batch_export(
-    probe: Option<&mut dyn Source>,
+    mut probe: Option<&mut dyn Source>,
     config: &Config,
     export: &ExportConfig,
     config_dir: &Path,
@@ -40,7 +40,7 @@ pub(crate) fn plan_batch_export(
     params: Option<&HashMap<String, String>>,
 ) -> Result<PlannedExport> {
     let plan = crate::plan::build::build_plan_on(
-        probe,
+        probe.as_mut().map(|p| &mut **p as &mut dyn Source),
         config,
         export,
         config_dir,
@@ -57,7 +57,7 @@ pub(crate) fn plan_batch_export(
             export.query.as_deref(),
         )
     })?;
-    refuse_mssql_datetime_text_in_a_cdc_baseline(config, export, &plan)?;
+    refuse_mssql_datetime_text_in_a_cdc_baseline(probe, config, export, &plan)?;
     let diags = crate::plan::validate_plan(&plan);
     if let Some(err) = log_plan_diagnostics(&plan.export_name, &diags) {
         return Err(err);
@@ -65,34 +65,53 @@ pub(crate) fn plan_batch_export(
     Ok(PlannedExport { plan, diags })
 }
 
-/// Refuses a CDC baseline leg that declares `text` over a SQL Server date-time: the leg delivers the server's own text, the change stream renders the same cell in its own form into the same `__changes` log.
+/// Refuses a CDC baseline leg that declares `text` over a SQL Server date-time: the leg delivers the server's own text, the change stream renders the same cell in its own form into the same `__changes` log; with no catalog to read the guard admits.
 fn refuse_mssql_datetime_text_in_a_cdc_baseline(
+    probe: Option<&mut dyn Source>,
     config: &Config,
     export: &ExportConfig,
     plan: &ResolvedRunPlan,
 ) -> Result<()> {
-    let Some(parent) = export.snapshot_parent.as_deref() else {
-        return Ok(());
-    };
-    if seeded!("cdc-leg-mssql-datetime-text", true, false) {
-        return Ok(());
-    }
-    if plan.column_overrides.is_empty()
-        || config.source.source_type != crate::config::SourceType::Mssql
+    let parent = export.snapshot_parent.as_deref();
+    let source_type = config.source.source_type;
+    if seeded!("cdc-leg-mssql-datetime-text", true, false)
+        || mssql_cdc_baseline_parent(parent, source_type, &plan.column_overrides).is_none()
     {
         return Ok(());
     }
-    let Ok(mut src) = crate::plan::build::connect_source(&config.source) else {
+    let Some(probe) = probe else {
         return Ok(());
     };
-    let Ok(detected) = src.type_mappings(&plan.base_query, &crate::types::ColumnOverrides::new())
+    let Ok(detected) = probe.type_mappings(&plan.base_query, &crate::types::ColumnOverrides::new())
     else {
         return Ok(());
     };
-    let Some(declared) = crate::types::override_table::mssql_datetime_text_declared(
-        &detected,
-        &plan.column_overrides,
-    ) else {
+    refuse_mssql_datetime_text_declared(parent, source_type, &detected, &plan.column_overrides)
+}
+
+/// The parent export when this is a SQL Server CDC baseline leg that declares any `columns:` override.
+fn mssql_cdc_baseline_parent<'a>(
+    snapshot_parent: Option<&'a str>,
+    source_type: crate::config::SourceType,
+    overrides: &crate::types::ColumnOverrides,
+) -> Option<&'a str> {
+    snapshot_parent
+        .filter(|_| source_type == crate::config::SourceType::Mssql && !overrides.is_empty())
+}
+
+/// The coded refusal for a SQL Server CDC baseline leg whose `overrides` declare text over a column of `detected` that is a date-time.
+fn refuse_mssql_datetime_text_declared(
+    snapshot_parent: Option<&str>,
+    source_type: crate::config::SourceType,
+    detected: &[crate::types::TypeMapping],
+    overrides: &crate::types::ColumnOverrides,
+) -> Result<()> {
+    let Some(parent) = mssql_cdc_baseline_parent(snapshot_parent, source_type, overrides) else {
+        return Ok(());
+    };
+    let Some(declared) =
+        crate::types::override_table::mssql_datetime_text_declared(detected, overrides)
+    else {
         return Ok(());
     };
     let column = &declared.column_name;
@@ -438,5 +457,155 @@ mod tests {
             let err = refuse_to_seal(&p).unwrap_err();
             crate::error::assert_coded(&err, "RIVET_PLAN_PARTITION_TOKEN_UNEXPANDED", 1);
         }
+    }
+
+    fn dated(native: &str) -> crate::types::TypeMapping {
+        use crate::types::{RivetType, SourceColumn, TimeUnit, TypeMapping};
+        TypeMapping::from_source(
+            &SourceColumn::simple("v", native, true),
+            RivetType::Timestamp {
+                unit: TimeUnit::Microsecond,
+                timezone: None,
+            },
+        )
+    }
+
+    fn declare(ty: crate::types::RivetType) -> crate::types::ColumnOverrides {
+        crate::types::ColumnOverrides::from([("v".to_string(), ty)])
+    }
+
+    /// A SQL Server CDC baseline leg that declares text over a date-time is refused by code naming the column and the type, for every date-time spelling the catalog returns.
+    #[test]
+    fn a_cdc_baseline_leg_declaring_text_over_a_sql_server_date_time_is_refused() {
+        use crate::config::SourceType::Mssql;
+        use crate::types::RivetType;
+        for (native, said) in [
+            ("datetime2", "`datetime2`"),
+            ("datetimeoffsetn", "`datetimeoffset`"),
+            ("datetimen", "`datetime or smalldatetime`"),
+            ("datetime4", "`smalldatetime`"),
+        ] {
+            for text in [RivetType::Text, RivetType::String] {
+                let err = refuse_mssql_datetime_text_declared(
+                    Some("parent"),
+                    Mssql,
+                    &[dated(native)],
+                    &declare(text),
+                )
+                .unwrap_err();
+                crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+                let said_all = format!("{err:#}");
+                assert!(
+                    said_all.contains(&format!(
+                        "export 'parent': column 'v' is declared text over a {said} column"
+                    )),
+                    "{native}: {said_all}"
+                );
+                assert!(
+                    said_all.contains("Remove `v` from `columns:`")
+                        && said_all.contains("declare `v: timestamp` (or `timestamp_tz`"),
+                    "{native}: {said_all}"
+                );
+            }
+        }
+    }
+
+    /// Every neighbour of that refusal is admitted: a batch export, a stream-only export, text over a text column, a nanosecond declaration, no declaration and another source.
+    #[test]
+    fn a_cdc_baseline_text_refusal_admits_its_neighbours() {
+        use crate::config::SourceType::{Mssql, Mysql, Postgres};
+        use crate::types::{ColumnOverrides, RivetType, TimeUnit};
+        let text = || declare(RivetType::Text);
+        let nanos = RivetType::Timestamp {
+            unit: TimeUnit::Nanosecond,
+            timezone: None,
+        };
+        let dt = || [dated("datetime2")];
+        let admit = |parent: Option<&str>, st, detected: &[crate::types::TypeMapping], o| {
+            refuse_mssql_datetime_text_declared(parent, st, detected, &o).is_ok()
+        };
+        assert!(admit(None, Mssql, &dt(), text()), "batch export");
+        assert!(
+            admit(Some("p"), Mssql, &dt(), declare(nanos)),
+            "timestamp_ns"
+        );
+        assert!(
+            admit(Some("p"), Mssql, &dt(), ColumnOverrides::new()),
+            "none"
+        );
+        assert!(
+            admit(
+                Some("p"),
+                Mssql,
+                &[crate::types::TypeMapping::from_source(
+                    &crate::types::SourceColumn::simple("v", "nvarchar", true),
+                    RivetType::String
+                )],
+                text()
+            ),
+            "nvarchar text"
+        );
+        assert!(admit(Some("p"), Postgres, &dt(), text()), "postgres");
+        assert!(admit(Some("p"), Mysql, &dt(), text()), "mysql");
+        assert!(admit(Some("p"), Mssql, &[], text()), "no catalog column");
+        assert!(!admit(Some("p"), Mssql, &dt(), text()), "the refused pair");
+    }
+
+    /// A source that counts the catalog reads it answers.
+    struct CountingSource(std::cell::Cell<usize>, Vec<crate::types::TypeMapping>);
+
+    impl Source for CountingSource {
+        fn export(
+            &mut self,
+            _request: &crate::source::ExportRequest<'_>,
+            _sink: &mut dyn crate::source::BatchSink,
+        ) -> Result<()> {
+            Ok(())
+        }
+        fn query_scalar(&mut self, _sql: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+        fn type_mappings(
+            &mut self,
+            _query: &str,
+            _overrides: &crate::types::ColumnOverrides,
+        ) -> Result<Vec<crate::types::TypeMapping>> {
+            self.0.set(self.0.get() + 1);
+            Ok(self.1.clone())
+        }
+    }
+
+    /// The wrapper reads the catalog only for a SQL Server baseline leg that declares an override, refuses on what it read, and admits with no catalog to read.
+    #[test]
+    fn the_cdc_baseline_guard_reads_the_catalog_only_where_it_can_refuse() {
+        use crate::types::RivetType;
+        let mssql = one_export_config("mssql", "");
+        let pg = one_export_config("postgres", "");
+        assert_eq!(mssql.source.source_type, crate::config::SourceType::Mssql);
+        let mut leg = mssql.exports[0].clone();
+        leg.snapshot_parent = Some("parent".into());
+        let mut plan = crate::plan::test_support::test_plan();
+        plan.column_overrides = declare(RivetType::Text);
+        let run = |config: &Config, export: &ExportConfig, plan: &ResolvedRunPlan| {
+            let mut src = CountingSource(std::cell::Cell::new(0), vec![dated("datetime2")]);
+            let out =
+                refuse_mssql_datetime_text_in_a_cdc_baseline(Some(&mut src), config, export, plan);
+            (out, src.0.get())
+        };
+        let (out, reads) = run(&mssql, &leg, &plan);
+        crate::error::assert_coded(&out.unwrap_err(), "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+        assert_eq!(reads, 1);
+        let (out, reads) = run(&mssql, &mssql.exports[0], &plan);
+        assert!(out.is_ok() && reads == 0, "a batch export reads nothing");
+        let (out, reads) = run(&pg, &leg, &plan);
+        assert!(out.is_ok() && reads == 0, "another source reads nothing");
+        let mut bare = plan.clone();
+        bare.column_overrides.clear();
+        let (out, reads) = run(&mssql, &leg, &bare);
+        assert!(out.is_ok() && reads == 0, "no override reads nothing");
+        assert!(
+            refuse_mssql_datetime_text_in_a_cdc_baseline(None, &mssql, &leg, &plan).is_ok(),
+            "no catalog admits"
+        );
     }
 }

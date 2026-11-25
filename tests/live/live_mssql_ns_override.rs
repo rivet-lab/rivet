@@ -356,7 +356,7 @@ fn declared_text(rig: Rig) -> Rig {
     rig.export_line("columns:").export_line("  v: \"text\"")
 }
 
-/// The run and both `check` spellings refuse `rig`'s export by `WIRE`; returns the run's stderr.
+/// The run, `doctor` and both `check` spellings refuse `rig`'s export by `WIRE`; returns the run's stderr.
 fn refused_alike(rig: &Rig, name: &str) -> String {
     let run = rig.run_args(&["--export", name]);
     assert_refused(&run, WIRE);
@@ -365,10 +365,11 @@ fn refused_alike(rig: &Rig, name: &str) -> String {
         &rig.cli(&["check", "--export", name, "--type-report"]),
         WIRE,
     );
+    assert_refused(&rig.cli(&["doctor"]), WIRE);
     String::from_utf8_lossy(&run.stderr).into_owned()
 }
 
-/// A CDC baseline leg declared `text` over a date-time is refused by the run and both `check` spellings, naming the column, the type and the remedy, and the remedy delivers the baseline and the stream as the column's own type.
+/// A CDC baseline leg declared `text` over a date-time is refused by the run, `doctor` and both `check` spellings, naming the column, the type and the remedy, and the remedy delivers the baseline and the stream as the column's own type.
 #[test]
 #[ignore = "live: requires docker compose mssql (CDC)"]
 fn a_cdc_baseline_declared_text_over_a_date_time_is_refused_and_its_remedy_delivers() {
