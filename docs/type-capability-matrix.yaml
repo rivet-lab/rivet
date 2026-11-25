@@ -31,8 +31,6 @@
 #                       path is the row's known_defect, which the parity test grades against today_delivery
 #          refuses      the verdict of the whole column, `refuse:CODE@extract` (the column is
 #                       refused by name today); on a row with `delivery` it needs `known_defect`
-#          declarable   a matrix-only row with `refuses`: a `columns:` override delivers the column, so the
-#                       row is also a column of the no-silent-null override grid
 #          render       optional, `{c}` standing for the column, over the engine's `renders:`
 #                       entry for the row's delivery (what the delivery determines; a row
 #                       names only what its native type adds); no render may narrow a value:

@@ -64,6 +64,14 @@ scenarios:
     mongo:    { na: "a MongoDB change row is two text cells; no `columns:` override retypes a field on the stream" }
     oracle:   { test: oracle_cdc_a_date_override_refuses_a_time_of_day_not_drops_it }
 
+  - id: override_text_over_a_server_text_column_is_refused_on_a_pending_cdc_baseline
+    what: "a PostgreSQL date, time, timestamp, timestamptz or array column declared `text` under `columns:` on a CDC export with a pending baseline is refused RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH (exit 1) by check, doctor and run before a row is delivered, because the baseline would write the server's text while the change stream renders the cell in its own form; removing the declaration delivers the column's own type; a temporal cursor_column declared `text` is refused RIVET_PLAN_CURSOR_TYPE_UNSUPPORTED (exit 5)"
+    postgres: { test: a_pending_baseline_declared_text_over_a_server_text_column_is_refused_and_its_remedy_delivers_postgres }
+    mysql:    { na: "the server-text projection of a declared text column is a PostgreSQL batch path (col::text); MySQL reads its temporal values through its own converter on every leg" }
+    mssql:    { na: "SQL Server refuses a datetime2 under a text override on every leg (mssql_a_datetime2_declared_text_is_one_refusal_on_batch_and_cdc), so no server text reaches a baseline" }
+    mongo:    { na: "a document source takes no per-column text override" }
+    oracle:   { na: "the Oracle baseline and the stream render a date through one stamp (oracle_cdc_timestamp9_is_delivered_as_batch_delivers_it); there is no server-text projection" }
+
   - id: override_integer_text_whole_cell_only
     what: "a text cell under an integer override is an integer only when the whole cell is one: `1.5`, `1.0`, `1e3`, `12abc`, a cell with a space, empty and `-` are refused RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5) on the batch converter, the CDC snapshot and the CDC stream through one reading (`whole_int_text`), never cut to a leading prefix or truncated to its integer part"
     postgres: { na: "a text column under an integer override is refused at plan time on the baseline leg and on a stream-only export alike (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH, a_text_under_an_integer_override_is_refused_alike_on_every_leg_postgres), so no text cell is read as an integer" }
