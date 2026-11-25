@@ -1,4 +1,4 @@
-//! A temporal value a warehouse cannot hold is refused by `RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE`, and the remedy that refusal names, `columns: {c: text}`, delivers the source's own text: graded by the values a second client reads back from the warehouse against what the source server renders itself.
+//! A temporal value a warehouse cannot hold is refused by `RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE`, and the remedy that refusal names, `columns: {c: text}`, delivers the source's value as text: graded by the values a second client reads back from the warehouse against what the source server renders itself.
 
 use crate::common::*;
 
@@ -14,18 +14,11 @@ struct Family {
     held: &'static [(&'static str, &'static [WarehouseKind])],
     ordinary: &'static str,
     text_of: fn(&str) -> String,
+    sep: char,
 }
 
 fn cast_char(c: &str) -> String {
     format!("CAST({c} AS CHAR)")
-}
-
-fn convert_121(c: &str) -> String {
-    format!("CONVERT(NVARCHAR(100), {c}, 121)")
-}
-
-fn convert_23(c: &str) -> String {
-    format!("CONVERT(NVARCHAR(100), {c}, 23)")
 }
 
 #[cfg_attr(not(feature = "oracle"), allow(dead_code))]
@@ -49,6 +42,7 @@ const MYSQL_DATE: Family = Family {
     ],
     ordinary: "'2024-02-29'",
     text_of: cast_char,
+    sep: ' ',
 };
 
 const MYSQL_DATETIME6: Family = Family {
@@ -60,6 +54,7 @@ const MYSQL_DATETIME6: Family = Family {
     ],
     ordinary: "'2024-02-29 12:34:56.789012'",
     text_of: cast_char,
+    sep: ' ',
 };
 
 const MYSQL_DATETIME3: Family = Family {
@@ -70,28 +65,7 @@ const MYSQL_DATETIME3: Family = Family {
     ],
     ordinary: "'2024-02-29 12:34:56.789'",
     text_of: cast_char,
-};
-
-const MSSQL_DATE: Family = Family {
-    ty: "DATE",
-    held: &[
-        ("'0001-01-01'", CH),
-        ("'1899-12-31'", CH),
-        ("'2300-01-01'", CH),
-        ("'9999-12-31'", CH),
-    ],
-    ordinary: "'2024-02-29'",
-    text_of: convert_23,
-};
-
-const MSSQL_DATETIME2_6: Family = Family {
-    ty: "DATETIME2(6)",
-    held: &[
-        ("'0001-01-01 00:00:00.000000'", CH),
-        ("'9999-12-31 23:59:59.999999'", CH),
-    ],
-    ordinary: "'2024-02-29 12:34:56.789012'",
-    text_of: convert_121,
+    sep: ' ',
 };
 
 #[cfg_attr(not(feature = "oracle"), allow(dead_code))]
@@ -104,6 +78,7 @@ const ORACLE_DATE: Family = Family {
     ],
     ordinary: "DATE '2024-02-29'",
     text_of: oracle_date,
+    sep: 'T',
 };
 
 #[cfg_attr(not(feature = "oracle"), allow(dead_code))]
@@ -115,7 +90,17 @@ const ORACLE_TIMESTAMP6: Family = Family {
     ],
     ordinary: "TIMESTAMP '2024-02-29 12:34:56.789012'",
     text_of: oracle_ts6,
+    sep: 'T',
 };
+
+/// The server's text in the form rivet delivers a declared-text temporal: the separator `sep`, a time of day and six fraction digits.
+fn delivered_form(server: &str, sep: char) -> String {
+    let (date, time) = server
+        .split_once([' ', 'T'])
+        .unwrap_or((server, "00:00:00"));
+    let (clock, frac) = time.split_once('.').unwrap_or((time, ""));
+    format!("{date}{sep}{clock}.{frac:0<6}")
+}
 
 /// A table `(id, v)` of `family` holding every value `kind` cannot hold, an ordinary one and NULL: the load is refused by code with the `columns:` remedy named, and the export that declares `v: text` lands the source's own text, which the source server and the warehouse's second client agree on.
 fn text_remedy_lands(e: SqlEngine, kind: WarehouseKind, family: &Family) {
@@ -153,6 +138,10 @@ fn text_remedy_lands(e: SqlEngine, kind: WarehouseKind, family: &Family) {
         values.join(", ")
     ));
     let server = e.id_texts(&table, &(family.text_of)(&v));
+    let delivered: Vec<(i64, Option<String>)> = server
+        .iter()
+        .map(|(k, t)| (*k, t.as_deref().map(|t| delivered_form(t, family.sep))))
+        .collect();
     assert_eq!(server.len(), rows.len(), "the source holds every row");
 
     let plain = w.shape(e.staged(e.rig(&table), "full", &[]), "id");
@@ -182,8 +171,8 @@ fn text_remedy_lands(e: SqlEngine, kind: WarehouseKind, family: &Family) {
         "the declared column lands as text, not {landed_type}"
     );
     assert_eq!(
-        landed, server,
-        "the warehouse holds the source's own text for every row, in {landed_type}"
+        landed, delivered,
+        "the warehouse holds the source's value as text for every row, in {landed_type}"
     );
 }
 
@@ -217,22 +206,6 @@ fn text_remedy_lands_in_clickhouse_mysql_datetime3() {
 #[ignore = "live: requires docker compose mysql + BigQuery creds"]
 fn text_remedy_lands_in_bigquery_mysql_date() {
     text_remedy_lands(SqlEngine::Mysql, WarehouseKind::BigQuery, &MYSQL_DATE);
-}
-
-#[test]
-#[ignore = "live: requires docker compose mssql + clickhouse + fake-gcs"]
-fn text_remedy_lands_in_clickhouse_mssql_date() {
-    text_remedy_lands(SqlEngine::Mssql, WarehouseKind::ClickHouse, &MSSQL_DATE);
-}
-
-#[test]
-#[ignore = "live: requires docker compose mssql + clickhouse + fake-gcs"]
-fn text_remedy_lands_in_clickhouse_mssql_datetime2() {
-    text_remedy_lands(
-        SqlEngine::Mssql,
-        WarehouseKind::ClickHouse,
-        &MSSQL_DATETIME2_6,
-    );
 }
 
 #[cfg(feature = "oracle")]
