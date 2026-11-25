@@ -33,6 +33,7 @@ use std::path::{Path, PathBuf};
 // 55 -> 57 (2026-11-22, #1162): the MySQL zero-datetime and Oracle Julian-date open-defect cells deliver a text the oracle's own source read cannot represent (NULL for a zero datetime, a sign-spaced text for a Julian date); closes when the oracle reads both as the server prints them.
 // 57 -> 58 (2026-11-22): the Oracle CDC cell for an LTZ value stored outside Oracle's own range reads that source through the oracle, whose own read fails with ORA-01877; one shared closure for the stream and snapshot legs; closes when the oracle reads a stored value Oracle cannot print.
 // 58 -> 59 (2026-11-22): the Oracle cell for a real LTZ instant just past 9999 compares the delivered value with the TZ column holding the same literal; the oracle's own source read of year 10000 fails with ORA-01841; closes when the oracle reads a stored value Oracle cannot convert.
+// 59 -> 60 (2026-11-25, #1235): the SQL Server declared-text cells for a DATETIME column: the ledger renders DATETIME through DATETIME2(7) (.1233333) while the server's own text is .123; graded against CONVERT; closes when the ledger renders a DATETIME at its own three digits.
 // ratchet-pin: no-oracle-opt-outs (review 2027-02-01) count tests/live/ \.no_oracle\(|run_rivet_ok_no_oracle\(|"RIVET_TEST_NO_ORACLE"|NO_ORACLE_ENV
 
 // Typed declarations in tests/live of what a run that does not exit 0 may leave. History frozen at 2026-11-04.

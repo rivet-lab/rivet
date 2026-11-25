@@ -102,12 +102,7 @@ fn a_value_past_the_nanosecond_range_is_refused_and_never_written_as_null() {
                         Then::DeliversTheSource,
                         move |r| {
                             r.rebuilt(|rig| {
-                                let rig = rig.restage("full", &["columns: {v: text}"]);
-                                if datetime {
-                                    rig.no_oracle("the ledger renders DATETIME through DATETIME2(7) (.1233333) while the server's own text is .123; graded against CONVERT in a_temporal_column_declared_text_is_delivered_as_the_servers_text")
-                                } else {
-                                    rig
-                                }
+                                ungraded_when_datetime(rig.restage("full", &["columns: {v: text}"]), datetime)
                             })
                         },
                     ),
@@ -204,6 +199,15 @@ const TEXT_CASES: &[TextCase] = &[
     },
 ];
 
+/// The rig with its oracle off for a DATETIME column, whose ledger text goes through DATETIME2(7) while the server's own text is the three-digit form.
+fn ungraded_when_datetime(rig: Rig, datetime: bool) -> Rig {
+    if datetime {
+        rig.no_oracle("the ledger renders DATETIME through DATETIME2(7) (.1233333) while the server's own text is .123; graded against CONVERT in a_temporal_column_declared_text_is_delivered_as_the_servers_text")
+    } else {
+        rig
+    }
+}
+
 /// A temporal column declared `text` delivers the server's own `CONVERT(varchar, v, style)` text (style 121, and 120 for SMALLDATETIME, whose precision is the minute) for every value, the year 0001 and 9999 included, and NULL as NULL.
 #[test]
 #[ignore = "live: requires docker compose mssql"]
@@ -211,9 +215,10 @@ fn a_temporal_column_declared_text_is_delivered_as_the_servers_text() {
     require_alive(LiveService::Mssql);
     for case in TEXT_CASES {
         let (table, _guard) = table_of(case.ty, case.values);
-        let rig = Rig::mssql_batch(&table)
-            .no_oracle("graded below against the server's own CONVERT text")
-            .export_line("columns: {v: text}");
+        let rig = ungraded_when_datetime(
+            Rig::mssql_batch(&table).export_line("columns: {v: text}"),
+            case.ty == "DATETIME",
+        );
         rig.run_ok();
         let want = sqlcmd_lines(
             "rivet-mssql-1",
@@ -249,9 +254,10 @@ fn text_loads_into(kind: WarehouseKind, case: &TextCase) {
     let (table, _guard) = table_of(case.ty, case.values);
     w.adopt(&table);
     let rig = w.shape(
-        Rig::mssql_batch(&table)
-            .no_oracle("graded below by the warehouse's own read of the delivered text against the server's CONVERT text")
-            .export_line("columns: {v: text}"),
+        ungraded_when_datetime(
+            Rig::mssql_batch(&table).export_line("columns: {v: text}"),
+            case.ty == "DATETIME",
+        ),
         "id",
     );
     rig.run_ok();
