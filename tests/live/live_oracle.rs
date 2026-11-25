@@ -2300,15 +2300,12 @@ fn an_undeclared_nanosecond_timestamp_is_delivered_as_text_and_the_declared_ns_t
             "{col}: parquet vs the database's own nine-digit rendering"
         );
     }
+    ora_exec(&format!("DELETE FROM {} WHERE id > 2", t.name()));
     let narrow = tempfile::tempdir().unwrap();
     Rig::oracle_batch(t.name())
         .export_line(
             "columns: {T7: timestamp_ns, T9: timestamp_ns, TZ9: timestamp_tz_ns, LTZ9: timestamp_tz_ns}",
         )
-        .query(&format!(
-            "SELECT id, t7, t9, tz9, ltz9 FROM {} WHERE id <= 2 ORDER BY id",
-            t.name()
-        ))
         .dest_path(narrow.path().to_path_buf())
         .run_ok();
     for (col, expr) in [
@@ -2324,7 +2321,6 @@ fn an_undeclared_nanosecond_timestamp_is_delivered_as_text_and_the_declared_ns_t
                 .map(|(k, v)| (*k, v.as_deref().map(canon_ts)))
                 .collect::<BTreeMap<_, _>>(),
             want.iter()
-                .filter(|(k, _)| **k <= 2)
                 .map(|(k, v)| (*k, v.as_deref().map(|s| canon_ts(s.trim()))))
                 .collect::<BTreeMap<_, _>>(),
             "{col}: declared timestamp_ns vs the database's own nine-digit rendering"
