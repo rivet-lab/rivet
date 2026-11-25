@@ -1762,10 +1762,10 @@ fn domain_map(
     map
 }
 
-/// The first object id a user creates: every catalog type below it is built in and keeps its name.
+/// The first object id a user creates: every catalog type below it is built in, in `pg_catalog` or in `information_schema`.
 const FIRST_USER_OID: u32 = 16384;
 
-/// The lowest array type object id the session open reads: every one when a user type takes the name of a built-in one, else the user-defined ones only.
+/// The lowest array type object id the session open reads from `pg_catalog`: every one when a user type takes the name of a built-in one, else the user-defined ones only.
 fn array_scan_floor(builtin_names_taken: bool) -> u32 {
     if builtin_names_taken {
         0
@@ -1791,15 +1791,32 @@ fn builtin_names_taken(client: &mut Client) -> Result<bool> {
 
 /// The catalog's domains and the array types the open decides, as `domain_map` takes them, and whether that is every array type.
 fn load_domains(client: &mut Client) -> Result<(Domains, bool)> {
-    let domains: Vec<(String, String)> = client
-        .query(
-            "SELECT format_type(oid, NULL), format_type(typbasetype, NULL) \
-             FROM pg_type WHERE typtype = 'd'",
-            &[],
-        )?
+    let rows = client.query(
+        "SELECT format_type(a.oid, NULL), \
+                CASE WHEN a.typtype = 'd' THEN format_type(a.typbasetype, NULL) END, \
+                CASE WHEN a.typtype <> 'd' THEN a.oid END, \
+                (SELECT e.typtype::text FROM pg_type e WHERE e.oid = a.typelem) \
+           FROM pg_type a \
+          WHERE a.typtype = 'd' \
+             OR (a.typcategory = 'A' AND a.typelem <> 0 AND a.oid < $1 \
+                 AND a.typnamespace <> 'pg_catalog'::regnamespace)",
+        &[&FIRST_USER_OID],
+    )?;
+    let domains: Vec<(String, String)> = rows
         .iter()
-        .map(|r| (r.get(0), r.get(1)))
+        .filter_map(|r| Some((r.get(0), r.get::<_, Option<String>>(1)?)))
         .collect();
+    let schema_arrays: Vec<(u32, String, String)> = seeded!(
+        "pg-cdc-built-in-schema-arrays-not-read-at-open",
+        Vec::new(),
+        rows.iter()
+            .filter_map(|r| Some((
+                r.get::<_, Option<u32>>(2)?,
+                r.get(0),
+                r.get::<_, Option<String>>(3)?
+            )))
+            .collect()
+    );
     let taken = builtin_names_taken(client)?;
     let floor = array_scan_floor(taken);
     let arrays: Vec<(u32, String, String)> = seeded!(
@@ -1829,10 +1846,13 @@ fn load_domains(client: &mut Client) -> Result<(Domains, bool)> {
                 .collect()
         )
     );
-    Ok((domain_map(domains, arrays), taken))
+    Ok((
+        domain_map(domains, arrays.into_iter().chain(schema_arrays)),
+        taken,
+    ))
 }
 
-/// The built-in array types the catalog holds under `labels`, named as a search path of `pg_catalog` alone prints them; a user-defined array type is decided at the session open, never here.
+/// The built-in array types the catalog holds under `labels`, named as a search path of `pg_catalog` alone prints them; an array type outside `pg_catalog` is decided at the session open, never here.
 fn load_arrays(client: &mut Client, labels: &[String]) -> Result<Vec<(u32, String, String)>> {
     let ceiling = seeded!(
         "pg-cdc-array-map-decided-at-read-time",
@@ -4369,7 +4389,7 @@ mod tests {
     #[test]
     #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
     fn live_ddl_on_a_type_after_the_open_leaves_array_decoding_as_the_open_map_does() {
-        let scenarios: [(&str, &str, String, &str); 16] = [
+        let scenarios: [(&str, &str, String, &str); 17] = [
             (
                 "rename_composite",
                 "",
@@ -4466,6 +4486,12 @@ mod tests {
                 format!("{COMP_TABLE} CREATE TABLE u (id int primary key);"),
                 "ALTER TABLE u ADD COLUMN c comp[]; INSERT INTO t VALUES (1, ARRAY[ROW(1,'x')::comp]); ALTER TYPE comp RENAME TO comp3; INSERT INTO t VALUES (2, ARRAY[ROW(2,'y')::comp3])",
             ),
+            (
+                "information_schema_in_search_path",
+                "search_path = public, information_schema",
+                "CREATE TABLE t (id int primary key, c information_schema.cardinal_number[], s information_schema.sql_identifier[]);".to_string(),
+                "INSERT INTO t VALUES (1, '{1,2}', '{a,b}')",
+            ),
         ];
         let mut diverged = Vec::new();
         for (tag, db_set, setup, after) in &scenarios {
@@ -4482,7 +4508,7 @@ mod tests {
         );
     }
 
-    /// Live: after a composite type is renamed, 300 rows carrying its old label are read in a handful of transactions, not one lookup per row.
+    /// Live: after the open, 300 rows carry the label of a composite type renamed after it, and are read in a handful of transactions, not one lookup per row.
     #[test]
     #[ignore = "live: requires docker compose postgres (wal_level=logical)"]
     fn live_a_label_the_catalog_does_not_hold_is_asked_once_per_session() {
@@ -4512,8 +4538,9 @@ mod tests {
         )
         .unwrap();
         c.batch_execute(
-            "INSERT INTO t SELECT g, ARRAY[ROW(g,'x')::comp] FROM generate_series(1,300) g; \
-             DROP TYPE comp CASCADE; ALTER TABLE t ADD COLUMN v text; INSERT INTO t VALUES (1000, 'z')",
+            "ALTER TYPE comp RENAME TO comp2; \
+             INSERT INTO t SELECT g, ARRAY[ROW(g,'x')::comp2] FROM generate_series(1,300) g; \
+             ALTER TABLE t ADD COLUMN v text; INSERT INTO t (id, v) VALUES (1000, 'z')",
         )
         .unwrap();
         let settled = |admin: &mut Client, col: &str| -> i64 {
