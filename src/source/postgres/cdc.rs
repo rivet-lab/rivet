@@ -1800,7 +1800,8 @@ fn load_domains(client: &mut Client) -> Result<(Domains, bool)> {
         .iter()
         .map(|r| (r.get(0), r.get(1)))
         .collect();
-    let floor = array_scan_floor(builtin_names_taken(client)?);
+    let taken = builtin_names_taken(client)?;
+    let floor = array_scan_floor(taken);
     let arrays: Vec<(u32, String, String)> = seeded!(
         "pg-cdc-session-reads-whole-type-catalog",
         client
@@ -1828,7 +1829,7 @@ fn load_domains(client: &mut Client) -> Result<(Domains, bool)> {
                 .collect()
         )
     );
-    Ok((domain_map(domains, arrays), floor == 0))
+    Ok((domain_map(domains, arrays), taken))
 }
 
 /// The built-in array types the catalog holds under `labels`, named as a search path of `pg_catalog` alone prints them; a user-defined array type is decided at the session open, never here.
