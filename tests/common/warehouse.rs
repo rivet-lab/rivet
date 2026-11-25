@@ -408,7 +408,7 @@ impl Warehouse {
     }
 
     /// Rows of `sql` against BigQuery, as the second client renders them.
-    pub fn bq_rows(&self, sql: &str) -> Vec<serde_json::Value> {
+    pub fn read_warehouse_rows(&self, sql: &str) -> Vec<serde_json::Value> {
         self.bq.as_ref().expect("BigQuery").read_bq_rows(sql)
     }
 }

@@ -94,7 +94,7 @@ fn recovered(w: &Warehouse, table: &str, col: &str, plain: bool) -> Vec<(i64, Op
         recover(sub, col),
     );
     let micros = "'%Y-%m-%d %H:%M:%E6S'";
-    let rows = w.bq_rows(&format!(
+    let rows = w.read_warehouse_rows(&format!(
         "SELECT id, CAST({col} AS STRING) AS ns, FORMAT_TIMESTAMP({micros}, {instant}) AS inst, \
          FORMAT_DATETIME({micros}, {datetime}) AS dt, CAST({sub} AS STRING) AS sub, \
          CAST(UNIX_MICROS({instant}) AS STRING) AS us FROM {} ORDER BY id",
