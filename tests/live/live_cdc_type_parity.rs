@@ -2152,6 +2152,11 @@ fn oracle_batch_and_cdc_deliver_every_ledger_row_alike() {
         &columns_ddl(&lg.rows, "id NUMBER(10) PRIMARY KEY"),
     );
     let declared = format!("columns: {{C{declared_at}: timestamp}}");
+    assert_eq!(
+        lg.rows.iter().filter(|r| r.native == DECLARED).count(),
+        2,
+        "the ledger's undeclared {DECLARED} text column and the declared one are both graded"
+    );
     let cdc = Rig::oracle_cdc(t.name())
         .cdc_line("initial: snapshot")
         .export_line(&declared);
