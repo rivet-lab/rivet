@@ -7456,6 +7456,22 @@ seeds:
       oracle:
         cells: ["lib:an_unreachable_source_refuses_an_unadmitted_override_and_not_a_plain_plan"]
 
+  - name: schema-baseline-before-refusal
+    class: "a run that will be refused (the quality gate, a coded stop after the drift check, an undecodable change) has already replaced the export's stored drift baseline with the schema it observed, so the next run reads no drift against a schema the refused run never delivered"
+    history: "2026-11-23 - Oracle CDC a-change-older-than-an-alter cell under PostgreSQL state: the anchor run stored ID,V, the next run under the default warn policy rewrote it to ID,V,W and only then LogMiner refused with RIVET_SOURCE_CDC_UNDECODABLE; the rig oracle graded the changed export_schema row a resume-point leftover; RED on main by the batch cells below"
+    scope: source
+    switch: schema-baseline-before-refusal
+    engines:
+      postgres:
+        cells: [a_refused_single_run_leaves_the_stored_baseline_as_it_found_it_pg, a_refused_chunked_run_leaves_the_stored_baseline_as_it_found_it_pg, pg_cdc_a_refused_run_leaves_the_stored_baseline_as_it_found_it, "lib:a_run_that_never_ends_clean_leaves_the_stored_baseline_untouched"]
+      mysql:
+        cells: [a_refused_single_run_leaves_the_stored_baseline_as_it_found_it_mysql, a_refused_chunked_run_leaves_the_stored_baseline_as_it_found_it_mysql, mysql_cdc_a_refused_run_leaves_the_stored_baseline_as_it_found_it, "lib:a_run_that_never_ends_clean_leaves_the_stored_baseline_untouched"]
+      mssql:
+        cells: [a_refused_single_run_leaves_the_stored_baseline_as_it_found_it_mssql, a_refused_chunked_run_leaves_the_stored_baseline_as_it_found_it_mssql, mssql_cdc_a_refused_run_leaves_the_stored_baseline_as_it_found_it, "lib:a_run_that_never_ends_clean_leaves_the_stored_baseline_untouched"]
+      oracle:
+        cells: [a_refused_single_run_leaves_the_stored_baseline_as_it_found_it_oracle, a_refused_chunked_run_leaves_the_stored_baseline_as_it_found_it_oracle, a_change_older_than_an_alter_is_refused_by_code_oracle, "lib:a_run_that_never_ends_clean_leaves_the_stored_baseline_untouched"]
+      mongo:
+        cells: ["lib:a_run_that_never_ends_clean_leaves_the_stored_baseline_untouched"]
   - name: doctor-probe-fixed-temp-path
     class: "`rivet doctor` stages its destination write-probe at one temp path shared by every process, so a parallel doctor removes the file between another's write and copy and reports `[FAIL] Destination ... No such file or directory (os error 2)`"
     history: "2026-11-24 - gate cell sec_keyword_value_credentials, 12 parallel doctors with separate local destinations: 81 of 720 runs failed, 0 of 60 serial; RED on main: parallel_destination_probes_on_separate_local_destinations_all_succeed fails 857 of 1800 probes"
