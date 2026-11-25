@@ -17,7 +17,7 @@ the keyset path. The expected value is the SOURCE row, read by DuckDB — never 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from . import engines
 from .core import Ledger, SkipCause
@@ -134,7 +134,7 @@ MSSQL = [
         ),
     ),
     _risky("mssql", "rivet_sent_dt2_100ns", "DATETIME2(7)", "'2024-01-01 00:00:00.0000001'"),
-    _risky("mssql", "rivet_sent_xml", "XML", "'<a/>'"),
+    replace(_risky("mssql", "rivet_sent_xml", "XML", "'<a/>'"), risky=False),
     _risky("mssql", "rivet_sent_variant", "SQL_VARIANT", "CAST(1 AS INT)"),
 ]
 

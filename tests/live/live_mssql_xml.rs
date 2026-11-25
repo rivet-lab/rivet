@@ -4,8 +4,6 @@ use crate::common::*;
 
 const COLS: &str = "id INT PRIMARY KEY, doc XML";
 
-const NO_ORACLE: &str = "xml: the DuckDB mssql scanner reads xml as text of its own; the oracle here is sqlcmd's CAST to nvarchar(max)";
-
 /// The value expressions inserted per id; `None` is SQL NULL.
 fn docs() -> Vec<(i64, Option<&'static str>)> {
     vec![
@@ -31,6 +29,11 @@ fn docs() -> Vec<(i64, Option<&'static str>)> {
             ),
         ),
         (11, Some("CAST(N'<a>x&#13;&#10;y</a>' AS xml)")),
+        (
+            12,
+            Some("CAST(N'<?xml version=\"1.0\" encoding=\"utf-16\"?><a>x</a>' AS xml)"),
+        ),
+        (13, Some("CAST(NCHAR(0xFEFF) + N'<a>x</a>' AS xml)")),
     ]
 }
 
@@ -112,12 +115,12 @@ fn a_batch_export_delivers_xml_columns_as_the_source_renders_them() {
     let table = unique_name("mssql_xml");
     mssql_exec(&format!("CREATE TABLE dbo.{table} ({COLS})"));
     let _guard = MssqlTable::adopt(table.clone());
-    for sql in inserts(&table, 1..=11) {
+    for sql in inserts(&table, 1..=13) {
         mssql_exec(&sql);
     }
     let want = source_rendering("rivet-mssql-1", &table);
-    assert_eq!(want.len(), 11, "oracle rows: {want:?}");
-    let rig = Rig::mssql_batch(&table).no_oracle(NO_ORACLE);
+    assert_eq!(want.len(), 13, "oracle rows: {want:?}");
+    let rig = Rig::mssql_batch(&table);
     rig.run_ok();
     assert_eq!(delivered(&rig.out_dir()), want);
 }
@@ -125,22 +128,20 @@ fn a_batch_export_delivers_xml_columns_as_the_source_renders_them() {
 #[test]
 #[ignore = "live: requires docker compose mssql with SQL Server Agent + CDC"]
 fn a_cdc_baseline_and_stream_deliver_the_same_xml_text_as_the_source_renders() {
-    let mut sc = CdcScenario::mssql_with("mssql_cdc_xml", COLS, |r, _| {
-        r.cdc("initial: snapshot").no_oracle(NO_ORACLE)
-    });
+    let mut sc = CdcScenario::mssql_with("mssql_cdc_xml", COLS, |r, _| r.cdc("initial: snapshot"));
     let table = sc.table.clone();
     for sql in inserts(&table, 1..=6) {
         sc.sql(&sql);
     }
     sc.settle();
     sc.rig.run_ok();
-    for sql in inserts(&table, 7..=11) {
+    for sql in inserts(&table, 7..=13) {
         sc.sql(&sql);
     }
     sc.settle();
     sc.rig.run_ok();
     let want = source_rendering("rivet-mssql-cdc-1", &table);
-    assert_eq!(want.len(), 11, "oracle rows: {want:?}");
+    assert_eq!(want.len(), 13, "oracle rows: {want:?}");
     let out = sc.rig.out_dir();
     let mut got = delivered(&out.join("snapshot"));
     assert_eq!(got.len(), 6, "the baseline holds ids 1..=6: {got:?}");
@@ -151,16 +152,16 @@ fn a_cdc_baseline_and_stream_deliver_the_same_xml_text_as_the_source_renders() {
 #[test]
 #[ignore = "live: requires docker compose mssql with SQL Server Agent + CDC"]
 fn a_cdc_stream_without_a_baseline_delivers_xml_text_as_the_source_renders() {
-    let mut sc = CdcScenario::mssql_with("mssql_cdc_xml_s", COLS, |r, _| r.no_oracle(NO_ORACLE));
+    let mut sc = CdcScenario::mssql_with("mssql_cdc_xml_s", COLS, |r, _| r);
     sc.rig.run_ok();
     let table = sc.table.clone();
-    for sql in inserts(&table, 1..=11) {
+    for sql in inserts(&table, 1..=13) {
         sc.sql(&sql);
     }
     sc.settle();
     sc.rig.run_ok();
     let want = source_rendering("rivet-mssql-cdc-1", &table);
-    assert_eq!(want.len(), 11, "oracle rows: {want:?}");
+    assert_eq!(want.len(), 13, "oracle rows: {want:?}");
     assert_eq!(delivered(&sc.rig.out_dir()), want);
 }
 
@@ -171,13 +172,11 @@ fn a_declared_text_column_over_xml_delivers_the_same_text_as_the_undeclared_one(
     let table = unique_name("mssql_xml_decl");
     mssql_exec(&format!("CREATE TABLE dbo.{table} ({COLS})"));
     let _guard = MssqlTable::adopt(table.clone());
-    for sql in inserts(&table, 1..=11) {
+    for sql in inserts(&table, 1..=13) {
         mssql_exec(&sql);
     }
     let want = source_rendering("rivet-mssql-1", &table);
-    let rig = Rig::mssql_batch(&table)
-        .export_line("columns: {doc: text}")
-        .no_oracle(NO_ORACLE);
+    let rig = Rig::mssql_batch(&table).export_line("columns: {doc: text}");
     rig.run_ok();
     assert_eq!(delivered(&rig.out_dir()), want);
 }

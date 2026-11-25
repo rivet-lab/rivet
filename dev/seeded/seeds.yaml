@@ -7029,7 +7029,7 @@ seeds:
         cells:
           - a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mysql
       mssql:
-        na: "2026-11-25: xml was the one SQL Server wire type with no Arrow mapping and is now delivered as text, so no SQL Server column reaches the unmapped refusal or the format refusal; reopens if a SQL Server wire type loses its Arrow mapping"
+        na: "2026-11-25: xml is now delivered as text and ColumnType::Null (a typeless NULL, never a table column) is the only SQL Server wire type left without an Arrow mapping, so no SQL Server column reaches the unmapped refusal or the format refusal; reopens if a SQL Server wire type loses its Arrow mapping"
       oracle:
         na: "2026-11-23: csv now writes every type an Oracle source delivers, so no Oracle column reaches the format refusal; the format half is held by the lib cells and the unmapped-column cell for Oracle is open"
       mongo:
