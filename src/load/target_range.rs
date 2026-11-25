@@ -19,11 +19,11 @@ pub(crate) fn orchestrated_ranges(target: &LoadTarget) -> &'static Ranges {
     }
 }
 
-/// The remedy a range refusal names: the operator declares the column text, and the export delivers the source's own text.
+/// The remedy a range refusal names: the operator declares the column text, and the export delivers the value as text.
 pub(crate) fn text_remedy(column: &str) -> String {
     format!(
         "To keep the value, declare `{column}: text` under `columns:` in the export and run it \
-         again: the warehouse then holds the source's text for the column. Or correct it at the source."
+         again: the warehouse then holds the value as text. Or correct it at the source."
     )
 }
 
@@ -237,7 +237,7 @@ mod tests {
              which ClickHouse enforces by storing the nearest end silently; nothing was inserted. \
              Re-export the part with statistics enabled (rivet's writer keeps them). \
              To keep the value, declare `ts: text` under `columns:` in the export and run it \
-             again: the warehouse then holds the source's text for the column. Or correct it at the source."
+             again: the warehouse then holds the value as text. Or correct it at the source."
         );
     }
 
