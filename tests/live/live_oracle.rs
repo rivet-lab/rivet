@@ -2271,6 +2271,87 @@ fn a_value_past_the_nanosecond_range_under_the_override_is_refused_by_code() {
     assert!(said.contains("column `T9` holds "), "{said}");
 }
 
+const TS9_ROWS: &[(&str, &str)] = &[
+    (
+        "TIMESTAMP '2024-02-29 13:14:15.123456789'",
+        "2024-02-29T13:14:15.123456789",
+    ),
+    (
+        "TIMESTAMP '1500-03-04 05:06:07.000000001'",
+        "1500-03-04T05:06:07.000000001",
+    ),
+    (
+        "TIMESTAMP '9999-12-31 23:59:59.999999999'",
+        "9999-12-31T23:59:59.999999999",
+    ),
+    (
+        "TIMESTAMP '0001-01-01 00:00:00.123456789'",
+        "0001-01-01T00:00:00.123456789",
+    ),
+];
+
+/// An undeclared TIMESTAMP(9) loads into `kind` and a second client reads back the nine-digit text of each source literal, years 0001 and 9999 included.
+fn timestamp9_loads_into(kind: WarehouseKind) {
+    require_alive(LiveService::Oracle);
+    let Some(mut w) = Warehouse::of(kind, "orats9") else {
+        return;
+    };
+    let t = OracleTable::create("ora_whts", "id NUMBER(10) PRIMARY KEY, t9 TIMESTAMP(9)");
+    w.adopt(t.name());
+    for (i, (literal, _)) in TS9_ROWS.iter().enumerate() {
+        ora_exec(&format!(
+            "INSERT INTO {} VALUES ({}, {literal})",
+            t.name(),
+            i + 1
+        ));
+    }
+    ora_exec(&format!(
+        "INSERT INTO {} VALUES ({}, NULL)",
+        t.name(),
+        TS9_ROWS.len() + 1
+    ));
+    let rig = w.shape(
+        Rig::oracle_batch(t.name()).no_oracle(
+            "graded below by the warehouse's own read of the delivered text against the source literals",
+        ),
+        "ID",
+    );
+    rig.run_ok();
+    w.load(&rig);
+    let want: Vec<String> = TS9_ROWS
+        .iter()
+        .map(|(_, text)| text.to_string())
+        .chain(["NULL".to_string()])
+        .collect();
+    let got: Vec<String> = w
+        .texts(t.name(), "ID", "T9")
+        .into_iter()
+        .map(|(_, v)| v.unwrap_or_else(|| "NULL".to_string()))
+        .collect();
+    assert_eq!(
+        got, want,
+        "TIMESTAMP(9) into {kind:?}: read back vs the source literals"
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose oracle + clickhouse + fake-gcs"]
+fn an_undeclared_timestamp9_loads_into_clickhouse_as_nanosecond_text() {
+    timestamp9_loads_into(WarehouseKind::ClickHouse);
+}
+
+#[test]
+#[ignore = "live: requires docker compose oracle + BigQuery creds"]
+fn an_undeclared_timestamp9_loads_into_bigquery_as_nanosecond_text() {
+    timestamp9_loads_into(WarehouseKind::BigQuery);
+}
+
+#[test]
+#[ignore = "live: requires docker compose oracle + Snowflake creds"]
+fn an_undeclared_timestamp9_loads_into_snowflake_as_nanosecond_text() {
+    timestamp9_loads_into(WarehouseKind::Snowflake);
+}
+
 /// An undeclared TIMESTAMP(7..9), zoned or not, is delivered as the database's own nine-digit text in any year, `Z` on a zoned value; declaring it as `timestamp_ns` still delivers native nanoseconds inside 1677..2262.
 #[test]
 #[ignore = "live: requires docker compose oracle"]
