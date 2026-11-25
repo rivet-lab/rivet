@@ -308,3 +308,81 @@ fn the_remedy_of_a_value_refusal_delivers_the_server_text_postgres() {
 fn the_remedy_of_a_value_refusal_delivers_the_server_text_mssql() {
     remedy_delivers(Eng::Mssql);
 }
+
+const NEIGHBOUR_TABLE: &str = "id INT PRIMARY KEY, d DATE, t TIME, ts TIMESTAMP, tz TIMESTAMPTZ, ia INTEGER[], ta TEXT[], iv INTERVAL, u UUID";
+const NEIGHBOUR_ROW: &str = "(1, '2024-03-15', '14:30:00.123456', '2024-03-15 10:11:12.123456', '2024-03-15 10:11:12.123456+00', '{1,2,3}', '{a,b}', '1 day 02:03:04', 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11')";
+const NATIVE: &[(&str, &str)] = &[
+    ("d", "2024-03-15"),
+    ("t", "14:30:00.123456"),
+    ("ts", "2024-03-15T10:11:12.123456"),
+    ("tz", "2024-03-15T10:11:12.123456Z"),
+    ("ia", "[1, 2, 3]"),
+    ("ta", "[a, b]"),
+    ("iv", "P1DT2H3M4S"),
+    ("u", "a0eebc999c0b4ef8bb6d6bb9bd380a11"),
+];
+const READABLE_TEXT_UUID: &str = "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11";
+const STILL_REFUSED: &[(&str, &str)] = &[
+    ("d", "int64"),
+    ("ts", "bool"),
+    ("ia", "int64"),
+    ("t", "float64"),
+    ("tz", "date"),
+];
+
+fn neighbour_table() -> (String, PgTable) {
+    let table = unique_name("vrt_n");
+    let mut c = pg_connect();
+    c.batch_execute(&format!("CREATE TABLE {table} ({NEIGHBOUR_TABLE})"))
+        .unwrap();
+    let guard = PgTable::adopt(table.clone());
+    c.batch_execute(&format!("INSERT INTO {table} VALUES {NEIGHBOUR_ROW}"))
+        .unwrap();
+    (table, guard)
+}
+
+fn first_delivered(rig: &Rig, col: &str) -> String {
+    dir_parquet_display(&rig.out_dir(), col)
+        .remove(0)
+        .unwrap_or_else(|| "<null>".into())
+}
+
+fn delivered_row(rig: &Rig) -> Vec<(String, String)> {
+    NATIVE
+        .iter()
+        .map(|(c, _)| (c.to_string(), first_delivered(rig, c)))
+        .collect()
+}
+
+fn pinned(row: &[(&str, &str)]) -> Vec<(String, String)> {
+    row.iter()
+        .map(|(c, v)| (c.to_string(), v.to_string()))
+        .collect()
+}
+
+/// What main delivered and refused next to the remedy stays byte-identical.
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn the_remedy_leaves_the_neighbouring_postgres_reads_unchanged() {
+    require_alive(LiveService::Postgres);
+    let (table, _guard) = neighbour_table();
+    let rig = readback_only(Rig::pg_batch(&table));
+    assert_eq!(rig.run().status.code(), Some(0));
+    assert_eq!(delivered_row(&rig), pinned(NATIVE), "no override");
+    let rig = readback_only(Rig::pg_batch(&table)).export_line("columns: {iv: text, u: text}");
+    assert_eq!(rig.run().status.code(), Some(0));
+    let mut want = pinned(NATIVE);
+    want[7].1 = READABLE_TEXT_UUID.to_string();
+    assert_eq!(delivered_row(&rig), want, "text over interval and uuid");
+    for (col, ty) in STILL_REFUSED {
+        let rig =
+            readback_only(Rig::pg_batch(&table)).export_line(&format!("columns: {{{col}: {ty}}}"));
+        let out = rig.run();
+        assert_eq!(out.status.code(), Some(1), "{col}: {ty}");
+        assert!(
+            stop_text(&out).contains("RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH"),
+            "{col}: {ty}: {}",
+            stop_text(&out)
+        );
+    }
+}

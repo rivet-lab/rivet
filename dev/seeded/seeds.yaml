@@ -7495,3 +7495,22 @@ seeds:
           - "lib:a_date32_inside_a_list_that_chrono_cannot_name_is_refused_not_written_as_an_empty_string"
           - "lib:a_microsecond_timestamp_chrono_cannot_name_is_refused_not_written_as_an_empty_cell"
           - "lib:a_microsecond_timestamp_inside_a_list_that_chrono_cannot_name_is_refused_not_written_as_an_empty_string"
+
+  - name: value-refusal-text-remedy
+    class: "a value refusal prescribes a `columns:` text declaration that the override table then refuses, so the remedy it names cannot be followed"
+    history: "2026-11-25 - owner decision on refusal-gap group C: a PostgreSQL date, time, timestamp or array column declared text was refused as an unread pair, so the infinity, 24:00:00 and multi-dimensional-array refusals had no working remedy"
+    scope: source
+    patch: value-refusal-text-remedy/shared.patch
+    engines:
+      postgres:
+        cells:
+          - the_remedy_of_a_value_refusal_delivers_the_server_text_postgres
+          - "lib:a_temporal_or_array_declared_text_is_projected_and_nothing_else_is"
+      mysql:
+        na: "a MySQL date, time and datetime are read as text already and refuse nothing a text declaration would recover; the PostgreSQL text projection does not run"
+      mssql:
+        na: "the patched PostgreSQL text projection does not run on SQL Server; its XML refusal names `columns:` through the type policy (the_remedy_of_a_value_refusal_delivers_the_server_text_mssql)"
+      mongo:
+        na: "a MongoDB export has no PostgreSQL text projection, and its values have no refusal that a text declaration recovers"
+      oracle:
+        na: "the patched PostgreSQL text projection does not run on Oracle; a NUMBER of 1E125 is refused by number_text and a text declaration does not recover it (open question)"

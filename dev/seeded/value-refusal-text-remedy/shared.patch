@@ -1,0 +1,13 @@
+diff --git a/src/source/postgres/arrow_convert.rs b/src/source/postgres/arrow_convert.rs
+index dd30c616..ff945759 100644
+--- a/src/source/postgres/arrow_convert.rs
++++ b/src/source/postgres/arrow_convert.rs
+@@ -368,7 +368,7 @@ pub(super) fn pg_server_text(t: &Type) -> bool {
+ 
+ /// Whether a `columns:` override declares `name` text over a date, time, timestamp or array wire type, which the server renders.
+ fn pg_text_declared(t: &Type, name: &str, column_overrides: &ColumnOverrides) -> bool {
+-    matches!(
++    false && matches!(
+         column_overrides.get(name),
+         Some(RivetType::String | RivetType::Text)
+     ) && matches!(
