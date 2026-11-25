@@ -125,32 +125,7 @@ fn a_pending_baseline_declared_text_over_a_server_text_column_is_refused_and_its
 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc postgres-cdc"]
-fn a_stream_only_export_declared_text_is_admitted_as_it_was_postgres() {
-    for (label, ddl, literal) in SERVER_TEXT {
-        let mut scn = CdcScenario::pg_with(
-            &format!("vrt_cdc_only_{label}"),
-            &format!("id BIGINT PRIMARY KEY, v {ddl}"),
-            |r, _| declared_text(r),
-        );
-        put(&mut scn, literal);
-        let name = scn.rig.export_name().to_string();
-        both_check_spellings_accept(&scn.rig, &name);
-        scn.rig.run_ok();
-        let source: i64 = oracle()
-            .query_one(&format!("SELECT count(*) FROM {}", scn.table), &[])
-            .unwrap()
-            .get(0);
-        assert_eq!(
-            parquet_column_values(&scn.rig, "id").len() as i64,
-            source,
-            "{label}: the stream-only run delivers every source row"
-        );
-    }
-}
-
-#[test]
-#[ignore = "live: requires docker compose --profile cdc postgres-cdc"]
-fn a_done_baseline_is_not_admitted_again_over_a_text_declaration_postgres() {
+fn a_done_baseline_and_a_stream_only_export_declared_text_are_admitted_as_they_were_postgres() {
     let mut scn = scenario("vrt_cdc_done", "DATE", |r| r);
     put(&mut scn, "'2024-03-15'");
     scn.rig.run_ok();
@@ -162,6 +137,16 @@ fn a_done_baseline_is_not_admitted_again_over_a_text_declaration_postgres() {
     let name = scn.rig.export_name().to_string();
     scn.rig.amend_export_lines(&["columns:", "  v: \"text\""]);
     both_check_spellings_accept(&scn.rig, &name);
+    for (label, ddl, literal) in SERVER_TEXT {
+        let mut only = CdcScenario::pg_with(
+            &format!("vrt_cdc_only_{label}"),
+            &format!("id BIGINT PRIMARY KEY, v {ddl}"),
+            |r, _| declared_text(r),
+        );
+        put(&mut only, literal);
+        let only_name = only.rig.export_name().to_string();
+        both_check_spellings_accept(&only.rig, &only_name);
+    }
 }
 
 #[test]
