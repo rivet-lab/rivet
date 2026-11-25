@@ -128,10 +128,13 @@ pub fn mask_value_in_output(value: &str) {
     }
 }
 
-/// The automaton of the registered `known` values, none when there are none.
+/// The automaton of the non-empty registered `known` values, none when there are none; an empty pattern would match at every byte and never let the masking pass end.
 fn automaton(known: &[String]) -> Option<NFA> {
-    (!known.is_empty()).then(|| {
-        let nfa = NFA::builder().match_kind(MatchKind::Standard).build(known);
+    let patterns: Vec<&String> = known.iter().filter(|k| !k.is_empty()).collect();
+    (!patterns.is_empty()).then(|| {
+        let nfa = NFA::builder()
+            .match_kind(MatchKind::Standard)
+            .build(patterns);
         nfa.expect("registered values fit an automaton")
     })
 }
@@ -908,6 +911,11 @@ mod tests {
 
     use super::*;
 
+    /// [`redact_secrets`] with no registered value, so the scan alone is exercised and no automaton is built per call.
+    fn redact_plain(text: &str) -> String {
+        redact_with(text, &[])
+    }
+
     // ── URL-safety matrix: the recurring credential-leak class, at the infra
     //    level (docs/url-safety-matrix.yaml). The class has regressed THREE times
     //    (round-1 MSSQL round-trip, round-3 the state-URL redactor, and the general redactor
@@ -952,7 +960,7 @@ mod tests {
                         format!("connect to {url} failed: timeout"),
                         format!("[2026-07-22 ERROR src] dialing {url} then EOF"),
                     ] {
-                        let out = redact_secrets(&ctx);
+                        let out = redact_plain(&ctx);
                         assert!(
                             !out.contains(SECRET),
                             "SECRET leaked through redact_secrets\n  scheme={scheme} body={body}\n  in:  {ctx}\n  out: {out}"
@@ -1131,13 +1139,13 @@ mod tests {
                     format!("[2026-10-07 WARN src] dialing {conn}"),
                     format!("first line\nconnect to {conn}\nlast line"),
                 ] {
-                    let out = redact_secrets(&ctx);
+                    let out = redact_plain(&ctx);
                     assert!(
                         !out.contains(SECRET),
                         "SECRET leaked\n  body={body}\n  in:  {ctx}\n  out: {out}"
                     );
                     assert!(out.contains("***"), "nothing was masked: {out}");
-                    assert_eq!(redact_secrets(&out), out, "second pass: {ctx}");
+                    assert_eq!(redact_plain(&out), out, "second pass: {ctx}");
                 }
             }
         }
@@ -1535,13 +1543,13 @@ mod tests {
         ) {
             let text = format!("?{prefix}{keyword}=x");
             let want = if keyword == "n" || keyword == "pass" { text.clone() } else { format!("?{prefix}{keyword}=***") };
-            proptest::prop_assert_eq!(redact_secrets(&text), want);
+            proptest::prop_assert_eq!(redact_plain(&text), want);
         }
 
         /// Arbitrary UTF-8 passes every redactor without a panic, and unchanged when it holds neither an `@` nor an `=`.
         #[test]
         fn any_utf8_text_is_redacted_without_a_panic(text in "\\PC{0,64}") {
-            let out = redact_secrets(&text);
+            let out = redact_plain(&text);
             proptest::prop_assert!(text.contains(['@', '=']) || out == text, "{:?} -> {:?}", text, out);
         }
     }
