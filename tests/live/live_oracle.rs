@@ -2065,50 +2065,47 @@ fn check_on_an_init_scaffold_finds_the_cursor_index() {
     assert_eq!(d["diagnostic"]["uses_index"], true, "{d}");
 }
 
-/// The type report refuses an undeclared TIMESTAMP(9) column with the run's own code and passes once it is declared.
+/// The type report vouches for an undeclared TIMESTAMP(9) column as nanosecond text, TIMESTAMP(6) stays native and exact, and a declared `timestamp` still passes.
 #[test]
 #[ignore = "live: requires docker compose oracle"]
-fn the_type_report_refuses_an_undeclared_timestamp_9_column_as_the_run_does() {
+fn the_type_report_delivers_an_undeclared_timestamp_9_column_as_nanosecond_text() {
     require_alive(LiveService::Oracle);
     let t = OracleTable::create(
         "ora_ts9r",
         "id NUMBER(10) PRIMARY KEY, t9 TIMESTAMP(9), t6 TIMESTAMP(6)",
     );
-    let refused = Rig::oracle_batch(t.name()).run_after(
-        &["check", "--type-report", "--json"],
-        &[],
-        Pairing::SameRefusal,
-    );
-    assert!(!refused.green, "the report vouches for nothing it refuses");
-    let said = String::from_utf8_lossy(&refused.preflight.stderr).to_string()
-        + &String::from_utf8_lossy(&refused.preflight.stdout);
-    assert!(said.contains("RIVET_TYPE_UNSAFE_MAPPING"), "{said}");
-    assert!(said.contains("column 'T9'"), "{said}");
-    assert!(
-        !said.contains("column 'T6'"),
-        "TIMESTAMP(6) is exact:\n{said}"
-    );
-    let declared = Rig::oracle_batch(t.name())
-        .export_line("columns: {T9: timestamp}")
-        .run_after(
+    let column = |d: &serde_json::Value, name: &str| {
+        d["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["column"] == name)
+            .unwrap_or_else(|| panic!("{name} in {d}"))
+            .clone()
+    };
+    for (line, t9_text) in [(None, true), (Some("columns: {T9: timestamp}"), false)] {
+        let mut rig = Rig::oracle_batch(t.name());
+        if let Some(line) = line {
+            rig = rig.export_line(line);
+        }
+        let report = rig.run_after(
             &["check", "--type-report", "--json"],
             &[],
             Pairing::SameRefusal,
         );
-    assert!(
-        declared.green,
-        "stderr:\n{}",
-        String::from_utf8_lossy(&declared.preflight.stderr)
-    );
-    let d: serde_json::Value = serde_json::from_slice(&declared.preflight.stdout).unwrap();
-    let fidelity = d["columns"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|c| c["column"] == "T6")
-        .unwrap()["fidelity"]
-        .clone();
-    assert_eq!(fidelity, "exact");
+        assert!(
+            report.green,
+            "stderr:\n{}",
+            String::from_utf8_lossy(&report.preflight.stderr)
+        );
+        let d: serde_json::Value = serde_json::from_slice(&report.preflight.stdout).unwrap();
+        assert_eq!(column(&d, "T6")["fidelity"], "exact");
+        assert_eq!(
+            column(&d, "T9").to_string().contains("iso_timestamp_nanos"),
+            t9_text,
+            "{d}"
+        );
+    }
 }
 
 /// A coalesce-mode incremental cursor advances on Oracle: run 2 over an unchanged table
@@ -2199,6 +2196,12 @@ fn nanosecond_boundary_table() -> OracleTable {
          TO_TIMESTAMP_TZ('2024-02-29 10:00:00.987654321 +02:00','YYYY-MM-DD HH24:MI:SS.FF TZH:TZM'), \
          TO_TIMESTAMP_TZ('2024-02-29 10:00:00.000000001 -03:00','YYYY-MM-DD HH24:MI:SS.FF TZH:TZM')",
         "2, NULL, NULL, TIMESTAMP '2024-01-01 00:00:00.000000001', NULL, NULL",
+        "3, NULL, TIMESTAMP '1500-03-04 05:06:07.1234567', TIMESTAMP '1500-03-04 05:06:07.123456789', \
+         TO_TIMESTAMP_TZ('1500-03-04 05:06:07.123456789 +00:00','YYYY-MM-DD HH24:MI:SS.FF TZH:TZM'), \
+         TO_TIMESTAMP_TZ('1500-03-04 05:06:07.000000007 +00:00','YYYY-MM-DD HH24:MI:SS.FF TZH:TZM')",
+        "4, NULL, TIMESTAMP '2500-03-04 05:06:07.1234567', TIMESTAMP '9999-06-07 08:09:10.999999999', \
+         TO_TIMESTAMP_TZ('2500-03-04 05:06:07.123456789 +00:00','YYYY-MM-DD HH24:MI:SS.FF TZH:TZM'), \
+         TO_TIMESTAMP_TZ('2500-03-04 05:06:07.000000007 +00:00','YYYY-MM-DD HH24:MI:SS.FF TZH:TZM')",
     ] {
         ora_exec(&format!("INSERT INTO {} VALUES ({row})", t.name()));
     }
@@ -2270,39 +2273,46 @@ fn a_value_past_the_nanosecond_range_under_the_override_is_refused_by_code() {
     assert!(said.contains("column `T9` holds "), "{said}");
 }
 
-/// An undeclared TIMESTAMP(7..9), zoned or not, is refused naming each such column and not TIMESTAMP(6); declaring it as `timestamp_ns` delivers every digit.
+/// An undeclared TIMESTAMP(7..9), zoned or not, is delivered as the database's own nine-digit text in any year, `Z` on a zoned value; declaring it as `timestamp_ns` still delivers native nanoseconds inside 1677..2262.
 #[test]
 #[ignore = "live: requires docker compose oracle"]
-fn an_undeclared_nanosecond_timestamp_is_refused_and_the_declared_ns_type_delivers_every_digit() {
+fn an_undeclared_nanosecond_timestamp_is_delivered_as_text_and_the_declared_ns_type_delivers_every_digit()
+ {
     require_alive(LiveService::Oracle);
     let t = nanosecond_boundary_table();
-    let out = tempfile::tempdir().unwrap();
-    let mut rig = Rig::oracle_batch(t.name()).dest_path(out.path().to_path_buf());
-    let said = rig.refuses_twice_then(
-        &["run"],
-        &[],
-        Refused::by_code("RIVET_TYPE_UNSAFE_MAPPING", 1),
-        vec![Remedy::new(
-            "timestamp_ns` keeps all nine digits",
-            Then::DeliversTheSource,
-            |r| {
-                r.rebuilt(|rig| {
-                    rig.export_line(
-                        "columns: {T7: timestamp_ns, T9: timestamp_ns, TZ9: timestamp_tz_ns, LTZ9: timestamp_tz_ns}",
-                    )
-                })
-            },
-        )],
-    );
-    for col in ["T7", "T9", "TZ9", "LTZ9"] {
-        assert!(said.contains(&format!("column '{col}'")), "{col}:\n{said}");
-    }
-    assert!(
-        !said.contains("column 'T6'"),
-        "TIMESTAMP(6) is exact:\n{said}"
-    );
     let ns = |c: &str| format!("TO_CHAR({c}, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF9')");
     let utc9 = |c: &str| format!("TO_CHAR(SYS_EXTRACT_UTC({c}), 'YYYY-MM-DD\"T\"HH24:MI:SS.FF9')");
+    let out = tempfile::tempdir().unwrap();
+    Rig::oracle_batch(t.name())
+        .dest_path(out.path().to_path_buf())
+        .run_ok();
+    for (col, expr, z) in [
+        ("T7", ns("t7"), ""),
+        ("T9", ns("t9"), ""),
+        ("TZ9", utc9("tz9"), "Z"),
+        ("LTZ9", utc9("ltz9"), "Z"),
+    ] {
+        let want: BTreeMap<i64, Option<String>> = oracle_cells(t.name(), &expr)
+            .into_iter()
+            .map(|(k, v)| (k, v.map(|s| format!("{}{z}", s.trim()))))
+            .collect();
+        assert_eq!(
+            parquet_cells(out.path(), col),
+            want,
+            "{col}: parquet vs the database's own nine-digit rendering"
+        );
+    }
+    let narrow = tempfile::tempdir().unwrap();
+    Rig::oracle_batch(t.name())
+        .export_line(
+            "columns: {T7: timestamp_ns, T9: timestamp_ns, TZ9: timestamp_tz_ns, LTZ9: timestamp_tz_ns}",
+        )
+        .query(&format!(
+            "SELECT id, t7, t9, tz9, ltz9 FROM {} WHERE id <= 2 ORDER BY id",
+            t.name()
+        ))
+        .dest_path(narrow.path().to_path_buf())
+        .run_ok();
     for (col, expr) in [
         ("T7", ns("t7")),
         ("T9", ns("t9")),
@@ -2310,15 +2320,16 @@ fn an_undeclared_nanosecond_timestamp_is_refused_and_the_declared_ns_type_delive
         ("LTZ9", utc9("ltz9")),
     ] {
         let want = oracle_cells(t.name(), &expr);
-        let got = parquet_cells(out.path(), col);
+        let got = parquet_cells(narrow.path(), col);
         assert_eq!(
             got.iter()
                 .map(|(k, v)| (*k, v.as_deref().map(canon_ts)))
                 .collect::<BTreeMap<_, _>>(),
             want.iter()
+                .filter(|(k, _)| **k <= 2)
                 .map(|(k, v)| (*k, v.as_deref().map(|s| canon_ts(s.trim()))))
                 .collect::<BTreeMap<_, _>>(),
-            "{col}: parquet vs the database's own nine-digit rendering"
+            "{col}: declared timestamp_ns vs the database's own nine-digit rendering"
         );
     }
 }

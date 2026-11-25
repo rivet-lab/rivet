@@ -60,7 +60,7 @@ trigger that makes the session linguistic).
 | `chunked` keyset (`chunk_by_key`) | single-column unique NOT NULL key: integer `NUMBER` of any precision, bare `NUMBER`, `VARCHAR2`/`CHAR`, `DATE`, `TIMESTAMP(0..6)`; also `parallel > 1`; or the primary key's columns in order (`chunk_by_key: [a, b]`, sequential) |
 | `time_window`, `partition_by` | ANSI `TIMESTAMP '…'` / `DATE '…'` bounds |
 
-A `TIMESTAMP(7..9)` column needs a `columns:` declaration (see Types); it is not a keyset key (rivet reads it at microseconds, so a page
+A `TIMESTAMP(7..9)` column is delivered as nanosecond text unless a `columns:` declaration says otherwise (see Types); it is not a keyset key (rivet reads it at microseconds, so a page
 could not advance), and it is refused as an incremental cursor
 (`RIVET_SOURCE_CURSOR_FINER_THAN_MICROSECOND`): the saved cursor would fall below
 its own row and every run would export that row again. Read it as
@@ -106,7 +106,7 @@ stops the query at the budget.
 | `BINARY_FLOAT` / `BINARY_DOUBLE` | Float32 / Float64 (NaN, ±Inf kept) |
 | `BOOLEAN` (23ai and later) | Boolean |
 | `DATE`, `TIMESTAMP(0..6)` | Timestamp(µs) |
-| `TIMESTAMP(7..9)`, zoned or not | refused until declared: `columns: {COL: timestamp_ns}` (`timestamp_tz_ns` for a zoned one) keeps every digit, `timestamp` (`timestamp_tz`) reads microseconds and drops the sub-microsecond digits on purpose |
+| `TIMESTAMP(7..9)`, zoned or not | Utf8 text `YYYY-MM-DDTHH:MM:SS.fffffffff` in any year, nine fraction digits, a trailing `Z` and UTC for a zoned one; `columns: {COL: timestamp_ns}` (`timestamp_tz_ns` for a zoned one) delivers a native nanosecond timestamp instead (years 1677-09-21..2262-04-11 only), `timestamp` (`timestamp_tz`) reads microseconds and drops the sub-microsecond digits on purpose |
 | `TIMESTAMP WITH [LOCAL] TIME ZONE` | Timestamp(µs, UTC) — converted on the server (`SYS_EXTRACT_UTC`) |
 | `INTERVAL YEAR TO MONTH` / `DAY TO SECOND` | ISO 8601 duration text |
 | `VARCHAR2`, `NVARCHAR2`, `CHAR`, `NCHAR`, `CLOB`, `NCLOB`, `LONG` | Utf8 (a zero-length LOB stays `''`, not NULL) |
@@ -127,11 +127,12 @@ Parquet); dates before 1582-10-15 are not converted from Oracle's Julian calenda
 - TLS verifies the server against the public CA bundle compiled into the driver
   (`webpki-roots`) only: no system trust store, no `tls.ca_file` (refused), no
   Oracle wallet.
-- A `TIMESTAMP(7..9)` column is refused with `RIVET_TYPE_UNSAFE_MAPPING`, with or
-  without `--strict`, until a `columns:` entry declares it: `timestamp_ns` keeps
-  all nine digits (range 1677-09-21..2262-04-11), `timestamp` reads microseconds.
+- A `TIMESTAMP(7..9)` column, zoned or not, is delivered as text with all nine fraction digits whatever
+  the year, with or without `--strict` (it used to be refused with `RIVET_TYPE_UNSAFE_MAPPING` until a
+  `columns:` entry declared it). A `columns:` entry still picks another form: `timestamp_ns` keeps
+  all nine digits as a native timestamp (range 1677-09-21..2262-04-11), `timestamp` reads microseconds.
   A change-data-capture export (snapshot and stream) takes the same declarations and
-  delivers the same values as batch: `timestamp_ns` and `timestamp_tz_ns` keep all nine
+  delivers the same values as batch, an undeclared column included (the same nine-digit text): `timestamp_ns` and `timestamp_tz_ns` keep all nine
   digits, and `text` carries the batch text byte for byte (`SYYYY-MM-DDTHH24:MI:SS.FF6`,
   nine fraction digits when a value is finer than a microsecond; the stream used to print
   a space and a variable fraction). One value differs: a DATE only the Julian calendar holds

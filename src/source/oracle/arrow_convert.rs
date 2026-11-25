@@ -30,19 +30,11 @@ pub(super) fn bare_number_warning(name: &str) -> String {
     )
 }
 
-/// The refusal for an undeclared `TIMESTAMP(7..9)`, naming the two declarations (`zoned` picks the `_tz` forms).
-pub(super) fn timestamp_ns_refusal(name: &str, zoned: bool) -> String {
-    let (ns, us) = if zoned {
-        ("timestamp_tz_ns", "timestamp_tz")
-    } else {
-        ("timestamp_ns", "timestamp")
-    };
+/// The warning of a `TIMESTAMP(7..9)` column `name` read at microseconds.
+#[cfg(feature = "seeded")]
+fn truncated_timestamp_warning(name: &str) -> String {
     format!(
-        "TIMESTAMP(7..9) is read at microseconds, so its sub-microsecond digits would be dropped. \
-         Declare the column under `columns:` of the export: `{name}: {ns}` keeps all nine digits \
-         (batch modes; years 1677-09-21..2262-04-11 only; BigQuery holds it as INT64 nanoseconds), \
-         or `{name}: {us}` drops them knowingly (the only form `mode: cdc` reads; the ad-hoc \
-         `rivet cdc` has no `columns:`, so use a `mode: cdc` export)"
+        "column `{name}`: TIMESTAMP(7..9) is read at microseconds, so its sub-microsecond digits are dropped"
     )
 }
 
@@ -189,23 +181,23 @@ fn deliver_number_text(
     }
 }
 
-/// The un-overridden mapping with its Oracle warning.
+/// The un-overridden mapping with its Oracle warning; an undeclared `TIMESTAMP(7..9)` is delivered as nanosecond text.
 fn with_oracle_warning(mapping: TypeMapping, bare_number: bool, sub_us: bool) -> TypeMapping {
     if bare_number {
         let name = mapping.column_name.clone();
         mapping.with_warning(bare_number_warning(&name))
     } else if sub_us && mapping.source_native_type.starts_with("timestamp") {
-        let zoned = mapping.source_native_type.starts_with("timestamp_tz")
-            || mapping.source_native_type.starts_with("timestamp_ltz");
-        let name = mapping.column_name.clone();
-        let lossy = TypeMapping {
-            fidelity: crate::types::TypeFidelity::Lossy,
-            ..mapping
-        };
         seeded!(
             "oracle-timestamp-ns-undeclared-truncated",
-            lossy.with_warning(timestamp_ns_refusal(&name, zoned)),
-            lossy.with_refusal(timestamp_ns_refusal(&name, zoned))
+            {
+                let name = mapping.column_name.clone();
+                TypeMapping {
+                    fidelity: crate::types::TypeFidelity::Lossy,
+                    ..mapping
+                }
+                .with_warning(truncated_timestamp_warning(&name))
+            },
+            mapping.with_text(TextForm::IsoTimestampNanos)
         )
     } else {
         mapping
@@ -552,6 +544,40 @@ fn timestamp_micros_column(
     Ok(Arc::new(b.finish().with_timezone_opt(tz)))
 }
 
+/// The `iso_timestamp_nanos` text of an Oracle timestamp: nine fraction digits whatever the year, `Z` for a zoned value read as UTC.
+fn timestamp_iso_nanos(t: &OracleTimestamp, zoned: bool) -> Result<String> {
+    Ok(crate::types::iso_timestamp_nanos(
+        timestamp_datetime(t)?,
+        zoned,
+    ))
+}
+
+/// One undeclared `TIMESTAMP(7..9)` column as `iso_timestamp_nanos` text.
+fn timestamp_iso_column(
+    rows: &[Row],
+    idx: usize,
+    name: &str,
+    (zoned, ltz): (bool, bool),
+) -> Result<ArrayRef> {
+    let mut b = StringBuilder::with_capacity(rows.len(), rows.len() * 32);
+    for r in rows {
+        match timestamp_cell(r, idx, name, ltz)? {
+            Some(t) => b.append_value(timestamp_iso_nanos(&t, zoned)?),
+            None => b.append_null(),
+        }
+    }
+    Ok(Arc::new(b.finish()))
+}
+
+/// True when the field is delivered as `iso_timestamp_nanos` text.
+fn is_iso_nanos_field(field: &arrow::datatypes::Field) -> bool {
+    field
+        .metadata()
+        .get(crate::types::META_TEXT_FORM)
+        .map(String::as_str)
+        == Some(TextForm::IsoTimestampNanos.label())
+}
+
 /// One Date32 column.
 fn date_column(rows: &[Row], idx: usize, name: &str, ltz: bool) -> Result<ArrayRef> {
     let mut b = Date32Builder::with_capacity(rows.len());
@@ -746,6 +772,12 @@ pub(super) fn rows_to_batch(
             let flag = empty_flags.get(i).copied().flatten();
             let at = row_index.get(i).copied().unwrap_or(i);
             let ltz = is_ltz(native, i);
+            if is_iso_nanos_field(f) {
+                let zoned = native
+                    .get(i)
+                    .is_some_and(|n| crate::types::is_zoned_timestamp_label(n));
+                return timestamp_iso_column(rows, at, f.name(), (zoned, ltz));
+            }
             build_column(
                 rows,
                 at,
@@ -953,19 +985,44 @@ mod tests {
     }
 
     #[test]
-    fn a_sub_microsecond_timestamp_is_refused_and_a_bare_number_warns_by_name() {
-        use crate::types::TypeFidelity;
+    fn a_sub_microsecond_timestamp_is_text_and_a_bare_number_warns_by_name() {
+        use crate::types::{Delivery, TypeFidelity};
         let plain = with_oracle_warning(mapping("timestamp(9)"), false, false);
         assert_ne!(plain.fidelity, TypeFidelity::Lossy);
         assert!(plain.warnings.is_empty());
         assert_eq!(plain.refusal, None);
-        let refused = with_oracle_warning(mapping("timestamp(9)"), false, true);
-        assert_eq!(refused.fidelity, TypeFidelity::Lossy);
-        assert!(refused.warnings.is_empty());
-        assert_eq!(refused.refusal, Some(timestamp_ns_refusal("TS9", false)));
+        assert_eq!(plain.delivery, Delivery::Native);
+        let text = with_oracle_warning(mapping("timestamp(9)"), false, true);
+        assert_eq!(text.delivery, Delivery::Text(TextForm::IsoTimestampNanos));
+        assert_eq!(text.refusal, None);
+        assert!(text.warnings.is_empty());
         let bare = with_oracle_warning(mapping("timestamp(9)"), true, false);
         assert_eq!(bare.warnings, vec![bare_number_warning("TS9")]);
         assert_eq!(bare.refusal, None);
+    }
+
+    #[test]
+    fn an_undeclared_sub_microsecond_timestamp_is_delivered_as_nanosecond_text_not_refused() {
+        use crate::types::{Delivery, TypeFidelity};
+        for native in [
+            "timestamp(7)",
+            "timestamp(9)",
+            "timestamp_tz(7)",
+            "timestamp_tz(9)",
+            "timestamp_ltz(7)",
+            "timestamp_ltz(9)",
+        ] {
+            let m = with_oracle_warning(mapping(native), false, true);
+            assert_eq!(m.refusal, None, "{native}");
+            assert_eq!(
+                m.delivery,
+                Delivery::Text(TextForm::IsoTimestampNanos),
+                "{native}"
+            );
+            assert_eq!(m.arrow_type, Some(DataType::Utf8), "{native}");
+            assert_eq!(m.fidelity, TypeFidelity::LogicalString, "{native}");
+            assert!(m.warnings.is_empty(), "{native}");
+        }
     }
 
     #[test]
@@ -975,23 +1032,6 @@ mod tests {
         assert_ne!(iv.fidelity, TypeFidelity::Lossy);
         assert!(iv.warnings.is_empty());
         assert_eq!(iv.refusal, None);
-    }
-
-    #[test]
-    fn the_refusal_names_the_column_and_the_declarations_for_each_zone_form() {
-        for native in ["timestamp(7)", "timestamp(9)"] {
-            let m = with_oracle_warning(mapping(native), false, true);
-            let r = m.refusal.expect("refused");
-            assert!(r.contains("`TS9: timestamp_ns`"), "{r}");
-            assert!(r.contains("`TS9: timestamp`"), "{r}");
-            assert!(r.contains("1677-09-21..2262-04-11"), "{r}");
-        }
-        for native in ["timestamp_tz(9)", "timestamp_ltz(9)"] {
-            let m = with_oracle_warning(mapping(native), false, true);
-            let r = m.refusal.expect("refused");
-            assert!(r.contains("`TS9: timestamp_tz_ns`"), "{r}");
-            assert!(r.contains("`TS9: timestamp_tz`"), "{r}");
-        }
     }
 
     #[test]
@@ -1392,6 +1432,19 @@ mod renderer_twins {
     /// Byte strings every hex twin is fed.
     fn byte_cases() -> Vec<Vec<u8>> {
         vec![vec![], vec![0x00], vec![0x0A, 0xFF], (0..=255).collect()]
+    }
+
+    #[test]
+    fn timestamp_iso_nanos_prints_nine_digits_in_any_year_and_z_only_when_zoned() {
+        for (y, zoned, want) in [
+            (1500, false, "1500-06-07T08:09:10.123456789"),
+            (2262, false, "2262-06-07T08:09:10.123456789"),
+            (2500, true, "2500-06-07T08:09:10.123456789Z"),
+            (9999, true, "9999-06-07T08:09:10.123456789Z"),
+        ] {
+            let t = OracleTimestamp::new_timestamp(y, 6, 7, 8, 9, 10, 123_456_789);
+            assert_eq!(super::timestamp_iso_nanos(&t, zoned).expect("text"), want);
+        }
     }
 
     #[test]
