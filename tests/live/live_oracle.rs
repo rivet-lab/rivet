@@ -2250,6 +2250,11 @@ fn a_value_past_the_nanosecond_range_under_the_override_is_refused_by_code() {
                 },
             ),
             Remedy::new(
+                "Declare `T9: text` under `columns:` and rivet delivers the server's own text for every row",
+                Then::DeliversTheSource,
+                |r| r.rebuilt(|rig| rig.restage("full", &["columns: {T9: text}"])),
+            ),
+            Remedy::new(
                 "Declare the column `timestamp`",
                 Then::DeliversTheSource,
                 |r| r.rebuilt(|rig| rig.restage("full", &["columns: {T9: timestamp}"])),
