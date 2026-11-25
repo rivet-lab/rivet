@@ -45,7 +45,7 @@ scenarios:
     mysql:   { test: mysql_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent }
     mssql:   { test: mssql_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent }
     mongo:    { na: "boolean rides the verbatim document blob, not a typed column" }
-    oracle:   { na: "Oracle CDC captures an allow-list of column kinds (ColKind::of, src/source/oracle/cdc.rs: NUMBER, FLOAT, BINARY_FLOAT/DOUBLE, DATE, the character types, RAW, TIMESTAMP [WITH TIME ZONE]); a BOOLEAN column is refused by name at open, so no value of it reaches the stream (column_kinds_cover_the_preview_types_and_refuse_the_rest)" }
+    oracle:   { na: "Oracle CDC captures an allow-list of column kinds (ColKind::of, src/source/oracle/cdc.rs: NUMBER, FLOAT, BINARY_FLOAT/DOUBLE, DATE, the character types, RAW, INTERVAL YEAR TO MONTH, INTERVAL DAY TO SECOND, ROWID, TIMESTAMP [WITH TIME ZONE]); a BOOLEAN column is refused by name at open, so no value of it reaches the stream (column_kinds_cover_the_preview_types_and_refuse_the_rest)" }
 
   - id: type_integer_families
     what: "int16/32/64 + unsigned 64 (incl. BIGINT UNSIGNED > i64::MAX) survive CDC. MySQL cell is INDEPENDENT (DuckDB re-read vs the source literal), not a batch-differential"
@@ -141,7 +141,7 @@ scenarios:
     mysql:   { test: mysql_batch_and_cdc_deliver_every_ledger_row_alike, oracle: independent }
     mssql:    { na: "SQL Server has no native JSON type; the CDC matrix fixture omits it by design" }
     mongo:    { test: mongo_cdc_change_stream_renders_tricky_bson_verbatim_like_batch, oracle: independent }
-    oracle:   { na: "Oracle CDC captures an allow-list of column kinds (ColKind::of, src/source/oracle/cdc.rs: NUMBER, FLOAT, BINARY_FLOAT/DOUBLE, DATE, the character types, RAW, TIMESTAMP [WITH TIME ZONE]); a JSON column is refused by name at open, so no value of it reaches the stream (column_kinds_cover_the_preview_types_and_refuse_the_rest)" }
+    oracle:   { na: "Oracle CDC captures an allow-list of column kinds (ColKind::of, src/source/oracle/cdc.rs: NUMBER, FLOAT, BINARY_FLOAT/DOUBLE, DATE, the character types, RAW, INTERVAL YEAR TO MONTH, INTERVAL DAY TO SECOND, ROWID, TIMESTAMP [WITH TIME ZONE]); a JSON column is refused by name at open, so no value of it reaches the stream (column_kinds_cover_the_preview_types_and_refuse_the_rest)" }
 
   - id: type_uuid
     what: "uuid — PG uuid / MySQL CHAR(36) / MSSQL uniqueidentifier → canonical value through CDC"
@@ -197,7 +197,7 @@ scenarios:
     mysql:    { na: "MySQL has no INTERVAL column type" }
     mssql:    { na: "SQL Server has no INTERVAL type" }
     mongo:    { na: "no interval type" }
-    oracle:   { na: "Oracle CDC captures an allow-list of column kinds (ColKind::of, src/source/oracle/cdc.rs: NUMBER, FLOAT, BINARY_FLOAT/DOUBLE, DATE, the character types, RAW, TIMESTAMP [WITH TIME ZONE]); a INTERVAL column is refused by name at open, so no value of it reaches the stream (column_kinds_cover_the_preview_types_and_refuse_the_rest)" }
+    oracle:   { test: oracle_cdc_interval_and_rowid_are_delivered_as_batch_delivers_them, oracle: independent }
 
   - id: type_list
     what: "PostgreSQL 1-D arrays (int[]/text[]/…) as a real Arrow List through CDC; a multi-dimensional array fails loud, never a flat NULL list (finding #6)"
@@ -205,7 +205,7 @@ scenarios:
     mysql:    { na: "MySQL has no array column type" }
     mssql:    { na: "SQL Server has no array column type" }
     mongo:    { na: "arrays ride the verbatim document blob (BSON array → extJSON)" }
-    oracle:   { na: "Oracle CDC captures an allow-list of column kinds (ColKind::of, src/source/oracle/cdc.rs: NUMBER, FLOAT, BINARY_FLOAT/DOUBLE, DATE, the character types, RAW, TIMESTAMP [WITH TIME ZONE]); a VARRAY / nested-table column is refused by name at open, so no value of it reaches the stream (column_kinds_cover_the_preview_types_and_refuse_the_rest)" }
+    oracle:   { na: "Oracle CDC captures an allow-list of column kinds (ColKind::of, src/source/oracle/cdc.rs: NUMBER, FLOAT, BINARY_FLOAT/DOUBLE, DATE, the character types, RAW, INTERVAL YEAR TO MONTH, INTERVAL DAY TO SECOND, ROWID, TIMESTAMP [WITH TIME ZONE]); a VARRAY / nested-table column is refused by name at open, so no value of it reaches the stream (column_kinds_cover_the_preview_types_and_refuse_the_rest)" }
 
   - id: type_network
     what: "PostgreSQL inet/cidr through CDC as the server's own address text"

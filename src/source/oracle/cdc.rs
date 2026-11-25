@@ -7,7 +7,8 @@ use std::sync::Arc;
 use chrono::NaiveDateTime;
 use oracledb::{Connection, Cursor, Row};
 
-use super::{Ora, connect};
+use super::arrow_convert::{interval_ds_text, interval_ym_iso};
+use super::{Ora, OraKind, connect};
 use crate::config::TlsConfig;
 use crate::error::Result;
 use crate::source::cdc::checkpoint_identity::IdentityVerdict;
@@ -31,6 +32,9 @@ pub(crate) enum ColKind {
     TimestampTz,
     Text,
     Raw,
+    IntervalYm,
+    IntervalDs,
+    Rowid,
 }
 
 impl ColKind {
@@ -43,6 +47,9 @@ impl ColKind {
             "DATE" => Self::Date,
             "VARCHAR2" | "NVARCHAR2" | "CHAR" | "NCHAR" => Self::Text,
             "RAW" => Self::Raw,
+            "ROWID" => Self::Rowid,
+            _ if t.starts_with("INTERVAL YEAR") => Self::IntervalYm,
+            _ if t.starts_with("INTERVAL DAY") => Self::IntervalDs,
             _ if t.starts_with("TIMESTAMP") && t.ends_with("WITH TIME ZONE") => Self::TimestampTz,
             _ if t.starts_with("TIMESTAMP") => Self::Timestamp,
             _ => return None,
@@ -71,7 +78,16 @@ pub(crate) fn decode(kind: ColKind, text: &str) -> std::result::Result<RivetValu
             let secs = parse_offset(offset).ok_or_else(bad)?;
             RivetValue::DateTime(wall - chrono::Duration::seconds(secs))
         }
-        ColKind::Text => RivetValue::Bytes(text.as_bytes().to_vec()),
+        ColKind::Text | ColKind::Rowid => RivetValue::Bytes(text.as_bytes().to_vec()),
+        ColKind::IntervalYm => {
+            let (years, months) = parse_interval_ym(text).ok_or_else(bad)?;
+            RivetValue::Bytes(interval_ym_iso(years, months).into_bytes())
+        }
+        ColKind::IntervalDs => {
+            let (days, hours, minutes, seconds, nanos) = parse_interval_ds(text).ok_or_else(bad)?;
+            let iso = interval_ds_text(days, hours, minutes, seconds, nanos).ok_or_else(bad)?;
+            RivetValue::Bytes(iso.into_bytes())
+        }
         ColKind::Raw => RivetValue::Bytes(decode_hex(text.trim()).ok_or_else(bad)?),
     })
 }
@@ -81,6 +97,51 @@ fn is_number_infinity(kind: ColKind, text: &str) -> bool {
     kind == ColKind::Number
         && matches!(text.trim(), "~" | "-~")
         && seeded!("oracle-cdc-number-infinity-uncoded", false, true)
+}
+
+/// The years and months of LogMiner's `[+-]YYYYYYYYY-MM` text, both carrying its sign.
+fn parse_interval_ym(text: &str) -> Option<(i32, i32)> {
+    let (sign, body) = split_sign(text.trim());
+    let (years, months) = body.split_once('-')?;
+    Some((
+        sign * years.parse::<i32>().ok()?,
+        sign * months.parse::<i32>().ok()?,
+    ))
+}
+
+/// The fields of LogMiner's `[+-]DDDDDDDDD HH:MM:SS.fffffffff` text, all carrying its sign.
+fn parse_interval_ds(text: &str) -> Option<(i32, i8, i8, i8, i32)> {
+    let (sign, body) = split_sign(text.trim());
+    let (days, time) = body.split_once(' ')?;
+    let mut parts = time.splitn(3, ':');
+    let (hours, minutes, rest) = (parts.next()?, parts.next()?, parts.next()?);
+    let (seconds, fraction) = rest.split_once('.').unwrap_or((rest, ""));
+    if fraction.len() > 9 {
+        return None;
+    }
+    let nanos = format!("{fraction:0<9}").parse::<i32>().ok()?;
+    Some((
+        sign * days.parse::<i32>().ok()?,
+        i8::try_from(sign * hours.parse::<i32>().ok()?).ok()?,
+        i8::try_from(sign * minutes.parse::<i32>().ok()?).ok()?,
+        i8::try_from(sign * seconds.parse::<i32>().ok()?).ok()?,
+        sign * nanos,
+    ))
+}
+
+/// The sign of a leading `+` or `-` as 1 or -1, and the text after it.
+fn split_sign(text: &str) -> (i32, &str) {
+    match text.strip_prefix('-') {
+        Some(rest) => (seeded!("oracle-cdc-interval-sign-dropped", 1, -1), rest),
+        None => (1, text.strip_prefix('+').unwrap_or(text)),
+    }
+}
+
+/// Whether `text` is a DAY TO SECOND value with a sub-microsecond digit, which rivet refuses rather than drops.
+fn is_sub_micro_interval(kind: ColKind, text: &str) -> bool {
+    kind == ColKind::IntervalDs
+        && parse_interval_ds(text)
+            .is_some_and(|(d, h, m, s, n)| interval_ds_text(d, h, m, s, n).is_none())
 }
 
 /// Hex text (either case) as bytes; `None` on an odd length or a non-hex digit.
@@ -643,8 +704,9 @@ pub(crate) fn unmineable(
     if !refused.is_empty() {
         return Some(format!(
             "oracle cdc: `{owner}.{table}` cannot be captured in this preview: {}. Supported: NUMBER, \
-             FLOAT, BINARY_FLOAT/DOUBLE, DATE, TIMESTAMP (any zone form), VARCHAR2, NVARCHAR2, \
-             CHAR, NCHAR, RAW. Export the table in batch, or capture a table without them.",
+             FLOAT, BINARY_FLOAT/DOUBLE, DATE, TIMESTAMP (any zone form), INTERVAL YEAR TO MONTH, \
+             INTERVAL DAY TO SECOND, VARCHAR2, NVARCHAR2, CHAR, NCHAR, RAW, ROWID. Export the \
+             table in batch, or capture a table without them.",
             refused.join(", ")
         ));
     }
@@ -967,6 +1029,17 @@ fn value_slot(j: usize, side: Side) -> usize {
         }
 }
 
+/// The select expression of one mined value; a ROWID goes through the batch export's `ROWIDTOCHAR`.
+fn mine_value(image: &str, spec: &str, kind: ColKind) -> String {
+    let mined = format!("SYS.DBMS_LOGMNR.MINE_VALUE({image}, {spec})");
+    match kind {
+        ColKind::Rowid => OraKind::Rowid
+            .projection(&format!("CHARTOROWID({mined})"))
+            .unwrap_or(mined),
+        _ => mined,
+    }
+}
+
 /// The contents query's select list: the fixed columns, then three slots per column.
 fn contents_select(tables: &[Captured]) -> Vec<String> {
     let slots = tables.iter().map(|t| t.columns.len()).max().unwrap_or(0);
@@ -977,13 +1050,13 @@ fn contents_select(tables: &[Captured]) -> Vec<String> {
             lit(&t.table)
         )
     };
-    let per_slot = |j: usize, f: &dyn Fn(&str) -> String| {
+    let per_slot = |j: usize, f: &dyn Fn(&str, ColKind) -> String| {
         let arms: String = tables
             .iter()
             .filter_map(|t| {
-                let (c, _) = t.columns.get(j)?;
+                let (c, kind) = t.columns.get(j)?;
                 let spec = lit(&format!("{}.{}.{c}", t.owner, t.table));
-                Some(format!(" WHEN {} THEN {}", is(t), f(&spec)))
+                Some(format!(" WHEN {} THEN {}", is(t), f(&spec, *kind)))
             })
             .collect();
         format!("CASE{arms} END")
@@ -993,18 +1066,16 @@ fn contents_select(tables: &[Captured]) -> Vec<String> {
         *slot = fixed.into();
     }
     for j in 0..slots {
-        select[presence_slot(j)] = per_slot(j, &|s| {
+        select[presence_slot(j)] = per_slot(j, &|s, _| {
             format!(
                 "TO_CHAR(SYS.DBMS_LOGMNR.COLUMN_PRESENT(REDO_VALUE, {s}) * 2 \
                  + SYS.DBMS_LOGMNR.COLUMN_PRESENT(UNDO_VALUE, {s}))"
             )
         });
-        select[value_slot(j, Side::Redo)] = per_slot(j, &|s| {
-            format!("SYS.DBMS_LOGMNR.MINE_VALUE(REDO_VALUE, {s})")
-        });
-        select[value_slot(j, Side::Undo)] = per_slot(j, &|s| {
-            format!("SYS.DBMS_LOGMNR.MINE_VALUE(UNDO_VALUE, {s})")
-        });
+        select[value_slot(j, Side::Redo)] =
+            per_slot(j, &|s, kind| mine_value("REDO_VALUE", s, kind));
+        select[value_slot(j, Side::Undo)] =
+            per_slot(j, &|s, kind| mine_value("UNDO_VALUE", s, kind));
     }
     select
 }
@@ -1291,6 +1362,18 @@ impl OracleChangeStream {
                              stores it). rivet refuses rather than writing a finite number for an \
                              infinite value, as the batch export does. Set the column to a finite \
                              value at the source; the redo that holds the infinity is read again on \
+                             resume, so re-baseline the stream past it. {}",
+                            crate::source::cdc::checkpoint_identity::RECOVER
+                        ),
+                    )),
+                    Some(s) if is_sub_micro_interval(*kind, &s) => Err(crate::error::coded(
+                        crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+                        format!(
+                            "oracle cdc: `{owner}.{table}`.{name} holds an INTERVAL DAY TO SECOND \
+                             with a sub-microsecond fraction (LogMiner prints it as `{s}`): rivet \
+                             writes microseconds and refuses rather than dropping the last digits, \
+                             as the batch export does. Set the column to a value with at most six \
+                             fraction digits at the source; the redo that holds it is read again on \
                              resume, so re-baseline the stream past it. {}",
                             crate::source::cdc::checkpoint_identity::RECOVER
                         ),
@@ -2269,17 +2352,130 @@ mod tests {
         );
         assert_eq!(ColKind::of("TIMESTAMP(6)"), Some(ColKind::Timestamp));
         assert_eq!(ColKind::of("NVARCHAR2"), Some(ColKind::Text));
+        for (kind, types) in [
+            (
+                ColKind::IntervalYm,
+                ["INTERVAL YEAR(2) TO MONTH", "INTERVAL YEAR(9) TO MONTH"],
+            ),
+            (
+                ColKind::IntervalDs,
+                [
+                    "INTERVAL DAY(2) TO SECOND(6)",
+                    "INTERVAL DAY(9) TO SECOND(9)",
+                ],
+            ),
+            (ColKind::Rowid, ["ROWID", "rowid"]),
+        ] {
+            for t in types {
+                assert_eq!(ColKind::of(t), Some(kind), "{t}");
+            }
+        }
         for refused in [
-            "CLOB",
-            "BLOB",
-            "LONG",
-            "XMLTYPE",
-            "JSON",
-            "INTERVAL DAY(2) TO SECOND(6)",
-            "ROWID",
-            "BOOLEAN",
+            "CLOB", "NCLOB", "BLOB", "LONG", "LONG RAW", "XMLTYPE", "JSON", "UROWID", "BOOLEAN",
+            "VECTOR",
         ] {
             assert_eq!(ColKind::of(refused), None, "{refused}");
+        }
+    }
+
+    #[test]
+    fn an_interval_or_rowid_is_decoded_to_the_text_the_batch_export_writes() {
+        let text = |kind, s: &str| decode(kind, s).unwrap();
+        let bytes = |s: &str| RivetValue::Bytes(s.as_bytes().to_vec());
+        for (logminer, iso) in [
+            ("+999999999-11", "P999999999Y11M"),
+            ("-999999999-11", "P-999999999Y-11M"),
+            ("-000000000-01", "P-1M"),
+            ("+000000002-00", "P2Y"),
+            ("+000000000-00", "PT0S"),
+        ] {
+            assert_eq!(
+                text(ColKind::IntervalYm, logminer),
+                bytes(iso),
+                "{logminer}"
+            );
+        }
+        for (logminer, iso) in [
+            ("-000000001 02:03:04.123456000", "P-1DT-2H-3M-4.123456S"),
+            ("+000000000 00:00:00.000001000", "PT0.000001S"),
+            ("+000000000 00:00:00.000000000", "PT0S"),
+            ("+000000099 23:59:59.999999000", "P99DT23H59M59.999999S"),
+            ("+000000001 02:03:04", "P1DT2H3M4S"),
+        ] {
+            assert_eq!(
+                text(ColKind::IntervalDs, logminer),
+                bytes(iso),
+                "{logminer}"
+            );
+        }
+        assert_eq!(
+            text(ColKind::Rowid, "AAAR3sAAEAAAACXAAA"),
+            bytes("AAAR3sAAEAAAACXAAA")
+        );
+        for (kind, bad) in [
+            (ColKind::IntervalYm, "+12"),
+            (ColKind::IntervalYm, "x-1"),
+            (ColKind::IntervalDs, "+1 02:03"),
+            (ColKind::IntervalDs, "+1 02:03:04.1234567891"),
+            (ColKind::IntervalDs, "+1 300:00:00"),
+        ] {
+            assert!(decode(kind, bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn only_a_day_to_second_value_with_a_sub_microsecond_digit_is_a_sub_micro_interval() {
+        assert!(is_sub_micro_interval(
+            ColKind::IntervalDs,
+            "+000000000 00:00:00.000000001"
+        ));
+        assert!(is_sub_micro_interval(
+            ColKind::IntervalDs,
+            "-000000001 02:03:04.123456789"
+        ));
+        assert!(!is_sub_micro_interval(
+            ColKind::IntervalDs,
+            "-000000001 02:03:04.123456000"
+        ));
+        assert!(!is_sub_micro_interval(
+            ColKind::IntervalDs,
+            "+000000001 02:03:04"
+        ));
+        assert!(!is_sub_micro_interval(
+            ColKind::IntervalYm,
+            "+000000000 00:00:00.000000001"
+        ));
+        assert!(!is_sub_micro_interval(
+            ColKind::Text,
+            "+000000000 00:00:00.000000001"
+        ));
+    }
+
+    #[test]
+    fn a_rowid_column_is_mined_through_the_batch_rowidtochar_and_no_other_kind_is_wrapped() {
+        let one = |kind| {
+            let t = Captured {
+                columns: vec![("V".to_string(), kind)],
+                ..captured("APP", "T", &["V"])
+            };
+            contents_select(&[t])
+        };
+        let rowid = one(ColKind::Rowid);
+        assert_eq!(
+            rowid[value_slot(0, Side::Redo)],
+            "CASE WHEN SEG_OWNER = 'APP' AND TABLE_NAME = 'T' THEN ROWIDTOCHAR(CHARTOROWID(\
+             SYS.DBMS_LOGMNR.MINE_VALUE(REDO_VALUE, 'APP.T.V'))) END"
+        );
+        assert_eq!(
+            rowid[presence_slot(0)],
+            one(ColKind::Text)[presence_slot(0)]
+        );
+        for kind in [ColKind::IntervalYm, ColKind::IntervalDs, ColKind::Text] {
+            assert_eq!(
+                one(kind)[value_slot(0, Side::Undo)],
+                "CASE WHEN SEG_OWNER = 'APP' AND TABLE_NAME = 'T' THEN \
+                 SYS.DBMS_LOGMNR.MINE_VALUE(UNDO_VALUE, 'APP.T.V') END"
+            );
         }
     }
 

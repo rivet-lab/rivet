@@ -687,8 +687,9 @@ Notes:
 - **ALL COLUMNS logging, not PRIMARY KEY.** With key logging an UPDATE's redo
   carries only the changed columns, so the change cannot represent the row; rivet
   refuses such a table and prints the statement above.
-- **Tables the preview refuses by name:** a column of type LOB, LONG, XMLTYPE, JSON,
-  INTERVAL, BOOLEAN, VECTOR, ROWID or an object type; a name over 30 bytes; and,
+- **Tables the preview refuses by name:** a column of type LOB, LONG, LONG RAW,
+  XMLTYPE, JSON, BOOLEAN, VECTOR, UROWID or an object type (`INTERVAL` and `ROWID` columns are captured
+  as the text batch delivers); a name over 30 bytes; and,
   before 23ai, an identity column (LogMiner ignores those tables entirely).
 - **Retention is the DBA's**, as with the binlog: nothing pins archived logs for
   rivet. If the checkpoint needs a log that was deleted, the run fails with a
