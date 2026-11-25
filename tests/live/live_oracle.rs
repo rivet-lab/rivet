@@ -2310,12 +2310,7 @@ fn timestamp9_loads_into(kind: WarehouseKind) {
         t.name(),
         TS9_ROWS.len() + 1
     ));
-    let rig = w.shape(
-        Rig::oracle_batch(t.name()).no_oracle(
-            "graded below by the warehouse's own read of the delivered text against the source literals",
-        ),
-        "ID",
-    );
+    let rig = w.shape(Rig::oracle_batch(t.name()), "ID");
     rig.run_ok();
     w.load(&rig);
     let want: Vec<String> = TS9_ROWS
