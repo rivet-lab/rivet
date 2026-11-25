@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import re
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 from . import core
 from . import property_no_silent_null as nsn
@@ -175,25 +178,63 @@ def self_test() -> None:
     for pa_type, want in (("int32", "Int32"), ("decimal128(38, 10)", "Decimal128(38, 10)"), ("timestamp[us, tz=UTC]", 'Timestamp(µs, "UTC")'), ("string", "Utf8"), ("list<item: string>", "List(Utf8)"), ("struct<a: int32>", "")):
         if arrow_label(pa_type) != want:
             raise SystemExit(f"self-test: arrow type {pa_type!r} labelled {arrow_label(pa_type)!r}, expected {want!r}")
+    for rows, want in (([], 2), ([{"verdict": "UNMEASURED"}], 2), ([{"verdict": "deliverable"}, {"verdict": "NOT CLASSIFIED"}], 2),
+                       ([{"verdict": "deliverable"}, {"verdict": "DEFECT"}], 1), ([{"verdict": "deliverable"}, {"verdict": "refused by design"}], 0)):
+        if exit_code(rows) != want:
+            raise SystemExit(f"self-test: rows {rows} exit {exit_code(rows)}, expected {want}")
+    for cell, want in ((nsn.Result("c", nsn.DELIVERED), 0), (nsn.Result("c", nsn.DELIVERED, nsn.NULLED, "x"), 1), (nsn.Result("c", nsn.REFUSED, nsn.NOT_GRADED, "x"), 2)):
+        with mock.patch.object(cdc_grid, "run_engine", lambda *a, _c=cell, **k: [_c]), contextlib.redirect_stdout(io.StringIO()):
+            got = run_cdc(["postgres"], Path(tempfile.gettempdir()))
+        if got != want:
+            raise SystemExit(f"self-test: the CDC run exits {got} for a {cell.klass or 'passing'} cell, expected {want}")
     print("self-test ok: a faithful run is deliverable; a changed or nulled value is DEFECT; every matrix-only column reaches the CDC plan")
 
 
 def run_cdc(engines: list[str], work: Path) -> int:
-    """The CDC grid over the matrix-only columns of each engine on its CDC stand; exit 1 on any DEFECT."""
+    """The CDC grid over the matrix-only columns of each engine on its CDC stand; exit 1 on any DEFECT, 2 on a not-classified cell."""
     cells: list[dict] = []
     for engine in engines:
         for x in cdc_grid.run_engine(engine, work / "cdc" / engine, print, cols=cdc_cols(engine)):
             cells.append(cdc_cell(x))
             print(json.dumps(cells[-1], ensure_ascii=False), flush=True)
-    tally: dict[str, int] = {}
-    for c in cells:
-        tally[c["verdict"]] = tally.get(c["verdict"], 0) + 1
-    print("SUMMARY " + json.dumps(tally, sort_keys=True), flush=True)
-    return 1 if tally.get("DEFECT") else 0
+    print("SUMMARY " + json.dumps(tally([c["verdict"] for c in cells]), sort_keys=True), flush=True)
+    return exit_code(cells, UNMEASURED_CELLS)
+
+
+def run_engines(engines: list[str], work: Path) -> list[dict]:
+    """Measure every matrix-only ledger row of the engines on the stand, printing each row as one JSON line."""
+    rows: list[dict] = []
+    for engine in engines:
+        url = nsn.STAND[engine]
+        try:
+            for i, r in unmeasured(engine):
+                row = measure(engine, url, work / engine, i, r)
+                rows.append(row)
+                print(json.dumps(row, ensure_ascii=False), flush=True)
+        finally:
+            nsn.cleanup(engine, url)
+    return rows
+
+
+UNMEASURED_ROWS = frozenset({"UNMEASURED", "NOT CLASSIFIED"})
+UNMEASURED_CELLS = frozenset({"not classified"})
+
+
+def tally(verdicts: list[str]) -> dict[str, int]:
+    """How many times each verdict occurs."""
+    return {v: verdicts.count(v) for v in sorted(set(verdicts))}
+
+
+def exit_code(rows: list[dict], unmeasured_verdicts: frozenset[str] = UNMEASURED_ROWS) -> int:
+    """1 on any DEFECT, 2 when nothing was measured or any entry carries an unmeasured verdict, else 0."""
+    verdicts = {row["verdict"] for row in rows}
+    if "DEFECT" in verdicts:
+        return 1
+    return 2 if not rows or verdicts & unmeasured_verdicts else 0
 
 
 def main() -> int:
-    """Developer entry: measure every matrix-only ledger row of the chosen engines on the stand; exit 1 on any DEFECT."""
+    """Developer entry: measure every matrix-only ledger row of the chosen engines on the stand."""
     ap = argparse.ArgumentParser(prog="property_no_silent_null_matrix_only")
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--cdc", action="store_true", help="run the CDC grid over the matrix-only columns instead of the batch rows")
@@ -207,23 +248,11 @@ def main() -> int:
     print(nsn.binary_line(), flush=True)
     if ns.cdc:
         return run_cdc(ns.engine.split(","), Path(ns.work))
-    rows: list[dict] = []
-    for engine in ns.engine.split(","):
-        url = nsn.STAND[engine]
-        try:
-            for i, r in unmeasured(engine):
-                row = measure(engine, url, Path(ns.work) / engine, i, r)
-                rows.append(row)
-                print(json.dumps(row, ensure_ascii=False), flush=True)
-        finally:
-            nsn.cleanup(engine, url)
-    tally: dict[str, int] = {}
-    for row in rows:
-        tally[row["verdict"]] = tally.get(row["verdict"], 0) + 1
-    print("SUMMARY " + json.dumps(tally, sort_keys=True), flush=True)
+    rows = run_engines(ns.engine.split(","), Path(ns.work))
+    print("SUMMARY " + json.dumps(tally([row["verdict"] for row in rows]), sort_keys=True), flush=True)
     if ns.out:
         Path(ns.out).write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in rows) + "\n")
-    return 1 if tally.get("DEFECT") else 0
+    return exit_code(rows)
 
 
 if __name__ == "__main__":

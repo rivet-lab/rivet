@@ -299,6 +299,47 @@ impl Warehouse {
         rows
     }
 
+    /// `(key, text)` of every row of `table` through the second client, sorted by key; a NULL reads as `None`. Not for the local destination.
+    pub fn texts(&self, table: &str, key: &str, value: &str) -> Vec<(i64, Option<String>)> {
+        let text = |v: &serde_json::Value| match v {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(s) => Some(s.clone()),
+            other => panic!("not text: {other}"),
+        };
+        let mut rows: Vec<(i64, Option<String>)> = match self.kind {
+            WarehouseKind::DuckDb => panic!("the local destination has no second client"),
+            WarehouseKind::ClickHouse => clickhouse_run_sql_json(&format!(
+                "SELECT {key} AS k, {value} AS v FROM {}.{table}",
+                self.ch.as_ref().expect("ClickHouse").0
+            ))
+            .iter()
+            .map(|r| (to_i64(&r["k"]), text(&r["v"])))
+            .collect(),
+            WarehouseKind::BigQuery => {
+                let bq = self.bq.as_ref().expect("BigQuery");
+                bq.read_bq_rows(&format!(
+                    "SELECT {key} AS k, {value} AS v FROM `{}.{}.{table}`",
+                    bq.project, bq.dataset
+                ))
+                .iter()
+                .map(|r| (to_i64(&r["k"]), text(&r["v"])))
+                .collect()
+            }
+            WarehouseKind::Snowflake => {
+                let sf = self.sf.as_ref().expect("Snowflake");
+                sf.read(&format!(
+                    "SELECT {key} AS k, {value} AS v FROM {}",
+                    sf.fq(table)
+                ))
+                .iter()
+                .map(|r| (to_i64(&r[0]), text(&r[1])))
+                .collect()
+            }
+        };
+        rows.sort_unstable();
+        rows
+    }
+
     /// `(rows, distinct keys)` of the change log `<table>__changes`, or of `table` itself where no log exists (a whole-table layout); `whole` as in [`Warehouse::pairs`].
     pub fn log_rows(&self, rig: &Rig, table: &str, key: &str, whole: bool) -> (i64, i64) {
         let changes = format!("{table}__changes");
