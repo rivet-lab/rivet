@@ -4,7 +4,9 @@ use crate::config::SchemaDriftPolicy;
 use crate::error::{Result, SchemaDriftError};
 use crate::journal::RunEvent;
 use crate::plan::ResolvedRunPlan;
-use crate::state::{SchemaColumn, StateStore};
+use crate::state::{
+    PendingBaselines, SchemaChange, SchemaColumn, StateStore, schema_change_between,
+};
 
 use super::summary::RunSummary;
 
@@ -70,6 +72,7 @@ pub(super) fn check_from_cdc_mappings(
     key: &str,
     mappings: &[crate::types::TypeMapping],
     policy: SchemaDriftPolicy,
+    pending: &mut PendingBaselines,
 ) -> Result<()> {
     let fields: Vec<arrow::datatypes::Field> = mappings
         .iter()
@@ -78,9 +81,16 @@ pub(super) fn check_from_cdc_mappings(
     if fields.is_empty() {
         return Ok(());
     }
-    migrate_baseline(state, key, mappings, AbsentColumns::Adopt);
+    migrate_baseline(state, pending, key, mappings, AbsentColumns::Adopt);
     let columns = crate::state::arrow_schema_to_columns(&arrow::datatypes::Schema::new(fields));
-    check_and_persist(state, key, &columns, policy, &mut RunSummary::default())
+    judge(
+        state,
+        pending,
+        key,
+        &columns,
+        policy,
+        &mut RunSummary::default(),
+    )
 }
 
 /// Whether a column the baseline never recorded may be adopted into it: only a CDC baseline omitted an unbuildable column, a batch baseline did not.
@@ -90,9 +100,10 @@ pub(super) enum AbsentColumns {
     Drift,
 }
 
-/// Rewrite the stored baseline of `key` where a column is now delivered as server text, so no run reads that as drift.
+/// Hold the baseline of `key` with every column now delivered as server text rewritten, so no run reads that as drift.
 pub(super) fn migrate_baseline(
     state: &StateStore,
+    pending: &mut PendingBaselines,
     key: &str,
     mappings: &[crate::types::TypeMapping],
     absent: AbsentColumns,
@@ -100,12 +111,10 @@ pub(super) fn migrate_baseline(
     if seeded!("upgrade-baseline-not-migrated", true, false) {
         return;
     }
-    match state.get_stored_schema(key) {
+    match pending.effective(state, key) {
         Ok(Some(stored)) => {
-            if let Some(migrated) = migrate_upgrade_labels(&stored, mappings, absent)
-                && let Err(e) = state.store_schema(key, &migrated)
-            {
-                log::warn!("schema drift: could not migrate the baseline of '{key}': {e:#}");
+            if let Some(migrated) = migrate_upgrade_labels(&stored, mappings, absent) {
+                pending.set(key, migrated);
             }
         }
         Ok(None) => {}
@@ -166,7 +175,7 @@ fn migrate_upgrade_labels(
     moved.then_some(out)
 }
 
-/// Deep core (private): detect drift of `columns` against the stored baseline for `export_name` and act per `policy`.
+/// Deep core (private): judge `columns` for `export_name` and hold any new baseline in the summary, stored only when the run ends clean.
 fn check_and_persist(
     state: &StateStore,
     export_name: &str,
@@ -174,64 +183,100 @@ fn check_and_persist(
     policy: SchemaDriftPolicy,
     summary: &mut RunSummary,
 ) -> Result<()> {
-    match state.detect_schema_change(export_name, columns) {
-        Ok(Some(change)) => {
-            summary.schema_changed = Some(true);
-            summary.journal.record(RunEvent::SchemaChanged {
-                added: change.added.clone(),
-                removed: change.removed.clone(),
-                type_changed: change.type_changed.clone(),
-            });
-            match policy {
-                SchemaDriftPolicy::Continue => {
-                    if let Err(e) = state.store_schema(export_name, columns) {
-                        log::warn!("export '{export_name}': schema store update failed: {e:#}");
-                    }
-                }
-                SchemaDriftPolicy::Warn => {
-                    log::warn!("export '{export_name}': schema changed!");
-                    if !change.added.is_empty() {
-                        log::warn!("  added: {}", change.added.join(", "));
-                    }
-                    if !change.removed.is_empty() {
-                        log::warn!("  removed: {}", change.removed.join(", "));
-                    }
-                    for (col, old, new) in &change.type_changed {
-                        log::warn!("  type changed: {col} ({old} → {new})");
-                    }
-                    if let Err(e) = state.store_schema(export_name, columns) {
-                        log::warn!("export '{export_name}': schema store update failed: {e:#}");
-                    }
-                }
-                SchemaDriftPolicy::Fail => {
-                    log::error!(
-                        "export '{export_name}': schema drift detected — aborting (on_schema_drift: fail)"
-                    );
-                    if !change.added.is_empty() {
-                        log::error!("  added: {}", change.added.join(", "));
-                    }
-                    if !change.removed.is_empty() {
-                        log::error!("  removed: {}", change.removed.join(", "));
-                    }
-                    for (col, old, new) in &change.type_changed {
-                        log::error!("  type changed: {col} ({old} → {new})");
-                    }
-                    return Err(SchemaDriftError::new(format!(
-                        "schema drift detected for export '{export_name}': \
-                         {} column(s) added, {} removed, {} retyped — \
-                         set `on_schema_drift: warn` to accept, or fix the schema mismatch",
-                        change.added.len(),
-                        change.removed.len(),
-                        change.type_changed.len()
-                    ))
-                    .into());
-                }
-            }
+    let mut pending = std::mem::take(&mut summary.pending_baselines);
+    let verdict = judge(state, &mut pending, export_name, columns, policy, summary);
+    summary.pending_baselines = pending;
+    verdict
+}
+
+/// Judge `columns` and hold the new baseline in `pending`, stored only when the run ends clean.
+fn judge(
+    state: &StateStore,
+    pending: &mut PendingBaselines,
+    export_name: &str,
+    columns: &[SchemaColumn],
+    policy: SchemaDriftPolicy,
+    summary: &mut RunSummary,
+) -> Result<()> {
+    let verdict = hold_or_refuse(state, pending, export_name, columns, policy, summary);
+    if seeded!("schema-baseline-before-refusal", true, false) {
+        pending.commit(state);
+    }
+    verdict
+}
+
+/// The lines that name what a schema change added, removed and retyped.
+fn drift_lines(change: &SchemaChange) -> Vec<String> {
+    let mut lines = Vec::new();
+    if !change.added.is_empty() {
+        lines.push(format!("  added: {}", change.added.join(", ")));
+    }
+    if !change.removed.is_empty() {
+        lines.push(format!("  removed: {}", change.removed.join(", ")));
+    }
+    for (col, old, new) in &change.type_changed {
+        lines.push(format!("  type changed: {col} ({old} → {new})"));
+    }
+    lines
+}
+
+/// Detect drift of `columns` against the baseline of `export_name` and act per `policy`.
+fn hold_or_refuse(
+    state: &StateStore,
+    pending: &mut PendingBaselines,
+    export_name: &str,
+    columns: &[SchemaColumn],
+    policy: SchemaDriftPolicy,
+    summary: &mut RunSummary,
+) -> Result<()> {
+    let stored = match pending.effective(state, export_name) {
+        Ok(Some(stored)) => stored,
+        Ok(None) => {
+            pending.set(export_name, columns.to_vec());
+            summary.schema_changed = Some(false);
+            return Ok(());
         }
-        Ok(None) => summary.schema_changed = Some(false),
         Err(e) => {
             log::warn!("schema tracking error: {e:#}");
             summary.schema_changed.get_or_insert(false);
+            return Ok(());
+        }
+    };
+    let Some(change) = schema_change_between(&stored, columns) else {
+        summary.schema_changed = Some(false);
+        return Ok(());
+    };
+    summary.schema_changed = Some(true);
+    summary.journal.record(RunEvent::SchemaChanged {
+        added: change.added.clone(),
+        removed: change.removed.clone(),
+        type_changed: change.type_changed.clone(),
+    });
+    match policy {
+        SchemaDriftPolicy::Continue => pending.set(export_name, columns.to_vec()),
+        SchemaDriftPolicy::Warn => {
+            log::warn!("export '{export_name}': schema changed!");
+            drift_lines(&change)
+                .iter()
+                .for_each(|line| log::warn!("{line}"));
+            pending.set(export_name, columns.to_vec());
+        }
+        SchemaDriftPolicy::Fail => {
+            log::error!(
+                "export '{export_name}': schema drift detected — aborting (on_schema_drift: fail)"
+            );
+            drift_lines(&change)
+                .iter()
+                .for_each(|line| log::error!("{line}"));
+            return Err(SchemaDriftError::new(format!(
+                "schema drift detected for export '{export_name}': \
+                 {} column(s) added, {} removed, {} retyped — \
+                 set `on_schema_drift: warn` to accept, or fix the schema mismatch",
+                change.added.len(),
+                change.removed.len(),
+                change.type_changed.len()
+            ))
+            .into());
         }
     }
     Ok(())
@@ -306,7 +351,14 @@ mod tests {
                 },
             ),
         ];
-        migrate_baseline(&st, "k", &cols, AbsentColumns::Drift);
+        let mut pending = PendingBaselines::default();
+        migrate_baseline(&st, &mut pending, "k", &cols, AbsentColumns::Drift);
+        assert_eq!(
+            st.get_stored_schema("k").unwrap().unwrap().len(),
+            4,
+            "the migration is held, not stored"
+        );
+        pending.commit(&st);
         let stored = st.get_stored_schema("k").unwrap().unwrap();
         assert_eq!(
             stored,
@@ -318,7 +370,9 @@ mod tests {
             ]
         );
         let again = st.get_stored_schema("k").unwrap();
-        migrate_baseline(&st, "k", &cols, AbsentColumns::Drift);
+        let mut second = PendingBaselines::default();
+        migrate_baseline(&st, &mut second, "k", &cols, AbsentColumns::Drift);
+        second.commit(&st);
         assert_eq!(st.get_stored_schema("k").unwrap(), again, "idempotent");
     }
 
@@ -339,14 +393,18 @@ mod tests {
         ];
         let batch = StateStore::open_in_memory().unwrap();
         batch.store_schema("k", &[col("id", "Int64")]).unwrap();
-        migrate_baseline(&batch, "k", &cols, AbsentColumns::Drift);
+        let mut held = PendingBaselines::default();
+        migrate_baseline(&batch, &mut held, "k", &cols, AbsentColumns::Drift);
+        held.commit(&batch);
         assert_eq!(
             batch.get_stored_schema("k").unwrap().unwrap(),
             vec![col("id", "Int64")]
         );
         let cdc = StateStore::open_in_memory().unwrap();
         cdc.store_schema("k", &[col("id", "Int64")]).unwrap();
-        migrate_baseline(&cdc, "k", &cols, AbsentColumns::Adopt);
+        let mut held = PendingBaselines::default();
+        migrate_baseline(&cdc, &mut held, "k", &cols, AbsentColumns::Adopt);
+        held.commit(&cdc);
         assert_eq!(
             cdc.get_stored_schema("k").unwrap().unwrap(),
             vec![col("id", "Int64"), col("x", "Utf8"), col("n", "Utf8")]
@@ -422,18 +480,54 @@ mod tests {
             server_text("n", "numeric", bare_numeric()),
             server_text("d", "date[]", date_list()),
         ];
-        check_from_cdc_mappings(&st, "k", &cols, SchemaDriftPolicy::Fail).unwrap();
+        let mut pending = PendingBaselines::default();
+        check_from_cdc_mappings(&st, "k", &cols, SchemaDriftPolicy::Fail, &mut pending).unwrap();
+        pending.commit(&st);
         let stored = st.get_stored_schema("k").unwrap().unwrap();
         assert!(stored.contains(&col("n", "Utf8")), "{stored:?}");
         assert!(stored.contains(&col("d", "Utf8")), "{stored:?}");
 
         cols.push(mapping("extra", "bigint", crate::types::RivetType::Int64));
-        let err = check_from_cdc_mappings(&st, "k", &cols, SchemaDriftPolicy::Fail)
+        let err = check_from_cdc_mappings(&st, "k", &cols, SchemaDriftPolicy::Fail, &mut pending)
             .expect_err("a genuinely new column still drifts");
         assert!(
             format!("{err:#}").contains("schema drift detected"),
             "{err:#}"
         );
+    }
+
+    #[test]
+    fn the_drift_lines_name_each_kind_of_change_that_happened_and_no_other() {
+        let change = |added: &[&str], removed: &[&str], retyped: bool| SchemaChange {
+            added: added.iter().map(|s| s.to_string()).collect(),
+            removed: removed.iter().map(|s| s.to_string()).collect(),
+            type_changed: if retyped {
+                vec![("v".into(), "Int64".into(), "Utf8".into())]
+            } else {
+                Vec::new()
+            },
+        };
+        assert!(drift_lines(&change(&[], &[], false)).is_empty());
+        assert_eq!(
+            drift_lines(&change(&["a", "b"], &[], false)),
+            vec!["  added: a, b"]
+        );
+        assert_eq!(
+            drift_lines(&change(&[], &["c"], false)),
+            vec!["  removed: c"]
+        );
+        assert_eq!(
+            drift_lines(&change(&["a"], &["c"], true)),
+            vec![
+                "  added: a",
+                "  removed: c",
+                "  type changed: v (Int64 → Utf8)"
+            ]
+        );
+    }
+
+    fn ends_clean(st: &StateStore, s: &mut RunSummary) {
+        s.pending_baselines.commit(st);
     }
 
     #[test]
@@ -443,13 +537,23 @@ mod tests {
         let cols = vec![col("id", "Int64"), col("name", "Utf8")];
         check_and_persist(&st, "orders", &cols, SchemaDriftPolicy::Fail, &mut s).unwrap();
         assert_eq!(s.schema_changed, Some(false));
+        assert!(!s.pending_baselines.is_empty(), "the baseline is held");
+        assert_eq!(
+            st.get_stored_schema("orders").unwrap(),
+            None,
+            "a first baseline is held until the run ends clean"
+        );
+        ends_clean(&st, &mut s);
+        assert_eq!(st.get_stored_schema("orders").unwrap(), Some(cols));
     }
 
     #[test]
     fn drift_under_fail_returns_err_and_flags_change() {
         let st = StateStore::open_in_memory().unwrap();
         let v1 = vec![col("id", "Int64")];
-        check_and_persist(&st, "orders", &v1, SchemaDriftPolicy::Fail, &mut summary()).unwrap();
+        let mut s1 = summary();
+        check_and_persist(&st, "orders", &v1, SchemaDriftPolicy::Fail, &mut s1).unwrap();
+        ends_clean(&st, &mut s1);
         let v2 = vec![col("id", "Int64"), col("email", "Utf8")];
         let mut s2 = summary();
         let err = check_and_persist(&st, "orders", &v2, SchemaDriftPolicy::Fail, &mut s2)
@@ -459,20 +563,66 @@ mod tests {
             "{err:#}"
         );
         assert_eq!(s2.schema_changed, Some(true));
+        assert!(s2.pending_baselines.is_empty(), "a refusal holds nothing");
     }
 
     #[test]
     fn drift_under_warn_stores_new_baseline_and_continues() {
         let st = StateStore::open_in_memory().unwrap();
         let v1 = vec![col("id", "Int64")];
-        check_and_persist(&st, "orders", &v1, SchemaDriftPolicy::Warn, &mut summary()).unwrap();
+        let mut s1 = summary();
+        check_and_persist(&st, "orders", &v1, SchemaDriftPolicy::Warn, &mut s1).unwrap();
+        ends_clean(&st, &mut s1);
         let v2 = vec![col("id", "Int64"), col("email", "Utf8")];
         let mut s2 = summary();
         check_and_persist(&st, "orders", &v2, SchemaDriftPolicy::Warn, &mut s2).unwrap();
         assert_eq!(s2.schema_changed, Some(true));
+        ends_clean(&st, &mut s2);
         let mut s3 = summary();
         check_and_persist(&st, "orders", &v2, SchemaDriftPolicy::Warn, &mut s3).unwrap();
         assert_eq!(s3.schema_changed, Some(false));
+    }
+
+    /// A run that is refused after the check leaves the stored baseline as it found it, whatever the policy.
+    #[test]
+    fn a_run_that_never_ends_clean_leaves_the_stored_baseline_untouched() {
+        let v1 = vec![col("id", "Int64"), col("v", "Int64")];
+        let v2 = vec![col("id", "Int64"), col("v", "Int64"), col("w", "Int64")];
+        for policy in [SchemaDriftPolicy::Warn, SchemaDriftPolicy::Continue] {
+            let st = StateStore::open_in_memory().unwrap();
+            st.store_schema("orders", &v1).unwrap();
+            let mut s = summary();
+            check_and_persist(&st, "orders", &v2, policy, &mut s).unwrap();
+            assert_eq!(s.schema_changed, Some(true));
+            assert_eq!(st.get_stored_schema("orders").unwrap().unwrap(), v1);
+            let mut retry = summary();
+            check_and_persist(&st, "orders", &v2, policy, &mut retry).unwrap();
+            assert_eq!(
+                retry.schema_changed,
+                Some(true),
+                "the retry of a refused run reports the same drift again"
+            );
+        }
+    }
+
+    /// Within one run a second check judges against the baseline the first one held, as it did when the first stored it.
+    #[test]
+    fn a_second_check_in_the_run_judges_against_the_baseline_the_first_held() {
+        let st = StateStore::open_in_memory().unwrap();
+        st.store_schema("k", &[col("id", "Int64")]).unwrap();
+        let v2 = vec![col("id", "Int64"), col("w", "Int64")];
+        let mut s = summary();
+        check_and_persist(&st, "k", &v2, SchemaDriftPolicy::Warn, &mut s).unwrap();
+        assert_eq!(s.schema_changed, Some(true));
+        check_and_persist(&st, "k", &v2, SchemaDriftPolicy::Warn, &mut s).unwrap();
+        assert_eq!(s.schema_changed, Some(false));
+        let v3 = vec![col("id", "Int64"), col("w", "Utf8")];
+        assert!(check_and_persist(&st, "k", &v3, SchemaDriftPolicy::Fail, &mut s).is_err());
+        assert_eq!(
+            s.pending_baselines.effective(&st, "k").unwrap().unwrap(),
+            v2,
+            "a refusal does not move what the run holds"
+        );
     }
 
     /// A zero-row run must not DESTROY the baseline.
@@ -484,14 +634,9 @@ mod tests {
             Field::new("id", DataType::Int64, false),
             Field::new("email", DataType::Utf8, true),
         ]);
-        check_from_sink_schema(
-            &st,
-            "orders",
-            &real,
-            SchemaDriftPolicy::Warn,
-            &mut summary(),
-        )
-        .unwrap();
+        let mut first = summary();
+        check_from_sink_schema(&st, "orders", &real, SchemaDriftPolicy::Warn, &mut first).unwrap();
+        ends_clean(&st, &mut first);
 
         let empty = Schema::empty();
         let mut s_empty = summary();
@@ -523,14 +668,9 @@ mod tests {
         use arrow::datatypes::{DataType, Field, Schema};
         let st = StateStore::open_in_memory().unwrap();
         let real = Schema::new(vec![Field::new("id", DataType::Int64, false)]);
-        check_from_sink_schema(
-            &st,
-            "orders",
-            &real,
-            SchemaDriftPolicy::Fail,
-            &mut summary(),
-        )
-        .unwrap();
+        let mut first = summary();
+        check_from_sink_schema(&st, "orders", &real, SchemaDriftPolicy::Fail, &mut first).unwrap();
+        ends_clean(&st, &mut first);
 
         let empty = Schema::empty();
         let mut s = summary();

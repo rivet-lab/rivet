@@ -31,6 +31,11 @@ one run per cell:
 | Oracle | 24 / 102 / 142 / – | 23 / 99 / 106 / – | 24 / 92 / 94 / – | 23 / 102 / 132 / – |
 | MongoDB | 26 / 109 / 141 / – | 26 / 100 / 121 / – | – | – |
 
+Under `target_row_group_mb: 16` the release gate grades `incremental` as flat
+from 1 million to 5 million rows: on Oracle the median peak is 112.5 MiB at
+1 million rows and 128.5 MiB at 5 million, about 16 MiB more (median ratio 1.14
+against the gate's limit of 1.25).
+
 Fixed 100,000-row groups level `full` off the same way (PostgreSQL 42 / 42,
 MySQL 76 / 75 / 79 from 1 million rows on). On this narrow table the batch caps
 (`batch_size_memory_mb`, `max_batch_memory_mb`, `memory_threshold_mb`) changed
