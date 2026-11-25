@@ -37,6 +37,17 @@ def row_cells(engine: str, r: dict) -> list[str]:
     return [engine, f"`{esc(r['native_type'])}`", batch, cdc, *legs]
 
 
+def recover_section(doc: dict) -> list[str]:
+    """The BigQuery expressions that turn an INT64 nanosecond column back into a native value."""
+    out = ["## Recovering a value that lands as INT64 nanoseconds on BigQuery", ""]
+    for name, r in doc["native_recover"].items():
+        rows = ", ".join(f"`{esc(x)}`" for x in r["rows"])
+        out += [f"Rows: {rows}. `x` is the INT64 column.", "", "| result | expression |", "| --- | --- |"]
+        out += [f"| {k.replace('_', ' ')} | `{esc(v)}` |" for k, v in r.items() if k != "rows"]
+        out.append("")
+    return out
+
+
 def render(doc: dict) -> str:
     """The whole document."""
     body, summary, gaps = [], [], []
@@ -80,6 +91,7 @@ def render(doc: dict) -> str:
         "| " + " | ".join("---" for _ in HEAD) + " |",
         *["| " + " | ".join(c) + " |" for c in body],
         "",
+        *recover_section(doc),
     ]
     return "\n".join(out)
 

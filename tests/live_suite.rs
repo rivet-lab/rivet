@@ -396,6 +396,9 @@ mod oracle_sensitivity;
 #[path = "live/live_batch_census.rs"]
 mod live_batch_census;
 
+#[path = "live/live_bigquery_nanos_recovery.rs"]
+mod live_bigquery_nanos_recovery;
+
 #[path = "live/live_single_abort.rs"]
 mod live_single_abort;
 

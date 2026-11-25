@@ -193,3 +193,16 @@ No cell is empty.
 | mongo | `javascript` | 2026-11-22: a Mongo collection exports as two columns, `_id` Utf8 and `document` Utf8 with the arrow.json extension (docs/type-mapping.md, JSON-blob model); a BSON type is a value inside `document`, never a column, so it has no per-column delivery, CDC verdict or warehouse leg; the edge matrix grades its value form | n/a | n/a | n/a | n/a |
 | mongo | `javascriptWithScope` | 2026-11-22: a Mongo collection exports as two columns, `_id` Utf8 and `document` Utf8 with the arrow.json extension (docs/type-mapping.md, JSON-blob model); a BSON type is a value inside `document`, never a column, so it has no per-column delivery, CDC verdict or warehouse leg; the edge matrix grades its value form | n/a | n/a | n/a | n/a |
 | mongo | `mixed types in one field` | 2026-11-22: a Mongo collection exports as two columns, `_id` Utf8 and `document` Utf8 with the arrow.json extension (docs/type-mapping.md, JSON-blob model); a BSON type is a value inside `document`, never a column, so it has no per-column delivery, CDC verdict or warehouse leg; the edge matrix grades its value form | n/a | n/a | n/a | n/a |
+
+## Recovering a value that lands as INT64 nanoseconds on BigQuery
+
+Rows: `mssql DATETIME2`, `mssql DATETIMEOFFSET`. `x` is the INT64 column.
+
+| result | expression |
+| --- | --- |
+| instant | `TIMESTAMP_MICROS(DIV(x, 1000))` |
+| datetime | `DATETIME(TIMESTAMP_MICROS(DIV(x, 1000)), 'UTC')` |
+| sub microsecond ns | `MOD(x, 1000)` |
+| instant before 1970 | `TIMESTAMP_MICROS(DIV(x, 1000) - IF(MOD(x, 1000) < 0, 1, 0))` |
+| datetime before 1970 | `DATETIME(TIMESTAMP_MICROS(DIV(x, 1000) - IF(MOD(x, 1000) < 0, 1, 0)), 'UTC')` |
+| sub microsecond ns before 1970 | `MOD(x, 1000) + IF(MOD(x, 1000) < 0, 1000, 0)` |

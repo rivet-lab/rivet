@@ -182,6 +182,16 @@ forms:
       clickhouse: text
       duckdb: text
 
+native_recover:
+  bigquery_int64_nanos:
+    rows: [mssql DATETIME2, mssql DATETIMEOFFSET]
+    instant: TIMESTAMP_MICROS(DIV(x, 1000))
+    datetime: DATETIME(TIMESTAMP_MICROS(DIV(x, 1000)), 'UTC')
+    sub_microsecond_ns: MOD(x, 1000)
+    instant_before_1970: TIMESTAMP_MICROS(DIV(x, 1000) - IF(MOD(x, 1000) < 0, 1, 0))
+    datetime_before_1970: DATETIME(TIMESTAMP_MICROS(DIV(x, 1000) - IF(MOD(x, 1000) < 0, 1, 0)), 'UTC')
+    sub_microsecond_ns_before_1970: MOD(x, 1000) + IF(MOD(x, 1000) < 0, 1000, 0)
+
 engines:
   postgres:
     setup:

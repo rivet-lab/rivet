@@ -400,4 +400,15 @@ impl Warehouse {
         rows.sort_unstable();
         (rows, ty)
     }
+
+    /// The BigQuery table `table` as `project.dataset.table`, for a read through the second client.
+    pub fn bq_table(&self, table: &str) -> String {
+        let bq = self.bq.as_ref().expect("BigQuery");
+        format!("`{}.{}.{table}`", bq.project, bq.dataset)
+    }
+
+    /// Rows of `sql` against BigQuery, as the second client renders them.
+    pub fn bq_rows(&self, sql: &str) -> Vec<serde_json::Value> {
+        self.bq.as_ref().expect("BigQuery").read_bq_rows(sql)
+    }
 }
