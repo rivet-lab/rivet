@@ -5795,17 +5795,18 @@ seeds:
       mongo:
         na: "a document source has no declared column wire type and takes no columns override"
   - name: oracle-timestamp-ns-undeclared-truncated
-    class: an undeclared Oracle TIMESTAMP(7..9) column is delivered at microseconds with a warning and exit 0, so a second client reads a value the source does not hold
-    history: "2026-11-05 cluster C5: the sentinel rivet_sent_ts9 failed with SUCCEEDED WITH A CHANGED VALUE; the mapping now carries a refusal that every consumer routes through TypePolicy::validate"
+    class: an undeclared Oracle TIMESTAMP(7..9) column is delivered at microseconds with a warning and exit 0 instead of as nanosecond text, so a second client reads a value the source does not hold
+    history: "2026-11-05 cluster C5: the sentinel rivet_sent_ts9 failed with SUCCEEDED WITH A CHANGED VALUE; 2026-11-25 owner rule text-if-lossless-text-exists: the refusal became nanosecond text (IsoTimestampNanos) on batch and CDC; the seed restores the microsecond read with a warning"
     scope: source
     engines:
       oracle:
         switch: oracle-timestamp-ns-undeclared-truncated
         cells:
-          - an_undeclared_nanosecond_timestamp_is_refused_and_the_declared_ns_type_delivers_every_digit
-          - oracle_batch_timestamp9_is_refused_until_declared_under_every_policy
-          - oracle_cdc_timestamp9_is_refused_until_declared_and_a_declared_timestamp_delivers_the_row
-          - "lib:a_sub_microsecond_timestamp_is_refused_and_a_bare_number_warns_by_name"
+          - an_undeclared_nanosecond_timestamp_is_delivered_as_text_and_the_declared_ns_type_delivers_every_digit
+          - oracle_batch_timestamp9_is_delivered_as_text_undeclared_under_every_policy
+          - oracle_cdc_timestamp9_is_delivered_as_text_undeclared_and_a_declared_timestamp_delivers_the_row
+          - oracle_timestamp9_undeclared_is_nanosecond_text_on_batch_and_cdc
+          - "lib:a_sub_microsecond_timestamp_is_text_and_a_bare_number_warns_by_name"
       postgres:
         na: "PostgreSQL timestamp is microsecond-exact, so no column maps with a refusal and there is no truncation to seed"
       mysql:
@@ -7386,7 +7387,7 @@ seeds:
     switch: narrowing-override-reported-exact
     engines:
       oracle:
-        cells: ["lib:a_time_override_narrowing_a_result_column_is_lossy_on_batch_and_stream", "lib:the_stream_resolver_reports_a_narrowing_override_lossy_as_check_does", an_oracle_batch_time_override_is_graded_by_the_result_column_it_lands_on, an_oracle_cdc_time_override_is_graded_as_the_batch_override, oracle_batch_timestamp9_is_refused_until_declared_under_every_policy]
+        cells: ["lib:a_time_override_narrowing_a_result_column_is_lossy_on_batch_and_stream", "lib:the_stream_resolver_reports_a_narrowing_override_lossy_as_check_does", an_oracle_batch_time_override_is_graded_by_the_result_column_it_lands_on, an_oracle_cdc_time_override_is_graded_as_the_batch_override, oracle_batch_timestamp9_is_delivered_as_text_undeclared_under_every_policy]
       mssql:
         cells: ["lib:a_time_override_narrowing_a_result_column_is_lossy_on_batch_and_stream", "lib:the_stream_resolver_reports_a_narrowing_override_lossy_as_check_does", a_mssql_batch_time_override_is_graded_by_the_result_column_it_lands_on, a_mssql_cdc_time_override_is_graded_as_the_batch_override]
       postgres:
