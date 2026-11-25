@@ -3,7 +3,6 @@
 use crate::common::*;
 
 const OUT_OF_RANGE: Refused = Refused::by_code("RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE", 5);
-const UNGRADED: &str = "the subject is the text a declared override delivers, graded against the source server's own text";
 
 const CH: &[WarehouseKind] = &[WarehouseKind::ClickHouse];
 const CH_BQ: &[WarehouseKind] = &[WarehouseKind::ClickHouse, WarehouseKind::BigQuery];
@@ -145,7 +144,6 @@ fn text_remedy_lands(e: SqlEngine, kind: WarehouseKind, family: &Family) {
     assert_eq!(server.len(), rows.len(), "the source holds every row");
 
     let plain = w.shape(e.staged(e.rig(&table), "full", &[]), "id");
-    let plain = plain.no_oracle(UNGRADED);
     plain.run_ok();
     let out = plain.cli_env(&["load"], w.load_envs());
     assert_refused(&out, OUT_OF_RANGE);
@@ -155,12 +153,10 @@ fn text_remedy_lands(e: SqlEngine, kind: WarehouseKind, family: &Family) {
         "the refusal names the remedy:\n{said}"
     );
 
-    let declared = w
-        .shape(
-            e.staged(e.rig(&table), "full", &["columns: {v: text}"]),
-            "id",
-        )
-        .no_oracle(UNGRADED);
+    let declared = w.shape(
+        e.staged(e.rig(&table), "full", &["columns: {v: text}"]),
+        "id",
+    );
     declared.run_ok();
     w.load(&declared);
     let (landed, landed_type) = w.texts(&table, "id", "v");
