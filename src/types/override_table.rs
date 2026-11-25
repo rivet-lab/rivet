@@ -170,13 +170,10 @@ fn mssql_reads(native: Native, src: Kind, tgt: Kind) -> bool {
         I16 | I32 => &[Dec],
         I64 => &[I64, Dec],
         Text => &[Text, Json, Uuid],
-        Naive | Utc if seeded!("mssql-text-over-datetime-refused", true, false) => {
-            if src == Naive {
-                &[Naive, Utc, NaiveNs, UtcNs]
-            } else {
-                &[Naive, Utc]
-            }
+        Naive if seeded!("mssql-text-over-datetime-refused", true, false) => {
+            &[Naive, Utc, NaiveNs, UtcNs]
         }
+        Utc if seeded!("mssql-text-over-datetime-refused", true, false) => &[Naive, Utc],
         Naive => &[Naive, Utc, NaiveNs, UtcNs, Text],
         Utc => &[Naive, Utc, Text],
         _ => &[],
