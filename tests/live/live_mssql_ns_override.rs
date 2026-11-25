@@ -245,7 +245,7 @@ fn a_temporal_column_declared_text_is_delivered_as_the_servers_text() {
     }
 }
 
-/// A `datetime2(7)` / `datetimeoffset(7)` column declared `text` loads into `kind` and a second client reads back the server's own text, years 0001 and 9999 included.
+/// A temporal column declared `text` loads into `kind` and a second client reads back the server's own text, years 0001 and 9999 included.
 fn text_loads_into(kind: WarehouseKind, case: &TextCase) {
     require_alive(LiveService::Mssql);
     let Some(mut w) = Warehouse::of(kind, "mssqltxt") else {
@@ -282,7 +282,7 @@ fn text_loads_into(kind: WarehouseKind, case: &TextCase) {
 }
 
 fn text_loads_every_case_into(kind: WarehouseKind) {
-    for case in &TEXT_CASES[..2] {
+    for case in TEXT_CASES {
         text_loads_into(kind, case);
     }
 }
@@ -303,4 +303,178 @@ fn a_temporal_declared_text_loads_into_bigquery_as_the_servers_text() {
 #[ignore = "live: requires docker compose mssql + Snowflake creds"]
 fn a_temporal_declared_text_loads_into_snowflake_as_the_servers_text() {
     text_loads_every_case_into(WarehouseKind::Snowflake);
+}
+
+const WIRE: Refused<'static> = Refused::by_code("RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+
+const CDC_TEXT_TYPES: &[(&str, &str, &str, &str)] = &[
+    (
+        "DATETIME2(7)",
+        "datetime2",
+        "'2300-01-01 00:00:00.000001'",
+        "timestamp",
+    ),
+    (
+        "DATETIMEOFFSET(7)",
+        "datetimeoffset",
+        "'2300-01-01 00:00:00.000001 +02:00'",
+        "timestamp_tz",
+    ),
+    (
+        "DATETIME",
+        "datetime or smalldatetime",
+        "'2000-01-01 00:00:00.003'",
+        "",
+    ),
+    (
+        "SMALLDATETIME",
+        "datetime or smalldatetime",
+        "'2024-02-29 12:34'",
+        "",
+    ),
+];
+
+fn cdc_scenario(
+    label: &str,
+    ty: &str,
+    literal: &str,
+    shape: impl FnOnce(Rig) -> Rig,
+) -> CdcScenario {
+    let mut scn =
+        CdcScenario::mssql_with(label, &format!("id BIGINT PRIMARY KEY, v {ty}"), |r, t| {
+            shape(r.repoint(&format!("dbo.{t}")))
+        });
+    let t = scn.table.clone();
+    scn.sql(&format!(
+        "INSERT INTO dbo.{t} (id, v) VALUES (1, {literal})"
+    ));
+    scn.settle();
+    scn
+}
+
+fn declared_text(rig: Rig) -> Rig {
+    rig.export_line("columns:").export_line("  v: \"text\"")
+}
+
+/// The run and both `check` spellings refuse `rig`'s export by `WIRE`; returns the run's stderr.
+fn refused_alike(rig: &Rig, name: &str) -> String {
+    let run = rig.run_args(&["--export", name]);
+    assert_refused(&run, WIRE);
+    assert_refused(&rig.cli(&["check", "--export", name]), WIRE);
+    assert_refused(
+        &rig.cli(&["check", "--export", name, "--type-report"]),
+        WIRE,
+    );
+    String::from_utf8_lossy(&run.stderr).into_owned()
+}
+
+/// A CDC baseline leg declared `text` over a date-time is refused by the run and both `check` spellings, naming the column, the type and the remedy, and the remedy delivers the baseline and the stream as the column's own type.
+#[test]
+#[ignore = "live: requires docker compose mssql (CDC)"]
+fn a_cdc_baseline_declared_text_over_a_date_time_is_refused_and_its_remedy_delivers() {
+    let _serial = cross_process_serial("mssql_cdc");
+    for (ty, native, literal, remedy) in CDC_TEXT_TYPES {
+        let scn = cdc_scenario("cdctxt_ms", ty, literal, |r| {
+            declared_text(r.cdc_line("initial: snapshot"))
+        });
+        let name = scn.rig.export_name().to_string();
+        let mut rig = scn.rig;
+        let said = refused_alike(&rig, &name);
+        assert!(
+            said.contains(&format!(
+                "column 'v' is declared text over a `{native}` column, which the baseline leg would deliver as the server's own text while the change stream renders the same cell in its own form"
+            )),
+            "{ty}: {said}"
+        );
+        assert!(
+            said.contains("no row was delivered. Remove `v` from `columns:` and the baseline and the stream both deliver")
+                && said.contains("declare `v: timestamp` (or `timestamp_tz` for a datetimeoffset) instead"),
+            "{ty}: {said}"
+        );
+        assert_eq!(
+            files_with_extension(&rig.out_dir(), "parquet").len(),
+            0,
+            "{ty}: a refused baseline delivered a part"
+        );
+        if remedy.is_empty() {
+            rig.replace_export_line("columns:", "");
+            rig.replace_export_line("  v:", "");
+        } else {
+            rig.replace_export_line("  v:", &format!("  v: \"{remedy}\""));
+        }
+        rig.run_ok();
+        assert_eq!(
+            dir_parquet_display(&rig.out_dir().join("snapshot"), "id").len(),
+            1,
+            "{ty}: the baseline after the remedy"
+        );
+    }
+}
+
+/// A stream-only export declared `text` over a `datetime2(7)` or `datetimeoffset(7)` keeps delivering the change stream's own text, as before the baseline leg was guarded.
+#[test]
+#[ignore = "live: requires docker compose mssql (CDC)"]
+fn a_stream_only_export_declared_text_over_a_date_time_keeps_the_streams_text() {
+    let _serial = cross_process_serial("mssql_cdc");
+    for (ty, literal, want) in [
+        (
+            "DATETIME2(7)",
+            "'2300-01-01 00:00:00.0000001'",
+            "2300-01-01 00:00:00.000000100",
+        ),
+        (
+            "DATETIMEOFFSET(7)",
+            "'2300-01-01 00:00:00.0000001 +02:00'",
+            "2299-12-31 22:00:00.000000100",
+        ),
+    ] {
+        let scn = cdc_scenario("cdcstm_ms", ty, literal, declared_text);
+        scn.rig.run_ok();
+        assert_eq!(
+            dir_parquet_display(&scn.rig.out_dir(), "v"),
+            vec![Some(want.to_string())],
+            "{ty}"
+        );
+    }
+}
+
+/// A CDC baseline leg declared `text` over a text column, or `timestamp_ns` over a `datetime2(7)`, is delivered as before.
+#[test]
+#[ignore = "live: requires docker compose mssql (CDC)"]
+fn a_cdc_baseline_declared_over_a_text_column_or_a_nanosecond_timestamp_is_delivered() {
+    let _serial = cross_process_serial("mssql_cdc");
+    for (ty, literal, declared, want) in [
+        ("NVARCHAR(40)", "N'abc'", "text", "abc"),
+        (
+            "DATETIME2(7)",
+            "'2024-02-29 12:34:56.1234567'",
+            "timestamp_ns",
+            "2024-02-29T12:34:56.123456700",
+        ),
+    ] {
+        let scn = cdc_scenario("cdcnbr_ms", ty, literal, |r| {
+            r.cdc_line("initial: snapshot")
+                .export_line("columns:")
+                .export_line(&format!("  v: \"{declared}\""))
+        });
+        scn.rig.run_ok();
+        assert_eq!(
+            dir_parquet_display(&scn.rig.out_dir().join("snapshot"), "v"),
+            vec![Some(want.to_string())],
+            "{ty} {declared}"
+        );
+    }
+}
+
+/// A CDC baseline leg declared `text` over a `date` is still refused by the batch table's own message, not the baseline guard's.
+#[test]
+#[ignore = "live: requires docker compose mssql (CDC)"]
+fn a_cdc_baseline_declared_text_over_a_date_keeps_the_batch_tables_refusal() {
+    let _serial = cross_process_serial("mssql_cdc");
+    let scn = cdc_scenario("cdcdate_ms", "DATE", "'2024-02-29'", |r| {
+        declared_text(r.cdc_line("initial: snapshot"))
+    });
+    let name = scn.rig.export_name().to_string();
+    let said = refused_alike(&scn.rig, &name);
+    assert!(!said.contains("the baseline leg would deliver"), "{said}");
 }

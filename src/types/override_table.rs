@@ -257,6 +257,19 @@ pub(crate) fn resolve_column(
     }
 }
 
+/// The first of `detected` that `overrides` declares text over a SQL Server date-time, which the batch reader delivers as the server's own text and a CDC change stream renders in its own form.
+pub(crate) fn mssql_datetime_text_declared<'a>(
+    detected: &'a [crate::types::TypeMapping],
+    overrides: &ColumnOverrides,
+) -> Option<&'a crate::types::TypeMapping> {
+    detected.iter().find(|m| {
+        matches!(kind_of(&m.rivet_type), Naive | Utc | NaiveNs | UtcNs)
+            && overrides
+                .get(&m.column_name)
+                .is_some_and(|target| kind_of(target) == Text)
+    })
+}
+
 /// The refusal text for a pair the table does not read: names the column, both types and the two remedies.
 pub fn refusal_message(
     engine: Engine,
@@ -345,6 +358,40 @@ mod tests {
                 "{native} int"
             );
         }
+    }
+
+    #[test]
+    fn a_declared_text_over_a_sql_server_date_time_is_found_and_nothing_else() {
+        let col = |name: &str, ty: RivetType| {
+            crate::types::TypeMapping::from_source(
+                &crate::types::SourceColumn::simple(name, "datetime2", true),
+                ty,
+            )
+        };
+        let ts = RivetType::Timestamp {
+            unit: TimeUnit::Microsecond,
+            timezone: None,
+        };
+        let detected = [
+            col("id", RivetType::Int64),
+            col("s", RivetType::String),
+            col("v", ts.clone()),
+        ];
+        let declared = |c: &str, t: RivetType| ColumnOverrides::from([(c.to_string(), t)]);
+        for text in [RivetType::String, RivetType::Text] {
+            let found = mssql_datetime_text_declared(&detected, &declared("v", text));
+            assert_eq!(found.map(|m| m.column_name.as_str()), Some("v"));
+        }
+        assert!(mssql_datetime_text_declared(&detected, &declared("s", RivetType::Text)).is_none());
+        assert!(
+            mssql_datetime_text_declared(&detected, &declared("id", RivetType::Text)).is_none()
+        );
+        let nanos = RivetType::Timestamp {
+            unit: TimeUnit::Nanosecond,
+            timezone: None,
+        };
+        assert!(mssql_datetime_text_declared(&detected, &declared("v", nanos)).is_none());
+        assert!(mssql_datetime_text_declared(&detected, &ColumnOverrides::new()).is_none());
     }
 
     #[test]

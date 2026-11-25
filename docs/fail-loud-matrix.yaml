@@ -230,3 +230,11 @@ scenarios:
     mssql:    { na: "same source-agnostic load path" }
     mongo:    { na: "same source-agnostic load path" }
     oracle:   { na: "same source-agnostic load path" }
+
+  - id: override_text_over_a_date_time_is_refused_on_a_pending_mssql_cdc_baseline
+    what: "a SQL Server datetime2, datetimeoffset, datetime or smalldatetime column declared `text` under `columns:` on a CDC export with a pending baseline is refused RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH (exit 1) by check, doctor and run before a row is delivered, because the baseline would write the server's own text while the change stream renders the same cell in its own form; a stream-only export and the batch export are not refused"
+    postgres: { na: "the PostgreSQL pending-baseline refusal is a separate guard in its own change" }
+    mysql:    { na: "the MySQL override table is not changed by this class" }
+    mssql:    { test: a_cdc_baseline_declared_text_over_a_date_time_is_refused_and_its_remedy_delivers }
+    mongo:    { na: "a document source takes no per-column text override" }
+    oracle:   { na: "the Oracle override table is not changed by this class" }

@@ -57,11 +57,61 @@ pub(crate) fn plan_batch_export(
             export.query.as_deref(),
         )
     })?;
+    refuse_mssql_datetime_text_in_a_cdc_baseline(config, export, &plan)?;
     let diags = crate::plan::validate_plan(&plan);
     if let Some(err) = log_plan_diagnostics(&plan.export_name, &diags) {
         return Err(err);
     }
     Ok(PlannedExport { plan, diags })
+}
+
+/// Refuses a CDC baseline leg that declares `text` over a SQL Server date-time: the leg delivers the server's own text, the change stream renders the same cell in its own form into the same `__changes` log.
+fn refuse_mssql_datetime_text_in_a_cdc_baseline(
+    config: &Config,
+    export: &ExportConfig,
+    plan: &ResolvedRunPlan,
+) -> Result<()> {
+    let Some(parent) = export.snapshot_parent.as_deref() else {
+        return Ok(());
+    };
+    if seeded!("cdc-leg-mssql-datetime-text", true, false) {
+        return Ok(());
+    }
+    if plan.column_overrides.is_empty()
+        || config.source.source_type != crate::config::SourceType::Mssql
+    {
+        return Ok(());
+    }
+    let Ok(mut src) = crate::plan::build::connect_source(&config.source) else {
+        return Ok(());
+    };
+    let Ok(detected) = src.type_mappings(&plan.base_query, &crate::types::ColumnOverrides::new())
+    else {
+        return Ok(());
+    };
+    let Some(declared) = crate::types::override_table::mssql_datetime_text_declared(
+        &detected,
+        &plan.column_overrides,
+    ) else {
+        return Ok(());
+    };
+    let column = &declared.column_name;
+    let native = match declared.source_native_type.as_str() {
+        "datetimeoffsetn" => "datetimeoffset",
+        "datetimen" => "datetime or smalldatetime",
+        "datetime4" => "smalldatetime",
+        other => other,
+    };
+    crate::rivet_bail!(
+        crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH,
+        "export '{parent}': column '{column}' is declared text over a `{native}` column, which the \
+         baseline leg would deliver as the server's own text while the change stream renders the \
+         same cell in its own form, so one `__changes` log would hold two spellings of it; no row \
+         was delivered. Remove `{column}` from `columns:` and the baseline and the stream both \
+         deliver the `{native}` column's own type; if the column holds a value outside \
+         1677-09-21..2262-04-11, declare `{column}: timestamp` (or `timestamp_tz` for a \
+         datetimeoffset) instead, which delivers the full range at microseconds on both."
+    )
 }
 
 /// The refusals the source's own catalog decides before a write: an override the wire type cannot take, a missing relation, a strict or settle column.
