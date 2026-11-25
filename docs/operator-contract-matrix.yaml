@@ -591,3 +591,19 @@ scenarios:
     mssql:    { test: an_mssql_read_blocked_past_its_lock_timeout_exits_retryable }
     mongo:    { na: "MongoDB has no row lock a read waits on" }
     oracle:   { na: "an Oracle read does not wait on a row lock (multiversion reads)" }
+
+  - id: range_refusal_text_remedy
+    what: "2026-11-25 owner decision: a date or timestamp ClickHouse or BigQuery cannot hold is refused by RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE (exit 5) naming `columns: {c: text}` and the `query:` cast, and the export that declares the column text lands the source's value as text, read back by a second client (ClickHouse: text_remedy_lands_in_clickhouse_<engine>_*, BigQuery: text_remedy_lands_in_bigquery_mysql_date)"
+    postgres: { gap: "2026-11-25: a PostgreSQL `date` or `timestamp` declared `text` under `columns:` is refused by RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH (postgres_reads has no Text for them); closes with PR #1233, then a cell here" }
+    mysql:    { test: text_remedy_lands_in_clickhouse_mysql_date }
+    mssql:    { gap: "2026-11-25: mssql_reads has no Text for Date, Naive or Utc, so a SQL Server date or timestamp declared `text` is refused by RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH and the `query:` cast is the remedy; closes when the override table reads those pairs, then a cell here" }
+    mongo:    { na: "a MongoDB document lands in one `document` column, so there is no date column to declare text" }
+    oracle:   { test: text_remedy_lands_in_clickhouse_oracle_date }
+
+  - id: bigquery_int64_nanos_recovery
+    what: "2026-11-25 owner decision: a SQL Server datetime2(7) / datetimeoffset(7) stays INT64 nanoseconds on BigQuery, and the ledger's native_recover expressions give back the source instant to the 100 ns tick"
+    postgres: { na: "PostgreSQL timestamps are microseconds and land as native BigQuery types, so no PostgreSQL column lands as INT64 nanoseconds" }
+    mysql:    { na: "MySQL DATETIME holds at most microseconds and lands as a native BigQuery type" }
+    mssql:    { test: bigquery_int64_nanos_recover_the_source_instant_mssql }
+    mongo:    { na: "a MongoDB document lands in one `document` column, so no column lands as INT64 nanoseconds" }
+    oracle:   { gap: "2026-11-25: an Oracle TIMESTAMP(7..9) lands as microseconds by default, so it has no INT64 nanosecond column to recover unless declared timestamp_ns; no cell yet" }
