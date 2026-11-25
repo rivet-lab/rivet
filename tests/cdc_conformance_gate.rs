@@ -985,7 +985,8 @@ const PIN_SELF_COUNTER: usize = 6; // ratchet-pin: cdc-census-self-counter (revi
 // 115 -> 117 (2026-11-19, #712): two PostgreSQL column-grants cells whose oracle is a coded refusal (a sealed plan after a revoke, a BIT column the role may not read).
 // 117 -> 122 (2026-11-19, #713): five SQL Server column-grants cells whose oracle is a coded refusal, the server's own refusal text, or an unmoved checkpoint.
 // 122 -> 121 (2026-11-20, MYSQL_TIME_RANGE_REFUSED): the MySQL TIME refusal-text capture cell now compares the stream text with the source, so it left the presence bucket.
-const PIN_PRESENCE: usize = 119; // ratchet-pin: cdc-census-presence (review 2027-02-01)
+// 119 -> 118 (2026-11-25, mssql-xml-text): the SQL Server refusal cell for an undecodable xml cell left, xml is delivered as text.
+const PIN_PRESENCE: usize = 118; // ratchet-pin: cdc-census-presence (review 2027-02-01)
 
 /// TIER 2 (harness audit, 2026-08-29): a test whose NAME makes a
 /// COMPLETENESS claim must carry a class-(a) INDEPENDENT oracle — not merely

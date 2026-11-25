@@ -59,7 +59,7 @@ stays per engine, in the engine's own decoder
 
 Types an engine carries alone stay in its own table: PostgreSQL `oid`, `timetz`, enums,
 arrays and the types it does not map; MySQL `bigint unsigned`, `bit`, `year`, `enum`,
-`set`; SQL Server `money`, `smallmoney`, `sql_variant`, CLR types. Within a shared
+`set`; SQL Server `money`, `smallmoney`, `sql_variant`, `xml`, CLR types. Within a shared
 kind the engine keeps its own reading: MySQL `time` beyond 24 hours and negative,
 SQL Server `time(7)` precision, Oracle interval units, PostgreSQL `interval` months,
 days and microseconds. MongoDB has no native-type
