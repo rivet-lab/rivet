@@ -161,7 +161,7 @@ fn bigquery_int64_nanos_recover_the_source_instant_mssql() {
         ("t", "CONVERT(NVARCHAR(100), t, 121)"),
         (
             "o",
-            "CONVERT(NVARCHAR(100), SWITCHOFFSET(o, '+00:00'), 121)",
+            "CONVERT(NVARCHAR(100), CAST(SWITCHOFFSET(o, '+00:00') AS DATETIME2(7)), 121)",
         ),
     ] {
         let server = e.id_texts(&table, source_expr);
