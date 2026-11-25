@@ -19,6 +19,14 @@ pub(crate) fn orchestrated_ranges(target: &LoadTarget) -> &'static Ranges {
     }
 }
 
+/// The remedy a range refusal names: the operator declares the column text, and the export delivers the source's own text.
+pub(crate) fn text_remedy(column: &str) -> String {
+    format!(
+        "To keep the value, declare `{column}: text` under `columns:` in the export and run it \
+         again: the warehouse then holds the source's text for the column. Or correct it at the source."
+    )
+}
+
 /// Refuse a part holding a date or timestamp outside `ranges`, or one its footer cannot bound where the warehouse would store it silently.
 pub(crate) fn refuse_outside_ranges(
     meta: &ParquetMetaData,
@@ -37,16 +45,16 @@ pub(crate) fn refuse_outside_ranges(
             "{uri}: column `{column}` has no min/max statistics in the Parquet footer, so rivet \
              cannot check it against {wh} {name}'s range ({span}), \
              which {wh} enforces by {}; {nothing}. \
-             Re-export the part with statistics enabled (rivet's writer keeps them), or cast \
-             the column to text in the export's `query:`.",
-            range.enforced
+             Re-export the part with statistics enabled (rivet's writer keeps them). {}",
+            range.enforced,
+            text_remedy(column)
         ),
         Some(value) => crate::rivet_bail!(
             crate::error::codes::LOAD_VALUE_OUT_OF_TARGET_RANGE,
             "{uri}: column `{column}` holds {value}, outside {wh} {name}'s range \
-             ({span}). {wh} would {}; {nothing}. Cast the column to text \
-             in the export's `query:` to keep the value, or correct it at the source.",
-            range.beyond
+             ({span}). {wh} would {}; {nothing}. {}",
+            range.beyond,
+            text_remedy(column)
         ),
     }
 }
@@ -186,8 +194,8 @@ mod tests {
                 Some(&*format!(
                     "gs://b/p: column `d` holds {shown}, outside BigQuery DATE's range \
                      (0001-01-01 to 9999-12-31). BigQuery would fail the whole load job; \
-                     nothing was loaded. Cast the column to text in the export's `query:` to \
-                     keep the value, or correct it at the source."
+                     nothing was loaded. {}",
+                    text_remedy("d")
                 )),
                 "{bad}"
             );
@@ -227,8 +235,9 @@ mod tests {
             "gs://b/p: column `ts` has no min/max statistics in the Parquet footer, so rivet \
              cannot check it against ClickHouse DateTime64's range (1900-01-01 to 2299-12-31), \
              which ClickHouse enforces by storing the nearest end silently; nothing was inserted. \
-             Re-export the part with statistics enabled (rivet's writer keeps them), or cast \
-             the column to text in the export's `query:`."
+             Re-export the part with statistics enabled (rivet's writer keeps them). \
+             To keep the value, declare `ts: text` under `columns:` in the export and run it \
+             again: the warehouse then holds the source's text for the column. Or correct it at the source."
         );
     }
 

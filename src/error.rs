@@ -1200,7 +1200,7 @@ pub mod codes {
     );
     pub const LOAD_VALUE_OUT_OF_TARGET_RANGE: Code = refusal(
         "RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE",
-        "the warehouse type cannot hold this value; declare a wider type (e.g. String) for the column, or fix the source value",
+        "the warehouse type cannot hold this value; declare the column `text` under `columns:` in the export and run it again (the warehouse then holds the source's text), or fix the source value",
     );
     pub const LOAD_COUNT_MISMATCH: Code = integrity(
         "RIVET_LOAD_COUNT_MISMATCH",

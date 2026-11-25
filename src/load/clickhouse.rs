@@ -1823,7 +1823,7 @@ mod tests {
             assert!(
                 text.contains(&format!("column `d` holds {shown}"))
                     && text.contains("outside ClickHouse Date32's range")
-                    && text.contains("Cast the column to text in the export's `query:`"),
+                    && text.contains("declare `d: text` under `columns:` in the export"),
                 "{text}"
             );
         }
