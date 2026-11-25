@@ -3,7 +3,7 @@
 use crate::error::Result;
 use crate::plan::load_settings::LoadMode;
 use crate::preflight::type_report::TypeReportRow;
-use crate::types::{RivetType, TimeUnit, TypeMapping};
+use crate::types::{Delivery, RivetType, TimeUnit, TypeMapping};
 
 /// How a column lands in the file, against what a key or an order needs of it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -30,7 +30,9 @@ impl KeyLanding {
             RivetType::Timestamp {
                 unit: TimeUnit::Microsecond,
                 ..
-            } if seeded!("load-key-landed-type-not-admitted", false, finer) => {
+            } if m.delivery == Delivery::Native
+                && seeded!("load-key-landed-type-not-admitted", false, finer) =>
+            {
                 Self::FinerThanMicrosecond
             }
             _ => Self::Exact,
@@ -287,6 +289,18 @@ mod tests {
             KeyLanding::of(&mapping("int", RivetType::Int32), true),
             KeyLanding::Exact
         );
+    }
+
+    /// A column delivered as nanosecond text lands every digit, so a finer source column is not a collapsed key.
+    #[test]
+    fn a_nanosecond_text_landing_is_exact_whatever_the_catalog_says() {
+        let native = mapping("timestamp(9)", micros());
+        assert_eq!(
+            KeyLanding::of(&native, true),
+            KeyLanding::FinerThanMicrosecond
+        );
+        let text = native.with_text(TextForm::IsoTimestampNanos);
+        assert_eq!(KeyLanding::of(&text, true), KeyLanding::Exact);
     }
 
     /// The text landing of a bare Oracle NUMBER, and the text a number is delivered as, are the same fact.

@@ -133,7 +133,7 @@ fn table() -> Vec<Case> {
         case(
             "timestamp(9)",
             of(OraKind::Timestamp, "timestamp", 0, 9),
-            "timestamp(microsecond) | Timestamp(µs) | native | lossy | reads date,timestamp(microsecond),timestamp_tz(microsecond,UTC),timestamp(nanosecond),timestamp_tz(nanosecond,UTC),string,json",
+            "timestamp(microsecond) | Utf8 | text:iso_timestamp_nanos | logical_string | reads date,timestamp(microsecond),timestamp_tz(microsecond,UTC),timestamp(nanosecond),timestamp_tz(nanosecond,UTC),string,json",
         ),
         case(
             "timestamp_tz(6)",
@@ -143,7 +143,7 @@ fn table() -> Vec<Case> {
         case(
             "timestamp_tz(9)",
             of(OraKind::TimestampTz, "timestamp_tz", 0, 9),
-            "timestamp_tz(microsecond,UTC) | Timestamp(µs, \"UTC\") | native | lossy | reads date,timestamp(microsecond),timestamp_tz(microsecond,UTC),timestamp(nanosecond),timestamp_tz(nanosecond,UTC),string,json",
+            "timestamp_tz(microsecond,UTC) | Utf8 | text:iso_timestamp_nanos | logical_string | reads date,timestamp(microsecond),timestamp_tz(microsecond,UTC),timestamp(nanosecond),timestamp_tz(nanosecond,UTC),string,json",
         ),
         case(
             "timestamp_ltz(6)",
@@ -153,7 +153,7 @@ fn table() -> Vec<Case> {
         case(
             "timestamp_ltz(9)",
             of(OraKind::TimestampLtz, "timestamp_ltz", 0, 9),
-            "timestamp_tz(microsecond,UTC) | Timestamp(µs, \"UTC\") | native | lossy | reads date,timestamp(microsecond),timestamp_tz(microsecond,UTC),timestamp(nanosecond),timestamp_tz(nanosecond,UTC),string,json",
+            "timestamp_tz(microsecond,UTC) | Utf8 | text:iso_timestamp_nanos | logical_string | reads date,timestamp(microsecond),timestamp_tz(microsecond,UTC),timestamp(nanosecond),timestamp_tz(nanosecond,UTC),string,json",
         ),
         case(
             "interval day to second(6)",
