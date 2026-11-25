@@ -302,24 +302,39 @@ fn interval_ds_iso(
     seconds: i8,
     nanos: i32,
 ) -> Result<String> {
-    if nanos % 1_000 != 0 && seeded!("oracle-interval-ns-truncated", false, true) {
-        crate::rivet_bail!(
+    interval_ds_text(days, hours, minutes, seconds, nanos).ok_or_else(|| {
+        crate::error::coded(
             crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
-            "oracle: column `{column}` holds an INTERVAL DAY TO SECOND with a sub-microsecond \
-             fraction ({nanos} ns): rivet writes microseconds and refuses rather than dropping \
-             the last digits. Select `TO_CHAR({column}) AS {column}` in the query to export the \
-             exact text."
-        );
+            format!(
+                "oracle: column `{column}` holds an INTERVAL DAY TO SECOND with a sub-microsecond \
+                 fraction ({nanos} ns): rivet writes microseconds and refuses rather than dropping \
+                 the last digits. Select `TO_CHAR({column}) AS {column}` in the query to export the \
+                 exact text."
+            ),
+        )
+    })
+}
+
+/// ISO 8601 for a DAY TO SECOND interval's fields, or `None` when a sub-microsecond digit would be dropped.
+pub(crate) fn interval_ds_text(
+    days: i32,
+    hours: i8,
+    minutes: i8,
+    seconds: i8,
+    nanos: i32,
+) -> Option<String> {
+    if nanos % 1_000 != 0 && seeded!("oracle-interval-ns-truncated", false, true) {
+        return None;
     }
     let us = i64::from(hours) * 3_600_000_000
         + i64::from(minutes) * 60_000_000
         + i64::from(seconds) * 1_000_000
         + i64::from(nanos) / 1_000;
-    Ok(crate::source::postgres::pg_interval_to_iso8601(0, days, us))
+    Some(crate::source::postgres::pg_interval_to_iso8601(0, days, us))
 }
 
 /// ISO 8601 for a YEAR TO MONTH interval, straight from its fields (YEAR(9) overflows i32 months).
-fn interval_ym_iso(years: i32, months: i32) -> String {
+pub(crate) fn interval_ym_iso(years: i32, months: i32) -> String {
     match (years, months) {
         (0, 0) => "PT0S".to_string(),
         (0, m) => format!("P{m}M"),

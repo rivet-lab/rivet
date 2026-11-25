@@ -5935,6 +5935,8 @@ seeds:
         cells:
           - an_oracle_interval_with_nanoseconds_is_refused_by_code_and_to_char_delivers_the_text
           - "lib:a_sub_microsecond_interval_is_refused_with_its_column_and_remedy"
+          - oracle_cdc_a_sub_microsecond_interval_is_one_refusal_on_batch_snapshot_and_stream
+          - "lib:only_a_day_to_second_value_with_a_sub_microsecond_digit_is_a_sub_micro_interval"
       postgres:
         na: "a PostgreSQL interval is microsecond-exact, so no value has a sub-microsecond fraction to drop"
       mysql:
@@ -6301,6 +6303,23 @@ seeds:
         na: "SQL Server cannot store infinity in a float or decimal column"
       mongo:
         na: "a MongoDB change is a BSON document read whole, no per-column infinity text"
+
+  - name: oracle-cdc-interval-sign-dropped
+    class: "an Oracle CDC run reads a negative INTERVAL (LogMiner `-000000001 02:03:04.123456000`, `-000000000-01`) and delivers it positive, so the stream disagrees with the snapshot and batch by the sign, with exit 0"
+    history: "Oracle CDC allow-list group E (2026-11-25): INTERVAL YEAR TO MONTH and DAY TO SECOND are captured as the text batch delivers; RED from this switch: the live cell sees `P1DT2H3M4.123456S` for `P-1DT-2H-3M-4.123456S` and the lib cell sees the decoded parts lose their sign"
+    scope: source
+    engines:
+      oracle:
+        switch: oracle-cdc-interval-sign-dropped
+        cells: [oracle_cdc_interval_and_rowid_are_delivered_as_batch_delivers_them, "lib:an_interval_or_rowid_is_decoded_to_the_text_the_batch_export_writes"]
+      postgres:
+        na: "a PostgreSQL interval is read through the pgoutput text form and graded by postgres_batch_and_cdc_deliver_every_ledger_row_alike; it shares no sign split with LogMiner's text"
+      mysql:
+        na: "MySQL has no interval column type"
+      mssql:
+        na: "SQL Server has no interval column type"
+      mongo:
+        na: "a document source has no interval column type"
 
   - name: load-key-landed-type-not-admitted
     class: "the keyed load admits its order and key columns by name alone, so an incremental cursor that lands as text (an Oracle bare NUMBER) is ranked as a string by the current-state view (99 stays after 100), and a primary-key column the source declares finer than a microsecond (an MSSQL datetime2(7)) lands at microseconds and collapses rows into one, both with exit 0"
