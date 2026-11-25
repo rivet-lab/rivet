@@ -168,7 +168,9 @@ fn case_table(case: &Case) -> (String, PgTable) {
 
 /// The server's own text of every row, by id, read through a second client.
 fn held_as_text(table: &str) -> Vec<Option<String>> {
-    pg_connect()
+    let mut oracle = pg_connect();
+    oracle.batch_execute("SET TimeZone = 'UTC'").unwrap();
+    oracle
         .query(&format!("SELECT v::text FROM {table} ORDER BY id"), &[])
         .unwrap()
         .iter()

@@ -78,6 +78,43 @@ pub(crate) fn admit_incremental_cursor(
     Ok(())
 }
 
+/// Refuses a cursor `column` the export declares `text` over a date, time or timestamp the server renders: its text order is not its time order.
+fn refuse_text_declared_temporal(
+    src: &mut dyn Source,
+    config: &Config,
+    export: &ExportConfig,
+    query: &str,
+    column: &str,
+    overrides: &crate::types::ColumnOverrides,
+) -> Result<()> {
+    use crate::types::override_table::{Engine, server_text_declared};
+    let Some(target) = overrides.get(column) else {
+        return Ok(());
+    };
+    if seeded!("text-declared-temporal-cursor", true, false) {
+        return Ok(());
+    }
+    if config.source.source_type != SourceType::Postgres {
+        return Ok(());
+    }
+    let only = crate::types::ColumnOverrides::from([(column.to_string(), target.clone())]);
+    let Ok(detected) = src.type_mappings(query, &crate::types::ColumnOverrides::new()) else {
+        return Ok(());
+    };
+    let Some(declared) = server_text_declared(Engine::Postgres, &detected, &only) else {
+        return Ok(());
+    };
+    crate::rivet_bail!(
+        crate::error::codes::PLAN_CURSOR_TYPE_UNSUPPORTED,
+        "export '{}': cursor_column '{column}' is declared text over a `{}` column, whose text \
+         order is not its order in time (a year above 9999, a BC date), so the cursor could skip \
+         rows; nothing was read or written. Remove `{column}` from `columns:` so the cursor reads \
+         the column's own type",
+        export.name,
+        declared.source_native_type
+    )
+}
+
 /// The verdict on the primary cursor `column` of `query`.
 pub(crate) fn admission(
     probe: Option<&mut (dyn Source + '_)>,
@@ -111,6 +148,7 @@ pub(crate) fn admission(
     let Some(mapping) = mappings.iter().find(|m| m.column_name == column) else {
         return Ok(Admission::Admitted);
     };
+    refuse_text_declared_temporal(src, config, export, query, column, &overrides)?;
     let nullable = match src.column_nullable(query, column) {
         Ok(n) => n,
         Err(e) => return Ok(unverified(export, column, &e)),

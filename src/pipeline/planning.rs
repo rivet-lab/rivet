@@ -57,11 +57,52 @@ pub(crate) fn plan_batch_export(
             export.query.as_deref(),
         )
     })?;
+    refuse_text_the_stream_renders_otherwise(config, export, &plan)?;
     let diags = crate::plan::validate_plan(&plan);
     if let Some(err) = log_plan_diagnostics(&plan.export_name, &diags) {
         return Err(err);
     }
     Ok(PlannedExport { plan, diags })
+}
+
+/// Refuses a CDC baseline leg that declares `text` over a column the server renders as text, which the change stream renders in its own form into the same `__changes` log.
+fn refuse_text_the_stream_renders_otherwise(
+    config: &Config,
+    export: &ExportConfig,
+    plan: &ResolvedRunPlan,
+) -> Result<()> {
+    use crate::types::override_table::{Engine, server_text_declared};
+    let Some(parent) = export.snapshot_parent.as_deref() else {
+        return Ok(());
+    };
+    if seeded!("cdc-leg-text-declaration", true, false) {
+        return Ok(());
+    }
+    if plan.column_overrides.is_empty()
+        || config.source.source_type != crate::config::SourceType::Postgres
+    {
+        return Ok(());
+    }
+    let Ok(mut src) = crate::plan::build::connect_source(&config.source) else {
+        return Ok(());
+    };
+    let Ok(detected) = src.type_mappings(&plan.base_query, &crate::types::ColumnOverrides::new())
+    else {
+        return Ok(());
+    };
+    let Some(declared) = server_text_declared(Engine::Postgres, &detected, &plan.column_overrides)
+    else {
+        return Ok(());
+    };
+    let (column, native) = (&declared.column_name, &declared.source_native_type);
+    crate::rivet_bail!(
+        crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH,
+        "export '{parent}': column '{column}' is declared text over a `{native}` column, which the \
+         baseline leg would deliver as the server's own text while the change stream renders the \
+         same cell in its own form, so one `__changes` log would hold two spellings of it; nothing \
+         was read or written. Remove `{column}` from `columns:`: the baseline and the stream then \
+         both deliver the `{native}` column's own type."
+    )
 }
 
 /// The refusals the source's own catalog decides before a write: an override the wire type cannot take, a missing relation, a strict or settle column.

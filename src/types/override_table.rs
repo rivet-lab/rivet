@@ -252,6 +252,26 @@ pub(crate) fn resolve_column(
     }
 }
 
+/// Whether the batch reader delivers a `src` column declared `tgt` as the server's own text, which a CDC change stream renders in its own form.
+pub(crate) fn is_server_text_projection(engine: Engine, src: &RivetType, tgt: &RivetType) -> bool {
+    engine == Engine::Postgres
+        && matches!(kind_of(src), Date | Time | Naive | Utc | List)
+        && kind_of(tgt) == Text
+}
+
+/// The first of `detected` that `overrides` declares text and the batch reader delivers as the server's own text.
+pub(crate) fn server_text_declared<'a>(
+    engine: Engine,
+    detected: &'a [crate::types::TypeMapping],
+    overrides: &ColumnOverrides,
+) -> Option<&'a crate::types::TypeMapping> {
+    detected.iter().find(|m| {
+        overrides
+            .get(&m.column_name)
+            .is_some_and(|target| is_server_text_projection(engine, &m.rivet_type, target))
+    })
+}
+
 /// The remedy a value refusal names: the column declared text delivers the server's own text for every row.
 pub(crate) fn text_remedy(column: &str) -> String {
     format!(
@@ -729,6 +749,38 @@ mod tests {
                 override_is_read(e, "datetime2", &ns(true), &ns(true)),
                 "{e:?}"
             );
+        }
+    }
+
+    /// Only a PostgreSQL date, time, timestamp or array declared text is a server text projection.
+    #[test]
+    fn a_server_text_projection_is_postgres_temporal_or_array_declared_text_only() {
+        let ts = RivetType::Timestamp {
+            unit: TimeUnit::Microsecond,
+            timezone: None,
+        };
+        let list = RivetType::List {
+            inner: Box::new(RivetType::Int32),
+        };
+        for src in [RivetType::Date, ts.clone(), list] {
+            for tgt in [RivetType::String, RivetType::Text] {
+                assert!(is_server_text_projection(Engine::Postgres, &src, &tgt));
+                for other in ENGINES.into_iter().filter(|e| *e != Engine::Postgres) {
+                    assert!(!is_server_text_projection(other, &src, &tgt), "{other:?}");
+                }
+            }
+            assert!(!is_server_text_projection(
+                Engine::Postgres,
+                &src,
+                &RivetType::Json
+            ));
+        }
+        for src in [RivetType::Int32, RivetType::String, RivetType::Uuid] {
+            assert!(!is_server_text_projection(
+                Engine::Postgres,
+                &src,
+                &RivetType::Text
+            ));
         }
     }
 }

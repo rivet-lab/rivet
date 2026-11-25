@@ -7516,3 +7516,39 @@ seeds:
         na: "a MongoDB export has no PostgreSQL text projection, and its values have no refusal that a text declaration recovers"
       oracle:
         na: "the patched PostgreSQL text projection does not run on Oracle; a NUMBER of 1E125 is refused by number_text and a text declaration does not recover it (open question)"
+
+  - name: cdc-leg-text-declaration
+    class: "a CDC baseline leg that declares text over a PostgreSQL date, time, timestamp or array column delivers the server text while the change stream renders the same cell in its own form, so one `__changes` log holds two spellings"
+    history: "2026-11-25 - verifier on the group C text remedy: broadening the override table made the baseline leg accept a text declaration the stream renders differently; main refused it before any write"
+    scope: source
+    switch: cdc-leg-text-declaration
+    engines:
+      postgres:
+        cells:
+          - a_pending_baseline_declared_text_over_a_server_text_column_is_refused_and_its_remedy_delivers_postgres
+      mysql:
+        na: "a MySQL baseline leg reads date and time as text already; the PostgreSQL text projection the guard names does not run"
+      mssql:
+        na: "the guard is PostgreSQL only; a SQL Server CDC baseline leg has no server text projection"
+      mongo:
+        na: "a MongoDB export has no PostgreSQL text projection"
+      oracle:
+        na: "the guard is PostgreSQL only; an Oracle CDC baseline leg has no server text projection"
+
+  - name: text-declared-temporal-cursor
+    class: "an incremental cursor_column declared text over a date or timestamp lands as text, whose order is not its order in time, and the cursor admission lets it through"
+    history: "2026-11-25 - verifier on the group C text remedy: the override table now reads a temporal column as text, so cursor_renders admitted a Utf8 cursor over it"
+    scope: source
+    switch: text-declared-temporal-cursor
+    engines:
+      postgres:
+        cells:
+          - a_temporal_cursor_declared_text_is_refused_on_every_command_postgres
+      mysql:
+        na: "a MySQL temporal column is not read through a server text projection; its text declaration is refused as an override mismatch"
+      mssql:
+        na: "a SQL Server temporal column is not read through a server text projection"
+      mongo:
+        na: "a MongoDB export has no PostgreSQL text projection"
+      oracle:
+        na: "an Oracle temporal column is not read through a server text projection"

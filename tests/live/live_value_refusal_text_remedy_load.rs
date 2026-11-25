@@ -59,7 +59,9 @@ fn held_table() -> (String, PgTable) {
 /// The server's own text of every declared column, by id, read through a second client.
 fn server_rows(table: &str) -> Grid {
     let casts: Vec<String> = COLUMNS.iter().map(|(c, _)| format!("{c}::text")).collect();
-    pg_connect()
+    let mut oracle = pg_connect();
+    oracle.batch_execute("SET TimeZone = 'UTC'").unwrap();
+    oracle
         .query(
             &format!("SELECT {} FROM {table} ORDER BY id", casts.join(", ")),
             &[],
