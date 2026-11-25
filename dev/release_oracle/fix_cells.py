@@ -55,15 +55,72 @@ FIX = re.compile(r"fix[(:!]")
 TEST = re.compile(r"^#\[test\]\n(?:#\[[^\n]*\n)*(?:pub )?fn (\w+)\(\) \{\n(.*?)^\}", re.M | re.S)
 #: Fix cell allowed to pass on the previous release → (its fix commit, reason). Shrink-only.
 GREEN_ON_PREV: dict[str, tuple[str, str]] = {  # ratchet-pin: fix-cells-green-on-previous-release (review 2027-02-01) strings
+    "a_bounded_scalar_read_is_cancelled_at_its_budget_mysql": (
+        "a94c9b19",
+        "2026-11-25: in-process lib cell, never runs the baseline binary (MysqlSource::connect); closes when the baseline moves past 0.33.0",
+    ),
+    "a_bounded_scalar_read_is_cancelled_at_its_budget_postgres": (
+        "a94c9b19",
+        "2026-11-25: in-process lib cell, never runs the baseline binary (PostgresSource::connect); the binary-run postgres cells of #1073 are red on 0.33.0; closes when the baseline moves past 0.33.0",
+    ),
+    "a_sampler_under_the_statement_timeout_keeps_its_run_mysql": (
+        "a94c9b19",
+        "2026-11-25: control: every id once under the budget, green before and after the fix by design; closes when the baseline moves past 0.33.0",
+    ),
+    "a_seek_sampler_under_the_statement_timeout_keeps_its_run_postgres": (
+        "a94c9b19",
+        "2026-11-25: control: every id once under the budget, green before and after the fix by design; the cancel cells of #1073 are red on 0.33.0; closes when the baseline moves past 0.33.0",
+    ),
+    "a_clean_temporal_column_is_delivered_and_validated_without_a_count_mysql": (
+        "229cfbad",
+        "2026-11-25: control: a column with no zero date writes no count row, green before and after the fix by design; the zero-date cells of #1084 are red on 0.33.0; closes when the baseline moves past 0.33.0",
+    ),
+    "an_oracle_sub_microsecond_key_is_refused_into_clickhouse": (
+        "f6c8d093",
+        "2026-11-25: the fix edits only the helper's argument; the table export already refused on 0.33.0 and the query export cell of #1081 is red there; closes when the baseline moves past 0.33.0",
+    ),
+    "an_integer_column_declared_float_is_delivered_with_its_values_oracle": (
+        "bd36fb3d",
+        "2026-11-25: expectation edit, float4 to float8 in the declaration; float8 was read correctly on 0.33.0; closes when the baseline moves past 0.33.0",
+    ),
+    "every_override_decoder_round_trips_against_oracles_rendering": (
+        "bd36fb3d",
+        "2026-11-25: expectation edit, N_F4 graded as float64; the cell passes on 0.33.0; closes when the baseline moves past 0.33.0",
+    ),
+    "text_and_decimal_under_a_float_or_int_override_read_as_before_mysql": (
+        "bd36fb3d",
+        "2026-11-25: expectation edit: the fixture drops the unparsable text and float4 becomes float8; the cell passes on 0.33.0; closes when the baseline moves past 0.33.0",
+    ),
+    "zero_and_one_under_a_bool_override_are_delivered_as_flags_mysql": (
+        "64312e43",
+        "2026-11-25: control: the batch read of 0 and 1 as flags is the behaviour the stream fix (#995) matches; the cdc cells are red on 0.33.0; closes when the baseline moves past 0.33.0",
+    ),
+    "parallel_keyset_midrange_error_counts_pre_failure_page_parts_postgres": (
+        "b9a515e6",
+        "2026-11-25: the fix adds ANALYZE to the fixture only; the sampler cells of #1062 are red on 0.33.0; closes when the baseline moves past 0.33.0",
+    ),
 }  # ratchet-pin: end
 #: Fix commit (short sha) → pattern of the only cells it is the fix for, with its reason. Shrink-only.
 FIX_SCOPE: dict[str, tuple[str, str]] = {
+    "5ae3d4a5": (r"(_in_parallel|_keeps_the_run)_mssql$", "2026-11-25: #1078 fixes the text of a parallel split point read by the mssql samplers (RIVET_SOURCE_QUERY_FAILED on every parallel range, per the commit body); the cursor cells of all four engines (mssql and postgres also gained datetimeoffset(6) and timestamptz(6) keys) read no split point, and the mysql, oracle and postgres parallel cells run no mssql code; read from the diff, not measured on 0.33.0; closes when the mssql stand grades the cursor cell on 0.33.0 or the baseline moves past 0.33.0"),
 }
 #: Fix commit (short sha) → (a test that sees its defect, reason) for a fix that credits no live cell. Shrink-only.
 NO_LIVE_CELL: dict[str, tuple[str, str]] = {
     "29e487eb": (
         "allow_anonymous_signs_nothing_even_with_an_ambient_identity",
         "2026-11-16: #1034 offline test through the in-process S3 signer (tests/s3_named_profile.rs: 4 of 16 red before the fix, per the PR body), no rig cell; closes when a live MinIO cell runs allow_anonymous beside static keys or the baseline moves past 0.33.0",
+    ),
+    "25b76fd9": (
+        "a_store_error_in_a_failure_detail_never_carries_a_registered_credential",
+        "2026-11-25: #1065 lib test in src/pipeline/validate_manifest.rs, no live cell; closes when a live store cell masks a credential in a failure detail or the baseline moves past 0.33.0",
+    ),
+    "696d5b20": (
+        "a_columns_override_on_the_blob_columns_is_refused_or_read_never_ignored",
+        "2026-11-25: #1044 lib test in src/source/mongo/mod.rs pins the override wiring, no live cell; closes when a live Mongo cell runs a blob-column override or the baseline moves past 0.33.0",
+    ),
+    "b61f7dc8": (
+        "a_corrupt_source_is_refused_as_corrupt",
+        "2026-11-25: #1087 lib test in src/state/copy.rs, no live cell; closes when a live cell copies a corrupt SQLite state or the baseline moves past 0.33.0",
     ),
 }
 

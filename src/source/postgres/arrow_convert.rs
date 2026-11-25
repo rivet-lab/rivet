@@ -222,10 +222,8 @@ fn unrepresentable_temporal(col: &str, kind: &str, cause: impl std::fmt::Display
          no instant to map to, or a time of `24:00:00`, which Arrow's TIME range \
          [00:00, 24:00) excludes. rivet refuses rather than writing NULL, because a NULL \
          here is indistinguishable from a genuinely absent value and every count and \
-         checksum would agree about the loss. Project the column through a `query:` \
-         that maps the sentinels to a real bound (e.g. \
-         `CASE WHEN {col} = 'infinity' THEN '9999-12-31' ELSE {col} END`), or exclude \
-         the column."
+         checksum would agree about the loss. {}",
+        crate::types::override_table::text_remedy(col)
     );
     anyhow::Error::new(crate::error::CodedError::new(
         crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
@@ -368,6 +366,21 @@ pub(super) fn pg_server_text(t: &Type) -> bool {
     unmapped(&pg_type_to_rivet(t))
 }
 
+/// Whether a `columns:` override declares `name` text over a date, time, timestamp or array wire type, which the server renders.
+fn pg_text_declared(t: &Type, name: &str, column_overrides: &ColumnOverrides) -> bool {
+    let declared = matches!(
+        column_overrides.get(name),
+        Some(RivetType::String | RivetType::Text)
+    ) && matches!(
+        pg_type_to_rivet(t),
+        RivetType::Date
+            | RivetType::Time { .. }
+            | RivetType::Timestamp { .. }
+            | RivetType::List { .. }
+    );
+    seeded!("value-refusal-text-remedy", false, declared)
+}
+
 /// Whether column `name` of wire type `t` is read through the text projection: a `numeric` keeps its wire read when a catalog hint or a `columns:` override types it.
 fn pg_text_projected(
     t: &Type,
@@ -379,7 +392,7 @@ fn pg_text_projected(
         return !column_overrides.contains_key(name)
             && !numeric_hints.is_some_and(|h| h.contains_key(name));
     }
-    pg_server_text(t)
+    pg_server_text(t) || pg_text_declared(t, name, column_overrides)
 }
 
 /// The SQL that renders `expr`, a cell of wire type `t`, as the server's own output text.
@@ -1027,12 +1040,10 @@ fn pg_array_decode_error(rows: &[Row], col_idx: usize, e: &postgres::Error) -> a
 fn array_decode_message(col: &str, e: &dyn std::fmt::Display) -> String {
     format!(
         "column '{col}': a PostgreSQL array value could not be decoded as a one-dimensional \
-         Arrow List ({e}). The usual cause is a MULTI-dimensional (nested) array value — an \
-         `integer[]` column may legally hold 2-D+ matrices, but Arrow's List is one-dimensional \
-         and has no flat mapping. Cast the column to text in the export query (e.g. `{col}::text`) \
-         to export the array literal, or flatten it to a 1-D array. In a date, time or timestamp \
-         array an element of `infinity`, `-infinity` or `24:00:00` fails the same way: map it \
-         to a real bound in the query."
+         Arrow List ({e}). The usual cause is a MULTI-dimensional (nested) array value, which \
+         Arrow's one-dimensional List cannot hold; in a date, time or timestamp array an element \
+         of `infinity`, `-infinity` or `24:00:00` fails the same way. {}",
+        crate::types::override_table::text_remedy(col)
     )
 }
 
@@ -1588,6 +1599,44 @@ mod server_text_projection_tests {
         ));
     }
 
+    /// A date, time, timestamp or array declared text is read as the server's text; nothing else moves, and an undeclared one keeps its wire read.
+    #[test]
+    fn a_temporal_or_array_declared_text_is_projected_and_nothing_else_is() {
+        let text: ColumnOverrides = [("c".to_string(), RivetType::String)].into();
+        let int: ColumnOverrides = [("c".to_string(), RivetType::Int64)].into();
+        let none = ColumnOverrides::new();
+        for t in [
+            Type::DATE,
+            Type::TIME,
+            Type::TIMESTAMP,
+            Type::TIMESTAMPTZ,
+            Type::INT4_ARRAY,
+            Type::TEXT_ARRAY,
+            Type::DATE_ARRAY,
+        ] {
+            assert!(pg_text_projected(&t, "c", &text, None), "{t} declared text");
+            assert!(!pg_text_projected(&t, "c", &none, None), "{t} undeclared");
+            assert!(!pg_text_projected(&t, "c", &int, None), "{t} declared int");
+            assert!(
+                !pg_text_projected(&t, "other", &text, None),
+                "{t} other column"
+            );
+        }
+        for t in [
+            Type::INT4,
+            Type::TEXT,
+            Type::UUID,
+            Type::BYTEA,
+            Type::JSONB,
+            Type::BOOL,
+        ] {
+            assert!(
+                !pg_text_projected(&t, "c", &text, None),
+                "{t} keeps its wire read"
+            );
+        }
+    }
+
     /// An undeclared column with no Arrow mapping is labelled server text; a hinted numeric and an overridden column are not.
     #[test]
     fn the_server_text_label_follows_the_mapping_the_column_resolved_to() {
@@ -1755,7 +1804,11 @@ mod temporal_refusal_tests {
         let panicking: Vec<&str> = product
             .lines()
             .filter(|l| l.contains(".get(") || l.contains(".get::<"))
-            .filter(|l| !l.contains("columns().get(") && !l.contains("h.get(name)"))
+            .filter(|l| {
+                !l.contains("columns().get(")
+                    && !l.contains("h.get(name)")
+                    && !l.contains("column_overrides.get(name)")
+            })
             .collect();
         assert!(
             panicking.is_empty(),
@@ -2062,17 +2115,32 @@ mod renderer_twins {
 mod array_decode_message_text {
     use super::array_decode_message;
 
-    /// The refusal names the column, the nested-array cause, the cast remedy and the temporal bounds remedy.
+    /// The refusal names the column, the nested-array cause, the temporal bounds cause and the text override remedy.
     #[test]
     fn the_refusal_text_names_cause_and_remedy() {
         let m = array_decode_message("tags", &"wire error");
         assert!(m.starts_with("column 'tags': a PostgreSQL array value could not be decoded"));
         assert!(m.contains("(wire error)"));
         assert!(m.contains("MULTI-dimensional"));
-        assert!(m.contains("`tags::text`"));
-        assert!(m.contains(
-            "In a date, time or timestamp array an element of `infinity`, `-infinity` or `24:00:00` fails the same way: map it to a real bound in the query."
-        ));
+        assert!(m.contains("`infinity`, `-infinity` or `24:00:00` fails the same way"));
+        assert!(m.contains("Declare `tags: text` under `columns:`"));
+    }
+}
+
+#[cfg(test)]
+mod unrepresentable_temporal_text {
+    use super::unrepresentable_temporal;
+
+    /// The refusal names the text override of its own column as the remedy.
+    #[test]
+    fn the_temporal_refusal_names_the_text_override_of_its_column() {
+        let m = unrepresentable_temporal("seen_at", "TIMESTAMP", "out of range").to_string();
+        assert!(
+            m.contains(
+                "Declare `seen_at: text` under `columns:` and rivet delivers the server's own text for every row"
+            ),
+            "{m}"
+        );
     }
 }
 
