@@ -13,6 +13,7 @@ ignore = [
     { id = "RUSTSEC-2026-0195", reason = "quick-xml unbounded namespace-declaration allocation; same pins as RUSTSEC-2026-0194 (review 2027-02-04)" },
     { id = "RUSTSEC-2026-0391", reason = "zstd stream context reuse leak; fresh Decoder per payload on the MySQL binlog path, fix needs zstd 0.14 which mysql_common 0.37 and parquet 59 block, #724 (review 2027-02-04)" },
     { id = "RUSTSEC-2026-0395", reason = "zstd-safe StableInBuffer on CCtx; experimental feature off, encoder only (review 2027-02-04)" },
+    { id = "RUSTSEC-2026-0595", reason = "parquet bloom filters written in the clear under modular encryption; the encryption feature is off and no writer property enables it (review 2027-02-04)" },
     { id = "RUSTSEC-2026-0396", reason = "zstd-safe Seekable reads; seekable feature off (review 2027-02-04)" },
     { id = "RUSTSEC-2026-0397", reason = "zstd-safe OutBuffer::around_pos; the decoder uses OutBuffer::around (review 2027-02-04)" },
     { id = "RUSTSEC-2026-0398", reason = "zstd-safe Seekable::decompress; seekable feature off (review 2027-02-04)" },

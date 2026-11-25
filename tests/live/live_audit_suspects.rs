@@ -1095,6 +1095,40 @@ fn pg_batch_plain_timestamp_infinity_is_refused_not_a_panic() {
     );
 }
 
+/// A `format: csv` export of a PostgreSQL temporal value chrono cannot name stops by code at the source and writes no csv part.
+#[test]
+#[ignore = "live: requires docker compose postgres"]
+fn pg_csv_export_of_a_date_chrono_cannot_name_is_refused_not_written_as_an_empty_cell() {
+    for (label, select) in [
+        ("aud_csv_dinf", "SELECT 1 AS id, 'infinity'::date AS v"),
+        ("aud_csv_dfar", "SELECT 1 AS id, '300000-01-01'::date AS v"),
+        (
+            "aud_csv_tfar",
+            "SELECT 1 AS id, '294276-12-31 23:59:59.999999'::timestamp AS v",
+        ),
+    ] {
+        let out = tempfile::tempdir().unwrap();
+        let rig = Rig::pg_batch(&unique_name(label))
+            .query(select)
+            .with_format("csv")
+            .dest_path(out.path().to_path_buf());
+        let run = rig.run();
+        assert_refused(
+            &run,
+            Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5),
+        );
+        let csvs: Vec<_> = files_under(out.path())
+            .into_iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "csv"))
+            .collect();
+        assert_eq!(
+            csvs,
+            Vec::<std::path::PathBuf>::new(),
+            "{select}: a csv part was written"
+        );
+    }
+}
+
 /// A DATETIMEOFFSET's 7th fractional digit is graded at the microsecond delivery through the ledger's `today_render`, not failed for the known ns gap.
 #[test]
 #[ignore = "live: requires docker compose mssql"]

@@ -117,7 +117,7 @@ pub(crate) fn select_exports(
 
 /// One batch export, or one baseline leg of a CDC export, planned and then admitted against the shared source connection.
 fn plan_and_admit(
-    src: &mut Option<Box<dyn Source>>,
+    src: &mut std::result::Result<Box<dyn Source>, String>,
     config: &Config,
     export: &ExportConfig,
     config_dir: &Path,
@@ -125,7 +125,7 @@ fn plan_and_admit(
     params: Option<&HashMap<String, String>>,
 ) -> Result<PlannedExport> {
     plan_batch_export(
-        src.as_deref_mut().map(|s| s as &mut dyn Source),
+        src.as_deref_mut().ok().map(|s| s as &mut dyn Source),
         config,
         export,
         config_dir,
@@ -133,10 +133,22 @@ fn plan_and_admit(
         params,
     )
     .and_then(|p| match src.as_deref_mut() {
-        Some(s) => {
+        Ok(s) => {
             admit_columns(s, config, &p.plan, export, config_dir, params, flags.strict).map(|()| p)
         }
-        None => Ok(p),
+        Err(_)
+            if p.plan.column_overrides.is_empty()
+                || seeded!("check-unreachable-override-admitted", true, false) =>
+        {
+            Ok(p)
+        }
+        Err(cause) => Err(crate::error::coded(
+            crate::error::codes::SOURCE_CONNECT_FAILED,
+            format!(
+                "export '{}' was not admitted: the source could not be reached, so its `columns:` overrides were not checked against the catalog: {cause}",
+                export.name
+            ),
+        )),
     })
 }
 
@@ -151,11 +163,11 @@ pub(crate) fn plan_run(
 ) -> Result<Vec<(String, Result<PlannedExport>)>> {
     let exports = select_exports(config, export_name, config_dir, params)?;
     let mut src = match crate::source::create_source(&config.source) {
-        Ok(src) => Some(src),
+        Ok(src) => Ok(src),
         Err(e) if config.source.columns_from_grants() => {
             return Err(super::attach_connect_hint(e, &config.source));
         }
-        Err(_) => None,
+        Err(e) => Err(format!("{e:#}")),
     };
     let mut planned = Vec::new();
     for export in &exports {
@@ -292,9 +304,10 @@ mod tests {
         let wide = || {
             col(
                 "n",
-                RivetType::Decimal {
-                    precision: 60,
-                    scale: 10,
+                RivetType::List {
+                    inner: Box::new(RivetType::List {
+                        inner: Box::new(RivetType::String),
+                    }),
                 },
             )
         };
@@ -334,9 +347,9 @@ mod tests {
         }
     }
 
-    /// A source that cannot connect stops a `columns_from: grants` plan with the connect refusal and lets any other plan go on without a catalog.
+    /// A source that cannot connect stops a `columns_from: grants` plan, refuses an export whose `columns:` it could not admit, and lets an export with no override go on.
     #[test]
-    fn an_unreachable_source_stops_a_grants_plan_and_not_a_plain_one() {
+    fn an_unreachable_source_refuses_an_unadmitted_override_and_not_a_plain_plan() {
         let dir = Path::new(".");
         let grants = one_export_config("mysql", ", columns_from: grants");
         let err = plan_run(&grants, dir, None, None, PlanFlags::default(), false)
@@ -347,6 +360,17 @@ mod tests {
         let planned = plan_run(&plain, dir, None, None, PlanFlags::default(), false).unwrap();
         assert_eq!(planned.len(), 1);
         assert_eq!(planned[0].0, "e");
+        assert!(planned[0].1.is_ok());
+        let mut over = plain.clone();
+        over.exports[0].columns = [("id".to_string(), "int64".to_string())].into();
+        let mut planned = plan_run(&over, dir, None, None, PlanFlags::default(), false).unwrap();
+        let err = planned
+            .remove(0)
+            .1
+            .err()
+            .expect("an override is not a pass");
+        crate::error::assert_coded(&err, "RIVET_SOURCE_CONNECT_FAILED", 2);
+        assert!(format!("{err:#}").contains("127.0.0.1"), "{err:#}");
     }
 
     /// Sealing refuses a destination holding `{partition}` by code and passes an expanded one.
