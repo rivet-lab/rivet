@@ -2035,15 +2035,10 @@ fn sigkill_in_commit_window_leaves_no_committed_file() {
     );
 }
 
+/// An `int[]` column is delivered as JSON array text under CSV and natively under Parquet: `check --strict` is green and the run delivers it under both.
 #[test]
 #[ignore = "live: requires docker compose postgres"]
-fn check_strict_flags_csv_unserializable_column_consistently_with_run() {
-    // Format-awareness regression: `check` resolves types for the Parquet
-    // representation, but a CSV export rejects columns CSV can't serialize
-    // (lists, …) at writer creation. Before the fix `check --strict` reported an
-    // `int[]` column safe while the CSV run failed ("CSV cannot serialize column
-    // …") — a check↔run gap. `check` must now flag it under CSV, and pass it
-    // under Parquet (proving it's format-specific).
+fn check_strict_and_run_agree_on_an_int_array_column_under_csv_and_parquet() {
     require_alive(LiveService::Postgres);
     let name = unique_name("rivet_csvarr");
     let mut c = pg_connect();
@@ -2061,39 +2056,55 @@ fn check_strict_flags_csv_unserializable_column_consistently_with_run() {
     }
     let _cleanup = DropTable(name.clone());
 
-    let out = tempfile::tempdir().unwrap();
-    let mk = |fmt: &'static str| {
+    let mk = |fmt: &'static str, out: &std::path::Path| {
         Rig::pg_batch(&name)
             .query(&format!("SELECT id, arr FROM {name}"))
             .with_format(fmt)
-            .dest_path(out.path().to_path_buf())
+            .dest_path(out.to_path_buf())
     };
-    let csv_rig = mk("csv");
-
-    let chk = csv_rig
-        .run_after(
+    let delivered_alike = |rig: &Rig, fmt: &str| {
+        let said = rig.run_after(
             &["check", "--export", &name, "--strict"],
             &["--export", &name],
-            Pairing::BothRefuse,
-        )
-        .preflight;
-    assert!(
-        !chk.status.success(),
-        "check --strict must flag an int[] column under CSV format; stderr:\n{}",
-        String::from_utf8_lossy(&chk.stderr)
+            Pairing::GreenOnly,
+        );
+        assert!(
+            said.preflight.status.success() && said.green,
+            "check --strict must pass an int[] column under {fmt}; stderr:\n{}",
+            String::from_utf8_lossy(&said.preflight.stderr)
+        );
+        assert!(
+            said.run.status.success(),
+            "the run must deliver the int[] column check --strict passed under {fmt}; stderr:\n{}",
+            String::from_utf8_lossy(&said.run.stderr)
+        );
+    };
+
+    let csv_out = tempfile::tempdir().unwrap();
+    delivered_alike(&mk("csv", csv_out.path()), "csv");
+    let part = files_under(csv_out.path())
+        .into_iter()
+        .find(|p| p.extension().is_some_and(|e| e == "csv"))
+        .expect("the csv run wrote a .csv part");
+    let mut rdr = csv::Reader::from_path(&part).unwrap();
+    let headers = rdr.headers().unwrap().clone();
+    let arr = headers.iter().position(|h| h == "arr").expect("arr header");
+    let cells: Vec<String> = rdr
+        .records()
+        .map(|r| r.unwrap().get(arr).unwrap().to_string())
+        .collect();
+    assert_eq!(
+        cells,
+        ["[1,2]"],
+        "the int[] column must be delivered as its JSON array text; {part:?}"
     );
 
-    let pq_rig = mk("parquet");
-    let chk_pq = pq_rig
-        .run_after(
-            &["check", "--export", &name, "--strict"],
-            &["--export", &name],
-            Pairing::BothRefuse,
-        )
-        .preflight;
+    let pq_out = tempfile::tempdir().unwrap();
+    delivered_alike(&mk("parquet", pq_out.path()), "parquet");
     assert!(
-        chk_pq.status.success(),
-        "check --strict must pass the same int[] column under Parquet; stderr:\n{}",
-        String::from_utf8_lossy(&chk_pq.stderr)
+        files_under(pq_out.path())
+            .iter()
+            .any(|p| p.extension().is_some_and(|e| e == "parquet")),
+        "the parquet run wrote no .parquet part"
     );
 }

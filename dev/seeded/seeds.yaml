@@ -7423,6 +7423,7 @@ seeds:
         cells:
           - a_csv_export_of_a_decimal256_column_is_delivered_like_check_admits_postgres
           - a_pending_baseline_csv_decimal256_is_accepted_by_check_postgres
+          - check_strict_and_run_agree_on_an_int_array_column_under_csv_and_parquet
           - "lib:csv_admits_wide_decimals_nanosecond_timestamps_and_flat_lists"
       mysql:
         cells:
