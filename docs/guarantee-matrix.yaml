@@ -823,7 +823,7 @@ guarantees:
     held_by:
       strict: { test: check_strict_and_run_strict_agree_on_an_undeclared_timestamp_9_and_refuse_a_declared_lossy_one, asserts: "run --strict wrote a part" }
 
-      default_policy: { test: oracle_batch_timestamp9_is_delivered_as_text_undeclared_under_every_policy, asserts: "a refused run wrote a part" }
+      default_policy: { test: a_postgres_two_dimensional_jsonb_array_keeps_the_multi_dimensional_refusal, asserts: "a refused run wrote a part" }
   - id: uuid_and_json_keep_native_types
     stated:
       - file: docs/type-mapping.md
