@@ -1334,6 +1334,22 @@ pub(crate) fn stamp_text(
     }
 }
 
+/// The zone flag of a column delivered as `iso_timestamp_nanos` text, or `None` for any other column.
+pub(crate) fn iso_nanos_zone(m: &crate::types::TypeMapping) -> Option<bool> {
+    (m.delivery == crate::types::Delivery::Text(crate::types::TextForm::IsoTimestampNanos))
+        .then(|| crate::types::is_zoned_timestamp_label(&m.source_native_type))
+}
+
+/// The cell an `iso_timestamp_nanos` text column stores: the batch export's text of the same value, every other cell untouched.
+pub(crate) fn stamp_iso_nanos(zoned: bool, v: RivetValue) -> RivetValue {
+    match v {
+        RivetValue::DateTime(d) => {
+            RivetValue::Bytes(crate::types::iso_timestamp_nanos(d, zoned).into_bytes())
+        }
+        v => v,
+    }
+}
+
 /// Whether an Oracle column of this native type, written into `dt`, needs `stamp_text` (a MySQL date column always carries its fix).
 pub(crate) fn prints_stamp_text(
     engine: crate::source::cdc::CdcEngine,

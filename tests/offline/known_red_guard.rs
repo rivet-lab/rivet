@@ -38,9 +38,13 @@ const EXCUSES: &str = "dev/release_oracle/skip_allow.py";
 // 22 -> 20 (2026-11-05): the two CDC-RUN-START cells are plain cells again (fix/cdc-run-start-marker).
 // 20 -> 16 (2026-11-05): the VP-8 cells on MSSQL, Oracle and Mongo and the MSSQL lock-timeout cell MT-F-F are plain cells again (fix/stop-class-by-code).
 // 16 -> 2 (2026-11-06): the 14 keyset key type cells are plain cells again (fix/seam-keyset-key-type).
+// 30 -> 32 (2026-11-24): the two ab-diff keyset_parallel rows join the ledger, expiring 2026-12-15 (_BASELINE_EXPIRES).
 
 /// The horizon every known-red entry and every excused skip expires at; moves only here and in both ledgers together.
 const EXPIRES: &str = "2026-11-29";
+
+/// The one date past the horizon the ledger may hold, as `_BASELINE_EXPIRES`: the ab-diff rows of the keyset_parallel part count, which close when 0.34.0 is the previous release.
+const BASELINE_EXPIRES: &str = "2026-12-15";
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -183,9 +187,15 @@ fn the_known_red_horizon_moves_only_with_this_guard() {
             })
             .filter(|s| *s > EXPIRES)
             .collect();
+        let allowed: Vec<&str> = if path == LEDGER
+            && text.contains(&format!("\n_BASELINE_EXPIRES = \"{BASELINE_EXPIRES}\"\n"))
+        {
+            vec![BASELINE_EXPIRES]
+        } else {
+            Vec::new()
+        };
         assert_eq!(
-            later,
-            Vec::<&str>::new(),
+            later, allowed,
             "{path}: dates past the horizon {EXPIRES}. An entry that must outlive the horizon moves the horizon here, in the open."
         );
     }
@@ -222,7 +232,7 @@ fn every_open_entry_names_a_live_cell_that_exists() {
     let orphan_rows: Vec<&String> = rows
         .iter()
         .filter(|m| {
-            let family = m.split('[').next().unwrap_or("");
+            let family = m.split(['[', ':']).next().unwrap_or("");
             family.is_empty() || !gate.contains(&format!("\"{family}["))
         })
         .collect();

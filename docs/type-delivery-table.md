@@ -11,7 +11,7 @@ One row per delivering ledger row: the source native type, the Arrow type batch 
 | postgres | 77 | 26 | 4 | 0 |
 | mysql | 45 | 37 | 0 | 0 |
 | mssql | 21 | 34 | 1 | 0 |
-| oracle | 14 | 43 | 0 | 0 |
+| oracle | 17 | 40 | 0 | 0 |
 | mongo | 0 | 20 | 0 | 0 |
 
 No cell is empty.
@@ -174,13 +174,16 @@ No cell is empty.
 | oracle | `BINARY_DOUBLE` | `Float64` | `exact` | `Nullable(Float64)` | `FLOAT64` | `FLOAT` |
 | oracle | `DATE` | `Timestamp(µs)` | `exact` | `Nullable(DateTime64(6, 'UTC'))` | `DATETIME` | `TIMESTAMP_NTZ` |
 | oracle | `TIMESTAMP(6)` | `Timestamp(µs)` | `exact` | `Nullable(DateTime64(6, 'UTC'))` | `DATETIME` | `TIMESTAMP_NTZ` |
+| oracle | `TIMESTAMP(9)` | `iso_timestamp_nanos` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | oracle | `TIMESTAMP(6) WITH TIME ZONE` | `Timestamp(µs, "UTC")` | `exact` | `Nullable(DateTime64(6, 'UTC'))` | `TIMESTAMP` | `TIMESTAMP_TZ` |
 | oracle | `TIMESTAMP(6) WITH LOCAL TIME ZONE` | `Timestamp(µs, "UTC")` | `exact` | `Nullable(DateTime64(6, 'UTC'))` | `TIMESTAMP` | `TIMESTAMP_TZ` |
 | oracle | `VARCHAR2(100 CHAR)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | oracle | `NVARCHAR2(50)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | oracle | `CHAR(5 CHAR)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | oracle | `RAW(16)` | `Binary` | `exact` | `Nullable(String)` | `BYTES` | `BINARY` |
-| oracle | 43 matrix-only rows: `TIMESTAMP(9)`, `FLOAT`, `FLOAT(10)`, `NUMBER(38,0)`, `NUMBER(10,-3)`, `NUMBER(10,2)`, `NUMBER(5,7)`, `NUMBER(18,0)`, `NUMBER(19,0)`, `INTEGER`, `SMALLINT`, `DECIMAL(20,5)`, `NUMBER(38,38)`, `CHAR(10)`, `CHAR(2000)`, `VARCHAR2(4000)`, `VARCHAR2(10 CHAR)`, `NCHAR(10)`, `NVARCHAR2(2000)`, `CLOB`, `NCLOB`, `BLOB`, `RAW(2000)`, `LONG`, `LONG RAW`, `TIMESTAMP(0)`, `TIMESTAMP(3)`, `TIMESTAMP(0) WITH TIME ZONE`, `TIMESTAMP(9) WITH TIME ZONE`, `TIMESTAMP(0) WITH LOCAL TIME ZONE`, `TIMESTAMP(9) WITH LOCAL TIME ZONE`, `INTERVAL YEAR(9) TO MONTH`, `INTERVAL YEAR(2) TO MONTH`, `INTERVAL DAY(9) TO SECOND(9)`, `INTERVAL DAY(2) TO SECOND(0)`, `ROWID`, `UROWID(4000)`, `JSON`, `XMLTYPE`, `BOOLEAN`, `VECTOR(3, FLOAT32)`, `VECTOR(2, FLOAT64)`, `VECTOR(2, INT8)` | n/a: no `delivery`, graded by the edge matrix only (a refused or text-only column) | n/a | n/a | n/a | n/a |
+| oracle | `TIMESTAMP(9) WITH TIME ZONE` | `iso_timestamp_nanos` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | `TIMESTAMP(9) WITH LOCAL TIME ZONE` | `iso_timestamp_nanos` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | 40 matrix-only rows: `FLOAT`, `FLOAT(10)`, `NUMBER(38,0)`, `NUMBER(10,-3)`, `NUMBER(10,2)`, `NUMBER(5,7)`, `NUMBER(18,0)`, `NUMBER(19,0)`, `INTEGER`, `SMALLINT`, `DECIMAL(20,5)`, `NUMBER(38,38)`, `CHAR(10)`, `CHAR(2000)`, `VARCHAR2(4000)`, `VARCHAR2(10 CHAR)`, `NCHAR(10)`, `NVARCHAR2(2000)`, `CLOB`, `NCLOB`, `BLOB`, `RAW(2000)`, `LONG`, `LONG RAW`, `TIMESTAMP(0)`, `TIMESTAMP(3)`, `TIMESTAMP(0) WITH TIME ZONE`, `TIMESTAMP(0) WITH LOCAL TIME ZONE`, `INTERVAL YEAR(9) TO MONTH`, `INTERVAL YEAR(2) TO MONTH`, `INTERVAL DAY(9) TO SECOND(9)`, `INTERVAL DAY(2) TO SECOND(0)`, `ROWID`, `UROWID(4000)`, `JSON`, `XMLTYPE`, `BOOLEAN`, `VECTOR(3, FLOAT32)`, `VECTOR(2, FLOAT64)`, `VECTOR(2, INT8)` | n/a: no `delivery`, graded by the edge matrix only (a refused or text-only column) | n/a | n/a | n/a | n/a |
 | mongo | `double` | 2026-11-22: a Mongo collection exports as two columns, `_id` Utf8 and `document` Utf8 with the arrow.json extension (docs/type-mapping.md, JSON-blob model); a BSON type is a value inside `document`, never a column, so it has no per-column delivery, CDC verdict or warehouse leg; the edge matrix grades its value form | n/a | n/a | n/a | n/a |
 | mongo | `int` | 2026-11-22: a Mongo collection exports as two columns, `_id` Utf8 and `document` Utf8 with the arrow.json extension (docs/type-mapping.md, JSON-blob model); a BSON type is a value inside `document`, never a column, so it has no per-column delivery, CDC verdict or warehouse leg; the edge matrix grades its value form | n/a | n/a | n/a | n/a |
 | mongo | `long` | 2026-11-22: a Mongo collection exports as two columns, `_id` Utf8 and `document` Utf8 with the arrow.json extension (docs/type-mapping.md, JSON-blob model); a BSON type is a value inside `document`, never a column, so it has no per-column delivery, CDC verdict or warehouse leg; the edge matrix grades its value form | n/a | n/a | n/a | n/a |

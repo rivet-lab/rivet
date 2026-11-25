@@ -182,6 +182,11 @@ pub fn iso_timestamp_nanos(dt: NaiveDateTime, zoned: bool) -> String {
     )
 }
 
+/// True when a timestamp's source native label (`timestamp_tz(9)`, `timestamp_ltz(7)`) names a zoned type, whose nanosecond text carries the `Z` flag.
+pub fn is_zoned_timestamp_label(native: &str) -> bool {
+    native.starts_with("timestamp_tz") || native.starts_with("timestamp_ltz")
+}
+
 /// `[-]hh:mm:ss.ffffff` with as many hour digits as needed (at least two).
 pub fn time_beyond_day(micros: i64) -> String {
     let sign = if micros < 0 { "-" } else { "" };

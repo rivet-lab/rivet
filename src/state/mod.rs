@@ -47,7 +47,10 @@ pub use run_aggregate::{RunAggregate, RunAggregateEntry};
 pub use run_shape::RunShape;
 pub use run_status_store::FinishOutcome;
 #[allow(unused_imports)]
-pub use schema::{SchemaChange, SchemaColumn, arrow_schema_to_columns, schema_fingerprint};
+pub use schema::{
+    PendingBaselines, SchemaChange, SchemaColumn, arrow_schema_to_columns, schema_change_between,
+    schema_fingerprint,
+};
 #[allow(unused_imports)]
 pub use shape::ShapeWarning;
 
