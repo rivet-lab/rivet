@@ -81,7 +81,7 @@ one either.
 | Source value | What rivet writes | Signal |
 |--------------|-------------------|--------|
 | MySQL zero, partial or invalid date (`0000-00-00`, `2026-00-15`, `2024-02-31` under `ALLOW_INVALID_DATES`) in `DATE`, `DATETIME`, `TIMESTAMP` | NULL, exit 0, batch and CDC | a WARN per column with the count; the batch summary has a `fidelity` row; `nulled_cells` in the manifest; `validate` warns |
-| A date or instant the target type cannot hold (PostgreSQL `infinity` or an out-of-range date, a `timestamp_ns` value outside 1677..2262) | nothing: the run is refused | `RIVET_SOURCE_VALUE_UNREPRESENTABLE`, exit 5 |
+| A date or instant the target type cannot hold (PostgreSQL `infinity` or an out-of-range date, a `timestamp_ns` value outside 1677..2262) | nothing: the run is refused; declaring the column `text` under `columns:` delivers the server's own text for every row (PostgreSQL) | `RIVET_SOURCE_VALUE_UNREPRESENTABLE`, exit 5 |
 | An Oracle `NUMBER` or `FLOAT` of infinity (or an exact `1E125`, which the client prints with the same bytes), an Oracle `INTERVAL DAY TO SECOND` with a sub-microsecond fraction | nothing: the run is refused; `TO_CHAR(col) AS col` in the query exports the exact text | `RIVET_SOURCE_VALUE_UNREPRESENTABLE`, exit 5 |
 
 The columns are labelled `rivet.fidelity: compatible`, never `exact`. The run records
@@ -361,9 +361,9 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `enum` | `enum` | `Utf8` + logical=enum | label text | custom PG enum | type_roundtrip |
 | `text[]` | `list<string>` | `List<Utf8>` | — | 1-D arrays | type_roundtrip |
 | `integer[]` | `list<int32>` | `List<Int32>` | — | 1-D arrays | type_roundtrip |
-| `date[]` | `list<date>` | `List<Date32>` | — | 1-D arrays; an element of `infinity` or `-infinity` is refused, map it to a bound in the query | type capability ledger |
-| `timestamp[]` / `timestamptz[]` | `list<timestamp>` | `List<Timestamp(µs)>` / `List<Timestamp(µs, UTC)>` | — | 1-D arrays; the same `infinity` refusal | type capability ledger |
-| `time[]` | `list<time>` | `List<Time64(µs)>` | — | 1-D arrays; an element of `24:00:00` is refused | type capability ledger |
+| `date[]` | `list<date>` | `List<Date32>` | — | 1-D arrays; an element of `infinity` or `-infinity` is refused, declare the column `text` under `columns:` for the server's own text, or map it to a bound in the query | type capability ledger |
+| `timestamp[]` / `timestamptz[]` | `list<timestamp>` | `List<Timestamp(µs)>` / `List<Timestamp(µs, UTC)>` | — | 1-D arrays; the same `infinity` refusal and remedy | type capability ledger |
+| `time[]` | `list<time>` | `List<Time64(µs)>` | — | 1-D arrays; an element of `24:00:00` is refused, declare the column `text` under `columns:` for the server's own text | type capability ledger |
 | `uuid[]` | `list<uuid>` | `List<FixedSizeBinary(16)>` with the `arrow.uuid` item | — | read as native UUID lists downstream | type capability ledger |
 | `bytea[]` | `list<binary>` | `List<Binary>` | — | 1-D arrays | type capability ledger |
 | `json[]` / `jsonb[]` | `list<json>` | `List<Utf8>` | — | 1-D arrays; each element is its JSON text | type capability ledger |
@@ -491,7 +491,8 @@ CDC (change streams) emits the same two-column shape prefixed with the
 ## Known gaps (tracked)
 
 1. **Multi-dimensional arrays**: not in the type matrix; they fail at the read
-   unless a `columns:` override maps them. A PostgreSQL type with no Arrow
+   (`RIVET_SOURCE_VALUE_UNREPRESENTABLE`, exit 5) unless a `columns:` override maps
+   them; declaring the column `text` delivers the server's own array text. A PostgreSQL type with no Arrow
    mapping (ranges, `inet`, geometric types, PostGIS and the rest of the
    PostgreSQL row above) is delivered as the server's text.
 2. **Nullability**: every exported column is `OPTIONAL`; a source `NOT NULL`

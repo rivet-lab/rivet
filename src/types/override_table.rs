@@ -157,7 +157,8 @@ fn postgres_reads(src: Kind, tgt: Kind) -> bool {
         Dec => &[Dec, Text, Json],
         Text | Json | Enum | Interval => TEXTS,
         Uuid => &[Uuid, Text, Json],
-        Naive | Utc => STAMPS,
+        Naive | Utc => &[Naive, Utc, Text],
+        Date | Time | List => &[Text],
         Unsupported => TEXTS,
         _ => &[],
     };
@@ -251,6 +252,14 @@ pub(crate) fn resolve_column(
     }
 }
 
+/// The remedy a value refusal names: the column declared text delivers the server's own text for every row.
+pub(crate) fn text_remedy(column: &str) -> String {
+    format!(
+        "Declare `{column}: text` under `columns:` and rivet delivers the server's own text for \
+         every row, or project the column in the export's `query:`."
+    )
+}
+
 /// The refusal text for a pair the table does not read: names the column, both types and the two remedies.
 pub fn refusal_message(
     engine: Engine,
@@ -302,6 +311,66 @@ mod tests {
 
     fn one(column: &str, t: RivetType) -> ColumnOverrides {
         ColumnOverrides::from([(column.to_string(), t)])
+    }
+
+    #[test]
+    fn postgres_reads_a_date_time_timestamp_or_array_as_text_and_nothing_wider() {
+        let ts = |tz| RivetType::Timestamp {
+            unit: TimeUnit::Microsecond,
+            timezone: tz,
+        };
+        let time = RivetType::Time {
+            unit: TimeUnit::Microsecond,
+        };
+        let list = RivetType::List {
+            inner: Box::new(RivetType::Int32),
+        };
+        for (native, src) in [
+            ("date", RivetType::Date),
+            ("time", time.clone()),
+            ("timestamp", ts(None)),
+            ("timestamptz", ts(Some("UTC".into()))),
+            ("_int4", list.clone()),
+        ] {
+            assert!(
+                override_is_read(Engine::Postgres, native, &src, &RivetType::String),
+                "{native}"
+            );
+            assert!(
+                !override_is_read(Engine::Postgres, native, &src, &RivetType::Json),
+                "{native} json"
+            );
+            assert!(
+                !override_is_read(Engine::Postgres, native, &src, &RivetType::Int64),
+                "{native} int"
+            );
+        }
+        assert!(!override_is_read(
+            Engine::Postgres,
+            "date",
+            &RivetType::Date,
+            &ts(None)
+        ));
+        assert!(!override_is_read(
+            Engine::Postgres,
+            "time",
+            &time,
+            &RivetType::Date
+        ));
+        assert!(!override_is_read(
+            Engine::Mssql,
+            "date",
+            &RivetType::Date,
+            &RivetType::String
+        ));
+    }
+
+    #[test]
+    fn the_text_remedy_names_the_column_and_the_override() {
+        assert_eq!(
+            text_remedy("seen_at"),
+            "Declare `seen_at: text` under `columns:` and rivet delivers the server's own text for every row, or project the column in the export's `query:`."
+        );
     }
 
     #[test]
