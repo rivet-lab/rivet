@@ -341,6 +341,8 @@ mod live_temp_spill;
 mod live_three_cycles;
 #[path = "live/live_type_policy.rs"]
 mod live_type_policy;
+#[path = "live/live_value_range_text_remedy.rs"]
+mod live_value_range_text_remedy;
 #[path = "live/live_wave_apply.rs"]
 mod live_wave_apply;
 #[path = "live/live_zero_date_fidelity.rs"]

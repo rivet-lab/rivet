@@ -334,4 +334,70 @@ impl Warehouse {
         let distinct: std::collections::BTreeSet<i64> = pairs.iter().map(|(k, _)| *k).collect();
         (pairs.len() as i64, distinct.len() as i64)
     }
+    /// `(key, value)` of every row of `table` with `value` rendered as the warehouse's own text, sorted by key, and `value`'s declared type, both through the second client.
+    pub fn texts(
+        &self,
+        table: &str,
+        key: &str,
+        value: &str,
+    ) -> (Vec<(i64, Option<String>)>, String) {
+        let text = |v: &serde_json::Value| match v {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(s) => Some(s.clone()),
+            other => Some(other.to_string()),
+        };
+        let (mut rows, ty): (Vec<(i64, Option<String>)>, String) = match self.kind {
+            WarehouseKind::DuckDb => panic!("the local destination has no declared warehouse type"),
+            WarehouseKind::ClickHouse => {
+                let db = &self.ch.as_ref().expect("ClickHouse").0;
+                let rows = clickhouse_run_sql_json(&format!(
+                    "SELECT {key} AS k, {value} AS v FROM {db}.{table}"
+                ))
+                .iter()
+                .map(|r| (to_i64(&r["k"]), text(&r["v"])))
+                .collect();
+                let ty = clickhouse_run_sql_json(&format!(
+                    "SELECT type AS t FROM system.columns WHERE database = '{db}' AND table = '{table}' AND name = '{value}'"
+                ));
+                (rows, ty[0]["t"].as_str().expect("a type").to_string())
+            }
+            WarehouseKind::BigQuery => {
+                let bq = self.bq.as_ref().expect("BigQuery");
+                let rows = bq
+                    .read_bq_rows(&format!(
+                        "SELECT {key} AS k, {value} AS v FROM `{}.{}.{table}`",
+                        bq.project, bq.dataset
+                    ))
+                    .iter()
+                    .map(|r| (to_i64(&r["k"]), text(&r["v"])))
+                    .collect();
+                let ty = bq.read_bq_rows(&format!(
+                    "SELECT data_type AS t FROM `{}.{}`.INFORMATION_SCHEMA.COLUMNS WHERE table_name = '{table}' AND column_name = '{value}'",
+                    bq.project, bq.dataset
+                ));
+                (rows, ty[0]["t"].as_str().expect("a type").to_string())
+            }
+            WarehouseKind::Snowflake => {
+                let sf = self.sf.as_ref().expect("Snowflake");
+                let rows = sf
+                    .read(&format!(
+                        "SELECT {key} AS k, {value} AS v FROM {}",
+                        sf.fq(table)
+                    ))
+                    .iter()
+                    .map(|r| (to_i64(&r[0]), text(&r[1])))
+                    .collect();
+                let ty = sf.read(&format!(
+                    "SELECT data_type FROM {}.INFORMATION_SCHEMA.COLUMNS WHERE table_schema = '{}' AND table_name = '{}' AND column_name = '{}'",
+                    sf.database(),
+                    sf.schema().to_uppercase(),
+                    table.to_uppercase(),
+                    value.to_uppercase()
+                ));
+                (rows, text(&ty[0][0]).expect("a type"))
+            }
+        };
+        rows.sort_unstable();
+        (rows, ty)
+    }
 }

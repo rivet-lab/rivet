@@ -99,7 +99,7 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_DEST_CONTAINER_NOT_FOUND` | environment | 1 | create the bucket or container, or correct `destination.bucket` |
 | `RIVET_DEST_RELATIVE_PATH_MOVED` | refusal | 5 | move the export's files from the directory under the working directory to the one beside the config, or make `destination.path` absolute |
 | `RIVET_DEST_ALREADY_COMPLETE` | refusal | 5 | pass `--force` with `--resume` to continue an interrupted run or, with none, run as a plain run does (new parts beside the complete export); or use another destination prefix |
-| `RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE` | refusal | 5 | the warehouse type cannot hold this value; declare a wider type (e.g. String) for the column, or fix the source value |
+| `RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE` | refusal | 5 | the warehouse type cannot hold this value; declare the column `text` under `columns:` in the export and run it again (the warehouse then holds the source's text), or fix the source value |
 | `RIVET_LOAD_COUNT_MISMATCH` | integrity | 3 | compare the warehouse table with the run's manifest before re-running; the source is kept |
 | `RIVET_LOAD_LEASE_LOST_DURING_WRITE` | integrity | 3 | compare the warehouse table with the source before relying on it: another load or compact may have written it at the same time; the next `rivet load` loads the same runs again |
 | `RIVET_LOAD_ADOPTION_COLUMN_MISMATCH` | refusal | 5 | add the export's new columns to the table (`ALTER TABLE … ADD COLUMN`) and re-run; do not rename it aside |
