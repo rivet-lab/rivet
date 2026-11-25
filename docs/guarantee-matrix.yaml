@@ -819,11 +819,11 @@ guarantees:
   - id: a_lossy_or_unmapped_type_fails_loud
     stated:
       - file: docs/type-mapping.md
-        sentence: "**Rivet fails loud, not silent** — a lossy or unmapped type is named by `rivet check` and aborts the run, never quietly truncated."
+        sentence: "**Rivet fails loud, not silent** — an unmapped type is named by `rivet check` and aborts the run, and a lossy one is named by `rivet check` and aborts the run under `--strict`, never quietly truncated."
     held_by:
       strict: { test: check_strict_and_run_strict_agree_on_an_undeclared_timestamp_9_and_refuse_a_declared_lossy_one, asserts: "run --strict wrote a part" }
 
-      default_policy: { test: a_postgres_two_dimensional_jsonb_array_keeps_the_multi_dimensional_refusal, asserts: "a refused run wrote a part" }
+      default_policy: { test: a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mysql, asserts: "1 column(s) need a `columns:` declaration" }
   - id: uuid_and_json_keep_native_types
     stated:
       - file: docs/type-mapping.md

@@ -60,7 +60,7 @@ trigger that makes the session linguistic).
 | `chunked` keyset (`chunk_by_key`) | single-column unique NOT NULL key: integer `NUMBER` of any precision, bare `NUMBER`, `VARCHAR2`/`CHAR`, `DATE`, `TIMESTAMP(0..6)`; also `parallel > 1`; or the primary key's columns in order (`chunk_by_key: [a, b]`, sequential) |
 | `time_window`, `partition_by` | ANSI `TIMESTAMP '…'` / `DATE '…'` bounds |
 
-A `TIMESTAMP(7..9)` column is delivered as nanosecond text unless a `columns:` declaration says otherwise (see Types); it is not a keyset key (rivet reads it at microseconds, so a page
+A `TIMESTAMP(7..9)` column is delivered as nanosecond text unless a `columns:` declaration says otherwise (see Types); it is not a keyset key, whatever type is delivered (the keyset cursor cannot advance past it exactly, so a page
 could not advance), and it is refused as an incremental cursor
 (`RIVET_SOURCE_CURSOR_FINER_THAN_MICROSECOND`): the saved cursor would fall below
 its own row and every run would export that row again. Read it as
