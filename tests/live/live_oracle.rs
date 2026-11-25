@@ -2065,7 +2065,7 @@ fn check_on_an_init_scaffold_finds_the_cursor_index() {
     assert_eq!(d["diagnostic"]["uses_index"], true, "{d}");
 }
 
-/// The type report vouches for an undeclared TIMESTAMP(9) column as nanosecond text, TIMESTAMP(6) stays native and exact, and a declared `timestamp` still passes.
+/// The type report names an undeclared TIMESTAMP(9) column as `Utf8` `logical_string` (nanosecond text), TIMESTAMP(6) stays native and exact, and a declared `timestamp` still passes.
 #[test]
 #[ignore = "live: requires docker compose oracle"]
 fn the_type_report_delivers_an_undeclared_timestamp_9_column_as_nanosecond_text() {
@@ -2100,11 +2100,9 @@ fn the_type_report_delivers_an_undeclared_timestamp_9_column_as_nanosecond_text(
         );
         let d: serde_json::Value = serde_json::from_slice(&report.preflight.stdout).unwrap();
         assert_eq!(column(&d, "T6")["fidelity"], "exact");
-        assert_eq!(
-            column(&d, "T9").to_string().contains("iso_timestamp_nanos"),
-            t9_text,
-            "{d}"
-        );
+        let t9 = column(&d, "T9");
+        assert_eq!(t9["arrow_type"] == "Utf8", t9_text, "{d}");
+        assert_eq!(t9["fidelity"] == "logical_string", t9_text, "{d}");
     }
 }
 
