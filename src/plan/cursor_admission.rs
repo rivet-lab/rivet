@@ -496,4 +496,60 @@ mod tests {
         let got = admit_exports(&config, &config.exports, Path::new("/nonexistent-dir"));
         assert!(matches!(got[0].verdict, Ok(Admission::Unverified(_))));
     }
+
+    fn text_declared(config: &Config, detected: RivetType, declared: RivetType) -> Result<()> {
+        let mut probe = ProbeSource::describing(detected, Some(false));
+        let overrides = crate::types::ColumnOverrides::from([("k".to_string(), declared)]);
+        refuse_text_declared_temporal(
+            &mut probe,
+            config,
+            &config.exports[0],
+            "SELECT k FROM t",
+            "k",
+            &overrides,
+        )
+    }
+
+    /// A cursor column declared text over a PostgreSQL date is refused by code with the export, the column, the native type and the remedy.
+    #[test]
+    fn a_cursor_declared_text_over_a_postgres_date_is_refused_with_the_remedy() {
+        let err = text_declared(&config_of("postgres"), RivetType::Date, RivetType::String)
+            .expect_err("a server-rendered date declared text");
+        assert_eq!(
+            crate::error::code_of(&err).map(|c| c.id),
+            Some(crate::error::codes::PLAN_CURSOR_TYPE_UNSUPPORTED.id)
+        );
+        let text = format!("{err:#}");
+        assert!(
+            text.contains(
+                "export 'orders': cursor_column 'k' is declared text over a `native` column"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("Remove `k` from `columns:`"), "{text}");
+    }
+
+    /// The inputs next to the refused declaration are admitted: another engine, a column that is not server-rendered text, a declaration that is not text and a column nothing declares.
+    #[test]
+    fn the_inputs_next_to_a_refused_cursor_declaration_are_admitted() {
+        let pg = config_of("postgres");
+        let mut mysql = config_of("postgres");
+        mysql.source.source_type = SourceType::Mysql;
+        text_declared(&mysql, RivetType::Date, RivetType::String)
+            .expect("a source that is not PostgreSQL");
+        text_declared(&pg, RivetType::Int64, RivetType::String).expect("an integer cursor");
+        text_declared(&pg, RivetType::Date, RivetType::Int64)
+            .expect("a declaration that is not text");
+        let mut probe = ProbeSource::describing(RivetType::Date, Some(false));
+        let overrides = crate::types::ColumnOverrides::from([("k".to_string(), RivetType::String)]);
+        refuse_text_declared_temporal(
+            &mut probe,
+            &pg,
+            &pg.exports[0],
+            "SELECT k FROM t",
+            "other",
+            &overrides,
+        )
+        .expect("a column nothing declares");
+    }
 }

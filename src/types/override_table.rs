@@ -783,4 +783,33 @@ mod tests {
             ));
         }
     }
+
+    /// The first detected column declared text over a PostgreSQL date, time, timestamp or array is named, and nothing else is.
+    #[test]
+    fn server_text_declared_names_the_first_declared_projection_only() {
+        use crate::types::{SourceColumn, TypeMapping};
+        let col = |name: &str, native: &str, t: RivetType| {
+            TypeMapping::from_source(&SourceColumn::simple(name, native, true), t)
+        };
+        let detected = vec![
+            col("id", "int4", RivetType::Int32),
+            col("d", "date", RivetType::Date),
+            col("t", "timestamp", RivetType::Date),
+        ];
+        let text = |names: &[&str]| -> ColumnOverrides {
+            names
+                .iter()
+                .map(|n| (n.to_string(), RivetType::String))
+                .collect()
+        };
+        let named = |engine, declared: &ColumnOverrides| {
+            server_text_declared(engine, &detected, declared).map(|m| m.column_name.as_str())
+        };
+        assert_eq!(named(Engine::Postgres, &text(&["id", "t", "d"])), Some("d"));
+        assert_eq!(named(Engine::Postgres, &text(&["t"])), Some("t"));
+        assert_eq!(named(Engine::Postgres, &text(&["id"])), None);
+        assert_eq!(named(Engine::Postgres, &text(&["absent"])), None);
+        assert_eq!(named(Engine::Postgres, &ColumnOverrides::new()), None);
+        assert_eq!(named(Engine::Mysql, &text(&["d"])), None);
+    }
 }
