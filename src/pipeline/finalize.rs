@@ -254,10 +254,9 @@ fn write_run_manifest(
         .schema_fingerprint
         .clone()
         .or_else(|| {
-            state
-                .get_stored_schema(&summary.export_name)
-                .ok()
-                .flatten()
+            summary
+                .pending_baselines
+                .in_force(state, &summary.export_name)
                 .map(|cols| crate::state::schema_fingerprint(&cols))
         })
         .unwrap_or_else(|| crate::manifest::SCHEMA_FINGERPRINT_UNAVAILABLE.to_string());
