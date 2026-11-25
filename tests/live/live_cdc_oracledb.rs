@@ -1695,6 +1695,7 @@ fn oracle_cdc_timestamp9_is_delivered_as_batch_delivers_it() {
     for declared in [
         "columns: {T9: timestamp_ns, Z9: timestamp_tz_ns, L9: timestamp_tz_ns}",
         "columns: {T9: text, Z9: text, L9: text}",
+        "",
     ] {
         let legs = ts9_legs(declared, &TS9_SEED, &TS9_CHANGES);
         assert_stream_is_batch(
@@ -1713,16 +1714,47 @@ fn oracle_cdc_timestamp9_is_delivered_as_batch_delivers_it() {
     }
 }
 
-/// An undeclared TIMESTAMP(9) column gets one verdict from the batch export, the CDC snapshot and the change stream.
+/// An undeclared TIMESTAMP(9) column is delivered as nanosecond text by the batch export, the CDC snapshot and the change stream alike, in years outside 1677..2262 too.
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
-fn oracle_timestamp9_undeclared_is_one_verdict_on_batch_and_cdc() {
+fn oracle_timestamp9_undeclared_is_nanosecond_text_on_batch_and_cdc() {
     let _serial = cross_process_serial("oracle_cdc");
-    let legs = ts9_legs("", &TS9_SEED, &TS9_CHANGES);
-    let want = Err("refused[RIVET_TYPE_UNSAFE_MAPPING exit 1]".to_string());
-    assert_eq!(legs.batch, want);
-    assert_eq!(legs.snapshot, want);
-    assert_eq!(legs.stream, want);
+    let mut seed = TS9_SEED.to_vec();
+    seed.push("5, TIMESTAMP '1500-03-04 05:06:07.123456789', TIMESTAMP '1500-03-04 05:06:07.123456789 +00:00', TIMESTAMP '1500-03-04 05:06:07.123456789 +00:00'");
+    let mut changes = TS9_CHANGES.to_vec();
+    changes.push("INSERT INTO {t} VALUES (13, TIMESTAMP '9999-06-07 08:09:10.999999999', TIMESTAMP '9999-06-07 08:09:10.999999999 +00:00', TIMESTAMP '9999-06-07 08:09:10.999999999 +00:00')");
+    let legs = ts9_legs("", &seed, &changes);
+    assert_stream_is_batch(
+        &legs,
+        "undeclared",
+        1..=5,
+        &[
+            ("insert", 10),
+            ("insert", 11),
+            ("insert", 12),
+            ("insert", 13),
+            ("update", 1),
+            ("update", 3),
+            ("delete", 2),
+        ],
+    );
+    let batch = stamp_cells(&legs.batch, "batch");
+    let one = batch.get(":1").expect("row 1");
+    assert!(
+        one.contains("2024-02-29T13:14:15.123456789")
+            && one.contains("2024-02-29T08:00:00.123456789Z"),
+        "{one}"
+    );
+    let five = batch.get(":5").expect("row 5");
+    assert!(five.contains("1500-03-04T05:06:07.123456789"), "{five}");
+    let thirteen = stamp_cells(&legs.stream, "stream");
+    assert!(
+        thirteen
+            .get("insert:13")
+            .expect("insert 13")
+            .contains("9999-06-07T08:09:10.999999999"),
+        "{thirteen:?}"
+    );
 }
 
 /// A TIMESTAMP(9) value past the nanosecond range under `timestamp_ns` is refused by one code on batch and CDC.

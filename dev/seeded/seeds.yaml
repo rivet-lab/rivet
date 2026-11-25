@@ -5795,17 +5795,18 @@ seeds:
       mongo:
         na: "a document source has no declared column wire type and takes no columns override"
   - name: oracle-timestamp-ns-undeclared-truncated
-    class: an undeclared Oracle TIMESTAMP(7..9) column is delivered at microseconds with a warning and exit 0, so a second client reads a value the source does not hold
-    history: "2026-11-05 cluster C5: the sentinel rivet_sent_ts9 failed with SUCCEEDED WITH A CHANGED VALUE; the mapping now carries a refusal that every consumer routes through TypePolicy::validate"
+    class: an undeclared Oracle TIMESTAMP(7..9) column is delivered at microseconds with a warning and exit 0 instead of as nanosecond text, so a second client reads a value the source does not hold
+    history: "2026-11-05 cluster C5: the sentinel rivet_sent_ts9 failed with SUCCEEDED WITH A CHANGED VALUE; 2026-11-25 owner rule text-if-lossless-text-exists: the refusal became nanosecond text (IsoTimestampNanos) on batch and CDC; the seed restores the microsecond read with a warning"
     scope: source
     engines:
       oracle:
         switch: oracle-timestamp-ns-undeclared-truncated
         cells:
-          - an_undeclared_nanosecond_timestamp_is_refused_and_the_declared_ns_type_delivers_every_digit
-          - oracle_batch_timestamp9_is_refused_until_declared_under_every_policy
-          - oracle_cdc_timestamp9_is_refused_until_declared_and_a_declared_timestamp_delivers_the_row
-          - "lib:a_sub_microsecond_timestamp_is_refused_and_a_bare_number_warns_by_name"
+          - an_undeclared_nanosecond_timestamp_is_delivered_as_text_and_the_declared_ns_type_delivers_every_digit
+          - oracle_batch_timestamp9_is_delivered_as_text_undeclared_under_every_policy
+          - oracle_cdc_timestamp9_is_delivered_as_text_undeclared_and_a_declared_timestamp_delivers_the_row
+          - oracle_timestamp9_undeclared_is_nanosecond_text_on_batch_and_cdc
+          - "lib:a_sub_microsecond_timestamp_is_text_and_a_bare_number_warns_by_name"
       postgres:
         na: "PostgreSQL timestamp is microsecond-exact, so no column maps with a refusal and there is no truncation to seed"
       mysql:
@@ -7386,7 +7387,7 @@ seeds:
     switch: narrowing-override-reported-exact
     engines:
       oracle:
-        cells: ["lib:a_time_override_narrowing_a_result_column_is_lossy_on_batch_and_stream", "lib:the_stream_resolver_reports_a_narrowing_override_lossy_as_check_does", an_oracle_batch_time_override_is_graded_by_the_result_column_it_lands_on, an_oracle_cdc_time_override_is_graded_as_the_batch_override, oracle_batch_timestamp9_is_refused_until_declared_under_every_policy]
+        cells: ["lib:a_time_override_narrowing_a_result_column_is_lossy_on_batch_and_stream", "lib:the_stream_resolver_reports_a_narrowing_override_lossy_as_check_does", an_oracle_batch_time_override_is_graded_by_the_result_column_it_lands_on, an_oracle_cdc_time_override_is_graded_as_the_batch_override, oracle_batch_timestamp9_is_delivered_as_text_undeclared_under_every_policy]
       mssql:
         cells: ["lib:a_time_override_narrowing_a_result_column_is_lossy_on_batch_and_stream", "lib:the_stream_resolver_reports_a_narrowing_override_lossy_as_check_does", a_mssql_batch_time_override_is_graded_by_the_result_column_it_lands_on, a_mssql_cdc_time_override_is_graded_as_the_batch_override]
       postgres:
@@ -7456,6 +7457,22 @@ seeds:
       oracle:
         cells: ["lib:an_unreachable_source_refuses_an_unadmitted_override_and_not_a_plain_plan"]
 
+  - name: schema-baseline-before-refusal
+    class: "a run that will be refused (the quality gate, a coded stop after the drift check, an undecodable change) has already replaced the export's stored drift baseline with the schema it observed, so the next run reads no drift against a schema the refused run never delivered"
+    history: "2026-11-23 - Oracle CDC a-change-older-than-an-alter cell under PostgreSQL state: the anchor run stored ID,V, the next run under the default warn policy rewrote it to ID,V,W and only then LogMiner refused with RIVET_SOURCE_CDC_UNDECODABLE; the rig oracle graded the changed export_schema row a resume-point leftover; RED on main by the batch cells below"
+    scope: source
+    switch: schema-baseline-before-refusal
+    engines:
+      postgres:
+        cells: [a_refused_single_run_leaves_the_stored_baseline_as_it_found_it_pg, a_refused_chunked_run_leaves_the_stored_baseline_as_it_found_it_pg, pg_cdc_a_refused_run_leaves_the_stored_baseline_as_it_found_it, "lib:a_run_that_never_ends_clean_leaves_the_stored_baseline_untouched"]
+      mysql:
+        cells: [a_refused_single_run_leaves_the_stored_baseline_as_it_found_it_mysql, a_refused_chunked_run_leaves_the_stored_baseline_as_it_found_it_mysql, mysql_cdc_a_refused_run_leaves_the_stored_baseline_as_it_found_it, "lib:a_run_that_never_ends_clean_leaves_the_stored_baseline_untouched"]
+      mssql:
+        cells: [a_refused_single_run_leaves_the_stored_baseline_as_it_found_it_mssql, a_refused_chunked_run_leaves_the_stored_baseline_as_it_found_it_mssql, mssql_cdc_a_refused_run_leaves_the_stored_baseline_as_it_found_it, "lib:a_run_that_never_ends_clean_leaves_the_stored_baseline_untouched"]
+      oracle:
+        cells: [a_refused_single_run_leaves_the_stored_baseline_as_it_found_it_oracle, a_refused_chunked_run_leaves_the_stored_baseline_as_it_found_it_oracle, a_change_older_than_an_alter_is_refused_by_code_oracle, "lib:a_run_that_never_ends_clean_leaves_the_stored_baseline_untouched"]
+      mongo:
+        cells: ["lib:a_run_that_never_ends_clean_leaves_the_stored_baseline_untouched"]
   - name: doctor-probe-fixed-temp-path
     class: "`rivet doctor` stages its destination write-probe at one temp path shared by every process, so a parallel doctor removes the file between another's write and copy and reports `[FAIL] Destination ... No such file or directory (os error 2)`"
     history: "2026-11-24 - gate cell sec_keyword_value_credentials, 12 parallel doctors with separate local destinations: 81 of 720 runs failed, 0 of 60 serial; RED on main: parallel_destination_probes_on_separate_local_destinations_all_succeed fails 857 of 1800 probes"
