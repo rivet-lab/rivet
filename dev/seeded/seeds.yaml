@@ -7500,7 +7500,7 @@ seeds:
     class: "a value refusal prescribes a `columns:` text declaration that the override table then refuses, so the remedy it names cannot be followed"
     history: "2026-11-25 - owner decision on refusal-gap group C: a PostgreSQL date, time, timestamp or array column declared text was refused as an unread pair, so the infinity, 24:00:00 and multi-dimensional-array refusals had no working remedy"
     scope: source
-    patch: value-refusal-text-remedy/shared.patch
+    switch: value-refusal-text-remedy
     engines:
       postgres:
         cells:
@@ -7509,7 +7509,7 @@ seeds:
       mysql:
         na: "a MySQL date, time and datetime are read as text already and refuse nothing a text declaration would recover; the PostgreSQL text projection does not run"
       mssql:
-        na: "the patched PostgreSQL text projection does not run on SQL Server; its XML refusal names `columns:` through the type policy (the_remedy_of_a_value_refusal_delivers_the_server_text_mssql)"
+        na: "the patched PostgreSQL text projection does not run on SQL Server, whose XML refusal is an unmapped type, not a value refusal (open defect, 2026-11-25: `columns: text` over XML is refused as an override mismatch)"
       mongo:
         na: "a MongoDB export has no PostgreSQL text projection, and its values have no refusal that a text declaration recovers"
       oracle:

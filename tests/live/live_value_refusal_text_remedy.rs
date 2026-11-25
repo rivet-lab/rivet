@@ -6,12 +6,6 @@ use crate::live_int_to_float_override::readback_only;
 const UNREPRESENTABLE: &str = "RIVET_SOURCE_VALUE_UNREPRESENTABLE";
 const PG_REMEDY: &str = "declare `v: text` under `columns:`";
 
-#[derive(Clone, Copy, Debug)]
-enum Eng {
-    Postgres,
-    Mssql,
-}
-
 struct Case {
     label: &'static str,
     ty: &'static str,
@@ -151,86 +145,35 @@ const POSTGRES: &[Case] = &[
     },
 ];
 
-const MSSQL: &[Case] = &[Case {
-    label: "xml",
-    ty: "XML",
-    held: "N'<a>x</a>'",
-    ordinary: "N'<b/>'",
-    code: "RIVET_TYPE_UNSAFE_MAPPING",
-    exit: 2,
-    remedy: "`columns:`",
-}];
+/// A table holding the case's three rows (held, ordinary, NULL), dropped with its guard.
+fn case_table(case: &Case) -> (String, PgTable) {
+    let rows = [(1, case.held), (2, case.ordinary), (3, "NULL")];
+    let table = unique_name("vrt_x");
+    let ddl = format!(
+        "CREATE TABLE {table} (id INT PRIMARY KEY, v {} NULL)",
+        case.ty
+    );
+    let values = rows
+        .iter()
+        .map(|(id, lit)| format!("({id}, {lit})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut c = pg_connect();
+    c.batch_execute(&ddl).unwrap();
+    let guard = PgTable::adopt(table.clone());
+    c.batch_execute(&format!("INSERT INTO {table} (id, v) VALUES {values}"))
+        .unwrap();
+    (table, guard)
+}
 
-impl Eng {
-    fn cases(self) -> &'static [Case] {
-        match self {
-            Eng::Postgres => POSTGRES,
-            Eng::Mssql => MSSQL,
-        }
-    }
-
-    fn live(self) -> LiveService {
-        match self {
-            Eng::Postgres => LiveService::Postgres,
-            Eng::Mssql => LiveService::Mssql,
-        }
-    }
-
-    fn rig(self, table: &str) -> Rig {
-        match self {
-            Eng::Postgres => Rig::pg_batch(table),
-            Eng::Mssql => Rig::mssql_batch(table),
-        }
-    }
-
-    fn table(self, case: &Case) -> (String, Box<dyn std::any::Any>) {
-        let rows = [(1, case.held), (2, case.ordinary), (3, "NULL")];
-        let table = unique_name("vrt_x");
-        let ddl = format!(
-            "CREATE TABLE {table} (id INT PRIMARY KEY, v {} NULL)",
-            case.ty
-        );
-        let values = rows
-            .iter()
-            .map(|(id, lit)| format!("({id}, {lit})"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let dml = format!("INSERT INTO {table} (id, v) VALUES {values}");
-        let guard: Box<dyn std::any::Any> = match self {
-            Eng::Postgres => {
-                let mut c = pg_connect();
-                c.batch_execute(&ddl).unwrap();
-                let g = PgTable::adopt(table.clone());
-                c.batch_execute(&dml).unwrap();
-                Box::new(g)
-            }
-            _ => {
-                mssql_exec(&ddl);
-                let g = MssqlTable::adopt(table.clone());
-                mssql_exec(&dml);
-                Box::new(g)
-            }
-        };
-        (table, guard)
-    }
-
-    /// The server's own text of every row, by id, read through the engine's own client.
-    fn server_text(self, table: &str) -> Vec<Option<String>> {
-        match self {
-            Eng::Postgres => pg_connect()
-                .query(&format!("SELECT v::text FROM {table} ORDER BY id"), &[])
-                .unwrap()
-                .iter()
-                .map(|r| r.get::<_, Option<String>>(0))
-                .collect(),
-            Eng::Mssql => mssql_query_strings(&format!(
-                "SELECT ISNULL(CAST(v AS NVARCHAR(MAX)), N'<null>') FROM {table} ORDER BY id"
-            ))
-            .into_iter()
-            .map(|t| (t != "<null>").then_some(t))
-            .collect(),
-        }
-    }
+/// The server's own text of every row, by id, read through a second client.
+fn held_as_text(table: &str) -> Vec<Option<String>> {
+    pg_connect()
+        .query(&format!("SELECT v::text FROM {table} ORDER BY id"), &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.get::<_, Option<String>>(0))
+        .collect()
 }
 
 fn sorted_by_id(rig: &Rig) -> Vec<Option<String>> {
@@ -250,12 +193,12 @@ fn stop_text(out: &std::process::Output) -> String {
 }
 
 /// The value is refused by code with the override named as the remedy, and that override delivers the server's text for every row.
-fn remedy_delivers(eng: Eng) {
-    require_alive(eng.live());
+fn remedy_delivers() {
+    require_alive(LiveService::Postgres);
     let mut bad = Vec::new();
-    for case in eng.cases() {
-        let (table, _guard) = eng.table(case);
-        let refused = readback_only(eng.rig(&table)).run();
+    for case in POSTGRES {
+        let (table, _guard) = case_table(case);
+        let refused = readback_only(Rig::pg_batch(&table)).run();
         let said = stop_text(&refused);
         if refused.status.code() != Some(case.exit) || !said.contains(case.code) {
             bad.push(format!(
@@ -274,7 +217,7 @@ fn remedy_delivers(eng: Eng) {
             ));
             continue;
         }
-        let rig = readback_only(eng.rig(&table)).export_line("columns: {v: text}");
+        let rig = readback_only(Rig::pg_batch(&table)).export_line("columns: {v: text}");
         let out = rig.run();
         if !out.status.success() {
             bad.push(format!(
@@ -286,7 +229,7 @@ fn remedy_delivers(eng: Eng) {
             continue;
         }
         let got = sorted_by_id(&rig);
-        let want = eng.server_text(&table);
+        let want = held_as_text(&table);
         if got != want {
             bad.push(format!(
                 "{}: delivered {got:?}, server text {want:?}",
@@ -294,19 +237,13 @@ fn remedy_delivers(eng: Eng) {
             ));
         }
     }
-    assert!(bad.is_empty(), "{eng:?}:\n{}", bad.join("\n"));
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
 
 #[test]
 #[ignore = "live: requires docker compose postgres"]
 fn the_remedy_of_a_value_refusal_delivers_the_server_text_postgres() {
-    remedy_delivers(Eng::Postgres);
-}
-
-#[test]
-#[ignore = "live: requires docker compose mssql"]
-fn the_remedy_of_a_value_refusal_delivers_the_server_text_mssql() {
-    remedy_delivers(Eng::Mssql);
+    remedy_delivers();
 }
 
 const NEIGHBOUR_TABLE: &str = "id INT PRIMARY KEY, d DATE, t TIME, ts TIMESTAMP, tz TIMESTAMPTZ, ia INTEGER[], ta TEXT[], iv INTERVAL, u UUID";

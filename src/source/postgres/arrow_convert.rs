@@ -368,7 +368,7 @@ pub(super) fn pg_server_text(t: &Type) -> bool {
 
 /// Whether a `columns:` override declares `name` text over a date, time, timestamp or array wire type, which the server renders.
 fn pg_text_declared(t: &Type, name: &str, column_overrides: &ColumnOverrides) -> bool {
-    matches!(
+    let declared = matches!(
         column_overrides.get(name),
         Some(RivetType::String | RivetType::Text)
     ) && matches!(
@@ -377,7 +377,8 @@ fn pg_text_declared(t: &Type, name: &str, column_overrides: &ColumnOverrides) ->
             | RivetType::Time { .. }
             | RivetType::Timestamp { .. }
             | RivetType::List { .. }
-    )
+    );
+    seeded!("value-refusal-text-remedy", false, declared)
 }
 
 /// Whether column `name` of wire type `t` is read through the text projection: a `numeric` keeps its wire read when a catalog hint or a `columns:` override types it.
