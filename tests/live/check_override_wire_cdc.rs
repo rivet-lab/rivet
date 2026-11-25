@@ -26,10 +26,10 @@ fn pending_baseline_is_refused_by_check_like_the_run(mut scn: CdcScenario, want:
 }
 
 /// Declares the observed schema and range checkpoint a refused baseline leg leaves behind.
-fn a_refused_baseline_may_leave_its_schema_and_checkpoint(rig: Rig) -> Rig {
+pub(crate) fn a_refused_baseline_may_leave_its_schema_and_checkpoint(rig: Rig) -> Rig {
     rig.a_failed_run_may_leave(
         &[Leftover::ObservedSchema, Leftover::ChunkCheckpoint],
-        "the refused baseline leg stored the schema it observed and its range checkpoint before the converter refused",
+        "the refused baseline leg stored the schema it observed and its range checkpoint before the baseline plan refused",
     )
 }
 

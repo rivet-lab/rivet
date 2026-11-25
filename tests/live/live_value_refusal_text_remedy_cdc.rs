@@ -4,7 +4,9 @@
 //! cargo nextest run --test live_suite --run-ignored only -E 'test(/^live_value_refusal_text_remedy_cdc::/)'
 //! ```
 
+use crate::check_override_wire_cdc::a_refused_baseline_may_leave_its_schema_and_checkpoint;
 use crate::common::*;
+use std::collections::BTreeSet;
 
 const WIRE: Refused<'static> = Refused::by_code("RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
 
@@ -30,6 +32,25 @@ fn put(scn: &mut CdcScenario, literal: &str) {
     let t = scn.table.clone();
     scn.sql(&format!("INSERT INTO {t} (id, v) VALUES (1, {literal})"));
     scn.settle();
+}
+
+fn delivered(rig: &Rig, column: &str) -> BTreeSet<String> {
+    duckdb_dir_parquet_distinct_strings(&rig.out_dir(), column)
+}
+
+fn server_text(table: &str) -> BTreeSet<String> {
+    let mut oracle = postgres::Client::connect(POSTGRES_CDC_URL, postgres::NoTls).unwrap();
+    oracle.batch_execute("SET TimeZone = 'UTC'").unwrap();
+    oracle
+        .query(&format!("SELECT v::text FROM {table}"), &[])
+        .unwrap()
+        .iter()
+        .map(|r| r.get::<_, String>(0))
+        .collect()
+}
+
+fn ids(of: &[&str]) -> BTreeSet<String> {
+    of.iter().map(|i| i.to_string()).collect()
 }
 
 fn both_check_spellings_accept(rig: &Rig, name: &str) {
@@ -77,10 +98,7 @@ fn a_pending_baseline_declared_text_over_a_server_text_column_is_refused_and_its
         let mut scn = scenario(&format!("vrt_cdc_{label}"), ddl, declared_text);
         put(&mut scn, literal);
         let name = scn.rig.export_name().to_string();
-        scn.rig = scn.rig.a_failed_run_may_leave(
-            &[Leftover::ObservedSchema, Leftover::ChunkCheckpoint],
-            "the refused baseline leg stored the schema it observed and its range checkpoint before the plan refused",
-        );
+        scn.rig = a_refused_baseline_may_leave_its_schema_and_checkpoint(scn.rig);
         let said = refused_alike(&scn.rig, &name);
         let native = match *label {
             "int4_array" => "_int4",
@@ -99,6 +117,11 @@ fn a_pending_baseline_declared_text_over_a_server_text_column_is_refused_and_its
         scn.rig.replace_export_line("columns:", "");
         scn.rig.replace_export_line("  v:", "");
         scn.rig.run_ok();
+        assert_eq!(
+            delivered(&scn.rig, "id"),
+            ids(&["1"]),
+            "{label}: the remedy delivers the row"
+        );
     }
 }
 
@@ -123,6 +146,7 @@ fn a_done_baseline_is_not_admitted_again_over_a_text_declaration_postgres() {
     let mut scn = scenario("vrt_cdc_done", "DATE", |r| r);
     put(&mut scn, "'2024-03-15'");
     scn.rig.run_ok();
+    assert_eq!(delivered(&scn.rig, "id"), ids(&["1"]));
     let name = scn.rig.export_name().to_string();
     scn.rig.amend_export_lines(&["columns:", "  v: \"text\""]);
     both_check_spellings_accept(&scn.rig, &name);
@@ -140,5 +164,10 @@ fn a_pending_baseline_declared_text_over_columns_the_server_does_not_render_is_a
         let name = scn.rig.export_name().to_string();
         both_check_spellings_accept(&scn.rig, &name);
         scn.rig.run_ok();
+        assert_eq!(
+            delivered(&scn.rig, "v"),
+            server_text(&scn.table),
+            "{label}: the declared text is the server's text"
+        );
     }
 }
