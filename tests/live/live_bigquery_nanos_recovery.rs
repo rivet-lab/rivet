@@ -188,13 +188,13 @@ fn bigquery_int64_nanos_recover_the_source_instant_mssql() {
                 "{col} id {id}: DATETIME and TIMESTAMP agree"
             );
             assert_eq!(
-                f.micros * 1000 + f.sub,
-                f.ns,
+                i128::from(f.micros) * 1000 + i128::from(f.sub),
+                i128::from(f.ns),
                 "{col} id {id}: the pair is the INT64"
             );
             assert_eq!(
-                p.micros * 1000 + p.sub,
-                p.ns,
+                i128::from(p.micros) * 1000 + i128::from(p.sub),
+                i128::from(p.ns),
                 "{col} id {id}: the plain pair is the INT64"
             );
             assert_eq!(
