@@ -695,16 +695,3 @@ fn a_csv_export_of_a_nanosecond_timestamp_column_is_delivered_like_check_admits_
         l == "2024-01-01T10:30:00.000000000"
     });
 }
-
-#[test]
-#[ignore = "live: mssql"]
-fn a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mssql() {
-    require_alive(LiveService::Mssql);
-    let name = unique_name("unmapped_ms");
-    let out = tempfile::tempdir().unwrap();
-    let rig = Rig::mssql_batch(&name)
-        .query("SELECT CAST('<a/>' AS XML) AS x")
-        .mode("full")
-        .dest_path(out.path().to_path_buf());
-    unmapped_column_is_refused_like_the_run(rig, &name, "x");
-}

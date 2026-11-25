@@ -7028,8 +7028,7 @@ seeds:
         cells:
           - a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mysql
       mssql:
-        cells:
-          - a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mssql
+        na: "2026-11-25: xml was the one SQL Server wire type with no Arrow mapping and is now delivered as text, so no SQL Server column reaches the unmapped refusal or the format refusal; reopens if a SQL Server wire type loses its Arrow mapping"
       oracle:
         na: "2026-11-23: csv now writes every type an Oracle source delivers, so no Oracle column reaches the format refusal; the format half is held by the lib cells and the unmapped-column cell for Oracle is open"
       mongo:
@@ -7114,6 +7113,22 @@ seeds:
         na: "Oracle has no TIME type; a time of day is a DATE or TIMESTAMP column"
       mongo:
         na: "BSON has no time-of-day type, so no MongoDB value is a TIME column"
+  - name: mssql-xml-refused
+    class: "a SQL Server xml column is refused (batch RIVET_TYPE_UNSAFE_MAPPING, CDC RIVET_SOURCE_CDC_CELL_UNSUPPORTED) where every other wire type with a lossless text form is delivered as that text"
+    history: "owner 2026-11-25: no native type means the server's lossless text, refuse only where none exists; the xml type table row was unsupported(xml) through 0.33"
+    scope: source
+    switch: mssql-xml-refused
+    engines:
+      mssql:
+        cells: ["lib:the_mssql_type_table_is_pinned", "lib:every_wire_type_is_typed_through_its_kind_or_the_engine_table", a_batch_export_delivers_xml_columns_as_the_source_renders_them, a_cdc_baseline_and_stream_deliver_the_same_xml_text_as_the_source_renders]
+      postgres:
+        na: "PostgreSQL xml has been delivered as the server's text since #1144; no PostgreSQL column reaches the SQL Server wire-type table"
+      mysql:
+        na: "MySQL has no xml column type, so no MySQL wire type reaches the SQL Server table"
+      oracle:
+        na: "Oracle XMLTYPE is a separate path (text serialized on the server), not the SQL Server wire-type table"
+      mongo:
+        na: "BSON has no xml type, and Mongo has no SQL Server wire-type table"
   - name: mssql-money-decoded-as-f64
     class: "a SQL Server MONEY or SMALLMONEY past 2^53 scaled units (|value| of about 9.007e11 and more) is carried as an f64 and so is refused by code (batch, RIVET_SOURCE_VALUE_UNREPRESENTABLE) or stopped in the stream (CDC, RIVET_SOURCE_CDC_CELL_UNSUPPORTED) instead of delivered exact"
     history: "type matrix class MSSQL_MONEY_BIG (known_red 2026-11-16, MONEY Decimal(19,4) and SMALLMONEY Decimal(10,4) across ClickHouse, BigQuery and Snowflake); fixed 2026-11-21 by decoding money as Numeric at scale 4 in the tiberius pin"

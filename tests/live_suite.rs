@@ -238,6 +238,8 @@ mod live_mssql_reconcile_repair;
 mod live_mssql_resume;
 #[path = "live/live_mssql_variant.rs"]
 mod live_mssql_variant;
+#[path = "live/live_mssql_xml.rs"]
+mod live_mssql_xml;
 #[path = "live/live_mysql_chunked.rs"]
 mod live_mysql_chunked;
 #[path = "live/live_mysql_chunked_recovery.rs"]
