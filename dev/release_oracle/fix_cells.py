@@ -102,7 +102,7 @@ GREEN_ON_PREV: dict[str, tuple[str, str]] = {  # ratchet-pin: fix-cells-green-on
 }  # ratchet-pin: end
 #: Fix commit (short sha) → pattern of the only cells it is the fix for, with its reason. Shrink-only.
 FIX_SCOPE: dict[str, tuple[str, str]] = {
-    "5ae3d4a5": (r"(_in_parallel|_keeps_the_run)_mssql$", "2026-11-25: #1078 is an mssql-only fix of the parallel sampler; the cursor cell of every engine only had its key list hoisted and the other engines' parallel cells are coverage added beside it, green on 0.33.0 by design"),
+    "5ae3d4a5": (r"(_in_parallel|_keeps_the_run)_mssql$", "2026-11-25: #1078 fixes the text of a parallel split point read by the mssql samplers (RIVET_SOURCE_QUERY_FAILED on every parallel range, per the commit body); the cursor cells of all four engines (mssql and postgres also gained datetimeoffset(6) and timestamptz(6) keys) read no split point, and the mysql, oracle and postgres parallel cells run no mssql code; read from the diff, not measured on 0.33.0; closes when the mssql stand grades the cursor cell on 0.33.0 or the baseline moves past 0.33.0"),
 }
 #: Fix commit (short sha) → (a test that sees its defect, reason) for a fix that credits no live cell. Shrink-only.
 NO_LIVE_CELL: dict[str, tuple[str, str]] = {
