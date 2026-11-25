@@ -34,23 +34,17 @@ fn put(scn: &mut CdcScenario, literal: &str) {
     scn.settle();
 }
 
-fn delivered(rig: &Rig, column: &str) -> BTreeSet<String> {
-    duckdb_dir_parquet_distinct_strings(&rig.out_dir(), column)
+fn oracle() -> postgres::Client {
+    let mut c = postgres::Client::connect(POSTGRES_CDC_URL, postgres::NoTls).unwrap();
+    c.batch_execute("SET TimeZone = 'UTC'").unwrap();
+    c
 }
 
-fn server_text(table: &str) -> BTreeSet<String> {
-    let mut oracle = postgres::Client::connect(POSTGRES_CDC_URL, postgres::NoTls).unwrap();
-    oracle.batch_execute("SET TimeZone = 'UTC'").unwrap();
-    oracle
-        .query(&format!("SELECT v::text FROM {table}"), &[])
-        .unwrap()
-        .iter()
-        .map(|r| r.get::<_, String>(0))
+fn parquet_column_values(rig: &Rig, column: &str) -> BTreeSet<String> {
+    dir_parquet_display(&rig.out_dir(), column)
+        .into_iter()
+        .flatten()
         .collect()
-}
-
-fn ids(of: &[&str]) -> BTreeSet<String> {
-    of.iter().map(|i| i.to_string()).collect()
 }
 
 fn both_check_spellings_accept(rig: &Rig, name: &str) {
@@ -117,10 +111,14 @@ fn a_pending_baseline_declared_text_over_a_server_text_column_is_refused_and_its
         scn.rig.replace_export_line("columns:", "");
         scn.rig.replace_export_line("  v:", "");
         scn.rig.run_ok();
+        let source: i64 = oracle()
+            .query_one(&format!("SELECT count(*) FROM {}", scn.table), &[])
+            .unwrap()
+            .get(0);
         assert_eq!(
-            delivered(&scn.rig, "id"),
-            ids(&["1"]),
-            "{label}: the remedy delivers the row"
+            parquet_column_values(&scn.rig, "id").len() as i64,
+            source,
+            "{label}: the remedy delivers every source row"
         );
     }
 }
@@ -146,7 +144,11 @@ fn a_done_baseline_is_not_admitted_again_over_a_text_declaration_postgres() {
     let mut scn = scenario("vrt_cdc_done", "DATE", |r| r);
     put(&mut scn, "'2024-03-15'");
     scn.rig.run_ok();
-    assert_eq!(delivered(&scn.rig, "id"), ids(&["1"]));
+    let want: String = oracle()
+        .query_one(&format!("SELECT v::text FROM {}", scn.table), &[])
+        .unwrap()
+        .get(0);
+    assert_eq!(parquet_column_values(&scn.rig, "v"), BTreeSet::from([want]));
     let name = scn.rig.export_name().to_string();
     scn.rig.amend_export_lines(&["columns:", "  v: \"text\""]);
     both_check_spellings_accept(&scn.rig, &name);
@@ -164,9 +166,13 @@ fn a_pending_baseline_declared_text_over_columns_the_server_does_not_render_is_a
         let name = scn.rig.export_name().to_string();
         both_check_spellings_accept(&scn.rig, &name);
         scn.rig.run_ok();
+        let want: String = oracle()
+            .query_one(&format!("SELECT v::text FROM {}", scn.table), &[])
+            .unwrap()
+            .get(0);
         assert_eq!(
-            delivered(&scn.rig, "v"),
-            server_text(&scn.table),
+            parquet_column_values(&scn.rig, "v"),
+            BTreeSet::from([want]),
             "{label}: the declared text is the server's text"
         );
     }
