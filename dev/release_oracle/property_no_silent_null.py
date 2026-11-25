@@ -798,6 +798,19 @@ class Result:
     detail: str = ""
     code: str = ""
     fidelity: str = ""
+    arrow: str = ""
+
+
+def parquet_arrow(out: Path, col: str) -> str:
+    """The Arrow type pyarrow reads for one column of the parquet parts a run wrote; empty when none is read."""
+    import pyarrow.parquet as pq
+
+    for p in data_files(out, "parquet"):
+        schema = pq.read_schema(p)
+        names = [n.lower() for n in schema.names]
+        if col.lower() in names:
+            return str(schema.field(names.index(col.lower())).type)
+    return ""
 
 
 def check_column(stdout: str, col: str) -> dict:
@@ -955,6 +968,8 @@ def run_unit(engine: str, work: Path, url: str, col: Col, n_rows: int, mode: str
             out.append(Result(cell, DELIVERED, NOT_GRADED, "the source's own text of the seeded values could not be read"))
             continue
         r = grade_run(engine, cell, p, check, fid, d / f"out-{fmt}", fmt, col, n_rows, target, list(col.lits), want, expect=expect)
+        if fmt == "parquet":
+            r.arrow = parquet_arrow(d / f"out-{fmt}", col.name)
         out.append(r)
         if r.klass in (NULLED, WRONG):
             out.append(integrity(cell, rivet(["validate", "-c", str(cfg), "--depth", "full"], env, d), r))

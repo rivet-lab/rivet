@@ -423,14 +423,14 @@ def attributed(engine: str, r: int, group: list[Col], units: list[Unit], image: 
     return [x for c in group for x in run_round(engine, next(solo), [c], solo_units(units, c), image, work)]
 
 
-def run_engine(engine: str, work: Path, progress=lambda s: None) -> list[Result]:
-    """Every round of one engine; MongoDB is NOT_GRADED with its reason."""
+def run_engine(engine: str, work: Path, progress=lambda s: None, cols: list[Col] | None = None) -> list[Result]:
+    """Every round of one engine over `cols` (the delivering columns by default); MongoDB is NOT_GRADED with its reason."""
     if CDC_STAND[engine] is None:
         return [Result(f"{engine}/*/cdc-*", REFUSED, NOT_GRADED, MONGO_NOT_GRADED)]
     untrusted = nsn.reader_trusted(nsn.READER)
     if untrusted:
         return [Result(f"{engine}/*/cdc-*", REFUSED, NOT_GRADED, untrusted)]
-    cols = nsn.columns(engine)
+    cols = nsn.columns(engine) if cols is None else cols
     results: list[Result] = []
     plan = rounds(engine, cols)
     solo = itertools.count(len(plan))

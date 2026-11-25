@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
+import re
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 from . import core
 from . import property_no_silent_null as nsn
+from . import property_no_silent_null_cdc as cdc_grid
 
 UNMEASURED_KLASSES = (nsn.NOT_GRADED, nsn.UNGRADED)
 GEOMETRY_GAP = frozenset({"GEOMETRY", "POINT", "LINESTRING", "POLYGON", "GEOMETRYCOLLECTION", "MULTIPOINT"})
@@ -19,6 +24,41 @@ GAP_LABEL = "refused today, gap against ADR-0038 CP1, fix in flight"
 def unmeasured(engine: str) -> list[tuple[int, dict]]:
     """The ledger rows of one engine with no delivery and not declarable, keeping their ledger index."""
     return [(i, r) for i, r in enumerate(nsn.ledger_rows(engine)) if not r.get("delivery") and not r.get("declarable")]
+
+
+def cdc_cols(engine: str) -> list[nsn.Col]:
+    """The seed columns of the matrix-only rows for the CDC grid; a row whose edge refuses on the change stream is left out."""
+    cols = []
+    for i, r in unmeasured(engine):
+        if r["native_type"].split("(")[0] in GEOMETRY_GAP:
+            continue
+        try:
+            cols.append(nsn.row_cols(engine, i, r))
+        except ValueError:
+            continue
+    return cols
+
+
+SESSION_OVERRIDE_OPEN = "open: check cannot see a session override"
+
+
+def cdc_cell(x: nsn.Result) -> dict:
+    """One CDC cell as a verdict: a run-side value refusal is refused, a session-override prerequisite is open, DEFECT on any other changed, nulled or uncoded value."""
+    run_side_value = x.klass == "CHECK_RUN_SPLIT" and x.code == "RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+    session_override = x.klass == "CHECK_RUN_SPLIT" and x.code == "RIVET_SOURCE_CDC_PREREQUISITE" and "@" in x.cell.split("/")[2]
+    if run_side_value:
+        verdict = f"refused [{x.code}]"
+    elif session_override:
+        verdict = SESSION_OVERRIDE_OPEN
+    elif x.klass in nsn.FAIL_CLASSES and x.klass not in UNMEASURED_KLASSES:
+        verdict = "DEFECT"
+    elif x.verdict == nsn.REFUSED and x.klass not in UNMEASURED_KLASSES:
+        verdict = f"refused [{x.code}]"
+    elif x.klass in UNMEASURED_KLASSES:
+        verdict = "not classified"
+    else:
+        verdict = "exact"
+    return {"cell": x.cell, "verdict": verdict, "klass": x.klass, "code": x.code, "fidelity": x.fidelity, "detail": x.detail[:240]}
 
 
 def seed_one(engine: str, url: str, col: nsn.Col) -> int:
@@ -31,6 +71,26 @@ def seed_one(engine: str, url: str, col: nsn.Col) -> int:
         if not p.ok:
             raise RuntimeError(f"seed refused `{st[:160]}`: exit {p.returncode}: {p.out.strip()[:300]}")
     return n
+
+
+ARROW_SCALARS = {"bool": "Boolean", "int16": "Int16", "int32": "Int32", "int64": "Int64", "uint64": "UInt64", "float": "Float32", "double": "Float64", "string": "Utf8", "binary": "Binary", "date32[day]": "Date32"}
+ARROW_UNIT = {"us": "µs", "ns": "ns", "ms": "ms", "s": "s"}
+
+
+def arrow_label(pa_type: str) -> str:
+    """The ledger's delivery spelling of a pyarrow type string; empty for a type the ledger has no label for."""
+    if pa_type in ARROW_SCALARS:
+        return ARROW_SCALARS[pa_type]
+    if m := re.fullmatch(r"decimal(128|256)\((\d+), (\d+)\)", pa_type):
+        return f"Decimal{m[1]}({m[2]}, {m[3]})"
+    if m := re.fullmatch(r"timestamp\[(\w+)(?:, tz=([^\]]+))?\]", pa_type):
+        return f"Timestamp({ARROW_UNIT[m[1]]}, \"{m[2]}\")" if m[2] else f"Timestamp({ARROW_UNIT[m[1]]})"
+    if m := re.fullmatch(r"time64\[(\w+)\]", pa_type):
+        return f"Time64({ARROW_UNIT[m[1]]})"
+    if m := re.fullmatch(r"list<item: (.+)>", pa_type):
+        inner = arrow_label(m[1])
+        return f"List({inner})" if inner else ""
+    return ""
 
 
 def label(results: list[nsn.Result]) -> dict:
@@ -66,9 +126,12 @@ def measure(engine: str, url: str, work: Path, i: int, r: dict) -> dict:
         n = seed_one(engine, url, col)
     except RuntimeError as e:
         return base | {"verdict": "UNMEASURED", "reason": f"the seed could not be created: {e}"[:300], "cells": []}
-    out = label(nsn.run_unit(engine, work, url, col, n, "full", "none", ["parquet", "csv"]))
+    results = nsn.run_unit(engine, work, url, col, n, "full", "none", ["parquet", "csv"])
+    out = label(results)
     if out["verdict"] == "refused by design" and r["native_type"].split("(")[0] in GEOMETRY_GAP:
         out["verdict"] = GAP_LABEL
+    arrow = {x.arrow for x in results if x.arrow}
+    out["arrow"] = arrow_label(arrow.pop()) if len(arrow) == 1 else ""
     return base | out
 
 
@@ -97,7 +160,45 @@ def self_test() -> None:
         got = _grade(col, lits, rows)["verdict"]
         if got != want:
             raise SystemExit(f"self-test: rows {rows} labelled {got!r}, expected {want!r}")
-    print("self-test ok: a faithful run is deliverable; a changed or nulled value is DEFECT")
+    cols = cdc_cols("postgres")
+    planned = {c.name for group, _, _ in cdc_grid.rounds("postgres", cols) for c in group}
+    if not cols or planned != {c.name for c in cols}:
+        raise SystemExit(f"self-test: the CDC plan holds {len(planned)} of {len(cols)} matrix-only columns")
+    if cdc_cell(nsn.Result("x", nsn.DELIVERED, nsn.NULLED, ""))["verdict"] != "DEFECT":
+        raise SystemExit("self-test: a nulled CDC value is not a DEFECT")
+    value_refusal = nsn.Result("mysql/T->d/cdc-insert/parquet", nsn.REFUSED, "CHECK_RUN_SPLIT", "", "RIVET_SOURCE_VALUE_UNREPRESENTABLE")
+    if cdc_cell(value_refusal)["verdict"] != "refused [RIVET_SOURCE_VALUE_UNREPRESENTABLE]":
+        raise SystemExit("self-test: a run-side value refusal after a passing check is not refused")
+    session = nsn.Result("mysql/T->none/cdc-delete@MINIMAL/parquet", nsn.REFUSED, "CHECK_RUN_SPLIT", "", "RIVET_SOURCE_CDC_PREREQUISITE")
+    if cdc_cell(session)["verdict"] != "open: check cannot see a session override":
+        raise SystemExit("self-test: a session-override partial image is not its own open class")
+    unscoped = nsn.Result("mysql/T->none/cdc-delete/parquet", nsn.REFUSED, "CHECK_RUN_SPLIT", "", "RIVET_SOURCE_CDC_PREREQUISITE")
+    if cdc_cell(unscoped)["verdict"] != "DEFECT":
+        raise SystemExit("self-test: a prerequisite refusal without a session override is not a DEFECT")
+    for pa_type, want in (("int32", "Int32"), ("decimal128(38, 10)", "Decimal128(38, 10)"), ("timestamp[us, tz=UTC]", 'Timestamp(µs, "UTC")'), ("string", "Utf8"), ("list<item: string>", "List(Utf8)"), ("struct<a: int32>", "")):
+        if arrow_label(pa_type) != want:
+            raise SystemExit(f"self-test: arrow type {pa_type!r} labelled {arrow_label(pa_type)!r}, expected {want!r}")
+    for rows, want in (([], 2), ([{"verdict": "UNMEASURED"}], 2), ([{"verdict": "deliverable"}, {"verdict": "NOT CLASSIFIED"}], 2),
+                       ([{"verdict": "deliverable"}, {"verdict": "DEFECT"}], 1), ([{"verdict": "deliverable"}, {"verdict": "refused by design"}], 0)):
+        if exit_code(rows) != want:
+            raise SystemExit(f"self-test: rows {rows} exit {exit_code(rows)}, expected {want}")
+    for cell, want in ((nsn.Result("c", nsn.DELIVERED), 0), (nsn.Result("c", nsn.DELIVERED, nsn.NULLED, "x"), 1), (nsn.Result("c", nsn.REFUSED, nsn.NOT_GRADED, "x"), 2)):
+        with mock.patch.object(cdc_grid, "run_engine", lambda *a, _c=cell, **k: [_c]), contextlib.redirect_stdout(io.StringIO()):
+            got = run_cdc(["postgres"], Path(tempfile.gettempdir()))
+        if got != want:
+            raise SystemExit(f"self-test: the CDC run exits {got} for a {cell.klass or 'passing'} cell, expected {want}")
+    print("self-test ok: a faithful run is deliverable; a changed or nulled value is DEFECT; every matrix-only column reaches the CDC plan")
+
+
+def run_cdc(engines: list[str], work: Path) -> int:
+    """The CDC grid over the matrix-only columns of each engine on its CDC stand; exit 1 on any DEFECT, 2 on a not-classified cell."""
+    cells: list[dict] = []
+    for engine in engines:
+        for x in cdc_grid.run_engine(engine, work / "cdc" / engine, print, cols=cdc_cols(engine)):
+            cells.append(cdc_cell(x))
+            print(json.dumps(cells[-1], ensure_ascii=False), flush=True)
+    print("SUMMARY " + json.dumps(tally([c["verdict"] for c in cells]), sort_keys=True), flush=True)
+    return exit_code(cells, UNMEASURED_CELLS)
 
 
 def run_engines(engines: list[str], work: Path) -> list[dict]:
@@ -115,18 +216,28 @@ def run_engines(engines: list[str], work: Path) -> list[dict]:
     return rows
 
 
-def exit_code(rows: list[dict]) -> int:
-    """1 on any DEFECT row, 2 when no row was measured or any row is UNMEASURED or NOT CLASSIFIED, else 0."""
+UNMEASURED_ROWS = frozenset({"UNMEASURED", "NOT CLASSIFIED"})
+UNMEASURED_CELLS = frozenset({"not classified"})
+
+
+def tally(verdicts: list[str]) -> dict[str, int]:
+    """How many times each verdict occurs."""
+    return {v: verdicts.count(v) for v in sorted(set(verdicts))}
+
+
+def exit_code(rows: list[dict], unmeasured_verdicts: frozenset[str] = UNMEASURED_ROWS) -> int:
+    """1 on any DEFECT, 2 when nothing was measured or any entry carries an unmeasured verdict, else 0."""
     verdicts = {row["verdict"] for row in rows}
     if "DEFECT" in verdicts:
         return 1
-    return 2 if not rows or verdicts & {"UNMEASURED", "NOT CLASSIFIED"} else 0
+    return 2 if not rows or verdicts & unmeasured_verdicts else 0
 
 
 def main() -> int:
     """Developer entry: measure every matrix-only ledger row of the chosen engines on the stand."""
     ap = argparse.ArgumentParser(prog="property_no_silent_null_matrix_only")
     ap.add_argument("--self-test", action="store_true")
+    ap.add_argument("--cdc", action="store_true", help="run the CDC grid over the matrix-only columns instead of the batch rows")
     ap.add_argument("--engine", default="postgres,mysql")
     ap.add_argument("--work", default=str(Path(tempfile.gettempdir()) / "no_silent_null_matrix_only"))
     ap.add_argument("--out", default="")
@@ -135,11 +246,10 @@ def main() -> int:
         self_test()
         return 0
     print(nsn.binary_line(), flush=True)
+    if ns.cdc:
+        return run_cdc(ns.engine.split(","), Path(ns.work))
     rows = run_engines(ns.engine.split(","), Path(ns.work))
-    tally: dict[str, int] = {}
-    for row in rows:
-        tally[row["verdict"]] = tally.get(row["verdict"], 0) + 1
-    print("SUMMARY " + json.dumps(tally, sort_keys=True), flush=True)
+    print("SUMMARY " + json.dumps(tally([row["verdict"] for row in rows]), sort_keys=True), flush=True)
     if ns.out:
         Path(ns.out).write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in rows) + "\n")
     return exit_code(rows)
