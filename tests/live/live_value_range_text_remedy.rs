@@ -2,6 +2,8 @@
 
 use crate::common::*;
 
+const DATE_AS_TIMESTAMP_TEXT: &str = "a MySQL DATE declared text is delivered with a time of day and six fraction digits, which the rig oracle's date form does not equal; graded here against the server's text in that form";
+
 const OUT_OF_RANGE: Refused = Refused::by_code("RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE", 5);
 
 const CH: &[WarehouseKind] = &[WarehouseKind::ClickHouse];
@@ -14,6 +16,7 @@ struct Family {
     ordinary: &'static str,
     text_of: fn(&str) -> String,
     sep: char,
+    ungraded: Option<&'static str>,
 }
 
 fn cast_char(c: &str) -> String {
@@ -42,6 +45,7 @@ const MYSQL_DATE: Family = Family {
     ordinary: "'2024-02-29'",
     text_of: cast_char,
     sep: ' ',
+    ungraded: Some(DATE_AS_TIMESTAMP_TEXT),
 };
 
 const MYSQL_DATETIME6: Family = Family {
@@ -54,6 +58,7 @@ const MYSQL_DATETIME6: Family = Family {
     ordinary: "'2024-02-29 12:34:56.789012'",
     text_of: cast_char,
     sep: ' ',
+    ungraded: None,
 };
 
 const MYSQL_DATETIME3: Family = Family {
@@ -65,6 +70,7 @@ const MYSQL_DATETIME3: Family = Family {
     ordinary: "'2024-02-29 12:34:56.789'",
     text_of: cast_char,
     sep: ' ',
+    ungraded: None,
 };
 
 #[cfg_attr(not(feature = "oracle"), allow(dead_code))]
@@ -78,6 +84,7 @@ const ORACLE_DATE: Family = Family {
     ordinary: "DATE '2024-02-29'",
     text_of: oracle_date,
     sep: 'T',
+    ungraded: None,
 };
 
 #[cfg_attr(not(feature = "oracle"), allow(dead_code))]
@@ -90,6 +97,7 @@ const ORACLE_TIMESTAMP6: Family = Family {
     ordinary: "TIMESTAMP '2024-02-29 12:34:56.789012'",
     text_of: oracle_ts6,
     sep: 'T',
+    ungraded: None,
 };
 
 /// The server's text in the form rivet delivers a declared-text temporal: the separator `sep`, a time of day and six fraction digits.
@@ -157,6 +165,10 @@ fn text_remedy_lands(e: SqlEngine, kind: WarehouseKind, family: &Family) {
         e.staged(e.rig(&table), "full", &["columns: {v: text}"]),
         "id",
     );
+    let declared = match family.ungraded {
+        Some(why) => declared.no_oracle(why),
+        None => declared,
+    };
     declared.run_ok();
     w.load(&declared);
     let (landed, landed_type) = w.texts(&table, "id", "v");
