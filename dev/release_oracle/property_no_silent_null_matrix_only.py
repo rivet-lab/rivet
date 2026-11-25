@@ -100,8 +100,31 @@ def self_test() -> None:
     print("self-test ok: a faithful run is deliverable; a changed or nulled value is DEFECT")
 
 
+def run_engines(engines: list[str], work: Path) -> list[dict]:
+    """Measure every matrix-only ledger row of the engines on the stand, printing each row as one JSON line."""
+    rows: list[dict] = []
+    for engine in engines:
+        url = nsn.STAND[engine]
+        try:
+            for i, r in unmeasured(engine):
+                row = measure(engine, url, work / engine, i, r)
+                rows.append(row)
+                print(json.dumps(row, ensure_ascii=False), flush=True)
+        finally:
+            nsn.cleanup(engine, url)
+    return rows
+
+
+def exit_code(rows: list[dict]) -> int:
+    """1 on any DEFECT row, 2 when no row was measured or any row is UNMEASURED or NOT CLASSIFIED, else 0."""
+    verdicts = {row["verdict"] for row in rows}
+    if "DEFECT" in verdicts:
+        return 1
+    return 2 if not rows or verdicts & {"UNMEASURED", "NOT CLASSIFIED"} else 0
+
+
 def main() -> int:
-    """Developer entry: measure every matrix-only ledger row of the chosen engines on the stand; exit 1 on any DEFECT."""
+    """Developer entry: measure every matrix-only ledger row of the chosen engines on the stand."""
     ap = argparse.ArgumentParser(prog="property_no_silent_null_matrix_only")
     ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--engine", default="postgres,mysql")
@@ -112,23 +135,14 @@ def main() -> int:
         self_test()
         return 0
     print(nsn.binary_line(), flush=True)
-    rows: list[dict] = []
-    for engine in ns.engine.split(","):
-        url = nsn.STAND[engine]
-        try:
-            for i, r in unmeasured(engine):
-                row = measure(engine, url, Path(ns.work) / engine, i, r)
-                rows.append(row)
-                print(json.dumps(row, ensure_ascii=False), flush=True)
-        finally:
-            nsn.cleanup(engine, url)
+    rows = run_engines(ns.engine.split(","), Path(ns.work))
     tally: dict[str, int] = {}
     for row in rows:
         tally[row["verdict"]] = tally.get(row["verdict"], 0) + 1
     print("SUMMARY " + json.dumps(tally, sort_keys=True), flush=True)
     if ns.out:
         Path(ns.out).write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in rows) + "\n")
-    return 1 if tally.get("DEFECT") else 0
+    return exit_code(rows)
 
 
 if __name__ == "__main__":
