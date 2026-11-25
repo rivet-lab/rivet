@@ -544,9 +544,9 @@ exclude_re = [
     "replace <impl ChangeStream for PgChangeStream>::ack -> Result<\\(\\)> with Ok\\(\\(\\)\\)$",
     # 2026-11-17 text_rows runs a catalog query on a live Client; witness: live_pg_catalog_rows_are_the_servers_text_cells.
     "replace <impl CatalogRows for Client>::text_rows -> Result<Vec<Vec<Option<String>>>> with Ok\\(vec!\\[",
-    # 2026-11-21 load_domains reads the catalog on a live Client; witness: live_type_labels_resolve_every_domain_as_the_domain_map_does (stub run on the devbox).
+    # 2026-11-21 load_domains reads the catalog on a live Client; witness: live_ddl_on_a_type_after_the_open_leaves_array_decoding_as_the_open_map_does, RED under the stub (hand run 2026-11-25).
     "replace load_domains -> Result<\\(Domains, bool\\)> with ",
-    # 2026-11-25 builtin_names_taken reads the PG catalog on a live Client; witness: live_ddl_on_a_type_after_the_open_leaves_array_decoding_as_the_open_map_does (builtin_name_taken_before_the_open) RED under Ok(false) and live_a_session_over_a_table_without_arrays_does_not_scan_the_type_catalog RED under Ok(true).
+    # 2026-11-25 builtin_names_taken reads the PG catalog on a live Client; witness: live_ddl_on_a_type_after_the_open_leaves_array_decoding_as_the_open_map_does (builtin_name_taken_before_the_open) RED under Ok(false) and live_a_session_over_a_table_without_arrays_does_not_scan_the_type_catalog RED under Ok(true) (hand run 2026-11-25).
     "replace builtin_names_taken -> Result<bool> with ",
     # 2026-10-31 #728: `note_statement` only sets `in_transaction` and `grants_pending`, both live-only; the live_cdc_column_grants:: cells kill its stub.
     "replace MysqlChangeStream::note_statement with \\(\\)",
