@@ -5869,7 +5869,7 @@ seeds:
           - mysql_cdc_a_datetime_or_timestamp_as_text_is_the_batch_text_byte_for_byte
           - "lib:an_oracle_or_mysql_stamp_in_a_text_column_prints_as_the_batch_prints_it"
       postgres:
-        na: "the batch export refuses text over a timestamp on PostgreSQL, so no batch text exists to differ from; the stream text stays chrono form, an open defect graded by open_defect_a_pg_timestamp_declared_text_is_one_verdict_on_batch_and_the_stream"
+        na: "the PostgreSQL stream text stays chrono form while batch delivers the server's text, an open defect graded by open_defect_a_pg_timestamp_declared_text_is_one_verdict_on_batch_and_the_stream"
       mssql:
         na: "the override table reads no text over a datetime2 on SQL Server, so batch and the stream both refuse it by code (mssql_a_datetime2_declared_text_is_one_refusal_on_batch_and_cdc) and no text is written to differ"
       mongo:
@@ -7512,3 +7512,60 @@ seeds:
           - "lib:a_date32_inside_a_list_that_chrono_cannot_name_is_refused_not_written_as_an_empty_string"
           - "lib:a_microsecond_timestamp_chrono_cannot_name_is_refused_not_written_as_an_empty_cell"
           - "lib:a_microsecond_timestamp_inside_a_list_that_chrono_cannot_name_is_refused_not_written_as_an_empty_string"
+
+  - name: value-refusal-text-remedy
+    class: "a value refusal prescribes a `columns:` text declaration that the override table then refuses, so the remedy it names cannot be followed"
+    history: "2026-11-25 - owner decision on refusal-gap group C: a PostgreSQL date, time, timestamp or array column declared text was refused as an unread pair, so the infinity, 24:00:00 and multi-dimensional-array refusals had no working remedy"
+    scope: source
+    switch: value-refusal-text-remedy
+    engines:
+      postgres:
+        cells:
+          - the_remedy_of_a_value_refusal_delivers_the_server_text_postgres
+          - "lib:a_temporal_or_array_declared_text_is_projected_and_nothing_else_is"
+          - a_text_declared_column_loads_into_clickhouse_as_the_server_text
+          - a_text_declared_column_loads_into_bigquery_as_the_server_text
+      mysql:
+        na: "a MySQL date, time and datetime are read as text already and refuse nothing a text declaration would recover; the PostgreSQL text projection does not run"
+      mssql:
+        na: "the patched PostgreSQL text projection does not run on SQL Server, whose XML refusal is an unmapped type, not a value refusal (open defect, 2026-11-25: `columns: text` over XML is refused as an override mismatch)"
+      mongo:
+        na: "a MongoDB export has no PostgreSQL text projection, and its values have no refusal that a text declaration recovers"
+      oracle:
+        na: "the patched PostgreSQL text projection does not run on Oracle; a NUMBER of 1E125 is refused by number_text and a text declaration does not recover it (open question)"
+
+  - name: cdc-leg-text-declaration
+    class: "a CDC baseline leg that declares text over a PostgreSQL date, time, timestamp or array column delivers the server text while the change stream renders the same cell in its own form, so one `__changes` log holds two spellings"
+    history: "2026-11-25 - verifier on the group C text remedy: broadening the override table made the baseline leg accept a text declaration the stream renders differently; main refused it before any write"
+    scope: source
+    switch: cdc-leg-text-declaration
+    engines:
+      postgres:
+        cells:
+          - a_pending_baseline_declared_text_over_a_server_text_column_is_refused_and_its_remedy_delivers_postgres
+      mysql:
+        na: "a MySQL baseline leg reads date and time as text already; the PostgreSQL text projection the guard names does not run"
+      mssql:
+        na: "the guard is PostgreSQL only; a SQL Server CDC baseline leg has no server text projection"
+      mongo:
+        na: "a MongoDB export has no PostgreSQL text projection"
+      oracle:
+        na: "the guard is PostgreSQL only; an Oracle CDC baseline leg has no server text projection"
+
+  - name: text-declared-temporal-cursor
+    class: "an incremental cursor_column declared text over a date or timestamp lands as text, whose order is not its order in time, and the cursor admission lets it through"
+    history: "2026-11-25 - verifier on the group C text remedy: the override table now reads a temporal column as text, so cursor_renders admitted a Utf8 cursor over it"
+    scope: source
+    switch: text-declared-temporal-cursor
+    engines:
+      postgres:
+        cells:
+          - a_temporal_cursor_declared_text_is_refused_on_every_command_postgres
+      mysql:
+        na: "a MySQL temporal column is not read through a server text projection; its text declaration is refused as an override mismatch"
+      mssql:
+        na: "a SQL Server temporal column is not read through a server text projection"
+      mongo:
+        na: "a MongoDB export has no PostgreSQL text projection"
+      oracle:
+        na: "an Oracle temporal column is not read through a server text projection"
