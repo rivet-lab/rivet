@@ -436,10 +436,8 @@ jobs:
             say cache miss
             rm -rf .mutants-cache
           fi
-          # Up to eight runners, at least ~10 mutants each: every shard pays a build and a
-          # baseline (~6 min), so a small diff on eight runners buys nothing.
+          # One shard per ~10 mutants; N <= MUTANTS_DIFF_BUDGET bounds the count, so no second cap.
           SHARD_N=$(( (N + 9) / 10 ))
-          SHARD_N=$(( SHARD_N > 8 ? 8 : SHARD_N ))
           say shard_n "$SHARD_N"
           if [ "$CACHE" = miss ] && [ "$SHARD_N" -gt 0 ] && [ "$READY" != "true" ]; then
             say held true
