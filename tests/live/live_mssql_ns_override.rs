@@ -82,6 +82,7 @@ fn a_value_past_the_nanosecond_range_is_refused_and_never_written_as_null() {
                 "{ctx}: nothing is written before the refusal"
             );
             let table_q = table.clone();
+            let datetime = case.ty == "DATETIME";
             let said = rig.refuses_twice_and_walks_out(
                 &["run"],
                 &[],
@@ -94,6 +95,20 @@ fn a_value_past_the_nanosecond_range_is_refused_and_never_written_as_null() {
                             for f in std::fs::read_dir(r.out_dir()).expect("the destination").flatten() {
                                 let _ = std::fs::remove_file(f.path());
                             }
+                        },
+                    ),
+                    Remedy::new(
+                        "Declare `v: text` under `columns:` and rivet delivers the server's own text for every row",
+                        Then::DeliversTheSource,
+                        move |r| {
+                            r.rebuilt(|rig| {
+                                let rig = rig.restage("full", &["columns: {v: text}"]);
+                                if datetime {
+                                    rig.no_oracle("the ledger renders DATETIME through DATETIME2(7) (.1233333) while the server's own text is .123; graded against CONVERT in a_temporal_column_declared_text_is_delivered_as_the_servers_text")
+                                } else {
+                                    rig
+                                }
+                            })
                         },
                     ),
                     Remedy::new("Declare the column `timestamp`", Then::DeliversTheSource, |r| {
@@ -136,4 +151,150 @@ fn in_range_values_under_the_override_keep_every_digit_and_null_stays_null() {
         assert_eq!(got.len(), case.in_range.len() + 1, "{}: {got:?}", case.ty);
         assert_eq!(got, want, "{}", case.ty);
     }
+}
+
+/// A temporal column type with the values a nanosecond timestamp cannot hold and the ones it can.
+struct TextCase {
+    ty: &'static str,
+    style: u8,
+    values: &'static [&'static str],
+}
+
+const TEXT_CASES: &[TextCase] = &[
+    TextCase {
+        ty: "DATETIME2(7)",
+        style: 121,
+        values: &[
+            "'0001-01-01 00:00:00.1234567'",
+            "'1600-01-01 00:00:00.0000001'",
+            "'2024-02-29 12:34:56.1234567'",
+            "'2300-01-01 00:00:00'",
+            "'9999-12-31 23:59:59.9999999'",
+        ],
+    },
+    TextCase {
+        ty: "DATETIMEOFFSET(7)",
+        style: 121,
+        values: &[
+            "'0001-01-01 00:00:00.1234567 +00:00'",
+            "'1600-01-01 00:00:00.0000001 +05:30'",
+            "'2024-02-29 12:34:56.1234567 +02:00'",
+            "'2300-01-01 00:00:00 -08:00'",
+            "'9999-12-31 23:59:59.9999999 +00:00'",
+        ],
+    },
+    TextCase {
+        ty: "DATETIME2(3)",
+        style: 121,
+        values: &["'0001-01-01 00:00:00.123'", "'9999-12-31 23:59:59.999'"],
+    },
+    TextCase {
+        ty: "DATETIME",
+        style: 121,
+        values: &[
+            "'1753-01-01'",
+            "'2024-02-29 12:34:56.997'",
+            "'9999-12-31 23:59:59.997'",
+        ],
+    },
+    TextCase {
+        ty: "SMALLDATETIME",
+        style: 120,
+        values: &["'1900-01-01'", "'2024-02-29 12:34'", "'2079-06-06 23:59'"],
+    },
+];
+
+/// A temporal column declared `text` delivers the server's own `CONVERT(varchar, v, style)` text (style 121, and 120 for SMALLDATETIME, whose precision is the minute) for every value, the year 0001 and 9999 included, and NULL as NULL.
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn a_temporal_column_declared_text_is_delivered_as_the_servers_text() {
+    require_alive(LiveService::Mssql);
+    for case in TEXT_CASES {
+        let (table, _guard) = table_of(case.ty, case.values);
+        let rig = Rig::mssql_batch(&table)
+            .no_oracle("graded below against the server's own CONVERT text")
+            .export_line("columns: {v: text}");
+        rig.run_ok();
+        let want = sqlcmd_lines(
+            "rivet-mssql-1",
+            &format!(
+                "SELECT ISNULL(CONVERT(varchar(40), v, {}), 'NULL') FROM dbo.{table} ORDER BY id",
+                case.style
+            ),
+        );
+        let got: Vec<String> = dir_parquet_display(&rig.out_dir(), "v")
+            .into_iter()
+            .map(|v| v.unwrap_or_else(|| "NULL".to_string()))
+            .collect();
+        assert_eq!(
+            parquet_column_type(&rig.out_dir(), "v"),
+            arrow::datatypes::DataType::Utf8,
+            "{}",
+            case.ty
+        );
+        assert_eq!(
+            got, want,
+            "{}: delivered text vs the server CONVERT text",
+            case.ty
+        );
+    }
+}
+
+/// A `datetime2(7)` / `datetimeoffset(7)` column declared `text` loads into `kind` and a second client reads back the server's own text, years 0001 and 9999 included.
+fn text_loads_into(kind: WarehouseKind, case: &TextCase) {
+    require_alive(LiveService::Mssql);
+    let Some(mut w) = Warehouse::of(kind, "mssqltxt") else {
+        return;
+    };
+    let (table, _guard) = table_of(case.ty, case.values);
+    w.adopt(&table);
+    let rig = w.shape(
+        Rig::mssql_batch(&table)
+            .no_oracle("graded below by the warehouse's own read of the delivered text against the server's CONVERT text")
+            .export_line("columns: {v: text}"),
+        "id",
+    );
+    rig.run_ok();
+    w.load(&rig);
+    let want = sqlcmd_lines(
+        "rivet-mssql-1",
+        &format!(
+            "SELECT ISNULL(CONVERT(varchar(40), v, {}), 'NULL') FROM dbo.{table} ORDER BY id",
+            case.style
+        ),
+    );
+    let got: Vec<String> = w
+        .texts(&table, "id", "v")
+        .into_iter()
+        .map(|(_, v)| v.unwrap_or_else(|| "NULL".to_string()))
+        .collect();
+    assert_eq!(
+        got, want,
+        "{} into {kind:?}: read back vs the server text",
+        case.ty
+    );
+}
+
+fn text_loads_every_case_into(kind: WarehouseKind) {
+    for case in &TEXT_CASES[..2] {
+        text_loads_into(kind, case);
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql + clickhouse + fake-gcs"]
+fn a_temporal_declared_text_loads_into_clickhouse_as_the_servers_text() {
+    text_loads_every_case_into(WarehouseKind::ClickHouse);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql + BigQuery creds"]
+fn a_temporal_declared_text_loads_into_bigquery_as_the_servers_text() {
+    text_loads_every_case_into(WarehouseKind::BigQuery);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql + Snowflake creds"]
+fn a_temporal_declared_text_loads_into_snowflake_as_the_servers_text() {
+    text_loads_every_case_into(WarehouseKind::Snowflake);
 }

@@ -101,7 +101,6 @@ fn kind_of(t: &RivetType) -> Kind {
 
 const TEXTS: &[Kind] = &[Text, Json];
 const STAMPS: &[Kind] = &[Naive, Utc];
-const STAMPS_NS: &[Kind] = &[Naive, Utc, NaiveNs, UtcNs];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Native {
@@ -171,8 +170,15 @@ fn mssql_reads(native: Native, src: Kind, tgt: Kind) -> bool {
         I16 | I32 => &[Dec],
         I64 => &[I64, Dec],
         Text => &[Text, Json, Uuid],
-        Naive => STAMPS_NS,
-        Utc => STAMPS,
+        Naive | Utc if seeded!("mssql-text-over-datetime-refused", true, false) => {
+            if src == Naive {
+                &[Naive, Utc, NaiveNs, UtcNs]
+            } else {
+                &[Naive, Utc]
+            }
+        }
+        Naive => &[Naive, Utc, NaiveNs, UtcNs, Text],
+        Utc => &[Naive, Utc, Text],
         _ => &[],
     };
     allowed.contains(&tgt)
@@ -311,6 +317,33 @@ mod tests {
                 RivetType::Date
             });
             assert_eq!(got.unwrap(), RivetType::Date, "{e:?}");
+        }
+    }
+
+    #[test]
+    fn sql_server_reads_a_date_time_as_text_and_nothing_wider() {
+        let ts = |tz| RivetType::Timestamp {
+            unit: TimeUnit::Microsecond,
+            timezone: tz,
+        };
+        for (native, src) in [
+            ("datetime2", ts(None)),
+            ("datetime", ts(None)),
+            ("smalldatetime", ts(None)),
+            ("datetimeoffset", ts(Some("UTC".into()))),
+        ] {
+            assert!(
+                override_is_read(Engine::Mssql, native, &src, &RivetType::String),
+                "{native}"
+            );
+            assert!(
+                !override_is_read(Engine::Mssql, native, &src, &RivetType::Json),
+                "{native} json"
+            );
+            assert!(
+                !override_is_read(Engine::Mssql, native, &src, &RivetType::Int64),
+                "{native} int"
+            );
         }
     }
 

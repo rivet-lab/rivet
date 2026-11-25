@@ -521,7 +521,7 @@ CDC (change streams) emits the same two-column shape prefixed with the
 
    `timestamp_ns` / `timestamp_tz_ns` stay accepted and mean the same as the default.
    **Caveats (verified live 2026-06-07; the default now takes this path):**
-   - A value outside 1677-09-21 .. 2262-04-11 (Arrow's nanosecond range) is **refused**: the run stops with `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5) naming the column and the value, before any part is written. Declare the column `timestamp` / `timestamp_tz` (microseconds, full range). Before 0.33.0 such a value was written as NULL with exit 0; before this release a `datetime2(7)` landed at microseconds over the full range with no override.
+   - A value outside 1677-09-21 .. 2262-04-11 (Arrow's nanosecond range) is **refused**: the run stops with `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5) naming the column and the value, before any part is written. Declare `<column>: text` under `columns:` to receive the server's own text of every value (`0001-01-01 00:00:00.1234567`, `9999-12-31 23:59:59.9999999 +00:00`), or declare the column `timestamp` / `timestamp_tz` (microseconds, full range). Before 0.33.0 such a value was written as NULL with exit 0; before this release a `datetime2(7)` landed at microseconds over the full range with no override.
    - **DuckDB** — native `TIMESTAMP_NS`, fully lossless.
    - **Snowflake** — autoloads as `NUMBER(38,0)` (raw nanos); `TO_TIMESTAMP_NTZ(col, 9)`
      recovers a **lossless** `TIMESTAMP_NTZ` (it holds 9 digits — the 7th survives).

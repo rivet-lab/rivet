@@ -100,8 +100,10 @@ pub fn timestamp_nanos_or_refuse(
                 "{source}: column `{column}` holds {dt}, outside the nanosecond timestamp range \
                  ({NANOSECOND_RANGE}) its nanosecond type (a sub-microsecond column, or a \
                  `timestamp_ns` / `timestamp_tz_ns` override) delivers, and writing it as NULL would \
-                 lose the value. Declare the column `timestamp` (microseconds, full range) or \
-                 `timestamp_tz` in `columns:` instead, or CAST it in the export's `query:`."
+                 lose the value. Declare `{column}: text` under `columns:` and rivet delivers the \
+                 server's own text for every row. Declare the column `timestamp` (microseconds, \
+                 full range) or `timestamp_tz` in `columns:` instead, or CAST it in the export's \
+                 `query:`."
             ),
         )
     })
@@ -330,7 +332,9 @@ mod tests {
             let text = format!("{err:#}");
             assert!(
                 text.contains("column `event_ts` holds ")
-                    && text.contains("Declare the column `timestamp`"),
+                    && text.contains(
+                        "Declare `event_ts: text` under `columns:` and rivet delivers the server's own text for every row. Declare the column `timestamp`"
+                    ),
                 "{text}"
             );
         }
