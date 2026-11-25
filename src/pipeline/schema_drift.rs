@@ -4,7 +4,9 @@ use crate::config::SchemaDriftPolicy;
 use crate::error::{Result, SchemaDriftError};
 use crate::journal::RunEvent;
 use crate::plan::ResolvedRunPlan;
-use crate::state::{PendingBaselines, SchemaColumn, StateStore, schema_change_between};
+use crate::state::{
+    PendingBaselines, SchemaChange, SchemaColumn, StateStore, schema_change_between,
+};
 
 use super::summary::RunSummary;
 
@@ -203,6 +205,21 @@ fn judge(
     verdict
 }
 
+/// The lines that name what a schema change added, removed and retyped.
+fn drift_lines(change: &SchemaChange) -> Vec<String> {
+    let mut lines = Vec::new();
+    if !change.added.is_empty() {
+        lines.push(format!("  added: {}", change.added.join(", ")));
+    }
+    if !change.removed.is_empty() {
+        lines.push(format!("  removed: {}", change.removed.join(", ")));
+    }
+    for (col, old, new) in &change.type_changed {
+        lines.push(format!("  type changed: {col} ({old} → {new})"));
+    }
+    lines
+}
+
 /// Detect drift of `columns` against the baseline of `export_name` and act per `policy`.
 fn hold_or_refuse(
     state: &StateStore,
@@ -239,30 +256,18 @@ fn hold_or_refuse(
         SchemaDriftPolicy::Continue => pending.set(export_name, columns.to_vec()),
         SchemaDriftPolicy::Warn => {
             log::warn!("export '{export_name}': schema changed!");
-            if !change.added.is_empty() {
-                log::warn!("  added: {}", change.added.join(", "));
-            }
-            if !change.removed.is_empty() {
-                log::warn!("  removed: {}", change.removed.join(", "));
-            }
-            for (col, old, new) in &change.type_changed {
-                log::warn!("  type changed: {col} ({old} → {new})");
-            }
+            drift_lines(&change)
+                .iter()
+                .for_each(|line| log::warn!("{line}"));
             pending.set(export_name, columns.to_vec());
         }
         SchemaDriftPolicy::Fail => {
             log::error!(
                 "export '{export_name}': schema drift detected — aborting (on_schema_drift: fail)"
             );
-            if !change.added.is_empty() {
-                log::error!("  added: {}", change.added.join(", "));
-            }
-            if !change.removed.is_empty() {
-                log::error!("  removed: {}", change.removed.join(", "));
-            }
-            for (col, old, new) in &change.type_changed {
-                log::error!("  type changed: {col} ({old} → {new})");
-            }
+            drift_lines(&change)
+                .iter()
+                .for_each(|line| log::error!("{line}"));
             return Err(SchemaDriftError::new(format!(
                 "schema drift detected for export '{export_name}': \
                  {} column(s) added, {} removed, {} retyped — \
@@ -491,6 +496,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_drift_lines_name_each_kind_of_change_that_happened_and_no_other() {
+        let change = |added: &[&str], removed: &[&str], retyped: bool| SchemaChange {
+            added: added.iter().map(|s| s.to_string()).collect(),
+            removed: removed.iter().map(|s| s.to_string()).collect(),
+            type_changed: if retyped {
+                vec![("v".into(), "Int64".into(), "Utf8".into())]
+            } else {
+                Vec::new()
+            },
+        };
+        assert!(drift_lines(&change(&[], &[], false)).is_empty());
+        assert_eq!(
+            drift_lines(&change(&["a", "b"], &[], false)),
+            vec!["  added: a, b"]
+        );
+        assert_eq!(
+            drift_lines(&change(&[], &["c"], false)),
+            vec!["  removed: c"]
+        );
+        assert_eq!(
+            drift_lines(&change(&["a"], &["c"], true)),
+            vec![
+                "  added: a",
+                "  removed: c",
+                "  type changed: v (Int64 → Utf8)"
+            ]
+        );
+    }
+
     fn ends_clean(st: &StateStore, s: &mut RunSummary) {
         s.pending_baselines.commit(st);
     }
@@ -502,6 +537,7 @@ mod tests {
         let cols = vec![col("id", "Int64"), col("name", "Utf8")];
         check_and_persist(&st, "orders", &cols, SchemaDriftPolicy::Fail, &mut s).unwrap();
         assert_eq!(s.schema_changed, Some(false));
+        assert!(!s.pending_baselines.is_empty(), "the baseline is held");
         assert_eq!(
             st.get_stored_schema("orders").unwrap(),
             None,

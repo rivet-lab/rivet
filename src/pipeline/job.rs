@@ -2640,6 +2640,60 @@ mod tests {
         assert_eq!(outcome("interrupted", true), None);
     }
 
+    /// An incremental plan on `updated_at` over the shape the job tests share.
+    fn cursor_plan() -> ResolvedRunPlan {
+        use crate::plan::{ExtractionStrategy, IncrementalCursorPlan};
+        let mut plan = chunked_plan_with_quality(None);
+        plan.strategy = ExtractionStrategy::Incremental(IncrementalCursorPlan {
+            primary_column: "updated_at".into(),
+            fallback_column: None,
+            mode: crate::config::IncrementalCursorMode::SingleColumn,
+            settle: None,
+        });
+        plan
+    }
+
+    /// The incremental cursor moves only for a successful run whose manifest landed, and a failed store stops the run.
+    #[test]
+    fn settle_incremental_cursor_advances_only_a_run_that_succeeded_with_its_manifest() {
+        use super::settle_incremental_cursor;
+        let stored = |status: &str, gap: Option<&str>| {
+            let st = crate::state::StateStore::open_in_memory().unwrap();
+            let plan = cursor_plan();
+            let mut summary = RunSummary::stub_for_testing("run-1", "orders");
+            summary.status = status.into();
+            summary.cursor_high = Some("2026-05-30T12:00:00Z".into());
+            let gap = gap.map(str::to_string);
+            settle_incremental_cursor(&st, &plan, &summary, &gap, "export").unwrap();
+            st.get("orders", &plan.source.state_key())
+                .unwrap()
+                .last_cursor_value
+        };
+        assert_eq!(
+            stored("success", None).as_deref(),
+            Some("2026-05-30T12:00:00Z")
+        );
+        assert_eq!(stored("failed", None), None, "a failed status");
+        assert_eq!(stored("success", Some("gap")), None, "a manifest gap");
+    }
+
+    #[test]
+    fn settle_incremental_cursor_raises_the_stop_of_a_cursor_that_could_not_be_stored() {
+        use super::settle_incremental_cursor;
+        let st = crate::state::StateStore::open_in_memory().unwrap();
+        let plan = chunked_plan_with_quality(None);
+        let mut summary = RunSummary::stub_for_testing("run-1", "orders");
+        summary.status = "success".into();
+        summary.cursor_high = Some("7".into());
+        let stop = settle_incremental_cursor(&st, &plan, &summary, &None, "export")
+            .expect_err("a cursor without an identity cannot be stored");
+        assert_eq!(
+            crate::error::error_code(&stop),
+            Some("RIVET_STATE_CURSOR_NOT_STORED"),
+            "{stop:#}"
+        );
+    }
+
     #[test]
     fn skip_empty_skips_only_a_run_that_delivered_nothing() {
         use super::ok_status;

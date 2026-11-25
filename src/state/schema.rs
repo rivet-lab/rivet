@@ -205,6 +205,24 @@ mod tests {
     }
 
     #[test]
+    fn the_baseline_in_force_is_the_held_one_else_the_stored_one() {
+        let st = store();
+        let col = |ty: &str| {
+            vec![SchemaColumn {
+                name: "id".into(),
+                data_type: ty.into(),
+            }]
+        };
+        let mut pending = PendingBaselines::default();
+        assert_eq!(pending.in_force(&st, "k"), None, "nothing held or stored");
+        st.store_schema("k", &col("Int64")).unwrap();
+        assert_eq!(pending.in_force(&st, "k"), Some(col("Int64")));
+        pending.set("k", col("Utf8"));
+        assert_eq!(pending.in_force(&st, "k"), Some(col("Utf8")));
+        assert_eq!(pending.in_force(&st, "other"), None);
+    }
+
+    #[test]
     fn first_schema_stored_no_change() {
         let s = store();
         let cols = vec![
