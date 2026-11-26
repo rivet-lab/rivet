@@ -9,6 +9,7 @@ reader (DuckDB) grades the delivered parts, never rivet's own counters.
 from __future__ import annotations
 
 import concurrent.futures as cf
+import functools
 import hashlib
 import json
 import math
@@ -291,9 +292,54 @@ _BIT_NATIVE = re.compile(r"BIT(?:\((\d+)\))?", re.I)
 _HEX_PAIRS = re.compile(r"(?:[0-9A-Fa-f]{2})*")
 
 
+SRID_BYTES = 4
+_SPATIAL_LIT = re.compile(r"ST_GeomFromText\('(?:[^']|'')*'\)", re.I)
+SPATIAL_STANDS = (STAND["mysql"], "mysql://rivet:rivet@127.0.0.1:3307/rivet")
+
+
+class Spatial(bytes):
+    """The MySQL server's own bytes of a spatial value: a 4-byte SRID, then WKB."""
+
+
+@functools.cache
+def server_geometry(lit: str) -> Spatial:
+    """The bytes a MySQL server holds for a spatial literal, read as `HEX(literal)`; raises when no stand answers."""
+    for url in SPATIAL_STANDS:
+        p = cdc._mysql(url, f"SELECT HEX({lit});")
+        last = p.stdout.strip().splitlines()[-1:] if p.ok else []
+        if last and re.fullmatch(r"(?:[0-9A-F]{2})+", last[0]):
+            return Spatial(bytes.fromhex(last[0]))
+    raise RuntimeError(f"no MySQL stand rendered the spatial literal {lit}: it cannot be graded")
+
+
+def spatial_verdict(exp: Spatial, target: str, got, csv: bool = False) -> str:
+    """OK or WRONG for a delivered spatial cell: the lowercase hex of the WKB under no override, the server's own bytes under `binary` and `text`, JSON text under `json`."""
+    if target == "json":
+        try:
+            json.loads(got.decode("utf-8") if isinstance(got, (bytes, bytearray, memoryview)) else got)
+        except (TypeError, ValueError):
+            return WRONG
+        return "OK"
+    if target == "text":
+        raw = got.encode("utf-8", "surrogateescape") if isinstance(got, str) else bytes(got) if isinstance(got, (bytes, bytearray, memoryview)) else None
+        return "OK" if raw == bytes(exp) else WRONG
+    if target == "binary":
+        raw = got if isinstance(got, (bytes, bytearray, memoryview)) else bytes.fromhex(got) if csv and isinstance(got, str) and _HEX_PAIRS.fullmatch(got) else None
+        return "OK" if raw is not None and bytes(raw) == bytes(exp) else WRONG
+    text = got.decode("ascii", "replace") if isinstance(got, (bytes, bytearray, memoryview)) else got
+    return "OK" if isinstance(text, str) and text == bytes(exp[SRID_BYTES:]).hex() else WRONG
+
+
+def excused_by_fidelity(engine: str, lits: list[str], fidelity: str) -> bool:
+    """A changed value is declared lossy by the column's fidelity, never when the source literal is server truth (a spatial value)."""
+    return fidelity in ("lossy", "logical_string", "unsupported") and not any(isinstance(parse_lit(engine, l), Spatial) for l in lits)
+
+
 def parse_lit(engine: str, lit: str):
-    """The Python value of a simple SQL literal: None for NULL, Decimal, bool, str; `...` when it cannot be read."""
+    """The Python value of a simple SQL literal: None for NULL, Decimal, bool, str, the server's bytes for a spatial literal; `...` when it cannot be read."""
     s = te.reduce(engine, lit).strip()
+    if engine == "mysql" and _SPATIAL_LIT.fullmatch(s):
+        return server_geometry(s)
     if (n := te.numeric_of(s)) is not None:
         return n
     if s.upper() == "NULL" or (engine == "oracle" and s == "''"):
@@ -542,6 +588,8 @@ def pg_array_elements(lit: str, base: str):
 
 def element_got(exp, got, base: str, csv: bool = False):
     """A delivered element in the type its source literal is read as: bytes of a text value decode, text of a binary value encodes, a CSV hex of bytes unhexes."""
+    if isinstance(exp, Spatial):
+        return got
     if csv and isinstance(got, str) and isinstance(exp, bytes) and (raw := _unhex_text_bytes(got)) is not None:
         return raw
     if isinstance(got, str) and isinstance(exp, bytes):
@@ -614,6 +662,8 @@ def compare(engine: str, src_lit: str, src_family: str, target: str, got, csv: b
         return NULLED
     if csv and got == "" and not _blank(exp):
         return WRONG
+    if isinstance(exp, Spatial) and target in ("none", "binary", "text", "json"):
+        return spatial_verdict(exp, target, got, csv)
     if target == "binary" and engine == "mysql" and (bits := _bit_bytes(native, exp)) is not None:
         return _same_bit_bytes(bits, got, csv)
     if engine == "postgres" and native.endswith("[]"):
@@ -890,7 +940,7 @@ def grade_run(engine: str, cell: str, p: core.Proc, check: core.Proc, fidelity: 
         return Result(cell, DELIVERED, COLUMNS, f"delivered {sorted(desc)}, expected {sorted(want)}", fidelity=fidelity)
     if fmt == "parquet" and target != "none" and not type_ok(target, desc.get(key, "?")):
         return Result(cell, DELIVERED, IGNORED, f"declared {target}, delivered {desc.get(key)}", fidelity=fidelity)
-    nulled, wrong, zeros = [], [], 0
+    nulled, wrong, wrong_lits, zeros = [], [], [], 0
     for i in range(1, n_rows + 1):
         lit = src_lits[i - 1] if i - 1 < len(src_lits) else "NULL"
         v = compare(engine, lit, col.family, target, rows[i][key], fmt == "csv", col.native) if expect is None \
@@ -901,11 +951,12 @@ def grade_run(engine: str, cell: str, p: core.Proc, check: core.Proc, fidelity: 
             nulled.append(lit)
         elif v == WRONG:
             wrong.append(f"{lit}->{rows[i][key]!r}")
+            wrong_lits.append(lit)
     if unwarned := zero_date_unwarned(zeros, warned_counts(p.out).get(key, 0)):
         nulled.append(unwarned)
     if nulled:
         return Result(cell, DELIVERED, NULLED, f"{len(nulled)} non-NULL values delivered as NULL, e.g. {nulled[:3]}", fidelity=fidelity)
-    if wrong and fidelity in ("lossy", "logical_string", "unsupported"):
+    if wrong and excused_by_fidelity(engine, wrong_lits, fidelity):
         return Result(cell, DECLARED, "", f"{len(wrong)} values changed under fidelity {fidelity}", fidelity=fidelity)
     if wrong:
         return Result(cell, DELIVERED, WRONG, f"{len(wrong)} values changed under fidelity {fidelity or '?'}, e.g. {wrong[:3]}", fidelity=fidelity)
@@ -1242,6 +1293,35 @@ def nanosecond_read_keeps_every_digit() -> bool:
         and got["m"] == "1677-09-21 00:12:43.1452242" and desc["m"] == "TIMESTAMP_NS"
 
 
+POINT_ORIGIN = Spatial(bytes(SRID_BYTES) + bytes.fromhex("0101000000") + bytes(16))
+
+
+def spatial_self_test() -> None:
+    """A spatial cell is graded against the server's own bytes: a wrong value is WRONG, a right one OK, in both forms and under `binary`."""
+    global server_geometry
+    real, server_geometry = server_geometry, lambda lit: POINT_ORIGIN
+    try:
+        lit, wkb = "ST_GeomFromText('POINT(0 0)')", bytes(POINT_ORIGIN[SRID_BYTES:]).hex()
+        assert parse_lit("mysql", lit) == POINT_ORIGIN and parse_lit("mysql", "ST_GeomFromText('POINT(0 0)')") is not ...
+        assert compare("mysql", lit, "other", "none", wkb, False, "POINT") == "OK" and compare("mysql", lit, "other", "none", wkb, True, "POINT") == "OK"
+        assert compare("mysql", lit, "other", "none", "garbage", True, "POINT") == WRONG and compare("mysql", lit, "other", "none", wkb[:-2] + "01", False, "POINT") == WRONG
+        assert compare("mysql", lit, "other", "none", POINT_ORIGIN.hex(), True, "POINT") == WRONG, "the SRID prefix is not part of the delivered hex"
+        assert compare("mysql", lit, "other", "none", wkb.encode(), False, "POINT") == "OK" and compare("mysql", lit, "other", "none", wkb[:-2].encode() + b"01", False, "POINT") == WRONG, "a text column read back as bytes is its text"
+        assert compare("mysql", lit, "other", "none", "", True, "POINT") == WRONG and compare("mysql", lit, "other", "none", None, False, "POINT") == NULLED
+        assert compare("mysql", lit, "other", "binary", bytes(POINT_ORIGIN), False, "POINT") == "OK" and compare("mysql", lit, "other", "binary", POINT_ORIGIN.hex(), True, "POINT") == "OK"
+        assert compare("mysql", lit, "other", "binary", bytes(POINT_ORIGIN[SRID_BYTES:]), False, "POINT") == WRONG, "under binary the server's own bytes are the SRID and the WKB"
+        assert compare("mysql", lit, "other", "binary", POINT_ORIGIN.hex(), False, "POINT") == WRONG, "a typed binary column holds bytes, not their hex text"
+        assert excused_by_fidelity("mysql", [lit], "logical_string") is False and excused_by_fidelity("mysql", ["1"], "logical_string") is True and excused_by_fidelity("mysql", ["1"], "exact") is False
+        internal = bytes(POINT_ORIGIN).decode("latin-1")
+        assert all(compare("mysql", lit, "other", t, internal, c, "POINT") == "OK" and compare("mysql", lit, "other", t, internal[:-1] + "\x01", c, "POINT") == WRONG and compare("mysql", lit, "other", t, "garbage", c, "POINT") == WRONG for t in ("text",) for c in (False, True)), "a text override holds the server's bytes"
+        assert compare("mysql", lit, "other", "binary", b"garbage", False, "POINT") == WRONG and compare("mysql", lit, "other", "binary", "garbage", True, "POINT") == WRONG
+        gc = Spatial(bytes(SRID_BYTES) + bytes.fromhex("010700000001000000" + "0101000000" + "00" * 16))
+        assert spatial_verdict(gc, "json", bytes(gc)) == WRONG, "a json override takes JSON text, never the raw SRID and WKB bytes"
+        assert spatial_verdict(gc, "json", '{"type": "GeometryCollection"}') == "OK", "a json override takes JSON text"
+    finally:
+        server_geometry = real
+
+
 def self_test() -> None:
     """Grade the grader: axes come from the product, every failure class fires on its exact harm, a delivered value passes."""
     ax = axes()
@@ -1253,6 +1333,7 @@ def self_test() -> None:
     assert compare("mysql", "-2147483648", "int", "decimal(18,-2)", Decimal("-2147483600")) == WRONG, "a negative scale rounds away digits"
     assert compare("mysql", "-2147483600", "int", "decimal(18,-2)", Decimal("-2147483600")) == "OK"
     assert ZERO_DATE_LIT.fullmatch("'0000-00-00'") and ZERO_DATE_LIT.fullmatch("'2026-00-15 00:00:00'") and not ZERO_DATE_LIT.fullmatch("'2026-11-01 00:00:00'")
+    spatial_self_test()
     assert parse_lit("mysql", "NULL") is None and parse_lit("oracle", "''") is None and parse_lit("mysql", "''") == ""
     assert parse_lit("mysql", "-5") == Decimal(-5) and parse_lit("mysql", "'a''b'") == "a'b" and parse_lit("postgres", "TRUE") is True
     assert parse_lit("mysql", "UNHEX('00')") == b"\0" and parse_lit("mysql", "JSON_OBJECT('a',1)") is ...
