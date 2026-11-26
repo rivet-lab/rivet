@@ -121,15 +121,26 @@ fn refuse_mssql_datetime_text_declared(
         "datetime4" => "smalldatetime",
         other => other,
     };
+    let range_remedy = match declared.source_native_type.as_str() {
+        "datetimen" | "datetime4" => String::new(),
+        wire => format!(
+            "; if the column holds a value outside {}, declare `{column}: {}` instead, which \
+             delivers the full range at microseconds on both",
+            crate::types::NANOSECOND_RANGE,
+            if wire == "datetimeoffsetn" {
+                "timestamp_tz"
+            } else {
+                "timestamp"
+            }
+        ),
+    };
     crate::rivet_bail!(
         crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH,
         "export '{parent}': column '{column}' is declared text over a `{native}` column, which the \
          baseline leg would deliver as the server's own text while the change stream renders the \
          same cell in its own form, so one `__changes` log would hold two spellings of it; no row \
          was delivered. Remove `{column}` from `columns:` and the baseline and the stream both \
-         deliver the `{native}` column's own type; if the column holds a value outside \
-         1677-09-21..2262-04-11, declare `{column}: timestamp` (or `timestamp_tz` for a \
-         datetimeoffset) instead, which delivers the full range at microseconds on both."
+         deliver the `{native}` column's own type{range_remedy}."
     )
 }
 
@@ -501,11 +512,23 @@ mod tests {
                     )),
                     "{native}: {said_all}"
                 );
+                let want = match native {
+                    "datetime2" => Some("declare `v: timestamp` instead"),
+                    "datetimeoffsetn" => Some("declare `v: timestamp_tz` instead"),
+                    _ => None,
+                };
                 assert!(
-                    said_all.contains("Remove `v` from `columns:`")
-                        && said_all.contains("declare `v: timestamp` (or `timestamp_tz`"),
+                    said_all.contains("Remove `v` from `columns:`"),
                     "{native}: {said_all}"
                 );
+                assert_eq!(
+                    said_all.contains("1677-09-21..2262-04-11"),
+                    want.is_some(),
+                    "{native}: {said_all}"
+                );
+                if let Some(want) = want {
+                    assert!(said_all.contains(want), "{native}: {said_all}");
+                }
             }
         }
     }

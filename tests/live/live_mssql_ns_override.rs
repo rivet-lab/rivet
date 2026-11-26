@@ -119,6 +119,10 @@ fn a_value_past_the_nanosecond_range_is_refused_and_never_written_as_null() {
                 ],
             );
             assert!(said.contains("column `v` holds "), "{ctx}: {said}");
+            assert!(
+                said.contains("`text` is for a batch export and a stream-only CDC export (SQL Server refuses it on a CDC baseline); a `mode: cdc` export that takes a baseline declares `timestamp` or `timestamp_tz`."),
+                "{ctx}: {said}"
+            );
         }
     }
 }
@@ -369,18 +373,17 @@ fn refused_alike(rig: &Rig, name: &str) -> String {
     String::from_utf8_lossy(&run.stderr).into_owned()
 }
 
-/// A CDC baseline leg declared `text` over a date-time is refused by the run, `doctor` and both `check` spellings, naming the column, the type and the remedy, and the remedy delivers the baseline and the stream as the column's own type.
+/// A CDC baseline leg declared `text` over a date-time is refused by the run, `doctor` and both `check` spellings, naming the column, the type and the remedy, and the remedy delivers the baseline and a change past the nanosecond range as the column's own type.
 #[test]
 #[ignore = "live: requires docker compose mssql (CDC)"]
 fn a_cdc_baseline_declared_text_over_a_date_time_is_refused_and_its_remedy_delivers() {
     let _serial = cross_process_serial("mssql_cdc");
     for (ty, native, literal, remedy) in CDC_TEXT_TYPES {
-        let scn = cdc_scenario("cdctxt_ms", ty, literal, |r| {
+        let mut scn = cdc_scenario("cdctxt_ms", ty, literal, |r| {
             declared_text(r.cdc_line("initial: snapshot"))
         });
         let name = scn.rig.export_name().to_string();
-        let mut rig = scn.rig;
-        let said = refused_alike(&rig, &name);
+        let said = refused_alike(&scn.rig, &name);
         assert!(
             said.contains(&format!(
                 "column 'v' is declared text over a `{native}` column, which the baseline leg would deliver as the server's own text while the change stream renders the same cell in its own form"
@@ -388,27 +391,62 @@ fn a_cdc_baseline_declared_text_over_a_date_time_is_refused_and_its_remedy_deliv
             "{ty}: {said}"
         );
         assert!(
-            said.contains("no row was delivered. Remove `v` from `columns:` and the baseline and the stream both deliver")
-                && said.contains("declare `v: timestamp` (or `timestamp_tz` for a datetimeoffset) instead"),
+            said.contains("no row was delivered. Remove `v` from `columns:` and the baseline and the stream both deliver"),
             "{ty}: {said}"
         );
+        if remedy.is_empty() {
+            assert!(!said.contains("1677-09-21"), "{ty}: {said}");
+        } else {
+            assert!(
+                said.contains(&format!(
+                    "if the column holds a value outside 1677-09-21..2262-04-11, declare `v: {remedy}` instead, which delivers the full range at microseconds on both"
+                )),
+                "{ty}: {said}"
+            );
+        }
         assert_eq!(
-            files_with_extension(&rig.out_dir(), "parquet").len(),
+            files_with_extension(&scn.rig.out_dir(), "parquet").len(),
             0,
             "{ty}: a refused baseline delivered a part"
         );
         if remedy.is_empty() {
-            rig.replace_export_line("columns:", "");
-            rig.replace_export_line("  v:", "");
+            scn.rig.replace_export_line("columns:", "");
+            scn.rig.replace_export_line("  v:", "");
         } else {
-            rig.replace_export_line("  v:", &format!("  v: \"{remedy}\""));
+            scn.rig
+                .replace_export_line("  v:", &format!("  v: \"{remedy}\""));
         }
-        rig.run_ok();
+        scn.rig.run_ok();
         assert_eq!(
-            dir_parquet_display(&rig.out_dir().join("snapshot"), "id").len(),
+            dir_parquet_display(&scn.rig.out_dir().join("snapshot"), "id").len(),
             1,
             "{ty}: the baseline after the remedy"
         );
+        if let Some((past, want)) = cdc_stream_past(ty) {
+            scn.sql(&format!(
+                "INSERT INTO dbo.{} (id, v) VALUES (2, {past})",
+                scn.table
+            ));
+            scn.settle();
+            scn.rig.run_ok();
+            assert_eq!(
+                dir_parquet_display(&scn.rig.out_dir(), "v"),
+                vec![Some(want.to_string())],
+                "{ty}: a change past the nanosecond range after the remedy"
+            );
+        }
+    }
+}
+
+/// The change inserted after a remedy that declares a microsecond timestamp, and the value the stream delivers for it.
+fn cdc_stream_past(ty: &str) -> Option<(&'static str, &'static str)> {
+    match ty {
+        "DATETIME2(7)" => Some(("'9999-12-31 23:59:59.999999'", "9999-12-31T23:59:59.999999")),
+        "DATETIMEOFFSET(7)" => Some((
+            "'9999-12-31 23:59:59.999999 +00:00'",
+            "9999-12-31T23:59:59.999999Z",
+        )),
+        _ => None,
     }
 }
 

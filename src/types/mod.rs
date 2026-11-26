@@ -103,7 +103,9 @@ pub fn timestamp_nanos_or_refuse(
                  lose the value. Declare `{column}: text` under `columns:` and rivet delivers the \
                  server's own text for every row. Declare the column `timestamp` (microseconds, \
                  full range) or `timestamp_tz` in `columns:` instead, or CAST it in the export's \
-                 `query:`."
+                 `query:`. `text` is for a batch export and a stream-only CDC export (SQL Server \
+                 refuses it on a CDC baseline); a `mode: cdc` export that takes a baseline \
+                 declares `timestamp` or `timestamp_tz`."
             ),
         )
     })
@@ -334,6 +336,9 @@ mod tests {
                 text.contains("column `event_ts` holds ")
                     && text.contains(
                         "Declare `event_ts: text` under `columns:` and rivet delivers the server's own text for every row. Declare the column `timestamp`"
+                    )
+                    && text.contains(
+                        "`text` is for a batch export and a stream-only CDC export (SQL Server refuses it on a CDC baseline); a `mode: cdc` export that takes a baseline declares `timestamp` or `timestamp_tz`."
                     ),
                 "{text}"
             );
