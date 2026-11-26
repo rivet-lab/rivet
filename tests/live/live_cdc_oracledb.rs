@@ -76,34 +76,34 @@ fn ops(v: &[(i64, &str)]) -> Vec<(i64, String)> {
     v.iter().map(|(i, o)| (*i, o.to_string())).collect()
 }
 
-/// An `int4` override on a fractional NUMBER fails the CDC run by column, like batch.
+/// An `int4` override on an integer NUMBER holding a value past int32 fails the CDC run by column, like batch.
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
-fn oracle_cdc_an_int_override_on_a_fractional_number_fails_by_column_not_null() {
+fn oracle_cdc_an_int_override_on_a_number_past_int32_fails_by_column_not_null() {
     let _serial = cross_process_serial("oracle_cdc");
     let d = tempfile::tempdir().unwrap();
-    let t = cdc_table(
-        "ora_cover",
-        "id NUMBER(18) PRIMARY KEY, amount NUMBER(10,2)",
-    );
+    let t = cdc_table("ora_cover", "id NUMBER(18) PRIMARY KEY, amount NUMBER(18)");
     let ckpt = d.path().join("cdc.ckpt");
     let over = r#"columns: { AMOUNT: int4 }"#;
     rig(&t, &ckpt, &d.path().join("anchor"))
         .export_line(over)
         .run_ok();
     let anchored = std::fs::read(&ckpt).unwrap();
-    ora_exec(&format!("INSERT INTO {} VALUES (1, 1.5)", t.name()));
+    ora_exec(&format!("INSERT INTO {} VALUES (1, 5000000000)", t.name()));
 
     let batch = Rig::oracle_batch(t.name())
         .export_line(over)
         .run_expect_fail();
-    let err = rig(&t, &ckpt, &d.path().join("out"))
+    let out = rig(&t, &ckpt, &d.path().join("out"))
         .export_line(over)
-        .run_expect_fail();
+        .run_args(&[]);
+    assert_refused(
+        &out,
+        Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5),
+    );
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(
-        err.contains("RIVET_SOURCE_VALUE_UNREPRESENTABLE")
-            && err.contains("column 'AMOUNT' is Int32")
-            && err.contains("\"1.5\""),
+        err.contains("column 'AMOUNT' is Int32") && err.contains("\"5000000000\""),
         "CDC must refuse naming the column, its type and the value: {err}\nbatch: {batch}"
     );
     assert_eq!(
@@ -846,12 +846,13 @@ fn oracle_cdc_a_change_older_than_an_alter_is_refused_by_code() {
     let d = tempfile::tempdir().unwrap();
     let t = cdc_table("ora_cmid", "id NUMBER(18) PRIMARY KEY, v NUMBER(18)");
     let ckpt = d.path().join("cdc.ckpt");
-    rig(&t, &ckpt, &d.path().join("anchor")).run_ok();
+    let anchor = rig(&t, &ckpt, &d.path().join("anchor"));
+    anchor.run_ok();
     let anchored = std::fs::read(&ckpt).unwrap();
     ora_exec(&format!("INSERT INTO {} VALUES (1, 10)", t.name()));
     ora_exec(&format!("ALTER TABLE {} ADD (w NUMBER(18))", t.name()));
     let out = d.path().join("out");
-    let err = rig(&t, &ckpt, &out).run_expect_fail();
+    let err = anchor.twin().dest_path(out.clone()).run_expect_fail();
     assert!(
         err.contains("[RIVET_SOURCE_CDC_UNDECODABLE]"),
         "the pre-ALTER change must be refused by code: {err}"
@@ -1694,6 +1695,7 @@ fn oracle_cdc_timestamp9_is_delivered_as_batch_delivers_it() {
     for declared in [
         "columns: {T9: timestamp_ns, Z9: timestamp_tz_ns, L9: timestamp_tz_ns}",
         "columns: {T9: text, Z9: text, L9: text}",
+        "",
     ] {
         let legs = ts9_legs(declared, &TS9_SEED, &TS9_CHANGES);
         assert_stream_is_batch(
@@ -1712,16 +1714,47 @@ fn oracle_cdc_timestamp9_is_delivered_as_batch_delivers_it() {
     }
 }
 
-/// An undeclared TIMESTAMP(9) column gets one verdict from the batch export, the CDC snapshot and the change stream.
+/// An undeclared TIMESTAMP(9) column is delivered as nanosecond text by the batch export, the CDC snapshot and the change stream alike, in years outside 1677..2262 too.
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
-fn oracle_timestamp9_undeclared_is_one_verdict_on_batch_and_cdc() {
+fn oracle_timestamp9_undeclared_is_nanosecond_text_on_batch_and_cdc() {
     let _serial = cross_process_serial("oracle_cdc");
-    let legs = ts9_legs("", &TS9_SEED, &TS9_CHANGES);
-    let want = Err("refused[RIVET_TYPE_UNSAFE_MAPPING exit 1]".to_string());
-    assert_eq!(legs.batch, want);
-    assert_eq!(legs.snapshot, want);
-    assert_eq!(legs.stream, want);
+    let mut seed = TS9_SEED.to_vec();
+    seed.push("5, TIMESTAMP '1500-03-04 05:06:07.123456789', TIMESTAMP '1500-03-04 05:06:07.123456789 +00:00', TIMESTAMP '1500-03-04 05:06:07.123456789 +00:00'");
+    let mut changes = TS9_CHANGES.to_vec();
+    changes.push("INSERT INTO {t} VALUES (13, TIMESTAMP '9999-06-07 08:09:10.999999999', TIMESTAMP '9999-06-07 08:09:10.999999999 +00:00', TIMESTAMP '9999-06-07 08:09:10.999999999 +00:00')");
+    let legs = ts9_legs("", &seed, &changes);
+    assert_stream_is_batch(
+        &legs,
+        "undeclared",
+        1..=5,
+        &[
+            ("insert", 10),
+            ("insert", 11),
+            ("insert", 12),
+            ("insert", 13),
+            ("update", 1),
+            ("update", 3),
+            ("delete", 2),
+        ],
+    );
+    let batch = stamp_cells(&legs.batch, "batch");
+    let one = batch.get(":1").expect("row 1");
+    assert!(
+        one.contains("2024-02-29T13:14:15.123456789")
+            && one.contains("2024-02-29T08:00:00.123456789Z"),
+        "{one}"
+    );
+    let five = batch.get(":5").expect("row 5");
+    assert!(five.contains("1500-03-04T05:06:07.123456789"), "{five}");
+    let thirteen = stamp_cells(&legs.stream, "stream");
+    assert!(
+        thirteen
+            .get("insert:13")
+            .expect("insert 13")
+            .contains("9999-06-07T08:09:10.999999999"),
+        "{thirteen:?}"
+    );
 }
 
 /// A TIMESTAMP(9) value past the nanosecond range under `timestamp_ns` is refused by one code on batch and CDC.

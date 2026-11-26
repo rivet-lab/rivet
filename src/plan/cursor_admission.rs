@@ -78,6 +78,43 @@ pub(crate) fn admit_incremental_cursor(
     Ok(())
 }
 
+/// Refuses a cursor `column` the export declares `text` over a date, time or timestamp the server renders: its text order is not its time order.
+fn refuse_text_declared_temporal(
+    src: &mut dyn Source,
+    config: &Config,
+    export: &ExportConfig,
+    query: &str,
+    column: &str,
+    overrides: &crate::types::ColumnOverrides,
+) -> Result<()> {
+    use crate::types::override_table::{Engine, server_text_declared};
+    let Some(target) = overrides.get(column) else {
+        return Ok(());
+    };
+    if seeded!("text-declared-temporal-cursor", true, false) {
+        return Ok(());
+    }
+    if config.source.source_type != SourceType::Postgres {
+        return Ok(());
+    }
+    let only = crate::types::ColumnOverrides::from([(column.to_string(), target.clone())]);
+    let Ok(detected) = src.type_mappings(query, &crate::types::ColumnOverrides::new()) else {
+        return Ok(());
+    };
+    let Some(declared) = server_text_declared(Engine::Postgres, &detected, &only) else {
+        return Ok(());
+    };
+    crate::rivet_bail!(
+        crate::error::codes::PLAN_CURSOR_TYPE_UNSUPPORTED,
+        "export '{}': cursor_column '{column}' is declared text over a `{}` column, whose text \
+         order is not its order in time (a year above 9999, a BC date), so the cursor could skip \
+         rows; nothing was read or written. Remove `{column}` from `columns:` so the cursor reads \
+         the column's own type",
+        export.name,
+        declared.source_native_type
+    )
+}
+
 /// The verdict on the primary cursor `column` of `query`.
 pub(crate) fn admission(
     probe: Option<&mut (dyn Source + '_)>,
@@ -111,6 +148,7 @@ pub(crate) fn admission(
     let Some(mapping) = mappings.iter().find(|m| m.column_name == column) else {
         return Ok(Admission::Admitted);
     };
+    refuse_text_declared_temporal(src, config, export, query, column, &overrides)?;
     let nullable = match src.column_nullable(query, column) {
         Ok(n) => n,
         Err(e) => return Ok(unverified(export, column, &e)),
@@ -457,5 +495,71 @@ mod tests {
         let config = exports_config(UNREACHABLE, export);
         let got = admit_exports(&config, &config.exports, Path::new("/nonexistent-dir"));
         assert!(matches!(got[0].verdict, Ok(Admission::Unverified(_))));
+    }
+
+    fn text_declared(config: &Config, detected: RivetType, declared: RivetType) -> Result<()> {
+        let mut probe = ProbeSource::describing(detected, Some(false));
+        let overrides = crate::types::ColumnOverrides::from([("k".to_string(), declared)]);
+        refuse_text_declared_temporal(
+            &mut probe,
+            config,
+            &config.exports[0],
+            "SELECT k FROM t",
+            "k",
+            &overrides,
+        )
+    }
+
+    /// A cursor column declared text over a PostgreSQL date is refused by code with the export, the column, the native type and the remedy.
+    #[test]
+    fn a_cursor_declared_text_over_a_postgres_date_is_refused_with_the_remedy() {
+        let err = text_declared(&config_of("postgres"), RivetType::Date, RivetType::String)
+            .expect_err("a server-rendered date declared text");
+        assert_eq!(
+            crate::error::code_of(&err).map(|c| c.id),
+            Some(crate::error::codes::PLAN_CURSOR_TYPE_UNSUPPORTED.id)
+        );
+        let text = format!("{err:#}");
+        assert!(
+            text.contains(
+                "export 'orders': cursor_column 'k' is declared text over a `native` column"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("Remove `k` from `columns:`"), "{text}");
+    }
+
+    /// The inputs next to the refused declaration are admitted: another engine, a column that is not server-rendered text, a declaration that is not text and a column nothing declares.
+    #[test]
+    fn the_inputs_next_to_a_refused_cursor_declaration_are_admitted() {
+        let pg = config_of("postgres");
+        let mut mysql = config_of("postgres");
+        mysql.source.source_type = SourceType::Mysql;
+        assert!(
+            text_declared(&mysql, RivetType::Date, RivetType::String).is_ok(),
+            "a source that is not PostgreSQL"
+        );
+        assert!(
+            text_declared(&pg, RivetType::Int64, RivetType::String).is_ok(),
+            "an integer cursor"
+        );
+        assert!(
+            text_declared(&pg, RivetType::Date, RivetType::Int64).is_ok(),
+            "a declaration that is not text"
+        );
+        let mut probe = ProbeSource::describing(RivetType::Date, Some(false));
+        let overrides = crate::types::ColumnOverrides::from([("k".to_string(), RivetType::String)]);
+        assert!(
+            refuse_text_declared_temporal(
+                &mut probe,
+                &pg,
+                &pg.exports[0],
+                "SELECT k FROM t",
+                "other",
+                &overrides,
+            )
+            .is_ok(),
+            "a column nothing declares"
+        );
     }
 }

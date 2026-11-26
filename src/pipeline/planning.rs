@@ -57,11 +57,58 @@ pub(crate) fn plan_batch_export(
             export.query.as_deref(),
         )
     })?;
+    refuse_text_the_stream_renders_otherwise(
+        config,
+        export,
+        &plan,
+        crate::plan::build::connect_source,
+    )?;
     let diags = crate::plan::validate_plan(&plan);
     if let Some(err) = log_plan_diagnostics(&plan.export_name, &diags) {
         return Err(err);
     }
     Ok(PlannedExport { plan, diags })
+}
+
+/// Refuses a CDC baseline leg that declares `text` over a column the server renders as text, which the change stream renders in its own form into the same `__changes` log.
+fn refuse_text_the_stream_renders_otherwise(
+    config: &Config,
+    export: &ExportConfig,
+    plan: &ResolvedRunPlan,
+    connect: impl FnOnce(&crate::config::SourceConfig) -> Result<Box<dyn Source>>,
+) -> Result<()> {
+    use crate::types::override_table::{Engine, server_text_declared};
+    let Some(parent) = export.snapshot_parent.as_deref() else {
+        return Ok(());
+    };
+    if seeded!("cdc-leg-text-declaration", true, false) {
+        return Ok(());
+    }
+    if plan.column_overrides.is_empty()
+        || config.source.source_type != crate::config::SourceType::Postgres
+    {
+        return Ok(());
+    }
+    let Ok(mut src) = connect(&config.source) else {
+        return Ok(());
+    };
+    let Ok(detected) = src.type_mappings(&plan.base_query, &crate::types::ColumnOverrides::new())
+    else {
+        return Ok(());
+    };
+    let Some(declared) = server_text_declared(Engine::Postgres, &detected, &plan.column_overrides)
+    else {
+        return Ok(());
+    };
+    let (column, native) = (&declared.column_name, &declared.source_native_type);
+    crate::rivet_bail!(
+        crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH,
+        "export '{parent}': column '{column}' is declared text over a `{native}` column, which the \
+         baseline leg would deliver as the server's own text while the change stream renders the \
+         same cell in its own form, so one `__changes` log would hold two spellings of it; no row \
+         was delivered. Remove `{column}` from `columns:`: the baseline and the stream then \
+         both deliver the `{native}` column's own type."
+    )
 }
 
 /// The refusals the source's own catalog decides before a write: an override the wire type cannot take, a missing relation, a strict or settle column.
@@ -117,7 +164,7 @@ pub(crate) fn select_exports(
 
 /// One batch export, or one baseline leg of a CDC export, planned and then admitted against the shared source connection.
 fn plan_and_admit(
-    src: &mut Option<Box<dyn Source>>,
+    src: &mut std::result::Result<Box<dyn Source>, String>,
     config: &Config,
     export: &ExportConfig,
     config_dir: &Path,
@@ -125,7 +172,7 @@ fn plan_and_admit(
     params: Option<&HashMap<String, String>>,
 ) -> Result<PlannedExport> {
     plan_batch_export(
-        src.as_deref_mut().map(|s| s as &mut dyn Source),
+        src.as_deref_mut().ok().map(|s| s as &mut dyn Source),
         config,
         export,
         config_dir,
@@ -133,10 +180,22 @@ fn plan_and_admit(
         params,
     )
     .and_then(|p| match src.as_deref_mut() {
-        Some(s) => {
+        Ok(s) => {
             admit_columns(s, config, &p.plan, export, config_dir, params, flags.strict).map(|()| p)
         }
-        None => Ok(p),
+        Err(_)
+            if p.plan.column_overrides.is_empty()
+                || seeded!("check-unreachable-override-admitted", true, false) =>
+        {
+            Ok(p)
+        }
+        Err(cause) => Err(crate::error::coded(
+            crate::error::codes::SOURCE_CONNECT_FAILED,
+            format!(
+                "export '{}' was not admitted: the source could not be reached, so its `columns:` overrides were not checked against the catalog: {cause}",
+                export.name
+            ),
+        )),
     })
 }
 
@@ -151,11 +210,11 @@ pub(crate) fn plan_run(
 ) -> Result<Vec<(String, Result<PlannedExport>)>> {
     let exports = select_exports(config, export_name, config_dir, params)?;
     let mut src = match crate::source::create_source(&config.source) {
-        Ok(src) => Some(src),
+        Ok(src) => Ok(src),
         Err(e) if config.source.columns_from_grants() => {
             return Err(super::attach_connect_hint(e, &config.source));
         }
-        Err(_) => None,
+        Err(e) => Err(format!("{e:#}")),
     };
     let mut planned = Vec::new();
     for export in &exports {
@@ -292,9 +351,10 @@ mod tests {
         let wide = || {
             col(
                 "n",
-                RivetType::Decimal {
-                    precision: 60,
-                    scale: 10,
+                RivetType::List {
+                    inner: Box::new(RivetType::List {
+                        inner: Box::new(RivetType::String),
+                    }),
                 },
             )
         };
@@ -334,9 +394,9 @@ mod tests {
         }
     }
 
-    /// A source that cannot connect stops a `columns_from: grants` plan with the connect refusal and lets any other plan go on without a catalog.
+    /// A source that cannot connect stops a `columns_from: grants` plan, refuses an export whose `columns:` it could not admit, and lets an export with no override go on.
     #[test]
-    fn an_unreachable_source_stops_a_grants_plan_and_not_a_plain_one() {
+    fn an_unreachable_source_refuses_an_unadmitted_override_and_not_a_plain_plan() {
         let dir = Path::new(".");
         let grants = one_export_config("mysql", ", columns_from: grants");
         let err = plan_run(&grants, dir, None, None, PlanFlags::default(), false)
@@ -347,6 +407,17 @@ mod tests {
         let planned = plan_run(&plain, dir, None, None, PlanFlags::default(), false).unwrap();
         assert_eq!(planned.len(), 1);
         assert_eq!(planned[0].0, "e");
+        assert!(planned[0].1.is_ok());
+        let mut over = plain.clone();
+        over.exports[0].columns = [("id".to_string(), "int64".to_string())].into();
+        let mut planned = plan_run(&over, dir, None, None, PlanFlags::default(), false).unwrap();
+        let err = planned
+            .remove(0)
+            .1
+            .err()
+            .expect("an override is not a pass");
+        crate::error::assert_coded(&err, "RIVET_SOURCE_CONNECT_FAILED", 2);
+        assert!(format!("{err:#}").contains("127.0.0.1"), "{err:#}");
     }
 
     /// Sealing refuses a destination holding `{partition}` by code and passes an expanded one.
@@ -364,5 +435,116 @@ mod tests {
             let err = refuse_to_seal(&p).unwrap_err();
             crate::error::assert_coded(&err, "RIVET_PLAN_PARTITION_TOKEN_UNEXPANDED", 1);
         }
+    }
+
+    fn declared_text_plan(column: &str) -> ResolvedRunPlan {
+        let mut plan = crate::plan::test_support::test_plan();
+        plan.column_overrides = [(column.to_string(), crate::types::RivetType::String)].into();
+        plan
+    }
+
+    fn connect_to(
+        native: &str,
+        rivet_type: crate::types::RivetType,
+    ) -> impl FnOnce(&crate::config::SourceConfig) -> Result<Box<dyn Source>> + '_ {
+        move |_| {
+            let column = crate::types::SourceColumn::simple("d", native, true);
+            let mapping = crate::types::TypeMapping::from_source(&column, rivet_type);
+            Ok(Box::new(ScriptedSource(vec![mapping])) as Box<dyn Source>)
+        }
+    }
+
+    fn stream_leg(config: &Config) -> ExportConfig {
+        let mut export = config.exports[0].clone();
+        export.snapshot_parent = Some("parent".into());
+        export
+    }
+
+    /// A CDC baseline leg declaring text over a PostgreSQL date is refused by code with the column, the native type and the remedy.
+    #[test]
+    fn a_baseline_leg_declaring_text_over_a_postgres_date_is_refused_with_the_remedy() {
+        let config = one_export_config("postgres", "");
+        let err = refuse_text_the_stream_renders_otherwise(
+            &config,
+            &stream_leg(&config),
+            &declared_text_plan("d"),
+            connect_to("date", crate::types::RivetType::Date),
+        )
+        .expect_err("a server-rendered date declared text");
+        assert_eq!(
+            crate::error::code_of(&err).map(|c| c.id),
+            Some(crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH.id)
+        );
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("export 'parent': column 'd' is declared text over a `date` column"),
+            "{text}"
+        );
+        assert!(
+            text.contains("no row was delivered. Remove `d` from `columns:`"),
+            "{text}"
+        );
+    }
+
+    fn run(
+        config: &Config,
+        export: &ExportConfig,
+        plan: &ResolvedRunPlan,
+        connect: impl FnOnce(&crate::config::SourceConfig) -> Result<Box<dyn Source>>,
+    ) -> Result<()> {
+        refuse_text_the_stream_renders_otherwise(config, export, plan, connect)
+    }
+
+    /// The same declaration is admitted where the leg is not a baseline, nothing is declared, the source is not PostgreSQL, the column is not server-rendered text or the source cannot be reached.
+    #[test]
+    fn the_inputs_next_to_a_refused_baseline_declaration_are_admitted() {
+        let date = || connect_to("date", crate::types::RivetType::Date);
+        let pg = one_export_config("postgres", "");
+        assert!(
+            run(&pg, &pg.exports[0], &declared_text_plan("d"), date()).is_ok(),
+            "no snapshot parent"
+        );
+        assert!(
+            run(
+                &pg,
+                &stream_leg(&pg),
+                &crate::plan::test_support::test_plan(),
+                date(),
+            )
+            .is_ok(),
+            "no declared column"
+        );
+        assert!(
+            run(
+                &pg,
+                &stream_leg(&pg),
+                &declared_text_plan("d"),
+                connect_to("int4", crate::types::RivetType::Int32),
+            )
+            .is_ok(),
+            "a column the server does not render as text"
+        );
+        assert!(
+            run(&pg, &stream_leg(&pg), &declared_text_plan("other"), date()).is_ok(),
+            "a declaration over another column"
+        );
+        assert!(
+            run(&pg, &stream_leg(&pg), &declared_text_plan("d"), |_| {
+                anyhow::bail!("unreachable")
+            })
+            .is_ok(),
+            "an unreachable source"
+        );
+        let mysql = one_export_config("mysql", "");
+        assert!(
+            run(
+                &mysql,
+                &stream_leg(&mysql),
+                &declared_text_plan("d"),
+                date(),
+            )
+            .is_ok(),
+            "a source that is not PostgreSQL"
+        );
     }
 }

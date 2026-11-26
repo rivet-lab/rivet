@@ -27,7 +27,7 @@ pub use invoke::Spawned;
 mod materialize;
 mod oracle;
 mod remedy;
-pub use remedy::{Refused, Remedy, Then, assert_refused};
+pub use remedy::{Refused, Remedy, Then, Walk, assert_refused};
 mod sabotage;
 pub use sabotage::{Damage, Stopped, Survived};
 mod stop;

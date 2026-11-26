@@ -1,0 +1,174 @@
+//! A baseline leg and the change stream of one table deliver one spelling: a server-text column declared `text` is refused on the pending baseline, and what the stream already carried stays as it was.
+//!
+//! ```text
+//! cargo nextest run --test live_suite --run-ignored only -E 'test(/^live_value_refusal_text_remedy_cdc::/)'
+//! ```
+
+use crate::check_override_wire_cdc::a_refused_baseline_may_leave_its_schema_and_checkpoint;
+use crate::common::*;
+use std::collections::BTreeSet;
+
+const WIRE: Refused<'static> = Refused::by_code("RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+
+const SERVER_TEXT: &[(&str, &str, &str)] = &[
+    ("date", "DATE", "'2024-03-15'"),
+    ("time", "TIME", "'10:11:12.5'"),
+    ("timestamp", "TIMESTAMP", "'2024-03-15 10:11:12.5'"),
+    ("timestamptz", "TIMESTAMPTZ", "'2024-03-15 10:11:12.5+00'"),
+    ("int4_array", "INTEGER[]", "'{1,2}'"),
+];
+
+fn declared_text(rig: Rig) -> Rig {
+    rig.export_line("columns:").export_line("  v: \"text\"")
+}
+
+fn scenario(label: &str, ddl: &str, shape: impl FnOnce(Rig) -> Rig) -> CdcScenario {
+    CdcScenario::pg_with(label, &format!("id BIGINT PRIMARY KEY, v {ddl}"), |r, _| {
+        shape(r.cdc_line("initial: snapshot"))
+    })
+}
+
+fn put(scn: &mut CdcScenario, literal: &str) {
+    let t = scn.table.clone();
+    scn.sql(&format!("INSERT INTO {t} (id, v) VALUES (1, {literal})"));
+    scn.settle();
+}
+
+fn oracle() -> postgres::Client {
+    let mut c = postgres::Client::connect(POSTGRES_CDC_URL, postgres::NoTls).unwrap();
+    c.batch_execute("SET TimeZone = 'UTC'").unwrap();
+    c
+}
+
+fn parquet_column_values(rig: &Rig, column: &str) -> BTreeSet<String> {
+    dir_parquet_display(&rig.out_dir(), column)
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+fn both_check_spellings_accept(rig: &Rig, name: &str) {
+    for args in [
+        &["check", "--export", name][..],
+        &["check", "--export", name, "--type-report"][..],
+    ] {
+        let o = rig.cli(args);
+        assert_eq!(
+            o.status.code(),
+            Some(0),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
+}
+
+/// The run and both `check` spellings refuse `rig`'s export by `WIRE`; returns the run's stderr.
+fn refused_alike(rig: &Rig, name: &str) -> String {
+    assert_eq!(
+        files_with_extension(&rig.out_dir(), "parquet").len(),
+        0,
+        "a refused baseline starts without a part"
+    );
+    let run = rig.run_args(&["--export", name]);
+    assert_refused(&run, WIRE);
+    assert_refused(&rig.cli(&["check", "--export", name]), WIRE);
+    assert_refused(
+        &rig.cli(&["check", "--export", name, "--type-report"]),
+        WIRE,
+    );
+    assert_eq!(
+        files_with_extension(&rig.out_dir(), "parquet").len(),
+        0,
+        "a refused baseline delivered a part"
+    );
+    String::from_utf8_lossy(&run.stderr).into_owned()
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc postgres-cdc"]
+fn a_pending_baseline_declared_text_over_a_server_text_column_is_refused_and_its_remedy_delivers_postgres()
+ {
+    for (label, ddl, literal) in SERVER_TEXT {
+        let mut scn = scenario(&format!("vrt_cdc_{label}"), ddl, declared_text);
+        put(&mut scn, literal);
+        let name = scn.rig.export_name().to_string();
+        scn.rig = a_refused_baseline_may_leave_its_schema_and_checkpoint(scn.rig);
+        let said = refused_alike(&scn.rig, &name);
+        let native = match *label {
+            "int4_array" => "_int4",
+            other => other,
+        };
+        assert!(
+            said.contains(&format!(
+                "column 'v' is declared text over a `{native}` column, which the baseline leg would deliver as the server's own text while the change stream renders the same cell in its own form"
+            )),
+            "{label}: {said}"
+        );
+        assert!(
+            said.contains("no row was delivered. Remove `v` from `columns:`"),
+            "{label}: {said}"
+        );
+        scn.rig.replace_export_line("columns:", "");
+        scn.rig.replace_export_line("  v:", "");
+        scn.rig.run_ok();
+        let source: i64 = oracle()
+            .query_one(&format!("SELECT count(*) FROM {}", scn.table), &[])
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            parquet_column_values(&scn.rig, "id").len() as i64,
+            source,
+            "{label}: the remedy delivers every source row"
+        );
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc postgres-cdc"]
+fn a_done_baseline_and_a_stream_only_export_declared_text_are_admitted_as_they_were_postgres() {
+    let mut scn = scenario("vrt_cdc_done", "DATE", |r| r);
+    put(&mut scn, "'2024-03-15'");
+    scn.rig.run_ok();
+    let want: String = oracle()
+        .query_one(&format!("SELECT v::text FROM {}", scn.table), &[])
+        .unwrap()
+        .get(0);
+    assert_eq!(parquet_column_values(&scn.rig, "v"), BTreeSet::from([want]));
+    let name = scn.rig.export_name().to_string();
+    scn.rig.amend_export_lines(&["columns:", "  v: \"text\""]);
+    both_check_spellings_accept(&scn.rig, &name);
+    for (label, ddl, literal) in SERVER_TEXT {
+        let mut only = CdcScenario::pg_with(
+            &format!("vrt_cdc_only_{label}"),
+            &format!("id BIGINT PRIMARY KEY, v {ddl}"),
+            |r, _| declared_text(r),
+        );
+        put(&mut only, literal);
+        let only_name = only.rig.export_name().to_string();
+        both_check_spellings_accept(&only.rig, &only_name);
+    }
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc postgres-cdc"]
+fn a_pending_baseline_declared_text_over_columns_the_server_does_not_render_is_admitted_postgres() {
+    for (label, ddl, literal) in [
+        ("numeric", "NUMERIC(10,2)", "12.50"),
+        ("varchar", "VARCHAR(20)", "'abc'"),
+    ] {
+        let mut scn = scenario(&format!("vrt_cdc_n_{label}"), ddl, declared_text);
+        put(&mut scn, literal);
+        let name = scn.rig.export_name().to_string();
+        both_check_spellings_accept(&scn.rig, &name);
+        scn.rig.run_ok();
+        let want: String = oracle()
+            .query_one(&format!("SELECT v::text FROM {}", scn.table), &[])
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            parquet_column_values(&scn.rig, "v"),
+            BTreeSet::from([want]),
+            "{label}: the declared text is the server's text"
+        );
+    }
+}

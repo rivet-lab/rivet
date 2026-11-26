@@ -429,6 +429,24 @@ pub fn assert_spill_evidence(stderr: &str, cap: usize, own: OwnSpill) {
     }
 }
 
+/// `text` with every run of ASCII digits (a run id's time, counter or pid, whatever its width) replaced by one `#`.
+pub fn mask_digit_runs(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_digits = false;
+    for c in text.chars() {
+        if c.is_ascii_digit() {
+            if !in_digits {
+                out.push('#');
+            }
+            in_digits = true;
+        } else {
+            out.push(c);
+            in_digits = false;
+        }
+    }
+    out
+}
+
 /// `text` with the timestamp of every log line (`[<rfc3339> LEVEL target] ...`) replaced by `<ts>`, so two runs' output compare by what they said.
 pub fn without_log_stamps(text: &str) -> String {
     text.split_inclusive('\n')
@@ -560,6 +578,33 @@ mod ndjson_tests {
     #[should_panic(expected = "is not JSON")]
     fn ndjson_after_ids_refuses_a_line_that_is_not_json() {
         ndjson_after_ids("done: 2 events", "t");
+    }
+}
+
+#[cfg(test)]
+mod digit_mask_tests {
+    use super::mask_digit_runs;
+
+    /// The product's manifest name is `manifest-<export>_<UTC ms>_<pid>.json`; a pid is 5 digits on one run and 6 on the next.
+    #[test]
+    fn two_runs_whose_pids_differ_in_width_mask_to_the_same_manifest_name() {
+        let five = "manifest-stand_dated_99596_0_20261125T140458.123_99701.json";
+        let six = "manifest-stand_dated_99596_0_20261125T140458.123_100701.json";
+        assert_ne!(five, six);
+        assert_eq!(mask_digit_runs(five), mask_digit_runs(six));
+        assert_eq!(
+            mask_digit_runs(five),
+            "manifest-stand_dated_#_#_#T#.#_#.json"
+        );
+    }
+
+    #[test]
+    fn a_name_that_differs_in_its_letters_still_differs() {
+        assert_ne!(
+            mask_digit_runs("manifest-a_1.json"),
+            mask_digit_runs("manifest-b_1.json")
+        );
+        assert_ne!(mask_digit_runs("a_1.json"), mask_digit_runs("a1.json"));
     }
 }
 

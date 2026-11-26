@@ -175,6 +175,7 @@ fn row_violations(doc: &Value) -> Vec<String> {
             }
             bad.extend(edge_violations(&at, r));
             bad.extend(cdc_violations(&at, r));
+            bad.extend(csv_violations(&at, r));
             bad.extend(na_violations(&at, r, delivers));
             for key in r.as_mapping().into_iter().flat_map(|m| m.keys()) {
                 let key = key.as_str().unwrap_or("");
@@ -456,7 +457,6 @@ const KNOWN_DEFECTS: &[&str] = &[
     // 2026-11-22: eight array rows left this list, a NULL array is refused at the ClickHouse load (RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE); UUID[] keeps its FixedString(16) defect.
     "postgres:UUID[] (ClickHouse)",
     "mssql:UNIQUEIDENTIFIER (ClickHouse)",
-    "oracle:TIMESTAMP(9)",
 ]; // ratchet-pin: end
 
 /// A row that never delivers carries `na:` dated and without `delivery`; an engine with no delivering row needs it on every row.
@@ -494,7 +494,7 @@ fn na_violations(at: &str, r: &Value, engine_delivers: bool) -> Vec<String> {
 }
 
 /// The fields a ledger row may carry.
-const ROW_KEYS: [&str; 16] = [
+const ROW_KEYS: [&str; 18] = [
     "native_type",
     "sample",
     "delivery",
@@ -510,6 +510,8 @@ const ROW_KEYS: [&str; 16] = [
     "refuses",
     "cdc",
     "cdc_reason",
+    "csv",
+    "csv_reason",
     "na",
 ];
 
@@ -612,6 +614,40 @@ fn cdc_violations(at: &str, r: &Value) -> Vec<String> {
                 ));
             }
         }
+    }
+    bad
+}
+
+/// Whether a delivery label is an Arrow type CSV writes as rendered text: a flat list, a wide decimal or a nanosecond timestamp.
+fn csv_text_delivery(delivery: &str) -> bool {
+    delivery.starts_with("List(")
+        || delivery.starts_with("Decimal256(")
+        || delivery.starts_with("Timestamp(ns")
+}
+
+/// Every error in a row's `csv:` decision: a row whose delivery CSV writes as text carries `csv: text` and a dated `csv_reason`, and no other row does.
+fn csv_violations(at: &str, r: &Value) -> Vec<String> {
+    let mut bad = Vec::new();
+    let text_row = r["delivery"].as_str().is_some_and(csv_text_delivery);
+    match (r["csv"].as_str(), text_row) {
+        (Some("text"), true) => {
+            let dated = r["csv_reason"].as_str().is_some_and(|w| {
+                let d = w.as_bytes();
+                d.len() > 11
+                    && d[..10].iter().enumerate().all(|(i, b)| if i == 4 || i == 7 { *b == b'-' } else { b.is_ascii_digit() })
+                    && d[10] == b':'
+            });
+            if !dated {
+                bad.push(format!("{at}: `csv: text` needs `csv_reason: \"YYYY-MM-DD: why\"`"));
+            }
+        }
+        (None, true) => bad.push(format!(
+            "{at}: a list, wide decimal or nanosecond timestamp row needs `csv: text` and a dated `csv_reason:`, the decision CSV makes for it"
+        )),
+        (Some(other), _) if other != "text" => bad.push(format!("{at}: `csv: {other}` is `text`")),
+        (Some(_), false) => bad.push(format!("{at}: `csv:` belongs to a list, wide decimal or nanosecond timestamp row")),
+        (None, false) if !r["csv_reason"].is_null() => bad.push(format!("{at}: `csv_reason:` belongs beside `csv: text`")),
+        _ => {}
     }
     bad
 }
@@ -812,13 +848,13 @@ fn a_delivering_row_without_a_warehouse_leg_is_refused() {
 #[test]
 fn a_leg_today_the_resolver_does_not_build_is_refused() {
     let mut doc = ledger();
-    leg_mut(&mut doc, "oracle", "TIMESTAMP(9)", "bigquery").insert("today".into(), "INT64".into());
+    leg_mut(&mut doc, "postgres", "CIDR", "bigquery").insert("today".into(), "INT64".into());
     leg_mut(&mut doc, "postgres", "INET", "snowflake")
         .remove("today")
         .unwrap();
     let bad = leg_violations(&doc);
     for want in [
-        "engines.oracle.rows[TIMESTAMP(9)].bigquery.today: `INT64`, `rivet load` builds `DATETIME`",
+        "engines.postgres.rows[CIDR].bigquery.today: `INT64`, `rivet load` builds `STRING`",
         "engines.postgres.rows[INET].snowflake.today: missing, `rivet load` builds `TEXT`",
     ] {
         assert!(bad.iter().any(|b| b == want), "{want}: {bad:?}");
@@ -1137,5 +1173,48 @@ fn a_known_defect_fixed_in_the_ledger_only_is_refused() {
         [format!(
             "postgres:INET: {FIDELITY} names a known_defect the ledger does not mark"
         )]
+    );
+}
+
+#[test]
+fn a_csv_text_row_without_its_decision_or_a_stray_one_is_refused() {
+    let mut doc = ledger();
+    row_mut(&mut doc, "postgres", "TEXT[]")
+        .remove("csv")
+        .unwrap();
+    row_mut(&mut doc, "postgres", "TEXT").insert("csv".into(), "text".into());
+    row_mut(&mut doc, "postgres", "INTEGER[]")
+        .insert("csv_reason".into(), "2026-11-23 undated".into());
+    row_mut(&mut doc, "postgres", "DATE[]").insert("csv".into(), "refuse".into());
+    let bad = row_violations(&doc);
+    for (row, want) in [
+        ("TEXT[]", "needs `csv: text`"),
+        ("TEXT", "`csv:` belongs to a list"),
+        ("INTEGER[]", "needs `csv_reason:"),
+        ("DATE[]", "is `text`"),
+    ] {
+        assert!(
+            bad.iter()
+                .any(|b| b.contains(&format!("rows[{row}]")) && b.contains(want)),
+            "{row}: {bad:?}"
+        );
+    }
+}
+
+#[test]
+fn every_list_wide_decimal_and_nanosecond_row_of_the_ledger_carries_its_csv_decision() {
+    let doc = ledger();
+    let mut deciding = 0;
+    for engine in ["postgres", "mysql", "mssql", "oracle", "mongo"] {
+        for (native, r) in rows(&doc, engine) {
+            if r["delivery"].as_str().is_some_and(csv_text_delivery) {
+                assert_eq!(r["csv"].as_str(), Some("text"), "{engine} {native}");
+                deciding += 1;
+            }
+        }
+    }
+    assert_eq!(
+        deciding, 12,
+        "ten PostgreSQL rows, DATETIME2, DATETIMEOFFSET"
     );
 }

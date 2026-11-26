@@ -945,11 +945,19 @@ fn run_cdc_inner(
         );
     }
 
+    let pending = std::sync::Mutex::new(crate::state::PendingBaselines::default());
     let schema_gate = |table: &str, cols: &[crate::types::TypeMapping]| {
         let key = cdc_drift_key(&export.name, table, multi);
-        super::schema_drift::check_from_cdc_mappings(state, &key, cols, export.on_schema_drift)
+        let mut held = pending.lock().unwrap_or_else(|p| p.into_inner());
+        super::schema_drift::check_from_cdc_mappings(
+            state,
+            &key,
+            cols,
+            export.on_schema_drift,
+            &mut held,
+        )
     };
-    run_capture(
+    let captured = run_capture(
         CdcCapture {
             export_name: export.name.clone(),
             cdc_cfg: CdcConfig {
@@ -984,7 +992,14 @@ fn run_cdc_inner(
             policy: crate::types::policy::TypePolicy::from_strict(strict),
         },
         read_bytes,
-    )
+    );
+    if captured.1.is_ok() {
+        pending
+            .into_inner()
+            .unwrap_or_else(|p| p.into_inner())
+            .commit(state);
+    }
+    captured
 }
 
 /// Build the per-run summary (mirrors `synthetic_failed_summary`'s shape, for a CDC run).
