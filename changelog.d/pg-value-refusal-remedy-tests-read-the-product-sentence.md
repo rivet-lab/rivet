@@ -1,0 +1,1 @@
+- **Harness only: the live cells that grade a PostgreSQL value refusal read its remedy sentence from the product's `text_remedy` and run the declared-text remedy.** No behaviour change; `rivet::types::text_remedy` is now public so the cells and the product share one sentence.
