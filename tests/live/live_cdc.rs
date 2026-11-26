@@ -9189,7 +9189,7 @@ fn open_defect_a_mysql_zero_datetime_declared_text_is_the_batch_text_on_the_stre
     );
 }
 
-/// A PostgreSQL timestamp declared `text` gets one verdict from the batch export and the change stream. Open defect: batch refuses it, the stream writes chrono's text.
+/// A PostgreSQL timestamp declared `text` reads the same on the batch export and the change stream. Open defect: batch delivers the server's text, the stream writes chrono's text.
 #[test]
 #[ignore = "live+gate-only: requires docker compose postgres (wal_level=logical)"]
 fn open_defect_a_pg_timestamp_declared_text_is_one_verdict_on_batch_and_the_stream() {
@@ -9229,5 +9229,10 @@ fn open_defect_a_pg_timestamp_declared_text_is_one_verdict_on_batch_and_the_stre
         "batch and the stream disagree on a timestamp declared text: batch {}, stream {}",
         word(&batched),
         word(&streamed)
+    );
+    assert_eq!(
+        streamed.as_ref().unwrap().get("insert:3"),
+        batched.as_ref().unwrap().get(":3"),
+        "a timestamp declared text reads differently on the stream and on batch"
     );
 }

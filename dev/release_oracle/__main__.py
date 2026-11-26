@@ -69,6 +69,7 @@ from . import (
     property_no_silent_null_grants,
     property_no_silent_null_cdc,
     property_no_silent_null_load,
+    property_no_silent_null_matrix_only,
     cloud_legs,
     partner_shape,
     perf,
@@ -968,6 +969,9 @@ def _matrix_exit_code_self_test() -> None:
         "property_no_silent_null_cdc": (property_no_silent_null_cdc, "run_engine", lambda r: [r], lambda m: m.main()),
         "property_no_silent_null_load": (property_no_silent_null_load, "run_engine", lambda r: ([r], []), lambda m: m.main()),
         "property_no_silent_null_grants": (property_no_silent_null_grants, "run_grants", lambda r: [r], lambda m: m.main()),
+        "property_no_silent_null_matrix_only": (
+            property_no_silent_null_matrix_only, "run_engines",
+            lambda r: [property_no_silent_null_matrix_only.label([r])], lambda m: m.main()),
         "property_refusal_names_true_cause": (
             refusal, "run_offline",
             lambda r: [f"{refusal.MATRIX} cause/X/- {'PASS' if not r.klass else 'RED' if r.klass != nsn.NOT_GRADED else 'NOT_GRADED'} x"],
@@ -1036,6 +1040,7 @@ def _stages_self_test() -> None:
     property_no_silent_null_grants.self_test()
     property_no_silent_null_cdc.self_test()
     property_no_silent_null_load.self_test()
+    property_no_silent_null_matrix_only.self_test()
     cloud_legs.self_test()
     _matrix_exit_code_self_test()
     doc = {

@@ -40,10 +40,11 @@ fn oracle_ts9_table() -> OracleTable {
     t
 }
 
-/// An undeclared Oracle CDC `TIMESTAMP(9)` is refused with or without `--strict`, before any part or checkpoint move; the declared `timestamp` delivers the row.
+/// An undeclared Oracle CDC `TIMESTAMP(9)` is delivered as nanosecond text with or without `--strict`; the declared `timestamp` still delivers microseconds.
 #[test]
 #[ignore = "live: requires the oracle service with LogMiner prerequisites"]
-fn oracle_cdc_timestamp9_is_refused_until_declared_and_a_declared_timestamp_delivers_the_row() {
+fn oracle_cdc_timestamp9_is_delivered_as_text_undeclared_and_a_declared_timestamp_delivers_the_row()
+{
     let _serial = cross_process_serial("oracle_cdc");
     let t = OracleTable::create("tp_cts9", "id NUMBER(10) PRIMARY KEY, ts9 TIMESTAMP(9)");
     ora_exec(&format!(
@@ -51,81 +52,92 @@ fn oracle_cdc_timestamp9_is_refused_until_declared_and_a_declared_timestamp_deli
         t.name()
     ));
     ora_exec(&format!("GRANT SELECT ON {} TO c##rivetcdc", t.name()));
-    let d = tempfile::tempdir().unwrap();
-    let out = d.path().join("out");
-    let ckpt = d.path().join("cdc.ckpt");
-    std::fs::create_dir_all(&out).unwrap();
-    let rig = |declared: bool| {
-        let r = Rig::oracle_cdc(t.name())
-            .checkpoint_path(ckpt.clone())
-            .dest_path(out.clone());
-        match declared {
-            true => r.export_line("columns: {TS9: timestamp}"),
-            false => r,
+    let table = t.name().to_string();
+    let leg = |declared: bool| {
+        let d = tempfile::tempdir().unwrap();
+        let out = d.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let ckpt = d.path().join("cdc.ckpt");
+        let table = table.clone();
+        let rig = move || {
+            let r = Rig::oracle_cdc(&table)
+                .checkpoint_path(ckpt.clone())
+                .dest_path(out.clone());
+            match declared {
+                true => r.export_line("columns: {TS9: timestamp}"),
+                false => r,
+            }
+        };
+        (d, rig)
+    };
+    let insert = |id: u32| {
+        ora_exec(&format!(
+            "INSERT INTO {} VALUES ({id}, TIMESTAMP '2024-01-02 03:04:05.123456789')",
+            t.name()
+        ));
+    };
+
+    let count = |dir: &std::path::Path, filter: &str| {
+        duckdb_dir_scalar(&dir.join("out"), "count(*)", Some(filter))
+    };
+    let (undeclared_dir, undeclared) = leg(false);
+    undeclared().run_ok();
+    insert(1);
+    for (args, id) in [(&[][..], 1), (&["--strict"][..], 2)] {
+        if id == 2 {
+            insert(2);
         }
-    };
-    let refused = |args: &[&str]| {
-        let run = rig(false).run_args(args);
-        let err = String::from_utf8_lossy(&run.stderr).to_string();
-        assert!(!run.status.success(), "{args:?} must refuse:\n{err}");
-        assert!(err.contains("RIVET_TYPE_UNSAFE_MAPPING"), "{err}");
-        assert!(
-            err.contains("column 'TS9'") && err.contains("`TS9: timestamp`"),
-            "the refusal names the column and the declaration CDC can read:\n{err}"
+        let run = undeclared().run_args(args);
+        let err = String::from_utf8_lossy(&run.stderr);
+        assert!(run.status.success(), "{args:?} undeclared:\n{err}");
+        assert!(!err.contains("RIVET_TYPE_UNSAFE_MAPPING"), "{err}");
+        assert_eq!(
+            count(
+                undeclared_dir.path(),
+                &format!("__op = 'insert' AND ID = {id} AND TS9 = '2024-01-02T03:04:05.123456789'")
+            ),
+            1,
+            "{args:?}: the undeclared timestamp(9) keeps every digit as text"
         );
-        assert!(!err.contains("strict mode"), "{err}");
-    };
+    }
 
-    rig(true).run_ok();
-    let anchored = std::fs::read(&ckpt).expect("the declared run anchors");
-    ora_exec(&format!(
-        "INSERT INTO {} VALUES (1, TIMESTAMP '2024-01-02 03:04:05.123456789')",
-        t.name()
-    ));
-    let parts_before = parquet_parts(&out);
-
-    refused(&[]);
-    refused(&["--strict"]);
+    let (declared_dir, declared) = leg(true);
+    declared().run_ok();
+    insert(3);
+    declared().run_ok();
     assert_eq!(
-        parquet_parts(&out),
-        parts_before,
-        "a refused run wrote a part"
-    );
-    assert_eq!(
-        std::fs::read(&ckpt).unwrap(),
-        anchored,
-        "a refused run moved the checkpoint"
-    );
-
-    rig(true).run_ok();
-    assert_eq!(
-        duckdb_dir_scalar(
-            &out,
-            "count(*)",
-            Some("__op = 'insert' AND ID = 1 AND TS9 = TIMESTAMP '2024-01-02 03:04:05.123456'")
+        count(
+            declared_dir.path(),
+            "__op = 'insert' AND ID = 3 AND TS9 = TIMESTAMP '2024-01-02 03:04:05.123456'"
         ),
         1,
         "the declared timestamp keeps microseconds"
     );
 }
 
-/// An undeclared Oracle batch `TIMESTAMP(9)` is refused with or without `--strict`; declared `timestamp` it is delivered lossy without `--strict` and refused under it; declared `timestamp_ns` it runs under both.
+/// An undeclared Oracle batch `TIMESTAMP(9)` is delivered as nanosecond text under every policy; declared `timestamp` it is delivered lossy without `--strict` and refused under it; declared `timestamp_ns` it runs under both.
 #[test]
 #[ignore = "live: requires docker compose oracle"]
-fn oracle_batch_timestamp9_is_refused_until_declared_under_every_policy() {
+fn oracle_batch_timestamp9_is_delivered_as_text_undeclared_under_every_policy() {
     require_alive(LiveService::Oracle);
     let t = oracle_ts9_table();
     let d = tempfile::tempdir().unwrap();
-    let out = d.path().join("out");
-    let rig = Rig::oracle_batch(t.name()).dest_path(out.clone());
 
-    for args in [&["--strict"][..], &[][..]] {
-        let run = rig.run_args(args);
+    for (n, args) in [&["--strict"][..], &[][..]].into_iter().enumerate() {
+        let out = d.path().join(format!("undeclared{n}"));
+        let run = Rig::oracle_batch(t.name())
+            .dest_path(out.clone())
+            .run_args(args);
         let err = String::from_utf8_lossy(&run.stderr);
-        assert!(!run.status.success(), "{args:?} must refuse:\n{err}");
-        assert!(err.contains("RIVET_TYPE_UNSAFE_MAPPING"), "{err}");
-        assert!(err.contains("column 'TS9'"), "{err}");
-        assert_eq!(parquet_parts(&out), 0, "a refused run wrote a part");
+        assert!(run.status.success(), "{args:?} undeclared:\n{err}");
+        assert!(!err.contains("RIVET_TYPE_UNSAFE_MAPPING"), "{err}");
+        crate::live_narrowing_override::assert_delivered(
+            &out,
+            &["ID", "TS9"],
+            &["1", "2024-01-02T03:04:05.123456789"],
+            1,
+            "the undeclared timestamp(9) keeps every digit as text",
+        );
     }
 
     let declared = |n: usize, decl: &str| {
@@ -186,9 +198,11 @@ fn oracle_batch_timestamp9_is_refused_until_declared_under_every_policy() {
     }
 }
 
+/// `check --strict` and `run --strict` agree on an undeclared TIMESTAMP(9): both pass and the run delivers the text, and the declared lossy `timestamp` is refused by both with one code.
 #[test]
 #[ignore = "live: requires docker compose oracle"]
-fn check_strict_and_run_strict_refuse_the_same_config_with_the_same_code() {
+fn check_strict_and_run_strict_agree_on_an_undeclared_timestamp_9_and_refuse_a_declared_lossy_one()
+{
     require_alive(LiveService::Oracle);
     let t = oracle_ts9_table();
     let d = tempfile::tempdir().unwrap();
@@ -200,30 +214,39 @@ fn check_strict_and_run_strict_refuse_the_same_config_with_the_same_code() {
         &["--strict"],
         Pairing::SameRefusal,
     );
-    let check_err = String::from_utf8_lossy(&c.preflight.stderr);
-    let run_err = String::from_utf8_lossy(&c.run.stderr);
     assert!(
-        !c.preflight.status.success(),
-        "check --strict:\n{check_err}"
+        c.green,
+        "check --strict:\n{}\nrun --strict:\n{}",
+        String::from_utf8_lossy(&c.preflight.stderr),
+        String::from_utf8_lossy(&c.run.stderr)
     );
-    for (who, err) in [("check", &check_err), ("run", &run_err)] {
+    crate::live_narrowing_override::assert_delivered(
+        &out,
+        &["ID", "TS9"],
+        &["1", "2024-01-02T03:04:05.123456789"],
+        1,
+        "run --strict delivers the text",
+    );
+
+    let lossy_out = d.path().join("lossy");
+    let lossy = Rig::oracle_batch(t.name())
+        .dest_path(lossy_out.clone())
+        .export_line("columns: {TS9: timestamp}")
+        .run_after(
+            &["check", "--type-report", "--strict"],
+            &["--strict"],
+            Pairing::SameRefusal,
+        );
+    assert!(!lossy.green, "a declared lossy timestamp under --strict");
+    for (who, err) in [
+        ("check", &lossy.preflight.stderr),
+        ("run", &lossy.run.stderr),
+    ] {
+        let err = String::from_utf8_lossy(err);
         assert!(err.contains("RIVET_TYPE_UNSAFE_MAPPING"), "{who}: {err}");
         assert!(err.contains("column 'TS9'"), "{who}: {err}");
     }
-    assert_eq!(parquet_parts(&out), 0, "run --strict wrote a part");
-
-    let lax = rig.run_after(&["check", "--type-report"], &[], Pairing::SameRefusal);
-    assert!(
-        !lax.green,
-        "an undeclared TIMESTAMP(9) is refused without --strict too:\n{}",
-        String::from_utf8_lossy(&lax.preflight.stderr)
-    );
-    for err in [&lax.preflight.stderr, &lax.run.stderr] {
-        let err = String::from_utf8_lossy(err);
-        assert!(err.contains("RIVET_TYPE_UNSAFE_MAPPING"), "{err}");
-        assert!(!err.contains("strict mode"), "{err}");
-    }
-    assert_eq!(parquet_parts(&out), 0, "the lax run wrote a part");
+    assert_eq!(parquet_parts(&lossy_out), 0, "run --strict wrote a part");
 }
 
 /// A PostgreSQL json[], jsonb[], interval[], oid[] and enum[] column is delivered as a list of its elements, NULL elements kept.
@@ -263,7 +286,7 @@ fn a_postgres_json_interval_oid_enum_array_is_delivered_as_a_list_of_its_element
     assert_eq!(duckdb_dir_scalar(&out, "count(*)", Some(filter)), 1);
 }
 
-/// A two-dimensional jsonb[] keeps its refusal naming the multi-dimensional cause, the column and the cast to text.
+/// A two-dimensional jsonb[] keeps its refusal naming the multi-dimensional cause, the column and the text remedy.
 #[test]
 #[ignore = "live: requires docker compose postgres"]
 fn a_postgres_two_dimensional_jsonb_array_keeps_the_multi_dimensional_refusal() {
@@ -279,10 +302,10 @@ fn a_postgres_two_dimensional_jsonb_array_keeps_the_multi_dimensional_refusal() 
     let d = tempfile::tempdir().unwrap();
     let out = d.path().join("out");
     let run = Rig::pg_batch(&table).dest_path(out.clone()).run_args(&[]);
-    let err = String::from_utf8_lossy(&run.stderr).to_lowercase();
+    let err = String::from_utf8_lossy(&run.stderr).into_owned();
     assert!(!run.status.success(), "{err}");
     assert!(
-        err.contains("multi-dimensional") && err.contains("grid") && err.contains("::text"),
+        err.to_lowercase().contains("multi-dimensional") && says_text_remedy(&err, "grid"),
         "{err}"
     );
     assert_eq!(parquet_parts(&out), 0, "a refused run wrote a part");

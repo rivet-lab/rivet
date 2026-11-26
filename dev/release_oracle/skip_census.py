@@ -14,6 +14,9 @@ within its noise of the lane's ceiling, both ways: over it is a run the oracle u
 longer does; under it is a closed gap, and the ceiling comes down in the same PR.
 
     python3 -m dev.release_oracle.skip_census --verdicts target/rivet-oracle.log --lane ci
+
+`--legs-result RESULT` is the result of the matrix job that wrote the logs (`needs.e2e.result`): anything but `success`
+means a leg was cancelled or failed and its log is missing or short, so neither census grades it.
 """
 from __future__ import annotations
 
@@ -58,16 +61,16 @@ GRADED = ("PASS", "FAIL", "XFAIL", "PARTIAL")
 #: 20 counted on main and the 4 `incremental_adding_settle_*`, opted out (OFF) on main and graded now.
 #: 2026-10-29 (#719): skip 53 -> 59 (CI measured 56 on main): 3 column-grants cells grade nothing by design (2 backfill recipes whose stream carries the rows, 1 `time_window`); closes when the oracle reads a relative window.
 #: 2026-11-18 (nightly run 44227262825, 4 legs, skip 84): 42 of the 84 are `cdc.backfill` recipe runs, out of the counter and paired per test (`unpaired_backfills`); #1035 made every one-table MySQL/PostgreSQL CDC init scaffold a backfill recipe, so 20 tests carry them. 59 -> 42 is the rest: 14 skipped-export reruns, 12 empty-source runs, 10 `time_window`, 5 keyless CDC, 1 unset url_env.
-#: 2026-11-24 (nightly runs 44978587648 and 45019189856, all 4 legs logged, both measured skip 37, partial 20, deferred 7): skip 42 -> 37, partial 24 -> 20, deferred 9 -> 7. Runs with a cancelled 3/3 leg log 26/16/7 and are not a measure: lower again only from a run with every leg's log.
+#: 2026-11-25 (nightly runs 45345157060, 45536865386, 45553927600, every E2E leg green, all measured skip 42, partial 26, deferred 9; so did the green nightlies 43670316589 and 43708582230 and the 11-18..11-20 runs 44227262825, 44448295918, 44664682652 once their backfill SKIPs were paired): skip 37 -> 42, partial 20 -> 26, deferred 7 -> 9, undoing the 2026-11-24 fall. Runs 44978587648 and 45019189856 (37/20/7) had 183-204 red tests per leg that logged no verdict (3 skipped-export reruns, 2 `time_window`, 6 `settle:` PARTIALs, 2 capped drains missing), and a red leg is now refused by `--legs-result`. Lower again only from a run whose every leg is green.
 VERDICT_CEILINGS: dict[str, dict[str, tuple[int, int]]] = {
     "ci": {
         "first-run": (0,  # ratchet-pin: rig-oracle-first-run (review 2027-02-01)
                       0),
-        "skip": (37,  # ratchet-pin: rig-oracle-skip (review 2027-02-01)
+        "skip": (42,  # ratchet-pin: rig-oracle-skip (review 2027-02-01)
                  3),
-        "partial": (20,  # ratchet-pin: rig-oracle-partial (review 2027-02-01)
+        "partial": (26,  # ratchet-pin: rig-oracle-partial (review 2027-02-01)
                     3),
-        "deferred": (7,  # ratchet-pin: rig-oracle-deferred (review 2027-02-01)
+        "deferred": (9,  # ratchet-pin: rig-oracle-deferred (review 2027-02-01)
                      0),
     },
     "gate": {"first-run": (0,  # ratchet-pin: rig-oracle-first-run-gate (review 2027-02-01)
@@ -191,6 +194,14 @@ def verify_oracle_verdict_census(led, log: Path | None = None, may_be_empty: boo
                    f"PARTIAL {n['PARTIAL']}, OFF {n['OFF']}", "census")
 
 
+def legs_refusal(result: str) -> str | None:
+    """Why a log written by a matrix whose job result is `result` is not graded, or None when every leg succeeded."""
+    if result == "success":
+        return None
+    return (f"the E2E legs ended `{result or 'unknown'}`, not `success`: a leg that was cancelled or failed left no log or a short one, "
+            "so this census would grade a partial log and misreport a ceiling")
+
+
 def _lacking(raw: list[str]) -> list[str]:
     """`--lacking` values, each possibly several per line (a YAML block), blank lines dropped."""
     return [l.strip() for v in raw for l in v.splitlines() if l.strip()]
@@ -212,7 +223,40 @@ def _self_test() -> int:
     assert unexplained(self_skipped(log.with_name("absent")), []) == {}, "no log is no skip"
     print("self-test ok: a self-skip is explained by SKIP_ALLOWED or a named lacking prerequisite, never silently")
     _verdict_self_test()
+    _legs_self_test()
     return 0
+
+
+def _run_main(argv: list[str]) -> tuple[int, str]:
+    """`main(argv)` with its stderr captured: the exit code and what it printed."""
+    import contextlib
+    import io
+
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+        return main(argv), err.getvalue()
+
+
+def _legs_self_test() -> None:
+    """RED-provable: a census over the log of a matrix with a cancelled or failed leg refuses, and names the result."""
+    assert legs_refusal("success") is None
+    tmp = Path(tempfile.mkdtemp(prefix="rivet-legs-census-"))
+    short = tmp / "oracle.log"
+    short.write_text(at_ceiling("ci").replace("RIVET-ORACLE-SKIP", "RIVET-ORACLE-OFF", 4))
+    assert any("gap closed" in e for e in verdict_errors(short.read_text(), "ci")), "the log below the ceiling reads as a closed gap"
+    skips = tmp / "skips.log"
+    skips.write_text("RIVET-SKIP live_x::ran_nothing — pgbouncer-state (:6433) is down\n")
+    for result in ("cancelled", "failure", "skipped", ""):
+        for argv in (["--verdicts", str(short), "--lane", "ci"], [str(skips)]):
+            code, err = _run_main([*argv, "--legs-result", result])
+            assert code == 1 and "not `success`" in err, (result, argv, code, err)
+            assert "gap closed" not in err and "skipped itself" not in err, (result, argv, err)
+            assert (f"`{result}`" in err) or (not result and "`unknown`" in err), (result, err)
+    code, err = _run_main(["--verdicts", str(short), "--lane", "ci", "--legs-result", "success"])
+    assert code == 1 and "gap closed" in err, "a successful matrix is graded as before"
+    code, err = _run_main([str(skips), "--legs-result", "success"])
+    assert code == 1 and "skipped itself" in err, (code, err)
+    print("self-test ok: a matrix with a cancelled or failed leg is refused by name, not graded as a ceiling")
 
 
 def at_ceiling(lane: str) -> str:
@@ -294,10 +338,14 @@ def main(argv: list[str] | None = None) -> int:
                     help="a prerequisite this lane does not provide; a skip whose reason names it is explained")
     ap.add_argument("--verdicts", type=Path, help="grade this rig oracle verdict log instead of a skip log")
     ap.add_argument("--lane", choices=sorted(VERDICT_CEILINGS), default="ci", help="whose ceilings --verdicts reads")
+    ap.add_argument("--legs-result", help="needs.e2e.result of the matrix that wrote the logs; anything but `success` refuses to grade")
     ap.add_argument("--self-test", action="store_true")
     ns = ap.parse_args(argv)
     if ns.self_test:
         return _self_test()
+    if ns.legs_result is not None and (why := legs_refusal(ns.legs_result)):
+        print(f"::error::{why}", file=sys.stderr)
+        return 1
     if ns.verdicts:
         text = ns.verdicts.read_text() if ns.verdicts.exists() else ""
         print("\n".join(verdict_report(text, ns.lane)))

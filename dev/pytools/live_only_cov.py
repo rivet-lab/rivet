@@ -66,6 +66,8 @@ ADJUDICATED: dict[str, tuple[str, int]] = {  # ratchet-pin: live-only-adjudicate
     "run_cdc_inner": ("2026-11-04: its viable stub is MISSED under --lib --bins; the offline executions are binary-spawning CLI tests against an unreachable source, outside the mutation scope", 85),
     "run_cdc_export": ("2026-11-04: stub MISSED under --lib --bins; the offline executions are binary-spawning CLI tests against an unreachable source, outside the mutation scope", 90),
     "pause": ("2026-11-04: the offline executions are the cfg(test) twin; the production body is not compiled into the test build, so its stub is MISSED by construction", 0),
+    "timestamp_micros_column": ("2026-11-25: offline reaches the empty-rows probe of build_column only; the row loop reads a live oracle::Row, graded by the live ltz cells (#1183), measured 2 exec, 79% of body", 79),
+    "date_column": ("2026-11-25: offline reaches the empty-rows probe of build_column only; the row loop reads a live oracle::Row, graded by the live ltz cells (#1183), measured 1 exec, 62% of body", 62),
 }  # ratchet-pin: end
 
 

@@ -1210,14 +1210,7 @@ fn empty_run_delivery(eng: Eng, table: &str, lines: &[&str]) -> EmptyRun {
     );
     let mut files: Vec<String> = files_under(&rig.out_dir())
         .iter()
-        .map(|p| {
-            p.strip_prefix(rig.out_dir())
-                .unwrap()
-                .to_string_lossy()
-                .chars()
-                .map(|c| if c.is_ascii_digit() { '#' } else { c })
-                .collect()
-        })
+        .map(|p| mask_digit_runs(&p.strip_prefix(rig.out_dir()).unwrap().to_string_lossy()))
         .collect();
     files.sort();
     let metrics =

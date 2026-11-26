@@ -142,14 +142,71 @@ def _interval(s: str) -> tuple[int, int, str] | None:
     return None
 
 
+NUMERIC_SPECIALS = ("NaN", "Infinity", "-Infinity")
+_ARRAY_TOKEN = re.compile(r"[{},]|[^{},]+")
+
+
+def numeric_value(v: object) -> object:
+    """A PostgreSQL numeric (scalar or array) as a Decimal, a special spelled `NaN` / `Infinity` / `-Infinity`, or a list of them; the server's text, a Decimal, a float, an int and a one-key `item` list all land on one form."""
+    if v is None:
+        return None
+    if isinstance(v, (list, tuple)):
+        return [numeric_value(x["item"] if isinstance(x, dict) and set(x) == {"item"} else x) for x in v]
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, int):
+        return decimal.Decimal(v)
+    if isinstance(v, (float, decimal.Decimal)):
+        if v != v:
+            return "NaN"
+        if v in (float("inf"), float("-inf")):
+            return "Infinity" if v > 0 else "-Infinity"
+        return v if isinstance(v, decimal.Decimal) else decimal.Decimal(repr(v))
+    if not isinstance(v, str):
+        return v
+    s = v.strip()
+    if s.startswith("{"):
+        return _pg_array_text(s)
+    if s in NUMERIC_SPECIALS:
+        return s
+    try:
+        d = decimal.Decimal(s)
+    except decimal.InvalidOperation:
+        return v
+    return d if d.is_finite() else v
+
+
+def _pg_array_text(s: str) -> object:
+    """A PostgreSQL array literal of numerics (`{1.5,NaN,{NULL}}`) as nested lists of `numeric_value`; the text itself when it is not one."""
+    stack: list[list] = []
+    root: list | None = None
+    for tok in _ARRAY_TOKEN.findall(s):
+        if tok == "{":
+            stack.append([])
+        elif tok == "}":
+            if not stack:
+                return s
+            done = stack.pop()
+            if stack:
+                stack[-1].append(done)
+            else:
+                root = done
+        elif tok != ",":
+            if not stack:
+                return s
+            stack[-1].append(None if tok.strip() == "NULL" else numeric_value(tok))
+    return s if stack or root is None else root
+
+
 def diff_rows(
     source: list[dict],
     dest: list[dict],
     key: str = "id",
     padded: frozenset = frozenset(),
     bits: frozenset = frozenset(),
+    numerics: frozenset = frozenset(),
 ) -> list[str]:
-    """Every column whose values differ between source and destination, keyed by `key`, with one example each; `padded` names CHAR(n) columns (trailing blanks insignificant), `bits` names BIT(n) columns (bytes read as an unsigned integer)."""
+    """Every column whose values differ between source and destination, keyed by `key`, with one example each; `padded` names CHAR(n) columns (trailing blanks insignificant), `bits` names BIT(n) columns (bytes read as an unsigned integer), `numerics` names PostgreSQL numeric columns (both sides compared as exact decimals or the spelled specials)."""
     src = {canon(r[key]): r for r in source}
     dst = {canon(r[key]): r for r in dest}
     out: list[str] = []
@@ -170,6 +227,8 @@ def diff_rows(
                 a, b = a.rstrip(" "), b.rstrip(" ")
             if col in bits and isinstance(a, (bytes, bytearray)):
                 a = int.from_bytes(a, "big")
+            if col in numerics:
+                a, b = numeric_value(a), numeric_value(b)
             a, b = canon(a), canon(b)
             if a != b:
                 out.append(f"`{col}` differs at {key}={k}: source {src[k].get(col)!r} vs warehouse {dst[k].get(col)!r}")
@@ -285,6 +344,31 @@ def pg_padded_columns(ora, table: str) -> frozenset:
     ).replace("'", "''")
     rows = ora.db.sql(f"SELECT * FROM postgres_query('pg', '{inner}')").fetchall()
     return frozenset(r[0] for r in rows)
+
+
+def pg_numeric_columns(ora, schema: str, table: str) -> frozenset:
+    """The NUMERIC and NUMERIC[] columns of a PostgreSQL table attached as `pg`, from its own catalog."""
+    inner = (
+        "SELECT column_name FROM information_schema.columns "
+        f"WHERE table_schema = '{schema}' AND table_name = '{table}' "
+        "AND (data_type = 'numeric' OR (data_type = 'ARRAY' AND udt_name = '_numeric'))"
+    ).replace("'", "''")
+    rows = ora.db.sql(f"SELECT * FROM postgres_query('pg', '{inner}')").fetchall()
+    return frozenset(r[0] for r in rows)
+
+
+def overlay_source_text(ora, engine: str, prefix: str, table: str, rows: list[dict], columns: frozenset) -> None:
+    """Replace each `columns` value of `rows` by the engine's own text of it, read by id: the scanner reads a NaN or an infinity as 0 and a wide numeric as DOUBLE."""
+    sql = source_text_select(engine, prefix, table, sorted(columns))
+    if sql is None:
+        raise OracleReadLost(f"{engine} has no text pass-through for {sorted(columns)}")
+    text = {canon(r["id"]): r for r in fetch(ora, sql)}
+    for row in rows:
+        held = text.get(canon(row["id"]))
+        if held is None:
+            raise OracleReadLost(f"id={row['id']} is in the typed read of the source and not in its text read")
+        for c in columns:
+            row[c] = held[c]
 
 
 def mysql_bit_columns(ora, database: str, table: str) -> frozenset:
@@ -654,13 +738,16 @@ def _rows_against_source(
         return 0, [f"STRING column(s) {bad} hold bytes that are not UTF-8 — unreadable as text"]
     dates = stage_date_text(ora, engine, prefix, table)
     src = fetch(ora, source_select(ora, f"{prefix}.{table}", dates if engine == "mysql" else []))
+    numerics = pg_numeric_columns(ora, prefix.split(".", 1)[1], table) if engine == "postgres" else frozenset()
+    if numerics:
+        overlay_source_text(ora, engine, prefix, table, src, numerics)
     counted = graded_losses(lost_values(ora, dates, src), declared_null)
     if lost is not None:
         lost.update(counted)
     dst = fetch(ora, f"SELECT * FROM {dest} ORDER BY id")
     padded = pg_padded_columns(ora, table) if engine == "postgres" else frozenset()
     bits = mysql_bit_columns(ora, prefix.split(".", 1)[1], table) if engine == "mysql" else frozenset()
-    return len(dst), diff_rows(src, dst, padded=padded, bits=bits)
+    return len(dst), diff_rows(src, dst, padded=padded, bits=bits, numerics=numerics)
 
 
 def _self_test() -> None:
@@ -688,6 +775,23 @@ def _self_test() -> None:
     assert canon([1, 2]) == canon([{"item": 1}, {"item": 2}])
     assert not diff_rows([{"id": 1, "c": "a"}], [{"id": 1, "c": "a  "}], padded=frozenset({"c"}))
     assert diff_rows([{"id": 1, "c": "a"}], [{"id": 1, "c": "a  "}]), "varchar blanks count"
+    nums = frozenset({"v"})
+    for spec in NUMERIC_SPECIALS:
+        assert not diff_rows([{"id": 1, "v": spec}], [{"id": 1, "v": spec}], numerics=nums)
+        assert diff_rows([{"id": 1, "v": spec}], [{"id": 1, "v": 0.0}], numerics=nums), f"{spec} read back as 0.0 is a difference"
+        assert diff_rows([{"id": 1, "v": spec}], [{"id": 1, "v": decimal.Decimal("0.00")}], numerics=nums)
+        assert diff_rows([{"id": 1, "v": spec}], [{"id": 1, "v": None}], numerics=nums)
+    assert not diff_rows([{"id": 1, "v": "Infinity"}], [{"id": 1, "v": float("inf")}], numerics=nums)
+    assert not diff_rows([{"id": 1, "v": "NaN"}], [{"id": 1, "v": float("nan")}], numerics=nums)
+    assert diff_rows([{"id": 1, "v": "Infinity"}], [{"id": 1, "v": float("-inf")}], numerics=nums)
+    assert diff_rows([{"id": 1, "v": "NaN"}], [{"id": 1, "v": "nan"}], numerics=nums), "only the server's own spelling is NaN"
+    assert not diff_rows([{"id": 1, "v": "1.50"}], [{"id": 1, "v": decimal.Decimal("1.5")}], numerics=nums)
+    assert diff_rows([{"id": 1, "v": "0.1000000000000000000001"}], [{"id": 1, "v": "0.1"}], numerics=nums), "a numeric keeps every digit"
+    assert not diff_rows([{"id": 1, "v": "{1.5,NaN,-Infinity,NULL}"}], [{"id": 1, "v": [{"item": 1.5}, {"item": float("nan")}, {"item": float("-inf")}, {"item": None}]}], numerics=nums)
+    assert not diff_rows([{"id": 1, "v": "{NaN,1.5}"}], [{"id": 1, "v": "{NaN,1.50}"}], numerics=nums)
+    assert diff_rows([{"id": 1, "v": "{NaN,1.5}"}], [{"id": 1, "v": [0.0, 1.5]}], numerics=nums), "an array NaN read back as 0.0 is a difference"
+    assert diff_rows([{"id": 1, "v": "{{1,2},{3,4}}"}], [{"id": 1, "v": "{{1,2},{3,5}}"}], numerics=nums)
+    assert numeric_value("{1,") == "{1,", "an unbalanced array literal is compared as text"
     assert canon("09:08:07.987654") == canon(dt.time(9, 8, 7, 987654))
     assert canon("100:00:00") != canon(dt.time(4, 0)), "a MySQL TIME past 24h must not match its wrap"
     assert canon("-01:30:00") == canon(-dt.timedelta(hours=1, minutes=30))
