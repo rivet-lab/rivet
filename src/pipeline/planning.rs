@@ -72,7 +72,7 @@ pub(crate) fn plan_batch_export(
     Ok(PlannedExport { plan, diags })
 }
 
-/// Refuses a CDC baseline leg that declares `text` over a column the server renders as text, which the change stream renders in its own form into the same `__changes` log; a source it cannot read is admitted with a warning.
+/// Refuses a CDC baseline leg that declares `text` over a column the server renders as text, which the change stream renders in its own form into the same `__changes` log; a source it cannot read leaves the guard with a warning and no refusal.
 fn refuse_text_the_stream_renders_otherwise(
     config: &Config,
     export: &ExportConfig,
@@ -129,10 +129,10 @@ fn refuse_text_the_stream_renders_otherwise(
     )
 }
 
-/// The warning for a baseline leg admitted because the source could not be read to check its text declarations.
+/// The warning that the text-declaration check of a baseline leg did not run because the source could not be read.
 fn warn_text_declaration_unchecked(parent: &str, step: &str, cause: &anyhow::Error) {
     log::warn!(
-        "export '{parent}': the check of its `columns:` text declarations against the source did not run, the {step} failed: {}; the baseline leg is admitted unchecked, and a date, time, timestamp or array column declared `text` there would be delivered as the server's text while the change stream renders it in its own form",
+        "export '{parent}': the check of its `columns:` text declarations against the source did not run, the {step} failed: {}; a date, time, timestamp or array column declared `text` there was not checked against the change stream's rendering",
         crate::redact::redact_error(cause)
     );
 }
@@ -564,9 +564,9 @@ mod tests {
         anyhow::bail!("connect refused at postgres://u:connect_pw@127.0.0.1:1/db")
     }
 
-    /// A baseline leg whose source cannot be reached is admitted with one warning naming the export, the step, the masked cause and that the check did not run.
+    /// A baseline leg whose source cannot be reached is not refused by the text guard and draws one warning naming the export, the step, the masked cause and that the check did not run, without claiming admission.
     #[test]
-    fn an_unreachable_source_admits_the_baseline_leg_with_one_masked_warning() {
+    fn an_unreachable_source_leaves_the_text_guard_with_one_masked_warning() {
         crate::pipeline::run::run_tail_tests::install_warn_capture();
         let pg = one_export_config("postgres", "");
         let leg = named_leg(&pg, "warn_connect");
@@ -577,16 +577,13 @@ mod tests {
             said[0].contains("the check of its `columns:` text declarations against the source did not run, the connect failed: connect refused at"),
             "{said:?}"
         );
-        assert!(
-            said[0].contains("the baseline leg is admitted unchecked"),
-            "{said:?}"
-        );
+        assert!(!said[0].contains("admitted"), "{said:?}");
         assert!(!said[0].contains("connect_pw"), "{said:?}");
     }
 
-    /// A catalog describe that fails admits the leg with one warning naming the describe step and masking the cause.
+    /// A catalog describe that fails is not refused by the text guard and draws one warning naming the describe step and masking the cause.
     #[test]
-    fn a_failed_describe_admits_the_baseline_leg_with_one_masked_warning() {
+    fn a_failed_describe_leaves_the_text_guard_with_one_masked_warning() {
         crate::pipeline::run::run_tail_tests::install_warn_capture();
         let pg = one_export_config("postgres", "");
         let leg = named_leg(&pg, "warn_describe");
@@ -632,6 +629,68 @@ mod tests {
         let said = warnings_of("probe_warns");
         assert_eq!(said.len(), 1, "{said:?}");
         assert!(said[0].contains("the describe failed"), "{said:?}");
+    }
+
+    fn date_probe() -> ScriptedSource {
+        let column = crate::types::SourceColumn::simple("d", "date", true);
+        ScriptedSource(vec![crate::types::TypeMapping::from_source(
+            &column,
+            crate::types::RivetType::Date,
+        )])
+    }
+
+    fn declared_text_leg(parent: &str) -> (Config, ExportConfig) {
+        let mut config = one_export_config("postgres", "");
+        config.exports[0].columns = [("d".to_string(), "string".to_string())].into();
+        let leg = named_leg(&config, parent);
+        (config, leg)
+    }
+
+    /// The caller's probe reaches the text guard through the batch plan: a date declared text is refused on it, with no second connection to fall back on.
+    #[test]
+    fn the_batch_plan_hands_its_probe_to_the_text_guard() {
+        let (config, leg) = declared_text_leg("planned_probe");
+        let err = plan_batch_export(
+            Some(&mut date_probe()),
+            &config,
+            &leg,
+            Path::new("."),
+            PlanFlags::default(),
+            None,
+        )
+        .err()
+        .expect("a date declared text, read on the probe the plan holds");
+        crate::error::assert_coded(&err, "RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
+        assert!(
+            format!("{err:#}").contains("export 'planned_probe': column 'd'"),
+            "{err:#}"
+        );
+    }
+
+    /// An unreachable PostgreSQL baseline leg with a `columns:` override draws the unchecked warning and the connect refusal together, and the warning does not call the leg admitted.
+    #[test]
+    fn an_unreachable_postgres_baseline_leg_warns_unchecked_and_is_refused_not_admitted() {
+        crate::pipeline::run::run_tail_tests::install_warn_capture();
+        let (config, leg) = declared_text_leg("agree_unreachable");
+        let mut src = crate::source::create_source(&config.source).map_err(|e| format!("{e:#}"));
+        assert!(src.is_err(), "the fixture source must be unreachable");
+        let err = plan_and_admit(
+            &mut src,
+            &config,
+            &leg,
+            Path::new("."),
+            PlanFlags::default(),
+            None,
+        )
+        .err()
+        .expect("an override on an unreachable source is not a pass");
+        crate::error::assert_coded(&err, "RIVET_SOURCE_CONNECT_FAILED", 2);
+        assert!(format!("{err:#}").contains("was not admitted"), "{err:#}");
+        let said = warnings_of("agree_unreachable");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("the connect failed"), "{said:?}");
+        assert!(said[0].contains("did not run"), "{said:?}");
+        assert!(!said[0].contains("admitted"), "{said:?}");
     }
 
     /// Where the check has nothing to read, or reads and finds nothing, an unreachable source and a clean read stay silent.
