@@ -163,8 +163,8 @@ fn cell_type_name(c: &ColumnData<'_>) -> String {
 use crate::error::Result;
 use crate::types::kind::CommonKind;
 use crate::types::{
-    ColumnOverrides, RivetType, SourceColumn, TimeUnit as RivetTimeUnit, TypeMapping,
-    build_arrow_field, resolve_column,
+    ColumnOverrides, NanosSource, RivetType, SourceColumn, TimeUnit as RivetTimeUnit, TypeMapping,
+    build_arrow_field, resolve_column, timestamp_nanos_or_refuse,
 };
 
 /// Days from the Arrow/Unix epoch (1970-01-01) used to anchor `Date32`.
@@ -799,11 +799,7 @@ fn build_array(
                     Some(dt) => match seeded!(
                         "mssql-ns-override-out-of-range-null",
                         dt.and_utc().timestamp_nanos_opt(),
-                        Some(crate::types::timestamp_nanos_or_refuse(
-                            dt,
-                            crate::types::NanosSource::Mssql,
-                            column
-                        )?)
+                        Some(timestamp_nanos_or_refuse(dt, NanosSource::Mssql, column)?)
                     ) {
                         Some(ns) => b.append_value(ns),
                         None => b.append_null(),
