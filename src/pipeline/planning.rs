@@ -80,14 +80,14 @@ fn refuse_text_the_stream_renders_otherwise(
     probe: Option<&mut dyn Source>,
     connect: impl FnOnce(&crate::config::SourceConfig) -> Result<Box<dyn Source>>,
 ) -> Result<()> {
-    use crate::types::override_table::{Engine, server_text_declared};
+    use crate::types::override_table::{Engine, declares_text, server_text_declared};
     let Some(parent) = export.snapshot_parent.as_deref() else {
         return Ok(());
     };
     if seeded!("cdc-leg-text-declaration", true, false) {
         return Ok(());
     }
-    if plan.column_overrides.is_empty()
+    if !declares_text(&plan.column_overrides)
         || config.source.source_type != crate::config::SourceType::Postgres
     {
         return Ok(());
@@ -693,13 +693,40 @@ mod tests {
         assert!(!said[0].contains("admitted"), "{said:?}");
     }
 
-    /// Where the check has nothing to read, or reads and finds nothing, an unreachable source and a clean read stay silent.
+    /// An unreachable PostgreSQL baseline leg declaring only a non-text override is still refused as not admitted, and draws no text-check warning.
+    #[test]
+    fn an_unreachable_postgres_baseline_leg_with_an_int_override_is_refused_without_a_warning() {
+        crate::pipeline::run::run_tail_tests::install_warn_capture();
+        let mut config = one_export_config("postgres", "");
+        config.exports[0].columns = [("id".to_string(), "int64".to_string())].into();
+        let leg = named_leg(&config, "agree_int_only");
+        let mut src = crate::source::create_source(&config.source).map_err(|e| format!("{e:#}"));
+        assert!(src.is_err(), "the fixture source must be unreachable");
+        let err = plan_and_admit(
+            &mut src,
+            &config,
+            &leg,
+            Path::new("."),
+            PlanFlags::default(),
+            None,
+        )
+        .err()
+        .expect("an override on an unreachable source is not a pass");
+        crate::error::assert_coded(&err, "RIVET_SOURCE_CONNECT_FAILED", 2);
+        assert!(format!("{err:#}").contains("was not admitted"), "{err:#}");
+        let said = warnings_of("agree_int_only");
+        assert!(said.is_empty(), "{said:?}");
+    }
+
+    /// Where the check has nothing to read or no text to check, or reads and finds nothing, an unreachable source and a clean read stay silent.
     #[test]
     fn the_inputs_next_to_an_unchecked_leg_stay_silent() {
         crate::pipeline::run::run_tail_tests::install_warn_capture();
         let pg = one_export_config("postgres", "");
         let mysql = one_export_config("mysql", "");
-        let cases: [(&str, &Config, ExportConfig, ResolvedRunPlan); 4] = [
+        let mut int_only = crate::plan::test_support::test_plan();
+        int_only.column_overrides = [("d".to_string(), crate::types::RivetType::Int64)].into();
+        let cases: [(&str, &Config, ExportConfig, ResolvedRunPlan); 6] = [
             (
                 "silent_no_parent",
                 &pg,
@@ -724,10 +751,31 @@ mod tests {
                 named_leg(&pg, "silent_clean_read"),
                 declared_text_plan("other"),
             ),
+            (
+                "silent_int_only",
+                &pg,
+                named_leg(&pg, "silent_int_only"),
+                int_only,
+            ),
+            (
+                "silent_text_over_text",
+                &pg,
+                named_leg(&pg, "silent_text_over_text"),
+                declared_text_plan("d"),
+            ),
         ];
         for (name, config, export, plan) in cases {
             let connect: ConnectFn = if name == "silent_clean_read" {
                 Box::new(|_| Ok(Box::new(ScriptedSource(Vec::new())) as Box<dyn Source>))
+            } else if name == "silent_text_over_text" {
+                Box::new(|_| {
+                    let column = crate::types::SourceColumn::simple("d", "text", true);
+                    let mapping = crate::types::TypeMapping::from_source(
+                        &column,
+                        crate::types::RivetType::String,
+                    );
+                    Ok(Box::new(ScriptedSource(vec![mapping])) as Box<dyn Source>)
+                })
             } else {
                 Box::new(move |_| anyhow::bail!("connect refused for {name}"))
             };
