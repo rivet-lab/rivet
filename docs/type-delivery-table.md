@@ -11,7 +11,7 @@ One row per delivering ledger row: the source native type, the Arrow type batch 
 | postgres | 91 | 12 | 4 | 0 |
 | mysql | 37 | 43 | 0 | 0 |
 | mssql | 51 | 4 | 1 | 0 |
-| oracle | 17 | 40 | 0 | 0 |
+| oracle | 57 | 0 | 0 | 0 |
 | mongo | 0 | 20 | 0 | 0 |
 
 No cell is empty.
@@ -217,9 +217,48 @@ No cell is empty.
 | oracle | `NVARCHAR2(50)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | oracle | `CHAR(5 CHAR)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | oracle | `RAW(16)` | `Binary` | `exact` | `Nullable(String)` | `BYTES` | `BINARY` |
+| oracle | `FLOAT` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | `FLOAT(10)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | `NUMBER(38,0)` | `Decimal128(38, 0)` | `exact` | `Nullable(Decimal(38, 0))` | `BIGNUMERIC` | `NUMBER(38,0)` |
+| oracle | `NUMBER(10,-3)` | `Decimal128(13, 0)` | `exact` | `Nullable(Decimal(13, 0))` | `NUMERIC` | `NUMBER(13,0)` |
+| oracle | `NUMBER(10,2)` | `Decimal128(10, 2)` | `exact` | `Nullable(Decimal(10, 2))` | `NUMERIC` | `NUMBER(10,2)` |
+| oracle | `NUMBER(5,7)` | `Decimal128(7, 7)` | `exact` | `Nullable(Decimal(7, 7))` | `NUMERIC` | `NUMBER(7,7)` |
+| oracle | `NUMBER(18,0)` | `Int64` | `exact` | `Nullable(Int64)` | `INT64` | `NUMBER(38,0)` |
+| oracle | `NUMBER(19,0)` | `Decimal128(19, 0)` | `exact` | `Nullable(Decimal(19, 0))` | `NUMERIC` | `NUMBER(19,0)` |
+| oracle | `INTEGER` | `Decimal128(38, 0)` | `exact` | `Nullable(Decimal(38, 0))` | `BIGNUMERIC` | `NUMBER(38,0)` |
+| oracle | `SMALLINT` | `Decimal128(38, 0)` | `exact` | `Nullable(Decimal(38, 0))` | `BIGNUMERIC` | `NUMBER(38,0)` |
+| oracle | `DECIMAL(20,5)` | `Decimal128(20, 5)` | `exact` | `Nullable(Decimal(20, 5))` | `NUMERIC` | `NUMBER(20,5)` |
+| oracle | `NUMBER(38,38)` | `Decimal128(38, 38)` | `exact` | `Nullable(Decimal(38, 38))` | `BIGNUMERIC` | `NUMBER(38,38)` |
+| oracle | `CHAR(10)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | `CHAR(2000)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | `VARCHAR2(4000)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | `VARCHAR2(10 CHAR)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | `NCHAR(10)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | `NVARCHAR2(2000)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | `CLOB` | `Utf8` | `refuse:RIVET_SOURCE_CDC_TABLE_UNSUPPORTED` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | `NCLOB` | `Utf8` | `refuse:RIVET_SOURCE_CDC_TABLE_UNSUPPORTED` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | `BLOB` | `Binary` | `refuse:RIVET_SOURCE_CDC_TABLE_UNSUPPORTED` | `Nullable(String)` | `BYTES` | `BINARY` |
+| oracle | `RAW(2000)` | `Binary` | `exact` | `Nullable(String)` | `BYTES` | `BINARY` |
+| oracle | `LONG` | `Utf8` | `refuse:RIVET_SOURCE_CDC_TABLE_UNSUPPORTED` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | `LONG RAW` | `Binary` | `refuse:RIVET_SOURCE_CDC_TABLE_UNSUPPORTED` | `Nullable(String)` | `BYTES` | `BINARY` |
+| oracle | `TIMESTAMP(0)` | `Timestamp(µs)` | `exact` | `Nullable(DateTime64(6, 'UTC'))` | `DATETIME` | `TIMESTAMP_NTZ` |
+| oracle | `TIMESTAMP(3)` | `Timestamp(µs)` | `exact` | `Nullable(DateTime64(6, 'UTC'))` | `DATETIME` | `TIMESTAMP_NTZ` |
+| oracle | `TIMESTAMP(0) WITH TIME ZONE` | `Timestamp(µs, "UTC")` | `exact` | `Nullable(DateTime64(6, 'UTC'))` | `TIMESTAMP` | `TIMESTAMP_TZ` |
 | oracle | `TIMESTAMP(9) WITH TIME ZONE` | `iso_timestamp_nanos` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | `TIMESTAMP(0) WITH LOCAL TIME ZONE` | `Timestamp(µs, "UTC")` | `exact` | `Nullable(DateTime64(6, 'UTC'))` | `TIMESTAMP` | `TIMESTAMP_TZ` |
 | oracle | `TIMESTAMP(9) WITH LOCAL TIME ZONE` | `iso_timestamp_nanos` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
-| oracle | 40 matrix-only rows: `FLOAT`, `FLOAT(10)`, `NUMBER(38,0)`, `NUMBER(10,-3)`, `NUMBER(10,2)`, `NUMBER(5,7)`, `NUMBER(18,0)`, `NUMBER(19,0)`, `INTEGER`, `SMALLINT`, `DECIMAL(20,5)`, `NUMBER(38,38)`, `CHAR(10)`, `CHAR(2000)`, `VARCHAR2(4000)`, `VARCHAR2(10 CHAR)`, `NCHAR(10)`, `NVARCHAR2(2000)`, `CLOB`, `NCLOB`, `BLOB`, `RAW(2000)`, `LONG`, `LONG RAW`, `TIMESTAMP(0)`, `TIMESTAMP(3)`, `TIMESTAMP(0) WITH TIME ZONE`, `TIMESTAMP(0) WITH LOCAL TIME ZONE`, `INTERVAL YEAR(9) TO MONTH`, `INTERVAL YEAR(2) TO MONTH`, `INTERVAL DAY(9) TO SECOND(9)`, `INTERVAL DAY(2) TO SECOND(0)`, `ROWID`, `UROWID(4000)`, `JSON`, `XMLTYPE`, `BOOLEAN`, `VECTOR(3, FLOAT32)`, `VECTOR(2, FLOAT64)`, `VECTOR(2, INT8)` | n/a: no `delivery`, graded by the edge matrix only (a refused or text-only column) | n/a | n/a | n/a | n/a |
+| oracle | `INTERVAL YEAR(9) TO MONTH` | `Utf8` | `refuse:RIVET_SOURCE_CDC_TABLE_UNSUPPORTED` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | `INTERVAL YEAR(2) TO MONTH` | `Utf8` | `refuse:RIVET_SOURCE_CDC_TABLE_UNSUPPORTED` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | `INTERVAL DAY(9) TO SECOND(9)` | `Utf8` | `refuse:RIVET_SOURCE_CDC_TABLE_UNSUPPORTED` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | `INTERVAL DAY(2) TO SECOND(0)` | `Utf8` | `refuse:RIVET_SOURCE_CDC_TABLE_UNSUPPORTED` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | `ROWID` | `Utf8` | `refuse:RIVET_SOURCE_CDC_TABLE_UNSUPPORTED` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | `UROWID(4000)` | `Utf8` | `refuse:RIVET_SOURCE_CDC_TABLE_UNSUPPORTED` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | `JSON` | `arrow.json` | `refuse:RIVET_SOURCE_CDC_TABLE_UNSUPPORTED` | `Nullable(String)` | `JSON` | `VARIANT` |
+| oracle | `XMLTYPE` | `Utf8` | `refuse:RIVET_SOURCE_CDC_TABLE_UNSUPPORTED` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | `BOOLEAN` | `Boolean` | `refuse:RIVET_SOURCE_CDC_TABLE_UNSUPPORTED` | `Nullable(Bool)` | `BOOL` | `BOOLEAN` |
+| oracle | `VECTOR(3, FLOAT32)` | `Utf8` | `refuse:RIVET_SOURCE_CDC_TABLE_UNSUPPORTED` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | `VECTOR(2, FLOAT64)` | `Utf8` | `refuse:RIVET_SOURCE_CDC_TABLE_UNSUPPORTED` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | `VECTOR(2, INT8)` | `Utf8` | `refuse:RIVET_SOURCE_CDC_TABLE_UNSUPPORTED` | `Nullable(String)` | `STRING` | `TEXT` |
 | mongo | `double` | 2026-11-22: a Mongo collection exports as two columns, `_id` Utf8 and `document` Utf8 with the arrow.json extension (docs/type-mapping.md, JSON-blob model); a BSON type is a value inside `document`, never a column, so it has no per-column delivery, CDC verdict or warehouse leg; the edge matrix grades its value form | n/a | n/a | n/a | n/a |
 | mongo | `int` | 2026-11-22: a Mongo collection exports as two columns, `_id` Utf8 and `document` Utf8 with the arrow.json extension (docs/type-mapping.md, JSON-blob model); a BSON type is a value inside `document`, never a column, so it has no per-column delivery, CDC verdict or warehouse leg; the edge matrix grades its value form | n/a | n/a | n/a | n/a |
 | mongo | `long` | 2026-11-22: a Mongo collection exports as two columns, `_id` Utf8 and `document` Utf8 with the arrow.json extension (docs/type-mapping.md, JSON-blob model); a BSON type is a value inside `document`, never a column, so it has no per-column delivery, CDC verdict or warehouse leg; the edge matrix grades its value form | n/a | n/a | n/a | n/a |

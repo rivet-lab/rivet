@@ -21,6 +21,11 @@ LIT_SHOWN = 40
 ONE_PER_TABLE = ("LONG", "LONG RAW")
 
 
+def one_per_table_clash(held: list, c) -> bool:
+    """Whether column `c` is a LONG or LONG RAW and the table already holds one, which Oracle refuses (ORA-01754)."""
+    return c.native in ONE_PER_TABLE and any(x.native in ONE_PER_TABLE for x in held)
+
+
 @dataclass(frozen=True)
 class Column:
     """One ledger row seeded as a column: its literals sit at ids 1..n, the all-NULL row after them."""
@@ -92,7 +97,7 @@ def chunks(engine: str) -> list[Chunk]:
     out: list[list[Column]] = [[]]
     width = 1 if engine == "mongo" else MAX_COLS
     for c in columns(engine):
-        if len(out[-1]) == width or (c.native in ONE_PER_TABLE and any(x.native in ONE_PER_TABLE for x in out[-1])):
+        if len(out[-1]) == width or one_per_table_clash(out[-1], c):
             out.append([])
         out[-1].append(c)
     return [Chunk(TABLE.format(k=k), tuple(cs)) for k, cs in enumerate(out) if cs]
@@ -253,6 +258,7 @@ def self_test() -> None:
     """Grade the grader: units split what refuses, and every failure class fires on its exact harm."""
     from .property_no_silent_null import NULLED, WRONG
 
+    assert all(sum(c.native in ONE_PER_TABLE for c in k.cols) <= 1 for k in chunks("oracle")), "no Oracle table holds two LONG or LONG RAW columns"
     exact, null = te.Verdict(te.EXACT), te.Verdict(te.NULL)
     form = lambda t, d="": te.Verdict(te.FORM, text=t, defect=d)
     refuse = lambda c, s=te.EXTRACT, d="": te.Verdict(te.REFUSE, code=c, stage=s, defect=d)

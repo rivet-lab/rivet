@@ -22,6 +22,7 @@ from . import cdc, core
 from . import property_no_silent_null as nsn
 from .core import Ledger, SkipCause
 from . import type_edges as te
+from . import type_matrix as tm
 from .property_no_silent_null import CDC_DIFFERS, DELIVERED, EMPTY, IGNORED, NOT_GRADED, NULLED, REFUSED, WRONG, Col, Result
 
 SCENARIO = "no_silent_null_cdc"
@@ -410,8 +411,12 @@ def stops_alone(c: Col) -> bool:
 
 def groups(cols: list[Col]) -> list[list[Col]]:
     """Column groups of one table: GROUP delivering columns together, each column whose run stops alone so its refusal cannot stop another's run."""
-    whole = [c for c in cols if not stops_alone(c)]
-    return [whole[g:g + GROUP] for g in range(0, len(whole), GROUP)] + [[c] for c in cols if c not in whole]
+    out: list[list[Col]] = [[]]
+    for c in (c for c in cols if not stops_alone(c)):
+        if len(out[-1]) == GROUP or tm.one_per_table_clash(out[-1], c):
+            out.append([])
+        out[-1].append(c)
+    return [g for g in out if g] + [[c] for c in cols if stops_alone(c)]
 
 
 def rounds(engine: str, cols: list[Col]) -> list[tuple[list[Col], list[Unit], str]]:
@@ -543,6 +548,8 @@ def self_test() -> None:
     assert [[c.name for c in g] for g in groups([exact_c, gone_c, exact_c])] == [["e00", "e00"], ["g00"]], "a column the change stream refuses is its own round"
     batch_c = Col("b00", "NUMERIC", "Utf8", "text", ("'1'",), cdc=te.EXACT_V, refuses=te.parse_verdict("refuse:RIVET_X@extract", te.EXTRACT))
     assert [[c.name for c in g] for g in groups([exact_c, batch_c, exact_c])] == [["e00", "e00"], ["b00"]], "a column batch refuses is its own round"
+    longs = [Col("l00", "LONG", "Utf8", "text", ("'a'",)), Col("l01", "LONG RAW", "Binary", "bytes", ("HEXTORAW('00')",)), exact_c]
+    assert [[c.name for c in g] for g in groups(longs)] == [["l00"], ["l01", "e00"]], "a table holds one LONG or LONG RAW column, so a second one opens a new group"
     refused, none = nsn._proc(5, "[RIVET_X] no"), Unit("none", None, "parquet")
     stop = Result("cell", REFUSED, "", "", "RIVET_X")
     assert judge_stop(exact_c, none, "cell", None) is None and judge_stop(gone_c, none, "cell", stop) is stop

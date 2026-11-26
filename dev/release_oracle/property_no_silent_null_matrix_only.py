@@ -29,9 +29,14 @@ GEOMETRY_GAP = frozenset({"GEOMETRY", "POINT", "LINESTRING", "POLYGON", "GEOMETR
 GAP_LABEL = "refused today, gap against ADR-0038 CP1, fix in flight"
 
 
+def picked(native: str, only: str) -> bool:
+    """Whether a native type contains any of the comma-separated parts of `only`; an empty `only` keeps every type."""
+    return any(o.strip().lower() in native.lower() for o in only.split(","))
+
+
 def unmeasured(engine: str, only: str = "") -> list[tuple[int, dict]]:
-    """The ledger rows of one engine with no delivery and not declarable, keeping their ledger index; `only` keeps the rows whose native type contains it."""
-    return [(i, r) for i, r in enumerate(nsn.ledger_rows(engine)) if not r.get("delivery") and not r.get("declarable") and only.lower() in r["native_type"].lower()]
+    """The ledger rows of one engine with no delivery and not declarable, keeping their ledger index; `only` keeps the rows whose native type contains any of its comma-separated parts."""
+    return [(i, r) for i, r in enumerate(nsn.ledger_rows(engine)) if not r.get("delivery") and not r.get("declarable") and picked(r["native_type"], only)]
 
 
 def cdc_cols(engine: str, only: str = "") -> list[nsn.Col]:
@@ -263,6 +268,8 @@ def self_test() -> None:
     lost = {**wired, first: json_util.dumps({k: v for k, v in tm.mongo_grid()[0][first - 1].items() if not k.startswith("c")}, json_options=json_util.RELAXED_JSON_OPTIONS)}
     if not n_ok or bad_ok or not grade_mongo_row("double", lost)[1]:
         raise SystemExit(f"self-test: a faithful Mongo document grades {bad_ok} over {n_ok} values, or a document that lost its fields grades clean")
+    if not (picked("CLOB", "BLOB,CLOB") and picked("NCLOB", "blob, clob") and picked("RAW", "")) or picked("RAW(2000)", "BLOB,CLOB"):
+        raise SystemExit("self-test: --only keeps a row naming any of its comma-separated parts and no other")
     if dated("no date") or not dated("2026-11-22: a reason"):
         raise SystemExit("self-test: a Mongo reason is dated when it opens with an ISO date")
     cols = cdc_cols("postgres")
@@ -380,7 +387,7 @@ def main() -> int:
     ap.add_argument("--cdc", action="store_true", help="run the CDC grid over the matrix-only columns instead of the batch rows")
     ap.add_argument("--engine", default=",".join(ENGINES))
     ap.add_argument("--work", default=str(Path(tempfile.gettempdir()) / "no_silent_null_matrix_only"))
-    ap.add_argument("--only", default="", help="only the rows whose native type contains this text")
+    ap.add_argument("--only", default="", help="only the rows whose native type contains any of these comma-separated texts")
     ap.add_argument("--out", default="")
     ns = ap.parse_args()
     if ns.self_test:
