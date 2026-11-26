@@ -962,7 +962,7 @@ def _matrix_exit_code_self_test() -> None:
     from ..pytools import property_refusal_names_true_cause as refusal
 
     nsn = property_no_silent_null
-    ok, red, ng = (nsn.Result("c", nsn.DELIVERED), nsn.Result("c", nsn.DELIVERED, nsn.NULLED, "x"), nsn.Result("c", nsn.REFUSED, nsn.NOT_GRADED, "x"))
+    ok, red, ng = (nsn.Result("c", nsn.DELIVERED, fidelity="exact", checked=1), nsn.Result("c", nsn.DELIVERED, nsn.NULLED, "x"), nsn.Result("c", nsn.REFUSED, nsn.NOT_GRADED, "x"))
     tmp = tempfile.mkdtemp()
     table = {
         "property_no_silent_null": (nsn, "run_engine", lambda r: ([r], []), lambda m: m.main()),

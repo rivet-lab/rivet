@@ -645,7 +645,50 @@ fn bigquery_validates_oracle_type_matrix_parquet() {
     let Some(bq) = BqLive::from_env("bq_ora") else {
         return;
     };
-    let legs = oracle_ledger_legs();
+    for legs in oracle_groups(oracle_ledger_legs()) {
+        check_oracle_group(&bq, &legs);
+    }
+}
+
+/// The Oracle legs cut into the tables the type grids seed: Oracle holds one LONG or LONG RAW column a table.
+#[cfg(feature = "oracle")]
+fn oracle_groups(legs: Vec<OracleLeg>) -> Vec<Vec<OracleLeg>> {
+    let out = Command::new("uv")
+        .args([
+            "run",
+            "--frozen",
+            "--quiet",
+            "python",
+            "-m",
+            "dev.release_oracle.type_matrix",
+            "partition",
+            "oracle",
+        ])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("spawn `uv run` for the seed partition");
+    assert!(
+        out.status.success(),
+        "type_matrix partition: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let chunks: Vec<Vec<String>> =
+        serde_json::from_slice(&out.stdout).expect("type_matrix partition prints a JSON list");
+    let mut groups: Vec<Vec<OracleLeg>> = chunks.iter().map(|_| Vec::new()).collect();
+    for l in legs {
+        let at = chunks
+            .iter()
+            .position(|c| c.contains(&l.native))
+            .unwrap_or_else(|| panic!("{} is in no seed chunk", l.native));
+        groups[at].push(l);
+    }
+    groups.retain(|g| !g.is_empty());
+    groups
+}
+
+/// One table of `legs`: exported to Parquet, loaded into BigQuery, and every column's type compared with the ledger.
+#[cfg(feature = "oracle")]
+fn check_oracle_group(bq: &BqLive, legs: &[OracleLeg]) {
     let t = OracleTable::create(
         "bq_ora",
         &std::iter::once("id NUMBER(10) PRIMARY KEY".to_string())
@@ -735,5 +778,25 @@ fn bigquery_validates_oracle_type_matrix_parquet() {
         "{} ledger violations:\n{}",
         bad.len(),
         bad.join("\n")
+    );
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+fn oracle_ledger_legs_never_share_a_table_with_a_second_long() {
+    let groups = oracle_groups(oracle_ledger_legs());
+    let longs = |g: &Vec<OracleLeg>| g.iter().filter(|l| l.native.starts_with("LONG")).count();
+    assert!(
+        groups.iter().all(|g| longs(g) <= 1),
+        "a table holds one LONG or LONG RAW column (ORA-01754): {:?}",
+        groups
+            .iter()
+            .map(|g| g.iter().map(|l| l.native.as_str()).collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        groups.iter().map(Vec::len).sum::<usize>(),
+        oracle_ledger_legs().len(),
+        "every leg lands in one table"
     );
 }

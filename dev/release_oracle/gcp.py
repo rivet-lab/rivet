@@ -31,7 +31,7 @@ def token(refresh: bool = False) -> str:
         tok, at = _token
         if refresh or not tok or time.monotonic() - at > _TOKEN_TTL:
             tok = subprocess.run(["gcloud", "auth", "print-access-token"], capture_output=True,
-                                 text=True, check=True).stdout.strip()
+                                 text=True, check=True, timeout=120).stdout.strip()
             _token = (tok, time.monotonic())
         return tok
 

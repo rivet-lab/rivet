@@ -21,6 +21,7 @@ from . import cdc, core
 from . import property_no_silent_null as nsn
 from .core import Ledger, SkipCause
 from . import type_edges as te
+from . import type_matrix as tm
 from .property_no_silent_null import CDC_DIFFERS, DELIVERED, EMPTY, IGNORED, NOT_GRADED, NULLED, REFUSED, WRONG, Col, Result
 
 SCENARIO = "no_silent_null_cdc"
@@ -140,9 +141,8 @@ def sql(engine: str, url: str, stmt: str) -> core.Proc:
     return p
 
 
-def exec_all(engine: str, url: str, stmts: list[str], image: str = "") -> None:
-    """Run statements on the source; SQL Server waits for its capture job; raises on the first refusal."""
-    before = cdc._mssql_max_lsn(url) if engine == "mssql" else ""
+def exec_all(engine: str, url: str, stmts: list[str], image: str = "", leg: str = "", t: str = "", n: int = 0) -> None:
+    """Run statements on the source; SQL Server then waits for the change row of the last write of `leg`; raises on the first refusal."""
     if engine == "mysql" and image:
         p = sql(engine, url, f"SET SESSION binlog_row_image = {image}; " + " ".join(s + ";" for s in stmts))
         if not p.ok:
@@ -152,8 +152,10 @@ def exec_all(engine: str, url: str, stmts: list[str], image: str = "") -> None:
             p = sql(engine, url, s + ";")
             if not p.ok:
                 raise RuntimeError(f"{engine} refused `{s[:160]}`: exit {p.returncode}: {p.out.strip()[:300]}")
-    if engine == "mssql":
-        cdc._wait_mssql_captured(url, before)
+    if engine == "mssql" and leg:
+        op, row_id, _ = expected(leg, n)[-1]
+        if not cdc._wait_mssql_captured(url, f"dbo_{t}", op, row_id):
+            raise RuntimeError(f"the capture job did not harvest the {leg} leg's last change ({op} id={row_id})")
 
 
 def capture_on(engine: str, url: str, t: str) -> list[str]:
@@ -163,7 +165,7 @@ def capture_on(engine: str, url: str, t: str) -> list[str]:
     if engine == "oracle":
         return [f"ALTER TABLE {t} ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS", f"GRANT SELECT ON {t} TO c##rivetcdc"]
     if engine == "mssql":
-        return [f"EXEC sys.sp_cdc_enable_table @source_schema='dbo', @source_name='{t}', @role_name=NULL, @capture_instance='dbo_{t}'"]
+        return ["EXEC sys.sp_configure 'max text repl size (B)', -1; RECONFIGURE", f"EXEC sys.sp_cdc_enable_table @source_schema='dbo', @source_name='{t}', @role_name=NULL, @capture_instance='dbo_{t}'"]
     return []
 
 
@@ -358,10 +360,10 @@ def run_round(engine: str, r: int, cols: list[Col], units: list[Unit], image: st
 
     try:
         each("snapshot")
-        exec_all(engine, dml_url, dml(engine, cols, t, n), image)
+        exec_all(engine, dml_url, dml(engine, cols, t, n), image, "delete", t, n)
         each("stream")
         for kind in ddl_kinds():
-            exec_all(engine, dml_url, ddl_insert(engine, cols, t, kind), image)
+            exec_all(engine, dml_url, ddl_insert(engine, cols, t, kind), image, kind, t, n)
             each(kind)
     except RuntimeError as e:
         note = f"the round's source DML was refused: {e}"[:300]
@@ -382,8 +384,12 @@ def stops_alone(c: Col) -> bool:
 
 def groups(cols: list[Col]) -> list[list[Col]]:
     """Column groups of one table: GROUP delivering columns together, each column whose run stops alone so its refusal cannot stop another's run."""
-    whole = [c for c in cols if not stops_alone(c)]
-    return [whole[g:g + GROUP] for g in range(0, len(whole), GROUP)] + [[c] for c in cols if c not in whole]
+    out: list[list[Col]] = [[]]
+    for c in (c for c in cols if not stops_alone(c)):
+        if len(out[-1]) == GROUP or tm.one_per_table_clash(out[-1], c):
+            out.append([])
+        out[-1].append(c)
+    return [g for g in out if g] + [[c] for c in cols if stops_alone(c)]
 
 
 def rounds(engine: str, cols: list[Col]) -> list[tuple[list[Col], list[Unit], str]]:
@@ -502,6 +508,8 @@ def self_test() -> None:
     assert [[c.name for c in g] for g in groups([exact_c, gone_c, exact_c])] == [["e00", "e00"], ["g00"]], "a column the change stream refuses is its own round"
     batch_c = Col("b00", "NUMERIC", "Utf8", "text", ("'1'",), cdc=te.EXACT_V, refuses=te.parse_verdict("refuse:RIVET_X@extract", te.EXTRACT))
     assert [[c.name for c in g] for g in groups([exact_c, batch_c, exact_c])] == [["e00", "e00"], ["b00"]], "a column batch refuses is its own round"
+    longs = [Col("l00", "LONG", "Utf8", "text", ("'a'",)), Col("l01", "LONG RAW", "Binary", "bytes", ("HEXTORAW('00')",)), exact_c]
+    assert [[c.name for c in g] for g in groups(longs)] == [["l00"], ["l01", "e00"]], "a table holds one LONG or LONG RAW column, so a second one opens a new group"
     refused, none = nsn._proc(5, "[RIVET_X] no"), Unit("none", None, "parquet")
     stop = Result("cell", REFUSED, "", "", "RIVET_X")
     assert judge_stop(exact_c, none, "cell", None) is None and judge_stop(gone_c, none, "cell", stop) is stop
@@ -556,6 +564,23 @@ def self_test() -> None:
     finally:
         globals()["run_round"] = saved_round
     assert asked == [(7, ["e00"], [none, units[1]]), (8, ["e01"], [none, units[2]])] and [x.cell for x in solo] == ["e00", "e01"], asked
+    waits, real_wait, real_sql = [], cdc._wait_mssql_captured, globals()["sql"]
+    cdc._wait_mssql_captured = lambda url, ci, op, row_id: waits.append((ci, op, row_id)) or bool(row_id != 2002)
+    globals()["sql"] = lambda *_a, **_k: nsn._proc(0)
+    try:
+        exec_all("mssql", "u", ["x"], "", "removed", "t", 3)
+        exec_all("mssql", "u", ["x"], "", "delete", "t", 3)
+        exec_all("mssql", "u", ["x"])
+        exec_all("postgres", "u", ["x"], "", "removed", "t", 3)
+        assert waits == [("dbo_t", "insert", 2003), ("dbo_t", "delete", 3)], f"a leg waits for the change row of its last write: {waits}"
+        try:
+            exec_all("mssql", "u", ["x"], "", "type_changed", "t", 3)
+        except RuntimeError as e:
+            assert "type_changed" in str(e), e
+        else:
+            raise AssertionError("a change row that never lands is a refusal, not a graded run")
+    finally:
+        cdc._wait_mssql_captured, globals()["sql"] = real_wait, real_sql
     shutil.rmtree(d, ignore_errors=True)
     print(f"no_silent_null_cdc self-test ok: legs {legs()}, row images {row_images()}")
 
