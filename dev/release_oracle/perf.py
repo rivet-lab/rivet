@@ -125,6 +125,9 @@ def _pg_counters(url: str) -> dict[str, int] | None:
     return dict(zip(("pg_tup_returned", "pg_tup_fetched", "pg_temp_files"), map(int, vals[-3:])))
 
 
+PLAN_CACHE_HARM = "mssql_logical_reads"
+
+
 def _mssql_reads(url: str, own: str) -> dict[str, int] | None:
     """Logical reads of each cached statement whose text names `own`, keyed by plan and offset; None when the DMV did not answer."""
     from .cdc import _sqlcmd
@@ -175,7 +178,7 @@ def measured_harm(probe: str, before: dict[str, int] | None, after: dict[str, in
         return None
     if probe.startswith("mssql"):
         grown = (v - before.get(k, 0) if v >= before.get(k, 0) else v for k, v in after.items())
-        return reported | {"mssql_logical_reads": sum(grown)}
+        return reported | {PLAN_CACHE_HARM: sum(grown)}
     return {k: after[k] - before[k] for k in after}
 
 
@@ -207,15 +210,15 @@ def _ran(s: Sample | None) -> bool:
 
 
 def _best(samples: list[Sample]) -> Sample | None:
-    """The per-metric minimum over successful samples; the first failed sample (with its `why`) when any run failed, None when there are none."""
+    """The per-metric minimum over successful samples, the median for the plan-cache metric; the first failed sample (with its `why`) when any run failed, None when there are none."""
     if not samples:
         return None
     if not all(s.ok for s in samples):
         return next(s for s in samples if not s.ok)
     keys = set.intersection(*(set(s.harm) for s in samples)) if samples else set()
+    harm = {k: (statistics.median_low if k == PLAN_CACHE_HARM else min)(s.harm[k] for s in samples) for k in keys}
     return Sample(True, min(s.wall for s in samples), min(s.cpu for s in samples),
-                  min(s.rss for s in samples), {k: min(s.harm[k] for s in samples) for k in keys},
-                  statistics.median(s.wall for s in samples))
+                  min(s.rss for s in samples), harm, statistics.median(s.wall for s in samples))
 
 
 def perf_verdict(engine: str, prev: Sample, cur: Sample) -> list[str]:
