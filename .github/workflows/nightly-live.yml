@@ -88,7 +88,7 @@ jobs:
           # it every test that writes a shared workdir EACCESes — the first
           # nightly after the cdc-oracle suite landed failed exactly there.
           mkdir -p tests/.live-tmp
-          docker compose --profile pool --profile loaders --profile cdc --profile replica --profile governor --profile tz --profile mysql-stmt up -d postgres postgres-state mysql mssql mssql-governor minio fake-gcs azurite toxiproxy pgbouncer pgbouncer-state proxysql mysql-tz proxysql-tz clickhouse-tz duckdb clickhouse postgres-cdc mysql-cdc mysql-reset mssql-cdc mysql-primary mysql-replica mysql-replica-nolog oracle mysql-stmt-84-lctn1 mongo
+          python3 -m dev.pytools.compose_up docker compose --profile pool --profile loaders --profile cdc --profile replica --profile governor --profile tz --profile mysql-stmt up -d postgres postgres-state mysql mssql mssql-governor minio fake-gcs azurite toxiproxy pgbouncer pgbouncer-state proxysql mysql-tz proxysql-tz clickhouse-tz duckdb clickhouse postgres-cdc mysql-cdc mysql-reset mssql-cdc mysql-primary mysql-replica mysql-replica-nolog oracle mysql-stmt-84-lctn1 mongo
           uv run --frozen python -m dev.release_oracle.stand_stacks up full
           sudo chmod -R 0777 tests/.live-tmp
 
@@ -242,7 +242,7 @@ jobs:
       - name: Start Mongo stack
         run: |
           mkdir -p tests/.live-tmp
-          docker compose --profile replica --profile shard up -d --wait mongo mongo-rs2-a mongo-rs2-b mongos toxiproxy minio fake-gcs duckdb clickhouse
+          python3 -m dev.pytools.compose_up docker compose --profile replica --profile shard up -d --wait mongo mongo-rs2-a mongo-rs2-b mongos toxiproxy minio fake-gcs duckdb clickhouse
           uv run --frozen python -m dev.release_oracle.stand_stacks up mongo
           sudo chmod -R 0777 tests/.live-tmp
 
@@ -330,8 +330,8 @@ jobs:
         run: |
           export ${{ matrix.env }}=${{ matrix.tag }}
           mkdir -p tests/.live-tmp
-          docker compose --profile cdc up -d mysql-cdc postgres-cdc
-          docker compose up -d --wait duckdb
+          python3 -m dev.pytools.compose_up docker compose --profile cdc up -d mysql-cdc postgres-cdc
+          python3 -m dev.pytools.compose_up docker compose up -d --wait duckdb
           sudo chmod -R 0777 tests/.live-tmp
       - name: MySQL 5.7 is refused (no binlog_row_metadata), the expected outcome
         if: matrix.engine == 'mysql' && matrix.tag == '5.7'
@@ -403,7 +403,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
       - name: Start postgres
-        run: docker compose up -d postgres
+        run: python3 -m dev.pytools.compose_up docker compose up -d postgres
       - name: Exchange artifacts between the two versions
         # The axis the offline PR gate cannot run: an artifact written by one
         # version consumed by the other. It is where the sealed-plan integrity
@@ -442,7 +442,7 @@ jobs:
           tool: cargo-nextest,uv
       - name: Start CDC stack
         if: steps.day.outputs.sunday == 'yes'
-        run: docker compose --profile cdc up -d mysql-cdc
+        run: python3 -m dev.pytools.compose_up docker compose --profile cdc up -d mysql-cdc
       - name: Build + soak 45m
         if: steps.day.outputs.sunday == 'yes'
         run: |
@@ -489,7 +489,6 @@ jobs:
         if: always()
         run: python3 dev/pytools/statement_truth.py mysql down
 
-  # E2E: one nextest archive, four legs on a full stack, one census job.
   e2e-build:
     name: E2E build (nextest archive)
     needs: start
@@ -529,7 +528,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        leg: [pre, 1/3, 2/3, 3/3]
+        leg: [pre, 1/4, 2/4, 3/4, 4/4]
     env:
       RIVET_TEST_STATE_URL: postgresql://rivet:rivet@127.0.0.1:5433/rivet_state_ci
       RIVET_SKIP_LOG: ${{ github.workspace }}/target/rivet-skips.log
@@ -543,7 +542,7 @@ jobs:
       - name: Start services (in the background)
         run: |
           mkdir -p tests/.live-tmp
-          ( docker compose --profile pool --profile cdc --profile replica --profile governor --profile tz --profile mysql-stmt up -d postgres postgres-state mysql mssql mssql-governor minio fake-gcs azurite toxiproxy pgbouncer pgbouncer-state proxysql mysql-tz proxysql-tz clickhouse-tz postgres-cdc mysql-cdc mysql-reset mssql-cdc mysql-primary mysql-replica mysql-replica-nolog duckdb clickhouse oracle mysql-stmt-84-lctn1 mongo > "$RUNNER_TEMP/compose.log" 2>&1; echo $? > "$RUNNER_TEMP/compose.rc" ) &
+          ( python3 -m dev.pytools.compose_up docker compose --profile pool --profile cdc --profile replica --profile governor --profile tz --profile mysql-stmt up -d postgres postgres-state mysql mssql mssql-governor minio fake-gcs azurite toxiproxy pgbouncer pgbouncer-state proxysql mysql-tz proxysql-tz clickhouse-tz postgres-cdc mysql-cdc mysql-reset mssql-cdc mysql-primary mysql-replica mysql-replica-nolog duckdb clickhouse oracle mysql-stmt-84-lctn1 mongo > "$RUNNER_TEMP/compose.log" 2>&1; echo $? > "$RUNNER_TEMP/compose.rc" ) &
 
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         if: ${{ matrix.leg == 'pre' }}
@@ -617,26 +616,30 @@ jobs:
             -S localhost -U sa -P 'Rivet_Passw0rd!' -C -b \
             -Q "IF DB_ID('rivet') IS NULL CREATE DATABASE rivet;"
 
+      - name: Stand is ready
+        id: stand
+        run: echo "the services answered and every seed ran"
+
       - name: Type-golden tests (semantic gate)
-        if: ${{ !cancelled() && matrix.leg == 'pre' }}
+        if: ${{ !cancelled() && steps.stand.outcome == 'success' && matrix.leg == 'pre' }}
         run: cargo test --test live_type_golden -- --ignored
 
       - name: Type round-trip validators — DuckDB · ClickHouse · pyarrow (semantic gate)
-        if: ${{ !cancelled() && matrix.leg == 'pre' }}
+        if: ${{ !cancelled() && steps.stand.outcome == 'success' && matrix.leg == 'pre' }}
         run: cargo test --test type_roundtrip -- --include-ignored --skip bigquery
 
       - name: Differential correctness at scale (DuckDB vs source)
-        if: ${{ !cancelled() && matrix.leg == 'pre' }}
+        if: ${{ !cancelled() && steps.stand.outcome == 'success' && matrix.leg == 'pre' }}
         run: cargo test --test live_differential -- --ignored
 
       - name: Create matrix navigation links
-        if: ${{ !cancelled() && matrix.leg == 'pre' }}
+        if: ${{ !cancelled() && steps.stand.outcome == 'success' && matrix.leg == 'pre' }}
         env:
           RIVET_BIN: ${{ github.workspace }}/target/debug/rivet
         run: python3 -m dev.pytools.matrix_common setup-links
 
       - name: PR regression matrices (cli + cfg + path)
-        if: ${{ !cancelled() && matrix.leg == 'pre' }}
+        if: ${{ !cancelled() && steps.stand.outcome == 'success' && matrix.leg == 'pre' }}
         env:
           RIVET_BIN: ${{ github.workspace }}/target/debug/rivet
         shell: bash
@@ -656,7 +659,7 @@ jobs:
           retention-days: 14
 
       - name: Run E2E test suite
-        if: ${{ !cancelled() && matrix.leg == 'pre' }}
+        if: ${{ !cancelled() && steps.stand.outcome == 'success' && matrix.leg == 'pre' }}
         env:
           MINIO_ACCESS_KEY: minioadmin
           MINIO_SECRET_KEY: minioadmin
@@ -664,15 +667,15 @@ jobs:
         run: python3 -m dev.pytools.e2e
 
       - name: State lib tests on the Postgres state backend
-        if: ${{ !cancelled() && matrix.leg == 'pre' }}
+        if: ${{ !cancelled() && steps.stand.outcome == 'success' && matrix.leg == 'pre' }}
         run: python3 -m dev.release_oracle.state_lib
 
       - name: Ignored doc-tests
-        if: ${{ !cancelled() && matrix.leg == 'pre' }}
+        if: ${{ !cancelled() && steps.stand.outcome == 'success' && matrix.leg == 'pre' }}
         run: cargo test --doc -- --ignored
 
       - name: Run live cargo integration tests
-        if: ${{ !cancelled() && matrix.leg != 'pre' }}
+        if: ${{ !cancelled() && steps.stand.outcome == 'success' && matrix.leg != 'pre' }}
         run: |
           cargo nextest run --archive-file "$RUNNER_TEMP/e2e-nextest.tar.zst" \
           --extract-to "$GITHUB_WORKSPACE" --extract-overwrite \
@@ -762,12 +765,15 @@ jobs:
             RIVET_LEASE_CARRIER_BIN
             macOS `hdiutil`
             RIVET_GATE_STATE_URL
+          LEGS: ${{ needs.e2e.result }}
         run: |
-          python3 -m dev.release_oracle.skip_census target/rivet-skips.log --lacking "$LACKING"
+          python3 -m dev.release_oracle.skip_census target/rivet-skips.log --lacking "$LACKING" --legs-result "$LEGS"
 
       - name: Rig oracle verdict census
         if: ${{ !cancelled() }}
-        run: python3 -m dev.release_oracle.skip_census --verdicts target/rivet-oracle.log --lane ci
+        env:
+          LEGS: ${{ needs.e2e.result }}
+        run: python3 -m dev.release_oracle.skip_census --verdicts target/rivet-oracle.log --lane ci --legs-result "$LEGS"
 
   nightly-verdict:
     name: Nightly verdict

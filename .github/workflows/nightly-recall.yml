@@ -216,11 +216,12 @@ jobs:
           SHA: ${{ needs.plan.outputs.sha }}
           COUNT: ${{ needs.plan.outputs.count }}
           EXPECTED: ${{ needs.plan.outputs.expected }}
+          PLAN: ${{ needs.plan.outputs.shards }}
         run: |
           set +e
           mkdir -p out
           uv sync --frozen
-          uv run python -m dev.seeded.verdict --dir shards --sha "$SHA" --shards "$COUNT" --expected "$EXPECTED" --record out/recall-runs.jsonl 2>&1 | tee out/verdict.txt
+          uv run python -m dev.seeded.verdict --dir shards --sha "$SHA" --shards "$COUNT" --expected "$EXPECTED" --plan "$PLAN" --record out/recall-runs.jsonl 2>&1 | tee out/verdict.txt
           rc=${PIPESTATUS[0]}
           { echo "### Nightly recall of ${SHA:0:12}"; echo '```'; cat shards/*/table.txt 2>/dev/null; cat out/verdict.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"

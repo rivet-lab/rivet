@@ -5599,17 +5599,17 @@ seeds:
         cells: [cdc_rollover_zero_is_refused_on_the_flag_mongo]
 
   - name: check-override-wire-not-refused
-    class: "rivet check reads a columns: override through the run's converter but drops the wire-mismatch refusal, so check exits 0 on a config the run refuses with RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH"
-    history: "audit defect 11, 2026-11-03: check and check --type-report accepted an int4 column declared string on PostgreSQL while run refused it, on all four SQL engines"
+    class: "rivet check reads a columns: override through the run's converter but drops the first-row probe's refusals (the wire-mismatch code and the value code), so check exits 0 on a config the run refuses"
+    history: "audit defect 11, 2026-11-03: check and check --type-report accepted an int4 column declared string on PostgreSQL while run refused it, on all four SQL engines; recut 2026-11-23 after #1148 recoded the value-decided refusals to RIVET_SOURCE_VALUE_UNREPRESENTABLE: the old mutant dropped only the wire-mismatch code, so the Oracle cell (a time of day under date) stopped reaching it and nightly recall 45168882457 read MISSED"
     scope: source
     switch: check-override-wire-not-refused
     engines:
       postgres:
-        na: "2026-11-20 measured on 31cd3fdd+seed: since #1041 check runs the run's planning function, which refuses an override wire mismatch at preflight/mod.rs and again in planning::admit_columns; the single-site defect left check_refuses_an_int4_column_declared_string_postgres green, so no check-only defect exists on this engine; closes if check regains a path of its own"
+        cells: [a_lossy_scale_override_is_refused_by_check_like_the_run_postgres]
       mysql:
-        na: "2026-11-20 measured: the single-site defect left check_refuses_a_text_value_declared_uuid_mysql green; MySQL refuses that cell by RIVET_SOURCE_VALUE_UNREPRESENTABLE, which the seeded comparison keeps, and check shares the run's planning function since #1041; closes if check regains a path of its own"
+        cells: [check_refuses_a_text_value_declared_uuid_mysql, a_lossy_scale_override_is_refused_by_check_like_the_run_mysql]
       mssql:
-        na: "2026-11-20 measured: the single-site defect left check_refuses_an_int_column_declared_string_mssql green; check shares the run's planning function since #1041; closes if check regains a path of its own"
+        na: "2026-11-20 measured: the single-site defect left check_refuses_an_int_column_declared_string_mssql green; check shares the run's planning function since #1041; closes if check_override_wire gains a value-decided SQL Server cell"
       oracle:
         cells: [check_refuses_a_timestamp_with_a_time_declared_date_oracle]
       mongo:
@@ -5810,17 +5810,18 @@ seeds:
       mongo:
         na: "a document source has no declared column wire type and takes no columns override"
   - name: oracle-timestamp-ns-undeclared-truncated
-    class: an undeclared Oracle TIMESTAMP(7..9) column is delivered at microseconds with a warning and exit 0, so a second client reads a value the source does not hold
-    history: "2026-11-05 cluster C5: the sentinel rivet_sent_ts9 failed with SUCCEEDED WITH A CHANGED VALUE; the mapping now carries a refusal that every consumer routes through TypePolicy::validate"
+    class: an undeclared Oracle TIMESTAMP(7..9) column is delivered at microseconds with a warning and exit 0 instead of as nanosecond text, so a second client reads a value the source does not hold
+    history: "2026-11-05 cluster C5: the sentinel rivet_sent_ts9 failed with SUCCEEDED WITH A CHANGED VALUE; 2026-11-25 owner rule text-if-lossless-text-exists: the refusal became nanosecond text (IsoTimestampNanos) on batch and CDC; the seed restores the microsecond read with a warning"
     scope: source
     engines:
       oracle:
         switch: oracle-timestamp-ns-undeclared-truncated
         cells:
-          - an_undeclared_nanosecond_timestamp_is_refused_and_the_declared_ns_type_delivers_every_digit
-          - oracle_batch_timestamp9_is_refused_until_declared_under_every_policy
-          - oracle_cdc_timestamp9_is_refused_until_declared_and_a_declared_timestamp_delivers_the_row
-          - "lib:a_sub_microsecond_timestamp_is_refused_and_a_bare_number_warns_by_name"
+          - an_undeclared_nanosecond_timestamp_is_delivered_as_text_and_the_declared_ns_type_delivers_every_digit
+          - oracle_batch_timestamp9_is_delivered_as_text_undeclared_under_every_policy
+          - oracle_cdc_timestamp9_is_delivered_as_text_undeclared_and_a_declared_timestamp_delivers_the_row
+          - oracle_timestamp9_undeclared_is_nanosecond_text_on_batch_and_cdc
+          - "lib:a_sub_microsecond_timestamp_is_text_and_a_bare_number_warns_by_name"
       postgres:
         na: "PostgreSQL timestamp is microsecond-exact, so no column maps with a refusal and there is no truncation to seed"
       mysql:
@@ -5883,7 +5884,7 @@ seeds:
           - mysql_cdc_a_datetime_or_timestamp_as_text_is_the_batch_text_byte_for_byte
           - "lib:an_oracle_or_mysql_stamp_in_a_text_column_prints_as_the_batch_prints_it"
       postgres:
-        na: "the batch export refuses text over a timestamp on PostgreSQL, so no batch text exists to differ from; the stream text stays chrono form, an open defect graded by open_defect_a_pg_timestamp_declared_text_is_one_verdict_on_batch_and_the_stream"
+        na: "the PostgreSQL stream text stays chrono form while batch delivers the server's text, an open defect graded by open_defect_a_pg_timestamp_declared_text_is_one_verdict_on_batch_and_the_stream"
       mssql:
         na: "the override table reads no text over a datetime2 on SQL Server, so batch and the stream both refuse it by code (mssql_a_datetime2_declared_text_is_one_refusal_on_batch_and_cdc) and no text is written to differ"
       mongo:
@@ -6297,6 +6298,108 @@ seeds:
         na: "SQL Server has no array column type"
       mongo:
         na: "a MongoDB array is a BSON value inside the document column, never a typed array column"
+      oracle:
+        na: "an Oracle collection type is refused at the mining schema, never read as an array literal"
+
+  - name: pg-cdc-session-reads-whole-type-catalog
+    class: "the PostgreSQL CDC reader reads every array type of pg_type, built-in ones included, when a session opens, whatever the captured tables hold, so each reader session costs about 1800 more source tuples than the tables it reads need"
+    history: "found 2026-11-24 by the Nightly Gate perf probe (postgres/cdc pg_tup_returned 6905 over its 5077 baseline, first red b04f2301, since #1145); RED on main: one session open returned 3135 tuples over the 2000 ceiling"
+    scope: source
+    switch: pg-cdc-session-reads-whole-type-catalog
+    engines:
+      postgres:
+        cells: ["lib:live_a_session_over_a_table_without_arrays_does_not_scan_the_type_catalog"]
+      mysql:
+        na: "the MySQL reader asks information_schema.TABLES for each configured table by name at open and holds no whole-catalog read"
+      mssql:
+        na: "the SQL Server reader joins sys.tables and sys.columns on the one capture instance it reads, never the whole catalog"
+      mongo:
+        na: "a MongoDB change stream reads no type catalog"
+      oracle:
+        na: "the Oracle reader reads all_tab_cols for the one owner and table it mines, never the whole catalog"
+
+  - name: pg-cdc-array-map-decided-at-read-time
+    class: "the PostgreSQL CDC reader decides which array types deliver as the server's text when it reads a row, not when the session opens, so a type renamed, moved to another schema or dropped between the open and the read, or a search_path with one name in two schemas, is delivered as a list where the open-time map delivers the server's text"
+    history: "found 2026-11-25 by rivet-verifier on #1214 head a719fc94: after ALTER TYPE comp RENAME the stream delivered A[B((1,x))] where main delivered B({\"(1,x)\"}); same for RENAME SCHEMA, SET SCHEMA, a table row type rename and an enum and a composite of one name under a search_path"
+    scope: source
+    switch: pg-cdc-array-map-decided-at-read-time
+    engines:
+      postgres:
+        cells: ["lib:live_ddl_on_a_type_after_the_open_leaves_array_decoding_as_the_open_map_does"]
+      mysql:
+        na: "MySQL has no array column type, so no array label is resolved"
+      mssql:
+        na: "SQL Server has no array column type, so no array label is resolved"
+      mongo:
+        na: "a MongoDB change stream carries no column types to resolve"
+      oracle:
+        na: "an Oracle collection type is refused at the mining schema, never read as an array literal"
+
+  - name: pg-cdc-builtin-name-taken-not-read-at-open
+    class: "the PostgreSQL CDC reader leaves the built-in array types unread at the session open even when a user type bears a built-in name, so a built-in array label printed schema-qualified is delivered as a list where the whole-catalog map delivers the server's text"
+    history: "found 2026-11-25 while probing #1214 after a719fc94: with search_path public, pg_catalog and a public.inet type, an inet[] column arrives as pg_catalog.inet[]"
+    scope: source
+    switch: pg-cdc-builtin-name-taken-not-read-at-open
+    engines:
+      postgres:
+        cells: ["lib:live_ddl_on_a_type_after_the_open_leaves_array_decoding_as_the_open_map_does"]
+      mysql:
+        na: "MySQL has no array column type, so no array label is resolved"
+      mssql:
+        na: "SQL Server has no array column type, so no array label is resolved"
+      mongo:
+        na: "a MongoDB change stream carries no column types to resolve"
+      oracle:
+        na: "an Oracle collection type is refused at the mining schema, never read as an array literal"
+
+  - name: pg-cdc-built-in-schema-arrays-not-read-at-open
+    class: "the PostgreSQL CDC reader leaves the array types of a built-in schema other than pg_catalog unread at the session open, so an information_schema domain array is delivered as a list where the whole-catalog map delivers the server's text"
+    history: "found 2026-11-25 by rivet-verifier on #1214 head e2f742b7: with search_path public, information_schema, a cardinal_number[] column arrives as a list on the head and as text on main"
+    scope: source
+    switch: pg-cdc-built-in-schema-arrays-not-read-at-open
+    engines:
+      postgres:
+        cells: ["lib:live_ddl_on_a_type_after_the_open_leaves_array_decoding_as_the_open_map_does"]
+      mysql:
+        na: "MySQL has no array column type, so no array label is resolved"
+      mssql:
+        na: "SQL Server has no array column type, so no array label is resolved"
+      mongo:
+        na: "a MongoDB change stream carries no column types to resolve"
+      oracle:
+        na: "an Oracle collection type is refused at the mining schema, never read as an array literal"
+
+  - name: pg-cdc-user-schema-label-asked-of-catalog
+    class: "the PostgreSQL CDC reader puts the array label of a schema other than pg_catalog to the catalog by to_regtype, which raises permission denied for a schema the CDC role cannot use, so a change of a table outside the export stops the run"
+    history: "found 2026-11-25 by rivet-verifier on #1214 head 27141343: a REPLICATION role with no USAGE on schema secret, a secret.mood[] column changed and then a captured public table changed, stopped on permission denied for schema secret where main delivered both rows"
+    scope: source
+    switch: pg-cdc-user-schema-label-asked-of-catalog
+    engines:
+      postgres:
+        cells: ["lib:live_a_role_without_usage_on_a_schema_reads_past_its_array_labels"]
+      mysql:
+        na: "MySQL has no array column type, so no array label is resolved"
+      mssql:
+        na: "SQL Server has no array column type, so no array label is resolved"
+      mongo:
+        na: "a MongoDB change stream carries no column types to resolve"
+      oracle:
+        na: "an Oracle collection type is refused at the mining schema, never read as an array literal"
+
+  - name: pg-cdc-unheld-array-label-asked-per-row
+    class: "the PostgreSQL CDC reader asks the catalog again for an array label it has been told the catalog does not hold, so each row carrying a renamed or dropped type costs a catalog query and its transactions"
+    history: "found 2026-11-25 by rivet-verifier on #1214 head a719fc94: 20000 rows of a renamed composite array read in 18.6 s and 40025 transactions against 0.26 s and 25 on main"
+    scope: source
+    switch: pg-cdc-unheld-array-label-asked-per-row
+    engines:
+      postgres:
+        cells: ["lib:live_a_label_the_catalog_does_not_hold_is_asked_once_per_session", "lib:absorbing_an_answer_decides_every_label_asked"]
+      mysql:
+        na: "MySQL has no array column type, so no array label is resolved"
+      mssql:
+        na: "SQL Server has no array column type, so no array label is resolved"
+      mongo:
+        na: "a MongoDB change stream carries no column types to resolve"
       oracle:
         na: "an Oracle collection type is refused at the mining schema, never read as an array literal"
 
@@ -7032,26 +7135,21 @@ seeds:
         na: "MongoDB parallel is the separate `_id`-range reader (mongo_parallel), not the SQL keyset range sampler"
 
   - name: check-run-refusal-split
-    class: "check, plan and doctor pass a batch export that run then refuses by code: a column the export's format cannot write (csv of decimal256, nanosecond timestamp, list; parquet of a negative-scale decimal) and a column no Arrow type carries and no `columns:` entry declares, because those two refusals were raised only where run opens its writer or converts a row"
+    class: "check, plan and doctor pass a batch export that run then refuses by code: a column the export's format cannot write (csv of a nested list; parquet of a negative-scale decimal) and a column no Arrow type carries and no `columns:` entry declares, because those two refusals were raised only where run opens its writer or converts a row"
     history: "issues #912 and #918; RED on main 2026-11-19 by the no_silent_null matrix CHECK_RUN_SPLIT verdict (batch full tier: mssql 10 pairs, mysql 19, oracle 19, postgres 24)"
     scope: source
     switch: check-run-refusal-split
     engines:
       postgres:
-        cells:
-          - a_csv_export_of_a_decimal256_column_is_refused_by_check_like_the_run_postgres
-          - a_declared_type_on_a_column_without_an_arrow_type_is_refused_by_check_like_the_run_postgres
+        na: "2026-11-24: a PostgreSQL type with no Arrow mapping is delivered as the server's text and an array is always a flat list, so no Postgres column reaches the format refusal or the unmapped refusal (measured: the declared-type cell stays green under the seed); reopens if a Postgres type or a declared override gains an Arrow type csv/parquet cannot write, or if an undeclared unmapped type stops being server text"
       mysql:
         cells:
-          - a_csv_export_of_a_decimal256_column_is_refused_by_check_like_the_run_mysql
           - a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mysql
       mssql:
         cells:
-          - a_csv_export_of_a_nanosecond_timestamp_column_is_refused_by_check_like_the_run_mssql
           - a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mssql
       oracle:
-        cells:
-          - a_csv_export_of_a_nanosecond_timestamp_column_is_refused_by_check_like_the_run_oracle
+        na: "2026-11-23: csv now writes every type an Oracle source delivers, so no Oracle column reaches the format refusal; the format half is held by the lib cells and the unmapped-column cell for Oracle is open"
       mongo:
         na: "a MongoDB export lands the whole document in one column: no column type reaches the format or the type mapping"
       lib:
@@ -7068,11 +7166,9 @@ seeds:
       postgres:
         cells:
           - a_pending_baseline_wire_mismatch_is_refused_by_check_postgres
-          - a_pending_baseline_csv_decimal256_is_refused_by_check_postgres
       mysql:
         cells:
           - a_pending_baseline_wire_mismatch_is_refused_by_check_mysql
-          - a_pending_baseline_csv_decimal256_is_refused_by_check_mysql
       mssql:
         cells:
           - a_pending_baseline_wire_mismatch_is_refused_by_check_mssql
@@ -7408,7 +7504,7 @@ seeds:
     switch: narrowing-override-reported-exact
     engines:
       oracle:
-        cells: ["lib:a_time_override_narrowing_a_result_column_is_lossy_on_batch_and_stream", "lib:the_stream_resolver_reports_a_narrowing_override_lossy_as_check_does", an_oracle_batch_time_override_is_graded_by_the_result_column_it_lands_on, an_oracle_cdc_time_override_is_graded_as_the_batch_override, oracle_batch_timestamp9_is_refused_until_declared_under_every_policy]
+        cells: ["lib:a_time_override_narrowing_a_result_column_is_lossy_on_batch_and_stream", "lib:the_stream_resolver_reports_a_narrowing_override_lossy_as_check_does", an_oracle_batch_time_override_is_graded_by_the_result_column_it_lands_on, an_oracle_cdc_time_override_is_graded_as_the_batch_override, oracle_batch_timestamp9_is_delivered_as_text_undeclared_under_every_policy]
       mssql:
         cells: ["lib:a_time_override_narrowing_a_result_column_is_lossy_on_batch_and_stream", "lib:the_stream_resolver_reports_a_narrowing_override_lossy_as_check_does", a_mssql_batch_time_override_is_graded_by_the_result_column_it_lands_on, a_mssql_cdc_time_override_is_graded_as_the_batch_override]
       postgres:
@@ -7417,3 +7513,176 @@ seeds:
         na: "MySQL datetime, timestamp and time hold microseconds at most, so no time override keeps fewer digits than the source"
       mongo:
         na: "a BSON date holds milliseconds and a Mongo export has no `columns:` time override over it, so nothing narrows"
+
+  - name: csv-text-types-refused
+    class: "`format: csv` refuses by RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED a flat array, a Decimal256 and a nanosecond timestamp that Parquet delivers and CSV can hold as lossless text"
+    history: "owner rule 2026-11-21 (a type is delivered natively, else as server text where lossless, else refused by code); RED on main 2026-11-23 by the csv text cells (lib text_cell_tests: 10 failed) and by the PostgreSQL grid (10 array and numeric(60,10) types refused in csv, 40 cells)"
+    scope: source
+    switch: csv-text-types-refused
+    engines:
+      postgres:
+        cells:
+          - a_csv_export_of_a_decimal256_column_is_delivered_like_check_admits_postgres
+          - a_pending_baseline_csv_decimal256_is_accepted_by_check_postgres
+          - check_strict_and_run_agree_on_an_int_array_column_under_csv_and_parquet
+          - "lib:csv_admits_wide_decimals_nanosecond_timestamps_and_flat_lists"
+      mysql:
+        cells:
+          - a_csv_export_of_a_decimal256_column_is_delivered_like_check_admits_mysql
+          - a_pending_baseline_csv_decimal256_is_accepted_by_check_mysql
+          - "lib:csv_admits_wide_decimals_nanosecond_timestamps_and_flat_lists"
+      mssql:
+        cells:
+          - a_csv_export_of_a_nanosecond_timestamp_column_is_delivered_like_check_admits_mssql
+          - "lib:csv_admits_wide_decimals_nanosecond_timestamps_and_flat_lists"
+      oracle:
+        cells:
+          - "lib:csv_admits_wide_decimals_nanosecond_timestamps_and_flat_lists"
+      mongo:
+        na: "a MongoDB export lands the whole document in one column: no array, wide decimal or nanosecond timestamp column reaches the csv writer"
+  - name: pg-numeric-text-drops-display-scale
+    class: "a PostgreSQL numeric delivered as text from the binary wire loses its display scale: 1.50 lands as 1.5, 0.00 as 0, 1000.000 as 1000, exit 0 (the server's own text keeps every digit of the column's scale)"
+    history: "release-oracle grid no_silent_null[postgres] WRONG_VALUE over 1 source->override pairs (known_red #5a2b070b, expiry 2026-11-29); RED on main 2026-11-23 (live: id 1 delivered 1.5 where the server prints 1.50)"
+    scope: source
+    switch: pg-numeric-text-drops-display-scale
+    engines:
+      postgres:
+        cells: [a_bare_numeric_under_a_text_override_keeps_its_display_scale_postgres, a_typed_numeric_under_a_text_override_is_the_servers_text_postgres, pg_cdc_a_numeric_declared_text_is_one_string_in_the_snapshot_and_the_stream, "lib:display_scale_pads_trailing_zeros_like_the_servers_text", "lib:plain_at_display_scale_keeps_every_scale_like_decimal_plain"]
+      mysql:
+        na: "MySQL DECIMAL is read as server text or as a scaled decimal, never rebuilt from a wire header whose display scale a normalizer could drop (grid no_silent_null[mysql] DECIMAL -> text delivers the server's digits)"
+      mssql:
+        na: "a SQL Server numeric, decimal or money column under a text override is refused (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH), so no text is delivered to lose a scale"
+      mongo:
+        na: "MongoDB has no fixed-scale numeric column: a Decimal128 under a text override is the BSON value's own string"
+      oracle:
+        na: "an Oracle NUMBER carries no display scale on the wire, so its text has no trailing zeros to drop; CDC canonical_number is graded by its own divergence test"
+
+  - name: check-unreachable-override-admitted
+    class: "`check`, `doctor` and `plan` pass an export whose `columns:` overrides they could not check against the catalog because the source connection failed (a listener refusing one of several concurrent checks), so the override a run refuses by code (RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH) is passed with exit 0"
+    history: "2026-11-23 - Oracle CDC grid, 6 parallel checks: 5 to 11 of 240 concurrent checks of one wire-mismatch config exited 0 on main (ORA-12516 on the connection), every serial check exited 1; RED on main: an_unreachable_source_refuses_an_unadmitted_override_and_not_a_plain_plan panics `an override is not a pass`"
+    scope: source
+    switch: check-unreachable-override-admitted
+    engines:
+      postgres:
+        cells: ["lib:an_unreachable_source_refuses_an_unadmitted_override_and_not_a_plain_plan"]
+      mysql:
+        cells: ["lib:an_unreachable_source_refuses_an_unadmitted_override_and_not_a_plain_plan"]
+      mssql:
+        cells: ["lib:an_unreachable_source_refuses_an_unadmitted_override_and_not_a_plain_plan"]
+      mongo:
+        cells: ["lib:an_unreachable_source_refuses_an_unadmitted_override_and_not_a_plain_plan"]
+      oracle:
+        cells: ["lib:an_unreachable_source_refuses_an_unadmitted_override_and_not_a_plain_plan"]
+
+  - name: schema-baseline-before-refusal
+    class: "a run that will be refused (the quality gate, a coded stop after the drift check, an undecodable change) has already replaced the export's stored drift baseline with the schema it observed, so the next run reads no drift against a schema the refused run never delivered"
+    history: "2026-11-23 - Oracle CDC a-change-older-than-an-alter cell under PostgreSQL state: the anchor run stored ID,V, the next run under the default warn policy rewrote it to ID,V,W and only then LogMiner refused with RIVET_SOURCE_CDC_UNDECODABLE; the rig oracle graded the changed export_schema row a resume-point leftover; RED on main by the batch cells below"
+    scope: source
+    switch: schema-baseline-before-refusal
+    engines:
+      postgres:
+        cells: [a_refused_single_run_leaves_the_stored_baseline_as_it_found_it_pg, a_refused_chunked_run_leaves_the_stored_baseline_as_it_found_it_pg, pg_cdc_a_refused_run_leaves_the_stored_baseline_as_it_found_it, "lib:a_run_that_never_ends_clean_leaves_the_stored_baseline_untouched"]
+      mysql:
+        cells: [a_refused_single_run_leaves_the_stored_baseline_as_it_found_it_mysql, a_refused_chunked_run_leaves_the_stored_baseline_as_it_found_it_mysql, mysql_cdc_a_refused_run_leaves_the_stored_baseline_as_it_found_it, "lib:a_run_that_never_ends_clean_leaves_the_stored_baseline_untouched"]
+      mssql:
+        cells: [a_refused_single_run_leaves_the_stored_baseline_as_it_found_it_mssql, a_refused_chunked_run_leaves_the_stored_baseline_as_it_found_it_mssql, mssql_cdc_a_refused_run_leaves_the_stored_baseline_as_it_found_it, "lib:a_run_that_never_ends_clean_leaves_the_stored_baseline_untouched"]
+      oracle:
+        cells: [a_refused_single_run_leaves_the_stored_baseline_as_it_found_it_oracle, a_refused_chunked_run_leaves_the_stored_baseline_as_it_found_it_oracle, a_change_older_than_an_alter_is_refused_by_code_oracle, "lib:a_run_that_never_ends_clean_leaves_the_stored_baseline_untouched"]
+      mongo:
+        cells: ["lib:a_run_that_never_ends_clean_leaves_the_stored_baseline_untouched"]
+  - name: doctor-probe-fixed-temp-path
+    class: "`rivet doctor` stages its destination write-probe at one temp path shared by every process, so a parallel doctor removes the file between another's write and copy and reports `[FAIL] Destination ... No such file or directory (os error 2)`"
+    history: "2026-11-24 - gate cell sec_keyword_value_credentials, 12 parallel doctors with separate local destinations: 81 of 720 runs failed, 0 of 60 serial; RED on main: parallel_destination_probes_on_separate_local_destinations_all_succeed fails 857 of 1800 probes"
+    scope: destination
+    switch: doctor-probe-fixed-temp-path
+    engines:
+      local:
+        cells: ["lib:parallel_destination_probes_on_separate_local_destinations_all_succeed"]
+      s3:
+        cells: ["lib:a_probe_that_another_probe_completes_inside_is_still_read_by_a_store"]
+      gcs:
+        cells: ["lib:a_probe_that_another_probe_completes_inside_is_still_read_by_a_store"]
+      azure:
+        cells: ["lib:a_probe_that_another_probe_completes_inside_is_still_read_by_a_store"]
+      stdout:
+        na: "doctor reports a stdout destination as streaming and `continue`s before check_destination_auth, so no probe is staged for it"
+
+  - name: csv-temporal-out-of-range-written-empty
+    class: "the CSV writer writes an empty cell (inside a list, an empty string) for a Date32 or microsecond timestamp that chrono cannot name, the same bytes as NULL, instead of refusing it by RIVET_SOURCE_VALUE_UNREPRESENTABLE"
+    history: "found 2026-11-23 reading src/format/csv.rs on PR #1193 (write_date32 and write_timestamp returned Ok without a byte for a value chrono could not hold); RED on its head 2026-11-23 by the four lib cells (the cell was `d\\n\\n`)"
+    scope: source
+    switch: csv-temporal-out-of-range-written-empty
+    engines:
+      postgres:
+        na: "the CSV writer is one engine-independent module (src/format/csv.rs): no source engine delivers a date or timestamp outside chrono's range, its own conversion refuses it first, so the lib cells over the writer are the catch for every engine (2026-11-23)"
+      mysql:
+        na: "the CSV writer is one engine-independent module (src/format/csv.rs): no source engine delivers a date or timestamp outside chrono's range, its own conversion refuses it first, so the lib cells over the writer are the catch for every engine (2026-11-23)"
+      mssql:
+        na: "the CSV writer is one engine-independent module (src/format/csv.rs): no source engine delivers a date or timestamp outside chrono's range, its own conversion refuses it first, so the lib cells over the writer are the catch for every engine (2026-11-23)"
+      oracle:
+        na: "the CSV writer is one engine-independent module (src/format/csv.rs): no source engine delivers a date or timestamp outside chrono's range, its own conversion refuses it first, so the lib cells over the writer are the catch for every engine (2026-11-23)"
+      mongo:
+        na: "a MongoDB export has no CSV format: the document lands whole in its one column"
+      lib:
+        cells:
+          - "lib:a_date32_chrono_cannot_name_is_refused_not_written_as_an_empty_cell"
+          - "lib:a_date32_inside_a_list_that_chrono_cannot_name_is_refused_not_written_as_an_empty_string"
+          - "lib:a_microsecond_timestamp_chrono_cannot_name_is_refused_not_written_as_an_empty_cell"
+          - "lib:a_microsecond_timestamp_inside_a_list_that_chrono_cannot_name_is_refused_not_written_as_an_empty_string"
+
+  - name: value-refusal-text-remedy
+    class: "a value refusal prescribes a `columns:` text declaration that the override table then refuses, so the remedy it names cannot be followed"
+    history: "2026-11-25 - owner decision on refusal-gap group C: a PostgreSQL date, time, timestamp or array column declared text was refused as an unread pair, so the infinity, 24:00:00 and multi-dimensional-array refusals had no working remedy"
+    scope: source
+    switch: value-refusal-text-remedy
+    engines:
+      postgres:
+        cells:
+          - the_remedy_of_a_value_refusal_delivers_the_server_text_postgres
+          - "lib:a_temporal_or_array_declared_text_is_projected_and_nothing_else_is"
+          - a_text_declared_column_loads_into_clickhouse_as_the_server_text
+          - a_text_declared_column_loads_into_bigquery_as_the_server_text
+      mysql:
+        na: "a MySQL date, time and datetime are read as text already and refuse nothing a text declaration would recover; the PostgreSQL text projection does not run"
+      mssql:
+        na: "the patched PostgreSQL text projection does not run on SQL Server, whose XML refusal is an unmapped type, not a value refusal (open defect, 2026-11-25: `columns: text` over XML is refused as an override mismatch)"
+      mongo:
+        na: "a MongoDB export has no PostgreSQL text projection, and its values have no refusal that a text declaration recovers"
+      oracle:
+        na: "the patched PostgreSQL text projection does not run on Oracle; a NUMBER of 1E125 is refused by number_text and a text declaration does not recover it (open question)"
+
+  - name: cdc-leg-text-declaration
+    class: "a CDC baseline leg that declares text over a PostgreSQL date, time, timestamp or array column delivers the server text while the change stream renders the same cell in its own form, so one `__changes` log holds two spellings"
+    history: "2026-11-25 - verifier on the group C text remedy: broadening the override table made the baseline leg accept a text declaration the stream renders differently; main refused it before any write"
+    scope: source
+    switch: cdc-leg-text-declaration
+    engines:
+      postgres:
+        cells:
+          - a_pending_baseline_declared_text_over_a_server_text_column_is_refused_and_its_remedy_delivers_postgres
+      mysql:
+        na: "a MySQL baseline leg reads date and time as text already; the PostgreSQL text projection the guard names does not run"
+      mssql:
+        na: "the guard is PostgreSQL only; a SQL Server CDC baseline leg has no server text projection"
+      mongo:
+        na: "a MongoDB export has no PostgreSQL text projection"
+      oracle:
+        na: "the guard is PostgreSQL only; an Oracle CDC baseline leg has no server text projection"
+
+  - name: text-declared-temporal-cursor
+    class: "an incremental cursor_column declared text over a date or timestamp lands as text, whose order is not its order in time, and the cursor admission lets it through"
+    history: "2026-11-25 - verifier on the group C text remedy: the override table now reads a temporal column as text, so cursor_renders admitted a Utf8 cursor over it"
+    scope: source
+    switch: text-declared-temporal-cursor
+    engines:
+      postgres:
+        cells:
+          - a_temporal_cursor_declared_text_is_refused_on_every_command_postgres
+      mysql:
+        na: "a MySQL temporal column is not read through a server text projection; its text declaration is refused as an override mismatch"
+      mssql:
+        na: "a SQL Server temporal column is not read through a server text projection"
+      mongo:
+        na: "a MongoDB export has no PostgreSQL text projection"
+      oracle:
+        na: "an Oracle temporal column is not read through a server text projection"

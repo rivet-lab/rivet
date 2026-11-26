@@ -378,6 +378,9 @@ pub fn a_table_put_back_is_refused_until_rebaselined(
     ] {
         assert!(first.contains(&said), "the refusal says `{said}`:\n{first}");
     }
+    if !first.every_remedy_applied() {
+        return;
+    }
     assert!(
         dir.join("snapshot").join("_SUCCESS").exists(),
         "the remedy's run took the table's baseline again"
@@ -424,6 +427,17 @@ pub fn a_table_switched_over_a_baseline_is_refused_and_switched_back_continues(
         files_under(&rig.out_dir()).len() > before.len(),
         "pointed back: the row written before the switch arrives as a change part"
     );
+}
+
+/// The sentence a PostgreSQL value refusal names as its remedy for `column`, as the product writes it.
+pub fn text_remedy(column: &str) -> String {
+    rivet::types::text_remedy(column)
+}
+
+/// Whether `said` holds the text remedy for `column`, whitespace-flattened.
+pub fn says_text_remedy(said: &str, column: &str) -> bool {
+    let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    flat(said).contains(&flat(&text_remedy(column)))
 }
 
 pub fn unique_name(prefix: &str) -> String {

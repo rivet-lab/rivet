@@ -7,6 +7,7 @@ mkdir -p /opt/oracle/oradata/archive
 sqlplus -s / as sysdba <<'SQL'
 WHENEVER SQLERROR EXIT FAILURE
 ALTER SYSTEM SET log_archive_dest_1 = 'LOCATION=/opt/oracle/oradata/archive' SCOPE = BOTH;
+ALTER SYSTEM SET processes = 1000 SCOPE = SPFILE;
 SHUTDOWN IMMEDIATE
 STARTUP MOUNT
 ALTER DATABASE ARCHIVELOG;

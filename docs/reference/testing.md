@@ -200,9 +200,27 @@ hard rules over the live CDC suite's SOURCES:
 
 `ci.yml` runs `cargo-mutants` on the lines a PR changes: `mutants-plan` lists the
 mutants of the diff, `mutants-shard` runs them against the offline suite, and
-`mutants-verdict` fails the PR on a missed mutant in code the offline suite
-executes (`Mutants (changed lines)`). A surviving mutant is a named test blind
-spot — the meta-gate that finds holes in the gates above. The nightly rotation
+`mutants-in-diff` (`Mutants (grade)`) grades their outcomes. A surviving mutant is a named test blind
+spot — the meta-gate that finds holes in the gates above.
+
+The shards run once per PR, on the final head, not on every push:
+
+1. Push freely. An unlabeled push runs the cheap jobs and the plan; `Mutants (changed lines)` is red while the diff touches Rust, tests, Cargo files or `mutants.toml` and has no verdict.
+2. Add the `ready` label on the final head. The shards run on it, and on every later push while the label stays.
+3. Read the verdict from `Mutants (grade)`; `Mutants (coverage verdict)` only warns about a missed mutant and does not fail on it. A clean grade is recorded on the head as the `mutants/graded` commit status and turns `Mutants (changed lines)` green. A diff already graded for the same code replays from the outcome cache without the shards.
+
+`Mutants (changed lines)` (`mutants-required`) always runs, so it cannot be skipped into a pass. In the merge queue it passes only when the PR head carries a recorded verdict for the same diff. A diff over the budget is accepted as ungraded only with the label.
+
+A missed mutant, a grade that did not finish, a timeout and a tool error all leave `Mutants (changed lines)` red: the refusal is `mutants-required`, not the coverage verdict. The grade step publishes its `result` only after the labelled-class loop and the P2 audit, so a crash in either leaves no result and the check red.
+
+Moving a PR to this flow:
+
+- A check that was green before the change still lets a PR into the merge queue, but `merge_group` refuses it with `no mutants verdict is recorded on the PR head` until the head has a verdict. Add the `ready` label and let a fresh run grade it.
+- "Re-run failed jobs" replays the original event, so it does not see a label added after that run started. Re-run after labelling is not enough; push, or remove the label and add it again.
+- Any `labeled` event, whatever the label, cancels the in-flight run, shards included, and starts a new one. Add `ready` last, when no other label is about to change. Removing a label starts no run.
+- The key of the recorded verdict is the diff of Rust, tests, Cargo files and `mutants.toml` against the base, binary files included.
+
+The nightly rotation
 (`mutants-nightly`) was removed on 2026-08-17 (see the note in
 `nightly-live.yml`); `docs/mutants-baseline.txt` is kept only as the record of
 the misses it adjudicated and no job reads it.
