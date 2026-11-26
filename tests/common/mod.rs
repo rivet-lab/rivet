@@ -429,6 +429,17 @@ pub fn a_table_switched_over_a_baseline_is_refused_and_switched_back_continues(
     );
 }
 
+/// The sentence a PostgreSQL value refusal names as its remedy for `column`, as the product writes it.
+pub fn text_remedy(column: &str) -> String {
+    rivet::types::text_remedy(column)
+}
+
+/// Whether `said` holds the text remedy for `column`, whitespace-flattened.
+pub fn says_text_remedy(said: &str, column: &str) -> bool {
+    let flat = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    flat(said).contains(&flat(&text_remedy(column)))
+}
+
 pub fn unique_name(prefix: &str) -> String {
     let c = NAME_COUNTER.fetch_add(1, Ordering::SeqCst);
     let pid = std::process::id();

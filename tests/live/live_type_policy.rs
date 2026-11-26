@@ -286,7 +286,7 @@ fn a_postgres_json_interval_oid_enum_array_is_delivered_as_a_list_of_its_element
     assert_eq!(duckdb_dir_scalar(&out, "count(*)", Some(filter)), 1);
 }
 
-/// A two-dimensional jsonb[] keeps its refusal naming the multi-dimensional cause, the column and the cast to text.
+/// A two-dimensional jsonb[] keeps its refusal naming the multi-dimensional cause, the column and the text remedy.
 #[test]
 #[ignore = "live: requires docker compose postgres"]
 fn a_postgres_two_dimensional_jsonb_array_keeps_the_multi_dimensional_refusal() {
@@ -302,10 +302,10 @@ fn a_postgres_two_dimensional_jsonb_array_keeps_the_multi_dimensional_refusal() 
     let d = tempfile::tempdir().unwrap();
     let out = d.path().join("out");
     let run = Rig::pg_batch(&table).dest_path(out.clone()).run_args(&[]);
-    let err = String::from_utf8_lossy(&run.stderr).to_lowercase();
+    let err = String::from_utf8_lossy(&run.stderr).into_owned();
     assert!(!run.status.success(), "{err}");
     assert!(
-        err.contains("multi-dimensional") && err.contains("grid") && err.contains("::text"),
+        err.to_lowercase().contains("multi-dimensional") && says_text_remedy(&err, "grid"),
         "{err}"
     );
     assert_eq!(parquet_parts(&out), 0, "a refused run wrote a part");

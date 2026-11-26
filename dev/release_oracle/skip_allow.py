@@ -20,7 +20,6 @@ class Excuse:
 
 
 _EXPIRES = "2026-11-29"
-_UNPROVEN = "2026-11-25"
 _REVIEWED = "2026-11-22"
 _MAIN = "14cd46ab"
 
@@ -37,14 +36,6 @@ FOLD_CELLS = (
     "a_truncate_spelled_with_a_character_the_server_folds_stops_the_stream_mysql",
 )
 
-PG_STATE_CELLS = (
-    "one_keeper_renews_every_lease_and_reports_the_one_that_is_gone",
-    "pg_a_chunk_run_whose_task_insert_fails_is_not_left_open",
-    "pg_chunk_checkpoint_claim_complete",
-    "pg_load_spec_round_trips",
-    "pg_several_writers_migrating_one_database_at_once_all_succeed",
-)
-
 BY_DESIGN_SKIPS = (
     ("gcp-secret-resolved", "the Secret Manager endpoint is a const https URL (src/config/gcp_secret.rs) with no mock seam; the fetch-fail and token paths are graded",
      "the endpoint becomes overridable for a stub"),
@@ -53,20 +44,22 @@ BY_DESIGN_SKIPS = (
 )
 
 STAND_SKIPS = (
-    ("no_secret_in_output/warehouse-load-success-path", "-", "the stage stages no bucket for `rivet load` although the stand runs fake-gcs, minio and azurite, so the warehouse load error path after staging is not graded",
-     "the stage points `rivet load` at a stand emulator bucket", _UNPROVEN),
+    ("no_secret_in_output/warehouse-load-success-path", "-", "the stage stages no bucket for `rivet load` although the stand runs fake-gcs, minio and azurite, so the warehouse load error path after staging is not graded; "
+     "re-read 2026-11-26 on main 9dfb85d9: the stage still records this skip with no cell behind it",
+     "the stage points `rivet load` at a stand emulator bucket"),
     ("no_secret_in_output/success-path", "-", "the stand holds no provisioned canary users, so the right-password success path of the source engines is not graded",
-     "the seed provisions a canary user per source engine", _EXPIRES),
+     "the seed provisions a canary user per source engine"),
     ("no_secret_in_output/state-tls-success", "-", "the stand postgres and the cdc primary run ssl=off (`show ssl`), so state over TLS success is not graded; the sslmode=require error path is",
-     "the stand postgres serves TLS", _EXPIRES),
-    ("no_secret_in_output/oracle-cdc-events", "-", "the stage has no cell that drives Oracle CDC with events although the stand runs Oracle, so it is not graded",
-     "a cell drives an Oracle CDC run with events", _UNPROVEN),
+     "the stand postgres serves TLS"),
+    ("no_secret_in_output/oracle-cdc-events", "-", "the stage has no cell that drives Oracle CDC with events although the stand runs Oracle, so it is not graded; "
+     "re-read 2026-11-26 on main 9dfb85d9: the stage still records this skip with no cell behind it",
+     "a cell drives an Oracle CDC run with events"),
     *((f"no_secret_in_output/slot-reach/{sl}", "-", f"no command connects to the {sl} credential slot on the stand, so its cells are clean but ungraded",
-       f"a stub or cloud account answers the {sl} slot", _EXPIRES) for sl in ("ambient", "bigquery", "load", "snowflake")),
+       f"a stub or cloud account answers the {sl} slot") for sl in ("ambient", "bigquery", "load", "snowflake")),
     *(("memory", e, f"the island sets no RIVET_SCALE_{e.upper()}_URL, so the scale-memory pair of tables is not measured on {e}; flat_rss grades peak RSS over 10 thousand, 1 million and 5 million seeded rows",
-       "the island names a batch-tier database with a large row-count ratio per engine, or the stage is retired for flat_rss", _EXPIRES) for e in ("postgres", "mysql", "mssql", "mongo")),
+       "the island names a batch-tier database with a large row-count ratio per engine, or the stage is retired for flat_rss") for e in ("postgres", "mysql", "mssql", "mongo")),
     ("cloud_legs", "-", "the gate host has no cloud credentials or bucket, so the cloud tier (no_silent_null_cloud, no_secret_in_output_cloud, no_debris_after_stop_cloud) is not graded",
-     "the gate host is given a test project and bucket", _EXPIRES),
+     "the gate host is given a test project and bucket"),
 )
 
 EXCUSES: tuple[Excuse, ...] = (
@@ -74,15 +67,10 @@ EXCUSES: tuple[Excuse, ...] = (
              _reviewed("the stand's lower_case_table_names is 0, so the cell self-skips on v0.32.2 and is not proven to fail there; "
                        "closes when the stand runs a folding MySQL or the next release leaves it out of the fix window", _EXPIRES), _EXPIRES)
       for cell in FOLD_CELLS),
-    *(Excuse("fix_cells", "all", cell,
-             _reviewed("the stage runs the previous binary on the SQLite state only, so a Postgres-state cell is expected to self-skip there; "
-                       "the self-skip is not re-run on the stand, it passes on the current binary in the live modules; "
-                       "closes when the stage hands the previous binary a scratch Postgres state or the baseline moves past 0.32.2", _UNPROVEN), _UNPROVEN)
-      for cell in PG_STATE_CELLS),
     *(Excuse(f"no_secret_in_output/{name}", "-", "-", _reviewed(f"{why}; closes when {closes}", _EXPIRES), _EXPIRES)
       for name, why, closes in BY_DESIGN_SKIPS),
-    *(Excuse(scenario, engine, "-", _reviewed(f"{why}; closes when {closes}", expires), expires)
-      for scenario, engine, why, closes, expires in STAND_SKIPS),
+    *(Excuse(scenario, engine, "-", _reviewed(f"{why}; closes when {closes}", _EXPIRES), _EXPIRES)
+      for scenario, engine, why, closes in STAND_SKIPS),
     *(Excuse("no_silent_null_load_cloud", e, "-",
              _reviewed("the gate host has no BigQuery project or Snowflake connection, so the ledger cells are not loaded into either warehouse; "
                        "closes when the gate host is given both", _EXPIRES), _EXPIRES)
