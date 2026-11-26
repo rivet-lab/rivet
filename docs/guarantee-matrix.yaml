@@ -823,7 +823,7 @@ guarantees:
     held_by:
       strict: { test: check_strict_and_run_strict_agree_on_an_undeclared_timestamp_9_and_refuse_a_declared_lossy_one, asserts: "run --strict wrote a part" }
 
-      default_policy: { test: a_column_without_an_arrow_type_is_refused_by_check_like_the_run_mysql, asserts: "1 column(s) need a `columns:` declaration" }
+      default_policy: { gap: "2026-11-26: the mysql cell is gone: its test was renamed to open_defect_a_mysql_null_literal_column_is_refused_by_check_like_the_run (tests/live/check_override_wire.rs, #[ignore]), which asserts today's wrong behaviour, so it holds nothing. Closes when check refuses a NULL-literal column like the run and a live cell holds that." }
   - id: uuid_and_json_keep_native_types
     stated:
       - file: docs/type-mapping.md
