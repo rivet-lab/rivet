@@ -75,6 +75,11 @@ class Unit:
         return f"{self.chunk.table}.{self.col.name}{'@' + str(self.ids[0]) if self.solo else ''}"
 
 
+def partition(engine: str) -> list[list[str]]:
+    """The native types of each seed chunk of the engine, which a live test reads to build the same tables the grids seed."""
+    return [[c.native for c in k.cols] for k in chunks(engine)]
+
+
 def columns(engine: str) -> list[Column]:
     """Every ledger row of the engine as a column; its index in the ledger names it, so a row added later renames nothing."""
     out = []
@@ -298,4 +303,9 @@ def self_test() -> None:
 
 
 if __name__ == "__main__":
-    self_test()
+    import sys
+
+    if sys.argv[1:2] == ["partition"]:
+        print(json.dumps(partition(sys.argv[2])))
+    else:
+        self_test()
