@@ -10,7 +10,7 @@ One row per delivering ledger row: the source native type, the Arrow type batch 
 | --- | --- | --- | --- | --- |
 | postgres | 91 | 12 | 4 | 0 |
 | mysql | 37 | 43 | 0 | 0 |
-| mssql | 21 | 34 | 1 | 0 |
+| mssql | 51 | 4 | 1 | 0 |
 | oracle | 17 | 40 | 0 | 0 |
 | mongo | 0 | 20 | 0 | 0 |
 
@@ -171,7 +171,37 @@ No cell is empty.
 | mssql | `SMALLMONEY` | `Decimal128(19, 4)` | `exact` | `Nullable(Decimal(19, 4))` | `NUMERIC` | `NUMBER(19,4)` |
 | mssql | `VARBINARY(4)` | `Binary` | `exact` | `Nullable(String)` | `BYTES` | `BINARY` |
 | mssql | `FLOAT` | `Float64` | `exact` | `Nullable(Float64)` | `FLOAT64` | `FLOAT` |
-| mssql | 34 matrix-only rows: `TINYINT`, `SMALLINT`, `INT`, `DECIMAL(38,0)`, `DECIMAL(38,38)`, `DECIMAL(38,10)`, `DECIMAL(1,0)`, `DECIMAL(18,6)`, `NUMERIC(10,2)`, `REAL`, `CHAR(10)`, `VARCHAR(20)`, `VARCHAR(MAX)`, `TEXT`, `NCHAR(10)`, `NVARCHAR(20)`, `NVARCHAR(MAX)`, `NTEXT`, `BINARY(16)`, `VARBINARY(MAX)`, `IMAGE`, `DATETIME2(0)`, `DATETIME2(3)`, `DATETIME2(6)`, `DATETIMEOFFSET(0)`, `DATETIMEOFFSET(6)`, `TIME(0)`, `TIME(3)`, `TIME(6)`, `XML`, `SQL_VARIANT`, `HIERARCHYID`, `GEOMETRY`, `GEOGRAPHY` | n/a: no `delivery`, graded by the edge matrix only (a refused or text-only column) | n/a | n/a | n/a | n/a |
+| mssql | `TINYINT` | `Int16` | `exact` | `Nullable(Int16)` | `INT64` | `NUMBER(38,0)` |
+| mssql | `SMALLINT` | `Int16` | `exact` | `Nullable(Int16)` | `INT64` | `NUMBER(38,0)` |
+| mssql | `INT` | `Int32` | `exact` | `Nullable(Int32)` | `INT64` | `NUMBER(38,0)` |
+| mssql | `DECIMAL(38,0)` | `Decimal128(38, 0)` | `exact` | `Nullable(Decimal(38, 0))` | `BIGNUMERIC` | `NUMBER(38,0)` |
+| mssql | `DECIMAL(38,38)` | `Decimal128(38, 38)` | `exact` | `Nullable(Decimal(38, 38))` | `BIGNUMERIC` | `NUMBER(38,38)` |
+| mssql | `DECIMAL(38,10)` | `Decimal128(38, 10)` | `exact` | `Nullable(Decimal(38, 10))` | `BIGNUMERIC` | `NUMBER(38,10)` |
+| mssql | `DECIMAL(1,0)` | `Decimal128(1, 0)` | `exact` | `Nullable(Decimal(1, 0))` | `NUMERIC` | `NUMBER(1,0)` |
+| mssql | `DECIMAL(18,6)` | `Decimal128(18, 6)` | `exact` | `Nullable(Decimal(18, 6))` | `NUMERIC` | `NUMBER(18,6)` |
+| mssql | `NUMERIC(10,2)` | `Decimal128(10, 2)` | `exact` | `Nullable(Decimal(10, 2))` | `NUMERIC` | `NUMBER(10,2)` |
+| mssql | `REAL` | `Float32` | `exact` | `Nullable(Float32)` | `FLOAT64` | `FLOAT` |
+| mssql | `CHAR(10)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mssql | `VARCHAR(20)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mssql | `VARCHAR(MAX)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mssql | `NCHAR(10)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mssql | `NVARCHAR(20)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mssql | `NVARCHAR(MAX)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mssql | `BINARY(16)` | `Binary` | `exact` | `Nullable(String)` | `BYTES` | `BINARY` |
+| mssql | `VARBINARY(MAX)` | `Binary` | `exact` | `Nullable(String)` | `BYTES` | `BINARY` |
+| mssql | `DATETIME2(0)` | `Timestamp(µs)` | `exact` | `Nullable(DateTime64(6, 'UTC'))` | `DATETIME` | `TIMESTAMP_NTZ` |
+| mssql | `DATETIME2(3)` | `Timestamp(µs)` | `exact` | `Nullable(DateTime64(6, 'UTC'))` | `DATETIME` | `TIMESTAMP_NTZ` |
+| mssql | `DATETIME2(6)` | `Timestamp(µs)` | `exact` | `Nullable(DateTime64(6, 'UTC'))` | `DATETIME` | `TIMESTAMP_NTZ` |
+| mssql | `DATETIMEOFFSET(0)` | `Timestamp(µs, "UTC")` | `exact` | `Nullable(DateTime64(6, 'UTC'))` | `TIMESTAMP` | `TIMESTAMP_TZ` |
+| mssql | `DATETIMEOFFSET(6)` | `Timestamp(µs, "UTC")` | `exact` | `Nullable(DateTime64(6, 'UTC'))` | `TIMESTAMP` | `TIMESTAMP_TZ` |
+| mssql | `TIME(0)` | `Time64(µs)` | `exact` | `Nullable(Decimal(18, 6))` | `TIME` | `TIME` |
+| mssql | `TIME(3)` | `Time64(µs)` | `exact` | `Nullable(Decimal(18, 6))` | `TIME` | `TIME` |
+| mssql | `TIME(6)` | `Time64(µs)` | `exact` | `Nullable(Decimal(18, 6))` | `TIME` | `TIME` |
+| mssql | `SQL_VARIANT` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mssql | `HIERARCHYID` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mssql | `GEOMETRY` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mssql | `GEOGRAPHY` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mssql | 4 matrix-only rows: `TEXT`, `NTEXT`, `IMAGE`, `XML` | n/a: no `delivery`, graded by the edge matrix only (a refused or text-only column) | n/a | n/a | n/a | n/a |
 | oracle | `NUMBER` | `decimal_plain` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | oracle | `NUMBER(38,10)` | `Decimal128(38, 10)` | `exact` | `Nullable(Decimal(38, 10))` | `BIGNUMERIC` | `NUMBER(38,10)` |
 | oracle | `NUMBER(9)` | `Int32` | `exact` | `Nullable(Int32)` | `INT64` | `NUMBER(38,0)` |

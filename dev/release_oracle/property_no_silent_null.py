@@ -211,13 +211,14 @@ RIVET_TYPE_FAMILY = {
 }
 
 
-def row_cols(engine: str, i: int, r: dict) -> Col:
-    """The seed column of ledger row `i`: its samples and the edges every stage delivers (a column that refuses holds every edge)."""
+def row_cols(engine: str, i: int, r: dict, extract_only: bool = False) -> Col:
+    """The seed column of ledger row `i`: its samples and the edges every stage delivers (a column that refuses holds every edge); `extract_only` keeps every edge the extract delivers, whatever a warehouse target does with it."""
     fam, delivery, whole = family(r["native_type"], r.get("delivery", ""), engine), r.get("delivery", ""), te.row_verdict(r)
     edges = te.edges_of(r)
     if (cut := next((e.lit for e in edges if e.cdc is not None and e.cdc.kind == te.REFUSE), None)) is not None:
         raise ValueError(f"row {r['native_type']}: edge {cut} refuses on the change stream; the CDC grid grades a refusal per column, `cdc: refuse:CODE` on the row")
-    lits = list(dict.fromkeys([*r["sample"], *(e.lit for e in edges if whole or (not e.solo and e.x.kind in (te.EXACT, te.NULL)))]))
+    kinds = (te.EXACT, te.NULL, te.FORM) if extract_only else (te.EXACT, te.NULL)
+    lits = list(dict.fromkeys([*r["sample"], *(e.lit for e in edges if whole or ((extract_only or not e.solo) and e.x.kind in kinds))]))
     by_lit = {e.lit: e for e in edges}
     return Col(f"c{i:02d}", r["native_type"], delivery, fam, tuple(lits), tuple(by_lit.get(x, te.Edge(x)) for x in lits), whole, te.row_cdc(r) if delivery else None)
 
@@ -799,6 +800,8 @@ class Result:
     code: str = ""
     fidelity: str = ""
     arrow: str = ""
+    checked: int = 0
+    presence: int = 0
 
 
 def parquet_arrow(out: Path, col: str) -> str:
@@ -881,6 +884,23 @@ def grade_stop(cell: str, p: core.Proc, check: core.Proc, col: str = "") -> Resu
     return Result(cell, REFUSED, "", f"check exit {check.returncode} [{(CODE.search(check.stderr + check.stdout) or [None, ''])[1]}]", code)
 
 
+def form_verdict(engine: str, lit: str, native: str, text: str, got) -> str:
+    """OK, WRONG or NULLED for a value the ledger states as a canonical form: the delivered value, read as its source literal is, has that canonical text."""
+    if got is None:
+        return NULLED
+    return "OK" if te.canon(element_got(parse_lit(engine, lit), got, native)) == text else WRONG
+
+
+def by_value(engine: str, lit: str, edge, server_text: str | None) -> bool:
+    """Whether a delivered value that graded OK was compared by value: not a NULL source value, not an unparsed literal."""
+    if edge is not None and edge.x.kind == te.FORM:
+        return True
+    if server_text is not None:
+        return True
+    exp = parse_lit(engine, lit)
+    return exp is not None and exp is not ...
+
+
 def grade_run(engine: str, cell: str, p: core.Proc, check: core.Proc, fidelity: str, out: Path, fmt: str, col: Col,
               n_rows: int, target: str, src_lits: list[str], want: frozenset[str] = frozenset(), reader=None,
               expect: list[str | None] | None = None) -> Result:
@@ -903,11 +923,19 @@ def grade_run(engine: str, cell: str, p: core.Proc, check: core.Proc, fidelity: 
         return Result(cell, DELIVERED, COLUMNS, f"delivered {sorted(desc)}, expected {sorted(want)}", fidelity=fidelity)
     if fmt == "parquet" and target != "none" and not type_ok(target, desc.get(key, "?")):
         return Result(cell, DELIVERED, IGNORED, f"declared {target}, delivered {desc.get(key)}", fidelity=fidelity)
-    nulled, wrong, zeros = [], [], 0
+    nulled, wrong, zeros, checked, presence = [], [], 0, 0, 0
     for i in range(1, n_rows + 1):
         lit = src_lits[i - 1] if i - 1 < len(src_lits) else "NULL"
-        v = compare(engine, lit, col.family, target, rows[i][key], fmt == "csv", col.native) if expect is None \
-            else server_text_verdict(expect[i - 1], rows[i][key], fmt == "csv")
+        edge = col.edges[i - 1] if i - 1 < len(col.edges) else None
+        if edge is not None and edge.x.kind == te.FORM:
+            v = form_verdict(engine, lit, col.native, edge.x.text, rows[i][key])
+        else:
+            v = compare(engine, lit, col.family, target, rows[i][key], fmt == "csv", col.native) if expect is None \
+                else server_text_verdict(expect[i - 1], rows[i][key], fmt == "csv")
+        if v == "PRESENCE":
+            presence += 1
+        elif v == "OK" and by_value(engine, lit, edge, None if expect is None else expect[i - 1]):
+            checked += 1
         if is_zero_date_null(engine, lit, v):
             zeros += 1
         elif v == NULLED:
@@ -919,10 +947,10 @@ def grade_run(engine: str, cell: str, p: core.Proc, check: core.Proc, fidelity: 
     if nulled:
         return Result(cell, DELIVERED, NULLED, f"{len(nulled)} non-NULL values delivered as NULL, e.g. {nulled[:3]}", fidelity=fidelity)
     if wrong and fidelity in ("lossy", "logical_string", "unsupported"):
-        return Result(cell, DECLARED, "", f"{len(wrong)} values changed under fidelity {fidelity}", fidelity=fidelity)
+        return Result(cell, DECLARED, "", f"{len(wrong)} values changed under fidelity {fidelity}", fidelity=fidelity, checked=checked, presence=presence)
     if wrong:
         return Result(cell, DELIVERED, WRONG, f"{len(wrong)} values changed under fidelity {fidelity or '?'}, e.g. {wrong[:3]}", fidelity=fidelity)
-    return Result(cell, DELIVERED, "", "", fidelity=fidelity)
+    return Result(cell, DELIVERED, "", "", fidelity=fidelity, checked=checked, presence=presence)
 
 
 def recheck(check, cfg: Path, env: dict, d: Path):
@@ -1292,6 +1320,9 @@ def self_test() -> None:
         assert compare("mysql", lit, "int", "binary", want, csv=True, native=native) == "OK" and compare("mysql", lit, "int", "binary", want[:-2] + "ff", csv=True, native=native) == WRONG, (lit, "the CSV hex of a BIT is compared as its bytes")
     assert compare("mysql", "b'10101010'", "int", "binary", "zz", csv=True, native="BIT(8)") == WRONG and compare("mysql", "b'10101010'", "int", "binary", 170, native="BIT(8)") == WRONG, "a shape that is no bytes is WRONG, never PRESENCE"
     assert compare("mysql", "b'101'", "int", "int8", Decimal(5), native="BIT(8)") == "OK", "a BIT under an integer override is still a number"
+    assert form_verdict("mssql", "CAST(0x00FF AS varbinary(10))", "SQL_VARIANT", "0x30306666", "00ff") == "OK" and form_verdict("mssql", "CAST(0x00FF AS varbinary(10))", "SQL_VARIANT", "0x30306666", "00fe") == WRONG, "a form edge is graded by its canonical text"
+    assert form_verdict("mssql", "1", "BIT", "1", None) == NULLED, "a form edge delivered NULL is NULLED"
+    assert not by_value("mssql", "NULL", None, None) and by_value("mssql", "1", None, None) and not by_value("mssql", "N'a'+NCHAR(1)+(SELECT 1)", None, None), "only a parsed non-NULL source value counts as compared by value"
     assert compare("mysql", "NULL", "int", "float4", None) == "OK"
     assert compare("mysql", "7", "int", "float4", None) == NULLED, "a non-NULL value delivered as NULL is the harm of the MySQL int->float override"
     assert compare("mysql", "7", "int", "float4", None, csv=True) == NULLED and compare("mysql", "7", "int", "float4", "", csv=True) == WRONG
