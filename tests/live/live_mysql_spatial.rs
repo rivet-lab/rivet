@@ -779,10 +779,13 @@ fn a_json_override_of_a_geometrycollection_is_refused_by_code_with_exit_5() {
     let _guard = create_and_seed(&table);
     let rig = rig(&table).export_line("columns: {gc: json}");
     let out = rig.run();
+    assert_refused(
+        &out,
+        Refused::by_code("RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5),
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(5), "exit 5 expected: {stderr}");
     assert!(
-        stderr.contains("RIVET_SOURCE_VALUE_UNREPRESENTABLE") && stderr.contains("`gc`"),
-        "the refusal is coded and names the column: {stderr}"
+        stderr.contains("`gc`"),
+        "the refusal names the column: {stderr}"
     );
 }
