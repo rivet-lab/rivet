@@ -769,3 +769,32 @@ fn a_spatial_value_is_held_to_the_value_ceiling_on_its_bytes_like_a_binary_colum
     assert!(err.contains("RIVET_SOURCE_VALUE_TOO_LARGE"), "{err}");
     assert!(err.contains("column 'g' has a single value of"), "{err}");
 }
+
+/// A json override of a GEOMETRYCOLLECTION column is refused with its coded error or delivers JSON text.
+#[test]
+#[ignore = "live: requires docker compose mysql"]
+fn a_json_override_of_a_geometrycollection_is_refused_or_delivers_json_text() {
+    require_alive(LiveService::Mysql);
+    let table = unique_name("mysql_spatial_json_gc");
+    let _guard = create_and_seed(&table);
+    let rig = rig(&table)
+        .no_oracle("spatial: the json override of a GEOMETRYCOLLECTION column is the open defect this test asserts")
+        .export_line("columns: {gc: json}");
+    let out = rig.run();
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("RIVET_SOURCE_VALUE_UNREPRESENTABLE") && stderr.contains("`gc`"),
+            "a refusal is coded and names the column: {stderr}"
+        );
+        return;
+    }
+    let values = dir_parquet_display(&rig.out_dir(), "gc");
+    assert_eq!(values.len(), 3, "one json value per seeded row: {values:?}");
+    for value in values.into_iter().flatten() {
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&value).is_ok(),
+            "json text, got {value:?}"
+        );
+    }
+}
