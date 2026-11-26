@@ -273,7 +273,7 @@ pub(crate) fn server_text_declared<'a>(
 }
 
 /// The remedy a value refusal names: the column declared text delivers the server's own text for every row.
-pub(crate) fn text_remedy(column: &str) -> String {
+pub fn text_remedy(column: &str) -> String {
     format!(
         "Declare `{column}: text` under `columns:` and rivet delivers the server's own text for \
          every row, or project the column in the export's `query:`."

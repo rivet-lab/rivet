@@ -6286,6 +6286,108 @@ seeds:
       oracle:
         na: "an Oracle collection type is refused at the mining schema, never read as an array literal"
 
+  - name: pg-cdc-session-reads-whole-type-catalog
+    class: "the PostgreSQL CDC reader reads every array type of pg_type, built-in ones included, when a session opens, whatever the captured tables hold, so each reader session costs about 1800 more source tuples than the tables it reads need"
+    history: "found 2026-11-24 by the Nightly Gate perf probe (postgres/cdc pg_tup_returned 6905 over its 5077 baseline, first red b04f2301, since #1145); RED on main: one session open returned 3135 tuples over the 2000 ceiling"
+    scope: source
+    switch: pg-cdc-session-reads-whole-type-catalog
+    engines:
+      postgres:
+        cells: ["lib:live_a_session_over_a_table_without_arrays_does_not_scan_the_type_catalog"]
+      mysql:
+        na: "the MySQL reader asks information_schema.TABLES for each configured table by name at open and holds no whole-catalog read"
+      mssql:
+        na: "the SQL Server reader joins sys.tables and sys.columns on the one capture instance it reads, never the whole catalog"
+      mongo:
+        na: "a MongoDB change stream reads no type catalog"
+      oracle:
+        na: "the Oracle reader reads all_tab_cols for the one owner and table it mines, never the whole catalog"
+
+  - name: pg-cdc-array-map-decided-at-read-time
+    class: "the PostgreSQL CDC reader decides which array types deliver as the server's text when it reads a row, not when the session opens, so a type renamed, moved to another schema or dropped between the open and the read, or a search_path with one name in two schemas, is delivered as a list where the open-time map delivers the server's text"
+    history: "found 2026-11-25 by rivet-verifier on #1214 head a719fc94: after ALTER TYPE comp RENAME the stream delivered A[B((1,x))] where main delivered B({\"(1,x)\"}); same for RENAME SCHEMA, SET SCHEMA, a table row type rename and an enum and a composite of one name under a search_path"
+    scope: source
+    switch: pg-cdc-array-map-decided-at-read-time
+    engines:
+      postgres:
+        cells: ["lib:live_ddl_on_a_type_after_the_open_leaves_array_decoding_as_the_open_map_does"]
+      mysql:
+        na: "MySQL has no array column type, so no array label is resolved"
+      mssql:
+        na: "SQL Server has no array column type, so no array label is resolved"
+      mongo:
+        na: "a MongoDB change stream carries no column types to resolve"
+      oracle:
+        na: "an Oracle collection type is refused at the mining schema, never read as an array literal"
+
+  - name: pg-cdc-builtin-name-taken-not-read-at-open
+    class: "the PostgreSQL CDC reader leaves the built-in array types unread at the session open even when a user type bears a built-in name, so a built-in array label printed schema-qualified is delivered as a list where the whole-catalog map delivers the server's text"
+    history: "found 2026-11-25 while probing #1214 after a719fc94: with search_path public, pg_catalog and a public.inet type, an inet[] column arrives as pg_catalog.inet[]"
+    scope: source
+    switch: pg-cdc-builtin-name-taken-not-read-at-open
+    engines:
+      postgres:
+        cells: ["lib:live_ddl_on_a_type_after_the_open_leaves_array_decoding_as_the_open_map_does"]
+      mysql:
+        na: "MySQL has no array column type, so no array label is resolved"
+      mssql:
+        na: "SQL Server has no array column type, so no array label is resolved"
+      mongo:
+        na: "a MongoDB change stream carries no column types to resolve"
+      oracle:
+        na: "an Oracle collection type is refused at the mining schema, never read as an array literal"
+
+  - name: pg-cdc-built-in-schema-arrays-not-read-at-open
+    class: "the PostgreSQL CDC reader leaves the array types of a built-in schema other than pg_catalog unread at the session open, so an information_schema domain array is delivered as a list where the whole-catalog map delivers the server's text"
+    history: "found 2026-11-25 by rivet-verifier on #1214 head e2f742b7: with search_path public, information_schema, a cardinal_number[] column arrives as a list on the head and as text on main"
+    scope: source
+    switch: pg-cdc-built-in-schema-arrays-not-read-at-open
+    engines:
+      postgres:
+        cells: ["lib:live_ddl_on_a_type_after_the_open_leaves_array_decoding_as_the_open_map_does"]
+      mysql:
+        na: "MySQL has no array column type, so no array label is resolved"
+      mssql:
+        na: "SQL Server has no array column type, so no array label is resolved"
+      mongo:
+        na: "a MongoDB change stream carries no column types to resolve"
+      oracle:
+        na: "an Oracle collection type is refused at the mining schema, never read as an array literal"
+
+  - name: pg-cdc-user-schema-label-asked-of-catalog
+    class: "the PostgreSQL CDC reader puts the array label of a schema other than pg_catalog to the catalog by to_regtype, which raises permission denied for a schema the CDC role cannot use, so a change of a table outside the export stops the run"
+    history: "found 2026-11-25 by rivet-verifier on #1214 head 27141343: a REPLICATION role with no USAGE on schema secret, a secret.mood[] column changed and then a captured public table changed, stopped on permission denied for schema secret where main delivered both rows"
+    scope: source
+    switch: pg-cdc-user-schema-label-asked-of-catalog
+    engines:
+      postgres:
+        cells: ["lib:live_a_role_without_usage_on_a_schema_reads_past_its_array_labels"]
+      mysql:
+        na: "MySQL has no array column type, so no array label is resolved"
+      mssql:
+        na: "SQL Server has no array column type, so no array label is resolved"
+      mongo:
+        na: "a MongoDB change stream carries no column types to resolve"
+      oracle:
+        na: "an Oracle collection type is refused at the mining schema, never read as an array literal"
+
+  - name: pg-cdc-unheld-array-label-asked-per-row
+    class: "the PostgreSQL CDC reader asks the catalog again for an array label it has been told the catalog does not hold, so each row carrying a renamed or dropped type costs a catalog query and its transactions"
+    history: "found 2026-11-25 by rivet-verifier on #1214 head a719fc94: 20000 rows of a renamed composite array read in 18.6 s and 40025 transactions against 0.26 s and 25 on main"
+    scope: source
+    switch: pg-cdc-unheld-array-label-asked-per-row
+    engines:
+      postgres:
+        cells: ["lib:live_a_label_the_catalog_does_not_hold_is_asked_once_per_session", "lib:absorbing_an_answer_decides_every_label_asked"]
+      mysql:
+        na: "MySQL has no array column type, so no array label is resolved"
+      mssql:
+        na: "SQL Server has no array column type, so no array label is resolved"
+      mongo:
+        na: "a MongoDB change stream carries no column types to resolve"
+      oracle:
+        na: "an Oracle collection type is refused at the mining schema, never read as an array literal"
+
   - name: oracle-cdc-number-infinity-uncoded
     class: "an Oracle CDC run that reads NUMBER infinity (LogMiner `~`) stops as an unreadable cell under RIVET_SOURCE_CDC_CELL_UNSUPPORTED where batch refuses the same value as RIVET_SOURCE_VALUE_UNREPRESENTABLE"
     history: "owner 2026-11-21 (batch and CDC must not disagree about a value); RED on #1144 head: oracle probe, FLOAT 9.99..E125 mined as `~`, batch VALUE_UNREPRESENTABLE, cdc CELL_UNSUPPORTED"

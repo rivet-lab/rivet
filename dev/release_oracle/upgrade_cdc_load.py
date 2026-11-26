@@ -182,6 +182,7 @@ class Postgres(Src):
 
 
 class MSSQL(Src):
+    CT_OP = {"ins": "insert", "set_v": "update", "set_ts": "update", "neg": "update", "del": "delete"}
     ts_type = "DATETIMEOFFSET"
     anchor_first = True
     tz_note = ("SQL Server has no session zone: every value carries a +09:00 offset and rivet runs "
@@ -220,11 +221,9 @@ class MSSQL(Src):
         _lc_drop("mssql", self.url, t)
 
     def apply(self, t, ops):
-        from .cdc import _mssql_max_lsn, _wait_mssql_captured
-        before = _mssql_max_lsn(self.url)
-        ok = super().apply(t, ops)
-        _wait_mssql_captured(self.url, before)  # the capture job settles before the next run
-        return ok
+        from .cdc import _wait_mssql_captured
+        kind, i = ops[-1][0], ops[-1][1]
+        return super().apply(t, ops) and _wait_mssql_captured(self.url, f"dbo_{t}", self.CT_OP[kind], i)
 
     def fp(self, o, t):
         from .cdc import _sqlcmd

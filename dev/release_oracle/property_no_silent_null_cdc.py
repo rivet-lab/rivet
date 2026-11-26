@@ -11,7 +11,6 @@ import shutil
 import tempfile
 import threading
 import time
-import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -142,9 +141,8 @@ def sql(engine: str, url: str, stmt: str) -> core.Proc:
     return p
 
 
-def exec_all(engine: str, url: str, stmts: list[str], image: str = "", marker: str = "") -> None:
-    """Run statements on the source; SQL Server waits for its capture job, to the marker row when `marker` names a captured table; raises on the first refusal."""
-    before = cdc._mssql_max_lsn(url) if engine == "mssql" and not marker else ""
+def exec_all(engine: str, url: str, stmts: list[str], image: str = "", leg: str = "", t: str = "", n: int = 0) -> None:
+    """Run statements on the source; SQL Server then waits for the change row of the last write of `leg`; raises on the first refusal."""
     if engine == "mysql" and image:
         p = sql(engine, url, f"SET SESSION binlog_row_image = {image}; " + " ".join(s + ";" for s in stmts))
         if not p.ok:
@@ -154,21 +152,10 @@ def exec_all(engine: str, url: str, stmts: list[str], image: str = "", marker: s
             p = sql(engine, url, s + ";")
             if not p.ok:
                 raise RuntimeError(f"{engine} refused `{s[:160]}`: exit {p.returncode}: {p.out.strip()[:300]}")
-    if marker:
-        wait_marker(url, marker)
-    elif engine == "mssql":
-        cdc._wait_mssql_captured(url, before)
-
-
-def wait_marker(url: str, marker: str) -> None:
-    """SQL Server: insert a tagged row into the captured marker table and wait until the capture job has written it, so every earlier commit is in the change tables."""
-    tag = uuid.uuid4().hex
-    p = cdc._sqlcmd(url, sql=f"INSERT INTO dbo.{marker}(tag) VALUES ('{tag}');")
-    if p.returncode != 0:
-        raise RuntimeError(f"mssql refused the marker row: {p.stdout.strip()[:300]}")
-    seen = lambda: f"{tag}" in cdc._sqlcmd(url, q=f"SET NOCOUNT ON; SELECT tag FROM cdc.dbo_{marker}_CT WHERE tag = '{tag}'").stdout
-    if not cdc.wait_until(seen, tries=90, delay=1.0):
-        raise RuntimeError(f"mssql capture never reached marker {tag} of {marker}")
+    if engine == "mssql" and leg:
+        op, row_id, _ = expected(leg, n)[-1]
+        if not cdc._wait_mssql_captured(url, f"dbo_{t}", op, row_id):
+            raise RuntimeError(f"the capture job did not harvest the {leg} leg's last change ({op} id={row_id})")
 
 
 def capture_on(engine: str, url: str, t: str) -> list[str]:
@@ -178,27 +165,15 @@ def capture_on(engine: str, url: str, t: str) -> list[str]:
     if engine == "oracle":
         return [f"ALTER TABLE {t} ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS", f"GRANT SELECT ON {t} TO c##rivetcdc"]
     if engine == "mssql":
-        return ["EXEC sys.sp_configure 'max text repl size (B)', -1; RECONFIGURE", f"CREATE TABLE dbo.{marker_of(t)} (id INT IDENTITY PRIMARY KEY, tag VARCHAR(64) NOT NULL)",
-                *(f"EXEC sys.sp_cdc_enable_table @source_schema='dbo', @source_name='{x}', @role_name=NULL, @capture_instance='dbo_{x}'" for x in (t, marker_of(t)))]
+        return ["EXEC sys.sp_configure 'max text repl size (B)', -1; RECONFIGURE", f"EXEC sys.sp_cdc_enable_table @source_schema='dbo', @source_name='{t}', @role_name=NULL, @capture_instance='dbo_{t}'"]
     return []
 
 
-def marker_for(engine: str, t: str) -> str:
-    """The captured marker table a SQL Server round waits on, empty on every other engine."""
-    return marker_of(t) if engine == "mssql" else ""
-
-
-def marker_of(t: str) -> str:
-    """The name of a round table's marker table."""
-    return f"{t}_mk"
-
-
 def wait_capture(engine: str, url: str, t: str) -> None:
-    """SQL Server: wait until the capture instances of the round table and its marker table are queryable."""
-    for x in (t, marker_of(t)) if engine == "mssql" else ():
-        if not cdc.wait_until(lambda: "NULL" not in cdc._sqlcmd(
-                url, q=f"SET NOCOUNT ON; SELECT ISNULL(CONVERT(varchar(64), sys.fn_cdc_get_min_lsn('dbo_{x}'), 1), 'NULL')").stdout, tries=30, delay=1.5):
-            raise RuntimeError(f"mssql capture instance dbo_{x} never became queryable")
+    """SQL Server: wait until the capture instance is queryable."""
+    if engine == "mssql" and not cdc.wait_until(lambda: "NULL" not in cdc._sqlcmd(
+            url, q=f"SET NOCOUNT ON; SELECT ISNULL(CONVERT(varchar(64), sys.fn_cdc_get_min_lsn('dbo_{t}'), 1), 'NULL')").stdout, tries=30, delay=1.5):
+        raise RuntimeError(f"mssql capture instance dbo_{t} never became queryable")
 
 
 def drop(engine: str, url: str, t: str, slots: list[str]) -> None:
@@ -207,7 +182,6 @@ def drop(engine: str, url: str, t: str, slots: list[str]) -> None:
         for s in slots:
             cdc._psql(url, sql=f"SELECT pg_drop_replication_slot('{s}') FROM pg_replication_slots WHERE slot_name='{s}';")
     if engine == "mssql":
-        cdc._lc_drop("mssql", url, marker_of(t))
         cdc._lc_drop("mssql", url, t)
     else:
         nsn.sql(engine, DML_STAND.get(engine, url), f"DROP TABLE IF EXISTS {t};")
@@ -354,7 +328,6 @@ def run_round(engine: str, r: int, cols: list[Col], units: list[Unit], image: st
     t = f"{TABLE}{r}"
     slots = [f"{t}_u{i}" for i in range(len(units))]
     tag = f"@{image}" if image else ""
-    mark = marker_for(engine, t)
     drop(engine, url, t, slots)
     try:
         stmts, n = nsn.seed_sql(engine, cols, t)
@@ -387,10 +360,10 @@ def run_round(engine: str, r: int, cols: list[Col], units: list[Unit], image: st
 
     try:
         each("snapshot")
-        exec_all(engine, dml_url, dml(engine, cols, t, n), image, mark)
+        exec_all(engine, dml_url, dml(engine, cols, t, n), image, "delete", t, n)
         each("stream")
         for kind in ddl_kinds():
-            exec_all(engine, dml_url, ddl_insert(engine, cols, t, kind), image, mark)
+            exec_all(engine, dml_url, ddl_insert(engine, cols, t, kind), image, kind, t, n)
             each(kind)
     except RuntimeError as e:
         note = f"the round's source DML was refused: {e}"[:300]
@@ -489,19 +462,6 @@ def self_test() -> None:
     assert set(CDC_STAND) == set(nsn.axes()["engines"]), f"CDC_STAND {sorted(CDC_STAND)} must name every SourceType variant"
     assert change_ops() == ["delete", "insert", "update"], change_ops()
     assert ddl_kinds()[-1] == "removed" and set(ddl_kinds()) == {"added", "removed", "type_changed"}
-    import sys
-    from unittest import mock
-
-    calls = []
-    with mock.patch.object(sys.modules[__name__], "sql", lambda *a, **k: core.Proc(["x"], 0, "", "", gated=False)), \
-            mock.patch.object(sys.modules[__name__], "wait_marker", lambda u, m: calls.append(("marker", m))), \
-            mock.patch.object(cdc, "_mssql_max_lsn", lambda u: calls.append(("lsn",)) or "0"), \
-            mock.patch.object(cdc, "_wait_mssql_captured", lambda u, b: calls.append(("lsn-wait",))):
-        exec_all("mssql", "u", ["s"], "", "t_mk")
-        exec_all("mssql", "u", ["s"])
-    assert calls == [("marker", "t_mk"), ("lsn",), ("lsn-wait",)], f"a SQL Server round waits on its marker row when it has one: {calls}"
-    assert marker_for("mssql", "t") == "t_mk" and marker_for("mysql", "t") == "", "only SQL Server rounds carry a marker table"
-    assert sum("sp_cdc_enable_table" in x and "dbo_t_mk" in x for x in capture_on("mssql", "", "t")) == 1 and marker_of("t") == "t_mk", capture_on("mssql", "", "t")
     assert row_images("x `binlog_row_image` decides `FULL` ... `MINIMAL` and `NOBLOB` y rivet's change stream `ZZZZ`") == ["FULL", "MINIMAL", "NOBLOB"]
     assert set(row_images()) >= {"FULL", "MINIMAL"}
     assert expected("snapshot", 3) == [("", 1, 0), ("", 2, 1), ("", 3, 2)]
@@ -604,6 +564,23 @@ def self_test() -> None:
     finally:
         globals()["run_round"] = saved_round
     assert asked == [(7, ["e00"], [none, units[1]]), (8, ["e01"], [none, units[2]])] and [x.cell for x in solo] == ["e00", "e01"], asked
+    waits, real_wait, real_sql = [], cdc._wait_mssql_captured, globals()["sql"]
+    cdc._wait_mssql_captured = lambda url, ci, op, row_id: waits.append((ci, op, row_id)) or bool(row_id != 2002)
+    globals()["sql"] = lambda *_a, **_k: nsn._proc(0)
+    try:
+        exec_all("mssql", "u", ["x"], "", "removed", "t", 3)
+        exec_all("mssql", "u", ["x"], "", "delete", "t", 3)
+        exec_all("mssql", "u", ["x"])
+        exec_all("postgres", "u", ["x"], "", "removed", "t", 3)
+        assert waits == [("dbo_t", "insert", 2003), ("dbo_t", "delete", 3)], f"a leg waits for the change row of its last write: {waits}"
+        try:
+            exec_all("mssql", "u", ["x"], "", "type_changed", "t", 3)
+        except RuntimeError as e:
+            assert "type_changed" in str(e), e
+        else:
+            raise AssertionError("a change row that never lands is a refusal, not a graded run")
+    finally:
+        cdc._wait_mssql_captured, globals()["sql"] = real_wait, real_sql
     shutil.rmtree(d, ignore_errors=True)
     print(f"no_silent_null_cdc self-test ok: legs {legs()}, row images {row_images()}")
 
