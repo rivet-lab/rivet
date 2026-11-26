@@ -219,7 +219,7 @@ def norm_native(t: str | bytes) -> str:
     t = re.sub(r"^TIMESTAMP(\(\d+\))? WITH TIME ZONE", r"TIMESTAMPTZ\1", t)
     t = re.sub(r"^TIME(\(\d+\))? WITHOUT TIME ZONE", r"TIME\1", t)
     t = re.sub(r"^TIME(\(\d+\))? WITH TIME ZONE", r"TIMETZ\1", t)
-    t = re.sub(r"^(DATETIME2|DATETIMEOFFSET)\(7\)$", r"\1", t)
+    t = re.sub(r"^(TIME|DATETIME2|DATETIMEOFFSET)\(7\)$", r"\1", t)
     t = re.sub(r"^CHARACTER VARYING", "VARCHAR", t)
     return re.sub(r"^CHARACTER\b", "CHAR", t)
 
@@ -680,8 +680,8 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
             "SELECT * FROM mssql_scan('ms', " + _lit(
                 "SELECT COLUMN_NAME, UPPER(DATA_TYPE) + CASE WHEN DATA_TYPE IN ('decimal', 'numeric') THEN "
                 "'(' + CAST(NUMERIC_PRECISION AS varchar) + ',' + CAST(NUMERIC_SCALE AS varchar) + ')' "
-                "WHEN DATA_TYPE IN ('datetime2', 'datetimeoffset') THEN '(' + CAST(DATETIME_PRECISION AS varchar) + ')' "
-                "WHEN CHARACTER_MAXIMUM_LENGTH > 0 THEN '(' + CAST(CHARACTER_MAXIMUM_LENGTH AS varchar) + ')' "
+                "WHEN DATA_TYPE IN ('time', 'datetime2', 'datetimeoffset') THEN '(' + CAST(DATETIME_PRECISION AS varchar) + ')' "
+                "WHEN CHARACTER_MAXIMUM_LENGTH > 0 AND DATA_TYPE <> 'hierarchyid' THEN '(' + CAST(CHARACTER_MAXIMUM_LENGTH AS varchar) + ')' "
                 "ELSE '' END FROM INFORMATION_SCHEMA.COLUMNS "
                 f"WHERE TABLE_SCHEMA = {_lit(sch)} AND TABLE_NAME = {_lit(leaf)}"
             ) + ")"
@@ -695,8 +695,12 @@ def _source(ora, spec: dict, renders: dict) -> tuple[str, list[str], dict]:
         )}
         partial = bool(readable) and any(c not in readable for c in native)
         native = {c: n for c, n in native.items() if c in readable} if partial else native
-        # The scanner trims CHAR/NCHAR padding; the server's own cast keeps it.
         renders = {**{n: "CAST({c} AS NVARCHAR(MAX))" for n in native.values() if n.startswith(("CHAR(", "NCHAR("))}, **renders}
+        unscannable = {r[0] for r in ora.rows(
+            "SELECT * FROM mssql_scan('ms', " + _lit(f"SELECT c.name FROM sys.columns c WHERE c.object_id = {oid} AND c.system_type_id IN (98, 240)") + ")"
+        )}
+        if bare := sorted(f"{c} {n}" for c, n in native.items() if c in unscannable and n not in renders):
+            raise ValueError(f"the mssql scanner holds the connection until it times out on a sql_variant or CLR type column: give the ledger row of {', '.join(bare)} a render.server")
         if not partial and not any(n in renders for n in native.values()):
             return f"ms.{sch}.{leaf}", key, native
         cols = ", ".join(renders.get(n, "{c}").replace("{c}", f"[{c}]") + f" AS [{c}]" for c, n in native.items())
@@ -2396,6 +2400,7 @@ def _self_test() -> None:
     assert grade_findings(collapsed, rows, set(), {"b": "BIGINT"}, True), "DISTINCT relaxes only for a collapse column"
     assert norm_native("timestamp(6) without time zone[]") == "TIMESTAMP(6)[]"
     assert norm_native("character varying(50)") == "VARCHAR(50)"
+    assert norm_native("TIME(7)") == "TIME" and norm_native("time(0)") == "TIME(0)" and norm_native("DATETIME2(7)") == "DATETIME2"
     assert norm_native("time with time zone") == "TIMETZ" and norm_native("time(3) without time zone") == "TIME(3)"
     assert unpinned_loss("TIMESTAMP WITH TIME ZONE", "VARCHAR") is None and unpinned_loss("TIMESTAMP", "VARCHAR") is not None
     assert norm_native("DATETIME2(7)") == "DATETIME2" and norm_native("DATETIMEOFFSET(7)") == "DATETIMEOFFSET"

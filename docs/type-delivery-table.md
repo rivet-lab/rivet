@@ -217,8 +217,8 @@ No cell is empty.
 | oracle | `NVARCHAR2(50)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | oracle | `CHAR(5 CHAR)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | oracle | `RAW(16)` | `Binary` | `exact` | `Nullable(String)` | `BYTES` | `BINARY` |
-| oracle | `FLOAT` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
-| oracle | `FLOAT(10)` | `Utf8` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | `FLOAT` | `decimal_plain` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| oracle | `FLOAT(10)` | `decimal_plain` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | oracle | `NUMBER(38,0)` | `Decimal128(38, 0)` | `exact` | `Nullable(Decimal(38, 0))` | `BIGNUMERIC` | `NUMBER(38,0)` |
 | oracle | `NUMBER(10,-3)` | `Decimal128(13, 0)` | `exact` | `Nullable(Decimal(13, 0))` | `NUMERIC` | `NUMBER(13,0)` |
 | oracle | `NUMBER(10,2)` | `Decimal128(10, 2)` | `exact` | `Nullable(Decimal(10, 2))` | `NUMERIC` | `NUMBER(10,2)` |

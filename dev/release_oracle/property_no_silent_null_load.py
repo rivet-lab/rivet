@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -45,6 +46,7 @@ CH_USER, CH_PASSWORD, CH_PASSWORD_ENV = "rivet", "rivet", "RIVET_TEST_CH_PASSWOR
 GCS = "http://127.0.0.1:4443"
 BUCKET = "pm-no-silent-null"
 WORKERS = 6
+ENGINE_DEADLINE = 1800.0
 BISECT_RUNS = 40
 SNOW = "/opt/homebrew/bin/snow"
 
@@ -653,7 +655,28 @@ class Matrix:
         return out, seen
 
 
-def run_engine(engine: str, url: str, work: Path, targets: tuple[str, ...], progress=lambda s: None, only: str = "") -> tuple[list[Result], list[dict]]:
+def run_engine(engine: str, url: str, work: Path, targets: tuple[str, ...], progress=lambda s: None, only: str = "", deadline: float = ENGINE_DEADLINE) -> tuple[list[Result], list[dict]]:
+    """`matrix_of_engine` under a deadline: one still running after it is left to finish alone and reads as not graded, never as a hang."""
+    box: list[tuple[bool, object]] = []
+
+    def go() -> None:
+        try:
+            box.append((True, matrix_of_engine(engine, url, work, targets, progress, only)))
+        except BaseException as e:
+            box.append((False, e))
+
+    runner = threading.Thread(target=go, name=f"load-matrix-{engine}", daemon=True)
+    runner.start()
+    runner.join(deadline)
+    if not box:
+        return [Result(f"{engine}/*/matrix", REFUSED, NOT_GRADED, f"the {engine} load matrix did not finish within {deadline:.0f} s and was abandoned")], []
+    ok, got = box[0]
+    if not ok:
+        raise got
+    return got
+
+
+def matrix_of_engine(engine: str, url: str, work: Path, targets: tuple[str, ...], progress=lambda s: None, only: str = "") -> tuple[list[Result], list[dict]]:
     """Seed, observe and grade one engine at `targets`; drops its seed tables and every warehouse object after."""
     m = Matrix(engine, url, work, targets)
     chunks = [Chunk(c.table, tuple(x for x in c.cols if only.lower() in x.native.lower())) for c in tm.chunks(engine)]
@@ -837,6 +860,26 @@ def self_test() -> None:
     ms.targets = [ClickHouse()]
     ms.splits, ms.obs = {key: {"RIVET_X"}}, {}
     assert [(r.cell, r.klass) for r in ms.results([ch_])[0]] == [("mssql/NUMBER(5)->none/load-clickhouse", nsn.SPLIT)], "a refusal `rivet check` let through is a split"
+    gate = threading.Event()
+    slow, quick = (lambda *a, **k: (gate.wait(), ([], []))[1]), (lambda *a, **k: ([Result("x", DELIVERED)], []))
+
+    def boom(*a, **k):
+        raise KeyError("seed")
+
+    t0 = time.monotonic()
+    with mock.patch.object(sys.modules[__name__], "matrix_of_engine", slow):
+        hung, _ = run_engine("e", "u", Path("w"), (), deadline=0.2)
+    gate.set()
+    assert time.monotonic() - t0 < 5 and [(r.cell, r.klass) for r in hung] == [("e/*/matrix", NOT_GRADED)], "a matrix past its deadline is not graded, never a hang"
+    with mock.patch.object(sys.modules[__name__], "matrix_of_engine", quick):
+        assert [r.cell for r in run_engine("e", "u", Path("w"), (), deadline=5)[0]] == ["x"], "a matrix inside its deadline keeps its results"
+    with mock.patch.object(sys.modules[__name__], "matrix_of_engine", boom):
+        try:
+            run_engine("e", "u", Path("w"), (), deadline=5)
+        except KeyError:
+            pass
+        else:
+            raise AssertionError("an error inside the matrix reaches the caller")
     print(f"no_silent_null_load self-test ok: targets {load_targets()}")
 
 

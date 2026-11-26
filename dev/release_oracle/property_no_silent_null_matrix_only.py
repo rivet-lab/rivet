@@ -29,27 +29,41 @@ GEOMETRY_GAP = frozenset({"GEOMETRY", "POINT", "LINESTRING", "POLYGON", "GEOMETR
 GAP_LABEL = "refused today, gap against ADR-0038 CP1, fix in flight"
 
 
+def only_parts(only: str) -> list[str]:
+    """The non-empty lower-cased comma-separated parts of `only`."""
+    return [p.strip().lower() for p in only.split(",") if p.strip()]
+
+
 def picked(native: str, only: str) -> bool:
-    """Whether a native type contains any of the comma-separated parts of `only`; an empty `only` keeps every type."""
-    return any(o.strip().lower() in native.lower() for o in only.split(","))
+    """Whether a native type contains any part of `only`; no part keeps every type."""
+    parts = only_parts(only)
+    return not parts or any(p in native.lower() for p in parts)
 
 
-def unmeasured(engine: str, only: str = "") -> list[tuple[int, dict]]:
-    """The ledger rows of one engine with no delivery and not declarable, keeping their ledger index; `only` keeps the rows whose native type contains any of its comma-separated parts."""
-    return [(i, r) for i, r in enumerate(nsn.ledger_rows(engine)) if not r.get("delivery") and not r.get("declarable") and picked(r["native_type"], only)]
+def unmatched_only(engines: list[str], only: str) -> list[str]:
+    """The parts of `only` that no ledger row of the engines contains: a part that selects nothing is a typo, never an empty run."""
+    natives = [r["native_type"].lower() for e in engines for r in nsn.ledger_rows(e)]
+    return [p for p in only_parts(only) if not any(p in n for n in natives)]
 
 
-def cdc_cols(engine: str, only: str = "") -> list[nsn.Col]:
-    """The seed columns of the matrix-only rows for the CDC grid; a row whose edge refuses on the change stream is left out."""
-    cols = []
-    for i, r in unmeasured(engine, only):
+def matrix_rows(engine: str, only: str = "") -> list[tuple[int, dict]]:
+    """Every ledger row of one engine, delivering or not, keeping its ledger index; `only` keeps the rows whose native type contains any of its comma-separated parts."""
+    return [(i, r) for i, r in enumerate(nsn.ledger_rows(engine)) if picked(r["native_type"], only)]
+
+
+def cdc_plan(engine: str, only: str = "") -> tuple[list[nsn.Col], list[dict]]:
+    """The seed columns of the engine's ledger rows for the CDC grid, and one cell for each row left out of it with the reason."""
+    cols, left = [], []
+    for i, r in matrix_rows(engine, only):
+        cell = {"cell": f"{engine}/{r['native_type']}/cdc"}
         if r["native_type"].split("(")[0] in GEOMETRY_GAP:
+            left.append(cell | {"verdict": "left out", "reason": GAP_LABEL})
             continue
         try:
             cols.append(nsn.row_cols(engine, i, r))
-        except ValueError:
-            continue
-    return cols
+        except ValueError as e:
+            left.append(cell | {"verdict": "not classified", "reason": str(e)[:240]})
+    return cols, left
 
 
 SESSION_OVERRIDE_OPEN = "open: check cannot see a session override"
@@ -272,10 +286,21 @@ def self_test() -> None:
         raise SystemExit("self-test: --only keeps a row naming any of its comma-separated parts and no other")
     if dated("no date") or not dated("2026-11-22: a reason"):
         raise SystemExit("self-test: a Mongo reason is dated when it opens with an ISO date")
-    cols = cdc_cols("postgres")
+    if not (picked("TEXT", "NCHAR,TEXT") and not picked("TEXT", "NCHAR,") and picked("RAW(2000)", "raw(2000)")) or unmatched_only(["oracle"], "NCHAR, RAW\\(2000\\)") != ["raw\\(2000\\)"]:
+        raise SystemExit("self-test: an empty part of --only keeps every row, or a part that matches no ledger row is not named")
+    for engine in ENGINES:
+        if len(matrix_rows(engine)) != len(nsn.ledger_rows(engine)):
+            raise SystemExit(f"self-test: the matrix lanes of {engine} skip a ledger row")
+    for engine in ENGINES[:-1]:
+        cols, left = cdc_plan(engine)
+        held = {c.native for c in cols} | {x["cell"].split("/", 1)[1].rsplit("/", 1)[0] for x in left}
+        dropped = sorted({r["native_type"] for r in nsn.ledger_rows(engine)} - held)
+        if dropped:
+            raise SystemExit(f"self-test: ledger rows of {engine} left out of the CDC plan: {dropped}")
+    cols = cdc_plan("postgres")[0]
     planned = {c.name for group, _, _ in cdc_grid.rounds("postgres", cols) for c in group}
     if not cols or planned != {c.name for c in cols}:
-        raise SystemExit(f"self-test: the CDC plan holds {len(planned)} of {len(cols)} matrix-only columns")
+        raise SystemExit(f"self-test: the CDC plan holds {len(planned)} of {len(cols)} ledger columns")
     if cdc_cell(nsn.Result("x", nsn.DELIVERED, nsn.NULLED, ""))["verdict"] != "DEFECT":
         raise SystemExit("self-test: a nulled CDC value is not a DEFECT")
     value_refusal = nsn.Result("mysql/T->d/cdc-insert/parquet", nsn.REFUSED, "CHECK_RUN_SPLIT", "", "RIVET_SOURCE_VALUE_UNREPRESENTABLE")
@@ -307,9 +332,13 @@ def run_cdc(engines: list[str], work: Path, only: str = "") -> int:
     cells: list[dict] = []
     for engine in engines:
         if engine == "mongo":
-            cells += [{"cell": f"mongo/{r['native_type']}/cdc", "verdict": "n/a" if dated(r.get("na")) else "not classified", "reason": str(r.get("na", ""))[:120]} for _, r in unmeasured(engine, only)]
+            cells += [{"cell": f"mongo/{r['native_type']}/cdc", "verdict": "n/a" if dated(r.get("na")) else "not classified", "reason": str(r.get("na", ""))[:120]} for _, r in matrix_rows(engine, only)]
             continue
-        for x in cdc_grid.run_engine(engine, work / "cdc" / engine, print, cols=cdc_cols(engine, only)):
+        cols, left = cdc_plan(engine, only)
+        for cell in left:
+            cells.append(cell)
+            print(json.dumps(cell, ensure_ascii=False), flush=True)
+        for x in cdc_grid.run_engine(engine, work / "cdc" / engine, print, cols=cols):
             cells.append(cdc_cell(x))
             print(json.dumps(cells[-1], ensure_ascii=False), flush=True)
     print("SUMMARY " + json.dumps(tally([c["verdict"] for c in cells]), sort_keys=True), flush=True)
@@ -349,10 +378,10 @@ def run_engines(engines: list[str], work: Path, only: str = "") -> list[dict]:
         mine: list[dict] = []
         try:
             if engine == "mongo":
-                mine = measure_mongo(url, work / engine, unmeasured(engine, only))
+                mine = measure_mongo(url, work / engine, matrix_rows(engine, only))
                 for row in mine:
                     print(json.dumps(row, ensure_ascii=False), flush=True)
-            for i, r in unmeasured(engine, only) if engine != "mongo" else []:
+            for i, r in matrix_rows(engine, only) if engine != "mongo" else []:
                 row = measure(engine, url, work / engine, i, r)
                 mine.append(row)
                 print(json.dumps(row, ensure_ascii=False), flush=True)
@@ -387,12 +416,14 @@ def main() -> int:
     ap.add_argument("--cdc", action="store_true", help="run the CDC grid over the matrix-only columns instead of the batch rows")
     ap.add_argument("--engine", default=",".join(ENGINES))
     ap.add_argument("--work", default=str(Path(tempfile.gettempdir()) / "no_silent_null_matrix_only"))
-    ap.add_argument("--only", default="", help="only the rows whose native type contains any of these comma-separated texts")
+    ap.add_argument("--only", default="", help="only the rows whose native type contains any of these comma-separated texts (plain text, not a pattern)")
     ap.add_argument("--out", default="")
     ns = ap.parse_args()
     if ns.self_test:
         self_test()
         return 0
+    if gone := unmatched_only(ns.engine.split(","), ns.only):
+        ap.error(f"--only {gone} matches no ledger row of {ns.engine}")
     print(nsn.binary_line(), flush=True)
     if ns.cdc:
         return run_cdc(ns.engine.split(","), Path(ns.work), ns.only)
