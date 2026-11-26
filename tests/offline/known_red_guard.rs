@@ -39,6 +39,7 @@ const EXCUSES: &str = "dev/release_oracle/skip_allow.py";
 // 20 -> 16 (2026-11-05): the VP-8 cells on MSSQL, Oracle and Mongo and the MSSQL lock-timeout cell MT-F-F are plain cells again (fix/stop-class-by-code).
 // 16 -> 2 (2026-11-06): the 14 keyset key type cells are plain cells again (fix/seam-keyset-key-type).
 // 30 -> 32 (2026-11-24): the two ab-diff keyset_parallel rows join the ledger, expiring 2026-12-15 (_BASELINE_EXPIRES).
+// 32 -> 34 (2026-11-26): the MySQL NULL-literal open defect (check_override_wire) and the GEOMETRYCOLLECTION json open defect (property_no_silent_null) join the ledger, expiring 2026-11-29.
 
 /// The horizon every known-red entry and every excused skip expires at; moves only here and in both ledgers together.
 const EXPIRES: &str = "2026-11-29";

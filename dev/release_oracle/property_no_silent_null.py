@@ -1309,6 +1309,8 @@ def spatial_self_test() -> None:
         internal = bytes(POINT_ORIGIN).decode("latin-1")
         assert all(compare("mysql", lit, "other", t, internal, c, "POINT") == "OK" and compare("mysql", lit, "other", t, internal[:-1] + "\x01", c, "POINT") == WRONG and compare("mysql", lit, "other", t, "garbage", c, "POINT") == WRONG for t in ("text", "json") for c in (False, True)), "a text or json override holds the server's bytes"
         assert compare("mysql", lit, "other", "binary", b"garbage", False, "POINT") == WRONG and compare("mysql", lit, "other", "binary", "garbage", True, "POINT") == WRONG
+        gc = Spatial(bytes(SRID_BYTES) + bytes.fromhex("010700000001000000" + "0101000000" + "00" * 16))
+        assert spatial_verdict(gc, "json", bytes(gc)) == "OK", "the open defect: json takes the raw SRID and WKB bytes, recorded by known_red"
     finally:
         server_geometry = real
 
