@@ -48,13 +48,13 @@ PG_STATE_CELLS = (
 BY_DESIGN_SKIPS = (
     ("gcp-secret-resolved", "the Secret Manager endpoint is a const https URL (src/config/gcp_secret.rs) with no mock seam; the fetch-fail and token paths are graded",
      "the endpoint becomes overridable for a stub"),
+    ("warehouse-load-snowflake", "the Snowflake API endpoint is built from the account name (src/load/snowflake_rest.rs) with no override and the cloud quota is never touched, so the Snowflake load error path after staging is not graded; the clickhouse and BigQuery paths are",
+     "the Snowflake endpoint becomes overridable for a stub"),
     *((f"ambient-metadata/{m}", f"reqsign reads a fixed link-local {m} metadata URL with no environment override and no stub can stand on it without root; the other ambient sources are graded",
        "the stand grants a stub the link-local address or reqsign reads an override") for m in ("aws", "azure", "google")),
 )
 
 STAND_SKIPS = (
-    ("no_secret_in_output/warehouse-load-success-path", "-", "the stage stages no bucket for `rivet load` although the stand runs fake-gcs, minio and azurite, so the warehouse load error path after staging is not graded",
-     "the stage points `rivet load` at a stand emulator bucket", _UNPROVEN),
     ("no_secret_in_output/success-path", "-", "the stand holds no provisioned canary users, so the right-password success path of the source engines is not graded",
      "the seed provisions a canary user per source engine", _EXPIRES),
     ("no_secret_in_output/state-tls-success", "-", "the stand postgres and the cdc primary run ssl=off (`show ssl`), so state over TLS success is not graded; the sslmode=require error path is",
@@ -62,7 +62,7 @@ STAND_SKIPS = (
     ("no_secret_in_output/oracle-cdc-events", "-", "the stage has no cell that drives Oracle CDC with events although the stand runs Oracle, so it is not graded",
      "a cell drives an Oracle CDC run with events", _UNPROVEN),
     *((f"no_secret_in_output/slot-reach/{sl}", "-", f"no command connects to the {sl} credential slot on the stand, so its cells are clean but ungraded",
-       f"a stub or cloud account answers the {sl} slot", _EXPIRES) for sl in ("ambient", "bigquery", "load", "snowflake")),
+       f"a stub or cloud account answers the {sl} slot", _EXPIRES) for sl in ("ambient", "snowflake")),
     *(("memory", e, f"the island sets no RIVET_SCALE_{e.upper()}_URL, so the scale-memory pair of tables is not measured on {e}; flat_rss grades peak RSS over 10 thousand, 1 million and 5 million seeded rows",
        "the island names a batch-tier database with a large row-count ratio per engine, or the stage is retired for flat_rss", _EXPIRES) for e in ("postgres", "mysql", "mssql", "mongo")),
     ("cloud_legs", "-", "the gate host has no cloud credentials or bucket, so the cloud tier (no_silent_null_cloud, no_secret_in_output_cloud, no_debris_after_stop_cloud) is not graded",
