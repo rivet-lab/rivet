@@ -125,6 +125,12 @@ def live_test_table() -> list[tuple[str, str, bool]]:
             for f in sorted((ROOT / "tests" / "live").glob("*.rs")) for reason, name in IGNORED_TEST.findall(f.read_text())]
 
 
+def lib_live_tests() -> set[str]:
+    """Bare names of the ignored tests under src/ that need a service: every `#[ignore = ..]` fn but a measurement."""
+    return {name for f in sorted((ROOT / "src").rglob("*.rs")) for reason, name in IGNORED_TEST.findall(f.read_text())
+            if not reason.startswith("measurement")}
+
+
 def part_tests(part: str, table: list[tuple[str, str, bool]] | None = None) -> set[str]:
     """Bare names of the live tests the `part` ("hosted" or "devbox") half runs."""
     return {name for _, name, devbox in (live_test_table() if table is None else table) if devbox is (part == DEVBOX)}
