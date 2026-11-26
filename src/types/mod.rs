@@ -89,25 +89,54 @@ pub fn is_time_of_day(us: i64) -> bool {
 /// The dates a nanosecond timestamp holds, in the words of every refusal of a value outside them.
 pub const NANOSECOND_RANGE: &str = "1677-09-21..2262-04-11";
 
+/// The source whose nanosecond refusal is being worded: each names only the remedies its engine admits.
+#[derive(Clone, Copy, Debug)]
+pub enum NanosSource {
+    Mssql,
+    Oracle,
+}
+
+impl NanosSource {
+    /// The engine name the refusal starts with.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Mssql => "mssql",
+            Self::Oracle => "oracle",
+        }
+    }
+
+    /// The closing clause naming where `text` is refused, or nothing for an engine that admits it everywhere.
+    fn text_scope(self) -> &'static str {
+        match self {
+            Self::Mssql => {
+                " `text` is for a batch export and a stream-only CDC export (SQL Server refuses it \
+                 on a CDC baseline); a `mode: cdc` export that takes a baseline declares `timestamp` \
+                 or `timestamp_tz`."
+            }
+            Self::Oracle => "",
+        }
+    }
+}
+
 /// Nanoseconds since the Unix epoch of `dt` read as UTC, or the coded refusal naming `column` when `dt` is outside Arrow's 1677-09-21..2262-04-11.
 pub fn timestamp_nanos_or_refuse(
     dt: chrono::NaiveDateTime,
-    source: &str,
+    source: NanosSource,
     column: &str,
 ) -> anyhow::Result<i64> {
     dt.and_utc().timestamp_nanos_opt().ok_or_else(|| {
         crate::error::coded(
             crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
             format!(
-                "{source}: column `{column}` holds {dt}, outside the nanosecond timestamp range \
+                "{}: column `{column}` holds {dt}, outside the nanosecond timestamp range \
                  ({NANOSECOND_RANGE}) its nanosecond type (a sub-microsecond column, or a \
                  `timestamp_ns` / `timestamp_tz_ns` override) delivers, and writing it as NULL would \
                  lose the value. Declare `{column}: text` under `columns:` and rivet delivers the \
                  server's own text for every row. Declare the column `timestamp` (microseconds, \
                  full range) or `timestamp_tz` in `columns:` instead, or CAST it in the export's \
-                 `query:`. `text` is for a batch export and a stream-only CDC export (SQL Server \
-                 refuses it on a CDC baseline); a `mode: cdc` export that takes a baseline \
-                 declares `timestamp` or `timestamp_tz`."
+                 `query:`.{}",
+                source.name(),
+                source.text_scope()
             ),
         )
     })
@@ -305,6 +334,37 @@ mod tests {
             .unwrap()
     }
 
+    /// The Oracle refusal names `text` and the microsecond declarations and says nothing about SQL Server or a CDC baseline.
+    #[test]
+    fn the_oracle_nanosecond_refusal_offers_text_without_a_sql_server_clause() {
+        let err = timestamp_nanos_or_refuse(at(2300, 1, 1, 0, 0, 0, 0), NanosSource::Oracle, "T9")
+            .unwrap_err();
+        crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+        let text = format!("{err:#}");
+        assert!(
+            text.starts_with("oracle: column `T9` holds 2300-01-01 00:00:00, outside")
+                && text.contains(
+                    "Declare `T9: text` under `columns:` and rivet delivers the server's own text for every row. Declare the column `timestamp` (microseconds, full range) or `timestamp_tz` in `columns:` instead, or CAST it in the export's `query:`."
+                )
+                && !text.contains("SQL Server")
+                && !text.contains("CDC")
+                && !text.contains("baseline"),
+            "{text}"
+        );
+    }
+
+    /// The SQL Server refusal is the exact text it carried before the engines were told apart.
+    #[test]
+    fn the_sql_server_nanosecond_refusal_text_is_pinned() {
+        let err =
+            timestamp_nanos_or_refuse(at(2300, 1, 1, 0, 0, 0, 0), NanosSource::Mssql, "event_ts")
+                .unwrap_err();
+        assert_eq!(
+            format!("{err:#}"),
+            "mssql: column `event_ts` holds 2300-01-01 00:00:00, outside the nanosecond timestamp range (1677-09-21..2262-04-11) its nanosecond type (a sub-microsecond column, or a `timestamp_ns` / `timestamp_tz_ns` override) delivers, and writing it as NULL would lose the value. Declare `event_ts: text` under `columns:` and rivet delivers the server's own text for every row. Declare the column `timestamp` (microseconds, full range) or `timestamp_tz` in `columns:` instead, or CAST it in the export's `query:`. `text` is for a batch export and a stream-only CDC export (SQL Server refuses it on a CDC baseline); a `mode: cdc` export that takes a baseline declares `timestamp` or `timestamp_tz`."
+        );
+    }
+
     #[test]
     fn nanoseconds_hold_both_representable_ends_and_refuse_one_past_each() {
         let (min, max) = (
@@ -312,15 +372,20 @@ mod tests {
             at(2262, 4, 11, 23, 47, 16, 854_775_807),
         );
         assert_eq!(
-            timestamp_nanos_or_refuse(min, "mssql", "c").unwrap(),
+            timestamp_nanos_or_refuse(min, NanosSource::Mssql, "c").unwrap(),
             i64::MIN
         );
         assert_eq!(
-            timestamp_nanos_or_refuse(max, "mssql", "c").unwrap(),
+            timestamp_nanos_or_refuse(max, NanosSource::Mssql, "c").unwrap(),
             i64::MAX
         );
         assert_eq!(
-            timestamp_nanos_or_refuse(at(1970, 1, 1, 0, 0, 1, 123_456_700), "mssql", "c").unwrap(),
+            timestamp_nanos_or_refuse(
+                at(1970, 1, 1, 0, 0, 1, 123_456_700),
+                NanosSource::Mssql,
+                "c"
+            )
+            .unwrap(),
             1_123_456_700
         );
         for past in [
@@ -331,7 +396,7 @@ mod tests {
             at(9999, 12, 31, 23, 59, 59, 999_999_900),
             at(1, 1, 1, 0, 0, 0, 0),
         ] {
-            let err = timestamp_nanos_or_refuse(past, "mssql", "event_ts").unwrap_err();
+            let err = timestamp_nanos_or_refuse(past, NanosSource::Mssql, "event_ts").unwrap_err();
             crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
             let text = format!("{err:#}");
             assert!(

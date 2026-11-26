@@ -128,7 +128,7 @@ fn refuse_mssql_datetime_text_declared(
         other => other,
     };
     let range_remedy = match declared.source_native_type.as_str() {
-        "datetimen" | "datetime4" => String::new(),
+        "datetimen" | "datetime" | "datetime4" => String::new(),
         wire => format!(
             "; if the column holds a value outside {}, declare `{column}: {}` instead, which \
              delivers the full range at microseconds on both",
@@ -652,6 +652,7 @@ mod tests {
             ("datetime2", "`datetime2`"),
             ("datetimeoffsetn", "`datetimeoffset`"),
             ("datetimen", "`datetime or smalldatetime`"),
+            ("datetime", "`datetime`"),
             ("datetime4", "`smalldatetime`"),
         ] {
             for text in [RivetType::Text, RivetType::String] {

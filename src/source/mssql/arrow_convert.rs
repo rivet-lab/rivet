@@ -800,7 +800,9 @@ fn build_array(
                         "mssql-ns-override-out-of-range-null",
                         dt.and_utc().timestamp_nanos_opt(),
                         Some(crate::types::timestamp_nanos_or_refuse(
-                            dt, "mssql", column
+                            dt,
+                            crate::types::NanosSource::Mssql,
+                            column
                         )?)
                     ) {
                         Some(ns) => b.append_value(ns),
