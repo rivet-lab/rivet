@@ -545,14 +545,17 @@ mod tests {
         }
     }
 
+    /// A one-shot source connector the test hands the guard in place of the real connect.
     type ConnectFn = Box<dyn FnOnce(&crate::config::SourceConfig) -> Result<Box<dyn Source>>>;
 
+    /// A stream leg of `config` that names `parent` as its snapshot parent.
     fn named_leg(config: &Config, parent: &str) -> ExportConfig {
         let mut export = stream_leg(config);
         export.snapshot_parent = Some(parent.into());
         export
     }
 
+    /// The captured WARN lines that mention the export `parent`.
     fn warnings_of(parent: &str) -> Vec<String> {
         crate::pipeline::run::run_tail_tests::install_warn_capture();
         crate::pipeline::run::run_tail_tests::captured_warnings_mentioning(&format!(
@@ -560,6 +563,7 @@ mod tests {
         ))
     }
 
+    /// A connector that always fails with a password-bearing URL in its message.
     fn unreachable(_: &crate::config::SourceConfig) -> Result<Box<dyn Source>> {
         anyhow::bail!("connect refused at postgres://u:connect_pw@127.0.0.1:1/db")
     }
@@ -631,6 +635,7 @@ mod tests {
         assert!(said[0].contains("the describe failed"), "{said:?}");
     }
 
+    /// A scripted source whose describe returns one nullable `date` column named `d`.
     fn date_probe() -> ScriptedSource {
         let column = crate::types::SourceColumn::simple("d", "date", true);
         ScriptedSource(vec![crate::types::TypeMapping::from_source(
@@ -639,6 +644,7 @@ mod tests {
         )])
     }
 
+    /// A PostgreSQL config whose column `d` is declared `string`, and its baseline leg under `parent`.
     fn declared_text_leg(parent: &str) -> (Config, ExportConfig) {
         let mut config = one_export_config("postgres", "");
         config.exports[0].columns = [("d".to_string(), "string".to_string())].into();
@@ -667,9 +673,10 @@ mod tests {
         );
     }
 
-    /// An unreachable PostgreSQL baseline leg with a `columns:` override draws the unchecked warning and the connect refusal together, and the warning does not call the leg admitted.
+    /// The library seam `plan_and_admit` (not the `check`, `doctor` or `run` commands) raises the connect refusal for an unreachable baseline leg with an override, and the guard's warning beside it does not call the leg admitted.
     #[test]
-    fn an_unreachable_postgres_baseline_leg_warns_unchecked_and_is_refused_not_admitted() {
+    fn an_unreachable_postgres_baseline_leg_warns_unchecked_and_plan_and_admit_refuses_the_connect()
+    {
         crate::pipeline::run::run_tail_tests::install_warn_capture();
         let (config, leg) = declared_text_leg("agree_unreachable");
         let mut src = crate::source::create_source(&config.source).map_err(|e| format!("{e:#}"));

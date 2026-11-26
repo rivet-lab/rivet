@@ -73,8 +73,8 @@ scenarios:
     oracle:   { na: "the Oracle baseline and the stream render a date through one stamp (oracle_cdc_timestamp9_is_delivered_as_batch_delivers_it); there is no server-text projection" }
 
   - id: override_text_baseline_check_that_could_not_run_warns
-    what: "a pending CDC baseline leg whose source cannot be connected or described draws a WARN naming the export, the failed step (connect or describe), the credential-masked cause and that the text-declaration check did not run, and the WARN never calls the leg admitted: the guard refuses nothing there, and check and doctor still refuse a leg with columns overrides on an unreachable source as RIVET_SOURCE_CONNECT_FAILED; a leg declaring no text column draws no WARN"
-    postgres: { test: an_unreachable_postgres_baseline_leg_warns_unchecked_and_is_refused_not_admitted }
+    what: "a pending CDC baseline leg whose text-declaration check could not run draws a WARN naming the export, the failed step (connect or describe), the credential-masked cause and that the check did not run, and the WARN never calls the leg admitted: the connect-failure WARN is drawn by check only, because doctor fails its connectivity check (RIVET_CLI_PREFLIGHT_UNVERIFIED, exit 2) before it plans the leg and run refuses at connect (RIVET_SOURCE_CONNECT_FAILED, exit 2); a describe failure on a reachable source can reach all three; a leg declaring no text column draws no WARN"
+    postgres: { test: an_unreachable_postgres_baseline_leg_warns_unchecked_and_plan_and_admit_refuses_the_connect }
     mysql:    { na: "the text-declaration check is a PostgreSQL guard; a MySQL baseline leg has no server-text projection to check" }
     mssql:    { na: "SQL Server refuses a datetime2 under a text override on every leg, so there is no declaration the check could miss" }
     mongo:    { na: "a document source takes no per-column text override" }
