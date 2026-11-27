@@ -5366,6 +5366,22 @@ seeds:
           - a_cdc_baseline_holding_a_null_array_is_refused_with_the_rebaseline_and_loads_after_it
           - "lib:a_null_list_is_refused_before_any_write_and_an_empty_list_or_null_element_passes"
 
+  - name: bigquery-null-array-loads-as-empty
+    class: "a BigQuery REPEATED field cannot be NULL, so a NULL array column value loads as [] and is the same value as an empty array, exit 0"
+    history: "owner decision 2026-11-22 (DEFECT_PG_NULL_LIST_EMPTY_BQ): every PostgreSQL array type loaded a NULL as [] at BigQuery; the load now refuses a part holding a NULL list before any write"
+    scope: target
+    switch: bigquery-null-array-loads-as-empty
+    engines:
+      bigquery:
+        cells:
+          - "lib:a_null_list_part_is_refused_before_the_warehouse_write"
+          - "lib:a_null_list_is_refused_with_the_remedy_its_load_mode_can_apply"
+          - "lib:an_empty_list_a_null_element_and_a_cdc_delete_row_are_not_refused"
+      clickhouse:
+        na: "the seed edits the orchestrated pre-write check (refuse_unholdable_parts), which gives ClickHouse no list check: its own loader reads its footers (checked_part_rows)"
+      snowflake:
+        na: "the seed edits the orchestrated pre-write check (refuse_unholdable_parts), which checks only a BigQuery plan: Snowflake holds a NULL list as a NULL"
+
   - name: cleanup-removes-a-pointer-that-changed-hands
     class: "`cleanup_source` removes a directory's canonical manifest.json and _SUCCESS on the strength of a read taken before the warehouse jobs ran, so an extract that commits during the jobs loses its markers and the dataset reads as not whole, exit 0"
     history: "found 2026-11-01 by a rivet-verifier probe of cleanup_target_leased (canonical_run_id read once, maybe_cleanup removes unconditionally); RED on main 2026-11-01 (lib cell: r2's canonical manifest.json absent after the load cleaned r1)"
@@ -7358,9 +7374,9 @@ seeds:
           - "lib:a_date_past_either_end_of_bigquery_date_is_refused_with_its_day"
           - "lib:a_timestamp_past_either_end_of_bigquery_timestamp_is_refused"
       clickhouse:
-        na: "the seed edits the orchestrated pre-write check (refuse_parts_outside_ranges), which gives ClickHouse no ranges: its own loader reads its footers (checked_part_rows)"
+        na: "the seed edits the orchestrated pre-write check (refuse_unholdable_parts), which gives ClickHouse no ranges: its own loader reads its footers (checked_part_rows)"
       snowflake:
-        na: "the seed edits the orchestrated pre-write check (refuse_parts_outside_ranges), which gives Snowflake no ranges: Snowflake holds every year and delivers it as a form"
+        na: "the seed edits the orchestrated pre-write check (refuse_unholdable_parts), which gives Snowflake no ranges: Snowflake holds every year and delivers it as a form"
 
   - name: pg-unmapped-type-refused
     class: "a PostgreSQL type with no Arrow mapping (network, bit, money, geometric, range, tsvector, OID alias, composite, extension type) is refused by a batch run with RIVET_TYPE_UNSAFE_MAPPING where it is delivered as the server's text"
