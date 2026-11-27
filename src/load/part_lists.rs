@@ -39,6 +39,21 @@ fn first_null<'c>(batch: &RecordBatch, columns: &'c [String]) -> Result<Option<&
     }))
 }
 
+/// The remedy for a NULL list: a `query:` rewrite for a batch export, a source fix and a re-baseline for a CDC export, which has no `query:`.
+pub(crate) fn null_list_remedy(column: &str, cdc: bool) -> String {
+    match cdc {
+        false => format!(
+            "In the export's `query:` read it as COALESCE({column}, '{{}}') AS {column} to load [] on purpose, \
+             or as {column}::text AS {column} to keep the NULL, or correct the source value."
+        ),
+        true => format!(
+            "A CDC export cannot reshape `{column}` in its config, and the part holding the NULL stays staged, so fixing the source alone does not lift this refusal. \
+             Give every row a list in `{column}` in the source (an empty list if [] is what is meant), then re-baseline the stream. {}",
+            crate::source::cdc::checkpoint_identity::RECOVER
+        ),
+    }
+}
+
 /// Whether the schema node is a list group.
 fn is_list(t: &Type) -> bool {
     t.is_group() && t.get_basic_info().converted_type() == ConvertedType::LIST

@@ -1256,26 +1256,14 @@ fn refuse_null_lists(
             crate::error::codes::LOAD_VALUE_OUT_OF_TARGET_RANGE,
             "{uri}: column `{column}` holds a NULL list, and a ClickHouse Array cannot be NULL: it would load as [], the same value as an empty list. \
              Nothing was written and no table was created. {}",
-            null_list_remedy(column, role)
-        ),
-    }
-}
-
-/// The remedy for a NULL list: a `query:` rewrite for a batch export, a source fix and a re-baseline for a CDC export, which has no `query:`.
-fn null_list_remedy(column: &str, role: PartRole) -> String {
-    match seeded!(
-        "clickhouse-cdc-null-array-names-a-query",
-        PartRole::Batch,
-        role
-    ) {
-        PartRole::Batch => format!(
-            "In the export's `query:` read it as COALESCE({column}, '{{}}') AS {column} to load [] on purpose, \
-             or as {column}::text AS {column} to keep the NULL, or correct the source value."
-        ),
-        PartRole::CdcBaseline | PartRole::CdcChangeLog => format!(
-            "A CDC export cannot reshape `{column}` in its config, and the part holding the NULL stays staged, so fixing the source alone does not lift this refusal. \
-             Give every row a list in `{column}` in the source (an empty list if [] is what is meant), then re-baseline the stream. {}",
-            crate::source::cdc::checkpoint_identity::RECOVER
+            super::part_lists::null_list_remedy(
+                column,
+                seeded!(
+                    "clickhouse-cdc-null-array-names-a-query",
+                    false,
+                    role != PartRole::Batch
+                )
+            )
         ),
     }
 }
