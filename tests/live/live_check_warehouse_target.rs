@@ -205,6 +205,7 @@ fn check_refuses_a_clickhouse_database_the_server_does_not_hold() {
         "RIVET_LOAD_WAREHOUSE_OBJECT_NOT_FOUND",
         "{check_err}"
     );
+    rig.run_ok();
 }
 
 /// A ClickHouse database the server shows passes `check`.
@@ -218,6 +219,7 @@ fn check_passes_a_clickhouse_database_the_server_holds() {
     let err = stderr_of(&out);
     assert_eq!(out.status.code(), Some(0), "{err}");
     assert!(!err.contains("could not confirm"), "{err}");
+    rig.run_ok();
 }
 
 /// A ClickHouse that cannot be reached is a warning, as it was before the probe.
@@ -236,6 +238,7 @@ fn check_warns_when_clickhouse_cannot_be_reached() {
         err.contains("could not confirm ClickHouse database `d` exists"),
         "{err}"
     );
+    rig.run_ok();
 }
 
 /// A Snowflake database or schema the login cannot see stops `check` with the code a load statement error gets; the stand's own passes.
@@ -253,8 +256,10 @@ fn check_refuses_a_snowflake_place_the_login_cannot_see_and_passes_the_stand() {
             .top_line(line)
     };
     let (database, schema) = sf.place();
-    let ok = rig_for(&sf.load_line("")).cli(&["check"]);
+    let held = rig_for(&sf.load_line(""));
+    let ok = held.cli(&["check"]);
     assert!(ok.status.success(), "{}", stderr_of(&ok));
+    held.run_ok();
     let no_database = unique_name("RIVET_NO_DB").to_uppercase();
     let no_schema = unique_name("RIVET_NO_SCHEMA").to_uppercase();
     for (db, sc, named) in [
@@ -282,5 +287,6 @@ fn check_refuses_a_snowflake_place_the_login_cannot_see_and_passes_the_stand() {
             "RIVET_LOAD_WAREHOUSE_REJECTED",
             "{check_err}"
         );
+        rig.run_ok();
     }
 }
