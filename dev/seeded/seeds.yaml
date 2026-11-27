@@ -7516,6 +7516,36 @@ seeds:
       oracle:
         cells: ["lib:narrows_flags_a_decimal_float8_override_past_fifteen_digits_as_lossy", "lib:a_float8_override_over_a_wide_decimal_is_reported_lossy"]
 
+  - name: secret-value-not-registered
+    class: "a credential held in a Secret is masked only where a call site remembers to register it, so a BigQuery access token (RIVET_BQ_ACCESS_TOKEN or an ADC token) a warehouse echoes in its error body reaches stderr and --summary-output verbatim"
+    history: "known_red no_secret_in_output_cloud[offline] SECRET_LEAK 2026-11-10 (the hostile replay echoes the Authorization header in a 401); Secret::new did not register, only the S3 and Azure call sites did; owner decision 2026-11-20: fix at the I1 seam (ADR-0040), register by construction"
+    scope: target
+    switch: secret-value-not-registered
+    engines:
+      bigquery:
+        cells: ["lib:a_secret_is_masked_in_output_by_construction"]
+      snowflake:
+        cells: ["lib:a_secret_is_masked_in_output_by_construction"]
+      clickhouse:
+        cells: ["lib:a_secret_is_masked_in_output_by_construction"]
+
+  - name: registered-anchor-masked
+    class: "a registered credential equal to a scanner anchor (a URL scheme such as `postgres`, a key such as `signature` or `db.password`) is masked before the URL, keyword and query scanners run, so the anchor becomes `***` (or, for a percent-encoded key or a value straddling the anchor, is cut) and the scanner leaves ANOTHER credential after it in clear"
+    history: "independent verifier on PR 1146 head cd495ddb, 2026-11-21: registered `postgres` printed `***://rivet:StatePw1146x@db...` where main printed `postgres://REDACTED@...`; same for `signature` and `db.password`"
+    scope: source
+    switch: registered-anchor-masked
+    engines:
+      postgres:
+        cells: ["lib:a_registered_scanner_anchor_does_not_leave_another_credential_in_clear", "lib:a_registered_query_key_in_any_spelling_does_not_leave_another_credential_in_clear", "lib:a_registered_value_straddling_an_anchor_leaves_no_other_credential_in_clear", "lib:a_registered_value_covering_the_separator_before_a_password_key_keeps_the_value_masked", "lib:a_registered_substring_never_hides_the_password_a_scanner_masks"]
+      mysql:
+        cells: ["lib:a_registered_scanner_anchor_does_not_leave_another_credential_in_clear", "lib:a_registered_query_key_in_any_spelling_does_not_leave_another_credential_in_clear", "lib:a_registered_value_straddling_an_anchor_leaves_no_other_credential_in_clear", "lib:a_registered_value_covering_the_separator_before_a_password_key_keeps_the_value_masked", "lib:a_registered_substring_never_hides_the_password_a_scanner_masks"]
+      mssql:
+        cells: ["lib:a_registered_scanner_anchor_does_not_leave_another_credential_in_clear", "lib:a_registered_query_key_in_any_spelling_does_not_leave_another_credential_in_clear", "lib:a_registered_value_straddling_an_anchor_leaves_no_other_credential_in_clear", "lib:a_registered_value_covering_the_separator_before_a_password_key_keeps_the_value_masked", "lib:a_registered_substring_never_hides_the_password_a_scanner_masks"]
+      mongo:
+        cells: ["lib:a_registered_scanner_anchor_does_not_leave_another_credential_in_clear", "lib:a_registered_query_key_in_any_spelling_does_not_leave_another_credential_in_clear", "lib:a_registered_value_straddling_an_anchor_leaves_no_other_credential_in_clear", "lib:a_registered_value_covering_the_separator_before_a_password_key_keeps_the_value_masked", "lib:a_registered_substring_never_hides_the_password_a_scanner_masks"]
+      oracle:
+        cells: ["lib:a_registered_scanner_anchor_does_not_leave_another_credential_in_clear", "lib:a_registered_query_key_in_any_spelling_does_not_leave_another_credential_in_clear", "lib:a_registered_value_straddling_an_anchor_leaves_no_other_credential_in_clear", "lib:a_registered_value_covering_the_separator_before_a_password_key_keeps_the_value_masked", "lib:a_registered_substring_never_hides_the_password_a_scanner_masks"]
+
   - name: cdc-override-value-refusal-wire-coded
     class: "a value a `columns:` override cannot hold is refused on the change stream with the wire-mismatch code (exit 1) while the batch converter and the snapshot leg of the same engine refuse it with the value code (exit 5), so one condition has two exits and `rivet check` names the other"
     history: "2026-11-21: Oracle CDC `initial: snapshot` refused a DATE with a time of day under `date` with exit 5 and the stream leg with exit 1; CellRefusal::into_error coded every overridden refusal as the wire-mismatch code"

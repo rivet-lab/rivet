@@ -1,5 +1,14 @@
 //! Pure readers of the text of a connection URL: its authority, the userinfo a credential mask cuts, and the host list.
 
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC};
+
+/// Chars to percent-encode in a URL userinfo (user / password) component.
+pub(crate) const USERINFO: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
 /// The authority of a connection URL: its userinfo, its host list, and the text from the first `/`, `?` or `#` on.
 pub(crate) struct Authority<'a> {
     pub userinfo: Option<&'a str>,

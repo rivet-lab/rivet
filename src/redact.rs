@@ -34,6 +34,10 @@
 //! - Secrets the operator captured *outside* Rivet (shell history, env
 //!   var dumps, `ps` snapshots) — out of scope.
 
+use aho_corasick::automaton::Automaton;
+use aho_corasick::nfa::contiguous::NFA;
+use aho_corasick::{Anchored, MatchKind};
+
 /// Replace `user:password@host` userinfo segments in any URL-like
 /// substring with `REDACTED@host`.
 ///
@@ -52,58 +56,292 @@
 ///
 /// Idempotent: once-redacted strings pass through unchanged.
 pub fn redact_url_passwords(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+    apply_edits(s, &url_edits(s))
+}
+
+/// The userinfo of every URL word of `s` that holds a password, each replaced by `REDACTED`.
+fn url_edits(s: &str) -> Vec<Edit> {
+    let mut edits = Vec::new();
     for word in s.split_inclusive(|c: char| c.is_ascii_whitespace()) {
-        match crate::url_text::credential_span(word, crate::url_text::Mask::Password)
-            .and_then(|(start, at)| word.get(..start).zip(word.get(at..)))
-        {
-            Some((scheme, host)) => {
-                out.push_str(scheme);
-                out.push_str("REDACTED");
-                out.push_str(host);
-            }
-            None => out.push_str(word),
+        let span = crate::url_text::credential_span(word, crate::url_text::Mask::Password);
+        if let Some(userinfo) = span.and_then(|(start, at)| word.get(start..at)) {
+            edits.push(edit_of(s, userinfo, "REDACTED"));
         }
     }
-    out
+    edits
 }
 
 /// Shortest value registered for masking: a shorter one would blank ordinary text.
 const MIN_MASKED_LEN: usize = 8;
 
-/// Every value registered by [`mask_value_in_output`], raw and percent-encoded.
-static MASKED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-
-/// `text` with every registered value replaced by the mask.
-fn mask_registered(text: &str) -> String {
-    let known = MASKED.lock().unwrap_or_else(|e| e.into_inner());
-    known
-        .iter()
-        .fold(text.to_string(), |acc, v| acc.replace(v.as_str(), MASK))
+/// The registered forms and the automaton built from them, rebuilt when a registration adds a form.
+struct Registry {
+    values: Vec<String>,
+    nfa: Option<std::sync::Arc<NFA>>,
 }
 
-/// Register a credential value so [`redact_secrets`] masks it wherever it appears, raw or percent-encoded.
-pub fn mask_value_in_output(value: &str) {
-    if value.len() < MIN_MASKED_LEN {
-        return;
+static MASKED: std::sync::Mutex<Registry> = std::sync::Mutex::new(Registry {
+    values: Vec::new(),
+    nfa: None,
+});
+
+/// `encoded` with the hex digits of every percent escape in lower case.
+fn lower_hex(encoded: &str) -> String {
+    let mut parts = encoded.split('%');
+    let head = parts.next().unwrap_or_default().to_string();
+    parts.fold(head, |lower, part| {
+        let (hex, rest) = part.split_at(2);
+        format!("{lower}%{}{rest}", hex.to_ascii_lowercase())
+    })
+}
+
+/// Chars form encoding leaves as they are besides letters and digits.
+const FORM: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'*')
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_');
+
+/// The forms of `value` that are masked: the raw text, its percent-encoding (every non-alphanumeric byte, the URL userinfo set rivet writes, form encoding with `+` for a space), each in upper-case and lower-case hex; none for a value shorter than [`MIN_MASKED_LEN`] bytes or equal to `password` in any case, the word rivet's own remedy hints print.
+fn registered_forms(value: &str) -> Vec<String> {
+    if value.len() < MIN_MASKED_LEN || value.eq_ignore_ascii_case("password") {
+        return Vec::new();
     }
-    let encoded = percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC)
-        .to_string();
-    let mut known = MASKED.lock().unwrap_or_else(|e| e.into_inner());
-    for v in [value.to_string(), encoded] {
-        if !known.contains(&v) {
-            known.push(v);
+    use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+    let encoded =
+        |set: &'static percent_encoding::AsciiSet| utf8_percent_encode(value, set).to_string();
+    let mut forms = vec![value.to_string()];
+    let upper = [
+        encoded(NON_ALPHANUMERIC),
+        encoded(crate::url_text::USERINFO),
+        encoded(FORM).replace("%20", "+"),
+    ];
+    for form in upper {
+        for form in [lower_hex(&form), form] {
+            if !forms.contains(&form) {
+                forms.push(form);
+            }
         }
     }
+    forms
 }
 
-/// Compose every redactor.  Use this at every boundary that turns a
-/// driver/library error (or any operator-untrusted string) into a
-/// persisted or emitted artifact.
+/// Register a credential value so [`redact_secrets`] masks its raw and percent-encoded forms.
+pub fn mask_value_in_output(value: &str) {
+    let mut known = MASKED.lock().unwrap_or_else(|e| e.into_inner());
+    let before = known.values.len();
+    for form in registered_forms(value) {
+        if !known.values.contains(&form) {
+            known.values.push(form);
+        }
+    }
+    if known.values.len() != before {
+        known.nfa = automaton(&known.values).map(std::sync::Arc::new);
+    }
+}
+
+/// The automaton of the non-empty registered `known` values, none when there are none; an empty pattern would match at every byte and never let the masking pass end.
+fn automaton(known: &[String]) -> Option<NFA> {
+    let patterns: Vec<&String> = known.iter().filter(|k| !k.is_empty()).collect();
+    (!patterns.is_empty()).then(|| {
+        let nfa = NFA::builder()
+            .match_kind(MatchKind::Standard)
+            .build(patterns);
+        nfa.expect("registered values fit an automaton")
+    })
+}
+
+/// `spans` in order with every overlapping pair merged into one; spans that only touch stay apart.
+fn merged(mut spans: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    spans.sort_unstable();
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in spans {
+        match out.last_mut() {
+            Some(last) if start < last.1 => last.1 = last.1.max(end),
+            _ => out.push((start, end)),
+        }
+    }
+    out
+}
+
+/// The ordered spans of `text` that hold a registered value, overlapping occurrences as one, in one pass over `text`.
+fn known_spans(text: &str, nfa: &NFA) -> Vec<(usize, usize)> {
+    let mut state = nfa.start_state(Anchored::No).expect("an unanchored start");
+    let mut spans = Vec::new();
+    for (end, byte) in (1..).zip(text.bytes()) {
+        state = nfa.next_state(Anchored::No, state, byte);
+        let lens: Vec<usize> = if nfa.is_match(state) {
+            (0..nfa.match_len(state))
+                .map(|i| nfa.pattern_len(nfa.match_pattern(state, i)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        spans.extend(lens.into_iter().map(|len| (end - len, end)));
+    }
+    merged(spans)
+}
+
+/// A scanner's replacement of the bytes `start..end` of its input by a token.
+type Edit = (usize, usize, &'static str);
+
+/// The edit replacing `part`, a slice of `whole`, by `token`.
+fn edit_of(whole: &str, part: &str, token: &'static str) -> Edit {
+    let start = part.as_ptr() as usize - whole.as_ptr() as usize;
+    (start, start + part.len(), token)
+}
+
+/// `text` with each of the ordered, disjoint `edits` applied.
+fn apply_edits(text: &str, edits: &[Edit]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    for &(start, end, token) in edits {
+        out.push_str(&text[copied..start]);
+        out.push_str(token);
+        copied = end;
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
+/// `text` with each of the ordered, disjoint `spans` replaced by the mask.
+#[cfg(feature = "seeded")]
+fn mask_spans(text: &str, spans: &[(usize, usize)]) -> String {
+    let edits: Vec<Edit> = spans
+        .iter()
+        .map(|&(start, end)| (start, end, MASK))
+        .collect();
+    apply_edits(text, &edits)
+}
+
+/// The three scanners, in the order they run, each reading the text the one before left.
+const SCANNERS: [fn(&str) -> Vec<Edit>; 3] = [keyword_edits, url_edits, query_edits];
+
+/// `text` through every scanner, then each of the ordered, disjoint `spans` of it masked; a span a scanner's edit cut is dropped, its mask standing in the edit's token.
+fn scan_around(text: &str, spans: &[(usize, usize)]) -> String {
+    let mut ids = vec![0usize; text.len()];
+    for (id, &(start, end)) in spans.iter().enumerate() {
+        ids[start..end].fill(id + 1);
+    }
+    let mut cut = std::collections::HashSet::<usize>::new();
+    let mut held = text.to_string();
+    for scan in SCANNERS {
+        let edits = scan(&held);
+        let mut next = Vec::with_capacity(ids.len());
+        let mut at = 0;
+        for &(start, end, token) in &edits {
+            next.extend_from_slice(&ids[at..start]);
+            cut.extend(&ids[start..end]);
+            next.extend(std::iter::repeat_n(0, token.len()));
+            at = end;
+        }
+        next.extend_from_slice(&ids[at..]);
+        (held, ids) = (apply_edits(&held, &edits), next);
+    }
+    let mut out = String::with_capacity(held.len());
+    let mut rest = held.as_str();
+    for run in ids.chunk_by(|a, b| a == b) {
+        let (piece, tail) = rest.split_at(run.len());
+        match run[0] {
+            0 => out.push_str(piece),
+            id if !cut.contains(&id) => out.push_str(MASK),
+            _ => {}
+        }
+        rest = tail;
+    }
+    out
+}
+
+/// `text` with every registered value it holds, one a mask forms with its neighbours included, replaced by the mask, in one pass: a mask is read again with what follows it.
+fn mask_formed(text: &str, nfa: &NFA) -> String {
+    let mut pending: Vec<u8> = text.bytes().rev().collect();
+    let mut out = Vec::with_capacity(text.len());
+    let mut states = vec![nfa.start_state(Anchored::No).expect("an unanchored start")];
+    while let Some(byte) = pending.pop() {
+        let state = nfa.next_state(Anchored::No, states[states.len() - 1], byte);
+        out.push(byte);
+        states.push(state);
+        let lens: Vec<usize> = if nfa.is_match(state) {
+            (0..nfa.match_len(state))
+                .map(|i| nfa.pattern_len(nfa.match_pattern(state, i)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if let Some(len) = lens.into_iter().max() {
+            out.truncate(out.len() - len);
+            states.truncate(out.len() + 1);
+            pending.extend(MASK.bytes().rev());
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The byte ranges of `text` that the scanners in turn mask reading `text` with the `spans` starred, and the `spans` themselves, merged where they overlap.
+fn hidden_ranges(text: &str, spans: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let mut bytes = text.as_bytes().to_vec();
+    let mut hidden = vec![false; bytes.len()];
+    for &(start, end) in spans {
+        bytes[start..end].fill(b'*');
+    }
+    let mut held = String::from_utf8_lossy(&bytes).into_owned();
+    let mut origin: Vec<Option<usize>> = (0..text.len()).map(Some).collect();
+    for scan in SCANNERS {
+        let edits = scan(&held);
+        let mut next = Vec::with_capacity(origin.len());
+        let mut at = 0;
+        for &(start, end, token) in &edits {
+            next.extend_from_slice(&origin[at..start]);
+            origin[start..end]
+                .iter()
+                .flatten()
+                .for_each(|&from| hidden[from] = true);
+            next.extend(std::iter::repeat_n(None, token.len()));
+            at = end;
+        }
+        next.extend_from_slice(&origin[at..]);
+        (held, origin) = (apply_edits(&held, &edits), next);
+    }
+    let mut ranges = spans.to_vec();
+    let mut at = 0;
+    for run in hidden.chunk_by(|a, b| a == b) {
+        if run[0] {
+            ranges.push((at, at + run.len()));
+        }
+        at += run.len();
+    }
+    merged(ranges)
+}
+
+/// `text` with every registered value masked and every credential a scanner reads in it masked, in the text as it was and in the text with the registered values read as masks.
+#[cfg(test)]
+fn redact_with(text: &str, known: &[String]) -> String {
+    redact_by(text, automaton(known).as_ref())
+}
+
+/// [`redact_with`] for the values of an automaton, none when none are registered.
+fn redact_by(text: &str, nfa: Option<&NFA>) -> String {
+    let Some(nfa) = nfa else {
+        return scan_around(text, &[]);
+    };
+    let spans = known_spans(text, nfa);
+    if spans.is_empty() {
+        return scan_around(text, &spans);
+    }
+    let masked = seeded!(
+        "registered-anchor-masked",
+        redact_query_secrets(&redact_url_passwords(&redact_keyword_passwords(
+            &mask_spans(text, &spans)
+        ))),
+        scan_around(text, &hidden_ranges(text, &spans))
+    );
+    mask_formed(&masked, nfa)
+}
+
+/// Compose every redactor; the boundary for driver errors and operator-untrusted text.
 pub fn redact_secrets(s: &str) -> String {
-    redact_query_secrets(&redact_url_passwords(&redact_keyword_passwords(
-        &mask_registered(s),
-    )))
+    let nfa = MASKED.lock().unwrap_or_else(|e| e.into_inner()).nfa.clone();
+    redact_by(s, nfa.as_deref())
 }
 
 /// `raw` with its keyword/value passwords, its whole userinfo (user included) and its query secrets masked, and whether any was found: the form a persisted plan holds.
@@ -124,7 +362,12 @@ const MASK: &str = "***";
 
 /// Mask the value of every `password=` / `pwd=` pair of a keyword/value connection string (libpq DSN, ADO, `;`-separated JDBC properties).
 pub fn redact_keyword_passwords(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+    apply_edits(s, &keyword_edits(s))
+}
+
+/// The value of every password pair of `s`, each replaced by the mask.
+fn keyword_edits(s: &str) -> Vec<Edit> {
+    let mut edits = Vec::new();
     let mut stops = s.match_indices([';', '\n', '\r']).peekable();
     let mut copied = 0;
     for (key_start, value_start) in password_pairs(s) {
@@ -133,12 +376,10 @@ pub fn redact_keyword_passwords(s: &str) -> String {
         }
         while stops.next_if(|(at, _)| *at < value_start).is_some() {}
         let stop = stops.peek().map_or(s.len(), |(at, _)| *at);
-        out.push_str(&s[copied..value_start]);
-        out.push_str(MASK);
         copied = value_start + keyword_value_len(s, key_start, value_start, stop);
+        edits.push((value_start, copied, MASK));
     }
-    out.push_str(&s[copied..]);
-    out
+    edits
 }
 
 /// Whether `s` holds a keyword/value password pair, masked or not.
@@ -245,8 +486,8 @@ fn unescaped_whitespace(text: &str) -> usize {
     text.len()
 }
 
-/// Mask the value of every secret-bearing URL query pair (`?token=`, `&client_secret=`, `sig=`, `sas=`, and any key [`is_password_keyword`] accepts), keeping the key's spelling; a percent-encoded key is read decoded.
-pub(crate) fn redact_query_secrets(s: &str) -> String {
+/// The value of every secret-bearing URL query pair (`?token=`, `&client_secret=`, `sig=`, `sas=`, and any key [`is_password_keyword`] accepts), each replaced by the mask; a percent-encoded key is read decoded.
+fn query_edits(s: &str) -> Vec<Edit> {
     const FAMILIES: [&str; 7] = [
         "token",
         "apikey",
@@ -269,11 +510,12 @@ pub(crate) fn redact_query_secrets(s: &str) -> String {
         );
         keyword || FAMILIES.iter().any(|f| family(f)) || lower == "sas"
     }
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(q) = rest.find(['?', '&']) {
-        out.push_str(&rest[..=q]);
-        rest = &rest[q + 1..];
+    let mut edits: Vec<Edit> = Vec::new();
+    for (q, _) in s.match_indices(['?', '&']) {
+        if edits.last().is_some_and(|&(_, end, _)| q < end) {
+            continue;
+        }
+        let rest = &s[q + 1..];
         let key_end = rest
             .find(|c: char| {
                 seeded!(
@@ -289,18 +531,19 @@ pub(crate) fn redact_query_secrets(s: &str) -> String {
             percent_encoding::percent_decode_str(&rest[..key_end]).decode_utf8_lossy()
         );
         if key_end < rest.len() && rest.as_bytes()[key_end] == b'=' && is_secret_key(&key) {
-            out.push_str(&rest[..key_end]);
-            out.push_str("=***");
             let after = &rest[key_end + 1..];
-            let val_end = after
+            let val_len = after
                 .find(|c: char| matches!(c, '&' | '\'' | '"' | ')' | ';') || c.is_whitespace())
-                .map(|i| key_end + 1 + i)
-                .unwrap_or(rest.len());
-            rest = &rest[val_end..];
+                .unwrap_or(after.len());
+            edits.push(edit_of(s, &after[..val_len], MASK));
         }
     }
-    out.push_str(rest);
-    out
+    edits
+}
+
+/// Mask the value of every secret-bearing URL query pair, keeping the key's spelling.
+pub(crate) fn redact_query_secrets(s: &str) -> String {
+    apply_edits(s, &query_edits(s))
 }
 
 /// Neutralise terminal-control bytes in text that originates outside the
@@ -679,6 +922,11 @@ mod tests {
 
     use super::*;
 
+    /// [`redact_secrets`] with no registered value, so the scan alone is exercised and no automaton is built per call.
+    fn redact_plain(text: &str) -> String {
+        redact_with(text, &[])
+    }
+
     // ── URL-safety matrix: the recurring credential-leak class, at the infra
     //    level (docs/url-safety-matrix.yaml). The class has regressed THREE times
     //    (round-1 MSSQL round-trip, round-3 the state-URL redactor, and the general redactor
@@ -723,7 +971,7 @@ mod tests {
                         format!("connect to {url} failed: timeout"),
                         format!("[2026-07-22 ERROR src] dialing {url} then EOF"),
                     ] {
-                        let out = redact_secrets(&ctx);
+                        let out = redact_plain(&ctx);
                         assert!(
                             !out.contains(SECRET),
                             "SECRET leaked through redact_secrets\n  scheme={scheme} body={body}\n  in:  {ctx}\n  out: {out}"
@@ -902,13 +1150,13 @@ mod tests {
                     format!("[2026-10-07 WARN src] dialing {conn}"),
                     format!("first line\nconnect to {conn}\nlast line"),
                 ] {
-                    let out = redact_secrets(&ctx);
+                    let out = redact_plain(&ctx);
                     assert!(
                         !out.contains(SECRET),
                         "SECRET leaked\n  body={body}\n  in:  {ctx}\n  out: {out}"
                     );
                     assert!(out.contains("***"), "nothing was masked: {out}");
-                    assert_eq!(redact_secrets(&out), out, "second pass: {ctx}");
+                    assert_eq!(redact_plain(&out), out, "second pass: {ctx}");
                 }
             }
         }
@@ -1306,13 +1554,13 @@ mod tests {
         ) {
             let text = format!("?{prefix}{keyword}=x");
             let want = if keyword == "n" || keyword == "pass" { text.clone() } else { format!("?{prefix}{keyword}=***") };
-            proptest::prop_assert_eq!(redact_secrets(&text), want);
+            proptest::prop_assert_eq!(redact_plain(&text), want);
         }
 
         /// Arbitrary UTF-8 passes every redactor without a panic, and unchanged when it holds neither an `@` nor an `=`.
         #[test]
         fn any_utf8_text_is_redacted_without_a_panic(text in "\\PC{0,64}") {
-            let out = redact_secrets(&text);
+            let out = redact_plain(&text);
             proptest::prop_assert!(text.contains(['@', '=']) || out == text, "{:?} -> {:?}", text, out);
         }
     }
@@ -1585,5 +1833,801 @@ mod tests {
             format!("a {MASK} b {MASK} c")
         );
         assert_eq!(redact_secrets("a Kp4!xR7 b"), "a Kp4!xR7 b");
+    }
+
+    /// A registered value that is a prefix of another registered value never leaves the longer one's tail in the text, whichever registered first.
+    #[test]
+    fn a_registered_prefix_does_not_leave_the_tail_of_a_longer_registered_value() {
+        for (short, long) in [
+            (
+                "V1146aaaaPREFIX",
+                "V1146aaaaPREFIX-and-LATER-TAIL-SECRET-99",
+            ),
+            (
+                "V1146bbbbPREFIX",
+                "V1146bbbbPREFIX-and-FIRST-TAIL-SECRET-99",
+            ),
+        ] {
+            if short.contains("bbbb") {
+                super::mask_value_in_output(long);
+                super::mask_value_in_output(short);
+            } else {
+                super::mask_value_in_output(short);
+                super::mask_value_in_output(long);
+            }
+            let shown = redact_secrets(&format!("echoed {long} end"));
+            assert_eq!(shown, format!("echoed {MASK} end"), "{shown}");
+        }
+    }
+    /// The forms the registry would hold for each value, in the given order.
+    fn known(values: &[&str]) -> Vec<String> {
+        values.iter().flat_map(|v| registered_forms(v)).collect()
+    }
+
+    /// A registered value that is a scheme, a password keyword or a query family does not hide the credential a scanner reads after it, whichever order the values registered in.
+    #[test]
+    fn a_registered_scanner_anchor_does_not_leave_another_credential_in_clear() {
+        let rows = [
+            (
+                "postgres",
+                "connect postgres://rivet:StatePw1146x@db.internal:5432/state failed",
+                "connect ***://REDACTED@db.internal:5432/state failed",
+            ),
+            (
+                "postgresql",
+                "connect postgresql://rivet:StatePw1146x@db.internal:5432/state failed",
+                "connect ***://REDACTED@db.internal:5432/state failed",
+            ),
+            (
+                "sqlserver",
+                "connect sqlserver://rivet:StatePw1146x@db.internal:1433/state failed",
+                "connect ***://REDACTED@db.internal:1433/state failed",
+            ),
+            (
+                "signature",
+                "GET /x?x=1&signature=OtherSig1146 failed",
+                "GET /x?x=1&***=*** failed",
+            ),
+            (
+                "db.password",
+                "db.password=OtherKw1146 user=u",
+                "***=*** user=u",
+            ),
+            (
+                "x-api-key",
+                "GET /x?x-api-key=OtherKey1146 failed",
+                "GET /x?***=*** failed",
+            ),
+        ];
+        for (anchor, text, want) in rows {
+            for values in [[anchor, "StatePw1146x"], ["StatePw1146x", anchor]] {
+                let shown = redact_with(text, &known(&values));
+                assert_eq!(shown, want, "anchor {anchor}, order {values:?}");
+            }
+            assert_eq!(
+                redact_with(text, &known(&[anchor])),
+                want,
+                "anchor {anchor}"
+            );
+        }
+    }
+
+    /// A value equal to a scanner anchor is still masked wherever it is not the anchor.
+    #[test]
+    fn a_registered_scanner_anchor_is_masked_where_it_is_not_an_anchor() {
+        let known = known(&["postgres", "signature", "db.password"]);
+        assert_eq!(
+            redact_with(
+                "user postgres; password=postgres; signature in db.password",
+                &known
+            ),
+            "user ***; password=***; *** in ***"
+        );
+        assert_eq!(
+            redact_with("postgres://postgres:pw1146xyz@h/d", &known),
+            "***://REDACTED@h/d"
+        );
+    }
+
+    /// Overlapping registered values are masked as one run, whichever registered first; adjacent ones keep one mask each.
+    #[test]
+    fn overlapping_registered_values_leave_no_tail() {
+        let text = "echo XOVaaaa-1234-bbbbYOV end";
+        for values in [
+            ["XOVaaaa-1234", "1234-bbbbYOV"],
+            ["1234-bbbbYOV", "XOVaaaa-1234"],
+        ] {
+            assert_eq!(
+                redact_with(text, &known(&values)),
+                "echo *** end",
+                "{values:?}"
+            );
+        }
+        assert_eq!(redact_with("aaaaaaaaaaaa", &known(&["aaaaaaaa"])), "***");
+        assert_eq!(
+            redact_with(
+                "XOVaaaa-1234bbbbYOV2",
+                &known(&["XOVaaaa-1234", "bbbbYOV2"])
+            ),
+            "******"
+        );
+    }
+
+    /// A value is masked raw and percent-encoded in upper-case and in lower-case hex; a short value and the word password are not registered.
+    #[test]
+    fn a_registered_value_is_masked_in_both_hex_cases() {
+        let known = known(&["Xy:Zq?Wv9"]);
+        let text = "a Xy:Zq?Wv9 b Xy%3AZq%3FWv9 c Xy%3aZq%3fWv9 d";
+        assert_eq!(redact_with(text, &known), "a *** b *** c *** d");
+        assert!(registered_forms("Kp4!xR7").is_empty());
+        for word in ["password", "PASSWORD", "Password"] {
+            assert!(registered_forms(word).is_empty(), "{word}");
+        }
+    }
+
+    /// A megabyte of one repeated registered value is masked in one pass.
+    #[test]
+    fn a_hostile_megabyte_of_overlapping_occurrences_is_masked_in_one_pass() {
+        let text = "a".repeat(1 << 20);
+        assert_eq!(
+            known_spans(&text, &automaton(&known(&["aaaaaaaa"])).unwrap()),
+            vec![(0, 1 << 20)]
+        );
+    }
+
+    /// A registered keyword that is not followed by `=` is no anchor and is masked.
+    #[test]
+    fn a_registered_keyword_not_followed_by_an_equals_sign_is_masked() {
+        let known = known(&["db.password", "x-signature"]);
+        assert_eq!(
+            redact_with("use db.password here, x-signature too", &known),
+            format!("use {MASK} here, {MASK} too")
+        );
+        assert_eq!(
+            redact_with("db.password:x-signature", &known),
+            format!("{MASK}:{MASK}")
+        );
+    }
+
+    /// A registered key, spelled percent-encoded in either hex case, still lets the query scanner mask the credential after it.
+    #[test]
+    fn a_registered_query_key_in_any_spelling_does_not_leave_another_credential_in_clear() {
+        let rows = [
+            (
+                "x-api-key",
+                "GET /x?x%2Dapi%2Dkey=OtherKey1146 failed",
+                "GET /x?***=*** failed",
+            ),
+            (
+                "x-api-key",
+                "GET /x?x%2dapi%2dkey=OtherKey1146 failed",
+                "GET /x?***=*** failed",
+            ),
+            (
+                "my_token",
+                "GET /x?my%5Ftoken=OtherTok1146 failed",
+                "GET /x?***=*** failed",
+            ),
+            (
+                "signature",
+                "GET /x?a=1&x%2Dsignature=OtherSig1146 failed",
+                "GET /x?a=1&x%2D***=*** failed",
+            ),
+            (
+                "client_secret",
+                "GET /x?client%5Fsecret=OtherSec1146 failed",
+                "GET /x?***=*** failed",
+            ),
+        ];
+        for (anchor, text, want) in rows {
+            for values in [[anchor, "StatePw1146x"], ["StatePw1146x", anchor]] {
+                assert_eq!(redact_with(text, &known(&values)), want, "{anchor} {text}");
+            }
+        }
+    }
+
+    /// A registered value that straddles a scanner anchor and the text around it leaves no other credential in clear.
+    #[test]
+    fn a_registered_value_straddling_an_anchor_leaves_no_other_credential_in_clear() {
+        assert_eq!(
+            redact_with(
+                "connect postgres://rivet:OtherPw1146@db/x",
+                &known(&["stgres:/"])
+            ),
+            "connect po***/REDACTED@db/x"
+        );
+        assert_eq!(
+            redact_with("password=OtherKw1146", &known(&["ssword=O"])),
+            "pa***"
+        );
+    }
+
+    /// A registered value that is no anchor of any scanner is masked, the text around it kept.
+    #[test]
+    fn a_registered_value_no_scanner_reads_is_masked() {
+        let rows = [
+            (
+                "Tr0ub4dor-sig",
+                "echo Tr0ub4dor-sig=1 done",
+                "echo ***=1 done",
+            ),
+            ("Tr0ub4dor9", "bad url Tr0ub4dor9://x", "bad url ***://x"),
+            ("Tr0 ub4dor9", "bad Tr0 ub4dor9://x", "bad ***://x"),
+            ("MyAppPwd", "MyAppPwd=1", "***=***"),
+        ];
+        for (value, text, want) in rows {
+            assert_eq!(redact_with(text, &known(&[value])), want, "{text}");
+        }
+    }
+
+    /// A registered password that stands in its own pair, in each grammar, is masked as the plain replace followed by the scanners masked it before the anchors were left to the scanners.
+    #[test]
+    fn a_registered_password_in_its_own_pair_is_masked_as_a_plain_replace_would() {
+        let password = "hunter2 hunter2";
+        let rows = [
+            "host=db password=hunter2 hunter2 port=1",
+            "Server=h;Password=hunter2 hunter2;Db=x",
+            "Server=h; Password = hunter2 hunter2;Db=x",
+            "password='hunter2 hunter2' x",
+            "password=\"hunter2 hunter2\" x",
+            "password={hunter2 hunter2} x",
+            "GET /x?a=1&password=hunter2 hunter2 end",
+            "postgres://rivet:hunter2%20hunter2@db/x",
+        ];
+        for text in rows {
+            let plain = text.replace(password, MASK);
+            let want =
+                redact_query_secrets(&redact_url_passwords(&redact_keyword_passwords(&plain)));
+            assert_eq!(redact_with(text, &known(&[password])), want, "{text}");
+        }
+    }
+
+    /// A registered value that holds a tab and `***` hides the userinfo the scanners hid when it was a plain mask.
+    #[test]
+    fn a_registered_value_holding_a_tab_does_not_expose_what_a_plain_mask_hid() {
+        let text = "?\tQZ;*******mysql://Password=?\tQZ;***db.password ;user:K@h?\tQZ;***";
+        assert_eq!(
+            redact_with(text, &known(&["?\tQZ;***"])),
+            "*******mysql://***@h***"
+        );
+    }
+
+    /// A registered value equal to the word the URL scanner prints is masked there too.
+    #[test]
+    fn a_registered_redacted_is_masked_where_the_url_scanner_prints_it() {
+        assert_eq!(
+            redact_with("pg://u:pw@h REDACTED", &known(&["REDACTED"])),
+            "pg://***@h ***"
+        );
+    }
+
+    /// A value the original text does not hold is not looked for in what the scanners print.
+    #[test]
+    fn a_value_the_text_does_not_hold_is_not_looked_for_in_the_scanners_output() {
+        for (value, text, want) in [
+            ("pwd=***&QZ", "x ?pwd=K9&QZ y", "x ?pwd=***&QZ y"),
+            (
+                "REDACTED@hostQZ",
+                "pg://u:K9@hostQZ",
+                "pg://REDACTED@hostQZ",
+            ),
+        ] {
+            assert_eq!(redact_with(text, &known(&[value])), want, "{text}");
+            assert_eq!(redact_by(text, None), want, "{text}");
+        }
+    }
+
+    /// A value is masked in the encodings rivet itself writes: the URL userinfo set and form encoding, in both hex cases.
+    #[test]
+    fn a_registered_value_is_masked_in_its_userinfo_and_form_encodings() {
+        let known = known(&["my secret~pw!"]);
+        let text = "a my secret~pw! b my%20secret~pw%21 c my+secret%7Epw%21 d my%20secret%7Epw%21 e my%20secret~pw%21 f";
+        assert_eq!(redact_with(text, &known), "a *** b *** c *** d *** e *** f");
+        let lower = "a my%20secret%7epw%21 b my+secret%7epw%21 c";
+        assert_eq!(redact_with(lower, &known), "a *** b *** c");
+    }
+
+    /// Spans merge only where they overlap, and a scanner edit swallows a span it cuts and leaves the other spans masked where they stand.
+    #[test]
+    fn spans_merge_where_they_overlap_and_an_edit_cuts_what_it_covers() {
+        assert_eq!(
+            merged(vec![(5, 9), (0, 4), (4, 6), (20, 30), (22, 25)]),
+            [(0, 4), (4, 9), (20, 30)]
+        );
+        let text = "abcdefgh password=ijklmnop qrstuvwx";
+        assert_eq!(
+            scan_around(text, &[(0, 8), (18, 22), (27, 35)]),
+            "*** password=*** ***"
+        );
+        assert_eq!(
+            scan_around(text, &[(0, 8), (27, 35)]),
+            "*** password=*** ***"
+        );
+    }
+
+    /// A registered value nested inside another is masked as the longer one, tail included.
+    #[test]
+    fn a_registered_value_nested_in_a_longer_one_leaves_no_tail() {
+        let long = "abcdefghijklmnop";
+        for values in [[long, "cdefghij"], ["cdefghij", long]] {
+            assert_eq!(
+                redact_with("xx abcdefghijklmnop yy", &known(&values)),
+                "xx *** yy",
+                "{values:?}"
+            );
+        }
+    }
+
+    /// Every two-letter word of 1 to `max` letters.
+    fn two_letter_words(max: usize) -> Vec<String> {
+        let mut words = vec![String::new()];
+        let mut all = Vec::new();
+        for _ in 0..max {
+            words = words
+                .iter()
+                .flat_map(|w| [format!("{w}a"), format!("{w}b")])
+                .collect();
+            all.extend(words.iter().cloned());
+        }
+        all
+    }
+
+    /// The spans of every occurrence of every value in `text`, found by trying each offset, with overlapping spans joined until none overlap.
+    fn naive_spans(text: &str, values: &[&str]) -> Vec<(usize, usize)> {
+        let mut spans: Vec<(usize, usize)> = values
+            .iter()
+            .flat_map(|v| {
+                (0..text.len())
+                    .filter(move |&i| text[i..].starts_with(v))
+                    .map(move |i| (i, i + v.len()))
+            })
+            .collect();
+        while let Some((i, j)) = (0..spans.len())
+            .flat_map(|i| (i + 1..spans.len()).map(move |j| (i, j)))
+            .find(|&(i, j)| spans[i].0 < spans[j].1 && spans[j].0 < spans[i].1)
+        {
+            spans[i] = (spans[i].0.min(spans[j].0), spans[i].1.max(spans[j].1));
+            spans.remove(j);
+        }
+        spans.sort_unstable();
+        spans
+    }
+
+    /// The spans found for one and for two values equal those of a search that tries every offset, on every small text over two letters.
+    #[test]
+    fn registered_spans_equal_a_naive_search_on_every_small_input() {
+        let singles = two_letter_words(4);
+        let pairs = two_letter_words(3);
+        for text in std::iter::once(String::new()).chain(two_letter_words(9)) {
+            for v in &singles {
+                let found = known_spans(&text, &automaton(std::slice::from_ref(v)).unwrap());
+                assert_eq!(found, naive_spans(&text, &[v]), "{v:?} in {text:?}");
+            }
+            if text.len() > 7 {
+                continue;
+            }
+            for v in &pairs {
+                for w in &pairs {
+                    let found = known_spans(&text, &automaton(&[v.clone(), w.clone()]).unwrap());
+                    assert_eq!(
+                        found,
+                        naive_spans(&text, &[v, w]),
+                        "{v:?} {w:?} in {text:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A second occurrence that begins inside the partial match of a value whose prefix repeats is masked, the text around it kept.
+    #[test]
+    fn a_registered_value_with_a_repeating_prefix_is_masked_at_every_occurrence() {
+        assert_eq!(
+            redact_with("got aaaaaaab then aaaaaaaab end", &known(&["aaaaaaab"])),
+            "got *** then a*** end"
+        );
+    }
+
+    /// No registered substring of a text, whatever bytes around a scanner's anchor it covers, leaves any four bytes of the credential the scanners mask in clear.
+    #[test]
+    fn a_registered_substring_never_hides_the_password_a_scanner_masks() {
+        const SECRET: &str = "QZXWVYQZ";
+        let texts = [
+            "x1y2z3Server=h;Password=a QZXWVYQZ\nnext",
+            "x1y2z3 Server=h; \tPassword=a QZXWVYQZ\nnext",
+            "x1y2z3;Server=h;pwd = a QZXWVYQZ;next",
+            "x1y2z3 host=db password=QZXWVYQZ end",
+            "x1y2z3?a=b&password=QZXWVYQZ end",
+            "x1y2z3&p=1?token=QZXWVYQZ end",
+            "x1y2z3 postgres://rivet:QZXWVYQZ@db/x end",
+        ];
+        for text in texts {
+            for from in 0..text.len() {
+                for len in 8..=14 {
+                    let Some(value) = text.get(from..from + len) else {
+                        continue;
+                    };
+                    let shown = redact_with(text, &known(&[value]));
+                    let windows = SECRET.as_bytes().windows(4).map(|w| std::str::from_utf8(w));
+                    for window in windows.flatten() {
+                        assert!(!shown.contains(window), "{value:?} in {text:?}: {shown:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// A value that covers the separator before an ADO password key leaves the key's value masked whole, `;`, `?`, `&` and blanks included, and a line break after the value changes nothing.
+    #[test]
+    fn a_registered_value_covering_the_separator_before_a_password_key_keeps_the_value_masked() {
+        let rows = [
+            (
+                "Tr0ub4dor;",
+                "Server=h;App=Tr0ub4dor;Password=my secret pw\nnext",
+                "Server=h;App=***Password=***\nnext",
+            ),
+            (
+                "Tr0ub4dor; ",
+                "Server=h;App=Tr0ub4dor; Password=my secret pw\nnext",
+                "Server=h;App=***Password=***\nnext",
+            ),
+            (
+                "Tr0ub4dor; \t",
+                "Server=h;App=Tr0ub4dor; \tPassword=my secret pw\nnext",
+                "Server=h;App=***Password=***\nnext",
+            ),
+            (
+                "r=h;Password",
+                "Server=h;Password=a QZXWVYQZhy0mq",
+                "Serve***=***",
+            ),
+            (
+                "=h;Passw",
+                "Server=h;Password=a QZXWVYQZhy0mq",
+                "Server***ord=***",
+            ),
+            (
+                "r=h;Password=a",
+                "Server=h;Password=a QZXWVYQZhy0mq",
+                "Serve***",
+            ),
+            (
+                "Tr0ub4dor&",
+                "GET /x?a=Tr0ub4dor&password=my secret pw end",
+                "GET /x?a=***password=*** secret pw end",
+            ),
+            (
+                "Tr0ub4dor?",
+                "GET /x/Tr0ub4dor?token=my secret pw end",
+                "GET /x/***token=*** secret pw end",
+            ),
+            (
+                "Tr0ub4dor\n",
+                "App=Tr0ub4dor\nPassword=my secret pw",
+                "App=***Password=*** secret pw",
+            ),
+        ];
+        for (value, text, want) in rows {
+            assert_eq!(
+                redact_with(text, &known(&[value])),
+                want,
+                "{value:?} {text:?}"
+            );
+        }
+    }
+
+    /// Eight times the text costs about eight times the CPU for each hostile shape of registered values and text, and the output is exact.
+    #[test]
+    fn masking_registered_values_is_linear_on_a_hostile_text() {
+        use crate::test_budget::{SCALE, SMALL, linear_cost};
+        type Shape = (&'static str, fn(usize) -> (Vec<String>, String, String));
+        let shapes: [Shape; 6] = [
+            ("blank value, blanks then =", |n| {
+                (
+                    known(&["        "]),
+                    format!("{}=", " ".repeat(n)),
+                    "***=".into(),
+                )
+            }),
+            ("300 values, no hit", |n| {
+                let values: Vec<String> =
+                    (0..300).map(|i| format!("Tok{i:05}-0123456789")).collect();
+                let refs: Vec<&str> = values.iter().map(String::as_str).collect();
+                (known(&refs), "x".repeat(n), "x".repeat(n))
+            }),
+            ("one long value, hits everywhere", |n| {
+                (known(&[&"a".repeat(n / 16)]), "a".repeat(n), MASK.into())
+            }),
+            ("a mask forms a value again, once per value", |n| {
+                (
+                    known(&["Passw0rd*"]),
+                    format!("{}*", "Passw0rd".repeat(n / 8)),
+                    "*".repeat(2 * (n / 8) + 1),
+                )
+            }),
+            ("a mask forms a value again, three masks", |n| {
+                (
+                    known(&["Passw0rd***"]),
+                    format!("{}***", "Passw0rd".repeat(n / 8)),
+                    MASK.into(),
+                )
+            }),
+            ("ab overlap", |n| {
+                (
+                    known(&["abababab", "babababa"]),
+                    "ab".repeat(n / 2),
+                    MASK.into(),
+                )
+            }),
+        ];
+        for (label, shape) in shapes {
+            let (known_small, small, want_small) = shape(SMALL / 4);
+            let (known_large, large, want_large) = shape(SMALL / 4 * SCALE);
+            let (got_small, got_large) = linear_cost(
+                label,
+                (known_small, small),
+                (known_large, large),
+                |(known, text): &(Vec<String>, String)| redact_with(text, known),
+            );
+            assert_eq!(got_small, want_small, "{label}: small");
+            assert_eq!(got_large, want_large, "{label}: large");
+        }
+    }
+
+    /// Text with no anchor and no overlap is masked exactly as a plain replace of each value would.
+    #[test]
+    fn masking_without_anchors_or_overlaps_equals_a_plain_replace() {
+        let values = ["Tk7#nQ2wLm", "Rb5$vH9xZc"];
+        let known = known(&values);
+        for text in [
+            "none here",
+            "Tk7#nQ2wLm",
+            "x Tk7#nQ2wLm y Rb5$vH9xZc z Tk7#nQ2wLm",
+            "Tk7%23nQ2wLm and Rb5%24vH9xZc",
+            "Tk7#nQ2wLmRb5$vH9xZc",
+        ] {
+            let plain = known
+                .iter()
+                .fold(text.to_string(), |acc, v| acc.replace(v.as_str(), MASK));
+            assert_eq!(redact_with(text, &known), plain, "{text}");
+        }
+    }
+
+    /// A registered value that ends where a scanner anchor starts masks the value and leaves the anchor to the scanner, as a plain replace did.
+    #[test]
+    fn a_registered_value_ending_at_a_scanner_anchor_leaves_no_fragment() {
+        let rows = [
+            (
+                "hunter2 hunter2",
+                "x hunter2 hunter2postgres://rivet:OtherPw1@db/x",
+                "x ***postgres://REDACTED@db/x",
+            ),
+            (
+                "s3cr3t!4dor",
+                "s3cr3t!4dorpassword=OtherPw1 x",
+                "***password=*** x",
+            ),
+            (
+                "a QZQZQZ",
+                "a QZQZQZpostgres://u:KKKK@h",
+                "***postgres://REDACTED@h",
+            ),
+        ];
+        for (value, text, want) in rows {
+            assert_eq!(redact_with(text, &known(&[value])), want, "{text}");
+        }
+    }
+
+    /// A registered value that covers the `;` ending a libpq bare value leaves no tail of that value visible.
+    #[test]
+    fn a_registered_value_covering_the_semicolon_that_ends_a_bare_value_leaves_no_tail() {
+        let rows = [
+            (
+                ";Tr0ub4dor",
+                "host=db password=my secret pw;Tr0ub4dor end",
+                "host=db password=****** end",
+            ),
+            (
+                ";App=Tr0ub4dor",
+                "host=db password=my secret pw;App=Tr0ub4dor",
+                "host=db password=******",
+            ),
+        ];
+        for (value, text, want) in rows {
+            assert_eq!(redact_with(text, &known(&[value])), want, "{text}");
+        }
+    }
+
+    /// A registered value that changes where a scanner finds a boundary when masked first does not expose what the scanner alone hides.
+    #[test]
+    fn masking_a_registered_value_does_not_move_a_scanner_boundary() {
+        let value = "d;= '=d?'pwd=  \u{e9}QZ";
+        let text = "@\tokend;= '=d?'pwd=  \u{e9}QZpwd==\"=d;= '=d?'pwd=  \u{e9}QZ\u{e9}token;KK";
+        let out = redact_with(text, &known(&[value]));
+        assert!(!out.contains("KK") && !out.contains("QZ"), "{out}");
+    }
+
+    /// A mask and the text next to it that form a second registered value are masked as that value, whichever order the values registered in.
+    #[test]
+    fn a_mask_and_its_neighbour_forming_a_registered_value_are_masked_again() {
+        for values in [["zzzzzzzz", "****abcd"], ["****abcd", "zzzzzzzz"]] {
+            assert_eq!(
+                redact_with("*zzzzzzzzabcd", &known(&values)),
+                MASK,
+                "{values:?}"
+            );
+        }
+    }
+
+    /// What a plain replace of the registered values followed by the scanners printed, the order the scanners ran in before the registered values were left to read.
+    fn replace_then_scan(text: &str, known: &[String]) -> String {
+        let plain = known
+            .iter()
+            .fold(text.to_string(), |acc, v| acc.replace(v.as_str(), MASK));
+        redact_query_secrets(&redact_url_passwords(&redact_keyword_passwords(&plain)))
+    }
+
+    /// The count of bytes of `text` that are one of `letters`.
+    fn letters_in(text: &str, letters: &str) -> usize {
+        text.chars().filter(|c| letters.contains(*c)).count()
+    }
+
+    /// A xorshift generator, seeded, so a failing input is the same on every run.
+    struct Xorshift(u64);
+
+    impl Xorshift {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % n as u64) as usize
+        }
+
+        fn token<'a>(&mut self, tokens: &[&'a str]) -> &'a str {
+            tokens[self.below(tokens.len())]
+        }
+    }
+
+    /// What the output for `text` shows that it must not: a registered value, or a `letters` or `K` byte that the scanners alone or a plain replace hid.
+    fn exposure(text: &str, known: &[String], nfa: &NFA, letters: &str) -> Option<String> {
+        let out = redact_by(text, Some(nfa));
+        let plain = replace_then_scan(text, known);
+        let scanned = redact_by(text, None);
+        let again = redact_by(&out, Some(nfa));
+        let held = known
+            .iter()
+            .any(|f| out.contains(f.as_str()) || again.contains(f.as_str()));
+        let more = letters_in(&out, "K") > letters_in(&scanned, "K").min(letters_in(&plain, "K"))
+            || letters_in(&out, letters) > letters_in(&plain, letters);
+        (held || more).then(|| format!("{out:?} (plain {plain:?}, scanners {scanned:?})"))
+    }
+
+    /// Every text of up to five tokens, with each of three registered values among them, hides all that the scanners and a plain replace hid.
+    #[test]
+    fn registered_masking_hides_all_on_every_short_text() {
+        const TOKENS: [&str; 8] = ["V", "pwd=", "postgres://", "KK", ";", " ", "@", "?"];
+        let mut broken = Vec::new();
+        for value in ["QZQZQZQZ", ";QZQZQZQZ", "QZ QZQZQZ"] {
+            let known = known(&[value]);
+            let nfa = automaton(&known).unwrap();
+            let mut texts: Vec<Vec<usize>> = vec![Vec::new()];
+            let mut level = texts.clone();
+            for _ in 0..5 {
+                level = level
+                    .iter()
+                    .flat_map(|t| (0..TOKENS.len()).map(move |i| [t.clone(), vec![i]].concat()))
+                    .collect();
+                texts.extend(level.iter().cloned());
+            }
+            for picks in texts {
+                let text: String = picks
+                    .iter()
+                    .map(|&i| if i == 0 { value } else { TOKENS[i] })
+                    .collect();
+                if let Some(why) = exposure(&text, &known, &nfa, "QZ") {
+                    broken.push(format!("{value:?} {text:?} -> {why}"));
+                }
+            }
+        }
+        assert_eq!(
+            broken[..broken.len().min(8)],
+            Vec::<String>::new(),
+            "{} exposed",
+            broken.len()
+        );
+    }
+
+    /// Over 400000 seeded random texts and registered values, the output holds no registered value and no byte of a credential or a registered value that the scanners alone, or a plain replace followed by the scanners, hid.
+    #[test]
+    fn registered_masking_hides_all_that_the_scanners_and_a_plain_replace_hid() {
+        const TEXT: [&str; 38] = [
+            "password",
+            "pwd",
+            "Password",
+            "PWD",
+            "=",
+            "=",
+            ";",
+            ";",
+            " ",
+            "\t",
+            "\n",
+            "?",
+            "&",
+            "@",
+            ":",
+            "//",
+            "postgres://",
+            "pg://",
+            "u",
+            "a",
+            "h",
+            "KK",
+            "KKKK",
+            "'",
+            "\"",
+            "{",
+            "}",
+            "%",
+            "token",
+            "sig",
+            "\\",
+            "V",
+            "V",
+            "V",
+            "W",
+            "W",
+            "\u{e9}",
+            "*",
+        ];
+        const VALUE: [&str; 23] = [
+            "Q", "Z", "QZ", ";", "=", "&", "?", "@", ":", "/", " ", "\t", "\n", "'", "{", "\\",
+            "p", "w", "d", "password", "pwd", "\u{e9}", "*",
+        ];
+        const OTHER: [&str; 12] = [
+            "X", "J", "XJ", ";", "=", "&", "?", "@", ":", " ", "pwd", "*",
+        ];
+        let mut rng = Xorshift(0x9E37_79B9_7F4A_7C15);
+        let mut broken = Vec::new();
+        let build = |tokens: &[&str], letters: &str, rng: &mut Xorshift| {
+            let mut value = String::new();
+            while value.len() < 8 || letters_in(&value, letters) == 0 {
+                value.push_str(rng.token(tokens));
+            }
+            value
+        };
+        for _ in 0..20_000 {
+            let value = build(&VALUE, "QZ", &mut rng);
+            let other = build(&OTHER, "XJ", &mut rng);
+            let two = rng.below(4) == 0;
+            let values: Vec<&str> = if two {
+                vec![&value, &other]
+            } else {
+                vec![&value]
+            };
+            let known = known(&values);
+            let nfa = automaton(&known).unwrap();
+            let letters = if two { "QZXJ" } else { "QZ" };
+            for _ in 0..20 {
+                let mut text = String::new();
+                for _ in 0..3 + rng.below(12) {
+                    match rng.token(&TEXT) {
+                        "V" => text.push_str(&value),
+                        "W" if two => text.push_str(&other),
+                        "W" => text.push('a'),
+                        token => text.push_str(token),
+                    }
+                }
+                if let Some(why) = exposure(&text, &known, &nfa, letters) {
+                    broken.push(format!("{values:?} {text:?} -> {why}"));
+                }
+            }
+        }
+        assert_eq!(
+            broken[..broken.len().min(8)],
+            Vec::<String>::new(),
+            "{} of 400000 exposed",
+            broken.len()
+        );
     }
 }
