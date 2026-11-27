@@ -15,6 +15,7 @@ import concurrent.futures as cf
 import dataclasses
 import contextlib
 import hashlib
+import io
 import itertools
 import json
 import os
@@ -29,7 +30,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+import urllib.error
 import urllib.parse
+import urllib.request
 from pathlib import Path
 
 try:
@@ -54,6 +57,12 @@ ENV_READ = re.compile(r'env::var(?:_os)?\(\s*"([A-Z][A-Z0-9_]+)"')
 DIRECT_ENV = {"RIVET_STATE_URL", "GOOGLE_APPLICATION_CREDENTIALS"}
 CONNECT_SHAPED = re.compile(r"refused|connect|reset|unreachable|timed? ?out|eof|broken pipe|handshake|closed|resolve", re.I)
 PANIC = re.compile(r"panicked at|RUST_BACKTRACE", re.I)
+STAGED_PATHS = ("staged", "staged-hostile")
+LIVE_PATHS = ("wrong-password", "live-state", "live-source", *STAGED_PATHS)
+BQ_STATIC_TOKEN = "RIVET_BQ_ACCESS_TOKEN"
+STAGED_BQ_SPELLING = "access-token-env"
+STAGE_BUCKET = "pm-no-secret"
+STAGE_TIMEOUT_S = 120
 
 
 @dataclasses.dataclass(frozen=True)
@@ -323,13 +332,13 @@ def command_tree(binary: Path) -> list[Cmd]:
 
 
 WIRE_CAP = 1 << 22
-OWN_STUB = {"source": "source", "state": "state", "load": "load", "bigquery key": "load", "snowflake key": "load",
-            "gcp key": "token", "gcp access token": "token", "webhook": "notify", "gcs key": "dest", "s3 access key": "dest",
+OWN_STUB = {"source": "source", "state": "state", "load": "load", "load password env": "load", "bigquery key": "load", "snowflake key": "load",
+            "gcp key": "token", "gcp access token": "token", "bigquery token": "load", "webhook": "notify", "gcs key": "dest", "s3 access key": "dest",
             "s3 secret key": "dest", "s3 session token": "dest", "azure account key": "dest", "azure sas token": "dest"}
 
 
 class Stub:
-    """A loopback listener that counts connections: it resets them (`rst`), refuses a PostgreSQL login (`pg`), answers HTTP 500 (`http`) or relays to a real server (`fwd`)."""
+    """A loopback listener that counts connections: it resets them (`rst`), refuses a PostgreSQL login (`pg`), answers HTTP 500 (`http`), answers 401 reflecting the request (`echo`) or relays to a real server (`fwd`)."""
 
     def __init__(self, kind: str, upstream: int = 0, body: bytes = b"", host: str = "127.0.0.1") -> None:
         self.kind, self.count, self.password, self.wire, self.upstream, self.body = kind, 0, None, bytearray(), upstream, body
@@ -416,6 +425,26 @@ class Stub:
             return
         conn.sendall(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 
+    def _echo(self, conn: socket.socket) -> None:
+        """Read one whole request, answer 401 with its header lines inside a one-line JSON error: a hostile server that reflects the credential it was sent."""
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            chunk = conn.recv(65536)
+            if not chunk:
+                return
+            buf += chunk
+        head, _, rest = buf.partition(b"\r\n\r\n")
+        want = int(next((ln.split(b":", 1)[1] for ln in head.lower().split(b"\r\n") if ln.startswith(b"content-length:")), b"0"))
+        while len(rest) < min(want, WIRE_CAP):
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            rest += chunk
+        self.wire += head + b"\r\n\r\n" + rest
+        reflected = " | ".join(head.decode("latin-1").split("\r\n"))
+        body = json.dumps({"error": {"code": 401, "message": f"Invalid credentials: {reflected}", "status": "UNAUTHENTICATED"}}).encode()
+        conn.sendall(b"HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(body) + body)
+
     def _pg(self, conn: socket.socket) -> None:
         """Ask for a cleartext password, record it, refuse with 28P01."""
         while True:
@@ -478,6 +507,16 @@ class Spec:
     def store(self) -> str:
         """The ledger store: the path and mode the cell runs."""
         return f"{self.path}/{self.mode}"
+
+    @property
+    def staged(self) -> bool:
+        """Whether the cell stages an export on the GCS emulator and then loads it into a stub warehouse."""
+        return self.path in STAGED_PATHS
+
+    @property
+    def warehouse_stub(self) -> str:
+        """The stub kind the warehouse client of the cell talks to: a hostile one reflects what it was sent."""
+        return "echo" if self.path == "staged-hostile" else "http"
 
 
 SRC_SPELLINGS = ("userinfo", "userinfo-raw", "query-password", "query-PASSWORD", "query-PaSsWoRd", "query-pct-key",
@@ -655,7 +694,7 @@ def build_scene(spec: Spec, root: Path, variant: tuple[str, dict[str, str], tupl
     tag = f"{spec.scenario}|{spec.engine}|{spec.path}|{spec.mode}"
     src_kind = "pg" if spec.path == "wrong-password" and spec.engine == "postgres" else "rst"
     stubs["source"] = Stub(src_kind)
-    target = target if spec.path in ("wrong-password", "live-state", "live-source") else None
+    target = target if spec.path in LIVE_PATHS else None
     src_target = target if spec.path == "wrong-password" else None
     src_port = src_target["port"] if src_target else stubs["source"].port
     if src_target:
@@ -669,10 +708,12 @@ def build_scene(spec: Spec, root: Path, variant: tuple[str, dict[str, str], tupl
     cfg["source"] = source_scene(spec.engine, spec.spelling if spec.slot in ("source", "ambient") else "userinfo", pw_for_source,
                                  src_port, root, env)
     roles["source"] = pw_for_source
-    if spec.path == "live-source":
+    if spec.path == "live-source" or spec.staged:
         assert target is not None
         del roles["source"]
         cfg["source"] = {"type": "postgres", "url": f"postgresql://rivet:rivet@127.0.0.1:{target['port']}/rivet"}
+    if spec.staged:
+        dest = {"type": "gcs", "bucket": STAGE_BUCKET, "prefix": f"{root.name}/", "endpoint": stage_endpoint(), "allow_anonymous": True}
     if spec.slot == "gcp-secret":
         token = token_canary(tag + "token")
         body = json.dumps({"access_token": token.plain, "token_type": "Bearer", "expires_in": 3600}).encode() if spec.path == "fetch-token" else b""
@@ -705,9 +746,10 @@ def build_scene(spec: Spec, root: Path, variant: tuple[str, dict[str, str], tupl
         if spec.command.name == "state copy":
             argv_extra += ["--to", env.pop("RIVET_STATE_URL")]
     if spec.slot == "load":
-        stubs["load"] = Stub("http")
+        stubs["load"] = Stub(spec.warehouse_stub)
         base = f"http://127.0.0.1:{stubs['load'].port}"
-        env["CANARY_CH_PW"] = canary("baseline").plain
+        baseline = canary(tag + "load-env")
+        env["CANARY_CH_PW"] = baseline.plain
         load = {"target": "clickhouse", "database": "canary", "user": "rivet", "url": base, "password_env": "CANARY_CH_PW"}
         spelling, _, shape = spec.spelling.partition("@")
         if spelling == "url-userinfo":
@@ -721,12 +763,14 @@ def build_scene(spec: Spec, root: Path, variant: tuple[str, dict[str, str], tupl
             load["url"] = endpoint_url(shape, stubs["remote"].port, stubs["load"].port)
         cfg["load"] = load
         roles["load"] = secret
+        if spelling != "password-env":
+            roles["load password env"] = baseline
     if spec.slot == "bigquery":
         token = token_canary(tag + "bqtoken")
         redirect = spec.spelling.startswith("redirect-")
         body = json.dumps({"access_token": token.plain, "token_type": "Bearer", "expires_in": 3600}).encode() if redirect else b""
-        stubs["load"] = Stub("http", body=body)
-        made = service_account_key(tag, f"http://127.0.0.1:{stubs['load'].port}/token")
+        stubs["load"] = Stub(spec.warehouse_stub, body=body)
+        made = service_account_key(tag, f"http://127.0.0.1:{stubs['load'].port}/token") if spec.spelling != "access-token-env" else None
         if made:
             key_file = "bq.json" if spec.spelling.startswith("destination-") else "sa.json"
             (root / key_file).write_text(made[0])
@@ -742,6 +786,11 @@ def build_scene(spec: Spec, root: Path, variant: tuple[str, dict[str, str], tupl
             env[spec.spelling.removeprefix("redirect-")] = f"http://127.0.0.1:{stubs['redirect'].port}"
             roles["gcp access token"] = token
         cfg["load"] = {"target": "bigquery", "project": "canary-project", "dataset": "canary"}
+        if spec.staged:
+            env["RIVET_BQ_API_ENDPOINT"] = f"http://127.0.0.1:{stubs['load'].port}"
+        if spec.spelling == "access-token-env":
+            env["RIVET_BQ_ACCESS_TOKEN"] = token.plain
+            roles["bigquery token"] = token
     if spec.slot == "snowflake":
         key = token_canary(tag)
         (root / "sf.pem").write_text(f"-----BEGIN PRIVATE KEY-----\n{key.plain}\n-----END PRIVATE KEY-----\n")
@@ -1016,11 +1065,57 @@ def _db_dump(path: Path) -> bytes:
             return b""
 
 
+def stage_endpoint() -> str:
+    """The stand's GCS emulator URL, read from the registry."""
+    try:
+        from ..pytools import registry
+    except ImportError:  # pragma: no cover
+        import registry  # type: ignore
+    return registry.gate_profiles()["fake-gcs"]["url"]
+
+
+def stage_ready() -> str:
+    """Create the staging bucket on the GCS emulator; the empty string when it is ready, else why it is not."""
+    req = urllib.request.Request(f"{stage_endpoint()}/storage/v1/b?project=test", data=json.dumps({"name": STAGE_BUCKET}).encode(),
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            r.read()
+    except urllib.error.HTTPError as e:
+        return "" if e.code == 409 else f"the GCS emulator refused the bucket: HTTP {e.code}"
+    except (OSError, ValueError) as e:
+        return f"the GCS emulator at {stage_endpoint()} does not answer ({type(e).__name__})"
+    return ""
+
+
+def stage_drop(prefix: str) -> None:
+    """Delete every object a cell staged under `prefix`."""
+    base = f"{stage_endpoint()}/storage/v1/b/{STAGE_BUCKET}/o"
+    with contextlib.suppress(OSError, ValueError, KeyError):
+        with urllib.request.urlopen(f"{base}?prefix={urllib.parse.quote(prefix)}", timeout=10) as r:
+            names = [o["name"] for o in json.load(r).get("items", [])]
+        for n in names:
+            with contextlib.suppress(OSError), urllib.request.urlopen(
+                urllib.request.Request(f"{base}/{urllib.parse.quote(n, safe='')}", method="DELETE"), timeout=10
+            ):
+                pass
+
+
+def stage_export(binary: Path, scene: Scene) -> dict[str, bytes]:
+    """`rivet run` the scene's export onto the emulator bucket so `rivet load` has a manifest and recorded column types; its output as sinks."""
+    p = subprocess.run([str(binary), "run", "--config", str(scene.root / "rivet.yaml")], cwd=scene.root, env=scene.env,
+                       stdin=subprocess.DEVNULL, capture_output=True, timeout=STAGE_TIMEOUT_S)
+    if p.returncode != 0:
+        raise RuntimeError(f"staging `rivet run` exited {p.returncode}: {p.stderr.decode('utf-8', 'replace')[-300:]}")
+    return {"stage/stdout": p.stdout, "stage/stderr": p.stderr}
+
+
 def run_variant(binary: Path, spec: Spec, variant: tuple[str, dict[str, str], tuple[str, ...]], target: dict | None,
                 timeout: int) -> tuple[Scene, dict[str, bytes], int, bool, bool]:
     """Run `spec` once in a fresh directory; the scene, its sinks, the exit code, the timeout flag and the stub reach."""
     root = Path(tempfile.mkdtemp(prefix="ss-"))
     scene = build_scene(spec, root, variant, binary, target)
+    staged = stage_export(binary, scene) if spec.staged else {}
     before = _snapshot(root)
     timed_out = False
     p = subprocess.Popen([str(binary), *scene.argv], cwd=root, env=scene.env, stdin=subprocess.DEVNULL,
@@ -1035,7 +1130,7 @@ def run_variant(binary: Path, spec: Spec, variant: tuple[str, dict[str, str], tu
         except subprocess.TimeoutExpired:
             p.kill()
             out, err = p.communicate()
-    sinks = {f"{variant[0]}/stdout": out, f"{variant[0]}/stderr": err}
+    sinks = {f"{variant[0]}/stdout": out, f"{variant[0]}/stderr": err, **{f"{variant[0]}/{k}": v for k, v in staged.items()}}
     after = _snapshot(root)
     for path, sig in after.items():
         if before.get(path) != sig:
@@ -1067,6 +1162,8 @@ def run_cell(binary: Path, spec: Spec, target: dict | None = None, timeout: int 
             if scene is not None:
                 for s in scene.stubs.values():
                     s.close()
+                if spec.staged:
+                    stage_drop(scene.root.name + "/")
         rcs.append(rc)
         timed_out |= to
         text = b"\n".join(sinks.values()).decode("utf-8", "replace")
@@ -1090,7 +1187,7 @@ def run_cell(binary: Path, spec: Spec, target: dict | None = None, timeout: int 
 
 
 def cell_matrix(cmds: list[Cmd], engines: list[str], modes: list[str], dests: list[str], loads: list[str],
-                live: set[str], live_state: bool = False, live_source: bool = False) -> tuple[list[Spec], list[str]]:
+                live: set[str], live_state: bool = False, live_source: bool = False, staged: bool = False) -> tuple[list[Spec], list[str]]:
     """Every cell the product's own axes imply, and a guard line for each axis value or argument no recipe covers."""
     guards: list[str] = []
     guards += [f"source engine `{e}` has no URL scheme recipe" for e in engines if e not in SCHEME]
@@ -1112,6 +1209,8 @@ def cell_matrix(cmds: list[Cmd], engines: list[str], modes: list[str], dests: li
             redirect_slot(n)
         except KeyError as e:
             guards.append(str(e).strip("'\""))
+    if "bigquery" in loads and BQ_STATIC_TOKEN not in product_secret_env():
+        guards.append(f"staged BigQuery cell names `{BQ_STATIC_TOKEN}` and src/ no longer reads it")
     known_values = set(FILL) | {"PLAN_FILE", "ENV_VAR"}
     for c in cmds:
         for g in c.required:
@@ -1140,6 +1239,9 @@ def cell_matrix(cmds: list[Cmd], engines: list[str], modes: list[str], dests: li
             specs += [Spec(c, "postgres", "dest", sp) for d in dests for sp in dest_recipes.get(d, ())]
             specs += [Spec(c, "postgres", "notify", sp) for sp in ("webhook-url", "webhook-url-env")]
             specs += [Spec(c, "postgres", "gcp-secret", sp, pa) for sp in GCP_SECRET_SPELLINGS for pa in ("fetch-fail", "fetch-token")]
+            if staged and c.name == "load":
+                specs += [Spec(c, "postgres", "load", sp, pa) for sp in LOAD_SPELLINGS for pa in STAGED_PATHS if "clickhouse" in loads]
+                specs += [Spec(c, "postgres", "bigquery", STAGED_BQ_SPELLING, pa) for pa in STAGED_PATHS if "bigquery" in loads]
             if live_source:
                 specs += [Spec(c, "postgres", "dest", dest_recipes[d][0], "live-source") for d in dests if d in dest_recipes]
                 specs += [Spec(c, "postgres", "notify", sp, "live-source") for sp in ("webhook-url", "webhook-url-env")]
@@ -1181,7 +1283,7 @@ def grade(led: Ledger, outs: list[Outcome]) -> tuple[dict[str, int], set[int]]:
             counts["FAIL"] += 1
         elif o.hits:
             kinds = {h.sink.split("/", 1)[1].split(":")[0] for h in o.hits}
-            cell = {"command": s.command.name, "engine": s.engine, "slot": s.slot, "spelling": s.spelling}
+            cell = {"command": s.command.name, "engine": s.engine, "slot": s.slot, "spelling": s.spelling, "path": s.path}
             known, in_date = property_no_secret_in_output_known.match(cell, kinds)
             first = o.hits[0]
             msg = (f"LEAK {label}: {first.role} [{first.form}] in {first.sink}: {first.line!r} "
@@ -1197,6 +1299,10 @@ def grade(led: Ledger, outs: list[Outcome]) -> tuple[dict[str, int], set[int]]:
             wire = {True: " wire-password==canary", False: " WIRE-PASSWORD-DIFFERS", None: ""}[o.wire_ok]
             led.add(s.engine, "-", s.scenario, s.store, Status.PASS, f"clean; slot reached;{wire} {det}")
             counts["PASS"] += 1
+        elif s.staged:
+            led.skipped(s.engine, "-", s.scenario, s.store,
+                        f"{label}: NOT GRADED, the staged load never reached the {s.slot} warehouse stub {det}", cause=SkipCause.ENV)
+            counts["SKIP"] += 1
         elif not by_base.get(base_key(s)):
             counts["N/A"] += 1
             if base_key(s) in na_seen:
@@ -1244,7 +1350,7 @@ def target_for(s: Spec, live: dict[str, dict]) -> dict | None:
     """The real server a cell points at: the stand state database, or a stand source for a wrong password."""
     if s.path == "live-state":
         return live.get("state")
-    if s.path == "live-source":
+    if s.path == "live-source" or s.staged:
         return live.get("postgres")
     if s.path == "wrong-password" and s.engine != "postgres":
         return live.get(s.engine)
@@ -1314,7 +1420,12 @@ def verify_credential_never_reaches_a_sink(led: Ledger, binary: Path | None = No
 def _verify(led: Ledger, binary: Path, cmds: list[Cmd], engines: list[str], modes: list[str], dests: list[str], loads: list[str],
             live: dict[str, dict], state_target_: dict | None, state_why: str, jobs: int, only: str, live_tier: bool) -> None:
     """Build the matrix, run it and record the verdicts."""
-    specs, guards = cell_matrix(cmds, engines, modes, dests, loads, set(live) - {"postgres"}, state_target_ is not None, "postgres" in live)
+    stage_why = stage_ready() if "postgres" in live else ("the stand postgres does not answer" if live_tier else "live tier off")
+    specs, guards = cell_matrix(cmds, engines, modes, dests, loads, set(live) - {"postgres"}, state_target_ is not None, "postgres" in live,
+                                not stage_why)
+    if stage_why:
+        led.skipped("-", "-", "no_secret_in_output/warehouse-load-success-path", "-",
+                    f"the warehouse load error path after staging (clickhouse, BigQuery) is NOT GRADED: {stage_why}", cause=SkipCause.ENV)
     if state_target_ is None:
         led.skipped("postgres", "-", "no_secret_in_output/state-success-live", "-",
                     f"state URL success path against a real postgres state database is NOT GRADED: {state_why}", cause=SkipCause.ENV)
@@ -1329,7 +1440,7 @@ def _verify(led: Ledger, binary: Path, cmds: list[Cmd], engines: list[str], mode
             led.skipped(e, "-", "no_secret_in_output/wrong-password-live", "-",
                         f"wrong-password against a real {e} server is NOT GRADED: " + ("no stand answers for it" if live_tier else "live tier off"), cause=SkipCause.ENV)
     for scenario, why in (
-            ("warehouse-load-success-path", "the warehouse load error path (clickhouse, BigQuery, Snowflake reached after staging) is NOT GRADED: `rivet load` refuses a local destination and this stage stages no emulator bucket; the config-time refusals are graded"),
+            ("warehouse-load-snowflake", "the Snowflake load error path after staging is NOT GRADED: the API endpoint is built from the account name with no override and the cloud quota is never touched"),
             ("gcp-secret-resolved", "the resolved Secret Manager value reaching a sink is NOT GRADED: the endpoint is a const https URL (src/config/gcp_secret.rs:14) with no mock seam and the stand holds no Google project; the fetch-fail and token paths are graded"),
             ("state-tls-success", "state over TLS success is NOT GRADED: the stand postgres runs ssl=off; the sslmode=require error path is graded"),
             ("oracle-cdc-events", "Oracle CDC with events is NOT GRADED: this stage has no cell that drives it")):
@@ -1353,7 +1464,7 @@ def _verify(led: Ledger, binary: Path, cmds: list[Cmd], engines: list[str], mode
                 "right-password success path of the source engines is NOT GRADED: no provisioned canary users on the stand", cause=SkipCause.ENV)
     outs = execute(binary, specs, live, jobs)
     counts, used = grade(led, outs)
-    if not only:
+    if not only and not stage_why:
         for reason in stale_known(used):
             led.failed("-", "-", "no_secret_in_output/known-leak", "-", f"known-leak entry matched no cell, it is fixed: remove it ({reason})")
     never = sorted({o.spec.command.name for o in outs if o.spec.slot == "source" and not any(
@@ -1439,6 +1550,33 @@ def _self_test() -> None:
     finally:
         socket.create_connection = real_connect
     assert not silent, f"an engine with a registry source and an open port is a live target: {silent}"
+    echo = Stub("echo")
+    e = socket.create_connection(("127.0.0.1", echo.port), timeout=2)
+    e.sendall(b"POST /x HTTP/1.1\r\nAuthorization: Bearer " + c.plain.encode() + b"\r\nContent-Length: 2\r\n\r\nhi")
+    answer = b""
+    while chunk := e.recv(4096):
+        answer += chunk
+    echo.close()
+    assert answer.startswith(b"HTTP/1.1 401") and find_hits({"r": c}, {"s": answer}), "the echo stub does not reflect the credential it was sent"
+    assert b"hi" in bytes(echo.wire) and echo.count == 1
+    load = Cmd(("load",), (), frozenset({"--config"}))
+    staged = Spec(load, "postgres", "load", "password-env", "staged-hostile")
+    assert staged.staged and staged.warehouse_stub == "echo" and Spec(load, "postgres", "load", "password-env", "staged").warehouse_stub == "http"
+    assert not Spec(load, "postgres", "load", "password-env").staged
+    unreached = Outcome(staged, [], False, None, [1], True, False, False, [])
+    led = Ledger()
+    with contextlib.redirect_stdout(io.StringIO()):
+        counts, _ = grade(led, [unreached])
+    assert counts["SKIP"] == 1 and counts["PASS"] == 0 and counts["N/A"] == 0, "a staged cell the stub never saw must read as a skip"
+    reached = Outcome(staged, [], True, None, [1], True, False, False, [])
+    assert grade(Ledger(), [reached])[0]["PASS"] == 1
+    for spelling in LOAD_SPELLINGS:
+        root = Path(tempfile.mkdtemp(prefix="ss-"))
+        sc = build_scene(Spec(load, "postgres", "load", spelling, "staged-hostile"), root, CONNECT_VARIANTS[0], Path("rivet"), {"port": 1})
+        for stub in sc.stubs.values():
+            stub.close()
+        shutil.rmtree(root, ignore_errors=True)
+        assert sc.env["CANARY_CH_PW"] in {c.plain for c in sc.roles.values()}, f"load:{spelling} sends a password no role watches"
     print("no_secret_in_output self-test: ok")
 
 

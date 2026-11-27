@@ -276,12 +276,13 @@ impl ClickhouseLoader {
         uris: &[String],
         rows: &[u64],
         repeat: Repeat,
+        read: Option<&PartRead>,
     ) -> Result<u64> {
         uris.iter()
             .zip(rows)
             .enumerate()
             .map(|(i, (uri, rows))| {
-                let rows = self.insert_one(target, uri, *rows, repeat)?;
+                let rows = self.insert_one(target, uri, *rows, repeat, read)?;
                 crate::test_hook::maybe_panic_at_chunk("clickhouse_after_part", i as i64);
                 Ok(rows)
             })
@@ -289,7 +290,14 @@ impl ClickhouseLoader {
     }
 
     /// Insert one part of `rows` rows into `target`; a pushed part's own footer is checked again.
-    fn insert_one(&self, target: &str, uri: &str, rows: u64, repeat: Repeat) -> Result<u64> {
+    fn insert_one(
+        &self,
+        target: &str,
+        uri: &str,
+        rows: u64,
+        repeat: Repeat,
+        read: Option<&PartRead>,
+    ) -> Result<u64> {
         let (bucket, key) = super::split_object_uri(uri)?;
         let pull = self
             .named_collection
@@ -297,10 +305,16 @@ impl ClickhouseLoader {
             .filter(|_| pullable(bucket, key));
         let (query, body) = match pull {
             Some(nc) => (
-                format!(
-                    "INSERT INTO {target} SELECT * FROM {}",
-                    pull_source(nc, super::scheme_of(uri), bucket, key)
-                ),
+                match read {
+                    Some(r) => r.insert_sql(
+                        target,
+                        &pull_source(nc, super::scheme_of(uri), bucket, key, Some(&r.structure)),
+                    ),
+                    None => format!(
+                        "INSERT INTO {target} SELECT * FROM {}",
+                        pull_source(nc, super::scheme_of(uri), bucket, key, None)
+                    ),
+                },
                 bytes::Bytes::new(),
             ),
             None => {
@@ -310,7 +324,13 @@ impl ClickhouseLoader {
                     .with_context(|| format!("reading {uri} for the ClickHouse load"))?;
                 let meta = parquet_footer(&bytes).with_context(|| format!("reading {uri}"))?;
                 refuse_unholdable_temporals(&meta, uri)?;
-                let insert = format!("INSERT INTO {target} FORMAT Parquet");
+                let insert = match read {
+                    Some(r) => format!(
+                        "{} FORMAT Parquet",
+                        r.insert_sql(target, &format!("input({})", literal(&r.structure)))
+                    ),
+                    None => format!("INSERT INTO {target} FORMAT Parquet"),
+                };
                 (insert, bytes::Bytes::from(bytes))
             }
         };
@@ -420,7 +440,8 @@ impl TargetLoader for ClickhouseLoader {
             &order_by(&self.cluster_by),
         ))?;
         crate::test_hook::maybe_panic_at("clickhouse_full_after_swap_created");
-        let rows = self.insert_uris(&swap, uris, &part_rows, Repeat::Undelivered)?;
+        let read = PartRead::of(specs, &[]);
+        let rows = self.insert_uris(&swap, uris, &part_rows, Repeat::Undelivered, read.as_ref())?;
         crate::test_hook::maybe_panic_at("clickhouse_full_before_swap_in");
         for (sql, repeat, hook) in swap_in(self.object_kind(table)?, &swap, &target) {
             self.post(&[], bytes::Bytes::from(sql), repeat)?;
@@ -470,7 +491,14 @@ impl TargetLoader for ClickhouseLoader {
             self.query(&alter)
                 .with_context(|| format!("adding new columns to `{table}__changes`"))?;
         }
-        self.insert_uris(&changes, uris, &part_rows, changelog_repeat(self.cdc))
+        let read = changelog_read(specs, shape.not_null);
+        self.insert_uris(
+            &changes,
+            uris,
+            &part_rows,
+            changelog_repeat(self.cdc),
+            read.as_ref(),
+        )
     }
 
     fn warehouse(&self) -> Warehouse {
@@ -581,15 +609,22 @@ fn pullable(bucket: &str, key: &str) -> bool {
 }
 
 /// The table function reading one part through `collection`.
-fn pull_source(collection: &str, scheme: &str, bucket: &str, key: &str) -> String {
+fn pull_source(
+    collection: &str,
+    scheme: &str,
+    bucket: &str,
+    key: &str,
+    structure: Option<&str>,
+) -> String {
+    let structure = structure.map_or(String::new(), |s| format!(", structure = {}", literal(s)));
     match scheme {
         "az" => format!(
-            "azureBlobStorage({collection}, container = {}, blob_path = {}, format = 'Parquet')",
+            "azureBlobStorage({collection}, container = {}, blob_path = {}, format = 'Parquet'{structure})",
             literal(bucket),
             literal(key)
         ),
         s => format!(
-            "{}({collection}, filename = {}, format = 'Parquet')",
+            "{}({collection}, filename = {}, format = 'Parquet'{structure})",
             if s == "s3" { "s3" } else { "gcs" },
             literal(&format!("{bucket}/{key}"))
         ),
@@ -696,6 +731,11 @@ fn changelog_specs(specs: &[TargetColumnSpec]) -> Vec<TargetColumnSpec> {
             .cloned(),
     );
     full
+}
+
+/// How a change-log part is read: its meta columns come with the data columns, so a UUID read never drops them.
+fn changelog_read(specs: &[TargetColumnSpec], not_null: &[String]) -> Option<PartRead> {
+    PartRead::of(&changelog_specs(specs), not_null)
 }
 
 /// The engine, key and version column of a change log (ADR-0035 CH2, CH10).
@@ -808,6 +848,9 @@ fn changelog_conflict(
     wanted.iter().find_map(|&(name, want)| {
         let (_, have) = existing.iter().find(|(n, _)| *n == name)?;
         (*have != want && !zone_less_of(have, want)).then(|| {
+            if let Some(depth) = uuid_bytes_depth(have, want) {
+                return uuid_bytes_conflict(changes, name, want, depth, &restart);
+            }
             format!(
                 "column `{name}` of `{changes}` is {have}, but the export now resolves it to {want}; \
                  inserting would convert every value silently. Nothing was written. Widen it with `ALTER TABLE \
@@ -816,6 +859,35 @@ fn changelog_conflict(
             )
         })
     })
+}
+
+/// The `Array` depth of a column an earlier release landed as `FixedString(16)` bytes where `want` is a native `UUID`.
+fn uuid_bytes_depth(have: &str, want: &str) -> Option<usize> {
+    (want.contains("UUID") && have == want.replace("UUID", "FixedString(16)"))
+        .then(|| want.matches("Array(").count())
+}
+
+/// The refusal for a log whose UUID column holds the 16 raw bytes, with the statements that convert it in place.
+fn uuid_bytes_conflict(
+    changes: &str,
+    name: &str,
+    want: &str,
+    depth: usize,
+    restart: &str,
+) -> String {
+    let new = format!("{name}__uuid");
+    format!(
+        "column `{name}` of `{changes}` holds UUIDs as FixedString(16) raw bytes, as a rivet \
+         release before the native UUID load wrote them, but this load writes {want}. Nothing \
+         was written. Convert the column in place with these statements, in order (not possible \
+         for a key column):\n\
+         ALTER TABLE {changes} ADD COLUMN `{new}` {want}\n\
+         ALTER TABLE {changes} UPDATE `{new}` = {} WHERE 1 SETTINGS mutations_sync = 2\n\
+         ALTER TABLE {changes} DROP COLUMN `{name}`\n\
+         ALTER TABLE {changes} RENAME COLUMN `{new}` TO `{name}`\n\
+         Or take the new type: {restart}",
+        uuid_from_bytes(&format!("`{name}`"), depth)
+    )
 }
 
 /// Whether `have` is `want` without the zone rivet declares timestamps in.
@@ -950,8 +1022,18 @@ fn columns_ddl(specs: &[TargetColumnSpec], not_null: &[String]) -> String {
 
 /// The native type a spec lands as: `Nullable(T)` unless it is a key column or a container.
 fn column_type(spec: &TargetColumnSpec, not_null: bool) -> String {
+    typed(spec, not_null, landed_type)
+}
+
+/// The type a spec's Parquet column is read as: `column_type`, with a UUID as its 16 bytes.
+fn file_column_type(spec: &TargetColumnSpec, not_null: bool) -> String {
+    typed(spec, not_null, file_type)
+}
+
+/// A spec's declared type through `land`, wrapped as `column_type` documents.
+fn typed(spec: &TargetColumnSpec, not_null: bool, land: fn(&ChType) -> ChType) -> String {
     let t = match &spec.target_type {
-        TargetType::ClickHouse(t) => TargetType::ClickHouse(landed_type(t)),
+        TargetType::ClickHouse(t) => TargetType::ClickHouse(land(t)),
         other => other.clone(),
     };
     if not_null || matches!(t, TargetType::ClickHouse(ChType::Array(_))) {
@@ -961,13 +1043,104 @@ fn column_type(spec: &TargetColumnSpec, not_null: bool) -> String {
     }
 }
 
-/// A resolved type with JSON and UUID, also as Array elements, replaced by what they land as.
+/// A resolved type with JSON, also as an Array element, replaced by what it lands as.
 fn landed_type(t: &ChType) -> ChType {
     match t {
         ChType::Json => ChType::String,
-        ChType::Uuid => ChType::FixedString16,
+        ChType::Uuid => seeded!(
+            "clickhouse-uuid-lands-as-bytes",
+            ChType::FixedString16,
+            ChType::Uuid
+        ),
         ChType::Array(inner) => ChType::Array(Box::new(landed_type(inner))),
         other => other.clone(),
+    }
+}
+
+/// `landed_type` with a UUID, also as an Array element, as the 16 bytes a Parquet reader sees.
+fn file_type(t: &ChType) -> ChType {
+    match t {
+        ChType::Uuid => ChType::FixedString16,
+        ChType::Array(inner) => ChType::Array(Box::new(file_type(inner))),
+        other => landed_type(other),
+    }
+}
+
+/// How many `Array`s wrap the UUID of a resolved type, or `None` when it holds no UUID.
+fn uuid_depth(t: &ChType) -> Option<usize> {
+    match t {
+        ChType::Uuid => Some(0),
+        ChType::Array(inner) => uuid_depth(inner).map(|d| d + 1),
+        _ => None,
+    }
+}
+
+/// The expression turning `expr`, `depth` arrays of 16-byte values, into native UUIDs.
+fn uuid_from_bytes(expr: &str, depth: usize) -> String {
+    if depth == 0 {
+        return format!("toUUID(UUIDNumToString({expr}))");
+    }
+    let item = format!("x{depth}");
+    format!(
+        "arrayMap({item} -> {}, {expr})",
+        uuid_from_bytes(&item, depth - 1)
+    )
+}
+
+/// How a part holding UUID columns is read: ClickHouse's Parquet reader hands a UUID over as `FixedString(16)`, which no direct insert into a `UUID` column accepts.
+struct PartRead {
+    columns: String,
+    select: String,
+    structure: String,
+}
+
+impl PartRead {
+    /// The read for `specs`, or `None` when none holds a UUID (the part is inserted as it is).
+    fn of(specs: &[TargetColumnSpec], not_null: &[String]) -> Option<Self> {
+        let depth = |s: &TargetColumnSpec| match &s.target_type {
+            TargetType::ClickHouse(t) => uuid_depth(t),
+            _ => None,
+        };
+        specs
+            .iter()
+            .any(|s| depth(s).is_some() && seeded!("clickhouse-uuid-lands-as-bytes", false, true))
+            .then(|| {
+                let quoted: Vec<String> = specs
+                    .iter()
+                    .map(|s| Warehouse::ClickHouse.quote_ident(&s.column_name))
+                    .collect();
+                let select = specs
+                    .iter()
+                    .zip(&quoted)
+                    .map(|(s, q)| match depth(s) {
+                        Some(d) => format!("{} AS {q}", uuid_from_bytes(q, d)),
+                        None => q.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let structure = specs
+                    .iter()
+                    .zip(&quoted)
+                    .map(|(s, q)| {
+                        format!(
+                            "{q} {}",
+                            file_column_type(s, not_null.contains(&s.column_name))
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                Self {
+                    columns: quoted.join(", "),
+                    select: select.join(", "),
+                    structure: structure.join(", "),
+                }
+            })
+    }
+
+    /// `INSERT INTO target (columns) SELECT … FROM source`, the UUID columns converted.
+    fn insert_sql(&self, target: &str, source: &str) -> String {
+        format!(
+            "INSERT INTO {target} ({}) SELECT {} FROM {source}",
+            self.columns, self.select
+        )
     }
 }
 
@@ -1203,9 +1376,9 @@ mod tests {
         );
     }
 
-    /// ClickHouse refuses a JSON or UUID column fed from Parquet, and `Array(Nullable(JSON))` cannot even be created (measured on 24.8).
+    /// ClickHouse refuses a JSON column fed from Parquet, and `Array(Nullable(JSON))` cannot even be created (measured on 24.8); a UUID lands native.
     #[test]
-    fn json_and_uuid_land_as_their_parquet_types_also_inside_an_array() {
+    fn json_lands_as_its_parquet_type_and_uuid_native_also_inside_an_array() {
         let ddl = columns_ddl(
             &[
                 spec("u", RivetType::Uuid),
@@ -1217,8 +1390,105 @@ mod tests {
         );
         assert_eq!(
             ddl,
-            "  `u` Nullable(FixedString(16)),\n  `j` Nullable(String),\n  \
-             `us` Array(Nullable(FixedString(16))),\n  `js` Array(Nullable(String))"
+            "  `u` Nullable(UUID),\n  `j` Nullable(String),\n  \
+             `us` Array(Nullable(UUID)),\n  `js` Array(Nullable(String))"
+        );
+    }
+
+    /// A part with a UUID column is read as its bytes and converted; a part without one is inserted as it always was.
+    #[test]
+    fn a_part_with_uuid_columns_is_converted_and_one_without_is_untouched() {
+        let specs = [
+            spec("id", RivetType::Int64),
+            spec("u", RivetType::Uuid),
+            spec("us", list(RivetType::Uuid)),
+            spec("name", RivetType::String),
+        ];
+        let read = PartRead::of(&specs, &["id".to_string()]).expect("holds a uuid");
+        assert_eq!(
+            read.structure,
+            "`id` Int64, `u` Nullable(FixedString(16)), \
+             `us` Array(Nullable(FixedString(16))), `name` Nullable(String)"
+        );
+        assert_eq!(
+            read.insert_sql("d.t", "input('s')"),
+            "INSERT INTO d.t (`id`, `u`, `us`, `name`) SELECT `id`, \
+             toUUID(UUIDNumToString(`u`)) AS `u`, \
+             arrayMap(x1 -> toUUID(UUIDNumToString(x1)), `us`) AS `us`, `name` FROM input('s')"
+        );
+        let log = changelog_read(&specs, &["id".to_string()]).expect("holds a uuid");
+        assert!(
+            log.columns.starts_with("`__op`, `__pos`, `__seq`, `id`")
+                && log.select.starts_with("`__op`, `__pos`, `__seq`, `id`"),
+            "{} / {}",
+            log.columns,
+            log.select
+        );
+        let key = PartRead::of(&specs, &["u".to_string()]).expect("holds a uuid");
+        assert!(
+            key.structure.contains("`u` FixedString(16)"),
+            "{}",
+            key.structure
+        );
+        assert!(
+            PartRead::of(
+                &[spec("id", RivetType::Int64), spec("j", RivetType::Json)],
+                &[]
+            )
+            .is_none()
+        );
+        assert_eq!(
+            uuid_from_bytes("c", 2),
+            "arrayMap(x2 -> arrayMap(x1 -> toUUID(UUIDNumToString(x1)), x2), c)"
+        );
+    }
+
+    /// A log an earlier release wrote with `FixedString(16)` is refused with statements that convert it, and no other type pair gets them.
+    #[test]
+    fn a_log_holding_uuid_bytes_is_refused_with_its_conversion() {
+        let pk = ["id".to_string()];
+        let shape = changelog_shape(false, "t", &pk, None).unwrap();
+        let conflict = |have: &str, want: &str| {
+            changelog_conflict(
+                "d.t__changes",
+                "d.t",
+                &shape,
+                &pk,
+                ("MergeTree", "", ""),
+                &[("c", have)],
+                &[("c", want)],
+            )
+        };
+        let scalar = conflict("Nullable(FixedString(16))", "Nullable(UUID)").expect("refused");
+        assert!(
+            scalar
+                .contains("column `c` of `d.t__changes` holds UUIDs as FixedString(16) raw bytes")
+                && scalar
+                    .contains("ALTER TABLE d.t__changes ADD COLUMN `c__uuid` Nullable(UUID)\n")
+                && scalar.contains(
+                    "ALTER TABLE d.t__changes UPDATE `c__uuid` = toUUID(UUIDNumToString(`c`)) \
+                     WHERE 1 SETTINGS mutations_sync = 2\n"
+                )
+                && scalar.contains("ALTER TABLE d.t__changes DROP COLUMN `c`\n")
+                && scalar.contains("ALTER TABLE d.t__changes RENAME COLUMN `c__uuid` TO `c`\n")
+                && scalar.contains("Or take the new type: Drop `d.t__changes` and `d.t`")
+                && !scalar.contains("MODIFY COLUMN"),
+            "{scalar}"
+        );
+        let array =
+            conflict("Array(Nullable(FixedString(16)))", "Array(Nullable(UUID))").expect("refused");
+        assert!(
+            array.contains("= arrayMap(x1 -> toUUID(UUIDNumToString(x1)), `c`) WHERE 1"),
+            "{array}"
+        );
+        let other = conflict("Nullable(FixedString(16))", "Nullable(String)").expect("refused");
+        assert!(other.contains("MODIFY COLUMN"), "{other}");
+        assert_eq!(conflict("Nullable(UUID)", "Nullable(UUID)"), None);
+        assert_eq!(uuid_bytes_depth("Nullable(String)", "Nullable(UUID)"), None);
+        assert_eq!(uuid_bytes_depth("Nullable(Int32)", "Nullable(Int64)"), None);
+        assert_eq!(
+            uuid_bytes_depth("Nullable(FixedString(16))", "Nullable(UUID)"),
+            Some(0)
         );
     }
 
@@ -2331,16 +2601,27 @@ mod tests {
     #[test]
     fn a_pull_reads_the_part_with_the_function_of_its_store() {
         assert_eq!(
-            pull_source("nc", "gs", "b", "p/part'1.parquet"),
+            pull_source("nc", "gs", "b", "p/part'1.parquet", None),
             "gcs(nc, filename = 'b/p/part\\'1.parquet', format = 'Parquet')"
         );
         assert_eq!(
-            pull_source("nc", "s3", "b", "p/a.parquet"),
+            pull_source("nc", "s3", "b", "p/a.parquet", None),
             "s3(nc, filename = 'b/p/a.parquet', format = 'Parquet')"
         );
         assert_eq!(
-            pull_source("nc", "az", "c", "p/a.parquet"),
+            pull_source("nc", "az", "c", "p/a.parquet", None),
             "azureBlobStorage(nc, container = 'c', blob_path = 'p/a.parquet', format = 'Parquet')"
+        );
+        assert_eq!(
+            pull_source(
+                "nc",
+                "s3",
+                "b",
+                "p/a.parquet",
+                Some("`u` Nullable(FixedString(16))")
+            ),
+            "s3(nc, filename = 'b/p/a.parquet', format = 'Parquet', \
+             structure = '`u` Nullable(FixedString(16))')"
         );
     }
 
