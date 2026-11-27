@@ -10,7 +10,7 @@ One row per delivering ledger row: the source native type, the Arrow type batch 
 | --- | --- | --- | --- | --- |
 | postgres | 77 | 26 | 2 | 0 |
 | mysql | 45 | 37 | 0 | 0 |
-| mssql | 21 | 34 | 0 | 0 |
+| mssql | 24 | 31 | 0 | 0 |
 | oracle | 17 | 40 | 0 | 0 |
 | mongo | 0 | 20 | 0 | 0 |
 
@@ -165,7 +165,10 @@ No cell is empty.
 | mssql | `SMALLMONEY` | `Decimal128(19, 4)` | `exact` | `Nullable(Decimal(19, 4))` | `NUMERIC` | `NUMBER(19,4)` |
 | mssql | `VARBINARY(4)` | `Binary` | `exact` | `Nullable(String)` | `BYTES` | `BINARY` |
 | mssql | `FLOAT` | `Float64` | `exact` | `Nullable(Float64)` | `FLOAT64` | `FLOAT` |
-| mssql | 34 matrix-only rows: `TINYINT`, `SMALLINT`, `INT`, `DECIMAL(38,0)`, `DECIMAL(38,38)`, `DECIMAL(38,10)`, `DECIMAL(1,0)`, `DECIMAL(18,6)`, `NUMERIC(10,2)`, `REAL`, `CHAR(10)`, `VARCHAR(20)`, `VARCHAR(MAX)`, `TEXT`, `NCHAR(10)`, `NVARCHAR(20)`, `NVARCHAR(MAX)`, `NTEXT`, `BINARY(16)`, `VARBINARY(MAX)`, `IMAGE`, `DATETIME2(0)`, `DATETIME2(3)`, `DATETIME2(6)`, `DATETIMEOFFSET(0)`, `DATETIMEOFFSET(6)`, `TIME(0)`, `TIME(3)`, `TIME(6)`, `XML`, `SQL_VARIANT`, `HIERARCHYID`, `GEOMETRY`, `GEOGRAPHY` | n/a: no `delivery`, graded by the edge matrix only (a refused or text-only column) | n/a | n/a | n/a | n/a |
+| mssql | `HIERARCHYID` | `hex_bytes` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mssql | `GEOMETRY` | `hex_bytes` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mssql | `GEOGRAPHY` | `hex_bytes` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
+| mssql | 31 matrix-only rows: `TINYINT`, `SMALLINT`, `INT`, `DECIMAL(38,0)`, `DECIMAL(38,38)`, `DECIMAL(38,10)`, `DECIMAL(1,0)`, `DECIMAL(18,6)`, `NUMERIC(10,2)`, `REAL`, `CHAR(10)`, `VARCHAR(20)`, `VARCHAR(MAX)`, `TEXT`, `NCHAR(10)`, `NVARCHAR(20)`, `NVARCHAR(MAX)`, `NTEXT`, `BINARY(16)`, `VARBINARY(MAX)`, `IMAGE`, `DATETIME2(0)`, `DATETIME2(3)`, `DATETIME2(6)`, `DATETIMEOFFSET(0)`, `DATETIMEOFFSET(6)`, `TIME(0)`, `TIME(3)`, `TIME(6)`, `XML`, `SQL_VARIANT` | n/a: no `delivery`, graded by the edge matrix only (a refused or text-only column) | n/a | n/a | n/a | n/a |
 | oracle | `NUMBER` | `decimal_plain` | `exact` | `Nullable(String)` | `STRING` | `TEXT` |
 | oracle | `NUMBER(38,10)` | `Decimal128(38, 10)` | `exact` | `Nullable(Decimal(38, 10))` | `BIGNUMERIC` | `NUMBER(38,10)` |
 | oracle | `NUMBER(9)` | `Int32` | `exact` | `Nullable(Int32)` | `INT64` | `NUMBER(38,0)` |
