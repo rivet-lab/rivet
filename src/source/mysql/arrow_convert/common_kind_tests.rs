@@ -517,7 +517,7 @@ fn table() -> Vec<(&'static str, Spec, Option<CommonKind>, RivetType)> {
             "geometry",
             (MYSQL_TYPE_GEOMETRY, BIN, 0, none, 0),
             None,
-            unsupported("unknown"),
+            unsupported("geometry"),
         ),
         (
             "null",
