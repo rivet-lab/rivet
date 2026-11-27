@@ -8,6 +8,7 @@
 //! rivet overrides: no 30 s bound on a server round-trip.
 
 use crate::common::*;
+use crate::live_value_refusal_text_remedy_load::{ChDb, clickhouse_rows_json, json_text};
 
 const COLS: &str = "id INT PRIMARY KEY, v sql_variant, h hierarchyid, g geometry, gg geography";
 
@@ -96,6 +97,374 @@ fn a_cdc_capture_delivers_sql_variant_and_udt_columns_as_the_source_renders_them
     let want = source_rendering("rivet-mssql-cdc-1", &table);
     assert_eq!(want.len(), 6, "oracle rows: {want:?}");
     assert_eq!(delivered(&sc.rig.out_dir()), want);
+}
+
+const GEO_COLS: &str = "id INT PRIMARY KEY, g geometry, gg geography";
+
+const NO_GEO_ORACLE: &str = "CLR UDT: the DuckDB mssql scanner cannot read a geometry or geography column; the oracle is the server's own varbinary rendering through sqlcmd";
+
+/// One INSERT per row: SRID 0 and 4326, NULL, empty, curve types, and a Z/M point.
+fn geo_inserts(table: &str) -> Vec<String> {
+    [
+        "1, geometry::STGeomFromText('POINT(1 2)', 0), geography::Point(47.65, -122.34, 4326)",
+        "2, geometry::STGeomFromText('POLYGON((0 0,10 0,10 10,0 10,0 0))', 4326), \
+         geography::STGeomFromText('LINESTRING(-122.36 47.656, -122.343 47.656)', 4326)",
+        "3, NULL, NULL",
+        "4, geometry::STGeomFromText('POINT EMPTY', 0), \
+         geography::STGeomFromText('GEOMETRYCOLLECTION EMPTY', 4326)",
+        "5, geometry::STGeomFromText('CIRCULARSTRING(0 0, 1 1, 2 0)', 0), \
+         geography::STGeomFromText('CIRCULARSTRING(-122.3 47.6, -122.2 47.7, -122.1 47.6)', 4326)",
+        "6, geometry::STGeomFromText('COMPOUNDCURVE((0 0,1 1),CIRCULARSTRING(1 1,2 0,3 1))', 0), NULL",
+        "7, geometry::STGeomFromText('CURVEPOLYGON(CIRCULARSTRING(0 0,4 0,4 4,0 4,0 0))', 0), NULL",
+        "8, geometry::STGeomFromText('POINT(1 2 3 4)', 0), \
+         geography::STGeomFromText('POINT(1 2 3 4)', 4326)",
+    ]
+    .iter()
+    .map(|v| format!("INSERT INTO dbo.{table} (id, g, gg) VALUES ({v})"))
+    .collect()
+}
+
+/// The server's rendering of `expr` per row, read in 200-character slices because sqlcmd truncates a long line.
+fn geo_slices(container: &str, table: &str, expr: &str) -> std::collections::BTreeMap<i64, String> {
+    let lines = sqlcmd_lines(
+        container,
+        &format!(
+            "WITH n AS (SELECT TOP 60 ROW_NUMBER() OVER (ORDER BY (SELECT 1)) - 1 AS k FROM sys.all_objects) \
+             SELECT CONCAT(t.id, '|', n.k, '|', CASE WHEN {expr} IS NULL THEN CASE WHEN n.k = 0 THEN 'NULL' ELSE '' END \
+             ELSE SUBSTRING({expr}, n.k * 200 + 1, 200) END) FROM dbo.{table} t CROSS JOIN n \
+             WHERE n.k = 0 OR n.k * 200 < ISNULL(LEN({expr}), 0) ORDER BY t.id, n.k"
+        ),
+    );
+    let mut out = std::collections::BTreeMap::new();
+    for line in lines {
+        let mut f = line.splitn(3, '|');
+        let id: i64 = f.next().expect("id").trim().parse().expect("numeric id");
+        f.next().expect("slice index");
+        out.entry(id)
+            .or_insert_with(String::new)
+            .push_str(f.next().unwrap_or(""));
+    }
+    out
+}
+
+/// The server's rendering of `a` and `b` per row as `id|a|b`, with `NULL` for SQL NULL.
+fn geo_source(container: &str, table: &str, a: &str, b: &str) -> Vec<String> {
+    let (a, b) = (
+        geo_slices(container, table, a),
+        geo_slices(container, table, b),
+    );
+    a.iter()
+        .map(|(id, x)| format!("{id}|{x}|{}", b[id]))
+        .collect()
+}
+
+/// The lowercase hex of the CLR serialization of column `c`.
+fn clr_hex(c: &str) -> String {
+    format!("LOWER(CONVERT(varchar(max), CAST({c} AS varbinary(max)), 2))")
+}
+
+/// What rivet wrote under `dir`, read back through the parquet reader as `id|a|b`, `NULL` for a null, bytes as lowercase hex.
+fn geo_delivered(dir: &std::path::Path, a: &str, b: &str) -> Vec<String> {
+    use arrow::util::display::array_value_to_string;
+    let cell = |col: &arrow::array::ArrayRef, i: usize| {
+        if col.is_null(i) {
+            "NULL".to_string()
+        } else {
+            array_value_to_string(col, i)
+                .expect("render a cell")
+                .to_lowercase()
+        }
+    };
+    let mut rows: Vec<(i64, String)> = Vec::new();
+    for part in files_under(dir)
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "parquet"))
+    {
+        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+            std::fs::File::open(part).expect("open part"),
+        )
+        .expect("parquet part")
+        .build()
+        .expect("parquet reader");
+        for batch in reader {
+            let batch = batch.expect("record batch");
+            let id = batch.column_by_name("id").expect("id column");
+            let ids =
+                arrow::compute::cast(id, &arrow::datatypes::DataType::Int64).expect("id as i64");
+            let ids = ids
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .expect("i64 ids");
+            let (ca, cb) = (batch.column_by_name(a), batch.column_by_name(b));
+            let (ca, cb) = (ca.expect("first column"), cb.expect("second column"));
+            for i in 0..batch.num_rows() {
+                rows.push((
+                    ids.value(i),
+                    format!("{}|{}|{}", ids.value(i), cell(ca, i), cell(cb, i)),
+                ));
+            }
+        }
+    }
+    rows.sort();
+    rows.into_iter().map(|(_, line)| line).collect()
+}
+
+/// The `rivet.text_form` of `col` in every part under `dir` that holds the column.
+fn text_forms(dir: &std::path::Path, col: &str) -> Vec<Option<String>> {
+    files_under(dir)
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "parquet"))
+        .filter_map(|p| {
+            let b = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+                std::fs::File::open(p).expect("open part"),
+            )
+            .expect("parquet part");
+            let f = b.schema().field_with_name(col).ok()?.clone();
+            Some(f.metadata().get("rivet.text_form").cloned())
+        })
+        .collect()
+}
+
+/// Every part holding `col` labels it `hex_bytes`, and at least one does.
+fn assert_hex_bytes_labelled(dir: &std::path::Path, col: &str) {
+    let forms = text_forms(dir, col);
+    assert!(
+        !forms.is_empty() && forms.iter().all(|f| f.as_deref() == Some("hex_bytes")),
+        "{col}: rivet.text_form per part: {forms:?}"
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn a_batch_export_labels_geometry_and_geography_hex_bytes_and_keeps_the_clr_hex_of_every_value() {
+    require_alive(LiveService::Mssql);
+    let table = unique_name("mssql_geo");
+    mssql_exec(&format!("CREATE TABLE dbo.{table} ({GEO_COLS})"));
+    let _guard = MssqlTable::adopt(table.clone());
+    for sql in geo_inserts(&table) {
+        mssql_exec(&sql);
+    }
+    let want = geo_source("rivet-mssql-1", &table, &clr_hex("g"), &clr_hex("gg"));
+    assert_eq!(want.len(), 8, "oracle rows: {want:?}");
+    let rig = Rig::mssql_batch(&table).no_oracle(NO_GEO_ORACLE);
+    rig.run_ok();
+    let dir = rig.out_dir();
+    assert_eq!(geo_delivered(&dir, "g", "gg"), want);
+    assert_hex_bytes_labelled(&dir, "g");
+    assert_hex_bytes_labelled(&dir, "gg");
+    assert_eq!(text_forms(&dir, "id"), vec![None]);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql with SQL Server Agent + CDC"]
+fn a_cdc_capture_labels_geometry_and_geography_hex_bytes_and_keeps_the_clr_hex_of_every_value() {
+    let mut sc =
+        CdcScenario::mssql_with("mssql_cdc_geo", GEO_COLS, |r, _| r.no_oracle(NO_GEO_ORACLE));
+    sc.rig.run_ok();
+    let table = sc.table.clone();
+    for sql in geo_inserts(&table) {
+        sc.sql(&sql);
+    }
+    sc.settle();
+    sc.rig.run_ok();
+    let want = geo_source("rivet-mssql-cdc-1", &table, &clr_hex("g"), &clr_hex("gg"));
+    assert_eq!(want.len(), 8, "oracle rows: {want:?}");
+    let dir = sc.rig.out_dir();
+    assert_eq!(geo_delivered(&dir, "g", "gg"), want);
+    assert_hex_bytes_labelled(&dir, "g");
+    assert_hex_bytes_labelled(&dir, "gg");
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn a_query_with_stasbinary_and_stsrid_delivers_wkb_and_the_srid_not_the_clr_hex() {
+    require_alive(LiveService::Mssql);
+    let table = unique_name("mssql_geo_wkb");
+    mssql_exec(&format!("CREATE TABLE dbo.{table} ({GEO_COLS})"));
+    let _guard = MssqlTable::adopt(table.clone());
+    for sql in geo_inserts(&table) {
+        mssql_exec(&sql);
+    }
+    let wkb = |c: &str| format!("LOWER(CONVERT(varchar(max), {c}.STAsBinary(), 2))");
+    let want = geo_source("rivet-mssql-1", &table, &wkb("g"), &wkb("gg"));
+    let clr = geo_source("rivet-mssql-1", &table, &clr_hex("g"), &clr_hex("gg"));
+    assert_eq!(want.len(), 8, "oracle rows: {want:?}");
+    assert_ne!(want, clr, "the WKB is not the CLR hex");
+    let rig = Rig::mssql_batch(&table)
+        .no_oracle(NO_GEO_ORACLE)
+        .query(&format!(
+            "SELECT id, g.STAsBinary() AS g_wkb, gg.STAsBinary() AS gg_wkb FROM dbo.{table}"
+        ));
+    rig.run_ok();
+    assert_eq!(geo_delivered(&rig.out_dir(), "g_wkb", "gg_wkb"), want);
+    let srid = |c: &str| format!("CAST({c}.STSrid AS varchar(10))");
+    let want_srid = geo_source("rivet-mssql-1", &table, &srid("g"), &srid("gg"));
+    let rig = Rig::mssql_batch(&table)
+        .no_oracle(NO_GEO_ORACLE)
+        .query(&format!(
+            "SELECT id, g.STSrid AS g_srid, gg.STSrid AS gg_srid FROM dbo.{table}"
+        ));
+    rig.run_ok();
+    assert_eq!(
+        geo_delivered(&rig.out_dir(), "g_srid", "gg_srid"),
+        want_srid
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql"]
+fn a_columns_text_declaration_on_a_geometry_column_still_delivers_the_clr_hex_unlabelled() {
+    require_alive(LiveService::Mssql);
+    let table = unique_name("mssql_geo_decl");
+    mssql_exec(&format!("CREATE TABLE dbo.{table} ({GEO_COLS})"));
+    let _guard = MssqlTable::adopt(table.clone());
+    for sql in geo_inserts(&table) {
+        mssql_exec(&sql);
+    }
+    let want = geo_source("rivet-mssql-1", &table, &clr_hex("g"), &clr_hex("gg"));
+    let rig = Rig::mssql_batch(&table)
+        .no_oracle(NO_GEO_ORACLE)
+        .export_line("columns: {g: text, gg: text}");
+    rig.run_ok();
+    let dir = rig.out_dir();
+    assert_eq!(geo_delivered(&dir, "g", "gg"), want);
+    assert_eq!(text_forms(&dir, "g"), vec![None]);
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql + RIVET_PREV_RELEASE_BIN"]
+fn a_geometry_column_a_previous_release_wrote_is_not_drift_under_fail_and_keeps_its_values() {
+    require_alive(LiveService::Mssql);
+    let table = unique_name("mssql_geo_up");
+    mssql_exec(&format!("CREATE TABLE dbo.{table} ({GEO_COLS})"));
+    let _guard = MssqlTable::adopt(table.clone());
+    for sql in geo_inserts(&table) {
+        mssql_exec(&sql);
+    }
+    let want = geo_source("rivet-mssql-1", &table, &clr_hex("g"), &clr_hex("gg"));
+    let rig = Rig::mssql_batch(&table)
+        .no_oracle(NO_GEO_ORACLE)
+        .export_line("on_schema_drift: fail");
+    let Some(old) = rig.as_previous_release() else {
+        return;
+    };
+    let before = old.run();
+    assert!(
+        before.status.success(),
+        "{}",
+        String::from_utf8_lossy(&before.stderr)
+    );
+    let dir = rig.out_dir();
+    assert_eq!(geo_delivered(&dir, "g", "gg"), want);
+    for part in files_under(&dir) {
+        std::fs::remove_file(part).expect("clear the previous release's parts");
+    }
+    let mine = rig.run();
+    let err = String::from_utf8_lossy(&mine.stderr);
+    assert_eq!(mine.status.code(), Some(0), "{err}");
+    assert!(!err.contains("type changed"), "{err}");
+    assert!(!err.contains("schema changed"), "{err}");
+    assert_eq!(geo_delivered(&dir, "g", "gg"), want);
+    assert_hex_bytes_labelled(&dir, "g");
+    assert_hex_bytes_labelled(&dir, "gg");
+}
+
+const GEO_WAREHOUSE_BUCKET: &str = "rivet-qa-clickhouse-load";
+const GEO_CH_PASSWORD_ENV: &str = "RIVET_TEST_CH_PASSWORD";
+
+fn geo_table() -> (String, MssqlTable) {
+    let table = unique_name("mssql_geo_wh");
+    mssql_exec(&format!("CREATE TABLE dbo.{table} ({GEO_COLS})"));
+    let guard = MssqlTable::adopt(table.clone());
+    for sql in geo_inserts(&table) {
+        mssql_exec(&sql);
+    }
+    (table, guard)
+}
+
+fn id_pipe(rows: &[Vec<Option<String>>]) -> Vec<String> {
+    rows.iter()
+        .map(|r| {
+            r.iter()
+                .map(|c| c.clone().unwrap_or_else(|| "NULL".to_string()))
+                .collect::<Vec<_>>()
+                .join("|")
+        })
+        .collect()
+}
+
+#[test]
+#[ignore = "live: requires clickhouse + fake-gcs + mssql"]
+fn a_labelled_geometry_column_loads_into_clickhouse_and_unhex_recovers_the_clr_bytes() {
+    require_alive(LiveService::Mssql);
+    require_alive(LiveService::ClickHouse);
+    require_alive(LiveService::FakeGcs);
+    ensure_gcs_bucket(GEO_WAREHOUSE_BUCKET);
+    let (table, _guard) = geo_table();
+    let want = geo_source("rivet-mssql-1", &table, &clr_hex("g"), &clr_hex("gg"));
+    let db = ChDb::new();
+    let rig = Rig::mssql_batch(&table)
+        .no_oracle(NO_GEO_ORACLE)
+        .dest_gcs(
+            GEO_WAREHOUSE_BUCKET,
+            &unique_name("geoch"),
+            FAKE_GCS_ENDPOINT,
+        )
+        .top_line(&format!(
+            "load: {{ target: clickhouse, url: \"{CLICKHOUSE_HTTP_URL}\", database: {}, \
+             user: {CLICKHOUSE_USER}, password_env: {GEO_CH_PASSWORD_ENV}, pk: [id] }}",
+            db.0
+        ));
+    rig.run_ok();
+    rig.load_ok(&[], &[(GEO_CH_PASSWORD_ENV, CLICKHOUSE_PASSWORD)]);
+    let read = |g: &str, gg: &str| {
+        id_pipe(&clickhouse_rows_json(&format!(
+            "SELECT id, ifNull({g}, 'NULL'), ifNull({gg}, 'NULL') FROM {}.{table} ORDER BY id FORMAT JSONCompact",
+            db.0
+        )))
+    };
+    assert_eq!(read("g", "gg"), want, "clickhouse: the text as delivered");
+    assert_eq!(
+        read("lower(hex(unhex(g)))", "lower(hex(unhex(gg)))"),
+        want,
+        "clickhouse: unhex(x) recovers the CLR bytes"
+    );
+}
+
+#[test]
+#[ignore = "live: requires BigQuery creds + mssql"]
+fn a_labelled_geometry_column_loads_into_bigquery_and_from_hex_recovers_the_clr_bytes() {
+    let Some(bq) = BqLive::from_env("geo_bq") else {
+        return;
+    };
+    require_alive(LiveService::Mssql);
+    let (table, _guard) = geo_table();
+    let want = geo_source("rivet-mssql-1", &table, &clr_hex("g"), &clr_hex("gg"));
+    let _cleanup = bq.cleanup(&[&table]);
+    let rig = Rig::mssql_batch(&table)
+        .no_oracle(NO_GEO_ORACLE)
+        .dest_gcs_live(&bq.bucket, &format!("{}/{table}", bq.prefix))
+        .top_line(&bq.load_line(""));
+    rig.run_ok();
+    rig.load_ok(&[], &[]);
+    let read = |g: &str, gg: &str| {
+        let rows = bq.read_bq_rows(&format!(
+            "SELECT id, IFNULL({g}, 'NULL') AS a, IFNULL({gg}, 'NULL') AS b FROM `{}.{}.{table}` ORDER BY id",
+            bq.project, bq.dataset
+        ));
+        id_pipe(
+            &rows
+                .iter()
+                .map(|r| vec![json_text(&r["id"]), json_text(&r["a"]), json_text(&r["b"])])
+                .collect::<Vec<_>>(),
+        )
+    };
+    assert_eq!(read("g", "gg"), want, "bigquery: the text as delivered");
+    assert_eq!(
+        read("LOWER(TO_HEX(FROM_HEX(g)))", "LOWER(TO_HEX(FROM_HEX(gg)))"),
+        want,
+        "bigquery: FROM_HEX(x) recovers the CLR bytes"
+    );
 }
 
 /// A read held behind a schema lock for over 30 s completes. It does not go red when

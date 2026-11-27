@@ -250,7 +250,7 @@ pub(super) fn mssql_columns_to_schema(
         );
         let native = format!("{:?}", col.column_type()).to_lowercase();
         let source = SourceColumn::simple(col.name(), native, true);
-        let mapping = TypeMapping::from_source(&source, rivet);
+        let mapping = label_clr_udt(TypeMapping::from_source(&source, rivet), col, overrides);
         match build_arrow_field(&mapping) {
             Some(field) => {
                 if let Some(dt) = mapping
@@ -299,6 +299,16 @@ pub(super) fn mssql_columns_to_schema(
 /// The warning on a `time` column whose scale could not be read: delivered at microseconds.
 const TIME_SCALE_UNREAD_WARNING: &str = "time → Time64(microsecond): the column's declared scale could not be read from the catalog (a query that is not a single-table SELECT), so a scale-7 column (the bare `time` default) is read from its first value's scale; time(0..6) is exact.";
 
+/// A CLR UDT column (`geometry`, `geography`, `hierarchyid`) with no `columns:` override is delivered as the hex of its serialized bytes, and says so.
+fn label_clr_udt(mapping: TypeMapping, col: &Column, overrides: &ColumnOverrides) -> TypeMapping {
+    let labelled = col.column_type() == ColumnType::Udt && !overrides.contains_key(col.name());
+    if seeded!("mssql-clr-udt-unlabelled", false, labelled) {
+        mapping.with_text(crate::types::TextForm::HexBytes)
+    } else {
+        mapping
+    }
+}
+
 /// A `time` column still at microseconds with no override keeps the scale-unread warning.
 fn warn_time_scale_unread(mapping: TypeMapping, overridden: bool) -> TypeMapping {
     if overridden
@@ -332,7 +342,7 @@ pub(super) fn mssql_type_mappings(
             );
             let native = format!("{:?}", col.column_type()).to_lowercase();
             let source = SourceColumn::simple(col.name(), native.clone(), true);
-            let mapping = TypeMapping::from_source(&source, rivet);
+            let mapping = label_clr_udt(TypeMapping::from_source(&source, rivet), col, overrides);
             let mapping = if native == "timen" {
                 warn_time_scale_unread(mapping, overrides.contains_key(col.name()))
             } else {
@@ -1394,6 +1404,65 @@ mod tests {
         assert!(renders_as_text(T::Udt));
         assert!(!renders_as_text(T::NVarchar));
         assert!(!renders_as_text(T::Int4));
+    }
+
+    /// Mappings of one CLR UDT (`geometry`, `geography`, `hierarchyid`) beside its neighbours, by the batch schema and by the type report.
+    fn udt_row() -> Row {
+        Row::builder()
+            .column(
+                "g",
+                ColumnType::Udt,
+                ColumnData::Binary(Some(vec![0u8, 1].into())),
+            )
+            .column("v", ColumnType::SSVariant, ColumnData::I32(Some(1)))
+            .column("s", ColumnType::NVarchar, ColumnData::String(None))
+            .column("b", ColumnType::BigVarBin, ColumnData::Binary(None))
+            .build()
+    }
+
+    /// A CLR UDT column is labelled `hex_bytes` by the batch schema and by the type report; nothing beside it is.
+    #[test]
+    fn a_clr_udt_column_carries_the_hex_bytes_label_on_both_mapping_paths() {
+        let rows = [udt_row()];
+        let none = ColumnOverrides::new();
+        let (schema, _) = mssql_columns_to_schema(rows[0].columns(), &none, &rows, None).unwrap();
+        let mappings = mssql_type_mappings(rows[0].columns(), &none, None).unwrap();
+        let label = |i: usize| {
+            schema
+                .field(i)
+                .metadata()
+                .get(crate::types::META_TEXT_FORM)
+                .cloned()
+        };
+        assert_eq!(label(0).as_deref(), Some("hex_bytes"));
+        assert_eq!(
+            mappings[0].delivery,
+            crate::types::Delivery::Text(crate::types::TextForm::HexBytes)
+        );
+        assert_eq!(mappings[0].arrow_type, Some(DataType::Utf8));
+        for (i, mapping) in mappings.iter().enumerate().skip(1).take(3) {
+            assert_eq!(label(i), None, "{}", schema.field(i).name());
+            assert_eq!(mapping.delivery, crate::types::Delivery::Native);
+        }
+    }
+
+    /// A UDT column under a `columns:` override keeps the mapping the override gives it, unlabelled.
+    #[test]
+    fn a_declared_udt_column_keeps_its_override_mapping() {
+        let rows = [udt_row()];
+        let declared = ColumnOverrides::from([("g".to_string(), RivetType::Text)]);
+        let (schema, _) =
+            mssql_columns_to_schema(rows[0].columns(), &declared, &rows, None).unwrap();
+        let mappings = mssql_type_mappings(rows[0].columns(), &declared, None).unwrap();
+        assert_eq!(schema.field(0).data_type(), &DataType::Utf8);
+        assert!(
+            !schema
+                .field(0)
+                .metadata()
+                .contains_key(crate::types::META_TEXT_FORM)
+        );
+        assert_eq!(mappings[0].delivery, crate::types::Delivery::Native);
+        assert_eq!(mappings[0].rivet_type, RivetType::Text);
     }
 
     /// Every base type a `sql_variant` or UDT can carry renders as SQL Server's own ISO text.

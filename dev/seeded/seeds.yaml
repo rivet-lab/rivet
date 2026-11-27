@@ -7822,3 +7822,22 @@ seeds:
         na: "Oracle has no uuid column type and the type ledger holds no uuid row for it; the shared column_type is graded by the postgres and mssql cells"
       mongo:
         na: "a MongoDB field is read into its one `document` column; no uuid column reaches the ClickHouse typed loader"
+  - name: mssql-clr-udt-unlabelled
+    class: "a SQL Server geometry, geography or hierarchyid column is delivered as the hex of its CLR serialization with no `rivet.text_form` label, so the form the warehouse holds is not named and the recovery of the bytes is not discoverable"
+    history: "owner decision 2026-11-27 (geometry/geography keep today's hex, gain the label and the documented remedy); RED on main 2026-11-27 (the cells below)"
+    scope: source
+    switch: mssql-clr-udt-unlabelled
+    engines:
+      mssql:
+        cells:
+          - a_batch_export_labels_geometry_and_geography_hex_bytes_and_keeps_the_clr_hex_of_every_value
+          - a_cdc_capture_labels_geometry_and_geography_hex_bytes_and_keeps_the_clr_hex_of_every_value
+          - "lib:a_clr_udt_column_carries_the_hex_bytes_label_on_both_mapping_paths"
+      postgres:
+        na: "PostgreSQL has no CLR UDT; a PostGIS geometry is delivered by the PostgreSQL text projection, not a serialization this label names"
+      mysql:
+        na: "MySQL spatial columns are delivered as hex_wkb, already labelled (mysql_spatial cells in live_mysql_spatial.rs)"
+      mongo:
+        na: "a MongoDB field is read into its one `document` column; no CLR UDT exists"
+      oracle:
+        na: "Oracle SDO_GEOMETRY is refused by code, not delivered as bytes"
