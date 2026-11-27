@@ -293,10 +293,11 @@ What this changes:
 - **DuckDB autoload**: `VARCHAR` → `UUID` native type. A view like
   `SELECT uid::VARCHAR FROM read_parquet(...)` keeps working because
   DuckDB's `UUID::VARCHAR` cast yields the canonical form.
-- **ClickHouse 24.8 autoload**: `String` → `FixedString(16)` (the bytes,
-  not the text). To get back the canonical string, use
-  `lower(hex(uid))` and reformat, or upgrade to ClickHouse 25.x which
-  decodes `LogicalType::Uuid` directly.
+- **ClickHouse autoload**: a plain Parquet read gives `FixedString(16)` (the bytes,
+  not the text) on 24.8 and 26.8. `rivet load` into ClickHouse reads the column as
+  those bytes and converts it with `toUUID(UUIDNumToString(...))`, so the table holds
+  a native `UUID` (`Array(UUID)` for a list); only a direct read of the file needs
+  the conversion.
 
 Consumers reading the old Utf8-shaped Parquet files keep working — only
 files produced by Rivet ≥ v0.7.8 carry the new layout.
@@ -624,12 +625,12 @@ two independent engines and pins the autoload type. The full matrix:
 | `timestamp_tz(µs, UTC)`       | `TIMESTAMP WITH TIME ZONE` | `Nullable(DateTime64(6, 'UTC'))` |
 | `string` / `text` / `enum` / `interval` | `VARCHAR` | `Nullable(String)` |
 | `json` (PG `JSON`/`JSONB`, MySQL `JSON`) | `JSON` | `Nullable(String)` (ClickHouse 24.8) — DuckDB autoloads as native `JSON` |
-| `uuid` (PG native; MySQL via override) | `UUID` | `Nullable(FixedString(16))` (ClickHouse 24.8) — DuckDB autoloads as native `UUID` |
+| `uuid` (PG native; MySQL via override) | `UUID` | `Nullable(UUID)` through `rivet load` (a plain ClickHouse 24.8 Parquet read gives `Nullable(FixedString(16))`) — DuckDB autoloads as native `UUID` |
 | `binary` (`bytea` / `BLOB`)   | `BLOB`             | `Nullable(String)` (raw bytes)     |
 | `bool`                        | `BOOLEAN`          | `Nullable(Bool)`                   |
 | `list<inner>`                 | `inner[]`          | `Array(Nullable(inner))`           |
 
-A NULL list and an empty list are indistinguishable at BigQuery (a `REPEATED` field cannot hold a NULL list); `columns: {col: string}` keeps NULL. A ClickHouse `Array` cannot hold a NULL list either, so `rivet load` refuses a part holding one with `RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE` before creating a table; in a batch export read the column as `COALESCE(col, '{}')` to load `[]` on purpose, or as text to keep the NULL; a `mode: cdc` export has no `query:`, so give every source row a list and re-baseline the stream.
+A BigQuery `REPEATED` field and a ClickHouse `Array` cannot hold a NULL list, so a NULL list would load as `[]`, the same value as an empty list. `rivet load` refuses a part holding one with `RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE` before it writes anything (for ClickHouse, before creating a table); in a batch export read the column as `COALESCE(col, '{}')` to load `[]` on purpose, or as text to keep the NULL; a `mode: cdc` export has no `query:`, so give every source row a list and re-baseline the stream. An empty list and a list holding a NULL element load as before, and a table written before the refusal keeps the `[]` it holds.
 
 Round-trip values that the suite pins per row: `sum(decimal * 10^scale)`
 matches the in-process Arrow check; `json_valid` / `isValidJSON` returns true
