@@ -41,8 +41,13 @@ workflow enforces on the PR itself:
 - commit messages and the PR title/body are English, carry no `Co-Authored-By` /
   `Claude-Session` trailer, and never put fix/close/resolve before `#N` (write `see #N`);
 - a raised ratchet pin (any line or block marked `ratchet-pin:`) is named in a
-  `## Ratchets raised` section of the PR body; lowering one needs nothing. A pin whose marker
-  names a `count <pathspec> <regex>` is measured from the tree (`pr_ready.py pins`), so there is no number to type;
+  `## Ratchets raised` section of the PR body, on a line that carries the pin name, its step right after the name
+  (`name +N` or `name old -> new` with `old` the base value), a date `YYYY-MM-DD` and a short reason; the PR rules
+  compare the measured pin against the merge base and fail a raise larger than the declared step, a step that does not
+  follow the exact name, or a line without a date and a reason. Prefer `+N`: it does not go stale when another PR lands first. Lowering one needs nothing;
+- a pin whose marker names `count <pathspec> <regex>`, or `rows <pathspec> <row start regex> || <regex a row holds>`,
+  is measured from the tree (`pr_ready.py pins`): there is no number to type and no history line to keep (`git log` is the history),
+  so two branches that each raise such a pin by 1 do not edit the same line. A pin without such a marker is still a literal and can conflict;
 - every `ratchet-pin:` marker carries `(review YYYY-MM-DD)` right after its name, before `sum`, `count` or `min`; the date is a
   calendar day at most 180 days away, and the same rule holds for every `SKIP_ALLOWED` reason (`(review YYYY-MM-DD)`), every known-red
   entry and every `EXCUSES` entry (their `expires`). A malformed, missing or far date fails the PR rules; a passed one fails

@@ -846,7 +846,7 @@ fn flush(
             seeded!(
                 "mysql-cdc-time-remedy-names-the-batch-cast",
                 true,
-                f.applies_to(dt)
+                f.applies_to(dt, &m.delivery)
             )
         });
         let memo = image_name_memo(events, &m.column_name);
