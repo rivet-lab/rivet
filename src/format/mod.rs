@@ -83,7 +83,11 @@ mod tests {
     /// The shared check refuses what each writer refuses, by the same code and message, and nothing else.
     #[test]
     fn unwritable_columns_are_refused_by_format_with_the_writers_own_message() {
-        let dec256 = DataType::Decimal256(60, 10);
+        let dec256 = DataType::List(Arc::new(Field::new(
+            "item",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            true,
+        )));
         let neg = DataType::Decimal128(10, -2);
         let cols = |dt: &DataType| vec![("c", dt.clone())];
         let check = |f: FormatType, dt: &DataType| {

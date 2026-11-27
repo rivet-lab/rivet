@@ -209,6 +209,28 @@ pub fn decimal_str_to_scaled_i256(s: &str, scale: i8) -> Option<i256> {
     Some(if negative { -result } else { result })
 }
 
+/// Format a scaled `Decimal256` value as exact decimal text (no float).
+pub fn scaled_i256_to_decimal_str(value: i256, scale: i8) -> String {
+    let text = value.to_string();
+    let (sign, digits) = match text.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", text.as_str()),
+    };
+    if scale <= 0 {
+        if value == i256::ZERO {
+            return "0".to_string();
+        }
+        return format!(
+            "{sign}{digits}{}",
+            "0".repeat(scale.unsigned_abs() as usize)
+        );
+    }
+    let width = scale as usize;
+    let padded = format!("{digits:0>w$}", w = width + 1);
+    let (int_part, frac) = padded.split_at(padded.len() - width);
+    format!("{sign}{int_part}.{frac}")
+}
+
 /// Scale an integer (already widened to `i128`) by `10^scale` into `i256` — the
 /// `Decimal256` analogue of the source drivers' `scale_int_to_i128`. `None` on
 /// negative scale or `i256` overflow.
@@ -232,14 +254,16 @@ fn pow10_i256(n: u32) -> Option<i256> {
     Some(acc)
 }
 
-/// Decimal text that is exactly an integer (`-42`, `42.00`); `None` for a fraction, non-numeric text or `i128` overflow.
-pub fn decimal_text_to_int(s: &str) -> Option<i128> {
-    let s = s.trim();
-    let (int, frac) = s.split_once('.').unwrap_or((s, ""));
-    if !frac.bytes().all(|b| b == b'0') {
-        return None;
-    }
-    int.parse().ok()
+/// The integer a text cell holds when the whole cell is that integer; a fraction (`1.0` too), an exponent, a space or trailing text is no integer.
+pub fn whole_int_text(bv: &[u8]) -> Option<i128> {
+    let (v, used) = atoi::FromRadix10SignedChecked::from_radix_10_signed_checked(bv);
+    v.filter(|_| {
+        seeded!(
+            "integer-text-cut-to-leading-digits",
+            used > 0,
+            used == bv.len() && bv.last().is_some_and(u8::is_ascii_digit)
+        )
+    })
 }
 
 /// Decimal text as the nearest float of type `F` (correctly rounded); `None` for non-numeric text.
@@ -332,23 +356,38 @@ pub fn rounded_f64_refusal(column: &str, text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{decimal_str_to_scaled_i128, decimal_text_to_float, decimal_text_to_int};
+    use super::{i256, scaled_i256_to_decimal_str};
+
+    /// `Decimal256` text is exact at both ends of the 76-digit range.
+    #[test]
+    fn i256_text_is_exact_at_the_extremes() {
+        let max = scaled_i256_to_decimal_str(i256::MAX, 0);
+        assert_eq!(max.len(), 77);
+        assert_eq!(scaled_i256_to_decimal_str(i256::MAX, 76).len(), 78);
+        assert_eq!(
+            scaled_i256_to_decimal_str(i256::MIN, 0),
+            i256::MIN.to_string()
+        );
+        assert_eq!(scaled_i256_to_decimal_str(i256::ZERO, 3), "0.000");
+        assert_eq!(scaled_i256_to_decimal_str(i256::ZERO, -3), "0");
+        assert_eq!(scaled_i256_to_decimal_str(i256::from_i128(-7), 3), "-0.007");
+    }
+
+    use super::{decimal_str_to_scaled_i128, decimal_text_to_float, whole_int_text};
 
     #[test]
-    fn decimal_text_to_int_accepts_only_exact_integers() {
-        assert_eq!(decimal_text_to_int("42"), Some(42));
-        assert_eq!(decimal_text_to_int("-42"), Some(-42));
-        assert_eq!(decimal_text_to_int("+7"), Some(7));
-        assert_eq!(decimal_text_to_int(" 42.00 "), Some(42));
-        assert_eq!(decimal_text_to_int("0.0"), Some(0));
+    fn whole_int_text_accepts_only_a_whole_cell_integer() {
+        assert_eq!(whole_int_text(b"42"), Some(42));
+        assert_eq!(whole_int_text(b"-42"), Some(-42));
         assert_eq!(
-            decimal_text_to_int("18446744073709551615"),
+            whole_int_text(b"18446744073709551615"),
             Some(18_446_744_073_709_551_615)
         );
         for bad in [
-            "1.5", "42.01", "", "-", ".0", "abc", "1e3", "--5", "4 2", "0x10", "1.5.0",
+            "1.5", "1.0", "42.00", "1 ", " 1", "", "-", ".0", "abc", "1e3", "--5", "4 2", "0x10",
+            "1.5.0",
         ] {
-            assert_eq!(decimal_text_to_int(bad), None, "{bad:?}");
+            assert_eq!(whole_int_text(bad.as_bytes()), None, "{bad:?}");
         }
     }
 

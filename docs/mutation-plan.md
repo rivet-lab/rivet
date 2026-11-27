@@ -59,7 +59,7 @@ Narrow live filters for Tier 3 (mutate X → run only its guards):
    stub without executing it, which coverage cannot see.
 
    The graded set runs in up to eight `Mutants (shard N)` jobs (about ten mutants each) (`--shard k/N`,
-   dependencies reused through `--copy-target`); `Mutants (changed lines)`
+   dependencies reused through `--copy-target`); `Mutants (grade)`
    grades their outcomes as one run, and the P2 audit rides in that same run
    rather than paying a second build.
 2. **Nightly: removed 2026-08-17.** The rotation over Tier 0-2 hit the job's

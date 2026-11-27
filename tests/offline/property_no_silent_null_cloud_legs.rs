@@ -60,7 +60,7 @@ fn the_offline_tier_grades_the_recorded_answers_and_names_what_it_cannot() {
     assert!(out.status.success(), "{seen}");
     for line in [
         "no_silent_null_cloud summary tier=offline PASS=2 RED=0 NOT_GRADED=3",
-        "no_secret_in_output_cloud summary tier=offline PASS=3 RED=1 NOT_GRADED=6",
+        "no_secret_in_output_cloud summary tier=offline PASS=4 RED=0 NOT_GRADED=6",
         "check_equals_run_cloud summary tier=offline PASS=1 RED=1 NOT_GRADED=2",
         "no_debris_after_stop_cloud summary tier=offline PASS=2 RED=0 NOT_GRADED=3",
     ] {

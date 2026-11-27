@@ -1135,7 +1135,7 @@ pub mod codes {
     /// A source value the column's Arrow type has no faithful reading for (PG `infinity`, `24:00:00`).
     pub const SOURCE_VALUE_UNREPRESENTABLE: Code = refusal(
         "RIVET_SOURCE_VALUE_UNREPRESENTABLE",
-        "map the value to a representable one in the export's `query:`, or exclude the column",
+        "declare the column `text` under `columns:` where the message names it, or map the value to a representable one in the export's `query:`, or exclude the column",
     );
     /// A planner probe (range bound, keyset boundary or ceiling) returned a value of a type the adapter has no reader for.
     pub const SOURCE_PROBE_UNREADABLE: Code = refusal(
@@ -2220,7 +2220,36 @@ pub fn codes_markdown() -> String {
             c.action.replace('|', "\\|")
         ));
     }
+    out.push_str(
+        "\n## Decided by a value\n\n`rivet check` reads at most the first row of an export that \
+         declares `columns:`, so a later value can still raise these codes in `rivet run` or \
+         `rivet load` after check passed: check names them in a note on stderr.\n\n",
+    );
+    for id in VALUE_CODES {
+        out.push_str(&format!("- `{id}`\n"));
+    }
     out
+}
+
+/// The codes only a value the source or warehouse holds raises: `rivet check` reads at most the first row of an export that declares `columns:`, so it names these for the rows it did not read.
+pub const VALUE_CODES: [&str; 2] = [
+    codes::SOURCE_VALUE_UNREPRESENTABLE.id,
+    codes::LOAD_VALUE_OUT_OF_TARGET_RANGE.id,
+];
+
+/// The note `rivet check` prints when an export declares `columns:`: the codes a value it did not read can still raise.
+pub fn values_unread_note(declares_columns: bool) -> Option<String> {
+    if !declares_columns {
+        return None;
+    }
+    seeded!(
+        "check-values-unread-unsaid",
+        None,
+        Some(format!(
+            "note[values-unread]: rivet check reads at most the first row of an export that declares `columns:`; a run may still refuse a value it did not read with {}",
+            VALUE_CODES.join(", ")
+        ))
+    )
 }
 
 pub type Result<T> = anyhow::Result<T>;
@@ -2309,6 +2338,37 @@ mod tests {
         ] {
             assert!(md.contains(row), "missing row: {row}\n{md}");
         }
+    }
+
+    #[test]
+    fn check_names_exactly_the_codes_only_a_value_raises() {
+        assert_eq!(
+            super::VALUE_CODES,
+            [
+                "RIVET_SOURCE_VALUE_UNREPRESENTABLE",
+                "RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE"
+            ],
+            "a value-decided code is added here on purpose: check names it instead of deciding it"
+        );
+        assert_eq!(super::values_unread_note(false), None);
+        let note = super::values_unread_note(true).expect("an export that declares columns");
+        assert_eq!(
+            note,
+            "note[values-unread]: rivet check reads at most the first row of an export that \
+             declares `columns:`; a run may still refuse a value it did not read with \
+             RIVET_SOURCE_VALUE_UNREPRESENTABLE, RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE"
+        );
+        assert!(
+            super::VALUE_CODES.iter().all(|c| note.contains(c)),
+            "{note}"
+        );
+        assert!(
+            super::codes::ALL
+                .iter()
+                .filter(|c| !super::VALUE_CODES.contains(&c.id))
+                .all(|c| !note.contains(c.id)),
+            "{note}"
+        );
     }
 
     #[test]

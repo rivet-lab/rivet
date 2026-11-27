@@ -38,6 +38,7 @@ pub(crate) mod kind;
 #[cfg(test)]
 mod kind_doc;
 mod mapping;
+pub(crate) mod narrowing;
 pub(crate) mod override_table;
 mod override_type;
 pub mod policy;
@@ -48,9 +49,9 @@ pub mod target;
 pub use cursor::CursorState;
 #[allow(unused_imports)]
 pub use delivery::{
-    Delivery, TextForm, bit_string, decimal_plain, hex_bytes, iso_timestamp_nanos,
-    iso8601_duration, mysql_datetime_text, oracle_fields_text, oracle_timestamp_text,
-    time_beyond_day, time_of_day_offset, uuid36,
+    Delivery, TextForm, bit_string, decimal_plain, hex_bytes, is_zoned_timestamp_label,
+    iso_timestamp_nanos, iso8601_duration, mysql_datetime_text, oracle_fields_text,
+    oracle_timestamp_text, time_beyond_day, time_of_day_offset, uuid36,
 };
 pub use fidelity::TypeFidelity;
 // Public surface for contract/integration tests; not referenced from the binary.
@@ -59,6 +60,8 @@ pub use mapping::{
     META_TEXT_FORM, TypeMapping, build_arrow_field, derive_fidelity, rivet_type_to_arrow,
 };
 pub(crate) use override_table::resolve_column;
+#[allow(unused_imports)]
+pub use override_table::text_remedy;
 pub use override_type::{parse_column_overrides, parse_type_str};
 pub(crate) use override_type::{refuse_cursor_case_miss, refuse_override_case_miss};
 pub use policy::plan_columns;

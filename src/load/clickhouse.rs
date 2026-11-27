@@ -124,6 +124,11 @@ impl ClickhouseLoader {
         self
     }
 
+    /// The role a part plays in this load: `cdc_role` for a change-data-capture export, else a plain batch part.
+    fn role(&self, cdc_role: PartRole) -> PartRole {
+        if self.cdc { cdc_role } else { PartRole::Batch }
+    }
+
     /// Mark this loader as writing a CDC change log.
     pub(crate) fn cdc(mut self, cdc: bool) -> Self {
         self.cdc = cdc;
@@ -419,7 +424,11 @@ impl TargetLoader for ClickhouseLoader {
                 ),
             ));
         }
-        let part_rows = super::before_write(checked_part_rows(|| self.store(), uris, false))?;
+        let part_rows = super::before_write(checked_part_rows(
+            || self.store(),
+            uris,
+            self.role(PartRole::CdcBaseline),
+        ))?;
         let target = self.quoted(table);
         let swap = self.quoted(&format!("{table}__rivet_swap"));
         self.query(&create_table_sql(
@@ -450,7 +459,11 @@ impl TargetLoader for ClickhouseLoader {
         uris: &[String],
         pk: &[String],
     ) -> Result<u64> {
-        let part_rows = super::before_write(checked_part_rows(|| self.store(), uris, self.cdc))?;
+        let part_rows = super::before_write(checked_part_rows(
+            || self.store(),
+            uris,
+            self.role(PartRole::CdcChangeLog),
+        ))?;
         let full = changelog_specs(specs);
         let changes = self.quoted(&format!("{table}__changes"));
         let shape = super::before_write(changelog_shape(
@@ -1181,11 +1194,19 @@ fn object_kind_of(engine: &str) -> ObjectKind {
     }
 }
 
-/// The row count of every part in `uris`, in order, each footer checked for a date or timestamp ClickHouse cannot hold and, for a change log, the head of `__pos` for a position it cannot version.
+/// What a part is loaded as, which decides the checks it takes and the remedy a refusal names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PartRole {
+    Batch,
+    CdcBaseline,
+    CdcChangeLog,
+}
+
+/// The row count of every part in `uris`, in order, each checked for a date or timestamp, or a NULL list, ClickHouse cannot hold and, for a change log, the head of `__pos` for a position it cannot version.
 fn checked_part_rows<'s>(
     store: impl FnOnce() -> Result<&'s GcsStore>,
     uris: &[String],
-    change_log: bool,
+    role: PartRole,
 ) -> Result<Vec<u64>> {
     if uris.is_empty() {
         return Ok(Vec::new());
@@ -1193,11 +1214,61 @@ fn checked_part_rows<'s>(
     let store = store()?;
     super::target_range::map_footers(store, uris, |key, uri, meta| {
         refuse_unholdable_temporals(meta, uri)?;
-        if change_log {
+        refuse_null_lists(store, key, meta, uri, role)?;
+        if role == PartRole::CdcChangeLog {
             refuse_unorderable_positions(store, key, meta, uri)?;
         }
         footer_rows(meta)
     })
+}
+
+/// Refuse a part holding a NULL list, which a ClickHouse Array cannot keep and would load as `[]`, before any table is created.
+fn refuse_null_lists(
+    store: &GcsStore,
+    key: &str,
+    meta: &parquet::file::metadata::ParquetMetaData,
+    uri: &str,
+    role: PartRole,
+) -> Result<()> {
+    let columns = seeded!(
+        "clickhouse-null-array-loads-as-empty",
+        Vec::new(),
+        super::part_lists::list_columns(meta)
+    );
+    match super::part_lists::first_null_list(
+        store,
+        key,
+        meta,
+        &columns,
+        role == PartRole::CdcChangeLog,
+    )? {
+        None => Ok(()),
+        Some(column) => crate::rivet_bail!(
+            crate::error::codes::LOAD_VALUE_OUT_OF_TARGET_RANGE,
+            "{uri}: column `{column}` holds a NULL list, and a ClickHouse Array cannot be NULL: it would load as [], the same value as an empty list. \
+             Nothing was written and no table was created. {}",
+            null_list_remedy(column, role)
+        ),
+    }
+}
+
+/// The remedy for a NULL list: a `query:` rewrite for a batch export, a source fix and a re-baseline for a CDC export, which has no `query:`.
+fn null_list_remedy(column: &str, role: PartRole) -> String {
+    match seeded!(
+        "clickhouse-cdc-null-array-names-a-query",
+        PartRole::Batch,
+        role
+    ) {
+        PartRole::Batch => format!(
+            "In the export's `query:` read it as COALESCE({column}, '{{}}') AS {column} to load [] on purpose, \
+             or as {column}::text AS {column} to keep the NULL, or correct the source value."
+        ),
+        PartRole::CdcBaseline | PartRole::CdcChangeLog => format!(
+            "A CDC export cannot reshape `{column}` in its config, and the part holding the NULL stays staged, so fixing the source alone does not lift this refusal. \
+             Give every row a list in `{column}` in the source (an empty list if [] is what is meant), then re-baseline the stream. {}",
+            crate::source::cdc::checkpoint_identity::RECOVER
+        ),
+    }
 }
 
 /// Refuse a change-log part whose `__pos` head is of a shape ClickHouse cannot version, before any table is created.
@@ -1747,7 +1818,7 @@ mod tests {
             .map(|i| write(&format!("p{i:02}.parquet"), &vec![0; i + 1]))
             .collect();
         assert_eq!(
-            checked_part_rows(|| Ok(&store), &good, false).unwrap(),
+            checked_part_rows(|| Ok(&store), &good, PartRole::Batch).unwrap(),
             (1..=good.len() as u64).collect::<Vec<_>>(),
             "one count per part, in the order given"
         );
@@ -1755,7 +1826,7 @@ mod tests {
             checked_part_rows(
                 || Err(anyhow::anyhow!("no store is opened for a load of no parts")),
                 &[],
-                false
+                PartRole::Batch
             )
             .unwrap(),
             Vec::<u64>::new()
@@ -1766,7 +1837,7 @@ mod tests {
         mixed.push(write("early.parquet", &[DATETIME64_MIN_SECS - 1]));
         let err = format!(
             "{:#}",
-            checked_part_rows(|| Ok(&store), &mixed, false).unwrap_err()
+            checked_part_rows(|| Ok(&store), &mixed, PartRole::Batch).unwrap_err()
         );
         assert!(
             err.contains("gs://b/late.parquet")
@@ -1776,7 +1847,7 @@ mod tests {
         let gone = vec![good[0].clone(), "gs://b/absent.parquet".to_string()];
         let err = format!(
             "{:#}",
-            checked_part_rows(|| Ok(&store), &gone, false).unwrap_err()
+            checked_part_rows(|| Ok(&store), &gone, PartRole::Batch).unwrap_err()
         );
         assert!(
             err.contains("reading the footer of gs://b/absent.parquet"),
@@ -1824,12 +1895,12 @@ mod tests {
             .map(|(i, p)| part_of_positions(dir.path(), &format!("g{i}.parquet"), &[*p, *p]))
             .collect();
         assert_eq!(
-            checked_part_rows(|| Ok(&store), &good, true).unwrap(),
+            checked_part_rows(|| Ok(&store), &good, PartRole::CdcChangeLog).unwrap(),
             vec![2; good.len()]
         );
         let legacy = part_of_positions(dir.path(), "legacy.parquet", &[None, Some(LEGACY_POS)]);
         let mixed = vec![good[0].clone(), legacy.clone()];
-        let err = checked_part_rows(|| Ok(&store), &mixed, true).unwrap_err();
+        let err = checked_part_rows(|| Ok(&store), &mixed, PartRole::CdcChangeLog).unwrap_err();
         assert!(err.is::<crate::load::Refused>(), "{err:#}");
         assert_eq!(
             crate::error::error_code(&err),
@@ -1843,10 +1914,114 @@ mod tests {
             )
         );
         assert_eq!(
-            checked_part_rows(|| Ok(&store), &mixed, false).unwrap(),
+            checked_part_rows(|| Ok(&store), &mixed, PartRole::Batch).unwrap(),
             vec![2, 2],
             "a load that is not a change log never reads __pos"
         );
+    }
+
+    /// A NULL list is refused before any write with its column and both remedies; an empty list and a NULL element pass.
+    #[test]
+    fn a_null_list_is_refused_before_any_write_and_an_empty_list_or_null_element_passes() {
+        use arrow::array::{ArrayRef, ListArray};
+        use arrow::datatypes::Int32Type;
+        let dir = tempfile::tempdir().unwrap();
+        let store = GcsStore::open_fs(dir.path().to_str().unwrap()).unwrap();
+        let write = |name: &str, rows: Vec<Option<Vec<Option<i32>>>>| {
+            let col = ListArray::from_iter_primitive::<Int32Type, _, _>(rows);
+            let batch = arrow::record_batch::RecordBatch::try_from_iter([(
+                "tags",
+                std::sync::Arc::new(col) as ArrayRef,
+            )])
+            .unwrap();
+            let mut buf = Vec::new();
+            let mut w =
+                parquet::arrow::ArrowWriter::try_new(&mut buf, batch.schema(), None).unwrap();
+            w.write(&batch).unwrap();
+            w.close().unwrap();
+            std::fs::write(dir.path().join(name), buf).unwrap();
+            format!("gs://b/{name}")
+        };
+        let clean = write(
+            "clean.parquet",
+            vec![Some(vec![]), Some(vec![Some(1), None])],
+        );
+        let nulls = write("nulls.parquet", vec![Some(vec![Some(1)]), None]);
+        assert_eq!(
+            checked_part_rows(|| Ok(&store), std::slice::from_ref(&clean), PartRole::Batch)
+                .unwrap(),
+            vec![2]
+        );
+        let both = vec![clean, nulls.clone()];
+        let err = checked_part_rows(|| Ok(&store), &both, PartRole::Batch).unwrap_err();
+        assert_eq!(
+            crate::error::error_code(&err),
+            Some("RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE")
+        );
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "{nulls}: column `tags` holds a NULL list, and a ClickHouse Array cannot be NULL: it would load as [], the same value as an empty list. \
+                 Nothing was written and no table was created. In the export's `query:` read it as COALESCE(tags, '{{}}') AS tags to load [] on purpose, \
+                 or as tags::text AS tags to keep the NULL, or correct the source value."
+            )
+        );
+        for role in [PartRole::CdcBaseline, PartRole::CdcChangeLog] {
+            let err =
+                checked_part_rows(|| Ok(&store), std::slice::from_ref(&nulls), role).unwrap_err();
+            assert_eq!(
+                crate::error::error_code(&err),
+                Some("RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE")
+            );
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "{nulls}: column `tags` holds a NULL list, and a ClickHouse Array cannot be NULL: it would load as [], the same value as an empty list. \
+                     Nothing was written and no table was created. A CDC export cannot reshape `tags` in its config, and the part holding the NULL stays staged, so fixing the source alone does not lift this refusal. \
+                     Give every row a list in `tags` in the source (an empty list if [] is what is meant), then re-baseline the stream. {}",
+                    crate::source::cdc::checkpoint_identity::RECOVER
+                )
+            );
+        }
+    }
+
+    /// A NULL list in a change-log delete row passes only for the change-log role; every other role refuses it.
+    #[test]
+    fn a_null_list_in_a_delete_row_passes_only_for_the_change_log_role() {
+        use arrow::array::{ArrayRef, ListArray, StringArray};
+        use arrow::datatypes::Int32Type;
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let store = GcsStore::open_fs(dir.path().to_str().unwrap()).unwrap();
+        let tags =
+            ListArray::from_iter_primitive::<Int32Type, _, _>(vec![Some(vec![Some(1)]), None]);
+        let ops = StringArray::from(vec![
+            crate::source::cdc::ChangeOp::Insert.as_str(),
+            crate::source::cdc::ChangeOp::Delete.as_str(),
+        ]);
+        let batch = arrow::record_batch::RecordBatch::try_from_iter([
+            ("tags", Arc::new(tags) as ArrayRef),
+            ("__op", Arc::new(ops) as ArrayRef),
+        ])
+        .unwrap();
+        let mut buf = Vec::new();
+        let mut w = parquet::arrow::ArrowWriter::try_new(&mut buf, batch.schema(), None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+        std::fs::write(dir.path().join("del.parquet"), buf).unwrap();
+        let part = vec!["gs://b/del.parquet".to_string()];
+        assert_eq!(
+            checked_part_rows(|| Ok(&store), &part, PartRole::CdcChangeLog).unwrap(),
+            vec![2]
+        );
+        for role in [PartRole::Batch, PartRole::CdcBaseline] {
+            let err = checked_part_rows(|| Ok(&store), &part, role).unwrap_err();
+            assert_eq!(
+                crate::error::error_code(&err),
+                Some("RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE"),
+                "{role:?}"
+            );
+        }
     }
 
     #[test]

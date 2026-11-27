@@ -199,11 +199,11 @@ def _sf_value(kind: str, text: str | None):
     return sf_json(text) if kind == "VARIANT" else text
 
 
-SF_TEXT_FORMATS = {"TIMESTAMP_NTZ": "YYYY-MM-DD HH24:MI:SS.FF9", "TIMESTAMP_LTZ": "YYYY-MM-DD HH24:MI:SS.FF9", "TIMESTAMP_TZ": "YYYY-MM-DD HH24:MI:SS.FF9 TZH:TZM", "TIME": "HH24:MI:SS.FF9"}
+SF_TEXT_FORMATS = {"DATE": "UUUU-MM-DD", "TIMESTAMP_NTZ": "UUUU-MM-DD HH24:MI:SS.FF9", "TIMESTAMP_LTZ": "UUUU-MM-DD HH24:MI:SS.FF9", "TIMESTAMP_TZ": "UUUU-MM-DD HH24:MI:SS.FF9 TZH:TZM", "TIME": "HH24:MI:SS.FF9"}
 
 
 def sf_text(kind: str, col: str) -> str:
-    """A Snowflake column as the harness reads it: a FLOAT as the double itself (its text keeps nine digits), a VARIANT as its JSON text (TO_VARCHAR drops a string's quotes), a time at nine fraction digits (the session formats cut to milliseconds and seconds), the rest as text."""
+    """A Snowflake column as the harness reads it: a FLOAT as the double itself (its text keeps nine digits), a VARIANT as its JSON text (TO_VARCHAR drops a string's quotes), a date or timestamp with the signed year `UUUU` (`YYYY` is the era year, so a BC date reads as AD) and a time at nine fraction digits (the session formats cut to milliseconds and seconds), the rest as text."""
     if kind == "FLOAT":
         return f'"{col}"'
     if kind in ("ARRAY", "OBJECT", "VARIANT"):
@@ -740,6 +740,9 @@ def self_test() -> None:
         assert gcp.bq_rows("p", "SELECT 1") == [{"v": "a"}, {"v": "b"}], "a query result page past the first is read"
     assert _json_of("FLOAT64", '"Infinity"') == float("inf") and _json_of("STRING", '"x"') == "x" and _json_of("JSON", "null") == "null"
     assert _sf_value("BINARY", "0102") == b"\x01\x02" and _sf_value("BOOLEAN", "true") is True and _sf_value("NUMBER", "12.50") == Decimal("12.50")
+    assert sf_text("DATE", "c") == 'TO_VARCHAR("c", \'UUUU-MM-DD\')', "a DATE is read with the signed year, never the session format"
+    assert all("YYYY" not in f for f in SF_TEXT_FORMATS.values()), "YYYY is the era year: a BC value would read as AD"
+    assert all(sf_text(k, "c").count("UUUU") == 1 for k in ("DATE", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ"))
     assert sf_text("FLOAT", "c") == '"c"' and sf_text("TIME", "c") == 'TO_VARCHAR("c", \'HH24:MI:SS.FF9\')' and sf_text("TEXT", "c") == 'TO_VARCHAR("c")' and sf_text("VARIANT", "c") == 'TO_JSON("c")'
     assert sf_drops("D.S", ["t"]) == ["DROP TABLE IF EXISTS D.S.t", "DROP TABLE IF EXISTS D.S.t__changes", "DROP STAGE IF EXISTS D.S.rivet_stage_t", "DROP STAGE IF EXISTS D.S.rivet_stage_t__changes"]
     assert _sf_value("VARIANT", '{"a":-1.797693134862316e+308,"b":21.797693134862316e+308}') == '{"a":-1.7976931348623157e+308,"b":21.797693134862316e+308}' and _sf_value("ARRAY", "[1.797693134862316e+308]") == [1.7976931348623157e+308], "Snowflake's 16-digit largest double reads as itself"

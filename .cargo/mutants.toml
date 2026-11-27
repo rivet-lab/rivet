@@ -305,6 +305,9 @@ exclude_re = [
     "delete match arm \"mssql\" in scan_tables",
     # 2026-11-05 witness: init_mongo_schema_wide_lists_collections_in_rivets_order.
     "delete match arm \"mongo\" in scan_tables",
+    # 2026-11-25 learn_arrays and load_arrays read the PG catalog over a live slot; witness: live_arrays_met_after_open_decode_as_the_whole_catalog_map_does and live_ddl_on_a_type_after_the_open_leaves_array_decoding_as_the_open_map_does, RED under each stub (hand run 2026-11-25).
+    "^src/source/postgres/cdc\\.rs:\\d+:\\d+: replace PgChangeStream::learn_arrays -> Result<\\(\\)> with Ok\\(\\(\\)\\)$",
+    "^src/source/postgres/cdc\\.rs:\\d+:\\d+: replace load_arrays -> Result<Vec<\\(u32, String, String\\)>> with ",
     # 2026-11-05 witness: init_oracle_schema_wide_discovers_seeded_table.
     "delete match arm \"oracle\" in scan_tables",
     # 2026-11-05 witness: init_discover_names_the_oracle_table_scope.
@@ -541,8 +544,10 @@ exclude_re = [
     "replace <impl ChangeStream for PgChangeStream>::ack -> Result<\\(\\)> with Ok\\(\\(\\)\\)$",
     # 2026-11-17 text_rows runs a catalog query on a live Client; witness: live_pg_catalog_rows_are_the_servers_text_cells.
     "replace <impl CatalogRows for Client>::text_rows -> Result<Vec<Vec<Option<String>>>> with Ok\\(vec!\\[",
-    # 2026-11-21 load_domains reads the catalog on a live Client; witness: live_type_labels_resolve_every_domain_as_the_domain_map_does (stub run on the devbox).
-    "replace load_domains -> Result<Domains> with Ok\\(Default::default\\(\\)\\)",
+    # 2026-11-21 load_domains reads the catalog on a live Client; witness: live_ddl_on_a_type_after_the_open_leaves_array_decoding_as_the_open_map_does, RED under the stub (hand run 2026-11-25).
+    "replace load_domains -> Result<\\(Domains, bool\\)> with ",
+    # 2026-11-25 builtin_names_taken reads the PG catalog on a live Client; witness: live_ddl_on_a_type_after_the_open_leaves_array_decoding_as_the_open_map_does (builtin_name_taken_before_the_open) RED under Ok(false) and live_a_session_over_a_table_without_arrays_does_not_scan_the_type_catalog RED under Ok(true) (hand run 2026-11-25).
+    "replace builtin_names_taken -> Result<bool> with ",
     # 2026-10-31 #728: `note_statement` only sets `in_transaction` and `grants_pending`, both live-only; the live_cdc_column_grants:: cells kill its stub.
     "replace MysqlChangeStream::note_statement with \\(\\)",
     # 2026-11-18 readable_columns: live catalog read; witness live_cdc_column_grants::a_column_grant_account_delivers_no_hidden_column_by_name_or_value_mysql (RED in the 2026-11-15 stub run).
@@ -832,6 +837,10 @@ exclude_re = [
     # decode and `side_a`, are unit-tested in postgres/arrow_convert.rs.
     "replace pg_cell -> Result<Option<T>> with Ok\\(None\\)",
     "replace pg_int_cell -> Result<Option<T>> with Ok\\(None\\)",
+    # pg_numeric_optional_plain reads a live `tokio_postgres::Row`; its Ok(None), "xyzzy" and empty-string stubs fail
+    # `a_typed_numeric_read_as_a_decimal_is_the_value_at_the_column_scale_postgres` and
+    # `a_decimal_column_keeps_its_catalog_precision_and_scale_postgres` (RED-checked 2026-11-23).
+    "replace pg_numeric_optional_plain -> Result<Option<String>> with Ok\\(.*\\)",
     "replace <impl crate::source::value_checksum::CellSource for PgCellSource<'_>>::int16 -> Option<i16>",
     "replace <impl crate::source::value_checksum::CellSource for PgCellSource<'_>>::int32 -> Option<i32>",
     "replace <impl crate::source::value_checksum::CellSource for PgCellSource<'_>>::int64 -> Option<i64>",
@@ -973,6 +982,10 @@ exclude_re = [
     "replace MssqlSource::mssql_catalog_hints_opt ->",
     "replace finer_time_sql ->",
     # 2026-11-21: Oracle build_column arms read a live oracle::Row, unkillable under --lib --bins; each is RED by hand under its stub: Number in the Utf8 branch by an_oracle_number_infinity_is_refused_by_code_and_to_char_delivers_the_server_text and finite_oracle_numbers_and_a_microsecond_interval_are_delivered_unchanged, Number in the Float64 branch by an_oracle_number_infinity_in_a_float64_override_is_refused_and_finite_is_delivered, the interval arm by an_oracle_interval_with_nanoseconds_is_refused_by_code_and_to_char_delivers_the_text; closes with an offline Oracle row fake.
+    # 2026-11-23: timestamp_cell, timestamp_micros_column and date_column read a live oracle::Row, unkillable under --lib --bins; RED by hand under each stub (third verifier of #1183, not re-run by the author): timestamp_cell and bypassing the check in timestamp_micros_column by an_ltz_value_stored_outside_the_range_is_refused_by_code_through_a_cast_or_a_view and an_ltz_value_stored_outside_the_range_is_refused_by_code_and_a_query_without_it_delivers_the_rest, date_column and the Utf8 and json arms by an_ltz_value_outside_the_range_is_refused_by_code_under_every_override_that_reads_it; the pure core checked_timestamp is killed offline by every_timestamp_cell_passes_the_range_check_and_only_an_ltz_column_is_checked_at_the_floor; the nanosecond arm is a true equivalent (timestamp_nanos refuses past 2262 with the same code); closes with an offline Oracle row fake.
+    "replace timestamp_cell ->",
+    "replace timestamp_micros_column ->",
+    "replace date_column ->",
     "delete match arm OraKind::Number in build_column$",
     "delete match arm OraKind::IntervalDs \\| OraKind::IntervalYm in build_column$",
     # 2026-11-21: PgCellSource::list and its Float64 and Utf8 arms read a live tokio_postgres::Row; RED by hand under each stub: list None and Some(vec![]) and the Utf8 arm by a_postgres_json_interval_oid_enum_array_is_delivered_as_a_list_of_its_elements, the Float64 arm by the postgres DOUBLE PRECISION[] cells of property_no_silent_null_load (UNEXPECTED_REFUSAL RIVET_INTERNAL_VALUE_CONVERTER); closes with an offline Postgres row fake.
@@ -986,4 +999,6 @@ exclude_re = [
     "replace match guard is_oid_array\\(.*\\) with (true|false) in <impl crate::source::value_checksum::CellSource for PgCellSource<'_>>::list$",
     # 2026-11-21: read_utf8_list reads a live tokio_postgres::Row, unkillable under --lib --bins; its choice of reader lives in utf8_list_read, unit-tested; RED by hand under every whole-body stub (None, vec![None], "xyzzy", empty string, empty vec) by a_postgres_json_interval_oid_enum_array_is_delivered_as_a_list_of_its_elements; closes with an offline Postgres row fake.
     "replace read_utf8_list ->",
+    # 2026-11-25: mask_spans is compiled only with feature `seeded`, so both stubs are the code as shipped in the graded build; with the feature on it runs only under the `registered-anchor-masked` switch, which dev/seeded/recall.py grades (CAUGHT); closes never.
+    "replace mask_spans -> String with ",
 ]

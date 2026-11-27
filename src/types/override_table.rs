@@ -157,7 +157,8 @@ fn postgres_reads(src: Kind, tgt: Kind) -> bool {
         Dec => &[Dec, Text, Json],
         Text | Json | Enum | Interval => TEXTS,
         Uuid => &[Uuid, Text, Json],
-        Naive | Utc => STAMPS,
+        Naive | Utc => &[Naive, Utc, Text],
+        Date | Time | List => &[Text],
         Unsupported => TEXTS,
         _ => &[],
     };
@@ -251,6 +252,39 @@ pub(crate) fn resolve_column(
     }
 }
 
+/// Whether the batch reader delivers a `src` column declared `tgt` as the server's own text, which a CDC change stream renders in its own form.
+pub(crate) fn is_server_text_projection(engine: Engine, src: &RivetType, tgt: &RivetType) -> bool {
+    engine == Engine::Postgres
+        && matches!(kind_of(src), Date | Time | Naive | Utc | List)
+        && kind_of(tgt) == Text
+}
+
+/// Whether `overrides` declares any column text, the only declaration a server-rendered column can conflict with.
+pub(crate) fn declares_text(overrides: &ColumnOverrides) -> bool {
+    overrides.values().any(|target| kind_of(target) == Text)
+}
+
+/// The first of `detected` that `overrides` declares text and the batch reader delivers as the server's own text.
+pub(crate) fn server_text_declared<'a>(
+    engine: Engine,
+    detected: &'a [crate::types::TypeMapping],
+    overrides: &ColumnOverrides,
+) -> Option<&'a crate::types::TypeMapping> {
+    detected.iter().find(|m| {
+        overrides
+            .get(&m.column_name)
+            .is_some_and(|target| is_server_text_projection(engine, &m.rivet_type, target))
+    })
+}
+
+/// The remedy a value refusal names: the column declared text delivers the server's own text for every row.
+pub fn text_remedy(column: &str) -> String {
+    format!(
+        "Declare `{column}: text` under `columns:` and rivet delivers the server's own text for \
+         every row, or project the column in the export's `query:`."
+    )
+}
+
 /// The refusal text for a pair the table does not read: names the column, both types and the two remedies.
 pub fn refusal_message(
     engine: Engine,
@@ -276,7 +310,8 @@ pub fn refusal_message(
              the source column definition), or remove the override."
                 .to_string()
         }
-        _ => "Remove the override, or CAST the column to the declared type in the export's `query:`."
+        _ => "Remove the override, or CAST the column to the declared type in the export's `query:` \
+              (a `mode: cdc` export has no `query:`: remove the override)."
             .to_string(),
     };
     format!(
@@ -291,6 +326,19 @@ pub fn refusal_message(
 mod tests {
     use super::*;
 
+    /// `declares_text` is true only for an override whose target is text.
+    #[test]
+    fn declares_text_is_true_only_for_a_text_target() {
+        assert!(!declares_text(&ColumnOverrides::new()));
+        assert!(!declares_text(&one("c", RivetType::Int64)));
+        assert!(declares_text(&one("c", RivetType::String)));
+        let mixed = ColumnOverrides::from([
+            ("a".to_string(), RivetType::Int64),
+            ("b".to_string(), RivetType::String),
+        ]);
+        assert!(declares_text(&mixed));
+    }
+
     const ENGINES: [Engine; 5] = [
         Engine::Postgres,
         Engine::Mysql,
@@ -301,6 +349,66 @@ mod tests {
 
     fn one(column: &str, t: RivetType) -> ColumnOverrides {
         ColumnOverrides::from([(column.to_string(), t)])
+    }
+
+    #[test]
+    fn postgres_reads_a_date_time_timestamp_or_array_as_text_and_nothing_wider() {
+        let ts = |tz| RivetType::Timestamp {
+            unit: TimeUnit::Microsecond,
+            timezone: tz,
+        };
+        let time = RivetType::Time {
+            unit: TimeUnit::Microsecond,
+        };
+        let list = RivetType::List {
+            inner: Box::new(RivetType::Int32),
+        };
+        for (native, src) in [
+            ("date", RivetType::Date),
+            ("time", time.clone()),
+            ("timestamp", ts(None)),
+            ("timestamptz", ts(Some("UTC".into()))),
+            ("_int4", list.clone()),
+        ] {
+            assert!(
+                override_is_read(Engine::Postgres, native, &src, &RivetType::String),
+                "{native}"
+            );
+            assert!(
+                !override_is_read(Engine::Postgres, native, &src, &RivetType::Json),
+                "{native} json"
+            );
+            assert!(
+                !override_is_read(Engine::Postgres, native, &src, &RivetType::Int64),
+                "{native} int"
+            );
+        }
+        assert!(!override_is_read(
+            Engine::Postgres,
+            "date",
+            &RivetType::Date,
+            &ts(None)
+        ));
+        assert!(!override_is_read(
+            Engine::Postgres,
+            "time",
+            &time,
+            &RivetType::Date
+        ));
+        assert!(!override_is_read(
+            Engine::Mssql,
+            "date",
+            &RivetType::Date,
+            &RivetType::String
+        ));
+    }
+
+    #[test]
+    fn the_text_remedy_names_the_column_and_the_override() {
+        assert_eq!(
+            text_remedy("seen_at"),
+            "Declare `seen_at: text` under `columns:` and rivet delivers the server's own text for every row, or project the column in the export's `query:`."
+        );
     }
 
     #[test]
@@ -660,5 +768,66 @@ mod tests {
                 "{e:?}"
             );
         }
+    }
+
+    /// Only a PostgreSQL date, time, timestamp or array declared text is a server text projection.
+    #[test]
+    fn a_server_text_projection_is_postgres_temporal_or_array_declared_text_only() {
+        let ts = RivetType::Timestamp {
+            unit: TimeUnit::Microsecond,
+            timezone: None,
+        };
+        let list = RivetType::List {
+            inner: Box::new(RivetType::Int32),
+        };
+        for src in [RivetType::Date, ts.clone(), list] {
+            for tgt in [RivetType::String, RivetType::Text] {
+                assert!(is_server_text_projection(Engine::Postgres, &src, &tgt));
+                for other in ENGINES.into_iter().filter(|e| *e != Engine::Postgres) {
+                    assert!(!is_server_text_projection(other, &src, &tgt), "{other:?}");
+                }
+            }
+            assert!(!is_server_text_projection(
+                Engine::Postgres,
+                &src,
+                &RivetType::Json
+            ));
+        }
+        for src in [RivetType::Int32, RivetType::String, RivetType::Uuid] {
+            assert!(!is_server_text_projection(
+                Engine::Postgres,
+                &src,
+                &RivetType::Text
+            ));
+        }
+    }
+
+    /// The first detected column declared text over a PostgreSQL date, time, timestamp or array is named, and nothing else is.
+    #[test]
+    fn server_text_declared_names_the_first_declared_projection_only() {
+        use crate::types::{SourceColumn, TypeMapping};
+        let col = |name: &str, native: &str, t: RivetType| {
+            TypeMapping::from_source(&SourceColumn::simple(name, native, true), t)
+        };
+        let detected = vec![
+            col("id", "int4", RivetType::Int32),
+            col("d", "date", RivetType::Date),
+            col("t", "timestamp", RivetType::Date),
+        ];
+        let text = |names: &[&str]| -> ColumnOverrides {
+            names
+                .iter()
+                .map(|n| (n.to_string(), RivetType::String))
+                .collect()
+        };
+        let named = |engine, declared: &ColumnOverrides| {
+            server_text_declared(engine, &detected, declared).map(|m| m.column_name.as_str())
+        };
+        assert_eq!(named(Engine::Postgres, &text(&["id", "t", "d"])), Some("d"));
+        assert_eq!(named(Engine::Postgres, &text(&["t"])), Some("t"));
+        assert_eq!(named(Engine::Postgres, &text(&["id"])), None);
+        assert_eq!(named(Engine::Postgres, &text(&["absent"])), None);
+        assert_eq!(named(Engine::Postgres, &ColumnOverrides::new()), None);
+        assert_eq!(named(Engine::Mysql, &text(&["d"])), None);
     }
 }

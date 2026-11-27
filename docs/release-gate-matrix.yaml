@@ -138,6 +138,13 @@ scenarios:
     mssql:    test
     mongo:    { na: "Mongo keyset is page_size (+ parallel -> mongo_parallel), graded by the mongo_keyset row" }
     oracle:   test
+  - id: keyset_skew
+    what: "parallel:4 keyset over a skewed integer key (180k dense ids, 20k far apart): every row once (DuckDB over the declared parts == the source count, distinct), the run log says `seek+recut` and not `not balanced`, >=2 ranges, none above twice the mean rows (dev/release_oracle/keyset_skew.py)."
+    postgres: test
+    mysql:    test
+    mssql:    test
+    mongo:    { na: "Mongo keyset is page_size (+ parallel -> mongo_parallel), graded by the mongo_keyset row" }
+    oracle:   test
   - id: mongo_keyset
     what: "Mongo keyset on ONE version (8): `source.mongo.page_size` sequential AND `parallel: 4` (run_mongo_parallel) must each equal the pymongo source count+distinct via DuckDB over the DECLARED parts, over >=2 range parts; an int+string `_id` collection must be REFUSED on both (exit != 0, zero parts, the ensure_uniform_id_type message) — `$gt` is BSON-type-bracketed, so an unguarded keyset exports one bracket and reports success. RED-proven against the guard disabled and a dropped parallel range."
     postgres: { na: "SQL keyset is the keyset_parallel row" }

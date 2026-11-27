@@ -22,6 +22,9 @@ use crate::types::{
 
 use crate::source::value_within_ceiling;
 
+/// The native type name every MySQL spatial column carries: one wire type stands for all six SQL types.
+pub(crate) const MYSQL_GEOMETRY_NATIVE: &str = "geometry";
+
 pub(super) fn mysql_native_type_name(col: &mysql::Column) -> String {
     use mysql::consts::ColumnType::*;
     let unsigned = col.flags().contains(ColumnFlags::UNSIGNED_FLAG);
@@ -68,6 +71,7 @@ pub(super) fn mysql_native_type_name(col: &mysql::Column) -> String {
         MYSQL_TYPE_BIT if col.column_length() == 1 => "bit(1)".into(),
         MYSQL_TYPE_BIT => "bit".into(),
         MYSQL_TYPE_YEAR => "year".into(),
+        MYSQL_TYPE_GEOMETRY => MYSQL_GEOMETRY_NATIVE.into(),
         _ => "unknown".into(),
     }
 }
@@ -189,7 +193,7 @@ pub(super) fn mysql_type_to_rivet(col: &mysql::Column) -> RivetType {
     }
 }
 
-/// The mapping of a MySQL column; a date or time stamp column that can hold a zero or partial date is `compatible`, never `exact`.
+/// The mapping of a MySQL column; a date or time stamp column that can hold a zero or partial date is `compatible`, never `exact`, and an undeclared spatial column is delivered as the hex of its standard WKB.
 pub(crate) fn mysql_mapping(source: &SourceColumn, rivet: RivetType) -> TypeMapping {
     let temporal = matches!(rivet, RivetType::Date | RivetType::Timestamp { .. })
         && matches!(
@@ -205,6 +209,11 @@ pub(crate) fn mysql_mapping(source: &SourceColumn, rivet: RivetType) -> TypeMapp
     }
     if duration {
         mapping = mapping.with_text(crate::types::TextForm::TimeBeyondDay);
+    }
+    if source.native_type == MYSQL_GEOMETRY_NATIVE
+        && matches!(mapping.rivet_type, RivetType::Unsupported { .. })
+    {
+        mapping = mapping.with_text(crate::types::TextForm::HexWkb);
     }
     mapping
 }
@@ -354,26 +363,34 @@ pub(super) fn rows_to_record_batch_typed(
                 .is_some_and(|c| matches!(c.column_type(), ColumnType::MYSQL_TYPE_BIT))
         });
         let column = schema.field(col_idx).name();
-        arrays.push(if is_time_text(schema.field(col_idx)) {
-            build_time_text(col_idx, rows)?
-        } else {
-            build_array(arrow_type, col_idx, rows, is_bit, column, max_value_bytes)?
-        });
+        let field = schema.field(col_idx);
+        arrays.push(
+            if has_text_form(field, crate::types::TextForm::TimeBeyondDay) {
+                build_time_text(col_idx, rows)?
+            } else if has_text_form(field, crate::types::TextForm::HexWkb) {
+                build_wkb_text(col_idx, rows, column, max_value_bytes)?
+            } else {
+                build_array(arrow_type, col_idx, rows, is_bit, column, max_value_bytes)?
+            },
+        );
     }
     let batch = RecordBatch::try_new(schema.clone(), arrays)?;
-    let a = crate::source::value_checksum::source_checksums(schema, &MysqlCellSource { rows });
+    let a = crate::source::value_checksum::source_checksums(
+        schema,
+        &MysqlCellSource::for_schema(rows, schema),
+    );
     let b = crate::source::value_checksum::arrow_batch_checksums(&batch);
     crate::source::value_checksum::verify(&a, &b, schema)?;
     Ok(batch)
 }
 
-/// Whether the field is declared as `time_beyond_day` text.
-fn is_time_text(field: &Field) -> bool {
+/// Whether the field is declared as text of `form`.
+fn has_text_form(field: &Field, form: crate::types::TextForm) -> bool {
     field
         .metadata()
         .get(crate::types::META_TEXT_FORM)
         .map(String::as_str)
-        == Some(crate::types::TextForm::TimeBeyondDay.label())
+        == Some(form.label())
 }
 
 /// Whether wire column `col` is a MySQL `TIME`.
@@ -398,9 +415,116 @@ fn build_time_text(col_idx: usize, rows: &[mysql::Row]) -> Result<Arc<dyn Array>
     Ok(Arc::new(b.finish()))
 }
 
+/// A spatial column as the lowercase hex of its standard WKB; a value over the ceiling or one it cannot carry is refused by code.
+fn build_wkb_text(
+    col_idx: usize,
+    rows: &[mysql::Row],
+    column: &str,
+    max_value_bytes: Option<usize>,
+) -> Result<Arc<dyn Array>> {
+    let mut b = StringBuilder::with_capacity(rows.len(), rows.len() * 42);
+    for row in rows {
+        match row.as_ref(col_idx) {
+            None | Some(Value::NULL) => b.append_null(),
+            Some(Value::Bytes(bv)) => {
+                if seeded!("mysql-spatial-ceiling-on-hex", false, true) {
+                    value_within_ceiling(column, bv.len(), max_value_bytes)?;
+                }
+                match wkb_hex_of_internal(bv, BATCH_SRID_REMEDY) {
+                    Ok(hex) => b.append_value(hex),
+                    Err(why) => crate::rivet_bail!(
+                        crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+                        "mysql: column `{column}`: {why}"
+                    ),
+                }
+            }
+            Some(other) => crate::rivet_bail!(
+                crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+                "mysql: column `{column}`: a spatial column delivered {other:?}; rivet refuses rather than writing NULL"
+            ),
+        }
+    }
+    Ok(Arc::new(b.finish()))
+}
+
+/// The remedy of an SRID refusal in a batch export, where the export query can select the WKB and the SRID.
+pub(crate) const BATCH_SRID_REMEDY: &str = "Declare the column `binary` in `columns:` to deliver MySQL's internal bytes, or select ST_AsBinary(col) and ST_SRID(col) in the export query";
+
+/// Whether MySQL names a column type `native` one of its spatial types.
+pub(crate) fn is_spatial_native(native: &str) -> bool {
+    matches!(
+        native.to_ascii_lowercase().as_str(),
+        "geometry"
+            | "point"
+            | "linestring"
+            | "polygon"
+            | "multipoint"
+            | "multilinestring"
+            | "multipolygon"
+            | "geomcollection"
+            | "geometrycollection"
+    )
+}
+
+/// The lowercase hex of the standard WKB inside a MySQL internal geometry value (4-byte little-endian SRID, then WKB); the reason in words, ending in `remedy` for an SRID, when the value cannot be delivered as that form.
+pub(crate) fn wkb_hex_of_internal(
+    internal: &[u8],
+    remedy: &str,
+) -> std::result::Result<String, String> {
+    let (srid, wkb) = match internal {
+        [a, b, c, d, wkb @ ..] => (u32::from_le_bytes([*a, *b, *c, *d]), wkb),
+        _ => {
+            return Err(format!(
+                "a spatial value of {} byte(s) is shorter than MySQL's 4-byte SRID prefix; rivet refuses rather than writing NULL",
+                internal.len()
+            ));
+        }
+    };
+    if srid != 0 && seeded!("mysql-spatial-srid-dropped", false, true) {
+        return Err(format!(
+            "a spatial value has SRID {srid}, which the hex_wkb form cannot carry (WKB holds no SRID, and a geographic SRS stores its axes in the other order than ST_AsBinary writes them); rivet refuses rather than delivering coordinates without their SRS. {remedy}"
+        ));
+    }
+    let well_formed =
+        wkb.len() >= 5 && wkb[0] == 1 && (1..=7).contains(&wkb[1]) && wkb[2..5] == [0, 0, 0];
+    if !well_formed {
+        return Err(format!(
+            "a spatial value does not hold little-endian WKB after its SRID (starts {}); rivet refuses rather than writing NULL",
+            crate::types::hex_bytes(&wkb[..wkb.len().min(5)])
+        ));
+    }
+    Ok(crate::types::hex_bytes(seeded!(
+        "mysql-spatial-srid-prefix-kept",
+        internal,
+        wkb
+    )))
+}
+
 /// Side A of the Form A value-checksum for MySQL.
 struct MysqlCellSource<'a> {
     rows: &'a [mysql::Row],
+    wkb: Vec<bool>,
+}
+
+impl<'a> MysqlCellSource<'a> {
+    /// A source whose columns are read as `schema` delivers them: a `hex_wkb` column as its hex.
+    fn for_schema(rows: &'a [mysql::Row], schema: &SchemaRef) -> Self {
+        let wkb = schema
+            .fields()
+            .iter()
+            .map(|f| has_text_form(f, crate::types::TextForm::HexWkb))
+            .collect();
+        Self { rows, wkb }
+    }
+
+    /// A source whose columns are all read as their wire value.
+    #[cfg(test)]
+    fn plain(rows: &'a [mysql::Row]) -> Self {
+        Self {
+            rows,
+            wkb: Vec::new(),
+        }
+    }
 }
 
 impl MysqlCellSource<'_> {
@@ -434,7 +558,7 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
         match self.rows[row].as_ref(col) {
             Some(Value::Int(v)) => Some(*v as i16),
             Some(Value::UInt(v)) => Some(*v as i16),
-            Some(Value::Bytes(bv)) => atoi::atoi::<i128>(bv).map(|v| v as i16),
+            Some(Value::Bytes(bv)) => crate::types::decimal::whole_int_text(bv).map(|v| v as i16),
             _ => None,
         }
     }
@@ -442,7 +566,7 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
         match self.rows[row].as_ref(col) {
             Some(Value::Int(v)) => Some(*v as i32),
             Some(Value::UInt(v)) => Some(*v as i32),
-            Some(Value::Bytes(bv)) => atoi::atoi::<i128>(bv).map(|v| v as i32),
+            Some(Value::Bytes(bv)) => crate::types::decimal::whole_int_text(bv).map(|v| v as i32),
             _ => None,
         }
     }
@@ -459,7 +583,9 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
             Some(Value::UInt(v)) => Some(*v),
             Some(Value::Int(v)) if *v >= 0 => Some(*v as u64),
             Some(Value::Bytes(bv)) if self.is_bit(col) => Some(bit_bytes_to_u64(bv)),
-            Some(Value::Bytes(bv)) => atoi::atoi::<u64>(bv),
+            Some(Value::Bytes(bv)) => {
+                crate::types::decimal::whole_int_text(bv).and_then(|v| u64::try_from(v).ok())
+            }
             _ => None,
         }
     }
@@ -537,6 +663,14 @@ impl crate::source::value_checksum::CellSource for MysqlCellSource<'_> {
         }
     }
     fn utf8(&self, col: usize, row: usize) -> Option<Cow<'_, [u8]>> {
+        if self.wkb.get(col).copied().unwrap_or(false) {
+            let Some(Value::Bytes(bv)) = self.rows[row].as_ref(col) else {
+                return None;
+            };
+            return wkb_hex_of_internal(bv, BATCH_SRID_REMEDY)
+                .ok()
+                .map(|h| Cow::Owned(h.into_bytes()));
+        }
         if is_time_wire(self.rows.first().map(|r| r.columns_ref()), col) {
             let us = mysql_time_micros(self.rows[row].as_ref(col))
                 .ok()
@@ -618,7 +752,7 @@ fn uint64_from_bytes(column: &str, bv: &[u8], is_bit: bool) -> Result<u64> {
     if is_bit {
         return Ok(bit_bytes_to_u64(bv));
     }
-    match atoi::atoi::<u64>(bv) {
+    match crate::types::decimal::whole_int_text(bv).and_then(|v| u64::try_from(v).ok()) {
         Some(v) => Ok(v),
         None => unparsed(column, "unsigned bigint", bv),
     }
@@ -629,7 +763,7 @@ fn int64_from_bytes(bv: &[u8], is_bit: bool) -> Result<Option<i64>> {
     if is_bit {
         return Ok(Some(narrow::<i64>(bit_bytes_to_u64(bv) as i128, "bit")?));
     }
-    match atoi::atoi::<i128>(bv) {
+    match crate::types::decimal::whole_int_text(bv) {
         Some(v) => Ok(Some(narrow::<i64>(v, "bigint")?)),
         None => Ok(None),
     }
@@ -944,7 +1078,7 @@ fn build_array(
                 match row.as_ref(col_idx) {
                     Some(Value::Int(v)) => b.append_value(narrow::<i16>(*v as i128, "smallint")?),
                     Some(Value::UInt(v)) => b.append_value(narrow::<i16>(*v as i128, "smallint")?),
-                    Some(Value::Bytes(bv)) => match atoi::atoi::<i128>(bv) {
+                    Some(Value::Bytes(bv)) => match crate::types::decimal::whole_int_text(bv) {
                         Some(v) => b.append_value(narrow::<i16>(v, "smallint")?),
                         None => b.append_value(unparsed(column, "smallint", bv)?),
                     },
@@ -962,7 +1096,7 @@ fn build_array(
                 match row.as_ref(col_idx) {
                     Some(Value::Int(v)) => b.append_value(narrow::<i32>(*v as i128, "int")?),
                     Some(Value::UInt(v)) => b.append_value(narrow::<i32>(*v as i128, "int")?),
-                    Some(Value::Bytes(bv)) => match atoi::atoi::<i128>(bv) {
+                    Some(Value::Bytes(bv)) => match crate::types::decimal::whole_int_text(bv) {
                         Some(v) => b.append_value(narrow::<i32>(v, "int")?),
                         None => b.append_value(unparsed(column, "int", bv)?),
                     },
@@ -1359,6 +1493,8 @@ fn mysql_decimal_to_decimal256(
 #[cfg(test)]
 mod common_kind_tests;
 #[cfg(test)]
+mod spatial_tests;
+#[cfg(test)]
 mod type_table;
 
 #[cfg(test)]
@@ -1479,7 +1615,7 @@ mod utf8_fast_path_tests {
 
 #[cfg(test)]
 mod int64_bytes_dispatch_tests {
-    use super::int64_from_bytes;
+    use super::{int64_from_bytes, uint64_from_bytes};
 
     #[test]
     fn bit_bytes_decode_big_endian_even_when_ascii_digits() {
@@ -1509,6 +1645,34 @@ mod int64_bytes_dispatch_tests {
             int64_from_bytes(b"9223372036854775807", false).unwrap(),
             Some(i64::MAX)
         );
+    }
+
+    /// A text cell under an integer type is read whole: a fraction, an exponent or trailing text is refused, never cut to its leading digits.
+    #[test]
+    fn a_text_cell_is_an_integer_only_when_the_whole_cell_is() {
+        for ok in ["0", "12", "-42", "+7", "2147483647"] {
+            assert!(
+                crate::types::decimal::whole_int_text(ok.as_bytes()).is_some(),
+                "{ok}"
+            );
+        }
+        for bad in ["1.5", "1.0", "1e3", "12abc", "", "-", " 1", "1 ", "0x10"] {
+            assert_eq!(
+                crate::types::decimal::whole_int_text(bad.as_bytes()),
+                None,
+                "{bad:?}"
+            );
+            assert!(
+                int64_from_bytes(bad.as_bytes(), false).unwrap().is_none(),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(crate::types::decimal::whole_int_text(b"-42"), Some(-42));
+        let uint = |t: &[u8]| uint64_from_bytes("c", t, false).ok();
+        assert_eq!(uint(b"18446744073709551615"), Some(u64::MAX));
+        assert_eq!(uint(b"18446744073709551616"), None);
+        assert_eq!(uint(b"-1"), None);
+        assert_eq!(uint(b"1.0"), None);
     }
 }
 
@@ -2183,6 +2347,69 @@ mod roast_mysql_bit_decode_tests {
         assert!(s.is_null(1));
     }
 
+    /// An unsigned BIGINT and a text-wire integer are read by the 16 and 32 bit accessors; text with a fraction is not an integer.
+    #[test]
+    fn the_narrow_integer_accessors_read_an_unsigned_and_a_whole_text_cell() {
+        use crate::source::value_checksum::CellSource;
+        let cases: Vec<(&str, Cell)> = vec![
+            ("uint", v_uint((1u64 << 63) | 5)),
+            ("whole", v_bytes(b"42")),
+            ("fraction", v_bytes(b"1.5")),
+        ];
+        let defs: Vec<Vec<u8>> = cases.iter().map(|(_, (d, _))| d.clone()).collect();
+        let row: Vec<Option<Vec<u8>>> = cases.iter().map(|(_, (_, b))| Some(b.clone())).collect();
+        let rows = fetch_binary_rows(defs, vec![row]);
+        let s = MysqlCellSource::plain(&rows);
+        assert_eq!(s.int16(0, 0), Some(5));
+        assert_eq!(s.int32(0, 0), Some(5));
+        assert_eq!(s.int16(1, 0), Some(42));
+        assert_eq!(s.int32(1, 0), Some(42));
+        assert_eq!(s.int16(2, 0), None);
+        assert_eq!(s.int32(2, 0), None);
+        assert_eq!(s.uint64(1, 0), Some(42));
+        assert_eq!(s.uint64(2, 0), None);
+    }
+
+    /// A text cell under a smallint or int override is delivered when it is a whole integer and refused by code, naming the column and the target type, otherwise.
+    #[test]
+    fn a_text_cell_under_a_narrow_integer_override_is_read_whole_or_refused() {
+        use arrow::array::{Array, Int16Array, Int32Array};
+        for (dt, target) in [(DataType::Int16, "smallint"), (DataType::Int32, "int")] {
+            for bad in ["1.5", "12abc"] {
+                let (def, bytes) = v_bytes(bad.as_bytes());
+                let rows = fetch_binary_rows(vec![def], vec![vec![Some(bytes)]]);
+                let err = build_array(&dt, 0, &rows, false, "c", None).unwrap_err();
+                let coded = err
+                    .downcast_ref::<crate::error::CodedError>()
+                    .unwrap_or_else(|| panic!("{target} {bad}: not coded: {err}"));
+                assert_eq!(coded.code(), "RIVET_SOURCE_VALUE_UNREPRESENTABLE");
+                let said = err.to_string();
+                assert!(
+                    said.contains("column `c`") && said.contains(&format!("not a valid {target}")),
+                    "{target} {bad}: {said}"
+                );
+            }
+            let (def, bytes) = v_bytes(b"42");
+            let rows = fetch_binary_rows(vec![def], vec![vec![Some(bytes)]]);
+            let a = build_array(&dt, 0, &rows, false, "c", None).unwrap();
+            assert_eq!(a.null_count(), 0);
+            let got = match dt {
+                DataType::Int16 => i32::from(
+                    a.as_any()
+                        .downcast_ref::<Int16Array>()
+                        .expect("int16")
+                        .value(0),
+                ),
+                _ => a
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .expect("int32")
+                    .value(0),
+            };
+            assert_eq!(got, 42, "{target}");
+        }
+    }
+
     /// Every `CellSource` accessor, over the BINARY protocol.
     #[test]
     fn every_cell_source_accessor_reads_the_binary_value_it_should() {
@@ -2210,7 +2437,7 @@ mod roast_mysql_bit_decode_tests {
         let row0: Vec<Option<Vec<u8>>> = cases.iter().map(|(_, (_, b))| Some(b.clone())).collect();
         let row1: Vec<Option<Vec<u8>>> = cases.iter().map(|_| None).collect();
         let rows = fetch_binary_rows(defs, vec![row0, row1]);
-        let s = MysqlCellSource { rows: &rows };
+        let s = MysqlCellSource::plain(&rows);
 
         assert_eq!(s.num_rows(), 2);
         assert_eq!(s.boolean(col("bool_true"), 0), Some(true));
@@ -2808,6 +3035,8 @@ mod roast_mysql_bit_decode_tests {
             ("bit16", BIN, 16, MYSQL_TYPE_BIT as u8, UNSIGNED, 0, "bit", RivetType::Int64),
             ("bit63", BIN, 63, MYSQL_TYPE_BIT as u8, UNSIGNED, 0, "bit", RivetType::Int64),
             ("bit64", BIN, 64, MYSQL_TYPE_BIT as u8, UNSIGNED, 0, "bit", RivetType::UInt64),
+            ("geometry", BIN, 0, MYSQL_TYPE_GEOMETRY as u8, 0, 0, "geometry",
+             RivetType::Unsupported { native_type: "geometry".into(), reason: "no Rivet mapping for this MySQL type".into() }),
         ];
 
         let defs = cases
@@ -2973,7 +3202,7 @@ mod roast_mysql_bit_decode_tests {
         let arr = build_array(&DataType::Utf8, 0, &rows, false, "c", None).expect("array");
         let arr = arr.as_any().downcast_ref::<StringArray>().expect("Utf8");
         assert_eq!(arr.value(0), want, "array");
-        let source = MysqlCellSource { rows: &rows };
+        let source = MysqlCellSource::plain(&rows);
         assert_eq!(
             source.utf8(0, 0).as_deref(),
             Some(want.as_bytes()),
@@ -3133,7 +3362,7 @@ mod roast_mysql_bit_decode_tests {
             let columns: Arc<[mysql::Column]> = Arc::from(vec![mysql::Column::new(column_type)]);
             let rows = [mysql_common::row::new_row(vec![value], columns)];
             let is_bit = matches!(column_type, ColumnType::MYSQL_TYPE_BIT);
-            let checksum = MysqlCellSource { rows: &rows }.boolean(0, 0);
+            let checksum = MysqlCellSource::plain(&rows).boolean(0, 0);
             match super::build_flags(0, &rows, is_bit, "c") {
                 Ok(arr) => {
                     let arr = arr

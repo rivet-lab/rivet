@@ -18,8 +18,8 @@ out?" — the short answer is no:
 - **Timestamps preserve the instant** — the point in time round-trips (Parquet
   keeps the zone; CSV emits the instant normalised to UTC with a trailing `Z`,
   while naive timestamps render bare).
-- **Rivet fails loud, not silent** — a lossy or unmapped type is named by
-  `rivet check` and aborts the run, never quietly truncated. The one value-level
+- **Rivet fails loud, not silent** — an unmapped type is named by
+  `rivet check` and aborts the run, and a lossy one is named by `rivet check` and aborts the run under `--strict`, never quietly truncated. The one value-level
   exception is a source value that is not a value of the target type at all
   (a MySQL `0000-00-00`): it is written as NULL and counted, see
   [Values with no Arrow representation](#values-with-no-arrow-representation).
@@ -81,7 +81,7 @@ one either.
 | Source value | What rivet writes | Signal |
 |--------------|-------------------|--------|
 | MySQL zero, partial or invalid date (`0000-00-00`, `2026-00-15`, `2024-02-31` under `ALLOW_INVALID_DATES`) in `DATE`, `DATETIME`, `TIMESTAMP` | NULL, exit 0, batch and CDC | a WARN per column with the count; the batch summary has a `fidelity` row; `nulled_cells` in the manifest; `validate` warns |
-| A date or instant the target type cannot hold (PostgreSQL `infinity` or an out-of-range date, a `timestamp_ns` value outside 1677..2262) | nothing: the run is refused | `RIVET_SOURCE_VALUE_UNREPRESENTABLE`, exit 5 |
+| A date or instant the target type cannot hold (PostgreSQL `infinity` or an out-of-range date, a `timestamp_ns` value outside 1677..2262) | nothing: the run is refused; declaring the column `text` under `columns:` delivers the server's own text for every row, timestamps rendered in UTC (PostgreSQL batch exports; a CDC export with a pending baseline refuses the declaration, because the change stream renders the same cell in its own form; when the source cannot be connected or described that check does not run and a WARN says so) | `RIVET_SOURCE_VALUE_UNREPRESENTABLE`, exit 5 |
 | An Oracle `NUMBER` or `FLOAT` of infinity (or an exact `1E125`, which the client prints with the same bytes), an Oracle `INTERVAL DAY TO SECOND` with a sub-microsecond fraction | nothing: the run is refused; `TO_CHAR(col) AS col` in the query exports the exact text | `RIVET_SOURCE_VALUE_UNREPRESENTABLE`, exit 5 |
 
 The columns are labelled `rivet.fidelity: compatible`, never `exact`. The run records
@@ -154,9 +154,17 @@ Supported override types: `bool`, `int2/int4/int8`, `float4/float8`,
 `decimal(p,s)`, `date`, `timestamp`, `timestamp_ns`, `timestamp_tz`,
 `timestamp_tz_ns`, `text`, `binary`, `json`, `uuid`. The `_ns` timestamp
 variants preserve sub-microsecond precision (range 1677–2262; see gap 4) — the
-plain `timestamp` is microsecond with full date range. An Oracle
-`TIMESTAMP(7..9)` column is the one case where the declaration is required: undeclared, the run is refused
-(`RIVET_TYPE_UNSAFE_MAPPING`) rather than truncated.
+plain `timestamp` is microsecond with full date range. An undeclared Oracle
+`TIMESTAMP(7..9)` column is delivered as nanosecond text (`YYYY-MM-DDTHH:MM:SS.fffffffff`, a trailing `Z` when zoned) in any year, on batch and on CDC, rather than truncated.
+
+A `timestamp` or `timestamp_tz` declared over a result column finer than a
+microsecond (an Oracle `TIMESTAMP(7..9)` or `TIMESTAMP(7..9) WITH TIME ZONE`, a SQL Server `datetime2(7)` or
+`datetimeoffset(7)`), on batch and on CDC, truncates the finer digits: the type
+report says `lossy` with the cause and the remedy, the default policy runs, and `--strict` refuses it
+(`RIVET_TYPE_UNSAFE_MAPPING`). The verdict follows the column the query returns:
+an alias keeps it, a `CAST` to a coarser type or a column that is not finer is
+`exact`. When the source cannot say whether the column is finer (the query cannot be described), the column is graded `lossy` with that cause. To keep the digits, drop the override on SQL Server, or declare
+`timestamp_ns` on an Oracle `TIMESTAMP(7..9)` and `timestamp_tz_ns` on an Oracle `TIMESTAMP(7..9) WITH TIME ZONE`. SQL Server refuses `timestamp_tz_ns` over `datetimeoffset(7)` on batch (`RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH`). A `date` declared over such a column is refused by code, on `check` and on `run`, with the same `RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH`: a time column keeps its time type or is read as text.
 
 An override the source reader cannot build is refused by code, not run:
 `RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH` (exit 1) names the column, the declared
@@ -167,6 +175,19 @@ refused before any row is read, even over an empty result; declare `timestamp`
 same way on SQL Server and Oracle (declare the source column's own `decimal(p,s)` with p <= 38, or remove the override). On SQL
 Server a value whose wire type the declared type cannot read is refused at the
 first batch with the same code.
+
+A value of a readable wire type that the declared type cannot hold (an Oracle `DATE`
+with a time of day under `date`, an Oracle `RAW` of the wrong length or SQL Server
+text that is not a uuid under `uuid`, a SQL Server decimal a narrower scale would
+round (on a CDC stream as on batch), a MySQL text cell that is not a whole integer under an integer override (`1.0` and
+`1 ` are not), an integer past the declared integer width) is refused
+`RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5) naming the column and the value, on a
+batch run and on a CDC snapshot or stream alike. A refusal decided by the column's
+type alone (PostgreSQL, SQL Server and Oracle numeric, float or text under an integer
+override; MySQL DECIMAL or DOUBLE under one) is `RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH`
+(exit 1) at plan time on every leg: a batch run, the baseline leg of a CDC export and a stream-only CDC export read the same table, so a `mode: cdc` export refuses the pair before it reads a change. A chunked run refused at a later chunk keeps the
+parts of the chunks it finished and a manifest whose run is marked `failed`; fix the
+value or declare a wider type, and re-run.
 
 A `bool` override over an integer column is a flag only for 0 and 1. PostgreSQL, SQL Server and Oracle refuse it for a batch export at plan time; MySQL, which checks each value, refuses a value outside 0 and 1 at the cell. A CDC stream reads every engine the way MySQL does: 0, 1 and NULL are delivered as `false`, `true` and NULL, and any other integer (2, 5, -1) is refused `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5) naming the column, the value and its row, before a part is written and before the checkpoint moves. Declare the column `int64` in `columns:` to carry the number.
 
@@ -340,9 +361,9 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `enum` | `enum` | `Utf8` + logical=enum | label text | custom PG enum | type_roundtrip |
 | `text[]` | `list<string>` | `List<Utf8>` | — | 1-D arrays | type_roundtrip |
 | `integer[]` | `list<int32>` | `List<Int32>` | — | 1-D arrays | type_roundtrip |
-| `date[]` | `list<date>` | `List<Date32>` | — | 1-D arrays; an element of `infinity` or `-infinity` is refused, map it to a bound in the query | type capability ledger |
-| `timestamp[]` / `timestamptz[]` | `list<timestamp>` | `List<Timestamp(µs)>` / `List<Timestamp(µs, UTC)>` | — | 1-D arrays; the same `infinity` refusal | type capability ledger |
-| `time[]` | `list<time>` | `List<Time64(µs)>` | — | 1-D arrays; an element of `24:00:00` is refused | type capability ledger |
+| `date[]` | `list<date>` | `List<Date32>` | — | 1-D arrays; an element of `infinity` or `-infinity` is refused, declare the column `text` under `columns:` for the server's own text, or map it to a bound in the query | type capability ledger |
+| `timestamp[]` / `timestamptz[]` | `list<timestamp>` | `List<Timestamp(µs)>` / `List<Timestamp(µs, UTC)>` | — | 1-D arrays; the same `infinity` refusal and remedy | type capability ledger |
+| `time[]` | `list<time>` | `List<Time64(µs)>` | — | 1-D arrays; an element of `24:00:00` is refused, declare the column `text` under `columns:` for the server's own text | type capability ledger |
 | `uuid[]` | `list<uuid>` | `List<FixedSizeBinary(16)>` with the `arrow.uuid` item | — | read as native UUID lists downstream | type capability ledger |
 | `bytea[]` | `list<binary>` | `List<Binary>` | — | 1-D arrays | type capability ledger |
 | `json[]` / `jsonb[]` | `list<json>` | `List<Utf8>` | — | 1-D arrays; each element is its JSON text | type capability ledger |
@@ -372,6 +393,7 @@ defects in the PG / MySQL drivers; all have been fixed in v0.7.8:
 | `varchar` / `text` | `string` / `text` | `Utf8` | escaped UTF-8 | | live matrix |
 | `json` | `json` | `Utf8` + Parquet `LogicalType::Json` (via `arrow.json` extension) | JSON string | | live matrix |
 | `binary` / `varbinary` / `blob` | `binary` | `Binary` | hex in CSV | charset 63 / binary payload; under `columns: {c: string}` a value that is valid UTF-8 is delivered as that text and any other byte stops the run with `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (declare `binary`, or select `HEX(c)` / `ST_AsText(c)`), never U+FFFD | type_roundtrip, live matrix |
+| `geometry` / `point` / `linestring` / `polygon` / `multipoint` / `multilinestring` / `multipolygon` / `geometrycollection` | `string` | `Utf8` | lowercase hex (`rivet.text_form: hex_wkb`) | the standard WKB of the value as lowercase hex, equal to `LOWER(HEX(ST_AsBinary(col)))`, batch and CDC; the SRID is not carried, so a value whose SRID is not 0 stops the run with `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5) naming the column: declare the column `binary` in `columns:` to carry MySQL's internal bytes (4-byte little-endian SRID, then WKB), or in a batch export select `ST_AsBinary(col)` and `ST_SRID(col)` in the query. A warehouse recovers the geometry from the text: BigQuery `ST_GEOGFROMWKB(x)`, Snowflake `TO_GEOMETRY(x)`, ClickHouse `readWKB*(unhex(x))` (25.8 or later; 24.8 has no `readWKB*`) | live (batch + CDC) |
 | `bit(1)` | `bool` | `Boolean` | | | golden |
 | `bit(n)`, 1 < n <= 63 | `int64` | `Int64` | | avoids silent truncation | type_roundtrip |
 | `bit(64)` | `u_int64` → `UInt64` | `UInt64` | integer text | every value, including those with bit 63 set; `Int64` holds half of them | type_roundtrip |
@@ -436,8 +458,8 @@ and scale.
 | `BOOLEAN` | `bool` | `Boolean` | true/false | | type table |
 | `DATE` | `timestamp(µs, none)` | `Timestamp(µs, None)` | datetime text | an Oracle `DATE` holds a time of day | type table |
 | `TIMESTAMP(0..6)` | `timestamp(µs, none)` | `Timestamp(µs, None)` | datetime text | naive | type table |
-| `TIMESTAMP(7..9)` | `timestamp(µs, none)` | `Timestamp(µs, None)` | datetime text | labelled `lossy`; undeclared, the run is refused (`RIVET_TYPE_UNSAFE_MAPPING`); declare the column in `columns:` | type table |
-| `TIMESTAMP WITH TIME ZONE` / `WITH LOCAL TIME ZONE` | `timestamp_tz(µs, UTC)` | `Timestamp(µs, UTC)` | datetime text | normalised to UTC; the `(7..9)` precisions are `lossy` like the naive one | type table |
+| `TIMESTAMP(7..9)` | `timestamp(µs, none)` | `Utf8` (`text:iso_timestamp_nanos`) | datetime text | undeclared, delivered as nanosecond text (`Utf8`, `logical_string`); declared `timestamp` it is `Timestamp(µs, None)` and labelled `lossy`; declared `timestamp_ns` it is a native nanosecond timestamp | type table |
+| `TIMESTAMP WITH TIME ZONE` / `WITH LOCAL TIME ZONE` | `timestamp_tz(µs, UTC)` | `Timestamp(µs, UTC)` | datetime text | normalised to UTC; a `WITH LOCAL TIME ZONE` value Oracle stored outside 4712 BC to 9999 is refused with `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5) under every mapping, and so is any timestamp or date value read past 9999 outside the 1 January 10000 window whatever produced it or stored it (a stored `DATE`, `TIMESTAMP` or `TIMESTAMP WITH TIME ZONE` value past the window, a `CAST` to `TIMESTAMP`, `TIMESTAMP WITH TIME ZONE` or `DATE`, a view, `TRUNC`, `ADD_MONTHS` including `ADD_MONTHS(l, -11)` over a shifted row, `FROM_TZ`, `COALESCE`, `UNION ALL`, the `text`, `json`, `timestamp_ns` and `date` overrides, and a value Oracle computes in a `query:` from a real year-10000 instant), except a real instant on 1 January 10000 before 16:00, which is delivered as a `TIMESTAMP WITH TIME ZONE` column delivers it; limit: `TRUNC(l, 'YYYY')` over a shifted row lands inside that window and is delivered a year off, exactly as on main, because it cannot be told apart from `TRUNC` of a real instant; an undeclared `(7..9)` is `Utf8` nanosecond text (`logical_string`) with a trailing `Z`; declared `timestamp_tz` it is `lossy` | type table |
 | `INTERVAL DAY TO SECOND`, `INTERVAL YEAR TO MONTH` | `interval` | `Utf8` labelled `rivet.text_form = iso8601_duration` | ISO 8601 duration text | a day-to-second value with a sub-microsecond fraction is refused (`RIVET_SOURCE_VALUE_UNREPRESENTABLE`) | type table |
 | `VARCHAR2` / `NVARCHAR2` / `CHAR` / `NCHAR` / `LONG` / `CLOB` / `NCLOB` | `string` | `Utf8` | escaped UTF-8 | | type table |
 | `JSON` | `json` | `Utf8` + Parquet `LogicalType::Json` (via `arrow.json` extension) | JSON string | labelled `logical_string` | type table |
@@ -470,16 +492,17 @@ CDC (change streams) emits the same two-column shape prefixed with the
 ## Known gaps (tracked)
 
 1. **Multi-dimensional arrays**: not in the type matrix; they fail at the read
-   unless a `columns:` override maps them. A PostgreSQL type with no Arrow
+   (`RIVET_SOURCE_VALUE_UNREPRESENTABLE`, exit 5) unless a `columns:` override maps
+   them; declaring the column `text` delivers the server's own array text. A PostgreSQL type with no Arrow
    mapping (ranges, `inet`, geometric types, PostGIS and the rest of the
    PostgreSQL row above) is delivered as the server's text.
 2. **Nullability**: every exported column is `OPTIONAL`; a source `NOT NULL`
    constraint is not propagated into the Parquet schema (ADR-0016, deferred to
    v0.8 Phase A).
-3. **CSV complex types**: arrays (`List`), `Decimal256` (precision > 38), and
-   non-UUID fixed binary have no CSV cell — the export **fails loudly** naming
-   the column (see [CSV serialization](#csv-serialization)) rather than silently
-   writing empty values.
+3. **CSV complex types**: a flat array (`List` of a scalar), `Decimal256` (precision > 38) and a
+   nanosecond timestamp (an Oracle `TIMESTAMP(9)` declared `timestamp_ns`; undeclared it is already text) is written as text (see [CSV serialization](#csv-serialization)); a nested
+   array and non-UUID fixed binary have no CSV cell — the export **fails loudly** naming the column
+   rather than silently writing empty values.
 4. **SQL Server `datetime2(7)` / `datetimeoffset(7)` sub-microsecond precision** — *default is
    nanosecond; microsecond is the per-column opt-out.* rivet delivers a column whose declared
    scale is above 6 (a bare `datetime2` is `datetime2(7)`) as `Timestamp(ns)` on batch and on CDC,
@@ -519,8 +542,8 @@ CDC (change streams) emits the same two-column shape prefixed with the
    below the source max, re-exporting the boundary row every run; the default nanosecond cursor
    literal carries all 9 digits, as does a `datetime2(6)` (or coarser) or an integer/identity cursor.
 
-   **Primary key of an incremental or CDC load:** a `datetime2(7)` / `datetimeoffset(7)` (or Oracle `TIMESTAMP(7..9)` read as `timestamp`) key column
-   lands at microseconds when declared `timestamp` (or an Oracle one by default), so two rows that differ only below a microsecond would collapse into one row of the current-state view.
+   **Primary key of an incremental or CDC load:** a `datetime2(7)` / `datetimeoffset(7)` (or Oracle `TIMESTAMP(7..9)` declared `timestamp`) key column
+   lands at microseconds when declared `timestamp`, so two rows that differ only below a microsecond would collapse into one row of the current-state view.
    `rivet load` and `rivet check` refuse it with `RIVET_LOAD_KEY_COLUMN_LANDS_INEXACT` (exit 5) until `timestamp_ns` / `timestamp_tz_ns` is declared (the SQL Server default) or a `pk:` that
    does not depend on it is named; parts already extracted hold microseconds, so run `rivet state reset --export <name>` and the export again before the reload. A table already loaded keeps its column type: drop its change log and view first.
    A cursor that lands as text (a bare Oracle `NUMBER`) is refused the same way for an incremental load: declare `int64` or `decimal(p,s)`.
@@ -553,11 +576,14 @@ only the text rendering differs ([`src/format/csv.rs`](https://github.com/rivet-
 | `binary` (`bytea` / `BLOB`) | lowercase hex (`deadbeef`) |
 | `date` / `time` / `timestamp` | ISO 8601 (`2026-01-01T12:00:00.000000`) |
 | `timestamp_tz` | ISO 8601 normalised to UTC with a trailing `Z` (`2026-01-01T12:00:00.000000Z`) — distinguishable from a naive timestamp, which renders bare |
+| `list` (flat array of a scalar) | one JSON array text in one quoted field: `["a,b",null,""]`; each element keeps its scalar text (dates, timestamps, uuid, hex bytes and decimals as JSON strings, ints, bools and finite floats bare), a NULL element is `null`, a non-finite float is the string `"NaN"`, `"inf"` or `"-inf"`; an empty list is `[]`, distinct from the empty NULL cell |
+| `Decimal256` (precision > 38) | exact plain decimal text, never via float |
+| `timestamp` / `timestamp_tz` at nanosecond precision | ISO 8601 with nine fraction digits, `Z` for an instant (`2026-01-01T12:00:00.123456789Z`) |
 
-CSV has **no cell representation** for `list` (arrays), `Decimal256`
-(precision > 38), or non-UUID fixed binary. Rather than silently write an empty
-value, the export **fails at writer creation** naming the column — use
-`format: parquet` or drop the column from the query.
+CSV has **no cell representation** for a nested `list` (an array of arrays) or
+non-UUID fixed binary. Rather than silently write an empty value, the export
+**fails at writer creation** naming the column — use `format: parquet` or drop
+the column from the query.
 
 **Loading CSV into a warehouse:** unlike Parquet (whose loader will not coerce a
 declared type — see below), BigQuery's CSV loader *honors* a declared `--schema`.
@@ -602,7 +628,7 @@ two independent engines and pins the autoload type. The full matrix:
 | `bool`                        | `BOOLEAN`          | `Nullable(Bool)`                   |
 | `list<inner>`                 | `inner[]`          | `Array(Nullable(inner))`           |
 
-A NULL list and an empty list are indistinguishable at ClickHouse and BigQuery (an `Array` and a `REPEATED` field cannot hold a NULL list); `columns: {col: string}` keeps NULL.
+A NULL list and an empty list are indistinguishable at BigQuery (a `REPEATED` field cannot hold a NULL list); `columns: {col: string}` keeps NULL. A ClickHouse `Array` cannot hold a NULL list either, so `rivet load` refuses a part holding one with `RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE` before creating a table; in a batch export read the column as `COALESCE(col, '{}')` to load `[]` on purpose, or as text to keep the NULL; a `mode: cdc` export has no `query:`, so give every source row a list and re-baseline the stream.
 
 Round-trip values that the suite pins per row: `sum(decimal * 10^scale)`
 matches the in-process Arrow check; `json_valid` / `isValidJSON` returns true

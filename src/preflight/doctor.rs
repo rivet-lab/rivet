@@ -500,21 +500,26 @@ fn note_oracle_harm_permission(config: &Config) {
 }
 
 fn check_destination_auth(dest: &crate::config::DestinationConfig) -> Result<()> {
-    use crate::destination::create_destination_for_probe;
-    let d = create_destination_for_probe(dest)?;
+    let d = crate::destination::create_destination_for_probe(dest)?;
+    write_destination_probe(d.as_ref(), dest)
+}
+
+/// Write the doctor probe through `d` from a file only this call owns, then remove the destination copy.
+fn write_destination_probe(
+    d: &dyn crate::destination::Destination,
+    dest: &crate::config::DestinationConfig,
+) -> Result<()> {
+    use std::io::Write;
     let probe_key = crate::manifest::DOCTOR_PROBE_FILENAME;
-    let tmp = std::env::temp_dir().join(probe_key);
-    std::fs::write(&tmp, b"ok")?;
-    match d.write(&tmp, probe_key) {
-        Ok(_) => {
-            log::debug!("doctor: probe write succeeded, cleaning up");
-        }
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e);
-        }
-    }
-    let _ = std::fs::remove_file(&tmp);
+    let mut tmp = tempfile::NamedTempFile::new()?;
+    tmp.write_all(b"ok")?;
+    tmp.flush()?;
+    seeded!(
+        "doctor-probe-fixed-temp-path",
+        crate::seeded::through_shared_probe(probe_key, |shared| d.write(shared, probe_key)),
+        d.write(tmp.path(), probe_key)
+    )?;
+    log::debug!("doctor: probe write succeeded, cleaning up");
     remove_destination_probe(dest, probe_key);
     Ok(())
 }
@@ -1301,6 +1306,94 @@ exports:
             !dir.path().join(probe_key).exists(),
             "cleanup must follow the same base-path resolution as the writer"
         );
+    }
+
+    fn local_dest_at(path: &std::path::Path) -> crate::config::DestinationConfig {
+        crate::config::DestinationConfig {
+            destination_type: DestinationType::Local,
+            path: Some(path.to_string_lossy().into_owned()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn parallel_destination_probes_on_separate_local_destinations_all_succeed() {
+        let outcomes: Vec<std::result::Result<(), String>> = std::thread::scope(|s| {
+            let workers: Vec<_> = (0..12)
+                .map(|_| {
+                    s.spawn(|| {
+                        (0..150)
+                            .map(|_| {
+                                let dir = tempfile::tempdir().unwrap();
+                                check_destination_auth(&local_dest_at(dir.path()))
+                                    .map_err(|e| format!("{e:#}"))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|w| w.join().unwrap())
+                .collect()
+        });
+        let succeeded = outcomes.iter().filter(|o| o.is_ok()).count();
+        assert_eq!(
+            (succeeded, outcomes.iter().find_map(|o| o.clone().err())),
+            (1800, None)
+        );
+    }
+
+    struct NestingStore(std::sync::atomic::AtomicBool);
+
+    impl crate::destination::Destination for NestingStore {
+        fn write(
+            &self,
+            local_path: &std::path::Path,
+            _remote_key: &str,
+        ) -> Result<crate::destination::WriteOutcome> {
+            if self.0.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                write_destination_probe(self, &dest_of(DestinationType::S3))?;
+            }
+            assert_eq!(std::fs::read(local_path)?, b"ok");
+            Ok(crate::destination::WriteOutcome::default())
+        }
+        fn capabilities(&self) -> crate::destination::DestinationCapabilities {
+            crate::destination::DestinationCapabilities {
+                commit_protocol: crate::destination::WriteCommitProtocol::FinalizeOnClose,
+                idempotent_overwrite: true,
+                retry_safe: true,
+                partial_write_risk: false,
+            }
+        }
+    }
+
+    #[test]
+    fn a_probe_that_another_probe_completes_inside_is_still_read_by_a_store() {
+        let store = NestingStore(std::sync::atomic::AtomicBool::new(true));
+        let dest = dest_of(DestinationType::S3);
+        assert_eq!(
+            write_destination_probe(&store, &dest).map_err(|e| format!("{e:#}")),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn destination_probe_on_a_local_prefix_leaves_the_prefix_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        check_destination_auth(&local_dest_at(dir.path())).unwrap();
+        assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn destination_probe_on_a_prefix_that_is_a_file_fails_with_the_write_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+        let err = check_destination_auth(&local_dest_at(&blocker)).unwrap_err();
+        let text = trim_probe_error(&err);
+        assert_eq!(text, "File exists (os error 17)");
+        assert!(blocker.is_file());
     }
 
     #[test]

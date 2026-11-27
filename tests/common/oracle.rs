@@ -63,6 +63,15 @@ pub fn ora_exec_on(url: &str, sql: &str) {
     ora(conn.commit(), "commit");
 }
 
+/// Insert one row into the columns `ID` and `L` of `table` from a session whose time zone is `zone`.
+pub fn ora_insert_from_zone(table: &str, zone: &str, id: i64, literal: &str) {
+    ora_exec(&format!(
+        "BEGIN EXECUTE IMMEDIATE 'ALTER SESSION SET TIME_ZONE = ''{zone}'''; \
+         EXECUTE IMMEDIATE 'INSERT INTO {table} (ID, L) VALUES ({id}, {})'; COMMIT; END;",
+        literal.replace('\'', "''")
+    ));
+}
+
 /// Every row of a query whose columns are all character types, as text.
 pub fn ora_text_rows(sql: &str) -> Vec<Vec<Option<String>>> {
     ora_text_rows_on(ORACLE_URL, sql)

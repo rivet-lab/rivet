@@ -34,6 +34,19 @@ x-mssql-env: &mssql-env
 x-mssql-limits: &mssql-limits
   mem_limit: 3g
 
+x-oracle-healthcheck: &oracle-healthcheck
+  test: ["CMD", "healthcheck.sh"]
+  interval: 10s
+  timeout: 5s
+  retries: 30
+  start_period: 300s
+
+x-proxysql-healthcheck: &proxysql-healthcheck
+  test: ["CMD-SHELL", "bash -c '(echo > /dev/tcp/127.0.0.1/6033)' || exit 1"]
+  interval: 5s
+  timeout: 3s
+  retries: 20
+
 services:
   postgres:
     image: *img-postgres16
@@ -213,11 +226,7 @@ services:
       - "127.0.0.1:1521:1521"
     volumes:
       - ./dev/oracle/init:/container-entrypoint-initdb.d:ro
-    healthcheck:
-      test: ["CMD", "healthcheck.sh"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
+    healthcheck: *oracle-healthcheck
 
   # A second Oracle Free whose LATIN1PDB has the WE8ISO8859P1 character set, for the
   # non-Unicode character-type tests. Its own container: a PDB of another character set in
@@ -231,11 +240,7 @@ services:
       - "127.0.0.1:1531:1521"
     volumes:
       - ./dev/oracle/init:/container-entrypoint-initdb.d:ro
-    healthcheck:
-      test: ["CMD", "healthcheck.sh"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
+    healthcheck: *oracle-healthcheck
 
   # ---- CDC-configured source engines (cdc profile) --------------------------
   # Dedicated instances carrying the server-side config change data capture
@@ -742,14 +747,7 @@ services:
         condition: service_healthy
     volumes:
       - ./dev/proxysql/proxysql.cnf:/etc/proxysql.cnf:ro
-    healthcheck:
-      # Wait for the client-facing 6033 port to accept connections.  ProxySQL's
-      # admin port (6032) comes up first; using 6033 ensures backend wiring is
-      # in place before tests dial in.
-      test: ["CMD-SHELL", "(echo > /dev/tcp/127.0.0.1/6033) >/dev/null 2>&1 || exit 1"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
+    healthcheck: *proxysql-healthcheck
 
   # ---- MySQL in another time zone, alone and behind a proxy that drops a SET ----
   # `mysql-tz` runs with `default_time_zone = '+03:00'` (a server in Europe/Moscow);
@@ -786,11 +784,7 @@ services:
         condition: service_healthy
     volumes:
       - ./dev/proxysql/proxysql-tz.cnf:/etc/proxysql.cnf:ro
-    healthcheck:
-      test: ["CMD-SHELL", "bash -c '(echo > /dev/tcp/127.0.0.1/6033)' || exit 1"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
+    healthcheck: *proxysql-healthcheck
 
   toxiproxy:
     image: *img-toxiproxy

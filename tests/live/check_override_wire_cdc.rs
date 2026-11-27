@@ -7,7 +7,6 @@ use crate::check_override_wire::check_and_run_refuse_alike_by;
 use crate::common::*;
 
 const WIRE: Refused<'static> = Refused::by_code("RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH", 1);
-const FORMAT: Refused<'static> = Refused::by_code("RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED", 1);
 
 fn declare(rig: Rig, column: &str, declared: &str) -> Rig {
     rig.export_line("columns:")
@@ -22,11 +21,16 @@ fn pending_baseline_is_refused_by_check_like_the_run(mut scn: CdcScenario, want:
     scn.insert(1);
     scn.settle();
     let name = scn.rig.export_name().to_string();
-    let rig = scn.rig.a_failed_run_may_leave(
-        &[Leftover::ObservedSchema, Leftover::ChunkCheckpoint],
-        "the refused baseline leg stored the schema it observed and its range checkpoint before the converter refused",
-    );
+    let rig = a_refused_baseline_may_leave_its_schema_and_checkpoint(scn.rig);
     check_and_run_refuse_alike_by(rig, &name, want);
+}
+
+/// Declares the observed schema and range checkpoint a refused baseline leg leaves behind.
+pub(crate) fn a_refused_baseline_may_leave_its_schema_and_checkpoint(rig: Rig) -> Rig {
+    rig.a_failed_run_may_leave(
+        &[Leftover::ObservedSchema, Leftover::ChunkCheckpoint],
+        "the refused baseline leg stored the schema it observed and its range checkpoint before the baseline plan refused",
+    )
 }
 
 fn both_check_spellings_accept(rig: &Rig, name: &str) {
@@ -83,13 +87,12 @@ fn a_pending_baseline_wire_mismatch_is_refused_by_check_postgres() {
 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc postgres-cdc"]
-fn a_pending_baseline_csv_decimal256_is_refused_by_check_postgres() {
-    pending_baseline_is_refused_by_check_like_the_run(
-        CdcScenario::pg_with("cdcw_csv_pg", "id BIGINT PRIMARY KEY, v BIGINT", |r, _| {
-            as_csv(r.cdc_line("initial: snapshot"), "v")
-        }),
-        FORMAT,
-    );
+fn a_pending_baseline_csv_decimal256_is_accepted_by_check_postgres() {
+    a_pending_baseline_over_columns_the_run_writes_is_accepted(CdcScenario::pg_with(
+        "cdcw_csv_pg",
+        "id BIGINT PRIMARY KEY, v NUMERIC(10,2)",
+        |r, _| as_csv(r.cdc_line("initial: snapshot"), "v"),
+    ));
 }
 
 #[test]
@@ -128,13 +131,12 @@ fn a_pending_baseline_wire_mismatch_is_refused_by_check_mysql() {
 
 #[test]
 #[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
-fn a_pending_baseline_csv_decimal256_is_refused_by_check_mysql() {
-    pending_baseline_is_refused_by_check_like_the_run(
-        CdcScenario::mysql_with("cdcw_csv_my", "id BIGINT PRIMARY KEY, v BIGINT", |r, _| {
-            as_csv(r.cdc_line("initial: snapshot"), "v")
-        }),
-        FORMAT,
-    );
+fn a_pending_baseline_csv_decimal256_is_accepted_by_check_mysql() {
+    a_pending_baseline_over_columns_the_run_writes_is_accepted(CdcScenario::mysql_with(
+        "cdcw_csv_my",
+        "id BIGINT PRIMARY KEY, v DECIMAL(10,2)",
+        |r, _| as_csv(r.cdc_line("initial: snapshot"), "v"),
+    ));
 }
 
 #[test]
@@ -281,4 +283,218 @@ fn a_pending_baseline_over_columns_the_run_writes_is_accepted_oracle() {
         "cdcw_ok_or",
         |r, _| r.cdc_line("initial: snapshot"),
     ));
+}
+
+/// A numeric, float or text column under an integer override gets the one answer of the override table on the baseline leg and on a stream-only export: the run and both `check` spellings refuse it at plan time, naming the declared type and a remedy a `mode: cdc` export can take.
+fn a_non_integer_under_an_integer_override_is_refused_alike_on_every_leg(
+    baseline: CdcScenario,
+    stream: CdcScenario,
+    column: &str,
+    literal: &str,
+    qualified: impl Fn(&str) -> String,
+) {
+    for (mut scn, anchored) in [(baseline, false), (stream, true)] {
+        if anchored {
+            scn.rig.run_ok();
+        }
+        let t = qualified(&scn.table);
+        scn.sql(&format!("INSERT INTO {t} (id, v) VALUES (1, {literal})"));
+        scn.settle();
+        if anchored {
+            scn.rig
+                .amend_export_lines(&["columns:", &format!("  {column}: \"int64\"")]);
+        }
+        let name = scn.rig.export_name().to_string();
+        let rig = a_refused_baseline_may_leave_its_schema_and_checkpoint(scn.rig);
+        let said = check_and_run_refuse_alike_by(rig, &name, WIRE);
+        assert!(said.contains("int64"), "{said}");
+        assert!(
+            said.contains("a `mode: cdc` export has no `query:`: remove the override"),
+            "{said}"
+        );
+    }
+}
+
+fn numeric_scenarios(
+    make: impl Fn(&str, bool) -> CdcScenario,
+    column: &str,
+    literal: &str,
+    qualified: impl Fn(&str) -> String,
+) {
+    a_non_integer_under_an_integer_override_is_refused_alike_on_every_leg(
+        make("snap", true),
+        make("strm", false),
+        column,
+        literal,
+        qualified,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc postgres-cdc"]
+fn a_numeric_under_an_integer_override_is_refused_alike_on_every_leg_postgres() {
+    numeric_scenarios(
+        |tag, snap| {
+            CdcScenario::pg_with(
+                &format!("cdcn_{tag}_pg"),
+                "id BIGINT PRIMARY KEY, v NUMERIC(10,2)",
+                move |r, _| {
+                    if snap {
+                        declare(r.cdc_line("initial: snapshot"), "v", "int64")
+                    } else {
+                        r
+                    }
+                },
+            )
+        },
+        "v",
+        "43.00",
+        str::to_string,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc postgres-cdc"]
+fn a_text_under_an_integer_override_is_refused_alike_on_every_leg_postgres() {
+    numeric_scenarios(
+        |tag, snap| {
+            CdcScenario::pg_with(
+                &format!("cdct_{tag}_pg"),
+                "id BIGINT PRIMARY KEY, v TEXT",
+                move |r, _| {
+                    if snap {
+                        declare(r.cdc_line("initial: snapshot"), "v", "int64")
+                    } else {
+                        r
+                    }
+                },
+            )
+        },
+        "v",
+        "'2'",
+        str::to_string,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose --profile cdc mysql-cdc"]
+fn a_numeric_under_an_integer_override_is_refused_alike_on_every_leg_mysql() {
+    numeric_scenarios(
+        |tag, snap| {
+            CdcScenario::mysql_with(
+                &format!("cdcn_{tag}_my"),
+                "id BIGINT PRIMARY KEY, v DECIMAL(10,2)",
+                move |r, _| {
+                    if snap {
+                        declare(r.cdc_line("initial: snapshot"), "v", "int64")
+                    } else {
+                        r
+                    }
+                },
+            )
+        },
+        "v",
+        "43.00",
+        str::to_string,
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql (CDC)"]
+fn a_numeric_under_an_integer_override_is_refused_alike_on_every_leg_mssql() {
+    let _serial = cross_process_serial("mssql_cdc");
+    numeric_scenarios(
+        |tag, snap| {
+            CdcScenario::mssql_with(
+                &format!("cdcn_{tag}_ms"),
+                "id BIGINT PRIMARY KEY, v NUMERIC(10,2)",
+                move |r, t| {
+                    let r = r.repoint(&format!("dbo.{t}"));
+                    if snap {
+                        declare(r.cdc_line("initial: snapshot"), "v", "int64")
+                    } else {
+                        r
+                    }
+                },
+            )
+        },
+        "v",
+        "43.00",
+        |t| format!("dbo.{t}"),
+    );
+}
+
+#[test]
+#[ignore = "live: requires docker compose mssql (CDC)"]
+fn a_text_under_an_integer_override_is_refused_alike_on_every_leg_mssql() {
+    let _serial = cross_process_serial("mssql_cdc");
+    numeric_scenarios(
+        |tag, snap| {
+            CdcScenario::mssql_with(
+                &format!("cdct_{tag}_ms"),
+                "id BIGINT PRIMARY KEY, v VARCHAR(20)",
+                move |r, t| {
+                    let r = r.repoint(&format!("dbo.{t}"));
+                    if snap {
+                        declare(r.cdc_line("initial: snapshot"), "v", "int64")
+                    } else {
+                        r
+                    }
+                },
+            )
+        },
+        "v",
+        "'2'",
+        |t| format!("dbo.{t}"),
+    );
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle (LogMiner)"]
+fn a_numeric_under_an_integer_override_is_refused_alike_on_every_leg_oracle() {
+    let _serial = cross_process_serial("oracle_cdc");
+    numeric_scenarios(
+        |tag, snap| {
+            CdcScenario::oracle_cols_with(
+                &format!("cdcn_{tag}_or"),
+                "id NUMBER(18) PRIMARY KEY, v NUMBER(10,2)",
+                move |r, _| {
+                    if snap {
+                        declare(r.cdc_line("initial: snapshot"), "V", "int64")
+                    } else {
+                        r
+                    }
+                },
+            )
+        },
+        "V",
+        "43.00",
+        str::to_string,
+    );
+}
+
+#[cfg(feature = "oracle")]
+#[test]
+#[ignore = "live: requires docker compose oracle (LogMiner)"]
+fn a_text_under_an_integer_override_is_refused_alike_on_every_leg_oracle() {
+    let _serial = cross_process_serial("oracle_cdc");
+    numeric_scenarios(
+        |tag, snap| {
+            CdcScenario::oracle_cols_with(
+                &format!("cdct_{tag}_or"),
+                "id NUMBER(18) PRIMARY KEY, v VARCHAR2(20)",
+                move |r, _| {
+                    if snap {
+                        declare(r.cdc_line("initial: snapshot"), "V", "int64")
+                    } else {
+                        r
+                    }
+                },
+            )
+        },
+        "V",
+        "'2'",
+        str::to_string,
+    );
 }

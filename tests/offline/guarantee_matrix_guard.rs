@@ -12,25 +12,8 @@ const MATRIX: &str = "docs/guarantee-matrix.yaml";
 const KNOWN_RED: &str = "dev/release_oracle/known_red.py";
 const GATE_DIR: &str = "dev/release_oracle";
 
-/// Rows not fully held: a `gap` cell or a live contradiction. Shrink-only; LOWER it with the row.
-// 30 -> 27 (2026-10-08): CDC refusals carry their code (#497, -2); a refused CDC run leaves nothing behind (-1).
-// 27 -> 26 (2026-10-09): the guarantee checks left unwritten are written (#506, -1).
-// 26 -> 25 (2026-10-09): the docs name `_rivet_exported_at` as the one column that differs between runs, and a cell holds it (#506, -1).
-// 25 -> 23 (2026-10-09): flat-memory.md states what was measured and a capped-run cell holds it; source-safe-under-load.md scopes the one-page sentence to chunked (#506, -2).
-// 20 -> 19 (2026-10-14, main): schema_drift_surfaces_as_an_error cites its existing cells; 19 -> 17: at_least_once_at_the_destination
-// and a_rerun_never_overwrites_the_previous_parts are held on Oracle too.
-// 17 -> 16 (2026-10-14): decimals_never_become_floats is held on every engine by one SqlEngine body.
-// 16 -> 15 (2026-10-15): no_row_silently_skipped is no longer contradicted; a cursor past the manifest is refused.
-// 15 -> 14 (2026-11-05): default_policy is no longer contradicted; an undeclared Oracle TIMESTAMP(7..9) is refused.
-const ROWS_NOT_HELD: usize = 14; // ratchet-pin: guarantee-rows-not-held (review 2027-02-01)
-/// `gap` cells over all rows. Shrink-only; LOWER it when a cell is written.
-// 29 -> 26 (2026-10-14): the `on_schema_drift: fail` cells already existed on MySQL, SQL Server and Oracle
-// (one body, live_schema_drift.rs); the row now cites them. 26 -> 19: the Oracle crash-after-write cell holds
-// three rows, the Oracle rapid-runs cell one, and a plain re-run of a finished checkpointed export is one
-// SqlEngine body on PostgreSQL, SQL Server and Oracle.
-// 19 -> 17 (2026-10-14): the decimal golden body holds the SQL Server and Oracle cells.
-// 17 -> 16 (2026-11-05): a test cell holds default_policy on Oracle.
-const GAP_CELLS: usize = 16; // ratchet-pin: guarantee-gap-cells (review 2027-02-01)
+// ratchet-pin: guarantee-rows-not-held (review 2027-02-01) rows docs/guarantee-matrix.yaml ^  - id: || \{ gap:|^    contradicted_by:
+// ratchet-pin: guarantee-gap-cells (review 2027-02-01) count docs/guarantee-matrix.yaml ^      [a-z0-9_]+: \{ gap:
 
 fn rows() -> Vec<Value> {
     let doc: Value = serde_yaml_ng::from_str(&subject_text(MATRIX))
@@ -324,9 +307,28 @@ fn every_contradiction_still_resolves() {
     );
 }
 
-/// The census of rows not held and of gap cells equals its ceiling.
+/// A pin's measured value as `pr_ready.py pins` prints it.
+fn pinned(name: &str) -> usize {
+    let out = std::process::Command::new("python3")
+        .args(["dev/pytools/pr_ready.py", "pins"])
+        .current_dir(repo_root())
+        .output()
+        .expect("python3 is a prerequisite of every gate script in this repo");
+    let said = String::from_utf8_lossy(&out.stdout);
+    said.lines()
+        .find_map(|l| l.strip_prefix(&format!("tests/offline/guarantee_matrix_guard.rs:{name} ")))
+        .and_then(|n| n.trim().parse().ok())
+        .unwrap_or_else(|| {
+            panic!(
+                "pr_ready.py pins lists no {name} pin:\n{said}{}",
+                String::from_utf8_lossy(&out.stderr)
+            )
+        })
+}
+
+/// The pins `pr_ready.py` measures from the matrix text equal what this guard parses from it.
 #[test]
-fn rows_not_held_and_gap_cells_match_their_ceilings() {
+fn the_rows_not_held_and_gap_cell_pins_count_what_the_parser_reads() {
     let (mut not_held, mut gaps) = (Vec::new(), 0usize);
     for row in rows() {
         let row_gaps = cells(&row)
@@ -340,10 +342,12 @@ fn rows_not_held_and_gap_cells_match_their_ceilings() {
         }
     }
     assert_eq!(
+        (
+            pinned("guarantee-rows-not-held"),
+            pinned("guarantee-gap-cells")
+        ),
         (not_held.len(), gaps),
-        (ROWS_NOT_HELD, GAP_CELLS),
-        "(rows not held, gap cells) moved from the ceilings (ROWS_NOT_HELD, GAP_CELLS). A new \
-         stated guarantee arrives with its cell; a cell written or a defect fixed LOWERS the pin. \
+        "a `ratchet-pin:` census in this file misses a row or cell shape the matrix holds. \
          Rows not held now: {not_held:?}"
     );
 }

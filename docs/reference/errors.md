@@ -60,7 +60,7 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_SOURCE_CDC_CELL_UNSUPPORTED` | refusal | 5 | leave the column out of the capture (SQL Server: @captured_column_list), then re-baseline the stream: delete the checkpoint, empty the export's destination, clear its `cdc_snapshot` rows, give it `cdc.initial: snapshot`, then re-run |
 | `RIVET_SOURCE_CDC_PREREQUISITE` | environment | 2 if its cause is transient, else 1 | apply the setup statement the message names, then re-run (docs/reference/cdc.md) |
 | `RIVET_SOURCE_CDC_ANCHOR_NOT_RELEASED` | environment | 2 if its cause is transient, else 1 | remove the slot, checkpoint file or `export_state` row the warning names, or leave it for the next run of the export to reuse |
-| `RIVET_SOURCE_VALUE_UNREPRESENTABLE` | refusal | 5 | map the value to a representable one in the export's `query:`, or exclude the column |
+| `RIVET_SOURCE_VALUE_UNREPRESENTABLE` | refusal | 5 | declare the column `text` under `columns:` where the message names it, or map the value to a representable one in the export's `query:`, or exclude the column |
 | `RIVET_SOURCE_PROBE_UNREADABLE` | refusal | 5 | chunk, page or partition the export on a column of a type the message lists, remove `parallel:` from a keyset export, or use `mode: full` |
 | `RIVET_SOURCE_COLUMNS_CHANGED_UNDER_READ` | environment | 2 | run the export again: the next run probes and reads the table as it is now |
 | `RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH` | usage | 1 | remove or correct the column's `columns:` override (batch: or CAST the column to that type in the export's `query:`; CDC: then re-snapshot the table) |
@@ -240,3 +240,10 @@ Every failure rivet names carries a stable `RIVET_<FAMILY>_<NAME>` code: in `--j
 | `RIVET_STATE_MIGRATION_LOCKED` | environment | 2 | wait for the other rivet process migrating this state database to finish, then run again |
 | `RIVET_INTERNAL_DEST_INVARIANT` | internal | 6 | a destination invariant did not hold — a bug; report it with the message |
 | `RIVET_INTERNAL_STATE_INVARIANT` | internal | 6 | a state-store invariant did not hold — a bug; report it with the message |
+
+## Decided by a value
+
+`rivet check` reads at most the first row of an export that declares `columns:`, so a later value can still raise these codes in `rivet run` or `rivet load` after check passed: check names them in a note on stderr.
+
+- `RIVET_SOURCE_VALUE_UNREPRESENTABLE`
+- `RIVET_LOAD_VALUE_OUT_OF_TARGET_RANGE`

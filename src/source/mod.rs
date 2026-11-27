@@ -628,6 +628,15 @@ pub(crate) fn refuse_unbuildable_override<T>(
     )
 }
 
+/// Whether `err` of the first-row probe is a refusal the run raises too: the pair code or the value code.
+fn is_probe_refusal(err: &anyhow::Error) -> bool {
+    crate::error::code_of(err).is_some_and(|c| {
+        seeded!("check-override-wire-not-refused", false, true)
+            && (c.id == crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH.id
+                || c.id == crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE.id)
+    })
+}
+
 /// Returns the run's refusal for a `columns:` override.
 pub(crate) fn refuse_override_wire_mismatch(
     src: &mut dyn Source,
@@ -654,14 +663,7 @@ pub(crate) fn refuse_override_wire_mismatch(
         Ok(()) => return Ok(()),
         Err(e) => e,
     };
-    let refused = crate::error::code_of(&err).is_some_and(|c| {
-        c.id == seeded!(
-            "check-override-wire-not-refused",
-            crate::error::codes::SOURCE_QUERY_FAILED.id,
-            crate::error::codes::SOURCE_OVERRIDE_WIRE_MISMATCH.id
-        ) || c.id == crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE.id
-    });
-    if refused {
+    if is_probe_refusal(&err) {
         return Err(err);
     }
     log::debug!("override probe ended without a wire verdict: {err:#}");
@@ -1176,6 +1178,21 @@ mod override_probe_tests {
         assert_eq!(
             crate::error::code_of(&err).map(|c| c.id),
             Some(codes::SOURCE_OVERRIDE_WIRE_MISMATCH.id)
+        );
+    }
+
+    #[test]
+    fn a_value_refusal_of_the_probe_is_returned_with_its_code() {
+        let mut src = Scripted {
+            fail: Some(codes::SOURCE_VALUE_UNREPRESENTABLE),
+            ..Default::default()
+        };
+        let err =
+            refuse_override_wire_mismatch(&mut src, SourceType::Postgres, "SELECT 1", &overrides())
+                .unwrap_err();
+        assert_eq!(
+            crate::error::code_of(&err).map(|c| c.id),
+            Some(codes::SOURCE_VALUE_UNREPRESENTABLE.id)
         );
     }
 

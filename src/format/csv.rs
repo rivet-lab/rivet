@@ -1,13 +1,17 @@
 use std::io::{BufRead, Write};
 use std::path::Path;
 
-use arrow::array::types::{Decimal128Type, Time64MicrosecondType, Time64NanosecondType};
+use arrow::array::types::{
+    Date32Type, Decimal128Type, Decimal256Type, Float32Type, Float64Type, Int16Type, Int32Type,
+    Int64Type, Time64MicrosecondType, Time64NanosecondType, TimestampMicrosecondType,
+    TimestampNanosecondType, UInt64Type,
+};
 use arrow::array::*;
 use arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use arrow::record_batch::RecordBatch;
 
 use crate::error::Result;
-use crate::types::decimal::scaled_i128_to_decimal_str;
+use crate::types::decimal::{scaled_i128_to_decimal_str, scaled_i256_to_decimal_str};
 
 pub struct CsvFormat;
 
@@ -59,7 +63,8 @@ impl super::FormatWriter for CsvFormatWriter {
                 if col_idx > 0 {
                     buf.push(b',');
                 }
-                write_csv_value(&mut buf, batch.column(col_idx), row_idx)?;
+                write_csv_value(&mut buf, batch.column(col_idx), row_idx)
+                    .map_err(|e| name_column(e, batch.schema().field(col_idx).name()))?;
             }
             buf.push(b'\n');
         }
@@ -89,8 +94,26 @@ pub(crate) fn refuse_column(name: &str, dt: &DataType) -> Result<()> {
     )
 }
 
-/// Arrow types `write_csv_value` can serialize.
+/// Arrow types `write_csv_value` can serialize: a scalar, or a flat list of scalars written as JSON array text.
 pub(crate) fn csv_serializable(dt: &DataType) -> bool {
+    if seeded!("csv-text-types-refused", true, false)
+        && matches!(
+            dt,
+            DataType::List(_)
+                | DataType::Decimal256(_, _)
+                | DataType::Timestamp(TimeUnit::Nanosecond, _)
+        )
+    {
+        return false;
+    }
+    match dt {
+        DataType::List(item) => scalar_serializable(item.data_type()),
+        other => scalar_serializable(other),
+    }
+}
+
+/// Arrow scalar types with a lossless CSV text.
+fn scalar_serializable(dt: &DataType) -> bool {
     matches!(
         dt,
         DataType::Boolean
@@ -99,6 +122,7 @@ pub(crate) fn csv_serializable(dt: &DataType) -> bool {
             | DataType::Int64
             | DataType::UInt64
             | DataType::Decimal128(_, _)
+            | DataType::Decimal256(_, _)
             | DataType::Float32
             | DataType::Float64
             | DataType::Utf8
@@ -108,6 +132,7 @@ pub(crate) fn csv_serializable(dt: &DataType) -> bool {
             | DataType::Time64(TimeUnit::Microsecond)
             | DataType::Time64(TimeUnit::Nanosecond)
             | DataType::Timestamp(TimeUnit::Microsecond, _)
+            | DataType::Timestamp(TimeUnit::Nanosecond, _)
     )
 }
 
@@ -165,161 +190,118 @@ fn empty_value() -> &'static [u8] {
     seeded!("csv-empty-value-written-bare", &b""[..], &b"\"\""[..])
 }
 
+/// One cell: empty for NULL, a quoted field for text and list cells, the scalar text otherwise.
 fn write_csv_value(writer: &mut dyn Write, array: &dyn Array, idx: usize) -> Result<()> {
     if array.is_null(idx) {
         return Ok(());
     }
-
     match array.data_type() {
-        DataType::Boolean => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<BooleanArray>()
-                .expect("DataType/Array mismatch");
-            write!(writer, "{}", arr.value(idx))?;
+        DataType::List(_) => write_list_cell(writer, array.as_list::<i32>(), idx),
+        DataType::Utf8 => write_text_field(writer, array.as_string::<i32>().value(idx).as_bytes()),
+        DataType::Binary if array.as_binary::<i32>().value(idx).is_empty() => {
+            Ok(writer.write_all(empty_value())?)
         }
-        DataType::Int16 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Int16Array>()
-                .expect("DataType/Array mismatch");
-            write!(writer, "{}", arr.value(idx))?;
+        _ => write_scalar_text(writer, array, idx),
+    }
+}
+
+/// A text field: an empty value as the quoted empty field, a value with a delimiter, quote or line break quoted with doubled quotes.
+fn write_text_field(writer: &mut dyn Write, val: &[u8]) -> Result<()> {
+    if val.is_empty() {
+        return Ok(writer.write_all(empty_value())?);
+    }
+    if !val.iter().any(|b| matches!(b, b',' | b'"' | b'\n' | b'\r')) {
+        return Ok(writer.write_all(val)?);
+    }
+    writer.write_all(b"\"")?;
+    for (n, part) in val.split(|b| *b == b'"').enumerate() {
+        if n > 0 {
+            writer.write_all(b"\"\"")?;
         }
-        DataType::Int32 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .expect("DataType/Array mismatch");
-            write!(writer, "{}", arr.value(idx))?;
+        writer.write_all(part)?;
+    }
+    Ok(writer.write_all(b"\"")?)
+}
+
+/// A list cell: the elements as one JSON array text in a single field.
+fn write_list_cell(writer: &mut dyn Write, list: &ListArray, idx: usize) -> Result<()> {
+    let items = list.value(idx);
+    let mut json = Vec::with_capacity(items.len() * 8 + 2);
+    json.push(b'[');
+    for i in 0..items.len() {
+        if i > 0 {
+            json.push(b',');
         }
-        DataType::Int64 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .expect("DataType/Array mismatch");
-            write!(writer, "{}", arr.value(idx))?;
-        }
-        DataType::UInt64 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<UInt64Array>()
-                .expect("DataType/Array mismatch");
-            write!(writer, "{}", arr.value(idx))?;
-        }
+        write_json_element(&mut json, items.as_ref(), i)?;
+    }
+    json.push(b']');
+    write_text_field(writer, &json)
+}
+
+/// One list element as JSON: null, a bare number or boolean, else a JSON string of its scalar text.
+fn write_json_element(out: &mut Vec<u8>, array: &dyn Array, idx: usize) -> Result<()> {
+    if array.is_null(idx) {
+        out.extend_from_slice(b"null");
+        return Ok(());
+    }
+    let mut text = Vec::new();
+    write_scalar_text(&mut text, array, idx)?;
+    let bare = match array.data_type() {
+        DataType::Boolean | DataType::Int16 | DataType::Int32 | DataType::Int64 => true,
+        DataType::UInt64 => true,
+        DataType::Float32 | DataType::Float64 => text
+            .iter()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'-' | b'.')),
+        _ => false,
+    };
+    if bare {
+        out.extend_from_slice(&text);
+        return Ok(());
+    }
+    serde_json::to_writer(&mut *out, String::from_utf8_lossy(&text).as_ref())
+        .map_err(std::io::Error::from)?;
+    Ok(())
+}
+
+/// The text of one non-null scalar, with no CSV quoting.
+fn write_scalar_text(writer: &mut dyn Write, array: &dyn Array, idx: usize) -> Result<()> {
+    match array.data_type() {
+        DataType::Boolean => write!(writer, "{}", array.as_boolean().value(idx))?,
+        DataType::Int16 => write_primitive::<Int16Type>(writer, array, idx)?,
+        DataType::Int32 => write_primitive::<Int32Type>(writer, array, idx)?,
+        DataType::Int64 => write_primitive::<Int64Type>(writer, array, idx)?,
+        DataType::UInt64 => write_primitive::<UInt64Type>(writer, array, idx)?,
+        DataType::Float32 => write_primitive::<Float32Type>(writer, array, idx)?,
+        DataType::Float64 => write_primitive::<Float64Type>(writer, array, idx)?,
         DataType::Decimal128(_, scale) => {
-            let arr = array.as_primitive::<Decimal128Type>();
-            let text = scaled_i128_to_decimal_str(arr.value(idx), *scale);
-            writer.write_all(text.as_bytes())?;
+            let value = array.as_primitive::<Decimal128Type>().value(idx);
+            writer.write_all(scaled_i128_to_decimal_str(value, *scale).as_bytes())?;
         }
-        DataType::Float32 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Float32Array>()
-                .expect("DataType/Array mismatch");
-            write!(writer, "{}", arr.value(idx))?;
+        DataType::Decimal256(_, scale) => {
+            let value = array.as_primitive::<Decimal256Type>().value(idx);
+            writer.write_all(scaled_i256_to_decimal_str(value, *scale).as_bytes())?;
         }
-        DataType::Float64 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .expect("DataType/Array mismatch");
-            write!(writer, "{}", arr.value(idx))?;
-        }
-        DataType::Utf8 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .expect("DataType/Array mismatch");
-            let val = arr.value(idx);
-            if val.is_empty() {
-                writer.write_all(empty_value())?;
-                return Ok(());
-            }
-            if val
-                .bytes()
-                .any(|b| matches!(b, b',' | b'"' | b'\n' | b'\r'))
-            {
-                writer.write_all(b"\"")?;
-                let mut rest = val;
-                while let Some(pos) = rest.find('"') {
-                    writer.write_all(&rest.as_bytes()[..pos])?;
-                    writer.write_all(b"\"\"")?;
-                    rest = &rest[pos + 1..];
-                }
-                writer.write_all(rest.as_bytes())?;
-                writer.write_all(b"\"")?;
-            } else {
-                writer.write_all(val.as_bytes())?;
-            }
-        }
-        DataType::Binary => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .expect("DataType/Array mismatch");
-            let val = arr.value(idx);
-            if val.is_empty() {
-                writer.write_all(empty_value())?;
-                return Ok(());
-            }
-            write_lower_hex(writer, val)?;
-        }
+        DataType::Utf8 => writer.write_all(array.as_string::<i32>().value(idx).as_bytes())?,
+        DataType::Binary => write_lower_hex(writer, array.as_binary::<i32>().value(idx))?,
         DataType::FixedSizeBinary(16) => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<FixedSizeBinaryArray>()
-                .expect("DataType/Array mismatch");
-            let val = arr.value(idx);
             let mut bytes = [0u8; 16];
-            bytes.copy_from_slice(val);
+            bytes.copy_from_slice(array.as_fixed_size_binary().value(idx));
             write!(writer, "{}", uuid::Uuid::from_bytes(bytes).hyphenated())?;
         }
-        DataType::Date32 => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<Date32Array>()
-                .expect("DataType/Array mismatch");
-            let days = arr.value(idx);
-            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is valid");
-            let date =
-                chrono::Duration::try_days(days as i64).and_then(|d| epoch.checked_add_signed(d));
-            if let Some(date) = date {
-                write!(writer, "{}", date)?;
-            }
-        }
+        DataType::Date32 => write_date32(writer, array.as_primitive::<Date32Type>().value(idx))?,
         DataType::Time64(unit) => write_time64(writer, array, idx, unit)?,
-        DataType::Timestamp(TimeUnit::Microsecond, tz) => {
-            let arr = array
-                .as_any()
-                .downcast_ref::<TimestampMicrosecondArray>()
-                .expect("DataType/Array mismatch");
-            let is_instant = tz.is_some();
-            let micros = arr.value(idx);
-            let secs = micros.div_euclid(1_000_000);
-            let nsecs = (micros.rem_euclid(1_000_000) * 1_000) as u32;
-            if let Some(dt) = chrono::DateTime::from_timestamp(secs, nsecs) {
-                use chrono::{Datelike as _, Timelike as _};
-                let y = dt.year();
-                if (0..=9999).contains(&y) {
-                    write!(
-                        writer,
-                        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}",
-                        y,
-                        dt.month(),
-                        dt.day(),
-                        dt.hour(),
-                        dt.minute(),
-                        dt.second(),
-                        dt.nanosecond() / 1_000
-                    )?;
-                } else {
-                    write!(writer, "{}", dt.format("%Y-%m-%dT%H:%M:%S%.6f"))?;
-                }
-                if is_instant {
-                    writer.write_all(b"Z")?;
-                }
-            }
-        }
+        DataType::Timestamp(TimeUnit::Microsecond, tz) => write_timestamp(
+            writer,
+            array.as_primitive::<TimestampMicrosecondType>().value(idx),
+            1_000,
+            tz.is_some(),
+        )?,
+        DataType::Timestamp(TimeUnit::Nanosecond, tz) => write_timestamp(
+            writer,
+            array.as_primitive::<TimestampNanosecondType>().value(idx),
+            1,
+            tz.is_some(),
+        )?,
         other => {
             crate::rivet_bail!(
                 crate::error::codes::INTERNAL_DEST_INVARIANT,
@@ -327,7 +309,105 @@ fn write_csv_value(writer: &mut dyn Write, array: &dyn Array, idx: usize) -> Res
             );
         }
     }
+    Ok(())
+}
 
+/// A primitive cell in its `Display` form.
+fn write_primitive<T: ArrowPrimitiveType>(
+    writer: &mut dyn Write,
+    array: &dyn Array,
+    idx: usize,
+) -> Result<()>
+where
+    T::Native: std::fmt::Display,
+{
+    write!(writer, "{}", array.as_primitive::<T>().value(idx))?;
+    Ok(())
+}
+
+/// The dates and timestamps a CSV text can name: chrono's proleptic range.
+const CSV_TEMPORAL_RANGE: &str = "-262143-01-01..+262142-12-31";
+
+/// The coded refusal for a temporal value the CSV text cannot name, which an empty cell would turn into NULL.
+fn unrepresentable_temporal(what: String) -> anyhow::Error {
+    crate::error::coded(
+        crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE,
+        format!(
+            "holds {what}, outside the dates a CSV text can name ({CSV_TEMPORAL_RANGE}), and \
+             writing it as an empty cell would lose the value, since an empty cell reads as NULL. \
+             Select the column as text with a CAST in the export's `query:`, or use `format: parquet`."
+        ),
+    )
+}
+
+/// `err` with the column it came from named when it is a temporal refusal; any other error passes through.
+fn name_column(err: anyhow::Error, column: &str) -> anyhow::Error {
+    let code = crate::error::codes::SOURCE_VALUE_UNREPRESENTABLE;
+    if crate::error::error_code(&err) != Some(code.id) {
+        return err;
+    }
+    crate::error::recoded(&err, code, format!("csv: column `{column}` {err}"))
+}
+
+/// A `Date32` cell as `YYYY-MM-DD`, or the coded refusal for a day count chrono cannot hold.
+fn write_date32(writer: &mut dyn Write, days: i32) -> Result<()> {
+    let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is valid");
+    let date = chrono::Duration::try_days(days as i64).and_then(|d| epoch.checked_add_signed(d));
+    let Some(date) = date else {
+        if seeded!("csv-temporal-out-of-range-written-empty", true, false) {
+            return Ok(());
+        }
+        return Err(unrepresentable_temporal(format!(
+            "a date {days} days from 1970-01-01"
+        )));
+    };
+    write!(writer, "{}", date)?;
+    Ok(())
+}
+
+/// A timestamp cell: six fraction digits for microseconds, nine for nanoseconds, a trailing `Z` for an instant.
+fn write_timestamp(
+    writer: &mut dyn Write,
+    value: i64,
+    nanos_per_unit: i64,
+    is_instant: bool,
+) -> Result<()> {
+    let per_second = 1_000_000_000 / nanos_per_unit;
+    let secs = value.div_euclid(per_second);
+    let nsecs = (value.rem_euclid(per_second) * nanos_per_unit) as u32;
+    let Some(dt) = chrono::DateTime::from_timestamp(secs, nsecs) else {
+        if seeded!("csv-temporal-out-of-range-written-empty", true, false) {
+            return Ok(());
+        }
+        return Err(unrepresentable_temporal(format!(
+            "a timestamp of {value} microseconds from 1970-01-01T00:00:00"
+        )));
+    };
+    if nanos_per_unit == 1 {
+        let text = crate::types::iso_timestamp_nanos(dt.naive_utc(), is_instant);
+        writer.write_all(text.as_bytes())?;
+        return Ok(());
+    }
+    use chrono::{Datelike as _, Timelike as _};
+    let y = dt.year();
+    if (0..=9999).contains(&y) {
+        write!(
+            writer,
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}",
+            y,
+            dt.month(),
+            dt.day(),
+            dt.hour(),
+            dt.minute(),
+            dt.second(),
+            dt.nanosecond() / 1_000
+        )?;
+    } else {
+        write!(writer, "{}", dt.format("%Y-%m-%dT%H:%M:%S%.6f"))?;
+    }
+    if is_instant {
+        writer.write_all(b"Z")?;
+    }
     Ok(())
 }
 
@@ -704,18 +784,22 @@ mod tests {
     }
 
     #[test]
-    fn csv_rejects_array_columns_loudly() {
+    fn csv_rejects_nested_array_columns_loudly() {
         use crate::format::Format;
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int64, false),
             Field::new(
                 "tags",
-                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                DataType::List(Arc::new(Field::new(
+                    "item",
+                    DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                    true,
+                ))),
                 true,
             ),
         ]));
         let Err(err) = CsvFormat.create_writer(&schema, Box::new(Vec::<u8>::new())) else {
-            panic!("CSV must reject array columns, not silently drop them");
+            panic!("CSV must reject nested array columns, not silently drop them");
         };
         let msg = format!("{err:#}");
         assert!(msg.contains("tags"), "error must name the column: {msg}");
@@ -753,6 +837,21 @@ mod tests {
             ("d", Arc::new(Date32Array::from(vec![0i32]))),
             ("t", Arc::new(Time64MicrosecondArray::from(vec![0i64]))),
             ("ts", Arc::new(TimestampMicrosecondArray::from(vec![0i64]))),
+            ("tsn", Arc::new(TimestampNanosecondArray::from(vec![0i64]))),
+            (
+                "dec256",
+                Arc::new(
+                    Decimal256Array::from(vec![arrow::datatypes::i256::from_i128(1)])
+                        .with_precision_and_scale(60, 10)
+                        .unwrap(),
+                ),
+            ),
+            (
+                "list",
+                Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
+                    Some(vec![Some(1)]),
+                ])),
+            ),
         ];
         let fields: Vec<Field> = cols
             .iter()
@@ -795,22 +894,21 @@ mod tests {
 
     #[test]
     fn timestamp_fast_path_matches_chrono_format() {
-        let cases: [i64; 6] = [
+        let cases: [i64; 5] = [
             0,
             1_700_000_000_123_456,
             1_000_000 * 86_399 + 999_999,
             -62_135_596_800_000_000,
             253_402_300_799_000_000,
-            300_000_000_000_000_000,
         ];
         for micros in cases {
             let got = cell(TimestampMicrosecondArray::from(vec![micros]), 0);
             let secs = micros.div_euclid(1_000_000);
             let nsecs = (micros.rem_euclid(1_000_000) * 1_000) as u32;
-            let expected = match chrono::DateTime::from_timestamp(secs, nsecs) {
-                Some(dt) => format!("{}", dt.format("%Y-%m-%dT%H:%M:%S%.6f")),
-                None => String::new(),
-            };
+            let expected = chrono::DateTime::from_timestamp(secs, nsecs)
+                .expect("every case is inside chrono's range")
+                .format("%Y-%m-%dT%H:%M:%S%.6f")
+                .to_string();
             assert_eq!(got, expected, "timestamp mismatch for micros={micros}");
         }
     }
@@ -834,6 +932,258 @@ mod tests {
 }
 
 #[cfg(test)]
+mod text_cell_tests {
+    use super::*;
+    use arrow::array::types::{Int32Type, TimestampNanosecondType};
+    use arrow::datatypes::i256;
+    use std::sync::Arc;
+
+    fn cell(array: &dyn Array, idx: usize) -> String {
+        let mut buf = Vec::new();
+        write_csv_value(&mut buf, array, idx).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    fn unquote(field: &str) -> String {
+        match field.strip_prefix('"').and_then(|f| f.strip_suffix('"')) {
+            Some(inner) => inner.replace("\"\"", "\""),
+            None => field.to_string(),
+        }
+    }
+
+    fn json_of(array: &dyn Array, idx: usize) -> serde_json::Value {
+        serde_json::from_str(&unquote(&cell(array, idx))).expect("a list cell is JSON array text")
+    }
+
+    fn dec256(v: &str, precision: u8, scale: i8) -> Decimal256Array {
+        Decimal256Array::from(vec![i256::from_string(v).unwrap()])
+            .with_precision_and_scale(precision, scale)
+            .unwrap()
+    }
+
+    fn strings(items: Vec<Option<&str>>) -> ListArray {
+        let mut b = ListBuilder::new(StringBuilder::new());
+        for i in items {
+            b.values().append_option(i);
+        }
+        b.append(true);
+        b.finish()
+    }
+
+    #[test]
+    fn decimal256_writes_exact_plain_text_beyond_i128() {
+        let big = "123456789012345678901234567890123456789012345678901234567890";
+        assert_eq!(
+            cell(&dec256(big, 60, 10), 0),
+            "12345678901234567890123456789012345678901234567890.1234567890"
+        );
+        assert_eq!(cell(&dec256("-5", 60, 10), 0), "-0.0000000005");
+        assert_eq!(cell(&dec256("42", 50, 0), 0), "42");
+        assert_eq!(cell(&dec256("42", 50, -2), 0), "4200");
+    }
+
+    #[test]
+    fn decimal256_text_equals_decimal128_text_where_both_fit() {
+        let d128 = Decimal128Array::from(vec![-123_456_789_i128])
+            .with_precision_and_scale(38, 4)
+            .unwrap();
+        assert_eq!(
+            cell(&dec256("-123456789", 60, 4), 0),
+            cell(&d128, 0),
+            "one decimal text across widths"
+        );
+    }
+
+    #[test]
+    fn timestamp_nanos_write_nine_digits_and_z_only_for_an_instant() {
+        let naive = TimestampNanosecondArray::from(vec![1_719_136_800_123_456_789_i64]);
+        assert_eq!(cell(&naive, 0), "2024-06-23T10:00:00.123456789");
+        let zoned = naive.clone().with_timezone("UTC");
+        assert_eq!(cell(&zoned, 0), "2024-06-23T10:00:00.123456789Z");
+        let before_epoch = TimestampNanosecondArray::from(vec![-1_i64]);
+        assert_eq!(cell(&before_epoch, 0), "1969-12-31T23:59:59.999999999");
+    }
+
+    #[test]
+    fn timestamp_micros_keep_six_digits_next_to_nanos() {
+        let us = TimestampMicrosecondArray::from(vec![1_719_136_800_123_456_i64]);
+        assert_eq!(cell(&us, 0), "2024-06-23T10:00:00.123456");
+        assert_eq!(
+            cell(&us.with_timezone("UTC"), 0),
+            "2024-06-23T10:00:00.123456Z"
+        );
+    }
+
+    #[test]
+    fn a_list_of_integers_is_a_json_array_with_null_elements() {
+        let list = ListArray::from_iter_primitive::<Int32Type, _, _>(vec![Some(vec![
+            Some(1),
+            None,
+            Some(3),
+        ])]);
+        assert_eq!(cell(&list, 0), "\"[1,null,3]\"");
+        let empty = ListArray::from_iter_primitive::<Int32Type, _, _>(vec![Some(vec![])]);
+        assert_eq!(cell(&empty, 0), "[]");
+    }
+
+    #[test]
+    fn a_uint64_element_above_i64_max_is_a_bare_decimal_number() {
+        let list = ListArray::from_iter_primitive::<UInt64Type, _, _>(vec![Some(vec![
+            Some(u64::MAX),
+            Some(9_223_372_036_854_775_808),
+        ])]);
+        assert_eq!(
+            cell(&list, 0),
+            "\"[18446744073709551615,9223372036854775808]\""
+        );
+    }
+
+    #[test]
+    fn a_null_list_is_the_bare_null_field_and_an_empty_list_is_not() {
+        let list = ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
+            None,
+            Some(Vec::<Option<i32>>::new()),
+        ]);
+        assert_eq!(cell(&list, 0), "");
+        assert_eq!(cell(&list, 1), "[]");
+    }
+
+    #[test]
+    fn a_list_of_text_keeps_commas_quotes_nulls_and_empty_strings_apart() {
+        let items = vec![
+            Some("with,comma"),
+            Some("he said \"hi\""),
+            None,
+            Some(""),
+            Some("line\nbreak"),
+            Some("null"),
+        ];
+        let list = strings(items);
+        assert_eq!(
+            json_of(&list, 0),
+            serde_json::json!([
+                "with,comma",
+                "he said \"hi\"",
+                null,
+                "",
+                "line\nbreak",
+                "null"
+            ])
+        );
+    }
+
+    #[test]
+    fn a_list_of_floats_names_non_finite_values_like_postgres_json() {
+        let list =
+            ListArray::from_iter_primitive::<arrow::array::types::Float64Type, _, _>(vec![Some(
+                vec![Some(2.5), Some(f64::NAN), Some(f64::INFINITY), Some(-0.5)],
+            )]);
+        assert_eq!(
+            json_of(&list, 0),
+            serde_json::json!([2.5, "NaN", "inf", -0.5])
+        );
+    }
+
+    #[test]
+    fn a_list_of_typed_scalars_renders_each_as_its_scalar_text() {
+        let mut dates = ListBuilder::new(Date32Builder::new());
+        dates.values().append_value(19_723);
+        dates.values().append_null();
+        dates.append(true);
+        assert_eq!(
+            json_of(&dates.finish(), 0),
+            serde_json::json!(["2024-01-01", null])
+        );
+
+        let mut ts = ListBuilder::new(TimestampMicrosecondBuilder::new().with_timezone("UTC"));
+        ts.values().append_value(1_719_136_800_000_001);
+        ts.append(true);
+        assert_eq!(
+            json_of(&ts.finish(), 0),
+            serde_json::json!(["2024-06-23T10:00:00.000001Z"])
+        );
+
+        let mut bin = ListBuilder::new(BinaryBuilder::new());
+        bin.values().append_value([0xde, 0xad, 0xbe, 0xef]);
+        bin.values().append_value([]);
+        bin.append(true);
+        assert_eq!(
+            json_of(&bin.finish(), 0),
+            serde_json::json!(["deadbeef", ""])
+        );
+
+        let mut uuid = ListBuilder::new(FixedSizeBinaryBuilder::new(16));
+        uuid.values().append_value([0x12; 16]).unwrap();
+        uuid.append(true);
+        assert_eq!(
+            json_of(&uuid.finish(), 0),
+            serde_json::json!(["12121212-1212-1212-1212-121212121212"])
+        );
+
+        let mut tm = ListBuilder::new(Time64MicrosecondBuilder::new());
+        tm.values().append_value(36_000_000_000);
+        tm.append(true);
+        assert_eq!(
+            json_of(&tm.finish(), 0),
+            serde_json::json!(["10:00:00.000000"])
+        );
+    }
+
+    #[test]
+    fn a_list_of_nanosecond_timestamps_and_wide_decimals_is_text_per_element() {
+        let mut ts = ListBuilder::new(PrimitiveBuilder::<TimestampNanosecondType>::new());
+        ts.values().append_value(1_719_136_800_123_456_789);
+        ts.append(true);
+        assert_eq!(
+            json_of(&ts.finish(), 0),
+            serde_json::json!(["2024-06-23T10:00:00.123456789"])
+        );
+    }
+
+    #[test]
+    fn csv_admits_wide_decimals_nanosecond_timestamps_and_flat_lists() {
+        for dt in [
+            DataType::Decimal256(60, 10),
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+            DataType::List(Arc::new(arrow::datatypes::Field::new(
+                "item",
+                DataType::Utf8,
+                true,
+            ))),
+            DataType::List(Arc::new(arrow::datatypes::Field::new(
+                "item",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                true,
+            ))),
+        ] {
+            assert!(csv_serializable(&dt), "{dt:?} must have a CSV cell");
+        }
+    }
+
+    #[test]
+    fn csv_still_refuses_what_has_no_lossless_cell() {
+        let inner = Arc::new(arrow::datatypes::Field::new("item", DataType::Utf8, true));
+        let nested = DataType::List(Arc::new(arrow::datatypes::Field::new(
+            "item",
+            DataType::List(inner),
+            true,
+        )));
+        for dt in [
+            nested,
+            DataType::Int8,
+            DataType::Float16,
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            DataType::Timestamp(TimeUnit::Second, None),
+        ] {
+            assert!(!csv_serializable(&dt), "{dt:?} stays refused");
+            let err = refuse_column("c", &dt).unwrap_err();
+            crate::error::assert_coded(&err, "RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED", 1);
+        }
+    }
+}
+
+#[cfg(test)]
 mod error_code_tests {
     #[test]
     fn a_column_csv_cannot_serialize_is_refused_by_code() {
@@ -843,7 +1193,11 @@ mod error_code_tests {
             "tags",
             DataType::List(std::sync::Arc::new(Field::new(
                 "item",
-                DataType::Utf8,
+                DataType::List(std::sync::Arc::new(Field::new(
+                    "item",
+                    DataType::Utf8,
+                    true,
+                ))),
                 true,
             ))),
             true,
@@ -851,7 +1205,193 @@ mod error_code_tests {
         let err = super::CsvFormat
             .create_writer(&schema, Box::new(Vec::<u8>::new()))
             .err()
-            .expect("a list column has no CSV cell");
+            .expect("a nested list column has no CSV cell");
         crate::error::assert_coded(&err, "RIVET_CONFIG_FORMAT_COLUMN_UNSUPPORTED", 1);
+    }
+}
+
+#[cfg(test)]
+mod out_of_range_tests {
+    use super::*;
+    use arrow::datatypes::{Field, Schema};
+    use std::sync::Arc;
+
+    fn natural_days(date: chrono::NaiveDate) -> i32 {
+        let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is valid");
+        (date - epoch).num_days() as i32
+    }
+
+    fn natural_micros(dt: chrono::NaiveDateTime) -> i64 {
+        dt.and_utc().timestamp_micros()
+    }
+
+    fn csv_of(array: ArrayRef) -> Result<String> {
+        let schema: SchemaRef = Arc::new(Schema::new(vec![Field::new(
+            "d",
+            array.data_type().clone(),
+            true,
+        )]));
+        let sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        struct Tee(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for Tee {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        use crate::format::Format as _;
+        let mut w = CsvFormat.create_writer(&schema, Box::new(Tee(sink.clone())))?;
+        w.write_batch(&RecordBatch::try_new(schema, vec![array])?)?;
+        let text = String::from_utf8(sink.lock().unwrap().clone()).unwrap();
+        Ok(text)
+    }
+
+    fn date_list(days: &[Option<i32>]) -> ArrayRef {
+        let mut b = ListBuilder::new(Date32Builder::new());
+        for d in days {
+            b.values().append_option(*d);
+        }
+        b.append(true);
+        Arc::new(b.finish())
+    }
+
+    fn timestamp_list(micros: &[i64]) -> ArrayRef {
+        let mut b = ListBuilder::new(TimestampMicrosecondBuilder::new());
+        for m in micros {
+            b.values().append_value(*m);
+        }
+        b.append(true);
+        Arc::new(b.finish())
+    }
+
+    fn assert_refused(got: Result<String>, what: &str) {
+        let err = got.expect_err(what);
+        crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+        assert!(format!("{err:#}").contains("column `d`"), "{err:#}");
+    }
+
+    #[test]
+    fn a_date32_chrono_cannot_name_is_refused_not_written_as_an_empty_cell() {
+        let past_max = natural_days(chrono::NaiveDate::MAX) + 1;
+        let before_min = natural_days(chrono::NaiveDate::MIN) - 1;
+        for days in [past_max, before_min, i32::MAX, i32::MIN] {
+            let got = csv_of(Arc::new(Date32Array::from(vec![days])));
+            assert_refused(
+                got,
+                &format!("Date32 {days} must be refused, not an empty cell"),
+            );
+        }
+    }
+
+    #[test]
+    fn a_date32_inside_a_list_that_chrono_cannot_name_is_refused_not_written_as_an_empty_string() {
+        let got = csv_of(date_list(&[Some(19_723), Some(i32::MAX)]));
+        assert_refused(
+            got,
+            "a list holding Date32 i32::MAX must be refused, not [\"2024-01-01\",\"\"]",
+        );
+    }
+
+    #[test]
+    fn a_microsecond_timestamp_chrono_cannot_name_is_refused_not_written_as_an_empty_cell() {
+        let past_max = natural_micros(chrono::NaiveDateTime::MAX) + 1;
+        for micros in [past_max, i64::MAX, i64::MIN] {
+            let got = csv_of(Arc::new(TimestampMicrosecondArray::from(vec![micros])));
+            assert_refused(
+                got,
+                &format!("timestamp {micros} us must be refused, not an empty cell"),
+            );
+        }
+    }
+
+    #[test]
+    fn a_microsecond_timestamp_inside_a_list_that_chrono_cannot_name_is_refused_not_written_as_an_empty_string()
+     {
+        let got = csv_of(timestamp_list(&[0, i64::MAX]));
+        assert_refused(got, "a list holding a timestamp i64::MAX must be refused");
+    }
+
+    #[test]
+    fn the_refusal_names_the_column_the_value_the_range_and_the_remedy() {
+        let err = csv_of(Arc::new(Date32Array::from(vec![i32::MAX]))).unwrap_err();
+        assert_eq!(
+            format!("{err}"),
+            "csv: column `d` holds a date 2147483647 days from 1970-01-01, outside the dates a CSV \
+             text can name (-262143-01-01..+262142-12-31), and writing it as an empty cell would \
+             lose the value, since an empty cell reads as NULL. Select the column as text with a \
+             CAST in the export's `query:`, or use `format: parquet`."
+        );
+    }
+
+    fn neighbours() -> Vec<String> {
+        let days = |d: chrono::NaiveDate| natural_days(d);
+        let ymd = |y, m, d| chrono::NaiveDate::from_ymd_opt(y, m, d).expect("valid");
+        let dates = vec![
+            Some(0),
+            Some(-1),
+            Some(19_723),
+            Some(days(ymd(1, 1, 1))),
+            Some(days(ymd(0, 12, 31))),
+            Some(days(ymd(9999, 12, 31))),
+            Some(days(ymd(10_000, 1, 1))),
+            Some(days(chrono::NaiveDate::MAX)),
+            Some(days(chrono::NaiveDate::MIN)),
+            None,
+        ];
+        let micros = vec![
+            Some(0),
+            Some(-1),
+            Some(1_719_136_800_123_456),
+            Some(natural_micros(chrono::NaiveDateTime::MAX)),
+            Some(natural_micros(chrono::NaiveDateTime::MIN)),
+            Some(natural_micros(
+                ymd(10_000, 1, 1).and_hms_opt(0, 0, 0).unwrap(),
+            )),
+            None,
+        ];
+        let mut out = vec![
+            csv_of(Arc::new(Date32Array::from(dates.clone()))).unwrap(),
+            csv_of(Arc::new(TimestampMicrosecondArray::from(micros.clone()))).unwrap(),
+            csv_of(Arc::new(
+                TimestampMicrosecondArray::from(micros).with_timezone("UTC"),
+            ))
+            .unwrap(),
+            csv_of(Arc::new(TimestampNanosecondArray::from(vec![
+                Some(i64::MIN),
+                Some(-1),
+                Some(0),
+                Some(i64::MAX),
+                None,
+            ])))
+            .unwrap(),
+            csv_of(Arc::new(Time64MicrosecondArray::from(vec![
+                Some(-1),
+                Some(0),
+                Some(86_399_999_999),
+                Some(i64::MAX),
+                None,
+            ])))
+            .unwrap(),
+        ];
+        out.push(csv_of(date_list(&dates)).unwrap());
+        out
+    }
+
+    #[test]
+    fn every_value_chrono_can_name_is_written_as_before() {
+        assert_eq!(
+            neighbours(),
+            vec![
+                "d\n1970-01-01\n1969-12-31\n2024-01-01\n0001-01-01\n0000-12-31\n9999-12-31\n+10000-01-01\n+262142-12-31\n-262143-01-01\n\n",
+                "d\n1970-01-01T00:00:00.000000\n1969-12-31T23:59:59.999999\n2024-06-23T10:00:00.123456\n+262142-12-31T23:59:59.999999\n-262143-01-01T00:00:00.000000\n+10000-01-01T00:00:00.000000\n\n",
+                "d\n1970-01-01T00:00:00.000000Z\n1969-12-31T23:59:59.999999Z\n2024-06-23T10:00:00.123456Z\n+262142-12-31T23:59:59.999999Z\n-262143-01-01T00:00:00.000000Z\n+10000-01-01T00:00:00.000000Z\n\n",
+                "d\n1677-09-21T00:12:43.145224192\n1969-12-31T23:59:59.999999999\n1970-01-01T00:00:00.000000000\n2262-04-11T23:47:16.854775807\n\n",
+                "d\n-00:00:00.000001\n00:00:00.000000\n23:59:59.999999\n2562047788:00:54.775807\n\n",
+                "d\n\"[\"\"1970-01-01\"\",\"\"1969-12-31\"\",\"\"2024-01-01\"\",\"\"0001-01-01\"\",\"\"0000-12-31\"\",\"\"9999-12-31\"\",\"\"+10000-01-01\"\",\"\"+262142-12-31\"\",\"\"-262143-01-01\"\",null]\"\n",
+            ]
+        );
     }
 }

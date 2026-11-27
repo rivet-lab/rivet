@@ -9,38 +9,13 @@ use std::path::PathBuf;
 const LEDGER: &str = "dev/release_oracle/known_red.py";
 const EXCUSES: &str = "dev/release_oracle/skip_allow.py";
 
-// The ledger's entries: `_open(...)` cells and bare `KnownRed(...)` gate rows. History frozen at 2026-11-04; a later raise is a dated entry in the ledger.
-// 25 (2026-10-14): 21 open-defect cells, 4 gate rows (Oracle cdc-load x2, Oracle TIMESTAMP(9) sentinels x2).
-// 12 -> 9 (2026-10-15): a stored cursor past the destination's success manifest is refused by code (-3).
-// 9 -> 8 (2026-10-16): the Azure removed-container cell is a plain cell again (fix/azure-missing-container-is-persistent).
-// 8 -> 7 (2026-10-16): the PostgreSQL out-of-descriptors cell is a plain cell again (fix/postgres-client-runtime-is-coded).
-// 6 -> 10 (2026-10-16): the dropped-source-table cells on four SQL engines (fix/dropped-source-table-is-coded).
-// 10 -> 6 (2026-10-16): the four dropped-source-table cells are plain cells again (fix/dropped-source-table-is-coded).
-// 7 -> 6 (2026-10-16): the changed-chunk-plan repair cell is a plain cell again (P-21, #618).
-// 6 -> 5 (2026-10-16): the relative destination.path cell is a plain cell again (P-27, fix/relative-destination-path-follows-the-config).
-// 4 -> 8 (2026-10-22): perf[mysql/cdc], cdc-spill, cdc-resume, cdc-snapshot: Handler_read_rnd_next counts the
-// performance_schema scan of two `SHOW GLOBAL VARIABLES` per run (#661, #684), no user table; issue #694.
-// 8 -> 4 (2026-10-27): the four perf[mysql/cdc*] rows matched no failure in the 0.32.2 gate; issue #694 keeps the reading.
-// 4 -> 10 (2026-11-03): five CDC-begin contract cells and the load-across-a-rolling-run cell, open defect HDW-1 (fix/run-closing-cdc-begin).
-// 10 -> 11 (2026-11-03): the MySQL CDC ENUM/SET label cell (TF-2, closes with fix/mysql-enum-label-escapes).
-// 11 -> 26 -> 11 (2026-11-03): the 15 open_defect_ cells of the config count knobs HCF-1/3/4/8 opened and closed (fix/config-knob-quantity-counts).
-// 11 -> 13 (2026-11-03): the gc_orphans-beside-a-CDC-run's-first-roll cells on MySQL and PostgreSQL, open defect CDC-RUN-START (fix/cdc-run-start-marker).
-// 13 -> 14 (2026-11-04): the MySQL CDC negative TIME(1)/(2) fraction cell (TF-1).
-// 14 -> 28 (2026-11-04): the keyset key type cells, ER-1/ER-3/ER-6/RHS-3 (fix/seam-keyset-key-type).
-// 28 -> 32 (2026-11-04): VP-8 missing-relation cells on MSSQL, Oracle and Mongo, and the MSSQL lock-timeout cell MT-F-F (close with fix/stop-class-by-code).
-// 32 -> 31 (2026-11-04): the TF-2 cell is green on fix/mysql-enum-label-escapes and its entry is deleted.
-// 31 -> 25 (2026-11-04): the six HDW-1 cells are plain cells again (fix/run-closing-cdc-begin).
-// 25 -> 26 (2026-11-05): the S3 profile-beside-env-keys cell, open defect HFF-2 (closes with fix/destination-credential-every-leg).
-// 26 -> 25 (2026-11-05): the TF-1 cell closed with fix/mysql-binlog-time-fraction.
 // ratchet-pin: known-red-entries (review 2027-02-01) count dev/release_oracle/known_red.py ^    (_open|KnownRed)\(
-// 25 -> 24 (2026-11-05): the HFF-2 cell is green on fix/destination-credential-every-leg and its entry is deleted.
-// 24 -> 22 (2026-11-05): the two Oracle TIMESTAMP(9) sentinel gate rows are deleted; an undeclared TIMESTAMP(7..9) is refused by code (c5-oracle-ts9).
-// 22 -> 20 (2026-11-05): the two CDC-RUN-START cells are plain cells again (fix/cdc-run-start-marker).
-// 20 -> 16 (2026-11-05): the VP-8 cells on MSSQL, Oracle and Mongo and the MSSQL lock-timeout cell MT-F-F are plain cells again (fix/stop-class-by-code).
-// 16 -> 2 (2026-11-06): the 14 keyset key type cells are plain cells again (fix/seam-keyset-key-type).
 
 /// The horizon every known-red entry and every excused skip expires at; moves only here and in both ledgers together.
 const EXPIRES: &str = "2026-11-29";
+
+/// The one date past the horizon the ledger may hold, as `_BASELINE_EXPIRES`: the ab-diff rows of the keyset_parallel part count, which close when 0.34.0 is the previous release.
+const BASELINE_EXPIRES: &str = "2026-12-15";
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -183,9 +158,15 @@ fn the_known_red_horizon_moves_only_with_this_guard() {
             })
             .filter(|s| *s > EXPIRES)
             .collect();
+        let allowed: Vec<&str> = if path == LEDGER
+            && text.contains(&format!("\n_BASELINE_EXPIRES = \"{BASELINE_EXPIRES}\"\n"))
+        {
+            vec![BASELINE_EXPIRES]
+        } else {
+            Vec::new()
+        };
         assert_eq!(
-            later,
-            Vec::<&str>::new(),
+            later, allowed,
             "{path}: dates past the horizon {EXPIRES}. An entry that must outlive the horizon moves the horizon here, in the open."
         );
     }
@@ -222,7 +203,7 @@ fn every_open_entry_names_a_live_cell_that_exists() {
     let orphan_rows: Vec<&String> = rows
         .iter()
         .filter(|m| {
-            let family = m.split('[').next().unwrap_or("");
+            let family = m.split(['[', ':']).next().unwrap_or("");
             family.is_empty() || !gate.contains(&format!("\"{family}["))
         })
         .collect();

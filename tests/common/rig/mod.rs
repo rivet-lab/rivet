@@ -27,7 +27,7 @@ pub use invoke::Spawned;
 mod materialize;
 mod oracle;
 mod remedy;
-pub use remedy::{Refused, Remedy, Then, assert_refused};
+pub use remedy::{Refused, Remedy, Then, Walk, assert_refused};
 mod sabotage;
 pub use sabotage::{Damage, Stopped, Survived};
 mod stop;
@@ -1169,7 +1169,13 @@ impl CdcScenario {
     /// Oracle: a `RIVET` `(id, v)` table logged with all columns and readable by the capture user, unpinned and shaped.
     #[cfg(feature = "oracle")]
     pub fn oracle_with(label: &str, shape: impl FnOnce(Rig, &str) -> Rig) -> Self {
-        let t = super::OracleTable::create(label, "id NUMBER(18) PRIMARY KEY, v NUMBER(18)");
+        Self::oracle_cols_with(label, "id NUMBER(18) PRIMARY KEY, v NUMBER(18)", shape)
+    }
+
+    /// [`Self::oracle_with`] over the columns `cols`.
+    #[cfg(feature = "oracle")]
+    pub fn oracle_cols_with(label: &str, cols: &str, shape: impl FnOnce(Rig, &str) -> Rig) -> Self {
+        let t = super::OracleTable::create(label, cols);
         let table = t.name().to_string();
         super::ora_exec(&format!(
             "ALTER TABLE {table} ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS"
