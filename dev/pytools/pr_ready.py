@@ -48,7 +48,7 @@ TRAILER = re.compile(r"^\s*(co-authored-by|claude-session):", re.I)
 BYTE_SLICE = re.compile(r"\[\s*\.\.\s*[A-Za-z_][\w.]*\.len\(\)\s*\]|\[\s*[A-Za-z_]\w*\s*\.\.\s*[A-Za-z_]\w*\s*\+\s*\w+\s*\]")
 SQL_PARSER = re.compile(r"^\+?\s*(sqlparser|sqlformat|sql-parse|pg_query|sqlparse)\b")
 BINARY = re.compile(r"\.(gif|png|jpg|jpeg|parquet|ico|pdf)$")
-MARK = re.compile(review_dates.MARKER + r"(?:\s+(sum|strings|lines|count))?(?:\s+(min))?")
+MARK = re.compile(review_dates.MARKER + r"(?:\s+(sum|strings|lines|count|rows))?(?:\s+(min))?")
 STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
 NUMBER = re.compile(r"(?<!\w)\d\w*")
 # Definitions that look like a pin by name; each must carry a `ratchet-pin:` marker.
@@ -62,6 +62,7 @@ NO_CHANGE = re.compile(r"no user-visible change", re.I)
 RATCHET_HEADING = re.compile(r"^\s*(?:#+\s*|\*\*)ratchets raised", re.I)
 HEADING = re.compile(r"^\s*(?:#+\s|\*\*[^*]+\*\*\s*$)")
 INVARIANTS_HEADING = re.compile(r"^\s*(?:#+\s*|\*\*)invariants\b", re.I)
+FIGURE = re.compile(r"(\d+)\s*(?:->|\u2192)\s*(\d+)|(?<![\w.])\+(\d+)\b")
 ANSWERED = re.compile(r"\bI([1-5])\b(.*)")
 SEAMS = (
     ("src/cli/", "a command"),
@@ -177,13 +178,19 @@ def pins(text: str, path: str, census=None) -> dict[str, tuple[int, bool]]:
             if len(ints) != 1:
                 raise ValueError(f"{where} needs exactly one integer on its line, found {len(ints)}")
             value = ints[0]
-        elif measure == "count":
+        elif measure in ("count", "rows"):
             spec = line[m.end() :].split(None, 1)
             if len(spec) != 2 or census is None:
-                raise ValueError(f"{where} count needs `<pathspec> <extended regex>` after it and a census to count with")
-            value = census(spec[0], spec[1].strip())
+                raise ValueError(f"{where} {measure} needs `<pathspec> <regex>` after it and a census to count with")
+            if measure == "rows":
+                parts = spec[1].strip().split(" || ", 1)
+                if len(parts) != 2:
+                    raise ValueError(f"{where} rows needs `<pathspec> <row start regex> || <regex a row holds>`")
+                value = census(spec[0], parts[0], parts[1])
+            else:
+                value = census(spec[0], spec[1].strip())
             if value == 0:
-                raise ValueError(f"{where} count matched nothing in {spec[0]}: the census is blind, so a shrink would read as green")
+                raise ValueError(f"{where} {measure} matched nothing in {spec[0]}: the census is blind, so a shrink would read as green")
         else:
             body, closed = [], False
             for later in lines[i + 1 :]:
@@ -218,10 +225,25 @@ def pin_files(rev: str | None) -> dict[str, str]:
     return out
 
 
+def rows_holding(text: str, start: str, within: str) -> int:
+    """Blocks of `text`, each opened by a line matching `start`, in which some line matches `within`."""
+    opens, holds = re.compile(start), re.compile(within)
+    blocks: list[list[str]] = []
+    for line in text.splitlines():
+        if opens.search(line):
+            blocks.append([])
+        if blocks:
+            blocks[-1].append(line)
+    return sum(1 for b in blocks if any(holds.search(x) for x in b))
+
+
 def census(rev: str | None):
     """The counter a `count` pin measures with: matches of an extended regex under a pathspec at `rev` (working tree when None)."""
 
-    def count(pathspec: str, regex: str) -> int:
+    def count(pathspec: str, regex: str, within: str | None = None) -> int:
+        if within is not None:
+            text = git("show", f"{rev}:{pathspec}") if rev else (ROOT / pathspec).read_text()
+            return rows_holding(text, regex, within)
         cmd = [GIT, "grep", "-o", "-h", "-E", "-e", regex, *([rev] if rev else []), "--", pathspec]
         p = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
         if p.returncode > 1:
@@ -276,10 +298,32 @@ def section(body: str, heading: re.Pattern) -> str:
     return "\n".join(out)
 
 
+def declared_amount(name: str, body: str, sign: int) -> int:
+    """The loosening the body's "Ratchets raised" section allows pin `name`: the largest `a -> b` step in its direction or `+N` on a line naming it, else 0."""
+    best = 0
+    for line in section(body, RATCHET_HEADING).splitlines():
+        if name not in line:
+            continue
+        for m in FIGURE.finditer(line):
+            best = max(best, int(m.group(3)) if m.group(3) else (int(m.group(2)) - int(m.group(1))) * sign)
+    return best
+
+
 def undeclared(raises: list[str], body: str) -> list[str]:
-    """Raised pins whose NAME the body's "Ratchets raised" section does not mention."""
-    said = section(body, RATCHET_HEADING)
-    return [r for r in raises if r.split(" ")[0].rsplit(":", 1)[1] not in said]
+    """Raised pins the body's "Ratchets raised" section does not allow: it names no figure, or its figure is smaller than the raise."""
+    out = []
+    for r in raises:
+        key, old, _, new = r.rsplit(" ", 3)
+        name = key.rsplit(":", 1)[1]
+        if new == "removed":
+            if name not in section(body, RATCHET_HEADING):
+                out.append(r)
+            continue
+        step = int(new) - int(old)
+        allowed = declared_amount(name, body, 1 if step > 0 else -1)
+        if allowed < abs(step):
+            out.append(f"{r} (the section allows {allowed}, the raise is {abs(step)})")
+    return out
 
 
 def invariants_verdict(changed: list[str], body: str | None, root: Path = ROOT) -> tuple[str, str]:
@@ -361,10 +405,10 @@ def branch_rows(base: str, body: str | None, expiry: bool) -> list[tuple[str, st
     if not up:
         rows.append(("ratchets raised", "PASS", "none"))
     elif body is None:
-        rows.append(("ratchets raised", "DECLARE", "declare under 'Ratchets raised' in the PR body: " + "; ".join(up)))
+        rows.append(("ratchets raised", "DECLARE", "declare under 'Ratchets raised' in the PR body, each pin with its step (`name old -> new` or `name +N`): " + "; ".join(up)))
     else:
         missing = undeclared(up, body)
-        rows.append(("ratchets raised", "FAIL" if missing else "PASS", ("not declared in the PR body: " + "; ".join(missing)) if missing else "declared: " + "; ".join(up)))
+        rows.append(("ratchets raised", "FAIL" if missing else "PASS", ("not allowed by the PR body's 'Ratchets raised': " + "; ".join(missing)) if missing else "declared: " + "; ".join(up)))
     changed = git("diff", "--name-only", f"{mb}...HEAD").split()
     head_log = git("show", "HEAD:CHANGELOG.md")
     base_log = git("show", f"{mb}:CHANGELOG.md")
@@ -614,6 +658,19 @@ def self_test() -> int:
 
     counted = "// ratchet-pin: opt-outs count tests/live/ \\.no_oracle\\(|NO_ORACLE_ENV\n"
     assert pins(counted, "r.rs", fake) == {"opt-outs": (32, False)} and seen == [("tests/live/", "\\.no_oracle\\(|NO_ORACLE_ENV")], seen
+    seen_rows = []
+
+    def fake_rows(pathspec: str, regex: str, within: str | None = None) -> int:
+        seen_rows.append((pathspec, regex, within))
+        return 7
+
+    rowed = "// ratchet-pin: held (review 2027-02-01) rows d/m.yaml ^  - id: || \\{ gap:|^    contradicted_by:\n"
+    assert pins(rowed, "r.rs", fake_rows) == {"held": (7, False)} and seen_rows == [("d/m.yaml", "^  - id:", "\\{ gap:|^    contradicted_by:")], seen_rows
+    try:
+        pins("// ratchet-pin: held rows d/m.yaml ^  - id:\n", "r.rs", fake_rows)
+        raise AssertionError("a rows pin without its second regex must be an error")
+    except ValueError:
+        pass
     here = census(None)
     assert here("dev/pytools/pr_ready.py", "def (census|pins)\\(") == 2, "a census counts every match of an extended regex"
     try:
@@ -644,9 +701,17 @@ def self_test() -> int:
     assert raised(base, {"f:silent": (39, False), "f:independent": (105, True), **keep}) == ["f:independent 106 -> 105"]
     assert raised(base, {"f:silent": (39, False), "f:independent": (106, True)}) == ["f:gone 1 -> removed"]
     up = ["tests/offline/s.rs:silent 39 -> 40"]
-    assert undeclared(up, "## Why\nx\n") == up, "an undeclared raise must fail"
+    assert len(undeclared(up, "## Why\nx\n")) == 1, "an undeclared raise must fail"
     assert undeclared(up, "## Ratchets raised\n- silent 39 -> 40: why\n## Evidence\n") == []
-    assert undeclared(up, "## Ratchets raised\nnone\n## Evidence\nsilent\n") == up, "a mention outside the section does not declare"
+    assert len(undeclared(up, "## Ratchets raised\nnone\n## Evidence\nsilent\n")) == 1, "a mention outside the section does not declare"
+    assert len(undeclared(up, "## Ratchets raised\n- silent: why\n")) == 1, "a name with no figure allows nothing"
+    assert undeclared(up, "## Ratchets raised\n- silent +1 (2026-11-27): why\n") == []
+    assert undeclared(up, "## Ratchets raised\n| silent | 38 \u2192 39 | why |\n") == [], "the step is allowed whatever the base it was written against"
+    assert len(undeclared(up, "## Ratchets raised\n- silent 39 -> 38: why\n")) == 1, "a step in the other direction allows nothing"
+    assert len(undeclared(["tests/offline/s.rs:silent 39 -> 41"], "## Ratchets raised\n- silent 39 -> 40: why\n")) == 1, "a raise of 2 over a declared 1 must fail"
+    assert undeclared(["tests/offline/s.rs:independent 106 -> 105"], "## Ratchets raised\n- independent 106 -> 105: why\n") == [], "a floor loosens downwards"
+    assert undeclared(["f:gone 1 -> removed"], "## Ratchets raised\n- gone: moved\n") == []
+    assert rows_holding("# h\n  - id: a\n    x: { gap: 1 }\n    y: { gap: 2 }\n  - id: b\n    z: 1\n  - id: c\n    contradicted_by:\n", "^  - id:", "gap:|contradicted_by:") == 2
     assert PIN_NAME.match("const NO_ORACLE_CEILING: usize = 21;") and PIN_NAME.match("gap_ratchet: 2")
     assert PIN_NAME.match("const BASELINE: &[(&str, usize)] = &[") and PIN_NAME.match("CONN_CEILING = {")
     assert not PIN_NAME.match("    let ceiling = x;") and not PIN_NAME.match("fn ratchet() {")
