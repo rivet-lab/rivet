@@ -388,18 +388,28 @@ def groups(cols: list[Col]) -> list[list[Col]]:
     return [whole[g:g + GROUP] for g in range(0, len(whole), GROUP)] + [[c] for c in cols if c not in whole]
 
 
+FINE_FRACTION = re.compile(r"^(DATETIME2|DATETIMEOFFSET)$|^TIMESTAMP\([789]\)")
+FINE_TARGETS = ("timestamp", "timestamp_tz")
+
+
 def rounds(engine: str, cols: list[Col]) -> list[tuple[list[Col], list[Unit], str]]:
-    """(columns, units, row image) rounds: per column group the `none` units in every format and one override unit per family representative and target on Parquet; MySQL adds every non-default row image; a column whose CDC verdict is a refusal is a round of its own."""
+    """(columns, units, row image) rounds: per column group the `none` units in every format and one override unit per family representative and target on Parquet, plus the timestamp and timestamp_tz units of one fine-fraction column when the representative is not one; MySQL adds every non-default row image; a column whose CDC verdict is a refusal is a round of its own."""
     ax = nsn.axes()
     cap = UNITS_PER_ROUND.get(engine, 64)
     seen: set[str] = set()
+    fine_seen = False
     out = []
     for group in groups(cols):
         units = [Unit("none", None, f) for f in ax["formats"]]
         for c in group:
+            fine = FINE_FRACTION.search(c.native) is not None
             if c.family not in seen and not stops_alone(c):
                 seen.add(c.family)
+                fine_seen |= fine
                 units += [Unit(t, c, "parquet") for t in ax["targets"] if t != "none"]
+            elif fine and not fine_seen and not stops_alone(c):
+                fine_seen = True
+                units += [Unit(t, c, "parquet") for t in FINE_TARGETS if t in ax["targets"]]
         out += [(group, units[k:k + cap], "") for k in range(0, len(units), cap)]
     if engine == "mysql":
         default = nsn.sql("mysql", CDC_STAND["mysql"], "SELECT @@global.binlog_row_image;").out
@@ -534,6 +544,22 @@ def self_test() -> None:
     assert agree_on_code([snap, held])[1] is held, "a leg that carries another class keeps it"
     split = Result(snap.cell, REFUSED, nsn.SPLIT, "", "RIVET_A")
     assert agree_on_code([split, ins])[1].klass == CDC_DIFFERS, "a snapshot leg graded a check split still fixes the code its stream legs must carry"
+    fine = Col("t00", "DATETIME2", "Timestamp", "other", ("'2000-01-01 00:00:00.1234567'",))
+    cut = [{"id": i, "__op": op or None, "t00": "2000-01-01 00:00:00.123456"} for leg in legs() for op, i, _ in expected(leg, 1)]
+    nsn.read_parts = lambda out, fmt, key="": ({"id": "INTEGER", "t00": "TIMESTAMP", "__op": "VARCHAR"}, cut, 1)
+
+    def report(fidelity: str) -> core.Proc:
+        return core.Proc(["rivet"], 0, json.dumps({"columns": [{"column": "t00", "fidelity": fidelity}]}) + "\n", "", gated=False)
+
+    try:
+        graded = {f: grade_unit("mssql", Unit("timestamp", fine, "parquet"), [fine], 1, {k: ok for k in ("snapshot", "stream", *ddl_kinds())}, {"snapshot": report(f)}, d, "") for f in ("lossy", "exact")}
+    finally:
+        nsn.read_parts = saved
+    assert nsn.DECLARED in {r.verdict for r in graded["lossy"]} and {r.klass for r in graded["lossy"]} == {""}, [(r.cell, r.verdict, r.klass) for r in graded["lossy"]]
+    assert WRONG in {r.klass for r in graded["exact"]} and not any(r.verdict == nsn.DECLARED for r in graded["exact"]), "a truncated stream value under fidelity exact is WRONG_VALUE"
+    date_c, ns9 = Col("t01", "DATE", "Timestamp", "other", ("DATE '2000-01-01'",)), Col("t02", "TIMESTAMP(9)", "Timestamp", "other", ("TIMESTAMP '2000-01-01 00:00:00.123456789'",))
+    reps = {(u.col.native, u.target) for _, units, _ in rounds("oracle", [date_c, ns9]) for u in units if u.col is not None}
+    assert ("TIMESTAMP(9)", "timestamp") in reps and ("TIMESTAMP(9)", "timestamp_tz") in reps and ("DATE", "timestamp") in reps and ("TIMESTAMP(9)", "text") not in reps, reps
     value_stop = nsn._proc(5, "[RIVET_SOURCE_VALUE_UNREPRESENTABLE] column `e00` holds 1.1234567890123456789")
     stated = core.Proc(["rivet"], 0, json.dumps({"columns": [{"column": "E00", "fidelity": "lossy", "warnings": ["refused at run (RIVET_SOURCE_VALUE_UNREPRESENTABLE)"]}]}), "", gated=False)
     rs = grade_unit("mysql", Unit("float8", exact_c, "parquet"), [exact_c], 1, {"snapshot": value_stop}, {"snapshot": stated}, d, "")
