@@ -2831,35 +2831,95 @@ mod tests {
         }
     }
 
-    /// Whatever the keys and the fence, the sampled ranges hold every fenced row exactly once, each key value in one range, in at most N+1 seeks.
+    /// The most statements the sampler issues for up to [`PROBE_POINTS`] ranges when no span holds [`PROBE_ROWS`] rows: two end seeks, a seek per cut, a probe pair per span, then per recut round a probe pair per span and a snap pair per cut.
+    fn sampler_statement_bound(parts: usize) -> usize {
+        assert!(
+            parts <= PROBE_POINTS,
+            "{parts} ranges exceed the {PROBE_POINTS} the first probe pass covers"
+        );
+        2 + (parts - 1) + 2 * parts + RECUT_ROUNDS * (2 * parts + 2 * (parts - 1))
+    }
+
+    /// The sampled ranges over the keys and the fence hold every fenced row once, in at most [`sampler_statement_bound`] statements.
+    fn sampled_ranges_hold_fenced_rows(
+        ts: Vec<String>,
+        is: Vec<i64>,
+        numeric: bool,
+        parts: usize,
+        fence: Option<(usize, usize)>,
+    ) -> std::result::Result<(), proptest::test_runner::TestCaseError> {
+        use proptest::prelude::*;
+        let plan = crate::plan::test_support::test_plan();
+        let mut src = if numeric {
+            Indexed::new(keys(is), true)
+        } else {
+            Indexed::new(ts, false)
+        };
+        let all = src.keys.clone();
+        let (floor, ceil) = fence
+            .filter(|_| !all.is_empty())
+            .map(|(a, b)| {
+                (
+                    all.get(a % all.len()).cloned(),
+                    all.get(b % all.len()).cloned(),
+                )
+            })
+            .unwrap_or((None, None));
+        let bounds = sample_key_boundaries(
+            &mut src,
+            &plan,
+            "k",
+            parts,
+            parts,
+            floor.as_deref(),
+            ceil.as_deref(),
+        )
+        .unwrap();
+        prop_assert!(
+            src.sql.len() <= sampler_statement_bound(parts),
+            "{} statements for {parts} parts",
+            src.sql.len()
+        );
+        let ranges = partition_ranges(&bounds, floor.as_deref(), ceil.as_deref());
+        prop_assert!(ranges.len() <= parts);
+        let numeric = src.numeric;
+        let inside = |k: &str, lo: &Option<String>, hi: &Option<String>| {
+            lo.as_deref()
+                .is_none_or(|l| Indexed::order(numeric, k, l).is_gt())
+                && hi
+                    .as_deref()
+                    .is_none_or(|h| Indexed::order(numeric, k, h).is_le())
+        };
+        for k in &all {
+            let held = ranges
+                .iter()
+                .filter(|(_, lo, hi, _)| inside(k, lo, hi))
+                .count();
+            let fenced = inside(k, &floor, &ceil);
+            prop_assert_eq!(held, usize::from(fenced), "key {:?} in {:?}", k, ranges);
+        }
+        Ok(())
+    }
+
+    /// Whatever the keys and the fence, the sampled ranges hold every fenced row exactly once, each key value in one range, in a bounded number of statements.
     #[test]
     fn sampled_ranges_hold_every_fenced_row_once_for_any_keys() {
         use proptest::prelude::*;
-        let plan = crate::plan::test_support::test_plan();
         let text = proptest::collection::vec("\\PC{0,6}", 0..60);
         let ints = proptest::collection::vec(-1_000_000i64..1_000_000, 0..60);
         proptest!(|(ts in text, is in ints, numeric: bool, parts in 2usize..9, fence in proptest::option::of((0usize..60, 0usize..60)))| {
-            let mut src = if numeric { Indexed::new(keys(is), true) } else { Indexed::new(ts, false) };
-            let all = src.keys.clone();
-            let (floor, ceil) = fence
-                .filter(|_| !all.is_empty())
-                .map(|(a, b)| (all.get(a % all.len()).cloned(), all.get(b % all.len()).cloned()))
-                .unwrap_or((None, None));
-            let bounds = sample_key_boundaries(&mut src, &plan, "k", parts, parts, floor.as_deref(), ceil.as_deref()).unwrap();
-            prop_assert!(src.sql.len() <= 2 + parts * (2 * RECUT_ROUNDS + 4), "{} statements for {parts} parts", src.sql.len());
-            let ranges = partition_ranges(&bounds, floor.as_deref(), ceil.as_deref());
-            prop_assert!(ranges.len() <= parts);
-            let numeric = src.numeric;
-            let inside = |k: &str, lo: &Option<String>, hi: &Option<String>| {
-                lo.as_deref().is_none_or(|l| Indexed::order(numeric, k, l).is_gt())
-                    && hi.as_deref().is_none_or(|h| Indexed::order(numeric, k, h).is_le())
-            };
-            for k in &all {
-                let held = ranges.iter().filter(|(_, lo, hi, _)| inside(k, lo, hi)).count();
-                let fenced = inside(k, &floor, &ceil);
-                prop_assert_eq!(held, usize::from(fenced), "key {:?} in {:?}", k, ranges);
-            }
+            sampled_ranges_hold_fenced_rows(ts, is, numeric, parts, fence)?;
         });
+    }
+
+    /// The shrunk counterexample of the property: eight parts over sixteen keys with duplicates, fenced to keys 0 and 15.
+    #[test]
+    fn a_duplicate_heavy_key_set_samples_within_the_statement_bound() {
+        let is = vec![
+            -422949, -917785, -917786, -349698, -160335, -409826, -530337, -530337, -408326,
+            -917786, -509681, -160334, -385290, -382374, -508041, -160338,
+        ];
+        sampled_ranges_hold_fenced_rows(vec![], is, true, 8, Some((0, 15))).unwrap();
     }
 
     /// A key with 90% of its rows in 5% of its span keeps every row once, in ranges recut to near-equal row counts.
