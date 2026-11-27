@@ -485,6 +485,116 @@ fn value_ceiling_holds_at_the_limit_for_every_sized_type() {
     }
 }
 
+fn text_form_field(ty: DataType, form: Option<&str>) -> Field {
+    let field = Field::new("geom", ty, true);
+    match form {
+        Some(f) => field.with_metadata(std::collections::HashMap::from([(
+            crate::types::META_TEXT_FORM.to_string(),
+            f.to_string(),
+        )])),
+        None => field,
+    }
+}
+
+fn text_form_batch(ty: DataType, form: Option<&str>, value: &str) -> RecordBatch {
+    let col: ArrayRef = match ty {
+        DataType::Utf8 => Arc::new(StringArray::from(vec![value])),
+        DataType::LargeUtf8 => Arc::new(LargeStringArray::from(vec![value])),
+        _ => unreachable!(),
+    };
+    let schema = Arc::new(Schema::new(vec![text_form_field(ty, form)]));
+    RecordBatch::try_new(schema, vec![col]).unwrap()
+}
+
+/// Only the hex_wkb text form takes two digits per source byte; no form, and every other form, takes one.
+#[test]
+fn hex_digits_per_byte_is_two_for_hex_wkb_and_one_for_everything_else() {
+    let hex = crate::types::TextForm::HexWkb.label();
+    assert_eq!(
+        hex_digits_per_byte(&text_form_field(DataType::Utf8, Some(hex))),
+        2
+    );
+    assert_eq!(
+        hex_digits_per_byte(&text_form_field(DataType::LargeUtf8, Some(hex))),
+        2
+    );
+    for other in [
+        crate::types::TextForm::DecimalPlain,
+        crate::types::TextForm::Uuid36,
+        crate::types::TextForm::Json,
+        crate::types::TextForm::Iso8601Duration,
+    ] {
+        assert_eq!(
+            hex_digits_per_byte(&text_form_field(DataType::Utf8, Some(other.label()))),
+            1,
+            "{}",
+            other.label()
+        );
+    }
+    assert_eq!(
+        hex_digits_per_byte(&text_form_field(DataType::Utf8, Some("no_such_form"))),
+        1
+    );
+    assert_eq!(
+        hex_digits_per_byte(&text_form_field(DataType::Utf8, None)),
+        1
+    );
+}
+
+/// A hex_wkb value of N bytes (2N hex chars) passes at ceiling N and is refused at N-1; any other text of 2N chars is refused at N.
+#[test]
+fn value_ceiling_reads_a_hex_wkb_value_as_the_bytes_it_holds() {
+    let hex = crate::types::TextForm::HexWkb.label();
+    let value = "0123456789abcdef";
+    for ty in [DataType::Utf8, DataType::LargeUtf8] {
+        let mut sink = minimal_sink();
+        sink.max_value_bytes = Some(8);
+        let at = text_form_batch(ty.clone(), Some(hex), value);
+        assert!(
+            sink.check_value_ceiling(&at).is_ok(),
+            "{ty:?}: 8 bytes as 16 hex chars at ceiling 8"
+        );
+        sink.max_value_bytes = Some(7);
+        let err = format!("{:#}", sink.check_value_ceiling(&at).unwrap_err());
+        assert!(
+            err.contains("per-value ceiling") && err.contains("'geom'"),
+            "{ty:?}: {err}"
+        );
+        sink.max_value_bytes = Some(8);
+        for form in [
+            None,
+            Some("uuid36"),
+            Some("decimal_plain"),
+            Some("no_such_form"),
+        ] {
+            let plain = text_form_batch(ty.clone(), form, value);
+            let err = format!("{:#}", sink.check_value_ceiling(&plain).unwrap_err());
+            assert!(
+                err.contains("per-value ceiling"),
+                "{ty:?} {form:?}: 16 chars at ceiling 8 is refused: {err}"
+            );
+        }
+    }
+}
+
+/// The refusal reports the measured size in MB: a hex_wkb value is counted in bytes, half its characters.
+#[test]
+fn value_ceiling_reports_a_hex_wkb_value_in_source_bytes() {
+    let hex = crate::types::TextForm::HexWkb.label();
+    let mut sink = minimal_sink();
+    sink.max_value_bytes = Some(1024 * 1024);
+    let value = "ab".repeat(3 * 1024 * 1024);
+    let batch = text_form_batch(DataType::Utf8, Some(hex), &value);
+    let err = format!("{:#}", sink.check_value_ceiling(&batch).unwrap_err());
+    assert!(
+        err.contains("a single value of 3.0 MB") && err.contains("ceiling of 1 MB"),
+        "{err}"
+    );
+    let plain = text_form_batch(DataType::Utf8, None, &value);
+    let err = format!("{:#}", sink.check_value_ceiling(&plain).unwrap_err());
+    assert!(err.contains("a single value of 6.0 MB"), "{err}");
+}
+
 /// Every string and binary type records its longest value, and a shorter later batch keeps it.
 #[test]
 fn shape_tracks_the_longest_value_of_every_sized_type() {

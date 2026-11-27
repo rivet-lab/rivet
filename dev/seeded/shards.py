@@ -96,10 +96,11 @@ def coverage_problems(shards: Sequence[dict], expected: Sequence[str]) -> list[s
 
 
 def load() -> tuple[list[Row], set[str], set[str]]:
-    """The ledger's rows, the bare names of the devbox-only live tests and of every live test."""
+    """The ledger's rows, the bare names of the devbox-only live tests and of every live test, tests/live and src/ alike."""
     from dev.release_oracle import live_modules
     table = live_modules.live_test_table()
-    return parse_manifest(yaml.safe_load(MANIFEST.read_text())), live_modules.part_tests(DEVBOX, table), {name for _, name, _ in table}
+    live = {name for _, name, _ in table} | live_modules.lib_live_tests()
+    return parse_manifest(yaml.safe_load(MANIFEST.read_text())), live_modules.part_tests(DEVBOX, table), live
 
 
 def expected(rows: Sequence[Row], devbox_tests: Collection[str], only: Sequence[str] = ()) -> list[str]:
@@ -149,6 +150,12 @@ def self_test() -> int:
     assert hosted and set(placed) == {r.seed for r in real}, "every ledger seed has a home"
     real_plan = plan(real, devbox, live)
     assert not coverage_problems(real_plan, expected(real, devbox)), "the real plan drops or doubles a seed"
+    from dev.release_oracle.live_modules import lib_live_tests
+    lib_live = lib_live_tests()
+    needing = {s for s in hosted if any(c.startswith(LIB) and c.removeprefix(LIB) in lib_live for c in cells_of(real, s))}
+    lean = {s for sh in real_plan if sh["stack"] == "lean" for s in sh["seeds"].split(",")}
+    assert needing, "no hosted seed grades a live test under src/: the lib live names are not read"
+    assert needing <= lean, f"a seed whose cell is a live test under src/ runs without the stack: {sorted(needing - lean)}"
     print(f"self-test ok: shards — {len(hosted)} hosted seed(s) in {len(real_plan)} shard(s), {len(placed) - len(hosted)} on the devbox")
     return 0
 
