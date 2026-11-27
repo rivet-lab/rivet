@@ -56,6 +56,14 @@ scenarios:
     mongo:    { test: a_columns_override_on_a_numeric_field_never_nulls_it_mongo }
     oracle:   { test: a_declared_override_delivers_the_source_or_refuses_by_code_oracle }
 
+  - id: json_override_over_text_that_is_not_json_is_refused
+    what: "a `columns: {c: json}` override over a text, blob or geometry value that is valid UTF-8 but not one JSON document → RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5) naming the column, never the value, with the `c: text` remedy that delivers the server's text; JSON of any depth and number range, and a native json column, deliver as before (batch converter and CDC flush share one check)"
+    postgres: { test: a_json_override_delivers_json_text_or_refuses_by_code_postgres }
+    mysql:    { test: a_json_override_delivers_json_text_or_refuses_by_code_mysql }
+    mssql:    { test: a_json_override_delivers_json_text_or_refuses_by_code_mssql }
+    mongo:    { test: a_json_override_on_a_mongo_export_refuses_a_pair_it_does_not_read_and_delivers_json_mongo }
+    oracle:   { test: a_json_override_delivers_json_text_or_refuses_by_code_oracle }
+
   - id: override_value_refusal_one_code_on_every_leg
     what: "a value a `columns:` override cannot hold → RIVET_SOURCE_VALUE_UNREPRESENTABLE (exit 5) on the batch converter, the CDC snapshot leg and the CDC stream leg alike; RIVET_SOURCE_OVERRIDE_WIRE_MISMATCH (exit 1) only for a wire type the declared type cannot read; a decimal with more fraction digits than the declared scale is a value refusal on the stream as on batch"
     postgres: { test: an_override_refusal_by_value_carries_the_value_code_as_batch_does }

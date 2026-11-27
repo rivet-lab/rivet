@@ -921,6 +921,7 @@ fn flush(
         RecordBatch::try_new(schema.clone(), arrays)?
     };
     crate::source::refuse_decimal_overflow(&batch)?;
+    crate::source::refuse_non_json(&batch, |c| overridden.contains(c))?;
 
     let slices = match partition
         .and_then(|r| crate::pipeline::batch_partition_buckets(&batch, r).map(|b| (r, b)))
@@ -2558,6 +2559,64 @@ mod tests {
                 ],
                 "{engine:?}"
             );
+        }
+    }
+
+    fn json_flush(engine: CdcEngine, text: &str, overridden: &[&str]) -> Result<()> {
+        let events: Vec<ChangeEvent> = [Some(text), None]
+            .into_iter()
+            .map(|t| ChangeEvent {
+                after: Some(vec![t.map_or(RivetValue::Null, |t| {
+                    RivetValue::Bytes(t.as_bytes().to_vec())
+                })]),
+                ..insert(0)
+            })
+            .collect();
+        let mut cols = vec![TypeMapping {
+            source_native_type: "varchar".into(),
+            rivet_type: crate::types::RivetType::Json,
+            arrow_type: Some(DataType::Utf8),
+            ..int_col().remove(0)
+        }];
+        let mut schema = None;
+        let sch = ensure_schema(
+            &mut schema,
+            &mut cols,
+            &events,
+            &crate::config::RowHash::default(),
+        )
+        .unwrap();
+        let set = overridden.iter().map(|s| s.to_string()).collect();
+        flush(
+            &events,
+            &sch,
+            &cols,
+            engine,
+            &crate::config::RowHash::default(),
+            None,
+            &set,
+        )
+        .map(|_| ())
+    }
+
+    /// A text cell under a `json` override that is not JSON is refused by code on every engine; JSON text, and a column no override names, are delivered as before.
+    #[test]
+    fn a_json_override_over_text_that_is_not_json_is_refused_on_every_engine() {
+        for (engine, _) in BOOL_ENGINES {
+            for ok in ["{}", "[1, 2]", "5", r#""x""#, "null"] {
+                json_flush(engine, ok, &["v"]).unwrap_or_else(|e| panic!("{engine:?} {ok}: {e:#}"));
+            }
+            for bad in ["abc", "", "{'a':1}", r#"{"a":1}x"#] {
+                let err = json_flush(engine, bad, &["v"]).unwrap_err();
+                crate::error::assert_coded(&err, "RIVET_SOURCE_VALUE_UNREPRESENTABLE", 5);
+                assert!(
+                    format!("{err:#}").contains("column `v` is declared `json`"),
+                    "{engine:?} {bad:?}: {err:#}"
+                );
+                json_flush(engine, bad, &[]).unwrap_or_else(|e| {
+                    panic!("{engine:?} {bad:?}: a column no override names is not read: {e:#}")
+                });
+            }
         }
     }
 

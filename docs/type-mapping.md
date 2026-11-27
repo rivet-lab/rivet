@@ -189,6 +189,8 @@ override; MySQL DECIMAL or DOUBLE under one) is `RIVET_SOURCE_OVERRIDE_WIRE_MISM
 parts of the chunks it finished and a manifest whose run is marked `failed`; fix the
 value or declare a wider type, and re-run.
 
+A `json` override over a text, blob or geometry column is delivered only when every value is one JSON document (RFC 8259, any nesting depth, any number range). A value that is not JSON (`abc`, `{'a':1}`, `{"a":1}x`, a MySQL `GEOMETRYCOLLECTION` or a `BLOB` of other bytes) stops the batch, snapshot or stream run before it writes with `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5): "column `c` is declared `json` but holds a value that is not JSON". The message never prints the value, and `rivet check` reads no values, so it does not decide this. Declare the column `text` instead (`columns: {c: text}`) and rivet delivers the server's own text of it. A native `json`, `jsonb` or `JSON` column is not re-read.
+
 A `bool` override over an integer column is a flag only for 0 and 1. PostgreSQL, SQL Server and Oracle refuse it for a batch export at plan time; MySQL, which checks each value, refuses a value outside 0 and 1 at the cell. A CDC stream reads every engine the way MySQL does: 0, 1 and NULL are delivered as `false`, `true` and NULL, and any other integer (2, 5, -1) is refused `RIVET_SOURCE_VALUE_UNREPRESENTABLE` (exit 5) naming the column, the value and its row, before a part is written and before the checkpoint moves. Declare the column `int64` in `columns:` to carry the number.
 
 The override path is safe: a `uid: uuid` declaration tries to parse each
